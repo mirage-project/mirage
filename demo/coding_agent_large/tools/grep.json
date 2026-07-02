@@ -1,0 +1,12 @@
+{
+  "name": "grep",
+  "description": "Search the contents of workspace files for a regular expression; returns matching path:line: text.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "pattern": {"type": "string"}
+    },
+    "required": ["pattern"],
+    "additionalProperties": false
+  }
+}

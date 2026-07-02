@@ -23,9 +23,11 @@ Examples:
 import argparse
 import importlib.util
 import pathlib
+import re
 
 import torch
 
+HERE = pathlib.Path(__file__).parent
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 STRUCTURED_PY = REPO_ROOT / "python" / "mirage" / "mpk" / "structured.py"
 
@@ -156,33 +158,59 @@ def _is_complete(mgr, spec, out_ids) -> bool:
 
 # ── Real online_pinned serving (usage template) ────────────────────────────
 
-def run_online_pinned(model: str, vocab_size: int, schema: str):
+def run_online_pinned(model: str, vocab_size: int, sample: bool, tool_call: bool):
     """The real serving path. The Qwen3 builder inserts
     ``apply_token_bitmask_layer`` before argmax when
     ``enable_constrained_decoding=True``.  ``vocab_size`` must be the *padded*
-    logit width the masking task sees (153600 for Qwen3)."""
-    from mirage.engine import ModelRunner, RunnerConfig  # noqa: F401
+    logit width the masking task sees (153600 for Qwen3).
+
+    With ``tool_call`` a structural tag is used: the model generates FREE
+    (unconstrained) text and, the moment it emits the trigger ``<function=``,
+    xgrammar switches it to CONSTRAINED — the rest must be a schema-valid call to
+    one of the tools loaded from ``tool_registry/`` (the ONLY tools the model may
+    call). Otherwise a bounded-integer JSON schema is enforced.
+    """
+    import json
+    import threading
+    from mirage.engine import ModelRunner, RunnerConfig
 
     cfg = RunnerConfig(model=model, vocab_size=vocab_size,
-                       enable_constrained_decoding=True,
+                       enable_constrained_decoding=True, do_sample=sample,
                        max_num_batched_requests=1, max_seq_length=512)
-    runner = ModelRunner(cfg)
-    rt = runner.runtime
-    rt.init_xgrammar(runner.tokenizer, cfg.vocab_size)
+    runner = ModelRunner(cfg)              # xgrammar auto-initialized from the flag
+    rt, tok = runner.runtime, runner.tokenizer
 
-    rid = 0
-    rt.set_request_grammar(rid, json_schema=schema)
+    if tool_call:
+        from mirage.mpk import create_tools, structured_tools as T
+        tools = create_tools(HERE / "tool_registry")   # only the registry tools
+        names = {t["name"] for t in tools}
+        rt.set_request_grammar(0, triggered_tags=tools)
+        print(f"registry: {len(tools)} tools ->", sorted(names))
+        msgs = [{"role": "system", "content": T.tools_system_prompt(tools)},
+                {"role": "user", "content": "Show me the git status of the repo."}]
+        prompt = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True,
+                                         enable_thinking=False, return_tensors="pt")[0]
+    else:
+        schema = ('{"type":"object","properties":{"id":'
+                  '{"type":"integer","minimum":0,"maximum":999999}},"required":["id"]}')
+        rt.set_request_grammar(0, json_schema=schema, any_whitespace=False)
+        prompt = tok("Give me a JSON object: ", return_tensors="pt").input_ids[0]
 
-    import threading
     threading.Thread(target=runner, daemon=True).start()  # drives mpk()
-
-    prompt = runner.tokenizer("Give me a JSON object: ", return_tensors="pt").input_ids[0]
-    rt.submit(rid, prompt)
-    buffer_row, final_step = rt.wait_for_request(rid, timeout=120)
-    ids = rt.read_tokens_at_row(buffer_row, final_step)
-    print(runner.tokenizer.decode(ids, skip_special_tokens=True))
-    rt.release_grammar(rid)
-    rt.shutdown()
+    rt.submit(0, prompt)
+    row, final = rt.wait_for_request(0, timeout=120)
+    out = tok.decode(rt.read_tokens_at_row(row, final)[prompt.shape[0]:],
+                     skip_special_tokens=True)
+    print("OUTPUT:", repr(out))
+    if tool_call:
+        calls = re.findall(r"<function=(\w+)>(.*?)</function>", out, re.S)
+        print("free text before call:",
+              repr(out[:out.index("<function=")]) if calls else "(none)")
+        for name, args in calls:
+            print(f"tool call: {name}({json.loads(args)})  known_tool={name in names}")
+        if not calls:
+            print("tool call: (no call emitted)")
+    rt.shutdown()                          # grammar auto-released on completion
 
 
 def main():
@@ -195,12 +223,17 @@ def main():
                    help="simulated-mode grammar")
     p.add_argument("--max-tokens", type=int, default=32)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--sample", action="store_true",
+                   help="sample (Gumbel-max) instead of greedy argmax")
+    p.add_argument("--structural-tag", action="store_true",
+                   help="tool-call structural tag: free text until <function=, "
+                        "then schema-constrained (unconstrained→constrained switch)")
     args = p.parse_args()
 
     if args.model is not None:
         assert args.vocab_size is not None, "--vocab-size is required with --model"
-        schema = '{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}'
-        run_online_pinned(args.model, args.vocab_size, schema)
+        run_online_pinned(args.model, args.vocab_size, args.sample,
+                          args.structural_tag)
     else:
         run_simulate(args.grammar, args.max_tokens, args.seed)
 

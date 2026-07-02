@@ -1,0 +1,12 @@
+{
+  "name": "list_dir",
+  "description": "List files under a workspace directory, recursively. Use . for the workspace root.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string", "description": "directory relative to the workspace root"}
+    },
+    "required": ["path"],
+    "additionalProperties": false
+  }
+}

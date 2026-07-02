@@ -19,9 +19,7 @@
 
 namespace kernel {
 
-// System-scope acquire load (pairs with the CPU's release store on mask_seq).
-// Implemented inline so this header has no dependency on mpk_atoms.cuh include
-// order.
+// System-scope acquire load, pairing with the CPU's release store on mask_seq.
 static __device__ __forceinline__ int32_t
     apply_mask_ld_acquire_sys_i32(int32_t volatile const *addr) {
   int32_t v;
@@ -29,75 +27,57 @@ static __device__ __forceinline__ int32_t
   return v;
 }
 
-// Constrained-decoding logit masking (xgrammar).
-//
-// in_ptr     : [batch_size, vocab_size], bf16, the raw logits (read-only).
-// out_ptr    : [batch_size, vocab_size], bf16, the masked logits (written).
-//              Distinct from in_ptr — downstream argmax/sampling reads out_ptr.
-//              (A distinct output, rather than in-place, keeps the MPK
-//              producer/consumer event wiring unambiguous: this task is the
-//              sole producer of out_ptr.)
-// bitmask    : [total_inflight, bitmask_words] packed int32, bit j set ⇒ token
-//              j allowed.  Indexed by buffer row (not batch position).
-// mask_seq   : [total_inflight] int32, pinned. The CPU publishes
-//              mask_seq[row] = decode step the row's bitmask is valid for.
-// flag       : [1] int32, pinned. 0 ⇒ unconstrained → plain copy (no wait, no
-//              bit tests); 1 ⇒ wait for the CPU mask and apply it.
-// request_ids: [batch_size] int, maps batch position → buffer row (-1 = idle).
-// step       : [total_inflight] int, the row's current decode step (the step
-//              whose logits we are about to sample). The task waits until the
-//              CPU has published a mask for at least this step.
-//
-// Contract: when flag==1 the CPU MUST publish a valid bitmask + mask_seq for
-// every active row each step (an all-ones mask for rows with no grammar).
+// Constrained decoding: copy [BATCH_SIZE, vocab] logits to out, then (when flag
+// is set) mask each active request's next-token row to xgrammar's bitmask.
+// Looping over requests keeps request_ids/qo_indptr (sized by request count) in
+// bounds; request b's next-token logits are row qo_indptr[b+1]-1. The CPU
+// publishes mask_seq[row]=step and the bitmask before that step is decoded.
 template <typename T, int BATCH_SIZE>
 __device__ __forceinline__ void apply_token_bitmask_sm100_kernel(
     void const *__restrict__ in_ptr,
     void *__restrict__ out_ptr,
-    int32_t const *__restrict__ bitmask,
-    int32_t volatile const *__restrict__ mask_seq,
-    int32_t volatile const *__restrict__ flag,
-    int const *__restrict__ request_ids,
-    int const *__restrict__ step,
+    int32_t const *__restrict__ bitmask,        // [total_inflight, bitmask_words]
+    int32_t volatile const *__restrict__ mask_seq,  // [total_inflight], pinned
+    int32_t volatile const *__restrict__ flag,       // [1], pinned: 0=off
+    int const *__restrict__ request_ids,        // [num_requests], slot -> row
+    int const *__restrict__ step,               // [total_inflight]
+    int const *__restrict__ qo_indptr,          // [num_requests+1]
     int vocab_size,
     int bitmask_words,
-    int num_active_tokens) {
+    int num_requests) {
   T const *__restrict__ in = static_cast<T const *>(in_ptr);
   T *__restrict__ out = static_cast<T *>(out_ptr);
   T const neg_inf = static_cast<T>(-INFINITY);
 
-  // The masking task is present in every compiled graph; the runtime flag is
-  // read once and toggles between a plain copy (unconstrained) and a masked
-  // copy (constrained), so flipping it switches decoding modes with no
-  // recompile.
-  bool const constrained = (apply_mask_ld_acquire_sys_i32(flag) != 0);
+  for (size_t i = threadIdx.x;
+       i < static_cast<size_t>(BATCH_SIZE) * vocab_size; i += blockDim.x) {
+    out[i] = in[i];
+  }
+  __syncthreads();
 
-  for (int b = 0; b < num_active_tokens; b++) {
+  if (apply_mask_ld_acquire_sys_i32(flag) == 0) {
+    return; // unconstrained
+  }
+
+  for (int b = 0; b < num_requests; b++) {
     int row = request_ids[b];
-    bool const do_mask = constrained && (row >= 0);
-    int32_t const *__restrict__ row_mask = nullptr;
-
-    if (do_mask) {
-      // Wait until the CPU has produced this row's mask for the current step.
-      // mask_seq increases monotonically (one mask per decode step, in lockstep
-      // with token production), so ">= target" is the catch-up condition.
-      if (threadIdx.x == 0) {
-        int target = step[row];
-        while (apply_mask_ld_acquire_sys_i32(&mask_seq[row]) < target) {
-          __nanosleep(20);
-        }
-      }
-      __syncthreads();
-      row_mask = bitmask + static_cast<size_t>(row) * bitmask_words;
+    int pos = (row >= 0) ? qo_indptr[b + 1] - 1 : -1;
+    if (pos < 0) {
+      continue;
     }
-
-    size_t const base = static_cast<size_t>(b) * vocab_size;
-    for (int v = threadIdx.x; v < vocab_size; v += blockDim.x) {
-      T val = in[base + v];
-      if (do_mask && (((row_mask[v >> 5] >> (v & 31)) & 1) == 0)) {
-        val = neg_inf; // disallowed token ⇒ zero probability downstream
+    if (threadIdx.x == 0) {
+      while (apply_mask_ld_acquire_sys_i32(&mask_seq[row]) < step[row]) {
+        __nanosleep(20);
       }
-      out[base + v] = val;
+    }
+    __syncthreads();
+    int32_t const *__restrict__ row_mask =
+        bitmask + static_cast<size_t>(row) * bitmask_words;
+    size_t const base = static_cast<size_t>(pos) * vocab_size;
+    for (int v = threadIdx.x; v < vocab_size; v += blockDim.x) {
+      if (((row_mask[v >> 5] >> (v & 31)) & 1) == 0) {
+        out[base + v] = neg_inf;
+      }
     }
     __syncthreads();
   }

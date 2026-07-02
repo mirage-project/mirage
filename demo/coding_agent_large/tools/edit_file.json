@@ -1,0 +1,14 @@
+{
+  "name": "edit_file",
+  "description": "Replace a SMALL snippet: the exact text old with new (old must occur once; trailing-whitespace tolerant). For rewriting a whole function or file, use write_file with the full contents instead. Python results must still parse.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string"},
+      "old": {"type": "string"},
+      "new": {"type": "string"}
+    },
+    "required": ["path", "old", "new"],
+    "additionalProperties": false
+  }
+}

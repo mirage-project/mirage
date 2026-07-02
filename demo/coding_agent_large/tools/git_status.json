@@ -1,0 +1,9 @@
+{
+  "name": "git_status",
+  "description": "Show the short git status of the workspace (which files changed).",
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

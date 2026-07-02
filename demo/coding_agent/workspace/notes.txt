@@ -1,0 +1,1 @@
+This file contains the message that main.py should print.

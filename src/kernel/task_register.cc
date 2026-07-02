@@ -2199,12 +2199,12 @@ int TaskRegister::register_sampling_sm100_task(threadblock::Graph const &bgraph,
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::sampling_from_logits_kernel<256, 4, bfloat16, int>(");
+  code.e("kernel::sampling_from_logits_kernel<256, 4, bfloat16, long long>(");
   code.e("    static_cast<bfloat16*>(task_desc->input_ptrs[0]),");
-  code.e("    static_cast<int*>(task_desc->output_ptrs[0]),");
+  code.e("    static_cast<long long*>(task_desc->output_ptrs[0]),");
   code.e("    $,", vocab_size);
   code.e("    $,", seed);
-  code.e("    0,  // philox_offset");
+  code.e("    (unsigned long long)runtime_config.step[0],  // per-step offset");
   code.e("    $);", batch_size);
   return register_task_variant(TASK_SAMPLING_SM100, code.to_string());
 }
@@ -2243,9 +2243,12 @@ int TaskRegister::register_apply_token_bitmask_sm100_task(
   code.e("    runtime_config.pinned_constrained_flag,");
   code.e("    runtime_config.request_ids,");
   code.e("    runtime_config.step,");
+  code.e("    runtime_config.qo_indptr_buffer,");
   code.e("    $,", vocab_size);
   code.e("    $,", bitmask_words);
-  code.e("    $);", batch_size);
+  // Loop over requests (request_ids/qo_indptr are sized by request count), not
+  // the logits batch dim, to keep those reads in bounds.
+  code.e("    MPK_MAX_NUM_BATCHED_REQUESTS);");
   return register_task_variant(TASK_APPLY_TOKEN_BITMASK_SM100,
                                code.to_string());
 }

@@ -326,11 +326,15 @@ class PersistentKernel:
         pinned_ring_capacity: int = 0,
         test_mode: bool = False,
         enable_constrained_decoding: bool = False,
+        do_sample: bool = False,
+        sampling_seed: int = 42,
     ):
         self.__finalized__ = False
         self._is_compiled = False
         self.test_mode = test_mode
         self.enable_constrained_decoding = enable_constrained_decoding
+        self.do_sample = do_sample
+        self.sampling_seed = sampling_seed
 
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
@@ -2117,34 +2121,15 @@ class PersistentKernel:
         # Register task with seed parameter
         self.kn_graph.register_task(tb_graph, "sampling_sm100", [seed])
 
-    def apply_token_bitmask_layer(
-        self,
-        logits: DTensor,        # [batch_size, vocab_size], raw logits (input)
-        output: DTensor,        # [batch_size, vocab_size], masked logits
-        grid_dim: tuple,
-        block_dim: tuple,
-    ):
-        """Constrained decoding (xgrammar): write masked logits to ``output``
-        using a CPU-produced token bitmask delivered via the pinned ring
-        buffers.  Feed ``output`` (not ``logits``) into the following argmax /
-        sampling layer.
-
-        This task is present in every compiled graph but is gated at runtime by
-        ``pinned_constrained_flag``: flag 0 ⇒ plain copy logits→output (no CPU
-        wait, no bit tests); flag 1 ⇒ wait for the CPU mask and mask disallowed
-        tokens to -inf.  Flipping the flag switches constrained vs unconstrained
-        decoding on the same compiled kernel.  Only valid in ``online_pinned``
-        mode (the per-step CPU rendezvous is meaningless in the offline
-        one-shot path).
-        """
-        assert logits.num_dims == 2  # (batch_size, vocab_size)
-        assert output.num_dims == 2  # (batch_size, vocab_size)
-        assert self.mode == "online_pinned", (
-            "apply_token_bitmask_layer requires mode='online_pinned'"
-        )
+    def apply_token_bitmask_layer(self, logits, output, grid_dim, block_dim):
+        """Constrained decoding: write masked logits to ``output`` (feed that, not
+        ``logits``, into the following argmax/sampling layer). Gated at runtime by
+        pinned_constrained_flag (flag 0 ⇒ plain copy). online_pinned only."""
+        assert logits.num_dims == 2 and output.num_dims == 2
+        assert self.mode == "online_pinned"
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(logits, (0, -1, -1), -1, True)  # input[0]: raw logits
-        tb_graph.new_input(output, (0, -1, -1), -1, True)  # output[0]: masked
+        tb_graph.new_input(logits, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
         self.kn_graph.customized([logits, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "apply_token_bitmask_sm100", [])
 

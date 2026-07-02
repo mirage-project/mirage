@@ -1,0 +1,12 @@
+{
+  "name": "run_python",
+  "description": "Run a Python file in the workspace with no shell and capture stdout/stderr.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string"}
+    },
+    "required": ["path"],
+    "additionalProperties": false
+  }
+}

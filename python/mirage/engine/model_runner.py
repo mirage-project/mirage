@@ -47,6 +47,10 @@ class RunnerConfig:
     """Build the apply_token_bitmask masking layer into the graph (online_pinned
     only). Runtime constrained/unconstrained is then a flag flip."""
 
+    do_sample: bool = False
+    """Sample (Gumbel-max) instead of greedy argmax."""
+    sampling_seed: int = 42
+
     tensor_parallel_size: int = 1
     """Number of GPUs for tensor parallelism (matches ``mpirun -n`` count)."""
 
@@ -100,6 +104,8 @@ class ModelRunner:
             model_config=MirageModelConfig(with_lm_head=True),
             use_cutlass_kernel=config.use_cutlass_kernel,
             enable_constrained_decoding=config.enable_constrained_decoding,
+            do_sample=config.do_sample,
+            sampling_seed=config.sampling_seed,
             **self.meta_tensors,
         )
         self.mpk = MPK(mpk_meta)
@@ -107,6 +113,15 @@ class ModelRunner:
         self.runtime = OnlinePinnedRuntime(self.mpk)
         self.tokenizer = self.mpk.tokenizer
         self.mpk.compile(output_dir=config.output_dir)
+
+        # Constrained decoding: the runtime already has the tokenizer and the
+        # (padded) logit width, so initialize xgrammar automatically — callers
+        # just attach grammars per request via runtime.set_request_grammar().
+        if config.enable_constrained_decoding:
+            assert config.vocab_size is not None, (
+                "enable_constrained_decoding=True requires RunnerConfig.vocab_size "
+                "(the model's padded logit width, e.g. 153600 for Qwen3)")
+            self.runtime.init_xgrammar(self.tokenizer, config.vocab_size)
 
     # ── Execution ─────────────────────────────────────────────────────────────
 

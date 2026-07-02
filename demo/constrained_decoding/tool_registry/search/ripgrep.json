@@ -1,0 +1,22 @@
+{
+  "name": "ripgrep",
+  "description": "Fast recursive search (ripgrep) with an optional glob.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "pattern": {
+        "type": "string"
+      },
+      "path": {
+        "type": "string"
+      },
+      "glob": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "pattern"
+    ],
+    "additionalProperties": false
+  }
+}

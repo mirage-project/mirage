@@ -618,7 +618,12 @@ __device__ __forceinline__ bool
     }
     config.prompt_length[row] = prompt_len;
     config.step[row] = initial_step;
-    // Let CPU discover which row this rid is on by scanning pinned_rid_at_row.
+    // Reset per-row CPU state before publishing the rid so a recycled row never
+    // exposes the previous occupant's progress/mask. mask_seq is set below the
+    // first step so the masking task waits for this request's fresh mask.
+    st_release_sys_i32(&config.pinned_step[row], (int32_t)initial_step);
+    st_release_sys_i32(&config.pinned_mask_seq[row], (int32_t)(initial_step - 1));
+    // CPU discovers the row by scanning pinned_rid_at_row.
     config.pinned_rid_at_row[row] = (int32_t)new_rid;
 
     // Clear the ring slot so CPU can reuse it.

@@ -1,0 +1,9 @@
+{
+  "name": "run_pytest",
+  "description": "Run the pytest suite in the workspace and return a summary of passes and failures.",
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

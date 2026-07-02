@@ -1,0 +1,20 @@
+{
+  "name": "write_file",
+  "description": "Create or overwrite a file with the given content.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string"
+      },
+      "content": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "path",
+      "content"
+    ],
+    "additionalProperties": false
+  }
+}

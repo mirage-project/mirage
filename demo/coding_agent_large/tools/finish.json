@@ -1,0 +1,12 @@
+{
+  "name": "finish",
+  "description": "End the session with a summary of the changes you made. This re-runs the full test suite and only succeeds if ALL tests pass; if any fail it returns an error and you must keep fixing.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "summary": {"type": "string"}
+    },
+    "required": ["summary"],
+    "additionalProperties": false
+  }
+}

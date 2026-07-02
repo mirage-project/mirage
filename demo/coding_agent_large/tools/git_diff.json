@@ -1,0 +1,9 @@
+{
+  "name": "git_diff",
+  "description": "Show the unstaged git diff of the workspace against the initial commit.",
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

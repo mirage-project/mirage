@@ -9,6 +9,25 @@ from ....core import bfloat16, int64
 
 from typing import Optional
 
+
+def _aligned_splitk(reduction: int, ideal: int, align: int = 64) -> int:
+    """Pick a split-K factor (grid.y) that keeps every split 16B-aligned.
+
+    ``splitk_linear_layer`` maps the reduction dim (K) onto grid.y, so split
+    ``y`` starts at byte offset ``y * (K/grid.y) * 2`` (bf16). SM100 TMA requires
+    a 16B-aligned base pointer, so ``K/grid.y`` must divide K into equal pieces
+    that are a multiple of ``align``=64 elements (the TMA copy tile, matching the
+    validated configs). Among such factors, pick the split count closest to
+    ``ideal`` (perf heuristic), breaking ties toward the larger — 4 is the
+    validated Qwen3-8B value. E.g. Qwen3-8B (K=4096/12288, ideal=4) -> 4
+    (unchanged); Qwen3-14B (K=5120/17408, ideal=3) -> 4 (3 gives misaligned
+    1707/5803 splits; 4 divides both into 1280/4352, aligned).
+    """
+    cands = [s for s in range(1, 2 * max(1, ideal) + 1)
+             if reduction % s == 0 and (reduction // s) % align == 0]
+    return min(cands, key=lambda s: (abs(s - ideal), -s)) if cands else 1
+
+
 @register_model_builder("Qwen3", "Qwen/Qwen3-8B", "Qwen/Qwen3-1.7B", "Qwen/Qwen3-14B", "Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B", "Qwen3.5-0.8B")
 class Qwen3Builder(GraphBuilder):
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
@@ -382,7 +401,9 @@ class Qwen3Builder(GraphBuilder):
                     input=self.attn_out,
                     weight=self.w,
                     output=self.attn_proj_out,
-                    grid_dim=(self.hidden_size // 128, 128 * 128 // self.hidden_size, 1),
+                    grid_dim=(self.hidden_size // 128,
+                              _aligned_splitk(self.num_local_q_heads * self.head_dim,
+                                              128 * 128 // self.hidden_size), 1),
                     block_dim=(256, 1, 1),
                 )
             else:
@@ -497,7 +518,9 @@ class Qwen3Builder(GraphBuilder):
                     input=self.silu_mul_out,
                     weight=self.w,
                     output=self.mlp_out,
-                    grid_dim=(self.hidden_size // 128, 128 * 128 // self.hidden_size, 1),
+                    grid_dim=(self.hidden_size // 128,
+                              _aligned_splitk(self.intermediate_size // self.world_size,
+                                              128 * 128 // self.hidden_size), 1),
                     block_dim=(256, 1, 1),
                 )
             else:
@@ -618,10 +641,8 @@ class Qwen3Builder(GraphBuilder):
             argmax_partial_grid_dim = (self.mpk.num_workers, 1, 1)
             argmax_reduce_grid_dim = (1, 1, 1)
 
-            # Constrained decoding (xgrammar): mask the logits with the
-            # CPU-produced token bitmask before argmax. Only in online_pinned
-            # mode (per-step CPU rendezvous) and only when enabled at build
-            # time; gated at runtime by pinned_constrained_flag (free when off).
+            # Constrained decoding: mask logits before token selection
+            # (online_pinned + enable_constrained_decoding; gated at runtime).
             argmax_input = self.argmax_in
             if (self.mpk.mode == "online_pinned"
                     and getattr(self.mpk, "enable_constrained_decoding", False)):
@@ -639,18 +660,27 @@ class Qwen3Builder(GraphBuilder):
                 )
                 argmax_input = self.masked_logits
 
-            self.mpk.argmax_partial_layer(
-                input=argmax_input,
-                output=(self.argmax_part_value, self.argmax_part_index),
-                grid_dim=argmax_partial_grid_dim,
-                block_dim=(128, 1, 1),
-            )
-            self.mpk.argmax_reduce_layer(
-                input=(self.argmax_part_value, self.argmax_part_index),
-                output=argmax_out,
-                grid_dim=argmax_reduce_grid_dim,
-                block_dim=(128, 1, 1),
-            )
+            if getattr(self.mpk, "do_sample", False):
+                self.mpk.sampling_sm100_layer(
+                    logits=argmax_input,
+                    output=argmax_out,
+                    grid_dim=(1, 1, 1),
+                    block_dim=(256, 1, 1),
+                    seed=getattr(self.mpk, "sampling_seed", 42),
+                )
+            else:
+                self.mpk.argmax_partial_layer(
+                    input=argmax_input,
+                    output=(self.argmax_part_value, self.argmax_part_index),
+                    grid_dim=argmax_partial_grid_dim,
+                    block_dim=(128, 1, 1),
+                )
+                self.mpk.argmax_reduce_layer(
+                    input=(self.argmax_part_value, self.argmax_part_index),
+                    output=argmax_out,
+                    grid_dim=argmax_reduce_grid_dim,
+                    block_dim=(128, 1, 1),
+                )
             # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
             # if spec_decode_config:
             #     verify_out = self.mpk.verify_layer_dispatcher(
