@@ -43,10 +43,10 @@ template <typename T,
           int Q_LEN_OVERRIDE = 0,
           int TAIL_OFFSET = 0,
           // MAX_TOKENS = per-call query rows (= mbt). Must be >= mbt yet small
-          // enough that the per-row smem buffers fit MAX_DYNAMIC_SHARED_MEMORY.
-          // The default 8 does NOT fit smem (MMA_ITERS_M 3->4, S_O_BUFFER
-          // +32KB); to run Eagle3 (K<=5, mbt<=6) override it to 6. See the demo
-          // header.
+          // enough that the per-row smem buffers (S_Q/S_O) fit
+          // MAX_DYNAMIC_SHARED_MEMORY. The cross-warp output reduction buffer
+          // is chunked per MMA m-tile, so it no longer grows with MAX_TOKENS
+          // (issue #702); the default 8 fits smem even for GQA ratios >= 8:1.
           int MAX_TOKENS = 8>
 __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *qkv_ptr,
@@ -183,8 +183,13 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
         sizeof(float) * MMA_ITERS_M * NUM_THREADS * 2;
 
     constexpr size_t S_O_BUFFER_OFFSET = S_D_BUFFER_OFFSET + S_D_BUFFER_SIZE;
-    constexpr size_t S_O_BUFFER_SIZE =
-        sizeof(float) * MMA_ITERS_M * NUM_THREADS * 64;
+    // The cross-warp output reduction is chunked over MMA m-tiles, so this
+    // buffer only holds ONE tile's accumulator fragments at a time
+    // (NUM_THREADS * 64 floats) instead of all MMA_ITERS_M tiles. This keeps
+    // total smem independent of MAX_TOKENS * NUM_QO_PER_KV so GQA ratios
+    // >= 8:1 (e.g. Qwen3-32B, 64 Q / 8 KV heads) fit the Blackwell smem
+    // budget (issue #702).
+    constexpr size_t S_O_BUFFER_SIZE = sizeof(float) * NUM_THREADS * 64;
     constexpr size_t S_TOTAL_OFFSET = S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE;
     static_assert(S_TOTAL_OFFSET <=
                   mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
@@ -597,7 +602,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       curr_iter_len = next_iter_len;
     }
 
-    // write intermediate results to buffer in shared memory
+    // write per-thread m and d to buffers in shared memory (these stay small
+    // enough to hold all MMA m-tiles at once)
 #pragma unroll
     for (int m = 0; m < MMA_ITERS_M; m++) {
       m_local[m][0] *= m_local[m][0] != -inf ? sm_scale : 1.f;
@@ -606,77 +612,89 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       s_m_buffer[m * NUM_THREADS * 2 + threadIdx.x * 2 + 1] = m_local[m][1];
       s_d_buffer[m * NUM_THREADS * 2 + threadIdx.x * 2] = d[m][0];
       s_d_buffer[m * NUM_THREADS * 2 + threadIdx.x * 2 + 1] = d[m][1];
+    }
+
+    // get global m, d, and o, one MMA m-tile at a time: spill this tile's
+    // accumulator fragments to the (single-tile) o buffer, reduce across the
+    // 4 warps, then reuse the buffer for the next tile. Both barriers are
+    // reached uniformly by all threads since the loop bounds do not depend
+    // on threadIdx.
+    for (int m = 0; m < MMA_ITERS_M; m++) {
+#pragma unroll
       for (int n = 0; n < HEAD_DIM / 16; n++) {
 #pragma unroll
         for (int frag_idx = 0; frag_idx < 8; frag_idx++) {
-          s_o_buffer[m * NUM_THREADS * 64 + threadIdx.x * 64 + n * 8 +
-                     frag_idx] = o[m][n][frag_idx];
+          s_o_buffer[threadIdx.x * 64 + n * 8 + frag_idx] = o[m][n][frag_idx];
         }
       }
-    }
-    wg_barrier.arrive_and_wait();
+      wg_barrier.arrive_and_wait();
 
-    // get global m, d, and o
-    // each thread handles an element in o in each iteration
-    for (int elem_idx = threadIdx.x;
-         elem_idx < num_tokens * NUM_QO_PER_KV * HEAD_DIM;
-         elem_idx += NUM_THREADS) {
-      int row = elem_idx / HEAD_DIM;
-      int col = elem_idx % HEAD_DIM;
-      int t_idx = (row % 8) * 4 + (col % 8) / 2;
-      int mma_iter_n = col / 16;
-      /* The fragment layout is as follows:
-       *
-       * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
-       * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
-       * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
-       * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
-       * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
-       * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
-       * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
-       * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
-       * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
-       * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
-       * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
-       * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
-       * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
-       * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
-       * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
-       * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
-       */
-      int frag_idx = ((col % 16) / 8) * 4 + ((row % 16) / 8) * 2 + (col % 2);
+      // rows covered by this m-tile, clipped to the valid query rows
+      int const row_begin = m * 16;
+      int const row_end = min((m + 1) * 16, num_tokens * NUM_QO_PER_KV);
+      int const tile_elems = max(row_end - row_begin, 0) * HEAD_DIM;
+      // each thread handles an element in o in each iteration
+      for (int elem_idx = threadIdx.x; elem_idx < tile_elems;
+           elem_idx += NUM_THREADS) {
+        int row = row_begin + elem_idx / HEAD_DIM;
+        int col = elem_idx % HEAD_DIM;
+        int t_idx = (row % 8) * 4 + (col % 8) / 2;
+        int mma_iter_n = col / 16;
+        /* The fragment layout is as follows:
+         *
+         * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
+         * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
+         * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
+         * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
+         * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
+         * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
+         * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
+         * 0 1 0 1 0 1 0 1 4 5 4 5 4 5 4 5
+         * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
+         * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
+         * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
+         * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
+         * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
+         * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
+         * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
+         * 2 3 2 3 2 3 2 3 6 7 6 7 6 7 6 7
+         */
+        int frag_idx = ((col % 16) / 8) * 4 + ((row % 16) / 8) * 2 + (col % 2);
 
-      float m_global = -inf;
-      float d_global = 1.f;
-      float o_global = 0.f;
-      // 4 local values per row
+        float m_global = -inf;
+        float d_global = 1.f;
+        float o_global = 0.f;
+        // 4 local values per row
 #pragma unroll
-      for (int local_idx = 0; local_idx < 4; local_idx++) {
-        // access the shared memory buffer
-        int md_smem_offset = (row / 16) * NUM_THREADS * 2 // mma iter m
-                             + local_idx * 32 * 2  // 32 threads per local value
-                             + t_idx * 2           // corresponding thread
-                             + (frag_idx % 4) / 2; // first half or second half
-        float m_prev = m_global,
-              d_prev = d_global; // save previous values
-        float other_m = s_m_buffer[md_smem_offset],
-              other_d = s_d_buffer[md_smem_offset];
-        m_global = max(m_prev, other_m);
-        d_global = d_prev * expf(m_prev - m_global) +
-                   other_d * expf(other_m - m_global);
-        // accumulate o
-        float other_o =
-            s_o_buffer[(row / 16) * NUM_THREADS * 64 // mma iter m
-                       + local_idx * 32 * 64 // 32 threads per local value
-                       + t_idx * 64          // corresponding thread
-                       + mma_iter_n * 8      // mma iter n
-                       + frag_idx];
-        o_global = o_global * expf(m_prev - m_global) +
-                   other_o * expf(other_m - m_global);
+        for (int local_idx = 0; local_idx < 4; local_idx++) {
+          // access the shared memory buffer
+          int md_smem_offset =
+              m * NUM_THREADS * 2   // mma iter m
+              + local_idx * 32 * 2  // 32 threads per local value
+              + t_idx * 2           // corresponding thread
+              + (frag_idx % 4) / 2; // first half or second half
+          float m_prev = m_global,
+                d_prev = d_global; // save previous values
+          float other_m = s_m_buffer[md_smem_offset],
+                other_d = s_d_buffer[md_smem_offset];
+          m_global = max(m_prev, other_m);
+          d_global = d_prev * expf(m_prev - m_global) +
+                     other_d * expf(other_m - m_global);
+          // accumulate o (buffer holds only the current m-tile)
+          float other_o =
+              s_o_buffer[local_idx * 32 * 64 // 32 threads per local value
+                         + t_idx * 64        // corresponding thread
+                         + mma_iter_n * 8    // mma iter n
+                         + frag_idx];
+          o_global = o_global * expf(m_prev - m_global) +
+                     other_o * expf(other_m - m_global);
+        }
+        o_smem.at(row, col) = bfloat16(o_global / d_global);
       }
-      o_smem.at(row, col) = bfloat16(o_global / d_global);
+      // protects the o buffer before the next tile overwrites it, and makes
+      // o_smem visible to the store below after the last tile
+      wg_barrier.arrive_and_wait();
     }
-    wg_barrier.arrive_and_wait();
 
     // store the output
     for (int elem_idx = threadIdx.x;
