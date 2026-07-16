@@ -1,0 +1,16 @@
+{
+  "name": "git_apply_patch",
+  "description": "Apply a unified-diff patch to the repo.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "patch": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "patch"
+    ],
+    "additionalProperties": false
+  }
+}

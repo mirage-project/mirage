@@ -12,3 +12,4 @@ tg4perfetto @ git+https://github.com/flashinfer-ai/tg4perfetto.git
 cuda-python
 fastapi
 uvicorn
+xgrammar

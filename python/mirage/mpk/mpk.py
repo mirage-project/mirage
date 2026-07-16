@@ -68,6 +68,17 @@ class MPKMetadata:
     pinned_step: Optional[torch.Tensor] = None
     pinned_inbox_tokens: Optional[torch.Tensor] = None
     pinned_rid_at_row: Optional[torch.Tensor] = None
+    # Constrained decoding (xgrammar) pinned buffers
+    pinned_token_bitmask: Optional[torch.Tensor] = None
+    pinned_mask_seq: Optional[torch.Tensor] = None
+    pinned_constrained_flag: Optional[torch.Tensor] = None
+    # Build-time toggle: insert the apply_token_bitmask masking layer into the
+    # graph (online_pinned only). Runtime constrained/unconstrained is then
+    # controlled by pinned_constrained_flag.
+    enable_constrained_decoding: bool = False
+    # Sampling (Gumbel-max) instead of greedy argmax for token selection.
+    do_sample: bool = False
+    sampling_seed: int = 42
     # spec decode config
     spec_decode: Optional[str] = None
     spec_decode_config: Optional[object] = None
@@ -211,6 +222,12 @@ class MPK:
         self.pinned_step             = args.pinned_step
         self.pinned_inbox_tokens     = args.pinned_inbox_tokens
         self.pinned_rid_at_row       = args.pinned_rid_at_row
+        self.pinned_token_bitmask    = args.pinned_token_bitmask
+        self.pinned_mask_seq         = args.pinned_mask_seq
+        self.pinned_constrained_flag = args.pinned_constrained_flag
+        self.enable_constrained_decoding = args.enable_constrained_decoding
+        self.do_sample = args.do_sample
+        self.sampling_seed = args.sampling_seed
 
         self.profiler_tensor = args.profiler_tensor
         self.spec_decode_config = args.spec_decode_config
@@ -253,6 +270,9 @@ class MPK:
             "pinned_step":             args.pinned_step,
             "pinned_inbox_tokens":     args.pinned_inbox_tokens,
             "pinned_rid_at_row":       args.pinned_rid_at_row,
+            "pinned_token_bitmask":    args.pinned_token_bitmask,
+            "pinned_mask_seq":         args.pinned_mask_seq,
+            "pinned_constrained_flag": args.pinned_constrained_flag,
         }
         self.persistent_kernel = PersistentKernel(
             mode=args.mode,
@@ -272,6 +292,9 @@ class MPK:
             spec_decode_config=self.spec_decode_config,
             use_cutlass_kernel=args.use_cutlass_kernel,
             pinned_ring_capacity=args.pinned_ring_capacity,
+            enable_constrained_decoding=args.enable_constrained_decoding,
+            do_sample=args.do_sample,
+            sampling_seed=args.sampling_seed,
         )
         self.meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors.values()]
         self.profiler_buffer_ptr = (

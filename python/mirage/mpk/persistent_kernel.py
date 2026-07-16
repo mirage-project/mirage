@@ -325,10 +325,16 @@ class PersistentKernel:
         eos_token_id: int64 = -1,
         pinned_ring_capacity: int = 0,
         test_mode: bool = False,
+        enable_constrained_decoding: bool = False,
+        do_sample: bool = False,
+        sampling_seed: int = 42,
     ):
         self.__finalized__ = False
         self._is_compiled = False
         self.test_mode = test_mode
+        self.enable_constrained_decoding = enable_constrained_decoding
+        self.do_sample = do_sample
+        self.sampling_seed = sampling_seed
 
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
@@ -2115,6 +2121,18 @@ class PersistentKernel:
         # Register task with seed parameter
         self.kn_graph.register_task(tb_graph, "sampling_sm100", [seed])
 
+    def apply_token_bitmask_layer(self, logits, output, grid_dim, block_dim):
+        """Constrained decoding: write masked logits to ``output`` (feed that, not
+        ``logits``, into the following argmax/sampling layer). Gated at runtime by
+        pinned_constrained_flag (flag 0 ⇒ plain copy). online_pinned only."""
+        assert logits.num_dims == 2 and output.num_dims == 2
+        assert self.mode == "online_pinned"
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(logits, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized([logits, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "apply_token_bitmask_sm100", [])
+
     def find_ngram_partial_layer(
         self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3):
         # Currently assume that input/output
@@ -2748,6 +2766,9 @@ class PersistentKernel:
             "pinned_step",
             "pinned_inbox_tokens",
             "pinned_rid_at_row",
+            "pinned_token_bitmask",
+            "pinned_mask_seq",
+            "pinned_constrained_flag",
         ]
         meta_tensors_ptr = []
         for key in expected_order:
@@ -2870,6 +2891,9 @@ class PersistentKernel:
             meta_tensors.append(self.meta_tensors["pinned_step"])
             meta_tensors.append(self.meta_tensors["pinned_inbox_tokens"])
             meta_tensors.append(self.meta_tensors["pinned_rid_at_row"])
+            meta_tensors.append(self.meta_tensors["pinned_token_bitmask"])
+            meta_tensors.append(self.meta_tensors["pinned_mask_seq"])
+            meta_tensors.append(self.meta_tensors["pinned_constrained_flag"])
         meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0

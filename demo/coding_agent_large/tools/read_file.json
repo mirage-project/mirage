@@ -1,0 +1,12 @@
+{
+  "name": "read_file",
+  "description": "Read a text or source file from the workspace and return its contents.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string", "description": "workspace-relative path, e.g. src/calculator.py"}
+    },
+    "required": ["path"],
+    "additionalProperties": false
+  }
+}

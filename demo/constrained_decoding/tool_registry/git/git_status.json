@@ -1,0 +1,10 @@
+{
+  "name": "git_status",
+  "description": "Show the git working-tree status.",
+  "parameters": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  }
+}

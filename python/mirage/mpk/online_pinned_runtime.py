@@ -59,6 +59,22 @@ class OnlinePinnedRuntime:
         self._inbox_tokens      = mpk.pinned_inbox_tokens     # int64[cap, max_seq_len], pinned
         self._pinned_rid_at_row = mpk.pinned_rid_at_row       # int32[max_batched], pinned
 
+        # ── Constrained decoding (xgrammar) ───────────────────────────────
+        # Optional; activated by init_xgrammar() + set_request_grammar().
+        # All xgrammar state lives in StructuredGenerationManager (structured.py);
+        # this runtime just drives its per-step tick from the drain loop.
+        from .structured import StructuredGenerationManager
+        self.structured = StructuredGenerationManager(
+            token_bitmask=getattr(mpk, "pinned_token_bitmask", None),
+            mask_seq=getattr(mpk, "pinned_mask_seq", None),
+            constrained_flag=getattr(mpk, "pinned_constrained_flag", None),
+            tokens=mpk.tokens,
+            pinned_step=self._pinned_step,
+            find_row_for_rid=self.find_row_for_rid,
+            prompt_lengths=getattr(mpk, "prompt_lengths", None),
+            active_rows=self.active_rows,
+        )
+
         # CPU-private ring cursors.
         self._cpu_req_tail  = 0  # next ring slot to write
         self._cpu_req_ack   = 0  # last slot known to be consumed by GPU
@@ -190,6 +206,14 @@ class OnlinePinnedRuntime:
                 self._completions[rid] = (buffer_row, final_step)
             finished.append((rid, buffer_row, final_step))
 
+        # Auto-release each completed request's grammar state, keyed by the
+        # completion ring's buffer_row (authoritative: the GPU has already reset
+        # pinned_rid_at_row for this row, so a rid-based lookup would miss it and
+        # leave the global constrained flag stuck on). Idempotent. This is why
+        # release_grammar() is not needed in the normal path.
+        for rid, buffer_row, _ in finished:
+            self.structured.release(rid, row=buffer_row)
+
         # Flush all waiting requests while ring slots are free.
         while self.flush_waiting():
             pass
@@ -202,9 +226,50 @@ class OnlinePinnedRuntime:
         while not self._drain_stop.is_set():
             try:
                 self.drain_completions()
+                self.structured.tick()
             except Exception:
                 pass
             self._drain_stop.wait(0.0002)
+
+    # ── Constrained decoding (xgrammar) — delegates to structured.py ──────
+
+    def init_xgrammar(self, tokenizer, vocab_size: int) -> None:
+        """Build the xgrammar compiler + tokenizer info (see
+        :meth:`structured.StructuredGenerationManager.init_xgrammar`).
+
+        ``ModelRunner`` calls this automatically when
+        ``enable_constrained_decoding=True``; call it yourself only when driving
+        ``OnlinePinnedRuntime`` without a ``ModelRunner``."""
+        self.structured.init_xgrammar(tokenizer, vocab_size)
+
+    def set_request_grammar(self, rid: int, *, json_schema=None, ebnf=None,
+                            regex=None, structural_tag=None,
+                            triggered_tags=None, tags_with_separator=None,
+                            dispatch=None, model=None,
+                            any_whitespace=True) -> None:
+        """Attach a grammar to a request (call once, near submit()).
+
+        Pass a raw grammar source (``json_schema`` / ``ebnf`` / ``regex`` /
+        ``structural_tag``) or a tool list from
+        :func:`~mirage.mpk.create_tools` via ``triggered_tags=`` /
+        ``tags_with_separator=`` / ``dispatch=`` (optionally ``model=`` for the
+        model's native format). See
+        :meth:`structured.StructuredGenerationManager.set_request_grammar`."""
+        self.structured.set_request_grammar(
+            rid, json_schema=json_schema, ebnf=ebnf, regex=regex,
+            structural_tag=structural_tag, triggered_tags=triggered_tags,
+            tags_with_separator=tags_with_separator, dispatch=dispatch,
+            model=model, any_whitespace=any_whitespace)
+
+    def set_constrained(self, on: bool) -> None:
+        """Flip the global runtime constrained-decoding flag."""
+        self.structured.set_constrained(on)
+
+    def release_grammar(self, rid: int) -> None:
+        """Drop a request's grammar state. Optional in the normal path — the
+        runtime auto-releases on completion (see :meth:`drain_completions`); use
+        this only to abort a request's grammar early. Idempotent."""
+        self.structured.release(rid)
 
     def wait_for_request(
         self,
@@ -268,6 +333,12 @@ class OnlinePinnedRuntime:
                 return r
         return -1
 
+    def active_rows(self) -> List[int]:
+        """Buffer rows currently holding a live request (rid != -1). Used by the
+        constrained-decoding tick to publish a mask for every active row."""
+        return [r for r in range(self._total_inflight)
+                if int(self._pinned_rid_at_row[r].item()) >= 0]
+
     @property
     def waiting_count(self) -> int:
         """Number of requests queued on the CPU side."""
@@ -293,3 +364,4 @@ class OnlinePinnedRuntime:
         self._req_ready.zero_()
         self._req_request_id.zero_()
         self._pinned_rid_at_row.fill_(-1)
+        self.structured.reset()

@@ -23,6 +23,7 @@
 #if defined(USE_NVSHMEM) && defined(MIRAGE_GRACE_BLACKWELL)
 #include "tasks/blackwell/allreduce.cuh"
 #endif
+#include "apply_token_bitmask_sm100.cuh"
 #include "argmax_sm100.cuh"
 #include "attention_sm100.cuh"
 #include "dflash_attention_sm100.cuh"

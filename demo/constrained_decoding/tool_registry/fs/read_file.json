@@ -1,0 +1,17 @@
+{
+  "name": "read_file",
+  "description": "Read the full contents of a file.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "File path to read."
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  }
+}

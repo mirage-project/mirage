@@ -1,0 +1,19 @@
+{
+  "name": "grep",
+  "description": "Search for a regex pattern within a path.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "pattern": {
+        "type": "string"
+      },
+      "path": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "pattern"
+    ],
+    "additionalProperties": false
+  }
+}

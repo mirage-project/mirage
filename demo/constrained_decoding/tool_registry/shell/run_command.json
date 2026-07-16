@@ -1,0 +1,16 @@
+{
+  "name": "run_command",
+  "description": "Run a shell command and return its output.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "command"
+    ],
+    "additionalProperties": false
+  }
+}

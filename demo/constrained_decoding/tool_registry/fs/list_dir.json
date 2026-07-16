@@ -1,0 +1,16 @@
+{
+  "name": "list_dir",
+  "description": "List the entries of a directory.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "additionalProperties": false
+  }
+}

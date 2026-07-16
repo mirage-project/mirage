@@ -1,0 +1,12 @@
+{
+  "name": "find_files",
+  "description": "Find files whose path matches a glob pattern such as *.py or test_*.py.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "pattern": {"type": "string"}
+    },
+    "required": ["pattern"],
+    "additionalProperties": false
+  }
+}

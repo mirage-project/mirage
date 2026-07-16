@@ -1,0 +1,14 @@
+{
+  "name": "git_diff",
+  "description": "Show a git diff, optionally scoped to a path.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string"
+      }
+    },
+    "required": [],
+    "additionalProperties": false
+  }
+}
