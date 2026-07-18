@@ -319,8 +319,10 @@ class DFlashBuilder:
             mpk.linear_layer(input=h, weight=kw, output=bkr, grid_dim=(_gpl(self.kv_size), 1, 1), block_dim=bd)
             mpk.dflash_norm_rope_layer(x=bkr, weight=kn, cos=cosB, sin=sinB, output=BK, grid_dim=(1, 1, 1), block_dim=bd, head_dim=self.head_dim)
             mpk.linear_layer(input=h, weight=vw, output=bv, grid_dim=(_gpl(self.kv_size), 1, 1), block_dim=bd)
+            # Split attention across kv heads: num_kv_heads tasks/layer instead
+            # of 1 (each task = 8 q heads / 1 kv head on the mma flash path).
             mpk.dflash_attention_layer(q=Q, ctx_k=ck, ctx_v=cv, blk_k=BK, blk_v=bv, output=at,
-                                       grid_dim=(1, 1, 1), block_dim=bd,
+                                       grid_dim=(self.num_kv_heads, 1, 1), block_dim=bd,
                                        sliding_window=self.layer_sliding[i], head_dim=self.head_dim)
             mpk.linear_layer(input=at, weight=ow, output=ao, grid_dim=(_gpl(H), 1, 1), block_dim=bd)
             mpk.elementwise_add_layer(input_a=hidden, input_b=ao, output=h2, grid_dim=(B, 1, 1), block_dim=bd)

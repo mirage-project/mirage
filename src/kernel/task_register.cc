@@ -152,13 +152,25 @@ int TaskRegister::register_dflash_attention_sm100_task(
   int kv_size = input_ops[1]->dtensor.dim[1];
   int num_q_heads = q_size / head_dim;
   int num_kv_heads = kv_size / head_dim;
+  // The layer may be grid-split across kv heads (grid.x = G): each task then
+  // handles a column slice with num_q_heads/G q heads and num_kv_heads/G kv
+  // heads. The runtime offsets the input/output pointers to the slice; the
+  // full row widths are passed as stride template args so per-row addressing
+  // stays correct.
+  int G = bgraph.grid_dim.x;
+  assert(G >= 1);
+  assert(num_q_heads % G == 0);
+  assert(num_kv_heads % G == 0);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::dflash_attention_sm100<bfloat16, $, $, $, $>(",
-         num_q_heads,
-         num_kv_heads,
+  code.e("kernel::dflash_attention_sm100<bfloat16, $, $, $, $, $, $, $>(",
+         num_q_heads / G,
+         num_kv_heads / G,
          head_dim,
-         B);
+         B,
+         q_size,
+         kv_size,
+         q_size);
   code.e("    task_desc->input_ptrs[0],");  // q
   code.e("    task_desc->input_ptrs[1],");  // ctx_k
   code.e("    task_desc->input_ptrs[2],");  // ctx_v

@@ -765,17 +765,27 @@ class PersistentKernel:
         sliding_window: int = 0,
         head_dim: int = 128,
     ):
-        # DFlash non-causal block attention (split ctx/block KV; one task/request).
+        # DFlash non-causal block attention (split ctx/block KV).
+        # grid_dim[0] > 1 splits the layer across kv heads: each task gets a
+        # column slice (dim 1) of every tensor via imap (1, -1, -1).
         for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
             assert t.num_dims == 2
+        G = grid_dim[0]
+        if G > 1:
+            for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
+                assert t.dim(1) % (G * head_dim) == 0, (
+                    "dflash_attention grid split requires dim1 divisible by "
+                    f"grid_dim[0]*head_dim ({t.dim(1)} % {G * head_dim})"
+                )
+        imap = (1, -1, -1) if G > 1 else (-1, -1, -1)
         params = [sliding_window, head_dim]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(q, (-1, -1, -1), -1, True)
-        tb_graph.new_input(ctx_k, (-1, -1, -1), -1, True)
-        tb_graph.new_input(ctx_v, (-1, -1, -1), -1, True)
-        tb_graph.new_input(blk_k, (-1, -1, -1), -1, True)
-        tb_graph.new_input(blk_v, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q, imap, -1, True)
+        tb_graph.new_input(ctx_k, imap, -1, True)
+        tb_graph.new_input(ctx_v, imap, -1, True)
+        tb_graph.new_input(blk_k, imap, -1, True)
+        tb_graph.new_input(blk_v, imap, -1, True)
+        tb_graph.new_input(output, imap, -1, True)
         self.kn_graph.customized([q, ctx_k, ctx_v, blk_k, blk_v, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "dflash_attention", params)
 
