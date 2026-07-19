@@ -242,13 +242,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64(
   int const num_iters = (seq_len + KV_TILE_SIZE - 1) / KV_TILE_SIZE;
   int curr_iter_len = min(seq_len, KV_TILE_SIZE);
 
-  // printf("num_iters %d, curr_iter_len %d, seq_len %d, num_tokens %d\n",
-  // num_iters, curr_iter_len, seq_len, num_tokens);
   // PAGE_SIZE = 4
-  // if(threadIdx.x == 0){
-  //   printf("seq_length %d, %d, %d, %d, %d\n", seq_len, KV_TILE_SIZE,
-  //   num_pages, PAGE_SIZE, paged_kv_last_page_len_buffer_ptr[request_id]);
-  // }
   int cp_finished_seq_len = 0;
   // assert no leafover to be handled when loading qkv
   static_assert(HEAD_DIM % CP_CHUNK_SIZE == 0);
@@ -485,11 +479,6 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64(
           ldsm(src_ptr_Q, q_frag);
           ldsm(src_ptr_KT, kt_frag);
 
-          //     if(threadIdx.x == 0 && iter == 3){
-          //     printf("q frag is n %d, k %d, value %d\n", n,k, q_frag[0]);
-          //     printf("kt_frag frag is n %d, k %d, kt_col %d,curr_iter_len %d,
-          //     value %d\n", n,k, kt_col, curr_iter_len , kt_frag[0]);
-          // }
           mma_m16n16k16_bf16bf16bf32(
               x_frag_f[m][n], q_frag, kt_frag, x_frag_f[m][n]);
         }
@@ -503,15 +492,9 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64(
     // x_frag_f[m][0, 1, 4, 5], and the second value is the maximum of
     // x_frag_f[m][2, 3, 6, 7]
 
-    // if(threadIdx.x == 0 && iter == 7){
-
     //   for(int n = 0; n < NUM_ITER_QK_N; n++){
     //     for (int frag_idx = 0; frag_idx < 8; frag_idx++) {
-    //       printf("result of qk is n %d, fragidx %d, value %f\n", n, frag_idx,
-    //       x_frag_f[0][n][frag_idx]);
     //     }
-    //   }
-    // }
     float m_prev[GLOBAL_ITERS_M][2];
 #pragma unroll
     for (int m = 0; m < GLOBAL_ITERS_M; m++) {
@@ -684,8 +667,6 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64(
       //       o_smem.at(row, col) =  bfloat16(o[m][col >> 4][frag_idx << 1] /
       //       d_global); o_smem.at(row, col + 1) =  bfloat16(o[m][col >>
       //       4][(frag_idx << 1) + 1] / d_global);
-
-      //       // }
 
       //     }
       // stmatrix_m8n8x4((uint32_t*)o[0][i], o_smem(0, 0));

@@ -1,9 +1,11 @@
 // Ampere task impls
 #include "tasks/ampere/clamped_swiglu.cuh"
 #include "tasks/ampere/embedding.cuh"
+#include "tasks/ampere/identity.cuh"
 #include "tasks/ampere/merge_splitkv.cuh"
 #include "tasks/ampere/multitoken_paged_attention_split_kv.cuh"
 #include "tasks/ampere/silu_mul.cuh"
+#include "tasks/ampere/single_batch_extend.cuh"
 #ifdef USE_NVSHMEM
 #include "tasks/ampere/allreduce.cuh"
 #endif // USE_NVSHMEM
@@ -25,33 +27,58 @@
 #include "tasks/blackwell/allreduce.cuh"
 #endif
 #include "argmax_sm100.cuh"
+#if defined(USE_NVSHMEM) && defined(MIRAGE_GRACE_BLACKWELL)
+#include "nvshmem_argmax_sm100.cuh"
+#endif
 #include "attention_sm100.cuh"
+#include "deepseek_mla_rope_sm100.cuh"
 #include "dflash_attention_sm100.cuh"
 #include "dflash_kv_store_sm100.cuh"
 #include "dflash_norm_rope_sm100.cuh"
+#include "dsv3_router_gate_gemv_sm100.cuh"
+#include "fp8_gemm_dense_decode_splitk_sm100.cuh"
+#include "fp8_gemm_dense_finen_sm100.cuh"
+#include "fp8_gemm_dense_fp8out_sm100.cuh"
+#include "fp8_gemm_dense_mediumm_sm100.cuh"
+#include "fp8_gemm_dense_smallm_sm100.cuh"
+#include "fp8_group_gemm_largem_compact_sm100.cuh"
+#include "fp8_group_gemm_largem_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"
 #include "glm_moe_router_sm100.cuh"
 #include "inkling_attention_sm100.cuh"
 #include "inkling_moe_router_sm100.cuh"
 #include "inkling_sconv_sm100.cuh"
 #include "linear_fp8_1d2d_sm100.cuh"
+#include "fp8_group_gemm_smallm_sm100.cuh"
+#include "fused_rmsnorm_quantize_fp8_sm100.cuh"
+#include "linear_fp8_bmm_dense_sm100.cuh"
+#include "linear_fp8_bmm_sm100.cuh"
 #include "linear_fp8_sm100.cuh"
+#include "linear_fp8_swapAB_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
-#include "mla_dispatch_sm100.cuh"
+#include "mla_kv_append_sm100.cuh"
 #include "mla_kv_cache_gather_sm100.cuh"
 #include "mla_kv_cache_gather_split_sm100.cuh"
 // sm100_ptx.cuh must be included BEFORE mla_mtp_decode_sm100.cuh at top level
 // so kernel::sm100_ptx is defined in the correct namespace
+#include "assemble_q_decode_sm100.cuh"
 #include "elementwise_add_sm100.cuh"
 #include "mla_mtp_decode_sm100.cuh"
 #include "mla_mtp_decode_tp2_sm100.cuh"
 #include "mla_mtp_decode_tp4_sm100.cuh"
+#ifdef MPK_DSV3_MLA_FINESPLIT
+#include "mla_mtp_decode_tp8_finesplit_sm100.cuh"
+#else
 #include "mla_mtp_decode_tp8_sm100.cuh"
+#endif
 #include "mla_prefill_sm100.cuh"
+#include "mla_prefill_tp8_chunked_sm100.cuh"
+#include "mla_prefill_tp8_chunked_splitk_sm100.cuh"
 #include "mla_prefill_tp8_sm100.cuh"
-#include "mla_reduce_sm100.cuh"
-#include "mla_sm100_2sm.cuh"
+#include "mla_unified_sm100.cuh"
 #include "moe_linear_sm100.cuh"
+#include "moe_permute_sm100.cuh"
+#include "moe_unpermute_sm100.cuh"
 #include "mul_sum_add_sm100.cuh"
 #include "per_token_group_quantize_fp8.cuh"
 #include "prob_scatter_sm100.cuh"
@@ -60,7 +87,19 @@
 #include "tasks/common/sampling.cuh"
 #include "tasks/speculative_decoding/eagle3_ops.cuh"
 #include "tasks/speculative_decoding/mtp_token_ops.cuh"
+#include "tasks/speculative_decoding/prompt_lookup.cuh"
+#include "tasks/speculative_decoding/target_verify.cuh"
 #include "tasks/speculative_decoding/target_verify_mtp.cuh"
 #include "tensor_init.cuh"
+// MPK_DSV3_TOPK_PARALLEL=1 (default-OFF, byte-identical default): warp-parallel
+// bitonic topk-sigmoid (ferret workspace4, 2.88× std body 4.64→1.61µs,
+// bit-exact routing) replacing the serial warp-0 Phase-5 argmax. Same
+// namespace+signature (kernel::topk_sigmoid_task_impl) → transparent swap.
+// in-MPK transfer TBD (box).
+#ifdef MPK_DSV3_TOPK_PARALLEL
+#include "topk_sigmoid_parallel_sm100.cuh"
+#else
 #include "topk_sigmoid_sm100.cuh"
+#endif
 #include "topk_softmax_sm100.cuh"
+#include "transpose_scale_sm100.cuh"

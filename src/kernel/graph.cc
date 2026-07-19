@@ -664,7 +664,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "tensor_init") {
     int variant_id =
         task_register->register_tensor_init_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(2, 1, TASK_TENSOR_INIT, variant_id);
+    task_config[op] = std::make_tuple(1, 2, TASK_TENSOR_INIT, variant_id);
   } else if (name == "moe_topk_softmax_sm100") {
     int variant_id = task_register->register_moe_topk_softmax_sm100_task(
         customized->bgraph, params);
@@ -687,7 +687,9 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "moe_silu_mul") {
     int variant_id =
         task_register->register_moe_silu_mul_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
+    int num_inputs_silu = (params.size() >= 2 && params[0] >= 0) ? 2 : 1;
+    task_config[op] =
+        std::make_tuple(num_inputs_silu, 1, TASK_SILU_MUL, variant_id);
   } else if (name == "moe_clamped_swiglu") {
     int variant_id = task_register->register_moe_clamped_swiglu_task(
         customized->bgraph, params);
@@ -772,6 +774,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     // attached with store_in_dmem=True, MPK convention (same as mla_decode).
     // Task register dispatches input_ptrs[4] as the O pointer.
     task_config[op] = std::make_tuple(5, 0, TASK_MLA_PREFILL_SM100, variant_id);
+  } else if (name == "mla_prefill_absorbed_sm100") {
+    int variant_id = task_register->register_mla_prefill_absorbed_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_MLA_PREFILL_SM100, variant_id);
   } else if (name == "mla_prefill_tp8_sm100") {
     int variant_id = task_register->register_mla_prefill_tp8_sm100_task(
         customized->bgraph, params);
@@ -779,6 +785,31 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     // descriptors.
     task_config[op] =
         std::make_tuple(4, 1, TASK_MLA_PREFILL_TP8_SM100, variant_id);
+  } else if (name == "mla_prefill_tp8_chunked_sm100") {
+    int variant_id = task_register->register_mla_prefill_tp8_chunked_sm100_task(
+        customized->bgraph, params);
+    // Per-head unabsorbed: 5 inputs (Qn, Qp, K_nope, K_rope, V) + 1 output.
+    task_config[op] =
+        std::make_tuple(5, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SM100, variant_id);
+  } else if (name == "mla_prefill_tp8_chunked_splitk_sm100") {
+    int variant_id =
+        task_register->register_mla_prefill_tp8_chunked_splitk_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        5, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100, variant_id);
+  } else if (name == "mla_prefill_tp8_chunked_reduce_sm100") {
+    int variant_id =
+        task_register->register_mla_prefill_tp8_chunked_reduce_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        1, 1, TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100, variant_id);
+  } else if (name == "mla_unified_sm100") {
+    int variant_id = task_register->register_mla_unified_sm100_task(
+        customized->bgraph, params);
+    // Inputs: Q_nope, Q_pe, CKV, KPE, O, Q_fused TMA, KV TMA.
+    // Outputs: decode partial O and LSE. O is an input by MPK convention so
+    // the prefill branch can write it directly.
+    task_config[op] = std::make_tuple(7, 2, TASK_MLA_UNIFIED_SM100, variant_id);
   } else if (name == "mla_mtp_decode_sm100") {
     int variant_id = task_register->register_mla_mtp_decode_sm100_task(
         customized->bgraph, params);
@@ -800,10 +831,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP2_SM100, variant_id);
   } else if (name == "mla_mtp_decode_tp2_reduce_sm100") {
     int variant_id =
-        task_register->register_mla_mtp_decode_tp2_reduce_sm100_task(
-            customized->bgraph, params);
+        task_register->register_mla_mtp_decode_tp_reduce_sm100_task(
+            customized->bgraph, params, /*tp=*/2);
     task_config[op] =
-        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100, variant_id);
+        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP_REDUCE_SM100, variant_id);
   } else if (name == "mla_mtp_decode_tp4_sm100") {
     int variant_id = task_register->register_mla_mtp_decode_tp4_sm100_task(
         customized->bgraph, params);
@@ -811,10 +842,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP4_SM100, variant_id);
   } else if (name == "mla_mtp_decode_tp4_reduce_sm100") {
     int variant_id =
-        task_register->register_mla_mtp_decode_tp4_reduce_sm100_task(
-            customized->bgraph, params);
+        task_register->register_mla_mtp_decode_tp_reduce_sm100_task(
+            customized->bgraph, params, /*tp=*/4);
     task_config[op] =
-        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100, variant_id);
+        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP_REDUCE_SM100, variant_id);
   } else if (name == "mla_mtp_decode_tp8_sm100") {
     int variant_id = task_register->register_mla_mtp_decode_tp8_sm100_task(
         customized->bgraph, params);
@@ -822,22 +853,26 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP8_SM100, variant_id);
   } else if (name == "mla_mtp_decode_tp8_reduce_sm100") {
     int variant_id =
-        task_register->register_mla_mtp_decode_tp8_reduce_sm100_task(
-            customized->bgraph, params);
+        task_register->register_mla_mtp_decode_tp_reduce_sm100_task(
+            customized->bgraph, params, /*tp=*/8);
     task_config[op] =
-        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100, variant_id);
+        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP_REDUCE_SM100, variant_id);
   }
   // FP8 tasks
   else if (name == "quantize_fp8_sm100") {
     int variant_id = task_register->register_quantize_fp8_sm100_task(
         customized->bgraph, params, true /*scale_ue8m0*/);
+    // B15: params.size() == 5 means expert_active mode (active_mode=5)
+    // with meta as 2nd input. Otherwise legacy 1-input.
+    int num_inputs_q = (params.size() == 5) ? 2 : 1;
     task_config[op] =
-        std::make_tuple(1, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
+        std::make_tuple(num_inputs_q, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "quantize_fp8_f32scale_sm100") {
     int variant_id = task_register->register_quantize_fp8_sm100_task(
         customized->bgraph, params, false /*scale_ue8m0*/);
+    int num_inputs_q = (params.size() == 5) ? 2 : 1;
     task_config[op] =
-        std::make_tuple(1, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
+        std::make_tuple(num_inputs_q, 2, TASK_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "linear_fp8_sm100") {
     int variant_id = task_register->register_linear_fp8_sm100_task(
         customized->bgraph, params, false);
@@ -847,6 +882,203 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, true);
     task_config[op] =
         std::make_tuple(5, 1, TASK_LINEAR_FP8_WITH_RESIDUAL_SM100, variant_id);
+  } else if (name == "linear_fp8_swapAB_sm100") {
+    int variant_id = task_register->register_linear_fp8_swapAB_sm100_task(
+        customized->bgraph, params, false);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_LINEAR_FP8_SWAPAB_SM100, variant_id);
+  } else if (name == "linear_fp8_swapAB_with_residual_sm100") {
+    int variant_id = task_register->register_linear_fp8_swapAB_sm100_task(
+        customized->bgraph, params, true);
+    task_config[op] = std::make_tuple(
+        5, 1, TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100, variant_id);
+  } else if (name == "splitk_linear_fp8_swapAB_sm100") {
+    int variant_id =
+        task_register->register_splitk_linear_fp8_swapAB_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100, variant_id);
+  } else if (name == "linear_fp8_bmm_sm100") {
+    int variant_id = task_register->register_linear_fp8_bmm_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_LINEAR_FP8_BMM_SM100, variant_id);
+  } else if (name == "linear_fp8_bmm_dense_sm100") {
+    int variant_id = task_register->register_linear_fp8_bmm_dense_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_LINEAR_FP8_BMM_DENSE_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_smallm_sm100") {
+    // The whole dense FP8 GEMM family registers under one
+    // TASK_FP8_GEMM_DENSE_SM100 enum; each name bakes its flavor into the
+    // per-instance variant body (TMA + scheduler metadata are identical
+    // across flavors).
+    int variant_id = task_register->register_fp8_gemm_dense_sm100_task(
+        customized->bgraph, params, /*mediumm=*/false);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SM100, variant_id);
+  } else if (name == "dsv3_router_gate_gemv_sm100") {
+    // ferret BF16 CUDA-core GEMV: hidden[M,K] @ W_gate[N,K]^T → logits[M,N].
+    // 2 real inputs (hidden, W_gate) + 1 real output (logits); raw-ptr ABI.
+    // Default-OFF: MPK_DSV3_ROUTER_GEMV=1 gated in builder.py at mbt==1.
+    int variant_id = task_register->register_dsv3_router_gate_gemv_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_DSV3_ROUTER_GATE_GEMV_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_mediumm_sm100") {
+    int variant_id = task_register->register_fp8_gemm_dense_sm100_task(
+        customized->bgraph, params, /*mediumm=*/true);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_finen_sm100") {
+    // fine-N (mediumm body @ BN=16). Own enum so tma.cuh uses B-box=16.
+    int variant_id = task_register->register_fp8_gemm_dense_finen_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_FINEN_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_decode_splitk_sm100") {
+    int variant_id =
+        task_register->register_fp8_gemm_dense_decode_splitk_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_smallm_fp8out_sm100") {
+    // D1 (2026-05-17): fp8out variant — 4 inputs + 2 outputs (FP8 C and
+    // packed UE8M0 scale). Fuses what was a downstream
+    // per_token_group_quantize_fp8 into the GEMM epilogue.
+    int variant_id = task_register->register_fp8_gemm_dense_fp8out_sm100_task(
+        customized->bgraph, params, /*mediumm=*/false);
+    task_config[op] =
+        std::make_tuple(4, 2, TASK_FP8_GEMM_DENSE_SM100, variant_id);
+  } else if (name == "fp8_gemm_dense_mediumm_fp8out_sm100") {
+    int variant_id = task_register->register_fp8_gemm_dense_fp8out_sm100_task(
+        customized->bgraph, params, /*mediumm=*/true);
+    task_config[op] =
+        std::make_tuple(4, 2, TASK_FP8_GEMM_DENSE_SM100, variant_id);
+  } else if (name == "fused_rmsnorm_quantize_fp8_sm100") {
+    // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
+    // 2 real inputs (input, weight) + 3 outputs
+    // (output_bf16, output_fp8, output_scale). All 3 outputs are wired
+    // via `tb_graph.new_input(store_in_dmem=True)` in the Python
+    // wrapper, but the tuple MUST split them into the output slots so
+    // build_annotated_graph populates last_writer for the FP8/scale
+    // buffers — otherwise downstream FP8 GEMM has no producer edge,
+    // residual stripping can't find the chain, and the embedding gets
+    // misclassified as a case-3 fork+join-producer.
+    int variant_id =
+        task_register->register_fused_rmsnorm_quantize_fp8_sm100_task(
+            customized->bgraph, params);
+    size_t const num_ops_fused = customized->bgraph.operators.size();
+    assert(num_ops_fused == 5 || num_ops_fused == 6);
+    int const num_inputs_fused = (num_ops_fused == 6) ? 3 : 2;
+    task_config[op] = std::make_tuple(
+        num_inputs_fused, 3, TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100, variant_id);
+  } else if (name == "fp8_group_gemm_smallm_sm100") {
+    // 5 inputs (A_fp8, B_fp8, sfa, sfb, m_indices) + optional 6th (meta for
+    // per-expert active mask) + 1 output (D_bf16). All 4 first inputs +
+    // the output carry TMA descriptors; m_indices + active mask are direct
+    // LDG. The 6th-input case is signaled by params[5] >= 0 (= flat offset
+    // of active_expert_mask inside meta).
+    int variant_id = task_register->register_fp8_group_gemm_smallm_sm100_task(
+        customized->bgraph, params);
+    int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
+    task_config[op] = std::make_tuple(
+        num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_SMALLM_SM100, variant_id);
+  } else if (name == "fp8_group_gemm_largem_sm100") {
+    int variant_id = task_register->register_fp8_group_gemm_largem_sm100_task(
+        customized->bgraph, params);
+    int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
+    task_config[op] = std::make_tuple(
+        num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_LARGEM_SM100, variant_id);
+  } else if (name == "fp8_group_gemm_largem_compact_sm100") {
+    int variant_id =
+        task_register->register_fp8_group_gemm_largem_compact_sm100_task(
+            customized->bgraph, params);
+    int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
+    task_config[op] = std::make_tuple(
+        num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100, variant_id);
+  } else if (name == "fp8_group_gemm_largem_compact_fused_sm100") {
+    int variant_id =
+        task_register->register_fp8_group_gemm_largem_compact_fused_sm100_task(
+            customized->bgraph, params);
+    int base_inputs = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
+    int num_inputs_fused = base_inputs + 4;
+    task_config[op] =
+        std::make_tuple(num_inputs_fused,
+                        2,
+                        TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100,
+                        variant_id);
+  } else if (name == "ffn_full_megakernel_sm100") {
+    int variant_id = task_register->register_ffn_full_megakernel_sm100_task(
+        customized->bgraph, params);
+    // FULLY-fused FFN (rmsnorm+router+topk+MoE). Same 14-input/1-output ABI as
+    // the COLD FFN, but slots 5/6/7 carry rmsnorm_weight/router_gate_w/bias
+    // (the routing is computed internally) instead of the topk outputs.
+    //   inputs: [0] hidden(pre-rmsnorm) [1] w13 [2] w13_scale [3] w2
+    //           [4] w2_scale [5] rmsnorm_weight [6] router_gate_w [7] bias
+    //           [8] wgu_raw [9] wgu_scale [10] wdn [11] wdn_scale
+    //           [12] out(store_in_dmem) [13] scratch
+    //   output: [0] out (tracked bf16 moe_output write).
+    task_config[op] =
+        std::make_tuple(14, 1, TASK_FFN_FULL_MEGAKERNEL_SM100, variant_id);
+  } else if (name == "dsv3_dense_mlp_fused_sm100") {
+    int variant_id = task_register->register_dsv3_dense_mlp_fused_sm100_task(
+        customized->bgraph, params);
+    // Fused DENSE-MLP decode (rmsnorm + W13 GEMV + silu_mul + W2 GEMV). The
+    // kernel reads 7 input pointers + writes output_ptrs[0]:
+    //   inputs: [0] hidden(pre-rmsnorm bf16) [1] w13 [2] w13_scale(raw f32)
+    //           [3] w2 [4] w2_scale(raw f32) [5] rmsnorm_weight [6] scratch
+    //   output: [0] out (W2 GEMV result, bf16, pre-AllReduce/residual).
+    task_config[op] =
+        std::make_tuple(7, 1, TASK_DSV3_DENSE_MLP_FUSED_SM100, variant_id);
+  } else if (name == "attn_block_megakernel_sm100") {
+    int variant_id = task_register->register_attn_block_megakernel_sm100_task(
+        customized->bgraph, params);
+    // 14 inputs + 1 output. The two layernorm weights and cos/sin are each
+    // concatenated into one input buffer to fit the 14-input cap.
+    //   inputs:  [0] hidden [1] qkv_a_w [2] qkv_a_s [3] ln_weights [4] q_b_w
+    //            [5] q_b_s [6] cos_sin [7] kv_cache [8] kvbv_w [9] kvbv_s
+    //            [10] oproj_w [11] oproj_s [12] residual [13] scratch.
+    //   output:  [0] out (attn_proj_out). kv_cache is read+written in place via
+    //            input_ptrs[7] (same physical buffer as any binding — a root
+    //            cuda_tensor's input and output descriptors resolve to one
+    //            address; the write persists across decode steps).
+    task_config[op] =
+        std::make_tuple(14, 1, TASK_ATTN_BLOCK_MEGAKERNEL_SM100, variant_id);
+  } else if (name == "moe_permute_sm100") {
+    // 4 inputs (input_fp8, input_scale, topk_weights, routing_indices)
+    // + 3 outputs (permuted_fp8, permuted_scale, meta-packed-buffer).
+    // m_indices is a static attach_input buffer set up by the builder; it
+    // is NOT an output of this task.
+    int variant_id = task_register->register_moe_permute_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(4, 3, TASK_MOE_PERMUTE_SM100, variant_id);
+  } else if (name == "moe_unpermute_sm100") {
+    // 3 inputs (permuted_output, meta, residual) + 1 output (output).
+    int variant_id = task_register->register_moe_unpermute_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_MOE_UNPERMUTE_SM100, variant_id);
+  } else if (name == "transpose_scale_sm100") {
+    int variant_id = task_register->register_transpose_scale_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_TRANSPOSE_SCALE_SM100, variant_id);
+  } else if (name == "assemble_q_decode_sm100") {
+    // 2 inputs (q_nope_abs, q_pe) + 1 output (q_nope_pe).
+    int variant_id = task_register->register_assemble_q_decode_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_ASSEMBLE_Q_DECODE_SM100, variant_id);
+  }
+  // bs=1 contiguous KV append (no page table). kv_buf is tracked as an
+  // output so the MLA decode task (which reads it the same iteration) gets a
+  // producer->consumer dependency edge.
+  else if (name == "mla_kv_append_sm100") {
+    int variant_id = task_register->register_mla_kv_append_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_MLA_KV_APPEND_SM100, variant_id);
   }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {
@@ -859,6 +1091,39 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(5, 0, TASK_MLA_KV_GATHER_SPLIT_SM100, variant_id);
+  } else if (name == "mla_kv_gather_unified_sm100") {
+    int variant_id = task_register->register_mla_kv_gather_unified_sm100_task(
+        customized->bgraph, params);
+    // 2 inputs (c_latent_new, k_pe_new) + 4 store_in_dmem slots; we track
+    // ckv_sep and kpe_sep as outputs so downstream consumers
+    // (quantize_kv_b_k / quantize_kv_b_v / identity copies) get dependency
+    // edges. paged_cache and contiguous_kv stay in input slots because
+    // they're attach_input torch tensors written in-place across iters
+    // (their consumers are naturally serialized by EVENT_END_OF_TASK_GRAPH).
+    task_config[op] =
+        std::make_tuple(4, 2, TASK_MLA_KV_GATHER_UNIFIED_SM100, variant_id);
+  } else if (name == "deepseek_mla_rope_q_sm100") {
+    int variant_id = task_register->register_deepseek_mla_rope_q_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 2, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
+  } else if (name == "deepseek_mla_rope_q_fused_sm100") {
+    int variant_id =
+        task_register->register_deepseek_mla_rope_q_fused_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
+  } else if (name == "deepseek_mla_rope_q_split_sm100") {
+    int variant_id =
+        task_register->register_deepseek_mla_rope_q_split_sm100_task(
+            customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
+  } else if (name == "deepseek_mla_rope_k_sm100") {
+    int variant_id = task_register->register_deepseek_mla_rope_k_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_DEEPSEEK_MLA_ROPE_SM100, variant_id);
   }
   // MTP tasks
   else if (name == "mtp_verify_strict") {
@@ -921,11 +1186,51 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
+  } else if (name == "nvshmem_tile_allreduce_with_residual") {
+    int variant_id = task_register->register_nvshmem_tile_allreduce_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
+  } else if (name == "nvshmem_tile_allreduce_pertile") {
+    // Candidate-2: reduce input + per-tile flags buffer => 2 inputs, 1 output.
+    int variant_id = task_register->register_nvshmem_tile_allreduce_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
+  } else if (name == "nvshmem_tile_allreduce_pertile_with_residual") {
+    // reduce input + residual + per-tile flags buffer => 3 inputs, 1 output.
+    int variant_id = task_register->register_nvshmem_tile_allreduce_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
+  } else if (name == "nvshmem_global_argmax") {
+    int variant_id = task_register->register_nvshmem_global_argmax_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 3, TASK_NVSHMEM_GLOBAL_ARGMAX, variant_id);
   }
 
   else {
-    printf("Unsupported task name: %s\n", name);
+    printf("Unsupported task name: %s\n", name.c_str());
     assert(false && "Unsupported task type");
+  }
+  // Loud guard: a task whose declared input/output count exceeds the fixed
+  // TaskDesc arrays silently overflows inputs[]/outputs[] into adjacent fields
+  // at runtime (a silent wrong-result, not a crash). Fail at build instead.
+  {
+    auto const &cfg = task_config[op];
+    int n_in = std::get<0>(cfg);
+    int n_out = std::get<1>(cfg);
+    if (n_in > MAX_INPUTS_PER_TASK || n_out > MAX_OUTPUTS_PER_TASK) {
+      printf("Task %s declares %d inputs / %d outputs, exceeds "
+             "MAX_INPUTS_PER_TASK=%d / MAX_OUTPUTS_PER_TASK=%d\n",
+             name.c_str(),
+             n_in,
+             n_out,
+             MAX_INPUTS_PER_TASK,
+             MAX_OUTPUTS_PER_TASK);
+      assert(false && "task input/output count exceeds TaskDesc capacity");
+    }
   }
 }
 

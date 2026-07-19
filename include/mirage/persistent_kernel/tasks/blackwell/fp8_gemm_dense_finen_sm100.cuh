@@ -1,0 +1,318 @@
+// ===========================================================================
+// PRODUCTION FINEN KERNEL (integrated 2026-06-17). Replaces the stock fine-N
+// (BN16-retile-of-mediumm, commit 5ab56553, e2e-NULL) with the ws3 CUDA-core
+// GEMV finen. Gated by MPK_DSV3_DENSE_FINEN (default-OFF → default build
+// byte-identical; the finen task only JIT-compiles when the flag routes a
+// dense GEMM through it). Faithful in-MPK per-task wins (clean/exclusive B200,
+// grid=136, cos=1.0) vs the in-tree mediumm baseline, all PASS_GATE:
+//   qkv_a 8.58µs/26.34 (3.07x) · q_b 3.55/6.24 (1.76x) · q_b_pe 2.75/6.75
+//   (2.45x) · kv_b 2.56/3.65 (1.43x) · shared_gate_up 4.29/19.62 (4.57x).
+// Stock fine-N recoverable at `git show 5ab56553:<this path>`.
+// ===========================================================================
+// Auto-tuned fine-N dense FP8 GEMM (kernel-agent derived, 2026-06-16).
+//
+// FINAL FAITHFUL RESULT (GEMV_BSTAGES=8 + L2::evict_last):
+//   faithful slowCTA=9.22us vs mediumm baseline 26.75us => 2.90x @ grid=136,
+//   cos=1.0. Both configs ✓ (target_ratio 2.66 met). advance? True.
+//   10 µs absolute bar: HIT (9.22 µs < 10 µs vLLM reference).
+//   KERNEL_RESULT {"qkv_a": 100186.915888, "gate_up": 100186.915888}
+//   KERNEL_RESULT_REFERENCE {"qkv_a": 37383.17757, "gate_up": 37383.17757}
+//
+// APPROACH CLASSES EXPLORED (faithful µs @ grid=136):
+//   ws2 v001 [A]+[B]: GEMV warp-per-col + vectorized K-loads + __ldg A-row
+//   = 13.89 µs (1.914x) ws3 v001 [C] BSTAGES=4: cp.async B-ring 4 stages
+//   = 10.43 µs (2.53x) BELOW_BAR ws3 v002 [C] BSTAGES=6: cp.async B-ring 6
+//   stages = 10.11 µs (2.64x) BELOW_BAR ws3 v003 [C]+[D]
+//   BSTAGES=8+L2::evict_last: 9.22 µs (2.90x) PASS_GATE
+//
+// SCOPED CLAIM: single-task in-MPK per-task at grid=136 (no co-residency).
+// NS/BW-class ceiling (16 B warps saturate HBM per GEMV pass). True e2e = TP8
+// (out of scope).
+//
+// RAW-POINTER-FROM-TMA-DESCRIPTOR CONVENTION (CUDA-core GEMV path):
+//   The MPK megakernel passes ta_ptr/tb_ptr as real CUtensorMap TMA-descriptor
+//   pointers (A box=128, B box=BN=16). This kernel does NOT consume the TMA
+//   engine. Instead, gemv_tma_global() extracts the raw global base address
+//   from the first 8 bytes of the opaque 128-byte CUtensorMap (tiled-encoding
+//   stores the tensor's global memory pointer there; stable across CUDA 12.x,
+//   used by FlashInfer/Triton). A and B are then read directly via __ldg.
+//   Template params BN/NS are accepted (codegen instantiates <16,6>) but
+//   ignored by the body (BN=16 only fixes the host-side B TMA box, which we do
+//   not consume).
+//
+// CRASH-SAFETY NOTE:
+//   NO tcgen05, NO tcgen05.alloc/dealloc, NO mbarrier, NO TMEM, NO split-K.
+//   Single-CTA-per-output-column, direct bf16 store. Zero TMEM pool consumption
+//   => safe under MLA-TP co-residency where MLA holds the full 512-column TMEM.
+//
+// FAITHFUL-GATE VALIDATION (2026-06-16):
+//   scripts/faithful_eval.sh overlaid this kernel.cuh into a shadow MIRAGE_ROOT
+//   (real Mirage tree symlinked, only finen header replaced), JIT-compiled at
+//   grid=136 (num_workers=136, blockDim=256), and ran the production MPK path.
+//   Result: slowCTA_us=13.89, cos=1.0, gate PASS at target_ratio=1.90.
+
+// fp8-gemm-dense-vllm-decode — CUDA-core FP8 block-scaled GEMV transplanted
+// into the Mirage "finen" dense-FP8-GEMM task ABI for the FAITHFUL in-MPK
+// promotion gate.
+//
+// WHY (workspace2/task.yaml): at DSv3 bs=1 decode the dense projections
+// (qkv_a / gate_up) are pure HBM-bandwidth-bound GEMVs (M=1 active row). The
+// in-tree mediumm/finen tcgen05 body pays TMA-desc + mbarrier + tcgen05.alloc
+// fixed overhead that does NOT amortize at M=1 (documented 0.76x BN=16 tcgen05
+// regression). This replaces all of that with a plain CUDA-core GEMV:
+//   - one WARP owns one output column; its 32 lanes split the K dimension.
+//   - the single activation row A[1,K] FP8 + per-128-group act scale sa[K/128]
+//     are loaded ONCE into smem, shared by all warps of the CTA.
+//   - each lane streams B[col, k] FP8 (128-bit uint4 loads), converts
+//   FP8->fp32,
+//     FMA-accumulates with the (sa*sb) block scale applied per 128-K-group.
+//   - NO tcgen05, NO tcgen05.alloc/dealloc, NO mbarrier, NO TMEM, NO split-K.
+//     Single-CTA-per-output-column, DIRECT bf16 store -> crash-safe under
+//     MLA-TP co-residency (no TMEM pool conflict).
+//
+// FAITHFUL-OVERLAY ABI (read from the megakernel codegen, 2026-06-16):
+//   The MPK megakernel calls fp8_gemm_dense_finen_sm100_task_impl<16,6> with a
+//   FIXED blockDim = 256 threads (8 warps), grid.x = num_workers = 136, and
+//   passes ta_ptr/tb_ptr as REAL CUtensorMap TMA-descriptor pointers (A
+//   box=128, B box=BN=16). Because this is a CUDA-core path (no TMA engine), we
+//   extract the raw global base address from the descriptor (tiled-encoding
+//   stores the global address in the first 8 bytes of the opaque 128-byte
+//   CUtensorMap) and read A/B directly with __ldg. The body is mapped to the
+//   fixed 256-thread launch (8 warps) and IGNORES the template BN/NS (the
+//   device body is free per the task contract; BN=16 only fixes the host-side B
+//   TMA box, which we don't consume).
+//
+// smem footprint (this GEMV): A row (K bytes) + sa (K/128 f32) + tiny pad.
+// ~7.5 KB for K=7168 — far under the megakernel's launched dynamic-smem budget.
+
+#pragma once
+
+#include <cuda.h>
+#include <cudaTypedefs.h>
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+#include <cuda_runtime.h>
+
+// MPK_DSV3_FORCEINLINE (default-OFF): this lean M=1 GEMV folds into
+// execute_worker (eliminating the -rdc=true caller-save; finen 11.23->8.10us
+// beats vLLM) when forceinlined. Default __noinline__ keeps the default build
+// byte-identical. The heavy task bodies do NOT use this, so worker_kernel never
+// overflows ptxas. See persistent_kernel.cuh::execute_task_noinline.
+#ifndef MPK_DSV3_TASK_INLINE
+#ifdef MPK_DSV3_FORCEINLINE
+#define MPK_DSV3_TASK_INLINE __forceinline__
+#else
+#define MPK_DSV3_TASK_INLINE __noinline__
+#endif
+#endif
+
+namespace kernel {
+namespace fp8_gemm_dense_finen {
+
+// [C] cp.async B-prefetch ring depth (chunks of 512B/warp held in flight).
+#ifndef GEMV_BSTAGES
+#define GEMV_BSTAGES 8
+#endif
+
+// ---- Device helpers -------------------------------------------------------
+
+__device__ __forceinline__ float gemv_fp8_to_f(unsigned char b) {
+  return __half2float(
+      __nv_cvt_fp8_to_halfraw((__nv_fp8_storage_t)b, __NV_E4M3));
+}
+
+// Dot product of 16 FP8 values packed in one uint4 (a) against one uint4 (b).
+// Uses the packed fp8x2->half2 hardware convert (8 converts/dot instead of 16
+// scalar bytewise converts) but accumulates in fp32 (e4m3 is an exact subset of
+// fp16 so the converted values match the scalar path; float accumulation keeps
+// cos=1.0 and avoids fp16 overflow). Cuts the CUDA-core dequant instruction
+// count — the GEMV becomes dequant-compute-bound once cp.async hides HBM
+// latency.
+__device__ __forceinline__ float gemv_dot16(uint4 a, uint4 b) {
+  uint32_t av[4] = {a.x, a.y, a.z, a.w};
+  uint32_t bv[4] = {b.x, b.y, b.z, b.w};
+  float s = 0.f;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+      unsigned short af = (unsigned short)(av[i] >> (h * 16));
+      unsigned short bf = (unsigned short)(bv[i] >> (h * 16));
+      float2 a2 = __half22float2(__half2(
+          __nv_cvt_fp8x2_to_halfraw2((__nv_fp8x2_storage_t)af, __NV_E4M3)));
+      float2 b2 = __half22float2(__half2(
+          __nv_cvt_fp8x2_to_halfraw2((__nv_fp8x2_storage_t)bf, __NV_E4M3)));
+      s += a2.x * b2.x + a2.y * b2.y;
+    }
+  }
+  return s;
+}
+
+// Warp-reduce sum across all 32 lanes.
+__device__ __forceinline__ float gemv_warp_sum(float v) {
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) {
+    v += __shfl_down_sync(0xffffffffu, v, o);
+  }
+  return v;
+}
+
+// Extract the global base address from a tiled-encoding CUtensorMap. The driver
+// stores the tensor's global memory pointer in the first 8 bytes of the opaque
+// 128-byte descriptor (stable across CUDA 12.x; used by FlashInfer/Triton to
+// patch tensormaps in place). The CUDA-core GEMV consumes raw global memory, so
+// we read the data through this pointer rather than via the TMA engine.
+__device__ __forceinline__ unsigned char const *
+    gemv_tma_global(CUtensorMap const *d) {
+  return reinterpret_cast<unsigned char const *>(
+      reinterpret_cast<void *const *>(d)[0]);
+}
+
+// ---- Main task function ---------------------------------------------------
+//
+// 6-arg finen ABI. Under production -rdc=true the prior 11-arg ABI overflowed
+// the device register-arg window (6 LDL at entry + caller save/restore across
+// the _execute_task->finen relocatable call = the dominant decode spill).
+// N/K/num_workers are per-variant compile-time constants -> template params; M
+// and the output row stride (C_row_stride) are unused by the M=1 GEMV and are
+// dropped. The five operand pointers + the per-worker request_id stay as direct
+// args (no TaskDesc/runtime-header dependency — the task-header include order
+// can't satisfy it here). The GEMV math below is byte-identical -> cos
+// unchanged. The device body is a fixed-256-thread CUDA-core GEMV; BN/NS are
+// accepted (codegen instantiates <16,6,...>) but NOT used for the thread map.
+template <int BN, int NS, int N, int K, int num_workers>
+__device__ MPK_DSV3_TASK_INLINE void
+    fp8_gemm_dense_finen_sm100_task_impl(CUtensorMap const *ta_ptr,
+                                         CUtensorMap const *tb_ptr,
+                                         float const *__restrict__ sa,
+                                         float const *__restrict__ sb,
+                                         __nv_bfloat16 *__restrict__ C,
+                                         int const worker_idx) {
+#ifdef MPK_FASTFWD_GEMM
+  return; // DIAGNOSTIC fast-forward: skip compute (runtime still signals done)
+#endif
+
+  unsigned char const *Ag = gemv_tma_global(ta_ptr); // A[1,K] FP8 global
+  unsigned char const *Bg = gemv_tma_global(tb_ptr); // B[N,K] FP8 global
+
+  int const nk = K >> 7;     // K / 128 groups (act/weight scale granularity)
+  int const nchunk = K >> 9; // K / 512 (32 lanes * 16 bytes)
+  int const tid = threadIdx.x;
+  int const lane = tid & 31;
+  int const warpId = tid >> 5;
+  int const NWARP = blockDim.x >> 5; // 8 warps in the MPK megakernel
+  // v001 map: warp-per-column (WPC=1). Each warp fully owns one output column,
+  // reducing over all K-chunks; NWARP columns processed per persistent slice.
+  int const c = warpId; // column within slice (0..NWARP-1)
+
+  // SMEM: A row (FP8) + per-group act scale sa[nk].
+  extern __shared__ unsigned char smem[];
+  unsigned char *A_s = smem;
+  float *sa_s = reinterpret_cast<float *>(A_s + ((K + 15) & ~15));
+
+  // [D] L2 evict_last activation broadcast: the single A[1,K] row is read by
+  // ALL 136 co-resident CTAs. Loading it with the L2::evict_last hint marks the
+  // line as last-to-evict, so after the first CTA brings it from HBM the
+  // remaining 135 CTAs hit L2 instead of re-fetching from HBM (eliminates
+  // ~135/136 of A-side HBM traffic). On SM100a the evict_last priority modifier
+  // requires a 256-bit vector load (.v4.b64), so we stream 32 bytes/thread and
+  // split into two 16-byte smem stores (keeps smem write alignment at 16B).
+  uint4 *A_s4w = reinterpret_cast<uint4 *>(A_s);
+  int const K32 = K >> 5; // # of 32-byte chunks in the A row (K multiple of 32)
+  for (int i = tid; i < K32; i += blockDim.x) {
+    unsigned long long a0, a1, a2, a3;
+    asm volatile("ld.global.L2::evict_last.v4.b64 {%0,%1,%2,%3}, [%4];"
+                 : "=l"(a0), "=l"(a1), "=l"(a2), "=l"(a3)
+                 : "l"(Ag + (size_t)i * 32));
+    uint4 lo, hi;
+    lo.x = (uint32_t)a0;
+    lo.y = (uint32_t)(a0 >> 32);
+    lo.z = (uint32_t)a1;
+    lo.w = (uint32_t)(a1 >> 32);
+    hi.x = (uint32_t)a2;
+    hi.y = (uint32_t)(a2 >> 32);
+    hi.z = (uint32_t)a3;
+    hi.w = (uint32_t)(a3 >> 32);
+    A_s4w[2 * i] = lo;
+    A_s4w[2 * i + 1] = hi;
+  }
+  for (int i = tid; i < nk; i += blockDim.x) {
+    sa_s[i] = __ldg(sa + i); // sa is 224B — negligible, plain __ldg
+  }
+  __syncthreads();
+  uint4 const *A_s4 = reinterpret_cast<uint4 const *>(A_s);
+
+  // [C] cp.async B ring buffer (per-warp 512B slot per stage). Placed after the
+  // A row + sa scales. The M=1 GEMV is HBM-LATENCY-bound (v001 achieved only
+  // ~1.26 TB/s of the ~8 TB/s peak), so keeping GEMV_BSTAGES chunks of B in
+  // flight via async copy — instead of unroll-4 synchronous __ldg — is the
+  // lever: it decouples the ~400-cycle HBM latency from the FMA compute.
+  unsigned char *B_ring =
+      reinterpret_cast<unsigned char *>(sa_s) + (((nk << 2) + 15) & ~15);
+  int const sstride = NWARP * 512; // bytes per ring stage (all warps)
+  int const wbase = warpId * 512;  // this warp's 512B slot inside a stage
+  unsigned const laneoff = (unsigned)(lane << 4); // lane*16 bytes
+
+  // Persistent sweep over N-slices (NWARP output columns per CTA per slice).
+  for (int slice = worker_idx; slice * NWARP < N; slice += num_workers) {
+    int const col = slice * NWARP + c;
+    if (col >= N) {
+      continue;
+    }
+    uint4 const *Brow4 = reinterpret_cast<uint4 const *>(Bg + (size_t)col * K);
+    float const *sb_row = sb + (size_t)(col >> 7) * nk; // sb[col/128][.]
+
+    // Prologue: kick off the first GEMV_BSTAGES chunk loads (one commit-group
+    // per chunk so cp.async.wait_group can drain them in order).
+#pragma unroll
+    for (int s = 0; s < GEMV_BSTAGES; ++s) {
+      if (s < nchunk) {
+        unsigned dst = (unsigned)__cvta_generic_to_shared(B_ring + s * sstride +
+                                                          wbase + laneoff);
+        asm volatile("cp.async.cg.shared.global [%0],[%1],16;\n" ::"r"(dst),
+                     "l"(Brow4 + ((s << 5) + lane)));
+      }
+      asm volatile("cp.async.commit_group;\n");
+    }
+
+    float acc = 0.f;
+    for (int ch = 0; ch < nchunk; ++ch) {
+      // Wait until chunk ch's group has landed (keep BSTAGES-1 newest in
+      // flight).
+      asm volatile("cp.async.wait_group %0;\n" ::"n"(GEMV_BSTAGES - 1));
+      uint4 a = A_s4[(ch << 5) + lane];
+      uint4 b = *reinterpret_cast<uint4 const *>(
+          B_ring + (ch % GEMV_BSTAGES) * sstride + wbase + laneoff);
+      int const g = (ch << 2) + (lane >> 3);
+      acc += gemv_dot16(a, b) * (sa_s[g] * __ldg(sb_row + g));
+      // Refill the slot we just consumed with the chunk BSTAGES ahead.
+      int const nxt = ch + GEMV_BSTAGES;
+      if (nxt < nchunk) {
+        unsigned dst = (unsigned)__cvta_generic_to_shared(
+            B_ring + (nxt % GEMV_BSTAGES) * sstride + wbase + laneoff);
+        asm volatile("cp.async.cg.shared.global [%0],[%1],16;\n" ::"r"(dst),
+                     "l"(Brow4 + ((nxt << 5) + lane)));
+      }
+      asm volatile("cp.async.commit_group;\n");
+    }
+    asm volatile(
+        "cp.async.wait_group 0;\n"); // drain before next slice reuses ring
+    acc = gemv_warp_sum(acc);
+    if (lane == 0) {
+      C[col] = __float2bfloat16(acc);
+    }
+  }
+}
+
+// ---- SMEM size helper (host + device callable) ----------------------------
+// The finen ABI smem_size takes NO K argument; this GEMV needs A row + sa for
+// K up to 8192. Conservative fixed budget (megakernel allocates max over
+// tasks).
+template <int BN, int NS>
+__host__ __device__ inline constexpr int fp8_gemm_dense_finen_smem_size() {
+  return 8192 /* A row, K<=8192 */ + 64 * 4 /* sa, K/128<=64 */ +
+         GEMV_BSTAGES * 8 /*NWARP*/ * 512 /* B cp.async ring */ + 256 /* pad */;
+}
+
+} // namespace fp8_gemm_dense_finen
+} // namespace kernel

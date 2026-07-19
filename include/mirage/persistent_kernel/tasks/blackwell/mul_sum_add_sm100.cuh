@@ -38,10 +38,12 @@ __device__ __forceinline__ void
                           : 0.0f;
 #pragma unroll
       for (int topk_idx = 0; topk_idx < NUM_TOPK; ++topk_idx) {
-        T val = d_input[row_idx * OUTPUT_STRIDE * NUM_TOPK +
-                        topk_idx * OUTPUT_STRIDE + i];
         float weight = d_weight[row_idx * NUM_TOPK + topk_idx];
-        sum_val += float(val) * weight;
+        if (weight != 0.0f) {
+          T val = d_input[row_idx * OUTPUT_STRIDE * NUM_TOPK +
+                          topk_idx * OUTPUT_STRIDE + i];
+          sum_val += float(val) * weight;
+        }
       }
       d_output[row_idx * OUTPUT_STRIDE + i] = T(sum_val);
     }

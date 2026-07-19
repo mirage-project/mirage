@@ -147,10 +147,6 @@ __device__ __forceinline__ void
     for (int i = threadIdx.x; i < tail_pages; i += NUM_THREADS) {
       page_indices[tail_offset + i] =
           paged_kv_indices_buffer_ptr[first_page_pos + tail_offset + i];
-      // if(threadIdx.x == 0){
-      //   printf("page_indices[%d] = %d, %d, %d\n", tail_offset + i,
-      //   page_indices[tail_offset + i], first_page_pos, tail_offset, i);
-      // }
     }
   }
   wg_sync<128>(CONSUMER_WARPGROUP_SYNC_BARRIER_ID);

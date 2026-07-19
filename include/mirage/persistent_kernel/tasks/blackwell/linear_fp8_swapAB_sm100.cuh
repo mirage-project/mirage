@@ -13,6 +13,19 @@
  * limitations under the License.
  */
 
+// FP8 swap-AB Linear kernel for Blackwell SM100. Designed for MPK
+// (one CTA per task) — MMA_M=128 aligns to the per-task output dim.
+//
+// One CTA = one (per-task output_size x batch) output tile. Pipeline:
+//   warp 5      : producer (TMA-loads weight + activation, packs SF in SMEM)
+//   warp 4      : MMA issue (UTCCP scales -> TMEM, SM100_MMA_MXF8F6F4_SS)
+//   warps 0..3  : epilogue (TMEM -> regs -> SMEM -> TMA store)
+//
+// Scale layout: per-128-K UE8M0 packed 4 bytes per uint32. The MMA's sf_id
+// field selects which byte of the loaded uint32 to use for the current
+// TILE_K (k_tile % 4). See linear_fp8_sm100.cuh:496-499 for the canonical
+// pattern this mirrors.
+
 #pragma once
 #include <cstdint>
 #include <cstdio>
@@ -38,6 +51,7 @@
 #include "../hopper/barrier.cuh"
 #include "../hopper/smem_layout_tma.cuh"
 #include "../hopper/tma.cuh"
+#include "linear_fp8_sm100_sm100_utils.cuh"
 #include "sm100_utils.cuh"
 #include "storage.cuh"
 
@@ -77,17 +91,19 @@ template <typename T_,
           int OUTPUT_SIZE,
           int REDUCTION_SIZE,
           bool NOBIAS,
-          bool SplitK,
+          bool SplitK = false,
           int NUM_AB_STAGE = 8,
           int NUM_ACC_STAGE = 2,
           int NUM_C_STAGE = 4>
 __device__ __noinline__ void
-    linear_fp8_1d2d_sm100_task_impl(const TMA_A &tma_a,
-                                    const TMA_B &tma_b,
-                                    uint32_t const *weight_scale_ptr,
-                                    uint32_t const *input_scale_ptr,
-                                    BiasTensor mBias,
-                                    const TMA_OUT &tma_out) {
+    linear_fp8_swapAB_sm100_task_impl(const TMA_A &tma_a,
+                                      const TMA_B &tma_b,
+                                      uint32_t const *weight_scale_ptr,
+                                      uint32_t const *input_scale_ptr,
+                                      int weight_scale_row_stride,
+                                      int input_scale_row_stride,
+                                      BiasTensor mBias,
+                                      const TMA_OUT &tma_out) {
   using Barrier = cutlass::arch::ClusterTransactionBarrier;
   using TypeScale = uint32_t;
   using TypeC = cute::bfloat16_t;
@@ -98,10 +114,12 @@ __device__ __noinline__ void
   constexpr int UMMA_K = 32;
   constexpr int NUM_K_SUBTILES = TILE_K / UMMA_K; // 4
   constexpr int SCALE_K = REDUCTION_SIZE / TILE_K;
-  constexpr int PADDED_SCALE_K = ((SCALE_K + 3) / 4) * 4;
+  // Packed UE8M0 scale buffer has shape (outer, ceil(SCALE_K/4)) and stores
+  // 4 logical scales per uint32 (byte 0..3). Row stride in uint32 elements
+  // = ceil(SCALE_K / 4).
+  constexpr int PACKED_SCALE_K = (SCALE_K + 3) / 4;
 
-  // We assume per-128-K packed block scales:
-  // one uint32 per row/col per K-tile, containing 4x UE8M0 bytes.
+  // Per-128-K block scales: one uint32 per row per K-tile group of 4.
   constexpr int SF_BLOCK_M =
       ((OUTPUT_ATOM_SIZE + detail::kNumUTCCPAlignedElems - 1) /
        detail::kNumUTCCPAlignedElems) *
@@ -115,8 +133,13 @@ __device__ __noinline__ void
   constexpr int kNumAccumTmemCols = MMA_N * NUM_ACC_STAGE;
   constexpr int kTmemStartColOfSFA = kNumAccumTmemCols;
   constexpr int kTmemStartColOfSFB = kNumAccumTmemCols + kNumSFATmemCols;
+  // tcgen05 TMEM allocator requires column count to be a power-of-2 in
+  // {32, 64, 128, 256, 512}. Round up the raw sum.
+  constexpr int num_tmem_columns_raw =
+      kNumAccumTmemCols + kNumSFATmemCols + kNumSFBTmemCols;
   constexpr int num_tmem_columns =
-      kNumAccumTmemCols + kNumSFATmemCols + kNumSFBTmemCols; // TODO
+      mirage::blackwell::linear_fp8_sm100::sm100::get_num_aligned_tmem_cols<
+          num_tmem_columns_raw>();
 
   int warp_idx = cutlass::canonical_warp_idx_sync();
   int lane_idx = kernel::lane_id();
@@ -239,17 +262,28 @@ __device__ __noinline__ void
     return shared_storage.SFB.begin() + stage * SF_BLOCK_N;
   };
 
+  // Each row of the packed scale tensor stores logical_scale_k UE8M0 bytes
+  // packed 4 per uint32 (byte 0 = scale for k_tile 0, byte 1 = k_tile 1, ...).
+  // For per-128-K quantization, the same uint32 is reused across 4 consecutive
+  // k_tiles; we always load it in full and let the UMMA's sf_id field pick the
+  // correct byte.
+  //
+  // `row_stride` is the gmem row stride in uint32 elements — passed at runtime
+  // because for split-K the per-task PACKED_SCALE_K differs from the buffer's
+  // actual row stride (which spans the FULL K). Non-split call sites pass
+  // PACKED_SCALE_K (compile-time per-task value) and behavior is unchanged.
   auto load_packed_scale_tile = [&](TypeScale *dst,
                                     TypeScale const *src,
                                     int row_base,
                                     int total_rows,
                                     int block_rows,
-                                    int k_tile) {
+                                    int packed_k_idx,
+                                    int row_stride) {
 #pragma unroll
     for (int i = lane_idx; i < block_rows; i += 32) {
       int global_row = row_base + i;
       dst[i] = global_row < total_rows
-                   ? src[global_row * PADDED_SCALE_K + k_tile]
+                   ? src[global_row * row_stride + packed_k_idx]
                    : TypeScale(0);
     }
   };
@@ -295,7 +329,7 @@ __device__ __noinline__ void
   cute::Tensor tCgA = cta_mma.partition_A(gA);
   cute::Tensor tCgB = cta_mma.partition_B(gB);
 
-  // NOTE: tCrA/tCrB are still useful for shape/k-looping, but actual FP8
+  // tCrA/tCrB are still useful for shape/k-looping, but the actual FP8
   // block-scaled issue below uses low-level descriptors, not
   // cute::gemm(tiled_mma, ...).
   cute::Tensor tCrA = cta_mma.make_fragment_A(tCsA);
@@ -308,8 +342,16 @@ __device__ __noinline__ void
                                                cute::Int<NUM_ACC_STAGE>{}));
   auto tCtAcc = tiled_mma.make_fragment_C(acc_shape);
 
+  // TMA bytes must match the host-side BMM TMA descriptor's box height for B,
+  // i.e. the rows the TMA engine actually delivers. For decode (batch_size <
+  // MMA_N) the B globalDim is `batch` rows while the descriptor box is MMA_N,
+  // so only `min(batch, MMA_N)` rows are in-bounds and transferred. Counting
+  // the full MMA_N here over-states expect_tx -> ab_full's transaction count is
+  // never satisfied -> the consumer (MMA) warps spin on ab_full forever (the
+  // bs=1 swapAB BMM hang). Mirror the BF16 linear_sm100_mpk.cuh:303 clamp.
+  constexpr int kClampedBN = (BATCH_SIZE < MMA_N) ? BATCH_SIZE : MMA_N;
   int tma_transaction_bytes =
-      sizeof(T_) * cute::size<1>(mma_tiler) * cute::size<2>(mma_tiler) +
+      sizeof(T_) * kClampedBN * cute::size<2>(mma_tiler) +
       sizeof(T_) * cute::size<0>(mma_tiler) * cute::size<2>(mma_tiler);
 
   constexpr int TILE_SIZE = 128;
@@ -379,18 +421,24 @@ __device__ __noinline__ void
           int m_base = m_tile * OUTPUT_ATOM_SIZE;
           int n_base = n_tile * MMA_N;
 
+          // Per-128-K: each k_tile maps to one logical scale_k whose byte
+          // sits in packed_scale[row, k_tile/4]. The UMMA picks the byte via
+          // sf_id = k_tile % 4 (set in the MMA warp below).
+          int packed_k_idx = k_tile / 4;
           load_packed_scale_tile(smem_sfa(smem_wr_buffer),
                                  weight_scale_ptr,
                                  m_base,
                                  OUTPUT_SIZE,
                                  SF_BLOCK_M,
-                                 k_tile);
+                                 packed_k_idx,
+                                 weight_scale_row_stride);
           load_packed_scale_tile(smem_sfb(smem_wr_buffer),
                                  input_scale_ptr,
                                  n_base,
                                  BATCH_SIZE,
                                  SF_BLOCK_N,
-                                 k_tile);
+                                 packed_k_idx,
+                                 input_scale_row_stride);
           __syncwarp();
 
 #pragma unroll
@@ -452,8 +500,6 @@ __device__ __noinline__ void
     tmem_allocation_result_barrier.arrive_and_wait();
     tCtAcc.data() = shared_storage.tmem_base_ptr;
 
-    // These helpers are expected to exist in Mirage, or be ported from
-    // deepgemm.
     auto instr_desc =
         cute::UMMA::make_instr_desc_block_scaled<T_,
                                                  T_,
@@ -508,9 +554,8 @@ __device__ __noinline__ void
             shared_storage.ab_full_mbar_ptr[smem_rd_buffer],
             mma_rd_ab_full_phase);
 
-        // Zero init accumulator at beginning of tile
-        // For block-scaled low-level mma_t::fma, this is controlled by the bool
-        // "accumulate".
+        // Zero init accumulator at beginning of tile (first MMA fma sets
+        // accumulate=0; subsequent k_subs/k_tiles add into it).
         bool accumulate = false;
 
         for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
@@ -557,14 +602,22 @@ __device__ __noinline__ void
               __shfl_sync(0xffffffff, b_desc_lo, smem_rd_buffer);
 
           if (cute::elect_one_sync()) {
-#pragma unroll
-            for (int k_sub = 0; k_sub < NUM_K_SUBTILES; ++k_sub) {
-              uint32_t const sfa_id = k_sub;
-              uint32_t const sfb_id = k_sub;
-              auto const runtime_instr_desc =
-                  kernel::sm100::make_runtime_instr_desc_with_sf_id(
-                      instr_desc, sfa_id, sfb_id);
+            // For per-128-K quantization, all 4 k_subs in this TILE_K share the
+            // same UE8M0 scale, packed into byte (k_tile % 4) of the loaded
+            // uint32. sf_id = k_tile % 4 selects that byte for every k_sub.
+            // (See linear_fp8_sm100.cuh:496-499 for the canonical pattern:
+            //   sfa_id = (kGranKA == 32 ? k_sub : sfa_stage_in_group_idx).)
+            const uint32_t sfa_id = static_cast<uint32_t>(k_tile & 3);
+            const uint32_t sfb_id = sfa_id;
+            auto const runtime_instr_desc =
+                kernel::sm100::make_runtime_instr_desc_with_sf_id(
+                    instr_desc, sfa_id, sfb_id);
 
+            // NOTE: do NOT use #pragma unroll here. With #pragma unroll the
+            // compiler can constant-propagate the initial `accumulate=false`
+            // value to all NUM_K_SUBTILES calls, so every subtile REPLACES
+            // the accumulator and only the last one survives.
+            for (int k_sub = 0; k_sub < NUM_K_SUBTILES; ++k_sub) {
               b_desc.lo = kernel::sm100::
                   advance_umma_desc_lo<cute::UMMA::Major::K, MMA_N, 128, T_>(
                       b_desc_base_lo, 0, k_sub * UMMA_K);
@@ -576,10 +629,11 @@ __device__ __noinline__ void
                                                       T_>(
                       a_desc_base_lo, 0, k_sub * UMMA_K);
 
+              uint32_t accum_flag = accumulate ? 1u : 0u;
               mma_issue_t::fma(a_desc,
                                b_desc,
                                acc_buf_idx * MMA_N,
-                               accumulate,
+                               accum_flag,
                                runtime_instr_desc,
                                kTmemStartColOfSFA,
                                kTmemStartColOfSFB);
@@ -695,6 +749,10 @@ __device__ __noinline__ void
 
         if (warp_idx == 0 && cute::elect_one_sync()) {
           if constexpr (SplitK) {
+            // Split-K: each grid.y CTA holds a partial along its K-slice. Use
+            // TMA reduce-add to atomically accumulate into the shared output
+            // region. Caller MUST zero-initialize the output tensor before
+            // launch — there is no kernel-side guard.
             tma_out.tma_reduce_add_async(
                 output_smem.base_ptr,
                 {m_tile * OUTPUT_ATOM_SIZE, n_tile * MMA_N});

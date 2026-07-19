@@ -189,7 +189,7 @@ __device__ __forceinline__ void mbar_wait_1(int a, int p) {
 }
 
 // Named barrier 3 (128 threads) for this task — barriers 0-2 are used by
-// other v2 tasks; see the kernel_adaptation_guide memory.
+// the sibling MLA decode kernels.
 __device__ __forceinline__ void task_sync() {
   asm volatile("bar.sync 3, %0;" ::"n"(NT));
 }
