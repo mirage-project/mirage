@@ -83,7 +83,10 @@ def allocate_nvshmem_teams(mpk, num: int):
         existing_max_teams = int(nvshmem_max_teams)
         if existing_max_teams < max_num_teams:
             os.environ["NVSHMEM_MAX_TEAMS"] = str(max_num_teams)
-    mpk.allocate_nvshmem_teams = num
+    mpk.allocate_nvshmem_teams = max(
+        getattr(mpk, "allocate_nvshmem_teams", 0),
+        num,
+    )
     # print(f"Set NVSHMEM_MAX_TEAMS={os.environ['NVSHMEM_MAX_TEAMS']}")
 
     # We should also set NVSHMEM_MAX_CTAS environment variable to avoid creating
@@ -192,17 +195,55 @@ class AllReduceStrategy_NvshmemTile(AllReduceStrategy):
     
     def register_tasks(self, mpk, tensors: Dict, grid_dim: Tuple,
                       block_dim: Tuple, params: List[int]) -> None:
-        assert len(params) == 2, "params should contain [world_size, rank]"
+        assert len(params) in (2, 3, 4), (
+            "params should contain [world_size, rank] plus optional gate mode "
+            "(params[2]) and optional per-tile mode flag (params[3])")
         input_tensor = tensors.pop("input")
         output_tensor = tensors.pop("output")
+        residual_tensor = tensors.pop("residual", None)
+        # Candidate-2: symmetric per-tile arrival-flag buffer (uint64 slots).
+        # NOT partitioned per-CTA — every CTA needs the WHOLE flags buffer
+        # (it indexes by [cta, pe]), so input_map is broadcast (-1,-1,-1),
+        # offset -1.
+        pertile_flags = tensors.pop("pertile_flags", None)
         # if len(tensors) > 0:
         #     print(f"{self} Unused tensors: {tensors.keys()}")
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input_tensor, (1, -1, -1), -1, True)
+        if residual_tensor is not None:
+            tb_graph.new_input(residual_tensor, (1, -1, -1), -1, True)
         tb_graph.new_input(output_tensor, (1, -1, -1), -1, True)
-        mpk.kn_graph.customized([input_tensor, output_tensor], tb_graph)
-        mpk.kn_graph.register_task(tb_graph, "nvshmem_tile_allreduce", params)
+        # Flags input goes AFTER the output so the C++ register (which splits
+        # inputs vs the single output by count) treats it as the LAST reduction
+        # input. Order of tb_graph.new_input for inputs must be:
+        #   [reduce_input, (residual), pertile_flags, output]
+        # so we insert the flags input BEFORE the output. Re-do the ordering:
+        ordered_inputs = [input_tensor]
+        if residual_tensor is not None:
+            ordered_inputs.append(residual_tensor)
+        if pertile_flags is not None:
+            # rebuild tb_graph with the flags input placed before output
+            tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+            tb_graph.new_input(input_tensor, (1, -1, -1), -1, True)
+            if residual_tensor is not None:
+                tb_graph.new_input(residual_tensor, (1, -1, -1), -1, True)
+            tb_graph.new_input(pertile_flags, (-1, -1, -1), -1, True)
+            tb_graph.new_input(output_tensor, (1, -1, -1), -1, True)
+            ordered_inputs.append(pertile_flags)
+        if pertile_flags is not None:
+            mpk.kn_graph.customized(ordered_inputs + [output_tensor], tb_graph)
+            task_name = ("nvshmem_tile_allreduce_pertile_with_residual"
+                         if residual_tensor is not None
+                         else "nvshmem_tile_allreduce_pertile")
+        elif residual_tensor is None:
+            mpk.kn_graph.customized([input_tensor, output_tensor], tb_graph)
+            task_name = "nvshmem_tile_allreduce"
+        else:
+            mpk.kn_graph.customized(
+                [input_tensor, residual_tensor, output_tensor], tb_graph)
+            task_name = "nvshmem_tile_allreduce_with_residual"
+        mpk.kn_graph.register_task(tb_graph, task_name, params)
 
         # We should set NVSHMEM_MAX_TEAMS environment variable
         allocate_nvshmem_teams(mpk, grid_dim[0] * grid_dim[1] * grid_dim[2])
@@ -227,11 +268,11 @@ def auto_select_allreduce_implementation(
 ) -> AllReduceStrategy:
     """
     Automatically select the best AllReduce implementation.
-    
+
     Args:
         num_gpus: Number of GPUs involved in the collective
         device_id: GPU device ID to query capabilities
-        
+
     Returns:
         An AllReduceStrategy instance ready to register tasks
     """

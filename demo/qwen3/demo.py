@@ -117,6 +117,12 @@ if __name__ == "__main__":
         help="Not use the cutlass version kernel.",
     )
     parser.add_argument("--ignore-eos", action="store_true", help="Ignore eos token during generation")
+    parser.add_argument("--no-chat-template", action="store_true",
+        help="Tokenize --prompt directly without the chat template "
+             "(benchmarking: enables exact prompt lengths, e.g. 1 token)")
+    parser.add_argument("--prof-dump", type=str, default=None,
+        help="With --profiling: also dump the raw profiler buffer to this "
+             ".npy path for offline analysis")
 
     # -------- Args for CI tests ----------
     parser.add_argument("--max-new-tokens", type=int, default=None, help="Decode cap for CI determinism")
@@ -228,16 +234,19 @@ if __name__ == "__main__":
                 """
     #question = "Can you please change x axis to start from 0"
     #prompt = code_text + "\n" + question
-    messages = [
-        {
-            "role": "system",
-            "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
-        },
-        {"role": "user", "content": prompt},
-    ]
-    text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    if args.no_chat_template:
+        text = prompt
+    else:
+        messages = [
+            {
+                "role": "system",
+                "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
+            },
+            {"role": "user", "content": prompt},
+        ]
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
     for r in range(total_num_requests):
         for i in range(model_inputs.input_ids.shape[-1]):
@@ -333,7 +342,7 @@ if __name__ == "__main__":
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
             spec_decode_config=spec_decode_config,
-            use_cutlass_kernel=args.use_cutlass_kernel
+            use_cutlass_kernel=args.use_cutlass_kernel,
         )
         
         if spec_decode_config and spec_decode_config.method == "promptlookup":
@@ -441,14 +450,21 @@ if __name__ == "__main__":
             name="argmax_in",
             io_category="cuda_tensor",
         )
+        
+        def _aligned_lm_head_workers(out_width, max_workers, align=8):
+            for g in range(max_workers, 0, -1):
+                if out_width % g == 0 and (out_width // g) % align == 0:
+                    return g
+            return 1
+        lm_head_workers = _aligned_lm_head_workers(vocab_size, num_workers)
         argmax_part_value = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
+            dims=(args.max_num_batched_tokens, lm_head_workers),
             dtype=mi.bfloat16,
             name="argmax_part_value",
             io_category="cuda_tensor",
         )
         argmax_part_index = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
+            dims=(args.max_num_batched_tokens, lm_head_workers),
             dtype=mi.int64,
             name="argmax_part_index",
             io_category="cuda_tensor",
@@ -611,6 +627,7 @@ if __name__ == "__main__":
                     output=attn_proj_out,
                     grid_dim=grid_for_splitk_linear_layer(hidden_size, w.dim(1)),
                     block_dim=(256, 1, 1),
+                    accumulate=True,
                 )
             else:
                 mpk.linear_with_residual_layer(
@@ -691,6 +708,7 @@ if __name__ == "__main__":
                     output=mlp_out,
                     grid_dim=grid_for_splitk_linear_layer(hidden_size, w.dim(1)),
                     block_dim=(256, 1, 1),
+                    accumulate=True,
                 )
             else:
                 mpk.linear_with_residual_layer(
@@ -729,7 +747,7 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(mpk.num_workers, 1, 1),
+            grid_dim=(lm_head_workers, 1, 1),
             block_dim=(128, 1, 1),
         )
         #mpk.rmsnorm_linear_layer(
@@ -747,7 +765,7 @@ if __name__ == "__main__":
                                        1)
             argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
         else:
-            argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
+            argmax_partial_grid_dim = (lm_head_workers, 1, 1)
             argmax_reduce_grid_dim = (1, 1, 1)
         mpk.argmax_partial_layer(
             input=argmax_in,
@@ -771,8 +789,9 @@ if __name__ == "__main__":
             )
 
         results = mpk.kn_graph.generate_task_graph(num_gpus=world_size, my_gpu_id=rank)
+        task_graph_json = results["json_file"]
         with open(f"task_graph_{rank}.json", "w") as f:
-            f.write(results["json_file"])
+            f.write(task_graph_json)
         with open(f"kernel_{rank}.cu", "w") as f:
             f.write(results["cuda_code"])
 
@@ -864,6 +883,11 @@ if __name__ == "__main__":
               prompt_lengths[0], tokens_generated, per_tok_ms
             )
         )
+
+        if args.prof_dump and profiler_tensor is not None:
+            import numpy as np
+            np.save(args.prof_dump, profiler_tensor.cpu().numpy())
+            print(f"[prof] dumped raw profiler buffer to {args.prof_dump}")
 
         # -------- CI dumps outputs to json files ----------
         if save_path and rank == 0:

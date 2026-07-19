@@ -254,7 +254,8 @@ class Qwen3Builder(GraphBuilder):
         # add rmsnorm + linear
         target_cc = torch.cuda.get_device_properties(0).major * 10 + torch.cuda.get_device_properties(0).minor
         # A current workaround to use splitk for only B200 GPUs
-        use_splitk = (target_cc == 100)
+        #use_splitk = (target_cc == 100)
+        use_splitk = False
         for i in range(self.num_layers):
             prefix = f"model.layers.{i}."
             w_norm = self.mpk.attach_input(
@@ -384,6 +385,7 @@ class Qwen3Builder(GraphBuilder):
                     output=self.attn_proj_out,
                     grid_dim=grid_for_splitk_linear_layer(self.hidden_size, self.w.dim(1)),
                     block_dim=(256, 1, 1),
+                    accumulate=True,
                 )
             else:
                 self.mpk.linear_with_residual_layer(
@@ -499,6 +501,7 @@ class Qwen3Builder(GraphBuilder):
                     output=self.mlp_out,
                     grid_dim=grid_for_splitk_linear_layer(self.hidden_size, self.w.dim(1)),
                     block_dim=(256, 1, 1),
+                    accumulate=True,
                 )
             else:
                 self.mpk.linear_with_residual_layer(
