@@ -1,0 +1,52 @@
+{
+  "skill": "b200-tmem-lifecycle-planner",
+  "version": "0.1.0",
+  "source_book": "Modern GPU Programming For MLSys (MLC Community) + NVIDIA Blackwell Tuning/Compatibility Guides",
+  "darwin_compatible": true,
+  "test_cases": [
+    {
+      "id": "should-trigger-01",
+      "type": "should_trigger",
+      "prompt": "Compute the TMEM allocation and epilogue readback for a 128x128 fp32 accumulator.",
+      "expected_behavior": "Should activate and provide TLane/TCol, the column budget, the ld path, and the free point.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-02",
+      "type": "should_trigger",
+      "prompt": "How should the SFA/SFB of an nvfp4 GEMM be placed in TMEM?",
+      "expected_behavior": "Should activate and distinguish the scale layout, split/multicast, and the accumulator.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-03",
+      "type": "should_trigger",
+      "prompt": "In FlashAttention, can S, P, and O reuse the same TMEM region?",
+      "expected_behavior": "Should activate and decide based on lifecycles and barriers.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-01",
+      "type": "should_not_trigger",
+      "prompt": "How many registers does an H100 wgmma accumulator use?",
+      "expected_behavior": "Should not activate; Hopper has no TMEM.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-02",
+      "type": "should_not_trigger",
+      "prompt": "How do I pad ordinary CUDA shared memory?",
+      "expected_behavior": "Should not activate; the layout skill should be invoked.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "edge-case-01",
+      "type": "edge_case",
+      "prompt": "I only use tcgen05.mma, but the epilogue simply discards the result.",
+      "expected_behavior": "May be invoked for a minimal lifecycle; if there truly is no consumer, still ensure a safe free after completion.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    }
+  ],
+  "minimum_pass_rate": 0.8,
+  "notes": "All should_not_trigger cases must pass; edge_case must state the invocation boundary. These tests are prompt/behavior stress tests, not hardware performance tests."
+}

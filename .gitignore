@@ -86,3 +86,14 @@ ncu_tmp
 /CLAUDE.md
 /pr.md
 *.log
+
+# Track the agent skill/agent suites (re-include from the `.claude/` rule above).
+# A file can't be re-included while its parent dir is excluded, so: re-include
+# .claude/ itself, re-ignore its other children (settings.local.json, session
+# state, ...), then re-include exactly the two shipped subtrees + their contents.
+!.claude/
+.claude/*
+!.claude/skills/
+!.claude/agents/
+!.claude/skills/**
+!.claude/agents/**

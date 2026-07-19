@@ -1,0 +1,52 @@
+{
+  "skill": "b200-gemm-optimization-ladder",
+  "version": "0.1.0",
+  "source_book": "Modern GPU Programming For MLSys (MLC Community) + NVIDIA Blackwell Tuning/Compatibility Guides",
+  "darwin_compatible": true,
+  "test_cases": [
+    {
+      "id": "should-trigger-01",
+      "type": "should_trigger",
+      "prompt": "Help me optimize a synchronous tiled GEMM, level by level, into a B200 version.",
+      "expected_behavior": "Should activate and give the per-level versions, gating, and stopping rule.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-02",
+      "type": "should_trigger",
+      "prompt": "I already have a TMA double-buffered GEMM; how do I do warp specialization next?",
+      "expected_behavior": "Should activate, locate the current level, and define the roles and the four barriers.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-03",
+      "type": "should_trigger",
+      "prompt": "Build a regression-testable benchmark shape matrix for a B200 GEMM.",
+      "expected_behavior": "Should activate and cover neat, boundary, small/large, and K-tail shapes.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-01",
+      "type": "should_not_trigger",
+      "prompt": "I just want to know how to call torch.matmul.",
+      "expected_behavior": "Should not activate; no custom GEMM is needed.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-02",
+      "type": "should_not_trigger",
+      "prompt": "Optimize a pure reduction kernel.",
+      "expected_behavior": "Should not activate; not a GEMM.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "edge-case-01",
+      "type": "edge_case",
+      "prompt": "The custom GEMM is 5% slower than cuBLASLt, but bias+activation must be fused.",
+      "expected_behavior": "Should be invoked, but the goal should shift to end-to-end fusion gains rather than standalone GEMM peak.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    }
+  ],
+  "minimum_pass_rate": 0.8,
+  "notes": "All should_not_trigger cases must pass; edge_case must state the invocation boundary. These are prompt/behavior stress tests, not hardware performance tests."
+}

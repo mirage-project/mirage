@@ -1,0 +1,52 @@
+{
+  "skill": "b200-flash-attention4-planner",
+  "version": "0.1.0",
+  "source_book": "Modern GPU Programming For MLSys (MLC Community) + NVIDIA Blackwell Tuning/Compatibility Guides",
+  "darwin_compatible": true,
+  "test_cases": [
+    {
+      "id": "should-trigger-01",
+      "type": "should_trigger",
+      "prompt": "Design a causal GQA FlashAttention forward kernel for B200.",
+      "expected_behavior": "Should activate and output the algorithm state, the two MMAs, roles, TMEM, barriers, and validation.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-02",
+      "type": "should_trigger",
+      "prompt": "Why must O be rescaled every round in FA4? Help me wire it into the barriers.",
+      "expected_behavior": "Should activate and explain the mathematical necessity and the TMEM→reg→TMEM handoff.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-03",
+      "type": "should_trigger",
+      "prompt": "I want to add LSE output on top of the book's FA4.",
+      "expected_behavior": "Should activate and point out the row_max scale and the final LSE computation/saving.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-01",
+      "type": "should_not_trigger",
+      "prompt": "Explain the standard attention formula to me, with no GPU implementation involved.",
+      "expected_behavior": "Should not activate; a general conceptual answer suffices.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-02",
+      "type": "should_not_trigger",
+      "prompt": "Optimize a convolution kernel.",
+      "expected_behavior": "Should not activate; not attention.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "edge-case-01",
+      "type": "edge_case",
+      "prompt": "Decode only, query length=1.",
+      "expected_behavior": "May be invoked, but the tile/algorithm should be re-evaluated; the prefill FA4 structure may not be optimal for low latency.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    }
+  ],
+  "minimum_pass_rate": 0.8,
+  "notes": "All should_not_trigger cases must pass; edge_case must state the invocation boundary. These are prompt/behavior stress tests, not hardware performance tests."
+}

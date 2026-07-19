@@ -1,0 +1,52 @@
+{
+  "skill": "b200-warp-specialized-debugger",
+  "version": "0.1.0",
+  "source_book": "Modern GPU Programming For MLSys (MLC Community) + NVIDIA Blackwell Tuning/Compatibility Guides",
+  "darwin_compatible": true,
+  "test_cases": [
+    {
+      "id": "should-trigger-01",
+      "type": "should_trigger",
+      "prompt": "My Step 7 warp-specialized GEMM hangs — give me the full debugging worksheet.",
+      "expected_behavior": "Should trigger and proceed environment → minimal reproduction → generated code → handoff worksheet.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-02",
+      "type": "should_trigger",
+      "prompt": "TIRx compiles successfully and the numerics are correct, but I see no tcgen05/TMA and performance is very poor.",
+      "expected_behavior": "Should trigger and inspect the lowering and the role timelines.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-03",
+      "type": "should_trigger",
+      "prompt": "After one illegal memory access, every subsequent CUDA call fails.",
+      "expected_behavior": "Should trigger and require a context restart, a minimal shape, and an address/lifetime audit.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-01",
+      "type": "should_not_trigger",
+      "prompt": "Ordinary Python code raises a KeyError.",
+      "expected_behavior": "Should not trigger; not a GPU kernel.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-02",
+      "type": "should_not_trigger",
+      "prompt": "Model validation accuracy dropped, but there is no custom kernel.",
+      "expected_behavior": "Should not trigger; do model-level diagnosis first.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "edge-case-01",
+      "type": "edge_case",
+      "prompt": "Deadlocks happen only intermittently at large shapes; small shapes are fine.",
+      "expected_behavior": "Should trigger, focusing on stage wrap, tail iterations, resource residency, and the number of clusters.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    }
+  ],
+  "minimum_pass_rate": 0.8,
+  "notes": "All should_not_trigger cases must pass; edge_case must state the invocation boundary. These tests are prompt/behavior stress tests, not hardware performance tests."
+}

@@ -1,0 +1,52 @@
+{
+  "skill": "b200-tma-pipeline-designer",
+  "version": "0.1.0",
+  "source_book": "Modern GPU Programming For MLSys (MLC Community) + NVIDIA Blackwell Tuning/Compatibility Guides",
+  "darwin_compatible": true,
+  "test_cases": [
+    {
+      "id": "should-trigger-01",
+      "type": "should_trigger",
+      "prompt": "Design TMA loads + PIPE_DEPTH=2 for my B200 GEMM.",
+      "expected_behavior": "Should activate and provide the descriptor, barriers, stage ring, and three-phase timeline.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-02",
+      "type": "should_trigger",
+      "prompt": "After a TMA store, when can Dsmem be reused?",
+      "expected_behavior": "Should activate and explain the commit/wait group drain protocol.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-03",
+      "type": "should_trigger",
+      "prompt": "How does this 3D tile get both tiling and a 128B swizzle at the same time?",
+      "expected_behavior": "Should activate and design the descriptor dimensions and the matching layout.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-01",
+      "type": "should_not_trigger",
+      "prompt": "I need a random-index gather where every lane has a different address.",
+      "expected_behavior": "Should not default to TMA; should suggest a plain/vectorized thread path.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-02",
+      "type": "should_not_trigger",
+      "prompt": "Help me investigate CPU memcpy performance.",
+      "expected_behavior": "Should not activate; not GPU TMA.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "edge-case-01",
+      "type": "edge_case",
+      "prompt": "The tile is only 1KB but it loops many times — is TMA worth it?",
+      "expected_behavior": "May be invoked for a cost/overlap assessment, but must not outright guarantee that TMA is faster.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    }
+  ],
+  "minimum_pass_rate": 0.8,
+  "notes": "All should_not_trigger cases must pass; edge_case must state the invocation boundary. These tests are prompt/behavior stress tests, not hardware performance tests."
+}

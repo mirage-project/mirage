@@ -1,0 +1,52 @@
+{
+  "skill": "b200-scope-layout-dispatch",
+  "version": "0.1.0",
+  "source_book": "Modern GPU Programming For MLSys (MLC Community) + NVIDIA Blackwell Tuning/Compatibility Guides",
+  "darwin_compatible": true,
+  "test_cases": [
+    {
+      "id": "should-trigger-01",
+      "type": "should_trigger",
+      "prompt": "Decompose a QK^T + mask + softmax + PV operator into Blackwell scope/layout/dispatch.",
+      "expected_behavior": "Should trigger and output the scope, layout, dispatch, and handoff for each stage.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-02",
+      "type": "should_trigger",
+      "prompt": "Should this TIRx primitive be invoked by a single lane, a warp, or a warpgroup?",
+      "expected_behavior": "Should trigger and distinguish the issue scope from the participation scope.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-03",
+      "type": "should_trigger",
+      "prompt": "Review the GMEM/SMEM/TMEM/register lifetimes of this B200 kernel for me.",
+      "expected_behavior": "Should trigger and produce the lifetimes and the contract table.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-01",
+      "type": "should_not_trigger",
+      "prompt": "Help me choose the number of Transformer layers.",
+      "expected_behavior": "Should not trigger; this is model architecture.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-02",
+      "type": "should_not_trigger",
+      "prompt": "How much does a DGX B200 weigh?",
+      "expected_behavior": "Should not trigger; this is a system spec.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "edge-case-01",
+      "type": "edge_case",
+      "prompt": "I only want to use cuBLASLt, but I don't know how to fill in the layout.",
+      "expected_behavior": "The layout portion may be invoked; no need to expand into custom scheduling — focus on the library interface contract.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    }
+  ],
+  "minimum_pass_rate": 0.8,
+  "notes": "All should_not_trigger cases must pass; edge_case must state the invocation boundary. These tests are prompt/behavior stress tests, not hardware performance tests."
+}

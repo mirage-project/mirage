@@ -1,0 +1,52 @@
+{
+  "skill": "b200-kernel-roofline-triage",
+  "version": "0.1.0",
+  "source_book": "Modern GPU Programming For MLSys (MLC Community) + NVIDIA Blackwell Tuning/Compatibility Guides",
+  "darwin_compatible": true,
+  "test_cases": [
+    {
+      "id": "should-trigger-01",
+      "type": "should_trigger",
+      "prompt": "My fp16 GEMM on B200 only reaches about 30% of what I expected — first help me decide whether it's bandwidth or the Tensor Cores not being fed.",
+      "expected_behavior": "Should trigger and estimate FLOPs/bytes, lay out the evidence matrix, and give the minimal experiments.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-02",
+      "type": "should_trigger",
+      "prompt": "Should this fused RMSNorm kernel move to TMA? Do a roofline diagnosis first.",
+      "expected_behavior": "Should trigger, identify the low arithmetic intensity, and evaluate regular block transfers and fusion gains.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-03",
+      "type": "should_trigger",
+      "prompt": "I have Nsight metrics and shapes — rank the optimization priorities for a B200 kernel for me.",
+      "expected_behavior": "Should trigger and rank based on measurements, not a checklist of tricks.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-01",
+      "type": "should_not_trigger",
+      "prompt": "How much memory does a B200 have in total?",
+      "expected_behavior": "Should not trigger; this is a spec query.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-02",
+      "type": "should_not_trigger",
+      "prompt": "Write me an ordinary Python bubble sort.",
+      "expected_behavior": "Should not trigger; unrelated to GPU kernels.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "edge-case-01",
+      "type": "edge_case",
+      "prompt": "I only know the end-to-end model throughput got slower; I don't know which kernel it is.",
+      "expected_behavior": "May be partially invoked to build an observation plan, but should first require a broken-down profile; must not attribute the slowdown directly to a single kernel.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    }
+  ],
+  "minimum_pass_rate": 0.8,
+  "notes": "All should_not_trigger cases must pass; edge_case must state the invocation boundary. These tests are prompt/behavior stress tests, not hardware performance tests."
+}
