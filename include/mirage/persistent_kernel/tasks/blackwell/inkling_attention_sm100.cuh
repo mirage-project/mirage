@@ -113,7 +113,9 @@ __device__ __forceinline__ void
   }
 
   // smem for cross-warp merge: per warp, per head: m, l, acc[HEAD_DIM]
-  extern __shared__ char smem_raw[];
+  // Must match the declaration in mla_prefill_sm100.cuh — extern __shared__
+  // symbols with the same name must agree across the whole megakernel TU.
+  extern __shared__ __align__(128) uint8_t smem_raw[];
   float *s_acc = reinterpret_cast<float *>(smem_raw);
   // [NUM_WARPS][NUM_QO_PER_KV][HEAD_DIM]
   float *s_m = s_acc + NUM_WARPS * NUM_QO_PER_KV * HEAD_DIM;
