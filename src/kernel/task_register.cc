@@ -255,6 +255,179 @@ int TaskRegister::register_dflash_kv_store_sm100_task(
   return register_task_variant(TASK_DFLASH_KV_STORE_SM100, code.to_string());
 }
 
+int TaskRegister::register_inkling_sconv_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: []. 3 inputs (x [SEQ, hidden] bf16, weight [hidden, K] fp32,
+  // conv_state [K-1, hidden] fp32, updated in place), 1 output
+  // (out [SEQ, hidden] bf16). grid.x = G partitions the channel dim; the
+  // runtime offsets pointers via imap, full row widths are stride args.
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 3;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->dtensor.num_dims == 2);  // x
+  assert(input_ops[1]->dtensor.num_dims == 2);  // weight
+  assert(input_ops[2]->dtensor.num_dims == 2);  // conv_state
+  assert(output_ops[0]->dtensor.num_dims == 2); // out
+  int seq_len = input_ops[0]->dtensor.dim[0];
+  int hidden = input_ops[0]->dtensor.dim[1];
+  int kernel_size = input_ops[1]->dtensor.dim[1];
+  assert(input_ops[1]->dtensor.dim[0] == hidden);
+  assert(input_ops[2]->dtensor.dim[0] == kernel_size - 1);
+  assert(input_ops[2]->dtensor.dim[1] == hidden);
+  assert(output_ops[0]->dtensor.dim[0] == seq_len);
+  assert(output_ops[0]->dtensor.dim[1] == hidden);
+  int G = bgraph.grid_dim.x;
+  assert(G >= 1 && hidden % G == 0);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::inkling_sconv_task_impl<bfloat16, $, $, $, $, $, $>(",
+         hidden / G,
+         kernel_size,
+         seq_len,
+         /*X_STRIDE=*/hidden,
+         /*OUT_STRIDE=*/hidden,
+         /*STATE_STRIDE=*/hidden);
+  code.e("    task_desc->input_ptrs[0],");  // x
+  code.e("    task_desc->input_ptrs[1],");  // weight (fp32)
+  code.e("    task_desc->input_ptrs[2],");  // conv_state (fp32, in-place)
+  code.e("    task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_INKLING_SCONV_SM100, code.to_string());
+}
+
+int TaskRegister::register_inkling_attention_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [sliding_window, extent, head_dim, log_scaling_alpha (float
+  // bits), log_scaling_n_floor]. 7 inputs (q, ctx_k, ctx_v, blk_k, blk_v,
+  // bias, step), 1 output. grid.x = G partitions kv heads (imap dim 1 for
+  // q/kv/out, dim 0 for bias).
+  assert(params.size() == 5);
+  int sliding_window = params[0];
+  int extent = params[1];
+  int head_dim = params[2];
+  float alpha;
+  memcpy(&alpha, &params[3], sizeof(float));
+  int n_floor = params[4];
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 7;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->dtensor.num_dims == 2); // [1, NQ*D]
+  assert(input_ops[1]->dtensor.num_dims == 2);  // ctx_k [MAX_CTX, NKV*D]
+  assert(input_ops[5]->dtensor.num_dims == 2);  // bias [NQ, EXTENT]
+  int q_size = output_ops[0]->dtensor.dim[1];
+  int kv_size = input_ops[1]->dtensor.dim[1];
+  int num_q_heads = q_size / head_dim;
+  int num_kv_heads = kv_size / head_dim;
+  assert(input_ops[5]->dtensor.dim[0] == num_q_heads);
+  assert(input_ops[5]->dtensor.dim[1] == extent);
+  int G = bgraph.grid_dim.x;
+  assert(G >= 1 && num_q_heads % G == 0 && num_kv_heads % G == 0);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::inkling_attention_task_impl<bfloat16, $, $, $, $, $, $, $, "
+         "$, $>(",
+         num_q_heads / G,
+         num_kv_heads / G,
+         head_dim,
+         extent,
+         sliding_window,
+         /*Q_STRIDE=*/q_size,
+         /*KV_STRIDE=*/kv_size,
+         /*O_STRIDE=*/q_size,
+         /*BIAS_STRIDE=*/extent);
+  code.e("    task_desc->input_ptrs[0],");  // q
+  code.e("    task_desc->input_ptrs[1],");  // ctx_k
+  code.e("    task_desc->input_ptrs[2],");  // ctx_v
+  code.e("    task_desc->input_ptrs[3],");  // blk_k
+  code.e("    task_desc->input_ptrs[4],");  // blk_v
+  code.e("    task_desc->input_ptrs[5],");  // bias (fp32)
+  code.e("    task_desc->input_ptrs[6],");  // step (int32 = ctx_len)
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    $f,", alpha);
+  code.e("    $);", n_floor);
+  return register_task_variant(TASK_INKLING_ATTENTION_SM100, code.to_string());
+}
+
+int TaskRegister::register_inkling_moe_router_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [route_scale bits, n_shared]. 3 inputs (logits [rows, STRIDE]
+  // bf16 where STRIDE >= R+S may be padded for the gate linear,
+  // e_score_correction_bias [R] fp32, global_scale [1] fp32), 3 outputs
+  // (weights [rows, K+S] fp32, routing indices [R+S, rows] int32,
+  // active expert ids [R+S+1] int32). Run with grid (1,1,1).
+  assert(params.size() == 2);
+  float route_scale;
+  memcpy(&route_scale, &params[0], sizeof(float));
+  int n_shared = params[1];
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 3;
+  int num_outputs = 3;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->dtensor.num_dims == 2);  // logits
+  assert(input_ops[1]->dtensor.num_dims == 1);  // bias
+  assert(output_ops[0]->dtensor.num_dims == 2); // weights
+  assert(output_ops[1]->dtensor.num_dims == 2); // routing indices
+  assert(output_ops[2]->dtensor.num_dims == 1); // active expert ids
+  int num_rows = input_ops[0]->dtensor.dim[0];
+  int logits_stride = input_ops[0]->dtensor.dim[1];
+  int num_routed = input_ops[1]->dtensor.dim[0];
+  int num_total = num_routed + n_shared;
+  int topk = output_ops[0]->dtensor.dim[1] - n_shared;
+  assert(n_shared >= 0 && topk >= 1);
+  assert(logits_stride >= num_total);
+  assert(output_ops[0]->dtensor.dim[0] == num_rows);
+  assert(output_ops[1]->dtensor.dim[0] == num_total);
+  assert(output_ops[1]->dtensor.dim[1] == num_rows);
+  assert(output_ops[2]->dtensor.dim[0] == num_total + 1);
+  assert(bgraph.grid_dim.x == 1);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::inkling_moe_router_task_impl<bfloat16, $, $, $, $>(",
+         num_routed,
+         n_shared,
+         topk,
+         logits_stride);
+  code.e("    task_desc->input_ptrs[0],");  // logits (zeroed after read)
+  code.e("    task_desc->input_ptrs[1],");  // bias (fp32)
+  code.e("    task_desc->input_ptrs[2],");  // global_scale (fp32)
+  code.e("    task_desc->output_ptrs[0],"); // weights
+  code.e("    task_desc->output_ptrs[1],"); // routing indices
+  code.e("    task_desc->output_ptrs[2],"); // active expert ids
+  code.e("    $,", num_rows);
+  code.e("    $f);", route_scale);
+  return register_task_variant(TASK_INKLING_MOE_ROUTER_SM100,
+                               code.to_string());
+}
+
 int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
   assert(params.size() == 0);

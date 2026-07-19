@@ -832,6 +832,121 @@ class PersistentKernel:
         self.kn_graph.customized([kv_in, slot_mapping, cache], tb_graph)
         self.kn_graph.register_task(tb_graph, "dflash_kv_store", params)
 
+    def inkling_attention_layer(
+        self,
+        q: DTensor,       # [1, num_q_heads*head_dim] (per-head q_norm applied)
+        ctx_k: DTensor,   # [max_ctx, num_kv_heads*head_dim] (k cache)
+        ctx_v: DTensor,   # [max_ctx, num_kv_heads*head_dim] (v cache)
+        blk_k: DTensor,   # [1, num_kv_heads*head_dim] (this step's k)
+        blk_v: DTensor,   # [1, num_kv_heads*head_dim]
+        bias: DTensor,    # [num_q_heads, extent] bf16 (r @ proj, per step)
+        step: DTensor,    # [1] int32 = ctx_len (= position of new token)
+        output: DTensor,  # [1, num_q_heads*head_dim]
+        grid_dim: tuple,
+        block_dim: tuple,
+        sliding_window: int = 0,       # 0 = global layer
+        extent: int = 1024,            # rel_extent
+        head_dim: int = 128,
+        log_scaling_alpha: float = 0.0,  # 0 = no log scaling (local layers)
+        log_scaling_n_floor: int = 128000,
+    ):
+        # Inkling GQA decode attention with relative-position bias.
+        # grid_dim[0] = G partitions kv heads: imap slices dim 1 of
+        # q/ctx/blk/out and dim 0 of bias.
+        import struct
+
+        for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
+            assert t.num_dims == 2
+        assert bias.num_dims == 2 and bias.dim(1) == extent
+        G = grid_dim[0]
+        if G > 1:
+            for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
+                assert t.dim(1) % (G * head_dim) == 0
+            assert bias.dim(0) % G == 0
+        cmap = (1, -1, -1) if G > 1 else (-1, -1, -1)
+        bmap = (0, -1, -1) if G > 1 else (-1, -1, -1)
+        alpha_bits = struct.unpack("i", struct.pack("f", log_scaling_alpha))[0]
+        params = [sliding_window, extent, head_dim, alpha_bits, log_scaling_n_floor]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(q, cmap, -1, True)
+        tb_graph.new_input(ctx_k, cmap, -1, True)
+        tb_graph.new_input(ctx_v, cmap, -1, True)
+        tb_graph.new_input(blk_k, cmap, -1, True)
+        tb_graph.new_input(blk_v, cmap, -1, True)
+        tb_graph.new_input(bias, bmap, -1, True)
+        tb_graph.new_input(step, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, cmap, -1, True)
+        self.kn_graph.customized(
+            [q, ctx_k, ctx_v, blk_k, blk_v, bias, step, output], tb_graph
+        )
+        self.kn_graph.register_task(tb_graph, "inkling_attention", params)
+
+    def inkling_sconv_layer(
+        self,
+        x: DTensor,          # [seq_len, hidden] bf16
+        weight: DTensor,     # [hidden, K] fp32 (depthwise taps, [:,0] oldest)
+        conv_state: DTensor, # [K-1, hidden] fp32, updated in place
+        output: DTensor,     # [seq_len, hidden] bf16 (conv + residual)
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # Inkling depthwise short convolution + residual (fp32 math).
+        # grid_dim[0] = G partitions the channel dim; imap slices dim 1 of
+        # x/state/out and dim 0 of weight.
+        assert x.num_dims == 2 and output.num_dims == 2
+        assert weight.num_dims == 2 and conv_state.num_dims == 2
+        G = grid_dim[0]
+        assert x.dim(1) % G == 0
+        cmap = (1, -1, -1) if G > 1 else (-1, -1, -1)
+        wmap = (0, -1, -1) if G > 1 else (-1, -1, -1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(x, cmap, -1, True)
+        tb_graph.new_input(weight, wmap, -1, True)
+        tb_graph.new_input(conv_state, cmap, -1, True)
+        tb_graph.new_input(output, cmap, -1, True)
+        self.kn_graph.customized([x, weight, conv_state, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "inkling_sconv")
+
+    def inkling_moe_router_layer(
+        self,
+        logits: DTensor,       # [rows, stride>=R+S] bf16 (cols R+S.. padded)
+        bias: DTensor,         # [num_routed] fp32 e_score_correction_bias
+        global_scale: DTensor, # [1] fp32
+        output: tuple,         # (weights, routing_indices, active_expert_ids)
+        grid_dim: tuple,
+        block_dim: tuple,
+        route_scale: float = 8.0,
+        n_shared: int = 2,
+    ):
+        # Inkling router: sigmoid+bias top-k over routed experts, weights =
+        # softmax(logsigmoid(selected ++ shared logits)) * route_scale *
+        # global_scale. Shared experts are emitted as always-selected experts
+        # num_routed..num_routed+n_shared-1 (folded into the expert tensor).
+        import struct
+
+        weights, routing_indices, active_ids = output
+        assert logits.num_dims == 2
+        assert bias.num_dims == 1
+        assert weights.num_dims == 2      # [rows, topk + n_shared] fp32
+        assert routing_indices.num_dims == 2  # [num_total, rows] int32
+        assert active_ids.num_dims == 1   # [num_total + 1] int32
+        assert grid_dim == (1, 1, 1)
+        scale_bits = struct.unpack("i", struct.pack("f", route_scale))[0]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(logits, (-1, -1, -1), -1, True)
+        tb_graph.new_input(bias, (-1, -1, -1), -1, True)
+        tb_graph.new_input(global_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weights, (-1, -1, -1), -1, True)
+        tb_graph.new_input(routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(active_ids, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [logits, bias, global_scale, weights, routing_indices, active_ids],
+            tb_graph,
+        )
+        self.kn_graph.register_task(
+            tb_graph, "inkling_moe_router", [scale_bits, n_shared]
+        )
+
     def single_batch_extend_attention_layer(
         self,
         input: DTensor, # [6, 6144]

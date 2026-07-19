@@ -469,6 +469,21 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_DFLASH_KV_STORE_SM100, variant_id);
+  } else if (name == "inkling_sconv") {
+    int variant_id = task_register->register_inkling_sconv_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_INKLING_SCONV_SM100, variant_id);
+  } else if (name == "inkling_moe_router") {
+    int variant_id = task_register->register_inkling_moe_router_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 3, TASK_INKLING_MOE_ROUTER_SM100, variant_id);
+  } else if (name == "inkling_attention") {
+    int variant_id = task_register->register_inkling_attention_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(7, 1, TASK_INKLING_ATTENTION_SM100, variant_id);
   } else if (name == "attention") {
     int variant_id =
         task_register->register_attention_task(customized->bgraph, params);
