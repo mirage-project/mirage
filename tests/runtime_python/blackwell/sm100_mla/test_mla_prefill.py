@@ -11,10 +11,16 @@ Run:
 
 import argparse
 import math
+import os
+import sys
 import torch
 
 torch.set_printoptions(sci_mode=False)
 import runtime_kernel_mla_prefill
+
+# Use the canonical PyTorch reference shared with the test_mode tests.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from pytorch_reference import mla_prefill_ref as pytorch_mla_prefill_ref
 
 D_CKV = 512
 D_KPE = 64
@@ -26,19 +32,6 @@ try:
     HAS_FLASHINFER = True
 except ImportError:
     HAS_FLASHINFER = False
-
-
-def pytorch_mla_prefill_ref(Q_nope, Q_pe, CKV, KPE, sm_scale):
-    B, S, H, _ = Q_nope.shape
-    q = torch.cat([Q_nope.float(), Q_pe.float()], dim=-1)  # [B,S,H,576]
-    k = torch.cat([CKV.float(), KPE.float()], dim=-1)      # [B,S,576]
-    scores = torch.einsum('bshd,btd->bsht', q, k) * sm_scale
-    causal = torch.triu(torch.ones(S, S, device=scores.device), diagonal=1).bool()
-    scores.masked_fill_(causal.unsqueeze(0).unsqueeze(2), float('-inf'))
-    probs = torch.softmax(scores, dim=-1)
-    v = CKV.float()
-    o = torch.einsum('bsht,btd->bshd', probs, v)
-    return o.to(Q_nope.dtype)
 
 
 def test_correctness(seq_len=1024):

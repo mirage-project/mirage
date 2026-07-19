@@ -1,7 +1,15 @@
-from setuptools import setup
-import os, sys
+"""Build the kernel-wrapper extension for the split-K FP8 swap-AB Linear kernel.
+
+Mirrors the non-split sm100_linear_fp8_swapAB/setup.py. Set
+SM100_LINEAR_SPLITK_FP8_SWAPAB_DEBUG=1 in the environment to enable
+device debug (-G) for cuda-gdb / compute-sanitizer.
+"""
+import os
+import sys
 import shutil
 from glob import glob
+from setuptools import setup
+
 
 def _import_torch_cpp_extension():
     try:
@@ -21,27 +29,26 @@ def _import_torch_cpp_extension():
                     return BuildExtension, CUDAExtension
         raise e
 
+
 BuildExtension, CUDAExtension = _import_torch_cpp_extension()
 import torch
 import torch.utils.cpp_extension as torch_cpp_extension
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
+
 def _resolve_cuda_home():
     env_cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     if env_cuda_home and os.path.exists(os.path.join(env_cuda_home, "bin", "nvcc")):
         return env_cuda_home
-
     torch_cuda = getattr(torch.version, "cuda", None)
     if torch_cuda:
         candidate = os.path.join("/usr/local", f"cuda-{torch_cuda}")
         if os.path.exists(os.path.join(candidate, "bin", "nvcc")):
             return candidate
-
     nvcc_path = shutil.which("nvcc")
     if nvcc_path:
         return os.path.dirname(os.path.dirname(nvcc_path))
-
     return "/usr/local/cuda"
 
 
@@ -57,23 +64,33 @@ cuda_library_dirs = [
 ]
 
 blackwell_task_dir = os.path.join(
-    this_dir,
-    '../../../../include/mirage/persistent_kernel/tasks/blackwell',
+    this_dir, '../../../../include/mirage/persistent_kernel/tasks/blackwell',
 )
 blackwell_depends = sorted(
     glob(os.path.join(blackwell_task_dir, '**', '*.cuh'), recursive=True)
 )
 
+debug_extra = []
+if os.environ.get("SM100_LINEAR_SPLITK_FP8_SWAPAB_DEBUG", "0") == "1":
+    debug_extra = ["-G", "-Xcompiler=-g", "-Xcompiler=-O0"]
+    nvcc_opt = "-O0"
+else:
+    debug_extra = ["-Xcompiler=-g"]
+    nvcc_opt = "-O3"
+
 setup(
-    name='runtime_kernel_blackwell_linear_fp8',
+    name='runtime_kernel_blackwell_linear_splitk_fp8_swapAB',
     ext_modules=[
         CUDAExtension(
-            name='runtime_kernel_blackwell_linear_fp8',
-            sources=[
-                os.path.join(this_dir, 'runtime_kernel_wrapper_sm100.cu'),
-            ],
+            name='runtime_kernel_blackwell_linear_splitk_fp8_swapAB',
+            sources=[os.path.join(this_dir, 'runtime_kernel_wrapper.cu')],
             depends=blackwell_depends,
-            define_macros=[("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None)],
+            define_macros=[
+                ("MIRAGE_BACKEND_USE_CUDA", None),
+                ("MIRAGE_FINGERPRINT_USE_CUDA", None),
+                ("MIRAGE_GRACE_BLACKWELL", None),
+                ("MPK_ENABLE_TMA", None),
+            ],
             include_dirs=[
                 os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/'),
                 os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks'),
@@ -84,15 +101,19 @@ setup(
             libraries=["cuda"],
             library_dirs=cuda_library_dirs,
             extra_compile_args={
-                'cxx': ['-DMIRAGE_GRACE_BLACKWELL'],
+                'cxx': ['-DMIRAGE_GRACE_BLACKWELL', '-g', '-O3'],
                 'nvcc': [
-                    '-O3',
+                    nvcc_opt,
+                    '-lineinfo',
                     '-gencode=arch=compute_100a,code=sm_100a',
                     '-DMIRAGE_GRACE_BLACKWELL',
                     '-DMPK_ENABLE_TMA',
-                ]
-            }
+                    '-std=c++20',
+                    '--expt-relaxed-constexpr',
+                    '-use_fast_math',
+                ] + debug_extra,
+            },
         )
     ],
-    cmdclass={'build_ext': BuildExtension}
+    cmdclass={'build_ext': BuildExtension},
 )

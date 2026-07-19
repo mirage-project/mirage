@@ -1,5 +1,6 @@
 import torch
 import runtime_kernel_blackwell
+from pytorch_reference import moe_w13_linear_ref
 
 torch.set_printoptions(sci_mode=False, profile="full")
 # torch.set_printoptions(sci_mode=False)
@@ -32,26 +33,20 @@ for reduction_size in reduction_sizes:
         output = torch.zeros(batch_size, num_topk, output_size, device="cuda", dtype=torch.bfloat16)
         
         # reference impl
-        expert_mask = torch.nn.functional.one_hot(topk_expert_indices, num_classes=num_experts).permute(2, 1, 0)
-        expert_hit = torch.greater(expert_mask.sum(dim=(-1, -2)), 0).nonzero()
-        torch_out = torch.zeros((batch_size, num_topk, output_size), device="cuda", dtype=torch.bfloat16)
-        for i, expert_idx in enumerate(expert_hit):
-            if (i+expert_offset) % expert_stride != 0:
-                continue
-            # print(f"idx: {i}, expert_idx: {expert_idx.item()}")
-            expert_w = w[expert_idx].squeeze(0)
-            idx, top_x = torch.where(expert_mask[expert_idx].squeeze(0))
-            # Index the correct hidden states and compute the expert hidden state for
-            # the current expert. 
-            current_state = x[None, top_x].reshape(-1, reduction_size)
-            # print(f"top_x {top_x} idx {idx}  expert {expert_idx} ")
-            current_hidden_states = torch.matmul(current_state, expert_w.T)
-            if has_residual:
-                expert_residual = residual[expert_idx].squeeze(0)
-                current_residual = expert_residual[None, top_x].reshape(-1, output_size)
-                current_hidden_states += current_residual
-            torch_out[top_x, idx] = current_hidden_states
-            
+        torch_out, expert_hit = moe_w13_linear_ref(
+            x=x,
+            w=w,
+            topk_expert_indices=topk_expert_indices,
+            num_experts=num_experts,
+            num_topk=num_topk,
+            batch_size=batch_size,
+            reduction_size=reduction_size,
+            output_size=output_size,
+            residual=residual if has_residual else None,
+            expert_offset=expert_offset,
+            expert_stride=expert_stride,
+        )
+
         # mpk impl
         mpk_routing_indices = torch.zeros((num_experts, batch_size), device="cuda", dtype=torch.int32)
         mpk_expert_mask = torch.zeros((num_experts+1), device="cuda", dtype=torch.int32)

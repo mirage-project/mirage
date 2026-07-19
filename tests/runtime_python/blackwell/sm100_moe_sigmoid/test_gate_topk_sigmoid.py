@@ -3,6 +3,8 @@ import runtime_kernel_moe_sigmoid
 
 from torch.nn import functional as F
 
+from pytorch_reference import moe_topk_sigmoid_routing_ref
+
 torch.set_printoptions(sci_mode=False, profile="full")
 
 # ============================================================================
@@ -17,59 +19,6 @@ EXPERTS_PER_GROUP = NUM_EXPERTS // NUM_GROUPS  # 32
 
 BATCH_SIZES = [1, 2, 4, 8]
 SEED = 42
-
-
-# ============================================================================
-# PyTorch reference: DeepSeek V3 group-aware sigmoid routing
-# (matches DeepseekV3TopkRouter.forward + get_topk_indices)
-# ============================================================================
-def reference_sigmoid_routing(logits_bf16, bias, batch_size):
-    """Exact replica of DeepseekV3TopkRouter logic."""
-    # Step 1: sigmoid
-    scores = torch.sigmoid(logits_bf16.float())
-
-    # Step 2: add bias for selection decisions
-    biased = scores + bias.unsqueeze(0)
-
-    # Step 3: group top-2, sum -> group scores
-    biased_grouped = biased.view(batch_size, NUM_GROUPS, EXPERTS_PER_GROUP)
-    top2_per_group, _ = biased_grouped.topk(2, dim=-1)
-    group_scores = top2_per_group.sum(dim=-1)
-
-    # Step 4: select top-K groups
-    _, top_groups = group_scores.topk(TOPK_GROUP, dim=-1, sorted=False)
-    group_mask = torch.zeros(batch_size, NUM_GROUPS, device="cuda")
-    group_mask.scatter_(1, top_groups, 1.0)
-    expert_mask = (
-        group_mask.unsqueeze(-1)
-        .expand(-1, -1, EXPERTS_PER_GROUP)
-        .reshape(batch_size, NUM_EXPERTS)
-    )
-
-    # Step 5: mask non-selected groups, find top-K experts
-    biased_masked = biased.clone()
-    biased_masked[expert_mask == 0] = -10000.0
-    _, topk_indices = biased_masked.topk(NUM_EXPERTS_PER_TOK, dim=-1)
-
-    # Step 6: gather ORIGINAL sigmoid scores (no bias)
-    topk_weights = scores.gather(1, topk_indices)
-
-    # Step 7: normalize + scale
-    topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-20)
-    topk_weights = topk_weights * ROUTED_SCALING_FACTOR
-
-    # Build routing indices (expert-major, 1-indexed)
-    routing_indices = torch.zeros(
-        (NUM_EXPERTS, batch_size), device="cuda", dtype=torch.int32
-    )
-    expert_active = torch.zeros((NUM_EXPERTS,), device="cuda", dtype=torch.int32)
-    for tok in range(batch_size):
-        for k in range(NUM_EXPERTS_PER_TOK):
-            eidx = topk_indices[tok, k]
-            routing_indices[eidx, tok] = k + 1
-            expert_active[eidx] = 1
-
-    return topk_weights, routing_indices, expert_active
 
 
 # ============================================================================
@@ -113,8 +62,15 @@ for batch_size in BATCH_SIZES:
     )
 
     # Reference
-    ref_weights, ref_routing, ref_expert_mask = reference_sigmoid_routing(
-        gating_output_ref, bias, batch_size
+    ref_weights, ref_routing, ref_expert_mask = moe_topk_sigmoid_routing_ref(
+        gating_output_ref,
+        bias,
+        batch_size,
+        num_experts=NUM_EXPERTS,
+        num_experts_per_tok=NUM_EXPERTS_PER_TOK,
+        num_groups=NUM_GROUPS,
+        topk_group=TOPK_GROUP,
+        routed_scaling_factor=ROUTED_SCALING_FACTOR,
     )
 
     # Check topk_weights

@@ -72,7 +72,21 @@ def decode_ue8m0(encoded: int) -> float:
     return 2.0 ** (encoded - 127)
 
 
-def _quantize_to_fp8_packed_ue8m0(x_bf16: torch.Tensor, layout: str):
+def _quantize_to_fp8_packed_ue8m0(
+    x_bf16: torch.Tensor,
+    layout: str,
+    payload_against_raw_scale: bool = False,
+):
+    # payload_against_raw_scale=False (default) is SELF-CONSISTENT: the fp8
+    # payload is divided by the same CEIL-UE8M0 scale that gets packed, so
+    # dequant(payload, packed_scale) == x exactly (up to fp8 rounding). This
+    # is convenient but BLIND to the production conversion-contract bug:
+    # DeepSeek checkpoints quantize the payload against the RAW fp32 scale,
+    # while the kernel applies 2^ceil(log2 s) — inflating every block by
+    # ceil/raw in [1,2) (the 2026-06-13 UE8M0 bug; ~53% GEMM error) unless the
+    # payload is requantized. Set payload_against_raw_scale=True to reproduce
+    # that real contract (divide payload by the RAW scale, still pack the CEIL
+    # scale) so a test can SEE the mismatch the self-consistent path hides.
     assert x_bf16.dim() == 2
     outer_dim, reduction_size = x_bf16.shape
     assert reduction_size % BLOCK_K == 0
@@ -102,8 +116,10 @@ def _quantize_to_fp8_packed_ue8m0(x_bf16: torch.Tensor, layout: str):
             raw_scale = abs_max / FP8_MAX
             encoded = encode_ue8m0(raw_scale)
             snapped_scale = decode_ue8m0(encoded)
+            # Pack the CEIL scale either way; only the payload divisor differs.
+            divisor = raw_scale if payload_against_raw_scale else snapped_scale
             x_q[outer_idx, k_start:k_end] = torch.clamp(
-                block / snapped_scale, -FP8_MAX, FP8_MAX
+                block / divisor, -FP8_MAX, FP8_MAX
             ).to(torch.float8_e4m3fn)
 
             packed_k = scale_k // SCALE_PACK_SIZE
@@ -115,12 +131,20 @@ def _quantize_to_fp8_packed_ue8m0(x_bf16: torch.Tensor, layout: str):
     return x_q, packed_scales
 
 
-def quantize_to_fp8_packed_ue8m0(x_bf16: torch.Tensor):
-    return _quantize_to_fp8_packed_ue8m0(x_bf16, layout="row_major")
+def quantize_to_fp8_packed_ue8m0(
+    x_bf16: torch.Tensor, payload_against_raw_scale: bool = False
+):
+    return _quantize_to_fp8_packed_ue8m0(
+        x_bf16, layout="row_major",
+        payload_against_raw_scale=payload_against_raw_scale)
 
 
-def quantize_to_fp8_deepgemm_style(x_bf16: torch.Tensor):
-    return _quantize_to_fp8_packed_ue8m0(x_bf16, layout="deepgemm_col_major")
+def quantize_to_fp8_deepgemm_style(
+    x_bf16: torch.Tensor, payload_against_raw_scale: bool = False
+):
+    return _quantize_to_fp8_packed_ue8m0(
+        x_bf16, layout="deepgemm_col_major",
+        payload_against_raw_scale=payload_against_raw_scale)
 
 
 def dequant_from_packed_ue8m0(x_q: torch.Tensor, packed_scales: torch.Tensor):

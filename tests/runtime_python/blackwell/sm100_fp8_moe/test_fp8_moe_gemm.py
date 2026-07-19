@@ -28,6 +28,8 @@ except ImportError:
     print("Run: python setup.py build_ext --inplace")
     sys.exit(1)
 
+from pytorch_reference import moe_w13_fp8_ref, moe_w2_fp8_ref
+
 # ================================================================
 # DeepSeek V3 W13 MoE parameters
 # ================================================================
@@ -119,61 +121,14 @@ def make_routing(active_tokens, num_experts, num_topk, device, seed=42):
 
 
 # ================================================================
-# Reference implementation
+# Reference implementations are imported from pytorch_reference.py
+# (moe_w13_fp8_ref, moe_w2_fp8_ref)
 # ================================================================
-def reference_moe_w13(input_fp8, input_scale, weight_fp8, weight_scale,
-                       batch_size, token_to_experts, use_ue8m0=True):
-    """Pure PyTorch reference using FP8 dequantization."""
-    if use_ue8m0:
-        i_scale = float32_to_ue8m0_approx(input_scale)
-        w_scale = float32_to_ue8m0_approx(weight_scale)
-    else:
-        i_scale = input_scale
-        w_scale = weight_scale
 
-    input_deq = dequantize_fp8(input_fp8, i_scale).bfloat16()
-    output = torch.zeros(BATCH_SIZE, NUM_TOPK, OUTPUT_SIZE,
-                         dtype=torch.bfloat16, device=input_fp8.device)
-
-    for i in range(batch_size):
-        for slot, e in enumerate(token_to_experts[i]):
-            w_deq = dequantize_fp8(weight_fp8[e], w_scale[e]).bfloat16()
-            output[i, slot] = (input_deq[i:i+1] @ w_deq.T).squeeze(0)
-
-    return output
-
-
-# W2 dimensions
+# W2 dimensions (still used by run_w2_test for tensor allocation)
 W2_OUTPUT_SIZE = K           # 7168: hidden_size is output dim for W2
 W2_REDUCTION_SIZE = 2048     # intermediate_size is reduction dim for W2
 W2_K_SCALE = W2_REDUCTION_SIZE // 128  # 16
-
-
-def reference_moe_w2(input_fp8_3d, input_scale_3d, weight_fp8, weight_scale,
-                      batch_size, token_to_experts, use_ue8m0=True):
-    """W2 reference: [B, topk, I] @ [E, K, I].T → [B, topk, K]."""
-    if use_ue8m0:
-        i_scale = float32_to_ue8m0_approx(input_scale_3d)
-        w_scale = float32_to_ue8m0_approx(weight_scale)
-    else:
-        i_scale = input_scale_3d
-        w_scale = weight_scale
-
-    # Dequantize 3D input [B, topk, I]
-    B, T, I = input_fp8_3d.shape
-    input_deq = dequantize_fp8(
-        input_fp8_3d.reshape(B * T, I), i_scale.reshape(B * T, I // 128)
-    ).reshape(B, T, I).bfloat16()
-
-    output = torch.zeros(BATCH_SIZE, NUM_TOPK, W2_OUTPUT_SIZE,
-                         dtype=torch.bfloat16, device=input_fp8_3d.device)
-
-    for i in range(batch_size):
-        for slot, e in enumerate(token_to_experts[i]):
-            w_deq = dequantize_fp8(weight_fp8[e], w_scale[e]).bfloat16()
-            output[i, slot] = (input_deq[i, slot:slot+1] @ w_deq.T).squeeze(0)
-
-    return output
 
 
 def run_w2_test(batch_size, seed=42, label=""):
@@ -217,8 +172,8 @@ def run_w2_test(batch_size, seed=42, label=""):
     kernel_ms = (time.time() - t0) * 1000.0
 
     # Reference
-    ref = reference_moe_w2(input_fp8_3d, input_scale_3d, weight_fp8, weight_scale,
-                            batch_size, token_to_experts, use_ue8m0=True)
+    ref = moe_w2_fp8_ref(input_fp8_3d, input_scale_3d, weight_fp8, weight_scale,
+                         batch_size, token_to_experts, use_ue8m0=True)
 
     # Compare only routed tokens
     max_abs = 0.0
@@ -288,8 +243,8 @@ def run_test(batch_size, seed=42, label="", use_2d=False, expert_stride=1, n_spl
     kernel_ms = (time.time() - t0) * 1000.0
 
     # Reference with UE8M0-approximated scales (should match kernel closely)
-    ref = reference_moe_w13(input_fp8, input_scale, weight_fp8, weight_scale,
-                             batch_size, token_to_experts, use_ue8m0=True)
+    ref = moe_w13_fp8_ref(input_fp8, input_scale, weight_fp8, weight_scale,
+                          batch_size, token_to_experts, use_ue8m0=True)
 
     # Compare only routed tokens
     max_abs = 0.0

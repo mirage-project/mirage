@@ -185,12 +185,17 @@ void mla_mtp_run(torch::Tensor O) {
   }
 
   dim3 rg((D_V + RD_DV - 1) / RD_DV, g_num_head_groups, g_B);
-  mla_mtp_reduce_wrapper<<<rg, RD_TB>>>((nv_bfloat16 *)g_Oa.data_ptr(),
-                                        (float *)g_La.data_ptr(),
-                                        (nv_bfloat16 *)O.data_ptr(),
-                                        g_sk,
-                                        g_num_head_groups,
-                                        g_Q_LEN);
+  // la_smem now lives in the DYNAMIC shared region (see
+  // mla_mtp_decode_sm100.cuh — the 16KB static array broke the megakernel's
+  // smem budget); the standalone launch must allocate it explicitly.
+  constexpr int reduce_smem = kernel::mla_mtp::MAX_SK * 128 * sizeof(float);
+  mla_mtp_reduce_wrapper<<<rg, RD_TB, reduce_smem>>>(
+      (nv_bfloat16 *)g_Oa.data_ptr(),
+      (float *)g_La.data_ptr(),
+      (nv_bfloat16 *)O.data_ptr(),
+      g_sk,
+      g_num_head_groups,
+      g_Q_LEN);
 }
 
 void mla_mtp_test(torch::Tensor Q,
