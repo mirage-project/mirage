@@ -654,6 +654,7 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        eps: float = 1e-6,
     ):
         # Currently assume that the input/output are 2D tensors
         assert input.num_dims == 2
@@ -663,7 +664,15 @@ class PersistentKernel:
         tb_graph.new_input(weight, (-1, -1, -1), 0, True)
         tb_graph.new_input(output, (0, -1, -1), 1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "rmsnorm_hopper" if self.target_cc >= 90 else "rmsnorm")
+        # params[0]: eps float bits (only emitted when non-default)
+        params = []
+        if eps != 1e-6:
+            import struct
+            params.append(struct.unpack("i", struct.pack("f", eps))[0])
+        self.kn_graph.register_task(
+            tb_graph,
+            "rmsnorm_hopper" if self.target_cc >= 90 else "rmsnorm",
+            params)
 
     def rmsnorm_linear_layer(
         self,
@@ -673,6 +682,7 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        eps: float = 1e-6,
     ):
         # Currently assume that the input/weight_linear/output are 2D tensors
         assert input.num_dims == 2
@@ -684,7 +694,12 @@ class PersistentKernel:
         tb_graph.new_input(weight_linear, (0, -1, -1), 1, True)
         tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input, weight_norm, weight_linear, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "rmsnorm_linear")
+        # params[0]: eps float bits (only emitted when non-default)
+        params = []
+        if eps != 1e-6:
+            import struct
+            params.append(struct.unpack("i", struct.pack("f", eps))[0])
+        self.kn_graph.register_task(tb_graph, "rmsnorm_linear", params)
 
     def attention_layer(
         self,

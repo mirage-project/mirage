@@ -16,11 +16,28 @@
 #include "mirage/kernel/operator.h"
 #include "mirage/transpiler/utils.h"
 
+#include <cstdio>
+
 namespace mirage {
 namespace runtime {
 
 namespace kn = mirage::kernel;
 namespace tb = mirage::threadblock;
+
+// Decode an eps value passed as float bits in an optional task param
+// (std::to_string would truncate to 6 fixed decimals, so emit with %.9g to
+// round-trip the float exactly through the generated source).
+static std::string eps_literal(std::vector<int> const &params,
+                               size_t index,
+                               float default_eps = 1e-6f) {
+  float eps = default_eps;
+  if (params.size() > index) {
+    memcpy(&eps, &params[index], sizeof(float));
+  }
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%.9g", eps);
+  return std::string(buf);
+}
 
 TaskRegister *TaskRegister::singleton = nullptr;
 
@@ -90,7 +107,8 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params) {
-  assert(params.size() == 0);
+  // params[0]: eps as float bits (optional, default 1e-6)
+  assert(params.size() <= 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 2;
@@ -119,7 +137,7 @@ int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    1e-6f);");
+  code.e("    $f);", eps_literal(params, 0));
   return register_task_variant(TASK_RMS_NORM, code.to_string());
 }
 
@@ -489,7 +507,8 @@ int TaskRegister::register_inkling_moe_router_sm100_task(
 
 int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
-  assert(params.size() == 0);
+  // params[0]: eps as float bits (optional, default 1e-6)
+  assert(params.size() <= 1);
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -527,7 +546,7 @@ int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
-  code.e("    1e-6f,");
+  code.e("    $f,", eps_literal(params, 0));
   code.e("    task_desc->output_ptrs[0]);");
   return register_task_variant(TASK_RMS_NORM_LINEAR, code.to_string());
 }
@@ -1502,7 +1521,8 @@ int TaskRegister::register_paged_attention_hopper_task(
 
 int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
-  assert(params.size() == 0);
+  // params[0]: eps as float bits (optional, default 1e-6)
+  assert(params.size() <= 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 2;
@@ -1533,7 +1553,7 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0],");
-  code.e("    1e-6f);");
+  code.e("    $f);", eps_literal(params, 0));
   return register_task_variant(TASK_RMS_NORM_HOPPER, code.to_string());
 }
 

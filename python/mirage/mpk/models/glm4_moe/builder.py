@@ -21,10 +21,8 @@ v1 limitations: world_size == 1, BF16 weights. Skips the MTP nextn layer
 `num_layers` can be overridden via the state dict contents for smoke tests
 (layers are built for indices present in the dict).
 
-Known approximation: the hidden-state RMSNorm task hardcodes eps 1e-6 while
-GLM uses 1e-5 (a ~5e-6 relative effect, far below bf16 resolution; the
-end-to-end test vs HF shows cosine > 0.9998). The attention q/k norms DO use
-the exact 1e-5 via the qk_norm_eps parameter.
+All RMSNorms use GLM's exact eps 1e-5: the attention q/k norms via the
+qk_norm_eps parameter and the hidden-state norms via rmsnorm_layer(eps=...).
 """
 
 from typing import Optional
@@ -188,7 +186,8 @@ class Glm4MoeBuilder(GraphBuilder):
             f"layer_{i}_input_layernorm")
         mpk.rmsnorm_layer(
             input=self.x, weight=w_norm, output=self.rmsnorm_out,
-            grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1))
+            grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1),
+            eps=RMS_NORM_EPS)
 
         # fused qkv (kv-head-interleaved) linear WITH bias. The bias vector is
         # shuffled with the same row permutation as the weight and tiled to
@@ -364,7 +363,8 @@ class Glm4MoeBuilder(GraphBuilder):
             f"layer_{i}_post_attn_layernorm")
         mpk.rmsnorm_layer(
             input=self.x, weight=w_norm, output=self.rmsnorm_out,
-            grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1))
+            grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1),
+            eps=RMS_NORM_EPS)
         if i < self.first_k_dense:
             self._build_dense_mlp(i, state_dict)
         else:
@@ -420,7 +420,8 @@ class Glm4MoeBuilder(GraphBuilder):
             self._get(state_dict, "model.norm.weight"), "model_norm")
         mpk.rmsnorm_layer(
             input=self.x, weight=w_norm, output=self.rmsnorm_out,
-            grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1))
+            grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1),
+            eps=RMS_NORM_EPS)
 
         if not with_lm_head:
             return
