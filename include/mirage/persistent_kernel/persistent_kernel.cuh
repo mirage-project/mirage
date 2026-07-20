@@ -1845,11 +1845,39 @@ extern "C" void
   }
 
   // Set configuration for kernels. The worker setAttribute FAILS (invalid
-  // argument) when the kernel's STATIC shared (the max over all compiled-in
-  // task branches) + MAX_DYNAMIC_SHARED_MEMORY_SIZE exceeds the per-CTA
-  // opt-in limit — and an unchecked failure here leads to the silent
-  // worker-launch failure / eternal-hang class (2026-06-12). Catch it at
-  // setup with a precise message.
+  // argument) when the kernel's STATIC shared + MAX_DYNAMIC_SHARED_MEMORY_SIZE
+  // exceeds the per-CTA opt-in limit — and an unchecked failure here leads to
+  // the silent worker-launch failure / eternal-hang class (2026-06-12). Catch
+  // it at setup with a precise message.
+  //
+  // NOTE on the static term: it is the SUM over all compiled-in task branches,
+  // not the max. ptxas does NOT overlay per-branch statics even when the
+  // branches are mutually exclusive in a dispatch switch. Measured on sm_100a
+  // at production branch count (2026-07-20): 120 template instantiations, each
+  // declaring its own static barrier block, requested 13440 B and ptxas
+  // reported 15360 B — a sum plus alignment padding, not a max (which would
+  // have been ~136 B). All 120 blocks were pairwise DISJOINT and every one sat
+  // BELOW the dynamic arena base. That disjointness is what makes it safe to
+  // keep async-armed mbarriers in static __shared__ (see
+  // tasks/blackwell/fp8_gemm_dense_sm100_common.cuh), and the summing is why
+  // every task branch's static __shared__ must be budgeted against this limit.
+  //
+  // BUDGET STATUS (B200, 61L TP8 DSv3 megakernel, measured 2026-07-20 by
+  // compiling one generated test.cu against both trees with identical flags):
+  //   before the barrier relocation: worker_kernel SHARED = 8192 B
+  //   after:                         worker_kernel SHARED = 9216 B  (+1024)
+  // The device reports sharedMemPerMultiprocessor = 233472 and
+  // MAX_DYNAMIC_SHARED_MEMORY_SIZE = 224256, so 9216 + 224256 = 233472 sits
+  // EXACTLY at the limit: there is now ZERO static headroom on this build.
+  // Adding any further static __shared__ to any task branch will make the
+  // cudaFuncSetAttribute below fail. That failure is loud and precise (it
+  // aborts naming the byte count), NOT the silent worker-launch wedge, so this
+  // is a known-tight budget rather than a latent hazard — but the next author
+  // who needs static __shared__ must first buy headroom back, e.g. by raising
+  // WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE (which lowers
+  // MAX_DYNAMIC_SHARED_MEMORY_SIZE by the same amount). The largest single
+  // arena request today is the FP8 group GEMM at ~220416 B, so roughly 3.8 KB
+  // can be moved from dynamic to static before any task runs out of arena.
   {
     cudaError_t aerr =
         cudaFuncSetAttribute(worker_kernel,

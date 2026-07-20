@@ -6,6 +6,21 @@ on:
   workflow_dispatch:
 
 jobs:
+  async-barrier-placement:
+    # Enforces: an mbarrier armed by an asynchronous agent must never live in the
+    # `extern __shared__` arena that every task body aliases. __syncthreads() at
+    # a task boundary orders threads but drains no async agent, so an
+    # arena-resident barrier lets a late TMA/tcgen05 arrival corrupt the next
+    # task's reused bytes. That defect shipped undetected for months; manual
+    # audit demonstrably could not hold the line, so it is machine-checked here.
+    # Source-only and CPU-only, so it runs on every PR alongside the format check.
+    name: Async-armed mbarrier placement
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check async-armed mbarriers are not arena-resident
+        run: python3 scripts/check_async_barrier_placement.py
+
   formatting-check:
     name: Clang format check
     runs-on: ubuntu-22.04

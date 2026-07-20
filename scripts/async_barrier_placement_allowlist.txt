@@ -1,0 +1,52 @@
+# Files whose mbarriers still resolve back to the `extern __shared__` arena.
+#
+# Checked by scripts/check_async_barrier_placement.py. An entry here is a
+# DEFERRED FIX, not an exoneration: every one of these is structurally capable
+# of the defect described in that script's header (a late async arrival landing
+# in the next task's reused arena bytes). Each needs a written reason, and the
+# check also fails if an entry becomes stale, so the list cannot rot silently.
+#
+# Migrated out of the arena (do NOT re-add): the four FP8-GEMM common bodies,
+# fp8_group_gemm_largem_compact, linear_sm100_mpk, linear_fp8_swapAB_sm100,
+# moe_linear_sm100, fp8_group_gemm_sm100, and the three mla_prefill_tp8*.
+
+# --- Blackwell (sm_100a) -----------------------------------------------------
+
+# Arming sites are real (s_rp_mbar / s_pipe_full via cp.async.mbarrier.arrive)
+# and DO dangle, but the whole warp-specialized region is inside
+# `#if defined(MPK_DSV3_FFN_WS_PAGES)`, derived from the env var
+# MPK_DSV3_FFN_WARPSPEC, which is default-OFF: the shipped megakernel compiles
+# ZERO arming sites from this file. MUST be migrated before that lever is ever
+# defaulted ON. A separate count mismatch also needs fixing first
+# (ws_loader_prologue arms all WS_NUM_RPAGES pages under a CTA-level guard while
+# the consumer waits only under `t < ROUTER_N * RKSPLIT`, so boundary CTAs arm
+# pages nobody waits).
+include/mirage/persistent_kernel/tasks/blackwell/ffn_full_megakernel_sm100.cuh
+
+# Barriers are CUTLASS pipeline storage reached through a PatternVisitor over
+# `smem_buffer`, so hoisting them means restructuring the pipeline rather than
+# redirecting a pointer -- a larger change than the rest of this fix. It is
+# registered (graph.cc:838) and compiled into the TU, but the DeepSeek-V3
+# builder routes through linear_fp8_swapAB_sm100 (which IS migrated), so it is
+# not exercised on the model path this fix was validated against. Deferred, not
+# safe: any model that does dispatch it is exposed.
+include/mirage/persistent_kernel/tasks/blackwell/linear_fp8_sm100.cuh
+
+# --- Hopper (sm_90a) ---------------------------------------------------------
+# Not compiled into any sm_100a megakernel, so none of these is on the validated
+# path. All are the same shape: TMA `expect_tx` barriers only, no
+# tcgen05.commit, and each arm is audited 1:1 with a wait, so no arrival should
+# outlive the task. That is an inspection argument of exactly the kind that
+# failed for the FP8-GEMM family, so these remain listed rather than closed.
+# They should be migrated when the Hopper path is next touched.
+include/mirage/persistent_kernel/tasks/hopper/linear_hopper.cuh
+include/mirage/persistent_kernel/tasks/hopper/linear_swapAB_hopper.cuh
+include/mirage/persistent_kernel/tasks/hopper/matmul_demo_hopper.cuh
+include/mirage/persistent_kernel/tasks/hopper/moe_linear_swapAB_hopper.cuh
+include/mirage/persistent_kernel/tasks/hopper/multitoken_paged_attention_hopper.cuh
+include/mirage/persistent_kernel/tasks/hopper/norm_linear_hopper.cuh
+
+# CUTLASS warp-specialised GEMM helper on the Hopper path; its pipeline storage
+# (and therefore its barriers) is placed in the arena by the CuTe pipeline
+# types. Same reasoning and same deferral as the hopper/ entries above.
+include/mirage/persistent_kernel/tasks/cute/hopper/gemm_ws_cooperative.cuh

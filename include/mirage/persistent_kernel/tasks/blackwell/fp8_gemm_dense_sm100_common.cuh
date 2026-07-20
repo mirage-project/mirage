@@ -124,12 +124,69 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
   auto sA = [&](int s) { return sb_aligned + s * SA; };
   auto sBl = [&](int s) { return sb_aligned + NS * SA + s * SB; };
 
-  int bars_addr = sb_aligned + NS * (SA + SB);
+  // ------------------------------------------------------------------------
+  // ASYNC-AGENT SAFETY (2026-07-20): the mbarrier array and the TMEM
+  // allocation slot live in STATIC __shared__, deliberately NOT in the
+  // `extern __shared__` arena.
+  //
+  // Every task body's `extern __shared__` declaration aliases ONE arena at ONE
+  // base, and a persistent worker CTA runs heterogeneous tasks back-to-back
+  // separated only by __syncthreads(). __syncthreads() orders THREADS; it
+  // drains no ASYNCHRONOUS agent. A `tcgen05.commit ... mbarrier::arrive` (and
+  // a TMA expect_tx completion) keeps writing an mbarrier's state word after
+  // the issuing task has nominally ended, so an arena-resident barrier lets a
+  // late arrival land in memory the NEXT task has already reused. Whether that
+  // faults or corrupts silently depends only on what occupies that byte.
+  //
+  // This kernel has a provably dangling agent. Warp 1 commits to `be[s]` at the
+  // bottom of its MMA loop; the ONLY waiter is warp 0's `mb_wait(be + s*8)` at
+  // the TOP of an iteration that never runs once warp 0's loop has exited.
+  // Per stage the wait at ring index n unblocks after exactly n arrivals, and
+  // both warps perform the same number of iterations, so exactly ONE arrival
+  // per stage — NS in total — outlives the task body.
+  //
+  // Static __shared__ is not part of the arena. nvcc SUMS per-branch statics
+  // rather than overlaying them, and places them BELOW the dynamic arena base
+  // (measured on sm_100a: six distinct <BN,NS,NE> instantiations received six
+  // distinct, non-overlapping addresses, every one of them below the arena
+  // base). These bytes therefore belong to this template instantiation alone:
+  // a late arrival lands on storage no other task ever reads or writes, which
+  // closes the hazard with NO phase arithmetic and NO added wait. The MLA
+  // decode family already used this idiom (mla_decode_sm100.cuh's
+  // `__shared__ uint64_t mbar_buf[10]`), which is where it was copied from.
+  //
+  // Do NOT assert a global "every kernel is safe" invariant from a comment --
+  // an earlier round of this same investigation shipped three such comments
+  // that turned out to be wrong. The invariant is machine-checked instead:
+  // scripts/check_async_barrier_placement.py fails the build if any mbarrier
+  // operand resolves back to an `extern __shared__` symbol, and carries an
+  // allowlist of the remaining exceptions with written reasons.
+  //
+  // The arena's trailing barrier bytes are now unused; smem_size_tpl() still
+  // reserves them, which is deliberate slack (see the note there).
+  __shared__ __align__(16) uint64_t sm_bars_fp8gemm[NS * 2 + NE * 2 + 1];
+  int bars_addr = static_cast<int>(__cvta_generic_to_shared(sm_bars_fp8gemm));
   int bf = bars_addr;
   int be = bf + NS * 8;
   int btf = be + NS * 8;
   int bte = btf + NE * 8;
   int tp_addr = bars_addr + (NS * 2 + NE * 2) * 8;
+#ifdef MPK_DSV3_ASYNC_BAR_ARENA_UNSAFE
+  // FAULT INJECTION (default OFF, never ship enabled). Puts this family's
+  // barrier block back in the arena, restoring the defect. The sibling
+  // fp8_gemm_dense_qout body does the same under this macro, and both share the
+  // SAME `sm_raw_fp8gemm` extern symbol and layout formula, so enabling it
+  // restores the exact observed collision: byte 64 of the block is
+  // simultaneously NE=1's tp_addr, NE=2's bte[0] and NE=4's btf[2]. With this
+  // ON the canary and Class-2 probes must FIRE; with it OFF they must be
+  // silent. Without the control, "the canary was silent" is unfalsifiable.
+  bars_addr = sb_aligned + NS * (SA + SB);
+  bf = bars_addr;
+  be = bf + NS * 8;
+  btf = be + NS * 8;
+  bte = btf + NE * 8;
+  tp_addr = bars_addr + (NS * 2 + NE * 2) * 8;
+#endif
   constexpr int TC = NE * BN;
   constexpr int TCA = TC <= 32    ? 32
                       : TC <= 64  ? 64
@@ -190,6 +247,36 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
   __syncthreads();
   uint32_t taddr;
   asm volatile("ld.shared.u32 %0, [%1];" : "=r"(taddr) : "r"(tp_addr));
+#ifdef MPK_DSV3_TMEM_GUARD_ALL
+  // DIAGNOSTIC (compile-time, default OFF). The sibling fp8_gemm_dense_qout
+  // kernel validates this base and traps; this one does not, so a base that
+  // tcgen05.alloc never published (0xDEADBEEF) or that was clobbered goes
+  // straight into tcgen05.mma and yields SILENT garbage rather than a fault.
+  // Enabling this turns that silent corruption into a named failure, which is
+  // how we test whether the degenerate-output class shares the cause of the
+  // seq>2048 fault (where the qout guard is the believed trap source).
+  if (!((taddr >> 16) < 128u && ((taddr & 0xFFFFu) + (uint32_t)TCA) <= 512u)) {
+    if (wid == 0 && elect_one_sync()) {
+      printf("[MPK FATAL] fp8_gemm_dense: invalid TMEM base 0x%08x (requested "
+             "%d cols) on block %d. 0xdeadbeef means tcgen05.alloc never wrote "
+             "the slot; any other value means it was overwritten.\n",
+             taddr,
+             (int)TCA,
+             (int)blockIdx.x);
+    }
+#ifdef MPK_DSV3_TMEM_GUARD_NOTRAP
+    // Diagnostic mode: do NOT trap. A trapping megakernel never exits, and the
+    // printf FIFO only flushes when it FILLS or when the CTA EXITS -- the
+    // driver floors the FIFO at 524288 B, which a handful of guard lines never
+    // fills, so trapping makes the guard structurally unable to report. Force a
+    // legal TMEM base instead: the math is wrong, but the CTA exits, the FIFO
+    // flushes, and we learn whether the guard fired at all and with what value.
+    taddr = 0u;
+#else
+    __trap();
+#endif
+  }
+#endif
   constexpr uint32_t idesc =
       (1u << 4) | ((uint32_t)(BN / 8) << 17) | (8u << 24);
 

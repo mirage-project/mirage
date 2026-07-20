@@ -70,6 +70,13 @@ __device__ __forceinline__ uint32_t elect_one_sync() {
                : "r"(0xFFFFFFFF));
   return pred;
 }
+#ifdef MPK_DSV3_CLASS2_PROBE
+// Global count of Class-2 hits (async mbarrier state found in live activation
+// bytes). Rate-limits the probe printf; ZERO is the acceptance signal.
+__device__ unsigned int mpk_class2_probe_hits = 0;
+__device__ unsigned int mpk_class2_clean_reports = 0;
+#endif
+
 __device__ __forceinline__ void mb_init(int a, int c) {
   asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(a), "r"(c));
 }
@@ -177,8 +184,19 @@ __device__ __noinline__ void task_impl_tpl(
   auto sSFB_addr = [&](int s) {
     return sb_aligned + SCD_TOT + NS * (SA + SB) + NS * SFA_SIZE + s * SFB_SIZE;
   };
-  int bar_base = sb_aligned + SCD_TOT + NS * (SA + SB + SFA_SIZE + SFB_SIZE);
-  bar_base = (bar_base + 7) & ~7;
+  // ASYNC-AGENT SAFETY (2026-07-20): mbarriers + the TMEM allocation slot live
+  // in STATIC __shared__, NOT in the `extern __shared__` arena. Rationale in
+  // fp8_gemm_dense_sm100_common.cuh: __syncthreads() (and the `bar.sync 10,
+  // 256` at the end of this body) orders THREADS but drains no ASYNCHRONOUS
+  // agent, so an arena-resident barrier lets a `tcgen05.commit` arrival or a
+  // TMA expect_tx completion land in memory the NEXT task has already reused.
+  // This kernel is on BOTH sides of the observed collision: its own barriers
+  // could outlive it, and its sA(5) activation tile occupied exactly the arena
+  // bytes [98304, 98384) that the dense FP8-GEMM family used for bf/be/btf.
+  // Static __shared__ is summed per branch and placed below the arena base, so
+  // these bytes belong to this <BN,NS> instantiation alone.
+  __shared__ __align__(16) uint64_t sm_bars_fp8group[NS * 3 + NE * 2 + 1];
+  int bar_base = static_cast<int>(__cvta_generic_to_shared(sm_bars_fp8group));
   int bf = bar_base;
   int be = bf + NS * 8;
   int bsf = be + NS * 8;
@@ -256,6 +274,54 @@ __device__ __noinline__ void task_impl_tpl(
   __syncthreads();
   uint32_t taddr;
   asm volatile("ld.shared.u32 %0, [%1];" : "=r"(taddr) : "r"(tp_addr));
+#ifdef MPK_DSV3_CLASS2_PROBE
+  // SCRUB half of scrub-then-check. Stamp an INDEXED sentinel over
+  // [arena+98304, +98384) at task ENTRY, before this task's pipeline touches
+  // those bytes.
+  //
+  // WHY THIS IS REQUIRED: without it the end-of-task read cannot distinguish
+  // "a foreign async write landed here during this task" from "the PREVIOUS
+  // dense task's mbarrier array is simply still sitting here, never
+  // overwritten". Those are very different claims and the benign-residue null
+  // actually predicts ~10 of 20 words hold state values (one per 8-byte
+  // barrier across 80 bytes) -- MORE than the 2-8/20 observed. Comparing
+  // against a random-FP8 null (2^-20/word) was the wrong null and made a
+  // residue reading look like six orders of magnitude of signal.
+  if (wid == 0 && elect_one_sync()) {
+    for (int w = 0; w < 20; w++) {
+      asm volatile("st.shared.u32 [%0], %1;" ::"r"(sb_aligned + 98304 + w * 4),
+                   "r"(0xDEADBE00u | (unsigned)w)
+                   : "memory");
+    }
+  }
+  __syncthreads();
+#endif
+#ifdef MPK_DSV3_TMEM_GUARD_ALL
+  // DIAGNOSTIC (compile-time, default OFF) -- see the matching note in
+  // fp8_gemm_dense_sm100_common.cuh. This is the routed-MoE group GEMM, so an
+  // unpublished TMEM base here corrupts expert output silently.
+  if (!((taddr >> 16) < 128u && ((taddr & 0xFFFFu) + (uint32_t)TCA) <= 512u)) {
+    if (wid == 0 && elect_one_sync()) {
+      printf("[MPK FATAL] fp8_group_gemm: invalid TMEM base 0x%08x (requested "
+             "%d cols) on block %d. 0xdeadbeef means tcgen05.alloc never wrote "
+             "the slot; any other value means it was overwritten.\n",
+             taddr,
+             (int)TCA,
+             (int)blockIdx.x);
+    }
+#ifdef MPK_DSV3_TMEM_GUARD_NOTRAP
+    // Diagnostic mode: do NOT trap. A trapping megakernel never exits, and the
+    // printf FIFO only flushes when it FILLS or when the CTA EXITS -- the
+    // driver floors the FIFO at 524288 B, which a handful of guard lines never
+    // fills, so trapping makes the guard structurally unable to report. Force a
+    // legal TMEM base instead: the math is wrong, but the CTA exits, the FIFO
+    // flushes, and we learn whether the guard fired at all and with what value.
+    taddr = 0u;
+#else
+    __trap();
+#endif
+  }
+#endif
 
   if (wid < 4) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 64;");
@@ -558,6 +624,75 @@ __device__ __noinline__ void task_impl_tpl(
   // still be reading TMEM), then deallocate from warp 0 -- the same warp that
   // allocated.
   asm volatile("bar.sync 10, 256;");
+#ifdef MPK_DSV3_CLASS2_PROBE
+  // CLASS-2 PROBE. The dense FP8-GEMM family's ASYNC-armed barriers (bf/be/btf,
+  // signalled by TMA expect_tx completion and tcgen05.commit mbarrier::arrive)
+  // occupy absolute bytes [98304, 98384) of the shared arena. That range is
+  // EXACTLY this task's sA_addr(5) = sb_aligned + SCD_TOT + 5*SA
+  // = sb_aligned + 16384 + 81920 -- live FP8 activation data. Every extern
+  // __shared__ declaration aliases ONE arena at ONE base, so a late arrival
+  // issued by a PREVIOUS dense task lands here while THIS task owns the bytes,
+  // silently corrupting activations instead of faulting. That is the Class-2
+  // hazard and the leading remaining candidate for the degenerate-output
+  // blocker (the Class-1 TMEM-slot clobber was excluded by run Q).
+  //
+  // Detection: mbarrier state words satisfy low32 = 0x00200000 - 2*pending, so
+  // for pending in [1,128] they land in [0x001fff00, 0x001fffff]. Packed FP8
+  // activations hit that 20-bit pattern with probability ~2^-20 per word, so a
+  // LARGE count is decisive while a handful is expected noise.
+  // CHECK half of scrub-then-check. Classify each word into THREE buckets --
+  // two buckets cannot separate the hypotheses:
+  //   intact  (0xDEADBE00|w) -> nobody wrote it during this task
+  //   mbar    ([0x001fff00,0x001fffff]) -> a FOREIGN async arrival landed here
+  //                                        DURING this task (the real signal)
+  //   other   -> this task's own TMA payload overwrote it (normal)
+  // Only `mbar` supports the Class-2 claim, and only because the scrub
+  // guarantees the value was NOT already there at task entry.
+  if (wid == 0 && elect_one_sync()) {
+    int probe_base = sb_aligned + 98304;
+    int intact = 0, mbar = 0, other = 0;
+    uint32_t sample = 0;
+    for (int w = 0; w < 20; w++) {
+      uint32_t v;
+      asm volatile("ld.shared.u32 %0, [%1];"
+                   : "=r"(v)
+                   : "r"(probe_base + w * 4));
+      if (v == (0xDEADBE00u | (unsigned)w)) {
+        intact++;
+      } else if (v >= 0x001fff00u && v <= 0x001fffffu) {
+        mbar++;
+        sample = v;
+      } else {
+        other++;
+      }
+    }
+    if (mbar > 0) {
+      unsigned int n = atomicAdd(&mpk_class2_probe_hits, (unsigned int)mbar);
+      if (n < 16u) {
+        printf("[MPK CLASS2] fp8_group_gemm: intact=%d mbar=%d other=%d of 20 "
+               "at arena+98304; sample=0x%08x (pending=%d) blk %d -- mbar>0 "
+               "means a FOREIGN async arrival landed after this task's scrub\n",
+               intact,
+               mbar,
+               other,
+               sample,
+               (int)((0x00200000u - sample) / 2u),
+               (int)blockIdx.x);
+      }
+    } else {
+      // Report the benign classification once so "no hits" is distinguishable
+      // from "the probe never ran".
+      unsigned int n = atomicAdd(&mpk_class2_clean_reports, 1u);
+      if (n < 8u) {
+        printf("[MPK CLASS2] fp8_group_gemm: CLEAN intact=%d mbar=0 other=%d "
+               "of 20 at arena+98304 on blk %d\n",
+               intact,
+               other,
+               (int)blockIdx.x);
+      }
+    }
+  }
+#endif
   if (wid == 0) {
     asm volatile(
         "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr),

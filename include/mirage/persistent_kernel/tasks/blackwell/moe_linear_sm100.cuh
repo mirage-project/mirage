@@ -260,35 +260,51 @@ __device__ __forceinline__ void
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
 
+  // ASYNC-AGENT SAFETY (2026-07-20): mbarriers + the TMEM allocation slot live
+  // in STATIC __shared__, deliberately NOT in the `extern __shared__` arena
+  // that `shared_storage` aliases. __syncthreads() orders THREADS but drains no
+  // ASYNCHRONOUS agent, so an arena-resident barrier can take a late TMA
+  // expect_tx completion or `tcgen05.commit ... mbarrier::arrive` after this
+  // task ended, landing in bytes the NEXT task already reused. nvcc sums static
+  // __shared__ per branch and places it below the arena base, so these bytes
+  // belong to this instantiation alone. Full rationale:
+  // fp8_gemm_dense_sm100_common.cuh; see also `PipedBarriers` in storage.cuh.
+  __shared__ alignas(16) cute::uint64_t sm_a_full_mbar[NUM_AB_STAGE];
+  __shared__ alignas(16) cute::uint64_t sm_b_full_mbar[NUM_AB_STAGE];
+  __shared__ alignas(16) cute::uint64_t sm_ab_empty_mbar[NUM_AB_STAGE];
+  __shared__ alignas(16) cute::uint64_t sm_acc_full_mbar[NUM_ACC_STAGE];
+  __shared__ alignas(16) cute::uint64_t sm_acc_empty_mbar[NUM_ACC_STAGE];
+  __shared__ alignas(16) cute::uint32_t sm_tmem_base;
+
   // Initialize the barriers in shared memory
   if (warp_idx == 0) {
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterTransactionBarrier,
-        NUM_AB_STAGE>(shared_storage.a_full_mbar_ptr,
+        NUM_AB_STAGE>(sm_a_full_mbar,
                       /* arrival count
                        */
                       1);
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterTransactionBarrier,
-        NUM_AB_STAGE>(shared_storage.b_full_mbar_ptr,
+        NUM_AB_STAGE>(sm_b_full_mbar,
                       /* arrival count
                        */
                       32);
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterBarrier,
-        NUM_AB_STAGE>(shared_storage.ab_empty_mbar_ptr,
+        NUM_AB_STAGE>(sm_ab_empty_mbar,
                       /* arrival count
                        */
                       1);
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterBarrier,
-        NUM_ACC_STAGE>(shared_storage.acc_full_mbar_ptr,
+        NUM_ACC_STAGE>(sm_acc_full_mbar,
                        /* arrival count
                         */
                        1);
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterBarrier,
-        NUM_ACC_STAGE>(shared_storage.acc_empty_mbar_ptr,
+        NUM_ACC_STAGE>(sm_acc_empty_mbar,
                        /* arrival count */ 4);
   }
 
@@ -356,8 +372,7 @@ __device__ __forceinline__ void
 
   T_ *shared_weight = shared_storage.A.begin();
 
-  Barrier *a_full_mbar_ptr =
-      reinterpret_cast<Barrier *>(shared_storage.a_full_mbar_ptr);
+  Barrier *a_full_mbar_ptr = reinterpret_cast<Barrier *>(sm_a_full_mbar);
 
   using WeightSmem = smem_tma<T_,
                               B,
@@ -499,8 +514,7 @@ __device__ __forceinline__ void
               (num_prev_k_blk + tma_wr_k_tile) / NUM_AB_STAGE % 2 ^ 1;
 
           bool peek_ab_empty_status = ::kernel::try_wait_barrier(
-              shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-              tma_wr_ab_empty_phase);
+              sm_ab_empty_mbar[smem_wr_buffer], tma_wr_ab_empty_phase);
 
           // CUTE_UNROLL
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
@@ -514,9 +528,8 @@ __device__ __forceinline__ void
 
             // Wait for an empty buffer
             if (!peek_ab_empty_status) {
-              cute::wait_barrier(
-                  shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-                  tma_wr_ab_empty_phase);
+              cute::wait_barrier(sm_ab_empty_mbar[smem_wr_buffer],
+                                 tma_wr_ab_empty_phase);
             }
 
             // TMA for loading A
@@ -529,8 +542,7 @@ __device__ __forceinline__ void
                                                       OUTPUT_ATOM_SIZE *
                                                       TILE_SIZE);
               cute::set_barrier_transaction_bytes(
-                  shared_storage.a_full_mbar_ptr[smem_wr_buffer],
-                  tma_transaction_bytes_A);
+                  sm_a_full_mbar[smem_wr_buffer], tma_transaction_bytes_A);
               tma_a.tma_cp_async(a_full_mbar_ptr[smem_wr_buffer],
                                  weight_smem.base_ptr,
                                  tma_coords_A);
@@ -552,11 +564,11 @@ __device__ __forceinline__ void
             }
 
             cutlass::arch::cpasync_barrier_arrive_noinc(
-                &shared_storage.b_full_mbar_ptr[smem_wr_buffer]);
+                &sm_b_full_mbar[smem_wr_buffer]);
 
             if (tma_wr_k_tile_next < k_tile_count) {
               peek_ab_empty_status = ::kernel::try_wait_barrier(
-                  shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
+                  sm_ab_empty_mbar[smem_wr_buffer_next],
                   tma_wr_ab_empty_phase_next);
             }
 
@@ -573,7 +585,7 @@ __device__ __forceinline__ void
 
     // Wait for TMEM allocation to complete
     tmem_allocation_result_barrier.arrive_and_wait();
-    tCtAcc.data() = shared_storage.tmem_base_ptr;
+    tCtAcc.data() = sm_tmem_base;
 
     int total_k_tile_count = 0;
     int num_tiles_executed = 0;
@@ -596,15 +608,12 @@ __device__ __forceinline__ void
 
           // Peek full phase
           bool peek_a_full_status = ::kernel::try_wait_barrier(
-              shared_storage.a_full_mbar_ptr[smem_rd_buffer],
-              mma_rd_ab_full_phase);
+              sm_a_full_mbar[smem_rd_buffer], mma_rd_ab_full_phase);
           bool peek_b_full_status = ::kernel::try_wait_barrier(
-              shared_storage.b_full_mbar_ptr[smem_rd_buffer],
-              mma_rd_ab_full_phase);
+              sm_b_full_mbar[smem_rd_buffer], mma_rd_ab_full_phase);
 
           int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
-          cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
-                             acc_empty_phase);
+          cute::wait_barrier(sm_acc_empty_mbar[acc_buf_idx], acc_empty_phase);
 
           // Initialize the accumulator to zero
           tiled_mma.accumulate_ = cute::UMMA::ScaleOut::Zero;
@@ -618,12 +627,12 @@ __device__ __forceinline__ void
                                                 : mma_rd_ab_full_phase;
 
             if (!peek_a_full_status) {
-              cute::wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buffer],
+              cute::wait_barrier(sm_a_full_mbar[smem_rd_buffer],
                                  mma_rd_ab_full_phase);
             }
 
             if (!peek_b_full_status) {
-              cute::wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buffer],
+              cute::wait_barrier(sm_b_full_mbar[smem_rd_buffer],
                                  mma_rd_ab_full_phase);
             }
 
@@ -636,15 +645,14 @@ __device__ __forceinline__ void
               tiled_mma.accumulate_ = cute::UMMA::ScaleOut::One;
             }
 
-            cutlass::arch::umma_arrive(
-                &shared_storage.ab_empty_mbar_ptr[smem_rd_buffer]);
+            cutlass::arch::umma_arrive(&sm_ab_empty_mbar[smem_rd_buffer]);
 
             if (mma_rd_k_tile_next < k_tile_count) {
               peek_a_full_status = ::kernel::try_wait_barrier(
-                  shared_storage.a_full_mbar_ptr[smem_rd_buffer_next],
+                  sm_a_full_mbar[smem_rd_buffer_next],
                   mma_rd_ab_full_phase_next);
               peek_b_full_status = ::kernel::try_wait_barrier(
-                  shared_storage.b_full_mbar_ptr[smem_rd_buffer_next],
+                  sm_b_full_mbar[smem_rd_buffer_next],
                   mma_rd_ab_full_phase_next);
             }
 
@@ -654,8 +662,7 @@ __device__ __forceinline__ void
 
           } // end for k_tile
 
-          cutlass::arch::umma_arrive(
-              &shared_storage.acc_full_mbar_ptr[acc_buf_idx]);
+          cutlass::arch::umma_arrive(&sm_acc_full_mbar[acc_buf_idx]);
           num_tiles_executed++;
 
         } // end for n_tile
@@ -666,10 +673,10 @@ __device__ __forceinline__ void
 
     // Allocate TMEM for accumulators
     if (warp_idx == 0) {
-      tmem_allocator.allocate(num_tmem_columns, &shared_storage.tmem_base_ptr);
+      tmem_allocator.allocate(num_tmem_columns, &sm_tmem_base);
     }
     tmem_allocation_result_barrier.arrive_and_wait();
-    tCtAcc.data() = shared_storage.tmem_base_ptr;
+    tCtAcc.data() = sm_tmem_base;
 
     using TypeBias = T_;
     using TypeC = T_;
@@ -705,7 +712,7 @@ __device__ __forceinline__ void
     //   cute::print("tCtAcc:\t");
     //   cute::print(tCtAcc);
     //   cute::print("\n");
-    //   printf("tmem_base_ptr: %u\n", shared_storage.tmem_base_ptr);
+    //   printf("tmem_base_ptr: %u\n", sm_tmem_base);
     // } epilogue_wg_barrier.arrive_and_wait();
 
     int num_tiles_executed = 0;
@@ -771,8 +778,7 @@ __device__ __forceinline__ void
             }
           }
 
-          cute::wait_barrier(shared_storage.acc_full_mbar_ptr[acc_buf_idx],
-                             acc_full_phase);
+          cute::wait_barrier(sm_acc_full_mbar[acc_buf_idx], acc_full_phase);
           // T2R copy
           cute::copy(tiled_copy_t2r,
                      tTR_tAcc(cute::_, cute::_, cute::_, cute::_, acc_buf_idx),
@@ -781,8 +787,7 @@ __device__ __forceinline__ void
           // arrive acc empty buffer
           epilogue_wg_barrier.arrive_and_wait();
           if (cute::elect_one_sync()) {
-            cute::arrive_barrier(
-                shared_storage.acc_empty_mbar_ptr[acc_buf_idx]);
+            cute::arrive_barrier(sm_acc_empty_mbar[acc_buf_idx]);
           }
 
           if constexpr (!NOBIAS) {
@@ -818,7 +823,7 @@ __device__ __forceinline__ void
   if (warp_idx == 0) {
     // don't do relinquish for megakernel
     // tmem_allocator.release_allocation_lock();
-    tmem_allocator.free(shared_storage.tmem_base_ptr, num_tmem_columns);
+    tmem_allocator.free(sm_tmem_base, num_tmem_columns);
   }
 
 } // end moe_linear_sm100_task_impl

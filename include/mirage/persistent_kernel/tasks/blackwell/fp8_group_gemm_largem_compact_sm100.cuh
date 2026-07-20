@@ -228,10 +228,20 @@ __device__
                         s * SFB_SIZE);
   };
 
-  int bar_base = SCD_TOT + NS * (SA + SB + SFA_SIZE + SFB_SIZE);
-  bar_base = (bar_base + 7) & ~7;
-  auto bars = reinterpret_cast<uint64_t *>(sm + bar_base);
-  int bf = __cvta_generic_to_shared(bars);
+  // ASYNC-AGENT SAFETY (2026-07-20): mbarriers + the TMEM allocation slot live
+  // in STATIC __shared__, NOT in the `extern __shared__` arena. Rationale in
+  // fp8_gemm_dense_sm100_common.cuh: __syncthreads() (and the `bar.sync 10,
+  // 256` at the end of this body) orders THREADS but drains no ASYNCHRONOUS
+  // agent, so an arena-resident barrier lets a `tcgen05.commit` arrival or a
+  // TMA expect_tx completion land in memory the NEXT task has already reused.
+  // `be[]` here is the dangling edge, exactly as in the sibling
+  // fp8_group_gemm_sm100_common.cuh: it is armed once per K-block by the MMA
+  // warp but waited only at the TOP of the loader's loop, which never runs
+  // again once that loop exits. Static __shared__ is summed per branch and
+  // placed below the arena base, so these bytes belong to this task alone.
+  __shared__ __align__(16) uint64_t sm_bars_compact[NS * 3 + NE * 2 + 1];
+  uint64_t *bars = sm_bars_compact;
+  int bf = static_cast<int>(__cvta_generic_to_shared(bars));
   int be = bf + NS * 8;
   int bsf = be + NS * 8;
   int btf = bsf + NS * 8;

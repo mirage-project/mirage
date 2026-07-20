@@ -234,7 +234,19 @@ __device__ __noinline__ void mla_prefill_tp8_sm100_task_impl(
   int kps = sb + KP_OFF;
   int v0s = sb + V0_OFF;
   int v1s = sb + V1_OFF;
-  int mbs = sb + MBAR_OFF;
+  // ASYNC-AGENT SAFETY (2026-07-20): the mbarrier lives in STATIC __shared__,
+  // not in the `extern __shared__` arena. Rationale in
+  // fp8_gemm_dense_sm100_common.cuh: __syncthreads() at a task boundary orders
+  // THREADS but drains no ASYNCHRONOUS agent, so an arena-resident barrier can
+  // take a late TMA expect_tx completion after this task has ended and corrupt
+  // the NEXT task's reused bytes. This kernel's arrivals look 1:1 waited, but
+  // "looks safe on inspection" is exactly what failed for the FP8-GEMM family,
+  // and this is the prefill path where the fault manifests -- so the barrier is
+  // moved out of reach rather than argued safe. The arena still reserves
+  // MBAR_OFF..+16 (harmless slack). Enforced by
+  // scripts/check_async_barrier_placement.py.
+  __shared__ __align__(16) uint64_t sm_mbar_tp8[2];
+  int mbs = static_cast<int>(__cvta_generic_to_shared(sm_mbar_tp8));
   if (tid == 0) {
     mbar_init_1(mbs, 1);
     asm volatile("fence.mbarrier_init.release.cluster;");

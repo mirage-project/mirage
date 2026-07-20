@@ -614,6 +614,23 @@ __device__ __forceinline__ void
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
 
+  // ASYNC-AGENT SAFETY (2026-07-20): mbarriers + the TMEM allocation slot live
+  // in STATIC __shared__, deliberately NOT in the `extern __shared__` arena
+  // that `shared_storage` aliases. __syncthreads() orders THREADS but drains no
+  // ASYNCHRONOUS agent, so an arena-resident barrier can take a late TMA
+  // expect_tx completion or `tcgen05.commit ... mbarrier::arrive` after this
+  // task ended, landing in bytes the NEXT task already reused. nvcc sums static
+  // __shared__ per branch and places it below the arena base, so these bytes
+  // belong to this instantiation alone. Full rationale:
+  // fp8_gemm_dense_sm100_common.cuh; see also `PipedBarriers` in storage.cuh.
+  __shared__ alignas(16) cute::uint64_t sm_a_full_mbar[NUM_AB_STAGE];
+  __shared__ alignas(16) cute::uint64_t sm_b_full_mbar[NUM_AB_STAGE];
+  __shared__ alignas(16) cute::uint64_t sm_ab_empty_mbar[NUM_AB_STAGE];
+  __shared__ alignas(16) cute::uint64_t sm_sf_ready_mbar[NUM_AB_STAGE];
+  __shared__ alignas(16) cute::uint64_t sm_acc_full_mbar[NUM_ACC_STAGE];
+  __shared__ alignas(16) cute::uint64_t sm_acc_empty_mbar[NUM_ACC_STAGE];
+  __shared__ alignas(16) cute::uint32_t sm_tmem_base;
+
   // Identify which warp this thread belongs to (0-7 for 256-thread block).
   // canonical_warp_idx_sync uses __syncwarp to ensure consistent results.
   int warp_idx = cutlass::canonical_warp_idx_sync();
@@ -632,23 +649,23 @@ __device__ __forceinline__ void
   if (warp_idx == 0) {
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterTransactionBarrier,
-        NUM_AB_STAGE>(shared_storage.a_full_mbar_ptr, 1);
+        NUM_AB_STAGE>(sm_a_full_mbar, 1);
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterBarrier,
-        NUM_AB_STAGE>(shared_storage.b_full_mbar_ptr, 32);
+        NUM_AB_STAGE>(sm_b_full_mbar, 32);
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterBarrier,
-        NUM_AB_STAGE>(shared_storage.ab_empty_mbar_ptr, 1);
+        NUM_AB_STAGE>(sm_ab_empty_mbar, 1);
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterBarrier,
-        NUM_ACC_STAGE>(shared_storage.acc_full_mbar_ptr, 1);
+        NUM_ACC_STAGE>(sm_acc_full_mbar, 1);
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterBarrier,
-        NUM_ACC_STAGE>(shared_storage.acc_empty_mbar_ptr, 4);
+        NUM_ACC_STAGE>(sm_acc_empty_mbar, 4);
     // sf_ready: scale warp (warp 6) signals 1 elected thread per stage
     cutlass::arch::detail::initialize_barrier_array_aligned<
         cutlass::arch::ClusterBarrier,
-        NUM_AB_STAGE>(shared_storage.sf_ready_mbar_ptr, 1);
+        NUM_AB_STAGE>(sm_sf_ready_mbar, 1);
   }
 
   // ----------------------------------------------------------------
@@ -657,7 +674,7 @@ __device__ __forceinline__ void
   // tmem_allocation_result_barrier: synchronizes TMEM allocation (done by
   // epilogue warp 0) with all consumers (MMA warp 4 + epilogue warps 0-3).
   // Thread count = 32 (allocator warp) + 128 (4 epilogue warps) = 160.
-  // After this barrier fires, shared_storage.tmem_base_ptr is valid.
+  // After this barrier fires, sm_tmem_base is valid.
   cutlass::arch::NamedBarrier tmem_allocation_result_barrier(
       32 + 128, cutlass::arch::ReservedNamedBarriers::TmemAllocBarrier);
   // epilogue_wg_barrier: synchronizes the 4 epilogue warps (128 threads)
@@ -721,8 +738,7 @@ __device__ __forceinline__ void
   // Barrier for TMA weight loads: ClusterTransactionBarrier tracks the byte
   // count of in-flight TMA transfers (set via set_barrier_transaction_bytes).
   using Barrier = cutlass::arch::ClusterTransactionBarrier;
-  Barrier *a_full_mbar_ptr =
-      reinterpret_cast<Barrier *>(shared_storage.a_full_mbar_ptr);
+  Barrier *a_full_mbar_ptr = reinterpret_cast<Barrier *>(sm_a_full_mbar);
 
   // WeightSmem: CuTe smem_tma wrapper that encodes the shared memory tile
   // layout for TMA. The TMA hardware uses this to map global memory addresses
@@ -744,7 +760,7 @@ __device__ __forceinline__ void
   // This does NOT allocate TMEM; it just computes the fragment shape/layout.
   // The actual TMEM allocation happens later via tmem_allocator.allocate()
   // in the epilogue warp. The base column address is stored in
-  // shared_storage.tmem_base_ptr and assigned to tCtAcc.data() after
+  // sm_tmem_base and assigned to tCtAcc.data() after
   // allocation.
   auto acc_shape = cute::partition_shape_C(
       tiled_mma_bf16,
@@ -838,8 +854,7 @@ __device__ __forceinline__ void
           // this buffer (ab_empty). If yes, we can skip the blocking wait
           // below.
           bool peek_ab_empty_status = ::kernel::try_wait_barrier(
-              shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-              tma_wr_ab_empty_phase);
+              sm_ab_empty_mbar[smem_wr_buffer], tma_wr_ab_empty_phase);
 
           // Inner loop: iterate over K-tiles for this (expert, m_tile, n_tile)
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
@@ -854,9 +869,8 @@ __device__ __forceinline__ void
             // Wait for MMA warp to finish reading this smem buffer (if peek
             // failed)
             if (!peek_ab_empty_status) {
-              cute::wait_barrier(
-                  shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
-                  tma_wr_ab_empty_phase);
+              cute::wait_barrier(sm_ab_empty_mbar[smem_wr_buffer],
+                                 tma_wr_ab_empty_phase);
             }
 
             // ---- TMA WEIGHT LOAD (operand A) ----
@@ -883,8 +897,7 @@ __device__ __forceinline__ void
                                                       TILE_SIZE);
               // Tell the transaction barrier how many bytes to expect
               cute::set_barrier_transaction_bytes(
-                  shared_storage.a_full_mbar_ptr[smem_wr_buffer],
-                  tma_transaction_bytes_A);
+                  sm_a_full_mbar[smem_wr_buffer], tma_transaction_bytes_A);
               // Fire the async TMA copy (hardware handles the rest)
               tma_weight.tma_cp_async(a_full_mbar_ptr[smem_wr_buffer],
                                       weight_smem.base_ptr,
@@ -967,14 +980,14 @@ __device__ __forceinline__ void
             // cpasync_barrier_arrive_noinc: each of 32 lanes arrives at the
             // barrier after its cp.async group is committed.
             cutlass::arch::cpasync_barrier_arrive_noinc(
-                &shared_storage.b_full_mbar_ptr[smem_wr_buffer]);
+                &sm_b_full_mbar[smem_wr_buffer]);
 
             // Lookahead peek: try to check if the NEXT smem buffer is already
             // available (MMA warp consumed it). This overlaps barrier checking
             // with the current K-tile's TMA/cp.async execution.
             if (tma_wr_k_tile_next < k_tile_count) {
               peek_ab_empty_status = ::kernel::try_wait_barrier(
-                  shared_storage.ab_empty_mbar_ptr[smem_wr_buffer_next],
+                  sm_ab_empty_mbar[smem_wr_buffer_next],
                   tma_wr_ab_empty_phase_next);
             }
             // Advance pipeline state to the next K-tile
@@ -1016,14 +1029,14 @@ __device__ __forceinline__ void
   //
   else if (warp_idx == 4) {
     // Wait for TMEM allocation (done by epilogue warp 0) to complete.
-    // After this barrier, shared_storage.tmem_base_ptr is valid.
+    // After this barrier, sm_tmem_base is valid.
     tmem_allocation_result_barrier.arrive_and_wait();
-    tCtAcc.data() = shared_storage.tmem_base_ptr;
+    tCtAcc.data() = sm_tmem_base;
 
     // Compute absolute TMEM column addresses for the three regions.
     // These are column indices within the TMEM allocation, used by UMMA
     // (accumulator destination) and UTCCP (scale factor destination).
-    uint32_t const tmem_base = shared_storage.tmem_base_ptr;
+    uint32_t const tmem_base = sm_tmem_base;
     uint32_t const sfa_tmem = tmem_base + kTmemStartColOfSFA; // weight scales
     uint32_t const sfb_tmem = tmem_base + kTmemStartColOfSFB; // input scales
 
@@ -1126,21 +1139,18 @@ __device__ __forceinline__ void
               (num_prev_k_blk + mma_rd_k_tile) / NUM_AB_STAGE % 2;
 
           // Optimistic peeks: check if A/B/scales are already ready
-          bool peek_a = ::kernel::try_wait_barrier(
-              shared_storage.a_full_mbar_ptr[smem_rd_buf],
-              mma_rd_ab_full_phase);
-          bool peek_b = ::kernel::try_wait_barrier(
-              shared_storage.b_full_mbar_ptr[smem_rd_buf],
-              mma_rd_ab_full_phase);
+          bool peek_a = ::kernel::try_wait_barrier(sm_a_full_mbar[smem_rd_buf],
+                                                   mma_rd_ab_full_phase);
+          bool peek_b = ::kernel::try_wait_barrier(sm_b_full_mbar[smem_rd_buf],
+                                                   mma_rd_ab_full_phase);
           int sf_phase = (num_prev_k_blk) / NUM_AB_STAGE % 2;
           bool peek_sf = ::kernel::try_wait_barrier(
-              shared_storage.sf_ready_mbar_ptr[smem_rd_buf], sf_phase);
+              sm_sf_ready_mbar[smem_rd_buf], sf_phase);
 
           // Wait for epilogue to finish reading the previous accumulator in
           // this buffer slot before we overwrite it with new UMMA results.
           int acc_empty_phase = num_tiles_executed / NUM_ACC_STAGE % 2 ^ 1;
-          cute::wait_barrier(shared_storage.acc_empty_mbar_ptr[acc_buf_idx],
-                             acc_empty_phase);
+          cute::wait_barrier(sm_acc_empty_mbar[acc_buf_idx], acc_empty_phase);
 
           // first_tile: controls whether the UMMA accumulates (1) or overwrites
           // (0). The first K-tile's first sub-tile clears the accumulator; all
@@ -1160,18 +1170,17 @@ __device__ __forceinline__ void
             // Wait for DMA warp to finish loading this K-tile's A/B data into
             // smem
             if (!peek_a) {
-              cute::wait_barrier(shared_storage.a_full_mbar_ptr[smem_rd_buf],
+              cute::wait_barrier(sm_a_full_mbar[smem_rd_buf],
                                  mma_rd_ab_full_phase);
             }
             if (!peek_b) {
-              cute::wait_barrier(shared_storage.b_full_mbar_ptr[smem_rd_buf],
+              cute::wait_barrier(sm_b_full_mbar[smem_rd_buf],
                                  mma_rd_ab_full_phase);
             }
 
             // Wait for scale warp (warp 6) to finish transpose (if peek failed)
             if (!peek_sf) {
-              cute::wait_barrier(shared_storage.sf_ready_mbar_ptr[smem_rd_buf],
-                                 sf_phase);
+              cute::wait_barrier(sm_sf_ready_mbar[smem_rd_buf], sf_phase);
             }
 
             // ============================================================
@@ -1285,22 +1294,18 @@ __device__ __forceinline__ void
             // outstanding UMMA instructions to complete before arriving.
             // This ensures the DMA warp won't overwrite smem data that UMMA
             // is still reading asynchronously.
-            cutlass::arch::umma_arrive(
-                &shared_storage.ab_empty_mbar_ptr[smem_rd_buf]);
+            cutlass::arch::umma_arrive(&sm_ab_empty_mbar[smem_rd_buf]);
 
             // Lookahead peek for the next K-tile's A/B/scale data
             if (mma_rd_k_tile_next < k_tile_count) {
               peek_a = ::kernel::try_wait_barrier(
-                  shared_storage.a_full_mbar_ptr[smem_rd_buf_next],
-                  mma_rd_ab_full_phase_next);
+                  sm_a_full_mbar[smem_rd_buf_next], mma_rd_ab_full_phase_next);
               peek_b = ::kernel::try_wait_barrier(
-                  shared_storage.b_full_mbar_ptr[smem_rd_buf_next],
-                  mma_rd_ab_full_phase_next);
+                  sm_b_full_mbar[smem_rd_buf_next], mma_rd_ab_full_phase_next);
               int sf_phase_next =
                   (num_prev_k_blk + mma_rd_k_tile_next) / NUM_AB_STAGE % 2;
               peek_sf = ::kernel::try_wait_barrier(
-                  shared_storage.sf_ready_mbar_ptr[smem_rd_buf_next],
-                  sf_phase_next);
+                  sm_sf_ready_mbar[smem_rd_buf_next], sf_phase_next);
               sf_phase = sf_phase_next;
             }
 
@@ -1314,8 +1319,7 @@ __device__ __forceinline__ void
           // accumulated. Signal the epilogue that the accumulator is ready to
           // read. umma_arrive ensures all UMMA writes to the accumulator TMEM
           // columns are complete before the epilogue reads them.
-          cutlass::arch::umma_arrive(
-              &shared_storage.acc_full_mbar_ptr[acc_buf_idx]);
+          cutlass::arch::umma_arrive(&sm_acc_full_mbar[acc_buf_idx]);
           num_tiles_executed++;
         } // end n_tile loop
       }   // end m_tile loop
@@ -1364,7 +1368,7 @@ __device__ __forceinline__ void
             // gates scale warp against the UTCCP read.
             int sf_wr_ab_empty_phase =
                 (num_prev_k_blk + k_tile) / NUM_AB_STAGE % 2 ^ 1;
-            cute::wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_buf],
+            cute::wait_barrier(sm_ab_empty_mbar[smem_buf],
                                sf_wr_ab_empty_phase);
 
             // ---- Load + convert + pack SFA (weight scales) ----
@@ -1410,7 +1414,7 @@ __device__ __forceinline__ void
 
             // ---- Signal MMA warp that scales are ready ----
             if (cute::elect_one_sync()) {
-              cute::arrive_barrier(shared_storage.sf_ready_mbar_ptr[smem_buf]);
+              cute::arrive_barrier(sm_sf_ready_mbar[smem_buf]);
             }
           } // end k_tile loop
         }   // end n_tile loop
@@ -1440,15 +1444,15 @@ __device__ __forceinline__ void
   else if (warp_idx < 4) {
     // ---- TMEM ALLOCATION (warp 0 only) ----
     // Allocate TMEM columns for accumulators + scale factors.
-    // The base column address is stored in shared_storage.tmem_base_ptr
+    // The base column address is stored in sm_tmem_base
     // and broadcast to all warps via the tmem_allocation_result_barrier.
     if (warp_idx == 0) {
-      tmem_allocator.allocate(kNumTmemColsTotal, &shared_storage.tmem_base_ptr);
+      tmem_allocator.allocate(kNumTmemColsTotal, &sm_tmem_base);
     }
     // Wait for allocation to complete, then set the TMEM fragment's base
     // address.
     tmem_allocation_result_barrier.arrive_and_wait();
-    tCtAcc.data() = shared_storage.tmem_base_ptr;
+    tCtAcc.data() = sm_tmem_base;
 
     // ---- TMEM LOAD AND CONVERSION SETUP ----
     // CuTe provides SM100_TMEM_LOAD_32dp32b1x: a hardware instruction that
@@ -1496,8 +1500,7 @@ __device__ __forceinline__ void
               cute::make_tensor<TypeC>(cute::shape(tTR_rAcc(0, cute::_, 0, 0)));
 
           // Wait for MMA warp to finish accumulating all K-tiles
-          cute::wait_barrier(shared_storage.acc_full_mbar_ptr[acc_buf_idx],
-                             acc_full_phase);
+          cute::wait_barrier(sm_acc_full_mbar[acc_buf_idx], acc_full_phase);
 
           // TMEM -> registers: bulk load FP32 accumulators from TMEM
           cute::copy(tiled_copy_t2r,
@@ -1510,8 +1513,7 @@ __device__ __forceinline__ void
           // initialization).
           epilogue_wg_barrier.arrive_and_wait();
           if (cute::elect_one_sync()) {
-            cute::arrive_barrier(
-                shared_storage.acc_empty_mbar_ptr[acc_buf_idx]);
+            cute::arrive_barrier(sm_acc_empty_mbar[acc_buf_idx]);
           }
 
           // Convert FP32 accumulator values to BF16
@@ -1557,7 +1559,7 @@ __device__ __forceinline__ void
   // Free the TMEM columns allocated at the start of the epilogue.
   // Only warp 0 performs the deallocation (matching the allocation).
   if (warp_idx == 0) {
-    tmem_allocator.free(shared_storage.tmem_base_ptr, kNumTmemColsTotal);
+    tmem_allocator.free(sm_tmem_base, kNumTmemColsTotal);
     // NOTE: intentionally no release_allocation_lock() here — MPK persistent
     // kernels keep the TMEM allocator locked to warp 0 across tasks. See
     // moe_linear_sm100.cuh "don't do relinquish for megakernel" comment.

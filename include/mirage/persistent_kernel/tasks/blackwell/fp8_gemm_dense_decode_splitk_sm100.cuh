@@ -149,7 +149,17 @@ __device__ __forceinline__ void
   auto sA = [&](int s) { return sb_aligned + s * SA; };
   auto sBl = [&](int s) { return sb_aligned + NS * SA + s * SB; };
 
-  int bars_addr = sb_aligned + NS * (SA + SB);
+  // ASYNC-AGENT SAFETY (2026-07-20): mbarriers + the TMEM allocation slot live
+  // in STATIC __shared__, NOT in the `extern __shared__` arena. Rationale in
+  // fp8_gemm_dense_sm100_common.cuh: __syncthreads() between tasks orders
+  // THREADS but drains no ASYNCHRONOUS agent, so an arena-resident barrier
+  // lets a `tcgen05.commit` arrival (this file arms `be[]` and `btf[]` that
+  // way) land in memory the NEXT task has already reused. Static __shared__ is
+  // summed per branch and placed below the arena base, so these bytes belong
+  // to this instantiation alone.
+  __shared__ __align__(16) uint64_t sm_bars_fp8gemm_sk[NS * 2 + NE * 2 + 1];
+  int bars_addr =
+      static_cast<int>(__cvta_generic_to_shared(sm_bars_fp8gemm_sk));
   int bf = bars_addr;
   int be = bf + NS * 8;
   int btf = be + NS * 8;
@@ -215,6 +225,31 @@ __device__ __forceinline__ void
   __syncthreads();
   uint32_t taddr;
   asm volatile("ld.shared.u32 %0, [%1];" : "=r"(taddr) : "r"(tp_addr));
+#ifdef MPK_DSV3_TMEM_GUARD_ALL
+  // DIAGNOSTIC (compile-time, default OFF) -- see the matching note in
+  // fp8_gemm_dense_sm100_common.cuh.
+  if (!((taddr >> 16) < 128u && ((taddr & 0xFFFFu) + (uint32_t)TCA) <= 512u)) {
+    if (wid == 0 && elect_one_sync()) {
+      printf("[MPK FATAL] fp8_gemm_dense_decode_splitk: invalid TMEM base "
+             "0x%08x (requested %d cols) on block %d. 0xdeadbeef means "
+             "tcgen05.alloc never wrote the slot.\n",
+             taddr,
+             (int)TCA,
+             (int)blockIdx.x);
+    }
+#ifdef MPK_DSV3_TMEM_GUARD_NOTRAP
+    // Diagnostic mode: do NOT trap. A trapping megakernel never exits, and the
+    // printf FIFO only flushes when it FILLS or when the CTA EXITS -- the
+    // driver floors the FIFO at 524288 B, which a handful of guard lines never
+    // fills, so trapping makes the guard structurally unable to report. Force a
+    // legal TMEM base instead: the math is wrong, but the CTA exits, the FIFO
+    // flushes, and we learn whether the guard fired at all and with what value.
+    taddr = 0u;
+#else
+    __trap();
+#endif
+  }
+#endif
   constexpr uint32_t idesc =
       (1u << 4) | ((uint32_t)(BN / 8) << 17) | (8u << 24);
 

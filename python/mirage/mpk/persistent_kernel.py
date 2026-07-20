@@ -302,6 +302,55 @@ def get_compile_command(
     # byte-identical default build). Used to localize attn recurrence bugs.
     if os.environ.get("MPK_ATTN_DBG") == "1":
         flags = flags + ["-DMPK_ATTN_DBG"]
+    # Debug-only: extend the fp8_gemm_dense_qout TMEM-base validity guard to the
+    # other three FP8 GEMM kernels, which read the tcgen05.alloc result but do
+    # NOT validate it (default-OFF ⇒ byte-identical default build). A base the
+    # allocation never published shows up there as silent garbage from
+    # tcgen05.mma rather than a fault; turning this on makes it a loud, named
+    # trap, which is how we test whether silently-degenerate output shares the
+    # cause of the guarded kernel's trap.
+    if os.environ.get("MPK_DSV3_TMEM_GUARD_ALL") == "1":
+        flags = flags + ["-DMPK_DSV3_TMEM_GUARD_ALL"]
+    # Debug-only: make the TMEM-base guards REPORT instead of __trap(). A
+    # trapping megakernel never exits, and the device printf FIFO flushes only
+    # when it FILLS or when the CTA EXITS -- and the driver floors the FIFO at
+    # 524288 B, which a handful of guard lines never fills. A trapping guard is
+    # therefore structurally unable to tell us that it fired. Non-trapping mode
+    # substitutes a legal TMEM base (the math is wrong, but the CTA exits and
+    # the FIFO flushes), which is what makes "did the guard fire, and with what
+    # taddr?" answerable on a recipe that otherwise dies with an opaque
+    # cudaErrorLaunchFailure and zero device output.
+    if os.environ.get("MPK_DSV3_TMEM_GUARD_NOTRAP") == "1":
+        flags = flags + ["-DMPK_DSV3_TMEM_GUARD_NOTRAP"]
+    # Debug-only: relocate fp8_gemm_dense_qout's TMEM allocation slot past every
+    # sibling FP8-GEMM instantiation's mbarrier array, and leave a canary at the
+    # vacated offset. bars_addr+64 is simultaneously NE=1's tp_addr, NE=2's
+    # bte[0] and NE=4's btf[2] within the shared sm_raw_fp8gemm region, so a
+    # late ASYNC mbarrier arrival issued by a sibling task in the same
+    # persistent CTA can land on the TMEM base. The canary discriminates fixing
+    # the mechanism from merely perturbing timing.
+    if os.environ.get("MPK_DSV3_TMEM_SLOT_PAD") == "1":
+        flags = flags + ["-DMPK_DSV3_TMEM_SLOT_PAD"]
+    # Debug-only: Class-2 probe. The dense FP8-GEMM family's async-armed
+    # barriers occupy arena bytes [98304,98384), which is exactly the group
+    # GEMM's sA(5) live activation tile (all extern __shared__ alias one arena).
+    # This probe checks, at group-task end, whether those bytes hold mbarrier
+    # state (low32 = 0x00200000 - 2*pending) where activations should be -- i.e.
+    # whether a late async arrival from a previous dense task silently corrupted
+    # live data. Class 2 is the leading remaining candidate for the
+    # degenerate-output blocker after run Q excluded the Class-1 slot clobber.
+    if os.environ.get("MPK_DSV3_CLASS2_PROBE") == "1":
+        flags = flags + ["-DMPK_DSV3_CLASS2_PROBE"]
+    # FAULT INJECTION (debug-only, default OFF, NEVER ship enabled). Puts the
+    # FP8-GEMM barrier block back INSIDE the extern __shared__ arena, i.e.
+    # deliberately restores the defect that the static-__shared__ relocation
+    # fixed. Its only purpose is to prove the detectors still detect: with this
+    # ON, MPK_DSV3_TMEM_SLOT_PAD's canary and MPK_DSV3_CLASS2_PROBE must FIRE;
+    # with it OFF they must be silent. Without this control, "the canary was
+    # silent" is unfalsifiable — it could equally mean the probe is broken.
+    # A build with this defined is known to corrupt memory and fault.
+    if os.environ.get("MPK_DSV3_ASYNC_BAR_ARENA_UNSAFE") == "1":
+        flags = flags + ["-DMPK_DSV3_ASYNC_BAR_ARENA_UNSAFE"]
     # Candidate-2 AllReduce: NVLS one-shot + per-tile (per-CTA) flat arrival
     # gate replacing the radix-8 dissemination barrier (default-OFF ⇒ default
     # build byte-identical). The builder reads the SAME env var to allocate the

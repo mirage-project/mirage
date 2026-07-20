@@ -466,8 +466,15 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
   int kps = sb + KP_OFF;
   int v0s = sb + V0_OFF;
   int v1s = sb + V1_OFF;
-  int mbk = sb + MBK_OFF;
-  int mbv = sb + MBV_OFF;
+  // ASYNC-AGENT SAFETY (2026-07-20): mbarriers live in STATIC __shared__, not
+  // in the `extern __shared__` arena -- see the note in
+  // mla_prefill_tp8_sm100.cuh and the full rationale in
+  // fp8_gemm_dense_sm100_common.cuh. The arena still reserves
+  // MBK_OFF..MBV_OFF+16 (harmless slack). Enforced by
+  // scripts/check_async_barrier_placement.py.
+  __shared__ __align__(16) uint64_t sm_mbar_chunk[4];
+  int mbk = static_cast<int>(__cvta_generic_to_shared(sm_mbar_chunk));
+  int mbv = mbk + 16;
   if (tid == 0) {
     mbar_init_1(mbk, 1);
     mbar_init_1(mbv, 1);
