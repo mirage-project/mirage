@@ -1579,7 +1579,24 @@ extern "C" void
   // Initialize nvshmem
   cudaSetDevice(my_rank);
   // Increase printf FIFO to avoid losing debug messages from device.
-  cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 128 * 1024 * 1024);
+  //
+  // DIAGNOSTIC OVERRIDE (MPK_PRINTF_FIFO_BYTES): the device printf FIFO is
+  // flushed to the host when it FILLS or when the CTA exits. A large FIFO is
+  // right for high-volume tracing, but it SUPPRESSES low-volume output from a
+  // kernel that traps or hangs and never exits: a handful of lines (e.g. the
+  // fp8_gemm_dense_qout TMEM guard's [MPK FATAL], ~100 B/CTA) never come close
+  // to filling 128 MB, so the host sees nothing and the failure looks silent.
+  // Setting MPK_PRINTF_FIFO_BYTES=8192 makes even a few lines fill the FIFO and
+  // flush in near-real time, which is what makes a trapping megakernel
+  // diagnosable. Unset (the default) keeps the historical 128 MB exactly.
+  size_t mpk_printf_fifo_bytes = 128ull * 1024 * 1024;
+  if (char const *mpk_fifo_env = std::getenv("MPK_PRINTF_FIFO_BYTES")) {
+    unsigned long long v = std::strtoull(mpk_fifo_env, nullptr, 10);
+    if (v > 0) {
+      mpk_printf_fifo_bytes = (size_t)v;
+    }
+  }
+  cudaDeviceSetLimit(cudaLimitPrintfFifoSize, mpk_printf_fifo_bytes);
 
 #ifdef USE_NVSHMEM
   MPI_Comm mpi_comm = MPI_COMM_WORLD;
