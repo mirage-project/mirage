@@ -372,6 +372,42 @@ if __name__ == "__main__":
     # handling for step>0 prefill chunks was validated against the
     # token-by-token oracle (KV exact across both chunks; 2026-06-13).
 
+    # DIAGNOSTIC (MPK_DSV3_TOKEN_FILL=<id>): both `tokens` and `output_tokens`
+    # are zero-filled and BOS is id 0, so a generated slot reading 0 is
+    # AMBIGUOUS three ways -- the model may have emitted BOS, or the argmax may
+    # never have written `output_tokens`, or the scheduler may never have copied
+    # `output_tokens` into `tokens`. A single sentinel cannot separate these,
+    # because `tokens` is written by an UNCONDITIONAL copy from `output_tokens`
+    # (persistent_kernel.cuh:288): a never-written `output_tokens` slot faithfully
+    # overwrites the sentinel with its own 0.
+    #
+    # So poison the two stages with DISTINCT ids and let the surviving value
+    # name the stage that failed:
+    #   <id>    survives in the output -> `tokens` slot never written at all
+    #   <id>+1  survives in the output -> `output_tokens` never written by the
+    #           argmax, but the copy into `tokens` did run
+    #   0       -> both stages ran; the argmax genuinely returned vocab id 0
+    # Note this is exactly the discriminator a single-stage sentinel lacks.
+    # Reading a 0 is not self-evidently a bug: the PER-CHUNK argmax
+    # (ampere/argmax.cuh:91, argmax_sm100.cuh:106) deliberately defaults its
+    # index to 0, by explicit comment, so an all -inf / NaN row still yields a
+    # VALID index rather than a sentinel. The CROSS-RANK stage that this
+    # vocab-parallel TP8 build actually emits into output_tokens
+    # (nvshmem_argmax_sm100.cuh:57,92) does NOT inherit that fallback: it inits
+    # to -1 and only updates under a strict `val > best_val` starting from
+    # -inf, so a fully degenerate row surfaces as -1, not 0. Empirically,
+    # across every DSv3 run recorded so far, 0 appears and -1 never does --
+    # i.e. the logits reaching the argmax are finite, not NaN/-inf poisoned.
+    _tok_fill = os.environ.get("MPK_DSV3_TOKEN_FILL")
+    if _tok_fill:
+        _fill_id = int(_tok_fill)
+        for r in range(total_num_requests):
+            tokens[r, int(prompt_lengths[r].item()):] = _fill_id
+        output_tokens.fill_(_fill_id + 1)
+        print(f"[diag] MPK_DSV3_TOKEN_FILL: tokens generation region pre-filled "
+              f"with id {_fill_id}, output_tokens pre-filled with id "
+              f"{_fill_id + 1} (two-stage write-liveness sentinel)")
+
     step = torch.full((total_num_requests,), 0, dtype=torch.int32, device="cuda")
     num_new_tokens = torch.full((total_num_requests,), 1, dtype=torch.int32, device="cuda")
 
