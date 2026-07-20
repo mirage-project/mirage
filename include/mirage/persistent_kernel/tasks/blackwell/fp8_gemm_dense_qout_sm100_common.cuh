@@ -25,9 +25,8 @@
 //   sb: float32 [N/128, K/128]    row-major
 //
 // 256 threads/CTA, 128B-swizzle TMA for A/B. Roles:
-//   warp 0     = TMA loader
+//   warp 0     = tensormap prefetch + TMA loader + tcgen05.alloc/dealloc
 //   warp 1     = MMA issue (also runs mbarrier init)
-//   warp 2     = tcgen05.alloc
 //   warps 4..7 = epilogue (TMEM read + dequant + write C)
 //
 // MPK adaptation: each task instance handles tiles striding by `num_workers`
@@ -58,6 +57,22 @@ __device__ __forceinline__ uint32_t elect_one_sync() {
 __device__ __forceinline__ void mb_init(int a, int c) {
   asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(a), "r"(c));
 }
+
+// A TMEM address is packed as (lane << 16) | column. B200 exposes 512 TMEM
+// columns and 128 lanes, so any address whose column window would run past
+// 512 (or whose lane is out of range) cannot be a live allocation. Used to
+// reject a stale shared-memory word that was never overwritten by
+// tcgen05.alloc -- see the guard at the allocation site below.
+// NOTE this predicate necessarily ACCEPTS 0x00000000, which is both a legal
+// allocation base (lane 0, column 0) and the value of never-written / zeroed
+// shared memory. That ambiguity is why the allocation slot is pre-seeded with
+// a 0xDEADBEEF sentinel before tcgen05.alloc: a slot the allocator never wrote
+// then reads back as the sentinel and is rejected, instead of aliasing onto a
+// legal-looking base of 0.
+__device__ __forceinline__ bool tmem_addr_valid(uint32_t a, int cols) {
+  return (a >> 16) < 128u && ((a & 0xFFFFu) + (uint32_t)cols) <= 512u;
+}
+
 __device__ __forceinline__ void mb_wait(int a, int p) {
   asm volatile(
       "{\n\t.reg .pred "
@@ -199,7 +214,37 @@ __device__ __forceinline__ void
       mb_init(bte + i * 8, 128);
     }
     asm volatile("fence.mbarrier_init.release.cluster;");
-  } else if (wid == 2) {
+  }
+  // TMEM allocation is issued by warp 0, unchained from the mb_init if/else.
+  // CUTLASS's TMEM allocator requires that "for repeated allocations, the same
+  // warp must be used to issue all allocations"
+  // (deps/cutlass/include/cute/arch/tmem_allocator_sm100.hpp:59-73). MPK never
+  // issues tcgen05.relinquish_alloc_permit, so that requirement spans every
+  // task a persistent worker CTA executes, not just one kernel. Every task
+  // that is LIVE in the DSv3 build (linear_sm100_mpk and the MLA MTP decode
+  // family) allocates from warp 0, so this file allocating from warp 2 was an
+  // inconsistency across task boundaries. NOTE the tree is not uniform:
+  // mla_decode_sm100.cuh:108 and simple_linear_sm100.cuh:148 still allocate
+  // from warp 1 (both are dead code -- neither appears in any generated
+  // megakernel), and fp8_group_gemm_sm100_common.cuh still DEALLOCATES from
+  // warp 5. This change is an invariant/hygiene fix: it was measured NOT to
+  // resolve the observed prefill fault, so it is not a proven root cause.
+  // Seed the allocation slot with a sentinel and separate the mbarrier-init
+  // writes from the allocation with a CTA barrier. Without this barrier the
+  // warp-1 mbarrier inits and the warp-0 tcgen05.alloc both write this shared
+  // region with NO ordering between them, and the allocation result at
+  // tp_addr (which sits immediately after the mbarrier array) could be
+  // overwritten by an mbarrier-init word. The consuming warps then read an
+  // mbarrier state value as a TMEM address and tcgen05.mma faults with
+  // "Warp Out of range Address". The sentinel also removes the ambiguity that
+  // a never-written slot reading 0x00000000 is indistinguishable from a legal
+  // allocation base of (lane 0, column 0).
+  if (wid == 0 && elect_one_sync()) {
+    asm volatile("st.shared.u32 [%0], %1;" ::"r"(tp_addr), "r"(0xDEADBEEFu)
+                 : "memory");
+  }
+  __syncthreads();
+  if (wid == 0) {
     asm volatile(
         "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::
             "r"(tp_addr),
@@ -207,7 +252,55 @@ __device__ __forceinline__ void
   }
   __syncthreads();
   uint32_t taddr;
-  asm volatile("ld.shared.u32 %0, [%1];" : "=r"(taddr) : "r"(tp_addr));
+  asm volatile("ld.shared.u32 %0, [%1];"
+               : "=r"(taddr)
+               : "r"(tp_addr)
+               : "memory");
+  // Bounded re-read. If the allocation result has not been published yet the
+  // slot still holds unrelated residue from an earlier task in this persistent
+  // CTA; consuming it as a TMEM address faults the tcgen05.mma below with
+  // "Warp Out of range Address". Re-read for a bounded window, then fail loudly
+  // rather than issuing an MMA against a wild TMEM address.
+  if (!tmem_addr_valid(taddr, TCA)) {
+    int spun = 0;
+#pragma unroll 1
+    for (int spin = 0; spin < 1024; spin++) {
+      __nanosleep(32);
+      spun = spin + 1;
+      asm volatile("ld.shared.u32 %0, [%1];"
+                   : "=r"(taddr)
+                   : "r"(tp_addr)
+                   : "memory");
+      if (tmem_addr_valid(taddr, TCA)) {
+        break;
+      }
+    }
+    // A RECOVERY here would mean the allocation result merely arrived late,
+    // i.e. a visibility/ordering problem rather than a failed allocation.
+    // Report it loudly: if this ever fires, the re-read is silently masking a
+    // real ordering bug and must NOT be treated as a fix. (Measured so far:
+    // never fires -- the slot still holds the pre-alloc sentinel after the
+    // full window, so the allocation genuinely did not happen.)
+    if (tmem_addr_valid(taddr, TCA) && elect_one_sync()) {
+      printf("[MPK TMEM-WARN] blk %d: TMEM base arrived only after %d re-reads "
+             "(late publish -- ordering bug, not a failed allocation)\n",
+             (int)blockIdx.x,
+             spun);
+    }
+  }
+  if (!tmem_addr_valid(taddr, TCA)) {
+    if (wid == 0 && elect_one_sync()) {
+      printf("[MPK FATAL] fp8_gemm_dense_qout: no valid TMEM base published "
+             "(read 0x%08x, requested %d cols) on block %d. 0xdeadbeef means "
+             "tcgen05.alloc never wrote the slot; anything else means the slot "
+             "was overwritten after the allocation. Aborting instead of "
+             "issuing tcgen05.mma against an out-of-range TMEM address.\n",
+             taddr,
+             TCA,
+             (int)blockIdx.x);
+    }
+    __trap();
+  }
   constexpr uint32_t idesc =
       (1u << 4) | ((uint32_t)(BN / 8) << 17) | (8u << 24);
 
@@ -456,7 +549,7 @@ __device__ __forceinline__ void
   // membar instruction per CTA exit); standalone tests still pass since
   // it's a no-op when no other CTAs are reading.
   asm volatile("membar.gl;" ::: "memory");
-  if (wid == 0) {
+  if (wid == 0 && tmem_addr_valid(taddr, TCA)) {
     asm volatile(
         "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr),
         "r"(TCA));

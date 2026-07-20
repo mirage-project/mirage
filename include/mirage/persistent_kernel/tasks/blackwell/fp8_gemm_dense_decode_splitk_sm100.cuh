@@ -176,7 +176,37 @@ __device__ __forceinline__ void
       mb_init_sk(bte + i * 8, 128);
     }
     asm volatile("fence.mbarrier_init.release.cluster;");
-  } else if (wid == 2) {
+  }
+  // TMEM allocation is issued by warp 0, unchained from the mb_init if/else.
+  // CUTLASS's TMEM allocator requires that "for repeated allocations, the same
+  // warp must be used to issue all allocations"
+  // (deps/cutlass/include/cute/arch/tmem_allocator_sm100.hpp:59-73). MPK never
+  // issues tcgen05.relinquish_alloc_permit, so that requirement spans every
+  // task a persistent worker CTA executes, not just one kernel. Every task
+  // that is LIVE in the DSv3 build (linear_sm100_mpk and the MLA MTP decode
+  // family) allocates from warp 0, so this file allocating from warp 2 was an
+  // inconsistency across task boundaries. NOTE the tree is not uniform:
+  // mla_decode_sm100.cuh:108 and simple_linear_sm100.cuh:148 still allocate
+  // from warp 1 (both are dead code -- neither appears in any generated
+  // megakernel), and fp8_group_gemm_sm100_common.cuh still DEALLOCATES from
+  // warp 5. This change is an invariant/hygiene fix: it was measured NOT to
+  // resolve the observed prefill fault, so it is not a proven root cause.
+  // Seed the allocation slot with a sentinel and separate the mbarrier-init
+  // writes from the allocation with a CTA barrier. Without this barrier the
+  // warp-1 mbarrier inits and the warp-0 tcgen05.alloc both write this shared
+  // region with NO ordering between them, and the allocation result at
+  // tp_addr (which sits immediately after the mbarrier array) could be
+  // overwritten by an mbarrier-init word. The consuming warps then read an
+  // mbarrier state value as a TMEM address and tcgen05.mma faults with
+  // "Warp Out of range Address". The sentinel also removes the ambiguity that
+  // a never-written slot reading 0x00000000 is indistinguishable from a legal
+  // allocation base of (lane 0, column 0).
+  if (wid == 0 && elect_one_sync_splitk()) {
+    asm volatile("st.shared.u32 [%0], %1;" ::"r"(tp_addr), "r"(0xDEADBEEFu)
+                 : "memory");
+  }
+  __syncthreads();
+  if (wid == 0) {
     asm volatile(
         "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::
             "r"(tp_addr),
