@@ -536,11 +536,32 @@ __device__ __noinline__ void task_impl_tpl(
     if (ew == 0) {
       asm volatile("cp.async.bulk.wait_group.read %0;" ::"n"(0) : "memory");
     }
-    if (ew == 1) {
-      asm volatile(
-          "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr),
-          "r"(TCA));
-    }
+    // C3: the tcgen05.dealloc used to sit HERE, under `if (ew == 1)` -- issued
+    // by warp 5 only, while the matching tcgen05.alloc is issued by warp 0
+    // (:250). That is (a) a convergence violation -- warps 0-3 have already
+    // fallen out of this if-else chain, so a `.sync.aligned` dealloc here has
+    // no guarantee the CTA is converged -- and (b) a violation of the TMEM
+    // allocator contract, which requires alloc and dealloc to be issued by the
+    // SAME warp (deps/cutlass/include/cute/arch/tmem_allocator_sm100.hpp:59-73:
+    // "for repeated allocations, the same warp must be used to issue all
+    // allocations"). MPK never issues tcgen05.relinquish_alloc_permit, so that
+    // requirement spans task boundaries for the entire life of the persistent
+    // CTA. The identical defect was already found and fixed in the sibling
+    // fp8_group_gemm_largem_compact_sm100.cuh:616-631 ("C3"); this file was
+    // simply never updated, and it is the only remaining live alloc/dealloc
+    // warp split in the megakernel. Moved below.
+  }
+  // C3 FIX (mirrors fp8_group_gemm_largem_compact_sm100.cuh:621-631): every
+  // warp falls through the if-else chain to this point and this task body
+  // contains no early `return`, so a full-CTA barrier here is safe. Sync all
+  // 256 threads (all 8 warp-specialized loops have exited, so no warp can
+  // still be reading TMEM), then deallocate from warp 0 -- the same warp that
+  // allocated.
+  asm volatile("bar.sync 10, 256;");
+  if (wid == 0) {
+    asm volatile(
+        "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr),
+        "r"(TCA));
   }
 #endif
 }
