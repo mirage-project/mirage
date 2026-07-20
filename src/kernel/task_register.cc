@@ -255,6 +255,65 @@ int TaskRegister::register_dflash_kv_store_sm100_task(
   return register_task_variant(TASK_DFLASH_KV_STORE_SM100, code.to_string());
 }
 
+int TaskRegister::register_glm_moe_router_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [routed_scaling_factor bits, n_shared]. 2 inputs (logits
+  // [rows, STRIDE] bf16 where STRIDE >= R may be padded for the gate linear,
+  // e_score_correction_bias [R] fp32), 3 outputs (weights [rows, K+S] fp32,
+  // routing indices [R+S, rows] int32, active expert ids [R+S+1] int32).
+  // Shared experts are folded in as experts R..R+S-1, always selected with
+  // weight 1.0. Run with grid (1,1,1).
+  assert(params.size() == 2);
+  float routed_scaling_factor;
+  memcpy(&routed_scaling_factor, &params[0], sizeof(float));
+  int n_shared = params[1];
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 3;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->dtensor.num_dims == 2);  // logits
+  assert(input_ops[1]->dtensor.num_dims == 1);  // bias
+  assert(output_ops[0]->dtensor.num_dims == 2); // weights
+  assert(output_ops[1]->dtensor.num_dims == 2); // routing indices
+  assert(output_ops[2]->dtensor.num_dims == 1); // active expert ids
+  int num_rows = input_ops[0]->dtensor.dim[0];
+  int logits_stride = input_ops[0]->dtensor.dim[1];
+  int num_routed = input_ops[1]->dtensor.dim[0];
+  int num_total = num_routed + n_shared;
+  int topk = output_ops[0]->dtensor.dim[1] - n_shared;
+  assert(n_shared >= 0 && topk >= 1);
+  assert(logits_stride >= num_routed);
+  assert(output_ops[0]->dtensor.dim[0] == num_rows);
+  assert(output_ops[1]->dtensor.dim[0] == num_total);
+  assert(output_ops[1]->dtensor.dim[1] == num_rows);
+  assert(output_ops[2]->dtensor.dim[0] == num_total + 1);
+  assert(bgraph.grid_dim.x == 1);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::glm_moe_router_task_impl<bfloat16, $, $, $, $>(",
+         num_routed,
+         n_shared,
+         topk,
+         logits_stride);
+  code.e("    task_desc->input_ptrs[0],");  // logits (zeroed after read)
+  code.e("    task_desc->input_ptrs[1],");  // bias (fp32)
+  code.e("    task_desc->output_ptrs[0],"); // weights
+  code.e("    task_desc->output_ptrs[1],"); // routing indices
+  code.e("    task_desc->output_ptrs[2],"); // active expert ids
+  code.e("    $,", num_rows);
+  code.e("    $f);", routed_scaling_factor);
+  return register_task_variant(TASK_GLM_MOE_ROUTER_SM100, code.to_string());
+}
+
 int TaskRegister::register_inkling_sconv_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: []. 3 inputs (x [SEQ, hidden] bf16, weight [hidden, K] fp32,
@@ -2218,7 +2277,9 @@ int TaskRegister::register_paged_attention_sm100_task(
   // params[5]: page_size
   // params[6]: q_len_override (optional, default 0)
   // params[7]: tail_offset    (optional, default 0)
-  assert(params.size() == 6 || params.size() == 8);
+  // params[8]: rotary_dim     (optional, 0 = head_dim; GLM-4.6 partial RoPE)
+  // params[9]: qk-norm eps as float bits (optional, default 1e-6)
+  assert(params.size() == 6 || params.size() == 8 || params.size() == 10);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -2245,6 +2306,11 @@ int TaskRegister::register_paged_attention_sm100_task(
   int page_size = params[5];
   int q_len_override = (params.size() >= 7) ? params[6] : 0;
   int tail_offset = (params.size() >= 8) ? params[7] : 0;
+  int rotary_dim = (params.size() >= 9 && params[8] > 0) ? params[8] : head_dim;
+  float qk_eps = 1e-6f;
+  if (params.size() >= 10) {
+    memcpy(&qk_eps, &params[9], sizeof(float));
+  }
   // Assert that k_cache has the same head_dim
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
@@ -2253,10 +2319,10 @@ int TaskRegister::register_paged_attention_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // Pass Q_LEN_OVERRIDE, TAIL_OFFSET, and MAX_TOKENS explicitly.
+  // Pass Q_LEN_OVERRIDE, TAIL_OFFSET, MAX_TOKENS, and ROTARY_DIM explicitly.
   code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
          "$, $, "
-         "$, $, $, $, $, $, $>(",
+         "$, $, $, $, $, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          kv_stride,
@@ -2267,7 +2333,8 @@ int TaskRegister::register_paged_attention_sm100_task(
          page_size,
          q_len_override,
          tail_offset,
-         max_tokens);
+         max_tokens,
+         rotary_dim);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -2283,8 +2350,8 @@ int TaskRegister::register_paged_attention_sm100_task(
   code.e("    task_desc->input_ptrs[4],");
   code.e("    task_desc->input_ptrs[5],");
   code.e("    task_desc->input_ptrs[6],");
-  code.e("    1e-6f,");
-  code.e("    1e-6f);");
+  code.e("    $f,", qk_eps);
+  code.e("    $f);", qk_eps);
   return register_task_variant(TASK_ATTN_SM100, code.to_string());
 }
 

@@ -24,7 +24,11 @@ template <typename T,
           int WINDOW_SIZE,
           int HEAD_DIM = 128,
           int NUM_THREADS = 128,
-          int BARRIER_ID = 9>
+          int BARRIER_ID = 9,
+          // Partial RoPE (e.g. GLM-4.6: 64 of 128 dims): rotate dims
+          // [0, ROTARY_DIM) pairing i <-> i + ROTARY_DIM/2, pass the rest
+          // through. cos/sin rows are ROTARY_DIM wide.
+          int ROTARY_DIM = HEAD_DIM>
 __device__ __forceinline__ void rotary_embedding_hopper(InputSmem smem_input,
                                                         T const *cos_ptr,
                                                         T const *sin_ptr,
@@ -41,34 +45,37 @@ __device__ __forceinline__ void rotary_embedding_hopper(InputSmem smem_input,
 #pragma unroll
     for (int head_idx = 0; head_idx < NUM_HEAD; ++head_idx) {
 
-      T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
-      T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
+      T const *cur_cos_ptr = cos_ptr + win_idx * ROTARY_DIM;
+      T const *cur_sin_ptr = sin_ptr + win_idx * ROTARY_DIM;
 
 #pragma unroll
       for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
-        int offset = (i / HEAD_DIM) * HEAD_DIM + i;
-
         int row = smem_seq_idx * NUM_HEAD + head_idx;
         int col = i;
 
-        float cos = static_cast<float>(cur_cos_ptr[offset]);
-        float sin = static_cast<float>(cur_sin_ptr[offset]);
-
-        float v_rot;
+        float v_rot = 0.0f;
 
         wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
 
-        if (i < HEAD_DIM / 2) {
+        if (i < ROTARY_DIM / 2) {
+          float cos = static_cast<float>(cur_cos_ptr[i]);
+          float sin = static_cast<float>(cur_sin_ptr[i]);
           float v1 = static_cast<float>(smem_input.at(row, col));
-          float v2 = static_cast<float>(smem_input.at(row, col + HEAD_DIM / 2));
+          float v2 =
+              static_cast<float>(smem_input.at(row, col + ROTARY_DIM / 2));
           v_rot = v1 * cos - v2 * sin;
-        } else {
+        } else if (i < ROTARY_DIM) {
+          float cos = static_cast<float>(cur_cos_ptr[i]);
+          float sin = static_cast<float>(cur_sin_ptr[i]);
           float v1 = static_cast<float>(smem_input.at(row, col));
-          float v2 = static_cast<float>(smem_input.at(row, col - HEAD_DIM / 2));
+          float v2 =
+              static_cast<float>(smem_input.at(row, col - ROTARY_DIM / 2));
           v_rot = v1 * cos + v2 * sin;
         }
         wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
-        smem_input.at(row, col) = static_cast<T>(v_rot);
+        if (i < ROTARY_DIM) {
+          smem_input.at(row, col) = static_cast<T>(v_rot);
+        }
       }
     }
   }

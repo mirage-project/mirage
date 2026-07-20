@@ -47,7 +47,11 @@ template <typename T,
           // MAX_DYNAMIC_SHARED_MEMORY. The cross-warp output reduction buffer
           // is chunked per MMA m-tile, so it no longer grows with MAX_TOKENS
           // (issue #702); the default 8 fits smem even for GQA ratios >= 8:1.
-          int MAX_TOKENS = 8>
+          int MAX_TOKENS = 8,
+          // Partial RoPE (GLM-4.6: 64 of 128 dims). Rotates dims
+          // [0, ROTARY_DIM), passes the rest through; cos/sin tables are
+          // [max_seq_len, ROTARY_DIM]. Default = full-dim NeoX RoPE.
+          int ROTARY_DIM = HEAD_DIM>
 __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -358,7 +362,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                          NUM_QO_PER_KV,
                          HEAD_DIM,
                          CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
-                         ROTARY_SYNC_BARRIER_ID>(
+                         ROTARY_SYNC_BARRIER_ID,
+                         ROTARY_DIM>(
               q_smem,
               static_cast<T const *>(q_norm_weight_ptr),
               s_q_norm_sum,
@@ -367,9 +372,9 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
               0 /*token_offset*/,
               rope,
               static_cast<T const *>(cos_ptr) +
-                  (seq_len - num_tokens) * HEAD_DIM,
+                  (seq_len - num_tokens) * ROTARY_DIM,
               static_cast<T const *>(sin_ptr) +
-                  (seq_len - num_tokens) * HEAD_DIM);
+                  (seq_len - num_tokens) * ROTARY_DIM);
         }
         // K norm
         if (kv_tokens_to_process > 0) {
@@ -378,7 +383,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                          1,
                          HEAD_DIM,
                          CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
-                         ROTARY_SYNC_BARRIER_ID>(
+                         ROTARY_SYNC_BARRIER_ID,
+                         ROTARY_DIM>(
               k_smem,
               static_cast<T const *>(k_norm_weight_ptr),
               s_k_norm_sum,
@@ -387,9 +393,9 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
               curr_iter_len - kv_tokens_to_process,
               rope,
               static_cast<T const *>(cos_ptr) +
-                  first_kv_token_to_process * HEAD_DIM,
+                  first_kv_token_to_process * ROTARY_DIM,
               static_cast<T const *>(sin_ptr) +
-                  first_kv_token_to_process * HEAD_DIM);
+                  first_kv_token_to_process * ROTARY_DIM);
         }
       } else if (rope) {
         if (iter == 0) {
@@ -402,12 +408,13 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                                     1,
                                     HEAD_DIM,
                                     128,
-                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                                    ROTARY_DIM>(
                 q_smem,
                 static_cast<T const *>(cos_ptr) +
-                    (token_idx + seq_len - num_tokens) * HEAD_DIM,
+                    (token_idx + seq_len - num_tokens) * ROTARY_DIM,
                 static_cast<T const *>(sin_ptr) +
-                    (token_idx + seq_len - num_tokens) * HEAD_DIM,
+                    (token_idx + seq_len - num_tokens) * ROTARY_DIM,
                 token_idx);
           }
         }
@@ -421,12 +428,13 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                                     1,
                                     HEAD_DIM,
                                     128,
-                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                                    ROTARY_DIM>(
                 k_smem,
                 static_cast<T const *>(cos_ptr) +
-                    (token_idx + first_kv_token_to_process) * HEAD_DIM,
+                    (token_idx + first_kv_token_to_process) * ROTARY_DIM,
                 static_cast<T const *>(sin_ptr) +
-                    (token_idx + first_kv_token_to_process) * HEAD_DIM,
+                    (token_idx + first_kv_token_to_process) * ROTARY_DIM,
                 token_idx + curr_iter_len - kv_tokens_to_process);
           }
         }

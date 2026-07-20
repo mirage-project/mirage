@@ -947,6 +947,45 @@ class PersistentKernel:
             tb_graph, "inkling_moe_router", [scale_bits, n_shared]
         )
 
+    def glm_moe_router_layer(
+        self,
+        logits: DTensor,   # [rows, stride>=R] bf16 (cols R.. padded)
+        bias: DTensor,     # [num_routed] fp32 e_score_correction_bias
+        output: tuple,     # (weights, routing_indices, active_expert_ids)
+        grid_dim: tuple,
+        block_dim: tuple,
+        routed_scaling_factor: float = 2.5,
+        n_shared: int = 1,
+    ):
+        # GLM-4.x router (n_group=1): topk on sigmoid(logits)+bias, weights =
+        # gathered unbiased sigmoid scores normalized by their sum and scaled
+        # by routed_scaling_factor. Shared experts are emitted as
+        # always-selected experts num_routed..num_routed+n_shared-1 with
+        # weight 1.0 (folded into the expert tensor).
+        import struct
+
+        weights, routing_indices, active_ids = output
+        assert logits.num_dims == 2
+        assert bias.num_dims == 1
+        assert weights.num_dims == 2          # [rows, topk + n_shared] fp32
+        assert routing_indices.num_dims == 2  # [num_total, rows] int32
+        assert active_ids.num_dims == 1       # [num_total + 1] int32
+        assert grid_dim == (1, 1, 1)
+        scale_bits = struct.unpack(
+            "i", struct.pack("f", routed_scaling_factor))[0]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(logits, (-1, -1, -1), -1, True)
+        tb_graph.new_input(bias, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weights, (-1, -1, -1), -1, True)
+        tb_graph.new_input(routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(active_ids, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [logits, bias, weights, routing_indices, active_ids], tb_graph
+        )
+        self.kn_graph.register_task(
+            tb_graph, "glm_moe_router", [scale_bits, n_shared]
+        )
+
     def single_batch_extend_attention_layer(
         self,
         input: DTensor, # [6, 6144]
@@ -1033,6 +1072,8 @@ class PersistentKernel:
         enable_qk_norm: bool = True,
         q_len_override: int = 0,
         tail_offset: int = 0,
+        rotary_dim: int = 0,        # 0 = full head_dim; GLM-4.6 partial RoPE
+        qk_norm_eps: float = 1e-6,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
@@ -1047,11 +1088,12 @@ class PersistentKernel:
         num_kv_heads = k_cache.dim(2)
         num_q_heads = output.dim(1) // head_dim
         rotary_embed = 0
+        effective_rotary_dim = rotary_dim if rotary_dim > 0 else head_dim
         if cos_pos_embed is not None or sin_pos_embed is not None:
-            assert cos_pos_embed.num_dims == 2  # (seq_len, head_dim)
-            assert sin_pos_embed.num_dims == 2  # (seq_len, head_dim)
-            assert cos_pos_embed.dim(1) == head_dim
-            assert sin_pos_embed.dim(1) == head_dim
+            assert cos_pos_embed.num_dims == 2  # (seq_len, rotary_dim)
+            assert sin_pos_embed.num_dims == 2  # (seq_len, rotary_dim)
+            assert cos_pos_embed.dim(1) == effective_rotary_dim
+            assert sin_pos_embed.dim(1) == effective_rotary_dim
             rotary_embed = 1
         assert q_norm is not None and k_norm is not None, (
             "q_norm/k_norm must be valid DTensors; pass a dummy + "
@@ -1070,10 +1112,18 @@ class PersistentKernel:
         # params[5]: page_size
         # params[6]: q_len_override (only included if non-zero; for Eagle3 K>1 chain)
         # params[7]: tail_offset    (only included if non-zero; for Eagle3 K>1 chain)
+        # params[8]: rotary_dim     (0 = head_dim; GLM-4.6 partial RoPE)
+        # params[9]: qk-norm eps float bits (default 1e-6)
+        # Trailing pairs are only emitted when non-default (legacy sizes 6/8).
+        import struct
         params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
                   self.max_seq_length, self.page_size]
-        if q_len_override != 0 or tail_offset != 0:
+        if (q_len_override != 0 or tail_offset != 0 or rotary_dim != 0
+                or qk_norm_eps != 1e-6):
             params.extend([q_len_override, tail_offset])
+        if rotary_dim != 0 or qk_norm_eps != 1e-6:
+            eps_bits = struct.unpack("i", struct.pack("f", qk_norm_eps))[0]
+            params.extend([rotary_dim, eps_bits])
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests

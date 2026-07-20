@@ -207,6 +207,11 @@ enum TaskType {
   // GQA decode attention with relative-position bias + log scaling.
   TASK_INKLING_ATTENTION_SM100 = 353,
   TASK_INKLING_TASK_END = 399, // end placeholder, not a real task
+  // GLM-4.x (zai-org) tasks, SM100
+  TASK_GLM_TASK_BEGIN = 400, // begin placeholder, not a real task
+  // Sigmoid+bias top-k router (n_group=1) with folded shared expert.
+  TASK_GLM_MOE_ROUTER_SM100 = 401,
+  TASK_GLM_TASK_END = 449, // end placeholder, not a real task
 };
 
 enum EventType {
