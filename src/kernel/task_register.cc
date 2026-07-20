@@ -1310,7 +1310,15 @@ int TaskRegister::register_paged_attention_hopper_task(
   // params[3]: rotary_emd
   // params[4]: max_seq_len
   // params[5]: page_size
-  assert(params.size() == 6);
+  // params[6]: q_len_override (optional; sm100-only, must be 0 here)
+  // params[7]: tail_offset    (optional; sm100-only, must be 0 here)
+  // params[8]: rotary_dim     (optional, 0 = head_dim; GLM-4.6 partial RoPE)
+  // params[9]: qk-norm eps as float bits (optional, default 1e-6)
+  assert(params.size() == 6 || params.size() == 8 || params.size() == 10);
+  if (params.size() >= 8) {
+    assert(params[6] == 0 && params[7] == 0 &&
+           "q_len_override/tail_offset are not supported on Hopper");
+  }
 
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -1460,9 +1468,14 @@ int TaskRegister::register_paged_attention_hopper_task(
   //        "tma_output(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs["
   //        "0][0]));");
 
+  int rotary_dim = (params.size() >= 9 && params[8] > 0) ? params[8] : head_dim;
+  float qk_eps = 1e-6f;
+  if (params.size() >= 10) {
+    memcpy(&qk_eps, &params[9], sizeof(float));
+  }
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
          "$, $, $, $, $, "
-         "$, $, $, $>(",
+         "$, $, $, $, $>(",
          num_q_heads_per_kv, /* NUM_QO_HEADS               */
          1,                  /* NUM_KV_HEADS               */
          num_kv_heads,       /* NUM_QO_GROUPS              */
@@ -1475,7 +1488,8 @@ int TaskRegister::register_paged_attention_hopper_task(
          page_size,   /* PAGE_SIZE                  */
          max_tokens,  /* MAX_TOKENS                 */
          "false",     /* PARTITION_KV               */
-         1            /* NUM_KV_CHUNKS              */
+         1,           /* NUM_KV_CHUNKS              */
+         rotary_dim   /* ROTARY_DIM                 */
   );
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -1490,8 +1504,8 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    task_desc->input_ptrs[4],");
   code.e("    task_desc->input_ptrs[5],");
   code.e("    task_desc->input_ptrs[6],");
-  code.e("    1e-6f,");
-  code.e("    1e-6f,");
+  code.e("    $f,", qk_eps);
+  code.e("    $f,", qk_eps);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    nullptr,"); // lse, not used for non-split KV tasks

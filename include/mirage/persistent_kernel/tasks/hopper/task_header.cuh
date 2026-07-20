@@ -24,5 +24,7 @@
 
 #include "tasks/blackwell/argmax_sm100.cuh"
 #include "tasks/blackwell/attention_sm100.cuh"
+// arch-agnostic scalar kernel (GLM-4.x router), shared with the sm100 build
+#include "tasks/blackwell/glm_moe_router_sm100.cuh"
 #include "tasks/blackwell/mul_sum_add_sm100.cuh"
 #include "tasks/blackwell/topk_softmax_sm100.cuh"

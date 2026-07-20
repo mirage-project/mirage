@@ -44,7 +44,11 @@ template <typename T,
           int PAGE_SIZE,
           int MAX_TOKENS = 8,
           bool PARTITION_KV = true,
-          int NUM_KV_CHUNKS = 1>
+          int NUM_KV_CHUNKS = 1,
+          // Partial RoPE (GLM-4.6: 64 of 128 dims). Rotates dims
+          // [0, ROTARY_DIM), passes the rest through; cos/sin tables are
+          // [max_seq_len, ROTARY_DIM]. Default = full-dim NeoX RoPE.
+          int ROTARY_DIM = HEAD_DIM>
 __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     void *paged_k_cache_ptr,
     void *paged_v_cache_ptr,
@@ -467,7 +471,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                           NUM_QO_PER_KV,
                           HEAD_DIM,
                           THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                          CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+                          CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                          ROTARY_DIM>(
               q_smem,
               static_cast<T const *>(q_norm_weight_ptr),
               s_q_norm_sum,
@@ -476,9 +481,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
               0 /*token_offset*/,
               rope,
               static_cast<T const *>(cos_ptr) +
-                  (global_seq_len - num_tokens) * HEAD_DIM,
+                  (global_seq_len - num_tokens) * ROTARY_DIM,
               static_cast<T const *>(sin_ptr) +
-                  (global_seq_len - num_tokens) * HEAD_DIM);
+                  (global_seq_len - num_tokens) * ROTARY_DIM);
         }
         // K norm
         if (kv_tokens_to_process > 0) {
@@ -487,7 +492,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                           1,
                           HEAD_DIM,
                           THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                          CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+                          CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                          ROTARY_DIM>(
               k_smem,
               static_cast<T const *>(k_norm_weight_ptr),
               s_k_norm_sum,
@@ -496,9 +502,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
               curr_iter_len - kv_tokens_to_process,
               rope,
               static_cast<T const *>(cos_ptr) +
-                  (first_kv_token_to_process + kv_cache_offset) * HEAD_DIM,
+                  (first_kv_token_to_process + kv_cache_offset) * ROTARY_DIM,
               static_cast<T const *>(sin_ptr) +
-                  (first_kv_token_to_process + kv_cache_offset) * HEAD_DIM);
+                  (first_kv_token_to_process + kv_cache_offset) * ROTARY_DIM);
         }
       } else if (rope) {
         if (iter == 0) {
@@ -511,12 +517,13 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                                     1,
                                     HEAD_DIM,
                                     THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                                    ROTARY_DIM>(
                 q_smem,
                 static_cast<T const *>(cos_ptr) +
-                    (token_idx + global_seq_len - num_tokens) * HEAD_DIM,
+                    (token_idx + global_seq_len - num_tokens) * ROTARY_DIM,
                 static_cast<T const *>(sin_ptr) +
-                    (token_idx + global_seq_len - num_tokens) * HEAD_DIM,
+                    (token_idx + global_seq_len - num_tokens) * ROTARY_DIM,
                 token_idx);
           }
         }
@@ -530,14 +537,15 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                                     1,
                                     HEAD_DIM,
                                     THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID>(
+                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                                    ROTARY_DIM>(
                 k_smem,
                 static_cast<T const *>(cos_ptr) +
                     (token_idx + first_kv_token_to_process + kv_cache_offset) *
-                        HEAD_DIM,
+                        ROTARY_DIM,
                 static_cast<T const *>(sin_ptr) +
                     (token_idx + first_kv_token_to_process + kv_cache_offset) *
-                        HEAD_DIM,
+                        ROTARY_DIM,
                 token_idx + curr_iter_len - kv_tokens_to_process);
           }
         }
