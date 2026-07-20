@@ -39,6 +39,8 @@
 #include <nvshmemx.h>
 #endif
 #endif
+#include <chrono>
+#include <cstdlib>
 #include <map>
 #include <thread>
 #include <unistd.h>
@@ -831,7 +833,18 @@ __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   // assert(blockDim.x >= 128);
 }
 
+// Worker-grid residency handshake counter (see launch_persistent_kernel):
+// each worker CTA bumps this exactly once at entry so the host can verify the
+// FULL worker grid became resident before the scheduler kernel is launched.
+__device__ unsigned int mpk_worker_entry_count = 0;
+
 __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
+  // Residency handshake: report this worker CTA as resident. Must be the
+  // FIRST action so the host-side poll observes true residency (a CTA that
+  // cannot be scheduled onto an SM never reaches this line).
+  if (threadIdx.x == 0) {
+    atomicAdd(&mpk_worker_entry_count, 1u);
+  }
   // Make sure overall smem usage here do not exceed 3KB
   // last_task_pos: 2 * 8 = 16 B
   // next_task_pos: 2 * 8 = 16 B
@@ -1866,6 +1879,52 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                         global_runtime_config.prepare_done_event,
                         0);
 
+    // Worker-grid RESIDENCY HANDSHAKE (2026-07-19). The worker grid
+    // (num_workers CTAs, ~full-SM dynamic smem each => 1 CTA/SM) and the
+    // scheduler grid are launched on two concurrent non-blocking streams
+    // with NO co-residency guarantee (this split path cannot use
+    // nvshmemx_collective_launch, see comment below). If the scheduler's
+    // CTAs — or another process's kernels — win SM placement first, only
+    // (num_SMs - occupied) worker CTAs become resident. Persistent workers
+    // never yield their SM, so the losing worker CTAs NEVER start: tasks
+    // round-robined into their queues never execute, events never fire, and
+    // EVERY build wedges silently at 100% util (grid-barrier megakernels
+    // deadlock at the barrier; per-task chains stall on the dependency
+    // wait). Observed on 8xB200 with a co-tenant process: exactly
+    // (148 SMs - 48 scheduler CTAs) = 100 of 136 workers resident, blocks
+    // 100-135 never scheduled. Fix: reset an entry counter, launch workers,
+    // and WAIT until every worker CTA has reported entry before launching
+    // the scheduler kernel; fail LOUDLY (instead of wedging for the full
+    // timeout) if the grid cannot become fully resident.
+    // Escape hatch: MPK_DISABLE_RESIDENCY_HANDSHAKE=1 restores the old
+    // fire-and-hope launch.
+    bool const residency_handshake =
+        (std::getenv("MPK_DISABLE_RESIDENCY_HANDSHAKE") == nullptr);
+    cudaEvent_t residency_reset_done = nullptr;
+    if (residency_handshake) {
+      static unsigned int const kZero = 0;
+      CUDA_CHECK(cudaMemcpyToSymbolAsync(mpk_worker_entry_count,
+                                         &kZero,
+                                         sizeof(unsigned int),
+                                         0,
+                                         cudaMemcpyHostToDevice,
+                                         global_runtime_config.worker_stream));
+      // Make the reset explicitly happen-before the poll below. The reset is
+      // queued on worker_stream but the poll reads from scheduler_stream, and
+      // launch_persistent_kernel CAN be called repeatedly within one process
+      // with no intervening sync (the fp8_gemm_dense test-mode timing harness
+      // warms up in a loop and only synchronizes after the whole loop). On the
+      // second and later calls the counter still holds the previous launch's
+      // settled value, so without this dependency the poll could read that
+      // stale value, satisfy the residency condition on its very first check,
+      // and launch the scheduler without ever confirming the NEW worker grid
+      // is resident -- silently restoring the pre-fix hazard.
+      CUDA_CHECK(cudaEventCreateWithFlags(&residency_reset_done,
+                                          cudaEventDisableTiming));
+      CUDA_CHECK(cudaEventRecord(residency_reset_done,
+                                 global_runtime_config.worker_stream));
+    }
+
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
     // the interaction between the worker kernel and the scheduler kernel
@@ -1892,6 +1951,58 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                 MAX_DYNAMIC_SHARED_MEMORY_SIZE);
         abort();
       }
+    }
+
+    if (residency_handshake) {
+      // Poll the entry counter from the SCHEDULER stream (the worker stream
+      // is now occupied by the never-returning persistent worker kernel, so
+      // nothing enqueued behind it would ever run). ~30s budget: normal full
+      // residency is observed in well under a second; a timeout means the
+      // device cannot host num_workers co-resident CTAs right now (another
+      // process is holding SMs, or the worker smem/register footprint shrank
+      // the residency) — wedging silently would follow, so abort loudly.
+      // Order the poll after the counter reset (see the cudaEventRecord at the
+      // reset site): the two live on different streams, so on a repeated
+      // in-process launch the poll could otherwise observe the PREVIOUS
+      // launch's counter value.
+      CUDA_CHECK(cudaStreamWaitEvent(
+          global_runtime_config.scheduler_stream, residency_reset_done, 0));
+      unsigned int resident = 0;
+      auto const t0 = std::chrono::steady_clock::now();
+      while (true) {
+        CUDA_CHECK(
+            cudaMemcpyFromSymbolAsync(&resident,
+                                      mpk_worker_entry_count,
+                                      sizeof(unsigned int),
+                                      0,
+                                      cudaMemcpyDeviceToHost,
+                                      global_runtime_config.scheduler_stream));
+        CUDA_CHECK(
+            cudaStreamSynchronize(global_runtime_config.scheduler_stream));
+        if (resident >= (unsigned int)global_runtime_config.num_workers) {
+          break;
+        }
+        double const waited =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+                .count();
+        if (waited > 30.0) {
+          fprintf(stderr,
+                  "FATAL: worker grid failed to become fully resident: only "
+                  "%u of %d worker CTAs started after %.1fs. The persistent "
+                  "megakernel requires ALL worker CTAs co-resident (1 CTA/SM "
+                  "at %d B dynamic smem). Another process is likely holding "
+                  "SMs on this GPU (check nvidia-smi compute-apps), or the "
+                  "worker footprint no longer fits num_workers SMs. Refusing "
+                  "to launch the scheduler into a guaranteed wedge.\n",
+                  resident,
+                  global_runtime_config.num_workers,
+                  waited,
+                  MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+          abort();
+        }
+        usleep(2000);
+      }
+      CUDA_CHECK(cudaEventDestroy(residency_reset_done));
     }
 
     scheduler_kernel<<<dim3(global_runtime_config.num_local_schedulers, 1, 1),
