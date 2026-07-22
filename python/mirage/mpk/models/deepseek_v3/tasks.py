@@ -321,25 +321,12 @@ def mla_mtp_decode_layer(
     For tp_size == 8, q_len is the REAL (unpadded) Q_LEN; the TP8
     variant pads it to even internally.
     """
-    if tp_size == 1:
-        pk.mla_mtp_decode_layer(
-            q_input, kv_input, output_partial, output_lse, q_len, kv_len)
-    elif tp_size == 2:
-        pk.mla_mtp_decode_tp2_layer(
-            q_input, kv_input, output_partial, output_lse, q_len, kv_len,
-            num_splits_override=num_splits_override)
-    elif tp_size == 4:
-        pk.mla_mtp_decode_tp4_layer(
-            q_input, kv_input, output_partial, output_lse, q_len, kv_len,
-            num_splits_override=num_splits_override)
-    elif tp_size == 8:
+    if tp_size == 8:
         pk.mla_mtp_decode_tp8_layer(
             q_input, kv_input, output_partial, output_lse, q_len, kv_len,
             num_splits_override=num_splits_override)
     else:
-        raise ValueError(
-            f"mla_mtp_decode_layer: unsupported tp_size {tp_size} "
-            "(expected 1, 2, 4, or 8)")
+        raise NotImplementedError("DeepSeek-V3 MPK ships TP8 only")
 
 
 def mla_mtp_reduce_layer(
@@ -350,22 +337,11 @@ def mla_mtp_reduce_layer(
     companion of mla_mtp_decode_layer (registered task names unchanged).
     For tp_size == 8, q_len is the REAL (unpadded) Q_LEN.
     """
-    if tp_size == 1:
-        pk.mla_mtp_reduce_layer(
-            input_partial, input_lse, output, q_len, kv_len)
-    elif tp_size == 2:
-        pk.mla_mtp_decode_tp2_reduce_layer(
-            input_partial, input_lse, output, q_len, kv_len)
-    elif tp_size == 4:
-        pk.mla_mtp_decode_tp4_reduce_layer(
-            input_partial, input_lse, output, q_len, kv_len)
-    elif tp_size == 8:
+    if tp_size == 8:
         pk.mla_mtp_decode_tp8_reduce_layer(
             input_partial, input_lse, output, q_len, kv_len)
     else:
-        raise ValueError(
-            f"mla_mtp_reduce_layer: unsupported tp_size {tp_size} "
-            "(expected 1, 2, 4, or 8)")
+        raise NotImplementedError("DeepSeek-V3 MPK ships TP8 only")
 
 
 def ffn_full_megakernel_layer(
@@ -422,54 +398,6 @@ def ffn_full_megakernel_layer(
     pk.kn_graph.register_task(
         tb_graph, "ffn_full_megakernel_sm100",
         [local_expert_start, num_local_experts, scaling_bits])
-
-
-def dsv3_dense_mlp_fused_layer(
-    pk,
-    hidden: DTensor,
-    w13: DTensor,
-    w13_scale_fp32: DTensor,
-    w2: DTensor,
-    w2_scale_fp32: DTensor,
-    rmsnorm_weight: DTensor,
-    scratch: DTensor,
-    out: DTensor,
-    grid_dim: tuple = (136, 1, 1),
-    block_dim: tuple = (256, 1, 1),
-):
-    # Fused DENSE-MLP decode mega-task (DSv3 dense layers 0-2): one task absorbs
-    # post-attn RMSNorm + W13(gate+up) GEMV + silu(gate)*up (384-chunk
-    # interleave) + W2(down) GEMV -> bf16. Unlike the FFN-full mega-task there
-    # is NO router / topk / EP filter / shared-expert, so only 7 input slots:
-    #   inputs: [0] hidden(pre-rmsnorm bf16) [1] w13 [2] w13_scale(RAW f32)
-    #           [3] w2 [4] w2_scale(RAW f32) [5] rmsnorm_weight [6] scratch
-    #   output: [0] out (W2 GEMV result, bf16, PRE-AllReduce/residual — the
-    #           RowParallel down_proj AllReduce + residual stay OUTSIDE this
-    #           task, exactly as the unfused dense chain feeds _allreduce_residual).
-    # WEIGHT scales are RAW float32 [N/128, K/128] (NOT UE8M0/pow2 — the dense
-    # path uses scale_ue8m0=False); the kernel UE8M0-rounds only the ACTIVATION
-    # scales internally. ACTIVATION quant differs from the unfused chain's raw-f32
-    # (the fused kernel uses UE8M0 per its contract), so this is high-cosine
-    # equivalent (>=0.999), NOT bit-identical to the chain.
-    # merge_task_offset is the worker_idx (the 136-CTA full-grid barrier
-    # participant count); block_dim=256 is the MPK production worker (the kernel
-    # derives its thread partition from blockDim.x). NO literal params — the
-    # shapes are compile-time constants in the .cuh.
-    tensors = [
-        hidden,
-        w13,
-        w13_scale_fp32,
-        w2,
-        w2_scale_fp32,
-        rmsnorm_weight,
-        scratch,
-    ]
-    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-    for tensor in tensors:
-        tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
-    tb_graph.new_input(out, (-1, -1, -1), -1, True)
-    pk.kn_graph.customized(tensors + [out], tb_graph)
-    pk.kn_graph.register_task(tb_graph, "dsv3_dense_mlp_fused_sm100", [])
 
 
 def attn_block_megakernel_layer(
@@ -643,9 +571,7 @@ def _fp8_group_gemm_layer_impl(
     # input[5] (read as the active mask -> garbage -> num_active=0 -> the
     # kernel exits writing NOTHING) and `meta` in the output slot (the D
     # TMA-store goes to the tiny meta buffer, dropped) -> the entire
-    # active-skip MoE W13/W2 GEMM produced NULL output. Same bug class as
-    # the moe_silu_mul "CRITICAL ORDERING" fix; the grouped-GEMM path never
-    # got the analog.
+    # active-skip MoE W13/W2 GEMM produced NULL output.
     # meta=None path (non-active-skip) is unchanged (5 inputs + output).
     if meta is not None:
         tb_graph.new_input(meta, (-1, -1, -1), -1, True)
@@ -657,121 +583,14 @@ def _fp8_group_gemm_layer_impl(
 
 
 
-def _fp8_group_gemm_largem_compact_fused_layer(
-    pk,
-    a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-    num_workers, meta=None,
-    ta_sh_fp8=None, tb_sh_fp8=None, tsfa_sh=None, tsfb_sh=None,
-    shared_residual=None,
-    N_shared=7168, K_shared=256,
-):
-    """Fused compact W2 + shared-down GEMM.
-
-    The first five inputs and optional meta mirror _fp8_group_gemm_layer_impl.
-    Shared A/B/SFA/SFB are appended as extra inputs; routed D and shared D are
-    both graph outputs so task_register reads output_tma_desc_ptrs[0..1].
-    """
-    use_fused = all(x is not None for x in [
-        ta_sh_fp8, tb_sh_fp8, tsfa_sh, tsfb_sh, shared_residual
-    ])
-    if not use_fused:
-        _fp8_group_gemm_layer_impl(
-            pk, "fp8_group_gemm_largem_compact_sm100",
-            a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-            num_workers, meta=meta)
-        return
-
-    assert a_fp8.num_dims == 2
-    assert b_fp8.num_dims == 3
-    assert tb_sh_fp8.num_dims == 3
-    assert output.num_dims == 2
-    assert shared_residual.num_dims == 2
-    M_total = a_fp8.dim(0)
-    K = a_fp8.dim(1)
-    E = b_fp8.dim(0)
-    N = b_fp8.dim(1)
-    assert b_fp8.dim(2) == K
-    assert tb_sh_fp8.dim(0) == 1
-    assert tb_sh_fp8.dim(1) == N_shared
-    assert tb_sh_fp8.dim(2) == K_shared
-    assert K_shared == K
-    assert ta_sh_fp8.dim(1) == K_shared
-    assert shared_residual.dim(1) == N_shared
-    assert m_indices.dim(0) == M_total
-    if meta is None:
-        active_mask_offset = -1
-    else:
-        assert meta.num_dims == 2
-        active_mask_offset = meta.dim(1)
-
-    nn_shared = (N_shared + 127) // 128
-    params = [
-        M_total, N, K, E, num_workers, active_mask_offset,
-        N_shared, K_shared, nn_shared,
-    ]
-    grid_dim = (num_workers, 1, 1)
-    block_dim = (256, 1, 1)
-    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-    tb_graph.new_input(a_fp8, (-1, -1, -1), -1, True)
-    tb_graph.new_input(b_fp8, (-1, -1, -1), -1, True)
-    tb_graph.new_input(sfa_packed, (-1, -1, -1), -1, True)
-    tb_graph.new_input(sfb_packed, (-1, -1, -1), -1, True)
-    tb_graph.new_input(m_indices, (-1, -1, -1), -1, True)
-    operators = [a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices]
-    if meta is not None:
-        tb_graph.new_input(meta, (-1, -1, -1), -1, True)
-        operators.append(meta)
-    tb_graph.new_input(ta_sh_fp8, (-1, -1, -1), -1, True)
-    tb_graph.new_input(tb_sh_fp8, (-1, -1, -1), -1, True)
-    tb_graph.new_input(tsfa_sh, (-1, -1, -1), -1, True)
-    tb_graph.new_input(tsfb_sh, (-1, -1, -1), -1, True)
-    operators.extend([ta_sh_fp8, tb_sh_fp8, tsfa_sh, tsfb_sh])
-    tb_graph.new_input(output, (-1, -1, -1), -1, True)
-    tb_graph.new_input(shared_residual, (-1, -1, -1), -1, True)
-    operators.extend([output, shared_residual])
-    pk.kn_graph.customized(operators, tb_graph)
-    pk.kn_graph.register_task(
-        tb_graph, "fp8_group_gemm_largem_compact_fused_sm100", params)
-
-def _fp8_group_gemm_smallm_layer(
-    pk, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-    num_workers, meta=None,
-):
-    # Smallm variant: BN=64, NS=8. Best for K>4096 && MPE<=8 (gate_up
-    # M{1,4,8} on DSv3). MoE decode niche.
-    _fp8_group_gemm_layer_impl(
-        pk, "fp8_group_gemm_smallm_sm100",
-        a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-        num_workers, meta=meta)
-
-
 def _fp8_group_gemm_largem_layer(
     pk, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
     num_workers, meta=None,
 ):
-    # Largem variant: BN=128, NS=6. Default for everything outside the
-    # smallm niche (most MoE configs incl. all prefill MPE >= 16 and any
-    # K <= 4096 layer like down_proj).
-    #
-    # MPK_DSV3_GG_COMPACT=1 (default-OFF, byte-identical default build): swap the
-    # incumbent for the COMPACT-dispatch kernel. SAME _fp8_group_gemm_layer_impl
-    # signature/I/O, only the registered task_name differs. WHY: the incumbent
-    # strides ALL 128 experts with `continue`-skip, so at the production ~5-active
-    # bs=1 decode the active experts land unevenly across workers -> a subset owns
-    # 2 tiles -> W13 slowCTA ~50us (measured, winner trace 6/19). Compact iterates
-    # ONLY num_active*nn tiles, evenly strided -> 1 tile/worker -> ~18us
-    # (gate-validated 18.46 vs incumbent 28.67us @4-active, cos 1.0). DANGER:
-    # compact HANGS at >=18-active (README_faithful_pertask); safe ONLY at the
-    # bs=1 decode operating point (~5-active). Confirm the active-count before
-    # enabling at higher batch.
-    # 6/20: compact large-M group-GEMM is the DEFAULT for the decode build (mbt==1,
-    # ~5-active). It HANGS at ≥18-active, so the prefill/batched build (mbt>1) stays on
-    # the incumbent largem. mbt is read off the PersistentKernel (pk.max_num_batched_tokens).
-    _name = ("fp8_group_gemm_largem_compact_sm100"
-             if pk.max_num_batched_tokens == 1
-             else "fp8_group_gemm_largem_sm100")
+    # Largem variant: BN=128, NS=6. The general grouped-GEMM tile used for all
+    # MoE configs (decode + prefill).
     _fp8_group_gemm_layer_impl(
-        pk, _name,
+        pk, "fp8_group_gemm_largem_sm100",
         a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
         num_workers, meta=meta)
 
@@ -780,20 +599,10 @@ def fp8_group_gemm_layer(
     pk, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
     num_workers, meta=None,
 ):
-    # Public family entry. Auto-dispatcher: pick the smallm/largem tile
-    # variant by (K, M_per_expert).
-    K = a_fp8.dim(1)
-    M_total = a_fp8.dim(0)
-    E = b_fp8.dim(0)
-    MPE = M_total // E
-    if K > 4096 and MPE <= 8:
-        _fp8_group_gemm_smallm_layer(
-            pk, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-            num_workers, meta=meta)
-    else:
-        _fp8_group_gemm_largem_layer(
-            pk, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
-            num_workers, meta=meta)
+    # Public family entry — grouped FP8 GEMM (largem tile).
+    _fp8_group_gemm_largem_layer(
+        pk, a_fp8, b_fp8, sfa_packed, sfb_packed, m_indices, output,
+        num_workers, meta=meta)
 
 
 def moe_permute_sm100_layer(
@@ -1025,57 +834,6 @@ def linear_fp8_swapAB_with_residual_layer(
         tb_graph, "linear_fp8_swapAB_with_residual_sm100", params)
 
 
-def assemble_q_decode_sm100_layer(
-    pk,
-    q_nope_abs: DTensor,
-    q_pe: DTensor,
-    q_nope_pe: DTensor,
-    grid_dim: tuple,
-    block_dim: tuple = (128, 1, 1),
-    pe_only: bool = False,
-):
-    """Interleave the BMM-absorbed q_nope (N, H, 512) with q_pe (N, H, 64)
-    into per-head [nope|pe] layout (N, H, 576) for MLA decode.
-
-    Used by the DSv3 decode Q path:
-      rmsnorm_linear(q_a, q_b_nope) → q_nope (N, H, 128)
-      quantize_fp8(q_nope)         → q_nope_fp8 (N, H, 128)
-      linear_fp8_bmm_sm100(q_nope_fp8, kv_b_k_bmm) → q_nope_abs (N, H, 512)
-      rmsnorm_linear(q_a, q_b_pe)  → q_pe (N, H, 64)
-      assemble_q_decode_sm100(q_nope_abs, q_pe) → q_nope_pe (N, H, 576)
-
-    Replaces the load-time absorbed q_b_proj GEMM. The BMM is per-head and
-    loads smaller weights ((H, 512, 128) per head) vs the absorbed (H*576, q_lora)
-    monolith, which is the perf win — smaller TMA traffic per task.
-
-    grid_dim = (N, 1, 1); each CTA processes 1 token (all H heads).
-    block_dim = (128, 1, 1) is plenty: at TP=4 (H=32) each CTA writes
-    32*576 = 18432 bf16 elements = 144 elements/thread.
-    """
-    assert q_nope_abs.num_dims == 3
-    assert q_pe.num_dims == 3
-    # q_nope_pe may be 3D (N, H, D_TOTAL) or 2D (N, H*D_TOTAL) — same
-    # byte layout, the register code handles both. 2D is convenient so
-    # the existing q_nope_pe buffer doesn't need to be reshaped.
-    assert q_nope_pe.num_dims in (2, 3)
-    assert q_nope_abs.dim(0) == q_pe.dim(0) == q_nope_pe.dim(0)
-    H = q_nope_abs.dim(1)
-    assert q_pe.dim(1) == H
-    D_TOTAL = q_nope_abs.dim(2) + q_pe.dim(2)
-    if q_nope_pe.num_dims == 3:
-        assert q_nope_pe.dim(1) == H
-        assert q_nope_pe.dim(2) == D_TOTAL
-    else:
-        assert q_nope_pe.dim(1) == H * D_TOTAL
-    tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-    tb_graph.new_input(q_nope_abs, (0, -1, -1), -1, True)
-    tb_graph.new_input(q_pe,       (0, -1, -1), -1, True)
-    tb_graph.new_input(q_nope_pe,  (0, -1, -1), -1, True)
-    pk.kn_graph.customized([q_nope_abs, q_pe, q_nope_pe], tb_graph)
-    params = [1] if pe_only else []
-    pk.kn_graph.register_task(tb_graph, "assemble_q_decode_sm100", params)
-
-
 def _linear_fp8_bmm_sm100_layer(
     pk,
     input_fp8: DTensor,
@@ -1304,84 +1062,6 @@ def _fp8_gemm_dense_mediumm_layer(pk, input_fp8, weight_fp8, input_scale,
         num_workers, runtime_m_mode=runtime_m_mode)
 
 
-# Variants that fuse per-128-col-group UE8M0 quantize
-# into the GEMM epilogue — output is FP8 + packed scale uint32 instead
-# of bf16. Eliminates the downstream per_token_group_quantize_fp8 task
-# in the BMM Q-up chain (q_b_nope_decode → quantize → BMM): we drop
-# the quantize task and the BMM reads our FP8 + scale directly.
-def _fp8_gemm_dense_fp8out_layer_impl(
-    pk,
-    task_name: str,
-    input_fp8: DTensor,
-    weight_fp8: DTensor,
-    input_scale: DTensor,
-    weight_scale: DTensor,
-    output_fp8: DTensor,
-    output_scale: DTensor,
-    num_workers: int,
-    runtime_m_mode: int = 0,
-):
-    # Same A/B/sa/sb input plumbing as the bf16 variant. Outputs are two
-    # tensors (FP8 buf + packed uint32 scale); the bgraph attaches both
-    # so the task tuple is (4 inputs, 2 outputs). Scale layout: flat
-    # uint32 stride = N/128 entries per row (one per K-group), matching
-    # what per_token_group_quantize_fp8 produces today for the BMM
-    # input on the q_b_nope path.
-    assert input_fp8.num_dims in (2, 3)
-    assert weight_fp8.num_dims == 2
-    assert input_scale.num_dims == 2
-    assert weight_scale.num_dims == 2
-    assert output_fp8.num_dims in (2, 3)
-    assert output_scale.num_dims in (2, 3)
-    M = input_fp8.dim(0)
-    K = (input_fp8.dim(1) if input_fp8.num_dims == 2
-         else input_fp8.dim(1) * input_fp8.dim(2))
-    N = weight_fp8.dim(0)
-    assert weight_fp8.dim(1) == K
-    assert output_fp8.dim(0) == M
-    out_flat_n = (output_fp8.dim(1) if output_fp8.num_dims == 2
-                  else output_fp8.dim(1) * output_fp8.dim(2))
-    assert out_flat_n == N, (out_flat_n, N)
-    assert N % 128 == 0, (
-        "fp8_gemm_dense_fp8out requires N divisible by 128: " + str(N))
-    params = [M, N, K, num_workers]
-    if runtime_m_mode:
-        params.append(runtime_m_mode)
-    tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (256, 1, 1), 1, 64))
-    tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
-    tb_graph.new_input(weight_fp8, (-1, -1, -1), -1, True)
-    tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
-    tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)
-    tb_graph.new_input(output_fp8, (-1, -1, -1), -1, True)
-    tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
-    pk.kn_graph.customized(
-        [input_fp8, weight_fp8, input_scale, weight_scale,
-         output_fp8, output_scale],
-        tb_graph,
-    )
-    pk.kn_graph.register_task(tb_graph, task_name, params)
-
-
-def _fp8_gemm_dense_smallm_fp8out_layer(
-    pk, input_fp8, weight_fp8, input_scale, weight_scale,
-    output_fp8, output_scale, num_workers, runtime_m_mode: int = 0):
-    _fp8_gemm_dense_fp8out_layer_impl(
-        pk, "fp8_gemm_dense_smallm_fp8out_sm100",
-        input_fp8, weight_fp8, input_scale, weight_scale,
-        output_fp8, output_scale, num_workers,
-        runtime_m_mode=runtime_m_mode)
-
-
-def _fp8_gemm_dense_mediumm_fp8out_layer(
-    pk, input_fp8, weight_fp8, input_scale, weight_scale,
-    output_fp8, output_scale, num_workers, runtime_m_mode: int = 0):
-    _fp8_gemm_dense_fp8out_layer_impl(
-        pk, "fp8_gemm_dense_mediumm_fp8out_sm100",
-        input_fp8, weight_fp8, input_scale, weight_scale,
-        output_fp8, output_scale, num_workers,
-        runtime_m_mode=runtime_m_mode)
-
-
 def fp8_gemm_dense_layer(
     pk,
     input_fp8,
@@ -1392,44 +1072,22 @@ def fp8_gemm_dense_layer(
     output=None,
     runtime_m_mode: int = 0,
     variant: str = None,
-    fp8out: bool = False,
-    output_fp8=None,
-    output_scale=None,
 ):
     """Unified dense FP8 GEMM entry — dispatches to the smallm/mediumm
-    tile variants (+ their *_fp8out epilogue-quantize flavors). The
-    registered task names are unchanged.
+    tile variants. The registered task names are unchanged.
 
     variant: "smallm" | "mediumm" | None. None auto-picks by the rule
         every DSv3 builder call site used: smallm when
         pk.max_seq_length <= 512, else mediumm.
-    fp8out: select the epilogue-UE8M0-quantize flavor — the GEMM emits
-        FP8 + packed uint32 scale directly (pass output_fp8 +
-        output_scale instead of output).
     """
     if variant is None:
         variant = "smallm" if pk.max_seq_length <= 512 else "mediumm"
     assert variant in ("smallm", "mediumm"), variant
-    if fp8out:
-        assert output is None and output_fp8 is not None \
-            and output_scale is not None, (
-            "fp8_gemm_dense_layer(fp8out=True) takes output_fp8 + "
-            "output_scale, not output")
-        impl = (_fp8_gemm_dense_smallm_fp8out_layer
-                if variant == "smallm"
-                else _fp8_gemm_dense_mediumm_fp8out_layer)
-        impl(pk, input_fp8, weight_fp8, input_scale, weight_scale,
-             output_fp8, output_scale, num_workers,
-             runtime_m_mode=runtime_m_mode)
-    else:
-        assert output is not None and output_fp8 is None \
-            and output_scale is None, (
-            "fp8_gemm_dense_layer takes output (bf16), not "
-            "output_fp8/output_scale, unless fp8out=True")
-        impl = (_fp8_gemm_dense_smallm_layer if variant == "smallm"
-                else _fp8_gemm_dense_mediumm_layer)
-        impl(pk, input_fp8, weight_fp8, input_scale, weight_scale,
-             output, num_workers, runtime_m_mode=runtime_m_mode)
+    assert output is not None, "fp8_gemm_dense_layer takes output (bf16)"
+    impl = (_fp8_gemm_dense_smallm_layer if variant == "smallm"
+            else _fp8_gemm_dense_mediumm_layer)
+    impl(pk, input_fp8, weight_fp8, input_scale, weight_scale,
+         output, num_workers, runtime_m_mode=runtime_m_mode)
 
 
 def linear_splitk_swapAB_fp8_layer(

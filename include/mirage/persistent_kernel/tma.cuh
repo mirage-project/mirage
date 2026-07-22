@@ -1889,26 +1889,12 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     case TASK_MLA_MTP_DECODE_TP8_SM100: {
       // TP variants: Q box height = rows consumed by one CTA. TP2 splits
       // its 64 local heads into 2 head groups, so each CTA loads 32 rows.
-      // KV box = TILE_S=128 by default; TILE_S=32 when MPK_DSV3_MLA_FINESPLIT=1
-      // (TP=8 only — the finesplit kernel bakes TILE_S=32 and sets
-      // expect_tx = TILE_S*BK*2 = 4096 B, so the TMA box must deliver exactly
-      // 32 rows × 64 cols × 2 B = 4096 B. The SMEM slot stays
-      // TILE_BYTES=128-row for swizzle validity, but the box controls how many
-      // bytes TMA fills per cp.async.bulk. Mismatching box=128 vs
-      // expect_tx=4096 leaves the mbarrier permanently unsatisfied → megakernel
-      // deadlock. Fix: gate bd[1] to TILE_S.)
+      // KV box height = TILE_S=128 (the kernel bakes TILE_S=128 and sets
+      // expect_tx = TILE_S*BK*2, so the TMA box must deliver exactly that many
+      // bytes per cp.async.bulk or the mbarrier is never satisfied →
+      // megakernel deadlock).
       constexpr int BK = 64;
-      // Default TILE_S=128; finesplit (TILE_S=32) is the DEFAULT for the TP8
-      // decode build via the compile-time -DMPK_DSV3_MLA_FINESPLIT flag
-      // (get_compile_command adds it when mbt==1 && world_size==8), consistent
-      // with the kernel's #ifdef so the box bytes (TILE_S*BK*2) always match
-      // the kernel mbarrier expect_tx.
       int TILE_S = 128;
-#ifdef MPK_DSV3_MLA_FINESPLIT
-      if (task_desc.task_type == TASK_MLA_MTP_DECODE_TP8_SM100) {
-        TILE_S = 32;
-      }
-#endif
       constexpr CUtensorMapDataType fmt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
       constexpr CUtensorMapInterleave interleave =
           CU_TENSOR_MAP_INTERLEAVE_NONE;

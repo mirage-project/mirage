@@ -151,23 +151,9 @@ public:
                                           std::vector<int> const &params);
   int register_mla_prefill_tp8_chunked_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_mla_prefill_tp8_chunked_splitk_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_mla_prefill_tp8_chunked_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_mla_unified_sm100_task(threadblock::Graph const &bgraph,
-                                      std::vector<int> const &params);
-  int register_mla_mtp_decode_sm100_task(threadblock::Graph const &bgraph,
-                                         std::vector<int> const &params);
-  int register_mla_mtp_reduce_sm100_task(threadblock::Graph const &bgraph,
-                                         std::vector<int> const &params);
   // MLA-MTP TP variants (ferret-derived, no-PDL). Each: TP=2/4/8, with paired
   // reduce. Differ in NUM_HEADS (64/32/16); TP=4 also splits V across two
   // CTAs (z=2); TP=8 takes Q_LEN_real (Q_LEN padded to even).
-  int register_mla_mtp_decode_tp2_sm100_task(threadblock::Graph const &bgraph,
-                                             std::vector<int> const &params);
-  int register_mla_mtp_decode_tp4_sm100_task(threadblock::Graph const &bgraph,
-                                             std::vector<int> const &params);
   int register_mla_mtp_decode_tp8_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params);
   // Unified TP2/TP4/TP8 split-KV reduce (one TASK_MLA_MTP_DECODE_TP_REDUCE
@@ -202,38 +188,18 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   // fine-N dense GEMM (mediumm body @ BN=16, NS=6). default-OFF
   // MPK_DSV3_DENSE_FINEN.
-  int register_fp8_gemm_dense_finen_sm100_task(threadblock::Graph const &bgraph,
-                                               std::vector<int> const &params);
-  int register_fp8_gemm_dense_decode_splitk_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_gemm_dense_fp8out_sm100_task(
-      threadblock::Graph const &bgraph,
-      std::vector<int> const &params,
-      bool mediumm);
   int register_fused_rmsnorm_quantize_fp8_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_group_gemm_smallm_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_group_gemm_largem_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_group_gemm_largem_compact_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_fp8_group_gemm_largem_compact_fused_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_ffn_full_megakernel_sm100_task(threadblock::Graph const &bgraph,
                                               std::vector<int> const &params);
-  int register_dsv3_dense_mlp_fused_sm100_task(threadblock::Graph const &bgraph,
-                                               std::vector<int> const &params);
   int register_attn_block_megakernel_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_moe_permute_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
   int register_moe_unpermute_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
-  int register_transpose_scale_sm100_task(threadblock::Graph const &bgraph,
-                                          std::vector<int> const &params);
-  int register_assemble_q_decode_sm100_task(threadblock::Graph const &bgraph,
-                                            std::vector<int> const &params);
   int register_mla_kv_append_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
   int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,

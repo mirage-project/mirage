@@ -791,61 +791,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     // Per-head unabsorbed: 5 inputs (Qn, Qp, K_nope, K_rope, V) + 1 output.
     task_config[op] =
         std::make_tuple(5, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SM100, variant_id);
-  } else if (name == "mla_prefill_tp8_chunked_splitk_sm100") {
-    int variant_id =
-        task_register->register_mla_prefill_tp8_chunked_splitk_sm100_task(
-            customized->bgraph, params);
-    task_config[op] = std::make_tuple(
-        5, 1, TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100, variant_id);
-  } else if (name == "mla_prefill_tp8_chunked_reduce_sm100") {
-    int variant_id =
-        task_register->register_mla_prefill_tp8_chunked_reduce_sm100_task(
-            customized->bgraph, params);
-    task_config[op] = std::make_tuple(
-        1, 1, TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100, variant_id);
-  } else if (name == "mla_unified_sm100") {
-    int variant_id = task_register->register_mla_unified_sm100_task(
-        customized->bgraph, params);
-    // Inputs: Q_nope, Q_pe, CKV, KPE, O, Q_fused TMA, KV TMA.
-    // Outputs: decode partial O and LSE. O is an input by MPK convention so
-    // the prefill branch can write it directly.
-    task_config[op] = std::make_tuple(7, 2, TASK_MLA_UNIFIED_SM100, variant_id);
-  } else if (name == "mla_mtp_decode_sm100") {
-    int variant_id = task_register->register_mla_mtp_decode_sm100_task(
-        customized->bgraph, params);
-    // 2 inputs (Q TMA, KV TMA), 2 outputs (Oa, La)
-    task_config[op] =
-        std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_SM100, variant_id);
-  } else if (name == "mla_mtp_reduce_sm100") {
-    int variant_id = task_register->register_mla_mtp_reduce_sm100_task(
-        customized->bgraph, params);
-    // 2 inputs (Oa, La), 1 output (O)
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_MLA_MTP_REDUCE_SM100, variant_id);
-  }
-  // MLA-MTP TP variants (ferret-derived, no-PDL)
-  else if (name == "mla_mtp_decode_tp2_sm100") {
-    int variant_id = task_register->register_mla_mtp_decode_tp2_sm100_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP2_SM100, variant_id);
-  } else if (name == "mla_mtp_decode_tp2_reduce_sm100") {
-    int variant_id =
-        task_register->register_mla_mtp_decode_tp_reduce_sm100_task(
-            customized->bgraph, params, /*tp=*/2);
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP_REDUCE_SM100, variant_id);
-  } else if (name == "mla_mtp_decode_tp4_sm100") {
-    int variant_id = task_register->register_mla_mtp_decode_tp4_sm100_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(2, 2, TASK_MLA_MTP_DECODE_TP4_SM100, variant_id);
-  } else if (name == "mla_mtp_decode_tp4_reduce_sm100") {
-    int variant_id =
-        task_register->register_mla_mtp_decode_tp_reduce_sm100_task(
-            customized->bgraph, params, /*tp=*/4);
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_MLA_MTP_DECODE_TP_REDUCE_SM100, variant_id);
   } else if (name == "mla_mtp_decode_tp8_sm100") {
     int variant_id = task_register->register_mla_mtp_decode_tp8_sm100_task(
         customized->bgraph, params);
@@ -930,31 +875,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, /*mediumm=*/true);
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SM100, variant_id);
-  } else if (name == "fp8_gemm_dense_finen_sm100") {
-    // fine-N (mediumm body @ BN=16). Own enum so tma.cuh uses B-box=16.
-    int variant_id = task_register->register_fp8_gemm_dense_finen_sm100_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_FINEN_SM100, variant_id);
-  } else if (name == "fp8_gemm_dense_decode_splitk_sm100") {
-    int variant_id =
-        task_register->register_fp8_gemm_dense_decode_splitk_sm100_task(
-            customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SM100, variant_id);
-  } else if (name == "fp8_gemm_dense_smallm_fp8out_sm100") {
-    // D1 (2026-05-17): fp8out variant — 4 inputs + 2 outputs (FP8 C and
-    // packed UE8M0 scale). Fuses what was a downstream
-    // per_token_group_quantize_fp8 into the GEMM epilogue.
-    int variant_id = task_register->register_fp8_gemm_dense_fp8out_sm100_task(
-        customized->bgraph, params, /*mediumm=*/false);
-    task_config[op] =
-        std::make_tuple(4, 2, TASK_FP8_GEMM_DENSE_SM100, variant_id);
-  } else if (name == "fp8_gemm_dense_mediumm_fp8out_sm100") {
-    int variant_id = task_register->register_fp8_gemm_dense_fp8out_sm100_task(
-        customized->bgraph, params, /*mediumm=*/true);
-    task_config[op] =
-        std::make_tuple(4, 2, TASK_FP8_GEMM_DENSE_SM100, variant_id);
   } else if (name == "fused_rmsnorm_quantize_fp8_sm100") {
     // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
     // 2 real inputs (input, weight) + 3 outputs
@@ -973,41 +893,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int const num_inputs_fused = (num_ops_fused == 6) ? 3 : 2;
     task_config[op] = std::make_tuple(
         num_inputs_fused, 3, TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100, variant_id);
-  } else if (name == "fp8_group_gemm_smallm_sm100") {
-    // 5 inputs (A_fp8, B_fp8, sfa, sfb, m_indices) + optional 6th (meta for
-    // per-expert active mask) + 1 output (D_bf16). All 4 first inputs +
-    // the output carry TMA descriptors; m_indices + active mask are direct
-    // LDG. The 6th-input case is signaled by params[5] >= 0 (= flat offset
-    // of active_expert_mask inside meta).
-    int variant_id = task_register->register_fp8_group_gemm_smallm_sm100_task(
-        customized->bgraph, params);
-    int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
-    task_config[op] = std::make_tuple(
-        num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_SMALLM_SM100, variant_id);
   } else if (name == "fp8_group_gemm_largem_sm100") {
     int variant_id = task_register->register_fp8_group_gemm_largem_sm100_task(
         customized->bgraph, params);
     int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
     task_config[op] = std::make_tuple(
         num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_LARGEM_SM100, variant_id);
-  } else if (name == "fp8_group_gemm_largem_compact_sm100") {
-    int variant_id =
-        task_register->register_fp8_group_gemm_largem_compact_sm100_task(
-            customized->bgraph, params);
-    int num_inputs_gg = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
-    task_config[op] = std::make_tuple(
-        num_inputs_gg, 1, TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100, variant_id);
-  } else if (name == "fp8_group_gemm_largem_compact_fused_sm100") {
-    int variant_id =
-        task_register->register_fp8_group_gemm_largem_compact_fused_sm100_task(
-            customized->bgraph, params);
-    int base_inputs = (params.size() >= 6 && params[5] >= 0) ? 6 : 5;
-    int num_inputs_fused = base_inputs + 4;
-    task_config[op] =
-        std::make_tuple(num_inputs_fused,
-                        2,
-                        TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100,
-                        variant_id);
   } else if (name == "ffn_full_megakernel_sm100") {
     int variant_id = task_register->register_ffn_full_megakernel_sm100_task(
         customized->bgraph, params);
@@ -1021,16 +912,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     //   output: [0] out (tracked bf16 moe_output write).
     task_config[op] =
         std::make_tuple(14, 1, TASK_FFN_FULL_MEGAKERNEL_SM100, variant_id);
-  } else if (name == "dsv3_dense_mlp_fused_sm100") {
-    int variant_id = task_register->register_dsv3_dense_mlp_fused_sm100_task(
-        customized->bgraph, params);
-    // Fused DENSE-MLP decode (rmsnorm + W13 GEMV + silu_mul + W2 GEMV). The
-    // kernel reads 7 input pointers + writes output_ptrs[0]:
-    //   inputs: [0] hidden(pre-rmsnorm bf16) [1] w13 [2] w13_scale(raw f32)
-    //           [3] w2 [4] w2_scale(raw f32) [5] rmsnorm_weight [6] scratch
-    //   output: [0] out (W2 GEMV result, bf16, pre-AllReduce/residual).
-    task_config[op] =
-        std::make_tuple(7, 1, TASK_DSV3_DENSE_MLP_FUSED_SM100, variant_id);
   } else if (name == "attn_block_megakernel_sm100") {
     int variant_id = task_register->register_attn_block_megakernel_sm100_task(
         customized->bgraph, params);
@@ -1059,17 +940,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(3, 1, TASK_MOE_UNPERMUTE_SM100, variant_id);
-  } else if (name == "transpose_scale_sm100") {
-    int variant_id = task_register->register_transpose_scale_sm100_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(1, 1, TASK_TRANSPOSE_SCALE_SM100, variant_id);
-  } else if (name == "assemble_q_decode_sm100") {
-    // 2 inputs (q_nope_abs, q_pe) + 1 output (q_nope_pe).
-    int variant_id = task_register->register_assemble_q_decode_sm100_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_ASSEMBLE_Q_DECODE_SM100, variant_id);
   }
   // bs=1 contiguous KV append (no page table). kv_buf is tracked as an
   // output so the MLA decode task (which reads it the same iteration) gets a

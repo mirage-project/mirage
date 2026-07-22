@@ -1192,7 +1192,6 @@ TaskGraphResult print_task_graph(
   tgbody.inc_indent();
   code.e("#include \"persistent_kernel.cuh\"");
   code.e("#include \"tasks/blackwell/ffn_full_megakernel_sm100.cuh\"");
-  code.e("#include \"tasks/blackwell/dsv3_dense_mlp_fused_sm100.cuh\"");
   code.e("#include \"tasks/blackwell/attn_block_megakernel_sm100.cuh\"");
   if (use_json_format) {
     code.e("#include <nlohmann/json.hpp>");
