@@ -35,7 +35,7 @@
 //   sfa      [num_sf_k, M_total]       packed UE8M0 uint32 (4 UE8M0/uint32);
 //                                      M_total innermost — transposed vs. the
 //                                      natural [M_total, num_sf_k] producer
-//                                      layout (see transpose_scale_sm100)
+//                                      layout
 //   sfb      [num_sf_k, E*N]           packed UE8M0 uint32 (4 UE8M0/uint32);
 //                                      E*N innermost — same transposition
 //   m_indices[M_total]                 int32, expert id per row (rows in
@@ -245,8 +245,8 @@ __device__ __noinline__ void task_impl_tpl(
   // that is LIVE in the DSv3 build (linear_sm100_mpk and the MLA MTP decode
   // family) allocates from warp 0, so this file allocating from warp 2 was an
   // inconsistency across task boundaries. NOTE the tree is not uniform:
-  // mla_decode_sm100.cuh:108 and simple_linear_sm100.cuh:148 still allocate
-  // from warp 1 (both are dead code -- neither appears in any generated
+  // mla_decode_sm100.cuh:108 still allocates
+  // from warp 1 (dead code -- does not appear in any generated
   // megakernel), and fp8_group_gemm_sm100_common.cuh still DEALLOCATES from
   // warp 5. This change is an invariant/hygiene fix: it was measured NOT to
   // resolve the observed prefill fault, so it is not a proven root cause.
@@ -612,12 +612,10 @@ __device__ __noinline__ void task_impl_tpl(
     // "for repeated allocations, the same warp must be used to issue all
     // allocations"). MPK never issues tcgen05.relinquish_alloc_permit, so that
     // requirement spans task boundaries for the entire life of the persistent
-    // CTA. The identical defect was already found and fixed in the sibling
-    // fp8_group_gemm_largem_compact_sm100.cuh:616-631 ("C3"); this file was
-    // simply never updated, and it is the only remaining live alloc/dealloc
+    // CTA. This is the only remaining live alloc/dealloc
     // warp split in the megakernel. Moved below.
   }
-  // C3 FIX (mirrors fp8_group_gemm_largem_compact_sm100.cuh:621-631): every
+  // C3 FIX: every
   // warp falls through the if-else chain to this point and this task body
   // contains no early `return`, so a full-CTA barrier here is safe. Sync all
   // 256 threads (all 8 warp-specialized loops have exited, so no warp can

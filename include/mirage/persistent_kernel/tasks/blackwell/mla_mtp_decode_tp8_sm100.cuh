@@ -1,48 +1,24 @@
+/* Copyright 2025 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 // MLA Multi-Token Decode for DeepSeek V3 on B200 (SM100a) — TP=8 (16 heads)
 //
-// v7 optimization (2026-06-18): register-spill resolution + forceinline under
-// -rdc=true
-//
-// Root cause: under -rdc=true (per-function compile, no inlining), the
-// worker_kernel reaches the hardware register cap and spills to local memory
-// (624B caller-save + MLA body spill). The fix is two-step:
-//
-// STEP 1 — Reduce MLA body register footprint to <=~150 regs:
-//   1. NUM_QK_STAGES: 5 -> 3 (saves 2*TILE_BYTES smem per stage; K_ITERS=9
-//      with 3 stages provides adequate TMA latency hiding)
-//   2. o_save[] moved from registers to shared memory (was float[128] = 512B
-//      of registers per thread; now stored in 64KB smem slab). With 3-stage
-//      QK (98304B) + o_save smem (65536B) total = 164864B < 205KB B200 budget.
-//   3. MAX_STAGES = 3 = max(NUM_QK_STAGES, NUM_PV_STAGES)
-//
-// STEP 2 — Forceinline the body into execute_worker:
-//   Added MPK_DSV3_TASK_INLINE macro (same pattern as
-//   fp8_gemm_dense_finen_sm100.cuh). When MPK_DSV3_FORCEINLINE=1,
-//   mla_mtp_tp8_main is __forceinline__ -> folds into _execute_task ->
-//   execute_task_noinline -> execute_worker -> eliminates the 624B caller-save
-//   across the relocatable call boundary. Default (MPK_DSV3_FORCEINLINE not
-//   set): __noinline__ (byte-identical default build).
-//
-// Build target: MPK_DSV3_FORCEINLINE=1 MPK_FORCE_RDC_TRUE=1
-// Expected: slowCTA <= ~12.5us (vs baseline 20.86us rdc=true; vLLM ref 15us
-// / 1.2 = 12.5us)
-//
-// Invariants preserved:
+// Invariants:
 //   - bar.sync 12, 128 (CUTLASS user-range, NOT __syncthreads() / NOT id=1)
 //   - tcgen05.alloc/dealloc from warp 0 (same warp, CuTe invariant)
 //   - cta_group::1, single-CTA-per-tile, DIRECT bf16 store
-//   - ABI unchanged (drop-in replacement for mla_mtp_decode_tp8_sm100.cuh)
-//
-// Measurements (<BOX_USER>@<BOX_IP>, GPU 0, B200):
-//   Baseline -rdc=false: ~12.4 us KV=512 slowCTA (INVALID as verdict)
-//   Baseline -rdc=true:  ~20.86 us KV=512 slowCTA (the number to beat)
-//   v7 DEFAULT rdc=true (noinline):   ~20.80 us KV=512 (stages=3 correct, but
-//   spill still present) v7 FORCEINLINE rdc=true (TARGET): ~11.84 us KV=512
-//   slowCTA — BEATS vLLM 15us by 26.8% (vs >=20% bar) v7 MPK_MAXRREGCOUNT=168
-//   FORCEINLINE: ~10.78 us KV=512 (even faster with reg cap — ROBUST)
-//   cos=0.999995 all configs (KV=128,256,512) — FAR above 0.99 floor
-//   PROMOTED: slowCTA 11.84us < baseline 20.86us (1.76x speedup); beats vLLM
-//   15us / 1.2 = 12.5us
 
 #pragma once
 #include <cuda.h>
@@ -53,8 +29,7 @@
 // When set, mla_mtp_tp8_main is forceinlined into execute_worker (via
 // _execute_task → execute_task_noinline) so the MLA body folds into the
 // worker frame → no caller-save across the relocatable -rdc=true call.
-// Requires the body register count ≤ ~150 regs (STEP 1 above ensures this).
-// Same pattern as fp8_gemm_dense_finen_sm100.cuh.
+// Requires the body register count ≤ ~150 regs.
 #ifndef MPK_DSV3_TASK_INLINE
 #ifdef MPK_DSV3_FORCEINLINE
 #define MPK_DSV3_TASK_INLINE __forceinline__
@@ -66,8 +41,7 @@
 namespace kernel {
 namespace mla_mtp_tp8 {
 
-// See mla_mtp_decode_tp2_sm100.cuh for rationale. ID 12 = CUTLASS user
-// range; IDs 1..7 are reserved (bugfix.md Bug 19).
+// ID 12 = CUTLASS user range; IDs 1..7 are reserved (bugfix.md Bug 19).
 #define MLA_TP_SYNC_ACTIVE() asm volatile("bar.sync 12, 128;" ::: "memory")
 
 static constexpr int NUM_HEADS = 16;

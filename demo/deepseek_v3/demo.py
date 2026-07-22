@@ -60,32 +60,6 @@ def max_factor_leq_n(m: int, n: int) -> int:
     return max_factor
 
 
-def safe_tokenizer_decode(tokenizer, token_ids, *, context: str) -> str:
-    if torch.is_tensor(token_ids):
-        ids = [int(x) for x in token_ids.detach().cpu().reshape(-1).tolist()]
-    else:
-        ids = [int(x) for x in token_ids]
-
-    try:
-        vocab_size = len(tokenizer)
-    except TypeError:
-        vocab_size = getattr(tokenizer, "vocab_size", None)
-
-    if vocab_size is not None:
-        bad_ids = [tok for tok in ids if tok < 0 or tok >= vocab_size]
-        if bad_ids:
-            first = bad_ids[0]
-            return (
-                f"[decode skipped for {context}: {len(bad_ids)} token id(s) "
-                f"outside tokenizer range [0, {vocab_size}); first={first}]"
-            )
-
-    try:
-        return tokenizer.decode(ids, skip_special_tokens=True)
-    except (OverflowError, ValueError) as exc:
-        return f"[decode skipped for {context}: {type(exc).__name__}: {exc}]"
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DeepSeek V3 demo with Mirage megakernel")
     parser.add_argument("--model-path", type=str, required=True,
@@ -94,10 +68,6 @@ if __name__ == "__main__":
                         help="Use Mirage megakernel")
     parser.add_argument("--profiling", action="store_true",
                         help="Enable profiling to generate trace")
-    parser.add_argument("--profile-start-step", type=int, default=None,
-                        help="Profiling-only: initialize the runtime step "
-                             "after MPK compile so a single profiled graph "
-                             "starts from an existing context position.")
     parser.add_argument("--max-num-batched-tokens", default=8, type=int,
                         help="Max number of tokens in a batch")
     parser.add_argument("--max-num-batched-requests", default=1, type=int,
@@ -150,23 +120,13 @@ if __name__ == "__main__":
                             "Optional directory for MPK-ready per-rank weight cache. "
                             "When set, converted/fused/sharded tensors are saved after "
                             "the first run and loaded directly by later runs with the "
-                            "same model/layers/TP/EP/vocab-parallel settings."
+                            "same model/TP/EP/vocab-parallel settings."
                         ))
-    parser.add_argument("--layers", type=str, default=None,
-                        help="Comma-separated list of layer indices to load (e.g. '0,3,60') "
-                             "or a range '0-39'.")
 
     args = parser.parse_args()
 
     # Multi-GPU setup via MPI
     try:
-        if os.environ.get("MPK_BUILD_CACHE_ONLY") == "1":
-            # Cache-only builds never need MPI — and importing mpi4py installs
-            # OpenMPI memory hooks that slow large CPU tensor ops ~6x (measured
-            # (expert-fusion cat/stack 0.5s -> 3.0s/layer standalone;
-            # catastrophic in the full converter). Fall through to the
-            # single-process branch; MPK_FORCE_BUILD_WS/RANK still apply.
-            raise ImportError("MPK_BUILD_CACHE_ONLY: skipping mpi4py by design")
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
         world_size = comm.Get_size()
@@ -186,35 +146,6 @@ if __name__ == "__main__":
         world_size = 1
         rank = 0
 
-    # Single-process "pretend rank r of TP=N" mode: force the BUILD world_size
-    # (kernel selection: mla_mtp_decode_tpN + N-way sharding => this rank loads
-    # only 1/N of the weights) while only this single process runs. Used by the
-    # serial weight-cache pre-builder (MPK_BUILD_CACHE_ONLY exits at cache-save,
-    # before any AllReduce/kernel launch). No effect unless MPK_FORCE_BUILD_WS
-    # is set.
-    _force_build_ws = os.environ.get("MPK_FORCE_BUILD_WS")
-    if _force_build_ws:
-        world_size = int(_force_build_ws)
-        # MPK_FORCE_BUILD_RANK (default 0): pretend to be THIS rank of
-        # world_size, in a single process with NO MPI / NO dist init. The
-        # legacy single-card "pretend TP=N" debug mode keeps rank=0. The serial
-        # TP8 weight-cache pre-builder (tools/build_weight_cache_serial.sh) sets
-        # it to r=0..N-1 so each rank's cache is built in an ISOLATED subprocess
-        # — bounding peak host RAM to ONE rank, not world_size ranks
-        # (the TP8 cold-convert CPU-OOM fix; all 8 ranks co-resident = ~2.4TB
-        # un-sharded > 1.7TB host RAM).
-        rank = int(os.environ.get("MPK_FORCE_BUILD_RANK", "0"))
-        assert 0 <= rank < world_size, (
-            f"MPK_FORCE_BUILD_RANK={rank} out of range [0,{world_size})")
-        os.environ["WORLD_SIZE"] = str(world_size)
-        os.environ["RANK"] = str(rank)
-        # NOTE: cannot use print() here -- it is declared `global` further down,
-        # so referencing it before that declaration is a SyntaxError.
-        sys.stderr.write(
-            f"[MPK_FORCE_BUILD_WS] single-rank sim: build world_size={world_size}, "
-            f"rank={rank}; pair with MPK_BUILD_CACHE_ONLY=1 (exits after cache "
-            f"save, before any cross-rank AllReduce or kernel launch).\n")
-
     if args.save_tokens:
         if args.save_tokens == "auto":
             filename = "mpk_output.json" if args.use_mirage else "torch_output.json"
@@ -225,7 +156,7 @@ if __name__ == "__main__":
     else:
         save_path = None
 
-    if world_size > 1 and not _force_build_ws:
+    if world_size > 1:
         dist.init_process_group(backend="nccl", init_method="env://")
     global print
     if rank != 0:
@@ -242,13 +173,7 @@ if __name__ == "__main__":
     if 256 % args.ep_size != 0:
         raise ValueError(f"--ep-size must divide 256 routed experts: {args.ep_size}")
     torch.set_default_dtype(torch.bfloat16)
-    if os.environ.get("MPK_BUILD_CACHE_ONLY") == "1":
-        # Cache pre-build: a single process with a FORCED rank
-        # (MPK_FORCE_BUILD_RANK) that may exceed the visible device count.
-        # Pin to device 0 (the one visible GPU).
-        torch.cuda.set_device(0)
-    else:
-        torch.cuda.set_device(rank)
+    torch.cuda.set_device(rank)
 
     # Load model config and tokenizer from converted weights
     print(f"Loading model config from: {args.model_path}")
@@ -297,16 +222,9 @@ if __name__ == "__main__":
         (args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda"
     )
 
-    # Tokenize prompt (or synthesize a fixed-length prompt for stress tests)
+    # Tokenize prompt or synthesize a fixed-length prompt.
     if args.prompt_length > 0:
-        # Reserve at least 1 slot for the next decoded token. For prefill-only
-        # diagnostics (max_seq_length == prompt_length), this collapses to a
-        # one-iter run that terminates right after the prefill iter.
         pl = min(args.prompt_length, args.max_seq_length - 1)
-        # Deterministic synthetic prompt: cycle over a small subset of the
-        # vocab. Excludes special IDs (pad, bos, eos, etc.) by staying in
-        # [1024, 1024 + 4096) which is safely inside any tokenizer's main
-        # text vocabulary for DeepSeek V3 (vocab_size = 129280).
         synth = torch.arange(pl, dtype=torch.long, device="cuda") % 4096 + 1024
         for r in range(total_num_requests):
             tokens[r, :pl] = synth
@@ -314,8 +232,6 @@ if __name__ == "__main__":
             (total_num_requests,), pl,
             dtype=torch.int, device="cuda"
         )
-        print(f"[stress] Using synthetic prompt of length {pl} "
-              f"(max_seq_length={args.max_seq_length}).")
     elif args.prompts_json:
         prompt_list = json.loads(args.prompts_json)
         if not isinstance(prompt_list, list) or not prompt_list:
@@ -349,8 +265,6 @@ if __name__ == "__main__":
         prompt_lengths = torch.tensor(
             prompt_lens, dtype=torch.int, device="cuda"
         )
-        print(f"[batch] Using {len(prompt_list)} distinct prompts; "
-              f"prompt_lengths={prompt_lengths.tolist()}")
     else:
         messages = [
             {"role": "user", "content": args.prompt},
@@ -366,47 +280,6 @@ if __name__ == "__main__":
             (total_num_requests,), model_inputs.input_ids.shape[-1],
             dtype=torch.int, device="cuda"
         )
-
-    # Multi-chunk prefill (prompt longer than mbt → a second prefill chunk
-    # with q_len > 8 at step > 0) is supported: the split ROPE-Q position
-    # handling for step>0 prefill chunks was validated against the
-    # token-by-token oracle (KV exact across both chunks; 2026-06-13).
-
-    # DIAGNOSTIC (MPK_DSV3_TOKEN_FILL=<id>): both `tokens` and `output_tokens`
-    # are zero-filled and BOS is id 0, so a generated slot reading 0 is
-    # AMBIGUOUS three ways -- the model may have emitted BOS, or the argmax may
-    # never have written `output_tokens`, or the scheduler may never have copied
-    # `output_tokens` into `tokens`. A single sentinel cannot separate these,
-    # because `tokens` is written by an UNCONDITIONAL copy from `output_tokens`
-    # (persistent_kernel.cuh:288): a never-written `output_tokens` slot faithfully
-    # overwrites the sentinel with its own 0.
-    #
-    # So poison the two stages with DISTINCT ids and let the surviving value
-    # name the stage that failed:
-    #   <id>    survives in the output -> `tokens` slot never written at all
-    #   <id>+1  survives in the output -> `output_tokens` never written by the
-    #           argmax, but the copy into `tokens` did run
-    #   0       -> both stages ran; the argmax genuinely returned vocab id 0
-    # Note this is exactly the discriminator a single-stage sentinel lacks.
-    # Reading a 0 is not self-evidently a bug: the PER-CHUNK argmax
-    # (ampere/argmax.cuh:91, argmax_sm100.cuh:106) deliberately defaults its
-    # index to 0, by explicit comment, so an all -inf / NaN row still yields a
-    # VALID index rather than a sentinel. The CROSS-RANK stage that this
-    # vocab-parallel TP8 build actually emits into output_tokens
-    # (nvshmem_argmax_sm100.cuh:57,92) does NOT inherit that fallback: it inits
-    # to -1 and only updates under a strict `val > best_val` starting from
-    # -inf, so a fully degenerate row surfaces as -1, not 0. Empirically,
-    # across every DSv3 run recorded so far, 0 appears and -1 never does --
-    # i.e. the logits reaching the argmax are finite, not NaN/-inf poisoned.
-    _tok_fill = os.environ.get("MPK_DSV3_TOKEN_FILL")
-    if _tok_fill:
-        _fill_id = int(_tok_fill)
-        for r in range(total_num_requests):
-            tokens[r, int(prompt_lengths[r].item()):] = _fill_id
-        output_tokens.fill_(_fill_id + 1)
-        print(f"[diag] MPK_DSV3_TOKEN_FILL: tokens generation region pre-filled "
-              f"with id {_fill_id}, output_tokens pre-filled with id "
-              f"{_fill_id + 1} (two-stage write-liveness sentinel)")
 
     step = torch.full((total_num_requests,), 0, dtype=torch.int32, device="cuda")
     num_new_tokens = torch.full((total_num_requests,), 1, dtype=torch.int32, device="cuda")
@@ -448,13 +321,7 @@ if __name__ == "__main__":
             profiler_tensor = None
 
 
-        # Cache pre-build exits at cache-save (before the megakernel build), so
-        # num_workers is unused; the forced rank may exceed the visible device
-        # count, so query device 0 there.
-        if os.environ.get("MPK_BUILD_CACHE_ONLY") == "1":
-            num_workers, num_schedulers = mi.get_configurations_from_gpu(0)
-        else:
-            num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
+        num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
 
         # Meta tensor buffers for paged attention
         qo_indptr_buffer = torch.empty(
@@ -488,11 +355,7 @@ if __name__ == "__main__":
             mode="offline",
             world_size=world_size,
             spec_decode_config=None,
-            # Cache-only build: a single process with a forced rank that may
-            # exceed the visible device count → tell the kernel it's rank 0 (the
-            # one visible GPU). mpk is unused in cache-only mode (we exit at the
-            # cache-save); the loader uses the real `rank` for EP-filter/shard.
-            mpi_rank=(0 if os.environ.get("MPK_BUILD_CACHE_ONLY") == "1" else rank),
+            mpi_rank=rank,
             num_workers=num_workers,
             num_local_schedulers=num_schedulers,
             num_remote_schedulers=0,
@@ -534,20 +397,9 @@ if __name__ == "__main__":
         from safetensors.torch import load_file, save_file
         from safetensors import safe_open
 
-        def _parse_layers(spec):
-            result = []
-            for part in spec.split(','):
-                if '-' in part:
-                    lo, hi = part.split('-', 1)
-                    result.extend(range(int(lo), int(hi) + 1))
-                else:
-                    result.append(int(part))
-            return result
-
-        # `layer_indices_arg` is what the builder consumes; `_for_load` is
-        # the same set plus the MTP layer (we still have to load its weights).
-        layer_indices_arg = _parse_layers(args.layers) if args.layers else None
-        layer_indices_for_load = list(layer_indices_arg) if layer_indices_arg else None
+        layer_indices_arg = None
+        layer_indices_for_load = list(range(num_layers))
+        absorb_layers = list(range(num_layers))
 
         num_routed_experts_for_load = getattr(
             config,
@@ -574,12 +426,8 @@ if __name__ == "__main__":
         state_dict_from_cache = False
         if args.weight_cache_dir:
             cache_payload = {
-                # v2: dropped the dead kv_b_{k,v}_bf16 debug-ablation weights from the
-                # cached key set (cache contract: bump on any cached-key change).
                 "format": "deepseek_v3_mpk_fp8_runtime_cache_v2",
                 "model_path": os.path.realpath(args.model_path),
-                "layers": layer_indices_arg,
-                "layers_for_load": layer_indices_for_load,
                 "world_size": world_size,
                 "rank": rank,
                 "mtp": 0,  # MTP removed; key field kept for cache compat
@@ -598,15 +446,6 @@ if __name__ == "__main__":
             cache_dir = os.path.join(args.weight_cache_dir, cache_key)
             cache_file = os.path.join(cache_dir, f"rank{rank}.safetensors")
             if os.path.exists(cache_file):
-                if os.environ.get("MPK_BUILD_CACHE_ONLY") == "1":
-                    # Serial cache pre-builder, idempotent: this rank's cache is
-                    # already present, nothing to rebuild. Exit BEFORE the
-                    # cuda:{rank} warm-load (the builder runs with only 1 visible
-                    # GPU, so cuda:{rank>0} would be invalid).
-                    sys.stderr.write(
-                        f"[MPK_BUILD_CACHE_ONLY] cache present rank={rank} "
-                        f"world_size={world_size} file={cache_file} — exiting (no rebuild).\n")
-                    sys.exit(0)
                 cache_load_device = f"cuda:{rank}"
                 print(f"  Loading MPK weight cache: {cache_file}")
                 cache_load_start = time.perf_counter()
@@ -617,30 +456,9 @@ if __name__ == "__main__":
                     f"{time.perf_counter() - cache_load_start:.3f}s"
                 )
 
-        # Host-level conversion semaphore (MPK_CONVERT_SEMAPHORE=K, default off):
-        # bound how many ranks run the COLD load+convert simultaneously. At TP8
-        # all 8 ranks each materialize ~330GB un-sharded weights => ~2.6TB > host
-        # RAM (the TP8 cold-load OOM). K=4 gives two waves with the proven TP4
-        # footprint (~1.3TB peak, ~20min/wave on the 8xB200 box). Slot = rank%K
-        # (deterministic pairing; flock blocks until the slot-mate releases).
-        # Safe: the loader contains NO collectives, so a
-        # waiting rank cannot deadlock; NCCL/NVSHMEM comms init after the loader.
         _conv_sem_fh = None
         _conv_sem_k = int(os.environ.get("MPK_CONVERT_SEMAPHORE", "0") or "0")
-        if _conv_sem_k > 0 and world_size > 1 and not state_dict_from_cache:
-            import fcntl
-            _sem_dir = os.path.join(
-                args.weight_cache_dir or os.environ.get("TMPDIR", "/tmp"),
-                "_mpk_convert_sem")
-            os.makedirs(_sem_dir, exist_ok=True)
-            _conv_sem_fh = open(
-                os.path.join(_sem_dir, f"slot{rank % _conv_sem_k}"), "w")
-            _sem_t0 = time.perf_counter()
-            sys.stderr.write(f"[convert-sem] rank {rank}: waiting for slot "
-                             f"{rank % _conv_sem_k} (K={_conv_sem_k})\n")
-            fcntl.flock(_conv_sem_fh, fcntl.LOCK_EX)
-            sys.stderr.write(f"[convert-sem] rank {rank}: slot acquired after "
-                             f"{time.perf_counter() - _sem_t0:.1f}s\n")
+        needs_conversion = False
 
         weight_file = os.path.join(
             args.model_path, f"model{rank}-mp{world_size}.safetensors"
@@ -650,20 +468,31 @@ if __name__ == "__main__":
         elif os.path.exists(weight_file):
             state_dict = load_file(weight_file, device=f"cuda:{rank}")
         else:
-            # Selective loading: only load needed layers from sharded files
-            # * selective loading is what we want
             index_file = os.path.join(args.model_path, "model.safetensors.index.json")
-            if os.path.exists(index_file) and layer_indices_for_load is not None:
-                # Smart loading: use index to only load relevant shards/keys
-                print(f"  Selective loading for layers: {layer_indices_for_load}")
+            if os.path.exists(index_file):
+                needs_conversion = True
+                if _conv_sem_k > 0 and world_size > 1:
+                    import fcntl
+                    _sem_dir = os.path.join(
+                        args.weight_cache_dir or os.environ.get("TMPDIR", "/tmp"),
+                        "_mpk_convert_sem")
+                    os.makedirs(_sem_dir, exist_ok=True)
+                    _conv_sem_fh = open(
+                        os.path.join(_sem_dir, f"slot{rank % _conv_sem_k}"), "w")
+                    _sem_t0 = time.perf_counter()
+                    sys.stderr.write(f"[convert-sem] rank {rank}: waiting for slot "
+                                     f"{rank % _conv_sem_k} (K={_conv_sem_k})\n")
+                    fcntl.flock(_conv_sem_fh, fcntl.LOCK_EX)
+                    sys.stderr.write(f"[convert-sem] rank {rank}: slot acquired after "
+                                     f"{time.perf_counter() - _sem_t0:.1f}s\n")
+                print(f"  Loading HF-index weights for layers: {layer_indices_for_load}")
                 state_dict = {}
                 with open(index_file) as f:
                     index = json.load(f)
-                # Build key filter: global keys + selected layer keys
+                # Load global weights and all transformer layers from the HF index.
                 needed_prefixes = ["model.embed_tokens.", "model.norm.", "lm_head."]
                 for li in layer_indices_for_load:
                     needed_prefixes.append(f"model.layers.{li}.")
-                # Group keys by shard file
                 shard_to_keys = {}
                 for key, shard in index["weight_map"].items():
                     if any(key.startswith(p) for p in needed_prefixes):
@@ -675,19 +504,11 @@ if __name__ == "__main__":
                         ):
                             continue
                         shard_to_keys.setdefault(shard, []).append(key)
-                # Load only needed shards and keys
-                # Load to CPU first, then move to GPU. This avoids GPU OOM when
-                # multiple TP ranks each load full (un-sharded) weights — the
-                # builder will shard them later during weight conversion.
                 _load_device = "cpu" if world_size > 1 else f"cuda:{rank}"
                 sliced_lm_head = False
                 for shard, keys in sorted(shard_to_keys.items()):
                     shard_path = os.path.join(args.model_path, shard)
                     print(f"  Loading {len(keys)} keys from {shard}")
-                    # safetensors loads only the requested keys from each shard.
-                    # The granularity is still whole tensor per key; TP/EP
-                    # sharding happens after absorption because q_b/o_proj
-                    # fusion needs full per-layer matrices.
                     with safe_open(shard_path, framework="pt", device=_load_device) as f:
                         for key in keys:
                             if key == "lm_head.weight" and vocab_parallel_lm_head:
@@ -720,16 +541,11 @@ if __name__ == "__main__":
                         f"-> local padded {lm_head_local_vocab_padded}"
                     )
             else:
-                raise RuntimeError("No valid weight files found for selective loading.")
+                raise RuntimeError("No valid weight files found for indexed loading.")
         print(f"  Weight read time: {time.perf_counter() - load_start_time:.3f}s")
 
-        # Weight conversion (absorption + gate/up + expert fusion) runs only
-        # for selective loading. The pre-converted single-file path
-        # (`model{rank}-mp{world_size}.safetensors`) is already absorbed/fused.
-        if args.layers and not state_dict_from_cache:
-            # Absorb kv_b_proj into q_b_proj and fuse V un-absorption into
-            # o_proj (matches vLLM/SGLang runtime). The attached weights stay
-            # in the same FP8+scale format that the multi-GPU graph expects.
+        # Raw HF-index weights need MPK conversion; cache and per-rank files do not.
+        if needs_conversion:
             print("\nConverting weights for MPK builder (FP8 preserved)...")
             convert_start_time = time.perf_counter()
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
@@ -738,7 +554,6 @@ if __name__ == "__main__":
             )
             config_dict = AutoConfig.from_pretrained(args.model_path).to_dict()
             mp = get_model_params(config_dict)
-            absorb_layers = list(layer_indices_arg) if layer_indices_arg else list(range(num_layers))
 
             def _quantize_f32_to_checkpoint_fp8(w_f32, block_size=128):
                 """Quantize float32 weight to FP8 + per-2D-block scale_inv."""
@@ -784,10 +599,7 @@ if __name__ == "__main__":
                     kv_lora_rank = mp["kv_lora_rank"]
                     H_ = num_heads_loc
 
-                    # Prefill follows vLLM's compute-friendly MLA path:
-                    # original q_b_proj produces per-head q_nope/q_pe, while
-                    # kv_b_proj decompresses cached c_latent into per-head
-                    # K_nope/V. Decode keeps the absorbed q_b/o_proj path.
+                    # Prefill keeps q_nope/q_pe separate; decode uses absorbed q_b/o_proj.
                     q_orig = q_f32.reshape(H_, qk_nope + qk_rope, -1)
                     q_b_nope_f32 = q_orig[:, :qk_nope, :].contiguous().reshape(
                         H_ * qk_nope, -1)
@@ -801,21 +613,7 @@ if __name__ == "__main__":
                     state_dict[f"{attn}q_b_nope.weight_scale_inv"] = q_b_nope_scale
                     state_dict[f"{attn}q_b_pe.weight"] = q_b_pe_fp8
                     state_dict[f"{attn}q_b_pe.weight_scale_inv"] = q_b_pe_scale
-                    # FuseTensor v2 (row-swap layout):
-                    # Build a single unabsorbed q_b weight so the prefill
-                    # path can do ONE FP8 GEMM (instead of q_b_nope + q_b_pe).
-                    # The per-rank layout is [rank_heads_nope_concat;
-                    # rank_heads_pe_concat] so the 128-row FP8 quantization
-                    # block boundaries align cleanly with the nope/pe split.
-                    # The FULL weight is constructed as concatenation of
-                    # per-rank slices so that the default dim=0 TP-sharding
-                    # gives each rank its [nope; pe] block.
-                    #
-                    # Layout per rank (TP=4 → H_local=32):
-                    #   rows [0,         H_local*128)  = nope of rank's heads
-                    #   rows [H_local*128, H_local*192) = pe   of rank's heads
-                    # Full weight = concat([rank_0_slice, rank_1_slice, ...]).
-                    # Kernel reads Qn at base, Qp at base + H_local*128.
+                    # Build row-swapped q_b so dim=0 TP sharding preserves [nope; pe].
                     H_local_w = H_ // world_size
                     if H_ % world_size != 0:
                         raise ValueError(
@@ -853,23 +651,14 @@ if __name__ == "__main__":
                     state_dict[f"{attn}kv_b_v.weight"] = kv_b_v_fp8
                     state_dict[f"{attn}kv_b_v.weight_scale_inv"] = kv_b_v_scale
 
-                    # BMM repack of kv_b_k for the decode Q BMM path:
-                    # transpose W_UK (H, 128, 512) → (H, 512, 128) and
-                    # per-row quantize. BMM kernel expects weight layout
-                    # (H, D_out=512, D_in=128) FP8 + (H, 512, 1) uint32
-                    # UE8M0-packed scale (1 packed scale per row since
-                    # D_in=128 == one BLOCK_K). Row-major contiguous.
+                    # Repack kv_b_k for the decode Q BMM path.
                     W_UK_bmm = W_UK.transpose(-2, -1).contiguous()  # (H, 512, 128)
                     bmm_amax = W_UK_bmm.abs().amax(dim=-1, keepdim=True).clamp(
                         min=1e-12)
                     bmm_scale_inv_f32 = (bmm_amax / 448.0).squeeze(-1)  # (H, 512)
                     bmm_w_q = (W_UK_bmm / bmm_amax).clamp(-448, 448).to(
                         torch.float8_e4m3fn).contiguous()  # (H, 512, 128) FP8
-                    # UE8M0 encode (CEIL log2 to match kernel-side encode_ue8m0).
-                    # Direct exponent math (bias = 127) avoids the
-                    # float-as-int-bits trick which silently broke when
-                    # torch.pow returned float64 (last dim halved on view
-                    # to int32).
+                    # UE8M0 encode with CEIL log2 to match the kernel.
                     pos = torch.where(
                         bmm_scale_inv_f32 > 0, bmm_scale_inv_f32,
                         torch.full_like(bmm_scale_inv_f32, 1e-30))
@@ -877,20 +666,12 @@ if __name__ == "__main__":
                     ue = (log2_val + 127.0).clamp(0, 255).to(torch.uint8)
                     ue = torch.where(bmm_scale_inv_f32 > 0, ue,
                                      torch.zeros_like(ue))
-                    # Pack into uint32 (1 packed scale per row at K=128 ≤ 512).
                     bmm_scale_packed = ue.to(torch.uint32).unsqueeze(-1).contiguous()
-                    # ^ shape (H, 512, 1) uint32, low byte holds UE8M0 exponent.
                     state_dict[f"{attn}kv_b_k_bmm.weight"] = bmm_w_q
                     state_dict[f"{attn}kv_b_k_bmm.weight_scale_ue8m0"] = (
                         bmm_scale_packed)
 
-                    # BMM repack of kv_b_v (swapAB layout, kept for cache
-                    # compatibility; the decode post-attn BMM2 consumes the
-                    # dense repack below).
-                    # W_UV is already (H, V_HEAD_DIM=128, KV_LORA=512). BMM
-                    # kernel expects weight [H, D_out, D_in] = (H, 128, 512).
-                    # NO transpose needed unlike kv_b_k_bmm. Per-row UE8M0
-                    # scale with K=512 → packed_K=1 (one uint32 per row).
+                    # Repack kv_b_v for cache compatibility.
                     W_UV_bmm = W_UV.contiguous()  # (H, 128, 512)
                     bmm_v_amax = W_UV_bmm.abs().amax(dim=-1, keepdim=True).clamp(
                         min=1e-12)
@@ -905,35 +686,19 @@ if __name__ == "__main__":
                     ue_v = torch.where(bmm_v_scale_inv_f32 > 0, ue_v,
                                        torch.zeros_like(ue_v))
                     bmm_v_scale_packed = ue_v.to(torch.uint32).unsqueeze(-1).contiguous()
-                    # ^ shape (H, 128, 1) uint32, low byte holds UE8M0 exponent.
                     state_dict[f"{attn}kv_b_v_bmm.weight"] = bmm_v_w_q
                     state_dict[f"{attn}kv_b_v_bmm.weight_scale_ue8m0"] = (
                         bmm_v_scale_packed)
 
-                    # Dense-BMM repack of kv_b_v for the decode BMM2: the
-                    # DENSE block-scaled GEMM body wants float32 128x128-block
-                    # scales (one scale per [128-row-block, 128-K-group]), NOT
-                    # the per-row UE8M0 scale above. kv_b_v_fp8 / kv_b_v_scale
-                    # (computed by _quantize_f32_to_checkpoint_fp8 just above)
-                    # are ALREADY 128x128-block-quantized: kv_b_v_fp8 is
-                    # [H*128, 512], kv_b_v_scale is [bM=H, bK=512/128=4].
-                    # Reshape per-head: weight [H, D_out=128, D_in=512],
-                    # scale [H, D_out/128=1, D_in/128=4] (float32, row-major).
+                    # Repack kv_b_v for dense decode BMM2.
                     kv_lora_blk = kv_lora_rank // 128  # = 4 for K=512
-                    # .clone() breaks storage aliasing with kv_b_v.weight /
-                    # kv_b_v.weight_scale_inv (these are a reshape of the same
-                    # fp8/scale tensors) so the cache-save safetensors
-                    # save_file never sees shared storage. Cloning is
-                    # byte-identical (same values, separate storage).
                     state_dict[f"{attn}kv_b_v_bmm_dense.weight"] = (
                         kv_b_v_fp8.reshape(H_, v_dim, kv_lora_rank).contiguous().clone())
                     state_dict[f"{attn}kv_b_v_bmm_dense.weight_scale_inv"] = (
                         kv_b_v_scale.reshape(H_, 1, kv_lora_blk).to(
                             torch.float32).contiguous().clone())
 
-                    # Preserve original W_O for PR674 prefill output. The
-                    # existing o_proj key is replaced by the decode-only fused
-                    # W_UV→W_O path below.
+                    # Preserve original W_O for prefill.
                     o_key = f"{attn}o_proj.weight"
                     if o_key in state_dict:
                         o_w = state_dict[o_key]
@@ -954,23 +719,11 @@ if __name__ == "__main__":
                         o_fp8, o_scale = _quantize_f32_to_checkpoint_fp8(o_flat)
                         state_dict[o_key] = o_fp8
                         state_dict[o_s_key] = o_scale
-                        print(
-                            f"  L{li}: absorbed q_b {q_fp8.shape}, "
-                            f"prefill q/nope {q_b_nope_fp8.shape}/"
-                            f"{q_b_pe_fp8.shape}, kv_b K/V "
-                            f"{kv_b_k_fp8.shape}/{kv_b_v_fp8.shape}, "
-                            f"fused decode o_proj [{hidden_dim}, "
-                            f"{num_heads_loc * kv_lora_rank}]")
                     del state_dict[kv_key]
                     if kv_s_key in state_dict:
                         del state_dict[kv_s_key]
 
-            # Fuse gate_proj + up_proj for dense MLP layers (keep FP8).
-            # IMPORTANT: silu_mul kernel reads `gate` from the first half of
-            # each block and `up` from the second half (per-block layout). The
-            # FP8 linear partitions the output dim by `grid_for_rmsnorm_linear_layer`
-            # into N tasks, so silu_mul uses N/2 tasks. We must INTERLEAVE
-            # gate/up at granularity = N/2 chunks per tensor (NOT torch.cat).
+            # Fuse gate_proj + up_proj for dense MLP layers.
             from mirage.mpk.models.utils import shuffle_tensors as _shuffle_tensors
             from mirage.mpk.models.utils import grid_for_rmsnorm_linear_layer as _grid_fn
             for li in absorb_layers:
@@ -984,8 +737,7 @@ if __name__ == "__main__":
                     split = _grid_fn(out_dim_total) // 2
                     state_dict[f"{prefix}gate_up_proj.weight"] = _shuffle_tensors(
                         [g, u], split=split, dim=0)
-                    # Fuse scales with the SAME interleave (each scale row covers
-                    # 128 weight rows, so the chunk-row count = chunk_weight_rows/128).
+                    # Fuse scales with the same interleave.
                     gs_key = f"{gate_key}_scale_inv"
                     us_key = f"{up_key}_scale_inv"
                     if gs_key in state_dict and us_key in state_dict:
@@ -994,19 +746,7 @@ if __name__ == "__main__":
                         state_dict[f"{prefix}gate_up_proj.weight_scale_inv"] = (
                             _shuffle_tensors([gs, us], split=split, dim=0))
 
-            # FuseTensor part-a — Fuse q_a_proj + kv_a_proj_with_mqa
-            # into a single qkv_a_proj.weight of shape (2176, hidden). Layout:
-            #   rows [0     : 1536) = q_a_proj.weight              (12 fp8 blocks)
-            #   rows [1536  : 2048) = kv_a_proj_with_mqa[:512]     (4  blocks, c_latent)
-            #   rows [2048  : 2112) = kv_a_proj_with_mqa[512:576]  (k_pe real, 64 rows)
-            #   rows [2112  : 2176) = zero-padded                  (k_pe pad block tail)
-            # FP8 block boundaries fall cleanly at 128-row borders → no nope/pe
-            # mixing within blocks. Scales just concat.
-            #
-            # Both q_a_proj and kv_a_proj_with_mqa are REPLICATED (no TP shard),
-            # so the fused weight is also replicated. The fused 2176-wide
-            # qkv_a_proj is the only path the MPK builder supports — the
-            # 3-GEMM unfused path was removed (was +14.9% slower e2e).
+            # Fuse q_a_proj + kv_a_proj_with_mqa into qkv_a_proj.
             FUSED_ROWS = 2176  # 1536 q_a + 512 c_latent + 64 k_pe + 64 pad
             for li in absorb_layers:
                 attn = f"model.layers.{li}.self_attn."
@@ -1209,7 +949,6 @@ if __name__ == "__main__":
                     base_key = k.replace("_scale_inv", "")
                     shard_dim = _get_tp_shard_dim(base_key)
                     if base_key == "lm_head.weight" and vocab_parallel_lm_head:
-                        old_shape = tuple(state_dict[k].shape)
                         if state_dict[k].shape[0] == lm_head_local_vocab_padded:
                             shard = state_dict[k].contiguous()
                         else:
@@ -1230,12 +969,6 @@ if __name__ == "__main__":
                                 )
                                 shard = torch.cat([shard, pad], dim=0).contiguous()
                         state_dict[k] = shard
-                        if rank == 0:
-                            print(
-                                f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} "
-                                f"(vocab-parallel lm_head, local padded rows="
-                                f"{lm_head_local_vocab_padded})"
-                            )
                         continue
                     is_routed_expert = (
                         "mlp.experts.w13.weight" in base_key
@@ -1244,24 +977,11 @@ if __name__ == "__main__":
                     tp_rank_for_key = routed_tp_rank if is_routed_expert else rank
                     tp_size_for_key = routed_tp_size if is_routed_expert else world_size
                     if is_routed_expert and args.ep_size > 1:
-                        old_shape = tuple(state_dict[k].shape)
                         if state_dict[k].shape[0] == num_routed_experts:
                             state_dict[k] = state_dict[k].narrow(
                                 0, local_expert_start, local_num_experts
                             ).contiguous()
-                            if rank == 0:
-                                print(
-                                    f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} "
-                                    f"(EP experts {local_expert_start}:{local_expert_end})"
-                                )
-                        elif state_dict[k].shape[0] == local_num_experts:
-                            if rank == 0:
-                                print(
-                                    f"    {k}: {old_shape} "
-                                    f"(already EP-filtered experts "
-                                    f"{local_expert_start}:{local_expert_end})"
-                                )
-                        else:
+                        elif state_dict[k].shape[0] != local_num_experts:
                             raise ValueError(
                                 f"{k}: unexpected expert dimension "
                                 f"{state_dict[k].shape[0]}, expected "
@@ -1280,28 +1000,10 @@ if __name__ == "__main__":
                                 gate_half, shard_dim, tp_rank_for_key, tp_size_for_key)
                             up_shard = shard_tensor(
                                 up_half, shard_dim, tp_rank_for_key, tp_size_for_key)
-                            old_shape = tuple(w.shape)
                             state_dict[k] = torch.cat([gate_shard, up_shard], dim=shard_dim).contiguous()
-                            if rank == 0:
-                                print(
-                                    f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} "
-                                    f"(w13 split-shard dim={shard_dim}, tp={tp_size_for_key})"
-                                )
                         else:
-                            old_shape = tuple(state_dict[k].shape)
                             state_dict[k] = shard_tensor(
                                 state_dict[k], shard_dim, tp_rank_for_key, tp_size_for_key)
-                            if rank == 0 and old_shape != tuple(state_dict[k].shape):
-                                print(
-                                    f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} "
-                                    f"(dim={shard_dim}, tp={tp_size_for_key})"
-                                )
-                    elif shard_dim is not None and state_dict[k].dim() < 2:
-                        if rank == 0 and "shared_experts" in k:
-                            print(f"    [WARN] {k}: dim={state_dict[k].dim()} < 2, shard_dim={shard_dim} → SKIPPED (1D tensor)")
-                    else:
-                        if rank == 0 and "shared_experts" in k:
-                            print(f"    [INFO] {k}: shard_dim={shard_dim}, shape={tuple(state_dict[k].shape)} → {'REPLICATED' if shard_dim is None else 'BUG'}")
 
             if cache_file is not None:
                 os.makedirs(os.path.dirname(cache_file), exist_ok=True)
@@ -1320,22 +1022,7 @@ if __name__ == "__main__":
                     f"  Saved MPK weight cache: {cache_file} "
                     f"({time.perf_counter() - cache_save_start:.3f}s)"
                 )
-                # Drop the ~90GB CPU save-copy NOW — without this it stays
-                # referenced for the whole run (8 ranks x ~90GB = ~720GB of
-                # dead host RAM, fatal for the next semaphore wave).
-                if os.environ.get("MPK_BUILD_CACHE_ONLY") != "1":
-                    del cache_state_dict
-                if os.environ.get("MPK_BUILD_CACHE_ONLY") == "1":
-                    # Serial TP8 cache pre-builder: this subprocess existed only
-                    # to write rank{rank}.safetensors. Exit NOW — before the
-                    # megakernel build / NVSHMEM init / inference — so ALL host
-                    # RAM is reclaimed on process exit, bounding peak to ONE
-                    # rank's footprint (the TP8 cold-convert CPU-OOM fix).
-                    del cache_state_dict
-                    sys.stderr.write(
-                        f"[MPK_BUILD_CACHE_ONLY] cache-only saved rank={rank} "
-                        f"world_size={world_size} file={cache_file} — exiting.\n")
-                    sys.exit(0)
+                del cache_state_dict
 
         # Move state_dict to GPU after conversion + TP sharding.
         # Loading to CPU first (when TP>1) avoids single-GPU OOM from
@@ -1387,22 +1074,6 @@ if __name__ == "__main__":
         builder.build_from_config(model_config, layer_indices=layer_indices_arg)
 
         mpk.compile(output_dir=args.output_dir)
-        if args.profile_start_step is not None:
-            if not args.profiling:
-                raise ValueError("--profile-start-step requires --profiling")
-            if args.profile_start_step < 0 or args.profile_start_step >= args.max_seq_length:
-                raise ValueError(
-                    f"--profile-start-step must be in [0, {args.max_seq_length}); "
-                    f"got {args.profile_start_step}"
-                )
-            step.fill_(args.profile_start_step)
-            torch.cuda.synchronize()
-            if rank == 0:
-                print(
-                    f"[profiling] Starting first task graph at "
-                    f"step={args.profile_start_step}; prompt_lengths="
-                    f"{prompt_lengths.detach().cpu().tolist()}"
-                )
 
         # Run inference
         print("Starting inference with Mirage megakernel...")
@@ -1413,30 +1084,17 @@ if __name__ == "__main__":
         run_time = starter.elapsed_time(ender)
 
 
-        print("tokens.shape = ", tokens.shape)
-        # See note below: keep step on the host side after the megakernel
-        # runs to avoid sporadic `cudaErrorInvalidValue` from device-side
-        # tensor ops.
         _step_cpu_pre = step.detach().cpu().tolist()
         for r in range(total_num_requests):
             step_r = int(_step_cpu_pre[r])
             generated_ids = tokens[r, : step_r + 1]
-            response = safe_tokenizer_decode(
-                tokenizer, generated_ids, context=f"request {r}"
-            )
+            response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             if total_num_requests > 1:
                 print(f"[request {r}]")
             print(response)
 
-        # Convert step from GPU tensor to CPU values up-front. After the
-        # persistent kernel runs, doing new device-side reductions (`step.max()`,
-        # `step.min()`) intermittently triggers `cudaErrorInvalidValue` even
-        # though `step.cpu()` itself works. Stay on the host side from here on.
         step_cpu = step.detach().cpu().tolist()
         step_max = max(step_cpu)
-        step_min = min(step_cpu)
-        if total_num_requests > 1:
-            print(f"Output length of each batch is same: {step_max == step_min}")
 
         print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
             prompt_lengths[0].item(), step_max + 1 - int(prompt_lengths[0].item()),
@@ -1453,8 +1111,8 @@ if __name__ == "__main__":
                 per_tok_ms = run_time / max(tokens_generated, 1)
                 slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
                 token_ids = tokens[r, prompt_len:slice_end].tolist()
-                response_text = safe_tokenizer_decode(
-                    tokenizer, tokens[r, :end_idx], context=f"request {r}"
+                response_text = tokenizer.decode(
+                    tokens[r, :end_idx], skip_special_tokens=True
                 )
                 out.append({
                     "request_id": r,
@@ -1473,89 +1131,6 @@ if __name__ == "__main__":
 
     else:
         raise RuntimeError("Pytorch ref is not allowed for now, which may cause OOM.")
-        # Native PyTorch path (without Mirage)
-        # DeepSeek V3 requires the model implementation for non-Mirage inference
-        try:
-            from transformers import AutoModelForCausalLM
-            print(f"Loading DeepSeek V3 model from: {args.model_path}")
-            with torch.device("cuda"):
-                model = AutoModelForCausalLM.from_pretrained(
-                    args.model_path,
-                    torch_dtype=torch.bfloat16,
-                    trust_remote_code=True,
-                ).to("cuda")
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load DeepSeek V3 model for native inference: {e}. "
-                "For native PyTorch inference, ensure transformers supports the model "
-                "or use --use-mirage for Mirage megakernel inference."
-            )
-
-        prompt_len = prompt_lengths[0].item()
-        output_len = (
-            args.max_new_tokens
-            if args.max_new_tokens is not None
-            else (tokens.size(1) - prompt_len)
-        )
-        output_len = max(0, min(output_len, tokens.size(1) - prompt_len))
-        decode_limit = prompt_len + output_len
-        prev_pos = 0
-        stream = torch.cuda.Stream()
-
-        for cur_pos in range(prompt_len, decode_limit):
-            step.fill_(cur_pos - 1)
-            input_ids = tokens[:1, prev_pos:cur_pos]
-            with torch.no_grad():
-                logits = model(input_ids=input_ids).logits
-            next_token = logits[:, -1, :].argmax(dim=-1)
-            tokens[0, cur_pos] = next_token[0]
-            prev_pos = cur_pos
-            eos_id = config.eos_token_id
-            if isinstance(eos_id, list):
-                if next_token[0].item() in eos_id:
-                    break
-            elif next_token[0].item() == eos_id:
-                break
-            if cur_pos == prompt_len:
-                torch.cuda.synchronize()
-                starter.record()
-
-        ender.record()
-        torch.cuda.synchronize()
-        run_time = starter.elapsed_time(ender)
-
-        end_idx = prev_pos + 1
-        generated_ids = tokens[:1, :end_idx]
-        response = safe_tokenizer_decode(
-            tokenizer, generated_ids, context="torch request 0"
-        )
-        print(response)
-        print(
-            "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_len, cur_pos - prompt_len,
-                run_time / max(cur_pos - prompt_len, 1)
-            )
-        )
-
-        # Dump outputs to json
-        if save_path and rank == 0:
-            tokens_generated = max(0, end_idx - prompt_len)
-            per_tok_ms = run_time / max(tokens_generated, 1)
-            slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
-            token_ids = tokens[0, prompt_len:slice_end].tolist()
-            out = {
-                "token_ids": token_ids,
-                "text": safe_tokenizer_decode(
-                    tokenizer, tokens[0, :end_idx], context="torch request 0"
-                ),
-                "latency_ms_per_token": per_tok_ms,
-                "prompt_length": prompt_len,
-                "generate_length": tokens_generated,
-                "mode": "torch",
-            }
-            with open(save_path, "w") as f:
-                json.dump(out, f, indent=2)
-            print(f"Saved tokens to {save_path}")
 
     if "mpk" in locals() and hasattr(mpk, "finalize") and not getattr(
         mpk, "__finalized__", True

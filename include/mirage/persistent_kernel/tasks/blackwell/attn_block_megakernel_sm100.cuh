@@ -13,38 +13,30 @@
  * limitations under the License.
  */
 
-// MPK port of the ferret fused DSv3 decode ATTENTION BLOCK megakernel
-// (scratch/megakernels/attn_block_ferret_v126_cold87us_grid136.cuh, 87us cold,
-// grid=136, correct vs its own gate). The attention analog of the FFN mega-task
-// (ffn_full_megakernel_sm100.cuh). One task runs the WHOLE decode attention:
+// Fused DSv3 decode ATTENTION BLOCK megakernel — the attention analog of the
+// FFN mega-task (ffn_full_megakernel_sm100.cuh). One task runs the WHOLE decode
+// attention:
 //   input was rmsnorm'd by the prior task -> qkv_a GEMV -> q_a_ln + kv_a_ln ->
 //   q_b GEMV -> YaRN rope(q,k) -> kv_append -> MLA decode (flash, KV-split) ->
 //   reduce -> W_UV per-head BMM -> o_proj + residual.
 //
-// THREE structural adaptations vs the standalone ferret kernel:
-//   1. The standalone kernel kept inter-stage activations in GLOBAL __device__
-//      arrays (`g_hdeq`, `g_hf8`, ...). That is ILLEGAL in MPK (concurrent
-//      layers/tasks would clash on the single global instance). They are moved
-//      into a per-task SCRATCH buffer (`Scratch`/`make_scratch`, bound via an
-//      input_ptr), exactly like the FFN mega-task's `sc.*`.
-//   2. The standalone kernel was cooperative-launched (cg::this_grid().sync()).
-//      MPK is NOT cooperative. Every `grid.sync()` is replaced by the MPK
+// MPK-specific structure:
+//   1. Inter-stage activations live in a per-task SCRATCH buffer
+//      (`Scratch`/`make_scratch`, bound via an input_ptr, exactly like the FFN
+//      mega-task's `sc.*`) — NOT GLOBAL __device__ arrays, which concurrent
+//      layers/tasks would clash on.
+//   2. MPK is NOT cooperative-launched, so every `grid.sync()` is the MPK
 //      atomic `grid_barrier(GridBarrier, NUM_WORKERS)` (the SAME helper as the
 //      FFN mega-task; counters live at the top of the scratch buffer).
 //   3. `step` (decode position) comes from runtime_config.step[0] (sourced in
 //      the task_register snippet, the same way mla_mtp_decode does it).
 //
-// WEIGHT-SCALE FORMAT (reconciled to the MPK production layout): the three
-// dense GEMVs (qkv_a, q_b, o_proj) read qkv_a_s / q_b_s / oproj_s as the MPK
-// PER-128-ROW-BLOCK, per-128-K-group fp32 weight_scale_inv [N/128, K/128]
-// (row-major) that _attach_fp8_weight already produces — read as a PLAIN fp32,
-// IDENTICAL to the production fp8_gemm_dense_finen GEMV (`sb[(col>>7)*nk + g]`,
-// no UE8M0 decode; the per-block fp32 value already IS the decoded power-of-2).
-// This is a layout/encoding change vs the standalone ferret gate (which used a
-// per-ROW UE8M0-packed uint32 scale) — NOT a math change: the multiplied VALUE
-// is the same power-of-2, just laid out per-128-block instead of per-row, so
-// cosine is unaffected. kvbv_s is the per-head fp32 [H,1,4] kv_b_v_bmm_dense
-// scale and ALSO matches the kernel's `const float* kvbv_s`.
+// WEIGHT-SCALE FORMAT: the three dense GEMVs (qkv_a, q_b, o_proj) read
+// qkv_a_s / q_b_s / oproj_s as the MPK PER-128-ROW-BLOCK, per-128-K-group fp32
+// weight_scale_inv [N/128, K/128] (row-major) that _attach_fp8_weight produces
+// — read as a PLAIN fp32 (no UE8M0 decode; the per-block fp32 value already IS
+// the decoded power-of-2). kvbv_s is the per-head fp32 [H,1,4]
+// kv_b_v_bmm_dense scale and ALSO matches the kernel's `const float* kvbv_s`.
 #pragma once
 
 #include "mirage/persistent_kernel/runtime_header.h"
@@ -119,9 +111,8 @@ namespace attn_block_megakernel_sm100 {
 // Flash MLA KV-split: up to MLA_SPLITS splits per head.
 #define MLA_SPLITS 8
 
-// ---- BARRIER-REMOVAL FAST PATH (ported from ferret workspace6 v131,
-// 87->64.5us cold; the 5 changes each remove/merge a grid.sync). The five
-// changes match ferret v131, which ships them all on:
+// ---- BARRIER-REMOVAL FAST PATH: the 5 changes below each remove/merge a
+// grid.sync:
 //   1. HIDDEN_BLOCK_LOCAL — quant hidden[7168] block-local into s_act, removes
 //      the quant_hidden->qkv_a barrier (a block __syncthreads replaces it).
 //   2. QA_BLOCK_LOCAL     — q_a_layernorm+requant block-local into s_qbdeq,
@@ -159,8 +150,8 @@ namespace attn_block_megakernel_sm100 {
 // one whose `out` matches layer_3_attnmega_attn_proj_fused), the first 4 fp32
 // values, and a sum-of-abs checksum of the stage's scratch output. The device
 // printf FIFO must be bumped on the HOST before CUDA init (cuCtxSetLimit
-// cudaLimitPrintfFifoSize, e.g. 32MB) or low-volume prints may not flush — note
-// for the main agent. Compiles to NOTHING when MPK_ATTN_DBG is undefined, so
+// cudaLimitPrintfFifoSize, e.g. 32MB) or low-volume prints may not flush.
+// Compiles to NOTHING when MPK_ATTN_DBG is undefined, so
 // the default build stays byte-identical and perf/the gate watchdog are
 // unaffected.
 #ifdef MPK_ATTN_DBG
@@ -174,7 +165,7 @@ namespace attn_block_megakernel_sm100 {
 // is the SAFE decode comparison vs the chain: both configs still consume the
 // IDENTICAL prompt up to position 13, so the layer-0 input at step 14 matches
 // (free-running generation diverges by later steps, so a late step is NOT
-// chain-comparable — Codex). The nsp>1 MLA-merge path (KV>64) needs a separate
+// chain-comparable). The nsp>1 MLA-merge path (KV>64) needs a separate
 // forced/replayed-token test, not a free-running step. Adjust 14 to
 // (prompt_len) if the prompt length differs.
 #define ATTN_DBG_STEP(s) ((s) == 2 || (s) == 3 || (s) == 14)
@@ -219,11 +210,10 @@ __device__ __forceinline__ void attn_dbg_tap(char const *label,
 #define K_COSSIN_SINOFF 64
 
 // ===========================================================================
-//  Per-task SCRATCH (replaces the standalone kernel's global __device__
-//  arrays). Laid out after the 8-byte barrier (count, gen). Every section is
-//  16-byte aligned. Scalar (float / fp8) access only — no uint4 reads land in
-//  scratch (the cp.async weight ring is in dynamic smem; kv_cache is an
-//  external input).
+//  Per-task SCRATCH. Laid out after the 8-byte barrier (count, gen). Every
+//  section is 16-byte aligned. Scalar (float / fp8) access only — no uint4
+//  reads land in scratch (the cp.async weight ring is in dynamic smem;
+//  kv_cache is an external input).
 // ===========================================================================
 struct AttnScratch {
   float *g_hdeq;         // dequant hidden (S2 act)                    [7168]
@@ -346,7 +336,7 @@ __device__ __forceinline__ AttnScratch attn_make_scratch(uint8_t *base) {
   return sc;
 }
 
-// ---- math helpers (VERBATIM from the standalone kernel) ---------------------
+// ---- math helpers -----------------------------------------------------------
 __device__ __forceinline__ float k_bf16(float f) {
   return __bfloat162float(__float2bfloat16(f));
 }
@@ -397,31 +387,14 @@ __device__ __forceinline__ uint32_t k_lds_u32(uint32_t saddr) {
 
 // MAC one uint4 (16 fp8 weights) against pre-converted activation half2[8].
 //
-// SCALAR-ILP MAC path.
-// SASS diagnosis (cuobjdump -sass on the qkv_a N=2176 K=7168 RBT=2 STAGES=6
-// instantiation, CUDA 13.2 sm_100a; 40 regs, 0 spill stores/loads): the
-// production body is scalar-FP issue/throughput-pressure bound — NOT spill-
-// bound, NOT accumulate-serialized (the acc[t] FFMA chain is only SS=14 deep
-// with 2 rows interleaved). The `s += __low2float(p) + __high2float(p)` idiom
-// compiles each of the 8 half2 products into 2x `HADD2.F32 .H0_H0/.H1_H1`
-// (widen each fp16 lane to fp32) + FADD — ~39% of the warp's fp-pipe insts
-// (448 of ~1148/block) are HADD2.F32 doing nothing but widening. With 1 warp/SM
-// that scalar work is unhidden. NOTE: the consumer-vs-load split (this widen
-// work dominating the ~15us body over the ~5.4us load floor) rests on the prior
-// %globaltimer 5.4-vs-20.7us measurement, NOT on this static SASS alone; the
-// fp8->half2 CONVERT (F2FP) is left UNTOUCHED by this lever, so it sets an
-// Amdahl ceiling on the achievable cut.
-//
-// The lever accumulates the 8 products in 2 INDEPENDENT half2 partial sums
-// (group-4 each) via __hfma2, widening ONCE at the end. SASS-verified on the
-// standalone qkv_a kernel: HADD2.F32 96->24, FADD 115->37, HMUL2 24->0 (folded
-// into HFMA2 27->50); F2FP converts unchanged; still 40 regs / 0 spill.
-// NUMERICS (host fp16 emulation, full K=7168 row, e4m3 weights, unit-scale
-// decode activations, 20000 rows): max |err| 0.0157 vs typical |out| RMS 9.9
-// (~0.16%, on par with e4m3 quant noise), ZERO fp16 overflows. It is NOT
-// bit-equivalent (fp16 inner accumulation + reassociation, like the existing
-// pairwise-vs-leftfold note) and CAN overflow fp16 for abnormally large
-// activations (>~18); the box logit-cosine quality gate covers this path.
+// SCALAR-ILP MAC path. Accumulates the 8 products in 2 INDEPENDENT half2
+// partial sums (group-4 each) via __hfma2, widening ONCE at the end (instead of
+// widening every fp16 product to fp32 with a per-product HADD2.F32).
+// NUMERICS: NOT bit-equivalent (fp16 inner accumulation + reassociation, like
+// the existing pairwise-vs-leftfold note); typical max |err| ~0.16% of |out|
+// RMS (on par with e4m3 quant noise), but it CAN overflow fp16 for abnormally
+// large activations (>~18) — the box logit-cosine quality gate covers this
+// path.
 __device__ __forceinline__ float k_mac_u4(__half2 const *__restrict__ ah,
                                           uint4 raw) {
   __nv_fp8x2_storage_t const *wp =
@@ -441,15 +414,14 @@ __device__ __forceinline__ float k_mac_u4(__half2 const *__restrict__ ah,
 }
 
 // ===========================================================================
-//  L5.1 cp.async DEEP-PREFETCH GEMV (VERBATIM). out[n]=sum_k
+//  L5.1 cp.async DEEP-PREFETCH GEMV. out[n]=sum_k
 //  adeq[k]*W8[n,k]*wsc. Each global warp owns RBT consecutive output rows. The
 //  cold FP8 weight uint4 tiles stream via cp.async.cg into a per-warp
 //  STAGES-deep smem ring (`wbuf`). Wsc is the MPK per-128-ROW-BLOCK, per-128-
 //  K-group fp32 weight_scale_inv [N/128, K/128] (row-major), read as a PLAIN
-//  fp32 — identical to the production fp8_gemm_dense_finen GEMV
-//  (`sb[(col>>7)*nk + g]`, no UE8M0 decode; the value already IS the decoded
-//  power-of-2). RBT rows may span two 128-blocks, so each row's scale-row is
-//  derived from its OWN row index (n>>7), NOT a single pre-offset block-row.
+//  fp32 (no UE8M0 decode; the value already IS the decoded power-of-2). RBT
+//  rows may span two 128-blocks, so each row's scale-row is derived from its
+//  OWN row index (n>>7), NOT a single pre-offset block-row.
 // ===========================================================================
 template <int RBT, int STAGES>
 __device__ __forceinline__ void
@@ -845,12 +817,11 @@ __device__ __forceinline__ void quant_ue8m0_grid(
   }
 }
 
-// ---- FAST-lever block-local quant + smem-sourced GEMV helpers (ported from
-// ferret workspace6 v131; the quant math is BYTE-IDENTICAL to the grid versions
-// above — same UE8M0 amax/448 per-128-group; the GEMVs read activation from
-// SHARED instead of global; the WEIGHT scale (Wsc) read is adapted to the MPK
-// per-128-ROW-BLOCK fp32 weight_scale_inv format used everywhere in this file,
-// `__ldg(&sn[t][g])`, NOT ferret's per-row UE8M0 uint32 decode).
+// ---- FAST-lever block-local quant + smem-sourced GEMV helpers. The quant math
+// is BYTE-IDENTICAL to the grid versions above — same UE8M0 amax/448
+// per-128-group; the GEMVs read activation from SHARED instead of global; the
+// WEIGHT scale (Wsc) read uses the MPK per-128-ROW-BLOCK fp32 weight_scale_inv
+// format used everywhere in this file (`__ldg(&sn[t][g])`).
 // ---------------
 
 // Lever 1: block-cooperative UE8M0 quant of bf16 hidden[0:n] -> block-local
@@ -935,8 +906,7 @@ __device__ __forceinline__ void
 // and `4*for_idx+m` enumerates 0..27 monotonically == this helper's flat
 // `for(i=tid;i<7168;i+=NTHREAD)` set AND ORDER. So per-thread partials, the
 // tree, the product association, eps, rsqrt, and the single bf16 round all
-// match rms_norm_hopper_impl exactly (verified from first principles + Codex +
-// ablation-logic-reviewer, 2026-06-25).
+// match rms_norm_hopper_impl exactly.
 //
 // NOTE: this fused path and the two-task chain are NOT provably byte/token
 // identical. The remaining possible residual is FMA-contraction differences
@@ -1471,7 +1441,7 @@ __device__ __noinline__ void
            w0,
            w1,
            w2);
-    // Discriminate softmax-collapse vs V-accum-reads-wrong-row (Codex): print
+    // Discriminate softmax-collapse vs V-accum-reads-wrong-row: print
     // the V (c_latent) of rows 0,1,2 at a NON-tiny dim (d=256) + the weighted
     // reconstruction. If V[d] differs across rows AND weights are healthy but
     // attn_out[d] still ~= V0[d], the V-accumulation indexes the wrong row.
@@ -1580,7 +1550,7 @@ __device__ __noinline__ void
   }
   // Lever 5 (WUV_HEAD_SPINWAIT): publish "head h's g_attn_deq is ready" to the
   // W_UV stage (replaces the merge->W_UV grid barrier).
-  // CRITICAL (ferret v131 line 1147; reviewer+Codex-vetted): the dequant loop
+  // CRITICAL: the dequant loop
   // above is MULTI-WARP — warps 0..3 (threads 0..127) each wrote a 128-wide
   // slice of g_attn_deq[h]. tid0's __threadfence orders only tid0's OWN prior
   // accesses, so WITHOUT this __syncthreads tid0 could flip the flag before
@@ -1742,8 +1712,7 @@ __device__ __forceinline__ float rms_rcp_block(float const *__restrict__ src,
 //  input slot (the kernel writes output_ptrs[0] only). See the builder wrapper.
 //  Weight scales (qkv_a_s/q_b_s/oproj_s) are the MPK per-128-ROW-BLOCK,
 //  per-128-K-group fp32 weight_scale_inv [N/128, K/128] (row-major) that
-//  _attach_fp8_weight produces — the SAME format the production
-//  fp8_gemm_dense_finen GEMV reads (plain fp32, no UE8M0 decode). kvbv_s is the
+//  _attach_fp8_weight produces — plain fp32, no UE8M0 decode. kvbv_s is the
 //  per-head fp32 [H,1,4] kv_b_v_bmm_dense scale.
 //    [0]  hidden     (bf16, raw residual-stream self.x)              (1,7168)
 //    [1]  qkv_a_w    (fp8)                                        (2176,7168)
@@ -1806,7 +1775,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   //   input_ln_w = ln_weights        (offset 0)
   //   q_a_ln_w   = ln_weights + 7168 (offset K_HIDDEN)
   //   kv_a_ln_w  = ln_weights + 8704 (offset K_HIDDEN + K_QLORA)
-  // R3 (codex's top non-sync footgun): assert the concatenation offsets at
+  // R3: assert the concatenation offsets at
   // compile time. The kernel only sees a raw pointer (no runtime length), so a
   // static_assert on the layout constants is the strongest available guard —
   // the builder MUST cat exactly [input_ln(K_HIDDEN) | q_a_ln(K_QLORA) |
@@ -1838,9 +1807,9 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   // root cuda_tensor there is no input-snapshot vs output-live distinction, so
   // a write through input_ptrs[7] DOES reach the real buffer and persists
   // across decode steps. The kernel reads history rows [0,step) and writes the
-  // new row [step] through this single pointer. (Verified by reviewer+Codex:
-  // the FFN mega-task's "input slot is a stale alias" note is about two
-  // TensorDesc structs of ONE storage, NOT two buffers.)
+  // new row [step] through this single pointer. (The FFN mega-task's "input
+  // slot is a stale alias" note is about two TensorDesc structs of ONE storage,
+  // NOT two buffers.)
   __nv_bfloat16 *kv_cache =
       static_cast<__nv_bfloat16 *>(task_desc->input_ptrs[7]);
   __nv_fp8_e4m3 const *kvbv_w =
@@ -1885,7 +1854,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   // mla_merge_quant — both are <=512 floats, block-local.)
   soff += attn_au16((size_t)512 * sizeof(float));
   // Levers 1-3 block-local activation buffer (28KB f32). ALIASED across three
-  // NON-OVERLAPPING phases (exactly as ferret v131): qkv_a reads s_act[0:7168]
+  // NON-OVERLAPPING phases: qkv_a reads s_act[0:7168]
   // (dequant hidden), q_b reads s_act[0:1536] (q_a_layernorm deq), o_proj reads
   // s_act[0:2048] (g_red deq). One buffer subsumes the prior per-phase buffers.
   // 16-aligned (the smem-sourced GEMVs read it via ld.shared.v4.f32). Total
@@ -1985,11 +1954,11 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
            __bfloat162float(hidden[5]),
            __bfloat162float(hidden[6]),
            __bfloat162float(hidden[7]));
-    // SHARPER (Codex): `residual` == self.x == the embed output == the mega's
+    // SHARPER: `residual` == self.x == the embed output == the mega's
     // OWN rmsnorm INPUT. Tap it to separate the two staleness sources:
     //   - residual DIFFERS for steps 0,1 but HIDDEN (=rmsnorm output) IDENTICAL
     //     => the mega's hidden_bf16 / rmsnorm task is STALE (not re-derived per
-    //     decode step) — a mega-specific dependency bug (Codex #1).
+    //     decode step) — a mega-specific dependency bug.
     //   - residual IDENTICAL for steps 0,1 => self.x / the shared embed is
     //   stale
     //     (but the working chain reads the same self.x, so that'd be
@@ -2063,7 +2032,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   {
     float q_rcp = rms_rcp_block(sc.g_qkva, K_QLORA, red8);
     float kv_rcp = rms_rcp_block(sc.g_qkva + K_QLORA, K_KVLORA, red8);
-    // Confirm eps-domination directly (Codex): if a degenerate-c_latent token
+    // Confirm eps-domination directly: if a degenerate-c_latent token
     // has kv_rcp ~ 1/sqrt(eps) ~ 1000, the raw c_latent is eps-dominated (tiny)
     // -> the kv_a GEMV/scale is the bug, not the norm. Also print q_rcp + the
     // per-128-block raw c_latent mean-sq (blocks 12-15 = the 4 c_latent
@@ -2243,7 +2212,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                hv[2],
                hv[3]);
       }
-      // DECISIVE (Codex): pairwise VECTOR diff of the c_latent (V part [0:512])
+      // DECISIVE: pairwise VECTOR diff of the c_latent (V part [0:512])
       // between KV rows (0,1) and (1,2). sum|.| being similar (105.14 vs
       // 105.10) does NOT prove the vectors are near-identical — RMSNorm
       // naturally equalizes magnitudes. Compute sum_abs_diff / max_abs_diff /

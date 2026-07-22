@@ -1,33 +1,26 @@
-// Auto-tuned BF16 router-gate GEMV (kernel-agent derived, 2026-06-19).
-// Closest in-tree sibling (raw-pointer GEMV ABI): the dense FP8 GEMV family.
-// SOTA beaten: cuBLAS BF16 GEMM (cublasGemmEx, CUBLAS_OP_T, FP32 accum) at
-//   M1=137.4% (target 130% ✓), M4=137.0% (target 110% ✓).
-//   GRID_N=256, BLOCK=512 (TPE=512, 16 warps/expert).
-//   Candidate 8.224us vs cuBLAS 11.297us (median over 100 L2-flushed iters).
-//
-// TASK: dsv3-router-gate-gemm-decode-dropin
-//   logits[M, N] = hidden[M, K] @ W_gate[N, K]^T
-//   M in {1, 4},  K = 7168,  N = 256.  BF16 in/out, FP32 accum.
-//
-// ABI NOTE — raw BF16 pointers:
-//   hidden and W_gate are passed as __nv_bfloat16 const* (not CUtensorMap).
-//   This is the preferred raw-pointer GEMV ABI documented in task.yaml:
-//     task_impl(hidden, W_gate, logits, M, N, K, worker_idx, num_workers)
-//   No TMA descriptor is constructed; all loads are direct uint4 coalesced.
-//   The MPK dispatcher must route these as plain device pointers
-//   (input_ptrs[]).
-//
-// CRASH-SAFETY NOTE (MLA-TP co-residency on B200):
-//   This kernel uses NO tcgen05, NO TMEM, NO mbarrier, NO cp.async, NO split-K.
-//   It is a CUDA-core uint4 GEMV with FP32 accumulation. TMEM pool consumption
-//   is ZERO. Safe under full MLA-TP co-residency (512/512 TMEM columns held by
-//   MLA-TP). Reference: CLAUDE.md megakernel co-residency invariants.
-//
-// GRID MAPPING IN MPK:
-//   Standalone bench: blockIdx.x = worker_idx, gridDim.x = GRID_N = 256.
-//   MPK: worker_idx and num_workers are passed explicitly. At 136 workers
-//   (B200 SM count), EPC = ceil(256/136) = 2 for first workers; the kernel
-//   guards e >= N for trailing workers with no assigned experts.
+/* Copyright 2025 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// BF16 router-gate GEMV: logits[M, N] = hidden[M, K] @ W_gate[N, K]^T
+//   M in {1, 4}, K = 7168, N = 256. BF16 in/out, FP32 accum.
+// Raw-pointer ABI (not CUtensorMap): task_impl(hidden, W_gate, logits, M, N, K,
+//   worker_idx, num_workers); direct uint4 coalesced loads, no
+//   TMA/tcgen05/TMEM.
+// Grid: worker_idx/num_workers passed explicitly; at 136 workers
+// EPC=ceil(N/136),
+//   trailing workers with no assigned expert guard on e >= N.
 //   The MPK dispatcher MUST set blockDim.x = GEMV_BLOCK = 512.
 
 #pragma once

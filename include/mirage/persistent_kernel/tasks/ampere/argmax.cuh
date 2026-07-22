@@ -84,10 +84,8 @@ __device__ __forceinline__ void
 #pragma unroll
   for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
     T local_max = T(-inf);
-    // Default to chunk-internal index 0 instead of -1 so a degenerate
-    // input (all -inf or all NaN, where every `val > local_max` check
-    // returns false) produces a valid index rather than a sentinel
-    // that gets sign-extended in argmax_reduce_kernel below.
+    // Default to 0 (a valid index), not -1: a degenerate all-(-inf)/NaN input
+    // never beats local_max, and -1 sign-extends into a bogus token id.
     long long local_idx = 0;
 #pragma unroll
     for (int i = tidx; i < CHUNK_SIZE; i += NUM_THREADS) {
@@ -126,12 +124,8 @@ __device__ __forceinline__ void
 #pragma unroll
   for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
     T local_max = T(-inf);
-    // Pack (chunk_index, relative_index) into a single 64-bit integer.
-    // Default to (chunk 0, idx 0) — a valid token id — so a degenerate
-    // input where every `current_val > local_max` is false still
-    // produces a real token index. The previous -1 sentinel was
-    // sign-extended into 0xFFFFFFFFFFFFFFFF and collided with
-    // `eos_token_id = -1` in --ignore-eos mode.
+    // Packed (chunk_index, relative_index). Default 0, not -1: -1 sign-extends
+    // to 0xFFFF...FFFF and collided with eos_token_id=-1 under --ignore-eos.
     long long local_packed_idx = 0;
 
 #pragma unroll

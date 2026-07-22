@@ -614,7 +614,7 @@ __device__ __forceinline__ void
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
 
-  // ASYNC-AGENT SAFETY (2026-07-20): mbarriers + the TMEM allocation slot live
+  // ASYNC-AGENT SAFETY: mbarriers + the TMEM allocation slot live
   // in STATIC __shared__, deliberately NOT in the `extern __shared__` arena
   // that `shared_storage` aliases. __syncthreads() orders THREADS but drains no
   // ASYNCHRONOUS agent, so an arena-resident barrier can take a late TMA

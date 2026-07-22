@@ -32,68 +32,6 @@
 // builder selects it for the bs=1 TP8/EP2/B200 decode geometry
 // (_use_ffn_full_megakernel); all other configs (prefill mbt>8, non-TP8) fall
 // through to the per-task chain.
-//
-// PORTED FROM: scratch/megakernels/ffn_fullyfused_ferret_v015_cold62us_ACTIVE8
-// .cuh (fused_moe_full). The MPK ABI (the now-retired partially-fused COLD FFN
-// predecessor was the original ground truth) covers: GridBarrier +
-// grid_barrier, extern __shared__ __align__(1024) dynamic smem, the per-task
-// Scratch, input_ptrs binding, fp32 out_acc + bf16 convert, the dynamic-smem
-// layout, the SCRATCH_BYTES %16 rule, output_ptrs[0]-only write.
-//
-// v019 SPEED MERGE (ferret workspace5, 46.18us cold ACTIVE=4, 9.35x vs chain,
-// correctness EXACT). The merged levers
-// are GEMV/compute SPEED levers ONLY (the reduce/topk/silu MATH is
-// byte-identical to v015): (1) cp.async y13 staging in Phase 2; (2) RBX_W13
-// 4->8 already + STAGES_W13 2->4; (3) packed half2 inner dot (W13/W2/shGU) + W2
-// 4B->16B path; (4) parallel per-group top-8 argmax in Phase C. The DYNAMIC
-// active_count + EP-LOCAL filter, the atomic grid_barrier, the per-task
-// Scratch, input-binding order, and extern __align__(1024) are PRESERVED from
-// v015 (the in-MPK-correct ABI). The y13 staging REUSES the per-warp s_wbuf (no
-// new Scratch region); WBUF_U4 is grown + re-asserted to cover the 16B-W2 stage
-// AND the whole-block y13 staging. See the FFN-FAST lever comments below.
-// NOTE: SCRATCH_BYTES is 106624 (not v015's 106608) — the FAST y13 staging
-// reads the GLOBAL y13 section via cp.async.cg-16, which requires y13
-// 16B-aligned, so every Scratch section start is now 16B-aligned (was
-// contiguous-after-8B-barrier → %16==8 → misaligned-y13 crash). The +16 is two
-// 8B section pads, not a new region.
-//
-// Fast Phase B router GEMV path. Replaces the scalar router_partial<4> (NCU
-// long_scoreboard 17.82 cyc/issue, HBM latency exposed) with
-// router_partial_cpa<4,4>: cp.async STAGES=4 pipeline for weight loads + packed
-// __nv_bfloat162 inner dot (2 muls/instr vs 8 scalar bf16->float + 8 fmul). The
-// activation (s_norm) is in SMEM so it contributes zero HBM latency; only the
-// 256×7168 weight matrix is staged. Math NEAR-identical, NOT bit-identical:
-// same slice offsets + uint4 decomposition order, but the packed bf162 dot sums
-// pairwise (p0+p1) vs the scalar left-fold (acc+=p0; acc+=p1) -> fp32
-// non-associative -> sub-ULP. Uses the existing per-warp my_wbuf as the ring
-// buffer (WBUF_U4=1024 uint4/warp >> 128 uint4 needed). TP8-alignment-safe: row
-// stride = 14336B (16B-aligned), slice offset = sp×3584B (16B-aligned), extern
-// smem stays
-// __align__(1024). The cp.async is flushed (cpasync_wait<0>) before the
-// grid_barrier. Target: router Phase B slowCTA from ~8.88µs → ~3µs at W=128.
-//
-// THREE STRUCTURAL ADAPTATIONS vs the standalone fused_moe_full:
-//  1. DYNAMIC active_count, EP-LOCAL-FILTERED (NOT compile-time ACTIVE=8). The
-//     ferret gate hard-coded ACTIVE=8 (an EP1/all-256-local config). In TP8 EP2
-//     each rank holds 128 experts and only ~4 of the global top-8 are LOCAL.
-//     Phase C computes the GLOBAL top-8 selection + the GLOBAL-sum-normalized
-//     weights (production-exact topk_sigmoid math, incl. the off-node weight
-//     still counted in the sum), then FILTERS to this rank's
-//     [local_expert_start, local_expert_end) range: the LOCAL expert id
-//     (e - local_expert_start) and its weight are appended to active_experts /
-//     active_weights, and active_count++ — exactly as the COLD FFN derives the
-//     active list from moe_routing_indices (the production topk writes
-//     routing_indices ONLY for on-node experts). The W13/W2 loops then range
-//     over active_count LOCAL experts. (See the EP-LOCAL FILTER block below.)
-//  2. cg::grid.sync() -> the MPK atomic grid_barrier (the megakernel is NOT
-//     cooperative-launched).
-//  3. ALL of fused_moe_full's static __shared__ arrays (s_norm[7168] bf16 alone
-//     is 14KB, far over the ~6KB megakernel static reserve) move into the
-//     DYNAMIC extern __align__(1024) pool, exactly as the COLD FFN did. Global
-//     __device__ g_* arrays do NOT exist in the source; the per-task Scratch
-//     (block-0-persisted, ABI) holds the few globals (rmsnorm_out / a_fp8 /
-//     a_scale / logits / inter / y13 / i_fp8 / i_scale / sg / si_fp8 / si_scale
-//     / out_acc).
 // ============================================================================
 
 #include "mirage/persistent_kernel/runtime_header.h"
@@ -362,29 +300,6 @@ __device__ __forceinline__ float silu(float x) {
 __device__ __forceinline__ float silu_fast(float x) {
   return x / (1.0f + __expf(-x));
 }
-
-// ============================================================================
-//  FFN-FAST levers (ported from ferret workspace5 v019; default ON). These are
-//  GEMV/compute SPEED levers only — the reduce/topk/silu MATH is byte-identical
-//  to the proven v015 path.
-//  v019 wins folded in (each a kernel-BODY speed lever, NOT a math change):
-//   (1) cp.async y13 staging in Phase 2 (-5.1us): the cold y13 global readback
-//       is handed to the LSU as one coalesced cp.async.cg run + ONE wait, so
-//       the per-group exposed latency overlaps onto the memory pipe (8 warps).
-//   (2) RBX_W13 4->8 + STAGES_W13 2->4 (-4.2us): deeper register-blocked weight
-//       streams hide L1TEX latency at the 8-warp/SM regime. (RBX | GRP=128
-//       keeps the shared per-N-block scale row valid — see HAZARD 1 in the
-//       merge log.)
-//   (3) packed half2 inner dot (W13 + W2 + shared): per super-step the lane's
-//       activations decode ONCE to half2, PRE-SCALED by 2^-8 (exact exp shift),
-//       reused across RBX rows; each row -> __hfma2 (2 FMAs/instr); the dot is
-//       reduced to fp32, x256 to undo the prescale, x the group scale. Halves
-//       the inner-loop instr count. Cross-super-step accum stays fp32 ->
-//       y13/out cosine ~1.0 (>= the 0.999 floor the gate enforces).
-//   (4) parallel per-group top-8 argmax in Phase C (-0.6us, see Phase C below).
-//  DEAD (do NOT add): tcgen05 (1/16-util at M=1), STAGES_W13=5 (+1us),
-//  CTA round-robin W13 (+1.5us).
-// ============================================================================
 
 // FP8(e4m3)->__half2 for one packed uint32 (4 fp8) -> two half2, via the
 // hardware F2FP.E4M3 path (cvt.rn.f16x2.e4m3x2; bf16x2 is NOT supported on
@@ -820,45 +735,6 @@ __device__ __forceinline__ float
   return acc; // valid on lane 0
 }
 
-// ============================================================================
-//  Fast routing — Phase B fast router GEMV + Phase C bitonic topk.
-//
-//  Phase B fast (router_partial_cpa):
-//    Problem: router_partial issues HBM loads in a serial stride-32 loop with
-//    NO prefetch -> NCU long_scoreboard 17.82 cyc/issue (HBM load latency
-//    exposed). Fix: cp.async.cg pipeline the weight slice (uint4, 16B) into the
-//    per-warp staging buffer (my_wbuf, reused from W13/W2, WBUF_U4 >> needed).
-//    Inner dot: packed __nv_bfloat162 multiply-into-float2 (2 muls/instr vs 8
-//    scalar bf16->float + 8 fmul in the scalar path). The activation (s_norm)
-//    is in SMEM -> no latency; only weight is pipeline-staged from HBM. Math:
-//    NEAR-identical to router_partial<KSPLIT> (NOT byte-identical) — same slice
-//    offsets + uint4 decomposition order (x/y/z/w), but the packed bf162 dot
-//    sums pairwise (p0+p1) vs the scalar left-fold (acc+=p0; acc+=p1) -> fp32
-//    non-associative -> sub-ULP. Load ordering also differs (cp.async vs
-//    __ldg). WBUF fit: KSPLIT=4 -> Kc=1792 bf16 = 7168 bytes per slice = 448
-//    uint4. Ring: STAGES=4 * 32 lanes * 1 uint4/lane = 128 uint4/stage per
-//    warp. Total: 128*4 = 512 uint4 = 8192 bytes. WBUF_U4=1024 uint4/warp
-//    (16384 B)
-//    >> 512 uint4 -> fits. Stage stride = 32 uint4 per stage (one lane per
-//    uint4).
-//
-//  Phase C bitonic topk (router_topk_bitonic):
-//    Problem: the TOPK_EXPERTS=8 sequential argmax passes with 8 warp-reduces,
-//    even in the FAST parallel-group path, still requires TOPK_EXPERTS rounds
-//    of shfl-reduces. A bitonic top-8 over 256 bf16-logit-biased values runs in
-//    O(log^2 N) compare-swap steps on 256 values distributed across 8 warps,
-//    reducing barrier count from ~8 synchronization rounds to 3 (one per
-//    bitonic merge step across warp boundaries). NOTE: within the megakernel,
-//    Phase C runs block-locally (no grid_barrier needed) so __syncthreads is
-//    safe here. The fast Phase C path already does the
-//    parallel per-group top-8 + warp-0 merge which is equivalent benefit.
-//    FAST_ROUTING Phase C replaces the serial warp-0 merge of 64 candidates
-//    (2/lane, TOPK_EXPERTS rounds of shfl) with a direct bitonic sort of all 64
-//    candidates in warp 0 in O(log^2 64) = 15 compare-swap passes (completely
-//    unrolled, no shuffles needed — all values in registers of warp 0's 32
-//    lanes, 2 per lane).
-// ============================================================================
-
 // cp.async pipelined router partial GEMV (bf16 . bf16, fp32 accum).
 // STAGES ring buffer in wbuf_base (MUST be >= STAGES*32 uint4 per warp).
 // Activation (normed) is in SMEM -> read directly. Weight (wr) is in HBM ->
@@ -998,63 +874,7 @@ __device__ __forceinline__ void router_cpa_drain() {
 //    [12] out          (store_in_dmem alias; write through OUTPUT slot only)
 //    [13] scratch      (uint8 Scratch base: barrier + globals, zero-init head)
 //  + out bound as output_ptrs[0] (the tracked bf16 moe_output write).
-//
-//  RUNTIME ROUTING PARAMS baked as constexpr would be WRONG (the rank's local
-//  expert range varies per rank). They are passed via the LAST two int32 slots
-//  of the barrier scratch head OR a constexpr derived from the rank — but MPK
-//  has no per-rank constexpr, so they are read from runtime_config (the EP rank
-//  range). HOWEVER the simplest robust source matching the COLD FFN is the
-//  routing_indices the production topk would have produced; since we compute
-//  routing internally, the builder passes local_expert_start/local_expert_end
-//  through runtime_config.* . To avoid adding a new runtime field we instead
-//  read them from the SCRATCH head (written once by tensor_init? no) — the
-//  chosen mechanism: the builder bakes local_expert_start as a kernel-template
-//  arg is impossible. SOLUTION (see builder): local_expert_start and
-//  num_local_experts are passed as the params[] of register_task and emitted as
-//  literals into the dispatch snippet via task_register.cc -> here as the two
-//  function args `local_expert_start`, `num_local_experts`.
 // ============================================================================
-// ============================================================================
-//  MPK_DSV3_FFN_WARPSPEC — hand-rolled warp-specialization experiment
-//  (self-scheduled roles; env-gated, default-OFF, default build
-//  byte-identical).
-//
-//  Roles (stage 1, MPK_DSV3_FFN_WARPSPEC>=1):
-//    W7  = LOADER. (a) at t0 stages this CTA's 8 router-GEMV weight K-slices
-//          into SMEM pages (28KB overlay on the idle-until-Phase-1 s_wbuf) and
-//          publishes each page through a per-page mbarrier armed by
-//          cp.async.mbarrier.arrive.noinc (a hand-rolled page semaphore);
-//          (b) issues cp.async.bulk.prefetch.L2 for this CTA's 1/136 slice of
-//          the routing-INDEPENDENT weight streams (shared gate_up + shared
-//          down); (c) rejoins the block-collective rmsnorm/quant late (same
-//          threadIdx striding => bit-exact); (d) after GB1, runs a PRIVATE
-//          single-warp topk (registers only, feeds PREFETCH ONLY — divergence
-//          on FP ties is harmless) to learn the routed expert IDs ~2-3us before
-//          the consumers' authoritative block topk completes, and bulk-
-//          prefetches the active experts' W13/W2 grid slices; (e) waits the
-//          s_topk_done release flag, recomputes the authoritative EP filter,
-//          and rejoins Phase 1 as a normal MAC warp.
-//    W0-6 = CONSUMERS. Run the phases as before; Phase B consumes the loader's
-//          SMEM pages (identical fp32 dot order => sc.inter bit-exact); Phase C
-//          runs on 7 warps with barrier.cta.sync 1,224 partial barriers (W7 is
-//          detoured; __syncthreads would stall on it) — per-group work strides
-//          g += 7, elementwise loops stride 224 => bit-exact selection.
-// ============================================================================
-// Gate levels (all default-OFF; the default build is byte-identical):
-//   MPK_DSV3_FFN_WARPSPEC=1  WS_PAGES: loader-staged router SMEM pages
-//                            (V2 page semaphores). Measured -1.4us router body.
-//   MPK_DSV3_FFN_WARPSPEC=2  + WS_DETOUR: W7 topk-detour + L2 warm-up streams.
-//                            MEASURED NET-NEGATIVE (kept as the ablation arm):
-//                            advisory prefetch is background-class on B200
-//                            (starves demand, 2.3ms retire-drain), demand-class
-//                            streams interfere with the concurrent small-ops,
-//                            and the ~5us topk window x non-interfering rate
-//                            cannot move MB-scale weight streams.
-//   MPK_DSV3_FFN_WARPSPEC=3  + WS_PIPE (stage 2): paged loader‖consumer GEMV
-//                            pipeline on Phase 3 — W7 pre-stages each
-//                            consumer's W2 task pages into SMEM rings DURING
-//                            Phase 1/silu through mbarrier full/empty channels
-//                            (the V2 Channel, hand-rolled).
 #if defined(MPK_DSV3_FFN_WARPSPEC) && MPK_DSV3_FFN_WARPSPEC >= 1
 #define MPK_DSV3_FFN_WS_PAGES 1
 #endif
@@ -1152,10 +972,6 @@ __device__ __forceinline__ uint32_t ws_ld_acquire_u32(uint32_t *p) {
 }
 // Advisory L2 prefetch. addr 16B-aligned, bytes %16==0, bytes>0 (caller
 // guarantees). Fallback arm (per-128B line prefetch) for ablation.
-// MEASURED DEAD on B200 (2026-07-02): BOTH flavors are serviced in a slow
-// background class (~19GB/s) that starves demand traffic — cold slowCTA
-// REGRESSED +18us and the kernel retire-drained 2.3ms warm. Kept only for the
-// ablation record; ws_stream_slice (real discard-loads) is the live mechanism.
 __device__ __forceinline__ void ws_bulk_prefetch_l2(void const *gptr,
                                                     uint32_t bytes) {
 #if defined(MPK_DSV3_FFN_WARPSPEC_NO_PF)

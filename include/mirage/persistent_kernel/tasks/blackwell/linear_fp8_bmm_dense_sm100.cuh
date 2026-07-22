@@ -57,8 +57,8 @@
 // MPK_DSV3_TASK_INLINE:
 // Default: __noinline__ (byte-identical to prior baseline, default build safe).
 // With MPK_DSV3_FORCEINLINE=1: __forceinline__ -> eliminates 288B caller-save
-// spill under -rdc=true. Same pattern as fp8_gemm_dense_finen_sm100.cuh and
-// mla_mtp_decode_tp8_sm100.cuh (the MLA forceinline gave 20.86->11.07us, -47%).
+// spill under -rdc=true. Same pattern as mla_mtp_decode_tp8_sm100.cuh
+// (the MLA forceinline gave 20.86->11.07us, -47%).
 #ifndef MPK_DSV3_TASK_INLINE
 #ifdef MPK_DSV3_FORCEINLINE
 #define MPK_DSV3_TASK_INLINE __forceinline__

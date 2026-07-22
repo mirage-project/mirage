@@ -276,8 +276,8 @@ __device__ __forceinline__ void
   // that is LIVE in the DSv3 build (linear_sm100_mpk and the MLA MTP decode
   // family) allocates from warp 0, so this file allocating from warp 2 was an
   // inconsistency across task boundaries. NOTE the tree is not uniform:
-  // mla_decode_sm100.cuh:108 and simple_linear_sm100.cuh:148 still allocate
-  // from warp 1 (both are dead code -- neither appears in any generated
+  // mla_decode_sm100.cuh:108 still allocates
+  // from warp 1 (dead code -- does not appear in any generated
   // megakernel), and fp8_group_gemm_sm100_common.cuh still DEALLOCATES from
   // warp 5. This change is an invariant/hygiene fix: it was measured NOT to
   // resolve the observed prefill fault, so it is not a proven root cause.

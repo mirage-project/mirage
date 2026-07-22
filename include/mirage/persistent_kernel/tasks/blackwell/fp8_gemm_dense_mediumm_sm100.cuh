@@ -15,10 +15,7 @@
 
 // Dense FP8 block-scaled GEMM, medium-M variant (M=512..2048 sweet spot).
 // NE=4 TMEM stages (vs 2 in smallm) — more MMA↔epilogue overlap. Body is in
-// fp8_gemm_dense_sm100_common.cuh. Beats DeepGEMM 1.14-3.82x at M=512..2048;
-// trails DeepGEMM at M ≥ 4096 (use deep_gemm.fp8_gemm_nt for that range).
-// Adapted from cpp_examples/blackwell_fp8_gemm/fp8_gemm_dense_tp8_sm100.cu
-// (v002, ferret-generated).
+// fp8_gemm_dense_sm100_common.cuh.
 
 #pragma once
 

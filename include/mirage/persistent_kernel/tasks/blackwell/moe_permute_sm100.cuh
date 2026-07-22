@@ -154,8 +154,7 @@ __device__ __forceinline__ void
     __syncthreads();
 
     // Only warp 0 cooperates on the scan. Other warps idle here — Phase 2
-    // re-engages them. This trades 13 μs of single-thread work for ~1 μs
-    // of warp-parallel work (scan_end=128 → 4 chunks of 32 lanes).
+    // re-engages them.
     {
       int const my_routing_base = e * MBT;
       int const scan_end = (num_active_rows < MBT) ? num_active_rows : MBT;
