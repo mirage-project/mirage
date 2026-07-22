@@ -55,6 +55,10 @@
 #include "mla_kv_append_sm100.cuh"
 #include "mla_kv_cache_gather_sm100.cuh"
 #include "mla_kv_cache_gather_split_sm100.cuh"
+// mla_mtp_decode_sm100.cuh is a library header: register_mla_decode_sm100_task
+// and register_mla_reduce_sm100_task (task_register.cc) emit calls to its
+// mla_mtp_decode_sm100_task_impl / mla_mtp_reduce_sm100_task_impl.
+#include "mla_mtp_decode_sm100.cuh"
 #include "mla_mtp_decode_tp8_sm100.cuh"
 #include "mla_prefill_sm100.cuh"
 #include "mla_prefill_tp8_chunked_sm100.cuh"
