@@ -112,10 +112,18 @@ __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
 
-// Dispatch behind a non-inlined boundary: this keeps execute_worker's queue/
-// event state out of the heavy task-body call frames so each task body gets the
+// Dispatch behind a non-inlined boundary: keep execute_worker's queue/event
+// state out of the heavy task-body call frames so each task body gets the
 // per-task register budget instead of sharing (and spilling) the worker frame.
-static __device__ __noinline__ void
+// The single-token decode build (MPK_DSV3_FORCEINLINE, set by the builder when
+// mbt == 1) folds the lean decode dispatch into the worker frame instead.
+static __device__
+#ifdef MPK_DSV3_FORCEINLINE
+    __forceinline__
+#else
+    __noinline__
+#endif
+    void
     execute_task_noinline(TaskDesc const *task_desc,
                           RuntimeConfig const &runtime_config) {
   // Keep execute_worker's queue/event state out of heavy task-body call frames

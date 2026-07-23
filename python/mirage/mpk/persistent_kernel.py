@@ -237,6 +237,12 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
+    # Decode-only build specialization (single-token decode, mbt == 1): forceinline
+    # the lean decode task bodies + dispatch (MPK_DSV3_TASK_INLINE) to remove the
+    # -rdc=true worker-frame caller-save on that path. Compile-time only, keyed on
+    # the batch shape (not an env toggle); heavy bodies stay __noinline__.
+    if mpk.max_num_batched_tokens == 1:
+        flags = flags + ["-DMPK_DSV3_FORCEINLINE"]
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
