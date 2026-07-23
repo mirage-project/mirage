@@ -225,22 +225,8 @@ def get_compile_command(
     flags = [
         "-shared",
         _detect_cxx_standard(),
-        # Production TP8 builds -rdc=true (NVSHMEM requires it). -rdc=true compiles
-        # task bodies relocatable/per-function -> register-heavy decode kernels SPILL
-        # (dense ~312B, MLA ~216B, BMM2 ~288B); -rdc=false inlines them -> 0 spill, so
-        # a -rdc=false test-mode gate UNDER-predicts production. MPK_FORCE_RDC_TRUE=1
-        # makes the single-GPU faithful gate compile -rdc=true so slowCTA includes the
-        # spill = faithful to production.
-        "-rdc=true" if (use_nvshmem or os.environ.get("MPK_FORCE_RDC_TRUE") == "1")
-        else "-rdc=false",
-        # MPK_MAXRREGCOUNT=N adds -maxrregcount=N (the per-thread register cap).
-        # Production runs DEFAULT (no cap). Unset = ptxas default.
-        *(["-maxrregcount=" + os.environ["MPK_MAXRREGCOUNT"]]
-          if os.environ.get("MPK_MAXRREGCOUNT") else []),
-        # MPK_NVCC_RESOURCE_USAGE=1 adds --resource-usage (ptxas/nvlink -v):
-        # per-function register count + spill bytes. Diagnostic only.
-        *(["--resource-usage"]
-          if os.environ.get("MPK_NVCC_RESOURCE_USAGE") == "1" else []),
+        # NVSHMEM (multi-GPU) requires relocatable device code.
+        "-rdc=false" if not use_nvshmem else "-rdc=true",
         "-use_fast_math",
         "-lcuda",
         "-lcudart",
@@ -251,15 +237,6 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
-    # MPK_FASTFWD_GEMM=1 (diagnostic, default-OFF): fast-forward the heavy GEMM
-    # bodies (early-return, no compute; runtime still signals task-done).
-    if os.environ.get("MPK_FASTFWD_GEMM") == "1":
-        flags = flags + ["-DMPK_FASTFWD_GEMM"]
-    # MPK_FASTFWD_NONAR=1 (diagnostic, default-OFF): fast-forward EVERY compute
-    # task body at worker-dispatch EXCEPT cross-rank NVSHMEM collectives
-    # (301/302/303 — skipping those deadlocks).
-    if os.environ.get("MPK_FASTFWD_NONAR") == "1":
-        flags = flags + ["-DMPK_FASTFWD_NONAR"]
     # DeepSeek-V3 decode-build default (mbt==1 only; INERT for prefill builds
     # mbt>1 — those stay byte-identical):
     #   - MPK_DSV3_FORCEINLINE: selective forceinline of the LEAN decode task
@@ -269,36 +246,6 @@ def get_compile_command(
     _decode_build = (mpk.max_num_batched_tokens == 1)
     if _decode_build:
         flags = flags + ["-DMPK_DSV3_FORCEINLINE"]
-    # MPK_ATTN_DBG=1 (debug-only, default-OFF): compile-in the attn-block-
-    # megakernel per-stage taps.
-    if os.environ.get("MPK_ATTN_DBG") == "1":
-        flags = flags + ["-DMPK_ATTN_DBG"]
-    # MPK_DSV3_TMEM_GUARD_ALL=1 (debug-only, default-OFF): extend the
-    # fp8_gemm_dense_qout TMEM-base validity guard to the other three FP8 GEMM
-    # kernels (which read the tcgen05.alloc result but do not validate it).
-    if os.environ.get("MPK_DSV3_TMEM_GUARD_ALL") == "1":
-        flags = flags + ["-DMPK_DSV3_TMEM_GUARD_ALL"]
-    # MPK_DSV3_TMEM_GUARD_NOTRAP=1 (debug-only, default-OFF): make the TMEM-base
-    # guards REPORT instead of __trap() — substitute a legal TMEM base so the CTA
-    # exits and the printf FIFO flushes (the math is then wrong).
-    if os.environ.get("MPK_DSV3_TMEM_GUARD_NOTRAP") == "1":
-        flags = flags + ["-DMPK_DSV3_TMEM_GUARD_NOTRAP"]
-    # MPK_DSV3_TMEM_SLOT_PAD=1 (debug-only, default-OFF): relocate
-    # fp8_gemm_dense_qout's TMEM allocation slot past every sibling FP8-GEMM's
-    # mbarrier array, leaving a canary at the vacated offset.
-    if os.environ.get("MPK_DSV3_TMEM_SLOT_PAD") == "1":
-        flags = flags + ["-DMPK_DSV3_TMEM_SLOT_PAD"]
-    # MPK_DSV3_CLASS2_PROBE=1 (debug-only, default-OFF): at group-task end, check
-    # whether a late async mbarrier arrival from a prior dense FP8-GEMM corrupted
-    # the group GEMM's live activation bytes (arena [98304,98384)).
-    if os.environ.get("MPK_DSV3_CLASS2_PROBE") == "1":
-        flags = flags + ["-DMPK_DSV3_CLASS2_PROBE"]
-    # MPK_DSV3_ASYNC_BAR_ARENA_UNSAFE=1 (fault injection, default-OFF, NEVER ship
-    # enabled): put the FP8-GEMM barrier block back INSIDE the extern __shared__
-    # arena — deliberately restores a known memory-corrupting defect (a detector
-    # control). A build with this defined is known to corrupt memory and fault.
-    if os.environ.get("MPK_DSV3_ASYNC_BAR_ARENA_UNSAFE") == "1":
-        flags = flags + ["-DMPK_DSV3_ASYNC_BAR_ARENA_UNSAFE"]
     # MPK_DSV3_AR_NVLS_PERTILE=1 (default-OFF): NVLS one-shot + per-tile flat
     # arrival gate replacing the radix-8 dissemination AllReduce barrier. The
     # builder reads the SAME env var, so the JIT -D and the task graph activate
@@ -307,13 +254,6 @@ def get_compile_command(
     # MPK_DSV3_*).
     if os.environ.get("MPK_DSV3_AR_NVLS_PERTILE") == "1":
         flags = flags + ["-DMPK_DSV3_AR_NVLS_PERTILE"]
-    # MPK_DSV3_FFN_WARPSPEC={1,2,3} (default-OFF): hand-rolled warp-specialization
-    # inside the FFN-full megakernel (see ffn_full_megakernel_sm100.cuh for the
-    # per-level roles). Codegen-gated — an mpirun launcher must forward it
-    # explicitly with -x MPK_DSV3_FFN_WARPSPEC.
-    _ffn_ws = os.environ.get("MPK_DSV3_FFN_WARPSPEC")
-    if _ffn_ws and _ffn_ws != "0":
-        flags = flags + [f"-DMPK_DSV3_FFN_WARPSPEC={int(_ffn_ws)}"]
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
@@ -384,12 +324,10 @@ def get_compile_command(
     return common_cmd + specific_cmd + flags
 
 
-# Default grid_y cap for quantize_fp8_layer.
-# group_tiles auto-adjusts down to keep grid_y * group_tiles ≤ num_workers.
-# At cap=128 the quantize task occupies all workers in 1 wave, but contention
-# with concurrent tasks is negligible in practice (verified empirically).
-# Env override: MPK_QUANTIZE_GRID_Y_CAP={8,16,32,64,128}.
-_QUANTIZE_GRID_Y_CAP = int(os.environ.get("MPK_QUANTIZE_GRID_Y_CAP", "128"))
+# grid_y cap for quantize_fp8_layer. group_tiles auto-adjusts down to keep
+# grid_y * group_tiles <= num_workers; at 128 the quantize task fills all
+# workers in one wave.
+_QUANTIZE_GRID_Y_CAP = 128
 
 
 class PersistentKernel:
