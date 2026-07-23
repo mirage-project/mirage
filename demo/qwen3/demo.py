@@ -8,6 +8,7 @@ import os, json
 
 from models.qwen3_shard_loader import Qwen3ShardLoader
 from mirage.mpk.base_dynamic_shard_loader import ShardType
+from mirage.mpk.models.utils import grid_for_splitk_linear_layer
 
 
 mapping = {
@@ -608,7 +609,7 @@ if __name__ == "__main__":
                     input=attn_out,
                     weight=w,
                     output=attn_proj_out,
-                    grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
+                    grid_dim=grid_for_splitk_linear_layer(hidden_size, w.dim(1)),
                     block_dim=(256, 1, 1),
                 )
             else:
@@ -688,7 +689,7 @@ if __name__ == "__main__":
                     input=silu_mul_out,
                     weight=w,
                     output=mlp_out,
-                    grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
+                    grid_dim=grid_for_splitk_linear_layer(hidden_size, w.dim(1)),
                     block_dim=(256, 1, 1),
                 )
             else:
