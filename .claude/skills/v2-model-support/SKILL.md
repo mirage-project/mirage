@@ -15,6 +15,8 @@ on them; the staged plan that drove that campaign is archived at
 the closest starting point for a dense-model campaign).
 It is a context+phased-recipe skill: architectures vary, the PHASES and GATES do not.
 
+> **Read `mpk-development-norms` FIRST.** This skill is the HOW (graph→plan→demo); that one is the WHERE + the PR-shape gate that decides what lands cleanly on `mpk` when the campaign is done — model code in `models/<model>/builder.py` + `demo/<model>/`, only GENERIC ops (never `<model>_*`) in shared `persistent_kernel.py`, no experiment env-vars in landed code, runtime fixes as separate PRs. During exploration keep levers env-gated default-OFF (`mpk-lever-cleanup`); before opening the PR, conform to the norms.
+
 ## Environment prerequisites (what must exist on the machine)
 
 In-repo (travels with every clone): this skill's `references/`, the v2 runtime + kernels

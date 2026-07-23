@@ -4,6 +4,7 @@ Claude Code skills (`.claude/skills/`) and subagent definitions (`.claude/agents
 developed during the DeepSeek-V3 decode optimization campaign.
 
 ## v1-era suites (apply to `mpk` directly)
+- `mpk-development-norms` — **read first** for any landing work: where a change belongs (ownership map) + the PR-shape gate (right-place-not-convenient-place, minimal shared-surface diff, no experiment env-vars in landed code, model code in model dirs, runtime fixes as separate PRs), extracted from merged-PR history with cited exemplars.
 - `add-mpk-task` — add a new task/operator to the megakernel (enum → task_register → graph → kernel → builder).
 - `add-mpk-model` — bring a new model onto MPK (builder, TP sharding rules, demo wiring).
 - `test-mode` — unit-test single layers or multi-layer pipelines through the full compile path.
