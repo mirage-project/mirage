@@ -185,23 +185,17 @@ enum TaskType {
   TASK_DFLASH_NORM_ROPE_SM100 = 297,
   // DFlash standalone paged KV-cache store (L4 materialize write), SM100.
   TASK_DFLASH_KV_STORE_SM100 = 298,
-  // DeepSeek-V3 MLA additions. 296..299 are taken by DFlash + the old END
-  // placeholder and 300..303 by the multi-GPU placeholders below, so these
-  // four live at 326..329 (nothing references the numeric values except the
-  // profiler task-name map, which matches).
+  // DeepSeek-V3 MLA decode/prefill tasks.
   TASK_MLA_UNIFIED_SM100 = 326,
   TASK_MLA_KV_GATHER_UNIFIED_SM100 = 327,
   TASK_MLA_PREFILL_TP8_CHUNKED_SM100 = 328,
   TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 = 329,
   TASK_DEEPSEEK_MLA_ROPE_SM100 = 304,
   TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
-  // BF16 CUDA-core GEMV for DSv3 router gate (hidden@W_gate.T→logits), raw-ptr
-  // ABI (no TMA). Default-OFF: MPK_DSV3_ROUTER_GEMV=1.
+  // BF16 CUDA-core GEMV for the DSv3 router gate (hidden @ W_gate.T -> logits).
   TASK_DSV3_ROUTER_GATE_GEMV_SM100 = 318,
   TASK_FP8_GEMM_DENSE_SM100 = 306,
-  // fine-N dense GEMM (mediumm body @ BN=16): M=1 decode occupancy lever,
-  // default-OFF MPK_DSV3_DENSE_FINEN. TMA inputs (B-weight box=16). Reuses gap
-  // 308.
+  // fine-N dense FP8 GEMM (BN=16), TMA inputs.
   TASK_FP8_GEMM_DENSE_FINEN_SM100 = 308,
   TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100 = 309,
   TASK_FP8_GROUP_GEMM_SMALLM_SM100 = 311, // BN=64, NS=8
@@ -215,20 +209,15 @@ enum TaskType {
   TASK_MOE_TOPK_MARKER_INIT_SM100 = 320,
   TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100 = 321,
   TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
-  // bs=1 contiguous KV append (replaces paged-cache append + gather):
+  // bs=1 contiguous KV append (replaces paged-cache append + gather).
   TASK_MLA_KV_APPEND_SM100 = 323,
-  // (slot 324 retired: the older partially-fused ffn_mlp_megakernel experiment,
-  //  superseded by TASK_FFN_FULL_MEGAKERNEL_SM100.)
-  // Fused decode-attention megakernel (the default decode attention path).
-  // Uses the free 319 slot.
+  // Fused decode-attention megakernel (default decode attention path).
   TASK_ATTN_BLOCK_MEGAKERNEL_SM100 = 319,
-  // Fully-fused FFN megakernel (the default decode MoE-FFN path): absorbs
-  // rmsnorm + router-gate-GEMV + topk-sigmoid + the whole MoE chain.
+  // Fully-fused FFN megakernel (default decode MoE-FFN path): rmsnorm +
+  // router-gate-GEMV + topk-sigmoid + the MoE chain.
   TASK_FFN_FULL_MEGAKERNEL_SM100 = 325,
-  // Fully-fused DENSE-MLP megakernel (env-gated
-  // MPK_DSV3_DENSE_MLP_MEGAKERNEL=1): dense layers 0-2 = post-attn RMSNorm +
-  // W13(gate+up) GEMV + silu(gate)*up + W2(down) GEMV -> bf16 (pre-AllReduce).
-  // Uses the free 307 slot.
+  // Fully-fused dense-MLP megakernel: post-attn RMSNorm + W13 GEMV +
+  // silu(gate)*up + W2 GEMV -> bf16 (pre-AllReduce).
   TASK_DSV3_DENSE_MLP_FUSED_SM100 = 307,
   TASK_SM100_TASK_END = 330, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
