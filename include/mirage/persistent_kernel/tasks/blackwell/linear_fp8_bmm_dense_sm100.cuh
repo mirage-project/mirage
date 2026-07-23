@@ -13,58 +13,15 @@
  * limitations under the License.
  */
 
-// =============================================================================
-// BMM dense 2-step register-spill fix (linear_fp8_bmm_dense_sm100).
-//
-// PROBLEM: under -rdc=true (production standard), the BMM dense wrapper
-// linear_fp8_bmm_dense_sm100_task_impl() is __noinline__, so the
-// execute_worker -> task_impl call boundary causes 288 bytes of caller-save
-// spill under -rdc=true.
-//
-// FIX: Add MPK_DSV3_TASK_INLINE macro to the wrapper (Step 2).
-// When built with -DMPK_DSV3_FORCEINLINE the wrapper becomes __forceinline__,
-// folding into execute_worker and eliminating the 288B caller-save spill.
-// Default (macro absent or MPK_DSV3_FORCEINLINE not set): __noinline__ ->
-// byte-identical to the prior baseline.
-//
-// This is the MINIMAL correct change. Step 1 (acc->smem) was investigated
-// but is counter-productive: the smem read/write latency for BN=128 floats
-// is far worse than keeping float acc[BN] in registers. The baseline already
-// beats the vLLM target (10.24 us < 12.5 us = vLLM_ref/1.2).
-//
-// MEASUREMENT RESULTS (GPU 3, exclusive, rdc=true, n=5 trials):
-//   Baseline (__noinline__):      slowCTA = 10.24 us, cos = 1.0
-//   Candidate (__forceinline__):  slowCTA = 3.776 us (median), cos = 1.0
-//   Speedup vs baseline: 2.71x. Speedup vs vLLM (15 us): 3.97x.
-//   vLLM ref: 15 us; target (vLLM/1.2): 12.5 us. WINNER: 70% below target.
-//   Build env: MPK_FORCE_RDC_TRUE=1 MPK_DSV3_FORCEINLINE=1
-//
-// GEOMETRY (TP=8 decode, the production target):
-//   M=1 (active decode row), N=128 (per-head V-absorption dim),
-//   K=512 (KV_LORA per head), H_local=16 heads at TP=8,
-//   grid=(1,16,1), block=(256,1,1), one output tile per CTA.
-//
-// INTEGRATION NOTE:
-//   Drop this file into:
-//     include/mirage/persistent_kernel/tasks/blackwell/linear_fp8_bmm_dense_sm100.cuh
-//   No rebuild needed (it's a .cuh; JIT-compiled by nvcc at runtime).
-//   Enable: MPK_DSV3_FORCEINLINE=1 (add to the build env; already handled in
-//   persistent_kernel.py line ~301).
-// =============================================================================
+// linear_fp8_bmm_dense_sm100: TP=8 decode V-absorption BMM (M=1, N=128, K=512,
+// 16 local heads; grid=(1,16,1), block=(256,1,1), one output tile per CTA).
 
 #pragma once
 
-// MPK_DSV3_TASK_INLINE:
-// Default: __noinline__ (byte-identical to prior baseline, default build safe).
-// With MPK_DSV3_FORCEINLINE=1: __forceinline__ -> eliminates 288B caller-save
-// spill under -rdc=true. Same pattern as mla_mtp_decode_tp8_sm100.cuh
-// (the MLA forceinline gave 20.86->11.07us, -47%).
+// The BMM body runs __noinline__ behind the worker dispatch boundary so it gets
+// its own register budget under -rdc=true rather than spilling the worker frame.
 #ifndef MPK_DSV3_TASK_INLINE
-#ifdef MPK_DSV3_FORCEINLINE
-#define MPK_DSV3_TASK_INLINE __forceinline__
-#else
 #define MPK_DSV3_TASK_INLINE __noinline__
-#endif
 #endif
 
 #include "fp8_gemm_dense_qout_sm100_common.cuh"

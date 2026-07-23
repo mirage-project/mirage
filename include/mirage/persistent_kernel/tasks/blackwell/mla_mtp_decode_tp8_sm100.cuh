@@ -25,17 +25,11 @@
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
 
-// MPK_DSV3_FORCEINLINE (default-OFF, byte-identical default build):
-// When set, mla_mtp_tp8_main is forceinlined into execute_worker (via
-// _execute_task → execute_task_noinline) so the MLA body folds into the
-// worker frame → no caller-save across the relocatable -rdc=true call.
-// Requires the body register count ≤ ~150 regs.
+// The MLA decode body runs __noinline__ behind the worker dispatch boundary so
+// it gets its own register budget under -rdc=true rather than spilling the
+// worker frame.
 #ifndef MPK_DSV3_TASK_INLINE
-#ifdef MPK_DSV3_FORCEINLINE
-#define MPK_DSV3_TASK_INLINE __forceinline__
-#else
 #define MPK_DSV3_TASK_INLINE __noinline__
-#endif
 #endif
 
 namespace kernel {

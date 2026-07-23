@@ -237,15 +237,6 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
-    # DeepSeek-V3 decode-build default (mbt==1 only; INERT for prefill builds
-    # mbt>1 — those stay byte-identical):
-    #   - MPK_DSV3_FORCEINLINE: selective forceinline of the LEAN decode task
-    #     bodies + dispatch, eliminating the -rdc=true worker_kernel caller-save.
-    #     Heavy bodies (MLA/group-GEMM/BMM2) keep __noinline__ so ptxas never
-    #     overflows.
-    _decode_build = (mpk.max_num_batched_tokens == 1)
-    if _decode_build:
-        flags = flags + ["-DMPK_DSV3_FORCEINLINE"]
     # MPK_DSV3_AR_NVLS_PERTILE=1 (default-OFF): NVLS one-shot + per-tile flat
     # arrival gate replacing the radix-8 dissemination AllReduce barrier. The
     # builder reads the SAME env var, so the JIT -D and the task graph activate
