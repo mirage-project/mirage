@@ -237,14 +237,6 @@ def get_compile_command(
         py_so_path,
     ]
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
-    # MPK_DSV3_AR_NVLS_PERTILE=1 (default-OFF): NVLS one-shot + per-tile flat
-    # arrival gate replacing the radix-8 dissemination AllReduce barrier. The
-    # builder reads the SAME env var, so the JIT -D and the task graph activate
-    # together. mpirun caveat: codegen-gated — the launcher MUST forward it
-    # explicitly with `-x MPK_DSV3_AR_NVLS_PERTILE` (a generic -x list omits
-    # MPK_DSV3_*).
-    if os.environ.get("MPK_DSV3_AR_NVLS_PERTILE") == "1":
-        flags = flags + ["-DMPK_DSV3_AR_NVLS_PERTILE"]
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
     if mpk.mode == "offline":
@@ -3582,7 +3574,6 @@ class PersistentKernel:
         block_dim: tuple,
         residual: DTensor = None,
         gate_mode: int = 0,
-        pertile_flags: DTensor = None,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, hidden_size)
@@ -3606,22 +3597,15 @@ class PersistentKernel:
         if residual is not None:
             tensors["residual"] = residual
         params = [self.world_size, self.mpi_rank]
-        # Per-tile flat-gate NVLS path (default-OFF). When the
-        # builder passes a symmetric flags buffer we activate the per-tile
-        # variant: params[2]=gate_mode (0 if unused), params[3]=1 signals
-        # per-tile, and the flags buffer becomes the LAST task input.
-        pertile = pertile_flags is not None
-        if gate_mode or pertile:
+        # Phase-gated allreduce (gate_mode: 0=always, 1=prefill-only,
+        # 2=decode-only) is implemented only by the nvshmem_tile strategy;
+        # params[2]=gate_mode is emitted when non-zero.
+        if gate_mode:
             if getattr(best_implementation, "name", "") != "nvshmem_tile_allreduce":
                 raise RuntimeError(
-                    "Gated/per-tile allreduce is currently implemented only for "
+                    "Gated allreduce is currently implemented only for "
                     "nvshmem_tile_allreduce.")
-            # params[2] must always be present when params[3] is, so the C++
-            # register can positionally read params[3]. Emit gate_mode (0 ok).
             params.append(gate_mode)
-        if pertile:
-            params.append(1)  # params[3]: per-tile mode
-            tensors["pertile_flags"] = pertile_flags
         best_implementation.register_tasks(self, tensors=tensors, grid_dim=grid_dim,
                                            block_dim=block_dim, params=params)
 

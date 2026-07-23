@@ -316,11 +316,6 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
     def _allreduce_residual(self, partial, output, residual, gate_mode: int = 0):
-        # The per-tile flat-gate NVLS path is activated by passing the
-        # symmetric flags buffer (allocated only when the env is set), which
-        # switches the strategy to the *_pertile task variant. When the buffer
-        # is None (default) the call is byte-identical to before.
-        pertile_flags = getattr(self, "ar_pertile_flags", None)
         self.mpk.allreduce_layer(
             input=partial,
             buffer=self.allreduce_buf,
@@ -329,7 +324,6 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=_tensor_parallel_allreduce_grid(output.dim(1)),
             block_dim=(128, 1, 1),
             gate_mode=gate_mode,
-            pertile_flags=pertile_flags,
         )
 
     def _fp8_quant_buffers(self, rows: int, reduction_size: int,
@@ -1282,24 +1276,6 @@ class DeepSeekV3Builder(GraphBuilder):
                 name="allreduce_out",
                 io_category=_allreduce_io,
             )
-            # Per-tile AllReduce: symmetric uint64 arrival-flag
-            # buffer (default-OFF, only allocated when MPK_DSV3_AR_NVLS_PERTILE
-            # is set AND we have NVSHMEM+TP>1, so the default task graph is
-            # unchanged). Layout: 2 gates (start,end) x GRID CTAs x world_size.
-            # GRID = hidden_size/128 mirrors _tensor_parallel_allreduce_grid.
-            # int64 used as uint64 monotonic epoch slots. Zeroed at kernel init
-            # (runtime.cc name-gated cudaMemset on "ar_pertile_flags").
-            self.ar_pertile_flags = None
-            if (self._use_nvshmem
-                    and os.environ.get("MPK_DSV3_AR_NVLS_PERTILE") == "1"):
-                _ar_grid = self.hidden_size // 128
-                _n_slots = 2 * _ar_grid * self.world_size
-                self.ar_pertile_flags = self.mpk.new_tensor(
-                    dims=(1, _n_slots),
-                    dtype=int64,
-                    name="ar_pertile_flags",
-                    io_category="nvshmem_tensor",
-                )
 
         # Argmax
         self.argmax_part_value = self.mpk.new_tensor(
