@@ -1575,61 +1575,8 @@ extern "C" void
 
   // Initialize nvshmem
   cudaSetDevice(my_rank);
-  // Request a larger device printf FIFO so low-volume debug output is not lost.
-  //
-  // IMPORTANT: this call is a NO-OP at this point in the process, and always
-  // has been. cudaLimitPrintfFifoSize may only be changed before any kernel has
-  // been launched in the context; by the time init_persistent_kernel runs,
-  // torch and NVSHMEM have already launched kernels, so the driver rejects the
-  // change with cudaErrorInvalidValue and the FIFO stays at the CUDA default
-  // (measured: 9 699 328 B on B200 / CUDA 12.x). The return value used to be
-  // discarded, so the failure was invisible -- which caused a real
-  // misattribution: the absence of a device-side [MPK FATAL] guard line was
-  // read as "the guard did not fire" when in fact the FIFO had never been
-  // resized at all.
-  //
-  // MPK_PRINTF_FIFO_BYTES=<n> overrides the requested size (shrinking the FIFO
-  // makes a few lines fill it and flush in near-real time, which is what makes
-  // a megakernel that traps and never exits diagnosable). The override is
-  // subject to the same restriction, so it only takes effect if this is reached
-  // before any kernel launch. Either way the outcome is now REPORTED rather
-  // than assumed: an explicit override that fails prints a warning naming the
-  // reason and the size actually in force. With the variable unset the request
-  // is the historical 128 MB and this code stays silent, so the default build's
-  // output is unchanged.
-  size_t mpk_printf_fifo_bytes = 128ull * 1024 * 1024;
-  bool mpk_fifo_explicit = false;
-  if (char const *mpk_fifo_env = std::getenv("MPK_PRINTF_FIFO_BYTES")) {
-    unsigned long long v = std::strtoull(mpk_fifo_env, nullptr, 10);
-    if (v > 0) {
-      mpk_printf_fifo_bytes = (size_t)v;
-      mpk_fifo_explicit = true;
-    }
-  }
-  {
-    cudaError_t fifo_rc =
-        cudaDeviceSetLimit(cudaLimitPrintfFifoSize, mpk_printf_fifo_bytes);
-    if (fifo_rc != cudaSuccess) {
-      cudaGetLastError(); // clear the sticky error; this is not fatal
-      if (mpk_fifo_explicit) {
-        size_t fifo_actual = 0;
-        cudaDeviceGetLimit(&fifo_actual, cudaLimitPrintfFifoSize);
-        fprintf(stderr,
-                "[MPK WARN] MPK_PRINTF_FIFO_BYTES=%zu could NOT be applied "
-                "(cudaDeviceSetLimit: %s). The printf FIFO is fixed once a "
-                "kernel has been launched in the context, and torch/NVSHMEM "
-                "have already launched one by this point. FIFO actually in "
-                "force: %zu bytes. Device printf from a megakernel that traps "
-                "and never exits may therefore still be lost -- do NOT read "
-                "the absence of device output as proof that a device-side "
-                "guard did not fire.\n",
-                mpk_printf_fifo_bytes,
-                cudaGetErrorString(fifo_rc),
-                fifo_actual);
-        fflush(stderr);
-      }
-    }
-  }
+  // Increase printf FIFO to avoid losing debug messages from device.
+  cudaDeviceSetLimit(cudaLimitPrintfFifoSize, 128 * 1024 * 1024);
 
 #ifdef USE_NVSHMEM
   MPI_Comm mpi_comm = MPI_COMM_WORLD;

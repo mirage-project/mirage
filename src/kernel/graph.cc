@@ -1061,18 +1061,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
-  } else if (name == "nvshmem_tile_allreduce_pertile") {
-    // Candidate-2: reduce input + per-tile flags buffer => 2 inputs, 1 output.
-    int variant_id = task_register->register_nvshmem_tile_allreduce_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(2, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
-  } else if (name == "nvshmem_tile_allreduce_pertile_with_residual") {
-    // reduce input + residual + per-tile flags buffer => 3 inputs, 1 output.
-    int variant_id = task_register->register_nvshmem_tile_allreduce_task(
-        customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(3, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
   } else if (name == "nvshmem_global_argmax") {
     int variant_id = task_register->register_nvshmem_global_argmax_task(
         customized->bgraph, params);

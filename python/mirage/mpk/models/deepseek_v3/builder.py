@@ -2558,16 +2558,6 @@ class DeepSeekV3Builder(GraphBuilder):
             dtype=bfloat16,
             name=f"layer_{layer_idx}_ffn_full_megakernel_scratch",
             io_category="cuda_tensor")
-        # Skip-after-step-0 lever (MPK_DSV3_FFN_FOLD_TENSORINIT=1, default-OFF):
-        # make this per-step zero a runtime no-op on decode steps>=1 (step 0
-        # STILL zeroes, for the cudaMalloc garbage). The default build (env unset)
-        # is byte-identical — `skip_after_step0=False` emits the unguarded
-        # tensor_init.
-        _ffn_fold_tensorinit = (
-            os.environ.get("MPK_DSV3_FFN_FOLD_TENSORINIT") == "1")
-        # GATE-ONLY correctness harness: poison barrier_scratch data on steps>=1.
-        _ffn_fold_poison = (
-            os.environ.get("MPK_DSV3_FFN_FOLD_TENSORINIT_POISON") == "1")
         self.mpk.tensor_init_layer(
             target=barrier_scratch,
             dummy=self.x,
@@ -2575,8 +2565,6 @@ class DeepSeekV3Builder(GraphBuilder):
             block_dim=(128, 1, 1),
             dummy_input_map=(-1, -1, -1),
             target_input_map=(-1, -1, -1),
-            skip_after_step0=_ffn_fold_tensorinit,
-            poison_after_step0=_ffn_fold_poison,
         )
 
         # routed_scaling_factor: DSv3 default 2.5 (matches the chain's

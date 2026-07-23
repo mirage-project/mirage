@@ -1786,7 +1786,6 @@ class PersistentKernel:
         dummy_input_map: tuple,
         target_input_map: tuple,
         skip_after_step0: bool = False,
-        poison_after_step0: bool = False,
     ):
         """Zero-fill `target` using a custom kernel.
 
@@ -1838,9 +1837,7 @@ class PersistentKernel:
         # params[0]==1 => emit the step-0-guarded variant (skip on steps>=1).
         # Omit params entirely otherwise so the code string is byte-identical to
         # the historical unguarded tensor_init (other unflagged callers).
-        if poison_after_step0:
-            params = [2]  # GATE-ONLY poison-fill correctness variant
-        elif skip_after_step0:
+        if skip_after_step0:
             params = [1]
         else:
             params = None

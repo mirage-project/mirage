@@ -2605,10 +2605,6 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
   //   callers (the default unguarded form) are unaffected.
   assert(params.size() == 0 || params.size() == 1);
   bool skip_after_step0 = (params.size() == 1 && params[0] == 1);
-  // GATE-ONLY: params[0]==2 => poison variant (byte-fill 0xff on steps>=1,
-  // sparing the 16B barrier head) instead of the skip. Correctness gate for
-  // the skip lever; NOT a production path (never emitted by default builder).
-  bool poison_after_step0 = (params.size() == 1 && params[0] == 2);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 1;
@@ -2644,29 +2640,11 @@ int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
     // is uniformly a no-op on steps>=1.
     code.e("if (runtime_config.step[0] == 0) {");
   }
-  if (poison_after_step0) {
-    // GATE-ONLY correctness harness. step 0: real zero. steps>=1: poison the
-    // data range [16, total_bytes) with 0xff (NaN-toxic), sparing barrier head.
-    int total_bytes = batch_size * output_stride * 2; // bf16 elems -> bytes
-    code.e("if (runtime_config.step[0] == 0) {");
-    code.e("kernel::tensor_init_zero_sm100_task_impl<$, $, $>(",
-           /*BATCH_SIZE=*/batch_size,
-           /*OUTPUT_SIZE=*/output_size,
-           /*OUTPUT_STRIDE=*/output_stride);
-    code.e("    task_desc->output_ptrs[0]);");
-    code.e("} else {");
-    code.e("kernel::tensor_init_poison_sm100_task_impl<$, $>(",
-           /*TOTAL_BYTES=*/total_bytes,
-           /*POISON_OFFSET_BYTES=*/16);
-    code.e("    task_desc->output_ptrs[0]);");
-    code.e("}");
-  } else {
-    code.e("kernel::tensor_init_zero_sm100_task_impl<$, $, $>(",
-           /*BATCH_SIZE=*/batch_size,
-           /*OUTPUT_SIZE=*/output_size,
-           /*OUTPUT_STRIDE=*/output_stride);
-    code.e("    task_desc->output_ptrs[0]);");
-  }
+  code.e("kernel::tensor_init_zero_sm100_task_impl<$, $, $>(",
+         /*BATCH_SIZE=*/batch_size,
+         /*OUTPUT_SIZE=*/output_size,
+         /*OUTPUT_STRIDE=*/output_stride);
+  code.e("    task_desc->output_ptrs[0]);");
   if (skip_after_step0) {
     code.e("}"); // close the `if (step==0)` step-0 zero guard.
   }
@@ -4811,19 +4789,13 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   // params[0]: num_gpus
   // params[1]: my_gpu_id
   // params[2] optional: phase gate, 1=prefill, 2=decode.
-  // params[3] optional: per-tile NVLS mode, 1 = Candidate-2 flat-gate path.
-  //   When set, the LAST input op is the symmetric per-tile flags buffer
-  //   (uint64 arrival flags), not a reduction operand. Env-gated by the
-  //   builder (MPK_DSV3_AR_NVLS_PERTILE) so the DEFAULT graph is unchanged.
-  assert(params.size() >= 2 && params.size() <= 4);
+  assert(params.size() >= 2 && params.size() <= 3);
   int gate_mode = (params.size() >= 3) ? params[2] : 0;
-  bool const pertile = (params.size() >= 4) && (params[3] == 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_outputs = 1;
   int num_inputs = static_cast<int>(bgraph.operators.size()) - num_outputs;
-  // per-tile mode carries one extra input (the flags buffer) at the end.
-  int const reduce_inputs = pertile ? (num_inputs - 1) : num_inputs;
+  int const reduce_inputs = num_inputs;
   assert(reduce_inputs == 1 || reduce_inputs == 2);
   bool const with_residual = reduce_inputs == 2;
 
@@ -4854,31 +4826,6 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   mirage::transpiler::CodeKeeper c;
   c.inc_indent();
   emit_deepseek_phase_gate(c, gate_mode);
-  if (pertile) {
-    // Candidate-2 flat-gate NVLS path. The flags buffer is the last input
-    // (index == reduce_inputs, since inputs are [reduce, (residual), flags]).
-    if (with_residual) {
-      c.e("kernel::nvshmem_tile_allreduce_pertile_with_residual<__nv_bfloat16, "
-          "$, $, $>(",
-          batch_size,
-          output_size,
-          output_stride);
-      c.e("  task_desc->input_ptrs[0],");
-      c.e("  task_desc->input_ptrs[1],");
-    } else {
-      c.e("kernel::nvshmem_tile_allreduce_pertile<__nv_bfloat16, $, $, $>(",
-          batch_size,
-          output_size,
-          output_stride);
-      c.e("  task_desc->input_ptrs[0],");
-    }
-    c.e("  task_desc->output_ptrs[0],");
-    c.e("  runtime_config.nvshmem_teams,");
-    c.e("  task_desc->task_metadata.task_offset,");
-    c.e("  runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
-    c.e("  task_desc->input_ptrs[$]);", reduce_inputs);
-    return register_task_variant(TASK_NVSHMEM_TILE_ALLREDUCE, c.to_string());
-  }
   if (with_residual) {
     c.e("kernel::nvshmem_tile_allreduce_with_residual<__nv_bfloat16, $, $, "
         "$>(",
