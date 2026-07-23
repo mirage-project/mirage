@@ -1198,3 +1198,39 @@ def nvshmem_global_argmax_layer(
         ],
     )
     allocate_nvshmem_teams(pk, grid_dim[0] * grid_dim[1] * grid_dim[2])
+
+
+def dsv3_router_gate_gemv_layer(
+    pk,
+    input: DTensor,
+    weight: DTensor,
+    output: DTensor,
+    num_workers: int,
+):
+    # BF16 CUDA-core GEMV for the DSv3 router gate.
+    # Computes: output[M, N] = input[M, K] @ weight[N, K]^T  (BF16 in/out).
+    # Raw-pointer ABI (no TMA). Grid = (num_workers, 1, 1), blockDim = 512.
+    # 2 real inputs (hidden, W_gate), 1 real output (logits) — NOT
+    # store_in_dmem for the output (downstream moe_topk_sigmoid reads it
+    # via output_ptrs[0], avoiding the null-output AG bug). Selected for the
+    # single-token (mbt == 1) decode router; mbt > 1 uses linear_layer.
+    assert input.num_dims == 2   # (M, K)
+    assert weight.num_dims == 2  # (N, K)
+    assert output.num_dims == 2  # (M, N)
+    M = input.dim(0)
+    K = input.dim(1)
+    N = weight.dim(0)
+    assert weight.dim(1) == K
+    assert output.dim(0) == M
+    assert output.dim(1) == N
+    params = [M, N, K, num_workers]
+    tb_graph = TBGraph(CyTBGraph((num_workers, 1, 1), (512, 1, 1), 1, 64))
+    # 2 inputs, 1 real output: input→input_ptrs[0], weight→input_ptrs[1],
+    # output→output_ptrs[0]. All store_in_dmem=True so the tensor is
+    # passed by pointer; the (2,1) graph.cc tuple routes correctly.
+    tb_graph.new_input(input, (-1, -1, -1), -1, True)
+    tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+    tb_graph.new_input(output, (-1, -1, -1), -1, True)
+    pk.kn_graph.customized([input, weight, output], tb_graph)
+    pk.kn_graph.register_task(
+        tb_graph, "dsv3_router_gate_gemv_sm100", params)

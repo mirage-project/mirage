@@ -2663,10 +2663,11 @@ class DeepSeekV3Builder(GraphBuilder):
         router_grid = min(grid_for_rmsnorm_linear_layer(w_gate.dim(0)),
                           w_gate.dim(0) // 8)
         if self.max_num_batched_tokens == 1:
-            # BF16 CUDA-core GEMV replaces the tcgen05 linear_layer for
-            # the router gate at bs=1 decode. Default-OFF: env unset ⇒ the
-            # linear_layer path below (byte-identical baseline build).
-            self.mpk.dsv3_router_gate_gemv_layer(
+            # BF16 CUDA-core GEMV replaces the tcgen05 linear_layer for the
+            # router gate at single-token (mbt == 1) decode; mbt > 1 takes the
+            # linear_layer path below.
+            dsv3_tasks.dsv3_router_gate_gemv_layer(
+                self.mpk,
                 input=self.rmsnorm_out,
                 weight=w_gate,
                 output=router_logits,
