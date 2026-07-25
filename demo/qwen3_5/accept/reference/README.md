@@ -120,6 +120,10 @@ tokenizer (nothing is prepended); `pad_token` = `<|endoftext|>`.
 - `vllm_smoke/` — step 8: `vllm_smoke.py` (the script that produced this evidence),
   `vllm_smoke_result.json` (quantization method, load/generate timings, tokens/s,
   output ids, match result), `vllm_smoke_run.log` (full raw stdout/stderr).
+- `gpu_etiquette_evidence.md` — verbatim pre-run `nvidia-smi` rows + `CUDA_VISIBLE_DEVICES`
+  pinning, quoted from the actual B200 log files, for every GPU-using step (HF reference,
+  vLLM smoke, and the optional qwen3-8B demo smoke — including an honest note on the one
+  step whose log lacks an embedded `nvidia-smi` call).
 
 ## Versions
 
@@ -155,7 +159,168 @@ same FP8 code path (dynamically fetched `kernels` build matching whatever torch/
 active) — not expected to change the output tokens, but not re-verified under `2.11.0`
 since the already-validated artifact didn't need regenerating.
 
-## Exact commands run (on `catalyst-B200`, user `muhengl`)
+## Full environment rebuild (from nothing, on `catalyst-B200`, user `muhengl`)
+
+Everything below reproduces `~/mpk-qwen35` from an empty home directory through to being
+able to run the two command blocks in the next section. GPU etiquette
+(`nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv`, pick
+`<500 MiB` + `~0%` util, pin `CUDA_VISIBLE_DEVICES`, recheck immediately before every
+GPU-touching command) applies from step 6 onward; see `gpu_etiquette_evidence.md` in this
+directory for the actual verbatim pre-run `nvidia-smi` rows this run used.
+
+### 1. Layout + uv (user-local)
+
+```bash
+mkdir -p ~/mpk-qwen35/hf ~/mpk-qwen35/logs ~/mpk-qwen35/scripts
+curl -LsSf https://astral.sh/uv/install.sh | sh        # installs to ~/.local/bin
+export PATH=$HOME/.local/bin:$PATH
+```
+
+**`UV_CACHE_DIR` cross-filesystem caveat (discovered here, applies to any fresh rebuild):**
+`uv`'s wheel cache is meant to let multiple venvs *hardlink* shared downloads (e.g. torch)
+instead of each paying the full size again. On this box `~/.cache/uv` was already a
+symlink to `/tmp/muhengl_cache_relocate/uv` (root fs `/dev/md0`) — separate from
+`~/mpk-qwen35` on `/raid` (`/dev/md1`). Because a hardlink cannot cross filesystems, every
+`uv pip install` here printed `Failed to hardlink ... Invalid cross-device link (os error
+18); falling back to copy` and silently paid the full copy cost per venv instead of
+deduping. It still works, just uses more disk. If a fresh rebuild wants the real
+dedup benefit, set `export UV_CACHE_DIR=~/mpk-qwen35/.uv-cache` *before* creating the
+venvs so the cache and the venvs share one filesystem. (If instead you want to keep large
+downloads off the tight `/raid` pool the way this run ended up doing, leave the cache on
+`/tmp`/root-fs and accept the no-hardlink cost — root fs had ~268G free vs. `/raid`'s
+tighter shared pool; either choice is legitimate, just know which one you're making.)
+
+### 2. Both venvs
+
+```bash
+cd ~/mpk-qwen35
+uv venv venv-mpk --python 3.12
+uv venv venv-vllm --python 3.12
+```
+(uv-created venvs ship **no `pip` binary** — use `uv pip install ...` for everything below,
+not `pip install` / `python -m pip`, even inside an activated venv.)
+
+### 3. Clone mirage + submodules, pinned revisions
+
+```bash
+cd ~/mpk-qwen35
+git clone -b qwen3-5_support git@github.com:bill810975/mirage.git mirage   # https fallback if no ssh key:
+# git clone -b qwen3-5_support https://github.com/bill810975/mirage.git mirage
+cd mirage
+git submodule update --init --recursive   # deps/cutlass, deps/z3, deps/json (all https)
+```
+Revisions this run actually built against — verify a fresh clone lands on the same commits
+(they're what the pinned branch/submodule refs resolve to, not extra manual checkouts):
+mirage `qwen3-5_support` HEAD = `2c87a75` ("Support DFlash for Kimi-K2.6 (#728)");
+`deps/cutlass` = `f3fde58372d33e9a5650ba7b80fc48b3b49d40c8` (matches resources.md's pin).
+
+### 4. MPK editable build (CUDA 12.8) + the z3-solver ABI-drift fix
+
+```bash
+export PATH=$HOME/.local/bin:/usr/local/cuda-12.8/bin:$PATH
+export CUDA_HOME=/usr/local/cuda-12.8
+cd ~/mpk-qwen35/mirage
+source ~/mpk-qwen35/venv-mpk/bin/activate
+uv pip install -e . -v          # full log captured to logs/build_mpk.log on this run
+```
+
+`import mirage` will then fail: `ImportError: libz3.so.5.0: cannot open shared object
+file`. Root cause: `pyproject.toml`'s `[build-system] requires` lists unpinned
+`"z3-solver"`; the **isolated PEP517 build env** resolved `z3-solver 5.0.0.0` (so
+`core.cpython-312-x86_64-linux-gnu.so` got linked against `libz3.so.5.0`), but the
+**main venv install** independently resolved `z3-solver==4.16.0.0` (only ships
+`libz3.so.4.16`) — a build-time-vs-runtime dependency drift, not a broken build. Fix:
+confirm what the compiled extension actually needs, then install exactly that version and
+re-verify with a real import (not just "uv says installed"):
+
+```bash
+ldd ~/mpk-qwen35/mirage/python/mirage/core.cpython-312-x86_64-linux-gnu.so | grep z3
+# -> libz3.so.5.0 => not found
+uv pip install "z3-solver==5.0.0.0"
+python3 -c "import mirage; print('mirage import OK')"   # smoke-import verification
+```
+
+### 5. venv-vllm: pinned installs + the recurring ABI-drift reinstall rule
+
+```bash
+source ~/mpk-qwen35/venv-vllm/bin/activate
+uv pip install -U "huggingface_hub[cli,hf_transfer]"   # -> huggingface_hub 1.24.0
+                                                         # (extras warnings are harmless;
+                                                         #  the `hf` CLI ships in the base
+                                                         #  package on this version)
+uv pip install -U vllm                                  # -> vllm 0.25.1
+uv pip install -U transformers accelerate                # -> transformers 5.14.1, accelerate 1.14.0
+uv pip install "kernels>=0.15.2,<0.16.0"                  # -> kernels 0.15.2 (transformers'
+                                                         #  native fp8 GEMM kernels need this;
+                                                         #  not pulled in by default)
+```
+
+**Rule, root-caused twice in this one venv:** installing packages into a venv across more
+than one `uv pip install` call can leave an *already-installed* compiled/ABI-sensitive
+package silently stale the moment a *later* call bumps a shared dependency (here: torch)
+that the earlier package was built against — `uv` only re-resolves what the current
+command's graph touches, not everything already installed. **After all installs into a
+venv are done, smoke-import every heavy compiled dependency; if one fails with an
+`undefined symbol` / `cannot open shared object` error, reinstall exactly that package
+(not torch itself) and re-verify:**
+
+```bash
+# hit #1: torchvision was resolved against an earlier torch (~2.11.0); a later
+# `transformers accelerate` install bumped torch to 2.13.0 without re-resolving it.
+python3 -c "import torchvision"
+# -> RuntimeError: operator torchvision::nms does not exist
+uv pip install --reinstall-package torchvision torchvision   # -> torchvision 0.28.0 (now matches torch 2.13.0)
+python3 -c "import torchvision; print('torchvision import OK')"   # smoke-import verification
+
+# hit #2: vllm's OWN bundled flash-attention .so files were compiled against torch
+# 2.11.0's C++ ABI; they broke the same way once torch moved to 2.13.0.
+python3 -c "
+import torch
+torch.ops.load_library('$HOME/mpk-qwen35/venv-vllm/lib/python3.12/site-packages/vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so')
+"
+# -> OSError: undefined symbol: _ZNK2at10TensorBase14const_data_ptrIiLi0EEEPKT_v
+uv pip install --reinstall-package vllm vllm
+# -> uv resolves the WHOLE stack back down to vllm's natural pairing: torch 2.11.0,
+#    torchvision 0.26.0, triton 3.6.0, etc. (not always "forward to the newer shared dep" -
+#    sometimes the correct fix is "the newer package wants the older dependency back").
+python3 -c "
+import torch
+torch.ops.load_library('$HOME/mpk-qwen35/venv-vllm/lib/python3.12/site-packages/vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so')
+print('vllm flash-attn .so load OK')
+"   # smoke-import verification
+```
+
+Final venv-vllm state after both fixes: `vllm==0.25.1`, `transformers==5.14.1`,
+`accelerate==1.14.0`, `kernels==0.15.2`, `torch==2.11.0+cu130`,
+`torchvision==0.26.0+cu130` — this is the state that produced the step-8 vLLM smoke
+result below (torch differs from the `2.13.0` that step 7's HF reference used; see the
+Versions table above for why that's fine).
+
+### 6. ferret clone (small, read-only reference for M3+ kernel-opt tooling)
+
+```bash
+cd ~/mpk-qwen35
+git clone -b cc git@github.com:xinhaoc/ferret.git ferret
+```
+
+### 7. Checkpoint download (resume-capable, disk-headroom-checked)
+
+```bash
+export HF_HOME=~/mpk-qwen35/hf
+source ~/mpk-qwen35/venv-vllm/bin/activate
+df -h /raid                                              # headroom check BEFORE
+hf download Qwen/Qwen3.5-35B-A3B-FP8 \
+  --revision 9d1823d2dee688a6b25e77009dc727688c44936e    # ~37.5GB, 14 safetensors shards
+df -h /raid                                              # headroom check AFTER — keep >=10G free;
+                                                          # STOP and reassess if projected free
+                                                          # would drop below that
+```
+`hf download` resumes partial blob downloads natively — safe to re-run the identical
+command if interrupted. This run monitored `/raid` before/after every step above too
+(build, both venv installs); it went from 283G to 228G free over the whole rebuild+run,
+never approaching the 10G floor.
+
+## Exact commands run for the reference artifacts (steps 7–8 of the issue)
 
 ```bash
 # GPU etiquette: pick a GPU with ~0% util and <500MiB used, then pin it.
@@ -225,3 +390,15 @@ artifact idiosyncratic to `transformers`.
   (that needs the fixed workload/batch-size sweep with an otherwise-idle GPU, per M4).
 - Full raw log: `vllm_smoke/vllm_smoke_run.log`. Result JSON:
   `vllm_smoke/vllm_smoke_result.json`.
+
+## Regeneration / reproducibility check (provenance)
+
+| Run | Date | GPU | Script sha256 | Result |
+|---|---|---|---|---|
+| Original | 2026-07-25 03:14–03:17 EDT | `catalyst-B200` CUDA_VISIBLE_DEVICES=1 (4 MiB/0%) | `852d74cc...` (script has since been edited, see below) | Produced the first `reference_outputs.json` — but that script version predated the `TRANSFORMERS_DISABLE_DEEPGEMM_LINEAR` default + `transformers_disable_deepgemm_linear` meta field added afterward, leaving the committed artifact's schema stale relative to the script. |
+| **Regeneration** | **2026-07-25 04:06–04:09 EDT** | `catalyst-B200` `CUDA_VISIBLE_DEVICES=2` (4 MiB/0%) | **`852d74ccc6a294dd08d65bf4e60d95adc642ad18f7c8c2c20e2a609ca817f063`** — verified byte-identical to the committed `generate_reference.py` (sha256 checked on both the local repo copy and the B200 copy immediately before this run; the B200 copy had independently drifted by one dead-code line from an earlier sync and was re-synced first) | **Re-ran the exact current script**, same env (`venv-vllm`, `HF_HOME=~/mpk-qwen35/hf`, `TRANSFORMERS_DISABLE_DEEPGEMM_LINEAR=1`, `--revision 9d1823d2dee688a6b25e77009dc727688c44936e`), output to a scratch dir first. **Diffed all 10 prompts × 64 tokens against the existing committed artifact: 100% identical, input_ids and output_ids both, for every prompt.** Only then replaced `reference_outputs.json` and `generation_run.log` with this run's pair — now schema-synced (`transformers_disable_deepgemm_linear: "1"` present) and reproducibility-proven. See `gpu_etiquette_evidence.md` → "Step 7 regeneration" for the verbatim pre-run `nvidia-smi` rows + pinning. |
+
+Notable side detail: this regeneration ran under `torch==2.11.0+cu130` (the venv's current
+state after the step-8 vllm-flash-attn ABI fix), vs. the original's `torch==2.13.0+cu130` —
+i.e. the token-for-token match also held across two different torch/fp8-kernel-build
+combinations on this box, not just a literal re-run of identical binaries.
