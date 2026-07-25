@@ -1,0 +1,28 @@
+{
+  "batch_size": 8,
+  "rule": "bench-protocol.md \u00a76 two-boot merge",
+  "boots": [
+    {
+      "dir": "baselines/vllm-0.25.1-20260725/full",
+      "n": 3,
+      "decode_median": 1722.6574778123065,
+      "e2e_median": 4.9649979309760965
+    },
+    {
+      "dir": "baselines/vllm-0.25.1-20260725/full-hibs",
+      "n": 5,
+      "decode_median": 1687.503243207935,
+      "e2e_median": 4.9418178819760215
+    }
+  ],
+  "n_total": 8,
+  "decode_tokens_per_second_median": 1692.4669356762156,
+  "decode_merged_dispersion_pct": 3.0048433530965575,
+  "e2e_wall_seconds_median": 4.953407906476059,
+  "boot_median_agreement_pct": 2.061734767378017,
+  "binding_valid": true,
+  "bounds": {
+    "merged_dispersion_pct": 5.0,
+    "boot_median_agreement_pct": 3.0
+  }
+}

@@ -650,9 +650,83 @@ def collect_versions() -> dict:
     return versions
 
 
+# The BINDING contract (bench-protocol.md §3/§6): sweep runs must use exactly this shape
+# unless explicitly marked exploratory. Enforced in main(); exploratory artifacts self-label.
+BINDING_INPUT_LEN = 256
+BINDING_OUTPUT_LEN = 1024
+BINDING_BATCH_SIZES = {1, 2, 4, 8, 16}
+BINDING_MIN_REPS = 3
+BINDING_MIN_WARMUP = 1
+BINDING_MAX_DISPERSION_PCT = 5.0
+BINDING_BOOT_MEDIAN_AGREE_PCT = 3.0
+
+
+def merge_boots(args) -> None:
+    """protocol §6 escalation rule as tooling: merge reps of >=2 independent boots of one
+    batch size; binding iff merged dispersion <= 5% AND all boot medians agree within 3%."""
+    dirs = [Path(p).expanduser() for p in args.merge_inputs.split(",")]
+    bs = args.merge_batch_size
+    boots, reps = [], []
+    for d in dirs:
+        j = json.loads((d / f"bs{bs}.json").read_text())
+        r = [x["decode_tokens_per_second"] for x in j["reps"]]
+        e = [x["e2e_wall_seconds"] for x in j["reps"]]
+        boots.append({"dir": str(d), "n": len(r), "decode_median": statistics.median(r),
+                      "e2e_median": statistics.median(e)})
+        reps.append((r, e))
+    if len(boots) < 2:
+        sys.exit("merge: need >=2 boot dirs")
+    all_dec = [x for r, _ in reps for x in r]
+    all_e2e = [x for _, e in reps for x in e]
+    dec_med = statistics.median(all_dec)
+    e2e_med = statistics.median(all_e2e)
+    dec_disp = (max(all_dec) - min(all_dec)) / 2 / dec_med * 100
+    meds = [b["decode_median"] for b in boots]
+    agree = (max(meds) - min(meds)) / statistics.median(meds) * 100
+    valid = dec_disp <= BINDING_MAX_DISPERSION_PCT and agree <= BINDING_BOOT_MEDIAN_AGREE_PCT
+    out = {"batch_size": bs, "rule": "bench-protocol.md §6 two-boot merge",
+           "boots": boots, "n_total": len(all_dec),
+           "decode_tokens_per_second_median": dec_med,
+           "decode_merged_dispersion_pct": dec_disp,
+           "e2e_wall_seconds_median": e2e_med,
+           "boot_median_agreement_pct": agree,
+           "binding_valid": valid,
+           "bounds": {"merged_dispersion_pct": BINDING_MAX_DISPERSION_PCT,
+                      "boot_median_agreement_pct": BINDING_BOOT_MEDIAN_AGREE_PCT}}
+    dest = Path(args.output_dir).expanduser()
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / f"bs{bs}.merged.json").write_text(json.dumps(out, indent=2))
+    log(f"merge bs={bs}: median={dec_med:.1f} disp={dec_disp:.2f}% agree={agree:.2f}% "
+        f"binding_valid={valid}")
+    if not valid:
+        sys.exit(f"merge: NOT binding-valid (disp {dec_disp:.2f}% / agree {agree:.2f}%) — "
+                 f"escalate per protocol §6, do not re-roll")
+
+
+def enforce_binding_contract(args) -> None:
+    """Hard-fail sweep invocations that deviate from the pinned contract (unless
+    --exploratory, which self-labels the artifacts and makes them non-binding)."""
+    problems = []
+    if args.input_len != BINDING_INPUT_LEN or args.output_len != BINDING_OUTPUT_LEN:
+        problems.append(f"workload {args.input_len}/{args.output_len} != pinned "
+                        f"{BINDING_INPUT_LEN}/{BINDING_OUTPUT_LEN}")
+    bs_set = {int(b) for b in args.batch_sizes.split(",")}
+    if not bs_set <= BINDING_BATCH_SIZES:
+        problems.append(f"batch sizes {sorted(bs_set)} not a subset of {sorted(BINDING_BATCH_SIZES)}")
+    if args.reps < BINDING_MIN_REPS:
+        problems.append(f"reps {args.reps} < {BINDING_MIN_REPS}")
+    if args.warmup_reps < BINDING_MIN_WARMUP:
+        problems.append(f"warmup_reps {args.warmup_reps} < {BINDING_MIN_WARMUP}")
+    if args.max_dispersion_pct != BINDING_MAX_DISPERSION_PCT:
+        problems.append(f"max_dispersion_pct {args.max_dispersion_pct} != {BINDING_MAX_DISPERSION_PCT}")
+    if problems:
+        sys.exit("BINDING-CONTRACT VIOLATION (pass --exploratory for a self-labeled "
+                 "non-binding run): " + "; ".join(problems))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--mode", choices=["sweep", "ruling"], required=True)
+    ap.add_argument("--mode", choices=["sweep", "ruling", "merge"], required=True)
     ap.add_argument("--model-id", default=MODEL_ID_DEFAULT)
     ap.add_argument("--revision", default=REVISION_DEFAULT)
     ap.add_argument("--output-dir", required=True)
@@ -661,7 +735,8 @@ def main():
                           "to (required for log-based fp8 assertions to see subprocess lines).")
     ap.add_argument("--run-tag", default="vllm-run")
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.85)
-    ap.add_argument("--language-model-only", choices=["on", "off"], required=True)
+    ap.add_argument("--language-model-only", choices=["on", "off"], default=None,
+                     help="required for sweep/ruling (engine modes); unused by mode=merge")
     ap.add_argument("--sampling-seed", type=int, default=0)
     ap.add_argument("--prompt-seed-base", type=int, default=20260725)
 
@@ -685,13 +760,29 @@ def main():
     ap.add_argument("--ruling-batch-sizes", default="1,4")
     ap.add_argument("--ruling-output-len", type=int, default=64)
 
+    # binding-contract escape hatch + merge mode
+    ap.add_argument("--exploratory", action="store_true",
+                     help="permit non-pinned sweep params; artifacts self-label non-binding")
+    ap.add_argument("--merge-inputs", default=None,
+                     help="mode=merge: comma-separated run dirs (>=2 independent boots)")
+    ap.add_argument("--merge-batch-size", type=int, default=None, help="mode=merge: batch size")
+
     args = ap.parse_args()
     if args.max_model_len is None:
         args.max_model_len = args.input_len + args.output_len
 
     log(f"args: {vars(args)}")
 
-    if args.mode == "sweep":
+    if args.mode in ("sweep", "ruling") and args.language_model_only is None:
+        sys.exit("--language-model-only is required for engine modes (sweep/ruling)")
+    if args.mode == "merge":
+        if not args.merge_inputs or args.merge_batch_size is None:
+            sys.exit("mode=merge needs --merge-inputs dir1,dir2 and --merge-batch-size N")
+        merge_boots(args)
+    elif args.mode == "sweep":
+        if not args.exploratory:
+            enforce_binding_contract(args)
+        log(f"contract: binding={not args.exploratory}")
         run_sweep(args)
     else:
         run_ruling(args)
