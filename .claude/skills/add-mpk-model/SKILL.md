@@ -17,7 +17,24 @@ Before writing any model code, identify what the new model needs:
 
 ## Where Model Code Lives
 
-Model implementations live in `demo/<model_name>/`, NOT in `python/mirage/mpk/models/`. The `models/` directory holds only base infrastructure (`GraphBuilder`, `MirageModelConfig`, model registry).
+Model implementations live in **two places**, not just `demo/<model_name>/`:
+
+- **The registry path** — `python/mirage/mpk/models/<model_name>/builder.py`, a `GraphBuilder`
+  subclass (base class in `python/mirage/mpk/models/graph_builder.py`) decorated with
+  `@register_model_builder(...)` (`python/mirage/mpk/model_registry.py`). `MPK.build()` resolves
+  it by name via `get_builder(self.model_name)` (`python/mirage/mpk/mpk.py:458-467`) and calls
+  `build_from_model()`/`build_from_config()`. `models/qwen3/builder.py` and
+  `models/deepseek_v3/builder.py` both do this today — `models/` also holds `eagle3/` and
+  `dflash/` builder classes, but check each for an actual `@register_model_builder(...)` call
+  before assuming `MPK.build()` can reach it by name; not every class under `models/` is
+  registered yet.
+- **The inline demo path** — `demo/<model_name>/demo.py` builds a `PersistentKernel` directly and
+  never calls `MPK`/`get_builder`. This is the path CI actually exercises (e.g.
+  `demo/qwen3/demo.py`, driven by `tests/ci-tests/run_batch_perf.py`); the registry builder for
+  the same model isn't covered by CI.
+
+`python/mirage/mpk/models/graph_builder.py` still supplies the shared `GraphBuilder`/
+`MirageModelConfig` base that registry builders subclass.
 
 ```
 demo/<model_name>/
@@ -29,8 +46,10 @@ demo/<model_name>/
 ```
 
 **Reference implementations:**
-- `demo/qwen3/` — Canonical dense transformer model
-- `demo/deepseek_v3/` — MoE model (DeepSeek V3 with MLA + MoE)
+- `demo/qwen3/` — Canonical dense transformer model (inline path)
+- `demo/deepseek_v3/` — MoE model (DeepSeek V3 with MLA + MoE) (inline path)
+- `python/mirage/mpk/models/qwen3/builder.py`, `models/deepseek_v3/builder.py` — the same two
+  models wired through the registry path
 
 ## How to Build the Demo
 

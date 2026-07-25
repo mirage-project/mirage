@@ -7,7 +7,7 @@ You are helping the user add a new task to the MPK (Mirage Persistent Kernel) ru
 
 ## Task Lifecycle Overview
 
-A task flows through 7 files across 4 layers:
+A task flows through 9 files across 4 layers:
 
 ```
 Python (user API)
@@ -19,7 +19,7 @@ Python (user API)
           → persistent_kernel.cuh (runtime scheduler)
 ```
 
-## Step-by-Step: 7 Files to Touch
+## Step-by-Step: 9 Files to Touch
 
 ---
 
@@ -223,6 +223,40 @@ You could reference /mpk-internals skill to futher understand how this works.
 
 ---
 
+### Step 8 — `src/kernel/runtime.cc`
+
+Register the new `TaskType` in the `task_type_to_name` map built inside
+`Graph::generate_task_graph()` (currently `runtime.cc:1756-1868`):
+
+```cpp
+task_type_to_name[TASK_MY_OP] = "TASK_MY_OP";
+```
+
+This is not optional bookkeeping. The generated `_execute_task()` dispatcher's codegen loop hits
+`assert(task_type_to_name.find(task.first) != task_type_to_name.end());` (`runtime.cc:1878`) for
+every registered task variant — a missing entry aborts codegen, not just for your task.
+
+---
+
+### Step 9 — `include/mirage/persistent_kernel/tma.cuh` (only if your id is in the TMA window)
+
+Ids in the open interval `(TASK_SM100_TMA_START_TASK, TASK_SM100_TMA_END_TASK)` — i.e. 232–255
+(`runtime_header.h:128,140`) — get a TMA descriptor built unconditionally at init:
+`create_tma_desc_by_task(task_desc)` is called whenever `task_type` falls in that window
+(`runtime.cc:1170-1172`). That function is one big `switch` on `task_type`, ending in
+`default: assert(false);` (`tma.cuh:1629-1630`) — an in-window `TaskType` with no case aborts at
+init even if the task itself has nothing to do with TMA.
+
+Add a `case` for your new `TaskType`:
+- **Task uses TMA loads:** call `create_tma_desc_for_tensor()` for each TMA-eligible
+  input/output, following an existing multi-tensor case (e.g. `TASK_MLA_PREFILL_TP8_SM100`).
+- **Task doesn't use TMA:** add the case with a bare `break;` (e.g.
+  `TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100`).
+
+Only one free `TaskType` id (279) sits outside this window; every other free id needs this step.
+
+---
+
 ## Critical Constraints
 
 ### block_dim Must Match WORKER_NUM_THREADS
@@ -276,8 +310,8 @@ For each kernel, there should be a dedicated folder in `tests/runtime_python/{ar
 
 Adding a **standard unit test** for a new task requires **three parts** for verification and benchmarking:
 1. **Kernel correctness** (Steps A–C) — Test the CUDA kernel directly via a pybind11 wrapper
-2. **Pipeline correctness** (Step 8) — Test the full Python API → code generation → runtime path via test mode
-3. **Performance benchmark** (Step 9) — Measure latency/throughput across representative shapes
+2. **Pipeline correctness** (Step 10) — Test the full Python API → code generation → runtime path via test mode
+3. **Performance benchmark** (Step 11) — Measure latency/throughput across representative shapes
 
 ### Step A — Add kernel wrapper to `runtime_kernel_wrapper.cu`
 
@@ -374,17 +408,17 @@ A ratio close to 1.0 everywhere (or max abs error within bfloat16 rounding, ~1e-
 
 ---
 
-### Step 8 — Runtime Test with `test_mode`
+### Step 10 — Runtime Test with `test_mode`
 
 After verifying the kernel in isolation (Steps A–C), test it through the full MPK compilation pipeline using test mode. This validates the Python layer method (Step 7), task registration (Steps 5–6), code generation, and runtime dispatch end-to-end.
 
-Per-layer test_mode files live in the same folder as the kernel-wrapper test, at `tests/runtime_python/<arch>/sm100_<layer>/test_<layer>_testmode.py`. Each folder must also contain a `pytorch_reference.py` with the canonical PyTorch reference implementations — both the kernel-wrapper test (Step C) and the test_mode test import from it via `from pytorch_reference import <fn>`. This keeps the two tests aligned on a single source. If `pytorch_reference.py` does not yet exist for the layer, create it (extracting any inline ref from the kernel-wrapper test, then refactoring that test to use the import).
+Per-layer test_mode files live in the same folder as the kernel-wrapper test, at `tests/runtime_python/<arch>/sm100_<layer>/test_<layer>_testmode.py`. There is no shared `pytorch_reference.py` anywhere in the repo (`find tests -name pytorch_reference.py` returns nothing) — each test file defines its own PyTorch reference inline instead, either a small helper function or plain torch ops in the test body. Where a kernel-wrapper test and a test_mode test cover the same layer, each currently keeps its own independent copy rather than sharing one: see `tests/runtime_python/blackwell/sm100_moe_sigmoid/test_gate_topk_sigmoid.py` and its sibling `test_topk_sigmoid_testmode.py`, which both define their own `reference_sigmoid_routing()`. Follow that pattern for a new layer — write the reference inline (copy it from the sibling kernel-wrapper test if one already exists) — rather than creating a `pytorch_reference.py`.
 
 Multi-layer pipeline tests that don't correspond to a single layer (e.g., a fused MLP combining several layers) live in `tests/runtime_python/test_mode/`. See the `/test-mode` skill for the complete API guide, examples, and debugging tips.
 
 ---
 
-### Step 9 — Performance Benchmark
+### Step 11 — Performance Benchmark
 
 Create a benchmark alongside the kernel wrapper test at `tests/runtime_python/blackwell/<task>/bench_<task>.py`. It should:
 

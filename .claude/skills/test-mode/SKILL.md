@@ -23,11 +23,11 @@ The reference should:
 
 Use `torch.testing.assert_close(out, ref, atol=..., rtol=...)` and/or print `(out - ref).abs().max()` so failures surface immediately rather than silently producing wrong numbers.
 
-### Where the reference lives: `pytorch_reference.py`
+### Where the reference lives: inline, per test file
 
-Per-layer test_mode files **must import their PyTorch reference from `pytorch_reference.py` in the same folder**, not redefine it inline. The folder layout is `tests/runtime_python/<arch>/sm100_<layer>/`, with one `pytorch_reference.py` per folder containing one function per in-scope layer. Both the new test_mode test (`test_<layer>_testmode.py`) and the existing kernel-wrapper test (`test_<layer>.py`) import from the same file, so they stay aligned on a single canonical reference.
+There is no shared `pytorch_reference.py` anywhere in the repo today (`find tests -name pytorch_reference.py` returns nothing), and no test imports a reference from one. The actual convention: each test file defines its own PyTorch reference inline — either a small helper function in the same file (e.g. `torch_rmsnorm()` in `tests/runtime_python/test_mode/test_rmsnorm_testmode.py`) or ops written directly in the test body (e.g. `tests/runtime_python/test_mode/test_moe_w13_linear_testmode.py`). Where a kernel-wrapper test and a test_mode test cover the same layer, each currently keeps its own independent copy rather than sharing one — `tests/runtime_python/blackwell/sm100_moe_sigmoid/test_gate_topk_sigmoid.py` and its sibling `test_topk_sigmoid_testmode.py` each define their own `reference_sigmoid_routing()`.
 
-If `pytorch_reference.py` does not yet exist for the layer, create it. If a kernel-wrapper test already exists with an inline reference, extract that reference into `pytorch_reference.py` and refactor the kernel-wrapper test to import from it.
+Follow this for new tests: write the PyTorch reference inline in your `test_<layer>_testmode.py` (copy it from the sibling kernel-wrapper test if one already exists with the same math). Don't create a `pytorch_reference.py` — it isn't how the suite actually works today.
 
 ## Quick Start
 
@@ -248,10 +248,10 @@ torch.cuda.synchronize()
 ```bash
 LD_PRELOAD=$NVSHMEM_HOME/lib/libnvshmem_host.so \
 mpirun --np 2 -x LD_PRELOAD -x LD_LIBRARY_PATH -x NVSHMEM_HOME \
-    python tests/runtime_python/test_mode/test_multigpu_rmsnorm_testmode.py
+    python tests/runtime_python/test_mode/test_<your_layer>_testmode.py
 ```
 
-The `LD_PRELOAD` is required so `dlopen()`-loaded launcher modules resolve `nvshmem_selected_device_transport` and other NVSHMEM-versioned symbols. This is an existing NVSHMEM 3.x quirk, unrelated to test mode.
+The `LD_PRELOAD` is required so `dlopen()`-loaded launcher modules resolve `nvshmem_selected_device_transport` and other NVSHMEM-versioned symbols. This is an existing NVSHMEM 3.x quirk, unrelated to test mode. (No multi-GPU test_mode example ships in the repo today — substitute your own script's path; the launch shape above is what matters.)
 
 ## Profiling
 
@@ -338,7 +338,7 @@ For finer-grained analysis (per-worker breakdown, percentiles, outliers), `panda
 - The MPK runtime assumes occupying the entire GPU. If other processes are running, they can interfere with scheduling and cause hangs. Always check GPU availability before running. And if it hangs, kill and rerun on other idle GPUs.
 
 **Verifying that `prepare_next_batch` actually ran:**
-- After `pk()` returns, read back `pk.meta_tensors["step"][0]`. It should equal `prompt_lengths[0]` — `prepare_next_batch`'s Step 1.1 advances `step` by `num_tokens` on the second call. See `test_prepare_next_batch_testmode.py` for the canonical assertion.
+- After `pk()` returns, read back `pk.meta_tensors["step"][0]`. It should equal `prompt_lengths[0]` — `prepare_next_batch`'s Step 1.1 advances `step` by `num_tokens` on the second call. There's no dedicated example test for this (`test_prepare_next_batch_testmode.py` does not exist in the repo) — assert it directly, e.g. `assert pk.meta_tensors["step"][0].item() == prompt_lengths[0]`.
 
 ## Example Test Files
 
