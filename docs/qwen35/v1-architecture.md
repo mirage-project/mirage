@@ -26,12 +26,15 @@ single B200, batch 1..16) on MPK, and the M2 issue decomposition that implements
    `mamba_ssm_dtype`), lifecycle handled kernel-side via `step == 0` predication — no
    `prepare_next_batch` changes (§3).
 3. **Prefill = chunked in-kernel**, the same task family as decode, runtime `Q_LEN` per the
-   proven MLA pattern [MG §3.2 Option 1]. AC-5 is reachable with the recommended workload
-   (I=64, O≥256): prefill adds ≤ 25 % decode-equivalent iterations, so AC-4 ⟹ AC-5 (§8).
+   proven MLA pattern [MG §3.2 Option 1]. Corrected per-batch-size cost model (§8): workload
+   constraint `I ≤ O/4` (binding at B=16, mbt=16); the pinned (256, 1024) sits exactly on that
+   boundary and holds conditional on `t_pf(16-tok iter) ≤ t_dec(16-req step)` — a falsifiable
+   prediction probe P8 tests early-M2 on the shipped Qwen3-8B path.
 4. **FP8 ruling:** MPK's dense UE8M0 requantization path is **rejected for this model**
    (two-engine evidence). v1/M2 runs **dense projections in bf16** (dequantized at load,
    probe-gated); routed experts stay **fp8 with preserved block scales**. M3 restores fp8 dense
-   via a fp32-scale block GEMM — the semantics class vLLM proved token-exact (§6).
+   via a fp32-scale block GEMM — the semantics class both reference engines themselves run;
+   its full-set token-exactness is a hypothesis the M2 harness and probe P10 test (§6).
 5. **Attention:** cherry-pick `5715c6f`; `[q|gate]` sliced in-kernel + σ-gate epilogue (zero new
    inputs, 7-input limit respected); `MAX_TOKENS` decoupled from mbt at the one sm100
    registration site with an in-kernel Q-loop (4 queries/pass) so one build serves decode bs 16
@@ -276,8 +279,8 @@ Qwen3-8B codegen; precedent: the `Q_LEN_OVERRIDE`/`TAIL_OFFSET` optional params
 
 - decode at any mbt: Q_LEN = 1, one pass — smem is the MAX_TOKENS=4 instantiation (196 KiB,
   fits) regardless of mbt ⇒ **bs 16 works with one build**;
-- prefill chunks up to mbt tokens: ≤ 4 passes at mbt=16; KV tiles re-stream per pass — at
-  prefill positions ≤ 64 that is KiB-scale, irrelevant (§8);
+- prefill chunks up to mbt tokens: ≤ 4 passes at mbt=16; KV tiles re-stream per pass — ≈ 20 MB
+  at the pinned workload's deepest prefill chunk, irrelevant (§8.2);
 - no second task type, no dual-dispatch [MG §3.2 Option 2 held in reserve].
 
 Probe P3 re-validates the smem table by standalone `nvcc -arch=sm_100a` instantiation before
@@ -303,8 +306,9 @@ partial NeoX RoPE with θ=1e7 [VG §2.2.3] — MPK implements exactly that, on t
 FlashInfer HND view MPK's kernel already uses; head_size 256 is supported [VG §4.2]. KV is
 **bf16 on both sides** — the checkpoint ships no k/v scales and vLLM's cache resolves to bf16
 [VG §3.2, §3.7.5 item 7]; an fp8 KV cache would be a different precision contract (and MPK has
-none anyway [MG §2.4]). Sizing: 2 KiB per token per layer [VG §2.2.5]; at max_seq 512, bs 16:
-160 MiB — noise.
+none anyway [MG §2.4]). Sizing: 2 KiB per token per layer [VG §2.2.5]; at the pinned
+workload's max_seq (256+1024+template ≈ 1536), bs 16: 480 MiB resident; late-decode KV read
+≈ 26 MB/request/step (< 2 % of B=16 step bytes — §9.2 note).
 
 ---
 
@@ -388,11 +392,16 @@ all 640 positions): pass ⇒ GO; fail at wide margins ⇒ v1 jumps directly to t
 **M3 restores fp8 dense with fp32 block scales** (CUTLASS/DeepGEMM-promotion style: fp8 MMA,
 fp32 accumulation, per-128-k-tile `a_scale·b_scale` application — the semantics class of
 vLLM's `CutlassFp8BlockScaledMMKernel` [VG §3.5] and HF's Triton `finegrained-fp8` [REF]).
-That class is *empirically token-exact* against the HF reference (vLLM 64/64 on p01 [REF]), so
-an MPK implementation failing AC-3 there indicates an MPK bug, not a dead end — which is what
-makes it safe to defer. Deferral also parks it where the M2 harness's margin data (§12) can
-quantify headroom before the switch. The end state satisfies the goal's fp8-both-sides framing
-[GOAL]; the M2 bf16 staging is surfaced for user batch review (§13.4).
+Evidence for that class, stated at its actual strength: the one direct datapoint — vLLM
+(CUTLASS fp32-scale dense + FlashInfer fp8 MoE) matching HF **64/64 on p01 only** [REF] —
+supports that specific configuration on that prompt. "The fp32-scale class is token-exact over
+the full 640-position set" is a **hypothesis, not a result**; its tests are the M2 harness's
+margin data accumulating on every run (§12) and probe P10's CUTLASS-vs-HF-Triton comparison on
+real checkpoint weights (§14), both of which land before M3 commits kernel work. What the
+datapoint does license: an M3 fp32-scale implementation that diverges *grossly* from the
+reference indicates an MPK bug rather than an intrinsically dead numeric class — which is what
+makes deferral safe. The end state satisfies the goal's fp8-both-sides framing [GOAL]; the M2
+bf16 staging is surfaced for user batch review (§13.4).
 
 Precision boundary stays MPK's existing contract: fp8 inside GEMMs, bf16 between ops, GDN and
 attention on the bf16 side [MG §2.4].
@@ -410,7 +419,18 @@ lm_head traffic is compulsory on both engines.
 
 ---
 
-## 8. Prefill strategy and the AC-5 argument
+## 8. Prefill strategy and the AC-5 feasibility model
+
+> **REVISION (review cycle 1).** The previous version's "AC-4 ⟹ AC-5" derivation was invalid:
+> it priced every prefill iteration at one B=16-decode-equivalent step and then substituted the
+> *same-batch* decode time `t_mpk(B)` — unsupported at B < 16, where a 16-token prefill chunk
+> and a B-token decode step have different byte/compute profiles. Replaced by the
+> per-batch-size accounting in §8.2 plus a falsifiable prediction tested by probe P8 (§14).
+> **Coordinator outcome: the workload boundary is UNCHANGED — `I ≤ O/4` at mbt=16, binding at
+> B=16 — so the provisionally pinned (input 256 / output 1024) remains admissible; note it sits
+> exactly ON the boundary.** Its AC-5 margin then rests on AC-4's strict decode win plus vLLM's
+> nonzero prefill time (tolerance quantified in §8.2). Re-coordinate the pin only if P8
+> falsifies the iteration-cost prediction or the B=16 decode win comes in under ~25 %.
 
 ### 8.1 Mechanism: chunked in-kernel, one task family
 
@@ -429,40 +449,71 @@ chunk** instead of per token; attention = Q-loop in ≤4-query passes (§4.3). O
 (dual-dispatched separate prefill kernel, the MLA precedent) stays in reserve if the unified
 kernel's tiling turns out badly for Q_LEN ≫ 1 [MG §3.2].
 
-### 8.2 AC-5 cost estimate
+### 8.2 Per-batch-size cost model and the CORRECTED CONSTRAINT
 
-AC-5: MPK e2e (prefill+decode) ≤ 1.25× vLLM's at every batch size, same workload [GOAL].
-Workload bounds: input ≥ 64, output ≥ 256, coordinator's pick [CONSTR §2a]. **Recommended:
-I=64, O=256** (or larger O).
+AC-5: `N_pf·t_pf + O·t_dec(B) ≤ 1.25·(P_v(B) + O·t_v(B))` at every B, same workload [GOAL].
+Two distinct iteration types must be priced separately (this is what the previous version got
+wrong):
 
-Prefill iterations = `⌈B·I / mbt⌉` (each graph iteration advances ≤ mbt prompt tokens,
-regardless of how they distribute over requests [MG §3.1]). Each prefill iteration costs at
-most one B=16-decode-equivalent step: identical dense-weight streaming, expert traffic for
-≤ mbt tokens (≤ the decode-B=16 worst case), GDN state one read+write per *active* request
-(≤ decode's B×). With mbt=16:
+- **decode step at batch B** — `bytes_dec(B) = 3.88 (dense, a per-iteration constant) +
+  0.126·min(256, 8B) (worst-case distinct experts) + 0.129·B (GDN state)` GB — the §9.2 table;
+- **prefill iteration** (chunk of C ≤ mbt = 16 prompt tokens across ≥ 1 requests) —
+  `bytes_pf ≤ 3.88 + 0.126·min(256, 8C) + 0.129·(requests advancing) ≤ bytes_dec(16) =
+  22.05 GB`. Non-byte adders at the pinned I=256: attention Q-loop KV re-streams ≤ 4× ≈ 20 MB
+  at the deepest chunk (noise); GDN sequential chunk compute ≲ 0.5 ms worst case across 30
+  layers (§3.2 sizing) — real, and folded into probe P8's threshold below.
 
-| B | prefill iters (I=64) | decode iters (O=256) | prefill overhead |
-|---|---|---|---|
-| 1 | 4 | 256 | 1.6 % |
-| 4 | 16 | 256 | 6.3 % |
-| 16 | 64 | 256 | 25 % |
+Iterations to serve (I, O) at batch B: `N_pf = ⌈B·I/16⌉` prefill + `O` decode [MG §3.1];
+request stagger (mixed prefill+decode iterations) only lowers the total — dense streams once
+per iteration either way.
 
-So `MPK_e2e ≤ (0.25·O + O)·t_mpk = 1.25·O·t_mpk` at the worst point (B=16), while
-`vLLM_e2e = P_vllm + O·t_vllm` with `P_vllm > 0`. AC-4 forces `t_mpk < t_vllm` strictly ⇒
-`MPK_e2e < 1.25·O·t_vllm < 1.25·vLLM_e2e`. **AC-4 ⟹ AC-5 under this workload**, with margin =
-vLLM's own prefill time plus MPK's decode advantage; the per-iteration bound above is itself
-conservative (early prefill iterations touch fewer experts and less state).
+**Sufficient condition.** Dropping `P_v ≥ 0` and using AC-4's strict `t_dec(B) < t_v(B)`,
+AC-5 follows from
 
-**Constraint this places on the workload choice** (binding, record it): AC-5 headroom requires
-`B·I/mbt ≲ O/4` at B=16, i.e. `I ≲ O/4` at mbt=16. (64, 256) meets it with equality; a
-longer-input workload must either raise O proportionally or raise mbt — a 64-token chunk build
-(mbt=64) works mechanically (attention Q-loop scales to 16 passes; the GDN chunk loop and GEMM
-row masking scale trivially) and cuts prefill iterations 4×, at the cost of dead-row overhead
-in decode. Not needed for the recommended workload.
+```
+N_pf · t_pf  ≤  0.25 · O · t_dec(B)                      (*)
+```
 
-GDN chunk compute is far from critical at I=64 (per task: ≤16 tokens × ~150 KFLOP against a
-64 KiB state resident in smem); if a future workload has I ≫ 64, the chunk-parallel matmul
-formulation of the delta rule is the M3+ lever — not v1 scope.
+Modeling `t_pf / t_dec(B)` by the byte ratio (equal achieved bandwidth on both iteration
+types — conservative for prefill, whose 16-token GEMM tiles run no worse than 1-token decode):
+
+| B | bytes_dec(B) | t_pf/t_dec (byte ratio) | N_pf | (*) as an I/O bound |
+|---|---|---|---|---|
+| 1 | 5.02 GB | 4.39 | I/16 | I ≤ 0.91·O |
+| 2 | 6.15 | 3.59 | I/8 | I ≤ 0.56·O |
+| 4 | 8.43 | 2.62 | I/4 | I ≤ 0.38·O |
+| 8 | 12.96 | 1.70 | I/2 | I ≤ 0.29·O |
+| **16** | **22.05** | **1.00** | **I** | **I ≤ 0.25·O — binding** |
+
+In the opposite (fixed-overhead-dominated) limit `t_pf ≈ t_dec(B)` for every B and (*) reduces
+to `B·I/16 ≤ O/4` — binding again only at B=16. The general claim covering both limits:
+per-token iteration cost is monotone non-increasing in tokens/iteration (dense bytes and
+per-iteration overhead amortize; worst-case expert and state bytes per token never grow), so
+`t_pf(16)/16 ≤ t_dec(B)/B` and the B=16 bound dominates.
+
+**CORRECTED CONSTRAINT: `I ≤ O/4` at mbt=16, binding at B=16 — the same boundary as the
+invalid derivation, now conditional on one explicit, unmeasured assumption:
+`t_pf(16-token prefill iteration) ≤ t_dec(16-request decode step)`.** This cannot be proven
+pre-measurement; it is a falsifiable prediction — justified by the byte-subset + amortization
++ equal-overhead arguments above — and probe P8 (§14) tests it on the shipped Qwen3-8B
+MODE_OFFLINE path early in M2 (re-run on the Qwen3.5 graph once it stands). Prediction:
+prefill-iteration wall time within **1.5×** of the same-config decode iteration (the headroom
+covers the GDN-chunk compute adder Qwen3-8B cannot exercise).
+
+**The pinned workload (I=256, O=1024)** [coordinator, with I6]: I/O = 0.25 ⇒ meets (*) with
+equality at B=16 (N_pf = 256 vs O = 1024) and strict slack at B ≤ 8 (table) — **the corrected
+model does not move the boundary; the pin stands, at the boundary.** Equality at (*) still
+yields strict AC-5 margin: `MPK_e2e = 1.25·O·t_dec(16) < 1.25·O·t_v(16) ≤ 1.25·vLLM_e2e` by
+AC-4. Failure tolerance at this pin: AC-5 survives `t_pf ≤ k·t_dec(16)` for
+`k ≤ 5·(t_v/t_dec) − 4` (before crediting vLLM's own prefill time) — a 25 % decode win
+tolerates k ≤ 2.25, a 2× win tolerates k ≤ 6. The pin is threatened only if BOTH the B=16
+decode win is thin (< ~25 %) AND P8 lands near its 1.5–2× falsification band; either signal
+re-opens the workload choice — larger O, or an mbt=64 build (attention Q-loop scales to 16
+passes; GDN chunk loop and GEMM row masking scale trivially), which cuts N_pf 4× and relaxes
+the bound to I ≤ O at B=16, at the cost of decode dead-row overhead.
+
+If a future workload pushes I ≫ 256, the chunk-parallel matmul formulation of the delta rule
+is the M3+ lever — not v1 scope.
 
 ---
 
@@ -483,7 +534,8 @@ gather its tokens), which the existing mask/indices-driven grouped GEMM already 
 
 Dense (non-expert) weights: **2.47 GB/step fp8-target / 3.88 GB v1-bf16** (§6.2). Experts fp8:
 1.01→16.11 GB for B=1→16. GDN state: B × 128.8 MB (fp32 S read+write + conv) [VG §5.4, §4.7].
-KV read/write ≤ 7 MB/request at the 320-token workload — noise [VG §2.2.5].
+KV read grows with position: ≈ 26 MB/request/step at the pinned workload's final positions
+(~1300) → ≤ 0.42 GB/step at B=16 (< 2 %, not tabulated) [VG §2.2.5].
 
 | B | experts | GDN state | **v1 total** | M3 total (fp8 dense) | v1 floor @ 8 TB/s | v1 floor agg tok/s |
 |---|---|---|---|---|---|---|
@@ -495,7 +547,7 @@ KV read/write ≤ 7 MB/request at the 320-token workload — noise [VG §2.2.5].
 
 (8 TB/s = nominal B200 HBM3e; floors scale linearly with the true sustained figure.) Resident:
 33.26 GiB fp8-target weights [VG §5.4] + 1.41 GB v1 bf16-dense delta + 0.96 GiB GDN pools +
-0.16 GiB KV ≈ **36 GiB** — no memory pressure on a B200.
+0.47 GiB KV ≈ **36 GiB** — no memory pressure on a B200.
 
 ### 9.3 Feasibility vs the vLLM datapoint — stated honestly
 
@@ -634,7 +686,7 @@ owning issue writes first; all GPU probes run on `catalyst-B200` under the GPU-e
 | id | scope (one line) | SOP (dev skill) | depends on |
 |---|---|---|---|
 | **M2-I1** | AC-3 harness per §12: gate + per-position margin instrumentation + MPK top-16 logit dump + argmax-tie unit check | `test-mode` (reference discipline; §12) | — |
-| **M2-I2** | FP8 execution validation: probes P1, P2, P7; final dense GO/NO-GO per §6.2 decision tree; wire fp32-scale `quantize_fp8` for MoE activations | `test-mode` + `add-mpk-task` Step 9 (benches) | — |
+| **M2-I2** | FP8 execution validation: probes P1, P2, P7, P10 (M3 fp8-dense numerics + perf bar); final dense GO/NO-GO per §6.2 decision tree; wire fp32-scale `quantize_fp8` for MoE activations | `test-mode` + `add-mpk-task` Step 9 (benches) | — |
 | **M2-I3** | HF oracle `ref_dump.py`: per-op tensor dumps for one GDN layer, one full-attn layer, one MoE block (probe P6) | `test-mode` (`pytorch_reference.py` convention) | — |
 | **M2-I4** | `gdn_conv1d_sm100` (id 234): kernel + conv-state pool + `step==0` init + unit/test-mode tests vs oracle | `add-mpk-task` (9-file recipe, §10) | M2-I3 |
 | **M2-I5** | `gdn_recurrent_sm100` (id 237): fused delta rule + gated norm per §3.2; per-(head,slot) grid; chunked Q_LEN loop; unit/test-mode tests vs oracle | `add-mpk-task` (9-file) | M2-I3 (∥ M2-I4) |
@@ -643,6 +695,7 @@ owning issue writes first; all GPU probes run on `catalyst-B200` under the GPU-e
 | **M2-I8** | Qwen3.5 registry builder + weight loader: §2.0 transforms, config plumbing, `mbr ≤ mbt` + page-capacity asserts [MG §8 risk 5], vocab §7 | `add-mpk-model` (registry path) + `mpk-internals` | I4–I7 interfaces |
 | **M2-I9** | End-to-end bring-up: full 40-layer graph, per-layer test-mode vs oracle, AC-3 run via M2-I1 to 640/640 (or adjudicated tie-flips) | `test-mode` + systematic-debugging | all above |
 | **M2-I10** | Dev-skill maintenance commits: `add-mpk-task` 7→9-file recipe (+`tma.cuh` case, `runtime.cc`), `pytorch_reference.py` convention, `add-mpk-model` registry-path staleness [MG §9] | constraint.md §2b (skill-maintenance rule) | — |
+| **M2-I11** | Early runtime measurements on the shipped Qwen3-8B path (no Qwen3.5 code needed): prefill-iteration cost (P8, tests §8.2's load-bearing assumption) + scheduler-knee attribution (P9) | MPK profiler + `test-mode` | — (P9's labeled trace wants M2-I10's profiler-map fix; raw task-type ids work meanwhile) |
 
 ### Probes
 
@@ -742,9 +795,66 @@ quantifies the §6.2 rejection with data on our own weights. Exactly-zero deltas
 re-admit the existing dense path (not expected; would mean the checkpoint's scales were all
 powers of two, contradicting [MG §2.2.1]).
 
+**P8 — prefill-iteration cost vs decode-iteration cost (tests §8.2's one load-bearing
+assumption; runnable today, no Qwen3.5 code). Owner M2-I11.**
+```bash
+ssh catalyst-B200 'cd ~/mpk-qwen35/mirage && \
+  python ~/mpk-qwen35/probes/p8_prefill_iter_cost.py --model Qwen/Qwen3-8B --mbt 8 \
+    --input-len 32 --input-len 512 --output-len 128 --ignore-eos'
+# ≤60-line adaptation of tests/ci-tests/run_batch_perf.py (already measures ms/token with
+# --ignore-eos on the Qwen3-8B MODE_OFFLINE path [MG §6.1]): pad the prompt to each
+# --input-len; [T(512,128) − T(32,128)] / ((512−32)/mbt) = wall time per extra prefill
+# iteration at chunk = mbt; decode ms/token from the same run is t_dec at that config.
+```
+Expected: prefill-iteration time within **1.5×** of the same-config decode iteration ⇒ the
+§8.2 assumption `t_pf ≤ t_dec` holds on the real runtime (this validates the *iteration
+mechanics* — chunked prefill through the static graph has no hidden per-iteration penalty;
+the Qwen3.5-specific bytes are §8.2's model, re-tested by re-running P8 on the Qwen3.5 graph
+once M2-I9 stands). **> 2×** ⇒ §8.2's model is falsified for this runtime: escalate — the
+Option-2 dual-dispatch prefill kernel and/or an mbt=64 build enter M2 scope, and the
+(256, 1024) workload pin is re-coordinated (§8.2).
+
+**P9 — batch-8/16 scheduler-knee attribution (runnable today). Owner M2-I11.**
+```bash
+ssh catalyst-B200 'cd ~/mpk-qwen35/mirage && for r in 1 2 4 8; do \
+  python tests/ci-tests/run_batch_perf.py --max-num-batched-requests $r --ignore-eos; done'
+# step 1 reproduces the recorded knee (4.40/4.41/4.44/7.49 ms/token at r=1/2/4/8, commit
+# 92603ca [MG §8 risk 4]); step 2 re-runs r ∈ {4, 8} with params["profiler_tensor"] set and
+# reads, from the CSV trace, the per-iteration gap between the last task of iteration N and
+# the first task of N+1 (= prepare_next_batch + dispatch wall time) vs summed task execution
+# time. (Read raw task-type ids until M2-I10 fixes the stale profiler_persistent.py map
+# [MG §4].)
+```
+Expected: knee reproduces AND the inter-iteration gap grows by ≈ the ms/token jump (~+3.0 ms)
+from r=4 → r=8 while summed task time stays ≈ flat ⇒ **knee = serial `prepare_next_batch`** —
+confirms §3.3's keep-lifecycle-out ruling and makes scheduler-section work the top M3 item.
+Gap flat + task time grows ⇒ knee is task-side (occupancy/attention tiling) ⇒ M3 effort
+redirects to kernels; §3.3 still stands on blast-radius grounds alone.
+
+**P10 — fp32-scale dense fp8 GEMM: numerics + perf bar that greenlights the M3 restoration.
+Owner M2-I2.**
+```bash
+ssh catalyst-B200 'source ~/mpk-qwen35/venv-vllm/bin/activate && \
+  python ~/mpk-qwen35/probes/p10_fp8_dense_bar.py \
+    --shapes 12288x2048,9216x2048,2048x4096 --batch 1,4,16'
+# vLLM 0.25.1's own CUTLASS block-scaled kernel (ops.cutlass_scaled_mm — the exact kernel the
+# AC-4 baseline runs [VG §3.5]) on REAL layer-0 checkpoint weights + scales:
+# (i) numerics vs the HF kernels-hub Triton finegrained-fp8 linear on identical inputs;
+# (ii) latency vs a bf16 torch.matmul at the same shapes (proxy for MPK's bf16 linear task).
+```
+Expected: **(i)** CUTLASS-vs-HF-Triton max rel diff at fp32-accumulation-reorder scale
+(~1e-3, no systematic bias) ⇒ two independent implementations of the fp32-scale semantics
+agree on our weights — the M3 target semantics is well-defined and MPK's implementation has
+two oracles; **(ii)** fp8 ≥ **1.5×** faster than bf16 at B ≤ 16 ⇒ the +1.41 GB/step reclaim
+is real ⇒ **M3 GO** for adapting `linear_fp8_sm100.cuh` to promotion-style fp32-scale
+accumulation. (i) fails ⇒ the §6.2 M3 plan needs a numerics redesign review before any kernel
+work; (ii) < 1.2× ⇒ the restoration is perf-marginal — re-rank it among M3 levers (the goal's
+fp8-execution framing still forces it eventually; its priority, not its existence, changes).
+
 ### Dependency order
 
-`I1, I2, I3, I10` start immediately in parallel → `I4, I5` (need the I3 oracle), `I6` (starts
-with its own P3/P4), `I7` (needs I2's P2; starts with its own P5) → `I8` (interfaces) → `I9`
-(integration + the AC-3 gate). The critical path is `I3 → I5 → I8 → I9` — the recurrence task
-is the project's critical path overall [MG §8 risk 1]; everything else is parallel to it.
+`I1, I2, I3, I10, I11` start immediately in parallel → `I4, I5` (need the I3 oracle), `I6`
+(starts with its own P3/P4), `I7` (needs I2's P2; starts with its own P5) → `I8` (interfaces)
+→ `I9` (integration + the AC-3 gate). The critical path is `I3 → I5 → I8 → I9` — the
+recurrence task is the project's critical path overall [MG §8 risk 1]; everything else is
+parallel to it.
