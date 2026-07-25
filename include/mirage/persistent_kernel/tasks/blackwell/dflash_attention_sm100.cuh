@@ -370,9 +370,9 @@ __device__ __forceinline__ void dflash_attention_sm100(void const *q_ptr,
       uint32_t q_frags[MMA_K_TILES][4];
 
       for (int iter = 0; iter < num_iters; iter++) {
-        int next_iter_len =
-            iter + 1 < num_iters ? min(total_kv - cp_finished, KV_TILE_SIZE)
-                                 : 0;
+        int next_iter_len = iter + 1 < num_iters
+                                ? min(total_kv - cp_finished, KV_TILE_SIZE)
+                                : 0;
         if (next_iter_len > 0) {
           // Prefetch the next tile into the compute buffers of this iter
           // (they become the buffer pair after the rotation below).

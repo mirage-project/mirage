@@ -18,9 +18,10 @@
 // Inkling depthwise short convolution (InklingShortConvolution).
 //
 // Semantics (matches HF reference exactly, decode / short-extend path):
-//   x            : [SEQ, HIDDEN] (bf16) input activations (SEQ tokens, in order)
-//   weight       : [HIDDEN, K] (fp32) depthwise conv taps, w[.,0] = oldest tap
-//   conv_state   : [K-1, HIDDEN] (fp32) previous K-1 token activations,
+//   x            : [SEQ, HIDDEN] (bf16) input activations (SEQ tokens, in
+//   order) weight       : [HIDDEN, K] (fp32) depthwise conv taps, w[.,0] =
+//   oldest tap conv_state   : [K-1, HIDDEN] (fp32) previous K-1 token
+//   activations,
 //                  row 0 = oldest; updated IN PLACE to the last K-1 tokens
 //   out          : [SEQ, HIDDEN] (bf16)
 //

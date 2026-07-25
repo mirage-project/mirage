@@ -363,18 +363,17 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                          HEAD_DIM,
                          CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
                          ROTARY_SYNC_BARRIER_ID,
-                         ROTARY_DIM>(
-              q_smem,
-              static_cast<T const *>(q_norm_weight_ptr),
-              s_q_norm_sum,
-              q_eps,
-              num_tokens /*window_size*/,
-              0 /*token_offset*/,
-              rope,
-              static_cast<T const *>(cos_ptr) +
-                  (seq_len - num_tokens) * ROTARY_DIM,
-              static_cast<T const *>(sin_ptr) +
-                  (seq_len - num_tokens) * ROTARY_DIM);
+                         ROTARY_DIM>(q_smem,
+                                     static_cast<T const *>(q_norm_weight_ptr),
+                                     s_q_norm_sum,
+                                     q_eps,
+                                     num_tokens /*window_size*/,
+                                     0 /*token_offset*/,
+                                     rope,
+                                     static_cast<T const *>(cos_ptr) +
+                                         (seq_len - num_tokens) * ROTARY_DIM,
+                                     static_cast<T const *>(sin_ptr) +
+                                         (seq_len - num_tokens) * ROTARY_DIM);
         }
         // K norm
         if (kv_tokens_to_process > 0) {
@@ -384,18 +383,18 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                          HEAD_DIM,
                          CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
                          ROTARY_SYNC_BARRIER_ID,
-                         ROTARY_DIM>(
-              k_smem,
-              static_cast<T const *>(k_norm_weight_ptr),
-              s_k_norm_sum,
-              k_eps,
-              kv_tokens_to_process /*window_size*/,
-              curr_iter_len - kv_tokens_to_process,
-              rope,
-              static_cast<T const *>(cos_ptr) +
-                  first_kv_token_to_process * ROTARY_DIM,
-              static_cast<T const *>(sin_ptr) +
-                  first_kv_token_to_process * ROTARY_DIM);
+                         ROTARY_DIM>(k_smem,
+                                     static_cast<T const *>(k_norm_weight_ptr),
+                                     s_k_norm_sum,
+                                     k_eps,
+                                     kv_tokens_to_process /*window_size*/,
+                                     curr_iter_len - kv_tokens_to_process,
+                                     rope,
+                                     static_cast<T const *>(cos_ptr) +
+                                         first_kv_token_to_process * ROTARY_DIM,
+                                     static_cast<T const *>(sin_ptr) +
+                                         first_kv_token_to_process *
+                                             ROTARY_DIM);
         }
       } else if (rope) {
         if (iter == 0) {

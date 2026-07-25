@@ -49,10 +49,10 @@
 namespace kernel {
 
 template <typename T,
-          int NUM_Q_HEADS,  // q heads for THIS task
-          int NUM_KV_HEADS, // kv heads for THIS task
-          int HEAD_DIM,     // 128
-          int EXTENT,       // rel_extent (512 local / 1024 global)
+          int NUM_Q_HEADS,    // q heads for THIS task
+          int NUM_KV_HEADS,   // kv heads for THIS task
+          int HEAD_DIM,       // 128
+          int EXTENT,         // rel_extent (512 local / 1024 global)
           int SLIDING_WINDOW, // 0 = global
           int Q_STRIDE,
           int KV_STRIDE,
@@ -232,9 +232,8 @@ __device__ __forceinline__ void
         float acc = 0.0f;
 #pragma unroll
         for (int w = 0; w < NUM_WARPS; w++) {
-          acc += scale_w[w] *
-                 s_acc[(w * NUM_QO_PER_KV + h) * HEAD_DIM +
-                       lane_idx * ELTS_PER_LANE + e];
+          acc += scale_w[w] * s_acc[(w * NUM_QO_PER_KV + h) * HEAD_DIM +
+                                    lane_idx * ELTS_PER_LANE + e];
         }
         out[o_col + lane_idx * ELTS_PER_LANE + e] = T(acc * inv_l);
       }

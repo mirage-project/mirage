@@ -50,15 +50,15 @@ __device__ __forceinline__ float inkling_logsigmoid(float x) {
 }
 
 template <typename T,
-          int NUM_ROUTED,    // 256
-          int N_SHARED,      // 2
-          int TOPK,          // 6
-          int LOGITS_STRIDE  // row stride of logits buffer (>= NUM_TOTAL;
-                             // may be padded, e.g. 384, for the gate linear)
+          int NUM_ROUTED,   // 256
+          int N_SHARED,     // 2
+          int TOPK,         // 6
+          int LOGITS_STRIDE // row stride of logits buffer (>= NUM_TOTAL;
+                            // may be padded, e.g. 384, for the gate linear)
           >
 __device__ __forceinline__ void
     inkling_moe_router_task_impl(void *logits_ptr, // [num_rows, LOGITS_STRIDE]
-                                 void const *bias_ptr,  // float [NUM_ROUTED]
+                                 void const *bias_ptr,   // float [NUM_ROUTED]
                                  void const *gscale_ptr, // float [1]
                                  void *weights_ptr, // float [num_rows, K+S]
                                  void *indices_ptr, // int [NUM_TOTAL, num_rows]

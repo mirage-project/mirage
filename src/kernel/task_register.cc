@@ -357,9 +357,9 @@ int TaskRegister::register_inkling_sconv_sm100_task(
          /*X_STRIDE=*/hidden,
          /*OUT_STRIDE=*/hidden,
          /*STATE_STRIDE=*/hidden);
-  code.e("    task_desc->input_ptrs[0],");  // x
-  code.e("    task_desc->input_ptrs[1],");  // weight (fp32)
-  code.e("    task_desc->input_ptrs[2],");  // conv_state (fp32, in-place)
+  code.e("    task_desc->input_ptrs[0],"); // x
+  code.e("    task_desc->input_ptrs[1],"); // weight (fp32)
+  code.e("    task_desc->input_ptrs[2],"); // conv_state (fp32, in-place)
   code.e("    task_desc->output_ptrs[0]);");
   return register_task_variant(TASK_INKLING_SCONV_SM100, code.to_string());
 }
@@ -414,13 +414,13 @@ int TaskRegister::register_inkling_attention_sm100_task(
          /*KV_STRIDE=*/kv_size,
          /*O_STRIDE=*/q_size,
          /*BIAS_STRIDE=*/extent);
-  code.e("    task_desc->input_ptrs[0],");  // q
-  code.e("    task_desc->input_ptrs[1],");  // ctx_k
-  code.e("    task_desc->input_ptrs[2],");  // ctx_v
-  code.e("    task_desc->input_ptrs[3],");  // blk_k
-  code.e("    task_desc->input_ptrs[4],");  // blk_v
-  code.e("    task_desc->input_ptrs[5],");  // bias (fp32)
-  code.e("    task_desc->input_ptrs[6],");  // step (int32 = ctx_len)
+  code.e("    task_desc->input_ptrs[0],"); // q
+  code.e("    task_desc->input_ptrs[1],"); // ctx_k
+  code.e("    task_desc->input_ptrs[2],"); // ctx_v
+  code.e("    task_desc->input_ptrs[3],"); // blk_k
+  code.e("    task_desc->input_ptrs[4],"); // blk_v
+  code.e("    task_desc->input_ptrs[5],"); // bias (fp32)
+  code.e("    task_desc->input_ptrs[6],"); // step (int32 = ctx_len)
   code.e("    task_desc->output_ptrs[0],");
   code.e("    $f,", alpha);
   code.e("    $);", n_floor);
@@ -483,8 +483,7 @@ int TaskRegister::register_inkling_moe_router_sm100_task(
   code.e("    task_desc->output_ptrs[2],"); // active expert ids
   code.e("    $,", num_rows);
   code.e("    $f);", route_scale);
-  return register_task_variant(TASK_INKLING_MOE_ROUTER_SM100,
-                               code.to_string());
+  return register_task_variant(TASK_INKLING_MOE_ROUTER_SM100, code.to_string());
 }
 
 int TaskRegister::register_rmsnorm_linear_task(threadblock::Graph const &bgraph,
