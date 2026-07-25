@@ -411,8 +411,9 @@ kernel with preserved block scales, BUT that kernel converts scales to UE8M0 INT
 fallback:** if P2 shows systematic per-row bias or any AC-3-relevant token effect at our
 shapes, M2 implements the fp32-scale grouped variant (mirror of M2-I12's dense change, applied
 to `moe_w13/w2` — the scale-application point is the same k-tile loop), and no MoE integration
-lands before P2 has a verdict. P2 runs immediately after M2-I12's dense kernel exists (same
-harness, expert weights instead of dense).
+lands before P2 has a verdict. Issue placement (fixed at milestone-review cycle 2 to keep the
+dependency graph acyclic): P2 lives in **M2-I13**, which depends on M2-I12's dense kernel
+(same harness, expert weights instead of dense) and emits the verdict M2-I7 requires.
 
 Precision boundary stays MPK's existing contract: fp8 inside GEMMs, bf16 between ops, GDN and
 attention on the bf16 side [MG §2.4].
@@ -709,17 +710,18 @@ owning issue writes first; all GPU probes run on `catalyst-B200` under the GPU-e
 | id | scope (one line) | SOP (dev skill) | depends on |
 |---|---|---|---|
 | **M2-I1** | AC-3 harness per §12: gate + per-position margin instrumentation + MPK top-16 logit dump + argmax-tie unit check | `test-mode` (reference discipline; §12) | — |
-| **M2-I2** | FP8 execution validation — M2's FRONT design gate (amended §6.2): probe **P10 FIRST** (fp32-scale CUTLASS-class numerics + perf on real weights), then P1 (diagnostic oracle), P2 (**fail-closed MoE gate** — bias ⇒ the named fp32-scale grouped fallback), P7; wire fp32-scale `quantize_fp8` for MoE activations | `test-mode` + `add-mpk-task` Step 9 (benches) | — |
+| **M2-I2** | FP8 design gate — M2's FRONT issue (amended §6.2): probe **P10** (fp32-scale CUTLASS-class numerics + perf on real weights; emits an explicit P10 verdict artifact that gates M2-I12), plus HF-side diagnostics P1 and P7. NO MPK-kernel dependencies; P2 moved to M2-I13 (it needs I12's kernel) | `test-mode` + `add-mpk-task` Step 9 (benches) | — |
 | **M2-I3** | HF oracle `ref_dump.py`: per-op tensor dumps for one GDN layer, one full-attn layer, one MoE block (probe P6) | `test-mode` (`pytorch_reference.py` convention) | — |
 | **M2-I4** | `gdn_conv1d_sm100` (id 234): kernel + conv-state pool + `step==0` init + unit/test-mode tests vs oracle | `add-mpk-task` (9-file recipe, §10) | M2-I3 |
 | **M2-I5** | `gdn_recurrent_sm100` (id 237): fused delta rule + gated norm per §3.2; per-(head,slot) grid; chunked Q_LEN loop; unit/test-mode tests vs oracle | `add-mpk-task` (9-file) | M2-I3 (∥ M2-I4) |
 | **M2-I6** | Attention adaptation: cherry-pick `5715c6f`; QKVG slice + σ-gate epilogue (params-gated); `max_tokens_per_pass` + Q-loop at `task_register.cc:2052`; RoPE permutation loader; probes P3, P4; local Qwen3-8B CI run green | `add-mpk-task` steps 2/5/7 + `mpk-internals`; CI-byte-identical discipline [MG §6.2] | — (P3/P4 first) |
-| **M2-I7** | MoE block at our shapes: probe P5; w13/w2 wiring at `[256,1024,2048]`/`[256,2048,512]`; shared expert + `sigmoid_gate_mul_add_sm100` (id 238); test-mode pipeline test | `add-mpk-task` (one new task) + `test-mode` | M2-I2 (P2) |
+| **M2-I7** | MoE block at our shapes: probe P5; w13/w2 wiring at `[256,1024,2048]`/`[256,2048,512]`; shared expert + `sigmoid_gate_mul_add_sm100` (id 238); test-mode pipeline test | `add-mpk-task` (one new task) + `test-mode` | M2-I13 (P2 verdict) |
 | **M2-I8** | Qwen3.5 registry builder + weight loader: §2.0 transforms, config plumbing, `mbr ≤ mbt` + page-capacity asserts [MG §8 risk 5], vocab §7 | `add-mpk-model` (registry path) + `mpk-internals` | I4–I7 interfaces |
 | **M2-I9** | End-to-end bring-up: full 40-layer graph, per-layer test-mode vs oracle, AC-3 run via M2-I1 to 640/640 (or adjudicated tie-flips) | `test-mode` + systematic-debugging | all above |
 | **M2-I10** | Dev-skill maintenance commits: `add-mpk-task` 7→9-file recipe (+`tma.cuh` case, `runtime.cc`), `pytorch_reference.py` convention, `add-mpk-model` registry-path staleness [MG §9] | constraint.md §2b (skill-maintenance rule) | — |
 | **M2-I11** | Early runtime measurements on the shipped Qwen3-8B path (no Qwen3.5 code needed): prefill-iteration cost (P8, tests §8.2's load-bearing assumption) + scheduler-knee attribution (P9). **PREREQUISITE GATE (milestone-review elevation): P8's verdict must exist before M2-I9 integration closes** — an r > 2.25 outcome pulls the Option-2 prefill design into M2 scope immediately, not at M4 | MPK profiler + `test-mode` | — (P9's labeled trace wants M2-I10's profiler-map fix; raw task-type ids work meanwhile) |
-| **M2-I12** | **fp8-dense with preserved fp32 block scales (amended §6.2):** adapt the DSV3 dense fp8 GEMM to consume `weight_scale_inv` directly (skip UE8M0 requant); unit + test-mode vs oracle; this is the M2 acceptance dense path — bf16-dense builds are debugging scaffolds only | `add-mpk-task` steps 2/5/7 (kernel-param change, not a new task) + `test-mode` | M2-I2 (P10 GO) |
+| **M2-I12** | **fp8-dense with preserved fp32 block scales (amended §6.2):** adapt the DSV3 dense fp8 GEMM to consume `weight_scale_inv` directly (skip UE8M0 requant); unit + test-mode vs oracle; this is the M2 acceptance dense path — bf16-dense builds are debugging scaffolds only | `add-mpk-task` steps 2/5/7 (kernel-param change, not a new task) + `test-mode` | M2-I2 |
+| **M2-I13** | **P2 fail-closed MoE-scale gate** on the I12 harness: run expert weights `[256,·,·]` through the preserved-scale GEMM path incl. the grouped kernel's INTERNAL UE8M0 conversion; systematic per-row-bias + token-effect check per §6.2. Bias found ⇒ implement the named fp32-scale grouped fallback IN THIS ISSUE; either way emits the P2 verdict M2-I7 depends on; also wires fp32-scale `quantize_fp8` for MoE activations | `test-mode` + `add-mpk-task` Step 9 | M2-I12 |
 
 ### Probes
 
