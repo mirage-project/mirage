@@ -30,11 +30,13 @@ single B200, batch 1..16) on MPK, and the M2 issue decomposition that implements
    constraint `I ≤ O/4` (binding at B=16, mbt=16); the pinned (256, 1024) sits exactly on that
    boundary and holds conditional on `t_pf(16-tok iter) ≤ t_dec(16-req step)` — a falsifiable
    prediction probe P8 tests early-M2 on the shipped Qwen3-8B path.
-4. **FP8 ruling:** MPK's dense UE8M0 requantization path is **rejected for this model**
-   (two-engine evidence). v1/M2 runs **dense projections in bf16** (dequantized at load,
-   probe-gated); routed experts stay **fp8 with preserved block scales**. M3 restores fp8 dense
-   via a fp32-scale block GEMM — the semantics class both reference engines themselves run;
-   its full-set token-exactness is a hypothesis the M2 harness and probe P10 test (§6).
+4. **FP8 ruling (AMENDED at M1 milestone review):** MPK's dense UE8M0 requantization path is
+   **rejected for this model** (two-engine evidence). **M2 runs dense projections as fp8 with
+   the checkpoint's fp32 block scales preserved** (CUTLASS-class; new issue M2-I12 adapts the
+   DSV3 GEMM to consume `weight_scale_inv` directly; probe P10 is M2's front design gate).
+   bf16-dense is a debugging SCAFFOLD only — never an acceptance configuration (AC-1 pins bf16
+   to `modules_to_not_convert`). Routed experts stay fp8 preserved-scales with **P2 as a
+   fail-closed gate**: internal-UE8M0 bias ⇒ named fallback = fp32-scale grouped variant (§6).
 5. **Attention:** cherry-pick `5715c6f`; `[q|gate]` sliced in-kernel + σ-gate epilogue (zero new
    inputs, 7-input limit respected); `MAX_TOKENS` decoupled from mbt at the one sm100
    registration site with an in-kernel Q-loop (4 queries/pass) so one build serves decode bs 16
@@ -379,29 +381,38 @@ DeepGemm's E8M0 scale format" [VG §3.5, §6 g.9]. Against a zero-tolerance exac
 indefensible. (sglang, which lacks the guard, is a cautionary tale, not a counter-example
 [SG §3.2–3.3].)
 
-**v1/M2 runs dense projections in bf16** (dequantized at load): zero kernel work (the bf16
-`linear_sm100` family is CI-exercised [MG §6.2]), and it removes an entire error class from the
-GDN bring-up — when tokens mismatch during integration, the dense GEMMs are known-exact and
-suspicion concentrates on the new kernels. Cost, from the per-step budget (§9): **+1.41 GB/step
-at every batch size** (dense 2.47 → 3.88 GB) — +39 % of total step bytes at B=1 but only
-**+6.8 % at B=16**, because experts + GDN state dominate at large B. Feasibility survives at
-every batch size (§9), so this is a correctness-first staging decision, not a performance
-gamble. It is gated by **probe P1** (HF with dense-dequantized-to-bf16 vs the pinned reference,
-all 640 positions): pass ⇒ GO; fail at wide margins ⇒ v1 jumps directly to the M3 design below.
+**M2 runs dense projections as fp8 with the checkpoint's fp32 block scales PRESERVED**
+(CUTLASS/DeepGEMM-promotion style: fp8 MMA, fp32 accumulation, per-128-k-tile
+`a_scale·b_scale` application — the semantics class of vLLM's `CutlassFp8BlockScaledMMKernel`
+[VG §3.5] and HF's Triton `finegrained-fp8` [REF]). *(AMENDED at M1 milestone review
+2026-07-25: the previous revision staged M2 on bf16-dense with fp8 deferred to M3. The
+milestone reviewer correctly held that AC-1 pins bf16 to `modules_to_not_convert` ONLY — a
+bf16-dense demo is a different numerical execution path from both the HF FP8 oracle and the
+required final runtime, so it cannot be an M2 endpoint.)* Consequences:
+- **Kernel work moves into M2:** adapt the DSV3 dense fp8 GEMM to CONSUME `weight_scale_inv`
+  directly (skip its UE8M0 requant stage) — new M2 issue M2-I12, ordered before dense
+  integration; **probe P10** (CUTLASS-class vs HF-Triton numerics + perf on real layer-0
+  weights) moves to the FRONT of M2 as its design gate.
+- **bf16-dense remains a DEBUGGING SCAFFOLD only:** during GDN bring-up, a bf16-dense build may
+  be used to isolate new-kernel bugs (dense GEMMs known-exact ⇒ suspicion concentrates on the
+  new kernels), but no M2 acceptance run may use it; the M2 demo acceptance configuration is
+  fp8-dense. Probe P1 (HF dense-dequant oracle) stays as a diagnostic for attributing
+  mismatches, not as a GO/NO-GO for a bf16 endpoint.
+- Per-step budget note (§9): the fp8-dense M2 target keeps dense at 2.47 GB/step — the +1.41
+  GB bf16 delta applies only to scaffold builds and never to measured configurations.
+- Evidence status unchanged: "the fp32-scale class is token-exact over the full 640-position
+  set" is a **hypothesis, not a result** (one direct datapoint: vLLM matching HF 64/64 on p01
+  [REF]); its tests are P10 plus the M2 harness's margin data (§12). Gross divergence in the
+  MPK implementation indicates an MPK bug, not a dead numeric class.
 
-**M3 restores fp8 dense with fp32 block scales** (CUTLASS/DeepGEMM-promotion style: fp8 MMA,
-fp32 accumulation, per-128-k-tile `a_scale·b_scale` application — the semantics class of
-vLLM's `CutlassFp8BlockScaledMMKernel` [VG §3.5] and HF's Triton `finegrained-fp8` [REF]).
-Evidence for that class, stated at its actual strength: the one direct datapoint — vLLM
-(CUTLASS fp32-scale dense + FlashInfer fp8 MoE) matching HF **64/64 on p01 only** [REF] —
-supports that specific configuration on that prompt. "The fp32-scale class is token-exact over
-the full 640-position set" is a **hypothesis, not a result**; its tests are the M2 harness's
-margin data accumulating on every run (§12) and probe P10's CUTLASS-vs-HF-Triton comparison on
-real checkpoint weights (§14), both of which land before M3 commits kernel work. What the
-datapoint does license: an M3 fp32-scale implementation that diverges *grossly* from the
-reference indicates an MPK bug rather than an intrinsically dead numeric class — which is what
-makes deferral safe. The end state satisfies the goal's fp8-both-sides framing [GOAL]; the M2
-bf16 staging is surfaced for user batch review (§13.4).
+**MoE fail-closed branch** *(same amendment)*: the routed-expert chain keeps the DSV3 grouped
+kernel with preserved block scales, BUT that kernel converts scales to UE8M0 INTERNALLY
+[MG §2.2.1] — the same family rejected above. **Probe P2 is a fail-closed gate with a named
+fallback:** if P2 shows systematic per-row bias or any AC-3-relevant token effect at our
+shapes, M2 implements the fp32-scale grouped variant (mirror of M2-I12's dense change, applied
+to `moe_w13/w2` — the scale-application point is the same k-tile loop), and no MoE integration
+lands before P2 has a verdict. P2 runs immediately after M2-I12's dense kernel exists (same
+harness, expert weights instead of dense).
 
 Precision boundary stays MPK's existing contract: fp8 inside GEMMs, bf16 between ops, GDN and
 attention on the bf16 side [MG §2.4].
@@ -536,34 +547,42 @@ gather its tokens), which the existing mask/indices-driven grouped GEMM already 
 
 ### 9.2 Per-step HBM byte budget (compulsory traffic, worst-case distinct experts)
 
-Dense (non-expert) weights: **2.47 GB/step fp8-target / 3.88 GB v1-bf16** (§6.2). Experts fp8:
-1.01→16.11 GB for B=1→16. GDN state: B × 128.8 MB (fp32 S read+write + conv) [VG §5.4, §4.7].
-KV read grows with position: ≈ 26 MB/request/step at the pinned workload's final positions
-(~1300) → ≤ 0.42 GB/step at B=16 (< 2 %, not tabulated) [VG §2.2.5].
+Dense (non-expert) weights: **2.47 GB/step fp8 (the M2+ acceptance config) / 3.88 GB in the
+bf16 debugging scaffold** (§6.2, amended). Experts fp8: 1.01→16.11 GB for B=1→16. GDN state:
+B × 128.8 MB (fp32 S read+write + conv) [VG §5.4, §4.7]. KV read grows with position: ≈ 26
+MB/request/step at the pinned workload's final positions (~1300) → ≤ 0.42 GB/step at B=16
+(< 2 %, not tabulated) [VG §2.2.5].
 
-| B | experts | GDN state | **v1 total** | M3 total (fp8 dense) | v1 floor @ 8 TB/s | v1 floor agg tok/s |
+| B | experts | GDN state | **M2+ total (fp8 dense)** | bf16-scaffold total | floor @ 8 TB/s | floor agg tok/s |
 |---|---|---|---|---|---|---|
-| 1 | 1.01 | 0.13 | **5.02 GB** | 3.61 | 0.63 ms | 1 590 |
-| 2 | 2.01 | 0.26 | **6.15** | 4.74 | 0.77 | 2 600 |
-| 4 | 4.03 | 0.52 | **8.43** | 7.02 | 1.05 | 3 800 |
-| 8 | 8.05 | 1.03 | **12.96** | 11.55 | 1.62 | 4 940 |
-| 16 | 16.11 | 2.06 | **22.05** | 20.64 | 2.76 | 5 800 |
+| 1 | 1.01 | 0.13 | **3.61 GB** | 5.02 | 0.45 ms | 2 216 |
+| 2 | 2.01 | 0.26 | **4.74** | 6.15 | 0.59 | 3 380 |
+| 4 | 4.03 | 0.52 | **7.02** | 8.43 | 0.88 | 4 560 |
+| 8 | 8.05 | 1.03 | **11.55** | 12.96 | 1.44 | 5 540 |
+| 16 | 16.11 | 2.06 | **20.64** | 22.05 | 2.58 | 6 200 |
 
 (8 TB/s = nominal B200 HBM3e; floors scale linearly with the true sustained figure.) Resident:
-33.26 GiB fp8-target weights [VG §5.4] + 1.41 GB v1 bf16-dense delta + 0.96 GiB GDN pools +
-0.47 GiB KV ≈ **36 GiB** — no memory pressure on a B200.
+33.26 GiB fp8 weights [VG §5.4] (+1.41 GB only in scaffold builds) + 0.96 GiB GDN pools +
+0.47 GiB KV ≈ **35 GiB** — no memory pressure on a B200.
 
-### 9.3 Feasibility vs the vLLM datapoint — stated honestly
+### 9.3 Feasibility vs the BINDING vLLM baselines — stated honestly
 
-The only measured baseline number is the **bs=1 smoke**: 29.88 tok/s = 33.5 ms/step, warm, CUDA
-graphs captured, default config [REF]. That is ~1.3 % of the B=1 bandwidth roofline — vLLM's
-small-batch step is dominated by fixed overhead and small-kernel inefficiency across ~600 op
-instances/step, not by compulsory bytes. This is precisely the regime the megakernel thesis
-attacks: MPK needs only ≥ 2 % sustained bandwidth utilization at B=1 to beat 30 tok/s **with
-bf16 dense**; at a conservative 10–25 % it lands at 160–400 tok/s. The smoke number is not the
-AC-4 protocol (single request, no fixed workload) and the M4 baseline will be tuned
-(`--language-model-only` etc. — M1-I6 owns that ruling), but the headroom multiple (≥ 50×)
-absorbs any plausible tuning delta at B ∈ {1, 2, 4}.
+*(Rewritten at M1 milestone review: the binding M1-I6 baselines now exist and supersede the
+smoke.)* Binding vLLM decode medians (256/1024 workload, fp8, CUDA graphs, `lmo=off`
+[baselines README]): **285.5 / 529.8 / 934.4 / 1692.5 / 3018.1 tok/s at B = 1/2/4/8/16**.
+Reconciliation with the earlier 29.88 tok/s smoke: the smoke measured one 64-token request's
+whole wall time (prefill + first-token latency + short decode, cold-ish path); the binding
+numbers are steady-state decode-window medians after warmup over 1024-token decodes —
+methodological, both artifacts retained [REF; baselines README].
+
+Against the fp8-dense floors (§9.2): vLLM sits at **12.9 %** of the B=1 roofline (285.5 /
+2216), rising to **48.7 %** at B=16 (3018.1 / 6200 — per-step 5.30 ms vs 2.58 ms floor). So:
+- **B ∈ {1, 2, 4}: the megakernel regime.** vLLM burns most of the step on fixed overhead +
+  ~600 small kernel launches; MPK needs ≥ 13 % sustained bandwidth utilization at B=1 to win —
+  demanding but exactly what fusing the step into one kernel buys (no launch gaps, no
+  per-op activation round-trips).
+- **B ∈ {8, 16}: the real fight**, as before — but now quantified: MPK must exceed **≈ 49 %**
+  of the same compulsory-byte roofline at B=16. That number is the M3 optimization target.
 
 **B ∈ {8, 16} is the real fight.** There both engines converge toward the same compulsory
 ~13–22 GB/step — vLLM's per-step overhead amortizes over batched work and its floor at B=16 is
@@ -690,7 +709,7 @@ owning issue writes first; all GPU probes run on `catalyst-B200` under the GPU-e
 | id | scope (one line) | SOP (dev skill) | depends on |
 |---|---|---|---|
 | **M2-I1** | AC-3 harness per §12: gate + per-position margin instrumentation + MPK top-16 logit dump + argmax-tie unit check | `test-mode` (reference discipline; §12) | — |
-| **M2-I2** | FP8 execution validation: probes P1, P2, P7, P10 (M3 fp8-dense numerics + perf bar); final dense GO/NO-GO per §6.2 decision tree; wire fp32-scale `quantize_fp8` for MoE activations | `test-mode` + `add-mpk-task` Step 9 (benches) | — |
+| **M2-I2** | FP8 execution validation — M2's FRONT design gate (amended §6.2): probe **P10 FIRST** (fp32-scale CUTLASS-class numerics + perf on real weights), then P1 (diagnostic oracle), P2 (**fail-closed MoE gate** — bias ⇒ the named fp32-scale grouped fallback), P7; wire fp32-scale `quantize_fp8` for MoE activations | `test-mode` + `add-mpk-task` Step 9 (benches) | — |
 | **M2-I3** | HF oracle `ref_dump.py`: per-op tensor dumps for one GDN layer, one full-attn layer, one MoE block (probe P6) | `test-mode` (`pytorch_reference.py` convention) | — |
 | **M2-I4** | `gdn_conv1d_sm100` (id 234): kernel + conv-state pool + `step==0` init + unit/test-mode tests vs oracle | `add-mpk-task` (9-file recipe, §10) | M2-I3 |
 | **M2-I5** | `gdn_recurrent_sm100` (id 237): fused delta rule + gated norm per §3.2; per-(head,slot) grid; chunked Q_LEN loop; unit/test-mode tests vs oracle | `add-mpk-task` (9-file) | M2-I3 (∥ M2-I4) |
@@ -699,11 +718,14 @@ owning issue writes first; all GPU probes run on `catalyst-B200` under the GPU-e
 | **M2-I8** | Qwen3.5 registry builder + weight loader: §2.0 transforms, config plumbing, `mbr ≤ mbt` + page-capacity asserts [MG §8 risk 5], vocab §7 | `add-mpk-model` (registry path) + `mpk-internals` | I4–I7 interfaces |
 | **M2-I9** | End-to-end bring-up: full 40-layer graph, per-layer test-mode vs oracle, AC-3 run via M2-I1 to 640/640 (or adjudicated tie-flips) | `test-mode` + systematic-debugging | all above |
 | **M2-I10** | Dev-skill maintenance commits: `add-mpk-task` 7→9-file recipe (+`tma.cuh` case, `runtime.cc`), `pytorch_reference.py` convention, `add-mpk-model` registry-path staleness [MG §9] | constraint.md §2b (skill-maintenance rule) | — |
-| **M2-I11** | Early runtime measurements on the shipped Qwen3-8B path (no Qwen3.5 code needed): prefill-iteration cost (P8, tests §8.2's load-bearing assumption) + scheduler-knee attribution (P9) | MPK profiler + `test-mode` | — (P9's labeled trace wants M2-I10's profiler-map fix; raw task-type ids work meanwhile) |
+| **M2-I11** | Early runtime measurements on the shipped Qwen3-8B path (no Qwen3.5 code needed): prefill-iteration cost (P8, tests §8.2's load-bearing assumption) + scheduler-knee attribution (P9). **PREREQUISITE GATE (milestone-review elevation): P8's verdict must exist before M2-I9 integration closes** — an r > 2.25 outcome pulls the Option-2 prefill design into M2 scope immediately, not at M4 | MPK profiler + `test-mode` | — (P9's labeled trace wants M2-I10's profiler-map fix; raw task-type ids work meanwhile) |
+| **M2-I12** | **fp8-dense with preserved fp32 block scales (amended §6.2):** adapt the DSV3 dense fp8 GEMM to consume `weight_scale_inv` directly (skip UE8M0 requant); unit + test-mode vs oracle; this is the M2 acceptance dense path — bf16-dense builds are debugging scaffolds only | `add-mpk-task` steps 2/5/7 (kernel-param change, not a new task) + `test-mode` | M2-I2 (P10 GO) |
 
 ### Probes
 
-**P1 — dense-bf16 token equivalence (gates the §6.2 v1 ruling). Owner M2-I2.**
+**P1 — dense-bf16 token equivalence (DIAGNOSTIC after the §6.2 amendment — attributes
+integration mismatches to dense-vs-new-kernel causes; no longer a GO/NO-GO for any endpoint).
+Owner M2-I2.**
 ```bash
 ssh catalyst-B200 'source ~/mpk-qwen35/venv-vllm/bin/activate && \
   TRANSFORMERS_DISABLE_DEEPGEMM_LINEAR=1 python ~/mpk-qwen35/probes/p1_dense_bf16.py \

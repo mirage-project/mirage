@@ -33,6 +33,17 @@ faster), OFF is the config that matched the HF reference 64/64 on p01, and both 
 identical dense/MoE kernels (log-verified). Token divergence between modes at bs4 is the
 fused-vs-unfused rounding difference; with OFF pinned it is moot for the baseline.
 
+## Reconciliation with the M1-I5 smoke figure (29.88 tok/s)
+
+The smoke (`../reference/vllm_smoke/`) reported 64 generated tokens divided by the WHOLE
+single-request wall time — engine-warm but including prefill, first-token latency, and
+per-request API overhead, over a short 64-token decode. The binding numbers above are
+steady-state decode-window medians (tokens ÷ decode-window seconds) after a warmup rep, over
+1024-token decodes, per protocol §5. At bs=1: 1024 tokens decode in ~3.59 s (285.5 tok/s
+steady-state) while a 64-token request spends most of its ~2.1 s wall outside the steady
+decode window. Different definitions, both artifacts retained; the binding metric is the
+protocol's. (Added at M1 milestone review to close the apparent 10× discrepancy explicitly.)
+
 ## Run provenance
 
 - `full/` — sweep bs {1,2,4,8,16}, 3 reps + 1 warmup, single boot (GPU 5).
