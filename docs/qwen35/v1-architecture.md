@@ -496,9 +496,12 @@ invalid derivation, now conditional on one explicit, unmeasured assumption:
 `t_pf(16-token prefill iteration) ≤ t_dec(16-request decode step)`.** This cannot be proven
 pre-measurement; it is a falsifiable prediction — justified by the byte-subset + amortization
 + equal-overhead arguments above — and probe P8 (§14) tests it on the shipped Qwen3-8B
-MODE_OFFLINE path early in M2 (re-run on the Qwen3.5 graph once it stands). Prediction:
-prefill-iteration wall time within **1.5×** of the same-config decode iteration (the headroom
-covers the GDN-chunk compute adder Qwen3-8B cannot exercise).
+MODE_OFFLINE path early in M2 (re-run on the Qwen3.5 graph once it stands). Point prediction:
+prefill-iteration wall time ≤ **1.5×** the same-config decode iteration (the headroom covers
+the GDN-chunk compute adder Qwen3-8B cannot exercise) — but the pass/fail DISCRIMINATION is
+the absorption bound below (P8's bands in §14), not this point prediction: `t_pf ≤ t_dec` is
+the clean case, and any measured ratio r ≤ 2.25 still closes AC-5 at the minimum-acceptable
+25 % B=16 decode win.
 
 **The pinned workload (I=256, O=1024)** [coordinator, with I6]: I/O = 0.25 ⇒ meets (*) with
 equality at B=16 (N_pf = 256 vs O = 1024) and strict slack at B ≤ 8 (table) — **the corrected
@@ -507,7 +510,8 @@ yields strict AC-5 margin: `MPK_e2e = 1.25·O·t_dec(16) < 1.25·O·t_v(16) ≤ 
 AC-4. Failure tolerance at this pin: AC-5 survives `t_pf ≤ k·t_dec(16)` for
 `k ≤ 5·(t_v/t_dec) − 4` (before crediting vLLM's own prefill time) — a 25 % decode win
 tolerates k ≤ 2.25, a 2× win tolerates k ≤ 6. The pin is threatened only if BOTH the B=16
-decode win is thin (< ~25 %) AND P8 lands near its 1.5–2× falsification band; either signal
+decode win is thin (< ~25 %) AND P8's measured ratio r exceeds the absorbable k for the
+observed win (k = 5·(t_v/t_dec) − 4; k = 2.25 at the 25 % floor); either signal
 re-opens the workload choice — larger O, or an mbt=64 build (attention Q-loop scales to 16
 passes; GDN chunk loop and GEMM row masking scale trivially), which cuts N_pf 4× and relaxes
 the bound to I ≤ O at B=16, at the cost of decode dead-row overhead.
@@ -806,13 +810,19 @@ ssh catalyst-B200 'cd ~/mpk-qwen35/mirage && \
 # --input-len; [T(512,128) − T(32,128)] / ((512−32)/mbt) = wall time per extra prefill
 # iteration at chunk = mbt; decode ms/token from the same run is t_dec at that config.
 ```
-Expected: prefill-iteration time within **1.5×** of the same-config decode iteration ⇒ the
-§8.2 assumption `t_pf ≤ t_dec` holds on the real runtime (this validates the *iteration
-mechanics* — chunked prefill through the static graph has no hidden per-iteration penalty;
-the Qwen3.5-specific bytes are §8.2's model, re-tested by re-running P8 on the Qwen3.5 graph
-once M2-I9 stands). **> 2×** ⇒ §8.2's model is falsified for this runtime: escalate — the
-Option-2 dual-dispatch prefill kernel and/or an mbt=64 build enter M2 scope, and the
-(256, 1024) workload pin is re-coordinated (§8.2).
+Discrimination — r := measured prefill-iteration time / same-config decode-iteration time
+(the ≤1.5× figure above is the point PREDICTION; these bands DECIDE):
+- **r ≤ 1.0** ⇒ the §8.2 assumption `t_pf ≤ t_dec` holds outright on the real runtime, and
+  the iteration mechanics are validated (chunked prefill through the static graph has no
+  hidden per-iteration penalty). Qwen3.5-specific bytes remain §8.2's model — re-run P8 on
+  the Qwen3.5 graph once M2-I9 stands.
+- **1.0 < r ≤ 2.25** ⇒ the strict assumption is false, but AC-5 still closes at the
+  minimum-acceptable 25 % B=16 decode win (k ≤ 2.25, §8.2): the (256, 1024) pin STANDS with
+  quantified margin (2.25 − r); record r and re-evaluate against the actually measured decode
+  win once M2-I9 numbers exist (absorbable k = 5·(t_v/t_dec) − 4 grows with the win).
+- **r > 2.25** ⇒ §8.2 cannot close AC-5 at the minimum win: escalate — the Option-2
+  dual-dispatch prefill kernel and/or an mbt=64 build enter M2 scope, and the (256, 1024)
+  workload pin is re-coordinated (§8.2).
 
 **P9 — batch-8/16 scheduler-knee attribution (runnable today). Owner M2-I11.**
 ```bash

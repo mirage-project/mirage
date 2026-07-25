@@ -1,0 +1,134 @@
+{
+  "shared_meta": {
+    "schema_version": "1.0",
+    "run_tag": "vllm-0.25.1-fp8-lmo-off-r5",
+    "generated_at_utc": "2026-07-25T09:04:02Z",
+    "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+    "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+    "gpu_id_physical": 5,
+    "gpu_preflight": {
+      "memory_used_mib": 5,
+      "utilization_pct": 0
+    },
+    "engine_load_seconds": 102.5,
+    "engine_assertions": {
+      "quantization": "fp8",
+      "quantization_is_fp8": true,
+      "has_flashinfer": true,
+      "has_flashinfer_trtllm_fused_moe": true,
+      "flashinfer_version": "0.6.13",
+      "log_markers": {
+        "deepgemm_autodisabled": true,
+        "deepgemm_fallback_cutlass": true,
+        "dense_kernel_cutlass": true,
+        "moe_backend_flashinfer_trtllm": true
+      },
+      "tensor_parallel_size": 1,
+      "pipeline_parallel_size": 1,
+      "data_parallel_size": 1,
+      "lora_enabled": false,
+      "kv_cache_dtype": "auto",
+      "mamba_cache_dtype": "auto",
+      "mamba_ssm_cache_dtype": "float32",
+      "enable_prefix_caching": false,
+      "moe_backend": "auto",
+      "linear_backend": "auto",
+      "enforce_eager": false,
+      "max_num_batched_tokens": 16384,
+      "language_model_only": false,
+      "env_snapshot": {
+        "VLLM_TEST_FORCE_FP8_MARLIN": null,
+        "VLLM_BATCH_INVARIANT": null,
+        "VLLM_USE_DEEP_GEMM": null,
+        "VLLM_MOE_USE_DEEP_GEMM": null,
+        "VLLM_DISABLED_KERNELS": null,
+        "VLLM_USE_DEEP_GEMM_E8M0": null
+      },
+      "hard_checks": {
+        "quantization_is_fp8": true,
+        "has_flashinfer": true,
+        "has_flashinfer_trtllm_fused_moe": true,
+        "log_deepgemm_autodisabled": true,
+        "log_dense_kernel_cutlass": true,
+        "log_moe_backend_flashinfer_trtllm": true,
+        "tensor_parallel_size_is_1": true,
+        "pipeline_parallel_size_is_1": true,
+        "data_parallel_size_is_1": true,
+        "no_lora": true
+      },
+      "all_hard_checks_passed": true
+    },
+    "versions": {
+      "python": "3.12.3 (main, Jun 18 2025, 17:59:45) [GCC 13.3.0]",
+      "torch": "2.11.0+cu130",
+      "vllm": "0.25.1",
+      "transformers": "5.14.1",
+      "flashinfer": "0.6.13"
+    },
+    "cli_args": {
+      "mode": "sweep",
+      "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+      "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+      "output_dir": "/home/muhengl/mpk-qwen35/bench_vllm_run/full-hibs",
+      "log_file": "/home/muhengl/mpk-qwen35/logs/full_sweep_hibs.log",
+      "run_tag": "vllm-0.25.1-fp8-lmo-off-r5",
+      "gpu_memory_utilization": 0.85,
+      "language_model_only": "off",
+      "sampling_seed": 0,
+      "prompt_seed_base": 20260725,
+      "batch_sizes": "8,16",
+      "input_len": 256,
+      "output_len": 1024,
+      "max_model_len": 1280,
+      "reps": 5,
+      "warmup_reps": 1,
+      "max_dispersion_pct": 5.0,
+      "ruling_batch_sizes": "1,4",
+      "ruling_output_len": 64
+    }
+  },
+  "batch_sizes": [
+    8,
+    16
+  ],
+  "table": {
+    "8": {
+      "decode_tokens_per_second": {
+        "median": 1687.503243207935,
+        "min": 1675.3273935013171,
+        "max": 1777.0393539413647,
+        "spread_half_range": 50.85598022002375,
+        "dispersion_pct": 6.027363849487696,
+        "n": 5
+      },
+      "e2e_latency_seconds": {
+        "median": 4.9418178819760215,
+        "min": 4.693463949020952,
+        "max": 5.064079166011652,
+        "spread_half_range": 0.18530760849535,
+        "dispersion_pct": 7.499572542776643,
+        "n": 5
+      },
+      "dispersion_ok": false
+    },
+    "16": {
+      "decode_tokens_per_second": {
+        "median": 3020.8010488861078,
+        "min": 3002.432280508923,
+        "max": 3163.4821927240328,
+        "spread_half_range": 80.52495610755477,
+        "dispersion_pct": 5.3313644165508745,
+        "n": 5
+      },
+      "e2e_latency_seconds": {
+        "median": 5.555320779007161,
+        "min": 5.34120400599204,
+        "max": 5.69131264401949,
+        "spread_half_range": 0.17505431901372503,
+        "dispersion_pct": 6.30222181499339,
+        "n": 5
+      },
+      "dispersion_ok": false
+    }
+  }
+}
