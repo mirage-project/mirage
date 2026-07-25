@@ -9,18 +9,21 @@ auto-disabled marker), FlashInfer TRT-LLM fp8 block-scale MoE.
 
 ## Binding decode-throughput table (median tok/s; MPK must beat every row, AC-4)
 
-| bs | decode tok/s | source | dispersion | e2e (s, AC-5 ref) |
-|----|-------------:|--------|-----------:|------------------:|
-| 1  |  285.5 | `full/bs1.json` (3 reps, 1 boot)  | 0.06 % | 3.60 |
-| 2  |  529.8 | `full/bs2.json` (3 reps, 1 boot)  | 0.50 % | 3.89 |
-| 4  |  934.4 | `full/bs4.json` (3 reps, 1 boot)  | 3.48 % | 4.45 |
-| 8  | 1692.5 | merged `full`+`full-hibs` (8 reps, 2 boots) | 3.00 % (boot medians Δ2.06 %) | 4.953 |
-| 16 | 3018.1 | merged `full`+`full-hibs` (8 reps, 2 boots) | 3.43 % (boot medians Δ1.07 %) | 5.568 |
+| bs | decode tok/s | source | dispersion (see note) | e2e (s, AC-5 ref) |
+|----|-------------:|--------|----------------------|------------------:|
+| 1  |  285.5 | `full/bs1.json` (3 reps, 1 boot)  | 0.06 % full-range | 3.60 |
+| 2  |  529.8 | `full/bs2.json` (3 reps, 1 boot)  | 0.50 % full-range | 3.89 |
+| 4  |  934.4 | `full/bs4.json` (3 reps, 1 boot)  | 3.48 % full-range | 4.45 |
+| 8  | 1692.5 | merged, 8 reps / 2 boots (`bs8.merged.json`) | IQR 3.09 % (full-range 6.01 %; boot-median dev ≤2.08 %) | 4.953 |
+| 16 | 3018.1 | merged, 8 reps / 2 boots (`bs16.merged.json`) | IQR 3.43 % (full-range 6.87 %; boot-median dev ≤1.07 %) | 5.568 |
 
-bs 8/16 single-boot runs exceeded the 5 % bound (5.24 % / 6.41 %); per the protocol §6
-escalation rule the binding value is the merged-boot median (rule added 2026-07-25 from this
-data). Raw per-rep arrays, GPU clock snapshots, co-tenant records, and output-id digests are in
-the per-bs JSONs.
+bs 8/16 single-boot runs exceeded the 5 % full-range bound (5.24 % / 6.41 %); per the protocol
+§6 escalation rule the binding value is the merged-boot median, valid under the IQR-based
+merged criterion (CORRECTION 2026-07-25: an earlier version of this README and tool quoted
+half-range values as "dispersion" — the merged full ranges are 6.01 %/6.87 %, dominated by
+isolated FAST vllm outlier reps, so the binding medians are conservative in vLLM's favor; see
+protocol §6 for the corrected rule). Raw per-rep arrays, GPU clock snapshots, co-tenant
+records, and output-id digests are in the per-bs JSONs.
 
 ## `language_model_only` ruling (`ruling/`)
 

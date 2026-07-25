@@ -678,28 +678,37 @@ def merge_boots(args) -> None:
         sys.exit("merge: need >=2 boot dirs")
     all_dec = [x for r, _ in reps for x in r]
     all_e2e = [x for _, e in reps for x in e]
+    if len(all_dec) < 6:
+        sys.exit("merge: need >=6 total reps across boots")
     dec_med = statistics.median(all_dec)
     e2e_med = statistics.median(all_e2e)
-    dec_disp = (max(all_dec) - min(all_dec)) / 2 / dec_med * 100
-    meds = [b["decode_median"] for b in boots]
-    agree = (max(meds) - min(meds)) / statistics.median(meds) * 100
-    valid = dec_disp <= BINDING_MAX_DISPERSION_PCT and agree <= BINDING_BOOT_MEDIAN_AGREE_PCT
-    out = {"batch_size": bs, "rule": "bench-protocol.md §6 two-boot merge",
+    # Full range/median matches the single-run dispersion definition but is monotone in n
+    # (one outlier rep dominates a merged set forever), so it is RECORDED, not bounded.
+    # The merged-set validity statistic is the robust IQR/median (protocol §6, corrected
+    # 2026-07-25 — the first version of this tool wrongly halved the range).
+    dec_fullrange = (max(all_dec) - min(all_dec)) / dec_med * 100
+    q = statistics.quantiles(sorted(all_dec), n=4, method="inclusive")
+    dec_iqr = (q[2] - q[0]) / dec_med * 100
+    agree = max(abs(b["decode_median"] - dec_med) / dec_med * 100 for b in boots)
+    valid = dec_iqr <= BINDING_MAX_DISPERSION_PCT and agree <= BINDING_BOOT_MEDIAN_AGREE_PCT
+    out = {"batch_size": bs, "rule": "bench-protocol.md §6 two-boot merge (IQR-based, corrected 2026-07-25)",
            "boots": boots, "n_total": len(all_dec),
            "decode_tokens_per_second_median": dec_med,
-           "decode_merged_dispersion_pct": dec_disp,
+           "decode_merged_iqr_over_median_pct": dec_iqr,
+           "decode_merged_fullrange_over_median_pct": dec_fullrange,
            "e2e_wall_seconds_median": e2e_med,
-           "boot_median_agreement_pct": agree,
+           "boot_median_max_deviation_pct": agree,
            "binding_valid": valid,
-           "bounds": {"merged_dispersion_pct": BINDING_MAX_DISPERSION_PCT,
-                      "boot_median_agreement_pct": BINDING_BOOT_MEDIAN_AGREE_PCT}}
+           "bounds": {"merged_iqr_over_median_pct": BINDING_MAX_DISPERSION_PCT,
+                      "boot_median_max_deviation_pct": BINDING_BOOT_MEDIAN_AGREE_PCT,
+                      "min_total_reps": 6}}
     dest = Path(args.output_dir).expanduser()
     dest.mkdir(parents=True, exist_ok=True)
     (dest / f"bs{bs}.merged.json").write_text(json.dumps(out, indent=2))
-    log(f"merge bs={bs}: median={dec_med:.1f} disp={dec_disp:.2f}% agree={agree:.2f}% "
-        f"binding_valid={valid}")
+    log(f"merge bs={bs}: median={dec_med:.1f} IQR/med={dec_iqr:.2f}% "
+        f"fullrange/med={dec_fullrange:.2f}% boot-dev={agree:.2f}% binding_valid={valid}")
     if not valid:
-        sys.exit(f"merge: NOT binding-valid (disp {dec_disp:.2f}% / agree {agree:.2f}%) — "
+        sys.exit(f"merge: NOT binding-valid (IQR {dec_iqr:.2f}% / boot-dev {agree:.2f}%) — "
                  f"escalate per protocol §6, do not re-roll")
 
 

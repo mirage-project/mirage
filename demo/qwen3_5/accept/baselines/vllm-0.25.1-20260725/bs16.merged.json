@@ -1,6 +1,6 @@
 {
   "batch_size": 16,
-  "rule": "bench-protocol.md \u00a76 two-boot merge",
+  "rule": "bench-protocol.md \u00a76 two-boot merge (IQR-based, corrected 2026-07-25)",
   "boots": [
     {
       "dir": "baselines/vllm-0.25.1-20260725/full",
@@ -17,12 +17,14 @@
   ],
   "n_total": 8,
   "decode_tokens_per_second_median": 3018.1111975195627,
-  "decode_merged_dispersion_pct": 3.4345754777053457,
+  "decode_merged_iqr_over_median_pct": 3.4337045983474814,
+  "decode_merged_fullrange_over_median_pct": 6.869150955410691,
   "e2e_wall_seconds_median": 5.567888470002799,
-  "boot_median_agreement_pct": 1.071682845598491,
+  "boot_median_max_deviation_pct": 0.9777972973981465,
   "binding_valid": true,
   "bounds": {
-    "merged_dispersion_pct": 5.0,
-    "boot_median_agreement_pct": 3.0
+    "merged_iqr_over_median_pct": 5.0,
+    "boot_median_max_deviation_pct": 3.0,
+    "min_total_reps": 6
   }
 }
