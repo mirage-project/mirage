@@ -1,0 +1,181 @@
+{
+ "phase": "GDN",
+ "rows": [
+  {
+   "boundary": "pre_norm",
+   "frob_rel": 0.002669873053177301,
+   "max_abs": 0.0625,
+   "limit": 0.008,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "boundary": "in_proj_qkv",
+   "frob_rel": 0.005074582906133689,
+   "max_abs": 0.25,
+   "limit": 0.02,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "boundary": "in_proj_z",
+   "frob_rel": 0.005978747245053259,
+   "max_abs": 0.0625,
+   "limit": 0.02,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "boundary": "in_proj_ba (bf16)",
+   "frob_rel": 0.0022099026246049226,
+   "max_abs": 0.03125,
+   "limit": 0.02,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "boundary": "gdn_conv1d (task 234)",
+   "frob_rel": 0.0025067897794351247,
+   "max_abs": 0.125,
+   "limit": 0.03,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "boundary": "gdn_recurrent + gated norm (237)",
+   "frob_rel": 0.005711549123335495,
+   "max_abs": 0.015625,
+   "limit": 0.04,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "boundary": "recurrent state after",
+   "frob_rel": 0.008516895487652557,
+   "max_abs": 0.19936656951904297,
+   "limit": 0.04,
+   "ok": true,
+   "note": "per-slot fp32 pool (v1-arch 3.1)"
+  },
+  {
+   "boundary": "conv state after",
+   "frob_rel": 0.004399684980190441,
+   "max_abs": 0.125,
+   "limit": 0.03,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "boundary": "out_proj + residual",
+   "frob_rel": 0.010929459181766405,
+   "max_abs": 0.00390625,
+   "limit": 0.02,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "boundary": "post_attn_norm",
+   "frob_rel": 0.014253980917786653,
+   "max_abs": 0.125,
+   "limit": 0.03,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "boundary": "router logits buffer zeroed by topk",
+   "exact": true,
+   "ok": true,
+   "note": "documented topk_softmax side effect, not a bug"
+  },
+  {
+   "boundary": "router GEMM (replay on MPK's x)",
+   "frob_rel": 0.0038775025745134634,
+   "max_abs": 0.09375,
+   "limit": 0.02,
+   "ok": true,
+   "note": "bf16 router, never quantized (vllm-graph 2.3.1)"
+  },
+  {
+   "boundary": "router top-8 selection",
+   "near_ties": [
+    {
+     "token": 5,
+     "sym_diff": [
+      69,
+      84
+     ],
+     "margin": 0.00024716928601264954,
+     "perturbation": 0.03125
+    }
+   ],
+   "unexplained": [],
+   "ok": true,
+   "tokens": 8
+  },
+  {
+   "boundary": "router weights",
+   "frob_rel": 0.011153448152319619,
+   "max_abs": 0.0048828125,
+   "limit": 0.02,
+   "ok": true,
+   "note": "HF rounds these to bf16 (round_weights_to_input_dtype)"
+  },
+  {
+   "boundary": "shared gate_up (un-interleaved)",
+   "frob_rel": 0.017292311400103642,
+   "max_abs": 0.3125,
+   "limit": 0.03,
+   "ok": true,
+   "note": "wrong interleave => O(1) here"
+  },
+  {
+   "boundary": "shared gate_up (own quantized x)",
+   "frob_rel": 0.0,
+   "max_abs": 0.0,
+   "limit": 0.008,
+   "ok": true,
+   "note": "ATTRIBUTION: op fidelity, input drift removed"
+  },
+  {
+   "boundary": "shared silu_mul",
+   "frob_rel": 0.12078615932580127,
+   "max_abs": 1.140625,
+   "limit": 0.15,
+   "ok": true,
+   "note": "input drift x SwiGLU conditioning"
+  },
+  {
+   "boundary": "shared silu_mul (own gate_up)",
+   "frob_rel": 0.0,
+   "max_abs": 0.0,
+   "limit": 0.008,
+   "ok": true,
+   "note": "ATTRIBUTION: op fidelity, input drift removed"
+  },
+  {
+   "boundary": "shared down_proj",
+   "frob_rel": 0.10008041342830479,
+   "max_abs": 0.1796875,
+   "limit": 0.15,
+   "ok": true,
+   "note": "fp8 preserved-scale path, NOT bf16-dequant (M2-I7 flag)"
+  },
+  {
+   "boundary": "shared gate + residual",
+   "frob_rel": 0.012178283199835025,
+   "max_abs": 0.0078125,
+   "limit": 0.03,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "boundary": "BLOCK OUT (h2 + moe)",
+   "frob_rel": 0.014933642674166284,
+   "max_abs": 0.0078125,
+   "limit": 0.05,
+   "ok": true,
+   "note": "deferred-residual form folded into one add (vllm-graph 1.3)"
+  }
+ ],
+ "failures": []
+}

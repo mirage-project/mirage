@@ -1,0 +1,262 @@
+{
+ "rows": [
+  {
+   "check": "gdn gemma_fold dtype/shape",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "gdn input_layernorm via gemma_fold",
+   "frob_rel": 0.0030972214174859116,
+   "max_abs": 0.015625,
+   "limit": 0.006,
+   "ok": true,
+   "note": "bf16 norm-weight store is MPK's representation (I6)"
+  },
+  {
+   "check": "gdn counterfactual no-fold",
+   "frob_rel": 0.9727671888524366,
+   "ok": true,
+   "note": "must MISS"
+  },
+  {
+   "check": "attn gemma_fold dtype/shape",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "attn input_layernorm via gemma_fold",
+   "frob_rel": 0.001961381253933893,
+   "max_abs": 0.0625,
+   "limit": 0.006,
+   "ok": true,
+   "note": "bf16 norm-weight store is MPK's representation (I6)"
+  },
+  {
+   "check": "attn counterfactual no-fold",
+   "frob_rel": 0.860352426068908,
+   "ok": true,
+   "note": "must MISS"
+  },
+  {
+   "check": "gdn norm kept fp32, unfolded",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "gdn gated norm (no fold)",
+   "frob_rel": 0.0,
+   "max_abs": 0.0,
+   "limit": 0.005,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "gdn counterfactual folded gated norm",
+   "frob_rel": 1.5110858042640936,
+   "ok": true,
+   "note": "must MISS"
+  },
+  {
+   "check": "alog_dtbias [2,H] fp32",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "conv1d [C,1,4] -> [C,4] bf16",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "in_proj_ba = [b | a], plain order",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "in_proj_ba fused vs b_proj_out",
+   "frob_rel": 0.0,
+   "max_abs": 0.0,
+   "limit": 0.008,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "in_proj_ba fused vs a_proj_out",
+   "frob_rel": 0.0,
+   "max_abs": 0.0,
+   "limit": 0.008,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "permutation DOES cross scale blocks (the collision)",
+   "exact": true,
+   "ok": true,
+   "note": "if this ever becomes 0 the fp8 rescale is dead code"
+  },
+  {
+   "check": "q floor: fp8, unpermuted, exact scales",
+   "frob_rel": 0.0,
+   "max_abs": 0.0,
+   "limit": 0.008,
+   "ok": true,
+   "note": "the achievable floor"
+  },
+  {
+   "check": "k floor: fp8, unpermuted, exact scales",
+   "frob_rel": 0.0,
+   "max_abs": 0.0,
+   "limit": 0.008,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "q fp8-permute (unpermuted back)",
+   "frob_rel": 0.0021219945725406324,
+   "max_abs": 0.0732421875,
+   "limit": 0.02,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "k fp8-permute (unpermuted back)",
+   "frob_rel": 0.015528455942397837,
+   "max_abs": 0.0625,
+   "limit": 0.02,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "q bf16-dequant-permute (unpermuted back)",
+   "frob_rel": 0.004530565067523369,
+   "max_abs": 0.09375,
+   "limit": 0.05,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "k bf16-dequant-permute (unpermuted back)",
+   "frob_rel": 0.01741443917381867,
+   "max_abs": 0.046875,
+   "limit": 0.05,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "qk representation decision",
+   "ok": true,
+   "table": {
+    "floor_no_permute": {
+     "q": 0.0,
+     "k": 0.0
+    },
+    "fp8_permute": {
+     "q": 0.0021219945725406324,
+     "k": 0.015528455942397837
+    },
+    "bf16_permute": {
+     "q": 0.004530565067523369,
+     "k": 0.01741443917381867
+    }
+   },
+   "winner": "fp8_permute",
+   "q_stats": {
+    "rows": 8192,
+    "row_kblock_entries": 131072,
+    "rescaled_entries": 32640,
+    "rescaled_fraction": 0.2490234375,
+    "frob_rel_vs_exact_permute": 0.012406663966081031,
+    "max_abs_vs_exact_permute": 0.005615234375,
+    "min_ratio": 0.32758620381355286
+   },
+   "k_stats": {
+    "rows": 512,
+    "row_kblock_entries": 8192,
+    "rescaled_entries": 4096,
+    "rescaled_fraction": 0.5,
+    "frob_rel_vs_exact_permute": 0.018549910557004546,
+    "max_abs_vs_exact_permute": 0.00506591796875,
+    "min_ratio": 0.4559471309185028
+   }
+  },
+  {
+   "check": "fused qkvg width == MPK's packed row",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "fused->q|gate slice vs direct q_proj",
+   "frob_rel": 0.0021219945725406324,
+   "max_abs": 0.0732421875,
+   "limit": 0.02,
+   "ok": true,
+   "note": "layout check: a wrong interleave shows up as O(1) error"
+  },
+  {
+   "check": "fused->k slice vs direct k_proj",
+   "frob_rel": 0.015528455942397837,
+   "max_abs": 0.0625,
+   "limit": 0.02,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "fused->v slice vs direct v_proj",
+   "frob_rel": 0.0,
+   "max_abs": 0.0,
+   "limit": 0.02,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "q_norm fold->permute->bf16 (I6 convention)",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "k_norm fold->permute->bf16 (I6 convention)",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "w13 [E,2*inter,H] with [gate;up] packing",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "w13 scale UNEXPANDED [E,2*inter/128,H/128]",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "w2 [E,H,inter] + scale [E,H/128,inter/128]",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "scale is NOT the per-row expansion",
+   "exact": true,
+   "ok": true,
+   "note": ""
+  },
+  {
+   "check": "shared gate_up chunks interleave as [gate|up]",
+   "exact": true,
+   "ok": true,
+   "note": "split=4, 128 rows per chunk"
+  }
+ ],
+ "failures": []
+}
