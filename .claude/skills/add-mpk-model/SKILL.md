@@ -20,21 +20,22 @@ Before writing any model code, identify what the new model needs:
 Model implementations live in **two places**, not just `demo/<model_name>/`:
 
 - **The registry path** — `python/mirage/mpk/models/<model_name>/builder.py`, a `GraphBuilder`
-  subclass (base class in `python/mirage/mpk/models/graph_builder.py`) decorated with
-  `@register_model_builder(...)` (`python/mirage/mpk/model_registry.py`). `MPK.build()` resolves
-  it by name via `get_builder(self.model_name)` (`python/mirage/mpk/mpk.py:458-467`) and calls
-  `build_from_model()`/`build_from_config()`. `models/qwen3/builder.py` and
-  `models/deepseek_v3/builder.py` both do this today — `models/` also holds `eagle3/` and
-  `dflash/` builder classes, but check each for an actual `@register_model_builder(...)` call
+  subclass (base class `GraphBuilder` at `python/mirage/mpk/models/graph_builder.py:44`, config
+  class `MirageModelConfig` at `:8`) decorated with `@register_model_builder(...)` (decorator
+  defined at `python/mirage/mpk/model_registry.py:5`, resolved by `get_builder()` at `:25`).
+  `MPK.build()` calls `get_builder(self.model_name)` then
+  `build_from_model()`/`build_from_config()` (`python/mirage/mpk/mpk.py:458-467`). Two models
+  actually do this today: `models/qwen3/builder.py:12`
+  (`@register_model_builder("Qwen3", "Qwen/Qwen3-8B", ...)`) and
+  `models/deepseek_v3/builder.py:63` (`@register_model_builder("deepseek-v3", "DeepSeek-V3",
+  ...)`). `models/` also holds `eagle3/` and `dflash/` builder classes, but neither's `builder.py`
+  contains a `@register_model_builder(...)` call (verified by grep) — check each one directly
   before assuming `MPK.build()` can reach it by name; not every class under `models/` is
   registered yet.
 - **The inline demo path** — `demo/<model_name>/demo.py` builds a `PersistentKernel` directly and
   never calls `MPK`/`get_builder`. This is the path CI actually exercises (e.g.
-  `demo/qwen3/demo.py`, driven by `tests/ci-tests/run_batch_perf.py`); the registry builder for
-  the same model isn't covered by CI.
-
-`python/mirage/mpk/models/graph_builder.py` still supplies the shared `GraphBuilder`/
-`MirageModelConfig` base that registry builders subclass.
+  `demo/qwen3/demo.py:307`, driven by `tests/ci-tests/run_batch_perf.py`); the registry builder
+  for the same model isn't covered by CI.
 
 ```
 demo/<model_name>/

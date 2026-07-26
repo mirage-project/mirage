@@ -253,7 +253,9 @@ Add a `case` for your new `TaskType`:
 - **Task doesn't use TMA:** add the case with a bare `break;` (e.g.
   `TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100`).
 
-Only one free `TaskType` id (279) sits outside this window; every other free id needs this step.
+Fourteen `TaskType` ids are free below `TASK_SM100_TASK_END = 299` (`runtime_header.h:127-190`) —
+this is not a scarce resource. Thirteen of them (234, 237–247, 250) sit inside the TMA window and
+need a case here; only **one** (279) sits outside it and needs none.
 
 ---
 
@@ -412,7 +414,7 @@ A ratio close to 1.0 everywhere (or max abs error within bfloat16 rounding, ~1e-
 
 After verifying the kernel in isolation (Steps A–C), test it through the full MPK compilation pipeline using test mode. This validates the Python layer method (Step 7), task registration (Steps 5–6), code generation, and runtime dispatch end-to-end.
 
-Per-layer test_mode files live in the same folder as the kernel-wrapper test, at `tests/runtime_python/<arch>/sm100_<layer>/test_<layer>_testmode.py`. There is no shared `pytorch_reference.py` anywhere in the repo (`find tests -name pytorch_reference.py` returns nothing) — each test file defines its own PyTorch reference inline instead, either a small helper function or plain torch ops in the test body. Where a kernel-wrapper test and a test_mode test cover the same layer, each currently keeps its own independent copy rather than sharing one: see `tests/runtime_python/blackwell/sm100_moe_sigmoid/test_gate_topk_sigmoid.py` and its sibling `test_topk_sigmoid_testmode.py`, which both define their own `reference_sigmoid_routing()`. Follow that pattern for a new layer — write the reference inline (copy it from the sibling kernel-wrapper test if one already exists) — rather than creating a `pytorch_reference.py`.
+Per-layer test_mode files live in the same folder as the kernel-wrapper test, at `tests/runtime_python/<arch>/sm100_<layer>/test_<layer>_testmode.py`. There is no shared `pytorch_reference.py` anywhere in the repo — `find tests -name pytorch_reference.py` returns no results — each test file defines its own PyTorch reference inline instead, either a small helper function or plain torch ops in the test body. Where a kernel-wrapper test and a test_mode test cover the same layer, each currently keeps its own independent copy rather than sharing one: `tests/runtime_python/blackwell/sm100_moe_sigmoid/test_gate_topk_sigmoid.py:26` and its sibling `test_topk_sigmoid_testmode.py:33` both define their own `reference_sigmoid_routing()`. Follow that pattern for a new layer — write the reference inline (copy it from the sibling kernel-wrapper test if one already exists) — rather than creating a `pytorch_reference.py`.
 
 Multi-layer pipeline tests that don't correspond to a single layer (e.g., a fused MLP combining several layers) live in `tests/runtime_python/test_mode/`. See the `/test-mode` skill for the complete API guide, examples, and debugging tips.
 
