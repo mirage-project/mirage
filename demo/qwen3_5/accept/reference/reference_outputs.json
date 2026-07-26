@@ -20,7 +20,7 @@
         {
           "class": "AutoModelForCausalLM",
           "ok": true,
-          "seconds": 26.7
+          "seconds": 29.0
         }
       ],
       "loaded_via": "AutoModelForCausalLM"
@@ -453,7 +453,7 @@
       "accelerate": "1.14.0"
     },
     "gpu": "NVIDIA B200",
-    "total_elapsed_seconds": 93.8,
+    "total_elapsed_seconds": 96.6,
     "prompts_file": "/home/muhengl/mpk-qwen35/prompts_readonly_copy.jsonl",
     "num_prompts": 10
   },
@@ -1531,7 +1531,7 @@
         ]
       ],
       "decoded_output": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: Why the Roman Empire split into Eastern and Western halves.\n    *   Constraint: Three concise paragraphs.\n    *   Goal: Explain the reasons clearly and briefly.\n\n2.  **Identify Key Reasons for the",
-      "elapsed_seconds": 28.004
+      "elapsed_seconds": 28.339
     },
     "p02-math": {
       "input_ids": [
@@ -2644,7 +2644,7 @@
         ]
       ],
       "decoded_output": "Here's a thinking process that leads to the solution:\n\n1.  **Understand the Goal:** The objective is to find the specific time when two trains, starting from different stations at different times and moving towards each other, meet.\n\n2.  **Identify the Given Information:**\n    *   **",
-      "elapsed_seconds": 13.151
+      "elapsed_seconds": 16.358
     },
     "p03-python": {
       "input_ids": [
@@ -3733,7 +3733,7 @@
         ]
       ],
       "decoded_output": "The user wants a Python function that finds the longest palindromic substring in O(n^2) time. There are several approaches to this:\n\n1. Expand around center - O(n^2) time, O(1) space\n2. Dynamic programming - O(n^2) time, O(n",
-      "elapsed_seconds": 13.138
+      "elapsed_seconds": 13.053
     },
     "p04-chinese": {
       "input_ids": [
@@ -4810,7 +4810,7 @@
         ]
       ],
       "decoded_output": "Here's a thinking process that leads to the explanation of Mixture of Experts (MoE) and its cost-saving benefits:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** Mixture of Experts (MoE) / \u6df7\u5408\u4e13\u5bb6\u6a21\u578b.\n    *   **Language:** Chinese",
-      "elapsed_seconds": 5.567
+      "elapsed_seconds": 5.531
     },
     "p05-cuda": {
       "input_ids": [
@@ -5891,7 +5891,7 @@
         ]
       ],
       "decoded_output": "Here's a thinking process that leads to the explanation of CUDA shared memory vs. registers and the example:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** CUDA Memory Hierarchy (specifically Shared Memory vs. Registers).\n    *   **Task 1:** Explain the differences (",
-      "elapsed_seconds": 5.589
+      "elapsed_seconds": 5.548
     },
     "p06-poem": {
       "input_ids": [
@@ -6112,7 +6112,7 @@
         62342,
         5552,
         11,
-        288,
+        71439,
         90329,
         47964,
         11,
@@ -6526,7 +6526,7 @@
         ],
         [
           288,
-          288,
+          71439,
           75635,
           91491
         ],
@@ -6960,7 +6960,7 @@
         ]
       ],
       "decoded_output": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: A GPU (Graphics Processing Unit) dreaming of the ocean.\n    *   Format: Six-line poem.\n    *   Tone: Imaginative, perhaps slightly melancholic or wistful (machine vs. nature",
-      "elapsed_seconds": 5.611
+      "elapsed_seconds": 5.487
     },
     "p07-format": {
       "input_ids": [
@@ -8038,7 +8038,7 @@
         ]
       ],
       "decoded_output": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Task: List the planets of the solar system.\n    *   Order: From the Sun (closest to farthest).\n    *   Format: Numbered list.\n    *   Content: Each planet must have one distinguishing",
-      "elapsed_seconds": 5.613
+      "elapsed_seconds": 5.48
     },
     "p08-science": {
       "input_ids": [
@@ -9123,7 +9123,7 @@
         ]
       ],
       "decoded_output": "Here's a thinking process that leads to the suggested answer:\n\n1.  **Analyze the Request:**\n    *   **Core Question:** What is the difference between nuclear fission and fusion?\n    *   **Specific Question 1:** Which one powers the Sun?\n    *   **Specific Question",
-      "elapsed_seconds": 5.703
+      "elapsed_seconds": 5.529
     },
     "p09-translate": {
       "input_ids": [
@@ -10200,7 +10200,7 @@
         ]
       ],
       "decoded_output": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Source sentence: \"The quick brown fox jumps over the lazy dog\" (a famous pangram).\n    *   Target languages: French, German, Japanese.\n    *   Task: Translate the sentence into these three languages.",
-      "elapsed_seconds": 5.676
+      "elapsed_seconds": 5.609
     },
     "p10-logic": {
       "input_ids": [
@@ -11288,7 +11288,7 @@
         ]
       ],
       "decoded_output": "Here's a thinking process that leads to the solution:\n\n1.  **Analyze the Problem:**\n    *   **Items:** 8 identical-looking balls.\n    *   **Condition:** One ball is heavier than the others (all others are equal weight).\n    *   **Tool:** A balance",
-      "elapsed_seconds": 5.624
+      "elapsed_seconds": 5.526
     }
   }
 }

@@ -83,9 +83,12 @@ regeneration record, including a real tie-breaking bug the regeneration hit and 
 way). `reference_loader.py`/`ac3_types.py` needed NO changes — they already consumed
 `top2_id_per_step`/`top2_logit_per_step` defensively, exactly as designed. Confirmed against the
 real artifact: `margin_evidence_summary()` now reports `available: true` for all 640 positions
-(10 prompts × 64 tokens), margins spanning `[0.0, 18.875]`, mean `9.47` (the `0.0` minimum is a
-real observed exact top-1/top-2 logit tie somewhere in the 640 positions, not a bug —
-`generate_reference.py` handles this tie case explicitly, see its comments). A real mismatch
+(10 prompts × 64 tokens), margins spanning `[0.0, 18.875]`, mean `9.47` (the `0.0` minimum
+reflects 2 real observed exact top-1/top-2 logit ties among the 640 positions — e.g.
+`p06-poem` step 56 — each correctly represented as two DISTINCT ids sharing an equal logit, not
+a bug; `generate_reference.py` handles this tie case explicitly, including a caught-and-fixed
+defect where an earlier version silently duplicated the id instead — see
+`../reference/README.md`'s provenance table). A real mismatch
 against today's reference can therefore classify as `candidate_tie_flip` when the evidence
 supports it, not just `insufficient_evidence` — `tests/test_stub_e2e.py::RealVllmSmokeStubTest`
 now asserts `margin_evidence["available"]` is `True` against the real artifact (previously

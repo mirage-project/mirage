@@ -163,3 +163,17 @@ GPU 5: **4 MiB, 0%** — still free (this box's own process from attempt 1 had f
 freeing the 0 MiB reading back up to a residual 4 MiB baseline typical of this box when idle).
 Completed clean, exit 0, all 10 prompts. Lock file removed after this run completed and the
 identity diff (README provenance table) passed.
+
+## Step 7, M2-I3 tie-reconciliation fix (attempt 3), `CUDA_VISIBLE_DEVICES=5`
+
+Review of attempt 2's output caught a real defect (id-duplication under an exact tie, not a GPU
+etiquette issue — see README provenance table "tie-reconciliation fix" row). Same GPU
+re-claimed via the same lock file (`~/mpk-qwen35/.gpu-locks/M2-I3.lock`), re-verified
+immediately before this launch:
+```
+index, memory.used [MiB], utilization.gpu [%]
+5, 5 MiB, 0 %
+```
+GPU 5: **5 MiB, 0%** — still free. Completed clean, exit 0, all 10 prompts, all 640
+positions' `len(set(topk_ids)) == k` assertion passing. Lock file removed after this run
+completed and the identity diff passed for the third time.

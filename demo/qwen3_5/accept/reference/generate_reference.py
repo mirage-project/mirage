@@ -343,18 +343,36 @@ def main():
             topk_vals, topk_idxs = torch.topk(logits_f32, k, dim=-1)
             ids_row = [int(x) for x in topk_idxs.tolist()]
             logits_row = [float(x) for x in topk_vals.tolist()]
-            if ids_row[0] != int(idx.item()):
+            top1_id = int(idx.item())
+            if ids_row[0] != top1_id:
                 # Only reachable on an EXACT top-logit tie (torch.topk resolved it to a
-                # different index than torch.max) -- verify it really is a tie, then force
-                # index 0 to the VERIFIED top1 so the persisted row never disagrees with the
-                # id that was actually generated.
-                assert abs(logits_row[0] - float(val.item())) < 1e-6, (
-                    f"[{pid}] top-k[0] id {ids_row[0]} != torch.max argmax {int(idx.item())} "
-                    f"AND the logits differ ({logits_row[0]} vs {float(val.item())}) - "
-                    f"not a tie, a real bug"
+                # different index than torch.max). FIX (caught in review: an earlier version
+                # blindly OVERWROTE slot 0 with top1_id, which silently DUPLICATED it when
+                # top1_id already occupied a later slot -- e.g. p06-poem step 56 produced
+                # [288, 288, 75635, 91491], dropping the genuinely distinct tied alternative).
+                # Correct handling: the verified top1 (torch.max's pick) shares the max logit,
+                # so it must already be SOMEWHERE in topk's own window -- find it and SWAP it
+                # into slot 0 (both id and logit) rather than overwrite, so the displaced id
+                # survives at its new position and becomes the real, distinct top-2.
+                try:
+                    max_pos = ids_row.index(top1_id)
+                except ValueError:
+                    raise AssertionError(
+                        f"[{pid}] torch.max's argmax id {top1_id} (logit {float(val.item())}) "
+                        f"is not present anywhere in the top-{k} window {ids_row} -- the tie "
+                        f"group is larger than k; increase --topk-logits"
+                    )
+                assert abs(logits_row[max_pos] - float(val.item())) < 1e-6, (
+                    f"[{pid}] found id {top1_id} at topk slot {max_pos} but its logit "
+                    f"{logits_row[max_pos]} != torch.max's {float(val.item())} - not a tie, "
+                    f"a real bug"
                 )
-                ids_row[0] = int(idx.item())
-                logits_row[0] = float(val.item())
+                if max_pos != 0:
+                    ids_row[0], ids_row[max_pos] = ids_row[max_pos], ids_row[0]
+                    logits_row[0], logits_row[max_pos] = logits_row[max_pos], logits_row[0]
+            assert len(set(ids_row)) == k, (
+                f"[{pid}] topk ids not distinct after tie reconciliation: {ids_row}"
+            )
             topk_ids_per_step.append(ids_row)
             topk_logits_per_step.append(logits_row)
         # Sanity: greedy argmax of returned logits must equal the actually
