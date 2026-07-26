@@ -1,0 +1,65 @@
+{
+  "prompt_id": "p08-science",
+  "prompt_len": 40,
+  "reference_output_0": 15380,
+  "mpk_emitted_token": 16933,
+  "final_step": 68,
+  "row_with_reference_first_token": 0,
+  "last_rows": [
+    {
+      "row": 0,
+      "argmax": 15380,
+      "logit": 27.25,
+      "is_reference_first_token": true
+    }
+  ],
+  "all_rows_argmax": [
+    15380
+  ],
+  "consumed_row": 0,
+  "hypothesis": "row 0 (the consumed row) argmaxes to the reference token",
+  "tie_evidence": {
+    "mode": "free_run",
+    "consumed_row": 0,
+    "emitted_equals_argmax_of_consumed_row": false,
+    "emitted_token": 16933,
+    "position": 28,
+    "bf16_ulp_at_this_magnitude": 0.125,
+    "ref_top1": 15380,
+    "mpk_argmax": 15380,
+    "mpk_argmax_logit": 27.25,
+    "mpk_argmax_in_ref_topk": true,
+    "ref_margin_top1_top2": 0.125,
+    "mpk_margin_over_ref_top1": 0.0,
+    "candidates": [
+      {
+        "token_id": 15380,
+        "ref_logit": 27.5,
+        "mpk_logit": 27.25,
+        "delta": -0.25,
+        "delta_ulps": -2.0
+      },
+      {
+        "token_id": 16933,
+        "ref_logit": 27.375,
+        "mpk_logit": 27.25,
+        "delta": -0.125,
+        "delta_ulps": -1.0
+      },
+      {
+        "token_id": 31819,
+        "ref_logit": 25.75,
+        "mpk_logit": 25.375,
+        "delta": -0.375,
+        "delta_ulps": -3.0
+      },
+      {
+        "token_id": 73182,
+        "ref_logit": 23.5,
+        "mpk_logit": 23.625,
+        "delta": 0.125,
+        "delta_ulps": 1.0
+      }
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "batch_size": 8,
+  "note": "informational only -- no perf claim; mbt is fixed across batch sizes for a uniform correctness config, which inflates per-step cost at small bs",
+  "waves": [
+    {
+      "batch_size": 8,
+      "wave": 0,
+      "num_requests": 8,
+      "num_distinct_prompts": 8,
+      "prompt_ids": [
+        "p06-poem",
+        "p01-history",
+        "p04-chinese",
+        "p09-translate",
+        "p07-format",
+        "p05-cuda",
+        "p08-science",
+        "p10-logic"
+      ],
+      "wall_ms": 2119.472900390625,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 19.808157947575936,
+      "tokens_per_s": 403.8740008623071,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    }
+  ],
+  "slot_isolation_checks": []
+}

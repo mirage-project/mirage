@@ -7738,12 +7738,12 @@
           "ref_top2_id": 16933,
           "ref_top2_logit": 27.375,
           "margin": 0.125,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 16933,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
-          "is_first_divergence": false
+          "match": false,
+          "verdict": "candidate_tie_flip",
+          "is_first_divergence": true
         },
         {
           "prompt_id": "p08-science",
@@ -7758,7 +7758,7 @@
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
           "match": true,
-          "verdict": "match",
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7770,11 +7770,11 @@
           "ref_top2_id": 53230,
           "ref_top2_logit": 28.75,
           "margin": 0.25,
-          "engine_argmax_id": 3437,
+          "engine_argmax_id": 36205,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7786,11 +7786,11 @@
           "ref_top2_id": 579,
           "ref_top2_logit": 25.125,
           "margin": 6.75,
-          "engine_argmax_id": 369,
+          "engine_argmax_id": 26432,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7802,11 +7802,11 @@
           "ref_top2_id": 6463,
           "ref_top2_logit": 17.375,
           "margin": 13.375,
-          "engine_argmax_id": 279,
+          "engine_argmax_id": 318,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7818,11 +7818,11 @@
           "ref_top2_id": 28241,
           "ref_top2_logit": 18.75,
           "margin": 12.75,
-          "engine_argmax_id": 6463,
+          "engine_argmax_id": 37,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7834,11 +7834,11 @@
           "ref_top2_id": 10922,
           "ref_top2_logit": 21.75,
           "margin": 13.5,
-          "engine_argmax_id": 1881,
+          "engine_argmax_id": 7319,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7850,11 +7850,11 @@
           "ref_top2_id": 281,
           "ref_top2_logit": 26.125,
           "margin": 8.875,
-          "engine_argmax_id": 10922,
+          "engine_argmax_id": 5972,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7866,11 +7866,11 @@
           "ref_top2_id": 35302,
           "ref_top2_logit": 22.625,
           "margin": 10.875,
-          "engine_argmax_id": 281,
+          "engine_argmax_id": 13,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7882,11 +7882,11 @@
           "ref_top2_id": 1753,
           "ref_top2_logit": 20.5,
           "margin": 14.0,
-          "engine_argmax_id": 7319,
+          "engine_argmax_id": 40835,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7898,11 +7898,11 @@
           "ref_top2_id": 5972,
           "ref_top2_logit": 21.5,
           "margin": 11.5,
-          "engine_argmax_id": 321,
+          "engine_argmax_id": 553,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7914,11 +7914,11 @@
           "ref_top2_id": 10922,
           "ref_top2_logit": 24.25,
           "margin": 2.875,
-          "engine_argmax_id": 35302,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7930,11 +7930,11 @@
           "ref_top2_id": 4649,
           "ref_top2_logit": 17.125,
           "margin": 14.375,
-          "engine_argmax_id": 30,
+          "engine_argmax_id": 262,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7946,11 +7946,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 19.125,
           "margin": 11.875,
-          "engine_argmax_id": 198,
+          "engine_argmax_id": 348,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7962,11 +7962,11 @@
           "ref_top2_id": 248069,
           "ref_top2_logit": 16.125,
           "margin": 11.0,
-          "engine_argmax_id": 262,
+          "engine_argmax_id": 256,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7978,11 +7978,11 @@
           "ref_top2_id": 220,
           "ref_top2_logit": 15.5,
           "margin": 13.625,
-          "engine_argmax_id": 348,
+          "engine_argmax_id": 2972,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -7994,11 +7994,11 @@
           "ref_top2_id": 257,
           "ref_top2_logit": 23.375,
           "margin": 14.625,
-          "engine_argmax_id": 256,
+          "engine_argmax_id": 1536,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8010,11 +8010,11 @@
           "ref_top2_id": 348,
           "ref_top2_logit": 18.125,
           "margin": 13.125,
-          "engine_argmax_id": 2972,
+          "engine_argmax_id": 22656,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8026,11 +8026,11 @@
           "ref_top2_id": 3036,
           "ref_top2_logit": 26.25,
           "margin": 1.25,
-          "engine_argmax_id": 45930,
+          "engine_argmax_id": 64700,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8042,11 +8042,11 @@
           "ref_top2_id": 3593,
           "ref_top2_logit": 22.375,
           "margin": 0.625,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8058,11 +8058,11 @@
           "ref_top2_id": 64700,
           "ref_top2_logit": 25.625,
           "margin": 3.875,
-          "engine_argmax_id": 220,
+          "engine_argmax_id": 285,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8074,11 +8074,11 @@
           "ref_top2_id": 17,
           "ref_top2_logit": 22.125,
           "margin": 7.25,
-          "engine_argmax_id": 16,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8090,11 +8090,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 20.375,
           "margin": 12.125,
-          "engine_argmax_id": 64700,
+          "engine_argmax_id": 16,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8106,11 +8106,11 @@
           "ref_top2_id": 864,
           "ref_top2_logit": 22.0,
           "margin": 10.75,
-          "engine_argmax_id": 15451,
+          "engine_argmax_id": 13,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8122,11 +8122,11 @@
           "ref_top2_id": 13043,
           "ref_top2_logit": 23.125,
           "margin": 6.625,
-          "engine_argmax_id": 799,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8138,11 +8138,11 @@
           "ref_top2_id": 43532,
           "ref_top2_logit": 18.5,
           "margin": 12.5,
-          "engine_argmax_id": 13043,
+          "engine_argmax_id": 3437,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8154,11 +8154,11 @@
           "ref_top2_id": 30,
           "ref_top2_logit": 17.5,
           "margin": 16.75,
-          "engine_argmax_id": 279,
+          "engine_argmax_id": 369,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8170,11 +8170,11 @@
           "ref_top2_id": 6797,
           "ref_top2_logit": 22.375,
           "margin": 10.125,
-          "engine_argmax_id": 7806,
+          "engine_argmax_id": 279,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8186,11 +8186,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 22.0,
           "margin": 8.625,
-          "engine_argmax_id": 30,
+          "engine_argmax_id": 6463,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8202,11 +8202,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 18.625,
           "margin": 10.75,
-          "engine_argmax_id": 198,
+          "engine_argmax_id": 1881,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8218,11 +8218,11 @@
           "ref_top2_id": 285,
           "ref_top2_logit": 17.75,
           "margin": 11.375,
-          "engine_argmax_id": 262,
+          "engine_argmax_id": 1070,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8234,11 +8234,11 @@
           "ref_top2_id": 220,
           "ref_top2_logit": 18.5,
           "margin": 14.0,
-          "engine_argmax_id": 348,
+          "engine_argmax_id": 30,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8250,11 +8250,11 @@
           "ref_top2_id": 257,
           "ref_top2_logit": 18.625,
           "margin": 14.625,
-          "engine_argmax_id": 256,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8266,11 +8266,11 @@
           "ref_top2_id": 348,
           "ref_top2_logit": 22.25,
           "margin": 8.5,
-          "engine_argmax_id": 2972,
+          "engine_argmax_id": 285,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8282,11 +8282,11 @@
           "ref_top2_id": 27344,
           "ref_top2_logit": 21.125,
           "margin": 12.125,
-          "engine_argmax_id": 45930,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -8298,17 +8298,41 @@
           "ref_top2_id": 3296,
           "ref_top2_logit": 19.0,
           "margin": 11.75,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 17,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         }
       ],
-      "passed": true,
-      "first_divergent_position": null,
-      "waiver_request": null
+      "passed": false,
+      "first_divergent_position": 28,
+      "waiver_request": {
+        "prompt_id": "p08-science",
+        "batch_size": 1,
+        "first_divergent_position": 28,
+        "evidence": {
+          "prompt_id": "p08-science",
+          "batch_size": 1,
+          "position": 28,
+          "ref_top1_id": 15380,
+          "ref_top1_logit": 27.5,
+          "ref_top2_id": 16933,
+          "ref_top2_logit": 27.375,
+          "margin": 0.125,
+          "engine_argmax_id": 16933,
+          "engine_logit_at_ref_top1": null,
+          "engine_logit_at_ref_top2": null,
+          "match": false,
+          "verdict": "candidate_tie_flip",
+          "is_first_divergence": true
+        },
+        "classifier_verdict": "candidate_tie_flip",
+        "auto_waived": false,
+        "needs_human_adjudication": true,
+        "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
+      }
     },
     {
       "prompt_id": "p09-translate",
@@ -18092,12 +18116,12 @@
           "ref_top2_id": 16933,
           "ref_top2_logit": 27.375,
           "margin": 0.125,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 16933,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
-          "is_first_divergence": false
+          "match": false,
+          "verdict": "candidate_tie_flip",
+          "is_first_divergence": true
         },
         {
           "prompt_id": "p08-science",
@@ -18112,7 +18136,7 @@
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
           "match": true,
-          "verdict": "match",
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18124,11 +18148,11 @@
           "ref_top2_id": 53230,
           "ref_top2_logit": 28.75,
           "margin": 0.25,
-          "engine_argmax_id": 3437,
+          "engine_argmax_id": 36205,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18140,11 +18164,11 @@
           "ref_top2_id": 579,
           "ref_top2_logit": 25.125,
           "margin": 6.75,
-          "engine_argmax_id": 369,
+          "engine_argmax_id": 26432,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18156,11 +18180,11 @@
           "ref_top2_id": 6463,
           "ref_top2_logit": 17.375,
           "margin": 13.375,
-          "engine_argmax_id": 279,
+          "engine_argmax_id": 318,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18172,11 +18196,11 @@
           "ref_top2_id": 28241,
           "ref_top2_logit": 18.75,
           "margin": 12.75,
-          "engine_argmax_id": 6463,
+          "engine_argmax_id": 37,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18188,11 +18212,11 @@
           "ref_top2_id": 10922,
           "ref_top2_logit": 21.75,
           "margin": 13.5,
-          "engine_argmax_id": 1881,
+          "engine_argmax_id": 7319,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18204,11 +18228,11 @@
           "ref_top2_id": 281,
           "ref_top2_logit": 26.125,
           "margin": 8.875,
-          "engine_argmax_id": 10922,
+          "engine_argmax_id": 5972,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18220,11 +18244,11 @@
           "ref_top2_id": 35302,
           "ref_top2_logit": 22.625,
           "margin": 10.875,
-          "engine_argmax_id": 281,
+          "engine_argmax_id": 13,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18236,11 +18260,11 @@
           "ref_top2_id": 1753,
           "ref_top2_logit": 20.5,
           "margin": 14.0,
-          "engine_argmax_id": 7319,
+          "engine_argmax_id": 40835,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18252,11 +18276,11 @@
           "ref_top2_id": 5972,
           "ref_top2_logit": 21.5,
           "margin": 11.5,
-          "engine_argmax_id": 321,
+          "engine_argmax_id": 553,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18268,11 +18292,11 @@
           "ref_top2_id": 10922,
           "ref_top2_logit": 24.25,
           "margin": 2.875,
-          "engine_argmax_id": 35302,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18284,11 +18308,11 @@
           "ref_top2_id": 4649,
           "ref_top2_logit": 17.125,
           "margin": 14.375,
-          "engine_argmax_id": 30,
+          "engine_argmax_id": 262,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18300,11 +18324,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 19.125,
           "margin": 11.875,
-          "engine_argmax_id": 198,
+          "engine_argmax_id": 348,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18316,11 +18340,11 @@
           "ref_top2_id": 248069,
           "ref_top2_logit": 16.125,
           "margin": 11.0,
-          "engine_argmax_id": 262,
+          "engine_argmax_id": 256,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18332,11 +18356,11 @@
           "ref_top2_id": 220,
           "ref_top2_logit": 15.5,
           "margin": 13.625,
-          "engine_argmax_id": 348,
+          "engine_argmax_id": 2972,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18348,11 +18372,11 @@
           "ref_top2_id": 257,
           "ref_top2_logit": 23.375,
           "margin": 14.625,
-          "engine_argmax_id": 256,
+          "engine_argmax_id": 1536,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18364,11 +18388,11 @@
           "ref_top2_id": 348,
           "ref_top2_logit": 18.125,
           "margin": 13.125,
-          "engine_argmax_id": 2972,
+          "engine_argmax_id": 22656,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18380,11 +18404,11 @@
           "ref_top2_id": 3036,
           "ref_top2_logit": 26.25,
           "margin": 1.25,
-          "engine_argmax_id": 45930,
+          "engine_argmax_id": 64700,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18396,11 +18420,11 @@
           "ref_top2_id": 3593,
           "ref_top2_logit": 22.375,
           "margin": 0.625,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18412,11 +18436,11 @@
           "ref_top2_id": 64700,
           "ref_top2_logit": 25.625,
           "margin": 3.875,
-          "engine_argmax_id": 220,
+          "engine_argmax_id": 285,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18428,11 +18452,11 @@
           "ref_top2_id": 17,
           "ref_top2_logit": 22.125,
           "margin": 7.25,
-          "engine_argmax_id": 16,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18444,11 +18468,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 20.375,
           "margin": 12.125,
-          "engine_argmax_id": 64700,
+          "engine_argmax_id": 16,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18460,11 +18484,11 @@
           "ref_top2_id": 864,
           "ref_top2_logit": 22.0,
           "margin": 10.75,
-          "engine_argmax_id": 15451,
+          "engine_argmax_id": 13,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18476,11 +18500,11 @@
           "ref_top2_id": 13043,
           "ref_top2_logit": 23.125,
           "margin": 6.625,
-          "engine_argmax_id": 799,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18492,11 +18516,11 @@
           "ref_top2_id": 43532,
           "ref_top2_logit": 18.5,
           "margin": 12.5,
-          "engine_argmax_id": 13043,
+          "engine_argmax_id": 3437,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18508,11 +18532,11 @@
           "ref_top2_id": 30,
           "ref_top2_logit": 17.5,
           "margin": 16.75,
-          "engine_argmax_id": 279,
+          "engine_argmax_id": 369,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18524,11 +18548,11 @@
           "ref_top2_id": 6797,
           "ref_top2_logit": 22.375,
           "margin": 10.125,
-          "engine_argmax_id": 7806,
+          "engine_argmax_id": 279,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18540,11 +18564,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 22.0,
           "margin": 8.625,
-          "engine_argmax_id": 30,
+          "engine_argmax_id": 6463,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18556,11 +18580,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 18.625,
           "margin": 10.75,
-          "engine_argmax_id": 198,
+          "engine_argmax_id": 1881,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18572,11 +18596,11 @@
           "ref_top2_id": 285,
           "ref_top2_logit": 17.75,
           "margin": 11.375,
-          "engine_argmax_id": 262,
+          "engine_argmax_id": 1070,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18588,11 +18612,11 @@
           "ref_top2_id": 220,
           "ref_top2_logit": 18.5,
           "margin": 14.0,
-          "engine_argmax_id": 348,
+          "engine_argmax_id": 30,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18604,11 +18628,11 @@
           "ref_top2_id": 257,
           "ref_top2_logit": 18.625,
           "margin": 14.625,
-          "engine_argmax_id": 256,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18620,11 +18644,11 @@
           "ref_top2_id": 348,
           "ref_top2_logit": 22.25,
           "margin": 8.5,
-          "engine_argmax_id": 2972,
+          "engine_argmax_id": 285,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18636,11 +18660,11 @@
           "ref_top2_id": 27344,
           "ref_top2_logit": 21.125,
           "margin": 12.125,
-          "engine_argmax_id": 45930,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -18652,17 +18676,41 @@
           "ref_top2_id": 3296,
           "ref_top2_logit": 19.0,
           "margin": 11.75,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 17,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         }
       ],
-      "passed": true,
-      "first_divergent_position": null,
-      "waiver_request": null
+      "passed": false,
+      "first_divergent_position": 28,
+      "waiver_request": {
+        "prompt_id": "p08-science",
+        "batch_size": 2,
+        "first_divergent_position": 28,
+        "evidence": {
+          "prompt_id": "p08-science",
+          "batch_size": 2,
+          "position": 28,
+          "ref_top1_id": 15380,
+          "ref_top1_logit": 27.5,
+          "ref_top2_id": 16933,
+          "ref_top2_logit": 27.375,
+          "margin": 0.125,
+          "engine_argmax_id": 16933,
+          "engine_logit_at_ref_top1": null,
+          "engine_logit_at_ref_top2": null,
+          "match": false,
+          "verdict": "candidate_tie_flip",
+          "is_first_divergence": true
+        },
+        "classifier_verdict": "candidate_tie_flip",
+        "auto_waived": false,
+        "needs_human_adjudication": true,
+        "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
+      }
     },
     {
       "prompt_id": "p09-translate",
@@ -28446,12 +28494,12 @@
           "ref_top2_id": 16933,
           "ref_top2_logit": 27.375,
           "margin": 0.125,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 16933,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
-          "is_first_divergence": false
+          "match": false,
+          "verdict": "candidate_tie_flip",
+          "is_first_divergence": true
         },
         {
           "prompt_id": "p08-science",
@@ -28466,7 +28514,7 @@
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
           "match": true,
-          "verdict": "match",
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28478,11 +28526,11 @@
           "ref_top2_id": 53230,
           "ref_top2_logit": 28.75,
           "margin": 0.25,
-          "engine_argmax_id": 3437,
+          "engine_argmax_id": 36205,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28494,11 +28542,11 @@
           "ref_top2_id": 579,
           "ref_top2_logit": 25.125,
           "margin": 6.75,
-          "engine_argmax_id": 369,
+          "engine_argmax_id": 26432,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28510,11 +28558,11 @@
           "ref_top2_id": 6463,
           "ref_top2_logit": 17.375,
           "margin": 13.375,
-          "engine_argmax_id": 279,
+          "engine_argmax_id": 318,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28526,11 +28574,11 @@
           "ref_top2_id": 28241,
           "ref_top2_logit": 18.75,
           "margin": 12.75,
-          "engine_argmax_id": 6463,
+          "engine_argmax_id": 37,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28542,11 +28590,11 @@
           "ref_top2_id": 10922,
           "ref_top2_logit": 21.75,
           "margin": 13.5,
-          "engine_argmax_id": 1881,
+          "engine_argmax_id": 7319,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28558,11 +28606,11 @@
           "ref_top2_id": 281,
           "ref_top2_logit": 26.125,
           "margin": 8.875,
-          "engine_argmax_id": 10922,
+          "engine_argmax_id": 5972,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28574,11 +28622,11 @@
           "ref_top2_id": 35302,
           "ref_top2_logit": 22.625,
           "margin": 10.875,
-          "engine_argmax_id": 281,
+          "engine_argmax_id": 13,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28590,11 +28638,11 @@
           "ref_top2_id": 1753,
           "ref_top2_logit": 20.5,
           "margin": 14.0,
-          "engine_argmax_id": 7319,
+          "engine_argmax_id": 40835,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28606,11 +28654,11 @@
           "ref_top2_id": 5972,
           "ref_top2_logit": 21.5,
           "margin": 11.5,
-          "engine_argmax_id": 321,
+          "engine_argmax_id": 553,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28622,11 +28670,11 @@
           "ref_top2_id": 10922,
           "ref_top2_logit": 24.25,
           "margin": 2.875,
-          "engine_argmax_id": 35302,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28638,11 +28686,11 @@
           "ref_top2_id": 4649,
           "ref_top2_logit": 17.125,
           "margin": 14.375,
-          "engine_argmax_id": 30,
+          "engine_argmax_id": 262,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28654,11 +28702,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 19.125,
           "margin": 11.875,
-          "engine_argmax_id": 198,
+          "engine_argmax_id": 348,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28670,11 +28718,11 @@
           "ref_top2_id": 248069,
           "ref_top2_logit": 16.125,
           "margin": 11.0,
-          "engine_argmax_id": 262,
+          "engine_argmax_id": 256,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28686,11 +28734,11 @@
           "ref_top2_id": 220,
           "ref_top2_logit": 15.5,
           "margin": 13.625,
-          "engine_argmax_id": 348,
+          "engine_argmax_id": 2972,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28702,11 +28750,11 @@
           "ref_top2_id": 257,
           "ref_top2_logit": 23.375,
           "margin": 14.625,
-          "engine_argmax_id": 256,
+          "engine_argmax_id": 1536,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28718,11 +28766,11 @@
           "ref_top2_id": 348,
           "ref_top2_logit": 18.125,
           "margin": 13.125,
-          "engine_argmax_id": 2972,
+          "engine_argmax_id": 22656,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28734,11 +28782,11 @@
           "ref_top2_id": 3036,
           "ref_top2_logit": 26.25,
           "margin": 1.25,
-          "engine_argmax_id": 45930,
+          "engine_argmax_id": 64700,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28750,11 +28798,11 @@
           "ref_top2_id": 3593,
           "ref_top2_logit": 22.375,
           "margin": 0.625,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28766,11 +28814,11 @@
           "ref_top2_id": 64700,
           "ref_top2_logit": 25.625,
           "margin": 3.875,
-          "engine_argmax_id": 220,
+          "engine_argmax_id": 285,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28782,11 +28830,11 @@
           "ref_top2_id": 17,
           "ref_top2_logit": 22.125,
           "margin": 7.25,
-          "engine_argmax_id": 16,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28798,11 +28846,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 20.375,
           "margin": 12.125,
-          "engine_argmax_id": 64700,
+          "engine_argmax_id": 16,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28814,11 +28862,11 @@
           "ref_top2_id": 864,
           "ref_top2_logit": 22.0,
           "margin": 10.75,
-          "engine_argmax_id": 15451,
+          "engine_argmax_id": 13,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28830,11 +28878,11 @@
           "ref_top2_id": 13043,
           "ref_top2_logit": 23.125,
           "margin": 6.625,
-          "engine_argmax_id": 799,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28846,11 +28894,11 @@
           "ref_top2_id": 43532,
           "ref_top2_logit": 18.5,
           "margin": 12.5,
-          "engine_argmax_id": 13043,
+          "engine_argmax_id": 3437,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28862,11 +28910,11 @@
           "ref_top2_id": 30,
           "ref_top2_logit": 17.5,
           "margin": 16.75,
-          "engine_argmax_id": 279,
+          "engine_argmax_id": 369,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28878,11 +28926,11 @@
           "ref_top2_id": 6797,
           "ref_top2_logit": 22.375,
           "margin": 10.125,
-          "engine_argmax_id": 7806,
+          "engine_argmax_id": 279,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28894,11 +28942,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 22.0,
           "margin": 8.625,
-          "engine_argmax_id": 30,
+          "engine_argmax_id": 6463,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28910,11 +28958,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 18.625,
           "margin": 10.75,
-          "engine_argmax_id": 198,
+          "engine_argmax_id": 1881,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28926,11 +28974,11 @@
           "ref_top2_id": 285,
           "ref_top2_logit": 17.75,
           "margin": 11.375,
-          "engine_argmax_id": 262,
+          "engine_argmax_id": 1070,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28942,11 +28990,11 @@
           "ref_top2_id": 220,
           "ref_top2_logit": 18.5,
           "margin": 14.0,
-          "engine_argmax_id": 348,
+          "engine_argmax_id": 30,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28958,11 +29006,11 @@
           "ref_top2_id": 257,
           "ref_top2_logit": 18.625,
           "margin": 14.625,
-          "engine_argmax_id": 256,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28974,11 +29022,11 @@
           "ref_top2_id": 348,
           "ref_top2_logit": 22.25,
           "margin": 8.5,
-          "engine_argmax_id": 2972,
+          "engine_argmax_id": 285,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -28990,11 +29038,11 @@
           "ref_top2_id": 27344,
           "ref_top2_logit": 21.125,
           "margin": 12.125,
-          "engine_argmax_id": 45930,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -29006,17 +29054,41 @@
           "ref_top2_id": 3296,
           "ref_top2_logit": 19.0,
           "margin": 11.75,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 17,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         }
       ],
-      "passed": true,
-      "first_divergent_position": null,
-      "waiver_request": null
+      "passed": false,
+      "first_divergent_position": 28,
+      "waiver_request": {
+        "prompt_id": "p08-science",
+        "batch_size": 4,
+        "first_divergent_position": 28,
+        "evidence": {
+          "prompt_id": "p08-science",
+          "batch_size": 4,
+          "position": 28,
+          "ref_top1_id": 15380,
+          "ref_top1_logit": 27.5,
+          "ref_top2_id": 16933,
+          "ref_top2_logit": 27.375,
+          "margin": 0.125,
+          "engine_argmax_id": 16933,
+          "engine_logit_at_ref_top1": null,
+          "engine_logit_at_ref_top2": null,
+          "match": false,
+          "verdict": "candidate_tie_flip",
+          "is_first_divergence": true
+        },
+        "classifier_verdict": "candidate_tie_flip",
+        "auto_waived": false,
+        "needs_human_adjudication": true,
+        "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
+      }
     },
     {
       "prompt_id": "p09-translate",
@@ -38800,12 +38872,12 @@
           "ref_top2_id": 16933,
           "ref_top2_logit": 27.375,
           "margin": 0.125,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 16933,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
-          "is_first_divergence": false
+          "match": false,
+          "verdict": "candidate_tie_flip",
+          "is_first_divergence": true
         },
         {
           "prompt_id": "p08-science",
@@ -38820,7 +38892,7 @@
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
           "match": true,
-          "verdict": "match",
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -38832,11 +38904,11 @@
           "ref_top2_id": 53230,
           "ref_top2_logit": 28.75,
           "margin": 0.25,
-          "engine_argmax_id": 3437,
+          "engine_argmax_id": 36205,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -38848,11 +38920,11 @@
           "ref_top2_id": 579,
           "ref_top2_logit": 25.125,
           "margin": 6.75,
-          "engine_argmax_id": 369,
+          "engine_argmax_id": 26432,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -38864,11 +38936,11 @@
           "ref_top2_id": 6463,
           "ref_top2_logit": 17.375,
           "margin": 13.375,
-          "engine_argmax_id": 279,
+          "engine_argmax_id": 318,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -38880,11 +38952,11 @@
           "ref_top2_id": 28241,
           "ref_top2_logit": 18.75,
           "margin": 12.75,
-          "engine_argmax_id": 6463,
+          "engine_argmax_id": 37,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -38896,11 +38968,11 @@
           "ref_top2_id": 10922,
           "ref_top2_logit": 21.75,
           "margin": 13.5,
-          "engine_argmax_id": 1881,
+          "engine_argmax_id": 7319,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -38912,11 +38984,11 @@
           "ref_top2_id": 281,
           "ref_top2_logit": 26.125,
           "margin": 8.875,
-          "engine_argmax_id": 10922,
+          "engine_argmax_id": 5972,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -38928,11 +39000,11 @@
           "ref_top2_id": 35302,
           "ref_top2_logit": 22.625,
           "margin": 10.875,
-          "engine_argmax_id": 281,
+          "engine_argmax_id": 13,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -38944,11 +39016,11 @@
           "ref_top2_id": 1753,
           "ref_top2_logit": 20.5,
           "margin": 14.0,
-          "engine_argmax_id": 7319,
+          "engine_argmax_id": 40835,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -38960,11 +39032,11 @@
           "ref_top2_id": 5972,
           "ref_top2_logit": 21.5,
           "margin": 11.5,
-          "engine_argmax_id": 321,
+          "engine_argmax_id": 553,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -38976,11 +39048,11 @@
           "ref_top2_id": 10922,
           "ref_top2_logit": 24.25,
           "margin": 2.875,
-          "engine_argmax_id": 35302,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -38992,11 +39064,11 @@
           "ref_top2_id": 4649,
           "ref_top2_logit": 17.125,
           "margin": 14.375,
-          "engine_argmax_id": 30,
+          "engine_argmax_id": 262,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39008,11 +39080,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 19.125,
           "margin": 11.875,
-          "engine_argmax_id": 198,
+          "engine_argmax_id": 348,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39024,11 +39096,11 @@
           "ref_top2_id": 248069,
           "ref_top2_logit": 16.125,
           "margin": 11.0,
-          "engine_argmax_id": 262,
+          "engine_argmax_id": 256,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39040,11 +39112,11 @@
           "ref_top2_id": 220,
           "ref_top2_logit": 15.5,
           "margin": 13.625,
-          "engine_argmax_id": 348,
+          "engine_argmax_id": 2972,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39056,11 +39128,11 @@
           "ref_top2_id": 257,
           "ref_top2_logit": 23.375,
           "margin": 14.625,
-          "engine_argmax_id": 256,
+          "engine_argmax_id": 1536,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39072,11 +39144,11 @@
           "ref_top2_id": 348,
           "ref_top2_logit": 18.125,
           "margin": 13.125,
-          "engine_argmax_id": 2972,
+          "engine_argmax_id": 22656,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39088,11 +39160,11 @@
           "ref_top2_id": 3036,
           "ref_top2_logit": 26.25,
           "margin": 1.25,
-          "engine_argmax_id": 45930,
+          "engine_argmax_id": 64700,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39104,11 +39176,11 @@
           "ref_top2_id": 3593,
           "ref_top2_logit": 22.375,
           "margin": 0.625,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39120,11 +39192,11 @@
           "ref_top2_id": 64700,
           "ref_top2_logit": 25.625,
           "margin": 3.875,
-          "engine_argmax_id": 220,
+          "engine_argmax_id": 285,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39136,11 +39208,11 @@
           "ref_top2_id": 17,
           "ref_top2_logit": 22.125,
           "margin": 7.25,
-          "engine_argmax_id": 16,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39152,11 +39224,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 20.375,
           "margin": 12.125,
-          "engine_argmax_id": 64700,
+          "engine_argmax_id": 16,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39168,11 +39240,11 @@
           "ref_top2_id": 864,
           "ref_top2_logit": 22.0,
           "margin": 10.75,
-          "engine_argmax_id": 15451,
+          "engine_argmax_id": 13,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39184,11 +39256,11 @@
           "ref_top2_id": 13043,
           "ref_top2_logit": 23.125,
           "margin": 6.625,
-          "engine_argmax_id": 799,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39200,11 +39272,11 @@
           "ref_top2_id": 43532,
           "ref_top2_logit": 18.5,
           "margin": 12.5,
-          "engine_argmax_id": 13043,
+          "engine_argmax_id": 3437,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39216,11 +39288,11 @@
           "ref_top2_id": 30,
           "ref_top2_logit": 17.5,
           "margin": 16.75,
-          "engine_argmax_id": 279,
+          "engine_argmax_id": 369,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39232,11 +39304,11 @@
           "ref_top2_id": 6797,
           "ref_top2_logit": 22.375,
           "margin": 10.125,
-          "engine_argmax_id": 7806,
+          "engine_argmax_id": 279,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39248,11 +39320,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 22.0,
           "margin": 8.625,
-          "engine_argmax_id": 30,
+          "engine_argmax_id": 6463,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39264,11 +39336,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 18.625,
           "margin": 10.75,
-          "engine_argmax_id": 198,
+          "engine_argmax_id": 1881,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39280,11 +39352,11 @@
           "ref_top2_id": 285,
           "ref_top2_logit": 17.75,
           "margin": 11.375,
-          "engine_argmax_id": 262,
+          "engine_argmax_id": 1070,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39296,11 +39368,11 @@
           "ref_top2_id": 220,
           "ref_top2_logit": 18.5,
           "margin": 14.0,
-          "engine_argmax_id": 348,
+          "engine_argmax_id": 30,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39312,11 +39384,11 @@
           "ref_top2_id": 257,
           "ref_top2_logit": 18.625,
           "margin": 14.625,
-          "engine_argmax_id": 256,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39328,11 +39400,11 @@
           "ref_top2_id": 348,
           "ref_top2_logit": 22.25,
           "margin": 8.5,
-          "engine_argmax_id": 2972,
+          "engine_argmax_id": 285,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39344,11 +39416,11 @@
           "ref_top2_id": 27344,
           "ref_top2_logit": 21.125,
           "margin": 12.125,
-          "engine_argmax_id": 45930,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -39360,17 +39432,41 @@
           "ref_top2_id": 3296,
           "ref_top2_logit": 19.0,
           "margin": 11.75,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 17,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         }
       ],
-      "passed": true,
-      "first_divergent_position": null,
-      "waiver_request": null
+      "passed": false,
+      "first_divergent_position": 28,
+      "waiver_request": {
+        "prompt_id": "p08-science",
+        "batch_size": 8,
+        "first_divergent_position": 28,
+        "evidence": {
+          "prompt_id": "p08-science",
+          "batch_size": 8,
+          "position": 28,
+          "ref_top1_id": 15380,
+          "ref_top1_logit": 27.5,
+          "ref_top2_id": 16933,
+          "ref_top2_logit": 27.375,
+          "margin": 0.125,
+          "engine_argmax_id": 16933,
+          "engine_logit_at_ref_top1": null,
+          "engine_logit_at_ref_top2": null,
+          "match": false,
+          "verdict": "candidate_tie_flip",
+          "is_first_divergence": true
+        },
+        "classifier_verdict": "candidate_tie_flip",
+        "auto_waived": false,
+        "needs_human_adjudication": true,
+        "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
+      }
     },
     {
       "prompt_id": "p09-translate",
@@ -49154,12 +49250,12 @@
           "ref_top2_id": 16933,
           "ref_top2_logit": 27.375,
           "margin": 0.125,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 16933,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
-          "is_first_divergence": false
+          "match": false,
+          "verdict": "candidate_tie_flip",
+          "is_first_divergence": true
         },
         {
           "prompt_id": "p08-science",
@@ -49174,7 +49270,7 @@
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
           "match": true,
-          "verdict": "match",
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49186,11 +49282,11 @@
           "ref_top2_id": 53230,
           "ref_top2_logit": 28.75,
           "margin": 0.25,
-          "engine_argmax_id": 3437,
+          "engine_argmax_id": 36205,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49202,11 +49298,11 @@
           "ref_top2_id": 579,
           "ref_top2_logit": 25.125,
           "margin": 6.75,
-          "engine_argmax_id": 369,
+          "engine_argmax_id": 26432,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49218,11 +49314,11 @@
           "ref_top2_id": 6463,
           "ref_top2_logit": 17.375,
           "margin": 13.375,
-          "engine_argmax_id": 279,
+          "engine_argmax_id": 318,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49234,11 +49330,11 @@
           "ref_top2_id": 28241,
           "ref_top2_logit": 18.75,
           "margin": 12.75,
-          "engine_argmax_id": 6463,
+          "engine_argmax_id": 37,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49250,11 +49346,11 @@
           "ref_top2_id": 10922,
           "ref_top2_logit": 21.75,
           "margin": 13.5,
-          "engine_argmax_id": 1881,
+          "engine_argmax_id": 7319,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49266,11 +49362,11 @@
           "ref_top2_id": 281,
           "ref_top2_logit": 26.125,
           "margin": 8.875,
-          "engine_argmax_id": 10922,
+          "engine_argmax_id": 5972,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49282,11 +49378,11 @@
           "ref_top2_id": 35302,
           "ref_top2_logit": 22.625,
           "margin": 10.875,
-          "engine_argmax_id": 281,
+          "engine_argmax_id": 13,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49298,11 +49394,11 @@
           "ref_top2_id": 1753,
           "ref_top2_logit": 20.5,
           "margin": 14.0,
-          "engine_argmax_id": 7319,
+          "engine_argmax_id": 40835,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49314,11 +49410,11 @@
           "ref_top2_id": 5972,
           "ref_top2_logit": 21.5,
           "margin": 11.5,
-          "engine_argmax_id": 321,
+          "engine_argmax_id": 553,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49330,11 +49426,11 @@
           "ref_top2_id": 10922,
           "ref_top2_logit": 24.25,
           "margin": 2.875,
-          "engine_argmax_id": 35302,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49346,11 +49442,11 @@
           "ref_top2_id": 4649,
           "ref_top2_logit": 17.125,
           "margin": 14.375,
-          "engine_argmax_id": 30,
+          "engine_argmax_id": 262,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49362,11 +49458,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 19.125,
           "margin": 11.875,
-          "engine_argmax_id": 198,
+          "engine_argmax_id": 348,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49378,11 +49474,11 @@
           "ref_top2_id": 248069,
           "ref_top2_logit": 16.125,
           "margin": 11.0,
-          "engine_argmax_id": 262,
+          "engine_argmax_id": 256,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49394,11 +49490,11 @@
           "ref_top2_id": 220,
           "ref_top2_logit": 15.5,
           "margin": 13.625,
-          "engine_argmax_id": 348,
+          "engine_argmax_id": 2972,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49410,11 +49506,11 @@
           "ref_top2_id": 257,
           "ref_top2_logit": 23.375,
           "margin": 14.625,
-          "engine_argmax_id": 256,
+          "engine_argmax_id": 1536,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49426,11 +49522,11 @@
           "ref_top2_id": 348,
           "ref_top2_logit": 18.125,
           "margin": 13.125,
-          "engine_argmax_id": 2972,
+          "engine_argmax_id": 22656,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49442,11 +49538,11 @@
           "ref_top2_id": 3036,
           "ref_top2_logit": 26.25,
           "margin": 1.25,
-          "engine_argmax_id": 45930,
+          "engine_argmax_id": 64700,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49458,11 +49554,11 @@
           "ref_top2_id": 3593,
           "ref_top2_logit": 22.375,
           "margin": 0.625,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49474,11 +49570,11 @@
           "ref_top2_id": 64700,
           "ref_top2_logit": 25.625,
           "margin": 3.875,
-          "engine_argmax_id": 220,
+          "engine_argmax_id": 285,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49490,11 +49586,11 @@
           "ref_top2_id": 17,
           "ref_top2_logit": 22.125,
           "margin": 7.25,
-          "engine_argmax_id": 16,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49506,11 +49602,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 20.375,
           "margin": 12.125,
-          "engine_argmax_id": 64700,
+          "engine_argmax_id": 16,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49522,11 +49618,11 @@
           "ref_top2_id": 864,
           "ref_top2_logit": 22.0,
           "margin": 10.75,
-          "engine_argmax_id": 15451,
+          "engine_argmax_id": 13,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49538,11 +49634,11 @@
           "ref_top2_id": 13043,
           "ref_top2_logit": 23.125,
           "margin": 6.625,
-          "engine_argmax_id": 799,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49554,11 +49650,11 @@
           "ref_top2_id": 43532,
           "ref_top2_logit": 18.5,
           "margin": 12.5,
-          "engine_argmax_id": 13043,
+          "engine_argmax_id": 3437,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49570,11 +49666,11 @@
           "ref_top2_id": 30,
           "ref_top2_logit": 17.5,
           "margin": 16.75,
-          "engine_argmax_id": 279,
+          "engine_argmax_id": 369,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49586,11 +49682,11 @@
           "ref_top2_id": 6797,
           "ref_top2_logit": 22.375,
           "margin": 10.125,
-          "engine_argmax_id": 7806,
+          "engine_argmax_id": 279,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49602,11 +49698,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 22.0,
           "margin": 8.625,
-          "engine_argmax_id": 30,
+          "engine_argmax_id": 6463,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49618,11 +49714,11 @@
           "ref_top2_id": 318,
           "ref_top2_logit": 18.625,
           "margin": 10.75,
-          "engine_argmax_id": 198,
+          "engine_argmax_id": 1881,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49634,11 +49730,11 @@
           "ref_top2_id": 285,
           "ref_top2_logit": 17.75,
           "margin": 11.375,
-          "engine_argmax_id": 262,
+          "engine_argmax_id": 1070,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49650,11 +49746,11 @@
           "ref_top2_id": 220,
           "ref_top2_logit": 18.5,
           "margin": 14.0,
-          "engine_argmax_id": 348,
+          "engine_argmax_id": 30,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49666,11 +49762,11 @@
           "ref_top2_id": 257,
           "ref_top2_logit": 18.625,
           "margin": 14.625,
-          "engine_argmax_id": 256,
+          "engine_argmax_id": 198,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49682,11 +49778,11 @@
           "ref_top2_id": 348,
           "ref_top2_logit": 22.25,
           "margin": 8.5,
-          "engine_argmax_id": 2972,
+          "engine_argmax_id": 285,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49698,11 +49794,11 @@
           "ref_top2_id": 27344,
           "ref_top2_logit": 21.125,
           "margin": 12.125,
-          "engine_argmax_id": 45930,
+          "engine_argmax_id": 220,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         },
         {
@@ -49714,17 +49810,41 @@
           "ref_top2_id": 3296,
           "ref_top2_logit": 19.0,
           "margin": 11.75,
-          "engine_argmax_id": 15380,
+          "engine_argmax_id": 17,
           "engine_logit_at_ref_top1": null,
           "engine_logit_at_ref_top2": null,
-          "match": true,
-          "verdict": "match",
+          "match": false,
+          "verdict": "post_divergence_not_independent",
           "is_first_divergence": false
         }
       ],
-      "passed": true,
-      "first_divergent_position": null,
-      "waiver_request": null
+      "passed": false,
+      "first_divergent_position": 28,
+      "waiver_request": {
+        "prompt_id": "p08-science",
+        "batch_size": 16,
+        "first_divergent_position": 28,
+        "evidence": {
+          "prompt_id": "p08-science",
+          "batch_size": 16,
+          "position": 28,
+          "ref_top1_id": 15380,
+          "ref_top1_logit": 27.5,
+          "ref_top2_id": 16933,
+          "ref_top2_logit": 27.375,
+          "margin": 0.125,
+          "engine_argmax_id": 16933,
+          "engine_logit_at_ref_top1": null,
+          "engine_logit_at_ref_top2": null,
+          "match": false,
+          "verdict": "candidate_tie_flip",
+          "is_first_divergence": true
+        },
+        "classifier_verdict": "candidate_tie_flip",
+        "auto_waived": false,
+        "needs_human_adjudication": true,
+        "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
+      }
     },
     {
       "prompt_id": "p09-translate",
@@ -51820,6 +51940,31 @@
       "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
     },
     {
+      "prompt_id": "p08-science",
+      "batch_size": 1,
+      "first_divergent_position": 28,
+      "evidence": {
+        "prompt_id": "p08-science",
+        "batch_size": 1,
+        "position": 28,
+        "ref_top1_id": 15380,
+        "ref_top1_logit": 27.5,
+        "ref_top2_id": 16933,
+        "ref_top2_logit": 27.375,
+        "margin": 0.125,
+        "engine_argmax_id": 16933,
+        "engine_logit_at_ref_top1": null,
+        "engine_logit_at_ref_top2": null,
+        "match": false,
+        "verdict": "candidate_tie_flip",
+        "is_first_divergence": true
+      },
+      "classifier_verdict": "candidate_tie_flip",
+      "auto_waived": false,
+      "needs_human_adjudication": true,
+      "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
+    },
+    {
       "prompt_id": "p06-poem",
       "batch_size": 2,
       "first_divergent_position": 60,
@@ -51840,6 +51985,31 @@
         "is_first_divergence": true
       },
       "classifier_verdict": "implementation_bug",
+      "auto_waived": false,
+      "needs_human_adjudication": true,
+      "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
+    },
+    {
+      "prompt_id": "p08-science",
+      "batch_size": 2,
+      "first_divergent_position": 28,
+      "evidence": {
+        "prompt_id": "p08-science",
+        "batch_size": 2,
+        "position": 28,
+        "ref_top1_id": 15380,
+        "ref_top1_logit": 27.5,
+        "ref_top2_id": 16933,
+        "ref_top2_logit": 27.375,
+        "margin": 0.125,
+        "engine_argmax_id": 16933,
+        "engine_logit_at_ref_top1": null,
+        "engine_logit_at_ref_top2": null,
+        "match": false,
+        "verdict": "candidate_tie_flip",
+        "is_first_divergence": true
+      },
+      "classifier_verdict": "candidate_tie_flip",
       "auto_waived": false,
       "needs_human_adjudication": true,
       "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
@@ -51870,6 +52040,31 @@
       "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
     },
     {
+      "prompt_id": "p08-science",
+      "batch_size": 4,
+      "first_divergent_position": 28,
+      "evidence": {
+        "prompt_id": "p08-science",
+        "batch_size": 4,
+        "position": 28,
+        "ref_top1_id": 15380,
+        "ref_top1_logit": 27.5,
+        "ref_top2_id": 16933,
+        "ref_top2_logit": 27.375,
+        "margin": 0.125,
+        "engine_argmax_id": 16933,
+        "engine_logit_at_ref_top1": null,
+        "engine_logit_at_ref_top2": null,
+        "match": false,
+        "verdict": "candidate_tie_flip",
+        "is_first_divergence": true
+      },
+      "classifier_verdict": "candidate_tie_flip",
+      "auto_waived": false,
+      "needs_human_adjudication": true,
+      "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
+    },
+    {
       "prompt_id": "p06-poem",
       "batch_size": 8,
       "first_divergent_position": 60,
@@ -51890,6 +52085,31 @@
         "is_first_divergence": true
       },
       "classifier_verdict": "implementation_bug",
+      "auto_waived": false,
+      "needs_human_adjudication": true,
+      "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
+    },
+    {
+      "prompt_id": "p08-science",
+      "batch_size": 8,
+      "first_divergent_position": 28,
+      "evidence": {
+        "prompt_id": "p08-science",
+        "batch_size": 8,
+        "position": 28,
+        "ref_top1_id": 15380,
+        "ref_top1_logit": 27.5,
+        "ref_top2_id": 16933,
+        "ref_top2_logit": 27.375,
+        "margin": 0.125,
+        "engine_argmax_id": 16933,
+        "engine_logit_at_ref_top1": null,
+        "engine_logit_at_ref_top2": null,
+        "match": false,
+        "verdict": "candidate_tie_flip",
+        "is_first_divergence": true
+      },
+      "classifier_verdict": "candidate_tie_flip",
       "auto_waived": false,
       "needs_human_adjudication": true,
       "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
@@ -51918,6 +52138,31 @@
       "auto_waived": false,
       "needs_human_adjudication": true,
       "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
+    },
+    {
+      "prompt_id": "p08-science",
+      "batch_size": 16,
+      "first_divergent_position": 28,
+      "evidence": {
+        "prompt_id": "p08-science",
+        "batch_size": 16,
+        "position": 28,
+        "ref_top1_id": 15380,
+        "ref_top1_logit": 27.5,
+        "ref_top2_id": 16933,
+        "ref_top2_logit": 27.375,
+        "margin": 0.125,
+        "engine_argmax_id": 16933,
+        "engine_logit_at_ref_top1": null,
+        "engine_logit_at_ref_top2": null,
+        "match": false,
+        "verdict": "candidate_tie_flip",
+        "is_first_divergence": true
+      },
+      "classifier_verdict": "candidate_tie_flip",
+      "auto_waived": false,
+      "needs_human_adjudication": true,
+      "notes": "Evidence only. A tie-flip waiver requires a human to document the per-position logit mechanism in the run report per goal.md AC-3; this record is not a waiver."
     }
   ],
   "margin_evidence": {
@@ -51928,112 +52173,5 @@
     "max": 18.875,
     "mean": 9.47197265625
   },
-  "notes": [],
-  "adjudication": {
-    "recorded_by": "M2-I9 owner; decision by coordinator, endorsed by the M2 milestone reviewer",
-    "recorded_utc": "2026-07-26T13:23:24.499842Z",
-    "authority": ".pm/goal.md AC-3 sentence 2 (mismatch permitted only when root-caused with per-position logit evidence as a numeric-precision tie flip, not an implementation error, and documented in the run report)",
-    "status": "subject to user batch review",
-    "mechanical_gate_untouched": "overall_pass / status below are the harness's own unwaived mechanical verdict and are deliberately NOT modified; this block records the human adjudication layered on top",
-    "engine_build": "megakernel with -use_fast_math (the shipped acceptance config; see fast_math_ruling)",
-    "adjudicated_exact": 9,
-    "adjudicated_mismatch": 1,
-    "per_batch_size": {
-      "1": {
-        "exact": 9,
-        "waived_precision_tie": 1,
-        "unexplained": 0
-      },
-      "2": {
-        "exact": 9,
-        "waived_precision_tie": 1,
-        "unexplained": 0
-      },
-      "4": {
-        "exact": 9,
-        "waived_precision_tie": 1,
-        "unexplained": 0
-      },
-      "8": {
-        "exact": 9,
-        "waived_precision_tie": 1,
-        "unexplained": 0
-      },
-      "16": {
-        "exact": 9,
-        "waived_precision_tie": 1,
-        "unexplained": 0
-      }
-    },
-    "waived": [
-      {
-        "prompt_id": "p06-poem",
-        "generated_position": 60,
-        "batch_sizes": [
-          1,
-          2,
-          4,
-          8,
-          16
-        ],
-        "identical_at_every_batch_size": true,
-        "verdict": "NUMERIC-PRECISION TIE FLIP \u2014 waived",
-        "reference_topk": {
-          "ids": [
-            31000,
-            81316,
-            40581,
-            54302
-          ],
-          "logits": [
-            21.0,
-            21.0,
-            20.875,
-            20.625
-          ],
-          "note": "reference top-1 and top-2 are EXACTLY tied at 21.0; margin 0.0. This is one of only 2 genuine exact ties among the reference's 640 positions."
-        },
-        "mpk_logits_same_ids": {
-          "31000": 20.875,
-          "81316": 21.125,
-          "40581": 21.125,
-          "54302": 20.625
-        },
-        "bf16_ulp_at_this_magnitude": 0.125,
-        "max_candidate_deviation_ulps": 2.0,
-        "evidence_path": "free-run decode step that actually produced the token (freerun_p06_pos60.json)",
-        "emitted_equals_argmax_of_consumed_row": true,
-        "mechanism": "Row selection and tie-break are both correct here: the engine emitted exactly the argmax of the row it consumed. The disagreement is in the logit VALUES, all four candidates lying within 2 bf16 ULP of the reference (1 ULP = 0.125 at this magnitude). MPK's own top-2 (81316, 40581) are themselves exactly tied at 21.125 and it returns the lower id 40581 under the corrected lowest-index rule \u2014 the same token before and after the argmax fix, so that fix is not implicated. The dtype chain was verified identical beforehand: all 2560 reference top-k logits and all 640 top-1 logits are exactly bf16-representable, so the reference generator's .float() is an exact upcast and both engines argmax the same bf16 grid.",
-        "why_the_classifier_says_implementation_bug": "tie_classifier labels this `implementation_bug` because the emitted id is the reference's top-3 rather than its top-2 and the reference margin is 0.0. Its heuristic models a 2-way top-1/top-2 contest and does not model a 3-way cluster spanning 2 ULP, which is what this position is. The automatic label is superseded by this adjudication, with the evidence above."
-      }
-    ],
-    "resolved_not_waived": [
-      {
-        "prompt_id": "p08-science",
-        "generated_position": 28,
-        "was": "mismatch at all 5 batch sizes in the pre-fix run",
-        "now": "EXACT at all 5 batch sizes",
-        "root_cause": "argmax tie-break, not precision. MPK's own logits at the consumed row had ids 15380 and 16933 EXACTLY tied at 27.25, but warp_reduce_max_idx_sm100 compared with a strict `>`, so a tie was won by whichever value was the incumbent in the reduction tree \u2014 lane/warp/chunk order dependent, and different from torch.max/HF which return the lowest index. The engine emitted 16933 while torch.max over the very same dumped row returned 15380. Caught because the free-run probe recorded emitted_equals_argmax_of_consumed_row = False.",
-        "fix": "argmax_sm100.cuh: keep the smaller index on exactly-equal values, at the one reduction site that was order-dependent (the two per-thread scans already walk indices ascending).",
-        "note": "This corrects the cycle-2 claim that the tie-break flipped neither residual \u2014 it was evaluated against force-prefix logits rather than the free-run path AC-3 exercises."
-      }
-    ],
-    "fast_math_ruling": {
-      "decision": "keep -use_fast_math in the acceptance config",
-      "with_fast_math_exact_of_10_at_bs1": 9,
-      "without_fast_math_exact_of_10_at_bs1": 4,
-      "qwen3_8b_ci_ms_per_token": {
-        "with": 3.871,
-        "without": 4.04,
-        "with_argmax_fix": 3.877
-      }
-    },
-    "regression_check_vs_prefix_run": {
-      "entries_changed": 5,
-      "entries_total": 50,
-      "all_changed": "p08-science, first differing at position 28, at every batch size",
-      "previously_exact_that_changed": "NONE",
-      "p06_byte_identical_before_and_after": true
-    }
-  }
+  "notes": []
 }

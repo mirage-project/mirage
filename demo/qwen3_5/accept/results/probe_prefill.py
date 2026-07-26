@@ -50,6 +50,11 @@ def main() -> int:
                     help="Expose EVERY op boundary and report per-row L2 norms, "
                          "so the first layer whose rows >= 16 break is visible "
                          "in one run (the M2-I9 bisection).")
+    ap.add_argument("--free-run-to-pos", type=int, default=None,
+                    help="Let MPK generate FREELY up to generated position N and "
+                         "dump the logits of the decode step that produced it, "
+                         "so argmax(dumped) can be compared with the token the "
+                         "engine actually emitted in the path AC-3 exercises.")
     ap.add_argument("--force-prefix-pos", type=int, default=None,
                     help="Teacher-force the reference's own first N generated "
                          "tokens, then let MPK emit exactly one more, so the "
@@ -62,15 +67,26 @@ def main() -> int:
     r = ref["results"][args.prompt_id]
     input_ids, out_ids = r["input_ids"], r["output_ids"]
     ref_topk_ids = ref_topk_logits = None
+    free_pos = args.free_run_to_pos
     if args.force_prefix_pos is not None:
         pos = args.force_prefix_pos
         ref_topk_ids = r["topk_ids_per_step"][pos]
         ref_topk_logits = r["topk_logits_per_step"][pos]
         input_ids = input_ids + out_ids[:pos]
         out_ids = out_ids[pos:]
+    elif free_pos is not None:
+        # FREE-RUN: prompt untouched, MPK generates its own `free_pos` tokens
+        # before the one under test, so these logits come from the SAME path
+        # that produced the AC-3 mismatch (prefill + N single-token decodes).
+        # force-prefix instead rebuilds the context as one long chunked PREFILL,
+        # which is a genuinely different arithmetic path. argmax(dumped) vs the
+        # emitted token in THIS mode is what separates a row-selection bug from
+        # a value difference.
+        ref_topk_ids = r["topk_ids_per_step"][free_pos]
+        ref_topk_logits = r["topk_logits_per_step"][free_pos]
     plen = len(input_ids)
-    # Prefill + exactly one decode step.
-    max_seq_length = plen + 1
+    # Prefill + one decode step, or prefill + (free_pos + 1) decode steps.
+    max_seq_length = plen + 1 + (free_pos or 0)
     mbr = 1
     pages = max(-(-max_seq_length // args.page_size) + 4, 8)
 
@@ -111,14 +127,16 @@ def main() -> int:
     torch.cuda.synchronize()
 
     logits = builder.buffers["argmax_in"].float()
-    emitted = int(meta["tokens"][0, plen].item())
-    want = out_ids[0]
+    emitted = int(meta["tokens"][0, plen + (free_pos or 0)].item())
+    want = out_ids[free_pos] if free_pos is not None else out_ids[0]
 
-    # `argmax_in` is indexed by the row's position WITHIN THE CURRENT CHUNK, not
-    # by absolute sequence position: the runtime feeds ceil(plen / mbt) prefill
-    # chunks and the buffer only ever holds the last one. So the final prompt
-    # token lives at (plen - 1) % mbt, and only that many rows are meaningful.
-    last_row = (plen - 1) % args.mbt
+    # `argmax_in` is indexed by the row's position WITHIN THE CURRENT BATCH of
+    # tokens, not by absolute sequence position, and it only ever holds the LAST
+    # iteration. In prefill the runtime feeds ceil(plen / mbt) chunks, so the
+    # final prompt token lives at (plen - 1) % mbt. In free-run the last
+    # iteration is a DECODE step carrying exactly one token for the one request,
+    # so its logits are at row 0 (qo_indptr = [0, 1]).
+    last_row = 0 if free_pos is not None else (plen - 1) % args.mbt
     n_rows = min(plen, last_row + 1)
     rows = []
     hit_row = None
@@ -137,12 +155,21 @@ def main() -> int:
         "row_with_reference_first_token": hit_row,
         "last_rows": rows[-args.rows:],
         "all_rows_argmax": [x["argmax"] for x in rows],
-        "hypothesis": ("H-ROW: correct logits exist at row "
-                       f"{hit_row} but row {plen - 1} was consumed"
-                       if hit_row is not None and hit_row != plen - 1 else
-                       ("H-MATH: no prefill row predicts the reference token"
+        # The row the runtime actually consumes for the emitted token is
+        # `last_row` (see its derivation above). An earlier version of this
+        # string compared `hit_row` against `plen - 1`, an ABSOLUTE index that
+        # does not exist in a buffer of `mbt` rows -- so it reported a bogus
+        # "row N was consumed" on every run. Compare against `last_row`.
+        "consumed_row": last_row,
+        "hypothesis": ("H-ROW: the reference token is the argmax of row "
+                       f"{hit_row}, but the emitted token comes from row "
+                       f"{last_row} -- a row-SELECTION bug"
+                       if hit_row is not None and hit_row != last_row else
+                       ("H-VALUE: no dumped row argmaxes to the reference token "
+                        "-- the logit VALUES differ, not the row choice"
                         if hit_row is None else
-                        "prefill row plen-1 is correct; look downstream")),
+                        f"row {last_row} (the consumed row) argmaxes to the "
+                        "reference token")),
     }
     if ref_topk_ids is not None:
         # Side-by-side at the SAME candidate ids. Both engines argmax over bf16
@@ -161,7 +188,17 @@ def main() -> int:
                         "delta": m - clog, "delta_ulps": (m - clog) / ulp})
         mv, mi_ = torch.max(last, dim=-1)
         report["tie_evidence"] = {
-            "position": args.force_prefix_pos,
+            "mode": "free_run" if free_pos is not None else "force_prefix",
+            "consumed_row": last_row,
+            # THE decisive field: if the engine emitted a token that is NOT the
+            # argmax of the very row it consumed, the selection is wrong (bug).
+            # If they agree, the row choice is sound and any mismatch against
+            # the reference is a difference in the logit VALUES.
+            "emitted_equals_argmax_of_consumed_row":
+                emitted == int(mi_.item()),
+            "emitted_token": emitted,
+            "position": (free_pos if free_pos is not None
+                         else args.force_prefix_pos),
             "bf16_ulp_at_this_magnitude": ulp,
             "ref_top1": ref_topk_ids[0], "mpk_argmax": int(mi_.item()),
             "mpk_argmax_logit": float(mv.item()),
