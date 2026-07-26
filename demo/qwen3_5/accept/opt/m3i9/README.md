@@ -85,43 +85,57 @@ refill are **OUT**: both move live slots by construction, which is what
 The winner is also the only candidate that needs no extrapolation: every one of its 131
 iterations is the directly measured 16-slot 1-token step (22003 µs, n=18, spread 0.49%).
 
-## The runtime knob — spec
+## The runtime knob — implemented (local tree only, unbuilt)
 
-The winning policy is **not** pure Python: `prepare_next_batch` is device code. It is a
-three-line change with a default that is byte-identical to today.
+The winning policy is **not** pure Python: `prepare_next_batch` is device code. It is now landed
+in this tree with a default that is byte-identical to today. **Not built** (B200s contended) and
+**not propagated** to the box clone — M3-I2b owns that clone's window. CPU gate:
+`python3 test_admission_policy.py`.
 
-**1. `include/mirage/persistent_kernel/persistent_kernel.cuh`** — one `min` in step 3's prefill
-branch and one in the admission loop:
+**1. `include/mirage/persistent_kernel/admission_policy.h`** (new) — the default define and the
+one function both call sites use:
 
 ```cuda
-// default: MPK_MAX_TOKENS_PER_REQUEST == MPK_MAX_NUM_BATCHED_TOKENS  =>  no-op
 #ifndef MPK_MAX_TOKENS_PER_REQUEST
 #define MPK_MAX_TOKENS_PER_REQUEST MPK_MAX_NUM_BATCHED_TOKENS
 #endif
-...
-      if (num_new_tokens > 0) {                     // step 3, prefill branch
-        num_new_tokens = min(num_new_tokens,
-                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
-        num_new_tokens = min(num_new_tokens, MPK_MAX_TOKENS_PER_REQUEST);   // NEW
-      }
-...
-    int num_new_tokens = min(config.prompt_length[next_request_id],          // admission loop
-                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
-    num_new_tokens = min(num_new_tokens, MPK_MAX_TOKENS_PER_REQUEST);        // NEW
+
+MPK_ADMISSION_FN int
+    admission_prefill_tokens(int remaining, int budget_left, int cap) {
+  int k = (remaining < budget_left) ? remaining : budget_left;
+  return (k < cap) ? k : cap;
+}
 ```
 
-The decode branch is untouched: `min(1, budget)` is a correctness constraint (token *n+1*
-depends on token *n*), not a scheduling choice, and it is already ≤ any cap ≥ 1.
+It is `__host__ __device__` under nvcc and plain `inline` otherwise, which is what lets the CPU
+test exercise the *real* function rather than a copy. Two `static_assert`s reject `cap < 1`
+(would stall every prefill) and `cap > mbt` at compile time.
 
-**2. `python/mirage/mpk/persistent_kernel.py`** — `max_tokens_per_request: int = None` on
-`PersistentKernel.__init__`, emitted as the define; `None` emits nothing, so the generated
-graph is unchanged byte for byte.
+**Why the default is provably a no-op, from the code.** Both call sites pass
+`budget_left = MPK_MAX_NUM_BATCHED_TOKENS - num_tokens`, and `num_tokens` starts at 0 and only
+ever increases by a non-negative `num_new_tokens`, so `0 ≤ budget_left ≤ MPK_MAX_NUM_BATCHED_TOKENS`.
+The default `cap` **is** `MPK_MAX_NUM_BATCHED_TOKENS`. Hence
+`min(remaining, budget_left) ≤ budget_left ≤ cap`, so the second clamp is the identity for every
+reachable state and the expression equals the pre-M3-I9 `min(remaining, budget_left)` exactly.
+Check B of `test_admission_policy.py` confirms it empirically: chunk-vector-identical schedules
+at all five batch sizes, i.e. M3-I1's validated 109/109/109/111/203.
 
-**3. `demo/qwen3_5/accept/mpk_engine_run.py`** — **already landed here**, default off:
+**2. `include/mirage/persistent_kernel/persistent_kernel.cuh`** — the two MODE_OFFLINE prefill
+sites (step 3 and the admission loop) call the helper. The decode branch is untouched:
+`min(1, budget)` is a correctness constraint (token *n+1* depends on token *n*), not a scheduling
+choice, and it is already ≤ any cap ≥ 1. MODE_ONLINE / MODE_ONLINE_PINNED /
+MODE_ONLINE_NOTOKEN are untouched (check A asserts it).
+
+**3. `python/mirage/mpk/persistent_kernel.py`** — `max_tokens_per_request: int = None` on
+`PersistentKernel.__init__`, range-checked and refused outside `mode="offline"`. `None` emits no
+`-D` at all, so the compile command and the generated graph are unchanged byte for byte.
+
+**4. `demo/qwen3_5/accept/mpk_engine_run.py`** — default off:
 `--per-request-token-cap {auto,N}`, `auto = max(1, mbt // batch_size)`. It raises a
 `NotImplementedError` naming this spec if the installed `PersistentKernel` has no
 `max_tokens_per_request` parameter, rather than silently measuring the unmodified schedule under
-a flag that claims otherwise.
+a flag that claims otherwise — which is exactly what happens against the box's current build
+until it is rebuilt.
 
 Why `auto` and not a global 1: the cap must be an equal *share* of the budget. A global 1 is a
 19% regression at bs1. Bound to `bs`, the cost at bs 2/4/8 is 0.6–2.7% and it buys zero live-slot
@@ -143,7 +157,8 @@ every live-slot move rather than adding more.
 | `first_divergence` on duplicate-slot checks | `mpk_engine_run.py` | implemented — this is the free falsifier |
 | corrected HAZARD-COMPACTION docstring | `mpk_engine_run.py` | implemented |
 | `--per-request-token-cap` adapter flag | `mpk_engine_run.py` | implemented, refuses without the runtime knob |
-| the runtime knob itself | `persistent_kernel.cuh` + `persistent_kernel.py` | **specced above, NOT written** — it is C++/runtime |
+| the runtime knob itself | `admission_policy.h` (new) + `persistent_kernel.cuh` + `persistent_kernel.py` | **implemented, local tree only, NOT BUILT** — clang-format clean |
+| CPU gate on the admission arithmetic | `test_admission_policy.{cpp,py}` | implemented; 4 checks, 30 chunk-exact replays, PASS |
 | matched-geometry re-measure design | `remeasure-protocol.md` | implemented (design + generator + guards) |
 | pinned-geometry prompt generator | `make_synthetic_prompts.py` | implemented; `--verify` cross-checks the seed formula |
 | the capture | `plan_m3i9.sh` + `analyze_m3i9.py` | written, **not armed** |
@@ -156,6 +171,7 @@ python3 cost_model.py                    # closure gate: all five measured waves
 python3 cost_model.py --fit              # re-derive the coefficients from opt/tables/
 python3 rank_policies.py                 # the ranking + the +44% re-derivation
 python3 compaction_audit.py              # the hazard audit + the H1/H2 discrimination
+python3 test_admission_policy.py         # the C++ knob: static + no-op + cap + range (needs g++)
 ```
 
 No GPU, no B200 artifacts beyond `opt/meta/` and (for `--fit`) `opt/tables/`.
@@ -171,7 +187,8 @@ claim is settled before anyone compiles a modified runtime.
    back `identical: true`
 2. cost-law check: `--slot-order sorted-padded`, predicted 179 iterations / 4214 ms — the only
    cheap test of the cost law *off* its fit set. A miss here stops the runtime change.
-3. land the runtime knob (reviewed, not scripted), then codegen identity for default-off
+3. build the runtime knob (already landed in-tree, CPU-gated) and prove codegen identity for
+   default-off — one rebuild of the box clone, which is why it cannot be prepped further here
 4. AC-3 gate under the cap: bs16 first, then the sweep + per-case byte diff vs `e51cb86`
 5. perf bs16, ≥3 reps: predicted 4566.5 → 2825 ms unprofiled
 6. perf bs 1/2/4/8: the predicted **small losses** are part of the claim

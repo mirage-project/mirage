@@ -318,6 +318,11 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_NUM_BATCHED_REQUESTS={mpk.max_num_batched_requests}"]
 
     flags = flags + [f"-DMPK_MAX_NUM_BATCHED_TOKENS={mpk.max_num_batched_tokens}"]
+    # M3-I9: emitted ONLY when asked for, so an unset knob leaves the compile
+    # command byte-identical to the pre-M3-I9 one.
+    if getattr(mpk, "max_tokens_per_request", None) is not None:
+        flags = flags + [
+            f"-DMPK_MAX_TOKENS_PER_REQUEST={mpk.max_tokens_per_request}"]
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
@@ -396,6 +401,7 @@ class PersistentKernel:
         eos_token_id: int64 = -1,
         pinned_ring_capacity: int = 0,
         test_mode: bool = False,
+        max_tokens_per_request: int = None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -413,6 +419,21 @@ class PersistentKernel:
         self.max_seq_length = max_seq_length
         self.max_num_batched_requests = max_num_batched_requests
         self.max_num_batched_tokens = max_num_batched_tokens
+        # M3-I9: cap on what ONE request may take from ONE iteration's token
+        # budget (MODE_OFFLINE prefill only). None emits no define, so the
+        # header's default MPK_MAX_NUM_BATCHED_TOKENS applies and the clamp is
+        # the identity -- the generated graph is unchanged. See
+        # include/mirage/persistent_kernel/admission_policy.h.
+        if max_tokens_per_request is not None:
+            if not (1 <= max_tokens_per_request <= max_num_batched_tokens):
+                raise ValueError(
+                    f"max_tokens_per_request={max_tokens_per_request} must be in "
+                    f"[1, max_num_batched_tokens={max_num_batched_tokens}]")
+            if mode != "offline":
+                raise ValueError(
+                    "max_tokens_per_request is a MODE_OFFLINE admission knob; "
+                    f"mode={mode!r} does not use that scheduler")
+        self.max_tokens_per_request = max_tokens_per_request
         self.max_num_pages = max_num_pages
         self.page_size = page_size
         self.eos_token_id = eos_token_id

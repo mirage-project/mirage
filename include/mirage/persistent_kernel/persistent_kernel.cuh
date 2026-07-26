@@ -18,6 +18,7 @@
 #ifdef MPK_ENABLE_TMA
 #include "tma.cuh"
 #endif
+#include "admission_policy.h"
 #include "mpk_atoms.cuh"
 #include "runtime_header.h"
 #ifdef USE_NVSHMEM
@@ -319,11 +320,16 @@ __device__ __forceinline__ bool
       int step = config.step[request_id];
       int num_new_tokens = config.prompt_length[request_id] - step;
       if (num_new_tokens > 0) {
-        // Prefill requests
-        num_new_tokens =
-            min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+        // Prefill requests. MPK_MAX_TOKENS_PER_REQUEST defaults to
+        // MPK_MAX_NUM_BATCHED_TOKENS, which makes the cap the identity here --
+        // see admission_policy.h for the argument and why capping it is what
+        // stops one slot from taking the whole budget (M3-I9).
+        num_new_tokens = mirage::mpk::admission_prefill_tokens(
+            num_new_tokens,
+            MPK_MAX_NUM_BATCHED_TOKENS - num_tokens,
+            MPK_MAX_TOKENS_PER_REQUEST);
       } else {
-        // Decode requests
+        // Decode requests (never capped: min(1, budget) is causality)
 #ifdef MPK_SPEC_DECODE
         // Eagle3 / spec-decode: feed K+1 candidate tokens (1 bonus + K drafts)
         // per decode iter. mbt is compile-time set to K+1.
@@ -371,9 +377,11 @@ __device__ __forceinline__ bool
     config.request_ids[num_reqs] = next_request_id;
     config.qo_indptr_buffer[num_reqs] = num_tokens;
     config.paged_kv_indptr_buffer[num_reqs] = num_pages;
-    // Prefill request
-    int num_new_tokens = min(config.prompt_length[next_request_id],
-                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+    // Prefill request (same cap as step 3; identity at the default)
+    int num_new_tokens = mirage::mpk::admission_prefill_tokens(
+        config.prompt_length[next_request_id],
+        MPK_MAX_NUM_BATCHED_TOKENS - num_tokens,
+        MPK_MAX_TOKENS_PER_REQUEST);
     // Move tokens to input tokens
     for (int j = 0; j < num_new_tokens; j++) {
       config.input_tokens[num_tokens + j] =

@@ -26,10 +26,11 @@
 #     of the `a + b*max_chunk + c*n_live` law OUTSIDE the data it was fit on --
 #     if it misses, every predicted policy delta in the ranking is suspect and
 #     the runtime change should not be built yet.
-#  3  THE RUNTIME KNOB.  Build with MPK_MAX_TOKENS_PER_REQUEST (README.md
-#     "the runtime knob"), default = MPK_MAX_NUM_BATCHED_TOKENS.  Codegen
-#     identity first: default-off must regenerate the pre-M3-I9 graph byte for
-#     byte.  Then cap = max(1, mbt/bs).
+#  3  THE RUNTIME KNOB.  ALREADY LANDED in the repo (admission_policy.h + the
+#     two MODE_OFFLINE call sites + PersistentKernel(max_tokens_per_request=)),
+#     CPU-gated by opt/m3i9/test_admission_policy.py.  This stage is the BUILD:
+#     rebuild the box clone, then codegen identity -- default-off must
+#     regenerate the pre-M3-I9 task graph byte for byte.  Then cap = auto.
 #  4  AC-3 GATE on the cap: bs16 first (the one that changes), then the full
 #     sweep + per-case byte diff vs the committed report at e51cb86.  The six
 #     duplicate pairs are predicted to flip to identical:true -- nothing else in
@@ -131,11 +132,14 @@ fi
 
 # ---------------------------------------------------------------- stage 3+
 if has 3; then
+  echo "=== stage 3: CPU gate on the landed knob, then the rebuild $(date -Is)"
+  "$PY" "$ACC/opt/m3i9/test_admission_policy.py" || {
+    echo "REFUSING: the CPU admission gate failed -- do not spend a window on it." >&2
+    exit 1
+  }
   cat <<'EOF'
-=== stage 3: the runtime knob
-  NOT SCRIPTED.  It is a source change (opt/m3i9/README.md, "the runtime knob":
-  one define, one min(), one Python kwarg) and it must be reviewed and landed by
-  the issue owner, not materialised by a capture script.  Land it, then:
+  The knob is landed and CPU-gated.  The REBUILD is not scripted: it mutates the
+  shared clone, so the coordinator sequences it.  Then:
     - codegen identity: default-off must regenerate the pre-M3-I9 task graph
       byte for byte (diff task_graph_rank0.json)
     - re-run stages 4-7 with STAGES=4,5,6,7,8
