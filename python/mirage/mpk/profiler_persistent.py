@@ -8,97 +8,127 @@ from typing import List
 import torch
 from tg4perfetto import TraceGenerator
 
+# Task-type id -> symbolic name, used to label profiler events.
+#
+# SOURCE OF TRUTH: `enum TaskType` in
+# include/mirage/persistent_kernel/runtime_header.h. The profiler writes the
+# raw enum value into the event tag (profiler.h `encode_tag`), so this table
+# must mirror that enum EXACTLY -- every entry below is transcribed from it and
+# carries the declaring line as of commit e779efb.
+#
+# Line numbers drift; ids and names do not. `tests/runtime_python/
+# test_profiler_task_names.py` re-parses the header and asserts this map is
+# complete and exact, so a new TaskType fails that test instead of silently
+# showing up as `UNKNOWN_<id>` (or, worse, under a stale wrong name -- 298 read
+# TASK_SM100_TASK_END here for several releases while the header had moved
+# TASK_SM100_TASK_END to 299 and given 298 to TASK_DFLASH_KV_STORE_SM100).
 event_name_list = {
-    10: "TASK_BEGIN_TASK_GRAPH",
-    101: "TASK_EMBEDDING",
-    102: "TASK_RMS_NORM_LINEAR",
-    103: "TASK_ATTENTION_1",
-    104: "TASK_ATTENTION_2",
-    105: "TASK_SILU_MUL_LINEAR",
-    106: "TASK_ALLREDUCE",
-    107: "TASK_REDUCE",
-    108: "TASK_LINEAR_WITH_RESIDUAL",
-    109: "TASK_ARGMAX",
-    110: "TASK_ARGMAX_PARTIAL",
-    111: "TASK_ARGMAX_REDUCE",
-    112: "TASK_FIND_NGRAM_PARTIAL",
-    113: "TASK_FIND_NGRAM_GLOBAL",
-    114: "TASK_TARGET_VERIFY_GREEDY",
-    115: "TASK_SINGLE_BATCH_EXTEND_ATTENTION",
-    116: "TASK_PAGED_ATTENTION_1",
-    117: "TASK_PAGED_ATTENTION_2",
-    118: "TASK_SILU_MUL",
-    119: "TASK_RMS_NORM",
-    120: "TASK_LINEAR",
-    121: "TASK_IDENTITY",
-    150: "TASK_HOPPER_TASK_BEGIN",
-    151: "TASK_LINEAR_WITH_RESIDUAL_HOPPER",
-    152: "TASK_LINEAR_HOPPER",
-    153: "TASK_PAGED_ATTENTION_HOPPER",
-    154: "TASK_RMS_NORM_HOPPER",
-    155: "TASK_LINEAR_SWAPAB_HOPPER",
-    156: "TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER",
-    157: "TASK_LINEAR_CUTLASS_HOPPER",
-    158: "TASK_LINEAR_CUTLASS_WITH_RESIDUAL_HOPPER",
-    159: "TASK_SILU_MUL_HOPPER",
-    160: "TASK_EMBEDDING_HOPPER",
-    161: "TASK_MOE_W13_LINEAR_SM90",
-    162: "TASK_MOE_W2_LINEAR_SM90",
-    163: "TASK_SPLITK_LINEAR_SWAPAB_HOPPER",
-    198: "TASK_HOPPER_TASK_END",
-    200: "TASK_SCHD_TASKS",
-    201: "TASK_SCHD_EVENTS",
-    202: "TASK_GET_EVENT",
-    203: "TASK_GET_NEXT_TASK",
-    204: "TASK_SCHD_PREPARE_BATCH",
-    230: "TASK_SM100_TASK_BEGIN",
-    248: "TASK_MOE_W13_FP8_SM100",
-    249: "TASK_MOE_W2_FP8_SM100",
-    251: "TASK_SPLITK_LINEAR_SM100",
-    252: "TASK_LINEAR_WITH_RESIDUAL_SM100",
-    253: "TASK_LINEAR_SM100",
-    254: "TASK_MOE_W13_LINEAR_SM100",
-    255: "TASK_MOE_W2_LINEAR_SM100",
-    257: "TASK_ATTN_SM100",
-    258: "TASK_ARGMAX_REDUCE_SM100",
-    259: "TASK_ARGMAX_PARTIAL_SM100",
-    260: "TASK_MOE_TOPK_SOFTMAX_SM100",
-    261: "TASK_MOE_MUL_SUM_ADD_SM100",
-    262: "TASK_TENSOR_INIT",
-    263: "TASK_PAGED_ATTENTION_SPLIT_KV_SM100",
-    264: "TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100",
-    265: "TASK_SAMPLING_SM100",
-    266: "TASK_MLA_DECODE_SM100",
-    267: "TASK_MLA_REDUCE_SM100",
-    268: "TASK_MLA_PREFILL_SM100",
-    269: "TASK_MLA_MTP_DECODE_SM100",
-    270: "TASK_MLA_MTP_REDUCE_SM100",
-    271: "TASK_MTP_VERIFY_STRICT",
-    272: "TASK_MTP_ACCEPT_COMMIT",
-    273: "TASK_MTP_TOKEN_SCATTER",
-    274: "TASK_MTP_PREPARE_VERIFY",
-    275: "TASK_QUANTIZE_FP8_SM100",
-    276: "TASK_LINEAR_FP8_SM100",
-    277: "TASK_LINEAR_FP8_WITH_RESIDUAL_SM100",
-    278: "TASK_MLA_KV_GATHER_SM100",
-    280: "TASK_MOE_TOPK_SIGMOID_SM100",
-    281: "TASK_ELEMENTWISE_ADD_SM100",
-    282: "TASK_SOFTMAX_GATHER_SM100",
-    283: "TASK_MTP_VERIFY_PROBABILISTIC",
-    284: "TASK_PROB_SCATTER_SM100",
-    285: "TASK_MTP_FLOAT_SCATTER",
-    286: "TASK_PROB_EXTRACT_SM100",
-    287: "TASK_MLA_MTP_DECODE_TP2_SM100",
-    288: "TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100",
-    289: "TASK_MLA_MTP_DECODE_TP4_SM100",
-    290: "TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100",
-    291: "TASK_MLA_MTP_DECODE_TP8_SM100",
-    292: "TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100",
-    293: "TASK_MLA_KV_GATHER_SPLIT_SM100",
-    294: "TASK_MTP_BUILD_EMBED_INPUT",
-    298: "TASK_SM100_TASK_END",
-    301: "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT",
-    302: "TASK_NVSHMEM_TILE_ALLREDUCE",
+    0: "TASK_TERMINATE",                               # runtime_header.h:85
+    10: "TASK_BEGIN_TASK_GRAPH",                       # runtime_header.h:86
+    101: "TASK_EMBEDDING",                             # runtime_header.h:88
+    102: "TASK_RMS_NORM_LINEAR",                       # runtime_header.h:89
+    103: "TASK_ATTENTION_1",                           # runtime_header.h:90
+    104: "TASK_ATTENTION_2",                           # runtime_header.h:91
+    105: "TASK_SILU_MUL_LINEAR_WITH_RESIDUAL",         # runtime_header.h:92
+    106: "TASK_ALLREDUCE",                             # runtime_header.h:93
+    107: "TASK_REDUCE",                                # runtime_header.h:94
+    108: "TASK_LINEAR_WITH_RESIDUAL",                  # runtime_header.h:95
+    109: "TASK_ARGMAX",                                # runtime_header.h:96
+    110: "TASK_ARGMAX_PARTIAL",                        # runtime_header.h:97
+    111: "TASK_ARGMAX_REDUCE",                         # runtime_header.h:98
+    112: "TASK_FIND_NGRAM_PARTIAL",                    # runtime_header.h:99
+    113: "TASK_FIND_NGRAM_GLOBAL",                     # runtime_header.h:100
+    114: "TASK_TARGET_VERIFY_GREEDY",                  # runtime_header.h:101
+    115: "TASK_SINGLE_BATCH_EXTEND_ATTENTION",         # runtime_header.h:102
+    116: "TASK_PAGED_ATTENTION_1",                     # runtime_header.h:103
+    117: "TASK_PAGED_ATTENTION_2",                     # runtime_header.h:104
+    118: "TASK_SILU_MUL",                              # runtime_header.h:105
+    119: "TASK_RMS_NORM",                              # runtime_header.h:106
+    120: "TASK_LINEAR",                                # runtime_header.h:107
+    121: "TASK_IDENTITY",                              # runtime_header.h:108
+    150: "TASK_HOPPER_TASK_BEGIN",                     # runtime_header.h:110
+    151: "TASK_LINEAR_WITH_RESIDUAL_HOPPER",           # runtime_header.h:111
+    152: "TASK_LINEAR_HOPPER",                         # runtime_header.h:112
+    153: "TASK_PAGED_ATTENTION_HOPPER",                # runtime_header.h:113
+    154: "TASK_RMS_NORM_HOPPER",                       # runtime_header.h:114
+    155: "TASK_LINEAR_SWAPAB_HOPPER",                  # runtime_header.h:115
+    156: "TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER",    # runtime_header.h:116
+    157: "TASK_LINEAR_CUTLASS_HOPPER",                 # runtime_header.h:117
+    158: "TASK_LINEAR_CUTLASS_WITH_RESIDUAL_HOPPER",   # runtime_header.h:118
+    159: "TASK_SILU_MUL_HOPPER",                       # runtime_header.h:119
+    160: "TASK_EMBEDDING_HOPPER",                      # runtime_header.h:120
+    161: "TASK_MOE_W13_LINEAR_SM90",                   # runtime_header.h:121
+    162: "TASK_MOE_W2_LINEAR_SM90",                    # runtime_header.h:122
+    163: "TASK_SPLITK_LINEAR_SWAPAB_HOPPER",           # runtime_header.h:123
+    164: "TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER",       # runtime_header.h:124
+    198: "TASK_HOPPER_TASK_END",                       # runtime_header.h:125
+    200: "TASK_SCHD_TASKS",                            # runtime_header.h:199
+    201: "TASK_SCHD_EVENTS",                           # runtime_header.h:200
+    202: "TASK_GET_EVENT",                             # runtime_header.h:201
+    203: "TASK_GET_NEXT_TASK",                         # runtime_header.h:202
+    204: "TASK_SCHD_PREPARE_BATCH",                    # runtime_header.h:203
+    230: "TASK_SM100_TASK_BEGIN",                      # runtime_header.h:127
+    231: "TASK_SM100_TMA_START_TASK",                  # runtime_header.h:128
+    232: "TASK_COPY",                                  # runtime_header.h:129
+    233: "TASK_CONCAT",                                # runtime_header.h:130
+    234: "TASK_GDN_CONV1D_SM100",                      # runtime_header.h:134
+    235: "TASK_EAGLE3_D2T_REMAP",                      # runtime_header.h:135
+    236: "TASK_EAGLE3_COMMIT",                         # runtime_header.h:136
+    248: "TASK_MOE_W13_FP8_SM100",                     # runtime_header.h:137
+    249: "TASK_MOE_W2_FP8_SM100",                      # runtime_header.h:138
+    251: "TASK_SPLITK_LINEAR_SM100",                   # runtime_header.h:139
+    252: "TASK_LINEAR_WITH_RESIDUAL_SM100",            # runtime_header.h:140
+    253: "TASK_LINEAR_SM100",                          # runtime_header.h:141
+    254: "TASK_MOE_W13_LINEAR_SM100",                  # runtime_header.h:142
+    255: "TASK_MOE_W2_LINEAR_SM100",                   # runtime_header.h:143
+    256: "TASK_SM100_TMA_END_TASK",                    # runtime_header.h:144
+    257: "TASK_ATTN_SM100",                            # runtime_header.h:145
+    258: "TASK_ARGMAX_REDUCE_SM100",                   # runtime_header.h:146
+    259: "TASK_ARGMAX_PARTIAL_SM100",                  # runtime_header.h:147
+    260: "TASK_MOE_TOPK_SOFTMAX_SM100",                # runtime_header.h:148
+    261: "TASK_MOE_MUL_SUM_ADD_SM100",                 # runtime_header.h:149
+    262: "TASK_TENSOR_INIT",                           # runtime_header.h:150
+    263: "TASK_PAGED_ATTENTION_SPLIT_KV_SM100",        # runtime_header.h:151
+    264: "TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100",  # runtime_header.h:152
+    265: "TASK_SAMPLING_SM100",                        # runtime_header.h:153
+    266: "TASK_MLA_DECODE_SM100",                      # runtime_header.h:154
+    267: "TASK_MLA_REDUCE_SM100",                      # runtime_header.h:155
+    268: "TASK_MLA_PREFILL_SM100",                     # runtime_header.h:156
+    269: "TASK_MLA_MTP_DECODE_SM100",                  # runtime_header.h:157
+    270: "TASK_MLA_MTP_REDUCE_SM100",                  # runtime_header.h:158
+    271: "TASK_MTP_VERIFY_STRICT",                     # runtime_header.h:159
+    272: "TASK_MTP_ACCEPT_COMMIT",                     # runtime_header.h:160
+    273: "TASK_MTP_TOKEN_SCATTER",                     # runtime_header.h:161
+    274: "TASK_MTP_PREPARE_VERIFY",                    # runtime_header.h:162
+    275: "TASK_QUANTIZE_FP8_SM100",                    # runtime_header.h:163
+    276: "TASK_LINEAR_FP8_SM100",                      # runtime_header.h:164
+    277: "TASK_LINEAR_FP8_WITH_RESIDUAL_SM100",        # runtime_header.h:165
+    278: "TASK_MLA_KV_GATHER_SM100",                   # runtime_header.h:166
+    279: "TASK_LINEAR_FP8_BLOCKSCALE_SM100",           # runtime_header.h:170
+    280: "TASK_MOE_TOPK_SIGMOID_SM100",                # runtime_header.h:171
+    281: "TASK_ELEMENTWISE_ADD_SM100",                 # runtime_header.h:172
+    282: "TASK_SOFTMAX_GATHER_SM100",                  # runtime_header.h:173
+    283: "TASK_MTP_VERIFY_PROBABILISTIC",              # runtime_header.h:174
+    284: "TASK_PROB_SCATTER_SM100",                    # runtime_header.h:175
+    285: "TASK_MTP_FLOAT_SCATTER",                     # runtime_header.h:176
+    286: "TASK_PROB_EXTRACT_SM100",                    # runtime_header.h:177
+    287: "TASK_MLA_MTP_DECODE_TP2_SM100",              # runtime_header.h:179
+    288: "TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100",       # runtime_header.h:180
+    289: "TASK_MLA_MTP_DECODE_TP4_SM100",              # runtime_header.h:181
+    290: "TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100",       # runtime_header.h:182
+    291: "TASK_MLA_MTP_DECODE_TP8_SM100",              # runtime_header.h:183
+    292: "TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100",       # runtime_header.h:184
+    293: "TASK_MLA_KV_GATHER_SPLIT_SM100",             # runtime_header.h:186
+    294: "TASK_MTP_BUILD_EMBED_INPUT",                 # runtime_header.h:189
+    295: "TASK_MLA_PREFILL_TP8_SM100",                 # runtime_header.h:191
+    296: "TASK_DFLASH_ATTENTION_SM100",                # runtime_header.h:193
+    297: "TASK_DFLASH_NORM_ROPE_SM100",                # runtime_header.h:195
+    298: "TASK_DFLASH_KV_STORE_SM100",                 # runtime_header.h:197
+    299: "TASK_SM100_TASK_END",                        # runtime_header.h:198
+    300: "TASK_MULTIGPU_TASK_BEGIN",                   # runtime_header.h:205
+    301: "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT",         # runtime_header.h:206
+    302: "TASK_NVSHMEM_TILE_ALLREDUCE",                # runtime_header.h:207
+    349: "TASK_MULTIGPU_TASK_END",                     # runtime_header.h:208
 }
 
 
@@ -166,9 +196,27 @@ def export_to_perfetto_trace(
             tid = pid.create_group(f"group_{group_idx}")
             tid_map[(block_idx, group_idx)] = tid
 
+    def _tid_for(block_idx, group_idx):
+        """Look up a (block, group) track, creating it if the header didn't
+        cover it.
+
+        The header's `nblocks` is written by one block of one launch. It is
+        supposed to describe the whole global block-index space (see
+        `PROFILER_INIT_GLOBAL` in include/mirage/persistent_kernel/profiler.h),
+        but a mismatch used to make this a hard `KeyError: (80, 0)` that killed
+        the export -- and, because __call__ runs this before the CSV export,
+        killed the CSV too. Grow on demand instead of crashing.
+        """
+        key = (block_idx, group_idx)
+        if key not in tid_map:
+            pid = tgen.create_group(f"block_{block_idx}")
+            tid_map[key] = pid.create_group(f"group_{group_idx}")
+        return tid_map[key]
+
     for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
-        event = event_name_list[event_idx] + f"_{event_no}"
-        tid = tid_map[(block_idx, group_idx)]
+        name = event_name_list.get(event_idx, f"UNKNOWN_{event_idx}")
+        event = name + f"_{event_no}"
+        tid = _tid_for(block_idx, group_idx)
 
         if (block_idx, group_idx, event_idx) in track_map:
             track = track_map[(block_idx, group_idx, event_idx)]

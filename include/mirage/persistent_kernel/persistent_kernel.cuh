@@ -268,7 +268,14 @@ __device__ __forceinline__ bool
       config.step[request_id] = step + num_tokens;
       int step_advance = num_tokens;
 #endif
-#if defined(MPK_ENABLE_PROFILING) || defined(MPK_TEST_MODE)
+      // Test mode runs the task graph exactly once, so it retires every request
+      // after its first processed step. This shortcut belongs to MPK_TEST_MODE
+      // ALONE: MPK_ENABLE_PROFILING used to share it (PR #712), which silently
+      // truncated every profiled MODE_OFFLINE run to ~2 steps and made
+      // multi-iteration profiler traces impossible to collect
+      // (demo/qwen3_5/accept/probes/runtime/p9_methodology.md, step 2, bug 3).
+      // Profiling is instrumentation; it must not change the schedule.
+#if defined(MPK_TEST_MODE)
       if (true)
 #else
       if ((step + step_advance + 1 >= config.max_seq_length) ||
@@ -802,6 +809,39 @@ __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   // assert(blockDim.x >= 128);
 }
 
+#ifdef MPK_ENABLE_PROFILING
+// Workers and schedulers must share ONE block-index space in the profiler
+// buffer. With `split_worker_scheduler` they are two separate kernel launches,
+// so each launch's own `gridDim`/`blockIdx` would number both from 0 and their
+// event slots and tags would collide
+// (demo/qwen3_5/accept/probes/runtime/p9_methodology.md, step 2, bugs 1-2).
+// Convention: workers occupy [0, num_workers), schedulers follow — which is
+// already what the single fused `persistent_kernel` launch does naturally.
+__device__ __forceinline__ uint32_t
+    profiler_global_num_blocks(RuntimeConfig const &config) {
+  // NOTE: the event tag has 8 bits for (block * num_groups + group), so this
+  // total must stay below 256 for tags to be unique — true for every shipped
+  // launch config (128 workers + 80 schedulers).
+  return config.split_worker_scheduler
+             ? (uint32_t)(config.num_workers + config.num_local_schedulers)
+             : tb::get_num_blocks();
+}
+
+__device__ __forceinline__ uint32_t
+    profiler_worker_block_idx(RuntimeConfig const &config) {
+  (void)config;
+  // Workers are blocks [0, num_workers) in BOTH launch modes.
+  return tb::get_block_idx();
+}
+
+__device__ __forceinline__ uint32_t
+    profiler_scheduler_block_idx(RuntimeConfig const &config) {
+  return config.split_worker_scheduler
+             ? (uint32_t)config.num_workers + tb::get_block_idx()
+             : tb::get_block_idx();
+}
+#endif
+
 __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   // Make sure overall smem usage here do not exceed 3KB
   // last_task_pos: 2 * 8 = 16 B
@@ -823,10 +863,12 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 
 #ifdef MPK_ENABLE_PROFILING
   PROFILER_CLOSURE_PARAMS_DECL;
-  PROFILER_INIT(static_cast<uint64_t *>(config.profiler_buffer),
-                0,
-                1,
-                (threadIdx.x % WORKER_NUM_THREADS == 0));
+  PROFILER_INIT_GLOBAL(static_cast<uint64_t *>(config.profiler_buffer),
+                       0,
+                       1,
+                       (threadIdx.x % WORKER_NUM_THREADS == 0),
+                       profiler_worker_block_idx(config),
+                       profiler_global_num_blocks(config));
 
 #endif
   int const worker_id = blockIdx.x;
@@ -1130,8 +1172,12 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
     // Up to 4 scheduler warps share one block but the profiler has one
     // slot per block (num_groups=1).  Only warp 0 writes so events from
     // different warps don't interleave.
-    PROFILER_INIT(
-        static_cast<uint64_t *>(config.profiler_buffer), 0, 1, (warp_id == 0));
+    PROFILER_INIT_GLOBAL(static_cast<uint64_t *>(config.profiler_buffer),
+                         0,
+                         1,
+                         (warp_id == 0),
+                         profiler_scheduler_block_idx(config),
+                         profiler_global_num_blocks(config));
     uint32_t sched_profiling_cnt = 0;
 #endif
 

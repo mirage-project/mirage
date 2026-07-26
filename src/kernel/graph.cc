@@ -820,6 +820,14 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(5, 1, TASK_LINEAR_FP8_BLOCKSCALE_SM100, variant_id);
   }
+  // Gated-DeltaNet causal depthwise conv1d: 3 inputs (mixed_qkv, conv weight,
+  // conv-state pool) + 1 output. The state pool is read AND written in place
+  // through input_ptrs[2].
+  else if (name == "gdn_conv1d_sm100") {
+    int variant_id = task_register->register_gdn_conv1d_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_GDN_CONV1D_SM100, variant_id);
+  }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {
     int variant_id = task_register->register_mla_kv_gather_sm100_task(

@@ -4393,6 +4393,103 @@ int TaskRegister::register_linear_fp8_blockscale_sm100_task(
                                code.to_string());
 }
 
+int TaskRegister::register_gdn_conv1d_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Gated-DeltaNet causal depthwise conv1d, one task per request SLOT.
+  // Inputs:  [0] mixed_qkv   [max_num_batched_tokens, conv_dim]  bf16
+  //          [1] conv weight [conv_dim, kernel_size]             bf16
+  //          [2] conv state  [num_slots, kernel_size-1, conv_dim] bf16 (in/out)
+  // Output:  [0] conv out    [max_num_batched_tokens, conv_dim]  bf16
+  //
+  // Grid is (max_num_batched_requests, conv_dim / channels_per_task, 1);
+  // runtime.cc puts bid.x into task_metadata.request_id and bid.y into
+  // task_metadata.kv_idx. The kernel slices the token window itself from
+  // qo_indptr (chunk length varies per iteration), exactly like
+  // register_mla_prefill_sm100_task, and its channel block from kv_idx.
+  //
+  // The channel split is the prefill scaling axis: the FIR has no dependency
+  // between output tokens, so grid.y > 1 spreads a long chunk over several
+  // SMs instead of pinning it to one (vLLM's Triton kernel splits the same
+  // way - grid (B, 32), BLOCK_N = 256).
+  assert(params.size() == 0);
+  int const num_inputs = 3;
+  int const num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)(num_inputs + num_outputs));
+
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    auto *iop = static_cast<tb::TBInputOp *>(op);
+    if ((int)input_ops.size() < num_inputs) {
+      input_ops.push_back(iop);
+    } else {
+      output_ops.push_back(iop);
+    }
+  }
+
+  assert(input_ops[1]->dtensor.num_dims == 2);
+  int conv_dim = input_ops[1]->dtensor.dim[0];
+  int kernel_size = input_ops[1]->dtensor.dim[1];
+  assert(kernel_size >= 2);
+
+  // State pool: [num_slots, kernel_size - 1, conv_dim] (vLLM "SD" layout).
+  assert(input_ops[2]->dtensor.num_dims == 3);
+  assert(input_ops[2]->dtensor.dim[1] == kernel_size - 1);
+  assert(input_ops[2]->dtensor.dim[2] == conv_dim);
+
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  assert(input_ops[0]->dtensor.dim[1] == conv_dim);
+  assert(output_ops[0]->dtensor.num_dims == 2);
+  assert(output_ops[0]->dtensor.dim[1] == conv_dim);
+
+  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  int input_stride = static_cast<int>(
+      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op)
+          ->input_strides[0]);
+  int output_stride = static_cast<int>(
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op)
+          ->input_strides[0]);
+
+  int num_channel_blocks = static_cast<int>(bgraph.grid_dim.y);
+  assert(num_channel_blocks >= 1);
+  assert(conv_dim % num_channel_blocks == 0 &&
+         "conv_dim must divide evenly across grid.y channel blocks");
+  int channels_per_task = conv_dim / num_channel_blocks;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("  int slot_ = task_desc->task_metadata.request_id;");
+  code.e("  int c0_ = task_desc->task_metadata.kv_idx * $;", channels_per_task);
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[slot_];");
+  code.e("  int q_len_ = runtime_config.qo_indptr_buffer[slot_ + 1] - qo_fp_;");
+  code.e("  bool zero_state_ = "
+         "kernel::gdn_slot_is_first_chunk(runtime_config, slot_);");
+  code.e("  kernel::gdn_conv1d_sm100_task_impl<bfloat16, $, $, $, $, $>(",
+         conv_dim,
+         channels_per_task,
+         kernel_size,
+         input_stride,
+         output_stride);
+  code.e("      static_cast<bfloat16 const *>(task_desc->input_ptrs[0]) + "
+         "qo_fp_ * $ + c0_,",
+         input_stride);
+  code.e("      static_cast<bfloat16 const *>(task_desc->input_ptrs[1]) + "
+         "c0_ * $,",
+         kernel_size);
+  code.e("      static_cast<bfloat16 *>(task_desc->input_ptrs[2]) + slot_ * $ "
+         "+ c0_,",
+         (kernel_size - 1) * conv_dim);
+  code.e("      static_cast<bfloat16 *>(task_desc->output_ptrs[0]) + "
+         "qo_fp_ * $ + c0_,",
+         output_stride);
+  code.e("      q_len_,");
+  code.e("      zero_state_);");
+  code.e("}");
+  return register_task_variant(TASK_GDN_CONV1D_SM100, code.to_string());
+}
+
 int TaskRegister::register_mla_kv_gather_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: d_k (576)

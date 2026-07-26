@@ -128,6 +128,10 @@ enum TaskType {
   TASK_SM100_TMA_START_TASK = 231,
   TASK_COPY = 232,
   TASK_CONCAT = 233,
+  // Gated-DeltaNet causal depthwise conv1d + persistent conv-state pool.
+  // Inside the (231, 256) TMA window, so tma.cuh needs a case for it even
+  // though it uses no TMA descriptor.
+  TASK_GDN_CONV1D_SM100 = 234,
   TASK_EAGLE3_D2T_REMAP = 235,
   TASK_EAGLE3_COMMIT = 236,
   TASK_MOE_W13_FP8_SM100 = 248,

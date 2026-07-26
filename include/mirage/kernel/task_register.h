@@ -172,6 +172,9 @@ public:
       threadblock::Graph const &bgraph,
       std::vector<int> const &params,
       bool with_residual);
+  // Gated-DeltaNet causal depthwise conv1d (id 234).
+  int register_gdn_conv1d_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
   int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
   int register_mla_kv_gather_split_sm100_task(threadblock::Graph const &bgraph,

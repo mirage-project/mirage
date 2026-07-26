@@ -29,6 +29,7 @@
 #include "dflash_kv_store_sm100.cuh"
 #include "dflash_norm_rope_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"
+#include "gdn_conv1d_sm100.cuh"
 #include "linear_fp8_1d2d_sm100.cuh"
 #include "linear_fp8_blockscale_sm100.cuh"
 #include "linear_fp8_sm100.cuh"

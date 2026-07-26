@@ -107,28 +107,76 @@ struct ProfilerEntry {
 #define PROFILER_CLOSURE_PARAMS_DECL                                           \
   volatile tb::ProfilerEntry entry;                                            \
   uint64_t *profiler_write_ptr;                                                \
+  uint64_t *profiler_write_end;                                                \
   uint32_t profiler_write_stride;                                              \
   uint32_t profiler_entry_tag_base;                                            \
   bool profiler_write_thread_predicate;
 
+// End of the caller's profiler buffer. `persistent_kernel.py` emits
+// -DMPK_PROFILER_BUFFER_ENTRIES=<numel> whenever profiling is on; without it
+// the macros keep their historical unbounded behaviour.
+//
+// This matters because a run whose events exceed the buffer used to keep
+// writing PAST the tensor. It was previously unreachable in practice - every
+// profiled MODE_OFFLINE run was truncated to ~2 steps by the bug fixed in
+// persistent_kernel.cuh - so a full-length profiled run is exactly the case
+// that needs the bound. Overflow now DROPS events (the CSV exporter's
+// dangling-BEGIN check still reports it) instead of corrupting memory.
+#ifdef MPK_PROFILER_BUFFER_ENTRIES
+#define MPK_PROFILER_BUFFER_END(buf) ((buf) + (MPK_PROFILER_BUFFER_ENTRIES))
+#else
+#define MPK_PROFILER_BUFFER_END(buf) (static_cast<uint64_t *>(nullptr))
+#endif
+
+#define PROFILER_CAN_WRITE                                                     \
+  (profiler_write_thread_predicate &&                                          \
+   (profiler_write_end == nullptr || profiler_write_ptr < profiler_write_end))
+
 // #define PROFILER_PARAMS_DECL uint64_t *profiler_buffer;
 
-#define PROFILER_INIT(                                                         \
-    profiler_buffer, group_idx, num_groups, write_thread_predicate)            \
-  if (tb::get_block_idx() == 0 && tb::get_thread_idx() == 0) {                 \
-    entry.nblocks = tb::get_num_blocks();                                      \
+// Generalized init: the caller supplies the block's index inside a GLOBAL
+// block-index space and the size of that space, instead of both being taken
+// from the launching grid.
+//
+// This exists because the persistent runtime can run its workers and its
+// schedulers as two SEPARATE kernel launches (`split_worker_scheduler`). With
+// per-launch `get_block_idx()`/`get_num_blocks()` both launches number their
+// blocks from 0, so worker block b and scheduler block b write their events to
+// the same slots (`1 + b`, stride `num_blocks`) and share one tag namespace,
+// and the header records whichever launch's block 0 initialized first. That
+// corrupted rows in the CSV export and made the Perfetto export raise
+// `KeyError: (80, 0)` because its `tid_map` only covers `range(nblocks)`
+// (demo/qwen3_5/accept/probes/runtime/p9_methodology.md, step 2, bugs 1-2).
+#define PROFILER_INIT_GLOBAL(profiler_buffer,                                  \
+                             group_idx,                                        \
+                             num_groups,                                       \
+                             write_thread_predicate,                           \
+                             global_block_idx,                                 \
+                             global_num_blocks)                                \
+  if ((global_block_idx) == 0 && tb::get_thread_idx() == 0) {                  \
+    entry.nblocks = (global_num_blocks);                                       \
     entry.ngroups = num_groups;                                                \
     profiler_buffer[0] = entry.raw;                                            \
   }                                                                            \
   profiler_write_ptr =                                                         \
-      profiler_buffer + 1 + tb::get_block_idx() * num_groups + group_idx;      \
-  profiler_write_stride = tb::get_num_blocks() * num_groups;                   \
+      profiler_buffer + 1 + (global_block_idx)*num_groups + group_idx;         \
+  profiler_write_end = MPK_PROFILER_BUFFER_END(profiler_buffer);               \
+  profiler_write_stride = (global_num_blocks)*num_groups;                      \
   profiler_entry_tag_base =                                                    \
-      tb::encode_tag(tb::get_block_idx() * num_groups + group_idx, 0, 0);      \
+      tb::encode_tag((global_block_idx)*num_groups + group_idx, 0, 0);         \
   profiler_write_thread_predicate = write_thread_predicate;
 
+#define PROFILER_INIT(                                                         \
+    profiler_buffer, group_idx, num_groups, write_thread_predicate)            \
+  PROFILER_INIT_GLOBAL(profiler_buffer,                                        \
+                       group_idx,                                              \
+                       num_groups,                                             \
+                       write_thread_predicate,                                 \
+                       tb::get_block_idx(),                                    \
+                       tb::get_num_blocks())
+
 #define PROFILER_EVENT_START(event, event_no)                                  \
-  if (profiler_write_thread_predicate) {                                       \
+  if (PROFILER_CAN_WRITE) {                                                    \
     entry.tag =                                                                \
         tb::make_event_tag_start(profiler_entry_tag_base, event, event_no);    \
     entry.delta_time = tb::get_timestamp();                                    \
@@ -139,7 +187,7 @@ struct ProfilerEntry {
 
 #define PROFILER_EVENT_END(event, event_no)                                    \
   __threadfence_block();                                                       \
-  if (profiler_write_thread_predicate) {                                       \
+  if (PROFILER_CAN_WRITE) {                                                    \
     entry.tag =                                                                \
         tb::make_event_tag_end(profiler_entry_tag_base, event, event_no);      \
     entry.delta_time = tb::get_timestamp();                                    \
@@ -149,7 +197,7 @@ struct ProfilerEntry {
 
 #define PROFILER_EVENT_INSTANT(event, event_no)                                \
   __threadfence_block();                                                       \
-  if (profiler_write_thread_predicate) {                                       \
+  if (PROFILER_CAN_WRITE) {                                                    \
     entry.tag =                                                                \
         tb::make_event_tag_instant(profiler_entry_tag_base, event, event_no);  \
     entry.delta_time = tb::get_timestamp();                                    \

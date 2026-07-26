@@ -299,6 +299,15 @@ def get_compile_command(
     
     if profiling:
         flags = flags + ["-DMPK_ENABLE_PROFILING"]
+        # Tell the device-side profiler how many uint64 slots the caller's
+        # buffer actually has, so PROFILER_EVENT_* can stop at the end instead
+        # of walking past it. Profiling is already a compile-time decision, so
+        # this needs no runtime plumbing. Without the flag the macros keep
+        # their historical unbounded behaviour.
+        if getattr(mpk, "profiler_tensor", None) is not None:
+            flags = flags + [
+                f"-DMPK_PROFILER_BUFFER_ENTRIES={int(mpk.profiler_tensor.numel())}"
+            ]
 
     return common_cmd + specific_cmd + flags
 
@@ -1112,6 +1121,66 @@ class PersistentKernel:
             raise ValueError(f"Unsupported target CC: {self.target_cc}")
             
     # MLA (Multi-head Latent Attention) Layers
+    def gdn_conv1d_layer(
+        self,
+        input: DTensor,        # mixed_qkv [max_num_batched_tokens, conv_dim] bf16
+        weight: DTensor,       # conv1d weight [conv_dim, kernel_size] bf16
+        conv_state: DTensor,   # [num_slots, kernel_size-1, conv_dim] bf16, in/out
+        output: DTensor,       # [max_num_batched_tokens, conv_dim] bf16
+        grid_dim: tuple,       # (max_num_batched_requests, channel blocks, 1)
+        block_dim: tuple,      # (256, 1, 1) on SM100
+    ):
+        """Gated-DeltaNet causal depthwise conv1d with a persistent state pool.
+
+        One task per (request SLOT, channel block). The kernel reads its own
+        token window from ``qo_indptr_buffer`` (chunk length varies per
+        iteration) and its own conv-state slice from
+        ``task_metadata.request_id``/``kv_idx``, so nothing is partitioned by
+        the grid — every tensor is presented whole, exactly like
+        ``mla_prefill_layer``.
+
+        ``grid_dim[1]`` is the channel-block count and must divide ``conv_dim``.
+        It is the prefill scaling knob: the FIR has no dependency between output
+        tokens, so a long chunk parallelises across channel blocks. With
+        ``grid_dim[1] == 1`` a 256-token chunk runs on a single SM (measured
+        1.84 ms per layer at conv_dim 8192); vLLM's Triton kernel splits the
+        same way, 32 blocks of 256 channels.
+
+        State lifecycle is kernel-side: a slot whose request is at ``step == 0``
+        (its first prefill chunk) treats the stored state as zero instead of
+        loading it, and the updated state is written back unconditionally. Slot
+        reuse by a later request therefore re-zeros implicitly — no
+        ``prepare_next_batch`` change is needed (v1-architecture.md 3.3).
+        """
+        assert input.num_dims == 2
+        assert output.num_dims == 2
+        assert weight.num_dims == 2
+        assert conv_state.num_dims == 3
+        conv_dim = weight.dim(0)
+        kernel_size = weight.dim(1)
+        assert kernel_size >= 2
+        assert input.dim(1) == conv_dim
+        assert output.dim(1) == conv_dim
+        assert conv_state.dim(1) == kernel_size - 1
+        assert conv_state.dim(2) == conv_dim
+        assert conv_state.dim(0) >= grid_dim[0], (
+            "conv-state pool needs one slot per request "
+            f"({conv_state.dim(0)} slots < grid_dim.x {grid_dim[0]})"
+        )
+        num_channel_blocks = grid_dim[1]
+        assert num_channel_blocks >= 1 and conv_dim % num_channel_blocks == 0, (
+            f"grid_dim.y ({num_channel_blocks}) must divide conv_dim "
+            f"({conv_dim})"
+        )
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(conv_state, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, weight, conv_state, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "gdn_conv1d_sm100", [])
+
     def mla_kv_gather_layer(
         self,
         c_latent_new: DTensor,
@@ -2970,10 +3039,24 @@ class PersistentKernel:
             else:
                 stem = f"mirage_{self.mpi_rank}"
 
-            export_to_perfetto_trace(
-                self.profiler_tensor, stem + ".perfetto-trace"
-            )
-            export_to_csv(self.profiler_tensor, stem + ".csv")
+            # The two exporters are independent views of the same buffer; run
+            # them independently so a failure in one still leaves the other's
+            # artifact behind (the Perfetto exporter used to raise and take the
+            # otherwise-fine CSV with it -- see
+            # demo/qwen3_5/accept/probes/runtime/p9_methodology.md step 2).
+            first_error = None
+            for fn, path in (
+                (export_to_perfetto_trace, stem + ".perfetto-trace"),
+                (export_to_csv, stem + ".csv"),
+            ):
+                try:
+                    fn(self.profiler_tensor, path)
+                except Exception as e:  # noqa: BLE001 - report, don't mask
+                    print(f"[mpk] profiler export to {path} failed: {e!r}")
+                    if first_error is None:
+                        first_error = e
+            if first_error is not None:
+                raise first_error
 
     def __del__(self):
         if not self.__finalized__:

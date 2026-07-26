@@ -78,6 +78,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--profiling", action="store_true", help="Use Profiler to generate trace"
     )
+    parser.add_argument(
+        "--profiler-slots",
+        default=3000 * 128,
+        type=int,
+        help=(
+            "uint64 slots in the profiler buffer. The default fits a short "
+            "trace; a full-length profiled decode needs roughly "
+            "2 * (events per block) * (num_workers + num_schedulers) slots, "
+            "and an undersized buffer surfaces as a 'dangling BEGIN' error "
+            "from the CSV exporter."
+        ),
+    )
     # lookahead or promptlookup
     parser.add_argument(
         "--spec-decode",
@@ -284,7 +296,7 @@ if __name__ == "__main__":
 
         if args.profiling:
             profiler_tensor = torch.zeros(
-                3000 * 128, dtype=torch.uint64, device="cuda"
+                args.profiler_slots, dtype=torch.uint64, device="cuda"
             ).contiguous()
         else:
             profiler_tensor = None

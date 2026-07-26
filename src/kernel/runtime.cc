@@ -433,6 +433,13 @@ void register_mugraph(
             if (task_type == TASK_QUANTIZE_FP8_SM100) {
               task.task_metadata.request_id = bid.x;
             }
+            // GDN conv1d: grid = (max_num_batched_requests, channel blocks, 1).
+            // request_id = bid.x picks the conv-state slot and the token window
+            // (via qo_indptr); kv_idx = bid.y picks the channel block.
+            if (task_type == TASK_GDN_CONV1D_SM100) {
+              task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
+            }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
               task.task_metadata.task_offset =
                   bid.x + bid.y * bgraph.grid_dim.x +
@@ -1836,6 +1843,7 @@ TaskGraphResult print_task_graph(
       "TASK_LINEAR_FP8_WITH_RESIDUAL_SM100";
   task_type_to_name[TASK_LINEAR_FP8_BLOCKSCALE_SM100] =
       "TASK_LINEAR_FP8_BLOCKSCALE_SM100";
+  task_type_to_name[TASK_GDN_CONV1D_SM100] = "TASK_GDN_CONV1D_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

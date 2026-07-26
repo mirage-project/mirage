@@ -1626,6 +1626,13 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     case TASK_EAGLE3_COMMIT: {
       break;
     }
+    // The GDN conv1d task is a plain register/global FIR - no TMA - but its id
+    // (234) is inside the (TASK_SM100_TMA_START_TASK, TASK_SM100_TMA_END_TASK)
+    // window, so runtime.cc calls this function for it unconditionally and the
+    // default: assert(false) below would fire at init without this case.
+    case TASK_GDN_CONV1D_SM100: {
+      break;
+    }
     default:
       assert(false);
   }
