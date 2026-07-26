@@ -1,0 +1,3240 @@
+{
+  "mode": "decode",
+  "tensors": {
+    "gdn.input_layernorm.input": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.input_layernorm.input.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.0004686502506956458,
+      "std": 0.014121360145509243,
+      "min": -0.047607421875,
+      "max": 0.044189453125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.input_layernorm.output": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.input_layernorm.output.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.03480498120188713,
+      "std": 1.0249431133270264,
+      "min": -3.546875,
+      "max": 3.921875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.input_layernorm.__weight.weight": {
+      "shape": [
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.input_layernorm.__weight.weight.pt",
+      "is_weight": true,
+      "numel": 2048,
+      "mean": 0.028332330286502838,
+      "std": 0.049180421978235245,
+      "min": -0.08251953125,
+      "max": 0.32421875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.layer_input": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.layer_input.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.03480498120188713,
+      "std": 1.0249431133270264,
+      "min": -3.546875,
+      "max": 3.921875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.core_state_before": {
+      "shape": [
+        1,
+        32,
+        128,
+        128
+      ],
+      "dtype": "torch.float32",
+      "file": "decode/tensors/gdn.core_state_before.pt",
+      "is_weight": false,
+      "numel": 524288,
+      "mean": 0.0015412218635901809,
+      "std": 0.12881587445735931,
+      "min": -11.942131996154785,
+      "max": 16.280658721923828,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.conv_state_before": {
+      "shape": [
+        1,
+        8192,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.conv_state_before.pt",
+      "is_weight": false,
+      "numel": 32768,
+      "mean": -0.016446635127067566,
+      "std": 2.1256299018859863,
+      "min": -35.0,
+      "max": 31.625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.qkv_proj_out": {
+      "shape": [
+        1,
+        1,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.qkv_proj_out.pt",
+      "is_weight": false,
+      "numel": 8192,
+      "mean": -0.016027744859457016,
+      "std": 2.0879924297332764,
+      "min": -29.75,
+      "max": 29.25,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.z_proj_out": {
+      "shape": [
+        1,
+        1,
+        4096
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.z_proj_out.pt",
+      "is_weight": false,
+      "numel": 4096,
+      "mean": -0.26003509759902954,
+      "std": 1.6872903108596802,
+      "min": -11.5,
+      "max": 6.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.b_proj_out": {
+      "shape": [
+        1,
+        1,
+        32
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.b_proj_out.pt",
+      "is_weight": false,
+      "numel": 32,
+      "mean": 0.7695795297622681,
+      "std": 2.0529415607452393,
+      "min": -1.5625,
+      "max": 7.15625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.a_proj_out": {
+      "shape": [
+        1,
+        1,
+        32
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.a_proj_out.pt",
+      "is_weight": false,
+      "numel": 32,
+      "mean": 0.47009217739105225,
+      "std": 1.3494923114776611,
+      "min": -3.15625,
+      "max": 3.265625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.in_proj_b": {
+      "shape": [
+        32,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.__weight.in_proj_b.pt",
+      "is_weight": true,
+      "numel": 65536,
+      "mean": -0.00013561126252170652,
+      "std": 0.010873956605792046,
+      "min": -0.07958984375,
+      "max": 0.0751953125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.in_proj_a": {
+      "shape": [
+        32,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.__weight.in_proj_a.pt",
+      "is_weight": true,
+      "numel": 65536,
+      "mean": 0.00020975164079573005,
+      "std": 0.02235172688961029,
+      "min": -0.1279296875,
+      "max": 0.115234375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.conv_in": {
+      "shape": [
+        1,
+        8192,
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.conv_in.pt",
+      "is_weight": false,
+      "numel": 8192,
+      "mean": -0.016027744859457016,
+      "std": 2.0879924297332764,
+      "min": -29.75,
+      "max": 29.25,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.conv1d_weight": {
+      "shape": [
+        8192,
+        1,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.__weight.conv1d_weight.pt",
+      "is_weight": true,
+      "numel": 32768,
+      "mean": -0.00018635271408129483,
+      "std": 0.03418264910578728,
+      "min": -0.41015625,
+      "max": 0.392578125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.conv_out": {
+      "shape": [
+        1,
+        8192,
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.conv_out.pt",
+      "is_weight": false,
+      "numel": 8192,
+      "mean": 0.05785530433058739,
+      "std": 0.8320723176002502,
+      "min": -0.279296875,
+      "max": 19.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.conv_state_after": {
+      "shape": [
+        1,
+        8192,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.conv_state_after.pt",
+      "is_weight": false,
+      "numel": 32768,
+      "mean": -0.014961913228034973,
+      "std": 2.154215097427368,
+      "min": -35.0,
+      "max": 31.625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.q_split": {
+      "shape": [
+        1,
+        1,
+        16,
+        128
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.q_split.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.0035259281285107136,
+      "std": 0.2304699718952179,
+      "min": -0.279296875,
+      "max": 7.09375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.k_split": {
+      "shape": [
+        1,
+        1,
+        16,
+        128
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.k_split.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.0077863335609436035,
+      "std": 0.08972134441137314,
+      "min": -0.279296875,
+      "max": 1.734375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.v_split": {
+      "shape": [
+        1,
+        1,
+        32,
+        128
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.v_split.pt",
+      "is_weight": false,
+      "numel": 4096,
+      "mean": 0.11005448549985886,
+      "std": 1.161389946937561,
+      "min": -0.24609375,
+      "max": 19.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.beta": {
+      "shape": [
+        1,
+        1,
+        32
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.beta.pt",
+      "is_weight": false,
+      "numel": 32,
+      "mean": 0.5716552734375,
+      "std": 0.2657065987586975,
+      "min": 0.1728515625,
+      "max": 1.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.decay_g": {
+      "shape": [
+        1,
+        1,
+        32
+      ],
+      "dtype": "torch.float32",
+      "file": "decode/tensors/gdn.decay_g.pt",
+      "is_weight": false,
+      "numel": 32,
+      "mean": -8.848361015319824,
+      "std": 21.98409080505371,
+      "min": -91.57713317871094,
+      "max": -0.00010677211685106158,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.A_log": {
+      "shape": [
+        32
+      ],
+      "dtype": "torch.float32",
+      "file": "decode/tensors/gdn.__weight.A_log.pt",
+      "is_weight": true,
+      "numel": 32,
+      "mean": -1.794921875,
+      "std": 2.882762908935547,
+      "min": -3.984375,
+      "max": 4.28125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.dt_bias": {
+      "shape": [
+        32
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.__weight.dt_bias.pt",
+      "is_weight": true,
+      "numel": 32,
+      "mean": -0.6858367919921875,
+      "std": 5.179986000061035,
+      "min": -5.28125,
+      "max": 15.5625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.core_attn_out": {
+      "shape": [
+        1,
+        1,
+        32,
+        128
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.core_attn_out.pt",
+      "is_weight": false,
+      "numel": 4096,
+      "mean": 0.002692623995244503,
+      "std": 0.03471757844090462,
+      "min": -0.004974365234375,
+      "max": 0.84375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.core_state_after": {
+      "shape": [
+        1,
+        32,
+        128,
+        128
+      ],
+      "dtype": "torch.float32",
+      "file": "decode/tensors/gdn.core_state_after.pt",
+      "is_weight": false,
+      "numel": 524288,
+      "mean": 0.001722629414871335,
+      "std": 0.1360720992088318,
+      "min": -13.645994186401367,
+      "max": 15.211511611938477,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.gated_norm_out": {
+      "shape": [
+        32,
+        128
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.gated_norm_out.pt",
+      "is_weight": false,
+      "numel": 4096,
+      "mean": -0.0006338547682389617,
+      "std": 0.034549012780189514,
+      "min": -2.015625,
+      "max": 0.17578125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.norm_weight": {
+      "shape": [
+        128
+      ],
+      "dtype": "torch.float32",
+      "file": "decode/tensors/gdn.__weight.norm_weight.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 0.8813552856445312,
+      "std": 0.05295291915535927,
+      "min": 0.533203125,
+      "max": 0.956787109375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.out_proj_out": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.out_proj_out.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.0006641610525548458,
+      "std": 0.02402913011610508,
+      "min": -0.296875,
+      "max": 0.76953125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.in_proj_qkv": {
+      "shape": [
+        8192,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/gdn.__weight.in_proj_qkv.pt",
+      "is_weight": true,
+      "numel": 16777216,
+      "mean": 0.01699152961373329,
+      "std": 66.3466796875,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.in_proj_qkv_scale_inv": {
+      "shape": [
+        64,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.__weight.in_proj_qkv_scale_inv.pt",
+      "is_weight": true,
+      "numel": 1024,
+      "mean": 0.0002781795337796211,
+      "std": 9.285011765314266e-05,
+      "min": 0.0001277923583984375,
+      "max": 0.000888824462890625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.in_proj_z": {
+      "shape": [
+        4096,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/gdn.__weight.in_proj_z.pt",
+      "is_weight": true,
+      "numel": 8388608,
+      "mean": -0.11308062076568604,
+      "std": 81.52721405029297,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.in_proj_z_scale_inv": {
+      "shape": [
+        32,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.__weight.in_proj_z_scale_inv.pt",
+      "is_weight": true,
+      "numel": 512,
+      "mean": 0.0002217814326286316,
+      "std": 5.241229519015178e-05,
+      "min": 0.00015163421630859375,
+      "max": 0.000659942626953125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.out_proj": {
+      "shape": [
+        2048,
+        4096
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/gdn.__weight.out_proj.pt",
+      "is_weight": true,
+      "numel": 8388608,
+      "mean": -0.0119553804397583,
+      "std": 55.28553771972656,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.__weight.out_proj_scale_inv": {
+      "shape": [
+        16,
+        32
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.__weight.out_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 512,
+      "mean": 0.0003249663859605789,
+      "std": 0.00012169997353339568,
+      "min": 0.0001678466796875,
+      "max": 0.00099945068359375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.post_attention_layernorm.input": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.post_attention_layernorm.input.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.0011326391249895096,
+      "std": 0.028240084648132324,
+      "min": -0.306640625,
+      "max": 0.78515625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.post_attention_layernorm.output": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.post_attention_layernorm.output.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.01979510299861431,
+      "std": 0.6520255208015442,
+      "min": -9.8125,
+      "max": 6.875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "gdn.post_attention_layernorm.__weight.weight": {
+      "shape": [
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/gdn.post_attention_layernorm.__weight.weight.pt",
+      "is_weight": true,
+      "numel": 2048,
+      "mean": -0.10339173674583435,
+      "std": 0.1596376597881317,
+      "min": -0.81640625,
+      "max": 0.486328125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.layer_input": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.layer_input.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.01979510299861431,
+      "std": 0.6520255208015442,
+      "min": -9.8125,
+      "max": 6.875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.shared_gate_proj_out": {
+      "shape": [
+        1,
+        512
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.shared_gate_proj_out.pt",
+      "is_weight": false,
+      "numel": 512,
+      "mean": -0.4096718430519104,
+      "std": 0.685149610042572,
+      "min": -3.765625,
+      "max": 1.8203125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.shared_up_proj_out": {
+      "shape": [
+        1,
+        512
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.shared_up_proj_out.pt",
+      "is_weight": false,
+      "numel": 512,
+      "mean": 0.019089296460151672,
+      "std": 0.4706501066684723,
+      "min": -1.7109375,
+      "max": 1.6796875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.shared_silu_mul_out": {
+      "shape": [
+        1,
+        512
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.shared_silu_mul_out.pt",
+      "is_weight": false,
+      "numel": 512,
+      "mean": -0.0032636490650475025,
+      "std": 0.10251688212156296,
+      "min": -0.84375,
+      "max": 0.494140625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.shared_down_proj_out": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.shared_down_proj_out.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": -0.00021955970441922545,
+      "std": 0.034892626106739044,
+      "min": -0.5390625,
+      "max": 0.1318359375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.router_logits": {
+      "shape": [
+        1,
+        256
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.router_logits.pt",
+      "is_weight": false,
+      "numel": 256,
+      "mean": -6.08172607421875,
+      "std": 1.1879349946975708,
+      "min": -9.5625,
+      "max": -3.078125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.router_probs": {
+      "shape": [
+        1,
+        256
+      ],
+      "dtype": "torch.float32",
+      "file": "decode/tensors/moe0.router_probs.pt",
+      "is_weight": false,
+      "numel": 256,
+      "mean": 0.00390625,
+      "std": 0.005621107295155525,
+      "min": 6.52986709610559e-05,
+      "max": 0.042759500443935394,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.topk_weights_raw": {
+      "shape": [
+        1,
+        8
+      ],
+      "dtype": "torch.float32",
+      "file": "decode/tensors/moe0.topk_weights_raw.pt",
+      "is_weight": false,
+      "numel": 8,
+      "mean": 0.029635140672326088,
+      "std": 0.01115487515926361,
+      "min": 0.01500999741256237,
+      "max": 0.042759500443935394,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.topk_ids": {
+      "shape": [
+        1,
+        8
+      ],
+      "dtype": "torch.int64",
+      "file": "decode/tensors/moe0.topk_ids.pt",
+      "is_weight": false,
+      "numel": 8,
+      "mean": 122.375,
+      "std": 85.59862518310547,
+      "min": 13.0,
+      "max": 239.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.topk_renorm_weights": {
+      "shape": [
+        1,
+        8
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.topk_renorm_weights.pt",
+      "is_weight": false,
+      "numel": 8,
+      "mean": 0.125,
+      "std": 0.04715608060359955,
+      "min": 0.0634765625,
+      "max": 0.1806640625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.__weight.router_gate_weight": {
+      "shape": [
+        256,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.__weight.router_gate_weight.pt",
+      "is_weight": true,
+      "numel": 524288,
+      "mean": -0.00011213445395696908,
+      "std": 0.023053281009197235,
+      "min": -0.26953125,
+      "max": 0.3125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.routed_expert_output": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.routed_expert_output.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": -5.122835864312947e-05,
+      "std": 0.005032508634030819,
+      "min": -0.0216064453125,
+      "max": 0.0306396484375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_13.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_13.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.0810546875,
+      "std": 0.0,
+      "min": 0.0810546875,
+      "max": 0.0810546875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_13.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_13.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": 0.024546325206756592,
+      "std": 81.20404052734375,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_13.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_13.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.14994943141937256,
+      "std": 79.03280639648438,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_13.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_13.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 8.862465620040894e-05,
+      "std": 1.0550274964771233e-05,
+      "min": 7.2479248046875e-05,
+      "max": 0.000133514404296875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_13.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_13.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 9.83700156211853e-05,
+      "std": 1.3923520782554988e-05,
+      "min": 8.058547973632812e-05,
+      "max": 0.00013256072998046875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_19.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_19.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.142578125,
+      "std": 0.0,
+      "min": 0.142578125,
+      "max": 0.142578125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_19.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_19.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": 0.03426336124539375,
+      "std": 77.73345947265625,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_19.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_19.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.0384761244058609,
+      "std": 74.559326171875,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_19.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_19.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 8.171051740646362e-05,
+      "std": 8.61860917211743e-06,
+      "min": 6.914138793945312e-05,
+      "max": 0.00011777877807617188,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_19.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_19.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 9.674578905105591e-05,
+      "std": 1.5291421732399613e-05,
+      "min": 7.772445678710938e-05,
+      "max": 0.0001583099365234375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_69.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_69.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.1748046875,
+      "std": 0.0,
+      "min": 0.1748046875,
+      "max": 0.1748046875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_69.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_69.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": 0.002627388574182987,
+      "std": 82.78713989257812,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_69.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_69.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": 0.06280063092708588,
+      "std": 81.04891204833984,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_69.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_69.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 8.505955338478088e-05,
+      "std": 8.170824003173038e-06,
+      "min": 7.152557373046875e-05,
+      "max": 0.00011968612670898438,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_69.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_69.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 9.703636169433594e-05,
+      "std": 9.500343367108144e-06,
+      "min": 7.963180541992188e-05,
+      "max": 0.00013256072998046875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_116.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_116.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.15234375,
+      "std": 0.0,
+      "min": 0.15234375,
+      "max": 0.15234375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_116.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_116.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": -0.02237905003130436,
+      "std": 75.46058654785156,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_116.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_116.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": 0.04267563298344612,
+      "std": 73.13126373291016,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_116.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_116.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 9.535253047943115e-05,
+      "std": 1.6768222849350423e-05,
+      "min": 7.62939453125e-05,
+      "max": 0.000152587890625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_116.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_116.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.00010508298873901367,
+      "std": 1.9076796888839453e-05,
+      "min": 8.440017700195312e-05,
+      "max": 0.0001983642578125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_139.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_139.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.0693359375,
+      "std": 0.0,
+      "min": 0.0693359375,
+      "max": 0.0693359375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_139.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_139.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": -0.08518914133310318,
+      "std": 59.49494171142578,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_139.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_139.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": 0.10370446741580963,
+      "std": 76.94129180908203,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_139.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_139.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 0.00012930110096931458,
+      "std": 2.6857764169108123e-05,
+      "min": 8.296966552734375e-05,
+      "max": 0.00020694732666015625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_139.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_139.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.00010369718074798584,
+      "std": 1.1967302270932123e-05,
+      "min": 8.630752563476562e-05,
+      "max": 0.00016689300537109375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_159.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_159.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.1357421875,
+      "std": 0.0,
+      "min": 0.1357421875,
+      "max": 0.1357421875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_159.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_159.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": -0.039873115718364716,
+      "std": 75.14374542236328,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_159.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_159.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.05036558210849762,
+      "std": 71.75806427001953,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_159.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_159.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 8.270889520645142e-05,
+      "std": 7.718019332969561e-06,
+      "min": 6.866455078125e-05,
+      "max": 0.000110626220703125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_159.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_159.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 9.538233280181885e-05,
+      "std": 1.1711850675055757e-05,
+      "min": 8.0108642578125e-05,
+      "max": 0.0001430511474609375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_225.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_225.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.0634765625,
+      "std": 0.0,
+      "min": 0.0634765625,
+      "max": 0.0634765625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_225.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_225.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": 0.03657045215368271,
+      "std": 65.05057525634766,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_225.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_225.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": 0.05641452968120575,
+      "std": 64.77638244628906,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_225.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_225.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 8.990243077278137e-05,
+      "std": 1.5398351024487056e-05,
+      "min": 6.532669067382812e-05,
+      "max": 0.0001468658447265625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_225.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_225.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.0001104697585105896,
+      "std": 1.862720091594383e-05,
+      "min": 8.106231689453125e-05,
+      "max": 0.0001659393310546875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_239.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_239.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.1806640625,
+      "std": 0.0,
+      "min": 0.1806640625,
+      "max": 0.1806640625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_239.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_239.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": 0.04328768700361252,
+      "std": 75.02778625488281,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_239.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.expert_239.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.10549955070018768,
+      "std": 63.76690673828125,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_239.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_239.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 8.27200710773468e-05,
+      "std": 1.0064311936730519e-05,
+      "min": 6.532669067382812e-05,
+      "max": 0.000118255615234375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.expert_239.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.expert_239.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.00011198222637176514,
+      "std": 1.5995346984709613e-05,
+      "min": 8.106231689453125e-05,
+      "max": 0.0001544952392578125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.shared_gate_logit": {
+      "shape": [
+        1,
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.shared_gate_logit.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": -2.328125,
+      "std": 0.0,
+      "min": -2.328125,
+      "max": -2.328125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.shared_gate_sigmoid": {
+      "shape": [
+        1,
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.shared_gate_sigmoid.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.0888671875,
+      "std": 0.0,
+      "min": 0.0888671875,
+      "max": 0.0888671875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.shared_output_gated": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.shared_output_gated.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": -1.9326489564264193e-05,
+      "std": 0.003100272733718157,
+      "min": -0.0478515625,
+      "max": 0.01171875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.__weight.shared_expert_gate_weight": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.__weight.shared_expert_gate_weight.pt",
+      "is_weight": true,
+      "numel": 2048,
+      "mean": -1.8274917238159105e-05,
+      "std": 0.00623759301379323,
+      "min": -0.047607421875,
+      "max": 0.053466796875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.combined_output": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.combined_output.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": -7.0420210249722e-05,
+      "std": 0.006167103536427021,
+      "min": -0.04296875,
+      "max": 0.03759765625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.__weight.shared_expert.gate_proj": {
+      "shape": [
+        512,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.__weight.shared_expert.gate_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.10431700944900513,
+      "std": 37.27174377441406,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.__weight.shared_expert.gate_proj_scale_inv": {
+      "shape": [
+        4,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.__weight.shared_expert.gate_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.00034911930561065674,
+      "std": 5.748031253460795e-05,
+      "min": 0.000213623046875,
+      "max": 0.000457763671875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.__weight.shared_expert.up_proj": {
+      "shape": [
+        512,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.__weight.shared_expert.up_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.09169954061508179,
+      "std": 62.85917663574219,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.__weight.shared_expert.up_proj_scale_inv": {
+      "shape": [
+        4,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.__weight.shared_expert.up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.000178605318069458,
+      "std": 3.0106311896815896e-05,
+      "min": 0.00013256072998046875,
+      "max": 0.000308990478515625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.__weight.shared_expert.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe0.__weight.shared_expert.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.01063709706068039,
+      "std": 52.80665588378906,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe0.__weight.shared_expert.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe0.__weight.shared_expert.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.00024215877056121826,
+      "std": 0.00010920858767349273,
+      "min": 0.00013637542724609375,
+      "max": 0.000698089599609375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.input_layernorm.input": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.input_layernorm.input.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.0014808494597673416,
+      "std": 0.0450756773352623,
+      "min": -0.5390625,
+      "max": 1.078125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.input_layernorm.output": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.input_layernorm.output.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.033629439771175385,
+      "std": 1.1626439094543457,
+      "min": -20.0,
+      "max": 26.125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.input_layernorm.__weight.weight": {
+      "shape": [
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.input_layernorm.__weight.weight.pt",
+      "is_weight": true,
+      "numel": 2048,
+      "mean": -0.08256381005048752,
+      "std": 0.12239033728837967,
+      "min": -0.298828125,
+      "max": 0.671875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.layer_input": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.layer_input.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.033629439771175385,
+      "std": 1.1626439094543457,
+      "min": -20.0,
+      "max": 26.125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.q_proj_out": {
+      "shape": [
+        1,
+        1,
+        8192
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.q_proj_out.pt",
+      "is_weight": false,
+      "numel": 8192,
+      "mean": -2.581937789916992,
+      "std": 2.802180528640747,
+      "min": -13.25,
+      "max": 12.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.q_split": {
+      "shape": [
+        1,
+        1,
+        16,
+        256
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.q_split.pt",
+      "is_weight": false,
+      "numel": 4096,
+      "mean": 0.005692171864211559,
+      "std": 1.0874048471450806,
+      "min": -13.25,
+      "max": 12.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.gate_split": {
+      "shape": [
+        1,
+        1,
+        4096
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.gate_split.pt",
+      "is_weight": false,
+      "numel": 4096,
+      "mean": -5.169568061828613,
+      "std": 1.0625296831130981,
+      "min": -8.875,
+      "max": -0.2578125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.q_norm_out": {
+      "shape": [
+        1,
+        1,
+        16,
+        256
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.q_norm_out.pt",
+      "is_weight": false,
+      "numel": 4096,
+      "mean": 0.014088204130530357,
+      "std": 1.2002263069152832,
+      "min": -9.875,
+      "max": 7.28125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.k_proj_out": {
+      "shape": [
+        1,
+        1,
+        512
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.k_proj_out.pt",
+      "is_weight": false,
+      "numel": 512,
+      "mean": 0.0060756877064704895,
+      "std": 0.8283327221870422,
+      "min": -3.46875,
+      "max": 3.4375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.k_norm_out": {
+      "shape": [
+        1,
+        1,
+        2,
+        256
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.k_norm_out.pt",
+      "is_weight": false,
+      "numel": 512,
+      "mean": 0.0028926916420459747,
+      "std": 1.3558235168457031,
+      "min": -5.65625,
+      "max": 6.03125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.v_proj_out": {
+      "shape": [
+        1,
+        1,
+        512
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.v_proj_out.pt",
+      "is_weight": false,
+      "numel": 512,
+      "mean": -0.010712400078773499,
+      "std": 0.5938153266906738,
+      "min": -2.09375,
+      "max": 2.875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.rope_cos": {
+      "shape": [
+        1,
+        1,
+        64
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.rope_cos.pt",
+      "is_weight": false,
+      "numel": 64,
+      "mean": 0.8116302490234375,
+      "std": 0.4575030505657196,
+      "min": -0.9765625,
+      "max": 1.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.rope_sin": {
+      "shape": [
+        1,
+        1,
+        64
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.rope_sin.pt",
+      "is_weight": false,
+      "numel": 64,
+      "mean": 0.11384714394807816,
+      "std": 0.3524424433708191,
+      "min": -0.9921875,
+      "max": 0.98828125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.q_rope": {
+      "shape": [
+        1,
+        16,
+        1,
+        256
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.q_rope.pt",
+      "is_weight": false,
+      "numel": 4096,
+      "mean": -0.0019352436065673828,
+      "std": 1.2002191543579102,
+      "min": -9.875,
+      "max": 7.28125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.k_rope": {
+      "shape": [
+        1,
+        2,
+        1,
+        256
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.k_rope.pt",
+      "is_weight": false,
+      "numel": 512,
+      "mean": 0.0009189881384372711,
+      "std": 1.355786681175232,
+      "min": -5.65625,
+      "max": 6.03125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.kv_cache_k_after_write": {
+      "shape": [
+        1,
+        2,
+        9,
+        256
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.kv_cache_k_after_write.pt",
+      "is_weight": false,
+      "numel": 4608,
+      "mean": -0.030464066192507744,
+      "std": 1.3631961345672607,
+      "min": -12.1875,
+      "max": 10.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.kv_cache_v_after_write": {
+      "shape": [
+        1,
+        2,
+        9,
+        256
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.kv_cache_v_after_write.pt",
+      "is_weight": false,
+      "numel": 4608,
+      "mean": -0.005589600186794996,
+      "std": 0.46791887283325195,
+      "min": -2.328125,
+      "max": 3.5,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.core_attn_out": {
+      "shape": [
+        1,
+        1,
+        4096
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.core_attn_out.pt",
+      "is_weight": false,
+      "numel": 4096,
+      "mean": -0.009488827548921108,
+      "std": 0.39245134592056274,
+      "min": -1.765625,
+      "max": 3.03125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.gate_sigmoid_mul_out": {
+      "shape": [
+        1,
+        1,
+        4096
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.gate_sigmoid_mul_out.pt",
+      "is_weight": false,
+      "numel": 4096,
+      "mean": -0.00034778646659106016,
+      "std": 0.008654513396322727,
+      "min": -0.296875,
+      "max": 0.10498046875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.o_proj_out": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.o_proj_out.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": -0.00015032518422231078,
+      "std": 0.010457518510520458,
+      "min": -0.1494140625,
+      "max": 0.091796875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.__weight.q_proj": {
+      "shape": [
+        8192,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/attn.__weight.q_proj.pt",
+      "is_weight": true,
+      "numel": 16777216,
+      "mean": -0.28953543305397034,
+      "std": 72.89834594726562,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.__weight.q_proj_scale_inv": {
+      "shape": [
+        64,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.__weight.q_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 1024,
+      "mean": 0.0002547847107052803,
+      "std": 8.49716379889287e-05,
+      "min": 0.00012493133544921875,
+      "max": 0.000766754150390625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.__weight.k_proj": {
+      "shape": [
+        512,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/attn.__weight.k_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.05034361034631729,
+      "std": 80.80128479003906,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.__weight.k_proj_scale_inv": {
+      "shape": [
+        4,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.__weight.k_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.00021827220916748047,
+      "std": 4.3975676817353815e-05,
+      "min": 0.00016307830810546875,
+      "max": 0.0004329681396484375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.__weight.v_proj": {
+      "shape": [
+        512,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/attn.__weight.v_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.0681898221373558,
+      "std": 62.27000427246094,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.__weight.v_proj_scale_inv": {
+      "shape": [
+        4,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.__weight.v_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.00023289024829864502,
+      "std": 5.618967770715244e-05,
+      "min": 0.0001506805419921875,
+      "max": 0.0003528594970703125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.__weight.o_proj": {
+      "shape": [
+        2048,
+        4096
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/attn.__weight.o_proj.pt",
+      "is_weight": true,
+      "numel": 8388608,
+      "mean": -0.01473515946418047,
+      "std": 59.77241516113281,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.__weight.o_proj_scale_inv": {
+      "shape": [
+        16,
+        32
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.__weight.o_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 512,
+      "mean": 0.0003075525164604187,
+      "std": 0.00016379145381506532,
+      "min": 0.0001354217529296875,
+      "max": 0.00136566162109375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.__weight.q_norm_weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.__weight.q_norm_weight.pt",
+      "is_weight": true,
+      "numel": 256,
+      "mean": 0.3234272003173828,
+      "std": 0.10100233554840088,
+      "min": -0.32421875,
+      "max": 0.8671875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.__weight.k_norm_weight": {
+      "shape": [
+        256
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.__weight.k_norm_weight.pt",
+      "is_weight": true,
+      "numel": 256,
+      "mean": 0.31186413764953613,
+      "std": 0.16324032843112946,
+      "min": -0.40234375,
+      "max": 1.109375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.post_attention_layernorm.input": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.post_attention_layernorm.input.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.0013311151415109634,
+      "std": 0.0435953363776207,
+      "min": -0.45703125,
+      "max": 1.1484375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.post_attention_layernorm.output": {
+      "shape": [
+        1,
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.post_attention_layernorm.output.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.013645000755786896,
+      "std": 0.7371371388435364,
+      "min": -5.59375,
+      "max": 5.6875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "attn.post_attention_layernorm.__weight.weight": {
+      "shape": [
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/attn.post_attention_layernorm.__weight.weight.pt",
+      "is_weight": true,
+      "numel": 2048,
+      "mean": 0.13513770699501038,
+      "std": 0.14547325670719147,
+      "min": -0.9921875,
+      "max": 0.28125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.layer_input": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.layer_input.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.013645000755786896,
+      "std": 0.7371371388435364,
+      "min": -5.59375,
+      "max": 5.6875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.shared_gate_proj_out": {
+      "shape": [
+        1,
+        512
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.shared_gate_proj_out.pt",
+      "is_weight": false,
+      "numel": 512,
+      "mean": -0.3567488491535187,
+      "std": 0.606185793876648,
+      "min": -2.28125,
+      "max": 4.25,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.shared_up_proj_out": {
+      "shape": [
+        1,
+        512
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.shared_up_proj_out.pt",
+      "is_weight": false,
+      "numel": 512,
+      "mean": -0.0011840835213661194,
+      "std": 0.4378567039966583,
+      "min": -2.5625,
+      "max": 1.625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.shared_silu_mul_out": {
+      "shape": [
+        1,
+        512
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.shared_silu_mul_out.pt",
+      "is_weight": false,
+      "numel": 512,
+      "mean": 0.0034138811752200127,
+      "std": 0.11050638556480408,
+      "min": -1.140625,
+      "max": 0.8515625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.shared_down_proj_out": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.shared_down_proj_out.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 0.0005940682021901011,
+      "std": 0.032071638852357864,
+      "min": -0.1376953125,
+      "max": 0.28125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.router_logits": {
+      "shape": [
+        1,
+        256
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.router_logits.pt",
+      "is_weight": false,
+      "numel": 256,
+      "mean": -5.91180419921875,
+      "std": 0.7006052732467651,
+      "min": -8.25,
+      "max": -2.453125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.router_probs": {
+      "shape": [
+        1,
+        256
+      ],
+      "dtype": "torch.float32",
+      "file": "decode/tensors/moe3.router_probs.pt",
+      "is_weight": false,
+      "numel": 256,
+      "mean": 0.0039062497671693563,
+      "std": 0.006060357205569744,
+      "min": 0.0002857106737792492,
+      "max": 0.09407566487789154,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.topk_weights_raw": {
+      "shape": [
+        1,
+        8
+      ],
+      "dtype": "torch.float32",
+      "file": "decode/tensors/moe3.topk_weights_raw.pt",
+      "is_weight": false,
+      "numel": 8,
+      "mean": 0.02097710222005844,
+      "std": 0.029589775949716568,
+      "min": 0.008614737540483475,
+      "max": 0.09407566487789154,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.topk_ids": {
+      "shape": [
+        1,
+        8
+      ],
+      "dtype": "torch.int64",
+      "file": "decode/tensors/moe3.topk_ids.pt",
+      "is_weight": false,
+      "numel": 8,
+      "mean": 149.125,
+      "std": 58.547752380371094,
+      "min": 75.0,
+      "max": 251.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.topk_renorm_weights": {
+      "shape": [
+        1,
+        8
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.topk_renorm_weights.pt",
+      "is_weight": false,
+      "numel": 8,
+      "mean": 0.125274658203125,
+      "std": 0.17698559165000916,
+      "min": 0.05126953125,
+      "max": 0.5625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.__weight.router_gate_weight": {
+      "shape": [
+        256,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.__weight.router_gate_weight.pt",
+      "is_weight": true,
+      "numel": 524288,
+      "mean": 0.00023169016640167683,
+      "std": 0.023674460127949715,
+      "min": -0.3671875,
+      "max": 0.302734375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.routed_expert_output": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.routed_expert_output.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": -0.00010547041893005371,
+      "std": 0.01609308086335659,
+      "min": -0.056640625,
+      "max": 0.0615234375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_75.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_75.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.07958984375,
+      "std": 0.0,
+      "min": 0.07958984375,
+      "max": 0.07958984375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_75.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_75.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": 0.15008458495140076,
+      "std": 107.6915283203125,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_75.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_75.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": 0.16713851690292358,
+      "std": 105.62816619873047,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_75.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_75.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 9.470805525779724e-05,
+      "std": 6.301039775280515e-06,
+      "min": 8.344650268554688e-05,
+      "max": 0.00011777877807617188,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_75.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_75.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 9.800493717193604e-05,
+      "std": 6.725794264639262e-06,
+      "min": 8.440017700195312e-05,
+      "max": 0.00011968612670898438,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_92.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_92.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.05126953125,
+      "std": 0.0,
+      "min": 0.05126953125,
+      "max": 0.05126953125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_92.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_92.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": -0.10546490550041199,
+      "std": 109.09915924072266,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_92.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_92.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": 0.07251884788274765,
+      "std": 106.61449432373047,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_92.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_92.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 9.448826313018799e-05,
+      "std": 6.995629064476816e-06,
+      "min": 8.0108642578125e-05,
+      "max": 0.0001220703125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_92.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_92.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 9.784102439880371e-05,
+      "std": 7.958574315125588e-06,
+      "min": 8.678436279296875e-05,
+      "max": 0.00011920928955078125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_114.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_114.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.0771484375,
+      "std": 0.0,
+      "min": 0.0771484375,
+      "max": 0.0771484375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_114.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_114.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": 0.10059907287359238,
+      "std": 107.14653778076172,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_114.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_114.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.007960742339491844,
+      "std": 107.6532974243164,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_114.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_114.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 9.562447667121887e-05,
+      "std": 6.883783498778939e-06,
+      "min": 8.0108642578125e-05,
+      "max": 0.00011920928955078125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_114.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_114.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 9.584426879882812e-05,
+      "std": 6.370871687977342e-06,
+      "min": 8.487701416015625e-05,
+      "max": 0.00011587142944335938,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_123.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_123.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.06396484375,
+      "std": 0.0,
+      "min": 0.06396484375,
+      "max": 0.06396484375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_123.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_123.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": 0.013759348541498184,
+      "std": 107.99803924560547,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_123.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_123.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": 0.006519835442304611,
+      "std": 107.13268280029297,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_123.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_123.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 9.420141577720642e-05,
+      "std": 6.685316748189507e-06,
+      "min": 8.058547973632812e-05,
+      "max": 0.00011730194091796875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_123.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_123.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 9.696930646896362e-05,
+      "std": 7.059545623633312e-06,
+      "min": 8.249282836914062e-05,
+      "max": 0.00012063980102539062,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_173.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_173.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.052978515625,
+      "std": 0.0,
+      "min": 0.052978515625,
+      "max": 0.052978515625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_173.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_173.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": -0.10003514587879181,
+      "std": 107.15613555908203,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_173.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_173.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.11290273815393448,
+      "std": 106.48252868652344,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_173.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_173.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 9.550899267196655e-05,
+      "std": 7.2920847742352635e-06,
+      "min": 8.058547973632812e-05,
+      "max": 0.00011968612670898438,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_173.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_173.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 9.768456220626831e-05,
+      "std": 7.300569905055454e-06,
+      "min": 8.678436279296875e-05,
+      "max": 0.00013065338134765625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_174.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_174.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.5625,
+      "std": 0.0,
+      "min": 0.5625,
+      "max": 0.5625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_174.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_174.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": 0.23227408528327942,
+      "std": 108.71097564697266,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_174.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_174.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.055235348641872406,
+      "std": 108.22728729248047,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_174.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_174.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 9.3899667263031e-05,
+      "std": 6.431662768591195e-06,
+      "min": 8.058547973632812e-05,
+      "max": 0.00011205673217773438,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_174.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_174.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 9.656697511672974e-05,
+      "std": 5.819604211865226e-06,
+      "min": 8.535385131835938e-05,
+      "max": 0.00010919570922851562,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_191.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_191.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.06005859375,
+      "std": 0.0,
+      "min": 0.06005859375,
+      "max": 0.06005859375,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_191.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_191.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": -0.06643819808959961,
+      "std": 108.71211242675781,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_191.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_191.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": 0.02413354627788067,
+      "std": 107.88156127929688,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_191.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_191.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 9.47117805480957e-05,
+      "std": 6.394082902261289e-06,
+      "min": 8.153915405273438e-05,
+      "max": 0.00011444091796875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_191.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_191.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 9.603798389434814e-05,
+      "std": 6.896809736645082e-06,
+      "min": 8.487701416015625e-05,
+      "max": 0.00012159347534179688,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_251.weights_for_tokens": {
+      "shape": [
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_251.weights_for_tokens.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.0546875,
+      "std": 0.0,
+      "min": 0.0546875,
+      "max": 0.0546875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_251.__weight.gate_up_proj": {
+      "shape": [
+        1024,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_251.__weight.gate_up_proj.pt",
+      "is_weight": true,
+      "numel": 2097152,
+      "mean": 0.07613718509674072,
+      "std": 105.20359802246094,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_251.__weight.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.expert_251.__weight.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.043014537543058395,
+      "std": 100.15304565429688,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_251.__weight.gate_up_proj_scale_inv": {
+      "shape": [
+        8,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_251.__weight.gate_up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 128,
+      "mean": 9.78223979473114e-05,
+      "std": 1.4580197785107885e-05,
+      "min": 8.296966552734375e-05,
+      "max": 0.00017070770263671875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.expert_251.__weight.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.expert_251.__weight.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.00010588020086288452,
+      "std": 1.7657683201832697e-05,
+      "min": 8.7738037109375e-05,
+      "max": 0.00017261505126953125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.shared_gate_logit": {
+      "shape": [
+        1,
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.shared_gate_logit.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": -2.0625,
+      "std": 0.0,
+      "min": -2.0625,
+      "max": -2.0625,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.shared_gate_sigmoid": {
+      "shape": [
+        1,
+        1
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.shared_gate_sigmoid.pt",
+      "is_weight": false,
+      "numel": 1,
+      "mean": 0.11279296875,
+      "std": 0.0,
+      "min": 0.11279296875,
+      "max": 0.11279296875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.shared_output_gated": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.shared_output_gated.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": 6.727216532453895e-05,
+      "std": 0.0036168876104056835,
+      "min": -0.0155029296875,
+      "max": 0.03173828125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.__weight.shared_expert_gate_weight": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.__weight.shared_expert_gate_weight.pt",
+      "is_weight": true,
+      "numel": 2048,
+      "mean": -2.5823028408922255e-05,
+      "std": 0.006770702078938484,
+      "min": -0.049560546875,
+      "max": 0.057373046875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.combined_output": {
+      "shape": [
+        1,
+        2048
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.combined_output.pt",
+      "is_weight": false,
+      "numel": 2048,
+      "mean": -3.8072001188993454e-05,
+      "std": 0.016609108075499535,
+      "min": -0.05859375,
+      "max": 0.0703125,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.__weight.shared_expert.gate_proj": {
+      "shape": [
+        512,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.__weight.shared_expert.gate_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": 0.07984164357185364,
+      "std": 50.95154571533203,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.__weight.shared_expert.gate_proj_scale_inv": {
+      "shape": [
+        4,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.__weight.shared_expert.gate_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.00022687017917633057,
+      "std": 5.8968187659047544e-05,
+      "min": 0.00014781951904296875,
+      "max": 0.000457763671875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.__weight.shared_expert.up_proj": {
+      "shape": [
+        512,
+        2048
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.__weight.shared_expert.up_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": 0.015931066125631332,
+      "std": 62.54587936401367,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.__weight.shared_expert.up_proj_scale_inv": {
+      "shape": [
+        4,
+        16
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.__weight.shared_expert.up_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.00018809735774993896,
+      "std": 3.701558671309613e-05,
+      "min": 0.0001354217529296875,
+      "max": 0.0003185272216796875,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.__weight.shared_expert.down_proj": {
+      "shape": [
+        2048,
+        512
+      ],
+      "dtype": "torch.float8_e4m3fn",
+      "file": "decode/tensors/moe3.__weight.shared_expert.down_proj.pt",
+      "is_weight": true,
+      "numel": 1048576,
+      "mean": -0.06892950087785721,
+      "std": 53.38352966308594,
+      "min": -448.0,
+      "max": 448.0,
+      "any_nan": false,
+      "any_inf": false
+    },
+    "moe3.__weight.shared_expert.down_proj_scale_inv": {
+      "shape": [
+        16,
+        4
+      ],
+      "dtype": "torch.bfloat16",
+      "file": "decode/tensors/moe3.__weight.shared_expert.down_proj_scale_inv.pt",
+      "is_weight": true,
+      "numel": 64,
+      "mean": 0.00024634599685668945,
+      "std": 0.00013073295122012496,
+      "min": 0.00013446807861328125,
+      "max": 0.000972747802734375,
+      "any_nan": false,
+      "any_inf": false
+    }
+  },
+  "meta": {
+    "moe0.num_distinct_experts_hit": 8,
+    "moe0.expert_13.token_idx": [
+      0
+    ],
+    "moe0.expert_19.token_idx": [
+      0
+    ],
+    "moe0.expert_69.token_idx": [
+      0
+    ],
+    "moe0.expert_116.token_idx": [
+      0
+    ],
+    "moe0.expert_139.token_idx": [
+      0
+    ],
+    "moe0.expert_159.token_idx": [
+      0
+    ],
+    "moe0.expert_225.token_idx": [
+      0
+    ],
+    "moe0.expert_239.token_idx": [
+      0
+    ],
+    "attn.attention_mask_used_is_none": true,
+    "moe3.num_distinct_experts_hit": 8,
+    "moe3.expert_75.token_idx": [
+      0
+    ],
+    "moe3.expert_92.token_idx": [
+      0
+    ],
+    "moe3.expert_114.token_idx": [
+      0
+    ],
+    "moe3.expert_123.token_idx": [
+      0
+    ],
+    "moe3.expert_173.token_idx": [
+      0
+    ],
+    "moe3.expert_174.token_idx": [
+      0
+    ],
+    "moe3.expert_191.token_idx": [
+      0
+    ],
+    "moe3.expert_251.token_idx": [
+      0
+    ],
+    "input_ids_context": [
+      [
+        248045,
+        846,
+        198,
+        814,
+        20139,
+        3069,
+        279,
+        12386
+      ]
+    ],
+    "gdn_layer_idx": 0,
+    "attn_layer_idx": 3
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "fast_path": {
+    "is_causal_conv1d_available": false,
+    "is_flash_linear_attention_available": false
+  },
+  "gdn_forward_qualname_before_patch": "force_accelerate_hooks.<locals>.decorator.<locals>.wrapped",
+  "attn_forward_qualname_before_patch": "Qwen3_5MoeAttention.forward",
+  "causal_conv1d_update_bound": "<function torch_causal_conv1d_update at 0x799db34bb740>",
+  "chunk_gated_delta_rule_bound": "<function torch_chunk_gated_delta_rule at 0x799db34bb880>",
+  "recurrent_gated_delta_rule_bound": "<function torch_recurrent_gated_delta_rule at 0x799db34bb920>",
+  "gdn_layer_idx": 0,
+  "attn_layer_idx": 3,
+  "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+  "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+  "prompt_id": "p01-history",
+  "prefill_tokens": 8,
+  "decode_steps": 1,
+  "load_notes": {
+    "attempts": [
+      {
+        "class": "AutoModelForCausalLM",
+        "ok": true,
+        "seconds": 29.3
+      }
+    ],
+    "loaded_via": "AutoModelForCausalLM"
+  },
+  "versions": {
+    "torch": "2.11.0+cu130",
+    "transformers": "5.14.1",
+    "accelerate": "1.14.0",
+    "python": "3.12.3 (main, Jun 18 2025, 17:59:45) [GCC 13.3.0]"
+  },
+  "gpu": "NVIDIA B200",
+  "scale_attr_probe": {
+    "module": "layers[gdn].linear_attn.in_proj_qkv",
+    "weight_dtype": "torch.float8_e4m3fn",
+    "found_scale": true,
+    "scale_shape": [
+      64,
+      16
+    ],
+    "scale_dtype": "torch.bfloat16"
+  },
+  "moe_experts_backend": {
+    "experts_class": "FP8Experts",
+    "forward_is_plain_loop_class": false,
+    "forward_qualname": "FP8Experts.forward",
+    "gate_up_proj_dtype": "torch.float8_e4m3fn",
+    "gate_up_proj_shape": [
+      256,
+      1024,
+      2048
+    ],
+    "scale_like_attrs_found": [
+      "down_proj_scale_inv",
+      "gate_up_proj_scale_inv"
+    ]
+  },
+  "gdn_backend": {
+    "gdn_class": "Qwen3_5MoeGatedDeltaNet",
+    "forward_is_plain_class": true
+  },
+  "router_backend": {
+    "router_class": "Qwen3_5MoeTopKRouter",
+    "forward_is_plain_class": true
+  }
+}

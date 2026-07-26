@@ -1,0 +1,121 @@
+
+=== self-consistency report: mode=prefill ===
+op                                            status        max_abs      max_rel  note
+gdn.input_layernorm                           PASS                0            0  
+gdn.qkv_proj_out(fp8 dequant)                 PASS           0.2151        414.6  
+gdn.z_proj_out(fp8 dequant)                   PASS           0.1132        190.1  
+gdn.b_proj_out(bf16)                          PASS                0            0  
+gdn.a_proj_out(bf16)                          PASS                0            0  
+gdn.conv_out(prefill, plain-conv1d)           PASS                0            0  
+gdn.beta                                      PASS                0            0  
+gdn.decay_g                                   PASS        1.526e-05    2.234e-07  
+gdn.core_attn_out(prefill, chunk_gated_delta_rule) PASS        4.768e-07     0.005618  
+gdn.core_state_after(prefill)                 PASS        1.192e-06    0.0009701  
+gdn.gated_norm_out                            PASS        9.537e-07     0.004926  
+gdn.out_proj_out(fp8 dequant)                 PASS         0.003289        251.7  
+gdn.post_attention_layernorm                  PASS                0            0  
+attn.input_layernorm                          PASS                0            0  
+attn.q_proj_out(fp8 dequant)                  PASS          0.08917         1685  
+attn.q_split                                  PASS                0            0  
+attn.gate_split                               PASS                0            0  
+attn.q_norm_out                               PASS         0.003906     0.005102  
+attn.k_proj_out(fp8 dequant)                  PASS          0.06081        13.27  
+attn.k_norm_out                               PASS                0            0  
+attn.v_proj_out(fp8 dequant)                  PASS          0.04074        112.2  
+attn.q_rope                                   PASS                0            0  
+attn.k_rope                                   PASS                0            0  
+attn.core_attn_out                            PASS          0.02344        359.3  naive eager-softmax recompute (with reconstructed causal mask) vs the real backend (attention_mask=None -> implicit is_causal, e.g. SDPA); see LOOSE_KERNEL
+attn.gate_sigmoid_mul_out                     PASS                0            0  
+attn.o_proj_out(fp8 dequant)                  PASS         0.002253        116.1  
+attn.post_attention_layernorm                 PASS                0            0  
+moe0.shared_gate_proj_out(fp8 dequant)        PASS          0.05965        58.03  
+moe0.shared_up_proj_out(fp8 dequant)          PASS          0.03627        96.14  
+moe0.shared_silu_mul_out                      PASS                0            0  
+moe0.shared_down_proj_out(fp8 dequant)        PASS          0.01545        130.7  
+moe0.router_logits(bf16)                      PASS                0            0  
+moe0.router_probs                             PASS        7.451e-09    2.762e-07  
+moe0.topk_weights_raw                         PASS                0            0  
+moe0.topk_ids                                 PASS                0            0  
+moe0.topk_renorm_weights                      PASS        0.0006571     0.003241  
+moe0.routed_expert_output(reconstructed, 52 experts) PASS         0.001953        190.7  reconstructed from 52/52 hit experts (dequantized-weight recompute; FP8Experts internals are a black box, see README)
+moe0.shared_gate_logit(bf16)                  PASS                0            0  
+moe0.shared_gate_sigmoid                      PASS                0            0  
+moe0.shared_output_gated                      PASS                0            0  
+moe0.combined_output                          PASS                0            0  
+moe3.shared_gate_proj_out(fp8 dequant)        PASS          0.04761        7.926  
+moe3.shared_up_proj_out(fp8 dequant)          PASS          0.03312        30.73  
+moe3.shared_silu_mul_out                      PASS                0            0  
+moe3.shared_down_proj_out(fp8 dequant)        PASS         0.009883          376  
+moe3.router_logits(bf16)                      PASS                0            0  
+moe3.router_probs                             PASS        7.451e-09    2.904e-07  
+moe3.topk_weights_raw                         PASS                0            0  
+moe3.topk_ids                                 PASS                0            0  
+moe3.topk_renorm_weights                      PASS        0.0009408     0.003434  
+moe3.routed_expert_output(reconstructed, 44 experts) PASS        0.0009766        329.4  reconstructed from 44/44 hit experts (dequantized-weight recompute; FP8Experts internals are a black box, see README)
+moe3.shared_gate_logit(bf16)                  PASS                0            0  
+moe3.shared_gate_sigmoid                      PASS                0            0  
+moe3.shared_output_gated                      PASS                0            0  
+moe3.combined_output                          PASS                0            0  
+--- prefill: 55 PASS / 0 FAIL / 0 SKIP (of 55) ---
+
+=== self-consistency report: mode=decode ===
+op                                            status        max_abs      max_rel  note
+gdn.input_layernorm                           PASS                0            0  
+gdn.qkv_proj_out(fp8 dequant)                 PASS           0.1185        124.6  
+gdn.z_proj_out(fp8 dequant)                   PASS          0.07225          201  
+gdn.b_proj_out(bf16)                          PASS                0            0  
+gdn.a_proj_out(bf16)                          PASS                0            0  
+gdn.conv_out(decode, causal_conv1d_update)    PASS                0            0  
+gdn.conv_state_after(decode)                  PASS                0            0  
+gdn.beta                                      PASS                0            0  
+gdn.decay_g                                   PASS        1.907e-06    2.495e-07  
+gdn.core_attn_out(decode, recurrent_gated_delta_rule) PASS                0            0  
+gdn.core_state_after(decode)                  PASS        9.537e-07    0.0001675  
+gdn.gated_norm_out                            PASS                0            0  
+gdn.out_proj_out(fp8 dequant)                 PASS         0.001157        80.46  
+gdn.post_attention_layernorm                  PASS                0            0  
+attn.input_layernorm                          PASS                0            0  
+attn.q_proj_out(fp8 dequant)                  PASS          0.09178         29.8  
+attn.q_split                                  PASS                0            0  
+attn.gate_split                               PASS                0            0  
+attn.q_norm_out                               PASS                0            0  
+attn.k_proj_out(fp8 dequant)                  PASS          0.04828        55.64  
+attn.k_norm_out                               PASS                0            0  
+attn.v_proj_out(fp8 dequant)                  PASS          0.03601        3.145  
+attn.q_rope                                   PASS                0            0  
+attn.k_rope                                   PASS                0            0  
+attn.core_attn_out                            PASS          0.01685        530.1  naive eager-softmax recompute (with reconstructed causal mask) vs the real backend (attention_mask=None -> implicit is_causal, e.g. SDPA); see LOOSE_KERNEL
+attn.gate_sigmoid_mul_out                     PASS                0            0  
+attn.o_proj_out(fp8 dequant)                  PASS          0.00128        89.46  
+attn.post_attention_layernorm                 PASS                0            0  
+moe0.shared_gate_proj_out(fp8 dequant)        PASS          0.04143        7.096  
+moe0.shared_up_proj_out(fp8 dequant)          PASS           0.0194        20.28  
+moe0.shared_silu_mul_out                      PASS                0            0  
+moe0.shared_down_proj_out(fp8 dequant)        PASS         0.001916         11.4  
+moe0.router_logits(bf16)                      PASS                0            0  
+moe0.router_probs                             PASS        3.725e-09    1.721e-07  
+moe0.topk_weights_raw                         PASS                0            0  
+moe0.topk_ids                                 PASS                0            0  
+moe0.topk_renorm_weights                      PASS         0.000467     0.003065  
+moe0.routed_expert_output(reconstructed, 8 experts) PASS        0.0003662        20.03  reconstructed from 8/8 hit experts (dequantized-weight recompute; FP8Experts internals are a black box, see README)
+moe0.shared_gate_logit(bf16)                  PASS                0            0  
+moe0.shared_gate_sigmoid                      PASS                0            0  
+moe0.shared_output_gated                      PASS                0            0  
+moe0.combined_output                          PASS                0            0  
+moe3.shared_gate_proj_out(fp8 dequant)        PASS           0.0382        2.046  
+moe3.shared_up_proj_out(fp8 dequant)          PASS          0.03362        14.24  
+moe3.shared_silu_mul_out                      PASS                0            0  
+moe3.shared_down_proj_out(fp8 dequant)        PASS         0.002166         47.4  
+moe3.router_logits(bf16)                      PASS                0            0  
+moe3.router_probs                             PASS        7.451e-09    2.346e-07  
+moe3.topk_weights_raw                         PASS                0            0  
+moe3.topk_ids                                 PASS                0            0  
+moe3.topk_renorm_weights                      PASS         0.001915     0.003404  
+moe3.routed_expert_output(reconstructed, 8 experts) PASS         0.001343           36  reconstructed from 8/8 hit experts (dequantized-weight recompute; FP8Experts internals are a black box, see README)
+moe3.shared_gate_logit(bf16)                  PASS                0            0  
+moe3.shared_gate_sigmoid                      PASS                0            0  
+moe3.shared_output_gated                      PASS                0            0  
+moe3.combined_output                          PASS                0            0  
+--- decode: 56 PASS / 0 FAIL / 0 SKIP (of 56) ---
+
+=== OVERALL: PASS ===
