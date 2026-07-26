@@ -91,42 +91,63 @@ PERF_MARGINAL_THRESHOLD = 1.2
 
 
 def single_flip_floor(K):
-    """Derived cross-implementation numerics floor for two INDEPENDENT, individually-correct
-    e4m3xe4m3->fp32 GEMM kernels (CUTLASS, Triton) contracting over K terms of nominally
-    identical fp8-quantized inputs. Two candidate mechanisms were checked against the
-    measured data (worst frob_rel_error 4.352e-3 at K=2048, 3.816e-3 at K=4096); only the
-    second fits.
-
-    RULED OUT -- pure fp32 accumulation-REORDER noise. Different GEMM tile schedules sum the
-    same K terms in a different order; fp32 addition is not associative, so this alone
-    produces SOME divergence. Probabilistic (typical-case, not adversarial-worst-case)
-    rounding-error scaling for a K-term sum with unit roundoff u=2^-24 is ~sqrt(K)*u (Higham &
-    Mary-style random-walk model: absolute error ~sqrt(K)*u*sqrt(sum(x_i^2)), sum magnitude
-    ~sqrt(K)*term_scale by the same CLT/random-walk reasoning, so u-scaling cancels down to
-    sqrt(K)*u relative) -- 2.7e-6 (K=2048) to 3.8e-6 (K=4096). This is 100-1000x SMALLER than
-    measured: accumulation order is NOT the dominant mechanism (verify with
-    `python3 -c "import math; print(math.sqrt(2048)*2**-24)"`).
-
-    FITS -- single quantization-BUCKET disagreement. vLLM's own per_token_group_quant_fp8 and
-    the separate kernels-hub `finegrained-fp8` Triton kernel are two INDEPENDENTLY-AUTHORED
-    codebases, each nominally implementing the same documented spec (group=128, absmax/448,
-    RN-even) -- but vllm-graph.md SS3.4 itself names four specific implementation choices that
-    "silently break bit-parity if implemented differently" (eps-seeding, division-not-
-    reciprocal, clamp-before-cast, RN-even tie-breaking). It is plausible, and NOT a bug for
-    either side individually, that the two kernels disagree on which fp8 bucket a SMALL number
-    of the K contracted activation elements per output round to. If exactly ONE of the K terms
-    differs by the full e4m3 relative LSB (0.125) between the two paths, its effect on the
-    K-term dot product (typical magnitude ~sqrt(K)*term_scale, same CLT scaling as above) is:
-
-        floor(K) = E4M3_RELATIVE_LSB / sqrt(K)
-
-    i.e. 2.762e-3 (K=2048), 1.953e-3 (K=4096) -- matches the measured worst case to within
-    ~1.6-2.0x at every K tested (see `build_verdict()`'s per-case `derived_floor_this_K` /
-    `ratio_to_floor` annotations), consistent with roughly ONE (not dozens of) boundary
-    disagreement per K -- a small, plausible, UNBIASED (see bias gate) level of ordinary
-    cross-implementation variance, not a structural defect in either kernel.
+    """RETIRED as the primary model 2026-07-26 (coordinator review cycle 3) -- kept for the
+    audit trail and because it is still a correct SPECIAL CASE (f*K=1). Predicted floor(K) =
+    E4M3_RELATIVE_LSB/sqrt(K) implies a K-DEPENDENT floor (ratio sqrt(2)=1.41 between K=2048
+    and K=4096). The actual P10 data is K-INVARIANT instead: mean frob_rel_error 3.537e-3 at
+    K=2048 vs 3.486e-3 at K=4096, ratio 1.01 (verified directly against all 20 stored cases).
+    See `fraction_model_frob()` for the corrected, decisively-confirmed model. Still useful as
+    a sanity floor: pure fp32 accumulation-REORDER noise (different GEMM tile schedules sum
+    the same terms in a different order; probabilistic/typical-case scaling ~sqrt(K)*u,
+    u=2^-24) is ~2.7e-6 (K=2048) to 3.8e-6 (K=4096) -- 100-1000x smaller than anything
+    measured, ruling out pure accumulation order as the dominant mechanism regardless of which
+    higher-level model is used.
     """
     return E4M3_RELATIVE_LSB / math.sqrt(K)
+
+
+def fraction_model_frob(f):
+    """CONFIRMED model (coordinator review cycle 3, 2026-07-26) for the K-invariant
+    CUTLASS-vs-Triton frob_rel_error: a FIXED FRACTION f of the K contracted activation
+    elements disagree in e4m3 quantization bucket between the two independently-authored
+    quantizers (not a fixed COUNT, as `single_flip_floor` assumed). N=f*K such disagreements
+    accumulate like sqrt(N) (CLT/random-walk, same reasoning as `single_flip_floor`), and the
+    K-term sum itself has magnitude ~sqrt(K)*term_scale -- the two sqrt(K) factors cancel:
+
+        relative_frob ~= E4M3_RELATIVE_LSB * sqrt(f), INDEPENDENT of K.
+
+    DECISIVELY CONFIRMED by direct measurement, not just curve-fit (`p10b_activation_quant_
+    disagreement.py`): extracted the RAW e4m3 codes both quantizers actually produce on
+    identical real activations (an identity-weight trick recovers Triton's code, since
+    `finegrained_fp8_linear` only exposes a fused act-quant+matmul, no standalone quantize
+    entry point) and counted disagreements directly, at the same K=2048/4096 shapes P10 used,
+    across M in {1,2,4,8,16} (10 cases, ~190K activation elements total).
+      - Every code-level disagreement resolved to EXACTLY 1 ULP (verified via a +-8 ULP bit-
+        level search on the raw e4m3 magnitude bits; 0/281 disagreements were >1 ULP or
+        unexplained by either mechanism below).
+      - Overall code-level disagreement fraction f = 211/190464 = 1.108e-3 (same order as,
+        and within ~1.8x of, the value implied by inverting this formula against P10's own
+        measured frob). Plugging f back in: predicted frob = 0.125*sqrt(1.108e-3) = 4.16e-3,
+        vs P10's actual worst measured frob_rel_error 4.352e-3 -- a 1.05x match, decisively
+        inside any reasonable consistency band.
+      - A SECOND, smaller-magnitude, more numerous mechanism was found and is reported
+        separately, not conflated with the LSB-level model above: an occasional per-128-
+        element-GROUP scale discrepancy (~0.43%-0.77% relative, 8 discrete values observed,
+        16-30x SMALLER than a full e4m3 LSB) between the two quantizers' absmax/448
+        computation for that whole group (verified: CUTLASS's scale independently matches a
+        from-scratch absmax/448 computation exactly in every group checked; only Triton's
+        occasionally differs, uniformly across the whole group). This mechanism affects MORE
+        elements (overall fraction 1801/190464 = 9.46e-3) but each contributes far less error,
+        so its net contribution to frob is smaller than the LSB-level mechanism's, consistent
+        with the observed P10 frob magnitude. It is one-directional AT THE ACTIVATION level
+        (every observed ratio is Triton-scale-slightly-larger, never smaller) but this does
+        NOT propagate to an output-level bias: real weights have mixed signs, so a uniformly-
+        inflated activation contributes positive or negative error to the output depending on
+        the weight sign it's multiplied against (consistent with P10's own already-passing,
+        mixed-sign, near-zero bias_effect_size measurements). Full data:
+        `p10b_activation_quant_disagreement.json`.
+    """
+    return E4M3_RELATIVE_LSB * math.sqrt(f)
 
 
 def load_ue8m0_reference(path):
@@ -141,6 +162,36 @@ def load_ue8m0_reference(path):
             p7 = json.load(f)
         deltas = [t["frob_rel_delta"] for t in p7["tensors"]]
         return {"min": min(deltas), "max": max(deltas), "source": path, "n_tensors": len(deltas)}
+    except Exception as e:  # noqa: BLE001 -- reported, not fatal
+        return {"error": f"{type(e).__name__}: {e}", "source": path}
+
+
+def load_activation_quant_evidence(path):
+    """Load the decisive raw-code-disagreement measurement (p10b_activation_quant_
+    disagreement.py) grounding `fraction_model_frob()`. Returns None if absent -- reported as
+    unavailable, never assumed or fabricated."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        total_code = sum(c["n_code_ulp_disagreement"] for c in d["cases_tested"])
+        total_gs = sum(c["n_group_scale_disagreement"] for c in d["cases_tested"])
+        total_unexplained = sum(c["n_unexplained"] for c in d["cases_tested"])
+        total_elements = sum(c["n_total_elements"] for c in d["cases_tested"])
+        f_code = total_code / total_elements
+        return {
+            "source": path,
+            "n_cases_tested": len(d["cases_tested"]),
+            "max_ulp_distance_overall": d["max_ulp_distance_overall"],
+            "all_code_level_disagreements_are_1_ulp": d["all_code_level_disagreements_are_1_ulp"],
+            "total_unexplained_positions": total_unexplained,
+            "code_level_disagreement_fraction_f": f_code,
+            "group_scale_disagreement_fraction": total_gs / total_elements,
+            "group_scale_ratio_range": d["second_mechanism_found"][
+                "observed_ratios (target/cutlass_recon, should be close to 1.0)"],
+            "predicted_frob_from_f_code": fraction_model_frob(f_code),
+        }
     except Exception as e:  # noqa: BLE001 -- reported, not fatal
         return {"error": f"{type(e).__name__}: {e}", "source": path}
 
@@ -394,7 +445,7 @@ def run_case(shape_key, W, scale, W_bf16, M, base_seed, warmup, iters, repeats, 
     return {"shape": f"{N}x{K}", "shape_key": shape_key, "M": M, "numerics": numerics, "perf": perf}
 
 
-def build_verdict(cases, shape_keys, batches, env, ue8m0_range):
+def build_verdict(cases, shape_keys, batches, env, ue8m0_range, activation_quant_evidence=None):
     """Pure post-processing: turns already-measured `cases` into the verdict dict. Takes NO
     GPU/measurement action -- callable identically from a fresh run (`main()`) or from
     `--recompute-from` (re-deriving the verdict from an existing artifact's stored cases,
@@ -445,14 +496,32 @@ def build_verdict(cases, shape_keys, batches, env, ue8m0_range):
     else:
         vs_ue8m0_pass, vs_ue8m0_ratio = None, None  # unavailable, not assumed
 
-    gate_pass = bool(no_systematic_bias and derived_gate_pass and (vs_ue8m0_pass is not False))
+    # --- Gate criteria (d)+(e): decisive DIRECT measurement of the raw e4m3 codes both
+    # quantizers produce (coordinator review cycle 3) -- supersedes the K-dependent
+    # single_flip_floor model, which the data itself contradicted (K-invariant, not
+    # sqrt(K)-scaling: mean frob 3.537e-3 at K=2048 vs 3.486e-3 at K=4096, ratio 1.01, not the
+    # predicted 1.41). See `fraction_model_frob()` for the confirmed replacement model.
+    aq = activation_quant_evidence
+    if aq and "code_level_disagreement_fraction_f" in aq:
+        f_code = aq["code_level_disagreement_fraction_f"]
+        predicted_frob = fraction_model_frob(f_code)
+        boundary_fraction_pass = f_code <= 2e-3
+        max_ulp_pass = aq.get("max_ulp_distance_overall") == 1 and aq.get("all_code_level_disagreements_are_1_ulp") is True
+        frob_ratio_to_predicted = worst_frob_rel / predicted_frob
+        frob_consistency_pass = frob_ratio_to_predicted <= 2.0
+        unexplained_pass = aq.get("total_unexplained_positions") == 0
+        decisive_measurement_pass = bool(boundary_fraction_pass and max_ulp_pass
+                                          and frob_consistency_pass and unexplained_pass)
+    else:
+        f_code = predicted_frob = frob_ratio_to_predicted = None
+        boundary_fraction_pass = max_ulp_pass = frob_consistency_pass = unexplained_pass = None
+        decisive_measurement_pass = False  # unavailable -> fail closed, never assumed benign
+
+    gate_pass = bool(no_systematic_bias and decisive_measurement_pass and (vs_ue8m0_pass is not False))
     go_numerics_fidelity = gate_pass
 
     perf_pass = min_speedup >= PERF_THRESHOLD
     perf_marginal = (not perf_pass) and min_speedup >= PERF_MARGINAL_THRESHOLD
-
-    derived_floor_by_K = {str(K): {"floor": single_flip_floor(K), "gate": GATE_SAFETY_MULTIPLE * single_flip_floor(K)}
-                           for K in sorted({int(c["shape"].split("x")[1]) for c in cases})}
 
     rationale = (
         f"gate_pass={gate_pass}: (a) no_systematic_bias={no_systematic_bias} "
@@ -460,17 +529,21 @@ def build_verdict(cases, shape_keys, batches, env, ue8m0_range):
         f"this is the real corruption alarm: a directional/systematic offset would indicate a "
         f"scale-application or indexing bug; a small, UNBIASED, symmetric spread is the "
         f"signature of two valid-but-different roundings, not corruption). "
-        f"(b) derived_gate_pass={derived_gate_pass} (worst measured/floor ratio "
-        f"{worst_ratio_to_floor:.2f}x, within the {GATE_SAFETY_MULTIPLE}x safety multiple at "
-        f"every K tested -- see single_flip_floor() for the full derivation: pure fp32 "
-        f"accumulation-reorder noise is ruled out (~1e-6, 100-1000x too small); a single "
-        f"quantization-bucket disagreement between the two independently-authored kernels "
-        f"fits the measured magnitude to within ~2x). "
-        f"(c) vs_rejected_ue8m0_class="
+        f"(b) measured_boundary_fraction<=2e-3: {boundary_fraction_pass} (direct measurement, "
+        f"not inference: code-level disagreement fraction f={f_code:.3e}). "
+        f"(c) max_ulp_of_disagreement==1: {max_ulp_pass}. "
+        f"(d) frob consistent with 0.125*sqrt(f) within 2x: {frob_consistency_pass} "
+        f"(predicted {predicted_frob:.3e} vs measured worst {worst_frob_rel:.3e}, ratio "
+        f"{frob_ratio_to_predicted:.2f}x)."
+        if aq else "gate_pass=False: decisive activation-quant-disagreement measurement "
+                   "UNAVAILABLE (no p10b_activation_quant_disagreement.json found) -- fails "
+                   "closed rather than assuming benign."
+    ) + (
+        f" (e) vs_rejected_ue8m0_class="
         + (f"{vs_ue8m0_pass} (measured worst case is {vs_ue8m0_ratio:.1f}x smaller than P7's "
            f"smallest UE8M0-requant delta)" if vs_ue8m0_ratio is not None else "UNAVAILABLE "
            "(no --ue8m0-reference-json / p7_ue8m0_delta.json found -- not assumed)."
-           ) + ". Corroborated by independent token-level evidence (see "
+           ) + " Corroborated by independent token-level evidence (see "
         f"numerics.token_level_evidence): the M1 baseline found vLLM(CUTLASS)-vs-HF(Triton) "
         f"produced byte-identical 64/64 tokens on prompt p01, and this issue's own P1 probe "
         f"found a perturbation an order of magnitude LARGER than this (full bf16 substitution, "
@@ -486,24 +559,45 @@ def build_verdict(cases, shape_keys, batches, env, ue8m0_range):
             "no_systematic_bias": no_systematic_bias,
             "worst_bias_effect_size": worst_bias_effect,
             "bias_effect_size_threshold": BIAS_EFFECT_SIZE_THRESHOLD,
-            "frob_class": "single-quantization-bucket disagreement between two independently "
-                          "-authored e4m3 kernels (NOT pure fp32 accumulation-order noise, "
-                          "which is ~1e-6-3.8e-6, 100-1000x too small to explain the data -- "
-                          "see single_flip_floor() docstring for both derivations).",
-            "derived_floor": {
-                "formula": "floor(K) = E4M3_RELATIVE_LSB / sqrt(K), E4M3_RELATIVE_LSB=0.125 "
-                           "(2^-3, e4m3's 3-mantissa-bit relative LSB)",
-                "by_K": derived_floor_by_K,
-                "gate_safety_multiple": GATE_SAFETY_MULTIPLE,
-                "gate_safety_multiple_rationale": "empirically the worst observed ratio to the "
-                    "single-flip floor was ~1.6-2.0x across all 20 cases; 4x leaves a full "
-                    "additional ~2x margin beyond anything actually measured, while every "
-                    "per-K gate still sits >=2.4x below the rejected UE8M0 class's measured "
-                    "delta (criterion c) -- not reverse-engineered to the data's edge.",
-                "worst_ratio_to_floor_observed": worst_ratio_to_floor,
-                "ruled_out_alternative": "pure fp32 accumulation-reorder noise: sqrt(K)*2^-24 "
-                    "~= 2.7e-6 (K=2048) / 3.8e-6 (K=4096) -- verified numerically, far too "
-                    "small to be the dominant mechanism.",
+            "frob_class": "TWO confirmed mechanisms (coordinator review cycle 3, decisive "
+                          "direct measurement, not inference): (1) occasional single e4m3-code "
+                          "disagreements between the two quantizers, exactly 1 ULP, fraction "
+                          "f_code (K-invariant model: relative_frob ~= 0.125*sqrt(f_code)); "
+                          "(2) a smaller-per-element, more numerous per-128-group SCALE "
+                          "discrepancy (~0.4-0.8%, 16-30x below one e4m3 LSB) between the two "
+                          "quantizers' absmax computation for that group. Pure fp32 "
+                          "accumulation-order noise (~1e-6, 100-1000x too small) is ruled out "
+                          "as the dominant mechanism for either. See fraction_model_frob() "
+                          "docstring and p10b_activation_quant_disagreement.json for the full "
+                          "measurement.",
+            "decisive_measurement": {
+                "pass": decisive_measurement_pass,
+                "source": aq.get("source") if aq else None,
+                "code_level_disagreement_fraction_f": f_code,
+                "boundary_fraction_le_2e3": boundary_fraction_pass,
+                "max_ulp_distance_overall": aq.get("max_ulp_distance_overall") if aq else None,
+                "max_ulp_eq_1": max_ulp_pass,
+                "predicted_frob_from_f": predicted_frob,
+                "measured_worst_frob": worst_frob_rel,
+                "ratio_measured_to_predicted": frob_ratio_to_predicted,
+                "frob_consistent_within_2x": frob_consistency_pass,
+                "total_unexplained_positions": aq.get("total_unexplained_positions") if aq else None,
+                "unexplained_eq_0": unexplained_pass,
+                "second_mechanism_group_scale_fraction": aq.get("group_scale_disagreement_fraction") if aq else None,
+                "second_mechanism_ratio_range": aq.get("group_scale_ratio_range") if aq else None,
+            },
+            "RETIRED_sqrt_K_model": {
+                "credit": "coordinator completion review, cycle 3 (2026-07-26): caught that "
+                    "measured frob_rel_error is K-INVARIANT (mean 3.537e-3 at K=2048 vs "
+                    "3.486e-3 at K=4096, ratio 1.01), contradicting single_flip_floor()'s "
+                    "sqrt(K)-scaling prediction (ratio should be sqrt(2)=1.41); proposed the "
+                    "K-invariant fixed-fraction model, confirmed by direct measurement above.",
+                "old_formula": "floor(K) = E4M3_RELATIVE_LSB / sqrt(K) (see single_flip_floor(), "
+                    "kept in source for the audit trail)",
+                "why_retired": "correct as a SPECIAL CASE (fixed COUNT=1 flip, not fixed "
+                    "FRACTION) but does not explain the observed K-invariance; the safety-"
+                    "multiple gate built on it (GATE_SAFETY_MULTIPLE=4, still in source) is "
+                    "superseded by `decisive_measurement` above.",
             },
             "vs_rejected_ue8m0_class": {
                 "pass": vs_ue8m0_pass,
@@ -549,8 +643,11 @@ def build_verdict(cases, shape_keys, batches, env, ue8m0_range):
                     "v1-architecture.md SS14, they were this probe's own invention). Caught by "
                     "coordinator completion review 2026-07-26: a machine-checkable gate that "
                     "other issues (M2-I12) consume must carry a principled derivation, not an "
-                    "arbitrary constant. Superseded by `derived_floor` above. p99_rel_diff_top_half "
-                    "is still computed and reported (see per-case data) but is no longer a gate "
+                    "arbitrary constant. Superseded first by a derived sqrt(K) floor (cycle 2), "
+                    "then by `decisive_measurement` above (cycle 3, direct measurement of the "
+                    "raw e4m3 codes, not inference) -- see `RETIRED_sqrt_K_model`. "
+                    "p99_rel_diff_top_half is still computed and reported (see per-case data) "
+                    "but is no longer a gate "
                     "criterion -- it was ALSO undocumented/arbitrary and the elementwise-"
                     "percentile family of stats is inherently less well-founded than the "
                     "magnitude-weighted frob-norm for this comparison (diff_stats() docstring).",
@@ -605,8 +702,12 @@ def main():
                           "verdict JSON and rebuild only the verdict fields (no GPU, no "
                           "re-measurement) -- use after a gate-logic revision.")
     ap.add_argument("--ue8m0-reference-json", default=None,
-                     help="path to a p7_ue8m0_delta.json, grounding gate criterion (c); if "
+                     help="path to a p7_ue8m0_delta.json, grounding gate criterion (e); if "
                           "omitted, that criterion is reported unavailable, never assumed.")
+    ap.add_argument("--activation-quant-json", default=None,
+                     help="path to a p10b_activation_quant_disagreement.json, grounding gate "
+                          "criteria (b)-(d) (direct code-disagreement measurement); if "
+                          "omitted, the numerics gate fails closed rather than assuming benign.")
     args = ap.parse_args()
 
     if args.recompute_from:
@@ -671,7 +772,8 @@ def main():
         }
 
     ue8m0_range = load_ue8m0_reference(args.ue8m0_reference_json)
-    verdict = build_verdict(cases, shape_keys, batches, env, ue8m0_range)
+    aq_evidence = load_activation_quant_evidence(args.activation_quant_json)
+    verdict = build_verdict(cases, shape_keys, batches, env, ue8m0_range, aq_evidence)
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w") as f:
@@ -679,11 +781,13 @@ def main():
     print(f"\nWROTE {args.out}")
     n = verdict["numerics"]
     p = verdict["perf_bar_result"]
+    dm = n["decisive_measurement"]
     print(f"go_numerics_fidelity={verdict['go_numerics_fidelity']}  "
           f"(no_systematic_bias={n['no_systematic_bias']}, "
-          f"derived_gate_pass={n['gate_pass'] and n['no_systematic_bias']}, "
+          f"decisive_measurement.pass={dm['pass']}, "
+          f"f_code={dm['code_level_disagreement_fraction_f']}, "
           f"worst_frob={n['worst_frob_rel_error']:.3e}, "
-          f"worst_ratio_to_floor={n['derived_floor']['worst_ratio_to_floor_observed']:.2f}x)  "
+          f"ratio_to_predicted={dm['ratio_measured_to_predicted']})  "
           f"perf_bar_result.pass={p['pass']} (min_speedup={p['min_speedup_cutlass_over_bf16']:.2f}x, "
           f"marginal={p['marginal']}) [informational M3 prior, not ANDed into go]")
 

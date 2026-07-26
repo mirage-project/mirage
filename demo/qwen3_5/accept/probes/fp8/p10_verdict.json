@@ -6,23 +6,36 @@
     "no_systematic_bias": true,
     "worst_bias_effect_size": 0.03276217938407696,
     "bias_effect_size_threshold": 0.1,
-    "frob_class": "single-quantization-bucket disagreement between two independently -authored e4m3 kernels (NOT pure fp32 accumulation-order noise, which is ~1e-6-3.8e-6, 100-1000x too small to explain the data -- see single_flip_floor() docstring for both derivations).",
-    "derived_floor": {
-      "formula": "floor(K) = E4M3_RELATIVE_LSB / sqrt(K), E4M3_RELATIVE_LSB=0.125 (2^-3, e4m3's 3-mantissa-bit relative LSB)",
-      "by_K": {
-        "2048": {
-          "floor": 0.002762135864009951,
-          "gate": 0.011048543456039804
-        },
-        "4096": {
-          "floor": 0.001953125,
-          "gate": 0.0078125
-        }
-      },
-      "gate_safety_multiple": 4,
-      "gate_safety_multiple_rationale": "empirically the worst observed ratio to the single-flip floor was ~1.6-2.0x across all 20 cases; 4x leaves a full additional ~2x margin beyond anything actually measured, while every per-K gate still sits >=2.4x below the rejected UE8M0 class's measured delta (criterion c) -- not reverse-engineered to the data's edge.",
-      "worst_ratio_to_floor_observed": 1.9540146629850514,
-      "ruled_out_alternative": "pure fp32 accumulation-reorder noise: sqrt(K)*2^-24 ~= 2.7e-6 (K=2048) / 3.8e-6 (K=4096) -- verified numerically, far too small to be the dominant mechanism."
+    "frob_class": "TWO confirmed mechanisms (coordinator review cycle 3, decisive direct measurement, not inference): (1) occasional single e4m3-code disagreements between the two quantizers, exactly 1 ULP, fraction f_code (K-invariant model: relative_frob ~= 0.125*sqrt(f_code)); (2) a smaller-per-element, more numerous per-128-group SCALE discrepancy (~0.4-0.8%, 16-30x below one e4m3 LSB) between the two quantizers' absmax computation for that group. Pure fp32 accumulation-order noise (~1e-6, 100-1000x too small) is ruled out as the dominant mechanism for either. See fraction_model_frob() docstring and p10b_activation_quant_disagreement.json for the full measurement.",
+    "decisive_measurement": {
+      "pass": true,
+      "source": "/home/muhengl/mpk-qwen35/probes/fp8_out/p10b_activation_quant_disagreement.json",
+      "code_level_disagreement_fraction_f": 0.0011078209005376345,
+      "boundary_fraction_le_2e3": true,
+      "max_ulp_distance_overall": 1,
+      "max_ulp_eq_1": true,
+      "predicted_frob_from_f": 0.004160492948065234,
+      "measured_worst_frob": 0.004351591014659254,
+      "ratio_measured_to_predicted": 1.0459315924770134,
+      "frob_consistent_within_2x": true,
+      "total_unexplained_positions": 0,
+      "unexplained_eq_0": true,
+      "second_mechanism_group_scale_fraction": 0.009455855174731184,
+      "second_mechanism_ratio_range": [
+        1.00431,
+        1.004951,
+        1.005319,
+        1.005814,
+        1.005882,
+        1.006173,
+        1.006757,
+        1.007692
+      ]
+    },
+    "RETIRED_sqrt_K_model": {
+      "credit": "coordinator completion review, cycle 3 (2026-07-26): caught that measured frob_rel_error is K-INVARIANT (mean 3.537e-3 at K=2048 vs 3.486e-3 at K=4096, ratio 1.01), contradicting single_flip_floor()'s sqrt(K)-scaling prediction (ratio should be sqrt(2)=1.41); proposed the K-invariant fixed-fraction model, confirmed by direct measurement above.",
+      "old_formula": "floor(K) = E4M3_RELATIVE_LSB / sqrt(K) (see single_flip_floor(), kept in source for the audit trail)",
+      "why_retired": "correct as a SPECIAL CASE (fixed COUNT=1 flip, not fixed FRACTION) but does not explain the observed K-invariance; the safety-multiple gate built on it (GATE_SAFETY_MULTIPLE=4, still in source) is superseded by `decisive_measurement` above."
     },
     "vs_rejected_ue8m0_class": {
       "pass": true,
@@ -45,13 +58,13 @@
         "result": "7/10 prompts exact match (596/640 positions); all 3 divergences at close-margin decisions (this run's own top1-vs-top2 gap 0.0/0.125/0.25 logit units) -- even a coarser perturbation only flips already-marginal decisions, never produces gross corruption."
       }
     },
-    "rationale": "gate_pass=True: (a) no_systematic_bias=True (worst bias effect size 0.0328 <= 0.1 bar -- this is the real corruption alarm: a directional/systematic offset would indicate a scale-application or indexing bug; a small, UNBIASED, symmetric spread is the signature of two valid-but-different roundings, not corruption). (b) derived_gate_pass=True (worst measured/floor ratio 1.95x, within the 4x safety multiple at every K tested -- see single_flip_floor() for the full derivation: pure fp32 accumulation-reorder noise is ruled out (~1e-6, 100-1000x too small); a single quantization-bucket disagreement between the two independently-authored kernels fits the measured magnitude to within ~2x). (c) vs_rejected_ue8m0_class=True (measured worst case is 6.0x smaller than P7's smallest UE8M0-requant delta). Corroborated by independent token-level evidence (see numerics.token_level_evidence): the M1 baseline found vLLM(CUTLASS)-vs-HF(Triton) produced byte-identical 64/64 tokens on prompt p01, and this issue's own P1 probe found a perturbation an order of magnitude LARGER than this (full bf16 substitution, not just cross-implementation noise) only flipped 3/10 prompts at close margins.",
+    "rationale": "gate_pass=True: (a) no_systematic_bias=True (worst bias effect size 0.0328 <= 0.1 bar -- this is the real corruption alarm: a directional/systematic offset would indicate a scale-application or indexing bug; a small, UNBIASED, symmetric spread is the signature of two valid-but-different roundings, not corruption). (b) measured_boundary_fraction<=2e-3: True (direct measurement, not inference: code-level disagreement fraction f=1.108e-03). (c) max_ulp_of_disagreement==1: True. (d) frob consistent with 0.125*sqrt(f) within 2x: True (predicted 4.160e-03 vs measured worst 4.352e-03, ratio 1.05x). (e) vs_rejected_ue8m0_class=True (measured worst case is 6.0x smaller than P7's smallest UE8M0-requant delta) Corroborated by independent token-level evidence (see numerics.token_level_evidence): the M1 baseline found vLLM(CUTLASS)-vs-HF(Triton) produced byte-identical 64/64 tokens on prompt p01, and this issue's own P1 probe found a perturbation an order of magnitude LARGER than this (full bf16 substitution, not just cross-implementation noise) only flipped 3/10 prompts at close margins.",
     "worst_frob_rel_error": 0.004351591014659254,
     "worst_p99_rel_diff_top_half": 0.015282182022929192,
     "OLD_THRESHOLDS_RETIRED": {
       "frob_rel_error_max": 0.002,
       "p99_rel_diff_top_half_max": 0.01,
-      "why_retired": "Flat constants chosen as 'reasonable slack' around the design doc's explicitly-rough '~1e-3' point estimate, with no derivation -- an undocumented tightening (2e-3/1e-2 are NOT stated anywhere in v1-architecture.md SS14, they were this probe's own invention). Caught by coordinator completion review 2026-07-26: a machine-checkable gate that other issues (M2-I12) consume must carry a principled derivation, not an arbitrary constant. Superseded by `derived_floor` above. p99_rel_diff_top_half is still computed and reported (see per-case data) but is no longer a gate criterion -- it was ALSO undocumented/arbitrary and the elementwise-percentile family of stats is inherently less well-founded than the magnitude-weighted frob-norm for this comparison (diff_stats() docstring)."
+      "why_retired": "Flat constants chosen as 'reasonable slack' around the design doc's explicitly-rough '~1e-3' point estimate, with no derivation -- an undocumented tightening (2e-3/1e-2 are NOT stated anywhere in v1-architecture.md SS14, they were this probe's own invention). Caught by coordinator completion review 2026-07-26: a machine-checkable gate that other issues (M2-I12) consume must carry a principled derivation, not an arbitrary constant. Superseded first by a derived sqrt(K) floor (cycle 2), then by `decisive_measurement` above (cycle 3, direct measurement of the raw e4m3 codes, not inference) -- see `RETIRED_sqrt_K_model`. p99_rel_diff_top_half is still computed and reported (see per-case data) but is no longer a gate criterion -- it was ALSO undocumented/arbitrary and the elementwise-percentile family of stats is inherently less well-founded than the magnitude-weighted frob-norm for this comparison (diff_stats() docstring)."
     },
     "note": "cutlass_vs_triton is the gating pair (two independent fp32-scale-class implementations); *_vs_fp32ref entries in `cases` attribute any divergence (both fp8 kernels can share a small common offset vs the fp32 reference without disagreeing with EACH OTHER -- that's the actual P10 question)."
   },
@@ -246,7 +259,7 @@
     ],
     "timestamp_utc": "2026-07-26T00:08:28.459363+00:00",
     "recomputed_from": "/home/muhengl/mpk-qwen35/probes/fp8_out/p10_verdict.json",
-    "recompute_timestamp_utc": "2026-07-26T00:38:25.941491+00:00"
+    "recompute_timestamp_utc": "2026-07-26T01:18:09.906604+00:00"
   },
   "cases": [
     {
