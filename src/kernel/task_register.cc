@@ -3026,6 +3026,112 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
   }
 }
 
+int TaskRegister::register_moe_fp8_blockscale_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool w13_linear) {
+  // Grouped FP8 MoE GEMM on the checkpoint's PRESERVED float32 block scales.
+  // Same input ordering as register_moe_fp8_sm100_task, with ONE difference:
+  //   [3] weight_scale is the checkpoint's UNEXPANDED block scale
+  //       [num_experts, N/128, K/128] float32, not the per-row
+  //       repeat_interleave(128) form the UE8M0 kernel needs.
+  //   [0] input_fp8       [batch, K] or [batch, top_k, K]
+  //   [1] input_scale     [batch, K/128] or [batch, top_k, K/128]  float32
+  //   [2] weight_fp8      [num_experts, N, K]
+  //   [4] routing_indices [num_experts, batch]
+  //   [5] expert_mask     [num_experts+1]
+  //   output              [batch, top_k, N]
+  assert(params.size() == 0);
+  int num_inputs = 6;
+  int num_outputs = 1;
+  int num_experts = 0, num_experts_per_tok = 0, batch_size = 0;
+  int output_size = 0, orig_output_size = 0, reduction_size = 0,
+      output_stride = 0;
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  assert(output_ops[0]->output_tensors[0].num_dims == 3);
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
+  num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
+  // output_size is this task's N slice (N // grid_dim.y)
+  output_size = output_ops[0]->output_tensors[0].dim[2];
+
+  if (w13_linear) {
+    assert(input_ops[0]->output_tensors[0].num_dims == 2);
+    reduction_size = input_ops[0]->output_tensors[0].dim[1];
+  } else {
+    assert(input_ops[0]->output_tensors[0].num_dims == 3);
+    reduction_size = input_ops[0]->output_tensors[0].dim[2];
+    assert(input_ops[0]->output_tensors[0].dim[1] == num_experts_per_tok);
+  }
+
+  assert(input_ops[2]->output_tensors[0].num_dims == 3);
+  num_experts = input_ops[2]->output_tensors[0].dim[0];
+  assert(input_ops[2]->output_tensors[0].dim[1] == output_size);
+  assert(input_ops[2]->output_tensors[0].dim[2] == reduction_size);
+
+  // The block scale carries ONE row per 128 weight rows, not one per row.
+  assert(input_ops[3]->output_tensors[0].num_dims == 3);
+  assert(input_ops[3]->output_tensors[0].dim[0] == num_experts);
+  assert(input_ops[3]->output_tensors[0].dim[1] * 128 == output_size);
+  assert(input_ops[3]->output_tensors[0].dim[2] * 128 == reduction_size);
+
+  assert(input_ops[4]->output_tensors[0].num_dims == 2);
+  assert(input_ops[4]->output_tensors[0].dim[0] == num_experts);
+  assert(input_ops[4]->output_tensors[0].dim[1] == batch_size);
+  assert(input_ops[5]->output_tensors[0].num_dims == 1);
+  assert(input_ops[5]->output_tensors[0].dim[0] == num_experts + 1);
+
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  orig_output_size = input_ops[2]->dtensor.dim[1];
+  assert(output_stride == orig_output_size);
+
+  // Each CTA in grid.x owns every EXPERT_STRIDE-th activated expert, exactly
+  // like the UE8M0 grouped task.
+  int expert_stride = bgraph.grid_dim.x;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::moe_fp8_blockscale_task_impl<bfloat16, $, $, $, $, $, $, $>(",
+         batch_size,
+         num_experts_per_tok,
+         num_experts,
+         output_size,
+         orig_output_size,
+         reduction_size,
+         w13_linear ? "true" : "false");
+  code.e("    task_desc->input_ptrs[0],");  // input_fp8
+  code.e("    task_desc->input_ptrs[1],");  // input_scale (float32)
+  code.e("    task_desc->input_ptrs[2],");  // weight_fp8
+  code.e("    task_desc->input_ptrs[3],");  // weight_scale (fp32 blocks)
+  code.e("    task_desc->input_ptrs[4],");  // routing_indices
+  code.e("    task_desc->input_ptrs[5],");  // expert_mask
+  code.e("    task_desc->output_ptrs[0],"); // output
+  code.e("    task_desc->task_metadata.expert_offset,");
+  code.e("    $);", expert_stride);
+
+  if (w13_linear) {
+    return register_task_variant(TASK_MOE_W13_FP8_BLOCKSCALE_SM100,
+                                 code.to_string());
+  } else {
+    return register_task_variant(TASK_MOE_W2_FP8_BLOCKSCALE_SM100,
+                                 code.to_string());
+  }
+}
+
 int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params) {
   assert(params.size() == 0);

@@ -74,7 +74,10 @@ event_name_list = {
     234: "TASK_GDN_CONV1D_SM100",                      # runtime_header.h:134
     235: "TASK_EAGLE3_D2T_REMAP",                      # runtime_header.h:135
     236: "TASK_EAGLE3_COMMIT",                         # runtime_header.h:136
-    248: "TASK_MOE_W13_FP8_SM100",                     # runtime_header.h:137
+    237: "TASK_GDN_RECURRENT_SM100",                   # runtime_header.h:141
+    241: "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",          # runtime_header.h:152
+    242: "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",           # runtime_header.h:153
+    248: "TASK_MOE_W13_FP8_SM100",                     # runtime_header.h:154
     249: "TASK_MOE_W2_FP8_SM100",                      # runtime_header.h:138
     251: "TASK_SPLITK_LINEAR_SM100",                   # runtime_header.h:139
     252: "TASK_LINEAR_WITH_RESIDUAL_SM100",            # runtime_header.h:140

@@ -139,6 +139,18 @@ enum TaskType {
   // window, so tma.cuh needs a case for it even though it uses no TMA
   // descriptor.
   TASK_GDN_RECURRENT_SM100 = 237,
+  // Grouped (MoE) FP8 GEMMs that consume the checkpoint's float32 128x128
+  // block scales directly. The shipped TASK_MOE_W13/W2_FP8_SM100 pair keeps
+  // those scales in the builder but truncates them to UE8M0 inside the kernel
+  // (the block-scaled UMMA hardware-types its scale operands); probe P2
+  // measured that as a ~2x per-expert multiplicative shrink on this
+  // checkpoint, so these are the fail-closed fp32-scale variants
+  // (docs/qwen35/v1-architecture.md 6.2,
+  // demo/qwen3_5/accept/probes/fp8/p2_verdict.json). Inside the (231, 256) TMA
+  // window, so tma.cuh needs a case for them even though they use no TMA
+  // descriptor.
+  TASK_MOE_W13_FP8_BLOCKSCALE_SM100 = 241,
+  TASK_MOE_W2_FP8_BLOCKSCALE_SM100 = 242,
   TASK_MOE_W13_FP8_SM100 = 248,
   TASK_MOE_W2_FP8_SM100 = 249,
   TASK_SPLITK_LINEAR_SM100 = 251,

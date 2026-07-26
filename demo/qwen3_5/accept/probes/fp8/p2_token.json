@@ -1,0 +1,122 @@
+{
+ "stage": "token",
+ "tokens": 8,
+ "variants": {
+  "w2_chain_ue8m0": {
+   "vs_oracle_routed_expert_output": {
+    "vs": "oracle_hf_fp8",
+    "frob_rel": 0.8899889460697428,
+    "row_slope_mean": 0.12466029822826385,
+    "row_slope_min": 0.09462142735719681,
+    "row_slope_max": 0.17285571992397308,
+    "row_slope_std": 0.024647608399391174,
+    "gain_error_mean": 0.8753396943211555,
+    "gain_error_effect_size": 35.514177557704976,
+    "raw_bias_effect_size": -0.014985817956545834,
+    "raw_bias_zscore": -1.9181846984378668,
+    "mean_abs_ratio": 0.1201285868883133,
+    "n_elements": 16384
+   },
+   "vs_fp32_scale_chain": {
+    "vs": "fp32_scale_chain",
+    "frob_rel": 0.8899043688946345,
+    "row_slope_mean": 0.12463174760341644,
+    "row_slope_min": 0.09455644339323044,
+    "row_slope_max": 0.17275449633598328,
+    "row_slope_std": 0.024627787992358208,
+    "gain_error_mean": 0.8753682523965836,
+    "gain_error_effect_size": 35.54392492724504,
+    "raw_bias_effect_size": -0.014941074912212438,
+    "raw_bias_zscore": -1.912457588763192,
+    "mean_abs_ratio": 0.12014184147119522,
+    "n_elements": 16384
+   }
+  },
+  "w2_chain_blockscale": {
+   "vs_oracle_routed_expert_output": {
+    "vs": "oracle_hf_fp8",
+    "frob_rel": 0.00606554681592674,
+    "row_slope_mean": 0.9997184872627258,
+    "row_slope_min": 0.9978410601615906,
+    "row_slope_max": 1.0004011392593384,
+    "row_slope_std": 0.0008349885465577245,
+    "gain_error_mean": 0.00028149038553237915,
+    "gain_error_effect_size": 0.3371232862592592,
+    "raw_bias_effect_size": -0.012230126609315106,
+    "raw_bias_zscore": -1.5654562059923336,
+    "mean_abs_ratio": 0.999937117099762,
+    "n_elements": 16384
+   },
+   "vs_fp32_scale_chain": {
+    "vs": "fp32_scale_chain",
+    "frob_rel": 0.006658889757820031,
+    "row_slope_mean": 0.9993956089019775,
+    "row_slope_min": 0.9971843361854553,
+    "row_slope_max": 1.0021429061889648,
+    "row_slope_std": 0.0014543315628543496,
+    "gain_error_mean": 0.0006043463945388794,
+    "gain_error_effect_size": 0.41553742005543076,
+    "raw_bias_effect_size": -0.0038849067800250095,
+    "raw_bias_zscore": -0.4972680678432012,
+    "mean_abs_ratio": 1.0000474452972412,
+    "n_elements": 16384
+   }
+  },
+  "w2_chain_fp32ref": {
+   "vs_oracle_routed_expert_output": {
+    "vs": "oracle_hf_fp8",
+    "frob_rel": 0.007418123916217146,
+    "row_slope_mean": 1.000298261642456,
+    "row_slope_min": 0.997936487197876,
+    "row_slope_max": 1.002050518989563,
+    "row_slope_std": 0.0012525921920314431,
+    "gain_error_mean": -0.00029822438955307007,
+    "gain_error_effect_size": -0.23808381600128345,
+    "raw_bias_effect_size": -0.006514183536189845,
+    "raw_bias_zscore": -0.8338154926323001,
+    "mean_abs_ratio": 0.9998896718025208,
+    "n_elements": 16384
+   }
+  },
+  "w2_chain_bf16ref": {
+   "vs_oracle_routed_expert_output": {
+    "vs": "oracle_hf_fp8",
+    "frob_rel": 0.007573430654050401,
+    "row_slope_mean": 1.0003516674041748,
+    "row_slope_min": 0.9980402588844299,
+    "row_slope_max": 1.0021367073059082,
+    "row_slope_std": 0.0012239136267453432,
+    "gain_error_mean": -0.0003515779972076416,
+    "gain_error_effect_size": -0.2872585523316824,
+    "raw_bias_effect_size": -0.006626722365138841,
+    "raw_bias_zscore": -0.8482204627377716,
+    "mean_abs_ratio": 0.9999905228614807,
+    "n_elements": 16384
+   },
+   "vs_fp32_scale_chain": {
+    "vs": "fp32_scale_chain",
+    "frob_rel": 0.001696417589818947,
+    "row_slope_mean": 1.0000531673431396,
+    "row_slope_min": 0.9996364712715149,
+    "row_slope_max": 1.000234603881836,
+    "row_slope_std": 0.00019006940419785678,
+    "gain_error_mean": -5.32492995262146e-05,
+    "gain_error_effect_size": -0.28016454697199633,
+    "raw_bias_effect_size": -0.0010993407412705782,
+    "raw_bias_zscore": -0.140715614882634,
+    "mean_abs_ratio": 1.00010085105896,
+    "n_elements": 16384
+   }
+  }
+ },
+ "env": {
+  "hostname": "catalyst-fleet1.cs.cmu.edu",
+  "gpu_name": "NVIDIA B200",
+  "cuda_visible_devices": "7",
+  "torch": "2.13.0+cu130",
+  "checkpoint": "Qwen/Qwen3.5-35B-A3B-FP8",
+  "checkpoint_revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+  "oracle_dumps": "/home/muhengl/mpk-qwen35/oracle-work/dumps",
+  "timestamp_utc": "2026-07-26T07:34:15.926398+00:00"
+ }
+}

@@ -1,0 +1,130 @@
+{
+ "primitive": "per_token_group_quantize_fp8_task_impl <SCALE_UE8M0=false> == quantize_fp8_layer(scale_ue8m0=False)",
+ "contract": "vllm-graph.md 3.4 / v1-architecture.md 6.1: group 128, absmax = max(max|x|, 1e-10), scale = absmax/448, x/scale (division), clamp to +-448 BEFORE the RN-even e4m3 cast",
+ "shapes_covered": [
+  {
+   "kind": "w13 activation [tokens, 2048]",
+   "rows": [
+    1,
+    2,
+    4,
+    8,
+    16
+   ]
+  },
+  {
+   "kind": "w2 activation [tokens, 8, 512]",
+   "rows": [
+    8,
+    16,
+    64,
+    128
+   ]
+  }
+ ],
+ "standalone_build": {
+  "all_scales_bit_exact_vs_true_division": true,
+  "all_values_bit_exact": true,
+  "zero_group_eps_branch_ok": true
+ },
+ "reference_pitfall": "`t / 448.0` with a PYTHON scalar is lowered by PyTorch to a reciprocal multiply and is 1 fp32 ULP from true division; a torch reference must use torch.div with a 0-dim tensor or it mis-reports the kernel as wrong.",
+ "cases": [
+  {
+   "case": "w13 input rows=1",
+   "rows": 1,
+   "hidden": 2048,
+   "scale_bit_exact": true,
+   "ulp_histogram": {
+    "0": 2048
+   }
+  },
+  {
+   "case": "w13 input rows=2",
+   "rows": 2,
+   "hidden": 2048,
+   "scale_bit_exact": true,
+   "ulp_histogram": {
+    "0": 4096
+   }
+  },
+  {
+   "case": "w13 input rows=4",
+   "rows": 4,
+   "hidden": 2048,
+   "scale_bit_exact": true,
+   "ulp_histogram": {
+    "0": 8192
+   }
+  },
+  {
+   "case": "w13 input rows=8",
+   "rows": 8,
+   "hidden": 2048,
+   "scale_bit_exact": true,
+   "ulp_histogram": {
+    "0": 16384
+   }
+  },
+  {
+   "case": "w13 input rows=16",
+   "rows": 16,
+   "hidden": 2048,
+   "scale_bit_exact": true,
+   "ulp_histogram": {
+    "0": 32768
+   }
+  },
+  {
+   "case": "w2 input tokens=1",
+   "rows": 8,
+   "hidden": 512,
+   "scale_bit_exact": true,
+   "ulp_histogram": {
+    "0": 4096
+   }
+  },
+  {
+   "case": "w2 input tokens=2",
+   "rows": 16,
+   "hidden": 512,
+   "scale_bit_exact": true,
+   "ulp_histogram": {
+    "0": 8192
+   }
+  },
+  {
+   "case": "w2 input tokens=8",
+   "rows": 64,
+   "hidden": 512,
+   "scale_bit_exact": true,
+   "ulp_histogram": {
+    "0": 32768
+   }
+  },
+  {
+   "case": "w2 input tokens=16",
+   "rows": 128,
+   "hidden": 512,
+   "scale_bit_exact": true,
+   "ulp_histogram": {
+    "0": 65536
+   }
+  }
+ ],
+ "megakernel_build": {
+  "note": "MPK compiles the megakernel with -use_fast_math, which rewrites the quantizer's group_max/448.0f into a reciprocal multiply. That is 1 fp32 ULP (~2e-7 relative) from true division -- four orders of magnitude below one e4m3 LSB and below p10b's measured 1-e4m3-ULP disagreement between two independent implementations of this primitive.",
+  "scale_forms": [
+   {
+    "tensor": "activation",
+    "form": "reciprocal_multiply (-use_fast_math)",
+    "max_fp32_ulp_from_true_division": 1
+   },
+   {
+    "tensor": "w2 activation",
+    "form": "reciprocal_multiply (-use_fast_math)",
+    "max_fp32_ulp_from_true_division": 1
+   }
+  ],
+  "both_blockscale_tasks_ran_in_megakernel": true
+ }
+}

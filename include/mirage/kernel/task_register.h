@@ -127,6 +127,9 @@ public:
   int register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params,
                                   bool w13_linear);
+  int register_moe_fp8_blockscale_sm100_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params,
+                                             bool w13_linear);
   int register_moe_silu_mul_task(threadblock::Graph const &bgraph,
                                  std::vector<int> const &params);
   int register_moe_mul_sum_add_sm100_task(threadblock::Graph const &bgraph,

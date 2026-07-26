@@ -1,0 +1,128 @@
+{
+ "stage": "w13",
+ "shape": {
+  "E": 256,
+  "N": 1024,
+  "K": 2048,
+  "k_tiles": 16
+ },
+ "tokens": 8,
+ "activated_experts": 52,
+ "num_ab_stages": 8,
+ "ue8m0_kernel": {
+  "vs_fp32_scale": {
+   "vs": "fp32_scale_torch",
+   "frob_rel": 0.48229542395666736,
+   "row_slope_mean": 0.5110156536102295,
+   "row_slope_min": 0.45165151357650757,
+   "row_slope_max": 0.5583950877189636,
+   "row_slope_std": 0.03239704295992851,
+   "gain_error_mean": 0.4889843687415123,
+   "gain_error_effect_size": 15.093483644553924,
+   "raw_bias_effect_size": 0.16634568569303207,
+   "raw_bias_zscore": 42.58449553741621,
+   "mean_abs_ratio": 0.5090606808662415,
+   "n_elements": 65536
+  },
+  "vs_bf16_dequant": {
+   "vs": "bf16_dequant_torch",
+   "frob_rel": 0.4822931748074823,
+   "row_slope_mean": 0.5110306739807129,
+   "row_slope_min": 0.4516233205795288,
+   "row_slope_max": 0.5583778619766235,
+   "row_slope_std": 0.03240588679909706,
+   "gain_error_mean": 0.4889693111181259,
+   "gain_error_effect_size": 15.088900113214649,
+   "raw_bias_effect_size": 0.1663315554309522,
+   "raw_bias_zscore": 42.580878190323766,
+   "mean_abs_ratio": 0.5090724229812622,
+   "n_elements": 65536
+  },
+  "vs_truncation_model": {
+   "vs": "ue8m0_trunc_model",
+   "frob_rel": 0.0016859583497755824,
+   "row_slope_mean": 0.999989926815033,
+   "row_slope_min": 0.9998873472213745,
+   "row_slope_max": 1.000086784362793,
+   "row_slope_std": 6.329568714136258e-05,
+   "gain_error_mean": 1.0095536708831787e-05,
+   "gain_error_effect_size": 0.1594914852764109,
+   "raw_bias_effect_size": -0.0027174641935274013,
+   "raw_bias_zscore": -0.6956708335430147,
+   "mean_abs_ratio": 1.0000125169754028,
+   "n_elements": 65536
+  }
+ },
+ "truncation_model": {
+  "vs_fp32_scale": {
+   "vs": "fp32_scale_torch",
+   "frob_rel": 0.48228491089988235,
+   "row_slope_mean": 0.5110200643539429,
+   "row_slope_min": 0.4516655504703522,
+   "row_slope_max": 0.5583705306053162,
+   "row_slope_std": 0.03238224238157272,
+   "gain_error_mean": 0.4889799803495407,
+   "gain_error_effect_size": 15.100246866611585,
+   "raw_bias_effect_size": 0.16635462639303422,
+   "raw_bias_zscore": 42.58678435661676,
+   "mean_abs_ratio": 0.5090543627738953,
+   "n_elements": 65536
+  }
+ },
+ "bf16_dequant_reference": {
+  "vs_fp32_scale": {
+   "vs": "fp32_scale_torch",
+   "frob_rel": 0.0019239658552685516,
+   "row_slope_mean": 0.999970018863678,
+   "row_slope_min": 0.9996843338012695,
+   "row_slope_max": 1.0001015663146973,
+   "row_slope_std": 0.00013973955356050283,
+   "gain_error_mean": 3.0003488063812256e-05,
+   "gain_error_effect_size": 0.2147204767755649,
+   "raw_bias_effect_size": 0.0034417663950890324,
+   "raw_bias_zscore": 0.8810921971427923,
+   "mean_abs_ratio": 0.9999769330024719,
+   "n_elements": 65536
+  }
+ },
+ "env": {
+  "hostname": "catalyst-fleet1.cs.cmu.edu",
+  "gpu_name": "NVIDIA B200",
+  "cuda_visible_devices": "7",
+  "torch": "2.13.0+cu130",
+  "checkpoint": "Qwen/Qwen3.5-35B-A3B-FP8",
+  "checkpoint_revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+  "oracle_dumps": "/home/muhengl/mpk-qwen35/oracle-work/dumps",
+  "timestamp_utc": "2026-07-26T07:34:10.504684+00:00"
+ },
+ "blockscale_kernel": {
+  "vs_fp32_scale": {
+   "vs": "fp32_scale_torch",
+   "frob_rel": 0.0016242142544300963,
+   "row_slope_mean": 1.0000052452087402,
+   "row_slope_min": 0.9998487234115601,
+   "row_slope_max": 1.000173807144165,
+   "row_slope_std": 0.00011794629244832322,
+   "gain_error_mean": -5.2228569984436035e-06,
+   "gain_error_effect_size": -0.04427600385030719,
+   "raw_bias_effect_size": -0.00013710386754453314,
+   "raw_bias_zscore": -0.03509859009140048,
+   "mean_abs_ratio": 0.9999958276748657,
+   "n_elements": 65536
+  },
+  "vs_bf16_dequant": {
+   "vs": "bf16_dequant_torch",
+   "frob_rel": 0.0018217628416907381,
+   "row_slope_mean": 1.0000321865081787,
+   "row_slope_min": 0.999918520450592,
+   "row_slope_max": 1.000160813331604,
+   "row_slope_std": 9.197284089168534e-05,
+   "gain_error_mean": -3.214925527572632e-05,
+   "gain_error_effect_size": -0.3495487727634866,
+   "raw_bias_effect_size": -0.003757080890526537,
+   "raw_bias_zscore": -0.9618127079747935,
+   "mean_abs_ratio": 1.000018835067749,
+   "n_elements": 65536
+  }
+ }
+}

@@ -1869,6 +1869,72 @@ class PersistentKernel:
         assert self.target_cc == 100, "FP8 group GEMM requires SM100 (Blackwell)"
         self.kn_graph.register_task(tb_graph, "moe_w2_fp8_sm100")
 
+    def moe_fp8_blockscale_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        moe_routing_indices: DTensor,
+        moe_mask: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        w13_linear: bool,
+    ):
+        """Grouped FP8 MoE GEMM on the checkpoint's PRESERVED float32 block
+        scales -- the fail-closed alternative to moe_w13/w2_fp8_layer.
+
+        Those two hand the kernel a per-ROW scale (the builder's
+        `repeat_interleave(128)`), and the kernel then truncates every scale to
+        a power of two because its block-scaled UMMA hardware-types the
+        operand. Probe P2 measured that as a ~2x per-expert multiplicative
+        shrink on this checkpoint (probes/fp8/p2_verdict.json), so this variant
+        consumes `weight_scale_inv` in its SHIPPED shape --
+        (num_experts, N//128, K//128) float32 -- and applies it in fp32 at the
+        128-K-tile boundary instead.
+
+        input_fp8/input_scale must come from
+        quantize_fp8_layer(..., scale_ue8m0=False).
+        """
+        # input_fp8:    w13 (batch, hidden) / w2 (batch, topk, intermediate)
+        # input_scale:  the same, last dim // 128, float32
+        # weight_fp8:   (num_experts, N, K)                        FP8 E4M3
+        # weight_scale: (num_experts, N//128, K//128)              float32
+        # routing:      (num_experts, batch) int32, expert-major
+        # mask:         (num_experts + 1,)   int32
+        # output:       (batch, topk, N)     BF16
+        assert input_fp8.num_dims == (2 if w13_linear else 3)
+        assert input_scale.num_dims == input_fp8.num_dims
+        assert weight_fp8.num_dims == 3
+        assert weight_scale.num_dims == 3
+        assert weight_scale.dim(1) * 128 == weight_fp8.dim(1)
+        assert weight_scale.dim(2) * 128 == weight_fp8.dim(2)
+        assert moe_routing_indices.num_dims == 2
+        assert moe_mask.num_dims == 1
+        assert output.num_dims == 3
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # Same partitioning as the UE8M0 grouped layers: grid.y splits the
+        # weight's N. weight_scale carries one row per 128 weight rows, so its
+        # dim1 splits by the same factor.
+        tb_graph.new_input(input_fp8,           (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale,         (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8,          (-1, 1, -1),  -1, True)
+        tb_graph.new_input(weight_scale,        (-1, 1, -1),  -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_mask,            (-1, -1, -1), -1, True)
+        tb_graph.new_input(output,              (-1, 2, -1),  -1, True)
+        self.kn_graph.customized(
+            [input_fp8, input_scale, weight_fp8, weight_scale,
+             moe_routing_indices, moe_mask, output], tb_graph)
+        assert self.target_cc == 100, "FP8 group GEMM requires SM100 (Blackwell)"
+        task_name = (
+            "moe_w13_fp8_blockscale_sm100"
+            if w13_linear
+            else "moe_w2_fp8_blockscale_sm100"
+        )
+        self.kn_graph.register_task(tb_graph, task_name)
+
     # === FP8 Dense Layers ===
     def quantize_fp8_layer(
         self,
