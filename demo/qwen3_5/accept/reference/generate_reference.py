@@ -228,7 +228,19 @@ def main():
     )
     ap.add_argument("--output-dir", default=str(Path(__file__).resolve().parent))
     ap.add_argument("--max-new-tokens", type=int, default=64)
+    ap.add_argument(
+        "--topk-logits",
+        type=int,
+        default=4,
+        help=(
+            "Per-step top-k token ids/logits to persist (M2-I3 addendum: the AC-3 harness's "
+            "reference_loader.py needs at least top-2 for margin/tie-flip evidence; k=4 default "
+            "gives headroom beyond that minimum). Must be >= 2."
+        ),
+    )
     args = ap.parse_args()
+    if args.topk_logits < 2:
+        raise SystemExit("--topk-logits must be >= 2 (the AC-3 harness needs at least top-2)")
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -303,12 +315,48 @@ def main():
         hit_eos = num_generated < args.max_new_tokens
         eos_step = num_generated - 1 if hit_eos else None
 
+        # M2-I3 addendum: persist per-step top-k (not just top-1) so the AC-3 harness's
+        # reference_loader.py can compute a real margin (logit[top1] - logit[top2]) and the
+        # tie-flip waiver path (goal.md AC-3's second sentence) stops being structurally
+        # unsubstantiable. `k = args.topk_logits` (default 4: harness needs >=2, this gives
+        # headroom for a future 3-/4-way-tie analysis without a second regeneration).
+        #
+        # top1 extraction is DELIBERATELY UNCHANGED (still torch.max, not torch.topk[...][0]):
+        # a first attempt used torch.topk's own index-0 for top1 and hit a real assertion
+        # failure on p06-poem — torch.max and torch.topk are different kernels and can break an
+        # EXACT top-logit tie differently even on identical input (the same tie-breaking-is-not-
+        # guaranteed risk class M2-I3's oracle work independently found for the MoE router's
+        # torch.topk). Keeping top1 on the original torch.max call preserves this script's
+        # existing identity-critical behavior byte-for-byte; the separately-computed top-k is
+        # purely additive.
         top1_ids = []
         top1_logits = []
+        topk_ids_per_step = []
+        topk_logits_per_step = []
         for step_logits in gen.logits:  # tuple length == num_generated
-            val, idx = torch.max(step_logits[0].float(), dim=-1)
+            logits_f32 = step_logits[0].float()
+            val, idx = torch.max(logits_f32, dim=-1)
             top1_ids.append(int(idx.item()))
             top1_logits.append(float(val.item()))
+
+            k = min(args.topk_logits, logits_f32.shape[-1])
+            topk_vals, topk_idxs = torch.topk(logits_f32, k, dim=-1)
+            ids_row = [int(x) for x in topk_idxs.tolist()]
+            logits_row = [float(x) for x in topk_vals.tolist()]
+            if ids_row[0] != int(idx.item()):
+                # Only reachable on an EXACT top-logit tie (torch.topk resolved it to a
+                # different index than torch.max) -- verify it really is a tie, then force
+                # index 0 to the VERIFIED top1 so the persisted row never disagrees with the
+                # id that was actually generated.
+                assert abs(logits_row[0] - float(val.item())) < 1e-6, (
+                    f"[{pid}] top-k[0] id {ids_row[0]} != torch.max argmax {int(idx.item())} "
+                    f"AND the logits differ ({logits_row[0]} vs {float(val.item())}) - "
+                    f"not a tie, a real bug"
+                )
+                ids_row[0] = int(idx.item())
+                logits_row[0] = float(val.item())
+            topk_ids_per_step.append(ids_row)
+            topk_logits_per_step.append(logits_row)
         # Sanity: greedy argmax of returned logits must equal the actually
         # emitted token at every step (verifies do_sample=False was honored
         # and no logits warper altered the pick).
@@ -316,6 +364,12 @@ def main():
             f"[{pid}] greedy argmax(logits) != generated token ids - "
             f"do_sample=False was not purely greedy: {top1_ids} vs {output_ids}"
         )
+        # top2_{id,logit}_per_step: the exact optional keys reference_loader.py checks for
+        # (accept/harness/reference_loader.py `_OPTIONAL_TOP2_ID_KEYS`/`_OPTIONAL_TOP2_LOGIT_KEYS`).
+        # `None` per position only if a caller ever set --topk-logits below 2 at the vocab-size
+        # floor (can't happen given the >=2 CLI validation above plus vocab_size >> 2).
+        top2_id_per_step = [row[1] if len(row) > 1 else None for row in topk_ids_per_step]
+        top2_logit_per_step = [row[1] if len(row) > 1 else None for row in topk_logits_per_step]
 
         results[pid] = {
             "input_ids": input_ids[0].tolist(),
@@ -324,6 +378,10 @@ def main():
             "hit_eos": hit_eos,
             "eos_step": eos_step,
             "top1_logit_per_step": top1_logits,
+            "top2_id_per_step": top2_id_per_step,
+            "top2_logit_per_step": top2_logit_per_step,
+            "topk_ids_per_step": topk_ids_per_step,
+            "topk_logits_per_step": topk_logits_per_step,
             "decoded_output": tokenizer.decode(output_ids, skip_special_tokens=False),
             "elapsed_seconds": round(elapsed, 3),
         }
@@ -344,6 +402,7 @@ def main():
         "load_notes": load_notes,
         "fp8_execution_introspection": fp8_exec_info,
         "transformers_disable_deepgemm_linear": os.environ.get("TRANSFORMERS_DISABLE_DEEPGEMM_LINEAR"),
+        "topk_logits_k": args.topk_logits,
         "versions": {
             "python": sys.version,
             "torch": torch.__version__,

@@ -397,8 +397,29 @@ artifact idiosyncratic to `transformers`.
 |---|---|---|---|---|
 | Original | 2026-07-25 03:14–03:17 EDT | `catalyst-B200` CUDA_VISIBLE_DEVICES=1 (4 MiB/0%) | `852d74cc...` (script has since been edited, see below) | Produced the first `reference_outputs.json` — but that script version predated the `TRANSFORMERS_DISABLE_DEEPGEMM_LINEAR` default + `transformers_disable_deepgemm_linear` meta field added afterward, leaving the committed artifact's schema stale relative to the script. |
 | **Regeneration** | **2026-07-25 04:06–04:09 EDT** | `catalyst-B200` `CUDA_VISIBLE_DEVICES=2` (4 MiB/0%) | **`852d74ccc6a294dd08d65bf4e60d95adc642ad18f7c8c2c20e2a609ca817f063`** — verified byte-identical to the committed `generate_reference.py` (sha256 checked on both the local repo copy and the B200 copy immediately before this run; the B200 copy had independently drifted by one dead-code line from an earlier sync and was re-synced first) | **Re-ran the exact current script**, same env (`venv-vllm`, `HF_HOME=~/mpk-qwen35/hf`, `TRANSFORMERS_DISABLE_DEEPGEMM_LINEAR=1`, `--revision 9d1823d2dee688a6b25e77009dc727688c44936e`), output to a scratch dir first. **Diffed all 10 prompts × 64 tokens against the existing committed artifact: 100% identical, input_ids and output_ids both, for every prompt.** Only then replaced `reference_outputs.json` and `generation_run.log` with this run's pair — now schema-synced (`transformers_disable_deepgemm_linear: "1"` present) and reproducibility-proven. See `gpu_etiquette_evidence.md` → "Step 7 regeneration" for the verbatim pre-run `nvidia-smi` rows + pinning. |
+| **M2-I3 addendum regeneration** | **2026-07-25 ~20:22–20:28 EDT** | `catalyst-B200` `CUDA_VISIBLE_DEVICES=5` (4 MiB/0%), locked via `~/mpk-qwen35/.gpu-locks/M2-I3.lock` | **`aad2469871bbead72fcc0405a91b433c041b4090ce37330b7608cbb87310cfb5`** — verified byte-identical between the local repo copy and the B200 standalone copy (`~/mpk-qwen35/generate_reference.py`) immediately before this run | **Extended the script** to persist per-step top-k token ids + logits (`--topk-logits 4`, new keys below) — the AC-3 tie-flip waiver was structurally unsubstantiable without this (see `../harness/README.md` "Known gap", now updated). **First attempt used `torch.topk(...)[0]` for top1 and hit a real `AssertionError` on `p06-poem`**: `torch.max` and `torch.topk` broke an exact top-logit tie differently on the same tensor (same risk class M2-I3's oracle work independently found in the MoE router's `torch.topk`) — root-caused, not papered over: fixed by keeping top1 derivation on the ORIGINAL unchanged `torch.max` call and computing the additional top-k separately (with a defensive tie-reconciliation assertion), so this script's identity-critical behavior is unchanged from the prior regeneration. Re-ran clean (exit 0, all 10 prompts), output to a scratch dir (`~/mpk-qwen35/regen_addendum/`) first. **Diffed all 10 prompts' `input_ids` + `output_ids` + `num_generated` + `hit_eos`/`eos_step` against the previously-committed artifact programmatically: 100% identical for every prompt** — only `reference_outputs.json`/`generation_run.log` were then replaced. |
 
 Notable side detail: this regeneration ran under `torch==2.11.0+cu130` (the venv's current
 state after the step-8 vllm-flash-attn ABI fix), vs. the original's `torch==2.13.0+cu130` —
 i.e. the token-for-token match also held across two different torch/fp8-kernel-build
-combinations on this box, not just a literal re-run of identical binaries.
+combinations on this box, not just a literal re-run of identical binaries. The M2-I3 addendum
+regeneration above extends this further: token-for-token identity now holds across THREE
+separate runs of this script (three different processes, two different GPUs, two different
+sha256 script versions differing only in additive top-k persistence).
+
+## Schema addendum (M2-I3): per-step top-k logits
+
+As of the regeneration above, each prompt's entry in `reference_outputs.json["results"]` carries
+four new keys alongside the original `top1_logit_per_step`:
+
+- `top2_id_per_step` / `top2_logit_per_step` — the exact optional keys
+  `../harness/reference_loader.py` checks for (`_OPTIONAL_TOP2_ID_KEYS`/`_OPTIONAL_TOP2_LOGIT_KEYS`);
+  populated for every position of every prompt now, so `margin_evidence.available` is `true`
+  against this artifact (previously always `false` — see the harness README's former "Known gap").
+- `topk_ids_per_step` / `topk_logits_per_step` — the full top-`k` (`meta.topk_logits_k`, `k=4` by
+  default) per step, one list of `k` values per position. `topk_ids_per_step[step][0]` is
+  guaranteed to equal `output_ids[step]` (the actually-generated token) even in the rare case of
+  an exact top-logit tie — see the provenance row above for why that guarantee needed an explicit
+  fix rather than a bare `torch.topk` call.
+- `meta.topk_logits_k` — the `k` used for this run (regenerate with `--topk-logits N` to change
+  it; the harness only ever needs `k>=2`).

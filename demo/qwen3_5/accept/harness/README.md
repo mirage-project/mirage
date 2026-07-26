@@ -61,24 +61,37 @@ position-level compare surfaces it directly — no separate mechanism is needed
 (`tests/test_stub_e2e.py::FullSweepPerfectEngineTest::test_bs_dependent_regression_is_caught_against_the_single_reference`
 demonstrates this).
 
-## Known gap: the committed reference has no top-2/margin data
+## Resolved gap: the committed reference now carries top-k/margin data (M2-I3 addendum)
 
 `docs/qwen35/mpk-gaps.md` §6.5 and `docs/qwen35/v1-architecture.md` §12 ask this harness to
 emit, for every position, the reference's top-2 ids and the margin `logit[top1] -
-logit[top2]`. **The committed `reference_outputs.json` cannot supply this today** —
-`generate_reference.py` calls `torch.max` on each step's logits and keeps only the top-1 value
-(`top1_logit_per_step`); the rest of the logits vector is discarded before the file is written.
+logit[top2]`. **Originally the committed `reference_outputs.json` could not supply this** —
+`generate_reference.py` called `torch.max` on each step's logits and kept only the top-1 value
+(`top1_logit_per_step`); the rest of the logits vector was discarded before the file was
+written. This harness never fabricated a margin from that single float:
+`reference_loader.py` checked defensively for optional `top2_id_per_step` /
+`top2_logit_per_step` keys and reported `None` / `"available": false` when absent — true for
+every position of every prompt as originally committed.
 
-This harness does not fabricate a margin from that single float. `reference_loader.py` checks
-defensively for optional `top2_id_per_step` / `top2_logit_per_step` keys and reports `None` /
-`"available": false` (with the reason above) when they're absent, which is the case for every
-position of every prompt in the artifact as committed. A real mismatch against today's
-reference therefore classifies as `insufficient_evidence`, never `candidate_tie_flip` — there
-is not enough information yet to ever substantiate a tie-flip waiver. A future reference
-regeneration that persists a real top-2 (or top-k) per step would need no changes here beyond
-populating those two optional keys; `ac3_types.ReferenceStep` and the classifier already
-consume them when present (see `tests/test_stub_e2e.py::SyntheticFixtureTest`, which exercises
-the full tie/bug classification using a synthetic reference that does carry them).
+**As of the 2026-07-25 M2-I3 addendum regeneration, the gap is closed.**
+`generate_reference.py` now persists real per-step top-`k` (`k=4` by default, `--topk-logits`
+to change it; see `../reference/README.md` "Schema addendum") and `reference_outputs.json` was
+regenerated with `input_ids`/`output_ids` verified programmatically byte-identical to the prior
+committed artifact for all 10 prompts (identity requirement — token ids never changed, only
+metadata/logit fields were added; see `../reference/README.md`'s provenance table for the full
+regeneration record, including a real tie-breaking bug the regeneration hit and fixed along the
+way). `reference_loader.py`/`ac3_types.py` needed NO changes — they already consumed
+`top2_id_per_step`/`top2_logit_per_step` defensively, exactly as designed. Confirmed against the
+real artifact: `margin_evidence_summary()` now reports `available: true` for all 640 positions
+(10 prompts × 64 tokens), margins spanning `[0.0, 18.875]`, mean `9.47` (the `0.0` minimum is a
+real observed exact top-1/top-2 logit tie somewhere in the 640 positions, not a bug —
+`generate_reference.py` handles this tie case explicitly, see its comments). A real mismatch
+against today's reference can therefore classify as `candidate_tie_flip` when the evidence
+supports it, not just `insufficient_evidence` — `tests/test_stub_e2e.py::RealVllmSmokeStubTest`
+now asserts `margin_evidence["available"]` is `True` against the real artifact (previously
+asserted `False`, documenting the gap this section used to describe);
+`tests/test_stub_e2e.py::SyntheticFixtureTest` continues to exercise the full tie/bug
+classification via its own hand-authored synthetic reference, independent of the real data.
 
 ## Files
 

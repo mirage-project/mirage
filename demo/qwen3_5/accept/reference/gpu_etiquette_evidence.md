@@ -125,3 +125,41 @@ index, memory.used [MiB], utilization.gpu [%]
 GPU 2 (the pinned device): **4 MiB, 0%**. Script sha256 on the box at run time
 (`852d74cc...`) matches the committed `generate_reference.py`'s sha256 exactly — confirmed
 byte-identical before this run (see README provenance entry).
+
+## Step 7, M2-I3 addendum regeneration (top-k persistence), `CUDA_VISIBLE_DEVICES=5`
+
+Two attempts; both pinned the same GPU via the same etiquette check, re-verified immediately
+before each launch (agent tool-call transcript, this run was launched via `ssh`, not a persisted
+B200 log file the way steps 7/8's `run_*.sh` wrappers are — flagged for the same honesty reason
+as the qwen3-8B demo smoke gap above).
+
+Attempt 1 (`CUDA_VISIBLE_DEVICES=5`, pre-run check):
+```
+index, memory.used [MiB], utilization.gpu [%]
+0, 0 MiB, 0 %
+1, 0 MiB, 0 %
+2, 75220 MiB, 100 %
+3, 111570 MiB, 100 %
+4, 0 MiB, 0 %
+5, 0 MiB, 0 %
+6, 0 MiB, 0 %
+7, 27958 MiB, 0 %
+```
+GPU 5: **0 MiB, 0%** — well inside etiquette. GPUs 2/3 at 100% util (other users) correctly
+skipped; GPU 7 had 27958 MiB resident but 0% util (an idle-but-loaded process) — also skipped
+per the `<500 MiB` bound rather than treated as free just because it was idle. This attempt
+crashed with a script-level `AssertionError` on `p06-poem` (torch.max vs torch.topk tie-break
+disagreement — see README provenance table) before touching the KV-cache-heavy tail of
+generation; script was fixed and re-run as attempt 2 below, same GPU, same lock file held
+throughout (`~/mpk-qwen35/.gpu-locks/M2-I3.lock`, never released between attempts since this
+was the same logical job, not a new one).
+
+Attempt 2 (`CUDA_VISIBLE_DEVICES=5`, immediately before re-launch):
+```
+index, memory.used [MiB], utilization.gpu [%]
+5, 4 MiB, 0 %
+```
+GPU 5: **4 MiB, 0%** — still free (this box's own process from attempt 1 had fully exited,
+freeing the 0 MiB reading back up to a residual 4 MiB baseline typical of this box when idle).
+Completed clean, exit 0, all 10 prompts. Lock file removed after this run completed and the
+identity diff (README provenance table) passed.

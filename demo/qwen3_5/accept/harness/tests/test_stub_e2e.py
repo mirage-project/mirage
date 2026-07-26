@@ -62,9 +62,22 @@ class RealVllmSmokeStubTest(unittest.TestCase):
         self.assertTrue(all(p.match for p in result.positions))
         self.assertEqual(result.waiver_request, None)
 
-        # Confirms the documented gap: the real committed reference has no top-2/margin data,
-        # so this is honestly reported as unavailable rather than a fabricated value.
-        self.assertFalse(report.margin_evidence["available"])
+        # M2-I3 addendum (2026-07-25): this test used to confirm the documented gap (the real
+        # committed reference had no top-2/margin data, so margin_evidence was honestly reported
+        # unavailable rather than fabricated). The reference has since been regenerated with
+        # real per-step top-k data (reference/README.md "Schema addendum"; harness README
+        # "Known gap" updated) - the gap this assertion documented is closed, so the assertion
+        # flips to confirm the fix: margin evidence is now genuinely available, for EVERY
+        # position (not partial), computed from real logits (never fabricated).
+        self.assertTrue(report.margin_evidence["available"])
+        self.assertEqual(
+            report.margin_evidence["margin_data_available_positions"],
+            report.margin_evidence["total_positions"],
+        )
+        # margin = logit[top1] - logit[top2] is never negative by construction (top-k is sorted
+        # descending); exactly 0.0 at the minimum is a real observed exact top-1/top-2 tie
+        # somewhere in the 640 positions, not a bug - see generate_reference.py's tie-handling.
+        self.assertGreaterEqual(report.margin_evidence["min"], 0.0)
 
     def test_non_partial_mode_hard_fails_on_the_9_missing_prompts(self):
         # Without --allow-partial, the vLLM smoke artifact's single prompt is not a valid AC-3
