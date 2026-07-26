@@ -1,0 +1,457 @@
+{
+  "probe": "P4",
+  "spec": "docs/qwen35/v1-architecture.md \u00a714 P4 (gates \u00a74.4 zero-kernel-change route)",
+  "torch_version": "2.11.0+cu130",
+  "device": "cpu",
+  "seed": 20260726,
+  "config": {
+    "head_dim": 256,
+    "rotary_dim": 64,
+    "theta": 10000000.0,
+    "num_q_heads": 16,
+    "num_kv_heads": 2,
+    "eps": 1e-06
+  },
+  "permutation_src_head": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "permutation_src_128_136": [
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39
+  ],
+  "cases": [
+    {
+      "name": "synthetic_decode_T1",
+      "tokens": 1,
+      "q_heads": 16,
+      "kv_heads": 2,
+      "algebra_fp32_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "algebra_fp32_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 512,
+        "bit_exact": true
+      },
+      "asrun_fp32_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "asrun_fp32_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 512,
+        "bit_exact": true
+      },
+      "asrun_fp32_logits": {
+        "max_abs": 9.5367431640625e-07,
+        "mean_abs": 1.825392246246338e-07,
+        "max_rel": 3.409501687201555e-06,
+        "num_diff": 14,
+        "numel": 16,
+        "bit_exact": false
+      },
+      "kernelorder_bf16_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "kernelorder_bf16_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 512,
+        "bit_exact": true
+      },
+      "kernelorder_bf16_q_max_ulp": 0,
+      "kernelorder_bf16_k_max_ulp": 0,
+      "kernelorder_bf16_logits": {
+        "max_abs": 2.384185791015625e-07,
+        "mean_abs": 6.705522537231445e-08,
+        "max_rel": 2.574763129814528e-06,
+        "num_diff": 9,
+        "numel": 16,
+        "bit_exact": false
+      }
+    },
+    {
+      "name": "synthetic_prefill_T8",
+      "tokens": 8,
+      "q_heads": 16,
+      "kv_heads": 2,
+      "algebra_fp32_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 32768,
+        "bit_exact": true
+      },
+      "algebra_fp32_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "asrun_fp32_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 32768,
+        "bit_exact": true
+      },
+      "asrun_fp32_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "asrun_fp32_logits": {
+        "max_abs": 2.980232238769531e-07,
+        "mean_abs": 6.109621608629823e-08,
+        "max_rel": 0.0003058103902731091,
+        "num_diff": 634,
+        "numel": 1024,
+        "bit_exact": false
+      },
+      "kernelorder_bf16_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 32768,
+        "bit_exact": true
+      },
+      "kernelorder_bf16_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "kernelorder_bf16_q_max_ulp": 0,
+      "kernelorder_bf16_k_max_ulp": 0,
+      "kernelorder_bf16_logits": {
+        "max_abs": 2.384185791015625e-07,
+        "mean_abs": 3.1504896469414234e-09,
+        "max_rel": 6.262642727961065e-06,
+        "num_diff": 51,
+        "numel": 1024,
+        "bit_exact": false
+      }
+    },
+    {
+      "name": "synthetic_prefill_T33",
+      "tokens": 33,
+      "q_heads": 16,
+      "kv_heads": 2,
+      "algebra_fp32_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 135168,
+        "bit_exact": true
+      },
+      "algebra_fp32_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 16896,
+        "bit_exact": true
+      },
+      "asrun_fp32_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 135168,
+        "bit_exact": true
+      },
+      "asrun_fp32_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 16896,
+        "bit_exact": true
+      },
+      "asrun_fp32_logits": {
+        "max_abs": 1.9073486328125e-06,
+        "mean_abs": 1.4749275578651577e-07,
+        "max_rel": 0.0002939112891908735,
+        "num_diff": 13527,
+        "numel": 17424,
+        "bit_exact": false
+      },
+      "kernelorder_bf16_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 135168,
+        "bit_exact": true
+      },
+      "kernelorder_bf16_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 16896,
+        "bit_exact": true
+      },
+      "kernelorder_bf16_q_max_ulp": 0,
+      "kernelorder_bf16_k_max_ulp": 0,
+      "kernelorder_bf16_logits": {
+        "max_abs": 9.5367431640625e-07,
+        "mean_abs": 5.059245111738164e-08,
+        "max_rel": 0.0005386479897424579,
+        "num_diff": 6087,
+        "numel": 17424,
+        "bit_exact": false
+      }
+    },
+    {
+      "name": "oracle_decode",
+      "tokens": 1,
+      "q_heads": 16,
+      "kv_heads": 2,
+      "algebra_fp32_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "algebra_fp32_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 512,
+        "bit_exact": true
+      },
+      "asrun_fp32_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "asrun_fp32_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 512,
+        "bit_exact": true
+      },
+      "asrun_fp32_logits": {
+        "max_abs": 3.814697265625e-06,
+        "mean_abs": 8.940696716308594e-07,
+        "max_rel": 2.516151766940311e-07,
+        "num_diff": 12,
+        "numel": 16,
+        "bit_exact": false
+      },
+      "kernelorder_bf16_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "kernelorder_bf16_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 512,
+        "bit_exact": true
+      },
+      "kernelorder_bf16_q_max_ulp": 0,
+      "kernelorder_bf16_k_max_ulp": 0,
+      "kernelorder_bf16_logits": {
+        "max_abs": 1.9073486328125e-06,
+        "mean_abs": 5.364418029785156e-07,
+        "max_rel": 2.0620315410724288e-07,
+        "num_diff": 5,
+        "numel": 16,
+        "bit_exact": false
+      },
+      "positions": [
+        8
+      ],
+      "rebuilt_cos_vs_oracle_bf16": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 64,
+        "bit_exact": true
+      },
+      "rebuilt_sin_vs_oracle_bf16": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 64,
+        "bit_exact": true
+      },
+      "rebuilt_cos_vs_oracle_fp32_maxabs": 0.0016165375709533691,
+      "rebuilt_sin_vs_oracle_fp32_maxabs": 0.0010769963264465332,
+      "padding_cos_all_one": true,
+      "padding_sin_all_zero": true
+    },
+    {
+      "name": "oracle_prefill",
+      "tokens": 8,
+      "q_heads": 16,
+      "kv_heads": 2,
+      "algebra_fp32_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 32768,
+        "bit_exact": true
+      },
+      "algebra_fp32_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "asrun_fp32_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 32768,
+        "bit_exact": true
+      },
+      "asrun_fp32_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "asrun_fp32_logits": {
+        "max_abs": 1.9073486328125e-06,
+        "mean_abs": 2.0174775272607803e-07,
+        "max_rel": 4.5611541281687096e-06,
+        "num_diff": 316,
+        "numel": 1024,
+        "bit_exact": false
+      },
+      "kernelorder_bf16_q": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 32768,
+        "bit_exact": true
+      },
+      "kernelorder_bf16_k": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 4096,
+        "bit_exact": true
+      },
+      "kernelorder_bf16_q_max_ulp": 0,
+      "kernelorder_bf16_k_max_ulp": 0,
+      "kernelorder_bf16_logits": {
+        "max_abs": 1.9073486328125e-06,
+        "mean_abs": 2.4156179279088974e-08,
+        "max_rel": 1.1830538824142423e-06,
+        "num_diff": 36,
+        "numel": 1024,
+        "bit_exact": false
+      },
+      "positions": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "rebuilt_cos_vs_oracle_bf16": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 512,
+        "bit_exact": true
+      },
+      "rebuilt_sin_vs_oracle_bf16": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "max_rel": 0.0,
+        "num_diff": 0,
+        "numel": 512,
+        "bit_exact": true
+      },
+      "rebuilt_cos_vs_oracle_fp32_maxabs": 0.0019508004188537598,
+      "rebuilt_sin_vs_oracle_fp32_maxabs": 0.0018930435180664062,
+      "padding_cos_all_one": true,
+      "padding_sin_all_zero": true
+    }
+  ],
+  "verdict": {
+    "algebra_fp32_bit_exact": true,
+    "algebra_fp32_max_abs": 0.0,
+    "kernelorder_bf16_max_ulp": 0,
+    "decision": "PERMUTATION_ROUTE_GO",
+    "criterion": "\u00a714 P4: max abs diff = 0.0 in fp32 (algebra) and <= 1 ulp in bf16"
+  }
+}

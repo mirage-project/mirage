@@ -92,42 +92,77 @@ __device__ __forceinline__ void rms_norm_sm100(InputSmem smem_input,
 
         float rms_rcp = rsqrt(reduce_smem[0] / float(HEAD_DIM) + eps);
 
-        // multiply with weight
+        int const row = smem_seq_idx * NUM_HEAD + head_idx;
+
+        // multiply with weight -- for EVERY column of this head, before any
+        // rotation reads a partner column (see the note below).
 #pragma unroll
         for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
-          int row = smem_seq_idx * NUM_HEAD + head_idx;
           int col = i;
           float val = (float)smem_input.at(row, col);
           float w = (float)weight_ptr[i];
           val *= rms_rcp * w;
           smem_input.at(row, col) = (T)val;
+        }
 
-          if (rotary_emd) {
-            // we should do rope for all the window size q and k, because they
-            // came from hidden states, we didn't apply rope yet.
-            wg_barrier_rotary.arrive_and_wait();
-            T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
-            T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
+        if (rotary_emd) {
+          // we should do rope for all the window size q and k, because they
+          // came from hidden states, we didn't apply rope yet.
+          //
+          // NeoX rotation pairs column i with i +/- HEAD_DIM/2, so it is a
+          // read-modify-write across threads and needs BOTH:
+          //   (a) every column of this head normalised before any read, and
+          //   (b) every partner read completed before any write-back.
+          // When HEAD_DIM > NUM_THREADS each thread owns several columns and
+          // the loop below runs more than once. Fusing the rotation into the
+          // normalisation loop (as this code used to) breaks (a) and (b) at
+          // once: on its first trip a thread read a partner that had not been
+          // normalised yet, and on its second trip it read a partner that had
+          // already been rotated. head_dim 128 == NUM_THREADS is a single
+          // trip, which is why every shipped model was correct and Qwen3.5
+          // (head_dim 256, docs/qwen35/vllm-graph.md §2.2.1) is the first
+          // shape to expose it.
+          //
+          // Staging the rotated values in registers between the two barriers
+          // fixes it for any HEAD_DIM that is a multiple of NUM_THREADS. For
+          // HEAD_DIM <= NUM_THREADS this is the SAME operations in the same
+          // order with the same barrier count, so existing models stay
+          // bit-identical.
+          constexpr int COLS_PER_THREAD =
+              (HEAD_DIM + NUM_THREADS - 1) / NUM_THREADS;
+          T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
+          T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
+          float v_rot[COLS_PER_THREAD];
+
+          wg_barrier_rotary.arrive_and_wait();
+          int slot = 0;
+#pragma unroll
+          for (uint32_t i = threadIdx.x; i < HEAD_DIM;
+               i += NUM_THREADS, ++slot) {
+            int col = i;
             float cos = (float)cur_cos_ptr[i];
             float sin = (float)cur_sin_ptr[i];
-
-            float v_rot;
             if (i < HEAD_DIM / 2) {
               float v1 = (float)smem_input.at(row, col);
               float v2 = (float)smem_input.at(row, col + HEAD_DIM / 2);
-              v_rot = v1 * cos - v2 * sin;
+              v_rot[slot] = v1 * cos - v2 * sin;
             } else {
               float v1 = (float)smem_input.at(row, col);
               float v2 = (float)smem_input.at(row, col - HEAD_DIM / 2);
-              v_rot = v1 * cos + v2 * sin;
+              v_rot[slot] = v1 * cos + v2 * sin;
             }
-            wg_barrier_rotary.arrive_and_wait();
-            // output shape (window_size, head_num, head_dim)
-            smem_input.at(row, col) = (T)v_rot;
           }
-        } // i
-      }   // head_idx
-    }     // win_idx
+          wg_barrier_rotary.arrive_and_wait();
+          slot = 0;
+#pragma unroll
+          for (uint32_t i = threadIdx.x; i < HEAD_DIM;
+               i += NUM_THREADS, ++slot) {
+            // output shape (window_size, head_num, head_dim)
+            smem_input.at(row, i) = (T)v_rot[slot];
+          }
+        }
+      } // head_idx
+    }   // win_idx
   }
 }
 } // namespace kernel

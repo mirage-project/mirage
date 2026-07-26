@@ -917,7 +917,22 @@ class PersistentKernel:
         enable_qk_norm: bool = True,
         q_len_override: int = 0,
         tail_offset: int = 0,
+        attn_output_gate: bool = False,
+        max_tokens_per_pass: int = 0,
     ):
+        # attn_output_gate=True selects the fused QKVG input layout: each Q head
+        # occupies 2*head_dim in the packed row as [q | gate], and the task
+        # applies out *= sigmoid(gate) in its epilogue (Qwen3.5 full attention;
+        # docs/qwen35/vllm-graph.md §2.2.2/§2.2.4, v1-architecture.md §4.2).
+        #
+        # max_tokens_per_pass>0 sizes the task's smem arena by that value
+        # instead of by the activation's leading dim (= mbt) and loops
+        # ceil(Q_LEN / max_tokens_per_pass) passes over the request's queries
+        # (v1-architecture.md §4.3), so a large mbt no longer forces a smem
+        # instantiation that does not fit.
+        #
+        # Both default to off; when both are off the generated code string is
+        # byte-identical to what this layer produced before they existed.
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
         assert output.num_dims == 2  # (num_tokens, hidden_size / world_size)
@@ -954,10 +969,31 @@ class PersistentKernel:
         # params[5]: page_size
         # params[6]: q_len_override (only included if non-zero; for Eagle3 K>1 chain)
         # params[7]: tail_offset    (only included if non-zero; for Eagle3 K>1 chain)
+        # params[8]: attn_output_gate    (only included if either 8/9 is set)
+        # params[9]: max_tokens_per_pass (only included if either 8/9 is set)
+        gate_flag = 1 if attn_output_gate else 0
         params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
                   self.max_seq_length, self.page_size]
-        if q_len_override != 0 or tail_offset != 0:
+        if gate_flag != 0 or max_tokens_per_pass != 0:
+            # params are positional: 8/9 require 6/7 to be present, so emit the
+            # (possibly zero) Eagle3 pair first.
+            params.extend([q_len_override, tail_offset,
+                           gate_flag, max_tokens_per_pass])
+        elif q_len_override != 0 or tail_offset != 0:
             params.extend([q_len_override, tail_offset])
+
+        if gate_flag:
+            # QKVG row: per kv group, num_q_heads/num_kv_heads heads of
+            # [q|gate] plus one k and one v head.
+            expected_in = (2 * (num_q_heads // num_kv_heads) + 2) * head_dim * num_kv_heads
+            assert input.dim(1) == expected_in, (
+                f"attn_output_gate expects a fused QKVG row of {expected_in} "
+                f"elements, got {input.dim(1)}")
+        if max_tokens_per_pass != 0:
+            assert self.target_cc == 100, (
+                "max_tokens_per_pass is implemented for the sm100 task only")
+            assert max_tokens_per_pass <= input.dim(0), (
+                "max_tokens_per_pass must not exceed the activation's leading dim")
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests

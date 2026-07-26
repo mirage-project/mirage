@@ -1,0 +1,105 @@
+{
+  "probe": "P3",
+  "spec": "docs/qwen35/v1-architecture.md \u00a714 P3 (validates \u00a74.3 MAX_TOKENS choice)",
+  "label": "post_pick",
+  "tree": "/home/muhengl/mpk-qwen35/mirage",
+  "tree_head": "892f466edd9e49d390cd0e9d8114bfd8b74b1bd0",
+  "attention_sm100_cuh_sha256": "c93d9d511d160d86012784ca910edb39fba10c5f82d0165c1757d56aea489029",
+  "attention_sm100_cuh_worktree_status": "M include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh",
+  "nvcc_version": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Fri_Feb_21_20:23:50_PST_2025\nCuda compilation tools, release 12.8, V12.8.93\nBuild cuda_12.8.r12.8/compiler.35583870_0",
+  "flags": [
+    "-std=c++17",
+    "-O3",
+    "--expt-relaxed-constexpr",
+    "-arch=sm_100a",
+    "-DMPK_TARGET_CC=100",
+    "-DMIRAGE_GRACE_BLACKWELL",
+    "-DMIRAGE_BACKEND_USE_CUDA",
+    "-DMODE_OFFLINE"
+  ],
+  "shape": {
+    "num_q_heads": 16,
+    "num_kv_heads": 2,
+    "num_qo_per_kv": 8,
+    "head_dim": 256,
+    "kv_cache_stride": 512,
+    "o_stride": 4096,
+    "qkv_stride_qkvg": 9216,
+    "page_size": 64,
+    "max_seq_len": 2048
+  },
+  "sweep": {
+    "1": {
+      "verdict": "COMPILES",
+      "returncode": 0,
+      "seconds": 5.9,
+      "nvcc_cmd": "/usr/local/cuda-12.8/bin/nvcc -std=c++17 -O3 --expt-relaxed-constexpr -arch=sm_100a -DMPK_TARGET_CC=100 -DMIRAGE_GRACE_BLACKWELL -DMIRAGE_BACKEND_USE_CUDA -DMODE_OFFLINE -I/home/muhengl/mpk-qwen35/mirage/include -I/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel -I/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel/tasks -I/home/muhengl/mpk-qwen35/mirage/deps/cutlass/include -I/home/muhengl/mpk-qwen35/mirage/deps/cutlass/tools/util/include -DP3_MAX_TOKENS=1 -c /home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu -o /dev/null",
+      "stderr_head": "/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(115): warning #177-D: variable \"p3::TOTAL_POST_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_POST_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(118): warning #177-D: variable \"p3::TOTAL_PRE_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_PRE_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(115): warning #177-D: variable \"p3::TOTAL_POST_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_POST_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(118): warning #177-D: variable \"p3::TOTAL_PRE_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_PRE_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\n",
+      "arena_model": {
+        "total_post_pick_model": 174128,
+        "total_pre_pick_model": 174128,
+        "budget_bytes": 205824,
+        "mma_iters_m": 1
+      }
+    },
+    "2": {
+      "verdict": "COMPILES",
+      "returncode": 0,
+      "seconds": 6.7,
+      "nvcc_cmd": "/usr/local/cuda-12.8/bin/nvcc -std=c++17 -O3 --expt-relaxed-constexpr -arch=sm_100a -DMPK_TARGET_CC=100 -DMIRAGE_GRACE_BLACKWELL -DMIRAGE_BACKEND_USE_CUDA -DMODE_OFFLINE -I/home/muhengl/mpk-qwen35/mirage/include -I/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel -I/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel/tasks -I/home/muhengl/mpk-qwen35/mirage/deps/cutlass/include -I/home/muhengl/mpk-qwen35/mirage/deps/cutlass/tools/util/include -DP3_MAX_TOKENS=2 -c /home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu -o /dev/null",
+      "stderr_head": "/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(115): warning #177-D: variable \"p3::TOTAL_POST_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_POST_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(118): warning #177-D: variable \"p3::TOTAL_PRE_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_PRE_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(115): warning #177-D: variable \"p3::TOTAL_POST_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_POST_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(118): warning #177-D: variable \"p3::TOTAL_PRE_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_PRE_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\n",
+      "arena_model": {
+        "total_post_pick_model": 182320,
+        "total_pre_pick_model": 182320,
+        "budget_bytes": 205824,
+        "mma_iters_m": 1
+      }
+    },
+    "4": {
+      "verdict": "COMPILES",
+      "returncode": 0,
+      "seconds": 7.3,
+      "nvcc_cmd": "/usr/local/cuda-12.8/bin/nvcc -std=c++17 -O3 --expt-relaxed-constexpr -arch=sm_100a -DMPK_TARGET_CC=100 -DMIRAGE_GRACE_BLACKWELL -DMIRAGE_BACKEND_USE_CUDA -DMODE_OFFLINE -I/home/muhengl/mpk-qwen35/mirage/include -I/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel -I/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel/tasks -I/home/muhengl/mpk-qwen35/mirage/deps/cutlass/include -I/home/muhengl/mpk-qwen35/mirage/deps/cutlass/tools/util/include -DP3_MAX_TOKENS=4 -c /home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu -o /dev/null",
+      "stderr_head": "/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(115): warning #177-D: variable \"p3::TOTAL_POST_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_POST_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(118): warning #177-D: variable \"p3::TOTAL_PRE_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_PRE_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(115): warning #177-D: variable \"p3::TOTAL_POST_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_POST_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(118): warning #177-D: variable \"p3::TOTAL_PRE_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_PRE_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\n",
+      "arena_model": {
+        "total_post_pick_model": 200752,
+        "total_pre_pick_model": 233520,
+        "budget_bytes": 205824,
+        "mma_iters_m": 2
+      }
+    },
+    "8": {
+      "verdict": "STATIC_ASSERT",
+      "returncode": 1,
+      "seconds": 1.9,
+      "nvcc_cmd": "/usr/local/cuda-12.8/bin/nvcc -std=c++17 -O3 --expt-relaxed-constexpr -arch=sm_100a -DMPK_TARGET_CC=100 -DMIRAGE_GRACE_BLACKWELL -DMIRAGE_BACKEND_USE_CUDA -DMODE_OFFLINE -I/home/muhengl/mpk-qwen35/mirage/include -I/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel -I/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel/tasks -I/home/muhengl/mpk-qwen35/mirage/deps/cutlass/include -I/home/muhengl/mpk-qwen35/mirage/deps/cutlass/tools/util/include -DP3_MAX_TOKENS=8 -c /home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu -o /dev/null",
+      "stderr_head": "/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh(235): error: static assertion failed\n      static_assert(S_TOTAL_OFFSET <=\n      ^\n          detected during instantiation of \"void kernel::multitoken_paged_attention_sm100_task_impl<T,NUM_QO_HEADS,NUM_KV_HEADS,KV_CACHE_STRIDE,QKV_STRIDE,O_STRIDE,HEAD_DIM,MAX_SEQ_LEN,PAGE_SIZE,Q_LEN_OVERRIDE,TAIL_OFFSET,MAX_TOKENS,ATTN_OUTPUT_GATE,Q_PASS_SIZE>(const void *, void *, void *, void *, const int *, const int *, const int *, const int *, int16_t, __nv_bool, __nv_bool, const void *, const void *, const void *, const void *, float, float) [with T=bfloat16, NUM_QO_HEADS=8, NUM_KV_HEADS=1, KV_CACHE_STRIDE=512, QKV_STRIDE=9216, O_STRIDE=4096, HEAD_DIM=256, MAX_SEQ_LEN=2048, PAGE_SIZE=64, Q_LEN_OVERRIDE=0, TAIL_OFFSET=0, MAX_TOKENS=8, ATTN_OUTPUT_GATE=0, Q_PASS_SIZE=0]\" at line 155 of /home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(115): warning #177-D: variable \"p3::TOTAL_POST_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_POST_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(118): warning #177-D: variable \"p3::TOTAL_PRE_PICK\" was declared but never referenced\n  constexpr size_t",
+      "arena_model": {
+        "total_post_pick_model": 237616,
+        "total_pre_pick_model": 335920,
+        "budget_bytes": 205824,
+        "mma_iters_m": 4
+      }
+    },
+    "16": {
+      "verdict": "STATIC_ASSERT",
+      "returncode": 1,
+      "seconds": 1.9,
+      "nvcc_cmd": "/usr/local/cuda-12.8/bin/nvcc -std=c++17 -O3 --expt-relaxed-constexpr -arch=sm_100a -DMPK_TARGET_CC=100 -DMIRAGE_GRACE_BLACKWELL -DMIRAGE_BACKEND_USE_CUDA -DMODE_OFFLINE -I/home/muhengl/mpk-qwen35/mirage/include -I/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel -I/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel/tasks -I/home/muhengl/mpk-qwen35/mirage/deps/cutlass/include -I/home/muhengl/mpk-qwen35/mirage/deps/cutlass/tools/util/include -DP3_MAX_TOKENS=16 -c /home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu -o /dev/null",
+      "stderr_head": "/home/muhengl/mpk-qwen35/mirage/include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh(235): error: static assertion failed\n      static_assert(S_TOTAL_OFFSET <=\n      ^\n          detected during instantiation of \"void kernel::multitoken_paged_attention_sm100_task_impl<T,NUM_QO_HEADS,NUM_KV_HEADS,KV_CACHE_STRIDE,QKV_STRIDE,O_STRIDE,HEAD_DIM,MAX_SEQ_LEN,PAGE_SIZE,Q_LEN_OVERRIDE,TAIL_OFFSET,MAX_TOKENS,ATTN_OUTPUT_GATE,Q_PASS_SIZE>(const void *, void *, void *, void *, const int *, const int *, const int *, const int *, int16_t, __nv_bool, __nv_bool, const void *, const void *, const void *, const void *, float, float) [with T=bfloat16, NUM_QO_HEADS=8, NUM_KV_HEADS=1, KV_CACHE_STRIDE=512, QKV_STRIDE=9216, O_STRIDE=4096, HEAD_DIM=256, MAX_SEQ_LEN=2048, PAGE_SIZE=64, Q_LEN_OVERRIDE=0, TAIL_OFFSET=0, MAX_TOKENS=16, ATTN_OUTPUT_GATE=0, Q_PASS_SIZE=0]\" at line 155 of /home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(115): warning #177-D: variable \"p3::TOTAL_POST_PICK\" was declared but never referenced\n  constexpr size_t TOTAL_POST_PICK = ZERO_BUFFER_SIZE + S_Q_SIZE + 4 * S_K_SIZE +\n                   ^\n\nRemark: The warnings can be suppressed with \"-diag-suppress <warning-number>\"\n\n/home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/probes/attn/p3_attn_smem.cu(118): warning #177-D: variable \"p3::TOTAL_PRE_PICK\" was declared but never referenced\n  constexpr size_",
+      "arena_model": {
+        "total_post_pick_model": 311344,
+        "total_pre_pick_model": 540720,
+        "budget_bytes": 205824,
+        "mma_iters_m": 8
+      }
+    }
+  },
+  "model_vs_kernel_agreement": {
+    "agree": true,
+    "budget_bytes": 205824,
+    "model_key": "total_post_pick_model",
+    "mismatches": []
+  },
+  "max_admissible_max_tokens": 4
+}

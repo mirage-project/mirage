@@ -1,0 +1,31 @@
+{
+  "proof": "Qwen3-8B codegen byte-identity (INTERMEDIATE, M2-I6 final state)",
+  "method": "demo/qwen3/demo.py --use-mirage --output-dir <dir> with nvcc absent from PATH: PersistentKernel.compile() writes and copies test_rank0.cu + task_graph_rank0.json to --output-dir BEFORE it looks up nvcc, so the codegen is captured without building the megakernel. Identical demo, identical args; the ONLY difference is the source tree. Each side was rebuilt with `uv pip install -e . --no-build-isolation` before its run, because generate_task_graph() lives in the compiled core, not in Python.",
+  "baseline": "pristine 892f466 (M2-I6 changes git-stashed)",
+  "candidate": "892f466 + M2-I6 working tree (final state)",
+  "artifacts": {
+    "baseline_pristine": {
+      "test_rank0.cu": "357c71510a8b3a00d3d12e7dd92201d3a801b80ed0fc8c8d7538d1ef886753cb",
+      "task_graph_rank0.json": "d7c74138e12c6ebca8485be3a0794b2719bf0774d9d140191d9ab3ab7f7d6fd0"
+    },
+    "m2i6_final": {
+      "test_rank0.cu": "357c71510a8b3a00d3d12e7dd92201d3a801b80ed0fc8c8d7538d1ef886753cb",
+      "task_graph_rank0.json": "d7c74138e12c6ebca8485be3a0794b2719bf0774d9d140191d9ab3ab7f7d6fd0"
+    }
+  },
+  "byte_identical": {
+    "test_rank0.cu": true,
+    "task_graph_rank0.json": true
+  },
+  "positive_control": {
+    "claim": "the rebuild really picked up the modified task_register.cc, so the identity is not a stale-binary artifact",
+    "evidence": "strings on the rebuilt core.so finds BOTH emission format strings (the legacy 11-template-argument one and the new 13-argument one); a pristine build contains only one. core.so mtime is later than task_register.cc mtime.",
+    "emission_format_strings_in_core_so": 2,
+    "expected": 2
+  },
+  "also_verified_by_test_mode": {
+    "default_emission": "kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 5120, 4096, 256, 64, 64, 0, 0, 4>",
+    "gated_emission": "kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 9216, 4096, 256, 64, 64, 0, 0, 4, 1, 4>",
+    "note": "the params-gated branch appends exactly ATTN_OUTPUT_GATE and Q_PASS_SIZE"
+  }
+}

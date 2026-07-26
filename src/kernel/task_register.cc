@@ -2031,9 +2031,18 @@ int TaskRegister::register_paged_attention_sm100_task(
   // params[3]: rotary_emd
   // params[4]: max_seq_len
   // params[5]: page_size
-  // params[6]: q_len_override (optional, default 0)
-  // params[7]: tail_offset    (optional, default 0)
-  assert(params.size() == 6 || params.size() == 8);
+  // params[6]: q_len_override      (optional, default 0)
+  // params[7]: tail_offset         (optional, default 0)
+  // params[8]: attn_output_gate    (optional, default 0) -- Qwen3.5 QKVG
+  // params[9]: max_tokens_per_pass (optional, default 0) -- Qwen3.5 Q-loop
+  //
+  // params 8/9 are the Qwen3.5 full-attention variants (v1-architecture.md
+  // §4.2/§4.3). When BOTH are absent or zero this function emits exactly the
+  // template-argument list it emitted before they existed, so the generated
+  // code string -- and therefore register_task_variant()'s dedup key and every
+  // existing model's codegen, including the Qwen3-8B CI output -- is
+  // byte-identical. Do not "simplify" the two emission branches into one.
+  assert(params.size() == 6 || params.size() == 8 || params.size() == 10);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -2060,29 +2069,65 @@ int TaskRegister::register_paged_attention_sm100_task(
   int page_size = params[5];
   int q_len_override = (params.size() >= 7) ? params[6] : 0;
   int tail_offset = (params.size() >= 8) ? params[7] : 0;
+  int attn_output_gate = (params.size() >= 9) ? params[8] : 0;
+  int max_tokens_per_pass = (params.size() >= 10) ? params[9] : 0;
   // Assert that k_cache has the same head_dim
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
   assert(input_ops[2]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[2]->output_tensors[0].dim[3]);
 
+  if (max_tokens_per_pass > 0) {
+    // The smem arena is sized by MAX_TOKENS; with the Q-loop enabled it is
+    // sized by the PASS, decoupling it from the activation's leading dim
+    // (= mbt). Each task then loops ceil(Q_LEN / max_tokens_per_pass) passes.
+    assert(max_tokens_per_pass <= max_tokens);
+    max_tokens = max_tokens_per_pass;
+  }
+  if (attn_output_gate) {
+    // The QKVG row carries [q|gate] per Q head plus one k and one v head per
+    // kv group, so the per-group width is (2*num_qo_per_kv + 2) * head_dim.
+    assert(qkv_stride ==
+           (2 * (num_q_heads / num_kv_heads) + 2) * head_dim * num_kv_heads);
+  }
+
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   // Pass Q_LEN_OVERRIDE, TAIL_OFFSET, and MAX_TOKENS explicitly.
-  code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
-         "$, $, "
-         "$, $, $, $, $, $, $>(",
-         num_q_heads / num_kv_heads,
-         1,
-         kv_stride,
-         qkv_stride,
-         output_size,
-         head_dim,
-         max_seq_len,
-         page_size,
-         q_len_override,
-         tail_offset,
-         max_tokens);
+  if (attn_output_gate == 0 && max_tokens_per_pass == 0) {
+    code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
+           "$, $, "
+           "$, $, $, $, $, $, $>(",
+           num_q_heads / num_kv_heads,
+           1,
+           kv_stride,
+           qkv_stride,
+           output_size,
+           head_dim,
+           max_seq_len,
+           page_size,
+           q_len_override,
+           tail_offset,
+           max_tokens);
+  } else {
+    // Qwen3.5 variant: additionally pass ATTN_OUTPUT_GATE and Q_PASS_SIZE.
+    code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
+           "$, $, "
+           "$, $, $, $, $, $, $, $, $>(",
+           num_q_heads / num_kv_heads,
+           1,
+           kv_stride,
+           qkv_stride,
+           output_size,
+           head_dim,
+           max_seq_len,
+           page_size,
+           q_len_override,
+           tail_offset,
+           max_tokens,
+           attn_output_gate,
+           max_tokens_per_pass);
+  }
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");

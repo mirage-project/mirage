@@ -44,8 +44,24 @@ __device__ __forceinline__ void rotary_embedding_hopper(InputSmem smem_input,
       T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
       T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
 
+      // NeoX rotation pairs column i with i +/- HEAD_DIM/2, so it is a
+      // read-modify-write across threads: every partner must be READ before
+      // any write-back. When HEAD_DIM > NUM_THREADS a thread owns several
+      // columns and this loop runs more than once, so writing back inside the
+      // loop made the second trip read a partner the first trip had already
+      // rotated. head_dim 128 == NUM_THREADS is a single trip, which is why
+      // shipped models were correct and Qwen3.5's head_dim 256 is the first
+      // shape to expose it. Staging in registers between the two barriers
+      // fixes it for any HEAD_DIM that is a multiple of NUM_THREADS, and is
+      // the SAME sequence of operations when HEAD_DIM <= NUM_THREADS.
+      constexpr int COLS_PER_THREAD =
+          (HEAD_DIM + NUM_THREADS - 1) / NUM_THREADS;
+      float v_rot[COLS_PER_THREAD];
+      int slot = 0;
+
+      wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
 #pragma unroll
-      for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS) {
+      for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS, ++slot) {
         int offset = (i / HEAD_DIM) * HEAD_DIM + i;
 
         int row = smem_seq_idx * NUM_HEAD + head_idx;
@@ -54,21 +70,22 @@ __device__ __forceinline__ void rotary_embedding_hopper(InputSmem smem_input,
         float cos = static_cast<float>(cur_cos_ptr[offset]);
         float sin = static_cast<float>(cur_sin_ptr[offset]);
 
-        float v_rot;
-
-        wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
-
         if (i < HEAD_DIM / 2) {
           float v1 = static_cast<float>(smem_input.at(row, col));
           float v2 = static_cast<float>(smem_input.at(row, col + HEAD_DIM / 2));
-          v_rot = v1 * cos - v2 * sin;
+          v_rot[slot] = v1 * cos - v2 * sin;
         } else {
           float v1 = static_cast<float>(smem_input.at(row, col));
           float v2 = static_cast<float>(smem_input.at(row, col - HEAD_DIM / 2));
-          v_rot = v1 * cos + v2 * sin;
+          v_rot[slot] = v1 * cos + v2 * sin;
         }
-        wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
-        smem_input.at(row, col) = static_cast<T>(v_rot);
+      }
+      wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
+      slot = 0;
+#pragma unroll
+      for (uint32_t i = threadIdx.x; i < HEAD_DIM; i += NUM_THREADS, ++slot) {
+        int row = smem_seq_idx * NUM_HEAD + head_idx;
+        smem_input.at(row, i) = static_cast<T>(v_rot[slot]);
       }
     }
   }
