@@ -35,6 +35,11 @@ def evaluate_prompt_at_bs(
 ) -> PromptRunResult:
     """Compare one prompt's engine sequence against its reference at one batch size.
 
+    Enforces exact FULL-SEQUENCE equality, including length: a shorter engine sequence fails
+    via `ENGINE_TOO_SHORT` at every missing position; a LONGER one — first N ids matching but
+    with extra trailing tokens — fails via `ENGINE_TOO_LONG` at the first extra position, it
+    does not pass just because every reference-covered position matched.
+
     `engine_seq=None` (the engine produced nothing for this prompt at this batch size) is
     treated as an empty sequence rather than special-cased: every position then comes back
     `ENGINE_TOO_SHORT` through the same code path a genuinely-truncated sequence would hit,
@@ -82,6 +87,34 @@ def evaluate_prompt_at_bs(
                 engine_logit_at_ref_top2=engine_logit_top2,
                 match=match,
                 verdict=verdict.value,
+                is_first_divergence=is_first,
+            )
+        )
+
+    # Exact length equality is part of the gate, not just per-position equality: trailing
+    # engine tokens past the reference's end are a hard failure of their own
+    # (ENGINE_TOO_LONG), never a silent pass just because everything up to num_generated
+    # matched. Typically means the run violated the fixed new-tokens-per-prompt protocol
+    # rather than a numeric mismatch — see README.
+    for i in range(pref.num_generated, len(engine_seq.token_ids)):
+        is_first = first_divergence is None
+        if is_first:
+            first_divergence = i
+        records.append(
+            PositionRecord(
+                prompt_id=pref.prompt_id,
+                batch_size=batch_size,
+                position=i,
+                ref_top1_id=None,
+                ref_top1_logit=None,
+                ref_top2_id=None,
+                ref_top2_logit=None,
+                margin=None,
+                engine_argmax_id=engine_seq.token_ids[i],
+                engine_logit_at_ref_top1=None,
+                engine_logit_at_ref_top2=None,
+                match=False,
+                verdict=TieVerdict.ENGINE_TOO_LONG.value,
                 is_first_divergence=is_first,
             )
         )

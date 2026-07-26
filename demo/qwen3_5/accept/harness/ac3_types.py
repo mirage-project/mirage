@@ -21,6 +21,11 @@ class TieVerdict(str, Enum):
 
     MATCH = "match"
     ENGINE_TOO_SHORT = "engine_sequence_too_short"
+    # Symmetric with ENGINE_TOO_SHORT: the engine produced a token PAST the reference's
+    # length. AC-3 requires exact full-sequence equality, including length, so this is a hard
+    # failure, not a pass-with-extra-data. Assigned by the orchestrator, like ENGINE_TOO_SHORT
+    # — never by classify_position, which only ever sees positions the reference has.
+    ENGINE_TOO_LONG = "engine_sequence_too_long"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
     IMPLEMENTATION_BUG = "implementation_bug"
     CANDIDATE_TIE_FLIP = "candidate_tie_flip"
@@ -106,7 +111,9 @@ class PositionRecord:
     prompt_id: str
     batch_size: int
     position: int
-    ref_top1_id: int
+    # None only for an ENGINE_TOO_LONG position: the engine produced a token past the end of
+    # the reference, so there is no reference id to report.
+    ref_top1_id: Optional[int]
     ref_top1_logit: Optional[float]
     ref_top2_id: Optional[int]
     ref_top2_logit: Optional[float]

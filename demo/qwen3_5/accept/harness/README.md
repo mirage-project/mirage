@@ -30,6 +30,20 @@ assuming it's a bug), `2` usage/integrity error (bad args, malformed reference, 
 count), `3` not applicable as the real gate (no engine data given, or an intentional
 `--allow-partial`/`--vllm-smoke` smoke run).
 
+## The gate checks full-sequence equality, including length
+
+AC-3 is exact-sequence equality, not "every reference position happened to match": a 65-token
+engine sequence whose first 64 ids match a 64-token reference must still fail — the 65th token
+means the engine did not stop where the reference stopped. `evaluate_prompt_at_bs` (in
+`ac3_runner.py`) enforces this: any engine token past `pref.num_generated` gets its own
+`ENGINE_TOO_LONG` position record (`ref_top1_id=None`, `match=False`), symmetric with
+`ENGINE_TOO_SHORT` for a truncated sequence, and hard-fails the gate at the first such
+position. **A too-long sequence almost always means the run configuration violated the
+exactly-N-new-tokens protocol (e.g. `max_new_tokens` set wrong, or EOS handling disabled) —
+it is a run-config failure, not a token-level mismatch, and is never eligible for
+`CANDIDATE_TIE_FLIP`** (the position has no reference id to tie-flip against in the first
+place; `classify_position` is never even called for it — see `tests/test_stub_e2e.py::EngineTooLongTest`).
+
 ## Plugging in an engine
 
 Implement `engine_adapter.EngineAdapter.run(requests, batch_size) -> {prompt_id:

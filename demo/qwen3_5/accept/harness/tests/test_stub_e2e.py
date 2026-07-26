@@ -11,8 +11,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ac3_runner import run_ac3  # noqa: E402
-from ac3_types import EngineSequence, PositionRecord, TieVerdict, WaiverRequest  # noqa: E402
+from ac3_runner import evaluate_prompt_at_bs, run_ac3  # noqa: E402
+from ac3_types import (  # noqa: E402
+    EngineSequence,
+    PositionRecord,
+    PromptReference,
+    ReferenceStep,
+    TieVerdict,
+    WaiverRequest,
+)
 from engine_adapter import JSONDumpAdapter, StaticMappingAdapter, load_vllm_smoke  # noqa: E402
 from reference_loader import load_reference  # noqa: E402
 
@@ -125,6 +132,107 @@ class FullSweepPerfectEngineTest(unittest.TestCase):
         self.assertTrue(by_bs[1].passed)
         self.assertFalse(by_bs[2].passed)
         self.assertEqual(by_bs[2].first_divergent_position, 10)
+
+
+def _tiny_reference(prompt_id="syn-length", num_positions=2):
+    """A minimal, hand-built 2-position PromptReference for exact-length-equality tests —
+    plain Python objects rather than a JSON fixture since the scenario is a couple of ints."""
+    ids = [(10 * (p + 1), 5.0) for p in range(num_positions)]  # (top1_id, top1_logit)
+    return PromptReference(
+        prompt_id=prompt_id,
+        input_ids=[1, 2, 3],
+        output_ids=[i for i, _ in ids],
+        num_generated=num_positions,
+        hit_eos=False,
+        eos_step=None,
+        steps=[
+            ReferenceStep(position=p, top1_id=tid, top1_logit=logit)
+            for p, (tid, logit) in enumerate(ids)
+        ],
+    )
+
+
+class EngineTooLongTest(unittest.TestCase):
+    """Codex-verify (independent review, cycle 1) FAILed the harness on this exact hole:
+    `evaluate_prompt_at_bs` only walked the reference's positions, so a longer engine sequence
+    whose leading ids all matched passed silently — violating AC-3's exact full-SEQUENCE
+    equality (length included). Fixed in `ac3_runner.evaluate_prompt_at_bs`: any engine token
+    past `pref.num_generated` now gets its own `ENGINE_TOO_LONG` position record (symmetric
+    with `ENGINE_TOO_SHORT`) and hard-fails the gate."""
+
+    def test_engine_longer_by_one_hard_fails(self):
+        pref = _tiny_reference()  # reference: 2 positions, ids [10, 20]
+        engine = EngineSequence(token_ids=[10, 20, 999])  # matches, then one extra token
+        result = evaluate_prompt_at_bs(pref, engine, batch_size=1)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.first_divergent_position, 2)
+        self.assertEqual(len(result.positions), 3)
+        extra = result.positions[2]
+        self.assertEqual(extra.verdict, TieVerdict.ENGINE_TOO_LONG.value)
+        self.assertIsNone(extra.ref_top1_id)
+        self.assertEqual(extra.engine_argmax_id, 999)
+        self.assertFalse(extra.match)
+        self.assertIsNotNone(result.waiver_request)
+        self.assertEqual(result.waiver_request.classifier_verdict, TieVerdict.ENGINE_TOO_LONG.value)
+
+    def test_engine_longer_by_many_only_first_extra_is_independent_evidence(self):
+        pref = _tiny_reference()  # reference: 2 positions, ids [10, 20]
+        engine = EngineSequence(token_ids=[10, 20, 111, 222, 333])  # 3 extra tokens
+        result = evaluate_prompt_at_bs(pref, engine, batch_size=1)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.first_divergent_position, 2)
+        self.assertEqual(len(result.positions), 5)
+        self.assertEqual(result.positions[2].verdict, TieVerdict.ENGINE_TOO_LONG.value)
+        self.assertTrue(result.positions[2].is_first_divergence)
+        # Positions 3 and 4 are fallout from the position-2 divergence, not fresh independent
+        # ENGINE_TOO_LONG evidence - same "first divergence only" rule as a wrong-token bug.
+        self.assertEqual(result.positions[3].verdict, TieVerdict.POST_DIVERGENCE.value)
+        self.assertEqual(result.positions[4].verdict, TieVerdict.POST_DIVERGENCE.value)
+        # Exactly one waiver request, anchored at the first extra position.
+        self.assertEqual(result.waiver_request.first_divergent_position, 2)
+
+    def test_exact_length_match_still_passes(self):
+        pref = _tiny_reference()
+        engine = EngineSequence(token_ids=[10, 20])  # exactly num_generated tokens, all correct
+        result = evaluate_prompt_at_bs(pref, engine, batch_size=1)
+        self.assertTrue(result.passed)
+        self.assertEqual(len(result.positions), 2)
+        self.assertIsNone(result.waiver_request)
+
+    def test_too_short_behavior_is_unchanged_by_the_length_fix(self):
+        # Explicit regression guard: ENGINE_TOO_SHORT must still behave exactly as before.
+        pref = _tiny_reference()  # reference: 2 positions
+        engine = EngineSequence(token_ids=[10])  # one token short
+        result = evaluate_prompt_at_bs(pref, engine, batch_size=1)
+
+        self.assertFalse(result.passed)
+        self.assertEqual(len(result.positions), 2)  # no ENGINE_TOO_LONG records fabricated
+        self.assertEqual(result.positions[0].verdict, TieVerdict.MATCH.value)
+        self.assertEqual(result.positions[1].verdict, TieVerdict.ENGINE_TOO_SHORT.value)
+        self.assertEqual(result.first_divergent_position, 1)
+
+    def test_full_pipeline_catches_the_exact_reported_scenario(self):
+        # The coordinator's exact example: a 65-token engine sequence whose first 64 ids match
+        # the (64-token) reference. Goes through the real reference + full run_ac3 + adapter
+        # path, not just evaluate_prompt_at_bs directly.
+        references = load_reference(REAL_REFERENCE)
+        pref = references["p01-history"]
+        self.assertEqual(pref.num_generated, 64)
+        overlong = EngineSequence(token_ids=list(pref.output_ids) + [123456])  # 65 tokens
+
+        adapter = StaticMappingAdapter({1: {"p01-history": overlong}})
+        report = run_ac3(
+            adapter=adapter, references=references, batch_sizes=[1], prompt_ids=["p01-history"]
+        )
+
+        self.assertFalse(report.overall_pass)
+        self.assertEqual(report.status, "fail")
+        result = report.prompt_results[0]
+        self.assertFalse(result.passed)
+        self.assertEqual(result.first_divergent_position, 64)
+        self.assertEqual(result.waiver_request.classifier_verdict, TieVerdict.ENGINE_TOO_LONG.value)
 
 
 class SyntheticFixtureTest(unittest.TestCase):
