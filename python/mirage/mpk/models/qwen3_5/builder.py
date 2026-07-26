@@ -90,6 +90,26 @@ BLOCK = 128
 # this is a hard capacity bound, asserted rather than commented.
 MOE_ROUTER_MAX_ROWS_PER_TASK = 16
 
+# `quantize_fp8_layer`'s default `(-1,-1,-1)` hands EVERY task the whole tensor,
+# and the kernel then loops over all of its rows (it cannot use blockIdx.x as a
+# row index -- that is the physical worker id under the persistent runtime). A
+# `grid_dim=(mbt,1,1)` launch therefore quantized the whole activation mbt=16
+# times: M3-I1 measured 84.1 ms of worker time per decode step at bs1 across the
+# 240 call sites (3840 tasks x 21.9 us) and a 4540 us wall span -- 29.7% of the
+# step and the single largest task type at bs<=4, for 5.3 ms of useful work.
+#
+# Splitting grid.x over tensor dim 0 (the token axis) gives each task exactly
+# its own row. Bit-exact by construction: a 128-element group's fp8 bytes and
+# its fp32 block scale are computed from that group alone, and the kernel's row
+# loop carries no state across rows, so moving rows between CTAs cannot change a
+# byte. Every qwen3.5 quantize site is `scale_ue8m0=False` (preserved fp32 block
+# scales, M2-I12/I13), whose scale is row-major with the input's row axes -- the
+# precondition `quantize_fp8_layer` asserts. The same tuple serves the 2-D
+# [mbt, hidden] sites and the 3-D [mbt, topk, inter] MoE-activation site: dim 0
+# is the token axis in both, so a 3-D task keeps its whole [1, topk, inter]
+# slice (topk rows) and a 2-D task keeps one row.
+QUANTIZE_ROW_SPLIT = (0, -1, -1)
+
 
 def fp8_grid(output_size: int) -> int:
     """Task count for a preserved-block-scale dense GEMM.
@@ -333,7 +353,7 @@ class Qwen35Builder(GraphBuilder):
         xs = self._t((self.mbt, k // BLOCK), float32, f"{name}_xs")
         pk.quantize_fp8_layer(input=x, output_fp8=xq, output_scale=xs,
                               grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1),
-                              scale_ue8m0=False)
+                              scale_ue8m0=False, row_partition=QUANTIZE_ROW_SPLIT)
         weight = pk.attach_input(w[w_name], name=w_name)
         scale = pk.attach_input(w[w_name + "_scale"], name=w_name + "_scale")
         n = w[w_name].shape[0]
@@ -407,7 +427,7 @@ class Qwen35Builder(GraphBuilder):
         xs = self._t((self.mbt, c.hidden_size // BLOCK), float32, f"layer_{i}_gdn_xs")
         pk.quantize_fp8_layer(input=nrm, output_fp8=xq, output_scale=xs,
                               grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1),
-                              scale_ue8m0=False)
+                              scale_ue8m0=False, row_partition=QUANTIZE_ROW_SPLIT)
         qkv = self._t((self.mbt, c.conv_dim), bfloat16, f"layer_{i}_gdn_qkv")
         z = self._t((self.mbt, c.gdn_z_dim), bfloat16, f"layer_{i}_gdn_z")
         for tag, out in (("in_proj_qkv", qkv), ("in_proj_z", z)):
@@ -534,7 +554,7 @@ class Qwen35Builder(GraphBuilder):
         rs = self._t((mbt, c.hidden_size // BLOCK), float32, f"layer_{i}_moe_xs")
         pk.quantize_fp8_layer(input=x, output_fp8=rq, output_scale=rs,
                               grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
-                              scale_ue8m0=False)
+                              scale_ue8m0=False, row_partition=QUANTIZE_ROW_SPLIT)
         grid_x = min(c.num_experts, mbt * topk)
         mid = self._t((mbt, topk, 2 * inter), bfloat16, f"layer_{i}_moe_mid")
         pk.moe_fp8_blockscale_layer(
@@ -552,7 +572,7 @@ class Qwen35Builder(GraphBuilder):
         as_ = self._t((mbt, topk, inter // BLOCK), float32, f"layer_{i}_moe_acts")
         pk.quantize_fp8_layer(input=act, output_fp8=aq, output_scale=as_,
                               grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
-                              scale_ue8m0=False)
+                              scale_ue8m0=False, row_partition=QUANTIZE_ROW_SPLIT)
         down = self._t((mbt, topk, c.hidden_size), bfloat16, f"layer_{i}_moe_down")
         pk.moe_fp8_blockscale_layer(
             input_fp8=aq, input_scale=as_,

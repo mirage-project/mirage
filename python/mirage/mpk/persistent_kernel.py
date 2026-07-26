@@ -2024,17 +2024,61 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         scale_ue8m0: bool = True,
+        row_partition: tuple = (-1, -1, -1),
     ):
         """Quantize BF16 input to FP8 with block-wise scale.
 
         scale_ue8m0=True: output scale is packed UE8M0 uint32 (for FP8 linear GEMM)
         scale_ue8m0=False: output scale is float32 (for MoE group GEMM)
+
+        `row_partition` splits the ROW (token) axes across the grid.
+
+        The kernel (`per_token_group_quantize_fp8.cuh`) loops over all
+        `BATCH_SIZE` rows of the tile it is handed, because under the persistent
+        runtime `blockIdx.x` is the physical worker id and cannot be used as a
+        row index. With the default `(-1,-1,-1)` every task is handed the WHOLE
+        tensor, so a `grid_dim=(mbt,1,1)` launch runs the same full-tensor
+        quantize `mbt` times and only the graph-width benefit of the extra tasks
+        is real -- the work is `mbt`-fold redundant (M3-I1 measured 84 ms of
+        worker time per decode step for 5.3 ms of useful work).
+
+        Passing e.g. `(0,-1,-1)` makes grid.x split tensor dim 0 instead, so
+        `BATCH_SIZE` becomes `dim0/grid.x` and each task quantizes only its own
+        rows. This is BIT-EXACT: a group's fp8 bytes and its fp32 scale depend
+        only on that group's own 128 elements, and the row loop carries no state
+        across rows, so redistributing rows over CTAs cannot move a bit.
+
+        Only the row axes may be split -- the group (last) axis must stay whole,
+        because the fp32 scale row stride is `HIDDEN_SIZE/GROUP_SIZE` of the
+        TILE, not of the full tensor. UE8M0 scales are stored column-major
+        `[packed_k, aligned_batch]`, so their dim 0 is NOT the row axis and
+        partitioning is refused for that path.
         """
         params = []
+        if row_partition != (-1, -1, -1):
+            assert not scale_ue8m0, (
+                "row_partition is only valid for scale_ue8m0=False: the UE8M0 "
+                "scale is column-major [packed_k, aligned_batch], so its dim 0 "
+                "is the group axis, not the row axis")
+            nd = input.num_dims
+            assert output_fp8.num_dims == nd and all(
+                output_fp8.dim(d) == input.dim(d) for d in range(nd)), (
+                "row_partition: output_fp8 must have the input's exact shape "
+                "(the kernel indexes both with one linear index)")
+            assert output_scale.num_dims == nd, (
+                f"row_partition needs the scale ({output_scale.num_dims}-D) to "
+                f"carry the same leading row axes as the input ({nd}-D)")
+            for d in range(nd - 1):
+                assert output_scale.dim(d) == input.dim(d), (
+                    f"row_partition: scale dim {d} ({output_scale.dim(d)}) must "
+                    f"match input dim {d} ({input.dim(d)})")
+            assert max(row_partition) <= nd - 2, (
+                f"row_partition {row_partition} would split the group axis of a "
+                f"{nd}-D tensor; only axes 0..{nd - 2} are row axes")
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output_fp8, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input, row_partition, -1, True)
+        tb_graph.new_input(output_fp8, row_partition, -1, True)
+        tb_graph.new_input(output_scale, row_partition, -1, True)
         self.kn_graph.customized([input, output_fp8, output_scale], tb_graph)
         task_name = "quantize_fp8_sm100" if scale_ue8m0 else "quantize_fp8_f32scale_sm100"
         self.kn_graph.register_task(tb_graph, task_name, params)

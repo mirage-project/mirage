@@ -1,0 +1,33 @@
+--- a/python/mirage/mpk/models/qwen3_5/builder.py
++++ b/python/mirage/mpk/models/qwen3_5/builder.py
+@@ -147,7 +147,17 @@
+         self.loader: Optional[Qwen35WeightLoader] = None
+         self.eos_token_id = 248044  # config.json text_config.eos_token_id
+         # tuning knobs (task-count / parallelism), overridable before build
+-        self.gdn_conv_channel_blocks = 8
++        # M3-I2b lever 2 (widen the narrow stages). I1 measured these two as
++        # the only <=16-concurrency stages a builder-side grid change can widen
++        # without touching a kernel: gdn_conv1d ran 8 tasks/layer at
++        # concurrency 8.0 (193 us of bs1 wall) and moe_mul_sum_add 16 tasks at
++        # concurrency 16.0 (222 us). Both splits are over DISJOINT outputs with
++        # no cross-task reduction -- the depthwise FIR has no channel coupling,
++        # and the combine's sum over topk stays inside one task's column slice
++        # -- so both are bit-exact. conv_dim (8192) and hidden_size (2048) must
++        # stay divisible by their split.
++        self.gdn_conv_channel_blocks = 32
++        self.moe_combine_splits = 8
+         self.moe_n_splits = 2
+         self.qk_dense_path = "fp8"
+         # When set, every intermediate is a host-visible torch tensor
+@@ -605,8 +615,10 @@
+             grid_dim=(mbt, 1, 1), block_dim=(256, 1, 1))
+ 
+         out = self._t((mbt, c.hidden_size), bfloat16, f"layer_{i}_moe_out")
++        combine_splits = min(self.moe_combine_splits, c.hidden_size // BLOCK)
++        assert c.hidden_size % combine_splits == 0
+         pk.moe_mul_sum_add_layer(input=down, weight=topk_w, residual=r_prime,
+-                                 output=out, grid_dim=(mbt, 1, 1),
++                                 output=out, grid_dim=(mbt, combine_splits, 1),
+                                  block_dim=(128, 1, 1))
+         return out
+ 
