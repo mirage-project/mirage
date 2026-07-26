@@ -40,21 +40,32 @@ Run protocol (why it is shaped this way)
   vacated. See ``HAZARD-COMPACTION`` below -- this is the adapter exercising the
   batch size it was asked for, not a workaround for a failing gate.
 
-HAZARD-WAVE-RESET (found in M2-I9)
-----------------------------------
-Re-running ``init_kernel`` in-process between waves (the launcher's
-``init_request_func``) is sufficient at batch size 1 and 2 -- 15 waves ran clean
--- but at batch size 4 the megakernel DEADLOCKS on the second wave. It is the
-reset path, not the schedule or the prompts: replaying the exact wave that hangs
-as the FIRST wave of a fresh process completes normally. ``init_kernel`` resets
-``step`` / ``request_ids`` / ``qo_indptr`` / the page queue / ``next_request_id``
-but not every piece of task-graph queue state, and something in that remainder
-does not survive a bs>=4 launch boundary; the precise item is not yet
-identified. Mitigation used here: ``--prompt-ids`` + ``--max-seq-length`` let one
-wave run per PROCESS while all waves share one compiled kernel, so nothing
-carries across a wave at all. A wedged megakernel does NOT die on SIGTERM -- it
-holds its CUDA context and spins the GPU at 100% -- so always ``kill -9`` and
-verify with ``nvidia-smi --query-compute-apps``.
+HAZARD-WAVE-RESET (raised in M2-I9, root-caused and RETIRED in M3-I2a)
+---------------------------------------------------------------------
+M2-I9 saw the megakernel wedge on the second in-process wave at bs=4 and
+attributed it to ``init_request_func`` leaving some task-graph queue state
+un-reset. **That attribution was wrong.** M3-I2a re-ran the failing wave pair on
+M2-I9's own compiled kernel and could not reproduce it, then ran 62 in-process
+launches across bs 4/8/16 with the prompt geometry changing at every launch
+boundary -- all clean, all byte-identical.
+
+The real precondition is SM residency. MPK's workers and schedulers spin-wait on
+each other and never yield an SM, and the launch config claims the whole GPU
+(``get_configurations_from_gpu``: 128 workers at one SM each, plus
+``4 * (sm_count - workers)`` schedulers packed 4-per-SM into the remaining 20 --
+exactly the 148 SMs of a B200). One block of any other process is enough to stop
+the grid from becoming co-resident, and a partially resident grid deadlocks. The
+positive control reproduces M2-I9's signature exactly: waves 0-4 run clean, a
+co-tenant lands on the GPU, wave 5 wedges at ``step=[0,0,0,0]``.
+
+So in-process multi-wave is supported; what it needs is an EXCLUSIVE GPU. The
+launcher now probes co-residency before every launch and raises instead of
+wedging (``MPK_SKIP_RESIDENCY_CHECK=1`` opts out). ``--prompt-ids`` still works
+for bisection, but it is no longer required as a workaround.
+
+A wedged megakernel does NOT die on SIGTERM -- it holds its CUDA context and
+spins the GPU at 100% -- so always ``kill -9`` and verify with
+``nvidia-smi --query-compute-apps``.
 
 HAZARD-COMPACTION (found in M2-I9, reported, not silently avoided)
 ------------------------------------------------------------------
@@ -175,8 +186,10 @@ class MPKOfflineAdapter(EngineAdapter):
         self.reuse_kernel = reuse_kernel
         self.expose_logits = expose_logits
         # Pinning max_seq_length makes the compiled kernel identical for every
-        # wave of a batch size, which is what lets one wave-per-process (see
-        # HAZARD-WAVE-RESET) reuse a single compilation.
+        # wave of a batch size, so the decode length is a property of the
+        # protocol rather than of the wave a prompt landed in -- and one
+        # compilation serves every wave (and every process, when a run is split
+        # across processes for bisection).
         self.pinned_max_seq_length = pinned_max_seq_length
         self._mpk = None
         self._builder = None
@@ -478,11 +491,13 @@ def main(argv=None) -> int:
     ap.add_argument("--verify-chat-template", action="store_true")
     ap.add_argument("--max-seq-length", type=int, default=None,
                     help="Pin max_seq_length so every wave of every batch size "
-                         "compiles the SAME kernel (required for the "
-                         "one-wave-per-process protocol).")
+                         "compiles the SAME kernel, which keeps the decode "
+                         "length a property of the protocol and lets one "
+                         "compilation serve every wave.")
     ap.add_argument("--dump-name", default=None,
                     help="Override the dump filename (default bs<N>.json); use "
-                         "per-wave names when running a wave per process.")
+                         "per-wave names when splitting a run across "
+                         "processes.")
     args = ap.parse_args(argv)
 
     ref_path = Path(args.reference)

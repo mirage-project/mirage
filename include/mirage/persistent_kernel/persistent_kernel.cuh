@@ -1418,6 +1418,56 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
   }
 }
 
+// ---------------------------------------------------------------------------
+// Residency probe
+// ---------------------------------------------------------------------------
+// MPK's workers and schedulers are SPIN-WAITING peers: a worker blocks until a
+// scheduler enqueues its task, a scheduler blocks until a worker triggers its
+// event, and NEITHER ever yields its SM. The whole grid therefore has to be
+// co-resident, or the megakernel deadlocks -- silently, forever, holding the
+// GPU (it does not even die on SIGTERM). The launch config makes that a
+// whole-GPU claim: `get_configurations_from_gpu` picks
+// `scheduler = 4 * (sm_count - worker)`, so workers take one SM each and the
+// schedulers pack 4-per-SM into exactly the remainder. One block of any other
+// process on the device is enough to break it.
+//
+// The probe launches the SAME two grids with the SAME per-block resources and
+// asks every block to confirm it saw the whole grid arrive while it was itself
+// resident. A block that times out reports failure, so a grid that had to run
+// in two batches can never pass. On the happy path this costs one pair of
+// empty kernel launches; only a genuinely non-resident grid pays the deadline.
+struct ResidencyProbe {
+  unsigned long long *arrived;  // blocks that have started
+  unsigned long long *all_seen; // blocks that observed the full grid running
+  unsigned long long target;    // total blocks across both probe grids
+  long long cycle_budget;       // per-block spin deadline, in SM clocks
+};
+
+__device__ __forceinline__ void residency_probe_body(ResidencyProbe p) {
+  if (threadIdx.x != 0) {
+    return;
+  }
+  atom_add_release_gpu_u64(p.arrived, 1ull);
+  long long const t0 = clock64();
+  while (ld_acquire_gpu_u64(p.arrived) < p.target) {
+    if (clock64() - t0 > p.cycle_budget) {
+      return; // the rest of the grid never became co-resident with us
+    }
+    __nanosleep(1000);
+  }
+  atom_add_release_gpu_u64(p.all_seen, 1ull);
+}
+
+__global__
+    __launch_bounds__(WORKER_NUM_THREADS,
+                      1) void residency_probe_worker_kernel(ResidencyProbe p) {
+  residency_probe_body(p);
+}
+
+__global__ void residency_probe_sched_kernel(ResidencyProbe p) {
+  residency_probe_body(p);
+}
+
 __global__ __launch_bounds__(WORKER_NUM_THREADS,
                              1) void persistent_kernel(RuntimeConfig config) {
   persistent_checker(config);
@@ -1496,6 +1546,8 @@ static std::map<std::string, void *> global_model_tensors;
 // meta_tensors[20]: pinned_step
 // meta_tensors[21]: pinned_inbox_tokens
 // meta_tensors[22]: pinned_rid_at_row
+
+extern "C" int check_persistent_kernel_residency(double budget_seconds);
 
 extern "C" void init_request_resources() {
   init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
@@ -1812,10 +1864,101 @@ extern "C" void
 #endif
 
   init_request_resources();
+
+  // Run the residency probe here, at init, for two reasons: it reports an
+  // unusable GPU at startup rather than at the first launch, and it moves the
+  // probe kernels' one-time cost out of any timed region. That cost is large
+  // and it is NOT contention: the first kernel launch in the process pays for
+  // loading this (very large) module, which measured ~250 ms and made the
+  // first probe report every worker block as non-resident. So the first call
+  // is a warm-up whose verdict is discarded, and only the second one is
+  // trusted. Warm, a probe costs ~1 ms, which is what every later launch pays.
+  {
+    check_persistent_kernel_residency(0.25);
+    int const missing = check_persistent_kernel_residency(0.25);
+    if (missing > 0) {
+      fprintf(stderr,
+              "[MPK INIT] WARNING: %d of the megakernel's %d blocks could not "
+              "become co-resident on this GPU. MPK needs an EXCLUSIVE GPU; "
+              "launching in this state deadlocks instead of running.\n",
+              missing,
+              global_runtime_config.num_workers +
+                  global_runtime_config.num_local_schedulers);
+    }
+  }
 #ifdef USE_NVSHMEM
   // Add a global barrier for all init_kernel to complete
   nvshmem_barrier_all();
 #endif
+}
+
+// Verify the persistent kernel's grid can actually be co-resident on this GPU
+// RIGHT NOW (see the residency probe above for why that is a hard
+// precondition). Returns 0 when every block confirmed co-residency, otherwise
+// the number of blocks that did not -- a positive failure count. Cheap enough
+// to run per launch, and per launch is the right granularity: co-tenants
+// arrive between launches, and a wave boundary is exactly where MPK has
+// historically wedged.
+extern "C" int check_persistent_kernel_residency(double budget_seconds) {
+  static unsigned long long *counters = NULL;
+  static bool probe_attrs_set = false;
+  RuntimeConfig const &c = global_runtime_config;
+  unsigned long long const target = (unsigned long long)c.num_workers +
+                                    (unsigned long long)c.num_local_schedulers;
+  if (counters == NULL) {
+    if (cudaMalloc(&counters, 2 * sizeof(unsigned long long)) != cudaSuccess) {
+      return 0; // cannot probe; an allocator hiccup must not block the launch
+    }
+  }
+  if (!probe_attrs_set) {
+    cudaFuncSetAttribute(residency_probe_worker_kernel,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+    probe_attrs_set = true;
+  }
+  int device = 0;
+  cudaGetDevice(&device);
+  int clock_khz = 0;
+  cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, device);
+  if (clock_khz <= 0) {
+    clock_khz = 1000000; // 1 GHz fallback; this only sets the timeout scale
+  }
+  long long const cycle_budget =
+      (long long)(budget_seconds * (double)clock_khz * 1000.0);
+
+  // Zero on one of the probe's own streams and drain it: worker_stream and
+  // scheduler_stream are cudaStreamNonBlocking, so a memset on the legacy
+  // default stream would NOT be ordered before the probe launches.
+  cudaMemsetAsync(counters, 0, 2 * sizeof(unsigned long long), c.worker_stream);
+  cudaStreamSynchronize(c.worker_stream);
+
+  ResidencyProbe probe;
+  probe.arrived = counters;
+  probe.all_seen = counters + 1;
+  probe.target = target;
+  probe.cycle_budget = cycle_budget;
+  // Same grids, same per-block resources, same streams as the real launch, so
+  // the probe measures the configuration that will actually run.
+  residency_probe_worker_kernel<<<dim3(c.num_workers, 1, 1),
+                                  dim3(WORKER_NUM_THREADS, 1, 1),
+                                  MAX_DYNAMIC_SHARED_MEMORY_SIZE,
+                                  c.worker_stream>>>(probe);
+  residency_probe_sched_kernel<<<dim3(c.num_local_schedulers, 1, 1),
+                                 dim3(32, 1, 1),
+                                 0,
+                                 c.scheduler_stream>>>(probe);
+  cudaStreamSynchronize(c.worker_stream);
+  cudaStreamSynchronize(c.scheduler_stream);
+
+  unsigned long long host_counters[2] = {0, 0};
+  cudaMemcpy(host_counters,
+             counters,
+             2 * sizeof(unsigned long long),
+             cudaMemcpyDeviceToHost);
+  if (host_counters[1] >= target) {
+    return 0;
+  }
+  return (int)(target - host_counters[1]);
 }
 
 // Entry point for C/C++

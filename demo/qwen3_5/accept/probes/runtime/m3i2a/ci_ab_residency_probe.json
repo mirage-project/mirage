@@ -1,0 +1,35 @@
+{
+  "protocol": "same compiled binary, MPK_SKIP_RESIDENCY_CHECK=1 as the control arm, interleaved reps",
+  "unit": "ms/token, Qwen3-8B CI (demo/qwen3, --max-new-tokens 50, mbt=8, bs=1)",
+  "committed_M2_baseline": 3.871,
+  "probe_at_launch_only": {
+    "on": {
+      "n": 4,
+      "median": 4.727,
+      "min": 4.706,
+      "max": 4.73
+    },
+    "off": {
+      "n": 4,
+      "median": 3.879,
+      "min": 3.87,
+      "max": 3.906
+    },
+    "median_delta_pct": 21.9
+  },
+  "probe_warmed_at_init": {
+    "on": {
+      "n": 4,
+      "median": 3.925,
+      "min": 3.866,
+      "max": 3.945
+    },
+    "off": {
+      "n": 4,
+      "median": 3.872,
+      "min": 3.867,
+      "max": 3.942
+    },
+    "median_delta_pct": 1.4
+  }
+}

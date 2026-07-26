@@ -1,0 +1,54 @@
+{
+  "batch_size": 4,
+  "waves": 3,
+  "mode": "repeat",
+  "max_seq_length": 132,
+  "mbt": 16,
+  "prompt_ids": [
+    [
+      "p06-poem",
+      "p01-history",
+      "p04-chinese",
+      "p09-translate"
+    ],
+    [
+      "p06-poem",
+      "p01-history",
+      "p04-chinese",
+      "p09-translate"
+    ],
+    [
+      "p06-poem",
+      "p01-history",
+      "p04-chinese",
+      "p09-translate"
+    ]
+  ],
+  "prompt_lens": [
+    [
+      24,
+      30,
+      32,
+      32
+    ],
+    [
+      24,
+      30,
+      32,
+      32
+    ],
+    [
+      24,
+      30,
+      32,
+      32
+    ]
+  ],
+  "wave_results": "<elided>",
+  "identical_to_wave0": [
+    true,
+    true,
+    true
+  ],
+  "status": "pass"
+}

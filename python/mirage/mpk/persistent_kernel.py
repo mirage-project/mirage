@@ -21,6 +21,7 @@ from typing import Optional
 HARD_CODE = """
 #include <Python.h>
 #include <cuda_runtime.h>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -109,6 +110,39 @@ static PyObject *launch_func(PyObject *self, PyObject *args) {
     return NULL;
   }
   stream = (cudaStream_t)PyLong_AsVoidPtr(py_stream);
+
+  // MPK's workers and schedulers spin-wait on each other and never yield an
+  // SM, so the whole grid must be co-resident; if it is not, the megakernel
+  // deadlocks forever and holds the GPU through SIGTERM. Probe first and turn
+  // that into an immediate, actionable error. MPK_SKIP_RESIDENCY_CHECK=1
+  // opts out.
+  if (getenv("MPK_SKIP_RESIDENCY_CHECK") == NULL) {
+    int missing = 0;
+    Py_BEGIN_ALLOW_THREADS
+    // Retry a couple of times: a short-lived co-tenant should cost a retry,
+    // not a failed run. Sustained contention still fails.
+    for (int attempt = 0; attempt < 3; attempt++) {
+      missing = check_persistent_kernel_residency(0.25);
+      if (missing == 0) {
+        break;
+      }
+    }
+    Py_END_ALLOW_THREADS
+    if (missing > 0) {
+      PyErr_Format(PyExc_RuntimeError,
+                   "MPK residency check failed: %d of the megakernel's blocks "
+                   "could not become co-resident on this GPU. The persistent "
+                   "kernel claims every SM and its blocks spin-wait on each "
+                   "other, so launching now would deadlock the GPU instead of "
+                   "running. Give MPK an EXCLUSIVE GPU (check "
+                   "`nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory "
+                   "--format=csv` and pin CUDA_VISIBLE_DEVICES), or set "
+                   "MPK_SKIP_RESIDENCY_CHECK=1 to launch anyway.",
+                   missing);
+      return NULL;
+    }
+  }
+
   launch_persistent_kernel(stream);
 
   Py_RETURN_NONE;
