@@ -352,10 +352,20 @@ struct RuntimeConfig {
   int max_seq_length;             // Metadata for LLM serving
   int *new_token_nums;            // Metadata for LLM serving
   int *qo_indptr_buffer;          // Metadata for LLM serving (paged attention)
-  int *paged_kv_indptr_buffer;    // Metadata for LLM serving (paged attention)
-  int *paged_kv_indices_buffer;   // Metadata for LLM serving (paged attention)
-  int *paged_kv_indices_snapshot; // Scheduler snapshot for in-place compaction
-  int *paged_kv_last_page_len_buffer; // Metadata for LLM serving
+#ifndef MPK_NUM_KV_GROUPS
+#define MPK_NUM_KV_GROUPS 1
+#endif
+  int *paged_kv_indptr_buffer[MPK_NUM_KV_GROUPS];    // Metadata for LLM serving (paged attention)
+  int *paged_kv_indices_buffer[MPK_NUM_KV_GROUPS];   // Metadata for LLM serving (paged attention)
+  int *paged_kv_indices_snapshot[MPK_NUM_KV_GROUPS]; // Scheduler snapshot for in-place compaction
+  int *paged_kv_last_page_len_buffer[MPK_NUM_KV_GROUPS]; // Metadata for LLM serving
+  int kv_group_block_sizes[MPK_NUM_KV_GROUPS]; // Set at init, used by prepare_next_batch
+#ifdef MPK_KV_EVENT_LOG
+  // Allocator event debug log: [0] = record count, then 4-int records
+  // (type, group, row, page_id) with type 1=ALLOC, 2=FREE, 3=ITER. Written 
+  // single-threaded from prepare_next_batch; replayed host-side by allocator tests.
+  int *kv_event_log;
+#endif
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \
     defined(MODE_ONLINE_NOTOKEN) || defined(MODE_ONLINE_TEST) ||               \
     defined(MODE_ONLINE_PINNED)

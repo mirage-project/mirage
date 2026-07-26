@@ -297,14 +297,14 @@ if __name__ == "__main__":
         )
             
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
+        # KV 2.0: A KVCachePlan is built internally in modeling_qwen3.py.
+        kv_plan = model.model.kv_plan
+        # Create auxiliary buffers for paged (with kv_plan builder) KV and QO
         qo_indptr_buffer = torch.empty(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        paged_kv_indptr_buffer = torch.empty(
-            args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        paged_kv_indices_buffer = torch.empty(
-            args.max_num_pages, dtype=torch.int32, device="cuda")
-        paged_kv_last_page_len_buffer = torch.empty(
-            args.max_num_batched_requests, dtype=torch.int32, device="cuda")
+        kv_meta_tensors = kv_plan.build_meta_tensors(
+            max_num_pages=args.max_num_pages,
+            max_num_batched_requests=args.max_num_batched_requests)
         mpk = mi.PersistentKernel(
             mode="offline",
             world_size=world_size,
@@ -316,7 +316,7 @@ if __name__ == "__main__":
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
             max_num_pages=args.max_num_pages,
-            page_size=args.page_size,
+            kv_groups=kv_plan.group_specs(),
             eos_token_id=model.config.eos_token_id if not args.ignore_eos else -1,
             meta_tensors={
                 "step": step,
@@ -326,9 +326,7 @@ if __name__ == "__main__":
                 "num_new_tokens": num_new_tokens,
                 "prompt_lengths": prompt_lengths,
                 "qo_indptr_buffer": qo_indptr_buffer,
-                "paged_kv_indptr_buffer": paged_kv_indptr_buffer,
-                "paged_kv_indices_buffer": paged_kv_indices_buffer,
-                "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
+                **kv_meta_tensors,
             },
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
@@ -540,11 +538,14 @@ if __name__ == "__main__":
             w_k_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm"
             )
+            # kv_plan.layer_info() resolves (group_id, slot_id) for this layer.
+            # For single spec, slot_id == layer_idx.
+            group_id, slot_id = kv_plan.layer_info(i)
             k_cache = mpk.attach_input(
-                torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache"
+                torch_tensor=model.model.kv_cache[0][slot_id], name=f"layer_{i}_k_cache"
             ) 
             v_cache = mpk.attach_input(
-                torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
+                torch_tensor=model.model.kv_cache[1][slot_id], name=f"layer_{i}_v_cache"
             )
             # TODO: Later attention kernels should be merged as one
             if spec_decode_config:
@@ -574,6 +575,7 @@ if __name__ == "__main__":
                     attention_params=(num_local_q_heads, num_kv_cache_chunks),
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, num_kv_cache_chunks),
                     block_dim=(128, 1, 1),
+                    group_id=group_id,
                 )
 
                 mpk.paged_attention_split_kv_merge_layer(
@@ -583,6 +585,7 @@ if __name__ == "__main__":
                     attention_params=(num_local_q_heads, head_dim),
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
                     block_dim=(128, 1, 1),
+                    group_id=group_id,
                 )
             else:
                 mpk.paged_attention_layer(
@@ -596,6 +599,7 @@ if __name__ == "__main__":
                     output=attn_out,
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
                     block_dim=(128, 1, 1),
+                    group_id=group_id,
                 )
             
             
