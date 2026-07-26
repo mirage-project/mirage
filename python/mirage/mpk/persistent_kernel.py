@@ -1700,7 +1700,24 @@ class PersistentKernel:
         output: tuple[DTensor, DTensor, DTensor],
         grid_dim: tuple,
         block_dim: tuple,
+        round_weights_to_input_dtype: bool = False,
     ):
+        """MoE router: fp32 softmax over ALL experts -> top-k (lower expert
+        index wins ties) -> renormalize. Probe P5 verified each clause against
+        HF's empirical behaviour
+        (demo/qwen3_5/accept/probes/moe/p5_router_semantics.json).
+
+        `round_weights_to_input_dtype` reproduces HF's
+        `router_top_value.to(router_logits.dtype)` -- the Qwen3.5 router hands
+        the combine BF16 weights. DeepSeek-V3's reference keeps fp32, so this
+        defaults off.
+
+        NOTE: one task covers `WARP_SIZE * VPT / num_experts * 8` token rows
+        (8 at num_experts=256); the registration now picks the VPT that covers
+        `batch_size` and asserts rather than silently dropping rows.
+        NOTE: the kernel ZEROES `input` as it reads it, which is what lets a
+        split-k gate linear accumulate into the same buffer next step.
+        """
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, num_experts)
         assert len(output) == 3
@@ -1715,7 +1732,8 @@ class PersistentKernel:
         tb_graph.new_input(moe_masks, (-1, -1, -1), -1, True)
         self.kn_graph.customized([input, moe_topk_weight, moe_routing_indices, moe_masks], tb_graph)
 
-        self.kn_graph.register_task(tb_graph, "moe_topk_softmax_sm100")
+        params = [1] if round_weights_to_input_dtype else []
+        self.kn_graph.register_task(tb_graph, "moe_topk_softmax_sm100", params)
 
     def moe_topk_sigmoid_routing_layer(
         self,
@@ -2309,6 +2327,56 @@ class PersistentKernel:
         tb_graph.new_input(output, (0, -1, -1), -1, True)
         self.kn_graph.customized([input_a, input_b, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "elementwise_add_sm100")
+
+    def sigmoid_gate_mul_add_layer(
+        self,
+        input: DTensor,
+        gate_weight: DTensor,
+        shared: DTensor,
+        residual: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Qwen3.5 shared-expert gate + residual fold:
+
+            output = residual + sigmoid(input @ gate_weight.T) * shared
+
+        `input` is the PRE-MLP hidden state (the same tensor the router reads),
+        `gate_weight` is the `[1, hidden]` unquantized `shared_expert_gate`, and
+        `shared` is the shared expert's post-`down_proj` output. The gate scalar
+        is applied AFTER the down projection, per
+        `Qwen3_5MoeSparseMoeBlock.forward` (vllm-graph.md 2.3.3).
+
+        Folding `residual` in here is what lets the result be passed straight to
+        `moe_mul_sum_add_layer(residual=...)`, giving the block's final
+        `sum_j w_j * y_j + residual + sigmoid(...) * shared` in two tasks
+        (DeepSeek-V3's builder does the ungated version of this, mpk-gaps Gap 8).
+
+        A `linear_layer` at N=1 is degenerate, so the gate GEMV is computed
+        inline; the whole hidden row must live in one task, hence only the batch
+        dimension is split across the grid.
+        """
+        assert input.num_dims == 2  # (batch_size, hidden_size)
+        assert gate_weight.num_dims == 2  # (1, hidden_size)
+        assert gate_weight.dim(0) == 1
+        assert gate_weight.dim(1) == input.dim(1)
+        assert shared.num_dims == 2  # (batch_size, output_size)
+        assert residual.num_dims == 2  # (batch_size, output_size)
+        assert output.num_dims == 2  # (batch_size, output_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, -1, -1), -1, True)
+        tb_graph.new_input(gate_weight, (-1, -1, -1), -1, True)
+        tb_graph.new_input(shared, (0, -1, -1), -1, True)
+        tb_graph.new_input(residual, (0, -1, -1), -1, True)
+        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [input, gate_weight, shared, residual, output], tb_graph
+        )
+        assert self.target_cc == 100, (
+            "sigmoid_gate_mul_add_sm100 is registered for Blackwell only"
+        )
+        self.kn_graph.register_task(tb_graph, "sigmoid_gate_mul_add_sm100")
 
     def silu_mul_linear_with_residual_layer(
         self,

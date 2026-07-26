@@ -139,6 +139,13 @@ enum TaskType {
   // window, so tma.cuh needs a case for it even though it uses no TMA
   // descriptor.
   TASK_GDN_RECURRENT_SM100 = 237,
+  // Qwen3.5 shared-expert gate: r' = residual + sigmoid(x . w_sg^T) * shared.
+  // Folds the degenerate N=1 gate GEMV, the bf16-rounded sigmoid, the broadcast
+  // multiply and the residual add into one task, so the result can be handed to
+  // moe_mul_sum_add's single residual argument (mpk-gaps.md Gap 8,
+  // docs/qwen35/v1-architecture.md 2.4 #12). Inside the (231, 256) TMA window,
+  // so tma.cuh needs a case for it even though it uses no TMA descriptor.
+  TASK_SIGMOID_GATE_MUL_ADD_SM100 = 238,
   // Grouped (MoE) FP8 GEMMs that consume the checkpoint's float32 128x128
   // block scales directly. The shipped TASK_MOE_W13/W2_FP8_SM100 pair keeps
   // those scales in the builder but truncates them to UE8M0 inside the kernel

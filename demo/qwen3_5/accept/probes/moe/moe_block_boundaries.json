@@ -1,0 +1,340 @@
+{
+ "boundaries": [
+  {
+   "case": "decode/moe0",
+   "boundary": "router_logits",
+   "frob_rel": 0.0,
+   "bf16_floor": 0.0,
+   "limit": 0.003
+  },
+  {
+   "case": "decode/moe0",
+   "boundary": "router_probs",
+   "frob_rel": 0.0,
+   "bf16_floor": 0.0019132850100610304,
+   "limit": 0.003
+  },
+  {
+   "case": "decode/moe0",
+   "boundary": "w13 (vs fp32 of same bytes)",
+   "frob_rel": 0.00174327842338649,
+   "bf16_floor": 0.00174327842338649,
+   "limit": 0.004
+  },
+  {
+   "case": "decode/moe0",
+   "boundary": "w2 (vs fp32 of same bytes)",
+   "frob_rel": 0.0016498993586734419,
+   "bf16_floor": 0.0016498993586734419,
+   "limit": 0.004
+  },
+  {
+   "case": "decode/moe0",
+   "boundary": "routed_expert_output",
+   "frob_rel": 0.002092996276951566,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "decode/moe0",
+   "boundary": "shared gate_proj fp8bs",
+   "frob_rel": 0.0,
+   "bf16_floor": 0.0,
+   "limit": 0.01
+  },
+  {
+   "case": "decode/moe0",
+   "boundary": "shared silu_mul fp8bs",
+   "frob_rel": 0.0,
+   "bf16_floor": 0.0,
+   "limit": 0.03
+  },
+  {
+   "case": "decode/moe0",
+   "boundary": "shared down_proj fp8bs",
+   "frob_rel": 0.0,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "decode/moe0",
+   "boundary": "shared down_proj bf16 (scaffold)",
+   "frob_rel": 0.02310797099993778,
+   "bf16_floor": 0.0,
+   "limit": 1.0
+  },
+  {
+   "case": "decode/moe0",
+   "boundary": "BLOCK combined_output",
+   "frob_rel": 0.002862678075902866,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "decode/moe0",
+   "boundary": "BLOCK (fp8bs shared)",
+   "frob_rel": 0.002862678075902866,
+   "bf16_floor": 0.0,
+   "limit": 0.01
+  },
+  {
+   "case": "decode/moe0",
+   "boundary": "BLOCK (bf16 shared)",
+   "frob_rel": 0.011942939407333404,
+   "bf16_floor": 0.0,
+   "limit": 1.0
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "router_logits",
+   "frob_rel": 0.0,
+   "bf16_floor": 0.0,
+   "limit": 0.003
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "router_probs",
+   "frob_rel": 0.0,
+   "bf16_floor": 0.0016883109124438006,
+   "limit": 0.003
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "w13 (vs fp32 of same bytes)",
+   "frob_rel": 0.0016342486517150025,
+   "bf16_floor": 0.0016342486517150025,
+   "limit": 0.004
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "w2 (vs fp32 of same bytes)",
+   "frob_rel": 0.0016556069895200505,
+   "bf16_floor": 0.0016556069895200505,
+   "limit": 0.004
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "routed_expert_output",
+   "frob_rel": 0.00262951081006533,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "shared gate_proj fp8bs",
+   "frob_rel": 0.000331533213737701,
+   "bf16_floor": 0.0,
+   "limit": 0.01
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "shared silu_mul fp8bs",
+   "frob_rel": 0.0007577292363064762,
+   "bf16_floor": 0.0,
+   "limit": 0.03
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "shared down_proj fp8bs",
+   "frob_rel": 0.0009654468688279382,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "shared down_proj bf16 (scaffold)",
+   "frob_rel": 0.044547265082265405,
+   "bf16_floor": 0.0,
+   "limit": 1.0
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "BLOCK combined_output",
+   "frob_rel": 0.0034331528331607232,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "BLOCK (fp8bs shared)",
+   "frob_rel": 0.0034210434597408937,
+   "bf16_floor": 0.0,
+   "limit": 0.01
+  },
+  {
+   "case": "decode/moe3",
+   "boundary": "BLOCK (bf16 shared)",
+   "frob_rel": 0.010222989400449148,
+   "bf16_floor": 0.0,
+   "limit": 1.0
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "router_logits",
+   "frob_rel": 0.0,
+   "bf16_floor": 0.0,
+   "limit": 0.003
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "router_probs",
+   "frob_rel": 0.0,
+   "bf16_floor": 0.001639687666608534,
+   "limit": 0.003
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "w13 (vs fp32 of same bytes)",
+   "frob_rel": 0.0016242142544300963,
+   "bf16_floor": 0.0016242142544300963,
+   "limit": 0.004
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "w2 (vs fp32 of same bytes)",
+   "frob_rel": 0.001652687605636114,
+   "bf16_floor": 0.001652687605636114,
+   "limit": 0.004
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "routed_expert_output",
+   "frob_rel": 0.0038438247078915982,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "shared gate_proj fp8bs",
+   "frob_rel": 0.0014632434343996386,
+   "bf16_floor": 0.0,
+   "limit": 0.01
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "shared silu_mul fp8bs",
+   "frob_rel": 0.0023601666596407243,
+   "bf16_floor": 0.0,
+   "limit": 0.03
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "shared down_proj fp8bs",
+   "frob_rel": 0.005595360100102833,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "shared down_proj bf16 (scaffold)",
+   "frob_rel": 0.022266319991343875,
+   "bf16_floor": 0.0,
+   "limit": 1.0
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "BLOCK combined_output",
+   "frob_rel": 0.0042285325318627935,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "BLOCK (fp8bs shared)",
+   "frob_rel": 0.0044954389759874775,
+   "bf16_floor": 0.0,
+   "limit": 0.01
+  },
+  {
+   "case": "prefill/moe0",
+   "boundary": "BLOCK (bf16 shared)",
+   "frob_rel": 0.008068750082483932,
+   "bf16_floor": 0.0,
+   "limit": 1.0
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "router_logits",
+   "frob_rel": 0.0,
+   "bf16_floor": 0.0,
+   "limit": 0.003
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "router_probs",
+   "frob_rel": 0.0,
+   "bf16_floor": 0.0016019173971425558,
+   "limit": 0.003
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "w13 (vs fp32 of same bytes)",
+   "frob_rel": 0.001780758681661958,
+   "bf16_floor": 0.001780758681661958,
+   "limit": 0.004
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "w2 (vs fp32 of same bytes)",
+   "frob_rel": 0.0016434632369333923,
+   "bf16_floor": 0.0016434632369333923,
+   "limit": 0.004
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "routed_expert_output",
+   "frob_rel": 0.005562371463053975,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "shared gate_proj fp8bs",
+   "frob_rel": 0.001336136111052424,
+   "bf16_floor": 0.0,
+   "limit": 0.01
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "shared silu_mul fp8bs",
+   "frob_rel": 0.0009603326081883387,
+   "bf16_floor": 0.0,
+   "limit": 0.03
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "shared down_proj fp8bs",
+   "frob_rel": 0.00258666462383162,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "shared down_proj bf16 (scaffold)",
+   "frob_rel": 0.021358934791113483,
+   "bf16_floor": 0.0,
+   "limit": 1.0
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "BLOCK combined_output",
+   "frob_rel": 0.004152909919640144,
+   "bf16_floor": 0.0,
+   "limit": 0.02
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "BLOCK (fp8bs shared)",
+   "frob_rel": 0.0044665276734525425,
+   "bf16_floor": 0.0,
+   "limit": 0.01
+  },
+  {
+   "case": "prefill/moe3",
+   "boundary": "BLOCK (bf16 shared)",
+   "frob_rel": 0.014551897787591823,
+   "bf16_floor": 0.0,
+   "limit": 1.0
+  }
+ ]
+}

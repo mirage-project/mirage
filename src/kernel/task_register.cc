@@ -2319,6 +2319,72 @@ int TaskRegister::register_elementwise_add_sm100_task(
   return register_task_variant(TASK_ELEMENTWISE_ADD_SM100, code.to_string());
 }
 
+int TaskRegister::register_sigmoid_gate_mul_add_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Qwen3.5 shared-expert gate + residual fold (docs/qwen35 2.4 #12):
+  //   [0] x        [batch, hidden]  pre-MLP hidden state (router's input)
+  //   [1] gate_w   [1, hidden]      shared_expert_gate weight, bf16
+  //   [2] shared   [batch, output]  shared expert output (post down_proj)
+  //   [3] residual [batch, output]  layer residual
+  //   output       [batch, output]
+  // The gate GEMV reduces over the WHOLE hidden row, so the task must own a
+  // complete row: only the batch dimension may be split across the grid.
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 4;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int output_size = output_ops[0]->output_tensors[0].dim[1];
+  int output_stride = output_ops[0]->dtensor.dim[1];
+  // The epilogue is elementwise, so this task must own whole output rows too.
+  assert(output_size == output_stride);
+
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
+  int hidden_size = input_ops[0]->output_tensors[0].dim[1];
+  int x_stride = input_ops[0]->dtensor.dim[1];
+  assert(hidden_size == x_stride);
+
+  assert(input_ops[1]->output_tensors[0].num_dims == 2);
+  assert(input_ops[1]->output_tensors[0].dim[0] == 1);
+  assert(input_ops[1]->output_tensors[0].dim[1] == hidden_size);
+
+  for (int i = 2; i < 4; i++) {
+    assert(input_ops[i]->output_tensors[0].num_dims == 2);
+    assert(input_ops[i]->output_tensors[0].dim[0] == batch_size);
+    assert(input_ops[i]->output_tensors[0].dim[1] == output_size);
+    assert(input_ops[i]->dtensor.dim[1] == output_stride);
+  }
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::sigmoid_gate_mul_add_task_impl<cute::bfloat16_t, $, $, $, $, "
+         "$>(",
+         /*BATCH_SIZE=*/batch_size,
+         /*OUTPUT_SIZE=*/output_size,
+         /*HIDDEN_SIZE=*/hidden_size,
+         /*X_STRIDE=*/x_stride,
+         /*O_STRIDE=*/output_stride);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->input_ptrs[2],");
+  code.e("    task_desc->input_ptrs[3],");
+  code.e("    task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_SIGMOID_GATE_MUL_ADD_SM100,
+                               code.to_string());
+}
+
 int TaskRegister::register_softmax_gather_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 0);
@@ -2456,7 +2522,12 @@ int TaskRegister::register_prob_scatter_sm100_task(
 
 int TaskRegister::register_moe_topk_softmax_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 0);
+  // params[0] (optional): round the renormalized weights to the router's own
+  // output dtype before writing them. HF's Qwen3.5 router does
+  // (`router_top_value.to(router_logits.dtype)`); DeepSeek-V3's reference does
+  // not, so it defaults off and existing callers generate identical code.
+  assert(params.size() <= 1);
+  bool round_weights = !params.empty() && params[0] == 1;
   int batch_size = 0, num_experts = 0, num_experts_per_tok = 0, input_stride,
       output_stride;
   std::vector<tb::TBInputOp *> input_ops;
@@ -2493,13 +2564,52 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  // One task covers ROWS_PER_WARP * WARPS_PER_TB rows, and
+  //   ROWS_PER_WARP = WARP_SIZE * VPT / num_experts
+  // (topk_softmax_sm100.cuh:133-135). At 256 experts the historical VPT=8 gives
+  // 8 rows -- below the mbt=16 Qwen3.5 build -- and the kernel simply skips
+  // every row past its capacity (`if (thread_row < num_rows)`), leaving those
+  // tokens with no routing indices and stale weights. Probe P5 section A
+  // reproduces exactly that: 8/16 rows correct at VPT=8, 16/16 at VPT=16
+  // (demo/qwen3_5/accept/probes/moe/p5_router_semantics.json).
+  //
+  // The kernel's own static_asserts leave only two legal values: VPT must be a
+  // multiple of ELTS_PER_LDG (= BYTES_PER_LDG / sizeof(T) = 8 for bf16) and
+  // THREADS_PER_ROW = num_experts / VPT must be WARP_SIZE or WARP_SIZE/2. So
+  // pick the SMALLEST legal VPT that covers batch_size, which keeps the
+  // generated code byte-identical for every configuration that already worked
+  // (num_experts=256 with batch<=8, and num_experts=128 where VPT=8 is the only
+  // legal choice), and fail loudly instead of silently dropping rows above it.
+  constexpr int WARPS_PER_TB = 8;
+  constexpr int BYTES_PER_LDG = 16;
+  constexpr int ELTS_PER_LDG = BYTES_PER_LDG / 2; // sizeof(bfloat16)
+  int vpt = 0, rows_per_task = 0;
+  for (int threads_per_row : {32, 16}) {
+    int candidate = num_experts / threads_per_row;
+    if (candidate * threads_per_row != num_experts ||
+        candidate % ELTS_PER_LDG != 0) {
+      continue;
+    }
+    int rows = (32 * candidate / num_experts) * WARPS_PER_TB;
+    if (vpt == 0 || (rows_per_task < batch_size && rows > rows_per_task)) {
+      vpt = candidate;
+      rows_per_task = rows;
+    }
+    if (rows_per_task >= batch_size) {
+      break;
+    }
+  }
+  assert(vpt > 0 && "moe_topk_softmax: no legal VPT for this num_experts");
+  assert(rows_per_task >= batch_size &&
+         "moe_topk_softmax task cannot cover this many rows; split the batch "
+         "across tasks or widen the kernel");
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::topk_softmax_task_impl<cute::bfloat16_t, $, $, $, $>(",
-         /*VPT=*/8,
+         /*VPT=*/vpt,
          /*EXPERTS=*/num_experts,
-         /*WARPS_PER_TB=*/8,
-         /*BYTES_PER_LDG=*/16);
+         /*WARPS_PER_TB=*/WARPS_PER_TB,
+         /*BYTES_PER_LDG=*/BYTES_PER_LDG);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    nullptr,");
   code.e("    task_desc->output_ptrs[0],");
@@ -2509,7 +2619,8 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   code.e("    task_desc->output_ptrs[2],");
   code.e("    0,");
   code.e("    $,", num_experts);
-  code.e("    true);");
+  code.e("    true,");
+  code.e("    $);", round_weights ? "true" : "false");
   return register_task_variant(TASK_MOE_TOPK_SOFTMAX_SM100, code.to_string());
 }
 

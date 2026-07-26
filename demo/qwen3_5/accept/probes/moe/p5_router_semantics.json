@@ -1,0 +1,162 @@
+{
+ "probe": "P5",
+ "issue": "M2-I7",
+ "num_experts": 256,
+ "topk": 8,
+ "gpu": "NVIDIA B200",
+ "torch": "2.13.0+cu130",
+ "A_capacity": {
+  "shipped_vpt": 8,
+  "rows_per_task_shipped": 8,
+  "rows_per_task_vpt16": 16,
+  "build_mbt": 16,
+  "note": "ROWS_PER_WARP = WARP_SIZE * VPT / NUM_EXPERTS over 8 warps; the shipped registration hardcodes VPT=8 (task_register.cc register_moe_topk_softmax_sm100_task), and the build pins mbt=16 (docs/qwen35/v1-architecture.md 9.1).",
+  "vpt8_rows_correct": [
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   false,
+   false,
+   false,
+   false,
+   false,
+   false,
+   false,
+   false
+  ],
+  "vpt8_num_rows_correct": 8,
+  "vpt8_active_expert_count": 60,
+  "vpt16_rows_correct": [
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true
+  ],
+  "vpt16_num_rows_correct": 16,
+  "vpt16_active_expert_count": 104,
+  "vpt16_max_weight_rel_err": 2.2645485842076596e-07
+ },
+ "B_semantics": {
+  "rows": 512,
+  "vpt_used": 16,
+  "rows_per_task": 16,
+  "id_set_equals_renormalize_naive": true,
+  "id_set_equals_topk_then_softmax": true,
+  "max_rel_err_vs_renormalize_naive": 2.9595520345537807e-07,
+  "max_rel_err_vs_topk_then_softmax": 2.7972899374617555e-07,
+  "max_rel_err_vs_bf16_softmax": 0.00541410967707634,
+  "renormalized": 2.384185791015625e-07,
+  "input_buffer_zeroed_by_kernel": true,
+  "routing_indices_are_rank_plus_one": true,
+  "active_expert_count_matches_union": true
+ },
+ "C_tiebreak": {
+  "crafted_boundary_cases": 511,
+  "cases_where_exactly_one_of_the_pair_is_selected": 511,
+  "mpk_picked_lower_index": 511,
+  "mpk_picked_higher_index": 0,
+  "hf_topk_picked_lower_index": 511,
+  "hf_topk_picked_higher_index": 0,
+  "mpk_and_hf_agree": 511,
+  "inside_topk_cases_with_both_selected": 511,
+  "inside_topk_mpk_lower_index_first": 511,
+  "inside_topk_hf_lower_index_first": 40
+ },
+ "D_oracle": {
+  "oracle_dumps": "/home/muhengl/mpk-qwen35/oracle-work/dumps",
+  "total_token_rows": 18,
+  "rows_with_a_top8_boundary_tie": 2,
+  "rows_where_mpk_and_hf_expert_sets_differ": 0,
+  "blast_radius_fraction": 0.1111111111111111,
+  "details": [
+   {
+    "row": "decode/moe0#weights",
+    "max_rel_err_vs_hf_fp32_renorm": 1.0714981613091368e-07,
+    "max_rel_err_vs_hf_bf16_renorm": 0.0030654515139758587
+   },
+   {
+    "row": "decode/moe3#0",
+    "boundary_tie": true,
+    "tied_expert_ids": [
+     92,
+     219,
+     253
+    ],
+    "hf_selected_from_tie": [
+     92
+    ],
+    "mpk_selected_from_tie": [
+     92
+    ],
+    "set_equal": true
+   },
+   {
+    "row": "decode/moe3#weights",
+    "max_rel_err_vs_hf_fp32_renorm": 2.3324466269514232e-07,
+    "max_rel_err_vs_hf_bf16_renorm": 0.0034036636352539062
+   },
+   {
+    "row": "prefill/moe0#weights",
+    "max_rel_err_vs_hf_fp32_renorm": 1.867712740022398e-07,
+    "max_rel_err_vs_hf_bf16_renorm": 0.0032406477257609367
+   },
+   {
+    "row": "prefill/moe3#1",
+    "boundary_tie": true,
+    "tied_expert_ids": [
+     4,
+     246
+    ],
+    "hf_selected_from_tie": [
+     4
+    ],
+    "mpk_selected_from_tie": [
+     4
+    ],
+    "set_equal": true
+   },
+   {
+    "row": "prefill/moe3#weights",
+    "max_rel_err_vs_hf_fp32_renorm": 1.673662808343579e-07,
+    "max_rel_err_vs_hf_bf16_renorm": 0.0034342799335718155
+   }
+  ]
+ },
+ "E_weight_cast_position": {
+  "hf_renorm_weight_dtype": "torch.bfloat16",
+  "mpk_router_weight_dtype": "torch.float32",
+  "max_rel_weight_change_from_bf16_rounding": 0.003074877429753542,
+  "combine_frob_rel_fp32_weights": 0.0016722029937223557,
+  "combine_frob_rel_bf16_weights": 0.0018204397207047466,
+  "combine_bf16_output_rounding_floor": 0.0016722029937223557,
+  "delta_between_the_two": 0.0017024722187668573
+ },
+ "VERDICT": {
+  "renormalize_naive_equivalent": true,
+  "softmax_is_fp32_not_bf16": true,
+  "tie_break": "lower expert index, on both MPK and HF",
+  "tie_break_agreement": "511/511 crafted boundary ties, 2/2 real oracle ties",
+  "residual_tie_risk": "torch.topk's ORDER inside a tie is NOT index-monotone (40/511 lower-index-first, vs 511/511 for MPK), so its boundary rule is an implementation property, not a specification. It agreed with lower-index everywhere measured, but a future torch/CUDA version could differ. An MPK-vs-HF token mismatch that traces to a top-8 boundary tie therefore follows the same human-adjudication path as an argmax logit tie (M1-I3 6.5); 11.1% of oracle token rows carry such a tie, so the AC-3 run should record boundary-tie rows per token.",
+  "row_capacity_defect": "the shipped VPT=8 instantiation covers 8 rows but the build pins mbt=16; measured 8/16 rows correct at VPT=8 and 16/16 at VPT=16. FIXED: register_moe_topk_softmax_sm100_task now derives VPT from batch_size and asserts instead of silently dropping rows.",
+  "weight_cast_position": "HF hands the combine BF16 weights and MPK kept fp32; measured 1.702e-03 frob-rel at the combine, against a bf16 output-rounding floor of 1.672e-03. ALIGNED: the router task gained an opt-in round_weights_to_input_dtype parameter (default off, so DeepSeek-V3's fp32-weight semantics are unchanged), verified bit-exact against the oracle's topk_renorm_weights in test_router_oracle.py.",
+  "new_router_task_needed": false,
+  "reserved_id_239_released": true
+ }
+}

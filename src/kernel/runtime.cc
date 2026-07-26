@@ -1857,6 +1857,8 @@ TaskGraphResult print_task_graph(
       "TASK_LINEAR_FP8_BLOCKSCALE_SM100";
   task_type_to_name[TASK_GDN_CONV1D_SM100] = "TASK_GDN_CONV1D_SM100";
   task_type_to_name[TASK_GDN_RECURRENT_SM100] = "TASK_GDN_RECURRENT_SM100";
+  task_type_to_name[TASK_SIGMOID_GATE_MUL_ADD_SM100] =
+      "TASK_SIGMOID_GATE_MUL_ADD_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

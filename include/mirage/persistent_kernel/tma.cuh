@@ -1638,6 +1638,11 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     case TASK_GDN_RECURRENT_SM100: {
       break;
     }
+    // Same story for the Qwen3.5 shared-expert gate task (id 238): a GEMV plus
+    // an elementwise epilogue, no TMA, but its id is inside the window.
+    case TASK_SIGMOID_GATE_MUL_ADD_SM100: {
+      break;
+    }
     // The fp32-block-scale grouped MoE GEMMs (ids 241/242) stage weights with
     // cp.async, not TMA - the UE8M0 grouped kernel is the TMA one. Their ids
     // are inside the window, so the switch must cover them too.

@@ -77,7 +77,16 @@ __device__ __forceinline__ void topk_softmax_task_impl(
                                                   // experts
     int const start_expert,
     int const end_expert,
-    bool const renormalize) {
+    bool const renormalize,
+    // Qwen3.5 (M2-I7 / probe P5): HF's Qwen3_5MoeTopKRouter ends with
+    // `router_top_value.to(router_logits.dtype)`, i.e. the renormalized weights
+    // that reach the combine are bf16, not fp32 (oracle
+    // moe*.topk_renorm_weights). Measured effect of the difference at the
+    // combine boundary: 1.6e-3 frob-rel, the same order as the combine's own
+    // bf16 output-rounding floor (p5_router_semantics.json section E).
+    // DeepSeek-V3's reference keeps fp32 weights, so this defaults OFF and the
+    // generated code is unchanged for every existing caller.
+    bool const round_weights_to_output_dtype = false) {
   // Pointers
   T *input = static_cast<T *>(input_ptr);
   float *output = static_cast<float *>(output_ptr);
@@ -287,10 +296,13 @@ __device__ __forceinline__ void topk_softmax_task_impl(
 
     // Optional renormalization of top-k weights
     if (renormalize && thread_group_idx == 0) {
+      cutlass::NumericConverter<T, float> to_output_dtype;
       float inv = 1.f / row_sum_for_renormalize;
       for (int k_idx = 0; k_idx < k; ++k_idx) {
         int const out_idx = k * thread_row + k_idx;
-        output[out_idx] = output[out_idx] * inv;
+        float w = output[out_idx] * inv;
+        output[out_idx] =
+            round_weights_to_output_dtype ? converter(to_output_dtype(w)) : w;
       }
     }
   }
