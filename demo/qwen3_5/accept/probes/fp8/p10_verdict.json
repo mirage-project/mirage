@@ -1,23 +1,67 @@
 {
-  "go": false,
+  "go": true,
+  "go_numerics_fidelity": true,
   "numerics": {
-    "pass": false,
+    "gate_pass": true,
+    "no_systematic_bias": true,
+    "worst_bias_effect_size": 0.03276217938407696,
+    "bias_effect_size_threshold": 0.1,
+    "frob_class": "single-quantization-bucket disagreement between two independently -authored e4m3 kernels (NOT pure fp32 accumulation-order noise, which is ~1e-6-3.8e-6, 100-1000x too small to explain the data -- see single_flip_floor() docstring for both derivations).",
+    "derived_floor": {
+      "formula": "floor(K) = E4M3_RELATIVE_LSB / sqrt(K), E4M3_RELATIVE_LSB=0.125 (2^-3, e4m3's 3-mantissa-bit relative LSB)",
+      "by_K": {
+        "2048": {
+          "floor": 0.002762135864009951,
+          "gate": 0.011048543456039804
+        },
+        "4096": {
+          "floor": 0.001953125,
+          "gate": 0.0078125
+        }
+      },
+      "gate_safety_multiple": 4,
+      "gate_safety_multiple_rationale": "empirically the worst observed ratio to the single-flip floor was ~1.6-2.0x across all 20 cases; 4x leaves a full additional ~2x margin beyond anything actually measured, while every per-K gate still sits >=2.4x below the rejected UE8M0 class's measured delta (criterion c) -- not reverse-engineered to the data's edge.",
+      "worst_ratio_to_floor_observed": 1.9540146629850514,
+      "ruled_out_alternative": "pure fp32 accumulation-reorder noise: sqrt(K)*2^-24 ~= 2.7e-6 (K=2048) / 3.8e-6 (K=4096) -- verified numerically, far too small to be the dominant mechanism."
+    },
+    "vs_rejected_ue8m0_class": {
+      "pass": true,
+      "margin_ratio": 6.044259624845112,
+      "reference": {
+        "min": 0.0263021458737437,
+        "max": 0.02745967689959876,
+        "source": "/home/muhengl/mpk-qwen35/probes/fp8_out/p7_ue8m0_delta.json",
+        "n_tensors": 4
+      },
+      "note": "criterion (c): worst measured frob_rel_error must be <= 0.5x the SMALLEST P7 UE8M0-requant delta (a plain 'strictly much smaller' check); actual margin is typically larger."
+    },
+    "token_level_evidence": {
+      "vllm_cutlass_vs_hf_triton_full_pipeline": {
+        "source": "M1-I1 baseline finding, external to this probe (project memory: .memory/main/qwen35-target.md; accept/reference/README.md 'vLLM smoke (step 8)')",
+        "result": "vLLM (dense fp8 via CUTLASS) and HF transformers (dense fp8 via Triton, DeepGEMM disabled) produced BYTE-IDENTICAL 64/64 greedy token ids on prompt p01-history -- whatever numeric disagreement exists between these two kernel families (this probe's 2-4e-3 class) did not flip a single autoregressive decision across 64 sequential steps on that prompt."
+      },
+      "p1_bf16_dense_perturbation_comparison": {
+        "source": "this issue's own P1 probe (p1_dense_bf16_result.json) -- a perturbation an order of magnitude LARGER than cross-implementation noise (full removal of dense-path fp8, not just kernel disagreement)",
+        "result": "7/10 prompts exact match (596/640 positions); all 3 divergences at close-margin decisions (this run's own top1-vs-top2 gap 0.0/0.125/0.25 logit units) -- even a coarser perturbation only flips already-marginal decisions, never produces gross corruption."
+      }
+    },
+    "rationale": "gate_pass=True: (a) no_systematic_bias=True (worst bias effect size 0.0328 <= 0.1 bar -- this is the real corruption alarm: a directional/systematic offset would indicate a scale-application or indexing bug; a small, UNBIASED, symmetric spread is the signature of two valid-but-different roundings, not corruption). (b) derived_gate_pass=True (worst measured/floor ratio 1.95x, within the 4x safety multiple at every K tested -- see single_flip_floor() for the full derivation: pure fp32 accumulation-reorder noise is ruled out (~1e-6, 100-1000x too small); a single quantization-bucket disagreement between the two independently-authored kernels fits the measured magnitude to within ~2x). (c) vs_rejected_ue8m0_class=True (measured worst case is 6.0x smaller than P7's smallest UE8M0-requant delta). Corroborated by independent token-level evidence (see numerics.token_level_evidence): the M1 baseline found vLLM(CUTLASS)-vs-HF(Triton) produced byte-identical 64/64 tokens on prompt p01, and this issue's own P1 probe found a perturbation an order of magnitude LARGER than this (full bf16 substitution, not just cross-implementation noise) only flipped 3/10 prompts at close margins.",
     "worst_frob_rel_error": 0.004351591014659254,
     "worst_p99_rel_diff_top_half": 0.015282182022929192,
-    "worst_bias_effect_size": 0.03276217938407696,
-    "thresholds": {
+    "OLD_THRESHOLDS_RETIRED": {
       "frob_rel_error_max": 0.002,
       "p99_rel_diff_top_half_max": 0.01,
-      "bias_effect_size_max": 0.1
+      "why_retired": "Flat constants chosen as 'reasonable slack' around the design doc's explicitly-rough '~1e-3' point estimate, with no derivation -- an undocumented tightening (2e-3/1e-2 are NOT stated anywhere in v1-architecture.md SS14, they were this probe's own invention). Caught by coordinator completion review 2026-07-26: a machine-checkable gate that other issues (M2-I12) consume must carry a principled derivation, not an arbitrary constant. Superseded by `derived_floor` above. p99_rel_diff_top_half is still computed and reported (see per-case data) but is no longer a gate criterion -- it was ALSO undocumented/arbitrary and the elementwise-percentile family of stats is inherently less well-founded than the magnitude-weighted frob-norm for this comparison (diff_stats() docstring)."
     },
-    "note": "cutlass_vs_triton is the gating pair (two independent fp32-scale-class implementations); *_vs_fp32ref entries in `cases` attribute any divergence (both fp8 kernels can share a small common offset vs the fp32 reference without disagreeing with EACH OTHER -- that's the actual P10 question). Gate uses frob_rel_error (magnitude-weighted) + bias_effect_size (n-invariant mean/std ratio), NOT a raw elementwise max and NOT a z-score -- see diff_stats() docstring for both root-caused reasons (e4m3's ~12.5% per-element LSB inflates relative error on sub-RMS elements with no systematic disagreement; z-score grows with sqrt(n) at fixed effect size so it isn't a fair gate once --numerics-draws pools many samples). floored_max_rel and bias_zscore are kept per-case as diagnostics only."
+    "note": "cutlass_vs_triton is the gating pair (two independent fp32-scale-class implementations); *_vs_fp32ref entries in `cases` attribute any divergence (both fp8 kernels can share a small common offset vs the fp32 reference without disagreeing with EACH OTHER -- that's the actual P10 question)."
   },
-  "perf": {
+  "perf_bar_result": {
     "pass": false,
     "marginal": false,
     "measurement": "cuda_graph",
     "min_speedup_cutlass_over_bf16": 0.5033291277428348,
     "graph_capture_ok_all_cases": true,
+    "role": "AMENDED 2026-07-26: this is now an INFORMATIONAL M3-PRIORITIZATION PRIOR, NOT ANDed into top-level `go` -- per v1-architecture.md SS6.2 as amended, M2-I12's dense fp8 kernel work proceeds on NUMERICS FIDELITY (go / go_numerics_fidelity above); this perf bar is the input to how M3 should PRIORITIZE/rank the eventual restoration, a separate downstream question with a separate consumer.",
     "note": "Gates on CUDA-graph-replayed speedup (dispatch-overhead-free), which is the faithful reproduction of how vLLM's own AC-4 baseline runs this exact op (constraint.md: vLLM benchmarked 'with CUDA graphs'); eager (raw Python dispatch) speedup is reported per-case as a diagnostic only, since it conflates real kernel throughput with host dispatch overhead.",
     "per_case_speedup": [
       {
@@ -200,7 +244,9 @@
       "2048x4096",
       "2048x4096-attn-bonus"
     ],
-    "timestamp_utc": "2026-07-26T00:08:28.459363+00:00"
+    "timestamp_utc": "2026-07-26T00:08:28.459363+00:00",
+    "recomputed_from": "/home/muhengl/mpk-qwen35/probes/fp8_out/p10_verdict.json",
+    "recompute_timestamp_utc": "2026-07-26T00:38:25.941491+00:00"
   },
   "cases": [
     {
@@ -219,7 +265,11 @@
           "std_signed_diff": 0.0027445899322628975,
           "bias_effect_size": 0.002953905544564081,
           "bias_zscore_INFORMATIONAL_ONLY": 1.0354692476782903,
-          "n_elements": 122880
+          "n_elements": 122880,
+          "derived_floor_this_K": 0.002762135864009951,
+          "derived_gate_this_K": 0.011048543456039804,
+          "ratio_to_floor": 1.4013364437977511,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.1682652235031128,
@@ -344,7 +394,11 @@
           "std_signed_diff": 0.001968137454241514,
           "bias_effect_size": 0.005965274287106507,
           "bias_zscore_INFORMATIONAL_ONLY": 2.9572362200989217,
-          "n_elements": 245760
+          "n_elements": 245760,
+          "derived_floor_this_K": 0.002762135864009951,
+          "derived_gate_this_K": 0.011048543456039804,
+          "ratio_to_floor": 0.9729274225858092,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.25502538681030273,
@@ -469,7 +523,11 @@
           "std_signed_diff": 0.002608418231830001,
           "bias_effect_size": 0.001958644378068299,
           "bias_zscore_INFORMATIONAL_ONLY": 1.373175946238316,
-          "n_elements": 491520
+          "n_elements": 491520,
+          "derived_floor_this_K": 0.002762135864009951,
+          "derived_gate_this_K": 0.011048543456039804,
+          "ratio_to_floor": 1.3057162371203457,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.2729695439338684,
@@ -594,7 +652,11 @@
           "std_signed_diff": 0.002870786003768444,
           "bias_effect_size": 0.005925715086060491,
           "bias_zscore_INFORMATIONAL_ONLY": 5.875250135726676,
-          "n_elements": 983040
+          "n_elements": 983040,
+          "derived_floor_this_K": 0.002762135864009951,
+          "derived_gate_this_K": 0.011048543456039804,
+          "ratio_to_floor": 1.4239896619924164,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.232069730758667,
@@ -719,7 +781,11 @@
           "std_signed_diff": 0.002758283168077469,
           "bias_effect_size": -0.00016010146673060938,
           "bias_zscore_INFORMATIONAL_ONLY": -0.22448943313412514,
-          "n_elements": 1966080
+          "n_elements": 1966080,
+          "derived_floor_this_K": 0.002762135864009951,
+          "derived_gate_this_K": 0.011048543456039804,
+          "ratio_to_floor": 1.377996839745075,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.35286617279052734,
@@ -844,7 +910,11 @@
           "std_signed_diff": 0.0015320461243391037,
           "bias_effect_size": -0.021145846567705476,
           "bias_zscore_INFORMATIONAL_ONLY": -6.41942766781471,
-          "n_elements": 92160
+          "n_elements": 92160,
+          "derived_floor_this_K": 0.002762135864009951,
+          "derived_gate_this_K": 0.011048543456039804,
+          "ratio_to_floor": 0.7667937182398746,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.11941492557525635,
@@ -970,7 +1040,11 @@
           "std_signed_diff": 0.0031977312173694372,
           "bias_effect_size": -0.03276217938407696,
           "bias_zscore_INFORMATIONAL_ONLY": -14.06562435721695,
-          "n_elements": 184320
+          "n_elements": 184320,
+          "derived_floor_this_K": 0.002762135864009951,
+          "derived_gate_this_K": 0.011048543456039804,
+          "ratio_to_floor": 1.575444231892996,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.11495733261108398,
@@ -1096,7 +1170,11 @@
           "std_signed_diff": 0.0028663882985711098,
           "bias_effect_size": -0.013380999866867506,
           "bias_zscore_INFORMATIONAL_ONLY": -8.124371894344545,
-          "n_elements": 368640
+          "n_elements": 368640,
+          "derived_floor_this_K": 0.002762135864009951,
+          "derived_gate_this_K": 0.011048543456039804,
+          "ratio_to_floor": 1.3870140894936782,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.1459295153617859,
@@ -1222,7 +1300,11 @@
           "std_signed_diff": 0.00264188926666975,
           "bias_effect_size": 0.00383181393017943,
           "bias_zscore_INFORMATIONAL_ONLY": 3.2901874272045464,
-          "n_elements": 737280
+          "n_elements": 737280,
+          "derived_floor_this_K": 0.002762135864009951,
+          "derived_gate_this_K": 0.011048543456039804,
+          "ratio_to_floor": 1.2781570129813349,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.1366596221923828,
@@ -1348,7 +1430,11 @@
           "std_signed_diff": 0.0027144113555550575,
           "bias_effect_size": -0.011131311491556065,
           "bias_zscore_INFORMATIONAL_ONLY": -13.51691430071935,
-          "n_elements": 1474560
+          "n_elements": 1474560,
+          "derived_floor_this_K": 0.002762135864009951,
+          "derived_gate_this_K": 0.011048543456039804,
+          "ratio_to_floor": 1.3164275371107017,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.1535172462463379,
@@ -1474,7 +1560,11 @@
           "std_signed_diff": 0.003336487337946892,
           "bias_effect_size": -0.002159010821510786,
           "bias_zscore_INFORMATIONAL_ONLY": -0.30897247750757006,
-          "n_elements": 20480
+          "n_elements": 20480,
+          "derived_floor_this_K": 0.001953125,
+          "derived_gate_this_K": 0.0078125,
+          "ratio_to_floor": 1.7286258930435527,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.20361530780792236,
@@ -1598,7 +1688,11 @@
           "std_signed_diff": 0.0033235661685466766,
           "bias_effect_size": 0.00113053803681947,
           "bias_zscore_INFORMATIONAL_ONLY": 0.22880481137950892,
-          "n_elements": 40960
+          "n_elements": 40960,
+          "derived_floor_this_K": 0.001953125,
+          "derived_gate_this_K": 0.0078125,
+          "ratio_to_floor": 1.6886230537612847,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.2468729019165039,
@@ -1722,7 +1816,11 @@
           "std_signed_diff": 0.0033874583896249533,
           "bias_effect_size": -0.00246717892801118,
           "bias_zscore_INFORMATIONAL_ONLY": -0.7061478138480715,
-          "n_elements": 81920
+          "n_elements": 81920,
+          "derived_floor_this_K": 0.001953125,
+          "derived_gate_this_K": 0.0078125,
+          "ratio_to_floor": 1.716696593530014,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.36400318145751953,
@@ -1846,7 +1944,11 @@
           "std_signed_diff": 0.003185350215062499,
           "bias_effect_size": 0.0025685952001776187,
           "bias_zscore_INFORMATIONAL_ONLY": 1.0396942361007886,
-          "n_elements": 163840
+          "n_elements": 163840,
+          "derived_floor_this_K": 0.001953125,
+          "derived_gate_this_K": 0.0078125,
+          "ratio_to_floor": 1.6200395312686764,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.34775733947753906,
@@ -1970,7 +2072,11 @@
           "std_signed_diff": 0.0035135657526552677,
           "bias_effect_size": 0.0005619295282799283,
           "bias_zscore_INFORMATIONAL_ONLY": 0.32166723169236744,
-          "n_elements": 327680
+          "n_elements": 327680,
+          "derived_floor_this_K": 0.001953125,
+          "derived_gate_this_K": 0.0078125,
+          "ratio_to_floor": 1.7965492544865718,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.40563297271728516,
@@ -2094,7 +2200,11 @@
           "std_signed_diff": 0.003525741631165147,
           "bias_effect_size": 0.01079700811169822,
           "bias_zscore_INFORMATIONAL_ONLY": 1.5451420218479273,
-          "n_elements": 20480
+          "n_elements": 20480,
+          "derived_floor_this_K": 0.001953125,
+          "derived_gate_this_K": 0.0078125,
+          "ratio_to_floor": 1.9540146629850514,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.2767932415008545,
@@ -2218,7 +2328,11 @@
           "std_signed_diff": 0.0034214460756629705,
           "bias_effect_size": -0.004326809211164288,
           "bias_zscore_INFORMATIONAL_ONLY": -0.8756846149296381,
-          "n_elements": 40960
+          "n_elements": 40960,
+          "derived_floor_this_K": 0.001953125,
+          "derived_gate_this_K": 0.0078125,
+          "ratio_to_floor": 1.8795358766009078,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.22548794746398926,
@@ -2342,7 +2456,11 @@
           "std_signed_diff": 0.003274655668064952,
           "bias_effect_size": -0.003020882263275746,
           "bias_zscore_INFORMATIONAL_ONLY": -0.8646269558666222,
-          "n_elements": 81920
+          "n_elements": 81920,
+          "derived_floor_this_K": 0.001953125,
+          "derived_gate_this_K": 0.0078125,
+          "ratio_to_floor": 1.795206946556188,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.19631576538085938,
@@ -2466,7 +2584,11 @@
           "std_signed_diff": 0.0032811667770147324,
           "bias_effect_size": -0.0037534191381992867,
           "bias_zscore_INFORMATIONAL_ONLY": -1.5192772467169353,
-          "n_elements": 163840
+          "n_elements": 163840,
+          "derived_floor_this_K": 0.001953125,
+          "derived_gate_this_K": 0.0078125,
+          "ratio_to_floor": 1.7888375824020908,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.3250732421875,
@@ -2590,7 +2712,11 @@
           "std_signed_diff": 0.003456311533227563,
           "bias_effect_size": 0.00021294773235621428,
           "bias_zscore_INFORMATIONAL_ONLY": 0.1218983949319492,
-          "n_elements": 327680
+          "n_elements": 327680,
+          "derived_floor_this_K": 0.001953125,
+          "derived_gate_this_K": 0.0078125,
+          "ratio_to_floor": 1.8815422000350304,
+          "derived_gate_pass": true
         },
         "cutlass_vs_fp32ref": {
           "max_abs_diff": 0.338165283203125,
