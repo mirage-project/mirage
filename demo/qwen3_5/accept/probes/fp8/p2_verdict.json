@@ -1,455 +1,458 @@
 {
- "biased": true,
- "fallback_implemented": true,
- "mechanism": "fp8_group_gemm_sm100.cuh warp 6 keeps only the float32 exponent field of BOTH scale operands: applied = 2^floor(log2(s)), a power-of-two truncation toward zero (never rounding).",
- "mechanism_source": [
-  "include/mirage/persistent_kernel/tasks/blackwell/fp8_group_gemm_sm100.cuh:1379 (weight scale SFA)",
-  "include/mirage/persistent_kernel/tasks/blackwell/fp8_group_gemm_sm100.cuh:1394 (activation scale SFB)",
-  "tests/runtime_python/blackwell/sm100_fp8_moe/test_fp8_moe_gemm.py:68-75 float32_to_ue8m0_approx -- the in-tree DSV3 test compares the kernel against a reference that ALREADY applies this power-of-two floor, which is why the loss never showed up there"
- ],
- "pillars": {
-  "mechanism_identified": true,
-  "systematic_multiplicative_shrink": true,
-  "outside_preserved_scale_class": true,
-  "survives_to_moe_block_boundary": true
- },
- "evidence": {
-  "w13": {
-   "ue8m0_vs_fp32_scale": {
-    "vs": "fp32_scale_torch",
-    "frob_rel": 0.48229542395666736,
-    "row_slope_mean": 0.5110156536102295,
-    "row_slope_min": 0.45165151357650757,
-    "row_slope_max": 0.5583950877189636,
-    "row_slope_std": 0.03239704295992851,
-    "gain_error_mean": 0.4889843687415123,
-    "gain_error_effect_size": 15.093483644553924,
-    "raw_bias_effect_size": 0.16634568569303207,
-    "raw_bias_zscore": 42.58449553741621,
-    "mean_abs_ratio": 0.5090606808662415,
-    "n_elements": 65536
-   },
-   "ue8m0_vs_truncation_model": {
-    "vs": "ue8m0_trunc_model",
-    "frob_rel": 0.0016859583497755824,
-    "row_slope_mean": 0.999989926815033,
-    "row_slope_min": 0.9998873472213745,
-    "row_slope_max": 1.000086784362793,
-    "row_slope_std": 6.329568714136258e-05,
-    "gain_error_mean": 1.0095536708831787e-05,
-    "gain_error_effect_size": 0.1594914852764109,
-    "raw_bias_effect_size": -0.0027174641935274013,
-    "raw_bias_zscore": -0.6956708335430147,
-    "mean_abs_ratio": 1.0000125169754028,
-    "n_elements": 65536
-   },
-   "truncation_model_vs_fp32_scale": {
-    "vs": "fp32_scale_torch",
-    "frob_rel": 0.48228491089988235,
-    "row_slope_mean": 0.5110200643539429,
-    "row_slope_min": 0.4516655504703522,
-    "row_slope_max": 0.5583705306053162,
-    "row_slope_std": 0.03238224238157272,
-    "gain_error_mean": 0.4889799803495407,
-    "gain_error_effect_size": 15.100246866611585,
-    "raw_bias_effect_size": 0.16635462639303422,
-    "raw_bias_zscore": 42.58678435661676,
-    "mean_abs_ratio": 0.5090543627738953,
-    "n_elements": 65536
-   },
-   "bf16_dequant_vs_fp32_scale": {
-    "vs": "fp32_scale_torch",
-    "frob_rel": 0.0019239658552685516,
-    "row_slope_mean": 0.999970018863678,
-    "row_slope_min": 0.9996843338012695,
-    "row_slope_max": 1.0001015663146973,
-    "row_slope_std": 0.00013973955356050283,
-    "gain_error_mean": 3.0003488063812256e-05,
-    "gain_error_effect_size": 0.2147204767755649,
-    "raw_bias_effect_size": 0.0034417663950890324,
-    "raw_bias_zscore": 0.8810921971427923,
-    "mean_abs_ratio": 0.9999769330024719,
-    "n_elements": 65536
-   }
-  },
-  "w2": {
-   "ue8m0_vs_fp32_scale": {
-    "vs": "fp32_scale_torch",
-    "frob_rel": 0.5218755734267202,
-    "row_slope_mean": 0.491241991519928,
-    "row_slope_min": 0.4484015703201294,
-    "row_slope_max": 0.5454301834106445,
-    "row_slope_std": 0.0324476957321167,
-    "gain_error_mean": 0.5087580308318138,
-    "gain_error_effect_size": 15.67932476696039,
-    "raw_bias_effect_size": -0.0066454980188018304,
-    "raw_bias_zscore": -2.405927277289749,
-    "mean_abs_ratio": 0.48651760816574097,
-    "n_elements": 131072
-   },
-   "ue8m0_vs_truncation_model": {
-    "vs": "ue8m0_trunc_model",
-    "frob_rel": 0.001648387093496698,
-    "row_slope_mean": 1.0000042915344238,
-    "row_slope_min": 0.9999141693115234,
-    "row_slope_max": 1.0000954866409302,
-    "row_slope_std": 6.133106944616884e-05,
-    "gain_error_mean": -4.328787326812744e-06,
-    "gain_error_effect_size": -0.07055297801766128,
-    "raw_bias_effect_size": -0.002021970535917456,
-    "raw_bias_zscore": -0.732031527580995,
-    "mean_abs_ratio": 0.9999856352806091,
-    "n_elements": 131072
-   },
-   "bf16_dequant_vs_fp32_scale": {
-    "vs": "fp32_scale_torch",
-    "frob_rel": 0.00225960181089851,
-    "row_slope_mean": 1.0000419616699219,
-    "row_slope_min": 0.9997308254241943,
-    "row_slope_max": 1.000197172164917,
-    "row_slope_std": 0.0001465033128624782,
-    "gain_error_mean": -4.197657108306885e-05,
-    "gain_error_effect_size": -0.28649841592534103,
-    "raw_bias_effect_size": 0.0005864467148632311,
-    "raw_bias_zscore": 0.21231638982879458,
-    "mean_abs_ratio": 1.000054955482483,
-    "n_elements": 131072
-   }
-  },
-  "token_level": {
-   "w2_chain_ue8m0": {
-    "vs_oracle_routed_expert_output": {
-     "vs": "oracle_hf_fp8",
-     "frob_rel": 0.8899889460697428,
-     "row_slope_mean": 0.12466029822826385,
-     "row_slope_min": 0.09462142735719681,
-     "row_slope_max": 0.17285571992397308,
-     "row_slope_std": 0.024647608399391174,
-     "gain_error_mean": 0.8753396943211555,
-     "gain_error_effect_size": 35.514177557704976,
-     "raw_bias_effect_size": -0.014985817956545834,
-     "raw_bias_zscore": -1.9181846984378668,
-     "mean_abs_ratio": 0.1201285868883133,
-     "n_elements": 16384
-    },
-    "vs_fp32_scale_chain": {
-     "vs": "fp32_scale_chain",
-     "frob_rel": 0.8899043688946345,
-     "row_slope_mean": 0.12463174760341644,
-     "row_slope_min": 0.09455644339323044,
-     "row_slope_max": 0.17275449633598328,
-     "row_slope_std": 0.024627787992358208,
-     "gain_error_mean": 0.8753682523965836,
-     "gain_error_effect_size": 35.54392492724504,
-     "raw_bias_effect_size": -0.014941074912212438,
-     "raw_bias_zscore": -1.912457588763192,
-     "mean_abs_ratio": 0.12014184147119522,
-     "n_elements": 16384
-    }
-   },
-   "w2_chain_blockscale": {
-    "vs_oracle_routed_expert_output": {
-     "vs": "oracle_hf_fp8",
-     "frob_rel": 0.00606554681592674,
-     "row_slope_mean": 0.9997184872627258,
-     "row_slope_min": 0.9978410601615906,
-     "row_slope_max": 1.0004011392593384,
-     "row_slope_std": 0.0008349885465577245,
-     "gain_error_mean": 0.00028149038553237915,
-     "gain_error_effect_size": 0.3371232862592592,
-     "raw_bias_effect_size": -0.012230126609315106,
-     "raw_bias_zscore": -1.5654562059923336,
-     "mean_abs_ratio": 0.999937117099762,
-     "n_elements": 16384
-    },
-    "vs_fp32_scale_chain": {
-     "vs": "fp32_scale_chain",
-     "frob_rel": 0.006658889757820031,
-     "row_slope_mean": 0.9993956089019775,
-     "row_slope_min": 0.9971843361854553,
-     "row_slope_max": 1.0021429061889648,
-     "row_slope_std": 0.0014543315628543496,
-     "gain_error_mean": 0.0006043463945388794,
-     "gain_error_effect_size": 0.41553742005543076,
-     "raw_bias_effect_size": -0.0038849067800250095,
-     "raw_bias_zscore": -0.4972680678432012,
-     "mean_abs_ratio": 1.0000474452972412,
-     "n_elements": 16384
-    }
-   },
-   "w2_chain_fp32ref": {
-    "vs_oracle_routed_expert_output": {
-     "vs": "oracle_hf_fp8",
-     "frob_rel": 0.007418123916217146,
-     "row_slope_mean": 1.000298261642456,
-     "row_slope_min": 0.997936487197876,
-     "row_slope_max": 1.002050518989563,
-     "row_slope_std": 0.0012525921920314431,
-     "gain_error_mean": -0.00029822438955307007,
-     "gain_error_effect_size": -0.23808381600128345,
-     "raw_bias_effect_size": -0.006514183536189845,
-     "raw_bias_zscore": -0.8338154926323001,
-     "mean_abs_ratio": 0.9998896718025208,
-     "n_elements": 16384
-    }
-   },
-   "w2_chain_bf16ref": {
-    "vs_oracle_routed_expert_output": {
-     "vs": "oracle_hf_fp8",
-     "frob_rel": 0.007573430654050401,
-     "row_slope_mean": 1.0003516674041748,
-     "row_slope_min": 0.9980402588844299,
-     "row_slope_max": 1.0021367073059082,
-     "row_slope_std": 0.0012239136267453432,
-     "gain_error_mean": -0.0003515779972076416,
-     "gain_error_effect_size": -0.2872585523316824,
-     "raw_bias_effect_size": -0.006626722365138841,
-     "raw_bias_zscore": -0.8482204627377716,
-     "mean_abs_ratio": 0.9999905228614807,
-     "n_elements": 16384
-    },
-    "vs_fp32_scale_chain": {
-     "vs": "fp32_scale_chain",
-     "frob_rel": 0.001696417589818947,
-     "row_slope_mean": 1.0000531673431396,
-     "row_slope_min": 0.9996364712715149,
-     "row_slope_max": 1.000234603881836,
-     "row_slope_std": 0.00019006940419785678,
-     "gain_error_mean": -5.32492995262146e-05,
-     "gain_error_effect_size": -0.28016454697199633,
-     "raw_bias_effect_size": -0.0010993407412705782,
-     "raw_bias_zscore": -0.140715614882634,
-     "mean_abs_ratio": 1.00010085105896,
-     "n_elements": 16384
-    }
-   }
-  },
-  "gap7_hang_guard": {
-   "fp8_k_tile_count": 4,
-   "num_ab_stages_run": [
-    8,
-    4
-   ],
-   "completed_without_hang": true
-  },
-  "preserved_scale_class_p10": [
-   0.0021,
-   0.00435
-  ]
- },
- "methodology_note": "The raw residual effect size (mean/std of actual-reference, P10's bias statistic) is NOT the detector for this mechanism: an exponent truncation multiplies each output element by 1/(m_a*m_b), and a multiplicative shrink of a near-zero-mean output leaves a near-zero-mean residual. Both statistics are reported; the decision uses the per-row projection slope <actual,ref>/<ref,ref>, which is n-invariant and is exactly what a gain error moves. frob-rel (magnitude-weighted L2), never an elementwise max, is used for size -- a below-RMS e4m3 output element can show a large relative delta from rounding alone.",
- "prediction": {
+  "biased": true,
+  "fallback_implemented": true,
   "mechanism": "fp8_group_gemm_sm100.cuh warp 6 keeps only the float32 exponent field of BOTH scale operands: applied = 2^floor(log2(s)), a power-of-two truncation toward zero (never rounding).",
-  "predicted_per_element_factor_range": [
-   0.25,
-   1.0
+  "mechanism_source": [
+    "include/mirage/persistent_kernel/tasks/blackwell/fp8_group_gemm_sm100.cuh:1379 (weight scale SFA)",
+    "include/mirage/persistent_kernel/tasks/blackwell/fp8_group_gemm_sm100.cuh:1394 (activation scale SFB)",
+    "tests/runtime_python/blackwell/sm100_fp8_moe/test_fp8_moe_gemm.py:68-75 float32_to_ue8m0_approx -- the in-tree DSV3 test compares the kernel against a reference that ALREADY applies this power-of-two floor, which is why the loss never showed up there"
   ],
-  "predicted_row_slope_if_mantissas_log_uniform": 0.5204,
-  "predicted_frob_rel_vs_fp32_scale_order": "3e-1 to 6e-1",
-  "preserved_scale_class_from_p10": "2e-3 to 4.4e-3",
-  "predicted_raw_bias_effect_size": "SMALL (<0.1): a multiplicative shrink of a zero-mean output leaves a near-zero-mean residual -- this is the methodology trap; the detector is the per-row projection slope.",
-  "predicted_mechanism_residual_frob_rel": "~1e-3 (bf16 output rounding + accumulation order) if the truncation model is the whole story",
-  "predicted_w2_4ktile_hang": "no hang: the 2026-04-22 ab_empty fix removed the wrap-around race, and num_ab_stages=8 > k_tile_count=4"
- },
- "fallback_evidence": {
-  "w13_vs_fp32_scale": {
-   "vs": "fp32_scale_torch",
-   "frob_rel": 0.0016242142544300963,
-   "row_slope_mean": 1.0000052452087402,
-   "row_slope_min": 0.9998487234115601,
-   "row_slope_max": 1.000173807144165,
-   "row_slope_std": 0.00011794629244832322,
-   "gain_error_mean": -5.2228569984436035e-06,
-   "gain_error_effect_size": -0.04427600385030719,
-   "raw_bias_effect_size": -0.00013710386754453314,
-   "raw_bias_zscore": -0.03509859009140048,
-   "mean_abs_ratio": 0.9999958276748657,
-   "n_elements": 65536
+  "pillars": {
+    "mechanism_identified": true,
+    "systematic_multiplicative_shrink": true,
+    "outside_preserved_scale_class": true,
+    "survives_to_moe_block_boundary": true
   },
-  "w2_vs_fp32_scale": {
-   "vs": "fp32_scale_torch",
-   "frob_rel": 0.0016511211423405087,
-   "row_slope_mean": 1.0000135898590088,
-   "row_slope_min": 0.9999907612800598,
-   "row_slope_max": 1.0000340938568115,
-   "row_slope_std": 1.6034362488426268e-05,
-   "gain_error_mean": -1.3515353202819824e-05,
-   "gain_error_effect_size": -0.8434744212159456,
-   "raw_bias_effect_size": 0.0036887941430109113,
-   "raw_bias_zscore": 1.3354861326972083,
-   "mean_abs_ratio": 0.9999943375587463,
-   "n_elements": 131072
-  },
-  "kernel": "include/mirage/persistent_kernel/tasks/blackwell/moe_fp8_blockscale_sm100.cuh",
-  "task_ids": [
-   280,
-   281
-  ]
- },
- "activation_quant_fp32_scale": {
-  "primitive": "per_token_group_quantize_fp8_task_impl <SCALE_UE8M0=false> == quantize_fp8_layer(scale_ue8m0=False)",
-  "contract": "vllm-graph.md 3.4 / v1-architecture.md 6.1: group 128, absmax = max(max|x|, 1e-10), scale = absmax/448, x/scale (division), clamp to +-448 BEFORE the RN-even e4m3 cast",
-  "shapes_covered": [
-   {
-    "kind": "w13 activation [tokens, 2048]",
-    "rows": [
-     1,
-     2,
-     4,
-     8,
-     16
-    ]
-   },
-   {
-    "kind": "w2 activation [tokens, 8, 512]",
-    "rows": [
-     8,
-     16,
-     64,
-     128
-    ]
-   }
-  ],
-  "standalone_build": {
-   "all_scales_bit_exact_vs_true_division": true,
-   "all_values_bit_exact": true,
-   "zero_group_eps_branch_ok": true
-  },
-  "reference_pitfall": "`t / 448.0` with a PYTHON scalar is lowered by PyTorch to a reciprocal multiply and is 1 fp32 ULP from true division; a torch reference must use torch.div with a 0-dim tensor or it mis-reports the kernel as wrong.",
-  "cases": [
-   {
-    "case": "w13 input rows=1",
-    "rows": 1,
-    "hidden": 2048,
-    "scale_bit_exact": true,
-    "ulp_histogram": {
-     "0": 2048
-    }
-   },
-   {
-    "case": "w13 input rows=2",
-    "rows": 2,
-    "hidden": 2048,
-    "scale_bit_exact": true,
-    "ulp_histogram": {
-     "0": 4096
-    }
-   },
-   {
-    "case": "w13 input rows=4",
-    "rows": 4,
-    "hidden": 2048,
-    "scale_bit_exact": true,
-    "ulp_histogram": {
-     "0": 8192
-    }
-   },
-   {
-    "case": "w13 input rows=8",
-    "rows": 8,
-    "hidden": 2048,
-    "scale_bit_exact": true,
-    "ulp_histogram": {
-     "0": 16384
-    }
-   },
-   {
-    "case": "w13 input rows=16",
-    "rows": 16,
-    "hidden": 2048,
-    "scale_bit_exact": true,
-    "ulp_histogram": {
-     "0": 32768
-    }
-   },
-   {
-    "case": "w2 input tokens=1",
-    "rows": 8,
-    "hidden": 512,
-    "scale_bit_exact": true,
-    "ulp_histogram": {
-     "0": 4096
-    }
-   },
-   {
-    "case": "w2 input tokens=2",
-    "rows": 16,
-    "hidden": 512,
-    "scale_bit_exact": true,
-    "ulp_histogram": {
-     "0": 8192
-    }
-   },
-   {
-    "case": "w2 input tokens=8",
-    "rows": 64,
-    "hidden": 512,
-    "scale_bit_exact": true,
-    "ulp_histogram": {
-     "0": 32768
-    }
-   },
-   {
-    "case": "w2 input tokens=16",
-    "rows": 128,
-    "hidden": 512,
-    "scale_bit_exact": true,
-    "ulp_histogram": {
-     "0": 65536
-    }
-   }
-  ],
-  "megakernel_build": {
-   "note": "MPK compiles the megakernel with -use_fast_math, which rewrites the quantizer's group_max/448.0f into a reciprocal multiply. That is 1 fp32 ULP (~2e-7 relative) from true division -- four orders of magnitude below one e4m3 LSB and below p10b's measured 1-e4m3-ULP disagreement between two independent implementations of this primitive.",
-   "scale_forms": [
-    {
-     "tensor": "activation",
-     "form": "reciprocal_multiply (-use_fast_math)",
-     "max_fp32_ulp_from_true_division": 1
+  "evidence": {
+    "w13": {
+      "ue8m0_vs_fp32_scale": {
+        "vs": "fp32_scale_torch",
+        "frob_rel": 0.48229542395666736,
+        "row_slope_mean": 0.5110156536102295,
+        "row_slope_min": 0.45165151357650757,
+        "row_slope_max": 0.5583950877189636,
+        "row_slope_std": 0.03239704295992851,
+        "gain_error_mean": 0.4889843687415123,
+        "gain_error_effect_size": 15.093483644553924,
+        "raw_bias_effect_size": 0.16634568569303207,
+        "raw_bias_zscore": 42.58449553741621,
+        "mean_abs_ratio": 0.5090606808662415,
+        "n_elements": 65536
+      },
+      "ue8m0_vs_truncation_model": {
+        "vs": "ue8m0_trunc_model",
+        "frob_rel": 0.0016859583497755824,
+        "row_slope_mean": 0.999989926815033,
+        "row_slope_min": 0.9998873472213745,
+        "row_slope_max": 1.000086784362793,
+        "row_slope_std": 6.329568714136258e-05,
+        "gain_error_mean": 1.0095536708831787e-05,
+        "gain_error_effect_size": 0.1594914852764109,
+        "raw_bias_effect_size": -0.0027174641935274013,
+        "raw_bias_zscore": -0.6956708335430147,
+        "mean_abs_ratio": 1.0000125169754028,
+        "n_elements": 65536
+      },
+      "truncation_model_vs_fp32_scale": {
+        "vs": "fp32_scale_torch",
+        "frob_rel": 0.48228491089988235,
+        "row_slope_mean": 0.5110200643539429,
+        "row_slope_min": 0.4516655504703522,
+        "row_slope_max": 0.5583705306053162,
+        "row_slope_std": 0.03238224238157272,
+        "gain_error_mean": 0.4889799803495407,
+        "gain_error_effect_size": 15.100246866611585,
+        "raw_bias_effect_size": 0.16635462639303422,
+        "raw_bias_zscore": 42.58678435661676,
+        "mean_abs_ratio": 0.5090543627738953,
+        "n_elements": 65536
+      },
+      "bf16_dequant_vs_fp32_scale": {
+        "vs": "fp32_scale_torch",
+        "frob_rel": 0.0019239658552685516,
+        "row_slope_mean": 0.999970018863678,
+        "row_slope_min": 0.9996843338012695,
+        "row_slope_max": 1.0001015663146973,
+        "row_slope_std": 0.00013973955356050283,
+        "gain_error_mean": 3.0003488063812256e-05,
+        "gain_error_effect_size": 0.2147204767755649,
+        "raw_bias_effect_size": 0.0034417663950890324,
+        "raw_bias_zscore": 0.8810921971427923,
+        "mean_abs_ratio": 0.9999769330024719,
+        "n_elements": 65536
+      }
     },
-    {
-     "tensor": "w2 activation",
-     "form": "reciprocal_multiply (-use_fast_math)",
-     "max_fp32_ulp_from_true_division": 1
-    }
-   ],
-   "both_blockscale_tasks_ran_in_megakernel": true
-  }
- },
- "env": {
-  "hostname": "catalyst-fleet1.cs.cmu.edu",
-  "gpu_name": "NVIDIA B200",
-  "cuda_visible_devices": "7",
-  "torch": "2.13.0+cu130",
-  "checkpoint": "Qwen/Qwen3.5-35B-A3B-FP8",
-  "checkpoint_revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
-  "oracle_dumps": "/home/muhengl/mpk-qwen35/oracle-work/dumps",
-  "timestamp_utc": "2026-07-26T07:34:10.504684+00:00"
- },
- "stage_artifacts": {
-  "w13": "p2_w13.json",
-  "w2": "p2_w2.json",
-  "token": "p2_token.json",
-  "activation_quant": "p2_activation_quant.json"
- },
- "measurement": {
-  "shapes": {
-   "w13": [
-    256,
-    1024,
-    2048
-   ],
-   "w2": [
-    256,
-    2048,
-    512
-   ]
+    "w2": {
+      "ue8m0_vs_fp32_scale": {
+        "vs": "fp32_scale_torch",
+        "frob_rel": 0.5218755734267202,
+        "row_slope_mean": 0.491241991519928,
+        "row_slope_min": 0.4484015703201294,
+        "row_slope_max": 0.5454301834106445,
+        "row_slope_std": 0.0324476957321167,
+        "gain_error_mean": 0.5087580308318138,
+        "gain_error_effect_size": 15.67932476696039,
+        "raw_bias_effect_size": -0.0066454980188018304,
+        "raw_bias_zscore": -2.405927277289749,
+        "mean_abs_ratio": 0.48651760816574097,
+        "n_elements": 131072
+      },
+      "ue8m0_vs_truncation_model": {
+        "vs": "ue8m0_trunc_model",
+        "frob_rel": 0.001648387093496698,
+        "row_slope_mean": 1.0000042915344238,
+        "row_slope_min": 0.9999141693115234,
+        "row_slope_max": 1.0000954866409302,
+        "row_slope_std": 6.133106944616884e-05,
+        "gain_error_mean": -4.328787326812744e-06,
+        "gain_error_effect_size": -0.07055297801766128,
+        "raw_bias_effect_size": -0.002021970535917456,
+        "raw_bias_zscore": -0.732031527580995,
+        "mean_abs_ratio": 0.9999856352806091,
+        "n_elements": 131072
+      },
+      "bf16_dequant_vs_fp32_scale": {
+        "vs": "fp32_scale_torch",
+        "frob_rel": 0.00225960181089851,
+        "row_slope_mean": 1.0000419616699219,
+        "row_slope_min": 0.9997308254241943,
+        "row_slope_max": 1.000197172164917,
+        "row_slope_std": 0.0001465033128624782,
+        "gain_error_mean": -4.197657108306885e-05,
+        "gain_error_effect_size": -0.28649841592534103,
+        "raw_bias_effect_size": 0.0005864467148632311,
+        "raw_bias_zscore": 0.21231638982879458,
+        "mean_abs_ratio": 1.000054955482483,
+        "n_elements": 131072
+      }
+    },
+    "token_level": {
+      "w2_chain_ue8m0": {
+        "vs_oracle_routed_expert_output": {
+          "vs": "oracle_hf_fp8",
+          "frob_rel": 0.8899889460697428,
+          "row_slope_mean": 0.12466029822826385,
+          "row_slope_min": 0.09462142735719681,
+          "row_slope_max": 0.17285571992397308,
+          "row_slope_std": 0.024647608399391174,
+          "gain_error_mean": 0.8753396943211555,
+          "gain_error_effect_size": 35.514177557704976,
+          "raw_bias_effect_size": -0.014985817956545834,
+          "raw_bias_zscore": -1.9181846984378668,
+          "mean_abs_ratio": 0.1201285868883133,
+          "n_elements": 16384
+        },
+        "vs_fp32_scale_chain": {
+          "vs": "fp32_scale_chain",
+          "frob_rel": 0.8899043688946345,
+          "row_slope_mean": 0.12463174760341644,
+          "row_slope_min": 0.09455644339323044,
+          "row_slope_max": 0.17275449633598328,
+          "row_slope_std": 0.024627787992358208,
+          "gain_error_mean": 0.8753682523965836,
+          "gain_error_effect_size": 35.54392492724504,
+          "raw_bias_effect_size": -0.014941074912212438,
+          "raw_bias_zscore": -1.912457588763192,
+          "mean_abs_ratio": 0.12014184147119522,
+          "n_elements": 16384
+        }
+      },
+      "w2_chain_blockscale": {
+        "vs_oracle_routed_expert_output": {
+          "vs": "oracle_hf_fp8",
+          "frob_rel": 0.00606554681592674,
+          "row_slope_mean": 0.9997184872627258,
+          "row_slope_min": 0.9978410601615906,
+          "row_slope_max": 1.0004011392593384,
+          "row_slope_std": 0.0008349885465577245,
+          "gain_error_mean": 0.00028149038553237915,
+          "gain_error_effect_size": 0.3371232862592592,
+          "raw_bias_effect_size": -0.012230126609315106,
+          "raw_bias_zscore": -1.5654562059923336,
+          "mean_abs_ratio": 0.999937117099762,
+          "n_elements": 16384
+        },
+        "vs_fp32_scale_chain": {
+          "vs": "fp32_scale_chain",
+          "frob_rel": 0.006658889757820031,
+          "row_slope_mean": 0.9993956089019775,
+          "row_slope_min": 0.9971843361854553,
+          "row_slope_max": 1.0021429061889648,
+          "row_slope_std": 0.0014543315628543496,
+          "gain_error_mean": 0.0006043463945388794,
+          "gain_error_effect_size": 0.41553742005543076,
+          "raw_bias_effect_size": -0.0038849067800250095,
+          "raw_bias_zscore": -0.4972680678432012,
+          "mean_abs_ratio": 1.0000474452972412,
+          "n_elements": 16384
+        }
+      },
+      "w2_chain_fp32ref": {
+        "vs_oracle_routed_expert_output": {
+          "vs": "oracle_hf_fp8",
+          "frob_rel": 0.007418123916217146,
+          "row_slope_mean": 1.000298261642456,
+          "row_slope_min": 0.997936487197876,
+          "row_slope_max": 1.002050518989563,
+          "row_slope_std": 0.0012525921920314431,
+          "gain_error_mean": -0.00029822438955307007,
+          "gain_error_effect_size": -0.23808381600128345,
+          "raw_bias_effect_size": -0.006514183536189845,
+          "raw_bias_zscore": -0.8338154926323001,
+          "mean_abs_ratio": 0.9998896718025208,
+          "n_elements": 16384
+        }
+      },
+      "w2_chain_bf16ref": {
+        "vs_oracle_routed_expert_output": {
+          "vs": "oracle_hf_fp8",
+          "frob_rel": 0.007573430654050401,
+          "row_slope_mean": 1.0003516674041748,
+          "row_slope_min": 0.9980402588844299,
+          "row_slope_max": 1.0021367073059082,
+          "row_slope_std": 0.0012239136267453432,
+          "gain_error_mean": -0.0003515779972076416,
+          "gain_error_effect_size": -0.2872585523316824,
+          "raw_bias_effect_size": -0.006626722365138841,
+          "raw_bias_zscore": -0.8482204627377716,
+          "mean_abs_ratio": 0.9999905228614807,
+          "n_elements": 16384
+        },
+        "vs_fp32_scale_chain": {
+          "vs": "fp32_scale_chain",
+          "frob_rel": 0.001696417589818947,
+          "row_slope_mean": 1.0000531673431396,
+          "row_slope_min": 0.9996364712715149,
+          "row_slope_max": 1.000234603881836,
+          "row_slope_std": 0.00019006940419785678,
+          "gain_error_mean": -5.32492995262146e-05,
+          "gain_error_effect_size": -0.28016454697199633,
+          "raw_bias_effect_size": -0.0010993407412705782,
+          "raw_bias_zscore": -0.140715614882634,
+          "mean_abs_ratio": 1.00010085105896,
+          "n_elements": 16384
+        }
+      }
+    },
+    "gap7_hang_guard": {
+      "fp8_k_tile_count": 4,
+      "num_ab_stages_run": [
+        8,
+        4
+      ],
+      "completed_without_hang": true
+    },
+    "preserved_scale_class_p10": [
+      0.0021,
+      0.00435
+    ]
   },
-  "tokens": 8,
-  "activated_experts": 52,
-  "activations": "HF oracle moe0.layer_input (real layer-0 MoE input)",
-  "routing": "HF oracle moe0.topk_ids / moe0.topk_renorm_weights",
-  "weights": "checkpoint layer-0 experts.{e}.{gate,up,down}_proj.weight + weight_scale_inv (bf16 in the file, widened with .float() exactly as MPK's loader does)",
-  "harness": "tests/runtime_python/blackwell/sm100_fp8_moe_qwen35/runtime_kernel_wrapper_qwen35.cu"
- }
+  "methodology_note": "The raw residual effect size (mean/std of actual-reference, P10's bias statistic) is NOT the detector for this mechanism: an exponent truncation multiplies each output element by 1/(m_a*m_b), and a multiplicative shrink of a near-zero-mean output leaves a near-zero-mean residual. Both statistics are reported; the decision uses the per-row projection slope <actual,ref>/<ref,ref>, which is n-invariant and is exactly what a gain error moves. frob-rel (magnitude-weighted L2), never an elementwise max, is used for size -- a below-RMS e4m3 output element can show a large relative delta from rounding alone.",
+  "prediction": {
+    "mechanism": "fp8_group_gemm_sm100.cuh warp 6 keeps only the float32 exponent field of BOTH scale operands: applied = 2^floor(log2(s)), a power-of-two truncation toward zero (never rounding).",
+    "predicted_per_element_factor_range": [
+      0.25,
+      1.0
+    ],
+    "predicted_row_slope_if_mantissas_log_uniform": 0.5204,
+    "predicted_frob_rel_vs_fp32_scale_order": "3e-1 to 6e-1",
+    "preserved_scale_class_from_p10": "2e-3 to 4.4e-3",
+    "predicted_raw_bias_effect_size": "SMALL (<0.1): a multiplicative shrink of a zero-mean output leaves a near-zero-mean residual -- this is the methodology trap; the detector is the per-row projection slope.",
+    "predicted_mechanism_residual_frob_rel": "~1e-3 (bf16 output rounding + accumulation order) if the truncation model is the whole story",
+    "predicted_w2_4ktile_hang": "no hang: the 2026-04-22 ab_empty fix removed the wrap-around race, and num_ab_stages=8 > k_tile_count=4"
+  },
+  "fallback_evidence": {
+    "w13_vs_fp32_scale": {
+      "vs": "fp32_scale_torch",
+      "frob_rel": 0.0016242142544300963,
+      "row_slope_mean": 1.0000052452087402,
+      "row_slope_min": 0.9998487234115601,
+      "row_slope_max": 1.000173807144165,
+      "row_slope_std": 0.00011794629244832322,
+      "gain_error_mean": -5.2228569984436035e-06,
+      "gain_error_effect_size": -0.04427600385030719,
+      "raw_bias_effect_size": -0.00013710386754453314,
+      "raw_bias_zscore": -0.03509859009140048,
+      "mean_abs_ratio": 0.9999958276748657,
+      "n_elements": 65536
+    },
+    "w2_vs_fp32_scale": {
+      "vs": "fp32_scale_torch",
+      "frob_rel": 0.0016511211423405087,
+      "row_slope_mean": 1.0000135898590088,
+      "row_slope_min": 0.9999907612800598,
+      "row_slope_max": 1.0000340938568115,
+      "row_slope_std": 1.6034362488426268e-05,
+      "gain_error_mean": -1.3515353202819824e-05,
+      "gain_error_effect_size": -0.8434744212159456,
+      "raw_bias_effect_size": 0.0036887941430109113,
+      "raw_bias_zscore": 1.3354861326972083,
+      "mean_abs_ratio": 0.9999943375587463,
+      "n_elements": 131072
+    },
+    "kernel": "include/mirage/persistent_kernel/tasks/blackwell/moe_fp8_blockscale_sm100.cuh",
+    "task_ids": [
+      241,
+      242
+    ]
+  },
+  "activation_quant_fp32_scale": {
+    "primitive": "per_token_group_quantize_fp8_task_impl <SCALE_UE8M0=false> == quantize_fp8_layer(scale_ue8m0=False)",
+    "contract": "vllm-graph.md 3.4 / v1-architecture.md 6.1: group 128, absmax = max(max|x|, 1e-10), scale = absmax/448, x/scale (division), clamp to +-448 BEFORE the RN-even e4m3 cast",
+    "shapes_covered": [
+      {
+        "kind": "w13 activation [tokens, 2048]",
+        "rows": [
+          1,
+          2,
+          4,
+          8,
+          16
+        ]
+      },
+      {
+        "kind": "w2 activation [tokens, 8, 512]",
+        "rows": [
+          8,
+          16,
+          64,
+          128
+        ]
+      }
+    ],
+    "standalone_build": {
+      "all_scales_bit_exact_vs_true_division": true,
+      "all_values_bit_exact": true,
+      "zero_group_eps_branch_ok": true
+    },
+    "reference_pitfall": "`t / 448.0` with a PYTHON scalar is lowered by PyTorch to a reciprocal multiply and is 1 fp32 ULP from true division; a torch reference must use torch.div with a 0-dim tensor or it mis-reports the kernel as wrong.",
+    "cases": [
+      {
+        "case": "w13 input rows=1",
+        "rows": 1,
+        "hidden": 2048,
+        "scale_bit_exact": true,
+        "ulp_histogram": {
+          "0": 2048
+        }
+      },
+      {
+        "case": "w13 input rows=2",
+        "rows": 2,
+        "hidden": 2048,
+        "scale_bit_exact": true,
+        "ulp_histogram": {
+          "0": 4096
+        }
+      },
+      {
+        "case": "w13 input rows=4",
+        "rows": 4,
+        "hidden": 2048,
+        "scale_bit_exact": true,
+        "ulp_histogram": {
+          "0": 8192
+        }
+      },
+      {
+        "case": "w13 input rows=8",
+        "rows": 8,
+        "hidden": 2048,
+        "scale_bit_exact": true,
+        "ulp_histogram": {
+          "0": 16384
+        }
+      },
+      {
+        "case": "w13 input rows=16",
+        "rows": 16,
+        "hidden": 2048,
+        "scale_bit_exact": true,
+        "ulp_histogram": {
+          "0": 32768
+        }
+      },
+      {
+        "case": "w2 input tokens=1",
+        "rows": 8,
+        "hidden": 512,
+        "scale_bit_exact": true,
+        "ulp_histogram": {
+          "0": 4096
+        }
+      },
+      {
+        "case": "w2 input tokens=2",
+        "rows": 16,
+        "hidden": 512,
+        "scale_bit_exact": true,
+        "ulp_histogram": {
+          "0": 8192
+        }
+      },
+      {
+        "case": "w2 input tokens=8",
+        "rows": 64,
+        "hidden": 512,
+        "scale_bit_exact": true,
+        "ulp_histogram": {
+          "0": 32768
+        }
+      },
+      {
+        "case": "w2 input tokens=16",
+        "rows": 128,
+        "hidden": 512,
+        "scale_bit_exact": true,
+        "ulp_histogram": {
+          "0": 65536
+        }
+      }
+    ],
+    "megakernel_build": {
+      "note": "MPK compiles the megakernel with -use_fast_math, which rewrites the quantizer's group_max/448.0f into a reciprocal multiply. That is 1 fp32 ULP (~2e-7 relative) from true division -- four orders of magnitude below one e4m3 LSB and below p10b's measured 1-e4m3-ULP disagreement between two independent implementations of this primitive.",
+      "scale_forms": [
+        {
+          "tensor": "activation",
+          "form": "reciprocal_multiply (-use_fast_math)",
+          "max_fp32_ulp_from_true_division": 1
+        },
+        {
+          "tensor": "w2 activation",
+          "form": "reciprocal_multiply (-use_fast_math)",
+          "max_fp32_ulp_from_true_division": 1
+        }
+      ],
+      "both_blockscale_tasks_ran_in_megakernel": true
+    }
+  },
+  "env": {
+    "hostname": "catalyst-fleet1.cs.cmu.edu",
+    "gpu_name": "NVIDIA B200",
+    "cuda_visible_devices": "7",
+    "torch": "2.13.0+cu130",
+    "checkpoint": "Qwen/Qwen3.5-35B-A3B-FP8",
+    "checkpoint_revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+    "oracle_dumps": "/home/muhengl/mpk-qwen35/oracle-work/dumps",
+    "timestamp_utc": "2026-07-26T07:34:10.504684+00:00"
+  },
+  "stage_artifacts": {
+    "w13": "p2_w13.json",
+    "w2": "p2_w2.json",
+    "token": "p2_token.json",
+    "activation_quant": "p2_activation_quant.json"
+  },
+  "measurement": {
+    "shapes": {
+      "w13": [
+        256,
+        1024,
+        2048
+      ],
+      "w2": [
+        256,
+        2048,
+        512
+      ]
+    },
+    "tokens": 8,
+    "activated_experts": 52,
+    "activations": "HF oracle moe0.layer_input (real layer-0 MoE input)",
+    "routing": "HF oracle moe0.topk_ids / moe0.topk_renorm_weights",
+    "weights": "checkpoint layer-0 experts.{e}.{gate,up,down}_proj.weight + weight_scale_inv (bf16 in the file, widened with .float() exactly as MPK's loader does)",
+    "harness": "tests/runtime_python/blackwell/sm100_fp8_moe_qwen35/runtime_kernel_wrapper_qwen35.cu"
+  },
+  "corrections": [
+    "2026-07-26 coordinator: fallback task ids corrected 280/281 -> 241/242 (transcription error; ground truth runtime_header.h:152-153; 280/281 are pre-existing TASK_MOE_TOPK_SIGMOID/TASK_ELEMENTWISE_ADD)"
+  ]
 }
