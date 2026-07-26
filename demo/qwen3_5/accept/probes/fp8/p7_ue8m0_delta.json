@@ -1,0 +1,114 @@
+{
+  "expected_outcome": "nonzero deltas in BOTH directions for every tensor (checkpoint scales are not exact powers of two) -- exactly-zero deltas would falsify v1-architecture.md SS6.2's rejection of MPK's existing UE8M0-requantizing dense fp8 path.",
+  "all_tensors_show_bidirectional_nonzero_delta": true,
+  "tensors": [
+    {
+      "requested_tensor": "layers.0.linear_attn.in_proj_qkv",
+      "resolved_tensor": "layers.0.linear_attn.in_proj_qkv",
+      "substitution_note": null,
+      "shape": [
+        8192,
+        2048
+      ],
+      "checkpoint_scale_shape": [
+        64,
+        16
+      ],
+      "checkpoint_scale_dtype": "torch.bfloat16",
+      "checkpoint_scale_frac_already_pow2": 0.005859375,
+      "max_abs_delta": 0.008056640625,
+      "mean_abs_delta": 0.0002643835614435375,
+      "mean_signed_delta": 9.828785607624013e-08,
+      "std_signed_delta": 0.00041103787953034043,
+      "frob_rel_delta": 0.026469784862072375,
+      "n_positive_deltas": 8102047,
+      "n_negative_deltas": 8099504,
+      "n_zero_deltas": 575665,
+      "n_elements": 16777216,
+      "frac_nonzero": 0.9656876921653748,
+      "nonzero_in_both_directions": true
+    },
+    {
+      "requested_tensor": "layers.3.self_attn.q_proj",
+      "resolved_tensor": "layers.3.self_attn.q_proj",
+      "substitution_note": null,
+      "shape": [
+        8192,
+        2048
+      ],
+      "checkpoint_scale_shape": [
+        64,
+        16
+      ],
+      "checkpoint_scale_dtype": "torch.bfloat16",
+      "checkpoint_scale_frac_already_pow2": 0.0087890625,
+      "max_abs_delta": 0.014892578125,
+      "mean_abs_delta": 0.00028570095309987664,
+      "mean_signed_delta": 8.662137673809411e-08,
+      "std_signed_delta": 0.0004384201893117279,
+      "frob_rel_delta": 0.0263021458737437,
+      "n_positive_deltas": 8228320,
+      "n_negative_deltas": 8219707,
+      "n_zero_deltas": 329189,
+      "n_elements": 16777216,
+      "frac_nonzero": 0.9803788065910339,
+      "nonzero_in_both_directions": true
+    },
+    {
+      "requested_tensor": "layers.0.linear_attn.out_proj",
+      "resolved_tensor": "layers.0.linear_attn.out_proj",
+      "substitution_note": null,
+      "shape": [
+        2048,
+        4096
+      ],
+      "checkpoint_scale_shape": [
+        16,
+        32
+      ],
+      "checkpoint_scale_dtype": "torch.bfloat16",
+      "checkpoint_scale_frac_already_pow2": 0.001953125,
+      "max_abs_delta": 0.01513671875,
+      "mean_abs_delta": 0.0002680421166587621,
+      "mean_signed_delta": -1.3077375626835419e-08,
+      "std_signed_delta": 0.0004168626619502902,
+      "frob_rel_delta": 0.02661841873696686,
+      "n_positive_deltas": 4143033,
+      "n_negative_deltas": 4142973,
+      "n_zero_deltas": 102602,
+      "n_elements": 8388608,
+      "frac_nonzero": 0.9877688884735107,
+      "nonzero_in_both_directions": true
+    },
+    {
+      "requested_tensor": "layers.0.mlp.shared_expert.gate_proj",
+      "resolved_tensor": "layers.0.mlp.shared_expert.gate_proj",
+      "substitution_note": null,
+      "shape": [
+        512,
+        2048
+      ],
+      "checkpoint_scale_shape": [
+        4,
+        16
+      ],
+      "checkpoint_scale_dtype": "torch.bfloat16",
+      "checkpoint_scale_frac_already_pow2": 0.0,
+      "max_abs_delta": 0.00775146484375,
+      "mean_abs_delta": 0.00021530188678298146,
+      "mean_signed_delta": -1.7500663318514853e-07,
+      "std_signed_delta": 0.00034323951695114374,
+      "frob_rel_delta": 0.02745967689959876,
+      "n_positive_deltas": 518712,
+      "n_negative_deltas": 518745,
+      "n_zero_deltas": 11119,
+      "n_elements": 1048576,
+      "frac_nonzero": 0.9893960952758789,
+      "nonzero_in_both_directions": true
+    }
+  ],
+  "method": "Calls the REAL mirage.mpk.models.deepseek_v3.builder.DeepSeekV3Builder._requantize_fp8_for_ue8m0 (imported, not reimplemented) on real checkpoint tensors; recomputes the per-block UE8M0 scale via the same public formula (builder.py steps 1-2, verified against source) to dequantize the 'after' side for comparison, rather than reverse-engineering packed_ue8m0's strided uint32 bit-packing.",
+  "torch_version": "2.13.0+cu130",
+  "checkpoint": "Qwen/Qwen3.5-35B-A3B-FP8",
+  "checkpoint_revision": "9d1823d2dee688a6b25e77009dc727688c44936e"
+}

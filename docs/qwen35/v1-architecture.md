@@ -393,6 +393,15 @@ required final runtime, so it cannot be an M2 endpoint.)* Consequences:
   directly (skip its UE8M0 requant stage) — new M2 issue M2-I12, ordered before dense
   integration; **probe P10** (CUTLASS-class vs HF-Triton numerics + perf on real layer-0
   weights) moves to the FRONT of M2 as its design gate.
+  *P10 EXECUTED (2026-07-26, M2-I2; see accept/probes/fp8/p10_verdict.json): the gate for
+  M2-I12 is its NUMERICS half — PASSED (frob-rel 2–4e-3 across 20 cases, no systematic bias;
+  P7: the rejected UE8M0 requant's delta is 7–10× larger). The PERF half (≥1.5×) FAILED for
+  the STANDALONE op (0.50–1.01× vs bf16; latency-bound at M≤16, root-caused) — recorded as an
+  M3 PRIOR, not an M2 blocker: after the AC-1 amendment, fp8-dense is a checkpoint-fidelity
+  requirement, and P1's own data quantifies why (bf16-dense substitution flips 3/10 prompts vs
+  the reference; the preserved-scale delta class is 7–10× smaller). No standalone-speed claim
+  is made for fp8-dense in M2; the in-megakernel byte economics (no per-op launch tax; dense
+  weights dominate step bytes at high bandwidth utilization) are measured in M3.*
 - **bf16-dense remains a DEBUGGING SCAFFOLD only:** during GDN bring-up, a bf16-dense build may
   be used to isolate new-kernel bugs (dense GEMMs known-exact ⇒ suspicion concentrates on the
   new kernels), but no M2 acceptance run may use it; the M2 demo acceptance configuration is

@@ -1,0 +1,2484 @@
+{
+  "summary": {
+    "verdict_informational": "MISMATCH -- diagnostic only per SS6.2 amendment, not a GO/NO-GO gate",
+    "n_prompts": 10,
+    "n_prompts_full_match": 7,
+    "total_positions_compared": 640,
+    "total_positions_matched": 596,
+    "n_dense_modules_patched": 250,
+    "n_expert_related_modules_left_native_fp8": 80,
+    "patched_module_names": [
+      "model.layers.0.linear_attn.out_proj",
+      "model.layers.0.linear_attn.in_proj_qkv",
+      "model.layers.0.linear_attn.in_proj_z",
+      "model.layers.0.mlp.shared_expert.gate_proj",
+      "model.layers.0.mlp.shared_expert.up_proj",
+      "model.layers.0.mlp.shared_expert.down_proj",
+      "model.layers.1.linear_attn.out_proj",
+      "model.layers.1.linear_attn.in_proj_qkv",
+      "model.layers.1.linear_attn.in_proj_z",
+      "model.layers.1.mlp.shared_expert.gate_proj",
+      "model.layers.1.mlp.shared_expert.up_proj",
+      "model.layers.1.mlp.shared_expert.down_proj",
+      "model.layers.2.linear_attn.out_proj",
+      "model.layers.2.linear_attn.in_proj_qkv",
+      "model.layers.2.linear_attn.in_proj_z",
+      "model.layers.2.mlp.shared_expert.gate_proj",
+      "model.layers.2.mlp.shared_expert.up_proj",
+      "model.layers.2.mlp.shared_expert.down_proj",
+      "model.layers.3.self_attn.q_proj",
+      "model.layers.3.self_attn.k_proj",
+      "model.layers.3.self_attn.v_proj",
+      "model.layers.3.self_attn.o_proj",
+      "model.layers.3.mlp.shared_expert.gate_proj",
+      "model.layers.3.mlp.shared_expert.up_proj",
+      "model.layers.3.mlp.shared_expert.down_proj",
+      "model.layers.4.linear_attn.out_proj",
+      "model.layers.4.linear_attn.in_proj_qkv",
+      "model.layers.4.linear_attn.in_proj_z",
+      "model.layers.4.mlp.shared_expert.gate_proj",
+      "model.layers.4.mlp.shared_expert.up_proj",
+      "model.layers.4.mlp.shared_expert.down_proj",
+      "model.layers.5.linear_attn.out_proj",
+      "model.layers.5.linear_attn.in_proj_qkv",
+      "model.layers.5.linear_attn.in_proj_z",
+      "model.layers.5.mlp.shared_expert.gate_proj",
+      "model.layers.5.mlp.shared_expert.up_proj",
+      "model.layers.5.mlp.shared_expert.down_proj",
+      "model.layers.6.linear_attn.out_proj",
+      "model.layers.6.linear_attn.in_proj_qkv",
+      "model.layers.6.linear_attn.in_proj_z",
+      "model.layers.6.mlp.shared_expert.gate_proj",
+      "model.layers.6.mlp.shared_expert.up_proj",
+      "model.layers.6.mlp.shared_expert.down_proj",
+      "model.layers.7.self_attn.q_proj",
+      "model.layers.7.self_attn.k_proj",
+      "model.layers.7.self_attn.v_proj",
+      "model.layers.7.self_attn.o_proj",
+      "model.layers.7.mlp.shared_expert.gate_proj",
+      "model.layers.7.mlp.shared_expert.up_proj",
+      "model.layers.7.mlp.shared_expert.down_proj",
+      "model.layers.8.linear_attn.out_proj",
+      "model.layers.8.linear_attn.in_proj_qkv",
+      "model.layers.8.linear_attn.in_proj_z",
+      "model.layers.8.mlp.shared_expert.gate_proj",
+      "model.layers.8.mlp.shared_expert.up_proj",
+      "model.layers.8.mlp.shared_expert.down_proj",
+      "model.layers.9.linear_attn.out_proj",
+      "model.layers.9.linear_attn.in_proj_qkv",
+      "model.layers.9.linear_attn.in_proj_z",
+      "model.layers.9.mlp.shared_expert.gate_proj",
+      "model.layers.9.mlp.shared_expert.up_proj",
+      "model.layers.9.mlp.shared_expert.down_proj",
+      "model.layers.10.linear_attn.out_proj",
+      "model.layers.10.linear_attn.in_proj_qkv",
+      "model.layers.10.linear_attn.in_proj_z",
+      "model.layers.10.mlp.shared_expert.gate_proj",
+      "model.layers.10.mlp.shared_expert.up_proj",
+      "model.layers.10.mlp.shared_expert.down_proj",
+      "model.layers.11.self_attn.q_proj",
+      "model.layers.11.self_attn.k_proj",
+      "model.layers.11.self_attn.v_proj",
+      "model.layers.11.self_attn.o_proj",
+      "model.layers.11.mlp.shared_expert.gate_proj",
+      "model.layers.11.mlp.shared_expert.up_proj",
+      "model.layers.11.mlp.shared_expert.down_proj",
+      "model.layers.12.linear_attn.out_proj",
+      "model.layers.12.linear_attn.in_proj_qkv",
+      "model.layers.12.linear_attn.in_proj_z",
+      "model.layers.12.mlp.shared_expert.gate_proj",
+      "model.layers.12.mlp.shared_expert.up_proj",
+      "model.layers.12.mlp.shared_expert.down_proj",
+      "model.layers.13.linear_attn.out_proj",
+      "model.layers.13.linear_attn.in_proj_qkv",
+      "model.layers.13.linear_attn.in_proj_z",
+      "model.layers.13.mlp.shared_expert.gate_proj",
+      "model.layers.13.mlp.shared_expert.up_proj",
+      "model.layers.13.mlp.shared_expert.down_proj",
+      "model.layers.14.linear_attn.out_proj",
+      "model.layers.14.linear_attn.in_proj_qkv",
+      "model.layers.14.linear_attn.in_proj_z",
+      "model.layers.14.mlp.shared_expert.gate_proj",
+      "model.layers.14.mlp.shared_expert.up_proj",
+      "model.layers.14.mlp.shared_expert.down_proj",
+      "model.layers.15.self_attn.q_proj",
+      "model.layers.15.self_attn.k_proj",
+      "model.layers.15.self_attn.v_proj",
+      "model.layers.15.self_attn.o_proj",
+      "model.layers.15.mlp.shared_expert.gate_proj",
+      "model.layers.15.mlp.shared_expert.up_proj",
+      "model.layers.15.mlp.shared_expert.down_proj",
+      "model.layers.16.linear_attn.out_proj",
+      "model.layers.16.linear_attn.in_proj_qkv",
+      "model.layers.16.linear_attn.in_proj_z",
+      "model.layers.16.mlp.shared_expert.gate_proj",
+      "model.layers.16.mlp.shared_expert.up_proj",
+      "model.layers.16.mlp.shared_expert.down_proj",
+      "model.layers.17.linear_attn.out_proj",
+      "model.layers.17.linear_attn.in_proj_qkv",
+      "model.layers.17.linear_attn.in_proj_z",
+      "model.layers.17.mlp.shared_expert.gate_proj",
+      "model.layers.17.mlp.shared_expert.up_proj",
+      "model.layers.17.mlp.shared_expert.down_proj",
+      "model.layers.18.linear_attn.out_proj",
+      "model.layers.18.linear_attn.in_proj_qkv",
+      "model.layers.18.linear_attn.in_proj_z",
+      "model.layers.18.mlp.shared_expert.gate_proj",
+      "model.layers.18.mlp.shared_expert.up_proj",
+      "model.layers.18.mlp.shared_expert.down_proj",
+      "model.layers.19.self_attn.q_proj",
+      "model.layers.19.self_attn.k_proj",
+      "model.layers.19.self_attn.v_proj",
+      "model.layers.19.self_attn.o_proj",
+      "model.layers.19.mlp.shared_expert.gate_proj",
+      "model.layers.19.mlp.shared_expert.up_proj",
+      "model.layers.19.mlp.shared_expert.down_proj",
+      "model.layers.20.linear_attn.out_proj",
+      "model.layers.20.linear_attn.in_proj_qkv",
+      "model.layers.20.linear_attn.in_proj_z",
+      "model.layers.20.mlp.shared_expert.gate_proj",
+      "model.layers.20.mlp.shared_expert.up_proj",
+      "model.layers.20.mlp.shared_expert.down_proj",
+      "model.layers.21.linear_attn.out_proj",
+      "model.layers.21.linear_attn.in_proj_qkv",
+      "model.layers.21.linear_attn.in_proj_z",
+      "model.layers.21.mlp.shared_expert.gate_proj",
+      "model.layers.21.mlp.shared_expert.up_proj",
+      "model.layers.21.mlp.shared_expert.down_proj",
+      "model.layers.22.linear_attn.out_proj",
+      "model.layers.22.linear_attn.in_proj_qkv",
+      "model.layers.22.linear_attn.in_proj_z",
+      "model.layers.22.mlp.shared_expert.gate_proj",
+      "model.layers.22.mlp.shared_expert.up_proj",
+      "model.layers.22.mlp.shared_expert.down_proj",
+      "model.layers.23.self_attn.q_proj",
+      "model.layers.23.self_attn.k_proj",
+      "model.layers.23.self_attn.v_proj",
+      "model.layers.23.self_attn.o_proj",
+      "model.layers.23.mlp.shared_expert.gate_proj",
+      "model.layers.23.mlp.shared_expert.up_proj",
+      "model.layers.23.mlp.shared_expert.down_proj",
+      "model.layers.24.linear_attn.out_proj",
+      "model.layers.24.linear_attn.in_proj_qkv",
+      "model.layers.24.linear_attn.in_proj_z",
+      "model.layers.24.mlp.shared_expert.gate_proj",
+      "model.layers.24.mlp.shared_expert.up_proj",
+      "model.layers.24.mlp.shared_expert.down_proj",
+      "model.layers.25.linear_attn.out_proj",
+      "model.layers.25.linear_attn.in_proj_qkv",
+      "model.layers.25.linear_attn.in_proj_z",
+      "model.layers.25.mlp.shared_expert.gate_proj",
+      "model.layers.25.mlp.shared_expert.up_proj",
+      "model.layers.25.mlp.shared_expert.down_proj",
+      "model.layers.26.linear_attn.out_proj",
+      "model.layers.26.linear_attn.in_proj_qkv",
+      "model.layers.26.linear_attn.in_proj_z",
+      "model.layers.26.mlp.shared_expert.gate_proj",
+      "model.layers.26.mlp.shared_expert.up_proj",
+      "model.layers.26.mlp.shared_expert.down_proj",
+      "model.layers.27.self_attn.q_proj",
+      "model.layers.27.self_attn.k_proj",
+      "model.layers.27.self_attn.v_proj",
+      "model.layers.27.self_attn.o_proj",
+      "model.layers.27.mlp.shared_expert.gate_proj",
+      "model.layers.27.mlp.shared_expert.up_proj",
+      "model.layers.27.mlp.shared_expert.down_proj",
+      "model.layers.28.linear_attn.out_proj",
+      "model.layers.28.linear_attn.in_proj_qkv",
+      "model.layers.28.linear_attn.in_proj_z",
+      "model.layers.28.mlp.shared_expert.gate_proj",
+      "model.layers.28.mlp.shared_expert.up_proj",
+      "model.layers.28.mlp.shared_expert.down_proj",
+      "model.layers.29.linear_attn.out_proj",
+      "model.layers.29.linear_attn.in_proj_qkv",
+      "model.layers.29.linear_attn.in_proj_z",
+      "model.layers.29.mlp.shared_expert.gate_proj",
+      "model.layers.29.mlp.shared_expert.up_proj",
+      "model.layers.29.mlp.shared_expert.down_proj",
+      "model.layers.30.linear_attn.out_proj",
+      "model.layers.30.linear_attn.in_proj_qkv",
+      "model.layers.30.linear_attn.in_proj_z",
+      "model.layers.30.mlp.shared_expert.gate_proj",
+      "model.layers.30.mlp.shared_expert.up_proj",
+      "model.layers.30.mlp.shared_expert.down_proj",
+      "model.layers.31.self_attn.q_proj",
+      "model.layers.31.self_attn.k_proj",
+      "model.layers.31.self_attn.v_proj",
+      "model.layers.31.self_attn.o_proj",
+      "model.layers.31.mlp.shared_expert.gate_proj",
+      "model.layers.31.mlp.shared_expert.up_proj",
+      "model.layers.31.mlp.shared_expert.down_proj",
+      "model.layers.32.linear_attn.out_proj",
+      "model.layers.32.linear_attn.in_proj_qkv",
+      "model.layers.32.linear_attn.in_proj_z",
+      "model.layers.32.mlp.shared_expert.gate_proj",
+      "model.layers.32.mlp.shared_expert.up_proj",
+      "model.layers.32.mlp.shared_expert.down_proj",
+      "model.layers.33.linear_attn.out_proj",
+      "model.layers.33.linear_attn.in_proj_qkv",
+      "model.layers.33.linear_attn.in_proj_z",
+      "model.layers.33.mlp.shared_expert.gate_proj",
+      "model.layers.33.mlp.shared_expert.up_proj",
+      "model.layers.33.mlp.shared_expert.down_proj",
+      "model.layers.34.linear_attn.out_proj",
+      "model.layers.34.linear_attn.in_proj_qkv",
+      "model.layers.34.linear_attn.in_proj_z",
+      "model.layers.34.mlp.shared_expert.gate_proj",
+      "model.layers.34.mlp.shared_expert.up_proj",
+      "model.layers.34.mlp.shared_expert.down_proj",
+      "model.layers.35.self_attn.q_proj",
+      "model.layers.35.self_attn.k_proj",
+      "model.layers.35.self_attn.v_proj",
+      "model.layers.35.self_attn.o_proj",
+      "model.layers.35.mlp.shared_expert.gate_proj",
+      "model.layers.35.mlp.shared_expert.up_proj",
+      "model.layers.35.mlp.shared_expert.down_proj",
+      "model.layers.36.linear_attn.out_proj",
+      "model.layers.36.linear_attn.in_proj_qkv",
+      "model.layers.36.linear_attn.in_proj_z",
+      "model.layers.36.mlp.shared_expert.gate_proj",
+      "model.layers.36.mlp.shared_expert.up_proj",
+      "model.layers.36.mlp.shared_expert.down_proj",
+      "model.layers.37.linear_attn.out_proj",
+      "model.layers.37.linear_attn.in_proj_qkv",
+      "model.layers.37.linear_attn.in_proj_z",
+      "model.layers.37.mlp.shared_expert.gate_proj",
+      "model.layers.37.mlp.shared_expert.up_proj",
+      "model.layers.37.mlp.shared_expert.down_proj",
+      "model.layers.38.linear_attn.out_proj",
+      "model.layers.38.linear_attn.in_proj_qkv",
+      "model.layers.38.linear_attn.in_proj_z",
+      "model.layers.38.mlp.shared_expert.gate_proj",
+      "model.layers.38.mlp.shared_expert.up_proj",
+      "model.layers.38.mlp.shared_expert.down_proj",
+      "model.layers.39.self_attn.q_proj",
+      "model.layers.39.self_attn.k_proj",
+      "model.layers.39.self_attn.v_proj",
+      "model.layers.39.self_attn.o_proj",
+      "model.layers.39.mlp.shared_expert.gate_proj",
+      "model.layers.39.mlp.shared_expert.up_proj",
+      "model.layers.39.mlp.shared_expert.down_proj"
+    ],
+    "expert_related_module_names": [
+      "model.layers.0.mlp.experts",
+      "model.layers.0.mlp.experts.act_fn",
+      "model.layers.1.mlp.experts",
+      "model.layers.1.mlp.experts.act_fn",
+      "model.layers.2.mlp.experts",
+      "model.layers.2.mlp.experts.act_fn",
+      "model.layers.3.mlp.experts",
+      "model.layers.3.mlp.experts.act_fn",
+      "model.layers.4.mlp.experts",
+      "model.layers.4.mlp.experts.act_fn",
+      "model.layers.5.mlp.experts",
+      "model.layers.5.mlp.experts.act_fn",
+      "model.layers.6.mlp.experts",
+      "model.layers.6.mlp.experts.act_fn",
+      "model.layers.7.mlp.experts",
+      "model.layers.7.mlp.experts.act_fn",
+      "model.layers.8.mlp.experts",
+      "model.layers.8.mlp.experts.act_fn",
+      "model.layers.9.mlp.experts",
+      "model.layers.9.mlp.experts.act_fn",
+      "model.layers.10.mlp.experts",
+      "model.layers.10.mlp.experts.act_fn",
+      "model.layers.11.mlp.experts",
+      "model.layers.11.mlp.experts.act_fn",
+      "model.layers.12.mlp.experts",
+      "model.layers.12.mlp.experts.act_fn",
+      "model.layers.13.mlp.experts",
+      "model.layers.13.mlp.experts.act_fn",
+      "model.layers.14.mlp.experts",
+      "model.layers.14.mlp.experts.act_fn",
+      "model.layers.15.mlp.experts",
+      "model.layers.15.mlp.experts.act_fn",
+      "model.layers.16.mlp.experts",
+      "model.layers.16.mlp.experts.act_fn",
+      "model.layers.17.mlp.experts",
+      "model.layers.17.mlp.experts.act_fn",
+      "model.layers.18.mlp.experts",
+      "model.layers.18.mlp.experts.act_fn",
+      "model.layers.19.mlp.experts",
+      "model.layers.19.mlp.experts.act_fn",
+      "model.layers.20.mlp.experts",
+      "model.layers.20.mlp.experts.act_fn",
+      "model.layers.21.mlp.experts",
+      "model.layers.21.mlp.experts.act_fn",
+      "model.layers.22.mlp.experts",
+      "model.layers.22.mlp.experts.act_fn",
+      "model.layers.23.mlp.experts",
+      "model.layers.23.mlp.experts.act_fn",
+      "model.layers.24.mlp.experts",
+      "model.layers.24.mlp.experts.act_fn",
+      "model.layers.25.mlp.experts",
+      "model.layers.25.mlp.experts.act_fn",
+      "model.layers.26.mlp.experts",
+      "model.layers.26.mlp.experts.act_fn",
+      "model.layers.27.mlp.experts",
+      "model.layers.27.mlp.experts.act_fn",
+      "model.layers.28.mlp.experts",
+      "model.layers.28.mlp.experts.act_fn",
+      "model.layers.29.mlp.experts",
+      "model.layers.29.mlp.experts.act_fn",
+      "model.layers.30.mlp.experts",
+      "model.layers.30.mlp.experts.act_fn",
+      "model.layers.31.mlp.experts",
+      "model.layers.31.mlp.experts.act_fn",
+      "model.layers.32.mlp.experts",
+      "model.layers.32.mlp.experts.act_fn",
+      "model.layers.33.mlp.experts",
+      "model.layers.33.mlp.experts.act_fn",
+      "model.layers.34.mlp.experts",
+      "model.layers.34.mlp.experts.act_fn",
+      "model.layers.35.mlp.experts",
+      "model.layers.35.mlp.experts.act_fn",
+      "model.layers.36.mlp.experts",
+      "model.layers.36.mlp.experts.act_fn",
+      "model.layers.37.mlp.experts",
+      "model.layers.37.mlp.experts.act_fn",
+      "model.layers.38.mlp.experts",
+      "model.layers.38.mlp.experts.act_fn",
+      "model.layers.39.mlp.experts",
+      "model.layers.39.mlp.experts.act_fn"
+    ],
+    "load_notes": {
+      "attempts": [
+        {
+          "class": "AutoModelForCausalLM",
+          "ok": true,
+          "seconds": 54.8
+        }
+      ],
+      "loaded_via": "AutoModelForCausalLM"
+    },
+    "model": "Qwen/Qwen3.5-35B-A3B-FP8",
+    "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+    "reference_json": "/home/muhengl/mpk-qwen35/reference_run/reference_outputs.json",
+    "transformers_disable_deepgemm_linear": "1",
+    "versions": {
+      "python": "3.12.3 (main, Jun 18 2025, 17:59:45) [GCC 13.3.0]",
+      "torch": "2.11.0+cu130",
+      "transformers": "5.14.1"
+    },
+    "gpu": "NVIDIA B200",
+    "cuda_visible_devices": "0",
+    "total_elapsed_seconds": 44.8
+  },
+  "module_inventory": [
+    {
+      "name": "model.layers.0.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.0.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.0.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.0.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.0.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.0.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.0.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.0.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.1.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.1.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.1.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.1.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.1.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.1.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.1.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.1.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.2.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.2.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.2.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.2.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.2.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.2.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.2.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.2.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.3.self_attn.q_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.3.self_attn.k_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.3.self_attn.v_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.3.self_attn.o_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.3.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.3.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.3.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.3.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.3.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.4.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.4.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.4.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.4.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.4.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.4.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.4.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.4.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.5.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.5.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.5.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.5.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.5.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.5.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.5.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.5.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.6.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.6.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.6.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.6.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.6.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.6.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.6.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.6.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.7.self_attn.q_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.7.self_attn.k_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.7.self_attn.v_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.7.self_attn.o_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.7.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.7.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.7.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.7.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.7.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.8.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.8.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.8.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.8.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.8.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.8.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.8.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.8.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.9.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.9.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.9.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.9.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.9.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.9.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.9.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.9.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.10.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.10.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.10.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.10.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.10.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.10.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.10.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.10.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.11.self_attn.q_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.11.self_attn.k_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.11.self_attn.v_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.11.self_attn.o_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.11.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.11.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.11.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.11.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.11.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.12.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.12.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.12.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.12.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.12.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.12.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.12.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.12.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.13.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.13.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.13.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.13.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.13.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.13.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.13.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.13.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.14.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.14.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.14.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.14.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.14.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.14.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.14.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.14.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.15.self_attn.q_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.15.self_attn.k_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.15.self_attn.v_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.15.self_attn.o_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.15.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.15.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.15.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.15.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.15.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.16.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.16.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.16.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.16.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.16.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.16.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.16.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.16.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.17.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.17.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.17.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.17.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.17.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.17.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.17.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.17.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.18.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.18.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.18.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.18.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.18.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.18.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.18.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.18.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.19.self_attn.q_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.19.self_attn.k_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.19.self_attn.v_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.19.self_attn.o_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.19.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.19.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.19.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.19.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.19.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.20.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.20.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.20.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.20.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.20.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.20.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.20.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.20.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.21.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.21.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.21.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.21.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.21.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.21.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.21.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.21.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.22.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.22.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.22.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.22.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.22.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.22.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.22.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.22.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.23.self_attn.q_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.23.self_attn.k_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.23.self_attn.v_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.23.self_attn.o_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.23.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.23.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.23.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.23.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.23.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.24.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.24.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.24.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.24.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.24.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.24.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.24.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.24.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.25.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.25.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.25.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.25.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.25.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.25.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.25.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.25.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.26.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.26.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.26.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.26.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.26.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.26.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.26.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.26.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.27.self_attn.q_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.27.self_attn.k_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.27.self_attn.v_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.27.self_attn.o_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.27.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.27.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.27.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.27.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.27.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.28.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.28.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.28.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.28.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.28.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.28.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.28.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.28.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.29.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.29.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.29.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.29.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.29.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.29.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.29.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.29.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.30.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.30.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.30.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.30.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.30.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.30.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.30.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.30.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.31.self_attn.q_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.31.self_attn.k_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.31.self_attn.v_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.31.self_attn.o_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.31.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.31.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.31.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.31.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.31.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.32.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.32.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.32.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.32.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.32.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.32.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.32.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.32.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.33.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.33.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.33.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.33.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.33.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.33.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.33.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.33.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.34.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.34.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.34.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.34.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.34.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.34.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.34.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.34.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.35.self_attn.q_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.35.self_attn.k_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.35.self_attn.v_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.35.self_attn.o_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.35.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.35.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.35.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.35.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.35.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.36.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.36.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.36.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.36.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.36.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.36.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.36.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.36.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.37.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.37.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.37.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.37.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.37.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.37.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.37.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.37.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.38.linear_attn.out_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.38.linear_attn.in_proj_qkv",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.38.linear_attn.in_proj_z",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.38.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.38.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.38.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.38.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.38.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.39.self_attn.q_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.39.self_attn.k_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.39.self_attn.v_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.39.self_attn.o_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.39.mlp.experts",
+      "class": "FP8Experts",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.39.mlp.experts.act_fn",
+      "class": "SiLUActivation",
+      "is_fp8_linear": false,
+      "name_says_experts": true
+    },
+    {
+      "name": "model.layers.39.mlp.shared_expert.gate_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.39.mlp.shared_expert.up_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    },
+    {
+      "name": "model.layers.39.mlp.shared_expert.down_proj",
+      "class": "FP8Linear",
+      "is_fp8_linear": true,
+      "name_says_experts": false
+    }
+  ],
+  "results": {
+    "p01-history": {
+      "prompt_len": 30,
+      "num_generated_mine": 64,
+      "num_generated_ref": 64,
+      "n_match": 64,
+      "cmp_len": 64,
+      "full_match": true,
+      "divergence": null,
+      "elapsed_seconds": 11.29
+    },
+    "p02-math": {
+      "prompt_len": 68,
+      "num_generated_mine": 64,
+      "num_generated_ref": 64,
+      "n_match": 64,
+      "cmp_len": 64,
+      "full_match": true,
+      "divergence": null,
+      "elapsed_seconds": 3.681
+    },
+    "p03-python": {
+      "prompt_len": 44,
+      "num_generated_mine": 64,
+      "num_generated_ref": 64,
+      "n_match": 64,
+      "cmp_len": 64,
+      "full_match": true,
+      "divergence": null,
+      "elapsed_seconds": 3.712
+    },
+    "p04-chinese": {
+      "prompt_len": 32,
+      "num_generated_mine": 64,
+      "num_generated_ref": 64,
+      "n_match": 63,
+      "cmp_len": 64,
+      "full_match": false,
+      "divergence": {
+        "position": 50,
+        "ref_token_id": 593,
+        "my_token_id": 471,
+        "my_top1_id": 593,
+        "my_top1_logit": 25.625,
+        "my_top2_id": 471,
+        "my_top2_logit": 25.625,
+        "my_own_margin_top1_minus_top2": 0.0,
+        "ref_output_matches_my_top2": false,
+        "reference_top1_logit_at_step": 26.25
+      },
+      "elapsed_seconds": 3.642
+    },
+    "p05-cuda": {
+      "prompt_len": 36,
+      "num_generated_mine": 64,
+      "num_generated_ref": 64,
+      "n_match": 64,
+      "cmp_len": 64,
+      "full_match": true,
+      "divergence": null,
+      "elapsed_seconds": 3.731
+    },
+    "p06-poem": {
+      "prompt_len": 24,
+      "num_generated_mine": 64,
+      "num_generated_ref": 64,
+      "n_match": 56,
+      "cmp_len": 64,
+      "full_match": false,
+      "divergence": {
+        "position": 56,
+        "ref_token_id": 288,
+        "my_token_id": 71439,
+        "my_top1_id": 71439,
+        "my_top1_logit": 18.875,
+        "my_top2_id": 75635,
+        "my_top2_logit": 18.75,
+        "my_own_margin_top1_minus_top2": 0.125,
+        "ref_output_matches_my_top2": false,
+        "reference_top1_logit_at_step": 18.5
+      },
+      "elapsed_seconds": 3.805
+    },
+    "p07-format": {
+      "prompt_len": 33,
+      "num_generated_mine": 64,
+      "num_generated_ref": 64,
+      "n_match": 64,
+      "cmp_len": 64,
+      "full_match": true,
+      "divergence": null,
+      "elapsed_seconds": 3.739
+    },
+    "p08-science": {
+      "prompt_len": 40,
+      "num_generated_mine": 64,
+      "num_generated_ref": 64,
+      "n_match": 29,
+      "cmp_len": 64,
+      "full_match": false,
+      "divergence": {
+        "position": 28,
+        "ref_token_id": 15380,
+        "my_token_id": 16933,
+        "my_top1_id": 16933,
+        "my_top1_logit": 27.5,
+        "my_top2_id": 15380,
+        "my_top2_logit": 27.25,
+        "my_own_margin_top1_minus_top2": 0.25,
+        "ref_output_matches_my_top2": true,
+        "reference_top1_logit_at_step": 27.5
+      },
+      "elapsed_seconds": 3.721
+    },
+    "p09-translate": {
+      "prompt_len": 32,
+      "num_generated_mine": 64,
+      "num_generated_ref": 64,
+      "n_match": 64,
+      "cmp_len": 64,
+      "full_match": true,
+      "divergence": null,
+      "elapsed_seconds": 3.76
+    },
+    "p10-logic": {
+      "prompt_len": 43,
+      "num_generated_mine": 64,
+      "num_generated_ref": 64,
+      "n_match": 64,
+      "cmp_len": 64,
+      "full_match": true,
+      "divergence": null,
+      "elapsed_seconds": 3.756
+    }
+  }
+}
