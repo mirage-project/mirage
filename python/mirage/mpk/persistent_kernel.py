@@ -1763,6 +1763,7 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         round_weights_to_input_dtype: bool = False,
+        gate_padding_rows: bool = False,
     ):
         """MoE router: fp32 softmax over ALL experts -> top-k (lower expert
         index wins ties) -> renormalize. Probe P5 verified each clause against
@@ -1773,6 +1774,19 @@ class PersistentKernel:
         `router_top_value.to(router_logits.dtype)` -- the Qwen3.5 router hands
         the combine BF16 weights. DeepSeek-V3's reference keeps fp32, so this
         defaults off.
+
+        `gate_padding_rows` (M3-I8) restricts EXPERT ACTIVATION to the rows
+        that carry a live token this iteration. The batch dimension is the
+        compile-time `max_num_batched_tokens`, but a decode step usually fills
+        only `qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]` of those rows;
+        the rest hold the previous iteration's residue and still route,
+        activating expert groups no live token uses (M3-I1 measured 56.4
+        activated groups per layer at bs1, where top-8 on one token needs 8).
+        With the flag on the kernel reads that runtime scalar and marks
+        `moe_routing_indices` / `moe_masks` for live rows only; the row read,
+        the input-buffer zeroing and the top-k weight write are unchanged, so
+        only the grouped-GEMM consumers see a difference. Defaults OFF, and
+        when off the generated code is byte-identical to the pre-M3-I8 build.
 
         NOTE: one task covers `WARP_SIZE * VPT / num_experts * 8` token rows
         (8 at num_experts=256); the registration now picks the VPT that covers
@@ -1794,7 +1808,14 @@ class PersistentKernel:
         tb_graph.new_input(moe_masks, (-1, -1, -1), -1, True)
         self.kn_graph.customized([input, moe_topk_weight, moe_routing_indices, moe_masks], tb_graph)
 
-        params = [1] if round_weights_to_input_dtype else []
+        # Keep the params list EMPTY (or [1]) whenever the M3-I8 gate is off:
+        # register_task_variant dedups on the emitted code string, so an
+        # unchanged params tail is what keeps every existing caller's kernel
+        # byte-identical.
+        if gate_padding_rows:
+            params = [1 if round_weights_to_input_dtype else 0, 1]
+        else:
+            params = [1] if round_weights_to_input_dtype else []
         self.kn_graph.register_task(tb_graph, "moe_topk_softmax_sm100", params)
 
     def moe_topk_sigmoid_routing_layer(

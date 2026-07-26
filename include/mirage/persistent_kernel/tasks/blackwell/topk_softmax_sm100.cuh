@@ -86,7 +86,30 @@ __device__ __forceinline__ void topk_softmax_task_impl(
     // bf16 output-rounding floor (p5_router_semantics.json section E).
     // DeepSeek-V3's reference keeps fp32 weights, so this defaults OFF and the
     // generated code is unchanged for every existing caller.
-    bool const round_weights_to_output_dtype = false) {
+    bool const round_weights_to_output_dtype = false,
+    // M3-I8: how many of `num_rows` carry a LIVE token this iteration.
+    //
+    // `num_rows` is the COMPILE-TIME `max_num_batched_tokens` (16 for the
+    // Qwen3.5 build), while `prepare_next_batch` packs only
+    // `qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]` live tokens into rows
+    // [0, live) and leaves rows [live, num_rows) holding the previous
+    // iteration's residue (attention/GDN write per REQUEST slot, so nothing
+    // refreshes them). Those padding rows are still routed: each contributes
+    // its own top-k marks, and every expert they touch becomes an ACTIVATED
+    // group that the grouped GEMM then streams weights for and discards.
+    // Measured by M3-I1: 56.4 activated groups per layer at bs1, where a
+    // single top-8 token needs 8.
+    //
+    // Gating the MARKING (`mpk_routing_indices` / `mpk_active_expert_ids`)
+    // right-sizes the group set. It deliberately does NOT gate the row read
+    // (the input-buffer zeroing that lets a split-k gate linear accumulate
+    // must still cover every row) and does NOT gate the top-k weight write, so
+    // only the two grouped-GEMM consumers see any difference.
+    //
+    // <= 0, or a value the task cannot honour, means "no gating" -- the
+    // pre-M3-I8 behaviour -- so a caller that has no live-row count (test
+    // mode, a single-layer harness) is unaffected.
+    int const num_active_rows = -1) {
   // Pointers
   T *input = static_cast<T *>(input_ptr);
   float *output = static_cast<float *>(output_ptr);
@@ -161,9 +184,16 @@ __device__ __forceinline__ void topk_softmax_task_impl(
       warp_mask = subgroup_mask << (thread_row_in_warp * THREADS_PER_ROW);
     }
   }
+  // Rows at or above this index are padding for THIS iteration; they are read
+  // (and zeroed) like every other row, but they do not activate expert groups.
+  int const live_rows = (num_active_rows > 0 && num_active_rows < num_rows)
+                            ? num_active_rows
+                            : num_rows;
+
   if (thread_row < num_rows) {
 
-    bool const row_is_active = finished ? !finished[thread_row] : true;
+    bool const row_is_active =
+        (finished ? !finished[thread_row] : true) && (thread_row < live_rows);
 
     // Compute per-thread read pointers
     T *thread_row_ptr = input + thread_row * ELTS_PER_ROW;

@@ -2526,8 +2526,16 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   // output dtype before writing them. HF's Qwen3.5 router does
   // (`router_top_value.to(router_logits.dtype)`); DeepSeek-V3's reference does
   // not, so it defaults off and existing callers generate identical code.
-  assert(params.size() <= 1);
+  // params[1] (optional, M3-I8): gate expert activation to the rows that carry
+  // a LIVE token this iteration. `batch_size` here is the compile-time
+  // max_num_batched_tokens; the runtime live count is
+  // `qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]`, the same scalar
+  // argmax_reduce / reduction already consume. Off by default, and when off
+  // the emitted call is byte-identical to the pre-M3-I8 one (the kernel
+  // parameter defaults to -1 = no gating), so no existing caller moves.
+  assert(params.size() <= 2);
   bool round_weights = !params.empty() && params[0] == 1;
+  bool gate_padding_rows = params.size() > 1 && params[1] == 1;
   int batch_size = 0, num_experts = 0, num_experts_per_tok = 0, input_stride,
       output_stride;
   std::vector<tb::TBInputOp *> input_ops;
@@ -2620,7 +2628,13 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   code.e("    0,");
   code.e("    $,", num_experts);
   code.e("    true,");
-  code.e("    $);", round_weights ? "true" : "false");
+  if (gate_padding_rows) {
+    code.e("    $,", round_weights ? "true" : "false");
+    code.e("    runtime_config.qo_indptr_buffer["
+           "MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  } else {
+    code.e("    $);", round_weights ? "true" : "false");
+  }
   return register_task_variant(TASK_MOE_TOPK_SOFTMAX_SM100, code.to_string());
 }
 

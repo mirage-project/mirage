@@ -110,6 +110,28 @@ MOE_ROUTER_MAX_ROWS_PER_TASK = 16
 # slice (topk rows) and a 2-D task keeps one row.
 QUANTIZE_ROW_SPLIT = (0, -1, -1)
 
+# The router runs on all `mbt` rows, but a decode step fills only
+# `qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]` of them. Rows above that hold
+# the previous iteration's residue -- attention and GDN write per REQUEST slot,
+# so nothing refreshes a row no request owns -- and that residue is different in
+# every padding row, so each one contributes its own top-8 marks. M3-I1 measured
+# the result in the profile: 56.4 / 59.4 / 60.2 / 70.1 / 86.7 ACTIVATED expert
+# groups per layer at bs 1/2/4/8/16, where the live tokens need at most
+# min(256, 8*bs) = 8 / 16 / 32 / 64 / 128. At bs1 the grouped GEMM therefore
+# streams ~7x the expert weight the routing asks for.
+#
+# `gate_padding_rows` marks experts for live rows only. It is bit-exact for
+# every live row: a row's top-k is a per-row reduction over its own 256 logits,
+# the grouped GEMM gathers rows in ascending token order (so live rows keep
+# their slots), and each (token, slot) pair is owned by exactly one expert, so
+# no output element changes owner. Only padding rows' intermediates move -- and
+# M2's AC-3 already measured that live rows are independent of them: every
+# prompt's 64 output token ids are byte-identical at bs 1/2/4/8/16, i.e.
+# identical whether the other 15 rows hold residue or 15 different live prompts.
+#
+# Set False to rebuild the pre-M3-I8 graph (the A/B `base` arm).
+MOE_GATE_PADDING_ROWS = True
+
 
 def fp8_grid(output_size: int) -> int:
     """Task count for a preserved-block-scale dense GEMM.
@@ -547,7 +569,8 @@ class Qwen35Builder(GraphBuilder):
             block_dim=(256, 1, 1),
             # HF hands the combine BF16 weights (router_top_value.to(dtype));
             # probe P5 pinned this clause empirically.
-            round_weights_to_input_dtype=True)
+            round_weights_to_input_dtype=True,
+            gate_padding_rows=MOE_GATE_PADDING_ROWS)
 
         # ---- routed experts ---------------------------------------------
         rq = self._t((mbt, c.hidden_size), float8_e4m3, f"layer_{i}_moe_xq")

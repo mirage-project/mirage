@@ -1,0 +1,54 @@
+M3-I8 lever 2 -- STAGED AS AN ARM, NOT APPLIED TO THE TREE.
+
+Right-sizing the expert set (v1) removes work but, at bs <= 4, removes almost
+no STEP TIME: the 112-120 live grouped-GEMM tasks already fit in one pass over
+the 128 workers, so the stage's wall span is one task's latency plus arrival
+skew either way (model_moe_wall.py, claim C3). Dropping to 16 live tasks makes
+the stage NARROW instead of expensive -- 16 of 128 workers busy for 58 us.
+
+The fix for a narrow stage is the same one M3-I2b used on gdn_conv1d and
+moe_mul_sum_add: split it finer. `moe_n_splits` is grid.y on both grouped
+GEMMs, i.e. how many tasks share one expert's output columns. The per-task
+weight tile, and therefore the per-task time, divides by it:
+
+    T = 0.93 us * (N_tile / 128) * (K / 128)          [model_moe_wall.py C2]
+    w13  N_tile = 1024 / splits    K = 2048
+    w2   N_tile = 2048 / splits    K = 512
+
+    splits    w13 T     w2 T    live tasks at bs1 (8 groups)
+      2       58.4      30.7     16
+      4       29.2      15.4     32
+      8       14.6       7.7     64
+
+Legality: `moe_fp8_blockscale_sm100.cuh` static_asserts OUTPUT_SIZE % 128 == 0
+(one checkpoint scale block), so w13 caps at splits = 8 (1024/8 = 128) and w2
+at 16. The registration's own asserts (weight_scale tile dim1 * 128 ==
+OUTPUT_SIZE) hold at 4 and 8 for both.
+
+Bit-exact by construction, for the same reason the M3-I2b widenings were:
+grid.y partitions the OUTPUT COLUMNS. Each task owns a disjoint column range,
+the K reduction stays entirely inside one task, and the per-128-K-tile scale
+fold is unchanged -- NUM_N_BLOCKS shrinks but each n-block's accumulator was
+already independent. No cross-task reduction exists to reorder.
+
+Cost, priced up front: the dispatched task count per grouped-GEMM call site
+goes 256 -> 512 (v2a) or 1024 (v2b), i.e. +20k or +61k tasks per step on a
+41k-task graph. Dead tasks cost ~0.53 us each (M3-I1's `short_us_per_iter` /
+`n_short_per_iter` for task 241), which is ~85 us/step at v2a and ~254 us/step
+at v2b spread over 128 workers. model_moe_wall.py charges this.
+
+Apply with:  patch -p1 < v2-moe-grid-widen.patch   (v2a; use 8 for v2b)
+or let stage_arms.sh generate both arms directly.
+
+--- a/python/mirage/mpk/models/qwen3_5/builder.py
++++ b/python/mirage/mpk/models/qwen3_5/builder.py
+@@
+         # tuning knobs (task-count / parallelism), overridable before build
+         self.gdn_conv_channel_blocks = 8
+-        self.moe_n_splits = 2
++        # M3-I8 v2a: grid.y on both grouped MoE GEMMs. Only worth raising once
++        # MOE_GATE_PADDING_ROWS has shrunk the live expert set -- otherwise the
++        # extra tasks just add waves. 8 is the kernel's ceiling for w13
++        # (OUTPUT_SIZE must stay a whole 128-row scale block).
++        self.moe_n_splits = 4
+         self.qk_dense_path = "fp8"
