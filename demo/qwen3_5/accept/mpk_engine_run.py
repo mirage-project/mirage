@@ -74,11 +74,38 @@ retires (``persistent_kernel.cuh:311-362``) and migrates their KV pages with
 them (``paged_kv_indices_snapshot``). The **GDN conv/recurrent state pools are
 not part of that migration**: they are ``[max_num_batched_requests, ...]``
 tensors indexed by the *batch slot*, so a survivor that moves from slot 1 to
-slot 0 starts reading the retired request's state. This only fires when a
-request retires while another is still active -- i.e. rolling admission with
-``total_num_requests > max_num_batched_requests``, which the wave protocol above
-does not use. ``assert_no_rolling_admission`` enforces that precondition loudly
-rather than letting it corrupt silently.
+slot 0 starts reading the retired request's state.
+
+CORRECTION (M3-I9). This paragraph used to end "this only fires ... i.e. rolling
+admission with ``total_num_requests > max_num_batched_requests``, which the wave
+protocol above does not use". The trigger is right; the ``i.e.`` is wrong, and
+so is the implied all-clear. A request retiring while another is active needs no
+rolling admission at all -- it happens *inside* a single wave, because
+``max_seq_length`` retires on the global absolute step while slot-order-greedy
+admission advances the low slots first. Replaying the shipped waves
+(``opt/m3i9/protocol_sim.py``) gives **1 / 12 / 69 live-slot migrations at bs
+4 / 8 / 16**.
+
+Most of those are harmless because the request has already written the 64 tokens
+the harness reports. The ones that are not are the duplicate padding slots --
+and they are exactly the slots whose ``slot_isolation_checks`` report
+``identical: false`` in every committed bs16 / bs8-w1 / bs4-w2 dump: 14 of 14,
+no exceptions (``opt/m3i9/compaction_audit.py``). Those mismatches have been
+read as a slot-isolation question; they are this hazard reaching an answer.
+The competing explanation -- that a differently *chopped* prefill gives a
+different answer -- is refuted by the committed report itself: 9 of the 10
+prompts are prefilled with two to four different chunkings across batch sizes,
+in placements that never migrate, and all 25 (prompt, batch size) sequences are
+byte-identical.
+
+``assert_no_rolling_admission`` still holds the line it was written for, but it
+is a *sufficient* condition, not the necessary one: it passes for every wave
+above while live slots are being moved. Every wave's exposure is now recorded in
+the timings artifact (``compaction.live_slot_migrations`` /
+``compaction.straddling_slots``) so it stops being invisible. The fix is not a
+different slot order -- the lowest live slot always has budget priority, so it
+always retires first whatever the order -- but equalising the per-iteration
+advance; see ``opt/m3i9/README.md``.
 """
 from __future__ import annotations
 
@@ -176,7 +203,10 @@ class MPKOfflineAdapter(EngineAdapter):
                  kernel_dir: Optional[Path] = None,
                  reuse_kernel: bool = False,
                  expose_logits: bool = False,
-                 pinned_max_seq_length: Optional[int] = None):
+                 pinned_max_seq_length: Optional[int] = None,
+                 slot_order: str = "wave",
+                 audit_compaction: bool = True,
+                 per_request_token_cap=None):
         self.model_name = model_name
         self.model_path = model_path
         self.mbt = mbt
@@ -191,6 +221,24 @@ class MPKOfflineAdapter(EngineAdapter):
         # compilation serves every wave (and every process, when a run is split
         # across processes for bisection).
         self.pinned_max_seq_length = pinned_max_seq_length
+        # M3-I9 admission-protocol knobs. "wave" is the shipped behaviour, byte
+        # for byte: sort the wave ascending, then pad by repetition. The other
+        # values are experiment arms (opt/m3i9/README.md).
+        if slot_order not in ("wave", "sorted-padded", "descending"):
+            raise ValueError(f"unknown slot_order {slot_order!r}")
+        self.slot_order = slot_order
+        self.audit_compaction = audit_compaction
+        # M3-I9's winning policy. None = today's runtime. "auto" = max(1, mbt//bs)
+        # -- an equal share of the token budget per request per iteration, which
+        # is both the packing optimum and the only setting under which no live
+        # slot is ever migrated. It needs the runtime knob specced in
+        # opt/m3i9/README.md; the adapter refuses loudly rather than silently
+        # measuring the unmodified schedule.
+        if per_request_token_cap not in (None, "auto") and not (
+                isinstance(per_request_token_cap, int) and per_request_token_cap >= 1):
+            raise ValueError(f"per_request_token_cap={per_request_token_cap!r}: "
+                             "None, 'auto', or a positive int")
+        self.per_request_token_cap = per_request_token_cap
         self._mpk = None
         self._builder = None
         self._bs = None
@@ -251,6 +299,7 @@ class MPKOfflineAdapter(EngineAdapter):
             trace_name="",
             spec_decode_config=None,
             use_cutlass_kernel=True,
+            **self._cap_kwargs(batch_size),
         )
         builder = Qwen35Builder(mpk)
         builder.expose_logits = self.expose_logits
@@ -290,10 +339,21 @@ class MPKOfflineAdapter(EngineAdapter):
         assert max_seq_length >= max(plens) + self.max_new_tokens, (
             f"pinned max_seq_length {max_seq_length} cannot deliver "
             f"{self.max_new_tokens} new tokens for a {max(plens)}-token prompt")
-        # Ascending prompt length inside a wave: the longest prompt retires
-        # first (retirement is on the *global* absolute step), so putting it in
-        # the highest slot means no survivor is ever compacted downward.
+        # Ascending prompt length inside a wave.
+        #
+        # This used to claim "the longest prompt retires first, so putting it in
+        # the highest slot means no survivor is ever compacted downward". M3-I9
+        # replayed `prepare_next_batch` and refuted it: slot-order-greedy
+        # admission gives the token budget to the LOWEST live slot first, so the
+        # lowest slot always advances fastest and therefore always retires
+        # first, whatever the prompt lengths are. The shipped waves move live
+        # slots 1 / 12 / 69 times at bs 4 / 8 / 16 (opt/m3i9/compaction_audit.py).
+        # No slot ORDER can prevent that; only equalising the per-iteration
+        # advance can (opt/m3i9/README.md, "the runtime knob"). The sort is kept
+        # because it is what every committed AC-3 artifact was produced with.
         ordered = sorted(requests, key=lambda r: len(r.input_ids))
+        if self.slot_order == "descending":
+            ordered = ordered[::-1]
         waves = [ordered[i:i + batch_size]
                  for i in range(0, len(ordered), batch_size)]
         # Every wave is padded back up to exactly `batch_size` live requests, by
@@ -309,6 +369,13 @@ class MPKOfflineAdapter(EngineAdapter):
             slots = list(wave)
             while len(slots) < batch_size:
                 slots.append(wave[len(slots) % len(wave)])
+            if self.slot_order == "sorted-padded":
+                # M3-I9 P1: sort the PADDED slot list too, so the repeated short
+                # prompts stop sitting in the high slots. Predicted +11.4% wave
+                # time at bs16 and no rebuild needed -- but it also changes which
+                # slot reports each prompt, so it is off by default and is an
+                # experiment arm, not a shipping default.
+                slots = sorted(slots, key=lambda r: len(r.input_ids))
 
             if self._mpk is None:
                 self._build(batch_size, max_seq_length, batch_size)
@@ -365,12 +432,25 @@ class MPKOfflineAdapter(EngineAdapter):
                         out[req.prompt_id] = EngineSequence(
                             token_ids=per_slot[r_i], topk_logits=None)
                 else:
-                    agree = per_slot[r_i] == per_slot[first_slot[req.prompt_id]]
+                    ref = per_slot[first_slot[req.prompt_id]]
+                    agree = per_slot[r_i] == ref
+                    # M3-I9: WHERE they diverge is the evidence, not THAT they do.
+                    # If the cause is HAZARD-COMPACTION the copy must agree up to
+                    # the token produced by the iteration that migrated its slot,
+                    # and the predicted index differs per slot (60/54/46/35/19/0
+                    # for slots 10..15 of the bs16 wave). If the cause were the
+                    # different prefill chunking the copy gets, position 0 would
+                    # already differ. A boolean cannot tell those apart.
+                    first_div = next(
+                        (k for k, (x, y) in enumerate(zip(ref, per_slot[r_i]))
+                         if x != y),
+                        min(len(ref), len(per_slot[r_i])) if not agree else None)
                     self.dup_checks.append({
                         "batch_size": batch_size, "wave": w_idx,
                         "prompt_id": req.prompt_id,
                         "slots": [first_slot[req.prompt_id], r_i],
-                        "identical": agree})
+                        "identical": agree,
+                        "first_divergence": first_div})
                     if not agree:
                         log(f"SLOT-ISOLATION MISMATCH {req.prompt_id} "
                             f"slots {first_slot[req.prompt_id]} vs {r_i}")
@@ -386,11 +466,79 @@ class MPKOfflineAdapter(EngineAdapter):
                                 if decode_steps and wall_ms else None,
                 "max_seq_length": max_seq_length,
                 "max_num_batched_tokens": self.mbt,
+                "slot_order": self.slot_order,
+                "compaction": self._compaction_audit(
+                    [len(r.input_ids) for r in slots], max_seq_length),
             })
             log(f"bs={batch_size} wave={w_idx} slots={len(slots)} "
                 f"distinct={len(wave)} wall={wall_ms:.1f}ms "
                 f"steps={decode_steps}")
         return out
+
+    def _cap_kwargs(self, batch_size: int) -> dict:
+        """The M3-I9 per-request per-iteration token cap, if one is asked for.
+
+        `prepare_next_batch` step 3 currently gives a prefilling request
+        `min(remaining, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens)` -- the whole
+        remaining budget. The cap adds one more `min` against a compile-time
+        `MPK_MAX_TOKENS_PER_REQUEST` whose default is
+        `MPK_MAX_NUM_BATCHED_TOKENS`, i.e. today's behaviour byte for byte.
+        See opt/m3i9/README.md for the full spec and its evidence.
+        """
+        if self.per_request_token_cap is None:
+            return {}
+        cap = (max(1, self.mbt // batch_size)
+               if self.per_request_token_cap == "auto"
+               else int(self.per_request_token_cap))
+        import inspect
+        import mirage as mi
+        if "max_tokens_per_request" not in inspect.signature(
+                mi.PersistentKernel.__init__).parameters:
+            raise NotImplementedError(
+                "--per-request-token-cap needs the runtime knob specced in "
+                "demo/qwen3_5/accept/opt/m3i9/README.md ('the runtime knob'): "
+                "MPK_MAX_TOKENS_PER_REQUEST in persistent_kernel.cuh plus the "
+                "PersistentKernel(max_tokens_per_request=...) parameter. This "
+                "build does not have it, and running without it would measure "
+                "the UNMODIFIED schedule under a flag that claims otherwise.")
+        log(f"per-request token cap = {cap} (bs={batch_size}, mbt={self.mbt})")
+        return {"max_tokens_per_request": cap}
+
+    def _compaction_audit(self, plens: List[int], max_seq_length: int) -> Optional[dict]:
+        """Replay this wave's admission and record HAZARD-COMPACTION exposure.
+
+        Diagnostic only -- it never touches the run. It exists because the
+        hazard's stated precondition (rolling admission) is not the real one:
+        a wave with `total_num_requests == batch_size` still migrates live slots
+        whenever one request retires while another is active, which is every
+        AC-3 wave at bs >= 4. `straddling_slots` is the subset whose reported
+        `max_new_tokens` window is still being written when it migrates -- those
+        are the answers the hazard can actually reach, and they are exactly the
+        duplicate slots whose `slot_isolation_checks` report `identical: false`.
+        """
+        if not self.audit_compaction:
+            return None
+        try:
+            sys.path.insert(0, str(HERE / "opt" / "m3i9"))
+            from protocol_sim import audit, simulate  # noqa: E402
+        except Exception as exc:            # tooling absent -> never break a run
+            return {"unavailable": repr(exc)}
+        cap = None
+        if self.per_request_token_cap is not None:
+            cap = (max(1, self.mbt // len(plens))
+                   if self.per_request_token_cap == "auto"
+                   else int(self.per_request_token_cap))
+        sim = simulate(plens, self.mbt, max_seq_length, cap=cap)
+        a = audit(sim, self.max_new_tokens)
+        rec = {"predicted_iterations": sim["n_iterations"],
+               "live_slot_migrations": a["n_moves"],
+               "migrated_slots": a["moved_requests"],
+               "straddling_slots": a["straddling_requests"]}
+        if a["straddling_requests"]:
+            log(f"HAZARD-COMPACTION exposure: slots {a['straddling_requests']} "
+                f"migrate while their reported window is still being written "
+                f"({a['n_moves']} live-slot migrations this wave)")
+        return rec
 
     def _watchdog(self, meta, slots, w_idx: int, batch_size: int,
                   timeout_s: float = 120.0, poll_s: float = 5.0) -> None:
@@ -494,6 +642,22 @@ def main(argv=None) -> int:
                          "compiles the SAME kernel, which keeps the decode "
                          "length a property of the protocol and lets one "
                          "compilation serve every wave.")
+    ap.add_argument("--slot-order", default="wave",
+                    choices=("wave", "sorted-padded", "descending"),
+                    help="M3-I9 admission arm. 'wave' (default) is the shipped "
+                         "protocol, byte for byte. 'sorted-padded' also sorts "
+                         "the padded slot list (predicted +11.4%% wave time at "
+                         "bs16, but it changes which slot reports each prompt). "
+                         "See opt/m3i9/README.md.")
+    ap.add_argument("--per-request-token-cap", default=None,
+                    help="M3-I9 winning policy: cap the tokens one request may "
+                         "contribute to one iteration. 'auto' = max(1, mbt//bs). "
+                         "Needs the runtime knob (opt/m3i9/README.md); the "
+                         "adapter raises rather than silently measuring the "
+                         "unmodified schedule.")
+    ap.add_argument("--no-audit-compaction", action="store_true",
+                    help="skip the HAZARD-COMPACTION exposure replay recorded "
+                         "in the timings artifact (diagnostic only)")
     ap.add_argument("--dump-name", default=None,
                     help="Override the dump filename (default bs<N>.json); use "
                          "per-wave names when splitting a run across "
@@ -530,6 +694,11 @@ def main(argv=None) -> int:
         kernel_dir=Path(args.kernel_dir) if args.kernel_dir else None,
         reuse_kernel=args.reuse_kernel,
         pinned_max_seq_length=args.max_seq_length,
+        slot_order=args.slot_order,
+        audit_compaction=not args.no_audit_compaction,
+        per_request_token_cap=(args.per_request_token_cap
+                               if args.per_request_token_cap in (None, "auto")
+                               else int(args.per_request_token_cap)),
     )
     result = adapter.run(requests, args.batch_size)
 
