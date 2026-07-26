@@ -1,0 +1,141 @@
+{
+  "schema": "m3-backlog/1",
+  "issue": "M3-I1",
+  "generated_utc": "2026-07-26",
+  "baseline": {
+    "built_sha": "e51cb86603380057eb94488f5171d99bc85cf959",
+    "branch": "qwen3-5_support",
+    "engine_config": "max_num_batched_tokens=16, page_size=256, max_seq_length=132, eos disabled, -use_fast_math",
+    "workload": "AC-3 geometry: the 10 pinned reference prompts (24-68 input tokens), 64 reported output tokens, one wave per process",
+    "gpu": "catalyst-B200 GPU 6, exclusive, 3-sample idle guard, .gpu-locks/M3-I1.lock",
+    "measurement": "megakernel profiler, 48M slots, 9.3-24.7M events/run, 3 reps per batch size; profiled vs unprofiled wave wall 2.85-3.59% apart; token ids byte-identical to the committed M2 report for all 25 (prompt,bs) cases",
+    "steady_decode_step_us": {"1": 15264.0, "2": 15647.6, "4": 15645.1, "8": 18618.2, "16": 22005.2},
+    "decode_tok_s": {"1": 65.5, "2": 127.8, "4": 255.7, "8": 429.7, "16": 681.7}
+  },
+  "delta_model": {
+    "note": "expected_e2e_delta_per_bs is step_us/(step_us - recovered_wall_us) - 1 on the STEADY DECODE STEP, i.e. AC-4 decode throughput, unless the entry says wave-level. The wall-span decomposition is near-additive: the sum of per-task-type wall spans is 109-114% of the measured step at every batch size, so removing a stage's wall span is a defensible first-order model of the step it saves. Every number here is a HYPOTHESIS to be settled by the entry's verify_cmd, never acceptance (M3 milestone rules)."
+  },
+  "levers": [
+    {
+      "rank": 1,
+      "lever": "Fuse or widen quantize_fp8 (task 275)",
+      "evidence": "3840 tasks per step at EVERY batch size (grid_dim=(mbt,1,1), 96 per layer) -- the count is set by max_num_batched_tokens=16, not by live tokens, so total worker time is flat at 84.1/82.4/76.1 ms for bs1/4/16. Its wall footprint is the single largest of any task type at bs<=4: 4540 us of the 15264 us bs1 step (29.7%), 4244 us of the bs16 step (19.3%). Mean concurrency while it runs is only 33-35 of 128 blocks, and each task takes 19.8-21.9 us to block-quantize <=8 KB of activations -- three orders of magnitude off any bandwidth bound, i.e. pure launch/latency cost. Source: pertask_by_bs.csv rows TASK_QUANTIZE_FP8_SM100, tables/bs*_concurrency.json.",
+      "mechanism": "A separate task per (row, tensor) for a trivially cheap elementwise+reduction op. The producer (RMS-norm, SiLU-mul) already has the values in registers; quantizing in its epilogue removes both the task and the round trip through global memory.",
+      "expected_e2e_delta_per_bs": {"1": "+17% to +42%", "2": "+17% to +41%", "4": "+17% to +40%", "8": "+13% to +31%", "16": "+11% to +24%"},
+      "delta_basis": "lower bound = half its wall span recovered, upper bound = all of it",
+      "risk": "medium - numerics. The fp32-preserved-scale path (M2-I12/I13, tasks 279/241/242) consumes quantize_fp8_layer(scale_ue8m0=False); any change must reproduce the same fp8 bytes AND the same fp32 block scales bit-for-bit.",
+      "verify_cmd": "bash opt/gpu_guard_m3i1.sh 6,0,1 -- bash opt/run_m3i1.sh all && python3 opt/analyze.py  # compare TASK_QUANTIZE_FP8_SM100 wallspan + step_us in attribution.csv; then run_ac3.py per-case vs results/run_report_all_bs.json",
+      "suggested_owner_issue": "NEW M3-I8 (fuse quantize into norm/silu epilogues); adjacent to M3-I4"
+    },
+    {
+      "rank": 2,
+      "lever": "Right-size MoE expert activation to the live token count",
+      "evidence": "The MoE GEMM grid is grid_x = min(num_experts, mbt*topk) = min(256,128) = 128 groups x moe_n_splits=2, fixed by mbt=16 -- independent of how many tokens are really in the step (builder.py:538). Measured live (>1 us) w13 tasks per layer: 112.7 at bs1, 118.8 at bs2, 120.4 at bs4, 140.2 at bs8, 173.3 at bs16 (of 256 launched), i.e. 56.4 / 59.4 / 60.2 / 70.1 / 86.7 active expert groups of 128. Top-8 routing on ONE token needs 8. So bs1 activates ~7x more experts -- and reads ~7x more expert weight -- than the routing requires; bs4 ~1.9x; bs16 is already right-sized. MoE w13+w2 wall span is 4786 us of the bs1 step (31%). Source: pertask_by_bs.csv nlong_bs* + wallspan_us_bs*.",
+      "mechanism": "The router (topk_softmax_sm100) routes all mbt=16 rows including the 15 phantom rows of a 1-token decode step; each phantom row contributes its own top-8 entries to moe_routing_indices/moe_mask, so the grouped GEMM streams those experts' weights for output that is then discarded.",
+      "expected_e2e_delta_per_bs": {"1": "+37%", "2": "+33%", "4": "+17%", "8": "+3.5%", "16": "0%"},
+      "delta_basis": "MoE wall span scaled by (1 - min(128, 8*bs)/measured_active_groups)",
+      "risk": "medium - touches the router. Phantom-row outputs are discarded, so this should be AC-3 neutral by construction, but it must be proven per-case, and MOE_ROUTER_MAX_ROWS_PER_TASK/the 16-row cap interact (M2-I9).",
+      "verify_cmd": "python3 opt/parse_profile.py --raw prof/raw_bs1_rep0.npz ... ; expect nlong_bs1 for task 241 to fall from 4509 to ~320 per step; then AC-3 per-case byte-diff",
+      "suggested_owner_issue": "M3-I5b (already owns topk_softmax row handling) or a NEW M3-I9"
+    },
+    {
+      "rank": 3,
+      "lever": "Widen the narrow task stages (graph width, not scheduler speed)",
+      "evidence": "worker-idle-while-others-work is 9.57/9.44/8.76/9.92/9.91 ms per step at bs 1/2/4/8/16 -- essentially BATCH-INDEPENDENT and 45-63% of every step. Mean concurrency is 43.5/46.5/51.9/55.2/68.3 of 128 blocks; 6.7-9.1 ms of every step runs at <=16 concurrent workers. It is not a dispatch-rate or stall problem: total all-idle (nobody in a task) is only 0.50 ms/step at every bs, workers take 332-475 inter-task gaps per step of mean 21-30 us and max 164 us. The low-concurrency stages are exactly the low-task-count ones: TASK_ATTN_SM100 2/layer -> concurrency 2.0 at bs1, TASK_GDN_CONV1D 8/layer -> 8.0, TASK_RMS_NORM/SIGMOID_GATE/MOE_MUL_SUM_ADD 16/layer -> 15-16, TASK_QUANTIZE_FP8 96/layer -> 34.6. Source: attribution.csv worker_idle_us + us_at_conc_le16, tables/bs*_concurrency.json per_task_concurrency.",
+      "mechanism": "MPK executes one CTA per task. A stage emitting 16 tasks occupies 16 of 148 SMs for its whole duration no matter how cheap it is, and the 40 layers are strictly sequential, so those stages stack up into a batch-independent floor.",
+      "expected_e2e_delta_per_bs": {"1": "+33%", "2": "+35%", "4": "+32%", "8": "+32%", "16": "+18%"},
+      "delta_basis": "half of the <=16-concurrency wall recovered; the perfect-packing bound (task_sum/128) says the ceiling is 2.9x at bs1 and 1.9x at bs16",
+      "risk": "medium - many small builder/kernel changes; each split changes reduction order and can move bits, so every stage needs its own AC-3 per-case check.",
+      "verify_cmd": "python3 opt/concurrency.py prof/raw_bs1_rep0.npz prof/meta_bs1_rep0.json prof/task_names.json /tmp/c.json  # mean_concurrency and us_at_concurrency.c5_16 must both improve",
+      "suggested_owner_issue": "M3-I2b, RE-SCOPED (see the rejected prepare_next_batch entry below)"
+    },
+    {
+      "rank": 4,
+      "lever": "Fix the mbt=16 admission policy: bs16 never reaches a decode steady state",
+      "evidence": "An exact replay of prepare_next_batch (opt/schedule_sim.py, validated against the trace's own BEGIN_TASK_GRAPH count at all five batch sizes: 109/109/109/111/203 predicted == observed) shows the bs16 wave spends 108 of 203 iterations in a MIXED prefill+decode regime and the other 95 draining, with ZERO iterations where all 16 requests decode. The first request retires at iteration 101 while another is still prefilling. Wave time splits 2754 ms mixed + 1920 ms drain of a 4695 ms wave. Cause: step 3 fills the 16-token budget greedily in slot order, so once the early slots are decoding they consume the whole budget and the late slots prefill one token at a time. Source: attribution.csv mixed_phase_*/drain_phase_*, tables/bs16_iters.csv.",
+      "mechanism": "max_num_batched_tokens=16 (capped by the MoE router 16-row limit, M2-I9) equals the batch size at bs16, so decode alone saturates admission and prefill starves.",
+      "expected_e2e_delta_per_bs": {"1": "0%", "2": "+2% wave-level", "4": "+3% wave-level", "8": "+9% wave-level", "16": "+44% wave-level (4695 ms -> ~3270 ms; wave tok/s 234 -> ~327)"},
+      "delta_basis": "idealised schedule = 36 prefill iterations at the measured 25.5 ms mixed-iteration cost + 107 decode iterations at the measured 22.0 ms",
+      "risk": "medium-high - changes admission and therefore AC-5 e2e and the GDN slot-compaction hazard surface (HAZARD-COMPACTION).",
+      "verify_cmd": "python3 opt/schedule_sim.py opt/meta/meta_bs16_rep0.json  # n_decode_full must become > 0 and n_prefill_or_mixed must fall toward 36",
+      "suggested_owner_issue": "M3-I2b + M3-I5b (raising mbt is blocked on the router row loop)"
+    },
+    {
+      "rank": 5,
+      "lever": "GDN recurrent kernel (task 237) throughput",
+      "evidence": "Per-request task: 960 tasks/step at bs1 -> 15360 at bs16 (exactly x16). At bs16 it is the largest single consumer of worker time (589 ms/step, 39.7% of all task time) with a 4979 us wall span = 23% of the 22005 us step, running at full concurrency 128. Per-task cost is very uniform (36.6-39.4 us, p95/p50 = 1.03). At bs1 it is only 1217 us of wall at concurrency 32. Source: pertask_by_bs.csv, layer_type_by_bs.csv gdn_recurrent.",
+      "mechanism": "30 of 40 layers are GDN; the recurrent state is 128.8 MB/token/step (M2-I11), so this is a bandwidth-shaped kernel already at full occupancy -- a pure kernel-efficiency target, not a scheduling one.",
+      "expected_e2e_delta_per_bs": {"1": "+2.5%", "2": "+2.4%", "4": "+2.4%", "8": "+4.1%", "16": "+7.3%"},
+      "delta_basis": "a 30% kernel win on its measured wall span",
+      "risk": "medium - bit-exactness. Gated-norm and fp32 g handling are the M2-I4/I5 cast-position traps.",
+      "verify_cmd": "ferret episode artifacts + test-mode oracle, then bash opt/run_m3i1.sh all and compare TASK_GDN_RECURRENT_SM100 mean_us/wallspan in pertask_by_bs.csv",
+      "suggested_owner_issue": "M3-I3 (unchanged) - note it pays off at bs8/16, not bs1"
+    },
+    {
+      "rank": 6,
+      "lever": "Dense fp8 blockscale GEMM (task 279) throughput",
+      "evidence": "5200 tasks per step and 86.2/86.3/87.0 ms of worker time at bs1/8/16 -- completely batch-independent, another mbt=16-padded stage. Wall span 2936-2973 us = 19% of the bs1 step, 14% of the bs16 step, at concurrency ~70. Mean 16.6 us per task. Source: pertask_by_bs.csv TASK_LINEAR_FP8_BLOCKSCALE_SM100.",
+      "mechanism": "M=16 padded GEMM tiles whose cost is dominated by weight traffic, so batch size does not change it; the win has to come from the kernel (tile shape / two-level scaling) as M3-I4 already scopes.",
+      "expected_e2e_delta_per_bs": {"1": "+6.1%", "2": "+6.0%", "4": "+6.0%", "8": "+5.0%", "16": "+4.2%"},
+      "delta_basis": "a 30% kernel win on its measured wall span",
+      "risk": "medium - P10-class numerics gates (M2-I12/I13 preserved fp32 block scales).",
+      "verify_cmd": "same capture + analyze; TASK_LINEAR_FP8_BLOCKSCALE_SM100 mean_us must fall and AC-3 per-case must be identical",
+      "suggested_owner_issue": "M3-I4 (unchanged)"
+    },
+    {
+      "rank": 7,
+      "lever": "Attention max_tokens_per_pass sweep",
+      "evidence": "TASK_ATTN_SM100 is 2 tasks per full-attention layer (20 per step at bs1, 320 at bs16). Its entire wall span is 513 us at bs1 (3.4% of the step) and 461 us at bs16 (2.1%), even though it runs at concurrency 2.0 at bs1. Removing it ENTIRELY would buy +3.5%/+2.1%. Source: pertask_by_bs.csv TASK_ATTN_SM100.",
+      "mechanism": "At the AC-3 geometry the KV context is <=132 tokens, so attention is a rounding error. It is not a rounding error at the AC-4 256/1024 geometry, where the KV read is ~10x larger.",
+      "expected_e2e_delta_per_bs": {"1": "<=+3.5%", "2": "<=+3.4%", "4": "<=+3.3%", "8": "<=+2.7%", "16": "<=+2.1%"},
+      "delta_basis": "upper bound: the whole measured wall span removed",
+      "risk": "low",
+      "verify_cmd": "re-run this capture at the AC-4 256/1024 geometry BEFORE sweeping; the sweep is only worth a builder call if the attention wall span exceeds ~10% there",
+      "suggested_owner_issue": "M3-I6a - RECOMMEND DEFERRING until measured at 256/1024"
+    },
+    {
+      "rank": 8,
+      "lever": "GDN prefill chunked-matmul (WY/UT)",
+      "evidence": "Prefill/mixed iterations cost 19249-25500 us each (measured prefill_step_us), vs 15264-22005 us for a decode step at the same batch size -- only 1.16-1.30x a decode step, not the catastrophic per-token cost the sequential-prefill concern assumed. The bs16 mixed phase is 2754 ms, but rank 4 shows that is an ADMISSION problem (108 iterations instead of 36), not a per-iteration cost problem: at 36 iterations the whole prefill would be ~918 ms. Source: attribution.csv prefill_step_us/mixed_phase_*.",
+      "mechanism": "Each mixed iteration processes at most 16 tokens, so prefill already runs the same kernels as decode; a WY/UT chunked algorithm only pays off once the admission policy lets many tokens into one iteration.",
+      "expected_e2e_delta_per_bs": {"1": "~0%", "2": "~0%", "4": "~0%", "8": "small", "16": "unknown until rank 4 lands"},
+      "delta_basis": "measured prefill iteration cost vs decode iteration cost at the pinned mbt",
+      "risk": "high - replaces the GDN prefill algorithm; the HF chunk algorithm is the oracle.",
+      "verify_cmd": "re-run opt/run_m3i1.sh after rank 4 lands; only pursue if prefill_step_us/mbt is then far above the decode per-token cost",
+      "suggested_owner_issue": "M3-I6b - RECOMMEND SEQUENCING AFTER rank 4"
+    },
+    {
+      "rank": 9,
+      "lever": "REJECTED: prepare_next_batch cost",
+      "evidence": "TASK_SCHD_PREPARE_BATCH takes 4.2/6.9/11.1/20.9/35.6 us per step at bs 1/2/4/8/16 -- at most 0.16% of the step. The scheduler's serial section is not a bottleneck at any batch size in this geometry. Source: attribution.csv of_which_prepare_batch_us.",
+      "mechanism": "n/a",
+      "expected_e2e_delta_per_bs": {"1": "<=+0.03%", "2": "<=+0.04%", "4": "<=+0.07%", "8": "<=+0.11%", "16": "<=+0.16%"},
+      "delta_basis": "the whole measured prepare_batch time removed",
+      "risk": "n/a",
+      "verify_cmd": "n/a",
+      "suggested_owner_issue": "M3-I2b - drop this half of the issue's stated scope and keep the worker-occupancy half (rank 3) plus admission (rank 4)"
+    },
+    {
+      "rank": 10,
+      "lever": "REJECTED: MoE dead-task dispatch overhead",
+      "evidence": "5652 of 10240 w13 tasks and 5661 of 10240 w2 tasks complete in under 1 us at bs1 (mean 0.6 us) -- 5.9 ms of aggregated worker time, i.e. 46 us per worker per step, 0.3% of the step. Dispatching a no-op task is cheap; the cost is in the ~57 experts that are wrongly LIVE (rank 2), not in the ~71 that correctly exit.",
+      "mechanism": "n/a",
+      "expected_e2e_delta_per_bs": {"1": "<=+0.3%", "2": "<=+0.3%", "4": "<=+0.3%", "8": "<=+0.2%", "16": "<=+0.2%"},
+      "delta_basis": "all sub-1us MoE task time removed",
+      "risk": "n/a",
+      "verify_cmd": "n/a",
+      "suggested_owner_issue": "none - do not spend a builder call"
+    },
+    {
+      "rank": 11,
+      "lever": "MEASUREMENT DEBT: re-measure MPK decode at the AC-4 256/1024 geometry",
+      "evidence": "Every MPK number in this issue is at the AC-3 geometry (24-68 input tokens, max_seq_length 132), while the pinned vLLM baseline (285.5/529.8/934.4/1692.5/3018.1 tok/s) is at 256/1024. Attention and KV traffic grow with context, so the decode gaps re-derived here (4.36/4.15/3.65/3.94/4.43x) are a LOWER BOUND on the AC-4 gap. Source: gap_vs_vllm.csv + docs/qwen35/bench-protocol.md section 2.",
+      "mechanism": "n/a - this is a comparability gap, not a performance lever",
+      "expected_e2e_delta_per_bs": {"1": "n/a", "2": "n/a", "4": "n/a", "8": "n/a", "16": "n/a"},
+      "delta_basis": "n/a",
+      "risk": "high if ignored - an M3 exit claim built on AC-3-geometry numbers is not comparable to the AC-4 baseline",
+      "verify_cmd": "extend opt/profile_wave.py with synthetic 256-token prompts and max_seq_length=1280, re-run the capture, and recompute gap_vs_vllm.csv",
+      "suggested_owner_issue": "M3-I7 (the milestone gate) must consume the 256/1024 numbers, not these"
+    }
+  ]
+}

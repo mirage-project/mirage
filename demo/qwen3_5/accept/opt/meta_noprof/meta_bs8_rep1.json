@@ -1,0 +1,81 @@
+{
+  "tag": "bs8_rep1",
+  "batch_size": 8,
+  "rep": 1,
+  "prompt_ids": [
+    "p06-poem",
+    "p01-history",
+    "p04-chinese",
+    "p09-translate",
+    "p07-format",
+    "p05-cuda",
+    "p08-science",
+    "p10-logic"
+  ],
+  "prompt_lens": [
+    24,
+    30,
+    32,
+    32,
+    33,
+    36,
+    40,
+    43
+  ],
+  "max_seq_length": 132,
+  "mbt": 16,
+  "page_size": 256,
+  "max_new_tokens": 64,
+  "profiler_slots": 0,
+  "profiled": false,
+  "n_events": 0,
+  "waves": [
+    {
+      "batch_size": 8,
+      "wave": 0,
+      "num_requests": 8,
+      "num_distinct_prompts": 8,
+      "prompt_ids": [
+        "p06-poem",
+        "p01-history",
+        "p04-chinese",
+        "p09-translate",
+        "p07-format",
+        "p05-cuda",
+        "p08-science",
+        "p10-logic"
+      ],
+      "wall_ms": 2116.329345703125,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 19.778778931804908,
+      "tokens_per_s": 404.4739074936393,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    }
+  ],
+  "slot_isolation": [],
+  "run_seconds": 17.622464895248413,
+  "tokens_sha256": "79b82c1567ea6bcb6739ebd5261a1643451da71a807ade94bba6baf8ea5a4721",
+  "gpu_before": [
+    "0, 33168 MiB, 44 %, 1965 MHz, 3996 MHz",
+    "1, 0 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 75392 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "3, 112938 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "4, 0 MiB, 0 %, 120 MHz, 3996 MHz",
+    "5, 59606 MiB, 51 %, 1965 MHz, 3996 MHz",
+    "6, 0 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "7, 60284 MiB, 45 %, 1965 MHz, 3996 MHz"
+  ],
+  "gpu_after": [
+    "0, 33168 MiB, 39 %, 1965 MHz, 3996 MHz",
+    "1, 0 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 75392 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "3, 112938 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "4, 0 MiB, 0 %, 120 MHz, 3996 MHz",
+    "5, 59606 MiB, 48 %, 1965 MHz, 3996 MHz",
+    "6, 36810 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "7, 60284 MiB, 41 %, 1965 MHz, 3996 MHz"
+  ],
+  "cuda_visible_devices": "6",
+  "generated_utc": "2026-07-26T14:42:36Z"
+}

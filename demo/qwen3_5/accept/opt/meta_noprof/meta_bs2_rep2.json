@@ -1,0 +1,63 @@
+{
+  "tag": "bs2_rep2",
+  "batch_size": 2,
+  "rep": 2,
+  "prompt_ids": [
+    "p06-poem",
+    "p01-history"
+  ],
+  "prompt_lens": [
+    24,
+    30
+  ],
+  "max_seq_length": 132,
+  "mbt": 16,
+  "page_size": 256,
+  "max_new_tokens": 64,
+  "profiler_slots": 0,
+  "profiled": false,
+  "n_events": 0,
+  "waves": [
+    {
+      "batch_size": 2,
+      "wave": 0,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p06-poem",
+        "p01-history"
+      ],
+      "wall_ms": 1670.1976318359375,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 15.609323662018108,
+      "tokens_per_s": 128.12854953264662,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    }
+  ],
+  "slot_isolation": [],
+  "run_seconds": 15.996336460113525,
+  "tokens_sha256": "4870001550ef974978f1a161b2421236b79a237c3fe3d879b375b9c2111b3c8b",
+  "gpu_before": [
+    "0, 41646 MiB, 39 %, 1965 MHz, 3996 MHz",
+    "1, 165298 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "2, 75392 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "3, 112938 MiB, 98 %, 1965 MHz, 3996 MHz",
+    "4, 12070 MiB, 64 %, 1965 MHz, 3996 MHz",
+    "5, 59606 MiB, 43 %, 1965 MHz, 3996 MHz",
+    "6, 6 MiB, 0 %, 720 MHz, 3996 MHz",
+    "7, 60726 MiB, 38 %, 1965 MHz, 3996 MHz"
+  ],
+  "gpu_after": [
+    "0, 40620 MiB, 43 %, 1965 MHz, 3996 MHz",
+    "1, 0 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 75392 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "3, 112938 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "4, 12070 MiB, 73 %, 1965 MHz, 3996 MHz",
+    "5, 59606 MiB, 51 %, 1965 MHz, 3996 MHz",
+    "6, 36448 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "7, 60726 MiB, 47 %, 1965 MHz, 3996 MHz"
+  ],
+  "cuda_visible_devices": "6",
+  "generated_utc": "2026-07-26T15:05:07Z"
+}
