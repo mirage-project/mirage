@@ -225,7 +225,13 @@ def get_compile_command(
         "-shared",
         _detect_cxx_standard(),
         "-rdc=false" if not use_nvshmem else "-rdc=true",
-        "-use_fast_math",
+        # M2-I5 flagged that the megakernel JIT carries -use_fast_math while the
+        # unit-test builds do not, so an exact-token gate validated on a unit
+        # build would not be validating what actually ships. MPK_NO_FAST_MATH=1
+        # builds the same graph without it, which is how M2-I9 measured whether
+        # AC-3 exactness or decode latency depends on the flag. Default is
+        # unchanged, so no existing caller is affected.
+        *([] if os.environ.get("MPK_NO_FAST_MATH") == "1" else ["-use_fast_math"]),
         "-lcuda",
         "-lcudart",
         "-lstdc++fs",

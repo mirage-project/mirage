@@ -68,6 +68,28 @@ from .weight_loader import Qwen35Config, Qwen35WeightLoader, resolve_snapshot
 
 BLOCK = 128
 
+# The MoE router task (`topk_softmax_sm100.cuh`) has NO loop over rows: with a
+# strictly-256-thread block it covers exactly
+# `WARPS_PER_CTA * ROWS_PER_WARP = 8 * (WARP_SIZE * VPT / NUM_EXPERTS)` query
+# rows (= 16 at Qwen3.5's 256 experts), and `thread_row` is derived from
+# threadIdx alone, so a second task instance would recompute the same rows
+# rather than the next slice. Any chunk wider than this silently leaves
+# `topk_w`/`routing` at ZERO for the surplus rows -- the routed experts then
+# contribute nothing for those tokens at EVERY one of the 40 layers, while the
+# shared expert and the residual keep flowing, so the corruption is a quiet
+# quality loss rather than a crash.
+#
+# M2-I9 hit exactly this: at max_num_batched_tokens=128 the first 16 prefill
+# rows were correct and rows 16+ degraded, which made every AC-3 prompt diverge
+# at generated position 0 (the token read from the last prefill row). Found by
+# per-boundary bisection -- `layer_0_topk_w` already had 14 zero rows.
+# M2-I4..I8's single-layer gates all used 8-token chunks and could not see it.
+#
+# The real fix is a row loop (or a row-offset task param) in the kernel, which
+# also touches DeepSeek-V3's router and needs its own validation. Until then
+# this is a hard capacity bound, asserted rather than commented.
+MOE_ROUTER_MAX_ROWS_PER_TASK = 16
+
 
 def fp8_grid(output_size: int) -> int:
     """Task count for a preserved-block-scale dense GEMM.
@@ -115,6 +137,12 @@ class Qwen35Builder(GraphBuilder):
         # single-layer test-mode gates read every op boundary through it, and
         # M2-I9 gets the same handle for divergence bisection.
         self.expose_intermediates = False
+        # Narrow variant of the above for M2-I9's per-position logit evidence:
+        # makes ONLY the lm_head output host-visible, so a single forced-prefix
+        # step can be read back as a real logit vector (the tie-flip
+        # adjudication AC-3 requires) without paying for 40 layers of exposed
+        # intermediates.
+        self.expose_logits = False
         self.buffers: Dict[str, torch.Tensor] = {}
         self._keep: List[torch.Tensor] = []
 
@@ -188,6 +216,13 @@ class Qwen35Builder(GraphBuilder):
             f"max_num_batched_tokens ({self.mbt}) < max_num_batched_requests "
             f"({self.mbr}): surplus requests are admitted with 0 tokens and "
             f"stall forever (persistent_kernel.cuh:326, mpk-gaps.md §8 risk 5)")
+        assert self.mbt <= MOE_ROUTER_MAX_ROWS_PER_TASK, (
+            f"max_num_batched_tokens ({self.mbt}) > "
+            f"{MOE_ROUTER_MAX_ROWS_PER_TASK}: the MoE router task routes only "
+            f"the first {MOE_ROUTER_MAX_ROWS_PER_TASK} rows of a chunk and "
+            f"leaves topk_w/routing at ZERO for the rest, so every surplus "
+            f"token loses its routed experts at all {self.config.num_layers} "
+            f"layers (M2-I9 root cause; see MOE_ROUTER_MAX_ROWS_PER_TASK)")
         needed = self.mbr * math.ceil(self.max_seq_length / self.page_size)
         assert self.max_num_pages >= needed, (
             f"max_num_pages ({self.max_num_pages}) < max_num_batched_requests "
@@ -326,7 +361,15 @@ class Qwen35Builder(GraphBuilder):
             self.last_hidden = nrm
             return
 
-        logits = self._t((self.mbt, self.padded_vocab_size), bfloat16, "argmax_in")
+        if self.expose_logits and not self.expose_intermediates:
+            buf = torch.zeros((self.mbt, self.padded_vocab_size),
+                              dtype=torch.bfloat16, device="cuda")
+            self.buffers["argmax_in"] = buf
+            self._keep.append(buf)
+            logits = pk.attach_input(buf, name="argmax_in")
+        else:
+            logits = self._t((self.mbt, self.padded_vocab_size), bfloat16,
+                             "argmax_in")
         pk.linear_layer(input=nrm, weight=self.lm_head_w, output=logits,
                         grid_dim=(grid_for_rmsnorm_linear_layer(
                             self.padded_vocab_size), 1, 1),

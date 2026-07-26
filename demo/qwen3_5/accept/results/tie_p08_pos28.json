@@ -1,0 +1,69 @@
+{
+  "prompt_id": "p08-science",
+  "prompt_len": 68,
+  "reference_output_0": 15380,
+  "mpk_emitted_token": 16933,
+  "final_step": 68,
+  "row_with_reference_first_token": 3,
+  "last_rows": [
+    {
+      "row": 2,
+      "argmax": 5218,
+      "logit": 31.625,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 3,
+      "argmax": 15380,
+      "logit": 27.25,
+      "is_reference_first_token": true
+    }
+  ],
+  "all_rows_argmax": [
+    256,
+    2972,
+    5218,
+    15380
+  ],
+  "hypothesis": "H-ROW: correct logits exist at row 3 but row 67 was consumed",
+  "tie_evidence": {
+    "position": 28,
+    "bf16_ulp_at_this_magnitude": 0.125,
+    "ref_top1": 15380,
+    "mpk_argmax": 15380,
+    "mpk_argmax_logit": 27.25,
+    "mpk_argmax_in_ref_topk": true,
+    "ref_margin_top1_top2": 0.125,
+    "mpk_margin_over_ref_top1": 0.0,
+    "candidates": [
+      {
+        "token_id": 15380,
+        "ref_logit": 27.5,
+        "mpk_logit": 27.25,
+        "delta": -0.25,
+        "delta_ulps": -2.0
+      },
+      {
+        "token_id": 16933,
+        "ref_logit": 27.375,
+        "mpk_logit": 27.25,
+        "delta": -0.125,
+        "delta_ulps": -1.0
+      },
+      {
+        "token_id": 31819,
+        "ref_logit": 25.75,
+        "mpk_logit": 25.375,
+        "delta": -0.375,
+        "delta_ulps": -3.0
+      },
+      {
+        "token_id": 73182,
+        "ref_logit": 23.5,
+        "mpk_logit": 23.625,
+        "delta": 0.125,
+        "delta_ulps": 1.0
+      }
+    ]
+  }
+}

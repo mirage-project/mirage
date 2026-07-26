@@ -1,0 +1,69 @@
+{
+  "prompt_id": "p06-poem",
+  "prompt_len": 84,
+  "reference_output_0": 31000,
+  "mpk_emitted_token": 40581,
+  "final_step": 84,
+  "row_with_reference_first_token": null,
+  "last_rows": [
+    {
+      "row": 2,
+      "argmax": 318,
+      "logit": 26.625,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 3,
+      "argmax": 40581,
+      "logit": 21.125,
+      "is_reference_first_token": false
+    }
+  ],
+  "all_rows_argmax": [
+    375,
+    1218,
+    318,
+    40581
+  ],
+  "hypothesis": "H-MATH: no prefill row predicts the reference token",
+  "tie_evidence": {
+    "position": 60,
+    "bf16_ulp_at_this_magnitude": 0.125,
+    "ref_top1": 31000,
+    "mpk_argmax": 40581,
+    "mpk_argmax_logit": 21.125,
+    "mpk_argmax_in_ref_topk": true,
+    "ref_margin_top1_top2": 0.0,
+    "mpk_margin_over_ref_top1": 0.25,
+    "candidates": [
+      {
+        "token_id": 31000,
+        "ref_logit": 21.0,
+        "mpk_logit": 20.875,
+        "delta": -0.125,
+        "delta_ulps": -1.0
+      },
+      {
+        "token_id": 81316,
+        "ref_logit": 21.0,
+        "mpk_logit": 21.125,
+        "delta": 0.125,
+        "delta_ulps": 1.0
+      },
+      {
+        "token_id": 40581,
+        "ref_logit": 20.875,
+        "mpk_logit": 21.125,
+        "delta": 0.25,
+        "delta_ulps": 2.0
+      },
+      {
+        "token_id": 54302,
+        "ref_logit": 20.625,
+        "mpk_logit": 20.625,
+        "delta": 0.0,
+        "delta_ulps": 0.0
+      }
+    ]
+  }
+}

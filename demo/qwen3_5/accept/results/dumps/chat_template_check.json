@@ -1,0 +1,57 @@
+{
+  "template_call": "tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)",
+  "snapshot": "/home/muhengl/mpk-qwen35/hf/hub/models--Qwen--Qwen3.5-35B-A3B-FP8/snapshots/9d1823d2dee688a6b25e77009dc727688c44936e",
+  "prompts": {
+    "p01-history": {
+      "equal": true,
+      "len_rederived": 30,
+      "len_reference": 30
+    },
+    "p02-math": {
+      "equal": true,
+      "len_rederived": 68,
+      "len_reference": 68
+    },
+    "p03-python": {
+      "equal": true,
+      "len_rederived": 44,
+      "len_reference": 44
+    },
+    "p04-chinese": {
+      "equal": true,
+      "len_rederived": 32,
+      "len_reference": 32
+    },
+    "p05-cuda": {
+      "equal": true,
+      "len_rederived": 36,
+      "len_reference": 36
+    },
+    "p06-poem": {
+      "equal": true,
+      "len_rederived": 24,
+      "len_reference": 24
+    },
+    "p07-format": {
+      "equal": true,
+      "len_rederived": 33,
+      "len_reference": 33
+    },
+    "p08-science": {
+      "equal": true,
+      "len_rederived": 40,
+      "len_reference": 40
+    },
+    "p09-translate": {
+      "equal": true,
+      "len_rederived": 32,
+      "len_reference": 32
+    },
+    "p10-logic": {
+      "equal": true,
+      "len_rederived": 43,
+      "len_reference": 43
+    }
+  },
+  "all_equal": true
+}
