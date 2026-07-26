@@ -211,20 +211,11 @@ class Qwen3Attention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.key_cache, self.value_cache = kv_cache
-        assert kv_cache[0].shape == (
-            config.num_hidden_layers,
-            16,
-            4096,
-            self.num_key_value_heads // world_size,
-            self.head_dim,
-        )
-        assert kv_cache[1].shape == (
-            config.num_hidden_layers,
-            16,
-            4096,
-            self.num_key_value_heads // world_size,
-            self.head_dim,
-        )
+        # dims 1/2 are (max_num_pages, page_size) — configured by the demo args
+        for _c in kv_cache:
+            assert _c.shape[0] == config.num_hidden_layers
+            assert _c.shape[3] == self.num_key_value_heads // world_size
+            assert _c.shape[4] == self.head_dim
         self.max_position_embeddings = 4096
         self.rope_theta = config.rope_theta
         self.is_causal = True
@@ -412,36 +403,35 @@ class Qwen3PreTrainedModel(PreTrainedModel):
 
 
 class Qwen3Model(Qwen3PreTrainedModel):
-    def __init__(self, config: Qwen3Config, world_size: int, max_num_pages: int, page_size: int):
+    def __init__(self, config: Qwen3Config, world_size: int, max_num_pages: int,
+                page_size: int, kv_plan=None):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        # KV cache layout is (L, N, P, H, D) where L is the number of layers, 
-        # N is the max number of pages (i.e., 1), 
-        # P is the page size (i.e., config.max_embedding_positions), 
-        # H is the number of key-value heads, and D is the hidden dim size
-        key_cache = torch.empty(
-            (
-                config.num_hidden_layers,
-                max_num_pages,
-                page_size,
-                config.num_key_value_heads // world_size,
-                config.head_dim,
-            ),
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
-        value_cache = torch.empty(
-            (
-                config.num_hidden_layers,
-                max_num_pages,
-                page_size,
-                config.num_key_value_heads // world_size,
-                config.head_dim,
-            ),
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
+        # KV 2.0: kv_plan is the single source of truth for cache shape. Declare KVSpec type by 
+        # type (only one on qwen3), and the KV cache manager handles the planning and allocation.
+        if kv_plan is None:
+            from mirage.mpk.kv_group import plan_uniform_kv_groups
+
+            per_entry_bytes = (
+                2 * (config.num_key_value_heads // world_size) * config.head_dim * 2
+            )  # K + V, bf16
+            kv_plan = plan_uniform_kv_groups(
+                num_layers=config.num_hidden_layers,
+                per_entry_bytes=per_entry_bytes,
+                preferred_block_size=page_size)
+                
+        self.kv_plan = kv_plan
+        # KV cache layout is (L, N, P, H, D): L is kv_plan.num_slots
+        # (see KVCachePlan.allocate_slots); N is the max number of pages,
+        # P is the page size; H is the number of key-value heads;
+        # D is the hidden dim size.
+        entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
+        
+        key_cache = kv_plan.allocate_slots(
+            entry_shape=entry_shape, max_num_pages=max_num_pages)
+        value_cache = kv_plan.allocate_slots(
+            entry_shape=entry_shape, max_num_pages=max_num_pages)
 
         self.kv_cache = (key_cache, value_cache)
         self.embed_tokens = nn.Embedding(
@@ -505,9 +495,10 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
 class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
 
-    def __init__(self, config, world_size, max_num_pages, page_size):
+    def __init__(self, config, world_size, max_num_pages, page_size, kv_plan=None):
         super().__init__(config)
-        self.model = Qwen3Model(config, world_size, max_num_pages, page_size)
+        self.model = Qwen3Model(config, world_size, max_num_pages, page_size,
+                                kv_plan=kv_plan)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing
