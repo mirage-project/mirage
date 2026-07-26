@@ -1,5 +1,25 @@
 # P9 — batch-8 scheduler-knee attribution
 
+**Provenance addendum (coordinator-requested fix cycle):** step 1's original
+reproduction ran on the shared `~/mpk-qwen35/mirage` clone with another
+agent's unrecorded in-progress edits present (mtime forensics: all postdate
+this probe's compile window by 17-77 min, so likely not actually present
+during compilation, but never verified live — the gap the coordinator
+flagged). Re-ran the full sweep + repeatability set clean-room: git worktree
+detached at `origin/qwen3-5_support` (same HEAD `79c0073`, `status --short`
+verified empty), fresh `venv-mpk2`. **Clean r=8 mean = 4.520 ms vs dirty
+4.518 ms (0.03% delta) — no knee on the clean tree either; the dirty-tree
+"knee does not reproduce" finding is retro-validated, not overturned.**
+`p9_findings.json`'s top-level `knee_reproduced`/`step1_ms_per_token`/
+`r8_repeatability_check` now report the clean run (authoritative per
+instruction); `attribution` is unchanged (still blocked by the
+`MPK_ENABLE_PROFILING` truncation bug, which is a tree-cleanliness-
+independent source bug, not touched by this fix cycle). Both runs' full
+provenance and the delta are in `p9_findings.json`'s `provenance` key. Clean
+raw log: `clean_run.log`.
+
+---
+
 Per v1-architecture.md S14 P9: reproduce the recorded batch-scaling knee
 (4.40/4.41/4.44/**7.49** ms/token at r=1/2/4/8, commit `92603ca`), then
 attribute it via the MPK profiler (inter-iteration gap vs. summed task time).

@@ -1,5 +1,21 @@
 # P8 — prefill-iteration cost vs decode-iteration cost
 
+**Provenance addendum (coordinator-requested fix cycle):** the run below was
+originally taken on the shared `~/mpk-qwen35/mirage` clone, which — unrecorded
+at the time — had another agent's in-progress edits to shared runtime-path
+sources. Re-run clean-room in a verified-empty `git worktree` (detached at
+`origin/qwen3-5_support`, same HEAD `79c0073`) in a fresh venv (`venv-mpk2`).
+**Clean r = 1.578 vs dirty r = 1.559 (1.25% delta, within this probe's own
+~1.4% cross-pair noise) — same band, same pin verdict. The dirty-tree run is
+retro-validated, not overturned.** `p8_verdict.json`'s top-level fields now
+report the clean run (authoritative per instruction); both runs' full
+provenance ({head_sha, dirty file list, venv, gpu}) and the delta are in its
+`provenance` key. Clean raw evidence: `p8_raw_result_clean.json`,
+`p8_raw_result_xcheck_clean.json`, `p8_verdict_clean_purified.json`,
+`clean_run.log`, `clean_setup_excerpt.log`, `clean_head_sha.txt`.
+
+---
+
 Tests v1-architecture.md S8.2's load-bearing assumption `t_pf(16-token prefill
 iteration) <= t_dec(16-request decode step)` on the shipped Qwen3-8B
 MODE_OFFLINE path (no Qwen3.5 code), per S14 P8. Owner: M2-I11. Prerequisite

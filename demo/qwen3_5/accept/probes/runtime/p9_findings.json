@@ -7,10 +7,10 @@
     "attribution_attempt": "attribution_blocked (this file); raw profiler captures p9_summary_r4.json, p9_summary_r8.json, p9_trace_r4.csv, p9_trace_r8.csv, p9_step2.log alongside this JSON"
   },
   "step1_ms_per_token": {
-    "1": 4.434,
-    "2": 4.43,
-    "4": 4.468,
-    "8": 4.507
+    "1": 4.433,
+    "2": 4.431,
+    "4": 4.456,
+    "8": 4.519
   },
   "step1_recorded_92603ca_ms_per_token": {
     "1": 4.4,
@@ -20,25 +20,24 @@
   },
   "r8_repeatability_check": {
     "measurements_ms_per_token": [
-      4.507,
-      4.513,
-      4.515,
-      4.526,
-      4.531
+      4.519,
+      4.521,
+      4.519,
+      4.517,
+      4.523
     ],
+    "mean": 4.5198,
+    "spread_pct": 0.1327492366918744,
     "sources": [
-      "step1 sweep",
-      "repeat trial 1",
-      "repeat trial 2",
-      "repeat trial 3",
-      "fresh compile-cache dir"
-    ],
-    "mean": 4.5184,
-    "spread_pct": 0.5311614730878192,
-    "interpretation": "5 independent r=8 measurements (incl. a completely fresh compile-cache directory, ruling out kernel-cache staleness) agree within 0.53% of their mean -- the batch-8 config is NOT exhibiting the historical knee; this is not measurement noise."
+      "clean sweep r=8",
+      "clean trial 1",
+      "clean trial 2",
+      "clean trial 3",
+      "clean fresh compile-cache dir"
+    ]
   },
-  "r1_control_rerun_ms_per_token": 4.432,
-  "observed_jump_r4_to_r8_ms_per_token": 0.05039999999999978,
+  "r1_control_rerun_ms_per_token": 4.466,
+  "observed_jump_r4_to_r8_ms_per_token": 0.06379999999999963,
   "historical_jump_r4_to_r8_ms_per_token_at_92603ca": 3.05,
   "root_cause_investigation": {
     "code_diff_since_92603ca": "Only 4 commits touched persistent_kernel.cuh between 92603ca and current HEAD (2c87a75): 9af4349 (NVSHMEM_NO_DEVICE_LIB removal), c004c0b (test-mode interface consolidation), 52b4e7a (tensor-view whitespace-only in this file), e3cdbbea (EAGLE3/MPK_SPEC_DECODE support). All four are gated behind USE_NVSHMEM, MPK_TEST_MODE, or MPK_SPEC_DECODE macros NONE of which are defined for this probe's plain MODE_OFFLINE / use_cutlass_kernel=True / non-spec-decode build -- i.e. the code path this probe exercises is a functional no-op across all four commits. tests/ci-tests/run_batch_perf.py itself has never been modified since 92603ca (git log shows exactly one commit touching it: 92603ca itself).",
@@ -53,5 +52,52 @@
     ],
     "not_fixed_here": "None of these are in M2-I11's owned paths (probes/runtime/, ~/mpk-qwen35/probes/); flagged for a profiler-maintenance issue (natural fit: M2-I10, which already owns the stale profiler_persistent.py name-map fix) before M3 relies on 'the MPK profiler CSV' for scheduler-path optimization work per mpk-gaps.md risk #4's mitigation -- that plan is currently blocked for any OFFLINE multi-iteration case.",
     "practical_impact_on_this_probe": "Low: step 1 already establishes, with 5 independent trials, that there is no significant r=4-to-r=8 per-token jump to attribute right now (observed jump 0.050 ms vs the historical 3.05 ms) -- so the fine-grained gap-vs-task-sum breakdown step 2 was designed to explain has no target phenomenon to explain on the current codebase."
+  },
+  "provenance": {
+    "clean_run_used_for_this_verdict": {
+      "head_sha": "79c00730393e18fb7f90f5fa67d896fc2acfff40",
+      "status_short_dirty_list": [],
+      "venv": "venv-mpk2 (fresh, matched package versions, see p8_verdict.json provenance)",
+      "gpu": "catalyst-B200 GPU 7 (verified idle before every run)",
+      "mirage_root": "~/mpk-qwen35/mirage-clean (git worktree, detached at origin/qwen3-5_support, status --short verified EMPTY before this run set)",
+      "r8_mean": 4.5198,
+      "step1_ms_per_token": {
+        "1": 4.433,
+        "2": 4.431,
+        "4": 4.456,
+        "8": 4.519
+      }
+    },
+    "original_dirty_run": {
+      "head_sha": "79c00730393e18fb7f90f5fa67d896fc2acfff40",
+      "status_short_dirty_list": [
+        "include/mirage/kernel/task_register.h",
+        "include/mirage/persistent_kernel/runtime_header.h",
+        "include/mirage/persistent_kernel/tasks/blackwell/task_header.cuh",
+        "python/mirage/mpk/models/deepseek_v3/builder.py",
+        "python/mirage/mpk/models/utils.py",
+        "python/mirage/mpk/persistent_kernel.py",
+        "src/kernel/graph.cc",
+        "src/kernel/runtime.cc",
+        "src/kernel/task_register.cc"
+      ],
+      "dirty_list_provenance": "Reconstructed (not captured live) from a post-hoc B200 git-status + mtime-forensics check: all 9 dirty files' mtimes (21:03-21:07) postdate this probe's entire compile window (19:56-20:46) by 17-77 minutes -- see p8_verdict.json's provenance block for the full methodology note, identical reasoning applies here (same shared clone, same session).",
+      "venv": "venv-mpk",
+      "gpu": "catalyst-B200 GPU 7 (verified idle before every run)",
+      "mirage_root": "~/mpk-qwen35/mirage (shared clone)",
+      "r8_mean": 4.5184,
+      "step1_ms_per_token": {
+        "1": 4.434,
+        "2": 4.43,
+        "4": 4.468,
+        "8": 4.507
+      }
+    },
+    "clean_vs_dirty_delta": {
+      "r8_mean_dirty": 4.5184,
+      "r8_mean_clean": 4.5198,
+      "delta_pct": 0.030984419263462508,
+      "verdict": "WITHIN NOISE (0.031% delta, far smaller than either tree's own internal r=8 spread of ~0.5%) -- the dirty-tree 'knee does not reproduce' finding is RETRO-VALIDATED by an independent clean-room instrument at the identical HEAD (79c0073039) with zero working-tree changes. No knee on either tree: both give ~4.5 ms/token flat across r=1..8, not the historical 7.49."
+    }
   }
 }

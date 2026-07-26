@@ -23,7 +23,9 @@ import time
 
 import torch
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mirage"))
+ROOT = os.environ.get(
+    "MIRAGE_ROOT", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "mirage"))
+)
 DEMO_DIR = os.path.join(ROOT, "demo", "qwen3")
 sys.path.insert(0, DEMO_DIR)
 
