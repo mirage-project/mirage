@@ -26,7 +26,25 @@ __device__ __forceinline__ void warp_reduce_max_idx_sm100(T &val,
     float tmp = __shfl_down_sync(0xffffffff, (float)val, offset);
     T other_val = (T)tmp;
     long long other_idx = __shfl_down_sync(0xffffffff, idx, offset);
-    if (other_val > val) {
+    // Tie-break: on EXACTLY equal values keep the SMALLER index. With a plain
+    // `>` the winner of a tie is whichever value happened to be the incumbent
+    // in the reduction tree, which depends on lane/warp/chunk order -- so the
+    // result is both non-deterministic and different from torch.max / HF
+    // `generate`, which return the lowest index among ties.
+    //
+    // Exact bf16 logit ties are not hypothetical: the AC-3 reference has 2 in
+    // its 640 positions, and M2-I9 traced a real AC-3 mismatch to exactly this
+    // (p08-science generated position 28: ids 15380 and 16933 BOTH at 27.25 in
+    // MPK's own logits; the engine emitted 16933 while torch.max over the very
+    // same dumped row returned 15380, the reference token).
+    //
+    // Both callers are covered. In `argmax_partial` `idx` is the token id. In
+    // `argmax_reduce` it is the packed `(chunk << 32) | relative` value, which
+    // is monotone in the global token id (`chunk * CHUNK_SIZE + relative`), so
+    // "smaller packed index" is "smaller token id" there too. The two
+    // per-thread scans that feed this already walk `i` ascending and so already
+    // keep the lowest index on a tie; this reduction was the only gap.
+    if (other_val > val || (other_val == val && other_idx < idx)) {
       val = other_val;
       idx = other_idx;
     }
