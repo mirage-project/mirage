@@ -16,9 +16,18 @@ configurator + launcher + result collector.
 
 ---
 
+## Ferret root resolution (added 2026-07-26, mpk-qwen3.5 bringup)
+
+`FERRET_ROOT` selects the ferret install; default `~/ferret`. On catalyst-B200 this
+project's operational install is `~/mpk-qwen35/ferret` (branch `cc`, bringup proven by a
+converged smoke episode — see `docs/qwen35/ferret-bringup.md`). `cc-run.sh` self-locates via
+`dirname($0)`, so ALWAYS invoke scripts by their absolute path under the chosen root; every
+`~/ferret/...` path below means `$FERRET_ROOT/...`. The `claude` CLI on the box must be
+login-shell resolved (`bash -lc`); autonomy comes from the account-global settings.
+
 ## What ferret is
 
-Ferret lives at `~/ferret/`. It is an autonomous CUDA kernel optimization
+Ferret lives at `$FERRET_ROOT` (default `~/ferret/`). It is an autonomous CUDA kernel optimization
 system built on Claude Code. One ferret invocation = one `claude` mainthread
 running in `~/ferret/` with `FERRET_WORKSPACE=workspaceN`, driving a loop:
 
