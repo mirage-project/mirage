@@ -1,0 +1,420 @@
+/* Copyright 2026 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// Kernel-wrapper test harness for the Gated-DeltaNet recurrence task
+// (include/mirage/persistent_kernel/tasks/blackwell/gdn_recurrent_sm100.cuh).
+//
+// One CUDA block per (V-HEAD, REQUEST SLOT), mirroring the persistent runtime
+// where the task graph emits grid (NUM_V_HEADS, slots, 1) and each task is
+// executed by one worker CTA.  The wrapper does exactly the pointer arithmetic
+// that `TaskRegister::register_gdn_recurrent_sm100_task` emits into the
+// generated `_execute_task()`:
+//
+//   hv      = kv_idx                       (blockIdx.x here)
+//   slot    = request_id                   (blockIdx.y here)
+//   tok0    = qo_indptr[slot],  q_len = qo_indptr[slot+1] - tok0
+//   qkv    += tok0 * QKV_STRIDE            (head offsets are done in-kernel:
+//                                           q, k and v live at three different
+//                                           bases inside the packed row)
+//   ba     += tok0 * BA_STRIDE
+//   state  += (slot * NUM_V_HEADS + hv) * HEAD_V_DIM * HEAD_K_DIM
+//   z      += tok0 * Z_STRIDE   + hv * HEAD_V_DIM
+//   out    += tok0 * OUT_STRIDE + hv * HEAD_V_DIM
+//
+// `zero_state` is supplied per slot instead of being derived from
+// `runtime_config.step[request_ids[slot]]`, so one launch can cover "fresh
+// request" and "carried state" slots at once - that predicate's only observable
+// effect.
+//
+// A second entry point, `gdn_gating_probe`, evaluates ONLY the gating scalars
+// (`beta` and `g`) with the exact expressions the task uses.  They are the two
+// intermediates the M2-I3 oracle dumps directly but the fused task never
+// materialises, so this is how they get checked bit-for-bit against HF.
+
+#include "blackwell/gdn_recurrent_sm100.cuh"
+#include "runtime_header.h"
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime.h>
+#include <torch/extension.h>
+
+using bfloat16 = type::bfloat16_t;
+
+namespace {
+
+template <int NUM_V_HEADS,
+          int NUM_K_HEADS,
+          int HEAD_K_DIM,
+          int HEAD_V_DIM,
+          int QKV_STRIDE,
+          int BA_STRIDE,
+          int Z_STRIDE,
+          int OUT_STRIDE>
+__global__ void __launch_bounds__(WORKER_NUM_THREADS)
+    gdn_recurrent_wrapper(void const *qkv,
+                          void const *ba,
+                          void const *alog_dtbias,
+                          void *state,
+                          void const *z,
+                          void const *norm_w,
+                          void *out,
+                          int const *qo_indptr,
+                          uint8_t const *zero_state,
+                          void *o_debug) {
+  int const hv = blockIdx.x;
+  int const slot = blockIdx.y;
+  int const tok0 = qo_indptr[slot];
+  int const q_len = qo_indptr[slot + 1] - tok0;
+  constexpr int STATE_ELEMS = HEAD_V_DIM * HEAD_K_DIM;
+  kernel::gdn_recurrent_sm100_task_impl<bfloat16,
+                                        NUM_V_HEADS,
+                                        NUM_K_HEADS,
+                                        HEAD_K_DIM,
+                                        HEAD_V_DIM,
+                                        QKV_STRIDE,
+                                        BA_STRIDE,
+                                        Z_STRIDE,
+                                        OUT_STRIDE>(
+      static_cast<bfloat16 const *>(qkv) + (size_t)tok0 * QKV_STRIDE,
+      static_cast<bfloat16 const *>(ba) + (size_t)tok0 * BA_STRIDE,
+      alog_dtbias,
+      static_cast<float *>(state) +
+          ((size_t)slot * NUM_V_HEADS + hv) * STATE_ELEMS,
+      static_cast<bfloat16 const *>(z) + (size_t)tok0 * Z_STRIDE +
+          (size_t)hv * HEAD_V_DIM,
+      norm_w,
+      static_cast<bfloat16 *>(out) + (size_t)tok0 * OUT_STRIDE +
+          (size_t)hv * HEAD_V_DIM,
+      hv,
+      q_len,
+      zero_state[slot] != 0,
+      o_debug == nullptr
+          ? nullptr
+          : static_cast<void *>(static_cast<bfloat16 *>(o_debug) +
+                                (size_t)tok0 * OUT_STRIDE +
+                                (size_t)hv * HEAD_V_DIM));
+}
+
+template <int NUM_V_HEADS,
+          int NUM_K_HEADS,
+          int HEAD_K_DIM,
+          int HEAD_V_DIM,
+          int QKV_STRIDE,
+          int BA_STRIDE,
+          int Z_STRIDE,
+          int OUT_STRIDE>
+void launch_gdn_recurrent(int num_slots,
+                          void const *qkv,
+                          void const *ba,
+                          void const *alog_dtbias,
+                          void *state,
+                          void const *z,
+                          void const *norm_w,
+                          void *out,
+                          int const *qo_indptr,
+                          uint8_t const *zero_state,
+                          void *o_debug) {
+  // Matches the smem carve-up in gdn_recurrent_sm100_task_impl:
+  // S[HEAD_V_DIM][HEAD_K_DIM] + k + q + o + a 32-slot reduction scratch.
+  size_t const smem_size = sizeof(float) * ((size_t)HEAD_V_DIM * HEAD_K_DIM +
+                                            2 * HEAD_K_DIM + HEAD_V_DIM + 32);
+  auto kern = gdn_recurrent_wrapper<NUM_V_HEADS,
+                                    NUM_K_HEADS,
+                                    HEAD_K_DIM,
+                                    HEAD_V_DIM,
+                                    QKV_STRIDE,
+                                    BA_STRIDE,
+                                    Z_STRIDE,
+                                    OUT_STRIDE>;
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_size));
+  dim3 grid(NUM_V_HEADS, num_slots, 1);
+  kern<<<grid,
+         WORKER_NUM_THREADS,
+         smem_size,
+         at::cuda::getCurrentCUDAStream()>>>(qkv,
+                                             ba,
+                                             alog_dtbias,
+                                             state,
+                                             z,
+                                             norm_w,
+                                             out,
+                                             qo_indptr,
+                                             zero_state,
+                                             o_debug);
+}
+
+// Shapes this harness instantiates:
+// (num_v_heads, num_k_heads, head_k_dim, head_v_dim, qkv_stride, ba_stride,
+//  z_stride, out_stride).  Qwen3.5's GDN core is the first entry; the second
+// covers a strided qkv row (the layout a fused in_proj_qkvz would hand us,
+// vllm-graph.md 2.1.2); the rest keep the unit tests fast and cover the GVA
+// ratio (1, 2, 4) and a head_k_dim that is exactly one warp wide.
+#define GDN_RECURRENT_CASES(F)                                                 \
+  F(32, 16, 128, 128, 8192, 64, 4096, 4096)                                    \
+  F(32, 16, 128, 128, 12288, 64, 4096, 4096)                                   \
+  F(8, 4, 128, 128, 2048, 16, 1024, 1024)                                      \
+  F(4, 2, 32, 32, 256, 8, 128, 128)                                            \
+  F(4, 4, 32, 32, 384, 8, 128, 128)                                            \
+  F(4, 1, 32, 32, 192, 8, 128, 128)                                            \
+  F(2, 1, 64, 64, 256, 4, 128, 128)
+
+bool dispatch_gdn_recurrent(int num_v_heads,
+                            int num_k_heads,
+                            int head_k_dim,
+                            int head_v_dim,
+                            int qkv_stride,
+                            int ba_stride,
+                            int z_stride,
+                            int out_stride,
+                            int num_slots,
+                            void const *qkv,
+                            void const *ba,
+                            void const *alog_dtbias,
+                            void *state,
+                            void const *z,
+                            void const *norm_w,
+                            void *out,
+                            int const *qo_indptr,
+                            uint8_t const *zero_state,
+                            void *o_debug) {
+#define GDN_RECURRENT_DISPATCH(HV, HK, DK, DV, QS, BS, ZS, OS)                 \
+  if (num_v_heads == (HV) && num_k_heads == (HK) && head_k_dim == (DK) &&      \
+      head_v_dim == (DV) && qkv_stride == (QS) && ba_stride == (BS) &&         \
+      z_stride == (ZS) && out_stride == (OS)) {                                \
+    launch_gdn_recurrent<HV, HK, DK, DV, QS, BS, ZS, OS>(num_slots,            \
+                                                         qkv,                  \
+                                                         ba,                   \
+                                                         alog_dtbias,          \
+                                                         state,                \
+                                                         z,                    \
+                                                         norm_w,               \
+                                                         out,                  \
+                                                         qo_indptr,            \
+                                                         zero_state,           \
+                                                         o_debug);             \
+    return true;                                                               \
+  }
+  GDN_RECURRENT_CASES(GDN_RECURRENT_DISPATCH)
+#undef GDN_RECURRENT_DISPATCH
+  return false;
+}
+
+// Gating-scalar probe: the two dumped intermediates the fused task consumes but
+// never writes out.  Expressions are copied verbatim from the task impl so a
+// mismatch here localises to the CUDA math (expf / log1pf / sigmoid) rather
+// than to the recurrence.
+__global__ void gdn_gating_probe_kernel(bfloat16 const *__restrict__ ba,
+                                        float const *__restrict__ ad,
+                                        bfloat16 *__restrict__ beta_out,
+                                        float *__restrict__ g_out,
+                                        int num_tokens,
+                                        int num_v_heads,
+                                        int ba_stride) {
+  int const idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= num_tokens * num_v_heads) {
+    return;
+  }
+  int const t = idx / num_v_heads;
+  int const hv = idx - t * num_v_heads;
+  float const b_val = static_cast<float>(ba[(size_t)t * ba_stride + hv]);
+  float const a_val =
+      static_cast<float>(ba[(size_t)t * ba_stride + num_v_heads + hv]);
+  float const x = a_val + ad[num_v_heads + hv];
+  float const softplus = (x > 20.0f) ? x : log1pf(expf(x));
+  beta_out[idx] = bfloat16(1.0f / (1.0f + expf(-b_val)));
+  g_out[idx] = -expf(ad[hv]) * softplus;
+}
+
+} // namespace
+
+void gdn_recurrent_sm100(torch::Tensor qkv,         // [tokens, qkv_stride] bf16
+                         torch::Tensor ba,          // [tokens, ba_stride] bf16
+                         torch::Tensor alog_dtbias, // [2, num_v_heads] f32
+                         torch::Tensor state,     // [slots,Hv,Dv,Dk] f32 in/out
+                         torch::Tensor z,         // [tokens, z_stride] bf16
+                         torch::Tensor norm_w,    // [head_v_dim] f32
+                         torch::Tensor out,       // [tokens, out_stride] bf16
+                         torch::Tensor qo_indptr, // int32 [slots + 1]
+                         torch::Tensor zero_state, // uint8 [slots]
+                         int64_t num_k_heads,
+                         c10::optional<torch::Tensor> o_debug) {
+  TORCH_CHECK(qkv.dim() == 2 && qkv.is_contiguous() &&
+                  qkv.scalar_type() == at::kBFloat16,
+              "qkv must be a contiguous 2D bfloat16 tensor");
+  TORCH_CHECK(ba.dim() == 2 && ba.is_contiguous() &&
+                  ba.scalar_type() == at::kBFloat16,
+              "ba must be a contiguous 2D bfloat16 tensor");
+  TORCH_CHECK(z.dim() == 2 && z.is_contiguous() &&
+                  z.scalar_type() == at::kBFloat16,
+              "z must be a contiguous 2D bfloat16 tensor");
+  TORCH_CHECK(out.dim() == 2 && out.is_contiguous() &&
+                  out.scalar_type() == at::kBFloat16,
+              "out must be a contiguous 2D bfloat16 tensor");
+  TORCH_CHECK(alog_dtbias.dim() == 2 && alog_dtbias.is_contiguous() &&
+                  alog_dtbias.scalar_type() == at::kFloat &&
+                  alog_dtbias.size(0) == 2,
+              "alog_dtbias must be a contiguous [2, num_v_heads] fp32 tensor");
+  TORCH_CHECK(norm_w.dim() == 1 && norm_w.is_contiguous() &&
+                  norm_w.scalar_type() == at::kFloat,
+              "norm_w must be a contiguous 1D fp32 tensor");
+  TORCH_CHECK(state.dim() == 4 && state.is_contiguous() &&
+                  state.scalar_type() == at::kFloat,
+              "state must be a contiguous [slots, num_v_heads, head_v_dim, "
+              "head_k_dim] fp32 tensor");
+  TORCH_CHECK(qo_indptr.dim() == 1 && qo_indptr.is_contiguous() &&
+                  qo_indptr.scalar_type() == at::kInt,
+              "qo_indptr must be a contiguous 1D int32 tensor");
+  TORCH_CHECK(zero_state.dim() == 1 && zero_state.is_contiguous() &&
+                  zero_state.scalar_type() == at::kByte,
+              "zero_state must be a contiguous 1D uint8 tensor");
+
+  int const num_slots = (int)state.size(0);
+  int const num_v_heads = (int)state.size(1);
+  int const head_v_dim = (int)state.size(2);
+  int const head_k_dim = (int)state.size(3);
+  int const qkv_stride = (int)qkv.size(1);
+  int const ba_stride = (int)ba.size(1);
+  int const z_stride = (int)z.size(1);
+  int const out_stride = (int)out.size(1);
+
+  TORCH_CHECK(alog_dtbias.size(1) == num_v_heads,
+              "alog_dtbias must have num_v_heads columns");
+  TORCH_CHECK(norm_w.size(0) == head_v_dim, "norm_w must be head_v_dim long");
+  TORCH_CHECK(qo_indptr.size(0) == num_slots + 1,
+              "qo_indptr must have num_slots + 1 entries");
+  TORCH_CHECK(zero_state.size(0) == num_slots,
+              "zero_state must have num_slots entries");
+  TORCH_CHECK(num_k_heads >= 1 && num_v_heads % (int)num_k_heads == 0,
+              "num_v_heads must be a multiple of num_k_heads");
+  TORCH_CHECK(ba_stride >= 2 * num_v_heads, "ba packs [b | a]");
+  TORCH_CHECK(qkv_stride >=
+                  2 * (int)num_k_heads * head_k_dim + num_v_heads * head_v_dim,
+              "qkv row is too narrow for [q | k | v]");
+  TORCH_CHECK(qkv.size(0) == out.size(0) && qkv.size(0) == z.size(0) &&
+                  qkv.size(0) == ba.size(0),
+              "qkv, ba, z and out must have the same number of token rows");
+
+  void *o_debug_ptr = nullptr;
+  if (o_debug.has_value()) {
+    torch::Tensor const &od = o_debug.value();
+    TORCH_CHECK(od.dim() == 2 && od.is_contiguous() &&
+                    od.scalar_type() == at::kBFloat16 &&
+                    od.size(0) == out.size(0) && od.size(1) == out_stride,
+                "o_debug must match `out` in shape, dtype and layout");
+    o_debug_ptr = od.data_ptr();
+  }
+
+  bool const dispatched = dispatch_gdn_recurrent(num_v_heads,
+                                                 (int)num_k_heads,
+                                                 head_k_dim,
+                                                 head_v_dim,
+                                                 qkv_stride,
+                                                 ba_stride,
+                                                 z_stride,
+                                                 out_stride,
+                                                 num_slots,
+                                                 qkv.data_ptr(),
+                                                 ba.data_ptr(),
+                                                 alog_dtbias.data_ptr(),
+                                                 state.data_ptr(),
+                                                 z.data_ptr(),
+                                                 norm_w.data_ptr(),
+                                                 out.data_ptr(),
+                                                 qo_indptr.data_ptr<int>(),
+                                                 zero_state.data_ptr<uint8_t>(),
+                                                 o_debug_ptr);
+  TORCH_CHECK(dispatched,
+              "Unsupported gdn_recurrent_sm100 shape [num_v_heads=",
+              num_v_heads,
+              ", num_k_heads=",
+              num_k_heads,
+              ", head_k_dim=",
+              head_k_dim,
+              ", head_v_dim=",
+              head_v_dim,
+              ", qkv_stride=",
+              qkv_stride,
+              ", ba_stride=",
+              ba_stride,
+              ", z_stride=",
+              z_stride,
+              ", out_stride=",
+              out_stride,
+              "]");
+  C10_CUDA_CHECK(cudaGetLastError());
+}
+
+void gdn_gating_probe(torch::Tensor ba,
+                      torch::Tensor alog_dtbias,
+                      torch::Tensor beta_out,
+                      torch::Tensor g_out) {
+  TORCH_CHECK(ba.dim() == 2 && ba.is_contiguous() &&
+                  ba.scalar_type() == at::kBFloat16,
+              "ba must be a contiguous 2D bfloat16 tensor");
+  TORCH_CHECK(alog_dtbias.dim() == 2 && alog_dtbias.size(0) == 2 &&
+                  alog_dtbias.is_contiguous() &&
+                  alog_dtbias.scalar_type() == at::kFloat,
+              "alog_dtbias must be a contiguous [2, num_v_heads] fp32 tensor");
+  int const num_tokens = (int)ba.size(0);
+  int const ba_stride = (int)ba.size(1);
+  int const num_v_heads = (int)alog_dtbias.size(1);
+  TORCH_CHECK(beta_out.numel() == (int64_t)num_tokens * num_v_heads &&
+                  beta_out.scalar_type() == at::kBFloat16 &&
+                  beta_out.is_contiguous(),
+              "beta_out must be a contiguous bf16 [tokens, num_v_heads]");
+  TORCH_CHECK(g_out.numel() == (int64_t)num_tokens * num_v_heads &&
+                  g_out.scalar_type() == at::kFloat && g_out.is_contiguous(),
+              "g_out must be a contiguous fp32 [tokens, num_v_heads]");
+  int const n = num_tokens * num_v_heads;
+  int const threads = 128;
+  gdn_gating_probe_kernel<<<(n + threads - 1) / threads,
+                            threads,
+                            0,
+                            at::cuda::getCurrentCUDAStream()>>>(
+      static_cast<bfloat16 const *>(ba.data_ptr()),
+      alog_dtbias.data_ptr<float>(),
+      static_cast<bfloat16 *>(beta_out.data_ptr()),
+      g_out.data_ptr<float>(),
+      num_tokens,
+      num_v_heads,
+      ba_stride);
+  C10_CUDA_CHECK(cudaGetLastError());
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("gdn_recurrent_sm100",
+        &gdn_recurrent_sm100,
+        "Gated-DeltaNet recurrence + fused gated RMSNorm/SiLU epilogue with a "
+        "per-slot fp32 state pool (SM100)",
+        pybind11::arg("qkv"),
+        pybind11::arg("ba"),
+        pybind11::arg("alog_dtbias"),
+        pybind11::arg("state"),
+        pybind11::arg("z"),
+        pybind11::arg("norm_w"),
+        pybind11::arg("out"),
+        pybind11::arg("qo_indptr"),
+        pybind11::arg("zero_state"),
+        pybind11::arg("num_k_heads"),
+        pybind11::arg("o_debug") = c10::nullopt);
+  m.def("gdn_gating_probe",
+        &gdn_gating_probe,
+        "Evaluate only the GDN gating scalars (beta, g) with the task's own "
+        "expressions",
+        pybind11::arg("ba"),
+        pybind11::arg("alog_dtbias"),
+        pybind11::arg("beta_out"),
+        pybind11::arg("g_out"));
+}

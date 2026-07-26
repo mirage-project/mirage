@@ -440,6 +440,16 @@ void register_mugraph(
               task.task_metadata.request_id = bid.x;
               task.task_metadata.kv_idx = bid.y;
             }
+            // GDN recurrence: grid = (num_v_heads, max_num_batched_requests,
+            // 1).  kv_idx = bid.x picks the v-head (and with it the q/k head
+            // via the GVA mapping); request_id = bid.y picks the state slot
+            // and the token window via qo_indptr.  Note the axes are the
+            // TRANSPOSE of the conv task's: the recurrence cannot split a
+            // chunk's tokens, so its wide axis is the head, not the channel.
+            if (task_type == TASK_GDN_RECURRENT_SM100) {
+              task.task_metadata.kv_idx = bid.x;
+              task.task_metadata.request_id = bid.y;
+            }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
               task.task_metadata.task_offset =
                   bid.x + bid.y * bgraph.grid_dim.x +
@@ -1844,6 +1854,7 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_FP8_BLOCKSCALE_SM100] =
       "TASK_LINEAR_FP8_BLOCKSCALE_SM100";
   task_type_to_name[TASK_GDN_CONV1D_SM100] = "TASK_GDN_CONV1D_SM100";
+  task_type_to_name[TASK_GDN_RECURRENT_SM100] = "TASK_GDN_RECURRENT_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

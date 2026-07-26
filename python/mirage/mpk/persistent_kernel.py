@@ -1181,6 +1181,93 @@ class PersistentKernel:
         self.kn_graph.customized([input, weight, conv_state, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "gdn_conv1d_sm100", [])
 
+    def gdn_recurrent_layer(
+        self,
+        qkv: DTensor,        # conv output [max_num_batched_tokens, qkv_stride] bf16
+        ba: DTensor,         # [max_num_batched_tokens, 2*num_v_heads] bf16
+        alog_dtbias: DTensor,  # [2, num_v_heads] fp32 (row 0 A_log, row 1 dt_bias)
+        state: DTensor,      # [slots, num_v_heads, head_v_dim, head_k_dim] fp32
+        z: DTensor,          # [max_num_batched_tokens, num_v_heads*head_v_dim] bf16
+        norm_w: DTensor,     # [head_v_dim] fp32
+        output: DTensor,     # [max_num_batched_tokens, num_v_heads*head_v_dim] bf16
+        num_k_heads: int,
+        grid_dim: tuple,     # (num_v_heads, max_num_batched_requests, 1)
+        block_dim: tuple,    # (256, 1, 1) on SM100
+    ):
+        """Gated-DeltaNet recurrence with a fused gated RMSNorm/SiLU epilogue.
+
+        One task per (v-head, request SLOT). The task owns the WHOLE per-layer
+        chain between the conv output and the ``out_proj`` input: q/k L2 norm,
+        the gating scalars, the delta-rule update of the fp32 state, the readout
+        ``o = S q``, and the per-head gated norm - so no separate RMSNormGated
+        task is needed (v1-architecture.md 3.2).
+
+        The kernel reads its token window from ``qo_indptr_buffer`` and its
+        state slice from ``task_metadata.request_id``/``kv_idx``, so nothing is
+        partitioned by the grid - every tensor is presented whole, exactly like
+        ``gdn_conv1d_layer`` and ``mla_prefill_layer``.
+
+        Unlike the conv FIR, the recurrence is SEQUENTIAL in the token index, so
+        a chunk's tokens cannot be spread across tasks. The only parallel axes
+        are the v-head (grid.x) and the request slot (grid.y); a long prefill
+        chunk is therefore walked in-task.
+
+        ``num_k_heads`` declares the GVA ratio: two v-heads share one q/k head
+        on Qwen3.5 (32 v-heads, 16 k-heads). It cannot be inferred, because q
+        and k live inside the packed ``qkv`` row.
+
+        State lifecycle is kernel-side: a slot whose request is at ``step == 0``
+        treats the stored state as zero instead of loading it, and the updated
+        state is written back unconditionally, so slot reuse re-zeros implicitly
+        (v1-architecture.md 3.3).
+        """
+        assert qkv.num_dims == 2
+        assert ba.num_dims == 2
+        assert alog_dtbias.num_dims == 2
+        assert state.num_dims == 4
+        assert z.num_dims == 2
+        assert norm_w.num_dims == 1
+        assert output.num_dims == 2
+        num_v_heads = state.dim(1)
+        head_v_dim = state.dim(2)
+        head_k_dim = state.dim(3)
+        assert num_k_heads >= 1 and num_v_heads % num_k_heads == 0, (
+            f"num_v_heads ({num_v_heads}) must be a multiple of num_k_heads "
+            f"({num_k_heads})"
+        )
+        assert head_k_dim % 32 == 0, "head_k_dim must be a multiple of 32"
+        assert alog_dtbias.dim(0) == 2 and alog_dtbias.dim(1) == num_v_heads
+        assert norm_w.dim(0) == head_v_dim
+        assert ba.dim(1) >= 2 * num_v_heads, "ba packs [b | a]"
+        assert qkv.dim(1) >= 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim, (
+            "qkv row is too narrow for [q | k | v]"
+        )
+        assert z.dim(1) >= num_v_heads * head_v_dim
+        assert output.dim(1) >= num_v_heads * head_v_dim
+        assert grid_dim[0] == num_v_heads, (
+            f"grid_dim.x ({grid_dim[0]}) must be one task per v-head "
+            f"({num_v_heads})"
+        )
+        assert state.dim(0) >= grid_dim[1], (
+            "recurrent-state pool needs one slot per request "
+            f"({state.dim(0)} slots < grid_dim.y {grid_dim[1]})"
+        )
+
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(qkv, (-1, -1, -1), -1, True)
+        tb_graph.new_input(ba, (-1, -1, -1), -1, True)
+        tb_graph.new_input(alog_dtbias, (-1, -1, -1), -1, True)
+        tb_graph.new_input(state, (-1, -1, -1), -1, True)
+        tb_graph.new_input(z, (-1, -1, -1), -1, True)
+        tb_graph.new_input(norm_w, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(
+            [qkv, ba, alog_dtbias, state, z, norm_w, output], tb_graph
+        )
+        self.kn_graph.register_task(
+            tb_graph, "gdn_recurrent_sm100", [num_k_heads]
+        )
+
     def mla_kv_gather_layer(
         self,
         c_latent_new: DTensor,

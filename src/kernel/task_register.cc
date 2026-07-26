@@ -4490,6 +4490,137 @@ int TaskRegister::register_gdn_conv1d_sm100_task(
   return register_task_variant(TASK_GDN_CONV1D_SM100, code.to_string());
 }
 
+int TaskRegister::register_gdn_recurrent_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Gated-DeltaNet recurrence + fused gated norm, one task per
+  // (v-head, request SLOT).
+  // Inputs:  [0] qkv_c   [max_num_batched_tokens, qkv_stride]   bf16
+  //          [1] ba      [max_num_batched_tokens, 2*num_v_heads] bf16
+  //          [2] ad      [2, num_v_heads]                        fp32
+  //          [3] state   [num_slots, num_v_heads, head_v_dim, head_k_dim]
+  //                                                              fp32 (in/out)
+  //          [4] z       [max_num_batched_tokens, num_v_heads*head_v_dim] bf16
+  //          [5] norm_w  [head_v_dim]                            fp32
+  // Output:  [0] out     [max_num_batched_tokens, num_v_heads*head_v_dim] bf16
+  //
+  // Grid is (num_v_heads, max_num_batched_requests, 1); runtime.cc puts bid.x
+  // into task_metadata.kv_idx and bid.y into task_metadata.request_id.  The
+  // kernel slices its token window from qo_indptr (chunk length varies per
+  // iteration), exactly like the conv task and register_mla_prefill_sm100_task.
+  //
+  // params[0] = num_k_heads.  It cannot be derived from the tensors: q and k
+  // live inside the packed qkv row, whose only recorded dimension is the total
+  // stride, so the GVA ratio has to be declared.
+  assert(params.size() == 1);
+  int const num_k_heads = params[0];
+  assert(num_k_heads >= 1);
+
+  int const num_inputs = 6;
+  int const num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)(num_inputs + num_outputs));
+
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    auto *iop = static_cast<tb::TBInputOp *>(op);
+    if ((int)input_ops.size() < num_inputs) {
+      input_ops.push_back(iop);
+    } else {
+      output_ops.push_back(iop);
+    }
+  }
+
+  // State pool: [num_slots, num_v_heads, head_v_dim, head_k_dim].
+  assert(input_ops[3]->dtensor.num_dims == 4);
+  int num_v_heads = input_ops[3]->dtensor.dim[1];
+  int head_v_dim = input_ops[3]->dtensor.dim[2];
+  int head_k_dim = input_ops[3]->dtensor.dim[3];
+  assert(num_v_heads % num_k_heads == 0);
+  assert(head_k_dim % 32 == 0);
+
+  assert(input_ops[2]->dtensor.num_dims == 2);
+  assert(input_ops[2]->dtensor.dim[0] == 2);
+  assert(input_ops[2]->dtensor.dim[1] == num_v_heads);
+  assert(input_ops[5]->dtensor.num_dims == 1);
+  assert(input_ops[5]->dtensor.dim[0] == head_v_dim);
+
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  assert(input_ops[1]->dtensor.num_dims == 2);
+  assert(input_ops[4]->dtensor.num_dims == 2);
+  assert(output_ops[0]->dtensor.num_dims == 2);
+
+  // Row strides come from the KN-level inputs; the qkv row may be wider than
+  // [q|k|v] when it is a slice of a fused projection output.
+  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  assert(input_ops[1]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  assert(input_ops[4]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  int qkv_stride = static_cast<int>(
+      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op)
+          ->input_strides[0]);
+  int ba_stride = static_cast<int>(
+      static_cast<kn::KNInputOp *>(input_ops[1]->dtensor.owner_op)
+          ->input_strides[0]);
+  int z_stride = static_cast<int>(
+      static_cast<kn::KNInputOp *>(input_ops[4]->dtensor.owner_op)
+          ->input_strides[0]);
+  int out_stride = static_cast<int>(
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op)
+          ->input_strides[0]);
+  assert(ba_stride >= 2 * num_v_heads);
+  assert(qkv_stride >= 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim);
+  assert(z_stride >= num_v_heads * head_v_dim);
+  assert(out_stride >= num_v_heads * head_v_dim);
+
+  assert((int)bgraph.grid_dim.x == num_v_heads &&
+         "grid.x must be one task per v-head");
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("{");
+  code.e("  int hv_ = task_desc->task_metadata.kv_idx;");
+  code.e("  int slot_ = task_desc->task_metadata.request_id;");
+  code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[slot_];");
+  code.e("  int q_len_ = runtime_config.qo_indptr_buffer[slot_ + 1] - qo_fp_;");
+  code.e("  bool zero_state_ = "
+         "kernel::gdn_slot_is_first_chunk(runtime_config, slot_);");
+  code.e("  kernel::gdn_recurrent_sm100_task_impl<bfloat16, $, $, $, $, $, $, "
+         "$, $>(",
+         num_v_heads,
+         num_k_heads,
+         head_k_dim,
+         head_v_dim,
+         qkv_stride,
+         ba_stride,
+         z_stride,
+         out_stride);
+  code.e("      static_cast<bfloat16 const *>(task_desc->input_ptrs[0]) + "
+         "qo_fp_ * $,",
+         qkv_stride);
+  code.e("      static_cast<bfloat16 const *>(task_desc->input_ptrs[1]) + "
+         "qo_fp_ * $,",
+         ba_stride);
+  code.e("      task_desc->input_ptrs[2],");
+  code.e("      static_cast<float *>(task_desc->input_ptrs[3]) + "
+         "(slot_ * $ + hv_) * $,",
+         num_v_heads,
+         head_v_dim * head_k_dim);
+  code.e("      static_cast<bfloat16 const *>(task_desc->input_ptrs[4]) + "
+         "qo_fp_ * $ + hv_ * $,",
+         z_stride,
+         head_v_dim);
+  code.e("      task_desc->input_ptrs[5],");
+  code.e("      static_cast<bfloat16 *>(task_desc->output_ptrs[0]) + "
+         "qo_fp_ * $ + hv_ * $,",
+         out_stride,
+         head_v_dim);
+  code.e("      hv_,");
+  code.e("      q_len_,");
+  code.e("      zero_state_);");
+  code.e("}");
+  return register_task_variant(TASK_GDN_RECURRENT_SM100, code.to_string());
+}
+
 int TaskRegister::register_mla_kv_gather_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: d_k (576)

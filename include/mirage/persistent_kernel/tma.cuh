@@ -1633,6 +1633,11 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     case TASK_GDN_CONV1D_SM100: {
       break;
     }
+    // Same story for the GDN recurrence task (id 237): no TMA, but its id is
+    // inside the TMA window so the switch must cover it.
+    case TASK_GDN_RECURRENT_SM100: {
+      break;
+    }
     default:
       assert(false);
   }

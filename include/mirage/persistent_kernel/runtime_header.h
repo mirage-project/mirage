@@ -134,6 +134,11 @@ enum TaskType {
   TASK_GDN_CONV1D_SM100 = 234,
   TASK_EAGLE3_D2T_REMAP = 235,
   TASK_EAGLE3_COMMIT = 236,
+  // Gated-DeltaNet recurrence + fused gated RMSNorm/SiLU epilogue, with a
+  // persistent fp32 per-slot recurrent-state pool.  Inside the (231, 256) TMA
+  // window, so tma.cuh needs a case for it even though it uses no TMA
+  // descriptor.
+  TASK_GDN_RECURRENT_SM100 = 237,
   TASK_MOE_W13_FP8_SM100 = 248,
   TASK_MOE_W2_FP8_SM100 = 249,
   TASK_SPLITK_LINEAR_SM100 = 251,

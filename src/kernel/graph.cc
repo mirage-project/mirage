@@ -828,6 +828,15 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] = std::make_tuple(3, 1, TASK_GDN_CONV1D_SM100, variant_id);
   }
+  // Gated-DeltaNet recurrence + fused gated norm: 6 inputs (qkv_c, ba,
+  // A_log|dt_bias, state pool, z, norm weight) + 1 output.  The state pool is
+  // read AND written in place through input_ptrs[3].
+  else if (name == "gdn_recurrent_sm100") {
+    int variant_id = task_register->register_gdn_recurrent_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(6, 1, TASK_GDN_RECURRENT_SM100, variant_id);
+  }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {
     int variant_id = task_register->register_mla_kv_gather_sm100_task(
