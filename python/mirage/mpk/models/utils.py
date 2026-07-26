@@ -13,7 +13,47 @@ def grid_for_rmsnorm_linear_layer(size):
         return 96
     elif size % 64 == 0:
         return 64
-    
+
+
+def prepare_fp8_blockscale_weight(weight_fp8: torch.Tensor,
+                                  scale_inv: torch.Tensor,
+                                  block: int = 128):
+    """Prepare a block-FP8 checkpoint weight for the PRESERVED-scale dense GEMM.
+
+    The checkpoint ships `weight [N, K]` float8_e4m3fn plus
+    `weight_scale_inv [N/128, K/128]`, where scale_inv[i, j] is the dequant
+    scale of the weight tile W[i*128:(i+1)*128, j*128:(j+1)*128]
+    (docs/qwen35/vllm-graph.md 3.4). This is the identity transform on the
+    weight; the scale is only widened to float32 (checkpoints store it in BF16 —
+    widening cannot recover precision, but it matches what vLLM holds at
+    runtime) and made contiguous.
+
+    It is deliberately NOT DeepSeekV3Builder._requantize_fp8_for_ue8m0: no
+    dequant/re-quantize round trip, no power-of-two rounding, no collapse to
+    per-row scales. Both reference engines disable the UE8M0 scale format for
+    this model class on Blackwell (docs/qwen35/v1-architecture.md 6.2).
+
+    Returns (weight_fp8 [N, K] float8_e4m3fn, scale [N/128, K/128] float32).
+    """
+    if weight_fp8.dtype != torch.float8_e4m3fn:
+        raise ValueError(
+            "preserved-scale FP8 weight must be float8_e4m3fn, got "
+            f"{weight_fp8.dtype}")
+    if weight_fp8.dim() != 2 or scale_inv.dim() != 2:
+        raise ValueError("preserved-scale FP8 weight and scale must both be 2-D")
+    n, k = weight_fp8.shape
+    if n % block != 0 or k % block != 0:
+        raise ValueError(
+            f"preserved-scale FP8 weight [{n}, {k}] must be a whole number of "
+            f"{block}x{block} scale blocks")
+    expected = (n // block, k // block)
+    if tuple(scale_inv.shape) != expected:
+        raise ValueError(
+            f"weight_scale_inv shape {tuple(scale_inv.shape)} does not match "
+            f"the weight's block grid {expected}")
+    return weight_fp8.contiguous(), scale_inv.float().contiguous()
+
+
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
 def max_factor_leq_n(m: int, n: int) -> int:

@@ -1753,6 +1753,48 @@ class PersistentKernel:
         self.kn_graph.register_task(
             tb_graph, "linear_fp8_with_residual_sm100", params)
 
+    def linear_fp8_blockscale_layer(
+        self,
+        input_fp8: DTensor,
+        input_scale: DTensor,
+        weight_fp8: DTensor,
+        weight_scale: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        residual: DTensor = None,
+    ):
+        """Dense FP8 GEMM on the checkpoint's PRESERVED float32 block scales.
+
+        Unlike linear_fp8_layer, which needs weights re-quantized under
+        power-of-two UE8M0 scales, this consumes `weight_scale_inv` as shipped:
+        float32, one value per 128x128 weight block, [N/128, K/128]. The
+        activation must be quantized with the fp32-scale variant
+        (quantize_fp8_layer(..., scale_ue8m0=False)), which produces a
+        [batch, K/128] float32 scale.
+        """
+        params = [1] if residual is not None else []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        # Same partitioning as linear_fp8_layer: grid.x splits the weight's
+        # output rows, so weight_scale (whose dim0 is one row per 128 weight
+        # rows) splits on dim0 too and the output splits on dim1.
+        tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
+        tb_graph.new_input(weight_fp8, (0, -1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (0, -1, -1), -1, True)
+        inputs = [input_fp8, input_scale, weight_fp8, weight_scale]
+        if residual is not None:
+            tb_graph.new_input(residual, (1, -1, -1), -1, True)
+            inputs.append(residual)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        self.kn_graph.customized(inputs + [output], tb_graph)
+        task_name = (
+            "linear_fp8_blockscale_with_residual_sm100"
+            if residual is not None
+            else "linear_fp8_blockscale_sm100"
+        )
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
     def moe_silu_mul_layer(
         self,
         input: DTensor,

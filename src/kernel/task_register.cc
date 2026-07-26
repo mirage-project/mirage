@@ -4319,6 +4319,80 @@ int TaskRegister::register_linear_fp8_sm100_task(
   }
 }
 
+int TaskRegister::register_linear_fp8_blockscale_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool with_residual) {
+  // Dense FP8 GEMM on the checkpoint's PRESERVED float32 block scales.
+  // Inputs: input_fp8 [batch, reduction], input_scale [batch, reduction/128]
+  //         float32, weight_fp8 [output, reduction],
+  //         weight_scale [output/128, reduction/128] float32 (the checkpoint's
+  //         weight_scale_inv, split across tasks exactly like the weight),
+  //         (optional) residual [batch, output]
+  // Output: output_bf16 [batch, output]
+  bool rank_with_residual = with_residual;
+  if (with_residual) {
+    assert(params.size() == 1);
+    rank_with_residual = (params[0] == 1);
+  } else {
+    assert(params.size() == 0);
+  }
+  int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = with_residual ? 5 : 4;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
+  output_size = output_ops[0]->output_tensors[0].dim[1];
+  assert(input_ops[0]->dtensor.num_dims == 2); // input_fp8
+  reduction_size = input_ops[0]->dtensor.dim[1];
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+
+  // Both scale tensors carry one float32 entry per 128-element K group; the
+  // weight's scale additionally has one row per 128 weight rows.
+  assert(reduction_size % 128 == 0);
+  assert(output_size % 128 == 0);
+  assert(input_ops[1]->dtensor.num_dims == 2 &&
+         input_ops[1]->dtensor.dim[1] * 128 == reduction_size);
+  assert(input_ops[3]->dtensor.num_dims == 2 &&
+         input_ops[3]->dtensor.dim[1] * 128 == reduction_size);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::linear_fp8_blockscale_task_impl<bfloat16, $, $, $, $, $>(",
+         batch_size,
+         output_size,
+         reduction_size,
+         output_stride,
+         (with_residual && rank_with_residual) ? "true" : "false");
+  code.e("    task_desc->input_ptrs[0],"); // input_fp8
+  code.e("    task_desc->input_ptrs[1],"); // input_scale (float32)
+  code.e("    task_desc->input_ptrs[2],"); // weight_fp8
+  code.e("    task_desc->input_ptrs[3],"); // weight_scale (float32 blocks)
+  if (with_residual && rank_with_residual) {
+    code.e("    task_desc->input_ptrs[4],"); // residual
+  } else {
+    code.e("    nullptr,");
+  }
+  code.e("    task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_LINEAR_FP8_BLOCKSCALE_SM100,
+                               code.to_string());
+}
+
 int TaskRegister::register_mla_kv_gather_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: d_k (576)

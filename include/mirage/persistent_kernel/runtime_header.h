@@ -160,6 +160,10 @@ enum TaskType {
   TASK_LINEAR_FP8_SM100 = 276,
   TASK_LINEAR_FP8_WITH_RESIDUAL_SM100 = 277,
   TASK_MLA_KV_GATHER_SM100 = 278,
+  // Dense FP8 GEMM that consumes the checkpoint's float32 128x128 block scales
+  // (no UE8M0 requantization). The residual-fused form is a task VARIANT of the
+  // same type: _execute_task() keys on (task_type, variant_id).
+  TASK_LINEAR_FP8_BLOCKSCALE_SM100 = 279,
   TASK_MOE_TOPK_SIGMOID_SM100 = 280,
   TASK_ELEMENTWISE_ADD_SM100 = 281,
   TASK_SOFTMAX_GATHER_SM100 = 282,

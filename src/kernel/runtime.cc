@@ -1834,6 +1834,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_FP8_SM100] = "TASK_LINEAR_FP8_SM100";
   task_type_to_name[TASK_LINEAR_FP8_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_FP8_WITH_RESIDUAL_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_BLOCKSCALE_SM100] =
+      "TASK_LINEAR_FP8_BLOCKSCALE_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";

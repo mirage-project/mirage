@@ -14,7 +14,7 @@ import os
 import torch
 from typing import Optional
 
-from ..utils import grid_for_rmsnorm_linear_layer
+from ..utils import grid_for_rmsnorm_linear_layer, prepare_fp8_blockscale_weight
 from ..graph_builder import GraphBuilder, MirageModelConfig
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
@@ -116,8 +116,21 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
-                     grid_dim, block_dim, residual=None):
-        """Quantize BF16 input → FP8, then run FP8 GEMM."""
+                     grid_dim, block_dim, residual=None,
+                     preserve_block_scales=False):
+        """Quantize BF16 input → FP8, then run FP8 GEMM.
+
+        preserve_block_scales selects the scale CLASS, and must match how the
+        weight was attached:
+          False (default, the DeepSeek-V3 path) — weights were re-quantized by
+            _requantize_fp8_for_ue8m0, so both scales are packed UE8M0 and the
+            GEMM is the block-scaled-UMMA linear_fp8 task.
+          True — the weight carries the checkpoint's float32 [N/128, K/128]
+            weight_scale_inv untouched (_attach_fp8_weight_blockscale), the
+            activation is quantized with float32 scales, and the GEMM applies
+            a_scale * b_scale per 128-element K tile
+            (docs/qwen35/v1-architecture.md 6.2).
+        """
         if weight_scale is None:
             # BF16 path (post-dequant weights)
             if residual is not None:
@@ -153,25 +166,37 @@ class DeepSeekV3Builder(GraphBuilder):
         group_size = 128
         num_groups = (reduction_size + group_size - 1) // group_size
 
-        # Share FP8 quantization buffer by reduction_size across layers.
+        # Share FP8 quantization buffer by reduction_size across layers. The two
+        # scale classes have different layouts and dtypes, so they never share a
+        # buffer.
         if not hasattr(self, '_fp8_bufs'):
             self._fp8_bufs = {}
-        cache_key = reduction_size
+        cache_key = (reduction_size, preserve_block_scales)
         if cache_key not in self._fp8_bufs:
+            suffix = "f32scale" if preserve_block_scales else "ue8m0"
             fp8_buf = self.mpk.new_tensor(
                 dims=(mbt, reduction_size), dtype=float8_e4m3,
-                name=f"fp8_input_{reduction_size}_shared",
+                name=f"fp8_input_{reduction_size}_{suffix}_shared",
                 io_category="cuda_tensor",
             )
-            # Column-major UE8M0 scale stored as transposed row-major:
-            # physical shape=[packed_k, aligned_batch], dtype=uint32
-            packed_k = (num_groups + 3) // 4
-            aligned_batch = ((mbt + 3) // 4) * 4
-            scale_buf = self.mpk.new_tensor(
-                dims=(packed_k, aligned_batch), dtype=uint32,
-                name=f"fp8_scale_{reduction_size}_shared",
-                io_category="cuda_tensor",
-            )
+            if preserve_block_scales:
+                # float32 activation scale, [batch, K/128] row-major — the
+                # layout the fp32-scale quantize variant writes.
+                scale_buf = self.mpk.new_tensor(
+                    dims=(mbt, num_groups), dtype=float32,
+                    name=f"fp8_scale_{reduction_size}_{suffix}_shared",
+                    io_category="cuda_tensor",
+                )
+            else:
+                # Column-major UE8M0 scale stored as transposed row-major:
+                # physical shape=[packed_k, aligned_batch], dtype=uint32
+                packed_k = (num_groups + 3) // 4
+                aligned_batch = ((mbt + 3) // 4) * 4
+                scale_buf = self.mpk.new_tensor(
+                    dims=(packed_k, aligned_batch), dtype=uint32,
+                    name=f"fp8_scale_{reduction_size}_{suffix}_shared",
+                    io_category="cuda_tensor",
+                )
             self._fp8_bufs[cache_key] = (fp8_buf, scale_buf)
         self._fp8_input_buf, self._fp8_scale_buf = self._fp8_bufs[cache_key]
 
@@ -181,9 +206,21 @@ class DeepSeekV3Builder(GraphBuilder):
             output_scale=self._fp8_scale_buf,
             grid_dim=(mbt, 1, 1),
             block_dim=(128, 1, 1),
+            scale_ue8m0=not preserve_block_scales,
         )
 
-        if residual is not None:
+        if preserve_block_scales:
+            self.mpk.linear_fp8_blockscale_layer(
+                input_fp8=self._fp8_input_buf,
+                input_scale=self._fp8_scale_buf,
+                weight_fp8=weight,
+                weight_scale=weight_scale,
+                output=output,
+                grid_dim=grid_dim,
+                block_dim=block_dim,
+                residual=residual,
+            )
+        elif residual is not None:
             self.mpk.linear_fp8_with_residual_layer(
                 input_fp8=self._fp8_input_buf,
                 input_scale=self._fp8_scale_buf,
@@ -558,6 +595,23 @@ class DeepSeekV3Builder(GraphBuilder):
         else:
             w = self._safe_attach(state_dict[key], name)
             s = None  # weight is already BF16 (post-dequant)
+        return w, s
+
+    def _attach_fp8_weight_blockscale(self, state_dict, key, name):
+        """Attach FP8 weight + the checkpoint's float32 block scale, unchanged.
+
+        The counterpart of _attach_fp8_weight: no dequant/re-quantize round trip
+        and no per-row collapse, so the checkpoint's 128x128 block values reach
+        the GEMM exactly. Pair with _fp8_linear(preserve_block_scales=True).
+        """
+        scale_key = f"{key}_scale_inv"
+        if scale_key not in state_dict:
+            # Already BF16 (post-dequant) — no scale to preserve.
+            return self._safe_attach(state_dict[key], name), None
+        weight_fp8, scale_fp32 = prepare_fp8_blockscale_weight(
+            state_dict[key], state_dict[scale_key])
+        w = self._safe_attach(weight_fp8, name)
+        s = self._safe_attach(scale_fp32, f"{name}_scale")
         return w, s
 
     def _build_mla_attention_layer(self, layer_idx: int, state_dict: dict):
