@@ -1,0 +1,22 @@
+{
+  "max_num_batched_tokens": 8,
+  "max_num_batched_requests": 8,
+  "max_seq_length": 512,
+  "model": "Qwen/Qwen3-8B",
+  "prompt_length": 1,
+  "sequence_length": 512,
+  "generate_length_per_request": [
+    511,
+    511,
+    511,
+    511,
+    511,
+    511,
+    511,
+    511
+  ],
+  "generate_length_total": 4088,
+  "total_time_ms": 2319.655029296875,
+  "latency_ms_per_token": 4.530576229095459,
+  "throughput_tokens_per_s": 1762.3310140383842
+}

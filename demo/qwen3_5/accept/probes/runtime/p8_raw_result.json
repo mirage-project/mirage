@@ -1,0 +1,41 @@
+{
+  "probe": "P8",
+  "model": "Qwen/Qwen3-8B",
+  "runs": {
+    "32": {
+      "input_len": 32,
+      "output_len": 128,
+      "mbt": 8,
+      "requests": 1,
+      "max_seq_length": 160,
+      "n_pf_iters": 4,
+      "compile_seconds": 37.647494077682495,
+      "total_time_ms": 569.2133178710938,
+      "sequence_length_achieved": 160,
+      "latency_ms_per_token_blended": 3.557583236694336,
+      "expected_seq_len": 160,
+      "seq_len_matches_expected": true
+    },
+    "512": {
+      "input_len": 512,
+      "output_len": 128,
+      "mbt": 8,
+      "requests": 1,
+      "max_seq_length": 640,
+      "n_pf_iters": 64,
+      "compile_seconds": 41.550002336502075,
+      "total_time_ms": 965.828125,
+      "sequence_length_achieved": 640,
+      "latency_ms_per_token_blended": 1.5091064453125,
+      "expected_seq_len": 640,
+      "seq_len_matches_expected": true
+    }
+  },
+  "t_pf_ms_per_prefill_iter": 6.610246785481771,
+  "t_dec_ms_primary_source": "latency_ms_per_token_blended of input_len=32 run",
+  "t_dec_ms_primary": 3.557583236694336,
+  "t_dec_ms_purified_crosscheck": 4.240408833821615,
+  "r_primary": 1.8580722770731104,
+  "r_secondary_crosscheck": 1.5588701572259414,
+  "r_primary_vs_secondary_rel_diff": 0.16102824606935148
+}

@@ -1,0 +1,120 @@
+{
+  "r": 1.5588701572259414,
+  "band": "1.0<r<=2.25",
+  "workload_pin_stands": true,
+  "point_prediction_1.5x_held": false,
+  "methodology_note": "r = t_pf / t_dec_purified from the doc-mandated (input_len=32, input_len=512, output_len=128, mbt=8) pair. t_dec is the PURIFIED estimate (back out N_pf(low)*t_pf from T(low) using the same-pair t_pf), not the naive blended latency_ms_per_token of the low run -- the naive reading is diluted by prefill-token amortization (a prefill iteration advances mbt tokens at once) and was shown to disagree by 13-27% between two independent input-length pairs, whereas the purified estimate agrees to within 0.6% -- see cross_validation.",
+  "cross_validation": {
+    "spec_pair_32_512": {
+      "input_lens": [
+        32,
+        512
+      ],
+      "t_pf_ms": 6.610246785481771,
+      "t_dec_purified_ms": 4.240408833821615,
+      "t_dec_blended_ms": 3.557583236694336,
+      "r_purified": 1.5588701572259414,
+      "r_blended": 1.8580722770731104
+    },
+    "independent_pair_64_256": {
+      "input_lens": [
+        64,
+        256
+      ],
+      "t_pf_ms": 6.575274149576823,
+      "t_dec_purified_ms": 4.216074307759603,
+      "t_dec_blended_ms": 3.084685961405436,
+      "r_purified": 1.5595726426062178,
+      "r_blended": 2.1315862398456327
+    },
+    "t_pf_spread_pct_between_pairs": 0.5290670233637751,
+    "t_dec_purified_spread_pct_between_pairs": 0.5738721669457769,
+    "r_purified_spread_pct_between_pairs": 0.045063751911608295,
+    "r_blended_spread_pct_between_pairs": 14.720308039005321,
+    "interpretation": "r_purified is stable across two disjoint pairs (spread 0.05%) confirming the constant-per-iteration-cost model; r_blended is not (spread 14.72%), confirming it is a biased proxy, not an independent second reading -- a single (lo,hi) pair alone cannot distinguish these two possibilities since 2 points always exactly fit a 2-parameter linear model (tautological), which is why this cross-check pair was added beyond the doc's literal 2-point P8 command."
+  },
+  "raw_evidence": {
+    "spec_pair_32_512": {
+      "probe": "P8",
+      "model": "Qwen/Qwen3-8B",
+      "runs": {
+        "32": {
+          "input_len": 32,
+          "output_len": 128,
+          "mbt": 8,
+          "requests": 1,
+          "max_seq_length": 160,
+          "n_pf_iters": 4,
+          "compile_seconds": 37.647494077682495,
+          "total_time_ms": 569.2133178710938,
+          "sequence_length_achieved": 160,
+          "latency_ms_per_token_blended": 3.557583236694336,
+          "expected_seq_len": 160,
+          "seq_len_matches_expected": true
+        },
+        "512": {
+          "input_len": 512,
+          "output_len": 128,
+          "mbt": 8,
+          "requests": 1,
+          "max_seq_length": 640,
+          "n_pf_iters": 64,
+          "compile_seconds": 41.550002336502075,
+          "total_time_ms": 965.828125,
+          "sequence_length_achieved": 640,
+          "latency_ms_per_token_blended": 1.5091064453125,
+          "expected_seq_len": 640,
+          "seq_len_matches_expected": true
+        }
+      },
+      "t_pf_ms_per_prefill_iter": 6.610246785481771,
+      "t_dec_ms_primary_source": "latency_ms_per_token_blended of input_len=32 run",
+      "t_dec_ms_primary": 3.557583236694336,
+      "t_dec_ms_purified_crosscheck": 4.240408833821615,
+      "r_primary": 1.8580722770731104,
+      "r_secondary_crosscheck": 1.5588701572259414,
+      "r_primary_vs_secondary_rel_diff": 0.16102824606935148
+    },
+    "independent_pair_64_256": {
+      "probe": "P8",
+      "model": "Qwen/Qwen3-8B",
+      "runs": {
+        "64": {
+          "input_len": 64,
+          "output_len": 128,
+          "mbt": 8,
+          "requests": 1,
+          "max_seq_length": 192,
+          "n_pf_iters": 8,
+          "compile_seconds": 36.73375344276428,
+          "total_time_ms": 592.2597045898438,
+          "sequence_length_achieved": 192,
+          "latency_ms_per_token_blended": 3.084685961405436,
+          "expected_seq_len": 192,
+          "seq_len_matches_expected": true
+        },
+        "256": {
+          "input_len": 256,
+          "output_len": 128,
+          "mbt": 8,
+          "requests": 1,
+          "max_seq_length": 384,
+          "n_pf_iters": 32,
+          "compile_seconds": 40.20776653289795,
+          "total_time_ms": 750.0662841796875,
+          "sequence_length_achieved": 384,
+          "latency_ms_per_token_blended": 1.9532976150512695,
+          "expected_seq_len": 384,
+          "seq_len_matches_expected": true
+        }
+      },
+      "t_pf_ms_per_prefill_iter": 6.575274149576823,
+      "t_dec_ms_primary_source": "latency_ms_per_token_blended of input_len=64 run",
+      "t_dec_ms_primary": 3.084685961405436,
+      "t_dec_ms_purified_crosscheck": 4.216074307759603,
+      "r_primary": 2.1315862398456327,
+      "r_secondary_crosscheck": 1.5595726426062178,
+      "r_primary_vs_secondary_rel_diff": 0.26835113989140763
+    }
+  }
+}

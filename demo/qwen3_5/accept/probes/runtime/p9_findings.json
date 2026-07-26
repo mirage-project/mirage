@@ -1,0 +1,57 @@
+{
+  "probe": "P9",
+  "knee_reproduced": false,
+  "attribution": "blocked -- not scheduler-side or task-side: step 1 shows no significant r=4-to-r=8 jump exists to attribute on current HEAD (0.050 ms observed vs 3.05 ms historical), and step 2's profiler-based gap-vs-task-sum breakdown could not be run to a real multi-iteration completion because MPK_ENABLE_PROFILING truncates MODE_OFFLINE runs to ~2 steps regardless of max_seq_length (persistent_kernel.cuh:271-278, a genuine bug, not a data ambiguity -- see attribution_blocked for full evidence and repro).",
+  "evidence": {
+    "knee_reproduction": "step1_ms_per_token + r8_repeatability_check + root_cause_investigation (this file); raw logs p9_step1.log, p9_repeat.log alongside this JSON",
+    "attribution_attempt": "attribution_blocked (this file); raw profiler captures p9_summary_r4.json, p9_summary_r8.json, p9_trace_r4.csv, p9_trace_r8.csv, p9_step2.log alongside this JSON"
+  },
+  "step1_ms_per_token": {
+    "1": 4.434,
+    "2": 4.43,
+    "4": 4.468,
+    "8": 4.507
+  },
+  "step1_recorded_92603ca_ms_per_token": {
+    "1": 4.4,
+    "2": 4.41,
+    "4": 4.44,
+    "8": 7.49
+  },
+  "r8_repeatability_check": {
+    "measurements_ms_per_token": [
+      4.507,
+      4.513,
+      4.515,
+      4.526,
+      4.531
+    ],
+    "sources": [
+      "step1 sweep",
+      "repeat trial 1",
+      "repeat trial 2",
+      "repeat trial 3",
+      "fresh compile-cache dir"
+    ],
+    "mean": 4.5184,
+    "spread_pct": 0.5311614730878192,
+    "interpretation": "5 independent r=8 measurements (incl. a completely fresh compile-cache directory, ruling out kernel-cache staleness) agree within 0.53% of their mean -- the batch-8 config is NOT exhibiting the historical knee; this is not measurement noise."
+  },
+  "r1_control_rerun_ms_per_token": 4.432,
+  "observed_jump_r4_to_r8_ms_per_token": 0.05039999999999978,
+  "historical_jump_r4_to_r8_ms_per_token_at_92603ca": 3.05,
+  "root_cause_investigation": {
+    "code_diff_since_92603ca": "Only 4 commits touched persistent_kernel.cuh between 92603ca and current HEAD (2c87a75): 9af4349 (NVSHMEM_NO_DEVICE_LIB removal), c004c0b (test-mode interface consolidation), 52b4e7a (tensor-view whitespace-only in this file), e3cdbbea (EAGLE3/MPK_SPEC_DECODE support). All four are gated behind USE_NVSHMEM, MPK_TEST_MODE, or MPK_SPEC_DECODE macros NONE of which are defined for this probe's plain MODE_OFFLINE / use_cutlass_kernel=True / non-spec-decode build -- i.e. the code path this probe exercises is a functional no-op across all four commits. tests/ci-tests/run_batch_perf.py itself has never been modified since 92603ca (git log shows exactly one commit touching it: 92603ca itself).",
+    "conclusion": "The knee's disappearance is not explained by any code change on the exercised path. Leading hypothesis (not independently confirmed -- would require checking out 92603ca itself and rebuilding, which was judged out of this probe's bounded scope): the original 4.40/4.41/4.44/7.49 figures reflect a one-off measurement artifact (e.g. GPU contention at record time) rather than a deterministic architectural property, since 5 independent trials here (different compile-cache dirs, different points in time, verified-idle GPU before every run) show no such effect at all."
+  },
+  "attribution_blocked": {
+    "status": "step 2 (profiler-enabled r=4,8 gap-vs-task-sum attribution) could not be completed",
+    "reason": "Discovered a real bug in persistent_kernel.cuh's admission logic: '#if defined(MPK_ENABLE_PROFILING) || defined(MPK_TEST_MODE) / if (true) { // Request is done ... }' (lines 271-278, introduced by c004c0b / PR #712 'test: improve test mode interface') marks every request permanently finished after its FIRST processed step whenever MPK_ENABLE_PROFILING is set -- not just under MPK_TEST_MODE, which is presumably what was intended. Any profiler_tensor-enabled MODE_OFFLINE run therefore terminates after ~2 steps regardless of max_seq_length, independent of batch size. Confirmed directly: both r=4 and r=8 profiler captures (p9_summary_r{4,8}.json) show sequence_length=2, total_time_ms<=4.7 -- not the intended 127-iteration steady-state decode run.",
+    "secondary_bugs_found_en_route": [
+      "export_to_perfetto_trace's tid_map is pre-populated only for block_idx in range(header.num_blocks), where the header is written by whichever kernel's 'block 0' runs first (empirically the num_schedulers=80 scheduler launch); worker blocks (num_workers=128, a separate launch) index up to 127, causing KeyError: (80, 0) etc. mpk.__call__() has no try/except around this, so it also blocks the independent, otherwise-working export_to_csv() call.",
+      "export_to_csv's own pairing has a (minor, ~0.0% of rows in the truncated traces actually captured) buffer-aliasing exposure: workers and schedulers are separate kernel launches, each computing profiler_write_ptr/stride from its own local blockIdx/gridDim, so worker-block-b and scheduler-block-b alias the same shared-buffer offset on writes where their write-cycle counts coincide."
+    ],
+    "not_fixed_here": "None of these are in M2-I11's owned paths (probes/runtime/, ~/mpk-qwen35/probes/); flagged for a profiler-maintenance issue (natural fit: M2-I10, which already owns the stale profiler_persistent.py name-map fix) before M3 relies on 'the MPK profiler CSV' for scheduler-path optimization work per mpk-gaps.md risk #4's mitigation -- that plan is currently blocked for any OFFLINE multi-iteration case.",
+    "practical_impact_on_this_probe": "Low: step 1 already establishes, with 5 independent trials, that there is no significant r=4-to-r=8 per-token jump to attribute right now (observed jump 0.050 ms vs the historical 3.05 ms) -- so the fine-grained gap-vs-task-sum breakdown step 2 was designed to explain has no target phenomenon to explain on the current codebase."
+  }
+}

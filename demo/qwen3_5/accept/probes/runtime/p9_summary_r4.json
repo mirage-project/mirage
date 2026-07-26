@@ -1,0 +1,12 @@
+{
+  "max_num_batched_requests": 4,
+  "max_num_batched_tokens": 8,
+  "max_seq_length": 128,
+  "model": "Qwen/Qwen3-8B",
+  "compile_seconds": 35.62058973312378,
+  "total_time_ms": 4.626560211181641,
+  "sequence_length": 2,
+  "latency_ms_per_token": 2.3132801055908203,
+  "raw_profiler_buffer_path": "/home/muhengl/mpk-qwen35/probes/runtime_out/p9_r4.rawbuf.pt",
+  "profiler_slots": 384000
+}
