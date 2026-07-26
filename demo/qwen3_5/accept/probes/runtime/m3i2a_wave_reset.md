@@ -94,7 +94,7 @@ multi-wave (10/5/3/2/1 waves at bs 1/2/4/8/16):
 | AC-3 report vs committed `results/run_report_all_bs.json` | no differences; same single non-exact case (p06-poem at all 5 bs, the documented adjudicated reference-side tie) |
 | Two-wave regression test | 4 cycling waves pass; 3 repeated waves byte-identical |
 | Backward compat, wave-per-process (`--prompt-ids`) | tokens identical to committed `dumps_final/bs4_w1.json` |
-| Qwen3-8B CI | tokens identical to committed `results/ci_final.json` |
+| Qwen3-8B CI | tokens identical to committed `results/ci_final.json` (but see the CI reproducibility note below) |
 | Init-time residency warnings during the sweep | 0 |
 
 Perf, Qwen3-8B CI ms/token, same binary with `MPK_SKIP_RESIDENCY_CHECK=1` as the
@@ -107,3 +107,30 @@ control arm, 4 interleaved reps each (`m3i2a/ci_ab_residency_probe.json`):
 
 +1.4% sits inside the control arm's own spread (3.867-3.942), and the control
 median reproduces the committed M2 baseline of 3.871 exactly.
+
+## Fail-closed policy, and what the Qwen3-8B CI actually shows
+
+A probe that cannot RUN must never look like a probe that PASSED — otherwise a
+malfunctioning probe silently re-admits the deadlock it exists to prevent. Every
+CUDA API the probe uses (`cudaMalloc`, `cudaFuncSetAttribute`, `cudaGetDevice`,
+`cudaDeviceGetAttribute`, `cudaMemsetAsync`, both kernel launches via
+`cudaGetLastError`, both `cudaStreamSynchronize`, `cudaMemcpy`) therefore fails
+closed, returning `MPK_RESIDENCY_PROBE_ERROR` and naming the API plus its
+`cudaGetErrorString`. That is terminal inside the retry loop — an API error is
+never retried into a success. `MPK_SKIP_RESIDENCY_CHECK=1` is the only fail-open
+path and logs a warning when used. Negative tests live in
+`two_wave_repro.py --selftest-residency`: a forced `cudaMalloc` failure must
+raise, and the env bypass must warn and proceed. Both pass.
+
+**The Qwen3-8B CI decode is not run-to-run reproducible, and that predates this
+work.** Runs of one fixed binary, residency probe on vs bypassed, interleaved on
+one GPU, produced three distinct `generate_length` values (256 / 258 / 278), and
+the single first-100-token mismatch against `results/ci_final.json` landed in
+the **probe-bypassed** arm — so the check cannot be its cause. M2-I9's own logs
+show the same spread (261 / 258 / 256), and the recurring first-divergence index
+(71) matches the difference between the committed `ci_mpk_output.json` and
+`ci_final.json`, which points at a genuine near-tie whose winner follows
+reduction order. The qwen3.5 AC-3 gate — the acceptance gate that matters —
+stayed byte-identical (10/10 at bs=4) in the same validation run. Treat the
+Qwen3-8B CI as a smoke test, not a bit-exact gate, until that tie is chased
+down.

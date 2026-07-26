@@ -49,6 +49,60 @@ def log(msg: str) -> None:
     print(f"[two_wave] {msg}", flush=True)
 
 
+def selftest_residency(adapter: MPKOfflineAdapter,
+                       slots: List[PromptRequest]) -> dict:
+    """Negative tests for the residency check's failure policy.
+
+    (a) A probe that cannot RUN must fail CLOSED. `MPK_RESIDENCY_TEST_FORCE_
+        ALLOC_FAIL=1` makes the probe attempt a genuinely impossible cudaMalloc,
+        so the real error path runs; the launch must raise rather than proceed
+        on an unverified assumption.
+    (b) `MPK_SKIP_RESIDENCY_CHECK=1` is the ONLY fail-open path and must say so
+        on stderr, then proceed normally.
+    """
+    import os
+    import torch
+
+    out = {}
+    meta = adapter._meta
+    meta["tokens"].zero_()
+    meta["step"].zero_()
+    meta["num_new_tokens"].fill_(1)
+    for r_i, req in enumerate(slots):
+        ids = req.input_ids
+        meta["tokens"][r_i, :len(ids)] = torch.tensor(
+            ids, dtype=torch.long, device="cuda")
+        meta["prompt_lengths"][r_i] = len(ids)
+    adapter._reset_runtime()
+    torch.cuda.synchronize()
+
+    # (a) forced allocation failure -> RuntimeError, launch refused
+    os.environ["MPK_RESIDENCY_TEST_FORCE_ALLOC_FAIL"] = "1"
+    try:
+        adapter._mpk()
+        out["forced_alloc_failure"] = "FAIL: launch proceeded (fail-open)"
+    except RuntimeError as exc:
+        msg = str(exc)
+        ok = "could not run" in msg and "cudaMalloc" in msg
+        out["forced_alloc_failure"] = "pass" if ok else "FAIL: wrong error"
+        out["forced_alloc_failure_message"] = msg.split(". Refusing")[0]
+    finally:
+        os.environ.pop("MPK_RESIDENCY_TEST_FORCE_ALLOC_FAIL", None)
+    log(f"selftest(a) forced alloc failure: {out['forced_alloc_failure']}")
+
+    # (b) explicit bypass -> warning on stderr, launch proceeds
+    os.environ["MPK_SKIP_RESIDENCY_CHECK"] = "1"
+    try:
+        per_slot = run_wave(adapter, slots, 0, timeout_s=60.0)
+        out["env_bypass"] = ("pass" if all(len(v) > 0 for v in per_slot.values())
+                             else "FAIL: bypassed launch produced no tokens")
+    finally:
+        os.environ.pop("MPK_SKIP_RESIDENCY_CHECK", None)
+    log(f"selftest(b) env bypass: {out['env_bypass']} "
+        f"(the run log must carry '[MPK] WARNING: MPK_SKIP_RESIDENCY_CHECK')")
+    return out
+
+
 def run_wave(adapter: MPKOfflineAdapter, slots: List[PromptRequest],
              w_idx: int, timeout_s: float,
              poll_s: float = 2.0) -> Dict[int, List[int]]:
@@ -128,6 +182,10 @@ def main(argv=None) -> int:
                     help="Seconds of zero `step` progress before declaring a "
                          "wedge.")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--selftest-residency", action="store_true",
+                    help="Instead of the wave loop, run the residency check's "
+                         "negative tests: a probe that cannot run must fail "
+                         "CLOSED, and the env bypass must warn and proceed.")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -170,6 +228,16 @@ def main(argv=None) -> int:
         reuse_kernel=args.reuse_kernel,
         pinned_max_seq_length=args.max_seq_length)
     adapter._build(args.batch_size, args.max_seq_length, args.batch_size)
+
+    if args.selftest_residency:
+        res = selftest_residency(adapter, wave_slots[0])
+        res["status"] = ("pass" if all(v == "pass" for k, v in res.items()
+                                       if not k.endswith("_message"))
+                         else "fail")
+        with open(out, "w") as f:
+            json.dump(res, f, indent=2)
+        log(f"residency selftest {res['status']}; wrote {out}")
+        return 0 if res["status"] == "pass" else 5
 
     report = {"batch_size": bs, "waves": args.waves, "mode": args.mode,
               "max_seq_length": args.max_seq_length, "mbt": args.mbt,

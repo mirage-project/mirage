@@ -1,0 +1,6 @@
+{
+  "forced_alloc_failure": "pass",
+  "forced_alloc_failure_message": "MPK residency check could not run: cudaMalloc(probe test) failed: out of memory",
+  "env_bypass": "pass",
+  "status": "pass"
+}

@@ -1,0 +1,40 @@
+{
+  "question": "is the Qwen3-8B CI decode reproducible run-to-run on ONE fixed binary?",
+  "protocol": "same compiled kernel, residency probe on vs MPK_SKIP_RESIDENCY_CHECK=1, interleaved, one GPU",
+  "runs": [
+    {
+      "run": "det_off_0",
+      "matches_committed_ci_final": true,
+      "first_divergence": null,
+      "generate_length": 256,
+      "ms_per_token": 5.062
+    },
+    {
+      "run": "det_off_1",
+      "matches_committed_ci_final": false,
+      "first_divergence": 71,
+      "generate_length": 278,
+      "ms_per_token": 3.921
+    },
+    {
+      "run": "det_on_0",
+      "matches_committed_ci_final": true,
+      "first_divergence": null,
+      "generate_length": 258,
+      "ms_per_token": 3.875
+    },
+    {
+      "run": "det_on_1",
+      "matches_committed_ci_final": true,
+      "first_divergence": null,
+      "generate_length": 258,
+      "ms_per_token": 3.875
+    }
+  ],
+  "distinct_generate_length": [
+    256,
+    258,
+    278
+  ],
+  "conclusion": "non-reproducible run-to-run; the one token mismatch is in the probe-BYPASSED arm, so the residency check is not its cause"
+}

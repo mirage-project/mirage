@@ -1547,7 +1547,14 @@ static std::map<std::string, void *> global_model_tensors;
 // meta_tensors[21]: pinned_inbox_tokens
 // meta_tensors[22]: pinned_rid_at_row
 
-extern "C" int check_persistent_kernel_residency(double budget_seconds);
+// Returned by check_persistent_kernel_residency() when the PROBE ITSELF could
+// not run (a CUDA API error), as distinct from 0 = resident and >0 = that many
+// blocks were not. Callers must treat it as terminal, never as "resident".
+constexpr int MPK_RESIDENCY_PROBE_ERROR = -1;
+
+extern "C" int check_persistent_kernel_residency(double budget_seconds,
+                                                 char *err,
+                                                 int err_len);
 
 extern "C" void init_request_resources() {
   init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
@@ -1874,9 +1881,16 @@ extern "C" void
   // is a warm-up whose verdict is discarded, and only the second one is
   // trusted. Warm, a probe costs ~1 ms, which is what every later launch pays.
   {
-    check_persistent_kernel_residency(0.25);
-    int const missing = check_persistent_kernel_residency(0.25);
-    if (missing > 0) {
+    char probe_err[256];
+    check_persistent_kernel_residency(0.25, probe_err, (int)sizeof(probe_err));
+    int const missing = check_persistent_kernel_residency(
+        0.25, probe_err, (int)sizeof(probe_err));
+    if (missing == MPK_RESIDENCY_PROBE_ERROR) {
+      // Advisory here; the per-launch check is the gate and will fail closed.
+      fprintf(stderr,
+              "[MPK INIT] WARNING: residency probe could not run: %s\n",
+              probe_err);
+    } else if (missing > 0) {
       fprintf(stderr,
               "[MPK INIT] WARNING: %d of the megakernel's %d blocks could not "
               "become co-resident on this GPU. MPK needs an EXCLUSIVE GPU; "
@@ -1899,29 +1913,68 @@ extern "C" void
 // to run per launch, and per launch is the right granularity: co-tenants
 // arrive between launches, and a wave boundary is exactly where MPK has
 // historically wedged.
-extern "C" int check_persistent_kernel_residency(double budget_seconds) {
+// A probe that cannot RUN must never look like a probe that PASSED: an
+// unavailable or malfunctioning probe would silently re-admit exactly the
+// deadlock this check exists to replace with an actionable error. So every
+// CUDA API the probe uses fails CLOSED, returning MPK_RESIDENCY_PROBE_ERROR
+// and reporting which API failed plus its cudaGetErrorString. The only
+// fail-open path is the operator setting MPK_SKIP_RESIDENCY_CHECK=1, which is
+// logged. An API error is terminal -- it is never retried into a success.
+#define MPK_PROBE_TRY(call, api_name)                                          \
+  do {                                                                         \
+    cudaError_t _mpk_e = (call);                                               \
+    if (_mpk_e != cudaSuccess) {                                               \
+      if (err != NULL && err_len > 0) {                                        \
+        snprintf(err,                                                          \
+                 (size_t)err_len,                                              \
+                 "%s failed: %s",                                              \
+                 (api_name),                                                   \
+                 cudaGetErrorString(_mpk_e));                                  \
+      }                                                                        \
+      return MPK_RESIDENCY_PROBE_ERROR;                                        \
+    }                                                                          \
+  } while (0)
+
+extern "C" int check_persistent_kernel_residency(double budget_seconds,
+                                                 char *err,
+                                                 int err_len) {
   static unsigned long long *counters = NULL;
   static bool probe_attrs_set = false;
   RuntimeConfig const &c = global_runtime_config;
   unsigned long long const target = (unsigned long long)c.num_workers +
                                     (unsigned long long)c.num_local_schedulers;
+  if (err != NULL && err_len > 0) {
+    err[0] = '\0';
+  }
+  // Negative-test hook: force a REAL cudaMalloc failure so the fail-closed
+  // path is exercised end to end rather than argued about.
+  if (getenv("MPK_RESIDENCY_TEST_FORCE_ALLOC_FAIL") != NULL) {
+    void *doomed = NULL;
+    MPK_PROBE_TRY(cudaMalloc(&doomed, (size_t)-1024), "cudaMalloc(probe test)");
+  }
   if (counters == NULL) {
-    if (cudaMalloc(&counters, 2 * sizeof(unsigned long long)) != cudaSuccess) {
-      return 0; // cannot probe; an allocator hiccup must not block the launch
-    }
+    MPK_PROBE_TRY(cudaMalloc(&counters, 2 * sizeof(unsigned long long)),
+                  "cudaMalloc(probe counters)");
   }
   if (!probe_attrs_set) {
-    cudaFuncSetAttribute(residency_probe_worker_kernel,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+    MPK_PROBE_TRY(
+        cudaFuncSetAttribute(residency_probe_worker_kernel,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             MAX_DYNAMIC_SHARED_MEMORY_SIZE),
+        "cudaFuncSetAttribute(probe worker smem)");
     probe_attrs_set = true;
   }
   int device = 0;
-  cudaGetDevice(&device);
+  MPK_PROBE_TRY(cudaGetDevice(&device), "cudaGetDevice");
   int clock_khz = 0;
-  cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, device);
+  MPK_PROBE_TRY(
+      cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, device),
+      "cudaDeviceGetAttribute(clockRate)");
   if (clock_khz <= 0) {
-    clock_khz = 1000000; // 1 GHz fallback; this only sets the timeout scale
+    // A SUCCESSFUL query reporting 0 (the attribute is deprecated on some
+    // architectures) only costs timeout precision, so fall back. An API error
+    // above is still terminal.
+    clock_khz = 1000000;
   }
   long long const cycle_budget =
       (long long)(budget_seconds * (double)clock_khz * 1000.0);
@@ -1929,8 +1982,12 @@ extern "C" int check_persistent_kernel_residency(double budget_seconds) {
   // Zero on one of the probe's own streams and drain it: worker_stream and
   // scheduler_stream are cudaStreamNonBlocking, so a memset on the legacy
   // default stream would NOT be ordered before the probe launches.
-  cudaMemsetAsync(counters, 0, 2 * sizeof(unsigned long long), c.worker_stream);
-  cudaStreamSynchronize(c.worker_stream);
+  MPK_PROBE_TRY(
+      cudaMemsetAsync(
+          counters, 0, 2 * sizeof(unsigned long long), c.worker_stream),
+      "cudaMemsetAsync(probe counters)");
+  MPK_PROBE_TRY(cudaStreamSynchronize(c.worker_stream),
+                "cudaStreamSynchronize(probe memset)");
 
   ResidencyProbe probe;
   probe.arrived = counters;
@@ -1943,23 +2000,30 @@ extern "C" int check_persistent_kernel_residency(double budget_seconds) {
                                   dim3(WORKER_NUM_THREADS, 1, 1),
                                   MAX_DYNAMIC_SHARED_MEMORY_SIZE,
                                   c.worker_stream>>>(probe);
+  MPK_PROBE_TRY(cudaGetLastError(), "residency_probe_worker_kernel launch");
   residency_probe_sched_kernel<<<dim3(c.num_local_schedulers, 1, 1),
                                  dim3(32, 1, 1),
                                  0,
                                  c.scheduler_stream>>>(probe);
-  cudaStreamSynchronize(c.worker_stream);
-  cudaStreamSynchronize(c.scheduler_stream);
+  MPK_PROBE_TRY(cudaGetLastError(), "residency_probe_sched_kernel launch");
+  MPK_PROBE_TRY(cudaStreamSynchronize(c.worker_stream),
+                "cudaStreamSynchronize(probe workers)");
+  MPK_PROBE_TRY(cudaStreamSynchronize(c.scheduler_stream),
+                "cudaStreamSynchronize(probe schedulers)");
 
   unsigned long long host_counters[2] = {0, 0};
-  cudaMemcpy(host_counters,
-             counters,
-             2 * sizeof(unsigned long long),
-             cudaMemcpyDeviceToHost);
+  MPK_PROBE_TRY(cudaMemcpy(host_counters,
+                           counters,
+                           2 * sizeof(unsigned long long),
+                           cudaMemcpyDeviceToHost),
+                "cudaMemcpy(probe counters)");
   if (host_counters[1] >= target) {
     return 0;
   }
   return (int)(target - host_counters[1]);
 }
+
+#undef MPK_PROBE_TRY
 
 // Entry point for C/C++
 // TODO: change launch config

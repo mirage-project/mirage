@@ -116,18 +116,40 @@ static PyObject *launch_func(PyObject *self, PyObject *args) {
   // deadlocks forever and holds the GPU through SIGTERM. Probe first and turn
   // that into an immediate, actionable error. MPK_SKIP_RESIDENCY_CHECK=1
   // opts out.
-  if (getenv("MPK_SKIP_RESIDENCY_CHECK") == NULL) {
+  if (getenv("MPK_SKIP_RESIDENCY_CHECK") != NULL) {
+    // The ONLY fail-open path, and it is logged so it can never be a silent
+    // default.
+    fprintf(stderr,
+            "[MPK] WARNING: MPK_SKIP_RESIDENCY_CHECK=1 -- launching WITHOUT "
+            "verifying that the megakernel's grid can be co-resident. If it "
+            "cannot, this launch deadlocks the GPU instead of raising.\\n");
+  } else {
     int missing = 0;
+    char probe_err[256];
+    probe_err[0] = '\\0';
     Py_BEGIN_ALLOW_THREADS
     // Retry a couple of times: a short-lived co-tenant should cost a retry,
-    // not a failed run. Sustained contention still fails.
+    // not a failed run. Sustained contention still fails. A probe-
+    // infrastructure error is TERMINAL -- never retried into a success,
+    // because a probe that could not run has not shown anything is resident.
     for (int attempt = 0; attempt < 3; attempt++) {
-      missing = check_persistent_kernel_residency(0.25);
-      if (missing == 0) {
+      missing = check_persistent_kernel_residency(
+          0.25, probe_err, (int)sizeof(probe_err));
+      if (missing == MPK_RESIDENCY_PROBE_ERROR || missing == 0) {
         break;
       }
     }
     Py_END_ALLOW_THREADS
+    if (missing == MPK_RESIDENCY_PROBE_ERROR) {
+      PyErr_Format(PyExc_RuntimeError,
+                   "MPK residency check could not run: %s. Refusing to launch "
+                   "rather than assume the megakernel's grid is co-resident -- "
+                   "a wrong assumption deadlocks the GPU with a kernel that "
+                   "does not die on SIGTERM. Fix the CUDA error, or set "
+                   "MPK_SKIP_RESIDENCY_CHECK=1 to launch without the check.",
+                   probe_err);
+      return NULL;
+    }
     if (missing > 0) {
       PyErr_Format(PyExc_RuntimeError,
                    "MPK residency check failed: %d of the megakernel's blocks "
