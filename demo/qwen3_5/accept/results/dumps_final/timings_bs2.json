@@ -1,0 +1,87 @@
+{
+  "batch_size": 2,
+  "note": "informational only -- no perf claim; mbt is fixed across batch sizes for a uniform correctness config, which inflates per-step cost at small bs",
+  "waves": [
+    {
+      "batch_size": 2,
+      "wave": 0,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p06-poem",
+        "p01-history"
+      ],
+      "wall_ms": 1672.939208984375,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 15.634945878358645,
+      "tokens_per_s": 127.91857519432358,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 2,
+      "wave": 1,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p04-chinese",
+        "p09-translate"
+      ],
+      "wall_ms": 1554.335205078125,
+      "max_decode_steps": 99,
+      "ms_per_decode_step": 15.700355606849747,
+      "tokens_per_s": 127.38564973187235,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 2,
+      "wave": 2,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p07-format",
+        "p05-cuda"
+      ],
+      "wall_ms": 1555.5526123046875,
+      "max_decode_steps": 98,
+      "ms_per_decode_step": 15.87298583984375,
+      "tokens_per_s": 126.0002384037714,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 2,
+      "wave": 3,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p08-science",
+        "p10-logic"
+      ],
+      "wall_ms": 1446.6697998046875,
+      "max_decode_steps": 91,
+      "ms_per_decode_step": 15.897470327524038,
+      "tokens_per_s": 125.80617914645865,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 2,
+      "wave": 4,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p03-python",
+        "p02-math"
+      ],
+      "wall_ms": 1402.91015625,
+      "max_decode_steps": 87,
+      "ms_per_decode_step": 16.125404094827587,
+      "tokens_per_s": 124.02789959487116,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    }
+  ],
+  "slot_isolation_checks": []
+}

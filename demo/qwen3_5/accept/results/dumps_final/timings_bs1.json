@@ -1,0 +1,157 @@
+{
+  "batch_size": 1,
+  "note": "informational only -- no perf claim; mbt is fixed across batch sizes for a uniform correctness config, which inflates per-step cost at small bs",
+  "waves": [
+    {
+      "batch_size": 1,
+      "wave": 0,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p06-poem"
+      ],
+      "wall_ms": 1619.125244140625,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 15.132011627482477,
+      "tokens_per_s": 66.0850668515096,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 1,
+      "wave": 1,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p01-history"
+      ],
+      "wall_ms": 1522.6900634765625,
+      "max_decode_steps": 101,
+      "ms_per_decode_step": 15.076139242342203,
+      "tokens_per_s": 66.32997904340407,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 1,
+      "wave": 2,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p04-chinese"
+      ],
+      "wall_ms": 1495.1219482421875,
+      "max_decode_steps": 99,
+      "ms_per_decode_step": 15.102241901436237,
+      "tokens_per_s": 66.21533455273942,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 1,
+      "wave": 3,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p09-translate"
+      ],
+      "wall_ms": 1468.4239501953125,
+      "max_decode_steps": 99,
+      "ms_per_decode_step": 14.832565153488005,
+      "tokens_per_s": 67.41922180364341,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 1,
+      "wave": 4,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p07-format"
+      ],
+      "wall_ms": 1516.38330078125,
+      "max_decode_steps": 98,
+      "ms_per_decode_step": 15.473298987563776,
+      "tokens_per_s": 64.62745926409886,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 1,
+      "wave": 5,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p05-cuda"
+      ],
+      "wall_ms": 1472.2137451171875,
+      "max_decode_steps": 95,
+      "ms_per_decode_step": 15.496986790707236,
+      "tokens_per_s": 64.52867344506286,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 1,
+      "wave": 6,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p08-science"
+      ],
+      "wall_ms": 1432.2919921875,
+      "max_decode_steps": 91,
+      "ms_per_decode_step": 15.73947244162088,
+      "tokens_per_s": 63.53453101487932,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 1,
+      "wave": 7,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p10-logic"
+      ],
+      "wall_ms": 1361.3389892578125,
+      "max_decode_steps": 88,
+      "ms_per_decode_step": 15.46976124156605,
+      "tokens_per_s": 64.64223877696816,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 1,
+      "wave": 8,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p03-python"
+      ],
+      "wall_ms": 1340.3592529296875,
+      "max_decode_steps": 87,
+      "ms_per_decode_step": 15.40642819459411,
+      "tokens_per_s": 64.90797135905163,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    },
+    {
+      "batch_size": 1,
+      "wave": 9,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p02-math"
+      ],
+      "wall_ms": 1024.7454833984375,
+      "max_decode_steps": 63,
+      "ms_per_decode_step": 16.26580132378472,
+      "tokens_per_s": 61.478680336378304,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16
+    }
+  ],
+  "slot_isolation_checks": []
+}

@@ -52035,44 +52035,5 @@
       "previously_exact_that_changed": "NONE",
       "p06_byte_identical_before_and_after": true
     }
-  },
-  "provenance": {
-    "built_sha": "e51cb86603380057eb94488f5171d99bc85cf959",
-    "built_sha_subject": "fix(qwen35): the argmax index-aware comparator itself (missed from 0a01aee)",
-    "branch": "qwen3-5_support (origin)",
-    "tree_state": "git reset --hard origin/qwen3-5_support + git clean -fd; `git status --short` EMPTY at run time",
-    "build": "scripts/build_mpk.sh (submodule update --init --recursive + uv pip install -e . --no-build-isolation); BUILD_EXIT_CODE=0. Megakernel JIT dirs deleted first so every batch size recompiled from this source.",
-    "comparator_verified_in_tree": "argmax_sm100.cuh: `if (other_val > val || (other_val == val && other_idx < idx))`",
-    "gpu": "catalyst-B200 GPU 5, verified idle by 3-sample guard before the run; exclusive",
-    "engine_config": "max_num_batched_tokens=16, page_size=256, max_seq_length=132, eos disabled, -use_fast_math (the acceptance config)",
-    "validated_utc": "2026-07-26T13:54:12.397407Z",
-    "invariants_confirmed": {
-      "only_the_five_p08_entries_differ_vs_prefix_report": true,
-      "p06_byte_identical_at_every_batch_size": true,
-      "nine_of_ten_exact_plus_adjudicated_p06_at_every_batch_size": true,
-      "reproduces_the_pre_commit_validation_build_byte_for_byte": true
-    },
-    "demo": {
-      "cmd": "demo/qwen3_5/demo.py --use-mirage --max-new-tokens 64",
-      "exit_code": 0,
-      "generated": 64,
-      "ms_per_token": 15.065,
-      "first_tokens": [
-        90700,
-        8340,
-        25,
-        271,
-        16,
-        13,
-        220,
-        2972
-      ]
-    },
-    "qwen3_8b_ci": {
-      "exit_code": 0,
-      "generated": 256,
-      "ms_per_token": 3.871
-    },
-    "supersedes": "run_report_all_bs_PREFIX_argmax_tiebreak_bug.json (pre-fix) and run_report_all_bs_argmaxfix.json (post-fix, pre-commit tree)"
   }
 }
