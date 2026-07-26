@@ -1,0 +1,31 @@
+{
+  "syn-widebug": {
+    "token_ids": [10, 999]
+  },
+  "syn-topbut-wide": {
+    "token_ids": [30, 41]
+  },
+  "syn-tie": {
+    "token_ids": [50, 61]
+  },
+  "syn-tie-confirmed": {
+    "token_ids": [70, 81],
+    "topk_logits": [
+      {"70": 5.0, "71": 1.0},
+      {"81": 2.05, "80": 2.0}
+    ]
+  },
+  "syn-tie-refuted": {
+    "token_ids": [90, 101],
+    "topk_logits": [
+      {"90": 5.0, "91": 1.0},
+      {"100": 3.0, "101": 1.0}
+    ]
+  },
+  "syn-postdiv": {
+    "token_ids": [110, 999, 131]
+  },
+  "syn-insufficient": {
+    "token_ids": [140, 999]
+  }
+}

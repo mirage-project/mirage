@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "note": "SYNTHETIC fixture for the AC-3 harness's own test suite. Not a real HF reference. Unlike the committed accept/reference/reference_outputs.json, these entries carry optional top2_id_per_step/top2_logit_per_step so the stub tests can exercise every tie_classifier branch (the real reference cannot, today - see reference_loader.py)."
+  },
+  "results": {
+    "syn-widebug": {
+      "input_ids": [1, 2, 3],
+      "output_ids": [10, 20],
+      "num_generated": 2,
+      "hit_eos": false,
+      "eos_step": null,
+      "top1_logit_per_step": [5.0, 5.0],
+      "top2_id_per_step": [11, 21],
+      "top2_logit_per_step": [1.0, 1.0]
+    },
+    "syn-topbut-wide": {
+      "input_ids": [1, 2, 3],
+      "output_ids": [30, 40],
+      "num_generated": 2,
+      "hit_eos": false,
+      "eos_step": null,
+      "top1_logit_per_step": [5.0, 5.0],
+      "top2_id_per_step": [31, 41],
+      "top2_logit_per_step": [1.0, 1.0]
+    },
+    "syn-tie": {
+      "input_ids": [1, 2, 3],
+      "output_ids": [50, 60],
+      "num_generated": 2,
+      "hit_eos": false,
+      "eos_step": null,
+      "top1_logit_per_step": [5.0, 5.0],
+      "top2_id_per_step": [51, 61],
+      "top2_logit_per_step": [1.0, 4.95]
+    },
+    "syn-tie-confirmed": {
+      "input_ids": [1, 2, 3],
+      "output_ids": [70, 80],
+      "num_generated": 2,
+      "hit_eos": false,
+      "eos_step": null,
+      "top1_logit_per_step": [5.0, 5.0],
+      "top2_id_per_step": [71, 81],
+      "top2_logit_per_step": [1.0, 4.95]
+    },
+    "syn-tie-refuted": {
+      "input_ids": [1, 2, 3],
+      "output_ids": [90, 100],
+      "num_generated": 2,
+      "hit_eos": false,
+      "eos_step": null,
+      "top1_logit_per_step": [5.0, 5.0],
+      "top2_id_per_step": [91, 101],
+      "top2_logit_per_step": [1.0, 4.95]
+    },
+    "syn-postdiv": {
+      "input_ids": [1, 2, 3],
+      "output_ids": [110, 120, 130],
+      "num_generated": 3,
+      "hit_eos": false,
+      "eos_step": null,
+      "top1_logit_per_step": [5.0, 5.0, 5.0],
+      "top2_id_per_step": [111, 121, 131],
+      "top2_logit_per_step": [1.0, 1.0, 4.95]
+    },
+    "syn-insufficient": {
+      "input_ids": [1, 2, 3],
+      "output_ids": [140, 150],
+      "num_generated": 2,
+      "hit_eos": false,
+      "eos_step": null,
+      "top1_logit_per_step": [5.0, 5.0]
+    }
+  }
+}
