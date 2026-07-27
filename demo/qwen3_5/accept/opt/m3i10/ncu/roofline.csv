@@ -1,0 +1,14 @@
+kernel_or_stage,MB_per_step_bs1,us_per_step_bs1,achieved_TB_s_bs1,pct_of_HBM_roof_bs1,roofline_us_bs1,headroom_x_bs1,us_per_step_bs16,achieved_TB_s_bs16,pct_of_HBM_roof_bs16,headroom_x_bs16,note
+dense fp8 projections (160 sites),1340.0,1353.5,1.038,12.98,175.64,7.71,1370.96,1.025,12.81,7.81,weight-streaming dominated; activations negligible at M<=16
+"  - in_proj_qkvz [12288,2048] x30",720.0,283.5,2.663,33.29,94.37,3.0,,,,,per site 9.45 us at bs1 (ordinal analysis)
+"  - gdn out_proj [2048,4096] x30",240.0,322.5,0.78,9.75,31.46,10.25,,,,,per site 10.75 us at bs1
+"  - qkv(g)_proj [9216,2048] x10",180.0,94.5,1.997,24.97,23.59,4.01,,,,,
+"  - o_proj [2048,4096] x10",80.0,107.5,0.78,9.75,10.49,10.25,,,,,
+"  - shared gate_up [1024,2048] x40",80.0,312.0,0.269,3.36,10.49,29.75,,,,,
+"  - shared down [2048,512] x40",40.0,232.0,0.181,2.26,5.24,44.25,,,,,
+MoE routed w13 (top-8 of 256) x40,640.0,336.56,1.994,24.92,83.89,4.01,1123.23,0.597,7.47,13.39,"bs8/bs16 read more experts: bs8 ~<=64 groups, bs16 ~<=128 groups"
+MoE routed w2 (top-8 of 256) x40,320.0,300.66,1.116,13.95,41.94,7.17,755.94,0.444,5.55,18.02,
+"lm_head [248320,2048] bf16 x1",970.0,150.72,6.748,84.35,127.14,1.19,155.13,6.557,81.96,1.22,the reference point: this one IS at the roof
+GDN recurrent state rd+wr x30,120.0,163.65,0.769,9.61,15.73,10.4,462.74,4.351,54.38,1.84,"fp32 state [32,128,128] per layer per request; scales with batch"
+GDN conv1d state rd+wr x30,2.81,89.61,0.033,0.41,0.37,243.08,95.61,0.494,6.17,16.21,
+quantize / fp8 casts (200 sites),1.0,559.28,0.002,0.02,0.13,4283.7,606.23,0.028,0.34,290.21,"read bf16 + write fp8 + fp32 scales, M=1 row per site at bs1 - about 1 MB of traffic"

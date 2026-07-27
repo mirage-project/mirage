@@ -1,0 +1,42 @@
+{
+  "stage": "done",
+  "model": "Qwen/Qwen3.5-35B-A3B-FP8",
+  "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+  "args": {
+    "batch_size": 1,
+    "input_len": 256,
+    "output_len": 1024,
+    "reps": 2,
+    "mem_fraction_static": 0.85,
+    "out": "/home/muhengl/mpk-qwen35/m3i10-profile/sglang/out/probe_bs1.json",
+    "profile_dir": "/home/muhengl/mpk-qwen35/m3i10-profile/sglang/traces",
+    "profile_steps": 50
+  },
+  "utc": "2026-07-27T03:41:49Z",
+  "sglang_version": "0.5.16",
+  "torch_version": "2.11.0+cu130",
+  "engine_load_seconds": 447.9,
+  "vocab_n": 248044,
+  "warmup": {
+    "wall_s": 8.69189366698265,
+    "tokens": 1022,
+    "tok_per_s_e2e": 117.58082175834791
+  },
+  "reps": [
+    {
+      "wall_s": 3.0998663590289652,
+      "tokens": 1022,
+      "tok_per_s_e2e": 329.69163235802915
+    },
+    {
+      "wall_s": 3.11422762501752,
+      "tokens": 1022,
+      "tok_per_s_e2e": 328.171258834765
+    }
+  ],
+  "e2e_tok_per_s_median": 328.9314455963971,
+  "e2e_tok_per_s_range_pct": 0.46221592481299506,
+  "profile_files": [
+    "/home/muhengl/mpk-qwen35/m3i10-profile/sglang/traces/1785124179.1398642-TP-0.trace.json.gz"
+  ]
+}
