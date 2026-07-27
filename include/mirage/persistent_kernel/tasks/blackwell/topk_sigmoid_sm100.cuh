@@ -246,9 +246,8 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   // single-CTA variant must therefore never key its chunking on
   // blockIdx/gridDim: a task landing on worker w would silently process only
   // rows [w*ROWS_PER_CTA, w*ROWS_PER_CTA+ROWS_PER_CTA) — at decode
-  // (num_active_rows=1) that means EMPTY routing whenever w != 0 (caught by
-  // the test-mode matrix 2026-06-12: worker 1 → 0/10 PASS, rows 8-15 only at
-  // bs=16). FUSE_COMPACTION=false keeps the grid-stride for STANDALONE
+  // (num_active_rows=1) that means EMPTY routing whenever w != 0.
+  // FUSE_COMPACTION=false keeps the grid-stride for STANDALONE
   // multi-CTA launches only; before any megakernel use it must derive a
   // virtual chunk index from task metadata instead (builder wiring for the
   // multi-CTA prefill path is still pending).

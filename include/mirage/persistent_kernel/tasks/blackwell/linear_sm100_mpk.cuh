@@ -260,7 +260,7 @@ __device__ __noinline__ void
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
 
-  // ASYNC-AGENT SAFETY (2026-07-20): the mbarriers and the TMEM allocation slot
+  // ASYNC-AGENT SAFETY: the mbarriers and the TMEM allocation slot
   // are deliberately NOT taken from `shared_storage` (which lives in the
   // `extern __shared__` arena shared by every task) but from this STATIC
   // __shared__ block. See the note on PipedBarriers in storage.cuh: a TMA

@@ -1611,7 +1611,7 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = output_ops[0]->output_tensors[0].dim[0];
   int hidden_dim_full = output_ops[0]->output_tensors[0].dim[1];
-  // C20 (2026-05-17): use stride[0] (in elements) instead of dim[1] for the
+  // Use stride[0] (in elements) instead of dim[1] for the
   // row-walk stride. For root tensors stride[0] == dim[1] (row-major
   // default), so non-view callers see no behavior change. For `mpk.narrow`
   // views, dim[1] = slot_width but stride[0] = parent_width — using stride
@@ -1631,7 +1631,7 @@ int TaskRegister::register_rmsnorm_hopper_task(threadblock::Graph const &bgraph,
   int dtensor_batch = output_ops[0]->dtensor.dim[0];
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // B34 (2026-05-15): builder may shrink grid.x below mbt so each CTA
+  // Builder may shrink grid.x below mbt so each CTA
   // handles BATCH_SIZE > 1 rows. Skip CTAs whose first row is past the
   // active token count, and clamp the kernel's inner row-loop to the
   // remaining active rows so we don't normalize/overwrite stale bf16.
@@ -3239,11 +3239,10 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
   constexpr int MMA_N = 16;
   constexpr int bK = 128; // FP8: bK=128 for one scale-block per k-tile
   // NUM_AB_STAGE=8 (was 4): at TP=4, moe_w2_fp8 has fp8_k_tile_count=8 +
-  // fp8_num_m_tiles=56 + fp8_num_n_tiles=4. With 4 stages the pipeline hung
-  // (TP=4 mbt>=40 MoE hang). With 8 stages it passes at 26.9 ms/tok. Matches
-  // BF16 moe_linear_sm100's existing pipeline depth. Total smem ≈ 148KB, fits
-  // under the 205KB dynamic-smem budget. See project_tp4_moe_hang.md
-  // (2026-04-22).
+  // fp8_num_m_tiles=56 + fp8_num_n_tiles=4. 4 stages deadlocks the MoE
+  // pipeline (TP=4, mbt>=40); 8 stages is stable and matches BF16
+  // moe_linear_sm100's existing pipeline depth. Total smem ~148KB, fits
+  // under the 205KB dynamic-smem budget.
   constexpr int num_ab_stages = 8;
   constexpr int num_acc_stages = 2;
   constexpr int num_c_stages = 4;
@@ -3484,7 +3483,7 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
   // (num_experts_per_tok * batch_size) as the row bound.
   bool has_active = (active_mask_offset >= 0 && ctas_per_expert > 0);
   if (has_active) {
-    // D3 + B11 (2026-05-15): per-CTA short-circuit when this CTA's
+    // Per-CTA short-circuit when this CTA's
     // expert is inactive; otherwise read actual_count to cap the row
     // loop. For decode (active_token=1) each routed expert sees only
     // 1 real row, vs the BM_PADDING (=128) padded layout, so the
@@ -4500,7 +4499,7 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   float const mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
   float sm_scale = (1.0f / sqrtf(192.0f)) * mscale * mscale;
   float sm_scale_log2 = sm_scale * 1.44269504089f;
-  // FuseTensor row-swap layout (2026-05-12 user #2 v2): when qfused_mode=1,
+  // FuseTensor row-swap layout: when qfused_mode=1,
   // weight is rearranged at load time as [all_heads_nope; all_heads_pe]
   // per-rank, so the fused output buffer per row has layout
   //   [head0_nope(128), head1_nope(128), ..., head_{H-1}_nope(128),
@@ -4976,7 +4975,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
     hidden_size = input_ops[0]->output_tensors[0].dim[1];
   }
   // GLOBAL_STRIDE = stride between rows in linearized layout. C20
-  // (2026-05-17): use stride[0] (in elements) instead of dim[1]; for non-view
+  // Use stride[0] (in elements) instead of dim[1]; for non-view
   // tensors these are equal, but for an `mpk.narrow` view dim[1] is the
   // slot width while stride[0] is the parent's full row width — the
   // latter is what the kernel must walk by to avoid stepping into the
@@ -5060,7 +5059,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   // buffer is sized for hidden_size per row, so writes must use hidden_size
   // as the row stride. Default (no slice) keeps OUTPUT_STRIDE == input_stride
   // for backward compat with legacy callers where the kernel previously
-  // assumed input_stride == output_stride. 2026-05-12 H8 fix.
+  // assumed input_stride == output_stride.
   int output_stride = has_slice_override ? hidden_size : input_stride;
   // ROWS_PER_TASK: when caller passes grid.y < batch_size, the kernel
   // internally loops over multiple rows per CTA so total launched CTAs
@@ -5103,7 +5102,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
 
 int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
+  // Fused RMSNorm + per-token-group FP8 quantize.
   //
   // tb_graph inputs (in order):
   //   [0] input bf16  [M, K_full]              (row-major, possibly wider
@@ -5818,7 +5817,7 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   //   input  [N, H, D_in] -> stride[0] = H * D_in
   //   weight [H, D_out, D_in] -> stride between rows within a head is D_in
   //   output [N, H, D_out] -> stride[0] = H * D_out
-  // C20 (2026-05-17): read from dtensor.stride[0] instead of the owner_op's
+  // Read from dtensor.stride[0] instead of the owner_op's
   // input_strides[0] — view-safe (mpk.narrow inherits parent stride; root
   // tensors have stride populated by input.cc and fixup_legacy_strides).
   int input_row_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
@@ -6146,17 +6145,15 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   //   per-row write check (`if (mi < M)`) respect the active-token count,
   //   so decode iters don't overwrite output rows 1..MBT-1 with stale-
   //   FP8-driven garbage when the upstream quantize early-exited for
-  //   non-active rows. See scratch/qkva_fusion_bug_FIXED.md for the
-  //   multi-iter buffer-poisoning chain that motivated this fix
-  //   (2026-05-13).
+  //   non-active rows (a multi-iter buffer-poisoning chain otherwise).
   // runtime_m_mode=1: gates to prompt-prefill and uses request 0's current
   //   kv_len as runtime M. This is used for ckv -> kv_b_proj decompression.
-  // runtime_m_mode=2 (B20, 2026-05-15): prefill-phase gate (Q_LEN > 8) but
+  // runtime_m_mode=2: prefill-phase gate (Q_LEN > 8) but
   //   keep active_rows as runtime M. Used for the prefill-only branch of
   //   the dual-dispatch O_proj (prefill O_proj reads attn_unabsorbed which
   //   is only valid on prefill iters; decode iters early-exit so the GEMM
   //   doesn't burn ~30 μs on a wasted wave).
-  // runtime_m_mode=3 (B20, 2026-05-15): decode-phase gate (Q_LEN <= 8) with
+  // runtime_m_mode=3: decode-phase gate (Q_LEN <= 8) with
   //   active_rows as runtime M. Used for the decode-only branch of the
   //   dual-dispatch O_proj (decode O_proj reads attn_out which is only
   //   valid on decode iters; prefill iters early-exit).
@@ -6195,7 +6192,7 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   } else {
-    // 2026-05-13 ROOT-CAUSE FIX: cap M at active_rows so decode iters
+    // Cap M at active_rows so decode iters
     // (active_rows=1) don't overwrite output rows 1..M-1 with garbage.
     // This makes the GEMM's early-exit semantics symmetric with the
     // upstream quantize task's `request_id >= active_rows` early-exit:
@@ -6325,7 +6322,7 @@ int TaskRegister::register_dsv3_router_gate_gemv_sm100_task(
                                code.to_string());
 }
 
-// D1 (2026-05-17): fp8out variant builder. Same as the bf16 variant but
+// fp8out variant builder. Same as the bf16 variant but
 // the kernel call emits FP8 + packed UE8M0 scale outputs. Task tuple is
 // (4 inputs, 2 outputs): output_ptrs[0] = FP8 buffer, output_ptrs[1] =
 // packed-scale uint32 buffer. params layout unchanged (M, N, K,
@@ -6585,7 +6582,7 @@ int TaskRegister::register_moe_permute_sm100_task(
 //             residual (MBT, HIDDEN) bf16
 // Outputs (1): output (MBT, HIDDEN) bf16
 // Grid: (ceil(MBT / ROWS_PER_TASK), 1, 1). request_id = bid.x set by runtime.
-// B33 (2026-05-15): added ROWS_PER_TASK template — when the wrapper shrinks
+// ROWS_PER_TASK template: when the wrapper shrinks
 // grid_dim.x below MBT, the kernel loops ROWS_PER_TASK = ceil(MBT / grid.x)
 // tokens per CTA. Default grid.x == MBT keeps ROWS_PER_TASK == 1 and the
 // legacy 1-CTA-per-token shape unchanged.
@@ -6620,10 +6617,10 @@ int TaskRegister::register_moe_unpermute_sm100_task(
     rows_per_task = 1;
   }
 
-  // 2026-05-15 stragglers fix: HIDDEN_SPLIT = grid.y partitions the
+  // HIDDEN_SPLIT = grid.y partitions the
   // HIDDEN axis across HIDDEN_SPLIT CTAs per token. Decode case
   // (1 active token) has only HIDDEN_SPLIT CTAs doing actual compute
-  // — bumping HIDDEN_SPLIT spreads the 32 μs straggler across more
+  // — bumping HIDDEN_SPLIT spreads the straggler across more
   // SMs in parallel. Prefill grid balloons to MBT*HIDDEN_SPLIT CTAs
   // but per-CTA work shrinks proportionally.
   int hidden_split = bgraph.grid_dim.y > 0 ? (int)bgraph.grid_dim.y : 1;
@@ -6839,7 +6836,7 @@ int TaskRegister::register_mla_kv_gather_unified_sm100_task(
   //                         wider parent buffer. Per-task base pointers
   //                         are already offset by the runtime from each
   //                         view's view_offset.
-  //   size 6 (gather fan-out, 2026-05-16 C1): also append [num_gather_splits].
+  //   size 6 (gather fan-out): also append [num_gather_splits].
   //   When NUM_GATHER_SPLITS > 1, the builder passes grid_dim.y = N_SPLITS, and
   //   each CTA strides seq_pos by N_SPLITS so the formerly-serial gather/append
   //   loops run in parallel across N_SPLITS workers.

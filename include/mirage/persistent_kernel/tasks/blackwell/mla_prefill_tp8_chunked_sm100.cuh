@@ -466,7 +466,7 @@ __device__ __noinline__ void mla_prefill_tp8_chunked_sm100_task_impl(
   int kps = sb + KP_OFF;
   int v0s = sb + V0_OFF;
   int v1s = sb + V1_OFF;
-  // ASYNC-AGENT SAFETY (2026-07-20): mbarriers live in STATIC __shared__, not
+  // ASYNC-AGENT SAFETY: mbarriers live in STATIC __shared__, not
   // in the `extern __shared__` arena -- see the note in
   // mla_prefill_tp8_sm100.cuh and the full rationale in
   // fp8_gemm_dense_sm100_common.cuh. The arena still reserves

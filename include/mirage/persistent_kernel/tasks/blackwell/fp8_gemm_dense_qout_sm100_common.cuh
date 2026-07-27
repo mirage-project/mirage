@@ -193,7 +193,7 @@ __device__ __forceinline__ void
   auto sA = [&](int s) { return sb_aligned + s * SA; };
   auto sBl = [&](int s) { return sb_aligned + NS * SA + s * SB; };
 
-  // ASYNC-AGENT SAFETY (2026-07-20): mbarriers + the TMEM allocation slot live
+  // ASYNC-AGENT SAFETY: mbarriers + the TMEM allocation slot live
   // in STATIC __shared__, NOT in the `extern __shared__` arena. The full
   // rationale is in fp8_gemm_dense_sm100_common.cuh; the short form is that
   // __syncthreads() between tasks orders THREADS but drains no ASYNCHRONOUS

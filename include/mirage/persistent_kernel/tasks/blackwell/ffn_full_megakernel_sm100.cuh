@@ -1746,7 +1746,7 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
   float *s_gactw = reinterpret_cast<float *>(s_smem + off); // [TOPK_EXPERTS]
   off += (size_t)TOPK_EXPERTS * sizeof(float);
   off = FFN_FULL_AU16(off);
-  // FAST lever (4): per-group local top-8 staging for the parallel argmax
+  // Per-group local top-8 staging for the parallel argmax
   // (NUM_GROUPS warps x TOPK_EXPERTS winners). value + index.
   float *s_top8v = reinterpret_cast<float *>(s_smem + off);
   off += (size_t)NUM_GROUPS * TOPK_EXPERTS * sizeof(float);
@@ -2253,7 +2253,7 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
   }
   __syncthreads();
   FFN_WS_TS(13); // after (ii)+(iii)+mask
-  // FAST lever (4): GLOBAL top-8 via PARALLEL per-group top-8 + warp-0 merge.
+  // GLOBAL top-8 via PARALLEL per-group top-8 + warp-0 merge.
   // Instead of warp 0 serially scanning all 256 biased values 8 times (8
   // dependent rounds over 8 values/lane on ONE warp while 7 idle), ALL 8 warps
   // cooperate: warp w owns its group's 32 experts (1/lane) and computes ITS
@@ -2623,7 +2623,7 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
     }
   }
 #else
-  // FAST lever (1): stage the routed y13 (active_count*W13_N floats) into the
+  // Stage the routed y13 (active_count*W13_N floats) into the
   // (idle-here) whole-block s_wbuf via ONE coalesced cp.async.cg 16B run + ONE
   // wait, so the silu reads from FAST smem and the cold y13 global round-trip
   // (it was written by OTHER blocks in Phase 1) overlaps onto the memory pipe
@@ -2823,7 +2823,7 @@ __device__ __noinline__ void ffn_full_megakernel_sm100_task_impl(
       float const *ws = w2_scale + static_cast<size_t>(e) * NB2 * KG2 +
                         static_cast<size_t>(n0 / GRP) * KG2;
       float yb[RBX_W2];
-      // FAST lever (3): W2 on the 16B packed-half2 path (W2_K=512 -> SS=1; the
+      // W2 on the 16B packed-half2 path (W2_K=512 -> SS=1; the
       // half2 group index lane>>3 maps to the SAME 4 K-groups as the 4B path).
       dgemv_cpa16_h2<RBX_W2, ST_W2>(s_ifp8 + static_cast<size_t>(slot) * W2_K,
                                     s_iscale + slot * KG2,

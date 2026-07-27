@@ -876,7 +876,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SM100, variant_id);
   } else if (name == "fused_rmsnorm_quantize_fp8_sm100") {
-    // B37 (2026-05-15): fused RMSNorm + per-token-group FP8 quantize.
+    // Fused RMSNorm + per-token-group FP8 quantize.
     // 2 real inputs (input, weight) + 3 outputs
     // (output_bf16, output_fp8, output_scale). All 3 outputs are wired
     // via `tb_graph.new_input(store_in_dmem=True)` in the Python

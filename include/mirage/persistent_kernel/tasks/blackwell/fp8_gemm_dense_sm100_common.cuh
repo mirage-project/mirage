@@ -125,7 +125,7 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
   auto sBl = [&](int s) { return sb_aligned + NS * SA + s * SB; };
 
   // ------------------------------------------------------------------------
-  // ASYNC-AGENT SAFETY (2026-07-20): the mbarrier array and the TMEM
+  // ASYNC-AGENT SAFETY: the mbarrier array and the TMEM
   // allocation slot live in STATIC __shared__, deliberately NOT in the
   // `extern __shared__` arena.
   //
@@ -286,9 +286,9 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
   // iteration while the mbarriers' real parity stream is continuous, so any
   // multi-tile-iter task (total tiles > num_workers) with nk % NS != 0
   // desynced at the tile boundary — synccheck "Barrier error. Missing wait"
-  // at mb_arrive_tx, then cudaErrorLaunchFailure (2026-06-13; this is the
-  // long-parked B36 multi-tile-iter bug — split-K merely forced
-  // multi-tile-iter early). For single-tile-iter or nk % NS == 0 the
+  // at mb_arrive_tx, then cudaErrorLaunchFailure (split-K forces the
+  // multi-tile-iter case that exposes it). For single-tile-iter or
+  // nk % NS == 0 the
   // continuous form is bit-identical to the old sequence.
   if (wid == 0 && elect_one_sync()) {
     int gk = 0;

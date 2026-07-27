@@ -231,12 +231,12 @@ struct AttnScratch {
   float *g_mla_acc;      // un-normalized sum(p*V)         [16*8*512 = 65536]
   float *g_mla_m;        // partial row-max                   [16*8    = 128]
   float *g_mla_l;        // partial exp-sum                   [16*8    = 128]
-  // MLA_ATOMIC_MERGE (lever 4): per-head finished-split counter. Zeroed BEFORE
+  // MLA_ATOMIC_MERGE: per-head finished-split counter. Zeroed BEFORE
   // the q_b->MLA barrier (that barrier's __threadfence publishes the zeros to
   // every CTA); the LAST split-block of head h (atomicAdd return == nsp-1) runs
   // the in-place merge -> drops the partial->merge barrier.            [16]
   int *g_head_done;
-  // WUV_HEAD_SPINWAIT (lever 5): per-head "merge done, W_UV may read"
+  // WUV_HEAD_SPINWAIT: per-head "merge done, W_UV may read"
   // readiness flag. Zeroed alongside g_head_done before the SAME barrier; the
   // merge sets it (device release), the W_UV row-blocks spin-wait (device
   // acquire) -> drops the merge->W_UV barrier.                          [16]
@@ -265,8 +265,8 @@ static constexpr int ATTN_SCRATCH_BYTES =
     /*g_mla_acc*/ K_HLOCAL * MLA_SPLITS * K_KVLORA * 4 +
     /*g_mla_m*/ K_HLOCAL * MLA_SPLITS * 4 +
     /*g_mla_l*/ K_HLOCAL * MLA_SPLITS * 4 +
-    /*g_head_done (lever 4)*/ K_HLOCAL * 4 +
-    /*g_head_wuv_ready (lever 5)*/ K_HLOCAL * 4 +
+    /*g_head_done*/ K_HLOCAL * 4 +
+    /*g_head_wuv_ready*/ K_HLOCAL * 4 +
     /*16B pad slack between 17 sections*/ 17 * 16 +
     /* +8 so the TOTAL is a multiple of 16 → the scratch tensor's element count
        (bytes/2 bf16) is a multiple of 8, required by tensor_init's 16B-vec
@@ -817,7 +817,7 @@ __device__ __forceinline__ void quant_ue8m0_grid(
   }
 }
 
-// ---- FAST-lever block-local quant + smem-sourced GEMV helpers. The quant math
+// ---- Block-local quant + smem-sourced GEMV helpers. The quant math
 // is BYTE-IDENTICAL to the grid versions above — same UE8M0 amax/448
 // per-128-group; the GEMVs read activation from SHARED instead of global; the
 // WEIGHT scale (Wsc) read uses the MPK per-128-ROW-BLOCK fp32 weight_scale_inv
@@ -2373,7 +2373,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
       if (s_mla_last) {
         // S10+S11 FUSED: this last-split block merges head h's nsp partials AND
         // quantizes its 512 attn elems in-block; mla_merge_quant ALSO sets
-        // g_head_wuv_ready[h]=1 (device release) at its end (lever 5).
+        // g_head_wuv_ready[h]=1 (device release) at its end.
         mla_merge_quant(sc.g_attn,
                         sc.g_attn_deq,
                         sc.g_mla_acc,

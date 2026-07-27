@@ -184,7 +184,7 @@ __device__ __noinline__ void task_impl_tpl(
   auto sSFB_addr = [&](int s) {
     return sb_aligned + SCD_TOT + NS * (SA + SB) + NS * SFA_SIZE + s * SFB_SIZE;
   };
-  // ASYNC-AGENT SAFETY (2026-07-20): mbarriers + the TMEM allocation slot live
+  // ASYNC-AGENT SAFETY: mbarriers + the TMEM allocation slot live
   // in STATIC __shared__, NOT in the `extern __shared__` arena. Rationale in
   // fp8_gemm_dense_sm100_common.cuh: __syncthreads() (and the `bar.sync 10,
   // 256` at the end of this body) orders THREADS but drains no ASYNCHRONOUS

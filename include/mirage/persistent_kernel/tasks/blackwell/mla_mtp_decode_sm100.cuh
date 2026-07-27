@@ -748,8 +748,8 @@ __device__ __noinline__ void
   // worker_kernel's static SMEM to ~23KB, and static + the 221KB dynamic
   // allocation exceeds the SM100 per-CTA limit (232,448B) — the launch then
   // fails for ANY megakernel whose graph contains this task (TP1 graphs +
-  // the reduce testmode suite; found 2026-06-12 as a silent eternal hang
-  // before the launch-error check existed). The dynamic region is unused by
+  // the reduce testmode suite; the launch error otherwise surfaces as a
+  // silent hang). The dynamic region is unused by
   // this task otherwise; capacity (MAX_SK*128*4 = 16KB <= 221KB) is fine.
   extern __shared__ __align__(16) uint8_t mpk_dyn_smem_mtp_reduce[];
   float *la_smem = reinterpret_cast<float *>(mpk_dyn_smem_mtp_reduce);

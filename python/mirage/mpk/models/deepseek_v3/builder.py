@@ -82,7 +82,7 @@ FFN_FULL_MEGAKERNEL_SCRATCH_BYTES = 106624
 # build time: attn_make_scratch reaches 434464; 434720 carries 256B slack).
 # MUST be a multiple of 16: the scratch tensor's element count (bytes/2 bf16) must
 # be a multiple of 8 for tensor_init's 16B-vec zero-init static_assert.
-ATTN_BLOCK_MEGAKERNEL_SCRATCH_BYTES = 434864  # +144B: FAST levers' g_head_done[16]+g_head_wuv_ready[16]; MUST == kernel ATTN_SCRATCH_BYTES
+ATTN_BLOCK_MEGAKERNEL_SCRATCH_BYTES = 434864  # +144B: g_head_done[16]+g_head_wuv_ready[16] arrays; MUST == kernel ATTN_SCRATCH_BYTES
 FIRST_MOE_LAYER = 3
 VOCAB_SIZE = 129280
 RMS_NORM_EPS = 1e-6
