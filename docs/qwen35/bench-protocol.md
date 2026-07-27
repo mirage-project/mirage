@@ -366,3 +366,15 @@ directory's own contents (`summary.json` for the cross-batch-size table) and the
 report for the headline table. M3/M4 re-runs of this exact protocol land in sibling
 `vllm-<version>-<date>/` directories, keyed by vLLM version and capture date, never overwriting
 a prior capture in place.
+
+## Admission-cap policy (M3-I9 landing, 2026-07-27)
+
+Binding for every benchmark and for M4's final harness: **`--per-request-token-cap auto` at
+bs16; NO cap at bs 1/2/4/8.** Basis: at bs16 cap=1 == the uncapped chunk structure (mbt=16
+already admits ~1 token/request/iteration), tokens are byte-identical to the adjudicated M2
+dumps, live in-wave compaction drops to ZERO migrations (the six contaminated duplicate
+pairs flip to identical:true), and the wave gains +84.2% at the AC-3 geometry / +14.1% e2e
+at the matched 256/1024 workload. At bs<16 the cap genuinely changes prefill chunk
+boundaries — perf-neutral-to-negative by design AND numerically shifted at bs4 (p10-logic
+margin-0.625 flip; see M3-I9b) — so it stays off. Evidence: opt/m3i9/{predictions.md,
+predictions_addendum.md,results/}.
