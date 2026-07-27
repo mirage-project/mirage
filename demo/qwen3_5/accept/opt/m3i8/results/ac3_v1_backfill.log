@@ -1,0 +1,85 @@
+=== probing GPU 6 (3 samples, 3s apart) ===
+  sample 1: GPU 6 used=165419MiB util=0%
+GPU 6 not stable, trying next candidate.
+=== probing GPU 0 (3 samples, 3s apart) ===
+  sample 1: GPU 0 used=753MiB util=0%
+GPU 0 not stable, trying next candidate.
+=== probing GPU 1 (3 samples, 3s apart) ===
+  sample 1: GPU 1 used=16931MiB util=13%
+GPU 1 not stable, trying next candidate.
+=== probing GPU 2 (3 samples, 3s apart) ===
+  sample 1: GPU 2 used=5MiB util=0%
+  sample 2: GPU 2 used=5MiB util=0%
+  sample 3: GPU 2 used=733MiB util=0%
+GPU 2 not stable, trying next candidate.
+=== probing GPU 3 (3 samples, 3s apart) ===
+  sample 1: GPU 3 used=5MiB util=0%
+  sample 2: GPU 3 used=5MiB util=0%
+  sample 3: GPU 3 used=5MiB util=0%
+GPU 3 stable-idle across 3 samples -- claiming it (M3-I8).
+=== running (CUDA_VISIBLE_DEVICES=3): bash /home/muhengl/mpk-qwen35/m3i8/ac3_v1_backfill.sh ===
+##### 0. arm=v1 sha256
+ef87c59ff5e0cd040b062c82dc24eaa2bd7e52238c285cb2c51b498b3ae2d6cc  /home/muhengl/mpk-qwen35/mirage/python/mirage/mpk/persistent_kernel.py
+4e8e13f63033dd5f8012aa4c1c2d9ad1ba5bc5dfc75d81a263bb78682917a33e  /home/muhengl/mpk-qwen35/mirage/python/mirage/mpk/models/qwen3_5/builder.py
+133:MOE_GATE_PADDING_ROWS = True
+173:        self.moe_n_splits = 2
+589:            grid_dim=(grid_x, self.moe_n_splits, 1), block_dim=(256, 1, 1),
+606:            grid_dim=(grid_x, self.moe_n_splits, 1), block_dim=(256, 1, 1),
+##### 2. INERT-AT-bs16 ORACLE 2026-07-26T20:56:07-04:00
+##### rc=0 bs=16
+[mpk_engine] HAZARD-COMPACTION exposure: slots [10, 11, 12, 13, 14, 15] migrate while their reported window is still being written (69 live-slot migrations this wave)
+[mpk_engine] bs=16 wave=0 slots=16 distinct=10 wall=3692.4ms steps=107
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/m3i8/ac3_dumps_v1/bs16.json (10 prompts)
+bs16 identical: True changed: none
+##### 3. AC-3 SWEEP remaining bs 2026-07-26T20:57:34-04:00
+##### sweep bs=1 2026-07-26T20:57:34-04:00
+##### rc=0 bs=1 2026-07-26T20:59:44-04:00
+[mpk_engine]   [watchdog] bs=1 wave=9 step=[131]
+[mpk_engine] bs=1 wave=9 slots=1 distinct=1 wall=733.2ms steps=63
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/m3i8/ac3_dumps_v1/bs1.json (10 prompts)
+##### sweep bs=2 2026-07-26T20:59:44-04:00
+##### rc=0 bs=2 2026-07-26T21:01:31-04:00
+[mpk_engine]   [watchdog] bs=2 wave=4 step=[131, 131]
+[mpk_engine] bs=2 wave=4 slots=2 distinct=2 wall=986.5ms steps=87
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/m3i8/ac3_dumps_v1/bs2.json (10 prompts)
+##### sweep bs=4 2026-07-26T21:01:31-04:00
+##### rc=0 bs=4 2026-07-26T21:03:03-04:00
+[mpk_engine] HAZARD-COMPACTION exposure: slots [2, 3] migrate while their reported window is still being written (3 live-slot migrations this wave)
+[mpk_engine] bs=4 wave=2 slots=4 distinct=2 wall=1130.2ms steps=87
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/m3i8/ac3_dumps_v1/bs4.json (10 prompts)
+##### sweep bs=8 2026-07-26T21:03:03-04:00
+##### rc=0 bs=8 2026-07-26T21:04:43-04:00
+[mpk_engine] HAZARD-COMPACTION exposure: slots [2, 3, 4, 5, 6, 7] migrate while their reported window is still being written (20 live-slot migrations this wave)
+[mpk_engine] bs=8 wave=1 slots=8 distinct=2 wall=1682.8ms steps=87
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/m3i8/ac3_dumps_v1/bs8.json (10 prompts)
+##### 4. AC-3 GATE 2026-07-26T21:04:43-04:00
+##### ac3 rc=1
+  [p08-science bs=8] PASS — 64 position(s) scored
+  [p09-translate bs=8] PASS — 64 position(s) scored
+  [p10-logic bs=8] PASS — 64 position(s) scored
+  [p01-history bs=16] PASS — 64 position(s) scored
+  [p02-math bs=16] PASS — 64 position(s) scored
+  [p03-python bs=16] PASS — 64 position(s) scored
+  [p04-chinese bs=16] PASS — 64 position(s) scored
+  [p05-cuda bs=16] PASS — 64 position(s) scored
+  [p06-poem bs=16] FAIL (first divergence @ position 60) — 64 position(s) scored
+  [p07-format bs=16] PASS — 64 position(s) scored
+  [p08-science bs=16] PASS — 64 position(s) scored
+  [p09-translate bs=16] PASS — 64 position(s) scored
+  [p10-logic bs=16] PASS — 64 position(s) scored
+  5 waiver-request record(s) — evidence only, never auto-waived:
+    - p06-poem bs=1 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+    - p06-poem bs=2 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+    - p06-poem bs=4 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+    - p06-poem bs=8 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+    - p06-poem bs=16 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+Full run report written to /home/muhengl/mpk-qwen35/m3i8/run_report_v1.json
+##### 5. PER-CASE BYTE DIFF vs committed dumps_final 2026-07-26T21:04:43-04:00
+##### bytediff rc=0
+identical: True missing: []
+counts: {"bs1": "10/10 identical", "bs2": "10/10 identical", "bs4": "10/10 identical", "bs8": "10/10 identical", "bs16": "10/10 identical"}
+CHANGED: none
+##### 6. Qwen3-8B CI smoke 2026-07-26T21:04:43-04:00
+##### ci rc=0
+Prompt length 39, generate length 271, per-token latency: 3.902 ms
+##### AC3_V1_BACKFILL_DONE 2026-07-26T21:05:40-04:00

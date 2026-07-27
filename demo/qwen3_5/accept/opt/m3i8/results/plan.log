@@ -1,0 +1,215 @@
+########## STAGE 0 rebuild + codegen identity 2026-07-26T19:29:09-04:00
+rebuild rc=0
+Requirement already satisfied: pydantic-core==2.46.4 in /home/muhengl/mpk-qwen35/venv-mpk/lib/python3.12/site-packages (from pydantic>=2.9.0->fastapi->mirage-project==0.2.4) (2.46.4)
+Requirement already satisfied: anyio<5,>=3.6.2 in /home/muhengl/mpk-qwen35/venv-mpk/lib/python3.12/site-packages (from starlette>=0.46.0->fastapi->mirage-project==0.2.4) (4.14.2)
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in /home/muhengl/mpk-qwen35/venv-mpk/lib/python3.12/site-packages (from sympy>=1.13.3->torch>=2.4->mirage-project==0.2.4) (1.3.0)
+Requirement already satisfied: MarkupSafe>=2.0 in /home/muhengl/mpk-qwen35/venv-mpk/lib/python3.12/site-packages (from jinja2->torch>=2.4->mirage-project==0.2.4) (3.0.3)
+Requirement already satisfied: charset_normalizer<4,>=2 in /home/muhengl/mpk-qwen35/venv-mpk/lib/python3.12/site-packages (from requests->transformers==4.57.1->mirage-project==0.2.4) (3.4.9)
+Requirement already satisfied: idna<4,>=2.5 in /home/muhengl/mpk-qwen35/venv-mpk/lib/python3.12/site-packages (from requests->transformers==4.57.1->mirage-project==0.2.4) (3.18)
+Requirement already satisfied: urllib3<3,>=1.26 in /home/muhengl/mpk-qwen35/venv-mpk/lib/python3.12/site-packages (from requests->transformers==4.57.1->mirage-project==0.2.4) (2.7.0)
+Requirement already satisfied: certifi>=2023.5.7 in /home/muhengl/mpk-qwen35/venv-mpk/lib/python3.12/site-packages (from requests->transformers==4.57.1->mirage-project==0.2.4) (2026.7.22)
+Building wheels for collected packages: mirage-project
+  Building editable for mirage-project (pyproject.toml): started
+  Building editable for mirage-project (pyproject.toml): finished with status 'done'
+  Created wheel for mirage-project: filename=mirage_project-0.2.4-0.editable-cp312-cp312-linux_x86_64.whl size=5718 sha256=555245d91a83404c6c0dd4db6bfe85e3874a15019fc76020762c0a957718f814
+  Stored in directory: /tmp/pip-ephem-wheel-cache-rulwpdff/wheels/2d/aa/2f/2f4107d643f5114a677b3d506c4b82aa0440357bf0be0c8f96
+Successfully built mirage-project
+Installing collected packages: mirage-project
+  Attempting uninstall: mirage-project
+    Found existing installation: mirage-project 0.2.4
+    Uninstalling mirage-project-0.2.4:
+      Successfully uninstalled mirage-project-0.2.4
+Successfully installed mirage-project-0.2.4
+--- installed arm base
+base build rc=0
+--- /home/muhengl/mpk-qwen35/m3i8/kernel_base_bs1_noprof
+      0,
+      16,
+      256,
+      8,
+      kernel::topk_softmax_task_impl<cute::bfloat16_t, 16, 256, 8, 16>(
+      nullptr,
+      task_desc->input_ptrs[0],
+      task_desc->output_ptrs[0],
+      task_desc->output_ptrs[1],
+      task_desc->output_ptrs[2],
+      true);
+      true,
+--- /home/muhengl/mpk-qwen35/m3i1/kernel_bs1_noprof
+      0,
+      16,
+      256,
+      8,
+      kernel::topk_softmax_task_impl<cute::bfloat16_t, 16, 256, 8, 16>(
+      nullptr,
+      task_desc->input_ptrs[0],
+      task_desc->output_ptrs[0],
+      task_desc->output_ptrs[1],
+      task_desc->output_ptrs[2],
+      true);
+      true,
+CODEGEN IDENTITY OK: base emits the pre-M3-I8 router call
+########## STAGE 1 MECHANISM: activated-expert mask 2026-07-26T19:31:46-04:00
+--- installed arm base
+--- mask arm=base bs=1 rc=1
+--- mask arm=base bs=2 rc=1
+--- mask arm=base bs=4 rc=1
+--- mask arm=base bs=8 rc=0
+--- mask arm=base bs=16 rc=0
+--- installed arm v1
+--- mask arm=v1 bs=1 rc=1
+--- mask arm=v1 bs=2 rc=1
+--- mask arm=v1 bs=4 rc=1
+--- mask arm=v1 bs=8 rc=1
+--- mask arm=v1 bs=16 rc=1
+ "activated_mean": 57.3,
+ "hard_cap": 0,
+ "cap_respected": false,
+ "rows_marked_mean": 16.0,
+ "activated_mean": 31.125,
+ "hard_cap": 0,
+ "cap_respected": false,
+ "rows_marked_mean": 16.0,
+ "activated_mean": 8.0,
+ "hard_cap": 0,
+ "cap_respected": false,
+ "rows_marked_mean": 1.0,
+ "activated_mean": 8.0,
+ "hard_cap": 0,
+ "cap_respected": false,
+ "rows_marked_mean": 1.0,
+ "activated_mean": 8.0,
+ "hard_cap": 0,
+ "cap_respected": false,
+ "rows_marked_mean": 1.0,
+ "activated_mean": 8.0,
+ "hard_cap": 0,
+ "cap_respected": false,
+ "rows_marked_mean": 1.0,
+ "activated_mean": 8.0,
+ "hard_cap": 0,
+ "cap_respected": false,
+ "rows_marked_mean": 1.0,
+########## STAGE 2 AC-3 gate (v1) 2026-07-26T19:49:08-04:00
+--- installed arm v1
+########## ac3 v1 rc=97
+########## STAGE 3 perf bs8 then bs1 2026-07-26T19:49:17-04:00
+--- stage3 bs=8 arm=base rc=0 2026-07-26T19:53:54-04:00
+--- stage3 bs=8 arm=v1 rc=0 2026-07-26T19:58:50-04:00
+--- stage3 bs=1 arm=base rc=0 2026-07-26T20:02:30-04:00
+--- stage3 bs=1 arm=v1 rc=0 2026-07-26T20:06:48-04:00
+# M3-I8 A/B
+
+## Mechanism: activated expert groups per layer (the number M3-I1 measured at 56.4 / 59.4 / 60.2 / 70.1 / 86.7)
+
+| bs | cap 8*bs | predicted | base | v1 |
+|---|---|---|---|---|
+| 1 | 8 | 8.0 | 56.6 | 9.6 |
+| 2 | 16 | 14.7 | - | - |
+| 4 | 32 | 24.6 | - | - |
+| 8 | 64 | 47.9 | 69.9 | 50.4 |
+| 16 | 128 | 86.7 | - | - |
+
+## moe_w13: per-task us / waves / wall span per layer
+
+| bs | base T | base waves | base wall | v1 T | v1 waves | v1 wall |
+|---|---|---|---|---|---|---|
+| 1 | 58.2 | 1 | 76.8 | 47.6 | 1 | 59.4 |
+| 2 | - | - | - | - | - | - |
+| 4 | - | - | - | - | - | - |
+| 8 | 60.7 | 2 | 117.3 | 58.5 | 1 | 66.2 |
+| 16 | - | - | - | - | - | - |
+
+## moe_w2: per-task us / waves / wall span per layer
+
+| bs | base T | base waves | base wall | v1 T | v1 waves | v1 wall |
+|---|---|---|---|---|---|---|
+| 1 | 30.7 | 1 | 43.0 | 29.8 | 1 | 33.6 |
+| 2 | - | - | - | - | - | - |
+| 4 | - | - | - | - | - | - |
+| 8 | 30.9 | 2 | 62.6 | 30.7 | 1 | 36.3 |
+| 16 | - | - | - | - | - | - |
+
+## Step time and decode throughput
+
+| bs | I1 step | base step | base vs base | v1 step | v1 vs base |
+|---|---|---|---|---|---|
+| 1 | 15264 | 11715 | +0.0% | 10676 | +9.7% |
+| 2 | 15648 | - | - | - | - |
+| 4 | 15645 | - | - | - | - |
+| 8 | 18618 | 15610 | +0.0% | 12479 | +25.1% |
+########## STAGE 4 perf bs 2,4,16 2026-07-26T20:06:48-04:00
+--- stage4 bs=2 arm=base rc=0 2026-07-26T20:10:58-04:00
+--- stage4 bs=2 arm=v1 rc=0 2026-07-26T20:15:03-04:00
+--- stage4 bs=4 arm=base rc=0 2026-07-26T20:19:01-04:00
+--- stage4 bs=4 arm=v1 rc=0 2026-07-26T20:23:02-04:00
+--- stage4 bs=16 arm=base rc=0 2026-07-26T20:27:46-04:00
+--- stage4 bs=16 arm=v1 rc=0 2026-07-26T20:32:47-04:00
+########## STAGE 5 v2a (moe_n_splits=4) 2026-07-26T20:32:47-04:00
+--- stage5 perf bs=1 v2a rc=97
+--- stage5 perf bs=8 v2a rc=0
+--- installed arm v2a
+########## ac3 v2a rc=94
+##### 0. arm=v2a sha256
+##### 1. MECHANISM ORACLE: activated-expert mask per bs 2026-07-26T20:37:47-04:00
+##### mask bs=1 rc=1
+##### mask bs=2 rc=1
+##### mask bs=4 rc=1
+##### mask bs=8 rc=1
+##### mask bs=16 rc=1
+########## STAGE 6 v2b (moe_n_splits=8) 2026-07-26T20:44:42-04:00
+--- stage6 perf bs=1 v2b rc=0
+--- stage6 perf bs=8 v2b rc=97
+########## STAGE 7 analysis 2026-07-26T20:50:19-04:00
+# M3-I8 A/B
+
+## Mechanism: activated expert groups per layer (the number M3-I1 measured at 56.4 / 59.4 / 60.2 / 70.1 / 86.7)
+
+| bs | cap 8*bs | predicted | base | v1 | v2a | v2b |
+|---|---|---|---|---|---|---|
+| 1 | 8 | 8.0 | 56.6 | 9.6 | - | 8.3 |
+| 2 | 16 | 14.7 | 59.6 | 16.9 | - | - |
+| 4 | 32 | 24.6 | 60.5 | 30.3 | - | - |
+| 8 | 64 | 47.9 | 69.9 | 50.4 | 49.5 | - |
+| 16 | 128 | 86.7 | 87.0 | 87.0 | - | - |
+
+## moe_w13: per-task us / waves / wall span per layer
+
+| bs | base T | base waves | base wall | v1 T | v1 waves | v1 wall | v2a T | v2a waves | v2a wall | v2b T | v2b waves | v2b wall |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 58.2 | 1 | 76.8 | 47.6 | 1 | 59.4 | - | - | - | 15.5 | 1 | 34.8 |
+| 2 | 58.8 | 1 | 86.7 | 48.4 | 1 | 59.9 | - | - | - | - | - | - |
+| 4 | 59.4 | 1 | 77.7 | 52.0 | 1 | 61.9 | - | - | - | - | - | - |
+| 8 | 60.7 | 2 | 117.3 | 58.5 | 1 | 66.2 | 31.2 | 2 | 72.7 | - | - | - |
+| 16 | 61.1 | 2 | 125.6 | 61.1 | 2 | 125.2 | - | - | - | - | - | - |
+
+## moe_w2: per-task us / waves / wall span per layer
+
+| bs | base T | base waves | base wall | v1 T | v1 waves | v1 wall | v2a T | v2a waves | v2a wall | v2b T | v2b waves | v2b wall |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 30.7 | 1 | 43.0 | 29.8 | 1 | 33.6 | - | - | - | 9.4 | 1 | 27.8 |
+| 2 | 30.7 | 1 | 48.2 | 30.2 | 1 | 34.6 | - | - | - | - | - | - |
+| 4 | 30.9 | 1 | 43.3 | 30.6 | 1 | 35.9 | - | - | - | - | - | - |
+| 8 | 30.9 | 2 | 62.6 | 30.7 | 1 | 36.3 | 16.7 | 2 | 43.1 | - | - | - |
+| 16 | 30.7 | 2 | 66.2 | 30.7 | 2 | 66.1 | - | - | - | - | - | - |
+
+## Step time and decode throughput
+
+| bs | I1 step | base step | base vs base | v1 step | v1 vs base | v2a step | v2a vs base | v2b step | v2b vs base |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 15264 | 11715 | +0.0% | 10676 | +9.7% | - | - | 9396 | +24.7% |
+| 2 | 15648 | 12474 | +0.0% | 10823 | +15.3% | - | - | - | - |
+| 4 | 15645 | 11868 | +0.0% | 11080 | +7.1% | - | - | - | - |
+| 8 | 18618 | 15610 | +0.0% | 12479 | +25.1% | 13048 | +19.6% | - | - |
+| 16 | 22005 | 18736 | +0.0% | 18739 | -0.0% | - | - | - | - |
+
+## Falsifier check (predictions.md F1/F2)
+
+  bs1   v1    activated=9.6 cap=8    FALSIFIED (F1): the router gate did not take effect
+  bs1   v2b   activated=8.3 cap=8    OK
+  bs2   v1    activated=16.9 cap=16   FALSIFIED (F1): the router gate did not take effect
+  bs4   v1    activated=30.3 cap=32   OK
+  bs8   v1    activated=50.4 cap=64   OK
+  bs8   v2a   activated=49.5 cap=64   OK
+  bs16  v1    activated=87.0 cap=128  OK
+M3I8_PLAN_DONE=2026-07-26T20:50:19-04:00

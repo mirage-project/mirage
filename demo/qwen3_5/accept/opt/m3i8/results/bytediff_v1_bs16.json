@@ -1,0 +1,19 @@
+{
+  "per_case": {
+    "bs16/p01-history": "identical",
+    "bs16/p02-math": "identical",
+    "bs16/p03-python": "identical",
+    "bs16/p04-chinese": "identical",
+    "bs16/p05-cuda": "identical",
+    "bs16/p06-poem": "identical",
+    "bs16/p07-format": "identical",
+    "bs16/p08-science": "identical",
+    "bs16/p09-translate": "identical",
+    "bs16/p10-logic": "identical"
+  },
+  "identical": true,
+  "missing": [],
+  "counts": {
+    "bs16": "10/10 identical"
+  }
+}
