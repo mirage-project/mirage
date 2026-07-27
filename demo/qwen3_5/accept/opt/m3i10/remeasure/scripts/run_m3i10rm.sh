@@ -4,9 +4,11 @@
 #
 #   bash gpu_guard_m3i10rm.sh 1,7 -- bash run_m3i10rm.sh <arm> <mode>
 #
-# arm  = A (matched geometry, msl=1280, synthetic 256-tok prompts, 96 decode
-#          steps) | B (continuity, msl=132, AC-3 prompts, 64 new tokens --
-#          M3-I1's exact invocation)
+# arm  = A (matched geometry, msl=353 [corrected from an original 1280 slip --
+#          see logs/ROOT_CAUSE_msl.txt; msl=256-token-prompt+96-decode-steps+1,
+#          NOT vLLM's 256+1024 capacity sum], synthetic 256-tok prompts, 96
+#          decode steps) | B (continuity, msl=132, AC-3 prompts, 64 new tokens
+#          -- M3-I1's exact invocation)
 # mode = all | prof | noprof
 #
 # Reuses M3-I1/M3-I8's capture pipeline pattern (profile_wave.py, one wave per

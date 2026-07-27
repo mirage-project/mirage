@@ -67,9 +67,11 @@ MAP = [
     ("GDN conv1d", ["gdn_conv1d"], [234], 30, ""),
     ("GDN recurrent (delta rule)", ["gdn_recurrent"], [237], 30, ""),
     ("full attention", ["full_attention", "attention_kv_write"], [257], 10,
-     "Arm A is matched-geometry (256 prompt, msl 1280): the M3-I1 caveat about AC-3 context "
-     "(132) no longer applies to this column. Compare against the spec's +8.3% ctx correction "
-     "if diffing against the old (AC-3-geometry) MPK number."),
+     "Arm A is matched-geometry (256-token prompt, msl=353 = 256+96 decode steps+1): the "
+     "M3-I1 caveat about AC-3 context (132) no longer applies to this column. This row's "
+     "PRIMARY basis in ferret_targets.json is actually the late-context closure capture "
+     "(msl=897, ctx~801-896, opt/m3i10/remeasure/armAlate/), not this matched-geometry "
+     "(ctx 257-352) number directly -- see that file's context_band/matched_window fields."),
     ("norms / RoPE / glue", ["norms_rope_glue"], [154], 81,
      "NOT LIKE-FOR-LIKE: MPK fuses most norms/RoPE/L2-norm into its GEMM, attention and "
      "recurrent tasks; task 154 is only the standalone RMSNorm"),
