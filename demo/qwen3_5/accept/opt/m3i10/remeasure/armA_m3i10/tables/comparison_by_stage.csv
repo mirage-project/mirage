@@ -1,0 +1,17 @@
+stage,n_layer_sites,vllm_us_step_bs1,mpk_us_step_bs1,ratio_bs1,abs_gap_us_step_bs1,vllm_us_layer_bs1,mpk_us_layer_bs1,vllm_us_step_bs8,mpk_us_step_bs8,ratio_bs8,abs_gap_us_step_bs8,vllm_us_layer_bs8,mpk_us_layer_bs8,vllm_us_step_bs16,mpk_us_step_bs16,ratio_bs16,abs_gap_us_step_bs16,vllm_us_layer_bs16,mpk_us_layer_bs16,note
+dense projections (fp8 blockscale),40,1353.5,2933.0,2.167,1579.5,33.837,73.325,1434.72,2995.0,2.088,1560.3,35.868,74.875,1370.96,3005.0,2.192,1634.0,34.274,75.125,"160 GEMM sites both sides: qkvz x30, gdn out_proj x30, qkvg x10, o_proj x10, shared gate_up x40, shared down x40"
+dense projections (bf16 small + lm_head),71,609.27,788.0,1.293,178.7,8.581,11.099,626.86,879.0,1.402,252.1,8.829,12.38,632.19,905.0,1.432,272.8,8.904,12.746,"71 sites both sides: in_proj_ba x30, MoE router gate x40, lm_head x1"
+MoE routed GEMM w13 (gate_up),40,336.56,2388.0,7.095,2051.4,8.414,59.7,879.83,2478.0,2.816,1598.2,21.996,61.95,1123.23,2505.0,2.23,1381.8,28.081,62.625,
+MoE routed GEMM w2 (down),40,300.66,1347.0,4.48,1046.3,7.517,33.675,699.07,1453.0,2.078,753.9,17.477,36.325,755.94,1454.0,1.923,698.1,18.899,36.35,
+MoE router top-k/softmax,40,147.86,497.0,3.361,349.1,3.697,12.425,184.1,563.0,3.058,378.9,4.603,14.075,238.18,604.0,2.536,365.8,5.955,15.1,vLLM routing kernel only; the router GEMM is counted in the bf16 dense row
+MoE combine (weighted sum + residual),40,174.1,282.0,1.62,107.9,4.353,7.05,191.07,292.0,1.528,100.9,4.777,7.3,194.34,294.0,1.513,99.7,4.859,7.35,
+MoE/shared SiLU-mul,80,273.64,238.0,0.87,-35.6,3.42,2.975,405.08,297.0,0.733,-108.1,5.064,3.712,390.24,301.0,0.771,-89.2,4.878,3.763,"APPROX: vLLM activationDeepSeekKernel also re-quantises the intermediate to fp8, which on the MPK side lives in task 275 - this row flatters vLLM's 118-equivalent"
+shared-expert gate (sigmoid*shared+residual),40,429.61,293.0,0.682,-136.6,10.74,7.325,443.79,360.0,0.811,-83.8,11.095,9.0,455.14,363.0,0.798,-92.1,11.378,9.075,"vLLM = gate GEMM + sigmoid + mul (+splitK reduce at bs8/16), 3-4 kernels; MPK fuses all of it into one task. vLLM side runs on the overlapped side stream"
+quantize / fp8 casts,200,559.28,560.0,1.001,0.7,2.796,2.8,620.5,576.0,0.928,-44.5,3.103,2.88,606.23,571.0,0.942,-35.2,3.031,2.855,
+GDN conv1d,30,89.61,185.0,2.065,95.4,2.987,6.167,91.68,201.0,2.192,109.3,3.056,6.7,95.61,207.0,2.165,111.4,3.187,6.9,
+GDN recurrent (delta rule),30,163.65,1218.0,7.443,1054.3,5.455,40.6,270.43,2467.0,9.123,2196.6,9.014,82.233,462.74,4938.0,10.671,4475.3,15.425,164.6,
+full attention,10,133.57,757.0,5.667,623.4,13.357,75.7,133.39,804.0,6.027,670.6,13.339,80.4,148.71,787.0,5.292,638.3,14.871,78.7,"Arm A is matched-geometry (256 prompt, msl 1280): the M3-I1 caveat about AC-3 context (132) no longer applies to this column. Compare against the spec's +8.3% ctx correction if diffing against the old (AC-3-geometry) MPK number."
+norms / RoPE / glue,81,557.82,184.0,0.33,-373.8,6.887,2.272,660.5,200.0,0.303,-460.5,8.154,2.469,680.39,203.0,0.298,-477.4,8.4,2.506,"NOT LIKE-FOR-LIKE: MPK fuses most norms/RoPE/L2-norm into its GEMM, attention and recurrent tasks; task 154 is only the standalone RMSNorm"
+sampling / argmax,1,8.68,39.0,4.493,30.3,8.68,39.0,9.54,60.0,6.289,50.5,9.54,60.0,13.47,58.0,4.306,44.5,13.47,58.0,
+embedding,1,2.47,65.0,26.316,62.5,2.47,65.0,5.74,50.0,8.711,44.3,5.74,50.0,8.37,52.0,6.213,43.6,8.37,52.0,
+TOTAL (step),,5140.3,10963.9,3.074,7397.1,,,6656.3,12255.4,2.544,7437.1,,,7175.7,14714.6,2.744,9351.3,,,vLLM: union over all kernels

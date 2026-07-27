@@ -1,0 +1,69 @@
+{
+  "tag": "bs1_rep0",
+  "batch_size": 1,
+  "rep": 0,
+  "prompt_ids": [
+    "synth0"
+  ],
+  "prompt_lens": [
+    256
+  ],
+  "synthetic_prompt_len": 256,
+  "synthetic_seed": 20261725,
+  "max_seq_length": 353,
+  "mbt": 16,
+  "page_size": 256,
+  "max_new_tokens": 96,
+  "profiler_slots": 0,
+  "profiled": false,
+  "n_events": 0,
+  "waves": [
+    {
+      "batch_size": 1,
+      "wave": 0,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "synth0"
+      ],
+      "wall_ms": 1472.217529296875,
+      "max_decode_steps": 96,
+      "ms_per_decode_step": 15.335599263509115,
+      "tokens_per_s": 65.20775502914246,
+      "max_seq_length": 353,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 112,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation": [],
+  "run_seconds": 21.00509476661682,
+  "tokens_sha256": "21bd850d90b01edc77d1e21dd27a6f7660f33ee24aab6ab5dbaa6fc6fa493c48",
+  "gpu_before": [
+    "0, 164668 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "1, 128 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 11514 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "3, 130 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 37156 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "5, 11486 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "6, 165406 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "7, 4 MiB, 0 %, 120 MHz, 3996 MHz"
+  ],
+  "gpu_after": [
+    "0, 164668 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "1, 128 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 50709 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "3, 17294 MiB, 26 %, 1965 MHz, 3996 MHz",
+    "4, 54287 MiB, 93 %, 1965 MHz, 3996 MHz",
+    "5, 28655 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "6, 165406 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "7, 4 MiB, 0 %, 120 MHz, 3996 MHz"
+  ],
+  "cuda_visible_devices": "2",
+  "generated_utc": "2026-07-27T06:12:41Z"
+}

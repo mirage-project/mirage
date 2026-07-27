@@ -1,0 +1,4 @@
+batch_size,regime,steady_iters,step_us,step_us_spread_pct,tokens_per_step,decode_tok_s,task_sum_us_all_workers,task_sum_per_worker_us,sched_gap_all_idle_us,of_which_prepare_batch_us,worker_idle_us,sum_us,closure_vs_step_pct,closure_trace_vs_cudaevent_pct,occupancy,mean_concurrency,us_at_conc_le16,gaps_per_worker,mean_gap_us,tasks_per_step,wave_wall_ms_profiled,wave_wall_ms_unprofiled,profiling_overhead_pct,mixed_phase_iters,mixed_phase_ms,drain_phase_iters,drain_phase_ms
+1,1 0 1 1,6-62,10645.5,0.83,1,93.9,247016.0,1937.1,433.7,3.87,8274.7,10645.5,0.0,-1.03,0.182,23.2,7515.0,337.5,25.6,41046,1175.9,1129.8,4.07,2,31.9,0,0.0
+8,8 0 8 8,27-83,12476.4,1.01,8,641.2,825503.0,6456.7,412.5,21.11,5607.2,12476.4,0.0,-0.94,0.517,65.5,4545.0,404.2,14.8,49586,1553.8,1498.0,3.73,23,453.3,6,61.8
+16,7 0 7 7,115-116,15021.5,0.0,7,466.0,745906.0,5834.7,418.8,20.86,8768.0,15021.5,0.0,-0.41,0.388,49.2,4654.0,480.4,19.0,59346,3807.0,3692.9,3.09,108,2403.0,95,1386.4

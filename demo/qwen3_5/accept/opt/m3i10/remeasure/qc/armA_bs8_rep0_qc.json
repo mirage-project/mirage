@@ -1,0 +1,311 @@
+{
+  "tag": "bs8_rep0",
+  "batch_size": 8,
+  "n_workers": 128,
+  "anchor_qc": {
+    "n_iterations_full_span": 255,
+    "task_begin_task_graph_per_step": 1.0,
+    "task_begin_task_graph_is_1_0": true,
+    "max_frac_err_over_all_types": 0.0,
+    "threshold": 0.02,
+    "window_valid": true,
+    "n_task_types_mismatched_static_count": 3,
+    "rows": [
+      {
+        "task_type": 0,
+        "name": "TASK_TERMINATE",
+        "observed_per_step": 0.0,
+        "rounded": 0,
+        "static_call_sites": 1,
+        "frac_err": 0.0,
+        "mismatch": true
+      },
+      {
+        "task_type": 10,
+        "name": "TASK_BEGIN_TASK_GRAPH",
+        "observed_per_step": 1.0,
+        "rounded": 1,
+        "static_call_sites": 1,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 101,
+        "name": "TASK_EMBEDDING",
+        "observed_per_step": 1.0,
+        "rounded": 1,
+        "static_call_sites": 1,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 118,
+        "name": "TASK_SILU_MUL",
+        "observed_per_step": 5280.0,
+        "rounded": 5280,
+        "static_call_sites": 5280,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 154,
+        "name": "TASK_RMS_NORM_HOPPER",
+        "observed_per_step": 1296.0,
+        "rounded": 1296,
+        "static_call_sites": 1296,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 201,
+        "name": "TASK_SCHD_EVENTS",
+        "observed_per_step": 2277.0,
+        "rounded": 2277,
+        "static_call_sites": 0,
+        "frac_err": 0.0,
+        "mismatch": true
+      },
+      {
+        "task_type": 204,
+        "name": "TASK_SCHD_PREPARE_BATCH",
+        "observed_per_step": 1.0,
+        "rounded": 1,
+        "static_call_sites": 0,
+        "frac_err": 0.0,
+        "mismatch": true
+      },
+      {
+        "task_type": 234,
+        "name": "TASK_GDN_CONV1D_SM100",
+        "observed_per_step": 1920.0,
+        "rounded": 1920,
+        "static_call_sites": 1920,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 237,
+        "name": "TASK_GDN_RECURRENT_SM100",
+        "observed_per_step": 7680.0,
+        "rounded": 7680,
+        "static_call_sites": 7680,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 238,
+        "name": "TASK_SIGMOID_GATE_MUL_ADD_SM100",
+        "observed_per_step": 640.0,
+        "rounded": 640,
+        "static_call_sites": 640,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 241,
+        "name": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+        "observed_per_step": 10240.0,
+        "rounded": 10240,
+        "static_call_sites": 10240,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 242,
+        "name": "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+        "observed_per_step": 10240.0,
+        "rounded": 10240,
+        "static_call_sites": 10240,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 253,
+        "name": "TASK_LINEAR_SM100",
+        "observed_per_step": 2280.0,
+        "rounded": 2280,
+        "static_call_sites": 2280,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 257,
+        "name": "TASK_ATTN_SM100",
+        "observed_per_step": 160.0,
+        "rounded": 160,
+        "static_call_sites": 160,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 258,
+        "name": "TASK_ARGMAX_REDUCE_SM100",
+        "observed_per_step": 1.0,
+        "rounded": 1,
+        "static_call_sites": 1,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 259,
+        "name": "TASK_ARGMAX_PARTIAL_SM100",
+        "observed_per_step": 128.0,
+        "rounded": 128,
+        "static_call_sites": 128,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 260,
+        "name": "TASK_MOE_TOPK_SOFTMAX_SM100",
+        "observed_per_step": 40.0,
+        "rounded": 40,
+        "static_call_sites": 40,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 261,
+        "name": "TASK_MOE_MUL_SUM_ADD_SM100",
+        "observed_per_step": 640.0,
+        "rounded": 640,
+        "static_call_sites": 640,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 275,
+        "name": "TASK_QUANTIZE_FP8_SM100",
+        "observed_per_step": 3840.0,
+        "rounded": 3840,
+        "static_call_sites": 3840,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 279,
+        "name": "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+        "observed_per_step": 5200.0,
+        "rounded": 5200,
+        "static_call_sites": 5200,
+        "frac_err": 0.0,
+        "mismatch": false
+      }
+    ]
+  },
+  "windowing_crosscheck": {
+    "full_span_step_us": 17806.07,
+    "steady_window": [
+      247,
+      255
+    ],
+    "steady_window_step_us": 12255.37,
+    "pct_diff": -31.1731
+  },
+  "rotation_validation": {
+    "253": {
+      "offset": 126,
+      "n_blocks_matched": 126,
+      "n_blocks_total": 128,
+      "match_frac": 0.9844,
+      "aligned": true
+    },
+    "279": {
+      "offset": 126,
+      "n_blocks_matched": 128,
+      "n_blocks_total": 128,
+      "match_frac": 1.0,
+      "aligned": true
+    }
+  },
+  "call_site_split": {
+    "253": {
+      "steady_window": [
+        247,
+        255
+      ],
+      "sites": [
+        {
+          "site": "lm_head",
+          "n_instances_total": 7632,
+          "n_per_iter": 954.0,
+          "sum_us_per_iter": 18642.78,
+          "mean_us": 19.542,
+          "wallspan_us_per_iter": 176.11
+        },
+        {
+          "site": "moe_router_gate",
+          "n_instances_total": 10040,
+          "n_per_iter": 1255.0,
+          "sum_us_per_iter": 9332.66,
+          "mean_us": 7.436,
+          "wallspan_us_per_iter": 357.84
+        },
+        {
+          "site": "in_proj_ba",
+          "n_instances_total": 240,
+          "n_per_iter": 30.0,
+          "sum_us_per_iter": 298.62,
+          "mean_us": 9.954,
+          "wallspan_us_per_iter": 298.62
+        }
+      ]
+    },
+    "279": {
+      "steady_window": [
+        247,
+        255
+      ],
+      "sites": [
+        {
+          "site": "gdn_qkv",
+          "n_instances_total": 15360,
+          "n_per_iter": 1920.0,
+          "sum_us_per_iter": 31338.14,
+          "mean_us": 16.322,
+          "wallspan_us_per_iter": 530.47
+        },
+        {
+          "site": "attn_resid",
+          "n_instances_total": 5120,
+          "n_per_iter": 640.0,
+          "sum_us_per_iter": 20091.14,
+          "mean_us": 31.392,
+          "wallspan_us_per_iter": 1296.49
+        },
+        {
+          "site": "gdn_z",
+          "n_instances_total": 7680,
+          "n_per_iter": 960.0,
+          "sum_us_per_iter": 15931.33,
+          "mean_us": 16.595,
+          "wallspan_us_per_iter": 533.6
+        },
+        {
+          "site": "qkvg",
+          "n_instances_total": 5760,
+          "n_per_iter": 720.0,
+          "sum_us_per_iter": 12064.4,
+          "mean_us": 16.756,
+          "wallspan_us_per_iter": 183.26
+        },
+        {
+          "site": "shared_mid",
+          "n_instances_total": 2560,
+          "n_per_iter": 320.0,
+          "sum_us_per_iter": 5221.09,
+          "mean_us": 16.316,
+          "wallspan_us_per_iter": 674.23
+        },
+        {
+          "site": "shared_out",
+          "n_instances_total": 5120,
+          "n_per_iter": 640.0,
+          "sum_us_per_iter": 3701.96,
+          "mean_us": 5.784,
+          "wallspan_us_per_iter": 267.45
+        }
+      ]
+    }
+  }
+}

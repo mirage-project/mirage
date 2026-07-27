@@ -1,0 +1,10 @@
+Raw profiler buffer (>20MB) stored at:
+  /home/catalyst/mpk-artifacts/m3i10-remeasure/armA/raw_bs1_rep0.npz  (116 MB)
+
+Also retained on the B200 box (per protocol) at:
+  ~/mpk-qwen35/m3i10-remeasure/prof_A/raw_bs1_rep0.npz
+
+Arm A (matched geometry): max_seq_length=353, synthetic_prompt_len=256, batch_size=1, rep=0.
+Paired meta: meta_bs1_rep0.json (this directory). Paired task graph:
+~/mpk-qwen35/m3i10-remeasure/kernel_A_bs1_prof/task_graph_rank0.json (on box; not rsynced,
+build artifact, reproducible from the profile_wave.py patch in ../patch/).

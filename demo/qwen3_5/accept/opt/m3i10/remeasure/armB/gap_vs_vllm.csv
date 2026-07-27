@@ -1,0 +1,4 @@
+batch_size,vllm_decode_tok_s,mpk_m2_wave_tok_s,m2_headline_gap,mpk_decode_step_us,mpk_decode_tok_s,true_decode_gap,gap_from_prefill_and_drain,perfect_pack_tok_s,gap_if_perfectly_packed
+1,285.5,65.0,4.39,10645.5,93.9,3.04,1.35,516.2,0.55
+8,1692.5,240.5,7.04,12476.4,641.2,2.64,4.4,1239.0,1.37
+16,3018.1,233.9,12.9,15021.5,466.0,6.48,6.43,1199.7,2.52

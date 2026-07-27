@@ -1,0 +1,46 @@
+M3-I10 remeasure: --max-seq-length 1280 (spec's literal arm-A invocation) does NOT
+produce a 96-decode-step wave. Root-caused, not assumed.
+
+SYMPTOM: bs1 arm-A smoke run (prompt_len=256, --max-seq-length 1280, --max-new-tokens 96)
+completed with meta.waves[0].max_decode_steps = 1023 (not 96), wall_ms = 11997 (~12s, not
+the spec's ~1.1min-for-all-18-processes budget), n_events = 59,079,039 (vs spec's ~42.8M
+estimate for the much bigger bs16 case).
+
+MECHANISM (include/mirage/persistent_kernel/persistent_kernel.cuh, MODE_OFFLINE retirement):
+    if (step + step_advance + 1 >= config.max_seq_length) { /* request retires */ }
+So decode length is COMPLETELY DETERMINED by max_seq_length - prompt_len - 1, independent
+of --max-new-tokens (which only slices the REPORTED token_ids window post hoc:
+mpk_engine_run.py: gen = toks[r_i][plen:plen+self.max_new_tokens]). This differs from
+vLLM, where max_model_len is a capacity ceiling and --output-len independently controls
+how many tokens actually generate. The spec's --max-seq-length 1280 is vLLM's
+256(prompt)+1024(output) capacity number, carried over as if MPK's same-named parameter
+had the same (capacity-only) semantics. It does not.
+
+CONFIRMATION the spec's OWN intent was 96 real decode steps, not 1280's implied ~1024:
+  - remeasure_spec.md sec 4: "Arm A's profiled decode window sits at context 257-352"
+    -- only true for a 96-step decode from a 256-token prompt (256+1=257 .. 256+96=352).
+  - remeasure_spec.md sec 8 cost table: bs1/8/16 = 112/224/352 TOTAL iterations
+    (16/128/256 prefill [= bs*256/mbt16] + 96 decode, constant across bs since every
+    arm-A request is uniformly 256 synthetic tokens).
+  - remeasure_spec.md sec 8: "Actual waves ~= 1.1 min" for the WHOLE 18-process tier-1
+    capture -- only reachable at ~11-19ms/step over 112-352 iterations/process; a
+    ~1023-decode-step wave would be ~10x that, alone.
+All three derive independently from "96 decode steps"; none are consistent with a
+~1024-step decode. The single inconsistent number is the literal flag value.
+
+FIX: --max-seq-length = prompt_len(256) + desired_decode_steps(96) + 1 = 353. Verified
+empirically (rerun with 353): meta.waves[0].max_decode_steps == 96,
+compaction.predicted_iterations == 112 (16 prefill + 96 decode), matching the spec's
+own bs1 estimate exactly.
+
+Bs-independence: max_seq_length=353 is the SAME for bs 1/8/16 in arm A (prompt_len is
+uniformly 256 regardless of batch size); only prefill iteration count scales with bs
+(bs*256/mbt), matching the spec's 112/224/352 table.
+
+Not applicable to arm B: arm B keeps --max-seq-length 132 (the AC-3 geometry, M3-I1's
+exact invocation, heterogeneous 24-68 token prompts) unchanged -- that value was never
+in question; only arm A's borrowed-from-vLLM "1280" was wrong.
+
+Action for the coordinator: remeasure_spec.md sec 4(a)'s code block should read
+`--max-seq-length 353` (or `<synthetic_prompt_len> + <decode_steps> + 1` stated
+generally) for arm A, not 1280, when this finding is landed.

@@ -1,0 +1,8 @@
+Raw profiler buffer (>20MB) stored at:
+  /home/catalyst/mpk-artifacts/m3i10-remeasure/armA/raw_bs8_rep0.npz  (304 MB)
+
+Also retained on the B200 box (per protocol) at:
+  ~/mpk-qwen35/m3i10-remeasure/prof_A/raw_bs8_rep0.npz
+
+Arm A (matched geometry): max_seq_length=353, synthetic_prompt_len=256, batch_size=8, rep=0.
+Paired meta: meta_bs8_rep0.json (this directory).
