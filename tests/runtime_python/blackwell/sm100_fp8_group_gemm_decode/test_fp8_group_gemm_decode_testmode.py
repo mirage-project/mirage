@@ -1,36 +1,23 @@
 """DSV3 permuted grouped FP8 GEMM via PersistentKernel test_mode.
 
 Exercises `fp8_group_gemm_layer` (the production MoE call) end-to-end
-through the full MPK compile/run pipeline. The layer dispatches to
-fp8_group_gemm_largem_sm100 by
-(K, M_per_expert): K>4096 and MPE<=8 -> smallm (BN=64), else largem (BN=128).
+through the full MPK compile/run pipeline. The layer registers a single
+grouped-GEMM kernel, fp8_group_gemm_largem_sm100 (BN=128, NS=6).
 
 Two DSV3 routed-expert shapes are covered (ep_size=1 -> routed_tp = world_size):
   * W13 (gate||up):  K = HIDDEN = 7168,            N = 2*MOE_INTERMEDIATE/tp
   * W2  (down):      K = MOE_INTERMEDIATE/tp,      N = HIDDEN = 7168
-plus a SMALLM decode-niche arm (K=7168, MPE<=8) so the smallm kernel is
-exercised too (the W13/W2 production shapes use MPE=128 -> always largem).
+plus a small-M decode-niche arm (K=7168, MPE<=8) so the small rows-per-expert
+regime is covered too (the W13/W2 production shapes use MPE=128).
 
-Layout / sizing decisions (see DSV3_TESTMODE_DECISIONS.md per-unit entry):
-  * largem path = fp8_group_gemm_largem_compact_sm100. Its no-mask
-    (meta=None / active_expert_mask=nullptr) tile dispatch is HARD-CODED to
-    128 local experts (a 4-warp x 32-lane ballot scan marks all 128 expert
-    slots active; see .cuh L253-287). It then iterates num_active(=128)*nn
-    tiles and reads m_indices[s_compact[ae]*128] for ae up to 127, i.e. it
-    REQUIRES M_total = 128*128 = 16384 (E=128, MPE=128). Any smaller M_total
-    OOB-reads m_indices (compute-sanitizer confirmed: .cuh L327 __ldg). So
-    the production W13/W2 largem arms are tested at the kernel's design point
-    E=128, MPE=128 (M_total=16384 = the comment's "M=16384"), sweeping TP
-    through N (W13) and K (W2). This is production-faithful for ep>=2
-    (num_local_experts=128). See "real kernel issue" in the decision log.
-  * The bs axis (decode rows-per-expert) is swept through the SMALLM kernel
-    (fp8_group_gemm_smallm_sm100, K>4096 & MPE<=8), whose tiling is M_total-
-    driven (total = ceil(M_total/BM)*nn, m_indices read with an m_start <
-    M_total guard) and therefore correct for ANY E/MPE. MPE in {1,2,4,8}
-    covers bs<=8; bs=16 is the largem regime (MPE>=16 -> largem), covered by
-    the E=128 largem arm. E=32 (matches the proven test_wrapper smallm
-    configs); the kernel uses the block-start expert per BM=128 block and the
-    reference mirrors this exactly.
+Layout / sizing decisions:
+  * The kernel tile dispatch is M_total-driven: total = ceil(M_total/BM)*nn,
+    and m_indices is read under an `m_start < M_total` guard
+    (fp8_group_gemm_sm100_common.cuh L152/L289), so it is correct for ANY
+    E/MPE. The production W13/W2 arms use the ep>=2 design point E=128,
+    MPE=128 (M_total=16384), sweeping TP through N (W13) and K (W2); the
+    decode arms sweep MPE in {1,2,4,8} at E=32 (M_total <= 256). bs=16
+    (MPE>=16) is covered by the E=128 arm.
   * Scales are built directly via the shared UE8M0 helper + the transposed
     (num_sf_k, dim) packer in pytorch_reference (the layer's own SFA/SFB
     contract, identical to builder._pack_moe_scale_ue8m0). The reference
@@ -91,9 +78,9 @@ def _run_case(label, tp, bs, E, MPE, K, N, seed=42, active_experts=None):
     forever. None = legacy nullptr-mask path (process every tile).
     """
     M_total = E * MPE
-    variant = "smallm" if (K > 4096 and MPE <= 8) else "largem"
+    regime = "small-M" if (K > 4096 and MPE <= 8) else "large-M"
     tag = (f"[{label}] tp={tp} bs={bs} E={E} MPE={MPE} M_total={M_total} "
-           f"K={K} N={N} ({variant})"
+           f"K={K} N={N} ({regime})"
            + (f" mask={len(active_experts)}/{E}" if active_experts else ""))
     print(f"\n{'='*80}\n{tag}\n{'='*80}", flush=True)
 
@@ -205,15 +192,14 @@ def main():
     if smoke:
         results.append(_run_case("W13", 1, 128, E=128, MPE=128,
                                  K=HIDDEN, N=_w13_n(1)))
-        results.append(_run_case("smallm", 1, 8, E=32, MPE=8,
+        results.append(_run_case("decode", 1, 8, E=32, MPE=8,
                                  K=HIDDEN, N=_w13_n(1)))
         return _summary(results)
 
-    # ── LARGEM path (production W13/W2) at the kernel's design point ──
-    # E=128, MPE=128 -> M_total=16384 (the only correct shape for the no-mask
-    # largem_compact tile dispatch; see header). TP swept through N (W13) and
-    # K (W2). Hits TP in {1,2,4,8}; bs axis is not a largem-GEMM shape lever
-    # (the permuted M_total is expert-padded, independent of token count).
+    # ── Production W13/W2 arms at the ep>=2 design point ──
+    # E=128, MPE=128 -> M_total=16384. TP swept through N (W13) and K (W2).
+    # Hits TP in {1,2,4,8}; the bs axis is not a GEMM shape lever here (the
+    # permuted M_total is expert-padded, independent of token count).
     for tp in (1, 2, 4, 8):
         results.append(_run_case("W13", tp, 128, E=128, MPE=128,
                                  K=HIDDEN, N=_w13_n(tp)))
@@ -221,16 +207,15 @@ def main():
         results.append(_run_case("W2", tp, 128, E=128, MPE=128,
                                  K=_w2_k(tp), N=HIDDEN))
 
-    # ── SMALLM path (decode niche, K>4096 & MPE<=8) — bs axis sweep ──
-    # MPE in {1,2,4,8} maps the decode rows-per-expert (bs) axis; the smallm
-    # kernel is M_total-driven so any E/MPE is correct. E=32 (proven wrapper
-    # configs). tp=1 N (smallm is the small-M decode regime). bs=16 -> largem
-    # (MPE>=16), covered by the largem arm above.
+    # ── Decode-niche arms (small rows-per-expert, K>4096 & MPE<=8) ──
+    # MPE in {1,2,4,8} maps the decode rows-per-expert (bs) axis; the largem
+    # kernel is M_total-driven so any E/MPE is correct. E=32 exercises a
+    # smaller expert count. bs=16 (MPE>=16) is covered by the E=128 arm above.
     for MPE in (1, 2, 4, 8):
-        results.append(_run_case("smallm", 1, MPE, E=32, MPE=MPE,
+        results.append(_run_case("decode", 1, MPE, E=32, MPE=MPE,
                                  K=HIDDEN, N=_w13_n(1)))
-    # A TP corner on smallm (tp=8 shrinks N) so smallm sees a sharded N too.
-    results.append(_run_case("smallm", 8, 8, E=32, MPE=8,
+    # A TP corner (tp=8 shrinks N) so a decode arm sees a sharded N too.
+    results.append(_run_case("decode", 8, 8, E=32, MPE=8,
                              K=HIDDEN, N=_w13_n(8)))
 
     # ── MASKED largem (production active-skip path) ──

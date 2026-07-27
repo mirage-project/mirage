@@ -1,5 +1,5 @@
 """PyTorch reference for the permuted grouped FP8 GEMM
-(`fp8_group_gemm_layer` → fp8_group_gemm_{smallm,largem}_sm100).
+(`fp8_group_gemm_layer` → fp8_group_gemm_largem_sm100).
 
 The kernel computes, for each output row r:
 
@@ -22,9 +22,8 @@ Scale layout (SFA / SFB) — TRANSPOSED, UE8M0-packed uint32:
 This module REUSES the shared UE8M0 encode/decode helpers from
 `blackwell/common/sm100_fp8_scale_layout.py` (no scale-encoding logic is
 duplicated). The transposed packing into (num_sf_k, dim) uint32 is the
-layer's own contract (identical to builder._pack_moe_scale_ue8m0 /
-test_wrapper.pack_sf); it is implemented once here so both the test_mode
-test and the kernel-wrapper test can share it.
+layer's own contract (identical to builder._pack_moe_scale_ue8m0); it is
+implemented once here for the test-mode test.
 """
 
 import os
@@ -111,8 +110,8 @@ def pack_sf_transposed(enc_bytes: torch.Tensor) -> torch.Tensor:
     """[dim, nk] uint8 UE8M0 -> [num_sf_k, dim] uint32, dim innermost.
 
     Packs 4 consecutive K-block scales per uint32 (low byte = K-block
-    4*j+0). Matches the layer docstring / builder._pack_moe_scale_ue8m0 /
-    test_wrapper.pack_sf transposed layout that the kernel TMA reads.
+    4*j+0). Matches the layer docstring / builder._pack_moe_scale_ue8m0 transposed
+    layout that the kernel TMA reads.
     """
     dim, nk = enc_bytes.shape
     num_sf_k = (nk + 3) // 4

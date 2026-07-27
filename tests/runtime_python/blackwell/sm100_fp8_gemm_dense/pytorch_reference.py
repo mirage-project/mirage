@@ -7,33 +7,23 @@ Canonical home for the quantizers + reference math shared by every test in
 
 Kernels covered:
   * fp8_gemm_dense_{smallm,mediumm}_sm100        -> bf16 out
-  * fp8_gemm_dense_{smallm,mediumm}_fp8out_sm100 -> fp8 out + UE8M0 scale
-  * fp8_gemm_dense_decode_splitk_sm100           -> bf16 out (split-K accum)
 
-The fp8out scale is flat uint32 `[M, N/128]` row-major; each entry's low 8
-bits hold the UE8M0 exponent byte of the per-128-N-group max
-(`encode_ue8m0(local_max / 448)`), upper 24 bits zero. See
-`fp8_gemm_dense_qout_sm100_common.cuh` lines 350-404.
 """
 import os
 import sys
 
 import torch
 
-# Reuse the shared UE8M0 encode/decode helper rather than re-deriving it.
+# Reuse the shared FP8_MAX constant from the UE8M0 scale-layout helper.
 _COMMON_DIR = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "../common"))
 if _COMMON_DIR not in sys.path:
     sys.path.insert(0, _COMMON_DIR)
-from sm100_fp8_scale_layout import (  # noqa: E402
-    FP8_MAX,
-    encode_ue8m0,
-    decode_ue8m0,
-)
+from sm100_fp8_scale_layout import FP8_MAX  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Dense f32-block quantizers (canonical; previously in _build_helper.py)
+# Dense f32-block quantizers (canonical home).
 # ---------------------------------------------------------------------------
 
 def quantize_a_f32scale(a_bf16: torch.Tensor):
@@ -124,111 +114,6 @@ def reference_gemm(a_fp8, sa, b_fp8, sb):
     a_dq = dequant_a_f32scale(a_fp8, sa)
     b_dq = dequant_b_f32scale(b_fp8, sb)
     return torch.matmul(a_dq, b_dq.t()).to(torch.bfloat16)
-
-
-def reference_gemm_f32(a_fp8, sa, b_fp8, sb):
-    """Same as reference_gemm but returns the un-rounded f32 result.
-
-    Used by the fp8out re-quantize reference so the per-group max isn't first
-    perturbed by a bf16 round-trip — matches the kernel which re-quantizes the
-    f32 accumulator in registers.
-    """
-    a_dq = dequant_a_f32scale(a_fp8, sa)
-    b_dq = dequant_b_f32scale(b_fp8, sb)
-    return torch.matmul(a_dq, b_dq.t())
-
-
-# ---------------------------------------------------------------------------
-# fp8out re-quantize reference
-# ---------------------------------------------------------------------------
-
-def requantize_fp8out_ref(c_f32: torch.Tensor):
-    """Re-quantize a [M, N] f32 GEMM result to the fp8out kernel's output.
-
-    Mirrors `fp8_gemm_dense_qout_sm100_common.cuh` epilogue:
-      * group = 128 consecutive N columns (one 128-N tile per consumer thread)
-      * local_max  = max(|c|) over the 128-group, floored at 1e-30
-      * y_scale    = local_max / 448
-      * scale_byte = encode_ue8m0(y_scale)              (UE8M0 exponent)
-      * inv_scale  = 2^(127 - scale_byte)
-      * fp8[n]     = clamp(c[n] * inv_scale, -448, 448) -> e4m3
-
-    Returns
-    -------
-    c_fp8   : [M, N] float8_e4m3fn
-    c_scale : [M, N/128] uint32   (low 8 bits = scale_byte, flat row-major)
-    """
-    M, N = c_f32.shape
-    assert N % 128 == 0, "fp8out requires N divisible by 128"
-    ngroups = N // 128
-    device = c_f32.device
-
-    c_fp8 = torch.empty((M, N), dtype=torch.float8_e4m3fn, device=device)
-    c_scale = torch.zeros((M, ngroups), dtype=torch.uint32, device=device)
-
-    for m in range(M):
-        for g in range(ngroups):
-            block = c_f32[m, g * 128:(g + 1) * 128]
-            local_max = max(block.abs().max().item(), 1e-30)
-            y_scale = local_max / FP8_MAX
-            scale_byte = encode_ue8m0(y_scale)
-            inv_scale = 2.0 ** (127.0 - float(scale_byte))
-            q = (block * inv_scale).clamp(-FP8_MAX, FP8_MAX)
-            c_fp8[m, g * 128:(g + 1) * 128] = q.to(torch.float8_e4m3fn)
-            c_scale[m, g] = scale_byte
-    return c_fp8, c_scale
-
-
-def dequant_fp8out(c_fp8: torch.Tensor, c_scale: torch.Tensor) -> torch.Tensor:
-    """Dequant the fp8out (fp8 + flat-uint32-UE8M0-scale) pair back to f32.
-
-    scale of group g of row m = 2^(scale_byte - 127), scale_byte = low 8 bits
-    of c_scale[m, g]. Returns [M, N] f32.
-    """
-    M, N = c_fp8.shape
-    ngroups = c_scale.shape[1]
-    assert ngroups == N // 128
-    c_f = c_fp8.float()
-    out = torch.empty((M, N), dtype=torch.float32, device=c_fp8.device)
-    for m in range(M):
-        for g in range(ngroups):
-            scale_byte = int(c_scale[m, g].item()) & 0xFF
-            scale = decode_ue8m0(scale_byte)
-            out[m, g * 128:(g + 1) * 128] = (
-                c_f[m, g * 128:(g + 1) * 128] * scale)
-    return out
-
-
-# ---------------------------------------------------------------------------
-# decode_splitk reference (split-K only changes accumulation order)
-# ---------------------------------------------------------------------------
-
-def reference_gemm_splitk(a_fp8, sa, b_fp8, sb, split_k: int):
-    """Reference for fp8_gemm_dense_decode_splitk.
-
-    Mathematically identical to `reference_gemm` (split-K partitions the K
-    axis across CTAs and reduce-adds bf16 partials). We replicate the bf16
-    partial accumulation so the reference carries the same intermediate
-    rounding the kernel does: each of `split_k` K-slices is accumulated in
-    f32 then the partials are summed in bf16 (red.global.add.bf16x2).
-    """
-    M, K = a_fp8.shape
-    N = b_fp8.shape[0]
-    assert K % (128 * split_k) == 0
-    nk = K // 128
-    nk_per_slice = nk // split_k
-
-    a_dq = dequant_a_f32scale(a_fp8, sa)
-    b_dq = dequant_b_f32scale(b_fp8, sb)
-
-    acc = torch.zeros((M, N), dtype=torch.float32, device=a_fp8.device)
-    for s in range(split_k):
-        k0 = s * nk_per_slice * 128
-        k1 = (s + 1) * nk_per_slice * 128
-        partial = torch.matmul(a_dq[:, k0:k1], b_dq[:, k0:k1].t())
-        # bf16 reduce-add: round each partial to bf16, accumulate as bf16.
-        acc = (acc + partial.to(torch.bfloat16).float())
-    return acc.to(torch.bfloat16)
 
 
 # ---------------------------------------------------------------------------

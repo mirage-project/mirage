@@ -435,7 +435,7 @@ def _fp8_group_gemm_layer_impl(
     meta: DTensor = None,
 ):
     """Shared registration helper for the SM100 grouped FP8 block-scaled
-    GEMM tasks (`fp8_group_gemm_smallm_sm100` / `fp8_group_gemm_largem_sm100`).
+    GEMM task `fp8_group_gemm_largem_sm100`.
 
     Computes  D[r, :] = (A[r, :] * scale_a[r]) @ (B[m_indices[r]].T * scale_b)
     with hardware UE8M0 dequant via `tcgen05.mma.kind::mxf8f6f4.block_scale`.
@@ -487,10 +487,8 @@ def _fp8_group_gemm_layer_impl(
 
     Other params
     ------------
-    task_name   : "fp8_group_gemm_smallm_sm100" (BN=64, NS=8) or
-                  "fp8_group_gemm_largem_sm100" (BN=128, NS=6); picks the
-                  tile/stage variant. Dispatch policy lives in
-                  `fp8_group_gemm_layer`.
+    task_name   : "fp8_group_gemm_largem_sm100" (BN=128, NS=6).
+                  Dispatch policy lives in `fp8_group_gemm_layer`.
     num_workers : grid_dim.x. Each task instance handles a stride of
                   (bm, bn) tiles `task_desc.task_metadata.request_id ::
                   num_workers`; pick `pk.num_workers` so every worker

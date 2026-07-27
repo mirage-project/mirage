@@ -1,8 +1,7 @@
 """PyTorch reference for the DeepSeek-V3 MLA chunked-prefill attention.
 
-Lifted from ``test_chunked.py::torch_reference`` (the CUDA-extension test) so
-both the kernel-wrapper test and the MPK test-mode test share one canonical
-reference.
+The canonical torch reference for the chunked-prefill kernel, used by the
+MPK test-mode test.
 
 Per-head causal MLA chunked prefill (true unabsorbed, per-head K/V). Q covers
 the chunk ``[q_start, q_start + q_len)`` of a longer sequence; KV covers

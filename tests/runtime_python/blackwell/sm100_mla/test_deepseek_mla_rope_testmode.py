@@ -41,6 +41,7 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -129,7 +130,8 @@ def _run_q_fused(tp, bs, folder):
         q_dt = pk.attach_input(q, name="q_fused")
         cos_dt = pk.attach_input(cos, name="rope_cos")
         sin_dt = pk.attach_input(sin, name="rope_sin")
-        pk.deepseek_mla_rope_q_fused_layer(
+        dsv3_tasks.deepseek_mla_rope_q_fused_layer(
+            pk,
             q_nope_pe=q_dt,
             cos_pos_embed=cos_dt,
             sin_pos_embed=sin_dt,
@@ -178,7 +180,8 @@ def _run_q_split(tp, bs, folder, qfused_mode):
         q_dt = pk.attach_input(q, name="q_split")
         cos_dt = pk.attach_input(cos, name="rope_cos")
         sin_dt = pk.attach_input(sin, name="rope_sin")
-        pk.deepseek_mla_rope_q_split_layer(
+        dsv3_tasks.deepseek_mla_rope_q_split_layer(
+            pk,
             q_pe=q_dt,
             cos_pos_embed=cos_dt,
             sin_pos_embed=sin_dt,
@@ -213,7 +216,8 @@ def _run_rope_k(tp, bs, folder):
         k_dt = pk.attach_input(k, name="k_pe")
         cos_dt = pk.attach_input(cos, name="rope_cos")
         sin_dt = pk.attach_input(sin, name="rope_sin")
-        pk.deepseek_mla_rope_k_layer(
+        dsv3_tasks.deepseek_mla_rope_k_layer(
+            pk,
             k_pe=k_dt,
             cos_pos_embed=cos_dt,
             sin_pos_embed=sin_dt,
