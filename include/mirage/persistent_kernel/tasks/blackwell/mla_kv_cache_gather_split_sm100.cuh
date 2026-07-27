@@ -29,7 +29,10 @@ namespace kernel {
 template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
           int D_V,       // Latent dim (512)
           int PAGE_SIZE, // Page size (e.g., 128)
-          int K_PE_ROW_STRIDE = D_K - D_V>
+          int K_PE_ROW_STRIDE = D_K - D_V,
+          // Rows between consecutive pages: a page from a shared pool can be
+          // wider than this stream's entries. 0 = packed layout.
+          int PAGE_STRIDE_ROWS = 0>
 // Row stride of the `k_pe_new_ptr` buffer, in bf16 elements. DeepSeek
 // V3's builder allocates k_pe_out as [mbt, 128] (padded to MMA_M=128
 // alignment, real rope data is first 64 cols). If row stride isn't
@@ -51,6 +54,11 @@ __device__ __forceinline__ void mla_kv_cache_gather_split_sm100_task_impl(
   int const tid = threadIdx.x;
   int const NUM_THREADS = 128;
   constexpr int ROPE_DIM = D_K - D_V; // 64
+
+  // PAGE_SIZE stays the LOGICAL page size (tokens per page) for
+  // seq_len and pos_in_page; only row addressing uses the stride.
+  constexpr int PAGE_ROWS =
+      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
 
   // Sequence metadata
   int const first_token_pos = qo_indptr_buffer_ptr[request_id];
@@ -86,7 +94,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_split_sm100_task_impl(
     int const seq_pos = kv_start_pos + tok;
     int const page_idx = page_indices[seq_pos / PAGE_SIZE];
     int const pos_in_page = seq_pos % PAGE_SIZE;
-    T *dst = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
+    T *dst = paged_cache + (page_idx * PAGE_ROWS + pos_in_page) * D_K;
     T const *src_lat = c_latent_new + tok * D_V;
     T const *src_pe = k_pe_new + tok * K_PE_ROW_STRIDE;
     for (int d = tid * 8; d < D_V; d += NUM_THREADS * 8) {
@@ -108,7 +116,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_split_sm100_task_impl(
   for (int seq_pos = 0; seq_pos < seq_len; seq_pos++) {
     int const page_idx = page_indices[seq_pos / PAGE_SIZE];
     int const pos_in_page = seq_pos % PAGE_SIZE;
-    T const *src = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
+    T const *src = paged_cache + (page_idx * PAGE_ROWS + pos_in_page) * D_K;
     T *ckv_dst = ckv_sep + seq_pos * D_V;
     T *kpe_dst = kpe_sep + seq_pos * ROPE_DIM;
 
