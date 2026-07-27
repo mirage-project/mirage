@@ -1,0 +1,28 @@
+=== probing GPU 6 (3 samples, 3s apart) ===
+  sample 1: GPU 6 used=165419MiB util=0%
+GPU 6 not stable, trying next candidate.
+=== probing GPU 0 (3 samples, 3s apart) ===
+  sample 1: GPU 0 used=17971MiB util=81%
+GPU 0 not stable, trying next candidate.
+=== probing GPU 1 (3 samples, 3s apart) ===
+  sample 1: GPU 1 used=125MiB util=0%
+  sample 2: GPU 1 used=125MiB util=0%
+  sample 3: GPU 1 used=125MiB util=0%
+GPU 1 stable-idle across 3 samples -- claiming it (M3-I9).
+=== running (CUDA_VISIBLE_DEVICES=1): /home/muhengl/mpk-qwen35/venv-mpk/bin/python -u /home/muhengl/mpk-qwen35/m3i1/opt/profile_wave.py --batch-size 2 --prompt-ids p06-poem,p01-history --out-dir /home/muhengl/mpk-qwen35/m3i9x/f1 --kernel-dir /home/muhengl/mpk-qwen35/m3i8/kernel_v1_bs2_prof --reuse-kernel --rep 0 --save-raw ===
+sm_cnt:  148
+Fetching 28 files:   0%|          | 0/28 [00:00<?, ?it/s]Fetching 28 files: 100%|██████████| 28/28 [00:00<00:00, 123103.26it/s]
+[mpk_engine] graph assembled in 14.5s (bs=2, mbt=16, msl=132)
+[load_mpk_kernel] Kernel compatibility check passed!
+[load_mpk_kernel] Loading launcher from: /home/muhengl/mpk-qwen35/m3i8/kernel_v1_bs2_prof/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+[load_mpk_kernel] Using task graph JSON: /home/muhengl/mpk-qwen35/m3i8/kernel_v1_bs2_prof/task_graph_rank0.json
+[load_mpk_kernel] Passing 927 model tensors to kernel
+[MPK INIT] Total tasks: 42268, Total events: 2278
+[mpk_engine] reused compiled kernel from /home/muhengl/mpk-qwen35/m3i8/kernel_v1_bs2_prof (1.3s)
+[mpk_engine] profiler buffer attached: 48000000 slots (366 MiB), stock exporters bypassed
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine] bs=2 wave=0 slots=2 distinct=2 wall=1205.6ms steps=107
+[mpk_engine] profiler: 9710812 events, header nblocks=208 ngroups=1, fill=20.2%
+[mpk_engine] bs2_rep0: wall=1205.6ms steps=107 events=9710812

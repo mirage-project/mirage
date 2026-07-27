@@ -1,0 +1,140 @@
+{
+  "prompt_id": "p01-history",
+  "prompt_len": 30,
+  "reference_output_0": 90700,
+  "mpk_emitted_token": 90700,
+  "final_step": 30,
+  "row_with_reference_first_token": 29,
+  "last_rows": [
+    {
+      "row": 14,
+      "argmax": 7521,
+      "logit": 18.75,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 15,
+      "argmax": 19825,
+      "logit": 18.625,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 16,
+      "argmax": 13,
+      "logit": 21.5,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 17,
+      "argmax": 321,
+      "logit": 21.125,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 18,
+      "argmax": 264,
+      "logit": 17.625,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 19,
+      "argmax": 22157,
+      "logit": 19.625,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 20,
+      "argmax": 22157,
+      "logit": 19.25,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 21,
+      "argmax": 13,
+      "logit": 22.0,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 22,
+      "argmax": 248046,
+      "logit": 22.75,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 23,
+      "argmax": 198,
+      "logit": 26.375,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 24,
+      "argmax": 248045,
+      "logit": 30.25,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 25,
+      "argmax": 248068,
+      "logit": 25.625,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 26,
+      "argmax": 248068,
+      "logit": 30.375,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 27,
+      "argmax": 248068,
+      "logit": 33.25,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 28,
+      "argmax": 271,
+      "logit": 21.25,
+      "is_reference_first_token": false
+    },
+    {
+      "row": 29,
+      "argmax": 90700,
+      "logit": 29.0,
+      "is_reference_first_token": true
+    }
+  ],
+  "all_rows_argmax": [
+    846,
+    198,
+    3710,
+    20139,
+    279,
+    279,
+    2614,
+    19825,
+    557,
+    1083,
+    1330,
+    17489,
+    321,
+    10550,
+    7521,
+    19825,
+    13,
+    321,
+    264,
+    22157,
+    22157,
+    13,
+    248046,
+    198,
+    248045,
+    248068,
+    248068,
+    248068,
+    271,
+    90700
+  ],
+  "consumed_row": 29,
+  "hypothesis": "row 29 (the consumed row) argmaxes to the reference token"
+}

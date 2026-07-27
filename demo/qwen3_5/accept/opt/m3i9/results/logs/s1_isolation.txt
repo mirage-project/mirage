@@ -1,0 +1,8 @@
+stage 1 -- msl=212, predicted straddling slots [] (must be empty), predicted iterations 293
+  p06-poem       slots=[0, 10] identical=True first_divergence=None
+  p01-history    slots=[1, 11] identical=True first_divergence=None
+  p04-chinese    slots=[2, 12] identical=True first_divergence=None
+  p09-translate  slots=[3, 13] identical=True first_divergence=None
+  p07-format     slots=[4, 14] identical=True first_divergence=None
+  p05-cuda       slots=[5, 15] identical=True first_divergence=None
+VERDICT: PASS -- the mismatch is compaction
