@@ -1,0 +1,8 @@
+stage 5/6 -- base vs cap, median of reps, unprofiled clock
+ bs   base_ms    cap_ms     gain  pred_gain  base_iters  cap_iters  pred_cap_iters
+  1      1127      1127   -0.0%     +0.0%         109          ?             109
+  2      1153      1154   -0.1%     -0.6%         109          ?             110
+  4      1197      1209   -1.0%     -2.2%         109          ?             113
+  8      1573      1471   +6.9%     -2.7%         111          ?             119
+ 16      3700      2009  +84.2%    +61.5%         203          ?             131
+    C5 band [2750, 3050] ms unprofiled: FAIL

@@ -1,0 +1,145 @@
+{
+  "batch_size": 8,
+  "note": "informational only -- no perf claim; mbt is fixed across batch sizes for a uniform correctness config, which inflates per-step cost at small bs",
+  "waves": [
+    {
+      "batch_size": 8,
+      "wave": 0,
+      "num_requests": 8,
+      "num_distinct_prompts": 8,
+      "prompt_ids": [
+        "p06-poem",
+        "p01-history",
+        "p04-chinese",
+        "p09-translate",
+        "p07-format",
+        "p05-cuda",
+        "p08-science",
+        "p10-logic"
+      ],
+      "wall_ms": 16274.9833984375,
+      "max_decode_steps": 1255,
+      "ms_per_decode_step": 12.968114261703187,
+      "tokens_per_s": 616.8977106891491,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1259,
+        "live_slot_migrations": 12,
+        "migrated_slots": [
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 8,
+      "wave": 1,
+      "num_requests": 8,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p03-python",
+        "p02-math",
+        "p03-python",
+        "p02-math",
+        "p03-python",
+        "p02-math",
+        "p03-python",
+        "p02-math"
+      ],
+      "wall_ms": 16485.42578125,
+      "max_decode_steps": 1235,
+      "ms_per_decode_step": 13.34852289979757,
+      "tokens_per_s": 149.82931182822705,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1265,
+        "live_slot_migrations": 20,
+        "migrated_slots": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation_checks": [
+    {
+      "batch_size": 8,
+      "wave": 1,
+      "prompt_id": "p03-python",
+      "slots": [
+        0,
+        2
+      ],
+      "identical": true,
+      "first_divergence": null
+    },
+    {
+      "batch_size": 8,
+      "wave": 1,
+      "prompt_id": "p02-math",
+      "slots": [
+        1,
+        3
+      ],
+      "identical": true,
+      "first_divergence": null
+    },
+    {
+      "batch_size": 8,
+      "wave": 1,
+      "prompt_id": "p03-python",
+      "slots": [
+        0,
+        4
+      ],
+      "identical": true,
+      "first_divergence": null
+    },
+    {
+      "batch_size": 8,
+      "wave": 1,
+      "prompt_id": "p02-math",
+      "slots": [
+        1,
+        5
+      ],
+      "identical": true,
+      "first_divergence": null
+    },
+    {
+      "batch_size": 8,
+      "wave": 1,
+      "prompt_id": "p03-python",
+      "slots": [
+        0,
+        6
+      ],
+      "identical": true,
+      "first_divergence": null
+    },
+    {
+      "batch_size": 8,
+      "wave": 1,
+      "prompt_id": "p02-math",
+      "slots": [
+        1,
+        7
+      ],
+      "identical": true,
+      "first_divergence": null
+    }
+  ]
+}

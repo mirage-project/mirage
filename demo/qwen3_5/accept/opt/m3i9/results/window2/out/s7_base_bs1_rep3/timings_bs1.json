@@ -1,0 +1,227 @@
+{
+  "batch_size": 1,
+  "note": "informational only -- no perf claim; mbt is fixed across batch sizes for a uniform correctness config, which inflates per-step cost at small bs",
+  "waves": [
+    {
+      "batch_size": 1,
+      "wave": 0,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p06-poem"
+      ],
+      "wall_ms": 13786.1376953125,
+      "max_decode_steps": 1255,
+      "ms_per_decode_step": 10.984970275149402,
+      "tokens_per_s": 91.03347345984507,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1257,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 1,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p01-history"
+      ],
+      "wall_ms": 13729.2724609375,
+      "max_decode_steps": 1249,
+      "ms_per_decode_step": 10.992211738140512,
+      "tokens_per_s": 90.97350231439084,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1251,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 2,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p04-chinese"
+      ],
+      "wall_ms": 13707.66015625,
+      "max_decode_steps": 1247,
+      "ms_per_decode_step": 10.992510149358461,
+      "tokens_per_s": 90.9710326770416,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1249,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 3,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p09-translate"
+      ],
+      "wall_ms": 13698.8642578125,
+      "max_decode_steps": 1247,
+      "ms_per_decode_step": 10.98545650185445,
+      "tokens_per_s": 91.02944423212548,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1249,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 4,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p07-format"
+      ],
+      "wall_ms": 13693.8369140625,
+      "max_decode_steps": 1246,
+      "ms_per_decode_step": 10.990238293790128,
+      "tokens_per_s": 90.98983782408388,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1249,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 5,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p05-cuda"
+      ],
+      "wall_ms": 13667.9658203125,
+      "max_decode_steps": 1243,
+      "ms_per_decode_step": 10.99594997611625,
+      "tokens_per_s": 90.94257450898282,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1246,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 6,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p08-science"
+      ],
+      "wall_ms": 13627.060546875,
+      "max_decode_steps": 1239,
+      "ms_per_decode_step": 10.998434662530267,
+      "tokens_per_s": 90.92202942358918,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1242,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 7,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p10-logic"
+      ],
+      "wall_ms": 13602.396484375,
+      "max_decode_steps": 1236,
+      "ms_per_decode_step": 11.005175149170713,
+      "tokens_per_s": 90.86634119361148,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1239,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 8,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p03-python"
+      ],
+      "wall_ms": 13610.31640625,
+      "max_decode_steps": 1235,
+      "ms_per_decode_step": 11.02049911437247,
+      "tokens_per_s": 90.73999186623428,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1238,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 9,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p02-math"
+      ],
+      "wall_ms": 13404.0283203125,
+      "max_decode_steps": 1211,
+      "ms_per_decode_step": 11.068561783907928,
+      "tokens_per_s": 90.3459744385087,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1216,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation_checks": []
+}

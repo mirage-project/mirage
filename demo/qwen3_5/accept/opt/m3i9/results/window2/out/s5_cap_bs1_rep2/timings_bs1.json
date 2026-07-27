@@ -1,0 +1,227 @@
+{
+  "batch_size": 1,
+  "note": "informational only -- no perf claim; mbt is fixed across batch sizes for a uniform correctness config, which inflates per-step cost at small bs",
+  "waves": [
+    {
+      "batch_size": 1,
+      "wave": 0,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p06-poem"
+      ],
+      "wall_ms": 1127.3321533203125,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 10.535814517012266,
+      "tokens_per_s": 94.91435127158815,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 109,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 1,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p01-history"
+      ],
+      "wall_ms": 1069.560791015625,
+      "max_decode_steps": 101,
+      "ms_per_decode_step": 10.589710802134901,
+      "tokens_per_s": 94.43128511105313,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 103,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 2,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p04-chinese"
+      ],
+      "wall_ms": 1049.7139892578125,
+      "max_decode_steps": 99,
+      "ms_per_decode_step": 10.603171608664773,
+      "tokens_per_s": 94.31140388059109,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 101,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 3,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p09-translate"
+      ],
+      "wall_ms": 1049.6383056640625,
+      "max_decode_steps": 99,
+      "ms_per_decode_step": 10.602407127919824,
+      "tokens_per_s": 94.31820415258836,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 101,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 4,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p07-format"
+      ],
+      "wall_ms": 1050.2567138671875,
+      "max_decode_steps": 98,
+      "ms_per_decode_step": 10.71690524354273,
+      "tokens_per_s": 93.3105199005591,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 101,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 5,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p05-cuda"
+      ],
+      "wall_ms": 1066.2381591796875,
+      "max_decode_steps": 95,
+      "ms_per_decode_step": 11.2235595703125,
+      "tokens_per_s": 89.09829308030811,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 98,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 6,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p08-science"
+      ],
+      "wall_ms": 1033.7696533203125,
+      "max_decode_steps": 91,
+      "ms_per_decode_step": 11.360106080442995,
+      "tokens_per_s": 88.02734700880579,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 94,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 7,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p10-logic"
+      ],
+      "wall_ms": 953.0411987304688,
+      "max_decode_steps": 88,
+      "ms_per_decode_step": 10.830013621937145,
+      "tokens_per_s": 92.33598727654525,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 91,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 8,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p03-python"
+      ],
+      "wall_ms": 943.0452880859375,
+      "max_decode_steps": 87,
+      "ms_per_decode_step": 10.83960101248204,
+      "tokens_per_s": 92.25431811083064,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 90,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 9,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p02-math"
+      ],
+      "wall_ms": 729.5228881835938,
+      "max_decode_steps": 63,
+      "ms_per_decode_step": 11.579728383866568,
+      "tokens_per_s": 86.35781141406113,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 68,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation_checks": []
+}

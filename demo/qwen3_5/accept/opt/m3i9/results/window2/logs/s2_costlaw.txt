@@ -1,0 +1,7 @@
+stage 2 -- slot-order sorted-padded, n=3 reps
+  predicted iterations 179, predicted 4214 ms profiled
+  measured median 3341 ms unprofiled -> 3437 ms profiled
+  band [4050, 4350] ms: FAIL
+  -> the a + b*max_chunk + c*n_live law does not generalise off its fit set.
+     Every predicted policy delta in the ranking is suspect; do NOT build
+     the runtime knob on this model until the miss is explained.

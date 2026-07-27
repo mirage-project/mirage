@@ -1,0 +1,10 @@
+stage 0 -- duplicate-slot first divergence vs the compaction bound
+ slot prompt          identical  first_div  bound verdict
+   10 p06-poem            False         60     60 consistent with compaction
+   11 p01-history         False         58     54 consistent with compaction
+   12 p04-chinese         False         46     46 consistent with compaction
+   13 p09-translate       False         35     35 consistent with compaction
+   14 p07-format          False         19     19 consistent with compaction
+   15 p05-cuda            False          0   None n/a (does not discriminate)
+  strictly decreasing across slots 10..14: True (predicted True; the competing 'prefill chunking' explanation has no mechanism for an ordering)
+VERDICT: PASS

@@ -1,0 +1,36 @@
+-- /home/muhengl/mpk-qwen35/m3i9/out/prestage_control_rep2/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/prestage_control_rep3/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s0_base/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s1_msl212/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s2_sorted_rep1/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s2_sorted_rep2/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s2_sorted_rep3/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s3_codegen_identity/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s4_cap16/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s5_base_bs16_rep1/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s5_base_bs16_rep2/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s5_base_bs16_rep3/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s5_cap_bs16_rep1/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s5_cap_bs16_rep2/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s5_cap_bs16_rep3/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s7_base_bs16_rep1/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s7_base_bs16_rep2/timings_bs16.json
+-- /home/muhengl/mpk-qwen35/m3i9/out/s7_base_bs16_rep3/timings_bs16.json
+stage 5/6 -- base vs cap, median of reps, unprofiled clock
+ bs   base_ms    cap_ms     gain  pred_gain  base_iters  cap_iters  pred_cap_iters
+  1      1127      1127   -0.0%     +0.0%         109          ?             109
+  2      1153      1154   -0.1%     -0.6%         109          ?             110
+  4      1197      1209   -1.0%     -2.2%         109          ?             113
+  8      1500      1471   +2.0%     -2.7%         111          ?             119
+ 16      3700      2009  +84.2%    +61.5%         203          ?             131
+    C5 band [2750, 3050] ms unprofiled: FAIL
+stage 7 -- matched 256/1024 geometry (remeasure-protocol.md)
+  bs1   base  wall=    13779 ms  wave tok/s=    74.3  predicted decode_full iters=1023
+  bs1   cap   wall=    13808 ms  wave tok/s=    74.2  predicted decode_full iters=1023
+  bs2   base  wall=    14035 ms  wave tok/s=   145.9  predicted decode_full iters=1005
+  bs2   cap   wall=    14014 ms  wave tok/s=   146.1  predicted decode_full iters=1005
+  bs4   base  wall=    14305 ms  wave tok/s=   286.3  predicted decode_full iters=968
+  bs4   cap   wall=    14311 ms  wave tok/s=   286.2  predicted decode_full iters=968
+  bs8   base  wall=    16286 ms  wave tok/s=   503.0  predicted decode_full iters=869
+  bs8   cap   wall=    16270 ms  wave tok/s=   503.5  predicted decode_full iters=869
+  bs16  base  wall=    25812 ms  wave tok/s=   634.7  predicted decode_full iters=175

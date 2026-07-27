@@ -1,0 +1,12 @@
+stage 7 -- matched 256/1024 geometry (remeasure-protocol.md)
+  bs1   base  wall=    13779 ms  wave tok/s=    74.3  predicted decode_full iters=1023
+  bs1   cap   wall=    13808 ms  wave tok/s=    74.2  predicted decode_full iters=1023
+  bs2   base  wall=    14035 ms  wave tok/s=   145.9  predicted decode_full iters=1005
+  bs2   cap   wall=    14014 ms  wave tok/s=   146.1  predicted decode_full iters=1005
+  bs4   base  wall=    14305 ms  wave tok/s=   286.3  predicted decode_full iters=968
+  bs4   cap   wall=    14311 ms  wave tok/s=   286.2  predicted decode_full iters=968
+  bs8   base  wall=    16286 ms  wave tok/s=   503.0  predicted decode_full iters=869
+  bs8   cap   wall=    16270 ms  wave tok/s=   503.5  predicted decode_full iters=869
+  bs16  base  wall=    25812 ms  wave tok/s=   634.7  predicted decode_full iters=175
+  bs16  cap   wall=    22630 ms  wave tok/s=   724.0  predicted decode_full iters=175
+  vLLM baseline: /home/muhengl/mpk-qwen35/mirage/demo/qwen3_5/accept/baselines/vllm-0.25.1-20260725 (pinned, NOT re-run)

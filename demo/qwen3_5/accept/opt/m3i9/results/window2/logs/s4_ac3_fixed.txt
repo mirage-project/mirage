@@ -1,0 +1,63 @@
+AC-3 HARNESS RUN — status=fail overall_pass=False
+  batch_sizes=[1, 2, 4, 8, 16]
+  prompts=['p01-history', 'p02-math', 'p03-python', 'p04-chinese', 'p05-cuda', 'p06-poem', 'p07-format', 'p08-science', 'p09-translate', 'p10-logic']
+  tie_margin_threshold=0.5
+  margin evidence: 640/640 positions (min=0.0000 max=18.8750 mean=9.4720)
+  [p01-history bs=1] PASS — 64 position(s) scored
+  [p02-math bs=1] PASS — 64 position(s) scored
+  [p03-python bs=1] PASS — 64 position(s) scored
+  [p04-chinese bs=1] PASS — 64 position(s) scored
+  [p05-cuda bs=1] PASS — 64 position(s) scored
+  [p06-poem bs=1] FAIL (first divergence @ position 60) — 64 position(s) scored
+  [p07-format bs=1] PASS — 64 position(s) scored
+  [p08-science bs=1] PASS — 64 position(s) scored
+  [p09-translate bs=1] PASS — 64 position(s) scored
+  [p10-logic bs=1] PASS — 64 position(s) scored
+  [p01-history bs=2] PASS — 64 position(s) scored
+  [p02-math bs=2] PASS — 64 position(s) scored
+  [p03-python bs=2] PASS — 64 position(s) scored
+  [p04-chinese bs=2] PASS — 64 position(s) scored
+  [p05-cuda bs=2] PASS — 64 position(s) scored
+  [p06-poem bs=2] FAIL (first divergence @ position 60) — 64 position(s) scored
+  [p07-format bs=2] PASS — 64 position(s) scored
+  [p08-science bs=2] PASS — 64 position(s) scored
+  [p09-translate bs=2] PASS — 64 position(s) scored
+  [p10-logic bs=2] PASS — 64 position(s) scored
+  [p01-history bs=4] PASS — 64 position(s) scored
+  [p02-math bs=4] PASS — 64 position(s) scored
+  [p03-python bs=4] PASS — 64 position(s) scored
+  [p04-chinese bs=4] PASS — 64 position(s) scored
+  [p05-cuda bs=4] PASS — 64 position(s) scored
+  [p06-poem bs=4] FAIL (first divergence @ position 60) — 64 position(s) scored
+  [p07-format bs=4] PASS — 64 position(s) scored
+  [p08-science bs=4] PASS — 64 position(s) scored
+  [p09-translate bs=4] PASS — 64 position(s) scored
+  [p10-logic bs=4] FAIL (first divergence @ position 49) — 64 position(s) scored
+  [p01-history bs=8] PASS — 64 position(s) scored
+  [p02-math bs=8] PASS — 64 position(s) scored
+  [p03-python bs=8] PASS — 64 position(s) scored
+  [p04-chinese bs=8] PASS — 64 position(s) scored
+  [p05-cuda bs=8] PASS — 64 position(s) scored
+  [p06-poem bs=8] FAIL (first divergence @ position 60) — 64 position(s) scored
+  [p07-format bs=8] PASS — 64 position(s) scored
+  [p08-science bs=8] PASS — 64 position(s) scored
+  [p09-translate bs=8] PASS — 64 position(s) scored
+  [p10-logic bs=8] PASS — 64 position(s) scored
+  [p01-history bs=16] PASS — 64 position(s) scored
+  [p02-math bs=16] PASS — 64 position(s) scored
+  [p03-python bs=16] PASS — 64 position(s) scored
+  [p04-chinese bs=16] PASS — 64 position(s) scored
+  [p05-cuda bs=16] PASS — 64 position(s) scored
+  [p06-poem bs=16] FAIL (first divergence @ position 60) — 64 position(s) scored
+  [p07-format bs=16] PASS — 64 position(s) scored
+  [p08-science bs=16] PASS — 64 position(s) scored
+  [p09-translate bs=16] PASS — 64 position(s) scored
+  [p10-logic bs=16] PASS — 64 position(s) scored
+  6 waiver-request record(s) — evidence only, never auto-waived:
+    - p06-poem bs=1 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+    - p06-poem bs=2 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+    - p06-poem bs=4 pos=60 verdict=candidate_tie_flip ref_top1=31000 engine_argmax=81316 margin=0.0
+    - p10-logic bs=4 pos=49 verdict=implementation_bug ref_top1=528 engine_argmax=1719 margin=0.625
+    - p06-poem bs=8 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+    - p06-poem bs=16 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+Full run report written to /home/muhengl/mpk-qwen35/m3i9/out/run_report_cap.json
