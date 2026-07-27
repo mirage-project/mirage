@@ -135,17 +135,17 @@ QUANTIZE_ROW_SPLIT = (0, -1, -1)
 #
 # Set False to rebuild the pre-M3-I8 graph (the A/B `base` arm).
 #
-# DEFAULT OFF since 2026-07-27 (pre-registered consequence, M3-I8 F1 closure):
-# the per-iteration oracle measured steady-decode activation ABOVE the strict
-# min(256, 8*live) cap at bs1 and bs2 (mean 10.07 / 18.37 vs caps 8 / 16,
-# 32/32 iterations over; opt/m3i8/results/f1_closure/). The gate plainly
-# reduces activation (56.6 -> ~10 at bs1) and AC-3 stays byte-identical either
-# way (over-marking is a superset; it cannot corrupt a live row) -- but the
-# mechanism claim "activation == live top-k" is measurably wrong, and the
-# pre-registered falsifier consequence was OFF pending root-cause. Re-enable
-# only with a corrected mechanism statement (or a fixed gate) + a fresh
-# per-iteration oracle run.
-MOE_GATE_PADDING_ROWS = False
+# MECHANISM CLAIM (corrected + closed 2026-07-27, opt/m3i8/results/f1_closure/
+# rootcause.md): activated groups per layer = |union over live rows of top8(r)|
+# -- exactly 8 at live=1 (measured 8.0000, min=max, 32/32 steady iterations),
+# 8k minus router collisions at live=k (bs2 measured 15.731 vs the collision
+# model's 15.75). The 2026-07-27 default-OFF interlude was an INSTRUMENT
+# artifact: the oracle's 1us long-task threshold sat inside the empty-task
+# latency tail (1.6% of empties cross it; the histogram is empty from 2us to
+# 48us, real tiles start at 48us). Oracle threshold for task 241/242
+# classification is 4us. Falsifier for any future run: with the 4us separator,
+# activated > 8*n_live in any steady-decode iteration (at bs1: != 8.000).
+MOE_GATE_PADDING_ROWS = True
 
 
 def fp8_grid(output_size: int) -> int:
