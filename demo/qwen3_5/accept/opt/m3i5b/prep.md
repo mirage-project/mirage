@@ -447,3 +447,16 @@ before any GPU time is spent.
   order-dependent, not row-loop-specific, and more rows mean more marks and more opportunities.
   Flagged for its own issue; the `mask[NUM_EXPERTS] == unique(ids)` assertion in
   `test_router_oracle.py` and `test_gate_topk_sigmoid.py` is what would catch it.
+
+---
+
+## 7. Prep review outcome (codex gpt-5.6-sol, 2026-07-27)
+
+`PREP-REVIEW: PASS` — full reply in `review-prep-codex.txt`. Zero blocking findings; the
+bit-exactness argument, the sigmoid mask semantics (including the tile-boundary odd-row case),
+the no-divergent-barrier check, and the race triage were each independently confirmed.
+
+**Binding constraint from finding 5:** any `mbt > 16` DEFAULT change now requires either
+M3-I5c (the Phase-7 compaction race) fixed and validated first, or the window adds a
+high-repetition compaction stress test at the proposed maximum row count. P4's disposition
+rule inherits this prerequisite.
