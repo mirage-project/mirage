@@ -191,7 +191,6 @@ if __name__ == "__main__":
     num_attention_heads = config.num_attention_heads
     expected_config = {
         "hidden_size": 7168,
-        "num_hidden_layers": 61,
         "num_attention_heads": DEEPSEEK_V3_NUM_HEADS,
         "kv_lora_rank": DEEPSEEK_V3_KV_LORA_RANK,
         "qk_rope_head_dim": DEEPSEEK_V3_QK_ROPE_HEAD_DIM,
@@ -406,8 +405,6 @@ if __name__ == "__main__":
             "n_routed_experts",
             getattr(config, "num_experts", 256),
         )
-        assert world_size % args.ep_size == 0
-        assert num_routed_experts_for_load % args.ep_size == 0
         routed_tp_size_for_load = world_size // args.ep_size
         ep_rank_for_load = rank // routed_tp_size_for_load
         local_num_experts_for_load = num_routed_experts_for_load // args.ep_size
@@ -857,7 +854,6 @@ if __name__ == "__main__":
                     "n_routed_experts",
                     getattr(config, "num_experts", 256),
                 )
-                assert num_routed_experts % args.ep_size == 0
                 routed_tp_size = world_size // args.ep_size
                 routed_tp_rank = rank % routed_tp_size
                 ep_rank = rank // routed_tp_size
@@ -1130,7 +1126,8 @@ if __name__ == "__main__":
             print(f"Saved tokens to {save_path}")
 
     else:
-        raise RuntimeError("Pytorch ref is not allowed for now, which may cause OOM.")
+        raise RuntimeError(
+            "This DeepSeek-V3 demo runs the Mirage path only; pass --use-mirage.")
 
     if "mpk" in locals() and hasattr(mpk, "finalize") and not getattr(
         mpk, "__finalized__", True

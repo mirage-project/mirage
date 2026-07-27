@@ -1072,23 +1072,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     printf("Unsupported task name: %s\n", name.c_str());
     assert(false && "Unsupported task type");
   }
-  // Loud guard: a task whose declared input/output count exceeds the fixed
-  // TaskDesc arrays silently overflows inputs[]/outputs[] into adjacent fields
-  // at runtime (a silent wrong-result, not a crash). Fail at build instead.
+  // A task whose declared input/output count exceeds the fixed TaskDesc arrays
+  // would silently overflow inputs[]/outputs[] into adjacent fields at runtime.
   {
     auto const &cfg = task_config[op];
-    int n_in = std::get<0>(cfg);
-    int n_out = std::get<1>(cfg);
-    if (n_in > MAX_INPUTS_PER_TASK || n_out > MAX_OUTPUTS_PER_TASK) {
-      printf("Task %s declares %d inputs / %d outputs, exceeds "
-             "MAX_INPUTS_PER_TASK=%d / MAX_OUTPUTS_PER_TASK=%d\n",
-             name.c_str(),
-             n_in,
-             n_out,
-             MAX_INPUTS_PER_TASK,
-             MAX_OUTPUTS_PER_TASK);
-      assert(false && "task input/output count exceeds TaskDesc capacity");
-    }
+    assert(std::get<0>(cfg) <= MAX_INPUTS_PER_TASK);
+    assert(std::get<1>(cfg) <= MAX_OUTPUTS_PER_TASK);
   }
 }
 

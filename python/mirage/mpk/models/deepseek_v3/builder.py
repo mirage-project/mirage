@@ -269,6 +269,7 @@ class DeepSeekV3Builder(GraphBuilder):
     @property
     def _use_ffn_full_megakernel(self) -> bool:
         return (self.max_num_batched_tokens == 1
+                and self.world_size == 8
                 and self.mpk.num_workers == 136
                 and self.num_local_experts == 128
                 and self.routed_moe_intermediate_size == 512
@@ -488,13 +489,6 @@ class DeepSeekV3Builder(GraphBuilder):
                     input=input_bf16, weight=weight, output=output,
                     grid_dim=grid_dim, block_dim=block_dim)
             return
-
-        if input_bf16.num_dims != 2:
-            raise ValueError("FP8 linear v2 expects 2D input.")
-        if output.num_dims not in (2, 3):
-            raise ValueError("FP8 linear v2 expects 2D or 3D output.")
-        if weight.num_dims != 2 or weight_scale.num_dims != 2:
-            raise ValueError("FP8 linear v2 expects 2D weight + scale.")
 
         dense_nw = (self._fp8_dense_num_workers()
                     if no_wave_collapse
@@ -1443,28 +1437,9 @@ class DeepSeekV3Builder(GraphBuilder):
         REUSES the SAME weight tensors the prefill/compat chain binds. Writes
         the per-layer attn_proj_out (pre-AR; +residual fused). The post-attn
         rmsnorm + MLP/MoE and the AllReduce stay OUTSIDE this task (unchanged).
-
-        The asserts below restate the `_use_attn_megakernel` predicate the
-        caller already checked — defensive, since the kernel's grid_barrier
-        participant count + per-rank head count + step[0] sourcing all bake in
-        this exact geometry.
+        Only reached via the `_use_attn_megakernel` predicate (TP8 / 136-worker
+        / bs=1 decode geometry), which the kernel bakes in.
         """
-        assert self.mpk.num_workers == 136, (
-            "attn-block megakernel needs num_workers==136 (B200 148-SM); "
-            f"got {self.mpk.num_workers}. The kernel's grid_barrier participant "
-            "count (ATTN_NUM_WORKERS) is hard-wired to 136.")
-        assert self.max_num_batched_tokens == 1, (
-            "attn-block megakernel is a bs=1 / M=1 decode kernel; got "
-            f"mbt={self.max_num_batched_tokens}.")
-        assert self.world_size == 8, (
-            "attn-block megakernel is hard-wired to TP8 (16 local q-heads, "
-            f"K_HLOCAL=16); got world_size={self.world_size}.")
-        # The kernel hardcodes step = runtime_config.step[0], so it is only
-        # correct for the single-active-request decode (row 0). Guard it.
-        assert self.mpk.max_num_batched_requests == 1, (
-            "attn-block megakernel sources the decode position from "
-            "step[0]; it requires max_num_batched_requests==1, got "
-            f"{self.mpk.max_num_batched_requests}.")
         prefix = f"model.layers.{layer_idx}."
         attn = f"{prefix}self_attn."
 
@@ -2437,28 +2412,9 @@ class DeepSeekV3Builder(GraphBuilder):
         """The default fused decode MoE-FFN path (selected by
         `_use_ffn_full_megakernel` for the bs=1 TP8/EP2/B200 decode geometry):
         ONE mega-task in place of the whole per-task MoE chain. See
-        _build_moe_mlp. The asserts below restate that predicate (defensive —
-        the kernel hard-codes the TP8/EP2 per-rank shapes)."""
+        _build_moe_mlp. Only reached via `_use_ffn_full_megakernel`, which gates
+        the TP8/EP2 per-rank shapes the kernel hard-codes."""
         from ..utils import shuffle_tensors as _shuffle_tensors
-
-        # --- config guards: the kernel hard-codes the TP8 EP2 per-rank shapes.
-        assert self.mpk.num_workers == 136, (
-            "FFN-FULL kernel needs num_workers==136 (B200); got "
-            f"{self.mpk.num_workers}. The 136-CTA<->136-worker bijection is the "
-            "grid_barrier participant count; a non-136 count deadlocks.")
-        assert self.max_num_batched_tokens == 1, (
-            "FFN-FULL kernel is decode-only (mbt==1); got "
-            f"{self.max_num_batched_tokens}.")
-        assert self.num_local_experts == 128, (
-            "FFN-FULL kernel hard-codes E_LOCAL=128 (TP8 EP2); got "
-            f"num_local_experts={self.num_local_experts}.")
-        assert self.hidden_size == 7168, (
-            f"FFN-FULL kernel hard-codes HIDDEN=7168; got {self.hidden_size}.")
-        assert self.routed_moe_intermediate_size == 512, (
-            "FFN-FULL kernel hard-codes W2_K=512 (routed inter); got "
-            f"{self.routed_moe_intermediate_size}.")
-        assert NUM_EXPERTS == 256, (
-            f"FFN-FULL kernel hard-codes ROUTER_N=256; got {NUM_EXPERTS}.")
 
         w13_scale_key = f"{prefix}experts.w13.weight_scale_inv"
         if w13_scale_key not in state_dict:

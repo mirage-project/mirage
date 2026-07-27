@@ -17,7 +17,6 @@
 #include "mirage/transpiler/utils.h"
 
 #include <cstdlib>
-#include <stdexcept>
 
 namespace mirage {
 namespace runtime {
@@ -142,16 +141,10 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params) {
-  // params (optional, default = legacy contiguous):
-  //   params[0] = process_dim  (elements per row to normalise; defaults to
-  //               the DTensor's last-dim size = contiguous).
-  //   params[1] = in_offset_elems   (skip elements at the start of each row).
-  //   params[2] = out_offset_elems  (skip elements at the start of each row
-  //               in the output; equal to in_offset for in-place).
-  // Used by the QKV-a fused path (user #2 part-a, 2026-05-12): when q_a_out
-  // and kv_a_out are aliases of a wider qkv_a_out buffer, the per-row offset
-  // selects which slice to normalise.
-  assert(params.size() == 0 || params.size() == 3);
+  // params (optional): params[0] = process_dim (elements per row to
+  //   normalise; defaults to the DTensor's last-dim size). Column-slice
+  //   offsets are carried by narrow views, not params.
+  assert(params.size() == 0 || params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 2;
@@ -2964,14 +2957,9 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
   code.e("    $,", local_expert_start);
   code.e("    $,", local_expert_end);
   code.e("    $f,", scaling_factor);
-  // P6 (2026-05-14): bound compute loop to runtime active tokens. The
-  // initial "broke correctness" reading was a misdiagnosis — the
-  // 19-layer DSv3 baseline already outputs all-zero tokens at
-  // profile_start_step=100 (verified by `git stash` baseline test:
-  // same all-zero output), so the regression I attributed to P6 was
-  // baseline noise. The kernel-side skip is safe: Phase 0 init zeroes
-  // the full [0, num_rows) routing range, downstream moe_permute's
-  // `slot_1idx > 0` filter treats padded slots as "no routing".
+  // Bound the compute loop to the runtime active-token count. The kernel-side
+  // skip is safe: Phase 0 init zeroes the full [0, num_rows) routing range and
+  // moe_permute's `slot_1idx > 0` filter treats padded slots as "no routing".
   code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
   return register_task_variant(TASK_MOE_TOPK_SIGMOID_SM100, code.to_string());
 }
@@ -5850,27 +5838,19 @@ int TaskRegister::register_linear_fp8_bmm_sm100_task(
   code.inc_indent();
   constexpr int MMA_M = 128;
   // MMA_N is the batch (N) tile. At bs=1 decode (batch_size==1) the default 16
-  // wastes ~half the tcgen05 epilogue TMEM->reg fragment (~MMA_M*MMA_N/threads
-  // FP32/thread) — a FIXED register consumer that, combined with the FP8 scale
-  // descriptors, overflows this __noinline__ task's ~216-reg budget under the
-  // megakernel __launch_bounds__(256,1) (ptxas C7600, deterministic across CUDA
-  // 13.0/13.2/13.3; stage cuts alone don't fix it). N=8 (still a valid mul-of-8
-  // tcgen05 N, ≥ batch) halves that fragment. Guard batch_size<=8 so prefill
-  // (batch up to 16) keeps N=16. Codex-vetted 2026-06-14; box JIT re-verify
-  // (C7600 gone + cos correct); fallback = absorbed decode Q+O (avoid the BMM).
+  // wastes ~half the tcgen05 epilogue TMEM->reg fragment — a fixed register
+  // consumer that, with the FP8 scale descriptors, overflows this __noinline__
+  // task's ~216-reg budget under __launch_bounds__(256,1) (ptxas C7600). N=8
+  // (a valid mul-of-8 tcgen05 N, >= batch) halves that fragment; guard
+  // batch_size<=8 so prefill (batch up to 16) keeps N=16.
   int const MMA_N = (batch_size <= 8) ? 8 : 16;
   // Stage config. The per-head BMM contracts over REDUCTION_SIZE = D_in with
   // BLOCK_K=128, so k_tiles = ceil(D_in/128). At the decode o_proj / kv_b shape
-  // REDUCTION_SIZE=128 => 1 K-tile: there is NO intra-task K-depth to pipeline,
-  // so the default 8 AB stages are pure register/smem waste — and on sm100a
-  // (CUDA 13.x ptxas) they push this __noinline__ FP8 task past the
-  // megakernel's ~216-reg budget (ptxas C7600 "register allocation failed").
-  // For the single-K-tile case use a shallow pipeline (perf-neutral at 1 K-tile
-  // / bs=1 decode); KEEP the deep 8/2/4 for any multi-K-tile BMM (real
-  // K-latency to hide). Emitted as integer literals into the generated kernel
-  // (not used in a constexpr context here), so int-const is fine. Reviewed +
-  // Codex-vetted 2026-06-14; needs box JIT re-verify (C7600 gone + cos
-  // correct). Fallback ladder if C7600 persists: 2/1/1 -> 2/1/2 -> 1/1/1.
+  // REDUCTION_SIZE=128 => 1 K-tile: no intra-task K-depth to pipeline, so the
+  // default 8 AB stages are register/smem waste that pushes this __noinline__
+  // FP8 task past the ~216-reg budget (ptxas C7600). Use a shallow pipeline for
+  // the single-K-tile case (perf-neutral at 1 K-tile / bs=1 decode); keep the
+  // deep 8/2/4 for any multi-K-tile BMM.
   int const bmm_k_tiles = (reduction_size + 127) / 128;
   bool const bmm_single_k_tile = (bmm_k_tiles <= 1);
   int const num_ab_stages = bmm_single_k_tile ? 2 : 8;

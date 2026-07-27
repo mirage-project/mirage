@@ -19,9 +19,9 @@
 #pragma once
 
 // The BMM body runs __noinline__ behind the worker dispatch boundary so it gets
-// its own register budget under -rdc=true rather than spilling the worker frame.
-// The single-token decode build (MPK_DSV3_FORCEINLINE, mbt == 1) forceinlines it
-// into the worker frame instead.
+// its own register budget under -rdc=true rather than spilling the worker
+// frame. The single-token decode build (MPK_DSV3_FORCEINLINE, mbt == 1)
+// forceinlines it into the worker frame instead.
 #ifndef MPK_DSV3_TASK_INLINE
 #ifdef MPK_DSV3_FORCEINLINE
 #define MPK_DSV3_TASK_INLINE __forceinline__

@@ -115,6 +115,7 @@ event_name_list = {
     304: "TASK_DEEPSEEK_MLA_ROPE_SM100",
     305: "TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100",
     306: "TASK_FP8_GEMM_DENSE_SM100",
+    307: "TASK_DSV3_DENSE_MLP_FUSED_SM100",
     308: "TASK_FP8_GEMM_DENSE_FINEN_SM100",
     309: "TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100",
     311: "TASK_FP8_GROUP_GEMM_SMALLM_SM100",
@@ -124,41 +125,13 @@ event_name_list = {
     315: "TASK_TRANSPOSE_SCALE_SM100",
     316: "TASK_ASSEMBLE_Q_DECODE_SM100",
     317: "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100",
+    318: "TASK_DSV3_ROUTER_GATE_GEMV_SM100",
+    319: "TASK_ATTN_BLOCK_MEGAKERNEL_SM100",
+    321: "TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100",
     322: "TASK_LINEAR_FP8_BMM_DENSE_SM100",
     323: "TASK_MLA_KV_APPEND_SM100",
+    325: "TASK_FFN_FULL_MEGAKERNEL_SM100",
 }
-
-
-def _augment_event_names_from_header():
-    """Self-sync `event_name_list` from the C++ enum in runtime_header.h so the
-    Python profiler can never silently drift behind a newly-added task type
-    (the cause of the historical UNKNOWN_322/323 + the 320-mislabel bug). Any
-    `TASK_<NAME> = <id>` in the header that is missing here is added; existing
-    entries are NOT overwritten (the literal above stays authoritative for the
-    handful of legacy ids whose header names differ). Best-effort: a missing
-    header (installed wheel) just leaves the literal map as-is."""
-    import os
-    import re
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(here, "..", "..", "..", "include", "mirage",
-                     "persistent_kernel", "runtime_header.h"),
-        os.path.join(here, "include", "mirage", "persistent_kernel",
-                     "runtime_header.h"),
-    ]
-    for path in candidates:
-        try:
-            with open(path) as f:
-                text = f.read()
-        except OSError:
-            continue
-        for name, sid in re.findall(r"\b(TASK_[A-Z0-9_]+)\s*=\s*(\d+)", text):
-            event_name_list.setdefault(int(sid), name)
-        break
-
-
-_augment_event_names_from_header()
 
 
 class EventType(Enum):
@@ -168,10 +141,8 @@ class EventType(Enum):
 
 
 def decode_tag(tag, num_blocks, num_groups):
-    # layout (see profiler.h): [31:22 event_no][21:11 block_group]
-    #                          [10:2 event_idx][1:0 type]
-    event_no = tag >> 22
-    block_group_tag = (tag >> 11) & 0x7FF
+    event_no = tag >> 19
+    block_group_tag = (tag >> 11) & 0xFF
     event_idx = (tag >> 2) & 0x1FF
     event_type = tag & 0x3
     return (
@@ -197,15 +168,13 @@ def _decode_events(profiler_buffer: torch.Tensor):
 
     yield ("__header__", num_blocks, num_groups)
 
-    # numpy fast path: visit only nonzero entries (the buffer is sparse and
-    # iterating tens of millions of zeros in python dominates export time).
-    buf_np = profiler_buffer_host.numpy()
-    nz = buf_np.nonzero()[0]
-    nz = nz[nz >= 1]
-    for i in nz:
-        entry = int(buf_np[i])
-        tag = entry & 0xFFFFFFFF
-        timestamp = entry >> 32
+    for i in range(1, len(profiler_buffer_host)):
+        if profiler_buffer_host[i] == 0:
+            continue
+
+        tag, timestamp = profiler_buffer_host[i : i + 1].view(dtype=torch.uint32)
+        tag = int(tag)
+        timestamp = int(timestamp)
         event_no, block_idx, group_idx, event_idx, event_type = decode_tag(
             tag, num_blocks, num_groups
         )
@@ -222,33 +191,16 @@ def export_to_perfetto_trace(
     tgen = TraceGenerator(file_name)
 
     tid_map = {}
-    pid_map = {}
     track_map = {}
-
-    def _get_tid(block_idx, group_idx):
-        # Lazily materialize the (block, group) track. The buffer header's
-        # num_blocks/num_groups can under-count the worker grid at higher TP
-        # (e.g. TP8 emitted events for block 48 while the header reported
-        # fewer), which previously KeyError'd. Create on demand instead.
-        key = (block_idx, group_idx)
-        tid = tid_map.get(key)
-        if tid is not None:
-            return tid
-        pid = pid_map.get(block_idx)
-        if pid is None:
-            pid = tgen.create_group(f"block_{block_idx}")
-            pid_map[block_idx] = pid
-        tid = pid.create_group(f"group_{group_idx}")
-        tid_map[key] = tid
-        return tid
-
     for block_idx in range(num_blocks):
+        pid = tgen.create_group(f"block_{block_idx}")
         for group_idx in range(num_groups):
-            _get_tid(block_idx, group_idx)
+            tid = pid.create_group(f"group_{group_idx}")
+            tid_map[(block_idx, group_idx)] = tid
 
     for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
-        event = event_name_list.get(event_idx, f"UNKNOWN_{event_idx}") + f"_{event_no}"
-        tid = _get_tid(block_idx, group_idx)
+        event = event_name_list[event_idx] + f"_{event_no}"
+        tid = tid_map[(block_idx, group_idx)]
 
         if (block_idx, group_idx, event_idx) in track_map:
             track = track_map[(block_idx, group_idx, event_idx)]
@@ -286,13 +238,6 @@ def export_to_csv(
 
     pending = {}  # (block, group, event_idx) -> (event_no, begin_ts)
     rows = []
-    # A profile-start-step / single-graph capture clips begin/end pairs at the
-    # window edges: an END can appear whose BEGIN was before the window, and a
-    # BEGIN can be left open whose END is after it. Those boundary partials are
-    # expected, so skip them (don't abort the whole export); count them so a
-    # genuine buffer OVERFLOW (many dangling) still surfaces as a loud warning.
-    n_orphan_end = 0
-    n_redundant_begin = 0
 
     for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
         key = (block_idx, group_idx, event_idx)
@@ -300,15 +245,19 @@ def export_to_csv(
 
         if event_type == EventType.kBegin.value:
             if key in pending:
-                # Prior BEGIN never closed (its END fell outside the window);
-                # restart from this BEGIN rather than aborting.
-                n_redundant_begin += 1
+                prev_no, prev_ts = pending[key]
+                raise RuntimeError(
+                    f"dangling BEGIN: block={block_idx} group={group_idx} "
+                    f"event={name} event_no={prev_no} ts={prev_ts} has no END "
+                    f"before next BEGIN at event_no={event_no}"
+                )
             pending[key] = (event_no, timestamp)
         elif event_type == EventType.kEnd.value:
             if key not in pending:
-                # END whose BEGIN preceded the capture window — skip.
-                n_orphan_end += 1
-                continue
+                raise RuntimeError(
+                    f"END without matching BEGIN: block={block_idx} "
+                    f"group={group_idx} event={name} event_no={event_no}"
+                )
             begin_no, begin_ts = pending.pop(key)
             duration = (timestamp - begin_ts) & 0xFFFFFFFF
             rows.append(
@@ -321,13 +270,13 @@ def export_to_csv(
                  timestamp, timestamp, 0)
             )
 
-    if n_orphan_end or n_redundant_begin or pending:
-        print(
-            f"[profiler csv] boundary partials skipped: {n_orphan_end} orphan "
-            f"END, {n_redundant_begin} re-opened BEGIN, {len(pending)} still-open "
-            f"BEGIN at EOF (expected for a mid-flight capture; a LARGE count "
-            f"relative to {len(rows)} complete events would indicate buffer "
-            f"overflow)."
+    if pending:
+        (b, g, e), (no, ts) = next(iter(pending.items()))
+        name = event_name_list.get(e, f"UNKNOWN_{e}")
+        raise RuntimeError(
+            f"{len(pending)} dangling BEGIN event(s) with no matching END "
+            f"(profiler buffer likely overflowed). Example: block={b} "
+            f"group={g} event={name} event_no={no} ts={ts}"
         )
 
     with open(file_name, "w", newline="") as f:

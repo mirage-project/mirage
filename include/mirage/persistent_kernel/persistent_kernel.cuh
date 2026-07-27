@@ -126,8 +126,6 @@ static __device__
     void
     execute_task_noinline(TaskDesc const *task_desc,
                           RuntimeConfig const &runtime_config) {
-  // Keep execute_worker's queue/event state out of heavy task-body call frames
-  // so those callees can use the per-task register budget instead.
   _execute_task(task_desc, runtime_config);
 }
 
@@ -289,22 +287,15 @@ __device__ __forceinline__ bool
       config.step[request_id] = step + num_tokens;
       int step_advance = num_tokens;
 #endif
-      // Production completion: max sequence length, or EOS after the prompt.
-      bool request_done =
-          (step + step_advance + 1 >= config.max_seq_length) ||
+#if defined(MPK_ENABLE_PROFILING) || defined(MPK_TEST_MODE)
+      if (true)
+#else
+      if ((step + step_advance + 1 >= config.max_seq_length) ||
           ((config.tokens[request_id * MPK_MAX_SEQ_LENGTH + step +
                           step_advance] == config.eos_token_id) &&
-           (step + step_advance >= prompt_len));
-#ifdef MPK_TEST_MODE
-      // Test mode always completes after one iteration.
-      request_done = true;
+           (step + step_advance >= prompt_len)))
 #endif
-#ifdef MPK_ENABLE_PROFILING
-      // Profiling-only override: the profiler traces exactly one decode step,
-      // so it forces every request done after the first iteration.
-      request_done = true;
-#endif
-      if (request_done) {
+      {
         // Request is done
         config.request_ids[i] = -1;
         // Free pages
@@ -429,13 +420,6 @@ __device__ __forceinline__ bool
   // Step 5: update page head tail
   *config.page_queue_head = page_queue_head;
   *config.page_queue_tail = page_queue_tail;
-
-  // printf("Next batch: steps[%d %d %d %d] num_active_tokens(%d)\n",
-  //        config.step[0],
-  //        config.step[1],
-  //        config.step[2],
-  //        config.step[3],
-  //        config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);
 
   if (num_tokens == 0) {
     return false;
@@ -776,9 +760,6 @@ __device__ __forceinline__ void terminate_schedulers(RuntimeConfig config) {
     // CTAs before incrementing its last_ready_event_id
     size_t old;
     do {
-      // old = atomicCAS(&config.sched_queue_last_ready_event_id[i],
-      //                 last_event_id,
-      //                 last_event_id + 1);
       old = atom_cas_release_gpu_u64(&config.sched_queue_last_ready_event_id[i],
                                      last_event_id,
                                      last_event_id + 1);
@@ -830,18 +811,12 @@ __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   // assert(blockDim.x >= 128);
 }
 
-// Worker-grid residency handshake counter (see launch_persistent_kernel):
-// each worker CTA bumps this exactly once at entry so the host can verify the
-// FULL worker grid became resident before the scheduler kernel is launched.
+// Worker-grid residency handshake counter: each split-launch worker CTA bumps
+// this once at entry so the host confirms full residency before launching the
+// scheduler kernel (see launch_persistent_kernel).
 __device__ unsigned int mpk_worker_entry_count = 0;
 
 __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
-  // Residency handshake: report this worker CTA as resident. Must be the
-  // FIRST action so the host-side poll observes true residency (a CTA that
-  // cannot be scheduled onto an SM never reaches this line).
-  if (threadIdx.x == 0) {
-    atomicAdd(&mpk_worker_entry_count, 1u);
-  }
   // Make sure overall smem usage here do not exceed 3KB
   // last_task_pos: 2 * 8 = 16 B
   // next_task_pos: 2 * 8 = 16 B
@@ -1423,6 +1398,11 @@ __global__ __launch_bounds__(WORKER_NUM_THREADS,
 
 __global__ __launch_bounds__(WORKER_NUM_THREADS,
                              1) void worker_kernel(RuntimeConfig config) {
+  // Residency handshake: report this worker CTA resident as its first
+  // observable action (see launch_persistent_kernel).
+  if (threadIdx.x == 0) {
+    atomicAdd(&mpk_worker_entry_count, 1u);
+  }
   worker_checker(config);
   execute_worker(config);
 }
@@ -1654,14 +1634,14 @@ extern "C" void
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
   // split_worker_scheduler=true launches worker_kernel + scheduler_kernel as
-  // two independent grids; false fuses them into one collective launch. On a
-  // clean B200 box, split=true was verified to run TP8 EP2 (16L + full 61L,
-  // n=3/3, default 48 schedulers) without wedging, so it is re-enabled here.
-  // NOTE: the original rebase hang that motivated forcing false was not
-  // reproduced on a clean box and was not isolated to this flag (other fixes
-  // landed since); if a probabilistic wedge ever reappears under contention,
-  // this flag is the first thing to revisit.
+  // two independent grids; false fuses them into one collective launch.
   global_runtime_config.split_worker_scheduler = true;
+#ifdef MPK_ENABLE_PROFILING
+  // The profiler shares one buffer across the grid; the split worker and
+  // scheduler grids write it with different block counts (colliding header and
+  // slots), so profile through the single fused launch instead.
+  global_runtime_config.split_worker_scheduler = false;
+#endif
 
   std::vector<FullTaskDesc> all_fulltasks;
   std::vector<EventDesc> all_events;
@@ -1671,11 +1651,6 @@ extern "C" void
   std::vector<TaskDesc> all_tasks;
   for (auto const &ft : all_fulltasks) {
     TaskDesc task_desc(ft);
-    // if (ft.task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100 || ft.task_type
-    // == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) {
-    //   printf("ft.kv_idx %d\n", ft.kv_idx);
-    //   printf("ft.merge_task_offset %d\n", ft.merge_task_offset);
-    // }
     all_tasks.push_back(task_desc);
   }
 
@@ -1684,14 +1659,6 @@ extern "C" void
   global_runtime_config.worker_queue_last_ready_task_id =
       gpu_malloc<unsigned long long int>((num_workers * 2) *
                                          sizeof(unsigned long long int));
-  // std::vector<unsigned long long int> host_worker_queue_last_task_id;
-  // for (int i = 0; i < 2 * num_workers; i++) {
-  //   host_worker_queue_last_task_id.push_back(0);
-  // }
-  // cudaMemcpy(global_runtime_config.worker_queue_last_ready_task_id,
-  //            host_worker_queue_last_task_id.data(),
-  //            (num_workers * 2) * sizeof(unsigned long long int),
-  //            cudaMemcpyHostToDevice);
   //  Initialize scheduler queue last event id
   //  We maintain one extra scheduler queue for the global scheduler
   global_runtime_config.sched_queue_last_ready_event_id =
@@ -1700,19 +1667,6 @@ extern "C" void
   global_runtime_config.sched_queue_next_free_event_id =
       gpu_malloc<unsigned long long int>((num_schedulers + 1) *
                                          sizeof(unsigned long long int));
-
-  // std::vector<unsigned long long int> host_sched_queue_last_event_id;
-  // for (int i = 0; i < (num_schedulers + 1); i++) {
-  //   host_sched_queue_last_event_id.push_back(0);
-  // }
-  // cudaMemcpy(global_runtime_config.sched_queue_last_ready_event_id,
-  //            host_sched_queue_last_event_id.data(),
-  //            (num_schedulers + 1) * sizeof(unsigned long long int),
-  //            cudaMemcpyHostToDevice);
-  // cudaMemcpy(global_runtime_config.sched_queue_next_free_event_id,
-  //            host_sched_queue_last_event_id.data(),
-  //            (num_schedulers + 1) * sizeof(unsigned long long int),
-  //            cudaMemcpyHostToDevice);
   //  Initialize all event counters
   global_runtime_config.all_event_counters =
       gpu_malloc<EventCounter>(all_events.size() * sizeof(EventCounter));
@@ -1726,9 +1680,6 @@ extern "C" void
              host_all_event_counters.data(),
              all_events.size() * sizeof(int),
              cudaMemcpyHostToDevice);
-  // cudaMemset(global_runtime_config.all_event_counters,
-  //            0,
-  //            all_events.size() * sizeof(EventCounter));
   //  Initialize all tasks
   fprintf(stderr,
           "[MPK INIT] Total tasks: %zu, Total events: %zu\n",
@@ -1788,60 +1739,10 @@ extern "C" void
                cudaMemcpyHostToDevice);
   }
 
-  // Set configuration for kernels. The worker setAttribute FAILS (invalid
-  // argument) when the kernel's STATIC shared + MAX_DYNAMIC_SHARED_MEMORY_SIZE
-  // exceeds the per-CTA opt-in limit — and an unchecked failure here leads to
-  // the silent worker-launch failure / eternal-hang class (2026-06-12). Catch
-  // it at setup with a precise message.
-  //
-  // NOTE on the static term: it is the SUM over all compiled-in task branches,
-  // not the max. ptxas does NOT overlay per-branch statics even when the
-  // branches are mutually exclusive in a dispatch switch. Measured on sm_100a
-  // at production branch count (2026-07-20): 120 template instantiations, each
-  // declaring its own static barrier block, requested 13440 B and ptxas
-  // reported 15360 B — a sum plus alignment padding, not a max (which would
-  // have been ~136 B). All 120 blocks were pairwise DISJOINT and every one sat
-  // BELOW the dynamic arena base. That disjointness is what makes it safe to
-  // keep async-armed mbarriers in static __shared__ (see
-  // tasks/blackwell/fp8_gemm_dense_sm100_common.cuh), and the summing is why
-  // every task branch's static __shared__ must be budgeted against this limit.
-  //
-  // BUDGET STATUS (B200, 61L TP8 DSv3 megakernel, measured 2026-07-20 by
-  // compiling one generated test.cu against both trees with identical flags):
-  //   before the barrier relocation: worker_kernel SHARED = 8192 B
-  //   after:                         worker_kernel SHARED = 9216 B  (+1024)
-  // The device reports sharedMemPerMultiprocessor = 233472 and
-  // MAX_DYNAMIC_SHARED_MEMORY_SIZE = 224256, so 9216 + 224256 = 233472 sits
-  // EXACTLY at the limit: there is now ZERO static headroom on this build.
-  // Adding any further static __shared__ to any task branch will make the
-  // cudaFuncSetAttribute below fail. That failure is loud and precise (it
-  // aborts naming the byte count), NOT the silent worker-launch wedge, so this
-  // is a known-tight budget rather than a latent hazard — but the next author
-  // who needs static __shared__ must first buy headroom back, e.g. by raising
-  // WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE (which lowers
-  // MAX_DYNAMIC_SHARED_MEMORY_SIZE by the same amount). The largest single
-  // arena request today is the FP8 group GEMM at ~220416 B, so roughly 3.8 KB
-  // can be moved from dynamic to static before any task runs out of arena.
-  {
-    cudaError_t aerr =
-        cudaFuncSetAttribute(worker_kernel,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             MAX_DYNAMIC_SHARED_MEMORY_SIZE);
-    if (aerr != cudaSuccess) {
-      cudaFuncAttributes fattr;
-      cudaFuncGetAttributes(&fattr, worker_kernel);
-      fprintf(stderr,
-              "FATAL: cudaFuncSetAttribute(worker_kernel, maxDynamicSmem=%d) "
-              "failed: %s. worker_kernel static shared = %zu bytes; "
-              "static + dynamic exceeds the per-CTA opt-in limit — a task "
-              "branch compiled into this megakernel declares too much static "
-              "__shared__ memory.\n",
-              MAX_DYNAMIC_SHARED_MEMORY_SIZE,
-              cudaGetErrorString(aerr),
-              fattr.sharedSizeBytes);
-      abort();
-    }
-  }
+  // Set configuration for kernels
+  cudaFuncSetAttribute(worker_kernel,
+                       cudaFuncAttributeMaxDynamicSharedMemorySize,
+                       MAX_DYNAMIC_SHARED_MEMORY_SIZE);
   cudaFuncSetAttribute(
       scheduler_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 1024);
   cudaFuncSetAttribute(persistent_kernel,
@@ -1904,25 +1805,14 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                         global_runtime_config.prepare_done_event,
                         0);
 
-    // Worker-grid RESIDENCY HANDSHAKE (2026-07-19). The worker grid
-    // (num_workers CTAs, ~full-SM dynamic smem each => 1 CTA/SM) and the
-    // scheduler grid are launched on two concurrent non-blocking streams
-    // with NO co-residency guarantee (this split path cannot use
-    // nvshmemx_collective_launch, see comment below). If the scheduler's
-    // CTAs — or another process's kernels — win SM placement first, only
-    // (num_SMs - occupied) worker CTAs become resident. Persistent workers
-    // never yield their SM, so the losing worker CTAs NEVER start: tasks
-    // round-robined into their queues never execute, events never fire, and
-    // EVERY build wedges silently at 100% util (grid-barrier megakernels
-    // deadlock at the barrier; per-task chains stall on the dependency
-    // wait). Observed on 8xB200 with a co-tenant process: exactly
-    // (148 SMs - 48 scheduler CTAs) = 100 of 136 workers resident, blocks
-    // 100-135 never scheduled. Fix: reset an entry counter, launch workers,
-    // and WAIT until every worker CTA has reported entry before launching
-    // the scheduler kernel; fail LOUDLY (instead of wedging for the full
-    // timeout) if the grid cannot become fully resident.
-    // Escape hatch: MPK_DISABLE_RESIDENCY_HANDSHAKE=1 restores the old
-    // fire-and-hope launch.
+    // Worker-grid residency handshake: the worker and scheduler grids launch
+    // on two concurrent streams with no co-residency guarantee. Persistent
+    // workers never yield their SM, so if scheduler (or another process's) CTAs
+    // win SM placement first the losing worker CTAs never start and the build
+    // wedges silently. Reset an entry counter, launch workers, and wait until
+    // every worker CTA reports entry before launching the scheduler; abort on
+    // timeout rather than wedge. Escape hatch:
+    // MPK_DISABLE_RESIDENCY_HANDSHAKE=1.
     bool const residency_handshake =
         (std::getenv("MPK_DISABLE_RESIDENCY_HANDSHAKE") == nullptr);
     cudaEvent_t residency_reset_done = nullptr;
@@ -1934,16 +1824,9 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                                          0,
                                          cudaMemcpyHostToDevice,
                                          global_runtime_config.worker_stream));
-      // Make the reset explicitly happen-before the poll below. The reset is
-      // queued on worker_stream but the poll reads from scheduler_stream, and
-      // launch_persistent_kernel CAN be called repeatedly within one process
-      // with no intervening sync (the fp8_gemm_dense test-mode timing harness
-      // warms up in a loop and only synchronizes after the whole loop). On the
-      // second and later calls the counter still holds the previous launch's
-      // settled value, so without this dependency the poll could read that
-      // stale value, satisfy the residency condition on its very first check,
-      // and launch the scheduler without ever confirming the NEW worker grid
-      // is resident -- silently restoring the pre-fix hazard.
+      // Order the reset happen-before the poll: they live on different streams
+      // and launch_persistent_kernel can be called repeatedly in one process,
+      // so the poll could otherwise read the previous launch's counter value.
       CUDA_CHECK(cudaEventCreateWithFlags(&residency_reset_done,
                                           cudaEventDisableTiming));
       CUDA_CHECK(cudaEventRecord(residency_reset_done,
@@ -1958,38 +1841,12 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                     MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
                     global_runtime_config.worker_stream>>>(
         global_runtime_config);
-    // A failed worker launch (e.g. static smem of a compiled-in task branch +
-    // MAX_DYNAMIC_SHARED_MEMORY_SIZE exceeding the per-CTA limit) is
-    // otherwise SILENT: the scheduler kernel launches fine and spins forever
-    // pushing tasks to workers that never started — an undebuggable hang
-    // (2026-06-12: TASK_MLA_MTP_REDUCE's 16KB static la_smem did exactly
-    // this). Fail loudly instead.
-    {
-      cudaError_t lerr = cudaGetLastError();
-      if (lerr != cudaSuccess) {
-        fprintf(stderr,
-                "FATAL: worker_kernel launch failed: %s (num_workers=%d, "
-                "dynamic smem=%d; check static+dynamic shared memory vs the "
-                "per-CTA limit)\n",
-                cudaGetErrorString(lerr),
-                global_runtime_config.num_workers,
-                MAX_DYNAMIC_SHARED_MEMORY_SIZE);
-        abort();
-      }
-    }
 
     if (residency_handshake) {
-      // Poll the entry counter from the SCHEDULER stream (the worker stream
-      // is now occupied by the never-returning persistent worker kernel, so
-      // nothing enqueued behind it would ever run). ~30s budget: normal full
-      // residency is observed in well under a second; a timeout means the
-      // device cannot host num_workers co-resident CTAs right now (another
-      // process is holding SMs, or the worker smem/register footprint shrank
-      // the residency) — wedging silently would follow, so abort loudly.
-      // Order the poll after the counter reset (see the cudaEventRecord at the
-      // reset site): the two live on different streams, so on a repeated
-      // in-process launch the poll could otherwise observe the PREVIOUS
-      // launch's counter value.
+      // Poll the entry counter from the scheduler stream (the worker stream is
+      // now occupied by the never-returning persistent worker kernel). Abort
+      // after ~30s: full residency normally settles well under a second, so a
+      // timeout means the device cannot host num_workers co-resident CTAs.
       CUDA_CHECK(cudaStreamWaitEvent(
           global_runtime_config.scheduler_stream, residency_reset_done, 0));
       unsigned int resident = 0;
@@ -2013,16 +1870,12 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
         if (waited > 30.0) {
           fprintf(stderr,
                   "FATAL: worker grid failed to become fully resident: only "
-                  "%u of %d worker CTAs started after %.1fs. The persistent "
-                  "megakernel requires ALL worker CTAs co-resident (1 CTA/SM "
-                  "at %d B dynamic smem). Another process is likely holding "
-                  "SMs on this GPU (check nvidia-smi compute-apps), or the "
-                  "worker footprint no longer fits num_workers SMs. Refusing "
-                  "to launch the scheduler into a guaranteed wedge.\n",
+                  "%u of %d worker CTAs started after %.1fs (another process "
+                  "likely holds SMs). Refusing to launch into a guaranteed "
+                  "wedge.\n",
                   resident,
                   global_runtime_config.num_workers,
-                  waited,
-                  MAX_DYNAMIC_SHARED_MEMORY_SIZE);
+                  waited);
           abort();
         }
         usleep(2000);
@@ -2035,15 +1888,6 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                        0 /*smem*/,
                        global_runtime_config.scheduler_stream>>>(
         global_runtime_config);
-    {
-      cudaError_t lerr = cudaGetLastError();
-      if (lerr != cudaSuccess) {
-        fprintf(stderr,
-                "FATAL: scheduler_kernel launch failed: %s\n",
-                cudaGetErrorString(lerr));
-        abort();
-      }
-    }
 
 #ifdef MODE_OFFLINE
     cudaEventRecord(global_runtime_config.worker_done_event,

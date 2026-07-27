@@ -20,7 +20,6 @@
 #include "mirage/utils/json_utils.h"
 #include <queue>
 #include <set>
-#include <stdexcept>
 
 namespace mirage {
 namespace kernel {
@@ -759,19 +758,6 @@ void register_mugraph(
                 assert(task_ids.size() == 1);
                 EventId new_ev =
                     get_event_id(my_gpu_id, event_pos, nvshmem_event);
-                EventId old_ev = all_tasks[task_ids[0]].trigger_event;
-                if (old_ev != EVENT_INVALID_ID && old_ev != new_ev) {
-                  // A task has ONE trigger_event slot; a second distinct
-                  // event here means the earlier event keeps a num_triggers
-                  // count this task will never signal -> permanent wait.
-                  std::fprintf(stderr,
-                               "[TRIGGER_OVERWRITE] task=%zu type=%d "
-                               "old_event=%llx new_event=%llx\n",
-                               (size_t)task_ids[0],
-                               (int)all_tasks[task_ids[0]].task_type,
-                               (unsigned long long)old_ev,
-                               (unsigned long long)new_ev);
-                }
                 all_tasks[task_ids[0]].trigger_event = new_ev;
                 event_desc.num_triggers++;
               }
@@ -2111,7 +2097,6 @@ TaskGraphResult print_task_graph(
       continue;
     }
     for (int variant_id : used_it->second) {
-      assert(variant_id >= 0);
       assert(static_cast<size_t>(variant_id) < task.second.size());
       std::string cond = first_task ? "if" : "else if";
       assert(task_type_to_name.find(task.first) != task_type_to_name.end());

@@ -25,9 +25,6 @@ def fused_rmsnorm_quantize_fp8_layer(
     out_offset_elems: int = 0,
     scale_ue8m0: bool = True,
     emit_bf16: bool = True,
-    eps: float = 1e-6,  # accepted for API parity; kernel hardcodes 1e-6f
-    epsilon: float = None,  # alias for `eps` to match older call sites
-    group_size: int = 128,  # kernel currently asserts GROUP_SIZE == 128
     scratch_ptr_tensor: DTensor = None,
     optimized_grid_layout: bool = False,
 ):
@@ -51,15 +48,7 @@ def fused_rmsnorm_quantize_fp8_layer(
         HBM. Use when no downstream consumer needs the BF16 (e.g.,
         pre-qkv_a where only the FP8 path reads the result). Defaults
         to True so the wrapper is a strict superset of `rmsnorm_layer`.
-      * `eps` / `epsilon`: RMS epsilon (kernel hard-codes 1e-6f today;
-        accepted only for API parity).
-      * `group_size`: FP8 quantization group size; kernel requires 128.
     """
-    del eps, epsilon  # API parity only, kernel uses 1e-6f hard-coded.
-    if group_size != 128:
-        raise ValueError(
-            f"fused_rmsnorm_quantize_fp8_layer requires group_size=128, "
-            f"got {group_size}")
     assert input.num_dims == 2
     assert weight.num_dims == 1
     assert output_bf16.num_dims == 2
