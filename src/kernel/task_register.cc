@@ -825,8 +825,7 @@ int TaskRegister::register_identity_task(threadblock::Graph const &bgraph,
   //   emit a runtime Q_LEN gate at the top of the kernel that returns
   //   immediately if request 0's Q_LEN <= 8. This makes the kpe_sep_bridged
   //   phantom-bridge identity a noop on decode iters while still doing the
-  //   real BF16 copy on chunked-prefill iters — saving ~16 μs per decode
-  //   layer).
+  //   real BF16 copy on chunked-prefill iters).
   assert(params.size() <= 2);
   bool is_noop = (params.size() >= 1 && params[0] == 1);
   bool gate_decode_q_len = (params.size() >= 2 && params[1] == 1);
@@ -1102,7 +1101,7 @@ int TaskRegister::register_reduction_task(threadblock::Graph const &bgraph,
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int output_size = input_ops[0]->output_tensors[0].dim[1];
-  // get strides (C20: from dtensor.stride[0] — view-safe; for root tensors
+  // get strides (from dtensor.stride[0] — view-safe; for root tensors
   // this equals owner_op's input_strides[0])
   int input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
   int output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
@@ -3412,12 +3411,12 @@ int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
 int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params) {
   // params: [] (legacy) OR [active_mask_offset, ctas_per_expert, e_local]
-  //                       (NEW MoE D3+B11).
+  //                       (NEW MoE).
   //   active_mask_offset == -1 -> meta input not supplied, no skip.
   //   active_mask_offset >= 0  -> meta is input_ptrs[1], active mask lives
   //                               at meta + active_mask_offset (int32),
   //                               my_expert = bid.x / ctas_per_expert.
-  //                               B11: meta + active_mask_offset + e_local
+  //                               meta + active_mask_offset + e_local
   //                               holds per-expert actual_count (real row
   //                               count, ≤ BM_PADDING) — used to bound the
   //                               silu*mul loop.
@@ -3464,7 +3463,7 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
     output_size = output_ops[0]->output_tensors[0].dim[1];
     assert(input_ops[0]->output_tensors[0].dim[1] == output_size * 2);
   }
-  // get input/output strides (C20: stride[N-2] is the row-walk stride
+  // get input/output strides (stride[N-2] is the row-walk stride
   // regardless of rank; view-safe).
   if (out_dims == 3) {
     input_stride = static_cast<int>(input_ops[0]->dtensor.stride[1]);
@@ -3497,7 +3496,7 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
            ctas_per_expert);
     code.e("if (!active_mask_silu_[my_expert_silu_]) return;");
     // actual_count_per_expert lives at meta + active_mask_offset + e_local.
-    // For B11 we cap silu*mul's row count to actual_count instead of
+    // We cap silu*mul's row count to actual_count instead of
     // BM_PADDING (=128). Decode iter: actual_count ~= 1 (8 active
     // experts/iter, 1 routed row each), vs 128 padded rows.
     code.e("int silu_rows_ = active_mask_silu_[$ + my_expert_silu_];", e_local);
@@ -4744,7 +4743,7 @@ int TaskRegister::register_nvshmem_allgather_strided_put_task(
   assert(output_ops[0]->output_tensors[0].num_dims == 3);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int output_size = input_ops[0]->output_tensors[0].dim[1];
-  // Row stride (C20: dtensor.stride[0] is view-safe).
+  // Row stride (dtensor.stride[0] is view-safe).
   int input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
   // For this allgather task, input and output share the same stride
   int output_stride = input_stride;
@@ -4805,7 +4804,7 @@ int TaskRegister::register_nvshmem_tile_allreduce_task(
   assert(input_ops[0]->output_tensors[0].num_dims == 2);
   int batch_size = input_ops[0]->output_tensors[0].dim[0];
   int output_size = input_ops[0]->output_tensors[0].dim[1];
-  // Row stride (C20: dtensor.stride[0] is view-safe).
+  // Row stride (dtensor.stride[0] is view-safe).
   int input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
   // For this allgather task, input and output share the same stride
   int output_stride = input_stride;
@@ -4931,15 +4930,15 @@ int TaskRegister::register_quantize_fp8_sm100_task(
   //            per-task base pointer is already offset by the runtime from
   //            the input's mpk.narrow view.
   //   size 5: [active_mode=5, expert_meta_offset, e_local,
-  //            bm_padding, ctas_per_expert] — B15 per-expert
+  //            bm_padding, ctas_per_expert] — per-expert
   //            active-rows skip for NEW MoE silu_out quantize.
   assert(params.size() == 0 || params.size() == 1 || params.size() == 3 ||
          params.size() == 5);
   int active_mode = params.empty() ? 0 : params[0];
-  // active_mode 4 (B12): no token-indexed skip — process every CTA's
+  // active_mode 4: no token-indexed skip — process every CTA's
   // ROWS_PER_TASK chunk unconditionally. Used by NEW MoE silu_out
   // quantize where rows are permuted-expert layout, not token index.
-  // active_mode 5 (B15): per-expert active-rows cap. Meta is supplied
+  // active_mode 5: per-expert active-rows cap. Meta is supplied
   // as a 4th tb_graph input; codegen pre-reads active_mask[my_expert]
   // (skip if 0) then actual_count[my_expert] and caps the kernel's
   // ROWS_PER_TASK inner loop.
@@ -4974,7 +4973,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
     batch_size = input_ops[0]->output_tensors[0].dim[0];
     hidden_size = input_ops[0]->output_tensors[0].dim[1];
   }
-  // GLOBAL_STRIDE = stride between rows in linearized layout. C20
+  // GLOBAL_STRIDE = stride between rows in linearized layout.
   // Use stride[0] (in elements) instead of dim[1]; for non-view
   // tensors these are equal, but for an `mpk.narrow` view dim[1] is the
   // slot width while stride[0] is the parent's full row width — the
@@ -5023,7 +5022,7 @@ int TaskRegister::register_quantize_fp8_sm100_task(
     // token-indexed active_rows_ would silently leave most rows
     // uninitialized, feeding stale silu_fp8 to the W2 group GEMM.
   } else if (active_mode == 5) {
-    // B15: per-expert active-rows skip. Skip CTA entirely when expert
+    // Per-expert active-rows skip. Skip CTA entirely when expert
     // is inactive (active_mask[my_expert]=0). Otherwise read
     // actual_count and pass to kernel as row_count_cap to bound the
     // ROWS_PER_TASK inner loop. CTA→expert mapping: with grid_y =
@@ -5177,7 +5176,7 @@ int TaskRegister::register_fused_rmsnorm_quantize_fp8_sm100_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("{");
-  // Active-rows gate (B34 convention): skip CTAs whose first row is past
+  // Active-rows gate: skip CTAs whose first row is past
   // the active token count, and clamp the inner loop to the remaining
   // active rows so we don't normalize/overwrite stale bf16.
   code.e("int active_rows_fused_ = $;", dtensor_batch);
@@ -6152,7 +6151,7 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   //   keep active_rows as runtime M. Used for the prefill-only branch of
   //   the dual-dispatch O_proj (prefill O_proj reads attn_unabsorbed which
   //   is only valid on prefill iters; decode iters early-exit so the GEMM
-  //   doesn't burn ~30 μs on a wasted wave).
+  //   doesn't burn a wasted GEMM wave).
   // runtime_m_mode=3: decode-phase gate (Q_LEN <= 8) with
   //   active_rows as runtime M. Used for the decode-only branch of the
   //   dual-dispatch O_proj (decode O_proj reads attn_out which is only
@@ -6298,7 +6297,7 @@ int TaskRegister::register_fp8_gemm_dense_sm100_task(
 // Raw-pointer ABI (no TMA): hidden[M,K] @ W_gate[N,K]^T → logits[M,N] BF16.
 // 2 inputs (hidden, W_gate), 1 real output (logits) — NOT store_in_dmem.
 // params: [M, N, K, num_workers]. Grid = (num_workers,1,1), blockDim=512.
-// Default-OFF: MPK_DSV3_ROUTER_GEMV=1 (builder gates on mbt==1).
+// Selected by the builder at mbt==1 (BF16 CUDA-core GEMV).
 int TaskRegister::register_dsv3_router_gate_gemv_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;
@@ -6607,7 +6606,7 @@ int TaskRegister::register_moe_unpermute_sm100_task(
   int output_stride = HIDDEN;
   output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
 
-  // B33: rows_per_task = ceil(MBT / grid.x). When the wrapper passes
+  // rows_per_task = ceil(MBT / grid.x). When the wrapper passes
   // grid.x < MBT the kernel internally loops over multiple tokens per CTA
   // so the total launched CTAs stay ≤ num_workers. Default grid.x == MBT
   // gives rows_per_task == 1 (legacy 1-CTA-per-token contract).
@@ -7004,8 +7003,7 @@ int TaskRegister::register_deepseek_mla_rope_q_split_sm100_task(
   //     0 = legacy separate q_pe buffer, row stride = num_heads * 64,
   //         per-head stride 64. q_pe is a standalone (mbt, H*64) tensor.
   //     1 = row-swap fused q_b_prefill_fused (mbt, H*192), pe slice starts
-  //         at H*128 within each row. Per-head pe stride = 64. Used when
-  //         MPK_DSV3_QB_FUSED=1.
+  //         at H*128 within each row. Per-head pe stride = 64.
   //   phase_gate (optional, default 0):
   //     0 = no gate (legacy)
   //     1 = prefill-only (skip if Q_LEN <= 8) — used for the unabsorbed-Q

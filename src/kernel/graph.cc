@@ -807,7 +807,7 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   else if (name == "quantize_fp8_sm100") {
     int variant_id = task_register->register_quantize_fp8_sm100_task(
         customized->bgraph, params, true /*scale_ue8m0*/);
-    // B15: params.size() == 5 means expert_active mode (active_mode=5)
+    // params.size() == 5 means expert_active mode (active_mode=5)
     // with meta as 2nd input. Otherwise legacy 1-input.
     int num_inputs_q = (params.size() == 5) ? 2 : 1;
     task_config[op] =
@@ -863,9 +863,9 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     task_config[op] =
         std::make_tuple(4, 1, TASK_FP8_GEMM_DENSE_SM100, variant_id);
   } else if (name == "dsv3_router_gate_gemv_sm100") {
-    // ferret BF16 CUDA-core GEMV: hidden[M,K] @ W_gate[N,K]^T → logits[M,N].
+    // BF16 CUDA-core GEMV: hidden[M,K] @ W_gate[N,K]^T → logits[M,N].
     // 2 real inputs (hidden, W_gate) + 1 real output (logits); raw-ptr ABI.
-    // Default-OFF: MPK_DSV3_ROUTER_GEMV=1 gated in builder.py at mbt==1.
+    // Selected in builder.py at mbt==1.
     int variant_id = task_register->register_dsv3_router_gate_gemv_sm100_task(
         customized->bgraph, params);
     task_config[op] =

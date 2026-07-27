@@ -15,12 +15,11 @@
 //
 // Fused RMSNorm + per-token-group FP8 quantize kernel.
 //
-// Replaces the two-task chain RMSnorm (5 us wave) -> Quantize (5 us wave)
-// that currently feeds the qkv_a FP8 dense GEMM (~32 us). The standalone
-// kernels both touch HBM for the BF16 rmsnorm output / quantize input; this
-// kernel keeps the bf16 normalized row in shared memory and walks it once
-// to compute per-group FP8 + scale, saving one HBM round-trip and one
-// dispatch wave (~10 us / layer target).
+// Replaces the two-task chain RMSnorm -> Quantize that feeds the qkv_a FP8
+// dense GEMM. The standalone kernels both touch HBM for the BF16 rmsnorm
+// output / quantize input; this kernel keeps the bf16 normalized row in
+// shared memory and walks it once to compute per-group FP8 + scale, saving
+// one HBM round-trip and one dispatch wave.
 //
 // Design notes
 // ------------

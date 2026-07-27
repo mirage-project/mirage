@@ -2030,7 +2030,6 @@ class PersistentKernel:
         #     Downstream consumers (FP8 GEMM, permute) are insensitive
         #     to stale rows past active_rows, so over-quantizing in
         #     decode is benign — same as today.
-        del grid_dim  # see comment above; legacy callers expect override.
         if process_all_rows:
             assert active_mode == 0
             active_mode = 4
@@ -2526,10 +2525,10 @@ class PersistentKernel:
         params = [MBT, TOPK, HIDDEN, M_TOTAL]
         rows_per_cta_safe = max(1, int(rows_per_cta))
         grid_x = max(1, (MBT + rows_per_cta_safe - 1) // rows_per_cta_safe)
-        # Stragglers fix: grid.y = hidden_split spreads each
+        # grid.y = hidden_split spreads each
         # token's HIDDEN work across hidden_split CTAs. For decode
         # (active_rows=1) only 1*hidden_split CTAs do work — bumping
-        # hidden_split splits the 32 μs per-token straggler across
+        # hidden_split spreads the per-token straggler across
         # more SMs concurrently. task_register passes hidden_split as
         # the kernel's HIDDEN_SPLIT template and bid.y becomes the
         # partition index (kv_idx). HIDDEN must be divisible by
@@ -3294,7 +3293,7 @@ class PersistentKernel:
         # returns before doing the BF16 copy. Use for kpe_sep_bridged in the
         # chunked-prefill phantom bridge — chunked_prefill itself has a
         # Q_LEN > 8 gate, so the output buffer is never read on decode
-        # iters and the copy is wasted ~16 μs.
+        # iters and the copy is wasted work.
         # TODO: Add support from kn_graph
         last_dim = 0
         assert input.num_dims == output.num_dims

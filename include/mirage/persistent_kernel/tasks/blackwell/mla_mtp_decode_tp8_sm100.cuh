@@ -68,7 +68,7 @@ static constexpr int OSAVE_SMEM_BYTES = TB * TILE_S * sizeof(float);
 
 // Total smem: QK pipeline stages + o_save buffer + 1024 alignment padding
 // = 3*2*16384 + 64*1024 + 1024 = 98304 + 65536 + 1024 = 164864 (~161KB)
-// Budget: 205KB dynamic on B200 SM100a → PASS (44KB headroom).
+// Budget: fits the 205KB dynamic-smem limit on B200 SM100a.
 static constexpr int SMEM_SIZE =
     NUM_QK_STAGES * 2 * TILE_BYTES + OSAVE_SMEM_BYTES + 1024;
 

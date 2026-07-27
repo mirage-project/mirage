@@ -15,9 +15,7 @@
 
 // Shared body for grouped FP8 block-scaled GEMM tasks (smallm + largem).
 // Adapted from
-// cpp_examples/blackwell_fp8_gemm/fp8_group_gemm_dsv3_decode_sm100.cu (v007,
-// ferret-generated). Beats current DeepGEMM 1.05-1.29x across MPE 1-1024 on
-// E=32 + gate_up (K=7168 N=4096) / down (K=2048 N=7168).
+// cpp_examples/blackwell_fp8_gemm/fp8_group_gemm_dsv3_decode_sm100.cu.
 //
 // Two variants share this body, differing only in (BN, NS):
 //   smallm: BN=64,  NS=8  (used when K>4096 && MPE<=8 — gate_up_M{1,4,8})
@@ -548,9 +546,9 @@ __device__ __noinline__ void task_impl_tpl(
     if (ew == 0) {
       asm volatile("cp.async.bulk.wait_group.read %0;" ::"n"(0) : "memory");
     }
-    // C3: the tcgen05.dealloc used to sit HERE, under `if (ew == 1)` -- issued
-    // by warp 5 only, while the matching tcgen05.alloc is issued by warp 0
-    // (:250). That is (a) a convergence violation -- warps 0-3 have already
+    // The tcgen05.dealloc must NOT sit here under `if (ew == 1)` (warp 5
+    // only) while the matching tcgen05.alloc is issued by warp 0 (:250):
+    // that would be (a) a convergence violation -- warps 0-3 have already
     // fallen out of this if-else chain, so a `.sync.aligned` dealloc here has
     // no guarantee the CTA is converged -- and (b) a violation of the TMEM
     // allocator contract, which requires alloc and dealloc to be issued by the
@@ -558,10 +556,10 @@ __device__ __noinline__ void task_impl_tpl(
     // "for repeated allocations, the same warp must be used to issue all
     // allocations"). MPK never issues tcgen05.relinquish_alloc_permit, so that
     // requirement spans task boundaries for the entire life of the persistent
-    // CTA. This is the only remaining live alloc/dealloc
-    // warp split in the megakernel. Moved below.
+    // CTA. The dealloc is therefore issued below (full-CTA converged)
+    // instead.
   }
-  // C3 FIX: every
+  // Every
   // warp falls through the if-else chain to this point and this task body
   // contains no early `return`, so a full-CTA barrier here is safe. Sync all
   // 256 threads (all 8 warp-specialized loops have exited, so no warp can

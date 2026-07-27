@@ -151,9 +151,8 @@ public:
                                           std::vector<int> const &params);
   int register_mla_prefill_tp8_chunked_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  // MLA-MTP TP variants (ferret-derived, no-PDL). Each: TP=2/4/8, with paired
-  // reduce. Differ in NUM_HEADS (64/32/16); TP=4 also splits V across two
-  // CTAs (z=2); TP=8 takes Q_LEN_real (Q_LEN padded to even).
+  // MLA-MTP TP8 decode (no-PDL), with paired reduce. NUM_HEADS=16; takes
+  // Q_LEN_real (Q_LEN padded to even).
   int register_mla_mtp_decode_tp8_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params);
   // Unified TP2/TP4/TP8 split-KV reduce (one TASK_MLA_MTP_DECODE_TP_REDUCE
@@ -182,8 +181,8 @@ public:
   int register_fp8_gemm_dense_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params,
                                          bool mediumm);
-  // ferret BF16 CUDA-core GEMV for DSv3 router gate. params: [M,N,K,
-  // num_workers]. default-OFF lever (MPK_DSV3_ROUTER_GEMV).
+  // BF16 CUDA-core GEMV for DSv3 router gate. params: [M,N,K,
+  // num_workers]. Selected by the builder at mbt==1.
   int register_dsv3_router_gate_gemv_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   // fine-N dense GEMM (mediumm body @ BN=16, NS=6). default-OFF

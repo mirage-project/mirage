@@ -167,15 +167,11 @@ __device__ __forceinline__ void
   // a larger stride (per-head BMM where C is [M, H, N] row-major).
   int const C_rs = (C_row_stride > 0) ? C_row_stride : N;
 
-  // (Q1): skip the entire mb_init + tcgen05.alloc + __syncthreads +
-  // membar.gl + tcgen05.dealloc sequence for CTAs that have no tile to
-  // compute. Decode-time perfetto traces showed ~8% of MEDIUMM instances
-  // sitting in a 3-4μs band that's pure dispatch overhead — these are CTAs
-  // where `worker_idx >= total`. The branch is uniform across all 256 threads
-  // of the CTA so the early return is safe. Saves ~2μs of per-idle-CTA
-  // overhead; doesn't move per-task end-to-end (real-work CTAs determine
-  // task completion at 20-35μs), but cleans up trace clutter and saves SM
-  // cycles for concurrent tasks.
+  // Skip the entire mb_init + tcgen05.alloc + __syncthreads + membar.gl +
+  // tcgen05.dealloc sequence for CTAs that have no tile to compute
+  // (`worker_idx >= total`). The branch is uniform across all 256 threads of
+  // the CTA so the early return is safe; it frees SM cycles for concurrent
+  // tasks without moving per-task end-to-end latency.
   if (worker_idx >= total) {
     return;
   }

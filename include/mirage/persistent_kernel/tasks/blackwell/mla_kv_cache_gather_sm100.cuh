@@ -162,7 +162,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   }
 }
 
-// (C1): NUM_GATHER_SPLITS parameter parallelizes the sequential
+// NUM_GATHER_SPLITS parameter parallelizes the sequential
 // seq_pos loop in both phases across multiple CTAs. Each CTA handles a
 // strided subset of seq_pos values (seq_pos % NUM_GATHER_SPLITS == split_idx).
 // The partition is consistent between append (step 1) and gather (step 2):

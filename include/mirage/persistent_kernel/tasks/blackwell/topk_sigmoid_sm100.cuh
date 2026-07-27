@@ -139,8 +139,8 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
                                  // [0, num_rows) range so padded slots
                                  // in routing_indices stay 0 for the
                                  // downstream moe_permute scan. For
-                                 // decode this drops the compute from
-                                 // ~108 μs (full mbt=128) to ~1 μs.
+                                 // decode this scopes the compute to the
+                                 // active tokens only.
 
   // Pointers
   T *input = static_cast<T *>(input_ptr);
@@ -151,7 +151,7 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
 
   // ---- Phase 0: Initialize routing structures ----
   // Init only [0, num_active_rows) of the routing buffer: moe_permute
-  // (D5) only scans up to num_active_rows, so rows >= num_active_rows
+  // Only scans up to num_active_rows, so rows >= num_active_rows
   // are never read. Skipping their init drops decode's 128*128=16384
   // zero-stores to 128*1=128. The mpk_active_expert_ids vector still
   // gets the full LOCAL_EXPERTS reset because Phase 7's compaction

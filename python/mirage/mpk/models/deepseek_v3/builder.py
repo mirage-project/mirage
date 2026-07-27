@@ -1543,7 +1543,8 @@ class DeepSeekV3Builder(GraphBuilder):
         # scratch activation region is dead / fully-overwritten-before-read /
         # read-only-at-written-indices (g_mla_acc s<nsp, nsp clamped to 8 =>
         # ntask<=128<136) / zeroed-inside-the-kernel (g_head_done,
-        # g_head_wuv_ready before B2). The only thing this per-step zero protected
+        # g_head_wuv_ready before the q_b->MLA grid barrier). The only thing
+        # this per-step zero protected
         # was the cudaMalloc step-0 garbage (step 0 STILL zeroes). PREMISE: the
         # kernel keeps EXACTLY 136 CTAs hitting all 3 barriers each step with no
         # early-return, and this scratch stays per-layer-distinct.

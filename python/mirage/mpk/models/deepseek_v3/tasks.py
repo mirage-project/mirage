@@ -30,8 +30,7 @@ def fused_rmsnorm_quantize_fp8_layer(
 
     Replaces the two-task chain `rmsnorm_layer` + `quantize_fp8_layer`
     when the BF16 rmsnorm output is consumed (only) by an FP8 dense
-    GEMM. Saves one dispatch wave + one BF16 HBM round-trip per layer
-    (~10 μs/layer expected at TP=4 EP=2 mbt=128 decode).
+    GEMM. Saves one dispatch wave + one BF16 HBM round-trip per layer.
 
     Parameters mirror the two underlying calls:
       * `process_dim` selects a column slice of a wider parent buffer
@@ -732,11 +731,10 @@ def moe_unpermute_sm100_layer(
     params = [MBT, TOPK, HIDDEN, M_TOTAL]
     rows_per_cta_safe = max(1, int(rows_per_cta))
     grid_x = max(1, (MBT + rows_per_cta_safe - 1) // rows_per_cta_safe)
-    # Stragglers fix: grid.y = hidden_split spreads each
-    # token's HIDDEN work across hidden_split CTAs. For decode
-    # (active_rows=1) only 1*hidden_split CTAs do work — bumping
-    # hidden_split splits the 32 μs per-token straggler across
-    # more SMs concurrently. task_register passes hidden_split as
+    # grid.y = hidden_split spreads each token's HIDDEN work across
+    # hidden_split CTAs. For decode (active_rows=1) only 1*hidden_split
+    # CTAs do work — bumping hidden_split spreads the per-token straggler
+    # across more SMs concurrently. task_register passes hidden_split as
     # the kernel's HIDDEN_SPLIT template and bid.y becomes the
     # partition index (kv_idx). HIDDEN must be divisible by
     # hidden_split for clean partitions; the kernel rounds up
@@ -1047,7 +1045,7 @@ def fp8_gemm_dense_layer(
     input_scale,
     weight_scale,
     num_workers,
-    output=None,
+    output,
     runtime_m_mode: int = 0,
     variant: str = None,
 ):
@@ -1061,7 +1059,6 @@ def fp8_gemm_dense_layer(
     if variant is None:
         variant = "smallm" if pk.max_seq_length <= 512 else "mediumm"
     assert variant in ("smallm", "mediumm"), variant
-    assert output is not None, "fp8_gemm_dense_layer takes output (bf16)"
     impl = (_fp8_gemm_dense_smallm_layer if variant == "smallm"
             else _fp8_gemm_dense_mediumm_layer)
     impl(pk, input_fp8, weight_fp8, input_scale, weight_scale,

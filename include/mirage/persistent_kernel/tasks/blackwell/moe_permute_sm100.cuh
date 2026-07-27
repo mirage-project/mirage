@@ -228,8 +228,8 @@ __device__ __forceinline__ void
 
     // Phase 3: publish per-expert active mask + actual row count.
     //
-    // active_expert_mask[expert]: 0/1 — used by fp8_group_gemm + silu_mul
-    // D1/D3 short-circuits.
+    // active_expert_mask[expert]: 0/1 — used by the fp8_group_gemm +
+    // silu_mul active-expert short-circuits.
     //
     // actual_count_per_expert[expert]: number of real (non-padding)
     // routed rows this iter. Decode (active_token=1) routes at most 1 row

@@ -122,7 +122,8 @@ namespace attn_block_megakernel_sm100 {
 //      __threadfence release/acquire), removes the MLA-partial->merge barrier.
 //   5. WUV_HEAD_SPINWAIT  — per-head .release.gpu/.acquire.gpu readiness flag;
 //      W_UV row-blocks spin-wait per head, removes the merge->W_UV barrier.
-// Levers 4/5 use DEVICE-scope ordering (intra-GPU, one rank's 16 heads) — NOT
+// The per-head merge + W_UV spin-wait use DEVICE-scope ordering (intra-GPU,
+// one rank's 16 heads) — NOT
 // .sys — which is correct and required (the heads are all on this rank).
 
 // W0 tail lighten. The rope(k_pe) + kv_cache append before the q_b->MLA grid
@@ -430,7 +431,7 @@ __device__ __forceinline__ void
       for (int t = 0; t < RBT; t++) {
         uint4 raw = k_lds_u4(cur + (uint32_t)((t * 32 + lane) * 16));
         // MPK per-128-block fp32 weight scale (already the decoded power-of-2),
-        // read as a plain fp32 — same as the production finen GEMV. NO ue8m0.
+        // read as a plain fp32 — same as the production dense GEMV. NO ue8m0.
         float wsc = __ldg(&sn[t][g]);
         acc[t] += k_mac_u4(ah, raw) * wsc;
       }
@@ -526,7 +527,7 @@ __device__ __forceinline__ void
       for (int t = 0; t < RBT; t++) {
         uint4 raw = k_lds_u4(cur + (uint32_t)((t * 32 + lane) * 16));
         // MPK per-128-block fp32 weight scale (already the decoded power-of-2),
-        // read as a plain fp32 — same as the production finen GEMV. NO ue8m0.
+        // read as a plain fp32 — same as the production dense GEMV. NO ue8m0.
         float wsc = __ldg(&sn[t][g]);
         acc[t] += k_mac_u4(ah, raw) * wsc;
       }
@@ -649,7 +650,7 @@ __device__ __forceinline__ void
       for (int t = 0; t < RBT; t++) {
         uint4 raw = k_lds_u4(cur + (uint32_t)((t * 32 + lane) * 16));
         // MPK per-128-block fp32 weight scale (already the decoded power-of-2),
-        // read as a plain fp32 — same as the production finen GEMV. NO ue8m0.
+        // read as a plain fp32 — same as the production dense GEMV. NO ue8m0.
         float wsc = __ldg(&sn[t][g]);
         acc[t] += k_mac_u4(ah, raw) * wsc;
       }
@@ -818,7 +819,7 @@ __device__ __forceinline__ void
 // `rmsnorm_layer(self.x -> hidden_bf16)`, which on B200 (target_cc>=90)
 // dispatches to rms_norm_hopper_impl (rmsnorm_hopper.cuh). To keep the fold as
 // bit-faithful as feasible (sub-ULP fp32-reduction drift can flip a knife-edge
-// bf16 rounding -> token divergence over 61 layers, the same reason R1 mandates
+// bf16 rounding -> token divergence over 61 layers, the same reason we use
 // rsqrtf over 1.0f/sqrtf), the reduction here mirrors rmsnorm_hopper EXACTLY:
 //   - fp32 promote of every element;
 //   - intra-warp partial via __shfl_XOR_sync (matches rmsnorm_hopper:150-153);
@@ -1633,7 +1634,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   //   input_ln_w = ln_weights        (offset 0)
   //   q_a_ln_w   = ln_weights + 7168 (offset K_HIDDEN)
   //   kv_a_ln_w  = ln_weights + 8704 (offset K_HIDDEN + K_QLORA)
-  // R3: assert the concatenation offsets at
+  // Assert the concatenation offsets at
   // compile time. The kernel only sees a raw pointer (no runtime length), so a
   // static_assert on the layout constants is the strongest available guard —
   // the builder MUST cat exactly [input_ln(K_HIDDEN) | q_a_ln(K_QLORA) |
@@ -1711,7 +1712,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   // (s_score holds 512 floats = the per-head scores; also reused as s_attn in
   // mla_merge_quant — both are <=512 floats, block-local.)
   soff += attn_au16((size_t)512 * sizeof(float));
-  // Levers 1-3 block-local activation buffer (28KB f32). ALIASED across three
+  // Block-local activation buffer (28KB f32). ALIASED across three
   // NON-OVERLAPPING phases: qkv_a reads s_act[0:7168]
   // (dequant hidden), q_b reads s_act[0:1536] (q_a_layernorm deq), o_proj reads
   // s_act[0:2048] (g_red deq). One buffer subsumes the prior per-phase buffers.
@@ -1876,7 +1877,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                                      lane,
                                      my_wbuf);
   // === HAZARD #1: ZERO-BEFORE-BARRIER ===================================
-  // Levers 4 & 5: zero the per-head completion counters AND readiness flags
+  // Zero the per-head completion counters AND readiness flags
   // BEFORE the q_b->MLA grid barrier below. That barrier's __threadfence
   // (inside attn_grid_barrier) is what publishes these zero stores to EVERY
   // CTA, so the MLA partials that follow see a FRESHLY-ZEROED count for THIS

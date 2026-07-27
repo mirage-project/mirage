@@ -373,7 +373,7 @@ void register_mugraph(
             if (task_type == TASK_ASSEMBLE_Q_DECODE_SM100) {
               task.task_metadata.request_id = bid.x;
             }
-            // transpose_scale_sm100 (B13): grid_x CTAs stripe M.
+            // transpose_scale_sm100: grid_x CTAs stripe M.
             // request_id = bid.x = the CTA's chunk index.
             if (task_type == TASK_TRANSPOSE_SCALE_SM100) {
               task.task_metadata.request_id = bid.x;
@@ -539,8 +539,7 @@ void register_mugraph(
             // Each CTA owns one BM=BM_PADDING-row slice of the permuted
             // buffer, so request_id = bid.x identifies the expert this
             // CTA processes. The codegen uses it to early-return when
-            // active_expert_mask says no token routed to that expert
-            // (D3 follow-up to D1 — same skip pattern, lighter wiring).
+            // active_expert_mask says no token routed to that expert.
             if (task_type == TASK_SILU_MUL) {
               task.task_metadata.request_id = bid.x;
             }
