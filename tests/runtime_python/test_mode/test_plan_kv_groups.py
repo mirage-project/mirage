@@ -145,35 +145,69 @@ def test_layer_info_and_assignments():
         plan.layer_assignments(num_layers=7)
 
 
-def test_allocate_slots_stacked_shape_and_uniform_block_size_guard():
+def test_allocate_pool_slots_are_per_layer_and_do_not_alias():
+    # per_entry_bytes must match what the caller actually stores: an (8, 16)
+    # bf16 entry is 256 B. Going through the pool makes the two agree by
+    # construction — declaring 64 here would overrun the page budget.
     specs = [
-        KVSpec("full", per_entry_bytes=64, layer_ids=(0, 1),
+        KVSpec("full", per_entry_bytes=256, layer_ids=(0, 1),
               preferred_block_size=64),
-        KVSpec("window", per_entry_bytes=64, layer_ids=(2, 3),
+        KVSpec("window", per_entry_bytes=256, layer_ids=(2, 3),
               window_size=128, preferred_block_size=64),
     ]
     plan = plan_kv_groups(specs)
-    stacked = plan.allocate_slots(entry_shape=(8, 16), max_num_pages=32)
-    assert tuple(stacked.shape) == (plan.num_slots, 32, 64, 8, 16)
     assert plan.num_slots == 2
-    assert stacked.dtype.__str__() == "torch.bfloat16"
-    # Per-slot slicing gives the per-layer view a builder attaches — two
-    # different slices must NOT alias each other's memory.
-    stacked[0].fill_(1.0)
-    stacked[1].fill_(2.0)
-    assert (stacked[0] == 1.0).all()
-    assert (stacked[1] == 2.0).all()
+    layout = [("kv", (8, 16), torch.bfloat16)]
+    pool, views = plan.allocate_pool({"full": layout, "window": layout},
+                                     max_num_pages=32, device="cpu")
+    by = {g.spec_name: g.group_id for g in plan.groups}
+    cache = views[by["full"]]["kv"]
+    assert tuple(cache.shape) == (2, 32, 64, 8, 16)
+    assert cache.dtype == torch.bfloat16
+    # Slots are layers: slicing [slot_id] is what a builder attaches, and two
+    # slots must not alias each other.
+    cache[0].fill_(1.0)
+    cache[1].fill_(2.0)
+    assert (cache[0] == 1.0).all()
+    assert (cache[1] == 2.0).all()
+    # Two streams reading a page the same way get the same bytes; they are
+    # told apart by which page ids they hold, not by separate allocations.
+    assert views[by["window"]]["kv"].data_ptr() == cache.data_ptr()
 
-    # Multi-bucket (differing block_size across groups) is out of scope for
-    # this helper — should refuse loudly, not silently pick one.
+
+def test_allocate_pool_handles_streams_with_different_entry_sizes():
+    # Entries of 8 B and 800 B carve the same 6400 B page into 800 and 8
+    # slots respectively. One pool serves both; this is the case a single
+    # shared entry layout could not express.
     fat = KVSpec("fat", per_entry_bytes=8, layer_ids=(0,),
                 preferred_block_size=64)
     thin = KVSpec("thin", per_entry_bytes=800, layer_ids=(1,),
                  preferred_block_size=8)
-    mixed_plan = plan_kv_groups([fat, thin], target_page_bytes=6400)
-    assert len({g.block_size for g in mixed_plan.groups}) > 1  # sanity
+    plan = plan_kv_groups([fat, thin], target_page_bytes=6400)
+    by = {g.spec_name: g for g in plan.groups}
+    assert by["fat"].entries_per_page == 800
+    assert by["thin"].entries_per_page == 8
+
+    pool, views = plan.allocate_pool(
+        {"fat": [("kv", (4,), torch.bfloat16)],      # 8 B entries
+         "thin": [("kv", (400,), torch.bfloat16)]},  # 800 B entries
+        max_num_pages=16, device="cpu")
+    assert tuple(pool.shape) == (plan.num_slots, 16, 6400)
+    assert tuple(views[by["fat"].group_id]["kv"].shape) == \
+        (plan.num_slots, 16, 800, 4)
+    assert tuple(views[by["thin"].group_id]["kv"].shape) == \
+        (plan.num_slots, 16, 8, 400)
+    # Same page stride for both, since a page is a page.
+    stride = plan.page_stride_elems(torch.bfloat16)
+    assert views[by["fat"].group_id]["kv"].stride(1) == stride
+    assert views[by["thin"].group_id]["kv"].stride(1) == stride
+
+    # A layout claiming more than the page holds is refused, not truncated.
     with _raises(AssertionError):
-        mixed_plan.allocate_slots(entry_shape=(4,), max_num_pages=16)
+        plan.allocate_pool(
+            {"fat": [("kv", (4,), torch.bfloat16)],
+             "thin": [("kv", (4000,), torch.bfloat16)]},
+            max_num_pages=16, device="cpu")
 
 
 def test_allocate_pool_shares_one_allocation_across_streams():

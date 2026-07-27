@@ -25,7 +25,10 @@ template <typename T,
           int HEAD_DIM,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
-          int MAX_TOKENS = 8>
+          int MAX_TOKENS = 8,
+          // Rows between consecutive pages; forwarded to the chosen
+          // implementation. 0 = packed layout.
+          int PAGE_STRIDE_ROWS = 0>
 __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -54,7 +57,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
                                               HEAD_DIM,
                                               MAX_SEQ_LEN,
                                               PAGE_SIZE,
-                                              MAX_TOKENS>(
+                                              MAX_TOKENS,
+                                              PAGE_STRIDE_ROWS>(
         qkv_ptr,
         paged_k_cache_ptr,
         paged_v_cache_ptr,
@@ -82,7 +86,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
                                                HEAD_DIM,
                                                MAX_SEQ_LEN,
                                                PAGE_SIZE,
-                                               MAX_TOKENS>(
+                                               MAX_TOKENS,
+                                               PAGE_STRIDE_ROWS>(
         qkv_ptr,
         paged_k_cache_ptr,
         paged_v_cache_ptr,

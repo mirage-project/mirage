@@ -22,13 +22,15 @@ Vocabulary:
 Typical flow:
 
     plan = plan_kv_groups([KVSpec(...), KVSpec(...)])
-    cache = plan.allocate_slots(entry_shape, max_num_pages)
+    pool, views = plan.allocate_pool(
+        {"stream": [("k", entry_shape, torch.bfloat16),
+                    ("v", entry_shape, torch.bfloat16)]}, max_num_pages)
     pk = PersistentKernel(
         kv_groups=plan.group_specs(),
         meta_tensors={**other_meta, **plan.build_meta_tensors(...)})
     for layer_id in range(num_layers):
         group_id, slot_id = plan.layer_info(layer_id)
-        pk.attach_input(cache[slot_id], ...)
+        pk.attach_input(views[group_id]["k"][slot_id], ...)
         # pass group_id to the layer
 """
 
@@ -92,7 +94,7 @@ class KVGroupSpec:
 @dataclass
 class KVCachePlan:
     """Planner output: a prescription only. The builder allocates tensors
-    (``allocate_slots``) and wires layers (``layer_info``); the plan itself
+    (``allocate_pool``) and wires layers (``layer_info``); the plan itself
     holds no GPU state."""
 
     @dataclass
@@ -172,20 +174,6 @@ class KVCachePlan:
 
     # ── allocation ────────────────────────────────────────────────────────
 
-    def allocate_slots(self, entry_shape: Sequence[int], max_num_pages: int,
-                       dtype=torch.bfloat16, device: str = "cuda"):
-        """One stacked tensor [num_slots, max_num_pages, block_size,
-        *entry_shape]; the builder attaches slice [slot_id] per layer. Slot
-        sharing needs no special mode — two groups' layers simply slice the
-        same slot_id. Requires a uniform block_size across groups (always
-        true for a single-page-size plan)."""
-        block_sizes = {g.block_size for g in self.groups}
-        assert len(block_sizes) == 1, (
-            f"allocate_slots needs one uniform block_size, got {block_sizes}")
-        (block_size,) = block_sizes
-        return torch.zeros(self.num_slots, max_num_pages, block_size,
-                           *entry_shape, dtype=dtype, device=device)
-
     def allocate_pool(self, entry_layouts, max_num_pages: int,
                       device: str = "cuda"):
         """The entire KV cache as ONE allocation, plus typed views.
@@ -208,7 +196,8 @@ class KVCachePlan:
             stream's per_entry_bytes.
         Returns ``(pool, views)``; ``views[group_id][component_name]`` is
             shaped ``[num_slots, max_num_pages, entries_per_page,
-            *entry_shape]`` and aliases ``pool``, so keep ``pool`` alive.
+            *entry_shape]``. The views alias ``pool`` and keep its storage
+            alive on their own; ``pool`` is returned for accounting.
 
         EVERY view has page stride == target_page_bytes, which is >= its
         packed entry span whenever the stream has more than one component or

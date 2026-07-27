@@ -368,6 +368,32 @@ def get_compile_command(
     return common_cmd + specific_cmd + flags
 
 
+def _page_stride_rows(*caches):
+    """Rows between consecutive pages of a paged cache shaped
+    [num_pages, entries_per_page, *entry_shape].
+
+    A cache carved out of the shared KV pool is strided by the whole page,
+    which is wider than its own entries whenever the page carries padding or
+    a sibling component (K next to V). A dedicated cache is packed, and the
+    two coincide. Kernels take this instead of assuming pages sit back to
+    back; every cache in one task must agree."""
+    rows = []
+    for c in caches:
+        if c is None:
+            continue
+        row_elems = 1
+        for d in range(2, c.num_dims):
+            row_elems *= c.dim(d)
+        stride = c.stride[0]
+        assert stride % row_elems == 0, (
+            f"paged cache page stride {stride} is not a multiple of its "
+            f"{row_elems}-element row")
+        rows.append(stride // row_elems)
+    assert len(set(rows)) == 1, (
+        f"paged caches in one task disagree on page stride: {rows}")
+    return rows[0]
+
+
 class PersistentKernel:
     def __init__(
         self,
@@ -1223,39 +1249,41 @@ class PersistentKernel:
         # params[3]: rotary_embed
         # params[4]: max_seq_len
         # params[5]: page_size
-        # params[6]: q_len_override (only included if non-zero; for Eagle3 K>1 chain)
-        # params[7]: tail_offset    (only included if non-zero; for Eagle3 K>1 chain)
-        # params[8]: rotary_dim     (0 = head_dim; GLM-4.6 partial RoPE)
-        # params[9]: qk-norm eps float bits (default 1e-6)
-        # params[10]: window_size   (0 = full causal)
-        # params[11]: has_sink      (1 = an 8th input holds the sinks)
-        # params[12]: group_id      (which KV group's page table this reads)
-        # Trailing fields are only emitted when non-default (legacy sizes 6/8),
-        # but a field keeps its index, so wanting a later one materialises the
-        # earlier ones at their defaults.
+        # params[6]:  q_len_override (Eagle3 K>1 chain)
+        # params[7]:  tail_offset    (Eagle3 K>1 chain)
+        # params[8]:  rotary_dim     (0 = head_dim; GLM-4.6 partial RoPE)
+        # params[9]:  qk-norm eps float bits (default 1e-6)
+        # params[10]: window_size    (0 = full causal)
+        # params[11]: has_sink       (1 = an 8th input holds the sinks)
+        # params[12]: group_id       (which KV group's page table this reads)
+        # params[13]: page_stride_rows (0 = packed pages)
+        # A field keeps its index, so the tail is emitted up to the last
+        # non-default one and then rounded up to a size the C++ side accepts.
         import struct
         has_sink = 1 if sinks is not None else 0
         if has_sink:
             assert sinks.num_dims == 2  # (num_kv_heads, num_q_heads/num_kv)
             assert sinks.dim(0) == num_kv_heads
             assert sinks.dim(1) == num_q_heads // num_kv_heads
+        eps_bits = struct.unpack("i", struct.pack("f", qk_norm_eps))[0]
+        default_eps_bits = struct.unpack("i", struct.pack("f", 1e-6))[0]
+        # Packed pages are the default; 0 tells the kernel to derive the
+        # stride from the page size.
+        stride_rows = _page_stride_rows(k_cache, v_cache)
+        stride_field = 0 if stride_rows == block_size else stride_rows
+        tail = [q_len_override, tail_offset, rotary_dim, eps_bits,
+                window_size, has_sink, group_id, stride_field]
+        defaults = [0, 0, 0, default_eps_bits, 0, 0, 0, 0]
+        n = 0
+        for idx, (got, want) in enumerate(zip(tail, defaults)):
+            if got != want:
+                n = idx + 1
+        for allowed in (0, 2, 4, 5, 6, 7, 8):   # total sizes 6,8,10,11,12,13,14
+            if allowed >= n:
+                n = allowed
+                break
         params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
-                  self.max_seq_length, block_size]
-        tail = (q_len_override != 0 or tail_offset != 0 or rotary_dim != 0
-                or qk_norm_eps != 1e-6 or window_size != 0 or has_sink
-                or group_id != 0)
-        if tail:
-            params.extend([q_len_override, tail_offset])
-        if (rotary_dim != 0 or qk_norm_eps != 1e-6 or window_size != 0
-                or has_sink or group_id != 0):
-            eps_bits = struct.unpack("i", struct.pack("f", qk_norm_eps))[0]
-            params.extend([rotary_dim, eps_bits])
-        if window_size != 0 or has_sink or group_id != 0:
-            params.append(window_size)
-        if has_sink or group_id != 0:
-            params.append(has_sink)
-        if group_id != 0:
-            params.append(group_id)
+                  self.max_seq_length, block_size] + tail[:n]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
@@ -1342,7 +1370,8 @@ class PersistentKernel:
         # params[4]: max_seq_len
         # params[5]: page_size
         # params[6]: num_kv_chunks
-        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, block_size, num_kv_chunks, group_id]
+        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, block_size, num_kv_chunks, group_id,
+                  _page_stride_rows(k_cache, v_cache)]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
@@ -1435,7 +1464,8 @@ class PersistentKernel:
         d_k, d_v, page_size = mla_params
         page_size = self._resolve_kv_block_size(
             group_id, explicit_page_size=page_size, cache_dt=paged_cache)
-        params = [d_k, d_v, page_size, group_id]
+        params = [d_k, d_v, page_size, group_id,
+                  _page_stride_rows(paged_cache)]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
         tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
@@ -1466,7 +1496,8 @@ class PersistentKernel:
         d_k, d_v, page_size = mla_params
         page_size = self._resolve_kv_block_size(
             group_id, explicit_page_size=page_size, cache_dt=paged_cache)
-        params = [d_k, d_v, page_size, group_id]
+        params = [d_k, d_v, page_size, group_id,
+                  _page_stride_rows(paged_cache)]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
         tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)

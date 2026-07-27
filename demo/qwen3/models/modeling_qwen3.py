@@ -422,16 +422,22 @@ class Qwen3Model(Qwen3PreTrainedModel):
                 preferred_block_size=page_size)
                 
         self.kv_plan = kv_plan
-        # KV cache layout is (L, N, P, H, D): L is kv_plan.num_slots
-        # (see KVCachePlan.allocate_slots); N is the max number of pages,
-        # P is the page size; H is the number of key-value heads;
-        # D is the hidden dim size.
+        # One page pool for the whole cache. K and V are two COMPONENTS of a
+        # page, matching per_entry_bytes above, which counts both: a page id
+        # therefore covers a layer's K and V together, drawn once from the
+        # shared free list. Each view keeps the (L, N, P, H, D) shape the
+        # layers and kernels already expect — L is kv_plan.num_slots, N the
+        # max number of pages, P the page size in tokens — and differs only
+        # in being strided by the whole page.
         entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
-        
-        key_cache = kv_plan.allocate_slots(
-            entry_shape=entry_shape, max_num_pages=max_num_pages)
-        value_cache = kv_plan.allocate_slots(
-            entry_shape=entry_shape, max_num_pages=max_num_pages)
+        self.kv_pool, kv_views = kv_plan.allocate_pool(
+            {g.spec_name: [("k", entry_shape, torch.bfloat16),
+                           ("v", entry_shape, torch.bfloat16)]
+             for g in kv_plan.groups},
+            max_num_pages=max_num_pages)
+        (group_id,) = {g.group_id for g in kv_plan.groups}
+        key_cache = kv_views[group_id]["k"]
+        value_cache = kv_views[group_id]["v"]
 
         self.kv_cache = (key_cache, value_cache)
         self.embed_tokens = nn.Embedding(
