@@ -43,7 +43,8 @@
    "delta_basis": "lower bound = half its wall span recovered, upper bound = all of it",
    "risk": "medium - numerics. The fp32-preserved-scale path (M2-I12/I13, tasks 279/241/242) consumes quantize_fp8_layer(scale_ue8m0=False); any change must reproduce the same fp8 bytes AND the same fp32 block scales bit-for-bit.",
    "verify_cmd": "bash opt/gpu_guard_m3i1.sh 6,0,1 -- bash opt/run_m3i1.sh all && python3 opt/analyze.py  # compare TASK_QUANTIZE_FP8_SM100 wallspan + step_us in attribution.csv; then run_ac3.py per-case vs results/run_report_all_bs.json",
-   "suggested_owner_issue": "NEW M3-I8 (fuse quantize into norm/silu epilogues); adjacent to M3-I4"
+   "suggested_owner_issue": "NEW M3-I8 (fuse quantize into norm/silu epilogues); adjacent to M3-I4",
+   "disposition": "VALIDATED+LANDED (M3-I2b window 2026-07-26): quantize row-partition (input_map was unpartitioned -> 16x redundant); +28.3% bs1, +18-31% all bs, tokens bit-identical; evidence opt/m3i2b/."
   },
   {
    "rank": 2,
@@ -95,7 +96,8 @@
    "delta_basis": "idealised schedule = 36 prefill iterations at the measured 25.5 ms mixed-iteration cost + 107 decode iterations at the measured 22.0 ms",
    "risk": "medium-high - changes admission and therefore AC-5 e2e and the GDN slot-compaction hazard surface (HAZARD-COMPACTION).",
    "verify_cmd": "python3 opt/schedule_sim.py opt/meta/meta_bs16_rep0.json  # n_decode_full must become > 0 and n_prefill_or_mixed must fall toward 36",
-   "suggested_owner_issue": "M3-I2b + M3-I5b (router row loop LANDED prepared; the mbt A/B protocol + simulator sweep is opt/m3i5b/prep.md \u00a75. schedule_sim over the committed metas: bs16 iterations 203 -> 123 at mbt=32 and 114 at mbt=64, decode_full 0 -> 54; bs1-bs8 gain <=2.7%, so the padding cost is expected to dominate below bs16)"
+   "suggested_owner_issue": "M3-I2b + M3-I5b (router row loop LANDED prepared; the mbt A/B protocol + simulator sweep is opt/m3i5b/prep.md \u00a75. schedule_sim over the committed metas: bs16 iterations 203 -> 123 at mbt=32 and 114 at mbt=64, decode_full 0 -> 54; bs1-bs8 gain <=2.7%, so the padding cost is expected to dominate below bs16)",
+   "disposition": "IN VALIDATION (M3-I9 window running 2026-07-27): per-request-token-cap=1 knob landed CPU-gated (74df41f); plan_m3i9.sh stages 0-8 incl. free falsifier, codegen identity, AC-3 gate, matched-geometry re-measure (also covers rank 11)."
   },
   {
    "rank": 5,
@@ -214,7 +216,8 @@
    "delta_basis": "n/a",
    "risk": "high if ignored - an M3 exit claim built on AC-3-geometry numbers is not comparable to the AC-4 baseline",
    "verify_cmd": "extend opt/profile_wave.py with synthetic 256-token prompts and max_seq_length=1280, re-run the capture, and recompute gap_vs_vllm.csv",
-   "suggested_owner_issue": "M3-I7 (the milestone gate) must consume the 256/1024 numbers, not these"
+   "suggested_owner_issue": "M3-I7 (the milestone gate) must consume the 256/1024 numbers, not these",
+   "disposition": "IN VALIDATION: stage 7 of the M3-I9 window (256/1024 msl=1280, both arms, all bs)."
   }
  ]
 }
