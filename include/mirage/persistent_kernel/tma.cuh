@@ -1721,8 +1721,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
     case TASK_FP8_GROUP_GEMM_LARGEM_SM100: {
       // 5 TMA descriptors: A (param 0), B (param 1), SFA (param 2),
       // SFB (param 3), D output (output param 0). param_id 4 (m_indices) is
-      // direct LDG, not TMA. B/SFB box dim depends on BN: smallm uses BN=64
-      // (one TMA load = 64 rows of B), largem BN=128.
+      // direct LDG, not TMA. B/SFB box dim uses largem BN=128.
       constexpr CUtensorMapInterleave interleave =
           CU_TENSOR_MAP_INTERLEAVE_NONE;
       constexpr CUtensorMapL2promotion l2_none =

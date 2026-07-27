@@ -6,7 +6,7 @@ DeepSeek-V3 builder; the kernel hard-codes 1e-6f).
 
 DSV3 facts: HIDDEN=7168 (NOT TP-sharded), dtype bf16 -> this is a bs-only
 sweep. The grid mirrors the builder's ``_rmsnorm_grid`` at the default
-``MPK_DSV3_RMSNORM_ROWS_PER_TASK=1`` (one row per CTA -> grid.x = bs) and
+one row per CTA (grid.x = bs) and
 ``block_dim=(128,1,1)``.
 """
 

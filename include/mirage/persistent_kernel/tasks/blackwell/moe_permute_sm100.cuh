@@ -22,7 +22,7 @@ namespace kernel {
 // ============================================================================
 //
 // Build the pre-permuted input layout that the PR-674 grouped FP8 GEMM
-// (`fp8_group_gemm_smallm/largem_sm100`) consumes, while keeping the
+// (`fp8_group_gemm_largem_sm100`) consumes, while keeping the
 // MPK-level builder interface aligned with the OLD MoE path
 // (`routing_indices`, `mask`, `(mbt, K)` input, `(mbt, hidden)` output).
 //

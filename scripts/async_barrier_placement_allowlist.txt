@@ -7,7 +7,7 @@
 # check also fails if an entry becomes stale, so the list cannot rot silently.
 #
 # Migrated out of the arena (do NOT re-add): the four FP8-GEMM common bodies,
-# fp8_group_gemm_largem_compact, linear_sm100_mpk, linear_fp8_swapAB_sm100,
+# linear_sm100_mpk, linear_fp8_swapAB_sm100,
 # moe_linear_sm100, fp8_group_gemm_sm100, and the three mla_prefill_tp8*.
 
 # --- Blackwell (sm_100a) -----------------------------------------------------

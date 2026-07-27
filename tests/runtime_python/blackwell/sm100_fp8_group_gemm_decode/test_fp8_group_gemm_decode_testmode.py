@@ -1,8 +1,8 @@
 """DSV3 permuted grouped FP8 GEMM via PersistentKernel test_mode.
 
-Exercises `fp8_group_gemm_layer` (the production NEW-MoE call, env
-MPK_DSV3_NEW_MOE=1) end-to-end through the full MPK compile/run pipeline.
-The layer auto-dispatches to fp8_group_gemm_{smallm,largem}_sm100 by
+Exercises `fp8_group_gemm_layer` (the production MoE call) end-to-end
+through the full MPK compile/run pipeline. The layer dispatches to
+fp8_group_gemm_largem_sm100 by
 (K, M_per_expert): K>4096 and MPE<=8 -> smallm (BN=64), else largem (BN=128).
 
 Two DSV3 routed-expert shapes are covered (ep_size=1 -> routed_tp = world_size):
