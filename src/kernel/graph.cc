@@ -961,17 +961,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(5, 0, TASK_MLA_KV_GATHER_SPLIT_SM100, variant_id);
-  } else if (name == "mla_kv_gather_unified_sm100") {
-    int variant_id = task_register->register_mla_kv_gather_unified_sm100_task(
-        customized->bgraph, params);
-    // 2 inputs (c_latent_new, k_pe_new) + 4 store_in_dmem slots; we track
-    // ckv_sep and kpe_sep as outputs so downstream consumers
-    // (quantize_kv_b_k / quantize_kv_b_v / identity copies) get dependency
-    // edges. paged_cache and contiguous_kv stay in input slots because
-    // they're attach_input torch tensors written in-place across iters
-    // (their consumers are naturally serialized by EVENT_END_OF_TASK_GRAPH).
-    task_config[op] =
-        std::make_tuple(4, 2, TASK_MLA_KV_GATHER_UNIFIED_SM100, variant_id);
   } else if (name == "deepseek_mla_rope_q_sm100") {
     int variant_id = task_register->register_deepseek_mla_rope_q_sm100_task(
         customized->bgraph, params);

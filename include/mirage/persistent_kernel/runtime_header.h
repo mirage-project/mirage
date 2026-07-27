@@ -184,24 +184,15 @@ enum TaskType {
   // DFlash standalone paged KV-cache store (L4 materialize write), SM100.
   TASK_DFLASH_KV_STORE_SM100 = 298,
   // DeepSeek-V3 MLA decode/prefill tasks.
-  TASK_MLA_UNIFIED_SM100 = 326,
-  TASK_MLA_KV_GATHER_UNIFIED_SM100 = 327,
   TASK_MLA_PREFILL_TP8_CHUNKED_SM100 = 328,
-  TASK_MLA_PREFILL_TP8_CHUNKED_SPLITK_SM100 = 329,
   TASK_DEEPSEEK_MLA_ROPE_SM100 = 304,
-  TASK_MLA_PREFILL_TP8_CHUNKED_REDUCE_SM100 = 305,
   // BF16 CUDA-core GEMV for the DSv3 router gate (hidden @ W_gate.T -> logits).
   TASK_DSV3_ROUTER_GATE_GEMV_SM100 = 318,
   TASK_FP8_GEMM_DENSE_SM100 = 306,
   TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100 = 309,
-  TASK_FP8_GROUP_GEMM_SMALLM_SM100 = 311, // BN=64, NS=8
   TASK_FP8_GROUP_GEMM_LARGEM_SM100 = 312, // BN=128, NS=6
   TASK_MOE_PERMUTE_SM100 = 313,
   TASK_MOE_UNPERMUTE_SM100 = 314,
-  TASK_TRANSPOSE_SCALE_SM100 = 315,
-  TASK_ASSEMBLE_Q_DECODE_SM100 = 316,
-  TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_SM100 = 317,
-  TASK_FP8_GROUP_GEMM_LARGEM_COMPACT_FUSED_SM100 = 321,
   TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
   // bs=1 contiguous KV append (replaces paged-cache append + gather).
   TASK_MLA_KV_APPEND_SM100 = 323,
@@ -210,9 +201,6 @@ enum TaskType {
   // Fully-fused FFN megakernel (default decode MoE-FFN path): rmsnorm +
   // router-gate-GEMV + topk-sigmoid + the MoE chain.
   TASK_FFN_FULL_MEGAKERNEL_SM100 = 325,
-  // Fully-fused dense-MLP megakernel: post-attn RMSNorm + W13 GEMV +
-  // silu(gate)*up + W2 GEMV -> bf16 (pre-AllReduce).
-  TASK_DSV3_DENSE_MLP_FUSED_SM100 = 307,
   TASK_SM100_TASK_END = 330, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
