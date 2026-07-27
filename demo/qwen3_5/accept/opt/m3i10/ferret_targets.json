@@ -1,847 +1,851 @@
 {
-  "schema_version": "1.0",
-  "issue": "M3-I10",
-  "generated_utc": "2026-07-27",
-  "basis": {
-    "vllm": "per-kernel decode profile at the binding baseline identity, this issue (tables/bs*_kernels.csv)",
-    "mpk": "committed M3-I1 per-task wall spans (opt/pertask_by_bs.csv), NOT re-measured here",
-    "target_rule": "beat the corresponding vLLM kernel by 20-30 % => target = 0.70-0.80 x the vLLM number",
-    "caveat": "MPK numbers are at the AC-3 geometry (max_seq_length 132); vLLM at 256/1024. Only the attention row is materially context-sensitive - measured at +8 % from ctx 260 to ctx 556-896."
+ "schema_version": "1.0",
+ "issue": "M3-I10",
+ "generated_utc": "2026-07-27",
+ "basis": {
+  "vllm": "per-kernel decode profile at the binding baseline identity, this issue (tables/bs*_kernels.csv)",
+  "mpk": "committed M3-I1 per-task wall spans (opt/pertask_by_bs.csv), NOT re-measured here",
+  "target_rule": "beat the corresponding vLLM kernel by 20-30 % => target = 0.70-0.80 x the vLLM number",
+  "caveat": "MPK numbers are at the AC-3 geometry (max_seq_length 132); vLLM at 256/1024. Only the attention row is materially context-sensitive - measured at +8 % from ctx 260 to ctx 556-896."
+ },
+ "targets": [
+  {
+   "rank": 1,
+   "mpk_task": "237 TASK_GDN_RECURRENT_SM100",
+   "vllm_kernel": "fused_recurrent_gated_delta_rule_packed_decode_kernel (Triton, vLLM qwen_gdn_linear_attn)",
+   "why": "worst ratio at every batch size and the only one that GROWS with batch (7.4x -> 9.1x -> 10.8x). Dominates the bs16 gap.",
+   "shape": "30 GDN layers; 32 value heads x 16 key heads, head_dim 128; recurrent state [32,128,128] fp32 per request (128.8 MB/token/step); decay g fp32, beta bf16",
+   "sites_per_step": 30,
+   "vllm_us_per_call": {
+    "bs1": 5.455,
+    "bs8": 9.014,
+    "bs16": 15.425
+   },
+   "vllm_us_per_step": {
+    "bs1": 163.65,
+    "bs8": 270.43,
+    "bs16": 462.74
+   },
+   "mpk_us_per_step": {
+    "bs1": 1217.0,
+    "bs8": 2462.0,
+    "bs16": 4979.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 7.44,
+    "bs8": 9.1,
+    "bs16": 10.76
+   },
+   "target_us_per_call": {
+    "bs1": 4.36,
+    "bs8": 7.21,
+    "bs16": 12.34
+   },
+   "target_us_per_step": {
+    "bs1": 130.9,
+    "bs8": 216.3,
+    "bs16": 370.2
+   },
+   "step_gain_if_met_us": {
+    "bs1": 1086,
+    "bs8": 2246,
+    "bs16": 4609
+   },
+   "roofline": {
+    "kernel_or_stage": "GDN recurrent state rd+wr x30",
+    "bytes_per_step_bs1": 125829120,
+    "MB_per_step_bs1": 120.0,
+    "us_per_step_bs1": 163.65,
+    "achieved_TB_s_bs1": 0.769,
+    "pct_of_HBM_roof_bs1": 9.61,
+    "roofline_us_bs1": 15.73,
+    "headroom_x_bs1": 10.4,
+    "us_per_step_bs8": 270.43,
+    "MB_per_step_bs8": 960.0,
+    "achieved_TB_s_bs8": 3.722,
+    "pct_of_HBM_roof_bs8": 46.53,
+    "roofline_us_bs8": 125.83,
+    "headroom_x_bs8": 2.15,
+    "us_per_step_bs16": 462.74,
+    "MB_per_step_bs16": 1920.0,
+    "achieved_TB_s_bs16": 4.351,
+    "pct_of_HBM_roof_bs16": 54.38,
+    "roofline_us_bs16": 251.66,
+    "headroom_x_bs16": 1.84
+   },
+   "roofline_reading": "vLLM runs at 54.4 % of the 8 TB/s B200 HBM roof at bs16 (1.92 GB of fp32 state in 462.7 us, 1.8x off roofline) - it is genuinely bandwidth-bound. MPK at 4979 us is ~5 % of roof. This is a BANDWIDTH target, not a 20-30 % target: the roofline for the stage is 252 us at bs16."
   },
-  "targets": [
-    {
-      "rank": 1,
-      "mpk_task": "237 TASK_GDN_RECURRENT_SM100",
-      "vllm_kernel": "fused_recurrent_gated_delta_rule_packed_decode_kernel (Triton, vLLM qwen_gdn_linear_attn)",
-      "why": "worst ratio at every batch size and the only one that GROWS with batch (7.4x -> 9.1x -> 10.8x). Dominates the bs16 gap.",
-      "shape": "30 GDN layers; 32 value heads x 16 key heads, head_dim 128; recurrent state [32,128,128] fp32 per request (128.8 MB/token/step); decay g fp32, beta bf16",
-      "sites_per_step": 30,
-      "vllm_us_per_call": {
-        "bs1": 5.455,
-        "bs8": 9.014,
-        "bs16": 15.425
-      },
-      "vllm_us_per_step": {
-        "bs1": 163.65,
-        "bs8": 270.43,
-        "bs16": 462.74
-      },
-      "mpk_us_per_step": {
-        "bs1": 1217.0,
-        "bs8": 2462.0,
-        "bs16": 4979.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 7.44,
-        "bs8": 9.1,
-        "bs16": 10.76
-      },
-      "target_us_per_call": {
-        "bs1": 4.36,
-        "bs8": 7.21,
-        "bs16": 12.34
-      },
-      "target_us_per_step": {
-        "bs1": 130.9,
-        "bs8": 216.3,
-        "bs16": 370.2
-      },
-      "step_gain_if_met_us": {
-        "bs1": 1086,
-        "bs8": 2246,
-        "bs16": 4609
-      },
-      "roofline": {
-        "kernel_or_stage": "GDN recurrent state rd+wr x30",
-        "bytes_per_step_bs1": 125829120,
-        "MB_per_step_bs1": 120.0,
-        "us_per_step_bs1": 163.65,
-        "achieved_TB_s_bs1": 0.769,
-        "pct_of_HBM_roof_bs1": 9.61,
-        "roofline_us_bs1": 15.73,
-        "headroom_x_bs1": 10.4,
-        "us_per_step_bs8": 270.43,
-        "MB_per_step_bs8": 960.0,
-        "achieved_TB_s_bs8": 3.722,
-        "pct_of_HBM_roof_bs8": 46.53,
-        "roofline_us_bs8": 125.83,
-        "headroom_x_bs8": 2.15,
-        "us_per_step_bs16": 462.74,
-        "MB_per_step_bs16": 1920.0,
-        "achieved_TB_s_bs16": 4.351,
-        "pct_of_HBM_roof_bs16": 54.38,
-        "roofline_us_bs16": 251.66,
-        "headroom_x_bs16": 1.84
-      },
-      "roofline_reading": "vLLM runs at 54.4 % of the 8 TB/s B200 HBM roof at bs16 (1.92 GB of fp32 state in 462.7 us, 1.8x off roofline) - it is genuinely bandwidth-bound. MPK at 4979 us is ~5 % of roof. This is a BANDWIDTH target, not a 20-30 % target: the roofline for the stage is 252 us at bs16."
-    },
-    {
-      "rank": 2,
-      "mpk_task": "275 TASK_QUANTIZE_FP8_SM100",
-      "vllm_kernel": "per_token_group_quant_8bit_kernel<BFloat16, Float8_e4m3fn, ...> (vLLM csrc per_token_group_quant.cu)",
-      "why": "largest absolute gap at bs1 (3981 us/step) and second largest at bs8/bs16. vLLM issues 200 quantize launches/step and still costs 8x less than MPK's 3840 quantize tasks.",
-      "shape": "200 call sites/step: 160 dense (group=128 along K; K in {2048,4096,512,1024}) + 40 MoE routed activations (scales transposed to [K/128, M]). M = live tokens (MPK pads to mbt=16).",
-      "sites_per_step": 200,
-      "vllm_us_per_call": {
-        "bs1": 2.796,
-        "bs8": 3.103,
-        "bs16": 3.031
-      },
-      "vllm_us_per_step": {
-        "bs1": 559.3,
-        "bs8": 620.5,
-        "bs16": 606.2
-      },
-      "mpk_us_per_step": {
-        "bs1": 4540.0,
-        "bs8": 4406.0,
-        "bs16": 4244.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 8.12,
-        "bs8": 7.1,
-        "bs16": 7.0
-      },
-      "target_us_per_step": {
-        "bs1": 447.4,
-        "bs8": 496.4,
-        "bs16": 485.0
-      },
-      "step_gain_if_met_us": {
-        "bs1": 4093,
-        "bs8": 3910,
-        "bs16": 3759
-      },
-      "note": "A 10x kernel win is implausible; the M3-I1 backlog rank-1 lever (fuse quantize into the producing task, and stop computing mbt=16 rows at bs<16) is the mechanism. Ferret should target the standalone kernel at 0.7-0.8x vLLM AND the fusion should remove most of the 200 sites.",
-      "roofline": {
-        "kernel_or_stage": "quantize / fp8 casts (200 sites)",
-        "bytes_per_step_bs1": 1044480,
-        "MB_per_step_bs1": 1.0,
-        "us_per_step_bs1": 559.28,
-        "achieved_TB_s_bs1": 0.002,
-        "pct_of_HBM_roof_bs1": 0.02,
-        "roofline_us_bs1": 0.13,
-        "headroom_x_bs1": 4283.7,
-        "us_per_step_bs8": 620.5,
-        "MB_per_step_bs8": 7.97,
-        "achieved_TB_s_bs8": 0.013,
-        "pct_of_HBM_roof_bs8": 0.17,
-        "roofline_us_bs8": 1.04,
-        "headroom_x_bs8": 594.08,
-        "us_per_step_bs16": 606.23,
-        "MB_per_step_bs16": 15.94,
-        "achieved_TB_s_bs16": 0.028,
-        "pct_of_HBM_roof_bs16": 0.34,
-        "roofline_us_bs16": 2.09,
-        "headroom_x_bs16": 290.21
-      },
-      "roofline_reading": "The whole 200-site stage moves ~1 MB at bs1 and vLLM still spends 559 us on it - 4284x off roofline, i.e. pure launch overhead. A faster quantize KERNEL recovers almost nothing; the mechanism is fusion into the producing task plus not computing mbt=16 rows at bs<16."
-    },
-    {
-      "rank": 3,
-      "mpk_task": "241 TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
-      "vllm_kernel": "bmm_E4m3_E4m3E4m3_Fp32_t128x8x128u2_s8_et64x8_m64x8x32_...sm100f (FlashInfer TRT-LLM fp8 block-scale fused MoE, gemm1)",
-      "why": "largest absolute gap at bs8/bs16; MPK streams ~7x more expert weight than it uses at bs1 (56.4 live expert groups vs the 8 top-8 routing needs).",
-      "shape": "40 layers; w13 [256 experts, 1024, 2048] fp8 block-scale 128x128; top-8 of 256; M = bs tokens routed, grid = min(num_experts, mbt*topk) = 128 groups in MPK regardless of batch",
-      "sites_per_step": 40,
-      "vllm_us_per_call": {
-        "bs1": 8.414,
-        "bs8": 21.996,
-        "bs16": 28.081
-      },
-      "vllm_us_per_step": {
-        "bs1": 336.56,
-        "bs8": 879.83,
-        "bs16": 1123.23
-      },
-      "mpk_us_per_step": {
-        "bs1": 3084.0,
-        "bs8": 4696.0,
-        "bs16": 5009.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 9.16,
-        "bs8": 5.34,
-        "bs16": 4.46
-      },
-      "target_us_per_call": {
-        "bs1": 6.73,
-        "bs8": 17.6,
-        "bs16": 22.46
-      },
-      "target_us_per_step": {
-        "bs1": 269.2,
-        "bs8": 703.9,
-        "bs16": 898.6
-      },
-      "step_gain_if_met_us": {
-        "bs1": 2815,
-        "bs8": 3992,
-        "bs16": 4110
-      },
-      "note": "M3-I8 v2b already cut MPK's per-layer moe_w13 wall span from 76.8 to 34.8 us at bs1 by right-sizing expert activation; that A/B is NOT in the committed pertask_by_bs.csv numbers used here.",
-      "roofline": {
-        "kernel_or_stage": "MoE routed w13 (top-8 of 256) x40",
-        "bytes_per_step_bs1": 671088640,
-        "MB_per_step_bs1": 640.0,
-        "us_per_step_bs1": 336.56,
-        "achieved_TB_s_bs1": 1.994,
-        "pct_of_HBM_roof_bs1": 24.92,
-        "roofline_us_bs1": 83.89,
-        "headroom_x_bs1": 4.01,
-        "us_per_step_bs8": 879.83,
-        "MB_per_step_bs8": 640.0,
-        "achieved_TB_s_bs8": 0.763,
-        "pct_of_HBM_roof_bs8": 9.53,
-        "roofline_us_bs8": 83.89,
-        "headroom_x_bs8": 10.49,
-        "us_per_step_bs16": 1123.23,
-        "MB_per_step_bs16": 640.0,
-        "achieved_TB_s_bs16": 0.597,
-        "pct_of_HBM_roof_bs16": 7.47,
-        "roofline_us_bs16": 83.89,
-        "headroom_x_bs16": 13.39
-      },
-      "roofline_reading": "vLLM at 24.9 % of roof at bs1 (640 MB in 336.6 us), 7.5 % at bs16. Roofline 83.9 us."
-    },
-    {
-      "rank": 4,
-      "mpk_task": "279 TASK_LINEAR_FP8_BLOCKSCALE_SM100",
-      "vllm_kernel": "cutlass::device_kernel<vllm::cutlass_3x_gemm_fp8_blockwise<bfloat16_t,...>> (CUTLASS block-scale dense, CutlassFp8BlockScaledMMKernel)",
-      "why": "the flattest gap (2.05-2.17x at every batch size) over the most call sites (160), so it is the most predictable win; 1.6 ms/step at every bs.",
-      "shape": "160 GEMM sites/step, 6 distinct shapes [N,K] with A fp8 [M,K], per-token-group-128 act scales, fp32 block weight scales [N/128,K/128], bf16 out: in_proj_qkvz [12288,2048] x30, gdn out_proj [2048,4096] x30, qkv(g)_proj [9216,2048] x10, o_proj [2048,4096] x10, shared gate_up [1024,2048] x40, shared down [2048,512] x40",
-      "sites_per_step": 160,
-      "vllm_us_per_site_bs1_by_shape": {
-        "in_proj K=2048 (qkvz/qkvg)": 9.45,
-        "out_proj K=4096 (gdn out / o_proj)": 10.75,
-        "shared gate_up [1024,2048]": 7.8,
-        "shared down [2048,512]": 5.8
-      },
-      "vllm_us_per_step": {
-        "bs1": 1353.5,
-        "bs8": 1434.72,
-        "bs16": 1370.96
-      },
-      "mpk_us_per_step": {
-        "bs1": 2936.0,
-        "bs8": 2947.0,
-        "bs16": 2973.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 2.17,
-        "bs8": 2.05,
-        "bs16": 2.17
-      },
-      "target_us_per_site_bs1_by_shape": {
-        "in_proj K=2048": 7.09,
-        "out_proj K=4096": 8.06,
-        "shared gate_up": 5.85,
-        "shared down": 4.35
-      },
-      "target_us_per_step": {
-        "bs1": 1082.8,
-        "bs8": 1147.8,
-        "bs16": 1096.8
-      },
-      "step_gain_if_met_us": {
-        "bs1": 1853,
-        "bs8": 1799,
-        "bs16": 1876
-      },
-      "note": "At M=1 vLLM's cost tracks the K-loop depth, not the weight bytes: K=4096 out_proj (8.4 MB) costs MORE (10.7 us) than K=2048 qkvz (25.2 MB, 9.4 us). These GEMMs are latency/occupancy bound, not bandwidth bound - 25.2 MB at 8 TB/s would be 3.1 us. That is the headroom a ferret kernel can attack.",
-      "roofline": {
-        "kernel_or_stage": "dense fp8 projections (160 sites)",
-        "bytes_per_step_bs1": 1405091840,
-        "MB_per_step_bs1": 1340.0,
-        "us_per_step_bs1": 1353.5,
-        "achieved_TB_s_bs1": 1.038,
-        "pct_of_HBM_roof_bs1": 12.98,
-        "roofline_us_bs1": 175.64,
-        "headroom_x_bs1": 7.71,
-        "us_per_step_bs8": 1434.72,
-        "MB_per_step_bs8": 1340.0,
-        "achieved_TB_s_bs8": 0.979,
-        "pct_of_HBM_roof_bs8": 12.24,
-        "roofline_us_bs8": 175.64,
-        "headroom_x_bs8": 8.17,
-        "us_per_step_bs16": 1370.96,
-        "MB_per_step_bs16": 1340.0,
-        "achieved_TB_s_bs16": 1.025,
-        "pct_of_HBM_roof_bs16": 12.81,
-        "roofline_us_bs16": 175.64,
-        "headroom_x_bs16": 7.81
-      },
-      "roofline_reading": "vLLM at 13.0 % of roof (1.34 GB in 1353.5 us, 7.7x off). Worst sites: shared down [2048,512] 44x off roofline, shared gate_up 30x, out_proj 10x. Cost tracks K-loop depth, not bytes. SGLang's DeepGEMM already takes 13 % of this with a different algorithm, so >30 % is available."
-    },
-    {
-      "rank": 5,
-      "mpk_task": "242 TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
-      "vllm_kernel": "bmm_Bfloat16_E4m3E4m3_Fp32_t128x8x128...sm100f (TRT-LLM fused MoE, gemm2 / down)",
-      "shape": "40 layers; w2 [256 experts, 2048, 512] fp8 block-scale; bf16 output",
-      "sites_per_step": 40,
-      "vllm_us_per_call": {
-        "bs1": 7.517,
-        "bs8": 17.477,
-        "bs16": 18.898
-      },
-      "vllm_us_per_step": {
-        "bs1": 300.66,
-        "bs8": 699.07,
-        "bs16": 755.94
-      },
-      "mpk_us_per_step": {
-        "bs1": 1702.0,
-        "bs8": 2497.0,
-        "bs16": 2641.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 5.66,
-        "bs8": 3.57,
-        "bs16": 3.49
-      },
-      "target_us_per_call": {
-        "bs1": 6.01,
-        "bs8": 13.98,
-        "bs16": 15.12
-      },
-      "target_us_per_step": {
-        "bs1": 240.5,
-        "bs8": 559.3,
-        "bs16": 604.8
-      },
-      "step_gain_if_met_us": {
-        "bs1": 1462,
-        "bs8": 1938,
-        "bs16": 2036
-      },
-      "roofline": {
-        "kernel_or_stage": "MoE routed w2 (top-8 of 256) x40",
-        "bytes_per_step_bs1": 335544320,
-        "MB_per_step_bs1": 320.0,
-        "us_per_step_bs1": 300.66,
-        "achieved_TB_s_bs1": 1.116,
-        "pct_of_HBM_roof_bs1": 13.95,
-        "roofline_us_bs1": 41.94,
-        "headroom_x_bs1": 7.17,
-        "us_per_step_bs8": 699.07,
-        "MB_per_step_bs8": 320.0,
-        "achieved_TB_s_bs8": 0.48,
-        "pct_of_HBM_roof_bs8": 6.0,
-        "roofline_us_bs8": 41.94,
-        "headroom_x_bs8": 16.67,
-        "us_per_step_bs16": 755.94,
-        "MB_per_step_bs16": 320.0,
-        "achieved_TB_s_bs16": 0.444,
-        "pct_of_HBM_roof_bs16": 5.55,
-        "roofline_us_bs16": 41.94,
-        "headroom_x_bs16": 18.02
-      },
-      "roofline_reading": "vLLM at 13.9 % of roof at bs1, 5.5 % at bs16. SGLang's TN/noShfl variant is 24 % faster than vLLM's at bs1 (5.68 vs 7.52 us/call) - free evidence that the target is reachable."
-    },
-    {
-      "rank": 6,
-      "mpk_task": "257 TASK_ATTN_SM100 (paged attention, head_dim 256)",
-      "vllm_kernel": "fmhaSm100fKernel_QkvBfloat16OBfloat16H256PagedKvCausalP32MultiCtasKvCgaVarSeqQ8Kv128StaticSwapsAbForGen (FlashInfer trtllm-gen decode FMHA)",
-      "shape": "10 full-attention layers; 16 q-heads / 2 kv-heads GQA, head_dim 256, partial RoPE dims[0:64], bf16 paged KV, page size 1056, scale 1/16",
-      "sites_per_step": 10,
-      "vllm_us_per_call": {
-        "bs1": 9.425,
-        "bs8": 9.237,
-        "bs16": 10.659
-      },
-      "vllm_us_per_step_attn_only": {
-        "bs1": 94.25,
-        "bs8": 92.37,
-        "bs16": 106.59
-      },
-      "vllm_us_per_step_incl_kv_write": {
-        "bs1": 133.57,
-        "bs8": 133.39,
-        "bs16": 148.71
-      },
-      "mpk_us_per_step": {
-        "bs1": 513.0,
-        "bs8": 491.0,
-        "bs16": 461.0
-      },
-      "ratio_mpk_over_vllm_incl_kv_write": {
-        "bs1": 3.84,
-        "bs8": 3.68,
-        "bs16": 3.1
-      },
-      "target_us_per_call": {
-        "bs1": 7.07,
-        "bs8": 6.93,
-        "bs16": 7.99
-      },
-      "target_us_per_step": {
-        "bs1": 70.7,
-        "bs8": 69.3,
-        "bs16": 79.9
-      },
-      "step_gain_if_met_us": {
-        "bs1": 442,
-        "bs8": 422,
-        "bs16": 381
-      },
-      "note": "Context caveat quantified: the same kernel costs 8.706 us/call at ctx~260 vs 9.425 at ctx 556-896 (+8.3 %). MPK's number is at ctx<=132, so the true ratio at matched context is within ~10 % of the value above. MPK's attention also has concurrency 2.0 (2 tasks/layer) - the narrowest stage in the megakernel."
-    },
-    {
-      "rank": 7,
-      "mpk_task": "260 TASK_MOE_TOPK_SOFTMAX_SM100",
-      "vllm_kernel": "moe::dev::routing::routingCustom::routingIndicesBlockKernel (bs1) / routingIndicesDynBlockKernel (bs8/16), TRT-LLM",
-      "shape": "40 layers; softmax over 256 experts, top-8, renormalise; router GEMM [256,2048] bf16 is counted separately",
-      "sites_per_step": 40,
-      "vllm_us_per_call": {
-        "bs1": 3.697,
-        "bs8": 4.602,
-        "bs16": 5.955
-      },
-      "vllm_us_per_step": {
-        "bs1": 147.86,
-        "bs8": 184.1,
-        "bs16": 238.18
-      },
-      "mpk_us_per_step": {
-        "bs1": 565.0,
-        "bs8": 588.0,
-        "bs16": 632.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 3.82,
-        "bs8": 3.19,
-        "bs16": 2.65
-      },
-      "target_us_per_call": {
-        "bs1": 2.96,
-        "bs8": 3.68,
-        "bs16": 4.76
-      },
-      "target_us_per_step": {
-        "bs1": 118.3,
-        "bs8": 147.3,
-        "bs16": 190.5
-      },
-      "step_gain_if_met_us": {
-        "bs1": 447,
-        "bs8": 441,
-        "bs16": 442
-      },
-      "note": "MPK's router runs at concurrency 9.0 out of 128 workers - a width problem as much as a kernel problem (M3-I1 backlog rank 3)."
-    },
-    {
-      "rank": 8,
-      "mpk_task": "234 TASK_GDN_CONV1D_SM100",
-      "vllm_kernel": "_causal_conv1d_update_kernel (Triton)",
-      "shape": "30 GDN layers; depthwise causal conv, conv_dim 8192, kernel width 4, bf16, state [3, 8192] per request",
-      "sites_per_step": 30,
-      "vllm_us_per_call": {
-        "bs1": 2.987,
-        "bs8": 3.056,
-        "bs16": 3.187
-      },
-      "vllm_us_per_step": {
-        "bs1": 89.61,
-        "bs8": 91.68,
-        "bs16": 95.61
-      },
-      "mpk_us_per_step": {
-        "bs1": 193.0,
-        "bs8": 205.0,
-        "bs16": 212.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 2.15,
-        "bs8": 2.24,
-        "bs16": 2.22
-      },
-      "target_us_per_call": {
-        "bs1": 2.39,
-        "bs8": 2.44,
-        "bs16": 2.55
-      },
-      "target_us_per_step": {
-        "bs1": 71.7,
-        "bs8": 73.3,
-        "bs16": 76.5
-      },
-      "step_gain_if_met_us": {
-        "bs1": 121,
-        "bs8": 132,
-        "bs16": 136
-      },
-      "roofline": {
-        "kernel_or_stage": "GDN conv1d state rd+wr x30",
-        "bytes_per_step_bs1": 2949120,
-        "MB_per_step_bs1": 2.81,
-        "us_per_step_bs1": 89.61,
-        "achieved_TB_s_bs1": 0.033,
-        "pct_of_HBM_roof_bs1": 0.41,
-        "roofline_us_bs1": 0.37,
-        "headroom_x_bs1": 243.08,
-        "us_per_step_bs8": 91.68,
-        "MB_per_step_bs8": 22.5,
-        "achieved_TB_s_bs8": 0.257,
-        "pct_of_HBM_roof_bs8": 3.22,
-        "roofline_us_bs8": 2.95,
-        "headroom_x_bs8": 31.09,
-        "us_per_step_bs16": 95.61,
-        "MB_per_step_bs16": 45.0,
-        "achieved_TB_s_bs16": 0.494,
-        "pct_of_HBM_roof_bs16": 6.17,
-        "roofline_us_bs16": 5.9,
-        "headroom_x_bs16": 16.21
-      },
-      "roofline_reading": "243x off roofline at bs1 (2.8 MB in 89.6 us) - latency-bound, like quantize."
-    },
-    {
-      "rank": 9,
-      "mpk_task": "253 TASK_LINEAR_SM100 (bf16 dense: in_proj_ba x30 + MoE router gate x40 + lm_head x1)",
-      "vllm_kernel": "nvjet_sm100_tst_32x64_64x16_2x1_v_bz_splitK_TNN (in_proj_ba [64,2048] x30) + nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN (MoE router gate [256,2048] x40) + cublasLt::splitKreduce_kernel (x70) + nvjet_sm100_tst_192x*_TNT (lm_head [248320,2048] x1)",
-      "why": "8th largest absolute gap and it GROWS with batch (1.375 -> 1.410 -> 1.457). The smallest ratio of any slower stage, so it is the cheapest 20-30 % to buy.",
-      "shape": "71 GEMM sites/step, all bf16: in_proj_ba [64,2048] x30 (N=32 per shard < block_n, so the checkpoint refuses to quantize it), MoE router gate [256,2048] x40, lm_head [248320,2048] x1. M = live tokens; MPK pads to mbt=16.",
-      "sites_per_step": 71,
-      "vllm_us_per_step": {
-        "bs1": 609.27,
-        "bs8": 626.86,
-        "bs16": 632.19
-      },
-      "mpk_us_per_step": {
-        "bs1": 838.0,
-        "bs8": 884.0,
-        "bs16": 921.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 1.375,
-        "bs8": 1.41,
-        "bs16": 1.457
-      },
-      "target_us_per_step": {
-        "bs1": 457.0,
-        "bs8": 470.1,
-        "bs16": 474.1
-      },
-      "step_gain_if_met_us": {
-        "bs1": 381.0,
-        "bs8": 413.9,
-        "bs16": 446.9
-      },
-      "vllm_sub_split_bs1_us": {
-        "lm_head": 150.72,
-        "MoE router gate": 156.85,
-        "in_proj_ba": 112.26,
-        "splitKreduce (x70)": 189.44
-      },
-      "note": "WHERE THE HEADROOM IS NOT: lm_head is 150.7 us of vLLM's 609.3 and runs at 84 % of the B200 HBM roof (see ncu/roofline.csv) - it is closed on both sides. All the available headroom is in the 458.6 us of small bf16 GEMMs + splitK reduction. CAVEAT: the committed MPK table cannot split task 253 into ba / router / lm_head, so the target above is stated on the family sum only. The re-measure (remeasure_spec.md) should emit the per-call-site split before this target is dispatched, otherwise a ferret run could aim at the part that is already at roof.",
-      "roofline_reading": "lm_head 84.3 % of roof (1.2x off) at bs1; the bf16 small GEMMs are launch-bound like the quantize stage, not bandwidth-bound."
-    }
-  ],
-  "do_not_ferret": [
-    {
-      "stage": "norms / RoPE / glue",
-      "ratio_mpk_over_vllm": {
-        "bs1": 0.29,
-        "bs8": 0.23,
-        "bs16": 0.24
-      },
-      "reason": "MPK already wins by 3-4x because it fuses norms/RoPE/L2-norm into its GEMM, attention and recurrent tasks. vLLM spends 558-680 us/step on 273-312 separate elementwise/Triton launches. This is MPK's structural advantage, not a target."
-    },
-    {
-      "stage": "shared-expert gate (sigmoid*shared + residual)",
-      "ratio_mpk_over_vllm": {
-        "bs1": 1.0,
-        "bs8": 1.34,
-        "bs16": 0.95
-      },
-      "reason": "parity. MPK fuses gate GEMM + sigmoid + mul + residual into one task (238); vLLM needs 3-4 kernels on an overlapped side stream."
-    },
-    {
-      "stage": "MoE / shared SiLU-mul",
-      "ratio_mpk_over_vllm": {
-        "bs1": 0.87,
-        "bs8": 0.99,
-        "bs16": 1.23
-      },
-      "reason": "parity or better at bs1/bs8. APPROXIMATE row - vLLM's activationDeepSeekKernel also re-quantises to fp8, which MPK bills to task 275."
-    },
-    {
-      "stage": "MoE combine",
-      "ratio_mpk_over_vllm": {
-        "bs1": 1.27,
-        "bs8": 1.2,
-        "bs16": 1.25
-      },
-      "reason": "only 38-49 us/step of absolute gap; not worth a ferret run."
-    },
-    {
-      "stage": "lm_head (inside MPK task 253)",
-      "ratio": "n/a",
-      "reason": "vLLM's lm_head GEMM moves 1.017 GB of bf16 weights in 150.7 us = 6.75 TB/s, ~84 % of B200 HBM peak. There is <20 % headroom and it is a roofline, not an implementation gap."
-    }
-  ],
-  "ncu_status": "UNAVAILABLE on catalyst-B200 - counter collection fails on every kernel including a trivial control; see ncu/NCU_UNAVAILABLE.md. Substituted by the analytic memory roofline in ncu/roofline.csv, calibrated against lm_head at 84 % of HBM peak.",
-  "sglang_cross_check": {
-    "verdict": "SGLang 0.5.16 serves the checkpoint on one B200; NOT the same kernel identity",
-    "same_kernel_as_vllm": [
-      "GDN recurrent (163.6 vs 164.9 us/step - identical)",
-      "GDN conv1d",
-      "MoE w13/w2/routing/activation/finalize (FlashInfer TRT-LLM)",
-      "lm_head"
-    ],
-    "different_backend": {
-      "dense_fp8": "DeepGEMM (vLLM auto-disables it here on E8M0 accuracy grounds); 0.87x vLLM",
-      "full_attention": "Triton flash-decoding; 1.47x vLLM (slower)",
-      "quantize": "per_token_group_quant_8bit_v2_kernel; 0.68x vLLM"
-    },
-    "implication": "targets 1 (GDN recurrent) and 6 (attention) are measured against a reference two independent engines agree on or that vLLM wins; targets 2 and 4 have 13-32 % of slack a second production engine already collects."
+  {
+   "rank": 2,
+   "mpk_task": "275 TASK_QUANTIZE_FP8_SM100",
+   "vllm_kernel": "per_token_group_quant_8bit_kernel<BFloat16, Float8_e4m3fn, ...> (vLLM csrc per_token_group_quant.cu)",
+   "why": "largest absolute gap at bs1 (3981 us/step) and second largest at bs8/bs16. vLLM issues 200 quantize launches/step and still costs 8x less than MPK's 3840 quantize tasks.",
+   "shape": "200 call sites/step: 160 dense (group=128 along K; K in {2048,4096,512,1024}) + 40 MoE routed activations (scales transposed to [K/128, M]). M = live tokens (MPK pads to mbt=16).",
+   "sites_per_step": 200,
+   "vllm_us_per_call": {
+    "bs1": 2.796,
+    "bs8": 3.103,
+    "bs16": 3.031
+   },
+   "vllm_us_per_step": {
+    "bs1": 559.3,
+    "bs8": 620.5,
+    "bs16": 606.2
+   },
+   "mpk_us_per_step": {
+    "bs1": 4540.0,
+    "bs8": 4406.0,
+    "bs16": 4244.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 8.12,
+    "bs8": 7.1,
+    "bs16": 7.0
+   },
+   "target_us_per_step": {
+    "bs1": 447.4,
+    "bs8": 496.4,
+    "bs16": 485.0
+   },
+   "step_gain_if_met_us": {
+    "bs1": 4093,
+    "bs8": 3910,
+    "bs16": 3759
+   },
+   "note": "A 10x kernel win is implausible; the M3-I1 backlog rank-1 lever (fuse quantize into the producing task, and stop computing mbt=16 rows at bs<16) is the mechanism. Ferret should target the standalone kernel at 0.7-0.8x vLLM AND the fusion should remove most of the 200 sites.",
+   "roofline": {
+    "kernel_or_stage": "quantize / fp8 casts (200 sites)",
+    "bytes_per_step_bs1": 1044480,
+    "MB_per_step_bs1": 1.0,
+    "us_per_step_bs1": 559.28,
+    "achieved_TB_s_bs1": 0.002,
+    "pct_of_HBM_roof_bs1": 0.02,
+    "roofline_us_bs1": 0.13,
+    "headroom_x_bs1": 4283.7,
+    "us_per_step_bs8": 620.5,
+    "MB_per_step_bs8": 7.97,
+    "achieved_TB_s_bs8": 0.013,
+    "pct_of_HBM_roof_bs8": 0.17,
+    "roofline_us_bs8": 1.04,
+    "headroom_x_bs8": 594.08,
+    "us_per_step_bs16": 606.23,
+    "MB_per_step_bs16": 15.94,
+    "achieved_TB_s_bs16": 0.028,
+    "pct_of_HBM_roof_bs16": 0.34,
+    "roofline_us_bs16": 2.09,
+    "headroom_x_bs16": 290.21
+   },
+   "roofline_reading": "The whole 200-site stage moves ~1 MB at bs1 and vLLM still spends 559 us on it - 4284x off roofline, i.e. pure launch overhead. A faster quantize KERNEL recovers almost nothing; the mechanism is fusion into the producing task plus not computing mbt=16 rows at bs<16.",
+   "remeasure_update_20260727": "RESOLVED by I2b: gap collapsed 3981->0.7us bs1 (ratio ~1.00/0.93/0.94); code-delta isolation attributes ~100% to the quantize row-partition. No ferret dispatch. opt/m3i10/remeasure/ (matched geometry, current HEAD, anchor-QC exact)"
   },
-  "dispositions": [
-    {
-      "stage": "sampling / argmax",
-      "mpk_task": "259 TASK_ARGMAX_PARTIAL_SM100 + 258 TASK_ARGMAX_REDUCE_SM100",
-      "vllm_kernel": "at::native::reduce_kernel<512,1,ReduceOp<float, ArgMaxOps<float>,...>>",
-      "disposition": "below-threshold",
-      "sites_per_step": 1,
-      "vllm_us_per_step": {
-        "bs1": 8.68,
-        "bs8": 9.54,
-        "bs16": 13.47
-      },
-      "mpk_us_per_step": {
-        "bs1": 37.0,
-        "bs8": 75.0,
-        "bs16": 115.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 4.263,
-        "bs8": 7.862,
-        "bs16": 8.537
-      },
-      "step_gain_if_met_us": {
-        "bs1": 28.3,
-        "bs8": 65.5,
-        "bs16": 101.5
-      },
-      "reason": "MPK is 4.3-8.5x slower, but the whole stage is 28-102 us/step against a 15.3-22.0 ms MPK step, i.e. 0.19-0.46 %. A ferret run cannot pay for itself here. Worth re-checking if MPK's step ever drops below ~5 ms, where the bs16 gap would be ~2 %. The ratio grows with batch (4.26 -> 7.86 -> 8.54) because MPK's 128 argmax_partial tasks each scan ~1940 vocab rows and their mean cost scales with batch (5.38 -> 61.68 us/task), while vLLM's single reduce kernel goes 8.68 -> 13.47 us."
-    },
-    {
-      "stage": "embedding",
-      "mpk_task": "101 TASK_EMBEDDING",
-      "vllm_kernel": "at::native::indexSelectSmallIndex<c10::BFloat16, long, ...>",
-      "disposition": "structural-not-kernel",
-      "sites_per_step": 1,
-      "vllm_us_per_step": {
-        "bs1": 2.47,
-        "bs8": 5.74,
-        "bs16": 8.37
-      },
-      "mpk_us_per_step": {
-        "bs1": 54.0,
-        "bs8": 52.0,
-        "bs16": 50.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 21.862,
-        "bs8": 9.059,
-        "bs16": 5.974
-      },
-      "step_gain_if_met_us": {
-        "bs1": 51.5,
-        "bs8": 46.3,
-        "bs16": 41.6
-      },
-      "reason": "MPK runs the whole embedding gather as ONE task at concurrency 1.0 (52.0 us mean for a single-token lookup at bs1, vs vLLM's 2.47 us). The 6-22x ratio is graph WIDTH, not kernel quality: there is nothing for a ferret kernel to make faster, because one CTA is doing a memcpy-shaped job. The fix is a builder change (split the embedding across workers), and it belongs with M3-I1 backlog rank 3 'widen the narrow task stages', not in a kernel dispatch. Absolute gap is 42-52 us/step (0.2-0.3 % of the step) either way."
-    },
-    {
-      "stage": "MoE combine (weighted sum + residual)",
-      "mpk_task": "261 TASK_MOE_MUL_SUM_ADD_SM100",
-      "vllm_kernel": "moe::dev::finalize::finalizeKernel<KernelParams<bfloat16_t, bfloat16_t, 4, true>>",
-      "disposition": "below-threshold",
-      "sites_per_step": 40,
-      "vllm_us_per_step": {
-        "bs1": 174.1,
-        "bs8": 191.07,
-        "bs16": 194.34
-      },
-      "mpk_us_per_step": {
-        "bs1": 222.0,
-        "bs8": 229.0,
-        "bs16": 243.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 1.275,
-        "bs8": 1.199,
-        "bs16": 1.25
-      },
-      "step_gain_if_met_us": {
-        "bs1": 47.9,
-        "bs8": 37.9,
-        "bs16": 48.7
-      },
-      "reason": "MPK is only 1.20-1.27x behind and the absolute gap is 38-49 us/step (0.2-0.3 % of the step) at every batch size. Beating vLLM by 20-30 % here recovers under 50 us. Re-rank only if the stages above it are closed."
-    },
-    {
-      "stage": "MoE/shared SiLU-mul",
-      "mpk_task": "118 TASK_SILU_MUL",
-      "vllm_kernel": "moe::dev::activation::activationDeepSeekKernel (routed) + triton_poi_fused_mul_silu_slice_0 (shared)",
-      "disposition": "below-threshold",
-      "sites_per_step": 80,
-      "vllm_us_per_step": {
-        "bs1": 273.64,
-        "bs8": 405.08,
-        "bs16": 390.24
-      },
-      "mpk_us_per_step": {
-        "bs1": 238.0,
-        "bs8": 400.0,
-        "bs16": 479.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 0.87,
-        "bs8": 0.987,
-        "bs16": 1.227
-      },
-      "step_gain_if_met_us": {
-        "bs1": -35.6,
-        "bs8": -5.1,
-        "bs16": 88.8
-      },
-      "reason": "MPK is AHEAD at bs1 (0.87x) and level at bs8 (0.99x); only bs16 is slower (1.23x, +88.8 us/step = 0.4 % of the step). The row is also the one APPROXIMATE mapping in the table - vLLM's activationDeepSeekKernel re-quantises the intermediate to fp8, which MPK bills to task 275 - so the bs16 deficit is partly a bookkeeping artifact and is inside the mapping's own error bar. Do not dispatch on it; revisit after the quantize/275 accounting is settled by the re-measure (remeasure_spec.md)."
-    },
-    {
-      "stage": "norms / RoPE / glue",
-      "mpk_task": "154 TASK_RMS_NORM_HOPPER (+ norms/RoPE/L2-norm fused into tasks 279/257/237)",
-      "vllm_kernel": "273-312 inductor triton_* and at::native elementwise launches per step",
-      "disposition": "mpk-ahead",
-      "sites_per_step": 81,
-      "vllm_us_per_step": {
-        "bs1": 557.82,
-        "bs8": 660.5,
-        "bs16": 680.39
-      },
-      "mpk_us_per_step": {
-        "bs1": 162.0,
-        "bs8": 153.0,
-        "bs16": 162.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 0.29,
-        "bs8": 0.232,
-        "bs16": 0.238
-      },
-      "step_gain_if_met_us": {
-        "bs1": -395.8,
-        "bs8": -507.5,
-        "bs16": -518.4
-      },
-      "reason": "MPK is 3.4-4.3x FASTER (0.29x / 0.23x / 0.24x). This is the megakernel's structural advantage: vLLM spends 558-680 us/step on 273-312 separate small launches for work MPK folds into its GEMM, attention and recurrent tasks. NOT like-for-like - MPK task 154 is only the standalone RMSNorm - so treat the ratio as a direction, not a measurement. Protect this in any refactor: it is worth ~400-520 us/step."
-    },
-    {
-      "stage": "shared-expert gate (sigmoid*shared+residual)",
-      "mpk_task": "238 TASK_SIGMOID_GATE_MUL_ADD_SM100",
-      "vllm_kernel": "shared-expert gate GEMM (gemv2N / nvjet splitK) + sigmoid_kernel_cuda + BinaryFunctor mul (+ splitKreduce at bs8/16)",
-      "disposition": "mpk-ahead",
-      "sites_per_step": 40,
-      "vllm_us_per_step": {
-        "bs1": 429.61,
-        "bs8": 443.79,
-        "bs16": 455.14
-      },
-      "mpk_us_per_step": {
-        "bs1": 428.0,
-        "bs8": 596.0,
-        "bs16": 432.0
-      },
-      "ratio_mpk_over_vllm": {
-        "bs1": 0.996,
-        "bs8": 1.343,
-        "bs16": 0.949
-      },
-      "step_gain_if_met_us": {
-        "bs1": -1.6,
-        "bs8": 152.2,
-        "bs16": -23.1
-      },
-      "reason": "Parity or better at the two batch sizes that bracket the range: 1.00x at bs1 and 0.95x at bs16. MPK fuses gate GEMM + sigmoid + multiply + residual into ONE task where vLLM needs 3-4 kernels on an overlapped side stream. The bs8 row (1.34x, MPK 596 us) is ANOMALOUS: MPK's task-238 wall span is 428/432 us at bs1/bs16 with flat per-task time (6.35-6.59 us across all batch sizes), so 596 us at bs8 is almost certainly an M3-I1 capture artifact rather than a real bs8 regression. The re-measure (remeasure_spec.md) settles it; do not dispatch a ferret run on that single point."
-    }
-  ],
-  "coverage": {
-    "source": "tables/comparison_by_stage.csv",
-    "n_stages_total": 15,
-    "n_stages_slower_at_every_batch_size": 12,
-    "n_stages_slower_at_some_batch_size": 14,
-    "n_stages_slower_per_bs": {
-      "bs1": 12,
-      "bs8": 13,
-      "bs16": 13
-    },
-    "slower_count_note": "12 stages are slower at bs1, 13 at bs8, 13 at bs16, 12 at every batch size, 14 at at least one. The headline '13 of 15' in comparison.md is the bs16 count. The two stages that move between these counts are MoE/shared SiLU-mul (slower only at bs16) and the shared-expert gate (slower only at bs8, and that point is flagged as a probable M3-I1 capture artifact).",
-    "n_real_target_specs": 9,
-    "n_disposition_rows": 6,
-    "assertion": "targets + dispositions enumerate every stage in comparison_by_stage.csv exactly once; verified by scripts/extend_ferret.py at generation time",
-    "stage_index": {
-      "GDN conv1d": "target",
-      "GDN recurrent (delta rule)": "target",
-      "MoE combine (weighted sum + residual)": "below-threshold",
-      "MoE routed GEMM w13 (gate_up)": "target",
-      "MoE routed GEMM w2 (down)": "target",
-      "MoE router top-k/softmax": "target",
-      "MoE/shared SiLU-mul": "below-threshold",
-      "dense projections (bf16 small + lm_head)": "target",
-      "dense projections (fp8 blockscale)": "target",
-      "embedding": "structural-not-kernel",
-      "full attention": "target",
-      "norms / RoPE / glue": "mpk-ahead",
-      "quantize / fp8 casts": "target",
-      "sampling / argmax": "below-threshold",
-      "shared-expert gate (sigmoid*shared+residual)": "mpk-ahead"
-    },
-    "slower_stages_any_bs": [
-      "GDN conv1d",
-      "GDN recurrent (delta rule)",
-      "MoE combine (weighted sum + residual)",
-      "MoE routed GEMM w13 (gate_up)",
-      "MoE routed GEMM w2 (down)",
-      "MoE router top-k/softmax",
-      "MoE/shared SiLU-mul",
-      "dense projections (bf16 small + lm_head)",
-      "dense projections (fp8 blockscale)",
-      "embedding",
-      "full attention",
-      "quantize / fp8 casts",
-      "sampling / argmax",
-      "shared-expert gate (sigmoid*shared+residual)"
-    ],
-    "slower_stages_every_bs": [
-      "GDN conv1d",
-      "GDN recurrent (delta rule)",
-      "MoE combine (weighted sum + residual)",
-      "MoE routed GEMM w13 (gate_up)",
-      "MoE routed GEMM w2 (down)",
-      "MoE router top-k/softmax",
-      "dense projections (bf16 small + lm_head)",
-      "dense projections (fp8 blockscale)",
-      "embedding",
-      "full attention",
-      "quantize / fp8 casts",
-      "sampling / argmax"
-    ]
+  {
+   "rank": 3,
+   "mpk_task": "241 TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+   "vllm_kernel": "bmm_E4m3_E4m3E4m3_Fp32_t128x8x128u2_s8_et64x8_m64x8x32_...sm100f (FlashInfer TRT-LLM fp8 block-scale fused MoE, gemm1)",
+   "why": "largest absolute gap at bs8/bs16; MPK streams ~7x more expert weight than it uses at bs1 (56.4 live expert groups vs the 8 top-8 routing needs).",
+   "shape": "40 layers; w13 [256 experts, 1024, 2048] fp8 block-scale 128x128; top-8 of 256; M = bs tokens routed, grid = min(num_experts, mbt*topk) = 128 groups in MPK regardless of batch",
+   "sites_per_step": 40,
+   "vllm_us_per_call": {
+    "bs1": 8.414,
+    "bs8": 21.996,
+    "bs16": 28.081
+   },
+   "vllm_us_per_step": {
+    "bs1": 336.56,
+    "bs8": 879.83,
+    "bs16": 1123.23
+   },
+   "mpk_us_per_step": {
+    "bs1": 3084.0,
+    "bs8": 4696.0,
+    "bs16": 5009.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 9.16,
+    "bs8": 5.34,
+    "bs16": 4.46
+   },
+   "target_us_per_call": {
+    "bs1": 6.73,
+    "bs8": 17.6,
+    "bs16": 22.46
+   },
+   "target_us_per_step": {
+    "bs1": 269.2,
+    "bs8": 703.9,
+    "bs16": 898.6
+   },
+   "step_gain_if_met_us": {
+    "bs1": 2815,
+    "bs8": 3992,
+    "bs16": 4110
+   },
+   "note": "M3-I8 v2b already cut MPK's per-layer moe_w13 wall span from 76.8 to 34.8 us at bs1 by right-sizing expert activation; that A/B is NOT in the committed pertask_by_bs.csv numbers used here.",
+   "roofline": {
+    "kernel_or_stage": "MoE routed w13 (top-8 of 256) x40",
+    "bytes_per_step_bs1": 671088640,
+    "MB_per_step_bs1": 640.0,
+    "us_per_step_bs1": 336.56,
+    "achieved_TB_s_bs1": 1.994,
+    "pct_of_HBM_roof_bs1": 24.92,
+    "roofline_us_bs1": 83.89,
+    "headroom_x_bs1": 4.01,
+    "us_per_step_bs8": 879.83,
+    "MB_per_step_bs8": 640.0,
+    "achieved_TB_s_bs8": 0.763,
+    "pct_of_HBM_roof_bs8": 9.53,
+    "roofline_us_bs8": 83.89,
+    "headroom_x_bs8": 10.49,
+    "us_per_step_bs16": 1123.23,
+    "MB_per_step_bs16": 640.0,
+    "achieved_TB_s_bs16": 0.597,
+    "pct_of_HBM_roof_bs16": 7.47,
+    "roofline_us_bs16": 83.89,
+    "headroom_x_bs16": 13.39
+   },
+   "roofline_reading": "vLLM at 24.9 % of roof at bs1 (640 MB in 336.6 us), 7.5 % at bs16. Roofline 83.9 us.",
+   "remeasure_update_20260727": "Post-gate ratios 7.10/2.82/2.23 (bs1/8/16); still rank-1 absolute gap at bs1 \u2014 re-scope shapes to gated activation before dispatch. opt/m3i10/remeasure/ (matched geometry, current HEAD, anchor-QC exact)"
   },
-  "do_not_ferret_note": "`do_not_ferret` is the original prose summary and is kept for continuity; `dispositions` is the machine-readable form and is authoritative where the two overlap.",
-  "pending_remeasure": {
-    "spec": "remeasure_spec.md",
-    "why": "the MPK side of every row above is M3-I1's capture at the AC-3 geometry (max_seq_length 132) with MOE_GATE_PADDING_ROWS OFF, which predates the M3-I8 gate that is default-ON at HEAD and the M3-I2b quantize/width fixes",
-    "robust_to_remeasure": [
-      "GDN recurrent growth ratio (7.4 -> 9.1 -> 10.8)",
-      "dense fp8 flat ratio (~2.1x at every batch size)",
-      "lm_head at 84 % of HBM roof",
-      "norms/RoPE/glue as an MPK win"
-    ],
-    "may_reshuffle": [
-      "quantize / fp8 casts rank (M3-I2b targeted exactly this)",
-      "MoE w13 and w2 ranks (M3-I8 gate default-ON cuts moe_w13 per-layer wall span from 76.8 to 34.8 us at bs1)",
-      "shared-expert gate bs8 anomaly",
-      "any absolute step_gain_if_met_us figure"
-    ]
+  {
+   "rank": 4,
+   "mpk_task": "279 TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+   "vllm_kernel": "cutlass::device_kernel<vllm::cutlass_3x_gemm_fp8_blockwise<bfloat16_t,...>> (CUTLASS block-scale dense, CutlassFp8BlockScaledMMKernel)",
+   "why": "the flattest gap (2.05-2.17x at every batch size) over the most call sites (160), so it is the most predictable win; 1.6 ms/step at every bs.",
+   "shape": "160 GEMM sites/step, 6 distinct shapes [N,K] with A fp8 [M,K], per-token-group-128 act scales, fp32 block weight scales [N/128,K/128], bf16 out: in_proj_qkvz [12288,2048] x30, gdn out_proj [2048,4096] x30, qkv(g)_proj [9216,2048] x10, o_proj [2048,4096] x10, shared gate_up [1024,2048] x40, shared down [2048,512] x40",
+   "sites_per_step": 160,
+   "vllm_us_per_site_bs1_by_shape": {
+    "in_proj K=2048 (qkvz/qkvg)": 9.45,
+    "out_proj K=4096 (gdn out / o_proj)": 10.75,
+    "shared gate_up [1024,2048]": 7.8,
+    "shared down [2048,512]": 5.8
+   },
+   "vllm_us_per_step": {
+    "bs1": 1353.5,
+    "bs8": 1434.72,
+    "bs16": 1370.96
+   },
+   "mpk_us_per_step": {
+    "bs1": 2936.0,
+    "bs8": 2947.0,
+    "bs16": 2973.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 2.17,
+    "bs8": 2.05,
+    "bs16": 2.17
+   },
+   "target_us_per_site_bs1_by_shape": {
+    "in_proj K=2048": 7.09,
+    "out_proj K=4096": 8.06,
+    "shared gate_up": 5.85,
+    "shared down": 4.35
+   },
+   "target_us_per_step": {
+    "bs1": 1082.8,
+    "bs8": 1147.8,
+    "bs16": 1096.8
+   },
+   "step_gain_if_met_us": {
+    "bs1": 1853,
+    "bs8": 1799,
+    "bs16": 1876
+   },
+   "note": "At M=1 vLLM's cost tracks the K-loop depth, not the weight bytes: K=4096 out_proj (8.4 MB) costs MORE (10.7 us) than K=2048 qkvz (25.2 MB, 9.4 us). These GEMMs are latency/occupancy bound, not bandwidth bound - 25.2 MB at 8 TB/s would be 3.1 us. That is the headroom a ferret kernel can attack.",
+   "roofline": {
+    "kernel_or_stage": "dense fp8 projections (160 sites)",
+    "bytes_per_step_bs1": 1405091840,
+    "MB_per_step_bs1": 1340.0,
+    "us_per_step_bs1": 1353.5,
+    "achieved_TB_s_bs1": 1.038,
+    "pct_of_HBM_roof_bs1": 12.98,
+    "roofline_us_bs1": 175.64,
+    "headroom_x_bs1": 7.71,
+    "us_per_step_bs8": 1434.72,
+    "MB_per_step_bs8": 1340.0,
+    "achieved_TB_s_bs8": 0.979,
+    "pct_of_HBM_roof_bs8": 12.24,
+    "roofline_us_bs8": 175.64,
+    "headroom_x_bs8": 8.17,
+    "us_per_step_bs16": 1370.96,
+    "MB_per_step_bs16": 1340.0,
+    "achieved_TB_s_bs16": 1.025,
+    "pct_of_HBM_roof_bs16": 12.81,
+    "roofline_us_bs16": 175.64,
+    "headroom_x_bs16": 7.81
+   },
+   "roofline_reading": "vLLM at 13.0 % of roof (1.34 GB in 1353.5 us, 7.7x off). Worst sites: shared down [2048,512] 44x off roofline, shared gate_up 30x, out_proj 10x. Cost tracks K-loop depth, not bytes. SGLang's DeepGEMM already takes 13 % of this with a different algorithm, so >30 % is available."
+  },
+  {
+   "rank": 5,
+   "mpk_task": "242 TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+   "vllm_kernel": "bmm_Bfloat16_E4m3E4m3_Fp32_t128x8x128...sm100f (TRT-LLM fused MoE, gemm2 / down)",
+   "shape": "40 layers; w2 [256 experts, 2048, 512] fp8 block-scale; bf16 output",
+   "sites_per_step": 40,
+   "vllm_us_per_call": {
+    "bs1": 7.517,
+    "bs8": 17.477,
+    "bs16": 18.898
+   },
+   "vllm_us_per_step": {
+    "bs1": 300.66,
+    "bs8": 699.07,
+    "bs16": 755.94
+   },
+   "mpk_us_per_step": {
+    "bs1": 1702.0,
+    "bs8": 2497.0,
+    "bs16": 2641.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 5.66,
+    "bs8": 3.57,
+    "bs16": 3.49
+   },
+   "target_us_per_call": {
+    "bs1": 6.01,
+    "bs8": 13.98,
+    "bs16": 15.12
+   },
+   "target_us_per_step": {
+    "bs1": 240.5,
+    "bs8": 559.3,
+    "bs16": 604.8
+   },
+   "step_gain_if_met_us": {
+    "bs1": 1462,
+    "bs8": 1938,
+    "bs16": 2036
+   },
+   "roofline": {
+    "kernel_or_stage": "MoE routed w2 (top-8 of 256) x40",
+    "bytes_per_step_bs1": 335544320,
+    "MB_per_step_bs1": 320.0,
+    "us_per_step_bs1": 300.66,
+    "achieved_TB_s_bs1": 1.116,
+    "pct_of_HBM_roof_bs1": 13.95,
+    "roofline_us_bs1": 41.94,
+    "headroom_x_bs1": 7.17,
+    "us_per_step_bs8": 699.07,
+    "MB_per_step_bs8": 320.0,
+    "achieved_TB_s_bs8": 0.48,
+    "pct_of_HBM_roof_bs8": 6.0,
+    "roofline_us_bs8": 41.94,
+    "headroom_x_bs8": 16.67,
+    "us_per_step_bs16": 755.94,
+    "MB_per_step_bs16": 320.0,
+    "achieved_TB_s_bs16": 0.444,
+    "pct_of_HBM_roof_bs16": 5.55,
+    "roofline_us_bs16": 41.94,
+    "headroom_x_bs16": 18.02
+   },
+   "roofline_reading": "vLLM at 13.9 % of roof at bs1, 5.5 % at bs16. SGLang's TN/noShfl variant is 24 % faster than vLLM's at bs1 (5.68 vs 7.52 us/call) - free evidence that the target is reachable."
+  },
+  {
+   "rank": 6,
+   "mpk_task": "257 TASK_ATTN_SM100 (paged attention, head_dim 256)",
+   "vllm_kernel": "fmhaSm100fKernel_QkvBfloat16OBfloat16H256PagedKvCausalP32MultiCtasKvCgaVarSeqQ8Kv128StaticSwapsAbForGen (FlashInfer trtllm-gen decode FMHA)",
+   "shape": "10 full-attention layers; 16 q-heads / 2 kv-heads GQA, head_dim 256, partial RoPE dims[0:64], bf16 paged KV, page size 1056, scale 1/16",
+   "sites_per_step": 10,
+   "vllm_us_per_call": {
+    "bs1": 9.425,
+    "bs8": 9.237,
+    "bs16": 10.659
+   },
+   "vllm_us_per_step_attn_only": {
+    "bs1": 94.25,
+    "bs8": 92.37,
+    "bs16": 106.59
+   },
+   "vllm_us_per_step_incl_kv_write": {
+    "bs1": 133.57,
+    "bs8": 133.39,
+    "bs16": 148.71
+   },
+   "mpk_us_per_step": {
+    "bs1": 513.0,
+    "bs8": 491.0,
+    "bs16": 461.0
+   },
+   "ratio_mpk_over_vllm_incl_kv_write": {
+    "bs1": 3.84,
+    "bs8": 3.68,
+    "bs16": 3.1
+   },
+   "target_us_per_call": {
+    "bs1": 7.07,
+    "bs8": 6.93,
+    "bs16": 7.99
+   },
+   "target_us_per_step": {
+    "bs1": 70.7,
+    "bs8": 69.3,
+    "bs16": 79.9
+   },
+   "step_gain_if_met_us": {
+    "bs1": 442,
+    "bs8": 422,
+    "bs16": 381
+   },
+   "note": "Context caveat quantified: the same kernel costs 8.706 us/call at ctx~260 vs 9.425 at ctx 556-896 (+8.3 %). MPK's number is at ctx<=132, so the true ratio at matched context is within ~10 % of the value above. MPK's attention also has concurrency 2.0 (2 tasks/layer) - the narrowest stage in the megakernel.",
+   "remeasure_update_20260727": "BIGGER than modeled: ratio +48-60% at matched geometry (pure geometry effect, code delta zero) \u2014 promote as a ferret target at realistic context lengths. opt/m3i10/remeasure/ (matched geometry, current HEAD, anchor-QC exact)"
+  },
+  {
+   "rank": 7,
+   "mpk_task": "260 TASK_MOE_TOPK_SOFTMAX_SM100",
+   "vllm_kernel": "moe::dev::routing::routingCustom::routingIndicesBlockKernel (bs1) / routingIndicesDynBlockKernel (bs8/16), TRT-LLM",
+   "shape": "40 layers; softmax over 256 experts, top-8, renormalise; router GEMM [256,2048] bf16 is counted separately",
+   "sites_per_step": 40,
+   "vllm_us_per_call": {
+    "bs1": 3.697,
+    "bs8": 4.602,
+    "bs16": 5.955
+   },
+   "vllm_us_per_step": {
+    "bs1": 147.86,
+    "bs8": 184.1,
+    "bs16": 238.18
+   },
+   "mpk_us_per_step": {
+    "bs1": 565.0,
+    "bs8": 588.0,
+    "bs16": 632.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 3.82,
+    "bs8": 3.19,
+    "bs16": 2.65
+   },
+   "target_us_per_call": {
+    "bs1": 2.96,
+    "bs8": 3.68,
+    "bs16": 4.76
+   },
+   "target_us_per_step": {
+    "bs1": 118.3,
+    "bs8": 147.3,
+    "bs16": 190.5
+   },
+   "step_gain_if_met_us": {
+    "bs1": 447,
+    "bs8": 441,
+    "bs16": 442
+   },
+   "note": "MPK's router runs at concurrency 9.0 out of 128 workers - a width problem as much as a kernel problem (M3-I1 backlog rank 3)."
+  },
+  {
+   "rank": 8,
+   "mpk_task": "234 TASK_GDN_CONV1D_SM100",
+   "vllm_kernel": "_causal_conv1d_update_kernel (Triton)",
+   "shape": "30 GDN layers; depthwise causal conv, conv_dim 8192, kernel width 4, bf16, state [3, 8192] per request",
+   "sites_per_step": 30,
+   "vllm_us_per_call": {
+    "bs1": 2.987,
+    "bs8": 3.056,
+    "bs16": 3.187
+   },
+   "vllm_us_per_step": {
+    "bs1": 89.61,
+    "bs8": 91.68,
+    "bs16": 95.61
+   },
+   "mpk_us_per_step": {
+    "bs1": 193.0,
+    "bs8": 205.0,
+    "bs16": 212.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 2.15,
+    "bs8": 2.24,
+    "bs16": 2.22
+   },
+   "target_us_per_call": {
+    "bs1": 2.39,
+    "bs8": 2.44,
+    "bs16": 2.55
+   },
+   "target_us_per_step": {
+    "bs1": 71.7,
+    "bs8": 73.3,
+    "bs16": 76.5
+   },
+   "step_gain_if_met_us": {
+    "bs1": 121,
+    "bs8": 132,
+    "bs16": 136
+   },
+   "roofline": {
+    "kernel_or_stage": "GDN conv1d state rd+wr x30",
+    "bytes_per_step_bs1": 2949120,
+    "MB_per_step_bs1": 2.81,
+    "us_per_step_bs1": 89.61,
+    "achieved_TB_s_bs1": 0.033,
+    "pct_of_HBM_roof_bs1": 0.41,
+    "roofline_us_bs1": 0.37,
+    "headroom_x_bs1": 243.08,
+    "us_per_step_bs8": 91.68,
+    "MB_per_step_bs8": 22.5,
+    "achieved_TB_s_bs8": 0.257,
+    "pct_of_HBM_roof_bs8": 3.22,
+    "roofline_us_bs8": 2.95,
+    "headroom_x_bs8": 31.09,
+    "us_per_step_bs16": 95.61,
+    "MB_per_step_bs16": 45.0,
+    "achieved_TB_s_bs16": 0.494,
+    "pct_of_HBM_roof_bs16": 6.17,
+    "roofline_us_bs16": 5.9,
+    "headroom_x_bs16": 16.21
+   },
+   "roofline_reading": "243x off roofline at bs1 (2.8 MB in 89.6 us) - latency-bound, like quantize."
+  },
+  {
+   "rank": 9,
+   "mpk_task": "253 TASK_LINEAR_SM100 (bf16 dense: in_proj_ba x30 + MoE router gate x40 + lm_head x1)",
+   "vllm_kernel": "nvjet_sm100_tst_32x64_64x16_2x1_v_bz_splitK_TNN (in_proj_ba [64,2048] x30) + nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN (MoE router gate [256,2048] x40) + cublasLt::splitKreduce_kernel (x70) + nvjet_sm100_tst_192x*_TNT (lm_head [248320,2048] x1)",
+   "why": "8th largest absolute gap and it GROWS with batch (1.375 -> 1.410 -> 1.457). The smallest ratio of any slower stage, so it is the cheapest 20-30 % to buy.",
+   "shape": "71 GEMM sites/step, all bf16: in_proj_ba [64,2048] x30 (N=32 per shard < block_n, so the checkpoint refuses to quantize it), MoE router gate [256,2048] x40, lm_head [248320,2048] x1. M = live tokens; MPK pads to mbt=16.",
+   "sites_per_step": 71,
+   "vllm_us_per_step": {
+    "bs1": 609.27,
+    "bs8": 626.86,
+    "bs16": 632.19
+   },
+   "mpk_us_per_step": {
+    "bs1": 838.0,
+    "bs8": 884.0,
+    "bs16": 921.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 1.375,
+    "bs8": 1.41,
+    "bs16": 1.457
+   },
+   "target_us_per_step": {
+    "bs1": 457.0,
+    "bs8": 470.1,
+    "bs16": 474.1
+   },
+   "step_gain_if_met_us": {
+    "bs1": 381.0,
+    "bs8": 413.9,
+    "bs16": 446.9
+   },
+   "vllm_sub_split_bs1_us": {
+    "lm_head": 150.72,
+    "MoE router gate": 156.85,
+    "in_proj_ba": 112.26,
+    "splitKreduce (x70)": 189.44
+   },
+   "note": "WHERE THE HEADROOM IS NOT: lm_head is 150.7 us of vLLM's 609.3 and runs at 84 % of the B200 HBM roof (see ncu/roofline.csv) - it is closed on both sides. All the available headroom is in the 458.6 us of small bf16 GEMMs + splitK reduction. CAVEAT: the committed MPK table cannot split task 253 into ba / router / lm_head, so the target above is stated on the family sum only. The re-measure (remeasure_spec.md) should emit the per-call-site split before this target is dispatched, otherwise a ferret run could aim at the part that is already at roof.",
+   "roofline_reading": "lm_head 84.3 % of roof (1.2x off) at bs1; the bf16 small GEMMs are launch-bound like the quantize stage, not bandwidth-bound.",
+   "remeasure_update_20260727": "HELD status RESOLVED by the per-call-site split (worker-rotation validated): lm_head 1.17x (parity, SKIP), MoE router-gate 2.28x + in_proj_ba 2.79x = the targets. opt/m3i10/remeasure/ (matched geometry, current HEAD, anchor-QC exact)"
   }
+ ],
+ "do_not_ferret": [
+  {
+   "stage": "norms / RoPE / glue",
+   "ratio_mpk_over_vllm": {
+    "bs1": 0.29,
+    "bs8": 0.23,
+    "bs16": 0.24
+   },
+   "reason": "MPK already wins by 3-4x because it fuses norms/RoPE/L2-norm into its GEMM, attention and recurrent tasks. vLLM spends 558-680 us/step on 273-312 separate elementwise/Triton launches. This is MPK's structural advantage, not a target."
+  },
+  {
+   "stage": "shared-expert gate (sigmoid*shared + residual)",
+   "ratio_mpk_over_vllm": {
+    "bs1": 1.0,
+    "bs8": 1.34,
+    "bs16": 0.95
+   },
+   "reason": "parity. MPK fuses gate GEMM + sigmoid + mul + residual into one task (238); vLLM needs 3-4 kernels on an overlapped side stream."
+  },
+  {
+   "stage": "MoE / shared SiLU-mul",
+   "ratio_mpk_over_vllm": {
+    "bs1": 0.87,
+    "bs8": 0.99,
+    "bs16": 1.23
+   },
+   "reason": "parity or better at bs1/bs8. APPROXIMATE row - vLLM's activationDeepSeekKernel also re-quantises to fp8, which MPK bills to task 275."
+  },
+  {
+   "stage": "MoE combine",
+   "ratio_mpk_over_vllm": {
+    "bs1": 1.27,
+    "bs8": 1.2,
+    "bs16": 1.25
+   },
+   "reason": "only 38-49 us/step of absolute gap; not worth a ferret run."
+  },
+  {
+   "stage": "lm_head (inside MPK task 253)",
+   "ratio": "n/a",
+   "reason": "vLLM's lm_head GEMM moves 1.017 GB of bf16 weights in 150.7 us = 6.75 TB/s, ~84 % of B200 HBM peak. There is <20 % headroom and it is a roofline, not an implementation gap."
+  }
+ ],
+ "ncu_status": "UNAVAILABLE on catalyst-B200 - counter collection fails on every kernel including a trivial control; see ncu/NCU_UNAVAILABLE.md. Substituted by the analytic memory roofline in ncu/roofline.csv, calibrated against lm_head at 84 % of HBM peak.",
+ "sglang_cross_check": {
+  "verdict": "SGLang 0.5.16 serves the checkpoint on one B200; NOT the same kernel identity",
+  "same_kernel_as_vllm": [
+   "GDN recurrent (163.6 vs 164.9 us/step - identical)",
+   "GDN conv1d",
+   "MoE w13/w2/routing/activation/finalize (FlashInfer TRT-LLM)",
+   "lm_head"
+  ],
+  "different_backend": {
+   "dense_fp8": "DeepGEMM (vLLM auto-disables it here on E8M0 accuracy grounds); 0.87x vLLM",
+   "full_attention": "Triton flash-decoding; 1.47x vLLM (slower)",
+   "quantize": "per_token_group_quant_8bit_v2_kernel; 0.68x vLLM"
+  },
+  "implication": "targets 1 (GDN recurrent) and 6 (attention) are measured against a reference two independent engines agree on or that vLLM wins; targets 2 and 4 have 13-32 % of slack a second production engine already collects."
+ },
+ "dispositions": [
+  {
+   "stage": "sampling / argmax",
+   "mpk_task": "259 TASK_ARGMAX_PARTIAL_SM100 + 258 TASK_ARGMAX_REDUCE_SM100",
+   "vllm_kernel": "at::native::reduce_kernel<512,1,ReduceOp<float, ArgMaxOps<float>,...>>",
+   "disposition": "below-threshold",
+   "sites_per_step": 1,
+   "vllm_us_per_step": {
+    "bs1": 8.68,
+    "bs8": 9.54,
+    "bs16": 13.47
+   },
+   "mpk_us_per_step": {
+    "bs1": 37.0,
+    "bs8": 75.0,
+    "bs16": 115.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 4.263,
+    "bs8": 7.862,
+    "bs16": 8.537
+   },
+   "step_gain_if_met_us": {
+    "bs1": 28.3,
+    "bs8": 65.5,
+    "bs16": 101.5
+   },
+   "reason": "MPK is 4.3-8.5x slower, but the whole stage is 28-102 us/step against a 15.3-22.0 ms MPK step, i.e. 0.19-0.46 %. A ferret run cannot pay for itself here. Worth re-checking if MPK's step ever drops below ~5 ms, where the bs16 gap would be ~2 %. The ratio grows with batch (4.26 -> 7.86 -> 8.54) because MPK's 128 argmax_partial tasks each scan ~1940 vocab rows and their mean cost scales with batch (5.38 -> 61.68 us/task), while vLLM's single reduce kernel goes 8.68 -> 13.47 us."
+  },
+  {
+   "stage": "embedding",
+   "mpk_task": "101 TASK_EMBEDDING",
+   "vllm_kernel": "at::native::indexSelectSmallIndex<c10::BFloat16, long, ...>",
+   "disposition": "structural-not-kernel",
+   "sites_per_step": 1,
+   "vllm_us_per_step": {
+    "bs1": 2.47,
+    "bs8": 5.74,
+    "bs16": 8.37
+   },
+   "mpk_us_per_step": {
+    "bs1": 54.0,
+    "bs8": 52.0,
+    "bs16": 50.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 21.862,
+    "bs8": 9.059,
+    "bs16": 5.974
+   },
+   "step_gain_if_met_us": {
+    "bs1": 51.5,
+    "bs8": 46.3,
+    "bs16": 41.6
+   },
+   "reason": "MPK runs the whole embedding gather as ONE task at concurrency 1.0 (52.0 us mean for a single-token lookup at bs1, vs vLLM's 2.47 us). The 6-22x ratio is graph WIDTH, not kernel quality: there is nothing for a ferret kernel to make faster, because one CTA is doing a memcpy-shaped job. The fix is a builder change (split the embedding across workers), and it belongs with M3-I1 backlog rank 3 'widen the narrow task stages', not in a kernel dispatch. Absolute gap is 42-52 us/step (0.2-0.3 % of the step) either way."
+  },
+  {
+   "stage": "MoE combine (weighted sum + residual)",
+   "mpk_task": "261 TASK_MOE_MUL_SUM_ADD_SM100",
+   "vllm_kernel": "moe::dev::finalize::finalizeKernel<KernelParams<bfloat16_t, bfloat16_t, 4, true>>",
+   "disposition": "below-threshold",
+   "sites_per_step": 40,
+   "vllm_us_per_step": {
+    "bs1": 174.1,
+    "bs8": 191.07,
+    "bs16": 194.34
+   },
+   "mpk_us_per_step": {
+    "bs1": 222.0,
+    "bs8": 229.0,
+    "bs16": 243.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 1.275,
+    "bs8": 1.199,
+    "bs16": 1.25
+   },
+   "step_gain_if_met_us": {
+    "bs1": 47.9,
+    "bs8": 37.9,
+    "bs16": 48.7
+   },
+   "reason": "MPK is only 1.20-1.27x behind and the absolute gap is 38-49 us/step (0.2-0.3 % of the step) at every batch size. Beating vLLM by 20-30 % here recovers under 50 us. Re-rank only if the stages above it are closed."
+  },
+  {
+   "stage": "MoE/shared SiLU-mul",
+   "mpk_task": "118 TASK_SILU_MUL",
+   "vllm_kernel": "moe::dev::activation::activationDeepSeekKernel (routed) + triton_poi_fused_mul_silu_slice_0 (shared)",
+   "disposition": "below-threshold",
+   "sites_per_step": 80,
+   "vllm_us_per_step": {
+    "bs1": 273.64,
+    "bs8": 405.08,
+    "bs16": 390.24
+   },
+   "mpk_us_per_step": {
+    "bs1": 238.0,
+    "bs8": 400.0,
+    "bs16": 479.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 0.87,
+    "bs8": 0.987,
+    "bs16": 1.227
+   },
+   "step_gain_if_met_us": {
+    "bs1": -35.6,
+    "bs8": -5.1,
+    "bs16": 88.8
+   },
+   "reason": "MPK is AHEAD at bs1 (0.87x) and level at bs8 (0.99x); only bs16 is slower (1.23x, +88.8 us/step = 0.4 % of the step). The row is also the one APPROXIMATE mapping in the table - vLLM's activationDeepSeekKernel re-quantises the intermediate to fp8, which MPK bills to task 275 - so the bs16 deficit is partly a bookkeeping artifact and is inside the mapping's own error bar. Do not dispatch on it; revisit after the quantize/275 accounting is settled by the re-measure (remeasure_spec.md)."
+  },
+  {
+   "stage": "norms / RoPE / glue",
+   "mpk_task": "154 TASK_RMS_NORM_HOPPER (+ norms/RoPE/L2-norm fused into tasks 279/257/237)",
+   "vllm_kernel": "273-312 inductor triton_* and at::native elementwise launches per step",
+   "disposition": "mpk-ahead",
+   "sites_per_step": 81,
+   "vllm_us_per_step": {
+    "bs1": 557.82,
+    "bs8": 660.5,
+    "bs16": 680.39
+   },
+   "mpk_us_per_step": {
+    "bs1": 162.0,
+    "bs8": 153.0,
+    "bs16": 162.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 0.29,
+    "bs8": 0.232,
+    "bs16": 0.238
+   },
+   "step_gain_if_met_us": {
+    "bs1": -395.8,
+    "bs8": -507.5,
+    "bs16": -518.4
+   },
+   "reason": "MPK is 3.4-4.3x FASTER (0.29x / 0.23x / 0.24x). This is the megakernel's structural advantage: vLLM spends 558-680 us/step on 273-312 separate small launches for work MPK folds into its GEMM, attention and recurrent tasks. NOT like-for-like - MPK task 154 is only the standalone RMSNorm - so treat the ratio as a direction, not a measurement. Protect this in any refactor: it is worth ~400-520 us/step."
+  },
+  {
+   "stage": "shared-expert gate (sigmoid*shared+residual)",
+   "mpk_task": "238 TASK_SIGMOID_GATE_MUL_ADD_SM100",
+   "vllm_kernel": "shared-expert gate GEMM (gemv2N / nvjet splitK) + sigmoid_kernel_cuda + BinaryFunctor mul (+ splitKreduce at bs8/16)",
+   "disposition": "mpk-ahead",
+   "sites_per_step": 40,
+   "vllm_us_per_step": {
+    "bs1": 429.61,
+    "bs8": 443.79,
+    "bs16": 455.14
+   },
+   "mpk_us_per_step": {
+    "bs1": 428.0,
+    "bs8": 596.0,
+    "bs16": 432.0
+   },
+   "ratio_mpk_over_vllm": {
+    "bs1": 0.996,
+    "bs8": 1.343,
+    "bs16": 0.949
+   },
+   "step_gain_if_met_us": {
+    "bs1": -1.6,
+    "bs8": 152.2,
+    "bs16": -23.1
+   },
+   "reason": "Parity or better at the two batch sizes that bracket the range: 1.00x at bs1 and 0.95x at bs16. MPK fuses gate GEMM + sigmoid + multiply + residual into ONE task where vLLM needs 3-4 kernels on an overlapped side stream. The bs8 row (1.34x, MPK 596 us) is ANOMALOUS: MPK's task-238 wall span is 428/432 us at bs1/bs16 with flat per-task time (6.35-6.59 us across all batch sizes), so 596 us at bs8 is almost certainly an M3-I1 capture artifact rather than a real bs8 regression. The re-measure (remeasure_spec.md) settles it; do not dispatch a ferret run on that single point."
+  }
+ ],
+ "coverage": {
+  "source": "tables/comparison_by_stage.csv",
+  "n_stages_total": 15,
+  "n_stages_slower_at_every_batch_size": 12,
+  "n_stages_slower_at_some_batch_size": 14,
+  "n_stages_slower_per_bs": {
+   "bs1": 12,
+   "bs8": 13,
+   "bs16": 13
+  },
+  "slower_count_note": "12 stages are slower at bs1, 13 at bs8, 13 at bs16, 12 at every batch size, 14 at at least one. The headline '13 of 15' in comparison.md is the bs16 count. The two stages that move between these counts are MoE/shared SiLU-mul (slower only at bs16) and the shared-expert gate (slower only at bs8, and that point is flagged as a probable M3-I1 capture artifact).",
+  "n_real_target_specs": 9,
+  "n_disposition_rows": 6,
+  "assertion": "targets + dispositions enumerate every stage in comparison_by_stage.csv exactly once; verified by scripts/extend_ferret.py at generation time",
+  "stage_index": {
+   "GDN conv1d": "target",
+   "GDN recurrent (delta rule)": "target",
+   "MoE combine (weighted sum + residual)": "below-threshold",
+   "MoE routed GEMM w13 (gate_up)": "target",
+   "MoE routed GEMM w2 (down)": "target",
+   "MoE router top-k/softmax": "target",
+   "MoE/shared SiLU-mul": "below-threshold",
+   "dense projections (bf16 small + lm_head)": "target",
+   "dense projections (fp8 blockscale)": "target",
+   "embedding": "structural-not-kernel",
+   "full attention": "target",
+   "norms / RoPE / glue": "mpk-ahead",
+   "quantize / fp8 casts": "target",
+   "sampling / argmax": "below-threshold",
+   "shared-expert gate (sigmoid*shared+residual)": "mpk-ahead"
+  },
+  "slower_stages_any_bs": [
+   "GDN conv1d",
+   "GDN recurrent (delta rule)",
+   "MoE combine (weighted sum + residual)",
+   "MoE routed GEMM w13 (gate_up)",
+   "MoE routed GEMM w2 (down)",
+   "MoE router top-k/softmax",
+   "MoE/shared SiLU-mul",
+   "dense projections (bf16 small + lm_head)",
+   "dense projections (fp8 blockscale)",
+   "embedding",
+   "full attention",
+   "quantize / fp8 casts",
+   "sampling / argmax",
+   "shared-expert gate (sigmoid*shared+residual)"
+  ],
+  "slower_stages_every_bs": [
+   "GDN conv1d",
+   "GDN recurrent (delta rule)",
+   "MoE combine (weighted sum + residual)",
+   "MoE routed GEMM w13 (gate_up)",
+   "MoE routed GEMM w2 (down)",
+   "MoE router top-k/softmax",
+   "dense projections (bf16 small + lm_head)",
+   "dense projections (fp8 blockscale)",
+   "embedding",
+   "full attention",
+   "quantize / fp8 casts",
+   "sampling / argmax"
+  ]
+ },
+ "do_not_ferret_note": "`do_not_ferret` is the original prose summary and is kept for continuity; `dispositions` is the machine-readable form and is authoritative where the two overlap.",
+ "pending_remeasure": {
+  "spec": "remeasure_spec.md",
+  "why": "the MPK side of every row above is M3-I1's capture at the AC-3 geometry (max_seq_length 132) with MOE_GATE_PADDING_ROWS OFF, which predates the M3-I8 gate that is default-ON at HEAD and the M3-I2b quantize/width fixes",
+  "robust_to_remeasure": [
+   "GDN recurrent growth ratio (7.4 -> 9.1 -> 10.8)",
+   "dense fp8 flat ratio (~2.1x at every batch size)",
+   "lm_head at 84 % of HBM roof",
+   "norms/RoPE/glue as an MPK win"
+  ],
+  "may_reshuffle": [
+   "quantize / fp8 casts rank (M3-I2b targeted exactly this)",
+   "MoE w13 and w2 ranks (M3-I8 gate default-ON cuts moe_w13 per-layer wall span from 76.8 to 34.8 us at bs1)",
+   "shared-expert gate bs8 anomaly",
+   "any absolute step_gain_if_met_us figure"
+  ]
+ }
 }
