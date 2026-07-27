@@ -147,7 +147,7 @@ void mla_prefill_tp8_chunked_test(torch::Tensor Qn,     // [B, q_len, H, 128]
       H,
       sml2);
   // No cudaDeviceSynchronize here — caller (Python) syncs once via cuda
-  // events around the bench loop. Per-iter sync was costing ~10-15 us.
+  // events around the bench loop. Per-iter sync is avoided.
   cudaError_t err = cudaPeekAtLastError();
   TORCH_CHECK(err == cudaSuccess, "Kernel launch: ", cudaGetErrorString(err));
 }

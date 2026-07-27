@@ -326,7 +326,7 @@ __device__ __forceinline__ void
 
   // Stage index + parity from a CONTINUOUS K-block counter — the per-tile
   // `ki % NS` reset desyncs the mbarrier parity at tile boundaries whenever
-  // nk % NS != 0 on a multi-tile-iter task (the B36 bug; full note in
+  // nk % NS != 0 on a multi-tile-iter task (full note in
   // fp8_gemm_dense_sm100_common.cuh).
   if (wid == 0 && elect_one_sync()) {
     int gk = 0;

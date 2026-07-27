@@ -34,7 +34,7 @@
 //   builder can shrink grid.x below `batch_size`.
 // * row_count_cap: optional per-CTA cap so decode iterations (active_rows <
 //   ROWS_PER_TASK rows for the trailing CTA) don't normalize/quantize stale
-//   bf16. Matches the B34 active-rows convention used by rmsnorm_hopper.
+//   bf16. Matches the active-rows convention used by rmsnorm_hopper.
 // * IN_ROW_STRIDE / OUT_ROW_STRIDE / FP8_ROW_STRIDE: parent row width when
 //   the caller passes mpk.narrow views. Per-task base pointers are already
 //   offset by the runtime, so no in-kernel column shift is needed.

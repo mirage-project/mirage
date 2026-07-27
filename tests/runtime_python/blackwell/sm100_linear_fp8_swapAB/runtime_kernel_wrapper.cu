@@ -252,7 +252,7 @@ size_t compute_smem_bytes() {
 // current CUDA stream, sharing one allocation of the device descriptor
 // memory across iterations. For repeat=1 this matches the original
 // per-call cost; repeat>1 amortizes the cudaMalloc / cudaMemcpy /
-// cudaLaunchKernelEx per-call overhead (~150-200µs) so the timed signal
+// cudaLaunchKernelEx per-call overhead so the timed signal
 // is closer to actual kernel execution.
 // =========================================================================
 template <int BATCH, int OUTPUT_SIZE, int K_>

@@ -8,26 +8,9 @@ Grid derivation (mirrors builder._pick_bf16_splitk_factor on B200, 128 workers):
   n_tiles = 256 // 128 = 2
   k_align = 64  (BF16 splitk requirement)
   quotient = 7168 // 64 = 112
-  best split_k = largest s such that quotient%s==0 and 2*s <= 128
-               = 56 (2*56=112; 2*64=128) → wait: 112%64=48≠0; 112%56=0 and 2*56=112≤128 ✓
-               so split_k = 56? Actually iterate:
-               s=1→2, s=2→4, ..., s=56→112≤128 (112%56=0 ✓), s=64→128≤128 (112%64=48≠0 ✗)
-               Actually let me be careful: 112%56=0 ✓, 2*56=112≤128 ✓
-                                          112%112=0 ✓, 2*112=224>128 ✗ → stop
-               So best_s=56? But we also try s between 56 and 112:
-               s=56: 2*56=112≤128 ✓ → best_s=56; s=57...: 112%57≠0, ...
-               But the builder returned split_k=64 based on the perfetto comment
-               ("was 2 CTAs" → "128-CTA / ~1 wave", 2*64=128).
-               112%64=48 ≠ 0, so 64 is NOT valid per the code.
-               Actually re-read: quotient=112, iterate s=1..112:
-                 need quotient%s==0 (so K//s is still k_align-multiple) AND n*s<=workers
-               s=1: 112%1=0, 2*1=2≤128 → best=1
-               s=2: 112%2=0, 2*2=4≤128 → best=2
-               ... s=4,7,8,14,16,28,56 are divisors of 112 ≤ 64 (2*s≤128)
-               s=56: 112%56=0, 2*56=112≤128 → best=56
-               s=112: 2*112=224>128 → break
-               So split_k=56, grid=(2,56,1)
-               (The perfetto comment's "64" was approximate; code returns 56.)
+  best split_k = largest divisor s of quotient with 2*s <= 128
+               = 56 (112 % 56 == 0, 2*56 = 112 <= 128; 64 is not a divisor).
+  So split_k = 56, grid = (2, 56, 1).
 
 NOTE: accumulate=False HANGS for bs < 16 (compile-time BATCH_SIZE < MMA_N=16 bug,
 documented in builder comment lines 1526-1536 and test_splitk_linear_bf16_accfalse_testmode.py).

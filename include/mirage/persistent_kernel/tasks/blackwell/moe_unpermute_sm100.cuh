@@ -119,7 +119,7 @@ __device__ __forceinline__ void
 
     // Accumulate per-element: out[i] = residual[i]
     //                                + sum_k(d_in[rows[k]][i] * weights[k]).
-    // (B36-followup): hidden_partition splits the HIDDEN
+    // hidden_partition splits the HIDDEN
     // axis across HIDDEN_SPLIT CTAs. Each CTA owns the range
     // [hid_start, hid_end). HIDDEN_SPLIT=1 keeps the legacy
     // single-CTA-owns-full-hidden shape.

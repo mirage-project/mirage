@@ -142,7 +142,7 @@ __device__ __forceinline__ void
     // packed_idx=0 (one packed uint32 per row, low byte = UE8M0).
     constexpr int ROWS_PER_ITER = 4; // = blockDim.x / WARP_SIZE for 128 threads
     static_assert(ROWS_PER_ITER == 4,
-                  "C11 fast path assumes 128-thread block (4 warps)");
+                  "fast path assumes 128-thread block (4 warps)");
 #pragma unroll 1
     for (int r_base = 0; r_base < ROWS_PER_TASK; r_base += ROWS_PER_ITER) {
       int const r = r_base + warp_idx;

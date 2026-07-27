@@ -554,7 +554,7 @@ void register_mugraph(
               task.task_metadata.request_id = bid.y;
               task.task_metadata.kv_idx = bid.x;
             }
-            // B37 fused RMSNorm + FP8 quantize: grid=(mbt/ROWS_PER_TASK,1,1).
+            // Fused RMSNorm + FP8 quantize: grid=(mbt/ROWS_PER_TASK,1,1).
             // request_id is the row-block index used by the kernel to skip
             // CTAs past the active-rows boundary on decode iters.
             if (task_type == TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100) {

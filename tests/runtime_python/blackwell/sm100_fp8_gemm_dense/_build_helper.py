@@ -74,9 +74,7 @@ SHAPE_REGISTRY = {
     "shared_gate_up": DenseShape("shared_gate_up", 7168, 512),
     "shared_down":    DenseShape("shared_down",     256, 7168),
     # Routing-gate GEMV (router): hidden(7168) -> num_routed_experts(256), M=1.
-    # vLLM ref 3us (target <=2.5). Production uses SPLITK_LINEAR (~6.75us); the
-    # CUDA-core router GEMV (#180, ~4.48us) was deleted for a TP8 crash (#215) —
-    # a TP8-safe GEMV <=2.5us is the open lever. (gemv_m1 KIND @ --shape router.)
+    # Production uses SPLITK_LINEAR. (gemv_m1 KIND @ --shape router.)
     "router":         DenseShape("router",          7168, 256),
 }
 
@@ -276,18 +274,17 @@ def timed_kernel_run(pk, iters: int, warmup: int = 5, label: str = ""):
 
 
 # ===========================================================================
-# FAITHFUL per-task in-MPK latency (the #1 fidelity fix, 2026-06-16).
+# FAITHFUL per-task in-MPK latency.
 #
 # WHY THIS EXISTS: a standalone kernel bench (ferret / cpp_examples) and the
-# whole-megakernel e2e (``timed_kernel_run`` above) both MISLEAD the decode
-# campaign:
-#   * standalone gives the kernel a dedicated grid on an empty GPU -> a fine-N
-#     tile that looks 1.7x faster standalone can NULL in-MPK (the fine-N e2e
-#     NULL, 2026-06-16) because in-MPK the kernel runs at the PRODUCTION grid
-#     (grid.x = num_workers = 136 persistent worker CTAs, idle CTAs early-
-#     return) with the real per-task SETUP/dispatch overhead.
-#   * whole-megakernel e2e buries the ~65us fixed scheduler/launch floor on top
-#     of the task -> the task signal is swamped.
+# whole-megakernel e2e (``timed_kernel_run`` above) both MISLEAD:
+#   * standalone gives the kernel a dedicated grid on an empty GPU -> a tile
+#     that looks faster standalone can regress in-MPK because in-MPK the
+#     kernel runs at the PRODUCTION grid (grid.x = num_workers = 136 persistent
+#     worker CTAs, idle CTAs early-return) with the real per-task
+#     SETUP/dispatch overhead.
+#   * whole-megakernel e2e buries the fixed scheduler/launch floor on top of
+#     the task -> the task signal is swamped.
 #
 # THE FAITHFUL METRIC: run the REAL single-task megakernel at the production
 # grid/worker config, turn the persistent profiler ON (same begin/end CTA
@@ -401,7 +398,7 @@ def _parse_task_span_from_csv(csv_path: str, task_name: str):
 def _launch_only(pk):
     """Run the megakernel ONCE without PersistentKernel.__call__'s per-call
     trace export. The default __call__ writes a perfetto trace on EVERY launch
-    when profiling is on -- tg4perfetto serialization is ~4.8s/call and (a)
+    when profiling is on -- tg4perfetto serialization is slow and (a)
     makes a K-iteration median take minutes, (b) pollutes any wall-clock e2e
     reading. We bypass it and read the profiler buffer ourselves (cheap CSV),
     so the only GPU work timed is the megakernel itself."""

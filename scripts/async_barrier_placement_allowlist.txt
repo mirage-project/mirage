@@ -12,17 +12,6 @@
 
 # --- Blackwell (sm_100a) -----------------------------------------------------
 
-# Arming sites are real (s_rp_mbar / s_pipe_full via cp.async.mbarrier.arrive)
-# and DO dangle, but the whole warp-specialized region is inside
-# `#if defined(MPK_DSV3_FFN_WS_PAGES)`, derived from the env var
-# MPK_DSV3_FFN_WARPSPEC, which is default-OFF: the shipped megakernel compiles
-# ZERO arming sites from this file. MUST be migrated before that lever is ever
-# defaulted ON. A separate count mismatch also needs fixing first
-# (ws_loader_prologue arms all WS_NUM_RPAGES pages under a CTA-level guard while
-# the consumer waits only under `t < ROUTER_N * RKSPLIT`, so boundary CTAs arm
-# pages nobody waits).
-include/mirage/persistent_kernel/tasks/blackwell/ffn_full_megakernel_sm100.cuh
-
 # Barriers are CUTLASS pipeline storage reached through a PatternVisitor over
 # `smem_buffer`, so hoisting them means restructuring the pipeline rather than
 # redirecting a pointer -- a larger change than the rest of this fix. It is

@@ -2,8 +2,8 @@
 (`linear_fp8_bmm_dense_sm100_layer`, float32 block scales).
 
 This is the dense (float32-block-scale) variant of the per-head FP8 batched
-matmul. DSV3 uses it for the decode BMM2 / o-unabsorption when
-MPK_DSV3_BMM_DENSE=1 (builder.py `_bmm_decode_o_path` L1400):
+matmul. DSV3 uses it for the decode BMM2 / o-unabsorption via the
+dense=True builder dispatch (builder.py `_bmm_decode_o_path`):
     input (bs, Hl, 512) fp8 + f32 scale [bs, Hl, nk=4]
     weight (Hl, 128, 512) fp8 + f32 block scale [Hl, 1, nk=4]
     output (bs, Hl, 128) bf16
