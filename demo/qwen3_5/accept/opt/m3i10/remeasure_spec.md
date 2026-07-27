@@ -1,7 +1,41 @@
 # Re-measure spec — regenerating the MPK side of the M3-I10 correspondence
 
-**Not yet run.** This is the GPU window the coordinator needs to schedule (or harvest from the
-running M3-I9 resumption, see §7). Everything else in M3-I10 is complete and CPU-derived.
+**EXECUTED 2026-07-27.** Tier 1 (arm A, matched geometry) + tier 2 (arm B, continuity) + a
+late-context addendum (§4d) all ran, on an isolated `mirage-rm` clone + `venv-rm`, current HEAD
+(`4e26acf`, gate ON). Two execution bugs were found and fixed before the numbers could be
+trusted — **both change what is written below relative to what was originally spec'd**, so read
+§3/§4 as corrected, not historical:
+
+1. **§4(a)'s `--max-seq-length 1280` does not produce a 96-decode-step wave** — it produces
+   ~1023. MPK's `MODE_OFFLINE` retirement (`step + step_advance + 1 >= max_seq_length`) makes
+   `max_seq_length` gate decode *length* directly, unlike vLLM where `max_model_len` is a
+   capacity ceiling independent of `--output-len`. `1280` was vLLM's 256+1024 capacity number,
+   carried over as if MPK's same-named parameter meant the same thing. Corrected value:
+   `max_seq_length = prompt_len + decode_steps + 1 = 256 + 96 + 1 = 353`. Full derivation,
+   the three-way internal-consistency check that caught it (this doc's own §3 iteration counts,
+   §4(a)'s context claim, and §8's wave-time budget all only hold at 96 real decode steps), and
+   empirical confirmation:
+   `opt/m3i10/remeasure/logs/ROOT_CAUSE_msl.txt`.
+2. **`schedule_sim.py`'s `steady_window()` can select the prefill regime instead of decode** —
+   its tie-break ranks "most tokens/step" above "is this decode", which inverts whenever
+   `batch_size <= mbt` with a long uniform prompt (every arm-A run at bs 1 and 8): prefill's
+   mbt=16-bounded tokens/step beats decode's bs-bounded tokens/step, so the "steady window"
+   silently landed entirely inside the 16-iteration prefill phase at bs1. Fixed with a corrected
+   copy, **not a git-tree edit** — `opt/m3i10/remeasure/opt_fixed/schedule_sim.py` (one tie-break
+   term prepended: prefer any prefill-free regime outright before falling through to the original
+   ranking). Verified as a strict improvement: no regression on the AC-3 geometry it was tuned on
+   (arm B's full-vs-steady crosscheck tightens to −1.1 %), and it correctly recovers the
+   decode-only window at arm A bs 1/8/16. **This is a latent bug in the committed
+   `parse_profile.py`/`analyze.py` pipeline itself** (item 6.5.1 — lands via a separate follow-up
+   issue, tracked informally as "I7" in the remeasure's own memory note; not yet folded into the
+   git-tree `schedule_sim.py`). Any future capture with `batch_size <= mbt` should use the fixed
+   copy, not the committed one, until that lands.
+
+Results, regenerated tables, the `profile_wave.py` patch, and every analysis script used are all
+under `opt/m3i10/remeasure/` (raw profiler buffers >20 MB pointed to
+`/home/catalyst/mpk-artifacts/m3i10-remeasure/`, also retained on the capture box). The
+regenerated `ferret_targets.json` and this file are the two git-tracked artifacts this closure
+updates in place.
 
 ## 1. Why the MPK column is stale
 
@@ -39,9 +73,10 @@ window is already open.
 
 | tier | arm | geometry | bs | reps | processes | why |
 |---|---|---|---|---|---|---|
-| **1 (required)** | A — matched | `msl=1280`, 256-token prompts, 96 decode steps | 1, 8, 16 | 3 profiled + 3 unprofiled | 18 | makes the MPK column like-for-like with the vLLM column |
+| **1 (required)** | A — matched | `msl=353` (corrected; see status block above — **not** 1280), 256-token prompts, 96 decode steps | 1, 8, 16 | 3 profiled + 3 unprofiled | 18 | makes the MPK column like-for-like with the vLLM column |
 | 2 (recommended) | B — continuity | `msl=132`, AC-3 prompts, 64 new tokens (M3-I1's exact invocation) | 1, 8, 16 | 3 + 3 | 18 | **separates the code delta from the geometry delta.** Without arm B a moved number cannot be attributed to the I8 gate / I2b vs to the longer context |
-| 3 (optional) | A + B | as above | 2, 4 | 3 + 3 | 24 | restores M3-I1's 5-point table so the two are directly diffable |
+| 3 (optional) | A + B | as above | 2, 4 | 3 + 3 | 24 | restores M3-I1's 5-point table so the two are directly diffable — **not run** (box volatility already spent the discretionary margin on two GPU-residency wedges; see ROOT_CAUSE_msl.txt and the remeasure's memory note for the wedge diagnosis) |
+| 4 (closure, added post-c2) | A-late — recentred context | `msl=897` (256-token prompt + 640 decode steps + 1), final-96-iteration window (context ≈801–896) | 1, 8, 16 | 1 profiled only | 3 | closes the context-window mismatch between arm A's own decode window (context 257–352) and the vLLM reference table's (556–896) — see §4(d) |
 
 Arm B is the one people skip and then regret: arm A alone changes two variables at once.
 
@@ -55,9 +90,13 @@ reps via `--reuse-kernel`, and records an arm sha256 manifest. Two changes:
 **(a) Geometry flags.** `profile_wave.py` already exposes everything needed — no new plumbing:
 
 ```bash
-# arm A, matched geometry
+# arm A, matched geometry (msl CORRECTED from the original 1280 -- see status
+# block at the top of this file and ROOT_CAUSE_msl.txt. General form:
+# max_seq_length = synthetic_prompt_len + desired_decode_steps + 1, NOT
+# vLLM's prompt+output capacity sum -- MPK's max_seq_length gates decode
+# LENGTH directly, it is not a capacity ceiling like vLLM's max_model_len.)
 $PY -u "$OPT/profile_wave.py" --batch-size $BS \
-    --max-seq-length 1280 --max-new-tokens 96 --mbt 16 --page-size 256 \
+    --max-seq-length 353 --max-new-tokens 96 --mbt 16 --page-size 256 \
     --synthetic-prompt-len 256 --synthetic-seed $((20260725 + BS*1000 + REP)) \
     --out-dir "$M/prof_A" --kernel-dir "$M/kernel_A_bs${BS}_prof" \
     --rep $REP --slots 96000000 --reuse-kernel [--save-raw]
@@ -87,6 +126,82 @@ extra information, since the comparison only needs a steady-decode slice. 96 dec
 already bounded it: the same FMHA kernel costs 8.706 µs/call at ctx ≈ 260 vs 9.425 µs/call at ctx
 556–896, **+8.3 %** (`tables/prefill_bs1_kernels.csv` vs `tables/bs1_kernels.csv`). Apply that as
 a correction to the attention row rather than paying 16× the events to avoid it.
+
+**UPDATE (post-c2, §4(d) below): the +8.3 % single-kernel correction understated the effect.**
+Arm A's own matched-geometry attention ratio came in at 5.3–6.0× (up from the old AC-3-geometry
+capture's 3.1–3.8×) — a ~50 % increase, not the ~8 % the single-FMHA-call correction implied. A
+dedicated late-context capture (§4(d)) was run to measure this directly rather than keep
+extrapolating from one kernel call, and the corrected attention row uses that capture's numbers,
+not the +8.3 % arithmetic correction.
+
+### 4(d). Closure capture — recentring the decode window into the vLLM reference's context band
+
+Codex c2 flagged that arm A's own decode window (context 257–352) still does not match the
+vLLM reference table's sampled context (556–896) — exactly the stage the remeasure's own
+attention finding is about, so the mismatch could itself be inflating (or masking) that finding.
+Closure, cheapest correct form (MPK's profiler buffer is instrumented in-kernel with no windowed
+schedule like vLLM's torch.profiler `skip_first`/`wait`/`warmup`/`active` — it is all-or-nothing
+per wave, so "profile a later slice only" is not available; the only lever is how long the wave
+runs):
+
+```bash
+# arm A-late: same 256-token synthetic prompt, same seed formula, msl sized so
+# the wave's FINAL 96 decode iterations land in context ~[801,896] (inside
+# the vLLM reference's 556-896 band) -- prompt_len + D + 1, D=640:
+$PY -u "$OPT/profile_wave.py" --batch-size $BS \
+    --max-seq-length 897 --max-new-tokens 96 --mbt 16 --page-size 256 \
+    --synthetic-prompt-len 256 --synthetic-seed $((20260725 + BS*1000 + 0)) \
+    --out-dir "$M/prof_Alate" --kernel-dir "$M/kernel_Alate_bs${BS}_prof" \
+    --rep 0 --slots 200000000 --save-raw
+```
+
+Analysis takes the **final-96-iteration** window instead of arm A's post-warmup head window:
+`parse_profile.py ... --warm-iters 544 --steady-iters 96` (`schedule_sim.steady_window` finds the
+full ~640-iteration decode_full run; `warm_iters=544` skips to iteration 544 of it, leaving
+exactly the last 96 — the fixed `opt_fixed/schedule_sim.py` from §5 item 3 is required here too,
+for the same reason). Profiled only, 1 rep/bs (not the full 3+3): this is a targeted closure
+measurement of one stage's context sensitivity plus a spot-check that GDN/GEMM stages stay
+context-flat, not the primary statistical deliverable — arm A's own 3-rep captures already showed
+sub-0.2 % wave-to-wave spread and event counts are provably seed-independent (same event count
+across reps with different synthetic tokens, arm A tier-1 evidence), so 1 rep suffices for this
+purpose. Cost: 3 processes, ≈5 GPU-minutes total (all 3 bs compiled + ran in well under 5 minutes;
+`--slots 200000000` for headroom against bs16's ~123 M events, up from arm A's ~53 M since the
+wave now covers 640 decode + prefill iterations instead of 96).
+
+Verdict: attention's ratio increase is confirmed as a **real, mostly context-driven effect, larger
+than the old single-FMHA-kernel +8.3 % correction implied.** Attention wallspan (µs/step), matched
+geometry (ctx 257–352) → late-context (ctx ≈801–896 at bs1/bs8; see caveat below for bs16):
+
+| bs | matched-geometry (§4) | late-context (§4d) | further growth |
+|---|---:|---:|---:|
+| 1 | 757.0 | 1080.5 | **+42.7 %** |
+| 8 | 804.0 | 1221.2 | **+51.9 %** |
+| 16 | 787.0 | 1509.3 | **+91.8 %** (caveat below) |
+
+bs1/bs8 are clean measurements — bs1 is a single request, bs8 is a full 8-wide `decode_full`
+window (iterations 560–656, all 8 concurrent, uniform context). **bs16 has no clean equivalent**:
+`schedule_sim.simulate` shows its 12 surviving requests at the chosen window spread across
+per-slot context **263–890**, not a tight high-context band — bs16's staggered admission means
+its concurrent slots are never all at similar context simultaneously, at any point in the wave
+(structurally the same reason `schedule_sim.py`'s docstring already documented "no `decode_full`
+phase exists at bs16" — the fixed tie-break in item 2 above changes which regime a bs16 query
+lands on, not the underlying absence of one). Treat bs16's +91.8 % as directionally consistent,
+not independently precise.
+
+GDN recurrent and dense-fp8 (the two "robust" stages from §9) were spot-checked at the same
+late-context capture and stay flat, confirming they generalise to high context too:
+
+| task | bs | matched-geometry | late-context | Δ |
+|---|---|---:|---:|---:|
+| GDN recurrent (237) | 1/8/16 | 1218.0 / 2467.6 / 4938.0 | 1221.0 / 2467.6 / 4937.3 | +0.2% / +0.02% / −0.01% |
+| dense fp8 (279) | 1/8/16 | 2933.2 / 2978.4 / 2990.3 | 2939.2 / 2978.4 / 2990.3 | +0.2% / −0.6% / −0.5% |
+
+MoE w13 (241) is flat at bs1/bs8 (−0.3 % / +3.9 %) but +18.8 % at bs16 — read with the same
+reduced-concurrency caveat as attention's bs16 point, not yet attributed cleanly to context vs.
+concurrency. Full numbers, regime detail, and the exact per-slot context arrays:
+`ferret_targets.json`'s `full attention` row (`late_context_check_msl897` /
+`late_context_verdict`) and top-level `late_context_addendum`; regenerated tables in
+`opt/m3i10/remeasure/armAlate/`.
 
 ## 5. Normalisation — transplanting the anchor method
 

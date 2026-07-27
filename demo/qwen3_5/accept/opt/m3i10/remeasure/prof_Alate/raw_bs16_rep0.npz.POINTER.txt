@@ -1,11 +1,12 @@
 Raw profiler buffer (>20MB) stored at:
-  /home/catalyst/mpk-artifacts/m3i10-remeasure/armB/raw_bs1_rep0.npz  (109 MB)
+  /home/catalyst/mpk-artifacts/m3i10-remeasure/armAlate/raw_bs16_rep0.npz
 
 Also retained on the B200 box (per protocol) at:
-  ~/mpk-qwen35/m3i10-remeasure/prof_B/raw_bs1_rep0.npz
+  ~/mpk-qwen35/m3i10-remeasure/prof_Alate/raw_bs16_rep0.npz
 
-Arm B (continuity, AC-3 geometry): max_seq_length=132, prompt-ids=p06-poem, batch_size=1, rep=0.
-Paired meta: meta_bs1_rep0.json (this directory).
+Arm A-late (F2 closure, late/recentered context): max_seq_length=897,
+synthetic_prompt_len=256, batch_size=16, rep=0, profiled only. Paired meta:
+meta_bs16_rep0.json (this directory). See remeasure_spec.md sec 4(d).
 
 UPDATE 2026-07-27 (post-F2 closure): the on-box copy was deleted to relieve
 critical shared-disk pressure (/raid dropped to 6.3G free across many other

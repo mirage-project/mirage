@@ -6,3 +6,10 @@ Also retained on the B200 box (per protocol) at:
 
 Arm A (matched geometry): max_seq_length=353, synthetic_prompt_len=256, batch_size=8, rep=0.
 Paired meta: meta_bs8_rep0.json (this directory).
+
+UPDATE 2026-07-27 (post-F2 closure): the on-box copy was deleted to relieve
+critical shared-disk pressure (/raid dropped to 6.3G free across many other
+tenants' concurrent activity, not primarily this task's own usage). Both
+off-box copies (mpk-artifacts + this pointer's directory tree) were verified
+present before the on-box copy was removed. Re-generate on-box via the patch
++ scripts/ in this remeasure/ tree if needed again.
