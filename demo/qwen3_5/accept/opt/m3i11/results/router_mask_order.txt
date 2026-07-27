@@ -1,0 +1,19 @@
+runs: ['p1', 'p2', 'p3', 'p4', 'p5']
+mask samples per run: 80
+NUM_EXPERTS: 256
+
+pairs compared: 800
+  count differs : 0
+  order differs : 767  (of which SET differs: 0)
+  token dumps differing: 0
+    ORDER p1 vs p2 w0::layer_0_moe_mask: [ 33  56 136  78  89 241  14  18] vs [ 14  18 136  78  89 241  33  56]
+    ORDER p1 vs p2 w0::layer_1_moe_mask: [109 119 135 221 165 166 179 186] vs [135 109 119 165 166 179 186 221]
+    ORDER p1 vs p2 w0::layer_2_moe_mask: [135 158  56  81 178 248 201 115] vs [ 81 135 158 178 115  56 248 201]
+    ORDER p1 vs p2 w0::layer_3_moe_mask: [174 246  15  28 153 158 119 195] vs [174 195 246  15  28 119 153 158]
+    ORDER p1 vs p2 w0::layer_4_moe_mask: [133 229 246 248 253  23 120 127] vs [229 246 248 253 120 127  23 133]
+    ORDER p1 vs p2 w0::layer_5_moe_mask: [ 68  85  56 162 174  21 159 255] vs [ 68  85 255  21 159  56 162 174]
+  p1: non-ascending masks 77/80
+  p2: non-ascending masks 79/80
+  p3: non-ascending masks 79/80
+  p4: non-ascending masks 78/80
+  p5: non-ascending masks 80/80

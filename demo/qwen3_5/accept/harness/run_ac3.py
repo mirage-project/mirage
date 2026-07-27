@@ -45,6 +45,47 @@ def _default_reference_path() -> str:
     return str(Path(__file__).resolve().parent.parent / "reference" / "reference_outputs.json")
 
 
+def resolve_dump_tree(dump_dir: Path, batch_sizes) -> str:
+    """Refuse an ambiguous ``--engine-dump-dir`` tree. Returns "" if the tree is
+    unambiguous, else the error text to print before exiting 2.
+
+    The contract is one run directory holding ``bs<N>.json`` at its top level.
+    Point the flag at a PARENT of several run directories instead and the old
+    code silently scored whichever ``bs<N>.json`` sat at the top level -- or,
+    if the caller globbed, whichever one the glob happened to return. M3-I9 did
+    exactly that (``--engine-dump-dir $M/out`` over twenty run directories) and
+    a single anomalous dump out of eighty was reported as a policy effect
+    (M3-I9b root-cause; the cap turned out bit-transparent).
+
+    A dump tree that offers more than one candidate for a batch size is a
+    caller error, not something to resolve by precedence: the harness lists
+    every candidate and refuses. A single candidate that is NOT at the top
+    level is refused for the same reason -- it means the flag was pointed at a
+    parent, and the next run in that tree would make the same call ambiguous.
+    """
+    problems = []
+    for bs in batch_sizes:
+        expected = dump_dir / f"bs{bs}.json"
+        found = sorted(p for p in dump_dir.rglob(f"bs{bs}.json") if p.is_file())
+        if len(found) > 1:
+            problems.append(
+                f"  bs={bs}: {len(found)} candidates -- "
+                + "".join(f"\n      {p}" for p in found))
+        elif len(found) == 1 and found[0] != expected:
+            problems.append(
+                f"  bs={bs}: the only candidate is nested, not at the top level --"
+                f"\n      found:    {found[0]}"
+                f"\n      expected: {expected}")
+    if not problems:
+        return ""
+    return ("ACCEPT INTEGRITY ERROR (exit 2): ambiguous --engine-dump-dir tree "
+            f"{dump_dir}\n" + "\n".join(problems) +
+            "\n  Point --engine-dump-dir at ONE run directory whose top level holds "
+            "bs<N>.json.\n  (bench-protocol.md, 'Determinism protocol': a single "
+            "divergent dump picked out of\n  a multi-run tree is an anomaly "
+            "candidate, not a finding.)")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reference", default=_default_reference_path(),
@@ -138,6 +179,10 @@ def main(argv=None) -> int:
         prompt_ids = list(engine_map.keys())
     elif args.engine_dump_dir:
         dump_dir = Path(args.engine_dump_dir)
+        ambiguous = resolve_dump_tree(dump_dir, batch_sizes)
+        if ambiguous:
+            print(ambiguous)
+            return 2
         candidate_paths = {bs: dump_dir / f"bs{bs}.json" for bs in batch_sizes}
         present = {bs: p for bs, p in candidate_paths.items() if p.exists()}
         missing = [str(p) for bs, p in candidate_paths.items() if bs not in present]

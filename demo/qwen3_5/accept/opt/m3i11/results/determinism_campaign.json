@@ -1,0 +1,97 @@
+{
+ "pinned_commit": "65e42ee8",
+ "gpu": 6,
+ "config": "10 reference prompts, msl=1280, max_new_tokens=1024, warm cached m3i9 kernels (the exact .so files the m3i9 stage-7 runs loaded)",
+ "campaigns": {
+  "single_prompt": {
+   "e2": {
+    "processes": 4,
+    "trajectories": 16,
+    "distinct_states": 1
+   },
+   "e3": {
+    "processes": 6,
+    "trajectories": 12,
+    "distinct_states": 1
+   }
+  }
+ },
+ "token_dump_md5_groups": {
+  "be346b6d868ef8e7e46980426e662722": {
+   "n": 42,
+   "runs": [
+    "e4/bs1_rep1",
+    "e4/bs1_rep2",
+    "e4/bs1_rep3",
+    "e4/bs4_rep1",
+    "e4/bs4_rep2",
+    "e4/bs4_rep3",
+    "e5/bs1_r1",
+    "e5/bs1_r2",
+    "e5/bs1_r3",
+    "e5/bs1_r4",
+    "e5/bs1_r5",
+    "e5/bs1_r6",
+    "e5/bs4_r1",
+    "e5/bs4_r10",
+    "e5/bs4_r11",
+    "e5/bs4_r12",
+    "e5/bs4_r13",
+    "e5/bs4_r14",
+    "e5/bs4_r15",
+    "e5/bs4_r16",
+    "e5/bs4_r17",
+    "e5/bs4_r18",
+    "e5/bs4_r19",
+    "e5/bs4_r2",
+    "e5/bs4_r20",
+    "e5/bs4_r3",
+    "e5/bs4_r4",
+    "e5/bs4_r5",
+    "e5/bs4_r6",
+    "e5/bs4_r7",
+    "e5/bs4_r8",
+    "e5/bs4_r9",
+    "e5/bs8_r1",
+    "e5/bs8_r10",
+    "e5/bs8_r2",
+    "e5/bs8_r3",
+    "e5/bs8_r4",
+    "e5/bs8_r5",
+    "e5/bs8_r6",
+    "e5/bs8_r7",
+    "e5/bs8_r8",
+    "e5/bs8_r9"
+   ]
+  }
+ },
+ "n_runs_with_dump": 42,
+ "state_level": {
+  "per_bs": {
+   "bs1": {
+    "runs": 9,
+    "trajectories": 90,
+    "wave_state_fingerprints_per_run": 10,
+    "pairwise_array_comparisons": 1800,
+    "differing": 0
+   },
+   "bs4": {
+    "runs": 23,
+    "trajectories": 230,
+    "wave_state_fingerprints_per_run": 3,
+    "pairwise_array_comparisons": 5566,
+    "differing": 0
+   },
+   "bs8": {
+    "runs": 10,
+    "trajectories": 100,
+    "wave_state_fingerprints_per_run": 2,
+    "pairwise_array_comparisons": 810,
+    "differing": 0
+   }
+  },
+  "total_comparisons": 8176,
+  "total_differing": 0,
+  "total_trajectories": 420
+ }
+}

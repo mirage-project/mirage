@@ -381,10 +381,31 @@ predictions_addendum.md,results/}.
 
 ## Determinism protocol (M3-I9b/I11, 2026-07-27)
 
-MPK is not currently run-to-run deterministic at long generation (M3-I11, open). Until it
-closes: (a) any "policy/config X changed the tokens" claim requires >=2 same-config reps
-(a single divergent dump is an anomaly candidate, not a finding); (b) margin/waiver
-arguments use the ENGINE's own logits (reference-side margins overstate robustness — p10@49
-was 0.625 reference-side but 0.375 = 3 bf16 ULPs engine-side); (c) harness runs refuse
-ambiguous dump trees (run_ac3.py fix lands with I11). The bs16-conditional cap policy above
-is justified on PERF grounds (the cap is bit-transparent at every bs — I9b).
+Rules, in force regardless of where the remaining nondeterminism comes from: (a) any
+"policy/config X changed the tokens" claim requires >=2 same-config reps (a single divergent
+dump is an anomaly candidate, not a finding); (b) margin/waiver arguments use the ENGINE's
+own logits (reference-side margins overstate robustness — p10@49 was 0.625 reference-side
+but 0.375 = 3 bf16 ULPs engine-side); (c) harness runs refuse ambiguous dump trees —
+`run_ac3.py --engine-dump-dir` now hard-errors (exit 2) when the tree offers more than one
+`bs<N>.json` for a batch size, or a single one that is not at the top level, listing every
+candidate (`resolve_dump_tree`, tested in `harness/tests/test_dump_tree.py`). The
+bs16-conditional cap policy above is justified on PERF grounds (the cap is bit-transparent at
+every bs — I9b).
+
+M3-I11 state (evidence: `demo/qwen3_5/accept/opt/m3i11/`). A live run-to-run-varying write in
+the decode path is CONFIRMED on hardware: the MoE router's compacted `mpk_active_expert_ids`
+list comes out in a different order in 767 of 800 same-input comparisons (set and count
+identical in all 800). It is value-neutral at the geometries we run — the grouped GEMM
+strides the list and addresses by expert id — and 42 runs / 420 trajectories / 8176
+state-level comparisons at 65e42ee8 produced ZERO differences, all matching the census
+consensus md5. M3-I5c's `0c8b4cf5` removes that atomicAdd; its hardware validation is
+pre-registered and still owed, and I11's E7 numbers are its pre-fix baseline (post-fix must
+be 0 order differences and 0 non-ascending lists).
+
+What is NOT closed: the M3-I9b census's own token divergences (6 anomalous dumps of 80) did
+not reproduce — P(0 in 42 runs) is about 2e-4 at the census rate — so the >=2-rep rule stays
+mandatory for M4's 1024-token gate. Every census anomaly landed on GPU 1/4/7; every clean run
+here was on GPU 6, and that is the one untested difference. A second defect found by source
+reading is reported but not patched: `linear_sm100_mpk.cuh` ends a task with
+`cp.async.bulk.wait_group.read`, which does not cover the TMA store's destination write
+before the task's release-increment publishes it to a consumer CTA.
