@@ -411,7 +411,6 @@ class DeepSeekV3Builder(GraphBuilder):
     def _fp8_linear(self, input_bf16, weight, weight_scale, output,
                     grid_dim, block_dim, residual=None, gate_mode: int = 0,
                     input_row_stride: int = None,
-                    input_col_offset: int = 0,
                     share_quantize_tag: str = None,
                     input_fp8_override=None,
                     input_scale_override=None,
@@ -443,10 +442,11 @@ class DeepSeekV3Builder(GraphBuilder):
             Mirrored into the GEMM's runtime_m_mode (0/2/3) and the
             quantize's active_mode so wrong-phase dual-dispatch tasks
             early-exit.
-        input_row_stride / input_col_offset: read a column slice of a
-            wider input buffer (QKV-a fused path): parent row stride +
-            slice start column. K (= weight.dim(1)) sets how many cols are
-            quantized per row. Defaults preserve contiguous reads.
+        input_row_stride: read a column slice of a wider input buffer
+            (QKV-a fused path) at the parent row stride; the slice start
+            column is carried by the mpk.narrow view. K (= weight.dim(1))
+            sets how many cols are quantized per row. Defaults preserve
+            contiguous reads.
         share_quantize_tag: dedup the input-quantize task across GEMMs
             reading the same input slice. The FIRST call with a given tag
             emits one quantize with active_mode=0 (always run, so both
@@ -524,12 +524,11 @@ class DeepSeekV3Builder(GraphBuilder):
                       else 0)
             )
             quantize_kwargs = {}
-            if input_row_stride is not None or input_col_offset != 0:
+            if input_row_stride is not None:
                 quantize_kwargs["hidden_size_override"] = reduction_size
                 quantize_kwargs["input_stride_override"] = (
                     input_row_stride if input_row_stride is not None
                     else input_bf16.dim(1))
-                quantize_kwargs["in_offset_elems"] = input_col_offset
             self.mpk.quantize_fp8_layer(
                 input=input_bf16,
                 output_fp8=input_fp8,
@@ -702,9 +701,7 @@ class DeepSeekV3Builder(GraphBuilder):
                                           input_x: 'DTensor',
                                           w_norm: 'DTensor',
                                           layer_idx: int,
-                                          reduction_size: int,
-                                          in_offset_elems: int,
-                                          out_offset_elems: int) -> tuple:
+                                          reduction_size: int) -> tuple:
         """Fused q_a_layernorm + per-token-group FP8 quantize.
 
         Analogous to `_emit_fused_rmsnorm_qkv_a_quantize` but for the
@@ -765,8 +762,6 @@ class DeepSeekV3Builder(GraphBuilder):
             grid_dim=(mbt, 1, 1),
             block_dim=(128, 1, 1),
             process_dim=reduction_size,
-            in_offset_elems=in_offset_elems,
-            out_offset_elems=out_offset_elems,
             scale_ue8m0=False,
             emit_bf16=False,
         )
@@ -1064,12 +1059,9 @@ class DeepSeekV3Builder(GraphBuilder):
         # inherits the parent row stride into view.stride[0]; task_register,
         # the FP8 TMA descriptor builder (tma.cuh) and annotated_graph's 2D
         # bbox overlap check all consume the view metadata. The explicit
-        # *_offset / row_stride params still passed at call sites encode
-        # 0 offset + parent row stride, matching what the view supplies.
+        # row_stride param still passed at call sites encodes the parent row
+        # stride, matching what the view supplies.
         self._qkv_a_row_stride = qkv_a_total
-        self._qkv_a_q_offset = 0
-        self._qkv_a_c_latent_offset = 0
-        self._qkv_a_k_pe_offset = 0
         self.q_a_out = self.mpk.narrow(
             self.qkv_a_out, dim=1, start=0, length=self.q_lora_rank)
         self.q_a_out_buf = None
@@ -1705,18 +1697,14 @@ class DeepSeekV3Builder(GraphBuilder):
         q_a_fused_fp8_ovr, q_a_fused_scale_ovr, q_a_fused_tag = (
             self._emit_fused_q_a_rmsnorm_quantize(
                 input_x=self.q_a_out, w_norm=w_q_a_ln,
-                layer_idx=layer_idx, reduction_size=self.q_lora_rank,
-                in_offset_elems=self._qkv_a_q_offset,
-                out_offset_elems=self._qkv_a_q_offset))
+                layer_idx=layer_idx, reduction_size=self.q_lora_rank))
 
         # Step 3: q_b projections.
         # Decode uses absorbed q_b [H*(512+64)] to match the compressed cache.
         # Prefill uses vLLM's original split q_b [H*128] + [H*64].
         # QKV-a fused: q_a_out aliases qkv_a_out (mbt, 2176); pass the slice
-        # row stride + offset so the FP8 quantize reads only q_a's 1536 cols.
-        qb_slice_kwargs = dict(
-            input_row_stride=self._qkv_a_row_stride,
-            input_col_offset=self._qkv_a_q_offset)
+        # row stride so the FP8 quantize reads only q_a's 1536 cols.
+        qb_slice_kwargs = dict(input_row_stride=self._qkv_a_row_stride)
         # The fused q_a layernorm above already emitted q_a's FP8/scale
         # into per-layer buffers; thread its tag + buffers to ALL q_b
         # GEMMs (decode + prefill) so they share one quantize and read
@@ -1807,7 +1795,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 phase_gate=1,
             )
         # k_pe lives at cols [2048:2112) inside the 2176-wide qkv_a_out;
-        # pass row stride + offset so the ROPE kernel rotates the right slice.
+        # pass the row stride so the ROPE kernel rotates the right slice.
         dsv3_tasks.deepseek_mla_rope_k_layer(
             self.mpk,
             k_pe=self.k_pe_out,
@@ -1820,7 +1808,6 @@ class DeepSeekV3Builder(GraphBuilder):
             ),
             q_tile_size=self.max_num_batched_tokens,
             k_pe_row_stride=self._qkv_a_row_stride,
-            k_pe_offset=self._qkv_a_k_pe_offset,
         )
 
         # Step 5: kv_a_layernorm on c_latent slice [1536:2048) of qkv_a_out.

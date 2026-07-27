@@ -21,8 +21,6 @@ def fused_rmsnorm_quantize_fp8_layer(
     grid_dim: tuple,
     block_dim: tuple,
     process_dim: int = None,
-    in_offset_elems: int = 0,
-    out_offset_elems: int = 0,
     scale_ue8m0: bool = True,
     emit_bf16: bool = True,
     scratch_ptr_tensor: DTensor = None,
@@ -36,9 +34,9 @@ def fused_rmsnorm_quantize_fp8_layer(
     (~10 μs/layer expected at TP=4 EP=2 mbt=128 decode).
 
     Parameters mirror the two underlying calls:
-      * `process_dim` / `in_offset_elems` / `out_offset_elems` select
-        a column slice of a wider parent buffer (QKV-a FuseTensor
-        path). Defaults preserve legacy contiguous behaviour.
+      * `process_dim` selects a column slice of a wider parent buffer
+        (QKV-a FuseTensor path); slice offsets are carried by mpk.narrow
+        views. Defaults preserve legacy contiguous behaviour.
       * `scale_ue8m0=True` writes packed UE8M0 uint32 scales in the
         column-major `[packed_k, aligned_batch]` layout that the new
         FP8 dense GEMMs (`fp8_gemm_dense_smallm/mediumm_sm100`) read.
@@ -66,8 +64,6 @@ def fused_rmsnorm_quantize_fp8_layer(
     assert output_fp8.dim(1) == process_dim, (
         f"output_fp8 second dim must equal process_dim "
         f"({output_fp8.dim(1)} vs {process_dim})")
-    assert in_offset_elems + process_dim <= legacy_hidden
-    assert out_offset_elems + process_dim <= output_bf16.dim(1)
 
     tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
     # IMPORTANT: input order MUST match the C++ task_register reader.
@@ -100,9 +96,6 @@ def fused_rmsnorm_quantize_fp8_layer(
     pk.kn_graph.customized(tensors, tb_graph)
     # The C++ register on this branch reads [process_dim, scale_ue8m0,
     # emit_bf16]; slice offsets are carried by mpk.narrow views, not params.
-    assert in_offset_elems == 0 and out_offset_elems == 0, (
-        "offset params were dropped from the upstream task ABI; pass narrow "
-        "views instead")
     params = [
         process_dim,
         1 if scale_ue8m0 else 0,
@@ -265,16 +258,12 @@ def deepseek_mla_rope_k_layer(
     block_dim: tuple = (128, 1, 1),
     q_tile_size: int = 16,
     k_pe_row_stride: int = None,
-    k_pe_offset: int = 0,
 ):
     # k_pe_row_stride supports running the K_PE rotation in-place on a slice
     # of a wider buffer (e.g., qkv_a_out (mbt, 2176) where k_pe lives at cols
     # [2048:2112)). The C++ register on this branch reads [q_tile] or
     # [q_tile, k_pe_row_stride] — the slice offset comes from the narrow
     # view's base pointer, NOT a param.
-    assert k_pe_offset == 0, (
-        "k_pe_offset was dropped from the upstream task ABI; pass a narrow "
-        "view instead")
     params = [q_tile_size]
     if k_pe_row_stride is not None:
         params = [q_tile_size, k_pe_row_stride]
