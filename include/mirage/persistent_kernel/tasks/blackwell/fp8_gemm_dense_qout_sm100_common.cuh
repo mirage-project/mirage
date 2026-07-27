@@ -69,11 +69,6 @@ __device__ __forceinline__ void mb_init(int a, int c) {
 // a 0xDEADBEEF sentinel before tcgen05.alloc: a slot the allocator never wrote
 // then reads back as the sentinel and is rejected, instead of aliasing onto a
 // legal-looking base of 0.
-#ifdef MPK_DSV3_TMEM_SLOT_PAD
-// Global count of vacated-slot clobbers. Rate-limits the canary printf while
-// still letting "zero lines" be the acceptance signal.
-__device__ unsigned int mpk_tmem_canary_hits = 0;
-#endif
 
 __device__ __forceinline__ bool tmem_addr_valid(uint32_t a, int cols) {
   return (a >> 16) < 128u && ((a & 0xFFFFu) + (uint32_t)cols) <= 512u;
@@ -222,29 +217,6 @@ __device__ __forceinline__ void
   int btf = be + NS * 8;
   int bte = btf + NE * 8;
   int tp_addr = bars_addr + (NS * 2 + NE * 2) * 8;
-#ifdef MPK_DSV3_TMEM_SLOT_PAD
-  // DIAGNOSTIC (default OFF): leave a canary at the ARENA offset the barrier
-  // block used to occupy. It is written at task entry and checked a few
-  // instructions later, still inside this task, at bytes this task no longer
-  // touches — so a clobber can only come from an agent outside this task's
-  // thread ordering, i.e. a late async arrival from a PREVIOUS task. With the
-  // barriers relocated the canary must be SILENT;
-  // MPK_DSV3_ASYNC_BAR_ARENA_UNSAFE below is the fault-injection control that
-  // proves the detector still detects.
-  int tp_canary_addr = sb_aligned + NS * (SA + SB) + (NS * 2 + NE * 2) * 8;
-#endif
-#ifdef MPK_DSV3_ASYNC_BAR_ARENA_UNSAFE
-  // FAULT INJECTION (default OFF, never ship enabled). Puts the barrier block
-  // back in the arena — i.e. restores the defect — so that the canary and the
-  // Class-2 probe can be shown to FIRE. A build with this defined is known to
-  // corrupt memory and fault; it exists only to validate the detectors.
-  bars_addr = sb_aligned + NS * (SA + SB);
-  bf = bars_addr;
-  be = bf + NS * 8;
-  btf = be + NS * 8;
-  bte = btf + NE * 8;
-  tp_addr = bars_addr + 1024;
-#endif
   constexpr int TC = NE * BN;
   constexpr int TCA = TC <= 32    ? 32
                       : TC <= 64  ? 64
@@ -294,11 +266,6 @@ __device__ __forceinline__ void
   if (wid == 0 && elect_one_sync()) {
     asm volatile("st.shared.u32 [%0], %1;" ::"r"(tp_addr), "r"(0xDEADBEEFu)
                  : "memory");
-#ifdef MPK_DSV3_TMEM_SLOT_PAD
-    asm volatile("st.shared.u32 [%0], %1;" ::"r"(tp_canary_addr),
-                 "r"(0xC0DEFEEDu)
-                 : "memory");
-#endif
   }
   __syncthreads();
   if (wid == 0) {
@@ -313,36 +280,6 @@ __device__ __forceinline__ void
                : "=r"(taddr)
                : "r"(tp_addr)
                : "memory");
-#ifdef MPK_DSV3_TMEM_SLOT_PAD
-  // UNCONDITIONAL canary check -- it must run even when the slot is clean,
-  // because a clean slot plus a clobbered canary IS the proof that the alias
-  // was the mechanism (the write still happens, it just no longer lands on
-  // anything that matters). Reported per faulting block, low volume.
-  {
-    uint32_t canary;
-    asm volatile("ld.shared.u32 %0, [%1];"
-                 : "=r"(canary)
-                 : "r"(tp_canary_addr)
-                 : "memory");
-    if (canary != 0xC0DEFEEDu && wid == 0 && elect_one_sync()) {
-      // RATE-LIMITED: this fires ~75k times per 61L run, which floods the FIFO
-      // and skews timing badly enough that the run is unusable as a perf point.
-      // A bounded sample proves firing; ZERO lines is the acceptance signal, so
-      // suppressing the tail costs nothing diagnostically.
-      unsigned int n = atomicAdd(&mpk_tmem_canary_hits, 1u);
-      if (n < 16u) {
-        printf("[MPK CANARY] fp8_gemm_dense_qout: vacated slot offset "
-               "CLOBBERED: 0x%08x (mbarrier pending would be %d) on block %d; "
-               "live taddr=0x%08x valid=%d\n",
-               canary,
-               (int)((0x00200000u - canary) / 2u),
-               (int)blockIdx.x,
-               taddr,
-               (int)tmem_addr_valid(taddr, TCA));
-      }
-    }
-  }
-#endif
   // Bounded re-read. If the allocation result has not been published yet the
   // slot still holds unrelated residue from an earlier task in this persistent
   // CTA; consuming it as a TMEM address faults the tcgen05.mma below with
@@ -386,17 +323,7 @@ __device__ __forceinline__ void
              TCA,
              (int)blockIdx.x);
     }
-#ifdef MPK_DSV3_TMEM_GUARD_NOTRAP
-    // Diagnostic mode: do NOT trap. A trapping megakernel never exits, and the
-    // printf FIFO only flushes when it FILLS or when the CTA EXITS -- the
-    // driver floors the FIFO at 524288 B, which a handful of guard lines never
-    // fills, so trapping makes the guard structurally unable to report. Force a
-    // legal TMEM base instead: the math is wrong, but the CTA exits, the FIFO
-    // flushes, and we learn whether the guard fired at all and with what value.
-    taddr = 0u;
-#else
     __trap();
-#endif
   }
   constexpr uint32_t idesc =
       (1u << 4) | ((uint32_t)(BN / 8) << 17) | (8u << 24);
@@ -657,15 +584,7 @@ __device__ __forceinline__ void
 template <int BN, int NS, int NE>
 __host__ __device__ inline constexpr int smem_size_tpl() {
   constexpr int BM = 128, BK = 128;
-#ifdef MPK_DSV3_TMEM_SLOT_PAD
-  // The TMEM slot moves to bars_addr + 1024 (past every sibling's barrier
-  // array), so the region must cover that word explicitly -- otherwise the
-  // relocated slot writes past the dynamic allocation and we manufacture a new
-  // bug while chasing this one.
-  return NS * (BM * BK + BN * BK) + 1024 + 8 + 1024;
-#else
   return NS * (BM * BK + BN * BK) + (NS * 2 + NE * 2) * 8 + 8 + 1024;
-#endif
 }
 
 } // namespace fp8_gemm_dense_qout_common

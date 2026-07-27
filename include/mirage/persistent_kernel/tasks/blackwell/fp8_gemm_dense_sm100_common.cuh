@@ -171,22 +171,6 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
   int btf = be + NS * 8;
   int bte = btf + NE * 8;
   int tp_addr = bars_addr + (NS * 2 + NE * 2) * 8;
-#ifdef MPK_DSV3_ASYNC_BAR_ARENA_UNSAFE
-  // FAULT INJECTION (default OFF, never ship enabled). Puts this family's
-  // barrier block back in the arena, restoring the defect. The sibling
-  // fp8_gemm_dense_qout body does the same under this macro, and both share the
-  // SAME `sm_raw_fp8gemm` extern symbol and layout formula, so enabling it
-  // restores the exact observed collision: byte 64 of the block is
-  // simultaneously NE=1's tp_addr, NE=2's bte[0] and NE=4's btf[2]. With this
-  // ON the canary and Class-2 probes must FIRE; with it OFF they must be
-  // silent. Without the control, "the canary was silent" is unfalsifiable.
-  bars_addr = sb_aligned + NS * (SA + SB);
-  bf = bars_addr;
-  be = bf + NS * 8;
-  btf = be + NS * 8;
-  bte = btf + NE * 8;
-  tp_addr = bars_addr + (NS * 2 + NE * 2) * 8;
-#endif
   constexpr int TC = NE * BN;
   constexpr int TCA = TC <= 32    ? 32
                       : TC <= 64  ? 64
@@ -247,36 +231,6 @@ __device__ __forceinline__ void task_impl_tpl(CUtensorMap const *ta_ptr,
   __syncthreads();
   uint32_t taddr;
   asm volatile("ld.shared.u32 %0, [%1];" : "=r"(taddr) : "r"(tp_addr));
-#ifdef MPK_DSV3_TMEM_GUARD_ALL
-  // DIAGNOSTIC (compile-time, default OFF). The sibling fp8_gemm_dense_qout
-  // kernel validates this base and traps; this one does not, so a base that
-  // tcgen05.alloc never published (0xDEADBEEF) or that was clobbered goes
-  // straight into tcgen05.mma and yields SILENT garbage rather than a fault.
-  // Enabling this turns that silent corruption into a named failure, which is
-  // how we test whether the degenerate-output class shares the cause of the
-  // seq>2048 fault (where the qout guard is the believed trap source).
-  if (!((taddr >> 16) < 128u && ((taddr & 0xFFFFu) + (uint32_t)TCA) <= 512u)) {
-    if (wid == 0 && elect_one_sync()) {
-      printf("[MPK FATAL] fp8_gemm_dense: invalid TMEM base 0x%08x (requested "
-             "%d cols) on block %d. 0xdeadbeef means tcgen05.alloc never wrote "
-             "the slot; any other value means it was overwritten.\n",
-             taddr,
-             (int)TCA,
-             (int)blockIdx.x);
-    }
-#ifdef MPK_DSV3_TMEM_GUARD_NOTRAP
-    // Diagnostic mode: do NOT trap. A trapping megakernel never exits, and the
-    // printf FIFO only flushes when it FILLS or when the CTA EXITS -- the
-    // driver floors the FIFO at 524288 B, which a handful of guard lines never
-    // fills, so trapping makes the guard structurally unable to report. Force a
-    // legal TMEM base instead: the math is wrong, but the CTA exits, the FIFO
-    // flushes, and we learn whether the guard fired at all and with what value.
-    taddr = 0u;
-#else
-    __trap();
-#endif
-  }
-#endif
   constexpr uint32_t idesc =
       (1u << 4) | ((uint32_t)(BN / 8) << 17) | (8u << 24);
 

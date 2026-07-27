@@ -6541,9 +6541,9 @@ int TaskRegister::register_attn_block_megakernel_sm100_task(
 // grouped GEMM — NOT emitted by this task.
 // Grid: (E_LOCAL / E_PER_CTA, 1, 1). expert_offset = bid.x = CTA index
 // (runtime.cc). The kernel owns experts [bid.x*E_PER_CTA,
-// (bid.x+1)*E_PER_CTA). E_PER_CTA = params[6] (default 1; builder gates it
-// via MPK_DSV3_PERMUTE_EPC). Passed as a runtime scalar (not a template
-// arg) so raising it doesn't trigger a template-instantiation rebuild.
+// (bid.x+1)*E_PER_CTA). E_PER_CTA = params[6] (default 1), passed as a
+// runtime scalar (not a template arg) so raising it doesn't trigger a
+// template-instantiation rebuild.
 int TaskRegister::register_moe_permute_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   (void)bgraph;

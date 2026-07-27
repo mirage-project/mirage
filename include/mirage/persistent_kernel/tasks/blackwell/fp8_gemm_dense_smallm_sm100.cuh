@@ -36,9 +36,6 @@ __device__ __noinline__ void
                                           int const worker_idx,
                                           int const num_workers,
                                           int const C_row_stride = -1) {
-#ifdef MPK_FASTFWD_GEMM
-  return; // DIAGNOSTIC fast-forward: skip compute (runtime still signals done)
-#endif
   fp8_gemm_dense_common::task_impl_tpl<BN, NS, /*NE=*/2>(ta_ptr,
                                                          tb_ptr,
                                                          sa,

@@ -47,9 +47,6 @@
 #include <cuda_runtime.h>
 #include <math.h>
 #include <stdint.h>
-#ifdef MPK_ATTN_DBG
-#include <cstdio> // device printf for the per-stage debug taps (default-OFF)
-#endif
 
 // ---- MPK grid barrier (VERBATIM from ffn_full_megakernel_sm100.cuh)
 // ----------
@@ -141,66 +138,6 @@ namespace attn_block_megakernel_sm100 {
 // path (same float ops, same k_bf16 rounding, same intra-pair order). Still on
 // worker 0 only => no new cross-CTA coordination; the existing q_b->MLA
 // grid_barrier (count 136, fences ALL threads) publishes it.
-
-// ---- Per-stage debug taps (default-OFF; compile with -DMPK_ATTN_DBG) --------
-// Enable: add -DMPK_ATTN_DBG to the megakernel nvcc flags (e.g. via the
-// extra-defines env the runtime forwards), then run with the demo. At decode
-// step 0 ONLY, worker 0 / thread 0 prints, for EACH stage, the stage label, the
-// `out` buffer pointer (disambiguates the per-layer task — e.g. layer 3 is the
-// one whose `out` matches layer_3_attnmega_attn_proj_fused), the first 4 fp32
-// values, and a sum-of-abs checksum of the stage's scratch output. The device
-// printf FIFO must be bumped on the HOST before CUDA init (cuCtxSetLimit
-// cudaLimitPrintfFifoSize, e.g. 32MB) or low-volume prints may not flush.
-// Compiles to NOTHING when MPK_ATTN_DBG is undefined, so
-// the default build stays byte-identical and perf/the gate watchdog are
-// unaffected.
-#ifdef MPK_ATTN_DBG
-// Fire the taps at steps 0, 1, AND 2 — so tokens 0,1,2's per-step HIDDEN input
-// and raw c_latent can be compared directly (the decisive check: tokens 0,1
-// produce near-identical c_latent → is the HIDDEN itself near-identical for
-// steps 0,1 [input-binding bug] or does the GEMV flatten distinct hiddens?).
-// Fire at clean DISTINCT-token prefill positions (2,3 — tokens[2]=128803,
-// tokens[3]=45585; NOT 0/1 which are the duplicate token-0) AND the FIRST
-// decode step (14, the first GENERATED token after a 14-token prompt). Step 14
-// is the SAFE decode comparison vs the chain: both configs still consume the
-// IDENTICAL prompt up to position 13, so the layer-0 input at step 14 matches
-// (free-running generation diverges by later steps, so a late step is NOT
-// chain-comparable). The nsp>1 MLA-merge path (KV>64) needs a separate
-// forced/replayed-token test, not a free-running step. Adjust 14 to
-// (prompt_len) if the prompt length differs.
-#define ATTN_DBG_STEP(s) ((s) == 2 || (s) == 3 || (s) == 14)
-__device__ __forceinline__ void attn_dbg_tap(char const *label,
-                                             void const *out_id,
-                                             float const *v,
-                                             int n,
-                                             int step,
-                                             int worker_idx) {
-  if (!ATTN_DBG_STEP(step) || worker_idx != 0 || threadIdx.x != 0) {
-    return;
-  }
-  float s = 0.f;
-  for (int i = 0; i < n; i++) {
-    s += fabsf(v[i]);
-  }
-  printf("[ATTN_DBG out=%p step=%d] %-10s n=%d sum|.|=%.6f  v[0..3]= %.5f "
-         "%.5f %.5f %.5f\n",
-         out_id,
-         step,
-         label,
-         n,
-         s,
-         (n > 0 ? v[0] : 0.f),
-         (n > 1 ? v[1] : 0.f),
-         (n > 2 ? v[2] : 0.f),
-         (n > 3 ? v[3] : 0.f));
-}
-#define ATTN_DBG_TAP(label, out_id, v, n, step, worker_idx)                    \
-  attn_dbg_tap(label, out_id, v, n, step, worker_idx)
-#else
-#define ATTN_DBG_TAP(label, out_id, v, n, step, worker_idx)                    \
-  do {                                                                         \
-  } while (0)
-#endif
 
 // cos/sin are bound as ONE concatenated buffer [cos(64) | sin(64)] per max_seq
 // row (stride 128) to stay under MAX_INPUTS_PER_TASK=14. cos for position `pos`
@@ -824,12 +761,13 @@ __device__ __forceinline__ void quant_ue8m0_grid(
 // format used everywhere in this file (`__ldg(&sn[t][g])`).
 // ---------------
 
-// Lever 1: block-cooperative UE8M0 quant of bf16 hidden[0:n] -> block-local
-// SHARED s_deq (dequantized fp32, byte-identical to quant_hidden_grid's `deq`
-// output). Every block quantizes the SAME hidden into its own s_deq (redundant
-// but no block idles) so the quant_hidden->qkv_a grid barrier is removed: the
-// trailing __syncthreads publishes s_deq within the block before qkv_a reads
-// it. Does NOT write g_hf8/g_hsc (the qkv_a GEMV reads the fp32 deq path only).
+// HIDDEN_BLOCK_LOCAL: block-cooperative UE8M0 quant of bf16 hidden[0:n] ->
+// block-local SHARED s_deq (dequantized fp32, byte-identical to
+// quant_hidden_grid's `deq` output). Every block quantizes the SAME hidden into
+// its own s_deq (redundant but no block idles) so the quant_hidden->qkv_a grid
+// barrier is removed: the trailing __syncthreads publishes s_deq within the
+// block before qkv_a reads it. Does NOT write g_hf8/g_hsc (the qkv_a GEMV reads
+// the fp32 deq path only).
 __device__ __forceinline__ void
     quant_hidden_block_smem(__nv_bfloat16 const *__restrict__ hidden,
                             float *__restrict__ s_deq,
@@ -1002,10 +940,11 @@ __device__ __forceinline__ void rmsnorm_quant_hidden_block_smem(
   __syncthreads();
 }
 
-// Lever 3: block-cooperative UE8M0 quant of src[0:n] -> block-local SHARED
-// s_deq (dequantized values, byte-identical to quant_ue8m0_grid). Every block
-// quantizes the SAME src so the quant_gred->o_proj grid barrier is removed (the
-// trailing __syncthreads publishes s_deq within the block before o_proj reads).
+// OPROJ_BLOCK_QUANT: block-cooperative UE8M0 quant of src[0:n] -> block-local
+// SHARED s_deq (dequantized values, byte-identical to quant_ue8m0_grid). Every
+// block quantizes the SAME src so the quant_gred->o_proj grid barrier is
+// removed (the trailing __syncthreads publishes s_deq within the block before
+// o_proj reads).
 __device__ __forceinline__ void
     quant_ue8m0_block_smem(float const *__restrict__ src,
                            float *__restrict__ s_deq,
@@ -1038,12 +977,12 @@ __device__ __forceinline__ void
   __syncthreads();
 }
 
-// Lever 2 companion: q_b cp.async GEMV + fused YaRN rope that sources its
-// ACTIVATION from block-local SHARED s_adeq (already-dequantized q_a_normed).
-// Byte-identical to gemv_grid_cpa_qb_rope_t EXCEPT the activation source
-// (shared, via ld.shared.v4.f32) — the weight stream, MAC, rope, and Wsc read
-// (MPK per-128-block fp32 `__ldg(&sn[t][g])`) are identical. Lets the caller
-// drop the q_a_layernorm->q_b grid barrier.
+// QA_BLOCK_LOCAL companion: q_b cp.async GEMV + fused YaRN rope that sources
+// its ACTIVATION from block-local SHARED s_adeq (already-dequantized
+// q_a_normed). Byte-identical to gemv_grid_cpa_qb_rope_t EXCEPT the activation
+// source (shared, via ld.shared.v4.f32) — the weight stream, MAC, rope, and Wsc
+// read (MPK per-128-block fp32 `__ldg(&sn[t][g])`) are identical. Lets the
+// caller drop the q_a_layernorm->q_b grid barrier.
 template <int RBT, int STAGES>
 __device__ __forceinline__ void
     gemv_grid_cpa_qb_rope_smem_t(float const *__restrict__ s_adeq,
@@ -1183,10 +1122,10 @@ __device__ __forceinline__ void
   }
 }
 
-// Lever 3 companion: o_proj cp.async GEMV (fused residual add) that sources its
-// ACTIVATION from block-local SHARED s_adeq (already-dequantized g_red).
-// Byte-identical to gemv_grid_cpa_oproj_t EXCEPT the activation source. Lets
-// the caller drop the quant_gred->o_proj grid barrier.
+// OPROJ_BLOCK_QUANT companion: o_proj cp.async GEMV (fused residual add) that
+// sources its ACTIVATION from block-local SHARED s_adeq (already-dequantized
+// g_red). Byte-identical to gemv_grid_cpa_oproj_t EXCEPT the activation source.
+// Lets the caller drop the quant_gred->o_proj grid barrier.
 template <int RBT, int STAGES>
 __device__ __forceinline__ void
     gemv_grid_cpa_oproj_smem_t(float const *__restrict__ s_adeq,
@@ -1387,24 +1326,6 @@ __device__ __noinline__ void
     gmax = fmaxf(gmax, red8[i]);
   }
   __syncthreads();
-#ifdef MPK_ATTN_DBG
-  // DECISIVE: dump the PRE-softmax scores for the first 3 KV positions (head 0,
-  // split 0). If one position's score dominates by a large margin, attention
-  // collapses there (degenerate). Captured from s_score BEFORE the in-place
-  // exp. dbg_step is the current decode `step` passed by the task entry.
-  if (dbg_step == 2 && h == 0 && sp == 0 && tid == 0) {
-    float sc0 = (nr > 0) ? s_score[0] : 0.f;
-    float sc1 = (nr > 1) ? s_score[1] : 0.f;
-    float sc2 = (nr > 2) ? s_score[2] : 0.f;
-    printf("[ATTN_DBG] MLA h0 sp0 nr=%d gmax=%.5f  pre-softmax score[0,1,2]= "
-           "%.5f %.5f %.5f\n",
-           nr,
-           gmax,
-           sc0,
-           sc1,
-           sc2);
-  }
-#endif
   for (int rr = tid; rr < nr; rr += NTHREAD) {
     s_score[rr] = __expf(s_score[rr] - gmax);
   }
@@ -1426,43 +1347,6 @@ __device__ __noinline__ void
   for (int i = 0; i < NWARP; i++) {
     gsum += red8[i];
   }
-#ifdef MPK_ATTN_DBG
-  // normalized softmax WEIGHT for KV positions 0,1,2 (head 0, split 0). A
-  // weight ~1.0 on a single position = collapse (degenerate); ~1/KV each =
-  // uniform.
-  if (dbg_step == 2 && h == 0 && sp == 0 && tid == 0) {
-    float inv = (gsum > 0.f) ? 1.0f / gsum : 0.f;
-    float w0 = (nr > 0) ? s_score[0] * inv : 0.f;
-    float w1 = (nr > 1) ? s_score[1] * inv : 0.f;
-    float w2 = (nr > 2) ? s_score[2] * inv : 0.f;
-    printf("[ATTN_DBG] MLA h0 sp0 gsum=%.5f  softmax_weight[0,1,2]= %.5f %.5f "
-           "%.5f  (collapse if one ~1.0)\n",
-           gsum,
-           w0,
-           w1,
-           w2);
-    // Discriminate softmax-collapse vs V-accum-reads-wrong-row: print
-    // the V (c_latent) of rows 0,1,2 at a NON-tiny dim (d=256) + the weighted
-    // reconstruction. If V[d] differs across rows AND weights are healthy but
-    // attn_out[d] still ~= V0[d], the V-accumulation indexes the wrong row.
-    int dd = 256;
-    float v0 =
-        (nr > 0) ? __bfloat162float(kv_cache[(size_t)(r0 + 0) * K_QKHEAD + dd])
-                 : 0.f;
-    float v1 =
-        (nr > 1) ? __bfloat162float(kv_cache[(size_t)(r0 + 1) * K_QKHEAD + dd])
-                 : 0.f;
-    float v2 =
-        (nr > 2) ? __bfloat162float(kv_cache[(size_t)(r0 + 2) * K_QKHEAD + dd])
-                 : 0.f;
-    printf("[ATTN_DBG] MLA h0 V[d=256] rows[0,1,2]= %.5f %.5f %.5f  recon "
-           "w.V=%.5f\n",
-           v0,
-           v1,
-           v2,
-           w0 * v0 + w1 * v1 + w2 * v2);
-  }
-#endif
   int base = h * MLA_SPLITS + sp;
   if (tid == 0) {
     g_mla_m[base] = (nr > 0) ? gmax : -1e30f;
@@ -1548,7 +1432,7 @@ __device__ __noinline__ void
       dq[j] = (float)__nv_fp8_e4m3(vq) * ys;
     }
   }
-  // Lever 5 (WUV_HEAD_SPINWAIT): publish "head h's g_attn_deq is ready" to the
+  // WUV_HEAD_SPINWAIT: publish "head h's g_attn_deq is ready" to the
   // W_UV stage (replaces the merge->W_UV grid barrier).
   // CRITICAL: the dequant loop
   // above is MULTI-WARP — warps 0..3 (threads 0..127) each wrote a 128-wide
@@ -1593,14 +1477,14 @@ __device__ __noinline__ void
   int KGv = K_KVLORA / K_GRP; // 4
   int rows_per_head = K_VHEAD / RB;
   int nblk = K_HLOCAL * rows_per_head;
-  // Lever 5: remember the head whose readiness we already acquired. The
-  // grid-stride visits blocks of one head consecutively (blk/rows_per_head), so
-  // each warp spins at most once per head.
+  // WUV_HEAD_SPINWAIT: remember the head whose readiness we already acquired.
+  // The grid-stride visits blocks of one head consecutively
+  // (blk/rows_per_head), so each warp spins at most once per head.
   int last_h = -1;
   for (int blk = gwarp; blk < nblk; blk += gwarps) {
     int h = blk / rows_per_head;
     int nr0 = (blk % rows_per_head) * RB;
-    // Lever 5 (WUV_HEAD_SPINWAIT): per-head merge->W_UV spin-wait (replaces the
+    // WUV_HEAD_SPINWAIT: per-head merge->W_UV spin-wait (replaces the
     // merge->W_UV grid barrier). Lane 0 spins on g_head_wuv_ready[h] with a
     // DEVICE-scope ACQUIRE load (PTX ld.acquire.gpu — device-coherent, NOT
     // __ldg/.nc so it never reads a stale cached value across decode steps);
@@ -1731,32 +1615,6 @@ __device__ __forceinline__ float rms_rcp_block(float const *__restrict__ src,
 //  + out bound as output_ptrs[0] (the tracked bf16 attn_proj_out write).
 // ===========================================================================
 
-// ---- Optional per-phase probe (MPK_DSV3_ATTN_V1_PROBE builds only; NEVER set
-// in production — the default build is byte-identical, same pattern as the
-// FFN MPK_DSV3_FFN_WS_PROBE probe). Thread-0-of-CTA %globaltimer stamps at
-// the phase boundaries; a standalone driver can read the symbol back.
-// Slot map (14 used of 16):
-//   [0] entry            [1] post P0-quant (rmsnorm_quant_hidden_block_smem)
-//   [2] post qkv_a GEMV  [3] post B1 grid barrier (qkv_a->ln)
-//   [4] post q_a-ln/kv-ln/rope_k (+__syncthreads)
-//   [5] post q_b+rope GEMV [6] post B2 grid barrier (q_b->MLA)
-//   [7] post mla_partial   [8] post atomic+merge (mla_merge_quant)
-//   [9] post W_UV (incl. head spin-wait) [10] post B3 grid barrier (W_UV->*)
-//   [11] post o_proj quant [12] post o_proj GEMV+residual [13] exit ----------
-#ifdef MPK_DSV3_ATTN_V1_PROBE
-__device__ unsigned long long attn_v1_probe_ts[ATTN_NUM_WORKERS * 16];
-#define ATTN_V1_TS(k)                                                          \
-  do {                                                                         \
-    if (threadIdx.x == 0) {                                                    \
-      unsigned long long t__;                                                  \
-      asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t__));                  \
-      attn_v1_probe_ts[worker_idx * 16 + (k)] = t__;                           \
-    }                                                                          \
-  } while (0)
-#else
-#define ATTN_V1_TS(k)
-#endif
-
 __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
     mirage::runtime::TaskDesc const *task_desc,
     int merge_task_offset,
@@ -1865,8 +1723,9 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   float *s_qbdeq = s_act; // q_b phase reuses the front of s_act
   float *s_odeq = s_act;  // o_proj phase reuses the front of s_act
   soff += attn_au16((size_t)K_HIDDEN * sizeof(float));
-  // Lever 4: "this block is head h's last split" flag (block-local, set by tid0
-  // after the per-head atomicAdd, broadcast to the block via __syncthreads).
+  // MLA_ATOMIC_MERGE: "this block is head h's last split" flag (block-local,
+  // set by tid0 after the per-head atomicAdd, broadcast to the block via
+  // __syncthreads).
   __shared__ int s_mla_last;
   (void)soff;
 
@@ -1878,114 +1737,16 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   int gwarp = gtid >> 5;
   int gwarps = gthreads >> 5;
   int KV = step + 1, pos = step;
-  ATTN_V1_TS(0); // entry
 
   // EVERY-step header (H4 check: does `step` actually advance across decode
   // steps?). Prints once per invocation from worker0/thread0 regardless of
   // step, so the coordinator can confirm step = 0,1,2,... (a frozen/repeated
   // step -> self-attend -> repetition). Disambiguate per-layer by the out
   // pointer.
-#ifdef MPK_ATTN_DBG
-  // RANK = runtime_config.my_gpu_id (== nvshmem_my_pe()). DECISIVE for reading
-  // the multi-line output: at TP=N (mpirun -np N) each of the N lines at a
-  // fixed step is a SEPARATE PROCESS (TP rank), and the SAME layer's `out`
-  // buffer has a DIFFERENT virtual address per process. So 4 distinct `out`
-  // pointers at one step are the 4 TP RANKS, NOT 4 layers — and "RESID
-  // identical across ranks" is EXPECTED (TP replicates the residual) while
-  // "attn_proj differs per rank" is EXPECTED (each rank computes a different
-  // head subset, pre-AllReduce). Print the rank so ranks (same step, ranks
-  // 0..N-1) vs layers (same rank, different out) are unambiguous.
-  if (worker_idx == 0 && tid == 0) {
-    printf("[ATTN_DBG rank=%d out=%p] INVOKE step=%d KV=%d pos=%d\n",
-           runtime_config.my_gpu_id,
-           (void *)out,
-           step,
-           KV,
-           pos);
-  }
-  // DECISIVE fork-resolver: print the actual TOKEN IDs + step[0]. The embed
-  // kernel for this build uses input_source=1 -> reads input_tokens[0] (a FIXED
-  // index 0, NOT [step]); the runtime is expected to write the current token
-  // there each step. So print BOTH: tokens[step[0]] / tokens[step[0]+1] (the
-  // serving ring) AND input_tokens[0] (what the embed ACTUALLY consumed).
-  //   - input_tokens[0] (or tokens[step]) SAME for steps 0,1  => same token =>
-  //     identical hidden is EXPECTED (red herring; the chain has it too).
-  //   - DIFFERENT token id for steps 0,1 but HIDDEN identical => the mega reads
-  //     a stale hidden (real input-binding/indexing bug).
-  if (ATTN_DBG_STEP(step) && worker_idx == 0 && tid == 0) {
-    long long s0 = runtime_config.step[0];
-    long long tk_s =
-        (runtime_config.tokens != nullptr) ? runtime_config.tokens[s0] : -999;
-    long long tk_s1 = (runtime_config.tokens != nullptr)
-                          ? runtime_config.tokens[s0 + 1]
-                          : -999;
-    long long itk0 = (runtime_config.input_tokens != nullptr)
-                         ? runtime_config.input_tokens[0]
-                         : -999;
-    printf("[ATTN_DBG out=%p step=%d] TOKENID step0=%lld  tokens[step0]=%lld "
-           "tokens[step0+1]=%lld  input_tokens[0]=%lld\n",
-           (void *)out,
-           step,
-           s0,
-           tk_s,
-           tk_s1,
-           itk0);
-  }
-  // DECISIVE input-binding check: the HIDDEN input (= RMSNorm(self.x) of the
-  // CURRENT token). Print first-8 + sum|.| over 7168 at steps 0,1,2. If hidden
-  // is near-IDENTICAL for steps 0,1 → the input/residual binding feeds a stale/
-  // fixed token (the bug). If hidden is DISTINCT but the raw c_latent below is
-  // near-identical for 0,1 → the qkv_a GEMV flattens distinct hiddens.
-  if (ATTN_DBG_STEP(step) && worker_idx == 0 && tid == 0) {
-    float hs = 0.f;
-    for (int i = 0; i < K_HIDDEN; i++) {
-      hs += fabsf(__bfloat162float(hidden[i]));
-    }
-    printf("[ATTN_DBG out=%p step=%d] HIDDEN sum|.|=%.6f  h[0..7]= %.5f %.5f "
-           "%.5f %.5f %.5f %.5f %.5f %.5f\n",
-           (void *)out,
-           step,
-           hs,
-           __bfloat162float(hidden[0]),
-           __bfloat162float(hidden[1]),
-           __bfloat162float(hidden[2]),
-           __bfloat162float(hidden[3]),
-           __bfloat162float(hidden[4]),
-           __bfloat162float(hidden[5]),
-           __bfloat162float(hidden[6]),
-           __bfloat162float(hidden[7]));
-    // SHARPER: `residual` == self.x == the embed output == the mega's
-    // OWN rmsnorm INPUT. Tap it to separate the two staleness sources:
-    //   - residual DIFFERS for steps 0,1 but HIDDEN (=rmsnorm output) IDENTICAL
-    //     => the mega's hidden_bf16 / rmsnorm task is STALE (not re-derived per
-    //     decode step) — a mega-specific dependency bug.
-    //   - residual IDENTICAL for steps 0,1 => self.x / the shared embed is
-    //   stale
-    //     (but the working chain reads the same self.x, so that'd be
-    //     surprising).
-    float rs = 0.f;
-    for (int i = 0; i < K_HIDDEN; i++) {
-      rs += fabsf(__bfloat162float(residual[i]));
-    }
-    printf("[ATTN_DBG out=%p step=%d] RESID(self.x) sum|.|=%.6f  r[0..7]= %.5f "
-           "%.5f %.5f %.5f %.5f %.5f %.5f %.5f\n",
-           (void *)out,
-           step,
-           rs,
-           __bfloat162float(residual[0]),
-           __bfloat162float(residual[1]),
-           __bfloat162float(residual[2]),
-           __bfloat162float(residual[3]),
-           __bfloat162float(residual[4]),
-           __bfloat162float(residual[5]),
-           __bfloat162float(residual[6]),
-           __bfloat162float(residual[7]));
-  }
-#endif
 
   // ===================== S2: quantize hidden + qkv_a GEMM
   // =====================
-  // Lever 1 (HIDDEN_BLOCK_LOCAL): every block quantizes hidden[7168]
+  // HIDDEN_BLOCK_LOCAL: every block quantizes hidden[7168]
   // block-cooperatively ONCE into block-local SHARED s_act (the trailing
   // __syncthreads inside replaces the quant_hidden->qkv_a grid barrier), then
   // qkv_a reads s_act. Byte-identical UE8M0 dequant to quant_hidden_grid's deq.
@@ -1994,7 +1755,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   // then quant into s_act. NO grid barrier added (block-local, same as below).
   rmsnorm_quant_hidden_block_smem(
       hidden /*=raw self.x*/, input_ln_w, s_act, red8, K_HIDDEN, warpl, lane);
-  ATTN_V1_TS(1); // post P0-quant (block-converged: trailing __syncthreads)
   gemv_grid_cpa_t<2, 6>(
       s_act, // qkv_a reads BLOCK-LOCAL s_act (no grid barrier)
       qkv_a_w,
@@ -2006,11 +1766,8 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
       gwarps,
       lane,
       my_wbuf);
-  ATTN_V1_TS(2); // post qkv_a GEMV (thread0/warp0 granularity — no block sync)
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS); // qkv_a -> layernorm (KEPT)
-  ATTN_V1_TS(3);                                // post B1
   // tap S2: qkv_a_out [2176] = [q_a(1536) | c_latent(512) | k_pe(64) | pad(64)]
-  ATTN_DBG_TAP("qkv_a_out", out, sc.g_qkva, K_QKVAN, step, worker_idx);
   // DECISIVE: tap the RAW per-slice GEMV outputs BEFORE any norm — q_a slice
   // [0:1536], c_latent slice [1536:2048], k_pe slice [2048:2112]. If the raw
   // c_latent is token-IDENTICAL across steps (or near-zero) while raw q_a is
@@ -2018,15 +1775,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   // scale for the c_latent rows (1536-2047, 128-blocks 12-15) — NOT the
   // kv_a_layernorm (which only EXPOSES a tiny/constant c_latent via
   // eps-dominated normalization). Same per-token g_hdeq feeds all three.
-  ATTN_DBG_TAP("raw_q_a", out, sc.g_qkva, K_QLORA, step, worker_idx);
-  ATTN_DBG_TAP(
-      "raw_clatent", out, sc.g_qkva + K_QLORA, K_KVLORA, step, worker_idx);
-  ATTN_DBG_TAP("raw_kpe",
-               out,
-               sc.g_qkva + K_QLORA + K_KVLORA,
-               K_QKROPE,
-               step,
-               worker_idx);
 
   // ============ S3 q_a_layernorm + S5 kv_a_layernorm + rope_k + append =======
   {
@@ -2037,39 +1785,14 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
     // -> the kv_a GEMV/scale is the bug, not the norm. Also print q_rcp + the
     // per-128-block raw c_latent mean-sq (blocks 12-15 = the 4 c_latent
     // groups).
-#ifdef MPK_ATTN_DBG
-    if (ATTN_DBG_STEP(step) && worker_idx == 0 && tid == 0) {
-      float ms[4]; // mean-sq of each 128-wide c_latent group
-#pragma unroll
-      for (int b = 0; b < 4; b++) {
-        float acc = 0.f;
-        for (int i = 0; i < K_GRP; i++) {
-          float x = sc.g_qkva[K_QLORA + b * K_GRP + i];
-          acc += x * x;
-        }
-        ms[b] = acc / K_GRP;
-      }
-      printf("[ATTN_DBG out=%p step=%d] RCP q_rcp=%.4f kv_rcp=%.4f (eps-dom if "
-             "~1000)  c_latent_blk_meansq[12..15]= %.3e %.3e %.3e %.3e\n",
-             (void *)out,
-             step,
-             q_rcp,
-             kv_rcp,
-             ms[0],
-             ms[1],
-             ms[2],
-             ms[3]);
-    }
-#endif
     int ngq = K_QLORA / K_GRP; // 12
-    // Lever 2 (QA_BLOCK_LOCAL): every block computes ALL 12 groups (warp w owns
+    // QA_BLOCK_LOCAL: every block computes ALL 12 groups (warp w owns
     // groups {w, w+NWARP}) of q_a_layernorm+UE8M0-requant into block-local
     // SHARED s_qbdeq (dequantized values, byte-identical to the grid-strided
     // g_qbdeq below). q_b then reads s_qbdeq from shared -> drops the
     // layernorm->q_b grid barrier (a block __syncthreads, issued before q_b
-    // below, replaces it). The global g_qbdeq/g_qbf8/g_qbsc are written ONLY
-    // under MPK_ATTN_DBG so the q_a_normed tap still works; the normal
-    // perf build skips them (q_b sources s_qbdeq).
+    // below, replaces it). q_b sources s_qbdeq block-local; the grid-strided
+    // global g_qbdeq/g_qbf8/g_qbsc is not written on this path.
     for (int g = warpl; g < ngq; g += NWARP) {
       float const *src = sc.g_qkva + g * K_GRP;
       __nv_bfloat16 const *w = q_a_ln_w + g * K_GRP;
@@ -2096,26 +1819,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
         float qv = fminf(fmaxf(nv[t] / yq, -K_FP8MAX), K_FP8MAX);
         d[j] = (float)__nv_fp8_e4m3(qv) * yq;
       }
-#ifdef MPK_ATTN_DBG
-      // Mirror to the global g_qbdeq (and g_qbf8/g_qbsc) for the q_a_normed tap
-      // only — DEBUG-gated so the normal perf build stays clean. Block 0 only
-      // (identical across blocks) to avoid 136x redundant global writes.
-      if (worker_idx == 0) {
-        float *dg = sc.g_qbdeq + g * K_GRP;
-        __nv_fp8_e4m3 *d8 = sc.g_qbf8 + g * K_GRP;
-#pragma unroll
-        for (int t = 0; t < 4; t++) {
-          int j = lane + t * 32;
-          float qv = fminf(fmaxf(nv[t] / yq, -K_FP8MAX), K_FP8MAX);
-          __nv_fp8_e4m3 qf = __nv_fp8_e4m3(qv);
-          d8[j] = qf;
-          dg[j] = (float)qf * yq;
-        }
-        if (lane == 0) {
-          sc.g_qbsc[g] = yq;
-        }
-      }
-#endif
     }
     // kv_a_layernorm -> kv_cache row [0:512). grid-strided over 512 elements.
     for (int i = gtid; i < K_KVLORA; i += gthreads) {
@@ -2146,117 +1849,20 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
           __float2bfloat16(k_bf16(k1 * c + k0 * s));
     }
   }
-  // Lever 2 (QA_BLOCK_LOCAL): the layernorm->q_b grid barrier is DROPPED — only
+  // QA_BLOCK_LOCAL: the layernorm->q_b grid barrier is DROPPED — only
   // a block __syncthreads is needed before q_b reads block-local s_qbdeq (the
   // q_a_layernorm+requant above was block-cooperative into s_qbdeq). The
   // kv_a_layernorm/rope writes to kv_cache feed MLA, which is published
-  // cross-block by the q_b->MLA grid barrier below. Under MPK_ATTN_DBG we KEEP
-  // the grid barrier so the kv_cache HISTORY taps below see published cross-CTA
-  // writes (debug build only — the normal perf build uses __syncthreads).
-#ifdef MPK_ATTN_DBG
-  attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
-#else
+  // cross-block by the q_b->MLA grid barrier below.
   __syncthreads();
-#endif
-  ATTN_V1_TS(4); // post q_a-ln + kv_a-ln + rope_k (block-converged)
   // tap S3/S5: q_a_normed-dequant (q_b input) [1536]; the appended kv_cache row
   // [c_latent(512) | k_pe_rot(64)] is tapped from the live buffer for this
   // step.
-  ATTN_DBG_TAP("q_a_normed", out, sc.g_qbdeq, K_QLORA, step, worker_idx);
-#ifdef MPK_ATTN_DBG
-  if (ATTN_DBG_STEP(step) && worker_idx == 0 && tid == 0) {
-    // The JUST-written current row (read back through the kv_cache pointer).
-    float kvrow[8];
-#pragma unroll
-    for (int i = 0; i < 8; i++) {
-      kvrow[i] = __bfloat162float(kv_cache[(size_t)step * K_QKHEAD + i]);
-    }
-    float s = 0.f;
-    for (int i = 0; i < K_QKHEAD; i++) {
-      s += fabsf(__bfloat162float(kv_cache[(size_t)step * K_QKHEAD + i]));
-    }
-    printf("[ATTN_DBG out=%p step=%d] %-10s n=%d sum|.|=%.6f  v[0..3]= %.5f "
-           "%.5f %.5f %.5f\n",
-           (void *)out,
-           step,
-           "kv_row[step]",
-           K_QKHEAD,
-           s,
-           kvrow[0],
-           kvrow[1],
-           kvrow[2],
-           kvrow[3]);
-    // DECISIVE cross-step check: at step 2 (KV=3), read back the HISTORY rows 0
-    // and 1 that steps 0/1 wrote. If these checksums/values DON'T match what
-    // step 0/1 printed as their own kv_row[step], the KV write did not persist
-    // across invocations (the stale-alias bug) -> degenerate attention. If they
-    // match, history is intact and the bug is elsewhere.
-    if (step == 2) {
-      for (int r = 0; r < 2; r++) {
-        float hv[4];
-#pragma unroll
-        for (int i = 0; i < 4; i++) {
-          hv[i] = __bfloat162float(kv_cache[(size_t)r * K_QKHEAD + i]);
-        }
-        float hs = 0.f;
-        for (int i = 0; i < K_QKHEAD; i++) {
-          hs += fabsf(__bfloat162float(kv_cache[(size_t)r * K_QKHEAD + i]));
-        }
-        printf("[ATTN_DBG out=%p step=2] HISTORY row=%d sum|.|=%.6f  v[0..3]= "
-               "%.5f %.5f %.5f %.5f\n",
-               (void *)out,
-               r,
-               hs,
-               hv[0],
-               hv[1],
-               hv[2],
-               hv[3]);
-      }
-      // DECISIVE: pairwise VECTOR diff of the c_latent (V part [0:512])
-      // between KV rows (0,1) and (1,2). sum|.| being similar (105.14 vs
-      // 105.10) does NOT prove the vectors are near-identical — RMSNorm
-      // naturally equalizes magnitudes. Compute sum_abs_diff / max_abs_diff /
-      // cosine to settle whether tokens 0,1 actually produce the SAME c_latent
-      // (diff ~0, cos ~1 => the KV genuinely can't distinguish them => the real
-      // bug) or just similar-magnitude-but-distinct (diff large, cos < 1 => NOT
-      // the bug; look elsewhere).
-      float sad01 = 0.f, mad01 = 0.f, dot01 = 0.f, n0 = 0.f, n1 = 0.f;
-      float sad12 = 0.f, mad12 = 0.f, dot12 = 0.f, n2 = 0.f;
-      for (int i = 0; i < K_KVLORA; i++) {
-        float a = __bfloat162float(kv_cache[(size_t)0 * K_QKHEAD + i]);
-        float b = __bfloat162float(kv_cache[(size_t)1 * K_QKHEAD + i]);
-        float c = __bfloat162float(kv_cache[(size_t)2 * K_QKHEAD + i]);
-        float d01 = fabsf(a - b), d12 = fabsf(b - c);
-        sad01 += d01;
-        mad01 = fmaxf(mad01, d01);
-        dot01 += a * b;
-        sad12 += d12;
-        mad12 = fmaxf(mad12, d12);
-        dot12 += b * c;
-        n0 += a * a;
-        n1 += b * b;
-        n2 += c * c;
-      }
-      float cos01 = (n0 > 0.f && n1 > 0.f) ? dot01 / sqrtf(n0 * n1) : 0.f;
-      float cos12 = (n1 > 0.f && n2 > 0.f) ? dot12 / sqrtf(n1 * n2) : 0.f;
-      printf("[ATTN_DBG out=%p step=2] CLATENT-DIFF rows(0,1): sad=%.6f "
-             "max=%.6f cos=%.6f | rows(1,2): sad=%.6f max=%.6f cos=%.6f  "
-             "(diff~0 & cos~1 => tokens produce SAME c_latent = the bug)\n",
-             (void *)out,
-             sad01,
-             mad01,
-             cos01,
-             sad12,
-             mad12,
-             cos12);
-    }
-  }
-#endif
 
   // ===================== S4+S6 FUSED: q_b GEMM + rope -> g_qpe
   // ================
-  // Lever 2: q_b reads its activation from block-local SHARED s_qbdeq (no
-  // layernorm->q_b grid barrier). Byte-identical GEMV+rope math.
+  // QA_BLOCK_LOCAL: q_b reads its activation from block-local SHARED s_qbdeq
+  // (no layernorm->q_b grid barrier). Byte-identical GEMV+rope math.
   gemv_grid_cpa_qb_rope_smem_t<8, 4>(s_qbdeq,
                                      q_b_w,
                                      q_b_s,
@@ -2269,7 +1875,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                                      gwarps,
                                      lane,
                                      my_wbuf);
-  ATTN_V1_TS(5); // post q_b+rope GEMV (thread0/warp0 granularity)
   // === HAZARD #1: ZERO-BEFORE-BARRIER ===================================
   // Levers 4 & 5: zero the per-head completion counters AND readiness flags
   // BEFORE the q_b->MLA grid barrier below. That barrier's __threadfence
@@ -2288,26 +1893,12 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                     ATTN_NUM_WORKERS); // q_b->MLA: publishes g_qpe, kv_cache,
                                        // AND the zeroed flags (the barrier's
                                        // __threadfence does the cross-CTA pub)
-  ATTN_V1_TS(6);                       // post B2
   // tap S4/S6: q_nope_pe post-rope [16*576] (the MLA query). Print head-0's
   // nope-start (first 4) + a checksum over all 16 heads.
-  ATTN_DBG_TAP(
-      "q_nope_pe", out, sc.g_qpe, K_HLOCAL * K_QKHEAD, step, worker_idx);
   // head-0 q_PE part (g_qpe[512:516], post-rope) + the rope position used. The
   // q_pe drives the relative-position score term; if it's stale/un-roped
   // (==raw) or roped by the wrong pos, the per-position scores go garbage ->
   // collapse.
-  ATTN_DBG_TAP("q_pe_h0", out, sc.g_qpe + K_KVLORA, K_QKROPE, step, worker_idx);
-#ifdef MPK_ATTN_DBG
-  if (ATTN_DBG_STEP(step) && worker_idx == 0 && tid == 0) {
-    printf(
-        "[ATTN_DBG out=%p step=%d] q_pe rope pos=%d  (q_pe is g_qpe[512:576] "
-        "of head 0)\n",
-        (void *)out,
-        step,
-        pos);
-  }
-#endif
 
   // ===================== S9/S10: FLASH MLA decode (KV-split)
   // ==================
@@ -2329,7 +1920,7 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
   // a head's partials run before any W_UV spinner can need that head (all <=128
   // partial-blocks are among the 136 workers; the producers make unconditional
   // progress). Holds for nsp<=8 i.e. KV up to MLA_SPLITS*64 per the tile math.
-  // Lever 4 (MLA_ATOMIC_MERGE): one partial per block; the LAST split-block of
+  // MLA_ATOMIC_MERGE: one partial per block; the LAST split-block of
   // head h (atomicAdd return == nsp-1) runs that head's merge IN-PLACE -> drops
   // the partial->merge grid barrier. Memory ordering (device-scope release/
   // acquire message-passing): producer writers store g_mla_acc -> mla_partial's
@@ -2360,7 +1951,6 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                   r1,
                   sm,
                   step); // ends with __syncthreads (publishes acc into tid0)
-      ATTN_V1_TS(7);     // post mla_partial (block-converged)
       if (threadIdx.x == 0) {
         __threadfence(); // device release (publish g_mla_acc)
         int old = atomicAdd(&sc.g_head_done[h], 1);
@@ -2386,14 +1976,8 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                         sc.g_head_wuv_ready);
       }
     }
-#ifdef MPK_DSV3_ATTN_V1_PROBE
-    else {
-      ATTN_V1_TS(7); // non-participant CTA: zero-length MLA phase
-    }
-#endif
   }
-  ATTN_V1_TS(8); // post atomic+merge (merge ran only on last-arriver CTAs)
-  // Lever 5 (WUV_HEAD_SPINWAIT): NO grid barrier here — wuv_bmm_grid spin-waits
+  // WUV_HEAD_SPINWAIT: NO grid barrier here — wuv_bmm_grid spin-waits
   // per head on g_head_wuv_ready[h]. The merge-blocks make unconditional
   // progress so every flag is eventually set (no deadlock). The attn_out tap
   // (reads g_attn cross-block) is RELOCATED to after the W_UV->o_proj barrier.
@@ -2407,27 +1991,21 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                gwarps,
                lane,
                sc.g_head_wuv_ready);
-  ATTN_V1_TS(9); // post W_UV incl. head spin-wait (thread0/warp0 granularity)
   attn_grid_barrier(barrier, ATTN_NUM_WORKERS); // W_UV -> * (KEPT: publishes
                                                 // g_red from all warps)
-  ATTN_V1_TS(10);                               // post B3
   // tap S9/S10/S11 RELOCATED here: the W_UV->* barrier above guarantees every
   // head's merge completed (W_UV consumed g_attn_deq), so g_attn is fully
   // visible cross-CTA now.
-  ATTN_DBG_TAP(
-      "attn_out", out, sc.g_attn, K_HLOCAL * K_KVLORA, step, worker_idx);
   // tap S12: W_UV BMM out attn_out_reduced [2048].
-  ATTN_DBG_TAP("wuv_reduced", out, sc.g_red, K_OIN, step, worker_idx);
 
   // ===================== S13: quantize g_red + o_proj GEMM + residual ========
-  // Lever 3 (OPROJ_BLOCK_QUANT): g_red (visible cross-CTA after the W_UV->*
+  // OPROJ_BLOCK_QUANT: g_red (visible cross-CTA after the W_UV->*
   // barrier above) is quantized block-cooperatively ONCE into block-local
   // SHARED s_odeq (the trailing __syncthreads inside replaces the
   // quant_gred->o_proj grid barrier), then o_proj reads s_odeq. Byte-identical
   // UE8M0 quant to quant_ue8m0_grid. This merges the old two-barrier pair
   // (W_UV->quant + quant->o_proj) down to the single W_UV->* barrier above.
   quant_ue8m0_block_smem(sc.g_red, s_odeq, K_OIN, warpl, lane);
-  ATTN_V1_TS(11); // post o_proj quant (block-converged)
   gemv_grid_cpa_oproj_smem_t<8, 4>(s_odeq,
                                    oproj_w,
                                    oproj_s,
@@ -2439,47 +2017,13 @@ __device__ __noinline__ void attn_block_megakernel_sm100_task_impl(
                                    gwarps,
                                    lane,
                                    my_wbuf);
-  ATTN_V1_TS(12); // post o_proj GEMV+residual (thread0/warp0 granularity)
   // tap S13: final attn_proj_out [7168] (o_proj + residual, pre-AR) — the FULL
   // vector (the prior version was a worker-subset bug that summed only out[0]).
-#ifdef MPK_ATTN_DBG
-  // FULL-vector attn_proj (o_proj + residual = the attention's residual-stream
-  // contribution — the FINAL ground-truth to diff against the chain's
-  // attn_proj_out). The o_proj GEMV is grid-strided across all 136 workers, so
-  // a grid_barrier is needed BEFORE worker0/thread0 can read the whole 7168 (a
-  // bare __syncthreads only makes worker0's OWN rows visible — that's why the
-  // old "w0 rows" sum was ~0.005, just |out[0]|). This barrier is DEBUG-ONLY
-  // (the default build keeps the FFN-style post-task fence) so it cannot affect
-  // perf or the byte-identical default.
-  attn_grid_barrier(barrier, ATTN_NUM_WORKERS);
-  if (ATTN_DBG_STEP(step) && worker_idx == 0 && tid == 0) {
-    float s = 0.f;
-    for (int i = 0; i < K_HIDDEN; i++) {
-      s += fabsf(__bfloat162float(out[i]));
-    }
-    printf(
-        "[ATTN_DBG out=%p step=%d] attn_proj  n=%d FULLsum|.|=%.6f  v[0..7]= "
-        "%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f\n",
-        (void *)out,
-        step,
-        K_HIDDEN,
-        s,
-        __bfloat162float(out[0]),
-        __bfloat162float(out[1]),
-        __bfloat162float(out[2]),
-        __bfloat162float(out[3]),
-        __bfloat162float(out[4]),
-        __bfloat162float(out[5]),
-        __bfloat162float(out[6]),
-        __bfloat162float(out[7]));
-  }
-#endif
   // Publish the output stores globally before MPK signals task completion (the
   // post-task block-sync alone does NOT order other threads' global writes —
   // same class as the FFN mega-task's final __threadfence).
   __threadfence();
   __syncthreads();
-  ATTN_V1_TS(13); // exit (block-converged)
 }
 
 } // namespace attn_block_megakernel_sm100

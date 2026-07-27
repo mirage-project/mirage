@@ -72,19 +72,9 @@ static constexpr int OSAVE_SMEM_BYTES = TB * TILE_S * sizeof(float);
 static constexpr int SMEM_SIZE =
     NUM_QK_STAGES * 2 * TILE_BYTES + OSAVE_SMEM_BYTES + 1024;
 
-// Reduce kernel
-// MPK_DSV3_MLA_REDUCE_1WAVE (default-OFF, byte-identical default): RD_DV=4 →
-// each reduce CTA writes 4 V-elements (2 lanes × a 2-iter d-loop) so grid.x =
-// ceil(D_V=512 / 4) = 128 ≤ num_workers(136) = ONE scheduler wave instead of
-// the rd_dv=2 → 256-CTA two-wave bubble (~2-3µs/layer 2nd wave). Trade: 2×
-// per-CTA reduce work; net win only if the saved 2nd wave > the extra per-CTA
-// cost (uncertain at KV512 — verify on 8-GPU). The reduce body below loops d
-// over RD_DV/2 values so RD_DV=2 stays exactly the old single-d behavior.
-#ifdef MPK_DSV3_MLA_REDUCE_1WAVE
-static constexpr int RD_DV = 4;
-#else
+// Reduce kernel. RD_DV = V-elements written per reduce CTA; the reduce body
+// below loops d over RD_DV/2 values.
 static constexpr int RD_DV = 2;
-#endif
 static constexpr int RD_TB = 256;
 
 // ============ PTX Helpers ============

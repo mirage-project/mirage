@@ -2394,8 +2394,8 @@ class PersistentKernel:
         grouped FP8 GEMM. See moe_permute_sm100.cuh for the exact contract.
 
         By default one CTA per local expert (grid_dim = (E_local, 1, 1)).
-        `e_per_cta` (gated by the builder via MPK_DSV3_PERMUTE_EPC, default
-        1) lets each CTA own E_PER_CTA consecutive experts, shrinking the
+        `e_per_cta` (default 1) lets each CTA own E_PER_CTA consecutive
+        experts, shrinking the
         launch to (E_local / E_PER_CTA, 1, 1). This collapses the decode
         "permute valley" (128 CTAs vs ~8 active experts contending with the
         shared-expert GEMM). E_PER_CTA==1 is byte-identical to the legacy
