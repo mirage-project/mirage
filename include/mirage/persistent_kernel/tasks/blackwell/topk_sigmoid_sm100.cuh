@@ -378,16 +378,60 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   }
   __syncthreads();
 
-  // ---- Phase 7: Compact active expert IDs ----
+  // ---- Phase 7: Compact active expert IDs (M3-I5c) ----
+  //
+  // Character-for-character the softmax sibling's compaction
+  // (topk_softmax_sm100.cuh) -- the full argument lives there and is not
+  // repeated. In brief: the previous in-place read-then-scatter had no barrier
+  // between a thread's read of its own mark and other threads' compacted
+  // writes, and compacted entries alias the marks of experts [0, n_active). A
+  // scatter only ever stores a non-negative id, so an inactive expert whose
+  // slot was overwritten passed `mark >= 0` and appended ITSELF: phantom
+  // experts, inflated count, and -- with enough phantoms -- a `pos` that
+  // reaches NUM_EXPERTS and clobbers the counter. Independently, the
+  // grid-stride form miscounts deterministically once blockDim.x < NUM_EXPERTS
+  // forces more than one pass.
+  //
+  // Replacement: per-tile prefix count, base carried in a register, one
+  // __syncthreads() separating the tile's reads from the tile's writes. Tile t
+  // reads only its own marks [t*B, min((t+1)*B, n_local)) and writes only slots
+  // < base_{t+1} <= min((t+1)*B, n_local), so no tile touches a later tile's
+  // marks. Output is strictly ascending in expert id under every schedule; the
+  // SET is unchanged. `mpk_active_expert_ids`, `start_expert`, `end_expert` and
+  // `blockDim.x` are block-uniform, so the barrier's trip count is uniform.
   if (mpk_active_expert_ids != nullptr) {
-    for (int expert = start_expert + threadIdx.x; expert < end_expert;
-         expert += blockDim.x) {
-      int const local_expert = expert - start_expert;
-      int const mark = mpk_active_expert_ids[local_expert];
-      if (mark >= 0) {
-        int const pos = atomicAdd(mpk_active_expert_ids + NUM_EXPERTS, 1);
-        mpk_active_expert_ids[pos] = expert;
+    int const num_local_experts = end_expert - start_expert;
+    int const block_size = static_cast<int>(blockDim.x);
+    int base = 0; // #active strictly below this tile; same in every thread
+    for (int tile_base = 0; tile_base < num_local_experts;
+         tile_base += block_size) {
+      int const tile_end = (tile_base + block_size < num_local_experts)
+                               ? (tile_base + block_size)
+                               : num_local_experts;
+      int const local_expert = tile_base + static_cast<int>(threadIdx.x);
+      bool is_active = false;
+      int rank_in_tile = 0;
+      int tile_count = 0;
+      for (int j = tile_base; j < tile_end; ++j) {
+        if (mpk_active_expert_ids[j] >= 0) {
+          ++tile_count;
+          if (j < local_expert) {
+            ++rank_in_tile;
+          }
+          if (j == local_expert) {
+            is_active = true;
+          }
+        }
       }
+      __syncthreads(); // every read of this tile's marks precedes every write
+      if (is_active) {
+        mpk_active_expert_ids[base + rank_in_tile] =
+            start_expert + local_expert;
+      }
+      base += tile_count;
+    }
+    if (threadIdx.x == 0) {
+      mpk_active_expert_ids[NUM_EXPERTS] = base;
     }
   }
 }

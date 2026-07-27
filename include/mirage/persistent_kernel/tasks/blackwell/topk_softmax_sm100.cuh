@@ -368,16 +368,105 @@ __device__ __forceinline__ void topk_softmax_task_impl(
     }
   }
   __syncthreads();
-  // Compact marks into a dense list and count
+  // ---- Compact the marks into a DENSE, ASCENDING list and count (M3-I5c) ----
+  //
+  // The pre-M3-I5c body was an in-place read-then-scatter with no barrier
+  // between a thread's read of its own mark and other threads' compacted
+  // writes:
+  //
+  //     int const mark = mpk_active_expert_ids[local_expert];   // read slot j
+  //     if (mark >= 0) {
+  //       int const pos = atomicAdd(mpk_active_expert_ids + NUM_EXPERTS, 1);
+  //       mpk_active_expert_ids[pos] = expert;                  // write slot pos
+  //     }
+  //
+  // Compacted entries land in slots [0, n_active), which ALIAS the marks of
+  // experts [0, n_active), and nothing orders thread j's read of slot j against
+  // another thread's write of slot j. Two independent defects:
+  //
+  //  (1) RACE, present even at blockDim.x == NUM_EXPERTS (one pass per thread).
+  //      Every scatter stores a non-negative id, so the corruption is one-sided:
+  //      an INACTIVE expert j whose slot was overwritten passes `mark >= 0` and
+  //      appends ITSELF (`expert`, note: not `mark`) to the list. The set gains
+  //      phantom experts and the count inflates; an active expert is never lost,
+  //      because no scatter ever stores a negative value. With enough phantoms
+  //      `pos` reaches NUM_EXPERTS and clobbers the counter itself.
+  //  (2) GUARANTEED miscount when blockDim.x < NUM_EXPERTS and the grid-stride
+  //      loop makes more than one pass: a thread's own pass-p scatter can land
+  //      on a slot it reads in a later pass. That is arithmetic, not a
+  //      scheduling accident (found by M3-I9b). No shipped graph launches this
+  //      router with blockDim.x < NUM_EXPERTS today, so the single-pass shape
+  //      was hiding defect (2) entirely and merely thinning defect (1).
+  //
+  // Replacement: a barrier-separated PREFIX-COUNT compaction, one tile of
+  // blockDim.x experts at a time, carrying the running base in a register.
+  //
+  //     base_t = #active in [0, t*B)              (block-uniform, in-register)
+  //     rank   = base_t + #{ j in [t*B, local_expert) : mark[j] >= 0 }
+  //     mpk_active_expert_ids[rank] = expert
+  //
+  // Race-freedom, with no assumption about warp size, blockDim.x, NUM_EXPERTS,
+  // the number of active experts, or how many row tiles produced the marks:
+  //   * tile t READS only slots [t*B, min((t+1)*B, n_local)) -- its own marks;
+  //   * every write of tile t targets a slot < base_{t+1} <= min((t+1)*B,
+  //     n_local), because at most one active expert exists per slot. So tile t
+  //     can never touch a LATER tile's marks; and tile t+1's writes cannot race
+  //     tile t's reads either, since a thread reaching tile t+1's barrier
+  //     implies every thread already passed tile t's barrier and therefore
+  //     finished tile t's reads;
+  //   * the one __syncthreads() inside the tile separates that tile's reads from
+  //     that tile's writes -- the only remaining overlap;
+  //   * that barrier is reached by every thread: `mpk_active_expert_ids`,
+  //     `start_expert`, `end_expert` and `blockDim.x` are block-uniform, so the
+  //     trip count is uniform and no thread can skip it.
+  //   * the count slot (NUM_EXPERTS) is written once, by thread 0, after the
+  //     loop; compacted entries only ever occupy slots < n_local <= NUM_EXPERTS,
+  //     so that store needs no barrier of its own.
+  //
+  // DETERMINISM: `rank` is a pure prefix count over the mark array, so the list
+  // comes out strictly ascending in expert id under every schedule. The
+  // atomicAdd -- the only source of run-to-run permutation in this task -- is
+  // gone. The SET is unchanged (a mark is written iff some row's top-k selected
+  // that expert, exactly as before), which is what the grouped-GEMM consumers
+  // key on.
+  //
+  // COST: n_local L1-resident broadcast loads per thread (256 at the shipped
+  // shape). This task is 0.085% of measured per-step worker time (564 us of
+  // 665 ms, demo/qwen3_5/accept/opt/pertask_by_bs.csv). No shared memory is
+  // used, so the megakernel's smem budget and occupancy are untouched.
   if (mpk_active_expert_ids != nullptr) {
-    for (int expert = start_expert + threadIdx.x; expert < end_expert;
-         expert += blockDim.x) {
-      int const local_expert = expert - start_expert;
-      int const mark = mpk_active_expert_ids[local_expert];
-      if (mark >= 0) {
-        int const pos = atomicAdd(mpk_active_expert_ids + NUM_EXPERTS, 1);
-        mpk_active_expert_ids[pos] = expert;
+    int const num_local_experts = end_expert - start_expert;
+    int const block_size = static_cast<int>(blockDim.x);
+    int base = 0; // #active strictly below this tile; same in every thread
+    for (int tile_base = 0; tile_base < num_local_experts;
+         tile_base += block_size) {
+      int const tile_end = (tile_base + block_size < num_local_experts)
+                               ? (tile_base + block_size)
+                               : num_local_experts;
+      int const local_expert = tile_base + static_cast<int>(threadIdx.x);
+      bool is_active = false;
+      int rank_in_tile = 0;
+      int tile_count = 0;
+      for (int j = tile_base; j < tile_end; ++j) {
+        if (mpk_active_expert_ids[j] >= 0) {
+          ++tile_count;
+          if (j < local_expert) {
+            ++rank_in_tile;
+          }
+          if (j == local_expert) {
+            is_active = true;
+          }
+        }
       }
+      __syncthreads(); // every read of this tile's marks precedes every write
+      if (is_active) {
+        mpk_active_expert_ids[base + rank_in_tile] =
+            start_expert + local_expert;
+      }
+      base += tile_count;
+    }
+    if (threadIdx.x == 0) {
+      mpk_active_expert_ids[NUM_EXPERTS] = base;
     }
   }
 }

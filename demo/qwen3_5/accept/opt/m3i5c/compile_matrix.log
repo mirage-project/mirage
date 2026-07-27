@@ -1,0 +1,201 @@
+### nvcc: /usr/local/cuda-12.8/bin/nvcc
+Cuda compilation tools, release 12.8, V12.8.93
+Build cuda_12.8.r12.8/compiler.35583870_0
+### cutlass: /home/muhengl/mpk-qwen35/scratch-i5b/cutlass
+### base flags: -O3 -std=c++17 -gencode=arch=compute_100a,code=sm_100a  -DMPK_ENABLE_TMA -DMIRAGE_GRACE_BLACKWELL -DMIRAGE_BACKEND_USE_CUDA  -DMIRAGE_FINGERPRINT_USE_CUDA -DMPK_TARGET_CC=100 -DMODE_OFFLINE  --expt-relaxed-constexpr -Xcudafe --diag_suppress=177
+### TUs: tu_small tu_odd_sigmoid tu_big tu_i5c_ep
+
+### rc=0  nvcc -c      fast_pre_tu_small
+### rc=0  nvcc -cubin  fast_pre_tu_small
+### rc=0  nvcc -c      fast_pre_tu_odd_sigmoid
+### rc=0  nvcc -cubin  fast_pre_tu_odd_sigmoid
+### rc=0  nvcc -c      fast_pre_tu_big
+### rc=0  nvcc -cubin  fast_pre_tu_big
+### rc=0  nvcc -c      fast_pre_tu_i5c_ep
+### rc=0  nvcc -cubin  fast_pre_tu_i5c_ep
+### rc=0  nvcc -c      fast_post_tu_small
+### rc=0  nvcc -cubin  fast_post_tu_small
+### rc=0  nvcc -c      fast_post_tu_odd_sigmoid
+### rc=0  nvcc -cubin  fast_post_tu_odd_sigmoid
+### rc=0  nvcc -c      fast_post_tu_big
+### rc=0  nvcc -cubin  fast_post_tu_big
+### rc=0  nvcc -c      fast_post_tu_i5c_ep
+### rc=0  nvcc -cubin  fast_post_tu_i5c_ep
+### rc=0  nvcc -c      nofast_pre_tu_small
+### rc=0  nvcc -cubin  nofast_pre_tu_small
+### rc=0  nvcc -c      nofast_pre_tu_odd_sigmoid
+### rc=0  nvcc -cubin  nofast_pre_tu_odd_sigmoid
+### rc=0  nvcc -c      nofast_pre_tu_big
+### rc=0  nvcc -cubin  nofast_pre_tu_big
+### rc=0  nvcc -c      nofast_pre_tu_i5c_ep
+### rc=0  nvcc -cubin  nofast_pre_tu_i5c_ep
+### rc=0  nvcc -c      nofast_post_tu_small
+### rc=0  nvcc -cubin  nofast_post_tu_small
+### rc=0  nvcc -c      nofast_post_tu_odd_sigmoid
+### rc=0  nvcc -cubin  nofast_post_tu_odd_sigmoid
+### rc=0  nvcc -c      nofast_post_tu_big
+### rc=0  nvcc -cubin  nofast_post_tu_big
+### rc=0  nvcc -c      nofast_post_tu_i5c_ep
+### rc=0  nvcc -cubin  nofast_post_tu_i5c_ep
+
+==================== COMPILE MATRIX: 32/32 rc=0 ====================
+
+========= PER-FUNCTION VALUE-OP IDENTITY / ATOMIC / BARRIER CHECK ========
+
+----- fast / tu_small -----
+  PASS  _Z15k_softmax_gatedILi16ELi256ELi16EEvPvS0_S0_S0_ii       fp=SAME(250 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_sigmoidILi2EEvPvS0_S0_S0_S0_f                        fp=SAME(476 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_sigmoidILi4EEvPvS0_S0_S0_S0_f                        fp=SAME(476 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_sigmoidILi8EEvPvS0_S0_S0_S0_f                        fp=SAME(476 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi16ELi256ELi15EEvPvS0_S0_S0_i               fp=SAME(250 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi16ELi256ELi16EEvPvS0_S0_S0_i               fp=SAME(250 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi16ELi256ELi1EEvPvS0_S0_S0_i                fp=SAME(250 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi128ELi15EEvPvS0_S0_S0_i                fp=SAME(158 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi128ELi16EEvPvS0_S0_S0_i                fp=SAME(158 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi128ELi1EEvPvS0_S0_S0_i                 fp=SAME(158 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi256ELi1EEvPvS0_S0_S0_i                 fp=SAME(168 ops)  shfl=SAME(40)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi256ELi7EEvPvS0_S0_S0_i                 fp=SAME(168 ops)  shfl=SAME(40)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi256ELi8EEvPvS0_S0_S0_i                 fp=SAME(168 ops)  shfl=SAME(40)  atomics 5->0  BAR 2->3
+
+  13/13 functions PASS
+
+----- fast / tu_odd_sigmoid -----
+  PASS  _Z13k_sigmoid_oddILi1EEvPvS0_S0_S0_S0_f                   fp=SAME(474 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_sigmoid_oddILi3EEvPvS0_S0_S0_S0_f                   fp=SAME(476 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_sigmoid_oddILi7EEvPvS0_S0_S0_S0_f                   fp=SAME(476 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+
+  3/3 functions PASS
+
+----- fast / tu_big -----
+  PASS  _Z13k_sigmoid_bigILi16EEvPvS0_S0_S0_S0_f                  fp=SAME(476 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_sigmoid_bigILi17EEvPvS0_S0_S0_S0_f                  fp=SAME(476 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_sigmoid_bigILi64EEvPvS0_S0_S0_S0_f                  fp=SAME(476 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_sigmoid_bigILi9EEvPvS0_S0_S0_S0_f                   fp=SAME(476 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi16ELi256ELi129EEvPvS0_S0_S0_i         fp=SAME(252 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi16ELi256ELi17EEvPvS0_S0_S0_i          fp=SAME(504 ops)  shfl=SAME(64)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi16ELi256ELi64EEvPvS0_S0_S0_i          fp=SAME(252 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi8ELi128ELi128EEvPvS0_S0_S0_i          fp=SAME(160 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  FAIL  _Z13k_softmax_bigILi8ELi128ELi17EEvPvS0_S0_S0_i           fp=DIFF(317 ops)  shfl=SAME(64)  atomics 5->0  BAR 2->3
+        fp delta pre->post: FSEL 27->28, FSETP.GEU.FTZ.AND 13->14, FSETP.NEU.FTZ.AND 13->14
+  PASS  _Z13k_softmax_bigILi8ELi256ELi16EEvPvS0_S0_S0_i           fp=SAME(340 ops)  shfl=SAME(80)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi8ELi256ELi33EEvPvS0_S0_S0_i           fp=SAME(170 ops)  shfl=SAME(40)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi8ELi256ELi9EEvPvS0_S0_S0_i            fp=SAME(340 ops)  shfl=SAME(80)  atomics 5->0  BAR 2->3
+  PASS  _Z19k_softmax_big_gatedILi16ELi256ELi128EEvPvS0_S0_S0_ii  fp=SAME(252 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z19k_softmax_big_gatedILi16ELi256ELi32EEvPvS0_S0_S0_ii   fp=SAME(504 ops)  shfl=SAME(64)  atomics 5->0  BAR 2->3
+  PASS  _Z19k_softmax_big_gatedILi16ELi256ELi64EEvPvS0_S0_S0_ii   fp=SAME(252 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+
+  14/15 functions PASS
+
+----- fast / tu_i5c_ep -----
+  PASS  _Z12k_sigmoid_epILi256EEvPvS0_S0_S0_S0_fii                fp=SAME(476 ops)  shfl=SAME(168)  atomics 1->0  BAR 2->3
+  PASS  _Z12k_sigmoid_epILi64EEvPvS0_S0_S0_S0_fii                 fp=SAME(476 ops)  shfl=SAME(168)  atomics 1->0  BAR 2->3
+  PASS  _Z12k_softmax_epILi16ELi256ELi16ELi128EEvPvS0_S0_S0_iii   fp=SAME(250 ops)  shfl=SAME(32)  atomics 1->0  BAR 2->3
+  PASS  _Z12k_softmax_epILi16ELi256ELi16ELi256EEvPvS0_S0_S0_iii   fp=SAME(250 ops)  shfl=SAME(32)  atomics 1->0  BAR 2->3
+  PASS  _Z12k_softmax_epILi8ELi128ELi16ELi64EEvPvS0_S0_S0_iii     fp=SAME(158 ops)  shfl=SAME(32)  atomics 1->0  BAR 2->3
+
+  5/5 functions PASS
+
+----- nofast / tu_small -----
+  PASS  _Z15k_softmax_gatedILi16ELi256ELi16EEvPvS0_S0_S0_ii       fp=SAME(430 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_sigmoidILi2EEvPvS0_S0_S0_S0_f                        fp=SAME(549 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_sigmoidILi4EEvPvS0_S0_S0_S0_f                        fp=SAME(549 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_sigmoidILi8EEvPvS0_S0_S0_S0_f                        fp=SAME(549 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi16ELi256ELi15EEvPvS0_S0_S0_i               fp=SAME(430 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi16ELi256ELi16EEvPvS0_S0_S0_i               fp=SAME(430 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi16ELi256ELi1EEvPvS0_S0_S0_i                fp=SAME(430 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi128ELi15EEvPvS0_S0_S0_i                fp=SAME(258 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi128ELi16EEvPvS0_S0_S0_i                fp=SAME(258 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi128ELi1EEvPvS0_S0_S0_i                 fp=SAME(258 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi256ELi1EEvPvS0_S0_S0_i                 fp=SAME(268 ops)  shfl=SAME(40)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi256ELi7EEvPvS0_S0_S0_i                 fp=SAME(268 ops)  shfl=SAME(40)  atomics 5->0  BAR 2->3
+  PASS  _Z9k_softmaxILi8ELi256ELi8EEvPvS0_S0_S0_i                 fp=SAME(268 ops)  shfl=SAME(40)  atomics 5->0  BAR 2->3
+
+  13/13 functions PASS
+
+----- nofast / tu_odd_sigmoid -----
+  PASS  _Z13k_sigmoid_oddILi1EEvPvS0_S0_S0_S0_f                   fp=SAME(547 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_sigmoid_oddILi3EEvPvS0_S0_S0_S0_f                   fp=SAME(549 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_sigmoid_oddILi7EEvPvS0_S0_S0_S0_f                   fp=SAME(549 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+
+  3/3 functions PASS
+
+----- nofast / tu_big -----
+  PASS  _Z13k_sigmoid_bigILi16EEvPvS0_S0_S0_S0_f                  fp=SAME(549 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_sigmoid_bigILi17EEvPvS0_S0_S0_S0_f                  fp=SAME(549 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_sigmoid_bigILi64EEvPvS0_S0_S0_S0_f                  fp=SAME(549 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_sigmoid_bigILi9EEvPvS0_S0_S0_S0_f                   fp=SAME(549 ops)  shfl=SAME(168)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi16ELi256ELi129EEvPvS0_S0_S0_i         fp=SAME(432 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi16ELi256ELi17EEvPvS0_S0_S0_i          fp=SAME(850 ops)  shfl=SAME(64)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi16ELi256ELi64EEvPvS0_S0_S0_i          fp=SAME(432 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi8ELi128ELi128EEvPvS0_S0_S0_i          fp=SAME(260 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  FAIL  _Z13k_softmax_bigILi8ELi128ELi17EEvPvS0_S0_S0_i           fp=DIFF(503 ops)  shfl=SAME(64)  atomics 5->0  BAR 2->3
+        fp delta pre->post: FSEL 27->28, FSETP.EQ.AND 13->14, FSETP.GEU.AND 13->14
+  PASS  _Z13k_softmax_bigILi8ELi256ELi16EEvPvS0_S0_S0_i           fp=SAME(526 ops)  shfl=SAME(80)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi8ELi256ELi33EEvPvS0_S0_S0_i           fp=SAME(270 ops)  shfl=SAME(40)  atomics 5->0  BAR 2->3
+  PASS  _Z13k_softmax_bigILi8ELi256ELi9EEvPvS0_S0_S0_i            fp=SAME(526 ops)  shfl=SAME(80)  atomics 5->0  BAR 2->3
+  PASS  _Z19k_softmax_big_gatedILi16ELi256ELi128EEvPvS0_S0_S0_ii  fp=SAME(432 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+  PASS  _Z19k_softmax_big_gatedILi16ELi256ELi32EEvPvS0_S0_S0_ii   fp=SAME(850 ops)  shfl=SAME(64)  atomics 5->0  BAR 2->3
+  PASS  _Z19k_softmax_big_gatedILi16ELi256ELi64EEvPvS0_S0_S0_ii   fp=SAME(432 ops)  shfl=SAME(32)  atomics 5->0  BAR 2->3
+
+  14/15 functions PASS
+
+----- nofast / tu_i5c_ep -----
+  PASS  _Z12k_sigmoid_epILi256EEvPvS0_S0_S0_S0_fii                fp=SAME(549 ops)  shfl=SAME(168)  atomics 1->0  BAR 2->3
+  PASS  _Z12k_sigmoid_epILi64EEvPvS0_S0_S0_S0_fii                 fp=SAME(549 ops)  shfl=SAME(168)  atomics 1->0  BAR 2->3
+  PASS  _Z12k_softmax_epILi16ELi256ELi16ELi128EEvPvS0_S0_S0_iii   fp=SAME(430 ops)  shfl=SAME(32)  atomics 1->0  BAR 2->3
+  PASS  _Z12k_softmax_epILi16ELi256ELi16ELi256EEvPvS0_S0_S0_iii   fp=SAME(430 ops)  shfl=SAME(32)  atomics 1->0  BAR 2->3
+  PASS  _Z12k_softmax_epILi8ELi128ELi16ELi64EEvPvS0_S0_S0_iii     fp=SAME(258 ops)  shfl=SAME(32)  atomics 1->0  BAR 2->3
+
+  5/5 functions PASS
+
+==================== ptxas -v RESOURCES (pre/post) ====================
+
+===== tu_small =====
+  function                                              reg pre/post  spill pre/post  stack pre/post
+  _Z15k_softmax_gatedILi16ELi256ELi16EEvPvS0_S0_S0_ii          40/32             0/0             0/0
+  _Z9k_sigmoidILi2EEvPvS0_S0_S0_S0_f                           32/32             0/0           96/96
+  _Z9k_sigmoidILi4EEvPvS0_S0_S0_S0_f                           32/32             0/0           96/96
+  _Z9k_sigmoidILi8EEvPvS0_S0_S0_S0_f                           32/32             0/0           96/96
+  _Z9k_softmaxILi16ELi256ELi15EEvPvS0_S0_S0_i                  40/32             0/0             0/0
+  _Z9k_softmaxILi16ELi256ELi16EEvPvS0_S0_S0_i                  39/40             0/0             0/0
+  _Z9k_softmaxILi16ELi256ELi1EEvPvS0_S0_S0_i                   39/32             0/0             0/0
+  _Z9k_softmaxILi8ELi128ELi15EEvPvS0_S0_S0_i                   32/32             0/0             0/0
+  _Z9k_softmaxILi8ELi128ELi16EEvPvS0_S0_S0_i                   32/32             0/0             0/0
+  _Z9k_softmaxILi8ELi128ELi1EEvPvS0_S0_S0_i                    32/32             0/0             0/0
+  _Z9k_softmaxILi8ELi256ELi1EEvPvS0_S0_S0_i                    32/32             0/0             0/0
+  _Z9k_softmaxILi8ELi256ELi7EEvPvS0_S0_S0_i                    32/32             0/0             0/0
+  _Z9k_softmaxILi8ELi256ELi8EEvPvS0_S0_S0_i                    32/32             0/0             0/0
+
+===== tu_big =====
+  function                                              reg pre/post  spill pre/post  stack pre/post
+  _Z13k_sigmoid_bigILi16EEvPvS0_S0_S0_S0_f                     39/32             0/0           96/96
+  _Z13k_sigmoid_bigILi17EEvPvS0_S0_S0_S0_f                     39/32             0/0           96/96
+  _Z13k_sigmoid_bigILi64EEvPvS0_S0_S0_S0_f                     38/32             0/0           96/96
+  _Z13k_sigmoid_bigILi9EEvPvS0_S0_S0_S0_f                      39/32             0/0           96/96
+  _Z13k_softmax_bigILi16ELi256ELi129EEvPvS0_S0_S0_i            40/40             0/0             0/0
+  _Z13k_softmax_bigILi16ELi256ELi17EEvPvS0_S0_S0_i             40/40             0/0            0/64
+  _Z13k_softmax_bigILi16ELi256ELi64EEvPvS0_S0_S0_i             40/40             0/0             0/0
+  _Z13k_softmax_bigILi8ELi128ELi128EEvPvS0_S0_S0_i             32/32             0/0             0/0
+  _Z13k_softmax_bigILi8ELi128ELi17EEvPvS0_S0_S0_i              32/32             0/0             0/0
+  _Z13k_softmax_bigILi8ELi256ELi16EEvPvS0_S0_S0_i              32/32             0/0             0/0
+  _Z13k_softmax_bigILi8ELi256ELi33EEvPvS0_S0_S0_i              32/32             0/0             0/0
+  _Z13k_softmax_bigILi8ELi256ELi9EEvPvS0_S0_S0_i               32/32             0/0             0/0
+  _Z19k_softmax_big_gatedILi16ELi256ELi128EEvPvS0_S0_S0_ii         40/40             0/0             0/0
+  _Z19k_softmax_big_gatedILi16ELi256ELi32EEvPvS0_S0_S0_ii         40/32             0/0             0/0
+  _Z19k_softmax_big_gatedILi16ELi256ELi64EEvPvS0_S0_S0_ii         40/32             0/0             0/0
+
+===== tu_odd_sigmoid =====
+  function                                              reg pre/post  spill pre/post  stack pre/post
+  _Z13k_sigmoid_oddILi1EEvPvS0_S0_S0_S0_f                      32/32             0/0           96/96
+  _Z13k_sigmoid_oddILi3EEvPvS0_S0_S0_S0_f                      32/32             0/0           96/96
+  _Z13k_sigmoid_oddILi7EEvPvS0_S0_S0_S0_f                      32/32             0/0           96/96
+
+===== tu_i5c_ep =====
+  function                                              reg pre/post  spill pre/post  stack pre/post
+  _Z12k_sigmoid_epILi256EEvPvS0_S0_S0_S0_fii                   32/32             0/0           96/96
+  _Z12k_sigmoid_epILi64EEvPvS0_S0_S0_S0_fii                    32/32             0/0           96/96
+  _Z12k_softmax_epILi16ELi256ELi16ELi128EEvPvS0_S0_S0_iii         39/40             0/0             0/0
+  _Z12k_softmax_epILi16ELi256ELi16ELi256EEvPvS0_S0_S0_iii         39/40             0/0             0/0
+  _Z12k_softmax_epILi8ELi128ELi16ELi64EEvPvS0_S0_S0_iii         32/32             0/0             0/0
+
+==================== BUILD_RC=0 FPCHECK_RC=1 ====================
