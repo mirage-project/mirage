@@ -155,10 +155,9 @@ public:
   // Q_LEN_real (Q_LEN padded to even).
   int register_mla_mtp_decode_tp8_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params);
-  // Unified TP2/TP4/TP8 split-KV reduce (one TASK_MLA_MTP_DECODE_TP_REDUCE
-  // enum; tp in {2, 4, 8} picks the device function at graph-build time).
+  // TP8 split-KV reduce (one TASK_MLA_MTP_DECODE_TP_REDUCE enum).
   int register_mla_mtp_decode_tp_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params, int tp);
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_quantize_fp8_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params,
                                        bool scale_ue8m0);

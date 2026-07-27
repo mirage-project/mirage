@@ -1936,7 +1936,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       if (param_id == 0) {
         // Q is allocated by the DeepSeek builder as flat [MBT, H * D_K].
         // Reinterpret it as [MBT * H, D_K] for TMA so the box height matches
-        // the kernel's hpb rows. This mirrors the TP2/4/8 descriptor path.
+        // the kernel's hpb rows. This mirrors the decode descriptor path.
         constexpr int D_K = 576;
         int const total_elements = tensor_desc.dim[0] * tensor_desc.dim[1];
         int total_rows = total_elements / D_K; // B * Q_LEN * NUM_HEADS
@@ -1945,7 +1945,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         // cuTensorMapEncodeTiled rejects (every globalDim must be >= 1). Emit a
         // minimal valid 1-row descriptor instead — such a task performs 0 TMA
         // row-loads, so the descriptor is never dereferenced. Non-empty tensors
-        // (all real decode rows, every TP2/4/8/TP8 path) are unaffected.
+        // (all real decode rows) are unaffected.
         if (total_rows < 1) {
           total_rows = 1;
         }

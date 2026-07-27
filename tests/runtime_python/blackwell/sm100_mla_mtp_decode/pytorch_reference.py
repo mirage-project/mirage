@@ -218,14 +218,14 @@ def mla_full_ref(q, kv, batch_size, q_len, kv_len, num_heads=NUM_HEADS,
     This is the end-to-end attention the fused ``decode -> reduce`` pipeline
     computes: a single causal softmax over the full KV history, NOT a per-split
     partial. It is the ground truth for the fused decode->reduce final-output
-    check and is shared by the TP1/TP2/TP4/TP8 tests (parametric over
+    check and is shared by the MTP decode tests (parametric over
     ``num_heads`` = the per-rank head count = 128 / world_size).
 
     Args:
         q:  bf16 [batch_size * q_len * num_heads, D_K]   (D_K = 576)
         kv: bf16 [batch_size * kv_len, D_K]
         batch_size, q_len, kv_len: int
-        num_heads: per-rank head count (128/64/32/16 for TP=1/2/4/8).
+        num_heads: per-rank head count (128 / world_size).
 
     Returns:
         out: bf16 [batch_size, q_len, num_heads, D_V]   (D_V = 512)

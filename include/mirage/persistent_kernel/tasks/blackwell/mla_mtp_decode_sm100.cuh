@@ -186,7 +186,7 @@ __device__ __noinline__ void
   // contract for this TP1 kernel) that path is statically dead, but the
   // unconditional [128] forced ptxas to reserve a 128-register payload that
   // overflowed the megakernel's per-task budget (C7600 at 216 on CUDA 13.x).
-  // Match the TP2/4/8 kernels: size it to 1 when SINGLE_TILE so the dead path
+  // Match the TP8 kernel: size it to 1 when SINGLE_TILE so the dead path
   // costs no registers. (TP1-only kernel; semantics-identical for both configs
   // since the guards below already gate every o_save access on tile > t0.)
   float o_save[SINGLE_TILE ? 1 : 128];

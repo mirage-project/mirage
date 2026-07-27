@@ -1557,30 +1557,20 @@ class PersistentKernel:
             tb_graph, "mla_prefill_tp8_chunked_sm100", params
         )
 
-    # ─────────── MLA-MTP TP variants (no PDL) ───────────
-    # Shape: NUM_HEADS = 128/TP per rank, D_K=576, D_V=512
-    # Three variants (TP=2/4/8) — each is a (decode + reduce) pair.
+    # ─────────── MLA-MTP TP8 decode (no PDL) ───────────
+    # Shape: NUM_HEADS = 16 per rank, D_K=576, D_V=512
+    # A (decode + reduce) pair.
 
     def _mla_mtp_decode_tp_layer(
         self,
         q_input, kv_input, output_partial, output_lse,
-        q_len, kv_len, num_heads,
-        task_name, has_v_split=False, q_len_real=None, head_groups=1,
-        v_splits=2, num_splits_override=None,
+        q_len, kv_len, task_name, q_len_real=None, num_splits_override=None,
     ):
-        """Internal helper for TP=2/4/8 decode dispatch.
-          q_len: padded Q_LEN passed to the kernel
-          q_len_real: TP=8 only — actual unpadded Q_LEN
-          num_heads: 64/32/16 per TP variant
-          has_v_split: TP=4 only — block_x multiplied to encode V split id
-          head_groups: additional head split packed into block_x
+        """Internal helper for TP8 MTP decode dispatch.
+          q_len: even-padded Q_LEN passed to the kernel
+          q_len_real: actual unpadded Q_LEN
         """
-        if num_heads == 64:
-            qpg = min(2, q_len)
-        elif num_heads == 32:
-            qpg = min(4, q_len)
-        else:  # TP=8
-            qpg = 2
+        qpg = 2
         num_groups = (q_len + qpg - 1) // qpg
         # TILE_S=128 (mla_mtp_decode_tp8_sm100.cuh).
         mla_tile_s = 128
@@ -1589,18 +1579,13 @@ class PersistentKernel:
             if num_splits_override is not None
             else (kv_len + mla_tile_s - 1) // mla_tile_s
         )
-        # TP=4 packs the V split id into block_x → multiple tasks per split.
-        x_mul = v_splits if has_v_split else 1
-        grid_dim = (num_groups * num_splits * x_mul * head_groups,
+        grid_dim = (num_groups * num_splits,
                     self.max_num_batched_requests,
                     1)
         block_dim = (128, 1, 1)
 
-        if num_heads == 16:  # TP=8
-            params = [num_groups, q_len, kv_len, num_splits,
-                      q_len_real if q_len_real is not None else q_len]
-        else:  # TP=2 and TP=4
-            params = [num_groups, q_len, kv_len, num_splits]
+        params = [num_groups, q_len, kv_len, num_splits,
+                  q_len_real if q_len_real is not None else q_len]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_input, (-1, -1, -1), -1, True)
@@ -1615,14 +1600,9 @@ class PersistentKernel:
     def _mla_mtp_reduce_tp_layer(
         self,
         input_partial, input_lse, output,
-        q_len, kv_len, num_heads, task_name,
+        q_len, kv_len, task_name,
     ):
-        if num_heads == 64:
-            qpg = min(2, q_len)
-        elif num_heads == 32:
-            qpg = min(4, q_len)
-        else:
-            qpg = 2
+        qpg = 2
         num_groups = (q_len + qpg - 1) // qpg
         # sk = ceil(kv/TILE_S); TILE_S=128 (mla_mtp_decode_tp8_sm100.cuh).
         num_splits = (kv_len + 128 - 1) // 128
@@ -1655,7 +1635,7 @@ class PersistentKernel:
         q_len = (q_len_real + 1) & ~1
         self._mla_mtp_decode_tp_layer(
             q_input, kv_input, output_partial, output_lse,
-            q_len, kv_len, num_heads=16,
+            q_len, kv_len,
             task_name="mla_mtp_decode_tp8_sm100", q_len_real=q_len_real,
             num_splits_override=num_splits_override,
         )
@@ -1665,7 +1645,7 @@ class PersistentKernel:
     ):
         q_len = (q_len_real + 1) & ~1
         self._mla_mtp_reduce_tp_layer(
-            input_partial, input_lse, output, q_len, kv_len, num_heads=16,
+            input_partial, input_lse, output, q_len, kv_len,
             task_name="mla_mtp_decode_tp8_reduce_sm100",
         )
 

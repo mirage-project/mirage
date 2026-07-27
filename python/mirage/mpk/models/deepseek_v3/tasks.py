@@ -287,16 +287,10 @@ def mla_mtp_decode_layer(
     pk, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
     tp_size: int, num_splits_override=None,
 ):
-    """Unified MLA MTP decode entry — dispatches on tp_size to the
-    TP1/TP2/TP4/TP8 task variants (registered task names unchanged).
-
-    tp_size: the tensor-parallel world size (1/2/4/8). Selects the
-        per-rank head count (128/64/32/16) variant.
-    num_splits_override: KV-split override for the TP variants. The TP1
-        kernel derives its split count internally and has no override
-        plumbing (callers historically never passed one at TP1).
-    For tp_size == 8, q_len is the REAL (unpadded) Q_LEN; the TP8
-    variant pads it to even internally.
+    """MLA MTP decode entry (registered task names unchanged). Only
+    tp_size == 8 is shipped; other values raise. q_len is the REAL
+    (unpadded) Q_LEN; the TP8 variant pads it to even internally.
+    num_splits_override: optional KV-split override.
     """
     if tp_size == 8:
         pk.mla_mtp_decode_tp8_layer(

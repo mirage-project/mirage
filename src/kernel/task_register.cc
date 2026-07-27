@@ -7147,37 +7147,26 @@ int TaskRegister::register_eagle3_commit_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_EAGLE3_COMMIT, code.to_string());
 }
 
-// ============ MLA-MTP TP variants (no-PDL) ============
+// ============ MLA-MTP TP8 decode (no-PDL) ============
 //
-// Three variants (TP=2/4/8) share structure but differ:
-//   - NUM_HEADS hardcoded inside namespace (64/32/16) → not a runtime param
-//   - TP=4 splits V across two CTAs via blockIdx.z (z=2 grid)
-//   - TP=8 takes Q_LEN_real (Q_LEN is padded to even at the call site)
-//
-// Each TP has a paired (decode, reduce) task. params layout for decode:
-//   [num_groups, q_len, kv_len, num_splits]                 (TP=2)
-//   [num_groups, q_len, kv_len, num_splits, v_half]         (TP=4)
-//   [num_groups, q_len_padded, kv_len, num_splits, q_len_real]  (TP=8)
-// reduce params: [num_groups, q_len, num_splits, rd_dv]
+// NUM_HEADS=16 hardcoded inside the namespace (not a runtime param); takes
+// Q_LEN_real (Q_LEN is padded to even at the call site). Paired
+// (decode, reduce) tasks. params layout:
+//   decode: [num_groups, q_len_padded, kv_len, num_splits, q_len_real]
+//   reduce: [num_groups, q_len, num_splits, rd_dv]
 
-// Unified TP2/TP4/TP8 split-KV reduce. One TASK_MLA_MTP_DECODE_TP_REDUCE
-// enum; `tp` selects the kernel::mla_mtp_tp{2,4,8}::*_reduce device
-// function at graph-build time (the merged enum is safe because the three
-// reduces need no TMA and share the scheduler-metadata branch).
-// Per-TP body differences preserved verbatim from the former fns:
-//   - qpg: TP2 = min(q_len, 2); TP4 = min(q_len, 4); TP8 = 2.
-//   - TP2/TP4 pass the runtime compact split count sk_rt_ (matching the
-//     mains); TP8's partial layout is static-num_splits based and its
-//     runtime Q_LEN is even-padded (q_len_padded_rt_).
+// TP8 split-KV reduce (TASK_MLA_MTP_DECODE_TP_REDUCE). Emits
+// kernel::mla_mtp_tp8::mla_mtp_tp8_reduce; needs no TMA and shares the
+// scheduler-metadata branch. qpg=2; the partial layout is static-num_splits
+// based and the runtime Q_LEN is even-padded (q_len_padded_rt_).
 int TaskRegister::register_mla_mtp_decode_tp_reduce_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params, int tp) {
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 4);
-  assert(tp == 2 || tp == 4 || tp == 8);
   int num_groups = params[0];
   int q_len = params[1]; // TP8: even-padded q_len
   int num_splits = params[2];
   int rd_dv = params[3];
-  int qpg = (tp == 8) ? 2 : ((q_len < tp) ? q_len : tp);
+  int qpg = 2;
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -7205,29 +7194,15 @@ int TaskRegister::register_mla_mtp_decode_tp_reduce_sm100_task(
   code.e("  if (q_len_rt_ < 1) q_len_rt_ = 1;");
   code.e("  if (q_len_rt_ > 8) return;");
   code.e("  if (q_len_rt_ > $) q_len_rt_ = $;", q_len, q_len);
-  if (tp == 8) {
-    code.e("  int q_len_padded_rt_ = q_len_rt_ + (q_len_rt_ & 1);");
-  }
-  code.e("  kernel::mla_mtp_tp$::mla_mtp_tp$_reduce(", tp, tp);
+  code.e("  int q_len_padded_rt_ = q_len_rt_ + (q_len_rt_ & 1);");
+  code.e("  kernel::mla_mtp_tp8::mla_mtp_tp8_reduce(");
   code.e("      static_cast<const nv_bfloat16*>(task_desc->input_ptrs[0]),");
   code.e("      static_cast<const float*>(task_desc->input_ptrs[1]),");
   code.e("      static_cast<nv_bfloat16*>(task_desc->output_ptrs[0]),");
-  if (tp == 8) {
-    // See TP2 MTP reduce: TP8's partial layout is static-num_splits based.
-    code.e("      $,", num_splits);
-  } else {
-    // Match the main task's runtime compact split layout (sk_rt_). Passing
-    // compile-time num_splits read stale partial slots beyond sk_rt_; the
-    // main now also passes sk_rt_, so the two stay in sync for short
-    // context.
-    code.e("      sk_rt_,");
-  }
+  // TP8's partial layout is static-num_splits based.
+  code.e("      $,", num_splits);
   code.e("      $,", num_groups);
-  if (tp == 8) {
-    code.e("      q_len_padded_rt_,");
-  } else {
-    code.e("      q_len_rt_,");
-  }
+  code.e("      q_len_padded_rt_,");
   code.e("      $,", qpg);
   code.e("      task_desc->task_metadata.kv_idx,");
   code.e("      task_desc->task_metadata.request_id,");
@@ -7299,7 +7274,7 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
     code.e("      $f,", _sm);
   }
   code.e("      kv_len_,");
-  // See TP2 MTP decode: task metadata is laid out for static num_splits.
+  // Task metadata is laid out for static num_splits.
   code.e("      $,", num_splits);
   code.e("      q_len_padded_rt_,");
   code.e("      $,", qpg);
