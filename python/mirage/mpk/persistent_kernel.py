@@ -1309,9 +1309,12 @@ class PersistentKernel:
         z: DTensor,          # [max_num_batched_tokens, num_v_heads*head_v_dim] bf16
         norm_w: DTensor,     # [head_v_dim] fp32
         output: DTensor,     # [max_num_batched_tokens, num_v_heads*head_v_dim] bf16
+        split_scratch: DTensor,  # [slots, num_v_heads, head_v_dim + 8] fp32
         num_k_heads: int,
-        grid_dim: tuple,     # (num_v_heads, max_num_batched_requests, 1)
+        grid_dim: tuple,     # (num_v_heads, max_num_batched_requests, split)
         block_dim: tuple,    # (256, 1, 1) on SM100
+        depth: int = 2,      # decode cp.async ring depth (2..4)
+        decode_fastpath: bool = True,
     ):
         """Gated-DeltaNet recurrence with a fused gated RMSNorm/SiLU epilogue.
 
@@ -1330,6 +1333,30 @@ class PersistentKernel:
         a chunk's tokens cannot be spread across tasks. The only parallel axes
         are the v-head (grid.x) and the request slot (grid.y); a long prefill
         chunk is therefore walked in-task.
+
+        ``grid.z`` is the DECODE v-row split. Within one token the v-rows of the
+        recurrent state are mutually independent, so a decode step for one
+        (head, slot) can be fanned out over ``grid.z`` cooperating tasks, each
+        owning ``head_v_dim / grid.z`` rows; the last of them to arrive runs the
+        shared gated-norm epilogue over the fp32 ``o`` partials the others left
+        in ``split_scratch``. That matters at small batch: at bs1 the whole op
+        is only ``num_v_heads`` == 32 tasks, against 128 workers.
+
+        ``split_scratch`` is ``[slots, num_v_heads, head_v_dim + 8]`` fp32,
+        ZERO-INITIALISED and shared by every GDN layer (layer L+1 is
+        transitively downstream of layer L, so no two uses are ever in flight).
+        Column ``head_v_dim`` is the arrival counter, read as ``unsigned int``
+        and self-resetting; the remaining pad keeps each row 16 B aligned. With
+        ``grid.z == 1`` the buffer is never touched.
+
+        Prefill chunks and a slot's first chunk keep the unsplit path (their
+        epilogue is inside the token loop): split 0 runs the whole chunk and the
+        other splits return immediately.
+
+        ``decode_fastpath=False`` routes decode back through the original
+        unsplit implementation. It exists so an A/B can compare both arms from
+        ONE build in ONE window instead of swapping git trees; with it off and
+        ``grid.z == 1`` the emitted task body is the pre-split one.
 
         ``num_k_heads`` declares the GVA ratio: two v-heads share one q/k head
         on Qwen3.5 (32 v-heads, 16 k-heads). It cannot be inferred, because q
@@ -1371,6 +1398,26 @@ class PersistentKernel:
             "recurrent-state pool needs one slot per request "
             f"({state.dim(0)} slots < grid_dim.y {grid_dim[1]})"
         )
+        split = grid_dim[2]
+        assert split >= 1 and head_v_dim % split == 0, (
+            f"grid_dim.z ({split}), the decode v-row split, must divide "
+            f"head_v_dim ({head_v_dim})"
+        )
+        assert 2 <= depth <= 4, f"decode cp.async ring depth must be 2..4, got {depth}"
+        assert decode_fastpath or split == 1, (
+            "decode_fastpath=False needs grid_dim.z == 1: with the fast path "
+            f"off the extra splits would have nothing to do (got {split})"
+        )
+        assert split_scratch.num_dims == 3
+        assert split_scratch.dim(0) >= grid_dim[1], (
+            "split scratch needs one row per request slot "
+            f"({split_scratch.dim(0)} < grid_dim.y {grid_dim[1]})"
+        )
+        assert split_scratch.dim(1) == num_v_heads
+        assert split_scratch.dim(2) == head_v_dim + 8, (
+            "split scratch row is [head_v_dim o partials | counter | padding], "
+            f"expected {head_v_dim + 8}, got {split_scratch.dim(2)}"
+        )
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(qkv, (-1, -1, -1), -1, True)
@@ -1379,12 +1426,15 @@ class PersistentKernel:
         tb_graph.new_input(state, (-1, -1, -1), -1, True)
         tb_graph.new_input(z, (-1, -1, -1), -1, True)
         tb_graph.new_input(norm_w, (-1, -1, -1), -1, True)
+        tb_graph.new_input(split_scratch, (-1, -1, -1), -1, True)
         tb_graph.new_input(output, (-1, -1, -1), -1, True)
         self.kn_graph.customized(
-            [qkv, ba, alog_dtbias, state, z, norm_w, output], tb_graph
+            [qkv, ba, alog_dtbias, state, z, norm_w, split_scratch, output],
+            tb_graph,
         )
         self.kn_graph.register_task(
-            tb_graph, "gdn_recurrent_sm100", [num_k_heads]
+            tb_graph, "gdn_recurrent_sm100",
+            [num_k_heads, depth, 1 if decode_fastpath else 0]
         )
 
     def mla_kv_gather_layer(

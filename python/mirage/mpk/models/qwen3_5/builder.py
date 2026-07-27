@@ -54,6 +54,7 @@ Five things worth knowing before editing this file:
 from __future__ import annotations
 
 import math
+import os
 from typing import Dict, List, Optional
 
 import torch
@@ -187,6 +188,15 @@ class Qwen35Builder(GraphBuilder):
         self.gdn_conv_channel_blocks = 8
         self.moe_n_splits = 2
         self.qk_dense_path = "fp8"
+        # GDN recurrent decode v-row split (grid.z of task 237) and its
+        # cp.async ring depth.  The op is only `num_v_heads * mbr` tasks wide,
+        # so at small batch it leaves most of the 128 workers idle; splitting
+        # the v-rows multiplies the task count.  Defaults are set per mbr in
+        # `_gdn_split_default`, and can be overridden here or with
+        # MPK_GDN_SPLIT / MPK_GDN_DEPTH before build (both change the generated
+        # code, so a kernel dir must not be reused across values).
+        self.gdn_split: Optional[int] = None
+        self.gdn_depth = int(os.environ.get("MPK_GDN_DEPTH", "2"))
         # When set, every intermediate is a host-visible torch tensor
         # (`attach_input`) instead of an opaque `new_tensor`, and is recorded in
         # `self.buffers`. This is the `online_notoken` "fixed tensor" pattern the
@@ -326,7 +336,16 @@ class Qwen35Builder(GraphBuilder):
             (n, self.mbr, c.linear_num_value_heads,
              c.linear_value_head_dim, c.linear_key_head_dim),
             dtype=torch.float32, device="cuda")
-        self._keep += [self.conv_state, self.recurrent_state]
+        # Decode v-row-split scratch, shared by ALL GDN layers (layer L+1 is
+        # transitively downstream of layer L, so two uses are never in flight).
+        # Row = [head_v_dim fp32 `o` partials | arrival counter | padding]; the
+        # counter is read as `unsigned int`, starts at 0 here and self-resets,
+        # and the pad keeps every row 16 B aligned. Untouched when gdn_split==1.
+        self.gdn_split_scratch = torch.zeros(
+            (self.mbr, c.linear_num_value_heads, c.linear_value_head_dim + 8),
+            dtype=torch.float32, device="cuda")
+        self._keep += [self.conv_state, self.recurrent_state,
+                       self.gdn_split_scratch]
 
     _TORCH_DTYPE = {
         "bf16": torch.bfloat16, "fp32": torch.float32,
@@ -343,10 +362,45 @@ class Qwen35Builder(GraphBuilder):
         self._keep.append(buf)
         return self.mpk.attach_input(buf, name=name)
 
+    def _gdn_split_default(self) -> int:
+        """grid.z for task 237: how many tasks share one (head, slot) decode.
+
+        The op emits `num_v_heads * mbr` tasks per layer against 128 workers
+        (`utils.get_configurations_from_gpu`), so at small batch it runs a
+        fraction of the machine: 32 tasks at mbr=1. Splitting the v-rows over
+        `split` cooperating tasks multiplies that, at the cost of one extra
+        global round trip for the `o` partials and a slightly shorter per-task
+        row loop. The defaults aim for roughly one full 128-worker wave; they
+        were swept in-MPK rather than copied from the standalone kernel, whose
+        8-blocks-per-SM occupancy regime does not exist here (MPK runs ONE
+        worker CTA per SM).
+
+        0 means "decode fast path OFF": the task falls back to the original
+        unsplit implementation with grid.z == 1. That is the A/B base arm, and it
+        lives in the SAME build so both arms can be measured in one window
+        without swapping git trees (see `gdn_recurrent_layer`).
+        """
+        if self.gdn_split is not None:
+            return int(self.gdn_split)
+        env = os.environ.get("MPK_GDN_SPLIT")
+        if env is not None and env != "":
+            return int(env)
+        heads = self.config.linear_num_value_heads
+        target_workers = 128
+        split = max(1, target_workers // max(1, heads * self.mbr))
+        # must divide head_v_dim and stay a power of two for the row slicing
+        while split > 1 and self.config.linear_value_head_dim % split != 0:
+            split //= 2
+        return split
+
     def _attach_common(self):
         pk, c = self.mpk, self.config
         self.cos_dt = pk.attach_input(self.cos_table, name="cos_position_embedding")
         self.sin_dt = pk.attach_input(self.sin_table, name="sin_position_embedding")
+        # One shared decode-split scratch for every GDN layer (see
+        # `_alloc_state_pools`); attach it once, like the RoPE tables.
+        self.gdn_split_dt = pk.attach_input(self.gdn_split_scratch,
+                                            name="gdn_split_scratch")
         self._attn_slot = {li: j for j, li in enumerate(c.attn_layers)}
         self._gdn_slot = {li: j for j, li in enumerate(c.gdn_layers)}
 
@@ -491,6 +545,7 @@ class Qwen35Builder(GraphBuilder):
             block_dim=(256, 1, 1))
 
         g_out = self._t((self.mbt, c.gdn_z_dim), bfloat16, f"layer_{i}_gdn_out")
+        gdn_split = self._gdn_split_default()
         pk.gdn_recurrent_layer(
             qkv=qkv_c, ba=ba,
             alog_dtbias=pk.attach_input(w[f"layer_{i}_gdn_alog_dtbias"],
@@ -500,9 +555,14 @@ class Qwen35Builder(GraphBuilder):
             z=z,
             norm_w=pk.attach_input(w[f"layer_{i}_gdn_norm"],
                                    name=f"layer_{i}_gdn_norm"),
-            output=g_out, num_k_heads=c.linear_num_key_heads,
-            grid_dim=(c.linear_num_value_heads, self.mbr, 1),
-            block_dim=(256, 1, 1))
+            output=g_out,
+            split_scratch=self.gdn_split_dt,
+            num_k_heads=c.linear_num_key_heads,
+            grid_dim=(c.linear_num_value_heads, self.mbr,
+                      max(1, gdn_split)),
+            block_dim=(256, 1, 1),
+            depth=self.gdn_depth,
+            decode_fastpath=gdn_split > 0)
 
         out = self._t((self.mbt, c.hidden_size), bfloat16, f"layer_{i}_attn_resid")
         self._fp8_linear(f"layer_{i}_gdn_out_proj", g_out,

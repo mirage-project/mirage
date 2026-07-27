@@ -287,6 +287,104 @@ def test_state_slice_hygiene():
        f"every head of the active slot was updated ({len(changed)}/{hv_n})")
 
 
+# ------------------------------------------- 8: decode split path, BIT-EXACT
+# (split, depth) pairs the wrapper instantiates; must match
+# GDN_DECODE_SPLIT_CASES in runtime_kernel_wrapper_sm100.cu.
+SPLIT_CASES = {
+    (32, 16, 128, 128, 8192, 64, 4096, 4096): [
+        (1, 2), (2, 2), (4, 2), (8, 2), (16, 2), (32, 2),
+        (1, 3), (1, 4), (2, 4), (4, 4),
+    ],
+    (32, 16, 128, 128, 12288, 64, 4096, 4096): [(1, 2), (2, 2), (4, 2)],
+    (8, 4, 128, 128, 2048, 16, 1024, 1024): [(1, 2), (2, 2), (4, 2)],
+    (4, 2, 32, 32, 256, 8, 128, 128): [(1, 2), (2, 2), (4, 2)],
+    (4, 4, 32, 32, 384, 8, 128, 128): [(1, 2), (2, 2), (4, 2)],
+    (4, 1, 32, 32, 192, 8, 128, 128): [(1, 2), (2, 2), (4, 2)],
+    (2, 1, 64, 64, 256, 4, 128, 128): [(1, 2), (2, 2), (4, 2)],
+}
+
+
+def run_split(shape, qkv, ba, ad, state, z, norm_w, qo, split, depth,
+              scratch=None):
+    hv_n, hk_n, dk, dv, qs, bs, zs, os_ = shape
+    num_slots = state.shape[0]
+    out = torch.zeros(qkv.shape[0], os_, dtype=BF16, device=DEV)
+    st = state.clone().contiguous()
+    if scratch is None:
+        scratch = torch.zeros(num_slots, hv_n, dv + 8, dtype=torch.float32,
+                              device=DEV)
+    gdn.gdn_recurrent_decode_split_sm100(
+        qkv.contiguous(), ba.contiguous(), ad.contiguous(), st,
+        z.contiguous(), norm_w.contiguous(), out, scratch,
+        torch.tensor(qo, dtype=torch.int32, device=DEV),
+        hk_n, split, depth)
+    torch.cuda.synchronize()
+    return out, st, scratch
+
+
+def test_decode_split_bit_exact():
+    """The decode fast path must be BYTE-identical to the golden task impl.
+
+    This is the gate the ferret loop that produced this kernel ran on every
+    iteration (integer memcmp of `out` AND the updated fp32 `state`); re-run
+    here against the in-tree golden so the MPK port carries the same guarantee
+    at every instantiated shape and split.
+    """
+    print("\n[8] decode split path is bit-exact vs the golden task impl")
+    for shape, cases in SPLIT_CASES.items():
+        dv = shape[3]
+        for num_slots in (1, 3):
+            qo = list(range(num_slots + 1))          # one token per slot
+            qkv, ba, z, ad, norm_w, state = make_inputs(
+                shape, num_slots, num_slots, 9100 + num_slots)
+            g_out, g_st = run(shape, qkv, ba, ad, state, z, norm_w, qo,
+                              [0] * num_slots)
+            for split, depth in cases:
+                c_out, c_st, scratch = run_split(
+                    shape, qkv, ba, ad, state, z, norm_w, qo, split, depth)
+                same_out = torch.equal(c_out.view(torch.int16),
+                                       g_out.view(torch.int16))
+                same_st = torch.equal(c_st.view(torch.int32),
+                                      g_st.view(torch.int32))
+                ok(same_out and same_st,
+                   f"{shape} slots={num_slots} split={split} depth={depth}: "
+                   f"out bit-exact={same_out} state bit-exact={same_st}")
+                ctr = scratch[..., dv].view(torch.int32)
+                ok(bool((ctr == 0).all()),
+                   f"{shape} slots={num_slots} split={split} depth={depth}: "
+                   "arrival counters self-reset")
+
+
+def test_decode_split_counter_reuse():
+    """Back-to-back launches on ONE scratch buffer must stay bit-exact.
+
+    The self-reset is what lets all 30 GDN layers and every decode step share
+    a single scratch buffer; a leaked counter would elect the wrong epilogue
+    task (or none) on the next use.
+    """
+    print("\n[8b] repeated launches reuse one scratch buffer correctly")
+    shape = (32, 16, 128, 128, 8192, 64, 4096, 4096)
+    hv_n, dv, os_ = shape[0], shape[3], shape[7]
+    num_slots = 2
+    qo = list(range(num_slots + 1))
+    qkv, ba, z, ad, norm_w, state = make_inputs(shape, num_slots, num_slots,
+                                                9313)
+    g_out, g_st = run(shape, qkv, ba, ad, state, z, norm_w, qo,
+                      [0] * num_slots)
+    for split in (2, 4, 16):
+        scratch = torch.zeros(num_slots, hv_n, dv + 8, dtype=torch.float32,
+                              device=DEV)
+        good = True
+        for _ in range(4):
+            c_out, c_st, _ = run_split(shape, qkv, ba, ad, state, z, norm_w,
+                                       qo, split, 2, scratch=scratch)
+            good &= torch.equal(c_out.view(torch.int16),
+                                g_out.view(torch.int16))
+            good &= torch.equal(c_st.view(torch.int32), g_st.view(torch.int32))
+        ok(good, f"split={split}: 4 back-to-back launches on one scratch, "
+                 "all bit-exact")
+
+
 def main():
     print(f"device: {torch.cuda.get_device_name(0)}  torch {torch.__version__}")
     test_shapes_and_gva()
@@ -295,6 +393,8 @@ def main():
     test_parked_slot()
     test_carried_chain()
     test_state_slice_hygiene()
+    test_decode_split_bit_exact()
+    test_decode_split_counter_reuse()
     if FAILURES:
         print(f"\n{len(FAILURES)} FAILURE(S):")
         for f in FAILURES:

@@ -39,6 +39,13 @@ BA_STRIDE = 2 * NUM_V_HEADS                 # 16
 PROMPT_LENS = [5, 3]                        # request 0, request 1
 SEEDED_STEPS = [0, 7]                       # step==0 -> zero state
 MAX_SEQ_LENGTH = 64
+# grid.z, the decode v-row split. Both prompts here are PREFILL chunks, so this
+# exercises the codegen's "split 0 runs the whole chunk, the rest are no-ops"
+# branch - i.e. it proves a split-enabled graph still produces the unsplit
+# prefill result. The decode branch's bit-exactness is gated in
+# test_gdn_recurrent.py [8]; AC-3 gates it end to end.
+GDN_SPLIT = 4
+GDN_DEPTH = 2
 BF16 = torch.bfloat16
 EPS = 1e-6
 
@@ -145,6 +152,9 @@ def main():
     z_dt = pk.attach_input(z, name="gdn_z")
     nw_dt = pk.attach_input(norm_w, name="gdn_norm_weight")
     out_dt = pk.attach_input(out, name="gdn_gated_out")
+    split_scratch = torch.zeros(num_requests, NUM_V_HEADS, HEAD_V_DIM + 8,
+                                dtype=torch.float32, device=device)
+    ss_dt = pk.attach_input(split_scratch, name="gdn_split_scratch")
 
     pk.gdn_recurrent_layer(
         qkv=qkv_dt,
@@ -154,9 +164,11 @@ def main():
         z=z_dt,
         norm_w=nw_dt,
         output=out_dt,
+        split_scratch=ss_dt,
         num_k_heads=NUM_K_HEADS,
-        grid_dim=(NUM_V_HEADS, num_requests, 1),
+        grid_dim=(NUM_V_HEADS, num_requests, GDN_SPLIT),
         block_dim=block_dim,
+        depth=GDN_DEPTH,
     )
 
     pk.compile(output_dir="./test_output_gdn_recurrent")

@@ -4791,21 +4791,43 @@ int TaskRegister::register_gdn_recurrent_sm100_task(
   //                                                              fp32 (in/out)
   //          [4] z       [max_num_batched_tokens, num_v_heads*head_v_dim] bf16
   //          [5] norm_w  [head_v_dim]                            fp32
+  //          [6] split_scratch [num_slots, num_v_heads, head_v_dim + 8] fp32
   // Output:  [0] out     [max_num_batched_tokens, num_v_heads*head_v_dim] bf16
   //
-  // Grid is (num_v_heads, max_num_batched_requests, 1); runtime.cc puts bid.x
-  // into task_metadata.kv_idx and bid.y into task_metadata.request_id.  The
-  // kernel slices its token window from qo_indptr (chunk length varies per
-  // iteration), exactly like the conv task and register_mla_prefill_sm100_task.
+  // Grid is (num_v_heads, max_num_batched_requests, SPLIT); runtime.cc puts
+  // bid.x into task_metadata.kv_idx, bid.y into task_metadata.request_id and
+  // bid.z into task_metadata.merge_task_offset.  The kernel slices its token
+  // window from qo_indptr (chunk length varies per iteration), exactly like the
+  // conv task and register_mla_prefill_sm100_task.
+  //
+  // SPLIT (= grid.z) is the DECODE v-row split: one (head, slot) decode step is
+  // fanned out over SPLIT cooperating tasks, and the last one to arrive runs
+  // the shared gated-norm epilogue over the fp32 `o` partials the others left
+  // in `split_scratch` (whose tail word is the arrival counter).  See the long
+  // note in tasks/blackwell/gdn_recurrent_sm100.cuh for why that idiom is sound
+  // under MPK's persistent work-queue dispatch: nothing ever waits on a peer,
+  // so the SPLIT tasks need not be co-resident.
+  //
+  // Prefill chunks (q_len > 1) and a slot's first chunk keep the original
+  // unsplit path -- their epilogue is inside the token loop, so splitting it
+  // would need a real per-token cross-task barrier.  There split 0 does the
+  // whole chunk and the other splits return immediately.
   //
   // params[0] = num_k_heads.  It cannot be derived from the tensors: q and k
   // live inside the packed qkv row, whose only recorded dimension is the total
   // stride, so the GVA ratio has to be declared.
-  assert(params.size() == 1);
+  // params[1] = cp.async ring depth for the decode path (2..4).
+  // params[2] = decode fast path on/off.  Off routes decode back through the
+  // original unsplit impl, so an A/B can run both arms from ONE build in ONE
+  // measurement window instead of swapping git trees.
+  assert(params.size() == 3);
   int const num_k_heads = params[0];
+  int const depth = params[1];
+  bool const decode_fastpath = params[2] != 0;
   assert(num_k_heads >= 1);
+  assert(depth >= 2 && depth <= 4);
 
-  int const num_inputs = 6;
+  int const num_inputs = 7;
   int const num_outputs = 1;
   assert(bgraph.operators.size() == (size_t)(num_inputs + num_outputs));
 
@@ -4865,17 +4887,84 @@ int TaskRegister::register_gdn_recurrent_sm100_task(
   assert((int)bgraph.grid_dim.x == num_v_heads &&
          "grid.x must be one task per v-head");
 
+  // grid.z is the decode v-row split.  It must divide head_v_dim, and the
+  // split-scratch pool must be wide enough for every (slot, head).
+  int const split = (int)bgraph.grid_dim.z;
+  assert(split >= 1 && head_v_dim % split == 0 &&
+         "grid.z (the decode v-row split) must divide head_v_dim");
+  int const scratch_stride = head_v_dim + 8; // + arrival counter + padding
+  assert(input_ops[6]->dtensor.num_dims == 3);
+  assert(input_ops[6]->dtensor.dim[0] >= (int)bgraph.grid_dim.y);
+  assert(input_ops[6]->dtensor.dim[1] == num_v_heads);
+  assert(input_ops[6]->dtensor.dim[2] == scratch_stride &&
+         "split scratch row is [head_v_dim | counter | padding]");
+
+  // The thread count is WORKER_NUM_THREADS, not bgraph.block_dim (which MPK
+  // never reads - it is documentation on the builder call), so emit the macro
+  // and let the generated TU resolve it.  The decode path needs >= 3 warps.
+
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("{");
   code.e("  int hv_ = task_desc->task_metadata.kv_idx;");
   code.e("  int slot_ = task_desc->task_metadata.request_id;");
+  code.e("  int split_ = task_desc->task_metadata.merge_task_offset;");
   code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[slot_];");
   code.e("  int q_len_ = runtime_config.qo_indptr_buffer[slot_ + 1] - qo_fp_;");
   code.e("  bool zero_state_ = "
          "kernel::gdn_slot_is_first_chunk(runtime_config, slot_);");
-  code.e("  kernel::gdn_recurrent_sm100_task_impl<bfloat16, $, $, $, $, $, $, "
-         "$, $>(",
+  // Decode fast path: one carried-state token, v-rows split over `split` tasks.
+  // When it is off nothing is emitted for it at all, so the base arm's task
+  // body is the pre-split one rather than dead code the compiler still has to
+  // instantiate and schedule around.
+  if (decode_fastpath) {
+    code.e("  if (q_len_ == 1 && !zero_state_) {");
+    code.e("    kernel::gdn_recurrent_sm100_decode_split_impl<bfloat16, $, $, "
+           "$, $, $, $, $, $, $, $, WORKER_NUM_THREADS>(",
+           num_v_heads,
+           num_k_heads,
+           head_k_dim,
+           head_v_dim,
+           qkv_stride,
+           ba_stride,
+           z_stride,
+           out_stride,
+           split,
+           depth);
+    code.e("        static_cast<bfloat16 const *>(task_desc->input_ptrs[0]) + "
+           "qo_fp_ * $,",
+           qkv_stride);
+    code.e("        static_cast<bfloat16 const *>(task_desc->input_ptrs[1]) + "
+           "qo_fp_ * $,",
+           ba_stride);
+    code.e("        task_desc->input_ptrs[2],");
+    code.e("        static_cast<float *>(task_desc->input_ptrs[3]) + "
+           "(slot_ * $ + hv_) * $,",
+           num_v_heads,
+           head_v_dim * head_k_dim);
+    code.e("        static_cast<bfloat16 const *>(task_desc->input_ptrs[4]) + "
+           "qo_fp_ * $ + hv_ * $,",
+           z_stride,
+           head_v_dim);
+    code.e("        task_desc->input_ptrs[5],");
+    code.e("        static_cast<bfloat16 *>(task_desc->output_ptrs[0]) + "
+           "qo_fp_ * $ + hv_ * $,",
+           out_stride,
+           head_v_dim);
+    code.e("        static_cast<float *>(task_desc->input_ptrs[6]) + "
+           "(slot_ * $ + hv_) * $,",
+           num_v_heads,
+           scratch_stride);
+    code.e("        hv_,");
+    code.e("        split_);");
+    code.e("  } else if (split_ == 0) {");
+  } else {
+    code.e("  if (split_ == 0) {");
+  }
+  // Prefill / first chunk: the token loop cannot be split, so split 0 runs the
+  // whole chunk and the other splits are no-ops.
+  code.e("    kernel::gdn_recurrent_sm100_task_impl<bfloat16, $, $, $, $, $, "
+         "$, $, $>(",
          num_v_heads,
          num_k_heads,
          head_k_dim,
@@ -4884,29 +4973,30 @@ int TaskRegister::register_gdn_recurrent_sm100_task(
          ba_stride,
          z_stride,
          out_stride);
-  code.e("      static_cast<bfloat16 const *>(task_desc->input_ptrs[0]) + "
+  code.e("        static_cast<bfloat16 const *>(task_desc->input_ptrs[0]) + "
          "qo_fp_ * $,",
          qkv_stride);
-  code.e("      static_cast<bfloat16 const *>(task_desc->input_ptrs[1]) + "
+  code.e("        static_cast<bfloat16 const *>(task_desc->input_ptrs[1]) + "
          "qo_fp_ * $,",
          ba_stride);
-  code.e("      task_desc->input_ptrs[2],");
-  code.e("      static_cast<float *>(task_desc->input_ptrs[3]) + "
+  code.e("        task_desc->input_ptrs[2],");
+  code.e("        static_cast<float *>(task_desc->input_ptrs[3]) + "
          "(slot_ * $ + hv_) * $,",
          num_v_heads,
          head_v_dim * head_k_dim);
-  code.e("      static_cast<bfloat16 const *>(task_desc->input_ptrs[4]) + "
+  code.e("        static_cast<bfloat16 const *>(task_desc->input_ptrs[4]) + "
          "qo_fp_ * $ + hv_ * $,",
          z_stride,
          head_v_dim);
-  code.e("      task_desc->input_ptrs[5],");
-  code.e("      static_cast<bfloat16 *>(task_desc->output_ptrs[0]) + "
+  code.e("        task_desc->input_ptrs[5],");
+  code.e("        static_cast<bfloat16 *>(task_desc->output_ptrs[0]) + "
          "qo_fp_ * $ + hv_ * $,",
          out_stride,
          head_v_dim);
-  code.e("      hv_,");
-  code.e("      q_len_,");
-  code.e("      zero_state_);");
+  code.e("        hv_,");
+  code.e("        q_len_,");
+  code.e("        zero_state_);");
+  code.e("  }");
   code.e("}");
   return register_task_variant(TASK_GDN_RECURRENT_SM100, code.to_string());
 }

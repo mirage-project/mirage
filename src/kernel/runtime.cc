@@ -443,14 +443,26 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.y;
             }
             // GDN recurrence: grid = (num_v_heads, max_num_batched_requests,
-            // 1).  kv_idx = bid.x picks the v-head (and with it the q/k head
-            // via the GVA mapping); request_id = bid.y picks the state slot
-            // and the token window via qo_indptr.  Note the axes are the
+            // split).  kv_idx = bid.x picks the v-head (and with it the q/k
+            // head via the GVA mapping); request_id = bid.y picks the state
+            // slot and the token window via qo_indptr.  Note the axes are the
             // TRANSPOSE of the conv task's: the recurrence cannot split a
-            // chunk's tokens, so its wide axis is the head, not the channel.
+            // chunk's TOKENS, so its wide axis is the head, not the channel.
+            //
+            // merge_task_offset = bid.z is the DECODE v-row split index - the
+            // same "one task per grid slice" idiom the paged-attention split-KV
+            // tasks above use.  grid.z > 1 fans one (head, slot) decode step
+            // out over grid.z cooperating tasks, each owning
+            // head_v_dim/grid.z ROWS of the recurrent state (rows are mutually
+            // independent within a token); the last task to arrive runs the
+            // shared gated-norm epilogue.  Prefill chunks cannot be split -
+            // their epilogue sits inside the token loop - so there split 0 runs
+            // the whole chunk and the other splits return immediately.  See
+            // tasks/blackwell/gdn_recurrent_sm100.cuh.
             if (task_type == TASK_GDN_RECURRENT_SM100) {
               task.task_metadata.kv_idx = bid.x;
               task.task_metadata.request_id = bid.y;
+              task.task_metadata.merge_task_offset = bid.z;
             }
             if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
               task.task_metadata.task_offset =

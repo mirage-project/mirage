@@ -237,6 +237,30 @@ def run_kernel(qkv, ba, alog_dtbias, S0, z, norm_w, zero_state,
     return out, o_dbg, st
 
 
+def run_kernel_split(qkv, ba, alog_dtbias, S0, z, norm_w, split, depth,
+                     num_slots=1, qo=None):
+    """The decode fast path (q_len == 1, carried state) with the v-row split.
+
+    Same tensors as `run_kernel`, minus `zero_state` (this entry point IS the
+    carried-state branch) and minus `o_debug` -- the split path leaves its raw
+    fp32 `o` partials in `split_scratch`, which is returned so the
+    pre-epilogue readout can still be checked against `gdn.core_attn_out`.
+    """
+    T = qkv.shape[0]
+    out = torch.zeros(T, VAL_DIM, dtype=BF16, device=DEV)
+    st = S0.clone().contiguous()
+    scratch = torch.zeros(num_slots, NUM_V_HEADS, HEAD_V_DIM + 8,
+                          dtype=torch.float32, device=DEV)
+    if qo is None:
+        qo = torch.tensor([0, T], dtype=torch.int32, device=DEV)
+    gdn.gdn_recurrent_decode_split_sm100(
+        qkv.contiguous(), ba.contiguous(), alog_dtbias.contiguous(), st,
+        z.contiguous(), norm_w.contiguous(), out, scratch, qo,
+        NUM_K_HEADS, split, depth)
+    torch.cuda.synchronize()
+    return out, st, scratch
+
+
 def build_inputs(dump_dir, mode):
     conv_out = load(dump_dir, mode, "gdn.conv_out")          # [1, 8192, T]
     qkv = conv_out[0].transpose(0, 1).contiguous()           # [T, 8192]
@@ -289,6 +313,31 @@ def main():
     check("decode S  vs gdn.core_state_after (fp32)", st[0], S_ref.contiguous(),
           expect_exact=False,
           note="fp32 dot association order, see kernel header")
+
+    # ---- the DECODE FAST PATH must hit the same oracle references
+    # The megakernel routes q_len == 1 && !zero_state to
+    # `gdn_recurrent_sm100_decode_split_impl` with grid.z == split. The unit
+    # test proves it byte-identical to the golden impl on synthetic inputs;
+    # this proves the same thing against the real checkpoint's dumps, i.e. that
+    # the port did not move the numeric target.
+    print("\n[2a] decode FAST PATH (v-row split) vs the same oracle dumps")
+    for split, depth in ((1, 2), (2, 2), (4, 2), (8, 2), (16, 2), (32, 2),
+                         (2, 4), (4, 4)):
+        out_s, st_s, scratch_s = run_kernel_split(
+            qkv, ba, ad, S0, z, norm_w, split, depth)
+        if split > 1:
+            # split == 1 never publishes `o`: the single task keeps the readout
+            # in shared memory (o_dst = s_o) and skips the scratch round trip,
+            # so the buffer legitimately stays zero there.
+            o_s = scratch_s[0, :, :HEAD_V_DIM].reshape(1, VAL_DIM).to(BF16)
+            check(f"split={split} depth={depth}  o vs gdn.core_attn_out", o_s,
+                  o_ref)
+        check(f"split={split} depth={depth}  y vs gdn.gated_norm_out", out_s,
+              y_ref)
+        check(f"split={split} depth={depth}  y byte-identical to golden path",
+              out_s, out)
+        check(f"split={split} depth={depth}  S byte-identical to golden path",
+              st_s, st)
 
     # ---- counterfactuals: prove each rounding decision is load-bearing
     print("\n[2b] counterfactual rounding orders (each MUST miss)")

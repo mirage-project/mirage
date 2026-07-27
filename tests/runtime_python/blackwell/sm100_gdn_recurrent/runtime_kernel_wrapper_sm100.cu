@@ -211,6 +211,189 @@ bool dispatch_gdn_recurrent(int num_v_heads,
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// DECODE SPLIT PATH
+// ---------------------------------------------------------------------------
+// Same convention, plus grid.z == SPLIT and `split_scratch` pre-offset per
+// (slot, hv) - i.e. exactly what `register_gdn_recurrent_sm100_task` emits for
+// the q_len == 1 && !zero_state branch.  This is what makes the port's
+// bit-exactness claim testable OUTSIDE the megakernel: `test_gdn_recurrent.py`
+// runs the golden wrapper and this one on identical inputs and does an integer
+// comparison of `out` AND the updated `state`, which is the same gate the
+// ferret loop that produced this kernel ran on every iteration.
+template <int NUM_V_HEADS,
+          int NUM_K_HEADS,
+          int HEAD_K_DIM,
+          int HEAD_V_DIM,
+          int QKV_STRIDE,
+          int BA_STRIDE,
+          int Z_STRIDE,
+          int OUT_STRIDE,
+          int SPLIT,
+          int DEPTH>
+__global__ void __launch_bounds__(WORKER_NUM_THREADS)
+    gdn_decode_split_wrapper(void const *qkv,
+                             void const *ba,
+                             void const *alog_dtbias,
+                             void *state,
+                             void const *z,
+                             void const *norm_w,
+                             void *out,
+                             void *split_scratch,
+                             int const *qo_indptr) {
+  int const hv = blockIdx.x;
+  int const slot = blockIdx.y;
+  int const tok0 = qo_indptr[slot];
+  constexpr int STATE_ELEMS = HEAD_V_DIM * HEAD_K_DIM;
+  constexpr int SCRATCH_STRIDE = HEAD_V_DIM + 8;
+  kernel::gdn_recurrent_sm100_decode_split_impl<bfloat16,
+                                                NUM_V_HEADS,
+                                                NUM_K_HEADS,
+                                                HEAD_K_DIM,
+                                                HEAD_V_DIM,
+                                                QKV_STRIDE,
+                                                BA_STRIDE,
+                                                Z_STRIDE,
+                                                OUT_STRIDE,
+                                                SPLIT,
+                                                DEPTH,
+                                                WORKER_NUM_THREADS>(
+      static_cast<bfloat16 const *>(qkv) + (size_t)tok0 * QKV_STRIDE,
+      static_cast<bfloat16 const *>(ba) + (size_t)tok0 * BA_STRIDE,
+      alog_dtbias,
+      static_cast<float *>(state) +
+          ((size_t)slot * NUM_V_HEADS + hv) * STATE_ELEMS,
+      static_cast<bfloat16 const *>(z) + (size_t)tok0 * Z_STRIDE +
+          (size_t)hv * HEAD_V_DIM,
+      norm_w,
+      static_cast<bfloat16 *>(out) + (size_t)tok0 * OUT_STRIDE +
+          (size_t)hv * HEAD_V_DIM,
+      static_cast<float *>(split_scratch) +
+          ((size_t)slot * NUM_V_HEADS + hv) * SCRATCH_STRIDE,
+      hv,
+      (int)blockIdx.z);
+}
+
+template <int NUM_V_HEADS,
+          int NUM_K_HEADS,
+          int HEAD_K_DIM,
+          int HEAD_V_DIM,
+          int QKV_STRIDE,
+          int BA_STRIDE,
+          int Z_STRIDE,
+          int OUT_STRIDE,
+          int SPLIT,
+          int DEPTH>
+void launch_gdn_decode_split(int num_slots,
+                             void const *qkv,
+                             void const *ba,
+                             void const *alog_dtbias,
+                             void *state,
+                             void const *z,
+                             void const *norm_w,
+                             void *out,
+                             void *split_scratch,
+                             int const *qo_indptr) {
+  size_t const smem_size =
+      kernel::gdn_decode_split_smem_bytes<bfloat16,
+                                          HEAD_K_DIM,
+                                          HEAD_V_DIM,
+                                          DEPTH,
+                                          WORKER_NUM_THREADS>();
+  auto kern = gdn_decode_split_wrapper<NUM_V_HEADS,
+                                       NUM_K_HEADS,
+                                       HEAD_K_DIM,
+                                       HEAD_V_DIM,
+                                       QKV_STRIDE,
+                                       BA_STRIDE,
+                                       Z_STRIDE,
+                                       OUT_STRIDE,
+                                       SPLIT,
+                                       DEPTH>;
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_size));
+  dim3 grid(NUM_V_HEADS, num_slots, SPLIT);
+  kern<<<grid,
+         WORKER_NUM_THREADS,
+         smem_size,
+         at::cuda::getCurrentCUDAStream()>>>(qkv,
+                                             ba,
+                                             alog_dtbias,
+                                             state,
+                                             z,
+                                             norm_w,
+                                             out,
+                                             split_scratch,
+                                             qo_indptr);
+}
+
+// (shape) x (split, depth).  Every shape gets splits 1/2/4 at depth 2; the
+// Qwen3.5 production shape additionally gets the wider splits and the deeper
+// rings, since that is the one the megakernel actually compiles.
+#define GDN_SPLIT_TRIPLE(F, HV, HK, DK, DV, QS, BS, ZS, OS)                    \
+  F(HV, HK, DK, DV, QS, BS, ZS, OS, 1, 2)                                      \
+  F(HV, HK, DK, DV, QS, BS, ZS, OS, 2, 2)                                      \
+  F(HV, HK, DK, DV, QS, BS, ZS, OS, 4, 2)
+
+#define GDN_DECODE_SPLIT_CASES(F)                                              \
+  GDN_SPLIT_TRIPLE(F, 32, 16, 128, 128, 8192, 64, 4096, 4096)                  \
+  F(32, 16, 128, 128, 8192, 64, 4096, 4096, 8, 2)                              \
+  F(32, 16, 128, 128, 8192, 64, 4096, 4096, 16, 2)                             \
+  F(32, 16, 128, 128, 8192, 64, 4096, 4096, 32, 2)                             \
+  F(32, 16, 128, 128, 8192, 64, 4096, 4096, 1, 3)                              \
+  F(32, 16, 128, 128, 8192, 64, 4096, 4096, 1, 4)                              \
+  F(32, 16, 128, 128, 8192, 64, 4096, 4096, 2, 4)                              \
+  F(32, 16, 128, 128, 8192, 64, 4096, 4096, 4, 4)                              \
+  GDN_SPLIT_TRIPLE(F, 32, 16, 128, 128, 12288, 64, 4096, 4096)                 \
+  GDN_SPLIT_TRIPLE(F, 8, 4, 128, 128, 2048, 16, 1024, 1024)                    \
+  GDN_SPLIT_TRIPLE(F, 4, 2, 32, 32, 256, 8, 128, 128)                          \
+  GDN_SPLIT_TRIPLE(F, 4, 4, 32, 32, 384, 8, 128, 128)                          \
+  GDN_SPLIT_TRIPLE(F, 4, 1, 32, 32, 192, 8, 128, 128)                          \
+  GDN_SPLIT_TRIPLE(F, 2, 1, 64, 64, 256, 4, 128, 128)
+
+bool dispatch_gdn_decode_split(int num_v_heads,
+                               int num_k_heads,
+                               int head_k_dim,
+                               int head_v_dim,
+                               int qkv_stride,
+                               int ba_stride,
+                               int z_stride,
+                               int out_stride,
+                               int split,
+                               int depth,
+                               int num_slots,
+                               void const *qkv,
+                               void const *ba,
+                               void const *alog_dtbias,
+                               void *state,
+                               void const *z,
+                               void const *norm_w,
+                               void *out,
+                               void *split_scratch,
+                               int const *qo_indptr) {
+#define GDN_DECODE_SPLIT_DISPATCH(HV, HK, DK, DV, QS, BS, ZS, OS, SP, DP)      \
+  if (num_v_heads == (HV) && num_k_heads == (HK) && head_k_dim == (DK) &&      \
+      head_v_dim == (DV) && qkv_stride == (QS) && ba_stride == (BS) &&         \
+      z_stride == (ZS) && out_stride == (OS) && split == (SP) &&               \
+      depth == (DP)) {                                                         \
+    launch_gdn_decode_split<HV, HK, DK, DV, QS, BS, ZS, OS, SP, DP>(           \
+        num_slots,                                                             \
+        qkv,                                                                   \
+        ba,                                                                    \
+        alog_dtbias,                                                           \
+        state,                                                                 \
+        z,                                                                     \
+        norm_w,                                                                \
+        out,                                                                   \
+        split_scratch,                                                         \
+        qo_indptr);                                                            \
+    return true;                                                               \
+  }
+  GDN_DECODE_SPLIT_CASES(GDN_DECODE_SPLIT_DISPATCH)
+#undef GDN_DECODE_SPLIT_DISPATCH
+  return false;
+}
+
 // Gating-scalar probe: the two dumped intermediates the fused task consumes but
 // never writes out.  Expressions are copied verbatim from the task impl so a
 // mismatch here localises to the CUDA math (expf / log1pf / sigmoid) rather
@@ -356,6 +539,87 @@ void gdn_recurrent_sm100(torch::Tensor qkv,         // [tokens, qkv_stride] bf16
   C10_CUDA_CHECK(cudaGetLastError());
 }
 
+// Decode fast path (q_len == 1, carried state) with the v-row split.  Same
+// tensors as `gdn_recurrent_sm100` plus the [slots, Hv, Dv + 8] fp32 scratch;
+// `zero_state` is not a parameter because this entry point IS the
+// !zero_state branch.
+void gdn_recurrent_decode_split_sm100(torch::Tensor qkv,
+                                      torch::Tensor ba,
+                                      torch::Tensor alog_dtbias,
+                                      torch::Tensor state,
+                                      torch::Tensor z,
+                                      torch::Tensor norm_w,
+                                      torch::Tensor out,
+                                      torch::Tensor split_scratch,
+                                      torch::Tensor qo_indptr,
+                                      int64_t num_k_heads,
+                                      int64_t split,
+                                      int64_t depth) {
+  TORCH_CHECK(qkv.dim() == 2 && qkv.is_contiguous() &&
+                  qkv.scalar_type() == at::kBFloat16,
+              "qkv must be a contiguous 2D bfloat16 tensor");
+  TORCH_CHECK(state.dim() == 4 && state.is_contiguous() &&
+                  state.scalar_type() == at::kFloat,
+              "state must be a contiguous [slots, Hv, Dv, Dk] fp32 tensor");
+  TORCH_CHECK(split_scratch.dim() == 3 && split_scratch.is_contiguous() &&
+                  split_scratch.scalar_type() == at::kFloat,
+              "split_scratch must be a contiguous [slots, Hv, Dv + 8] fp32 "
+              "tensor");
+  TORCH_CHECK(qo_indptr.dim() == 1 && qo_indptr.is_contiguous() &&
+                  qo_indptr.scalar_type() == at::kInt,
+              "qo_indptr must be a contiguous 1D int32 tensor");
+
+  int const num_slots = (int)state.size(0);
+  int const num_v_heads = (int)state.size(1);
+  int const head_v_dim = (int)state.size(2);
+  int const head_k_dim = (int)state.size(3);
+  TORCH_CHECK(split_scratch.size(0) == num_slots &&
+                  split_scratch.size(1) == num_v_heads &&
+                  split_scratch.size(2) == head_v_dim + 8,
+              "split_scratch must be [slots, num_v_heads, head_v_dim + 8]");
+  TORCH_CHECK(split >= 1 && head_v_dim % (int)split == 0,
+              "split must divide head_v_dim");
+
+  bool const dispatched =
+      dispatch_gdn_decode_split(num_v_heads,
+                                (int)num_k_heads,
+                                head_k_dim,
+                                head_v_dim,
+                                (int)qkv.size(1),
+                                (int)ba.size(1),
+                                (int)z.size(1),
+                                (int)out.size(1),
+                                (int)split,
+                                (int)depth,
+                                num_slots,
+                                qkv.data_ptr(),
+                                ba.data_ptr(),
+                                alog_dtbias.data_ptr(),
+                                state.data_ptr(),
+                                z.data_ptr(),
+                                norm_w.data_ptr(),
+                                out.data_ptr(),
+                                split_scratch.data_ptr(),
+                                qo_indptr.data_ptr<int>());
+  TORCH_CHECK(dispatched,
+              "Unsupported gdn decode-split configuration [num_v_heads=",
+              num_v_heads,
+              ", num_k_heads=",
+              num_k_heads,
+              ", head_k_dim=",
+              head_k_dim,
+              ", head_v_dim=",
+              head_v_dim,
+              ", qkv_stride=",
+              (int)qkv.size(1),
+              ", split=",
+              split,
+              ", depth=",
+              depth,
+              "]");
+  C10_CUDA_CHECK(cudaGetLastError());
+}
+
 void gdn_gating_probe(torch::Tensor ba,
                       torch::Tensor alog_dtbias,
                       torch::Tensor beta_out,
@@ -409,6 +673,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("zero_state"),
         pybind11::arg("num_k_heads"),
         pybind11::arg("o_debug") = c10::nullopt);
+  m.def("gdn_recurrent_decode_split_sm100",
+        &gdn_recurrent_decode_split_sm100,
+        "Decode fast path (q_len == 1, carried state) with the v-row split "
+        "across `split` cooperating tasks (SM100)",
+        pybind11::arg("qkv"),
+        pybind11::arg("ba"),
+        pybind11::arg("alog_dtbias"),
+        pybind11::arg("state"),
+        pybind11::arg("z"),
+        pybind11::arg("norm_w"),
+        pybind11::arg("out"),
+        pybind11::arg("split_scratch"),
+        pybind11::arg("qo_indptr"),
+        pybind11::arg("num_k_heads"),
+        pybind11::arg("split"),
+        pybind11::arg("depth"));
   m.def("gdn_gating_probe",
         &gdn_gating_probe,
         "Evaluate only the GDN gating scalars (beta, g) with the task's own "
