@@ -186,6 +186,79 @@ class KVCachePlan:
         return torch.zeros(self.num_slots, max_num_pages, block_size,
                            *entry_shape, dtype=dtype, device=device)
 
+    def allocate_pool(self, entry_layouts, max_num_pages: int,
+                      device: str = "cuda"):
+        """The entire KV cache as ONE allocation, plus typed views.
+
+        Physical layout: ``[num_slots, max_num_pages, target_page_bytes]``
+        raw bytes. A page id from the unified free list denotes page ``p``
+        of EVERY slot — that page at every layer — and only one group holds
+        a given page id at a time, so the views never alias live data and
+        no capacity is stranded.
+
+        A stream may carve its page into several COMPONENTS (a GQA stream
+        stores K and V; a latent stream stores one blob). Components are
+        laid out component-major inside the page: all of the page's entries
+        for component 0, then all for component 1, ... — so each component's
+        inner shape is exactly what a per-layer cache tensor looks like
+        today, and only the page stride differs.
+
+        entry_layouts: ``{spec_name: [(component_name, entry_shape, dtype),
+            ...]}``. The components' per-entry bytes must sum to at most the
+            stream's per_entry_bytes.
+        Returns ``(pool, views)``; ``views[group_id][component_name]`` is
+            shaped ``[num_slots, max_num_pages, entries_per_page,
+            *entry_shape]`` and aliases ``pool``, so keep ``pool`` alive.
+
+        EVERY view has page stride == target_page_bytes, which is >= its
+        packed entry span whenever the stream has more than one component or
+        any intra-page padding. Kernels must therefore address a page by its
+        stride and never assume pages sit back to back — see
+        ``page_stride_elems``."""
+        pool = torch.zeros(self.num_slots, max_num_pages,
+                           self.target_page_bytes, dtype=torch.uint8,
+                           device=device)
+        views = {}
+        for g in self.groups:
+            if g.spec_name not in entry_layouts:
+                raise KeyError(
+                    f"no entry layout given for stream '{g.spec_name}'")
+            byte_off = 0
+            comps = {}
+            for cname, entry_shape, dtype in entry_layouts[g.spec_name]:
+                entry_elems = 1
+                for d in entry_shape:
+                    entry_elems *= d
+                itemsize = torch.empty(0, dtype=dtype).element_size()
+                assert self.target_page_bytes % itemsize == 0, (
+                    f"page of {self.target_page_bytes} B does not divide "
+                    f"into {itemsize} B elements ('{g.spec_name}.{cname}')")
+                assert byte_off % itemsize == 0, (
+                    f"component '{g.spec_name}.{cname}' starts at byte "
+                    f"{byte_off}, not a multiple of its {itemsize} B element")
+                span = g.entries_per_page * entry_elems
+                byte_end = byte_off + span * itemsize
+                assert byte_end <= self.target_page_bytes, (
+                    f"stream '{g.spec_name}' components exceed the "
+                    f"{self.target_page_bytes} B page at '{cname}' "
+                    f"({byte_end} B)")
+                elem_off = byte_off // itemsize
+                comps[cname] = pool.view(dtype)[
+                    ..., elem_off:elem_off + span].view(
+                    self.num_slots, max_num_pages, g.entries_per_page,
+                    *entry_shape)
+                byte_off = byte_end
+            views[g.group_id] = comps
+        return pool, views
+
+    def page_stride_elems(self, dtype) -> int:
+        """Elements between consecutive pages of a pool view of ``dtype`` —
+        what a kernel must multiply a page id by. Always the full page, not
+        the view's packed entry span."""
+        itemsize = torch.empty(0, dtype=dtype).element_size()
+        assert self.target_page_bytes % itemsize == 0
+        return self.target_page_bytes // itemsize
+
 
 # ── planner ───────────────────────────────────────────────────────────────
 
@@ -217,6 +290,11 @@ def plan_kv_groups(
             ((s.preferred_block_size or default_block_size)
              // s.compress_ratio) * s.per_entry_bytes
             for s in specs)
+        # TODO(padding): this maximises block sizes but ignores how evenly
+        # each stream's entries tile the page, so a stream whose entry size
+        # does not divide the target pays for it. Padding is already
+        # measured per group, so a later pass can score several candidate
+        # page sizes and pick the one with the least total padding.
 
     per_spec = {s.name: _fit_block_size(s, target_page_bytes) for s in specs}
     group_size = _group_size([len(s.layer_ids) for s in specs])
