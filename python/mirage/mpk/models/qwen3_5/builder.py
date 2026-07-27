@@ -134,7 +134,18 @@ QUANTIZE_ROW_SPLIT = (0, -1, -1)
 # identical whether the other 15 rows hold residue or 15 different live prompts.
 #
 # Set False to rebuild the pre-M3-I8 graph (the A/B `base` arm).
-MOE_GATE_PADDING_ROWS = True
+#
+# DEFAULT OFF since 2026-07-27 (pre-registered consequence, M3-I8 F1 closure):
+# the per-iteration oracle measured steady-decode activation ABOVE the strict
+# min(256, 8*live) cap at bs1 and bs2 (mean 10.07 / 18.37 vs caps 8 / 16,
+# 32/32 iterations over; opt/m3i8/results/f1_closure/). The gate plainly
+# reduces activation (56.6 -> ~10 at bs1) and AC-3 stays byte-identical either
+# way (over-marking is a superset; it cannot corrupt a live row) -- but the
+# mechanism claim "activation == live top-k" is measurably wrong, and the
+# pre-registered falsifier consequence was OFF pending root-cause. Re-enable
+# only with a corrected mechanism statement (or a fixed gate) + a fresh
+# per-iteration oracle run.
+MOE_GATE_PADDING_ROWS = False
 
 
 def fp8_grid(output_size: int) -> int:
