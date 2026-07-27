@@ -83,3 +83,38 @@ d19c8d88; no lingering processes.
 93.7 / 184.8 / 361.0 / 641.1 tok/s at bs 1/2/4/8 (bs16 stays 274.7 e2e — wave degeneracy,
 owned by the I9 cap policy). Gaps to vLLM: 3.05x / 2.87x / 2.59x / 2.64x / 11.0x.
 End-to-end confirmation lands at the I7 integration gate.
+
+---
+
+## Post-verdict addendum (2026-07-27): codex completion review c1 = FAIL, and what closes it
+
+The independent completion reviewer refused the close on the pre-registered voiding rule —
+correctly. Three findings, resolved as follows:
+
+1. **F1 strict-cap exceedance at bs1/bs2 (9.6>8, 16.9>16).** `predictions.md` voids results on
+   any cap exceedance "until explained"; qualitative attribution to instrument granularity is
+   not closure. CLOSURE (next window, pre-registered here): per-ITERATION activated oracle at
+   bs1/bs2 on the v1 arm — bucket grouped-GEMM long-task counts by task-graph iteration;
+   report the distribution over the final 32 iterations (steady decode). Falsifier: ANY
+   steady-decode iteration with activated > 8.0 (bs1) / > 16.0 (bs2) beyond the ±0.3
+   calibration bound ⇒ F1 genuinely fired, the mechanism claim is wrong, v1's default goes
+   back OFF pending root-cause. Prediction: bs1 = 8.0 exactly at every steady iteration; bs2
+   ≤ 16 (collision-model mean ≈ 14.7); the per-iteration data must also reproduce the
+   full-run averages (9.6 / 16.9) when prefill iterations are folded back in.
+2. **The substitute oracle cannot verify the per-decode-row cap.** Same closure as (1): the
+   per-iteration bucketing IS the isolation the run-average lacked.
+3. **`run_report_v1.json` reports `overall_pass: false`.** This is the DESIGNED value, not a
+   regression: the harness's mechanical verdict is deliberately never modified (see the M2
+   accepted report `results/run_report_all_bs.json`, whose adjudication block states
+   "overall_pass / status below are the harness's own unwaived mechanical verdict"). The
+   window report is schema- and content-consistent with the M2 report: 9/10 `passed: true`
+   per batch size; the 5 non-pass entries are all p06-poem pos-60 with the byte-identical
+   signature (ref_top1=31000 ref_top2=81316 margin=0.0, engine 40581) covered by the M2
+   reviewer-endorsed adjudication (subject to user batch review). `bytediff_v1.json` proves
+   the window dumps are byte-identical to the adjudicated M2 dumps at every (prompt, bs).
+
+Interim safety argument for keeping v1 default-ON while F1 closes: gating only REMOVES
+padding-row marks; a live row's own top-k is computed from its own 256 logits either way, and
+the superset-marks state (base) is the configuration M2 proved byte-correct. An over-cap
+activation count can waste bandwidth; it cannot corrupt a live row. The AC-3 byte-diff above
+is the direct measurement of that claim.
