@@ -360,3 +360,24 @@ Stated in advance so the outcome is falsifiable rather than rationalised afterwa
 quantize and MoE w13 in *absolute* recoverable microseconds at bs1 once I2b and I8 are in. It is
 already rank 1 at bs16 by a wide margin; if it becomes rank 1 at every batch size, the ferret
 dispatch order simplifies to "GDN recurrent first, unconditionally".
+
+## Addendum 2 (2026-07-27): sampling-representativeness rationale (review c5)
+
+Two methodology choices are DELIBERATE and load-bearing; recorded here so they are judged as
+designed rather than as omissions:
+
+1. **96-step decode windows, not the full 1024.** Per-kernel steady-decode cost is
+   step-count-invariant for context-flat kernels (anchor-QC proves per-step task counts are
+   exact integers; GDN/GEMM/quantize stages measured context-flat to <1% across ctx 257-352
+   vs 801-896). The one context-SENSITIVE stage (attention) is priced from the deep-context
+   band (801-896) as its primary basis — i.e., near the END of the pinned 256+1024 workload's
+   context range, the conservative choice. A full-1024 capture at 96M slots would overflow
+   the profiler buffer ~7x (42.8M events for 96 steps at bs16); the two-window BRACKET
+   covers the pinned range without silent truncation.
+2. **bs16 attention window uses the staggered-context mix.** With mbt=16, request k's prefill
+   completes ~16k iterations after request 0's, so the pinned bs16 workload NEVER has a tight
+   per-slot context band mid-decode — per-slot contexts are permanently staggered (263-890 in
+   the capture). The staggered window is therefore the REPRESENTATIVE measurement of what
+   bs16 actually runs; a synchronized tight band would be synthetic. The row carries the
+   caveat because the spread makes the point-estimate noisier, not because it mismeasures the
+   workload.
