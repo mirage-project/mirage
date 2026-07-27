@@ -505,7 +505,6 @@ void register_mugraph(
             // tiling loop. Grouped variants share the same metadata
             // shape; m_indices selects the active expert per output tile.
             if (task_type == TASK_FP8_GEMM_DENSE_SM100 ||
-                task_type == TASK_FP8_GEMM_DENSE_FINEN_SM100 ||
                 task_type == TASK_DSV3_ROUTER_GATE_GEMV_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_SMALLM_SM100 ||
                 task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100 ||
@@ -1328,7 +1327,6 @@ TaskGraphResult print_task_graph(
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SM100 || "
-           "task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_FINEN_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_SMALLM_SM100 || "
            "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_LARGEM_SM100 || "
            "task.at(\"task_type\") == "
@@ -2005,8 +2003,6 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_FP8_GEMM_DENSE_SM100] = "TASK_FP8_GEMM_DENSE_SM100";
   task_type_to_name[TASK_DSV3_ROUTER_GATE_GEMV_SM100] =
       "TASK_DSV3_ROUTER_GATE_GEMV_SM100";
-  task_type_to_name[TASK_FP8_GEMM_DENSE_FINEN_SM100] =
-      "TASK_FP8_GEMM_DENSE_FINEN_SM100";
   task_type_to_name[TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100] =
       "TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100";
   task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =

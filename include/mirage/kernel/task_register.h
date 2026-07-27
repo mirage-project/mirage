@@ -185,8 +185,6 @@ public:
   // num_workers]. Selected by the builder at mbt==1.
   int register_dsv3_router_gate_gemv_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  // fine-N dense GEMM (mediumm body @ BN=16, NS=6). default-OFF
-  // MPK_DSV3_DENSE_FINEN.
   int register_fused_rmsnorm_quantize_fp8_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_fp8_group_gemm_largem_sm100_task(

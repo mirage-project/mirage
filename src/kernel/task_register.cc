@@ -6207,52 +6207,24 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
   // BM=BK=BN=128 (SA=SB=16384B); NS7/NS8 overflow the dynamic-smem budget =>
   // runtime Illegal-Memory-Access, not a silent fallback.
   int dense_ns = ns_default;
-  if (std::string(namespace_name) == "fp8_gemm_dense_finen") {
-    // ABI-shrink (-rdc=true relocatable spill fix): template-promote the
-    // per-variant compile-time constants N/K/num_workers and drop the two
-    // unused int args (M/runtime_m and the output row stride). The finen M=1
-    // GEMV keeps the five operand pointers + the per-worker request_id as
-    // direct args. This shrinks the task call from 11 args to 6, reducing the
-    // device register-arg overflow that the -rdc=true megakernel pays at the
-    // _execute_task->finen call (the entry-LDL + caller-save decode spill).
-    // smallm/mediumm keep the 11-arg ABI below, so the default build (finen
-    // gated MPK_DSV3_DENSE_FINEN) stays byte-identical.
-    code.e("kernel::$::$<$, $, $, $, $>(",
-           namespace_name,
-           fn_name,
-           bn,
-           dense_ns,
-           N,
-           K,
-           num_workers);
-    code.e("    static_cast<const "
-           "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
-    code.e("    static_cast<const "
-           "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
-    code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
-    code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
-    code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
-    code.e("    task_desc->task_metadata.request_id);");
-  } else {
-    code.e("kernel::$::$<$, $>(", namespace_name, fn_name, bn, dense_ns);
-    code.e("    static_cast<const "
-           "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
-    code.e("    static_cast<const "
-           "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
-    code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
-    code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
-    code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
-    code.e("    runtime_m_,");
-    code.e("    $,", N);
-    code.e("    $,", K);
-    code.e("    task_desc->task_metadata.request_id,");
-    code.e("    $,", num_workers);
-    // Output row stride (elements): the view-safe dtensor.stride[0] of the
-    // output. -1 sentinel = dense (kernel uses N). Only differs from N when
-    // the output is a narrow column view (e.g. the TP2 gate/up halves) —
-    // invisible at M=1, row-corrupting at multi-row without it.
-    code.e("    $);", out_row_stride);
-  }
+  code.e("kernel::$::$<$, $>(", namespace_name, fn_name, bn, dense_ns);
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
+  code.e("    static_cast<const "
+         "CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[2]),");
+  code.e("    static_cast<const float*>(task_desc->input_ptrs[3]),");
+  code.e("    static_cast<__nv_bfloat16*>(task_desc->output_ptrs[0]),");
+  code.e("    runtime_m_,");
+  code.e("    $,", N);
+  code.e("    $,", K);
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $,", num_workers);
+  // Output row stride (elements): the view-safe dtensor.stride[0] of the
+  // output. -1 sentinel = dense (kernel uses N). Only differs from N when
+  // the output is a narrow column view (e.g. the TP2 gate/up halves) —
+  // invisible at M=1, row-corrupting at multi-row without it.
+  code.e("    $);", out_row_stride);
   code.e("}");
   return self->register_task_variant(task_type, code.to_string());
 }
@@ -6290,9 +6262,6 @@ int TaskRegister::register_fp8_gemm_dense_sm100_task(
       out_row_stride);
 }
 
-// fine-N dense GEMM = the mediumm body re-tiled to BN=16 (single-CTA-per-tile,
-// NE=4 baked in the finen fn) + NS default 6. The BN here (16) MUST equal the
-// tma.cuh TASK_FP8_GEMM_DENSE_FINEN_SM100 B-box (=16).
 // DSv3 router-gate BF16 GEMV.
 // Raw-pointer ABI (no TMA): hidden[M,K] @ W_gate[N,K]^T → logits[M,N] BF16.
 // 2 inputs (hidden, W_gate), 1 real output (logits) — NOT store_in_dmem.
