@@ -4495,8 +4495,8 @@ int TaskRegister::register_mla_prefill_tp8_chunked_sm100_task(
   // mscale_all_dim=1.0}; vLLM/SGLang apply yarn_get_mscale(40, 1.0)^2
   // unconditionally and the cos/sin tables carry no mscale (ratio 1.0), so
   // the whole correction belongs here. The bare 1/sqrt(192) this register
-  // used previously under-scaled prefill attention by 1.874x vs decode on
-  // the SAME cache (graph-audit finding #1, 2026-06-12).
+  // used previously under-scaled prefill attention relative to decode on
+  // the SAME cache.
   float const mscale = 0.1f * 1.0f * logf(40.0f) + 1.0f;
   float sm_scale = (1.0f / sqrtf(192.0f)) * mscale * mscale;
   float sm_scale_log2 = sm_scale * 1.44269504089f;
@@ -6206,22 +6206,11 @@ static int register_fp8_gemm_dense_variant(TaskRegister *self,
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   }
-  // NS = K-pipeline depth (async smem stages). Default 3. Deepening to 4-6
-  // hides more weight-TMA latency on the single-wave M=1 decode GEMMs (the L6
-  // single-wave-latency bottleneck) — numerically identical (bit-exact), so
-  // token-identical. Gated MPK_DSV3_DENSE_NS (default 3 => byte-identical).
-  // HARD CAP 6: staging smem = NS*(SA+SB) = NS*32KB at BM=BK=BN=128
-  // (SA=SB=16384B); NS6=192KB fits the ~205KB dynamic-smem budget, but
-  // NS7=224KB / NS8=256KB OVERFLOW => runtime Illegal-Memory-Access (NOT a
-  // silent fallback). So clamp [2,6]; this is a sweepable knob, not a blind
-  // bump.
+  // NS = K-pipeline depth (async smem stages), fixed at the production
+  // default. Bound [2,6]: staging smem = NS*(SA+SB) = NS*32KB at
+  // BM=BK=BN=128 (SA=SB=16384B); NS7/NS8 overflow the dynamic-smem budget =>
+  // runtime Illegal-Memory-Access, not a silent fallback.
   int dense_ns = ns_default;
-  if (char const *e = std::getenv("MPK_DSV3_DENSE_NS")) {
-    int v = atoi(e);
-    if (v >= 2 && v <= 6) {
-      dense_ns = v;
-    }
-  }
   if (std::string(namespace_name) == "fp8_gemm_dense_finen") {
     // ABI-shrink (-rdc=true relocatable spill fix): template-promote the
     // per-variant compile-time constants N/K/num_workers and drop the two
@@ -6306,10 +6295,9 @@ int TaskRegister::register_fp8_gemm_dense_sm100_task(
 }
 
 // fine-N dense GEMM = the mediumm body re-tiled to BN=16 (single-CTA-per-tile,
-// NE=4 baked in the finen fn) + NS default 6. Standalone-validated (ferret
-// v003, qkv_a 34.8->20.5us 1.70x). default-OFF MPK_DSV3_DENSE_FINEN. The BN
-// here (16) MUST equal the tma.cuh TASK_FP8_GEMM_DENSE_FINEN_SM100 B-box (=16).
-// DSv3 router-gate BF16 GEMV (ferret workspace4/kernel.cuh v002).
+// NE=4 baked in the finen fn) + NS default 6. The BN here (16) MUST equal the
+// tma.cuh TASK_FP8_GEMM_DENSE_FINEN_SM100 B-box (=16).
+// DSv3 router-gate BF16 GEMV.
 // Raw-pointer ABI (no TMA): hidden[M,K] @ W_gate[N,K]^T → logits[M,N] BF16.
 // 2 inputs (hidden, W_gate), 1 real output (logits) — NOT store_in_dmem.
 // params: [M, N, K, num_workers]. Grid = (num_workers,1,1), blockDim=512.
@@ -6396,22 +6384,11 @@ static int
     code.e("int runtime_m_ = active_rows_ < $ ? active_rows_ : $;", M, M);
     code.e("if (runtime_m_ <= 0) return;");
   }
-  // NS = K-pipeline depth (async smem stages). Default 3. Deepening to 4-6
-  // hides more weight-TMA latency on the single-wave M=1 decode GEMMs (the L6
-  // single-wave-latency bottleneck) — numerically identical (bit-exact), so
-  // token-identical. Gated MPK_DSV3_DENSE_NS (default 3 => byte-identical).
-  // HARD CAP 6: staging smem = NS*(SA+SB) = NS*32KB at BM=BK=BN=128
-  // (SA=SB=16384B); NS6=192KB fits the ~205KB dynamic-smem budget, but
-  // NS7=224KB / NS8=256KB OVERFLOW => runtime Illegal-Memory-Access (NOT a
-  // silent fallback). So clamp [2,6]; this is a sweepable knob, not a blind
-  // bump.
+  // NS = K-pipeline depth (async smem stages), fixed at the production
+  // default. Bound [2,6]: staging smem = NS*(SA+SB) = NS*32KB at
+  // BM=BK=BN=128 (SA=SB=16384B); NS7/NS8 overflow the dynamic-smem budget =>
+  // runtime Illegal-Memory-Access, not a silent fallback.
   int dense_ns = 3;
-  if (char const *e = std::getenv("MPK_DSV3_DENSE_NS")) {
-    int v = atoi(e);
-    if (v >= 2 && v <= 6) {
-      dense_ns = v;
-    }
-  }
   code.e("kernel::$::$<$, $>(", namespace_name, fn_name, 128, dense_ns);
   code.e("    static_cast<const "
          "CUtensorMap*>(task_desc->input_tma_desc_ptrs[0][0]),");
@@ -7304,7 +7281,7 @@ int TaskRegister::register_eagle3_commit_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_EAGLE3_COMMIT, code.to_string());
 }
 
-// ============ MLA-MTP TP variants (ferret-derived, no-PDL) ============
+// ============ MLA-MTP TP variants (no-PDL) ============
 //
 // Three variants (TP=2/4/8) share structure but differ:
 //   - NUM_HEADS hardcoded inside namespace (64/32/16) → not a runtime param

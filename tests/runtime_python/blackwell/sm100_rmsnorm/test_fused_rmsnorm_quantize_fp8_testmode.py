@@ -1,4 +1,4 @@
-"""Test-mode coverage for ``PersistentKernel.fused_rmsnorm_quantize_fp8_layer``.
+"""Test-mode coverage for ``deepseek_v3.tasks.fused_rmsnorm_quantize_fp8_layer``.
 
 The fused task does RMSNorm (eps hard-coded 1e-6f) then a per-128-group
 BF16->FP8 block quantize of the normalized row, emitting:
@@ -25,6 +25,7 @@ import torch
 
 import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
+from mirage.mpk.models.deepseek_v3 import tasks as dsv3_tasks
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 COMMON_DIR = os.path.abspath(os.path.join(THIS_DIR, "../common"))
@@ -105,7 +106,8 @@ def _run_case(bs: int, scale_ue8m0: bool, emit_bf16: bool) -> dict:
     out_fp8_dt = pk.attach_input(out_fp8, name="out_fp8")
     out_scale_dt = pk.attach_input(out_scale, name="out_scale")
 
-    pk.fused_rmsnorm_quantize_fp8_layer(
+    dsv3_tasks.fused_rmsnorm_quantize_fp8_layer(
+        pk,
         input=x_dt,
         weight=w_dt,
         output_bf16=out_bf16_dt,
