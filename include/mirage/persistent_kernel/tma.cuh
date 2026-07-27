@@ -1884,11 +1884,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
-    case TASK_MLA_MTP_DECODE_TP2_SM100:
-    case TASK_MLA_MTP_DECODE_TP4_SM100:
     case TASK_MLA_MTP_DECODE_TP8_SM100: {
-      // TP variants: Q box height = rows consumed by one CTA. TP2 splits
-      // its 64 local heads into 2 head groups, so each CTA loads 32 rows.
+      // Q box height = rows consumed by one CTA (16 local heads).
       // KV box height = TILE_S=128 (the kernel bakes TILE_S=128 and sets
       // expect_tx = TILE_S*BK*2, so the TMA box must deliver exactly that many
       // bytes per cp.async.bulk or the mbarrier is never satisfied →
@@ -1902,10 +1899,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       constexpr CUtensorMapL2promotion l2 = CU_TENSOR_MAP_L2_PROMOTION_NONE;
       constexpr CUtensorMapFloatOOBfill oob = CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE;
 
-      int num_heads =
-          (task_desc.task_type == TASK_MLA_MTP_DECODE_TP2_SM100)   ? 32
-          : (task_desc.task_type == TASK_MLA_MTP_DECODE_TP4_SM100) ? 32
-                                                                   : 16;
+      int num_heads = 16;
       if (param_id == 0) {
         // Q: may be flat [mbt, num_heads*D_K] (2D) or per-head [mbt, num_heads,
         // D_K] (3D — produced when the upstream q_b GEMM emits the BMM
@@ -2365,8 +2359,6 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       // no TMA needed
       break;
     }
-    case TASK_MLA_MTP_DECODE_TP2_SM100:
-    case TASK_MLA_MTP_DECODE_TP4_SM100:
     case TASK_MLA_MTP_DECODE_TP8_SM100: {
       // Q (input 0) and KV (input 1) each get 1 TMA desc
       for (size_t param_id = 0; param_id < 2; param_id++) {

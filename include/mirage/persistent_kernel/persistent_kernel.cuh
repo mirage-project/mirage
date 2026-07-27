@@ -989,15 +989,14 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       // Dispatch trace: D=dispatch start, F=finish
       bool _trace_t =
           task_desc->task_type == 275 || task_desc->task_type == 276 ||
-          task_desc->task_type == 277 || task_desc->task_type == 287 ||
-          task_desc->task_type == 288 || task_desc->task_type == 248 ||
-          task_desc->task_type == 249 || task_desc->task_type == 302 ||
-          task_desc->task_type == 278 || task_desc->task_type == 154 ||
-          task_desc->task_type == 280 || task_desc->task_type == 118 ||
-          task_desc->task_type == 281 || task_desc->task_type == 253 ||
-          task_desc->task_type == 258 || task_desc->task_type == 259 ||
-          task_desc->task_type == 261 || task_desc->task_type == 262 ||
-          task_desc->task_type == 101;
+          task_desc->task_type == 277 || task_desc->task_type == 288 ||
+          task_desc->task_type == 248 || task_desc->task_type == 249 ||
+          task_desc->task_type == 302 || task_desc->task_type == 278 ||
+          task_desc->task_type == 154 || task_desc->task_type == 280 ||
+          task_desc->task_type == 118 || task_desc->task_type == 281 ||
+          task_desc->task_type == 253 || task_desc->task_type == 258 ||
+          task_desc->task_type == 259 || task_desc->task_type == 261 ||
+          task_desc->task_type == 262 || task_desc->task_type == 101;
 #ifdef MPK_ENABLE_VERBOSE
       if (threadIdx.x == 0) {
         printf("[worker] _execute_task EXECUTE_TASK %d\n",

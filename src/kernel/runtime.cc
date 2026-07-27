@@ -462,12 +462,9 @@ void register_mugraph(
               task.task_metadata.request_id = bid.y;
               task.task_metadata.merge_task_offset = bid.z;
             }
-            // MLA-MTP TP variants: Python layer packs decode metadata into
-            // block_x. TP2 additionally packs a head-group id, TP4 packs
-            // v_half in the low bit, and batch is stored in request_id.
-            if (task_type == TASK_MLA_MTP_DECODE_TP2_SM100 ||
-                task_type == TASK_MLA_MTP_DECODE_TP4_SM100 ||
-                task_type == TASK_MLA_MTP_DECODE_TP8_SM100) {
+            // MLA-MTP TP8 decode: Python layer packs decode metadata into
+            // block_x; batch is stored in request_id.
+            if (task_type == TASK_MLA_MTP_DECODE_TP8_SM100) {
               task.task_metadata.kv_idx = bid.x;     // (gi*sk+si) or packed
               task.task_metadata.request_id = bid.y; // batch
             }
@@ -1316,8 +1313,6 @@ TaskGraphResult print_task_graph(
     // MLA kernels (outside SM100_TMA range but need TMA)
     code.e("if (task.at(\"task_type\") == TASK_MLA_DECODE_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_SM100 || "
-           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP2_SM100 || "
-           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP4_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP8_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_CHUNKED_SM100 || "
@@ -1979,12 +1974,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_MLA_UNIFIED_SM100] = "TASK_MLA_UNIFIED_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_SM100] = "TASK_MLA_MTP_DECODE_SM100";
   task_type_to_name[TASK_MLA_MTP_REDUCE_SM100] = "TASK_MLA_MTP_REDUCE_SM100";
-  task_type_to_name[TASK_MLA_MTP_DECODE_TP2_SM100] =
-      "TASK_MLA_MTP_DECODE_TP2_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_TP_REDUCE_SM100] =
       "TASK_MLA_MTP_DECODE_TP_REDUCE_SM100";
-  task_type_to_name[TASK_MLA_MTP_DECODE_TP4_SM100] =
-      "TASK_MLA_MTP_DECODE_TP4_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_TP8_SM100] =
       "TASK_MLA_MTP_DECODE_TP8_SM100";
   task_type_to_name[TASK_MLA_KV_APPEND_SM100] = "TASK_MLA_KV_APPEND_SM100";
