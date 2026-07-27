@@ -176,6 +176,74 @@ def test_allocate_slots_stacked_shape_and_uniform_block_size_guard():
         mixed_plan.allocate_slots(entry_shape=(4,), max_num_pages=16)
 
 
+def test_allocate_pool_shares_one_allocation_across_streams():
+    # Two streams with different entry sizes read the SAME bytes: a page id
+    # is owned by one stream at a time, so nothing is stranded. Entries that
+    # do not tile the page leave bounded padding, and every view is strided
+    # by the whole page rather than by its packed entry span.
+    specs = [
+        KVSpec("main", per_entry_bytes=584, layer_ids=(0, 1),
+               compress_ratio=4, preferred_block_size=256),
+        KVSpec("indexer", per_entry_bytes=132, layer_ids=(2, 3),
+               compress_ratio=4, preferred_block_size=256),
+    ]
+    plan = plan_kv_groups(specs)
+    assert plan.target_page_bytes == 37376
+    by = {g.spec_name: g for g in plan.groups}
+    assert by["main"].entries_per_page == 64        # 584 B x 64, no padding
+    assert by["indexer"].entries_per_page == 283    # 132 B x 283, 20 B spare
+
+    pages = 8
+    pool, views = plan.allocate_pool(
+        {"main": [("kv", (292,), torch.bfloat16)],
+         "indexer": [("kv", (66,), torch.bfloat16)]},
+        max_num_pages=pages, device="cpu")
+    assert tuple(pool.shape) == (plan.num_slots, pages, 37376)
+    main = views[by["main"].group_id]["kv"]
+    idx = views[by["indexer"].group_id]["kv"]
+    assert tuple(main.shape) == (plan.num_slots, pages, 64, 292)
+    assert tuple(idx.shape) == (plan.num_slots, pages, 283, 66)
+    # Both are views on the one allocation, not copies of it.
+    assert main.data_ptr() == idx.data_ptr() == pool.data_ptr()
+    # One addressing rule for padded and unpadded streams alike.
+    stride = plan.page_stride_elems(torch.bfloat16)
+    assert stride == 37376 // 2
+    assert main.stride(1) == idx.stride(1) == stride
+    assert idx.stride(1) > 283 * 66     # strictly wider than packed
+
+    with _raises(KeyError):
+        plan.allocate_pool({"main": [("kv", (292,), torch.bfloat16)]},
+                           max_num_pages=pages, device="cpu")
+
+
+def test_allocate_pool_multi_component_page_shares_one_page_id():
+    # A GQA stream stores K and V. They are two COMPONENTS of one page, so a
+    # single page id covers both — no second page table, no second draw from
+    # the free list. 8 kv heads x 64 dim bf16 => 1024 B per token per
+    # component, 2048 B for K+V.
+    spec = KVSpec("gqa", per_entry_bytes=2048, layer_ids=(0, 1),
+                  preferred_block_size=64)
+    plan = plan_kv_groups([spec])
+    (g,) = plan.groups
+    assert plan.target_page_bytes == 64 * 2048
+    assert g.entries_per_page == 64
+
+    pool, views = plan.allocate_pool(
+        {"gqa": [("k", (8, 64), torch.bfloat16),
+                 ("v", (8, 64), torch.bfloat16)]},
+        max_num_pages=8, device="cpu")
+    k, v = views[g.group_id]["k"], views[g.group_id]["v"]
+    # Each component keeps exactly the per-layer cache shape used today.
+    assert tuple(k.shape) == tuple(v.shape) == (2, 8, 64, 8, 64)
+    # V starts halfway into the page; both are page-strided by the whole page.
+    assert v.data_ptr() - pool.data_ptr() == 64 * 1024
+    assert k.stride(1) == v.stride(1) == plan.page_stride_elems(torch.bfloat16)
+    # Writing one component must not disturb the other.
+    k.fill_(1.0)
+    v.fill_(2.0)
+    assert (k == 1.0).all() and (v == 2.0).all()
+
+
 def test_plan_uniform_kv_groups_matches_manual_single_spec():
     manual = plan_kv_groups([
         KVSpec("gqa", per_entry_bytes=2048, layer_ids=tuple(range(36)),
