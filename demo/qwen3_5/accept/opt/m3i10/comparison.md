@@ -4,11 +4,12 @@ What each decode step costs in vLLM 0.25.1 at our exact workload and shapes, map
 stage onto MPK task families, so the remaining 4× gap can be spent as per-kernel optimization
 targets instead of guesses.
 
-**Headline.** MPK is slower than the corresponding vLLM kernel in **13 of 15 stages**. The gap is
-not concentrated in one place — it is 2×–11× spread across quantize, the MoE GEMMs, the dense fp8
-GEMMs, the GDN recurrent kernel and attention. MPK wins decisively in exactly one stage
-(norms/RoPE/glue, 3–4× faster, because it fuses them) and is at parity in two more. The one gap
-that *grows* with batch size is the GDN recurrent kernel: 7.4× at bs1, 10.8× at bs16.
+**Headline.** MPK is slower than the corresponding vLLM kernel in **13 of 15 stages** at bs16
+(12 at bs1, 13 at bs8, 12 at every batch size, 14 at at least one). The gap is not concentrated in
+one place — it is 2×–11× spread across quantize, the MoE GEMMs, the dense fp8 GEMMs, the GDN
+recurrent kernel and attention. MPK wins decisively in exactly one stage (norms/RoPE/glue, 3–4×
+faster, because it fuses them) and is at parity in two more. The one gap that *grows* with batch
+size is the GDN recurrent kernel: 7.4× at bs1, 10.8× at bs16.
 
 | | bs1 | bs8 | bs16 |
 |---|---:|---:|---:|
@@ -190,6 +191,15 @@ RMSNorm(o)·w ⊙ silu(z) with the fp8 quantize fused in.
 Ranked by absolute step time recoverable, worst first. Full detail with shapes and per-call
 targets in `ferret_targets.json`.
 
+`ferret_targets.json` covers **all 15 stages**, with no stage left implicit: **9 real target
+specs** (shapes, per-call baseline µs, proposed target µs, roofline reading, expected step gain)
+and **6 machine-readable disposition rows** — `below-threshold` for sampling/argmax, MoE combine
+and the bs16-only SiLU-mul deficit, `structural-not-kernel` for the embedding, and `mpk-ahead` for
+the two stages MPK already wins. Its `coverage` block asserts that targets ∪ dispositions equals
+every row of `tables/comparison_by_stage.csv` exactly once, and
+`scripts/extend_ferret.py` re-checks that assertion (and every µs in the added rows, read from the
+CSV rather than typed) on each regeneration.
+
 | # | MPK task | ratio bs1 / bs8 / bs16 | gap µs/step bs1 / bs16 | character |
 |---|---|---|---|---|
 | 1 | 237 GDN recurrent | 7.44 / 9.10 / **10.76** | 1053 / **4516** | the only gap that grows with batch |
@@ -367,17 +377,35 @@ here, not 1.3×. SGLang's DeepGEMM already takes 13 % of it with a different alg
 
 ## 8. Caveats
 
-1. **MPK numbers are not re-measured and are at a different geometry.** They are the committed
-   M3-I1 wall spans at the AC-3 workload (24–68 input tokens, `max_seq_length` 132). Only
-   attention and KV traffic are context-sensitive, and §5 bounds that at ~8 %. Every other stage
-   depends on token count and batch size, not context.
-2. **MPK's dense and MoE stages already do bs16-worth of work at bs1** (`max_num_batched_tokens`
+1. **The MPK column is stale in two ways, and a re-measure is specified but not yet run.** It is
+   M3-I1's capture at the AC-3 geometry (24–68 input tokens, `max_seq_length` 132) **and** it
+   predates both the M3-I8 MoE router gate — now `MOE_GATE_PADDING_ROWS = True`, default-ON at
+   HEAD since `96eff01` — and the M3-I2b quantize/width fixes. **`remeasure_spec.md`** is the run
+   matrix that closes it: arm A at matched 256/1024 geometry plus arm B at M3-I1's exact geometry
+   (so a moved number can be attributed to the code rather than to the geometry), bs {1, 8, 16},
+   3 profiled + 3 unprofiled reps, **~75–90 GPU-minutes** for the required tier. It also lists what
+   the running M3-I9 window's traces would have to contain to be harvested instead of scheduling
+   new time.
+
+   **Robust to the re-measure** — these should not move: the GDN-recurrent growth ratio
+   7.44 → 9.10 → 10.76×, since nothing in I8 or I2b touches task 237 and SGLang independently runs
+   the identical kernel at 164.9 vs vLLM's 163.6 µs/step; the dense-fp8 flat ratio ~2.1× at every
+   batch size across 160 untouched call sites; lm_head at 84 % of the HBM roof (arithmetic from
+   shapes plus a vLLM-side measurement, no MPK term at all); norms/RoPE/glue as an MPK win.
+
+   **May reshuffle:** the quantize rank (M3-I2b targeted exactly that stage and found 93.75 % of
+   its work redundant), the MoE w13/w2 ranks (the I8 gate cuts per-layer `moe_w13` wall span
+   76.8 → 34.8 µs at bs1, and much less at bs16), the shared-expert-gate bs8 point, and every
+   absolute `step_gain_if_met_us` — and with them the overall 4.28× / 3.86× / 4.10×, since the MPK
+   step denominator moves too. The *mechanism* conclusions survive either way, because they are
+   statements about vLLM's side and about physics: quantize moving ~1 MB at 4284× off roofline
+   stays a fusion/width problem rather than a kernel problem whatever MPK's number becomes.
+2. **Only attention is context-sensitive.** §5 bounds it at +8.3 % from ctx ≈ 260 to ctx 556–896.
+   Every other stage depends on token count and batch size, not context.
+3. **MPK's dense and MoE stages already do bs16-worth of work at bs1** (`max_num_batched_tokens`
    = 16). That is a property of the current MPK scheduler, not of the kernels, and it is M3-I1
    backlog items 2 and 4. The per-kernel ratios at bs1 therefore mix a kernel-quality gap with a
    padding gap; at bs16 they are closer to pure kernel quality.
-3. **M3-I8's MoE improvements are not in these MPK numbers.** `pertask_by_bs.csv` is the M3-I1
-   baseline. M3-I8's v2b already cut per-layer `moe_w13` wall span from 76.8 to 34.8 µs at bs1.
-   Rank 3's true remaining gap is smaller than the table shows at bs1.
 4. **The two sides use different overlap conventions.** vLLM per-stage numbers are sums of kernel
    durations (== union within every stage except the shared expert); MPK numbers are unions across
    128 workers. Neither sums to the step: vLLM's stage sums are 145 % of its step (two streams plus
@@ -405,7 +433,8 @@ In this directory:
 | `tables/prefill_bs{1,8,16}_kernels.csv` | short-context window (ctx ≈ 260), used for the attention context bound |
 | `tables/ordinal_bs1_cutlass.json` | per-GEMM-site cost of all 160 CUTLASS fp8 calls |
 | `tables/profile_meta.json` | engine assertions, versions, per-rep throughput, GPU clocks, co-tenant checks |
-| `ferret_targets.json` | the dispatch list: kernel, shapes, baseline µs, target µs, roofline, expected step gain |
+| `ferret_targets.json` | the dispatch list, total coverage of all 15 stages: 9 target specs (kernel, shapes, baseline µs, target µs, roofline, expected step gain) + 6 disposition rows + a `coverage` assertion |
+| `remeasure_spec.md` | the GPU window needed to regenerate the MPK column at matched geometry on current HEAD: run matrix, capture invocation, normalisation, analysis commands, M3-I9 harvest checklist, ~75–90 GPU-min |
 | `ncu/NCU_UNAVAILABLE.md` | why Nsight Compute could not run on this box, and what was tried |
 | `ncu/roofline.csv`, `ncu/roofline.json` | the analytic memory-roofline substitute for NCU's SOL section |
 | `sglang/probe_bs1.json` | SGLang feasibility result: versions, boot time, throughput reps |
