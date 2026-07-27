@@ -1,0 +1,3449 @@
+{
+ "arm": {
+  "bs": 4,
+  "mbt": 16,
+  "cap": null,
+  "compile_msl": 132
+ },
+ "prompts": "p07-format,p05-cuda,p08-science,p10-logic",
+ "target": "p10-logic",
+ "target_slot": 3,
+ "target_plen": 43,
+ "plens": [
+  33,
+  36,
+  40,
+  43
+ ],
+ "state_at": 0,
+ "points": [
+  {
+   "position": 0,
+   "runtime_msl": 44,
+   "wall_s": 2.005,
+   "steps": [
+    43,
+    43,
+    43,
+    43
+   ],
+   "emitted": 8160,
+   "ref_token": 8160,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    8
+   ],
+   "row_used": 8,
+   "sim_iterations": 13,
+   "sim_last_iter": {
+    "iteration": 12,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     42
+    ]
+   },
+   "engine_top8": [
+    [
+     8160,
+     27.5
+    ],
+    [
+     90700,
+     25.625
+    ],
+    [
+     1919,
+     19.5
+    ],
+    [
+     760,
+     18.5
+    ],
+    [
+     9764,
+     16.5
+    ],
+    [
+     81266,
+     16.375
+    ],
+    [
+     3733,
+     15.8125
+    ],
+    [
+     40,
+     15.625
+    ]
+   ],
+   "engine_margin_top1_top2": 1.875,
+   "row_sha": "5e06bb270c2ad7e9",
+   "ref_topk": [
+    [
+     8160,
+     27.25
+    ],
+    [
+     90700,
+     25.25
+    ],
+    [
+     1919,
+     19.0
+    ],
+    [
+     760,
+     17.75
+    ]
+   ],
+   "engine_at_ref_ids": [
+    27.5,
+    25.625,
+    19.5,
+    18.5
+   ],
+   "ref_margin_top1_top2": 2.0,
+   "state_sha": {
+    "conv": [
+     "f3e064c15cd6c1ef",
+     "88d7e213357ba16f",
+     "169189d76ccd439e",
+     "a5a91a88373b2d40",
+     "aa09e778b07c401d",
+     "e76ff7d5302607e2",
+     "1c0494fc7217b582",
+     "6153764ec12811d5",
+     "09ab71ccb4a68a10",
+     "7beac5c4ef18c3c9",
+     "dee09886b6db2221",
+     "026f3f7567e579a6",
+     "e44cf517ee7130e2",
+     "09f5c83768aebd54",
+     "92985fae2329e5c4",
+     "f3484092165d3849",
+     "d69bc605c8051c99",
+     "9ed1ccac1e58f839",
+     "bc2c219b9b133a98",
+     "f815f02832f302e1",
+     "76d67f1fd68128cd",
+     "1b75e29ee0f24552",
+     "c1bca83b977e8807",
+     "1ab10860e8a0e64d",
+     "cfe7b0dd49761e95",
+     "de6630d66bdff381",
+     "ec94ea5d3e5825af",
+     "954f5d5f471dff6b",
+     "c67f7a0eb8cf6c09",
+     "0d24f63699b3234d"
+    ],
+    "recur": [
+     "a895b638d260c465",
+     "6cebbf7708781994",
+     "4e953d7ccc5ff08f",
+     "5762d81b7b97f83a",
+     "870eba870db62731",
+     "53dd67722e5521f3",
+     "6fda55313ecfd755",
+     "a769d44dc6b88e0f",
+     "90bed5835f43bd77",
+     "8d1a3a56d06c9324",
+     "ab819c321c4a76de",
+     "37f64ab6847c8e80",
+     "2972c0580211154c",
+     "5da37df8bfda8097",
+     "9c4ebaabd09d0657",
+     "198940092f3711cc",
+     "07c136b19eed1813",
+     "a386f4b70d34981f",
+     "848378e376004459",
+     "97b3ee037f3d6ba9",
+     "017a70541c582190",
+     "1acce0e6bee356f9",
+     "1f58afd2929f1ab3",
+     "df36928ef01e4ef5",
+     "65e9d478e9ff5a91",
+     "220b6417ea4825dd",
+     "ce2ec083f0ad733a",
+     "dc6f98c5284b9f23",
+     "5fa40c1234f3860b",
+     "7a3d1cc03d5ae4f9"
+    ],
+    "k": [
+     "e45d9414eb2ac160",
+     "fdefd04cbd1bf25e",
+     "0d9ab1decb7be724",
+     "58360cd42478e39e",
+     "ccea837920db09e8",
+     "586c90a684a96185",
+     "78db8186b32a4ac8",
+     "4fdcf1b68df143f5",
+     "e868f297aeca064a",
+     "b9d12c2c1c79de9c"
+    ],
+    "v": [
+     "2f0520d1e0d32753",
+     "3720abcf4bf82e32",
+     "7e2ae31f99cd6e75",
+     "8e1413ede657da8f",
+     "bb0883733bf38c48",
+     "b4725035378c4f81",
+     "2e54f8dea5675dd2",
+     "22e43d3c387a0eb6",
+     "9b80937ff8598d94",
+     "3178103888c1c93a"
+    ]
+   }
+  },
+  {
+   "position": 5,
+   "runtime_msl": 49,
+   "wall_s": 2.001,
+   "steps": [
+    48,
+    48,
+    48,
+    48
+   ],
+   "emitted": 421,
+   "ref_token": 421,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 18,
+   "sim_last_iter": {
+    "iteration": 17,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     47
+    ]
+   },
+   "engine_top8": [
+    [
+     421,
+     28.375
+    ],
+    [
+     864,
+     16.5
+    ],
+    [
+     310,
+     15.1875
+    ],
+    [
+     5879,
+     15.0625
+    ],
+    [
+     11177,
+     15.0
+    ],
+    [
+     852,
+     14.9375
+    ],
+    [
+     25,
+     14.625
+    ],
+    [
+     6187,
+     14.4375
+    ]
+   ],
+   "engine_margin_top1_top2": 11.875,
+   "row_sha": "24147933d24a42b6",
+   "ref_topk": [
+    [
+     421,
+     28.5
+    ],
+    [
+     864,
+     16.375
+    ],
+    [
+     310,
+     15.3125
+    ],
+    [
+     5879,
+     14.8125
+    ]
+   ],
+   "engine_at_ref_ids": [
+    28.375,
+    16.5,
+    15.1875,
+    15.0625
+   ],
+   "ref_margin_top1_top2": 12.125,
+   "state_sha": {
+    "conv": [
+     "96e08fcb9a486d4c",
+     "cfae4976e872413a",
+     "7436c4a7e7c85318",
+     "e1590749324b618d",
+     "c7443a831c460fad",
+     "17a017f61c97ce5a",
+     "6066c8df95ff7a91",
+     "17f83cb9b03bd4d1",
+     "2bd43069ba266216",
+     "c754735dec74c32d",
+     "5ac2e92c4885dcc1",
+     "9a8917b7f18216de",
+     "b673a9f33019736f",
+     "b1462eae105cc7f9",
+     "a93e6e86e8142717",
+     "8e08028c24cf34af",
+     "5d7fb6fee0cf662f",
+     "cfb74bcac401df31",
+     "a1a62f1a9499a4b2",
+     "187ffbf399fc4e81",
+     "e9aa890dc0805a7b",
+     "58797f909cf80732",
+     "409c9bfd79a15e23",
+     "d8a1a1152076dcbc",
+     "c4544177a1e96edf",
+     "1c118bfd2c045b9e",
+     "c6f7c326c8e6cd05",
+     "5d108a07bb39edd7",
+     "f334e5911e33abeb",
+     "428289681080afee"
+    ],
+    "recur": [
+     "3e0a3599845be551",
+     "dbaa91bed8f9e83d",
+     "866dff433edba0b8",
+     "5bf3c9f03cd3438f",
+     "44cb0aebc3427893",
+     "86d1f330f932342a",
+     "ae03c59b0f160a80",
+     "3a7cbc2df5c49edc",
+     "64359cd3b58a288b",
+     "2f4d55b22c90b2c3",
+     "5c26756d239a40da",
+     "71b7780cbaea832b",
+     "6d3503e4b7d1ee46",
+     "451d6b8c39bab949",
+     "1f5a0a7607c728b4",
+     "f6d5cc5b091aa254",
+     "2d461ddfcd0e1282",
+     "df966baa7d8d17c6",
+     "2fadf671521a3d20",
+     "66957f8731766b01",
+     "3de7bb0dfc0c5119",
+     "197c530966ca5c1d",
+     "3e35f8c1d8ac6cf9",
+     "42f38094e3adbec7",
+     "61b2a7c1712b350e",
+     "e37152d5337539d0",
+     "74c8dadf74f96050",
+     "7efb9728521b5776",
+     "bfd1bab062fd1981",
+     "bd80666d705ece62"
+    ],
+    "k": [
+     "4ee9d7eea27cc466",
+     "8da185a686351477",
+     "6da454b5194210e1",
+     "1f7f45bd237b3f2a",
+     "953187f063d304e6",
+     "e2011d10df59a0f6",
+     "54299b10c6d64865",
+     "35b8e539cb388635",
+     "b39da49d4c79730b",
+     "f1476b8346d3bb8a"
+    ],
+    "v": [
+     "ff9ac070452d2cc3",
+     "bc88b8ddd28d8c45",
+     "26b802065684f1bf",
+     "c1adc5122f98cc23",
+     "c5b993d853a34759",
+     "5931b1aabd7e8284",
+     "0ed25dcb5eccfb55",
+     "7a37f51bb7e7deb8",
+     "8223d0f764df9228",
+     "fa3d094be943d616"
+    ]
+   }
+  },
+  {
+   "position": 10,
+   "runtime_msl": 54,
+   "wall_s": 2.001,
+   "steps": [
+    53,
+    53,
+    53,
+    53
+   ],
+   "emitted": 25,
+   "ref_token": 25,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 23,
+   "sim_last_iter": {
+    "iteration": 22,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     52
+    ]
+   },
+   "engine_top8": [
+    [
+     25,
+     31.0
+    ],
+    [
+     364,
+     24.75
+    ],
+    [
+     314,
+     19.375
+    ],
+    [
+     310,
+     17.25
+    ],
+    [
+     3766,
+     16.75
+    ],
+    [
+     321,
+     16.125
+    ],
+    [
+     11488,
+     15.875
+    ],
+    [
+     11,
+     15.75
+    ]
+   ],
+   "engine_margin_top1_top2": 6.25,
+   "row_sha": "cd7bd8041d090757",
+   "ref_topk": [
+    [
+     25,
+     30.75
+    ],
+    [
+     364,
+     24.375
+    ],
+    [
+     314,
+     19.375
+    ],
+    [
+     310,
+     17.125
+    ]
+   ],
+   "engine_at_ref_ids": [
+    31.0,
+    24.75,
+    19.375,
+    17.25
+   ],
+   "ref_margin_top1_top2": 6.375,
+   "state_sha": {
+    "conv": [
+     "9d4294457a5edf75",
+     "abe0922fcbcb833e",
+     "7ae9d96e07567c05",
+     "325aa9aca6ea4190",
+     "62f9a5d22c5be10e",
+     "1c9c71cc633258fc",
+     "2a0792e9bc922f26",
+     "c5254a1e7ebd58dc",
+     "9b0901115aa20d3e",
+     "fe68fca4e662a3de",
+     "ba777cd67c6e17ef",
+     "9121bc5d72e48fa7",
+     "4c127a4d28413796",
+     "683e859a6daa045c",
+     "96d318386a7c3038",
+     "14bfb9d827a07399",
+     "8da2c510a4fb7228",
+     "94a46bfb84778299",
+     "dff3d7bcc1544bd9",
+     "a26f530f978a94e9",
+     "cf6f2765c75bccd1",
+     "6ed2d604a45682d3",
+     "42caff875b1f5286",
+     "fd38f36f75c01603",
+     "36354d9e7f33d77e",
+     "4877e8980f0d19e8",
+     "b3fc356e6e930734",
+     "a96d2520ecc0e9cf",
+     "232e535363fd8dff",
+     "2f13a971de577ee8"
+    ],
+    "recur": [
+     "c149c90989443176",
+     "d4b59302adf9354d",
+     "5cb55935b337ca37",
+     "90225fedf59b542e",
+     "2a8331237725be4e",
+     "0c4d1b7c6658fda8",
+     "30211945ea8b1f2a",
+     "04c51f47e11be485",
+     "7b33c70d267c7209",
+     "5cd94d08e0339199",
+     "2063c70cb9408bb5",
+     "590ad9ab08075fb6",
+     "fca04bd7c7415724",
+     "e8f89944a76372d2",
+     "4ce4a45f44ee5411",
+     "1bd3805712ffd736",
+     "250c5fc9b8c0ae4a",
+     "000300475f824a91",
+     "ed5886bd8f0e528d",
+     "0c57fea50c54b550",
+     "f44054bb2cd94290",
+     "2e5e59bd676d8282",
+     "cc3313bc01d33180",
+     "e8f7fda79875cdda",
+     "6038c1a2db5ea7a5",
+     "0dccd21cd79e98a2",
+     "6784a2177658167c",
+     "9e3d7d0d4a2f55a9",
+     "4d6363b922aef02f",
+     "2801d29e1980d3be"
+    ],
+    "k": [
+     "e1133582ecd6ad53",
+     "e59328772dc369b0",
+     "0d1bb955413890dc",
+     "8b94d65c14493af8",
+     "1003f448384e246f",
+     "5a17a688f6ce89cb",
+     "88c671384a645f59",
+     "a7e21414096de07b",
+     "86f756eb104037be",
+     "ebc6d51916a122ff"
+    ],
+    "v": [
+     "981cd5202a9442c2",
+     "25fbabb5dda40f01",
+     "91fdf4402591ae80",
+     "e3df8a642ed4e6b0",
+     "086cee42eda0b1a4",
+     "ac8a17f13511f45a",
+     "a033c821a01b6e8c",
+     "576d6343eba8a499",
+     "2374558ab12a67cd",
+     "25e3dfbaf8ecd616"
+    ]
+   }
+  },
+  {
+   "position": 15,
+   "runtime_msl": 59,
+   "wall_s": 2.001,
+   "steps": [
+    58,
+    58,
+    58,
+    58
+   ],
+   "emitted": 2972,
+   "ref_token": 2972,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 28,
+   "sim_last_iter": {
+    "iteration": 27,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     57
+    ]
+   },
+   "engine_top8": [
+    [
+     2972,
+     30.875
+    ],
+    [
+     348,
+     18.125
+    ],
+    [
+     16112,
+     16.875
+    ],
+    [
+     1088,
+     15.4375
+    ],
+    [
+     173976,
+     15.25
+    ],
+    [
+     313,
+     15.0
+    ],
+    [
+     16654,
+     14.75
+    ],
+    [
+     16,
+     14.1875
+    ]
+   ],
+   "engine_margin_top1_top2": 12.75,
+   "row_sha": "ef021043858666f7",
+   "ref_topk": [
+    [
+     2972,
+     30.875
+    ],
+    [
+     348,
+     17.125
+    ],
+    [
+     16112,
+     16.5
+    ],
+    [
+     173976,
+     15.375
+    ]
+   ],
+   "engine_at_ref_ids": [
+    30.875,
+    18.125,
+    16.875,
+    15.25
+   ],
+   "ref_margin_top1_top2": 13.75,
+   "state_sha": {
+    "conv": [
+     "7a9a3d30105d2f71",
+     "6dc4ab2ecedf762b",
+     "86f6d0eb8b2dc52b",
+     "c4886d8c8f82d43c",
+     "f377c6f8a4de5b3a",
+     "9f9d4b9ce180e32b",
+     "c1d6d6340a2d405a",
+     "4c4c31b03eff3bfd",
+     "eb1979d8de57a352",
+     "3734529c3d455c69",
+     "c624f90262197b8b",
+     "12d5773470adfb1d",
+     "44808b3ebf90d416",
+     "273bb30a6938ae79",
+     "7b098f5342f46d85",
+     "5fdd480048d164b2",
+     "867a7f7cff558380",
+     "6736ae5f456b91e2",
+     "b245fb8271e2e79e",
+     "1a4422b6f03d0634",
+     "c022f016934f9093",
+     "c15f9b9b6c80a72c",
+     "620a134d179866c3",
+     "f296c4b5dee84b0b",
+     "891ec213f9c25b6c",
+     "ca9b5d023193ee25",
+     "18c604f493e15972",
+     "3fa0e75997fd3046",
+     "cea8e1e5c547b68c",
+     "174840f9a4040b82"
+    ],
+    "recur": [
+     "dc1a631666797f19",
+     "e224ebaafd35805d",
+     "5b3faf5e1805fd5d",
+     "d058ec7b8b653d01",
+     "2b64808cba19d83e",
+     "993c3d3a856012d6",
+     "e9276fb6bff57714",
+     "1d75da5f482338f8",
+     "1350a8a9a51e23bc",
+     "832611444e136185",
+     "5d4c735f95f5444e",
+     "6dceb7f7115789b8",
+     "46a4ebdb4be91222",
+     "93f8eba1ab20a1b1",
+     "95147f6ac1930f69",
+     "1205f3ced2ef029d",
+     "522bcfad5fdbcaf5",
+     "8e76549d8f19182e",
+     "35aa372e28b9d6ab",
+     "851a4898768241d5",
+     "60954fa1687a3f71",
+     "c5c7a4bf6bc0f7fd",
+     "ec65ab324d1fe2f9",
+     "edc55bb3c9a220a1",
+     "218cca38ee7b80b8",
+     "4079b6d3ca1de238",
+     "a7cf945edc95ccf8",
+     "5a595aa6bdc95b9c",
+     "aaaab2a2a230c6be",
+     "7b89507c4a0b1de8"
+    ],
+    "k": [
+     "82f9bb9e557afad0",
+     "f316235946560c76",
+     "e3eeac729d65ce14",
+     "aca7caa75ff0fcf7",
+     "e9b9465cd8605c24",
+     "77961bd8e6a1beed",
+     "ab8ecae05d34e592",
+     "823e5d20b17eea8c",
+     "00da2b9c5100c388",
+     "5b433855bedc219f"
+    ],
+    "v": [
+     "c1a99b63300b0422",
+     "d80b5eada356771e",
+     "d6fb8a802981edbd",
+     "f04154daac560a89",
+     "985092e14bf7fa74",
+     "82b94759b2a8d16f",
+     "e3cf35d56b891112",
+     "c9ff253053f06164",
+     "24087fa9220af964",
+     "ad95cf1c14c2cbea"
+    ]
+   }
+  },
+  {
+   "position": 20,
+   "runtime_msl": 64,
+   "wall_s": 2.002,
+   "steps": [
+    63,
+    63,
+    63,
+    63
+   ],
+   "emitted": 64700,
+   "ref_token": 64700,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 33,
+   "sim_last_iter": {
+    "iteration": 32,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     62
+    ]
+   },
+   "engine_top8": [
+    [
+     64700,
+     31.125
+    ],
+    [
+     92217,
+     17.375
+    ],
+    [
+     188912,
+     17.125
+    ],
+    [
+     159029,
+     16.75
+    ],
+    [
+     21085,
+     16.375
+    ],
+    [
+     84457,
+     15.9375
+    ],
+    [
+     245342,
+     15.9375
+    ],
+    [
+     51595,
+     15.375
+    ]
+   ],
+   "engine_margin_top1_top2": 13.75,
+   "row_sha": "680a60dc7deba003",
+   "ref_topk": [
+    [
+     64700,
+     31.125
+    ],
+    [
+     92217,
+     17.625
+    ],
+    [
+     188912,
+     17.25
+    ],
+    [
+     159029,
+     16.75
+    ]
+   ],
+   "engine_at_ref_ids": [
+    31.125,
+    17.375,
+    17.125,
+    16.75
+   ],
+   "ref_margin_top1_top2": 13.5,
+   "state_sha": {
+    "conv": [
+     "fc0abfedd6e93578",
+     "79d1fc029db41a0f",
+     "49a9450414cbf660",
+     "a08fc43e7004256f",
+     "b1a3a09e3bf04771",
+     "32b94475e02dc356",
+     "c114eaa849cae885",
+     "8aaef9954ddd766b",
+     "3f9e58b42f8615ed",
+     "609edbadcf15a53a",
+     "8a508135a1025178",
+     "54e6a8e665f91a3c",
+     "9f05d9fba9bad5fd",
+     "2cabe307e776c685",
+     "99fdc32f5a2fbee5",
+     "96bd8bb8b5eba260",
+     "5b5a2c5902a82d8f",
+     "67abbb073dd70078",
+     "de66a002f90e4807",
+     "4205e14101fcd1b1",
+     "d13e35e59f66809f",
+     "39a0234149c11d28",
+     "5713baf6f61de5e7",
+     "e8e070c790b9aba9",
+     "9bff6167fd58d391",
+     "e3790aba72645699",
+     "95e0651d5112fb2b",
+     "7748c7d3ecb21c16",
+     "4bead7ae5eb6b84e",
+     "3e4fbb7462038b39"
+    ],
+    "recur": [
+     "e8c7984b95e1af83",
+     "e22baa6894032b3e",
+     "c64da2bb3e932369",
+     "d668b2e6dac13d17",
+     "4780749c3287fc3f",
+     "a12017f3702e926c",
+     "1927dbacd26af9b7",
+     "6194979e7afdda9a",
+     "a42b9ffc90f00f17",
+     "c012ed8ac688b41c",
+     "b2969caebbc5e67b",
+     "3528198e38ad9f55",
+     "2060669454af81e7",
+     "cb49b99f06691f03",
+     "bda0e65ec1630dc2",
+     "818bf205ea680c66",
+     "f65f913b0c36b262",
+     "06ae8b61ffd089b9",
+     "58b07b71b2af87c4",
+     "b1c92db7c554079f",
+     "3cd31e47f6fe9111",
+     "cac7f9cfb0ce745f",
+     "a94ab20771cffdc8",
+     "209db282f5423b53",
+     "901f37737a3ffe64",
+     "197c5c0002ef0e5c",
+     "76e5f90560db69cf",
+     "a91b45add9bcd5b5",
+     "0e851528aa13e37a",
+     "2ef6839eda1dbe9c"
+    ],
+    "k": [
+     "f7e02a868067865e",
+     "307dab75e7fd40e2",
+     "a8639eeb4cea0d02",
+     "bd6c5d95a968d8ac",
+     "49d362324059ec92",
+     "a39826d2d6e6ba4d",
+     "5de96bb6e339e7c4",
+     "4c5c06204177cafb",
+     "f5b1c246fab1a8f5",
+     "eea513e95b0b7efa"
+    ],
+    "v": [
+     "aba333b383aa3baa",
+     "4241a46684f9b3ac",
+     "0ceb5e70842f9e56",
+     "49b6353db7498066",
+     "502b9ec5caf53121",
+     "a9e1b431be45b0bc",
+     "271eccbd7300ec67",
+     "82319b558853d477",
+     "395fa235a042f2f0",
+     "617d18253545492e"
+    ]
+   }
+  },
+  {
+   "position": 25,
+   "runtime_msl": 69,
+   "wall_s": 2.002,
+   "steps": [
+    68,
+    68,
+    68,
+    68
+   ],
+   "emitted": 2972,
+   "ref_token": 2972,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 38,
+   "sim_last_iter": {
+    "iteration": 37,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     67
+    ]
+   },
+   "engine_top8": [
+    [
+     2972,
+     27.25
+    ],
+    [
+     10342,
+     23.375
+    ],
+    [
+     18821,
+     21.625
+    ],
+    [
+     23359,
+     21.0
+    ],
+    [
+     2907,
+     20.625
+    ],
+    [
+     5396,
+     20.25
+    ],
+    [
+     38622,
+     19.0
+    ],
+    [
+     5561,
+     18.875
+    ]
+   ],
+   "engine_margin_top1_top2": 3.875,
+   "row_sha": "a36f204aec268d40",
+   "ref_topk": [
+    [
+     2972,
+     27.625
+    ],
+    [
+     10342,
+     23.25
+    ],
+    [
+     18821,
+     21.875
+    ],
+    [
+     23359,
+     21.25
+    ]
+   ],
+   "engine_at_ref_ids": [
+    27.25,
+    23.375,
+    21.625,
+    21.0
+   ],
+   "ref_margin_top1_top2": 4.375,
+   "state_sha": {
+    "conv": [
+     "12974d4f0fdd488b",
+     "e692069b9b1fae70",
+     "0e340c80ba13baee",
+     "73cfe43ecf489510",
+     "5e2c2e283c0c50a6",
+     "ec4ceb61dd5949ba",
+     "f0d717b14b173bfb",
+     "b0202b6e557ff404",
+     "7d8472c929dd04c2",
+     "c1a70d2ffab11d39",
+     "e982355d85564141",
+     "7fa405d183ae8034",
+     "bbc4f7394cbf7e54",
+     "adaa0fb97630aaed",
+     "a38f564c8e4e62b9",
+     "53613808aa9e497f",
+     "7a599a0d2854da27",
+     "7bf92a1e95a562ee",
+     "368e04b26810586e",
+     "c401eaf70eb5c6be",
+     "d14cb7e98d2fe53d",
+     "26ba4845a3458d5a",
+     "b7e15c0568a3e146",
+     "2c0cdea94fb6bf26",
+     "1f6b9512a68fb715",
+     "2bf0926f9b9dabc2",
+     "c63280cacc4414fe",
+     "6a2c42b9507fef30",
+     "5982c9178eb6b1b1",
+     "2382b12a33092cc9"
+    ],
+    "recur": [
+     "b25f7efa88153171",
+     "0f170badf4a50deb",
+     "bb7514a104561fc2",
+     "36e29481c607dd1e",
+     "cc3880ff1bbed7fa",
+     "1d50a37bc4a406f4",
+     "c7eaff6e95e22e57",
+     "cf424bd676a29536",
+     "891463d0191ca333",
+     "8f78674ad064458e",
+     "b901fee953d4b633",
+     "d970fe6c36cd748b",
+     "6e9de65f7d509a15",
+     "59847a3348c3d9f0",
+     "0b614b4222ed9eed",
+     "f1a67b23996cfddd",
+     "f0ff27c3c6fbe34d",
+     "e1862f11df273bba",
+     "755f7dd4b5cabdc1",
+     "578cbdacfb2e2f5a",
+     "0abaa2426177ec89",
+     "e49d8b6aac122d89",
+     "69b219abd42a89da",
+     "63d6da985886d28b",
+     "0c9284186066f781",
+     "2e70f6468ae58843",
+     "da3723444d632b87",
+     "e467247a1f42c135",
+     "1c1f58d1d53972ed",
+     "3ead7eb0178a45f6"
+    ],
+    "k": [
+     "455230ad286dbfb4",
+     "207998bb9a0efac9",
+     "a3f4d9973bc81acf",
+     "6f350181c08d9dd1",
+     "a99c61a4164a0c83",
+     "d7207d671e42c7a0",
+     "059534cb93e0d61b",
+     "4d3e661800f5d73f",
+     "4f77f4693a0e66b5",
+     "1ec36e57732de537"
+    ],
+    "v": [
+     "9ae1eb88049f4872",
+     "0f8db17eefb23d0e",
+     "1047d5837e6e8090",
+     "fdf9ce08d4377cc3",
+     "c4f92c5a4229af7e",
+     "fb898a53af3bf227",
+     "217429c206028384",
+     "5520319b2c8d2f6d",
+     "d37c6b56c81edede",
+     "017e5c3220d7db17"
+    ]
+   }
+  },
+  {
+   "position": 30,
+   "runtime_msl": 74,
+   "wall_s": 2.001,
+   "steps": [
+    73,
+    73,
+    73,
+    73
+   ],
+   "emitted": 18922,
+   "ref_token": 18922,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 43,
+   "sim_last_iter": {
+    "iteration": 42,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     72
+    ]
+   },
+   "engine_top8": [
+    [
+     18922,
+     26.75
+    ],
+    [
+     19715,
+     25.25
+    ],
+    [
+     4776,
+     18.875
+    ],
+    [
+     3408,
+     18.375
+    ],
+    [
+     12103,
+     17.125
+    ],
+    [
+     3896,
+     16.375
+    ],
+    [
+     1214,
+     16.25
+    ],
+    [
+     18659,
+     15.8125
+    ]
+   ],
+   "engine_margin_top1_top2": 1.5,
+   "row_sha": "d79a43e7847d4462",
+   "ref_topk": [
+    [
+     18922,
+     26.5
+    ],
+    [
+     19715,
+     25.375
+    ],
+    [
+     4776,
+     19.0
+    ],
+    [
+     3408,
+     18.375
+    ]
+   ],
+   "engine_at_ref_ids": [
+    26.75,
+    25.25,
+    18.875,
+    18.375
+   ],
+   "ref_margin_top1_top2": 1.125,
+   "state_sha": {
+    "conv": [
+     "2ea6560c80ef7e43",
+     "53036fb7a59b17a3",
+     "22f1845706efd363",
+     "3cfb0a6745e8e384",
+     "83851085210751fe",
+     "50c584b115fab7a0",
+     "b5f942f666e4abc6",
+     "379b137bf3e3500d",
+     "aece71aad7d3e967",
+     "b47372aa8c6e94e1",
+     "f0f4ec468bb7b65c",
+     "517d654faad93910",
+     "83bc4d1f0ed6f863",
+     "26866f86adf66659",
+     "b25cfbaaeca39043",
+     "089e7aa576e648ce",
+     "b537e78ced6f3b4c",
+     "5f8a7d4da0c4132a",
+     "c37a6eaaef234c17",
+     "6b70e55bb6d53fc0",
+     "c4e184009ef95091",
+     "2776b7f4f399317a",
+     "55cd6f443467415a",
+     "b5710402bd0fcee1",
+     "612149c72f0b3387",
+     "1977e18e9a1fd3cb",
+     "10242d496934cced",
+     "9d1c531b8517b652",
+     "e9322272fa8d9233",
+     "b5b7ccb262c1ec89"
+    ],
+    "recur": [
+     "ff07d0d719469ff1",
+     "3cb25e0e210375be",
+     "9856bab284a00157",
+     "b37af60d07190676",
+     "2a3546b82ec471ed",
+     "ef78c81041cd69bd",
+     "0bbcc09f4be1fd02",
+     "4268341d51eaf87f",
+     "815542728220ffd5",
+     "cd00c699753772be",
+     "36442bcd6c62491a",
+     "e8f6ac29676e1b38",
+     "5399426b88e3c346",
+     "6fe54eba435be4dd",
+     "7a63810919266daa",
+     "06ef655261369778",
+     "8e480c24763346cb",
+     "54cc7044b600c50f",
+     "33a81a1bbde013c9",
+     "872ef38f221ae6b5",
+     "cf9a2cf3ad277936",
+     "2f7803a4e070a102",
+     "4bbf13e1f77a977f",
+     "b25f0546eaca2d6c",
+     "cddc389ebef37618",
+     "5770e430807a9b1e",
+     "28aeaf4a7303e8dc",
+     "fba2afe1cce7fb3c",
+     "4f58e522fb4a3805",
+     "bd9b85bb87d03e94"
+    ],
+    "k": [
+     "41376d13708d44a3",
+     "1d31e11c37c0f609",
+     "ff3fd83f9814bb00",
+     "f3c6bec185f82b40",
+     "9990925bde2ea79b",
+     "ced0620e63c2665f",
+     "81b5b02207ab4019",
+     "acb6039be606e2a3",
+     "db7be7948c4e55c5",
+     "0cfd5f85872ef2ca"
+    ],
+    "v": [
+     "96f1538da693fbaf",
+     "8c33fd59451274f3",
+     "ae50f3aa1dc220a1",
+     "b26174346563c497",
+     "c8c01e44528a6e3f",
+     "498d414a0e958f84",
+     "dc9dbe721208ab0c",
+     "134ae08d98a031f1",
+     "608f2d81eaccff96",
+     "8336ebfec727a1c2"
+    ]
+   }
+  },
+  {
+   "position": 35,
+   "runtime_msl": 79,
+   "wall_s": 2.002,
+   "steps": [
+    78,
+    78,
+    78,
+    78
+   ],
+   "emitted": 262,
+   "ref_token": 262,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 48,
+   "sim_last_iter": {
+    "iteration": 47,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     77
+    ]
+   },
+   "engine_top8": [
+    [
+     262,
+     28.375
+    ],
+    [
+     285,
+     15.5
+    ],
+    [
+     257,
+     15.4375
+    ],
+    [
+     248069,
+     15.0
+    ],
+    [
+     256,
+     14.8125
+    ],
+    [
+     406,
+     14.75
+    ],
+    [
+     9,
+     13.25
+    ],
+    [
+     950,
+     12.9375
+    ]
+   ],
+   "engine_margin_top1_top2": 12.875,
+   "row_sha": "c9bcb9c7289f772f",
+   "ref_topk": [
+    [
+     262,
+     29.125
+    ],
+    [
+     257,
+     16.0
+    ],
+    [
+     285,
+     15.8125
+    ],
+    [
+     248069,
+     15.3125
+    ]
+   ],
+   "engine_at_ref_ids": [
+    28.375,
+    15.4375,
+    15.5,
+    15.0
+   ],
+   "ref_margin_top1_top2": 13.125,
+   "state_sha": {
+    "conv": [
+     "6343404f7de789cc",
+     "f3a0295e8c026e29",
+     "4bd09ae4062e0878",
+     "cc9d16d98522ab68",
+     "80af470f5e659661",
+     "2d8aea18db43bbe8",
+     "e58570c60cab33e4",
+     "f7cae2e70a7f1931",
+     "37fd1cef774f1bfc",
+     "270fca2c5598ff49",
+     "d3aab2b926e4ce65",
+     "e9575e2703b4e3f3",
+     "f0e7046c5beded47",
+     "bb2dd22e97e00a86",
+     "f396beee43c56d9e",
+     "1976ff9f77de27f5",
+     "f4ce30db8190f8e2",
+     "9d91a2cbeca32532",
+     "2629605621b92adf",
+     "ce44b060b98490dc",
+     "a5eee8998f8746af",
+     "73c03c950d75c8ce",
+     "a782c077075305d4",
+     "d913fd68463abfba",
+     "9a3b06c456d3b15d",
+     "abacd75fd5404e47",
+     "f57c103f3f4cb6b7",
+     "973f042c880e0788",
+     "4f1ed85b5e4e890e",
+     "49dbb039bca06d46"
+    ],
+    "recur": [
+     "76b39f4f41b813fc",
+     "76d63b27cbe74d38",
+     "2e7b4566f49a4503",
+     "fec20bf6b5011934",
+     "55a7d9635cc376f0",
+     "48bc29a19028296f",
+     "c68c9d122aada603",
+     "e52566372e137ca3",
+     "5e45c97b9ac2069c",
+     "fe2fd8ec179407d2",
+     "faf19ab93e103909",
+     "ec5ddd92db066e96",
+     "6f5c1d2cd0ae0294",
+     "af978333f7d668d0",
+     "91366bfb1fdb02ae",
+     "a0dee6be2e9833cc",
+     "7e7659b7df9b6208",
+     "5dfd9ecf77aaf0ed",
+     "3f3a3e05290a0b26",
+     "99b3228470ae634c",
+     "73ee1006955e58c2",
+     "b5c4e87eac328977",
+     "5914f6213cde9a62",
+     "5a8a06c2a92c8caf",
+     "da2403af2e874206",
+     "9e505af105d6fa6c",
+     "21f5d66617d42700",
+     "95b93dc90d777b38",
+     "135230fd53b2e263",
+     "308adb04716ed574"
+    ],
+    "k": [
+     "60b0a750201e4681",
+     "047e4183be06fa0f",
+     "ec859e1c64378194",
+     "74b00c5051f4c78b",
+     "f71f77bf8166fb6d",
+     "08176ac507143439",
+     "0ed5857a63d03b85",
+     "fa35992c14b5ee2e",
+     "e3417df39a63fc83",
+     "f1d26b495a179609"
+    ],
+    "v": [
+     "85c2974b7cbda023",
+     "f7bd95429e208eea",
+     "52f17af636546fb2",
+     "a2b4f24a9e13d465",
+     "db31a338d5274fb7",
+     "b354b3fa43a4e7e5",
+     "12270b86dbd9a6d3",
+     "63f28f93874b2b99",
+     "3aaafbd068efa586",
+     "7e3803e2d498ac92"
+    ]
+   }
+  },
+  {
+   "position": 40,
+   "runtime_msl": 84,
+   "wall_s": 2.001,
+   "steps": [
+    83,
+    83,
+    83,
+    83
+   ],
+   "emitted": 64700,
+   "ref_token": 64700,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 53,
+   "sim_last_iter": {
+    "iteration": 52,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     82
+    ]
+   },
+   "engine_top8": [
+    [
+     64700,
+     31.375
+    ],
+    [
+     220,
+     19.125
+    ],
+    [
+     51595,
+     18.375
+    ],
+    [
+     314,
+     17.25
+    ],
+    [
+     245342,
+     16.875
+    ],
+    [
+     188912,
+     16.75
+    ],
+    [
+     799,
+     16.0
+    ],
+    [
+     318,
+     15.9375
+    ]
+   ],
+   "engine_margin_top1_top2": 12.25,
+   "row_sha": "2763a477ac6e4cd1",
+   "ref_topk": [
+    [
+     64700,
+     31.125
+    ],
+    [
+     220,
+     18.75
+    ],
+    [
+     51595,
+     18.25
+    ],
+    [
+     314,
+     17.375
+    ]
+   ],
+   "engine_at_ref_ids": [
+    31.375,
+    19.125,
+    18.375,
+    17.25
+   ],
+   "ref_margin_top1_top2": 12.375,
+   "state_sha": {
+    "conv": [
+     "76541ff89ed0cd2a",
+     "0acc6c7e3412d4ef",
+     "5843d42b0ca3dfc0",
+     "ed534e43396aa05f",
+     "74d035cccd4cc63e",
+     "16c6f7f4d95d81ab",
+     "f1c3ccf9d773193a",
+     "a2ad3f69800bcaed",
+     "81919c503ac8c58a",
+     "2e1a14ef46947b19",
+     "76e0ebbd676bd6fc",
+     "8d83d5fa18951776",
+     "7a6bb3ca1410fec0",
+     "bb388982ae8cc1a2",
+     "297bc3883a811d62",
+     "ccf9f3f5e5fed2f3",
+     "576b238d1b629993",
+     "b7d4ca47b93365c9",
+     "9a5242e456beb522",
+     "07a2321d8b90e0b1",
+     "0806db440a5c124a",
+     "4f5396644a6a6626",
+     "cc1376c6b31fe07c",
+     "343e1d14d03f9387",
+     "f1c154977a223f10",
+     "b78faa59eb94e121",
+     "318855fb94db1961",
+     "ea8b9c00c198ea49",
+     "9e67be5f0bf37a3a",
+     "e1ec848e2a9f03d1"
+    ],
+    "recur": [
+     "912fa633dea417ab",
+     "28fa95178f31e143",
+     "a23645428b4fe03a",
+     "5cfed54d9de9eea7",
+     "94bc0cdef570e073",
+     "37760d974f3e101b",
+     "5af8b9b949b18aad",
+     "d8264a5a6457331a",
+     "583f1c67c0f62362",
+     "dc5dfdc7340c30cc",
+     "794eb8d4f137a665",
+     "abb8ac69d420f09f",
+     "4aa71b05d6c72e8b",
+     "2c4613fd9291fc90",
+     "6ed4bc63d45d2c48",
+     "f0ac718d721b36aa",
+     "e7b29f5d7d1baf92",
+     "a3313d8cc21c0ec7",
+     "340dfe3dc1440e6a",
+     "41fded511448e72c",
+     "8114df330d277d87",
+     "a58e8d342fabd577",
+     "8f0f8915799f3824",
+     "6699d977a766f913",
+     "b45936a8e94b06cc",
+     "abc3d105088c9111",
+     "2e04ba3168f446ed",
+     "9e503b874899b263",
+     "5e02d7df0d9a6fd1",
+     "08e290a4c992893f"
+    ],
+    "k": [
+     "828bdf240c6c3dc0",
+     "3fddce8be43fb8f9",
+     "bbd40c62581ea264",
+     "6d25856c9b084b93",
+     "ac880c1097483d09",
+     "4f1a661caa90d1b5",
+     "328965b624ff506c",
+     "6dc5806ecd4a381f",
+     "2ba4d571a24e42dd",
+     "9e03244621c3658e"
+    ],
+    "v": [
+     "488534b4abcf6dc6",
+     "bccfcfe4bc0ac32e",
+     "4a41601e2240af15",
+     "d088291c6bbfc147",
+     "b5625e9db8a1ed02",
+     "0b47e2f03bbaf8d0",
+     "593f787eb78597d3",
+     "675bb6d8d1c234f0",
+     "e70404aed64f0051",
+     "eb7298e535ec6a5f"
+    ]
+   }
+  },
+  {
+   "position": 43,
+   "runtime_msl": 87,
+   "wall_s": 2.001,
+   "steps": [
+    86,
+    86,
+    86,
+    86
+   ],
+   "emitted": 369,
+   "ref_token": 369,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 56,
+   "sim_last_iter": {
+    "iteration": 55,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     85
+    ]
+   },
+   "engine_top8": [
+    [
+     369,
+     31.5
+    ],
+    [
+     682,
+     20.375
+    ],
+    [
+     47778,
+     18.25
+    ],
+    [
+     42371,
+     17.75
+    ],
+    [
+     9781,
+     16.5
+    ],
+    [
+     5435,
+     16.125
+    ],
+    [
+     42103,
+     15.5625
+    ],
+    [
+     303,
+     15.0625
+    ]
+   ],
+   "engine_margin_top1_top2": 11.125,
+   "row_sha": "1b564f1e49010363",
+   "ref_topk": [
+    [
+     369,
+     31.375
+    ],
+    [
+     682,
+     19.875
+    ],
+    [
+     47778,
+     18.375
+    ],
+    [
+     42371,
+     17.25
+    ]
+   ],
+   "engine_at_ref_ids": [
+    31.5,
+    20.375,
+    18.25,
+    17.75
+   ],
+   "ref_margin_top1_top2": 11.5,
+   "state_sha": {
+    "conv": [
+     "9e9a3b446d960fce",
+     "f37e636e3308c05e",
+     "2ab8ed903a6002e8",
+     "b9163578be63d805",
+     "823660c88688a7a9",
+     "6993d4becbb53c77",
+     "567bb7b76a37d570",
+     "b425a3ecdc8bc599",
+     "2b4905f2e400eb6f",
+     "13532faa49fad0fd",
+     "34b4382effdb2061",
+     "9bcf3640d8a4c24c",
+     "7dc562d29331b8a3",
+     "720d5507a89f1751",
+     "978e230ec191012d",
+     "4887f240d9564a73",
+     "ee6991e002b2aa33",
+     "dfc7f4e2dc62cb4f",
+     "a98c864722bb2e0b",
+     "cbe4228b70424341",
+     "eb85f55831362496",
+     "b6dda7f59c83cc5a",
+     "0d0b491601f853cf",
+     "9750059401e33bb9",
+     "e75695d72a30c013",
+     "0c2409e6e06143e1",
+     "fc4e5a7af4cd3ac6",
+     "836f13e12eba1db3",
+     "dad5fea52c5ed788",
+     "778cdd9783f5a6cc"
+    ],
+    "recur": [
+     "9ae652266a9c39a3",
+     "1b92f981aa4024d3",
+     "4f278e41fe3f9ef8",
+     "8ffaacd9a4737153",
+     "df76ac92fb73d393",
+     "b76188e67634fb8e",
+     "6f21fbecbe9edf8b",
+     "2fab6913ff3c8653",
+     "97c029c48d9a7f6d",
+     "7a274627538cb6a4",
+     "8f62c3f91ff24d4b",
+     "7b42dce975e3fae0",
+     "7f2f135459a3e58c",
+     "e2f5d27c7c89a3b9",
+     "27cf260142191dcd",
+     "376fee1b49602b37",
+     "4b7ef32c2cbe0151",
+     "886ea0c2309ab7ce",
+     "27f5342328d1df0c",
+     "04b209b460c24220",
+     "4bc4736912860478",
+     "ec970da06fd7c087",
+     "451810b4b7f8b9eb",
+     "f8930d7e80395494",
+     "23d6c54fd6c9a811",
+     "1189ea7b5f500283",
+     "c92607e708ca84e6",
+     "1d6a47019a44b1c2",
+     "77eafc4ede6fb412",
+     "e15887a48ed3c276"
+    ],
+    "k": [
+     "c6d18dcc093a3154",
+     "7a40507775aca5cb",
+     "87e33bb94135625e",
+     "304f3a15e2238f9c",
+     "9b08d1303fd0d899",
+     "41893d5c12193ba9",
+     "9a72939a6386fed8",
+     "2fd703c71af2349a",
+     "53a2d92dc7069917",
+     "fc70ba786989f9a9"
+    ],
+    "v": [
+     "97571c51ae385b47",
+     "d94089f66c39376d",
+     "149536a347a0683d",
+     "8430bc034d93ea8e",
+     "80ca3a1198d1a3de",
+     "67385d86c4273188",
+     "9dd2e428faebe02b",
+     "371a211c3b8e56bf",
+     "3ebf6189a7304c70",
+     "16141f1ca322cc4e"
+    ]
+   }
+  },
+  {
+   "position": 45,
+   "runtime_msl": 89,
+   "wall_s": 2.002,
+   "steps": [
+    88,
+    88,
+    88,
+    88
+   ],
+   "emitted": 1056,
+   "ref_token": 1056,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 58,
+   "sim_last_iter": {
+    "iteration": 57,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     87
+    ]
+   },
+   "engine_top8": [
+    [
+     1056,
+     27.75
+    ],
+    [
+     318,
+     25.0
+    ],
+    [
+     26,
+     20.875
+    ],
+    [
+     13,
+     20.625
+    ],
+    [
+     11,
+     20.0
+    ],
+    [
+     1651,
+     17.0
+    ],
+    [
+     3376,
+     15.3125
+    ],
+    [
+     4460,
+     15.25
+    ]
+   ],
+   "engine_margin_top1_top2": 2.75,
+   "row_sha": "1afa9c67a013f280",
+   "ref_topk": [
+    [
+     1056,
+     28.0
+    ],
+    [
+     318,
+     24.875
+    ],
+    [
+     13,
+     20.5
+    ],
+    [
+     26,
+     20.125
+    ]
+   ],
+   "engine_at_ref_ids": [
+    27.75,
+    25.0,
+    20.625,
+    20.875
+   ],
+   "ref_margin_top1_top2": 3.125,
+   "state_sha": {
+    "conv": [
+     "16465b1dabbe203b",
+     "9d1c1261da5aaa64",
+     "f9270299b89a2518",
+     "a88c4fa121ef726c",
+     "eb333f428087b7b5",
+     "43a0d6b09a378364",
+     "0d6e990ac44935f2",
+     "8772dd6e1d1fc060",
+     "a4ec998400e34469",
+     "4daa58c4417da314",
+     "259187f2343f703e",
+     "a4dbde2c7a0c7745",
+     "4db496a9e7a5ead4",
+     "f42d3dee86949f13",
+     "ef1b65472ded8c27",
+     "c4589360cfcc97d2",
+     "bdb61a28782819bc",
+     "360618cf7daff594",
+     "7a1063e70f5f4a5b",
+     "91988a0136e3a568",
+     "60c60b8a2399f796",
+     "b5575301a3e27b9f",
+     "9fc8bd8ee95b422e",
+     "4e0d021efa0076a6",
+     "dd6706a369fa5d5f",
+     "bb6f16191a998f76",
+     "ed518cb0bfe987be",
+     "e94307b0b5799f1c",
+     "d011b916ccf7ac0b",
+     "3242c6136e5a655e"
+    ],
+    "recur": [
+     "0b84e65aa0f01bf0",
+     "b9a5026de0886979",
+     "108ee823862ea43b",
+     "8a5c51baa7cd7ead",
+     "3cdc08f11d6ed583",
+     "d1dd936873648d04",
+     "a9098a39a23a8c7c",
+     "c7c9687228a24f8f",
+     "c9aa0e403d740465",
+     "868d253950159724",
+     "2c96082495758688",
+     "d47e399114c2a131",
+     "255f1867dead1d19",
+     "0eb02ffeb6a5b721",
+     "02ab36eb20ca1581",
+     "586ab6ed7a4385d6",
+     "c3f35bd66d28fda5",
+     "cdfa8254ee337119",
+     "246fe6ac335453ad",
+     "81aebe049c3ba4ae",
+     "2b725dcf56e81e2d",
+     "17da57436970a9c4",
+     "dda40ed3920712b1",
+     "ee4d03e51cfcf58b",
+     "7326b4b362d31bb6",
+     "613e9b74a117ec5d",
+     "1a0f51f76868f9cf",
+     "4dcfcc01a36b31b0",
+     "ba75559b234f92c8",
+     "280cc7e3e11cd345"
+    ],
+    "k": [
+     "e123e50779104006",
+     "6df34ac611649290",
+     "c3deb21ad87863ca",
+     "16c5d344fafce61d",
+     "c1ebe12e47bd0861",
+     "3321f9d30a468d1a",
+     "f2aa9d260c167906",
+     "26336160791f383a",
+     "a8a758a9c8ff88c1",
+     "eac1b87ff94f4bc1"
+    ],
+    "v": [
+     "5a55499f5b3adfb0",
+     "d0551a2e57cc9145",
+     "6dc6bb88f0b33443",
+     "9049f836c09b6061",
+     "35198df2a3471e8c",
+     "8619e65d5a9d57fe",
+     "849adf93453c3c89",
+     "f8add83d6cdd5b8e",
+     "273a704930f6800d",
+     "45a6ab6cd451d073"
+    ]
+   }
+  },
+  {
+   "position": 46,
+   "runtime_msl": 90,
+   "wall_s": 2.002,
+   "steps": [
+    89,
+    89,
+    89,
+    89
+   ],
+   "emitted": 279,
+   "ref_token": 279,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 59,
+   "sim_last_iter": {
+    "iteration": 58,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     88
+    ]
+   },
+   "engine_top8": [
+    [
+     279,
+     33.75
+    ],
+    [
+     660,
+     23.375
+    ],
+    [
+     3672,
+     18.875
+    ],
+    [
+     4858,
+     16.625
+    ],
+    [
+     220,
+     16.25
+    ],
+    [
+     264,
+     16.0
+    ],
+    [
+     2645,
+     15.875
+    ],
+    [
+     4472,
+     15.3125
+    ]
+   ],
+   "engine_margin_top1_top2": 10.375,
+   "row_sha": "51b4ae99835ac735",
+   "ref_topk": [
+    [
+     279,
+     33.5
+    ],
+    [
+     660,
+     23.5
+    ],
+    [
+     3672,
+     18.375
+    ],
+    [
+     4858,
+     16.75
+    ]
+   ],
+   "engine_at_ref_ids": [
+    33.75,
+    23.375,
+    18.875,
+    16.625
+   ],
+   "ref_margin_top1_top2": 10.0,
+   "state_sha": {
+    "conv": [
+     "371d836623d18396",
+     "4d7e27054fbe8a78",
+     "856b3f14661f2ca8",
+     "a3b1dea09a9c2896",
+     "6a2c81a6a5d3c9f2",
+     "b39610fd5c072c52",
+     "53bcb8d98228b718",
+     "4f8b20a66c841705",
+     "7bd3e405a0e30eb5",
+     "931a4597bdb8ce59",
+     "a7ee92b88ac52bed",
+     "258d63e06097dbee",
+     "3a82ce8e28f15fb1",
+     "e7efe074612ded13",
+     "80f769e8a83a7811",
+     "5791ca593f410b6b",
+     "1b7651c0dcdea692",
+     "33fca2c964abb4ae",
+     "a45e58ba2aaf7e10",
+     "06fde7ac4a16878d",
+     "36af3a1bef85e4fe",
+     "b8a86f23b06dd084",
+     "d6228e691d3e8e3e",
+     "5653a550ac1030df",
+     "d1d8c302ff53a1e0",
+     "5a20d5bfb360defb",
+     "84d52046b6d176f9",
+     "dee417a5774ffe51",
+     "2aa78178a57feaf6",
+     "82ff7c09282d8bdf"
+    ],
+    "recur": [
+     "c25d3fb8f4251aeb",
+     "632fabc49e764df1",
+     "dc9b141f59a2099c",
+     "fc4af3ce8eb20403",
+     "dfa3dbd587380571",
+     "2df3115575f3e7c1",
+     "65a5c3276709387e",
+     "3eaa284caba412fa",
+     "155a7f48c9f9bc4b",
+     "d2ab941d75c1f448",
+     "c05f752af6d6c499",
+     "41d0c044270c0160",
+     "1136b4c2099a845c",
+     "0dab34da6d505a2d",
+     "919a29a8867695d2",
+     "01098f2697bf5d8a",
+     "028c363be7eb9644",
+     "6e3596ce7b0c9b27",
+     "4c945b65c2dc3345",
+     "092401667e9aca38",
+     "b3093882127d773d",
+     "364529f4f26dfea0",
+     "043ecb236546afef",
+     "48f372ee38f26b7b",
+     "f036d5d2eb6bd619",
+     "8803cee4e3314bc1",
+     "51ae79b6b5bef8fe",
+     "06735f08fc41d371",
+     "512ce48cd5f65f4e",
+     "54de8eb77a47f697"
+    ],
+    "k": [
+     "a38cc2ad084ccde6",
+     "e9db6ad77c790ac5",
+     "91cd11817e2c24cb",
+     "ccd78467b2a0f420",
+     "f6d0c8ea900c82cc",
+     "9ce34c51e2b9637e",
+     "522954e8f0de31ca",
+     "68c2c1652d99f32d",
+     "4b4f7daf3b663a37",
+     "150603ffb99adbde"
+    ],
+    "v": [
+     "06c0344109cd0141",
+     "c96048bbf479e6a4",
+     "5977caf02c4f98e7",
+     "b48e4cbaf7db0f8b",
+     "b4612420c64390d7",
+     "963bc63ea31c4239",
+     "5c0f7c181d50a143",
+     "88656f985898801f",
+     "40520f0ae9159a61",
+     "d26eea419a3d9702"
+    ]
+   }
+  },
+  {
+   "position": 47,
+   "runtime_msl": 91,
+   "wall_s": 2.002,
+   "steps": [
+    90,
+    90,
+    90,
+    90
+   ],
+   "emitted": 3672,
+   "ref_token": 3672,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 60,
+   "sim_last_iter": {
+    "iteration": 59,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     89
+    ]
+   },
+   "engine_top8": [
+    [
+     3672,
+     28.625
+    ],
+    [
+     2645,
+     28.0
+    ],
+    [
+     975,
+     25.75
+    ],
+    [
+     7840,
+     17.875
+    ],
+    [
+     9376,
+     17.75
+    ],
+    [
+     56871,
+     17.25
+    ],
+    [
+     220,
+     16.875
+    ],
+    [
+     5129,
+     16.375
+    ]
+   ],
+   "engine_margin_top1_top2": 0.625,
+   "row_sha": "eb85a5c443443693",
+   "ref_topk": [
+    [
+     3672,
+     28.375
+    ],
+    [
+     2645,
+     28.0
+    ],
+    [
+     975,
+     25.5
+    ],
+    [
+     9376,
+     18.125
+    ]
+   ],
+   "engine_at_ref_ids": [
+    28.625,
+    28.0,
+    25.75,
+    17.75
+   ],
+   "ref_margin_top1_top2": 0.375,
+   "state_sha": {
+    "conv": [
+     "118815cf762cb6e9",
+     "0667be75c3269f39",
+     "5e1808895b7ed566",
+     "0895953ce4462e36",
+     "713a8b8e67612e4b",
+     "df02345fdff4ef8e",
+     "858fb961edd6b139",
+     "9766fd5aa4117b88",
+     "16dfeca7398af1fb",
+     "e26c09f0de2352f0",
+     "6d5f4d206119960d",
+     "3398e1a3cb72d5c3",
+     "46c6e62cddc21a20",
+     "b2f9a0736442c8da",
+     "4d842d22bcd08864",
+     "ae5ea62438c7a1ff",
+     "f731d99860ca7dc3",
+     "e86c1a224517a98f",
+     "7cbe98ad0b7212d3",
+     "fd7c2e36e751f043",
+     "26d8a42207a0a73c",
+     "27a96db5aeda23aa",
+     "8019ee2746d90c43",
+     "3d9ed424e15ada9a",
+     "8220e6d0b2e4b4ca",
+     "3f23f84a437f0b7d",
+     "040eb950f7195c96",
+     "25ff19c0d4aad7a5",
+     "05f4f92e2ddaaf5e",
+     "63a58840e72a1af1"
+    ],
+    "recur": [
+     "cf305f9747896b80",
+     "abebca238eeeffee",
+     "3b81353d4d96d3d4",
+     "439a8dc47ff17a77",
+     "578252ba63fdf8e1",
+     "49fc1d54099a60ae",
+     "3344a6d19f38fb20",
+     "06f3be6a19b9d4e3",
+     "77b84c9cbf3d13bc",
+     "dbaa5abdfaf10365",
+     "4de02546be700263",
+     "4a685bed9803717e",
+     "a863a3a979cd2b83",
+     "05a15ac731cec7f2",
+     "b5eb3d03b291a44c",
+     "41c127bf6749a384",
+     "30230728f9a68505",
+     "60d6d4d5e3f22e4a",
+     "fc244c384f004bff",
+     "43ca86e40752304d",
+     "8f576e568aeb8319",
+     "fcd3093492169274",
+     "6e176310e25d9e58",
+     "7c65fd133fee1ef4",
+     "07b366caa965b665",
+     "7a3c7c56429ac369",
+     "bcacc846bdf5f9bd",
+     "aa299320731131e8",
+     "f8f955476ad259c2",
+     "f13903260d69ff67"
+    ],
+    "k": [
+     "725350354c01c91d",
+     "2b08aff112372c9f",
+     "8cf3d4d799bedc86",
+     "50bdd4e912c562c2",
+     "b0a2efe29a62241c",
+     "f55f6a6160df733e",
+     "fc9c0cded45d554e",
+     "84c7df8d973d1999",
+     "634cc80a026b5f34",
+     "a2ce085f98c8df17"
+    ],
+    "v": [
+     "364a648f2fd28765",
+     "c2394f9f3c03f94c",
+     "e146a4a9a4326e4b",
+     "3a3b084c768099f2",
+     "071a70cfd73759d5",
+     "6a1f56d356634cd1",
+     "c97cba13fdf0c01c",
+     "709b5d386a269897",
+     "9d8f3f94735c3e6d",
+     "1b10f654f325f56b"
+    ]
+   }
+  },
+  {
+   "position": 48,
+   "runtime_msl": 92,
+   "wall_s": 2.009,
+   "steps": [
+    91,
+    91,
+    91,
+    91
+   ],
+   "emitted": 318,
+   "ref_token": 318,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 61,
+   "sim_last_iter": {
+    "iteration": 60,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     90
+    ]
+   },
+   "engine_top8": [
+    [
+     318,
+     27.375
+    ],
+    [
+     13,
+     24.75
+    ],
+    [
+     26,
+     20.75
+    ],
+    [
+     11,
+     18.0
+    ],
+    [
+     1651,
+     16.5
+    ],
+    [
+     660,
+     15.75
+    ],
+    [
+     220,
+     14.9375
+    ],
+    [
+     3376,
+     14.6875
+    ]
+   ],
+   "engine_margin_top1_top2": 2.625,
+   "row_sha": "b4cb38017cb10150",
+   "ref_topk": [
+    [
+     318,
+     27.125
+    ],
+    [
+     13,
+     24.875
+    ],
+    [
+     26,
+     20.25
+    ],
+    [
+     11,
+     18.0
+    ]
+   ],
+   "engine_at_ref_ids": [
+    27.375,
+    24.75,
+    20.75,
+    18.0
+   ],
+   "ref_margin_top1_top2": 2.25,
+   "state_sha": {
+    "conv": [
+     "19de8229704e2717",
+     "b79c7e29218e2d22",
+     "eb715cfd05841afd",
+     "19f5067e835b4e70",
+     "dbfc5037e670aef9",
+     "cff4c29e9c7d5d39",
+     "ed645aeef82d2a59",
+     "0381408cd49ada45",
+     "05648a08588d9727",
+     "ae6b73c28e1ead8c",
+     "67f417233d077ddb",
+     "6e054b4964924052",
+     "2b2bd36bb13e607d",
+     "dcbf2bc18639dee8",
+     "6e7d8457f361a95d",
+     "4dd39f757dac9fd4",
+     "0db9caa7b523f7d9",
+     "31c0f7d71b464ea3",
+     "2b0b06d38f9692e9",
+     "7ed0fbe230151d4e",
+     "ac3389e34c16680a",
+     "28d59a70e8f13014",
+     "acccfe6a3da858af",
+     "79f1848b6d8e73fa",
+     "f40f5e90347d341b",
+     "fc6c28026ede39f8",
+     "9e67503c340b8888",
+     "874d4a6bf3a43b77",
+     "fd499c256ed2cfa5",
+     "438acf0806dc47e0"
+    ],
+    "recur": [
+     "72544b06e10d6311",
+     "023bb78a4aa7a0cc",
+     "37645fe9800b82b8",
+     "2d9d9b4710f76ded",
+     "3b159a474c39d8bf",
+     "602708126f9c481f",
+     "020887c06d30338e",
+     "534a960a099dfd0c",
+     "04608281e716973b",
+     "e6199ab32e8c751b",
+     "35256faf181c0139",
+     "26b85462e98e9c0e",
+     "e04b133fbcee6ec7",
+     "e90b83c2ec0edef5",
+     "3c85d9c0f0680979",
+     "7eeb5dc089021bc7",
+     "42a9bc198d879cc8",
+     "a5c95306f946f449",
+     "36f7f2c602479c4a",
+     "1d4c8afa7b4e8ea3",
+     "392ba9133057180d",
+     "ccc84f96c31374a0",
+     "ea16fd660a0c6a41",
+     "f21e925eed84d65a",
+     "68e11d5f4d047255",
+     "4ea22acaf05c1bd8",
+     "8a02042977cdc551",
+     "ac27aefc0752246c",
+     "a3ccf222f472325c",
+     "e797658e2b8bd62f"
+    ],
+    "k": [
+     "a47d95151f8a895e",
+     "5042cf006921d53e",
+     "8abd1eb8125bdf57",
+     "98e74c37bf279455",
+     "dc473c21804acf32",
+     "2b9df40a04fc4f33",
+     "dea2f7ca2db39c22",
+     "f4d85d14cb9ad23b",
+     "afb746e28fe447e8",
+     "bc4d09d5ae129fd9"
+    ],
+    "v": [
+     "20c06340272c80fc",
+     "b1325ba3c5d67bde",
+     "fde225990aea23f0",
+     "78076bf0c921d505",
+     "cd4222b633414e88",
+     "df3428d62707d088",
+     "26241feafd7b57e4",
+     "d831ec9939980858",
+     "b366a877137dc4e9",
+     "490947a3d541ef6d"
+    ]
+   }
+  },
+  {
+   "position": 49,
+   "runtime_msl": 93,
+   "wall_s": 2.002,
+   "steps": [
+    92,
+    92,
+    92,
+    92
+   ],
+   "emitted": 528,
+   "ref_token": 528,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 62,
+   "sim_last_iter": {
+    "iteration": 61,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     91
+    ]
+   },
+   "engine_top8": [
+    [
+     528,
+     22.5
+    ],
+    [
+     1719,
+     22.125
+    ],
+    [
+     7949,
+     21.125
+    ],
+    [
+     22,
+     21.125
+    ],
+    [
+     56871,
+     19.0
+    ],
+    [
+     21,
+     17.125
+    ],
+    [
+     4612,
+     17.125
+    ],
+    [
+     19458,
+     17.125
+    ]
+   ],
+   "engine_margin_top1_top2": 0.375,
+   "row_sha": "7f9980fe9aadd42a",
+   "ref_topk": [
+    [
+     528,
+     22.5
+    ],
+    [
+     1719,
+     21.875
+    ],
+    [
+     7949,
+     20.875
+    ],
+    [
+     22,
+     20.75
+    ]
+   ],
+   "engine_at_ref_ids": [
+    22.5,
+    22.125,
+    21.125,
+    21.125
+   ],
+   "ref_margin_top1_top2": 0.625,
+   "state_sha": {
+    "conv": [
+     "e7772cbd02991532",
+     "54676a40e629c3b4",
+     "b691f594c381e7ac",
+     "cb05791b07cf6fba",
+     "a343709b44a548f1",
+     "4075af2523b1927d",
+     "14e1743a4f4918d4",
+     "3cd4b8eab140ccd1",
+     "779cb942f640c9a4",
+     "027097df795b7383",
+     "c4e3a3b0cc1b5c09",
+     "46db19a387a37b46",
+     "31bfce067aa829e5",
+     "2befd6ad3caeae24",
+     "03a0e08dbc164f03",
+     "5dc443f7b9a8ae3f",
+     "39c9422209290325",
+     "47717deb508d5b1d",
+     "28088727fa8b1e81",
+     "478b87e5701ad51d",
+     "b8a5ad72b72436ee",
+     "44eec6f5857aa0a0",
+     "4785d9de5b74ca62",
+     "b218c28f6b9ef9d0",
+     "69f0609862a6ce0c",
+     "c7416b06d765b2bc",
+     "28fbf55686a68cc6",
+     "2c492501b5ec5ffa",
+     "5ead119ceb78f00a",
+     "2bc0e4b1116893a3"
+    ],
+    "recur": [
+     "b2f2a9707d235ce2",
+     "e2f77842ba66361a",
+     "c57b84c4d74114a3",
+     "01eeba9a33c04b2d",
+     "c05ebaff5f1180a2",
+     "1c215b4112550d92",
+     "28be76b777821e66",
+     "56b76ba8a3cf1a98",
+     "ffa242be7e0de13b",
+     "33f4096e47f91a0c",
+     "3ffed9bc02c2be42",
+     "e7d91e4918d52a9f",
+     "f4d3a46ba8b292fa",
+     "f5ec3fbcd7a3192b",
+     "6ccc0b9b3ef6b01b",
+     "e4356bcb8f416ec9",
+     "7f74bb7d67ac5241",
+     "bbcb0f9d1a4edc51",
+     "c33abbccd2127b32",
+     "565bdf4fcc190f70",
+     "6e2e407a8a8c59d7",
+     "5c4a57054021b7b0",
+     "6830bb541b007fba",
+     "6e5cb808cda26eec",
+     "ba679dd094d15f3b",
+     "f81d9e34973f728d",
+     "32ac9b78f72dc1fc",
+     "0c6990ba8dbe309c",
+     "9ac0b4d9b65e382e",
+     "2cdaf1b7cfcb50d4"
+    ],
+    "k": [
+     "a640da350f1a9dee",
+     "cd14855ef130b01d",
+     "5decaf069bcc6dd9",
+     "8f2a449c3fc7ee96",
+     "c4ede4224d692cee",
+     "e1e09ea86fc2bab5",
+     "c17d0945f6a3ac80",
+     "71cf22551b970c51",
+     "5f09c16c2a01a422",
+     "c4ad870f18f81d3a"
+    ],
+    "v": [
+     "40bc3bfa2c470754",
+     "d3fd2ea22c783ea0",
+     "6aafc2887d38f167",
+     "11b840c188169786",
+     "111febbba9d9d2c5",
+     "b108daf0dfc7aa65",
+     "ae48ed36f671ea2c",
+     "1d13529c9a5d57bd",
+     "3fbc411c48e22683",
+     "1aa1686ac414064d"
+    ]
+   }
+  },
+  {
+   "position": 50,
+   "runtime_msl": 94,
+   "wall_s": 2.001,
+   "steps": [
+    93,
+    93,
+    93,
+    93
+   ],
+   "emitted": 3672,
+   "ref_token": 3672,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 63,
+   "sim_last_iter": {
+    "iteration": 62,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     92
+    ]
+   },
+   "engine_top8": [
+    [
+     3672,
+     25.875
+    ],
+    [
+     975,
+     22.125
+    ],
+    [
+     4472,
+     20.25
+    ],
+    [
+     220,
+     19.75
+    ],
+    [
+     5129,
+     18.625
+    ],
+    [
+     5951,
+     18.375
+    ],
+    [
+     28606,
+     18.25
+    ],
+    [
+     279,
+     18.0
+    ]
+   ],
+   "engine_margin_top1_top2": 3.75,
+   "row_sha": "3d9277704183de36",
+   "ref_topk": [
+    [
+     3672,
+     25.875
+    ],
+    [
+     975,
+     22.75
+    ],
+    [
+     4472,
+     20.875
+    ],
+    [
+     220,
+     19.375
+    ]
+   ],
+   "engine_at_ref_ids": [
+    25.875,
+    22.125,
+    20.25,
+    19.75
+   ],
+   "ref_margin_top1_top2": 3.125,
+   "state_sha": {
+    "conv": [
+     "bc95c16b7ddd8b66",
+     "8b917095d03f4af2",
+     "b6c1aff2e3d97368",
+     "133bb7d6a396f812",
+     "687e5d828464e036",
+     "3cfdd6e4fba749ba",
+     "07b406f3db537257",
+     "87598c873ffa13ac",
+     "a05865874611aa4e",
+     "edd784b6109e40ce",
+     "c9ba49d11805e9b4",
+     "dbf4d9076dc67783",
+     "4e38edc6569e8bcf",
+     "013cd579501344be",
+     "d726b74c971a63b8",
+     "79b220746a9516b0",
+     "89b60bf001dfff3a",
+     "db35b34fc5f13d5b",
+     "c356eb5517d53812",
+     "35672a6fdbf41bd4",
+     "ae4f65b685c1ec27",
+     "12e0fd00c0fd71ac",
+     "c2a5b3682b7fdd78",
+     "48137d773f6c1b71",
+     "a91b8c46d648984d",
+     "cc3340b9feefe3c8",
+     "fd618aa217fdbbea",
+     "29d1da2d5a875014",
+     "7ba5b82e87304508",
+     "56737bca1a031601"
+    ],
+    "recur": [
+     "8d97db40d59a1a23",
+     "83e43e4f8a55690b",
+     "e600480dff9b6c93",
+     "7059db697b83c079",
+     "443affeb3731351b",
+     "a1515aaafb50b92d",
+     "572fc7f9e8a69b2e",
+     "2ff555cfb517be19",
+     "3a85f3da6db4aeb4",
+     "495c043ed7ee39b7",
+     "1aec90d61e2f3c59",
+     "5b019f6a23cdae3f",
+     "bc2079f22ceefb42",
+     "feb76a1d49cbc22b",
+     "5126dd3df1d9a0a0",
+     "2bb629a79f775a76",
+     "c45cb4ff30eb2efc",
+     "f7393915723035f7",
+     "c85c84da8d454bbf",
+     "2651cbaae558def2",
+     "3b548a42fd3b3e30",
+     "0693d03c176cd080",
+     "3813cf393822bb9a",
+     "c34c48a7a7593c89",
+     "aca1d26b0a626c11",
+     "5853ee0e8d44f0b7",
+     "29a1fe3b1140e940",
+     "4d318e65464bc5ea",
+     "d48a24eb8f3e78fe",
+     "23d9ad4ca1405314"
+    ],
+    "k": [
+     "a48466d0572de695",
+     "5a31fe65ac3c86d0",
+     "a43c500fd6a2db34",
+     "234618d937712c15",
+     "8e5d2f6ba1739f1a",
+     "af8bdf5243b2d205",
+     "eafef84c8d626331",
+     "56a034d7777714e1",
+     "ebffdbe37bba46a3",
+     "db82b7346f43a436"
+    ],
+    "v": [
+     "e0687ef4c1f89de7",
+     "6d92fb05bd23dfa0",
+     "eda834a9d047c04c",
+     "210029c23d3175fc",
+     "d2148ee85f7305d9",
+     "b83a4ca1b08e1c8b",
+     "a7f25a8a2cca6ffe",
+     "1fbb9a71f1801110",
+     "7ecb4eaf0656d4dd",
+     "9b0173f2addfe9c8"
+    ]
+   }
+  },
+  {
+   "position": 55,
+   "runtime_msl": 99,
+   "wall_s": 2.002,
+   "steps": [
+    98,
+    98,
+    98,
+    98
+   ],
+   "emitted": 198,
+   "ref_token": 198,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3,
+    15
+   ],
+   "row_used": 3,
+   "sim_iterations": 68,
+   "sim_last_iter": {
+    "iteration": 67,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     97
+    ]
+   },
+   "engine_top8": [
+    [
+     198,
+     25.75
+    ],
+    [
+     561,
+     18.75
+    ],
+    [
+     220,
+     17.5
+    ],
+    [
+     357,
+     16.25
+    ],
+    [
+     1942,
+     15.625
+    ],
+    [
+     24235,
+     15.0
+    ],
+    [
+     3648,
+     14.9375
+    ],
+    [
+     1165,
+     14.9375
+    ]
+   ],
+   "engine_margin_top1_top2": 7.0,
+   "row_sha": "68adb298014c093c",
+   "ref_topk": [
+    [
+     198,
+     25.875
+    ],
+    [
+     561,
+     19.125
+    ],
+    [
+     220,
+     17.875
+    ],
+    [
+     3648,
+     16.0
+    ]
+   ],
+   "engine_at_ref_ids": [
+    25.75,
+    18.75,
+    17.5,
+    14.9375
+   ],
+   "ref_margin_top1_top2": 6.75,
+   "state_sha": {
+    "conv": [
+     "aab3d906acd07fd1",
+     "93ae4b1ddb29a8cd",
+     "0935e447bf5d117b",
+     "b4db4ca1aa0a25fb",
+     "b06353284d5d5821",
+     "c3ccfb5c0a87f9aa",
+     "bdb8b8613009214f",
+     "8fe30a3645b82c7b",
+     "45e6ecb1c86b5686",
+     "734bf544e2909aa4",
+     "85b5f1f56812fa60",
+     "9e5c8f0555b081df",
+     "ea5b8c97b3692533",
+     "0dd290af3629dbf1",
+     "d40afe141c2997b2",
+     "e16e4641dc0b9142",
+     "79ab1a256d394cbe",
+     "b5bcd4e5e4283a4e",
+     "d6f0cd02e67cb0ee",
+     "b3e6dd4475227904",
+     "9d2fec6c4f0e4306",
+     "ae6da2a81039c0a2",
+     "bfdab60764eb5152",
+     "befa9bea2b18e112",
+     "175a99a1638e1ebc",
+     "22f840093c426506",
+     "3c705c9126c97fe0",
+     "197a533365860158",
+     "0b93de6c5881a0ae",
+     "c2f17e3dad1a3b61"
+    ],
+    "recur": [
+     "8734f80f66157306",
+     "ae98e964873cc540",
+     "40ef9121d7a9eacb",
+     "d9f49003b580f28a",
+     "bfb2bb8f269b6b64",
+     "0cacd800df52c002",
+     "5ec3cbac26ab3597",
+     "ee2091413d9693d7",
+     "055a305fca4d36ec",
+     "f1427f1f6982e698",
+     "1890b430d6031b38",
+     "dcbd02a5e7d24afb",
+     "798bda0f41b7fbde",
+     "de507f5938a62a34",
+     "01cbd211552f9863",
+     "1e419028012c0e5c",
+     "ac74e835fccbbc17",
+     "2de442ca93812e5a",
+     "d3555cba3c093e38",
+     "0bd107f1d1b4be80",
+     "82ac1bb95c6cbfed",
+     "ab9b12a3c1a41c0e",
+     "2138c88fb589d4d7",
+     "4d80d2a0989cbb6b",
+     "d7388c59dfd0cbc9",
+     "8c3839dacfe8639f",
+     "2a821dc8ea56b593",
+     "c896bc0f6a22f968",
+     "00c6f98a2c7a5b68",
+     "a3927129ec8bc761"
+    ],
+    "k": [
+     "891fee10e6d6c96a",
+     "c7dcba8d288eda48",
+     "73fb72ae3337cb1a",
+     "e98b54b4bd1d7ff0",
+     "ba980a8e51302ac6",
+     "335aa09af7d71915",
+     "f141b48fa85f7424",
+     "e316fc5d243a3ca9",
+     "c9a30c63f853f84a",
+     "638d7274b7d5a42e"
+    ],
+    "v": [
+     "3b12d5a96e62d5be",
+     "947f6fd3794216c5",
+     "aeaca05dda6ae0a0",
+     "d6633bc7f47935fd",
+     "95dd0913fe569f1c",
+     "302e44298887c065",
+     "03b249d4940c11c0",
+     "505c814b33937297",
+     "99a3973460bd9f49",
+     "fbf59106275e1e0f"
+    ]
+   }
+  },
+  {
+   "position": 63,
+   "runtime_msl": 107,
+   "wall_s": 2.001,
+   "steps": [
+    106,
+    106,
+    106,
+    106
+   ],
+   "emitted": 7915,
+   "ref_token": 7915,
+   "tokens_match_reference_so_far": true,
+   "first_token_mismatch": null,
+   "predicted_row": null,
+   "rows_matching_emitted": [
+    3
+   ],
+   "row_used": 3,
+   "sim_iterations": 76,
+   "sim_last_iter": {
+    "iteration": 75,
+    "tokens": 1,
+    "n_live": 1,
+    "n_prefill": 0,
+    "n_decode": 1,
+    "n_active": 1,
+    "max_chunk": 1,
+    "chunks": [
+     1
+    ],
+    "slots": [
+     0
+    ],
+    "steps": [
+     105
+    ]
+   },
+   "engine_top8": [
+    [
+     7915,
+     30.375
+    ],
+    [
+     1330,
+     21.625
+    ],
+    [
+     4145,
+     19.75
+    ],
+    [
+     41930,
+     19.625
+    ],
+    [
+     29835,
+     19.25
+    ],
+    [
+     6989,
+     19.0
+    ],
+    [
+     23086,
+     18.75
+    ],
+    [
+     5129,
+     18.5
+    ]
+   ],
+   "engine_margin_top1_top2": 8.75,
+   "row_sha": "bc3943887c16ffa0",
+   "ref_topk": [
+    [
+     7915,
+     30.5
+    ],
+    [
+     1330,
+     21.5
+    ],
+    [
+     4145,
+     19.875
+    ],
+    [
+     41930,
+     19.5
+    ]
+   ],
+   "engine_at_ref_ids": [
+    30.375,
+    21.625,
+    19.75,
+    19.625
+   ],
+   "ref_margin_top1_top2": 9.0,
+   "state_sha": {
+    "conv": [
+     "bf2e7487c2884a2a",
+     "3d2f1e93b7a952ae",
+     "961d3a6a5c05a5aa",
+     "5b1706d6730acd81",
+     "55efe296111e7966",
+     "841d189fa8e6112a",
+     "df1efdeee80a6f56",
+     "0de4aa681c833248",
+     "09004e1a31040ce1",
+     "62a782534a83631b",
+     "418d718e70865767",
+     "e82e3b08c0784dc5",
+     "aed81c24d07219c3",
+     "4ead46ec6e14aed4",
+     "51dcc69aa292dff6",
+     "9f5742b61ba84f14",
+     "b543fef9cc32b1ee",
+     "67ba6459ab3425e1",
+     "7689afc883efb256",
+     "a18dc1b9fed07b1e",
+     "a4c13fc0d4760457",
+     "7f5479e4a297b561",
+     "5406ae6e374c1f45",
+     "b280a735c730ed8d",
+     "11c235728df36a13",
+     "cb9ea53711a11aa2",
+     "195f4fd4ded9b5bf",
+     "e1f04194534fcff9",
+     "b3c8f9ab5f5f99a8",
+     "178305e47e2b4eda"
+    ],
+    "recur": [
+     "cf359c39a2e2a182",
+     "6710a5fca45935ad",
+     "baa8439c8f1f31f1",
+     "364aa630fa2c619e",
+     "76bc0635a81e72ce",
+     "8dd598df57ad78d4",
+     "3c14840e4adea144",
+     "3c253431a281115e",
+     "b0ba929cb169338a",
+     "9a6997e792ce6c38",
+     "e90cc359f0d88a20",
+     "9df5e8b66a92aa4c",
+     "499d731a0d2dce9a",
+     "2e8fa33b61cd5da8",
+     "13879d17dd9e65a6",
+     "506a7627834974ef",
+     "ed272e0be898d0ad",
+     "b27fff7636f23ee0",
+     "6121a3294831e474",
+     "9dd435be87595463",
+     "1701fa2d8d20ce71",
+     "f0ea342fa8aab5dd",
+     "5188990c1b5295ed",
+     "9fb781739576c961",
+     "f8e793233d9e8a68",
+     "af2c0d11c520c7ba",
+     "7ad15612c7a41207",
+     "3ab1c5c9251ca9b1",
+     "b4f3776aa9d4da73",
+     "5229c9c973525056"
+    ],
+    "k": [
+     "7aa30cb4b0923ba5",
+     "d1e93fcee545bab8",
+     "816b1f3c665dbe6f",
+     "6ff96d73925ed2ce",
+     "548163f14868037c",
+     "5d9c9791df38cbcf",
+     "83cf261039b974c9",
+     "a918ecd1aa17063f",
+     "1e653027643fd041",
+     "00493b77dff24ac0"
+    ],
+    "v": [
+     "f09f87eaa6f3ec54",
+     "9206be216bbf307a",
+     "c94c84b0e4f577a4",
+     "2f6c8c953270eebf",
+     "8ec284dc5437ff48",
+     "89963fe1d67c469a",
+     "ef5526e91519ee10",
+     "156bbe0e5d9e5469",
+     "0093c106f9f62c85",
+     "85206146649cdb36"
+    ]
+   }
+  }
+ ],
+ "state_sha": {
+  "conv_state": "7f982d3168b82b1d",
+  "recurrent_state": "d098e2227d85f1c0",
+  "k_cache": "1ad398a631826016",
+  "v_cache": "0a80876a42bea68b",
+  "argmax_in": "0c826e1aec3b10e2"
+ }
+}

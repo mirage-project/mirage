@@ -1,0 +1,30 @@
+first logit-row divergence: None   first token divergence: None
+ pos   A_emit   B_emit      ref   A_marg   B_marg  gapshift   maxULP same
+   0     8160     8160     8160    1.875    1.875       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+   5      421      421      421   11.875   11.875       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  10       25       25       25     6.25     6.25       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  15     2972     2972     2972    12.75    12.75       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  20    64700    64700    64700    13.75    13.75       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  25     2972     2972     2972    3.875    3.875       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  30    18922    18922    18922      1.5      1.5       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  35      262      262      262   12.875   12.875       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  40    64700    64700    64700    12.25    12.25       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  43      369      369      369   11.125   11.125       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  45     1056     1056     1056     2.75     2.75       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  46      279      279      279   10.375   10.375       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  47     3672     3672     3672    0.625    0.625       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  48      318      318      318    2.625    2.625       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  49      528      528      528    0.375    0.375       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  50     3672     3672     3672     3.75     3.75       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  55      198      198      198      7.0      7.0       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+  63     7915     7915     7915     8.75     8.75       0.0      0.0 Y  state:conv=0@None recur=0@None k=0@None v=0@None
+conv_state {"n_layers": 30, "first_divergent_layer": null, "all_identical": true}
+recurrent_state {"n_layers": 30, "first_divergent_layer": null, "all_identical": true}
+k_cache {"n_layers": 10, "first_divergent_layer": null, "all_identical": true}
+v_cache {"n_layers": 10, "first_divergent_layer": null, "all_identical": true}
+argmax_in {"identical": false, "n_elem": 3973120, "n_diff": 3219797, "frac_diff": 0.810395, "max_abs_delta": 36.546875, "max_rel_delta": 1.0670620437956204, "rms_a": 3.072497606277466}
+--- conv_state: 0/30 layers differ
+--- recurrent_state: 0/30 layers differ
+--- k_cache: 0/10 layers differ
+--- v_cache: 0/10 layers differ
+wrote /home/muhengl/mpk-qwen35/m3i9b/out/cmp_bs4.json

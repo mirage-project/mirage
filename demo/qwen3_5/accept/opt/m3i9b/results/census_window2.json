@@ -1,0 +1,1576 @@
+{
+ "root": "../m3i9/results/window2/out",
+ "dumps": {
+  "ac3_cap_dumps/bs1.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "ac3_cap_dumps/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "ac3_cap_dumps/bs2.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "ac3_cap_dumps/bs4.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "ac3_cap_dumps/bs8.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "prestage_control_rep2/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "prestage_control_rep3/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s0_base/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s1_msl212/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s2_sorted_rep1/bs16.json": {
+   "md5": "4e7c3ffe4c305820c022620e79ced8e8",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p02-math",
+     0,
+     90700
+    ],
+    [
+     "p03-python",
+     21,
+     3648
+    ],
+    [
+     "p06-poem",
+     60,
+     40581
+    ],
+    [
+     "p08-science",
+     57,
+     2179
+    ],
+    [
+     "p10-logic",
+     42,
+     30
+    ]
+   ],
+   "extra": [
+    [
+     "p02-math",
+     0,
+     90700
+    ],
+    [
+     "p03-python",
+     21,
+     3648
+    ],
+    [
+     "p08-science",
+     57,
+     2179
+    ],
+    [
+     "p10-logic",
+     42,
+     30
+    ]
+   ]
+  },
+  "s2_sorted_rep2/bs16.json": {
+   "md5": "4e7c3ffe4c305820c022620e79ced8e8",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p02-math",
+     0,
+     90700
+    ],
+    [
+     "p03-python",
+     21,
+     3648
+    ],
+    [
+     "p06-poem",
+     60,
+     40581
+    ],
+    [
+     "p08-science",
+     57,
+     2179
+    ],
+    [
+     "p10-logic",
+     42,
+     30
+    ]
+   ],
+   "extra": [
+    [
+     "p02-math",
+     0,
+     90700
+    ],
+    [
+     "p03-python",
+     21,
+     3648
+    ],
+    [
+     "p08-science",
+     57,
+     2179
+    ],
+    [
+     "p10-logic",
+     42,
+     30
+    ]
+   ]
+  },
+  "s2_sorted_rep3/bs16.json": {
+   "md5": "4e7c3ffe4c305820c022620e79ced8e8",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p02-math",
+     0,
+     90700
+    ],
+    [
+     "p03-python",
+     21,
+     3648
+    ],
+    [
+     "p06-poem",
+     60,
+     40581
+    ],
+    [
+     "p08-science",
+     57,
+     2179
+    ],
+    [
+     "p10-logic",
+     42,
+     30
+    ]
+   ],
+   "extra": [
+    [
+     "p02-math",
+     0,
+     90700
+    ],
+    [
+     "p03-python",
+     21,
+     3648
+    ],
+    [
+     "p08-science",
+     57,
+     2179
+    ],
+    [
+     "p10-logic",
+     42,
+     30
+    ]
+   ]
+  },
+  "s3_codegen_identity/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s4_cap1/bs1.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s4_cap16/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s4_cap2/bs2.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s4_cap4/bs4.json": {
+   "md5": "8fd2684f79a59a7567ce6417c85c0ad7",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     81316
+    ],
+    [
+     "p10-logic",
+     49,
+     1719
+    ]
+   ],
+   "extra": [
+    [
+     "p06-poem",
+     60,
+     81316
+    ],
+    [
+     "p10-logic",
+     49,
+     1719
+    ]
+   ]
+  },
+  "s4_cap4_determinism_check/bs4.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s4_cap4_determinism_check2/bs4.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s4_cap8/bs8.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs16_rep1/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs16_rep2/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs16_rep3/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs1_rep1/bs1.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs1_rep2/bs1.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs1_rep3/bs1.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs2_rep1/bs2.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs2_rep2/bs2.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs2_rep3/bs2.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs4_rep1/bs4.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs4_rep2/bs4.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs4_rep3/bs4.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs8_rep1/bs8.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs8_rep2/bs8.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_base_bs8_rep3/bs8.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs16_rep1/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs16_rep2/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs16_rep3/bs16.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs1_rep1/bs1.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs1_rep2/bs1.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs1_rep3/bs1.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs2_rep1/bs2.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs2_rep2/bs2.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs2_rep3/bs2.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs4_rep1/bs4.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs4_rep2/bs4.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs4_rep3/bs4.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs8_rep1/bs8.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs8_rep2/bs8.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s5_cap_bs8_rep3/bs8.json": {
+   "md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+   "n_prompts": 10,
+   "gen_len": 64,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs16_rep1/bs16.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs16_rep2/bs16.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs16_rep3/bs16.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs1_rep1/bs1.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs1_rep2/bs1.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs1_rep3/bs1.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs2_rep1/bs2.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs2_rep2/bs2.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs2_rep3/bs2.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs4_rep1/bs4.json": {
+   "md5": "ab7949df5e3ae8c31aa3a94793592f85",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs4_rep2/bs4.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs4_rep3/bs4.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs8_rep1/bs8.json": {
+   "md5": "96359653ab9356533c13b872d625a22b",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs8_rep2/bs8.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_base_bs8_rep3/bs8.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs16_rep1/bs16.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs16_rep2/bs16.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs16_rep3/bs16.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs1_rep1/bs1.json": {
+   "md5": "e04acdc92b8d2357a16b31d96e004d56",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs1_rep2/bs1.json": {
+   "md5": "cca054bf5e1f6fb53eb5c773197f25df",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs1_rep3/bs1.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs2_rep1/bs2.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs2_rep2/bs2.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs2_rep3/bs2.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs4_rep1/bs4.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs4_rep2/bs4.json": {
+   "md5": "f66d6bb529acb73e951ead1ce99442e2",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs4_rep3/bs4.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs8_rep1/bs8.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs8_rep2/bs8.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  },
+  "s7_cap_bs8_rep3/bs8.json": {
+   "md5": "be346b6d868ef8e7e46980426e662722",
+   "n_prompts": 10,
+   "gen_len": 1024,
+   "divergences": [
+    [
+     "p06-poem",
+     60,
+     40581
+    ]
+   ],
+   "extra": []
+  }
+ },
+ "anomalies": [
+  {
+   "dump": "s2_sorted_rep1/bs16.json",
+   "extra": [
+    [
+     "p02-math",
+     0,
+     90700
+    ],
+    [
+     "p03-python",
+     21,
+     3648
+    ],
+    [
+     "p08-science",
+     57,
+     2179
+    ],
+    [
+     "p10-logic",
+     42,
+     30
+    ]
+   ]
+  },
+  {
+   "dump": "s2_sorted_rep2/bs16.json",
+   "extra": [
+    [
+     "p02-math",
+     0,
+     90700
+    ],
+    [
+     "p03-python",
+     21,
+     3648
+    ],
+    [
+     "p08-science",
+     57,
+     2179
+    ],
+    [
+     "p10-logic",
+     42,
+     30
+    ]
+   ]
+  },
+  {
+   "dump": "s2_sorted_rep3/bs16.json",
+   "extra": [
+    [
+     "p02-math",
+     0,
+     90700
+    ],
+    [
+     "p03-python",
+     21,
+     3648
+    ],
+    [
+     "p08-science",
+     57,
+     2179
+    ],
+    [
+     "p10-logic",
+     42,
+     30
+    ]
+   ]
+  },
+  {
+   "dump": "s4_cap4/bs4.json",
+   "extra": [
+    [
+     "p06-poem",
+     60,
+     81316
+    ],
+    [
+     "p10-logic",
+     49,
+     1719
+    ]
+   ]
+  }
+ ],
+ "md5_groups": {
+  "ed70f79cbeb797ef57ed7f3033f2bece": [
+   "ac3_cap_dumps/bs1.json",
+   "ac3_cap_dumps/bs16.json",
+   "ac3_cap_dumps/bs2.json",
+   "ac3_cap_dumps/bs4.json",
+   "ac3_cap_dumps/bs8.json",
+   "prestage_control_rep2/bs16.json",
+   "prestage_control_rep3/bs16.json",
+   "s0_base/bs16.json",
+   "s1_msl212/bs16.json",
+   "s3_codegen_identity/bs16.json",
+   "s4_cap1/bs1.json",
+   "s4_cap16/bs16.json",
+   "s4_cap2/bs2.json",
+   "s4_cap4_determinism_check/bs4.json",
+   "s4_cap4_determinism_check2/bs4.json",
+   "s4_cap8/bs8.json",
+   "s5_base_bs16_rep1/bs16.json",
+   "s5_base_bs16_rep2/bs16.json",
+   "s5_base_bs16_rep3/bs16.json",
+   "s5_base_bs1_rep1/bs1.json",
+   "s5_base_bs1_rep2/bs1.json",
+   "s5_base_bs1_rep3/bs1.json",
+   "s5_base_bs2_rep1/bs2.json",
+   "s5_base_bs2_rep2/bs2.json",
+   "s5_base_bs2_rep3/bs2.json",
+   "s5_base_bs4_rep1/bs4.json",
+   "s5_base_bs4_rep2/bs4.json",
+   "s5_base_bs4_rep3/bs4.json",
+   "s5_base_bs8_rep1/bs8.json",
+   "s5_base_bs8_rep2/bs8.json",
+   "s5_base_bs8_rep3/bs8.json",
+   "s5_cap_bs16_rep1/bs16.json",
+   "s5_cap_bs16_rep2/bs16.json",
+   "s5_cap_bs16_rep3/bs16.json",
+   "s5_cap_bs1_rep1/bs1.json",
+   "s5_cap_bs1_rep2/bs1.json",
+   "s5_cap_bs1_rep3/bs1.json",
+   "s5_cap_bs2_rep1/bs2.json",
+   "s5_cap_bs2_rep2/bs2.json",
+   "s5_cap_bs2_rep3/bs2.json",
+   "s5_cap_bs4_rep1/bs4.json",
+   "s5_cap_bs4_rep2/bs4.json",
+   "s5_cap_bs4_rep3/bs4.json",
+   "s5_cap_bs8_rep1/bs8.json",
+   "s5_cap_bs8_rep2/bs8.json",
+   "s5_cap_bs8_rep3/bs8.json"
+  ],
+  "4e7c3ffe4c305820c022620e79ced8e8": [
+   "s2_sorted_rep1/bs16.json",
+   "s2_sorted_rep2/bs16.json",
+   "s2_sorted_rep3/bs16.json"
+  ],
+  "8fd2684f79a59a7567ce6417c85c0ad7": [
+   "s4_cap4/bs4.json"
+  ],
+  "be346b6d868ef8e7e46980426e662722": [
+   "s7_base_bs16_rep1/bs16.json",
+   "s7_base_bs16_rep2/bs16.json",
+   "s7_base_bs16_rep3/bs16.json",
+   "s7_base_bs1_rep1/bs1.json",
+   "s7_base_bs1_rep2/bs1.json",
+   "s7_base_bs1_rep3/bs1.json",
+   "s7_base_bs2_rep1/bs2.json",
+   "s7_base_bs2_rep2/bs2.json",
+   "s7_base_bs2_rep3/bs2.json",
+   "s7_base_bs4_rep2/bs4.json",
+   "s7_base_bs4_rep3/bs4.json",
+   "s7_base_bs8_rep2/bs8.json",
+   "s7_base_bs8_rep3/bs8.json",
+   "s7_cap_bs16_rep1/bs16.json",
+   "s7_cap_bs16_rep2/bs16.json",
+   "s7_cap_bs16_rep3/bs16.json",
+   "s7_cap_bs1_rep3/bs1.json",
+   "s7_cap_bs2_rep1/bs2.json",
+   "s7_cap_bs2_rep2/bs2.json",
+   "s7_cap_bs2_rep3/bs2.json",
+   "s7_cap_bs4_rep1/bs4.json",
+   "s7_cap_bs4_rep3/bs4.json",
+   "s7_cap_bs8_rep1/bs8.json",
+   "s7_cap_bs8_rep2/bs8.json",
+   "s7_cap_bs8_rep3/bs8.json"
+  ],
+  "ab7949df5e3ae8c31aa3a94793592f85": [
+   "s7_base_bs4_rep1/bs4.json"
+  ],
+  "96359653ab9356533c13b872d625a22b": [
+   "s7_base_bs8_rep1/bs8.json"
+  ],
+  "e04acdc92b8d2357a16b31d96e004d56": [
+   "s7_cap_bs1_rep1/bs1.json"
+  ],
+  "cca054bf5e1f6fb53eb5c773197f25df": [
+   "s7_cap_bs1_rep2/bs1.json"
+  ],
+  "f66d6bb529acb73e951ead1ce99442e2": [
+   "s7_cap_bs4_rep2/bs4.json"
+  ]
+ },
+ "rep_matrix": {
+  "s5_base_bs1": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s5_base_bs16": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s5_base_bs2": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s5_base_bs4": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s5_base_bs8": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s5_cap_bs1": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s5_cap_bs16": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s5_cap_bs2": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s5_cap_bs4": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s5_cap_bs8": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s7_base_bs1": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s7_base_bs16": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s7_base_bs2": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s7_base_bs4": {
+   "1v2": [
+    "p03-python",
+    632
+   ],
+   "1v3": [
+    "p03-python",
+    632
+   ],
+   "2v3": null
+  },
+  "s7_base_bs8": {
+   "1v2": [
+    "p02-math",
+    592
+   ],
+   "1v3": [
+    "p02-math",
+    592
+   ],
+   "2v3": null
+  },
+  "s7_cap_bs1": {
+   "1v2": [
+    "p03-python",
+    789
+   ],
+   "1v3": [
+    "p03-python",
+    859
+   ],
+   "2v3": [
+    "p03-python",
+    789
+   ]
+  },
+  "s7_cap_bs16": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s7_cap_bs2": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s7_cap_bs4": {
+   "1v2": [
+    "p08-science",
+    407
+   ],
+   "1v3": null,
+   "2v3": [
+    "p08-science",
+    407
+   ]
+  },
+  "s7_cap_bs8": {
+   "1v2": null,
+   "1v3": null,
+   "2v3": null
+  },
+  "s7_bs8_base_vs_cap": {
+   "rep1": [
+    "p02-math",
+    592
+   ],
+   "rep2": null,
+   "rep3": null
+  },
+  "s7_bs16_base_vs_cap": {
+   "rep1": null,
+   "rep2": null,
+   "rep3": null
+  },
+  "s7_bs1_base_vs_cap": {
+   "rep1": [
+    "p03-python",
+    859
+   ],
+   "rep2": [
+    "p03-python",
+    789
+   ],
+   "rep3": null
+  },
+  "s5_bs2_base_vs_cap": {
+   "rep1": null,
+   "rep2": null,
+   "rep3": null
+  },
+  "s7_bs4_base_vs_cap": {
+   "rep1": [
+    "p03-python",
+    632
+   ],
+   "rep2": [
+    "p08-science",
+    407
+   ],
+   "rep3": null
+  },
+  "s7_bs2_base_vs_cap": {
+   "rep1": null,
+   "rep2": null,
+   "rep3": null
+  },
+  "s5_bs8_base_vs_cap": {
+   "rep1": null,
+   "rep2": null,
+   "rep3": null
+  },
+  "s5_bs16_base_vs_cap": {
+   "rep1": null,
+   "rep2": null,
+   "rep3": null
+  },
+  "s5_bs1_base_vs_cap": {
+   "rep1": null,
+   "rep2": null,
+   "rep3": null
+  },
+  "s5_bs4_base_vs_cap": {
+   "rep1": null,
+   "rep2": null,
+   "rep3": null
+  }
+ },
+ "summary": {
+  "n_dumps": 80,
+  "n_anomalous": 4,
+  "n_md5_groups": 9,
+  "largest_md5_group": 46
+ }
+}

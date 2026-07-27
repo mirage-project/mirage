@@ -1,0 +1,10 @@
+--- c1_cap_3waves (10 prompts)
+    p06-poem: first divergence pos 60 ref=31000 got=40581 refmargin=0.0
+    all-match: False
+--- c2_cap_wave1 (4 prompts)
+    all-match: True
+--- c3_base_3waves (10 prompts)
+    p06-poem: first divergence pos 60 ref=31000 got=40581 refmargin=0.0
+    all-match: False
+--- c4_base_wave1 (4 prompts)
+    all-match: True
