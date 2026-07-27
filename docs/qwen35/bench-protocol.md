@@ -378,3 +378,13 @@ at the matched 256/1024 workload. At bs<16 the cap genuinely changes prefill chu
 boundaries — perf-neutral-to-negative by design AND numerically shifted at bs4 (p10-logic
 margin-0.625 flip; see M3-I9b) — so it stays off. Evidence: opt/m3i9/{predictions.md,
 predictions_addendum.md,results/}.
+
+## Determinism protocol (M3-I9b/I11, 2026-07-27)
+
+MPK is not currently run-to-run deterministic at long generation (M3-I11, open). Until it
+closes: (a) any "policy/config X changed the tokens" claim requires >=2 same-config reps
+(a single divergent dump is an anomaly candidate, not a finding); (b) margin/waiver
+arguments use the ENGINE's own logits (reference-side margins overstate robustness — p10@49
+was 0.625 reference-side but 0.375 = 3 bf16 ULPs engine-side); (c) harness runs refuse
+ambiguous dump trees (run_ac3.py fix lands with I11). The bs16-conditional cap policy above
+is justified on PERF grounds (the cap is bit-transparent at every bs — I9b).
