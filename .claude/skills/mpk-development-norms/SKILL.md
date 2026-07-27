@@ -73,6 +73,33 @@ method in `persistent_kernel.py`, and it is named for the operation.
    pushing. Never stage generated/local material: `scratch/`, `outputs/`, `_results/`, weight
    caches, generated `test.cu`/`.so`, perf logs, `PR_DESCRIPTION`/campaign notes, `.claude/`
    (except the sanctioned `.claude/skills/**` + `.claude/agents/**` on a skills PR).
+10. **No gratuitous assertions / error-throwing.** Before adding ANY `assert` / `raise` / `throw`
+    / `abort` / fail-loud check, ask: (a) did upstream have it? (b) is it necessary? (c) does
+    *omitting* it have a **correctness** consequence — a silently-wrong result, not merely a
+    later natural error? If (b)/(c) are "no", don't add it — **default to not adding.**
+    Seemingly-correct defensive throws have caused real breakage: they fire on *valid* states and
+    mislead debugging (a real case: `assert(params.size()==0||3)` that rejected the valid
+    1-param call the reader itself was written to handle). Keep a check only when it guards a
+    real, demonstrated failure **or** a silently-wrong path (wrong-kernel selection, a BF16/FP8
+    fork), and even then prefer the existing/upstream idiom over a new fail-loud `abort`. A check
+    that only pretty-prints an error the very next line would raise anyway (a `KeyError`, a dtype
+    error) is pure surface — drop it. Config guards that merely **restate a predicate the caller
+    already checked** are the archetype to delete. Same test for host launch/return-code checks:
+    if upstream launched without the check and omitting it just defers to the next CUDA error,
+    it's surface.
+11. **No gratuitous renames / type-descriptors on working code.** Don't rename existing symbols
+    (functions, params, enum symbols) or **renumber a task-type enum** or bolt on type
+    annotations / descriptor fields / "API-parity" wrapper params to code that already runs —
+    unless that change is itself the point. Two distinct breakages: a symbol rename breaks
+    source/API references (external callers, imports); **renumbering** a task-type enum (changing
+    its integer value) breaks already-**serialized** task graphs, because `task_type` is
+    serialized numerically — a surviving TP8-only reducer keeps its upstream id, it is not
+    re-slotted into a deleted variant's number. A `mpk: "PersistentKernel"` annotation or a
+    `TYPE_CHECKING` import is inert at runtime and adds a dependency edge for nothing. If it ran
+    upstream without the rename/annotation/wrapper, don't add it. Accepting-then-discarding params
+    (`del eps, epsilon  # API parity`; a `group_size` arg that only exists to be rejected when
+    != 128) is the same smell — unused surface that only exists to be validated away. Revert to
+    the upstream name/shape.
 
 ## 3. PR-shape checklist (run before you open/push)
 
@@ -88,8 +115,16 @@ method in `persistent_kernel.py`, and it is named for the operation.
       with the required `Co-Authored-By` line?
 - [ ] New kernels/tasks carry their test-mode test + reference?
 - [ ] Registration coherent (enum ⇄ register ⇄ graph ⇄ wrapper), rebuilt clean?
+- [ ] No **added** assert/raise/throw/abort that fails the norm-10 test (guards nothing
+      demonstrated or silently-wrong; restates a caller predicate; pretty-prints an immediate
+      natural error)?
+- [ ] No **rename** of an existing symbol / enum name-or-value / task-type ID, and no inert
+      type-annotation / descriptor / API-parity param added to working code (norm 11)?
 - [ ] `scripts/format.sh` clean; no generated/local artifacts staged; sensitive-grep before push?
 
 ## References
 - `references/exemplar-prs.md` — the cited merged PRs per category, with their file-touch tables
   (the empirical basis for every claim above). Mirror the closest one.
+- `references/codex-checklist.md` — a self-contained, tool-agnostic review checklist (no
+  Claude/skill framing) you can paste into `codex exec` (or hand a human reviewer) to score a
+  diff against these norms. Feed it the diff + "review against this checklist".
