@@ -124,7 +124,12 @@ from ac3_types import EngineSequence, PromptRequest  # noqa: E402
 from engine_adapter import EngineAdapter  # noqa: E402
 
 MAX_NEW_TOKENS = 64
-DEFAULT_MBT = 16  # MoE router task capacity — see builder.MOE_ROUTER_MAX_ROWS_PER_TASK
+# One MoE-router pass covers 16 rows (builder.MOE_ROUTER_ROWS_PER_TILE). Until
+# M3-I5b that was a hard cap and this default WAS the cap; the kernel now loops
+# over row tiles, so mbt is a free scheduling knob again. The default is
+# deliberately UNCHANGED at 16 so every M2/M3 measurement stays comparable --
+# raising it is the A/B in demo/qwen3_5/accept/opt/m3i5b/prep.md, not a default.
+DEFAULT_MBT = 16
 DEFAULT_PAGE_SIZE = 256
 
 

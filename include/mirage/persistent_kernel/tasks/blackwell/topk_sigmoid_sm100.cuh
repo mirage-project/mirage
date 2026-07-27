@@ -157,191 +157,222 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
   int const warp_base_row = warp_idx * ROWS_PER_WARP;
 
   int const thread_row_in_warp = lane_idx / THREADS_PER_ROW;
-  int const thread_row = warp_base_row + thread_row_in_warp;
-  uint32_t const warp_mask = (num_rows % 2 == 1 && thread_row == num_rows - 1)
-                                 ? 0x0000ffff
-                                 : 0xffffffff;
 
-  if (thread_row < num_rows) {
+  // Rows one pass of this block covers. Identical situation to the softmax
+  // sibling (topk_softmax_sm100.cuh): `thread_row` came from threadIdx alone
+  // and every row past ROWS_PER_CTA was silently dropped. At DeepSeek-V3's
+  // shape (256 experts, VPT=8) THREADS_PER_ROW is a full warp, so ROWS_PER_WARP
+  // is 1 and the cap was EIGHT rows, not sixteen.
+  //
+  // BIT-EXACT FOR num_rows <= ROWS_PER_CTA BY CONSTRUCTION, same three reasons
+  // as the softmax sibling: trip count 1 => row_tile_base == 0 => `thread_row`
+  // is the pre-change expression; the body is the pre-change body verbatim;
+  // `num_rows` is a literal at the generated call site so the loop folds away.
+  // Group scores (Phase 2/3) and the top-K group set (Phase 4) are per-row
+  // state held in registers and rebuilt from scratch each trip, so no tile can
+  // see another tile's groups.
+  static constexpr int ROWS_PER_CTA = WARPS_PER_CTA * ROWS_PER_WARP;
 
-    bool const row_is_active = finished ? !finished[thread_row] : true;
-
-    // ---- Phase 1: Load logits, apply sigmoid, load bias ----
-    T *thread_row_ptr = input + thread_row * ELTS_PER_ROW;
-    int const thread_group_idx = lane_idx % THREADS_PER_ROW;
-    int const first_elt_read_by_thread =
-        thread_group_idx * (BYTES_PER_LDG / sizeof(T));
-    T *thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
-
-    using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>;
-    T row_chunk_temp[VPT];
-    AccessType *row_chunk_vec_ptr =
-        reinterpret_cast<AccessType *>(&row_chunk_temp);
-    AccessType *vec_thread_read_ptr =
-        reinterpret_cast<AccessType *>(thread_read_ptr);
-
-    // Vectorized loads
-    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-      row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
-    }
-
-    cutlass::NumericConverter<float, T> converter;
-
-    // Compute sigmoid and biased scores
-    float row_chunk[VPT];    // unbiased sigmoid scores (for final weights)
-    float biased_chunk[VPT]; // sigmoid + bias (for selection)
-
-    int const bias_offset = thread_group_idx * VPT;
-    for (int ii = 0; ii < VPT; ++ii) {
-      float logit = converter(row_chunk_temp[ii]);
-      row_chunk_temp[ii] = static_cast<T>(0); // reset for split-k
-      float sig = 1.0f / (1.0f + expf(-logit));
-      row_chunk[ii] = sig;
-      biased_chunk[ii] = sig + bias[bias_offset + ii];
-    }
-
-    // Write back zeros (same as softmax kernel, for split-k gate linear)
-    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-      vec_thread_read_ptr[ii * THREADS_PER_ROW] = row_chunk_vec_ptr[ii];
-    }
-
-    // ---- Phase 2: Group top-2 reduction ----
-    // Each thread computes local top-2 of its VPT biased values
-    float local_top1 = biased_chunk[0];
-    float local_top2 = -1e30f;
-    for (int ii = 1; ii < VPT; ++ii) {
-      float val = biased_chunk[ii];
-      if (val > local_top1) {
-        local_top2 = local_top1;
-        local_top1 = val;
-      } else if (val > local_top2) {
-        local_top2 = val;
+  for (int row_tile_base = 0; row_tile_base < num_rows;
+       row_tile_base += ROWS_PER_CTA) {
+    int const thread_row = row_tile_base + warp_base_row + thread_row_in_warp;
+    // The pre-M3-I5b mask was `(num_rows % 2 == 1 && thread_row == num_rows-1)
+    // ? 0x0000ffff : 0xffffffff`, which is wrong for THREADS_PER_ROW == 32:
+    // there a row spans ALL 32 lanes, so restricting to the low 16 makes lanes
+    // 16-31 call __shfl_xor_sync with a mask that excludes them (undefined per
+    // the CUDA C++ guide). It is also wrong once the row loop exists, because
+    // an odd num_rows > ROWS_PER_CTA leaves a full-width row in a later tile.
+    // Use the softmax sibling's form: compile-time-off unless a warp really is
+    // split into two sub-groups, and keyed on the last row either way.
+    uint32_t warp_mask = 0xffffffffu;
+    if constexpr (THREADS_PER_ROW != WARP_SIZE_SIGMOID) {
+      constexpr uint32_t subgroup_mask = (1u << THREADS_PER_ROW) - 1u;
+      if ((num_rows % ROWS_PER_WARP) != 0 && thread_row == num_rows - 1) {
+        warp_mask = subgroup_mask << (thread_row_in_warp * THREADS_PER_ROW);
       }
     }
 
-    // Reduce top-2 across THREADS_PER_GROUP threads within the group
-    for (int mask = THREADS_PER_GROUP / 2; mask > 0; mask /= 2) {
-      float other_top1 =
-          __shfl_xor_sync(warp_mask, local_top1, mask, THREADS_PER_ROW);
-      float other_top2 =
-          __shfl_xor_sync(warp_mask, local_top2, mask, THREADS_PER_ROW);
-      merge_top2(local_top1, local_top2, other_top1, other_top2);
-    }
-    float group_score = local_top1 + local_top2;
+    if (thread_row < num_rows) {
 
-    // ---- Phase 3: Broadcast group scores and select top-K groups ----
-    float all_group_scores[NUM_GROUPS];
-    for (int g = 0; g < NUM_GROUPS; ++g) {
-      int source_lane = g * THREADS_PER_GROUP;
-      all_group_scores[g] =
-          __shfl_sync(warp_mask, group_score, source_lane, THREADS_PER_ROW);
-    }
+      bool const row_is_active = finished ? !finished[thread_row] : true;
 
-    // Iterative top-K group selection
-    bool group_selected[NUM_GROUPS];
-    for (int g = 0; g < NUM_GROUPS; ++g) {
-      group_selected[g] = false;
-    }
-    for (int ki = 0; ki < TOPK_GROUP; ++ki) {
-      int best_g = 0;
-      float best_s = -1e30f;
-      for (int g = 0; g < NUM_GROUPS; ++g) {
-        if (!group_selected[g] && all_group_scores[g] > best_s) {
-          best_s = all_group_scores[g];
-          best_g = g;
-        }
+      // ---- Phase 1: Load logits, apply sigmoid, load bias ----
+      T *thread_row_ptr = input + thread_row * ELTS_PER_ROW;
+      int const thread_group_idx = lane_idx % THREADS_PER_ROW;
+      int const first_elt_read_by_thread =
+          thread_group_idx * (BYTES_PER_LDG / sizeof(T));
+      T *thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
+
+      using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>;
+      T row_chunk_temp[VPT];
+      AccessType *row_chunk_vec_ptr =
+          reinterpret_cast<AccessType *>(&row_chunk_temp);
+      AccessType *vec_thread_read_ptr =
+          reinterpret_cast<AccessType *>(thread_read_ptr);
+
+      // Vectorized loads
+      for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+        row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
       }
-      group_selected[best_g] = true;
-    }
 
-    // ---- Phase 4: Mask non-selected groups ----
-    int my_group = thread_group_idx / THREADS_PER_GROUP;
-    if (!group_selected[my_group]) {
+      cutlass::NumericConverter<float, T> converter;
+
+      // Compute sigmoid and biased scores
+      float row_chunk[VPT];    // unbiased sigmoid scores (for final weights)
+      float biased_chunk[VPT]; // sigmoid + bias (for selection)
+
+      int const bias_offset = thread_group_idx * VPT;
       for (int ii = 0; ii < VPT; ++ii) {
-        biased_chunk[ii] = -10000.f;
+        float logit = converter(row_chunk_temp[ii]);
+        row_chunk_temp[ii] = static_cast<T>(0); // reset for split-k
+        float sig = 1.0f / (1.0f + expf(-logit));
+        row_chunk[ii] = sig;
+        biased_chunk[ii] = sig + bias[bias_offset + ii];
       }
-    }
 
-    // ---- Phase 5: Top-K expert selection (same loop as softmax) ----
-    int start_col = first_elt_read_by_thread;
-    static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
-    float weight_sum = 0.f;
+      // Write back zeros (same as softmax kernel, for split-k gate linear)
+      for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+        vec_thread_read_ptr[ii * THREADS_PER_ROW] = row_chunk_vec_ptr[ii];
+      }
 
-    for (int k_idx = 0; k_idx < TOPK_EXPERTS; ++k_idx) {
-      // Find local argmax on biased_chunk
-      float max_val = biased_chunk[0];
-      int expert = start_col;
-      for (int ldg = 0, col = start_col; ldg < LDG_PER_THREAD;
-           ++ldg, col += COLS_PER_GROUP_LDG) {
-        for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
-          float val = biased_chunk[ldg * ELTS_PER_LDG + ii];
-          if (val > max_val) {
-            max_val = val;
-            expert = col + ii;
+      // ---- Phase 2: Group top-2 reduction ----
+      // Each thread computes local top-2 of its VPT biased values
+      float local_top1 = biased_chunk[0];
+      float local_top2 = -1e30f;
+      for (int ii = 1; ii < VPT; ++ii) {
+        float val = biased_chunk[ii];
+        if (val > local_top1) {
+          local_top2 = local_top1;
+          local_top1 = val;
+        } else if (val > local_top2) {
+          local_top2 = val;
+        }
+      }
+
+      // Reduce top-2 across THREADS_PER_GROUP threads within the group
+      for (int mask = THREADS_PER_GROUP / 2; mask > 0; mask /= 2) {
+        float other_top1 =
+            __shfl_xor_sync(warp_mask, local_top1, mask, THREADS_PER_ROW);
+        float other_top2 =
+            __shfl_xor_sync(warp_mask, local_top2, mask, THREADS_PER_ROW);
+        merge_top2(local_top1, local_top2, other_top1, other_top2);
+      }
+      float group_score = local_top1 + local_top2;
+
+      // ---- Phase 3: Broadcast group scores and select top-K groups ----
+      float all_group_scores[NUM_GROUPS];
+      for (int g = 0; g < NUM_GROUPS; ++g) {
+        int source_lane = g * THREADS_PER_GROUP;
+        all_group_scores[g] =
+            __shfl_sync(warp_mask, group_score, source_lane, THREADS_PER_ROW);
+      }
+
+      // Iterative top-K group selection
+      bool group_selected[NUM_GROUPS];
+      for (int g = 0; g < NUM_GROUPS; ++g) {
+        group_selected[g] = false;
+      }
+      for (int ki = 0; ki < TOPK_GROUP; ++ki) {
+        int best_g = 0;
+        float best_s = -1e30f;
+        for (int g = 0; g < NUM_GROUPS; ++g) {
+          if (!group_selected[g] && all_group_scores[g] > best_s) {
+            best_s = all_group_scores[g];
+            best_g = g;
           }
         }
+        group_selected[best_g] = true;
       }
 
-      // Argmax reduce across subgroup
-      for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-        float other_max =
-            __shfl_xor_sync(warp_mask, max_val, mask, THREADS_PER_ROW);
-        int other_expert =
-            __shfl_xor_sync(warp_mask, expert, mask, THREADS_PER_ROW);
-        if (other_max > max_val ||
-            (other_max == max_val && other_expert < expert)) {
-          max_val = other_max;
-          expert = other_expert;
+      // ---- Phase 4: Mask non-selected groups ----
+      int my_group = thread_group_idx / THREADS_PER_GROUP;
+      if (!group_selected[my_group]) {
+        for (int ii = 0; ii < VPT; ++ii) {
+          biased_chunk[ii] = -10000.f;
         }
       }
 
-      // Gather original (unbiased) sigmoid score from owning thread
-      int owning_thread = expert / VPT;
-      int local_idx = expert % VPT;
-      float my_score = 0.f;
-      if (thread_group_idx == owning_thread) {
-        my_score = row_chunk[local_idx];
-      }
-      float orig_score =
-          __shfl_sync(warp_mask, my_score, owning_thread, THREADS_PER_ROW);
+      // ---- Phase 5: Top-K expert selection (same loop as softmax) ----
+      int start_col = first_elt_read_by_thread;
+      static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
+      float weight_sum = 0.f;
 
-      // Write output and routing indices (one thread per subgroup writes)
-      if (thread_group_idx == 0) {
-        bool const node_uses_expert =
-            expert >= start_expert && expert < end_expert;
-        bool const should_process_row = row_is_active && node_uses_expert;
-        int const out_idx = TOPK_EXPERTS * thread_row + k_idx;
-        output[out_idx] = orig_score;
-        weight_sum += orig_score;
-
-        if (should_process_row && mpk_routing_indices != nullptr) {
-          int const local_expert = expert - start_expert;
-          mpk_routing_indices[local_expert * num_rows + thread_row] = k_idx + 1;
-          if (mpk_active_expert_ids != nullptr) {
-            mpk_active_expert_ids[local_expert] = local_expert;
-          }
-        }
-      }
-
-      // Blank out the winning value for next iteration
-      if (k_idx + 1 < TOPK_EXPERTS) {
-        int const ldg_group_for_expert = expert / COLS_PER_GROUP_LDG;
-        int const thread_to_clear_in_group =
-            (expert / ELTS_PER_LDG) % THREADS_PER_ROW;
-        if (thread_group_idx == thread_to_clear_in_group) {
-          int const offset_for_expert = expert % ELTS_PER_LDG;
-          biased_chunk[ldg_group_for_expert * ELTS_PER_LDG +
-                       offset_for_expert] = -10000.f;
-        }
-      }
-    }
-
-    // ---- Phase 6: Normalize and scale ----
-    if (thread_group_idx == 0) {
-      float inv_sum = 1.0f / (weight_sum + 1e-20f);
       for (int k_idx = 0; k_idx < TOPK_EXPERTS; ++k_idx) {
-        int const out_idx = TOPK_EXPERTS * thread_row + k_idx;
-        output[out_idx] = output[out_idx] * inv_sum * routed_scaling_factor;
+        // Find local argmax on biased_chunk
+        float max_val = biased_chunk[0];
+        int expert = start_col;
+        for (int ldg = 0, col = start_col; ldg < LDG_PER_THREAD;
+             ++ldg, col += COLS_PER_GROUP_LDG) {
+          for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
+            float val = biased_chunk[ldg * ELTS_PER_LDG + ii];
+            if (val > max_val) {
+              max_val = val;
+              expert = col + ii;
+            }
+          }
+        }
+
+        // Argmax reduce across subgroup
+        for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+          float other_max =
+              __shfl_xor_sync(warp_mask, max_val, mask, THREADS_PER_ROW);
+          int other_expert =
+              __shfl_xor_sync(warp_mask, expert, mask, THREADS_PER_ROW);
+          if (other_max > max_val ||
+              (other_max == max_val && other_expert < expert)) {
+            max_val = other_max;
+            expert = other_expert;
+          }
+        }
+
+        // Gather original (unbiased) sigmoid score from owning thread
+        int owning_thread = expert / VPT;
+        int local_idx = expert % VPT;
+        float my_score = 0.f;
+        if (thread_group_idx == owning_thread) {
+          my_score = row_chunk[local_idx];
+        }
+        float orig_score =
+            __shfl_sync(warp_mask, my_score, owning_thread, THREADS_PER_ROW);
+
+        // Write output and routing indices (one thread per subgroup writes)
+        if (thread_group_idx == 0) {
+          bool const node_uses_expert =
+              expert >= start_expert && expert < end_expert;
+          bool const should_process_row = row_is_active && node_uses_expert;
+          int const out_idx = TOPK_EXPERTS * thread_row + k_idx;
+          output[out_idx] = orig_score;
+          weight_sum += orig_score;
+
+          if (should_process_row && mpk_routing_indices != nullptr) {
+            int const local_expert = expert - start_expert;
+            mpk_routing_indices[local_expert * num_rows + thread_row] = k_idx + 1;
+            if (mpk_active_expert_ids != nullptr) {
+              mpk_active_expert_ids[local_expert] = local_expert;
+            }
+          }
+        }
+
+        // Blank out the winning value for next iteration
+        if (k_idx + 1 < TOPK_EXPERTS) {
+          int const ldg_group_for_expert = expert / COLS_PER_GROUP_LDG;
+          int const thread_to_clear_in_group =
+              (expert / ELTS_PER_LDG) % THREADS_PER_ROW;
+          if (thread_group_idx == thread_to_clear_in_group) {
+            int const offset_for_expert = expert % ELTS_PER_LDG;
+            biased_chunk[ldg_group_for_expert * ELTS_PER_LDG +
+                         offset_for_expert] = -10000.f;
+          }
+        }
+      }
+
+      // ---- Phase 6: Normalize and scale ----
+      if (thread_group_idx == 0) {
+        float inv_sum = 1.0f / (weight_sum + 1e-20f);
+        for (int k_idx = 0; k_idx < TOPK_EXPERTS; ++k_idx) {
+          int const out_idx = TOPK_EXPERTS * thread_row + k_idx;
+          output[out_idx] = output[out_idx] * inv_sum * routed_scaling_factor;
+        }
       }
     }
   }

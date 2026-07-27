@@ -15,7 +15,15 @@ TOPK_GROUP = 4              # topk_group
 ROUTED_SCALING_FACTOR = 2.5 # routed_scaling_factor
 EXPERTS_PER_GROUP = NUM_EXPERTS // NUM_GROUPS  # 32
 
-BATCH_SIZES = [1, 2, 4, 8]
+# One pass of the kernel covers WARPS_PER_CTA * ROWS_PER_WARP = 8 rows at this
+# shape (256 experts, VPT=8 -> THREADS_PER_ROW = 32 -> ROWS_PER_WARP = 1). This
+# list used to STOP at 8 for exactly that reason: rows past the first pass were
+# silently dropped, the sigmoid twin of the softmax bug M2-I9 root-caused.
+# M3-I5b added the row-tile loop, so the sizes above 8 are the regression that
+# keeps it: 9 and 17 are partial last tiles, 16 and 32 are whole ones, and the
+# odd sizes are what exercised the (previously wrong) partial-warp shuffle mask.
+BATCH_SIZES = [1, 2, 4, 8, 9, 16, 17, 32]
+BENCH_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
 SEED = 42
 
 
@@ -147,7 +155,7 @@ print("=" * 70)
 WARMUP = 50
 REPETITIONS = 5000
 
-for batch_size in BATCH_SIZES:
+for batch_size in BENCH_BATCH_SIZES:
     # -- Allocate shared tensors --
     gating_output = torch.randn(
         (batch_size, NUM_EXPERTS), device="cuda", dtype=torch.bfloat16

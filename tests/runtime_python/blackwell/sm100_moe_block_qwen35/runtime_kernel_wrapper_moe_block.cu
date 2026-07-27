@@ -21,10 +21,12 @@
 //
 //   * topk_softmax_sm100  -- the router. Probe P5 needs to drive it with an
 //     EXPLICIT `VPT` rather than the `TopkConstants` default, because VPT is
-//     what sets the kernel's per-task row capacity
+//     what sets the kernel's rows-per-PASS
 //     (ROWS_PER_WARP = WARP_SIZE * VPT / NUM_EXPERTS, 8 warps per block), and
-//     P5's job is to establish whether the shipped instantiation covers our
-//     `mbt = 16` build (docs/qwen35/v1-architecture.md 9.1).
+//     P5's job was to establish whether the shipped instantiation covers our
+//     `mbt = 16` build (docs/qwen35/v1-architecture.md 9.1). Since M3-I5b the
+//     kernel loops over row tiles, so both VPTs must agree on every row and
+//     `vpt` selects how many passes it takes, not how many rows are routed.
 //   * sigmoid_gate_mul_add_sm100 (id 238) -- the new shared-expert gate task.
 //   * mul_sum_add_sm100 -- the combine, so the router weight -> combine
 //     boundary can be checked on the same bytes.
@@ -162,8 +164,10 @@ void topk_softmax_sm100(torch::Tensor gating_output,
   check_cuda("topk_softmax_sm100");
 }
 
-// Reports the compile-time row capacity of an instantiation, so the probe can
-// state it as a measured fact rather than a hand-derivation.
+// Reports the compile-time rows-per-PASS of an instantiation, so the probe can
+// state it as a measured fact rather than a hand-derivation. Since M3-I5b this
+// is a cost unit, not a capacity: the kernel repeats the pass until every row
+// is routed.
 int64_t topk_softmax_rows_per_task(int64_t vpt) {
   if (vpt == 0) {
     vpt = kernel::detail::TopkConstants<bfloat16, 256, 16>::VPT;

@@ -9,8 +9,10 @@ on the real dumps and on crafted rows:
   2. renormalized weights equal HF's fp32 renormalization to fp32 rounding;
   3. with `round_weights=True` they equal HF's SHIPPED bf16 weights
      (`topk_renorm_weights`) BIT-EXACTLY -- which is what pins the cast position;
-  4. the task's row capacity, so the mbt=16 build cannot regress back to the
-     silent 8-row drop probe P5 found.
+  4. the task's row coverage, so the build cannot regress back to the silent
+     row drop probe P5 found. Since M3-I5b the kernel loops over row tiles, so
+     the assertion is the opposite of what it was: EVERY row must be routed at
+     EVERY legal VPT, including well past one tile.
 
 Run:  python tests/runtime_python/blackwell/sm100_moe_block_qwen35/test_router_oracle.py
 """
@@ -33,8 +35,6 @@ ORACLE = os.environ.get(
 
 def run_router(logits, round_weights=False, vpt=0):
     rows = logits.shape[0]
-    cap = mk.topk_softmax_rows_per_task(vpt)
-    assert rows <= cap, f"{rows} rows exceeds the task capacity {cap}"
     g = logits.clone().contiguous()
     w = torch.zeros(rows, TOPK, dtype=torch.float32, device=DEVICE)
     routing = torch.zeros(NUM_EXPERTS, rows, dtype=torch.int32, device=DEVICE)
@@ -113,27 +113,43 @@ def main():
     print(f"  total token rows {n_rows}, of which {n_tie} have a top-8 boundary tie")
     assert n_tie >= 1, "the oracle is supposed to contain real boundary ties"
 
-    # ---- 4: row capacity, the failure probe P5 found -------------------
+    # ---- 4: row coverage, the failure probe P5 found -------------------
+    # Rows-per-PASS is unchanged (8 at VPT=8, 16 at VPT=16); what changed in
+    # M3-I5b is that the kernel now repeats the pass, so neither is a cap.
     assert mk.topk_softmax_default_vpt() == 8
     assert mk.topk_softmax_rows_per_task(8) == 8
     assert mk.topk_softmax_rows_per_task(16) == 16
+
+    # 16 rows must be routed identically at BOTH VPTs -- one pass at VPT=16,
+    # two row tiles at VPT=8. Before M3-I5b the VPT=8 arm left rows 8..15 at
+    # zero, which is exactly what this used to assert.
     logits16 = (torch.randn(16, NUM_EXPERTS, device=DEVICE) * 2).to(torch.bfloat16)
     ref = torch.topk(F.softmax(logits16, dtype=torch.float32, dim=-1), TOPK, dim=-1)[1]
-    ids16, _, _ = run_router(logits16, vpt=16)
+    ids16_v16, w16_v16, _ = run_router(logits16, vpt=16)
+    ids16_v8, w16_v8, _ = run_router(logits16, vpt=8)
     for b in range(16):
-        assert set(ids16[b].tolist()) == set(ref[b].tolist()), f"row {b} at VPT=16"
-    # VPT=8 covers only half of them -- the reason the registration now picks VPT
-    g = logits16.clone()
-    w8 = torch.zeros(16, TOPK, dtype=torch.float32, device=DEVICE)
-    r8 = torch.zeros(NUM_EXPERTS, 16, dtype=torch.int32, device=DEVICE)
-    m8 = torch.zeros(NUM_EXPERTS + 1, dtype=torch.int32, device=DEVICE)
-    mk.topk_softmax_sm100(g, w8, r8, m8, 8, False)
-    torch.cuda.synchronize()
-    assert int(r8[:, 8:].sum().item()) == 0, (
-        "VPT=8 is expected to leave rows 8..15 unrouted; if this fires the "
-        "kernel's row capacity changed and the registration logic must follow"
+        assert set(ids16_v16[b].tolist()) == set(ref[b].tolist()), f"row {b} at VPT=16"
+        assert set(ids16_v8[b].tolist()) == set(ref[b].tolist()), (
+            f"row {b} at VPT=8: the row-tile loop must route rows past the "
+            f"first 8-row pass (M3-I5b; this is the M2-I9 regression)"
+        )
+    assert torch.equal(w16_v8, w16_v16), (
+        "the two VPTs must agree bit-for-bit on the same rows"
     )
-    print("  capacity: VPT=8 -> 8 rows (rows 8..15 unrouted), VPT=16 -> 16 rows")
+
+    # Rows that are NOT a whole number of tiles, at both sub-group widths, so
+    # the partial-warp shuffle mask is exercised in a LATER tile too.
+    for rows in (1, 7, 9, 17, 33):
+        lg = (torch.randn(rows, NUM_EXPERTS, device=DEVICE) * 2).to(torch.bfloat16)
+        rf = torch.topk(F.softmax(lg, dtype=torch.float32, dim=-1), TOPK, dim=-1)[1]
+        for vpt in (8, 16):
+            ids_n, _, mask_n = run_router(lg, vpt=vpt)
+            for b in range(rows):
+                assert set(ids_n[b].tolist()) == set(rf[b].tolist()), (
+                    f"{rows} rows at VPT={vpt}: row {b} differs"
+                )
+            assert int(mask_n[NUM_EXPERTS].item()) == int(torch.unique(ids_n).numel())
+    print("  coverage: 1/7/9/16/17/33 rows all routed at VPT=8 and VPT=16")
 
     print("ROUTER ORACLE TEST PASSED")
 

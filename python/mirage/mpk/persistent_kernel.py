@@ -1809,9 +1809,12 @@ class PersistentKernel:
         only the grouped-GEMM consumers see a difference. Defaults OFF, and
         when off the generated code is byte-identical to the pre-M3-I8 build.
 
-        NOTE: one task covers `WARP_SIZE * VPT / num_experts * 8` token rows
-        (8 at num_experts=256); the registration now picks the VPT that covers
-        `batch_size` and asserts rather than silently dropping rows.
+        NOTE: one PASS of the task covers `WARP_SIZE * VPT / num_experts * 8`
+        token rows (8 at num_experts=256 and VPT=8, 16 at VPT=16). The
+        registration picks the widest legal VPT, and since M3-I5b the kernel
+        loops over row tiles, so `batch_size` is unbounded: a task makes
+        `ceil(batch_size / rows_per_pass)` passes. Before M3-I5b rows past the
+        first pass were silently left unrouted (M2-I9).
         NOTE: the kernel ZEROES `input` as it reads it, which is what lets a
         split-k gate linear accumulate into the same buffer next step.
         """

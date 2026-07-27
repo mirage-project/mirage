@@ -9,6 +9,15 @@ Validates: topk_weights, routing_indices, and active_expert_ids.
 
 Run:
     python tests/runtime_python/blackwell/sm100_moe_sigmoid/test_topk_sigmoid_testmode.py
+    python .../test_topk_sigmoid_testmode.py 8 17 33     # explicit batch sizes
+
+One pass of `topk_sigmoid_task_impl` covers 8 rows at this shape (256 experts,
+VPT=8 -> THREADS_PER_ROW = 32 -> ROWS_PER_WARP = 1, 8 warps). This test was
+pinned at exactly 8 for that reason -- rows past the first pass were silently
+dropped, the sigmoid twin of the softmax bug M2-I9 root-caused. M3-I5b added the
+row-tile loop, so the default now also runs 17 rows: two whole tiles plus a
+partial one, which is the case that regresses if the loop or its shuffle mask
+is wrong. Each batch size is a separate compile, so keep the list short.
 """
 
 import torch
@@ -79,9 +88,11 @@ def reference_sigmoid_routing(logits_bf16, bias, batch_size):
     return topk_weights, routing_indices, expert_active
 
 
-def test_topk_sigmoid_testmode():
+DEFAULT_BATCH_SIZES = [8, 17]
+
+
+def test_topk_sigmoid_testmode(batch_size=8):
     device = "cuda"
-    batch_size = 8
     seed = 42
 
     print(f"\n{'='*60}")
@@ -135,7 +146,8 @@ def test_topk_sigmoid_testmode():
     routing_indices_dt = pk.attach_input(routing_indices, name="routing_indices")
     active_ids_dt = pk.attach_input(active_expert_ids, name="active_expert_ids")
 
-    # Build layer — one task block handles all 8 rows (8 warps, 1 row/warp)
+    # Build layer — one task block handles ALL rows: 8 per pass (8 warps,
+    # 1 row/warp), looping over row tiles for anything wider (M3-I5b).
     block_dim = (256, 1, 1)
     pk.moe_topk_sigmoid_routing_layer(
         input=gating_dt,
@@ -207,4 +219,7 @@ def test_topk_sigmoid_testmode():
 
 
 if __name__ == "__main__":
-    test_topk_sigmoid_testmode()
+    sizes = [int(a) for a in sys.argv[1:]] or DEFAULT_BATCH_SIZES
+    for bs in sizes:
+        test_topk_sigmoid_testmode(batch_size=bs)
+    print(f"\nAll batch sizes passed: {sizes}")

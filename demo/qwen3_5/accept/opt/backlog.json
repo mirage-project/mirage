@@ -53,12 +53,12 @@
       "rank": 4,
       "lever": "Fix the mbt=16 admission policy: bs16 never reaches a decode steady state",
       "evidence": "An exact replay of prepare_next_batch (opt/schedule_sim.py, validated against the trace's own BEGIN_TASK_GRAPH count at all five batch sizes: 109/109/109/111/203 predicted == observed) shows the bs16 wave spends 108 of 203 iterations in a MIXED prefill+decode regime and the other 95 draining, with ZERO iterations where all 16 requests decode. The first request retires at iteration 101 while another is still prefilling. Wave time splits 2754 ms mixed + 1920 ms drain of a 4695 ms wave. Cause: step 3 fills the 16-token budget greedily in slot order, so once the early slots are decoding they consume the whole budget and the late slots prefill one token at a time. Source: attribution.csv mixed_phase_*/drain_phase_*, tables/bs16_iters.csv.",
-      "mechanism": "max_num_batched_tokens=16 (capped by the MoE router 16-row limit, M2-I9) equals the batch size at bs16, so decode alone saturates admission and prefill starves.",
+      "mechanism": "max_num_batched_tokens=16 (capped by the MoE router 16-row limit, M2-I9) equals the batch size at bs16, so decode alone saturates admission and prefill starves. M3-I5b removed the router cap (row-tile loop in topk_softmax_sm100 + topk_sigmoid_sm100; shipped instantiations SASS-identical), so mbt is now a free knob -- the remaining question is profitability, not feasibility.",
       "expected_e2e_delta_per_bs": {"1": "0%", "2": "+2% wave-level", "4": "+3% wave-level", "8": "+9% wave-level", "16": "+44% wave-level (4695 ms -> ~3270 ms; wave tok/s 234 -> ~327)"},
       "delta_basis": "idealised schedule = 36 prefill iterations at the measured 25.5 ms mixed-iteration cost + 107 decode iterations at the measured 22.0 ms",
       "risk": "medium-high - changes admission and therefore AC-5 e2e and the GDN slot-compaction hazard surface (HAZARD-COMPACTION).",
       "verify_cmd": "python3 opt/schedule_sim.py opt/meta/meta_bs16_rep0.json  # n_decode_full must become > 0 and n_prefill_or_mixed must fall toward 36",
-      "suggested_owner_issue": "M3-I2b + M3-I5b (raising mbt is blocked on the router row loop)"
+      "suggested_owner_issue": "M3-I2b + M3-I5b (router row loop LANDED prepared; the mbt A/B protocol + simulator sweep is opt/m3i5b/prep.md \u00a75. schedule_sim over the committed metas: bs16 iterations 203 -> 123 at mbt=32 and 114 at mbt=64, decode_full 0 -> 54; bs1-bs8 gain <=2.7%, so the padding cost is expected to dominate below bs16)"
     },
     {
       "rank": 5,

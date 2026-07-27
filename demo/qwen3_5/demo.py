@@ -42,7 +42,10 @@ def build_args():
     p.add_argument("--max-new-tokens", type=int, default=64)
     p.add_argument("--max-num-batched-tokens", type=int, default=16,
                    help=">= the prompt length gives a single-chunk prefill; "
-                        ">= --max-num-batched-requests is required.")
+                        ">= --max-num-batched-requests is required. Values "
+                        "above 16 were silently miscomputed by the MoE router "
+                        "before M3-I5b (M2-I9); the default stays 16 so "
+                        "measurements remain comparable.")
     p.add_argument("--max-num-batched-requests", type=int, default=1)
     p.add_argument("--page-size", type=int, default=256)
     p.add_argument("--output-dir", default=None,

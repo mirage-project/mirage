@@ -173,166 +173,197 @@ __device__ __forceinline__ void topk_softmax_task_impl(
   int const warp_base_row = warp_idx * ROWS_PER_WARP;
 
   int const thread_row_in_warp = lane_idx / THREADS_PER_ROW;
-  int const thread_row = warp_base_row + thread_row_in_warp;
-  uint32_t warp_mask = 0xffffffffu;
-  if constexpr (THREADS_PER_ROW != WARP_SIZE) {
-    constexpr uint32_t subgroup_mask = (1u << THREADS_PER_ROW) - 1u;
-    // The final warp can contain a single live sub-group when num_rows is odd.
-    // Restrict the shuffle mask to that sub-group instead of hard-coding the
-    // lower 16 lanes.
-    if ((num_rows % ROWS_PER_WARP) != 0 && thread_row == num_rows - 1) {
-      warp_mask = subgroup_mask << (thread_row_in_warp * THREADS_PER_ROW);
-    }
-  }
+
+  // Rows one pass of this block covers. `thread_row` is derived from threadIdx
+  // alone, so before M3-I5b the kernel simply DROPPED every row past this
+  // bound (`if (thread_row < num_rows)` with no loop around it) -- the silent
+  // 16-row router cap M2-I9 root-caused. The row-tile loop below repeats the
+  // same pass at row_tile_base = 0, ROWS_PER_CTA, 2*ROWS_PER_CTA, ... so any
+  // num_rows is routed.
+  //
+  // BIT-EXACT FOR num_rows <= ROWS_PER_CTA BY CONSTRUCTION:
+  //   (1) the trip count is ceil(num_rows / ROWS_PER_CTA) = 1, so
+  //       row_tile_base is identically 0 and `thread_row` evaluates to the
+  //       pre-change expression `warp_base_row + thread_row_in_warp`;
+  //   (2) the loop body is the pre-change body verbatim (only re-indented) --
+  //       same operations, same operands, same order, same shuffle masks;
+  //   (3) `num_rows` arrives as an integer LITERAL from the generated call
+  //       (task_register.cc emits `batch_size`), so the loop constant-folds
+  //       away entirely and the emitted SASS is unchanged.
+  // Above the old cap, nothing is reduced, accumulated or communicated ACROSS
+  // tiles: every reduction (max, sum, argmax) is a shuffle inside one row's
+  // sub-group, and each tile writes a DISJOINT row slice of `output` /
+  // `mpk_routing_indices`. The only cross-tile state is the idempotent
+  // `mpk_active_expert_ids[local_expert] = local_expert` mark, which is
+  // order-independent by construction; it is compacted after the loop, behind
+  // the same single __syncthreads() as before.
+  static constexpr int ROWS_PER_CTA = WARPS_PER_CTA * ROWS_PER_WARP;
+
   // Rows at or above this index are padding for THIS iteration; they are read
   // (and zeroed) like every other row, but they do not activate expert groups.
   int const live_rows = (num_active_rows > 0 && num_active_rows < num_rows)
                             ? num_active_rows
                             : num_rows;
 
-  if (thread_row < num_rows) {
-
-    bool const row_is_active =
-        (finished ? !finished[thread_row] : true) && (thread_row < live_rows);
-
-    // Compute per-thread read pointers
-    T *thread_row_ptr = input + thread_row * ELTS_PER_ROW;
-    int const thread_group_idx = lane_idx % THREADS_PER_ROW;
-    int const first_elt_read_by_thread =
-        thread_group_idx * (BYTES_PER_LDG / sizeof(T));
-    T *thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
-
-    using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>;
-    T row_chunk_temp[VPT];
-    AccessType *row_chunk_vec_ptr =
-        reinterpret_cast<AccessType *>(&row_chunk_temp);
-    AccessType *vec_thread_read_ptr =
-        reinterpret_cast<AccessType *>(thread_read_ptr);
-
-    // Vectorized loads across the row
-    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-      row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
+  for (int row_tile_base = 0; row_tile_base < num_rows;
+       row_tile_base += ROWS_PER_CTA) {
+    int const thread_row = row_tile_base + warp_base_row + thread_row_in_warp;
+    uint32_t warp_mask = 0xffffffffu;
+    if constexpr (THREADS_PER_ROW != WARP_SIZE) {
+      constexpr uint32_t subgroup_mask = (1u << THREADS_PER_ROW) - 1u;
+      // The final warp can contain a single live sub-group when num_rows is
+      // odd. Restrict the shuffle mask to that sub-group instead of
+      // hard-coding the lower 16 lanes. Expressed in `thread_row` / `num_rows`
+      // only, so it is the LAST TILE's partial warp that gets restricted.
+      if ((num_rows % ROWS_PER_WARP) != 0 && thread_row == num_rows - 1) {
+        warp_mask = subgroup_mask << (thread_row_in_warp * THREADS_PER_ROW);
+      }
     }
 
-    cutlass::NumericConverter<float, T> converter;
+    if (thread_row < num_rows) {
 
-    float row_chunk[VPT];
-    for (int ii = 0; ii < VPT; ++ii) {
-      row_chunk[ii] = converter(row_chunk_temp[ii]);
-      row_chunk_temp[ii] =
-          static_cast<T>(0); // reset input buffer to 0 for split-k gate linear
-    }
+      bool const row_is_active =
+          (finished ? !finished[thread_row] : true) && (thread_row < live_rows);
 
-    // reset input buffer to 0 for split-k gate linear
-    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
-      vec_thread_read_ptr[ii * THREADS_PER_ROW] = row_chunk_vec_ptr[ii];
-    }
+      // Compute per-thread read pointers
+      T *thread_row_ptr = input + thread_row * ELTS_PER_ROW;
+      int const thread_group_idx = lane_idx % THREADS_PER_ROW;
+      int const first_elt_read_by_thread =
+          thread_group_idx * (BYTES_PER_LDG / sizeof(T));
+      T *thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
 
-    // Max reduction within subgroup
-    float thread_max = row_chunk[0];
-    for (int ii = 1; ii < VPT; ++ii) {
-      thread_max = max(thread_max, row_chunk[ii]);
-    }
-    for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-      float other =
-          __shfl_xor_sync(warp_mask, thread_max, mask, THREADS_PER_ROW);
-      thread_max = max(thread_max, other);
-    }
+      using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>;
+      T row_chunk_temp[VPT];
+      AccessType *row_chunk_vec_ptr =
+          reinterpret_cast<AccessType *>(&row_chunk_temp);
+      AccessType *vec_thread_read_ptr =
+          reinterpret_cast<AccessType *>(thread_read_ptr);
 
-    // Softmax numerator and sum within subgroup
-    float row_sum = 0.f;
-    for (int ii = 0; ii < VPT; ++ii) {
-      row_chunk[ii] = expf(row_chunk[ii] - thread_max);
-      row_sum += row_chunk[ii];
-    }
-    for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-      row_sum += __shfl_xor_sync(warp_mask, row_sum, mask, THREADS_PER_ROW);
-    }
-
-    float const inv_row_sum = 1.f / row_sum;
-    for (int ii = 0; ii < VPT; ++ii) {
-      row_chunk[ii] = row_chunk[ii] * inv_row_sum;
-    }
-
-    // Fused Top-K selection within subgroup
-    int start_col = first_elt_read_by_thread;
-    static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
-    float row_sum_for_renormalize = 0.f;
-
-    for (int k_idx = 0; k_idx < k; ++k_idx) {
-      float max_val = row_chunk[0];
-      int expert = start_col;
-      for (int ldg = 0, col = start_col; ldg < LDG_PER_THREAD;
-           ++ldg, col += COLS_PER_GROUP_LDG) {
-        for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
-          float val = row_chunk[ldg * ELTS_PER_LDG + ii];
-          if (val > max_val) {
-            max_val = val;
-            expert = col + ii;
-          }
-        }
+      // Vectorized loads across the row
+      for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+        row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
       }
 
-      // Argmax reduce across subgroup with index tie-breaker (prefer lower
-      // index)
+      cutlass::NumericConverter<float, T> converter;
+
+      float row_chunk[VPT];
+      for (int ii = 0; ii < VPT; ++ii) {
+        row_chunk[ii] = converter(row_chunk_temp[ii]);
+        row_chunk_temp[ii] =
+            static_cast<T>(0); // reset input buffer to 0 for split-k gate linear
+      }
+
+      // reset input buffer to 0 for split-k gate linear
+      for (int ii = 0; ii < LDG_PER_THREAD; ++ii) {
+        vec_thread_read_ptr[ii * THREADS_PER_ROW] = row_chunk_vec_ptr[ii];
+      }
+
+      // Max reduction within subgroup
+      float thread_max = row_chunk[0];
+      for (int ii = 1; ii < VPT; ++ii) {
+        thread_max = max(thread_max, row_chunk[ii]);
+      }
       for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
-        float other_max =
-            __shfl_xor_sync(warp_mask, max_val, mask, THREADS_PER_ROW);
-        int other_expert =
-            __shfl_xor_sync(warp_mask, expert, mask, THREADS_PER_ROW);
-        if (other_max > max_val ||
-            (other_max == max_val && other_expert < expert)) {
-          max_val = other_max;
-          expert = other_expert;
-        }
+        float other =
+            __shfl_xor_sync(warp_mask, thread_max, mask, THREADS_PER_ROW);
+        thread_max = max(thread_max, other);
       }
 
-      // Write out the selected top-k value/index (one thread per subgroup
-      // writes)
-      if (thread_group_idx == 0) {
-        bool const node_uses_expert =
-            expert >= start_expert && expert < end_expert;
-        bool const should_process_row = row_is_active && node_uses_expert;
-        int const out_idx = k * thread_row + k_idx;
-        output[out_idx] = max_val;
-        // indices[out_idx] =
-        //     should_process_row ? (expert - start_expert) : NUM_EXPERTS;
-        row_sum_for_renormalize += max_val;
-        // Optionally populate MPK routing structures
-        if (should_process_row && mpk_routing_indices != nullptr) {
-          int const local_expert = expert - start_expert;
-          // Write 1-based rank into routing indices; stride by num_rows per
-          // expert
-          mpk_routing_indices[local_expert * num_rows + thread_row] = k_idx + 1;
-          // Sparse mark expert as active; idempotent without atomics
-          if (mpk_active_expert_ids != nullptr) {
-            mpk_active_expert_ids[local_expert] = local_expert;
+      // Softmax numerator and sum within subgroup
+      float row_sum = 0.f;
+      for (int ii = 0; ii < VPT; ++ii) {
+        row_chunk[ii] = expf(row_chunk[ii] - thread_max);
+        row_sum += row_chunk[ii];
+      }
+      for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+        row_sum += __shfl_xor_sync(warp_mask, row_sum, mask, THREADS_PER_ROW);
+      }
+
+      float const inv_row_sum = 1.f / row_sum;
+      for (int ii = 0; ii < VPT; ++ii) {
+        row_chunk[ii] = row_chunk[ii] * inv_row_sum;
+      }
+
+      // Fused Top-K selection within subgroup
+      int start_col = first_elt_read_by_thread;
+      static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
+      float row_sum_for_renormalize = 0.f;
+
+      for (int k_idx = 0; k_idx < k; ++k_idx) {
+        float max_val = row_chunk[0];
+        int expert = start_col;
+        for (int ldg = 0, col = start_col; ldg < LDG_PER_THREAD;
+             ++ldg, col += COLS_PER_GROUP_LDG) {
+          for (int ii = 0; ii < ELTS_PER_LDG; ++ii) {
+            float val = row_chunk[ldg * ELTS_PER_LDG + ii];
+            if (val > max_val) {
+              max_val = val;
+              expert = col + ii;
+            }
+          }
+        }
+
+        // Argmax reduce across subgroup with index tie-breaker (prefer lower
+        // index)
+        for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+          float other_max =
+              __shfl_xor_sync(warp_mask, max_val, mask, THREADS_PER_ROW);
+          int other_expert =
+              __shfl_xor_sync(warp_mask, expert, mask, THREADS_PER_ROW);
+          if (other_max > max_val ||
+              (other_max == max_val && other_expert < expert)) {
+            max_val = other_max;
+            expert = other_expert;
+          }
+        }
+
+        // Write out the selected top-k value/index (one thread per subgroup
+        // writes)
+        if (thread_group_idx == 0) {
+          bool const node_uses_expert =
+              expert >= start_expert && expert < end_expert;
+          bool const should_process_row = row_is_active && node_uses_expert;
+          int const out_idx = k * thread_row + k_idx;
+          output[out_idx] = max_val;
+          // indices[out_idx] =
+          //     should_process_row ? (expert - start_expert) : NUM_EXPERTS;
+          row_sum_for_renormalize += max_val;
+          // Optionally populate MPK routing structures
+          if (should_process_row && mpk_routing_indices != nullptr) {
+            int const local_expert = expert - start_expert;
+            // Write 1-based rank into routing indices; stride by num_rows per
+            // expert
+            mpk_routing_indices[local_expert * num_rows + thread_row] = k_idx + 1;
+            // Sparse mark expert as active; idempotent without atomics
+            if (mpk_active_expert_ids != nullptr) {
+              mpk_active_expert_ids[local_expert] = local_expert;
+            }
+          }
+        }
+
+        // Blank out the winning value for the next iteration
+        if (k_idx + 1 < k) {
+          int const ldg_group_for_expert = expert / COLS_PER_GROUP_LDG;
+          int const thread_to_clear_in_group =
+              (expert / ELTS_PER_LDG) % THREADS_PER_ROW;
+          if (thread_group_idx == thread_to_clear_in_group) {
+            int const offset_for_expert = expert % ELTS_PER_LDG;
+            row_chunk[ldg_group_for_expert * ELTS_PER_LDG + offset_for_expert] =
+                -10000.f;
           }
         }
       }
 
-      // Blank out the winning value for the next iteration
-      if (k_idx + 1 < k) {
-        int const ldg_group_for_expert = expert / COLS_PER_GROUP_LDG;
-        int const thread_to_clear_in_group =
-            (expert / ELTS_PER_LDG) % THREADS_PER_ROW;
-        if (thread_group_idx == thread_to_clear_in_group) {
-          int const offset_for_expert = expert % ELTS_PER_LDG;
-          row_chunk[ldg_group_for_expert * ELTS_PER_LDG + offset_for_expert] =
-              -10000.f;
+      // Optional renormalization of top-k weights
+      if (renormalize && thread_group_idx == 0) {
+        cutlass::NumericConverter<T, float> to_output_dtype;
+        float inv = 1.f / row_sum_for_renormalize;
+        for (int k_idx = 0; k_idx < k; ++k_idx) {
+          int const out_idx = k * thread_row + k_idx;
+          float w = output[out_idx] * inv;
+          output[out_idx] =
+              round_weights_to_output_dtype ? converter(to_output_dtype(w)) : w;
         }
-      }
-    }
-
-    // Optional renormalization of top-k weights
-    if (renormalize && thread_group_idx == 0) {
-      cutlass::NumericConverter<T, float> to_output_dtype;
-      float inv = 1.f / row_sum_for_renormalize;
-      for (int k_idx = 0; k_idx < k; ++k_idx) {
-        int const out_idx = k * thread_row + k_idx;
-        float w = output[out_idx] * inv;
-        output[out_idx] =
-            round_weights_to_output_dtype ? converter(to_output_dtype(w)) : w;
       }
     }
   }

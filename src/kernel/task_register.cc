@@ -2572,22 +2572,26 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
   kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
-  // One task covers ROWS_PER_WARP * WARPS_PER_TB rows, and
+  // One PASS of the task covers ROWS_PER_WARP * WARPS_PER_TB rows, and
   //   ROWS_PER_WARP = WARP_SIZE * VPT / num_experts
-  // (topk_softmax_sm100.cuh:133-135). At 256 experts the historical VPT=8 gives
-  // 8 rows -- below the mbt=16 Qwen3.5 build -- and the kernel simply skips
-  // every row past its capacity (`if (thread_row < num_rows)`), leaving those
-  // tokens with no routing indices and stale weights. Probe P5 section A
-  // reproduces exactly that: 8/16 rows correct at VPT=8, 16/16 at VPT=16
-  // (demo/qwen3_5/accept/probes/moe/p5_router_semantics.json).
+  // (topk_softmax_sm100.cuh). At 256 experts the historical VPT=8 gives 8 rows
+  // -- below the mbt=16 Qwen3.5 build -- and before M3-I5b the kernel simply
+  // SKIPPED every row past its capacity (`if (thread_row < num_rows)` with no
+  // loop), leaving those tokens with no routing indices and stale weights.
+  // Probe P5 section A reproduced exactly that: 8/16 rows correct at VPT=8,
+  // 16/16 at VPT=16 (demo/qwen3_5/accept/probes/moe/p5_router_semantics.json).
   //
-  // The kernel's own static_asserts leave only two legal values: VPT must be a
-  // multiple of ELTS_PER_LDG (= BYTES_PER_LDG / sizeof(T) = 8 for bf16) and
-  // THREADS_PER_ROW = num_experts / VPT must be WARP_SIZE or WARP_SIZE/2. So
-  // pick the SMALLEST legal VPT that covers batch_size, which keeps the
+  // M3-I5b put a row-tile loop in the kernel, so rows are no longer dropped for
+  // ANY batch_size: a task now makes ceil(batch_size / rows_per_task) passes.
+  // VPT selection stays exactly as it was, for two reasons: (1) it keeps the
   // generated code byte-identical for every configuration that already worked
-  // (num_experts=256 with batch<=8, and num_experts=128 where VPT=8 is the only
-  // legal choice), and fail loudly instead of silently dropping rows above it.
+  // (num_experts=256 with batch<=8 -> VPT=8, batch in (8,16] -> VPT=16, and
+  // num_experts=128 where VPT=8 is the only legal choice); (2) the widest legal
+  // VPT is still the one that needs the fewest passes, so the selection is now
+  // a PERFORMANCE choice rather than a correctness bound. The kernel's own
+  // static_asserts leave only two legal values: VPT must be a multiple of
+  // ELTS_PER_LDG (= BYTES_PER_LDG / sizeof(T) = 8 for bf16) and
+  // THREADS_PER_ROW = num_experts / VPT must be WARP_SIZE or WARP_SIZE/2.
   constexpr int WARPS_PER_TB = 8;
   constexpr int BYTES_PER_LDG = 16;
   constexpr int ELTS_PER_LDG = BYTES_PER_LDG / 2; // sizeof(bfloat16)
@@ -2608,9 +2612,9 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
     }
   }
   assert(vpt > 0 && "moe_topk_softmax: no legal VPT for this num_experts");
-  assert(rows_per_task >= batch_size &&
-         "moe_topk_softmax task cannot cover this many rows; split the batch "
-         "across tasks or widen the kernel");
+  // There is deliberately NO `rows_per_task >= batch_size` assert any more
+  // (M3-I5b): rows_per_task < batch_size is legal and simply means the kernel's
+  // row loop makes ceil(batch_size / rows_per_task) passes.
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::topk_softmax_task_impl<cute::bfloat16_t, $, $, $, $>(",
@@ -2681,6 +2685,16 @@ int TaskRegister::register_moe_topk_sigmoid_sm100_task(
          "Number of experts must be divisible by number of groups");
   int experts_per_group = num_experts / num_groups;
 
+  // VPT stays pinned at 8 (DeepSeek-V3's 256 experts -> THREADS_PER_ROW = 32,
+  // ROWS_PER_WARP = 1, so ONE pass covers 8 rows). Before M3-I5b that was a
+  // silent cap: rows 8.. were skipped with no diagnostic, the sigmoid twin of
+  // the bug M2-I9 root-caused in the softmax router. The kernel now loops over
+  // row tiles, so batch_size > 8 is routed in ceil(batch_size / 8) passes and
+  // this registration needs no change -- which is also what keeps the emitted
+  // call byte-identical for every existing DeepSeek-V3 caller. (Widening VPT
+  // to 16 would halve the pass count but would move the group mapping
+  // THREADS_PER_GROUP = EXPERTS_PER_GROUP / VPT, so it is a separate,
+  // separately-validated change.)
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::topk_sigmoid_task_impl<cute::bfloat16_t, $, $, $, $, $, $, "
