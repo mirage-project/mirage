@@ -12,6 +12,18 @@
   "moe_n_splits": 2,
   "layers": 40,
   "long_threshold_ns": 4000.0,
+  "classification_method": "trace_duration_gap",
+  "decode_only_classification_validation": {
+    "note": "iteration-duration largest-gap split vs schedule_sim's prefill/mixed/decode_full/decode_draining labels -- should agree closely wherever schedule_model_agrees is True (bs1/bs4); trace is authoritative regardless, since it makes no admission-model assumption.",
+    "trace_duration_threshold_ns": 12765120.0,
+    "trace_duration_gap_ns": 2921984.0,
+    "trace_duration_gap_ratio": 0.229,
+    "n_decode_only_iterations_sim": 99,
+    "n_decode_only_iterations_trace": 100,
+    "sim_vs_trace_agreement_pct": 99.07,
+    "decode_only_average_activated_sim": 27.71464646464647,
+    "decode_only_average_activated_trace": 27.6855
+  },
   "tail_window": [
     76,
     108
@@ -160,7 +172,7 @@
   "full_run_average_activated": 29.890277777777783,
   "full_run_iterations": 108,
   "n_prefill_or_mixed_iterations": 9,
-  "decode_only_average_activated": 27.71464646464647,
+  "decode_only_average_activated": 27.6855,
   "per_iteration_activated_all": [
     61.35,
     62.425,

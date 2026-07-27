@@ -118,8 +118,10 @@ with headroom. 96 M slots ≈ 1.15 GB of device buffer at M3-I1's ~12 bytes/even
 183 GB.
 
 Do **not** try to capture a full 1024-token decode: that is ~16× the events (150–400 M) for no
-extra information, since the comparison only needs a steady-decode slice. 96 decode steps at
-`msl=1280` is the MPK analogue of the 50-step kineto windows used on the vLLM side.
+extra information, since the comparison only needs a steady-decode slice. ~~96 decode steps at
+`msl=1280` is the MPK analogue~~ **corrected**: 96 decode steps at `msl=353` (see status block —
+`msl=1280` does not yield 96 decode steps at all, it yields ~1023) is the MPK analogue of the
+50-step kineto windows used on the vLLM side.
 
 **Context caveat that survives this design.** Arm A's profiled decode window sits at context
 257–352, while the vLLM windows sat at 556–896. Only attention is context-sensitive and this issue
@@ -199,9 +201,12 @@ late-context capture and stay flat, confirming they generalise to high context t
 MoE w13 (241) is flat at bs1/bs8 (−0.3 % / +3.9 %) but +18.8 % at bs16 — read with the same
 reduced-concurrency caveat as attention's bs16 point, not yet attributed cleanly to context vs.
 concurrency. Full numbers, regime detail, and the exact per-slot context arrays:
-`ferret_targets.json`'s `full attention` row (`late_context_check_msl897` /
-`late_context_verdict`) and top-level `late_context_addendum`; regenerated tables in
-`opt/m3i10/remeasure/armAlate/`.
+`ferret_targets.json`'s `full attention` row — **late-context is that row's PRIMARY basis as of
+the c3 closure** (`mpk_us_per_step` / `ratio_mpk_over_vllm` / `step_gain_if_met_us` are the
+801–896-context numbers directly, with `context_band` documenting the band + the bs16 caveat and
+`matched_window` preserving the demoted ctx-257–352 numbers this table's own left column shows)
+— plus top-level `late_context_addendum` for the GDN/dense-fp8/MoE-w13 spot check; regenerated
+tables in `opt/m3i10/remeasure/armAlate/`.
 
 ## 5. Normalisation — transplanting the anchor method
 
@@ -257,6 +262,11 @@ overall ratio and the only hardcoded MPK number in the pipeline.
 
 ## 7. Harvesting the running M3-I9 window instead
 
+**Moot for this execution** (tier 1 was captured directly, not harvested — see status block at
+the top), but the criteria below are corrected in place since a future issue may face the same
+harvest-or-capture choice and would otherwise inherit the same `msl=1280` mistake this file
+originally had.
+
 An M3-I9 resumption window is running stage-7 matched-geometry runs right now. If its output
 already satisfies the list below, **tier 1 needs no new GPU time** — check before scheduling.
 
@@ -265,8 +275,11 @@ Reusable if and only if all of these hold:
 1. **Raw profiler buffers retained**, not just derived tables: `raw_bs<N>_rep<R>.npz` +
    `meta_bs<N>_rep<R>.json` + `task_names.json`. Perfetto exports alone are not enough — the
    3-iteration Perfetto window is too short to re-derive per-task wall spans.
-2. **Geometry is genuinely matched**: `max_seq_length` ≥ 1280 and prompt length 256 recorded in
-   the meta. A run at `msl=132` is arm B, not arm A, and does not close the finding.
+2. **Geometry is genuinely matched**: ~~`max_seq_length` ≥ 1280~~ **corrected**: `max_seq_length
+   == 353` (256-token prompt + 96 decode steps + 1 — see status block; `max_seq_length` gates
+   MPK decode length directly, so `>= 1280` would actually mean the SAME bug this file's status
+   block documents, not "matched or better") and prompt length 256 recorded in the meta. A run at
+   `msl=132` is arm B, not arm A, and does not close the finding.
 3. **Gate state recorded**: `MOE_GATE_PADDING_ROWS` value and the commit sha in the run manifest
    (M3-I8's `arm_<arm>_sha256.txt` pattern). A run that does not record it cannot be attributed.
 4. **Both profiled and unprofiled reps of the same config.** Profiled-only is not usable: M3-I1's

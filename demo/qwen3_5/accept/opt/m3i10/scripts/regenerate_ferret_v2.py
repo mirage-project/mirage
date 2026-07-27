@@ -261,46 +261,91 @@ def main():
                     "vllm_us_per_call", "note", "roofline", "roofline_reading")
                    if k in old_row}
             row.pop("remeasure_update_20260727", None)
+
+            # I10-fix-1 (c3): attention's PRIMARY basis is late-context
+            # (opt/m3i10/remeasure/armAlate/, ctx ~801-896) -- that is what
+            # this file's own late_context_verdict already documented as
+            # correct, so the primary fields must actually use it, not just
+            # say so in a side note. Every other target keeps the
+            # matched-geometry (ctx 257-352) basis as primary.
+            tt0 = STAGE_TASK_TYPES[stage_name][0]
+            is_attention = (stage_name == "full attention")
+            if is_attention and latectx.get(tt0):
+                primary_mpk = dict(latectx[tt0])
+                primary_ratio = {bs: round(primary_mpk[bs] / vllm[bs], 3)
+                                 for bs in BSES if vllm.get(bs)}
+                primary_gap = {bs: round(primary_mpk[bs] - vllm[bs], 1)
+                               for bs in BSES if vllm.get(bs)}
+            else:
+                primary_mpk, primary_ratio, primary_gap = mpk, ratio, gap
+
             row.update(dict(
                 stage=stage_name,
                 vllm_us_per_step={bs: vllm[bs] for bs in BSES},
-                mpk_us_per_step={bs: mpk[bs] for bs in BSES},
-                ratio_mpk_over_vllm={bs: ratio[bs] for bs in BSES},
+                mpk_us_per_step={bs: primary_mpk[bs] for bs in BSES},
+                ratio_mpk_over_vllm={bs: primary_ratio[bs] for bs in BSES},
                 target_us_per_step={bs: round(vllm[bs] * TARGET_RATIO, 1) for bs in BSES},
-                step_gain_if_met_us={bs: round(mpk[bs] - vllm[bs] * TARGET_RATIO, 1)
+                step_gain_if_met_us={bs: round(primary_mpk[bs] - vllm[bs] * TARGET_RATIO, 1)
                                     for bs in BSES},
                 history_m3i1=hist,
             ))
-            # F2 closure: late-context (~801-896, vs this row's own ~257-352)
-            # spot check, every target task that has one.
-            tt0 = STAGE_TASK_TYPES[stage_name][0]
-            if latectx.get(tt0):
-                lc = latectx[tt0]
-                row["late_context_check_msl897"] = dict(
-                    wallspan_us_per_step=lc,
-                    pct_change_vs_matched_geometry={
-                        bs: round(100 * (lc[bs] - mpk[bs]) / mpk[bs], 1)
-                        for bs in lc if mpk.get(bs)},
-                    regime=LATECTX_REGIME,
+
+            if is_attention:
+                row["context_band"] = {
+                    "primary_basis": "late-context (opt/m3i10/remeasure/armAlate/), "
+                                     "ctx ~801-896 at bs1/bs8",
+                    "bs1": "801-896 (single request, clean)",
+                    "bs8": "801-896 (full 8-concurrent decode_full window, clean)",
+                    "bs16": "263-890 (STAGGERED: 12/16 concurrent survivors spread "
+                            "across this range at the chosen snapshot, not a tight "
+                            "band -- no full-bs16 prefill-free window exists at ANY "
+                            "context, structural, same reason M3-I1 documented for "
+                            "the original bs16 steady-state; per-slot context array "
+                            "in matched_window.late_context_regime.16). Treat bs16's "
+                            "primary numbers here as directionally right, not as "
+                            "precise as bs1/bs8.",
+                    "why_primary": "this is the context band the vLLM reference table "
+                                   "itself was sampled at (556-896) -- comparing MPK's "
+                                   "OWN matched-geometry window (257-352) against "
+                                   "vLLM's 556-896 window was exactly the F2 mismatch; "
+                                   "late-context is the apples-to-apples basis.",
+                }
+                row["matched_window"] = dict(
+                    description=("arm A's own matched-geometry window, ctx 257-352 -- "
+                                "PREVIOUS primary basis, kept for continuity, not used "
+                                "for ranking/target math above (see context_band)."),
+                    mpk_us_per_step=mpk, ratio_mpk_over_vllm=ratio,
+                    step_gain_if_met_us=gap,
+                    late_context_regime=LATECTX_REGIME,
+                    pct_change_matched_to_late={
+                        bs: round(100 * (primary_mpk[bs] - mpk[bs]) / mpk[bs], 1)
+                        for bs in BSES if mpk.get(bs)},
                 )
-            if stage_name == "full attention":
-                lc = latectx.get(257, {})
                 row["late_context_verdict"] = (
                     "CONFIRMED real and larger than the old single-FMHA-kernel +8.3% "
-                    "correction implied: wallspan grew a further "
-                    + ", ".join(f"{bs}={row['late_context_check_msl897']['pct_change_vs_matched_geometry'].get(bs, '?')}%"
+                    "correction implied, and now the PRIMARY basis above (not just a "
+                    "side note): wallspan grew "
+                    + ", ".join(f"{bs}={row['matched_window']['pct_change_matched_to_late'].get(bs, '?')}%"
                                for bs in BSES) +
-                    " moving from this row's own context (~257-352) toward the vLLM "
-                    "reference table's own sampled band (556-896). bs1/bs8 are clean, "
-                    "single-context (bs1) or uniform full-8-concurrent (bs8) "
-                    "measurements at context ~801-896. bs16's +91.8% carries a real "
-                    "caveat: no full-bs16 prefill-free window exists at ANY context "
-                    "(structural, same reason M3-I1 documented for the original "
-                    "steady-state), so that point averages 12 concurrent slots spread "
-                    "across context 263-890 (staggered admission), not a clean "
-                    "high-context sample -- directionally consistent with the bs1/bs8 "
-                    "growth, not independently as precise. See remeasure_spec.md sec "
-                    "4(d) and opt/m3i10/remeasure/armAlate/.")
+                    " moving from arm A's own context (~257-352, now in "
+                    "matched_window) to the vLLM reference table's own sampled band "
+                    "(556-896, this row's primary fields at ~801-896). bs1/bs8 are "
+                    "clean, single-context (bs1) or uniform full-8-concurrent (bs8) "
+                    "measurements. bs16 carries a real caveat -- see context_band. See "
+                    "remeasure_spec.md sec 4(d) and opt/m3i10/remeasure/armAlate/.")
+            else:
+                # F2 closure: late-context spot check for every OTHER target
+                # task that has one -- informational only, primary basis
+                # unchanged (matched-geometry).
+                if latectx.get(tt0):
+                    lc = latectx[tt0]
+                    row["late_context_check_msl897"] = dict(
+                        wallspan_us_per_step=lc,
+                        pct_change_vs_matched_geometry={
+                            bs: round(100 * (lc[bs] - mpk[bs]) / mpk[bs], 1)
+                            for bs in lc if mpk.get(bs)},
+                        regime=LATECTX_REGIME,
+                    )
             # per-call-site detail for 253 / 279
             tt = STAGE_TASK_TYPES[stage_name][0]
             if tt in (253, 279) and site_splits.get(tt):

@@ -1,0 +1,9 @@
+Raw profiler buffer (>20MB) stored at:
+  /home/catalyst/mpk-artifacts/m3i8-f1ext/raw_bs4_rep0.npz
+
+Also on the B200 box (read-only ssh pull, this file was not deleted there):
+  ~/mpk-qwen35/m3i9x/f1ext/raw_bs4_rep0.npz
+
+Source for f1_bs4_4us.json (this directory) -- M3-I8 F1 closure,
+trace-based decode-only classification (I8 c4 verdict). Paired meta:
+~/mpk-qwen35/m3i9x/f1ext/meta_bs4_rep0.json (not rsynced, small, on box).

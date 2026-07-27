@@ -12,6 +12,18 @@
   "moe_n_splits": 2,
   "layers": 40,
   "long_threshold_ns": 4000.0,
+  "classification_method": "trace_duration_gap",
+  "decode_only_classification_validation": {
+    "note": "iteration-duration largest-gap split vs schedule_sim's prefill/mixed/decode_full/decode_draining labels -- should agree closely wherever schedule_model_agrees is True (bs1/bs4); trace is authoritative regardless, since it makes no admission-model assumption.",
+    "trace_duration_threshold_ns": 17102240.0,
+    "trace_duration_gap_ns": 3192320.0,
+    "trace_duration_gap_ratio": 0.187,
+    "n_decode_only_iterations_sim": 94,
+    "n_decode_only_iterations_trace": 94,
+    "sim_vs_trace_agreement_pct": 100.0,
+    "decode_only_average_activated_sim": 26.24441489361702,
+    "decode_only_average_activated_trace": 26.24441489361702
+  },
   "tail_window": [
     170,
     202

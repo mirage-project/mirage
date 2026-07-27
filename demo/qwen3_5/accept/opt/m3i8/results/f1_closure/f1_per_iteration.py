@@ -43,6 +43,45 @@ import schedule_sim as SIM  # noqa: E402
 import trace_lib as TL  # noqa: E402
 
 
+def classify_decode_only_from_trace(dur_it: np.ndarray):
+    """Classify each iteration as decode-only (no prefill activity) directly
+    from the trace's own per-iteration wall-clock duration -- zero dependence
+    on schedule_sim's admission model, needed whenever schedule_model_agrees
+    is False (M3-I10 remeasure's own closure hit the identical class of bug:
+    schedule_sim's simple greedy-admission replay can diverge from the real
+    runtime's compaction/admission behaviour, making its PER-ITERATION labels
+    untrustworthy even when other aggregate checks look reasonable).
+
+    Mechanism: a prefill/mixed iteration processes up to `mbt` tokens (the
+    shared per-iteration token budget); a genuinely decode-only iteration
+    (decode_full OR decode_draining -- both process <= batch_size tokens,
+    1/live request) processes fewer. That difference in TOTAL WORK shows up
+    directly as a difference in iteration WALL-CLOCK TIME, with no need to
+    know which specific requests are in which phase. Empirically (validated
+    below at bs1/bs4, where schedule_sim agrees) the two populations form two
+    tight, cleanly-separated clusters with a wide gap between them (>=3000 ns
+    margin at every batch size 1/4/8/16 checked) -- so a single largest-gap
+    1D split of the sorted duration distribution recovers the decode-only set
+    without assuming a threshold value, a batch size, or an admission model.
+
+    Returns (is_decode_only: bool ndarray[n_it], threshold_ns: float,
+    gap_ns: float, gap_ratio: float -- gap_ns / threshold_ns, a scale-free
+    sanity number: this should be large context; a small ratio means the
+    split is not clean and the result should not be trusted blindly).
+    """
+    order = np.argsort(dur_it)
+    sorted_dur = dur_it[order].astype(np.float64)
+    gaps = np.diff(sorted_dur)
+    if len(gaps) == 0:
+        return np.ones(len(dur_it), dtype=bool), float(sorted_dur[0]), 0.0, 0.0
+    k = int(np.argmax(gaps))
+    threshold = (sorted_dur[k] + sorted_dur[k + 1]) / 2.0
+    gap_ns = float(gaps[k])
+    is_decode_only = dur_it <= threshold
+    gap_ratio = gap_ns / threshold if threshold > 0 else 0.0
+    return is_decode_only, float(threshold), gap_ns, gap_ratio
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -59,6 +98,18 @@ def main(argv=None) -> int:
                          "per-iteration distribution over.")
     ap.add_argument("--long-threshold-ns", type=float, default=1000.0,
                     help="matches trace_lib.per_task_table's short/long split.")
+    ap.add_argument("--classify-from-trace", action="store_true",
+                    help="Classify decode-only iterations from the trace's own "
+                         "iteration-duration distribution (largest-gap 1D "
+                         "split, see classify_decode_only_from_trace) instead "
+                         "of schedule_sim.label()'s prefill/mixed/decode_full/"
+                         "decode_draining prefix-count. REQUIRED whenever "
+                         "schedule_model_agrees is False -- the sim's "
+                         "per-iteration labels are not trustworthy there. "
+                         "Always validate against the sim-based classification "
+                         "first at a batch size where schedule_model_agrees is "
+                         "True (this script reports agreement_pct regardless "
+                         "of which mode drives decode_only_average_activated).")
     ap.add_argument("--out", required=True)
     args = ap.parse_args(argv)
 
@@ -114,8 +165,25 @@ def main(argv=None) -> int:
 
     full_run_avg = float(activated.mean())
     prefill_mixed_n = sum(1 for x in lab[:n_it] if x in ("prefill", "mixed"))
-    decode_only_avg = (float(activated[prefill_mixed_n:].mean())
-                      if prefill_mixed_n < n_it else None)
+
+    # -- decode-only classification: schedule_sim (existing) vs trace -------
+    lab_full = lab[:n_it] if len(lab) >= n_it else lab + ["?"] * (n_it - len(lab))
+    sim_decode_only = np.array([x not in ("prefill", "mixed") for x in lab_full])
+    dur_it = np.diff(bounds)
+    trace_decode_only, dur_threshold_ns, dur_gap_ns, dur_gap_ratio = \
+        classify_decode_only_from_trace(dur_it)
+    agreement_pct = float(100.0 * (sim_decode_only == trace_decode_only).mean())
+
+    decode_only_avg_sim = (float(activated[sim_decode_only].mean())
+                          if sim_decode_only.any() else None)
+    decode_only_avg_trace = (float(activated[trace_decode_only].mean())
+                            if trace_decode_only.any() else None)
+    if args.classify_from_trace:
+        decode_only_avg = decode_only_avg_trace
+        classification_method = "trace_duration_gap"
+    else:
+        decode_only_avg = decode_only_avg_sim
+        classification_method = "schedule_sim_label"
 
     out = dict(
         source_raw=os.path.abspath(args.raw),
@@ -126,6 +194,23 @@ def main(argv=None) -> int:
         schedule_model_agrees=schedule_model_agrees,
         task_type=args.task_type, moe_n_splits=args.moe_n_splits,
         layers=args.layers, long_threshold_ns=args.long_threshold_ns,
+        # --- I8 c4 closure: trace-intrinsic classification, no sim needed ---
+        classification_method=classification_method,
+        decode_only_classification_validation=dict(
+            note=("iteration-duration largest-gap split vs schedule_sim's "
+                  "prefill/mixed/decode_full/decode_draining labels -- should "
+                  "agree closely wherever schedule_model_agrees is True "
+                  "(bs1/bs4); trace is authoritative regardless, since it "
+                  "makes no admission-model assumption."),
+            trace_duration_threshold_ns=dur_threshold_ns,
+            trace_duration_gap_ns=dur_gap_ns,
+            trace_duration_gap_ratio=round(dur_gap_ratio, 3),
+            n_decode_only_iterations_sim=int(sim_decode_only.sum()),
+            n_decode_only_iterations_trace=int(trace_decode_only.sum()),
+            sim_vs_trace_agreement_pct=round(agreement_pct, 2),
+            decode_only_average_activated_sim=decode_only_avg_sim,
+            decode_only_average_activated_trace=decode_only_avg_trace,
+        ),
         # --- the closure: per-iteration distribution over the FINAL last_n ---
         tail_window=[int(lo), int(hi)],
         tail_labels=tail_labels, tail_n_live=tail_n_live,

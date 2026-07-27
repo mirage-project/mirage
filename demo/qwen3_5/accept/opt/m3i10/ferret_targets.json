@@ -583,14 +583,14 @@
     "16": 148.71
    },
    "mpk_us_per_step": {
-    "1": 757.0,
-    "8": 804.0,
-    "16": 787.0
+    "1": 1080.544,
+    "8": 1221.184,
+    "16": 1509.28
    },
    "ratio_mpk_over_vllm": {
-    "1": 5.667,
-    "8": 6.027,
-    "16": 5.292
+    "1": 8.09,
+    "8": 9.155,
+    "16": 10.149
    },
    "target_us_per_step": {
     "1": 100.2,
@@ -598,9 +598,9 @@
     "16": 111.5
    },
    "step_gain_if_met_us": {
-    "1": 656.8,
-    "8": 704.0,
-    "16": 675.5
+    "1": 980.4,
+    "8": 1121.1,
+    "16": 1397.7
    },
    "history_m3i1": {
     "mpk_us_per_step": {
@@ -620,18 +620,31 @@
     },
     "rank": 6
    },
-   "late_context_check_msl897": {
-    "wallspan_us_per_step": {
-     "1": 1080.544,
-     "8": 1221.184,
-     "16": 1509.28
+   "context_band": {
+    "primary_basis": "late-context (opt/m3i10/remeasure/armAlate/), ctx ~801-896 at bs1/bs8",
+    "bs1": "801-896 (single request, clean)",
+    "bs8": "801-896 (full 8-concurrent decode_full window, clean)",
+    "bs16": "263-890 (STAGGERED: 12/16 concurrent survivors spread across this range at the chosen snapshot, not a tight band -- no full-bs16 prefill-free window exists at ANY context, structural, same reason M3-I1 documented for the original bs16 steady-state; per-slot context array in matched_window.late_context_regime.16). Treat bs16's primary numbers here as directionally right, not as precise as bs1/bs8.",
+    "why_primary": "this is the context band the vLLM reference table itself was sampled at (556-896) -- comparing MPK's OWN matched-geometry window (257-352) against vLLM's 556-896 window was exactly the F2 mismatch; late-context is the apples-to-apples basis."
+   },
+   "matched_window": {
+    "description": "arm A's own matched-geometry window, ctx 257-352 -- PREVIOUS primary basis, kept for continuity, not used for ranking/target math above (see context_band).",
+    "mpk_us_per_step": {
+     "1": 757.0,
+     "8": 804.0,
+     "16": 787.0
     },
-    "pct_change_vs_matched_geometry": {
-     "1": 42.7,
-     "8": 51.9,
-     "16": 91.8
+    "ratio_mpk_over_vllm": {
+     "1": 5.667,
+     "8": 6.027,
+     "16": 5.292
     },
-    "regime": {
+    "step_gain_if_met_us": {
+     "1": 623.4,
+     "8": 670.6,
+     "16": 638.3
+    },
+    "late_context_regime": {
      "1": {
       "iteration": 335,
       "n_live": 1,
@@ -650,9 +663,14 @@
       "window": "[720,733)",
       "context_approx": "263-890 PER-SLOT, NOT a tight high-context band (exact per-slot step+1 from schedule_sim.simulate: [890,867,842,813,781,745,702,651,587,502,374,263], the 4 already-retired slots omitted) -- bs16's staggered admission means its 12 concurrent survivors are never all at similar context simultaneously, unlike bs1 (single request) or bs8 (full 8-wide window, uniform ~801-896). No prefill-free full-bs16 regime exists at ANY context (structural, same reason M3-I1 documented for the original bs16 steady-state). Treat bs16's late-context number as directionally consistent but NOT a clean single-context measurement."
      }
+    },
+    "pct_change_matched_to_late": {
+     "1": 42.7,
+     "8": 51.9,
+     "16": 91.8
     }
    },
-   "late_context_verdict": "CONFIRMED real and larger than the old single-FMHA-kernel +8.3% correction implied: wallspan grew a further 1=42.7%, 8=51.9%, 16=91.8% moving from this row's own context (~257-352) toward the vLLM reference table's own sampled band (556-896). bs1/bs8 are clean, single-context (bs1) or uniform full-8-concurrent (bs8) measurements at context ~801-896. bs16's +91.8% carries a real caveat: no full-bs16 prefill-free window exists at ANY context (structural, same reason M3-I1 documented for the original steady-state), so that point averages 12 concurrent slots spread across context 263-890 (staggered admission), not a clean high-context sample -- directionally consistent with the bs1/bs8 growth, not independently as precise. See remeasure_spec.md sec 4(d) and opt/m3i10/remeasure/armAlate/.",
+   "late_context_verdict": "CONFIRMED real and larger than the old single-FMHA-kernel +8.3% correction implied, and now the PRIMARY basis above (not just a side note): wallspan grew 1=42.7%, 8=51.9%, 16=91.8% moving from arm A's own context (~257-352, now in matched_window) to the vLLM reference table's own sampled band (556-896, this row's primary fields at ~801-896). bs1/bs8 are clean, single-context (bs1) or uniform full-8-concurrent (bs8) measurements. bs16 carries a real caveat -- see context_band. See remeasure_spec.md sec 4(d) and opt/m3i10/remeasure/armAlate/.",
    "rank": 5
   },
   {
