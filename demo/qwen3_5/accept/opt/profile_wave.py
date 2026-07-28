@@ -11,6 +11,17 @@ object has ``profiler_tensor`` set back to ``None`` so
 count) Perfetto/CSV exporters.  The device-side pointer was already handed to
 ``init_func`` at compile/load time, so the kernel still fills the buffer.
 
+Prompt source is one of two mutually exclusive modes:
+
+* ``--prompt-ids`` -- the AC-3 reference set (24-68 token prompts). Default
+  mode; what every prior M3 issue captured with.
+* ``--synthetic-prompt-len`` / ``--synthetic-seed`` -- M3-I10's matched-geometry
+  arm A: ``--batch-size`` DISTINCT synthetic prompts of exactly
+  ``--synthetic-prompt-len`` real-vocabulary token ids each, built byte-for-byte
+  like ``bench_vllm.py``'s ``build_synthetic_prompts`` (same rng threading, same
+  ``tokenizer.vocab_size`` source), so for the same seed both engines consume
+  literally the same token ids.
+
 Output per run (``--out-dir``):
 
     raw_bs<N>_rep<R>.npz   {idx: uint32 slot, val: uint64 entry}  non-zero only
@@ -36,8 +47,8 @@ ACCEPT = Path(os.environ.get("MPK_ACCEPT_DIR", str(HERE.parent))).resolve()
 sys.path.insert(0, str(ACCEPT))
 sys.path.insert(0, str(ACCEPT / "harness"))
 
-from mpk_engine_run import (MPKOfflineAdapter, load_reference_requests,  # noqa: E402
-                            log)
+from mpk_engine_run import (MPKOfflineAdapter, PromptRequest,  # noqa: E402
+                            load_reference_requests, log)
 
 
 class ProfiledAdapter(MPKOfflineAdapter):
@@ -81,10 +92,39 @@ def gpu_state():
         return [f"nvidia-smi failed: {e!r}"]
 
 
+def build_synthetic_requests(model_name: str, batch_size: int, input_len: int,
+                             seed: int):
+    """Byte-for-byte mirror of ``bench_vllm.py``'s ``build_synthetic_prompts``:
+    ONE ``random.Random(seed)`` instance walked across all ``batch_size``
+    prompts IN ORDER (not re-seeded per prompt), ``tokenizer.vocab_size`` as
+    the draw range, ``rng.randrange(0, vocab_n)`` per token -- so for the same
+    seed both engines consume literally the same token ids. Emits
+    ``PromptRequest`` (prompt_id/input_ids) instead of vLLM's ``TokensPrompt``,
+    since MPK is driven token-ids-in like every other adapter path here.
+    """
+    import random as _random
+    from transformers import AutoTokenizer
+    from mirage.mpk.models.qwen3_5.weight_loader import resolve_snapshot
+
+    # Same snapshot resolution the adapter itself uses when model_path is
+    # unset (see mpk_engine_run.py's CLI), so the tokenizer's vocab_size
+    # matches the checkpoint the wave actually loads.
+    tok = AutoTokenizer.from_pretrained(resolve_snapshot(model_name, None))
+    rng = _random.Random(seed)
+    vocab_n = tok.vocab_size
+    requests = []
+    for i in range(batch_size):
+        ids = [rng.randrange(0, vocab_n) for _ in range(input_len)]
+        requests.append(PromptRequest(prompt_id=f"synth{i}", input_ids=ids))
+    return requests
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--batch-size", type=int, required=True)
-    ap.add_argument("--prompt-ids", required=True)
+    ap.add_argument("--prompt-ids", default=None,
+                    help="AC-3 reference prompt ids (comma-separated). "
+                         "Mutually exclusive with --synthetic-prompt-len.")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--kernel-dir", required=True)
     ap.add_argument("--reuse-kernel", action="store_true")
@@ -103,20 +143,42 @@ def main(argv=None) -> int:
     ap.add_argument("--reference",
                     default=str(ACCEPT / "reference" / "reference_outputs.json"))
     ap.add_argument("--save-raw", action="store_true")
+    ap.add_argument("--synthetic-prompt-len", type=int, default=None,
+                    help="M3-I10 matched-geometry arm A: synthesize "
+                         "--batch-size DISTINCT prompts of exactly this many "
+                         "real-vocabulary token ids each (bench_vllm.py's "
+                         "build_synthetic_prompts, byte-for-byte). Mutually "
+                         "exclusive with --prompt-ids.")
+    ap.add_argument("--synthetic-seed", type=int, default=None,
+                    help="Seed for --synthetic-prompt-len. Pass the SAME seed "
+                         "the vLLM side used for the same (bs, rep) so both "
+                         "engines consume literally the same token ids "
+                         "(remeasure_spec.md sec 4: 20260725 + bs*1000 + rep).")
     args = ap.parse_args(argv)
+
+    if (args.prompt_ids is None) == (args.synthetic_prompt_len is None):
+        ap.error("exactly one of --prompt-ids / --synthetic-prompt-len is required")
+    if args.synthetic_prompt_len is not None and args.synthetic_seed is None:
+        ap.error("--synthetic-prompt-len requires --synthetic-seed")
 
     import torch
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     tag = f"bs{args.batch_size}_rep{args.rep}"
 
-    requests = load_reference_requests(Path(args.reference))
-    wanted = [s.strip() for s in args.prompt_ids.split(",") if s.strip()]
-    by_id = {r.prompt_id: r for r in requests}
-    missing = [w for w in wanted if w not in by_id]
-    if missing:
-        raise SystemExit(f"unknown prompt ids: {missing}")
-    requests = [by_id[w] for w in wanted]
+    if args.synthetic_prompt_len is not None:
+        requests = build_synthetic_requests(
+            args.model, args.batch_size, args.synthetic_prompt_len,
+            args.synthetic_seed)
+        wanted = [r.prompt_id for r in requests]
+    else:
+        all_requests = load_reference_requests(Path(args.reference))
+        wanted = [s.strip() for s in args.prompt_ids.split(",") if s.strip()]
+        by_id = {r.prompt_id: r for r in all_requests}
+        missing = [w for w in wanted if w not in by_id]
+        if missing:
+            raise SystemExit(f"unknown prompt ids: {missing}")
+        requests = [by_id[w] for w in wanted]
     if len(requests) > args.batch_size:
         raise SystemExit("one wave per process: len(prompt-ids) must be <= bs")
 
@@ -164,7 +226,9 @@ def main(argv=None) -> int:
     meta = dict(
         tag=tag, batch_size=args.batch_size, rep=args.rep,
         prompt_ids=wanted,
-        prompt_lens=[len(by_id[w].input_ids) for w in wanted],
+        prompt_lens=[len(r.input_ids) for r in requests],
+        synthetic_prompt_len=args.synthetic_prompt_len,
+        synthetic_seed=args.synthetic_seed,
         max_seq_length=args.max_seq_length, mbt=args.mbt,
         page_size=args.page_size, max_new_tokens=args.max_new_tokens,
         profiler_slots=(0 if prof is None else args.slots),
