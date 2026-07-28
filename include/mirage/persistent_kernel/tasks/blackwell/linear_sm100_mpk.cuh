@@ -717,9 +717,36 @@ __device__ __noinline__ void
         num_tiles_executed++;
       }
     }
-    // wait all TMA stores to complete
+    // Wait for all TMA stores to COMPLETE -- destination global writes
+    // performed and visible -- not merely to have finished reading their
+    // source smem.
+    //
+    // `cute::tma_store_wait<N>()` emits `cp.async.bulk.wait_group.read N`
+    // (deps/cutlass/include/cute/arch/copy_sm90_tma.hpp). Per PTX ISA
+    // 9.7.9.25.6.2, the `.read` modifier waits only until the bulk async
+    // operations have completed "1. reading from the tensormap 2. the reading
+    // from their source locations" -- correct for recycling the smem stage
+    // (that is what the in-loop wait<NUM_C_STAGE-1> above is for), but by
+    // construction it retires BEFORE the destination write. The default form
+    // (no `.read`) waits for the full bulk async operation, which that section
+    // defines to include "Writing to their respective destination locations"
+    // and "Writes being made visible to the executing thread".
+    //
+    // The distinction is load-bearing here because this kernel runs inside the
+    // MPK persistent runtime and the CTA does not exit at the end of the task:
+    // it release-increments the task's trigger event (persistent_kernel.cuh,
+    // `atom_add_release_gpu_u64`) and a consumer CTA that acquires that
+    // counter (`ld_acquire_sys_u64`) reads this output with ordinary loads.
+    // TMA stores are performed in the ASYNC proxy; `atom.add.release.gpu` and
+    // `__syncthreads()` order generic-proxy accesses only and do not order an
+    // in-flight async-proxy write, so with the `.read` form a consumer could
+    // observe the trigger event while our last output atom was still in
+    // flight. PTX ISA 9.7.9.25.2 (Async Proxy) states that "the completion of
+    // a cp{.reduce}.async.bulk operation is followed by an implicit
+    // generic-async proxy fence", so observing completion HERE is sufficient
+    // and no separate `fence.proxy.async{.global}` is needed.
     if (warp_idx == 0 && cute::elect_one_sync()) {
-      cute::tma_store_wait<0>();
+      kernel::tma::store_async_wait<0>();
     }
   }
   __syncthreads();

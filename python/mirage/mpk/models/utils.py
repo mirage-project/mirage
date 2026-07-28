@@ -4,9 +4,29 @@ def grid_for_rmsnorm_linear_layer(size):
     # 96 and 64 are enough to cover all Qwen3 model? Please update the method
     # if you meet any incompatibility.
     if size / 96 > 400:
-        # TODO: An ad-hoc workaround for linear kernel, both MPK ptx and
-        # cutlass version will output unexpected result (not same out put for
-        # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
+        # An ad-hoc workaround for the linear kernel. The original note here
+        # read: "TODO ... both MPK ptx and cutlass version will output
+        # unexpected result (not same out put for same prompt) if the
+        # OUTPUT_SIZE is too big, try to figure it out." M3-I11 resolved that
+        # PARTLY:
+        #  * On Blackwell the "cutlass version" is linear_sm100_mpk.cuh, and one
+        #    concrete mechanism for "not the same output for the same prompt"
+        #    was found and fixed there: the task-terminal TMA store wait used
+        #    cp.async.bulk.wait_group.read (source-read completion) instead of
+        #    cp.async.bulk.wait_group (destination-write visibility), so a
+        #    consumer task could acquire the trigger event and read this
+        #    layer's output before the async-proxy write landed. Exposure grows
+        #    with the per-task OUTPUT_SIZE -- more/larger in-flight store atoms
+        #    at the terminal wait -- which matches the size dependence this cap
+        #    works around. See the comment at that wait for the PTX citations.
+        #  * It is NOT the whole story for the "MPK ptx" variant: the ptx-based
+        #    Hopper linear (hopper/linear_hopper.cuh:360) has used the correct
+        #    write-visibility wait, store_async_wait<0>(), since #459, and the
+        #    Ampere linear writes its output with plain generic-proxy stores.
+        #    Any residual size-dependent nondeterminism on those two paths has
+        #    a different cause and was not re-measured here.
+        # The 256 cap stays: relaxing it changes the task graph and the per-task
+        # tile shape, so it needs its own perf + bit-exactness run.
         assert size % 256 == 0, f"FATAL: Linear layer size not support, it's {size}."
         return size // 256
     if size % 96 == 0:
