@@ -1,0 +1,52 @@
+{
+  "skill": "b200-layout-contract-auditor",
+  "version": "0.1.0",
+  "source_book": "Modern GPU Programming For MLSys (MLC Community) + NVIDIA Blackwell Tuning/Compatibility Guides",
+  "darwin_compatible": true,
+  "test_cases": [
+    {
+      "id": "should-trigger-01",
+      "type": "should_trigger",
+      "prompt": "The tcgen05 result is wrong after a TMA load; I suspect a 128B swizzle mismatch.",
+      "expected_behavior": "Should trigger and cross-check the descriptor, SMEM layout, and MMA layout.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-02",
+      "type": "should_trigger",
+      "prompt": "Compute this warp's GMEM coalescing and SMEM bank mapping for me.",
+      "expected_behavior": "Should trigger and output a lane→address/bank audit.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-03",
+      "type": "should_trigger",
+      "prompt": "After reading TMEM back into registers my rows and columns are interleaved — how do I localize this?",
+      "expected_behavior": "Should trigger and audit TLane/TCol and the tcgen05.ld fragment.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-01",
+      "type": "should_not_trigger",
+      "prompt": "The kernel never returns from mbarrier.wait, but the data layout has been verified correct.",
+      "expected_behavior": "Should not trigger on its own; prefer the barrier auditor.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-02",
+      "type": "should_not_trigger",
+      "prompt": "CMake cannot find CUDA.",
+      "expected_behavior": "Should not trigger; this is a build-environment issue.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    },
+    {
+      "id": "edge-case-01",
+      "type": "edge_case",
+      "prompt": "Results are correct but slow; I suspect bank conflicts.",
+      "expected_behavior": "Should be invoked, but combined with a profiler; the main bottleneck must not be asserted from the static mapping alone.",
+      "notes": "Used to validate the trigger boundary and execution method; does not imply it has been run on B200 hardware."
+    }
+  ],
+  "minimum_pass_rate": 0.8,
+  "notes": "All should_not_trigger cases must pass; edge_case must state the invocation boundary. These tests are prompt/behavior stress tests, not hardware performance tests."
+}

@@ -1,0 +1,52 @@
+{
+  "skill": "b200-tcgen05-mma-contract-builder",
+  "version": "0.1.0",
+  "source_book": "Modern GPU Programming For MLSys (MLC Community) + NVIDIA Blackwell Tuning/Compatibility Guides",
+  "darwin_compatible": true,
+  "test_cases": [
+    {
+      "id": "should-trigger-01",
+      "type": "should_trigger",
+      "prompt": "I want to implement a tcgen05 GEMM on B200 with fp16 inputs and fp32 accumulation.",
+      "expected_behavior": "Should activate and define the tile, group, layout, completion, and epilogue.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-02",
+      "type": "should_trigger",
+      "prompt": "With cta_group::2 and M=256, which accumulators does each of the two CTAs hold?",
+      "expected_behavior": "Should activate and describe the TMEM partitioning and the issuer.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-03",
+      "type": "should_trigger",
+      "prompt": "Help me design the SFA/SFB data path for an mxfp8 block-scaled MMA.",
+      "expected_behavior": "Should activate and provide the SMEM/TMEM placement, scale blocks, and multicast.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-01",
+      "type": "should_not_trigger",
+      "prompt": "Write mma.sync for an A100.",
+      "expected_behavior": "Should not activate; not Blackwell tcgen05.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-02",
+      "type": "should_not_trigger",
+      "prompt": "I just want to do an ordinary matmul with cuBLAS.",
+      "expected_behavior": "Should not activate; no custom MMA contract needed.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    },
+    {
+      "id": "edge-case-01",
+      "type": "edge_case",
+      "prompt": "The shape is tiny but latency must be low — should I use tcgen05?",
+      "expected_behavior": "May be invoked for an assessment, but should first compare library paths and tile utilization; no guarantee that a custom kernel is faster.",
+      "notes": "Used to validate activation boundaries and execution method; does not mean it has been run on B200 hardware."
+    }
+  ],
+  "minimum_pass_rate": 0.8,
+  "notes": "All should_not_trigger cases must pass; edge_case must state the invocation boundary. These tests are prompt/behavior stress tests, not hardware performance tests."
+}

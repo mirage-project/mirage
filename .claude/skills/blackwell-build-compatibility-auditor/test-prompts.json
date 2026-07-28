@@ -1,0 +1,52 @@
+{
+  "skill": "blackwell-build-compatibility-auditor",
+  "version": "0.1.0",
+  "source_book": "Modern GPU Programming For MLSys (MLC Community) + NVIDIA Blackwell Tuning/Compatibility Guides",
+  "darwin_compatible": true,
+  "test_cases": [
+    {
+      "id": "should-trigger-01",
+      "type": "should_trigger",
+      "prompt": "My CUDA 12.4 extension reports no kernel image on B200; how do I verify?",
+      "expected_behavior": "Should activate and check PTX/cubin, forced JIT, and rebuild flags.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-02",
+      "type": "should_trigger",
+      "prompt": "Configure sm_100 and a PTX fallback for a PyTorch wheel.",
+      "expected_behavior": "Should activate and output the multi-architecture artifacts and a verification plan.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-03",
+      "type": "should_trigger",
+      "prompt": "What are the deployment risks of sm_100a vs sm_100?",
+      "expected_behavior": "Should activate and explain the architecture-conditional compatibility boundary and fallback.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-01",
+      "type": "should_not_trigger",
+      "prompt": "The kernel runs, but Tensor Core utilization is low.",
+      "expected_behavior": "Should not activate; the performance/roofline skill should be invoked.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-02",
+      "type": "should_not_trigger",
+      "prompt": "Installing a pure-Python package fails.",
+      "expected_behavior": "Should not activate; not a CUDA binary.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "edge-case-01",
+      "type": "edge_case",
+      "prompt": "Only PTX, no sm_100 cubin, but it runs.",
+      "expected_behavior": "Should be invoked and judged compatible, but first-run JIT/deployment predictability is weaker; recommend native+PTX.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    }
+  ],
+  "minimum_pass_rate": 0.8,
+  "notes": "All should_not_trigger cases must pass; edge_case must state the invocation boundary. These are prompt/behavior stress tests, not hardware performance tests."
+}

@@ -5,6 +5,8 @@ description: Guide for adding a new model (e.g., Llama4, DeepSeek V3) to the MPK
 
 You are helping the user add a new model to MPK. This is a context + guidelines skill (not a step-by-step recipe) because model implementations vary significantly depending on architecture (dense vs MoE, GQA vs MLA, etc.).
 
+> **Read `mpk-development-norms` FIRST.** This skill is the HOW; that one is the WHERE + the PR-shape gate — model code stays in `models/<model>/builder.py` + `demo/<model>/`, shared `persistent_kernel.py` gets only GENERIC ops named by operation (never `<model>_*`), no experiment env-vars land, and runtime fixes are separate PRs. A model bring-up that sprawls into `persistent_kernel.cuh`/`multigpu.py`/model-specific shared methods is exactly what it flags.
+
 ## Prerequisites Check
 
 Before writing any model code, identify what the new model needs:

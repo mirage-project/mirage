@@ -5,6 +5,8 @@ description: Step-by-step guide for adding a new task implementation to Mirage P
 
 You are helping the user add a new task to the MPK (Mirage Persistent Kernel) runtime. A "task" is a single fused GPU operation (one thread block's worth of work) that runs as a node in the megakernel's task graph.
 
+> **Read `mpk-development-norms` FIRST.** This skill is the HOW (the 7 files); that one is the WHERE + the PR-shape gate — a new task = `.cuh` + its test-mode test + wrapper, with coherent registration (`runtime_header.h` ⇄ `src/kernel` ⇄ graph ⇄ TMA), and its Python API is a GENERIC `<operation>_layer` in `persistent_kernel.py` named for the op, never the model. No campaign env-vars land.
+
 ## Task Lifecycle Overview
 
 A task flows through 7 files across 4 layers:

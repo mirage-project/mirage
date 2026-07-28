@@ -1,0 +1,52 @@
+{
+  "skill": "b200-cluster-persistent-scheduler",
+  "version": "0.1.0",
+  "source_book": "Modern GPU Programming For MLSys (MLC Community) + NVIDIA Blackwell Tuning/Compatibility Guides",
+  "darwin_compatible": true,
+  "test_cases": [
+    {
+      "id": "should-trigger-01",
+      "type": "should_trigger",
+      "prompt": "Design a B200 2-CTA cluster GEMM and explain the DSMEM and barrier mask.",
+      "expected_behavior": "Should activate and output the cluster tile, owners, DSMEM, occupancy, and handoff.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-02",
+      "type": "should_trigger",
+      "prompt": "Tail tile costs are uneven; I want to use CLC for work stealing.",
+      "expected_behavior": "Should activate and give the try-cancel/query/predicate protocol.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-trigger-03",
+      "type": "should_trigger",
+      "prompt": "Can cluster size 16 be used? How do I enable it safely?",
+      "expected_behavior": "Should activate and explain the opt-in, occupancy, and fallback.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-01",
+      "type": "should_not_trigger",
+      "prompt": "A tiny elementwise kernel with only one CTA each time.",
+      "expected_behavior": "Should not activate; cluster/persistent is very likely unsuitable.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "should-not-trigger-02",
+      "type": "should_not_trigger",
+      "prompt": "How do I configure a multi-node NCCL communication topology?",
+      "expected_behavior": "Should not activate; this is cross-node communication.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    },
+    {
+      "id": "edge-case-01",
+      "type": "edge_case",
+      "prompt": "Tiles are uniform, but the grid's tail count is not divisible by the SM count.",
+      "expected_behavior": "May evaluate persistent/CLC; whether it is worth it depends on the tail fraction and the scheduling overhead.",
+      "notes": "Used to validate the activation boundary and execution method; does not imply this has been run on B200 hardware."
+    }
+  ],
+  "minimum_pass_rate": 0.8,
+  "notes": "All should_not_trigger cases must pass; edge_case must state the invocation boundary. These are prompt/behavior stress tests, not hardware performance tests."
+}
