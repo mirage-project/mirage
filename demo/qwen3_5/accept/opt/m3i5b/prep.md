@@ -460,3 +460,19 @@ the no-divergent-barrier check, and the race triage were each independently conf
 M3-I5c (the Phase-7 compaction race) fixed and validated first, or the window adds a
 high-repetition compaction stress test at the proposed maximum row count. P4's disposition
 rule inherits this prerequisite.
+
+---
+
+## 8. mbt terminal disposition (2026-07-28): REJECTED-WITH-EVIDENCE (superseded)
+
+The P4 A/B is dispositioned without a GPU run, on the pre-registered models plus what landed
+since: (a) P4c's exact-replay simulation put the ENTIRE mbt>16 gain at bs16 (-39.4%
+iterations at mbt=32; bs1-8 gains <= 2.7%); (b) M3-I9's admission cap landed bs16-
+conditionally and delivers MORE than mbt would (203 -> 131 iterations, +84.2% at the AC-3
+geometry, +14.1% matched e2e) with ZERO of the O(mbt) padding cost mbt adds to every
+mbt-shaped stage; (c) P4d's padding-cost model predicts a net LOSS at bs1-4 — and its key
+premise was later confirmed by measurement (quantize row-split landed; the remaining
+mbt-shaped stages persist). The M3-I5c stress prerequisite (finding-5) is now MET
+(5000/5000 across rows 16-128), so this rejection is on the merits, not on safety.
+REOPEN CONDITION: a workload class needing >16-token prefill chunks per request (beyond
+AC-4's pinned geometry) — the row loop already enables it and this protocol stands ready.

@@ -1,0 +1,68 @@
+running build_ext
+W0727 09:46:33.763000 1694003 torch/utils/cpp_extension.py:781] Attempted to use ninja as the BuildExtension backend but we could not find ninja.. Falling back to using the slow distutils backend.
+building 'runtime_kernel_blackwell_gdn_recurrent' extension
+creating build/temp.linux-x86_64-cpython-312/home/muhengl/mpk-qwen35/mirage-rm/tests/runtime_python/blackwell/sm100_gdn_recurrent
+/usr/local/cuda-13.0/bin/nvcc -DMIRAGE_BACKEND_USE_CUDA -DMIRAGE_FINGERPRINT_USE_CUDA -I/home/muhengl/mpk-qwen35/mirage-rm/tests/runtime_python/blackwell/sm100_gdn_recurrent/../../../../include/mirage/persistent_kernel/ -I/home/muhengl/mpk-qwen35/mirage-rm/tests/runtime_python/blackwell/sm100_gdn_recurrent/../../../../include/mirage/persistent_kernel/tasks -I/home/muhengl/mpk-qwen35/mirage-rm/tests/runtime_python/blackwell/sm100_gdn_recurrent/../../../../include -I/home/muhengl/mpk-qwen35/mirage-rm/tests/runtime_python/blackwell/sm100_gdn_recurrent/../../../../deps/cutlass/include -I/home/muhengl/mpk-qwen35/mirage-rm/tests/runtime_python/blackwell/sm100_gdn_recurrent/../../../../deps/cutlass/tools/util/include -I/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include -I/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -I/usr/local/cuda-13.0/include -I/home/muhengl/mpk-qwen35/venv-rm/include -I/usr/include/python3.12 -c /home/muhengl/mpk-qwen35/mirage-rm/tests/runtime_python/blackwell/sm100_gdn_recurrent/runtime_kernel_wrapper_sm100.cu -o build/temp.linux-x86_64-cpython-312/home/muhengl/mpk-qwen35/mirage-rm/tests/runtime_python/blackwell/sm100_gdn_recurrent/runtime_kernel_wrapper_sm100.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -O3 -gencode=arch=compute_100a,code=sm_100a -DMIRAGE_GRACE_BLACKWELL -use_fast_math -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=runtime_kernel_blackwell_gdn_recurrent -std=c++20
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/nn/modules/container/any_module_holder.h(93): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+            module->_forward_populate_default_args(std::move(arguments)));
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(93): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+    module.attr(name) = wrapper_class;
+    ^
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(155): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+                module.to(
+                ^
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(159): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+                module.to(detail::py_object_to_dtype(object), non_blocking);
+                ^
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(170): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+                  module.to(detail::py_object_to_dtype(dtype), non_blocking);
+                  ^
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(172): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+                  module.to(detail::py_object_to_device(device), non_blocking);
+                  ^
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(174): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+                  module.to(
+                  ^
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/nn/modules/container/any_module_holder.h(93): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+            module->_forward_populate_default_args(std::move(arguments)));
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(93): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+    module.attr(name) = wrapper_class;
+    ^
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(155): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+                module.to(
+                ^
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(159): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+                module.to(detail::py_object_to_dtype(object), non_blocking);
+                ^
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(170): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+                  module.to(detail::py_object_to_dtype(dtype), non_blocking);
+                  ^
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(172): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+                  module.to(detail::py_object_to_device(device), non_blocking);
+                  ^
+
+/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/include/torch/csrc/api/include/torch/python.h(174): warning #3189-D: "module" is parsed as an identifier rather than a keyword because the tokens that follow it do not match those of a preprocessor directive
+                  module.to(
+                  ^
+
+creating build/lib.linux-x86_64-cpython-312
+x86_64-linux-gnu-g++ -fno-strict-overflow -Wsign-compare -DNDEBUG -g -O2 -Wall -shared -Wl,-O1 -Wl,-Bsymbolic-functions build/temp.linux-x86_64-cpython-312/home/muhengl/mpk-qwen35/mirage-rm/tests/runtime_python/blackwell/sm100_gdn_recurrent/runtime_kernel_wrapper_sm100.o -L/usr/local/cuda-13.0/lib -L/usr/local/cuda-13.0/lib64 -L/usr/local/cuda-13.0/lib64/stubs -L/home/muhengl/mpk-qwen35/venv-rm/lib/python3.12/site-packages/torch/lib -L/usr/local/cuda-13.0/lib64 -L/usr/lib/x86_64-linux-gnu -lcuda -lc10 -ltorch -ltorch_cpu -ltorch_python -lcudart -lc10_cuda -ltorch_cuda -o build/lib.linux-x86_64-cpython-312/runtime_kernel_blackwell_gdn_recurrent.cpython-312-x86_64-linux-gnu.so
+copying build/lib.linux-x86_64-cpython-312/runtime_kernel_blackwell_gdn_recurrent.cpython-312-x86_64-linux-gnu.so -> 

@@ -1,0 +1,139 @@
+oracle dumps: /home/muhengl/mpk-qwen35/oracle-work/dumps
+device: NVIDIA B200  torch 2.13.0+cu130
+
+[1] gating scalars (CUDA probe vs gdn.beta / gdn.decay_g)
+  BIT-EXACT prefill beta = sigmoid(b) [bf16-native]        bitdiff=0/256 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  FAIL      prefill g = -exp(A_log)*softplus(a+dt)         bitdiff=169/256 maxabs=1.526e-05 maxabs/rms=6.52e-07 
+  BIT-EXACT decode beta = sigmoid(b) [bf16-native]         bitdiff=0/32 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  FAIL      decode g = -exp(A_log)*softplus(a+dt)          bitdiff=23/32 maxabs=1.144e-05 maxabs/rms=4.90e-07 
+
+[2] decode step (1 token, carried state from gdn.core_state_before)
+  BIT-EXACT decode o  vs gdn.core_attn_out  (bf16)         bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT decode y  vs gdn.gated_norm_out (bf16)         bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  ok        decode S  vs gdn.core_state_after (fp32)       bitdiff=182346/524288 maxabs=9.537e-07 maxabs/rms=7.01e-06 fp32 dot association order, see kernel header
+
+[2a] decode FAST PATH (v-row split) vs the same oracle dumps
+  BIT-EXACT split=1 depth=2  y vs gdn.gated_norm_out       bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=1 depth=2  y byte-identical to golden path bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=1 depth=2  S byte-identical to golden path bitdiff=0/524288 maxabs=0.000e+00 maxabs/rms=0.00e+00 
+  BIT-EXACT split=2 depth=2  o vs gdn.core_attn_out        bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=2 depth=2  y vs gdn.gated_norm_out       bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=2 depth=2  y byte-identical to golden path bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=2 depth=2  S byte-identical to golden path bitdiff=0/524288 maxabs=0.000e+00 maxabs/rms=0.00e+00 
+  BIT-EXACT split=4 depth=2  o vs gdn.core_attn_out        bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=4 depth=2  y vs gdn.gated_norm_out       bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=4 depth=2  y byte-identical to golden path bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=4 depth=2  S byte-identical to golden path bitdiff=0/524288 maxabs=0.000e+00 maxabs/rms=0.00e+00 
+  BIT-EXACT split=8 depth=2  o vs gdn.core_attn_out        bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=8 depth=2  y vs gdn.gated_norm_out       bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=8 depth=2  y byte-identical to golden path bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=8 depth=2  S byte-identical to golden path bitdiff=0/524288 maxabs=0.000e+00 maxabs/rms=0.00e+00 
+  BIT-EXACT split=16 depth=2  o vs gdn.core_attn_out       bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=16 depth=2  y vs gdn.gated_norm_out      bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=16 depth=2  y byte-identical to golden path bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=16 depth=2  S byte-identical to golden path bitdiff=0/524288 maxabs=0.000e+00 maxabs/rms=0.00e+00 
+  BIT-EXACT split=32 depth=2  o vs gdn.core_attn_out       bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=32 depth=2  y vs gdn.gated_norm_out      bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=32 depth=2  y byte-identical to golden path bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=32 depth=2  S byte-identical to golden path bitdiff=0/524288 maxabs=0.000e+00 maxabs/rms=0.00e+00 
+  BIT-EXACT split=2 depth=4  o vs gdn.core_attn_out        bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=2 depth=4  y vs gdn.gated_norm_out       bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=2 depth=4  y byte-identical to golden path bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=2 depth=4  S byte-identical to golden path bitdiff=0/524288 maxabs=0.000e+00 maxabs/rms=0.00e+00 
+  BIT-EXACT split=4 depth=4  o vs gdn.core_attn_out        bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=4 depth=4  y vs gdn.gated_norm_out       bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=4 depth=4  y byte-identical to golden path bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT split=4 depth=4  S byte-identical to golden path bitdiff=0/524288 maxabs=0.000e+00 maxabs/rms=0.00e+00 
+
+[2b] counterfactual rounding orders (each MUST miss)
+  ok        D1 fp32 l2norm (vLLM order) -> o               bitdiff=1448/4096 maxabs=3.906e-03 maxabs/rms=1.12e-01 maxulp=32695 counterfactual: must NOT be bit-exact
+  ok        D3 all-fp32 epilogue (arch doc) -> y           bitdiff=1046/4096 maxabs=4.883e-04 maxabs/rms=1.41e-02 maxulp=1 counterfactual: must NOT be bit-exact
+  BIT-EXACT epilogue applied to oracle o -> y              bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+
+[2c] torch reference (HF order) vs kernel
+  BIT-EXACT decode o  kernel vs torch-ref                  bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT decode y  kernel vs torch-ref                  bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  ok        decode S  kernel vs torch-ref                  bitdiff=182698/524288 maxabs=9.537e-07 maxabs/rms=7.01e-06 both fp32, different reduction association
+  BIT-EXACT decode o  kernel vs EXACT-ORDER ref            bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  BIT-EXACT decode y  kernel vs EXACT-ORDER ref            bitdiff=0/4096 maxabs=0.000e+00 maxabs/rms=0.00e+00 maxulp=0 
+  FAIL      decode S  kernel vs EXACT-ORDER ref (fp32)     bitdiff=127981/524288 maxabs=9.537e-07 maxabs/rms=7.01e-06 
+
+[3] chunked prefill (T=8, zero initial state)
+  (a) STRICT GATE: vs a torch reference carrying the kernel's own
+      fp32 association order - must be bit-exact, state included
+  FAIL      prefill o  kernel vs EXACT-ORDER ref           bitdiff=3/32768 maxabs=2.980e-08 maxabs/rms=1.45e-06 maxulp=1 
+  FAIL      prefill y  kernel vs EXACT-ORDER ref           bitdiff=2/32768 maxabs=2.384e-07 maxabs/rms=6.78e-06 maxulp=1 
+  FAIL      prefill S  kernel vs EXACT-ORDER ref (fp32)    bitdiff=263254/524288 maxabs=1.907e-06 maxabs/rms=1.48e-05 
+  (b) vs the SAME algorithm under torch's association order
+  ok        prefill o  kernel vs torch-order ref           bitdiff=4/32768 maxabs=9.537e-07 maxabs/rms=4.62e-05 maxulp=1 fp32 association compounds over 8 tokens
+  ok        prefill y  kernel vs torch-order ref           bitdiff=3/32768 maxabs=1.526e-05 maxabs/rms=4.34e-04 maxulp=2 downstream of the o flips
+  ok        prefill S  kernel vs torch-order ref           bitdiff=312201/524288 maxabs=2.861e-06 maxabs/rms=2.22e-05 fp32 reduction association
+  (c) vs the HF dump, which used torch_chunk_gated_delta_rule
+      (chunk_size=64 WY/UT transform - a DIFFERENT algorithm, so
+       agreement is bounded by the two algorithms' fp32 paths)
+  ok        prefill o  vs gdn.core_attn_out (chunked)      bitdiff=2/32768 maxabs=5.821e-11 maxabs/rms=2.82e-09 maxulp=11 sequential vs chunked algorithm
+  ok        prefill y  vs gdn.gated_norm_out (chunked)     bitdiff=1/32768 maxabs=1.048e-09 maxabs/rms=2.98e-08 maxulp=9 sequential vs chunked algorithm
+  ok        prefill S  vs gdn.core_state_after (chunked)   bitdiff=334337/524288 maxabs=3.815e-06 maxabs/rms=2.96e-05 sequential vs chunked algorithm
+  ok        prefill o  torch-seq vs chunked dump           bitdiff=3/32768 maxabs=9.537e-07 maxabs/rms=4.62e-05 maxulp=10 same gap without any CUDA involved
+
+==============================================================================
+check                                            status     bitdiff
+prefill beta = sigmoid(b) [bf16-native]          BIT-EXACT  0/256  maxabs=0.000e+00
+prefill g = -exp(A_log)*softplus(a+dt)           FAIL       169/256  maxabs=1.526e-05
+decode beta = sigmoid(b) [bf16-native]           BIT-EXACT  0/32  maxabs=0.000e+00
+decode g = -exp(A_log)*softplus(a+dt)            FAIL       23/32  maxabs=1.144e-05
+decode o  vs gdn.core_attn_out  (bf16)           BIT-EXACT  0/4096  maxabs=0.000e+00
+decode y  vs gdn.gated_norm_out (bf16)           BIT-EXACT  0/4096  maxabs=0.000e+00
+decode S  vs gdn.core_state_after (fp32)         ok         182346/524288  maxabs=9.537e-07
+split=1 depth=2  y vs gdn.gated_norm_out         BIT-EXACT  0/4096  maxabs=0.000e+00
+split=1 depth=2  y byte-identical to golden path BIT-EXACT  0/4096  maxabs=0.000e+00
+split=1 depth=2  S byte-identical to golden path BIT-EXACT  0/524288  maxabs=0.000e+00
+split=2 depth=2  o vs gdn.core_attn_out          BIT-EXACT  0/4096  maxabs=0.000e+00
+split=2 depth=2  y vs gdn.gated_norm_out         BIT-EXACT  0/4096  maxabs=0.000e+00
+split=2 depth=2  y byte-identical to golden path BIT-EXACT  0/4096  maxabs=0.000e+00
+split=2 depth=2  S byte-identical to golden path BIT-EXACT  0/524288  maxabs=0.000e+00
+split=4 depth=2  o vs gdn.core_attn_out          BIT-EXACT  0/4096  maxabs=0.000e+00
+split=4 depth=2  y vs gdn.gated_norm_out         BIT-EXACT  0/4096  maxabs=0.000e+00
+split=4 depth=2  y byte-identical to golden path BIT-EXACT  0/4096  maxabs=0.000e+00
+split=4 depth=2  S byte-identical to golden path BIT-EXACT  0/524288  maxabs=0.000e+00
+split=8 depth=2  o vs gdn.core_attn_out          BIT-EXACT  0/4096  maxabs=0.000e+00
+split=8 depth=2  y vs gdn.gated_norm_out         BIT-EXACT  0/4096  maxabs=0.000e+00
+split=8 depth=2  y byte-identical to golden path BIT-EXACT  0/4096  maxabs=0.000e+00
+split=8 depth=2  S byte-identical to golden path BIT-EXACT  0/524288  maxabs=0.000e+00
+split=16 depth=2  o vs gdn.core_attn_out         BIT-EXACT  0/4096  maxabs=0.000e+00
+split=16 depth=2  y vs gdn.gated_norm_out        BIT-EXACT  0/4096  maxabs=0.000e+00
+split=16 depth=2  y byte-identical to golden path BIT-EXACT  0/4096  maxabs=0.000e+00
+split=16 depth=2  S byte-identical to golden path BIT-EXACT  0/524288  maxabs=0.000e+00
+split=32 depth=2  o vs gdn.core_attn_out         BIT-EXACT  0/4096  maxabs=0.000e+00
+split=32 depth=2  y vs gdn.gated_norm_out        BIT-EXACT  0/4096  maxabs=0.000e+00
+split=32 depth=2  y byte-identical to golden path BIT-EXACT  0/4096  maxabs=0.000e+00
+split=32 depth=2  S byte-identical to golden path BIT-EXACT  0/524288  maxabs=0.000e+00
+split=2 depth=4  o vs gdn.core_attn_out          BIT-EXACT  0/4096  maxabs=0.000e+00
+split=2 depth=4  y vs gdn.gated_norm_out         BIT-EXACT  0/4096  maxabs=0.000e+00
+split=2 depth=4  y byte-identical to golden path BIT-EXACT  0/4096  maxabs=0.000e+00
+split=2 depth=4  S byte-identical to golden path BIT-EXACT  0/524288  maxabs=0.000e+00
+split=4 depth=4  o vs gdn.core_attn_out          BIT-EXACT  0/4096  maxabs=0.000e+00
+split=4 depth=4  y vs gdn.gated_norm_out         BIT-EXACT  0/4096  maxabs=0.000e+00
+split=4 depth=4  y byte-identical to golden path BIT-EXACT  0/4096  maxabs=0.000e+00
+split=4 depth=4  S byte-identical to golden path BIT-EXACT  0/524288  maxabs=0.000e+00
+D1 fp32 l2norm (vLLM order) -> o                 ok         1448/4096  maxabs=3.906e-03
+D3 all-fp32 epilogue (arch doc) -> y             ok         1046/4096  maxabs=4.883e-04
+epilogue applied to oracle o -> y                BIT-EXACT  0/4096  maxabs=0.000e+00
+decode o  kernel vs torch-ref                    BIT-EXACT  0/4096  maxabs=0.000e+00
+decode y  kernel vs torch-ref                    BIT-EXACT  0/4096  maxabs=0.000e+00
+decode S  kernel vs torch-ref                    ok         182698/524288  maxabs=9.537e-07
+decode o  kernel vs EXACT-ORDER ref              BIT-EXACT  0/4096  maxabs=0.000e+00
+decode y  kernel vs EXACT-ORDER ref              BIT-EXACT  0/4096  maxabs=0.000e+00
+decode S  kernel vs EXACT-ORDER ref (fp32)       FAIL       127981/524288  maxabs=9.537e-07
+prefill o  kernel vs EXACT-ORDER ref             FAIL       3/32768  maxabs=2.980e-08
+prefill y  kernel vs EXACT-ORDER ref             FAIL       2/32768  maxabs=2.384e-07
+prefill S  kernel vs EXACT-ORDER ref (fp32)      FAIL       263254/524288  maxabs=1.907e-06
+prefill o  kernel vs torch-order ref             ok         4/32768  maxabs=9.537e-07
+prefill y  kernel vs torch-order ref             ok         3/32768  maxabs=1.526e-05
+prefill S  kernel vs torch-order ref             ok         312201/524288  maxabs=2.861e-06
+prefill o  vs gdn.core_attn_out (chunked)        ok         2/32768  maxabs=5.821e-11
+prefill y  vs gdn.gated_norm_out (chunked)       ok         1/32768  maxabs=1.048e-09
+prefill S  vs gdn.core_state_after (chunked)     ok         334337/524288  maxabs=3.815e-06
+prefill o  torch-seq vs chunked dump             ok         3/32768  maxabs=9.537e-07
+
+FAILED (6): prefill g = -exp(A_log)*softplus(a+dt); decode g = -exp(A_log)*softplus(a+dt); decode S  kernel vs EXACT-ORDER ref (fp32); prefill o  kernel vs EXACT-ORDER ref; prefill y  kernel vs EXACT-ORDER ref; prefill S  kernel vs EXACT-ORDER ref (fp32)
