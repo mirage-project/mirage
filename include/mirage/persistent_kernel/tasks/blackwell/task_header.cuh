@@ -36,6 +36,7 @@
 #include "linear_fp8_1d2d_sm100.cuh"
 #include "linear_fp8_sm100.cuh"
 #include "linear_sm100_mpk.cuh"
+// #include "linear_sm100_mpk_cutlass.cuh" // CUTLASS
 #include "mla_dispatch_sm100.cuh"
 #include "mla_kv_cache_gather_sm100.cuh"
 #include "mla_kv_cache_gather_split_sm100.cuh"
