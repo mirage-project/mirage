@@ -114,7 +114,8 @@
    "delta_basis": "a 30% kernel win on its measured wall span",
    "risk": "medium - bit-exactness. Gated-norm and fp32 g handling are the M2-I4/I5 cast-position traps.",
    "verify_cmd": "ferret episode artifacts + test-mode oracle, then bash opt/run_m3i1.sh all and compare TASK_GDN_RECURRENT_SM100 mean_us/wallspan in pertask_by_bs.csv",
-   "suggested_owner_issue": "M3-I3 (unchanged) - note it pays off at bs8/16, not bs1"
+   "suggested_owner_issue": "M3-I3 (unchanged) - note it pays off at bs8/16, not bs1",
+   "disposition": "INTEGRATED (M3-I3, b0920b28, 2026-07-28): ferret v010 winner ported bit-exact (unit memcmp + oracle both flag lanes + AC-3 10/10x5); stage wallspan 1217->236 / 2469->782 / 4950->1556us (bs1/8/16) = e2e +9.0/+15.2/+28.1% tok/s. Per-worker task time 0.98x vLLM at bs16 = KERNEL PARITY; residual stage gap is width/scheduling (75.6/128 concurrent). Evidence opt/m3i3/results/."
   },
   {
    "rank": 6,

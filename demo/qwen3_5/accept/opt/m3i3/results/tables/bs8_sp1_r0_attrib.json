@@ -1,0 +1,695 @@
+{
+  "summary": {
+    "tag": "bs8_rep0",
+    "batch_size": 8,
+    "rep": 0,
+    "n_events": 26554882,
+    "n_iterations_traced": 255,
+    "header_nblocks": 208,
+    "header_ngroups": 1,
+    "n_worker_blocks": 128,
+    "n_sched_blocks": 2,
+    "dropped_dangling_begin": 0,
+    "dropped_unmatched_end": 0,
+    "sim_iterations": 256,
+    "trace_iterations": 256,
+    "schedule_model_agrees": true,
+    "n_prefill_or_mixed": 160,
+    "n_decode_full": 0,
+    "n_decode_draining": 96,
+    "first_retirement_iter": 112,
+    "steady_window": [
+      164,
+      167
+    ],
+    "steady_regime_live_prefill_decode_tokens": [
+      5,
+      0,
+      5,
+      5
+    ],
+    "step_us": 11266.666666666666,
+    "step_us_p50": 11266.144,
+    "step_us_min": 11247.712,
+    "step_us_max": 11286.144,
+    "task_sum_us": 410108.1066666667,
+    "sched_events_sum_us": 942.5493333333334,
+    "task_sum_per_worker_us": 3203.9695833333335,
+    "perfect_pack_us": 3211.33325,
+    "dead_all_idle_us": 428.5866666666667,
+    "prepare_batch_us": 17.994666666666667,
+    "worker_idle_us": 7626.74675,
+    "busy_any_us": 10838.08,
+    "occupancy": 0.2850170515408899,
+    "tasks_per_step": 49586.0,
+    "sched_events_per_step": 2277.0,
+    "tokens_per_step": 5,
+    "decode_tokens_per_step": 5,
+    "decode_tokens_per_s": 443.78698224852076,
+    "prefill_step_us": 22952.9526,
+    "prefill_total_ms": 3672.4724159999996,
+    "drain_total_ms": 1175.459904,
+    "wall_ms_cuda_event": 4860.00390625,
+    "trace_span_ms": 4847.93232,
+    "closure_error_pct": -0.24838634871210624,
+    "residual_pct_of_step": -8.072438181416523e-15
+  },
+  "buckets": [
+    {
+      "bucket": "moe_w13",
+      "n_per_iter": 10240.0,
+      "total_us_per_iter": 123887.2,
+      "per_worker_us_per_iter": 967.86875,
+      "task_types": [
+        241
+      ]
+    },
+    {
+      "bucket": "dense_proj",
+      "n_per_iter": 7480.0,
+      "total_us_per_iter": 118681.64266666665,
+      "per_worker_us_per_iter": 927.2003333333332,
+      "task_types": [
+        279,
+        253
+      ]
+    },
+    {
+      "bucket": "moe_w2",
+      "n_per_iter": 10240.0,
+      "total_us_per_iter": 70009.55733333333,
+      "per_worker_us_per_iter": 546.9496666666666,
+      "task_types": [
+        242
+      ]
+    },
+    {
+      "bucket": "gdn_recurrent",
+      "n_per_iter": 7680.0,
+      "total_us_per_iter": 53866.112,
+      "per_worker_us_per_iter": 420.829,
+      "task_types": [
+        237
+      ]
+    },
+    {
+      "bucket": "moe_silu_mul",
+      "n_per_iter": 5280.0,
+      "total_us_per_iter": 8455.328,
+      "per_worker_us_per_iter": 66.05725,
+      "task_types": [
+        118
+      ]
+    },
+    {
+      "bucket": "attention",
+      "n_per_iter": 160.0,
+      "total_us_per_iter": 7618.1759999999995,
+      "per_worker_us_per_iter": 59.516999999999996,
+      "task_types": [
+        257
+      ]
+    },
+    {
+      "bucket": "quantize_fp8",
+      "n_per_iter": 3840.0,
+      "total_us_per_iter": 7542.869333333333,
+      "per_worker_us_per_iter": 58.928666666666665,
+      "task_types": [
+        275
+      ]
+    },
+    {
+      "bucket": "gdn_conv",
+      "n_per_iter": 1920.0,
+      "total_us_per_iter": 7104.96,
+      "per_worker_us_per_iter": 55.5075,
+      "task_types": [
+        234
+      ]
+    },
+    {
+      "bucket": "moe_combine",
+      "n_per_iter": 640.0,
+      "total_us_per_iter": 4031.488,
+      "per_worker_us_per_iter": 31.496,
+      "task_types": [
+        261
+      ]
+    },
+    {
+      "bucket": "gdn_gate",
+      "n_per_iter": 640.0,
+      "total_us_per_iter": 3628.1173333333336,
+      "per_worker_us_per_iter": 28.34466666666667,
+      "task_types": [
+        238
+      ]
+    },
+    {
+      "bucket": "argmax",
+      "n_per_iter": 129.0,
+      "total_us_per_iter": 2698.688,
+      "per_worker_us_per_iter": 21.0835,
+      "task_types": [
+        259,
+        258
+      ]
+    },
+    {
+      "bucket": "norm",
+      "n_per_iter": 1296.0,
+      "total_us_per_iter": 1614.5493333333334,
+      "per_worker_us_per_iter": 12.613666666666667,
+      "task_types": [
+        154
+      ]
+    },
+    {
+      "bucket": "sched_events",
+      "n_per_iter": 2277.0,
+      "total_us_per_iter": 942.5493333333334,
+      "per_worker_us_per_iter": 7.363666666666667,
+      "task_types": [
+        201
+      ]
+    },
+    {
+      "bucket": "moe_router",
+      "n_per_iter": 40.0,
+      "total_us_per_iter": 919.84,
+      "per_worker_us_per_iter": 7.18625,
+      "task_types": [
+        260
+      ]
+    },
+    {
+      "bucket": "embedding",
+      "n_per_iter": 1.0,
+      "total_us_per_iter": 49.57866666666666,
+      "per_worker_us_per_iter": 0.3873333333333333,
+      "task_types": [
+        101
+      ]
+    },
+    {
+      "bucket": "sched_prepare_batch",
+      "n_per_iter": 1.0,
+      "total_us_per_iter": 17.994666666666667,
+      "per_worker_us_per_iter": 0.14058333333333334,
+      "task_types": [
+        204
+      ]
+    },
+    {
+      "bucket": "begin_task_graph",
+      "n_per_iter": 1.0,
+      "total_us_per_iter": 0.33066666666666666,
+      "per_worker_us_per_iter": 0.0025833333333333333,
+      "task_types": [
+        10
+      ]
+    }
+  ],
+  "per_task": [
+    {
+      "task_type": 241,
+      "name": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+      "bucket": "moe_w13",
+      "n_per_iter": 10240.0,
+      "total_us_per_iter": 123887.2,
+      "per_worker_us_per_iter": 967.86875,
+      "mean_us": 12.098359375,
+      "p50_us": 0.576,
+      "p95_us": 57.12,
+      "max_us": 61.504,
+      "n_short_per_iter": 8001.666666666667,
+      "short_us_per_iter": 4519.978666666667,
+      "n_long_per_iter": 2238.3333333333335,
+      "long_mean_us": 53.32861712583768,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 279,
+      "name": "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+      "bucket": "dense_proj",
+      "n_per_iter": 5200.0,
+      "total_us_per_iter": 88917.09866666666,
+      "per_worker_us_per_iter": 694.6648333333333,
+      "mean_us": 17.09944205128205,
+      "p50_us": 16.576,
+      "p95_us": 31.36,
+      "max_us": 34.304,
+      "n_short_per_iter": 0.0,
+      "short_us_per_iter": 0.0,
+      "n_long_per_iter": 5200.0,
+      "long_mean_us": 17.09944205128205,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 242,
+      "name": "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+      "bucket": "moe_w2",
+      "n_per_iter": 10240.0,
+      "total_us_per_iter": 70009.55733333333,
+      "per_worker_us_per_iter": 546.9496666666666,
+      "mean_us": 6.836870833333333,
+      "p50_us": 0.512,
+      "p95_us": 31.488,
+      "max_us": 34.688,
+      "n_short_per_iter": 8103.333333333333,
+      "short_us_per_iter": 4138.794666666667,
+      "n_long_per_iter": 2136.6666666666665,
+      "long_mean_us": 30.828750078003118,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 237,
+      "name": "TASK_GDN_RECURRENT_SM100",
+      "bucket": "gdn_recurrent",
+      "n_per_iter": 7680.0,
+      "total_us_per_iter": 53866.112,
+      "per_worker_us_per_iter": 420.829,
+      "mean_us": 7.013816666666667,
+      "p50_us": 10.4,
+      "p95_us": 11.52,
+      "max_us": 12.736,
+      "n_short_per_iter": 2709.0,
+      "short_us_per_iter": 1708.0106666666668,
+      "n_long_per_iter": 4971.0,
+      "long_mean_us": 10.492476631127206,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 253,
+      "name": "TASK_LINEAR_SM100",
+      "bucket": "dense_proj",
+      "n_per_iter": 2280.0,
+      "total_us_per_iter": 29764.543999999998,
+      "per_worker_us_per_iter": 232.53549999999998,
+      "mean_us": 13.054624561403509,
+      "p50_us": 9.664,
+      "p95_us": 23.52,
+      "max_us": 25.44,
+      "n_short_per_iter": 0.0,
+      "short_us_per_iter": 0.0,
+      "n_long_per_iter": 2280.0,
+      "long_mean_us": 13.054624561403509,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 118,
+      "name": "TASK_SILU_MUL",
+      "bucket": "moe_silu_mul",
+      "n_per_iter": 5280.0,
+      "total_us_per_iter": 8455.328,
+      "per_worker_us_per_iter": 66.05725,
+      "mean_us": 1.6013878787878788,
+      "p50_us": 1.568,
+      "p95_us": 2.016,
+      "max_us": 2.688,
+      "n_short_per_iter": 6.666666666666667,
+      "short_us_per_iter": 5.962666666666667,
+      "n_long_per_iter": 5273.333333333333,
+      "long_mean_us": 1.6022816687737043,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 257,
+      "name": "TASK_ATTN_SM100",
+      "bucket": "attention",
+      "n_per_iter": 160.0,
+      "total_us_per_iter": 7618.1759999999995,
+      "per_worker_us_per_iter": 59.516999999999996,
+      "mean_us": 47.6136,
+      "p50_us": 72.352,
+      "p95_us": 81.05760000000001,
+      "max_us": 83.584,
+      "n_short_per_iter": 37.333333333333336,
+      "short_us_per_iter": 28.319999999999997,
+      "n_long_per_iter": 122.66666666666667,
+      "long_mean_us": 61.87382608695652,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 275,
+      "name": "TASK_QUANTIZE_FP8_SM100",
+      "bucket": "quantize_fp8",
+      "n_per_iter": 3840.0,
+      "total_us_per_iter": 7542.869333333333,
+      "per_worker_us_per_iter": 58.928666666666665,
+      "mean_us": 1.9642888888888888,
+      "p50_us": 1.472,
+      "p95_us": 4.192,
+      "max_us": 5.952,
+      "n_short_per_iter": 153.66666666666666,
+      "short_us_per_iter": 141.68533333333332,
+      "n_long_per_iter": 3686.3333333333335,
+      "long_mean_us": 2.0077359616601864,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 234,
+      "name": "TASK_GDN_CONV1D_SM100",
+      "bucket": "gdn_conv",
+      "n_per_iter": 1920.0,
+      "total_us_per_iter": 7104.96,
+      "per_worker_us_per_iter": 55.5075,
+      "mean_us": 3.7005,
+      "p50_us": 4.896,
+      "p95_us": 6.176,
+      "max_us": 7.072,
+      "n_short_per_iter": 567.3333333333334,
+      "short_us_per_iter": 427.95733333333334,
+      "n_long_per_iter": 1352.6666666666667,
+      "long_mean_us": 4.936177427304091,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 261,
+      "name": "TASK_MOE_MUL_SUM_ADD_SM100",
+      "bucket": "moe_combine",
+      "n_per_iter": 640.0,
+      "total_us_per_iter": 4031.488,
+      "per_worker_us_per_iter": 31.496,
+      "mean_us": 6.2992,
+      "p50_us": 6.464,
+      "p95_us": 7.264,
+      "max_us": 8.0,
+      "n_short_per_iter": 0.0,
+      "short_us_per_iter": 0.0,
+      "n_long_per_iter": 640.0,
+      "long_mean_us": 6.2992,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 238,
+      "name": "TASK_SIGMOID_GATE_MUL_ADD_SM100",
+      "bucket": "gdn_gate",
+      "n_per_iter": 640.0,
+      "total_us_per_iter": 3628.1173333333336,
+      "per_worker_us_per_iter": 28.34466666666667,
+      "mean_us": 5.668933333333333,
+      "p50_us": 5.632,
+      "p95_us": 7.233599999999998,
+      "max_us": 8.288,
+      "n_short_per_iter": 0.0,
+      "short_us_per_iter": 0.0,
+      "n_long_per_iter": 640.0,
+      "long_mean_us": 5.668933333333333,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 259,
+      "name": "TASK_ARGMAX_PARTIAL_SM100",
+      "bucket": "argmax",
+      "n_per_iter": 128.0,
+      "total_us_per_iter": 2692.4373333333333,
+      "per_worker_us_per_iter": 21.034666666666666,
+      "mean_us": 21.034666666666666,
+      "p50_us": 21.568,
+      "p95_us": 25.2384,
+      "max_us": 31.936,
+      "n_short_per_iter": 0.0,
+      "short_us_per_iter": 0.0,
+      "n_long_per_iter": 128.0,
+      "long_mean_us": 21.034666666666666,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 154,
+      "name": "TASK_RMS_NORM_HOPPER",
+      "bucket": "norm",
+      "n_per_iter": 1296.0,
+      "total_us_per_iter": 1614.5493333333334,
+      "per_worker_us_per_iter": 12.613666666666667,
+      "mean_us": 1.2457942386831276,
+      "p50_us": 1.216,
+      "p95_us": 1.696,
+      "max_us": 2.368,
+      "n_short_per_iter": 260.3333333333333,
+      "short_us_per_iter": 256.992,
+      "n_long_per_iter": 1035.6666666666667,
+      "long_mean_us": 1.3108052784036046,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 201,
+      "name": "TASK_SCHD_EVENTS",
+      "bucket": "sched_events",
+      "n_per_iter": 2277.0,
+      "total_us_per_iter": 942.5493333333334,
+      "per_worker_us_per_iter": 7.363666666666667,
+      "mean_us": 0.41394349290001464,
+      "p50_us": 0.352,
+      "p95_us": 0.672,
+      "max_us": 2.592,
+      "n_short_per_iter": 2269.0,
+      "short_us_per_iter": 930.2186666666666,
+      "n_long_per_iter": 8.0,
+      "long_mean_us": 1.5413333333333332,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 260,
+      "name": "TASK_MOE_TOPK_SOFTMAX_SM100",
+      "bucket": "moe_router",
+      "n_per_iter": 40.0,
+      "total_us_per_iter": 919.84,
+      "per_worker_us_per_iter": 7.18625,
+      "mean_us": 22.996,
+      "p50_us": 23.376,
+      "p95_us": 26.0544,
+      "max_us": 27.52,
+      "n_short_per_iter": 0.0,
+      "short_us_per_iter": 0.0,
+      "n_long_per_iter": 40.0,
+      "long_mean_us": 22.996,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 101,
+      "name": "TASK_EMBEDDING",
+      "bucket": "embedding",
+      "n_per_iter": 1.0,
+      "total_us_per_iter": 49.57866666666666,
+      "per_worker_us_per_iter": 0.3873333333333333,
+      "mean_us": 49.57866666666666,
+      "p50_us": 49.056,
+      "p95_us": 50.6112,
+      "max_us": 50.784,
+      "n_short_per_iter": 0.0,
+      "short_us_per_iter": 0.0,
+      "n_long_per_iter": 1.0,
+      "long_mean_us": 49.57866666666666,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 204,
+      "name": "TASK_SCHD_PREPARE_BATCH",
+      "bucket": "sched_prepare_batch",
+      "n_per_iter": 1.0,
+      "total_us_per_iter": 17.994666666666667,
+      "per_worker_us_per_iter": 0.14058333333333334,
+      "mean_us": 17.994666666666667,
+      "p50_us": 17.696,
+      "p95_us": 18.992,
+      "max_us": 19.136,
+      "n_short_per_iter": 0.0,
+      "short_us_per_iter": 0.0,
+      "n_long_per_iter": 1.0,
+      "long_mean_us": 17.994666666666667,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 258,
+      "name": "TASK_ARGMAX_REDUCE_SM100",
+      "bucket": "argmax",
+      "n_per_iter": 1.0,
+      "total_us_per_iter": 6.250666666666667,
+      "per_worker_us_per_iter": 0.04883333333333333,
+      "mean_us": 6.250666666666667,
+      "p50_us": 6.464,
+      "p95_us": 6.4928,
+      "max_us": 6.496,
+      "n_short_per_iter": 0.0,
+      "short_us_per_iter": 0.0,
+      "n_long_per_iter": 1.0,
+      "long_mean_us": 6.250666666666667,
+      "n_blocks": 129
+    },
+    {
+      "task_type": 10,
+      "name": "TASK_BEGIN_TASK_GRAPH",
+      "bucket": "begin_task_graph",
+      "n_per_iter": 1.0,
+      "total_us_per_iter": 0.33066666666666666,
+      "per_worker_us_per_iter": 0.0025833333333333333,
+      "mean_us": 0.33066666666666666,
+      "p50_us": 0.192,
+      "p95_us": 0.5952,
+      "max_us": 0.64,
+      "n_short_per_iter": 1.0,
+      "short_us_per_iter": 0.33066666666666666,
+      "n_long_per_iter": 0.0,
+      "long_mean_us": 0.0,
+      "n_blocks": 129
+    }
+  ],
+  "stall_gaps_one_step": [
+    {
+      "start_us": 11242.784,
+      "len_us": 23.36,
+      "after_task": "TASK_SCHD_EVENTS"
+    },
+    {
+      "start_us": 3.744,
+      "len_us": 3.52,
+      "after_task": "TASK_SCHD_EVENTS"
+    },
+    {
+      "start_us": 6667.424,
+      "len_us": 1.824,
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+    },
+    {
+      "start_us": 2800.736,
+      "len_us": 1.76,
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+    },
+    {
+      "start_us": 4734.08,
+      "len_us": 1.728,
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+    },
+    {
+      "start_us": 56.32,
+      "len_us": 1.728,
+      "after_task": "TASK_EMBEDDING"
+    },
+    {
+      "start_us": 6096.192,
+      "len_us": 1.696,
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+    },
+    {
+      "start_us": 6930.336,
+      "len_us": 1.6,
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+    },
+    {
+      "start_us": 10491.52,
+      "len_us": 1.6,
+      "after_task": "TASK_GDN_CONV1D_SM100"
+    },
+    {
+      "start_us": 4471.904,
+      "len_us": 1.568,
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+    },
+    {
+      "start_us": 7192.128,
+      "len_us": 1.568,
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+    },
+    {
+      "start_us": 3381.888,
+      "len_us": 1.568,
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+    },
+    {
+      "start_us": 9392.448,
+      "len_us": 1.568,
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+    },
+    {
+      "start_us": 9770.944,
+      "len_us": 1.536,
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+    },
+    {
+      "start_us": 8869.248,
+      "len_us": 1.536,
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+    }
+  ],
+  "stall_by_predecessor_one_step": [
+    {
+      "after_task": "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+      "n_gaps": 81,
+      "total_us": 94.62399999999995
+    },
+    {
+      "after_task": "TASK_RMS_NORM_HOPPER",
+      "n_gaps": 71,
+      "total_us": 68.672
+    },
+    {
+      "after_task": "TASK_QUANTIZE_FP8_SM100",
+      "n_gaps": 50,
+      "total_us": 49.79200000000001
+    },
+    {
+      "after_task": "TASK_MOE_TOPK_SOFTMAX_SM100",
+      "n_gaps": 40,
+      "total_us": 45.92000000000001
+    },
+    {
+      "after_task": "TASK_SIGMOID_GATE_MUL_ADD_SM100",
+      "n_gaps": 40,
+      "total_us": 40.928
+    },
+    {
+      "after_task": "TASK_GDN_RECURRENT_SM100",
+      "n_gaps": 40,
+      "total_us": 38.04800000000001
+    },
+    {
+      "after_task": "TASK_GDN_CONV1D_SM100",
+      "n_gaps": 30,
+      "total_us": 34.91200000000001
+    },
+    {
+      "after_task": "TASK_SCHD_EVENTS",
+      "n_gaps": 6,
+      "total_us": 27.2
+    },
+    {
+      "after_task": "TASK_ATTN_SM100",
+      "n_gaps": 10,
+      "total_us": 12.032
+    },
+    {
+      "after_task": "TASK_SILU_MUL",
+      "n_gaps": 18,
+      "total_us": 7.7440000000000015
+    },
+    {
+      "after_task": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+      "n_gaps": 17,
+      "total_us": 7.744
+    },
+    {
+      "after_task": "TASK_EMBEDDING",
+      "n_gaps": 1,
+      "total_us": 1.728
+    },
+    {
+      "after_task": "TASK_ARGMAX_PARTIAL_SM100",
+      "n_gaps": 1,
+      "total_us": 1.28
+    },
+    {
+      "after_task": "TASK_BEGIN_TASK_GRAPH",
+      "n_gaps": 1,
+      "total_us": 0.992
+    },
+    {
+      "after_task": "TASK_ARGMAX_REDUCE_SM100",
+      "n_gaps": 1,
+      "total_us": 0.8320000000000001
+    }
+  ],
+  "n_dead_gaps_one_step": 410,
+  "dead_gap_total_us_one_step": 432.672
+}

@@ -1,0 +1,18 @@
+Fetching 28 files:   0%|          | 0/28 [00:00<?, ?it/s]Fetching 28 files: 100%|██████████| 28/28 [00:00<00:00, 238216.05it/s]
+sm_cnt:  148
+Fetching 28 files:   0%|          | 0/28 [00:00<?, ?it/s]Fetching 28 files: 100%|██████████| 28/28 [00:00<00:00, 301129.52it/s]
+[mpk_engine] graph assembled in 12.0s (bs=8, mbt=16, msl=353)
+[load_mpk_kernel] Kernel compatibility check passed!
+[load_mpk_kernel] Loading launcher from: /var/tmp/m3i3/kernel_bs8_sp0/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+[load_mpk_kernel] Using task graph JSON: /var/tmp/m3i3/kernel_bs8_sp0/task_graph_rank0.json
+[load_mpk_kernel] Passing 928 model tensors to kernel
+[MPK INIT] Total tasks: 49588, Total events: 2278
+[mpk_engine] reused compiled kernel from /var/tmp/m3i3/kernel_bs8_sp0 (1.9s)
+[mpk_engine] profiler buffer attached: 96000000 slots (732 MiB), stock exporters bypassed
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine] HAZARD-COMPACTION exposure: slots [1, 2, 3, 4, 5, 6, 7] migrate while their reported window is still being written (25 live-slot migrations this wave)
+[mpk_engine] bs=8 wave=0 slots=8 distinct=8 wall=4634.8ms steps=96
+[mpk_engine] profiler: 26554882 events, header nblocks=208 ngroups=1, fill=27.7%
+[mpk_engine] bs8_rep1: wall=4634.8ms steps=96 events=26554882
