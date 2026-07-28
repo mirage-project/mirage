@@ -1,0 +1,22 @@
+[mpk_engine] 10 prompts, lengths [24, 30, 32, 32, 33, 36, 40, 43, 44, 68]
+sm_cnt:  148
+Fetching 28 files:   0%|          | 0/28 [00:00<?, ?it/s]Fetching 28 files: 100%|██████████| 28/28 [00:00<00:00, 307435.90it/s]
+[mpk_engine] graph assembled in 13.8s (bs=16, mbt=16, msl=132)
+[load_mpk_kernel] Kernel compatibility check passed!
+[load_mpk_kernel] Loading launcher from: /home/muhengl/mpk-qwen35/i6a/perf/kernel_A_qp4_bs16/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+[load_mpk_kernel] Using task graph JSON: /home/muhengl/mpk-qwen35/i6a/perf/kernel_A_qp4_bs16/task_graph_rank0.json
+[load_mpk_kernel] Passing 928 model tensors to kernel
+[MPK INIT] Total tasks: 59348, Total events: 2278
+[mpk_engine] reused compiled kernel from /home/muhengl/mpk-qwen35/i6a/perf/kernel_A_qp4_bs16 (1.8s)
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine] SLOT-ISOLATION MISMATCH p06-poem slots 0 vs 10
+[mpk_engine] SLOT-ISOLATION MISMATCH p01-history slots 1 vs 11
+[mpk_engine] SLOT-ISOLATION MISMATCH p04-chinese slots 2 vs 12
+[mpk_engine] SLOT-ISOLATION MISMATCH p09-translate slots 3 vs 13
+[mpk_engine] SLOT-ISOLATION MISMATCH p07-format slots 4 vs 14
+[mpk_engine] SLOT-ISOLATION MISMATCH p05-cuda slots 5 vs 15
+[mpk_engine] HAZARD-COMPACTION exposure: slots [10, 11, 12, 13, 14, 15] migrate while their reported window is still being written (69 live-slot migrations this wave)
+[mpk_engine] bs=16 wave=0 slots=16 distinct=10 wall=3380.5ms steps=107
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/i6a/perf/dumpsA_qp4/bs16_rep1 (10 prompts)

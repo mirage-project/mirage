@@ -1,0 +1,935 @@
+{
+  "test": "M2-I6 Q-loop equivalence",
+  "rows": [
+    {
+      "case": "small gate=0 T=8 seq=8 [same arena, 2x4] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=8 [same arena, 2x4] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 1024,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=8 [same arena, 2x4] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 1024,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=8 [arena 4, 2x4 (production form)] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=8 [arena 4, 2x4 (production form)] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 1024,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=8 [arena 4, 2x4 (production form)] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 1024,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=8 [arena 2, 4x2] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=8 [arena 2, 4x2] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 1024,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=8 [arena 2, 4x2] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 1024,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=40 [same arena, 2x4] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=40 [same arena, 2x4] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 5120,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=40 [same arena, 2x4] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 5120,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=40 [arena 4, 2x4 (production form)] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=40 [arena 4, 2x4 (production form)] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 5120,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=40 [arena 4, 2x4 (production form)] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 5120,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=40 [arena 2, 4x2] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=40 [arena 2, 4x2] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 5120,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=8 seq=40 [arena 2, 4x2] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 5120,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=5 seq=37 [same arena, 2x4] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2560,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=5 seq=37 [same arena, 2x4] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4736,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=5 seq=37 [same arena, 2x4] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4736,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=5 seq=37 [arena 4, 2x4 (production form)] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2560,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=5 seq=37 [arena 4, 2x4 (production form)] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4736,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=5 seq=37 [arena 4, 2x4 (production form)] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4736,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=5 seq=37 [arena 2, 4x2] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2560,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=5 seq=37 [arena 2, 4x2] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4736,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=5 seq=37 [arena 2, 4x2] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4736,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=1 seq=33 [same arena, 2x4] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 512,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=1 seq=33 [same arena, 2x4] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4224,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=1 seq=33 [same arena, 2x4] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4224,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=1 seq=33 [arena 4, 2x4 (production form)] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 512,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=1 seq=33 [arena 4, 2x4 (production form)] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4224,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=1 seq=33 [arena 4, 2x4 (production form)] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4224,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=1 seq=33 [arena 2, 4x2] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 512,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=1 seq=33 [arena 2, 4x2] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4224,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=0 T=1 seq=33 [arena 2, 4x2] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4224,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=8 seq=8 [arena 4, 2x4 (production form)] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=8 seq=8 [arena 4, 2x4 (production form)] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 1024,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=8 seq=8 [arena 4, 2x4 (production form)] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 1024,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=8 seq=40 [arena 4, 2x4 (production form)] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=8 seq=40 [arena 4, 2x4 (production form)] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 5120,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=8 seq=40 [arena 4, 2x4 (production form)] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 5120,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=5 seq=37 [arena 4, 2x4 (production form)] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2560,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=5 seq=37 [arena 4, 2x4 (production form)] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4736,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=5 seq=37 [arena 4, 2x4 (production form)] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4736,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=1 seq=33 [arena 4, 2x4 (production form)] out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 512,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=1 seq=33 [arena 4, 2x4 (production form)] kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4224,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "small gate=1 T=1 seq=33 [arena 4, 2x4 (production form)] kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4224,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=0 T=4 seq=4 pass=4 arena=4 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 16384,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=0 T=4 seq=4 pass=4 arena=4 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2048,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=0 T=4 seq=4 pass=4 arena=4 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2048,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=0 T=4 seq=70 pass=4 arena=4 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 16384,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=0 T=4 seq=70 pass=4 arena=4 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=0 T=4 seq=70 pass=4 arena=4 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=0 T=1 seq=70 pass=4 arena=4 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=0 T=1 seq=70 pass=4 arena=4 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=0 T=1 seq=70 pass=4 arena=4 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=4 pass=4 arena=4 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 16384,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=4 pass=4 arena=4 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2048,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=4 pass=4 arena=4 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2048,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=4 pass=2 arena=2 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 16384,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=4 pass=2 arena=2 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2048,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=4 pass=2 arena=2 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2048,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=4 pass=1 arena=1 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 16384,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=4 pass=1 arena=1 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2048,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=4 pass=1 arena=1 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 2048,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=70 pass=4 arena=4 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 16384,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=70 pass=4 arena=4 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=70 pass=4 arena=4 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=70 pass=2 arena=2 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 16384,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=70 pass=2 arena=2 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=70 pass=2 arena=2 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=70 pass=1 arena=1 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 16384,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=70 pass=1 arena=1 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=4 seq=70 pass=1 arena=1 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=1 seq=70 pass=4 arena=4 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=1 seq=70 pass=4 arena=4 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=1 seq=70 pass=4 arena=4 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=1 seq=70 pass=2 arena=2 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=1 seq=70 pass=2 arena=2 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=1 seq=70 pass=2 arena=2 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=1 seq=70 pass=1 arena=1 out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=1 seq=70 pass=1 arena=1 kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35 gate=1 T=1 seq=70 pass=1 arena=1 kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 35840,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=8 seq=8 pass=2 (4 passes) out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 32768,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=8 seq=8 pass=2 (4 passes) kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=8 seq=8 pass=2 (4 passes) kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=8 seq=8 pass=1 (8 passes) out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 32768,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=8 seq=8 pass=1 (8 passes) kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=8 seq=8 pass=1 (8 passes) kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 4096,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=16 pass=2 (8 passes) out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 65536,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=16 pass=2 (8 passes) kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 8192,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=16 pass=2 (8 passes) kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 8192,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=16 pass=1 (16 passes) out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 65536,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=16 pass=1 (16 passes) kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 8192,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=16 pass=1 (16 passes) kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 8192,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=80 pass=2 (8 passes) out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 65536,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=80 pass=2 (8 passes) kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 40960,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=80 pass=2 (8 passes) kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 40960,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=80 pass=1 (16 passes) out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 65536,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=80 pass=1 (16 passes) kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 40960,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=80 pass=1 (16 passes) kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 40960,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=200 pass=2 (8 passes) out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 65536,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=200 pass=2 (8 passes) kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 102400,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=200 pass=2 (8 passes) kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 102400,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=200 pass=1 (16 passes) out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 65536,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=200 pass=1 (16 passes) kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 102400,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=16 seq=200 pass=1 (16 passes) kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 102400,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=13 seq=141 pass=2 (7 passes) out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 53248,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=13 seq=141 pass=2 (7 passes) kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 72192,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=13 seq=141 pass=2 (7 passes) kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 72192,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=13 seq=141 pass=1 (13 passes) out",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 53248,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=13 seq=141 pass=1 (13 passes) kv_k",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 72192,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "qwen35-multipass gate=1 T=13 seq=141 pass=1 (13 passes) kv_v",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 72192,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "cross-pass causal coupling (last query row)",
+      "bit_identical": true,
+      "num_diff": 0,
+      "numel": 512,
+      "max_abs": 0.0,
+      "expected_match": true
+    },
+    {
+      "case": "COUNTERFACTUAL truncated-to-pass-1 attention",
+      "bit_identical": false,
+      "num_diff": 512,
+      "numel": 512,
+      "max_abs": 1.015625,
+      "expected_match": false
+    }
+  ],
+  "failures": [],
+  "torch": "2.13.0+cu130"
+}

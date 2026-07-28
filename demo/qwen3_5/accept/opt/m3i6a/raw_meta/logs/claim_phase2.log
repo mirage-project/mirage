@@ -1,0 +1,120 @@
+===== claim attempt 1/90 2026-07-28T04:46:17-04:00 =====
+=== probing GPU 6 (3 samples, 3s apart) ===
+  sample 1: GPU 6 used=0MiB util=0%
+  sample 2: GPU 6 used=0MiB util=0%
+  sample 3: GPU 6 used=0MiB util=0%
+GPU 6 stable-idle across 3 samples -- claiming it (M3-I6A).
+=== running (CUDA_VISIBLE_DEVICES=6): bash /home/muhengl/mpk-qwen35/i6a/phase2.sh ===
+[decode] k rope vs REF HF per-product bf16 rounding              False      15/512       7.812e-03    7.963e-05
+[decode] REF(HF rounding) vs oracle k_rope                       False     138/512       3.125e-02    1.446e-03
+[decode] REF(fp32-fused) vs oracle k_rope                        False     149/512       3.125e-02    1.517e-03
+[decode] ATTRIB REF(HF norm order + MPK rope) vs oracle          False     149/512       3.125e-02    1.517e-03
+wrote /home/muhengl/mpk-qwen35/i6a/gates/oracle_mt2.json
+
+all hard assertions passed
+=== oracle max_tokens=1 q_pass=1 rc=0 ===
+[prefill] k_norm+rope (new tokens, via cache write)              False    1131/4096      6.250e-02    1.330e-03
+[prefill] k rope vs REF fp32-fused rounding (MPK order)          True        0/4096      0.000e+00    0.000e+00
+[prefill] k rope vs REF HF per-product bf16 rounding             False      71/4096      7.812e-03    5.599e-05
+[prefill] REF(HF rounding) vs oracle k_rope                      False    1090/4096      6.250e-02    1.299e-03
+[prefill] REF(fp32-fused) vs oracle k_rope                       False    1131/4096      6.250e-02    1.330e-03
+[prefill] ATTRIB REF(HF norm order + MPK rope) vs oracle         False    1131/4096      6.250e-02    1.330e-03
+[prefill] ATTRIB REF(HF norm + HF rope) vs oracle                False    1090/4096      6.250e-02    1.299e-03
+[prefill] ATTRIB REF(fp32 norm weight + HF rope) vs oracle       True        0/4096      0.000e+00    0.000e+00
+[prefill] kv cache k (full seq incl. context)                    False    1131/4096      6.250e-02    1.330e-03
+[prefill] kv cache v (raw, no norm/rope)                         True        0/4096      0.000e+00    0.000e+00
+[prefill] q_norm+rope (all 16 heads, via k-slot replay)          False    9280/32768     6.250e-02    1.296e-03
+[prefill] attention out (UNGATED)                                False   15234/32768     2.344e-02    6.557e-04
+[prefill] attention out from PRE-ROPED q/k (norm+rope bypassed)  True        0/32768     0.000e+00    0.000e+00
+[prefill] torch eager attention (same inputs) vs oracle          False    9064/32768     1.562e-02    2.521e-04
+[prefill] kernel (bypassed) vs torch eager attention             False    9064/32768     1.562e-02    2.521e-04
+[prefill] gated out (out * sigmoid(gate))                        False   14437/32768     1.953e-03    9.051e-06
+[prefill] gate epilogue isolated (kernel ungated x HF sigmoid)   True        0/32768     0.000e+00    0.000e+00
+[prefill] COUNTERFACTUAL gate w/ fp32-folded sigmoid             False    8881/32768     7.812e-03    7.820e-06
+[decode] k_norm+rope (new tokens, via cache write)               False     149/512       3.125e-02    1.517e-03
+[decode] k rope vs REF fp32-fused rounding (MPK order)           True        0/512       0.000e+00    0.000e+00
+[decode] k rope vs REF HF per-product bf16 rounding              False      15/512       7.812e-03    7.963e-05
+[decode] REF(HF rounding) vs oracle k_rope                       False     138/512       3.125e-02    1.446e-03
+[decode] REF(fp32-fused) vs oracle k_rope                        False     149/512       3.125e-02    1.517e-03
+[decode] ATTRIB REF(HF norm order + MPK rope) vs oracle          False     149/512       3.125e-02    1.517e-03
+wrote /home/muhengl/mpk-qwen35/i6a/gates/oracle_mt1.json
+
+all hard assertions passed
+--- cross-arm identity: does the ungated/gated kernel output MATCH across pass sizes? ---
+Traceback (most recent call last):
+  File "<stdin>", line 9, in <module>
+KeyError: 'case'
+GATE_ORACLE2_DONE 2026-07-28T04:47:45-04:00
+########## M3-I6a GATES gpu=6 2026-07-28T04:47:45-04:00 ##########
+tree: 170ab325 test(qwen35): I3 gate bundle (unit+oracle both lanes, test-mode, HEAD control); I5b mbt REJECTED-WITH-EVIDENCE
+c93d9d511d160d86012784ca910edb39fba10c5f82d0165c1757d56aea489029  /home/muhengl/mpk-qwen35/mirage-i6a/include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh
+1316ea69098293b3a1b12a19e2a4d052fad6eda618bc73beb6c0d96132354555  /home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/mpk/models/qwen3_5/builder.py
+builder default attn_q_pass = 2
+df /raid avail=176G
+
+########## PHASE 2: FULL AC-3 SWEEP 2026-07-28T04:47:45-04:00 ##########
+##### AC-3 arm MPK_ATTN_Q_PASS=2 2026-07-28T04:47:45-04:00
+##### AC-3 wave bs=16 2026-07-28T04:47:45-04:00
+##### rc=0 bs=16 2026-07-28T04:49:07-04:00
+[mpk_engine] HAZARD-COMPACTION exposure: slots [10, 11, 12, 13, 14, 15] migrate while their reported window is still being written (69 live-slot migrations this wave)
+[mpk_engine] bs=16 wave=0 slots=16 distinct=10 wall=3307.3ms steps=107
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/i6a/ac3/dumps_qp2/bs16.json (10 prompts)
+multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 9216, 4096, 256, 132, 256, 0, 0, 2, 1, 2>
+##### AC-3 wave bs=1 2026-07-28T04:49:07-04:00
+##### rc=0 bs=1 2026-07-28T04:51:15-04:00
+[mpk_engine]   [watchdog] bs=1 wave=9 step=[131]
+[mpk_engine] bs=1 wave=9 slots=1 distinct=1 wall=676.2ms steps=63
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/i6a/ac3/dumps_qp2/bs1.json (10 prompts)
+multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 9216, 4096, 256, 132, 256, 0, 0, 2, 1, 2>
+##### AC-3 wave bs=2 2026-07-28T04:51:15-04:00
+##### rc=0 bs=2 2026-07-28T04:52:49-04:00
+[mpk_engine]   [watchdog] bs=2 wave=4 step=[131, 131]
+[mpk_engine] bs=2 wave=4 slots=2 distinct=2 wall=920.4ms steps=87
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/i6a/ac3/dumps_qp2/bs2.json (10 prompts)
+multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 9216, 4096, 256, 132, 256, 0, 0, 2, 1, 2>
+##### AC-3 wave bs=4 2026-07-28T04:52:49-04:00
+##### rc=0 bs=4 2026-07-28T04:54:22-04:00
+[mpk_engine] HAZARD-COMPACTION exposure: slots [2, 3] migrate while their reported window is still being written (3 live-slot migrations this wave)
+[mpk_engine] bs=4 wave=2 slots=4 distinct=2 wall=1068.2ms steps=87
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/i6a/ac3/dumps_qp2/bs4.json (10 prompts)
+multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 9216, 4096, 256, 132, 256, 0, 0, 2, 1, 2>
+##### AC-3 wave bs=8 2026-07-28T04:54:22-04:00
+##### rc=0 bs=8 2026-07-28T04:55:40-04:00
+[mpk_engine] HAZARD-COMPACTION exposure: slots [2, 3, 4, 5, 6, 7] migrate while their reported window is still being written (20 live-slot migrations this wave)
+[mpk_engine] bs=8 wave=1 slots=8 distinct=2 wall=1556.0ms steps=87
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/i6a/ac3/dumps_qp2/bs8.json (10 prompts)
+multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 9216, 4096, 256, 132, 256, 0, 0, 2, 1, 2>
+##### AC-3 GATE arm qp2 2026-07-28T04:55:40-04:00
+##### run_ac3 rc=1
+  [p04-chinese bs=8] PASS — 64 position(s) scored
+  [p05-cuda bs=8] PASS — 64 position(s) scored
+  [p06-poem bs=8] FAIL (first divergence @ position 60) — 64 position(s) scored
+  [p07-format bs=8] PASS — 64 position(s) scored
+  [p08-science bs=8] PASS — 64 position(s) scored
+  [p09-translate bs=8] PASS — 64 position(s) scored
+  [p10-logic bs=8] PASS — 64 position(s) scored
+  [p01-history bs=16] PASS — 64 position(s) scored
+  [p02-math bs=16] PASS — 64 position(s) scored
+  [p03-python bs=16] PASS — 64 position(s) scored
+  [p04-chinese bs=16] PASS — 64 position(s) scored
+  [p05-cuda bs=16] PASS — 64 position(s) scored
+  [p06-poem bs=16] FAIL (first divergence @ position 60) — 64 position(s) scored
+  [p07-format bs=16] PASS — 64 position(s) scored
+  [p08-science bs=16] PASS — 64 position(s) scored
+  [p09-translate bs=16] PASS — 64 position(s) scored
+  [p10-logic bs=16] PASS — 64 position(s) scored
+  5 waiver-request record(s) — evidence only, never auto-waived:
+    - p06-poem bs=1 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+    - p06-poem bs=2 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+    - p06-poem bs=4 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+    - p06-poem bs=8 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+    - p06-poem bs=16 pos=60 verdict=implementation_bug ref_top1=31000 engine_argmax=40581 margin=0.0
+Full run report written to /home/muhengl/mpk-qwen35/i6a/ac3/run_report_qp2.json
+##### PER-CASE BYTE DIFF vs committed results/dumps_final
+##### bytediff rc=0
+identical: True  missing: []
+counts: {"bs1": "10/10 identical", "bs2": "10/10 identical", "bs4": "10/10 identical", "bs8": "10/10 identical", "bs16": "10/10 identical"}
+CHANGED: none
+
+########## GATE_ALL_DONE 2026-07-28T04:55:40-04:00 ##########
+===== body exited rc=0 2026-07-28T04:55:40-04:00 =====

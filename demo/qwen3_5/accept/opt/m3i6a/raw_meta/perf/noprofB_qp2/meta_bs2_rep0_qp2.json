@@ -1,0 +1,76 @@
+{
+  "tag": "bs2_rep0",
+  "batch_size": 2,
+  "rep": 0,
+  "prompt_ids": [
+    "synth0",
+    "synth1"
+  ],
+  "prompt_lens": [
+    256,
+    256
+  ],
+  "synthetic_prompt_len": 256,
+  "synthetic_seed": 20262725,
+  "max_seq_length": 353,
+  "mbt": 16,
+  "page_size": 256,
+  "max_new_tokens": 96,
+  "profiler_slots": 0,
+  "profiled": false,
+  "n_events": 0,
+  "waves": [
+    {
+      "batch_size": 2,
+      "wave": 0,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "synth0",
+        "synth1"
+      ],
+      "wall_ms": 1531.846923828125,
+      "max_decode_steps": 96,
+      "ms_per_decode_step": 15.956738789876303,
+      "tokens_per_s": 125.33889451576992,
+      "max_seq_length": 353,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 130,
+        "live_slot_migrations": 1,
+        "migrated_slots": [
+          1
+        ],
+        "straddling_slots": [
+          1
+        ]
+      }
+    }
+  ],
+  "slot_isolation": [],
+  "run_seconds": 64.79856157302856,
+  "tokens_sha256": "e1e264118e2002e43966c426137395f8815e5903e7c1dc1cc90a6ce9a6c126c8",
+  "gpu_before": [
+    "0, 130 MiB, 0 %, 120 MHz, 3996 MHz",
+    "1, 4 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 4 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 36362 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "4, 146342 MiB, 100 %, 1762 MHz, 3996 MHz",
+    "5, 158400 MiB, 100 %, 1807 MHz, 3996 MHz",
+    "6, 4 MiB, 0 %, 202 MHz, 3996 MHz",
+    "7, 165440 MiB, 100 %, 1747 MHz, 3996 MHz"
+  ],
+  "gpu_after": [
+    "0, 20508 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "1, 147822 MiB, 75 %, 1965 MHz, 3996 MHz",
+    "2, 148448 MiB, 24 %, 1965 MHz, 3996 MHz",
+    "3, 38728 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "4, 146342 MiB, 100 %, 1792 MHz, 3996 MHz",
+    "5, 158400 MiB, 100 %, 1800 MHz, 3996 MHz",
+    "6, 36448 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "7, 165440 MiB, 100 %, 1777 MHz, 3996 MHz"
+  ],
+  "cuda_visible_devices": "6",
+  "generated_utc": "2026-07-28T09:44:33Z"
+}

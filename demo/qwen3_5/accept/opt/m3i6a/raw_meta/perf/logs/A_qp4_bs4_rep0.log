@@ -1,0 +1,72 @@
+[mpk_engine] 10 prompts, lengths [24, 30, 32, 32, 33, 36, 40, 43, 44, 68]
+sm_cnt:  148
+Fetching 28 files:   0%|          | 0/28 [00:00<?, ?it/s]Fetching 28 files: 100%|██████████| 28/28 [00:00<00:00, 217482.43it/s]
+[mpk_engine] graph assembled in 12.9s (bs=4, mbt=16, msl=132)
+Compiling megakernel using the following command line:
+['/usr/local/cuda-12.8/bin/nvcc', '/tmp/tmpqw01xasr/test.cu', '-O3', '-lineinfo', '-I/usr/include/python3.12', '-I/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../include', '-I/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../include/mirage/persistent_kernel', '-I/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../deps/cutlass/include', '-I/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../deps/cutlass/tools/util/include', '-I/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../deps/json/include', '-DMAX_WORKER_PER_SCHEDULER=2', '-DMIRAGE_USE_CUTLASS_KERNEL=1', '-gencode=arch=compute_100a,code=sm_100a', '-DMPK_ENABLE_TMA', '-DMIRAGE_GRACE_BLACKWELL', '-shared', '-std=c++20', '-rdc=false', '-use_fast_math', '-lcuda', '-lcudart', '-lstdc++fs', '-Xcompiler=-fPIC', '--expt-relaxed-constexpr', '-o', '/tmp/tmpqw01xasr/test.cpython-312-x86_64-linux-gnu.so', '-DMPK_TARGET_CC=100', '-DMIRAGE_BACKEND_USE_CUDA', '-DMODE_OFFLINE', '-DMPK_MAX_NUM_BATCHED_REQUESTS=4', '-DMPK_MAX_NUM_BATCHED_TOKENS=16', '-DMPK_MAX_NUM_PAGES=8', '-DMPK_PAGE_SIZE=256', '-DMPK_MAX_SEQ_LENGTH=132']
+/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_sparse_mma_warpspecialized.hpp(902): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_warpspecialized.hpp(717): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_array_warpspecialized.hpp(716): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB));
+                            ^
+
+/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_mixed_tma_cpasync_warpspecialized.hpp(554): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm103_blockscaled_mma_warpspecialized.hpp(682): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(params.layout_SFB));
+                            ^
+
+/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm103_blockscaled_mma_array_warpspecialized.hpp(810): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB));
+                            ^
+
+/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../include/mirage/persistent_kernel/tasks/blackwell/mla_prefill_sm100.cuh(345): warning #177-D: variable "num_safe_tiles" was declared but never referenced
+    int num_safe_tiles = (q_hist + q_start) / PF_BN;
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../include/mirage/persistent_kernel/tasks/blackwell/mla_prefill_tp8_sm100.cuh(272): warning #177-D: variable "SPB" was declared but never referenced
+    constexpr int SNB = D_QK_NOPE * 2, SPB = D_QK_ROPE * 2, S128 = 128;
+                                       ^
+
+/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(1026): warning #177-D: variable "_trace_t" was declared but never referenced
+        bool _trace_t =
+             ^
+
+/home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(865): warning #20054-D: dynamic initialization is not supported for a function-scope static __shared__ variable within a __device__/__global__ function
+    __attribute__((shared)) TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
+                                     ^
+
+Saved compiled kernel to: /home/muhengl/mpk-qwen35/i6a/perf/kernel_A_qp4_bs4/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+Finished megakernel compilation...
+[MPK INIT] Total tasks: 44708, Total events: 2278
+[mpk_engine] megakernel compiled in 55.6s
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine] bs=4 wave=0 slots=4 distinct=4 wall=1149.5ms steps=107
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine]   [watchdog] bs=4 wave=1 step=[131, 131, 131, 131]
+[mpk_engine] bs=4 wave=1 slots=4 distinct=4 wall=1090.8ms steps=98
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine]   [watchdog] bs=4 wave=2 step=[131, 131, 131, 131]
+[mpk_engine] SLOT-ISOLATION MISMATCH p03-python slots 0 vs 2
+[mpk_engine] SLOT-ISOLATION MISMATCH p02-math slots 1 vs 3
+[mpk_engine] HAZARD-COMPACTION exposure: slots [2, 3] migrate while their reported window is still being written (3 live-slot migrations this wave)
+[mpk_engine] bs=4 wave=2 slots=4 distinct=2 wall=1093.9ms steps=87
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/i6a/perf/dumpsA_qp4/bs4_rep0 (10 prompts)

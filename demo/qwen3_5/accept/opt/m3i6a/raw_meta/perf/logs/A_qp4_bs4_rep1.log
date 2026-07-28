@@ -1,0 +1,28 @@
+[mpk_engine] 10 prompts, lengths [24, 30, 32, 32, 33, 36, 40, 43, 44, 68]
+sm_cnt:  148
+Fetching 28 files:   0%|          | 0/28 [00:00<?, ?it/s]Fetching 28 files: 100%|██████████| 28/28 [00:00<00:00, 228039.83it/s]
+[mpk_engine] graph assembled in 12.7s (bs=4, mbt=16, msl=132)
+[load_mpk_kernel] Kernel compatibility check passed!
+[load_mpk_kernel] Loading launcher from: /home/muhengl/mpk-qwen35/i6a/perf/kernel_A_qp4_bs4/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+[load_mpk_kernel] Using task graph JSON: /home/muhengl/mpk-qwen35/i6a/perf/kernel_A_qp4_bs4/task_graph_rank0.json
+[load_mpk_kernel] Passing 928 model tensors to kernel
+[MPK INIT] Total tasks: 44708, Total events: 2278
+[mpk_engine] reused compiled kernel from /home/muhengl/mpk-qwen35/i6a/perf/kernel_A_qp4_bs4 (1.3s)
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine] bs=4 wave=0 slots=4 distinct=4 wall=1163.4ms steps=107
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine]   [watchdog] bs=4 wave=1 step=[131, 131, 131, 131]
+[mpk_engine] bs=4 wave=1 slots=4 distinct=4 wall=1090.2ms steps=98
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine]   [watchdog] bs=4 wave=2 step=[131, 131, 131, 131]
+[mpk_engine] SLOT-ISOLATION MISMATCH p03-python slots 0 vs 2
+[mpk_engine] SLOT-ISOLATION MISMATCH p02-math slots 1 vs 3
+[mpk_engine] HAZARD-COMPACTION exposure: slots [2, 3] migrate while their reported window is still being written (3 live-slot migrations this wave)
+[mpk_engine] bs=4 wave=2 slots=4 distinct=2 wall=1093.5ms steps=87
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/i6a/perf/dumpsA_qp4/bs4_rep1 (10 prompts)

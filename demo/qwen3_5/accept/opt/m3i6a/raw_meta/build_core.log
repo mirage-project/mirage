@@ -1,0 +1,39 @@
+=== tree 170ab325 test(qwen35): I3 gate bundle (unit+oracle both lanes, test-mode, HEAD control); I5b mbt REJECTED-WITH-EVIDENCE 2026-07-28T03:44:12-04:00 ===
+cmake cfg rc=0 (tail)
+-- FORMAL_VERIFIER_LIB: /home/muhengl/mpk-qwen35/mirage-i6a/build/formal_verifier/release
+-- FORMAL_VERIFIER_LIBRARIES: /home/muhengl/mpk-qwen35/mirage-i6a/build/formal_verifier/release/libformal_verifier.so
+-- Configuring done (2.3s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/muhengl/mpk-qwen35/mirage-i6a/build
+make rc=0
+  266 |       default:
+      |       ^~~~~~~
+/home/muhengl/mpk-qwen35/mirage-i6a/src/transpiler/transpiler_tb_blackwell.cc: At global scope:
+/home/muhengl/mpk-qwen35/mirage-i6a/src/transpiler/transpiler_tb_blackwell.cc:186:13: warning: ‘std::pair<std::vector<int>, std::vector<long unsigned int> > mirage::transpiler::mov_last_get_stensor_shape_stride(const mirage::threadblock::STensor&, const STensorMeta&, int, bool)’ defined but not used [-Wunused-function]
+  186 | static auto mov_last_get_stensor_shape_stride(tb::STensor const &stensor,
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[100%] Linking CXX static library libmirage_runtime.a
+[100%] Built target mirage_runtime
+-rw-rw-r-- 1 muhengl muhengl 11229246 Jul 28 03:44 libmirage_runtime.a
+=== build_ext --inplace 2026-07-28T03:44:38-04:00 ===
+build_ext rc=0
+-- Z3_LIBRARIES: /home/muhengl/mpk-qwen35/venv-mpk/lib/python3.12/site-packages/z3/lib/libz3.so
+-- Using the multi-header code from /home/muhengl/mpk-qwen35/mirage-i6a/deps/json/include/
+-- ABSTRACT_SUBEXPR_LIB: /home/muhengl/mpk-qwen35/mirage-i6a/build/abstract_subexpr/release
+-- ABSTRACT_SUBEXPR_LIBRARIES: /home/muhengl/mpk-qwen35/mirage-i6a/build/abstract_subexpr/release/libabstract_subexpr.so
+-- FORMAL_VERIFIER_LIB: /home/muhengl/mpk-qwen35/mirage-i6a/build/formal_verifier/release
+-- FORMAL_VERIFIER_LIBRARIES: /home/muhengl/mpk-qwen35/mirage-i6a/build/formal_verifier/release/libformal_verifier.so
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/muhengl/mpk-qwen35/mirage-i6a/build
+[100%] Built target mirage_runtime
+Mirage runtime library built successfully.
+Requirements: ['cmake>=3.24', 'cython>=0.28', 'z3-solver==4.16', 'torch>=2.4', 'accelerate==1.8.0', 'numpy', 'graphviz', 'tqdm', 'transformers==4.57.1', 'protobuf', 'tg4perfetto @ git+https://github.com/flashinfer-ai/tg4perfetto.git', 'cuda-python', 'fastapi', 'uvicorn']
+-rwxrwxr-x 1 muhengl muhengl 10282760 Jul 28 03:43 python/mirage/core.cpython-312-x86_64-linux-gnu.so
+-rwxrwxr-x 1 muhengl muhengl  3148912 Jul 26 19:16 python/mirage/lib/libabstract_subexpr.so
+-rwxrwxr-x 1 muhengl muhengl  3414936 Jul 26 19:16 python/mirage/lib/libformal_verifier.so
+=== import smoke (PYTHONPATH=/home/muhengl/mpk-qwen35/mirage-i6a/python) ===
+mirage from /home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/__init__.py
+core ok /home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/core.cpython-312-x86_64-linux-gnu.so
+qwen3_5 builder ok
+BUILD_CORE_DONE rc=0 2026-07-28T03:44:52-04:00

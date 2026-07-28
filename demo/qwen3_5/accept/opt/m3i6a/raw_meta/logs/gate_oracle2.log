@@ -1,0 +1,93 @@
+rebuild rc=0
+creating build/lib.linux-x86_64-cpython-312
+x86_64-linux-gnu-g++ -fno-strict-overflow -Wsign-compare -DNDEBUG -g -O2 -Wall -shared -Wl,-O1 -Wl,-Bsymbolic-functions build/temp.linux-x86_64-cpython-312/home/muhengl/mpk-qwen35/mirage-i6a/tests/runtime_python/blackwell/sm100_attention_qwen35/runtime_kernel_wrapper_sm100.o -L/usr/local/cuda-13.0/lib -L/usr/local/cuda-13.0/lib64 -L/usr/local/cuda-13.0/lib64/stubs -L/home/muhengl/mpk-qwen35/venv-mpk/lib/python3.12/site-packages/torch/lib -L/usr/local/cuda-13.0/lib64 -L/usr/lib/x86_64-linux-gnu -lcuda -lc10 -ltorch -ltorch_cpu -ltorch_python -lcudart -lc10_cuda -ltorch_cuda -o build/lib.linux-x86_64-cpython-312/runtime_kernel_blackwell_attention_qwen35.cpython-312-x86_64-linux-gnu.so
+copying build/lib.linux-x86_64-cpython-312/runtime_kernel_blackwell_attention_qwen35.cpython-312-x86_64-linux-gnu.so -> 
+=== oracle max_tokens=4 q_pass=4 rc=0 ===
+[prefill] k_norm+rope (new tokens, via cache write)              False    1131/4096      6.250e-02    1.330e-03
+[prefill] k rope vs REF fp32-fused rounding (MPK order)          True        0/4096      0.000e+00    0.000e+00
+[prefill] k rope vs REF HF per-product bf16 rounding             False      71/4096      7.812e-03    5.599e-05
+[prefill] REF(HF rounding) vs oracle k_rope                      False    1090/4096      6.250e-02    1.299e-03
+[prefill] REF(fp32-fused) vs oracle k_rope                       False    1131/4096      6.250e-02    1.330e-03
+[prefill] ATTRIB REF(HF norm order + MPK rope) vs oracle         False    1131/4096      6.250e-02    1.330e-03
+[prefill] ATTRIB REF(HF norm + HF rope) vs oracle                False    1090/4096      6.250e-02    1.299e-03
+[prefill] ATTRIB REF(fp32 norm weight + HF rope) vs oracle       True        0/4096      0.000e+00    0.000e+00
+[prefill] kv cache k (full seq incl. context)                    False    1131/4096      6.250e-02    1.330e-03
+[prefill] kv cache v (raw, no norm/rope)                         True        0/4096      0.000e+00    0.000e+00
+[prefill] q_norm+rope (all 16 heads, via k-slot replay)          False    9280/32768     6.250e-02    1.296e-03
+[prefill] attention out (UNGATED)                                False   15234/32768     2.344e-02    6.557e-04
+[prefill] attention out from PRE-ROPED q/k (norm+rope bypassed)  True        0/32768     0.000e+00    0.000e+00
+[prefill] torch eager attention (same inputs) vs oracle          False    9064/32768     1.562e-02    2.521e-04
+[prefill] kernel (bypassed) vs torch eager attention             False    9064/32768     1.562e-02    2.521e-04
+[prefill] gated out (out * sigmoid(gate))                        False   14437/32768     1.953e-03    9.051e-06
+[prefill] gate epilogue isolated (kernel ungated x HF sigmoid)   True        0/32768     0.000e+00    0.000e+00
+[prefill] COUNTERFACTUAL gate w/ fp32-folded sigmoid             False    8881/32768     7.812e-03    7.820e-06
+[decode] k_norm+rope (new tokens, via cache write)               False     149/512       3.125e-02    1.517e-03
+[decode] k rope vs REF fp32-fused rounding (MPK order)           True        0/512       0.000e+00    0.000e+00
+[decode] k rope vs REF HF per-product bf16 rounding              False      15/512       7.812e-03    7.963e-05
+[decode] REF(HF rounding) vs oracle k_rope                       False     138/512       3.125e-02    1.446e-03
+[decode] REF(fp32-fused) vs oracle k_rope                        False     149/512       3.125e-02    1.517e-03
+[decode] ATTRIB REF(HF norm order + MPK rope) vs oracle          False     149/512       3.125e-02    1.517e-03
+wrote /home/muhengl/mpk-qwen35/i6a/gates/oracle_mt4.json
+
+all hard assertions passed
+=== oracle max_tokens=2 q_pass=2 rc=0 ===
+[prefill] k_norm+rope (new tokens, via cache write)              False    1131/4096      6.250e-02    1.330e-03
+[prefill] k rope vs REF fp32-fused rounding (MPK order)          True        0/4096      0.000e+00    0.000e+00
+[prefill] k rope vs REF HF per-product bf16 rounding             False      71/4096      7.812e-03    5.599e-05
+[prefill] REF(HF rounding) vs oracle k_rope                      False    1090/4096      6.250e-02    1.299e-03
+[prefill] REF(fp32-fused) vs oracle k_rope                       False    1131/4096      6.250e-02    1.330e-03
+[prefill] ATTRIB REF(HF norm order + MPK rope) vs oracle         False    1131/4096      6.250e-02    1.330e-03
+[prefill] ATTRIB REF(HF norm + HF rope) vs oracle                False    1090/4096      6.250e-02    1.299e-03
+[prefill] ATTRIB REF(fp32 norm weight + HF rope) vs oracle       True        0/4096      0.000e+00    0.000e+00
+[prefill] kv cache k (full seq incl. context)                    False    1131/4096      6.250e-02    1.330e-03
+[prefill] kv cache v (raw, no norm/rope)                         True        0/4096      0.000e+00    0.000e+00
+[prefill] q_norm+rope (all 16 heads, via k-slot replay)          False    9280/32768     6.250e-02    1.296e-03
+[prefill] attention out (UNGATED)                                False   15234/32768     2.344e-02    6.557e-04
+[prefill] attention out from PRE-ROPED q/k (norm+rope bypassed)  True        0/32768     0.000e+00    0.000e+00
+[prefill] torch eager attention (same inputs) vs oracle          False    9064/32768     1.562e-02    2.521e-04
+[prefill] kernel (bypassed) vs torch eager attention             False    9064/32768     1.562e-02    2.521e-04
+[prefill] gated out (out * sigmoid(gate))                        False   14437/32768     1.953e-03    9.051e-06
+[prefill] gate epilogue isolated (kernel ungated x HF sigmoid)   True        0/32768     0.000e+00    0.000e+00
+[prefill] COUNTERFACTUAL gate w/ fp32-folded sigmoid             False    8881/32768     7.812e-03    7.820e-06
+[decode] k_norm+rope (new tokens, via cache write)               False     149/512       3.125e-02    1.517e-03
+[decode] k rope vs REF fp32-fused rounding (MPK order)           True        0/512       0.000e+00    0.000e+00
+[decode] k rope vs REF HF per-product bf16 rounding              False      15/512       7.812e-03    7.963e-05
+[decode] REF(HF rounding) vs oracle k_rope                       False     138/512       3.125e-02    1.446e-03
+[decode] REF(fp32-fused) vs oracle k_rope                        False     149/512       3.125e-02    1.517e-03
+[decode] ATTRIB REF(HF norm order + MPK rope) vs oracle          False     149/512       3.125e-02    1.517e-03
+wrote /home/muhengl/mpk-qwen35/i6a/gates/oracle_mt2.json
+
+all hard assertions passed
+=== oracle max_tokens=1 q_pass=1 rc=0 ===
+[prefill] k_norm+rope (new tokens, via cache write)              False    1131/4096      6.250e-02    1.330e-03
+[prefill] k rope vs REF fp32-fused rounding (MPK order)          True        0/4096      0.000e+00    0.000e+00
+[prefill] k rope vs REF HF per-product bf16 rounding             False      71/4096      7.812e-03    5.599e-05
+[prefill] REF(HF rounding) vs oracle k_rope                      False    1090/4096      6.250e-02    1.299e-03
+[prefill] REF(fp32-fused) vs oracle k_rope                       False    1131/4096      6.250e-02    1.330e-03
+[prefill] ATTRIB REF(HF norm order + MPK rope) vs oracle         False    1131/4096      6.250e-02    1.330e-03
+[prefill] ATTRIB REF(HF norm + HF rope) vs oracle                False    1090/4096      6.250e-02    1.299e-03
+[prefill] ATTRIB REF(fp32 norm weight + HF rope) vs oracle       True        0/4096      0.000e+00    0.000e+00
+[prefill] kv cache k (full seq incl. context)                    False    1131/4096      6.250e-02    1.330e-03
+[prefill] kv cache v (raw, no norm/rope)                         True        0/4096      0.000e+00    0.000e+00
+[prefill] q_norm+rope (all 16 heads, via k-slot replay)          False    9280/32768     6.250e-02    1.296e-03
+[prefill] attention out (UNGATED)                                False   15234/32768     2.344e-02    6.557e-04
+[prefill] attention out from PRE-ROPED q/k (norm+rope bypassed)  True        0/32768     0.000e+00    0.000e+00
+[prefill] torch eager attention (same inputs) vs oracle          False    9064/32768     1.562e-02    2.521e-04
+[prefill] kernel (bypassed) vs torch eager attention             False    9064/32768     1.562e-02    2.521e-04
+[prefill] gated out (out * sigmoid(gate))                        False   14437/32768     1.953e-03    9.051e-06
+[prefill] gate epilogue isolated (kernel ungated x HF sigmoid)   True        0/32768     0.000e+00    0.000e+00
+[prefill] COUNTERFACTUAL gate w/ fp32-folded sigmoid             False    8881/32768     7.812e-03    7.820e-06
+[decode] k_norm+rope (new tokens, via cache write)               False     149/512       3.125e-02    1.517e-03
+[decode] k rope vs REF fp32-fused rounding (MPK order)           True        0/512       0.000e+00    0.000e+00
+[decode] k rope vs REF HF per-product bf16 rounding              False      15/512       7.812e-03    7.963e-05
+[decode] REF(HF rounding) vs oracle k_rope                       False     138/512       3.125e-02    1.446e-03
+[decode] REF(fp32-fused) vs oracle k_rope                        False     149/512       3.125e-02    1.517e-03
+[decode] ATTRIB REF(HF norm order + MPK rope) vs oracle          False     149/512       3.125e-02    1.517e-03
+wrote /home/muhengl/mpk-qwen35/i6a/gates/oracle_mt1.json
+
+all hard assertions passed
+--- cross-arm identity: does the ungated/gated kernel output MATCH across pass sizes? ---
+Traceback (most recent call last):
+  File "<stdin>", line 9, in <module>
+KeyError: 'case'
+GATE_ORACLE2_DONE 2026-07-28T04:47:45-04:00

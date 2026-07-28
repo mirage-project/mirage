@@ -1,0 +1,76 @@
+{
+  "tag": "bs2_rep2",
+  "batch_size": 2,
+  "rep": 2,
+  "prompt_ids": [
+    "synth0",
+    "synth1"
+  ],
+  "prompt_lens": [
+    256,
+    256
+  ],
+  "synthetic_prompt_len": 256,
+  "synthetic_seed": 20262727,
+  "max_seq_length": 353,
+  "mbt": 16,
+  "page_size": 256,
+  "max_new_tokens": 96,
+  "profiler_slots": 0,
+  "profiled": false,
+  "n_events": 0,
+  "waves": [
+    {
+      "batch_size": 2,
+      "wave": 0,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "synth0",
+        "synth1"
+      ],
+      "wall_ms": 1582.8360595703125,
+      "max_decode_steps": 96,
+      "ms_per_decode_step": 16.48787562052409,
+      "tokens_per_s": 121.30125469350352,
+      "max_seq_length": 353,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 130,
+        "live_slot_migrations": 1,
+        "migrated_slots": [
+          1
+        ],
+        "straddling_slots": [
+          1
+        ]
+      }
+    }
+  ],
+  "slot_isolation": [],
+  "run_seconds": 15.151341199874878,
+  "tokens_sha256": "539dfc5f8267c4d910f50f177e73320cf9f7b39e70cdc06a1064daad7dbf9910",
+  "gpu_before": [
+    "0, 130 MiB, 0 %, 622 MHz, 3996 MHz",
+    "1, 4 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 4 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 18412 MiB, 14 %, 1965 MHz, 3996 MHz",
+    "4, 146342 MiB, 100 %, 1740 MHz, 3996 MHz",
+    "5, 158400 MiB, 100 %, 1792 MHz, 3996 MHz",
+    "6, 4 MiB, 0 %, 240 MHz, 3996 MHz",
+    "7, 165440 MiB, 100 %, 1755 MHz, 3996 MHz"
+  ],
+  "gpu_after": [
+    "0, 130 MiB, 0 %, 120 MHz, 3996 MHz",
+    "1, 4 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 4 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 36362 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "4, 146342 MiB, 100 %, 1747 MHz, 3996 MHz",
+    "5, 158400 MiB, 100 %, 1807 MHz, 3996 MHz",
+    "6, 36448 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "7, 165440 MiB, 100 %, 1545 MHz, 3996 MHz"
+  ],
+  "cuda_visible_devices": "6",
+  "generated_utc": "2026-07-28T09:43:22Z"
+}

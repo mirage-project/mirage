@@ -1,0 +1,3 @@
+[mpk_engine] 10 prompts, lengths [24, 30, 32, 32, 33, 36, 40, 43, 44, 68]
+sm_cnt:  148
+Fetching 28 files:   0%|          | 0/28 [00:00<?, ?it/s]Fetching 28 files: 100%|██████████| 28/28 [00:00<00:00, 14161.40it/s]

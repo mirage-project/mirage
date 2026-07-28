@@ -1,0 +1,8 @@
+/home/muhengl/mpk-qwen35/mirage-i6a/include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh(235): error: static assertion failed
+      static_assert(S_TOTAL_OFFSET <=
+      ^
+          detected during:
+            instantiation of "void kernel::multitoken_paged_attention_sm100_task_impl<T,NUM_QO_HEADS,NUM_KV_HEADS,KV_CACHE_STRIDE,QKV_STRIDE,O_STRIDE,HEAD_DIM,MAX_SEQ_LEN,PAGE_SIZE,Q_LEN_OVERRIDE,TAIL_OFFSET,MAX_TOKENS,ATTN_OUTPUT_GATE,Q_PASS_SIZE>(const void *, void *, void *, void *, const int *, const int *, const int *, const int *, int16_t, __nv_bool, __nv_bool, const void *, const void *, const void *, const void *, float, float) [with T=bf16, NUM_QO_HEADS=8, NUM_KV_HEADS=1, KV_CACHE_STRIDE=512, QKV_STRIDE=9216, O_STRIDE=4096, HEAD_DIM=256, MAX_SEQ_LEN=897, PAGE_SIZE=256, Q_LEN_OVERRIDE=0, TAIL_OFFSET=0, MAX_TOKENS=8, ATTN_OUTPUT_GATE=1, Q_PASS_SIZE=8]" at line 71 of /home/muhengl/mpk-qwen35/i6a/tu_i6a_attn.cu
+            instantiation of "void k_attn_qwen35<Q_PASS>(const void *, void *, void *, void *, const int *, const int *, const int *, const int *, int16_t, const void *, const void *, const void *, const void *) [with Q_PASS=8]" at line 90 of /home/muhengl/mpk-qwen35/i6a/tu_i6a_attn.cu
+
+1 error detected in the compilation of "/home/muhengl/mpk-qwen35/i6a/tu_i6a_attn.cu".

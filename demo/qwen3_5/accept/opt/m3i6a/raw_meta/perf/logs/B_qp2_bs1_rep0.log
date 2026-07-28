@@ -1,0 +1,16 @@
+Fetching 28 files:   0%|          | 0/28 [00:00<?, ?it/s]Fetching 28 files: 100%|██████████| 28/28 [00:00<00:00, 238700.23it/s]
+sm_cnt:  148
+Fetching 28 files:   0%|          | 0/28 [00:00<?, ?it/s]Fetching 28 files: 100%|██████████| 28/28 [00:00<00:00, 89308.37it/s]
+[mpk_engine] graph assembled in 12.1s (bs=1, mbt=16, msl=353)
+[load_mpk_kernel] Kernel compatibility check passed!
+[load_mpk_kernel] Loading launcher from: /home/muhengl/mpk-qwen35/i6a/perf/kernel_B_qp2_bs1_noprof/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+[load_mpk_kernel] Using task graph JSON: /home/muhengl/mpk-qwen35/i6a/perf/kernel_B_qp2_bs1_noprof/task_graph_rank0.json
+[load_mpk_kernel] Passing 928 model tensors to kernel
+[MPK INIT] Total tasks: 43928, Total events: 2278
+[mpk_engine] reused compiled kernel from /home/muhengl/mpk-qwen35/i6a/perf/kernel_B_qp2_bs1_noprof (1.3s)
+[mpk_engine] no profiler buffer (unprofiled control run)
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine] bs=1 wave=0 slots=1 distinct=1 wall=1206.3ms steps=96
+[mpk_engine] bs1_rep0: wall=1206.3ms steps=96 events=0

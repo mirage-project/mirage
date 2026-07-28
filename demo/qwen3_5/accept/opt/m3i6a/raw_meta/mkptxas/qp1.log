@@ -1,0 +1,71 @@
+/home/muhengl/mpk-qwen35/mirage-i6a/include/mirage/persistent_kernel/tasks/blackwell/mla_prefill_sm100.cuh(345): warning #177-D: variable "num_safe_tiles" was declared but never referenced
+    int num_safe_tiles = (q_hist + q_start) / PF_BN;
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/home/muhengl/mpk-qwen35/mirage-i6a/include/mirage/persistent_kernel/tasks/blackwell/mla_prefill_tp8_sm100.cuh(272): warning #177-D: variable "SPB" was declared but never referenced
+    constexpr int SNB = D_QK_NOPE * 2, SPB = D_QK_ROPE * 2, S128 = 128;
+                                       ^
+
+/home/muhengl/mpk-qwen35/mirage-i6a/include/mirage/persistent_kernel/persistent_kernel.cuh(1026): warning #177-D: variable "_trace_t" was declared but never referenced
+        bool _trace_t =
+             ^
+
+/home/muhengl/mpk-qwen35/mirage-i6a/include/mirage/persistent_kernel/persistent_kernel.cuh(865): warning #20054-D: dynamic initialization is not supported for a function-scope static __shared__ variable within a __device__/__global__ function
+    __attribute__((shared)) TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
+                                     ^
+
+ptxas info    : 219924 bytes gmem
+ptxas info    : Compiling entry function '_ZN3cub18CUB_200700_1000_NS11EmptyKernelIvEEvv' for 'sm_100a'
+ptxas info    : Function properties for _ZN3cub18CUB_200700_1000_NS11EmptyKernelIvEEvv
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 4 registers, used 0 barriers
+ptxas info    : Compile time = 6.103 ms
+ptxas info    : Compiling entry function '_Z16scheduler_kernelN6mirage7runtime13RuntimeConfigE' for 'sm_100a'
+ptxas info    : Function properties for _Z16scheduler_kernelN6mirage7runtime13RuntimeConfigE
+    80 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 64 registers, used 0 barriers, 80 bytes cumulative stack size
+ptxas info    : Compile time = 130.407 ms
+ptxas info    : Compiling entry function '_Z13worker_kernelN6mirage7runtime13RuntimeConfigE' for 'sm_100a'
+ptxas info    : Function properties for _Z13worker_kernelN6mirage7runtime13RuntimeConfigE
+    96 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 238 registers, used 16 barriers, 96 bytes cumulative stack size, 5824 bytes smem
+ptxas info    : Compile time = 1799.939 ms
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm256ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm256ELm16ELm128ELm248320ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi256ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm64ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm64ELm16ELm128ELm64ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi64ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm8ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm8ELm16ELm128ELm256ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi8ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Compiling entry function '_Z17persistent_kernelN6mirage7runtime13RuntimeConfigE' for 'sm_100a'
+ptxas info    : Function properties for _Z17persistent_kernelN6mirage7runtime13RuntimeConfigE
+    144 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 238 registers, used 16 barriers, 144 bytes cumulative stack size, 5824 bytes smem
+ptxas info    : Compile time = 2612.613 ms
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm256ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm256ELm16ELm128ELm248320ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi256ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm64ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm64ELm16ELm128ELm64ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi64ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm8ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm8ELm16ELm128ELm256ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi8ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Compiling entry function '_Z28residency_probe_sched_kernel14ResidencyProbe' for 'sm_100a'
+ptxas info    : Function properties for _Z28residency_probe_sched_kernel14ResidencyProbe
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers
+ptxas info    : Compile time = 5.506 ms
+ptxas info    : Compiling entry function '_Z29residency_probe_worker_kernel14ResidencyProbe' for 'sm_100a'
+ptxas info    : Function properties for _Z29residency_probe_worker_kernel14ResidencyProbe
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers
+ptxas info    : Compile time = 2.896 ms
+ptxas info    : Compiling entry function '_Z14prepare_kernelN6mirage7runtime13RuntimeConfigEi' for 'sm_100a'
+ptxas info    : Function properties for _Z14prepare_kernelN6mirage7runtime13RuntimeConfigEi
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 24 registers, used 0 barriers
+ptxas info    : Compile time = 3.879 ms
+ptxas info    : Compiling entry function '_Z11init_kernelN6mirage7runtime13RuntimeConfigE' for 'sm_100a'
+ptxas info    : Function properties for _Z11init_kernelN6mirage7runtime13RuntimeConfigE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 0 barriers
+ptxas info    : Compile time = 11.186 ms

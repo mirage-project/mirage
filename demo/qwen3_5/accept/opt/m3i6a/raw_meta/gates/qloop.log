@@ -1,0 +1,123 @@
+
+case                                                          bit-identical  expected       max_abs
+----------------------------------------------------------------------------------------------------
+small gate=0 T=8 seq=8 [same arena, 2x4] out                  True           True         0.000e+00
+small gate=0 T=8 seq=8 [same arena, 2x4] kv_k                 True           True         0.000e+00
+small gate=0 T=8 seq=8 [same arena, 2x4] kv_v                 True           True         0.000e+00
+small gate=0 T=8 seq=8 [arena 4, 2x4 (production form)] out   True           True         0.000e+00
+small gate=0 T=8 seq=8 [arena 4, 2x4 (production form)] kv_k  True           True         0.000e+00
+small gate=0 T=8 seq=8 [arena 4, 2x4 (production form)] kv_v  True           True         0.000e+00
+small gate=0 T=8 seq=8 [arena 2, 4x2] out                     True           True         0.000e+00
+small gate=0 T=8 seq=8 [arena 2, 4x2] kv_k                    True           True         0.000e+00
+small gate=0 T=8 seq=8 [arena 2, 4x2] kv_v                    True           True         0.000e+00
+small gate=0 T=8 seq=40 [same arena, 2x4] out                 True           True         0.000e+00
+small gate=0 T=8 seq=40 [same arena, 2x4] kv_k                True           True         0.000e+00
+small gate=0 T=8 seq=40 [same arena, 2x4] kv_v                True           True         0.000e+00
+small gate=0 T=8 seq=40 [arena 4, 2x4 (production form)] out  True           True         0.000e+00
+small gate=0 T=8 seq=40 [arena 4, 2x4 (production form)] kv_k True           True         0.000e+00
+small gate=0 T=8 seq=40 [arena 4, 2x4 (production form)] kv_v True           True         0.000e+00
+small gate=0 T=8 seq=40 [arena 2, 4x2] out                    True           True         0.000e+00
+small gate=0 T=8 seq=40 [arena 2, 4x2] kv_k                   True           True         0.000e+00
+small gate=0 T=8 seq=40 [arena 2, 4x2] kv_v                   True           True         0.000e+00
+small gate=0 T=5 seq=37 [same arena, 2x4] out                 True           True         0.000e+00
+small gate=0 T=5 seq=37 [same arena, 2x4] kv_k                True           True         0.000e+00
+small gate=0 T=5 seq=37 [same arena, 2x4] kv_v                True           True         0.000e+00
+small gate=0 T=5 seq=37 [arena 4, 2x4 (production form)] out  True           True         0.000e+00
+small gate=0 T=5 seq=37 [arena 4, 2x4 (production form)] kv_k True           True         0.000e+00
+small gate=0 T=5 seq=37 [arena 4, 2x4 (production form)] kv_v True           True         0.000e+00
+small gate=0 T=5 seq=37 [arena 2, 4x2] out                    True           True         0.000e+00
+small gate=0 T=5 seq=37 [arena 2, 4x2] kv_k                   True           True         0.000e+00
+small gate=0 T=5 seq=37 [arena 2, 4x2] kv_v                   True           True         0.000e+00
+small gate=0 T=1 seq=33 [same arena, 2x4] out                 True           True         0.000e+00
+small gate=0 T=1 seq=33 [same arena, 2x4] kv_k                True           True         0.000e+00
+small gate=0 T=1 seq=33 [same arena, 2x4] kv_v                True           True         0.000e+00
+small gate=0 T=1 seq=33 [arena 4, 2x4 (production form)] out  True           True         0.000e+00
+small gate=0 T=1 seq=33 [arena 4, 2x4 (production form)] kv_k True           True         0.000e+00
+small gate=0 T=1 seq=33 [arena 4, 2x4 (production form)] kv_v True           True         0.000e+00
+small gate=0 T=1 seq=33 [arena 2, 4x2] out                    True           True         0.000e+00
+small gate=0 T=1 seq=33 [arena 2, 4x2] kv_k                   True           True         0.000e+00
+small gate=0 T=1 seq=33 [arena 2, 4x2] kv_v                   True           True         0.000e+00
+small gate=1 T=8 seq=8 [arena 4, 2x4 (production form)] out   True           True         0.000e+00
+small gate=1 T=8 seq=8 [arena 4, 2x4 (production form)] kv_k  True           True         0.000e+00
+small gate=1 T=8 seq=8 [arena 4, 2x4 (production form)] kv_v  True           True         0.000e+00
+small gate=1 T=8 seq=40 [arena 4, 2x4 (production form)] out  True           True         0.000e+00
+small gate=1 T=8 seq=40 [arena 4, 2x4 (production form)] kv_k True           True         0.000e+00
+small gate=1 T=8 seq=40 [arena 4, 2x4 (production form)] kv_v True           True         0.000e+00
+small gate=1 T=5 seq=37 [arena 4, 2x4 (production form)] out  True           True         0.000e+00
+small gate=1 T=5 seq=37 [arena 4, 2x4 (production form)] kv_k True           True         0.000e+00
+small gate=1 T=5 seq=37 [arena 4, 2x4 (production form)] kv_v True           True         0.000e+00
+small gate=1 T=1 seq=33 [arena 4, 2x4 (production form)] out  True           True         0.000e+00
+small gate=1 T=1 seq=33 [arena 4, 2x4 (production form)] kv_k True           True         0.000e+00
+small gate=1 T=1 seq=33 [arena 4, 2x4 (production form)] kv_v True           True         0.000e+00
+qwen35 gate=0 T=4 seq=4 pass=4 arena=4 out                    True           True         0.000e+00
+qwen35 gate=0 T=4 seq=4 pass=4 arena=4 kv_k                   True           True         0.000e+00
+qwen35 gate=0 T=4 seq=4 pass=4 arena=4 kv_v                   True           True         0.000e+00
+qwen35 gate=0 T=4 seq=70 pass=4 arena=4 out                   True           True         0.000e+00
+qwen35 gate=0 T=4 seq=70 pass=4 arena=4 kv_k                  True           True         0.000e+00
+qwen35 gate=0 T=4 seq=70 pass=4 arena=4 kv_v                  True           True         0.000e+00
+qwen35 gate=0 T=1 seq=70 pass=4 arena=4 out                   True           True         0.000e+00
+qwen35 gate=0 T=1 seq=70 pass=4 arena=4 kv_k                  True           True         0.000e+00
+qwen35 gate=0 T=1 seq=70 pass=4 arena=4 kv_v                  True           True         0.000e+00
+qwen35 gate=1 T=4 seq=4 pass=4 arena=4 out                    True           True         0.000e+00
+qwen35 gate=1 T=4 seq=4 pass=4 arena=4 kv_k                   True           True         0.000e+00
+qwen35 gate=1 T=4 seq=4 pass=4 arena=4 kv_v                   True           True         0.000e+00
+qwen35 gate=1 T=4 seq=4 pass=2 arena=2 out                    True           True         0.000e+00
+qwen35 gate=1 T=4 seq=4 pass=2 arena=2 kv_k                   True           True         0.000e+00
+qwen35 gate=1 T=4 seq=4 pass=2 arena=2 kv_v                   True           True         0.000e+00
+qwen35 gate=1 T=4 seq=4 pass=1 arena=1 out                    True           True         0.000e+00
+qwen35 gate=1 T=4 seq=4 pass=1 arena=1 kv_k                   True           True         0.000e+00
+qwen35 gate=1 T=4 seq=4 pass=1 arena=1 kv_v                   True           True         0.000e+00
+qwen35 gate=1 T=4 seq=70 pass=4 arena=4 out                   True           True         0.000e+00
+qwen35 gate=1 T=4 seq=70 pass=4 arena=4 kv_k                  True           True         0.000e+00
+qwen35 gate=1 T=4 seq=70 pass=4 arena=4 kv_v                  True           True         0.000e+00
+qwen35 gate=1 T=4 seq=70 pass=2 arena=2 out                   True           True         0.000e+00
+qwen35 gate=1 T=4 seq=70 pass=2 arena=2 kv_k                  True           True         0.000e+00
+qwen35 gate=1 T=4 seq=70 pass=2 arena=2 kv_v                  True           True         0.000e+00
+qwen35 gate=1 T=4 seq=70 pass=1 arena=1 out                   True           True         0.000e+00
+qwen35 gate=1 T=4 seq=70 pass=1 arena=1 kv_k                  True           True         0.000e+00
+qwen35 gate=1 T=4 seq=70 pass=1 arena=1 kv_v                  True           True         0.000e+00
+qwen35 gate=1 T=1 seq=70 pass=4 arena=4 out                   True           True         0.000e+00
+qwen35 gate=1 T=1 seq=70 pass=4 arena=4 kv_k                  True           True         0.000e+00
+qwen35 gate=1 T=1 seq=70 pass=4 arena=4 kv_v                  True           True         0.000e+00
+qwen35 gate=1 T=1 seq=70 pass=2 arena=2 out                   True           True         0.000e+00
+qwen35 gate=1 T=1 seq=70 pass=2 arena=2 kv_k                  True           True         0.000e+00
+qwen35 gate=1 T=1 seq=70 pass=2 arena=2 kv_v                  True           True         0.000e+00
+qwen35 gate=1 T=1 seq=70 pass=1 arena=1 out                   True           True         0.000e+00
+qwen35 gate=1 T=1 seq=70 pass=1 arena=1 kv_k                  True           True         0.000e+00
+qwen35 gate=1 T=1 seq=70 pass=1 arena=1 kv_v                  True           True         0.000e+00
+qwen35-multipass gate=1 T=8 seq=8 pass=2 (4 passes) out       True           True         0.000e+00
+qwen35-multipass gate=1 T=8 seq=8 pass=2 (4 passes) kv_k      True           True         0.000e+00
+qwen35-multipass gate=1 T=8 seq=8 pass=2 (4 passes) kv_v      True           True         0.000e+00
+qwen35-multipass gate=1 T=8 seq=8 pass=1 (8 passes) out       True           True         0.000e+00
+qwen35-multipass gate=1 T=8 seq=8 pass=1 (8 passes) kv_k      True           True         0.000e+00
+qwen35-multipass gate=1 T=8 seq=8 pass=1 (8 passes) kv_v      True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=16 pass=2 (8 passes) out     True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=16 pass=2 (8 passes) kv_k    True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=16 pass=2 (8 passes) kv_v    True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=16 pass=1 (16 passes) out    True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=16 pass=1 (16 passes) kv_k   True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=16 pass=1 (16 passes) kv_v   True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=80 pass=2 (8 passes) out     True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=80 pass=2 (8 passes) kv_k    True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=80 pass=2 (8 passes) kv_v    True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=80 pass=1 (16 passes) out    True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=80 pass=1 (16 passes) kv_k   True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=80 pass=1 (16 passes) kv_v   True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=200 pass=2 (8 passes) out    True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=200 pass=2 (8 passes) kv_k   True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=200 pass=2 (8 passes) kv_v   True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=200 pass=1 (16 passes) out   True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=200 pass=1 (16 passes) kv_k  True           True         0.000e+00
+qwen35-multipass gate=1 T=16 seq=200 pass=1 (16 passes) kv_v  True           True         0.000e+00
+qwen35-multipass gate=1 T=13 seq=141 pass=2 (7 passes) out    True           True         0.000e+00
+qwen35-multipass gate=1 T=13 seq=141 pass=2 (7 passes) kv_k   True           True         0.000e+00
+qwen35-multipass gate=1 T=13 seq=141 pass=2 (7 passes) kv_v   True           True         0.000e+00
+qwen35-multipass gate=1 T=13 seq=141 pass=1 (13 passes) out   True           True         0.000e+00
+qwen35-multipass gate=1 T=13 seq=141 pass=1 (13 passes) kv_k  True           True         0.000e+00
+qwen35-multipass gate=1 T=13 seq=141 pass=1 (13 passes) kv_v  True           True         0.000e+00
+cross-pass causal coupling (last query row)                   True           True         0.000e+00
+COUNTERFACTUAL truncated-to-pass-1 attention                  False          False        1.016e+00
+
+wrote /home/muhengl/mpk-qwen35/i6a/gates/qloop_result.json
+
+all Q-loop equivalence assertions passed

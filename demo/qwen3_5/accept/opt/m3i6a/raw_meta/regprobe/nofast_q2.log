@@ -1,0 +1,6 @@
+ptxas info    : 8 bytes gmem
+ptxas info    : Compiling entry function '_Z13k_attn_qwen35ILi2EEvPKvPvS2_S2_PKiS4_S4_S4_sS1_S1_S1_S1_' for 'sm_100a'
+ptxas info    : Function properties for _Z13k_attn_qwen35ILi2EEvPKvPvS2_S2_PKiS4_S4_S4_sS1_S1_S1_S1_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 240 registers, used 16 barriers
+ptxas info    : Compile time = 732.939 ms

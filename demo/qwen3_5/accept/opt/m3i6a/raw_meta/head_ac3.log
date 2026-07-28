@@ -1,0 +1,2 @@
+HEAD: f3606f2c pm(qwen35): backlog rank-7 INTEGRATED (attention pass-size; spill mechanism + split-KV next lever)
+claimed GPU=3

@@ -1,0 +1,54 @@
+=== probing GPU 6 (3 samples, 3s apart) ===
+  sample 1: GPU 6 used=4MiB util=0%
+  sample 2: GPU 6 used=4MiB util=0%
+  sample 3: GPU 6 used=4MiB util=0%
+GPU 6 stable-idle across 3 samples -- claiming it (M3-I6A).
+=== running (CUDA_VISIBLE_DEVICES=6): env QPLIST=1 BSLIST=1 8 bash run_ctx.sh ===
+df /raid avail=185G
+===== [qp1_bs1_msl897] msl=897 new=96 (compile) 2026-07-28T04:05:28-04:00 =====
+rc=0 [mpk_engine] profiler: 60620962 events, header nblocks=208 ngroups=1, fill=23.3%
+[mpk_engine] bs1_rep0: wall=6596.3ms steps=640 events=60620962
+--- ctx_curve qp1_bs1_msl897 ---
+anchor QC: n_it=655 anchor/step=1.0 max_frac_err=0.0000 valid=True mismatched_types=3
+   MISMATCH t=0 TASK_TERMINATE obs=0.0 static=1
+   MISMATCH t=201 TASK_SCHD_EVENTS obs=2277.0 static=0
+   MISMATCH t=204 TASK_SCHD_PREPARE_BATCH obs=1.0 static=0
+        iters  ctx(mean)   step_us  attn_wall  attn_sum  attn_n  attn_mean  blk  gdn_wall  fp8_wall
+    0-96             296   11341.3     1174.0    2336.5   20.00     116.83   19     959.7    2821.8
+   48-144            336    9680.2      469.9     933.7   20.00      46.69   19     218.7    2820.1
+   96-192            384    9711.6      496.5     986.7   20.00      49.33   19     218.7    2821.4
+  144-240            432    9738.5      522.8    1039.4   20.00      51.97   19     218.6    2821.7
+  192-288            480    9763.2      546.9    1087.7   20.00      54.38   19     218.9    2821.7
+  240-336            528    9787.6      571.3    1136.4   20.00      56.82   19     218.8    2821.3
+  288-384            576    9811.7      597.8    1189.3   20.00      59.47   19     218.3    2820.9
+  336-432            624    9836.7      623.9    1241.6   20.00      62.08   19     218.3    2821.3
+  384-480            672    9863.2      648.0    1290.0   20.00      64.50   19     218.8    2821.9
+  432-528            720    9887.1      672.5    1338.8   20.00      66.94   19     218.9    2822.1
+  480-576            768    9911.3      699.0    1391.8   20.00      69.59   19     218.7    2822.0
+  528-624            816    9939.0      725.1    1444.0   20.00      72.20   19     218.6    2822.3
+  559-655            848    9953.1      739.4    1472.4   20.00      73.62   19     218.8    2822.5
+ctx_curve rc=0
+===== [qp1_bs8_msl897] msl=897 new=96 (compile) 2026-07-28T04:07:18-04:00 =====
+rc=0 [mpk_engine] profiler: 84021302 events, header nblocks=208 ngroups=1, fill=32.3%
+[mpk_engine] bs8_rep0: wall=10468.3ms steps=640 events=84021302
+--- ctx_curve qp1_bs8_msl897 ---
+anchor QC: n_it=809 anchor/step=1.0 max_frac_err=0.0000 valid=True mismatched_types=3
+   MISMATCH t=0 TASK_TERMINATE obs=0.0 static=1
+   MISMATCH t=201 TASK_SCHD_EVENTS obs=2277.0 static=0
+   MISMATCH t=204 TASK_SCHD_PREPARE_BATCH obs=1.0 static=0
+        iters  ctx(mean)   step_us  attn_wall  attn_sum  attn_n  attn_mean  blk  gdn_wall  fp8_wall
+  141-237            364   13087.4     1059.2    8382.5  160.00      52.39  123    2327.8    2850.8
+  189-285            407   10651.5      517.6    7630.6  160.00      47.69  123     730.4    2850.3
+  237-333            455   10678.3      543.0    8038.8  160.00      50.24  123     730.3    2850.7
+  285-381            503   10703.6      569.0    8439.2  160.00      52.74  123     730.3    2850.3
+  333-429            551   10728.7      594.2    8835.3  160.00      55.22  123     730.1    2850.5
+  381-477            599   10754.8      618.6    9236.0  160.00      57.73  123     730.0    2850.0
+  429-525            647   10780.7      644.1    9644.8  160.00      60.28  123     729.8    2849.0
+  477-573            695   10806.5      670.4   10051.5  160.00      62.82  123     729.9    2848.5
+  525-621            743   10830.9      695.8   10452.3  160.00      65.33  123     730.0    2848.1
+  573-669            789   10850.7      718.8   10662.2  160.00      66.64  123     729.7    2848.3
+  621-717            822   10809.4      732.7    9226.7  160.00      57.67  123     726.6    2847.3
+  669-765            843   10661.7      737.5    6211.9  160.00      38.82  123     716.5    2844.9
+  713-809            861   10503.5      742.0    3544.9  160.00      22.16  123     696.6    2831.9
+ctx_curve rc=0
+RUN_CTX_DONE 2026-07-28T04:09:25-04:00

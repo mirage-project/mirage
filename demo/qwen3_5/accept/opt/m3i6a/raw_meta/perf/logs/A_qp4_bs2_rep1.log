@@ -1,0 +1,35 @@
+[mpk_engine] 10 prompts, lengths [24, 30, 32, 32, 33, 36, 40, 43, 44, 68]
+sm_cnt:  148
+Fetching 28 files:   0%|          | 0/28 [00:00<?, ?it/s]Fetching 28 files: 100%|██████████| 28/28 [00:00<00:00, 313174.70it/s]
+[mpk_engine] graph assembled in 13.1s (bs=2, mbt=16, msl=132)
+[load_mpk_kernel] Kernel compatibility check passed!
+[load_mpk_kernel] Loading launcher from: /home/muhengl/mpk-qwen35/i6a/perf/kernel_A_qp4_bs2/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+[load_mpk_kernel] Using task graph JSON: /home/muhengl/mpk-qwen35/i6a/perf/kernel_A_qp4_bs2/task_graph_rank0.json
+[load_mpk_kernel] Passing 928 model tensors to kernel
+[MPK INIT] Total tasks: 44188, Total events: 2278
+[mpk_engine] reused compiled kernel from /home/muhengl/mpk-qwen35/i6a/perf/kernel_A_qp4_bs2 (1.3s)
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine] bs=2 wave=0 slots=2 distinct=2 wall=1097.9ms steps=107
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine]   [watchdog] bs=2 wave=1 step=[131, 131]
+[mpk_engine] bs=2 wave=1 slots=2 distinct=2 wall=1056.0ms steps=99
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine]   [watchdog] bs=2 wave=2 step=[131, 131]
+[mpk_engine] bs=2 wave=2 slots=2 distinct=2 wall=1029.9ms steps=98
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine]   [watchdog] bs=2 wave=3 step=[131, 131]
+[mpk_engine] bs=2 wave=3 slots=2 distinct=2 wall=966.5ms steps=91
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[mpk_engine]   [watchdog] bs=2 wave=4 step=[131, 131]
+[mpk_engine] bs=2 wave=4 slots=2 distinct=2 wall=960.2ms steps=87
+[mpk_engine] wrote /home/muhengl/mpk-qwen35/i6a/perf/dumpsA_qp4/bs2_rep1 (10 prompts)

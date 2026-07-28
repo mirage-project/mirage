@@ -1,0 +1,108 @@
+===== claim attempt 1/90 2026-07-28T05:39:15-04:00 =====
+=== probing GPU 6 (3 samples, 3s apart) ===
+  sample 1: GPU 6 used=6MiB util=0%
+  sample 2: GPU 6 used=6MiB util=0%
+  sample 3: GPU 6 used=6MiB util=0%
+GPU 6 stable-idle across 3 samples -- claiming it (M3-I6A).
+=== running (CUDA_VISIBLE_DEVICES=6): bash /home/muhengl/mpk-qwen35/i6a/phase5.sh ===
+########## geometry B+C re-run, drain-gated  gpu=6 2026-07-28T05:39:22-04:00 ##########
+--- geometry B: msl=353 ---
+    drained (6MiB after 1 checks)
+  [B_qp4_bs1_rep0] rc=0 [mpk_engine] bs1_rep0: wall=1251.8ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp4_bs1_rep1] rc=0 [mpk_engine] bs1_rep1: wall=1250.6ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp4_bs1_rep2] rc=0 [mpk_engine] bs1_rep2: wall=1251.0ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp2_bs1_rep0] rc=0 [mpk_engine] bs1_rep0: wall=1206.3ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp2_bs1_rep1] rc=0 [mpk_engine] bs1_rep1: wall=1203.6ms steps=96 events=0
+    drained (0MiB after 1 checks)
+  [B_qp2_bs1_rep2] rc=0 [mpk_engine] bs1_rep2: wall=1204.1ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp4_bs2_rep0] rc=0 [mpk_engine] bs2_rep0: wall=1578.3ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp4_bs2_rep1] rc=0 [mpk_engine] bs2_rep1: wall=1582.9ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp4_bs2_rep2] rc=0 [mpk_engine] bs2_rep2: wall=1582.8ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp2_bs2_rep0] rc=0 [mpk_engine] bs2_rep0: wall=1531.8ms steps=96 events=0
+    drained (0MiB after 1 checks)
+  [B_qp2_bs2_rep1] rc=0 [mpk_engine] bs2_rep1: wall=1536.2ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp2_bs2_rep2] rc=0 [mpk_engine] bs2_rep2: wall=1536.2ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp4_bs4_rep0] rc=0 [mpk_engine] bs4_rep0: wall=2253.4ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp4_bs4_rep1] rc=0 [mpk_engine] bs4_rep1: wall=2239.9ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp4_bs4_rep2] rc=0 [mpk_engine] bs4_rep2: wall=2237.8ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp2_bs4_rep0] rc=0 [mpk_engine] bs4_rep0: wall=2185.4ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp2_bs4_rep1] rc=0 [mpk_engine] bs4_rep1: wall=2180.3ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp2_bs4_rep2] rc=0 [mpk_engine] bs4_rep2: wall=2182.3ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp4_bs8_rep0] rc=0 [mpk_engine] bs8_rep0: wall=4362.4ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp4_bs8_rep1] rc=0 [mpk_engine] bs8_rep1: wall=4352.3ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp4_bs8_rep2] rc=0 [mpk_engine] bs8_rep2: wall=4356.6ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp2_bs8_rep0] rc=0 [mpk_engine] bs8_rep0: wall=4274.8ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp2_bs8_rep1] rc=0 [mpk_engine] bs8_rep1: wall=4264.2ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp2_bs8_rep2] rc=0 [mpk_engine] bs8_rep2: wall=4270.4ms steps=96 events=0
+    drained (6MiB after 1 checks)
+  [B_qp4_bs16_rep0] rc=0 [mpk_engine] bs16_rep0: wall=10631.6ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp4_bs16_rep1] rc=0 [mpk_engine] bs16_rep1: wall=10564.7ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp4_bs16_rep2] rc=0 [mpk_engine] bs16_rep2: wall=10549.7ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp2_bs16_rep0] rc=0 [mpk_engine] bs16_rep0: wall=10493.7ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp2_bs16_rep1] rc=0 [mpk_engine] bs16_rep1: wall=10421.9ms steps=96 events=0
+    drained (4MiB after 1 checks)
+  [B_qp2_bs16_rep2] rc=0 [mpk_engine] bs16_rep2: wall=10411.6ms steps=96 events=0
+--- geometry C: msl=897 ---
+    drained (4MiB after 1 checks)
+  [C_qp4_bs1_rep0] rc=0 [mpk_engine] bs1_rep0: wall=6867.9ms steps=640 events=0
+    drained (6MiB after 1 checks)
+  [C_qp4_bs1_rep1] rc=0 [mpk_engine] bs1_rep1: wall=6870.1ms steps=640 events=0
+    drained (6MiB after 1 checks)
+  [C_qp4_bs1_rep2] rc=0 [mpk_engine] bs1_rep2: wall=6870.6ms steps=640 events=0
+    drained (4MiB after 1 checks)
+  [C_qp2_bs1_rep0] rc=0 [mpk_engine] bs1_rep0: wall=6469.2ms steps=640 events=0
+    drained (4MiB after 1 checks)
+  [C_qp2_bs1_rep1] rc=0 [mpk_engine] bs1_rep1: wall=6471.6ms steps=640 events=0
+    drained (0MiB after 1 checks)
+  [C_qp2_bs1_rep2] rc=0 [mpk_engine] bs1_rep2: wall=6473.1ms steps=640 events=0
+    drained (4MiB after 1 checks)
+  [C_qp4_bs8_rep0] rc=0 [mpk_engine] bs8_rep0: wall=10725.5ms steps=640 events=0
+    drained (0MiB after 1 checks)
+  [C_qp4_bs8_rep1] rc=0 [mpk_engine] bs8_rep1: wall=10696.3ms steps=640 events=0
+    drained (0MiB after 1 checks)
+  [C_qp4_bs8_rep2] rc=0 [mpk_engine] bs8_rep2: wall=10756.6ms steps=640 events=0
+    drained (4MiB after 1 checks)
+  [C_qp2_bs8_rep0] rc=0 [mpk_engine] bs8_rep0: wall=10168.8ms steps=640 events=0
+    drained (0MiB after 1 checks)
+  [C_qp2_bs8_rep1] rc=0 [mpk_engine] bs8_rep1: wall=10146.6ms steps=640 events=0
+    drained (0MiB after 1 checks)
+  [C_qp2_bs8_rep2] rc=0 [mpk_engine] bs8_rep2: wall=10197.9ms steps=640 events=0
+    drained (4MiB after 1 checks)
+  [C_qp4_bs16_rep0] rc=0 [mpk_engine] bs16_rep0: wall=23724.4ms steps=640 events=0
+    drained (4MiB after 1 checks)
+  [C_qp4_bs16_rep1] rc=0 [mpk_engine] bs16_rep1: wall=23181.3ms steps=640 events=0
+    drained (4MiB after 1 checks)
+  [C_qp4_bs16_rep2] rc=0 [mpk_engine] bs16_rep2: wall=22977.0ms steps=640 events=0
+    drained (4MiB after 1 checks)
+  [C_qp2_bs16_rep0] rc=0 [mpk_engine] bs16_rep0: wall=22700.3ms steps=640 events=0
+    drained (6MiB after 1 checks)
+  [C_qp2_bs16_rep1] rc=0 [mpk_engine] bs16_rep1: wall=22166.6ms steps=640 events=0
+    drained (6MiB after 1 checks)
+  [C_qp2_bs16_rep2] rc=0 [mpk_engine] bs16_rep2: wall=21964.2ms steps=640 events=0
+PHASE5_DONE 2026-07-28T06:13:10-04:00
+===== body exited rc=0 2026-07-28T06:13:10-04:00 =====

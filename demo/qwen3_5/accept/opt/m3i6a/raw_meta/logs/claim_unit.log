@@ -1,0 +1,84 @@
+===== claim attempt 1/60 2026-07-28T04:26:20-04:00 =====
+=== probing GPU 6 (3 samples, 3s apart) ===
+  sample 1: GPU 6 used=36362MiB util=0%
+GPU 6 not stable, trying next candidate.
+=== probing GPU 3 (3 samples, 3s apart) ===
+  sample 1: GPU 3 used=1614MiB util=100%
+GPU 3 not stable, trying next candidate.
+=== probing GPU 1 (3 samples, 3s apart) ===
+  sample 1: GPU 1 used=4MiB util=0%
+  sample 2: GPU 1 used=4MiB util=0%
+  sample 3: GPU 1 used=4MiB util=0%
+GPU 1 stable-idle across 3 samples -- claiming it (M3-I6A).
+=== running (CUDA_VISIBLE_DEVICES=1): bash /home/muhengl/mpk-qwen35/i6a/gate_all.sh ===
+########## M3-I6a GATES gpu=1 2026-07-28T04:26:27-04:00 ##########
+tree: 170ab325 test(qwen35): I3 gate bundle (unit+oracle both lanes, test-mode, HEAD control); I5b mbt REJECTED-WITH-EVIDENCE
+c93d9d511d160d86012784ca910edb39fba10c5f82d0165c1757d56aea489029  /home/muhengl/mpk-qwen35/mirage-i6a/include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh
+1316ea69098293b3a1b12a19e2a4d052fad6eda618bc73beb6c0d96132354555  /home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/mpk/models/qwen3_5/builder.py
+builder default attn_q_pass = 2
+df /raid avail=173G
+
+########## PHASE 1: unit / oracle / test-mode 2026-07-28T04:26:27-04:00 ##########
+qloop rows=116 mismatched_expectation=0 failures=0
+  new B2 multipass rows=30 all_bit_identical=True
+
+=== B. HF oracle, control (max_tokens/q_pass = 4) vs candidate (= 2) ===
+--- oracle max_tokens=4 q_pass=4 rc=0 ---
+[decode] ATTRIB REF(fp32 norm weight + HF rope) vs oracle        True        0/512       0.000e+00    0.000e+00
+[decode] kv cache k (full seq incl. context)                     False     149/4608      3.125e-02    1.686e-04
+[decode] kv cache v (raw, no norm/rope)                          True        0/4608      0.000e+00    0.000e+00
+[decode] attention out (UNGATED)                                 False    1586/4096      1.562e-02    4.921e-04
+[decode] attention out from PRE-ROPED q/k (norm+rope bypassed)   True        0/4096      0.000e+00    0.000e+00
+[decode] torch eager attention (same inputs) vs oracle           False    1231/4096      1.562e-02    3.443e-04
+[decode] kernel (bypassed) vs torch eager attention              False    1231/4096      1.562e-02    3.443e-04
+[decode] gated out (out * sigmoid(gate))                         False    1452/4096      9.766e-04    4.554e-06
+[decode] gate epilogue isolated (kernel ungated x HF sigmoid)    True        0/4096      0.000e+00    0.000e+00
+[decode] COUNTERFACTUAL gate w/ fp32-folded sigmoid              False    1115/4096      1.953e-03    4.684e-06
+
+wrote /home/muhengl/mpk-qwen35/i6a/gates/oracle_mt4.json
+
+all hard assertions passed
+--- oracle max_tokens=2 q_pass=2 rc=1 ---
+Traceback (most recent call last):
+  File "/home/muhengl/mpk-qwen35/mirage-i6a/tests/runtime_python/blackwell/sm100_attention_qwen35/test_attention_qwen35_oracle.py", line 453, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/muhengl/mpk-qwen35/mirage-i6a/tests/runtime_python/blackwell/sm100_attention_qwen35/test_attention_qwen35_oracle.py", line 434, in main
+    run_mode(orc, mode, a, rows, failures)
+  File "/home/muhengl/mpk-qwen35/mirage-i6a/tests/runtime_python/blackwell/sm100_attention_qwen35/test_attention_qwen35_oracle.py", line 227, in run_mode
+    run_kernel(qkv_ungated, kc_dev, vc_dev, out_ungated, T, seq_len,
+  File "/home/muhengl/mpk-qwen35/mirage-i6a/tests/runtime_python/blackwell/sm100_attention_qwen35/test_attention_qwen35_oracle.py", line 183, in run_kernel
+    K.attention_qwen35(qkv, kc, vc, out, qo, kvp, kvi, last, qn, kn, cos, sin,
+RuntimeError: unsupported attention_qwen35 config: num_qo_per_kv=8 num_kv_heads=2 head_dim=256 max_tokens=2 gate=0 q_pass_size=2
+
+=== C. test-mode pipeline (full MPK compile + dispatch), q_pass 4 and 2 ===
+--- testmode q_pass=4 rc=0 ---
+
+== COUNTERFACTUAL: without the Q-loop, mbt=8 does NOT build ==
+  RESULT build failed as expected (CalledProcessError)
+
+== default variant builds and uses the ORIGINAL emission branch ==
+  RESULT default variant built
+
+  default emission: ['      kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 5120, 4096, 256, 64, 64, 0, 0, 4>(']
+  gated   emission: ['      kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 9216, 4096, 256, 64, 64, 0, 0, 4, 1, 4>(']
+  template-arg commas: default=11 gated=13
+
+test-mode pipeline test passed
+--- testmode q_pass=2 rc=0 ---
+
+== COUNTERFACTUAL: without the Q-loop, mbt=8 does NOT build ==
+  RESULT build failed as expected (CalledProcessError)
+
+== default variant builds and uses the ORIGINAL emission branch ==
+  RESULT default variant built
+
+  default emission: ['      kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 5120, 4096, 256, 64, 64, 0, 0, 4>(']
+  gated   emission: ['      kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 9216, 4096, 256, 64, 64, 0, 0, 2, 1, 2>(']
+  template-arg commas: default=11 gated=13
+
+test-mode pipeline test passed
+GATE_UNIT_DONE 2026-07-28T04:30:22-04:00
+
+########## GATE_ALL_DONE 2026-07-28T04:30:22-04:00 ##########
+===== gates exited rc=0 2026-07-28T04:30:22-04:00 =====

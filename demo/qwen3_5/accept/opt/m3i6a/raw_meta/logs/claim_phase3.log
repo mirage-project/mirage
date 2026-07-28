@@ -1,0 +1,51 @@
+===== claim attempt 1/90 2026-07-28T04:56:00-04:00 =====
+=== probing GPU 6 (3 samples, 3s apart) ===
+  sample 1: GPU 6 used=4MiB util=0%
+  sample 2: GPU 6 used=4MiB util=0%
+  sample 3: GPU 6 used=4MiB util=0%
+GPU 6 stable-idle across 3 samples -- claiming it (M3-I6A).
+=== running (CUDA_VISIBLE_DEVICES=6): bash /home/muhengl/mpk-qwen35/i6a/phase3.sh ===
+########## M3-I6a GATES gpu=6 2026-07-28T04:56:06-04:00 ##########
+tree: 170ab325 test(qwen35): I3 gate bundle (unit+oracle both lanes, test-mode, HEAD control); I5b mbt REJECTED-WITH-EVIDENCE
+c93d9d511d160d86012784ca910edb39fba10c5f82d0165c1757d56aea489029  /home/muhengl/mpk-qwen35/mirage-i6a/include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh
+1316ea69098293b3a1b12a19e2a4d052fad6eda618bc73beb6c0d96132354555  /home/muhengl/mpk-qwen35/mirage-i6a/python/mirage/mpk/models/qwen3_5/builder.py
+builder default attn_q_pass = 2
+df /raid avail=176G
+
+########## PHASE 3: e2e A/B, 3 reps, both geometries 2026-07-28T04:56:06-04:00 ##########
+--- geometry A (AC-3: reference prompts, msl=132) ---
+  [A_qp4_bs1_rep0] rc=0 wall=922.6ms wall=694.1ms 
+  [A_qp4_bs1_rep1] rc=0 wall=891.7ms wall=693.9ms 
+  [A_qp4_bs1_rep2] rc=0 wall=891.9ms wall=716.3ms 
+  [A_qp2_bs1_rep0] rc=0 wall=868.2ms wall=675.6ms 
+  [A_qp2_bs1_rep1] rc=0 wall=868.6ms wall=675.4ms 
+  [A_qp2_bs1_rep2] rc=0 wall=873.8ms wall=675.5ms 
+  [A_qp4_bs2_rep0] rc=0 wall=966.8ms wall=953.2ms 
+  [A_qp4_bs2_rep1] rc=0 wall=966.5ms wall=960.2ms 
+  [A_qp4_bs2_rep2] rc=0 wall=966.7ms wall=942.6ms 
+  [A_qp2_bs2_rep0] rc=0 wall=943.0ms wall=919.5ms 
+  [A_qp2_bs2_rep1] rc=0 wall=942.7ms wall=919.0ms 
+  [A_qp2_bs2_rep2] rc=0 wall=942.7ms wall=918.8ms 
+  [A_qp4_bs4_rep0] rc=0 wall=1090.8ms wall=1093.9ms 
+  [A_qp4_bs4_rep1] rc=0 wall=1090.2ms wall=1093.5ms 
+  [A_qp4_bs4_rep2] rc=0 wall=1092.2ms wall=1094.4ms 
+  [A_qp2_bs4_rep0] rc=0 wall=1065.1ms wall=1070.0ms 
+  [A_qp2_bs4_rep1] rc=0 wall=1065.5ms wall=1068.6ms 
+  [A_qp2_bs4_rep2] rc=0 wall=1066.6ms wall=1072.5ms 
+  [A_qp4_bs8_rep0] rc=0 wall=1390.9ms wall=1590.9ms 
+  [A_qp4_bs8_rep1] rc=0 wall=1391.4ms wall=1599.0ms 
+  [A_qp4_bs8_rep2] rc=0 wall=1398.4ms wall=1591.1ms 
+  [A_qp2_bs8_rep0] rc=0 wall=1356.4ms wall=1556.3ms 
+  [A_qp2_bs8_rep1] rc=0 wall=1356.5ms wall=1561.0ms 
+  [A_qp2_bs8_rep2] rc=0 wall=1374.7ms wall=1567.7ms 
+  [A_qp4_bs16_rep0] rc=0 wall=3375.0ms 
+  [A_qp4_bs16_rep1] rc=0 wall=3380.5ms 
+  [A_qp4_bs16_rep2] rc=0 wall=3372.3ms 
+  [A_qp2_bs16_rep0] rc=0 wall=3304.0ms 
+  [A_qp2_bs16_rep1] rc=0 wall=3303.6ms 
+  [A_qp2_bs16_rep2] rc=0 wall=3304.2ms 
+--- geometry B (matched 256/1024: synth 256, msl=353, 96 decode steps) ---
+  [B_qp4_bs1_rep0] rc=0 [mpk_engine] bs1_rep0: wall=1247.9ms steps=96 events=0
+  [B_qp4_bs1_rep1] rc=0 [mpk_engine] bs1_rep1: wall=1247.9ms steps=96 events=0
+  [B_qp4_bs1_rep2] rc=0 [mpk_engine] bs1_rep2: wall=1248.0ms steps=96 events=0
+  [B_qp2_bs1_rep0] rc=0 [mpk_engine] bs1_rep0: wall=2658.8ms steps=96 events=0

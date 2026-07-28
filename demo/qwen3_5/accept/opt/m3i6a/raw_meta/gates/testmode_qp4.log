@@ -1,0 +1,16 @@
+
+== gated + Q-loop variant through the full pipeline ==
+  prompt_lens=[5, 3] (max > MAX_TOKENS_PER_PASS=4 -> the Q-loop is exercised)
+  RESULT max_abs_diff vs reference = 7.812e-03
+
+== COUNTERFACTUAL: without the Q-loop, mbt=8 does NOT build ==
+  RESULT build failed as expected (CalledProcessError)
+
+== default variant builds and uses the ORIGINAL emission branch ==
+  RESULT default variant built
+
+  default emission: ['      kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 5120, 4096, 256, 64, 64, 0, 0, 4>(']
+  gated   emission: ['      kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, 8, 1, 512, 9216, 4096, 256, 64, 64, 0, 0, 4, 1, 4>(']
+  template-arg commas: default=11 gated=13
+
+test-mode pipeline test passed

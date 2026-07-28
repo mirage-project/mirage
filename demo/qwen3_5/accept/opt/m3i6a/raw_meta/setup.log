@@ -1,0 +1,32 @@
+df /raid avail=192G
+=== cp -a /home/muhengl/mpk-qwen35/mirage -> /home/muhengl/mpk-qwen35/mirage-i6a 2026-07-28T03:39:43-04:00 ===
+HEAD=170ab325 test(qwen35): I3 gate bundle (unit+oracle both lanes, test-mode, HEAD control); I5b mbt REJECTED-WITH-EVIDENCE
+=== incremental build 2026-07-28T03:39:47-04:00 ===
+      |                                    ~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~
+/home/muhengl/mpk-qwen35/mirage/src/kernel/runtime.cc:1488:19: warning: unused variable ‘num_dims’ [-Wunused-variable]
+ 1488 |               int num_dims = input_ops[i]->dtensor.num_dims;
+      |                   ^~~~~~~~
+/home/muhengl/mpk-qwen35/mirage/src/kernel/runtime.cc:1454:20: warning: unused variable ‘event_gpu_id’ [-Wunused-variable]
+ 1454 |             size_t event_gpu_id = ((task_desc.trigger_event >> 32) & 0xffff);
+      |                    ^~~~~~~~~~~~
+/home/muhengl/mpk-qwen35/mirage/src/kernel/runtime.cc:1455:20: warning: unused variable ‘event_pos’ [-Wunused-variable]
+ 1455 |             size_t event_pos = (task_desc.trigger_event & 0xffffffff);
+      |                    ^~~~~~~~~
+/home/muhengl/mpk-qwen35/mirage/src/kernel/runtime.cc:1456:18: warning: unused variable ‘is_nvshmem_event’ [-Wunused-variable]
+ 1456 |             bool is_nvshmem_event =
+      |                  ^~~~~~~~~~~~~~~~
+/home/muhengl/mpk-qwen35/mirage/src/kernel/graph.cc: In member function ‘void mirage::kernel::Graph::register_task(const char*, std::vector<int>)’:
+/home/muhengl/mpk-qwen35/mirage/src/kernel/graph.cc:933:37: warning: format ‘%s’ expects argument of type ‘char*’, but argument 2 has type ‘std::string’ {aka ‘std::__cxx11::basic_string<char>’} [-Wformat=]
+  933 |     printf("Unsupported task name: %s\n", name);
+      |                                    ~^
+      |                                     |
+      |                                     char*
+/home/muhengl/mpk-qwen35/mirage/src/kernel/graph.cc: In lambda function:
+/home/muhengl/mpk-qwen35/mirage/src/kernel/graph.cc:204:3: warning: control reaches end of non-void function [-Wreturn-type]
+  204 |   };
+      |   ^
+[  4%] Linking CXX static library libmirage_runtime.a
+[100%] Built target mirage_runtime
+build rc=0
+-rwxrwxr-x 1 muhengl muhengl 10274592 Jul 26 22:30 python/mirage/core.cpython-312-x86_64-linux-gnu.so
+SETUP_DONE rc=0 2026-07-28T03:39:53-04:00
