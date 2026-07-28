@@ -1,7 +1,7 @@
 from safetensors.torch import load_model
 import torch
 
-from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors, inplace_shuffle_tensors
+from ..utils import grid_for_rmsnorm_linear_layer, grid_for_splitk_linear_layer, shuffle_tensors, inplace_shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
@@ -9,7 +9,7 @@ from ....core import bfloat16, int64
 
 from typing import Optional
 
-@register_model_builder("Qwen3", "Qwen/Qwen3-8B", "Qwen/Qwen3-1.7B", "Qwen/Qwen3-14B", "Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B", "Qwen3.5-0.8B")
+@register_model_builder("Qwen3", "Qwen/Qwen3-8B", "Qwen/Qwen3-1.7B", "Qwen/Qwen3-14B", "Qwen/Qwen3-32B", "Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B", "Qwen3.5-0.8B")
 class Qwen3Builder(GraphBuilder):
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
@@ -382,7 +382,7 @@ class Qwen3Builder(GraphBuilder):
                     input=self.attn_out,
                     weight=self.w,
                     output=self.attn_proj_out,
-                    grid_dim=(self.hidden_size // 128, 128 * 128 // self.hidden_size, 1),
+                    grid_dim=grid_for_splitk_linear_layer(self.hidden_size, self.w.dim(1)),
                     block_dim=(256, 1, 1),
                 )
             else:
@@ -497,7 +497,7 @@ class Qwen3Builder(GraphBuilder):
                     input=self.silu_mul_out,
                     weight=self.w,
                     output=self.mlp_out,
-                    grid_dim=(self.hidden_size // 128, 128 * 128 // self.hidden_size, 1),
+                    grid_dim=grid_for_splitk_linear_layer(self.hidden_size, self.w.dim(1)),
                     block_dim=(256, 1, 1),
                 )
             else:
