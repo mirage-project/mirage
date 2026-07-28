@@ -75,7 +75,11 @@ dnf install -y libcudnn9-cuda-12 libcudnn9-devel-cuda-12 || \
 ldconfig
 
 # --- Z3 (install from pip, then expose paths for CMake) ---
-pip install z3-solver
+# Pin to match requirements.txt / conda so the wheel links against the same
+# libz3 SONAME the runtime resolves. Leaving this unpinned pulls the latest
+# (e.g. 5.0.0.0 -> SONAME libz3.so.5.0), which then fails to load at import
+# time on environments that install the pinned z3-solver.
+pip install "z3-solver==4.16.0.0"
 Z3_PKG_DIR=$(python -c "import z3, os; print(os.path.dirname(z3.__file__))")
 Z3_LIB_PATH="${Z3_PKG_DIR}/lib/libz3.so"
 Z3_INCLUDE_PATH="${Z3_PKG_DIR}/include"

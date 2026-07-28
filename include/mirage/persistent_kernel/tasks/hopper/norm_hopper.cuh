@@ -23,7 +23,11 @@ template <typename T,
           int NUM_HEAD,
           int HEAD_DIM,
           int NUM_THREADS,
-          int BARRIER_ID = 9>
+          int BARRIER_ID = 9,
+          // Partial RoPE (e.g. GLM-4.6: 64 of 128 dims): rotate dims
+          // [0, ROTARY_DIM) pairing i <-> i + ROTARY_DIM/2, pass the rest
+          // through. cos/sin rows are ROTARY_DIM wide.
+          int ROTARY_DIM = HEAD_DIM>
 __device__ __forceinline__ void rms_norm_hopper(InputSmem smem_input,
                                                 T const *weight_ptr,
                                                 float *reduce_smem,
@@ -100,25 +104,30 @@ __device__ __forceinline__ void rms_norm_hopper(InputSmem smem_input,
         if (rotary_emd) {
           // we should do rope for all the window size q and k, because they
           // came from hidden states, we didn't apply rope yet.
+          // Both barriers are reached uniformly by every participating
+          // thread; dims >= ROTARY_DIM pass through unrotated.
           wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
-          T const *cur_cos_ptr = cos_ptr + win_idx * HEAD_DIM;
-          T const *cur_sin_ptr = sin_ptr + win_idx * HEAD_DIM;
-          float cos = (float)cur_cos_ptr[i];
-          float sin = (float)cur_sin_ptr[i];
-
-          float v_rot;
-          if (i < HEAD_DIM / 2) {
-            float v1 = (float)smem_input.at(row, col);
-            float v2 = (float)smem_input.at(row, col + HEAD_DIM / 2);
-            v_rot = v1 * cos - v2 * sin;
-          } else {
-            float v1 = (float)smem_input.at(row, col);
-            float v2 = (float)smem_input.at(row, col - HEAD_DIM / 2);
-            v_rot = v1 * cos + v2 * sin;
+          T const *cur_cos_ptr = cos_ptr + win_idx * ROTARY_DIM;
+          T const *cur_sin_ptr = sin_ptr + win_idx * ROTARY_DIM;
+          float v_rot = val;
+          if (i < ROTARY_DIM) {
+            float cos = (float)cur_cos_ptr[i];
+            float sin = (float)cur_sin_ptr[i];
+            if (i < ROTARY_DIM / 2) {
+              float v1 = (float)smem_input.at(row, col);
+              float v2 = (float)smem_input.at(row, col + ROTARY_DIM / 2);
+              v_rot = v1 * cos - v2 * sin;
+            } else {
+              float v1 = (float)smem_input.at(row, col);
+              float v2 = (float)smem_input.at(row, col - ROTARY_DIM / 2);
+              v_rot = v1 * cos + v2 * sin;
+            }
           }
           wg_sync<ROTARY_PARTICIPATING_THREADS>(BARRIER_ID);
           // output shape (window_size, head_num, head_dim)
-          smem_input.at(row, col) = (T)v_rot;
+          if (i < ROTARY_DIM) {
+            smem_input.at(row, col) = (T)v_rot;
+          }
         }
       } // i
     }   // head_idx

@@ -198,6 +198,20 @@ enum TaskType {
   TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 301,
   TASK_NVSHMEM_TILE_ALLREDUCE = 302,
   TASK_MULTIGPU_TASK_END = 349, // end placeholder, not a real task
+  // Inkling (Thinking Machines) tasks, SM100
+  TASK_INKLING_TASK_BEGIN = 350, // begin placeholder, not a real task
+  // Depthwise short conv (k=4) + residual, decode state updated in place.
+  TASK_INKLING_SCONV_SM100 = 351,
+  // Sigmoid top-6 + logsigmoid-softmax router with folded shared experts.
+  TASK_INKLING_MOE_ROUTER_SM100 = 352,
+  // GQA decode attention with relative-position bias + log scaling.
+  TASK_INKLING_ATTENTION_SM100 = 353,
+  TASK_INKLING_TASK_END = 399, // end placeholder, not a real task
+  // GLM-4.x (zai-org) tasks, SM100
+  TASK_GLM_TASK_BEGIN = 400, // begin placeholder, not a real task
+  // Sigmoid+bias top-k router (n_group=1) with folded shared expert.
+  TASK_GLM_MOE_ROUTER_SM100 = 401,
+  TASK_GLM_TASK_END = 449, // end placeholder, not a real task
 };
 
 enum EventType {

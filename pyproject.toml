@@ -3,7 +3,12 @@ requires = [
     "setuptools>=49.4.0",
     "cmake>=3.24",
     "cython>=0.28",
-    "z3-solver",
+    # Must match the runtime pin in requirements.txt: the extension is linked
+    # in the isolated build env against this z3-solver's libz3 SONAME, and the
+    # runtime env must provide the same SONAME. An unpinned build dep resolves
+    # to the latest (e.g. 5.0.0.0 -> libz3.so.5.0) and fails to load at import
+    # against the pinned runtime z3-solver.
+    "z3-solver==4.16.0.0",
     "graphviz"
 ]
 build-backend = "setuptools.build_meta"
