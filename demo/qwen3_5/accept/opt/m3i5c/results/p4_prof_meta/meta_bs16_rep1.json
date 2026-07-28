@@ -1,0 +1,187 @@
+{
+  "tag": "bs16_rep1",
+  "batch_size": 16,
+  "rep": 1,
+  "prompt_ids": [
+    "p06-poem",
+    "p01-history",
+    "p04-chinese",
+    "p09-translate",
+    "p07-format",
+    "p05-cuda",
+    "p08-science",
+    "p10-logic",
+    "p03-python",
+    "p02-math"
+  ],
+  "prompt_lens": [
+    24,
+    30,
+    32,
+    32,
+    33,
+    36,
+    40,
+    43,
+    44,
+    68
+  ],
+  "max_seq_length": 132,
+  "mbt": 16,
+  "page_size": 256,
+  "max_new_tokens": 64,
+  "profiler_slots": 48000000,
+  "profiled": true,
+  "n_events": 25019752,
+  "waves": [
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "num_requests": 16,
+      "num_distinct_prompts": 10,
+      "prompt_ids": [
+        "p06-poem",
+        "p01-history",
+        "p04-chinese",
+        "p09-translate",
+        "p07-format",
+        "p05-cuda",
+        "p08-science",
+        "p10-logic",
+        "p03-python",
+        "p02-math",
+        "p06-poem",
+        "p01-history",
+        "p04-chinese",
+        "p09-translate",
+        "p07-format",
+        "p05-cuda"
+      ],
+      "wall_ms": 3882.493896484375,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 36.28498968676986,
+      "tokens_per_s": 275.5960546309918,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 203,
+        "live_slot_migrations": 69,
+        "migrated_slots": [
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "straddling_slots": [
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ]
+      }
+    }
+  ],
+  "slot_isolation": [
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p06-poem",
+      "slots": [
+        0,
+        10
+      ],
+      "identical": false,
+      "first_divergence": 60
+    },
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p01-history",
+      "slots": [
+        1,
+        11
+      ],
+      "identical": false,
+      "first_divergence": 58
+    },
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p04-chinese",
+      "slots": [
+        2,
+        12
+      ],
+      "identical": false,
+      "first_divergence": 46
+    },
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p09-translate",
+      "slots": [
+        3,
+        13
+      ],
+      "identical": false,
+      "first_divergence": 35
+    },
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p07-format",
+      "slots": [
+        4,
+        14
+      ],
+      "identical": false,
+      "first_divergence": 19
+    },
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p05-cuda",
+      "slots": [
+        5,
+        15
+      ],
+      "identical": false,
+      "first_divergence": 0
+    }
+  ],
+  "run_seconds": 27.31701135635376,
+  "tokens_sha256": "74c4695a7a276d1263a4560a2bcf017ffaeabc7229dfcd233047b118723e45dc",
+  "gpu_before": [
+    "0, 37031 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "1, 131 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 1099 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "5, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "6, 36695 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "7, 131 MiB, 0 %, 120 MHz, 3996 MHz"
+  ],
+  "gpu_after": [
+    "0, 36857 MiB, 13 %, 1965 MHz, 3996 MHz",
+    "1, 131 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 37661 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "5, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "6, 36729 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "7, 131 MiB, 0 %, 120 MHz, 3996 MHz"
+  ],
+  "cuda_visible_devices": "4",
+  "generated_utc": "2026-07-28T00:32:48Z"
+}
