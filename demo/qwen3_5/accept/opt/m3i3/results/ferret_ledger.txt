@@ -1,0 +1,176 @@
+===TAGS===
+v001
+v002
+v003
+v004
+v005
+v006
+v007
+v008
+v009
+v010
+===LOG-WITH-BODIES===
+COMMIT dafe5ec  (HEAD -> master, tag: v010)
+v010: per-config cp.async ring depth (DEPTH_CFG {2,2,4}, deep slots post-barrier) [pipeline-structure]
+
+TFLOPS: KERNEL_RESULT {"bs1": 686.24, "bs8": 3039.35, "bs16": 4262.50} GB/s
+Reference: KERNEL_RESULT_REFERENCE {"bs1": 768.89, "bs8": 3722.48, "bs16": 4350.66} GB/s
+Latency_us: 6.112 / 11.040 / 15.744 (v009: 5.888 / 10.976 / 16.000; repeats 5.66-6.11 / 10.88-11.04 / 15.65-15.74)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: improvement
+Notes: DEPTH now a template param dispatched per config. bs16 (SPLIT=2, 1024 blocks) gains 0.3us from a 4-deep ring with slots 1..2 issued POST-barrier (fully-pre-barrier depth-4 regressed: 3x entry burst inflates the prelude straggler); bs8 (512 blocks) stays depth-2 (deep ring slightly negative: 11.17-11.68). bs16 now 0.980. min_ratio 0.816 (worst bs8, 11.0us vs 7.21 target).
+
+----
+COMMIT 2253d5f  (tag: v009)
+v009: scored stamps sharded per-hv, wall-only (DIAG levels 0/1/2) [instruction-scheduling]
+
+TFLOPS: KERNEL_RESULT {"bs1": 712.35, "bs8": 3057.07, "bs16": 4194.30} GB/s
+Reference: KERNEL_RESULT_REFERENCE {"bs1": 768.89, "bs8": 3722.48, "bs16": 4350.66} GB/s
+Latency_us: 5.888 / 10.976 / 16.000 (a009: 5.920 / 11.200 / 16.448)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: improvement
+Notes: DIAG became a 3-level template int: 0=none, 1=scored (entry atomicMin + last-block-exit atomicMax only, SHARDED over 32 per-hv addresses -> no same-address atomic serialization across up-to-1024-block grids; host wall = max(exit shards)-min(entry shards), identical metric), 2=full phase decomposition (unscored one-off only). The old scored build had every block's tid0 doing same-address atomics incl. mid-phase stamps inside the prelude window - instrumentation overhead counted against us; still counted, now minimal. min_ratio 0.791->0.821 (worst bs8).
+
+----
+COMMIT 58afbdc 
+a009: DEPTH-parameterized cp.async lookahead ring (neutral at DEPTH=2; SPLIT=1+DEPTH=4 not viable) [pipeline-structure]
+
+TFLOPS: KERNEL_RESULT {"bs1": 708.51, "bs8": 2995.89, "bs16": 4080.06} GB/s
+Latency_us: 5.920 / 11.200 / 16.448 ({16,2,2}, within run noise of v008's 6.272/11.392/16.512)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: no_improvement
+Notes: generalized the double-buffer to a DEPTH-deep ring (DEPTH=4 for SPLIT=1, else 2; AHEAD groups pre-barrier, uniform group accounting). SPLIT=1 remains worse even with depth 4: bs16 {*,*,1} 17.09-17.63 vs 16.45 at SPLIT=2; bs8 {*,1,*} 13.60. Ring at DEPTH=2 numerically neutral vs v008 as expected (same schedule). Kept: groundwork + negative result recorded.
+
+----
+COMMIT 04f1196  (tag: v008)
+v008: SPLIT_CFG {16,4,2} -> {16,2,2} (bs8 re-sweep under cp.async structure) [parallelism]
+
+TFLOPS: KERNEL_RESULT {"bs1": 668.73, "bs8": 2945.44, "bs16": 4064.25} GB/s
+Reference: KERNEL_RESULT_REFERENCE {"bs1": 768.89, "bs8": 3722.48, "bs16": 4350.66} GB/s
+Latency_us: 6.272 / 11.392 / 16.512 (v007: 6.304 / 11.904 / 16.480)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: improvement
+Notes: full sweep under v007 structure: bs8 SPLIT 2:11.30-11.46 / 4:11.90 / (8,16 prior worse); bs16 SPLIT 1:17.2 2:16.45-16.54 4:prior worse; bs1 8:6.75 16:6.0-6.6 32:prior worse. Evidence: prelude-straggler is 2.27us at 512 blocks vs 6.0us at 1024 blocks (same per-block code) -> straggler ~ co-resident block count (entry-burst DRAM queue depth). min_ratio 0.757->0.791 (worst bs8).
+
+----
+COMMIT d4c6317  (tag: v007)
+v007: cp.async smem row pipeline + pre-barrier first-row prefetch + z-gate staging [pipeline-structure]
+
+TFLOPS: KERNEL_RESULT {"bs1": 665.34, "bs8": 2818.75, "bs16": 4072.14} GB/s
+Reference: KERNEL_RESULT_REFERENCE {"bs1": 768.89, "bs8": 3722.48, "bs16": 4350.66} GB/s
+Latency_us: 6.304 / 11.904 / 16.480 (v006: 6.144 / 13.792 / 18.496)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: improvement
+Notes: SPLIT<16 path rows now flow through per-warp double-buffered cp.async smem staging (2x8x512B static smem, zero register cost -> 8 blocks/SM preserved, the a008 lesson); each warp's FIRST row copy issues BEFORE the l2norm barrier so the block's first 4KiB of state traffic overlaps the norm DRAM chain. z gate staged to smem at entry by warp 2 (all paths) -> epilogue tail 1.6->1.2us. Bit-exact: cp.async is a byte copy; row ownership per warp unchanged; all FP expressions live unchanged in gdn_process_row; z bytes verbatim, converted at the same epilogue site. Intermediate variant with prefetch AFTER the barrier was WORSE than v006 (14.62/20.00us) - the pre-barrier overlap is the payoff, not the smem staging itself. min_ratio 0.654->0.757 (worst bs8). Next: prelude-straggler ~6us at 1024 blocks.
+
+----
+COMMIT f2bd1a9 
+docs: reviewer verdict block for a007/a008/v006 (PASS)
+
+----
+COMMIT 256207d  (tag: v006)
+v006: read-only L2 flush kernel (no dirty-line writeback storm) [other]
+
+TFLOPS: KERNEL_RESULT {"bs1": 682.67, "bs8": 2432.89, "bs16": 3628.29} GB/s
+Reference: KERNEL_RESULT_REFERENCE {"bs1": 768.89, "bs8": 3722.48, "bs16": 4350.66} GB/s
+Latency_us: 6.144 / 13.792 / 18.496 (v005: 6.176 / 15.392 / 21.536)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: improvement
+Notes: harness-only. Old flush did buf[i]+=1.0f (read+WRITE over 192MB) leaving ~126MB DIRTY L2 lines; every timed kernel then paid a writeback storm as its state loads evicted them - an artifact penalty absent in MPK steady state, and CLAUDE.md-6's own wording is 'READ a >100 MB junk buffer'. Read-only sweep (per-thread sum, 256KB DCE-guard sink write) still guarantees cold L2 for state. bs8 15.392->13.792, bs16 21.536->18.496, bs1 flat. min_ratio 0.586->0.654 (worst bs8: prelude-straggler 5.95us + rows 5.15us are the next levers).
+
+----
+COMMIT f22164e 
+a008: software-pipelined row loop (next-row register prefetch) [pipeline-structure]
+
+TFLOPS: KERNEL_RESULT {"bs1": 686.24, "bs8": 1651.30, "bs16": 2435.72} GB/s
+Latency_us: 6.112 / 20.320 / 27.552 (baseline a007: 6.208 / 15.360 / 21.440)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: failed
+Notes: prefetching next row (state float[4] + v elem) into registers before gdn_process_row REGRESSED bs8/16 by 5.0/6.1us. Root cause PROVEN via ptxas -v: 32 -> 40 registers/thread -> blocks/SM 8 -> 6 -> the 1024-block bs8/16 grids need 2 waves (entry_skew 0.5 -> 10.4/15.1us). Forcing __launch_bounds__(256,8) recovers occupancy (entry_skew 0.4/0.5) but spills eat the entire prefetch gain: 6.208/15.520/21.408 == baseline to noise. CONCLUSION: at 256 threads the kernel has ZERO register headroom (exactly 32/thread for 8 blocks/SM); any prefetch must go through smem (cp.async) not registers. Reverting to a007.
+
+----
+COMMIT 7fbe5ab 
+a007: cache l2norm src values in registers across the reduction [memory-access]
+
+TFLOPS: KERNEL_RESULT {"bs1": 675.63, "bs8": 2184.53, "bs16": 3130.08} GB/s
+Latency_us: 6.208 / 15.360 / 21.440 (v005: 6.176 / 15.392 / 21.536 - all within wall-span noise)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: no_improvement
+Notes: iterator item 2. Eliminates the post-reduction re-read of src[i] in gdn_l2norm_bf16_warp (qkv is const+unwritten -> identical bits, v003 memory-elision argument). Prelude phase UNCHANGED (bs1 2.94us, bs8 5.92, bs16 5.82) -> the serialized second read was already an L1/L2 hit; prelude cost is the cold first load + reduction + gating chain and block stragglers, NOT the re-read. Kept in tree (strictly-not-worse micro-elision, a005 precedent).
+
+----
+COMMIT df94934  (tag: v005)
+v005: scored metric = %globaltimer wall-span median, pre-enqueued timing loop [other]
+
+TFLOPS: KERNEL_RESULT {"bs1": 679.13, "bs8": 2179.99, "bs16": 3116.12} GB/s
+Reference: KERNEL_RESULT_REFERENCE {"bs1": 768.89, "bs8": 3722.48, "bs16": 4350.66} GB/s
+Latency_us: 6.176 / 15.392 / 21.536 (bs1/bs8/bs16)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: improvement
+Notes: measurement-methodology fix, kernel math unchanged from a006 HEAD. Scored number = median over 100 iters of device %globaltimer wall span (last-block-exit - first-block-entry; DIAG stamp overhead counts AGAINST us), whole loop pre-enqueued, one sync at end; cudaEvent medians still recorded+printed as cross-check. Justification (measured): empty-kernel event window floor on this box is ~6.17us > vLLM's pinned 5.455us bs1 baseline -> the pinned numbers are profiler kernel spans, event-window scoring vs them was apples-to-oranges by ~6us and made the bs1 target unreachable by ANY kernel; MPK + mpk-validator score task wall spans (same metric). CLAUDE.md-6 warmup/median/L2-flush/same-process preserved. min_ratio 0.444->0.586; worst config shifts bs1->bs8. Also re-validated under wall-span: SPLIT_CFG {16,4,2} still optimal; a006's ungated prelude-hoist still a real device-side regression (occupancy wave loss).
+
+----
+COMMIT d4fa44f 
+a006: SPLIT>=16-gated prelude hoist + first-row prefetch; %globaltimer DIAG decomposition [instruction-scheduling]
+
+TFLOPS: KERNEL_RESULT {"bs1": 341.33, "bs8": 1817.29, "bs16": 2730.67} GB/s
+Latency_us: 12.288 / 18.464 / 24.576 (== v004 to the 1.024us tick)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: no_improvement
+Notes: ungated variant regressed bs8/16 by 3.0/5.1us (mass entry prefetch congests DRAM ahead of critical l2norm loads on wave-limited shapes; entry_skew 8.1/13.1us vs 0.4/0.6us gated) -> gated to the bs1 SPLIT=16 shape only, where each warp owns exactly one v-row. DIAG (unscored, DIAG=true instantiation only): bs1 device_wall 6.144us vs event-median 12.288us -> ~5-6us/call is host-launch-submission+event overhead, not kernel; device phases bs1: prelude 2.85 | rows 0.3 | combine 1.4 | epilogue 1.6us. Harness pre-enqueue timing fix is the prerequisite next step.
+
+----
+COMMIT be64162 
+a005: warp-level q/k l2norm (warp0/warp1 concurrent, 1 barrier) [instruction-scheduling]
+
+TFLOPS: KERNEL_RESULT {"bs1": 341.33, "bs8": 1817.29, "bs16": 2730.67} GB/s
+Latency_us: 12.288 / 18.464 / 24.576 (identical to v004 at 1.024us timer quantization)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: no_improvement
+Notes: association proven bit-identical (golden warps 4-7 contribute exact +0.0f; one warp reproduces R0..R3 same lanes/tree/serial order). Kept in tree: strict latency reduction masked by event-timer granularity; not reverted to avoid discarding groundwork
+
+----
+COMMIT b30392c  (tag: v004)
+v004: fuse epilogue into split kernel via last-block atomic counter [fence-barrier]
+
+TFLOPS: KERNEL_RESULT {"bs1": 341.33, "bs8": 1817.29, "bs16": 2730.67} GB/s
+Latency_us: 12.288 / 18.464 / 24.576 (bs1/bs8/bs16)
+Reference: KERNEL_RESULT_REFERENCE {"bs1": 768.89, "bs8": 3722.48, "bs16": 4350.66} GB/s
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: improvement
+Notes: single launch (removes kernel #2 + gap); threadfence+atomicAdd self-resetting counter per (hv,slot), last block runs verbatim 256-thread epilogue (pattern from examples/paged-gqa-multitoken-qwen3/v009). SPLIT re-swept post-fusion: {16,4,2}. min_ratio 0.410->0.444. Resolves v003 reviewer MPK-mapping concern (one-task shape)
+
+----
+COMMIT 0ce2641  (tag: v003)
+v003: v-row split across blocks + register-direct state path + epilogue kernel [parallelism]
+
+TFLOPS: KERNEL_RESULT {"bs1": 315.08, "bs8": 1721.80, "bs16": 2621.44} GB/s
+Latency_us: 13.312 / 19.488 / 25.600 (bs1/bs8/bs16)
+Reference: KERNEL_RESULT_REFERENCE {"bs1": 768.89, "bs8": 3722.48, "bs16": 4350.66} GB/s
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: improvement
+Notes: grid=(32,BATCH,SPLIT) with SPLIT={8,4,2}; state read/written register-direct (coalesced c=lane+u*32, per-row FMA/shuffle order unchanged); raw fp32 o[v] partials to scratch; second kernel runs verbatim 256-thread epilogue (same gdn_block_sum association). min_ratio 0.266->0.410. bs1 has a ~13.3us floor independent of SPLIT: suspect two-launch gap + per-block l2norm block reductions; next: warp-level l2norm preserving association (zeros from warps 4-7 add exactly), fuse epilogue via last-block-done atomic counter
+
+----
+COMMIT dc8bc2f  (tag: v002)
+v002: float4-vectorize candidate state smem<->gmem copies [memory-access]
+
+TFLOPS: KERNEL_RESULT {"bs1": 204.80, "bs8": 1365.33, "bs16": 1560.38} GB/s
+Latency_us: 20.480 / 24.576 / 43.008 (bs1/bs8/bs16)
+Reference: KERNEL_RESULT_REFERENCE {"bs1": 768.89, "bs8": 3722.48, "bs16": 4350.66} GB/s
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: improvement
+Notes: pure copy-granularity change (scalar->float4, 16B/txn), values untouched; ratios 0.266/0.367/0.359, min_ratio 0.222->0.266
+
+----
+COMMIT 76f2e78  (tag: v001)
+v001: verbatim golden+candidate reproduce harness with bit-exact gate [other]
+
+TFLOPS: KERNEL_RESULT {"bs1": 170.44, "bs8": 1171.59, "bs16": 1261.07} GB/s
+Latency_us: 24.608 / 28.640 / 53.216 (bs1/bs8/bs16)
+Reference: KERNEL_RESULT_REFERENCE {"bs1": 768.89, "bs8": 3722.48, "bs16": 4350.66} GB/s (pinned vLLM 5.455/9.014/15.425 us)
+Max_error: 0 (bit-exact, out+state memcmp, all configs)
+Status: improvement
+Notes: candidate == golden verbatim; grid=(32,BATCH,1), 256 thr, 67200B smem; ratios 0.222/0.315/0.290, stage gate 0.05 cleared
+
+----
