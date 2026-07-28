@@ -197,6 +197,12 @@ class Qwen35Builder(GraphBuilder):
         # code, so a kernel dir must not be reused across values).
         self.gdn_split: Optional[int] = None
         self.gdn_depth = int(os.environ.get("MPK_GDN_DEPTH", "2"))
+        # Full-attention `max_tokens_per_pass` (= Q_PASS_SIZE = MAX_TOKENS).
+        # See `_attn_q_pass_default` for why this is a perf knob and not just a
+        # smem sizing constant; MPK_ATTN_Q_PASS overrides it before build (it
+        # changes the generated code, so a kernel dir must not be reused across
+        # values).
+        self.attn_q_pass = 2
         # When set, every intermediate is a host-visible torch tensor
         # (`attach_input`) instead of an opaque `new_tensor`, and is recorded in
         # `self.buffers`. This is the `online_notoken` "fixed tensor" pattern the
@@ -392,6 +398,61 @@ class Qwen35Builder(GraphBuilder):
         while split > 1 and self.config.linear_value_head_dim % split != 0:
             split //= 2
         return split
+
+    def _attn_q_pass_default(self) -> int:
+        """`max_tokens_per_pass` (= Q_PASS_SIZE) for the full-attention task.
+
+        P3 measured the post-5715c6f smem arena at head_dim 256 / GQA 8:1 as
+        admissible only up to 4 queries per pass; the in-task Q-loop covers
+        longer chunks (v1-architecture.md §4.3).  Within that ceiling the value
+        is a real perf knob, because `task_register.cc` sets MAX_TOKENS from it
+        and the kernel derives
+
+            MMA_ITERS_M = ceil(MAX_TOKENS * NUM_QO_PER_KV / 16) = ceil(Q_PASS/2)
+
+        at 16 q / 2 kv heads.  The per-thread accumulator is
+        `float o[MMA_ITERS_M][HEAD_DIM/16][8]` = MMA_ITERS_M * 128 floats, so
+        Q_PASS 3-4 asks for 256 floats and does not fit the 255-register file.
+        Because MPK inlines every task body into ONE `persistent_kernel`, that
+        overflow is not local to attention -- ptxas allocates a single register
+        budget and stack frame for the whole megakernel (M3-I6a, `ptxas -v` on
+        the generated TU):
+
+            Q_PASS   registers   stack frame   spill st / ld
+              4         255         576 B       780 / 976 B
+              2         240         144 B          0 /   0 B
+              1         238         144 B          0 /   0 B
+
+        i.e. the attention accumulator was the ONLY source of spilling in the
+        megakernel.  The KV loop's rescale step touches every `o` element once
+        per KV tile, so at Q_PASS=4 that spill was paid per KV tile and its cost
+        therefore grew with decode context.  Measured at the pinned 256/1024
+        geometry (256-token prompt, msl=897, decode context ~801-896), attention
+        wallspan per step fell 1447 -> 752 us at bs1 (-48.0%) and 1491 -> 724 us
+        at bs8 (-51.4%); the marginal cost per KV token fell 0.1249 -> 0.0536 us
+        (R^2 >= 0.999).  Relieving the shared budget also sped up families this
+        knob does not touch -- dense fp8 2939 -> 2811 us/step, GDN recurrent
+        234 -> 219 -- so the whole decode step fell ~9-10%.
+
+        2 rather than 1: both are 0-spill and their decode cost is within 1.7%,
+        but Q_PASS=1 halves the pass length and so doubles the pass COUNT of
+        every prefill chunk (16 passes for an mbt=16 chunk instead of 8), which
+        measured 20-24% worse attention wallspan in every prefill-containing
+        window.  2 also fills the m16n16k16 tile exactly (2 tokens * 8 q-heads
+        = 16 rows), so no MMA rows are wasted during prefill.
+
+        `MPK_ATTN_Q_PASS` overrides it so both arms live in one tree and can be
+        swept without swapping git trees (same idiom as `MPK_GDN_SPLIT`).
+        """
+        env = os.environ.get("MPK_ATTN_Q_PASS")
+        if env is not None and env != "":
+            v = int(env)
+            assert 1 <= v <= 4, (
+                f"MPK_ATTN_Q_PASS={v} outside the smem-admissible range 1..4 "
+                "(P3: head_dim 256 / GQA 8:1 blows MAX_DYNAMIC_SHARED_MEMORY at "
+                "MAX_TOKENS >= 6; the kernel static_asserts it)")
+            return min(v, self.mbt)
+        return min(self.attn_q_pass, self.mbt)
 
     def _attach_common(self):
         pk, c = self.mpk, self.config
@@ -599,10 +660,7 @@ class Qwen35Builder(GraphBuilder):
             output=attn, grid_dim=(self.mbr, c.num_key_value_heads, 1),
             block_dim=(256, 1, 1), enable_qk_norm=True,
             attn_output_gate=True,
-            # P3 measured the post-5715c6f smem arena at head_dim 256 / GQA 8:1
-            # as admissible only up to 4 queries per pass; the in-task Q-loop
-            # covers longer chunks (v1-architecture.md §4.3).
-            max_tokens_per_pass=min(4, self.mbt))
+            max_tokens_per_pass=self._attn_q_pass_default())
 
         out = self._t((self.mbt, c.hidden_size), bfloat16, f"layer_{i}_attn_resid")
         self._fp8_linear(f"layer_{i}_o_proj", attn, f"layer_{i}_o_proj", out,

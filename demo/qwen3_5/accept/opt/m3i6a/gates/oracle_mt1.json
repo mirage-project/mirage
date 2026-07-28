@@ -1,0 +1,520 @@
+{
+  "test": "M2-I6 attention vs HF oracle",
+  "max_tokens": 1,
+  "q_pass_size": 1,
+  "torch": "2.13.0+cu130",
+  "rows": [
+    {
+      "intermediate": "[prefill] k_norm+rope (new tokens, via cache write)",
+      "shape": [
+        2,
+        8,
+        256
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 1131,
+      "max_abs": 0.0625,
+      "mean_abs": 0.0013296427205204964,
+      "max_rel": 0.0669642835855484,
+      "notes": "kernel rms_norm_sm100 + fused NeoX rope on the permuted basis"
+    },
+    {
+      "intermediate": "[prefill] k rope vs REF fp32-fused rounding (MPK order)",
+      "shape": [
+        8,
+        2,
+        256
+      ],
+      "numel": 4096,
+      "bit_exact": true,
+      "num_diff": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "max_rel": 0.0,
+      "notes": "expect bit-exact"
+    },
+    {
+      "intermediate": "[prefill] k rope vs REF HF per-product bf16 rounding",
+      "shape": [
+        8,
+        2,
+        256
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 71,
+      "max_abs": 0.0078125,
+      "mean_abs": 5.5987387895584106e-05,
+      "max_rel": 0.02083333395421505,
+      "notes": "counterfactual ordering"
+    },
+    {
+      "intermediate": "[prefill] REF(HF rounding) vs oracle k_rope",
+      "shape": [
+        2,
+        8,
+        256
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 1090,
+      "max_abs": 0.0625,
+      "mean_abs": 0.0012990543618798256,
+      "max_rel": 0.0714285746216774,
+      "notes": "input-construction check"
+    },
+    {
+      "intermediate": "[prefill] REF(fp32-fused) vs oracle k_rope",
+      "shape": [
+        2,
+        8,
+        256
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 1131,
+      "max_abs": 0.0625,
+      "mean_abs": 0.0013296427205204964,
+      "max_rel": 0.0669642835855484,
+      "notes": ""
+    },
+    {
+      "intermediate": "[prefill] ATTRIB REF(HF norm order + MPK rope) vs oracle",
+      "shape": [
+        2,
+        8,
+        256
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 1131,
+      "max_abs": 0.0625,
+      "mean_abs": 0.0013296427205204964,
+      "max_rel": 0.0669642835855484,
+      "notes": "isolates the norm's fp32 association from the rope"
+    },
+    {
+      "intermediate": "[prefill] ATTRIB REF(HF norm + HF rope) vs oracle",
+      "shape": [
+        2,
+        8,
+        256
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 1090,
+      "max_abs": 0.0625,
+      "mean_abs": 0.0012990543618798256,
+      "max_rel": 0.0714285746216774,
+      "notes": "full HF ordering -- the floor this basis can reach"
+    },
+    {
+      "intermediate": "[prefill] ATTRIB REF(fp32 norm weight + HF rope) vs oracle",
+      "shape": [
+        2,
+        8,
+        256
+      ],
+      "numel": 4096,
+      "bit_exact": true,
+      "num_diff": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "max_rel": 0.0,
+      "notes": "isolates the bf16 norm-weight rounding"
+    },
+    {
+      "intermediate": "[prefill] kv cache k (full seq incl. context)",
+      "shape": [
+        2,
+        8,
+        256
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 1131,
+      "max_abs": 0.0625,
+      "mean_abs": 0.0013296427205204964,
+      "max_rel": 0.0669642835855484,
+      "notes": "\u00a72.2.5 write-before-read"
+    },
+    {
+      "intermediate": "[prefill] kv cache v (raw, no norm/rope)",
+      "shape": [
+        2,
+        8,
+        256
+      ],
+      "numel": 4096,
+      "bit_exact": true,
+      "num_diff": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "max_rel": 0.0,
+      "notes": ""
+    },
+    {
+      "intermediate": "[prefill] q_norm+rope (all 16 heads, via k-slot replay)",
+      "shape": [
+        16,
+        8,
+        256
+      ],
+      "numel": 32768,
+      "bit_exact": false,
+      "num_diff": 9280,
+      "max_abs": 0.0625,
+      "mean_abs": 0.001296337926760316,
+      "max_rel": 2.1362305101182279e+27,
+      "notes": "same rms_norm_sm100 path, NUM_HEAD=1"
+    },
+    {
+      "intermediate": "[prefill] attention out (UNGATED)",
+      "shape": [
+        8,
+        4096
+      ],
+      "numel": 32768,
+      "bit_exact": false,
+      "num_diff": 15234,
+      "max_abs": 0.0234375,
+      "mean_abs": 0.0006557272863574326,
+      "max_rel": 125.61375427246094,
+      "notes": "MPK online/flash softmax vs HF softmax(QK^T)@V"
+    },
+    {
+      "intermediate": "[prefill] attention out from PRE-ROPED q/k (norm+rope bypassed)",
+      "shape": [
+        8,
+        4096
+      ],
+      "numel": 32768,
+      "bit_exact": true,
+      "num_diff": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "max_rel": 0.0,
+      "notes": "isolates the softmax/accumulation order"
+    },
+    {
+      "intermediate": "[prefill] torch eager attention (same inputs) vs oracle",
+      "shape": [
+        8,
+        4096
+      ],
+      "numel": 32768,
+      "bit_exact": false,
+      "num_diff": 9064,
+      "max_abs": 0.015625,
+      "mean_abs": 0.0002521488058846444,
+      "max_rel": 15.222222328186035,
+      "notes": "upper bound on what any kernel can match"
+    },
+    {
+      "intermediate": "[prefill] kernel (bypassed) vs torch eager attention",
+      "shape": [
+        8,
+        4096
+      ],
+      "numel": 32768,
+      "bit_exact": false,
+      "num_diff": 9064,
+      "max_abs": 0.015625,
+      "mean_abs": 0.0002521488058846444,
+      "max_rel": 5.677685737609863,
+      "notes": ""
+    },
+    {
+      "intermediate": "[prefill] gated out (out * sigmoid(gate))",
+      "shape": [
+        8,
+        4096
+      ],
+      "numel": 32768,
+      "bit_exact": false,
+      "num_diff": 14437,
+      "max_abs": 0.001953125,
+      "mean_abs": 9.051420420291834e-06,
+      "max_rel": 125.6839370727539,
+      "notes": "QKVG slice + sigma-gate epilogue"
+    },
+    {
+      "intermediate": "[prefill] gate epilogue isolated (kernel ungated x HF sigmoid)",
+      "shape": [
+        8,
+        4096
+      ],
+      "numel": 32768,
+      "bit_exact": true,
+      "num_diff": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "max_rel": 0.0,
+      "notes": "must be bit-exact"
+    },
+    {
+      "intermediate": "[prefill] COUNTERFACTUAL gate w/ fp32-folded sigmoid",
+      "shape": [
+        8,
+        4096
+      ],
+      "numel": 32768,
+      "bit_exact": false,
+      "num_diff": 8881,
+      "max_abs": 0.0078125,
+      "mean_abs": 7.820289283699822e-06,
+      "max_rel": 0.0078125,
+      "notes": "must NOT be bit-exact"
+    },
+    {
+      "intermediate": "[decode] k_norm+rope (new tokens, via cache write)",
+      "shape": [
+        2,
+        1,
+        256
+      ],
+      "numel": 512,
+      "bit_exact": false,
+      "num_diff": 149,
+      "max_abs": 0.03125,
+      "mean_abs": 0.0015172958374023438,
+      "max_rel": 0.046875,
+      "notes": "kernel rms_norm_sm100 + fused NeoX rope on the permuted basis"
+    },
+    {
+      "intermediate": "[decode] k rope vs REF fp32-fused rounding (MPK order)",
+      "shape": [
+        1,
+        2,
+        256
+      ],
+      "numel": 512,
+      "bit_exact": true,
+      "num_diff": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "max_rel": 0.0,
+      "notes": "expect bit-exact"
+    },
+    {
+      "intermediate": "[decode] k rope vs REF HF per-product bf16 rounding",
+      "shape": [
+        1,
+        2,
+        256
+      ],
+      "numel": 512,
+      "bit_exact": false,
+      "num_diff": 15,
+      "max_abs": 0.0078125,
+      "mean_abs": 7.963180541992188e-05,
+      "max_rel": 0.046875,
+      "notes": "counterfactual ordering"
+    },
+    {
+      "intermediate": "[decode] REF(HF rounding) vs oracle k_rope",
+      "shape": [
+        2,
+        1,
+        256
+      ],
+      "numel": 512,
+      "bit_exact": false,
+      "num_diff": 138,
+      "max_abs": 0.03125,
+      "mean_abs": 0.001445770263671875,
+      "max_rel": 0.014354066923260689,
+      "notes": "input-construction check"
+    },
+    {
+      "intermediate": "[decode] REF(fp32-fused) vs oracle k_rope",
+      "shape": [
+        2,
+        1,
+        256
+      ],
+      "numel": 512,
+      "bit_exact": false,
+      "num_diff": 149,
+      "max_abs": 0.03125,
+      "mean_abs": 0.0015172958374023438,
+      "max_rel": 0.046875,
+      "notes": ""
+    },
+    {
+      "intermediate": "[decode] ATTRIB REF(HF norm order + MPK rope) vs oracle",
+      "shape": [
+        2,
+        1,
+        256
+      ],
+      "numel": 512,
+      "bit_exact": false,
+      "num_diff": 149,
+      "max_abs": 0.03125,
+      "mean_abs": 0.0015172958374023438,
+      "max_rel": 0.046875,
+      "notes": "isolates the norm's fp32 association from the rope"
+    },
+    {
+      "intermediate": "[decode] ATTRIB REF(HF norm + HF rope) vs oracle",
+      "shape": [
+        2,
+        1,
+        256
+      ],
+      "numel": 512,
+      "bit_exact": false,
+      "num_diff": 138,
+      "max_abs": 0.03125,
+      "mean_abs": 0.001445770263671875,
+      "max_rel": 0.014354066923260689,
+      "notes": "full HF ordering -- the floor this basis can reach"
+    },
+    {
+      "intermediate": "[decode] ATTRIB REF(fp32 norm weight + HF rope) vs oracle",
+      "shape": [
+        2,
+        1,
+        256
+      ],
+      "numel": 512,
+      "bit_exact": true,
+      "num_diff": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "max_rel": 0.0,
+      "notes": "isolates the bf16 norm-weight rounding"
+    },
+    {
+      "intermediate": "[decode] kv cache k (full seq incl. context)",
+      "shape": [
+        2,
+        9,
+        256
+      ],
+      "numel": 4608,
+      "bit_exact": false,
+      "num_diff": 149,
+      "max_abs": 0.03125,
+      "mean_abs": 0.00016858841991052032,
+      "max_rel": 0.046875,
+      "notes": "\u00a72.2.5 write-before-read"
+    },
+    {
+      "intermediate": "[decode] kv cache v (raw, no norm/rope)",
+      "shape": [
+        2,
+        9,
+        256
+      ],
+      "numel": 4608,
+      "bit_exact": true,
+      "num_diff": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "max_rel": 0.0,
+      "notes": ""
+    },
+    {
+      "intermediate": "[decode] attention out (UNGATED)",
+      "shape": [
+        1,
+        4096
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 1586,
+      "max_abs": 0.015625,
+      "mean_abs": 0.0004920660285279155,
+      "max_rel": 111.52092742919922,
+      "notes": "MPK online/flash softmax vs HF softmax(QK^T)@V"
+    },
+    {
+      "intermediate": "[decode] attention out from PRE-ROPED q/k (norm+rope bypassed)",
+      "shape": [
+        1,
+        4096
+      ],
+      "numel": 4096,
+      "bit_exact": true,
+      "num_diff": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "max_rel": 0.0,
+      "notes": "isolates the softmax/accumulation order"
+    },
+    {
+      "intermediate": "[decode] torch eager attention (same inputs) vs oracle",
+      "shape": [
+        1,
+        4096
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 1231,
+      "max_abs": 0.015625,
+      "mean_abs": 0.00034427017089910805,
+      "max_rel": 14.03255844116211,
+      "notes": "upper bound on what any kernel can match"
+    },
+    {
+      "intermediate": "[decode] kernel (bypassed) vs torch eager attention",
+      "shape": [
+        1,
+        4096
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 1231,
+      "max_abs": 0.015625,
+      "mean_abs": 0.00034427017089910805,
+      "max_rel": 5.535714149475098,
+      "notes": ""
+    },
+    {
+      "intermediate": "[decode] gated out (out * sigmoid(gate))",
+      "shape": [
+        1,
+        4096
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 1452,
+      "max_abs": 0.0009765625,
+      "mean_abs": 4.554498445941135e-06,
+      "max_rel": 111.9142837524414,
+      "notes": "QKVG slice + sigma-gate epilogue"
+    },
+    {
+      "intermediate": "[decode] gate epilogue isolated (kernel ungated x HF sigmoid)",
+      "shape": [
+        1,
+        4096
+      ],
+      "numel": 4096,
+      "bit_exact": true,
+      "num_diff": 0,
+      "max_abs": 0.0,
+      "mean_abs": 0.0,
+      "max_rel": 0.0,
+      "notes": "must be bit-exact"
+    },
+    {
+      "intermediate": "[decode] COUNTERFACTUAL gate w/ fp32-folded sigmoid",
+      "shape": [
+        1,
+        4096
+      ],
+      "numel": 4096,
+      "bit_exact": false,
+      "num_diff": 1115,
+      "max_abs": 0.001953125,
+      "mean_abs": 4.684488885686733e-06,
+      "max_rel": 0.0078125,
+      "notes": "must NOT be bit-exact"
+    }
+  ],
+  "failures": []
+}

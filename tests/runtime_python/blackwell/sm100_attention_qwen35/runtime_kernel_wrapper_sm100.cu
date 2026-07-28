@@ -229,6 +229,13 @@ void attention_qwen35(torch::Tensor qkv,
   CASE(8, 2, 256, 4, 0, 4) // ungated + Q-loop
   CASE(8, 2, 256, 2, 1, 2) // gated + finer pass split (pass-size invariance)
   CASE(8, 2, 256, 1, 1, 1) // gated, one query per pass
+  // M3-I6a lowered the production pass size to 2, so the oracle test has to be
+  // runnable at --max-tokens 2 / --q-pass 2 -- and it always runs an UNGATED arm
+  // first to isolate core_attn_out from the gate epilogue.  Without this the
+  // oracle aborts with "unsupported attention_qwen35 config: ... gate=0
+  // q_pass_size=2" before it compares anything.
+  CASE(8, 2, 256, 2, 0, 2) // UNGATED control at the production pass size
+  CASE(8, 2, 256, 1, 0, 1) // UNGATED control, one query per pass
 
   // ---- small shape used for the Q-loop equivalence proof --------------
   // 4 Q / 1 KV head, head_dim 128: MAX_TOKENS=8 fits here, so a single 8-row

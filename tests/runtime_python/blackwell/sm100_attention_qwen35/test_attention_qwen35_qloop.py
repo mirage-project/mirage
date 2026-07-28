@@ -143,6 +143,32 @@ def main():
                     if not check(rows, f"{base} {what}", got[i], ref[i]):
                         failures.append(f"{base} {what} differs from the MAX_TOKENS=4 single pass")
 
+    # ------------- B2. Qwen3.5 shape, MULTI-pass regime (T > arena) ---------
+    # M3-I6a lowers the shipped `max_tokens_per_pass` from 4 to 2, which changes
+    # the pass COUNT of every prefill chunk: a full mbt=16 chunk goes from 4
+    # passes of 4 to 8 passes of 2.  Section B only reaches T=4, i.e. ONE pass at
+    # the shipped size, so it cannot see a bug that needs SEVERAL passes at the
+    # Qwen3.5 shape specifically -- 8 q-heads per kv group and head_dim 256 are
+    # what make MMA_ITERS_M and the chunked output reduction differ from the
+    # small shape.  Here T exceeds the arena on every arm, so the reference is
+    # the production 4-pass form rather than an unsplit run: MAX_TOKENS=4 with
+    # q_pass=0 would let q_tokens=T overrun the 4-row smem arena.
+    for gate in (0, 1):
+        for T, seq_len in ((8, 8), (16, 16), (16, 80), (16, 200), (13, 141)):
+            if gate == 0:
+                continue  # ungated instantiations: only arena/pass 4 is built
+            qkv = make_input(8, 2, 256, T, gate, seed=3000 + T + 17 * gate)
+            ck, cv = make_ctx(2, 256, seq_len - T, seed=300 + T + gate)
+            ref = run((8, 2, 256, 4, gate, 4), qkv, ck, cv, T, seq_len)
+            for mt, qp in ((2, 2), (1, 1)):
+                got = run((8, 2, 256, mt, gate, qp), qkv, ck, cv, T, seq_len)
+                base = (f"qwen35-multipass gate={gate} T={T} seq={seq_len} "
+                        f"pass={qp} ({-(-T // qp)} passes)")
+                for i, what in enumerate(("out", "kv_k", "kv_v")):
+                    if not check(rows, f"{base} {what}", got[i], ref[i]):
+                        failures.append(f"{base} {what} differs from the "
+                                        f"pass=4 ({-(-T // 4)}-pass) run")
+
     # ---------------- C. causal coupling ACROSS passes ---------------------
     # A pure prefill of T tokens with an empty cache: query t must attend keys
     # 0..t, including keys contributed by queries in an EARLIER pass. If the

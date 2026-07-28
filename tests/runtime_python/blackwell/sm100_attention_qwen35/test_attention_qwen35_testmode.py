@@ -42,7 +42,12 @@ NUM_QO_PER_KV = NUM_Q_HEADS // NUM_KV_HEADS
 HEAD_DIM = 256
 PAGE_SIZE = 64
 MAX_SEQ_LENGTH = 64
-MAX_TOKENS_PER_PASS = 4
+# The pass size this test drives through the full compile+dispatch pipeline.
+# 4 was the shipped value when this test was written; M3-I6a lowered the
+# production default to 2 (builder.py `_attn_q_pass_default`), so the gate is run
+# at BOTH.  Env-overridable rather than re-pointed at the builder so this stays a
+# standalone pipeline test with an unchanged default.
+MAX_TOKENS_PER_PASS = int(os.environ.get("ATTN_TESTMODE_Q_PASS", "4"))
 PROMPT_LENS = [5, 3]                 # two requests prefilling in one iteration
 BF16 = torch.bfloat16
 EPS = 1e-6

@@ -1,0 +1,44 @@
+ptxas info    : Compiling entry function '_ZN3cub18CUB_200700_1000_NS11EmptyKernelIvEEvv' for 'sm_100a'
+ptxas info    : Function properties for _ZN3cub18CUB_200700_1000_NS11EmptyKernelIvEEvv
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 4 registers, used 0 barriers
+ptxas info    : Compiling entry function '_Z16scheduler_kernelN6mirage7runtime13RuntimeConfigE' for 'sm_100a'
+ptxas info    : Function properties for _Z16scheduler_kernelN6mirage7runtime13RuntimeConfigE
+    80 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 64 registers, used 0 barriers, 80 bytes cumulative stack size
+ptxas info    : Compiling entry function '_Z13worker_kernelN6mirage7runtime13RuntimeConfigE' for 'sm_100a'
+ptxas info    : Function properties for _Z13worker_kernelN6mirage7runtime13RuntimeConfigE
+    96 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 238 registers, used 16 barriers, 96 bytes cumulative stack size, 5824 bytes smem
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm256ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm256ELm16ELm128ELm248320ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi256ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm64ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm64ELm16ELm128ELm64ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi64ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm8ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm8ELm16ELm128ELm256ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi8ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Compiling entry function '_Z17persistent_kernelN6mirage7runtime13RuntimeConfigE' for 'sm_100a'
+ptxas info    : Function properties for _Z17persistent_kernelN6mirage7runtime13RuntimeConfigE
+    144 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 238 registers, used 16 barriers, 144 bytes cumulative stack size, 5824 bytes smem
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm256ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm256ELm16ELm128ELm248320ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi256ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm64ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm64ELm16ELm128ELm64ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi64ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Function properties for _ZN6kernel26linear_sm100_mpk_task_implIN7cutlass10bfloat16_tENS_3tma6tma_2dIS2_Li3ELi3ELi3ELm8ELm2048ELm128ELm64ELm2048ELm1ELm1ELm1ELm8192ELb1EEENS4_IS2_Li3ELi3ELi3ELm16ELm2048ELm16ELm64ELm2048ELm1ELm1ELm1ELm1024ELb1EEEN4cute6TensorINS7_10ViewEngineINS7_8gmem_ptrIPS2_EEEENS7_6LayoutINS7_5tupleIJiiEEENSF_IJiNS7_1CILi1EEEEEEEEEENS4_IS2_Li0ELi3ELi3ELm16ELm8ELm16ELm128ELm256ELm1ELm1ELm1ELm2048ELb1EEELi128ELi16ELi16ELi8ELi2048ELb1ELb0ELi8ELi2ELi4EEEvRKT0_RKT1_T2_RKT3_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Compiling entry function '_Z28residency_probe_sched_kernel14ResidencyProbe' for 'sm_100a'
+ptxas info    : Function properties for _Z28residency_probe_sched_kernel14ResidencyProbe
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers
+ptxas info    : Compiling entry function '_Z29residency_probe_worker_kernel14ResidencyProbe' for 'sm_100a'
+ptxas info    : Function properties for _Z29residency_probe_worker_kernel14ResidencyProbe
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers
+ptxas info    : Compiling entry function '_Z14prepare_kernelN6mirage7runtime13RuntimeConfigEi' for 'sm_100a'
+ptxas info    : Function properties for _Z14prepare_kernelN6mirage7runtime13RuntimeConfigEi
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 24 registers, used 0 barriers
+ptxas info    : Compiling entry function '_Z11init_kernelN6mirage7runtime13RuntimeConfigE' for 'sm_100a'
+ptxas info    : Function properties for _Z11init_kernelN6mirage7runtime13RuntimeConfigE
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 0 barriers
