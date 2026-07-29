@@ -1,0 +1,113 @@
+{
+  "batch_size": 4,
+  "note": "informational only -- no perf claim; mbt is fixed across batch sizes for a uniform correctness config, which inflates per-step cost at small bs",
+  "waves": [
+    {
+      "batch_size": 4,
+      "wave": 0,
+      "num_requests": 4,
+      "num_distinct_prompts": 4,
+      "prompt_ids": [
+        "p06-poem",
+        "p01-history",
+        "p04-chinese",
+        "p09-translate"
+      ],
+      "wall_ms": 1123.458984375,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 10.49961667640187,
+      "tokens_per_s": 380.96628889224996,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 109,
+        "live_slot_migrations": 1,
+        "migrated_slots": [
+          3
+        ],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 4,
+      "wave": 1,
+      "num_requests": 4,
+      "num_distinct_prompts": 4,
+      "prompt_ids": [
+        "p07-format",
+        "p05-cuda",
+        "p08-science",
+        "p10-logic"
+      ],
+      "wall_ms": 1109.0030517578125,
+      "max_decode_steps": 98,
+      "ms_per_decode_step": 11.316357670998087,
+      "tokens_per_s": 353.4706233482991,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 101,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 4,
+      "wave": 2,
+      "num_requests": 4,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p03-python",
+        "p02-math",
+        "p03-python",
+        "p02-math"
+      ],
+      "wall_ms": 1076.7750244140625,
+      "max_decode_steps": 87,
+      "ms_per_decode_step": 12.376724418552442,
+      "tokens_per_s": 161.5936440341229,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 98,
+        "live_slot_migrations": 3,
+        "migrated_slots": [
+          2,
+          3
+        ],
+        "straddling_slots": [
+          2,
+          3
+        ]
+      }
+    }
+  ],
+  "slot_isolation_checks": [
+    {
+      "batch_size": 4,
+      "wave": 2,
+      "prompt_id": "p03-python",
+      "slots": [
+        0,
+        2
+      ],
+      "identical": false,
+      "first_divergence": 61
+    },
+    {
+      "batch_size": 4,
+      "wave": 2,
+      "prompt_id": "p02-math",
+      "slots": [
+        1,
+        3
+      ],
+      "identical": false,
+      "first_divergence": 56
+    }
+  ]
+}
