@@ -226,6 +226,19 @@ constexpr bool fast_path_ok(int batch_size,
 #endif
 }
 
+// OUTPUT_SIZE sanitised for the golden path, which requires whole 128-row scale
+// blocks. A NO-OP on every instantiation where the golden path is actually
+// reachable -- the dispatcher static_asserts that -- and it exists only so that
+// a toolchain which instantiates a DISCARDED `if constexpr` branch (nvcc does,
+// under some flag combinations, while recovering from an earlier diagnostic)
+// still compiles instead of reporting the golden path's assert for a slice the
+// golden path was never going to run. Depending on branch discarding to suppress
+// a static_assert is not portable; the reachability assert is what carries the
+// safety, and it does not depend on discarding at all.
+constexpr int golden_output_size(int output_size) {
+  return output_size % BLOCK_N == 0 ? output_size : BLOCK_N;
+}
+
 // Dynamic shared memory the DISPATCHED task actually needs. External launchers
 // (the kernel-wrapper tests) must size their arena with this, not either path's
 // own figure. MPK itself always gives a worker the full arena.
@@ -962,6 +975,19 @@ __device__ __forceinline__ void
                                     void const *__restrict__ weight_scale_ptr,
                                     void const *__restrict__ residual_ptr,
                                     void *__restrict__ output_ptr) {
+  // THE SAFETY PROPERTY, asserted where no compiler's instantiation eagerness
+  // can affect it: every instantiation has an admissible path. If the fast path
+  // rejects this (batch > 16, odd K-tile count, a ring that does not fit shared
+  // memory) then the golden path must be able to run it, and the golden path
+  // needs whole 128-row scale blocks. A builder that asks for a sub-block slice
+  // at, say, batch 64 fails the BUILD here rather than silently computing 128
+  // rows' worth of output for a 64-row slice.
+  static_assert(linear_fp8_blockscale::fast_path_ok(
+                    BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE) ||
+                    OUTPUT_SIZE % linear_fp8_blockscale::BLOCK_N == 0,
+                "no admissible linear_fp8_blockscale path for this "
+                "instantiation: the ferret fast path rejected it and the golden "
+                "path requires a per-task N of whole 128-row scale blocks");
   if constexpr (linear_fp8_blockscale::fast_path_ok(
                     BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE)) {
     linear_fp8_blockscale_task_impl_fast<T,
@@ -976,17 +1002,20 @@ __device__ __forceinline__ void
                                                         residual_ptr,
                                                         output_ptr);
   } else {
-    linear_fp8_blockscale_task_impl_golden<T,
-                                           BATCH_SIZE,
-                                           OUTPUT_SIZE,
-                                           REDUCTION_SIZE,
-                                           O_STRIDE,
-                                           WITH_RESIDUAL>(input_fp8_ptr,
-                                                          input_scale_ptr,
-                                                          weight_fp8_ptr,
-                                                          weight_scale_ptr,
-                                                          residual_ptr,
-                                                          output_ptr);
+    // golden_output_size() is the identity on every reachable instantiation
+    // (guaranteed by the static_assert above); see its comment.
+    linear_fp8_blockscale_task_impl_golden<
+        T,
+        BATCH_SIZE,
+        linear_fp8_blockscale::golden_output_size(OUTPUT_SIZE),
+        REDUCTION_SIZE,
+        O_STRIDE,
+        WITH_RESIDUAL>(input_fp8_ptr,
+                       input_scale_ptr,
+                       weight_fp8_ptr,
+                       weight_scale_ptr,
+                       residual_ptr,
+                       output_ptr);
   }
 }
 

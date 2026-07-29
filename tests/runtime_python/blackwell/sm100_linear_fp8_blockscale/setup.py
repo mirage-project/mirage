@@ -81,7 +81,21 @@ setup(
                 os.path.join(this_dir, 'runtime_kernel_wrapper_sm100.cu'),
             ],
             depends=blackwell_depends,
-            define_macros=[("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None)],
+            # MPK_TARGET_CC and MODE_OFFLINE are NOT optional, for the same
+            # reason sm100_attention_qwen35/setup.py spells them out: this
+            # kernel guards its arena with
+            #   static_assert(smem_bytes(...) <= MAX_DYNAMIC_SHARED_MEMORY_SIZE)
+            # and that constant is selected by those macros
+            # (runtime_header.h:35-64). Undefined MPK_TARGET_CC preprocesses as
+            # 0, so the TU picked the 163 KiB fallback instead of the 207 KiB
+            # Blackwell budget the megakernel runs with. That was invisible while
+            # the only path here needed 41 KiB; M4-I2's fast path needs up to
+            # 198 KiB, so the wrong budget made admissible slices fail to build.
+            # The megakernel build passes exactly these (persistent_kernel.py).
+            define_macros=[("MIRAGE_BACKEND_USE_CUDA", None),
+                           ("MIRAGE_FINGERPRINT_USE_CUDA", None),
+                           ("MPK_TARGET_CC", "100"),
+                           ("MODE_OFFLINE", None)],
             include_dirs=[
                 os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/'),
                 os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks'),
@@ -97,6 +111,12 @@ setup(
                     '-O3',
                     '-gencode=arch=compute_100a,code=sm_100a',
                     '-DMIRAGE_GRACE_BLACKWELL',
+                    # The kernel calls constexpr host helpers (tile_m,
+                    # smem_bytes, fast_path_ok) from __device__ code, exactly as
+                    # the megakernel JIT does -- persistent_kernel.py passes this
+                    # same flag. torch's COMMON_NVCC_FLAGS happens to add it too;
+                    # stating it here means this harness does not depend on that.
+                    '--expt-relaxed-constexpr',
                 ] + extra_nvcc
             }
         )

@@ -132,6 +132,8 @@ bool dispatch_linear_fp8_blockscale(int batch_size,
 #undef DISPATCH_OUTPUT
 #undef DISPATCH_REDUCTION
 
+} // namespace
+
 // ---------------------------------------------------------------------------
 // WHOLE-PROJECTION harness: N/N_SLICE cooperating tasks, exactly MPK's dispatch.
 //
