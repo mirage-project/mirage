@@ -1,0 +1,57 @@
+{
+ "tag": "bs8_r1",
+ "status": "ok",
+ "bs": 8,
+ "rep": 1,
+ "msl": 132,
+ "new_tokens": 64,
+ "mbt": 16,
+ "page_size": 256,
+ "cold_compile": true,
+ "per_request_token_cap": "policy",
+ "per_request_token_cap_compiled": 2,
+ "admission_policy": {
+  "cap_mode": "auto",
+  "cap_min_batch_size": 2,
+  "per_bs": {
+   "1": null,
+   "2": "auto",
+   "4": "auto",
+   "8": "auto",
+   "16": "auto"
+  },
+  "authority": "demo/qwen3_5/accept/admission_policy.py"
+ },
+ "kernel_dir": "/home/muhengl/mpk-qwen35/m4i4/kernels_cold/cold_bs8_r1",
+ "secs": 70.0,
+ "n_waves": 2,
+ "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+ "per_prompt_md5": {
+  "p06-poem": "c1f3562e36ff2ed3b89fbfe6de49dfcc",
+  "p01-history": "a1c399615def1fe460bf698cea00b11d",
+  "p04-chinese": "947d9b4fddda44077d513e89688716e2",
+  "p09-translate": "7c16984d75cff7f62a5b6f855e244761",
+  "p07-format": "5f6fb53c37392bf19700883b9e313ae4",
+  "p05-cuda": "f3a35fe75d55b55555441f32e7ee6ddf",
+  "p08-science": "8f91336b66706abecebb8301b9982530",
+  "p10-logic": "bec0e9b6088603d9422718c2f1e5b33c",
+  "p03-python": "de5282225fbb98d9660827bdc1775734",
+  "p02-math": "d5f3533e098fe87e1b96b68fb440b8da"
+ },
+ "device": {
+  "cuda_visible_devices": "6",
+  "uuid": "e56ad157-72b3-2e86-4cd9-5769dc1f229c",
+  "phys_index": 6,
+  "name": "NVIDIA B200"
+ },
+ "gpu_before": {
+  "memory_used_mib": 5,
+  "utilization_pct": 0
+ },
+ "gpu_after": {
+  "memory_used_mib": 40051,
+  "utilization_pct": 0
+ },
+ "pid": 4152111,
+ "utc": "2026-07-29T13:03:57Z"
+}

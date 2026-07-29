@@ -1,0 +1,11 @@
+2e22481aff5945942a63efe5da7df24f83c604114195d4d37e05ac5aed9f68ff  /home/muhengl/mpk-qwen35/mirage-m4i4/demo/qwen3_5/accept/admission_policy.py
+9b1df568cf6ea815a2f8101aaf9bc8b0d19a24580a3ef1c30a3b09f729c686bb  /home/muhengl/mpk-qwen35/mirage-m4i4/demo/qwen3_5/accept/mpk_engine_run.py
+48e787b325a033c78e023bf33c49c65041cae6263ba90f5c10b921d604995744  /home/muhengl/mpk-qwen35/mirage-m4i4/demo/qwen3_5/accept/harness/gate_ac3_stable.py
+79e720bcf76a5033aa3dfeae582d4c1caa482b83e9aba4e060cbd04f4e3efe93  /home/muhengl/mpk-qwen35/mirage-m4i4/demo/qwen3_5/accept/harness/gate_ac3_stable.sh
+cc0b3f272750966f8c56921044e190519809cade3c0d127ffff08cef544cfdd6  /home/muhengl/mpk-qwen35/mirage-m4i4/python/mirage/mpk/persistent_kernel.py
+d2917e0778ed424bb2470cefa0a50dd6ce8bb9dea6434e8df909474af6cc278e  /home/muhengl/mpk-qwen35/mirage-m4i4/include/mirage/persistent_kernel/persistent_kernel.cuh
+--- clone sha + redeploy state:
+348a601a97142ad54475450078fee31d3e9a9e80
+840d3cc31ae9a3602912dda28575a8abe33f652ef6488f6cde893d54fb85cc94  /home/muhengl/mpk-qwen35/mirage-m4i4/demo/qwen3_5/accept/admission_policy.py
+be31eb9eb0fca51a31c87f44ba76298c5a775edeb7a6ece3984360dec9e1a66c  /home/muhengl/mpk-qwen35/mirage-m4i4/demo/qwen3_5/accept/mpk_engine_run.py
+fca13978301cc566194c8f4f8ff24a2de807c5ff31fd2294d3b623085d57681f  /home/muhengl/mpk-qwen35/mirage-m4i4/demo/qwen3_5/accept/harness/gate_ac3_stable.py

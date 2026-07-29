@@ -1,0 +1,113 @@
+{
+  "batch_size": 16,
+  "note": "informational only -- no perf claim (cold compile)",
+  "waves": [
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "num_requests": 16,
+      "num_distinct_prompts": 10,
+      "prompt_ids": [
+        "p06-poem",
+        "p01-history",
+        "p04-chinese",
+        "p09-translate",
+        "p07-format",
+        "p05-cuda",
+        "p08-science",
+        "p10-logic",
+        "p03-python",
+        "p02-math",
+        "p06-poem",
+        "p01-history",
+        "p04-chinese",
+        "p09-translate",
+        "p07-format",
+        "p05-cuda"
+      ],
+      "wall_ms": 1572.524169921875,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 14.696487569363319,
+      "tokens_per_s": 680.4346924938895,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 131,
+        "per_request_token_cap_requested": "policy",
+        "per_request_token_cap_compiled": 1,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation_checks": [
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p06-poem",
+      "slots": [
+        0,
+        10
+      ],
+      "identical": true,
+      "first_divergence": null
+    },
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p01-history",
+      "slots": [
+        1,
+        11
+      ],
+      "identical": true,
+      "first_divergence": null
+    },
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p04-chinese",
+      "slots": [
+        2,
+        12
+      ],
+      "identical": true,
+      "first_divergence": null
+    },
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p09-translate",
+      "slots": [
+        3,
+        13
+      ],
+      "identical": true,
+      "first_divergence": null
+    },
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p07-format",
+      "slots": [
+        4,
+        14
+      ],
+      "identical": true,
+      "first_divergence": null
+    },
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "prompt_id": "p05-cuda",
+      "slots": [
+        5,
+        15
+      ],
+      "identical": true,
+      "first_divergence": null
+    }
+  ]
+}
