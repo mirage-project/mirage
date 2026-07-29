@@ -13,10 +13,11 @@ arrival-spread floor the split cannot cross.
 
 The number that reframes AC-4 is not a width number at all. The compiled task
 graph's **critical path** — the longest dependency chain, weighted by measured
-per-task times — is 4.55 / 5.39 / 6.09 ms at bs 1/8/16, i.e. **46–50 % of the
-current step and 1.14–1.30× vLLM's entire step**. At infinite width and perfect
-packing MPK would still be slower than vLLM at every batch size. The residual is
-the chain, not the fan-out.
+per-task times — is **7.96 / 8.24 / 8.64 ms at bs 1/8/16, i.e. 68–81 % of the
+current step and 1.63–2.27× vLLM's entire step**. At infinite width and perfect
+packing MPK would still be 1.6–2.3× slower than vLLM. The residual is the chain,
+not the fan-out. §7 decomposes it and answers what has to get faster, and by how
+much, for AC-4 to be arithmetically reachable.
 
 Basis: integrated HEAD (no `src/`, `include/` or `python/` change between
 `c80ebd68` and `01a54ad9` — `git diff --name-only` over those trees is empty), so
@@ -139,18 +140,29 @@ count to settle.
 Three bounds, `scripts/ceiling.py` + `scripts/critpath.py`, all from the compiled
 graph plus measured per-task times.
 
-| bs | step µs | work bound (task-µs/128) | **critical path** | CP as % of step | vLLM's whole step |
-|---:|---:|---:|---:|---:|---:|
-| 1 | 9822.8 | 1773.0 | **4554.3** | 46.4 % | 3503 |
-| 8 | 10728.1 | 3741.0 | **5394.2** | 50.3 % | 4727 |
-| 16 | 12662.3 | 5800.9 | **6085.5** | 48.1 % | 5301 |
+| bs | step µs | work bound (task-µs/128) | **critical path** | CP as % of step | vLLM's whole step | CP / vLLM step |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 9822.8 | 1773.0 | **7957.5** | 81.0 % | 3503 | **2.27×** |
+| 8 | 10728.1 | 3741.0 | **8240.9** | 76.8 % | 4727 | **1.74×** |
+| 16 | 12662.3 | 5800.9 | **8642.0** | 68.2 % | 5301 | **1.63×** |
 
 `critpath.py` walks the DAG (task T gated by `dependent_event`, triggering
 `trigger_event`; 0 topological violations, ids are emitted in dependency order)
 and takes the longest weighted chain. **At every batch size the chain alone is
-longer than vLLM's entire decode step** (1.30× / 1.14× / 1.15×). Applying every
-admissible split to the chain's per-task times brings it to 3804 / 4166 / 4328 µs
-— still 8.6 % above vLLM at bs1, below it at bs8/bs16.
+1.6–2.3× vLLM's entire decode step.** Applying every admissible split to the
+chain's per-task times brings it to 4827 / 5063 / 5349 µs — still above vLLM at
+bs1 and bs8, marginally below at bs16.
+
+> **Correction (this issue's own first pass reported 4554 / 5394 / 6086 µs.)** That
+> weighting charged each task the live/dead EXPECTED value, which understates
+> every level mixing live and dead tasks — the routed MoE GEMMs are 6 % live at
+> bs1, so their chain contribution came out ~14× too small. **Every event in this
+> graph has `num_triggers == n_producers` — verified, 2277 of 2277 at all three
+> batch sizes** — so every event is a full fan-in barrier and a level costs its
+> SLOWEST producer, i.e. `T_live`. Both weightings are emitted
+> (`cp_max_us` and `cp_expected_weighting_us`) so the correction is auditable.
+> The direction of the conclusion does not change; its size roughly doubles. §7
+> is the decomposition.
 
 The packing ceiling, from the wave-depth dispatch model (M3-I8's: a level costs
 `max_worker(live·T_live + dead·T_dead)`, calibrated per stage on its measured
@@ -330,11 +342,12 @@ disjoint-columns argument requires.
 * `moe_n_splits = 8` is **rejected with evidence**: worse than k=4 at bs ≥ 4 and
   worse than the base at bs ≥ 8, mechanism in §4.
 * **Graph width is not the AC-4 residual.** Ranked by what is left:
-  1. **The critical path.** 4.55/5.39/6.09 ms against vLLM's 3.50/4.73/5.30 ms
-     whole step. This is the binding structural fact and no split touches it. The
-     levers are per-task throughput on the chain (dense fp8, MoE GEMM kernels) and
-     FEWER, BIGGER tasks — the opposite of splitting. 2347 dependency levels per
-     step is itself a target.
+  1. **The critical path.** 7.96/8.24/8.64 ms against vLLM's 3.50/4.73/5.30 ms
+     whole step (§2, §7). This is the binding structural fact and no split
+     touches it. The chain is **59 % MoE block at bs1** — router + w13 + w2 alone
+     are 4228 µs of 7958 (53 %) — so the binding AC-4 lever is per-task LATENCY
+     on the MoE chain, which is what the running MoE ferret loop attacks. §7 has
+     the per-stage targets and which of them are known-achievable.
   2. **Dense fp8 (279)** — 1346 µs of idle machine at *every* batch size, already
      at the finest legal N split. Needs split-K with an atomic merge (the M3-I3
      idiom is admissible) or a coarser scale layout. Largest remaining
@@ -361,7 +374,259 @@ disjoint-columns argument requires.
 
 ---
 
-## 7. Layout and reproduction
+## 7. What the critical path is MADE OF, and the AC-4 feasibility arithmetic
+
+`scripts/cp_decompose.py`. The chain is recovered by recording, for every event,
+which producer set its ready time, then walking back from the finishing task; each
+path task's layer is read off its own `layer_<i>_...` tensor names, so the
+per-layer structure is exact rather than inferred. Self-check: the unscaled length
+equals `critpath.py`'s `cp_max_us` to 0.1 µs at all three batch sizes.
+
+**The coordinator's back-of-envelope was arithmetically exact — only the
+denominator was wrong.** router 21.05 + w13 54.87 + w2 29.77 = 105.69 µs/layer ×
+40 layers = 4227.6 µs, and the three stages measure 842.1 + 2194.6 + 1191.0 =
+4227.7 µs on the path. **No double counting**: each appears exactly 40 times, once
+per layer, confirmed by the per-layer chain below. It is **53 % of the path**, not
+93 %, because the path is 7958 µs and not the understated 4554.
+
+### (a) Composition by stage
+
+
+**bs1 — cp = 7957.5 µs, 595 tasks over 40 layers, 81.0 % of the measured 9822.8 µs step**
+
+| stage | path tasks | µs on path | % of cp | µs/path task | measured T_live |
+|---|---:|---:|---:|---:|---:|
+| MOE_W13_FP8_BLOCKSCALE_SM100 | 40 | 2194.6 | 27.58 | 54.866 | 54.866 |
+| LINEAR_FP8_BLOCKSCALE_SM100 | 80 | 1301.8 | 16.36 | 16.272 | 16.272 |
+| MOE_W2_FP8_BLOCKSCALE_SM100 | 40 | 1191.0 | 14.97 | 29.774 | 29.774 |
+| MOE_TOPK_SOFTMAX_SM100 | 40 | 842.1 | 10.58 | 21.053 | 21.053 |
+| ATTN_SM100 | 10 | 605.0 | 7.6 | 60.502 | 60.502 |
+| LINEAR_SM100 | 41 | 527.1 | 6.62 | 12.857 | 12.857 |
+| QUANTIZE_FP8_SM100 | 120 | 504.0 | 6.33 | 4.2 | 4.2 |
+| MOE_MUL_SUM_ADD_SM100 | 40 | 239.9 | 3.01 | 5.997 | 5.997 |
+| GDN_RECURRENT_SM100 | 30 | 165.4 | 2.08 | 5.515 | 5.515 |
+| GDN_CONV1D_SM100 | 30 | 158.0 | 1.99 | 5.266 | 5.266 |
+| RMS_NORM_HOPPER | 81 | 113.4 | 1.43 | 1.4 | 1.4 |
+| EMBEDDING | 1 | 57.9 | 0.73 | 57.911 | 57.911 |
+| SILU_MUL | 40 | 49.2 | 0.62 | 1.231 | 1.231 |
+| ARGMAX_PARTIAL_SM100 | 1 | 5.6 | 0.07 | 5.604 | 5.604 |
+| ARGMAX_REDUCE_SM100 | 1 | 2.4 | 0.03 | 2.377 | 2.377 |
+
+**bs8 — cp = 8240.9 µs, 595 tasks over 40 layers, 76.8 % of the measured 10728.1 µs step**
+
+| stage | path tasks | µs on path | % of cp | µs/path task | measured T_live |
+|---|---:|---:|---:|---:|---:|
+| MOE_W13_FP8_BLOCKSCALE_SM100 | 40 | 2278.6 | 27.65 | 56.966 | 56.966 |
+| LINEAR_FP8_BLOCKSCALE_SM100 | 80 | 1301.4 | 15.79 | 16.268 | 16.268 |
+| MOE_W2_FP8_BLOCKSCALE_SM100 | 40 | 1218.9 | 14.79 | 30.473 | 30.473 |
+| MOE_TOPK_SOFTMAX_SM100 | 40 | 903.3 | 10.96 | 22.582 | 22.582 |
+| ATTN_SM100 | 10 | 574.7 | 6.97 | 57.465 | 57.465 |
+| LINEAR_SM100 | 41 | 534.2 | 6.48 | 13.03 | 13.03 |
+| QUANTIZE_FP8_SM100 | 120 | 510.2 | 6.19 | 4.252 | 4.252 |
+| GDN_RECURRENT_SM100 | 30 | 309.1 | 3.75 | 10.304 | 10.304 |
+| MOE_MUL_SUM_ADD_SM100 | 40 | 217.2 | 2.64 | 5.429 | 5.429 |
+| GDN_CONV1D_SM100 | 30 | 155.7 | 1.89 | 5.189 | 5.189 |
+| RMS_NORM_HOPPER | 81 | 108.0 | 1.31 | 1.333 | 1.333 |
+| SILU_MUL | 40 | 45.5 | 0.55 | 1.137 | 1.137 |
+| EMBEDDING | 1 | 43.8 | 0.53 | 43.763 | 43.763 |
+| ARGMAX_PARTIAL_SM100 | 1 | 31.8 | 0.39 | 31.764 | 31.764 |
+| ARGMAX_REDUCE_SM100 | 1 | 8.6 | 0.1 | 8.593 | 8.593 |
+
+**bs16 — cp = 8642.0 µs, 595 tasks over 40 layers, 68.2 % of the measured 12662.3 µs step**
+
+| stage | path tasks | µs on path | % of cp | µs/path task | measured T_live |
+|---|---:|---:|---:|---:|---:|
+| MOE_W13_FP8_BLOCKSCALE_SM100 | 40 | 2430.4 | 28.12 | 60.759 | 60.759 |
+| LINEAR_FP8_BLOCKSCALE_SM100 | 80 | 1295.4 | 14.99 | 16.193 | 16.193 |
+| MOE_W2_FP8_BLOCKSCALE_SM100 | 40 | 1209.0 | 13.99 | 30.225 | 30.225 |
+| MOE_TOPK_SOFTMAX_SM100 | 40 | 982.1 | 11.36 | 24.552 | 24.552 |
+| ATTN_SM100 | 10 | 623.0 | 7.21 | 62.303 | 62.303 |
+| LINEAR_SM100 | 41 | 549.4 | 6.36 | 13.4 | 13.4 |
+| QUANTIZE_FP8_SM100 | 120 | 513.1 | 5.94 | 4.276 | 4.276 |
+| GDN_RECURRENT_SM100 | 30 | 306.1 | 3.54 | 10.202 | 10.202 |
+| MOE_MUL_SUM_ADD_SM100 | 40 | 200.1 | 2.32 | 5.003 | 5.003 |
+| SILU_MUL | 40 | 166.0 | 1.92 | 4.15 | 4.15 |
+| GDN_CONV1D_SM100 | 30 | 154.6 | 1.79 | 5.153 | 5.153 |
+| RMS_NORM_HOPPER | 81 | 114.5 | 1.33 | 1.414 | 1.414 |
+| ARGMAX_PARTIAL_SM100 | 1 | 46.8 | 0.54 | 46.751 | 46.751 |
+| EMBEDDING | 1 | 38.6 | 0.45 | 38.612 | 38.612 |
+| ARGMAX_REDUCE_SM100 | 1 | 12.9 | 0.15 | 12.857 | 12.857 |
+
+The **MoE block** (router → w13 → SiLU-mul → w2 → combine) is
+4516.8 µs of the bs1 path = **57 %**, and adding the
+MoE activation quantize (40 of the 120 quantize path tasks, 168 µs) takes it to
+59 %. So **the coordinator's hypothesis is right
+in substance**: the MoE chain dominates, and the binding AC-4 lever is per-task
+latency on it. The two corrections to the sizing are that dense fp8 (79 with 279
+appearing **80** times — twice per layer, in-proj and out-proj) is the second
+largest single contributor at 16 %, and that the MoE GEMMs are not 93 % of the
+chain because the chain is twice as long as first reported.
+
+### (b) Per-layer chain structure
+
+Exact, from tensor names. 595 path tasks over 40 layers; the histogram of path
+tasks per layer is `{14: 10, 15: 29, 16: 1}` — 10 full-attention layers of 14 and
+30 GDN layers of 15 (one carries an extra RMS norm). Identical at all three batch
+sizes.
+
+
+**GDN layer (15–16 path tasks):**
+
+`RMS_NORM → QUANTIZE_FP8 → LINEAR_FP8(in_proj) → GDN_CONV1D → GDN_RECURRENT →
+QUANTIZE_FP8 → LINEAR_FP8(out_proj) → RMS_NORM → LINEAR_SM100(router gate) →
+MOE_TOPK_SOFTMAX → MOE_W13 → SILU_MUL → QUANTIZE_FP8 → MOE_W2 → MOE_MUL_SUM_ADD
+→ RMS_NORM`
+
+**Full-attention layer (14 path tasks):**
+
+`QUANTIZE_FP8 → LINEAR_FP8(qkv) → ATTN_SM100 → QUANTIZE_FP8 →
+LINEAR_FP8(out_proj) → RMS_NORM → LINEAR_SM100 → MOE_TOPK_SOFTMAX → MOE_W13 →
+SILU_MUL → QUANTIZE_FP8 → MOE_W2 → MOE_MUL_SUM_ADD → RMS_NORM`
+
+Both layer types carry the **same 7-task MoE tail**, which is why the MoE block
+is 40× on the chain regardless of layer type, and why it dominates. The GDN and
+attention heads differ but are the cheap end: GDN's conv1d + recurrent is
+5.27 + 5.51 µs at bs1 against the MoE tail's ~112 µs.
+
+### (c) Sensitivity — cp when one stage reaches a multiple of vLLM's per-call time
+
+Floors are the MEASURED `vllm_us_per_call` from `opt/m3i10/ferret_targets.json`,
+per batch size. Tasks 279 and 253 have no per-call number because vLLM fuses
+them, so their floor is the derived `vllm_us_per_step / sites_per_step` and is
+labelled as such in the JSON. A stage where MPK is already at or below vLLM
+(GDN recurrent at bs16: 10.20 µs against 15.43) is skipped rather than
+"brought to parity", which would be a regression.
+
+
+**bs1** (base cp 7957.5 µs)
+
+| stage | measured T µs | vLLM µs/call | cp @ 2×vLLM | cp @ parity | cp @ 0.7×vLLM |
+|---|---:|---:|---:|---:|---:|
+| MOE_W13_FP8_BLOCKSCALE_SM100 | 54.866 | 8.414 | 6436.0 | **6099.4** | 5998.4 |
+| LINEAR_FP8_BLOCKSCALE_SM100 | 16.272 | 8.459 | 8009.2 | **7332.5** | 7129.4 |
+| MOE_W2_FP8_BLOCKSCALE_SM100 | 29.774 | 7.517 | 7367.9 | **7067.2** | 6977.0 |
+| MOE_TOPK_SOFTMAX_SM100 | 21.053 | 3.697 | 7411.1 | **7263.2** | 7218.9 |
+| ATTN_SM100 | 60.502 | 9.425 | 7541.0 | **7446.7** | 7418.4 |
+| LINEAR_SM100 | 12.857 | 8.581 | 8134.0 | **7782.2** | 7676.6 |
+
+**bs8** (base cp 8240.9 µs)
+
+| stage | measured T µs | vLLM µs/call | cp @ 2×vLLM | cp @ parity | cp @ 0.7×vLLM |
+|---|---:|---:|---:|---:|---:|
+| MOE_W13_FP8_BLOCKSCALE_SM100 | 56.966 | 21.996 | 7722.0 | **6842.1** | 6578.2 |
+| LINEAR_FP8_BLOCKSCALE_SM100 | 16.268 | 8.967 | 8374.2 | **7656.8** | 7441.6 |
+| MOE_W2_FP8_BLOCKSCALE_SM100 | 30.473 | 17.477 | 8420.2 | **7721.1** | 7511.4 |
+| MOE_TOPK_SOFTMAX_SM100 | 22.582 | 4.602 | 7705.8 | **7521.7** | 7466.5 |
+| ATTN_SM100 | 57.465 | 9.237 | 7851.0 | **7758.6** | 7730.9 |
+| LINEAR_SM100 | 13.03 | 8.829 | 8430.7 | **8068.7** | 7960.1 |
+
+**bs16** (base cp 8642.0 µs)
+
+| stage | measured T µs | vLLM µs/call | cp @ 2×vLLM | cp @ parity | cp @ 0.7×vLLM |
+|---|---:|---:|---:|---:|---:|
+| MOE_W13_FP8_BLOCKSCALE_SM100 | 60.759 | 28.081 | 8458.1 | **7334.8** | 6997.9 |
+| LINEAR_FP8_BLOCKSCALE_SM100 | 16.193 | 8.569 | 8717.5 | **8032.0** | 7826.3 |
+| MOE_W2_FP8_BLOCKSCALE_SM100 | 30.225 | 18.898 | 8944.8 | **8188.9** | 7962.1 |
+| MOE_TOPK_SOFTMAX_SM100 | 24.552 | 5.955 | 8136.3 | **7898.1** | 7826.6 |
+| ATTN_SM100 | 62.303 | 10.659 | 8232.1 | **8125.5** | 8093.5 |
+| LINEAR_SM100 | 13.4 | 8.904 | 8822.7 | **8457.6** | 8348.1 |
+
+**cp is a MAX over paths, so it is not additive under perturbation.** Cheapening
+one stage can expose a different, longer chain: the naive sum of the three MoE
+gains at bs1 is 3442 µs, but recomputing gives 4868 µs rather than 4515. Every
+number in these tables is a recomputation, never a subtraction.
+
+### The feasibility answer
+
+vLLM's whole decode step is 3503 / 4727 / 5301 µs at bs 1/8/16 (bs ÷ its measured
+decode tok/s, M3-I7 §2b). Stages added greedily by measured gain, cp recomputed at
+each step:
+
+
+**bs1** — cp must fall 4454.5 µs (7957.5 → below 3503.0)
+
+| + stage at vLLM parity | path tasks | must reach µs/task | cp µs | under vLLM step? |
+|---|---:|---|---:|---|
+| MOE_W13_FP8_BLOCKSCALE_SM100 | 40 | **54.87 → 8.414** | 6099.4 | no |
+| MOE_W2_FP8_BLOCKSCALE_SM100 | 40 | **29.77 → 7.517** | 5209.1 | no |
+| MOE_TOPK_SOFTMAX_SM100 | 40 | **21.05 → 3.697** | 4867.8 | no |
+| LINEAR_FP8_BLOCKSCALE_SM100 | 80 | **16.27 → 8.459** | 3889.9 | no |
+| ATTN_SM100 | 10 | **60.5 → 9.425** | 3379.1 | **YES** |
+| LINEAR_SM100 | 41 | **12.86 → 8.581** | 3203.8 | **YES** |
+| GDN_CONV1D_SM100 | 30 | **5.27 → 2.987** | 3135.4 | **YES** |
+| GDN_RECURRENT_SM100 | 30 | **5.51 → 5.455** | 3133.6 | **YES** |
+
+Minimal sufficient set: **5 stages** — MOE_W13_FP8_BLOCKSCALE_SM100, MOE_W2_FP8_BLOCKSCALE_SM100, MOE_TOPK_SOFTMAX_SM100, LINEAR_FP8_BLOCKSCALE_SM100, ATTN_SM100.
+Measured step / cp = **1.234×**, so meeting the chain floor with that packing factor unchanged gives a step of **3868.2 µs** (still above vLLM's 3503.0).
+
+**bs8** — cp must fall 3513.9 µs (8240.9 → below 4727.0)
+
+| + stage at vLLM parity | path tasks | must reach µs/task | cp µs | under vLLM step? |
+|---|---:|---|---:|---|
+| MOE_W13_FP8_BLOCKSCALE_SM100 | 40 | **56.97 → 21.996** | 6842.1 | no |
+| MOE_TOPK_SOFTMAX_SM100 | 40 | **22.58 → 4.602** | 6122.9 | no |
+| LINEAR_FP8_BLOCKSCALE_SM100 | 80 | **16.27 → 8.967** | 5538.8 | no |
+| MOE_W2_FP8_BLOCKSCALE_SM100 | 40 | **30.47 → 17.477** | 5019.0 | no |
+| ATTN_SM100 | 10 | **57.47 → 9.237** | 4536.7 | **YES** |
+| LINEAR_SM100 | 41 | **13.03 → 8.829** | 4364.5 | **YES** |
+| GDN_CONV1D_SM100 | 30 | **5.19 → 3.056** | 4300.5 | **YES** |
+| GDN_RECURRENT_SM100 | 30 | **10.3 → 9.014** | 4261.8 | **YES** |
+
+Minimal sufficient set: **5 stages** — MOE_W13_FP8_BLOCKSCALE_SM100, MOE_TOPK_SOFTMAX_SM100, LINEAR_FP8_BLOCKSCALE_SM100, MOE_W2_FP8_BLOCKSCALE_SM100, ATTN_SM100.
+Measured step / cp = **1.302×**, so meeting the chain floor with that packing factor unchanged gives a step of **5548.0 µs** (still above vLLM's 4727.0).
+
+**bs16** — cp must fall 3341.0 µs (8642.0 → below 5301.0)
+
+| + stage at vLLM parity | path tasks | must reach µs/task | cp µs | under vLLM step? |
+|---|---:|---|---:|---|
+| MOE_W13_FP8_BLOCKSCALE_SM100 | 40 | **60.76 → 28.081** | 7334.8 | no |
+| MOE_TOPK_SOFTMAX_SM100 | 40 | **24.55 → 5.955** | 6591.0 | no |
+| LINEAR_FP8_BLOCKSCALE_SM100 | 80 | **16.19 → 8.569** | 5981.0 | no |
+| ATTN_SM100 | 10 | **62.3 → 10.659** | 5464.6 | no |
+| MOE_W2_FP8_BLOCKSCALE_SM100 | 40 | **30.23 → 18.898** | 5011.5 | **YES** |
+| LINEAR_SM100 | 41 | **13.4 → 8.904** | 4827.1 | **YES** |
+| GDN_CONV1D_SM100 | 30 | **5.15 → 3.187** | 4768.2 | **YES** |
+
+Minimal sufficient set: **5 stages** — MOE_W13_FP8_BLOCKSCALE_SM100, MOE_TOPK_SOFTMAX_SM100, LINEAR_FP8_BLOCKSCALE_SM100, ATTN_SM100, MOE_W2_FP8_BLOCKSCALE_SM100.
+Measured step / cp = **1.465×**, so meeting the chain floor with that packing factor unchanged gives a step of **6986.4 µs** (still above vLLM's 5301.0).
+
+**So, stated as the coordinator asked — "stage X must reach Y µs/task":**
+
+| stage | bs1 | bs8 | bs16 | known achievable? |
+|---|---|---|---|---|
+| MoE w13 (241) | 54.87 → **8.41** | 56.97 → **22.00** | 60.76 → **28.08** | **NOT yet** — the ferret MoE loop is at 0.456 of vLLM's throughput, i.e. this is the open target |
+| MoE w2 (242) | 29.77 → **7.52** | 30.47 → **17.48** | 30.23 → **18.90** | same loop, same status |
+| MoE router (260) | 21.05 → **3.70** | 22.58 → **4.60** | 24.55 → **5.96** | untried; M3-I5c knowingly cost this task +51–61 % for a compaction fix and it has never been re-costed |
+| dense fp8 (279) | 16.27 → **8.46** | 16.27 → **8.97** | 16.19 → **8.57** | **YES** — the ferret dense-fp8 winner crossed parity and landed at `eee0fe66` (v011), after this basis was captured |
+| attention (257) | 60.50 → **9.43** | 57.47 → **9.24** | 62.30 → **10.66** | partly — M3-I6a took it 8.09→4.50× and its split-KV model is confirmed here to 1 %, but the 29.6 µs fixed term floors it near 33 µs, so **9.4 µs needs a kernel change, not a split** |
+| dense bf16 (253) | 12.86 → **8.58** | 13.03 → **8.83** | 13.40 → **8.90** | untried; 1.37–1.44× is the smallest ratio in the graph |
+| GDN conv1d (234) | 5.27 → **2.99** | 5.19 → **3.06** | 5.15 → **3.19** | plausible — the GDN recurrent loop reached parity, so the family is tractable |
+| GDN recurrent (237) | 5.51 → 5.46 | 10.30 → 9.01 | **already ahead** (10.20 vs 15.43) | **YES, done** — M3-I3 |
+
+**The answer to "is AC-4 arithmetically reachable".** Yes on the chain, no on the
+chain alone:
+
+1. **Five stages at vLLM parity clear the chain floor at every batch size** —
+   w13, w2, router, dense fp8 and attention. One of those five (dense fp8) is
+   already done. Three of the five are one ferret programme (the MoE chain).
+2. **No single stage suffices anywhere.** Taking w13 to *zero* removes only
+   2195 µs of the bs1 chain, leaving 5763 µs against vLLM's 3503.
+3. **The chain floor is not the step.** The measured step is 1.23× / 1.30× /
+   1.47× cp. Meeting the five-stage floor with that packing factor unchanged
+   gives 3868 / 5548 / 6986 µs — **still above vLLM at every batch size.**
+   So latency work and width work are each necessary and neither is sufficient:
+   the ferret loops have to close the per-task gap *and* the packing factor has
+   to come down toward 1.0, which is what §1's 80 %-one-stage-at-a-time number
+   describes.
+4. **Corollary the coordinator asked about directly:** width work and dense work
+   cannot move AC-4 while the MoE chain stands — the MoE block is 59 % of the
+   bs1 chain, and even zeroing everything else leaves it at 4685 µs, above
+   vLLM's whole step. But the converse is equally true: closing the MoE chain
+   alone leaves cp at 4868 µs, also above 3503. **Both, or neither.**
+
+---
+
+## 8. Layout and reproduction
 
 | path | what |
 |---|---|
@@ -369,7 +634,8 @@ disjoint-columns argument requires.
 | `tables/width_bs{1,8,16}.json` | the per-stage width table, anchor QC, concurrency bands |
 | `tables/anchor_bs16.json` | the bs16 anchor-QC resolution (profiler tail truncation) |
 | `tables/ceiling.json` | the wave-depth ceiling model, per-stage calibration, admissibility |
-| `tables/critpath_bs*.json` | DAG critical path, baseline and with splits |
+| `tables/critpath_bs*.json` | DAG critical path, both weightings, baseline and with splits |
+| `tables/cp_decompose_bs{1,8,16}.json` | **§7: the path's composition, per-layer chain, sensitivity, and the AC-4 feasibility solve** |
 | `tables/sweep_geomB.json`, `.csv` | the A/B: all 45 per-rep walls, device audits, token hashes |
 | `tables/prof/width_bs1_k{2,4,8}.json` | the profiled mechanism check |
 | `tables/prof/skew_bs1.json`, `sched_bs1.json` | arrival spread per level; scheduler-CTA time |
@@ -398,6 +664,9 @@ python3 m4i5/scripts/width.py /home/catalyst/mpk-artifacts/m3i7/late_raw/raw_bs1
 python3 m4i5/scripts/ceiling.py m4i5/tables/width_bs{1,8,16}.json --out /tmp/c.json
 python3 m4i5/scripts/critpath.py /home/catalyst/mpk-artifacts/m3i7/box/graphs/task_graph_bs1.json \
     m4i5/tables/width_bs1.json
+python3 m4i5/scripts/cp_decompose.py /home/catalyst/mpk-artifacts/m3i7/box/graphs/task_graph_bs1.json \
+    m4i5/tables/width_bs1.json --names meta/task_names.json \
+    --ferret m3i10/ferret_targets.json --out /tmp/cp1.json    # section 7
 python3 m4i5/scripts/sweep_tables.py m4i5/raw --out /tmp/ab.json   # reproduces §4
 
 # on catalyst-B200, isolated clone + fresh extension

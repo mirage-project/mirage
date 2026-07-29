@@ -13,7 +13,12 @@
   "241": 4.0,
   "242": 4.0
  },
- "cp_max_us": 4485.9,
- "cp_ntrig_us": 4485.9,
- "cp_max_pct_of_step": 45.7
+ "weighting": "levelmax (correct); expected retained for audit",
+ "events_full_fanin": "2277/2277",
+ "cp_max_us": 5418.3,
+ "cp_ntrig_us": 5418.3,
+ "cp_max_pct_of_step": 55.2,
+ "cp_expected_weighting_us": 4485.9,
+ "cp_expected_pct_of_step": 45.7,
+ "correction_note": "cp_expected_weighting_us is what this script reported before: it charges each task the live/dead expected value, which understates every level that mixes live and dead tasks. Every event here is a full fan-in barrier, so a level costs its slowest producer."
 }
