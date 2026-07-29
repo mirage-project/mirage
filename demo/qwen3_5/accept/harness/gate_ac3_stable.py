@@ -168,6 +168,7 @@ def _gpu_sample(phys_index) -> dict:
 def cmd_rep(args) -> int:
     import numpy as np
 
+    import admission_policy                             # noqa: E402  THE authority
     from mpk_engine_run import MPKOfflineAdapter, load_reference_requests  # noqa: E402
 
     out_dir = Path(args.out)
@@ -253,7 +254,15 @@ def cmd_rep(args) -> int:
     meta = {"tag": tag, "status": "ok", "bs": args.bs, "rep": args.rep,
             "msl": AC3_MSL, "new_tokens": AC3_NEW_TOKENS, "mbt": AC3_MBT,
             "page_size": AC3_PAGE_SIZE, "cold_compile": True,
-            "per_request_token_cap": cap,
+            # What was REQUESTED and what the policy actually compiled -- the
+            # cap is a compile-time define, so the resolved value is part of this
+            # rep's identity. (348a601a moved resolution into
+            # admission_policy.py and left a bare `cap` here, which raised
+            # NameError on every rep; caught by M4-I1's first real run.)
+            "per_request_token_cap": args.per_request_token_cap,
+            "per_request_token_cap_compiled": admission_policy.resolve_int(
+                args.per_request_token_cap, AC3_MBT, args.bs),
+            "admission_policy": admission_policy.summary(),
             "kernel_dir": str(args.kernel_dir),
             "secs": round(secs, 1), "n_waves": state["n"],
             "dump_md5": dump_md5,
@@ -629,11 +638,15 @@ def cmd_score(args) -> int:
 
 def _assertion(report, need, dr, rc) -> str:
     bss = ",".join(sorted(report["per_bs"], key=int))
+    # `dr` is None when NO rep scored (e.g. every rep errored). Formatting it
+    # with %-precision raised TypeError and destroyed the report that was trying
+    # to explain the failure -- M4-I1 hit exactly that.
+    drs = "n/a (no rep scored)" if dr is None else f"{dr:.1%}"
     if rc == 0:
         return (f"AC-3 STABLE: at bs {{{bss}}}, {need} independent COLD reps per bs are "
                 f"mutually bit-identical in KV/GDN state AND byte-identical to "
                 f"results/dumps_final per case; fingerprint divergence rate "
-                f"{dr:.1%} of scored reps, all divergent reps quarantined, re-run "
+                f"{drs} of scored reps, all divergent reps quarantined, re-run "
                 f"and retained in the record.")
     if rc == 1:
         return ("AC-3 FAIL: at least one rep's token ids differ from "
@@ -641,7 +654,7 @@ def _assertion(report, need, dr, rc) -> str:
                 "stability result -- see per_bs[*].reps[*].tokens.mismatched.")
     return (f"AC-3 UNSTABLE: at least one batch size could not produce {need} "
             f"mutually fingerprint-identical COLD reps inside the quarantine "
-            f"budget (observed fingerprint divergence rate {dr:.1%}). The gate "
+            f"budget (observed fingerprint divergence rate {drs}). The gate "
             f"refuses to assert stability; token verdicts per rep are in the report.")
 
 
