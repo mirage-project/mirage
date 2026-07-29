@@ -292,16 +292,68 @@ range rather than a band.
 | `gates/qloop_result.json` | pass-size invariance, 116 rows |
 | `gates/oracle_mt{4,2,1}.json` | HF oracle at each pass size |
 | `gates/bytediff_qp2.json`, `gates/run_report_qp2.json` | AC-3 per-case byte diff + harness report |
+| `raw_meta/sweep3/` | **all 135 per-rep records of the three-way sweep** — metas / timings / token dumps, 45 device-audit sidecars, 135 run logs; `sweep3.py` reproduces §3a's tables from this alone |
+| `raw_meta/perf/`, `raw_meta/{prof,tables,logs,ac3,gates,head_ac3,mkptxas}/` | the FIRST-pass campaign's per-rep records and gate logs (§5 and §§1–4) — a different run, kept separate |
 | `scripts/` | every script used: `ctx_curve.py`, `tu_i6a_attn.cu`, `probe_regs.sh`, `mk_ptxas.sh`, `run_ctx.sh`, `gate_*.sh`, `phase*.sh` (`phase6.sh` = the three-way sweep), `sweep3.py` / `sweep3_csv.py`, `perf_medians.py`, `gpu_guard_i6a.sh`, `retry.sh` |
+
+### Retained evidence, and how to reproduce the tables
+
+**Every number in §3a rests on retained per-rep evidence in this directory, not on a summary.** All
+135 reps are committed under `raw_meta/sweep3/`: 45 geometry-A timings plus their token dumps, 45
+geometry-B metas, 45 geometry-C metas, 45 device-audit sidecars and all 135 run logs — 2.5 MB total.
+No npz and no off-repo pointer for this campaign, because every perf rep ran `--no-profiler` or
+through `mpk_engine_run.py`, so the whole primary record fits in-tree.
+
+`scripts/sweep3.py` runs unmodified against it — `raw_meta/sweep3/` reproduces the layout the script
+expects of a scratch root:
+
+```bash
+cd demo/qwen3_5/accept/opt/m3i6a
+python3 scripts/sweep3.py     "$PWD/raw_meta/sweep3"           # -> tables/sweep3_table.txt
+python3 scripts/sweep3_csv.py "$PWD/raw_meta/sweep3" out.csv   # -> tables/sweep3_medians.csv
+```
+
+Both come out **byte-for-byte identical** to the committed tables, verified on a CPU-only box with no
+access to catalyst-B200 and no GPU used. The reproduction covers more than the medians: `sweep3.py`
+re-reads each rep's own pinned device and `gpu_before` and re-derives the discard decision, so
+"0 discarded" is checkable rather than asserted.
+
+| geometry | reps retained | per-rep record | device audit read from |
+|---|---:|---|---|
+| A — AC-3, msl=132 | 45 | `raw_meta/sweep3/dumpsA_qp{4,2,1}/timings_bs*_rep*` + token dumps | `raw_meta/sweep3/audit/A_*.json` (sidecar — `mpk_engine_run.py` records no GPU state) |
+| B — matched 256/1024, msl=353 | 45 | `raw_meta/sweep3/noprofB_qp{4,2,1}/meta_bs*_rep*_qp*.json` | that meta's own `cuda_visible_devices` + `gpu_before`/`gpu_after` |
+| C — deep context, msl=897 | 45 | `raw_meta/sweep3/noprofC_qp{4,2,1}/meta_bs*_rep*_qp*.json` | same |
+
+**`raw_meta/perf/` is a different campaign — do not mix the two.** It holds the first-pass two-arm
+runs behind §5 (phase3 + phase5, tree `170ab325`, geometry A predating the drain gate, geometry C only
+at bs 1/8/16). `raw_meta/sweep3/` holds the three-arm campaign behind §3a (phase6, integrated HEAD
+`f3606f2c`, interleaved, fully drain-gated, geometry C at all five batch sizes). They share file
+*names*, so they are kept in separate roots: §5's tables reproduce from `raw_meta/perf/` via
+`scripts/perf_medians.py`, §3a's from `raw_meta/sweep3/` via `scripts/sweep3.py`.
 
 ### Provenance
 
-The change landed at `a86b1eb1` on the strength of §§1–5. Cross-provider review then failed it at
-c2 on one gap: the acceptance requires a measured pass-size sweep at **all** batch sizes, and pass 1
-had only been measured in profiler windows at bs1/bs8, so the choice of 2 over 1 rested on partial
-evidence. §3a closes that — it is the whole reason the sweep re-runs all three arms rather than
-bolting a third arm onto the earlier tables. (The issue also sat in `todo` without a verdict while
-these gaps were being closed; the coordinator has corrected its status to `review`.)
+The change landed at `a86b1eb1` on the strength of §§1–5. Cross-provider review then failed it twice,
+each time on evidence rather than on the analysis, and each failure is worth recording because the
+conclusion never moved:
+
+- **c2 — incomplete selection evidence.** The acceptance requires a measured pass-size sweep at
+  **all** batch sizes, and pass 1 had only been measured in profiler windows at bs1/bs8, so the choice
+  of 2 over 1 rested on partial evidence. §3a closes it, and is the reason the sweep re-runs all three
+  arms rather than bolting a third arm onto the earlier tables. The sweep agreed with the landed value
+  and additionally showed pass 1 to be a regression against the *shipped* pass 4 at bs 4/8/16 — a fact
+  the partial evidence could not have produced.
+- **c3 — evidence not retained.** `a8c79c7f` committed the scripts and the summary tables but not the
+  per-rep records, so the reviewer could not re-run `sweep3.py` against retained evidence, and
+  correctly refused to accept summarized numbers as primary evidence. Closed by the section above. The
+  records were never actually lost: the hunt globbed `/var/tmp/i6a*`, while `phase6.sh` writes to
+  `/var/tmp/m3i6a_sweep`. A first attempt at retaining them rsynced phase6 over `raw_meta/perf/` and
+  silently replaced 60 of the phase5 records — the same class of provenance error — so those commits
+  were dropped while unpushed, `raw_meta/perf/` was verified byte-identical to `c80ebd68` again, and
+  the campaign was given its own root.
+
+(The issue also sat in `todo` without a verdict while these gaps were being closed; the coordinator
+has corrected its status to `review`.)
 
 Raw profiler `.npz` (6 × 0.5–1.4 GB) and the kernel dirs stay on catalyst-B200 under
 `~/mpk-qwen35/i6a/{prof,perf,ac3}/`; every table above regenerates from them with the committed
