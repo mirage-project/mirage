@@ -219,6 +219,129 @@ matched in **all 15 (bs, rep) pairs** — the kernel-level gate proved the paths
 bit-exact on synthetic tensors, and this is the same property through 40 real
 layers on real checkpoint weights.
 
+## Gate 3 — FULL AC-3 at all five batch sizes
+
+`harness/gate_ac3_stable.sh`, shipped arm, 10 pinned prompts, `msl=132`, 64 new
+tokens, a **cold kernel compile for every rep**, 3 fingerprint-consistent reps per
+bs. (`gate_ac3_stable.py`'s `NameError('cap')`, which M4-I1 fixed, is present in
+this tree — the gate scored reps normally.)
+
+**Verdict STABLE.** 15 reps launched, 15 scored, 15 accepted, **0 quarantined, 0
+run-errors**. Fingerprint divergence 0.0%, token divergence 0.0%. All reps on
+physical GPU 2, adopted from each run's own device UUID.
+
+| bs | verdict | accepted | quarantined | KV/GDN state_sig | tokens vs baseline |
+|---|---|---|---|---|---|
+| 1 | STABLE | 3/3 | 0 | `f66643d43adada64` | ALL IDENTICAL |
+| 2 | STABLE | 3/3 | 0 | `35629913b83a31ed` | ALL IDENTICAL |
+| 4 | STABLE | 3/3 | 0 | `f93138846d1d653d` | ALL IDENTICAL |
+| 8 | STABLE | 3/3 | 0 | `7fba0ce871626e3c` | ALL IDENTICAL |
+| 16 | STABLE | 3/3 | 0 | `317dc00900bfbc49` | ALL IDENTICAL |
+
+Under the **re-pinned** AC-3 (goal.md, 2026-07-29), at every batch size:
+
+- **(a) coherence** — repetition ok, byte-soup not-evaluated (no tokenizer in this
+  venv). Perplexity **transfers by identity**: every case is byte-identical to the
+  adjudicated baseline, so it is literally the same continuation that was already
+  scored.
+- **(b) agreement floor** — **10/10 cases ≥ 90%** at every bs; worst 0.9375
+  (`p06-poem`).
+- **(c) no silent degradation** — **bit-exact 10/10 at every bs** against the
+  committed `results/dumps_final`. Exactness is the expected result and it held,
+  so there is nothing to explain.
+
+The single divergence from the HF reference is `p06-poem` position 60 at every bs,
+and it is **the same token the committed baseline emits** — the M2-adjudicated
+numeric-precision tie (reference top-1 `31000` and top-2 `81316` both at logit
+21.0, margin 0.0; engine argmax `40581`, the reference's own top-3 at 20.875).
+`repin_m4i2.json` marks it `same-as-baseline [known-adjudicated]`. It is **not
+introduced by this change**.
+
+`run_ac3.py` exits **1** on this tree, and that is expected: it is the *pre-re-pin*
+scorer, which demanded bit-identity with the HF reference and therefore files the
+known `p06-poem` tie as a waiver request at all five batch sizes. Its five records
+are exactly those. The criterion goal.md now pins is the three-part one above, and
+that passes.
+
+## The stage wallspan, and where the rest of the gap lives
+
+M3-I7's re-derived table put dense fp8 at **2.07x slower than vLLM as a stage**
+while the ferret kernel now measures at parity standalone, so the integrated e2e
+win was expected to be much smaller than the kernel ratio — and the remainder had
+to be located, not assumed. Profiled runs (profiler ON, so these are **diagnostic
+attributions**; the perf claim is the `--no-profiler` A/B above), one steady-window
+iteration, `concurrency.py`:
+
+| bs | arm | step us | stage tasks | stage work us | **stage WALLSPAN us** | span/step | mean conc (of 128) |
+|---|---|---|---|---|---|---|---|
+| 1 | A | 9698.4 | 5200 | 84943.3 | **2813.8** | 0.290 | 70.8 |
+| 1 | B | 8655.5 | 16800 | 105377.1 | **1483.7** | 0.171 | 113.0 |
+| 16 | A | 11989.3 | 2859 | 46633.5 | **2851.1** | 0.238 | 39.0 |
+| 16 | B | 11237.9 | 13892 | 95005.2 | **1579.6** | 0.141 | 94.7 |
+
+**Stage wallspan 2813.8 → 1483.7 us at bs1 (1.896x) and 2851.1 → 1579.6 us at
+bs16 (1.805x).** Against M3-I7's 2.07x stage deficit that puts the dense-fp8 stage
+at roughly parity with vLLM — which is what the kernel's 1.011 `min_ratio`
+predicted, so the chain from standalone kernel to integrated stage closes.
+
+### The mechanism, because work went UP while wallspan went DOWN
+
+Aggregate per-task work **rose** (84943 → 105377 us at bs1). That is not a
+contradiction and it is not noise:
+
+the finer slice multiplies the task count ~3.2x (5200 → 16800 per step). Each task
+re-pays a fixed prologue — whole-K A staging, the fp32 scale panels, the cp.async
+ring fill — and at slice 32/16 only 4 or 2 of the 8 warps are compute-active. So
+the **sum** of per-task durations rises. What falls is the **union**: mean
+concurrency during the stage goes 70.8 → 113.0 (bs1) and 39.0 → 94.7 (bs16) out of
+128, and the wallspan — the only part the step pays — nearly halves. **The win is
+width, not less work.** This is also why the standalone ferret metric (whole-grid
+latency) and this measurement agree while the per-task sum does not.
+
+### The implied residual — the M4 handoff
+
+Two numbers, and the second is the decision-relevant one:
+
+- **Width residual on the stage.** The stage still runs at 113/128 (bs1) and
+  94.7/128 (bs16). Residual = wallspan − work/128 = **660.5 us (44.5% of the
+  stage's remaining wallspan)** at bs1 and **837.3 us (53.0%)** at bs16. Bounding
+  with arm A's un-inflated work instead gives 820.1 us and 1215.2 us. Either way,
+  **roughly half of what the dense stage still costs is width, not kernel** — and
+  it is worse at bs16.
+- **The ceiling on further task-279 work.** The stage is now **17.1% of the step at
+  bs1 and 14.1% at bs16**. Driving task 279 to *zero* would still leave 7171.8 of
+  8655.5 us (bs1) and 9658.3 of 11237.9 us (bs16) standing. **Dense-fp8 kernel
+  optimisation is close to exhausted as a lever**; the remaining gap to vLLM lives
+  in the other ~85% of the step, and the largest single width deficit now visible
+  in the same table is `TASK_MOE_W13_FP8_BLOCKSCALE_SM100` (span 2343.8 us at
+  mean concurrency 95.8) — M4-I5's territory.
+
+**Caveat, stated because it bounds what the table supports.** `concurrency.py`
+detects its steady window per run, and the two arms' windows do not cover
+identical fractions of an iteration — visible as arm A's task count differing
+between bs1 (5200) and bs16 (2859) when the graph is fixed. `wall_span/step`, mean
+concurrency and the span ratio are normalised and robust to that; absolute
+`work_us` and task counts are reported as **mechanism evidence**, not as
+measurements.
+
+## Caveats and what this issue did not establish
+
+- The e2e A/B is geometry B (synthetic 256-token prompts, `msl=353`, 96 decode
+  steps), the AC-4-shaped geometry — not an AC-4 verdict. AC-4/AC-5 against a fresh
+  vLLM comparator are not re-run here.
+- Prefill is untouched by design: `max_num_batched_tokens > 16` falls back to slice
+  128 + the golden path, because the fast path's per-warp B ring assumes
+  `TILE_M == 16`. A prefill-capable fast path is possible (it needs the ring
+  generalised to `WARPS_M > 1`) and is left to M4-I4's territory.
+- The stage-wallspan capture is 1 profiled rep per (arm, bs) at bs1 and bs16 only.
+  It is diagnostic attribution, not a 3-rep performance measurement.
+- 12 of the 14 `tests/runtime_python/blackwell/*/setup.py` still omit
+  `MPK_TARGET_CC`/`MODE_OFFLINE` and so validate arena `static_assert`s against a
+  163 KiB budget instead of 207 KiB. Only this issue's harness was fixed.
+- `demo/qwen3_5/accept/mpk_engine_run.py` carries **M4-I5's** uncommitted
+  `profile_wave` cap-probe fix as its own attributed commit, because bs ≥ 4
+  profiling needs it. If M4-I5 lands it too, the coordinator should dedupe.
+
 ## Files
 
 ```

@@ -1,0 +1,65 @@
+M4-I2 dense-fp8 stage wallspan (task 279 / dense_proj), ONE steady-window
+decode iteration, profiler ON -- DIAGNOSTIC attribution. The performance
+claim is the --no-profiler A/B in tables/m4i2_tables.txt.
+
+arm A = base(slice128+golden)      arm B = new(ferret v011)      NW = 128
+
+== the whole step, and the dense stage inside it ==
+ bs arm    step_us  tasks    work_us    span_us span/step  meanconc
+  1   A     9698.4   5200    84943.3     2813.8     0.290      70.8
+  1   B     8655.5  16800   105377.1     1483.7     0.171     113.0
+ 16   A    11989.3   2859    46633.5     2851.1     0.238      39.0
+ 16   B    11237.9  13892    95005.2     1579.6     0.141      94.7
+
+'tasks' is the stage's TASK count in the window, and it is itself a
+result: the finer slice is what multiplies it, and that multiplication is
+the graph-width half of the change.
+
+== before -> after, and the width residual M4-I5 owns ==
+bs1:
+   stage WORK        84943.3 ->  105377.1 us  (0.806x)
+   stage WALLSPAN     2813.8 ->    1483.7 us  (1.896x, -1330.0 us)
+   step               9698.4 ->    8655.5 us  (-1042.8 us)
+   mean concurrency during the stage  70.8 -> 113.0  of 128
+   WIDTH RESIDUAL (after) 660.5 us = 44.5% of the stage's remaining wallspan
+     (ideal span at full width = work/128 = 823.3 us)
+     bounded with arm A's un-inflated work: ideal 663.6 us -> residual 820.1 us
+   HEADROOM LEFT IN THIS STAGE: it is now 17.1% of the step, so driving task 279 to
+     ZERO would leave 7171.8 us of the 8655.5 us step standing.
+
+bs16:
+   stage WORK        46633.5 ->   95005.2 us  (0.491x)
+   stage WALLSPAN     2851.1 ->    1579.6 us  (1.805x, -1271.6 us)
+   step              11989.3 ->   11237.9 us  (-751.4 us)
+   mean concurrency during the stage  39.0 -> 94.7  of 128
+   WIDTH RESIDUAL (after) 837.3 us = 53.0% of the stage's remaining wallspan
+     (ideal span at full width = work/128 = 742.2 us)
+     bounded with arm A's un-inflated work: ideal 364.3 us -> residual 1215.2 us
+   HEADROOM LEFT IN THIS STAGE: it is now 14.1% of the step, so driving task 279 to
+     ZERO would leave 9658.3 us of the 11237.9 us step standing.
+
+READING IT, and the mechanism -- because 'work' goes UP while 'wallspan'
+goes DOWN, and a number you cannot explain you cannot trust:
+
+  The finer slice MULTIPLIES the task count (~3.2x). Each task re-pays a
+  fixed prologue -- whole-K A staging, the fp32 scale panels, the cp.async
+  ring fill -- and at slice 32/16 only 4/2 of the 8 warps are compute-
+  active. So the SUM of per-task durations rises. What falls is the UNION:
+  mean concurrency during the stage goes from well under half the machine
+  to near-saturation, and the stage's WALLSPAN -- the only part the step
+  actually pays -- drops ~1.8-1.9x. The win is WIDTH, not less work. That
+  is also why the standalone ferret metric (whole-grid latency) and this
+  agree while the per-task sum does not.
+
+  The WIDTH RESIDUAL is what a faster task-279 kernel cannot remove. But
+  the more decision-relevant number is the stage's SHARE of the step: once
+  that is small, further kernel work on task 279 has a hard ceiling no
+  matter how good the kernel gets, and the remaining gap is elsewhere.
+
+CAVEAT ON THE WORK/TASK-COUNT COLUMNS: concurrency.py measures one
+steady-window iteration whose bounds it detects per run, and the two arms'
+windows do not cover identical fractions of an iteration (visible as arm
+A's task count differing between bs1 and bs16 when the graph is fixed).
+wall_span/step, mean concurrency and the span ratio are normalised and
+robust to that; absolute work_us and task counts are not, and are reported
+as mechanism evidence rather than as measurements.

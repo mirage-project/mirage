@@ -36,7 +36,9 @@ import re
 import sys
 
 NW = 128           # MPK worker CTAs (concurrency.py's own NW)
-STAGE = "dense_proj"   # task 279, TASK_LINEAR_FP8_BLOCKSCALE_SM100 (trace_lib.py)
+# concurrency.py labels task types from the run's own task_names.json, which
+# carries the raw runtime_header.h names -- not trace_lib.py's short aliases.
+STAGE = "TASK_LINEAR_FP8_BLOCKSCALE_SM100"   # task 279
 ARM_LABEL = {"A": "base(slice128+golden)", "B": "new(ferret v011)"}
 
 
@@ -104,6 +106,10 @@ def main():
               f"{row['total_us']:10.1f} {row['wall_span_us']:10.1f} "
               f"{row['wall_span_us']/st:9.3f} {row['mean_conc_during']:9.1f}")
     P("")
+    P("'tasks' is the stage's TASK count in the window, and it is itself a")
+    P("result: the finer slice is what multiplies it, and that multiplication is")
+    P("the graph-width half of the change.")
+    P("")
     P("== before -> after, and the width residual M4-I5 owns ==")
     rows = []
     for bs in bss:
@@ -141,12 +147,47 @@ def main():
           f"{100*B['residual_share']:.1f}% of the stage's remaining wallspan")
         P(f"     (ideal span at full width = work/{NW} = "
           f"{B['ideal_span_us']:.1f} us)")
+        # The work base matters: arm B's work is INFLATED by the finer slice's
+        # per-task overhead, so work_B/NW overstates the incompressible floor.
+        # Bounding it with arm A's (un-inflated) work gives the honest range.
+        alt = A["total_us"] / NW
+        r["ideal_span_us_A_work"] = alt
+        r["width_residual_us_altbase"] = B["wall_span_us"] - alt
+        P(f"     bounded with arm A's un-inflated work: ideal "
+          f"{alt:.1f} us -> residual {B['wall_span_us']-alt:.1f} us")
+        # What the step could NOT get back even if the stage were free.
+        floor = sB - B["wall_span_us"]
+        r["step_floor_if_stage_free_us"] = floor
+        r["stage_share_of_step_B"] = B["wall_span_us"] / sB
+        P(f"   HEADROOM LEFT IN THIS STAGE: it is now "
+          f"{100*B['wall_span_us']/sB:.1f}% of the step, so driving task 279 to")
+        P(f"     ZERO would leave {floor:.1f} us of the {sB:.1f} us step standing.")
         P("")
-    P("READING IT: 'work' is what the kernel change bought inside MPK's own")
-    P("dispatch. 'wallspan' is what the step got. The WIDTH RESIDUAL is the part")
-    P("of the stage's remaining cost that a faster kernel cannot remove, because")
-    P("the stage is not running at the machine's width -- that is M4-I5's lever,")
-    P("not another round of kernel work on task 279.")
+    P("READING IT, and the mechanism -- because 'work' goes UP while 'wallspan'")
+    P("goes DOWN, and a number you cannot explain you cannot trust:")
+    P("")
+    P("  The finer slice MULTIPLIES the task count (~3.2x). Each task re-pays a")
+    P("  fixed prologue -- whole-K A staging, the fp32 scale panels, the cp.async")
+    P("  ring fill -- and at slice 32/16 only 4/2 of the 8 warps are compute-")
+    P("  active. So the SUM of per-task durations rises. What falls is the UNION:")
+    P("  mean concurrency during the stage goes from well under half the machine")
+    P("  to near-saturation, and the stage's WALLSPAN -- the only part the step")
+    P("  actually pays -- drops ~1.8-1.9x. The win is WIDTH, not less work. That")
+    P("  is also why the standalone ferret metric (whole-grid latency) and this")
+    P("  agree while the per-task sum does not.")
+    P("")
+    P("  The WIDTH RESIDUAL is what a faster task-279 kernel cannot remove. But")
+    P("  the more decision-relevant number is the stage's SHARE of the step: once")
+    P("  that is small, further kernel work on task 279 has a hard ceiling no")
+    P("  matter how good the kernel gets, and the remaining gap is elsewhere.")
+    P("")
+    P("CAVEAT ON THE WORK/TASK-COUNT COLUMNS: concurrency.py measures one")
+    P("steady-window iteration whose bounds it detects per run, and the two arms'")
+    P("windows do not cover identical fractions of an iteration (visible as arm")
+    P("A's task count differing between bs1 and bs16 when the graph is fixed).")
+    P("wall_span/step, mean concurrency and the span ratio are normalised and")
+    P("robust to that; absolute work_us and task counts are not, and are reported")
+    P("as mechanism evidence rather than as measurements.")
 
     txt = "\n".join(L) + "\n"
     open(os.path.join(a.out, "stage_wallspan.txt"), "w").write(txt)
