@@ -28,6 +28,15 @@ set -uo pipefail
 
 BOX_ROOT="${MPK_BOX_ROOT:-$HOME/mpk-qwen35}"
 PY="${MPK_PY:-$BOX_ROOT/venv-rm/bin/python}"
+# The HF reference model needs a DIFFERENT interpreter from the MPK runtime.
+# Measured on this box: the MPK venvs carry transformers 4.57.1, which has no
+# Qwen3.5 support at all ("module transformers has no attribute
+# Qwen3_5MoeForConditionalGeneration"), while venv-vllm carries 5.14.1 -- the
+# version the pinned vLLM baseline and the AC-3 reference were captured with
+# (reference/reference_outputs.json meta, baselines/*/summary.json versions).
+# AC-3(a) says "perplexity under the HF reference model", so it has to be scored
+# in the environment that can actually load that model.
+HF_PY="${MPK_HF_PY:-$BOX_ROOT/venv-vllm/bin/python}"
 # The interpreter's own bin dir goes on PATH for the same reason
 # collect_vllm.sh does it: pip console scripts (ninja, cmake) live there and the
 # JIT paths shell out to them.
@@ -50,6 +59,7 @@ while [ $# -gt 0 ]; do
     --model) MODEL="$2"; shift 2;;
     --revision) REVISION="$2"; shift 2;;
     --python) PY="$2"; shift 2;;
+    --hf-python) HF_PY="$2"; shift 2;;
     --skip-hf) SKIP_HF=1; shift;;
     *) echo "collect_ac3.sh: unknown flag $1" >&2; exit 3;;
   esac
@@ -146,8 +156,12 @@ if [ "$SKIP_HF" = "1" ]; then
   HFRC=99
 else
   echo "=== HF coherence stage (text + perplexity under the pinned HF model) $(date -Is) ==="
+  echo "    interpreter: $HF_PY"
+  "$HF_PY" -c "import transformers; print('    transformers', transformers.__version__)" \
+    || { echo "    HF interpreter unusable"; }
+  PATH="$(dirname "$HF_PY"):$PATH" \
   bash "$ACC/opt/m3i7/scripts/gpu_guard_i7.sh" "$GUARD_LIST" -- \
-    "$PY" -u "$ACC/final/hf_score.py" \
+    "$HF_PY" -u "$ACC/final/hf_score.py" \
       --reference "$ACC/reference/reference_outputs.json" \
       --reps-root "$SWEEP/reps" --batch-sizes "$BSS" \
       --model "$MODEL" --revision "$REVISION" \
