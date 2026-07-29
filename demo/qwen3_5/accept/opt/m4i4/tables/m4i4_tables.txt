@@ -1,0 +1,100 @@
+====================================================================================================
+1. AC-3 GEOMETRY (msl=132, 64 new tokens, 10 pinned prompts) -- total wave wall
+====================================================================================================
+ bs  cap |  uncapped ms    r%  n |  capped ms    r%  n |  speedup |   replay iters u/c
+  1   16 |      9181.7  0.03  3 |    9182.0  0.02  3 |   1.000 |   956/956 = 1.000x
+  2    8 |      4974.3  0.04  3 |    4963.1  0.10  3 |   1.002 |   498/505 = 0.986x
+  4    4 |      3251.0  0.06  3 |    3194.9  0.06  3 |   1.018 |   308/318 = 0.969x
+  8    2 |      2909.5  0.04  3 |    2496.1  0.06  3 |   1.166 |   228/228 = 1.000x
+ 16    1 |      3306.2  0.06  3 |    1572.1  0.14  3 |   2.103 |   203/131 = 1.550x
+
+======================================================================================================================
+2. PINNED 256/1024 GEOMETRY -- per-arm compiled kernels, arms interleaved in one claim
+======================================================================================================================
+ bs   arm  cap |   e2e s    r%  n | prefill s    r%  n | pre/e2e | decode tok/s | replay it
+  1  none None | 10.255  0.05  3 |    0.311  3.15  3 |   3.0% |       102.7 |     1039
+  1  auto   16 | 10.255  0.09  3 |    0.311 21.00  3 |   3.0% |       102.7 |     1039
+  2  none None | 10.799  0.81  3 |    0.614  0.33  3 |   5.7% |       200.5 |     1057
+  2  auto    8 | 10.653  0.47  3 |    0.479  0.37  3 |   4.5% |       200.7 |     1055
+  4  none None | 11.590  0.57  3 |    1.190  0.20  3 |  10.3% |       392.7 |     1094
+  4  auto    4 | 11.146  0.50  3 |    0.822  0.48  3 |   7.4% |       395.6 |     1087
+  8  none None | 14.424  0.85  3 |    2.938  0.23  3 |  20.4% |       711.1 |     1193
+  8  auto    2 | 12.641  0.41  3 |    1.701  0.09  3 |  13.5% |       746.7 |     1151
+ 16  none None | 28.294  5.56  3 |    8.252  0.10  3 |  29.2% |       815.1 |     1887
+ 16  auto    1 | 15.426  6.14  3 |    3.040  0.19  3 |  19.7% |      1318.9 |     1279
+
+3. CAP EFFECT at 256/1024 (capped vs uncapped, same window)
+ bs |   prefill |   decode |      e2e
+  1 |    1.000x |    +0.0% |    +0.0%
+  2 |    1.283x |    +0.1% |    +1.4%
+  4 |    1.447x |    +0.7% |    +4.0%
+  8 |    1.727x |    +5.0% |   +14.1%
+ 16 |    2.714x |   +61.8% |   +83.4%
+
+====================================================================================================
+4. AC-5 (mpk e2e / vLLM e2e, bound 1.25x) and AC-4 position (decode)
+====================================================================================================
+ bs   arm | mpk e2e s vllm e2e s AC-5 ratio  verdict |  mpk dec vllm dec AC-4 gap
+  1  none |   10.255      3.602      2.847     FAIL |   102.7    285.5     2.78
+  1  auto |   10.255      3.602      2.847     FAIL |   102.7    285.5     2.78
+  2  none |   10.799      3.886      2.779     FAIL |   200.5    529.8     2.64
+  2  auto |   10.653      3.886      2.741     FAIL |   200.7    529.8     2.64
+  4  none |   11.590      4.455      2.602     FAIL |   392.7    934.3     2.38
+  4  auto |   11.146      4.455      2.502     FAIL |   395.6    934.3     2.36
+  8  none |   14.424      4.953      2.912     FAIL |   711.1   1692.5     2.38
+  8  auto |   12.641      4.953      2.552     FAIL |   746.7   1692.5     2.27
+ 16  none |   28.294      5.568      5.082     FAIL |   815.1   3018.1     3.70
+ 16  auto |   15.426      5.568      2.771     FAIL |  1318.9   3018.1     2.29
+
+vLLM sources: bs1=vllm-0.25.1-20260725/full/summary.json (n=3); bs2=vllm-0.25.1-20260725/full/summary.json (n=3); bs4=vllm-0.25.1-20260725/full/summary.json (n=3); bs8=vllm-0.25.1-20260725/bs8.merged.json (two-boot merge) (n=8); bs16=vllm-0.25.1-20260725/bs16.merged.json (two-boot merge) (n=8)
+
+================================================================================================================
+5. AC-5 AS A DECODE REQUIREMENT (landed policy arm). Given prefill P and the 1.25x bound on vLLM e2e V,
+   the decode window may be at most 1.25V - P; the implied decode throughput is what AC-4 must reach for AC-5 to hold.
+================================================================================================================
+ bs | P (mpk pre s) V (vllm e2e s) vllm pre s* | max dec win s req dec tok/s / vllm dec |      now  need x | P_max@par pre must
+  1 |        0.311          3.602       0.026 |        4.191         243.6      0.853 |   102.7    2.37 |    0.926       ok
+  2 |        0.614          3.886       0.032 |        4.244         481.2      0.908 |   200.5    2.40 |    1.003       ok
+  4 |        0.822          4.455       0.084 |        4.746         860.5      0.921 |   395.6    2.18 |    1.197       ok
+  8 |        1.701          4.953       0.127 |        4.490        1819.0      1.075 |   746.7    2.44 |    1.366    1.25x
+ 16 |        3.040          5.568       0.155 |        3.920        4167.8      1.381 |  1318.9    3.16 |    1.547    1.96x
+  * vllm pre s is IMPLIED (its e2e minus its own decode window at its measured throughput), not separately measured.
+  'req dec tok/s / vllm dec' > 1 means AC-5 cannot be met at decode PARITY: our prefill deficit alone
+  spends more than the 25% slack, so AC-4 has to beat vLLM by that factor for AC-5 to pass.
+
+5. EVERY REP (ms), in rep order -- the >=3-rep rule checkable inline
+  A  bs1  none 9181.7 9179.8 9182.4   median=9181.7 n=3
+  A  bs1  auto 9180.2 9182.0 9182.1   median=9182.0 n=3
+  A  bs2  none 4973.7 4975.6 4974.3   median=4974.3 n=3
+  A  bs2  auto 4963.1 4961.4 4966.6   median=4963.1 n=3
+  A  bs4  none 3250.5 3251.0 3252.3   median=3251.0 n=3
+  A  bs4  auto 3194.4 3194.9 3196.5   median=3194.9 n=3
+  A  bs8  none 2908.9 2909.5 2910.0   median=2909.5 n=3
+  A  bs8  auto 2494.7 2496.1 2496.2   median=2496.1 n=3
+  A  bs16 none 3306.2 3307.2 3305.2   median=3306.2 n=3
+  A  bs16 auto 1572.1 1572.1 1574.3   median=1572.1 n=3
+  MF bs1  none 10252.3 10257.2 10255.4   median=10255.4 n=3
+  MP bs1  none 310.4 320.2 311.1   median=311.1 n=3
+  MF bs1  auto 10249.3 10254.6 10258.2   median=10254.6 n=3
+  MP bs1  auto 310.4 375.7 311.1   median=311.1 n=3
+  MF bs2  none 10842.5 10798.8 10755.6   median=10798.8 n=3
+  MP bs2  none 615.0 613.9 612.9   median=613.9 n=3
+  MF bs2  auto 10662.2 10652.7 10612.3   median=10652.7 n=3
+  MP bs2  auto 480.1 478.3 478.6   median=478.6 n=3
+  MF bs4  none 11559.8 11589.7 11625.9   median=11589.7 n=3
+  MP bs4  none 1191.4 1189.1 1189.7   median=1189.7 n=3
+  MF bs4  auto 11128.8 11146.2 11185.0   median=11146.2 n=3
+  MP bs4  auto 823.3 819.4 822.2   median=822.2 n=3
+  MF bs8  none 14347.7 14423.9 14470.3   median=14423.9 n=3
+  MP bs8  none 2933.7 2938.2 2940.5   median=2938.2 n=3
+  MF bs8  auto 12592.0 12643.7 12640.6   median=12640.6 n=3
+  MP bs8  auto 1700.2 1701.3 1701.7   median=1701.3 n=3
+  MF bs16 none 28294.0 28193.0 29764.8   median=28294.0 n=3
+  MP bs16 none 8252.3 8249.2 8257.7   median=8252.3 n=3
+  MF bs16 auto 15426.5 15168.1 16115.0   median=15426.5 n=3
+  MP bs16 auto 3040.2 3037.9 3043.6   median=3040.2 n=3
+
+6. INTEGRITY -- compiled cap value constant within every arm: OK
+
+wrote opt/m4i4/tables/m4i4_tables.json
+wrote opt/m4i4/tables/geomA.csv opt/m4i4/tables/geomM.csv

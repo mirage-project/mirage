@@ -1,0 +1,88 @@
+[scorer] repetition/coherence primitives: final/ac3_criteria.py (M4-I1 canonical)
+============================================================================================================
+RE-PINNED AC-3 REPORT (goal.md AC-3 as re-pinned 2026-07-29)
+  (a) coherence: repetition + byte-soup scored here; perplexity transfers by identity on byte-identical cases
+  (b) agreement floor: >= 90% of positions == HF reference top-1, per (prompt, bs)
+  (c) no silent degradation: bit-exactness vs /home/catalyst/project/demo/qwen3_5/accept/results/dumps_final reported, not required
+============================================================================================================
+
+### tree none_rep0  (opt/m4i4/raw/geomA/none/rep0)
+  bs1  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs1 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs2  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs2 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs4  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs4 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs8  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs8 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs16 cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs16 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+
+### tree none_rep1  (opt/m4i4/raw/geomA/none/rep1)
+  bs1  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs1 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs2  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs2 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs4  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs4 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs8  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs8 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs16 cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs16 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+
+### tree none_rep2  (opt/m4i4/raw/geomA/none/rep2)
+  bs1  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs1 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs2  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs2 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs4  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs4 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs8  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs8 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs16 cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs16 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+
+### tree auto_rep0  (opt/m4i4/raw/geomA/auto/rep0)
+  bs1  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs1 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs2  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs2 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs4  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs4 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs8  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs8 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs16 cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs16 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+
+### tree auto_rep1  (opt/m4i4/raw/geomA/auto/rep1)
+  bs1  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs1 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs2  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs2 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs4  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs4 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs8  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs8 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs16 cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs16 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+
+### tree auto_rep2  (opt/m4i4/raw/geomA/auto/rep2)
+  bs1  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs1 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs2  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs2 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs4  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs4 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs8  cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs8 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+  bs16 cases=10  bit-exact=10/10  agreement>=90%: 10/10  worst=0.9375 (p06-poem)  repetition=ok  byte-soup=n/e
+        first divergence p06-poem bs16 pos60: engine=40581 ref=31000 baseline=40581 same-as-baseline [known-adjudicated]  (+3 post-divergence positions)
+
+### flip reproduction across trees (a flip in ONE tree only is an anomaly candidate, not a finding -- determinism protocol)
+  p06-poem bs1 pos60: present in 6/6 trees [known-adjudicated]
+  p06-poem bs2 pos60: present in 6/6 trees [known-adjudicated]
+  p06-poem bs4 pos60: present in 6/6 trees [known-adjudicated]
+  p06-poem bs8 pos60: present in 6/6 trees [known-adjudicated]
+  p06-poem bs16 pos60: present in 6/6 trees [known-adjudicated]
+
+wrote opt/m4i4/gates/ac3_repin_geomA.json

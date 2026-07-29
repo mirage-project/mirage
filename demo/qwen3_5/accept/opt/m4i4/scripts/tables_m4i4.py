@@ -27,11 +27,20 @@ import argparse
 import json
 import os
 import statistics as st
+import sys
 from pathlib import Path
 
 ARMS = ("none", "auto")
 BSS = (1, 2, 4, 8, 16)
 AC5_BOUND = 1.25            # .pm/goal.md AC-5: mpk e2e <= 1.25x vLLM e2e
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))   # .../accept
+import admission_policy as _policy   # noqa: E402  -- THE policy authority
+
+
+def admission_policy_on(batch_size: int) -> bool:
+    """Is the SHIPPED policy capping this batch size? Read from the authority."""
+    return _policy.policy_cap(batch_size) is not None
 
 
 # --------------------------------------------------------------- baseline ---
@@ -251,6 +260,63 @@ def main(argv=None) -> int:
     print("\nvLLM sources: " + "; ".join(
         f"bs{bs}={vllm[bs]['source']} (n={vllm[bs]['n']})" for bs in BSS))
 
+    # AC-5 is an END-TO-END bound, so our prefill deficit is a TAX ON THE DECODE
+    # MARGIN AC-4 has to earn. Turn the bound into the decode throughput it
+    # implies at the landed prefill cost, so "prefill sanity" is a number the
+    # decode track can plan against instead of a vibe.
+    print()
+    print("=" * 112)
+    print(f"5. AC-5 AS A DECODE REQUIREMENT (landed policy arm). Given prefill P "
+          f"and the {AC5_BOUND}x bound on vLLM e2e V,")
+    print("   the decode window may be at most 1.25V - P; the implied decode "
+          "throughput is what AC-4 must reach for AC-5 to hold.")
+    print("=" * 112)
+    print(f"{'bs':>3} | {'P (mpk pre s)':>13} {'V (vllm e2e s)':>14} "
+          f"{'vllm pre s*':>11} | {'max dec win s':>13} {'req dec tok/s':>13} "
+          f"{'/ vllm dec':>10} | {'now':>8} {'need x':>7} | {'P_max@par':>9} "
+          f"{'pre must':>8}")
+    ac5req = {}
+    for bs in BSS:
+        # the landed policy arm for this bs, read from the policy authority
+        landed = "auto" if admission_policy_on(bs) else "none"
+        r = M[f"bs{bs}_{landed}"]
+        v = vllm[bs]
+        if not (r["prefill_s"] and r["e2e_s"]):
+            continue
+        D = r["full"]["decode_steps"] - r["pre"]["decode_steps"]
+        vpre = v["e2e_s"] - (bs * D / v["decode_tok_s"]) if v["decode_tok_s"] else None
+        budget = AC5_BOUND * v["e2e_s"] - r["prefill_s"]
+        req = (bs * D / budget) if budget and budget > 0 else None
+        ac5req[bs] = dict(landed_arm=landed, prefill_s=r["prefill_s"],
+                          vllm_e2e_s=v["e2e_s"], vllm_prefill_s_implied=vpre,
+                          decode_tokens=D, max_decode_window_s=budget,
+                          required_decode_tok_s=req,
+                          required_over_vllm=(req / v["decode_tok_s"] if req else None),
+                          current_decode_tok_s=r["decode_tok_s"],
+                          required_over_current=(req / r["decode_tok_s"]
+                                                 if req and r["decode_tok_s"] else None))
+        # the other side of the same joint constraint: with decode at exactly
+        # vLLM's throughput, how large may prefill be, and by how much must it
+        # fall from where it is now?
+        par_win = bs * D / v["decode_tok_s"] if v["decode_tok_s"] else None
+        p_max = (AC5_BOUND * v["e2e_s"] - par_win) if par_win else None
+        must = (r["prefill_s"] / p_max) if p_max and p_max > 0 else None
+        ac5req[bs]["prefill_budget_at_decode_parity_s"] = p_max
+        ac5req[bs]["prefill_must_fall_by_x"] = must
+        print(f"{bs:3d} |{fmt(r['prefill_s'], 13, 3)} {fmt(v['e2e_s'], 14, 3)} "
+              f"{fmt(vpre, 11, 3)} |{fmt(budget, 13, 3)} {fmt(req, 13, 1)} "
+              f"{fmt(req / v['decode_tok_s'] if req else None, 10, 3)} |"
+              f"{fmt(r['decode_tok_s'], 8)} "
+              f"{fmt(req / r['decode_tok_s'] if req and r['decode_tok_s'] else None, 7, 2)}"
+              f" |{fmt(p_max, 9, 3)} "
+              f"{('%.2fx' % must) if must and must > 1 else 'ok':>8}")
+    print("  * vllm pre s is IMPLIED (its e2e minus its own decode window at its "
+          "measured throughput), not separately measured.")
+    print("  'req dec tok/s / vllm dec' > 1 means AC-5 cannot be met at decode "
+          "PARITY: our prefill deficit alone")
+    print("  spends more than the 25% slack, so AC-4 has to beat vLLM by that "
+          "factor for AC-5 to pass.")
+
     print()
     print("5. EVERY REP (ms), in rep order -- the >=3-rep rule checkable inline")
     for bs in BSS:
@@ -276,7 +342,8 @@ def main(argv=None) -> int:
           + ("OK" if not bad else f"VIOLATED in {bad}"))
 
     doc = dict(schema="m4i4/tables/v1", reps_requested=a.reps,
-               ac5_bound=AC5_BOUND, vllm=vllm, geomA=A, geomM=M, ac5=ac5,
+               ac5_bound=AC5_BOUND, admission_policy=_policy.summary(),
+               vllm=vllm, geomA=A, geomM=M, ac5=ac5, ac5_requirement=ac5req,
                integrity_cap_consistent=(not bad), integrity_violations=bad)
     if a.out_json:
         Path(a.out_json).write_text(json.dumps(doc, indent=1) + "\n")

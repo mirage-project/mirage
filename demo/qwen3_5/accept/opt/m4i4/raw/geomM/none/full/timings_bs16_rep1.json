@@ -1,0 +1,92 @@
+{
+  "batch_size": 16,
+  "note": "informational only -- no perf claim; mbt is fixed across batch sizes for a uniform correctness config, which inflates per-step cost at small bs",
+  "admission_policy": {
+    "cap_mode": "auto",
+    "cap_min_batch_size": 4,
+    "per_bs": {
+      "1": null,
+      "2": null,
+      "4": "auto",
+      "8": "auto",
+      "16": "auto"
+    },
+    "authority": "demo/qwen3_5/accept/admission_policy.py",
+    "requested": "none",
+    "compiled_cap": null
+  },
+  "waves": [
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "num_requests": 16,
+      "num_distinct_prompts": 16,
+      "prompt_ids": [
+        "syn256-00",
+        "syn256-01",
+        "syn256-02",
+        "syn256-03",
+        "syn256-04",
+        "syn256-05",
+        "syn256-06",
+        "syn256-07",
+        "syn256-08",
+        "syn256-09",
+        "syn256-10",
+        "syn256-11",
+        "syn256-12",
+        "syn256-13",
+        "syn256-14",
+        "syn256-15"
+      ],
+      "wall_ms": 28192.951171875,
+      "max_decode_steps": 1023,
+      "ms_per_decode_step": 27.55909205461877,
+      "tokens_per_s": 580.570650451399,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1887,
+        "per_request_token_cap_requested": "none",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 120,
+        "migrated_slots": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ],
+        "straddling_slots": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15
+        ]
+      }
+    }
+  ],
+  "slot_isolation_checks": []
+}
