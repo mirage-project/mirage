@@ -39,8 +39,8 @@ D_V = 128
 def bare_sm_scale():
     """The unadjusted 1/sqrt(d) scale (documentation/comparison only).
 
-    Since the 2026-06-12 graph-audit fix the chunked-prefill register applies
-    the YARN scale below, same as every sibling MLA task — use
+    The chunked-prefill register applies the YARN scale below, same as every
+    sibling MLA task — use
     ``yarn_sm_scale`` for kernel comparisons.
     """
     return 1.0 / math.sqrt(D_QK)

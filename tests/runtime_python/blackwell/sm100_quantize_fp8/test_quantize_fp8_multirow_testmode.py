@@ -6,8 +6,7 @@ ROWS_PER_TASK > 1 rows per CTA. Compares both packed UE8M0 scale and FP8
 output against the reference, bit-for-bit (scales) and within FP8 tolerance
 (values).
 
-Added 2026-05-14 to exercise the dirty multi-row change that the previous
-session left unverified.
+Exercises the multi-row quantize path.
 """
 
 import os

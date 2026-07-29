@@ -1,8 +1,7 @@
-"""M1->M2 bridge: unabsorbed MLA prefill fed from the REAL compressed-latent
-cache path, through MPK test_mode (DSV3 TP8 per-rank shapes).
+"""Unabsorbed MLA prefill fed from the REAL compressed-latent cache path, through
+MPK test_mode (DSV3 TP8 per-rank shapes).
 
-Chain under test (the M2 materialized-prefill dataflow, scratch/preview_refactor.md
-§8.3 / Codex bridge-check):
+Chain under test:
 
     kv_buf [seq_pad, 576]               (THE decode-shared compressed cache:
       |                                  [kv_norm(c_latent) 512 | rope'd k_pe 64])
@@ -19,7 +18,7 @@ causal absolute-position attention, bare 1/sqrt(192) scale).
 
 What this proves beyond the per-kernel tests:
   * the cache->attention handoff: attention runs off per-head K/V materialized
-    from the SAME compressed cache decode reads (preview_refactor.md §1.2bis);
+    from the SAME compressed cache decode reads;
   * narrow-view STRIDED inputs work end-to-end: quantize reads ckv_sep
     (stride 576) and the attention K_rope TMA descriptor honours stride[0]
     (tma.cuh param_id==3) — no gather/copy needed in the M2 builder design;

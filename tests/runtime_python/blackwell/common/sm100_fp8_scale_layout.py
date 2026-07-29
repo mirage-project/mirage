@@ -83,7 +83,7 @@ def _quantize_to_fp8_packed_ue8m0(
     # is convenient but BLIND to the production conversion-contract bug:
     # DeepSeek checkpoints quantize the payload against the RAW fp32 scale,
     # while the kernel applies 2^ceil(log2 s) — inflating every block by
-    # ceil/raw in [1,2) (the 2026-06-13 UE8M0 bug; ~53% GEMM error) unless the
+    # ceil/raw in [1,2) (the UE8M0 conversion-contract bug) unless the
     # payload is requantized. Set payload_against_raw_scale=True to reproduce
     # that real contract (divide payload by the RAW scale, still pack the CEIL
     # scale) so a test can SEE the mismatch the self-consistent path hides.

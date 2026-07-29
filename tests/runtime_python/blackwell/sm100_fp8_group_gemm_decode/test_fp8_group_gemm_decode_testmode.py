@@ -71,7 +71,7 @@ def _run_case(label, tp, bs, E, MPE, K, N, seed=42, active_experts=None):
     meta buffer is passed (mask = row 1's first E int32s, see
     _fp8_group_gemm_layer_impl) marking ONLY those experts active — the kernel
     must skip every other expert's tiles (their output rows stay zero) WITHOUT
-    deadlocking. This pins the accumulator-ring regression (2026-06-12): the
+    deadlocking. This pins the accumulator-ring regression: the
     btf/bte ring was phased on the raw tile-iter counter, which advances across
     skipped tiles while arrivals only happen for processed ones — a scattered
     mask + multi-tile-iter (total tiles >> num_workers) made mb_wait spin
@@ -221,7 +221,7 @@ def main():
     # ── MASKED largem (production active-skip path) ──
     # Scattered 6-of-128 active experts + M_total=16384 ⇒ total tiles >>
     # num_workers (multi-tile-iter) + mixed skip — the exact geometry of the
-    # 2026-06-12 accumulator-ring deadlock (this case HANGS on the pre-fix
+    # accumulator-ring deadlock (this case HANGS on the pre-fix
     # kernel). W13 and W2 shapes at tp=2.
     _scattered = [3, 17, 42, 77, 101, 120]
     results.append(_run_case("W13-mask", 2, 8, E=128, MPE=128,

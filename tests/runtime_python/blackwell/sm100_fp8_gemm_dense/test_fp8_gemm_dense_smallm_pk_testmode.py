@@ -156,7 +156,7 @@ def main():
         results.append(run_case(1, 8, msl, N=2176, K=HIDDEN, label="qkv_a"))
         results.append(run_case(1, 16, msl, N=4096, K=512, label="kv_b"))
 
-    # TP8-EP2 shape-campaign corners (2026-06-13, tp8_task_shape_list S4/S5):
+    # TP8-EP2 corner shapes:
     # the shared expert at TP8 is the smallest dense GEMM in the model
     # (gate_up N=2*256=512; down K=256 — tile-boundary territory), and the
     # dense-MLP down_proj at TP8 has K=18432/8=2304 (K-loop tail). bs={1,16}

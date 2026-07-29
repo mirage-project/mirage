@@ -43,7 +43,7 @@ q_len`` the chunk loop runs over the full KV history (the "chunked" path).
   Q_nope [q_len, H, 128], Q_pe [q_len, H, 64], O [q_len, H, 128] (3D). A 4D
   [B, kv_len, H, 128] tensor would mis-resolve the TMA dims, so we keep 3D.
 
-* SCALE = YARN mscale**2 (fixed 2026-06-12, graph-audit #1). The chunked
+* SCALE = YARN mscale**2. The chunked
   register now applies the same ``(0.1*ln(40)+1)**2 ~= 1.874`` factor as every
   sibling MLA task and as vLLM/SGLang serving for the DSv3 yarn checkpoint;
   the reference uses the identical YARN scale.

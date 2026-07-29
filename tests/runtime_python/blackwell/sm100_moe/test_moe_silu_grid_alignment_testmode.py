@@ -1,5 +1,4 @@
-"""Regression guard for the 2026-06-13 routed-MoE NULL bug (bug class A:
-grid / dispatch mis-map).
+"""Regression guard for the routed-MoE grid / dispatch mis-map bug.
 
 The NEW-MoE fused SiLU-mul (``moe_silu_mul_layer`` with ``meta`` + ``bm_padding``)
 row-partitions its permuted-expert input across grid.x AND derives the logical
@@ -136,7 +135,7 @@ def main():
     assert raised, (
         f"REGRESSION: moe_silu_mul accepted the misaligned grid.x={bad_grid} "
         f"(rows_per_cta={M_TOTAL // bad_grid} does not divide bm_padding="
-        f"{BM_PADDING}) — the routed-MoE NULL bug would be reintroducible.")
+        f"{BM_PADDING}) — the routed-MoE grid-misalignment bug would be reintroducible.")
 
     # (4) Generality: a second expert count exercises the same invariant.
     e2 = 64
