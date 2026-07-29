@@ -188,3 +188,35 @@ committed artifacts wherever real data exists:
 | `remote_setup.sh` | isolated clone at the gate's sha + fresh extension build |
 | `mechanisms.json` | the AC-3(b) mechanism registry (ships empty) |
 | `tests/` | GPU-free unit + fixture tests |
+
+## What the pinned comment block says vs what this gate enforces
+
+The pinned gate's comment block describes AC-3 as "greedy token ids of mpk == HF transformers
+reference on all 10 prompts x 64 tokens". That wording predates the user's 2026-07-29 re-pin and is
+now **historical prose**: `.pm/goal.md` is authoritative, and this gate implements the re-pinned
+AC-3 (coherence + a >=90 % agreement floor + no silent degradation). Byte-identity is still measured
+and reported every run, as AC-3(c) requires -- it is simply no longer the pass condition. Nothing
+here needs the pinned gate changed; it is tier-2 pinned and the flag contract it passes is satisfied
+verbatim.
+
+One consequence to be aware of: with `final.sh` now present, the pinned gate no longer takes its
+"NOT-APPLICABLE (exit 3), final harness absent" branch. It runs the real gate, which means a
+multi-hour B200 campaign (5 batch sizes x 3 cold AC-3 reps x 2 perf arms + a fresh vLLM sweep).
+
+## What remains before the gate can be run for a verdict
+
+1. **The decode levers.** AC-4 fails today at 0.354x of vLLM at bs1 and AC-5 at 2.89x against the
+   1.25x bound (`opt/m4i1/README.md`). Nothing in the gate changes that; it only reports it.
+2. **A full-scope run.** The first end-to-end run covered bs1 only, deliberately (non-binding). The
+   binding run needs all five batch sizes: 15 cold AC-3 reps, 30 MPK perf cells and a 5-size fresh
+   vLLM sweep. At the observed per-cell costs that is several hours of exclusive-GPU time, and
+   `/raid` was at 99-100 % use during this work, so the kernel scratch needs headroom checked first.
+3. **A clean tree at invocation.** Integrity requires it, and the shared clone usually has another
+   agent's untracked work in it. Run the gate from a dedicated checkout of the commit under test.
+4. **The commit under test must be fetchable on the box** -- `remote_setup.sh` clones by sha from the
+   box's mirror or from the GitHub remote. An unpushed local commit has to be shipped to the deploy
+   path directly (that is how this run was done, and `remote_setup.sh` now says so when the checkout
+   fails).
+5. **Two dispersion arms.** bs1 prefill and bs16 full sit above the 5 % bound in the committed M3-I7
+   evidence; a PASS needs a valid measurement, so those need the protocol's section 6 escalation
+   (more reps) if they reproduce. In this run's own window the bs1 arms measured 0.07 % / 0.33 %.
