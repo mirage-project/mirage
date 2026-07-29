@@ -68,7 +68,8 @@
    "disposition": "integrated: M3-I8 v1 (gate_padding_rows, default ON since 46872ad) landed: real-hardware A/B +9.7/+15.3/+7.1/+25.1/-0.0% at bs1/2/4/8/16, AC-3 byte-identical 10/10 at all five bs. The v2a/v2b grid-widen half is REJECTED-WITH-EVIDENCE: composing it with v1 gave +24.6% at bs1 but made bs8 WORSE than v1 alone (+19.6% vs +25.1%) because splitting returns bs8 to two waves -- a bs-conditional grid for a bs1-only gain is not worth the branch. Residual at the gate: MoE w13 is still rank 1 (6.96/2.85/2.56x), but that residual is kernel-side (see the ferret target), not activation right-sizing. Evidence opt/m3i8/results/VALIDATION.md.",
    "disposition_before_m3i7": "VALIDATED+LANDED (M3-I8 window 2026-07-27): v1 (gate_padding_rows, default ON since 46872ad) real-hardware step-time A/B +9.7/+15.3/+7.1/+25.1/-0.0% at bs1/2/4/8/16 vs predicted +3/+5/+3/+17/+1; AC-3 byte-identical 10/10 at all 5 bs; bs16 inert as predicted. v2a/v2b (grid widen, STAGED not applied): bs1 composition +24.6/+24.7% but bs8 v1+v2a=+19.6% WORSE than v1 alone (+25.1%, splitting returns bs8 to 2 waves) -- bs-conditional only, re-rank at I7. Evidence: opt/m3i8/results/ + VALIDATION.md.",
    "disposition_kind": "integrated",
-   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)",
+   "m4i5_grid_widen_retest": "M4-I5 re-tested the v2 grid-widen half at k=4 AND k=8 at all five batch sizes (M3-I8 had k=8 at bs1 only). k=4 is the best value: +11.1/+8.8/+7.4/+3.5% at bs1/2/4/8, -1.0% at bs16. k=8 rejected. Landed as MPK_MOE_N_SPLITS, DEFAULT-OFF; an unconditional default is not adoptable because bs16 regresses. Evidence opt/m4i5/."
   },
   {
    "rank": 3,
@@ -86,9 +87,11 @@
    "risk": "medium - many small builder/kernel changes; each split changes reduction order and can move bits, so every stage needs its own AC-3 per-case check.",
    "verify_cmd": "python3 opt/concurrency.py prof/raw_bs1_rep0.npz prof/meta_bs1_rep0.json prof/task_names.json /tmp/c.json  # mean_concurrency and us_at_concurrency.c5_16 must both improve",
    "suggested_owner_issue": "M3-I2b, RE-SCOPED (see the rejected prepare_next_batch entry below)",
-   "disposition": "blocked-with-reason: Graph width is still the largest structural residual and M3 only chipped at it: I3 split GDN into separate tasks, I8 gated MoE pad rows, I6a removed the register spill that was throttling every task. What remains is a per-stage task-splitting programme -- I3 alone took a full ferret campaign plus an integration issue for ONE stage -- and it does not fit in M3's remaining budget. It is not rejected: the re-derived table shows MPK still 2.2-2.8x off vLLM overall while being AHEAD on every fused stage, which is the signature of a width problem, not a kernel-quality problem. Carried to M4 with the split-KV attention lever (M3-I6a) as the first concrete instance. Evidence opt/m3i7/stage/, opt/m3i3/, opt/m3i6a/.",
+   "disposition": "blocked-with-reason: Graph width is still the largest structural residual and M3 only chipped at it: I3 split GDN into separate tasks, I8 gated MoE pad rows, I6a removed the register spill that was throttling every task. What remains is a per-stage task-splitting programme -- I3 alone took a full ferret campaign plus an integration issue for ONE stage -- and it does not fit in M3's remaining budget. It is not rejected: the re-derived table shows MPK still 2.2-2.8x off vLLM overall while being AHEAD on every fused stage, which is the signature of a width problem, not a kernel-quality problem. Carried to M4 with the split-KV attention lever (M3-I6a) as the first concrete instance. Evidence opt/m3i7/stage/, opt/m3i3/, opt/m3i6a/.  || M4-I5 (2026-07-29) TERMINAL: quantified and measured. Per-stage width table at integrated HEAD (opt/m4i5/tables/width_bs*.json): at bs1 80.6% of the 9822.8us step has exactly ONE stage running and 79% runs on <=16 of 128 workers; 6580us is idle machine attributable to a single narrow stage. Largest merge-free residual is the routed MoE pair (3040us at bs1); it was PROTOTYPED behind MPK_MOE_N_SPLITS (default-off) and measures +11.1/+8.8/+7.4/+3.5% at bs1/2/4/8 and -1.0% at bs16 with k=4, against a model that predicted +34% at bs1. k=8 REJECTED (worse than k=4 at bs>=4, worse than base at bs>=8). Mechanism for the shortfall, measured on profiled arms: the split recovers width exactly (26->104 live tasks/level of 128) but is NOT work-conserving (+32%/+54% total worker time) and a dependency level has an arrival-spread floor of ~33us that the split cannot cross. CONCLUSION: width is real but is NOT the AC-4 residual -- the compiled graph's CRITICAL PATH is 4.55/5.39/6.09ms at bs1/8/16, 46-50% of the step and 1.14-1.30x vLLM's ENTIRE step, so at infinite width MPK is still slower than vLLM at every batch size. Evidence opt/m4i5/.",
    "disposition_kind": "blocked-with-reason",
-   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)",
+   "m4i5_terminal": "quantified + one prototype measured; width is not the AC-4 residual",
+   "m4i5_next_levers": "Remaining width residuals, ranked by measured idle-machine time and all needing a cross-task merge: dense fp8 279 (1346us at EVERY bs, already at the finest legal N split, needs split-K); MoE router 260 (447-602us, 1 task/layer, needs a row split with a compaction epilogue); attention split-KV 257 (594-621us, M3-I6a's model confirmed to 1% here); the 16-wide (mbt,1,1) glue 275/261/238/154 (~700us, merge-free but tasks are already 4-6us so the arrival floor bites immediately)."
   },
   {
    "rank": 4,
@@ -360,5 +363,12 @@
   "landed": "auto from bs2 up; bs1 uncapped (auto == mbt there, provable no-op)",
   "issue": "M4-I4",
   "ac3": "300/300 cases byte-identical to results/dumps_final across 2 arms x 3 reps x 5 bs x 10 prompts, plus the cold fingerprint gate at the shipped policy"
+ },
+ "m4i5_close": {
+  "issue": "M4-I5",
+  "utc": "2026-07-29",
+  "verdict": "graph width quantified; MPK_MOE_N_SPLITS landed default-off; width is not the AC-4 residual",
+  "binding_structural_fact": "the compiled task graph critical path is 4554/5394/6086 us at bs1/8/16 = 46-50% of the step and 1.14-1.30x vLLM whole step",
+  "new_levers": "Remaining width residuals, ranked by measured idle-machine time and all needing a cross-task merge: dense fp8 279 (1346us at EVERY bs, already at the finest legal N split, needs split-K); MoE router 260 (447-602us, 1 task/layer, needs a row split with a compaction epilogue); attention split-KV 257 (594-621us, M3-I6a's model confirmed to 1% here); the 16-wide (mbt,1,1) glue 275/261/238/154 (~700us, merge-free but tasks are already 4-6us so the arrival floor bites immediately)."
  }
 }
