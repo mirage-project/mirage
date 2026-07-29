@@ -503,3 +503,22 @@ documented, bounded re-run policy rather than by weakening the assertion:
 5. **The honest claim** the gate may make: "at every bs, N independent cold reps were
    bit-identical in state and byte-identical to dumps_final per case; divergence rate X%,
    divergent reps quarantined and re-run." It may NOT claim a single cold run is reproducible.
+
+## AC-3 RE-PINNED (user authorization, 2026-07-29) — supersedes the strict-token ruling above
+
+The user re-pinned AC-3: reordering-induced logit drift is acceptable; the requirement is that
+output be genuine language, and tiny content differences do not matter. `.pm/goal.md` carries
+the authoritative text. What changes here:
+
+- **The M4 gate's PASS condition** is no longer per-rep token identity. It is: coherence
+  (no degenerate repetition, no byte soup, perplexity within 1.5x of the reference continuation)
+  + a >=90% top-1 agreement floor per (prompt, bs) with every differing position either a
+  near-tie (reference margin <=0.5 or engine-side <=3 bf16 ULPs) or mechanism-documented.
+- **What is KEPT from the strict machinery, as DIAGNOSTICS**: the fingerprint-scored cold-run
+  harness (`harness/gate_ac3_stable.sh`), the pre-flight device probe, per-rep divergence-rate
+  reporting, and the pinned per-bs consensus fingerprint. The engine's 2.08%/cold-rep token
+  divergence is now an in-band phenomenon the gate tolerates and REPORTS rather than a blocker.
+- **What is KEPT as a hard rule**: bit-exactness stays the expected result for KERNEL work
+  (it is cheap and sharp there — every real defect this project found produced massive
+  divergence, not near-tie flips), and any drop from exact to merely-passing must be explained
+  in the run report. Precision-format downgrades remain forbidden.
