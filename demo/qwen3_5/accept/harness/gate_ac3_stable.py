@@ -185,7 +185,9 @@ def cmd_rep(args) -> int:
               f"got {len(requests)}")
         return 3
 
-    cap = args.per_request_token_cap
+    # The cap request is passed THROUGH; admission_policy.py resolves it. This
+    # gate must not restate the policy, or it would certify a configuration the
+    # runtime no longer ships (admission_policy.py's module docstring).
     adapter = MPKOfflineAdapter(
         model_name=args.model, model_path=args.model_path,
         mbt=AC3_MBT, page_size=AC3_PAGE_SIZE,
@@ -194,7 +196,7 @@ def cmd_rep(args) -> int:
         reuse_kernel=False,               # COLD: compile this rep's own kernel
         pinned_max_seq_length=AC3_MSL,
         audit_compaction=True,            # mpk_engine_run.py's AC-3 default
-        per_request_token_cap=(cap if cap in (None, "auto") else int(cap)),
+        per_request_token_cap=args.per_request_token_cap,
     )
 
     fps: dict = {}
@@ -699,7 +701,10 @@ def main(argv=None) -> int:
     p.add_argument("--reference",
                    default=str(ACC / "reference" / "reference_outputs.json"))
     p.add_argument("--expect-num-prompts", type=int, default=10)
-    p.add_argument("--per-request-token-cap", default=None)
+    # DERIVED, not restated: "policy" hands the decision to admission_policy.py
+    # so the gate certifies what the runtime ships. "none" reproduces the
+    # pre-policy uncapped runs that produced results/dumps_final.
+    p.add_argument("--per-request-token-cap", default="policy")
     p.set_defaults(fn=cmd_rep)
 
     s = sub.add_parser("score", help="aggregate reps into the gate report")

@@ -119,7 +119,9 @@ from typing import Dict, List, Optional
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "harness"))
+sys.path.insert(0, str(HERE))
 
+import admission_policy  # noqa: E402  -- THE admission-cap policy authority
 from ac3_types import EngineSequence, PromptRequest  # noqa: E402
 from engine_adapter import EngineAdapter  # noqa: E402
 
@@ -211,7 +213,7 @@ class MPKOfflineAdapter(EngineAdapter):
                  pinned_max_seq_length: Optional[int] = None,
                  slot_order: str = "wave",
                  audit_compaction: bool = True,
-                 per_request_token_cap=None):
+                 per_request_token_cap="policy"):
         self.model_name = model_name
         self.model_path = model_path
         self.mbt = mbt
@@ -233,17 +235,13 @@ class MPKOfflineAdapter(EngineAdapter):
             raise ValueError(f"unknown slot_order {slot_order!r}")
         self.slot_order = slot_order
         self.audit_compaction = audit_compaction
-        # M3-I9's winning policy. None = today's runtime. "auto" = max(1, mbt//bs)
-        # -- an equal share of the token budget per request per iteration, which
-        # is both the packing optimum and the only setting under which no live
-        # slot is ever migrated. It needs the runtime knob specced in
-        # opt/m3i9/README.md; the adapter refuses loudly rather than silently
-        # measuring the unmodified schedule.
-        if per_request_token_cap not in (None, "auto") and not (
-                isinstance(per_request_token_cap, int) and per_request_token_cap >= 1):
-            raise ValueError(f"per_request_token_cap={per_request_token_cap!r}: "
-                             "None, 'auto', or a positive int")
-        self.per_request_token_cap = per_request_token_cap
+        # The per-request per-iteration admission cap. THE POLICY LIVES IN
+        # admission_policy.py -- this class only stores the REQUEST and resolves
+        # it there once the batch size is known. "policy" (the default) is the
+        # shipped behaviour; "none"/None reproduces the pre-policy runtime;
+        # "auto" / an int force an arm. The knob is compile-time, so the resolved
+        # value is part of a kernel directory's identity (admission_policy.py).
+        self.per_request_token_cap = admission_policy.validate(per_request_token_cap)
         self._mpk = None
         self._builder = None
         self._bs = None
@@ -481,20 +479,22 @@ class MPKOfflineAdapter(EngineAdapter):
         return out
 
     def _cap_kwargs(self, batch_size: int) -> dict:
-        """The M3-I9 per-request per-iteration token cap, if one is asked for.
+        """The per-request per-iteration token cap this run compiles with.
 
-        `prepare_next_batch` step 3 currently gives a prefilling request
+        `prepare_next_batch` step 3 otherwise gives a prefilling request
         `min(remaining, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens)` -- the whole
         remaining budget. The cap adds one more `min` against a compile-time
         `MPK_MAX_TOKENS_PER_REQUEST` whose default is
-        `MPK_MAX_NUM_BATCHED_TOKENS`, i.e. today's behaviour byte for byte.
-        See opt/m3i9/README.md for the full spec and its evidence.
+        `MPK_MAX_NUM_BATCHED_TOKENS`, i.e. the pre-policy behaviour byte for
+        byte. The policy and its evidence live in admission_policy.py; the spec
+        of the runtime knob is opt/m3i9/README.md.
         """
-        if self.per_request_token_cap is None:
+        log(admission_policy.describe(self.per_request_token_cap, self.mbt,
+                                      batch_size))
+        cap = admission_policy.resolve_int(self.per_request_token_cap, self.mbt,
+                                          batch_size)
+        if cap is None:
             return {}
-        cap = (max(1, self.mbt // batch_size)
-               if self.per_request_token_cap == "auto"
-               else int(self.per_request_token_cap))
         import inspect
         import mirage as mi
         if "max_tokens_per_request" not in inspect.signature(
@@ -506,7 +506,6 @@ class MPKOfflineAdapter(EngineAdapter):
                 "PersistentKernel(max_tokens_per_request=...) parameter. This "
                 "build does not have it, and running without it would measure "
                 "the UNMODIFIED schedule under a flag that claims otherwise.")
-        log(f"per-request token cap = {cap} (bs={batch_size}, mbt={self.mbt})")
         return {"max_tokens_per_request": cap}
 
     def _compaction_audit(self, plens: List[int], max_seq_length: int) -> Optional[dict]:
@@ -528,14 +527,18 @@ class MPKOfflineAdapter(EngineAdapter):
             from protocol_sim import audit, simulate  # noqa: E402
         except Exception as exc:            # tooling absent -> never break a run
             return {"unavailable": repr(exc)}
-        cap = None
-        if self.per_request_token_cap is not None:
-            cap = (max(1, self.mbt // len(plens))
-                   if self.per_request_token_cap == "auto"
-                   else int(self.per_request_token_cap))
+        cap = admission_policy.resolve_int(self.per_request_token_cap, self.mbt,
+                                           len(plens))
         sim = simulate(plens, self.mbt, max_seq_length, cap=cap)
         a = audit(sim, self.max_new_tokens)
         rec = {"predicted_iterations": sim["n_iterations"],
+               # the COMPILE-TIME value this wave's kernel carries, recorded so a
+               # kernel-dir reuse across cap values is visible in the artifact
+               # rather than only in the replay (admission_policy.py).
+               "per_request_token_cap_requested":
+                   (self.per_request_token_cap
+                    if self.per_request_token_cap is not None else "none"),
+               "per_request_token_cap_compiled": cap,
                "live_slot_migrations": a["n_moves"],
                "migrated_slots": a["moved_requests"],
                "straddling_slots": a["straddling_requests"]}
@@ -654,12 +657,18 @@ def main(argv=None) -> int:
                          "the padded slot list (predicted +11.4%% wave time at "
                          "bs16, but it changes which slot reports each prompt). "
                          "See opt/m3i9/README.md.")
-    ap.add_argument("--per-request-token-cap", default=None,
-                    help="M3-I9 winning policy: cap the tokens one request may "
-                         "contribute to one iteration. 'auto' = max(1, mbt//bs). "
-                         "Needs the runtime knob (opt/m3i9/README.md); the "
-                         "adapter raises rather than silently measuring the "
-                         "unmodified schedule.")
+    ap.add_argument("--per-request-token-cap", default="policy",
+                    help="Cap the tokens one request may contribute to one "
+                         f"iteration: {admission_policy.CAP_CHOICES_DOC}. "
+                         "DEFAULT 'policy' = the shipped policy in "
+                         "admission_policy.py (auto at bs>="
+                         f"{admission_policy.CAP_MIN_BATCH_SIZE}); 'none' "
+                         "forces the pre-policy uncapped runtime and is what "
+                         "reproduces every artifact captured before the policy "
+                         "landed. Compile-time knob: a kernel dir is only valid "
+                         "for the cap it was built with. Needs the runtime knob "
+                         "(opt/m3i9/README.md); the adapter raises rather than "
+                         "silently measuring the unmodified schedule.")
     ap.add_argument("--no-audit-compaction", action="store_true",
                     help="skip the HAZARD-COMPACTION exposure replay recorded "
                          "in the timings artifact (diagnostic only)")
@@ -701,9 +710,7 @@ def main(argv=None) -> int:
         pinned_max_seq_length=args.max_seq_length,
         slot_order=args.slot_order,
         audit_compaction=not args.no_audit_compaction,
-        per_request_token_cap=(args.per_request_token_cap
-                               if args.per_request_token_cap in (None, "auto")
-                               else int(args.per_request_token_cap)),
+        per_request_token_cap=args.per_request_token_cap,
     )
     result = adapter.run(requests, args.batch_size)
 
@@ -720,6 +727,14 @@ def main(argv=None) -> int:
                    "note": ("informational only -- no perf claim; mbt is fixed "
                             "across batch sizes for a uniform correctness "
                             "config, which inflates per-step cost at small bs"),
+                   "admission_policy": dict(
+                       admission_policy.summary(),
+                       requested=(adapter.per_request_token_cap
+                                  if adapter.per_request_token_cap is not None
+                                  else "none"),
+                       compiled_cap=admission_policy.resolve_int(
+                           adapter.per_request_token_cap, args.mbt,
+                           args.batch_size)),
                    "waves": adapter.timings,
                    "slot_isolation_checks": adapter.dup_checks}, f, indent=2)
     return 0

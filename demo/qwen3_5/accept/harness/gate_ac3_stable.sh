@@ -49,9 +49,14 @@
 #     --baseline DIR            [<accept>/results/dumps_final]
 #     --kernel-root DIR         cold kernel scratch [<out>/kernels]
 #     --python PATH             interpreter [$PY, else python3]
-#     --per-request-token-cap V passthrough; 'auto' was measured bit-transparent
-#                               at bs4/8/16 in M3-I7. Default: unset, matching
-#                               how results/dumps_final was produced.
+#     --per-request-token-cap V policy | none | auto | <int>, passed through to
+#                               admission_policy.py, which OWNS the policy.
+#                               Default 'policy' = whatever the runtime ships, so
+#                               the gate certifies the shipped configuration.
+#                               'none' forces the pre-policy uncapped runtime,
+#                               which is how results/dumps_final was produced;
+#                               the cap was measured bit-transparent at bs4/8/16
+#                               (M3-I7) and re-verified at all five bs (M4-I4).
 #     --keep-kernels            do not delete each rep's kernel dir (needs
 #                               ~110 MiB per rep; off by default, /raid is tight)
 set -uo pipefail
@@ -66,7 +71,9 @@ OUT=""
 BASELINE="$ACC/results/dumps_final"
 KERNEL_ROOT=""
 PY="${PY:-python3}"
-CAP=""
+# 'policy' delegates to admission_policy.py -- the gate certifies the SHIPPED
+# configuration. Never hardcode a per-batch-size cap decision here.
+CAP="policy"
 KEEP_KERNELS=0
 DRAIN_TRIES="${DRAIN_TRIES:-60}"
 DRAIN_SLACK_MIB="${DRAIN_SLACK_MIB:-600}"
@@ -91,8 +98,9 @@ done
 [ -n "$KERNEL_ROOT" ] || KERNEL_ROOT="$OUT/kernels"
 mkdir -p "$OUT/reps" "$OUT/logs" "$KERNEL_ROOT"
 
-CAPARG=()
-[ -n "$CAP" ] && CAPARG=(--per-request-token-cap "$CAP")
+CAPARG=(--per-request-token-cap "$CAP")
+POLICY_JSON="$("$PY" "$ACC/admission_policy.py" 2>/dev/null | tr -d '\n' | sed 's/  */ /g')"
+[ -n "$POLICY_JSON" ] || POLICY_JSON='{"error":"admission_policy.py unreadable"}'
 
 # ---------------------------------------------------------------------------
 # the pinned device. CUDA_VISIBLE_DEVICES is the CLAIM; each rep re-derives the
@@ -189,6 +197,7 @@ cat > "$OUT/run_meta.json" <<EOF
   "max_extra": $MAX_EXTRA,
   "batch_sizes": "$BATCH_SIZES",
   "per_request_token_cap": "${CAP:-none}",
+  "admission_policy": $POLICY_JSON,
   "baseline": "$BASELINE",
   "gate_py_sha256": "$(sha256sum "$HERE/gate_ac3_stable.py" | cut -d' ' -f1)",
   "gate_sh_sha256": "$(sha256sum "${BASH_SOURCE[0]}" | cut -d' ' -f1)"

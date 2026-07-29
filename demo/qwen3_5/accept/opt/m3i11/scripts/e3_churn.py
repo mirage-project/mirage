@@ -80,7 +80,11 @@ def main() -> int:
         model_name="Qwen/Qwen3.5-35B-A3B-FP8", mbt=16, page_size=256,
         max_new_tokens=args.new_tokens,
         kernel_dir=Path(args.kernel_dir), reuse_kernel=not args.fresh_compile,
-        pinned_max_seq_length=args.msl, audit_compaction=False)
+        pinned_max_seq_length=args.msl, audit_compaction=False,
+        # Pinned to the PRE-POLICY uncapped runtime: this probe's committed
+        # census is the comparison basis, and the shipped default is now the
+        # admission policy (accept/admission_policy.py, M4-I4).
+        per_request_token_cap="none")
 
     rec = {"tag": args.tag, "prompt": args.prompt, "bs": args.bs,
            "fresh_compile": args.fresh_compile, "churn_mb": args.churn_mb,

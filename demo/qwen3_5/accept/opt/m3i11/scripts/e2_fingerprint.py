@@ -66,7 +66,9 @@ def main() -> int:
     ap.add_argument("--new-tokens", type=int, default=1024)
     ap.add_argument("--kernel-dir", required=True)
     ap.add_argument("--reference", default=str(ACC / "reference/reference_outputs.json"))
-    ap.add_argument("--per-request-token-cap", default=None)
+    # Pinned to the PRE-POLICY uncapped runtime by default: this probe's
+    # committed census is the comparison basis (accept/admission_policy.py, M4-I4).
+    ap.add_argument("--per-request-token-cap", default="none")
     args = ap.parse_args()
 
     out_dir = Path(args.out); out_dir.mkdir(parents=True, exist_ok=True)

@@ -65,7 +65,11 @@ def main() -> int:
         max_new_tokens=args.new_tokens,
         kernel_dir=Path(args.kernel_dir),
         reuse_kernel=Path(args.kernel_dir).joinpath("task_graph_rank0.json").exists(),
-        pinned_max_seq_length=args.msl, audit_compaction=False)
+        pinned_max_seq_length=args.msl, audit_compaction=False,
+        # Pinned to the PRE-POLICY uncapped runtime: this probe's committed
+        # census is the comparison basis, and the shipped default is now the
+        # admission policy (accept/admission_policy.py, M4-I4).
+        per_request_token_cap="none")
 
     rec = {"tag": args.tag, "bs": args.bs, "waves": []}
     saved = {}

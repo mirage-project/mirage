@@ -47,6 +47,7 @@ ACCEPT = Path(os.environ.get("MPK_ACCEPT_DIR", str(HERE.parent))).resolve()
 sys.path.insert(0, str(ACCEPT))
 sys.path.insert(0, str(ACCEPT / "harness"))
 
+import admission_policy as _admission  # noqa: E402
 from mpk_engine_run import (MPKOfflineAdapter, PromptRequest,  # noqa: E402
                             load_reference_requests, log)
 
@@ -154,6 +155,12 @@ def main(argv=None) -> int:
                          "the vLLM side used for the same (bs, rep) so both "
                          "engines consume literally the same token ids "
                          "(remeasure_spec.md sec 4: 20260725 + bs*1000 + rep).")
+    # Passthrough to accept/admission_policy.py -- the ONE authority for the
+    # admission cap. Default 'policy' measures the shipped configuration; pass
+    # 'none' to reproduce a capture taken before the policy landed (every M3
+    # per-stage table was captured uncapped). The cap is compile-time, so a
+    # kernel dir is only valid for one value of it.
+    ap.add_argument("--per-request-token-cap", default="policy")
     args = ap.parse_args(argv)
 
     if (args.prompt_ids is None) == (args.synthetic_prompt_len is None):
@@ -192,7 +199,8 @@ def main(argv=None) -> int:
         model_name=args.model, mbt=args.mbt, page_size=args.page_size,
         max_new_tokens=args.max_new_tokens, kernel_dir=Path(args.kernel_dir),
         reuse_kernel=args.reuse_kernel,
-        pinned_max_seq_length=args.max_seq_length, prof_tensor=prof)
+        pinned_max_seq_length=args.max_seq_length, prof_tensor=prof,
+        per_request_token_cap=args.per_request_token_cap)
 
     t0 = time.time()
     result = adapter.run(requests, args.batch_size)
@@ -231,6 +239,9 @@ def main(argv=None) -> int:
         synthetic_seed=args.synthetic_seed,
         max_seq_length=args.max_seq_length, mbt=args.mbt,
         page_size=args.page_size, max_new_tokens=args.max_new_tokens,
+        per_request_token_cap_requested=args.per_request_token_cap,
+        per_request_token_cap_compiled=_admission.resolve_int(
+            args.per_request_token_cap, args.mbt, args.batch_size),
         profiler_slots=(0 if prof is None else args.slots),
         profiled=prof is not None, n_events=n_events,
         waves=adapter.timings, slot_isolation=adapter.dup_checks,
