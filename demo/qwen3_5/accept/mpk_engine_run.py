@@ -496,9 +496,18 @@ class MPKOfflineAdapter(EngineAdapter):
         if cap is None:
             return {}
         import inspect
-        import mirage as mi
+        # Interrogate the CLASS, not `mirage.PersistentKernel`.  That package
+        # attribute is monkeypatchable and is in fact patched right here:
+        # `opt/profile_wave.py`'s `ProfiledAdapter._build` rebinds it to a plain
+        # function for the duration of this very call, so probing it asked
+        # `function.__init__` for a `max_tokens_per_request` parameter, never
+        # found one, and raised NotImplementedError on a build that has the knob.
+        # Symptom: profile_wave.py failed at every batch size where the policy
+        # resolves to a cap -- bs >= 4 -- i.e. exactly the AC-4 batch sizes,
+        # while bs 1/2 (cap None, early return above) worked. Found by M4-I5.
+        from mirage.mpk.persistent_kernel import PersistentKernel as _PK
         if "max_tokens_per_request" not in inspect.signature(
-                mi.PersistentKernel.__init__).parameters:
+                _PK.__init__).parameters:
             raise NotImplementedError(
                 "--per-request-token-cap needs the runtime knob specced in "
                 "demo/qwen3_5/accept/opt/m3i9/README.md ('the runtime knob'): "
