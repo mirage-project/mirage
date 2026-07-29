@@ -1,0 +1,25 @@
+bs1: n_it=  656 raw_steady=[16, 656] regime=(1, 0, 1, 1) conc_mid=336 -> parse [288,384) warm=272 span=96
+      prefill-free [16,656) len= 640 (live,prefill,decode,tokens)=(1, 0, 1, 1)
+bs8: n_it=  810 raw_steady=[170, 656] regime=(8, 0, 8, 8) conc_mid=413 -> parse [365,461) warm=195 span=96
+      prefill-free [170,656) len= 486 (live,prefill,decode,tokens)=(8, 0, 8, 8)
+      prefill-free [656,674) len=  18 (live,prefill,decode,tokens)=(7, 0, 7, 7)
+      prefill-free [674,692) len=  18 (live,prefill,decode,tokens)=(6, 0, 6, 6)
+      prefill-free [692,711) len=  19 (live,prefill,decode,tokens)=(5, 0, 5, 5)
+      prefill-free [711,733) len=  22 (live,prefill,decode,tokens)=(4, 0, 4, 4)
+      prefill-free [733,756) len=  23 (live,prefill,decode,tokens)=(3, 0, 3, 3)
+      prefill-free [756,781) len=  25 (live,prefill,decode,tokens)=(2, 0, 2, 2)
+      prefill-free [781,810) len=  29 (live,prefill,decode,tokens)=(1, 0, 1, 1)
+bs16: n_it= 1360 raw_steady=[720, 733] regime=(12, 0, 12, 12) conc_mid=726 -> parse [720,733) warm=0 span=13
+      prefill-free [720,733) len=  13 (live,prefill,decode,tokens)=(12, 0, 12, 12)
+      prefill-free [733,756) len=  23 (live,prefill,decode,tokens)=(11, 0, 11, 11)
+      prefill-free [756,781) len=  25 (live,prefill,decode,tokens)=(10, 0, 10, 10)
+      prefill-free [781,810) len=  29 (live,prefill,decode,tokens)=(9, 0, 9, 9)
+      prefill-free [810,842) len=  32 (live,prefill,decode,tokens)=(8, 0, 8, 8)
+      prefill-free [842,878) len=  36 (live,prefill,decode,tokens)=(7, 0, 7, 7)
+      prefill-free [878,921) len=  43 (live,prefill,decode,tokens)=(6, 0, 6, 6)
+      prefill-free [921,972) len=  51 (live,prefill,decode,tokens)=(5, 0, 5, 5)
+      prefill-free [972,1036) len=  64 (live,prefill,decode,tokens)=(4, 0, 4, 4)
+      prefill-free [1036,1121) len=  85 (live,prefill,decode,tokens)=(3, 0, 3, 3)
+      prefill-free [1121,1249) len= 128 (live,prefill,decode,tokens)=(2, 0, 2, 2)
+      prefill-free [1249,1360) len= 111 (live,prefill,decode,tokens)=(1, 0, 1, 1)
+wrote /home/catalyst/mpk-artifacts/m3i7/stage/window_plan.json

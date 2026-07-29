@@ -1,0 +1,34 @@
+{
+  "batch_size": 2,
+  "note": "informational only -- no perf claim; mbt is fixed across batch sizes for a uniform correctness config, which inflates per-step cost at small bs",
+  "waves": [
+    {
+      "batch_size": 2,
+      "wave": 0,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "syn256-00",
+        "syn256-01"
+      ],
+      "wall_ms": 10762.41796875,
+      "max_decode_steps": 1023,
+      "ms_per_decode_step": 10.52044767228739,
+      "tokens_per_s": 190.10597859522014,
+      "max_seq_length": 1280,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 1057,
+        "live_slot_migrations": 1,
+        "migrated_slots": [
+          1
+        ],
+        "straddling_slots": [
+          1
+        ]
+      }
+    }
+  ],
+  "slot_isolation_checks": []
+}

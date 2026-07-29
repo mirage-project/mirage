@@ -1,0 +1,69 @@
+{
+ "16": {
+  "window": [
+   720,
+   733
+  ],
+  "window_step_us": 12662.3,
+  "wave_average_step_us": 18890.65,
+  "window_vs_wave_pct": -32.9705,
+  "max_frac_err_over_all_types": 0.4437,
+  "threshold": 0.02,
+  "window_valid": false,
+  "n_task_types_mismatched": 16,
+  "trace_iterations": 1004,
+  "call_site_rotation_aligned": {
+   "253": true,
+   "279": false
+  },
+  "verdict": "FAIL"
+ },
+ "1": {
+  "window": [
+   288,
+   384
+  ],
+  "window_step_us": 9822.77,
+  "wave_average_step_us": 10028.95,
+  "window_vs_wave_pct": -2.0558,
+  "max_frac_err_over_all_types": 0.0,
+  "threshold": 0.02,
+  "window_valid": true,
+  "n_task_types_mismatched": 3,
+  "trace_iterations": 656,
+  "call_site_rotation_aligned": {
+   "253": true,
+   "279": true
+  },
+  "verdict": "PASS"
+ },
+ "8": {
+  "window": [
+   365,
+   461
+  ],
+  "window_step_us": 10728.12,
+  "wave_average_step_us": 12708.92,
+  "window_vs_wave_pct": -15.5859,
+  "max_frac_err_over_all_types": 0.0,
+  "threshold": 0.02,
+  "window_valid": true,
+  "n_task_types_mismatched": 3,
+  "trace_iterations": 810,
+  "call_site_rotation_aligned": {
+   "253": true,
+   "279": true
+  },
+  "verdict": "PASS"
+ },
+ "_summary": {
+  "pass": [
+   "1",
+   "8"
+  ],
+  "fail": [
+   "16"
+  ],
+  "meaning": "anchor QC compares the per-step task-type counts the trace implies against the counts the compiled task graph contains; a window that fails is not a step at the stated batch size. Rows for a FAILing bs are retained for continuity and flagged, not used for ranking (the rank is computed on bs1)."
+ }
+}

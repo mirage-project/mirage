@@ -28,7 +28,11 @@ from pathlib import Path
 
 import os
 
-ARM = "armA"
+# M3-I7: the arm name is the only thing that has to change to point this join at
+# a later re-measure's capture -- it selects both the MPK input directory and the
+# output directory. Env-overridable rather than forked; the default is unchanged,
+# so a bare run still reproduces M3-I10's armA join exactly.
+ARM = os.environ.get("M3I10RM_ARM", "armA")
 REMEASURE = Path(os.environ.get("M3I10RM_DIR",
                                 str(Path.home() / "mpk-qwen35" / "m3i10-remeasure")))
 REPO = REMEASURE / ARM                                   # pertask_by_bs.csv, attribution.csv

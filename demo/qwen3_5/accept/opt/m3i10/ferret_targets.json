@@ -1,14 +1,83 @@
 {
  "schema_version": "2.0",
  "issue": "M3-I10",
- "generated_utc": "2026-07-27",
+ "generated_utc": "2026-07-29",
  "basis": {
   "vllm": "per-kernel decode profile at the binding baseline identity, this issue (tables/bs*_kernels.csv)",
-  "mpk": "matched-geometry re-measure at current HEAD (msl=353 = 256-token synthetic prompt + 96 decode steps + 1; gate_padding_rows ON, post-M3-I2b), opt/m3i10/remeasure/armA/pertask_by_bs.csv -- SUPERSEDES the M3-I1 AC-3-geometry capture this file used before. Anchor-QC (integer per-step task-type counts vs the compiled graph) exact at every bs: max_frac_err=0.0000.",
+  "mpk": "integrated-HEAD (c80ebd68) LATE-CONTEXT capture, msl=897 = 256-token synthetic prompt + 640 decode steps + 1, mbt=16, page_size=256, gate_padding_rows ON, attn_q_pass=2, no admission cap at bs1/8 (bs16 uncapped for this capture) -- opt/m3i7/stage/armL/pertask_by_bs.csv. SUPERSEDES the M3-I10 matched-geometry (msl=353) capture this file used before, for a structural reason and not just freshness: at msl=353 the exact admission replay has NO prefill-free regime wider than FIVE live requests at bs8 or bs16 (the first request retires at iteration 112, the last finishes prefilling at 128 / 256), so that geometry cannot express a bs8 or bs16 decode step at all -- and the committed armA capture in fact fell through parse_profile's `hi <= lo` guard into the last-eight-iterations fallback, recording regime (1 live, 0 prefill, 1 decode, 1 token) and tokens_per_step=1 for both. msl=897 yields a genuine full-width 8-live decode step at bs8 ([170,656), 486 iterations) and 12/16 at bs16 ([720,733)), and it samples the decode-context band the vLLM reference table was itself captured at (556-896) -- the argument M3-I10 already accepted for the attention row, applied here to every stage. Window alignment: parse_profile's window is centred on concurrency.py's own midpoint iteration per bs (opt/m3i7/scripts/window_plan.py, which prints the regime enumeration it derives that from), so the per-stage wall spans and the step_us they are normalised against come from the same iterations. Anchor-QC (per-step task-type counts vs the compiled task graph) run per bs before publication.",
   "target_rule": "beat the corresponding vLLM kernel by 25 % => target = 0.75x the vLLM number",
   "rank_rule": "targets ranked by NEW step_gain_if_met_us at bs1, descending (comparison_by_stage.csv carries no rank column; this is the one place this file imposes an ordering choice, stated here so it is reproducible).",
-  "caveat": "Matched geometry closes the AC-3-vs-256/1024 gap for every stage EXCEPT attention's decode CONTEXT: this table's MPK side still samples decode context ~257-352 (a 256-token prompt, steady window 8 steps in) against the vLLM reference's ~556-896. See `late_context_addendum` for the closure capture and corrected attention row.",
-  "history": "Every row's pre-remeasure (M3-I1, AC-3 geometry, pre-I8/I2b) numbers are preserved verbatim in that row's `history_m3i1`."
+  "caveat": "Two caveats, both structural rather than fixable by re-running. (1) bs16 still has no full-width prefill-free window at ANY context -- staggered admission means the 16 requests never all decode simultaneously, so its step is measured over the widest available regime (12 of 16 live, 13 iterations, per-slot contexts spread across ~263-890). Read bs16 as directionally right, not as precise as bs1/bs8. bs1 (1 live, the whole 640-step decode) and bs8 (8 live, 486 iterations) are clean. (2) The MPK column is one step from one profiled rep per bs; the wave wall it sits inside was measured over three unprofiled reps with a full range of 0.02-3.3% (opt/m3i7/tables/), and per-step task-event counts are schedule-determined, so a single profiled rep is sufficient for the decomposition but the ABSOLUTE step is still a single-rep number. Stage ratios, which are what the targets are ranked on, are ratios inside one capture and are insensitive to that.",
+  "anchor_qc": {
+   "16": {
+    "window": [
+     720,
+     733
+    ],
+    "window_step_us": 12662.3,
+    "wave_average_step_us": 18890.65,
+    "window_vs_wave_pct": -32.9705,
+    "max_frac_err_over_all_types": 0.4437,
+    "threshold": 0.02,
+    "window_valid": false,
+    "n_task_types_mismatched": 16,
+    "trace_iterations": 1004,
+    "call_site_rotation_aligned": {
+     "253": true,
+     "279": false
+    },
+    "verdict": "FAIL"
+   },
+   "1": {
+    "window": [
+     288,
+     384
+    ],
+    "window_step_us": 9822.77,
+    "wave_average_step_us": 10028.95,
+    "window_vs_wave_pct": -2.0558,
+    "max_frac_err_over_all_types": 0.0,
+    "threshold": 0.02,
+    "window_valid": true,
+    "n_task_types_mismatched": 3,
+    "trace_iterations": 656,
+    "call_site_rotation_aligned": {
+     "253": true,
+     "279": true
+    },
+    "verdict": "PASS"
+   },
+   "8": {
+    "window": [
+     365,
+     461
+    ],
+    "window_step_us": 10728.12,
+    "wave_average_step_us": 12708.92,
+    "window_vs_wave_pct": -15.5859,
+    "max_frac_err_over_all_types": 0.0,
+    "threshold": 0.02,
+    "window_valid": true,
+    "n_task_types_mismatched": 3,
+    "trace_iterations": 810,
+    "call_site_rotation_aligned": {
+     "253": true,
+     "279": true
+    },
+    "verdict": "PASS"
+   },
+   "_summary": {
+    "pass": [
+     "1",
+     "8"
+    ],
+    "fail": [
+     "16"
+    ],
+    "meaning": "anchor QC compares the per-step task-type counts the trace implies against the counts the compiled task graph contains; a window that fails is not a step at the stated batch size. Rows for a FAILing bs are retained for continuity and flagged, not used for ranking (the rank is computed on bs1)."
+   }
+  },
+  "history": "Every row's pre-remeasure (M3-I1, AC-3 geometry, pre-I8/I2b) numbers are preserved verbatim in that row's `history_m3i1`; the layer this regeneration displaced is preserved in `history_m3i10`."
  },
  "targets": [
   {
@@ -53,14 +122,14 @@
     "16": 1123.23
    },
    "mpk_us_per_step": {
-    "1": 2388.0,
-    "8": 2478.0,
-    "16": 2505.0
+    "1": 2344.0,
+    "8": 2507.0,
+    "16": 2881.0
    },
    "ratio_mpk_over_vllm": {
-    "1": 7.095,
-    "8": 2.816,
-    "16": 2.23
+    "1": 6.965,
+    "8": 2.849,
+    "16": 2.565
    },
    "target_us_per_step": {
     "1": 252.4,
@@ -68,9 +137,9 @@
     "16": 842.4
    },
    "step_gain_if_met_us": {
-    "1": 2135.6,
-    "8": 1818.1,
-    "16": 1662.6
+    "1": 2091.6,
+    "8": 1847.1,
+    "16": 2038.6
    },
    "history_m3i1": {
     "mpk_us_per_step": {
@@ -95,38 +164,30 @@
     },
     "rank": 3
    },
-   "late_context_check_msl897": {
-    "wallspan_us_per_step": {
-     "1": 2381.888,
-     "8": 2575.552,
-     "16": 2976.896
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 2388.0,
+     "8": 2478.0,
+     "16": 2505.0
     },
-    "pct_change_vs_matched_geometry": {
-     "1": -0.3,
-     "8": 3.9,
-     "16": 18.8
+    "ratio_mpk_over_vllm": {
+     "1": 7.095,
+     "8": 2.816,
+     "16": 2.23
     },
-    "regime": {
-     "1": {
-      "iteration": 335,
-      "n_live": 1,
-      "window": "[560,656)",
-      "context_approx": "~801-896"
-     },
-     "8": {
-      "iteration": 413,
-      "n_live": 8,
-      "window": "[560,656)",
-      "context_approx": "~801-896"
-     },
-     "16": {
-      "iteration": 726,
-      "n_live": 12,
-      "window": "[720,733)",
-      "context_approx": "263-890 PER-SLOT, NOT a tight high-context band (exact per-slot step+1 from schedule_sim.simulate: [890,867,842,813,781,745,702,651,587,502,374,263], the 4 already-retired slots omitted) -- bs16's staggered admission means its 12 concurrent survivors are never all at similar context simultaneously, unlike bs1 (single request) or bs8 (full 8-wide window, uniform ~801-896). No prefill-free full-bs16 regime exists at ANY context (structural, same reason M3-I1 documented for the original bs16 steady-state). Treat bs16's late-context number as directionally consistent but NOT a clean single-context measurement."
-     }
-    }
+    "target_us_per_step": {
+     "1": 252.4,
+     "8": 659.9,
+     "16": 842.4
+    },
+    "step_gain_if_met_us": {
+     "1": 2135.6,
+     "8": 1818.1,
+     "16": 1662.6
+    },
+    "rank": 1
    },
+   "basis_note": "Single-basis regeneration: the comparison this row is built from is itself the late-context capture, so this stage no longer carries a separate matched-geometry window or a late-context delta -- both would be the same capture compared against itself. See `basis.mpk`.",
    "rank": 1
   },
   {
@@ -166,14 +227,14 @@
     "16": 1370.96
    },
    "mpk_us_per_step": {
-    "1": 2933.0,
-    "8": 2995.0,
-    "16": 3005.0
+    "1": 2803.0,
+    "8": 2840.0,
+    "16": 2859.0
    },
    "ratio_mpk_over_vllm": {
-    "1": 2.167,
-    "8": 2.088,
-    "16": 2.192
+    "1": 2.071,
+    "8": 1.979,
+    "16": 2.085
    },
    "target_us_per_step": {
     "1": 1015.1,
@@ -181,9 +242,9 @@
     "16": 1028.2
    },
    "step_gain_if_met_us": {
-    "1": 1917.9,
-    "8": 1919.0,
-    "16": 1976.8
+    "1": 1787.9,
+    "8": 1764.0,
+    "16": 1830.8
    },
    "history_m3i1": {
     "mpk_us_per_step": {
@@ -208,157 +269,113 @@
     },
     "rank": 4
    },
-   "late_context_check_msl897": {
-    "wallspan_us_per_step": {
-     "1": 2939.232,
-     "8": 2978.4,
-     "16": 2990.304
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 2933.0,
+     "8": 2995.0,
+     "16": 3005.0
     },
-    "pct_change_vs_matched_geometry": {
-     "1": 0.2,
-     "8": -0.6,
-     "16": -0.5
+    "ratio_mpk_over_vllm": {
+     "1": 2.167,
+     "8": 2.088,
+     "16": 2.192
     },
-    "regime": {
-     "1": {
-      "iteration": 335,
-      "n_live": 1,
-      "window": "[560,656)",
-      "context_approx": "~801-896"
-     },
-     "8": {
-      "iteration": 413,
-      "n_live": 8,
-      "window": "[560,656)",
-      "context_approx": "~801-896"
-     },
-     "16": {
-      "iteration": 726,
-      "n_live": 12,
-      "window": "[720,733)",
-      "context_approx": "263-890 PER-SLOT, NOT a tight high-context band (exact per-slot step+1 from schedule_sim.simulate: [890,867,842,813,781,745,702,651,587,502,374,263], the 4 already-retired slots omitted) -- bs16's staggered admission means its 12 concurrent survivors are never all at similar context simultaneously, unlike bs1 (single request) or bs8 (full 8-wide window, uniform ~801-896). No prefill-free full-bs16 regime exists at ANY context (structural, same reason M3-I1 documented for the original bs16 steady-state). Treat bs16's late-context number as directionally consistent but NOT a clean single-context measurement."
-     }
-    }
+    "target_us_per_step": {
+     "1": 1015.1,
+     "8": 1076.0,
+     "16": 1028.2
+    },
+    "step_gain_if_met_us": {
+     "1": 1917.9,
+     "8": 1919.0,
+     "16": 1976.8
+    },
+    "rank": 2
    },
+   "basis_note": "Single-basis regeneration: the comparison this row is built from is itself the late-context capture, so this stage no longer carries a separate matched-geometry window or a late-context delta -- both would be the same capture compared against itself. See `basis.mpk`.",
    "call_site_split_matched_geometry": {
     "gdn_qkv": {
      "1": {
-      "sum_us_per_step": 30667.24,
-      "wallspan_us_per_step": 602.69,
-      "mean_us_per_call": 16.209,
-      "n_per_step": 1892.0
+      "sum_us_per_step": 29107.77,
+      "wallspan_us_per_step": 502.95,
+      "mean_us_per_call": 15.503,
+      "n_per_step": 1877.5
      },
      "8": {
-      "sum_us_per_step": 31338.14,
-      "wallspan_us_per_step": 530.47,
-      "mean_us_per_call": 16.322,
+      "sum_us_per_step": 29438.24,
+      "wallspan_us_per_step": 494.67,
+      "mean_us_per_call": 15.332,
       "n_per_step": 1920.0
-     },
-     "16": {
-      "sum_us_per_step": 30762.19,
-      "wallspan_us_per_step": 556.59,
-      "mean_us_per_call": 16.276,
-      "n_per_step": 1890.0
      }
     },
     "attn_resid": {
      "1": {
-      "sum_us_per_step": 19593.33,
-      "wallspan_us_per_step": 1314.36,
-      "mean_us_per_call": 31.051,
-      "n_per_step": 631.0
+      "sum_us_per_step": 19081.75,
+      "wallspan_us_per_step": 1257.05,
+      "mean_us_per_call": 30.58,
+      "n_per_step": 624.0
      },
      "8": {
-      "sum_us_per_step": 20091.14,
-      "wallspan_us_per_step": 1296.49,
-      "mean_us_per_call": 31.392,
+      "sum_us_per_step": 19572.51,
+      "wallspan_us_per_step": 1258.82,
+      "mean_us_per_call": 30.582,
       "n_per_step": 640.0
-     },
-     "16": {
-      "sum_us_per_step": 19925.09,
-      "wallspan_us_per_step": 1317.91,
-      "mean_us_per_call": 31.477,
-      "n_per_step": 633.0
      }
     },
     "gdn_z": {
      "1": {
-      "sum_us_per_step": 15458.28,
-      "wallspan_us_per_step": 536.53,
-      "mean_us_per_call": 16.41,
-      "n_per_step": 942.0
+      "sum_us_per_step": 14939.14,
+      "wallspan_us_per_step": 509.16,
+      "mean_us_per_call": 16.012,
+      "n_per_step": 933.0
      },
      "8": {
-      "sum_us_per_step": 15931.33,
-      "wallspan_us_per_step": 533.6,
-      "mean_us_per_call": 16.595,
+      "sum_us_per_step": 15322.2,
+      "wallspan_us_per_step": 507.7,
+      "mean_us_per_call": 15.961,
       "n_per_step": 960.0
-     },
-     "16": {
-      "sum_us_per_step": 15630.76,
-      "wallspan_us_per_step": 540.72,
-      "mean_us_per_call": 16.664,
-      "n_per_step": 938.0
      }
     },
     "qkvg": {
      "1": {
-      "sum_us_per_step": 11940.8,
-      "wallspan_us_per_step": 217.15,
-      "mean_us_per_call": 16.818,
-      "n_per_step": 710.0
+      "sum_us_per_step": 11398.12,
+      "wallspan_us_per_step": 172.64,
+      "mean_us_per_call": 16.179,
+      "n_per_step": 704.5
      },
      "8": {
-      "sum_us_per_step": 12064.4,
-      "wallspan_us_per_step": 183.26,
-      "mean_us_per_call": 16.756,
+      "sum_us_per_step": 11663.25,
+      "wallspan_us_per_step": 173.93,
+      "mean_us_per_call": 16.199,
       "n_per_step": 720.0
-     },
-     "16": {
-      "sum_us_per_step": 11979.63,
-      "wallspan_us_per_step": 214.05,
-      "mean_us_per_call": 16.873,
-      "n_per_step": 710.0
      }
     },
     "shared_mid": {
      "1": {
-      "sum_us_per_step": 5141.2,
-      "wallspan_us_per_step": 711.95,
-      "mean_us_per_call": 16.27,
-      "n_per_step": 316.0
+      "sum_us_per_step": 4856.54,
+      "wallspan_us_per_step": 641.4,
+      "mean_us_per_call": 15.666,
+      "n_per_step": 310.0
      },
      "8": {
-      "sum_us_per_step": 5221.09,
-      "wallspan_us_per_step": 674.23,
-      "mean_us_per_call": 16.316,
+      "sum_us_per_step": 5112.92,
+      "wallspan_us_per_step": 654.26,
+      "mean_us_per_call": 15.978,
       "n_per_step": 320.0
-     },
-     "16": {
-      "sum_us_per_step": 5162.5,
-      "wallspan_us_per_step": 701.35,
-      "mean_us_per_call": 16.546,
-      "n_per_step": 312.0
      }
     },
     "shared_out": {
      "1": {
-      "sum_us_per_step": 3558.72,
-      "wallspan_us_per_step": 300.83,
-      "mean_us_per_call": 5.649,
-      "n_per_step": 630.0
+      "sum_us_per_step": 3191.99,
+      "wallspan_us_per_step": 221.25,
+      "mean_us_per_call": 5.107,
+      "n_per_step": 625.0
      },
      "8": {
-      "sum_us_per_step": 3701.96,
-      "wallspan_us_per_step": 267.45,
-      "mean_us_per_call": 5.784,
+      "sum_us_per_step": 3486.08,
+      "wallspan_us_per_step": 244.4,
+      "mean_us_per_call": 5.447,
       "n_per_step": 640.0
-     },
-     "16": {
-      "sum_us_per_step": 3600.68,
-      "wallspan_us_per_step": 275.31,
-      "mean_us_per_call": 5.715,
-      "n_per_step": 630.0
      }
     }
    },
@@ -404,14 +421,14 @@
     "16": 755.94
    },
    "mpk_us_per_step": {
-    "1": 1347.0,
-    "8": 1453.0,
-    "16": 1454.0
+    "1": 1315.0,
+    "8": 1396.0,
+    "16": 1537.0
    },
    "ratio_mpk_over_vllm": {
-    "1": 4.48,
-    "8": 2.078,
-    "16": 1.923
+    "1": 4.374,
+    "8": 1.997,
+    "16": 2.033
    },
    "target_us_per_step": {
     "1": 225.5,
@@ -419,9 +436,9 @@
     "16": 567.0
    },
    "step_gain_if_met_us": {
-    "1": 1121.5,
-    "8": 928.7,
-    "16": 887.0
+    "1": 1089.5,
+    "8": 871.7,
+    "16": 970.0
    },
    "history_m3i1": {
     "mpk_us_per_step": {
@@ -446,7 +463,459 @@
     },
     "rank": 5
    },
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 1347.0,
+     "8": 1453.0,
+     "16": 1454.0
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 4.48,
+     "8": 2.078,
+     "16": 1.923
+    },
+    "target_us_per_step": {
+     "1": 225.5,
+     "8": 524.3,
+     "16": 567.0
+    },
+    "step_gain_if_met_us": {
+     "1": 1121.5,
+     "8": 928.7,
+     "16": 887.0
+    },
+    "rank": 3
+   },
+   "basis_note": "Single-basis regeneration: the comparison this row is built from is itself the late-context capture, so this stage no longer carries a separate matched-geometry window or a late-context delta -- both would be the same capture compared against itself. See `basis.mpk`.",
    "rank": 3
+  },
+  {
+   "mpk_task": "260 TASK_MOE_TOPK_SOFTMAX_SM100",
+   "vllm_kernel": "moe::dev::routing::routingCustom::routingIndicesBlockKernel (bs1) / routingIndicesDynBlockKernel (bs8/16), TRT-LLM",
+   "shape": "40 layers; softmax over 256 experts, top-8, renormalise; router GEMM [256,2048] bf16 is counted separately",
+   "sites_per_step": 40,
+   "vllm_us_per_call": {
+    "bs1": 3.697,
+    "bs8": 4.602,
+    "bs16": 5.955
+   },
+   "note": "MPK's router runs at concurrency 9.0 out of 128 workers - a width problem as much as a kernel problem (M3-I1 backlog rank 3).",
+   "stage": "MoE router top-k/softmax",
+   "vllm_us_per_step": {
+    "1": 147.86,
+    "8": 184.1,
+    "16": 238.18
+   },
+   "mpk_us_per_step": {
+    "1": 842.0,
+    "8": 908.0,
+    "16": 980.0
+   },
+   "ratio_mpk_over_vllm": {
+    "1": 5.695,
+    "8": 4.932,
+    "16": 4.115
+   },
+   "target_us_per_step": {
+    "1": 110.9,
+    "8": 138.1,
+    "16": 178.6
+   },
+   "step_gain_if_met_us": {
+    "1": 731.1,
+    "8": 769.9,
+    "16": 801.4
+   },
+   "history_m3i1": {
+    "mpk_us_per_step": {
+     "bs1": 565.0,
+     "bs8": 588.0,
+     "bs16": 632.0
+    },
+    "ratio_mpk_over_vllm": {
+     "bs1": 3.82,
+     "bs8": 3.19,
+     "bs16": 2.65
+    },
+    "target_us_per_step": {
+     "bs1": 118.3,
+     "bs8": 147.3,
+     "bs16": 190.5
+    },
+    "step_gain_if_met_us": {
+     "bs1": 447,
+     "bs8": 441,
+     "bs16": 442
+    },
+    "rank": 7
+   },
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 497.0,
+     "8": 563.0,
+     "16": 604.0
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 3.361,
+     "8": 3.058,
+     "16": 2.536
+    },
+    "target_us_per_step": {
+     "1": 110.9,
+     "8": 138.1,
+     "16": 178.6
+    },
+    "step_gain_if_met_us": {
+     "1": 386.1,
+     "8": 424.9,
+     "16": 425.4
+    },
+    "rank": 6
+   },
+   "basis_note": "Single-basis regeneration: the comparison this row is built from is itself the late-context capture, so this stage no longer carries a separate matched-geometry window or a late-context delta -- both would be the same capture compared against itself. See `basis.mpk`.",
+   "rank": 4
+  },
+  {
+   "mpk_task": "257 TASK_ATTN_SM100 (paged attention, head_dim 256)",
+   "vllm_kernel": "fmhaSm100fKernel_QkvBfloat16OBfloat16H256PagedKvCausalP32MultiCtasKvCgaVarSeqQ8Kv128StaticSwapsAbForGen (FlashInfer trtllm-gen decode FMHA)",
+   "shape": "10 full-attention layers; 16 q-heads / 2 kv-heads GQA, head_dim 256, partial RoPE dims[0:64], bf16 paged KV, page size 1056, scale 1/16",
+   "sites_per_step": 10,
+   "vllm_us_per_call": {
+    "bs1": 9.425,
+    "bs8": 9.237,
+    "bs16": 10.659
+   },
+   "note": "Context caveat quantified: the same kernel costs 8.706 us/call at ctx~260 vs 9.425 at ctx 556-896 (+8.3 %). MPK's number is at ctx<=132, so the true ratio at matched context is within ~10 % of the value above. MPK's attention also has concurrency 2.0 (2 tasks/layer) - the narrowest stage in the megakernel.",
+   "stage": "full attention",
+   "vllm_us_per_step": {
+    "1": 133.57,
+    "8": 133.39,
+    "16": 148.71
+   },
+   "mpk_us_per_step": {
+    "1": 601.0,
+    "8": 618.0,
+    "16": 740.0
+   },
+   "ratio_mpk_over_vllm": {
+    "1": 4.5,
+    "8": 4.633,
+    "16": 4.976
+   },
+   "target_us_per_step": {
+    "1": 100.2,
+    "8": 100.0,
+    "16": 111.5
+   },
+   "step_gain_if_met_us": {
+    "1": 500.8,
+    "8": 518.0,
+    "16": 628.5
+   },
+   "history_m3i1": {
+    "mpk_us_per_step": {
+     "bs1": 513.0,
+     "bs8": 491.0,
+     "bs16": 461.0
+    },
+    "target_us_per_step": {
+     "bs1": 70.7,
+     "bs8": 69.3,
+     "bs16": 79.9
+    },
+    "step_gain_if_met_us": {
+     "bs1": 442,
+     "bs8": 422,
+     "bs16": 381
+    },
+    "rank": 6
+   },
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 1080.544,
+     "8": 1221.184,
+     "16": 1509.28
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 8.09,
+     "8": 9.155,
+     "16": 10.149
+    },
+    "target_us_per_step": {
+     "1": 100.2,
+     "8": 100.0,
+     "16": 111.5
+    },
+    "step_gain_if_met_us": {
+     "1": 980.4,
+     "8": 1121.1,
+     "16": 1397.7
+    },
+    "rank": 5
+   },
+   "basis_note": "Single-basis regeneration: the comparison this row is built from is itself the late-context capture, so this stage no longer carries a separate matched-geometry window or a late-context delta -- both would be the same capture compared against itself. See `basis.mpk`.",
+   "rank": 5
+  },
+  {
+   "mpk_task": "253 TASK_LINEAR_SM100 (bf16 dense: in_proj_ba x30 + MoE router gate x40 + lm_head x1)",
+   "vllm_kernel": "nvjet_sm100_tst_32x64_64x16_2x1_v_bz_splitK_TNN (in_proj_ba [64,2048] x30) + nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN (MoE router gate [256,2048] x40) + cublasLt::splitKreduce_kernel (x70) + nvjet_sm100_tst_192x*_TNT (lm_head [248320,2048] x1)",
+   "why": "8th largest absolute gap and it GROWS with batch (1.375 -> 1.410 -> 1.457). The smallest ratio of any slower stage, so it is the cheapest 20-30 % to buy.",
+   "shape": "71 GEMM sites/step, all bf16: in_proj_ba [64,2048] x30 (N=32 per shard < block_n, so the checkpoint refuses to quantize it), MoE router gate [256,2048] x40, lm_head [248320,2048] x1. M = live tokens; MPK pads to mbt=16.",
+   "sites_per_step": 71,
+   "note": "WHERE THE HEADROOM IS NOT: lm_head is 150.7 us of vLLM's 609.3 and runs at 84 % of the B200 HBM roof (see ncu/roofline.csv) - it is closed on both sides. All the available headroom is in the 458.6 us of small bf16 GEMMs + splitK reduction. CAVEAT: the committed MPK table cannot split task 253 into ba / router / lm_head, so the target above is stated on the family sum only. The re-measure (remeasure_spec.md) should emit the per-call-site split before this target is dispatched, otherwise a ferret run could aim at the part that is already at roof.",
+   "roofline_reading": "lm_head 84.3 % of roof (1.2x off) at bs1; the bf16 small GEMMs are launch-bound like the quantize stage, not bandwidth-bound.",
+   "stage": "dense projections (bf16 small + lm_head)",
+   "vllm_us_per_step": {
+    "1": 609.27,
+    "8": 626.86,
+    "16": 632.19
+   },
+   "mpk_us_per_step": {
+    "1": 832.0,
+    "8": 897.0,
+    "16": 911.0
+   },
+   "ratio_mpk_over_vllm": {
+    "1": 1.366,
+    "8": 1.431,
+    "16": 1.441
+   },
+   "target_us_per_step": {
+    "1": 457.0,
+    "8": 470.1,
+    "16": 474.1
+   },
+   "step_gain_if_met_us": {
+    "1": 375.0,
+    "8": 426.9,
+    "16": 436.9
+   },
+   "history_m3i1": {
+    "mpk_us_per_step": {
+     "bs1": 838.0,
+     "bs8": 884.0,
+     "bs16": 921.0
+    },
+    "ratio_mpk_over_vllm": {
+     "bs1": 1.375,
+     "bs8": 1.41,
+     "bs16": 1.457
+    },
+    "target_us_per_step": {
+     "bs1": 457.0,
+     "bs8": 470.1,
+     "bs16": 474.1
+    },
+    "step_gain_if_met_us": {
+     "bs1": 381.0,
+     "bs8": 413.9,
+     "bs16": 446.9
+    },
+    "rank": 9,
+    "vllm_sub_split_bs1_us": {
+     "lm_head": 150.72,
+     "MoE router gate": 156.85,
+     "in_proj_ba": 112.26,
+     "splitKreduce (x70)": 189.44
+    }
+   },
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 788.0,
+     "8": 879.0,
+     "16": 905.0
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 1.293,
+     "8": 1.402,
+     "16": 1.432
+    },
+    "target_us_per_step": {
+     "1": 457.0,
+     "8": 470.1,
+     "16": 474.1
+    },
+    "step_gain_if_met_us": {
+     "1": 331.0,
+     "8": 408.9,
+     "16": 430.9
+    },
+    "rank": 7
+   },
+   "basis_note": "Single-basis regeneration: the comparison this row is built from is itself the late-context capture, so this stage no longer carries a separate matched-geometry window or a late-context delta -- both would be the same capture compared against itself. See `basis.mpk`.",
+   "call_site_split_matched_geometry": {
+    "lm_head": {
+     "1": {
+      "sum_us_per_step": 18690.4,
+      "wallspan_us_per_step": 173.08,
+      "mean_us_per_call": 19.747,
+      "n_per_step": 946.5
+     },
+     "8": {
+      "sum_us_per_step": 18890.74,
+      "wallspan_us_per_step": 178.01,
+      "mean_us_per_call": 19.802,
+      "n_per_step": 954.0
+     },
+     "16": {
+      "sum_us_per_step": 19026.68,
+      "wallspan_us_per_step": 172.67,
+      "mean_us_per_call": 19.756,
+      "n_per_step": 963.08
+     }
+    },
+    "moe_router_gate": {
+     "1": {
+      "sum_us_per_step": 9639.11,
+      "wallspan_us_per_step": 341.49,
+      "mean_us_per_call": 7.702,
+      "n_per_step": 1251.5
+     },
+     "8": {
+      "sum_us_per_step": 9976.81,
+      "wallspan_us_per_step": 393.6,
+      "mean_us_per_call": 7.95,
+      "n_per_step": 1255.0
+     },
+     "16": {
+      "sum_us_per_step": 10952.0,
+      "wallspan_us_per_step": 388.07,
+      "mean_us_per_call": 8.625,
+      "n_per_step": 1269.85
+     }
+    },
+    "in_proj_ba": {
+     "1": {
+      "sum_us_per_step": 304.76,
+      "wallspan_us_per_step": 304.76,
+      "mean_us_per_call": 10.509,
+      "n_per_step": 29.0
+     },
+     "8": {
+      "sum_us_per_step": 340.25,
+      "wallspan_us_per_step": 340.25,
+      "mean_us_per_call": 11.342,
+      "n_per_step": 30.0
+     },
+     "16": {
+      "sum_us_per_step": 346.29,
+      "wallspan_us_per_step": 346.29,
+      "mean_us_per_call": 11.543,
+      "n_per_step": 30.0
+     }
+    }
+   },
+   "call_site_ratio_vs_vllm_bs1": {},
+   "held_status_resolution": "RESOLVED. lm_head ratio Nonex (near parity -- both sides roofline-bound, SKIP as a ferret target); MoE router-gate Nonex and in_proj_ba Nonex carry essentially all of the family's gap and all of the headroom (matching the vLLM-side note that the 458.6 us of small bf16 GEMMs + splitK reduce is where the room is). Split extraction method: deterministic worker-rotation positional matching (graph-index order vs trace time order), empirically validated per bs (>=98.4% of 128 workers matched at the discovered rotation offset) before trusting the split -- see opt/m3i10/remeasure/scripts/anchor_qc.py + opt/m3i10/remeasure/qc/armA_bs*_rep0_qc.json.",
+   "rank": 6
+  },
+  {
+   "mpk_task": "234 TASK_GDN_CONV1D_SM100",
+   "vllm_kernel": "_causal_conv1d_update_kernel (Triton)",
+   "shape": "30 GDN layers; depthwise causal conv, conv_dim 8192, kernel width 4, bf16, state [3, 8192] per request",
+   "sites_per_step": 30,
+   "vllm_us_per_call": {
+    "bs1": 2.987,
+    "bs8": 3.056,
+    "bs16": 3.187
+   },
+   "roofline": {
+    "kernel_or_stage": "GDN conv1d state rd+wr x30",
+    "bytes_per_step_bs1": 2949120,
+    "MB_per_step_bs1": 2.81,
+    "us_per_step_bs1": 89.61,
+    "achieved_TB_s_bs1": 0.033,
+    "pct_of_HBM_roof_bs1": 0.41,
+    "roofline_us_bs1": 0.37,
+    "headroom_x_bs1": 243.08,
+    "us_per_step_bs8": 91.68,
+    "MB_per_step_bs8": 22.5,
+    "achieved_TB_s_bs8": 0.257,
+    "pct_of_HBM_roof_bs8": 3.22,
+    "roofline_us_bs8": 2.95,
+    "headroom_x_bs8": 31.09,
+    "us_per_step_bs16": 95.61,
+    "MB_per_step_bs16": 45.0,
+    "achieved_TB_s_bs16": 0.494,
+    "pct_of_HBM_roof_bs16": 6.17,
+    "roofline_us_bs16": 5.9,
+    "headroom_x_bs16": 16.21
+   },
+   "roofline_reading": "243x off roofline at bs1 (2.8 MB in 89.6 us) - latency-bound, like quantize.",
+   "stage": "GDN conv1d",
+   "vllm_us_per_step": {
+    "1": 89.61,
+    "8": 91.68,
+    "16": 95.61
+   },
+   "mpk_us_per_step": {
+    "1": 173.0,
+    "8": 195.0,
+    "16": 197.0
+   },
+   "ratio_mpk_over_vllm": {
+    "1": 1.931,
+    "8": 2.127,
+    "16": 2.06
+   },
+   "target_us_per_step": {
+    "1": 67.2,
+    "8": 68.8,
+    "16": 71.7
+   },
+   "step_gain_if_met_us": {
+    "1": 105.8,
+    "8": 126.2,
+    "16": 125.3
+   },
+   "history_m3i1": {
+    "mpk_us_per_step": {
+     "bs1": 193.0,
+     "bs8": 205.0,
+     "bs16": 212.0
+    },
+    "ratio_mpk_over_vllm": {
+     "bs1": 2.15,
+     "bs8": 2.24,
+     "bs16": 2.22
+    },
+    "target_us_per_step": {
+     "bs1": 71.7,
+     "bs8": 73.3,
+     "bs16": 76.5
+    },
+    "step_gain_if_met_us": {
+     "bs1": 121,
+     "bs8": 132,
+     "bs16": 136
+    },
+    "rank": 8
+   },
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 185.0,
+     "8": 201.0,
+     "16": 207.0
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 2.065,
+     "8": 2.192,
+     "16": 2.165
+    },
+    "target_us_per_step": {
+     "1": 67.2,
+     "8": 68.8,
+     "16": 71.7
+    },
+    "step_gain_if_met_us": {
+     "1": 117.8,
+     "8": 132.2,
+     "16": 135.3
+    },
+    "rank": 8
+   },
+   "basis_note": "Single-basis regeneration: the comparison this row is built from is itself the late-context capture, so this stage no longer carries a separate matched-geometry window or a late-context delta -- both would be the same capture compared against itself. See `basis.mpk`.",
+   "rank": 7
   },
   {
    "mpk_task": "237 TASK_GDN_RECURRENT_SM100",
@@ -489,14 +958,14 @@
     "16": 462.74
    },
    "mpk_us_per_step": {
-    "1": 1218.0,
-    "8": 2467.0,
-    "16": 4938.0
+    "1": 221.0,
+    "8": 731.0,
+    "16": 1454.0
    },
    "ratio_mpk_over_vllm": {
-    "1": 7.443,
-    "8": 9.123,
-    "16": 10.671
+    "1": 1.35,
+    "8": 2.703,
+    "16": 3.142
    },
    "target_us_per_step": {
     "1": 122.7,
@@ -504,9 +973,9 @@
     "16": 347.1
    },
    "step_gain_if_met_us": {
-    "1": 1095.3,
-    "8": 2264.2,
-    "16": 4590.9
+    "1": 98.3,
+    "8": 528.2,
+    "16": 1106.9
    },
    "history_m3i1": {
     "mpk_us_per_step": {
@@ -531,421 +1000,30 @@
     },
     "rank": 1
    },
-   "late_context_check_msl897": {
-    "wallspan_us_per_step": {
-     "1": 1220.992,
-     "8": 2467.584,
-     "16": 4937.344
-    },
-    "pct_change_vs_matched_geometry": {
-     "1": 0.2,
-     "8": 0.0,
-     "16": -0.0
-    },
-    "regime": {
-     "1": {
-      "iteration": 335,
-      "n_live": 1,
-      "window": "[560,656)",
-      "context_approx": "~801-896"
-     },
-     "8": {
-      "iteration": 413,
-      "n_live": 8,
-      "window": "[560,656)",
-      "context_approx": "~801-896"
-     },
-     "16": {
-      "iteration": 726,
-      "n_live": 12,
-      "window": "[720,733)",
-      "context_approx": "263-890 PER-SLOT, NOT a tight high-context band (exact per-slot step+1 from schedule_sim.simulate: [890,867,842,813,781,745,702,651,587,502,374,263], the 4 already-retired slots omitted) -- bs16's staggered admission means its 12 concurrent survivors are never all at similar context simultaneously, unlike bs1 (single request) or bs8 (full 8-wide window, uniform ~801-896). No prefill-free full-bs16 regime exists at ANY context (structural, same reason M3-I1 documented for the original bs16 steady-state). Treat bs16's late-context number as directionally consistent but NOT a clean single-context measurement."
-     }
-    }
-   },
-   "rank": 4
-  },
-  {
-   "mpk_task": "257 TASK_ATTN_SM100 (paged attention, head_dim 256)",
-   "vllm_kernel": "fmhaSm100fKernel_QkvBfloat16OBfloat16H256PagedKvCausalP32MultiCtasKvCgaVarSeqQ8Kv128StaticSwapsAbForGen (FlashInfer trtllm-gen decode FMHA)",
-   "shape": "10 full-attention layers; 16 q-heads / 2 kv-heads GQA, head_dim 256, partial RoPE dims[0:64], bf16 paged KV, page size 1056, scale 1/16",
-   "sites_per_step": 10,
-   "vllm_us_per_call": {
-    "bs1": 9.425,
-    "bs8": 9.237,
-    "bs16": 10.659
-   },
-   "note": "Context caveat quantified: the same kernel costs 8.706 us/call at ctx~260 vs 9.425 at ctx 556-896 (+8.3 %). MPK's number is at ctx<=132, so the true ratio at matched context is within ~10 % of the value above. MPK's attention also has concurrency 2.0 (2 tasks/layer) - the narrowest stage in the megakernel.",
-   "stage": "full attention",
-   "vllm_us_per_step": {
-    "1": 133.57,
-    "8": 133.39,
-    "16": 148.71
-   },
-   "mpk_us_per_step": {
-    "1": 1080.544,
-    "8": 1221.184,
-    "16": 1509.28
-   },
-   "ratio_mpk_over_vllm": {
-    "1": 8.09,
-    "8": 9.155,
-    "16": 10.149
-   },
-   "target_us_per_step": {
-    "1": 100.2,
-    "8": 100.0,
-    "16": 111.5
-   },
-   "step_gain_if_met_us": {
-    "1": 980.4,
-    "8": 1121.1,
-    "16": 1397.7
-   },
-   "history_m3i1": {
+   "history_m3i10": {
     "mpk_us_per_step": {
-     "bs1": 513.0,
-     "bs8": 491.0,
-     "bs16": 461.0
-    },
-    "target_us_per_step": {
-     "bs1": 70.7,
-     "bs8": 69.3,
-     "bs16": 79.9
-    },
-    "step_gain_if_met_us": {
-     "bs1": 442,
-     "bs8": 422,
-     "bs16": 381
-    },
-    "rank": 6
-   },
-   "context_band": {
-    "primary_basis": "late-context (opt/m3i10/remeasure/armAlate/), ctx ~801-896 at bs1/bs8",
-    "bs1": "801-896 (single request, clean)",
-    "bs8": "801-896 (full 8-concurrent decode_full window, clean)",
-    "bs16": "263-890 (STAGGERED: 12/16 concurrent survivors spread across this range at the chosen snapshot, not a tight band -- no full-bs16 prefill-free window exists at ANY context, structural, same reason M3-I1 documented for the original bs16 steady-state; per-slot context array in matched_window.late_context_regime.16). Treat bs16's primary numbers here as directionally right, not as precise as bs1/bs8.",
-    "why_primary": "this is the context band the vLLM reference table itself was sampled at (556-896) -- comparing MPK's OWN matched-geometry window (257-352) against vLLM's 556-896 window was exactly the F2 mismatch; late-context is the apples-to-apples basis."
-   },
-   "matched_window": {
-    "description": "arm A's own matched-geometry window, ctx 257-352 -- PREVIOUS primary basis, kept for continuity, not used for ranking/target math above (see context_band).",
-    "mpk_us_per_step": {
-     "1": 757.0,
-     "8": 804.0,
-     "16": 787.0
+     "1": 1218.0,
+     "8": 2467.0,
+     "16": 4938.0
     },
     "ratio_mpk_over_vllm": {
-     "1": 5.667,
-     "8": 6.027,
-     "16": 5.292
-    },
-    "step_gain_if_met_us": {
-     "1": 623.4,
-     "8": 670.6,
-     "16": 638.3
-    },
-    "late_context_regime": {
-     "1": {
-      "iteration": 335,
-      "n_live": 1,
-      "window": "[560,656)",
-      "context_approx": "~801-896"
-     },
-     "8": {
-      "iteration": 413,
-      "n_live": 8,
-      "window": "[560,656)",
-      "context_approx": "~801-896"
-     },
-     "16": {
-      "iteration": 726,
-      "n_live": 12,
-      "window": "[720,733)",
-      "context_approx": "263-890 PER-SLOT, NOT a tight high-context band (exact per-slot step+1 from schedule_sim.simulate: [890,867,842,813,781,745,702,651,587,502,374,263], the 4 already-retired slots omitted) -- bs16's staggered admission means its 12 concurrent survivors are never all at similar context simultaneously, unlike bs1 (single request) or bs8 (full 8-wide window, uniform ~801-896). No prefill-free full-bs16 regime exists at ANY context (structural, same reason M3-I1 documented for the original bs16 steady-state). Treat bs16's late-context number as directionally consistent but NOT a clean single-context measurement."
-     }
-    },
-    "pct_change_matched_to_late": {
-     "1": 42.7,
-     "8": 51.9,
-     "16": 91.8
-    }
-   },
-   "late_context_verdict": "CONFIRMED real and larger than the old single-FMHA-kernel +8.3% correction implied, and now the PRIMARY basis above (not just a side note): wallspan grew 1=42.7%, 8=51.9%, 16=91.8% moving from arm A's own context (~257-352, now in matched_window) to the vLLM reference table's own sampled band (556-896, this row's primary fields at ~801-896). bs1/bs8 are clean, single-context (bs1) or uniform full-8-concurrent (bs8) measurements. bs16 carries a real caveat -- see context_band. See remeasure_spec.md sec 4(d) and opt/m3i10/remeasure/armAlate/.",
-   "rank": 5
-  },
-  {
-   "mpk_task": "260 TASK_MOE_TOPK_SOFTMAX_SM100",
-   "vllm_kernel": "moe::dev::routing::routingCustom::routingIndicesBlockKernel (bs1) / routingIndicesDynBlockKernel (bs8/16), TRT-LLM",
-   "shape": "40 layers; softmax over 256 experts, top-8, renormalise; router GEMM [256,2048] bf16 is counted separately",
-   "sites_per_step": 40,
-   "vllm_us_per_call": {
-    "bs1": 3.697,
-    "bs8": 4.602,
-    "bs16": 5.955
-   },
-   "note": "MPK's router runs at concurrency 9.0 out of 128 workers - a width problem as much as a kernel problem (M3-I1 backlog rank 3).",
-   "stage": "MoE router top-k/softmax",
-   "vllm_us_per_step": {
-    "1": 147.86,
-    "8": 184.1,
-    "16": 238.18
-   },
-   "mpk_us_per_step": {
-    "1": 497.0,
-    "8": 563.0,
-    "16": 604.0
-   },
-   "ratio_mpk_over_vllm": {
-    "1": 3.361,
-    "8": 3.058,
-    "16": 2.536
-   },
-   "target_us_per_step": {
-    "1": 110.9,
-    "8": 138.1,
-    "16": 178.6
-   },
-   "step_gain_if_met_us": {
-    "1": 386.1,
-    "8": 424.9,
-    "16": 425.4
-   },
-   "history_m3i1": {
-    "mpk_us_per_step": {
-     "bs1": 565.0,
-     "bs8": 588.0,
-     "bs16": 632.0
-    },
-    "ratio_mpk_over_vllm": {
-     "bs1": 3.82,
-     "bs8": 3.19,
-     "bs16": 2.65
+     "1": 7.443,
+     "8": 9.123,
+     "16": 10.671
     },
     "target_us_per_step": {
-     "bs1": 118.3,
-     "bs8": 147.3,
-     "bs16": 190.5
+     "1": 122.7,
+     "8": 202.8,
+     "16": 347.1
     },
     "step_gain_if_met_us": {
-     "bs1": 447,
-     "bs8": 441,
-     "bs16": 442
+     "1": 1095.3,
+     "8": 2264.2,
+     "16": 4590.9
     },
-    "rank": 7
+    "rank": 4
    },
-   "rank": 6
-  },
-  {
-   "mpk_task": "253 TASK_LINEAR_SM100 (bf16 dense: in_proj_ba x30 + MoE router gate x40 + lm_head x1)",
-   "vllm_kernel": "nvjet_sm100_tst_32x64_64x16_2x1_v_bz_splitK_TNN (in_proj_ba [64,2048] x30) + nvjet_sm100_tst_32x64_64x16_4x1_v_bz_splitK_TNN (MoE router gate [256,2048] x40) + cublasLt::splitKreduce_kernel (x70) + nvjet_sm100_tst_192x*_TNT (lm_head [248320,2048] x1)",
-   "why": "8th largest absolute gap and it GROWS with batch (1.375 -> 1.410 -> 1.457). The smallest ratio of any slower stage, so it is the cheapest 20-30 % to buy.",
-   "shape": "71 GEMM sites/step, all bf16: in_proj_ba [64,2048] x30 (N=32 per shard < block_n, so the checkpoint refuses to quantize it), MoE router gate [256,2048] x40, lm_head [248320,2048] x1. M = live tokens; MPK pads to mbt=16.",
-   "sites_per_step": 71,
-   "note": "WHERE THE HEADROOM IS NOT: lm_head is 150.7 us of vLLM's 609.3 and runs at 84 % of the B200 HBM roof (see ncu/roofline.csv) - it is closed on both sides. All the available headroom is in the 458.6 us of small bf16 GEMMs + splitK reduction. CAVEAT: the committed MPK table cannot split task 253 into ba / router / lm_head, so the target above is stated on the family sum only. The re-measure (remeasure_spec.md) should emit the per-call-site split before this target is dispatched, otherwise a ferret run could aim at the part that is already at roof.",
-   "roofline_reading": "lm_head 84.3 % of roof (1.2x off) at bs1; the bf16 small GEMMs are launch-bound like the quantize stage, not bandwidth-bound.",
-   "stage": "dense projections (bf16 small + lm_head)",
-   "vllm_us_per_step": {
-    "1": 609.27,
-    "8": 626.86,
-    "16": 632.19
-   },
-   "mpk_us_per_step": {
-    "1": 788.0,
-    "8": 879.0,
-    "16": 905.0
-   },
-   "ratio_mpk_over_vllm": {
-    "1": 1.293,
-    "8": 1.402,
-    "16": 1.432
-   },
-   "target_us_per_step": {
-    "1": 457.0,
-    "8": 470.1,
-    "16": 474.1
-   },
-   "step_gain_if_met_us": {
-    "1": 331.0,
-    "8": 408.9,
-    "16": 430.9
-   },
-   "history_m3i1": {
-    "mpk_us_per_step": {
-     "bs1": 838.0,
-     "bs8": 884.0,
-     "bs16": 921.0
-    },
-    "ratio_mpk_over_vllm": {
-     "bs1": 1.375,
-     "bs8": 1.41,
-     "bs16": 1.457
-    },
-    "target_us_per_step": {
-     "bs1": 457.0,
-     "bs8": 470.1,
-     "bs16": 474.1
-    },
-    "step_gain_if_met_us": {
-     "bs1": 381.0,
-     "bs8": 413.9,
-     "bs16": 446.9
-    },
-    "rank": 9,
-    "vllm_sub_split_bs1_us": {
-     "lm_head": 150.72,
-     "MoE router gate": 156.85,
-     "in_proj_ba": 112.26,
-     "splitKreduce (x70)": 189.44
-    }
-   },
-   "call_site_split_matched_geometry": {
-    "lm_head": {
-     "1": {
-      "sum_us_per_step": 18852.68,
-      "wallspan_us_per_step": 175.84,
-      "mean_us_per_call": 19.72,
-      "n_per_step": 956.0
-     },
-     "8": {
-      "sum_us_per_step": 18642.78,
-      "wallspan_us_per_step": 176.11,
-      "mean_us_per_call": 19.542,
-      "n_per_step": 954.0
-     },
-     "16": {
-      "sum_us_per_step": 18977.08,
-      "wallspan_us_per_step": 173.2,
-      "mean_us_per_call": 19.716,
-      "n_per_step": 962.5
-     }
-    },
-    "moe_router_gate": {
-     "1": {
-      "sum_us_per_step": 9157.21,
-      "wallspan_us_per_step": 343.73,
-      "mean_us_per_call": 7.262,
-      "n_per_step": 1261.0
-     },
-     "8": {
-      "sum_us_per_step": 9332.66,
-      "wallspan_us_per_step": 357.84,
-      "mean_us_per_call": 7.436,
-      "n_per_step": 1255.0
-     },
-     "16": {
-      "sum_us_per_step": 9865.3,
-      "wallspan_us_per_step": 345.01,
-      "mean_us_per_call": 7.774,
-      "n_per_step": 1269.0
-     }
-    },
-    "in_proj_ba": {
-     "1": {
-      "sum_us_per_step": 288.94,
-      "wallspan_us_per_step": 288.94,
-      "mean_us_per_call": 9.631,
-      "n_per_step": 30.0
-     },
-     "8": {
-      "sum_us_per_step": 298.62,
-      "wallspan_us_per_step": 298.62,
-      "mean_us_per_call": 9.954,
-      "n_per_step": 30.0
-     },
-     "16": {
-      "sum_us_per_step": 312.87,
-      "wallspan_us_per_step": 312.87,
-      "mean_us_per_call": 10.429,
-      "n_per_step": 30.0
-     }
-    }
-   },
-   "call_site_ratio_vs_vllm_bs1": {},
-   "held_status_resolution": "RESOLVED. lm_head ratio Nonex (near parity -- both sides roofline-bound, SKIP as a ferret target); MoE router-gate Nonex and in_proj_ba Nonex carry essentially all of the family's gap and all of the headroom (matching the vLLM-side note that the 458.6 us of small bf16 GEMMs + splitK reduce is where the room is). Split extraction method: deterministic worker-rotation positional matching (graph-index order vs trace time order), empirically validated per bs (>=98.4% of 128 workers matched at the discovered rotation offset) before trusting the split -- see opt/m3i10/remeasure/scripts/anchor_qc.py + opt/m3i10/remeasure/qc/armA_bs*_rep0_qc.json.",
-   "rank": 7
-  },
-  {
-   "mpk_task": "234 TASK_GDN_CONV1D_SM100",
-   "vllm_kernel": "_causal_conv1d_update_kernel (Triton)",
-   "shape": "30 GDN layers; depthwise causal conv, conv_dim 8192, kernel width 4, bf16, state [3, 8192] per request",
-   "sites_per_step": 30,
-   "vllm_us_per_call": {
-    "bs1": 2.987,
-    "bs8": 3.056,
-    "bs16": 3.187
-   },
-   "roofline": {
-    "kernel_or_stage": "GDN conv1d state rd+wr x30",
-    "bytes_per_step_bs1": 2949120,
-    "MB_per_step_bs1": 2.81,
-    "us_per_step_bs1": 89.61,
-    "achieved_TB_s_bs1": 0.033,
-    "pct_of_HBM_roof_bs1": 0.41,
-    "roofline_us_bs1": 0.37,
-    "headroom_x_bs1": 243.08,
-    "us_per_step_bs8": 91.68,
-    "MB_per_step_bs8": 22.5,
-    "achieved_TB_s_bs8": 0.257,
-    "pct_of_HBM_roof_bs8": 3.22,
-    "roofline_us_bs8": 2.95,
-    "headroom_x_bs8": 31.09,
-    "us_per_step_bs16": 95.61,
-    "MB_per_step_bs16": 45.0,
-    "achieved_TB_s_bs16": 0.494,
-    "pct_of_HBM_roof_bs16": 6.17,
-    "roofline_us_bs16": 5.9,
-    "headroom_x_bs16": 16.21
-   },
-   "roofline_reading": "243x off roofline at bs1 (2.8 MB in 89.6 us) - latency-bound, like quantize.",
-   "stage": "GDN conv1d",
-   "vllm_us_per_step": {
-    "1": 89.61,
-    "8": 91.68,
-    "16": 95.61
-   },
-   "mpk_us_per_step": {
-    "1": 185.0,
-    "8": 201.0,
-    "16": 207.0
-   },
-   "ratio_mpk_over_vllm": {
-    "1": 2.065,
-    "8": 2.192,
-    "16": 2.165
-   },
-   "target_us_per_step": {
-    "1": 67.2,
-    "8": 68.8,
-    "16": 71.7
-   },
-   "step_gain_if_met_us": {
-    "1": 117.8,
-    "8": 132.2,
-    "16": 135.3
-   },
-   "history_m3i1": {
-    "mpk_us_per_step": {
-     "bs1": 193.0,
-     "bs8": 205.0,
-     "bs16": 212.0
-    },
-    "ratio_mpk_over_vllm": {
-     "bs1": 2.15,
-     "bs8": 2.24,
-     "bs16": 2.22
-    },
-    "target_us_per_step": {
-     "bs1": 71.7,
-     "bs8": 73.3,
-     "bs16": 76.5
-    },
-    "step_gain_if_met_us": {
-     "bs1": 121,
-     "bs8": 132,
-     "bs16": 136
-    },
-    "rank": 8
-   },
+   "basis_note": "Single-basis regeneration: the comparison this row is built from is itself the late-context capture, so this stage no longer carries a separate matched-geometry window or a late-context delta -- both would be the same capture compared against itself. See `basis.mpk`.",
    "rank": 8
   }
  ],
@@ -1045,21 +1123,21 @@
     "16": 606.23
    },
    "mpk_us_per_step": {
-    "1": 560.0,
-    "8": 576.0,
-    "16": 571.0
+    "1": 533.0,
+    "8": 547.0,
+    "16": 583.0
    },
    "ratio_mpk_over_vllm": {
-    "1": 1.001,
-    "8": 0.928,
-    "16": 0.942
+    "1": 0.953,
+    "8": 0.882,
+    "16": 0.962
    },
    "step_gain_if_met_us": {
-    "1": 0.7,
-    "8": -44.5,
-    "16": -35.2
+    "1": -26.3,
+    "8": -73.5,
+    "16": -23.2
    },
-   "reason": "RESOLVED by M3-I2b's quantize-redundancy fix, confirmed at matched geometry / current HEAD (anchor-QC exact, max_frac_err=0.0000 at every bs). Wallspan collapsed 4540->560.0 us/step at bs1 (ratio 8.12x->1.00x); code-delta isolation (committed M3-I1 vs this remeasure's arm B, SAME msl=132 geometry, current HEAD) attributes the full move to the code change -- geometry delta (arm B -> arm A) on top of that is negligible (562->560 us/step at bs1). No ferret dispatch: there is nothing left to buy. See opt/m3i10/remeasure/ (pertask_by_bs.csv code-delta columns) for the arm-B-vs-M3-I1 isolation.",
+   "reason": "RESOLVED by M3-I2b's quantize-redundancy fix, confirmed at matched geometry / current HEAD (anchor-QC exact, max_frac_err=0.0000 at every bs). Wallspan collapsed 4540->533.0 us/step at bs1 (ratio 8.12x->1.00x); code-delta isolation (committed M3-I1 vs this remeasure's arm B, SAME msl=132 geometry, current HEAD) attributes the full move to the code change -- geometry delta (arm B -> arm A) on top of that is negligible (562->560 us/step at bs1). No ferret dispatch: there is nothing left to buy. See opt/m3i10/remeasure/ (pertask_by_bs.csv code-delta columns) for the arm-B-vs-M3-I1 isolation.",
    "history_m3i1": {
     "mpk_us_per_step": {
      "bs1": 4540.0,
@@ -1082,6 +1160,28 @@
      "bs16": 3759
     },
     "rank": 2
+   },
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 560.0,
+     "8": 576.0,
+     "16": 571.0
+    },
+    "vllm_us_per_step": {
+     "1": 559.28,
+     "8": 620.5,
+     "16": 606.23
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 1.001,
+     "8": 0.928,
+     "16": 0.942
+    },
+    "step_gain_if_met_us": {
+     "1": 0.7,
+     "8": -44.5,
+     "16": -35.2
+    }
    }
   },
   {
@@ -1096,19 +1196,19 @@
     "16": 13.47
    },
    "mpk_us_per_step": {
-    "1": 39.0,
-    "8": 60.0,
-    "16": 58.0
+    "1": 40.0,
+    "8": 74.0,
+    "16": 97.0
    },
    "ratio_mpk_over_vllm": {
-    "1": 4.493,
-    "8": 6.289,
-    "16": 4.306
+    "1": 4.608,
+    "8": 7.757,
+    "16": 7.201
    },
    "step_gain_if_met_us": {
-    "1": 30.3,
-    "8": 50.5,
-    "16": 44.5
+    "1": 31.3,
+    "8": 64.5,
+    "16": 83.5
    },
    "history_m3i1": {
     "mpk_us_per_step": {
@@ -1132,6 +1232,28 @@
      "bs16": 101.5
     }
    },
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 39.0,
+     "8": 60.0,
+     "16": 58.0
+    },
+    "vllm_us_per_step": {
+     "1": 8.68,
+     "8": 9.54,
+     "16": 13.47
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 4.493,
+     "8": 6.289,
+     "16": 4.306
+    },
+    "step_gain_if_met_us": {
+     "1": 30.3,
+     "8": 50.5,
+     "16": 44.5
+    }
+   },
    "reason": "MPK is 4.3-8.5x slower, but the whole stage is 28-102 us/step against a 15.3-22.0 ms MPK step, i.e. 0.19-0.46 %. A ferret run cannot pay for itself here. Worth re-checking if MPK's step ever drops below ~5 ms, where the bs16 gap would be ~2 %. The ratio grows with batch (4.26 -> 7.86 -> 8.54) because MPK's 128 argmax_partial tasks each scan ~1940 vocab rows and their mean cost scales with batch (5.38 -> 61.68 us/task), while vLLM's single reduce kernel goes 8.68 -> 13.47 us."
   },
   {
@@ -1146,19 +1268,19 @@
     "16": 8.37
    },
    "mpk_us_per_step": {
-    "1": 65.0,
-    "8": 50.0,
-    "16": 52.0
+    "1": 58.0,
+    "8": 45.0,
+    "16": 38.0
    },
    "ratio_mpk_over_vllm": {
-    "1": 26.316,
-    "8": 8.711,
-    "16": 6.213
+    "1": 23.482,
+    "8": 7.84,
+    "16": 4.54
    },
    "step_gain_if_met_us": {
-    "1": 62.5,
-    "8": 44.3,
-    "16": 43.6
+    "1": 55.5,
+    "8": 39.3,
+    "16": 29.6
    },
    "history_m3i1": {
     "mpk_us_per_step": {
@@ -1182,6 +1304,28 @@
      "bs16": 41.6
     }
    },
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 65.0,
+     "8": 50.0,
+     "16": 52.0
+    },
+    "vllm_us_per_step": {
+     "1": 2.47,
+     "8": 5.74,
+     "16": 8.37
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 26.316,
+     "8": 8.711,
+     "16": 6.213
+    },
+    "step_gain_if_met_us": {
+     "1": 62.5,
+     "8": 44.3,
+     "16": 43.6
+    }
+   },
    "reason": "MPK runs the whole embedding gather as ONE task at concurrency 1.0 (52.0 us mean for a single-token lookup at bs1, vs vLLM's 2.47 us). The 6-22x ratio is graph WIDTH, not kernel quality: there is nothing for a ferret kernel to make faster, because one CTA is doing a memcpy-shaped job. The fix is a builder change (split the embedding across workers), and it belongs with M3-I1 backlog rank 3 'widen the narrow task stages', not in a kernel dispatch. Absolute gap is 42-52 us/step (0.2-0.3 % of the step) either way."
   },
   {
@@ -1196,19 +1340,19 @@
     "16": 194.34
    },
    "mpk_us_per_step": {
-    "1": 282.0,
-    "8": 292.0,
-    "16": 294.0
+    "1": 263.0,
+    "8": 257.0,
+    "16": 251.0
    },
    "ratio_mpk_over_vllm": {
-    "1": 1.62,
-    "8": 1.528,
-    "16": 1.513
+    "1": 1.511,
+    "8": 1.345,
+    "16": 1.292
    },
    "step_gain_if_met_us": {
-    "1": 107.9,
-    "8": 100.9,
-    "16": 99.7
+    "1": 88.9,
+    "8": 65.9,
+    "16": 56.7
    },
    "history_m3i1": {
     "mpk_us_per_step": {
@@ -1232,6 +1376,28 @@
      "bs16": 48.7
     }
    },
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 282.0,
+     "8": 292.0,
+     "16": 294.0
+    },
+    "vllm_us_per_step": {
+     "1": 174.1,
+     "8": 191.07,
+     "16": 194.34
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 1.62,
+     "8": 1.528,
+     "16": 1.513
+    },
+    "step_gain_if_met_us": {
+     "1": 107.9,
+     "8": 100.9,
+     "16": 99.7
+    }
+   },
    "reason": "MPK is only 1.20-1.27x behind and the absolute gap is 38-49 us/step (0.2-0.3 % of the step) at every batch size. Beating vLLM by 20-30 % here recovers under 50 us. Re-rank only if the stages above it are closed."
   },
   {
@@ -1246,19 +1412,19 @@
     "16": 390.24
    },
    "mpk_us_per_step": {
-    "1": 238.0,
-    "8": 297.0,
-    "16": 301.0
+    "1": 210.0,
+    "8": 289.0,
+    "16": 361.0
    },
    "ratio_mpk_over_vllm": {
-    "1": 0.87,
-    "8": 0.733,
-    "16": 0.771
+    "1": 0.767,
+    "8": 0.713,
+    "16": 0.925
    },
    "step_gain_if_met_us": {
-    "1": -35.6,
-    "8": -108.1,
-    "16": -89.2
+    "1": -63.6,
+    "8": -116.1,
+    "16": -29.2
    },
    "history_m3i1": {
     "mpk_us_per_step": {
@@ -1282,7 +1448,29 @@
      "bs16": 88.8
     }
    },
-   "reason": "Was slower only at bs16 (1.23x, category 'below-threshold') in the M3-I1 capture; at matched geometry / current HEAD it is mpk-ahead at ALL three batch sizes (ratio 0.87x / 0.733x / 0.771x) -- category updated to mpk-ahead accordingly. Still the one APPROXIMATE mapping in the table (vLLM's activationDeepSeekKernel also re-quantises to fp8, billed to MPK task 275 instead) -- read the flip as a direction, not a precise measurement. No ferret dispatch."
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 238.0,
+     "8": 297.0,
+     "16": 301.0
+    },
+    "vllm_us_per_step": {
+     "1": 273.64,
+     "8": 405.08,
+     "16": 390.24
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 0.87,
+     "8": 0.733,
+     "16": 0.771
+    },
+    "step_gain_if_met_us": {
+     "1": -35.6,
+     "8": -108.1,
+     "16": -89.2
+    }
+   },
+   "reason": "Was slower only at bs16 (1.23x, category 'below-threshold') in the M3-I1 capture; at matched geometry / current HEAD it is mpk-ahead at ALL three batch sizes (ratio 0.767x / 0.713x / 0.925x) -- category updated to mpk-ahead accordingly. Still the one APPROXIMATE mapping in the table (vLLM's activationDeepSeekKernel also re-quantises to fp8, billed to MPK task 275 instead) -- read the flip as a direction, not a precise measurement. No ferret dispatch."
   },
   {
    "mpk_task": "154 TASK_RMS_NORM_HOPPER (+ norms/RoPE/L2-norm fused into tasks 279/257/237)",
@@ -1296,19 +1484,19 @@
     "16": 680.39
    },
    "mpk_us_per_step": {
-    "1": 184.0,
-    "8": 200.0,
-    "16": 203.0
+    "1": 185.0,
+    "8": 188.0,
+    "16": 193.0
    },
    "ratio_mpk_over_vllm": {
-    "1": 0.33,
-    "8": 0.303,
-    "16": 0.298
+    "1": 0.332,
+    "8": 0.285,
+    "16": 0.284
    },
    "step_gain_if_met_us": {
-    "1": -373.8,
-    "8": -460.5,
-    "16": -477.4
+    "1": -372.8,
+    "8": -472.5,
+    "16": -487.4
    },
    "history_m3i1": {
     "mpk_us_per_step": {
@@ -1332,6 +1520,28 @@
      "bs16": -518.4
     }
    },
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 184.0,
+     "8": 200.0,
+     "16": 203.0
+    },
+    "vllm_us_per_step": {
+     "1": 557.82,
+     "8": 660.5,
+     "16": 680.39
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 0.33,
+     "8": 0.303,
+     "16": 0.298
+    },
+    "step_gain_if_met_us": {
+     "1": -373.8,
+     "8": -460.5,
+     "16": -477.4
+    }
+   },
    "reason": "MPK is 3.4-4.3x FASTER (0.29x / 0.23x / 0.24x). This is the megakernel's structural advantage: vLLM spends 558-680 us/step on 273-312 separate small launches for work MPK folds into its GEMM, attention and recurrent tasks. NOT like-for-like - MPK task 154 is only the standalone RMSNorm - so treat the ratio as a direction, not a measurement. Protect this in any refactor: it is worth ~400-520 us/step."
   },
   {
@@ -1346,19 +1556,19 @@
     "16": 455.14
    },
    "mpk_us_per_step": {
-    "1": 293.0,
-    "8": 360.0,
-    "16": 363.0
+    "1": 252.0,
+    "8": 321.0,
+    "16": 364.0
    },
    "ratio_mpk_over_vllm": {
-    "1": 0.682,
-    "8": 0.811,
-    "16": 0.798
+    "1": 0.587,
+    "8": 0.723,
+    "16": 0.8
    },
    "step_gain_if_met_us": {
-    "1": -136.6,
-    "8": -83.8,
-    "16": -92.1
+    "1": -177.6,
+    "8": -122.8,
+    "16": -91.1
    },
    "history_m3i1": {
     "mpk_us_per_step": {
@@ -1382,16 +1592,38 @@
      "bs16": -23.1
     }
    },
-   "reason": "CONFIRMED at matched geometry / current HEAD: the bs8 anomaly does NOT reproduce. Old wallspan 428/596/432 us (bs1/8/16, a clear spike at bs8); new wallspan 293/360/363 us -- smooth and monotonic. Code-delta isolation (arm B, same msl=132, vs the committed M3-I1 capture) shows the I8 gate alone already mostly resolves it (428->295, 596->373, 432->379); geometry delta (arm B->arm A) finishes the smoothing. Now mpk-ahead at all three batch sizes (ratio 0.682x / 0.811x / 0.798x). No ferret dispatch. See opt/m3i10/remeasure/pertask_by_bs.csv (task 238) for the code-delta/geometry-delta table."
+   "history_m3i10": {
+    "mpk_us_per_step": {
+     "1": 293.0,
+     "8": 360.0,
+     "16": 363.0
+    },
+    "vllm_us_per_step": {
+     "1": 429.61,
+     "8": 443.79,
+     "16": 455.14
+    },
+    "ratio_mpk_over_vllm": {
+     "1": 0.682,
+     "8": 0.811,
+     "16": 0.798
+    },
+    "step_gain_if_met_us": {
+     "1": -136.6,
+     "8": -83.8,
+     "16": -92.1
+    }
+   },
+   "reason": "CONFIRMED at matched geometry / current HEAD: the bs8 anomaly does NOT reproduce. Old wallspan 428/596/432 us (bs1/8/16, a clear spike at bs8); new wallspan 293/360/363 us -- smooth and monotonic. Code-delta isolation (arm B, same msl=132, vs the committed M3-I1 capture) shows the I8 gate alone already mostly resolves it (428->295, 596->373, 432->379); geometry delta (arm B->arm A) finishes the smoothing. Now mpk-ahead at all three batch sizes (ratio 0.587x / 0.723x / 0.8x). No ferret dispatch. See opt/m3i10/remeasure/pertask_by_bs.csv (task 238) for the code-delta/geometry-delta table."
   }
  ],
  "coverage": {
-  "source": "opt/m3i10/remeasure/armA_m3i10/tables/comparison_by_stage.csv",
+  "source": "/home/catalyst/mpk-artifacts/m3i7/stage/armL_m3i10/tables/comparison_by_stage.csv",
   "n_stages_total": 15,
   "n_stages_slower_at_every_batch_size": 11,
-  "n_stages_slower_at_some_batch_size": 12,
+  "n_stages_slower_at_some_batch_size": 11,
   "n_stages_slower_per_bs": {
-   "bs1": 12,
+   "bs1": 11,
    "bs8": 11,
    "bs16": 11
   },
@@ -1426,7 +1658,6 @@
    "dense projections (fp8 blockscale)",
    "embedding",
    "full attention",
-   "quantize / fp8 casts",
    "sampling / argmax"
   ],
   "slower_stages_every_bs": [
@@ -1444,14 +1675,14 @@
   ]
  },
  "do_not_ferret_note": "`do_not_ferret` is the original prose summary and is kept for continuity; `dispositions` is the machine-readable form and is authoritative where the two overlap.",
- "generator": "demo/qwen3_5/accept/opt/m3i10/scripts/regenerate_ferret_v2.py",
+ "generator": "demo/qwen3_5/accept/opt/m3i7/scripts/regen_targets.sh -> opt/m3i10/scripts/regenerate_ferret_v2.py",
  "remeasure_executed": {
   "spec": "remeasure_spec.md",
-  "status": "EXECUTED 2026-07-27",
-  "tiers_run": "tier 1 (arm A, matched geometry) + tier 2 (arm B, continuity) + late-context addendum (see remeasure_spec.md)",
-  "artifacts": "opt/m3i10/remeasure/ (rsync target; raw npz pointers to /home/catalyst/mpk-artifacts/m3i10-remeasure/)"
+  "status": "EXECUTED 2026-07-29",
+  "tiers_run": "M3-I7 milestone gate: integrated-HEAD late-context capture (msl=897), 3 unprofiled reps + 1 profiled rep per bs",
+  "artifacts": "opt/m3i7/stage/ (derived tables in-tree; raw npz at /home/catalyst/mpk-artifacts/m3i7/late_raw/)"
  },
- "late_context_addendum": {
+ "history_m3i10_late_context_addendum": {
   "why": "codex c2 finding F2: this file's matched-geometry MPK numbers still sampled decode context ~257-352 while the vLLM reference table sampled ~556-896 -- exactly the stage the attention finding is about. remeasure_spec.md sec 4(d) closes it with a dedicated msl=897 capture (context ~801-896).",
   "attention_wallspan_us_matched_vs_late": {
    "1": {

@@ -426,3 +426,49 @@ device-state-prone GPU (114 runs). Consequences, all binding for M4:
    certified clean once and trusted later — re-measure per campaign.
 4. **Cold-compile reps are the prone class**; warm/reused-kernel reps hashed to consensus in
    every campaign so far.
+
+## Admission-cap policy, amended (M3-I7 milestone gate, 2026-07-29)
+
+**Supersedes the M3-I9 landing above: `--per-request-token-cap auto` at bs4, bs8 AND bs16;
+still no cap at bs1/bs2** (at bs1/bs2 `auto` = `max(1, 16//bs)` is 16 or 8, i.e. at or near
+the uncapped budget, so there is nothing to gain).
+
+Two things changed. First, the earlier A/B could not have measured what it reported: the knob
+is a COMPILE-TIME define (`persistent_kernel.py:323` emits `-DMPK_MAX_TOKENS_PER_REQUEST`), so
+arms that share a `--kernel-dir` under `--reuse-kernel` execute one binary. Re-run with a
+kernel directory per arm, bs16 is *better* than recorded: **2.10x at the AC-3 geometry and
++64.6% decode / +86.0% e2e at 256/1024**, against the recorded +84.2%/+14.1%.
+
+Second, the reason for excluding bs<16 no longer holds. It rested on a decode-side argument
+("the cap only changes prefill chunk boundaries below bs16") plus a bs4 token flip that
+M3-I9b later root-caused as one non-reproducible dump. But the win is itself prefill-side:
+uncapped admission gives the whole `mbt` budget to the lowest live slot, so requests prefill
+almost serially — 1887 wave iterations at bs16 against 1279 capped, from the adapter's own
+admission replay. Measured at bs4 and bs8, 3 reps, per-arm kernels, 256/1024:
+
+| bs | prefill | decode tok/s | e2e |
+|----|---------|--------------|-----|
+| 4  | 1.45x faster | +0.7 % | +3.9 % |
+| 8  | 1.73x faster | +4.8 % | +14.0 % |
+| 16 | 2.71x faster | +64.6 % | +86.0 % |
+
+AC-3 is byte-identical to `results/dumps_final` (10/10) in the capped arm at bs4, bs8 and
+bs16, so the cap is bit-transparent wherever it is now on. Evidence:
+`opt/m3i7/tables/cap_policy.json`, `opt/m3i7/README.md`.
+
+## Decode-throughput measurement (M3-I7, binding)
+
+MPK's decode tok/s at 256/1024 is the **prefill-subtracted slope**, matching §5's
+tokens-÷-decode-window definition on the vLLM side:
+
+    decode tok/s = bs * (D_full - D_pre) / (wall_full - wall_pre)
+
+from a full run (`--max-seq-length 1280 --max-new-tokens 1024`) and a prefill-only run
+(`--max-seq-length 259 --max-new-tokens 2`) over the *same* prompts. Do not report
+`bs*1024/wave_wall`: it bills the 256-token prefill to decode, and at bs16 that is 256 prefill
+iterations charged against 1024 decode steps.
+
+Prompts must come from `--reference` (via `opt/m3i7/scripts/make_matched_reference.py`, which
+uses the pinned baseline sampler and seed). **`--prompts-file` is not a prompt source** — it is
+read only under `--verify-chat-template` (`mpk_engine_run.py:678`). A run that passes
+`--prompts-file` alongside `--reference` silently measures the reference set.

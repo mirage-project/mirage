@@ -1,0 +1,258 @@
+{
+  "tag": "bs16_rep0",
+  "batch_size": 16,
+  "n_workers": 128,
+  "anchor_qc": {
+    "n_iterations_full_span": 1003,
+    "task_begin_task_graph_per_step": 1.0,
+    "task_begin_task_graph_is_1_0": true,
+    "max_frac_err_over_all_types": 0.4437,
+    "threshold": 0.02,
+    "window_valid": false,
+    "n_task_types_mismatched_static_count": 16,
+    "rows": [
+      {
+        "task_type": 253,
+        "name": "TASK_LINEAR_SM100",
+        "observed_per_step": 2265.4437,
+        "rounded": 2265,
+        "static_call_sites": 2280,
+        "frac_err": 0.4437,
+        "mismatch": true
+      },
+      {
+        "task_type": 241,
+        "name": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+        "observed_per_step": 10175.3868,
+        "rounded": 10175,
+        "static_call_sites": 10240,
+        "frac_err": 0.3868,
+        "mismatch": true
+      },
+      {
+        "task_type": 242,
+        "name": "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+        "observed_per_step": 10175.338,
+        "rounded": 10175,
+        "static_call_sites": 10240,
+        "frac_err": 0.338,
+        "mismatch": true
+      },
+      {
+        "task_type": 118,
+        "name": "TASK_SILU_MUL",
+        "observed_per_step": 5246.671,
+        "rounded": 5247,
+        "static_call_sites": 5280,
+        "frac_err": 0.329,
+        "mismatch": true
+      },
+      {
+        "task_type": 260,
+        "name": "TASK_MOE_TOPK_SOFTMAX_SM100",
+        "observed_per_step": 39.672,
+        "rounded": 40,
+        "static_call_sites": 40,
+        "frac_err": 0.328,
+        "mismatch": false
+      },
+      {
+        "task_type": 237,
+        "name": "TASK_GDN_RECURRENT_SM100",
+        "observed_per_step": 15263.2692,
+        "rounded": 15263,
+        "static_call_sites": 15360,
+        "frac_err": 0.2692,
+        "mismatch": true
+      },
+      {
+        "task_type": 154,
+        "name": "TASK_RMS_NORM_HOPPER",
+        "observed_per_step": 1287.7368,
+        "rounded": 1288,
+        "static_call_sites": 1296,
+        "frac_err": 0.2632,
+        "mismatch": true
+      },
+      {
+        "task_type": 201,
+        "name": "TASK_SCHD_EVENTS",
+        "observed_per_step": 2263.2383,
+        "rounded": 2263,
+        "static_call_sites": 0,
+        "frac_err": 0.2383,
+        "mismatch": true
+      },
+      {
+        "task_type": 234,
+        "name": "TASK_GDN_CONV1D_SM100",
+        "observed_per_step": 3815.8265,
+        "rounded": 3816,
+        "static_call_sites": 3840,
+        "frac_err": 0.1735,
+        "mismatch": true
+      },
+      {
+        "task_type": 259,
+        "name": "TASK_ARGMAX_PARTIAL_SM100",
+        "observed_per_step": 127.1535,
+        "rounded": 127,
+        "static_call_sites": 128,
+        "frac_err": 0.1535,
+        "mismatch": true
+      },
+      {
+        "task_type": 238,
+        "name": "TASK_SIGMOID_GATE_MUL_ADD_SM100",
+        "observed_per_step": 635.8873,
+        "rounded": 636,
+        "static_call_sites": 640,
+        "frac_err": 0.1127,
+        "mismatch": true
+      },
+      {
+        "task_type": 279,
+        "name": "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+        "observed_per_step": 5166.9113,
+        "rounded": 5167,
+        "static_call_sites": 5200,
+        "frac_err": 0.0887,
+        "mismatch": true
+      },
+      {
+        "task_type": 261,
+        "name": "TASK_MOE_MUL_SUM_ADD_SM100",
+        "observed_per_step": 636.0828,
+        "rounded": 636,
+        "static_call_sites": 640,
+        "frac_err": 0.0828,
+        "mismatch": true
+      },
+      {
+        "task_type": 257,
+        "name": "TASK_ATTN_SM100",
+        "observed_per_step": 318.0748,
+        "rounded": 318,
+        "static_call_sites": 320,
+        "frac_err": 0.0748,
+        "mismatch": true
+      },
+      {
+        "task_type": 275,
+        "name": "TASK_QUANTIZE_FP8_SM100",
+        "observed_per_step": 3815.9821,
+        "rounded": 3816,
+        "static_call_sites": 3840,
+        "frac_err": 0.0179,
+        "mismatch": true
+      },
+      {
+        "task_type": 258,
+        "name": "TASK_ARGMAX_REDUCE_SM100",
+        "observed_per_step": 0.999,
+        "rounded": 1,
+        "static_call_sites": 1,
+        "frac_err": 0.001,
+        "mismatch": false
+      },
+      {
+        "task_type": 0,
+        "name": "TASK_TERMINATE",
+        "observed_per_step": 0.0,
+        "rounded": 0,
+        "static_call_sites": 1,
+        "frac_err": 0.0,
+        "mismatch": true
+      },
+      {
+        "task_type": 10,
+        "name": "TASK_BEGIN_TASK_GRAPH",
+        "observed_per_step": 1.0,
+        "rounded": 1,
+        "static_call_sites": 1,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 101,
+        "name": "TASK_EMBEDDING",
+        "observed_per_step": 1.0,
+        "rounded": 1,
+        "static_call_sites": 1,
+        "frac_err": 0.0,
+        "mismatch": false
+      },
+      {
+        "task_type": 204,
+        "name": "TASK_SCHD_PREPARE_BATCH",
+        "observed_per_step": 1.0,
+        "rounded": 1,
+        "static_call_sites": 0,
+        "frac_err": 0.0,
+        "mismatch": true
+      }
+    ]
+  },
+  "windowing_crosscheck": {
+    "full_span_step_us": 18890.65,
+    "steady_window": [
+      720,
+      733
+    ],
+    "steady_window_step_us": 12662.3,
+    "pct_diff": -32.9705
+  },
+  "rotation_validation": {
+    "253": {
+      "offset": 126,
+      "n_blocks_matched": 125,
+      "n_blocks_total": 128,
+      "match_frac": 0.9766,
+      "aligned": true
+    },
+    "279": {
+      "offset": 126,
+      "n_blocks_matched": 98,
+      "n_blocks_total": 128,
+      "match_frac": 0.7656,
+      "aligned": false
+    }
+  },
+  "call_site_split": {
+    "253": {
+      "steady_window": [
+        720,
+        733
+      ],
+      "sites": [
+        {
+          "site": "lm_head",
+          "n_instances_total": 12520,
+          "n_per_iter": 963.08,
+          "sum_us_per_iter": 19026.68,
+          "mean_us": 19.756,
+          "wallspan_us_per_iter": 172.67
+        },
+        {
+          "site": "moe_router_gate",
+          "n_instances_total": 16508,
+          "n_per_iter": 1269.85,
+          "sum_us_per_iter": 10952.0,
+          "mean_us": 8.625,
+          "wallspan_us_per_iter": 388.07
+        },
+        {
+          "site": "in_proj_ba",
+          "n_instances_total": 390,
+          "n_per_iter": 30.0,
+          "sum_us_per_iter": 346.29,
+          "mean_us": 11.543,
+          "wallspan_us_per_iter": 346.29
+        }
+      ]
+    },
+    "279": {
+      "ERROR": "best rotation offset=126 only matched 98/128 blocks; split skipped"
+    }
+  }
+}

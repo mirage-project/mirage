@@ -1,0 +1,4 @@
+wrote attribution.csv pertask_by_bs.csv layer_type_by_bs.csv gap_vs_vllm.csv
+{'batch_size': 1, 'vllm_decode_tok_s': 285.5, 'mpk_m2_wave_tok_s': 65.0, 'm2_headline_gap': 4.39, 'mpk_decode_step_us': 9822.8, 'mpk_decode_tok_s': 101.8, 'true_decode_gap': 2.8, 'gap_from_prefill_and_drain': 1.59, 'perfect_pack_tok_s': 564.0, 'gap_if_perfectly_packed': 0.51}
+{'batch_size': 8, 'vllm_decode_tok_s': 1692.5, 'mpk_m2_wave_tok_s': 240.5, 'm2_headline_gap': 7.04, 'mpk_decode_step_us': 10728.1, 'mpk_decode_tok_s': 745.7, 'true_decode_gap': 2.27, 'gap_from_prefill_and_drain': 4.77, 'perfect_pack_tok_s': 2138.5, 'gap_if_perfectly_packed': 0.79}
+{'batch_size': 16, 'vllm_decode_tok_s': 3018.1, 'mpk_m2_wave_tok_s': 233.9, 'm2_headline_gap': 12.9, 'mpk_decode_step_us': 12662.3, 'mpk_decode_tok_s': 947.7, 'true_decode_gap': 3.18, 'gap_from_prefill_and_drain': 9.72, 'perfect_pack_tok_s': 2068.6, 'gap_if_perfectly_packed': 1.46}

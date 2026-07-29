@@ -1,0 +1,21 @@
+wrote /home/catalyst/project/demo/qwen3_5/accept/opt/m3i10/ferret_targets.json
+targets: 8  dispositions: 7
+
+new rank table (bs1 step_gain_if_met_us, descending):
+   1  MoE routed GEMM w13 (gate_up)                 ratio(1/8/16)=6.96/2.85/2.56 gap(1/8/16)=2092/1847/2039
+   2  dense projections (fp8 blockscale)            ratio(1/8/16)=2.07/1.98/2.08 gap(1/8/16)=1788/1764/1831
+   3  MoE routed GEMM w2 (down)                     ratio(1/8/16)=4.37/2.00/2.03 gap(1/8/16)=1090/872/970
+   4  MoE router top-k/softmax                      ratio(1/8/16)=5.70/4.93/4.12 gap(1/8/16)=731/770/801
+   5  full attention                                ratio(1/8/16)=4.50/4.63/4.98 gap(1/8/16)=501/518/628
+   6  dense projections (bf16 small + lm_head)      ratio(1/8/16)=1.37/1.43/1.44 gap(1/8/16)=375/427/437
+   7  GDN conv1d                                    ratio(1/8/16)=1.93/2.13/2.06 gap(1/8/16)=106/126/125
+   8  GDN recurrent (delta rule)                    ratio(1/8/16)=1.35/2.70/3.14 gap(1/8/16)=98/528/1107
+
+dispositions:
+  quantize / fp8 casts                          -> resolved-by-I2b
+  sampling / argmax                             -> below-threshold
+  embedding                                     -> structural-not-kernel
+  MoE combine (weighted sum + residual)         -> below-threshold
+  MoE/shared SiLU-mul                           -> mpk-ahead
+  norms / RoPE / glue                           -> mpk-ahead
+  shared-expert gate (sigmoid*shared+residual)  -> mpk-ahead

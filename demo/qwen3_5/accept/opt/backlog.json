@@ -44,7 +44,10 @@
    "risk": "medium - numerics. The fp32-preserved-scale path (M2-I12/I13, tasks 279/241/242) consumes quantize_fp8_layer(scale_ue8m0=False); any change must reproduce the same fp8 bytes AND the same fp32 block scales bit-for-bit.",
    "verify_cmd": "bash opt/gpu_guard_m3i1.sh 6,0,1 -- bash opt/run_m3i1.sh all && python3 opt/analyze.py  # compare TASK_QUANTIZE_FP8_SM100 wallspan + step_us in attribution.csv; then run_ac3.py per-case vs results/run_report_all_bs.json",
    "suggested_owner_issue": "NEW M3-I8 (fuse quantize into norm/silu epilogues); adjacent to M3-I4",
-   "disposition": "VALIDATED+LANDED (M3-I2b window 2026-07-26): quantize row-partition (input_map was unpartitioned -> 16x redundant); +28.3% bs1, +18-31% all bs, tokens bit-identical; evidence opt/m3i2b/."
+   "disposition": "integrated: M3-I2b landed the quantize row-partition (input_map was unpartitioned -> 16x redundant work): +28.3% bs1, +18-31% at every bs, tokens bit-identical. Confirmed closed at the gate: the re-derived per-stage table puts quantize at 0.95/0.88/0.96x of vLLM at bs1/8/16 -- MPK is now AHEAD of the reference kernel at bs8 and at parity elsewhere, so there is no gap left to buy. Evidence opt/m3i2b/, opt/m3i7/stage/armL_m3i10/tables/comparison_by_stage.csv.",
+   "disposition_before_m3i7": "VALIDATED+LANDED (M3-I2b window 2026-07-26): quantize row-partition (input_map was unpartitioned -> 16x redundant); +28.3% bs1, +18-31% all bs, tokens bit-identical; evidence opt/m3i2b/.",
+   "disposition_kind": "integrated",
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
   },
   {
    "rank": 2,
@@ -62,7 +65,10 @@
    "risk": "medium - touches the router. Phantom-row outputs are discarded, so this should be AC-3 neutral by construction, but it must be proven per-case, and MOE_ROUTER_MAX_ROWS_PER_TASK/the 16-row cap interact (M2-I9).",
    "verify_cmd": "python3 opt/parse_profile.py --raw prof/raw_bs1_rep0.npz ... ; expect nlong_bs1 for task 241 to fall from 4509 to ~320 per step; then AC-3 per-case byte-diff",
    "suggested_owner_issue": "M3-I5b (already owns topk_softmax row handling) or a NEW M3-I9",
-   "disposition": "VALIDATED+LANDED (M3-I8 window 2026-07-27): v1 (gate_padding_rows, default ON since 46872ad) real-hardware step-time A/B +9.7/+15.3/+7.1/+25.1/-0.0% at bs1/2/4/8/16 vs predicted +3/+5/+3/+17/+1; AC-3 byte-identical 10/10 at all 5 bs; bs16 inert as predicted. v2a/v2b (grid widen, STAGED not applied): bs1 composition +24.6/+24.7% but bs8 v1+v2a=+19.6% WORSE than v1 alone (+25.1%, splitting returns bs8 to 2 waves) -- bs-conditional only, re-rank at I7. Evidence: opt/m3i8/results/ + VALIDATION.md."
+   "disposition": "integrated: M3-I8 v1 (gate_padding_rows, default ON since 46872ad) landed: real-hardware A/B +9.7/+15.3/+7.1/+25.1/-0.0% at bs1/2/4/8/16, AC-3 byte-identical 10/10 at all five bs. The v2a/v2b grid-widen half is REJECTED-WITH-EVIDENCE: composing it with v1 gave +24.6% at bs1 but made bs8 WORSE than v1 alone (+19.6% vs +25.1%) because splitting returns bs8 to two waves -- a bs-conditional grid for a bs1-only gain is not worth the branch. Residual at the gate: MoE w13 is still rank 1 (6.96/2.85/2.56x), but that residual is kernel-side (see the ferret target), not activation right-sizing. Evidence opt/m3i8/results/VALIDATION.md.",
+   "disposition_before_m3i7": "VALIDATED+LANDED (M3-I8 window 2026-07-27): v1 (gate_padding_rows, default ON since 46872ad) real-hardware step-time A/B +9.7/+15.3/+7.1/+25.1/-0.0% at bs1/2/4/8/16 vs predicted +3/+5/+3/+17/+1; AC-3 byte-identical 10/10 at all 5 bs; bs16 inert as predicted. v2a/v2b (grid widen, STAGED not applied): bs1 composition +24.6/+24.7% but bs8 v1+v2a=+19.6% WORSE than v1 alone (+25.1%, splitting returns bs8 to 2 waves) -- bs-conditional only, re-rank at I7. Evidence: opt/m3i8/results/ + VALIDATION.md.",
+   "disposition_kind": "integrated",
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
   },
   {
    "rank": 3,
@@ -79,7 +85,10 @@
    "delta_basis": "half of the <=16-concurrency wall recovered; the perfect-packing bound (task_sum/128) says the ceiling is 2.9x at bs1 and 1.9x at bs16",
    "risk": "medium - many small builder/kernel changes; each split changes reduction order and can move bits, so every stage needs its own AC-3 per-case check.",
    "verify_cmd": "python3 opt/concurrency.py prof/raw_bs1_rep0.npz prof/meta_bs1_rep0.json prof/task_names.json /tmp/c.json  # mean_concurrency and us_at_concurrency.c5_16 must both improve",
-   "suggested_owner_issue": "M3-I2b, RE-SCOPED (see the rejected prepare_next_batch entry below)"
+   "suggested_owner_issue": "M3-I2b, RE-SCOPED (see the rejected prepare_next_batch entry below)",
+   "disposition": "blocked-with-reason: Graph width is still the largest structural residual and M3 only chipped at it: I3 split GDN into separate tasks, I8 gated MoE pad rows, I6a removed the register spill that was throttling every task. What remains is a per-stage task-splitting programme -- I3 alone took a full ferret campaign plus an integration issue for ONE stage -- and it does not fit in M3's remaining budget. It is not rejected: the re-derived table shows MPK still 2.2-2.8x off vLLM overall while being AHEAD on every fused stage, which is the signature of a width problem, not a kernel-quality problem. Carried to M4 with the split-KV attention lever (M3-I6a) as the first concrete instance. Evidence opt/m3i7/stage/, opt/m3i3/, opt/m3i6a/.",
+   "disposition_kind": "blocked-with-reason",
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
   },
   {
    "rank": 4,
@@ -97,7 +106,10 @@
    "risk": "medium-high - changes admission and therefore AC-5 e2e and the GDN slot-compaction hazard surface (HAZARD-COMPACTION).",
    "verify_cmd": "python3 opt/schedule_sim.py opt/meta/meta_bs16_rep0.json  # n_decode_full must become > 0 and n_prefill_or_mixed must fall toward 36",
    "suggested_owner_issue": "M3-I2b + M3-I5b (router row loop LANDED prepared; the mbt A/B protocol + simulator sweep is opt/m3i5b/prep.md \u00a75. schedule_sim over the committed metas: bs16 iterations 203 -> 123 at mbt=32 and 114 at mbt=64, decode_full 0 -> 54; bs1-bs8 gain <=2.7%, so the padding cost is expected to dominate below bs16)",
-   "disposition": "IN VALIDATION (M3-I9 window running 2026-07-27): per-request-token-cap=1 knob landed CPU-gated (74df41f); plan_m3i9.sh stages 0-8 incl. free falsifier, codegen identity, AC-3 gate, matched-geometry re-measure (also covers rank 11)."
+   "disposition": "integrated: The per-request admission cap landed (74df41f, policy pinned in docs/qwen35/bench-protocol.md) and the gate re-validated it at integrated HEAD with PER-ARM COMPILED KERNELS -- necessary because the knob is a compile-time define, and sharing one kernel dir between arms silently measures one binary twice. bs16: 2.10x at the AC-3 geometry and +64.6% decode / +86.0% e2e at the pinned 256/1024 geometry, both LARGER than M3-I9's original +84.2%/+14.1%. Mechanism confirmed from the adapter's own admission replay: uncapped, the budget goes to the lowest live slot first, so requests prefill almost serially (1887 wave iterations vs 1279 capped). NEW at the gate: the same mechanism pays at bs4 (+3.9% e2e) and bs8 (+14.0% e2e, +4.8% decode), AC-3 byte-identical 10/10 at both -- so the policy's bs<16 exclusion is superseded (see the bench-protocol amendment). Evidence opt/m3i7/tables/cap_policy.json.",
+   "disposition_before_m3i7": "IN VALIDATION (M3-I9 window running 2026-07-27): per-request-token-cap=1 knob landed CPU-gated (74df41f); plan_m3i9.sh stages 0-8 incl. free falsifier, codegen identity, AC-3 gate, matched-geometry re-measure (also covers rank 11).",
+   "disposition_kind": "integrated",
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
   },
   {
    "rank": 5,
@@ -115,7 +127,10 @@
    "risk": "medium - bit-exactness. Gated-norm and fp32 g handling are the M2-I4/I5 cast-position traps.",
    "verify_cmd": "ferret episode artifacts + test-mode oracle, then bash opt/run_m3i1.sh all and compare TASK_GDN_RECURRENT_SM100 mean_us/wallspan in pertask_by_bs.csv",
    "suggested_owner_issue": "M3-I3 (unchanged) - note it pays off at bs8/16, not bs1",
-   "disposition": "INTEGRATED (M3-I3, b0920b28, 2026-07-28): ferret v010 winner ported bit-exact (unit memcmp + oracle both flag lanes + AC-3 10/10x5); stage wallspan 1217->236 / 2469->782 / 4950->1556us (bs1/8/16) = e2e +9.0/+15.2/+28.1% tok/s. Per-worker task time 0.98x vLLM at bs16 = KERNEL PARITY; residual stage gap is width/scheduling (75.6/128 concurrent). Evidence opt/m3i3/results/."
+   "disposition": "integrated: M3-I3 ported the ferret v010 GDN recurrent kernel bit-exact (b0920b28): stage wallspan 1217->236 / 2469->782 / 4950->1556 us at bs1/8/16 = e2e +9.0/+15.2/+28.1% tok/s, unit memcmp + oracle both lanes + AC-3 10/10 at five bs. Re-derived at the gate the stage now sits at 1.35/2.70/3.14x of vLLM (was 7.44/9.12/10.67x), the largest single ratio improvement in M3. The remaining bs8/bs16 ratio is width, not kernel: per-worker task time was already 0.98x vLLM's at bs16. Evidence opt/m3i3/results/.",
+   "disposition_before_m3i7": "INTEGRATED (M3-I3, b0920b28, 2026-07-28): ferret v010 winner ported bit-exact (unit memcmp + oracle both flag lanes + AC-3 10/10x5); stage wallspan 1217->236 / 2469->782 / 4950->1556us (bs1/8/16) = e2e +9.0/+15.2/+28.1% tok/s. Per-worker task time 0.98x vLLM at bs16 = KERNEL PARITY; residual stage gap is width/scheduling (75.6/128 concurrent). Evidence opt/m3i3/results/.",
+   "disposition_kind": "integrated",
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
   },
   {
    "rank": 6,
@@ -132,7 +147,10 @@
    "delta_basis": "a 30% kernel win on its measured wall span",
    "risk": "medium - P10-class numerics gates (M2-I12/I13 preserved fp32 block scales).",
    "verify_cmd": "same capture + analyze; TASK_LINEAR_FP8_BLOCKSCALE_SM100 mean_us must fall and AC-3 per-case must be identical",
-   "suggested_owner_issue": "M3-I4 (unchanged)"
+   "suggested_owner_issue": "M3-I4 (unchanged)",
+   "disposition": "blocked-with-reason: Dense fp8 blockscale (task 279) is rank 2 in the re-derived table and the most batch-INDEPENDENT gap left (2.07/1.98/2.08x, ~1.8 ms/step at every bs). M3-I4's ferret loop was still climbing at min_ratio 0.680 when the box's Claude weekly quota ran out (reset 2026-07-29), and no in-MPK change landed, so there is nothing to integrate and nothing to reject. Unblocked by the quota reset; carried to M4 with the loop's current best ratio as its starting point. Evidence opt/m3i4/, the ferret episode ledger at 5cedb43c.",
+   "disposition_kind": "blocked-with-reason",
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
   },
   {
    "rank": 7,
@@ -150,8 +168,11 @@
    "risk": "low",
    "verify_cmd": "re-run this capture at the AC-4 256/1024 geometry BEFORE sweeping; the sweep is only worth a builder call if the attention wall span exceeds ~10% there",
    "suggested_owner_issue": "M3-I6a - RECOMMEND DEFERRING until measured at 256/1024",
-   "disposition": "INTEGRATED (M3-I6a, a86b1eb1, 2026-07-28): the pass-size knob was NOT a spill-risk question but THE megakernel's only register-spill source \u2014 pass 4 forced 255 regs + 576B stack + 780/976B spill st/ld across the WHOLE inlined kernel; pass 2 gives 240 regs, ZERO spills. Attention wallspan -48.0%/-51.4% (bs1/bs8) and untouched families sped up too (dense fp8 2939->2811, GDN 234->219 us/step) because the register budget is shared. e2e +3.1/+2.8/+2.7/+2.5/+2.1% at AC-3 geometry; +6.2/+5.5/+4.6% at deep context (bs1/8/16) \u2014 the win GROWS with context as the mechanism requires. attention_sm100.cuh untouched (builder config only). Gates: 116/116 pass-size invariance rows max_abs 0; oracle identical verdicts at pass 4/2/1; AC-3 50/50 byte-identical. NEXT LEVER (recorded, untaken): split-KV k-way via the I3 separate-task idiom \u2014 predicted 39us vs 75us at ctx 848, k=8; vLLM's own reference IS a split-KV kernel (MultiCtasKv). Evidence opt/m3i6a/.",
-   "next_lever": "split-KV k-way (M3-I3 separate-task + atomic-last-block idiom): latency model 29.6 + 0.0536*ctx/k + merge; after that the 29.6us fixed term is the target."
+   "disposition": "integrated: M3-I6a set attention max_tokens_per_pass 4->2 (a86b1eb1). The knob turned out not to be an attention question at all: pass 4 was the megakernel's ONLY register-spill source (255 regs, 576 B stack, 780/976 B spill st/ld across the whole inlined kernel), so pass 2 sped up untouched task families too. Attention wallspan -48.0/-51.4%, e2e +2.1-3.1% at the AC-3 geometry and +4.6-6.2% at deep context. Attention is now rank 5 (4.50/4.63/4.98x) rather than the 8-10x the previous table showed -- most of that apparent improvement is the corrected basis, not the change. NEXT LEVER recorded, untaken: split-KV k-way via the I3 separate-task idiom. Evidence opt/m3i6a/.",
+   "next_lever": "split-KV k-way (M3-I3 separate-task + atomic-last-block idiom): latency model 29.6 + 0.0536*ctx/k + merge; after that the 29.6us fixed term is the target.",
+   "disposition_before_m3i7": "INTEGRATED (M3-I6a, a86b1eb1, 2026-07-28): the pass-size knob was NOT a spill-risk question but THE megakernel's only register-spill source \u2014 pass 4 forced 255 regs + 576B stack + 780/976B spill st/ld across the WHOLE inlined kernel; pass 2 gives 240 regs, ZERO spills. Attention wallspan -48.0%/-51.4% (bs1/bs8) and untouched families sped up too (dense fp8 2939->2811, GDN 234->219 us/step) because the register budget is shared. e2e +3.1/+2.8/+2.7/+2.5/+2.1% at AC-3 geometry; +6.2/+5.5/+4.6% at deep context (bs1/8/16) \u2014 the win GROWS with context as the mechanism requires. attention_sm100.cuh untouched (builder config only). Gates: 116/116 pass-size invariance rows max_abs 0; oracle identical verdicts at pass 4/2/1; AC-3 50/50 byte-identical. NEXT LEVER (recorded, untaken): split-KV k-way via the I3 separate-task idiom \u2014 predicted 39us vs 75us at ctx 848, k=8; vLLM's own reference IS a split-KV kernel (MultiCtasKv). Evidence opt/m3i6a/.",
+   "disposition_kind": "integrated",
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
   },
   {
    "rank": 8,
@@ -168,7 +189,10 @@
    "delta_basis": "measured prefill iteration cost vs decode iteration cost at the pinned mbt",
    "risk": "high - replaces the GDN prefill algorithm; the HF chunk algorithm is the oracle.",
    "verify_cmd": "re-run opt/run_m3i1.sh after rank 4 lands; only pursue if prefill_step_us/mbt is then far above the decode per-token cost",
-   "suggested_owner_issue": "M3-I6b - RECOMMEND SEQUENCING AFTER rank 4"
+   "suggested_owner_issue": "M3-I6b - RECOMMEND SEQUENCING AFTER rank 4",
+   "disposition": "rejected-with-evidence: GDN prefill chunked-matmul (WY/UT) was conditional on the admission policy letting many tokens into one iteration, and that precondition went the OTHER way: I5b rejected raising mbt with evidence, and the cap that DID land moves tokens-per-request-per-iteration DOWN, not up. At mbt=16 a prefill iteration costs 1.16-1.30x a decode iteration, so there is no WY/UT-shaped win available -- the prefill cost that does matter is scheduling (see lever 4 and the new prefill-throughput entry), not the chunked-matmul algorithm. Re-open only if mbt rises. Evidence opt/attribution.csv prefill_step_us, opt/m3i5b/ (mbt rejection).",
+   "disposition_kind": "rejected-with-evidence",
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
   },
   {
    "rank": 9,
@@ -185,7 +209,10 @@
    "delta_basis": "the whole measured prepare_batch time removed",
    "risk": "n/a",
    "verify_cmd": "n/a",
-   "suggested_owner_issue": "M3-I2b - drop this half of the issue's stated scope and keep the worker-occupancy half (rank 3) plus admission (rank 4)"
+   "suggested_owner_issue": "M3-I2b - drop this half of the issue's stated scope and keep the worker-occupancy half (rank 3) plus admission (rank 4)",
+   "disposition": "rejected-with-evidence: prepare_next_batch is 4.2/6.9/11.1/20.9/35.6 us per step at bs1..16, at most 0.16% of the step. Removing all of it is inside measurement noise. Unchanged at the gate. Evidence opt/attribution.csv of_which_prepare_batch_us.",
+   "disposition_kind": "rejected-with-evidence",
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
   },
   {
    "rank": 10,
@@ -202,7 +229,10 @@
    "delta_basis": "all sub-1us MoE task time removed",
    "risk": "n/a",
    "verify_cmd": "n/a",
-   "suggested_owner_issue": "none - do not spend a builder call"
+   "suggested_owner_issue": "none - do not spend a builder call",
+   "disposition": "rejected-with-evidence: MoE dead-task dispatch: 5652/10240 w13 and 5661/10240 w2 tasks complete in under 1 us at bs1, 5.9 ms of aggregated worker time = 46 us per worker per step = 0.3% of the step. Dispatching a no-op task is cheap; the cost was in the wrongly-live experts, which lever 2 fixed. Evidence opt/pertask_by_bs.csv.",
+   "disposition_kind": "rejected-with-evidence",
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
   },
   {
    "rank": 11,
@@ -220,7 +250,63 @@
    "risk": "high if ignored - an M3 exit claim built on AC-3-geometry numbers is not comparable to the AC-4 baseline",
    "verify_cmd": "extend opt/profile_wave.py with synthetic 256-token prompts and max_seq_length=1280, re-run the capture, and recompute gap_vs_vllm.csv",
    "suggested_owner_issue": "M3-I7 (the milestone gate) must consume the 256/1024 numbers, not these",
-   "disposition": "IN VALIDATION: stage 7 of the M3-I9 window (256/1024 msl=1280, both arms, all bs)."
+   "disposition": "integrated: MEASUREMENT DEBT DISCHARGED by this issue, and it was worse than recorded. The 256/1024 numbers now exist and are in opt/m3i7/tables/geomM_matched_256_1024.csv. Two defects found and fixed on the way: (a) M3-I9's stage-7 'matched 256/1024' run measured the AC-3 REFERENCE prompts, not 256-token prompts -- mpk_engine_run.py's --prompts-file is only read under --verify-chat-template, so the run fell back to --reference, and its committed timings record prompt_ids ['p06-poem'] with max_decode_steps 1255 while the analysis divided by a hardcoded 1024; (b) it reported bs*1024/wave_wall, which bills the prefill to decode. The gate uses a real 256-token prompt source (opt/m3i7/scripts/make_matched_reference.py, the pinned baseline sampler and seed) and a prefill-subtracted slope, vLLM's own definition.",
+   "disposition_before_m3i7": "IN VALIDATION: stage 7 of the M3-I9 window (256/1024 msl=1280, both arms, all bs).",
+   "disposition_kind": "integrated",
+   "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)"
   }
- ]
+ ],
+ "new_levers_for_m4": [
+  {
+   "lever": "MPK prefill throughput at the 256/1024 workload",
+   "found_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)",
+   "evidence": "Measured directly for the first time: the prefill-only arm (same prompts, msl=259) costs 322/624/1189/2940/3060 ms at bs1/2/4/8/16 uncapped, i.e. 20-31% of the whole 256/1024 e2e, and at bs8 MPK's prefill ALONE (2.94 s) is 59% of vLLM's entire end-to-end time (4.95 s). No M3 backlog item covers prefill: every M3 measurement was a decode step. opt/m3i7/tables/geomM_matched_256_1024.csv.",
+   "mechanism": "mbt=16 caps the whole engine at 16 prefill tokens per iteration, so a 256-token prompt needs >=16 iterations and bs*256 tokens need bs*16 iterations at best -- and uncapped admission makes it far worse than that best case by serialising requests (lever 4's mechanism). vLLM prefills the same tokens in large fused chunks.",
+   "first_step": "Extend the admission cap to bs4/bs8 (already measured, +3.9%/+14.0% e2e, AC-3 byte-identical), then attack mbt itself for the prefill phase only -- M3-I5b rejected raising mbt on DECODE evidence, which does not bind the prefill phase.",
+   "disposition": "OPEN -> M4, ranked 1 by e2e effect"
+  },
+  {
+   "lever": "Split-KV k-way attention (the I3 separate-task idiom applied to task 257)",
+   "found_by": "M3-I6a, re-ranked by M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)",
+   "evidence": "Attention is rank 5 in the re-derived table (4.50/4.63/4.98x vLLM, 501/518/628 us/step of gap) and it is the only target whose ratio GROWS with batch size. vLLM's own reference is a split-KV kernel (MultiCtasKv). I6a predicted 39 us vs 75 us at ctx 848, k=8.",
+   "mechanism": "MPK runs 2 attention tasks per layer, so the stage occupies 2 of 148 SMs however long it takes; splitting the KV range k ways multiplies the available parallelism by k.",
+   "first_step": "ferret task spec against the vLLM MultiCtasKv reference at ctx 848.",
+   "disposition": "OPEN -> M4"
+  },
+  {
+   "lever": "MoE routed GEMM w13/w2 kernel (tasks 241/242)",
+   "found_by": "M3-I1, re-ranked by M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)",
+   "evidence": "Ranks 1 and 3 in the re-derived table: w13 6.96/2.85/2.56x (2092/1847/2039 us/step of gap), w2 4.37/2.00/2.03x. Together they are ~3.2 ms of a 9.8 ms bs1 step. The bs1 ratio is far worse than bs8/bs16, which is the tensor-core-waste signature the ferret MoE task authoring already identified: BATCH_SIZE=16 is compile-fixed, so NUM_M_TILES=1 and every activated expert pays a full 16-row MMA tile (~94% waste at bs1).",
+   "mechanism": "compile-fixed M tile vs live token count; distinct from lever 2, which fixed which experts are activated rather than what each costs.",
+   "first_step": "the authored ferret MoE task (workspace3, launch line staged, target_ratio 1.3333) once the box quota resets.",
+   "disposition": "OPEN -> M4"
+  },
+  {
+   "lever": "MoE router top-k/softmax (task 260)",
+   "found_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)",
+   "evidence": "Rank 4 and the biggest RATIO among the non-trivial stages: 5.70/4.93/4.12x vLLM, 731/770/801 us/step of gap, and it got WORSE relative to the previous table (3.36->5.70x at bs1) because the corrected window exposes it. 842-980 us/step for routing 1-16 tokens through a top-8-of-256 softmax is far above any plausible bound.",
+   "mechanism": "not yet attributed. The stage was reshaped twice in M3 (I5b's row loop, I5c's compaction race fix, which cost +51-61% on the task by design) and has never had a kernel-level look.",
+   "first_step": "attribute before optimising -- I5c knowingly traded speed for correctness here and that trade has never been re-costed.",
+   "disposition": "OPEN -> M4"
+  },
+  {
+   "lever": "schedule_sim diverges from the runtime at bs16/msl=897",
+   "found_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)",
+   "evidence": "The exact-replay admission model predicts 1360 iterations; the trace has 1004. bs1 (656) and bs8 (810) match exactly. Anchor QC on that window fails (max_frac_err 0.4437 vs a 0.02 threshold, 16 task types mismatched), so bs16's per-stage row is flagged not-valid rather than used. opt/m3i7/stage/qc/anchor_qc_summary.json.",
+   "mechanism": "unknown. It is a measurement-infrastructure defect, not a performance lever, but it blinds every bs16 per-stage number.",
+   "first_step": "diff the replay against the runtime's own iteration labels at bs16/msl=897; the iters.csv the parse already writes has both.",
+   "disposition": "OPEN -> M4 (blocks trustworthy bs16 stage attribution)"
+  }
+ ],
+ "m3_close": {
+  "closed_by": "M3-I7 (milestone gate, 2026-07-29, integrated HEAD c80ebd68)",
+  "all_terminal": true,
+  "counts": {
+   "integrated": 6,
+   "blocked-with-reason": 2,
+   "rejected-with-evidence": 3
+  },
+  "assertion": "every lever in `levers` carries one of integrated / rejected-with-evidence / blocked-with-reason with its evidence; asserted by opt/m3i7/scripts/close_backlog.py at generation time",
+  "n_new_levers_registered": 5
+ }
 }

@@ -37,6 +37,7 @@ Usage: python3 regenerate_ferret_v2.py
     to opt/m3i10/ -- i.e. this file's grandparent -- hardcoded, not
     parameterised, since this is meant to be re-run from a clean checkout)
 """
+import argparse
 import csv
 import json
 from pathlib import Path
@@ -49,6 +50,35 @@ LATECTX_DIR = HERE / "remeasure" / "armAlate" / "tables"
 BSES = ["1", "8", "16"]
 GENERATED_UTC = "2026-07-27"
 GENERATOR = "demo/qwen3_5/accept/opt/m3i10/scripts/regenerate_ferret_v2.py"
+
+# --- re-derivation layers (added by M3-I7) -----------------------------------
+# This file is regenerated once per re-measure, and each regeneration displaces
+# the previous PRIMARY numbers. None of them may be lost: `history_m3i1` holds
+# the original M3-I1 AC-3-geometry capture and `history_m3i10` the M3-I10
+# matched-geometry re-measure (pre-I3/I5c/I6a). HISTORY_KEY names the layer THIS
+# run displaces; it is written only when absent, so re-running a regeneration
+# against its own output is a no-op instead of a layer that eats the one below.
+# All four paths below are overridable so the generator can be pointed at a new
+# re-measure's outputs without forking it -- the defaults reproduce M3-I10's run
+# byte for byte.
+HISTORY_KEY = None
+BASIS_MPK = None
+BASIS_CAVEAT = None
+# SINGLE_BASIS: when the comparison CSV is ITSELF built from the late-context
+# capture, attention no longer needs a separate basis from the other stages --
+# every row already samples the band the vLLM reference table was captured at.
+# In that mode the `matched_window` / `late_context_check_msl897` sub-blocks
+# would be a capture compared against itself (0 % by construction), so they are
+# omitted and a `basis_note` records why instead of leaving inert zeros behind
+# for a machine consumer to read as a finding.
+SINGLE_BASIS = False
+QC_SUMMARY = None       # anchor-QC verdict per bs, embedded in basis.anchor_qc
+QC_PREFIX = "armA"      # arm name prefix of the qc/<prefix>_bs<N>_rep0_qc.json files
+LATECTX_REL = "opt/m3i10/remeasure/armAlate/"
+ARTIFACT_REL = ("opt/m3i10/remeasure/ (rsync target; raw npz pointers to "
+                "/home/catalyst/mpk-artifacts/m3i10-remeasure/)")
+TIERS_RUN = ("tier 1 (arm A, matched geometry) + tier 2 (arm B, continuity) "
+             "+ late-context addendum (see remeasure_spec.md)")
 
 # mpk_task string -> matching mpk task_type int(s), for pulling the right
 # comparison_by_stage.csv row and (for 253/279) the call-site split.
@@ -142,7 +172,7 @@ def load_site_splits():
     """{task_type: {bs: [{site, sum_us_per_iter, wallspan_us_per_iter, mean_us, n_per_iter}]}}"""
     out = {253: {}, 279: {}}
     for bs in BSES:
-        p = QC_DIR / f"armA_bs{bs}_rep0_qc.json"
+        p = QC_DIR / f"{QC_PREFIX}_bs{bs}_rep0_qc.json"
         if not p.exists():
             continue
         d = json.loads(p.read_text())
@@ -174,6 +204,35 @@ def build_history(old_row, keys):
     if "history_m3i1" in old_row:
         return old_row["history_m3i1"]
     return {k: old_row[k] for k in keys if k in old_row}
+
+
+def displaced_layer(old_row, keys):
+    """The layer THIS regeneration is displacing, under HISTORY_KEY.
+
+    Returns None when no extra layer is wanted (HISTORY_KEY unset, i.e. the
+    original M3-I10 regeneration, whose displaced layer IS history_m3i1 and is
+    already handled by build_history). Idempotent by the same rule: if the row
+    already carries HISTORY_KEY, that stored layer wins over the current primary
+    fields, so a re-run cannot overwrite a real prior layer with a copy of the
+    numbers that replaced it."""
+    if not HISTORY_KEY or HISTORY_KEY == "history_m3i1":
+        return None
+    if HISTORY_KEY in old_row:
+        return old_row[HISTORY_KEY]
+    return {k: old_row[k] for k in keys if k in old_row}
+
+
+def with_layers(row, old_row, keys, hist):
+    """Attach history_m3i1 plus, when this run displaces one, HISTORY_KEY, and
+    carry forward any OTHER history_* layer the old row already had."""
+    row["history_m3i1"] = hist
+    prior = displaced_layer(old_row, keys)
+    if prior is not None:
+        row[HISTORY_KEY] = prior
+    for k, v in old_row.items():
+        if k.startswith("history_") and k not in row:
+            row[k] = v
+    return row
 
 
 def make_call_site_block(sites_by_bs):
@@ -248,8 +307,8 @@ def main():
                         "there is nothing left to buy. See opt/m3i10/remeasure/ "
                         "(pertask_by_bs.csv code-delta columns) for the arm-B-vs-M3-I1 "
                         "isolation."),
-                history_m3i1=hist,
             ))
+            with_layers(row, old_row, HIST_DISP_KEYS, hist)
             new_dispositions.append(row)
             continue
 
@@ -269,7 +328,7 @@ def main():
             # say so in a side note. Every other target keeps the
             # matched-geometry (ctx 257-352) basis as primary.
             tt0 = STAGE_TASK_TYPES[stage_name][0]
-            is_attention = (stage_name == "full attention")
+            is_attention = (stage_name == "full attention") and not SINGLE_BASIS
             if is_attention and latectx.get(tt0):
                 primary_mpk = dict(latectx[tt0])
                 primary_ratio = {bs: round(primary_mpk[bs] / vllm[bs], 3)
@@ -287,12 +346,12 @@ def main():
                 target_us_per_step={bs: round(vllm[bs] * TARGET_RATIO, 1) for bs in BSES},
                 step_gain_if_met_us={bs: round(primary_mpk[bs] - vllm[bs] * TARGET_RATIO, 1)
                                     for bs in BSES},
-                history_m3i1=hist,
             ))
+            with_layers(row, old_row, HIST_TARGET_KEYS, hist)
 
             if is_attention:
                 row["context_band"] = {
-                    "primary_basis": "late-context (opt/m3i10/remeasure/armAlate/), "
+                    "primary_basis": f"late-context ({LATECTX_REL}), "
                                      "ctx ~801-896 at bs1/bs8",
                     "bs1": "801-896 (single request, clean)",
                     "bs8": "801-896 (full 8-concurrent decode_full window, clean)",
@@ -332,7 +391,17 @@ def main():
                     "(556-896, this row's primary fields at ~801-896). bs1/bs8 are "
                     "clean, single-context (bs1) or uniform full-8-concurrent (bs8) "
                     "measurements. bs16 carries a real caveat -- see context_band. See "
-                    "remeasure_spec.md sec 4(d) and opt/m3i10/remeasure/armAlate/.")
+                    "remeasure_spec.md sec 4(d) and " + LATECTX_REL + ".")
+            elif SINGLE_BASIS:
+                row.pop("context_band", None)
+                row.pop("matched_window", None)
+                row.pop("late_context_verdict", None)
+                row.pop("late_context_check_msl897", None)
+                row["basis_note"] = (
+                    "Single-basis regeneration: the comparison this row is built from is "
+                    "itself the late-context capture, so this stage no longer carries a "
+                    "separate matched-geometry window or a late-context delta -- both "
+                    "would be the same capture compared against itself. See `basis.mpk`.")
             else:
                 # F2 closure: late-context spot check for every OTHER target
                 # task that has one -- informational only, primary basis
@@ -392,8 +461,8 @@ def main():
             mpk_us_per_step={bs: mpk[bs] for bs in BSES},
             ratio_mpk_over_vllm={bs: ratio[bs] for bs in BSES},
             step_gain_if_met_us={bs: gap[bs] for bs in BSES},
-            history_m3i1=hist,
         ))
+        with_layers(row, old_row, HIST_DISP_KEYS, hist)
         if stage_name == "shared-expert gate (sigmoid*shared+residual)":
             row["reason"] = (
                 "CONFIRMED at matched geometry / current HEAD: the bs8 anomaly does "
@@ -456,7 +525,8 @@ def main():
     out["generator"] = GENERATOR
     out["basis"] = {
         "vllm": old["basis"]["vllm"],
-        "mpk": ("matched-geometry re-measure at current HEAD (msl=353 = "
+        "mpk": BASIS_MPK or (
+                "matched-geometry re-measure at current HEAD (msl=353 = "
                 "256-token synthetic prompt + 96 decode steps + 1; gate_padding_rows "
                 "ON, post-M3-I2b), opt/m3i10/remeasure/armA/pertask_by_bs.csv -- "
                 "SUPERSEDES the M3-I1 AC-3-geometry capture this file used before. "
@@ -467,19 +537,23 @@ def main():
                       "(comparison_by_stage.csv carries no rank column; this is the "
                       "one place this file imposes an ordering choice, stated here "
                       "so it is reproducible)."),
-        "caveat": ("Matched geometry closes the AC-3-vs-256/1024 gap for every stage "
+        "caveat": BASIS_CAVEAT or (
+                  "Matched geometry closes the AC-3-vs-256/1024 gap for every stage "
                   "EXCEPT attention's decode CONTEXT: this table's MPK side still "
                   "samples decode context ~257-352 (a 256-token prompt, steady window "
                   "8 steps in) against the vLLM reference's ~556-896. See "
                   "`late_context_addendum` for the closure capture and corrected "
                   "attention row."),
+        **({"anchor_qc": QC_SUMMARY} if QC_SUMMARY else {}),
         "history": ("Every row's pre-remeasure (M3-I1, AC-3 geometry, pre-I8/I2b) "
-                   "numbers are preserved verbatim in that row's `history_m3i1`."),
+                   "numbers are preserved verbatim in that row's `history_m3i1`"
+                   + (f"; the layer this regeneration displaced is preserved in "
+                      f"`{HISTORY_KEY}`." if HISTORY_KEY else ".")),
     }
     out["targets"] = new_targets
     out["dispositions"] = new_dispositions
     out["coverage"] = {
-        "source": "opt/m3i10/remeasure/armA_m3i10/tables/comparison_by_stage.csv",
+        "source": str(CMP_PATH).split("demo/qwen3_5/accept/", 1)[-1],
         "n_stages_total": len(all_stages),
         "n_stages_slower_at_every_batch_size": len(slower_all),
         "n_stages_slower_at_some_batch_size": len(slower_any),
@@ -497,43 +571,50 @@ def main():
         "slower_stages_every_bs": slower_all,
     }
     out.pop("pending_remeasure", None)
+    # The addendum exists to reconcile a matched-geometry primary against a
+    # late-context spot check. Under SINGLE_BASIS there is nothing to reconcile:
+    # the previous round's addendum is moved under the history key rather than
+    # left in place reading as current.
+    if SINGLE_BASIS:
+        prev = out.pop("late_context_addendum", None)
+        if prev is not None and HISTORY_KEY:
+            out.setdefault(HISTORY_KEY + "_late_context_addendum", prev)
     gdn_lc, dense_lc, moe_lc = latectx.get(237, {}), latectx.get(279, {}), latectx.get(241, {})
-    out["late_context_addendum"] = {
-        "why": ("codex c2 finding F2: this file's matched-geometry MPK numbers still sampled "
-                "decode context ~257-352 while the vLLM reference table sampled ~556-896 -- "
-                "exactly the stage the attention finding is about. remeasure_spec.md sec 4(d) "
-                "closes it with a dedicated msl=897 capture (context ~801-896)."),
-        "attention_wallspan_us_matched_vs_late": {
-            bs: {"matched_ctx_257_352": cmp_rows["full attention"][f"mpk_us_step_bs{bs}"],
-                "late_ctx_801_896": latectx.get(257, {}).get(bs)}
-            for bs in BSES},
-        "spot_check_context_flat_stages": {
-            "GDN recurrent (task 237)": {
-                bs: dict(matched=cmp_rows["GDN recurrent (delta rule)"][f"mpk_us_step_bs{bs}"],
-                        late=gdn_lc.get(bs),
-                        pct_change=(round(100 * (gdn_lc[bs] - float(cmp_rows["GDN recurrent (delta rule)"][f"mpk_us_step_bs{bs}"])) / float(cmp_rows["GDN recurrent (delta rule)"][f"mpk_us_step_bs{bs}"]), 2) if gdn_lc.get(bs) else None))
-                for bs in BSES},
-            "dense fp8 (task 279)": {
-                bs: dict(matched=cmp_rows["dense projections (fp8 blockscale)"][f"mpk_us_step_bs{bs}"],
-                        late=dense_lc.get(bs))
-                for bs in BSES},
-            "verdict": ("GDN recurrent and dense-fp8 stay flat within ~1% moving from context "
-                       "257-352 to 801-896 (GDN: +0.2%/+0.02%/-0.01% at bs1/8/16; dense-fp8: "
-                       "+0.2%/-0.6%/-0.5%) -- confirms these are genuinely context-insensitive, "
-                       "not an artifact of the un-recentred window. MoE w13 is flatter at "
-                       "bs1/bs8 (-0.3%/+3.9%) but shows +18.8% at bs16 -- read with the same "
-                       "reduced-concurrency caveat as the attention bs16 point (only 12/16 "
-                       "live, 13-iteration window), not yet attributed cleanly to context vs. "
-                       "concurrency."),
-        },
-    }
+    if not SINGLE_BASIS:
+      out["late_context_addendum"] = {
+          "why": ("codex c2 finding F2: this file's matched-geometry MPK numbers still sampled "
+                  "decode context ~257-352 while the vLLM reference table sampled ~556-896 -- "
+                  "exactly the stage the attention finding is about. remeasure_spec.md sec 4(d) "
+                  "closes it with a dedicated msl=897 capture (context ~801-896)."),
+          "attention_wallspan_us_matched_vs_late": {
+              bs: {"matched_ctx_257_352": cmp_rows["full attention"][f"mpk_us_step_bs{bs}"],
+                  "late_ctx_801_896": latectx.get(257, {}).get(bs)}
+              for bs in BSES},
+          "spot_check_context_flat_stages": {
+              "GDN recurrent (task 237)": {
+                  bs: dict(matched=cmp_rows["GDN recurrent (delta rule)"][f"mpk_us_step_bs{bs}"],
+                          late=gdn_lc.get(bs),
+                          pct_change=(round(100 * (gdn_lc[bs] - float(cmp_rows["GDN recurrent (delta rule)"][f"mpk_us_step_bs{bs}"])) / float(cmp_rows["GDN recurrent (delta rule)"][f"mpk_us_step_bs{bs}"]), 2) if gdn_lc.get(bs) else None))
+                  for bs in BSES},
+              "dense fp8 (task 279)": {
+                  bs: dict(matched=cmp_rows["dense projections (fp8 blockscale)"][f"mpk_us_step_bs{bs}"],
+                          late=dense_lc.get(bs))
+                  for bs in BSES},
+              "verdict": ("GDN recurrent and dense-fp8 stay flat within ~1% moving from context "
+                         "257-352 to 801-896 (GDN: +0.2%/+0.02%/-0.01% at bs1/8/16; dense-fp8: "
+                         "+0.2%/-0.6%/-0.5%) -- confirms these are genuinely context-insensitive, "
+                         "not an artifact of the un-recentred window. MoE w13 is flatter at "
+                         "bs1/bs8 (-0.3%/+3.9%) but shows +18.8% at bs16 -- read with the same "
+                         "reduced-concurrency caveat as the attention bs16 point (only 12/16 "
+                         "live, 13-iteration window), not yet attributed cleanly to context vs. "
+                         "concurrency."),
+          },
+      }
     out["remeasure_executed"] = {
         "spec": "remeasure_spec.md",
         "status": "EXECUTED " + GENERATED_UTC,
-        "tiers_run": "tier 1 (arm A, matched geometry) + tier 2 (arm B, continuity) "
-                    "+ late-context addendum (see remeasure_spec.md)",
-        "artifacts": "opt/m3i10/remeasure/ (rsync target; raw npz pointers to "
-                    "/home/catalyst/mpk-artifacts/m3i10-remeasure/)",
+        "tiers_run": TIERS_RUN,
+        "artifacts": ARTIFACT_REL,
     }
 
     FT_PATH.write_text(json.dumps(out, indent=1) + "\n")
@@ -551,5 +632,55 @@ def main():
         print(f"  {r['stage']:45s} -> {r['disposition']}")
 
 
-if __name__ == "__main__":
+def cli(argv=None):
+    """Point the generator at a different re-measure's outputs without forking
+    it. No argument reproduces M3-I10's original run byte for byte."""
+    global CMP_PATH, QC_DIR, LATECTX_DIR, GENERATED_UTC, GENERATOR
+    global HISTORY_KEY, BASIS_MPK, BASIS_CAVEAT, LATECTX_REL, ARTIFACT_REL, TIERS_RUN
+    global SINGLE_BASIS, QC_PREFIX, QC_SUMMARY
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--comparison", help="comparison_by_stage.csv for the new MPK column")
+    ap.add_argument("--qc-dir", help="dir holding <prefix>_bs<N>_rep0_qc.json call-site splits")
+    ap.add_argument("--qc-prefix", help="arm-name prefix of those qc files (default armA)")
+    ap.add_argument("--qc-summary", help="JSON file: the anchor-QC verdict per bs, recorded "
+                                         "under basis.anchor_qc so a consumer can see which "
+                                         "batch sizes the window is actually valid for")
+    ap.add_argument("--single-basis", action="store_true",
+                    help="the comparison CSV is itself the late-context capture, so every "
+                         "stage shares one basis: drop the attention row's separate "
+                         "late-context primary and the matched-vs-late sub-blocks")
+    ap.add_argument("--latectx-dir", help="tables dir of the late-context capture")
+    ap.add_argument("--history-key", help="e.g. history_m3i10 -- where to preserve the "
+                                          "layer this run displaces")
+    ap.add_argument("--generated-utc")
+    ap.add_argument("--generator", help="repo-relative path recorded in the file")
+    ap.add_argument("--basis-mpk", help="prose describing the new MPK basis")
+    ap.add_argument("--basis-caveat")
+    ap.add_argument("--latectx-rel", help="repo-relative path of the late-context capture")
+    ap.add_argument("--artifact-rel")
+    ap.add_argument("--tiers-run")
+    a = ap.parse_args(argv)
+    if a.comparison:
+        CMP_PATH = Path(a.comparison)
+    if a.qc_dir:
+        QC_DIR = Path(a.qc_dir)
+    if a.latectx_dir:
+        LATECTX_DIR = Path(a.latectx_dir)
+    if a.qc_prefix:
+        QC_PREFIX = a.qc_prefix
+    if a.qc_summary:
+        QC_SUMMARY = json.loads(Path(a.qc_summary).read_text())
+    if a.single_basis:
+        SINGLE_BASIS = True
+    for name, val in (("HISTORY_KEY", a.history_key), ("GENERATED_UTC", a.generated_utc),
+                      ("GENERATOR", a.generator), ("BASIS_MPK", a.basis_mpk),
+                      ("BASIS_CAVEAT", a.basis_caveat), ("LATECTX_REL", a.latectx_rel),
+                      ("ARTIFACT_REL", a.artifact_rel), ("TIERS_RUN", a.tiers_run)):
+        if val:
+            globals()[name] = val
     main()
+
+
+if __name__ == "__main__":
+    cli()

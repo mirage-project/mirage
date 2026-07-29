@@ -1,0 +1,4 @@
+ee30768525666d5880fc5382c76d334d16b590e2e3e4be48db23d697171d5124  /home/muhengl/mpk-qwen35/mirage-i7/demo/qwen3_5/accept/opt/profile_wave.py
+89a7d46db62104aa668dd17ea37557e7af47879aefde06068b0438914836ecae  /home/muhengl/mpk-qwen35/mirage-i7/demo/qwen3_5/accept/mpk_engine_run.py
+ae30c4310731aa14647e9e0474af3426e07a60294d5934054d5047c606080411  /home/muhengl/mpk-qwen35/mirage-i7/demo/qwen3_5/accept/harness/run_ac3.py
+1316ea69098293b3a1b12a19e2a4d052fad6eda618bc73beb6c0d96132354555  /home/muhengl/mpk-qwen35/mirage-i7/python/mirage/mpk/models/qwen3_5/builder.py
