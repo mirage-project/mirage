@@ -1,0 +1,261 @@
+{
+  "batch_size": 1,
+  "note": "informational only -- no perf claim; mbt is fixed across batch sizes for a uniform correctness config, which inflates per-step cost at small bs",
+  "admission_policy": {
+    "cap_mode": "auto",
+    "cap_min_batch_size": 4,
+    "per_bs": {
+      "1": null,
+      "2": null,
+      "4": "auto",
+      "8": "auto",
+      "16": "auto"
+    },
+    "authority": "demo/qwen3_5/accept/admission_policy.py",
+    "requested": "none",
+    "compiled_cap": null
+  },
+  "waves": [
+    {
+      "batch_size": 1,
+      "wave": 0,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p06-poem"
+      ],
+      "wall_ms": 1036.1356201171875,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 9.68351046838493,
+      "tokens_per_s": 103.26833468759452,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 109,
+        "per_request_token_cap_requested": "none",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 1,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p01-history"
+      ],
+      "wall_ms": 982.9661865234375,
+      "max_decode_steps": 101,
+      "ms_per_decode_step": 9.732338480430075,
+      "tokens_per_s": 102.75022822221138,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 103,
+        "per_request_token_cap_requested": "none",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 2,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p04-chinese"
+      ],
+      "wall_ms": 965.4149780273438,
+      "max_decode_steps": 99,
+      "ms_per_decode_step": 9.751666444720644,
+      "tokens_per_s": 102.54657556928436,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 101,
+        "per_request_token_cap_requested": "none",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 3,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p09-translate"
+      ],
+      "wall_ms": 965.1715087890625,
+      "max_decode_steps": 99,
+      "ms_per_decode_step": 9.74920715948548,
+      "tokens_per_s": 102.57244344500887,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 101,
+        "per_request_token_cap_requested": "none",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 4,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p07-format"
+      ],
+      "wall_ms": 964.7554321289062,
+      "max_decode_steps": 98,
+      "ms_per_decode_step": 9.844443184988839,
+      "tokens_per_s": 101.58014843590503,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 101,
+        "per_request_token_cap_requested": "none",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 5,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p05-cuda"
+      ],
+      "wall_ms": 940.3783569335938,
+      "max_decode_steps": 95,
+      "ms_per_decode_step": 9.898719546669408,
+      "tokens_per_s": 101.0231672172657,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 98,
+        "per_request_token_cap_requested": "none",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 6,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p08-science"
+      ],
+      "wall_ms": 904.6405029296875,
+      "max_decode_steps": 91,
+      "ms_per_decode_step": 9.941104427798765,
+      "tokens_per_s": 100.59244496050705,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 94,
+        "per_request_token_cap_requested": "none",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 7,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p10-logic"
+      ],
+      "wall_ms": 877.4450073242188,
+      "max_decode_steps": 88,
+      "ms_per_decode_step": 9.970965992320668,
+      "tokens_per_s": 100.2911855050122,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 91,
+        "per_request_token_cap_requested": "none",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 8,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p03-python"
+      ],
+      "wall_ms": 868.8828125,
+      "max_decode_steps": 87,
+      "ms_per_decode_step": 9.987158764367816,
+      "tokens_per_s": 100.1285774656752,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 90,
+        "per_request_token_cap_requested": "none",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 1,
+      "wave": 9,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "p02-math"
+      ],
+      "wall_ms": 675.8816528320312,
+      "max_decode_steps": 63,
+      "ms_per_decode_step": 10.728280203683036,
+      "tokens_per_s": 93.21158480337775,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 68,
+        "per_request_token_cap_requested": "none",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation_checks": []
+}
