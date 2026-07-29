@@ -409,3 +409,20 @@ here was on GPU 6, and that is the one untested difference. A second defect foun
 reading is reported but not patched: `linear_sm100_mpk.cuh` ends a task with
 `cp.async.bulk.wait_group.read`, which does not cover the TMA store's destination write
 before the task's release-increment publishes it to a consumer CTA.
+
+## Determinism protocol v2 (M3-I11 campaign 2, 2026-07-29)
+
+Supersedes the >=2-rep rule's sufficiency claim. Measured: 10-16% divergence per COLD rep on a
+device-state-prone GPU (114 runs). Consequences, all binding for M4:
+
+1. **Score by FINGERPRINT, not token md5.** The KV/GDN cache fingerprint (`e4_full.py`) is
+   ~100% sensitive; token ids catch ~2% (only perturbations that cross an argmax margin).
+   Campaign 2's fix arm read 0/59 clean by md5 and 6/59 divergent by fingerprint — md5 alone
+   would have shipped a false confirmation.
+2. **>=2 reps compared BY FINGERPRINT.** Two reps disagree ~25% of the time at the measured
+   rate, so the token-level >=2-rep rule alone is insufficient for a stable gate.
+3. **Device-conditionality is device STATE, not identity.** GPU7 was 0/19 clean on the night
+   it was pre-registered as the prone device while GPUs 0/1/2 diverged. A device cannot be
+   certified clean once and trusted later — re-measure per campaign.
+4. **Cold-compile reps are the prone class**; warm/reused-kernel reps hashed to consensus in
+   every campaign so far.
