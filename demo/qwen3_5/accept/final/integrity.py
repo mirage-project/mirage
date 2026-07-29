@@ -104,6 +104,13 @@ def main(argv=None) -> int:
     ap.add_argument("--min-output-len", type=int, required=True)
     ap.add_argument("--e2e-factor-max", required=True)
     ap.add_argument("--baseline", required=True)
+    ap.add_argument("--non-binding", action="store_true",
+                    help="the caller has declared this run NON-BINDING (a bounded "
+                         "spot-check, e.g. a subset of the pinned batch sizes). "
+                         "Contract deviations are then recorded as NOTES instead "
+                         "of violations, the report is stamped binding:false, and "
+                         "final.sh forces a non-zero exit -- such a run can never "
+                         "read as an AC-6 result.")
     ap.add_argument("--workload-input-len", type=int, default=256)
     ap.add_argument("--workload-output-len", type=int, default=1024)
     ap.add_argument("--output-json", required=True)
@@ -133,9 +140,15 @@ def main(argv=None) -> int:
                        "E2E_FACTOR_MAX": float(a.e2e_factor_max),
                        "BASELINE": a.baseline}
             for k, v in claimed.items():
-                if pinned[k] != v:
-                    V.append(f"invocation disagrees with the pinned {k}: "
-                             f"caller {v!r} != .pm/accept.sh {pinned[k]!r}")
+                if pinned[k] == v:
+                    continue
+                msg = (f"invocation disagrees with the pinned {k}: "
+                       f"caller {v!r} != the pinned gate's {pinned[k]!r}")
+                if a.non_binding:
+                    rep["binding"] = False
+                    rep["notes"].append("NON-BINDING: " + msg)
+                else:
+                    V.append(msg)
             # the harness path accept.sh execs must be THIS file's own gate
             expect_harness = "workspace/demo/qwen3_5/accept/final.sh"
             if pinned["HARNESS"] != expect_harness:
@@ -162,8 +175,8 @@ def main(argv=None) -> int:
                     V.append(f"pinned prompt set has {len(ids)} prompts, expected 10")
     else:
         rep["binding"] = False
-        rep["notes"].append("NON-BINDING: no --agent-root, so the pinned contract in "
-                            ".pm/accept.sh could not be read or cross-checked")
+        rep["notes"].append("NON-BINDING: no --agent-root, so the pinned contract "
+                            "could not be read or cross-checked")
 
     # ---- 3. the AC-3 reference artifact ---------------------------------
     sys.path.insert(0, str(Path(__file__).resolve().parent))

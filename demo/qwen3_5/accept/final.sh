@@ -101,6 +101,7 @@ while [ $# -gt 0 ]; do
     --baseline-dir) BASELINE_DIR="$2"; shift 2;;
     --poll-seconds) POLL_SECONDS="$2"; shift 2;;
     --stage-timeout) STAGE_TIMEOUT="$2"; shift 2;;
+    --non-binding) NONBINDING=1; shift;;
     --self-test) SELF_TEST=1; shift;;
     --rescore) RESCORE="$2"; shift 2;;
     --no-collect) NO_COLLECT=1; shift;;
@@ -184,6 +185,7 @@ if in_stage integrity; then
   echo; echo "===== STAGE integrity $(date -Is) ====="
   AG=()
   [ -n "$AGENT_ROOT" ] && AG=(--agent-root "$AGENT_ROOT")
+  [ "$NONBINDING" = "1" ] && AG+=(--non-binding)
   "$PY_LOCAL" "$FINAL/integrity.py" \
       --accept-dir "$HERE" --repo-root "$REPO" "${AG[@]+"${AG[@]}"}" \
       --baseline-dir "$BASELINE_DIR" --bench-vllm "$HERE/bench_vllm.py" \
@@ -196,10 +198,12 @@ if in_stage integrity; then
   IRC=$?
   if [ "$IRC" -ne 0 ]; then
     echo "===== INTEGRITY FAILED -- refusing to measure anything ====="
+    NB0=()
+    [ "$NONBINDING" = "1" ] && NB0=(--non-binding)
     "$PY_LOCAL" "$FINAL/report.py" --run-meta "$RUNDIR/run_meta.json" \
         --integrity "$INTEGRITY_JSON" --stages "$STAGES" \
         --output-json "$RUNDIR/report.json" --output-summary "$RUNDIR/summary.txt" \
-        ${NONBINDING:+--non-binding} || true
+        "${NB0[@]+"${NB0[@]}"}" || true
     exit 1
   fi
 fi
@@ -368,8 +372,10 @@ NB=()
     --output-summary "$RUNDIR/summary.txt" "${NB[@]+"${NB[@]}"}"
 RC=$?
 if [ "$NONBINDING" = "1" ]; then
-  echo "NON-BINDING invocation (--rescore): the verdict above is informational."
-  echo "Exiting 2 so it can never be mistaken for an AC-6 acceptance result."
+  echo "NON-BINDING invocation (--rescore / --non-binding): the verdict above is"
+  echo "informational -- the run deviated from the pinned contract or re-scored"
+  echo "existing artifacts. Exiting 2 so it can never be mistaken for an AC-6"
+  echo "acceptance result. (A criterion that FAILED still shows as FAIL above.)"
   exit 2
 fi
 echo "########## FINAL_GATE_DONE rc=$RC $(date -Is) ##########"
