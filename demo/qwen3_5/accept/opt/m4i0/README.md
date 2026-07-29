@@ -189,7 +189,10 @@ majority would be wrong — and turns the state check into an absolute assertion
   records the `sha256` it ran. All changes were to *when a rep is allowed to start* and to
   *report robustness*; the measurement path (`rep`) and the scoring criteria are unchanged
   across all of them, and every window was re-scored with the final scorer for the table
-  above. gateE's `gate_sh_sha256` matches the committed `gate_ac3_stable.sh`.
+  above. gateE's `gate_sh_sha256` matches the committed `gate_ac3_stable.sh`. As a final
+  check the exact committed bytes of both files were deployed and run (`verify`, GPU1,
+  bs16, 2 reps): **STABLE**, ledger written, `state_sig=c91b76a10b2430eb` matching the
+  pinned bs16 consensus, and the `run_meta.json` sha256 pair equal to commit `b0cd73f0`.
 - The 4 events are few. The rate's confidence interval is wide (95% upper bounds 9.3% state,
   6.4% token) and per-device rates rest on 6-30 reps each.
 - Cap policy: these runs used no `--per-request-token-cap`, matching how `dumps_final` was
