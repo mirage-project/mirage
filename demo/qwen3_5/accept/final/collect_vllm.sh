@@ -21,7 +21,13 @@ set -uo pipefail
 
 BOX_ROOT="${MPK_BOX_ROOT:-$HOME/mpk-qwen35}"
 VPY="${MPK_VLLM_PY:-$BOX_ROOT/venv-vllm/bin/python}"
-export PATH="${CUDA_BIN:-/usr/local/cuda-12.8/bin}:$PATH"
+# The interpreter's OWN bin dir goes on PATH -- the "activate" effect that
+# matters here.  vLLM's inductor path shells out to `ninja`, which is a pip
+# console script inside the venv, so calling venv-vllm/bin/python directly
+# without this makes engine construction die with
+# `FileNotFoundError: 'ninja'` inside determine_available_memory().  Found by
+# running this collector for real (M4-I1 proof run).
+export PATH="$(dirname "$VPY"):${CUDA_BIN:-/usr/local/cuda-12.8/bin}:$PATH"
 export HF_HOME="${HF_HOME:-$BOX_ROOT/hf}"
 export PYTHONUNBUFFERED=1
 

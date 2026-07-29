@@ -34,7 +34,10 @@ set -uo pipefail
 
 BOX_ROOT="${MPK_BOX_ROOT:-$HOME/mpk-qwen35}"
 PY="${MPK_PY:-$BOX_ROOT/venv-rm/bin/python}"
-export PATH="${CUDA_BIN:-/usr/local/cuda-12.8/bin}:$PATH"
+# The interpreter's own bin dir goes on PATH for the same reason
+# collect_vllm.sh does it: pip console scripts (ninja, cmake) live there and the
+# JIT paths shell out to them.
+export PATH="$(dirname "$PY"):${CUDA_BIN:-/usr/local/cuda-12.8/bin}:$PATH"
 export HF_HOME="${HF_HOME:-$BOX_ROOT/hf}"
 export PYTHONUNBUFFERED=1
 
