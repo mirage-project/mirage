@@ -233,6 +233,33 @@ def main(argv=None) -> int:
                  f"{(st.get('totals') or {}).get('fingerprint_divergence_rate')} "
                  f"token divergence "
                  f"{(st.get('totals') or {}).get('token_divergence_rate')}")
+    # ---- PER-SIZE RESULT LINES ------------------------------------------
+    # The pinned gate's own contract: "It must save raw run artifacts + configs
+    # and print per-size RESULT lines."  One grep-able line per batch size,
+    # carrying every number the three criteria rest on.
+    L.append("")
+    bss = sorted({*(perf or {}).get("per_bs", {}), *(ac3 or {}).get("per_bs", {})},
+                 key=int)
+    for bs in bss:
+        pr = ((perf or {}).get("per_bs") or {}).get(bs) or {}
+        a4 = pr.get("ac4") or {}
+        a5 = pr.get("ac5") or {}
+        a3 = (((ac3 or {}).get("per_bs") or {}).get(bs) or {}).get("verdict", "NOT_RUN")
+
+        def n(x, p=1):
+            return "n/a" if x is None else format(x, f".{p}f")
+        L.append(
+            f"RESULT bs={bs} AC3={a3} "
+            f"AC4={a4.get('verdict', 'NOT_RUN')} "
+            f"mpk_decode_tok_s={n(a4.get('mpk_decode_tok_s'))} "
+            f"vllm_decode_tok_s={n(a4.get('vllm_decode_tok_s'))} "
+            f"decode_ratio={n(a4.get('ratio_mpk_over_vllm'), 3)} "
+            f"AC5={a5.get('verdict', 'NOT_RUN')} "
+            f"mpk_e2e_s={n(a5.get('mpk_e2e_s'), 3)} "
+            f"vllm_e2e_s={n(a5.get('vllm_e2e_s'), 3)} "
+            f"e2e_ratio={n(a5.get('ratio_mpk_over_vllm'), 3)} "
+            f"e2e_ratio_max={n(a5.get('max_ratio'), 2)}")
+
     if rep["failures"]:
         L.append("")
         L.append("  FAILURES")

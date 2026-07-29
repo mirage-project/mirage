@@ -126,6 +126,7 @@ def main(argv=None) -> int:
             pinned = parse_accept_sh(accept_sh)
             rep["recorded"]["pinned_contract"] = pinned
             claimed = {"MODEL_ID": a.model, "BATCH_SIZES": a.batch_sizes,
+                       "PROMPTS": a.prompts,
                        "CORRECT_NEW_TOKENS": a.correct_new_tokens,
                        "MIN_INPUT_LEN": a.min_input_len,
                        "MIN_OUTPUT_LEN": a.min_output_len,
