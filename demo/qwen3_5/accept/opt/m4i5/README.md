@@ -379,10 +379,14 @@ disjoint-columns argument requires.
 | `gates/ptxas/` | `-Xptxas -v` on the generated megakernel TU at k = 2/4/8 |
 | `scripts/` | every script used |
 
-Profiler `.npz` (3 × 0.2–0.3 GB at bs1, 3 larger at bs8) stay on catalyst-B200
-under `/var/tmp/m4i5_prof/`; the M3-I7 buffers the width table rests on are at
+The three bs1 profiler buffers behind §4's mechanism check are retained off-repo
+at **`/home/catalyst/mpk-artifacts/m4i5/prof_raw/raw_bs1_rep0_k{2,4,8}.npz`**
+(566 MB); the bs8 pair stays on catalyst-B200 under `/var/tmp/m4i5_prof/`, and the
+M3-I7 buffers the §1 width table rests on are at
 `/home/catalyst/mpk-artifacts/m3i7/late_raw/`. Everything in `tables/` regenerates
-from those with the committed scripts.
+from those with the committed scripts; §4's A/B table regenerates from `raw/`
+alone, with no GPU — verified, and every published field is identical (only each
+rep record's `path` differs, scratch vs repo).
 
 ```bash
 # CPU-only, no GPU: the width table, the ceiling, the critical path
