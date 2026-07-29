@@ -213,6 +213,22 @@ This function orchestrates all code generation:
 
 Each registration function (in `src/kernel/task_register.cc`) reads tensor dimensions from the TBGraph, generates a CUDA code string calling the templated kernel with those dimensions, and returns a `variant_id` via `register_task_variant()`. Same code string → same variant_id (deduplication).
 
+### The C++ extension is a build artifact — rebuild it after any `src/` change
+
+Phases 1 and 2 are separated by a compiled boundary: the Python side calls into a C++ `.so` built
+from `src/` by the editable install. Pull new Python without rebuilding and the Python graph emits
+structure the stale C++ cannot account for. The canonical symptom is
+`build_annotated_graph: bgraph inputs/outputs count mismatch`
+(`src/kernel/annotated_graph.cc:302`), typically with `rc=134`, at **every** batch size — which
+reads exactly like "HEAD is broken". It isn't; it's a stale extension.
+
+```bash
+pip install --no-build-isolation -e .    # after any pull that touches src/
+```
+
+Treat an I/O-count mismatch as an environment symptom **before** suspecting the source. (A new
+split-task dispatch is the usual trigger: it changes the per-op input/output counts.)
+
 ---
 
 ## Phase 3: CUDA Compilation
@@ -310,6 +326,100 @@ Each scheduler runs on a single warp (32 threads, only thread 0 active). Up to 4
 
 ---
 
+## Megakernel-Wide Properties
+
+Three properties belong to the **whole** persistent kernel, not to any one task. Each is
+checkable from an artifact rather than by reasoning, and each has cost real debugging time.
+
+### One register budget and one stack frame for every task
+
+`_execute_task()` inlines **every** task body, and the worker entry carries
+`__launch_bounds__(WORKER_NUM_THREADS, 1)`. ptxas therefore allocates **one** register budget and
+**one** per-thread stack frame for the entire megakernel — any single task's register pressure is
+charged to every task.
+
+So a spill you introduce in one kernel slows down families you never touched, and relieving it
+speeds them all up. Measured (M3-I6a): attention's pass-4 accumulator
+(`float o[MMA_ITERS_M][HEAD_DIM/16][8]` = 256 floats at pass size 4, over the 255-register file)
+was the **only** spill source in the whole kernel, and it was paid per KV tile, so its cost grew
+with context:
+
+| attn q_pass | registers | stack frame | spill st | spill ld |
+|---|---|---|---|---|
+| 4 | 255 | 576 B | 780 B | 976 B |
+| 2 | 240 | 144 B | 0 | 0 |
+
+Dropping to pass 2 — a builder-config value only (`Qwen35Builder.attn_q_pass`, env
+`MPK_ATTN_Q_PASS`; `attention_sm100.cuh` byte-identical) — sped up untouched families: dense fp8
+−4.4%, GDN recurrent −6.2% µs/step at bs1. Evidence:
+`demo/qwen3_5/accept/opt/m3i6a/README.md:61-85`, raw dumps
+`opt/m3i6a/ptxas/megakernel_qp{4,2,1}.txt:21-22`.
+
+**Diagnostic before blaming a kernel:** recompile the *generated* TU with `-Xptxas -v` and read the
+`persistent_kernel` entry's spill lines. An isolated wrapper TU has its own budget and will not
+show the megakernel's. Recipe (nvcc flags lifted verbatim from the JIT command in the run log):
+`opt/m3i6a/scripts/mk_ptxas.sh`.
+
+### SM residency is a correctness precondition, not politeness
+
+Workers and schedulers are spin-waiting peers — a worker blocks until a scheduler enqueues its
+task, a scheduler blocks until a worker triggers its event — and neither ever yields its SM, so
+**the whole grid must be co-resident.** `get_configurations_from_gpu` claims one SM per worker
+(205 KB smem, `__launch_bounds__(..., 1)`) plus `4 * (sm_count - workers)` schedulers packed
+4-per-SM: on a 148-SM B200 that is *every* SM. One block of any other process breaks it, and the
+deadlock is **self-sustaining** — MPK's resident blocks never yield the SMs the missing blocks
+need, so a co-tenant present for seconds burns the GPU for hours and then wedges every job that
+lands on it.
+
+This is why a shared GPU looks exactly like an in-process wave-reset bug. It was M2-I9's
+`HAZARD-WAVE-RESET`: the reset path was already complete and 62 in-process launches passed, while a
+GEMM co-tenant landing mid-sequence reproduced the wedge on demand
+(`demo/qwen3_5/accept/probes/runtime/m3i2a_wave_reset.md`).
+
+`launch_func` now runs a residency probe before every launch, plus a warm one at init:
+`check_persistent_kernel_residency()` (`persistent_kernel.cuh:1946`) reruns the same two grids with
+the same per-block resources and requires every block to confirm it saw the whole grid arrive while
+itself resident — a grid that had to run in two batches can never pass. Every CUDA API the probe
+touches **fails closed** with `MPK_RESIDENCY_PROBE_ERROR` (`persistent_kernel.cuh:1558-1563`),
+terminal inside the retry loop: a probe that cannot run must never look like a probe that passed.
+`MPK_SKIP_RESIDENCY_CHECK=1` is the only fail-open path and warns. Warm cost ≈1 ms; cold it pays
+~250 ms of module load, which is why it is warmed at init.
+
+**Honest limit:** deterministic against *sustained* contention, only probabilistic against a bursty
+co-tenant that takes the SMs in the gap after the probe. Keep a progress watchdog.
+
+### A grid split becomes SEPARATE TASKS — and only a non-barrier epilogue is admissible
+
+MPK has no notion of cooperating blocks inside one task, so a `grid.z` split is expressed as
+`grid.z` independent tasks with the slice index carried in task metadata. `runtime.cc:452-467`
+writes `bid.z` into `task_metadata.merge_task_offset` for `TASK_GDN_RECURRENT_SM100`;
+`task_register.cc:4911-4960` reads it back (`int split_ = task_desc->task_metadata.merge_task_offset;`)
+to select the slice. The precedent is paged attention's split-KV pair — a separate *merge task*
+consuming per-split partials (`task_register.cc:3717`, `:3802`).
+
+If the split needs a shared epilogue, the **soundness condition** is that the epilogue must not be a
+barrier. A self-resetting `atomicAdd` counter per output slot, where the *last* arriving task runs
+the epilogue, is legal:
+
+- **It is not a barrier.** No task waits on a peer — each bumps the counter and either returns or
+  runs the epilogue. The split tasks therefore need **not** be co-resident, which is exactly the
+  property a persistent work-queue scheduler cannot guarantee.
+- `__threadfence()` is device-scope within a single launch, so the release/acquire pair covers every
+  worker CTA.
+- The event that unblocks the consumer counts **all** split tasks, so the epilogue always precedes
+  any consumer.
+
+A design needing a *real* cross-task barrier is **not admissible** — it deadlocks. That is why GDN
+prefill, whose epilogue sits inside the token loop, keeps the unsplit path (split 0 runs the whole
+chunk, other splits return immediately) and only decode is split. Full argument in
+`include/mirage/persistent_kernel/tasks/blackwell/gdn_recurrent_sm100.cuh:441-466`.
+
+Corollary for kernel tuning: a task's own occupancy is fixed at 1 (one persistent worker CTA per
+SM), so an occupancy-driven result from a standalone benchmark does not transfer into MPK
+(`gdn_recurrent_sm100.cuh:433-439`).
+
+---
+
 ## Task Graph JSON Schema
 
 The `task_graph.json` file is the key intermediate artifact between code generation and runtime. Generated by `print_task_graph()` in `runtime.cc`, loaded by `construct_task_graph()` at init time.
@@ -385,6 +495,12 @@ Full task descriptor used during code generation and JSON serialization. Contain
 ### `TaskDesc` (`runtime_header.h`)
 
 Compact runtime task descriptor (16-byte aligned). Contains only raw pointers (`input_ptrs[7]`, `output_ptrs[3]`), TMA descriptor pointers (if Hopper/Blackwell), event IDs, and task metadata. Constructed from `FullTaskDesc` at init time by resolving tensor names to GPU pointers.
+
+The array bounds are the hard per-task I/O limit: `MAX_INPUTS_PER_TASK = 7` and
+`MAX_OUTPUTS_PER_TASK = 3` (`runtime_header.h:79-80`), used by both `FullTaskDesc`
+(`:281-282`) and `TaskDesc` (`:334-339`). A task needing more inputs must pack them (e.g. a
+shuffled/interleaved weight via `pk.shuffle_tensors`) or be split into two tasks — see
+`/add-mpk-task`.
 
 ### `TaskDesc::TaskMetadata` (union)
 

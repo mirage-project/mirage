@@ -25,9 +25,31 @@ Use `torch.testing.assert_close(out, ref, atol=..., rtol=...)` and/or print `(ou
 
 ### Where the reference lives: inline, per test file
 
-There is no shared `pytorch_reference.py` anywhere in the repo today — `find tests -name pytorch_reference.py` returns no results — and no test imports a reference from one. The actual convention: each test file defines its own PyTorch reference inline — either a small helper function in the same file (e.g. `torch_rmsnorm()` at `tests/runtime_python/test_mode/test_rmsnorm_testmode.py:16`) or ops written directly in the test body (e.g. the `ref = ...` computation at `tests/runtime_python/test_mode/test_moe_w13_linear_testmode.py:74-80`). Where a kernel-wrapper test and a test_mode test cover the same layer, each currently keeps its own independent copy rather than sharing one: `tests/runtime_python/blackwell/sm100_moe_sigmoid/test_gate_topk_sigmoid.py:26` and its sibling `test_topk_sigmoid_testmode.py:33` each define their own `reference_sigmoid_routing()`.
+The `tests/` suite has no shared reference module — `find tests -name pytorch_reference.py` returns no results — and no test under `tests/` imports a reference from one. The actual convention: each test file defines its own PyTorch reference inline — either a small helper function in the same file (e.g. `torch_rmsnorm()` at `tests/runtime_python/test_mode/test_rmsnorm_testmode.py:16`) or ops written directly in the test body (e.g. the `ref = ...` computation at `tests/runtime_python/test_mode/test_moe_w13_linear_testmode.py:74-80`). Where a kernel-wrapper test and a test_mode test cover the same layer, each currently keeps its own independent copy rather than sharing one: `tests/runtime_python/blackwell/sm100_moe_sigmoid/test_gate_topk_sigmoid.py:26` and its sibling `test_topk_sigmoid_testmode.py:33` each define their own `reference_sigmoid_routing()`.
 
-Follow this for new tests: write the PyTorch reference inline in your `test_<layer>_testmode.py` (copy it from the sibling kernel-wrapper test if one already exists with the same math). Don't create a `pytorch_reference.py` — it isn't how the suite actually works today.
+Follow this for new tests under `tests/`: write the PyTorch reference inline in your `test_<layer>_testmode.py`, copying it from the sibling kernel-wrapper test if one already exists with the same math.
+
+**Model demos are the exception.** A model port validated against an HF oracle does keep one shared reference module: `demo/qwen3_5/oracle/pytorch_reference.py`, one function per dumped op, imported by both the dump driver and the self-consistency validator. Its GDN formulas are copied *verbatim* from `transformers`' torch fallback, which is the point — reusing the literal HF functions makes machine-precision agreement the expectation, so any material diff is a real bug rather than an approximation artifact (see its module docstring). If you are testing a layer of an existing model port, that module — not a prose spec — is the authority on cast positions and dtypes.
+
+### When the reference has ties: compare selected sets, not indices
+
+Any top-k selection over bf16 logits will produce genuine ties, and index-exact comparison against torch then reports failures that are not bugs. The trap is assuming the ambiguity lives only at the (k−1, k) boundary pair: bf16 values collide **entirely inside** the top-k too — e.g. ranks 4, 5 and 6 all sharing one bf16 value — which leaves the selected *set* unambiguous but the rank *label* within the tied group arbitrary.
+
+The pattern that holds (`tests/runtime_python/blackwell/sm100_moe/test_gate_topk.py:38-62`):
+
+1. Classify a row as TIE if **any** adjacent pair in the sorted top-(k+1) window is exactly equal — not just the boundary pair.
+2. At a TIE row accept either choice, provided (a) the selected set's logit **multiset** equals the reference top-k multiset bitwise on bf16 values, and (b) the renormalized weight matches a renormalization **recomputed on the kernel's own chosen set**, not torch's:
+   ```python
+   ref_multiset, _    = torch.sort(sorted_logits[t, :num_topk])
+   kernel_multiset, _ = torch.sort(gating_output_ref[t, kernel_experts_t].to(torch.float))
+   if not torch.equal(kernel_multiset, ref_multiset):
+       raise AssertionError("selected SET's logit multiset differs -- NOT tie-explained")
+   selected_softmax = torch_softmax[t, kernel_experts_t]
+   recomputed_w     = selected_softmax / selected_softmax.sum()
+   ```
+3. Non-tie rows keep the original strict index-exact comparison, and **keep a negative self-check**: the rewrite must still reject a genuine wrong-expert bug. `_self_check_catches_non_tie_bug` (`:361-373`) corrupts a non-tie row, a boundary-tie row and an internal-tie row and asserts each is REJECTED. It runs CPU-only before any GPU work and standalone via `--self-check-only`.
+
+Without step 3 a tie-aware comparison quietly degenerates into "accept anything".
 
 ## Quick Start
 
@@ -335,7 +357,18 @@ For finer-grained analysis (per-worker breakdown, percentiles, outliers), `panda
 **Kernel hangs / never terminates:**
 - Verify `total_num_requests` is set to match the number of in-flight test requests (typically 1, derived from `tokens.shape[0]`). If `next_request_id` never reaches `total_num_requests`, `prepare_next_batch` will keep returning true and iterations will not stop.
 - Verify the active `mode` is `"offline"` (the default). `MPK_TEST_MODE` is designed to layer on top of MODE_OFFLINE's `prepare_next_batch`; other modes are not supported.
-- The MPK runtime assumes occupying the entire GPU. If other processes are running, they can interfere with scheduling and cause hangs. Always check GPU availability before running. And if it hangs, kill and rerun on other idle GPUs.
+- **Exclusivity is correctness, not politeness.** MPK claims *every* SM (148 on a B200) and its workers and schedulers spin-wait on each other without ever yielding, so the whole grid must be co-resident. One block of any other process breaks it, and the resulting deadlock is **self-sustaining** — MPK's own blocks never yield the SMs the missing ones need, so a co-tenant present for a few seconds burns the GPU indefinitely and wedges every job that lands on it afterwards. Mechanism: `/mpk-internals` → "SM residency is a correctness precondition".
+- The runtime now runs a residency probe before every launch and raises a `RuntimeError` naming the number of non-resident blocks instead of hanging. If you get that error, move to an idle GPU — do not set `MPK_SKIP_RESIDENCY_CHECK=1` to get past it. Check the GPU is idle *and* under ~500 MiB before claiming it; a single read is not enough, since state is volatile (sample 3× a few seconds apart).
+- If a run does wedge, the GPU stays poisoned: kill the process **and** rerun elsewhere.
+
+**A standalone kernel-wrapper harness reports row-0-only from the second call:**
+- Reusing the **same tensor object** across repeated calls to a `runtime_kernel.*` wrapper degenerates the wrapper to row 0 only from call 2 onward. A fresh tensor per call, or `.clone()`, is always correct.
+- This is a property of the standalone wrapper path, not of the kernel or of test mode — but it invalidates stress harnesses built on it. In M3-I5c it made two of four checks fail on 100% of iterations (`demo/qwen3_5/accept/opt/m3i5c/stress_compaction.py`, checks C2 and C4), which read as a compaction bug until the arms were separated: `opt/m3i5c/results/diag_stress3.py` runs FRESH / `.clone()` / same-object side by side and isolates it.
+- **Check this before trusting any standalone-wrapper stress result.** Allocate inputs inside the loop.
+
+**Prefer per-cell invocations over one abort-on-first-failure sweep:**
+- A sweep that raises on the first failing `(bs, experts)` cell hides the rest of the coverage, and the cell that fails is often a known artifact on a never-shipped path. Collect a verdict per cell and keep going — `tests/runtime_python/blackwell/sm100_moe/test_gate_topk.py:469-476` appends `(case, "FAIL", …)` rather than raising, so "abort-on-first-failure stays OFF so every (bs, experts) cell is exercised and timed".
+- When a cell needs a different geometry (a compile-time constant, a different `mbt`), run it as its own invocation instead of widening the sweep. M3-I5b's router coverage was completed exactly this way, per-bs at 9/16/17/33 rows (`demo/qwen3_5/accept/opt/m3i9/predictions_addendum.md:39-41`).
 
 **Verifying that `prepare_next_batch` actually ran:**
 - After `pk()` returns, read back `pk.meta_tensors["step"][0]`. It should equal `prompt_lengths[0]` — `prepare_next_batch`'s Step 1.1 (`include/mirage/persistent_kernel/persistent_kernel.cuh:233`) advances `step` by `num_tokens` on the second call (`config.step[request_id] = step + num_tokens;` at `persistent_kernel.cuh:268`). This bullet named a nonexistent `test_prepare_next_batch_testmode.py` before this fix — assert it directly instead, e.g. `assert pk.meta_tensors["step"][0].item() == prompt_lengths[0]`.
