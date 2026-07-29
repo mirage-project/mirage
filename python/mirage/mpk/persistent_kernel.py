@@ -288,6 +288,14 @@ def get_compile_command(
         # AC-3 exactness or decode latency depends on the flag. Default is
         # unchanged, so no existing caller is affected.
         *([] if os.environ.get("MPK_NO_FAST_MATH") == "1" else ["-use_fast_math"]),
+        # M4-I2's A/B arm. With MPK_FP8_DENSE_BASELINE=1 the Qwen3.5 builder
+        # dispatches the dense fp8 GEMM at the old slice-128 grid AND this -D
+        # makes linear_fp8_blockscale_sm100.cuh compile the golden path, so the
+        # generated task-279 code is the pre-M4-I2 code. That lets both arms of
+        # the A/B come from one tree and interleave inside one GPU claim; the
+        # knob must be part of the TU, hence a -D and not a runtime check.
+        *(["-DMPK_FP8_DENSE_BASELINE=1"]
+          if os.environ.get("MPK_FP8_DENSE_BASELINE") == "1" else []),
         "-lcuda",
         "-lcudart",
         "-lstdc++fs",
@@ -2251,10 +2259,35 @@ class PersistentKernel:
         [batch, K/128] float32 scale.
         """
         params = [1] if residual is not None else []
+        # FAIL CLOSED on the scale split. grid.x splits weight_scale's dim0 by
+        # INTEGER DIVISION (runtime.cc: block_size = dim[input_map.x] /
+        # grid_dim.x, offset = block_size * bid.x * stride). A grid finer than
+        # dim0 therefore gives block_size == 0 and EVERY task silently reads
+        # scale row 0 -- wrong numbers, no error. Since M4-I2 the kernel accepts
+        # a per-task N slice finer than the checkpoint's 128-row scale block, and
+        # the caller supplies the extra rows by ROW-REPLICATING weight_scale to
+        # one row per task (bit-identical data; see
+        # Qwen35Builder._fp8_block_scale). Require that here so a mis-wired
+        # caller cannot compute with the wrong scales.
+        n_tasks = grid_dim[0]
+        assert weight_scale.dim(0) == n_tasks, (
+            f"weight_scale dim0 must be exactly one row per task: got "
+            f"{weight_scale.dim(0)} for grid.x={n_tasks}. grid.x splits this "
+            f"tensor by integer division, so a coarser dim0 makes every task "
+            f"read scale row 0. Row-replicate the checkpoint's [N/128, K/128] "
+            f"weight_scale to [n_tasks, K/128] before attaching it.")
+        assert weight_fp8.dim(0) % n_tasks == 0, (
+            f"weight rows {weight_fp8.dim(0)} must divide evenly over "
+            f"grid.x={n_tasks}")
+        n_slice = weight_fp8.dim(0) // n_tasks
+        assert n_slice % 128 == 0 or (128 % n_slice == 0 and n_slice >= 16), (
+            f"per-task N slice {n_slice} must be a multiple of the 128-row "
+            f"scale block or a sub-multiple >= 16 of one "
+            f"(linear_fp8_blockscale_sm100.cuh: fast_path_ok)")
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         # Same partitioning as linear_fp8_layer: grid.x splits the weight's
-        # output rows, so weight_scale (whose dim0 is one row per 128 weight
-        # rows) splits on dim0 too and the output splits on dim1.
+        # output rows, so weight_scale (whose dim0 is one row per TASK) splits on
+        # dim0 too and the output splits on dim1.
         tb_graph.new_input(input_fp8, (-1, -1, -1), -1, True)
         tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)
         tb_graph.new_input(weight_fp8, (0, -1, -1), -1, True)

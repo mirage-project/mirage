@@ -64,6 +64,14 @@ blackwell_depends = sorted(
     glob(os.path.join(blackwell_task_dir, '**', '*.cuh'), recursive=True)
 )
 
+# The MEGAKERNEL compiles with -use_fast_math (persistent_kernel.py); this
+# extension does not, so an exactness gate validated only here would not be
+# validating what ships. Set FP8BS_TEST_FAST_MATH=1 to build the fast-math arm
+# (same convention as sm100_gdn_recurrent/setup.py). M4-I2's bit-exactness gate
+# runs BOTH lanes.
+extra_nvcc = (['-use_fast_math']
+              if os.environ.get("FP8BS_TEST_FAST_MATH") == "1" else [])
+
 setup(
     name='runtime_kernel_blackwell_linear_fp8_blockscale',
     ext_modules=[
@@ -89,7 +97,7 @@ setup(
                     '-O3',
                     '-gencode=arch=compute_100a,code=sm_100a',
                     '-DMIRAGE_GRACE_BLACKWELL',
-                ]
+                ] + extra_nvcc
             }
         )
     ],

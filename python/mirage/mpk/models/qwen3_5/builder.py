@@ -149,17 +149,66 @@ QUANTIZE_ROW_SPLIT = (0, -1, -1)
 MOE_GATE_PADDING_ROWS = True
 
 
-def fp8_grid(output_size: int) -> int:
+# Per-task N slice for the preserved-block-scale dense GEMM, keyed by the
+# projection's (N, K). These are the slices the ferret `dense-fp8-blockscale`
+# winner (workspace4 tag v011) was BENCHMARKED at -- one entry per real Qwen3.5
+# dense call site -- and the kernel's ring depths are tuned per (K, slice), so a
+# slice not in this table is not a slice we have evidence for. The measured
+# effect of slicing is large: the ferret score went 0.727 (slice 128, one scale
+# block per task) -> 0.862 the moment per-shape slicing landed, and the deep
+# cp.async rings that carried it to 1.011 only FIT the worker's shared memory at
+# a narrow slice. The mechanism is MPK-specific: one persistent worker CTA per SM
+# runs one task at a time, so a projection dispatched as N/128 tasks occupies
+# only N/128 of the 148 SMs -- 16 of them for the N=2048 out_proj/o_proj pair.
+FP8_DENSE_N_SLICE = {
+    (8192, 2048): 64,   # GDN in_proj_qkv                 -> 128 tasks
+    (4096, 2048): 32,   # GDN in_proj_z                   -> 128 tasks
+    (9216, 2048): 64,   # attention qkv(g)_proj           -> 144 tasks
+    (2048, 4096): 16,   # GDN out_proj / attn o_proj      -> 128 tasks (residual)
+    (1024, 2048): 32,   # shared-expert gate_up           ->  32 tasks
+    (2048,  512): 64,   # shared-expert down              ->  32 tasks
+}
+
+
+def fp8_dense_baseline() -> bool:
+    """True when MPK_FP8_DENSE_BASELINE=1 pins the pre-M4-I2 dispatch.
+
+    The A/B measurement arm: slice 128 here plus the same -D in the JIT flags
+    (persistent_kernel.py) makes the generated task-279 code the golden path at
+    the old grid, so both arms come from ONE tree and can interleave inside one
+    GPU claim. Not a production knob -- leave it unset.
+    """
+    return os.environ.get("MPK_FP8_DENSE_BASELINE") == "1"
+
+
+def fp8_slice(output_size: int, reduction_size: int, batched_tokens: int) -> int:
+    """Per-task N slice for a preserved-block-scale dense GEMM.
+
+    Falls back to the 128-row scale block -- the pre-M4-I2 dispatch -- for any
+    (N, K) the ferret run did not benchmark, and for max_num_batched_tokens > 16,
+    where the kernel's fast path is inadmissible (its per-warp B ring assumes
+    TILE_M == 16, i.e. one 16-row MMA row-block per warp) and only the golden
+    path, which needs whole scale blocks, can run.
+    """
+    if batched_tokens > 16 or fp8_dense_baseline():
+        return BLOCK
+    return FP8_DENSE_N_SLICE.get((output_size, reduction_size), BLOCK)
+
+
+def fp8_grid(output_size: int, reduction_size: int, batched_tokens: int) -> int:
     """Task count for a preserved-block-scale dense GEMM.
 
-    The kernel's per-task N slice must be a whole number of 128-row scale
-    blocks (`linear_fp8_blockscale_sm100.cuh:120`), and grid.x splits both the
-    weight's rows and the scale's dim 0 (`persistent_kernel.py:2059-2060`), so
-    one scale row per task is the finest legal split.
+    grid.x splits the weight's rows, the output's columns, and the scale's dim 0
+    (`persistent_kernel.py`: `linear_fp8_blockscale_layer`). Since M4-I2 the
+    per-task slice may be FINER than the checkpoint's 128-row scale block, which
+    is why the scale has to be row-replicated first -- see
+    `Qwen35Builder._fp8_block_scale`.
     """
-    assert output_size % BLOCK == 0, (
-        f"preserved-scale FP8 output size {output_size} must be a multiple of {BLOCK}")
-    return output_size // BLOCK
+    n_slice = fp8_slice(output_size, reduction_size, batched_tokens)
+    assert output_size % n_slice == 0, (
+        f"preserved-scale FP8 output size {output_size} must be a multiple of "
+        f"its per-task slice {n_slice}")
+    return output_size // n_slice
 
 
 @register_model_builder(
@@ -520,6 +569,35 @@ class Qwen35Builder(GraphBuilder):
     # ------------------------------------------------------------------
     # fp8 dense helper
     # ------------------------------------------------------------------
+    def _fp8_block_scale(self, w_name: str, n_tasks: int):
+        """Attach `weight_scale_inv` with exactly ONE row per task.
+
+        The checkpoint ships [N/128, K/128]: one fp32 scale per 128x128 weight
+        block. When the per-task N slice is finer than 128 rows, 128//slice tasks
+        share a scale block -- and MPK's grid split cannot express that, because
+        it divides dim0 by grid.x with INTEGER division (runtime.cc), which would
+        silently hand every task row 0. So the rows are REPLICATED to one per
+        task: `repeat_interleave` copies the same fp32 values, so the numbers the
+        kernel promotes with are bit-identical to the checkpoint's, and the
+        ordinary split then gives each task its containing block row.
+
+        Cost is negligible -- the whole dense scale set is ~340 KiB before
+        replication -- and the replicated tensor is kept alive by
+        `attach_input`'s own reference list.
+        """
+        pk = self.mpk
+        raw = self.weights[w_name + "_scale"]
+        assert raw.dim() == 2, f"{w_name}_scale must be [N/128, K/128]"
+        n_blocks = raw.shape[0]
+        if n_blocks == n_tasks:
+            return pk.attach_input(raw, name=w_name + "_scale")
+        assert n_tasks % n_blocks == 0, (
+            f"{w_name}: {n_tasks} tasks do not partition {n_blocks} scale "
+            f"blocks evenly")
+        rep = n_tasks // n_blocks
+        rt = raw.repeat_interleave(rep, dim=0).contiguous()
+        return pk.attach_input(rt, name=f"{w_name}_scale_x{rep}")
+
     def _fp8_linear(self, name: str, x, w_name: str, out, *, residual=None,
                     k: int):
         """quantize(x) -> preserved-block-scale fp8 GEMM (optionally +residual).
@@ -535,11 +613,12 @@ class Qwen35Builder(GraphBuilder):
                               grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1),
                               scale_ue8m0=False, row_partition=QUANTIZE_ROW_SPLIT)
         weight = pk.attach_input(w[w_name], name=w_name)
-        scale = pk.attach_input(w[w_name + "_scale"], name=w_name + "_scale")
         n = w[w_name].shape[0]
+        n_tasks = fp8_grid(n, k, self.mbt)
+        scale = self._fp8_block_scale(w_name, n_tasks)
         pk.linear_fp8_blockscale_layer(
             input_fp8=xq, input_scale=xs, weight_fp8=weight, weight_scale=scale,
-            output=out, grid_dim=(fp8_grid(n), 1, 1), block_dim=(256, 1, 1),
+            output=out, grid_dim=(n_tasks, 1, 1), block_dim=(256, 1, 1),
             residual=residual)
 
     # ------------------------------------------------------------------
@@ -612,11 +691,12 @@ class Qwen35Builder(GraphBuilder):
         z = self._t((self.mbt, c.gdn_z_dim), bfloat16, f"layer_{i}_gdn_z")
         for tag, out in (("in_proj_qkv", qkv), ("in_proj_z", z)):
             name = f"layer_{i}_gdn_{tag}"
+            n_tasks = fp8_grid(w[name].shape[0], w[name].shape[1], self.mbt)
             pk.linear_fp8_blockscale_layer(
                 input_fp8=xq, input_scale=xs,
                 weight_fp8=pk.attach_input(w[name], name=name),
-                weight_scale=pk.attach_input(w[name + "_scale"], name=name + "_scale"),
-                output=out, grid_dim=(fp8_grid(w[name].shape[0]), 1, 1),
+                weight_scale=self._fp8_block_scale(name, n_tasks),
+                output=out, grid_dim=(n_tasks, 1, 1),
                 block_dim=(256, 1, 1))
 
         # b/a stay bf16 unconditionally: both shards are in

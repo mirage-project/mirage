@@ -4655,7 +4655,16 @@ int TaskRegister::register_linear_fp8_blockscale_sm100_task(
   // Both scale tensors carry one float32 entry per 128-element K group; the
   // weight's scale additionally has one row per 128 weight rows.
   assert(reduction_size % 128 == 0);
-  assert(output_size % 128 == 0);
+  // The per-task N slice is either whole 128-row scale blocks, or -- since
+  // M4-I2 -- a >= 16 sub-multiple of one block. A sub-block slice lies inside a
+  // SINGLE checkpoint scale block, so the caller must hand this task the
+  // containing block-row's weight_scale pointer; the builder does that by
+  // attaching the scale row-replicated to one row per task and letting the
+  // ordinary grid.x split pick the row (see linear_fp8_blockscale_sm100.cuh's
+  // header and PersistentKernel.linear_fp8_blockscale_layer's assert). 16 is
+  // the floor because each of the task's active warps needs one n8 MMA column
+  // block and the ldmatrix.x2 B fragment covers 8 rows.
+  assert(output_size % 128 == 0 || (128 % output_size == 0 && output_size >= 16));
   assert(input_ops[1]->dtensor.num_dims == 2 &&
          input_ops[1]->dtensor.dim[1] * 128 == reduction_size);
   assert(input_ops[3]->dtensor.num_dims == 2 &&
