@@ -195,7 +195,7 @@ for R in $(seq 0 $((REPS - 1))); do
 done
 
 # ---- audit.json --------------------------------------------------------------
-POLICY_JSON_FILE="$OUT/meta/admission_policy.json"
+POLICY_JSON_FILE="$OUT/admission_policy.json"
 "$PY" "$ACC/admission_policy.py" > "$POLICY_JSON_FILE" 2>/dev/null \
   || echo '{"error":"admission_policy.py unreadable"}' > "$POLICY_JSON_FILE"
 "$PY" - "$OUT" "$BSS" "$POLICY_JSON_FILE" "$DEVJSON" <<'EOF'
@@ -203,11 +203,16 @@ import json, sys, glob, os
 out, bss, policy_file, devjson = sys.argv[1:5]
 cells = {}
 for p in sorted(glob.glob(os.path.join(out, "meta", "*.json"))):
-    if p.endswith("device.json"):
-        continue
     try:
         d = json.load(open(p))
     except Exception:
+        continue
+    # Only per-cell records have a "tag"; anything else in meta/ (the device
+    # probe, and formerly the policy snapshot) is not a cell.  Keying on "tag"
+    # without this raised KeyError and lost the whole audit -- the device floor
+    # and the per-cell gpu_before are exactly what the dirty-rep rule needs, so
+    # losing them silently would have degraded the measurement, not stopped it.
+    if "tag" not in d:
         continue
     cells[d["tag"]] = d
 befores = [c["gpu_before_mib"] for c in cells.values()
