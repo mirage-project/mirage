@@ -13,6 +13,16 @@ Tree under test: `348a601a` (the policy landing) in an isolated clone
 `raw/provenance.txt`; per-run device state in `raw/audit/gpu_audit.txt`; drivers in
 `scripts/`.
 
+**Read the absolute numbers as of that tree.** The `ac3gate` phase ran after three
+`accept/` Python files were redeployed in place (`scripts/redeploy_m4i4.sh`, sha256 before and
+after in its output): the `CAP_MIN_BATCH_SIZE` change this campaign made, plus two fixes to
+defects this landing introduced (section 7). Neither touches the measurement path of `geomA` or
+`geomM`. Separately, `eee0fe66` (the ferret dense-fp8 winner in task 279) landed on the branch
+AFTER this campaign finished, so every absolute e2e / prefill / AC-5 figure below is a
+`348a601a` measurement. The A/B RATIOS are a policy comparison inside one tree and are unaffected;
+the AC-5 position against the 1.25x bound has to be re-read at integrated HEAD, which is
+`final.sh`'s job (M4-I1).
+
 ---
 
 ## 1. Where the policy lives now
