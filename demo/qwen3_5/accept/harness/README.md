@@ -96,6 +96,27 @@ asserted `False`, documenting the gap this section used to describe);
 `tests/test_stub_e2e.py::SyntheticFixtureTest` continues to exercise the full tie/bug
 classification via its own hand-authored synthetic reference, independent of the real data.
 
+## Cold-run stability gate (M4-I0)
+
+`run_ac3.py` scores ONE engine dump. It cannot tell a clean run from a run whose arithmetic
+diverged mid-flight and happened not to cross an argmax margin — and on this box that happens.
+`gate_ac3_stable.sh` wraps the sweep to close that hole:
+
+    CUDA_VISIBLE_DEVICES=<one idle device> bash gate_ac3_stable.sh --out DIR [--reps 3]
+
+It runs `--reps` independent COLD-compiled reps per batch size, captures the KV/GDN
+wave-boundary fingerprint per rep next to the token dump, and passes only when every rep's
+tokens are byte-identical to `../results/dumps_final` per case AND `--reps` reps agree with
+each other fingerprint-for-fingerprint. Fingerprint-divergent reps are quarantined, re-run,
+and reported as a rate. Exit 0 STABLE / 1 FAIL (tokens) / 2 UNSTABLE / 3 integrity.
+
+Measured over 100 cold reps on five B200s: 4.2% of reps diverge in state, 2.1% in tokens, and
+two of the four observed divergences emitted a token md5 *identical to the baseline* — i.e.
+invisible to `run_ac3.py` alone. Numbers, the four events, and what M4's `final.sh` can
+honestly assert: `../opt/m4i0/README.md`. Protocol basis:
+`docs/qwen35/bench-protocol.md`, "Determinism protocol v2". Scorer unit tests (no GPU):
+`../opt/m4i0/scripts/test_gate_scorer.py`.
+
 ## Files
 
 | File | Role |
@@ -106,6 +127,7 @@ classification via its own hand-authored synthetic reference, independent of the
 | `tie_classifier.py` | `classify_position(...)` — pure, no I/O, independently unit-tested. Implements the mpk-gaps.md §6.5 evidence test. |
 | `ac3_runner.py` | Orchestrates the sweep, computes first-divergence per prompt, assembles waiver requests and the `GateReport`. |
 | `run_ac3.py` / `run_ac3.sh` | CLI entry point. |
+| `gate_ac3_stable.sh` / `gate_ac3_stable.py` | The cold-run stability gate: N independent cold reps per bs, KV/GDN fingerprint scoring, quarantine-and-re-run, machine-readable verdict (M4-I0). |
 | `fixtures/synthetic_reference.json` + `synthetic_engine_dump.json` | Hand-authored synthetic scenarios covering every classifier branch (wide-margin bug, top-2-but-wide bug, tie candidate with/without confirming engine logits, a refuted tie, insufficient evidence, and a post-divergence case). |
 | `tests/test_tie_classifier.py` | Required unit test for the argmax-tie classifier. |
 | `tests/test_stub_e2e.py` | Stub-tests against the real vLLM smoke artifact + the synthetic fixtures + batch-size/missing-prompt semantics. |

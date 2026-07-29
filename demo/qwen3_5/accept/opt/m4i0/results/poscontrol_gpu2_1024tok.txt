@@ -1,0 +1,6 @@
+reps=11  keys=22
+STATE-divergent reps: 0/11 (0.0%)  -> (none)
+TOKEN-divergent reps: 0/11 (0.0%)  -> (none)
+md5 census: {'be346b6d868ef8e7e46980426e662722': 11}
+
+no token divergence in this arm -> no first-position distribution

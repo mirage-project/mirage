@@ -1,0 +1,19 @@
+reps=13  keys=22
+STATE-divergent reps: 1/13 (7.7%)  -> pc_c1
+TOKEN-divergent reps: 1/13 (7.7%)  -> pc_c1
+md5 census: {'041e3e28a3aa67ede3070278e3d51315': 1, 'be346b6d868ef8e7e46980426e662722': 12}
+
+rep pc_c1: 8 deviating keys; waves touched ['w1']; md5 MINORITY
+  tok_p05-cuda: 373/1024 tokens differ (36.4%) FIRST DIVERGENT TOKEN POSITION = 648
+  tok_p07-format: 241/1024 tokens differ (23.5%) FIRST DIVERGENT TOKEN POSITION = 731
+  tok_p08-science: 379/1024 tokens differ (37.0%) FIRST DIVERGENT TOKEN POSITION = 636
+  tok_p10-logic: 366/1024 tokens differ (35.7%) FIRST DIVERGENT TOKEN POSITION = 645
+  w1_conv: 120/120 entries differ (100.0%) min_index=[0, 0] shape=[30, 4]
+  w1_k: 24209/61440 entries differ (39.4%) min_index=[0, 2198] shape=[10, 6144]
+  w1_rec: 120/120 entries differ (100.0%) min_index=[0, 0] shape=[30, 4]
+  w1_v: 24209/61440 entries differ (39.4%) min_index=[0, 2198] shape=[10, 6144]
+
+=== first-divergent-token-position distribution (4 diverging prompt trajectories) ===
+  positions: [636, 645, 648, 731]
+  min 636  median 648  max 731
+  BELOW POSITION 64 (the AC-3 decode length): 0/4 (0.0%)

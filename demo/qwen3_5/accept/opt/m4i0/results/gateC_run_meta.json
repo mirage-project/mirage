@@ -1,0 +1,16 @@
+{
+  "driver": "gate_ac3_stable.sh",
+  "started_utc": "2026-07-29T05:58:25Z",
+  "host": "catalyst-fleet1.cs.cmu.edu",
+  "git_sha": "fa24a4215860ce771a0ec3c0dc7246fcbe26695d",
+  "git_dirty": true,
+  "cuda_visible_devices_claim": "1",
+  "gpu_floor_mib": 5,
+  "reps_required": 3,
+  "max_extra": 3,
+  "batch_sizes": "1,2,4,8,16",
+  "per_request_token_cap": "none",
+  "baseline": "/home/muhengl/mpk-qwen35/mirage-m4i0/demo/qwen3_5/accept/results/dumps_final",
+  "gate_py_sha256": "c3ce3e1774daa2cda30c9728906d5d65a6b23c17e0cd3e02f832a94330c1287a",
+  "gate_sh_sha256": "d29b1757512d1bd56caa0e06dc6483a1f86830aad9a7bfcaeb79488637c90adb"
+}

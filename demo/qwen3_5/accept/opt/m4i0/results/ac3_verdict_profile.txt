@@ -1,0 +1,8 @@
+status fail overall_pass False
+batch_sizes [1, 2, 4, 8, 16]
+margin evidence: 640/640 positions min=0.0000 max=18.8750 mean=9.4720
+waiver: p06-poem bs 1 pos 60 implementation_bug ref_top1 31000 engine 40581 margin 0.0
+waiver: p06-poem bs 2 pos 60 implementation_bug ref_top1 31000 engine 40581 margin 0.0
+waiver: p06-poem bs 4 pos 60 implementation_bug ref_top1 31000 engine 40581 margin 0.0
+waiver: p06-poem bs 8 pos 60 implementation_bug ref_top1 31000 engine 40581 margin 0.0
+waiver: p06-poem bs 16 pos 60 implementation_bug ref_top1 31000 engine 40581 margin 0.0

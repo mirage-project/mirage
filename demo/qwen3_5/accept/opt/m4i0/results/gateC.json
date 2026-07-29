@@ -1,0 +1,1033 @@
+{
+  "schema": "gate_ac3_stable/v1",
+  "generated_utc": "2026-07-29T06:49:53Z",
+  "config": {
+    "reps_required": 3,
+    "batch_sizes": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "baseline": "/home/muhengl/mpk-qwen35/mirage-m4i0/demo/qwen3_5/accept/results/dumps_final",
+    "reps_root": "/home/muhengl/mpk-qwen35/m4i0/gateC/reps",
+    "max_extra_reps": 3,
+    "geometry": {
+      "max_seq_length": 132,
+      "max_new_tokens": 64,
+      "mbt": 16,
+      "page_size": 256,
+      "cold_compile": true
+    },
+    "detector": "KV/GDN wave-boundary bitfp (e2_fingerprint.bitfp)",
+    "launch_ledger": null
+  },
+  "per_bs": {
+    "1": {
+      "verdict": "STABLE",
+      "reps_required": 3,
+      "reps_launched": 3,
+      "reps_scored": 3,
+      "accepted": 3,
+      "quarantined": 0,
+      "errors": 0,
+      "reps_needed_to_reach_verdict": 3,
+      "divergence_rate": 0.0,
+      "consensus_state_signature": "f66643d43adada64",
+      "distinct_state_signatures": 1,
+      "all_reps_tokens_identical_to_baseline": true,
+      "accepted_reps_tokens_identical_to_baseline": true,
+      "quarantined_token_reaching": 0,
+      "quarantined_state_only": 0,
+      "foreign_floor_mib": 5,
+      "reps_starting_on_a_non_clean_device": 0,
+      "reps": [
+        {
+          "tag": "bs1_r1",
+          "rep_index": 1,
+          "status": "ok",
+          "secs": 113.0,
+          "n_waves": 10,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 5,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 36929,
+            "utilization_pct": 0
+          },
+          "state_sig": "f66643d43adada64",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 5,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs1_r2",
+          "rep_index": 2,
+          "status": "ok",
+          "secs": 115.9,
+          "n_waves": 10,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 5,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 36929,
+            "utilization_pct": 0
+          },
+          "state_sig": "f66643d43adada64",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 5,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs1_r3",
+          "rep_index": 3,
+          "status": "ok",
+          "secs": 121.6,
+          "n_waves": 10,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 7,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 39393,
+            "utilization_pct": 0
+          },
+          "state_sig": "f66643d43adada64",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 7,
+          "mib_above_foreign_floor": 2,
+          "device_not_clean_at_start": false
+        }
+      ]
+    },
+    "2": {
+      "verdict": "STABLE",
+      "reps_required": 3,
+      "reps_launched": 5,
+      "reps_scored": 5,
+      "accepted": 3,
+      "quarantined": 2,
+      "errors": 0,
+      "reps_needed_to_reach_verdict": 5,
+      "divergence_rate": 0.4,
+      "consensus_state_signature": "0449b5655fa57c9b",
+      "distinct_state_signatures": 3,
+      "all_reps_tokens_identical_to_baseline": true,
+      "accepted_reps_tokens_identical_to_baseline": true,
+      "quarantined_token_reaching": 0,
+      "quarantined_state_only": 2,
+      "foreign_floor_mib": 5,
+      "reps_starting_on_a_non_clean_device": 3,
+      "reps": [
+        {
+          "tag": "bs2_r1",
+          "rep_index": 1,
+          "status": "ok",
+          "secs": 102.5,
+          "n_waves": 5,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 5,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 55450,
+            "utilization_pct": 4
+          },
+          "state_sig": "aab25b212f05276a",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "quarantined",
+          "fingerprint_delta_vs_consensus": {
+            "n_keys": 4,
+            "keys": [
+              {
+                "key": "w4_conv",
+                "entries_differ": 11,
+                "entries_total": 60,
+                "frac": 0.183333
+              },
+              {
+                "key": "w4_k",
+                "entries_differ": 272,
+                "entries_total": 20480,
+                "frac": 0.013281
+              },
+              {
+                "key": "w4_rec",
+                "entries_differ": 12,
+                "entries_total": 60,
+                "frac": 0.2
+              },
+              {
+                "key": "w4_v",
+                "entries_differ": 272,
+                "entries_total": 20480,
+                "frac": 0.013281
+              }
+            ],
+            "waves_touched": [
+              "w4"
+            ]
+          },
+          "divergence_reached_tokens": false,
+          "gpu_before_mib": 5,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs2_r2",
+          "rep_index": 2,
+          "status": "ok",
+          "secs": 97.3,
+          "n_waves": 5,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 5,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 63092,
+            "utilization_pct": 0
+          },
+          "state_sig": "517a07080a8b6e76",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "quarantined",
+          "fingerprint_delta_vs_consensus": {
+            "n_keys": 4,
+            "keys": [
+              {
+                "key": "w2_conv",
+                "entries_differ": 32,
+                "entries_total": 60,
+                "frac": 0.533333
+              },
+              {
+                "key": "w2_k",
+                "entries_differ": 470,
+                "entries_total": 20480,
+                "frac": 0.022949
+              },
+              {
+                "key": "w2_rec",
+                "entries_differ": 33,
+                "entries_total": 60,
+                "frac": 0.55
+              },
+              {
+                "key": "w2_v",
+                "entries_differ": 470,
+                "entries_total": 20480,
+                "frac": 0.022949
+              }
+            ],
+            "waves_touched": [
+              "w2"
+            ]
+          },
+          "divergence_reached_tokens": false,
+          "gpu_before_mib": 5,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs2_r3",
+          "rep_index": 3,
+          "status": "ok",
+          "secs": 86.8,
+          "n_waves": 5,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 25689,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 63091,
+            "utilization_pct": 0
+          },
+          "state_sig": "0449b5655fa57c9b",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 25689,
+          "mib_above_foreign_floor": 25684,
+          "device_not_clean_at_start": true
+        },
+        {
+          "tag": "bs2_r4",
+          "rep_index": 4,
+          "status": "ok",
+          "secs": 92.9,
+          "n_waves": 5,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 25689,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 63091,
+            "utilization_pct": 0
+          },
+          "state_sig": "0449b5655fa57c9b",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 25689,
+          "mib_above_foreign_floor": 25684,
+          "device_not_clean_at_start": true
+        },
+        {
+          "tag": "bs2_r5",
+          "rep_index": 5,
+          "status": "ok",
+          "secs": 88.9,
+          "n_waves": 5,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 25689,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 63092,
+            "utilization_pct": 0
+          },
+          "state_sig": "0449b5655fa57c9b",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 25689,
+          "mib_above_foreign_floor": 25684,
+          "device_not_clean_at_start": true
+        }
+      ]
+    },
+    "4": {
+      "verdict": "STABLE",
+      "reps_required": 3,
+      "reps_launched": 3,
+      "reps_scored": 3,
+      "accepted": 3,
+      "quarantined": 0,
+      "errors": 0,
+      "reps_needed_to_reach_verdict": 3,
+      "divergence_rate": 0.0,
+      "consensus_state_signature": "68e7a9fb004338df",
+      "distinct_state_signatures": 1,
+      "all_reps_tokens_identical_to_baseline": true,
+      "accepted_reps_tokens_identical_to_baseline": true,
+      "quarantined_token_reaching": 0,
+      "quarantined_state_only": 0,
+      "foreign_floor_mib": 25689,
+      "reps_starting_on_a_non_clean_device": 0,
+      "reps": [
+        {
+          "tag": "bs4_r1",
+          "rep_index": 1,
+          "status": "ok",
+          "secs": 85.8,
+          "n_waves": 3,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 25689,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 63931,
+            "utilization_pct": 0
+          },
+          "state_sig": "68e7a9fb004338df",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 25689,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs4_r2",
+          "rep_index": 2,
+          "status": "ok",
+          "secs": 88.7,
+          "n_waves": 3,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 25689,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 63931,
+            "utilization_pct": 2
+          },
+          "state_sig": "68e7a9fb004338df",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 25689,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs4_r3",
+          "rep_index": 3,
+          "status": "ok",
+          "secs": 94.3,
+          "n_waves": 3,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 25689,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 63932,
+            "utilization_pct": 0
+          },
+          "state_sig": "68e7a9fb004338df",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 25689,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        }
+      ]
+    },
+    "8": {
+      "verdict": "STABLE",
+      "reps_required": 3,
+      "reps_launched": 3,
+      "reps_scored": 3,
+      "accepted": 3,
+      "quarantined": 0,
+      "errors": 0,
+      "reps_needed_to_reach_verdict": 3,
+      "divergence_rate": 0.0,
+      "consensus_state_signature": "1e305b6d61e9e263",
+      "distinct_state_signatures": 1,
+      "all_reps_tokens_identical_to_baseline": true,
+      "accepted_reps_tokens_identical_to_baseline": true,
+      "quarantined_token_reaching": 0,
+      "quarantined_state_only": 0,
+      "foreign_floor_mib": 25689,
+      "reps_starting_on_a_non_clean_device": 0,
+      "reps": [
+        {
+          "tag": "bs8_r1",
+          "rep_index": 1,
+          "status": "ok",
+          "secs": 91.9,
+          "n_waves": 2,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 25689,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 65734,
+            "utilization_pct": 0
+          },
+          "state_sig": "1e305b6d61e9e263",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 25689,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs8_r2",
+          "rep_index": 2,
+          "status": "ok",
+          "secs": 79.7,
+          "n_waves": 2,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 25689,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 65733,
+            "utilization_pct": 0
+          },
+          "state_sig": "1e305b6d61e9e263",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 25689,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs8_r3",
+          "rep_index": 3,
+          "status": "ok",
+          "secs": 76.6,
+          "n_waves": 2,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 25689,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 66361,
+            "utilization_pct": 0
+          },
+          "state_sig": "1e305b6d61e9e263",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 25689,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        }
+      ]
+    },
+    "16": {
+      "verdict": "STABLE",
+      "reps_required": 3,
+      "reps_launched": 3,
+      "reps_scored": 3,
+      "accepted": 3,
+      "quarantined": 0,
+      "errors": 0,
+      "reps_needed_to_reach_verdict": 3,
+      "divergence_rate": 0.0,
+      "consensus_state_signature": "c91b76a10b2430eb",
+      "distinct_state_signatures": 1,
+      "all_reps_tokens_identical_to_baseline": true,
+      "accepted_reps_tokens_identical_to_baseline": true,
+      "quarantined_token_reaching": 0,
+      "quarantined_state_only": 0,
+      "foreign_floor_mib": 25689,
+      "reps_starting_on_a_non_clean_device": 0,
+      "reps": [
+        {
+          "tag": "bs16_r1",
+          "rep_index": 1,
+          "status": "ok",
+          "secs": 95.7,
+          "n_waves": 1,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 26317,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 69336,
+            "utilization_pct": 1
+          },
+          "state_sig": "c91b76a10b2430eb",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 26317,
+          "mib_above_foreign_floor": 628,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs16_r2",
+          "rep_index": 2,
+          "status": "ok",
+          "secs": 89.6,
+          "n_waves": 1,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 25690,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 69335,
+            "utilization_pct": 100
+          },
+          "state_sig": "c91b76a10b2430eb",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 25690,
+          "mib_above_foreign_floor": 1,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs16_r3",
+          "rep_index": 3,
+          "status": "ok",
+          "secs": 71.7,
+          "n_waves": 1,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "1",
+            "uuid": "e8754e6d-624e-e1d0-595a-f9444588960a",
+            "phys_index": 1,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 25689,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 69335,
+            "utilization_pct": 50
+          },
+          "state_sig": "c91b76a10b2430eb",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 25689,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        }
+      ]
+    }
+  },
+  "totals": {
+    "reps_launched": 17,
+    "reps_scored": 17,
+    "accepted": 15,
+    "quarantined": 2,
+    "run_errors": 0,
+    "token_mismatch_reps": 0,
+    "fingerprint_divergence_rate": 0.1176,
+    "token_divergence_rate": 0.0,
+    "quarantined_token_reaching": 0,
+    "quarantined_state_only": 2,
+    "fraction_of_divergences_reaching_tokens": 0.0,
+    "physical_gpus_used": [
+      1
+    ],
+    "reps_starting_on_a_non_clean_device": 3
+  },
+  "verdict": "STABLE",
+  "run": {
+    "driver": "gate_ac3_stable.sh",
+    "started_utc": "2026-07-29T05:58:25Z",
+    "host": "catalyst-fleet1.cs.cmu.edu",
+    "git_sha": "fa24a4215860ce771a0ec3c0dc7246fcbe26695d",
+    "git_dirty": true,
+    "cuda_visible_devices_claim": "1",
+    "gpu_floor_mib": 5,
+    "reps_required": 3,
+    "max_extra": 3,
+    "batch_sizes": "1,2,4,8,16",
+    "per_request_token_cap": "none",
+    "baseline": "/home/muhengl/mpk-qwen35/mirage-m4i0/demo/qwen3_5/accept/results/dumps_final",
+    "gate_py_sha256": "c3ce3e1774daa2cda30c9728906d5d65a6b23c17e0cd3e02f832a94330c1287a",
+    "gate_sh_sha256": "d29b1757512d1bd56caa0e06dc6483a1f86830aad9a7bfcaeb79488637c90adb"
+  },
+  "assertion": "AC-3 STABLE: at bs {1,2,4,8,16}, 3 independent COLD reps per bs are mutually bit-identical in KV/GDN state AND byte-identical to results/dumps_final per case; fingerprint divergence rate 11.8% of scored reps, all divergent reps quarantined, re-run and retained in the record."
+}
