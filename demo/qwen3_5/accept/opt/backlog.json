@@ -308,5 +308,8 @@
   },
   "assertion": "every lever in `levers` carries one of integrated / rejected-with-evidence / blocked-with-reason with its evidence; asserted by opt/m3i7/scripts/close_backlog.py at generation time",
   "n_new_levers_registered": 5
+ },
+ "m4_ranking_notes": {
+  "ranking_correction_20260729": "M3 milestone review (first-principles) corrected the residual ranking: AC-4 measures STEADY-STATE DECODE throughput, so the decode-gap ranking governs it \u2014 MoE w13 (6.96x bs1), dense fp8 (2.07x, most batch-independent), MoE w2 (4.37x), MoE router (5.70x, regressed), graph width (why MPK is 2.25-2.79x off e2e while winning every fused stage). PREFILL IS AN AC-5 LEVER, NOT THE LEADING AC-4 ROUTE: extending the admission cap to bs4/bs8 (+3.9%/+14.0% e2e, AC-3 byte-identical) is the cheapest first AC-5 action and reduces the e2e ratio, but it does not move decode tok/s. The two tracks are now ranked SEPARATELY in the M4 plan."
  }
 }
