@@ -38,7 +38,16 @@ M4-I0, not closed here.
 
 Three geometries, because they answer three different questions. Medians over 3 reps, full
 range quoted, per-rep values in `tables/perf_raw.json`. Every rep's device state was audited
-before the run; none were discarded.
+before the run against the foreign floor the guard recorded at claim time.
+
+**Discarded reps.** Three, all in the prefill-only arm, all rep 0 of their config: bs1
+(9364 MiB resident at start), bs4 (1866 MiB), bs16 (1061 MiB) against a 1032 MiB limit. Those
+prefill medians are therefore n=2, not n=3; the full-run arm is n=3 everywhere. The effect is
+small and in the conservative direction — bs1's discarded rep read 325.7 ms against the 322.1
+ms median, which moves the decode slope by 0.04 % — but it is below the pinned ≥3-rep rule and
+is called out rather than averaged in. bs16's full-run arm also has a 6.19 % range (one rep at
+16111 ms against 15169/15217); its median is the lower cluster and the cap A/B in §2c, which
+was captured in a separate window, reproduces it at 15210 ms.
 
 ### 2a. AC-3 geometry, M3-I1's exact shape — how far M3 moved
 
