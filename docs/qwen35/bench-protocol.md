@@ -472,3 +472,34 @@ Prompts must come from `--reference` (via `opt/m3i7/scripts/make_matched_referen
 uses the pinned baseline sampler and seed). **`--prompts-file` is not a prompt source** — it is
 read only under `--verify-chat-template` (`mpk_engine_run.py:678`). A run that passes
 `--prompts-file` alongside `--reference` silently measures the reference set.
+
+## M4 gate policy — coordinator decision (2026-07-29, on M4-I0's 100-rep campaign)
+
+The gate builder measured 4.17% fingerprint divergence / 2.08% token divergence over 100 cold
+reps on 5 devices and asked for a ruling on one design point. **DECISION: keep the STRICT
+form** — token identity is required of EVERY rep, not only of the reps that survive
+fingerprint quarantine.
+
+Why the strict form, stated so it can be argued with: scoping token-identity to accepted reps
+would let a token-divergent rep be quarantined and discarded, which is indistinguishable from
+how a real correctness bug would be hidden. The campaign makes that concrete — 2 of the 4
+divergences DID reach the tokens (sub-argmax divergence is REFUTED as a general rule), and
+gateC's two divergences emitted a token md5 IDENTICAL to baseline, so a token-scored gate
+calls a diverged trajectory clean. A gate that can be quieted by re-running is not a gate.
+
+The cost of strictness is a ~2% false-FAIL rate on a prone device. That is paid with a
+documented, bounded re-run policy rather than by weakening the assertion:
+
+1. **Pre-flight**: before the acceptance run, probe the candidate device (>=3 cold reps at
+   bs1); a device that diverges is not used. Device-proneness is device STATE, not identity
+   (protocol v2), so this is per-run, not a certification.
+2. **Strict scoring**: every rep must be token-identical per case AND all reps mutually
+   fingerprint-identical. Any token divergence = FAIL, investigated, never re-rolled away.
+3. **Bounded device-level re-runs**: at most 2 documented re-runs on a fresh device if a run
+   fails on FINGERPRINT divergence alone (never on token divergence). Every attempt, its
+   device, and the divergence rate appear in the final artifact.
+4. **Pinned consensus fingerprint**: the per-bs consensus fingerprint was identical across all
+   5 devices, so M4 pins it as an integrity input rather than majority-voting per run.
+5. **The honest claim** the gate may make: "at every bs, N independent cold reps were
+   bit-identical in state and byte-identical to dumps_final per case; divergence rate X%,
+   divergent reps quarantined and re-run." It may NOT claim a single cold run is reproducible.
