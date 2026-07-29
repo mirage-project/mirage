@@ -1,0 +1,21 @@
+{
+  "gate": "demo/qwen3_5/accept/final.sh",
+  "started_utc": "2026-07-29T12:33:36Z",
+  "host": "c762a55b7155",
+  "run_mode": "remote",
+  "remote_host": "catalyst-B200",
+  "git_sha": "c1d09a9692adbe2fb213372d66439ca23ebe8a9f",
+  "repo": "/tmp/claude-1006/-home-catalyst-agent/d305d170-45e6-4ad6-b21b-823f6f637deb/scratchpad/clean",
+  "agent_root": "/home/catalyst/agent",
+  "stages": "integrity,ac3,perf,report",
+  "reps": 3,
+  "batch_sizes": "1",
+  "workload": {"input_len": 256, "output_len": 1024},
+  "e2e_factor_max": 1.25,
+  "correct_new_tokens": 64,
+  "baseline_dir": "/tmp/claude-1006/-home-catalyst-agent/d305d170-45e6-4ad6-b21b-823f6f637deb/scratchpad/clean/demo/qwen3_5/accept/baselines/vllm-0.25.1-20260725",
+  "run_dir": "/tmp/claude-1006/-home-catalyst-agent/d305d170-45e6-4ad6-b21b-823f6f637deb/scratchpad/run",
+  "no_collect": 1,
+  "skip_hf": 0,
+  "non_binding": 1
+}

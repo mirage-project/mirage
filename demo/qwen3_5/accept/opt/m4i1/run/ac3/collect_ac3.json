@@ -1,0 +1,19 @@
+{
+  "stage": "ac3",
+  "ok": true,
+  "utc": "2026-07-29T12:31:26Z",
+  "gate_rc": 0,
+  "hf_score_rc": 0,
+  "reps_with_dump": 3,
+  "device_chosen": "5",
+  "preflight_attempts": [
+    {
+      "attempt": 1,
+      "candidates": "6,5,2",
+      "device": "5",
+      "rc": 0,
+      "verdict": "STABLE",
+      "fingerprint_divergence_rate": "0.0"
+    }
+  ]
+}

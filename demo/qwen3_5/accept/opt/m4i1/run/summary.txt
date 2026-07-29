@@ -1,0 +1,39 @@
+==============================================================================
+MPK Qwen3.5-35B-A3B-FP8 FINAL GATE -- FAIL (exit 1)
+  utc=2026-07-29T12:33:36Z  sha=c1d09a9692adbe2fb213372d66439ca23ebe8a9f  host=c762a55b7155  mode=remote
+  stages=integrity,ac3,perf,report  binding=False
+==============================================================================
+  integrity  PASS
+  AC-3       PASS
+  AC-4       FAIL
+  AC-5       FAIL
+
+  AC-4/AC-5 per batch size (mpk vs FRESH vLLM, pinned 256/1024):
+     bs  mpk tok/s  vllm tok/s   ratio          AC-4  mpk e2e s  vllm e2e s      x          AC-5
+      1      102.4       289.0   0.354          FAIL      10.28        3.56   2.89          FAIL
+         mpk full per-rep wall ms [10274.2, 10281.3, 10279.1] D=[1023] n=3 range=0.07%
+         mpk pre  per-rep wall ms [310.4, 310.2, 311.2] D=[2] n=3 range=0.33%
+         vllm fresh per-rep tok/s [289.1, 289.0, 288.9] e2e [3.557, 3.559, 3.559]
+         drift(decode): merged median 287.25935873660944 n=6 IQR/med=1.1949383068051058 boot-dev=0.6087858737743488 valid=True
+
+  AC-3 (re-pinned: coherence + >=90% agreement floor + no silent degradation):
+    bs=1   PASS           reps scored 3 errors 0
+         bs1_r1       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs1_r2       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs1_r3       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+    AC-3(c): 30/30 cases byte-identical to dumps_final; degraded 0, unexplained 0
+    stability diagnostic: STABLE fingerprint divergence 0.0 token divergence 0.0
+
+RESULT bs=1 AC3=PASS AC4=FAIL mpk_decode_tok_s=102.4 vllm_decode_tok_s=289.0 decode_ratio=0.354 AC5=FAIL mpk_e2e_s=10.279 vllm_e2e_s=3.559 e2e_ratio=2.888 e2e_ratio_max=1.25
+
+  FAILURES
+    - perf: AC-4 bs1: mpk decode tok/s STRICTLY GREATER than vLLM: {"mpk_decode_tok_s": 102.42070357782534, "vllm_decode_tok_s": 289.00704006743774, "ratio_mpk_over_vllm": 0.3543882652613798, "vllm_pinned_cross_check": 285.5105643395262}
+    - perf: AC-5 bs1: mpk e2e <= 1.25x vLLM e2e: {"mpk_e2e_s": 10.2791181640625, "vllm_e2e_s": 3.5587271590484306, "ratio_mpk_over_vllm": 2.8884254691812443, "max_ratio": 1.25, "vllm_pinned_cross_check": 3.601619330991525}
+
+  HONEST CLAIM
+    NON-BINDING RUN -- not an AC-6 result.
+    The gate is FAIL: perf: AC-4 bs1: mpk decode tok/s STRICTLY GREATER than vLLM: {"mpk_decode_tok_s": 102.42070357782534, "vllm_decode_tok_s": 289.00704006743774, "ratio_mpk_over_vllm": 0.3543882652613798, "vllm_pinned_cross_check": 285.5105643395262}; perf: AC-5 bs1: mpk e2e <= 1.25x vLLM e2e: {"mpk_e2e_s": 10.2791181640625, "vllm_e2e_s": 3.5587271590484306, "ratio_mpk_over_vllm": 2.8884254691812443, "max_ratio": 1.25, "vllm_pinned_cross_check": 3.601619330991525}
+    AC-3(c) diagnostic: 30/30 cases byte-identical to results/dumps_final, 0 degraded (0 unexplained); cold-rep fingerprint divergence 0.0 of scored reps. No claim is made that a single cold run is reproducible.
+
+  machine-readable report: /tmp/claude-1006/-home-catalyst-agent/d305d170-45e6-4ad6-b21b-823f6f637deb/scratchpad/run/report.json
+==============================================================================

@@ -1,0 +1,240 @@
+{
+  "schema": "final/coherence_inputs/v1",
+  "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+  "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+  "loaded_via": "AutoModelForCausalLM",
+  "tokenizer_vocab_len": 248077,
+  "utc": "2026-07-29T12:31:08Z",
+  "reps_root": "/home/muhengl/mpk-qwen35/final-gate/run-m4i1-proof/ac3/sweep/reps",
+  "definition": "teacher-forced continuation perplexity given the reference input_ids; log-softmax in float32",
+  "reference": {
+    "p01-history": {
+      "n": 64,
+      "nll_sum": 3.6168105602264404,
+      "ppl": 1.0581400394439697,
+      "token_ids_sha256": "d1b6c232f189b0f1c5ffc93de3aa8ce2ce5ea1385a7ae4e6f050f50f71d19cb4",
+      "text": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: Why the Roman Empire split into Eastern and Western halves.\n    *   Constraint: Three concise paragraphs.\n    *   Goal: Explain the reasons clearly and briefly.\n\n2.  **Identify Key Reasons for the"
+    },
+    "p02-math": {
+      "n": 64,
+      "nll_sum": 3.9313995838165283,
+      "ppl": 1.0633540153503418,
+      "token_ids_sha256": "4a53cc0750c8022c4fcdf210571942541face789fefad7c7e8da2d978a378e5f",
+      "text": "Here's a thinking process that leads to the solution:\n\n1.  **Understand the Goal:** The objective is to find the specific time when two trains, starting from different stations at different times and moving towards each other, meet.\n\n2.  **Identify the Given Information:**\n    *   **"
+    },
+    "p03-python": {
+      "n": 64,
+      "nll_sum": 6.847495079040527,
+      "ppl": 1.1129255294799805,
+      "token_ids_sha256": "bf7637e7a622b61996cf4030862a2b71e0edadb38e184068e7ecf539d48fffaf",
+      "text": "The user wants a Python function that finds the longest palindromic substring in O(n^2) time. There are several approaches to this:\n\n1. Expand around center - O(n^2) time, O(1) space\n2. Dynamic programming - O(n^2) time, O(n"
+    },
+    "p04-chinese": {
+      "n": 64,
+      "nll_sum": 3.5706491470336914,
+      "ppl": 1.0573770999908447,
+      "token_ids_sha256": "00cae98d29c4125985bc796314fc2681b17945e138530d974c93a364ddd98956",
+      "text": "Here's a thinking process that leads to the explanation of Mixture of Experts (MoE) and its cost-saving benefits:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** Mixture of Experts (MoE) / \u6df7\u5408\u4e13\u5bb6\u6a21\u578b.\n    *   **Language:** Chinese"
+    },
+    "p05-cuda": {
+      "n": 64,
+      "nll_sum": 6.005431175231934,
+      "ppl": 1.098378300666809,
+      "token_ids_sha256": "f7c1ff1dfcf834576985f0327c5252084cf1012b77c8c50a4eb899834be068d6",
+      "text": "Here's a thinking process that leads to the explanation of CUDA shared memory vs. registers and the example:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** CUDA Memory Hierarchy (specifically Shared Memory vs. Registers).\n    *   **Task 1:** Explain the differences ("
+    },
+    "p06-poem": {
+      "n": 64,
+      "nll_sum": 8.609905242919922,
+      "ppl": 1.1439987421035767,
+      "token_ids_sha256": "860590ba61235f32e25f7088fe12c6900d6ccde8a0c8b8999e9f01fda22491f6",
+      "text": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: A GPU (Graphics Processing Unit) dreaming of the ocean.\n    *   Format: Six-line poem.\n    *   Tone: Imaginative, perhaps slightly melancholic or wistful (machine vs. nature"
+    },
+    "p07-format": {
+      "n": 64,
+      "nll_sum": 1.3950159549713135,
+      "ppl": 1.0220364332199097,
+      "token_ids_sha256": "b8bf88db5d650619c4f0862dfecbeddb88d7ba9a371dbe5262c7abbe709e31e9",
+      "text": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Task: List the planets of the solar system.\n    *   Order: From the Sun (closest to farthest).\n    *   Format: Numbered list.\n    *   Content: Each planet must have one distinguishing"
+    },
+    "p08-science": {
+      "n": 64,
+      "nll_sum": 3.8887150287628174,
+      "ppl": 1.0626450777053833,
+      "token_ids_sha256": "a1331dd4aa2fb2e4671f69a020e5cafdf48730aef6ea725138b4e46de234ec31",
+      "text": "Here's a thinking process that leads to the suggested answer:\n\n1.  **Analyze the Request:**\n    *   **Core Question:** What is the difference between nuclear fission and fusion?\n    *   **Specific Question 1:** Which one powers the Sun?\n    *   **Specific Question"
+    },
+    "p09-translate": {
+      "n": 64,
+      "nll_sum": 2.9205634593963623,
+      "ppl": 1.0466910600662231,
+      "token_ids_sha256": "144d3cd5f4ed30bde7a2a8c58da6d2700f552fb1840790f26fda2efd9bfa5e42",
+      "text": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Source sentence: \"The quick brown fox jumps over the lazy dog\" (a famous pangram).\n    *   Target languages: French, German, Japanese.\n    *   Task: Translate the sentence into these three languages."
+    },
+    "p10-logic": {
+      "n": 64,
+      "nll_sum": 4.385723114013672,
+      "ppl": 1.0709294080734253,
+      "token_ids_sha256": "8431014e450af2c867fd1b988bb0c7a72849f63fadb303ea1df5a6df417afaab",
+      "text": "Here's a thinking process that leads to the solution:\n\n1.  **Analyze the Problem:**\n    *   **Items:** 8 identical-looking balls.\n    *   **Condition:** One ball is heavier than the others (all others are equal weight).\n    *   **Tool:** A balance"
+    }
+  },
+  "engine": [
+    {
+      "batch_size": 1,
+      "prompt_id": "p01-history",
+      "token_ids_sha256": "d1b6c232f189b0f1c5ffc93de3aa8ce2ce5ea1385a7ae4e6f050f50f71d19cb4",
+      "reps": [
+        "bs1_r1",
+        "bs1_r2",
+        "bs1_r3"
+      ],
+      "n": 64,
+      "nll_sum": 3.6168105602264404,
+      "ppl": 1.0581400394439697,
+      "invalid_token_ids": [],
+      "text": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: Why the Roman Empire split into Eastern and Western halves.\n    *   Constraint: Three concise paragraphs.\n    *   Goal: Explain the reasons clearly and briefly.\n\n2.  **Identify Key Reasons for the"
+    },
+    {
+      "batch_size": 1,
+      "prompt_id": "p02-math",
+      "token_ids_sha256": "4a53cc0750c8022c4fcdf210571942541face789fefad7c7e8da2d978a378e5f",
+      "reps": [
+        "bs1_r1",
+        "bs1_r2",
+        "bs1_r3"
+      ],
+      "n": 64,
+      "nll_sum": 3.9313995838165283,
+      "ppl": 1.0633540153503418,
+      "invalid_token_ids": [],
+      "text": "Here's a thinking process that leads to the solution:\n\n1.  **Understand the Goal:** The objective is to find the specific time when two trains, starting from different stations at different times and moving towards each other, meet.\n\n2.  **Identify the Given Information:**\n    *   **"
+    },
+    {
+      "batch_size": 1,
+      "prompt_id": "p03-python",
+      "token_ids_sha256": "bf7637e7a622b61996cf4030862a2b71e0edadb38e184068e7ecf539d48fffaf",
+      "reps": [
+        "bs1_r1",
+        "bs1_r2",
+        "bs1_r3"
+      ],
+      "n": 64,
+      "nll_sum": 6.847495079040527,
+      "ppl": 1.1129255294799805,
+      "invalid_token_ids": [],
+      "text": "The user wants a Python function that finds the longest palindromic substring in O(n^2) time. There are several approaches to this:\n\n1. Expand around center - O(n^2) time, O(1) space\n2. Dynamic programming - O(n^2) time, O(n"
+    },
+    {
+      "batch_size": 1,
+      "prompt_id": "p04-chinese",
+      "token_ids_sha256": "00cae98d29c4125985bc796314fc2681b17945e138530d974c93a364ddd98956",
+      "reps": [
+        "bs1_r1",
+        "bs1_r2",
+        "bs1_r3"
+      ],
+      "n": 64,
+      "nll_sum": 3.5706491470336914,
+      "ppl": 1.0573770999908447,
+      "invalid_token_ids": [],
+      "text": "Here's a thinking process that leads to the explanation of Mixture of Experts (MoE) and its cost-saving benefits:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** Mixture of Experts (MoE) / \u6df7\u5408\u4e13\u5bb6\u6a21\u578b.\n    *   **Language:** Chinese"
+    },
+    {
+      "batch_size": 1,
+      "prompt_id": "p05-cuda",
+      "token_ids_sha256": "f7c1ff1dfcf834576985f0327c5252084cf1012b77c8c50a4eb899834be068d6",
+      "reps": [
+        "bs1_r1",
+        "bs1_r2",
+        "bs1_r3"
+      ],
+      "n": 64,
+      "nll_sum": 6.005431175231934,
+      "ppl": 1.098378300666809,
+      "invalid_token_ids": [],
+      "text": "Here's a thinking process that leads to the explanation of CUDA shared memory vs. registers and the example:\n\n1.  **Deconstruct the Request:**\n    *   **Topic:** CUDA Memory Hierarchy (specifically Shared Memory vs. Registers).\n    *   **Task 1:** Explain the differences ("
+    },
+    {
+      "batch_size": 1,
+      "prompt_id": "p06-poem",
+      "token_ids_sha256": "78e6bd637fdba740c1a22f8575eb2f27fc8824dbaf4c2e4aa74b161a2bf3d0bf",
+      "reps": [
+        "bs1_r1",
+        "bs1_r2",
+        "bs1_r3"
+      ],
+      "n": 64,
+      "nll_sum": 7.544384956359863,
+      "ppl": 1.1251102685928345,
+      "invalid_token_ids": [],
+      "text": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: A GPU (Graphics Processing Unit) dreaming of the ocean.\n    *   Format: Six-line poem.\n    *   Tone: Imaginative, perhaps slightly melancholic or wistful (given the contrast between"
+    },
+    {
+      "batch_size": 1,
+      "prompt_id": "p07-format",
+      "token_ids_sha256": "b8bf88db5d650619c4f0862dfecbeddb88d7ba9a371dbe5262c7abbe709e31e9",
+      "reps": [
+        "bs1_r1",
+        "bs1_r2",
+        "bs1_r3"
+      ],
+      "n": 64,
+      "nll_sum": 1.3950159549713135,
+      "ppl": 1.0220364332199097,
+      "invalid_token_ids": [],
+      "text": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Task: List the planets of the solar system.\n    *   Order: From the Sun (closest to farthest).\n    *   Format: Numbered list.\n    *   Content: Each planet must have one distinguishing"
+    },
+    {
+      "batch_size": 1,
+      "prompt_id": "p08-science",
+      "token_ids_sha256": "a1331dd4aa2fb2e4671f69a020e5cafdf48730aef6ea725138b4e46de234ec31",
+      "reps": [
+        "bs1_r1",
+        "bs1_r2",
+        "bs1_r3"
+      ],
+      "n": 64,
+      "nll_sum": 3.8887150287628174,
+      "ppl": 1.0626450777053833,
+      "invalid_token_ids": [],
+      "text": "Here's a thinking process that leads to the suggested answer:\n\n1.  **Analyze the Request:**\n    *   **Core Question:** What is the difference between nuclear fission and fusion?\n    *   **Specific Question 1:** Which one powers the Sun?\n    *   **Specific Question"
+    },
+    {
+      "batch_size": 1,
+      "prompt_id": "p09-translate",
+      "token_ids_sha256": "144d3cd5f4ed30bde7a2a8c58da6d2700f552fb1840790f26fda2efd9bfa5e42",
+      "reps": [
+        "bs1_r1",
+        "bs1_r2",
+        "bs1_r3"
+      ],
+      "n": 64,
+      "nll_sum": 2.9205634593963623,
+      "ppl": 1.0466910600662231,
+      "invalid_token_ids": [],
+      "text": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Source sentence: \"The quick brown fox jumps over the lazy dog\" (a famous pangram).\n    *   Target languages: French, German, Japanese.\n    *   Task: Translate the sentence into these three languages."
+    },
+    {
+      "batch_size": 1,
+      "prompt_id": "p10-logic",
+      "token_ids_sha256": "8431014e450af2c867fd1b988bb0c7a72849f63fadb303ea1df5a6df417afaab",
+      "reps": [
+        "bs1_r1",
+        "bs1_r2",
+        "bs1_r3"
+      ],
+      "n": 64,
+      "nll_sum": 4.385723114013672,
+      "ppl": 1.0709294080734253,
+      "invalid_token_ids": [],
+      "text": "Here's a thinking process that leads to the solution:\n\n1.  **Analyze the Problem:**\n    *   **Items:** 8 identical-looking balls.\n    *   **Condition:** One ball is heavier than the others (all others are equal weight).\n    *   **Tool:** A balance"
+    }
+  ],
+  "git_sha": "01a54ad988d1f6c5006fe30de0d76ea961e3d243",
+  "device": {
+    "name": "NVIDIA B200",
+    "uuid": "087b0f09-0d22-7908-e4cb-bb49fd81a455",
+    "cuda_visible_devices": "5"
+  }
+}

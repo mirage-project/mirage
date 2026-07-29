@@ -1,0 +1,117 @@
+{
+  "schema": "final/perf_audit/v1",
+  "device": {
+    "cuda_visible_devices": "3",
+    "uuid": "51c31609-c1ae-1fa6-14b9-da2a172ffd67",
+    "phys_index": 3,
+    "name": "NVIDIA B200"
+  },
+  "foreign_floor_mib": 131,
+  "foreign_floor_definition": "the quietest pre-run sample observed on the pinned device in THIS session (harness/gate_ac3_stable.py's method)",
+  "admission_policy": {
+    "cap_mode": "auto",
+    "cap_min_batch_size": 4,
+    "per_bs": {
+      "1": null,
+      "2": null,
+      "4": "auto",
+      "8": "auto",
+      "16": "auto"
+    },
+    "authority": "demo/qwen3_5/accept/admission_policy.py"
+  },
+  "cap_define_by_cell": {
+    "full_bs1_rep0": "",
+    "full_bs1_rep1": "",
+    "full_bs1_rep2": "",
+    "pre_bs1_rep0": "",
+    "pre_bs1_rep1": "",
+    "pre_bs1_rep2": ""
+  },
+  "cells": {
+    "full_bs1_rep0": {
+      "tag": "full_bs1_rep0",
+      "arm": "full",
+      "bs": 1,
+      "rep": 0,
+      "status": "ok",
+      "rc": 0,
+      "gpu_index": 3,
+      "gpu_before_mib": 131,
+      "gpu_after_mib": 131,
+      "kernel_dir": "/home/muhengl/mpk-qwen35/final-gate/run-m4i1-proof/perf/mpk/kernels/full_bs1",
+      "cap_define": "",
+      "cap_flag": ""
+    },
+    "full_bs1_rep1": {
+      "tag": "full_bs1_rep1",
+      "arm": "full",
+      "bs": 1,
+      "rep": 1,
+      "status": "ok",
+      "rc": 0,
+      "gpu_index": 3,
+      "gpu_before_mib": 131,
+      "gpu_after_mib": 131,
+      "kernel_dir": "/home/muhengl/mpk-qwen35/final-gate/run-m4i1-proof/perf/mpk/kernels/full_bs1",
+      "cap_define": "",
+      "cap_flag": ""
+    },
+    "full_bs1_rep2": {
+      "tag": "full_bs1_rep2",
+      "arm": "full",
+      "bs": 1,
+      "rep": 2,
+      "status": "ok",
+      "rc": 0,
+      "gpu_index": 3,
+      "gpu_before_mib": 131,
+      "gpu_after_mib": 131,
+      "kernel_dir": "/home/muhengl/mpk-qwen35/final-gate/run-m4i1-proof/perf/mpk/kernels/full_bs1",
+      "cap_define": "",
+      "cap_flag": ""
+    },
+    "pre_bs1_rep0": {
+      "tag": "pre_bs1_rep0",
+      "arm": "pre",
+      "bs": 1,
+      "rep": 0,
+      "status": "ok",
+      "rc": 0,
+      "gpu_index": 3,
+      "gpu_before_mib": 131,
+      "gpu_after_mib": 153,
+      "kernel_dir": "/home/muhengl/mpk-qwen35/final-gate/run-m4i1-proof/perf/mpk/kernels/pre_bs1",
+      "cap_define": "",
+      "cap_flag": ""
+    },
+    "pre_bs1_rep1": {
+      "tag": "pre_bs1_rep1",
+      "arm": "pre",
+      "bs": 1,
+      "rep": 1,
+      "status": "ok",
+      "rc": 0,
+      "gpu_index": 3,
+      "gpu_before_mib": 131,
+      "gpu_after_mib": 131,
+      "kernel_dir": "/home/muhengl/mpk-qwen35/final-gate/run-m4i1-proof/perf/mpk/kernels/pre_bs1",
+      "cap_define": "",
+      "cap_flag": ""
+    },
+    "pre_bs1_rep2": {
+      "tag": "pre_bs1_rep2",
+      "arm": "pre",
+      "bs": 1,
+      "rep": 2,
+      "status": "ok",
+      "rc": 0,
+      "gpu_index": 3,
+      "gpu_before_mib": 131,
+      "gpu_after_mib": 131,
+      "kernel_dir": "/home/muhengl/mpk-qwen35/final-gate/run-m4i1-proof/perf/mpk/kernels/pre_bs1",
+      "cap_define": "",
+      "cap_flag": ""
+    }
+  }
+}

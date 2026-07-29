@@ -1,0 +1,253 @@
+{
+  "schema": "final/integrity/v1",
+  "generated_utc": "2026-07-29T11:54:13Z",
+  "binding": true,
+  "violations": [],
+  "notes": [],
+  "recorded": {
+    "pinned_contract": {
+      "MODEL_ID": "Qwen/Qwen3.5-35B-A3B-FP8",
+      "BATCH_SIZES": "1 2 4 8 16",
+      "PROMPTS": ".pm/eval/prompts.jsonl",
+      "PROMPTS_SHA": "5acabf2080332528ef606d5c627973791e848058f7a0f39c4a306f11716bb31b",
+      "CORRECT_NEW_TOKENS": 64,
+      "MIN_INPUT_LEN": 64,
+      "MIN_OUTPUT_LEN": 256,
+      "E2E_FACTOR_MAX": 1.25,
+      "BASELINE": "vllm",
+      "HARNESS": "workspace/demo/qwen3_5/accept/final.sh"
+    },
+    "pm_file_sha256": {
+      ".pm/goal.md": "56320eeeac2c6fdd8a73703264201e8f9c804a4c30351e97d34b816e6cba31c3",
+      ".pm/accept.sh": "76615ea8ad29413c69e6f1cda528d594fe1686cbe375a41c6756c13f401886d9",
+      ".pm/immutable": "32a01cc59895d8e803b5654b3d676b8ed7df88ed7cf1d5af81e61885f5e17d55"
+    },
+    "prompts": {
+      "path": "/home/catalyst/agent/.pm/eval/prompts.jsonl",
+      "sha256": "5acabf2080332528ef606d5c627973791e848058f7a0f39c4a306f11716bb31b",
+      "expected": "5acabf2080332528ef606d5c627973791e848058f7a0f39c4a306f11716bb31b",
+      "ids": [
+        "p01-history",
+        "p02-math",
+        "p03-python",
+        "p04-chinese",
+        "p05-cuda",
+        "p06-poem",
+        "p07-format",
+        "p08-science",
+        "p09-translate",
+        "p10-logic"
+      ]
+    },
+    "pinned_bench_constants": {
+      "BINDING_INPUT_LEN": 256,
+      "BINDING_OUTPUT_LEN": 1024,
+      "BINDING_BATCH_SIZES": [
+        1,
+        2,
+        4,
+        8,
+        16
+      ],
+      "BINDING_MIN_REPS": 3,
+      "BINDING_MIN_WARMUP": 1,
+      "BINDING_MAX_DISPERSION_PCT": 5.0,
+      "BINDING_BOOT_MEDIAN_AGREE_PCT": 3.0,
+      "MODEL_ID_DEFAULT": "Qwen/Qwen3.5-35B-A3B-FP8",
+      "REVISION_DEFAULT": "9d1823d2dee688a6b25e77009dc727688c44936e"
+    },
+    "admission_policy": {
+      "cap_mode": "auto",
+      "cap_min_batch_size": 4,
+      "per_bs": {
+        "1": null,
+        "2": null,
+        "4": "auto",
+        "8": "auto",
+        "16": "auto"
+      },
+      "authority": "demo/qwen3_5/accept/admission_policy.py"
+    },
+    "reference": {
+      "path": "/tmp/claude-1006/-home-catalyst-agent/d305d170-45e6-4ad6-b21b-823f6f637deb/scratchpad/clean/demo/qwen3_5/accept/reference/reference_outputs.json",
+      "sha256": "0fa3e09cc3660bcefd3e5735f8d6a16f4573b071f3c8bd19c035f02f64ce5a75",
+      "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+      "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+      "max_new_tokens": 64,
+      "greedy": true,
+      "n_prompts": 10,
+      "prompt_ids": [
+        "p01-history",
+        "p02-math",
+        "p03-python",
+        "p04-chinese",
+        "p05-cuda",
+        "p06-poem",
+        "p07-format",
+        "p08-science",
+        "p09-translate",
+        "p10-logic"
+      ],
+      "topk_present_every_step": true
+    },
+    "batch_sizes": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "exactness_baseline": {
+      "1": {
+        "sha256": "126dec3a9755227e6deb1a079458ad77b0a74bfaad52cbf833420579e4b62768",
+        "n_cases": 10,
+        "per_case_md5": {
+          "p01-history": "a1c399615def1fe460bf698cea00b11d",
+          "p02-math": "d5f3533e098fe87e1b96b68fb440b8da",
+          "p03-python": "de5282225fbb98d9660827bdc1775734",
+          "p04-chinese": "947d9b4fddda44077d513e89688716e2",
+          "p05-cuda": "f3a35fe75d55b55555441f32e7ee6ddf",
+          "p06-poem": "c1f3562e36ff2ed3b89fbfe6de49dfcc",
+          "p07-format": "5f6fb53c37392bf19700883b9e313ae4",
+          "p08-science": "8f91336b66706abecebb8301b9982530",
+          "p09-translate": "7c16984d75cff7f62a5b6f855e244761",
+          "p10-logic": "bec0e9b6088603d9422718c2f1e5b33c"
+        }
+      },
+      "2": {
+        "sha256": "126dec3a9755227e6deb1a079458ad77b0a74bfaad52cbf833420579e4b62768",
+        "n_cases": 10,
+        "per_case_md5": {
+          "p01-history": "a1c399615def1fe460bf698cea00b11d",
+          "p02-math": "d5f3533e098fe87e1b96b68fb440b8da",
+          "p03-python": "de5282225fbb98d9660827bdc1775734",
+          "p04-chinese": "947d9b4fddda44077d513e89688716e2",
+          "p05-cuda": "f3a35fe75d55b55555441f32e7ee6ddf",
+          "p06-poem": "c1f3562e36ff2ed3b89fbfe6de49dfcc",
+          "p07-format": "5f6fb53c37392bf19700883b9e313ae4",
+          "p08-science": "8f91336b66706abecebb8301b9982530",
+          "p09-translate": "7c16984d75cff7f62a5b6f855e244761",
+          "p10-logic": "bec0e9b6088603d9422718c2f1e5b33c"
+        }
+      },
+      "4": {
+        "sha256": "126dec3a9755227e6deb1a079458ad77b0a74bfaad52cbf833420579e4b62768",
+        "n_cases": 10,
+        "per_case_md5": {
+          "p01-history": "a1c399615def1fe460bf698cea00b11d",
+          "p02-math": "d5f3533e098fe87e1b96b68fb440b8da",
+          "p03-python": "de5282225fbb98d9660827bdc1775734",
+          "p04-chinese": "947d9b4fddda44077d513e89688716e2",
+          "p05-cuda": "f3a35fe75d55b55555441f32e7ee6ddf",
+          "p06-poem": "c1f3562e36ff2ed3b89fbfe6de49dfcc",
+          "p07-format": "5f6fb53c37392bf19700883b9e313ae4",
+          "p08-science": "8f91336b66706abecebb8301b9982530",
+          "p09-translate": "7c16984d75cff7f62a5b6f855e244761",
+          "p10-logic": "bec0e9b6088603d9422718c2f1e5b33c"
+        }
+      },
+      "8": {
+        "sha256": "126dec3a9755227e6deb1a079458ad77b0a74bfaad52cbf833420579e4b62768",
+        "n_cases": 10,
+        "per_case_md5": {
+          "p01-history": "a1c399615def1fe460bf698cea00b11d",
+          "p02-math": "d5f3533e098fe87e1b96b68fb440b8da",
+          "p03-python": "de5282225fbb98d9660827bdc1775734",
+          "p04-chinese": "947d9b4fddda44077d513e89688716e2",
+          "p05-cuda": "f3a35fe75d55b55555441f32e7ee6ddf",
+          "p06-poem": "c1f3562e36ff2ed3b89fbfe6de49dfcc",
+          "p07-format": "5f6fb53c37392bf19700883b9e313ae4",
+          "p08-science": "8f91336b66706abecebb8301b9982530",
+          "p09-translate": "7c16984d75cff7f62a5b6f855e244761",
+          "p10-logic": "bec0e9b6088603d9422718c2f1e5b33c"
+        }
+      },
+      "16": {
+        "sha256": "126dec3a9755227e6deb1a079458ad77b0a74bfaad52cbf833420579e4b62768",
+        "n_cases": 10,
+        "per_case_md5": {
+          "p01-history": "a1c399615def1fe460bf698cea00b11d",
+          "p02-math": "d5f3533e098fe87e1b96b68fb440b8da",
+          "p03-python": "de5282225fbb98d9660827bdc1775734",
+          "p04-chinese": "947d9b4fddda44077d513e89688716e2",
+          "p05-cuda": "f3a35fe75d55b55555441f32e7ee6ddf",
+          "p06-poem": "c1f3562e36ff2ed3b89fbfe6de49dfcc",
+          "p07-format": "5f6fb53c37392bf19700883b9e313ae4",
+          "p08-science": "8f91336b66706abecebb8301b9982530",
+          "p09-translate": "7c16984d75cff7f62a5b6f855e244761",
+          "p10-logic": "bec0e9b6088603d9422718c2f1e5b33c"
+        }
+      }
+    },
+    "vllm_pinned_baseline": {
+      "dir": "/tmp/claude-1006/-home-catalyst-agent/d305d170-45e6-4ad6-b21b-823f6f637deb/scratchpad/clean/demo/qwen3_5/accept/baselines/vllm-0.25.1-20260725",
+      "vllm_version": "0.25.1",
+      "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+      "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+      "input_len": 256,
+      "output_len": 1024,
+      "language_model_only": "off",
+      "reps": 3,
+      "per_bs": {
+        "1": {
+          "source": "full",
+          "binding_valid": null
+        },
+        "2": {
+          "source": "full",
+          "binding_valid": null
+        },
+        "4": {
+          "source": "full",
+          "binding_valid": null
+        },
+        "8": {
+          "binding_valid": true,
+          "decode": 1692.4669356762156,
+          "e2e": 4.953407906476059
+        },
+        "16": {
+          "binding_valid": true,
+          "decode": 3018.1111975195627,
+          "e2e": 5.567888470002799
+        }
+      }
+    },
+    "workload": {
+      "input_len": 256,
+      "output_len": 1024,
+      "min_input_len": 64,
+      "min_output_len": 256,
+      "source": "docs/qwen35/bench-protocol.md 2 (pinned 256/1024)"
+    },
+    "git": {
+      "repo": "/tmp/claude-1006/-home-catalyst-agent/d305d170-45e6-4ad6-b21b-823f6f637deb/scratchpad/clean",
+      "sha": "a844d547ac3801c43d979222ba94b2dcbde6e7a4",
+      "branch": "HEAD",
+      "clean": true,
+      "dirty_paths": []
+    },
+    "tool_sha256": {
+      "final.sh": "3af70d4624c56d8b6fde2c346a1aac6baabd888b5e16b8a406762a5ef9043f98",
+      "final/integrity.py": "01a468a77d4f5ff4c10b8c0a7e845e593513de9b5176fc5bfe943a3b573759ee",
+      "final/ac3_criteria.py": "b15be21be5e34b693799e7387f24e8d484b5fa16a8442071e73d2e70f15b1854",
+      "final/score_ac3.py": "86b987f0d6ff6b82264cfa16b4efd3b51cc8b3fea6808b4b66ddad36618a6304",
+      "final/score_perf.py": "c0527d812b4cad473dafee8d9e29cb2b00ec92e6b4523a975543f62e3d70559b",
+      "final/report.py": "7343184ab66f6a6f0f1184b182ad44df41e7bdb6f56d30d84fa8f42c1c4d20a1",
+      "final/hf_score.py": "80ba467b89cf7e8b044a66d4a2f2a987740d6ce3ed9487265f9adf7794d0069f",
+      "final/collect_ac3.sh": "e76c50a8fb86a68522e753f44e95025fcb129bde4f13f24e42ec6c752e3c2a20",
+      "final/collect_perf.sh": "c90bf7256867ee031117f04967ad93b36c0ebb61029ba3f78fc0be478f9e4495",
+      "final/remote_setup.sh": "439bd79b02f8b1a65c98dda59d9f7951f1ee2a72d9434b9a425b73ff44c02781",
+      "final/mechanisms.json": "7397d94c81dca2293131e5405b03eebd7e6f5ac04ac035f320e5c615afda4a4b",
+      "harness/gate_ac3_stable.sh": "79e720bcf76a5033aa3dfeae582d4c1caa482b83e9aba4e060cbd04f4e3efe93",
+      "harness/gate_ac3_stable.py": "48e787b325a033c78e023bf33c49c65041cae6263ba90f5c10b921d604995744",
+      "mpk_engine_run.py": "9b1df568cf6ea815a2f8101aaf9bc8b0d19a24580a3ef1c30a3b09f729c686bb",
+      "bench_vllm.py": "7f5de327225135a56c7c0caaa0186ee44bf8d440eda3090a18a71f4fafa78d65",
+      "admission_policy.py": "2e22481aff5945942a63efe5da7df24f83c604114195d4d37e05ac5aed9f68ff",
+      "opt/m3i7/scripts/make_matched_reference.py": "9f460573a4ff2ca3bd74a3df51e04f9840a2d6fb8b7f8fcefe23401b5c4fba92",
+      "opt/m3i9/make_synthetic_prompts.py": "6b5b3e332607e432d927b61df934c623d9b21ab79128eda92728aec252774ec6",
+      "opt/m3i7/scripts/gpu_guard_i7.sh": "9b4925b6732525b197f9bc6ea37e62db9cb9e32ee058ed0cf4f3a73acabb3f87"
+    }
+  },
+  "verdict": "PASS"
+}
