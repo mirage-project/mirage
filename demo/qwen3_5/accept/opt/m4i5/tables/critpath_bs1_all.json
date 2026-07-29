@@ -1,0 +1,23 @@
+{
+ "batch_size": 1,
+ "window": [
+  288,
+  384
+ ],
+ "step_measured_us": 9822.8,
+ "work_bound_us": 1773.0,
+ "n_tasks": 43928,
+ "n_events": 2278,
+ "topological_violations": 0,
+ "splits": {
+  "241": 4.0,
+  "242": 4.0,
+  "257": 2.0,
+  "261": 8.0,
+  "238": 8.0,
+  "234": 2.0
+ },
+ "cp_max_us": 3804.2,
+ "cp_ntrig_us": 3804.2,
+ "cp_max_pct_of_step": 38.7
+}

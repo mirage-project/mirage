@@ -186,7 +186,42 @@ class Qwen35Builder(GraphBuilder):
         self.eos_token_id = 248044  # config.json text_config.eos_token_id
         # tuning knobs (task-count / parallelism), overridable before build
         self.gdn_conv_channel_blocks = 8
-        self.moe_n_splits = 2
+        # grid.y of BOTH grouped MoE GEMMs (tasks 241/242): how many tasks share
+        # one expert's output columns.  This is a GRAPH-WIDTH knob, and M4-I5
+        # measured what it is worth: at bs1 the routed GEMMs offer only 16 live
+        # tasks per dependency level (8 activated expert groups x 2 splits), so
+        # they run 2346 + 1317 us of a 9823 us decode step on 16 of 128 workers,
+        # and for 98% / 91% of that span they are the ONLY stage running.  That
+        # is the largest single width residual in the graph at the batch size
+        # AC-4 binds hardest (bs1, 2.79x vLLM).
+        #
+        # DEFAULT IS UNCHANGED AT 2.  MPK_MOE_N_SPLITS overrides it before build;
+        # it changes the emitted template arguments (per-task OUTPUT_SIZE), so a
+        # kernel dir must not be reused across values -- the same trap M3-I7 hit
+        # with the admission cap.
+        #
+        # Legality (asserted in `_build_moe`): the per-task N slice must be a
+        # whole number of 128-row checkpoint scale blocks
+        # (`moe_fp8_blockscale_sm100.cuh:134`, OUTPUT_SIZE % BLOCK_N == 0), so
+        # w13 (N = 2*moe_intermediate = 1024) caps at 8 and w2 (N = hidden =
+        # 2048) at 16; the shared knob therefore caps at 8.
+        #
+        # Soundness under the persistent scheduler -- the M3-I3 test, applied:
+        # does this need a barrier?  NO.  grid.y partitions the OUTPUT COLUMNS,
+        # so each task owns a disjoint output range, the whole K reduction stays
+        # inside one task, and each n-block's accumulator was already
+        # independent.  There is no cross-task reduction, hence no arrival
+        # counter, no epilogue election and no co-residency requirement -- the
+        # property a persistent work-queue scheduler cannot guarantee is not
+        # needed here.  Bit-exact by construction for the same reason.
+        #
+        # Cost, priced: the dispatched task count per call site goes 256 -> 128*k,
+        # and a task with no routed rows still costs a queue pop plus a
+        # dependency check (measured 0.4 us).  The wave-depth model in
+        # opt/m4i5/scripts/ceiling.py charges that and is why k=4 was NEUTRAL at
+        # bs8 in M3-I8 (it doubles the worker depth and halves the task) while
+        # k=8 need not be.
+        self.moe_n_splits = int(os.environ.get("MPK_MOE_N_SPLITS", "2"))
         self.qk_dense_path = "fp8"
         # GDN recurrent decode v-row split (grid.z of task 237) and its
         # cp.async ring depth.  The op is only `num_v_heads * mbr` tasks wide,
@@ -705,6 +740,14 @@ class Qwen35Builder(GraphBuilder):
                               grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
                               scale_ue8m0=False, row_partition=QUANTIZE_ROW_SPLIT)
         grid_x = min(c.num_experts, mbt * topk)
+        # `moe_n_splits` is grid.y on both grouped GEMMs; the per-task N slice
+        # must stay a whole 128-row checkpoint scale block
+        # (moe_fp8_blockscale_sm100.cuh:134).
+        for _nm, _n in (("w13", 2 * inter), ("w2", c.hidden_size)):
+            assert _n % (self.moe_n_splits * BLOCK) == 0, (
+                f"moe_n_splits={self.moe_n_splits} is illegal for {_nm}: "
+                f"N={_n} must split into whole {BLOCK}-row scale blocks "
+                f"(max split for {_nm} is {_n // BLOCK})")
         mid = self._t((mbt, topk, 2 * inter), bfloat16, f"layer_{i}_moe_mid")
         pk.moe_fp8_blockscale_layer(
             input_fp8=rq, input_scale=rs,
