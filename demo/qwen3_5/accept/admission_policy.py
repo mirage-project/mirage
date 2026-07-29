@@ -32,16 +32,21 @@ prefill almost one at a time. That costs in two separable ways:
   and eats budget the later prefills needed, so the wave takes more iterations to
   push the same tokens. This term is large only where ``mbt`` is the binding
   constraint: at bs16 the admission replay counts 1887 iterations uncapped
-  against 1279 capped (1.48x), while at bs<=8 the two counts differ by under 4%.
+  against 1279 capped (1.48x of a measured 1.83x), while at bs<=8 the two counts
+  differ by under 4% -- at bs8/msl=132 they are identical and the cap is still
+  1.17x faster.
 * **graph width per iteration** -- one request contributing a 16-token chunk
   produces a NARROWER task graph than four requests contributing 4 tokens each,
   and MPK's cost is set by the widest per-slot chunk rather than the token total
-  (``opt/m3i9/cost_model.py``). This term is what pays at bs4/bs8, where the
-  iteration counts are essentially equal.
+  (``opt/m3i9/cost_model.py``). This term is what pays at bs2/bs4/bs8, where the
+  iteration counts are essentially equal, and it is the whole reason the cap helps
+  below bs16 at all.
 
 Both terms are prefill-side, which is why the decode-side argument M3-I9 used to
 exclude bs<16 ("the cap only changes prefill chunk boundaries") did not settle
-the question.
+the question. The mechanism recorded before M4-I4 -- "uncapped admission
+serialises prefill, 1887 iterations against 1279" -- describes only the first
+term, i.e. only bs16.
 
 THE POLICY
 ----------
@@ -73,11 +78,15 @@ from typing import Optional, Union
 #: task graph the budget allows.
 CAP_MODE = "auto"
 
-#: Smallest batch size the policy caps -- MEASURED, see the module docstring's
-#: evidence pointer. bs1's ``auto`` equals ``mbt`` and is a provable no-op; bs2
-#: is excluded on measurement, not on the arithmetic. Moving this constant is a
-#: policy change and needs its own A/B at both geometries.
-CAP_MIN_BATCH_SIZE = 4
+#: Smallest batch size the policy caps -- MEASURED (M4-I4, both geometries, 3
+#: reps, arms interleaved in one GPU claim): at the pinned 256/1024 workload the
+#: cap makes prefill 1.283x / 1.447x / 1.727x / 2.714x faster at bs 2 / 4 / 8 / 16
+#: for +1.4% / +4.0% / +14.1% / +83.4% e2e, with non-overlapping per-rep sets at
+#: every one of those batch sizes. bs1 is excluded because ``auto`` there equals
+#: ``mbt``, so the cap provably cannot bind -- measured at exactly 1.000x, medians
+#: identical to 0.1 ms. Moving this constant is a policy change and needs its own
+#: A/B at both geometries plus the AC-3 gate.
+CAP_MIN_BATCH_SIZE = 2
 
 #: Batch sizes the pinned benchmark protocol runs (AC-3/AC-4/AC-5).
 PROTOCOL_BATCH_SIZES = (1, 2, 4, 8, 16)
