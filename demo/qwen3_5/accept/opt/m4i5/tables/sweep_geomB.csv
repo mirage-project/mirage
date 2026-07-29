@@ -1,0 +1,6 @@
+geom,bs,base_k,base_median_ms,base_spread_pct,k2_distinct_shas_over_reps,k2_median_ms,k2_n_clean,k2_reps_compared,k2_speedup,k2_spread_pct,k2_tokens_identical_to_k2,k2_vs_k2,k4_distinct_shas_over_reps,k4_median_ms,k4_n_clean,k4_reps_compared,k4_speedup,k4_spread_pct,k4_tokens_identical_to_k2,k4_vs_k2,k8_distinct_shas_over_reps,k8_median_ms,k8_n_clean,k8_reps_compared,k8_speedup,k8_spread_pct,k8_tokens_identical_to_k2,k8_vs_k2,n_clean
+B,1,2,1206.1,0.12,1,1206.1,3,3,1.0,0.12,True,1.0,1,1082.7,3,3,1.114,0.48,True,0.8977,1,1074.2,3,3,1.1228,0.15,True,0.8906,3
+B,2,2,1536.5,0.24,3,1536.5,3,3,1.0,0.24,True,1.0,3,1416.9,3,3,1.0844,0.55,True,0.9222,3,1412.4,3,3,1.0879,0.63,True,0.9192,3
+B,4,2,1747.3,0.23,3,1747.3,3,3,1.0,0.23,True,1.0,3,1626.5,3,3,1.0743,0.26,True,0.9309,3,1719.0,3,3,1.0165,3.45,True,0.9838,3
+B,8,2,2674.0,0.21,3,2674.0,3,3,1.0,0.21,True,1.0,3,2584.8,3,3,1.0345,3.66,True,0.9666,3,2688.1,3,3,0.9948,2.32,True,1.0053,3
+B,16,2,4120.8,0.42,3,4120.8,3,3,1.0,0.42,True,1.0,3,4161.6,3,3,0.9902,2.48,True,1.0099,3,4252.1,3,3,0.9691,1.89,True,1.0319,3

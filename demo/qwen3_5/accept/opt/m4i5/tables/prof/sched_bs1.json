@@ -1,0 +1,83 @@
+{
+ "k2": {
+  "raw": "raw_bs1_rep0_k2.npz",
+  "batch_size": 1,
+  "nblocks": 208,
+  "ngroups": 1,
+  "n_scheduler_blocks": 1,
+  "window": [
+   1,
+   110
+  ],
+  "n_iterations": 111,
+  "step_us": 10882.0,
+  "worker_tasks_per_step": 46204.0,
+  "worker_task_us_per_step": 281918.1,
+  "scheduler_us_per_step": 4.6,
+  "scheduler_span_us_per_step": 4.6,
+  "scheduler_span_pct_of_step": 0.0,
+  "ns_of_scheduler_time_per_emitted_task": 0.1,
+  "scheduler_by_type": {
+   "TASK_SCHD_PREPARE_BATCH": {
+    "n": 1.0,
+    "total_us": 4.6,
+    "span_us": 4.6,
+    "mean_us": 4.5822
+   }
+  }
+ },
+ "k4": {
+  "raw": "raw_bs1_rep0_k4.npz",
+  "batch_size": 1,
+  "nblocks": 208,
+  "ngroups": 1,
+  "n_scheduler_blocks": 1,
+  "window": [
+   1,
+   110
+  ],
+  "n_iterations": 111,
+  "step_us": 9786.0,
+  "worker_tasks_per_step": 66684.0,
+  "worker_task_us_per_step": 295722.7,
+  "scheduler_us_per_step": 4.6,
+  "scheduler_span_us_per_step": 4.6,
+  "scheduler_span_pct_of_step": 0.0,
+  "ns_of_scheduler_time_per_emitted_task": 0.1,
+  "scheduler_by_type": {
+   "TASK_SCHD_PREPARE_BATCH": {
+    "n": 1.0,
+    "total_us": 4.6,
+    "span_us": 4.6,
+    "mean_us": 4.6071
+   }
+  }
+ },
+ "k8": {
+  "raw": "raw_bs1_rep0_k8.npz",
+  "batch_size": 1,
+  "nblocks": 208,
+  "ngroups": 1,
+  "n_scheduler_blocks": 1,
+  "window": [
+   1,
+   110
+  ],
+  "n_iterations": 111,
+  "step_us": 9748.4,
+  "worker_tasks_per_step": 107644.0,
+  "worker_task_us_per_step": 322169.6,
+  "scheduler_us_per_step": 4.6,
+  "scheduler_span_us_per_step": 4.6,
+  "scheduler_span_pct_of_step": 0.0,
+  "ns_of_scheduler_time_per_emitted_task": 0.0,
+  "scheduler_by_type": {
+   "TASK_SCHD_PREPARE_BATCH": {
+    "n": 1.0,
+    "total_us": 4.6,
+    "span_us": 4.6,
+    "mean_us": 4.5974
+   }
+  }
+ }
+}

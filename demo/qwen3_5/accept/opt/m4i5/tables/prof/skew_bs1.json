@@ -1,0 +1,113 @@
+{
+ "k2": {
+  "step_us": 10882.0,
+  "window": [
+   1,
+   110
+  ],
+  "stages": {
+   "TASK_MOE_W13_FP8_BLOCKSCALE_SM100": {
+    "task_type": 241,
+    "iteration": 55,
+    "tasks_in_iteration": 10240,
+    "levels_recovered": 40,
+    "emitted_per_level_median": 256.0,
+    "emitted_per_level_min": 256,
+    "emitted_per_level_max": 256,
+    "arrival_skew_us_median": 58.21,
+    "arrival_skew_us_mean": 58.25,
+    "arrival_skew_us_p90": 59.47,
+    "ns_per_emitted_task": 227.38,
+    "skew_total_us_per_step": 2329.9
+   },
+   "TASK_MOE_W2_FP8_BLOCKSCALE_SM100": {
+    "task_type": 242,
+    "iteration": 55,
+    "tasks_in_iteration": 10240,
+    "levels_recovered": 40,
+    "emitted_per_level_median": 256.0,
+    "emitted_per_level_min": 256,
+    "emitted_per_level_max": 256,
+    "arrival_skew_us_median": 32.29,
+    "arrival_skew_us_mean": 32.63,
+    "arrival_skew_us_p90": 33.71,
+    "ns_per_emitted_task": 126.12,
+    "skew_total_us_per_step": 1305.2
+   }
+  }
+ },
+ "k4": {
+  "step_us": 9786.0,
+  "window": [
+   1,
+   110
+  ],
+  "stages": {
+   "TASK_MOE_W13_FP8_BLOCKSCALE_SM100": {
+    "task_type": 241,
+    "iteration": 55,
+    "tasks_in_iteration": 20480,
+    "levels_recovered": 40,
+    "emitted_per_level_median": 512.0,
+    "emitted_per_level_min": 512,
+    "emitted_per_level_max": 512,
+    "arrival_skew_us_median": 36.46,
+    "arrival_skew_us_mean": 36.41,
+    "arrival_skew_us_p90": 37.43,
+    "ns_per_emitted_task": 71.22,
+    "skew_total_us_per_step": 1456.5
+   },
+   "TASK_MOE_W2_FP8_BLOCKSCALE_SM100": {
+    "task_type": 242,
+    "iteration": 55,
+    "tasks_in_iteration": 20480,
+    "levels_recovered": 40,
+    "emitted_per_level_median": 512.0,
+    "emitted_per_level_min": 512,
+    "emitted_per_level_max": 512,
+    "arrival_skew_us_median": 23.38,
+    "arrival_skew_us_mean": 23.36,
+    "arrival_skew_us_p90": 24.32,
+    "ns_per_emitted_task": 45.66,
+    "skew_total_us_per_step": 934.3
+   }
+  }
+ },
+ "k8": {
+  "step_us": 9748.4,
+  "window": [
+   1,
+   110
+  ],
+  "stages": {
+   "TASK_MOE_W13_FP8_BLOCKSCALE_SM100": {
+    "task_type": 241,
+    "iteration": 55,
+    "tasks_in_iteration": 40960,
+    "levels_recovered": 40,
+    "emitted_per_level_median": 1024.0,
+    "emitted_per_level_min": 1024,
+    "emitted_per_level_max": 1024,
+    "arrival_skew_us_median": 32.56,
+    "arrival_skew_us_mean": 32.71,
+    "arrival_skew_us_p90": 33.61,
+    "ns_per_emitted_task": 31.8,
+    "skew_total_us_per_step": 1308.4
+   },
+   "TASK_MOE_W2_FP8_BLOCKSCALE_SM100": {
+    "task_type": 242,
+    "iteration": 55,
+    "tasks_in_iteration": 40960,
+    "levels_recovered": 40,
+    "emitted_per_level_median": 1024.0,
+    "emitted_per_level_min": 1024,
+    "emitted_per_level_max": 1024,
+    "arrival_skew_us_median": 25.54,
+    "arrival_skew_us_mean": 25.57,
+    "arrival_skew_us_p90": 26.35,
+    "ns_per_emitted_task": 24.94,
+    "skew_total_us_per_step": 1022.7
+   }
+  }
+ }
+}
