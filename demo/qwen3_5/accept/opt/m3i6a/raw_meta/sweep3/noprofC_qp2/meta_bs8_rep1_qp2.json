@@ -1,0 +1,98 @@
+{
+  "tag": "bs8_rep1",
+  "batch_size": 8,
+  "rep": 1,
+  "prompt_ids": [
+    "synth0",
+    "synth1",
+    "synth2",
+    "synth3",
+    "synth4",
+    "synth5",
+    "synth6",
+    "synth7"
+  ],
+  "prompt_lens": [
+    256,
+    256,
+    256,
+    256,
+    256,
+    256,
+    256,
+    256
+  ],
+  "synthetic_prompt_len": 256,
+  "synthetic_seed": 20268726,
+  "max_seq_length": 897,
+  "mbt": 16,
+  "page_size": 256,
+  "max_new_tokens": 96,
+  "profiler_slots": 0,
+  "profiled": false,
+  "n_events": 0,
+  "waves": [
+    {
+      "batch_size": 8,
+      "wave": 0,
+      "num_requests": 8,
+      "num_distinct_prompts": 8,
+      "prompt_ids": [
+        "synth0",
+        "synth1",
+        "synth2",
+        "synth3",
+        "synth4",
+        "synth5",
+        "synth6",
+        "synth7"
+      ],
+      "wall_ms": 10182.8525390625,
+      "max_decode_steps": 640,
+      "ms_per_decode_step": 15.910707092285156,
+      "tokens_per_s": 502.80606346395945,
+      "max_seq_length": 897,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 810,
+        "live_slot_migrations": 28,
+        "migrated_slots": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation": [],
+  "run_seconds": 22.526132822036743,
+  "tokens_sha256": "bc3ce2e95a2780f6e1675ced36b3ee888d132bbbbf17d4e27b7711e23bf47ce0",
+  "gpu_before": [
+    "0, 48349 MiB, 92 %, 1965 MHz, 3996 MHz",
+    "1, 49051 MiB, 95 %, 1372 MHz, 3996 MHz",
+    "2, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 131 MiB, 0 %, 120 MHz, 3996 MHz",
+    "5, 5 MiB, 0 %, 232 MHz, 3996 MHz",
+    "6, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 129 MiB, 0 %, 120 MHz, 3996 MHz"
+  ],
+  "gpu_after": [
+    "0, 48349 MiB, 85 %, 1965 MHz, 3996 MHz",
+    "1, 49051 MiB, 80 %, 1965 MHz, 3996 MHz",
+    "2, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 131 MiB, 0 %, 120 MHz, 3996 MHz",
+    "5, 36991 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "6, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 129 MiB, 0 %, 120 MHz, 3996 MHz"
+  ],
+  "cuda_visible_devices": "5",
+  "generated_utc": "2026-07-29T07:52:50Z"
+}

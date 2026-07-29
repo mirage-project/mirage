@@ -1,0 +1,74 @@
+{
+  "tag": "bs2_rep2",
+  "batch_size": 2,
+  "rep": 2,
+  "prompt_ids": [
+    "synth0",
+    "synth1"
+  ],
+  "prompt_lens": [
+    256,
+    256
+  ],
+  "synthetic_prompt_len": 256,
+  "synthetic_seed": 20262727,
+  "max_seq_length": 897,
+  "mbt": 16,
+  "page_size": 256,
+  "max_new_tokens": 96,
+  "profiler_slots": 0,
+  "profiled": false,
+  "n_events": 0,
+  "waves": [
+    {
+      "batch_size": 2,
+      "wave": 0,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "synth0",
+        "synth1"
+      ],
+      "wall_ms": 6935.3427734375,
+      "max_decode_steps": 640,
+      "ms_per_decode_step": 10.836473083496093,
+      "tokens_per_s": 184.5618943165182,
+      "max_seq_length": 897,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 674,
+        "live_slot_migrations": 1,
+        "migrated_slots": [
+          1
+        ],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation": [],
+  "run_seconds": 20.29343008995056,
+  "tokens_sha256": "ddfc5f904f4ca9caefb889580eefab0003c9d6a77383dbfbed346b5aa292487e",
+  "gpu_before": [
+    "0, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "1, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 131 MiB, 0 %, 120 MHz, 3996 MHz",
+    "5, 5 MiB, 0 %, 202 MHz, 3996 MHz",
+    "6, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 129 MiB, 0 %, 120 MHz, 3996 MHz"
+  ],
+  "gpu_after": [
+    "0, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "1, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 131 MiB, 0 %, 120 MHz, 3996 MHz",
+    "5, 36449 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "6, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 129 MiB, 0 %, 120 MHz, 3996 MHz"
+  ],
+  "cuda_visible_devices": "5",
+  "generated_utc": "2026-07-29T07:40:54Z"
+}

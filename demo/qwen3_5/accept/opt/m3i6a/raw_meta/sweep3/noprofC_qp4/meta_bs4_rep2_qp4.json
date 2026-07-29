@@ -1,0 +1,82 @@
+{
+  "tag": "bs4_rep2",
+  "batch_size": 4,
+  "rep": 2,
+  "prompt_ids": [
+    "synth0",
+    "synth1",
+    "synth2",
+    "synth3"
+  ],
+  "prompt_lens": [
+    256,
+    256,
+    256,
+    256
+  ],
+  "synthetic_prompt_len": 256,
+  "synthetic_seed": 20264727,
+  "max_seq_length": 897,
+  "mbt": 16,
+  "page_size": 256,
+  "max_new_tokens": 96,
+  "profiler_slots": 0,
+  "profiled": false,
+  "n_events": 0,
+  "waves": [
+    {
+      "batch_size": 4,
+      "wave": 0,
+      "num_requests": 4,
+      "num_distinct_prompts": 4,
+      "prompt_ids": [
+        "synth0",
+        "synth1",
+        "synth2",
+        "synth3"
+      ],
+      "wall_ms": 8136.74560546875,
+      "max_decode_steps": 640,
+      "ms_per_decode_step": 12.713665008544922,
+      "tokens_per_s": 314.6221012832711,
+      "max_seq_length": 897,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 711,
+        "live_slot_migrations": 6,
+        "migrated_slots": [
+          1,
+          2,
+          3
+        ],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation": [],
+  "run_seconds": 20.836860418319702,
+  "tokens_sha256": "b79595ab688258821344515e9de1af9731ffb0900140bb1dfb3a84dacce2f7aa",
+  "gpu_before": [
+    "0, 48347 MiB, 47 %, 1425 MHz, 3996 MHz",
+    "1, 49049 MiB, 100 %, 1485 MHz, 3996 MHz",
+    "2, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 131 MiB, 0 %, 120 MHz, 3996 MHz",
+    "5, 5 MiB, 0 %, 232 MHz, 3996 MHz",
+    "6, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 129 MiB, 0 %, 120 MHz, 3996 MHz"
+  ],
+  "gpu_after": [
+    "0, 48349 MiB, 85 %, 1965 MHz, 3996 MHz",
+    "1, 49049 MiB, 77 %, 1965 MHz, 3996 MHz",
+    "2, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 131 MiB, 0 %, 120 MHz, 3996 MHz",
+    "5, 36569 MiB, 4 %, 1965 MHz, 3996 MHz",
+    "6, 5 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 129 MiB, 0 %, 120 MHz, 3996 MHz"
+  ],
+  "cuda_visible_devices": "5",
+  "generated_utc": "2026-07-29T07:46:59Z"
+}
