@@ -367,7 +367,61 @@ report for the headline table. M3/M4 re-runs of this exact protocol land in sibl
 `vllm-<version>-<date>/` directories, keyed by vLLM version and capture date, never overwriting
 a prior capture in place.
 
-## Admission-cap policy (M3-I9 landing, 2026-07-27)
+## Admission-cap policy — THE POLICY IS CODE (M4-I4 landing, 2026-07-29)
+
+**`demo/qwen3_5/accept/admission_policy.py` is the single authority.** This document does not
+restate the batch-size table, because a policy written in two places diverges — which is
+exactly what happened between the M3-I9 landing and the M3-I7 amendment (both below, kept as
+history). Read the policy with
+
+    python3 demo/qwen3_5/accept/admission_policy.py            # machine-readable
+    python3 demo/qwen3_5/accept/admission_policy.py --describe  # per-bs, in words
+
+and get it in a run by passing nothing: `mpk_engine_run.py`, `harness/gate_ac3_stable.sh` and
+`opt/profile_wave.py` all default to `--per-request-token-cap policy`. `none` forces the
+pre-policy uncapped runtime and is what reproduces any artifact captured before this landing,
+including `results/dumps_final`.
+
+As landed (M4-I4): **`auto` from bs2 up; bs1 uncapped**, where `auto = max(1, mbt // bs)`.
+bs1 is excluded because `auto` there equals `mbt`, so the extra `min()` in
+`prepare_next_batch` cannot bind — measured at exactly 1.000x with medians identical to
+0.1 ms, i.e. excluded by arithmetic, not by a perf argument.
+
+Measured at the pinned 256/1024 workload, 3 reps, a compiled kernel per arm, both arms
+interleaved inside ONE GPU claim (`opt/m4i4/README.md`, `opt/m4i4/tables/geomM.csv`):
+
+| bs | prefill | decode tok/s | e2e | AC-3 |
+|----|---------|--------------|-----|------|
+| 1  | 1.000x       | +0.0 %  | +0.0 %  | byte-identical |
+| 2  | 1.283x faster | +0.1 % | +1.4 %  | byte-identical |
+| 4  | 1.447x faster | +0.7 % | +4.0 %  | byte-identical |
+| 8  | 1.727x faster | +5.0 % | +14.1 % | byte-identical |
+| 16 | 2.714x faster | +61.8 % | +83.4 % | byte-identical |
+
+AC-3 at the AC-3 geometry: 2 arms x 3 reps x 5 bs x 10 prompts = 300 cases, every one
+byte-identical to `results/dumps_final`, every one over the 90 % agreement floor, and no first
+divergence anywhere except the adjudicated `p06-poem` pos60 tie. The cap is bit-transparent
+wherever it is on, now including bs1 and bs2.
+
+**The mechanism, corrected.** The M3-I7 amendment attributed the win to admission
+SERIALISATION and quoted the iteration counts (1887 uncapped against 1279 capped at bs16).
+That is the bs16 term only. Below bs16 the iteration counts barely move — 1057 vs 1055 at bs2,
+1094 vs 1087 at bs4, and at the AC-3 geometry the capped arm needs MORE iterations at bs2
+(505 vs 498) and bs4 (318 vs 308) while still being faster, and exactly as many at bs8
+(228/228) while being 1.17x faster. The term that pays below bs16 is GRAPH WIDTH per
+iteration: the cap drops the widest per-slot chunk from `mbt` to `mbt/bs`, so the same token
+budget is spread over more live requests, and MPK's iteration cost is set by the widest chunk
+rather than the token total (`opt/m3i9/cost_model.py`). Both terms are prefill-side; the
+iteration-count term contributes 1.55x of the 1.83x measured at bs16 and nothing below it.
+
+**AC-5 after the landing.** The cap does not make AC-5 pass — mpk e2e is 2.74/2.74/2.50/2.55/2.77x
+vLLM's at bs1/2/4/8/16 against a 1.25x bound, because the e2e ratio is dominated by the decode
+gap. What the landing changes is how much of AC-5's slack prefill spends. At the landed prefill
+cost, AC-5 holds at 0.85/0.91/0.92x of vLLM's decode throughput at bs1/2/4 (so AC-4 implies
+AC-5 there) but needs **1.075x at bs8 and 1.381x at bs16**. Equivalently, for AC-5 to hold at
+decode PARITY, prefill would have to fall a further 1.25x at bs8 and 1.96x at bs16.
+
+## Admission-cap policy (M3-I9 landing, 2026-07-27) — SUPERSEDED, kept as history
 
 Binding for every benchmark and for M4's final harness: **`--per-request-token-cap auto` at
 bs16; NO cap at bs 1/2/4/8.** Basis: at bs16 cap=1 == the uncapped chunk structure (mbt=16
@@ -427,9 +481,9 @@ device-state-prone GPU (114 runs). Consequences, all binding for M4:
 4. **Cold-compile reps are the prone class**; warm/reused-kernel reps hashed to consensus in
    every campaign so far.
 
-## Admission-cap policy, amended (M3-I7 milestone gate, 2026-07-29)
+## Admission-cap policy, amended (M3-I7 milestone gate, 2026-07-29) — SUPERSEDED by M4-I4
 
-**Supersedes the M3-I9 landing above: `--per-request-token-cap auto` at bs4, bs8 AND bs16;
+**Superseded the M3-I9 landing: `--per-request-token-cap auto` at bs4, bs8 AND bs16;
 still no cap at bs1/bs2** (at bs1/bs2 `auto` = `max(1, 16//bs)` is 16 or 8, i.e. at or near
 the uncapped budget, so there is nothing to gain).
 
@@ -455,6 +509,18 @@ admission replay. Measured at bs4 and bs8, 3 reps, per-arm kernels, 256/1024:
 AC-3 is byte-identical to `results/dumps_final` (10/10) in the capped arm at bs4, bs8 and
 bs16, so the cap is bit-transparent wherever it is now on. Evidence:
 `opt/m3i7/tables/cap_policy.json`, `opt/m3i7/README.md`.
+
+TWO CORRECTIONS TO THIS SECTION, from M4-I4 (see the current policy at the top):
+(1) bs2 does gain, and was excluded on an iteration-count argument that does not predict this
+knob below bs16 — 1.283x prefill / +1.4 % e2e, per-rep sets non-overlapping. bs2 is now capped.
+(2) Its bs4/bs8 rows were assembled from TWO windows (uncapped from the perfM sweep, capped
+from a later capsweep probe), so the arms never shared a window; and its own phase-`ac3`
+"capped bs16 is 10/10 byte-identical" claim (`gates/bytediff_cap.json`,
+`gates/bytediff_dumps_cap16.json`) ran with `--kernel-dir $K/A_bs16`, the dir the UNCAPPED
+bs16 run had already compiled, so under `--reuse-kernel` it executed the uncapped binary — the
+very trap the section above documents. The bs4/bs8 (`CS_A_cap_bs*`) and phase-`cap16`
+(`C16_A_*`) byte diffs did use per-arm dirs and stand. M4-I4 re-measured all of it in one
+window with per-arm kernels and the numbers hold.
 
 ## Decode-throughput measurement (M3-I7, binding)
 
