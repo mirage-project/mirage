@@ -1,0 +1,12 @@
+{
+  "schema": "final/mechanisms/v1",
+  "purpose": "AC-3(b) allows a differing position to be accounted for by a DOCUMENTED reordering/precision mechanism. This file is that documentation, in machine-checkable form. It is human-authored and reviewed; the gate never writes to it.",
+  "rules": [
+    "An entry excuses exactly ONE position: prompt_id + position + the explicit list of batch_sizes + the exact ref_top1_id + the exact engine_id must all match. There are no wildcards.",
+    "An entry with an empty `mechanism` string excuses nothing (final/ac3_criteria.py:_match_mechanism).",
+    "An entry can never lift the >=90% agreement floor: the floor is computed on raw matches and is not waivable.",
+    "Every applied entry is printed in the run report and listed in report.json, so a waiver is always visible in the artifact.",
+    "`mechanism` must name the mechanism (what in the engine produces this exact difference), and `evidence` must point at the artifact that establishes it."
+  ],
+  "mechanisms": []
+}
