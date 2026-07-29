@@ -1,0 +1,11 @@
+bs,arm,compiled_cap,e2e_s,e2e_range_pct,e2e_n,prefill_s,prefill_range_pct,prefill_n,decode_tok_s,vllm_e2e_s,ac5_ratio,vllm_decode,full_reps_ms,pre_reps_ms
+1,none,None,None,None,0,None,None,0,None,3.601619330991525,None,285.5105643395262,"",""
+2,none,None,None,None,0,None,None,0,None,3.886238737992244,None,529.7960084681633,"",""
+4,none,None,None,None,0,None,None,0,None,4.45474189100787,None,934.3478174709361,"",""
+8,none,None,None,None,0,None,None,0,None,4.953407906476059,None,1692.4669356762156,"",""
+16,none,None,None,None,0,None,None,0,None,5.567888470002799,None,3018.1111975195627,"",""
+1,auto,None,None,None,0,None,None,0,None,3.601619330991525,None,285.5105643395262,"",""
+2,auto,None,None,None,0,None,None,0,None,3.886238737992244,None,529.7960084681633,"",""
+4,auto,None,None,None,0,None,None,0,None,4.45474189100787,None,934.3478174709361,"",""
+8,auto,None,None,None,0,None,None,0,None,4.953407906476059,None,1692.4669356762156,"",""
+16,auto,None,None,None,0,None,None,0,None,5.567888470002799,None,3018.1111975195627,"",""

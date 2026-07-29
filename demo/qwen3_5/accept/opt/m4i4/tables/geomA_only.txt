@@ -1,0 +1,86 @@
+====================================================================================================
+1. AC-3 GEOMETRY (msl=132, 64 new tokens, 10 pinned prompts) -- total wave wall
+====================================================================================================
+ bs  cap |  uncapped ms    r%  n |  capped ms    r%  n |  speedup |   replay iters u/c
+  1   16 |      9181.7  0.03  3 |    9182.0  0.02  3 |   1.000 |   956/956 = 1.000x
+  2    8 |      4974.3  0.04  3 |    4963.1  0.10  3 |   1.002 |   498/505 = 0.986x
+  4    4 |      3251.0  0.06  3 |    3194.9  0.06  3 |   1.018 |   308/318 = 0.969x
+  8    2 |      2909.5  0.04  3 |    2496.1  0.06  3 |   1.166 |   228/228 = 1.000x
+ 16    1 |      3306.2  0.06  3 |    1572.1  0.14  3 |   2.103 |   203/131 = 1.550x
+
+======================================================================================================================
+2. PINNED 256/1024 GEOMETRY -- per-arm compiled kernels, arms interleaved in one claim
+======================================================================================================================
+ bs   arm  cap |   e2e s    r%  n | prefill s    r%  n | pre/e2e | decode tok/s | replay it
+  1  none None |               0 |                 0 |      % |             |         
+  1  auto None |               0 |                 0 |      % |             |         
+  2  none None |               0 |                 0 |      % |             |         
+  2  auto None |               0 |                 0 |      % |             |         
+  4  none None |               0 |                 0 |      % |             |         
+  4  auto None |               0 |                 0 |      % |             |         
+  8  none None |               0 |                 0 |      % |             |         
+  8  auto None |               0 |                 0 |      % |             |         
+ 16  none None |               0 |                 0 |      % |             |         
+ 16  auto None |               0 |                 0 |      % |             |         
+
+3. CAP EFFECT at 256/1024 (capped vs uncapped, same window)
+ bs |   prefill |   decode |      e2e
+  1 |           |          |         
+  2 |           |          |         
+  4 |           |          |         
+  8 |           |          |         
+ 16 |           |          |         
+
+====================================================================================================
+4. AC-5 (mpk e2e / vLLM e2e, bound 1.25x) and AC-4 position (decode)
+====================================================================================================
+ bs   arm | mpk e2e s vllm e2e s AC-5 ratio  verdict |  mpk dec vllm dec AC-4 gap
+  1  none |               3.602                     |            285.5         
+  1  auto |               3.602                     |            285.5         
+  2  none |               3.886                     |            529.8         
+  2  auto |               3.886                     |            529.8         
+  4  none |               4.455                     |            934.3         
+  4  auto |               4.455                     |            934.3         
+  8  none |               4.953                     |           1692.5         
+  8  auto |               4.953                     |           1692.5         
+ 16  none |               5.568                     |           3018.1         
+ 16  auto |               5.568                     |           3018.1         
+
+vLLM sources: bs1=vllm-0.25.1-20260725/full/summary.json (n=3); bs2=vllm-0.25.1-20260725/full/summary.json (n=3); bs4=vllm-0.25.1-20260725/full/summary.json (n=3); bs8=vllm-0.25.1-20260725/bs8.merged.json (two-boot merge) (n=8); bs16=vllm-0.25.1-20260725/bs16.merged.json (two-boot merge) (n=8)
+
+5. EVERY REP (ms), in rep order -- the >=3-rep rule checkable inline
+  A  bs1  none 9181.7 9179.8 9182.4   median=9181.7 n=3
+  A  bs1  auto 9180.2 9182.0 9182.1   median=9182.0 n=3
+  A  bs2  none 4973.7 4975.6 4974.3   median=4974.3 n=3
+  A  bs2  auto 4963.1 4961.4 4966.6   median=4963.1 n=3
+  A  bs4  none 3250.5 3251.0 3252.3   median=3251.0 n=3
+  A  bs4  auto 3194.4 3194.9 3196.5   median=3194.9 n=3
+  A  bs8  none 2908.9 2909.5 2910.0   median=2909.5 n=3
+  A  bs8  auto 2494.7 2496.1 2496.2   median=2496.1 n=3
+  A  bs16 none 3306.2 3307.2 3305.2   median=3306.2 n=3
+  A  bs16 auto 1572.1 1572.1 1574.3   median=1572.1 n=3
+  MF bs1  none    median= n=0
+  MP bs1  none    median= n=0
+  MF bs1  auto    median= n=0
+  MP bs1  auto    median= n=0
+  MF bs2  none    median= n=0
+  MP bs2  none    median= n=0
+  MF bs2  auto    median= n=0
+  MP bs2  auto    median= n=0
+  MF bs4  none    median= n=0
+  MP bs4  none    median= n=0
+  MF bs4  auto    median= n=0
+  MP bs4  auto    median= n=0
+  MF bs8  none    median= n=0
+  MP bs8  none    median= n=0
+  MF bs8  auto    median= n=0
+  MP bs8  auto    median= n=0
+  MF bs16 none    median= n=0
+  MP bs16 none    median= n=0
+  MF bs16 auto    median= n=0
+  MP bs16 auto    median= n=0
+
+6. INTEGRITY -- compiled cap value constant within every arm: OK
+
+wrote opt/m4i4/tables/geomA_only.json
+wrote opt/m4i4/tables/partial_geomA.csv opt/m4i4/tables/partial_geomM.csv
