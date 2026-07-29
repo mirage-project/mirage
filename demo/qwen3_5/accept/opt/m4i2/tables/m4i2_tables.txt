@@ -1,0 +1,38 @@
+M4-I2 dense-fp8 integration A/B -- geometry B (synthetic 256-token
+prompts, msl=353, 96 decode steps), arms interleaved per (bs, rep) in one
+GPU claim.
+
+arm A = base(slice128+golden)
+arm B = new(ferret v011)
+
+== gpu_before audit (each run's OWN pinned device, from its OWN record) ==
+   runs: 30   dirty(>500MiB at start): 0   unauditable: 0
+   pinned device(s) across all runs: 2
+   observed pinned-device floors (MiB): [5, 7]
+
+== per-rep wall_ms (every rep, both arms) ==
+ bs arm       rep0       rep1       rep2     median    range
+  1   A     1206.8     1207.8     1207.0     1207.0      1.0
+  1   B     1096.1     1097.1     1096.9     1096.9      1.0
+  2   A     1391.0     1391.3     1393.6     1391.3      2.6
+  2   B     1264.9     1265.1     1270.7     1265.1      5.8
+  4   A     1746.3     1754.8     1753.6     1753.6      8.4
+  4   B     1616.8     1612.1     1623.2     1616.8     11.1
+  8   A     2683.3     2684.1     2681.6     2683.3      2.5
+  8   B     2504.1     2503.5     2495.3     2503.5      8.8
+ 16   A     4124.6     4129.9     4144.5     4129.9     19.9
+ 16   B     3806.8     3815.5     3832.4     3815.5     25.6
+
+== median wall_ms, and the integration's e2e effect ==
+ bs     A base      B new   delta_ms  speedup  B ms/step  A ms/step
+  1     1207.0     1096.9     -110.1  1.1004x    11.4258    12.5726
+  2     1391.3     1265.1     -126.3  1.0998x    13.1778    14.4930
+  4     1753.6     1616.8     -136.8  1.0846x    16.8417    18.2663
+  8     2683.3     2503.5     -179.9  1.0718x    26.0778    27.9513
+ 16     4129.9     3815.5     -314.5  1.0824x    39.7445    43.0203
+
+== tokens_sha256: does the megakernel emit identical tokens in both arms? ==
+   (kernel-level bit-exactness was proven on synthetic tensors; this is
+    the same property through 40 real layers)
+   identical: 15   differing: 0
+
