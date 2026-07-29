@@ -4,10 +4,10 @@
  "ac5_bound": 1.25,
  "admission_policy": {
   "cap_mode": "auto",
-  "cap_min_batch_size": 4,
+  "cap_min_batch_size": 2,
   "per_bs": {
    "1": null,
-   "2": null,
+   "2": "auto",
    "4": "auto",
    "8": "auto",
    "16": "auto"
@@ -1108,18 +1108,18 @@
    "prefill_must_fall_by_x": 0.33594588230806655
   },
   "2": {
-   "landed_arm": "none",
-   "prefill_s": 0.613869873046875,
+   "landed_arm": "auto",
+   "prefill_s": 0.47864178466796875,
    "vllm_e2e_s": 3.886238737992244,
    "vllm_prefill_s_implied": 0.03192506374585058,
    "decode_tokens": 1021,
-   "max_decode_window_s": 4.24392854944343,
-   "required_decode_tok_s": 481.1579592375084,
-   "required_over_vllm": 0.9081947609018695,
-   "current_decode_tok_s": 200.49312394394835,
-   "required_over_current": 2.3998726229235934,
+   "max_decode_window_s": 4.379156637822336,
+   "required_decode_tok_s": 466.29983096823963,
+   "required_over_vllm": 0.8801497623896513,
+   "current_decode_tok_s": 200.7057441103099,
+   "required_over_current": 2.3233008752951116,
    "prefill_budget_at_decode_parity_s": 1.0034847482439115,
-   "prefill_must_fall_by_x": 0.6117381197084871
+   "prefill_must_fall_by_x": 0.4769796307373751
   },
   "4": {
    "landed_arm": "auto",

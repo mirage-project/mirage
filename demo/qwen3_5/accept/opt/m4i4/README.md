@@ -113,8 +113,10 @@ nothing to gain". The measurement disagrees, and the per-rep values are the reas
 | prefill ms | 615.0  613.9  612.9 | 480.1  478.3  478.6 |
 | e2e ms | 10842.5  10798.8  10755.6 | 10662.2  10652.7  10612.3 |
 
-1.283x on prefill, +1.4 % e2e at 256/1024, +0.2 % at the AC-3 geometry (where prefill is only
-5.7 % of e2e, so the smaller number is the expected one). `CAP_MIN_BATCH_SIZE` is therefore 2.
+1.283x on prefill and +1.4 % e2e at 256/1024; +0.2 % at the AC-3 geometry, also non-overlapping
+(4973.7/4975.6/4974.3 ms against 4963.1/4961.4/4966.6 ms). The AC-3 geometry's number is smaller
+for the obvious reason: its prompts are 24–68 tokens against 64 decode steps, so there is much
+less prefill in the wave for the cap to act on. `CAP_MIN_BATCH_SIZE` is therefore 2.
 
 bs1 stays uncapped, and not as a judgement call: `auto` at bs1 is `mbt`, so the extra `min()` in
 `prepare_next_batch` can never fire. It measures at exactly 1.000x at both geometries with
@@ -177,7 +179,7 @@ landed prefill cost `P` the decode throughput AC-4 must reach for AC-5 to hold i
 | bs | P (mpk prefill s) | max decode window s | required decode tok/s | ÷ vLLM decode | prefill budget at decode parity | prefill must fall |
 |----|------------------:|--------------------:|----------------------:|--------------:|-------------------------------:|------------------:|
 | 1  | 0.311 | 4.191 | 243.6  | **0.853** | 0.926 s | — |
-| 2  | 0.614 | 4.244 | 481.2  | **0.908** | 1.003 s | — |
+| 2  | 0.479 | 4.379 | 466.3  | **0.880** | 1.003 s | — |
 | 4  | 0.822 | 4.746 | 860.5  | **0.921** | 1.197 s | — |
 | 8  | 1.701 | 4.490 | 1819.0 | **1.075** | 1.366 s | 1.25x |
 | 16 | 3.040 | 3.920 | 4167.8 | **1.381** | 1.547 s | 1.96x |
