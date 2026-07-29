@@ -390,6 +390,38 @@ case " $PHASES " in *" late "*)
   done
 ;; esac
 
+# =========================================================== PHASE perfM2 ===
+# Re-capture the 256/1024 geometry at bs1, bs4 and bs16 to close the gate's one
+# FAIL: the drain gate discarded rep0 of the prefill-only arm at those three
+# batch sizes (9364 / 1866 / 1061 MiB already resident at start, against a
+# 1032 MiB limit), leaving those prefill medians at n=2 against M3's pinned
+# >=3-rep rule -- and the prefill median is a term in the decode slope, so it
+# propagates straight into the binding per-bs gap table.
+#
+# BOTH arms are re-run, not just the prefill one. The slope subtracts one arm
+# from the other, so the two have to come from the SAME window or box drift
+# lands directly in the answer; phase perfM got that right by interleaving them
+# and a prefill-only top-up would have thrown it away. Re-running both also buys
+# a free cross-window control: the full-run arm was already clean at n=3, so its
+# new median reproducing the old one is independent evidence that the two
+# windows are comparable. Rep indices and prompt files are the ORIGINAL ones, so
+# every rep still pairs full-against-prefill on identical prompts, and the
+# discarded originals stay on disk under perf/M/ for audit.
+case " $PHASES " in *" perfM2 "*)
+  echo; echo "########## PHASE perfM2: 256/1024 re-capture, bs1/bs4/bs16 $(date -Is) ##########"
+  for R in $(seq 0 $((REPS-1))); do
+    for BS in 1 4 16; do
+      REF=$M/perf/M/prompts/synthref_bs${BS}_rep${R}.json
+      [ -f "$REF" ] || { echo "MISSING PROMPT FILE $REF" >&2; exit 95; }
+      CAP=(); [ "$BS" = 16 ] && CAP=(--per-request-token-cap auto)
+      engine_run "p2_full_bs${BS}_rep${R}" "$M/perf/M2/full" "$K/M_bs${BS}_full" \
+          "$BS" 1280 1024 --reference "$REF" --dump-name "bs${BS}_rep${R}.json" "${CAP[@]}"
+      engine_run "p2_pre_bs${BS}_rep${R}" "$M/perf/M2/pre" "$K/M_bs${BS}_pre" \
+          "$BS" 259 2 --reference "$REF" --dump-name "bs${BS}_rep${R}.json" "${CAP[@]}"
+    done
+  done
+;; esac
+
 # ========================================================= PHASE capsweep ===
 # Bounded probe: does the bs16 admission-cap win exist at bs4 and bs8 too?
 #

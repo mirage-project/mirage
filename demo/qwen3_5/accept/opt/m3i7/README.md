@@ -37,17 +37,46 @@ M4-I0, not closed here.
 ## 2. Performance
 
 Three geometries, because they answer three different questions. Medians over 3 reps, full
-range quoted, per-rep values in `tables/perf_raw.json`. Every rep's device state was audited
-before the run against the foreign floor the guard recorded at claim time.
+range quoted. **Every rep of every arm is listed in §2d and `tables/geomM_per_rep.csv`**, so
+the ≥3-rep rule can be checked arm by arm without opening a raw artifact.
 
-**Discarded reps.** Three, all in the prefill-only arm, all rep 0 of their config: bs1
-(9364 MiB resident at start), bs4 (1866 MiB), bs16 (1061 MiB) against a 1032 MiB limit. Those
-prefill medians are therefore n=2, not n=3; the full-run arm is n=3 everywhere. The effect is
-small and in the conservative direction — bs1's discarded rep read 325.7 ms against the 322.1
-ms median, which moves the decode slope by 0.04 % — but it is below the pinned ≥3-rep rule and
-is called out rather than averaged in. bs16's full-run arm also has a 6.19 % range (one rep at
-16111 ms against 15169/15217); its median is the lower cluster and the cap A/B in §2c, which
-was captured in a separate window, reproduces it at 15210 ms.
+### Correction (second pass) — the n=2 prefill medians
+
+The first pass reported three prefill reps as discarded-dirty (bs1/bs4/bs16), leaving those
+prefill medians at n=2. That is below M3's pinned ≥3-rep rule, and since the prefill median is
+a term in the decode slope it propagated into three of the five binding rows.
+
+Closing it turned up the real cause: **the phantom dirty reps were a bug in my own analysis
+script, not contaminated data.** `gpu_before` records all eight devices per run, and
+`load_audit` selected by a hand-supplied *list* of candidate devices with last-match-wins — so
+it scored whichever co-tenant card came last rather than the device the run was pinned to. The
+9364 MiB charged to bs1's prefill rep0 belonged to a different card; the pinned device held
+635 MiB, well inside the limit. `i7_tables.py` and `perrep.py` now derive the pinned device per
+tag from each phase log's own `GATE gpu=N` line. On that basis the first window was already
+n=3 in every arm.
+
+The data was re-captured anyway rather than merely re-scored — a scoring bug is not evidence
+that the runs were sound. Phase `perfM2` re-ran bs1/bs4/bs16 at 256/1024 with **both arms
+interleaved in one window on a verified-idle box** (foreign floor 5 MiB; both arms because the
+slope subtracts one from the other and they must share a window). All reps clean, n=3 both
+arms. What moved:
+
+| bs | prefill ms as first reported (n=2) | prefill ms now (n=3, perfM2) | decode tok/s | shift | gap |
+|----|---:|---:|---:|---:|---:|
+| 1  | 322.1  | 326.1  | 102.6 → 102.2  | −0.47 % | 2.78 → 2.79× |
+| 4  | 1188.5 | 1190.4 | 392.7 → 392.6  | −0.04 % | 2.38 → 2.38× |
+| 16 | 3060.1 | 3041.4 | 1343.7 → 1339.8 | −0.16 % | 2.25 → 2.25× |
+
+**No conclusion changes.** Every shift is under 0.5 %, all in the conservative direction, and
+no gap moves by more than 0.01×. Cross-window control: the full-run arm was already clean at
+n=3 in *both* windows and its medians agree to +0.46 % / +0.04 % / +0.11 %, which is
+independent evidence that the two windows are comparable — so the bs2/bs8 rows retained from
+the first window sit on the same footing. Superseded values are kept in
+`tables/perrep_and_corrected.json` and `tables/geomM_window1_perfM.csv`.
+
+bs16's full-run arm carries a ~6.2 % range in both windows (one rep near 16.1 s against two
+near 15.2 s); its median is the lower cluster, and the independently captured cap A/B in §2c
+reproduces it at 15210 ms.
 
 ### 2a. AC-3 geometry, M3-I1's exact shape — how far M3 moved
 
@@ -72,13 +101,16 @@ prefill-subtracted slope `bs·(D_full − D_pre)/(wall_full − wall_pre)`, whic
 tokens-÷-decode-window definition. bs16 runs the pinned capped policy; bs1–8 uncapped.
 (`tables/geomM_matched_256_1024.csv`)
 
-| bs | e2e s | range | prefill s | decode tok/s | vLLM  | gap  | vLLM e2e | e2e gap |
-|----|------:|------:|----------:|-------------:|------:|-----:|---------:|--------:|
-| 1  | 10.27 | 0.25% | 0.32      | 102.6        | 285.5 | 2.78×| 3.60     | 2.85×   |
-| 2  | 10.81 | 0.57% | 0.62      | 200.4        | 529.8 | 2.64×| 3.89     | 2.78×   |
-| 4  | 11.59 | 0.93% | 1.19      | 392.7        | 934.4 | 2.38×| 4.45     | 2.60×   |
-| 8  | 14.41 | 0.80% | 2.94      | 712.4        | 1692.5| 2.38×| 4.95     | 2.91×   |
-| 16 | 15.22 | 6.19% | 3.06      | 1343.7       | 3018.1| 2.25×| 5.57     | 2.73×   |
+All rows n=3 in both arms. `win` names the capture window: `M2` is the second-pass re-capture
+(bs1/bs4/bs16), `M` the first (bs2/bs8) — see the correction above.
+
+| bs | win | e2e s | range | prefill s | range | decode tok/s | vLLM  | gap  | vLLM e2e | e2e gap |
+|----|-----|------:|------:|----------:|------:|-------------:|------:|-----:|---------:|--------:|
+| 1  | M2  | 10.32 | 0.54% | 0.326     | 6.41% | 102.2        | 285.5 | 2.79×| 3.60     | 2.87×   |
+| 2  | M   | 10.81 | 0.57% | 0.624     | 4.76% | 200.4        | 529.8 | 2.64×| 3.89     | 2.78×   |
+| 4  | M2  | 11.59 | 0.65% | 1.190     | 0.32% | 392.6        | 934.4 | 2.38×| 4.45     | 2.61×   |
+| 8  | M   | 14.41 | 0.80% | 2.940     | 0.22% | 712.4        | 1692.5| 2.38×| 4.95     | 2.91×   |
+| 16 | M2  | 15.23 | 6.22% | 3.041     | 0.20% | 1339.8       | 3018.1| 2.25×| 5.57     | 2.74×   |
 
 The previously recorded matched-geometry gaps (3.84/3.63/3.26/3.36/4.17×) are **not
 comparable** and should be retired — see §4.
@@ -101,6 +133,66 @@ recorded +84.2 % / +14.1 %. Mechanism, from the adapter's own admission replay: 
 whole `mbt` budget goes to the lowest live slot, so requests prefill nearly serially —
 1887 wave iterations at bs16 versus 1279 capped. The same arithmetic predicts bs4 and bs8, and
 they measure as predicted. `docs/qwen35/bench-protocol.md` is amended accordingly.
+
+### 2d. Every rep, every arm
+
+Wall ms per rep, in rep order, so the ≥3-rep rule is checkable inline. **All 31 arms are n=3;
+none are discarded.** The 256/1024 arms are in `tables/geomM_per_rep.csv` with the pinned
+device's `gpu_before` beside each rep; the rest are here.
+
+| arm | per-rep wall ms | median | n | range |
+|-----|-----------------|-------:|--:|------:|
+| A1 unprofiled bs1 | 1083.4 1049.2 1045.8 | 1049.2 | 3 | 3.58% |
+| A1 unprofiled bs2 | 1069.8 1084.4 1087.1 | 1084.4 | 3 | 1.60% |
+| A1 unprofiled bs4 | 1123.4 1122.1 1130.1 | 1123.4 | 3 | 0.71% |
+| A1 unprofiled bs8 | 1361.5 1359.3 1356.1 | 1359.3 | 3 | 0.39% |
+| A1 unprofiled bs16 | 3305.2 3305.3 3361.9 | 3305.3 | 3 | 1.71% |
+| A full-gate bs1 | 9218.2 9349.8 9377.3 | 9349.8 | 3 | 1.70% |
+| A full-gate bs2 | 4964.7 4977.0 4966.8 | 4966.8 | 3 | 0.25% |
+| A full-gate bs4 | 3254.2 3254.7 3308.0 | 3254.7 | 3 | 1.65% |
+| A full-gate bs8 | 2962.3 2911.7 2917.1 | 2917.1 | 3 | 1.73% |
+| A full-gate bs16 | 3307.3 3324.3 3328.2 | 3324.3 | 3 | 0.63% |
+| M full bs1 (window M) | 10288.9 10262.7 10270.0 | 10270.0 | 3 | 0.25% |
+| M pre bs1 (window M) | 325.7 332.8 311.5 | 325.7 | 3 | 6.54% |
+| **M2 full bs1** | 10365.0 10308.9 10317.0 | **10317.0** | 3 | 0.54% |
+| **M2 pre bs1** | 326.1 333.2 312.3 | **326.1** | 3 | 6.41% |
+| **M full bs2** | 10812.5 10823.9 10762.4 | **10812.5** | 3 | 0.57% |
+| **M pre bs2** | 624.0 616.2 645.9 | **624.0** | 3 | 4.76% |
+| M full bs4 (window M) | 11571.1 11588.2 11678.7 | 11588.2 | 3 | 0.93% |
+| M pre bs4 (window M) | 1195.8 1187.3 1189.6 | 1189.6 | 3 | 0.71% |
+| **M2 full bs4** | 11558.0 11592.9 11633.6 | **11592.9** | 3 | 0.65% |
+| **M2 pre bs4** | 1192.0 1188.2 1190.4 | **1190.4** | 3 | 0.32% |
+| **M full bs8** | 14353.3 14405.2 14468.4 | **14405.2** | 3 | 0.80% |
+| **M pre bs8** | 2934.5 2939.5 2940.9 | **2939.5** | 3 | 0.22% |
+| M full bs16 (window M) | 15217.5 15169.0 16110.5 | 15217.5 | 3 | 6.19% |
+| M pre bs16 (window M) | 3039.7 3075.7 3044.5 | 3044.5 | 3 | 1.18% |
+| **M2 full bs16** | 15234.2 15192.5 16139.3 | **15234.2** | 3 | 6.22% |
+| **M2 pre bs16** | 3041.4 3037.7 3043.7 | **3041.4** | 3 | 0.20% |
+| cap16 AC-3 bs16 uncapped | 3307.8 3307.9 3308.4 | 3307.9 | 3 | 0.02% |
+| cap16 AC-3 bs16 capped | 1573.1 1592.7 1572.8 | 1573.1 | 3 | 1.27% |
+| cap16 M full bs16 uncapped | 28291.5 28188.1 29746.3 | 28291.5 | 3 | 5.51% |
+| cap16 M pre bs16 uncapped | 8254.2 8250.2 8257.9 | 8254.2 | 3 | 0.09% |
+| cap16 M full bs16 capped | 15210.5 15166.1 16111.3 | 15210.5 | 3 | 6.21% |
+| cap16 M pre bs16 capped | 3040.8 3039.1 3044.9 | 3040.8 | 3 | 0.19% |
+| capsweep M full bs4 capped | 11112.9 11149.7 11186.9 | 11149.7 | 3 | 0.66% |
+| capsweep M pre bs4 capped | 822.7 819.3 830.3 | 822.7 | 3 | 1.33% |
+| capsweep M full bs8 capped | 12585.7 12640.4 12637.3 | 12637.3 | 3 | 0.43% |
+| capsweep M pre bs8 capped | 1700.6 1702.8 1701.2 | 1701.2 | 3 | 0.13% |
+| prof msl=353 unprofiled bs1 | 1203.2 1230.8 1203.2 | 1203.2 | 3 | 2.30% |
+| prof msl=353 unprofiled bs8 | 4275.3 4264.3 4270.4 | 4270.4 | 3 | 0.26% |
+| prof msl=353 unprofiled bs16 | 10498.2 10421.4 10410.0 | 10421.4 | 3 | 0.85% |
+| late msl=897 unprofiled bs1 | 6457.6 6457.3 6456.4 | 6457.3 | 3 | 0.02% |
+| late msl=897 unprofiled bs8 | 10175.5 10161.2 10213.8 | 10175.5 | 3 | 0.52% |
+| late msl=897 unprofiled bs16 | 22730.4 22199.4 21997.7 | 22199.4 | 3 | 3.30% |
+
+Bold rows are the ones the §2b table is built from. The `window M` rows at bs1/bs4/bs16 are
+the superseded first-pass captures, retained so the correction is auditable; their medians
+differ from the M2 window by 0.04–0.46 % on the full arm.
+
+The profiled captures are single-rep by design (per-step task-event counts are
+schedule-determined and seed-independent, and the unprofiled reps above bound the wave-wall
+dispersion they are normalised against) — that is a decomposition, not a timing, and is stated
+as such in `basis_caveat.txt`.
 
 ## 3. Re-derived per-stage comparison
 
@@ -211,8 +303,14 @@ registered for M4**. One line each:
 
 ## 6. Residual-gap ranking for M4
 
-1. **Prefill throughput** — 20–31 % of the 256/1024 e2e, and at bs8 MPK's prefill alone
-   (2.94 s) is 59 % of vLLM's entire end-to-end time. No M3 backlog item covered it; every M3
+1. **Prefill throughput** — 3.2 / 5.8 / 10.3 / 20.4 / 20.0 % of the 256/1024 e2e at
+   bs1/2/4/8/16 under the pinned policy (29.2 % at bs16 uncapped). The scale that matters is
+   against the reference, not against ourselves: at bs8 MPK's prefill **alone** (2.94 s) is
+   59 % of vLLM's entire end-to-end time (4.95 s), and at bs16 it is 55 %.
+   *(Corrected in the second pass: an earlier draft quoted "20–31 %" for the whole sweep,
+   which came from mixing the bs16 UNCAPPED arm into a table that is otherwise the pinned
+   capped policy. The bs8 figure against vLLM was and is right, and it is the one the ranking
+   rests on.)* No M3 backlog item covered it; every M3
    measurement was a decode step. Cheapest first move is already measured: extend the
    admission cap to bs4/bs8 (+3.9 % / +14.0 % e2e, AC-3 byte-identical). Then `mbt` for the
    prefill phase — M3-I5b rejected raising it on *decode* evidence, which does not bind here.

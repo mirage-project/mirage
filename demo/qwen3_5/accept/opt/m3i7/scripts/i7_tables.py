@@ -81,16 +81,44 @@ def pct_range(m, lo, hi):
 
 
 # --------------------------------------------------------------- dirty reps --
+def tag_gpu(root):
+    """tag -> the device that phase actually pinned.
+
+    CORRECTION (M3-I7, second pass): the audit file records ALL EIGHT devices per
+    run, so selecting by a hand-supplied device -- or, as this function first did,
+    letting the last matching line win across a list of candidate devices --
+    reports whichever co-tenant happened to be last, not the device the run was
+    pinned to. That is exactly the difference between "this rep started dirty"
+    and "some other card did", and it produced three phantom dirty reps in this
+    issue's first pass. Each phase log names its own device once (`GATE gpu=N`)
+    and lists every tag that phase ran, so the mapping is recoverable exactly.
+    """
+    out = {}
+    for log in sorted((Path(root) / "logs").glob("run_*.log")):
+        txt = log.read_text(errors="replace")
+        m = re.search(r"GATE gpu=(\d+)", txt)
+        if not m:
+            continue
+        g = int(m.group(1))
+        for t in set(re.findall(r"^\s*\[(\S+)\] rc=", txt, re.M)):
+            out[t] = g
+    return out
+
+
 def load_audit(root, gpu, floor):
-    """tag -> MiB resident on the pinned device just before that run started."""
+    """tag -> MiB resident on the PINNED device just before that run started."""
+    tg = tag_gpu(root)
     out = {}
     p = Path(root) / "audit" / "gpu_before.txt"
     if not p.exists():
         return out
     for line in p.read_text().splitlines():
         m = re.match(r"^(\S+)\s+(\d+),\s*(\d+)\s*MiB,\s*(\d+)\s*%", line.strip())
-        if m and int(m.group(2)) == gpu:
-            out[m.group(1)] = int(m.group(3))     # last occurrence wins
+        if not m:
+            continue
+        tag, dev, mib = m.group(1), int(m.group(2)), int(m.group(3))
+        if tag in tg and dev == tg[tag]:
+            out[tag] = mib
     return out
 
 
@@ -302,7 +330,10 @@ def main(argv=None):
             print(f"wrote {out / name}")
         dump("geomA1_ac3_shape.csv", a1rows)
         dump("geomA_ac3_full.csv", garows)
-        dump("geomM_matched_256_1024.csv", gmrows)
+        # window-1 only; the CANONICAL 256/1024 table is perrep.py's
+        # geomM_matched_256_1024.csv, which selects per bs between this window
+        # and the perfM2 re-capture and labels every row with its window.
+        dump("geomM_window1_perfM.csv", gmrows)
         json.dump(dict(geomA1=a1, geomA=ga, geomM=gm, gpu=str(a.gpu), floor=a.floor,
                        dirty_limit_mib=limit),
                   open(out / "perf_raw.json", "w"), indent=1, default=str)

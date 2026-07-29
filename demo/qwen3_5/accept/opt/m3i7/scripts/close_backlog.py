@@ -120,11 +120,14 @@ NEW_LEVERS = [
     {"lever": "MPK prefill throughput at the 256/1024 workload",
      "found_by": CLOSE,
      "evidence": "Measured directly for the first time: the prefill-only arm (same "
-                 "prompts, msl=259) costs 322/624/1189/2940/3060 ms at bs1/2/4/8/16 "
-                 "uncapped, i.e. 20-31% of the whole 256/1024 e2e, and at bs8 MPK's "
+                 "prompts, msl=259, n=3) costs 326/624/1190/2940/3041 ms at "
+                 "bs1/2/4/8/16 under the pinned policy = 3.2/5.8/10.3/20.4/20.0% of the "
+                 "whole 256/1024 e2e, rising to 29.2% at bs16 uncapped. The scale that "
+                 "matters is against the REFERENCE, not against ourselves: at bs8 MPK's "
                  "prefill ALONE (2.94 s) is 59% of vLLM's entire end-to-end time "
-                 "(4.95 s). No M3 backlog item covers prefill: every M3 measurement was "
-                 "a decode step. opt/m3i7/tables/geomM_matched_256_1024.csv.",
+                 "(4.95 s), and at bs16 it is 55%. No M3 backlog item covers prefill: "
+                 "every M3 measurement was a decode step. "
+                 "opt/m3i7/tables/geomM_matched_256_1024.csv.",
      "mechanism": "mbt=16 caps the whole engine at 16 prefill tokens per iteration, so a "
                   "256-token prompt needs >=16 iterations and bs*256 tokens need "
                   "bs*16 iterations at best -- and uncapped admission makes it far worse "
