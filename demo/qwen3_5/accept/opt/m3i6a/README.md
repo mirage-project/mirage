@@ -96,13 +96,90 @@ Attention wall span, µs/step (`tables/ctx_sweep.csv`):
 | 8 | 407 | 959.8 | 518.8 | 517.6 | 0.540 | 0.539 | 11572.0 | 10655.3 | 0.921 |
 | 8 | 789 | 1491.0 | 723.9 | 718.8 | 0.485 | 0.482 | 12099.6 | 10856.7 | 0.897 |
 
-**Pass size 2 is the pick.** 1 and 2 have the same register profile (238 vs 240, both zero spill)
-and their decode cost differs by ≤ 1.7 %, but pass size 1 halves the pass length and so doubles the
-pass count of every prefill chunk — 16 passes for an `mbt=16` chunk instead of 8, each replaying the
-KV stream. In every prefill-containing window that costs 20–24 %: bs1 window 0–96 (16 prefill
-slot-iterations) reads 945.1 µs at pass 2 against 1174.0 at pass 1; bs8 window 141–237 (29) reads
-886.0 against 1059.2. Pass size 2 also fills the m16n16k16 tile exactly (2 tokens × 8 q-heads = 16
-rows), so no MMA rows are wasted during prefill. Pass sizes ≥ 6 are inadmissible (smem).
+Pass sizes ≥ 6 are inadmissible (the smem `static_assert`), so the admissible set is {1, 2, 4} and
+the choice between 1 and 2 is settled by §3a.
+
+Read on its own this profiler view is **ambiguous** between 1 and 2: they have the same register
+profile (238 vs 240, both zero spill), pass 1 is ~1.7 % cheaper per decode step, and in
+prefill-containing windows it is 20–24 % worse (bs1 window 0–96, 16 prefill slot-iterations: 945.1 µs
+at pass 2 against 1174.0 at pass 1; bs8 window 141–237: 886.0 against 1059.2). Two batch sizes of
+profiler windows cannot weigh those against each other, which is why the selection rests on the
+end-to-end sweep below and not on this table.
+
+## 3a. The complete three-way sweep — how 2 vs 1 is settled
+
+`tables/sweep3_table.txt`, `tables/sweep3_medians.csv`; driver `scripts/phase6.sh`, analyser
+`scripts/sweep3.py`. **135 reps — 3 per (geometry, bs, arm), 0 discarded.** All three arms run
+back-to-back per (bs, rep) inside one GPU claim at integrated HEAD (`f3606f2c`), so drift or a
+co-tenant hits all three equally; `MPK_ATTN_Q_PASS` makes every arm available from one tree, so
+nothing changes between arms but that one value. Every rep is drain-gated (pinned device below
+500 MiB before it starts) and audited from **its own record** — `meta.cuda_visible_devices` +
+`gpu_before` for the `profile_wave` geometries, a per-rep sidecar for the AC-3 geometry — never from
+the candidate list the guard was handed, which is not evidence of what actually ran.
+
+The two perf geometries deliberately **bracket** the tradeoff rather than sampling one side of it: B
+is the prefill-heavy end (256·bs/16 prefill iterations against 96 decode steps, where pass 1's
+doubled pass count should hurt most) and C is the decode-heavy end (16 prefill iterations per request
+against 640 decode steps, where pass 1's lower per-KV-token cost should help most).
+
+Ratios are median/median; **`1 vs 2` above 1.000 means pass 1 is slower**. `sp%` is rep spread as a
+percentage of the median.
+
+**Geometry A — AC-3 (10 pinned reference prompts, msl=132), Σ wave wall_ms**
+
+| bs | pass 4 | sp% | pass 2 | sp% | pass 1 | sp% | 2 vs 4 | 1 vs 4 | **1 vs 2** |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 9481.3 | 1.58 | 9308.7 | 2.84 | 9266.9 | 0.55 | 0.9818 | 0.9774 | 0.9955 |
+| 2 | 5139.4 | 4.52 | 4974.1 | 0.39 | 4983.8 | 0.09 | 0.9678 | 0.9697 | 1.0020 |
+| 4 | 3366.7 | 3.04 | 3259.5 | 2.84 | 3305.2 | 0.64 | 0.9681 | 0.9817 | 1.0140 |
+| 8 | 2984.8 | 0.05 | 2917.1 | 0.61 | 2954.3 | 0.48 | 0.9773 | 0.9898 | 1.0128 |
+| 16 | 3383.1 | 1.25 | 3313.1 | 1.38 | 3327.3 | 1.97 | 0.9793 | 0.9835 | 1.0043 |
+| **all** | 24355.3 | | 23772.4 | | 23837.4 | | 0.9761 | 0.9787 | **1.0027** |
+
+Per-wave median ms/decode-step on the same runs puts pass 1 behind pass 2 at *every* batch size,
+bs1 included: 1.0029 / 1.0015 / 1.0150 / 1.0126 / 1.0043.
+
+**Geometry B — matched 256/1024 (msl=353, 96 decode steps), unprofiled wave wall_ms**
+
+| bs | pass 4 | sp% | pass 2 | sp% | pass 1 | sp% | 2 vs 4 | 1 vs 4 | **1 vs 2** |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1251.7 | 0.23 | 1205.9 | 0.12 | 1230.6 | 0.17 | 0.9635 | 0.9832 | 1.0205 |
+| 2 | 1590.3 | 0.27 | 1540.2 | 0.26 | 1583.0 | 0.57 | 0.9685 | 0.9954 | 1.0277 |
+| 4 | 2243.5 | 0.43 | 2182.2 | 0.39 | 2270.8 | 0.41 | 0.9727 | **1.0122** | 1.0406 |
+| 8 | 4364.6 | 0.26 | 4272.0 | 0.26 | 4428.7 | 0.27 | 0.9788 | **1.0147** | 1.0367 |
+| 16 | 10592.0 | 0.80 | 10458.0 | 0.79 | 10753.0 | 0.76 | 0.9874 | **1.0152** | 1.0282 |
+| **all** | 20042.0 | | 19658.4 | | 20266.1 | | 0.9809 | **1.0112** | **1.0309** |
+
+**Geometry C — deep context (msl=897, 640 decode steps, ctx 257→896), unprofiled wave wall_ms**
+
+| bs | pass 4 | sp% | pass 2 | sp% | pass 1 | sp% | 2 vs 4 | 1 vs 4 | **1 vs 2** |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 6889.4 | 0.13 | 6480.4 | 0.16 | 6509.4 | 0.11 | 0.9406 | 0.9448 | 1.0045 |
+| 2 | 7360.3 | 0.33 | 6928.5 | 0.32 | 6964.4 | 0.31 | 0.9413 | 0.9462 | 1.0052 |
+| 4 | 8136.7 | 0.42 | 7669.5 | 0.31 | 7734.6 | 0.91 | 0.9426 | 0.9506 | 1.0085 |
+| 8 | 10759.5 | 0.47 | 10201.6 | 0.43 | 10336.1 | 0.45 | 0.9482 | 0.9606 | 1.0132 |
+| 16 | 23252.6 | 3.18 | 22229.0 | 3.30 | 22431.8 | 3.27 | 0.9560 | 0.9647 | 1.0091 |
+| **all** | 56398.5 | | 53508.9 | | 53976.2 | | **0.9488** | 0.9571 | **1.0087** |
+
+**Pass size 2 is the pick, and the sweep is unanimous.** Pass 1 is slower than pass 2 in **14 of the
+15 (geometry, bs) cells**. The single cell where it is nominally ahead — geometry A bs1, 0.9955 —
+sits well inside pass 2's own 2.84 % rep spread there, and the same pair reverses on that geometry's
+per-wave ms/decode-step metric (1.0029). The margin is 0.3 % aggregate at the AC-3 geometry, 0.9 % at
+the decode-heavy end and **3.1 % at the prefill-heavy end** — the ordering the mechanism predicts,
+because what pass 1 buys (a marginally cheaper KV tile) is fixed, while what it costs (twice the
+passes, each replaying the KV stream) scales with prefill work.
+
+The sharpest result is one the profiler-only view could not have produced: at geometry B **pass 1 is
+worse than the shipped pass 4** at bs 4, 8 and 16 (1.0122 / 1.0147 / 1.0152 against rep spreads
+≤ 0.8 %). Choosing 1 would have been a regression at the matched 256/1024 geometry across most of the
+batch range, so this was not a cosmetic tie-break. Structurally, pass 2 fills the m16n16k16 tile
+exactly (2 tokens × 8 q-heads = 16 rows) while pass 1 leaves half of it idle during prefill, which is
+why the measured ordering comes out this way.
+
+This sweep is the **primary** e2e evidence, superseding §5's two-arm tables: same protocol, same
+tree, interleaved, fully audited, where §5's geometry A predates the drain gate. It also
+independently **reproduces** §5 at a different tree — geometry C pass 2 vs 4 lands at
++6.3 / +5.5 / +4.6 % (bs1 / bs8 / bs16) here against +6.2 / +5.5 / +4.6 % there.
 
 ## 4. Gates
 
@@ -135,7 +212,10 @@ logit tie (`opt/m3i8/results/VALIDATION.md`, and M3-I10 caveat 1 records the ide
 The byte-diff against `dumps_final` being exactly identical is the proof this change contributes
 nothing to it.
 
-## 5. End-to-end A/B — 3 reps, median, both arms in the same window
+## 5. End-to-end A/B, first pass — 3 reps, median, two arms (superseded by §3a)
+
+Kept because it is the run the mechanism was first confirmed against, and because its geometry-C
+numbers are what §3a reproduces at a different tree. For the selection, read §3a.
 
 `tables/perf_medians.txt`. Both arms alternate reps inside one GPU claim, so drift hits both
 equally.
@@ -203,14 +283,25 @@ range rather than a band.
 
 | path | what |
 |---|---|
+| `tables/sweep3_table.txt` | **the three-way e2e sweep (pass 4/2/1 × bs 1/2/4/8/16 × 3 geometries), 135 reps, 0 discarded — the selection evidence (§3a)** |
+| `tables/sweep3_medians.csv` | the same, machine-readable: medians, rep spreads, n, and all three pairwise ratios |
 | `tables/ctx_sweep.csv` | the per-window context sweep, all 6 captures (3 pass sizes × bs 1/8), one row per window |
 | `tables/ctx_*.json` | raw `ctx_curve.py` output including each capture's full-span anchor QC |
-| `tables/perf_medians.txt` | the e2e A/B medians, all three geometries |
+| `tables/perf_medians.txt` | the FIRST-pass two-arm e2e medians (§5), superseded by `sweep3_table.txt` |
 | `ptxas/megakernel_qp{4,2,1}.txt` | `-Xptxas -v` on the generated megakernel TU per pass size |
 | `gates/qloop_result.json` | pass-size invariance, 116 rows |
 | `gates/oracle_mt{4,2,1}.json` | HF oracle at each pass size |
 | `gates/bytediff_qp2.json`, `gates/run_report_qp2.json` | AC-3 per-case byte diff + harness report |
-| `scripts/` | every script used: `ctx_curve.py`, `tu_i6a_attn.cu`, `probe_regs.sh`, `mk_ptxas.sh`, `run_ctx.sh`, `gate_*.sh`, `phase*.sh`, `perf_medians.py`, `gpu_guard_i6a.sh`, `retry.sh` |
+| `scripts/` | every script used: `ctx_curve.py`, `tu_i6a_attn.cu`, `probe_regs.sh`, `mk_ptxas.sh`, `run_ctx.sh`, `gate_*.sh`, `phase*.sh` (`phase6.sh` = the three-way sweep), `sweep3.py` / `sweep3_csv.py`, `perf_medians.py`, `gpu_guard_i6a.sh`, `retry.sh` |
+
+### Provenance
+
+The change landed at `a86b1eb1` on the strength of §§1–5. Cross-provider review then failed it at
+c2 on one gap: the acceptance requires a measured pass-size sweep at **all** batch sizes, and pass 1
+had only been measured in profiler windows at bs1/bs8, so the choice of 2 over 1 rested on partial
+evidence. §3a closes that — it is the whole reason the sweep re-runs all three arms rather than
+bolting a third arm onto the earlier tables. (The issue also sat in `todo` without a verdict while
+these gaps were being closed; the coordinator has corrected its status to `review`.)
 
 Raw profiler `.npz` (6 × 0.5–1.4 GB) and the kernel dirs stay on catalyst-B200 under
 `~/mpk-qwen35/i6a/{prof,perf,ac3}/`; every table above regenerates from them with the committed
@@ -225,6 +316,13 @@ bash probe_regs.sh                      # compile-only: register/spill vs pass s
 bash gpu_guard_i6a.sh 6,3,1,0 -- env QPLIST="4 2 1" BSLIST="1 8" bash run_ctx.sh
 bash mk_ptxas.sh                        # compile-only: the generated megakernel's shared budget
 bash retry.sh phase2.sh                 # oracle at each pass size + full AC-3 sweep + byte diff
-bash retry.sh phase5.sh                 # e2e A/B, geometries B and C, drain-gated
+bash retry.sh phase5.sh                 # first-pass e2e A/B (two arms), geometries B and C
 python3 perf_medians.py ~/mpk-qwen35/i6a
+
+# the selection evidence (SS3a): three arms x 5 batch sizes x 3 geometries, 3 reps,
+# arms interleaved per (bs, rep), drain-gated, resumable. Scratch on /var/tmp because
+# /raid was at 9G box-wide. ~2.7 h on one exclusive GPU.
+CANDS="5,4,1,3" bash retry.sh phase6.sh
+python3 sweep3.py /var/tmp/m3i6a_sweep                       # the table
+python3 sweep3_csv.py /var/tmp/m3i6a_sweep out.csv           # the machine-readable form
 ```
