@@ -1,0 +1,38 @@
+set            rep               pos  state  token  detail
+g0_ctrl        g0_ctrl_c3          5   DIFF   DIFF  tok_p02-math:421/1024 tok_p03-python:265/1024 w2_conv:120/120 w2_k:19370/61440 w2_rec:120/120 w2_v:19370/61440
+g0_fix         g0_fix_c2           4   DIFF      -  w2_conv:60/120 w2_k:3488/61440 w2_rec:60/120 w2_v:3488/61440
+g1_ctrl        g1_ctrl_c1          1   DIFF   DIFF  tok_p07-format:239/1024 w1_conv:30/120 w1_k:6044/61440 w1_rec:30/120 w1_v:6044/61440
+g1_fix         g1_fix_c1           2   DIFF      -  w0_conv:90/120 w0_k:862/61440 w0_rec:90/120 w0_v:862/61440
+k1_ctrl        k1_ctrl_c1          1   DIFF   DIFF  tok_p01-history:485/1024 tok_p04-chinese:422/1024 tok_p06-poem:424/1024 tok_p09-translate:502/1024 w0_conv:120/120 w0_k:28773/61440 w0_rec:120/120 w0_v:28773/61440
+k1_fix         k1_fix_c8          16   DIFF      -  w0_conv:60/120 w0_k:4436/61440 w0_rec:60/120 w0_v:4436/61440
+k2_ctrl        k2_ctrl_c5          9   DIFF      -  w2_conv:14/120 w2_k:990/61440 w2_rec:15/120 w2_v:990/61440
+k2_ctrl        k2_ctrl_c7         13   DIFF   DIFF  tok_p03-python:232/1024 tok_p05-cuda:651/1024 tok_p07-format:792/1024 tok_p08-science:822/1024 tok_p10-logic:847/1024 w1_conv:120/120 w1_k:42110/61440 w1_rec:120/120 w1_v:42110/61440 w2_conv:90/120 w2_k:13580/61440 w2_rec:90/120 w2_v:13580/61440
+k2_ctrl        k2_ctrl_c8         15   DIFF   DIFF  tok_p01-history:875/1024 tok_p02-math:425/1024 tok_p03-python:230/1024 tok_p04-chinese:943/1024 tok_p06-poem:972/1024 tok_p09-translate:829/1024 w0_conv:120/120 w0_k:47131/61440 w0_rec:120/120 w0_v:47131/61440 w2_conv:119/120 w2_k:22754/61440 w2_rec:120/120 w2_v:22754/61440
+k2_ctrl        k2_ctrl_c9         17   DIFF   DIFF  tok_p01-history:495/1024 tok_p02-math:710/1024 tok_p03-python:634/1024 tok_p04-chinese:515/1024 tok_p05-cuda:749/1024 tok_p06-poem:441/1024 tok_p07-format:742/1024 tok_p08-science:745/1024 tok_p09-translate:506/1024 tok_p10-logic:688/1024 w0_conv:120/120 w0_k:29644/61440 w0_rec:120/120 w0_v:29644/61440 w1_conv:120/120 w1_k:39866/61440 w1_rec:120/120 w1_v:39866/61440 w2_conv:119/120 w2_k:38384/61440 w2_rec:120/120 w2_v:38384/61440
+k2_fix         k2_fix_c1           2   DIFF      -  w0_conv:64/120 w0_k:1320/61440 w0_rec:66/120 w0_v:1320/61440
+k2_fix         k2_fix_c7          14   DIFF   DIFF  tok_p02-math:751/1024 tok_p03-python:851/1024 w2_conv:119/120 w2_k:40929/61440 w2_rec:120/120 w2_v:40929/61440
+k2_fix         k2_fix_c8          16   DIFF   DIFF  tok_p01-history:893/1024 tok_p02-math:282/1024 tok_p03-python:233/1024 tok_p04-chinese:953/1024 tok_p05-cuda:490/1024 tok_p06-poem:945/1024 tok_p07-format:144/1024 tok_p08-science:513/1024 tok_p09-translate:843/1024 tok_p10-logic:101/1024 w0_conv:120/120 w0_k:46203/61440 w0_rec:120/120 w0_v:46203/61440 w1_conv:119/120 w1_k:25198/61440 w1_rec:120/120 w1_v:25198/61440 w2_conv:120/120 w2_k:29033/61440 w2_rec:120/120 w2_v:29033/61440
+
+=== per GPU ===
+  g0    ctrl: n=  3 state-div=1 token-div=1
+  g0    fix : n=  2 state-div=1 token-div=0
+  g1    ctrl: n= 10 state-div=1 token-div=1
+  g1    fix : n= 15 state-div=1 token-div=0
+  g7    ctrl: n=  9 state-div=0 token-div=0
+  g7    fix : n= 10 state-div=0 token-div=0
+  h3    ctrl: n= 14 state-div=0 token-div=0
+  h3    fix : n= 14 state-div=0 token-div=0
+  k1    ctrl: n= 10 state-div=1 token-div=1
+  k1    fix : n= 10 state-div=1 token-div=0
+  k2    ctrl: n=  9 state-div=4 token-div=3
+  k2    fix : n=  8 state-div=3 token-div=2
+
+=== pooled ===
+  ctrl: n= 55 state-div=7 (12.7%) token-div=6 (10.9%)
+  fix : n= 59 state-div=6 (10.2%) token-div=2 (3.4%)
+
+pre-registered one-sample test, baseline rate 0.1:
+  P(0 state-div in 59 | rate 0.1) = 0.0020   [observed 6]
+  P(0 token-div in 59 | rate 0.1) = 0.0020   [observed 2]
+  Fisher exact ctrl 7/55 vs fix 6/59 (state): p=0.7718
+  Fisher exact ctrl 6/55 vs fix 2/59 (token): p=0.1522
