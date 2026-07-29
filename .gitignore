@@ -80,6 +80,11 @@ ncu_tmp
 *.nsys-rep
 *.sqlite
 .claude/
+# ...but the dev SKILLS are project deliverables and ARE tracked (a plain
+# `git add .claude/skills/` silently no-ops without these negations).
+!.claude/
+!.claude/skills/
+!.claude/skills/**
 .humanize/
 
 # Local-only Claude docs / scratch PR description — never push
