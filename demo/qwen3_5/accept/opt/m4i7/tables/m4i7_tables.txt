@@ -6,10 +6,9 @@ arm A = base(golden, pre-M4-I7)
 arm B = new(ferret v012 fast)
 
 == gpu_before audit (each run's OWN pinned device, from its OWN record) ==
-   runs: 30   dirty(>500MiB at start): 1   unauditable: 0
+   runs: 30   dirty(>500MiB at start): 0   unauditable: 0
    pinned device(s) across all runs: 4
-   observed pinned-device floors (MiB): [108, 110, 131, 1028]
-   DIRTY ('A', 8, 2): 1028 MiB
+   observed pinned-device floors (MiB): [108, 110, 131]
 
 == per-rep wall_ms (every rep, both arms) ==
  bs arm       rep0       rep1       rep2     median    range
@@ -19,7 +18,7 @@ arm B = new(ferret v012 fast)
   2   B     1016.6     1033.6     1023.2     1023.2     17.1
   4   A     1616.0     1627.4     1624.1     1624.1     11.4
   4   B     1332.8     1378.9     1372.9     1372.9     46.1
-  8   A     2507.6     2498.8     2501.1     2501.1      8.8
+  8   A     2507.6     2498.8     2508.6     2507.6      9.8
   8   B     2222.8     2158.0     2180.2     2180.2     64.8
  16   A     3825.4     3842.0     3825.3     3825.4     16.7
  16   B     3396.2     3433.7     3382.7     3396.2     51.0
@@ -29,7 +28,7 @@ arm B = new(ferret v012 fast)
   1     1095.5      824.7     -270.8  1.3284x     8.5906    11.4116
   2     1267.4     1023.2     -244.3  1.2388x    10.6578    13.2024
   4     1624.1     1372.9     -251.2  1.1830x    14.3015    16.9182
-  8     2501.1     2180.2     -320.9  1.1472x    22.7109    26.0535
+  8     2507.6     2180.2     -327.4  1.1502x    22.7109    26.1211
  16     3825.4     3396.2     -429.2  1.1264x    35.3771    39.8481
 
 == tokens_sha256: does the megakernel emit identical tokens in both arms? ==

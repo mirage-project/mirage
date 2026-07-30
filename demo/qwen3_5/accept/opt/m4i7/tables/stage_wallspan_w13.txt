@@ -1,0 +1,66 @@
+M4-I7 MoE grouped-GEMM stage wallspan (TASK_MOE_W13_FP8_BLOCKSCALE_SM100), ONE steady-window
+decode iteration, profiler ON -- DIAGNOSTIC attribution. The performance
+claim is the --no-profiler A/B in tables/m4i7_tables.txt.
+
+arm A = base(golden, pre-M4-I7)      arm B = new(ferret v012 fast)      NW = 128
+
+== the whole step, and this MoE stage inside it ==
+ bs arm    step_us  tasks    work_us    span_us span/step  meanconc
+  1   A     8670.6  10240    40840.0     2340.7     0.270      94.2
+  1   B     6046.1  10240    59434.8      588.8     0.097      94.3
+ 16   A    11095.1   7600   184872.4     2864.3     0.258      59.0
+ 16   B     9993.7   7510   152440.3     1952.9     0.195      88.6
+
+'tasks' is the stage's LIVE task count in the window, and it is itself
+the primary result: the emitted task count is FIXED at grid.x*grid.y=256
+per (layer, stage), and work-item flattening is what converts dead tasks
+into live ones. A rise here at an unchanged emitted count IS the mechanism.
+
+== before -> after, and the width residual M4-I5 owns ==
+bs1:
+   stage WORK        40840.0 ->   59434.8 us  (0.687x)
+   stage WALLSPAN     2340.7 ->     588.8 us  (3.975x, -1751.9 us)
+   step               8670.6 ->    6046.1 us  (-2624.4 us)
+   mean concurrency during the stage  94.2 -> 94.3  of 128
+   WIDTH RESIDUAL (after) 124.5 us = 21.1% of the stage's remaining wallspan
+     (ideal span at full width = work/128 = 464.3 us)
+     bounded with arm A's un-inflated work: ideal 319.1 us -> residual 269.7 us
+   HEADROOM LEFT IN THIS STAGE: it is now 9.7% of the step, so driving this stage to
+     ZERO would leave 5457.3 us of the 6046.1 us step standing.
+
+bs16:
+   stage WORK       184872.4 ->  152440.3 us  (1.213x)
+   stage WALLSPAN     2864.3 ->    1952.9 us  (1.467x, -911.4 us)
+   step              11095.1 ->    9993.7 us  (-1101.5 us)
+   mean concurrency during the stage  59.0 -> 88.6  of 128
+   WIDTH RESIDUAL (after) 762.0 us = 39.0% of the stage's remaining wallspan
+     (ideal span at full width = work/128 = 1190.9 us)
+     bounded with arm A's un-inflated work: ideal 1444.3 us -> residual 508.6 us
+   HEADROOM LEFT IN THIS STAGE: it is now 19.5% of the step, so driving this stage to
+     ZERO would leave 8040.7 us of the 9993.7 us step standing.
+
+READING IT, and the mechanism -- because 'work' goes UP while 'wallspan'
+goes DOWN, and a number you cannot explain you cannot trust:
+
+  Flattening multiplies the LIVE task count by NUM_N_BLOCKS (and by 2x
+  more on PATH 2's TILE_N=64). Each work item re-pays a fixed prologue --
+  the routing gather, the A-tile fetch, the stage-0 B hoist -- so the SUM
+  of per-task durations can rise. What falls is the UNION:
+  mean concurrency during the stage goes from well under half the machine
+  to near-saturation, and the stage's WALLSPAN -- the only part the step
+  actually pays -- drops ~1.8-1.9x. The win is WIDTH, not less work. That
+  is also why the standalone ferret metric (whole-grid latency) and this
+  agree while the per-task sum does not.
+
+  The WIDTH RESIDUAL is what a faster MoE kernel cannot remove. But
+  the more decision-relevant number is the stage's SHARE of the step: once
+  that is small, further kernel work on this task has a hard ceiling no
+  matter how good the kernel gets, and the remaining gap is elsewhere.
+
+CAVEAT ON THE WORK/TASK-COUNT COLUMNS: concurrency.py measures one
+steady-window iteration whose bounds it detects per run, and the two arms'
+windows do not cover identical fractions of an iteration (visible as arm
+A's task count differing between bs1 and bs16 when the graph is fixed).
+wall_span/step, mean concurrency and the span ratio are normalised and
+robust to that; absolute work_us and task counts are not, and are reported
+as mechanism evidence rather than as measurements.

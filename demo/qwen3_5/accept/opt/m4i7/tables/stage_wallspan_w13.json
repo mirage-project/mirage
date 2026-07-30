@@ -1,0 +1,54 @@
+{
+ "NW": 128,
+ "stage": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+ "arms": {
+  "A": "base(golden, pre-M4-I7)",
+  "B": "new(ferret v012 fast)"
+ },
+ "rows": [
+  {
+   "bs": 1,
+   "step_us_A": 8670.592,
+   "step_us_B": 6046.144,
+   "work_us_A": 40839.968,
+   "work_us_B": 59434.752,
+   "work_speedup": 0.6871395374881012,
+   "span_us_A": 2340.736,
+   "span_us_B": 588.8,
+   "span_speedup": 3.9754347826086955,
+   "span_gain_us": 1751.936,
+   "step_gain_us": 2624.4480000000003,
+   "ideal_span_us_B": 464.334,
+   "width_residual_us_B": 124.46599999999995,
+   "residual_share_B": 0.21138926630434776,
+   "mean_conc_A": 94.248828125,
+   "mean_conc_B": 94.27822265625,
+   "ideal_span_us_A_work": 319.06225,
+   "width_residual_us_altbase": 269.73774999999995,
+   "step_floor_if_stage_free_us": 5457.344,
+   "stage_share_of_step_B": 0.09738438250891807
+  },
+  {
+   "bs": 16,
+   "step_us_A": 11095.136,
+   "step_us_B": 9993.664,
+   "work_us_A": 184872.416,
+   "work_us_B": 152440.32,
+   "work_speedup": 1.212752741531899,
+   "span_us_A": 2864.32,
+   "span_us_B": 1952.928,
+   "span_speedup": 1.4666797751888447,
+   "span_gain_us": 911.392,
+   "step_gain_us": 1101.4719999999998,
+   "ideal_span_us_B": 1190.94,
+   "width_residual_us_B": 761.988,
+   "residual_share_B": 0.3901772108341936,
+   "mean_conc_A": 58.984605263157896,
+   "mean_conc_B": 88.6474034620506,
+   "ideal_span_us_A_work": 1444.31575,
+   "width_residual_us_altbase": 508.61225000000013,
+   "step_floor_if_stage_free_us": 8040.736000000001,
+   "stage_share_of_step_B": 0.19541661596787724
+  }
+ ]
+}
