@@ -1,0 +1,41 @@
+M4-I6 MoE-router integration A/B -- geometry B (synthetic 256-token
+prompts, msl=353, 96 decode steps), arms interleaved per (bs, rep) in one
+GPU claim.
+
+arm A = base(M3-I5b/I5c/I8 router)
+arm B = new(ferret v013 router)
+
+== gpu_before audit (each run's OWN pinned device, from its OWN record) ==
+   runs: 30   dirty(>500MiB at start): 1   unauditable: 0
+   pinned device(s) across all runs: 7
+   observed pinned-device floors (MiB): [66, 68, 70, 2656]
+   DIRTY ('B', 1, 0): 2656 MiB
+
+== per-rep wall_ms (every rep, both arms) ==
+ bs arm       rep0       rep1       rep2     median    range
+  1   A     1096.2     1093.4     1094.6     1094.6      2.7
+  1   B     1049.7     1046.4     1051.9     1049.7      5.5
+  2   A     1264.2     1271.4     1266.7     1266.7      7.2
+  2   B     1215.2     1227.7     1217.5     1217.5     12.4
+  4   A     1637.8     1637.7     1626.9     1637.7     10.9
+  4   B     1544.3     1598.2     1559.3     1559.3     54.0
+  8   A     2503.8     2492.9     2498.1     2498.1     10.8
+  8   B     2411.8     2402.6     2407.2     2407.2      9.1
+ 16   A     3807.0     3824.2     3807.0     3807.0     17.2
+ 16   B     3678.4     3690.3     3688.5     3688.5     11.9
+
+== median wall_ms, and the integration's e2e effect ==
+ bs     A base      B new   delta_ms  speedup  B ms/step  A ms/step
+  1     1094.6     1049.7      -44.8  1.0427x    10.9345    11.4016
+  2     1266.7     1217.5      -49.2  1.0404x    12.6827    13.1951
+  4     1637.7     1559.3      -78.4  1.0503x    16.2422    17.0589
+  8     2498.1     2407.2      -90.9  1.0378x    25.0747    26.0216
+ 16     3807.0     3688.5     -118.5  1.0321x    38.4217    39.6564
+
+== tokens_sha256: does the megakernel emit identical tokens in both arms? ==
+   (gate 1 proved live-row bit-exactness on synthetic tensors and HF
+    dumps; this is the same property through 40 real layers, and it is
+    also the check that the padding-row zero-weight divergence stays
+    unobservable in the emitted tokens)
+   identical: 15   differing: 0
+
