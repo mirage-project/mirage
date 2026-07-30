@@ -723,13 +723,36 @@ def main():
         # realized longest path; this is the realized one.
         prio = cp_priority(gr, dur, allpos)
         tot = int(sum(int(dur[p]) for p in allpos))
+        cp0 = max(prio.values()) / 1e3
         out["floors"] = dict(
-            cp_exact_us=max(prio.values()) / 1e3,
+            cp_exact_us=cp0,
             work_bound_us=tot / a.workers / 1e3,
             total_task_us=tot / 1e3,
             n_dead_tasks=int(sum(1 for p in allpos if 0 < dur[p] < DEAD_NS)),
             dead_task_us=float(sum(int(dur[p]) for p in allpos
                                    if 0 < dur[p] < DEAD_NS)) / 1e3)
+        # ---- COUNTERFACTUALS on the exact floor ---------------------------
+        # Both floors are what remain after every scheduling and latency fix, so
+        # the only way past them is to change the GRAPH: make a stage cheaper, or
+        # take it off the chain entirely.  Zeroing one task type's duration
+        # prices "this stage becomes free / gets fused into its neighbour" for
+        # both floors at once, which is the honest way to rank the next levers.
+        ttype = gr["ttype"]
+        chain_types = [r["task_type"] for r in d["chain_by_type"]][:14]
+        cf = []
+        for t in chain_types:
+            d2 = dur.copy()
+            m = (ttype == t)
+            removed = int(d2[m].sum())
+            d2[m] = 0
+            p2 = cp_priority(gr, d2, allpos)
+            cf.append(dict(task_type=t, name=names.get(str(t), f"T{t}"),
+                           cp_exact_us=max(p2.values()) / 1e3,
+                           cp_delta_us=cp0 - max(p2.values()) / 1e3,
+                           work_bound_us=(tot - removed) / a.workers / 1e3,
+                           removed_task_us=removed / 1e3))
+        cf.sort(key=lambda r: -r["cp_delta_us"])
+        out["floor_counterfactuals"] = cf
 
     if a.out:
         Path(a.out).write_text(json.dumps(out, indent=1))
