@@ -70,8 +70,12 @@ drain () {
 
 arm_env () {
   case "$1" in
-    A) echo "" ;;
-    F) echo "MPK_FUSE_SILU_QUANT=1" ;;
+    A) echo "" ;;                                     # HEAD, all flags off
+    F) echo "MPK_FUSE_SILU_QUANT=1" ;;                # MoE SwiGLU + quantize
+    N) echo "MPK_FUSE_NORM_QUANT=1" ;;                # pre-norm + quantize
+    C) echo "MPK_FUSE_COMBINE_NORM=1" ;;              # combine + next pre-norm
+    G) echo "MPK_FUSE_RECUR_QUANT=1" ;;               # gdn_recurrent + quantize
+    S) echo "MPK_FUSE_SILU_QUANT=1 MPK_FUSE_NORM_QUANT=1 MPK_FUSE_RECUR_QUANT=1" ;;
     *) echo "BADARM"; return 1 ;;
   esac
 }

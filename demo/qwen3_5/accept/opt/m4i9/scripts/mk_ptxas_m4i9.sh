@@ -62,9 +62,13 @@ one () {              # $1 = label, $2 = kernel dir
     "$(grep -c 'TASK_SILU_MUL' "$CU")" \
     "$(grep -c 'TASK_QUANTIZE_FP8_SM100' "$CU")" \
     "$(grep -c 'TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100' "$CU")"
-  printf "    fused impl calls in TU: %s ; silu impl calls: %s ; quantize impl calls: %s\n" \
+  printf "    impl calls: silu+q=%s rms+q=%s comb+rms=%s recur+q=%s | silu=%s rms=%s quant=%s\n" \
     "$(grep -c 'moe_silu_mul_quantize_fp8_task_impl' "$CU")" \
+    "$(grep -c 'rms_norm_quantize_fp8_task_impl' "$CU")" \
+    "$(grep -c 'moe_mul_sum_add_rmsnorm_task_impl' "$CU")" \
+    "$(grep -c 'gdn_recurrent_quantize_fp8_task_impl' "$CU")" \
     "$(grep -c 'silu_mul_task_impl<' "$CU")" \
+    "$(grep -c 'rms_norm_hopper_impl' "$CU")" \
     "$(grep -c 'per_token_group_quantize_fp8_task_impl' "$CU")"
   rm -f "$OUT/$LBL.so"
 }
@@ -72,8 +76,8 @@ one () {              # $1 = label, $2 = kernel dir
 echo "########## M4-I9 ptxas -v, bs=$BS  $(date -Is) ##########"
 nvcc --version | tail -2
 echo "tree: $T HEAD=$(git -C "$T" rev-parse --short HEAD)"
-one A "$S/kernel_A_bs${BS}"
-one F "$S/kernel_F_bs${BS}"
+ARMS=${ARMS:-A F}
+for a in $ARMS; do one "$a" "$S/kernel_${a}_bs${BS}"; done
 
 echo
 echo "=== summary: registers / stack / spills, both arms ==="
@@ -82,7 +86,7 @@ pk () {
        f && /bytes stack frame/{sf=$0}
        f && /Used [0-9]+ registers/{print sf"|"$0; exit}' "$1"
 }
-for f in A F; do
+for f in $ARMS; do
   [ -f "$OUT/$f.log" ] || continue
   printf "  %-3s %s\n" "$f" "$(pk "$OUT/$f.log")"
 done

@@ -664,6 +664,13 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         1, 2, TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100, variant_id);
+  } else if (name == "rmsnorm_quantize_fp8_sm100") {
+    int variant_id = task_register->register_rmsnorm_quantize_fp8_sm100_task(
+        customized->bgraph, params);
+    // 2 inputs; 3 outputs when the bf16 norm still has a consumer, else 2.
+    int const n_out = (int)customized->bgraph.operators.size() - 2;
+    task_config[op] =
+        std::make_tuple(2, n_out, TASK_RMS_NORM_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "moe_w2_linear_sm100") {
     int variant_id = task_register->register_moe_linear_sm100_task(
         customized->bgraph, params, false /*w13_linear*/);
@@ -857,8 +864,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   else if (name == "gdn_recurrent_sm100") {
     int variant_id = task_register->register_gdn_recurrent_sm100_task(
         customized->bgraph, params);
+    // M4-I9 flag C replaces the single bf16 output with the (fp8, fp32 scale)
+    // pair its epilogue now produces, so the output count is read off the
+    // graph rather than hard-coded. Inputs stay at 7 -- MAX_INPUTS_PER_TASK.
+    int const n_out = (int)customized->bgraph.operators.size() - 7;
     task_config[op] =
-        std::make_tuple(7, 1, TASK_GDN_RECURRENT_SM100, variant_id);
+        std::make_tuple(7, n_out, TASK_GDN_RECURRENT_SM100, variant_id);
   }
   // MLA KV gather
   else if (name == "mla_kv_gather_sm100") {

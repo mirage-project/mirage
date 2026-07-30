@@ -1,0 +1,243 @@
+/* Copyright 2023-2025 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include "mirage/kernel/customized.h"
+#include "mirage/kernel/device_tensor.h"
+#include "mirage/kernel/operator.h"
+#include "mirage/kernel/runtime.h"
+#include "mirage/threadblock/graph.h"
+#include <memory>
+#include <vector>
+
+namespace mirage {
+namespace kernel {
+
+class Graph {
+private:
+  struct pair_hash {
+    size_t operator()(std::pair<int, int> const &p) const;
+  };
+
+public:
+  Graph(dim3 gpu_dim = {1, 1, 1}, bool disable_fingerprint = false);
+  ~Graph();
+  Graph(Graph const &) = delete;
+  Graph &operator=(Graph const &) = delete;
+  // input operator
+  DTensor new_input(std::vector<int> const &dims,
+                    std::vector<size_t> const &strides,
+                    mirage::type::DataType data_type,
+                    mirage::layout::DmemLayout layout);
+  DTensor *new_input_ptr(std::vector<int> const &dims,
+                         std::vector<size_t> const &strides,
+                         mirage::type::DataType data_type,
+                         mirage::layout::DmemLayout layout);
+  KNOperator *create_input_op(std::vector<int> const &dims,
+                              std::vector<size_t> const &strides,
+                              mirage::type::DataType data_type,
+                              mirage::layout::DmemLayout layout);
+  // output operator
+  void mark_output(DTensor const &A);
+  void mark_output(DTensor const *A);
+  void mark_output(DTensor const &A, std::vector<size_t> const &strides);
+  void mark_output(DTensor const *A, std::vector<size_t> const &strides);
+  KNOperator *create_output_op(DTensor const &A,
+                               std::vector<size_t> const &strides);
+  // matmul operator
+  DTensor matmul(DTensor const &A, DTensor const &B);
+  DTensor *matmul(DTensor const *A, DTensor const *B);
+  KNOperator *create_matmul_op(DTensor const &A, DTensor const &B);
+  // elementunary operator
+  DTensor exp(DTensor const &input);
+  DTensor *exp(DTensor const *input);
+  DTensor square(DTensor const &input);
+  DTensor *square(DTensor const *input);
+  DTensor sqrt(DTensor const &input);
+  DTensor *sqrt(DTensor const *input);
+  DTensor silu(DTensor const &input);
+  DTensor *silu(DTensor const *input);
+  DTensor gelu(DTensor const &input);
+  DTensor *gelu(DTensor const *input);
+  DTensor relu(DTensor const &input);
+  DTensor *relu(DTensor const *input);
+  DTensor
+      clamp(DTensor const &input, float const &min_val, float const &max_val);
+  DTensor *
+      clamp(DTensor const *input, float const &min_val, float const &max_val);
+  DTensor elementunary(DTensor const &input,
+                       mirage::type::KNOperatorType _type);
+  DTensor *elementunary(DTensor const *input,
+                        mirage::type::KNOperatorType _type);
+
+  KNOperator *create_elementunary_op(DTensor const &input,
+                                     mirage::type::KNOperatorType _type);
+
+  DTensor elementunary_clamp(DTensor const &input,
+                             float const &min_val,
+                             float const &max_val);
+  DTensor *elementunary_clamp(DTensor const *input,
+                              float const &min_val,
+                              float const &max_val);
+
+  KNOperator *create_elementunary_clamp_op(DTensor const &input,
+                                           float const &min_val,
+                                           float const &max_val);
+
+  // elementunary operator
+  DTensor add(DTensor const &input1, DTensor const &input2);
+  DTensor mul(DTensor const &input1, DTensor const &input2);
+  DTensor div(DTensor const &input1, DTensor const &input2);
+  DTensor pow(DTensor const &input1, DTensor const &input2);
+  DTensor *add(DTensor const *input1, DTensor const *input2);
+  DTensor *mul(DTensor const *input1, DTensor const *input2);
+  DTensor *div(DTensor const *input1, DTensor const *input2);
+  DTensor *pow(DTensor const *input1, DTensor const *input2);
+
+  DTensor elementbinary(DTensor const &input1,
+                        DTensor const &input2,
+                        mirage::type::KNOperatorType _type);
+  DTensor *elementbinary(DTensor const *input1,
+                         DTensor const *input2,
+                         mirage::type::KNOperatorType _type);
+  KNOperator *create_elementbinary_op(DTensor const &input1,
+                                      DTensor const &input2,
+                                      mirage::type::KNOperatorType _type);
+  // reduction operator
+  DTensor reduction(DTensor const &input, int dim, int size = 1);
+  DTensor *reduction(DTensor const *input, int dim, int size = 1);
+  KNOperator *create_reduction_op(DTensor const &input, int dim, int factor);
+  // normalization operator
+  DTensor rms_norm(DTensor const &input,
+                   std::vector<int> const &normalized_shape);
+  DTensor *rms_norm(DTensor const *input,
+                    std::vector<int> const &normalized_shape);
+  KNOperator *create_rms_norm_op(DTensor const &input,
+                                 std::vector<int> const &normalized_shape);
+  DTensor rms_norm(DTensor const &input,
+                   DTensor const &elementwise_afffine,
+                   std::vector<int> const &normalized_shape);
+  DTensor *rms_norm(DTensor const *input,
+                    DTensor const *elementwise_affine,
+                    std::vector<int> const &normalized_shape);
+  KNOperator *create_rms_norm_op(DTensor const &input,
+                                 DTensor const &elementwise_affine,
+                                 std::vector<int> const &normalized_shape);
+  // allreduce operator
+  DTensor all_reduce(DTensor const &input, bool inplace = true);
+  DTensor *all_reduce(DTensor const *input, bool inplace = true);
+  KNOperator *create_all_reduce_op(DTensor const &input, bool inplace);
+  // chunk operator
+  std::vector<DTensor> chunk(DTensor const &input, int chunk_size, int dim);
+  int chunk(DTensor const *input, int chunk_size, int dim);
+  KNOperator *create_chunk_op(DTensor const &input, int chunk_size, int dim);
+  // view / split / narrow — virtual tensors (views) that share underlying
+  // memory with `input`. They construct DTensors with `base_guid` pointing to
+  // the root storage tensor and `view_offset` set to the byte offset within
+  // that storage. They DO NOT create KNOperator instances and do not appear in
+  // `operators`; downstream layers see them as ordinary DTensors.
+  DTensor view(DTensor const &input, std::vector<int> const &new_shape);
+  DTensor *view(DTensor const *input, std::vector<int> const &new_shape);
+  std::vector<DTensor>
+      split(DTensor const &input, std::vector<int> const &sizes, int dim);
+  std::vector<DTensor> split(DTensor const &input, int chunk_size, int dim);
+  int split(DTensor const *input,
+            std::vector<int> const &sizes,
+            int dim,
+            DTensor **outputs);
+  DTensor narrow(DTensor const &input, int dim, int start, int length);
+  DTensor *narrow(DTensor const *input, int dim, int start, int length);
+  // customized operator
+  std::vector<DTensor> customized(std::vector<DTensor> const &inputs,
+                                  mirage::threadblock::Graph const &_graph);
+  int customized(std::vector<DTensor const *> inputs,
+                 DTensor **outputs,
+                 mirage::threadblock::Graph const *bgraph);
+  KNOperator *create_customized_op(std::vector<DTensor> const &inputs,
+                                   mirage::threadblock::Graph const &_graph);
+  // persistent kernel functions
+  void attach_torch_tensor(DTensor const *input,
+                           void *torch_ptr,
+                           char const *name);
+  void attach_cuda_tensor(DTensor const *input, char const *name);
+  void attach_nvshmem_tensor(DTensor const *input, char const *name);
+  DTensor *fuse_tensors(std::vector<DTensor const *> inputs,
+                        int fused_dim,
+                        int num_groups,
+                        char const *name);
+  DTensor *shuffle_tensors(std::vector<DTensor const *> inputs,
+                           int shuffled_dim,
+                           int num_groups,
+                           char const *name);
+  void register_task(char const *task_type, std::vector<int> params);
+  runtime::TaskGraphResult generate_task_graph(int num_gpus, int my_gpu_id);
+
+  // helper functions
+  int get_num_input_dtensors() const;
+  int get_num_output_dtensors() const;
+  int get_input_dtensors(DTensor **inputs) const;
+  int get_input_dtensor_shape_and_stride(DTensor const *input,
+                                         int *strides,
+                                         int *dims) const;
+  void generate_triton_program(char const *filepath);
+
+  bool can_allocate(DTensor const &tensor,
+                    bool allocate_fingerprint = true) const;
+  bool can_allocate(size_t data_size_in_bytes, size_t fp_size_in_bytes) const;
+  bool allocate(DTensor &tensor, bool allocate_fingerprint = true);
+  void free(DTensor &tensor);
+
+  // hash related functions
+  size_t get_owner_independent_hash() const;
+
+public:
+  std::vector<mirage::kernel::KNOperator *> operators;
+  // Storage for view DTensors returned by view/narrow/split (pointer forms).
+  // Views are not KNOperators and don't go in `operators`; they need somewhere
+  // to live so the raw pointers handed back to Cython stay valid for the
+  // Graph's lifetime.
+  std::vector<std::unique_ptr<DTensor>> view_storage;
+  dim3 gpu_dim;
+  // memory allocator
+  // device memory offset manager
+  off_t dmem_data_offset, dmem_fp_offset;
+  std::vector<std::pair<off_t, size_t>> allocated_data_tensors,
+      allocated_fp_tensors;
+  // This flag indicates that Mirage will not compute fingerprint
+  // for this kernel_graph and therefore bypass all kernel-level
+  // memory check. This flag is mainly useful for the Mirage runtime
+  // to handle extremely large muGraphs
+  bool disable_fingerprint;
+  // std::unordered_map<std::pair<int, int>, DTensor, pair_hash> tensors;
+  // std::unordered_map<std::pair<int, int>, std::pair<int, int>, pair_hash>
+  // edges; std::vector<std::vector<SrcEdge>> edges;
+  // mirage::kernel::OperatorFactory *operator_factory;
+
+  // Fields for persistent kernels
+  std::map<mirage::type::GuidType, mirage::runtime::IODesc> io_config;
+  std::unordered_map<mirage::kernel::KNOperator const *,
+                     std::tuple<int, int, runtime::TaskType, int>>
+      task_config;
+
+  using OpType = KNOperator;
+  using TensorType = DTensor;
+};
+
+void to_json(json &j, Graph const &g);
+void from_json(json const &j, Graph &g);
+
+} // namespace kernel
+} // namespace mirage

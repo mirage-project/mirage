@@ -3387,6 +3387,81 @@ int TaskRegister::register_moe_silu_mul_quantize_fp8_sm100_task(
                                code.to_string());
 }
 
+// M4-I9 flag A: RMS norm fused with the fp32-block-scale quantize that consumes
+// it. Two inputs (activation, norm weight); either THREE outputs
+// (bf16 norm, fp8, fp32 scale) where the bf16 norm still has a consumer, or TWO
+// (fp8, fp32 scale) where the quantize was its only consumer. Bit-exact by
+// construction -- see the header; the quantize half is literally the same
+// instantiated function, reading the norm's own shared staging buffer.
+int TaskRegister::register_rmsnorm_quantize_fp8_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+  int const num_inputs = 2;
+  int const num_outputs = (int)bgraph.operators.size() - num_inputs;
+  assert(num_outputs == 2 || num_outputs == 3);
+  bool const write_norm = (num_outputs == 3);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  constexpr int GROUP_SIZE = 128;
+  // The fp8 output carries the tile geometry either way; the optional bf16 norm
+  // output is asserted against it rather than trusted.
+  tb::TBInputOp *q_op = output_ops[write_norm ? 1 : 0];
+  tb::TBInputOp *s_op = output_ops[write_norm ? 2 : 1];
+  assert(q_op->output_tensors[0].num_dims == 2);
+  int const batch_size = q_op->output_tensors[0].dim[0];
+  int const hidden_dim = q_op->output_tensors[0].dim[1];
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
+  assert(input_ops[0]->output_tensors[0].dim[1] == hidden_dim);
+  assert(hidden_dim % GROUP_SIZE == 0);
+  assert(s_op->output_tensors[0].num_dims == 2);
+  assert(s_op->output_tensors[0].dim[0] == batch_size);
+  assert(s_op->output_tensors[0].dim[1] == hidden_dim / GROUP_SIZE);
+  if (write_norm) {
+    assert(output_ops[0]->output_tensors[0].num_dims == 2);
+    assert(output_ops[0]->output_tensors[0].dim[0] == batch_size);
+    assert(output_ops[0]->output_tensors[0].dim[1] == hidden_dim);
+  }
+  // The impl indexes every tensor with one linear index per row, so the full
+  // tensors' row strides must equal the tile width -- the same precondition
+  // `quantize_fp8_layer`'s row_partition documents.
+  assert(input_ops[0]->dtensor.dim[1] == hidden_dim);
+  assert(q_op->dtensor.dim[1] == hidden_dim);
+  assert(s_op->dtensor.dim[1] == hidden_dim / GROUP_SIZE);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::rms_norm_quantize_fp8_task_impl<$, $, $, $,",
+         batch_size,
+         hidden_dim,
+         GROUP_SIZE,
+         write_norm ? "true" : "false");
+  code.e("    bfloat16, __nv_fp8_e4m3>(");
+  code.e("    task_desc->input_ptrs[0],");  // activation bf16
+  code.e("    task_desc->input_ptrs[1],");  // norm weight
+  if (write_norm) {
+    code.e("    task_desc->output_ptrs[0],"); // bf16 norm
+    code.e("    task_desc->output_ptrs[1],"); // fp8
+    code.e("    task_desc->output_ptrs[2],"); // fp32 scale
+  } else {
+    code.e("    nullptr,");
+    code.e("    task_desc->output_ptrs[0],"); // fp8
+    code.e("    task_desc->output_ptrs[1],"); // fp32 scale
+  }
+  // 1e-6f is rmsnorm_hopper's eps; 1e-10f / -448 / 448 are the quantize's.
+  code.e("    1e-6f, 1e-10f, -448.0f, 448.0f);");
+  return register_task_variant(TASK_RMS_NORM_QUANTIZE_FP8_SM100,
+                               code.to_string());
+}
+
 int TaskRegister::register_moe_mul_sum_add_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   bool rank_with_residual = true;
@@ -4898,15 +4973,20 @@ int TaskRegister::register_gdn_recurrent_sm100_task(
   // params[2] = decode fast path on/off.  Off routes decode back through the
   // original unsplit impl, so an A/B can run both arms from ONE build in ONE
   // measurement window instead of swapping git trees.
-  assert(params.size() == 3);
+  // params[3] (OPTIONAL) = M4-I9 flag C: fuse the fp32-block-scale FP8 quantize
+  // of `out` into this task's epilogue. When absent the emitted text is exactly
+  // the pre-M4-I9 text, which is what gate 1c's byte-identical check needs.
+  assert(params.size() == 3 || params.size() == 4);
   int const num_k_heads = params[0];
   int const depth = params[1];
   bool const decode_fastpath = params[2] != 0;
+  bool const fuse_quant = params.size() > 3 && params[3] != 0;
   assert(num_k_heads >= 1);
   assert(depth >= 2 && depth <= 4);
 
   int const num_inputs = 7;
-  int const num_outputs = 1;
+  // M4-I9 flag C emits (fp8, fp32 scale) instead of the single bf16 output.
+  int const num_outputs = fuse_quant ? 2 : 1;
   assert(bgraph.operators.size() == (size_t)(num_inputs + num_outputs));
 
   std::vector<tb::TBInputOp *> input_ops, output_ops;
@@ -4961,6 +5041,16 @@ int TaskRegister::register_gdn_recurrent_sm100_task(
   assert(qkv_stride >= 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim);
   assert(z_stride >= num_v_heads * head_v_dim);
   assert(out_stride >= num_v_heads * head_v_dim);
+  if (fuse_quant) {
+    // output 0 is the fp8 activation (same row stride as the bf16 it replaces)
+    // and output 1 the fp32 block scales, one per 128-element group = one per
+    // v-head. head_v_dim == 128 is what makes that identity hold.
+    assert(head_v_dim == 128 &&
+           "the fused quantize assumes a v-head is exactly one scale group");
+    assert(out_stride % 128 == 0);
+    assert(output_ops[1]->dtensor.num_dims == 2);
+    assert(output_ops[1]->dtensor.dim[1] == out_stride / 128);
+  }
 
   assert((int)bgraph.grid_dim.x == num_v_heads &&
          "grid.x must be one task per v-head");
@@ -4998,7 +5088,7 @@ int TaskRegister::register_gdn_recurrent_sm100_task(
   if (decode_fastpath) {
     code.e("  if (q_len_ == 1 && !zero_state_) {");
     code.e("    kernel::gdn_recurrent_sm100_decode_split_impl<bfloat16, $, $, "
-           "$, $, $, $, $, $, $, $, WORKER_NUM_THREADS>(",
+           "$, $, $, $, $, $, $, $, WORKER_NUM_THREADS$>(",
            num_v_heads,
            num_k_heads,
            head_k_dim,
@@ -5008,7 +5098,8 @@ int TaskRegister::register_gdn_recurrent_sm100_task(
            z_stride,
            out_stride,
            split,
-           depth);
+           depth,
+           fuse_quant ? ", true, false" : "");
     code.e("        static_cast<bfloat16 const *>(task_desc->input_ptrs[0]) + "
            "qo_fp_ * $,",
            qkv_stride);
@@ -5025,16 +5116,33 @@ int TaskRegister::register_gdn_recurrent_sm100_task(
            z_stride,
            head_v_dim);
     code.e("        task_desc->input_ptrs[5],");
-    code.e("        static_cast<bfloat16 *>(task_desc->output_ptrs[0]) + "
-           "qo_fp_ * $ + hv_ * $,",
-           out_stride,
-           head_v_dim);
+    if (fuse_quant) {
+      // `out` is not materialised at all: its only consumer was the quantize
+      // this task now performs, so output 0 IS the fp8 activation.
+      code.e("        nullptr,");
+    } else {
+      code.e("        static_cast<bfloat16 *>(task_desc->output_ptrs[0]) + "
+             "qo_fp_ * $ + hv_ * $,",
+             out_stride,
+             head_v_dim);
+    }
     code.e("        static_cast<float *>(task_desc->input_ptrs[6]) + "
            "(slot_ * $ + hv_) * $,",
            num_v_heads,
            scratch_stride);
     code.e("        hv_,");
-    code.e("        split_);");
+    if (fuse_quant) {
+      code.e("        split_,");
+      code.e("        static_cast<__nv_fp8_e4m3 *>(task_desc->output_ptrs[0]) "
+             "+ qo_fp_ * $ + hv_ * $,",
+             out_stride,
+             head_v_dim);
+      code.e("        static_cast<float *>(task_desc->output_ptrs[1]) + "
+             "qo_fp_ * $ + hv_);",
+             out_stride / 128);
+    } else {
+      code.e("        split_);");
+    }
     code.e("  } else if (split_ == 0) {");
   } else {
     code.e("  if (split_ == 0) {");
@@ -5042,7 +5150,7 @@ int TaskRegister::register_gdn_recurrent_sm100_task(
   // Prefill / first chunk: the token loop cannot be split, so split 0 runs the
   // whole chunk and the other splits are no-ops.
   code.e("    kernel::gdn_recurrent_sm100_task_impl<bfloat16, $, $, $, $, $, "
-         "$, $, $>(",
+         "$, $, $$>(",
          num_v_heads,
          num_k_heads,
          head_k_dim,
@@ -5050,7 +5158,8 @@ int TaskRegister::register_gdn_recurrent_sm100_task(
          qkv_stride,
          ba_stride,
          z_stride,
-         out_stride);
+         out_stride,
+         fuse_quant ? ", true, false" : "");
   code.e("        static_cast<bfloat16 const *>(task_desc->input_ptrs[0]) + "
          "qo_fp_ * $,",
          qkv_stride);
@@ -5067,13 +5176,29 @@ int TaskRegister::register_gdn_recurrent_sm100_task(
          z_stride,
          head_v_dim);
   code.e("        task_desc->input_ptrs[5],");
-  code.e("        static_cast<bfloat16 *>(task_desc->output_ptrs[0]) + "
-         "qo_fp_ * $ + hv_ * $,",
-         out_stride,
-         head_v_dim);
+  if (fuse_quant) {
+    code.e("        nullptr,");
+  } else {
+    code.e("        static_cast<bfloat16 *>(task_desc->output_ptrs[0]) + "
+           "qo_fp_ * $ + hv_ * $,",
+           out_stride,
+           head_v_dim);
+  }
   code.e("        hv_,");
   code.e("        q_len_,");
-  code.e("        zero_state_);");
+  if (fuse_quant) {
+    code.e("        zero_state_,");
+    code.e("        nullptr,"); // o_debug
+    code.e("        static_cast<__nv_fp8_e4m3 *>(task_desc->output_ptrs[0]) + "
+           "qo_fp_ * $ + hv_ * $,",
+           out_stride,
+           head_v_dim);
+    code.e("        static_cast<float *>(task_desc->output_ptrs[1]) + "
+           "qo_fp_ * $ + hv_);",
+           out_stride / 128);
+  } else {
+    code.e("        zero_state_);");
+  }
   code.e("  }");
   code.e("}");
   return register_task_variant(TASK_GDN_RECURRENT_SM100, code.to_string());

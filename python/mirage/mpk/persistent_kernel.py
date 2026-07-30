@@ -790,6 +790,71 @@ class PersistentKernel:
         self.kn_graph.customized([input, weight, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "rmsnorm_hopper" if self.target_cc >= 90 else "rmsnorm")
 
+    def rmsnorm_quantize_fp8_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        output_fp8: DTensor,
+        output_scale: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        norm_output: DTensor = None,
+    ):
+        """`rmsnorm_layer` FUSED with the `quantize_fp8_layer` that consumes it.
+
+        M4-I9 flag A. Every layer's chain opens `rms_norm -> quantize ->
+        dense_fp8`, and the two front tasks have IDENTICAL geometry: `rmsnorm_layer`
+        splits dim 0 by grid.x and `quantize_fp8_layer` does the same via
+        `row_partition=(0,-1,-1)`, so both are one task per token row on the same
+        [1, hidden] tile. One task instead of two removes a record from all 40
+        layers' chains -- and M4-I8 measured what a record costs beyond its own
+        duration: ~1.15 us of event visibility or ~1.55 us of queue-pop latency
+        plus a barrier pair.
+
+        `norm_output` is the bf16 norm, and it is OPTIONAL: pass it where the norm
+        still has another consumer (GDN layers feed the bf16 `ba` projection from
+        it), omit it where the quantize was its only consumer (attention layers),
+        in which case the value never leaves shared memory.
+
+        Bit-exactness is structural rather than arithmetic and is argued at the
+        instruction level in `rmsnorm_quantize_fp8_sm100.cuh`: the norm half is
+        `rms_norm_hopper_impl`'s code unchanged, and the quantize half CALLS
+        `per_token_group_quantize_fp8_task_impl` at the same instantiation the
+        standalone task uses at this site, with only the input pointer's address
+        space changed. No rounding position moves.
+
+        Soundness under the persistent scheduler (the M3-I3 test): each task owns
+        a disjoint row, both halves are row-local, and the amax reduction stays
+        inside one warp -- no cross-task reduction, so no barrier is required and
+        the fused task reuses the norm's own `__syncthreads()`.
+        """
+        assert input.num_dims == 2
+        assert output_fp8.num_dims == 2
+        assert output_scale.num_dims == 2
+        assert weight.num_dims == 1
+        assert input.dim(0) == output_fp8.dim(0) == output_scale.dim(0)
+        assert input.dim(1) == output_fp8.dim(1) == weight.dim(0)
+        assert output_fp8.dim(1) % 128 == 0, (
+            f"hidden size {output_fp8.dim(1)} must be a whole number of "
+            "128-element scale groups (a group may not straddle a row)")
+        assert output_scale.dim(1) == output_fp8.dim(1) // 128
+        if norm_output is not None:
+            assert norm_output.num_dims == 2
+            assert norm_output.dim(0) == input.dim(0)
+            assert norm_output.dim(1) == input.dim(1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, -1, -1), 1, True)
+        tb_graph.new_input(weight, (-1, -1, -1), 0, True)
+        tensors = [input, weight]
+        if norm_output is not None:
+            tb_graph.new_input(norm_output, (0, -1, -1), 1, True)
+            tensors.append(norm_output)
+        tb_graph.new_input(output_fp8, (0, -1, -1), -1, True)
+        tb_graph.new_input(output_scale, (0, -1, -1), -1, True)
+        tensors += [output_fp8, output_scale]
+        self.kn_graph.customized(tensors, tb_graph)
+        self.kn_graph.register_task(tb_graph, "rmsnorm_quantize_fp8_sm100")
+
     def rmsnorm_linear_layer(
         self,
         input: DTensor,
@@ -1348,6 +1413,11 @@ class PersistentKernel:
         block_dim: tuple,    # (256, 1, 1) on SM100
         depth: int = 2,      # decode cp.async ring depth (2..4)
         decode_fastpath: bool = True,
+        # M4-I9 flag C: pass these INSTEAD of `output` to have the epilogue emit
+        # the fp8 activation and its fp32 block scales directly, replacing the
+        # downstream quantize task.
+        output_fp8: DTensor = None,
+        output_scale: DTensor = None,
     ):
         """Gated-DeltaNet recurrence with a fused gated RMSNorm/SiLU epilogue.
 
@@ -1406,7 +1476,7 @@ class PersistentKernel:
         assert state.num_dims == 4
         assert z.num_dims == 2
         assert norm_w.num_dims == 1
-        assert output.num_dims == 2
+        assert output is None or output.num_dims == 2
         num_v_heads = state.dim(1)
         head_v_dim = state.dim(2)
         head_k_dim = state.dim(3)
@@ -1422,7 +1492,7 @@ class PersistentKernel:
             "qkv row is too narrow for [q | k | v]"
         )
         assert z.dim(1) >= num_v_heads * head_v_dim
-        assert output.dim(1) >= num_v_heads * head_v_dim
+        assert output is None or output.dim(1) >= num_v_heads * head_v_dim
         assert grid_dim[0] == num_v_heads, (
             f"grid_dim.x ({grid_dim[0]}) must be one task per v-head "
             f"({num_v_heads})"
@@ -1460,15 +1530,43 @@ class PersistentKernel:
         tb_graph.new_input(z, (-1, -1, -1), -1, True)
         tb_graph.new_input(norm_w, (-1, -1, -1), -1, True)
         tb_graph.new_input(split_scratch, (-1, -1, -1), -1, True)
-        tb_graph.new_input(output, (-1, -1, -1), -1, True)
-        self.kn_graph.customized(
-            [qkv, ba, alog_dtbias, state, z, norm_w, split_scratch, output],
-            tb_graph,
-        )
-        self.kn_graph.register_task(
-            tb_graph, "gdn_recurrent_sm100",
-            [num_k_heads, depth, 1 if decode_fastpath else 0]
-        )
+        # M4-I9 flag C: `output_fp8`/`output_scale` replace the bf16 `output`.
+        # The recurrence's gated-RMSNorm epilogue already holds a whole v-head
+        # (HEAD_V_DIM = 128) of bf16 results, which is EXACTLY one fp8 scale
+        # group, and in the split configuration only the last-arriving task
+        # reaches the epilogue -- so the quantize its consumer used to do can be
+        # done here with no cross-task reduction and no regrouping. The bf16
+        # `output` had exactly one consumer (that quantize), so it is not
+        # materialised at all in the fused form.
+        #
+        # Inputs stay at 7, which is MAX_INPUTS_PER_TASK: this fusion is only
+        # possible because it needs no NEW input.
+        fused = output_fp8 is not None
+        assert not (fused and output is not None), (
+            "pass either `output` (bf16) or the (output_fp8, output_scale) "
+            "pair, not both")
+        if fused:
+            assert output_scale is not None
+            assert output_fp8.num_dims == 2 and output_scale.num_dims == 2
+            assert output_fp8.dim(1) == num_v_heads * head_v_dim
+            assert output_fp8.dim(1) % 128 == 0
+            assert output_scale.dim(1) == output_fp8.dim(1) // 128
+            assert head_v_dim == 128, (
+                "the fused quantize assumes a v-head is exactly one "
+                f"128-element scale group, got head_v_dim={head_v_dim}")
+            tb_graph.new_input(output_fp8, (-1, -1, -1), -1, True)
+            tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
+            tensors = [qkv, ba, alog_dtbias, state, z, norm_w, split_scratch,
+                       output_fp8, output_scale]
+        else:
+            tb_graph.new_input(output, (-1, -1, -1), -1, True)
+            tensors = [qkv, ba, alog_dtbias, state, z, norm_w, split_scratch,
+                       output]
+        self.kn_graph.customized(tensors, tb_graph)
+        params = [num_k_heads, depth, 1 if decode_fastpath else 0]
+        if fused:
+            params.append(1)
+        self.kn_graph.register_task(tb_graph, "gdn_recurrent_sm100", params)
 
     def mla_kv_gather_layer(
         self,

@@ -44,6 +44,8 @@
 // materialises, so this is how they get checked bit-for-bit against HF.
 
 #include "blackwell/gdn_recurrent_sm100.cuh"
+#include "blackwell/per_token_group_quantize_fp8.cuh"
+#include <cuda_fp8.h>
 #include "runtime_header.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
@@ -274,6 +276,100 @@ __global__ void __launch_bounds__(WORKER_NUM_THREADS)
       (int)blockIdx.z);
 }
 
+// ================================================================
+// M4-I9 flag C -- the same decode-split task with the fp32-block-scale FP8
+// quantize of `out` FUSED into its gated-RMSNorm epilogue.
+//
+// WRITE_OUT is a template parameter here so the test can do both jobs:
+//   WRITE_OUT=true  -> the bf16 `out` is still stored, so it can be compared
+//                      byte-for-byte against the unfused kernel (does the
+//                      fusion perturb the recurrence at all?) AND used as the
+//                      input to the standalone quantize for the fp8 reference.
+//   WRITE_OUT=false -> the form the graph actually ships. Its fp8 must equal
+//                      the WRITE_OUT=true form's, i.e. dropping the store
+//                      cannot move a byte.
+// ================================================================
+template <int NUM_V_HEADS,
+          int NUM_K_HEADS,
+          int HEAD_K_DIM,
+          int HEAD_V_DIM,
+          int QKV_STRIDE,
+          int BA_STRIDE,
+          int Z_STRIDE,
+          int OUT_STRIDE,
+          int SPLIT,
+          int DEPTH,
+          bool WRITE_OUT>
+__global__ void __launch_bounds__(WORKER_NUM_THREADS)
+    gdn_decode_split_fusedq_wrapper(void const *qkv,
+                                    void const *ba,
+                                    void const *alog_dtbias,
+                                    void *state,
+                                    void const *z,
+                                    void const *norm_w,
+                                    void *out,
+                                    void *out_q,
+                                    void *out_s,
+                                    void *split_scratch,
+                                    int const *qo_indptr) {
+  int const hv = blockIdx.x;
+  int const slot = blockIdx.y;
+  int const tok0 = qo_indptr[slot];
+  constexpr int STATE_ELEMS = HEAD_V_DIM * HEAD_K_DIM;
+  constexpr int SCRATCH_STRIDE = HEAD_V_DIM + 8;
+  kernel::gdn_recurrent_sm100_decode_split_impl<bfloat16,
+                                                NUM_V_HEADS,
+                                                NUM_K_HEADS,
+                                                HEAD_K_DIM,
+                                                HEAD_V_DIM,
+                                                QKV_STRIDE,
+                                                BA_STRIDE,
+                                                Z_STRIDE,
+                                                OUT_STRIDE,
+                                                SPLIT,
+                                                DEPTH,
+                                                WORKER_NUM_THREADS,
+                                                /*FUSE_QUANT=*/true,
+                                                WRITE_OUT>(
+      static_cast<bfloat16 const *>(qkv) + (size_t)tok0 * QKV_STRIDE,
+      static_cast<bfloat16 const *>(ba) + (size_t)tok0 * BA_STRIDE,
+      alog_dtbias,
+      static_cast<float *>(state) +
+          ((size_t)slot * NUM_V_HEADS + hv) * STATE_ELEMS,
+      static_cast<bfloat16 const *>(z) + (size_t)tok0 * Z_STRIDE +
+          (size_t)hv * HEAD_V_DIM,
+      norm_w,
+      WRITE_OUT ? (static_cast<bfloat16 *>(out) + (size_t)tok0 * OUT_STRIDE +
+                   (size_t)hv * HEAD_V_DIM)
+                : nullptr,
+      static_cast<float *>(split_scratch) +
+          ((size_t)slot * NUM_V_HEADS + hv) * SCRATCH_STRIDE,
+      hv,
+      (int)blockIdx.z,
+      static_cast<__nv_fp8_e4m3 *>(out_q) + (size_t)tok0 * OUT_STRIDE +
+          (size_t)hv * HEAD_V_DIM,
+      static_cast<float *>(out_s) + (size_t)tok0 * (OUT_STRIDE / 128) +
+          (size_t)hv);
+}
+
+// The standalone quantize, for the fp8 reference. Same header, same TU, same
+// nvcc flags as the fused arm -- so a torch reference's own rounding never
+// enters the comparison.
+template <int OUT_STRIDE>
+__global__ void __launch_bounds__(128)
+    gdn_ref_quantize_kernel(void const *__restrict__ input,
+                            void *__restrict__ output_q,
+                            void *__restrict__ output_s) {
+  kernel::per_token_group_quantize_fp8_task_impl</*BATCH_SIZE=*/1,
+                                                /*HIDDEN_SIZE=*/OUT_STRIDE,
+                                                /*GROUP_SIZE=*/128,
+                                                /*GLOBAL_STRIDE=*/OUT_STRIDE,
+                                                cute::bfloat16_t,
+                                                __nv_fp8_e4m3,
+                                                /*SCALE_UE8M0=*/false>(
+      input, output_q, output_s, 1e-10f, -448.0f, 448.0f, 1);
+}
+
 template <int NUM_V_HEADS,
           int NUM_K_HEADS,
           int HEAD_K_DIM,
@@ -325,6 +421,80 @@ void launch_gdn_decode_split(int num_slots,
                                              out,
                                              split_scratch,
                                              qo_indptr);
+}
+
+template <int NUM_V_HEADS,
+          int NUM_K_HEADS,
+          int HEAD_K_DIM,
+          int HEAD_V_DIM,
+          int QKV_STRIDE,
+          int BA_STRIDE,
+          int Z_STRIDE,
+          int OUT_STRIDE,
+          int SPLIT,
+          int DEPTH>
+void launch_gdn_decode_split_fusedq(int num_slots,
+                                    bool write_out,
+                                    void const *qkv,
+                                    void const *ba,
+                                    void const *alog_dtbias,
+                                    void *state,
+                                    void const *z,
+                                    void const *norm_w,
+                                    void *out,
+                                    void *out_q,
+                                    void *out_s,
+                                    void *split_scratch,
+                                    int const *qo_indptr,
+                                    int num_tokens) {
+  size_t const smem_size =
+      kernel::gdn_decode_split_smem_bytes<bfloat16,
+                                          HEAD_K_DIM,
+                                          HEAD_V_DIM,
+                                          DEPTH,
+                                          WORKER_NUM_THREADS>();
+  dim3 grid(NUM_V_HEADS, num_slots, SPLIT);
+  if (write_out) {
+    auto kern = gdn_decode_split_fusedq_wrapper<NUM_V_HEADS, NUM_K_HEADS,
+                                                HEAD_K_DIM, HEAD_V_DIM,
+                                                QKV_STRIDE, BA_STRIDE,
+                                                Z_STRIDE, OUT_STRIDE, SPLIT,
+                                                DEPTH, true>;
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_size));
+    kern<<<grid, WORKER_NUM_THREADS, smem_size,
+           at::cuda::getCurrentCUDAStream()>>>(qkv, ba, alog_dtbias, state, z,
+                                               norm_w, out, out_q, out_s,
+                                               split_scratch, qo_indptr);
+  } else {
+    auto kern = gdn_decode_split_fusedq_wrapper<NUM_V_HEADS, NUM_K_HEADS,
+                                                HEAD_K_DIM, HEAD_V_DIM,
+                                                QKV_STRIDE, BA_STRIDE,
+                                                Z_STRIDE, OUT_STRIDE, SPLIT,
+                                                DEPTH, false>;
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_size));
+    kern<<<grid, WORKER_NUM_THREADS, smem_size,
+           at::cuda::getCurrentCUDAStream()>>>(qkv, ba, alog_dtbias, state, z,
+                                               norm_w, out, out_q, out_s,
+                                               split_scratch, qo_indptr);
+  }
+}
+
+// The fp8 REFERENCE: the standalone quantize over the bf16 `out` the unfused
+// task wrote, one CTA per token row (the impl walks the row's groups itself).
+template <int OUT_STRIDE>
+void launch_gdn_ref_quantize(int num_tokens,
+                             void const *out,
+                             void *out_q,
+                             void *out_s) {
+  for (int t = 0; t < num_tokens; t++) {
+    gdn_ref_quantize_kernel<OUT_STRIDE>
+        <<<1, 128, 0, at::cuda::getCurrentCUDAStream()>>>(
+            static_cast<bfloat16 const *>(out) + (size_t)t * OUT_STRIDE,
+            static_cast<__nv_fp8_e4m3 *>(out_q) + (size_t)t * OUT_STRIDE,
+            static_cast<float *>(out_s) + (size_t)t * (OUT_STRIDE / 128));
+  }
 }
 
 // (shape) x (split, depth).  Every shape gets splits 1/2/4 at depth 2; the
@@ -391,6 +561,51 @@ bool dispatch_gdn_decode_split(int num_v_heads,
   }
   GDN_DECODE_SPLIT_CASES(GDN_DECODE_SPLIT_DISPATCH)
 #undef GDN_DECODE_SPLIT_DISPATCH
+  return false;
+}
+
+// M4-I9 flag C: the same dispatch for the FUSED arm, plus the fp8 reference.
+bool dispatch_gdn_decode_split_fusedq(int num_v_heads,
+                                      int num_k_heads,
+                                      int head_k_dim,
+                                      int head_v_dim,
+                                      int qkv_stride,
+                                      int ba_stride,
+                                      int z_stride,
+                                      int out_stride,
+                                      int split,
+                                      int depth,
+                                      int num_slots,
+                                      int num_tokens,
+                                      bool write_out,
+                                      bool ref_only,
+                                      void const *qkv,
+                                      void const *ba,
+                                      void const *alog_dtbias,
+                                      void *state,
+                                      void const *z,
+                                      void const *norm_w,
+                                      void *out,
+                                      void *out_q,
+                                      void *out_s,
+                                      void *split_scratch,
+                                      int const *qo_indptr) {
+#define GDN_FUSEDQ_DISPATCH(HV, HK, DK, DV, QS, BS, ZS, OS, SP, DP)            \
+  if (num_v_heads == (HV) && num_k_heads == (HK) && head_k_dim == (DK) &&      \
+      head_v_dim == (DV) && qkv_stride == (QS) && ba_stride == (BS) &&         \
+      z_stride == (ZS) && out_stride == (OS) && split == (SP) &&               \
+      depth == (DP)) {                                                        \
+    if (ref_only) {                                                            \
+      launch_gdn_ref_quantize<OS>(num_tokens, out, out_q, out_s);               \
+    } else {                                                                   \
+      launch_gdn_decode_split_fusedq<HV, HK, DK, DV, QS, BS, ZS, OS, SP, DP>(  \
+          num_slots, write_out, qkv, ba, alog_dtbias, state, z, norm_w, out,    \
+          out_q, out_s, split_scratch, qo_indptr, num_tokens);                  \
+    }                                                                          \
+    return true;                                                               \
+  }
+  GDN_DECODE_SPLIT_CASES(GDN_FUSEDQ_DISPATCH)
+#undef GDN_FUSEDQ_DISPATCH
   return false;
 }
 
@@ -543,6 +758,49 @@ void gdn_recurrent_sm100(torch::Tensor qkv,         // [tokens, qkv_stride] bf16
 // tensors as `gdn_recurrent_sm100` plus the [slots, Hv, Dv + 8] fp32 scratch;
 // `zero_state` is not a parameter because this entry point IS the
 // !zero_state branch.
+// M4-I9 flag C host entry. `mode`: 0 = fused with the bf16 store kept,
+// 1 = fused with the store dropped (the form the graph ships), 2 = the fp8
+// REFERENCE, i.e. the standalone quantize over an already-computed bf16 `out`.
+void gdn_recurrent_decode_split_fusedq_sm100(torch::Tensor qkv,
+                                            torch::Tensor ba,
+                                            torch::Tensor alog_dtbias,
+                                            torch::Tensor state,
+                                            torch::Tensor z,
+                                            torch::Tensor norm_w,
+                                            torch::Tensor out,
+                                            torch::Tensor out_q,
+                                            torch::Tensor out_s,
+                                            torch::Tensor split_scratch,
+                                            torch::Tensor qo_indptr,
+                                            int64_t num_k_heads,
+                                            int64_t split,
+                                            int64_t depth,
+                                            int64_t mode) {
+  c10::cuda::CUDAGuard guard(qkv.device());
+  TORCH_CHECK(out_q.scalar_type() == at::kFloat8_e4m3fn &&
+                  out_s.scalar_type() == at::kFloat,
+              "out_q must be float8_e4m3fn and out_s float32");
+  TORCH_CHECK(out_q.is_contiguous() && out_s.is_contiguous(),
+              "fp8 outputs must be contiguous");
+  int const num_slots = (int)state.size(0);
+  int const num_v_heads = (int)state.size(1);
+  int const head_v_dim = (int)state.size(2);
+  int const head_k_dim = (int)state.size(3);
+  int const num_tokens = (int)out.size(0);
+  TORCH_CHECK(out_s.size(1) == out.size(1) / 128,
+              "out_s must be [tokens, out_stride/128]");
+  bool const dispatched = dispatch_gdn_decode_split_fusedq(
+      num_v_heads, (int)num_k_heads, head_k_dim, head_v_dim, (int)qkv.size(1),
+      (int)ba.size(1), (int)z.size(1), (int)out.size(1), (int)split,
+      (int)depth, num_slots, num_tokens, /*write_out=*/mode == 0,
+      /*ref_only=*/mode == 2, qkv.data_ptr(), ba.data_ptr(),
+      alog_dtbias.data_ptr(), state.data_ptr(), z.data_ptr(),
+      norm_w.data_ptr(), out.data_ptr(), out_q.data_ptr(), out_s.data_ptr(),
+      split_scratch.data_ptr(), qo_indptr.data_ptr<int>());
+  TORCH_CHECK(dispatched, "Unsupported gdn fused-quantize configuration");
+  C10_CUDA_CHECK(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()));
+}
+
 void gdn_recurrent_decode_split_sm100(torch::Tensor qkv,
                                       torch::Tensor ba,
                                       torch::Tensor alog_dtbias,
@@ -689,6 +947,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         pybind11::arg("num_k_heads"),
         pybind11::arg("split"),
         pybind11::arg("depth"));
+  m.def("gdn_recurrent_decode_split_fusedq_sm100",
+        &gdn_recurrent_decode_split_fusedq_sm100,
+        "M4-I9 flag C: the decode-split recurrence with the fp32-block-scale "
+        "FP8 quantize fused into its epilogue (mode 0/1), or the standalone "
+        "quantize as the fp8 reference (mode 2)");
   m.def("gdn_gating_probe",
         &gdn_gating_probe,
         "Evaluate only the GDN gating scalars (beta, g) with the task's own "

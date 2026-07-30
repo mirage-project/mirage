@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #pragma once
+#include <cuda_fp8.h>
 // `gdn_slot_is_first_chunk` (the shared step==0 slot predicate) lives in the
 // conv task's header; both GDN tasks use it, so pull it in explicitly rather
 // than relying on task_header.cuh's include order.
@@ -178,6 +179,30 @@ __device__ __forceinline__ float gdn_block_sum(float acc, float *red) {
   return total;
 }
 
+// Block-wide MAX, the same shape as gdn_block_sum above.  M4-I9 flag C uses it
+// for the fp8 group amax.  Unlike the sum this one is EXACT and
+// order-independent -- fmaxf has no rounding -- so the fused quantize's scale
+// cannot differ from the standalone quantize's whatever the reduction shape is.
+__device__ __forceinline__ float gdn_block_max(float acc, float *red) {
+  int const lane = threadIdx.x & 31;
+  int const warp = threadIdx.x >> 5;
+  int const num_warps = (blockDim.x + 31) >> 5;
+#pragma unroll
+  for (int m = 16; m > 0; m >>= 1) {
+    acc = fmaxf(acc, __shfl_xor_sync(0xffffffff, acc, m));
+  }
+  __syncthreads();
+  if (lane == 0) {
+    red[warp] = acc;
+  }
+  __syncthreads();
+  float total = red[0];
+  for (int w = 1; w < num_warps; w++) {
+    total = fmaxf(total, red[w]);
+  }
+  return total;
+}
+
 // transformers' `l2norm`, run in the tensor's OWN dtype (bf16) exactly as HF
 // does, then handed to the caller already widened to fp32 (and optionally
 // scaled - the recurrence multiplies q by Dk^-0.5 right after the fp32 cast).
@@ -219,7 +244,13 @@ template <typename T,
           int QKV_STRIDE,
           int BA_STRIDE,
           int Z_STRIDE,
-          int OUT_STRIDE>
+          int OUT_STRIDE,
+          // M4-I9 flag C, same contract as the decode-split impl: defaulted OFF
+          // and the extra pointers defaulted null so the pre-M4-I9 call site
+          // emits identical generated text.
+          bool FUSE_QUANT = false,
+          bool WRITE_OUT = true,
+          int S_STRIDE = OUT_STRIDE / 128>
 __device__ __forceinline__ void
     gdn_recurrent_sm100_task_impl(void const *qkv_ptr,
                                   void const *ba_ptr,
@@ -237,7 +268,9 @@ __device__ __forceinline__ void
                                   // otherwise consumes it in registers, so this
                                   // is how the unit test observes it.  Left
                                   // null by the generated task code.
-                                  void *o_debug_ptr = nullptr) {
+                                  void *o_debug_ptr = nullptr,
+                                  void *q_out_ptr = nullptr,
+                                  void *s_out_ptr = nullptr) {
   static_assert(NUM_V_HEADS % NUM_K_HEADS == 0,
                 "GVA needs an integer v-heads-per-k-head ratio");
   static_assert(HEAD_K_DIM % 32 == 0,
@@ -383,6 +416,12 @@ __device__ __forceinline__ void
     float const variance =
         gdn_block_sum(acc, s_red) / static_cast<float>(HEAD_V_DIM);
     float const inv_rms = rsqrtf(variance + EPS);
+    // M4-I9 flag C -- the SAME fusion as the decode-split epilogue, applied per
+    // token here because this path's epilogue lives inside the token loop. It
+    // MUST be here as well as there: with the flag on, `out`'s consumer reads
+    // the fp8 pair, so a prefill chunk that produced only bf16 would hand the
+    // projection stale bytes.
+    float amax = 1e-10f;
     for (int i = tid; i < HEAD_V_DIM; i += nthreads) {
       float const x_hat = static_cast<float>(T(s_o[i] * inv_rms));
       float const y = d_norm_w[i] * x_hat;
@@ -390,7 +429,33 @@ __device__ __forceinline__ void
           static_cast<float>(d_z[static_cast<size_t>(t) * Z_STRIDE + i]);
       // torch's SiLU is `x * sigmoid(x)`, not `x / (1 + exp(-x))`.
       float const silu = zf * (1.0f / (1.0f + expf(-zf)));
-      d_out[static_cast<size_t>(t) * OUT_STRIDE + i] = T(y * silu);
+      T const out_v = T(y * silu);
+      if constexpr (WRITE_OUT) {
+        d_out[static_cast<size_t>(t) * OUT_STRIDE + i] = out_v;
+      }
+      if constexpr (FUSE_QUANT) {
+        float const ov = static_cast<float>(out_v);
+        s_o[i] = ov;
+        amax = fmaxf(fabsf(ov), amax);
+      }
+    }
+    if constexpr (FUSE_QUANT) {
+      static_assert(HEAD_V_DIM == 128,
+                    "flag C assumes a v-head is exactly one 128-element fp8 "
+                    "scale group");
+      float group_max = gdn_block_max(amax, s_red);
+      group_max = fmaxf(group_max, 1e-10f);
+      float const y_scale = group_max / 448.0f;
+      if (tid == 0) {
+        static_cast<float *>(s_out_ptr)[static_cast<size_t>(t) * S_STRIDE] =
+            y_scale;
+      }
+      __nv_fp8_e4m3 *const d_q = static_cast<__nv_fp8_e4m3 *>(q_out_ptr);
+      for (int i = tid; i < HEAD_V_DIM; i += nthreads) {
+        float const quant_val = fminf(fmaxf(s_o[i] / y_scale, -448.0f), 448.0f);
+        d_q[static_cast<size_t>(t) * OUT_STRIDE + i] = __nv_fp8_e4m3(quant_val);
+      }
+      __syncthreads(); // s_o is reused by the next token's readout
     }
   }
 
@@ -597,7 +662,13 @@ template <typename T,
           int OUT_STRIDE,
           int SPLIT,
           int DEPTH,
-          int NUM_THREADS>
+          int NUM_THREADS,
+          // M4-I9 flag C: fuse the fp32-block-scale FP8 quantize of `out` into
+          // this task's epilogue.  Defaulted OFF and the extra pointers
+          // defaulted to nullptr so the pre-M4-I9 call site emits the SAME
+          // generated text -- gate 1c's byte-identical requirement.
+          bool FUSE_QUANT = false,
+          bool WRITE_OUT = true>
 __device__ __forceinline__ void
     gdn_recurrent_sm100_decode_split_impl(void const *qkv_ptr,
                                           void const *ba_ptr,
@@ -608,7 +679,9 @@ __device__ __forceinline__ void
                                           void *out_ptr,
                                           void *split_scratch_ptr,
                                           int hv,
-                                          int split_idx) {
+                                          int split_idx,
+                                          void *q_out_ptr = nullptr,
+                                          void *s_out_ptr = nullptr) {
   static_assert(NUM_V_HEADS % NUM_K_HEADS == 0,
                 "GVA needs an integer v-heads-per-k-head ratio");
   static_assert(HEAD_K_DIM % 32 == 0,
@@ -874,12 +947,52 @@ __device__ __forceinline__ void
   float const variance =
       gdn_block_sum(acc, s_red) / static_cast<float>(HEAD_V_DIM);
   float const inv_rms = rsqrtf(variance + EPS);
+  // M4-I9 flag C.  HEAD_V_DIM is 128 on this checkpoint, i.e. EXACTLY one fp8
+  // scale group, and this task owns the whole of it: the split tasks deposit
+  // partials and only the last-arriving one reaches here.  So the quantize the
+  // standalone task would do over `out`'s group `hv` can be done here with no
+  // cross-task reduction and no change of grouping.
+  //
+  // BIT-EXACT BY CONSTRUCTION.  `out_v` is the same `T(y * silu)` this loop
+  // already stores, so the value quantized is the same bf16 the standalone
+  // quantize would read back out of global; the amax is over the same 128
+  // elements seeded with the same `eps`, reduced with fmaxf, which is exact and
+  // order-independent; and `y_scale`, the scale store and
+  // `fp8(clamp(orig / y_scale, min, max))` are the same expressions as
+  // `per_token_group_quantize_fp8_task_impl`'s f32-scale branch.  No rounding
+  // position moves, so the CAST-POSITION RULE does not apply.
+  float amax = 1e-10f; // the quantize's `eps` seed
   for (int i = tid; i < HEAD_V_DIM; i += NUM_THREADS) {
     float const x_hat = static_cast<float>(T(s_o[i] * inv_rms));
     float const y = d_norm_w[i] * x_hat;
     float const zf = static_cast<float>(s_z[i]); // staged at entry
     float const silu = zf * (1.0f / (1.0f + expf(-zf)));
-    d_out[i] = T(y * silu);
+    T const out_v = T(y * silu);
+    if constexpr (WRITE_OUT) {
+      d_out[i] = out_v;
+    }
+    if constexpr (FUSE_QUANT) {
+      float const ov = static_cast<float>(out_v);
+      s_o[i] = ov; // s_o is free from here; restage for the second pass
+      amax = fmaxf(fabsf(ov), amax);
+    }
+  }
+  if constexpr (FUSE_QUANT) {
+    static_assert(HEAD_V_DIM == 128,
+                  "flag C assumes a v-head is exactly one 128-element fp8 "
+                  "scale group; a different HEAD_V_DIM would need the group "
+                  "loop the standalone quantize has");
+    float group_max = gdn_block_max(amax, s_red);
+    group_max = fmaxf(group_max, 1e-10f);
+    float const y_scale = group_max / 448.0f;
+    if (tid == 0) {
+      static_cast<float *>(s_out_ptr)[0] = y_scale;
+    }
+    __nv_fp8_e4m3 *const d_q = static_cast<__nv_fp8_e4m3 *>(q_out_ptr);
+    for (int i = tid; i < HEAD_V_DIM; i += NUM_THREADS) {
+      float const quant_val = fminf(fmaxf(s_o[i] / y_scale, -448.0f), 448.0f);
+      d_q[i] = __nv_fp8_e4m3(quant_val);
+    }
   }
 }
 

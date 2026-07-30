@@ -1,0 +1,111 @@
+/* Copyright 2023-2024 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "mirage/kernel/reduction.h"
+#include "mirage/kernel/device_memory_manager.h"
+#include "mirage/kernel/graph.h"
+#include "mirage/layout.h"
+#include "mirage/utils/hash_utils.h"
+#include <cassert>
+
+namespace mirage {
+namespace kernel {
+
+using namespace mirage::type;
+
+DTensor Graph::reduction(DTensor const &input, int dim, int size) {
+  KNOperator *op = create_reduction_op(input, dim, size);
+  assert(op != nullptr);
+  operators.push_back(op);
+  assert(op->output_tensors.size() == 1);
+  DTensor output = op->output_tensors[0];
+  return output;
+}
+
+DTensor *Graph::reduction(DTensor const *input, int dim, int size) {
+  KNOperator *op = create_reduction_op(*input, dim, size);
+  assert(op != nullptr);
+  operators.push_back(op);
+  assert(op->output_tensors.size() == 1);
+  return &op->output_tensors[0];
+}
+
+KNOperator *
+    Graph::create_reduction_op(DTensor const &input, int dim, int size) {
+  if (input.num_dims <= dim) {
+    return nullptr;
+  }
+  if (input.dim[dim] % size != 0) {
+    return nullptr;
+  }
+  if (!this->can_allocate(input)) {
+    return nullptr;
+  }
+
+  KNReductionOp *op = new KNReductionOp(this, input, dim, size);
+  return op;
+}
+
+KNReductionOp::KNReductionOp(Graph *_kgraph,
+                             DTensor const &input,
+                             int dim,
+                             int size)
+    : KNOperator(_kgraph, (KNOperatorType)(KN_REDUCTION_0_OP + dim), input),
+      reduction_dim_idx(dim), reduction_dim_size(size) {
+  DTensor output = input;
+  assert(dim < output.num_dims);
+  assert(output.dim[dim] % size == 0);
+  output.dim[dim] = size;
+  // Reduction allocates fresh memory for the smaller output, so recompute
+  // row-major strides from the post-reduction shape rather than inheriting
+  // the (now-wrong) strides copied from `input`.
+  for (int i = output.num_dims - 1; i >= 0; i--) {
+    output.stride[i] = (i == output.num_dims - 1)
+                           ? 1
+                           : output.stride[i + 1] * output.dim[i + 1];
+  }
+  output.owner_op = this;
+  output.owner_ts_idx = 0;
+  output.guid = DTensor::next_guid++;
+  // Reduction output is freshly allocated; clear base_guid/view_offset so
+  // codegen doesn't route writes through input's parent IODesc when input
+  // is a view.
+  output.base_guid = 0;
+  output.view_offset = 0;
+  kgraph->allocate(output);
+  assert(output_tensors.size() == 0);
+  output_tensors.push_back(output);
+}
+
+KNReductionOp::~KNReductionOp() {
+  for (int i = output_tensors.size() - 1; i >= 0; i--) {
+    kgraph->free(output_tensors[i]);
+  }
+}
+
+KNReductionOp::operator json() const {
+  return json{{"op_type", op_type},
+              {"input_tensors", input_tensors},
+              {"output_tensors", output_tensors}};
+}
+
+#ifdef MIRAGE_FINGERPRINT_USE_CPU
+bool KNReductionOp::fingerprint(void) {
+  assert(false && "To be implemented");
+}
+#endif
+
+} // namespace kernel
+} // namespace mirage

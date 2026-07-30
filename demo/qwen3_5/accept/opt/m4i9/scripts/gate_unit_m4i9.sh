@@ -9,8 +9,12 @@
 #         both the SwiGLU and the fp8 rescale.
 #
 # Instruments, per lane:
-#   test_moe_silu_quant_fused.py    fused task vs the SHIPPED unfused pair,
-#       byte-identical fp8 AND fp32 scales required, 8 shapes x 4 value scales.
+#   test_moe_silu_quant_fused.py    flag F's fused task vs the SHIPPED unfused
+#       pair, byte-identical fp8 AND fp32 scales, 8 shapes x 4 value scales.
+#   test_rmsnorm_quant_fused.py     flag A/N's fused task vs its SHIPPED pair,
+#       byte-identical fp8, fp32 scales AND the bf16 norm where it is kept,
+#       7 shapes x 4 value scales x both output forms, at 256 threads (the
+#       megakernel's own block size, which rms_norm_hopper_impl requires).
 #   test_quantize_fp8_f32scale_moe.py  the pre-existing quantize test (the half
 #       the fusion absorbs), so the gate also proves the fusion did not perturb
 #       the standalone task it shares a header with.
@@ -52,9 +56,13 @@ run_lane () {
     | sed "s/^/  -use_fast_math occurrences in build log: /"
   "$CU/bin/nvcc" --version | tail -2 | sed 's/^/  /'""
 
-  echo "--- fused SwiGLU+quantize vs the shipped unfused pair ---"
+  echo "--- flag F: fused SwiGLU+quantize vs the shipped unfused pair ---"
   "$PY" test_moe_silu_quant_fused.py 2>&1 | tee "$M/gate2/fused_$lane.log"
   echo "FUSED_EXIT=${PIPESTATUS[0]}"
+
+  echo "--- flag N: fused RMSnorm+quantize vs the shipped unfused pair ---"
+  "$PY" test_rmsnorm_quant_fused.py 2>&1 | tee "$M/gate2/fusedN_$lane.log"
+  echo "FUSEDN_EXIT=${PIPESTATUS[0]}"
 
   echo "--- pre-existing standalone fp32-scale quantize test ---"
   "$PY" test_quantize_fp8_f32scale_moe.py > "$M/gate2/quant_$lane.log" 2>&1

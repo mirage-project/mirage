@@ -196,6 +196,70 @@ def fuse_silu_quant() -> bool:
     return os.environ.get("MPK_FUSE_SILU_QUANT") == "1"
 
 
+def fuse_norm_quant() -> bool:
+    """True when MPK_FUSE_NORM_QUANT=1 fuses each layer's PRE-NORM into the
+    quantize that consumes it (M4-I9 flag A). DEFAULT OFF.
+
+    Every layer's chain opens `rms_norm -> quantize -> dense_fp8`, and those two
+    front tasks have identical geometry (both one task per token row on the same
+    [1, hidden] tile), so they can be one. Modelled cp_exact effect on HEAD:
+    -62.0 / -63.3 / -67.8 us at bs 1/8/16 over 40 layers.
+
+    Applies at the two PRE-NORM sites only:
+      * GDN layers    pre_norm -> gdn_xq        (3 outputs: the bf16 norm is
+                                                 still read by the `ba` linear)
+      * ATTN layers   pre_norm -> qkvg_proj_xq  (2 outputs: the quantize was the
+                                                 norm's only consumer)
+
+    NOT applied at the POST-NORM site, and that is a hard graph constraint rather
+    than a scope choice: `post_norm -> moe_xq` would make the fused task a
+    fork-producer (post_norm still feeds the router, the shared-expert quantize
+    and the sigmoid gate) whose consumer `w13` is a JOIN-consumer (it also waits
+    on the router), which `build_annotated_graph` rejects as case 3
+    (annotated_graph.cc:642-661) -- the same rule that already forces the routed
+    and shared branches to carry separate quantizes (see the module docstring,
+    note 2). `post_norm -> shared_gate_up_xq` would be legal but is off the
+    critical path and tiny.
+
+    Compile-time GRAPH change, so a kernel dir must not be reused across values.
+    """
+    return os.environ.get("MPK_FUSE_NORM_QUANT") == "1"
+
+
+def fuse_recur_quant() -> bool:
+    """True when MPK_FUSE_RECUR_QUANT=1 fuses the GDN out-projection's quantize
+    into the recurrence that produces its input (M4-I9 flag C). DEFAULT OFF.
+
+    The largest of M4-I9's remaining admissible fusions: modelled cp_exact effect
+    -128.7 / -129.5 / -107.2 us at bs 1/8/16 on top of flag F, over the 30 GDN
+    layers.
+
+    Why it is legal, and why it needed the "with care" label. The recurrence's
+    gated-RMSNorm epilogue already holds one whole v-head of bf16 results, and
+    `linear_value_head_dim == 128` is EXACTLY one fp8 scale group -- so the
+    quantize its consumer used to do needs no regrouping and no cross-task
+    reduction. In the split configuration (grid.z > 1 at small batch) only the
+    LAST-ARRIVING task reaches the epilogue, elected by M3-I3's `__threadfence()`
+    + `atomicAdd` arrival counter, so exactly one task writes the group. The
+    counter is NOT a barrier -- no task waits on a peer -- which is the property
+    that makes it sound under a persistent work-queue scheduler, and the fusion
+    inherits it unchanged.
+
+    It also needs no NEW input, which is what makes it possible at all: the
+    recurrence already has 7 inputs and `MAX_INPUTS_PER_TASK` is 7.
+
+    The ATTENTION sibling (`o_proj_xq` into `paged_attention`) is deliberately
+    NOT implemented. It is worth only 32.4 / 32.9 / 26.4 us of cp_exact, and the
+    attention body is being rewritten by a concurrent parity loop -- a fusion
+    that lives inside a kernel someone else is replacing is a merge conflict by
+    construction, and the composable alternative (a separate quantize task) is
+    what already ships.
+
+    Compile-time GRAPH change, so a kernel dir must not be reused across values.
+    """
+    return os.environ.get("MPK_FUSE_RECUR_QUANT") == "1"
+
+
 def fp8_dense_baseline() -> bool:
     """True when MPK_FP8_DENSE_BASELINE=1 pins the pre-M4-I2 dispatch.
 
@@ -328,6 +392,9 @@ class Qwen35Builder(GraphBuilder):
         self.expose_logits = False
         self.buffers: Dict[str, torch.Tensor] = {}
         self._keep: List[torch.Tensor] = []
+        # Per-layer handoff for M4-I9 flag A: the (xq, xs) pair the fused
+        # pre-norm produced, or None when the flag is off.
+        self._pre_xq = None
 
     # ------------------------------------------------------------------
     # entry points
@@ -632,12 +699,20 @@ class Qwen35Builder(GraphBuilder):
         quantize a fork-producer, and any consumer that also waits on another
         producer (the router, for the MoE branches) then trips case 3.
         """
-        pk, w = self.mpk, self.weights
+        pk = self.mpk
         xq = self._t((self.mbt, k), float8_e4m3, f"{name}_xq")
         xs = self._t((self.mbt, k // BLOCK), float32, f"{name}_xs")
         pk.quantize_fp8_layer(input=x, output_fp8=xq, output_scale=xs,
                               grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1),
                               scale_ue8m0=False, row_partition=QUANTIZE_ROW_SPLIT)
+        self._fp8_gemm(name, xq, xs, w_name, out, residual=residual, k=k)
+
+    def _fp8_gemm(self, name: str, xq, xs, w_name: str, out, *, residual=None,
+                  k: int):
+        """The GEMM half of `_fp8_linear`, split out so a call site whose
+        (xq, xs) came from somewhere else -- M4-I9 flag A's fused pre-norm, or
+        flag C's fused producer -- can wire it without a second quantize."""
+        pk, w = self.mpk, self.weights
         weight = pk.attach_input(w[w_name], name=w_name)
         n = w[w_name].shape[0]
         n_tasks = fp8_grid(n, k, self.mbt)
@@ -691,11 +766,33 @@ class Qwen35Builder(GraphBuilder):
         pk, w, c = self.mpk, self.weights, self.config
         pre_w = pk.attach_input(w[f"layer_{i}_input_layernorm"],
                                 name=f"layer_{i}_input_layernorm")
-        nrm = self._t((self.mbt, c.hidden_size), bfloat16, f"layer_{i}_pre_norm")
-        pk.rmsnorm_layer(input=h, weight=pre_w, output=nrm,
-                         grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1))
+        is_gdn = c.layer_types[i] == "linear_attention"
 
-        if c.layer_types[i] == "linear_attention":
+        # M4-I9 flag A: fuse the pre-norm into the quantize that consumes it.
+        # `_pre_xq` is the (xq, xs) pair the fused task produced, or None; the
+        # branch builders skip their own quantize when it is not None.
+        self._pre_xq = None
+        if fuse_norm_quant() and not self.expose_intermediates:
+            k = c.hidden_size
+            tag = f"layer_{i}_gdn" if is_gdn else f"layer_{i}_qkvg_proj"
+            xq = self._t((self.mbt, k), float8_e4m3, f"{tag}_xq")
+            xs = self._t((self.mbt, k // BLOCK), float32, f"{tag}_xs")
+            # The bf16 norm is still materialised ONLY where something else
+            # reads it: at GDN layers the bf16 `ba` projection does.
+            nrm = (self._t((self.mbt, c.hidden_size), bfloat16,
+                           f"layer_{i}_pre_norm") if is_gdn else None)
+            pk.rmsnorm_quantize_fp8_layer(
+                input=h, weight=pre_w, output_fp8=xq, output_scale=xs,
+                norm_output=nrm, grid_dim=(self.mbt, 1, 1),
+                block_dim=(128, 1, 1))
+            self._pre_xq = (xq, xs)
+        else:
+            nrm = self._t((self.mbt, c.hidden_size), bfloat16,
+                          f"layer_{i}_pre_norm")
+            pk.rmsnorm_layer(input=h, weight=pre_w, output=nrm,
+                             grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1))
+
+        if is_gdn:
             h = self._build_gdn(i, nrm, h)
         else:
             h = self._build_attention(i, nrm, h)
@@ -708,11 +805,18 @@ class Qwen35Builder(GraphBuilder):
 
         # qkv and z share ONE quantize: both consumers have a single producer,
         # so this fork never meets a join (annotated_graph.cc case 3).
-        xq = self._t((self.mbt, c.hidden_size), float8_e4m3, f"layer_{i}_gdn_xq")
-        xs = self._t((self.mbt, c.hidden_size // BLOCK), float32, f"layer_{i}_gdn_xs")
-        pk.quantize_fp8_layer(input=nrm, output_fp8=xq, output_scale=xs,
-                              grid_dim=(self.mbt, 1, 1), block_dim=(128, 1, 1),
-                              scale_ue8m0=False, row_partition=QUANTIZE_ROW_SPLIT)
+        # M4-I9 flag A may already have produced this pair inside the pre-norm.
+        if self._pre_xq is not None:
+            xq, xs = self._pre_xq
+        else:
+            xq = self._t((self.mbt, c.hidden_size), float8_e4m3,
+                         f"layer_{i}_gdn_xq")
+            xs = self._t((self.mbt, c.hidden_size // BLOCK), float32,
+                         f"layer_{i}_gdn_xs")
+            pk.quantize_fp8_layer(input=nrm, output_fp8=xq, output_scale=xs,
+                                  grid_dim=(self.mbt, 1, 1),
+                                  block_dim=(128, 1, 1), scale_ue8m0=False,
+                                  row_partition=QUANTIZE_ROW_SPLIT)
         qkv = self._t((self.mbt, c.conv_dim), bfloat16, f"layer_{i}_gdn_qkv")
         z = self._t((self.mbt, c.gdn_z_dim), bfloat16, f"layer_{i}_gdn_z")
         for tag, out in (("in_proj_qkv", qkv), ("in_proj_z", z)):
@@ -746,7 +850,20 @@ class Qwen35Builder(GraphBuilder):
             grid_dim=(self.mbr, self.gdn_conv_channel_blocks, 1),
             block_dim=(256, 1, 1))
 
-        g_out = self._t((self.mbt, c.gdn_z_dim), bfloat16, f"layer_{i}_gdn_out")
+        # M4-I9 flag C: the recurrence emits the fp8 pair its consumer needed,
+        # and the bf16 `gdn_out` (whose only consumer was that quantize) is not
+        # materialised at all.
+        fuse_rq = fuse_recur_quant() and not self.expose_intermediates
+        if fuse_rq:
+            g_out = None
+            oq = self._t((self.mbt, c.gdn_z_dim), float8_e4m3,
+                         f"layer_{i}_gdn_out_proj_xq")
+            os_ = self._t((self.mbt, c.gdn_z_dim // BLOCK), float32,
+                          f"layer_{i}_gdn_out_proj_xs")
+        else:
+            g_out = self._t((self.mbt, c.gdn_z_dim), bfloat16,
+                            f"layer_{i}_gdn_out")
+            oq = os_ = None
         gdn_split = self._gdn_split_default()
         pk.gdn_recurrent_layer(
             qkv=qkv_c, ba=ba,
@@ -758,6 +875,7 @@ class Qwen35Builder(GraphBuilder):
             norm_w=pk.attach_input(w[f"layer_{i}_gdn_norm"],
                                    name=f"layer_{i}_gdn_norm"),
             output=g_out,
+            output_fp8=oq, output_scale=os_,
             split_scratch=self.gdn_split_dt,
             num_k_heads=c.linear_num_key_heads,
             grid_dim=(c.linear_num_value_heads, self.mbr,
@@ -767,9 +885,14 @@ class Qwen35Builder(GraphBuilder):
             decode_fastpath=gdn_split > 0)
 
         out = self._t((self.mbt, c.hidden_size), bfloat16, f"layer_{i}_attn_resid")
-        self._fp8_linear(f"layer_{i}_gdn_out_proj", g_out,
-                         f"layer_{i}_gdn_out_proj", out, residual=h,
-                         k=c.gdn_z_dim)
+        if fuse_rq:
+            self._fp8_gemm(f"layer_{i}_gdn_out_proj", oq, os_,
+                           f"layer_{i}_gdn_out_proj", out, residual=h,
+                           k=c.gdn_z_dim)
+        else:
+            self._fp8_linear(f"layer_{i}_gdn_out_proj", g_out,
+                             f"layer_{i}_gdn_out_proj", out, residual=h,
+                             k=c.gdn_z_dim)
         return out
 
     # ---- full attention ----------------------------------------------
@@ -777,7 +900,13 @@ class Qwen35Builder(GraphBuilder):
         pk, w, c = self.mpk, self.weights, self.config
         slot = self._attn_slot[i]
         qkvg = self._t((self.mbt, c.qkvg_dim), bfloat16, f"layer_{i}_qkvg")
-        if self.qk_dense_path == "fp8":
+        if self.qk_dense_path == "fp8" and self._pre_xq is not None:
+            # M4-I9 flag A: the pre-norm already emitted this site's (xq, xs),
+            # so only the GEMM half of `_fp8_linear` is left to wire.
+            self._fp8_gemm(f"layer_{i}_qkvg_proj", self._pre_xq[0],
+                           self._pre_xq[1], f"layer_{i}_qkvg_proj", qkvg,
+                           k=c.hidden_size)
+        elif self.qk_dense_path == "fp8":
             self._fp8_linear(f"layer_{i}_qkvg_proj", nrm, f"layer_{i}_qkvg_proj",
                              qkvg, k=c.hidden_size)
         else:

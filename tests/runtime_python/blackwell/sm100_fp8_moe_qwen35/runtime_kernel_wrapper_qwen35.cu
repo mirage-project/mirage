@@ -55,8 +55,10 @@
 
 #include "blackwell/moe_fp8_blockscale_sm100.cuh"
 #include "blackwell/moe_silu_mul_quantize_fp8_sm100.cuh"
+#include "blackwell/rmsnorm_quantize_fp8_sm100.cuh"
 #include "blackwell/per_token_group_quantize_fp8.cuh"
 #include "tasks/ampere/silu_mul.cuh"
+#include "tasks/hopper/rmsnorm_hopper.cuh"
 #include "runtime_header.h"
 #include "tasks/blackwell/fp8_group_gemm_sm100.cuh"
 #include "tasks/hopper/smem_layout_tma.cuh"
@@ -448,6 +450,88 @@ bool dispatch_silu_quant(bool fused,
 
 #undef Q35_SQ_DISPATCH
 
+// ================================================================
+// M4-I9 flag A -- the two halves of the norm+quantize fusion.
+//
+// Same contract as the silu fusion above: the reference is the SHIPPED PAIR
+// (`rms_norm_hopper_impl` into a bf16 buffer, then
+// `per_token_group_quantize_fp8_task_impl` over that buffer), not a torch ideal.
+//
+// LAUNCHED WITH 256 THREADS, which is the megakernel's real block size
+// (WORKER_NUM_THREADS = 256) and what `rms_norm_hopper_impl`'s NUM_THREADS
+// default assumes -- its cp.async warm-up has no loop, so the template parameter
+// and blockDim MUST agree. Dynamic shared memory is
+// 3 * HIDDEN * sizeof(T) + NUM_WARPS * 4, the arena the impl carves up.
+// ================================================================
+template <int ROWS, int HIDDEN>
+__global__ void __launch_bounds__(256)
+    q35_rmsnorm_ref_kernel(void const *__restrict__ input,
+                           void const *__restrict__ weight,
+                           void *__restrict__ output) {
+  kernel::rms_norm_hopper_impl<cute::bfloat16_t, ROWS, HIDDEN, 256>(
+      input, weight, output, 1e-6f);
+}
+
+template <int ROWS, int HIDDEN, bool WRITE_NORM>
+__global__ void __launch_bounds__(256)
+    q35_rmsnorm_quant_fused_kernel(void const *__restrict__ input,
+                                   void const *__restrict__ weight,
+                                   void *__restrict__ norm_out,
+                                   void *__restrict__ out_q,
+                                   void *__restrict__ out_s) {
+  kernel::rms_norm_quantize_fp8_task_impl</*BATCH_SIZE=*/ROWS,
+                                          /*HIDDEN_DIM=*/HIDDEN,
+                                          /*GROUP_SIZE=*/128,
+                                          WRITE_NORM,
+                                          cute::bfloat16_t,
+                                          __nv_fp8_e4m3,
+                                          /*NUM_THREADS=*/256>(
+      input, weight, norm_out, out_q, out_s, 1e-6f, 1e-10f, -448.0f, 448.0f);
+}
+
+template <int HIDDEN>
+constexpr int q35_norm_smem() {
+  return 3 * HIDDEN * (int)sizeof(cute::bfloat16_t) + (256 / 32) * 4;
+}
+
+#define Q35_NQ_DISPATCH(R, HID)                                                \
+  if (rows == R && hidden == HID) {                                            \
+    if (mode == 0) {                                                           \
+      q35_rmsnorm_ref_kernel<R, HID>                                           \
+          <<<1, 256, q35_norm_smem<HID>(),                                     \
+             at::cuda::getCurrentCUDAStream()>>>(input, weight, a);             \
+    } else if (mode == 1) {                                                    \
+      q35_rmsnorm_quant_fused_kernel<R, HID, true>                             \
+          <<<1, 256, q35_norm_smem<HID>(),                                     \
+             at::cuda::getCurrentCUDAStream()>>>(input, weight, a, b, c);       \
+    } else {                                                                   \
+      q35_rmsnorm_quant_fused_kernel<R, HID, false>                            \
+          <<<1, 256, q35_norm_smem<HID>(),                                     \
+             at::cuda::getCurrentCUDAStream()>>>(input, weight, nullptr, b, c); \
+    }                                                                          \
+    return true;                                                               \
+  }
+
+bool dispatch_norm_quant(int mode,
+                         int rows,
+                         int hidden,
+                         void const *input,
+                         void const *weight,
+                         void *a,
+                         void *b,
+                         void *c) {
+  Q35_NQ_DISPATCH(1, 2048)
+  Q35_NQ_DISPATCH(2, 2048)
+  Q35_NQ_DISPATCH(4, 2048)
+  Q35_NQ_DISPATCH(16, 2048)
+  Q35_NQ_DISPATCH(1, 512)
+  Q35_NQ_DISPATCH(1, 1024)
+  Q35_NQ_DISPATCH(4, 1024)
+  return false;
+}
+
+#undef Q35_NQ_DISPATCH
+
 #undef Q35_QUANT_DISPATCH_ROWS
 #undef Q35_QUANT_DISPATCH_HIDDEN
 
@@ -711,6 +795,56 @@ void quantize_fp8_f32scale_sm100(torch::Tensor input,
   C10_CUDA_CHECK(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()));
 }
 
+void rmsnorm_sm100(torch::Tensor input,
+                   torch::Tensor weight,
+                   torch::Tensor output) {
+  c10::cuda::CUDAGuard guard(input.device());
+  TORCH_CHECK(input.is_contiguous() && output.is_contiguous() &&
+                  weight.is_contiguous(),
+              "rmsnorm tensors must be contiguous");
+  TORCH_CHECK(input.scalar_type() == at::kBFloat16 &&
+                  output.scalar_type() == at::kBFloat16 &&
+                  weight.scalar_type() == at::kBFloat16,
+              "rmsnorm is bf16");
+  int const hidden = static_cast<int>(input.size(input.dim() - 1));
+  int const rows = static_cast<int>(input.numel() / hidden);
+  TORCH_CHECK(weight.numel() == hidden, "weight must be [hidden]");
+  TORCH_CHECK(dispatch_norm_quant(0, rows, hidden, input.data_ptr(),
+                                  weight.data_ptr(), output.data_ptr(),
+                                  nullptr, nullptr),
+              "unsupported rmsnorm shape [rows=", rows, ", hidden=", hidden,
+              "]");
+  C10_CUDA_CHECK(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()));
+}
+
+void rmsnorm_quantize_fp8_sm100(torch::Tensor input,
+                                torch::Tensor weight,
+                                torch::Tensor norm_out,
+                                torch::Tensor output_q,
+                                torch::Tensor output_s,
+                                bool write_norm) {
+  c10::cuda::CUDAGuard guard(input.device());
+  TORCH_CHECK(input.is_contiguous() && output_q.is_contiguous() &&
+                  output_s.is_contiguous() && weight.is_contiguous(),
+              "fused norm+quant tensors must be contiguous");
+  TORCH_CHECK(input.scalar_type() == at::kBFloat16, "input must be bfloat16");
+  TORCH_CHECK(output_q.scalar_type() == at::kFloat8_e4m3fn,
+              "output_q must be float8_e4m3fn");
+  TORCH_CHECK(output_s.scalar_type() == at::kFloat, "output_s must be float32");
+  int const hidden = static_cast<int>(input.size(input.dim() - 1));
+  int const rows = static_cast<int>(input.numel() / hidden);
+  TORCH_CHECK(weight.numel() == hidden, "weight must be [hidden]");
+  TORCH_CHECK(hidden % 128 == 0, "hidden must be a multiple of 128");
+  TORCH_CHECK(output_s.numel() == (int64_t)rows * (hidden / 128),
+              "output_s must be [rows, hidden/128] float32");
+  TORCH_CHECK(dispatch_norm_quant(write_norm ? 1 : 2, rows, hidden,
+                                  input.data_ptr(), weight.data_ptr(),
+                                  write_norm ? norm_out.data_ptr() : nullptr,
+                                  output_q.data_ptr(), output_s.data_ptr()),
+              "unsupported fused shape [rows=", rows, ", hidden=", hidden, "]");
+  C10_CUDA_CHECK(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()));
+}
+
 void moe_silu_mul_sm100(torch::Tensor input, torch::Tensor output) {
   c10::cuda::CUDAGuard guard(input.device());
   TORCH_CHECK(input.is_contiguous() && output.is_contiguous(),
@@ -776,4 +910,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &moe_silu_mul_quantize_fp8_sm100,
         "M4-I9: MoE activation SwiGLU fused with the fp32-block-scale FP8 "
         "quantize (one task)");
+  m.def("rmsnorm_sm100",
+        &rmsnorm_sm100,
+        "RMS norm alone (the unfused reference half of M4-I9 flag A)");
+  m.def("rmsnorm_quantize_fp8_sm100",
+        &rmsnorm_quantize_fp8_sm100,
+        "M4-I9 flag A: RMS norm fused with the fp32-block-scale FP8 quantize "
+        "(one task); write_norm selects the 3-output or 2-output form");
 }
