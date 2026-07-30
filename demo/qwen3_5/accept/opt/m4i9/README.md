@@ -8,9 +8,10 @@ the shipped arm's own measured durations, at the optimistic limit where fusion c
 task nothing — leaves the floor at **1.017 / 1.024 / 1.105**.
 
 **Fusion cannot get under 1.0 because the two largest tiny stages on the chain are not
-fusable.** The MoE router pair (`topk_softmax` 368.6 us + the router `linear` 350.8 us of
-cp_exact at bs1, 17.4% of it) and the MoE combine (230.8 us) are cross-task reductions, and
-the arithmetic says they are exactly what is in the way: the moment they are allowed to be
+fusable.** The MoE router pair (`topk_softmax` and the router `linear`) is worth 602.6 us of
+cp_exact at bs1 jointly — 14.6% of it, against 368.6 + 350.8 us one-at-a-time, so sub-additive —
+and the MoE combine another 230.8 us. Both are cross-task reductions, and the arithmetic says
+they are exactly what is in the way: the moment they are allowed to be
 free the floor drops to **0.845 / 0.863** at bs1/bs8 — from the other side of 1.0. At bs16 not
 even that helps: the work bound binds there, it is a *sum* and therefore exactly additive, and
 making every non-GEMM stage in the graph free leaves it at 1.030x.
@@ -101,7 +102,9 @@ its ~1.15 us of event visibility or ~1.55 us of queue-pop latency *and* its barr
 
 ### The two verdicts that decide the issue
 
-**The MoE router pair is structurally unfusable.** `router_logits` is dispatched as
+**The MoE router pair is structurally unfusable, and it is what blocks 1.0.** Jointly it is
+602.6 / 928.4 / 924.1 us of cp_exact at bs 1/8/16 on top of every admissible fusion, which is
+the entire remaining distance. `router_logits` is dispatched as
 `min(grid_for_rmsnorm_linear_layer(256), 256//8) = 32` tasks per layer, each computing 8 of the
 256 expert logits for **all** 16 token rows (tile `[16,8]`), and `topk_softmax` runs as ONE
 task that must reduce over all 256. Fusing them means collapsing the router to a single task,
