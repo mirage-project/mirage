@@ -321,6 +321,19 @@ iteration's realized durations, so it needs the second iteration as a noise chec
 The two iterations agree on Δcp within 0.3–8%. `width.py`, the independent instrument, agrees on
 the work bound over the whole window: −4.5 / −1.7 / −1.5%.
 
+**The two geometries disagree on the STEP at bs8/bs16, and that is worth stating rather than
+burying.** `width.py`'s window-averaged step moves −3.59% / +0.03% / +0.13% here (msl=897, late
+context, profiled), against the geometry-B paired e2e of +213 / +75 / +199 us per step (msl=353,
+unprofiled). The chain reduction is unambiguous and consistent in both; the *step* reduction is
+only unambiguous at bs1. That is what the decomposition predicts: PATH work is 52.2% of the step
+at bs1 but 43.5% at bs8 and 34.2% at bs16, while QUEUE work grows to 41.3% and 52.0%, so at
+larger batch the realized step is packing-and-throughput-bound and a shorter chain has less to
+convert. It also means the profiled instrument is not a fair step comparator between these arms:
+arm F has 640 fewer profiled records per step, so it pays *less* of the 1.4–2.7% profiler
+overhead M4-I8 measured, which biases the profiled step comparison in arm F's favour — and it
+still comes out flat at bs8/bs16. The e2e A/B, which carries no profiler, is the step evidence;
+this section is the chain evidence.
+
 **The measured reduction is about twice what the site-local model predicted** (−177.3 / −189.0 /
 −184.4). The extra is not the fused site: arm F's graph has 640 fewer tasks and 640 fewer events
 per step, and the tasks the fusion does not touch measured faster for it — `w13` on the chain
