@@ -1,0 +1,132 @@
+{
+  "batch_size": 2,
+  "note": "informational only -- no perf claim (cold compile)",
+  "waves": [
+    {
+      "batch_size": 2,
+      "wave": 0,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p06-poem",
+        "p01-history"
+      ],
+      "wall_ms": 663.6949462890625,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 6.202756507374416,
+      "tokens_per_s": 322.4372901986743,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 110,
+        "per_request_token_cap_requested": "policy",
+        "per_request_token_cap_compiled": 8,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 2,
+      "wave": 1,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p04-chinese",
+        "p09-translate"
+      ],
+      "wall_ms": 625.8047485351562,
+      "max_decode_steps": 99,
+      "ms_per_decode_step": 6.3212600862137,
+      "tokens_per_s": 316.39261361225806,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 103,
+        "per_request_token_cap_requested": "policy",
+        "per_request_token_cap_compiled": 8,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 2,
+      "wave": 2,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p07-format",
+        "p05-cuda"
+      ],
+      "wall_ms": 629.5070190429688,
+      "max_decode_steps": 98,
+      "ms_per_decode_step": 6.423541010642539,
+      "tokens_per_s": 311.3547491463657,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 103,
+        "per_request_token_cap_requested": "policy",
+        "per_request_token_cap_compiled": 8,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 2,
+      "wave": 3,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p08-science",
+        "p10-logic"
+      ],
+      "wall_ms": 598.295654296875,
+      "max_decode_steps": 91,
+      "ms_per_decode_step": 6.5746775197458796,
+      "tokens_per_s": 304.1974293025558,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 96,
+        "per_request_token_cap_requested": "policy",
+        "per_request_token_cap_compiled": 8,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 2,
+      "wave": 4,
+      "num_requests": 2,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p03-python",
+        "p02-math"
+      ],
+      "wall_ms": 589.8919067382812,
+      "max_decode_steps": 87,
+      "ms_per_decode_step": 6.780366744118175,
+      "tokens_per_s": 294.96929524276214,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 93,
+        "per_request_token_cap_requested": "policy",
+        "per_request_token_cap_compiled": 8,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation_checks": []
+}

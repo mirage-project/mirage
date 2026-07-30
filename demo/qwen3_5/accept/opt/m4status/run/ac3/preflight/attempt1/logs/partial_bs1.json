@@ -1,0 +1,253 @@
+{
+  "schema": "gate_ac3_stable/v1",
+  "generated_utc": "2026-07-30T10:22:08Z",
+  "config": {
+    "reps_required": 3,
+    "batch_sizes": [
+      1
+    ],
+    "baseline": "/home/muhengl/mpk-qwen35/final-gate/tree-6741b4ad8aae/demo/qwen3_5/accept/results/dumps_final",
+    "reps_root": "/home/muhengl/mpk-qwen35/final-gate/run-20260730T101424Z/ac3/preflight/attempt1/reps",
+    "max_extra_reps": 0,
+    "geometry": {
+      "max_seq_length": 132,
+      "max_new_tokens": 64,
+      "mbt": 16,
+      "page_size": 256,
+      "cold_compile": true
+    },
+    "detector": "KV/GDN wave-boundary bitfp (e2_fingerprint.bitfp)",
+    "launch_ledger": "/home/muhengl/mpk-qwen35/final-gate/run-20260730T101424Z/ac3/preflight/attempt1/launched.txt"
+  },
+  "per_bs": {
+    "1": {
+      "verdict": "FAIL",
+      "reps_required": 3,
+      "reps_launched": 3,
+      "reps_scored": 3,
+      "accepted": 2,
+      "quarantined": 1,
+      "errors": 0,
+      "reps_needed_to_reach_verdict": null,
+      "divergence_rate": 0.3333,
+      "consensus_state_signature": "f66643d43adada64",
+      "distinct_state_signatures": 2,
+      "all_reps_tokens_identical_to_baseline": false,
+      "accepted_reps_tokens_identical_to_baseline": true,
+      "quarantined_token_reaching": 1,
+      "quarantined_state_only": 0,
+      "foreign_floor_mib": 40,
+      "reps_starting_on_a_non_clean_device": 0,
+      "reps": [
+        {
+          "tag": "bs1_r1",
+          "rep_index": 1,
+          "status": "ok",
+          "secs": 112.6,
+          "n_waves": 10,
+          "dump_md5": "1728ad4588bca47350417ea0cecaa49b",
+          "device": {
+            "cuda_visible_devices": "5",
+            "uuid": "087b0f09-0d22-7908-e4cb-bb49fd81a455",
+            "phys_index": 5,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 46,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 36970,
+            "utilization_pct": 0
+          },
+          "state_sig": "8f761287cfd9a53d",
+          "token_sig": "d92c275564b0578f",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": false,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 9,
+            "all_identical": false,
+            "mismatched": [
+              {
+                "prompt_id": "p04-chinese",
+                "first_divergent_position": 61,
+                "ref_len": 64,
+                "got_len": 64
+              }
+            ]
+          },
+          "classification": "quarantined",
+          "fingerprint_delta_vs_consensus": {
+            "n_keys": 5,
+            "keys": [
+              {
+                "key": "tok_p04-chinese",
+                "entries_differ": 2,
+                "entries_total": 64,
+                "frac": 0.03125,
+                "first_pos": 61
+              },
+              {
+                "key": "w2_conv",
+                "entries_differ": 30,
+                "entries_total": 30,
+                "frac": 1.0
+              },
+              {
+                "key": "w2_k",
+                "entries_differ": 488,
+                "entries_total": 20480,
+                "frac": 0.023828
+              },
+              {
+                "key": "w2_rec",
+                "entries_differ": 30,
+                "entries_total": 30,
+                "frac": 1.0
+              },
+              {
+                "key": "w2_v",
+                "entries_differ": 488,
+                "entries_total": 20480,
+                "frac": 0.023828
+              }
+            ],
+            "waves_touched": [
+              "w2"
+            ]
+          },
+          "token_mismatch": true,
+          "divergence_reached_tokens": true,
+          "gpu_before_mib": 46,
+          "mib_above_foreign_floor": 6,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs1_r2",
+          "rep_index": 2,
+          "status": "ok",
+          "secs": 115.2,
+          "n_waves": 10,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "5",
+            "uuid": "087b0f09-0d22-7908-e4cb-bb49fd81a455",
+            "phys_index": 5,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 40,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 36968,
+            "utilization_pct": 0
+          },
+          "state_sig": "f66643d43adada64",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 40,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        },
+        {
+          "tag": "bs1_r3",
+          "rep_index": 3,
+          "status": "ok",
+          "secs": 115.0,
+          "n_waves": 10,
+          "dump_md5": "ed70f79cbeb797ef57ed7f3033f2bece",
+          "device": {
+            "cuda_visible_devices": "5",
+            "uuid": "087b0f09-0d22-7908-e4cb-bb49fd81a455",
+            "phys_index": 5,
+            "name": "NVIDIA B200"
+          },
+          "gpu_before": {
+            "memory_used_mib": 40,
+            "utilization_pct": 0
+          },
+          "gpu_after": {
+            "memory_used_mib": 36966,
+            "utilization_pct": 0
+          },
+          "state_sig": "f66643d43adada64",
+          "token_sig": "9f637f98c247796b",
+          "tokens": {
+            "available": true,
+            "per_case": {
+              "p01-history": true,
+              "p02-math": true,
+              "p03-python": true,
+              "p04-chinese": true,
+              "p05-cuda": true,
+              "p06-poem": true,
+              "p07-format": true,
+              "p08-science": true,
+              "p09-translate": true,
+              "p10-logic": true
+            },
+            "n_cases": 10,
+            "n_identical": 10,
+            "all_identical": true,
+            "mismatched": []
+          },
+          "classification": "accepted",
+          "gpu_before_mib": 40,
+          "mib_above_foreign_floor": 0,
+          "device_not_clean_at_start": false
+        }
+      ]
+    }
+  },
+  "totals": {
+    "reps_launched": 3,
+    "reps_scored": 3,
+    "accepted": 2,
+    "quarantined": 1,
+    "run_errors": 0,
+    "token_mismatch_reps": 1,
+    "fingerprint_divergence_rate": 0.3333,
+    "token_divergence_rate": 0.3333,
+    "quarantined_token_reaching": 1,
+    "quarantined_state_only": 0,
+    "fraction_of_divergences_reaching_tokens": 1.0,
+    "physical_gpus_used": [
+      5
+    ],
+    "reps_starting_on_a_non_clean_device": 0
+  },
+  "verdict": "FAIL",
+  "assertion": "AC-3 FAIL: at least one rep's token ids differ from results/dumps_final. This is a correctness result, not a stability result -- see per_bs[*].reps[*].tokens.mismatched."
+}

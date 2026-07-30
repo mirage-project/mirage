@@ -1,0 +1,15 @@
+bs1_r1
+bs1_r2
+bs1_r3
+bs2_r1
+bs2_r2
+bs2_r3
+bs4_r1
+bs4_r2
+bs4_r3
+bs8_r1
+bs8_r2
+bs8_r3
+bs16_r1
+bs16_r2
+bs16_r3
