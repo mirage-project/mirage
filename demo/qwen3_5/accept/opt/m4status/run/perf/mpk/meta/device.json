@@ -1,0 +1,6 @@
+{
+ "cuda_visible_devices": "2",
+ "uuid": "f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
+ "phys_index": 2,
+ "name": "NVIDIA B200"
+}

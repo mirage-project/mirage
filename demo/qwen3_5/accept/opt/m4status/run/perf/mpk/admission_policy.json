@@ -1,0 +1,1 @@
+{"cap_mode": "auto", "cap_min_batch_size": 2, "per_bs": {"1": null, "2": "auto", "4": "auto", "8": "auto", "16": "auto"}, "authority": "demo/qwen3_5/accept/admission_policy.py"}

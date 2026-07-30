@@ -1,0 +1,50 @@
+==============================================================================
+MPK Qwen3.5-35B-A3B-FP8 FINAL GATE -- NOT_APPLICABLE (exit 3)
+  utc=2026-07-30T11:25:26Z  sha=6741b4ad8aaef31d676ecb667220021c59f22fb5  host=c762a55b7155  mode=remote
+  stages=integrity,ac3,perf,report  binding=False
+==============================================================================
+  integrity  PASS
+  AC-3       PASS
+  AC-4       NOT_EVALUABLE
+  AC-5       NOT_EVALUABLE
+
+  AC-3 (re-pinned: coherence + >=90% agreement floor + no silent degradation):
+    bs=1   PASS           reps scored 3 errors 0
+         bs1_r1       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs1_r2       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs1_r3       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+    bs=2   PASS           reps scored 3 errors 0
+         bs2_r1       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs2_r2       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs2_r3       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+    bs=4   PASS           reps scored 3 errors 0
+         bs4_r1       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs4_r2       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs4_r3       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+    bs=8   PASS           reps scored 3 errors 0
+         bs8_r1       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs8_r2       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs8_r3       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+    bs=16  PASS           reps scored 3 errors 0
+         bs16_r1      exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs16_r2      exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs16_r3      exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+    AC-3(c): 150/150 cases byte-identical to dumps_final; degraded 0, unexplained 0
+    stability diagnostic: STABLE fingerprint divergence 0.0 token divergence 0.0
+
+RESULT bs=1 AC3=PASS AC4=NOT_RUN mpk_decode_tok_s=n/a vllm_decode_tok_s=n/a decode_ratio=n/a AC5=NOT_RUN mpk_e2e_s=n/a vllm_e2e_s=n/a e2e_ratio=n/a e2e_ratio_max=n/a
+RESULT bs=2 AC3=PASS AC4=NOT_RUN mpk_decode_tok_s=n/a vllm_decode_tok_s=n/a decode_ratio=n/a AC5=NOT_RUN mpk_e2e_s=n/a vllm_e2e_s=n/a e2e_ratio=n/a e2e_ratio_max=n/a
+RESULT bs=4 AC3=PASS AC4=NOT_RUN mpk_decode_tok_s=n/a vllm_decode_tok_s=n/a decode_ratio=n/a AC5=NOT_RUN mpk_e2e_s=n/a vllm_e2e_s=n/a e2e_ratio=n/a e2e_ratio_max=n/a
+RESULT bs=8 AC3=PASS AC4=NOT_RUN mpk_decode_tok_s=n/a vllm_decode_tok_s=n/a decode_ratio=n/a AC5=NOT_RUN mpk_e2e_s=n/a vllm_e2e_s=n/a e2e_ratio=n/a e2e_ratio_max=n/a
+RESULT bs=16 AC3=PASS AC4=NOT_RUN mpk_decode_tok_s=n/a vllm_decode_tok_s=n/a decode_ratio=n/a AC5=NOT_RUN mpk_e2e_s=n/a vllm_e2e_s=n/a e2e_ratio=n/a e2e_ratio_max=n/a
+
+  NOT EVALUABLE (exit 3 only if nothing failed)
+    - perf stage produced no report
+
+  HONEST CLAIM
+    NON-BINDING RUN -- not an AC-6 result.
+    The gate is NOT_APPLICABLE: perf stage produced no report
+    AC-3(c) diagnostic: 150/150 cases byte-identical to results/dumps_final, 0 degraded (0 unexplained); cold-rep fingerprint divergence 0.0 of scored reps. No claim is made that a single cold run is reproducible.
+
+  machine-readable report: /home/catalyst/m4status-gate/20260730T101424Z/report.json
+==============================================================================
