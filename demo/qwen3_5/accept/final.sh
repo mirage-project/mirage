@@ -114,6 +114,38 @@ done
 BS_COMMA="$(echo "$BATCH_SIZES" | tr ' ' ',' | sed 's/,,*/,/g;s/^,//;s/,$//')"
 in_stage() { case ",$STAGES," in *",$1,"*) return 0;; *) return 1;; esac; }
 
+# ---- resolve BOX_ROOT to a real absolute path (M4-I8) ------------------------
+# The default carries a LITERAL, unexpanded $HOME so it can be expanded on the
+# box.  But BOX_ROOT is also used locally to BUILD remote paths
+# (REMOTE_RUN="$BOX_ROOT/final-gate/run-..."), and those land inside SINGLE
+# quotes on the remote command line (`bash '$REMOTE_RUN/remote_setup.sh'`),
+# where $HOME does not expand -- so the gate tried to run
+# `$HOME/mpk-qwen35/final-gate/...` as a literal directory name and the
+# M4-status run had to pass --box-root as an absolute path to work at all.
+# Ask the box for its $HOME once, here, and substitute.  A caller-supplied
+# absolute --box-root is left exactly as given.
+case "$BOX_ROOT" in
+  *'$HOME'*|*'${HOME}'*)
+    if [ "$RUN_MODE" = "remote" ]; then
+      _box_home="$(ssh -o BatchMode=yes "$HOST" 'printf %s "$HOME"' 2>/dev/null)"
+    else
+      _box_home="$HOME"
+    fi
+    if [ -z "$_box_home" ]; then
+      echo "final.sh: cannot resolve \$HOME on $HOST to expand --box-root" >&2
+      echo "          pass an absolute --box-root instead" >&2
+      exit 2
+    fi
+    BOX_ROOT="${BOX_ROOT//\$\{HOME\}/$_box_home}"
+    BOX_ROOT="${BOX_ROOT//\$HOME/$_box_home}"
+    unset _box_home
+    ;;
+esac
+case "$BOX_ROOT" in
+  /*) ;;
+  *) echo "final.sh: --box-root must be absolute, got '$BOX_ROOT'" >&2; exit 2;;
+esac
+
 # =============================================================== self-test ===
 if [ "$SELF_TEST" = "1" ]; then
   echo "########## final.sh --self-test (GPU-free) $(date -Is) ##########"

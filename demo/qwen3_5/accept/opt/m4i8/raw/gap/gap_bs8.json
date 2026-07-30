@@ -1,0 +1,895 @@
+{
+ "raw": "/var/tmp/m4i8_prof/prof/raw_bs8_rep0.npz",
+ "graph": "/var/tmp/m4i8_prof/kernel_bs8/task_graph_rank0.json",
+ "batch_size": 8,
+ "window": [
+  365,
+  461
+ ],
+ "n_iterations": 767,
+ "nblocks": 208,
+ "ngroups": 1,
+ "n_tasks": 61188,
+ "n_events": 2278,
+ "graph_qc": {
+  "prelaunch_event_type": 903,
+  "prelaunch_range": [
+   2,
+   61188
+  ],
+  "n_empty_events": 2275,
+  "full_fanin": 2277,
+  "n_events_with_producers": 2277
+ },
+ "dropped_begin": 0,
+ "dropped_end": 0,
+ "iterations": [
+  {
+   "iteration": 365,
+   "assign_qc": {
+    "n_workers": 128,
+    "n_direct": 128,
+    "n_swapped": 0,
+    "n_mismatch": 0,
+    "mismatched_workers": [],
+    "verdict": "PASS"
+   },
+   "window_ns": 8253824,
+   "step_us": 8253.824,
+   "identity_error_ns": 0,
+   "chain_len": 848,
+   "chain_n_task": 798,
+   "chain_n_sev": 50,
+   "head_us": 0.0,
+   "tail_us": 25.312,
+   "path_work_us": 3590.56,
+   "queue_work_us": 3407.392,
+   "trigger_work_us": 22.944,
+   "data_gap_us": 630.304,
+   "resource_gap_us": 577.312,
+   "n_data_edges": 515,
+   "n_resource_edges": 333,
+   "chain_dead_tasks": 2,
+   "chain_dead_us": 1.952,
+   "sev_n": 2277,
+   "sev_mean_us": 0.4175458937198067,
+   "sev_total_us": 950.752,
+   "data_gap_median_ns": 1152.0,
+   "res_gap_median_ns": 1568.0,
+   "machine_idle_us": 499067.232,
+   "machine_idle_poll_us": 37535.456,
+   "machine_idle_starved_us": 456332.128,
+   "n_stalls": 61186,
+   "machine_idle_hol_full_us_by_window": {
+    "1": 0.0,
+    "2": 0.0,
+    "4": 0.0,
+    "8": 0.0,
+    "16": 0.0,
+    "32": 0.0,
+    "64": 0.0
+   },
+   "machine_idle_hol_partial_us_by_window": {
+    "1": 0.0,
+    "2": 0.0,
+    "4": 2347.648,
+    "8": 2347.648,
+    "16": 2347.648,
+    "32": 2347.648,
+    "64": 2347.648
+   },
+   "chain_by_type": [
+    {
+     "task_type": 241,
+     "name": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+     "n": 80,
+     "dur_us": 1458.752,
+     "as_path": 0,
+     "as_queue": 80,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 253,
+     "name": "TASK_LINEAR_SM100",
+     "n": 77,
+     "dur_us": 918.048,
+     "as_path": 41,
+     "as_queue": 36,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 242,
+     "name": "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+     "n": 80,
+     "dur_us": 876.928,
+     "as_path": 0,
+     "as_queue": 80,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 279,
+     "name": "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+     "n": 86,
+     "dur_us": 686.624,
+     "as_path": 74,
+     "as_queue": 12,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 237,
+     "name": "TASK_GDN_RECURRENT_SM100",
+     "n": 60,
+     "dur_us": 645.088,
+     "as_path": 28,
+     "as_queue": 32,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 257,
+     "name": "TASK_ATTN_SM100",
+     "n": 10,
+     "dur_us": 538.976,
+     "as_path": 10,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 260,
+     "name": "TASK_MOE_TOPK_SOFTMAX_SM100",
+     "n": 40,
+     "dur_us": 522.304,
+     "as_path": 40,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 275,
+     "name": "TASK_QUANTIZE_FP8_SM100",
+     "n": 91,
+     "dur_us": 300.352,
+     "as_path": 91,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 238,
+     "name": "TASK_SIGMOID_GATE_MUL_ADD_SM100",
+     "n": 40,
+     "dur_us": 269.44,
+     "as_path": 40,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 261,
+     "name": "TASK_MOE_MUL_SUM_ADD_SM100",
+     "n": 40,
+     "dur_us": 242.656,
+     "as_path": 40,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 234,
+     "name": "TASK_GDN_CONV1D_SM100",
+     "n": 30,
+     "dur_us": 186.688,
+     "as_path": 28,
+     "as_queue": 2,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 118,
+     "name": "TASK_SILU_MUL",
+     "n": 80,
+     "dur_us": 154.112,
+     "as_path": 40,
+     "as_queue": 40,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 154,
+     "name": "TASK_RMS_NORM_HOPPER",
+     "n": 81,
+     "dur_us": 113.024,
+     "as_path": 81,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 101,
+     "name": "TASK_EMBEDDING",
+     "n": 1,
+     "dur_us": 40.864,
+     "as_path": 1,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 259,
+     "name": "TASK_ARGMAX_PARTIAL_SM100",
+     "n": 1,
+     "dur_us": 35.84,
+     "as_path": 1,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 201,
+     "name": "TASK_SCHD_EVENTS",
+     "n": 50,
+     "dur_us": 22.944,
+     "as_path": 0,
+     "as_queue": 0,
+     "as_trigger": 50
+    },
+    {
+     "task_type": 258,
+     "name": "TASK_ARGMAX_REDUCE_SM100",
+     "n": 1,
+     "dur_us": 8.256,
+     "as_path": 0,
+     "as_queue": 1,
+     "as_trigger": 0
+    }
+   ],
+   "chain_head": [
+    {
+     "pos": 2,
+     "tt": 101,
+     "kind": "task",
+     "worker": 0,
+     "rix": 0,
+     "dur_ns": 40864,
+     "binding": "resource",
+     "gap_ns": 6816,
+     "start": 3934060384,
+     "ready_ns": 3934053568,
+     "prev_end": 3934053568
+    },
+    {
+     "pos": 4,
+     "tt": 154,
+     "kind": "task",
+     "worker": 2,
+     "rix": 0,
+     "dur_ns": 1952,
+     "binding": "data",
+     "gap_ns": 1312,
+     "start": 3934102560,
+     "ready_ns": 3934101248,
+     "prev_end": 3934053568
+    },
+    {
+     "pos": 35,
+     "tt": 253,
+     "kind": "task",
+     "worker": 33,
+     "rix": 0,
+     "dur_ns": 12512,
+     "binding": "data",
+     "gap_ns": 1056,
+     "start": 3934105568,
+     "ready_ns": 3934104512,
+     "prev_end": 3934053568
+    },
+    {
+     "pos": 163,
+     "tt": 279,
+     "kind": "task",
+     "worker": 33,
+     "rix": 1,
+     "dur_ns": 5696,
+     "binding": "resource",
+     "gap_ns": 3136,
+     "start": 3934121216,
+     "ready_ns": 3934107456,
+     "prev_end": 3934118080
+    },
+    {
+     "pos": 329,
+     "tt": 234,
+     "kind": "task",
+     "worker": 71,
+     "rix": 2,
+     "dur_ns": 6176,
+     "binding": "data",
+     "gap_ns": 1344,
+     "start": 3934128256,
+     "ready_ns": 3934126912,
+     "prev_end": 3934125920
+    }
+   ],
+   "chain_tail": [
+    {
+     "pos": 60910,
+     "tt": 253,
+     "kind": "task",
+     "worker": 108,
+     "rix": 501,
+     "dur_ns": 19488,
+     "binding": "resource",
+     "gap_ns": 1888,
+     "start": 3942197216,
+     "ready_ns": 3942060096,
+     "prev_end": 3942195328
+    },
+    {
+     "pos": 61038,
+     "tt": 253,
+     "kind": "task",
+     "worker": 108,
+     "rix": 502,
+     "dur_ns": 14368,
+     "binding": "resource",
+     "gap_ns": 1600,
+     "start": 3942218304,
+     "ready_ns": 3942060096,
+     "prev_end": 3942216704
+    },
+    {
+     "pos": 61125,
+     "tt": 259,
+     "kind": "task",
+     "worker": 67,
+     "rix": 494,
+     "dur_ns": 35840,
+     "binding": "data",
+     "gap_ns": 1248,
+     "start": 3942233920,
+     "ready_ns": 3942232672,
+     "prev_end": 3942225536
+    },
+    {
+     "pos": 61187,
+     "tt": 258,
+     "kind": "task",
+     "worker": 1,
+     "rix": 494,
+     "dur_ns": 8256,
+     "binding": "data",
+     "gap_ns": 1024,
+     "start": 3942270784,
+     "ready_ns": 3942269760,
+     "prev_end": 3942246144
+    },
+    {
+     "pos": -1,
+     "tt": 201,
+     "kind": "sev",
+     "worker": 1,
+     "rix": 495,
+     "dur_ns": 2272,
+     "binding": "resource",
+     "gap_ns": 768,
+     "start": 3942279808,
+     "ready_ns": -1,
+     "prev_end": 3942279040
+    }
+   ]
+  },
+  {
+   "iteration": 366,
+   "assign_qc": {
+    "n_workers": 128,
+    "n_direct": 126,
+    "n_swapped": 2,
+    "n_mismatch": 0,
+    "mismatched_workers": [],
+    "verdict": "PASS"
+   },
+   "window_ns": 8291936,
+   "step_us": 8291.936,
+   "identity_error_ns": 0,
+   "chain_len": 841,
+   "chain_n_task": 797,
+   "chain_n_sev": 44,
+   "head_us": 0.0,
+   "tail_us": 24.768,
+   "path_work_us": 3588.288,
+   "queue_work_us": 3442.048,
+   "trigger_work_us": 19.648,
+   "data_gap_us": 643.456,
+   "resource_gap_us": 573.728,
+   "n_data_edges": 514,
+   "n_resource_edges": 327,
+   "chain_dead_tasks": 1,
+   "chain_dead_us": 0.992,
+   "sev_n": 2277,
+   "sev_mean_us": 0.4180237154150197,
+   "sev_total_us": 951.8399999999999,
+   "data_gap_median_ns": 1184.0,
+   "res_gap_median_ns": 1600.0,
+   "machine_idle_us": 502993.44,
+   "machine_idle_poll_us": 37662.176,
+   "machine_idle_starved_us": 460281.92,
+   "n_stalls": 61186,
+   "machine_idle_hol_full_us_by_window": {
+    "1": 0.0,
+    "2": 0.0,
+    "4": 0.0,
+    "8": 0.0,
+    "16": 0.0,
+    "32": 0.0,
+    "64": 0.0
+   },
+   "machine_idle_hol_partial_us_by_window": {
+    "1": 0.0,
+    "2": 0.0,
+    "4": 2356.448,
+    "8": 2356.448,
+    "16": 2356.448,
+    "32": 2356.448,
+    "64": 2356.448
+   },
+   "chain_by_type": [
+    {
+     "task_type": 241,
+     "name": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+     "n": 80,
+     "dur_us": 1476.576,
+     "as_path": 1,
+     "as_queue": 79,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 253,
+     "name": "TASK_LINEAR_SM100",
+     "n": 76,
+     "dur_us": 906.048,
+     "as_path": 41,
+     "as_queue": 35,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 242,
+     "name": "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+     "n": 80,
+     "dur_us": 884.672,
+     "as_path": 0,
+     "as_queue": 80,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 279,
+     "name": "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+     "n": 88,
+     "dur_us": 700.384,
+     "as_path": 71,
+     "as_queue": 17,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 237,
+     "name": "TASK_GDN_RECURRENT_SM100",
+     "n": 60,
+     "dur_us": 644.128,
+     "as_path": 28,
+     "as_queue": 32,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 257,
+     "name": "TASK_ATTN_SM100",
+     "n": 10,
+     "dur_us": 543.776,
+     "as_path": 10,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 260,
+     "name": "TASK_MOE_TOPK_SOFTMAX_SM100",
+     "n": 40,
+     "dur_us": 522.624,
+     "as_path": 40,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 275,
+     "name": "TASK_QUANTIZE_FP8_SM100",
+     "n": 92,
+     "dur_us": 303.424,
+     "as_path": 92,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 238,
+     "name": "TASK_SIGMOID_GATE_MUL_ADD_SM100",
+     "n": 40,
+     "dur_us": 276.224,
+     "as_path": 40,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 261,
+     "name": "TASK_MOE_MUL_SUM_ADD_SM100",
+     "n": 40,
+     "dur_us": 246.304,
+     "as_path": 40,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 234,
+     "name": "TASK_GDN_CONV1D_SM100",
+     "n": 29,
+     "dur_us": 178.752,
+     "as_path": 29,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 118,
+     "name": "TASK_SILU_MUL",
+     "n": 78,
+     "dur_us": 152.704,
+     "as_path": 39,
+     "as_queue": 39,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 154,
+     "name": "TASK_RMS_NORM_HOPPER",
+     "n": 81,
+     "dur_us": 109.152,
+     "as_path": 81,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 101,
+     "name": "TASK_EMBEDDING",
+     "n": 1,
+     "dur_us": 41.504,
+     "as_path": 1,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 259,
+     "name": "TASK_ARGMAX_PARTIAL_SM100",
+     "n": 1,
+     "dur_us": 35.776,
+     "as_path": 1,
+     "as_queue": 0,
+     "as_trigger": 0
+    },
+    {
+     "task_type": 201,
+     "name": "TASK_SCHD_EVENTS",
+     "n": 44,
+     "dur_us": 19.648,
+     "as_path": 0,
+     "as_queue": 0,
+     "as_trigger": 44
+    },
+    {
+     "task_type": 258,
+     "name": "TASK_ARGMAX_REDUCE_SM100",
+     "n": 1,
+     "dur_us": 8.288,
+     "as_path": 0,
+     "as_queue": 1,
+     "as_trigger": 0
+    }
+   ],
+   "chain_head": [
+    {
+     "pos": 2,
+     "tt": 101,
+     "kind": "task",
+     "worker": 1,
+     "rix": 0,
+     "dur_ns": 41504,
+     "binding": "resource",
+     "gap_ns": 7040,
+     "start": 3942314432,
+     "ready_ns": 3942307392,
+     "prev_end": 3942307392
+    },
+    {
+     "pos": 4,
+     "tt": 154,
+     "kind": "task",
+     "worker": 2,
+     "rix": 0,
+     "dur_ns": 2176,
+     "binding": "data",
+     "gap_ns": 1280,
+     "start": 3942357216,
+     "ready_ns": 3942355936,
+     "prev_end": 3942307392
+    },
+    {
+     "pos": 35,
+     "tt": 253,
+     "kind": "task",
+     "worker": 33,
+     "rix": 0,
+     "dur_ns": 12480,
+     "binding": "data",
+     "gap_ns": 1088,
+     "start": 3942360480,
+     "ready_ns": 3942359392,
+     "prev_end": 3942307392
+    },
+    {
+     "pos": 163,
+     "tt": 279,
+     "kind": "task",
+     "worker": 33,
+     "rix": 1,
+     "dur_ns": 5696,
+     "binding": "resource",
+     "gap_ns": 3424,
+     "start": 3942376384,
+     "ready_ns": 3942362464,
+     "prev_end": 3942372960
+    },
+    {
+     "pos": 293,
+     "tt": 234,
+     "kind": "task",
+     "worker": 35,
+     "rix": 2,
+     "dur_ns": 6240,
+     "binding": "data",
+     "gap_ns": 1152,
+     "start": 3942383232,
+     "ready_ns": 3942382080,
+     "prev_end": 3942380864
+    }
+   ],
+   "chain_tail": [
+    {
+     "pos": 60878,
+     "tt": 253,
+     "kind": "task",
+     "worker": 76,
+     "rix": 508,
+     "dur_ns": 19840,
+     "binding": "resource",
+     "gap_ns": 1888,
+     "start": 3950488736,
+     "ready_ns": 3950351200,
+     "prev_end": 3950486848
+    },
+    {
+     "pos": 61006,
+     "tt": 253,
+     "kind": "task",
+     "worker": 76,
+     "rix": 509,
+     "dur_ns": 13344,
+     "binding": "resource",
+     "gap_ns": 3296,
+     "start": 3950511872,
+     "ready_ns": 3950351200,
+     "prev_end": 3950508576
+    },
+    {
+     "pos": 61125,
+     "tt": 259,
+     "kind": "task",
+     "worker": 67,
+     "rix": 496,
+     "dur_ns": 35776,
+     "binding": "data",
+     "gap_ns": 1216,
+     "start": 3950526432,
+     "ready_ns": 3950525216,
+     "prev_end": 3950522944
+    },
+    {
+     "pos": 61187,
+     "tt": 258,
+     "kind": "task",
+     "worker": 0,
+     "rix": 489,
+     "dur_ns": 8288,
+     "binding": "data",
+     "gap_ns": 1056,
+     "start": 3950563264,
+     "ready_ns": 3950562208,
+     "prev_end": 3950542592
+    },
+    {
+     "pos": -1,
+     "tt": 201,
+     "kind": "sev",
+     "worker": 0,
+     "rix": 490,
+     "dur_ns": 2240,
+     "binding": "resource",
+     "gap_ns": 768,
+     "start": 3950572320,
+     "ready_ns": -1,
+     "prev_end": 3950571552
+    }
+   ]
+  }
+ ],
+ "sim_latencies_ns": {
+  "l_poll": 1568,
+  "l_trig": 1152,
+  "l_sev": 417
+ },
+ "sim": {
+  "slide_1": {
+   "makespan_us": 8937.063,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "slide_2": {
+   "makespan_us": 8937.063,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "batch_2": {
+   "makespan_us": 8937.063,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "slide_4": {
+   "makespan_us": 8693.379,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "batch_4": {
+   "makespan_us": 8909.779,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "slide_8": {
+   "makespan_us": 8693.379,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "batch_8": {
+   "makespan_us": 8861.71,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "slide_16": {
+   "makespan_us": 8693.379,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "batch_16": {
+   "makespan_us": 8788.299,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "slide_32": {
+   "makespan_us": 8693.379,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "batch_32": {
+   "makespan_us": 8732.519,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "slide_1_nolat": {
+   "makespan_us": 7081.76,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "slide_8_nolat": {
+   "makespan_us": 6830.304,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "list_schedule": {
+   "makespan_us": 8456.897,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  },
+  "list_schedule_nolat": {
+   "makespan_us": 6612.608,
+   "done": 61186,
+   "total": 61186,
+   "complete": true,
+   "dep_qc": {
+    "verdict": "PASS",
+    "n_violations": 0,
+    "worst_violation_ns": 0
+   }
+  }
+ },
+ "floors": {
+  "cp_exact_us": 5275.712,
+  "work_bound_us": 4280.23175,
+  "total_task_us": 547869.664,
+  "n_dead_tasks": 273,
+  "dead_task_us": 224.896
+ }
+}
