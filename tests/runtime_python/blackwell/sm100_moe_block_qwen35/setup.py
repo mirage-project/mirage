@@ -73,7 +73,23 @@ setup(
                 os.path.join(this_dir, 'runtime_kernel_wrapper_moe_block.cu'),
             ],
             depends=blackwell_depends,
-            define_macros=[("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None)],
+            # MPK_TARGET_CC and MODE_OFFLINE are NOT optional. The MoE
+            # grouped-GEMM guards its shared-memory arena with
+            #   static_assert(smem_bytes_k(...) <= MAX_DYNAMIC_SHARED_MEMORY_SIZE)
+            # and that constant is selected by these macros (runtime_header.h:
+            # 35-64). An UNDEFINED MPK_TARGET_CC preprocesses as 0, so the TU
+            # picked the 163 KiB fallback instead of B200's 207 KiB budget -- the
+            # budget the megakernel actually launches with (persistent_kernel.py
+            # passes exactly these). That was invisible while the only path here
+            # needed 41 KiB; M4-I7's PATH 2 needs 166,580 B, which is over the
+            # fallback and comfortably under the real budget, so the wrong
+            # constant made an admissible path fail to BUILD.
+            # M4-I2 fixed sm100_linear_fp8_blockscale/setup.py for the same
+            # reason; 12 of the 14 blackwell test setups still lack these.
+            define_macros=[("MIRAGE_BACKEND_USE_CUDA", None),
+                           ("MIRAGE_FINGERPRINT_USE_CUDA", None),
+                           ("MPK_TARGET_CC", "100"),
+                           ("MODE_OFFLINE", None)],
             include_dirs=[
                 os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/'),
                 os.path.join(this_dir, '../../../../include/mirage/persistent_kernel/tasks'),

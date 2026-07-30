@@ -1,0 +1,30 @@
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function '_Z10k_dispatchILb0ELi1024ELi2048ELi512EEvPKvS1_S1_S1_S1_S1_Pv' for 'sm_100a'
+ptxas info    : Function properties for _Z10k_dispatchILb0ELi1024ELi2048ELi512EEvPKvS1_S1_S1_S1_S1_Pv
+ptxas info    : Used 56 registers, used 1 barriers
+ptxas info    : Compile time = 84.145 ms
+ptxas info    : Function properties for _ZN6kernel13moe_impl_pathI13__nv_bfloat16Li16ELi8ELi256ELi1024ELi2048ELi512ELb0ELi1EEEvPKvS3_S3_S3_S3_S3_Pvii
+ptxas info    : Function properties for _ZN6kernel13moe_impl_pathI13__nv_bfloat16Li16ELi8ELi256ELi1024ELi2048ELi512ELb0ELi2EEEvPKvS3_S3_S3_S3_S3_Pvii
+ptxas info    : Compiling entry function '_Z6k_pathILb0ELi1024ELi2048ELi512ELi2EEvPKvS1_S1_S1_S1_S1_Pv' for 'sm_100a'
+ptxas info    : Function properties for _Z6k_pathILb0ELi1024ELi2048ELi512ELi2EEvPKvS1_S1_S1_S1_S1_Pv
+ptxas info    : Used 38 registers, used 1 barriers
+ptxas info    : Compile time = 29.763 ms
+ptxas info    : Function properties for _ZN6kernel13moe_impl_pathI13__nv_bfloat16Li16ELi8ELi256ELi1024ELi2048ELi512ELb0ELi2EEEvPKvS3_S3_S3_S3_S3_Pvii
+ptxas info    : Compiling entry function '_Z6k_pathILb0ELi1024ELi2048ELi512ELi1EEvPKvS1_S1_S1_S1_S1_Pv' for 'sm_100a'
+ptxas info    : Function properties for _Z6k_pathILb0ELi1024ELi2048ELi512ELi1EEvPKvS1_S1_S1_S1_S1_Pv
+ptxas info    : Used 54 registers, used 1 barriers
+ptxas info    : Compile time = 44.092 ms
+ptxas info    : Function properties for _ZN6kernel13moe_impl_pathI13__nv_bfloat16Li16ELi8ELi256ELi1024ELi2048ELi512ELb0ELi1EEEvPKvS3_S3_S3_S3_S3_Pvii
+ptxas info    : Compiling entry function '_Z6k_pathILb0ELi1024ELi2048ELi512ELi0EEvPKvS1_S1_S1_S1_S1_Pv' for 'sm_100a'
+ptxas info    : Function properties for _Z6k_pathILb0ELi1024ELi2048ELi512ELi0EEvPKvS1_S1_S1_S1_S1_Pv
+ptxas info    : Used 58 registers, used 1 barriers
+ptxas info    : Compile time = 18.773 ms
+ptxas info    : Function properties for _ZN6kernel13moe_impl_pathI13__nv_bfloat16Li16ELi8ELi256ELi1024ELi2048ELi512ELb0ELi0EEEvPKvS3_S3_S3_S3_S3_Pvii
+ptxas info    : Compiling entry function '_Z8k_goldenILb0ELi1024ELi2048ELi512EEvPKvS1_S1_S1_S1_S1_Pv' for 'sm_100a'
+ptxas info    : Function properties for _Z8k_goldenILb0ELi1024ELi2048ELi512EEvPKvS1_S1_S1_S1_S1_Pv
+ptxas info    : Used 59 registers, used 1 barriers
+ptxas info    : Compile time = 25.064 ms
+ptxas info    : Compiling entry function '_Z10k_dispatchILb1ELi512ELi1024ELi2048EEvPKvS1_S1_S1_S1_S1_Pv' for 'sm_100a'
+ptxas info    : Function properties for _Z10k_dispatchILb1ELi512ELi1024ELi2048EEvPKvS1_S1_S1_S1_S1_Pv
+ptxas info    : Used 76 registers, used 1 barriers
+ptxas info    : Compile time = 146.327 ms
