@@ -1,0 +1,2786 @@
+{
+ "schema": "m4i4/ac3_repin/v1",
+ "agreement_floor": 0.9,
+ "repetition": {
+  "n": 4,
+  "max_repeats": 3
+ },
+ "scorer": "final/ac3_criteria.py (M4-I1 canonical)",
+ "baseline": "/home/muhengl/mpk-qwen35/mirage-m4i9/demo/qwen3_5/accept/results/dumps_final",
+ "reference": "/home/muhengl/mpk-qwen35/mirage-m4i9/demo/qwen3_5/accept/reference/reference_outputs.json",
+ "tokenizer_available": false,
+ "trees": {
+  "m4i9_G": {
+   "dir": "/var/tmp/m4i9_ac3_G/assembled",
+   "per_bs": {
+    "1": {
+     "present": true,
+     "n_cases": 10,
+     "n_bit_exact": 10,
+     "n_agreement_pass": 10,
+     "repetition_all_pass": true,
+     "bytesoup_all_pass": null,
+     "worst_agreement": 0.9375,
+     "worst_agreement_prompt": "p06-poem",
+     "cases": {
+      "p01-history": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p02-math": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 1,
+        "worst_gram": [
+         8160,
+         579,
+         264,
+         7047
+        ],
+        "reference_worst_count": 1,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 1,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 1,
+        "worst_ngram": [
+         8160,
+         579,
+         264,
+         7047
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p03-python": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         496,
+         1393,
+         61,
+         17
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         496,
+         1393,
+         61,
+         17
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p04-chinese": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 2,
+        "worst_gram": [
+         380,
+         12370,
+         314,
+         49051
+        ],
+        "reference_worst_count": 2,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 2,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 2,
+        "worst_ngram": [
+         380,
+         12370,
+         314,
+         49051
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p05-cuda": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 2,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 2,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 2,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 2,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p06-poem": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 60,
+        "agreement": 0.9375,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [
+         60,
+         61,
+         62,
+         63
+        ],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [
+        {
+         "position": 60,
+         "engine": 40581,
+         "reference": 31000,
+         "baseline": 40581,
+         "independent": true,
+         "classification": "first-divergence",
+         "in_committed_adjudication": true,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 61,
+         "engine": 279,
+         "reference": 5972,
+         "baseline": 279,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 62,
+         "engine": 12503,
+         "reference": 13,
+         "baseline": 12503,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 63,
+         "engine": 1881,
+         "reference": 6775,
+         "baseline": 1881,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        }
+       ],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p07-format": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 4,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 4,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 4,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 4,
+        "limit": 4,
+        "goal_limit": 3,
+        "reference_worst": 4,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p08-science": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p09-translate": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p10-logic": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      }
+     }
+    },
+    "2": {
+     "present": true,
+     "n_cases": 10,
+     "n_bit_exact": 10,
+     "n_agreement_pass": 10,
+     "repetition_all_pass": true,
+     "bytesoup_all_pass": null,
+     "worst_agreement": 0.9375,
+     "worst_agreement_prompt": "p06-poem",
+     "cases": {
+      "p01-history": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p02-math": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 1,
+        "worst_gram": [
+         8160,
+         579,
+         264,
+         7047
+        ],
+        "reference_worst_count": 1,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 1,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 1,
+        "worst_ngram": [
+         8160,
+         579,
+         264,
+         7047
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p03-python": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         496,
+         1393,
+         61,
+         17
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         496,
+         1393,
+         61,
+         17
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p04-chinese": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 2,
+        "worst_gram": [
+         380,
+         12370,
+         314,
+         49051
+        ],
+        "reference_worst_count": 2,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 2,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 2,
+        "worst_ngram": [
+         380,
+         12370,
+         314,
+         49051
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p05-cuda": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 2,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 2,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 2,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 2,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p06-poem": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 60,
+        "agreement": 0.9375,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [
+         60,
+         61,
+         62,
+         63
+        ],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [
+        {
+         "position": 60,
+         "engine": 40581,
+         "reference": 31000,
+         "baseline": 40581,
+         "independent": true,
+         "classification": "first-divergence",
+         "in_committed_adjudication": true,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 61,
+         "engine": 279,
+         "reference": 5972,
+         "baseline": 279,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 62,
+         "engine": 12503,
+         "reference": 13,
+         "baseline": 12503,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 63,
+         "engine": 1881,
+         "reference": 6775,
+         "baseline": 1881,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        }
+       ],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p07-format": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 4,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 4,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 4,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 4,
+        "limit": 4,
+        "goal_limit": 3,
+        "reference_worst": 4,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p08-science": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p09-translate": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p10-logic": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      }
+     }
+    },
+    "4": {
+     "present": true,
+     "n_cases": 10,
+     "n_bit_exact": 10,
+     "n_agreement_pass": 10,
+     "repetition_all_pass": true,
+     "bytesoup_all_pass": null,
+     "worst_agreement": 0.9375,
+     "worst_agreement_prompt": "p06-poem",
+     "cases": {
+      "p01-history": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p02-math": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 1,
+        "worst_gram": [
+         8160,
+         579,
+         264,
+         7047
+        ],
+        "reference_worst_count": 1,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 1,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 1,
+        "worst_ngram": [
+         8160,
+         579,
+         264,
+         7047
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p03-python": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         496,
+         1393,
+         61,
+         17
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         496,
+         1393,
+         61,
+         17
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p04-chinese": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 2,
+        "worst_gram": [
+         380,
+         12370,
+         314,
+         49051
+        ],
+        "reference_worst_count": 2,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 2,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 2,
+        "worst_ngram": [
+         380,
+         12370,
+         314,
+         49051
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p05-cuda": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 2,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 2,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 2,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 2,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p06-poem": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 60,
+        "agreement": 0.9375,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [
+         60,
+         61,
+         62,
+         63
+        ],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [
+        {
+         "position": 60,
+         "engine": 40581,
+         "reference": 31000,
+         "baseline": 40581,
+         "independent": true,
+         "classification": "first-divergence",
+         "in_committed_adjudication": true,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 61,
+         "engine": 279,
+         "reference": 5972,
+         "baseline": 279,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 62,
+         "engine": 12503,
+         "reference": 13,
+         "baseline": 12503,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 63,
+         "engine": 1881,
+         "reference": 6775,
+         "baseline": 1881,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        }
+       ],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p07-format": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 4,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 4,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 4,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 4,
+        "limit": 4,
+        "goal_limit": 3,
+        "reference_worst": 4,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p08-science": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p09-translate": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p10-logic": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      }
+     }
+    },
+    "8": {
+     "present": true,
+     "n_cases": 10,
+     "n_bit_exact": 10,
+     "n_agreement_pass": 10,
+     "repetition_all_pass": true,
+     "bytesoup_all_pass": null,
+     "worst_agreement": 0.9375,
+     "worst_agreement_prompt": "p06-poem",
+     "cases": {
+      "p01-history": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p02-math": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 1,
+        "worst_gram": [
+         8160,
+         579,
+         264,
+         7047
+        ],
+        "reference_worst_count": 1,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 1,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 1,
+        "worst_ngram": [
+         8160,
+         579,
+         264,
+         7047
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p03-python": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         496,
+         1393,
+         61,
+         17
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         496,
+         1393,
+         61,
+         17
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p04-chinese": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 2,
+        "worst_gram": [
+         380,
+         12370,
+         314,
+         49051
+        ],
+        "reference_worst_count": 2,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 2,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 2,
+        "worst_ngram": [
+         380,
+         12370,
+         314,
+         49051
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p05-cuda": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 2,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 2,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 2,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 2,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p06-poem": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 60,
+        "agreement": 0.9375,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [
+         60,
+         61,
+         62,
+         63
+        ],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [
+        {
+         "position": 60,
+         "engine": 40581,
+         "reference": 31000,
+         "baseline": 40581,
+         "independent": true,
+         "classification": "first-divergence",
+         "in_committed_adjudication": true,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 61,
+         "engine": 279,
+         "reference": 5972,
+         "baseline": 279,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 62,
+         "engine": 12503,
+         "reference": 13,
+         "baseline": 12503,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 63,
+         "engine": 1881,
+         "reference": 6775,
+         "baseline": 1881,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        }
+       ],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p07-format": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 4,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 4,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 4,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 4,
+        "limit": 4,
+        "goal_limit": 3,
+        "reference_worst": 4,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p08-science": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p09-translate": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p10-logic": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      }
+     }
+    },
+    "16": {
+     "present": true,
+     "n_cases": 10,
+     "n_bit_exact": 10,
+     "n_agreement_pass": 10,
+     "repetition_all_pass": true,
+     "bytesoup_all_pass": null,
+     "worst_agreement": 0.9375,
+     "worst_agreement_prompt": "p06-poem",
+     "cases": {
+      "p01-history": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p02-math": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 1,
+        "worst_gram": [
+         8160,
+         579,
+         264,
+         7047
+        ],
+        "reference_worst_count": 1,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 1,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 1,
+        "worst_ngram": [
+         8160,
+         579,
+         264,
+         7047
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p03-python": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         496,
+         1393,
+         61,
+         17
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         496,
+         1393,
+         61,
+         17
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p04-chinese": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 2,
+        "worst_gram": [
+         380,
+         12370,
+         314,
+         49051
+        ],
+        "reference_worst_count": 2,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 2,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 2,
+        "worst_ngram": [
+         380,
+         12370,
+         314,
+         49051
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p05-cuda": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 2,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 2,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 2,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 2,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p06-poem": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 60,
+        "agreement": 0.9375,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [
+         60,
+         61,
+         62,
+         63
+        ],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [
+        {
+         "position": 60,
+         "engine": 40581,
+         "reference": 31000,
+         "baseline": 40581,
+         "independent": true,
+         "classification": "first-divergence",
+         "in_committed_adjudication": true,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 61,
+         "engine": 279,
+         "reference": 5972,
+         "baseline": 279,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 62,
+         "engine": 12503,
+         "reference": 13,
+         "baseline": 12503,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        },
+        {
+         "position": 63,
+         "engine": 1881,
+         "reference": 6775,
+         "baseline": 1881,
+         "independent": false,
+         "classification": "post-divergence-not-independent",
+         "in_committed_adjudication": false,
+         "differs_from_baseline": false
+        }
+       ],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p07-format": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 4,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 4,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 4,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 4,
+        "limit": 4,
+        "goal_limit": 3,
+        "reference_worst": 4,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p08-science": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p09-translate": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      },
+      "p10-logic": {
+       "present": true,
+       "bit_exact_vs_baseline": true,
+       "agreement": {
+        "n_positions": 64,
+        "n_match": 64,
+        "agreement": 1.0,
+        "floor": 0.9,
+        "passed": true,
+        "differing_positions": [],
+        "length_engine": 64,
+        "length_reference": 64
+       },
+       "repetition": {
+        "criterion": "no n-gram with n>=4 repeated more than max(3, the pinned reference continuation's own worst count) times (goal AC-3(a); see repetition_verdict for why the reference term is required)",
+        "worst_n": 4,
+        "worst_count": 3,
+        "worst_gram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "reference_worst_count": 3,
+        "goal_absolute_bound": 3,
+        "max_allowed_count": 3,
+        "pass": true,
+        "passed": true,
+        "worst_ngram_repeats": 3,
+        "limit": 3,
+        "goal_limit": 3,
+        "reference_worst": 3,
+        "worst_ngram": [
+         198,
+         262,
+         348,
+         256
+        ],
+        "scorer": "final/ac3_criteria.py"
+       },
+       "nonlanguage": {
+        "available": false
+       },
+       "nonlanguage_reference": {
+        "available": false
+       },
+       "flips": [],
+       "perplexity_part": "transfers-by-identity (byte-identical to the adjudicated baseline)"
+      }
+     }
+    }
+   }
+  }
+ },
+ "flip_reproduction": {
+  "p06-poem|bs1|pos60": {
+   "trees_with_flip": 1,
+   "n_trees": 1,
+   "in_committed_adjudication": true
+  },
+  "p06-poem|bs2|pos60": {
+   "trees_with_flip": 1,
+   "n_trees": 1,
+   "in_committed_adjudication": true
+  },
+  "p06-poem|bs4|pos60": {
+   "trees_with_flip": 1,
+   "n_trees": 1,
+   "in_committed_adjudication": true
+  },
+  "p06-poem|bs8|pos60": {
+   "trees_with_flip": 1,
+   "n_trees": 1,
+   "in_committed_adjudication": true
+  },
+  "p06-poem|bs16|pos60": {
+   "trees_with_flip": 1,
+   "n_trees": 1,
+   "in_committed_adjudication": true
+  }
+ }
+}

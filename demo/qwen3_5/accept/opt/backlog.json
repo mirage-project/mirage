@@ -885,6 +885,142 @@
    "STALE EXTENSION, a NEW variant: `setup.py build_ext --inplace` silently reuses build/lib.*/mirage/core*.so after a C++ source change, and even `rm python/mirage/core*.so` does not help -- it just copies the cache back. libmirage_runtime.a HAD the new symbol while core.so did not. Only purging build/lib.* AND build/temp.* forces the relink. M4-I8's arms were header-only so they never surfaced it.",
    "A NEW task type must be added in FIVE places or it fails: runtime_header.h (enum), src/kernel/runtime.cc task_type_to_name (omitting it emits `task_desc->task_type == &&` -- a fail-closed COMPILE error, which is the good kind), tma.cuh's switch if the id is inside the (231,256) TMA window (else the default assert(false) fires at init), blackwell/task_header.cuh (include), and profiler_persistent.py (else traces label it UNKNOWN_<id> and tests/runtime_python/test_profiler_task_names.py fails).",
    "Hoisting tensors shared by two builder branches above the if/else changes DEVICE ALLOCATION ORDER in the generated TU and cost the strong form of gate 1c (240 moved cudaMallocs). Keep the default branch's declaration order byte-identical."
-  ]
+  ],
+  "continuation": {
+   "generated_utc": "2026-07-30",
+   "headline": "Two more admissible fusions implemented and measured; the first half's inc=0 projection (1.017/1.024/1.105) is REFUTED. Best MEASURED floor is 1.071 (bs1, flag F) / 1.044 (bs8, the stack) / 1.111 (bs16, flag F). Nothing reaches 1.0. The three-flag stack is a real 1.026-1.038x decode win at bs 1-8 and is the shippable artifact.",
+   "flags": [
+    {
+     "flag": "MPK_FUSE_SILU_QUANT (F)",
+     "task": "new type 243",
+     "cp_delta_us": {
+      "1": -380.6,
+      "8": -243.6,
+      "16": -234.4
+     },
+     "work_delta_us": {
+      "1": -84.7,
+      "8": -68.3,
+      "16": -85.4
+     },
+     "floor_ratio": {
+      "1": 1.071,
+      "8": 1.065,
+      "16": 1.111
+     },
+     "e2e": {
+      "1": 1.032,
+      "2": 1.021,
+      "4": 0.999,
+      "8": 1.003,
+      "16": 1.006
+     }
+    },
+    {
+     "flag": "MPK_FUSE_NORM_QUANT (N)",
+     "task": "new type 244",
+     "cp_delta_us": {
+      "1": -56.2,
+      "8": 41.9,
+      "16": 63.7
+     },
+     "work_delta_us": {
+      "1": 3.8,
+      "8": 26.9,
+      "16": 62.8
+     },
+     "floor_ratio": {
+      "1": 1.163,
+      "8": 1.125,
+      "16": 1.139
+     },
+     "e2e": {
+      "1": 1.016,
+      "8": 0.997,
+      "16": 0.986
+     }
+    },
+    {
+     "flag": "MPK_FUSE_RECUR_QUANT (G)",
+     "task": "new VARIANT of type 237, no new id needed",
+     "cp_delta_us": {
+      "1": -127.5,
+      "8": -42.7,
+      "16": 24.7
+     },
+     "work_delta_us": {
+      "1": -4.9,
+      "8": 73.0,
+      "16": 107.1
+     },
+     "floor_ratio": {
+      "1": 1.143,
+      "8": 1.107,
+      "16": 1.148
+     },
+     "e2e": {
+      "1": 1.018,
+      "8": 1.002,
+      "16": 0.999
+     }
+    },
+    {
+     "flag": "all three (STACK)",
+     "cp_delta_us": {
+      "1": -333.1,
+      "8": -339.0,
+      "16": -241.4
+     },
+     "work_delta_us": {
+      "1": -35.1,
+      "8": -36.7,
+      "16": 18.4
+     },
+     "floor_ratio": {
+      "1": 1.084,
+      "8": 1.044,
+      "16": 1.131
+     },
+     "e2e": {
+      "1": 1.026,
+      "2": 1.034,
+      "4": 1.038,
+      "8": 1.021,
+      "16": 1.004
+     },
+     "note": "15/15 paired reps favour it at every batch size; 30 runs, 0 dirty, 0 unauditable, tokens identical 15/15"
+    }
+   ],
+   "the_mechanism_that_refutes_the_model": "`inc` -- the incremental cost a fused host pays for its victim -- is NOT a constant, it is a function of MACHINE OCCUPANCY. At bs1 the work bound is 2039.7 us = 0.58x of vLLM's step, the machine is starved, the host absorbs its victim in slack it already had, and every flag's measured cp matches the inc=0 model to within 5% (F -381 vs -177 is the exception in the OTHER direction: it also removed machine-wide contention). At bs8/bs16 the work bound is at or above cp, the host is busy, the victim's work is paid in full, and because the fused task is ON the chain cp GROWS: flags N and G go from a modelled -63/-68 and -130/-107 us to a measured +42/+64 and -43/+25. A fusion's SIGN inverts with batch size. Falsifier for any future fusion claim: predict the work-bound delta as well as the cp delta, and check which of the two binds at the target batch size.",
+   "why_F_is_the_exception": "F is the only one of the three that also WIDENS its victim -- it moves the quantize from 16 tasks/layer onto the silu grid's 128. Removing a chain record while spreading its work wider is why F's work bound falls at every batch size and N's/G's rise. GENERALISATION: prefer a fusion whose host grid is FINER than the victim's; a fusion between two equal-width stages buys chain length by spending width, which is only free where the machine is starved.",
+   "gates_all_flags": "registers: base/N/G/stack all IDENTICAL at 255 regs, 16 barriers, 96 B stack, 0 spill, 5856 B smem, one TU per arm at identical flags. gate 1c: arm-A TU byte-identical to pristine pre-M4-I9 (sha256 30fba221) after all three flags' edits -- new template params were DEFAULTED off so the pre-M4-I9 call sites emit identical text. unit/oracle both nvcc lanes: N 56/56 byte-identical, G 20/20 byte-identical (bf16 out, fp32 state, fp8 bytes, fp32 scales, and the shipped no-store form). AC-3 for N, G and the STACK: all STABLE, 3 accepted / 0 quarantined at every bs, bit-exact 10/10 at bs 1/2/4/8/16 vs results/dumps_final.",
+   "not_attempted_with_the_arithmetic": [
+    {
+     "item": "3-way combine+rms+quant",
+     "blocked_by": "MAX_OUTPUTS_PER_TASK=3; it needs 4 at GDN layers (moe_out, pre_norm for the ba linear, xq, xs)",
+     "lift_cost": "3->4 grows TaskDesc 352->384 B (output_ptrs +8, output_tma_desc_ptrs[4][3] +24), which takes TASK_DESCS_BUFFER_LENGTH = min((3072-56)/(sizeof(TaskDesc)+sizeof(TaskId)),16) from 8 to 7 -- a prefetch-depth change on EVERY task in the kernel, needing its own A/B",
+     "payoff": "~48 us of cp at bs1 (the GDN layers' second record)",
+     "verdict": "not cheap, not worth it"
+    },
+    {
+     "item": "flag B, combine+rms",
+     "blocked_by": "mutually exclusive with flag A/N on the same rms record, for the same MAX_OUTPUTS_PER_TASK reason",
+     "payoff": "solo cp delta 47.5 us at bs1 vs A/N's 62.0; marginal value IN THE STACK is ~0",
+     "verdict": "skipped in favour of flag C, which composes and is worth twice as much. This is a deliberate deviation from the requested easiest-first order."
+    },
+    {
+     "item": "attention + quantize (o_proj_xq)",
+     "payoff": "32.4/32.9/26.4 us of cp",
+     "verdict": "skipped: the attention body is being rewritten by a concurrent parity loop, so a fusion inside it is a merge conflict by construction; the composable alternative (a separate quantize task) is what already ships"
+    }
+   ],
+   "traps_hit_2": [
+    "A task type is NOT always needed: flag C is a new VARIANT of task 237 because the runtime dispatches on (task_type, variant_id) and register_task_variant returns a fresh id for a different code string. That avoided all five registration tables. Check whether a variant suffices before minting an id.",
+    "Adding template parameters to a SHARED impl changes the generated text at every existing call site and would break gate 1c's byte-identical check. Defaulting them (bool FUSE_QUANT = false, pointers = nullptr) keeps the old call sites emitting identical text.",
+    "A `static_assert` guarding a fusion's precondition fires at BUILD time for every other shape a test extension instantiates. `if constexpr` in the dispatch is what keeps those shapes out of the TU -- the assert is right, the dispatch was wrong.",
+    "A fused task must be added to EVERY path its consumer's input can come from. Flag C needed the quantize in the PREFILL epilogue as well as the decode-split one: with the flag on, `out`'s consumer reads the fp8 pair, so a prefill chunk producing only bf16 would hand the projection stale bytes and AC-3 would fail at position 0.",
+    "Scoping a relaxed assert: relaxing `assert output.num_dims == 2` with a global string replace hit 24 unrelated layers. Scope the edit to the function under change."
+   ]
+  }
  }
 }

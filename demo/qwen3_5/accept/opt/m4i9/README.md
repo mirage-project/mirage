@@ -506,14 +506,32 @@ the *generated TU*, so the two arms are two different translation units and ther
 is nothing to compile before the code exists. (Recorded here so the next reader
 does not re-derive that.)
 
-| gate | arm N | arm G | arm S (stack) |
+| gate | arm N (norm+quant) | arm G (recur+quant) | arm S (stack) |
 |---|---|---|---|
-| registers / barriers / stack / spill / smem | 255 / 16 / 96 B / 0-0 / 5856 B | identical | identical |
+| registers / barriers / stack / spill / smem | **255 / 16 / 96 B / 0-0 / 5856 B** | identical | identical |
 | gate 1c: arm-A TU vs pristine pre-M4-I9 | byte-identical (`sha256 30fba221`) | idem | idem |
-| unit/oracle, no `-use_fast_math` | PASS 56/56 byte-identical | see below | — |
-| unit/oracle, `-use_fast_math` | PASS 56/56 byte-identical | see below | — |
-| AC-3, all five bs | see §8.3 | see §8.3 | see §8.3 |
+| unit/oracle, no `-use_fast_math` | **PASS, 56/56 byte-identical** | **PASS, 20/20 byte-identical** | (covered by its parts) |
+| unit/oracle, `-use_fast_math` | **PASS, 56/56** | **PASS, 20/20** | (idem) |
+| pre-existing regression test in both lanes | quantize test: PASS/known | split-vs-golden: PASS both lanes | — |
+| AC-3 stage 1, all five bs | **STABLE, 3 accepted / 0 quarantined** | **STABLE, 3/0** | **STABLE, 3/0** |
+| AC-3 stage 2, all five bs | **bit-exact 10/10**, agreement 10/10 | **bit-exact 10/10** | **bit-exact 10/10** |
 | tokens vs base, every e2e pair | identical 9/9 | identical 9/9 | identical 15/15 |
+
+Arm G's unit test checks four things per case, because its quantize arithmetic is
+the one that is hand-written: the bf16 `out` and the fp32 `state` must be
+byte-identical to the UNFUSED split kernel (the fusion perturbs nothing), the fp8
+bytes and fp32 scales must equal the standalone quantize run over that same bf16
+in the same TU with the same flags, and the shipped no-store form
+(`WRITE_OUT=false`) must produce the same fp8 as the store-keeping form. 20 cases
+= 5 (slots, split, depth) configurations x 4 value scales, both nvcc lanes. The
+`if constexpr (DV == 128)` guard in its dispatch is load-bearing: the impl
+`static_assert`s that a v-head is one scale group, and the test extension also
+instantiates 32- and 64-wide shapes that flag C is not defined for.
+
+All three AC-3 runs report the same single reference divergence as every prior
+issue — `p06-poem` position 60, `engine=40581 ref=31000 baseline=40581`, the
+M2-adjudicated tie, `same-as-baseline [known-adjudicated]`. `RUN_AC3_EXIT=1` is
+that pre-existing tie under the old strict-token harness; `REPIN_EXIT=0`.
 
 Arm N's unit test (`test_rmsnorm_quant_fused.py`) runs at **256 threads**, the
 megakernel's real block size: `rms_norm_hopper_impl`'s cp.async warm-up covers
@@ -583,6 +601,19 @@ So the honest verdict, replacing the earlier one:
 * **What the flags ARE worth is a real decode win**: the stack is 1.026 / 1.034 /
   1.038 / 1.021 / 1.004x at bs 1/2/4/8/16, 15/15 paired reps, bit-exact
   everywhere. That is worth shipping on its own terms; it is not an AC-4 lever.
+
+### 8.5 Disposition per flag
+
+| flag | keep? | why |
+|---|---|---|
+| `MPK_FUSE_SILU_QUANT` (F) | **yes** | the only one that widens as well as shortens; work bound falls at every bs; best arm at bs1 and bs16 |
+| `MPK_FUSE_NORM_QUANT` (N) | **yes, but only in the stack** | alone it regresses 0.3% at bs8 and 1.5% at bs16; inside the stack it is part of the best arm at bs 2/4/8 |
+| `MPK_FUSE_RECUR_QUANT` (G) | **yes, but only in the stack** | alone it is +1.8% at bs1 and neutral above; its work-bound cost is the largest of the three (+107 us at bs16) |
+| the stack (all three) | **yes — this is the artifact** | 1.026-1.038x at bs 1-8, 15/15 paired reps, AC-3 STABLE and bit-exact 10/10 at all five bs |
+
+All four stay **default-off** pending the milestone's integration decision. If only
+one ships, ship the stack: its worst cell (bs16, +0.36%) is still a win and its
+best (bs4, +3.8%) is the largest single decode improvement this issue produced.
 
 ## 7. Reproducing
 

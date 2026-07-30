@@ -595,14 +595,22 @@ bool dispatch_gdn_decode_split_fusedq(int num_v_heads,
       head_v_dim == (DV) && qkv_stride == (QS) && ba_stride == (BS) &&         \
       z_stride == (ZS) && out_stride == (OS) && split == (SP) &&               \
       depth == (DP)) {                                                        \
-    if (ref_only) {                                                            \
-      launch_gdn_ref_quantize<OS>(num_tokens, out, out_q, out_s);               \
-    } else {                                                                   \
-      launch_gdn_decode_split_fusedq<HV, HK, DK, DV, QS, BS, ZS, OS, SP, DP>(  \
-          num_slots, write_out, qkv, ba, alog_dtbias, state, z, norm_w, out,    \
-          out_q, out_s, split_scratch, qo_indptr, num_tokens);                  \
+    constexpr int DV_ = (DV);                                                  \
+    /* flag C is only defined where a v-head IS one 128-element scale group;    \
+       the impl static_asserts that, so the other test shapes must not          \
+       instantiate it at all. `if constexpr` keeps them out of the TU. */       \
+    if constexpr (DV_ == 128) {                                               \
+      if (ref_only) {                                                          \
+        launch_gdn_ref_quantize<OS>(num_tokens, out, out_q, out_s);             \
+      } else {                                                                 \
+        launch_gdn_decode_split_fusedq<HV, HK, DK, DV, QS, BS, ZS, OS, SP,      \
+                                       DP>(                                    \
+            num_slots, write_out, qkv, ba, alog_dtbias, state, z, norm_w, out,  \
+            out_q, out_s, split_scratch, qo_indptr, num_tokens);                \
+      }                                                                        \
+      return true;                                                             \
     }                                                                          \
-    return true;                                                               \
+    return false;                                                              \
   }
   GDN_DECODE_SPLIT_CASES(GDN_FUSEDQ_DISPATCH)
 #undef GDN_FUSEDQ_DISPATCH
