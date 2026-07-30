@@ -1,0 +1,4 @@
+RuntimeError: batch_size=4: only 5/6 valid (co-tenant-free) reps after 9 attempts
+---
+extra_pids': {3423557: {'used_memory_mib': 768, 'process_name': '/home/hongyij/miniforge3/bin/python'}}
+extra_pids': {3424364: {'used_memory_mib': 752, 'process_name': '/home/hongyij/miniforge3/bin/python'}}

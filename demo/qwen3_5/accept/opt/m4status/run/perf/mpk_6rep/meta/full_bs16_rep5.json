@@ -1,0 +1,1 @@
+{"tag":"full_bs16_rep5","arm":"full","bs":16,"rep":5,"status":"ok","rc":0,"gpu_index":5,"gpu_before_mib":14,"gpu_after_mib":14,"kernel_dir":"/home/muhengl/mpk-qwen35/final-gate/run-20260730T101424Z/perf/mpk/kernels/full_bs16","cap_define":"","cap_flag":""}

@@ -1,0 +1,60 @@
+{
+  "batch_size": 16,
+  "note": "informational only -- no perf claim; mbt is fixed across batch sizes for a uniform correctness config, which inflates per-step cost at small bs",
+  "admission_policy": {
+    "cap_mode": "auto",
+    "cap_min_batch_size": 2,
+    "per_bs": {
+      "1": null,
+      "2": "auto",
+      "4": "auto",
+      "8": "auto",
+      "16": "auto"
+    },
+    "authority": "demo/qwen3_5/accept/admission_policy.py",
+    "requested": "policy",
+    "compiled_cap": 1
+  },
+  "waves": [
+    {
+      "batch_size": 16,
+      "wave": 0,
+      "num_requests": 16,
+      "num_distinct_prompts": 16,
+      "prompt_ids": [
+        "syn256-00",
+        "syn256-01",
+        "syn256-02",
+        "syn256-03",
+        "syn256-04",
+        "syn256-05",
+        "syn256-06",
+        "syn256-07",
+        "syn256-08",
+        "syn256-09",
+        "syn256-10",
+        "syn256-11",
+        "syn256-12",
+        "syn256-13",
+        "syn256-14",
+        "syn256-15"
+      ],
+      "wall_ms": 2419.3173828125,
+      "max_decode_steps": 2,
+      "ms_per_decode_step": 1209.65869140625,
+      "tokens_per_s": 13.226871442059176,
+      "max_seq_length": 259,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 258,
+        "per_request_token_cap_requested": "policy",
+        "per_request_token_cap_compiled": 1,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation_checks": []
+}

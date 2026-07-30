@@ -40,7 +40,7 @@
               "cap_compiled": null,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 6147.76220703125,
+              "wall_ms": 6166.18310546875,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -49,8 +49,8 @@
               "prompt_ids": [
                 "syn256-00"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "full_bs1_rep1",
@@ -59,7 +59,7 @@
               "cap_compiled": null,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 6658.927734375,
+              "wall_ms": 6263.7041015625,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -68,8 +68,8 @@
               "prompt_ids": [
                 "syn256-00"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "full_bs1_rep2",
@@ -78,7 +78,7 @@
               "cap_compiled": null,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 6157.21875,
+              "wall_ms": 6182.22900390625,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -87,29 +87,92 @@
               "prompt_ids": [
                 "syn256-00"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs1_rep3",
+              "file": "timings_bs1_rep3.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6174.6240234375,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs1_rep4",
+              "file": "timings_bs1_rep4.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6180.07275390625,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs1_rep5",
+              "file": "timings_bs1_rep5.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6180.84716796875,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             }
           ],
           "walls_ms": [
-            6147.76220703125,
-            6658.927734375,
-            6157.21875
+            6166.18310546875,
+            6263.7041015625,
+            6182.22900390625,
+            6174.6240234375,
+            6180.07275390625,
+            6180.84716796875
           ],
           "decode_steps": [
+            1023,
+            1023,
+            1023,
             1023,
             1023,
             1023
           ],
           "excluded": [],
           "problems": [],
-          "n": 3,
-          "median_wall_ms": 6157.21875,
-          "median_D": 1023,
+          "n": 6,
+          "median_wall_ms": 6180.4599609375,
+          "median_D": 1023.0,
           "distinct_D": [
             1023
           ],
-          "range_pct": 8.301889994467876,
+          "range_pct": 1.5778922072161965,
           "reps_required": 3
         },
         "pre": {
@@ -123,7 +186,7 @@
               "cap_compiled": null,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 266.7147521972656,
+              "wall_ms": 267.17138671875,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -132,8 +195,8 @@
               "prompt_ids": [
                 "syn256-00"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "pre_bs1_rep1",
@@ -142,7 +205,7 @@
               "cap_compiled": null,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 302.55224609375,
+              "wall_ms": 266.89923095703125,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -151,8 +214,8 @@
               "prompt_ids": [
                 "syn256-00"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 36,
+              "gpu_index": 5
             },
             {
               "tag": "pre_bs1_rep2",
@@ -161,7 +224,7 @@
               "cap_compiled": null,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 270.9396057128906,
+              "wall_ms": 267.1576843261719,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -170,38 +233,101 @@
               "prompt_ids": [
                 "syn256-00"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs1_rep3",
+              "file": "timings_bs1_rep3.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 267.6894226074219,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs1_rep4",
+              "file": "timings_bs1_rep4.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 267.3408508300781,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs1_rep5",
+              "file": "timings_bs1_rep5.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 266.9020080566406,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             }
           ],
           "walls_ms": [
-            266.7147521972656,
-            302.55224609375,
-            270.9396057128906
+            267.17138671875,
+            266.89923095703125,
+            267.1576843261719,
+            267.6894226074219,
+            267.3408508300781,
+            266.9020080566406
           ],
           "decode_steps": [
+            2,
+            2,
+            2,
             2,
             2,
             2
           ],
           "excluded": [],
           "problems": [],
-          "n": 3,
-          "median_wall_ms": 270.9396057128906,
-          "median_D": 2,
+          "n": 6,
+          "median_wall_ms": 267.16453552246094,
+          "median_D": 2.0,
           "distinct_D": [
             2
           ],
-          "range_pct": 13.227115246657833,
+          "range_pct": 0.2957696645048131,
           "reps_required": 3
         },
         "device": {
-          "cuda_visible_devices": "2",
-          "uuid": "f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
-          "phys_index": 2,
+          "cuda_visible_devices": "5",
+          "uuid": "087b0f09-0d22-7908-e4cb-bb49fd81a455",
+          "phys_index": 5,
           "name": "NVIDIA B200"
         },
-        "foreign_floor_mib": 62,
+        "foreign_floor_mib": 14,
         "admission_policy_expected": {
           "compiled_cap": null,
           "cap_mode": "auto",
@@ -228,32 +354,32 @@
           "authority": "demo/qwen3_5/accept/admission_policy.py"
         },
         "problems": [],
-        "decode_tokens_per_second": 173.4542271905207,
-        "e2e_seconds": 6.15721875,
+        "decode_tokens_per_second": 172.66176075218476,
+        "e2e_seconds": 6.1804599609375,
         "decode_slope_formula": "bs*(D_full - D_pre)/(wall_full - wall_pre)",
         "dispersion": {
           "bound_pct": 5.0,
           "arms": {
             "full": {
-              "n": 3,
-              "statistic": "fullrange_over_median_pct",
-              "value_pct": 8.301889994467876,
-              "full_range_pct": 8.301889994467876,
-              "iqr_pct": 4.150944997233938,
-              "ok": false
+              "n": 6,
+              "statistic": "iqr_over_median_pct",
+              "value_pct": 0.09541909347298717,
+              "full_range_pct": 1.5778922072161965,
+              "iqr_pct": 0.09541909347298717,
+              "ok": true
             },
             "pre": {
-              "n": 3,
-              "statistic": "fullrange_over_median_pct",
-              "value_pct": 13.227115246657833,
-              "full_range_pct": 13.227115246657833,
-              "iqr_pct": 6.613557623328917,
-              "ok": false
+              "n": 6,
+              "statistic": "iqr_over_median_pct",
+              "value_pct": 0.12447673025624975,
+              "full_range_pct": 0.2957696645048131,
+              "iqr_pct": 0.12447673025624975,
+              "ok": true
             }
           },
-          "ok": false
+          "ok": true
         },
-        "measurement_valid": false
+        "measurement_valid": true
       },
       "vllm": {
         "batch_size": 1,
@@ -382,10 +508,10 @@
         "criterion": "AC-4 bs1: mpk decode tok/s STRICTLY GREATER than vLLM",
         "verdict": "FAIL",
         "point_estimate_passes": false,
-        "measurement_valid": false,
-        "mpk_decode_tok_s": 173.4542271905207,
+        "measurement_valid": true,
+        "mpk_decode_tok_s": 172.66176075218476,
         "vllm_decode_tok_s": 284.13382111283465,
-        "ratio_mpk_over_vllm": 0.6104666685267253,
+        "ratio_mpk_over_vllm": 0.6076776079522672,
         "vllm_pinned_cross_check": 285.5105643395262,
         "drift_valid": true
       },
@@ -393,10 +519,10 @@
         "criterion": "AC-5 bs1: mpk e2e <= 1.25x vLLM e2e",
         "verdict": "FAIL",
         "point_estimate_passes": false,
-        "measurement_valid": false,
-        "mpk_e2e_s": 6.15721875,
+        "measurement_valid": true,
+        "mpk_e2e_s": 6.1804599609375,
         "vllm_e2e_s": 3.618471367051825,
-        "ratio_mpk_over_vllm": 1.7016077026516967,
+        "ratio_mpk_over_vllm": 1.7080306389084607,
         "max_ratio": 1.25,
         "vllm_pinned_cross_check": 3.601619330991525,
         "drift_valid": true
@@ -416,7 +542,7 @@
               "cap_compiled": 8,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 6818.22802734375,
+              "wall_ms": 6825.90478515625,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -426,8 +552,8 @@
                 "syn256-00",
                 "syn256-01"
               ],
-              "gpu_before_mib": 69,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "full_bs2_rep1",
@@ -436,7 +562,7 @@
               "cap_compiled": 8,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 6805.83349609375,
+              "wall_ms": 6824.1640625,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -446,8 +572,8 @@
                 "syn256-00",
                 "syn256-01"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "full_bs2_rep2",
@@ -456,7 +582,7 @@
               "cap_compiled": 8,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 6674.24462890625,
+              "wall_ms": 6893.2353515625,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -466,29 +592,95 @@
                 "syn256-00",
                 "syn256-01"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs2_rep3",
+              "file": "timings_bs2_rep3.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6710.03076171875,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs2_rep4",
+              "file": "timings_bs2_rep4.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6755.58251953125,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 16,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs2_rep5",
+              "file": "timings_bs2_rep5.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6898.61572265625,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             }
           ],
           "walls_ms": [
-            6818.22802734375,
-            6805.83349609375,
-            6674.24462890625
+            6825.90478515625,
+            6824.1640625,
+            6893.2353515625,
+            6710.03076171875,
+            6755.58251953125,
+            6898.61572265625
           ],
           "decode_steps": [
+            1023,
+            1023,
+            1023,
             1023,
             1023,
             1023
           ],
           "excluded": [],
           "problems": [],
-          "n": 3,
-          "median_wall_ms": 6805.83349609375,
-          "median_D": 1023,
+          "n": 6,
+          "median_wall_ms": 6825.034423828125,
+          "median_D": 1023.0,
           "distinct_D": [
             1023
           ],
-          "range_pct": 2.115588024892765,
+          "range_pct": 2.7631356741454165,
           "reps_required": 3
         },
         "pre": {
@@ -502,7 +694,7 @@
               "cap_compiled": 8,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 401.1018371582031,
+              "wall_ms": 401.4626770019531,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -512,8 +704,8 @@
                 "syn256-00",
                 "syn256-01"
               ],
-              "gpu_before_mib": 67,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "pre_bs2_rep1",
@@ -522,7 +714,7 @@
               "cap_compiled": 8,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 397.5659484863281,
+              "wall_ms": 398.302001953125,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -532,8 +724,8 @@
                 "syn256-00",
                 "syn256-01"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "pre_bs2_rep2",
@@ -542,7 +734,7 @@
               "cap_compiled": 8,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 396.4389953613281,
+              "wall_ms": 397.21319580078125,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -552,38 +744,104 @@
                 "syn256-00",
                 "syn256-01"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 766,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs2_rep3",
+              "file": "timings_bs2_rep3.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 397.59588623046875,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs2_rep4",
+              "file": "timings_bs2_rep4.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 397.5652770996094,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 16,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs2_rep5",
+              "file": "timings_bs2_rep5.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 397.7581787109375,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             }
           ],
           "walls_ms": [
-            401.1018371582031,
-            397.5659484863281,
-            396.4389953613281
+            401.4626770019531,
+            398.302001953125,
+            397.21319580078125,
+            397.59588623046875,
+            397.5652770996094,
+            397.7581787109375
           ],
           "decode_steps": [
+            2,
+            2,
+            2,
             2,
             2,
             2
           ],
           "excluded": [],
           "problems": [],
-          "n": 3,
-          "median_wall_ms": 397.5659484863281,
-          "median_D": 2,
+          "n": 6,
+          "median_wall_ms": 397.6770324707031,
+          "median_D": 2.0,
           "distinct_D": [
             2
           ],
-          "range_pct": 1.1728473765492395,
+          "range_pct": 1.068575968486421,
           "reps_required": 3
         },
         "device": {
-          "cuda_visible_devices": "2",
-          "uuid": "f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
-          "phys_index": 2,
+          "cuda_visible_devices": "5",
+          "uuid": "087b0f09-0d22-7908-e4cb-bb49fd81a455",
+          "phys_index": 5,
           "name": "NVIDIA B200"
         },
-        "foreign_floor_mib": 62,
+        "foreign_floor_mib": 14,
         "admission_policy_expected": {
           "compiled_cap": 8,
           "cap_mode": "auto",
@@ -610,26 +868,26 @@
           "authority": "demo/qwen3_5/accept/admission_policy.py"
         },
         "problems": [],
-        "decode_tokens_per_second": 318.65086543747645,
-        "e2e_seconds": 6.80583349609375,
+        "decode_tokens_per_second": 317.7044430026227,
+        "e2e_seconds": 6.825034423828125,
         "decode_slope_formula": "bs*(D_full - D_pre)/(wall_full - wall_pre)",
         "dispersion": {
           "bound_pct": 5.0,
           "arms": {
             "full": {
-              "n": 3,
-              "statistic": "fullrange_over_median_pct",
-              "value_pct": 2.115588024892765,
-              "full_range_pct": 2.115588024892765,
-              "iqr_pct": 1.0577940124463825,
+              "n": 6,
+              "statistic": "iqr_over_median_pct",
+              "value_pct": 1.5190370956304915,
+              "full_range_pct": 2.7631356741454165,
+              "iqr_pct": 1.5190370956304915,
               "ok": true
             },
             "pre": {
-              "n": 3,
-              "statistic": "fullrange_over_median_pct",
-              "value_pct": 1.1728473765492395,
-              "full_range_pct": 1.1728473765492395,
-              "iqr_pct": 0.5864236882746198,
+              "n": 6,
+              "statistic": "iqr_over_median_pct",
+              "value_pct": 0.14914533951557818,
+              "full_range_pct": 1.068575968486421,
+              "iqr_pct": 0.14914533951557818,
               "ok": true
             }
           },
@@ -765,9 +1023,9 @@
         "verdict": "FAIL",
         "point_estimate_passes": false,
         "measurement_valid": true,
-        "mpk_decode_tok_s": 318.65086543747645,
+        "mpk_decode_tok_s": 317.7044430026227,
         "vllm_decode_tok_s": 529.9796512556082,
-        "ratio_mpk_over_vllm": 0.6012511323454411,
+        "ratio_mpk_over_vllm": 0.5994653610755226,
         "vllm_pinned_cross_check": 529.7960084681633,
         "drift_valid": true
       },
@@ -776,9 +1034,9 @@
         "verdict": "FAIL",
         "point_estimate_passes": false,
         "measurement_valid": true,
-        "mpk_e2e_s": 6.80583349609375,
+        "mpk_e2e_s": 6.825034423828125,
         "vllm_e2e_s": 3.8797123529948294,
-        "ratio_mpk_over_vllm": 1.7542108478326204,
+        "ratio_mpk_over_vllm": 1.7591599074502884,
         "max_ratio": 1.25,
         "vllm_pinned_cross_check": 3.886238737992244,
         "drift_valid": true
@@ -798,7 +1056,7 @@
               "cap_compiled": 4,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 7536.927734375,
+              "wall_ms": 7576.44921875,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -810,8 +1068,8 @@
                 "syn256-02",
                 "syn256-03"
               ],
-              "gpu_before_mib": 67,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "full_bs4_rep1",
@@ -820,7 +1078,7 @@
               "cap_compiled": 4,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 7952.134765625,
+              "wall_ms": 7968.51611328125,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -832,8 +1090,8 @@
                 "syn256-02",
                 "syn256-03"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "full_bs4_rep2",
@@ -842,7 +1100,7 @@
               "cap_compiled": 4,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 8114.75,
+              "wall_ms": 8356.5791015625,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -854,29 +1112,101 @@
                 "syn256-02",
                 "syn256-03"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 16,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs4_rep3",
+              "file": "timings_bs4_rep3.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 7836.126953125,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs4_rep4",
+              "file": "timings_bs4_rep4.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 7752.32666015625,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs4_rep5",
+              "file": "timings_bs4_rep5.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 8151.62744140625,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             }
           ],
           "walls_ms": [
-            7536.927734375,
-            7952.134765625,
-            8114.75
+            7576.44921875,
+            7968.51611328125,
+            8356.5791015625,
+            7836.126953125,
+            7752.32666015625,
+            8151.62744140625
           ],
           "decode_steps": [
+            1023,
+            1023,
+            1023,
             1023,
             1023,
             1023
           ],
           "excluded": [],
           "problems": [],
-          "n": 3,
-          "median_wall_ms": 7952.134765625,
-          "median_D": 1023,
+          "n": 6,
+          "median_wall_ms": 7902.321533203125,
+          "median_D": 1023.0,
           "distinct_D": [
             1023
           ],
-          "range_pct": 7.266253435778963,
+          "range_pct": 9.872160725612519,
           "reps_required": 3
         },
         "pre": {
@@ -890,7 +1220,7 @@
               "cap_compiled": 4,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 680.1577758789062,
+              "wall_ms": 670.0393676757812,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -902,8 +1232,8 @@
                 "syn256-02",
                 "syn256-03"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "pre_bs4_rep1",
@@ -912,7 +1242,7 @@
               "cap_compiled": 4,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 666.0004272460938,
+              "wall_ms": 666.7794189453125,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -924,8 +1254,8 @@
                 "syn256-02",
                 "syn256-03"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "pre_bs4_rep2",
@@ -934,7 +1264,7 @@
               "cap_compiled": 4,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 669.411376953125,
+              "wall_ms": 670.3635864257812,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -946,38 +1276,110 @@
                 "syn256-02",
                 "syn256-03"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 16,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs4_rep3",
+              "file": "timings_bs4_rep3.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 669.83837890625,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs4_rep4",
+              "file": "timings_bs4_rep4.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 666.2411499023438,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs4_rep5",
+              "file": "timings_bs4_rep5.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 670.7506713867188,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             }
           ],
           "walls_ms": [
-            680.1577758789062,
-            666.0004272460938,
-            669.411376953125
+            670.0393676757812,
+            666.7794189453125,
+            670.3635864257812,
+            669.83837890625,
+            666.2411499023438,
+            670.7506713867188
           ],
           "decode_steps": [
+            2,
+            2,
+            2,
             2,
             2,
             2
           ],
           "excluded": [],
           "problems": [],
-          "n": 3,
-          "median_wall_ms": 669.411376953125,
-          "median_D": 2,
+          "n": 6,
+          "median_wall_ms": 669.9388732910156,
+          "median_D": 2.0,
           "distinct_D": [
             2
           ],
-          "range_pct": 2.1148951332812285,
+          "range_pct": 0.6731243198685237,
           "reps_required": 3
         },
         "device": {
-          "cuda_visible_devices": "2",
-          "uuid": "f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
-          "phys_index": 2,
+          "cuda_visible_devices": "5",
+          "uuid": "087b0f09-0d22-7908-e4cb-bb49fd81a455",
+          "phys_index": 5,
           "name": "NVIDIA B200"
         },
-        "foreign_floor_mib": 62,
+        "foreign_floor_mib": 14,
         "admission_policy_expected": {
           "compiled_cap": 4,
           "cap_mode": "auto",
@@ -1004,32 +1406,32 @@
           "authority": "demo/qwen3_5/accept/admission_policy.py"
         },
         "problems": [],
-        "decode_tokens_per_second": 560.7792280498497,
-        "e2e_seconds": 7.952134765625,
+        "decode_tokens_per_second": 564.6825108738965,
+        "e2e_seconds": 7.902321533203125,
         "decode_slope_formula": "bs*(D_full - D_pre)/(wall_full - wall_pre)",
         "dispersion": {
           "bound_pct": 5.0,
           "arms": {
             "full": {
-              "n": 3,
-              "statistic": "fullrange_over_median_pct",
-              "value_pct": 7.266253435778963,
-              "full_range_pct": 7.266253435778963,
-              "iqr_pct": 3.6331267178894815,
-              "ok": false
+              "n": 6,
+              "statistic": "iqr_over_median_pct",
+              "value_pct": 4.2085464958518015,
+              "full_range_pct": 9.872160725612519,
+              "iqr_pct": 4.2085464958518015,
+              "ok": true
             },
             "pre": {
-              "n": 3,
-              "statistic": "fullrange_over_median_pct",
-              "value_pct": 2.1148951332812285,
-              "full_range_pct": 2.1148951332812285,
-              "iqr_pct": 1.0574475666406142,
+              "n": 6,
+              "statistic": "iqr_over_median_pct",
+              "value_pct": 0.4087496504393543,
+              "full_range_pct": 0.6731243198685237,
+              "iqr_pct": 0.4087496504393543,
               "ok": true
             }
           },
-          "ok": false
+          "ok": true
         },
-        "measurement_valid": false
+        "measurement_valid": true
       },
       "vllm": {
         "batch_size": 4,
@@ -1158,10 +1560,10 @@
         "criterion": "AC-4 bs4: mpk decode tok/s STRICTLY GREATER than vLLM",
         "verdict": "FAIL",
         "point_estimate_passes": false,
-        "measurement_valid": false,
-        "mpk_decode_tok_s": 560.7792280498497,
+        "measurement_valid": true,
+        "mpk_decode_tok_s": 564.6825108738965,
         "vllm_decode_tok_s": 936.361311883166,
-        "ratio_mpk_over_vllm": 0.5988919244453157,
+        "ratio_mpk_over_vllm": 0.6030604892658727,
         "vllm_pinned_cross_check": 934.3478174709361,
         "drift_valid": true
       },
@@ -1169,10 +1571,10 @@
         "criterion": "AC-5 bs4: mpk e2e <= 1.25x vLLM e2e",
         "verdict": "FAIL",
         "point_estimate_passes": false,
-        "measurement_valid": false,
-        "mpk_e2e_s": 7.952134765625,
+        "measurement_valid": true,
+        "mpk_e2e_s": 7.902321533203125,
         "vllm_e2e_s": 4.448229199042544,
-        "ratio_mpk_over_vllm": 1.7877079641796902,
+        "ratio_mpk_over_vllm": 1.776509523138793,
         "max_ratio": 1.25,
         "vllm_pinned_cross_check": 4.45474189100787,
         "drift_valid": true
@@ -1192,7 +1594,7 @@
               "cap_compiled": 2,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 9276.283203125,
+              "wall_ms": 9287.00390625,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -1208,8 +1610,8 @@
                 "syn256-06",
                 "syn256-07"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "full_bs8_rep1",
@@ -1218,7 +1620,7 @@
               "cap_compiled": 2,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 9988.1962890625,
+              "wall_ms": 10004.125,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -1234,8 +1636,8 @@
                 "syn256-06",
                 "syn256-07"
               ],
-              "gpu_before_mib": 68,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "full_bs8_rep2",
@@ -1244,7 +1646,7 @@
               "cap_compiled": 2,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 10737.5390625,
+              "wall_ms": 9965.33984375,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -1260,29 +1662,113 @@
                 "syn256-06",
                 "syn256-07"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs8_rep3",
+              "file": "timings_bs8_rep3.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 10027.2353515625,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs8_rep4",
+              "file": "timings_bs8_rep4.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 9910.0302734375,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs8_rep5",
+              "file": "timings_bs8_rep5.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 9781.4404296875,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             }
           ],
           "walls_ms": [
-            9276.283203125,
-            9988.1962890625,
-            10737.5390625
+            9287.00390625,
+            10004.125,
+            9965.33984375,
+            10027.2353515625,
+            9910.0302734375,
+            9781.4404296875
           ],
           "decode_steps": [
+            1023,
+            1023,
+            1023,
             1023,
             1023,
             1023
           ],
           "excluded": [],
           "problems": [],
-          "n": 3,
-          "median_wall_ms": 9988.1962890625,
-          "median_D": 1023,
+          "n": 6,
+          "median_wall_ms": 9937.68505859375,
+          "median_D": 1023.0,
           "distinct_D": [
             1023
           ],
-          "range_pct": 14.629827218905753,
+          "range_pct": 7.448731177814643,
           "reps_required": 3
         },
         "pre": {
@@ -1296,7 +1782,7 @@
               "cap_compiled": 2,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 1399.2080078125,
+              "wall_ms": 1396.0604248046875,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -1312,8 +1798,8 @@
                 "syn256-06",
                 "syn256-07"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "pre_bs8_rep1",
@@ -1322,7 +1808,7 @@
               "cap_compiled": 2,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 1401.1544189453125,
+              "wall_ms": 1400.0853271484375,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -1338,8 +1824,8 @@
                 "syn256-06",
                 "syn256-07"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "pre_bs8_rep2",
@@ -1348,7 +1834,7 @@
               "cap_compiled": 2,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 1393.496337890625,
+              "wall_ms": 1395.4893798828125,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -1364,38 +1850,122 @@
                 "syn256-06",
                 "syn256-07"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs8_rep3",
+              "file": "timings_bs8_rep3.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 1398.83642578125,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs8_rep4",
+              "file": "timings_bs8_rep4.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 1398.9200439453125,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs8_rep5",
+              "file": "timings_bs8_rep5.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 1397.183837890625,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             }
           ],
           "walls_ms": [
-            1399.2080078125,
-            1401.1544189453125,
-            1393.496337890625
+            1396.0604248046875,
+            1400.0853271484375,
+            1395.4893798828125,
+            1398.83642578125,
+            1398.9200439453125,
+            1397.183837890625
           ],
           "decode_steps": [
+            2,
+            2,
+            2,
             2,
             2,
             2
           ],
           "excluded": [],
           "problems": [],
-          "n": 3,
-          "median_wall_ms": 1399.2080078125,
-          "median_D": 2,
+          "n": 6,
+          "median_wall_ms": 1398.0101318359375,
+          "median_D": 2.0,
           "distinct_D": [
             2
           ],
-          "range_pct": 0.5473154107129521,
+          "range_pct": 0.32874921010689456,
           "reps_required": 3
         },
         "device": {
-          "cuda_visible_devices": "2",
-          "uuid": "f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
-          "phys_index": 2,
+          "cuda_visible_devices": "5",
+          "uuid": "087b0f09-0d22-7908-e4cb-bb49fd81a455",
+          "phys_index": 5,
           "name": "NVIDIA B200"
         },
-        "foreign_floor_mib": 62,
+        "foreign_floor_mib": 14,
         "admission_policy_expected": {
           "compiled_cap": 2,
           "cap_mode": "auto",
@@ -1422,32 +1992,32 @@
           "authority": "demo/qwen3_5/accept/admission_policy.py"
         },
         "problems": [],
-        "decode_tokens_per_second": 950.9851140245436,
-        "e2e_seconds": 9.9881962890625,
+        "decode_tokens_per_second": 956.4766891075415,
+        "e2e_seconds": 9.93768505859375,
         "decode_slope_formula": "bs*(D_full - D_pre)/(wall_full - wall_pre)",
         "dispersion": {
           "bound_pct": 5.0,
           "arms": {
             "full": {
-              "n": 3,
-              "statistic": "fullrange_over_median_pct",
-              "value_pct": 14.629827218905753,
-              "full_range_pct": 14.629827218905753,
-              "iqr_pct": 7.314913609452876,
-              "ok": false
+              "n": 6,
+              "statistic": "iqr_over_median_pct",
+              "value_pct": 1.819747951824207,
+              "full_range_pct": 7.448731177814643,
+              "iqr_pct": 1.819747951824207,
+              "ok": true
             },
             "pre": {
-              "n": 3,
-              "statistic": "fullrange_over_median_pct",
-              "value_pct": 0.5473154107129521,
-              "full_range_pct": 0.5473154107129521,
-              "iqr_pct": 0.27365770535647604,
+              "n": 6,
+              "statistic": "iqr_over_median_pct",
+              "value_pct": 0.18296443422522893,
+              "full_range_pct": 0.32874921010689456,
+              "iqr_pct": 0.18296443422522893,
               "ok": true
             }
           },
-          "ok": false
+          "ok": true
         },
-        "measurement_valid": false
+        "measurement_valid": true
       },
       "vllm": {
         "batch_size": 8,
@@ -1595,9 +2165,9 @@
         "verdict": "FAIL",
         "point_estimate_passes": false,
         "measurement_valid": false,
-        "mpk_decode_tok_s": 950.9851140245436,
+        "mpk_decode_tok_s": 956.4766891075415,
         "vllm_decode_tok_s": 1734.9970706382192,
-        "ratio_mpk_over_vllm": 0.5481191467803017,
+        "ratio_mpk_over_vllm": 0.5512843250828667,
         "vllm_pinned_cross_check": 1692.4669356762156,
         "drift_valid": true
       },
@@ -1606,9 +2176,9 @@
         "verdict": "FAIL",
         "point_estimate_passes": false,
         "measurement_valid": false,
-        "mpk_e2e_s": 9.9881962890625,
+        "mpk_e2e_s": 9.93768505859375,
         "vllm_e2e_s": 4.823541408055462,
-        "ratio_mpk_over_vllm": 2.070718470952049,
+        "ratio_mpk_over_vllm": 2.0602466565327937,
         "max_ratio": 1.25,
         "vllm_pinned_cross_check": 4.953407906476059,
         "drift_valid": true
@@ -1628,7 +2198,7 @@
               "cap_compiled": 1,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 12332.1201171875,
+              "wall_ms": 12392.7548828125,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -1652,8 +2222,8 @@
                 "syn256-14",
                 "syn256-15"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "full_bs16_rep1",
@@ -1662,7 +2232,7 @@
               "cap_compiled": 1,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 12217.734375,
+              "wall_ms": 12259.55859375,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -1686,8 +2256,8 @@
                 "syn256-14",
                 "syn256-15"
               ],
-              "gpu_before_mib": 86,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "full_bs16_rep2",
@@ -1696,7 +2266,7 @@
               "cap_compiled": 1,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 12877.8662109375,
+              "wall_ms": 12905.84375,
               "D": 1023,
               "max_seq_length": 1280,
               "mbt": 16,
@@ -1720,29 +2290,137 @@
                 "syn256-14",
                 "syn256-15"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs16_rep3",
+              "file": "timings_bs16_rep3.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 11748.1328125,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs16_rep4",
+              "file": "timings_bs16_rep4.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 12770.3330078125,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "full_bs16_rep5",
+              "file": "timings_bs16_rep5.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 13024.603515625,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             }
           ],
           "walls_ms": [
-            12332.1201171875,
-            12217.734375,
-            12877.8662109375
+            12392.7548828125,
+            12259.55859375,
+            12905.84375,
+            11748.1328125,
+            12770.3330078125,
+            13024.603515625
           ],
           "decode_steps": [
+            1023,
+            1023,
+            1023,
             1023,
             1023,
             1023
           ],
           "excluded": [],
           "problems": [],
-          "n": 3,
-          "median_wall_ms": 12332.1201171875,
-          "median_D": 1023,
+          "n": 6,
+          "median_wall_ms": 12581.5439453125,
+          "median_D": 1023.0,
           "distinct_D": [
             1023
           ],
-          "range_pct": 5.352946854754214,
+          "range_pct": 10.145580770320118,
           "reps_required": 3
         },
         "pre": {
@@ -1756,7 +2434,7 @@
               "cap_compiled": 1,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 2404.485107421875,
+              "wall_ms": 2419.7841796875,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -1780,8 +2458,8 @@
                 "syn256-14",
                 "syn256-15"
               ],
-              "gpu_before_mib": 66,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "pre_bs16_rep1",
@@ -1790,7 +2468,7 @@
               "cap_compiled": 1,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 2402.4296875,
+              "wall_ms": 2406.89501953125,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -1814,8 +2492,8 @@
                 "syn256-14",
                 "syn256-15"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             },
             {
               "tag": "pre_bs16_rep2",
@@ -1824,7 +2502,7 @@
               "cap_compiled": 1,
               "cap_requested": "policy",
               "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
-              "wall_ms": 2408.076171875,
+              "wall_ms": 2410.004638671875,
               "D": 2,
               "max_seq_length": 259,
               "mbt": 16,
@@ -1848,38 +2526,146 @@
                 "syn256-14",
                 "syn256-15"
               ],
-              "gpu_before_mib": 62,
-              "gpu_index": 2
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs16_rep3",
+              "file": "timings_bs16_rep3.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 2411.180419921875,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs16_rep4",
+              "file": "timings_bs16_rep4.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 2407.9091796875,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
+            },
+            {
+              "tag": "pre_bs16_rep5",
+              "file": "timings_bs16_rep5.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 2419.3173828125,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 14,
+              "gpu_index": 5
             }
           ],
           "walls_ms": [
-            2404.485107421875,
-            2402.4296875,
-            2408.076171875
+            2419.7841796875,
+            2406.89501953125,
+            2410.004638671875,
+            2411.180419921875,
+            2407.9091796875,
+            2419.3173828125
           ],
           "decode_steps": [
+            2,
+            2,
+            2,
             2,
             2,
             2
           ],
           "excluded": [],
           "problems": [],
-          "n": 3,
-          "median_wall_ms": 2404.485107421875,
-          "median_D": 2,
+          "n": 6,
+          "median_wall_ms": 2410.592529296875,
+          "median_D": 2.0,
           "distinct_D": [
             2
           ],
-          "range_pct": 0.2348313307315197,
+          "range_pct": 0.5346884635044284,
           "reps_required": 3
         },
         "device": {
-          "cuda_visible_devices": "2",
-          "uuid": "f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
-          "phys_index": 2,
+          "cuda_visible_devices": "5",
+          "uuid": "087b0f09-0d22-7908-e4cb-bb49fd81a455",
+          "phys_index": 5,
           "name": "NVIDIA B200"
         },
-        "foreign_floor_mib": 62,
+        "foreign_floor_mib": 14,
         "admission_policy_expected": {
           "compiled_cap": 1,
           "cap_mode": "auto",
@@ -1906,32 +2692,32 @@
           "authority": "demo/qwen3_5/accept/admission_policy.py"
         },
         "problems": [],
-        "decode_tokens_per_second": 1645.507714972457,
-        "e2e_seconds": 12.3321201171875,
+        "decode_tokens_per_second": 1606.1427620504235,
+        "e2e_seconds": 12.5815439453125,
         "decode_slope_formula": "bs*(D_full - D_pre)/(wall_full - wall_pre)",
         "dispersion": {
           "bound_pct": 5.0,
           "arms": {
             "full": {
-              "n": 3,
-              "statistic": "fullrange_over_median_pct",
-              "value_pct": 5.352946854754214,
-              "full_range_pct": 5.352946854754214,
-              "iqr_pct": 2.676473427377107,
-              "ok": false
+              "n": 6,
+              "statistic": "iqr_over_median_pct",
+              "value_pct": 4.602840485672334,
+              "full_range_pct": 10.145580770320118,
+              "iqr_pct": 4.602840485672334,
+              "ok": true
             },
             "pre": {
-              "n": 3,
-              "statistic": "fullrange_over_median_pct",
-              "value_pct": 0.2348313307315197,
-              "full_range_pct": 0.2348313307315197,
-              "iqr_pct": 0.11741566536575986,
+              "n": 6,
+              "statistic": "iqr_over_median_pct",
+              "value_pct": 0.3671337046261986,
+              "full_range_pct": 0.5346884635044284,
+              "iqr_pct": 0.3671337046261986,
               "ok": true
             }
           },
-          "ok": false
+          "ok": true
         },
-        "measurement_valid": false
+        "measurement_valid": true
       },
       "vllm": {
         "batch_size": 16,
@@ -2076,10 +2862,10 @@
         "criterion": "AC-4 bs16: mpk decode tok/s STRICTLY GREATER than vLLM",
         "verdict": "FAIL",
         "point_estimate_passes": false,
-        "measurement_valid": false,
-        "mpk_decode_tok_s": 1645.507714972457,
+        "measurement_valid": true,
+        "mpk_decode_tok_s": 1606.1427620504235,
         "vllm_decode_tok_s": 3032.523422454821,
-        "ratio_mpk_over_vllm": 0.5426199523433268,
+        "ratio_mpk_over_vllm": 0.5296390293830788,
         "vllm_pinned_cross_check": 3018.1111975195627,
         "drift_valid": true
       },
@@ -2087,10 +2873,10 @@
         "criterion": "AC-5 bs16: mpk e2e <= 1.25x vLLM e2e",
         "verdict": "FAIL",
         "point_estimate_passes": false,
-        "measurement_valid": false,
-        "mpk_e2e_s": 12.3321201171875,
+        "measurement_valid": true,
+        "mpk_e2e_s": 12.5815439453125,
         "vllm_e2e_s": 5.5670896240044385,
-        "ratio_mpk_over_vllm": 2.2151826088829765,
+        "ratio_mpk_over_vllm": 2.25998588042535,
         "max_ratio": 1.25,
         "vllm_pinned_cross_check": 5.567888470002799,
         "drift_valid": true
@@ -2120,16 +2906,16 @@
     "criterion": "mpk e2e <= 1.25x vLLM at EVERY batch size (goal AC-5)"
   },
   "failures": [
-    "AC-4 bs1: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 173.4542271905207, \"vllm_decode_tok_s\": 284.13382111283465, \"ratio_mpk_over_vllm\": 0.6104666685267253, \"vllm_pinned_cross_check\": 285.5105643395262}",
-    "AC-4 bs2: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 318.65086543747645, \"vllm_decode_tok_s\": 529.9796512556082, \"ratio_mpk_over_vllm\": 0.6012511323454411, \"vllm_pinned_cross_check\": 529.7960084681633}",
-    "AC-4 bs4: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 560.7792280498497, \"vllm_decode_tok_s\": 936.361311883166, \"ratio_mpk_over_vllm\": 0.5988919244453157, \"vllm_pinned_cross_check\": 934.3478174709361}",
-    "AC-4 bs8: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 950.9851140245436, \"vllm_decode_tok_s\": 1734.9970706382192, \"ratio_mpk_over_vllm\": 0.5481191467803017, \"vllm_pinned_cross_check\": 1692.4669356762156}",
-    "AC-4 bs16: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 1645.507714972457, \"vllm_decode_tok_s\": 3032.523422454821, \"ratio_mpk_over_vllm\": 0.5426199523433268, \"vllm_pinned_cross_check\": 3018.1111975195627}",
-    "AC-5 bs1: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 6.15721875, \"vllm_e2e_s\": 3.618471367051825, \"ratio_mpk_over_vllm\": 1.7016077026516967, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 3.601619330991525}",
-    "AC-5 bs2: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 6.80583349609375, \"vllm_e2e_s\": 3.8797123529948294, \"ratio_mpk_over_vllm\": 1.7542108478326204, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 3.886238737992244}",
-    "AC-5 bs4: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 7.952134765625, \"vllm_e2e_s\": 4.448229199042544, \"ratio_mpk_over_vllm\": 1.7877079641796902, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 4.45474189100787}",
-    "AC-5 bs8: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 9.9881962890625, \"vllm_e2e_s\": 4.823541408055462, \"ratio_mpk_over_vllm\": 2.070718470952049, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 4.953407906476059}",
-    "AC-5 bs16: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 12.3321201171875, \"vllm_e2e_s\": 5.5670896240044385, \"ratio_mpk_over_vllm\": 2.2151826088829765, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 5.567888470002799}"
+    "AC-4 bs1: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 172.66176075218476, \"vllm_decode_tok_s\": 284.13382111283465, \"ratio_mpk_over_vllm\": 0.6076776079522672, \"vllm_pinned_cross_check\": 285.5105643395262}",
+    "AC-4 bs2: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 317.7044430026227, \"vllm_decode_tok_s\": 529.9796512556082, \"ratio_mpk_over_vllm\": 0.5994653610755226, \"vllm_pinned_cross_check\": 529.7960084681633}",
+    "AC-4 bs4: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 564.6825108738965, \"vllm_decode_tok_s\": 936.361311883166, \"ratio_mpk_over_vllm\": 0.6030604892658727, \"vllm_pinned_cross_check\": 934.3478174709361}",
+    "AC-4 bs8: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 956.4766891075415, \"vllm_decode_tok_s\": 1734.9970706382192, \"ratio_mpk_over_vllm\": 0.5512843250828667, \"vllm_pinned_cross_check\": 1692.4669356762156}",
+    "AC-4 bs16: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 1606.1427620504235, \"vllm_decode_tok_s\": 3032.523422454821, \"ratio_mpk_over_vllm\": 0.5296390293830788, \"vllm_pinned_cross_check\": 3018.1111975195627}",
+    "AC-5 bs1: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 6.1804599609375, \"vllm_e2e_s\": 3.618471367051825, \"ratio_mpk_over_vllm\": 1.7080306389084607, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 3.601619330991525}",
+    "AC-5 bs2: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 6.825034423828125, \"vllm_e2e_s\": 3.8797123529948294, \"ratio_mpk_over_vllm\": 1.7591599074502884, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 3.886238737992244}",
+    "AC-5 bs4: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 7.902321533203125, \"vllm_e2e_s\": 4.448229199042544, \"ratio_mpk_over_vllm\": 1.776509523138793, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 4.45474189100787}",
+    "AC-5 bs8: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 9.93768505859375, \"vllm_e2e_s\": 4.823541408055462, \"ratio_mpk_over_vllm\": 2.0602466565327937, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 4.953407906476059}",
+    "AC-5 bs16: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 12.5815439453125, \"vllm_e2e_s\": 5.5670896240044385, \"ratio_mpk_over_vllm\": 2.25998588042535, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 5.567888470002799}"
   ],
   "not_evaluable": [
     "bs8 vllm: fresh run's own dispersion check failed (bench-protocol.md 6)"
