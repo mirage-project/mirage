@@ -1,0 +1,209 @@
+{
+ "root": "/var/tmp/m4i9_sweep2",
+ "arms": [
+  "A",
+  "F"
+ ],
+ "bs": [
+  1,
+  16
+ ],
+ "reps": [
+  0,
+  1,
+  2
+ ],
+ "rows": [
+  {
+   "bs": 1,
+   "A": [
+    786.6605834960938,
+    785.6919555664062,
+    786.5645141601562
+   ],
+   "A_med": 786.5645141601562,
+   "F": [
+    762.0697021484375,
+    761.993408203125,
+    762.5066528320312
+   ],
+   "F_med": 762.0697021484375
+  },
+  {
+   "bs": 16,
+   "A": [
+    3265.797607421875,
+    3304.203125,
+    3250.385986328125
+   ],
+   "A_med": 3265.797607421875,
+   "F": [
+    3246.939208984375,
+    3286.867919921875,
+    3230.794189453125
+   ],
+   "F_med": 3246.939208984375
+  }
+ ],
+ "missing": [],
+ "audits": [
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36432,
+   "after_util": 89,
+   "arm": "A",
+   "bs": 1,
+   "rep": 0,
+   "tokens_sha256": "21bd850d90b01edc77d1e21dd27a6f7660f33ee24aab6ab5dbaa6fc6fa493c48"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36432,
+   "after_util": 66,
+   "arm": "A",
+   "bs": 1,
+   "rep": 1,
+   "tokens_sha256": "ad5239e4f5dfd303b08cca1ae30f515c644734768b0dd0246483a65469caae4d"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37386,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 1,
+   "rep": 2,
+   "tokens_sha256": "21bd850d90b01edc77d1e21dd27a6f7660f33ee24aab6ab5dbaa6fc6fa493c48"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36426,
+   "after_util": 56,
+   "arm": "F",
+   "bs": 1,
+   "rep": 0,
+   "tokens_sha256": "21bd850d90b01edc77d1e21dd27a6f7660f33ee24aab6ab5dbaa6fc6fa493c48"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36426,
+   "after_util": 0,
+   "arm": "F",
+   "bs": 1,
+   "rep": 1,
+   "tokens_sha256": "ad5239e4f5dfd303b08cca1ae30f515c644734768b0dd0246483a65469caae4d"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36426,
+   "after_util": 100,
+   "arm": "F",
+   "bs": 1,
+   "rep": 2,
+   "tokens_sha256": "21bd850d90b01edc77d1e21dd27a6f7660f33ee24aab6ab5dbaa6fc6fa493c48"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37576,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 16,
+   "rep": 0,
+   "tokens_sha256": "e09df5c67d351993aba08c9712c5e345b2f89316925edd0c5424fcbb22c2a099"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37576,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 16,
+   "rep": 1,
+   "tokens_sha256": "22c1720fa6c0c145029d659c7ee34d1bdf84f27dbd4d65ddca1448feb32adf06"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37576,
+   "after_util": 72,
+   "arm": "A",
+   "bs": 16,
+   "rep": 2,
+   "tokens_sha256": "8c9bcf2d79c46671893b1635d522a1dfd8189088a170087d48f9d029ba7d1f9a"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37570,
+   "after_util": 100,
+   "arm": "F",
+   "bs": 16,
+   "rep": 0,
+   "tokens_sha256": "e09df5c67d351993aba08c9712c5e345b2f89316925edd0c5424fcbb22c2a099"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37570,
+   "after_util": 100,
+   "arm": "F",
+   "bs": 16,
+   "rep": 1,
+   "tokens_sha256": "22c1720fa6c0c145029d659c7ee34d1bdf84f27dbd4d65ddca1448feb32adf06"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37570,
+   "after_util": 100,
+   "arm": "F",
+   "bs": 16,
+   "rep": 2,
+   "tokens_sha256": "8c9bcf2d79c46671893b1635d522a1dfd8189088a170087d48f9d029ba7d1f9a"
+  }
+ ],
+ "n_dirty": 0,
+ "n_unauditable": 0,
+ "tokens_identical_pairs": 6,
+ "tokens_differing_pairs": 0,
+ "paired": {
+  "bs1_F": {
+   "deltas": [
+    24.59088134765625,
+    23.69854736328125,
+    24.057861328125
+   ],
+   "mean_ms": 24.115763346354168,
+   "arm_wins": 3,
+   "n": 3
+  },
+  "bs16_F": {
+   "deltas": [
+    18.8583984375,
+    17.335205078125,
+    19.591796875
+   ],
+   "mean_ms": 18.595133463541668,
+   "arm_wins": 3,
+   "n": 3
+  }
+ }
+}

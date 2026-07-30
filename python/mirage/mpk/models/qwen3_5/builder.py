@@ -863,14 +863,22 @@ class Qwen35Builder(GraphBuilder):
             moe_routing_indices=routing, moe_mask=mask, output=mid,
             grid_dim=(grid_x, self.moe_n_splits, 1), block_dim=(256, 1, 1),
             w13_linear=True)
-        aq = self._t((mbt, topk, inter), float8_e4m3, f"layer_{i}_moe_actq")
-        as_ = self._t((mbt, topk, inter // BLOCK), float32, f"layer_{i}_moe_acts")
         # M4-I9: SwiGLU + activation quantize as ONE task (default off). The
         # unfused pair is kept for `expose_intermediates`, because the
         # single-layer test-mode gates and M2-I9's divergence bisection read
         # `layer_i_moe_act` as a probe point and the fused task never
         # materialises it.
+        #
+        # The `else` branch declares its tensors in the ORIGINAL order (act,
+        # then actq/acts) rather than hoisting the shared pair above the `if`.
+        # Tensor creation order is device-allocation order in the generated TU,
+        # so hoisting made the shipped-default TU differ from pre-M4-I9 by 240
+        # lines of moved `cudaMalloc`s -- a difference with no reason to exist.
+        # Kept this way so gate 1c can assert the strong form: byte-identical.
         if fuse_silu_quant() and not self.expose_intermediates:
+            aq = self._t((mbt, topk, inter), float8_e4m3, f"layer_{i}_moe_actq")
+            as_ = self._t((mbt, topk, inter // BLOCK), float32,
+                          f"layer_{i}_moe_acts")
             pk.moe_silu_mul_quantize_fp8_layer(
                 input=mid, output_fp8=aq, output_scale=as_,
                 grid_dim=(mbt, topk, 1), block_dim=(128, 1, 1))
@@ -878,6 +886,9 @@ class Qwen35Builder(GraphBuilder):
             act = self._t((mbt, topk, inter), bfloat16, f"layer_{i}_moe_act")
             pk.moe_silu_mul_layer(input=mid, output=act, grid_dim=(mbt, topk, 1),
                                   block_dim=(128, 1, 1))
+            aq = self._t((mbt, topk, inter), float8_e4m3, f"layer_{i}_moe_actq")
+            as_ = self._t((mbt, topk, inter // BLOCK), float32,
+                          f"layer_{i}_moe_acts")
             pk.quantize_fp8_layer(input=act, output_fp8=aq, output_scale=as_,
                                   grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
                                   scale_ue8m0=False,

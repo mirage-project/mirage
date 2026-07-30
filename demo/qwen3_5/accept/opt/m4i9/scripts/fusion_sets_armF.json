@@ -1,0 +1,8 @@
+{
+  "R1 recur/attn+quant":        ["QUANTIZE_FP8_SM100|gdn_out_proj_xq", "QUANTIZE_FP8_SM100|o_proj_xq"],
+  "R2 combine+rms(+quant attn)":["RMS_NORM_HOPPER|pre_norm", "QUANTIZE_FP8_SM100|qkvg_proj_xq"],
+  "R_MAX remaining admissible": ["QUANTIZE_FP8_SM100|gdn_out_proj_xq", "QUANTIZE_FP8_SM100|o_proj_xq", "RMS_NORM_HOPPER|pre_norm", "QUANTIZE_FP8_SM100|qkvg_proj_xq", "QUANTIZE_FP8_SM100|shared_down_xq", "QUANTIZE_FP8_SM100|moe_xq"],
+  "U1 + router pair free":      ["QUANTIZE_FP8_SM100|gdn_out_proj_xq", "QUANTIZE_FP8_SM100|o_proj_xq", "RMS_NORM_HOPPER|pre_norm", "QUANTIZE_FP8_SM100|qkvg_proj_xq", "QUANTIZE_FP8_SM100|shared_down_xq", "QUANTIZE_FP8_SM100|moe_xq", "MOE_TOPK_SOFTMAX_SM100|", "TASK_LINEAR_SM100|router_logits"],
+  "U1b + also combine free":    ["QUANTIZE_FP8_SM100|gdn_out_proj_xq", "QUANTIZE_FP8_SM100|o_proj_xq", "RMS_NORM_HOPPER|pre_norm", "QUANTIZE_FP8_SM100|qkvg_proj_xq", "QUANTIZE_FP8_SM100|shared_down_xq", "QUANTIZE_FP8_SM100|moe_xq", "MOE_TOPK_SOFTMAX_SM100|", "TASK_LINEAR_SM100|router_logits", "MOE_MUL_SUM_ADD_SM100|"],
+  "U2 all tiny free":           ["QUANTIZE_FP8_SM100|", "RMS_NORM_HOPPER|", "SILU_MUL|", "MOE_SILU_MUL_QUANTIZE_FP8_SM100|", "MOE_TOPK_SOFTMAX_SM100|", "MOE_MUL_SUM_ADD_SM100|", "SIGMOID_GATE_MUL_ADD_SM100|"]
+}

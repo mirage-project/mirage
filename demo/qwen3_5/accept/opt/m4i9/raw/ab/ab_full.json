@@ -1,0 +1,485 @@
+{
+ "root": "/var/tmp/m4i9_sweep",
+ "arms": [
+  "A",
+  "F"
+ ],
+ "bs": [
+  1,
+  2,
+  4,
+  8,
+  16
+ ],
+ "reps": [
+  0,
+  1,
+  2
+ ],
+ "rows": [
+  {
+   "bs": 1,
+   "A": [
+    783.4042358398438,
+    786.0343627929688,
+    787.1925659179688
+   ],
+   "A_med": 786.0343627929688,
+   "F": [
+    761.7410278320312,
+    761.7256469726562,
+    771.9080810546875
+   ],
+   "F_med": 761.7410278320312
+  },
+  {
+   "bs": 2,
+   "A": [
+    950.0060424804688,
+    964.2509155273438,
+    955.6832885742188
+   ],
+   "A_med": 955.6832885742188,
+   "F": [
+    930.3469848632812,
+    943.5279541015625,
+    936.001708984375
+   ],
+   "F_med": 936.001708984375
+  },
+  {
+   "bs": 4,
+   "A": [
+    1274.00732421875,
+    1313.4998779296875,
+    1305.7188720703125
+   ],
+   "A_med": 1305.7188720703125,
+   "F": [
+    1244.017333984375,
+    1306.666748046875,
+    1356.2890625
+   ],
+   "F_med": 1306.666748046875
+  },
+  {
+   "bs": 8,
+   "A": [
+    2136.571533203125,
+    2062.55078125,
+    2092.677490234375
+   ],
+   "A_med": 2092.677490234375,
+   "F": [
+    2129.149169921875,
+    2054.718994140625,
+    2086.406494140625
+   ],
+   "F_med": 2086.406494140625
+  },
+  {
+   "bs": 16,
+   "A": [
+    3265.03466796875,
+    3304.243896484375,
+    3250.6123046875
+   ],
+   "A_med": 3265.03466796875,
+   "F": [
+    3246.05078125,
+    3286.66845703125,
+    3229.735595703125
+   ],
+   "F_med": 3246.05078125
+  }
+ ],
+ "missing": [],
+ "audits": [
+  {
+   "device": "7",
+   "before_mib": 16,
+   "before_util": 0,
+   "after_mib": 36344,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 1,
+   "rep": 0,
+   "tokens_sha256": "21bd850d90b01edc77d1e21dd27a6f7660f33ee24aab6ab5dbaa6fc6fa493c48"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36432,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 1,
+   "rep": 1,
+   "tokens_sha256": "ad5239e4f5dfd303b08cca1ae30f515c644734768b0dd0246483a65469caae4d"
+  },
+  {
+   "device": "3",
+   "before_mib": 106,
+   "before_util": 0,
+   "after_mib": 36432,
+   "after_util": 0,
+   "arm": "A",
+   "bs": 1,
+   "rep": 2,
+   "tokens_sha256": "21bd850d90b01edc77d1e21dd27a6f7660f33ee24aab6ab5dbaa6fc6fa493c48"
+  },
+  {
+   "device": "7",
+   "before_mib": 16,
+   "before_util": 0,
+   "after_mib": 36338,
+   "after_util": 100,
+   "arm": "F",
+   "bs": 1,
+   "rep": 0,
+   "tokens_sha256": "21bd850d90b01edc77d1e21dd27a6f7660f33ee24aab6ab5dbaa6fc6fa493c48"
+  },
+  {
+   "device": "3",
+   "before_mib": 106,
+   "before_util": 0,
+   "after_mib": 36426,
+   "after_util": 100,
+   "arm": "F",
+   "bs": 1,
+   "rep": 1,
+   "tokens_sha256": "ad5239e4f5dfd303b08cca1ae30f515c644734768b0dd0246483a65469caae4d"
+  },
+  {
+   "device": "3",
+   "before_mib": 106,
+   "before_util": 0,
+   "after_mib": 36426,
+   "after_util": 0,
+   "arm": "F",
+   "bs": 1,
+   "rep": 2,
+   "tokens_sha256": "21bd850d90b01edc77d1e21dd27a6f7660f33ee24aab6ab5dbaa6fc6fa493c48"
+  },
+  {
+   "device": "3",
+   "before_mib": 106,
+   "before_util": 0,
+   "after_mib": 36552,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 2,
+   "rep": 0,
+   "tokens_sha256": "e1e264118e2002e43966c426137395f8815e5903e7c1dc1cc90a6ce9a6c126c8"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36552,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 2,
+   "rep": 1,
+   "tokens_sha256": "2d88b743b728bab509e805ea26228d7973ed9f32b79a5ea484b37b872c013f57"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36552,
+   "after_util": 0,
+   "arm": "A",
+   "bs": 2,
+   "rep": 2,
+   "tokens_sha256": "033dba6bc077b02f4f2291896d8d5e6f32eee41ffe15b064d6fc78cfa30bd902"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36546,
+   "after_util": 0,
+   "arm": "F",
+   "bs": 2,
+   "rep": 0,
+   "tokens_sha256": "e1e264118e2002e43966c426137395f8815e5903e7c1dc1cc90a6ce9a6c126c8"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37550,
+   "after_util": 0,
+   "arm": "F",
+   "bs": 2,
+   "rep": 1,
+   "tokens_sha256": "2d88b743b728bab509e805ea26228d7973ed9f32b79a5ea484b37b872c013f57"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36546,
+   "after_util": 100,
+   "arm": "F",
+   "bs": 2,
+   "rep": 2,
+   "tokens_sha256": "033dba6bc077b02f4f2291896d8d5e6f32eee41ffe15b064d6fc78cfa30bd902"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36672,
+   "after_util": 90,
+   "arm": "A",
+   "bs": 4,
+   "rep": 0,
+   "tokens_sha256": "5f6983e881c653e63feef34ed4ef6f463c9b070a4d27e85d721aacdc7373a2c4"
+  },
+  {
+   "device": "3",
+   "before_mib": 106,
+   "before_util": 0,
+   "after_mib": 36672,
+   "after_util": 0,
+   "arm": "A",
+   "bs": 4,
+   "rep": 1,
+   "tokens_sha256": "3d36355426cfa6e589ce3694baaf776a64746db4b5169a5a57a207e8af7b3922"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36672,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 4,
+   "rep": 2,
+   "tokens_sha256": "078c632c0f586dd23aa30799d5d14c6ebee5a71db363dc9d6a4beff8b096eb02"
+  },
+  {
+   "device": "3",
+   "before_mib": 106,
+   "before_util": 0,
+   "after_mib": 36666,
+   "after_util": 15,
+   "arm": "F",
+   "bs": 4,
+   "rep": 0,
+   "tokens_sha256": "5f6983e881c653e63feef34ed4ef6f463c9b070a4d27e85d721aacdc7373a2c4"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36666,
+   "after_util": 90,
+   "arm": "F",
+   "bs": 4,
+   "rep": 1,
+   "tokens_sha256": "3d36355426cfa6e589ce3694baaf776a64746db4b5169a5a57a207e8af7b3922"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36666,
+   "after_util": 0,
+   "arm": "F",
+   "bs": 4,
+   "rep": 2,
+   "tokens_sha256": "078c632c0f586dd23aa30799d5d14c6ebee5a71db363dc9d6a4beff8b096eb02"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36914,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 8,
+   "rep": 0,
+   "tokens_sha256": "7ce24b63c9210685e014c68213ed50601b5a7011c9c19b3646e5b87451f2ea50"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36914,
+   "after_util": 37,
+   "arm": "A",
+   "bs": 8,
+   "rep": 1,
+   "tokens_sha256": "a86132db067241788b283d668d2afaea70eeca72c5c1ee58a8a22d7b250f6e61"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36914,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 8,
+   "rep": 2,
+   "tokens_sha256": "eea275e7ef5ce3b51d005c886feacd7b7b0cbfdc4f741d25c1e0fe2752bf43a5"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36908,
+   "after_util": 47,
+   "arm": "F",
+   "bs": 8,
+   "rep": 0,
+   "tokens_sha256": "7ce24b63c9210685e014c68213ed50601b5a7011c9c19b3646e5b87451f2ea50"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36908,
+   "after_util": 0,
+   "arm": "F",
+   "bs": 8,
+   "rep": 1,
+   "tokens_sha256": "a86132db067241788b283d668d2afaea70eeca72c5c1ee58a8a22d7b250f6e61"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 36908,
+   "after_util": 6,
+   "arm": "F",
+   "bs": 8,
+   "rep": 2,
+   "tokens_sha256": "eea275e7ef5ce3b51d005c886feacd7b7b0cbfdc4f741d25c1e0fe2752bf43a5"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37576,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 16,
+   "rep": 0,
+   "tokens_sha256": "e09df5c67d351993aba08c9712c5e345b2f89316925edd0c5424fcbb22c2a099"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37576,
+   "after_util": 100,
+   "arm": "A",
+   "bs": 16,
+   "rep": 1,
+   "tokens_sha256": "22c1720fa6c0c145029d659c7ee34d1bdf84f27dbd4d65ddca1448feb32adf06"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37576,
+   "after_util": 87,
+   "arm": "A",
+   "bs": 16,
+   "rep": 2,
+   "tokens_sha256": "8c9bcf2d79c46671893b1635d522a1dfd8189088a170087d48f9d029ba7d1f9a"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37570,
+   "after_util": 71,
+   "arm": "F",
+   "bs": 16,
+   "rep": 0,
+   "tokens_sha256": "e09df5c67d351993aba08c9712c5e345b2f89316925edd0c5424fcbb22c2a099"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37570,
+   "after_util": 100,
+   "arm": "F",
+   "bs": 16,
+   "rep": 1,
+   "tokens_sha256": "22c1720fa6c0c145029d659c7ee34d1bdf84f27dbd4d65ddca1448feb32adf06"
+  },
+  {
+   "device": "3",
+   "before_mib": 104,
+   "before_util": 0,
+   "after_mib": 37570,
+   "after_util": 31,
+   "arm": "F",
+   "bs": 16,
+   "rep": 2,
+   "tokens_sha256": "8c9bcf2d79c46671893b1635d522a1dfd8189088a170087d48f9d029ba7d1f9a"
+  }
+ ],
+ "n_dirty": 0,
+ "n_unauditable": 0,
+ "tokens_identical_pairs": 15,
+ "tokens_differing_pairs": 0,
+ "paired": {
+  "bs1_F": {
+   "deltas": [
+    21.6632080078125,
+    24.3087158203125,
+    15.28448486328125
+   ],
+   "mean_ms": 20.418802897135418,
+   "arm_wins": 3,
+   "n": 3
+  },
+  "bs2_F": {
+   "deltas": [
+    19.6590576171875,
+    20.72296142578125,
+    19.68157958984375
+   ],
+   "mean_ms": 20.021199544270832,
+   "arm_wins": 3,
+   "n": 3
+  },
+  "bs4_F": {
+   "deltas": [
+    29.989990234375,
+    6.8331298828125,
+    -50.5701904296875
+   ],
+   "mean_ms": -4.582356770833333,
+   "arm_wins": 2,
+   "n": 3
+  },
+  "bs8_F": {
+   "deltas": [
+    7.42236328125,
+    7.831787109375,
+    6.27099609375
+   ],
+   "mean_ms": 7.175048828125,
+   "arm_wins": 3,
+   "n": 3
+  },
+  "bs16_F": {
+   "deltas": [
+    18.98388671875,
+    17.575439453125,
+    20.876708984375
+   ],
+   "mean_ms": 19.145345052083332,
+   "arm_wins": 3,
+   "n": 3
+  }
+ }
+}

@@ -1,0 +1,32 @@
+M4-I9 -- did the CHAIN actually get shorter?  cp_exact re-derivation, arm A vs arm F
+Same geometry (msl=897, 640 decode steps, mbt=16, page 256, 256-token synthetic
+prompts), same windows, same instrument (M4-I8's sched_gap.py reconstruction via
+opt/m4i9/scripts/fuse_model.py). assign_qc PASS and identity_error 0 ns on every cell.
+Two consecutive iterations per cell, because cp_exact is a max over chains of ONE
+iteration's realized durations and is therefore sensitive to single-iteration noise.
+
+ bs   it |   A step     A cp   A work  A floor  xvLLM |   F step     F cp   F work  F floor  xvLLM |    d cp  d work
+--------------------------------------------------------------------------------------------------------------------
+  1  288 |   5795.4   4130.7   2039.7   4130.7  1.179 |   5601.5   3750.1   1955.0   3750.1  1.071 |  -380.6   -84.7
+  1  289 |   5767.5   4110.7   2033.4   4110.7  1.173 |   5573.1   3728.8   1949.4   3728.8  1.064 |  -381.9   -84.0
+  8  365 |   8253.8   5275.7   4280.2   5275.7  1.116 |   8266.2   5032.1   4211.9   5032.1  1.065 |  -243.6   -68.3
+  8  366 |   8291.9   5319.1   4287.4   5319.1  1.125 |   8280.4   5054.5   4211.2   5054.5  1.069 |  -264.6   -76.3
+ 16  720 |  10162.1   5638.7   5976.0   5976.0  1.127 |  10192.1   5404.3   5890.6   5890.6  1.111 |  -234.4   -85.4
+ 16  721 |  10352.6   5776.1   6112.8   6112.8  1.153 |  10372.0   5542.8   6024.9   6024.9  1.137 |  -233.3   -87.9
+
+window-averaged control (width.py, the independent instrument):
+ bs |   A step   A work |   F step   F work |  d step %  d work %
+  1 |   5821.3   2051.3 |   5612.6   1959.9 |     -3.59     -4.46
+  8 |   8347.7   4342.7 |   8350.6   4271.0 |     +0.03     -1.65
+ 16 |  10305.8   6093.4 |  10319.1   5999.2 |     +0.13     -1.55
+
+===== how far can fusion go?  every REMAINING admissible fusion, modelled on
+      ARM F's OWN measured durations (inc=0: the victim's work becomes free) =====
+set                            nrec      cp1   floor   xvLLM      cp8   floor   xvLLM     cp16   floor   xvLLM
+arm F as shipped                  0   3750.1  3750.1   1.071   5032.1  5032.1   1.065   5404.3  5890.6   1.111
+R1 recur/attn+quant              40   3621.4  3621.4   1.034   4902.6  4902.6   1.037   5297.1  5878.5   1.109
+R2 combine+rms(+quant attn)      50   3692.0  3692.0   1.054   4969.9  4969.9   1.051   5314.9  5879.1   1.109
+R_MAX remaining admissible       90   3563.3  3563.3   1.017   4840.4  4840.4   1.024   5207.6  5855.3   1.105
+U1 + router pair free           170   2960.7  2960.7   0.845   3912.0  4077.4   0.863   4283.6  5758.8   1.086
+U1b + also combine free         210   2711.3  2711.3   0.774   3656.4  4050.0   0.857   4090.4  5736.2   1.082
+U2 all tiny free                331   2898.8  2898.8   0.828   3884.9  4053.2   0.857   4313.9  5734.1   1.082
