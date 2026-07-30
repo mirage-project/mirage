@@ -1,0 +1,47 @@
+M4-I8 scheduler A/B -- geometry B (synthetic 256-token prompts, msl=353,
+96 decode steps, mbt=16), arms interleaved per (bs, rep) in one GPU claim.
+
+arm A = base(HEAD, both knobs off)
+arm S = MPK_EVENT_WAIT_GPU_SCOPE=1 (ld.acquire.gpu)
+arm O = MPK_WORKER_OOO_POP=1 (out-of-order pop)
+
+== gpu_before audit (each run's OWN pinned device, from its OWN record) ==
+   runs: 36   dirty(>500MiB at start): 0   unauditable: 0
+   pinned device(s) across all runs: 1
+   observed pinned-device floors (MiB): [72]
+
+== per-rep wall_ms (every rep, every arm) ==
+ bs arm       rep0       rep1       rep2     median    range
+  1   A      785.0      783.9      784.4      784.4      1.1
+  1   S      785.5      783.8      784.4      784.4      1.7
+  1   O      821.7      820.5      820.2      820.5      1.5
+  2   A      950.5      964.5      956.8      956.8     14.0
+  2   S      951.9      964.5      957.2      957.2     12.7
+  2   O         --         --         --         --       --
+  4   A     1252.2     1314.1     1306.9     1306.9     61.9
+  4   S     1252.5     1314.3     1307.4     1307.4     61.8
+  4   O         --         --         --         --       --
+  8   A     2137.4     2062.4     2092.8     2092.8     75.0
+  8   S     2137.0     2062.4     2093.0     2093.0     74.6
+  8   O         --         --         --         --       --
+ 16   A     3263.3     3302.2     3247.4     3263.3     54.8
+ 16   S     3264.3     3302.0     3252.3     3264.3     49.7
+ 16   O     3424.8     3464.1     3410.3     3424.8     53.8
+
+== median wall_ms, and each arm's e2e effect against arm A ==
+ bs arm     A base        arm   delta_ms   speedup  arm ms/step   A ms/step
+  1   S      784.4      784.4        0.0   1.0000x       8.1706      8.1704
+  1   O      784.4      820.5       36.2   0.9559x       8.5473      8.1704
+  2   S      956.8      957.2        0.4   0.9996x       9.9708      9.9667
+  4   S     1306.9     1307.4        0.5   0.9996x      13.6187     13.6133
+  8   S     2092.8     2093.0        0.2   0.9999x      21.8021     21.7996
+ 16   S     3263.3     3264.3        1.0   0.9997x      34.0027     33.9925
+ 16   O     3263.3     3424.8      161.5   0.9528x      35.6746     33.9925
+
+== tokens_sha256: does the megakernel emit identical tokens in every arm? ==
+   Arm S changes only a load's memory scope, so identity is expected by
+   construction; arm O reorders execution among tasks that are already
+   independent, so identity is the empirical claim. Either way this is the
+   same property through 40 real layers on the real checkpoint.
+   identical: 21   differing: 0
+

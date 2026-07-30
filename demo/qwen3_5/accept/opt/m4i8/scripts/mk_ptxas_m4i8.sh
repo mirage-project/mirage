@@ -60,8 +60,8 @@ one () {              # $1 = label, $2... = extra -D
   report "$OUT/$LBL.log"
   cuobjdump -sass "$OUT/$LBL.so" > "$OUT/$LBL.sass" 2>/dev/null
   printf "    SASS  LD*.STRONG.SYS=%s  LD*.STRONG.GPU=%s  total_LD=%s  lines=%s\n" \
-    "$(grep -cE 'LD[A-Z.]*\.STRONG\.SYS' "$OUT/$LBL.sass")" \
-    "$(grep -cE 'LD[A-Z.]*\.STRONG\.GPU' "$OUT/$LBL.sass")" \
+    "$(grep -cE 'LD[A-Z0-9.]*\.STRONG\.SYS' "$OUT/$LBL.sass")" \
+    "$(grep -cE 'LD[A-Z0-9.]*\.STRONG\.GPU' "$OUT/$LBL.sass")" \
     "$(grep -cE '^\s+/\*[0-9a-f]+\*/\s+LD' "$OUT/$LBL.sass")" \
     "$(wc -l < "$OUT/$LBL.sass")"
   rm -f "$OUT/$LBL.so"
@@ -91,8 +91,8 @@ for f in base S O SO; do
 done
 echo
 echo "=== GATE 2b: did each -D reach the compile? ==="
-SYS_BASE=$(grep -cE 'LD[A-Z.]*\.STRONG\.SYS' "$OUT/base.sass")
-SYS_S=$(grep -cE 'LD[A-Z.]*\.STRONG\.SYS' "$OUT/S.sass")
+SYS_BASE=$(grep -cE 'LD[A-Z0-9.]*\.STRONG\.SYS' "$OUT/base.sass")
+SYS_S=$(grep -cE 'LD[A-Z0-9.]*\.STRONG\.SYS' "$OUT/S.sass")
 echo "  base STRONG.SYS loads = $SYS_BASE ; arm S = $SYS_S"
 if [ "$SYS_S" -lt "$SYS_BASE" ]; then
   echo "  ARM S FLAG LANDED: the .sys load is gone from the SASS."

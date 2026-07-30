@@ -14,9 +14,9 @@ durations are
 
 | bs | measured step | cp (exact) | work bound | binding floor | vLLM step | floor / vLLM |
 |---|---|---|---|---|---|---|
-| 1 | 5781.4 | **4130.7** | 2039.7 | 4130.7 | 3503.0 | **1.179x** |
-| 8 | 8272.9 | **5275.7** | 4280.2 | 5275.7 | 4727.0 | **1.116x** |
-| 16 | 10257.4 | 5638.7 | **5976.0** | 5976.0 | 5301.0 | **1.127x** |
+| 1 | 5795.4 | **4130.7** | 2039.7 | 4130.7 | 3503.0 | **1.179x** |
+| 8 | 8253.8 | **5275.7** | 4280.2 | 5275.7 | 4727.0 | **1.116x** |
+| 16 | 10162.1 | 5638.7 | **5976.0** | 5976.0 | 5301.0 | **1.127x** |
 
 so a step with **perfect packing and zero dispatch overhead** is still 12–18% slower than vLLM's
 whole step. AC-4 does not need a better scheduler. It needs a shorter dependency chain (bs1, bs8)
@@ -99,41 +99,43 @@ the same code at a different clone: step 5821.3 / 8347.7 / 10305.8 here against 
 
 ## 2. The decomposition
 
-Mean of the two decomposed iterations per cell; window and geometry are M4-I5's
-(msl=897, 640 decode steps, mbt=16, page 256, 256-token synthetic prompts; windows
-bs1 `[288,384)`, bs8 `[365,461)`, bs16 `[720,733)`).
+Iterations 288 / 365 / 720, matching the committed `raw/gap/gap_bs*.json`. Window and geometry
+are M4-I5's (msl=897, 640 decode steps, mbt=16, page 256, 256-token synthetic prompts; windows
+bs1 `[288,384)`, bs8 `[365,461)`, bs16 `[720,733)`). The next iteration of each window was
+decomposed too and agrees within 0.5-1.9% on every term
+(5767.5 / 8291.9 / 10352.6 us of step; `raw/driver_logs/derive4.log`).
 
 | term | bs1 | % | bs8 | % | bs16 | % | what bounds it |
 |---|---|---|---|---|---|---|---|
-| **step (measured)** | 5781.4 | 100 | 8272.9 | 100 | 10257.4 | 100 | window / `BEGIN_TASK_GRAPH` deltas |
-| PATH work — dependency-chain tasks | 3043.6 | 52.6 | 3589.4 | 43.4 | 3483.9 | 34.0 | profiled task durations on data edges |
-| **QUEUE work — waited behind** | 1556.4 | 26.9 | 3424.7 | 41.4 | **5365.3** | **52.3** | profiled durations on resource edges |
-| TRIGGER work — `TASK_SCHD_EVENTS` | 23.2 | 0.4 | 21.3 | 0.3 | 27.4 | 0.3 | 2277 records/step, 0.40–0.44 us each |
-| data gap — event visibility | 643.4 | 11.1 | 636.9 | 7.7 | 576.7 | 5.6 | 483–514 data edges x ~1.15 us median |
-| resource gap — queue pop | 506.3 | 8.8 | 575.5 | 7.0 | 760.9 | 7.4 | 301–471 resource edges x ~1.58 us median |
-| tail — last record to boundary | 8.4 | 0.1 | 25.0 | 0.3 | 43.2 | 0.4 | direct |
+| **step (measured)** | 5795.4 | 100 | 8253.8 | 100 | 10162.1 | 100 | window / `BEGIN_TASK_GRAPH` deltas |
+| PATH work — dependency-chain tasks | 3026.6 | 52.2 | 3590.6 | 43.5 | 3473.9 | 34.2 | profiled task durations on data edges |
+| **QUEUE work — waited behind** | 1583.0 | 27.3 | 3407.4 | 41.3 | **5285.9** | **52.0** | profiled durations on resource edges |
+| TRIGGER work — `TASK_SCHD_EVENTS` | 26.1 | 0.5 | 22.9 | 0.3 | 28.2 | 0.3 | 2277 records/step, 0.40–0.44 us each |
+| data gap — event visibility | 637.2 | 11.0 | 630.3 | 7.6 | 574.5 | 5.7 | 482–515 data edges x ~1.15 us median |
+| resource gap — queue pop | 514.1 | 8.9 | 577.3 | 7.0 | 756.7 | 7.4 | 310–477 resource edges x ~1.55 us median |
+| tail — last record to boundary | 8.5 | 0.1 | 25.3 | 0.3 | 43.0 | 0.4 | direct |
 
 Chain shape, which is what the gap is really about:
 
 | bs | chain records | data edges | resource edges | dispatch latency | share of step |
 |---|---|---|---|---|---|
-| 1 | 757 task + 52 sev | 508 x 1152 ns | 301 x 1592 ns | 1149.7 us | 19.9% |
-| 8 | 798 task + 47 sev | 514 x 1168 ns | 330 x 1584 ns | 1212.4 us | 14.7% |
-| 16 | 884 task + 70 sev | 483 x 1136 ns | 471 x 1568 ns | 1337.6 us | 13.0% |
+| 1 | 757 task + 58 sev | 505 x 1152 ns | 310 x 1568 ns | 1151.2 us | 19.9% |
+| 8 | 798 task + 50 sev | 515 x 1152 ns | 333 x 1568 ns | 1207.6 us | 14.6% |
+| 16 | 884 task + 75 sev | 482 x 1152 ns | 477 x 1536 ns | 1331.1 us | 13.1% |
 
 Two terms answer the acceptance criterion's four questions and two of them are refuted as levers:
 
-* **per-task dispatch / event cost** = the two gap rows, 1149.7 / 1212.4 / 1337.6 us. It is
+* **per-task dispatch / event cost** = the two gap rows, 1151.2 / 1207.6 / 1331.1 us. It is
   `n_edges x per-edge latency`, i.e. it scales with the **depth of the chain**, not with the task
-  count. 508 data edges over 40 layers is ~12.7 serial dependency levels per layer at bs1, each
+  count. 505 data edges over 40 layers is ~12.6 serial dependency levels per layer at bs1, each
   costing ~1.15 us before any work happens.
 * **intra-level arrival spread** does not appear as a separate term, because with full fan-in it
   *is* the data gap plus the binding producer's own delay, which the backward walk attributes
   recursively.
-* **worker idle on fan-in** is 473070 / 501030 / 525988 us of worker-time (128 workers x step), of
+* **worker idle on fan-in** is 474466 / 499067 / 522635 us of worker-time (128 workers x step), of
   which 437124 / 458307 / 470157 us is genuine starvation — the worker had nothing ready. Only
-  30878 / 37599 / 49723 us is poll latency.
-* **the tail** is 8.4 / 25.0 / 43.2 us, 0.1–0.4%. Refuted as a lever.
+  30758 / 37535 / 49998 us is poll latency.
+* **the tail** is 8.5 / 25.3 / 43.0 us, 0.1–0.4%. Refuted as a lever.
 * **`TASK_SCHD_EVENTS`** is 0.3–0.4%. Refuted as a lever. Note it does *not* delay the consumer:
   the counter increment happens *before* the profiled `SCHD_EVENTS` pair, so its cost lands on the
   producing worker's occupancy, not on the dependency path.
@@ -149,7 +151,7 @@ is the validation; everything else is a prediction. Deltas are against `slide_1`
 | policy | bs1 | Δ | bs8 | Δ | bs16 | Δ |
 |---|---|---|---|---|---|---|
 | `slide_1` — model of HEAD | 6517.2 | — | 8937.1 | — | 10764.5 | — |
-| *measured step* | *5781.4* | *−11.3%* | *8272.9* | *−7.4%* | *10257.4* | *−4.7%* |
+| *measured step* | *5795.4* | *−11.1%* | *8253.8* | *−7.6%* | *10162.1* | *−5.6%* |
 | `slide_2` | 6520.3 | +0.0% | 8937.1 | 0.0% | 10764.5 | 0.0% |
 | `batch_8` — what a minimal kernel change gives | 6494.8 | −0.3% | 8861.7 | −0.8% | 10663.1 | −0.9% |
 | `slide_4` … `slide_32` | 6362.6 | −2.4% | 8693.4 | −2.7% | 10453.8 | −2.9% |
@@ -158,7 +160,7 @@ is the validation; everything else is a prediction. Deltas are against `slide_1`
 | `slide_8_nolat` | 4549.3 | −30.2% | 6830.3 | −23.6% | 8502.1 | −21.0% |
 | `list_schedule_nolat` | 4372.9 | −32.9% | 6612.6 | −26.0% | 8239.0 | −23.5% |
 
-The simulator over-predicts the step by 12.7 / 8.0 / 4.9%, because it charges the median per-edge
+The simulator over-predicts the step by 12.5 / 8.3 / 5.9%, because it charges the median per-edge
 latency to every pop. Only the relative deltas are used.
 
 **Ranked:**
@@ -180,7 +182,7 @@ it**: at every stall in the realized trace, of the next 64 tasks in that worker'
 Because tasks are prelaunched in graph position order and that order is topological, each worker's
 queue is itself topologically ordered, so its head is always its most-ready task. In-order
 draining is already optimal *given this assignment*. Only the partially-recoverable measure is
-non-zero — 1833 / 2352 / 2493 us of the ~500000 us of idle, 0.4–0.5% — and it saturates at window
+non-zero — 1837 / 2348 / 2480 us of the ~500000 us of idle, 0.4–0.5% — and it saturates at window
 4, which is exactly what the simulator then confirms at −2.4 to −2.9%. Nothing here would justify
 changing scheduler semantics, so the soundness question never arises.
 
@@ -243,13 +245,165 @@ simulator's falsifier: a large measured effect would mean the decomposition's ra
 
 ## 5. Gate results
 
-*(filled in by the gate runs; see `gates/` and `tables/`)*
+### Gate 1 — `-Xptxas -v` and SASS: one TU compiled four ways
+
+Both arms are `-D` only and neither touches generated code, so one TU (bs1, msl=353) is compiled
+four ways with nothing else moving. `core.so` md5 is unchanged by either arm — both are
+JIT-header-only, so no extension rebuild is involved.
+
+| arm | registers | barriers | stack | smem | spill st/ld | SASS lines | scoped-load census |
+|---|---|---|---|---|---|---|---|
+| base | **255** | 16 | 96 B | 5856 B | 0 / 0 | 149760 | 12 `.STRONG.GPU` + **2 `.STRONG.SYS`** |
+| S | **255** | 16 | 96 B | 5856 B | 0 / 0 | 149760 | **14 `.STRONG.GPU` + 0 `.SYS`** |
+| O | **254** | 16 | 96 B | 5856 B | 0 / 0 | 150560 | 14 `.STRONG.GPU` + 2 `.SYS` |
+| SO | **254** | 16 | 96 B | 5856 B | 0 / 0 | 150560 | 16 `.STRONG.GPU` + 0 `.SYS` |
+
+HEAD sits at the 255-register ceiling, so this was the gate that could have voided either arm.
+Neither costs a register and neither spills; arm O is one register *below* base. So arm O's e2e
+regression below is not register pressure.
+
+**The flag-landed proof.** Arm S's *complete* diff against base, over all 149760 SASS lines, is
+two instructions:
+
+```
+/*19c0*/  LD.E.64.STRONG.SYS R2, desc[UR4][R8.64]    ->   LD.E.64.STRONG.GPU R2, desc[UR4][R8.64]
+/*1d30*/  LD.E.64.STRONG.SYS R2, desc[UR40][R8.64]   ->   LD.E.64.STRONG.GPU R2, desc[UR40][R8.64]
+```
+
+Nothing else changed. The census makes the same point from the other side: the runtime's only two
+`.SYS` loads (the event-counter wait, inlined twice) became `.GPU`, and arm O *adds* two `.GPU`
+loads — its readiness scan — while leaving the two `.SYS` loads in place. Every arm's `-D` is
+accounted for at the instruction level. (The first run of this gate reported "flag did not land"
+from a grep whose character class excluded digits and so could not match `LD.E.64.STRONG.SYS`; the
+corrected census is `gates/ptxas/gate2b_corrected.txt`.)
+
+### Gate 2 — e2e A/B
+
+Geometry B (synthetic 256-token prompts, msl=353, 96 decode steps, mbt=16), 3 reps per cell, arms
+interleaved per (bs, rep) inside one GPU claim, a kernel dir per (arm, bs). **42 runs, 0 dirty, 0
+unauditable**, all on device 1, observed pinned-device floor 72 MiB, each run's audit derived from
+its own `cuda_visible_devices` + `gpu_before`.
+
+| bs | A per-rep (ms) | A med | S per-rep (ms) | S med | S speedup |
+|---|---|---|---|---|---|
+| 1 | 785.0 / 783.9 / 784.4 | 784.4 | 785.5 / 783.8 / 784.4 | 784.4 | **1.0000x** |
+| 2 | 950.5 / 964.5 / 956.8 | 956.8 | 951.9 / 964.5 / 957.2 | 957.2 | **0.9996x** |
+| 4 | 1252.2 / 1314.1 / 1306.9 | 1306.9 | 1252.5 / 1314.3 / 1307.4 | 1307.4 | **0.9996x** |
+| 8 | 2137.4 / 2062.4 / 2092.8 | 2092.8 | 2137.0 / 2062.4 / 2093.0 | 2093.0 | **0.9999x** |
+| 16 | 3263.3 / 3302.2 / 3247.4 | 3263.3 | 3264.3 / 3302.0 / 3252.3 | 3264.3 | **0.9997x** |
+
+**Arm S is an exact null.** The medians differ by 0.0 to 1.0 ms against per-rep ranges of 1.1 to
+75.0 ms. `LD.E.64.STRONG.SYS` and `LD.E.64.STRONG.GPU` cost the same on B200 for this access
+pattern. Arm S is *provably wasteful* and *measurably free* — those turned out to be independent
+claims.
+
+| bs | A med | O per-rep (ms) | O med | O speedup |
+|---|---|---|---|---|
+| 1 | 784.4 | 821.7 / 820.5 / 820.2 | 820.5 | **0.9559x** |
+| 16 | 3263.3 | 3424.8 / 3464.1 / 3410.3 | 3424.8 | **0.9528x** |
+
+**Arm O is a 4.4–4.7% regression**, against a pre-registered prediction of −0.3%. The simulator's
+*magnitude* was right (the reorder benefit is small) but its *sign* is wrong, because the simulator
+prices the benefit of the scan and not its cost. Gate 1 says the cost is not registers; the census
+says what it is — two extra scoped global loads per task plus the two extra `__syncthreads` the
+scan needs.
+
+That accident is a useful independent measurement. 36.2 ms over 96 steps is 377 us per step at bs1,
+spread over an 809-record critical chain: **~470 ns of makespan per extra scoped load + barrier
+pair, per chain record.** The measured resource-gap median is 1592 ns, i.e. about three such
+operations. So the per-task dispatch cost is set by the *number* of block-wide barriers and scoped
+global accesses on the chain, not by their memory scope — which is exactly why arm S is free and
+arm O is expensive.
+
+### Gate 3 — token identity through 40 real layers
+
+`tokens_sha256` against arm A at the same (bs, rep): **21 of 21 identical, 0 differing** (15 A/S
+pairs, 6 A/O pairs). For arm S this is expected by construction. For arm O it is the empirical
+claim, and it corroborates the soundness argument: reordering execution among tasks that are
+already independent and already ready is bit-exact on the real checkpoint.
+
+### Gate 4 — the profiler-overhead control
+
+The decomposition's two gap terms are differences of profiler timestamps, so each contains two
+`%globaltimer` reads that do not exist in the shipped kernel. Measured on the *same* msl=897
+geometry, 640 decode steps, same seeds, `--no-profiler`, 3 reps (`ms_per_decode_step`, profiled ÷
+unprofiled):
+
+| bs | profiled | unprofiled (3 reps) | inflation |
+|---|---|---|---|
+| 1 | 6.2185 | 6.0736 / 6.0586 / 6.1334 (med 6.0736) | **x1.0239** |
+| 8 | 10.4921 | 10.3541 … | **x1.0133** |
+
+So the instrument is worth ~2.4% of the bs1 step, about 135 us of the 1151.2 us dispatch-latency
+term — **82-89% of that term is real runtime cost** (bs1 88.2%, bs8 82.1%, bs16 89.2%). M4-I5's quoted x1.11–1.12 was a different
+geometry and does not apply here. (The ratio is measured on the wave-level
+`ms_per_decode_step`; it is applied to the steady-window step as an estimate, not an identity.)
+
+### Not run, and why
+
+The full five-batch-size AC-3 stable gate was run for arm S — see `gates/ac3/`. No AC-3 run is
+owed for arm O: it is a measured regression and is not proposed for integration, and its
+correctness evidence (21/21 identical token streams, of which 6 are its own) is already stronger
+than a coherence check.
+
+### The step/cp re-derivation
+
+The acceptance asks for a step/cp re-derivation proving the packing multiplier moved. **It is not
+owed, because there is no e2e win to attribute.** Arm S moves the step by 0.0–1.0 ms and arm O
+moves it the wrong way; a re-derivation showing an unchanged multiplier would only restate the
+e2e null. What the multiplier *would* have had to do is recorded instead as the simulator's
+prediction (`slide_1_nolat`), against which the null is itself the falsification: the latency term
+is real (Gate 4) but it is not the load's scope (Gate 2 + the SASS census).
 
 ---
 
 ## 6. Terminal disposition
 
-*(see the summary at the top; the backlog entry is in `tables/`)*
+**Both prototypes: REJECTED WITH EVIDENCE. Both knobs stay default-off and should be deleted
+unless someone re-litigates them with the numbers above.**
+
+* **Arm S** (`MPK_EVENT_WAIT_GPU_SCOPE`) — an exact null at all five batch sizes (1.0000 /
+  0.9996 / 0.9996 / 0.9999 / 0.9997x). Register-neutral, bit-exact, and the SASS diff is exactly
+  the two intended instructions. The scope mismatch is real and costs nothing.
+* **Arm O** (`MPK_WORKER_OOO_POP`) — a 4.4–4.7% regression at bs1 and bs16. Sound and bit-exact
+  (21/21 tokens), one register *cheaper* than base, but the readiness scan costs more than the
+  reordering saves. The simulator's ceiling for *any* reorder window was −0.3 to −2.9% before the
+  scan's cost, so no variant of this lever is worth its own overhead. If it is ever revisited, the
+  sliding-buffer variant (`slide_8`, −2.4 to −2.9%) is the only version with headroom and it needs
+  buffer compaction, i.e. strictly more per-task work than the version that just regressed.
+
+**The AC-4 finding, which is the deciding one.** The floors computed from the same per-task
+durations are 1.179x / 1.116x / 1.127x of vLLM's whole step at bs1 / bs8 / bs16. Those floors
+survive every scheduling fix and every dispatch-latency fix by construction — they are
+`max(longest weighted dependency chain, total task work / 128)`. **AC-4 is therefore not reachable
+by any change to the scheduler, the queue policy, the wait scope, or the fan-in rule.** The gap
+M4-I8 was created to close is real (step / floor = 1.403x / 1.564x / 1.700x) but closing all of it
+still leaves 12–18%.
+
+Robustness of that claim: at bs8 and bs1 the binding floor is the chain, and *both* independent
+estimates exceed vLLM (bs8: levelmax 4803.0 and exact 5275.7 against 4727.0; bs1: 4138.3 and
+4130.7 against 3503.0). At bs16 the binding floor is the work bound, which is a sum over 70948
+tasks rather than a max over chains and so is the statistically robust one: 5976.0 against 5301.0.
+Caveat: `cp_exact` is a max over chains of one iteration's realized durations and is therefore
+biased slightly upward by single-iteration duration noise; the conclusion has 10%+ of headroom
+either way and does not turn on it.
+
+**Where the remaining deficit actually lives**, from the chain composition (`raw/gap/`):
+
+* **bs1 / bs8 — chain depth and a handful of stages on it.** 505 data edges over 40 layers is
+  ~12.6 serial dependency levels per layer, each costing ~1.15 us before any work happens. On the
+  bs1 chain: attention is 10 records for 588.4 us (58.8 us each, against M4-status's 9.43 us parity
+  target), the MoE router is 40 records for 368.6 us at `live/lvl = 1.0` — one task per layer while
+  127 workers idle — and the tiny unfused stages contribute a third of the chain's record count
+  (quantize 95, rms-norm 81, sigmoid-gate 39, mul-sum-add 40) for 837.7 us of task time plus their
+  own ~1.15 us dispatch cost each. Fusing element-wise stages into their neighbours and splitting
+  the 1-wide router are chain-shortening levers; they are graph-structure changes, not scheduler
+  changes.
+* **bs16 — raw task work.** The work bound binds. MoE w13 (235148 us), MoE w2 (154670 us) and GDN
+  recurrent (158448 us) are 72% of the 764926 us of total task time. bs16 needs faster kernels, and
+  no amount of scheduling helps.
+
+The `tables/` counterfactuals price each of these against both floors directly.
 
 ---
 

@@ -367,350 +367,6 @@
      "prev_end": 8512789056
     }
    ]
-  },
-  {
-   "iteration": 721,
-   "assign_qc": {
-    "n_workers": 128,
-    "n_direct": 124,
-    "n_swapped": 4,
-    "n_mismatch": 0,
-    "mismatched_workers": [],
-    "verdict": "PASS"
-   },
-   "window_ns": 10352640,
-   "step_us": 10352.64,
-   "identity_error_ns": 0,
-   "chain_len": 949,
-   "chain_n_task": 884,
-   "chain_n_sev": 65,
-   "head_us": 0.0,
-   "tail_us": 43.392,
-   "path_work_us": 3493.888,
-   "queue_work_us": 5444.704,
-   "trigger_work_us": 26.592,
-   "data_gap_us": 578.944,
-   "resource_gap_us": 765.12,
-   "n_data_edges": 484,
-   "n_resource_edges": 465,
-   "chain_dead_tasks": 1,
-   "chain_dead_us": 0.992,
-   "sev_n": 2277,
-   "sev_mean_us": 0.43592797540623623,
-   "sev_total_us": 992.608,
-   "data_gap_median_ns": 1120.0,
-   "res_gap_median_ns": 1600.0,
-   "machine_idle_us": 529342.144,
-   "machine_idle_poll_us": 49449.024,
-   "machine_idle_starved_us": 473329.312,
-   "n_stalls": 70946,
-   "machine_idle_hol_full_us_by_window": {
-    "1": 0.0,
-    "2": 0.0,
-    "4": 0.0,
-    "8": 0.0,
-    "16": 0.0,
-    "32": 0.0,
-    "64": 0.0
-   },
-   "machine_idle_hol_partial_us_by_window": {
-    "1": 0.0,
-    "2": 0.0,
-    "4": 2504.768,
-    "8": 2504.768,
-    "16": 2504.768,
-    "32": 2504.768,
-    "64": 2504.768
-   },
-   "chain_by_type": [
-    {
-     "task_type": 241,
-     "name": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
-     "n": 80,
-     "dur_us": 2093.088,
-     "as_path": 0,
-     "as_queue": 80,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 242,
-     "name": "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
-     "n": 80,
-     "dur_us": 1291.2,
-     "as_path": 0,
-     "as_queue": 80,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 237,
-     "name": "TASK_GDN_RECURRENT_SM100",
-     "n": 120,
-     "dur_us": 1277.28,
-     "as_path": 29,
-     "as_queue": 91,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 253,
-     "name": "TASK_LINEAR_SM100",
-     "n": 78,
-     "dur_us": 922.432,
-     "as_path": 41,
-     "as_queue": 37,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 279,
-     "name": "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
-     "n": 112,
-     "dur_us": 776.736,
-     "as_path": 44,
-     "as_queue": 68,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 257,
-     "name": "TASK_ATTN_SM100",
-     "n": 10,
-     "dur_us": 691.552,
-     "as_path": 10,
-     "as_queue": 0,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 260,
-     "name": "TASK_MOE_TOPK_SOFTMAX_SM100",
-     "n": 40,
-     "dur_us": 531.584,
-     "as_path": 40,
-     "as_queue": 0,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 238,
-     "name": "TASK_SIGMOID_GATE_MUL_ADD_SM100",
-     "n": 40,
-     "dur_us": 291.232,
-     "as_path": 40,
-     "as_queue": 0,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 275,
-     "name": "TASK_QUANTIZE_FP8_SM100",
-     "n": 90,
-     "dur_us": 263.616,
-     "as_path": 88,
-     "as_queue": 2,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 118,
-     "name": "TASK_SILU_MUL",
-     "n": 80,
-     "dur_us": 237.696,
-     "as_path": 40,
-     "as_queue": 40,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 261,
-     "name": "TASK_MOE_MUL_SUM_ADD_SM100",
-     "n": 40,
-     "dur_us": 177.6,
-     "as_path": 40,
-     "as_queue": 0,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 234,
-     "name": "TASK_GDN_CONV1D_SM100",
-     "n": 30,
-     "dur_us": 145.792,
-     "as_path": 29,
-     "as_queue": 1,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 154,
-     "name": "TASK_RMS_NORM_HOPPER",
-     "n": 81,
-     "dur_us": 130.368,
-     "as_path": 81,
-     "as_queue": 0,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 259,
-     "name": "TASK_ARGMAX_PARTIAL_SM100",
-     "n": 1,
-     "dur_us": 68.128,
-     "as_path": 1,
-     "as_queue": 0,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 201,
-     "name": "TASK_SCHD_EVENTS",
-     "n": 65,
-     "dur_us": 26.592,
-     "as_path": 0,
-     "as_queue": 0,
-     "as_trigger": 65
-    },
-    {
-     "task_type": 101,
-     "name": "TASK_EMBEDDING",
-     "n": 1,
-     "dur_us": 24.192,
-     "as_path": 1,
-     "as_queue": 0,
-     "as_trigger": 0
-    },
-    {
-     "task_type": 258,
-     "name": "TASK_ARGMAX_REDUCE_SM100",
-     "n": 1,
-     "dur_us": 16.096,
-     "as_path": 0,
-     "as_queue": 1,
-     "as_trigger": 0
-    }
-   ],
-   "chain_head": [
-    {
-     "pos": 2,
-     "tt": 101,
-     "kind": "task",
-     "worker": 1,
-     "rix": 0,
-     "dur_ns": 24192,
-     "binding": "resource",
-     "gap_ns": 7200,
-     "start": 8512842816,
-     "ready_ns": 8512835616,
-     "prev_end": 8512835616
-    },
-    {
-     "pos": 18,
-     "tt": 154,
-     "kind": "task",
-     "worker": 16,
-     "rix": 0,
-     "dur_ns": 1952,
-     "binding": "data",
-     "gap_ns": 1216,
-     "start": 8512868224,
-     "ready_ns": 8512867008,
-     "prev_end": 8512835616
-    },
-    {
-     "pos": 35,
-     "tt": 253,
-     "kind": "task",
-     "worker": 32,
-     "rix": 2,
-     "dur_ns": 12832,
-     "binding": "data",
-     "gap_ns": 1024,
-     "start": 8512871200,
-     "ready_ns": 8512870176,
-     "prev_end": 8512839328
-    },
-    {
-     "pos": 163,
-     "tt": 279,
-     "kind": "task",
-     "worker": 32,
-     "rix": 3,
-     "dur_ns": 5664,
-     "binding": "resource",
-     "gap_ns": 3488,
-     "start": 8512887520,
-     "ready_ns": 8512873312,
-     "prev_end": 8512884032
-    },
-    {
-     "pos": -1,
-     "tt": 201,
-     "kind": "sev",
-     "worker": 32,
-     "rix": 4,
-     "dur_ns": 288,
-     "binding": "resource",
-     "gap_ns": 1056,
-     "start": 8512894240,
-     "ready_ns": -1,
-     "prev_end": 8512893184
-    }
-   ],
-   "chain_tail": [
-    {
-     "pos": 70662,
-     "tt": 253,
-     "kind": "task",
-     "worker": 4,
-     "rix": 568,
-     "dur_ns": 17376,
-     "binding": "resource",
-     "gap_ns": 4736,
-     "start": 8523022048,
-     "ready_ns": 8522881280,
-     "prev_end": 8523017312
-    },
-    {
-     "pos": 70790,
-     "tt": 253,
-     "kind": "task",
-     "worker": 4,
-     "rix": 569,
-     "dur_ns": 13536,
-     "binding": "resource",
-     "gap_ns": 1664,
-     "start": 8523041088,
-     "ready_ns": 8522881280,
-     "prev_end": 8523039424
-    },
-    {
-     "pos": 70897,
-     "tt": 259,
-     "kind": "task",
-     "worker": 111,
-     "rix": 570,
-     "dur_ns": 68128,
-     "binding": "data",
-     "gap_ns": 1184,
-     "start": 8523055808,
-     "ready_ns": 8523054624,
-     "prev_end": 8523052224
-    },
-    {
-     "pos": 70947,
-     "tt": 258,
-     "kind": "task",
-     "worker": 32,
-     "rix": 570,
-     "dur_ns": 16096,
-     "binding": "data",
-     "gap_ns": 1248,
-     "start": 8523125184,
-     "ready_ns": 8523123936,
-     "prev_end": 8523103424
-    },
-    {
-     "pos": -1,
-     "tt": 201,
-     "kind": "sev",
-     "worker": 32,
-     "rix": 571,
-     "dur_ns": 2592,
-     "binding": "resource",
-     "gap_ns": 992,
-     "start": 8523142272,
-     "ready_ns": -1,
-     "prev_end": 8523141280
-    }
-   ]
   }
  ],
  "sim_latencies_ns": {
@@ -891,5 +547,119 @@
   "total_task_us": 764926.336,
   "n_dead_tasks": 352,
   "dead_task_us": 315.488
- }
+ },
+ "floor_counterfactuals": [
+  {
+   "task_type": 241,
+   "name": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+   "cp_exact_us": 4512.352,
+   "cp_delta_us": 1126.304,
+   "work_bound_us": 4198.996,
+   "removed_task_us": 227454.848
+  },
+  {
+   "task_type": 242,
+   "name": "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+   "cp_exact_us": 4915.296,
+   "cp_delta_us": 723.3599999999997,
+   "work_bound_us": 4810.89175,
+   "removed_task_us": 149132.192
+  },
+  {
+   "task_type": 257,
+   "name": "TASK_ATTN_SM100",
+   "cp_exact_us": 4934.24,
+   "cp_delta_us": 704.4160000000002,
+   "work_bound_us": 5814.00325,
+   "removed_task_us": 20733.92
+  },
+  {
+   "task_type": 279,
+   "name": "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+   "cp_exact_us": 5035.808,
+   "cp_delta_us": 602.848,
+   "work_bound_us": 5006.981,
+   "removed_task_us": 124032.768
+  },
+  {
+   "task_type": 260,
+   "name": "TASK_MOE_TOPK_SOFTMAX_SM100",
+   "cp_exact_us": 5106.016,
+   "cp_delta_us": 532.6400000000003,
+   "work_bound_us": 5971.82575,
+   "removed_task_us": 532.64
+  },
+  {
+   "task_type": 253,
+   "name": "TASK_LINEAR_SM100",
+   "cp_exact_us": 5217.408,
+   "cp_delta_us": 421.2479999999996,
+   "work_bound_us": 5728.88525,
+   "removed_task_us": 31629.024
+  },
+  {
+   "task_type": 275,
+   "name": "TASK_QUANTIZE_FP8_SM100",
+   "cp_exact_us": 5287.232,
+   "cp_delta_us": 351.424,
+   "work_bound_us": 5918.09375,
+   "removed_task_us": 7410.336
+  },
+  {
+   "task_type": 237,
+   "name": "TASK_GDN_RECURRENT_SM100",
+   "cp_exact_us": 5291.904,
+   "cp_delta_us": 346.7519999999995,
+   "work_bound_us": 4741.0085,
+   "removed_task_us": 158077.248
+  },
+  {
+   "task_type": 261,
+   "name": "TASK_MOE_MUL_SUM_ADD_SM100",
+   "cp_exact_us": 5465.248,
+   "cp_delta_us": 173.40800000000036,
+   "work_bound_us": 5954.28275,
+   "removed_task_us": 2778.144
+  },
+  {
+   "task_type": 154,
+   "name": "TASK_RMS_NORM_HOPPER",
+   "cp_exact_us": 5502.208,
+   "cp_delta_us": 136.44800000000032,
+   "work_bound_us": 5959.5425,
+   "removed_task_us": 2104.896
+  },
+  {
+   "task_type": 234,
+   "name": "TASK_GDN_CONV1D_SM100",
+   "cp_exact_us": 5515.712,
+   "cp_delta_us": 122.9439999999995,
+   "work_bound_us": 5811.02775,
+   "removed_task_us": 21114.784
+  },
+  {
+   "task_type": 259,
+   "name": "TASK_ARGMAX_PARTIAL_SM100",
+   "cp_exact_us": 5567.808,
+   "cp_delta_us": 70.84799999999996,
+   "work_bound_us": 5914.86525,
+   "removed_task_us": 7823.584
+  },
+  {
+   "task_type": 118,
+   "name": "TASK_SILU_MUL",
+   "cp_exact_us": 5569.376,
+   "cp_delta_us": 69.27999999999975,
+   "work_bound_us": 5913.62325,
+   "removed_task_us": 7982.56
+  },
+  {
+   "task_type": 238,
+   "name": "TASK_SIGMOID_GATE_MUL_ADD_SM100",
+   "cp_exact_us": 5638.656,
+   "cp_delta_us": 0.0,
+   "work_bound_us": 5944.1395,
+   "removed_task_us": 4076.48
+  }
+ ]
 }

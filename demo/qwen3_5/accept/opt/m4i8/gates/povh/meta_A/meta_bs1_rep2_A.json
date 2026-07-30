@@ -1,0 +1,73 @@
+{
+  "tag": "bs1_rep2",
+  "batch_size": 1,
+  "rep": 2,
+  "prompt_ids": [
+    "synth0"
+  ],
+  "prompt_lens": [
+    256
+  ],
+  "synthetic_prompt_len": 256,
+  "synthetic_seed": 20261732,
+  "max_seq_length": 897,
+  "mbt": 16,
+  "page_size": 256,
+  "max_new_tokens": 640,
+  "per_request_token_cap_requested": "policy",
+  "per_request_token_cap_compiled": null,
+  "profiler_slots": 0,
+  "profiled": false,
+  "n_events": 0,
+  "waves": [
+    {
+      "batch_size": 1,
+      "wave": 0,
+      "num_requests": 1,
+      "num_distinct_prompts": 1,
+      "prompt_ids": [
+        "synth0"
+      ],
+      "wall_ms": 3925.38623046875,
+      "max_decode_steps": 640,
+      "ms_per_decode_step": 6.133415985107422,
+      "tokens_per_s": 163.0412811438365,
+      "max_seq_length": 897,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 656,
+        "per_request_token_cap_requested": "policy",
+        "per_request_token_cap_compiled": null,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation": [],
+  "run_seconds": 17.57346224784851,
+  "tokens_sha256": "a8b630cd1a8d097e678c6b70604cb3e6786d5a7e1dea84f84c74eca84c854eeb",
+  "gpu_before": [
+    "0, 92 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "1, 72 MiB, 0 %, 240 MHz, 3996 MHz",
+    "2, 8724 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "3, 110 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 70 MiB, 0 %, 120 MHz, 3996 MHz",
+    "5, 2216 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "6, 92 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 6038 MiB, 0 %, 1965 MHz, 3996 MHz"
+  ],
+  "gpu_after": [
+    "0, 1308 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "1, 36400 MiB, 100 %, 1965 MHz, 3996 MHz",
+    "2, 8724 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "3, 110 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 70 MiB, 0 %, 120 MHz, 3996 MHz",
+    "5, 2398 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "6, 92 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 6158 MiB, 0 %, 1965 MHz, 3996 MHz"
+  ],
+  "cuda_visible_devices": "1",
+  "generated_utc": "2026-07-30T14:33:52Z"
+}

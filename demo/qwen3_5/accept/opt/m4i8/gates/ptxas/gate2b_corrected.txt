@@ -1,0 +1,23 @@
+M4-I8 GATE 2b (corrected regex: the mnemonic is LD.E.64.STRONG.SYS, digits and all)
+
+scoped-load census over the whole persistent_kernel SASS, one TU compiled four ways:
+  base       12 LD.E.64.STRONG.GPU       2 LD.E.64.STRONG.SYS 
+  S          14 LD.E.64.STRONG.GPU 
+  O          14 LD.E.64.STRONG.GPU       2 LD.E.64.STRONG.SYS 
+  SO         16 LD.E.64.STRONG.GPU 
+
+arm S vs base, the COMPLETE diff of 149760 SASS lines:
+8125,8126c8125,8126
+<         /*19c0*/                   LD.E.64.STRONG.SYS R2, desc[UR4][R8.64] ;                                      /* 0x0000000408027980 */
+<                                                                                                                   /* 0x000ea8000c115b00 */
+---
+>         /*19c0*/                   LD.E.64.STRONG.GPU R2, desc[UR4][R8.64] ;                                      /* 0x0000000408027980 */
+>                                                                                                                   /* 0x000ea8000c10fb00 */
+75904,75905c75904,75905
+<         /*1d30*/                   LD.E.64.STRONG.SYS R2, desc[UR40][R8.64] ;                                     /* 0x0000002808027980 */
+<                                                                                                                   /* 0x000ee8000c115b00 */
+---
+>         /*1d30*/                   LD.E.64.STRONG.GPU R2, desc[UR40][R8.64] ;                                     /* 0x0000002808027980 */
+>                                                                                                                   /* 0x000ee8000c10fb00 */
+
+SASS line counts: base=149760 S=149760 O=150560 SO=150560
