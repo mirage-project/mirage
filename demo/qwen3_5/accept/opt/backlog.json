@@ -669,5 +669,222 @@
   "instrumentation_caveat": "the two dispatch-latency terms are differences of profiler timestamps, so each contains two %globaltimer reads absent from the shipped kernel. Measured on the SAME geometry with --no-profiler, 3 reps: inflation x1.0239/1.0269/1.0144, i.e. 82-89% of the term is real runtime cost. M4-I5's quoted x1.11-1.12 was a different geometry and does not apply.",
   "tooling": "opt/m4i8/scripts/sched_gap.py -- realized-schedule reconstruction, exact step partition, dependency-invariant-verified scheduling simulator, exact floors and per-type floor counterfactuals. Its dep_qc field is mandatory: an earlier version marked events fired at scheduling rather than completion time and produced makespans BELOW the critical path (6077 violations at bs1), which inverted the top-two lever ranking.",
   "default_path_unchanged": "GATE 1c: one TU compiled with no -D against pre-M4-I8 vs M4-I8 include trees -- 28 changed SASS lines, all immediates (24 IMAD.MOV.U32, 2 MOV, 2 HFMA2), ZERO non-immediate differences; they are the __LINE__ operands of the header's 31 assert() calls, shifted by the #ifdef blocks. persistent_kernel entry identical: 255 registers, 16 barriers, 96 B stack, 5856 B smem, 0 spill."
+ },
+ "m4i9": {
+  "issue": "M4-I9",
+  "generated_utc": "2026-07-30",
+  "basis": "own clone at HEAD 8ff7be39 + fresh extension (build/lib.* and build/temp.* PURGED -- see the stale-extension note below). Floor model: M4-I8's OWN profiled buffers via opt/m4i9/scripts/fuse_model.py, a thin driver over its sched_gap.py; arm-A floors reproduce M4-I8's published 4130.7/5275.7/5638.7 EXACTLY. Arm-F floors: own profiled msl=897/640-step capture at the same windows, assign_qc PASS and identity_error 0 ns on every cell, anchor_qc PASS worst_rel_err 0.0.",
+  "headline": "Fusion DOES move the AC-4 floor and does NOT reach 1.0. The shipped fusion takes the binding floor from 1.179/1.116/1.127 to 1.071/1.065/1.111 of vLLM's whole step at bs1/8/16. Every REMAINING admissible fusion, modelled on the shipped arm's own measured durations at inc=0, would take it to 1.017/1.024/1.105. bs16 is finished for this lever; bs1/bs8 are ~1.02x away and blocked by two cross-task reductions.",
+  "shipped_lever": {
+   "lever": "MPK_FUSE_SILU_QUANT (arm F): moe_silu_mul fused into its only consumer, the fp32-block-scale activation quantize. New task type 243, registered at the SILU grid (mbt,topk,1); the bf16 layer_i_moe_act is never materialised.",
+   "disposition": "WORKS, KEEP, DEFAULT-OFF pending the milestone integration decision",
+   "e2e_speedup": {
+    "1": 1.0319,
+    "2": 1.021,
+    "4": 0.9993,
+    "8": 1.003,
+    "16": 1.0058
+   },
+   "e2e_evidence": "geometry B (msl=353, 96 steps), arms interleaved per (bs,rep) in ONE GPU claim, a kernel dir per (arm,bs); 30 runs, 0 dirty, 0 unauditable, per-rep audit from each run's own cuda_visible_devices + gpu_before line, floor 120 MiB. PAIRED deltas per rep: +21.7/+24.3/+15.3 (bs1), +19.7/+20.7/+19.7 (bs2), +30.0/+6.8/-50.6 (bs4), +7.4/+7.8/+6.3 (bs8), +19.0/+17.6/+20.9 (bs16) ms -- 14/15 paired reps favour the fused arm. Paired is the right statistic: the unpaired per-rep RANGE reaches 112 ms at bs4 while the effect is ~20 ms. Reproduced at bs1/bs16 by a separate same-window control on the corrected base.",
+   "cp_movement_us": {
+    "bs1": {
+     "A": 4130.7,
+     "F": 3750.1,
+     "delta": -380.6
+    },
+    "bs8": {
+     "A": 5275.7,
+     "F": 5032.1,
+     "delta": -243.6
+    },
+    "bs16": {
+     "A": 5638.7,
+     "F": 5404.3,
+     "delta": -234.4
+    }
+   },
+   "work_bound_us": {
+    "bs1": {
+     "A": 2039.7,
+     "F": 1955.0
+    },
+    "bs8": {
+     "A": 4280.2,
+     "F": 4211.9
+    },
+    "bs16": {
+     "A": 5976.0,
+     "F": 5890.6
+    }
+   },
+   "floor_ratio_vllm": {
+    "bs1": {
+     "A": 1.179,
+     "F": 1.071
+    },
+    "bs8": {
+     "A": 1.116,
+     "F": 1.065
+    },
+    "bs16": {
+     "A": 1.127,
+     "F": 1.111
+    }
+   },
+   "registers": "GATE 1: both arms IDENTICAL at 255 registers, 16 barriers, 96 B stack, 0 spill st / 0 spill ld, 5856 B smem, one TU per arm compiled with identical flags at bs1/msl=353. The fusion is register-neutral, so the M3-I6a / M4-I6 spill-tax failure mode does not apply. TU census is also the flag-landed proof: silu calls 2->1, quantize 4->3, fused 0->1.",
+   "correctness": "bit-exact BY CONSTRUCTION (merged arithmetic at HEAD's own cast positions; fmaxf is order-exact; no extra barrier because a warp produces exactly the group it consumes) AND measured three ways: unit/oracle byte-identical to the shipped unfused pair on 32/32 cases in BOTH nvcc lanes; tokens_sha256 identical in 15/15 e2e A/F pairs; AC-3 stage 1 STABLE with 3 accepted / 0 quarantined at every bs and stage 2 bit-exact 10/10 at bs 1/2/4/8/16 vs results/dumps_final, agreement >=90% 10/10, worst 0.9375 (p06-poem, the M2-adjudicated tie, same-as-baseline).",
+   "default_path_unchanged": "GATE 1c, STRONG FORM: the arm-A generated TU is BYTE-IDENTICAL to a pristine pre-M4-I9 reference built at the same geometry (sha256 30fba2212b9a973425ab9803520c502e, 6267 lines, 353568 bytes; same 55528 tasks / 2278 events / per-type census). Needed one fix: hoisting the shared actq/acts tensors above the if/else moved 240 cudaMallocs in the default TU, so the else branch declares them in the ORIGINAL order. Arm F's TU is byte-identical before and after that fix."
+  },
+  "why_fusion_cannot_reach_1_0": {
+   "bs16": "ARITHMETIC, not estimation. The work bound binds (5976.0 > cp 5638.7) and it is a SUM over ~70000 tasks, hence exactly additive. All tiny-stage work is 24885 us = 194 us of work bound out of 5976, so all tiny stages free leaves 5781.6 = 1.091x; every NON-GEMM stage in the graph free leaves 5459.5 = 1.030x. bs16 needs faster w13/w2/GDN kernels.",
+   "bs1_bs8": "the two largest tiny stages left on the chain are cross-task reductions. (a) The MoE ROUTER PAIR -- topk_softmax (368.6/522.3/532.6 us of cp) plus the router linear (350.8/398.4/397.2 us), 17.4% of cp at bs1. router_logits is 32 tasks per layer each producing 8 of 256 expert logits for all 16 rows; topk must reduce over all 256. Fusing = collapsing the router to ONE task, i.e. a 32x serialization of a 1 MiB bf16 weight read onto one CTA, and the pair only costs 18.0 us/layer at bs1, so there is no headroom to pay for it. Fusing its producer (post_norm rms, row-local) in would make 32 tasks redo the whole-row norm; fusing topk into w13 would make 256 tasks redo the top-k. (b) The MoE COMBINE (moe_mul_sum_add, 230.8 us of cp at bs1) sums moe_down over the topk experts, each written by a DIFFERENT w2 task -- a cross-task reduction needing a barrier or atomics, which the persistent work-queue scheduler cannot guarantee (M3-I3's rule). It CAN fuse into its consumer (the next pre_norm rms), which removes the norm's record, not its own.",
+   "the_decisive_arithmetic": "on arm F's own measured durations: every remaining admissible fusion -> 1.017/1.024/1.105. Allow the router pair to be free -> 0.845/0.863/1.086. Allow the combine too -> 0.774/0.857/1.082. So the blocking items are exactly the two that fusion cannot touch.",
+   "honest_caveat": "the model holds every OTHER task's duration fixed and therefore UNDERSTATES fusion: it predicted -177.3/-189.0/-184.4 us of cp for the shipped arm and the measured value was -380.6/-243.6/-234.4, because 640 fewer tasks and 640 fewer events per step also made untouched tasks faster (w13 on the chain 581.3->569.5, attention 588.4->577.3 us at bs1). So the true value of the full admissible set could plausibly reach ~1.00 at bs1/bs8. That is a reason to measure, not a claim -- and it needs four more fusions."
+  },
+  "fusability_verdicts": [
+   {
+    "site": "QUANTIZE|moe_actq",
+    "verdict": "FUSABLE -- SHIPPED",
+    "into": "moe_silu_mul|moe_act (producer)",
+    "reason": "silu's tile [1,1,512] is FINER than the quantize's [1,8,512] and holds 4 whole 128-groups; row/group-local, no cross-task reduction",
+    "cp_delta_us": {
+     "1": 177.3,
+     "8": 189.0,
+     "16": 184.4
+    }
+   },
+   {
+    "site": "QUANTIZE|gdn_xq, QUANTIZE|qkvg_proj_xq",
+    "verdict": "FUSABLE",
+    "into": "rms_norm|pre_norm (producer)",
+    "reason": "tile-IDENTICAL [1,2048], both grid (mbt,1,1) row-partitioned on dim 0; rmsnorm already holds the bf16-rounded row in smem",
+    "cp_delta_us": {
+     "1": 62.0,
+     "8": 63.3,
+     "16": 67.8
+    }
+   },
+   {
+    "site": "RMS_NORM|pre_norm",
+    "verdict": "FUSABLE",
+    "into": "moe_mul_sum_add|moe_out (producer)",
+    "reason": "both tile [1,2048], both grid (mbt,1,1), row-local. NOTE the 3-way combine+rms+quant is admissible only at ATTENTION layers: at GDN layers it needs 4 outputs (moe_out, pre_norm for the gdn_ba linear, xq, xs) and MAX_OUTPUTS_PER_TASK is 3",
+    "cp_delta_us": {
+     "1": 47.5,
+     "8": 49.7,
+     "16": 70.0
+    }
+   },
+   {
+    "site": "QUANTIZE|gdn_out_proj_xq",
+    "verdict": "FUSABLE WITH CARE",
+    "into": "gdn_recurrent|gdn_out (producer)",
+    "reason": "a (v-head, slot) task owns exactly 128 columns = ONE whole scale group, but grid.z>1 (default split 4 at mbr=1) cooperates through gdn_split_scratch with an arrival counter, so only the epilogue-owning task may quantize",
+    "cp_delta_us": {
+     "1": 97.6,
+     "8": 100.7,
+     "16": 72.7
+    }
+   },
+   {
+    "site": "QUANTIZE|o_proj_xq",
+    "verdict": "FUSABLE WITH CARE",
+    "into": "paged_attention|attn_out (producer)",
+    "reason": "a kv-head task owns 2048 columns = 16 whole groups, so group-aligned; but it touches the attention kernel the parity loop owns",
+    "cp_delta_us": {
+     "1": 32.4,
+     "8": 32.9,
+     "16": 26.4
+    }
+   },
+   {
+    "site": "MOE_TOPK_SOFTMAX|topk_w",
+    "verdict": "NOT FUSABLE",
+    "reason": "needs all 256 logits, produced by 32 router tasks; the only fusion collapses a 32-way parallel 1 MiB weight stream onto one CTA",
+    "cp_delta_us": {
+     "1": 368.6,
+     "8": 522.3,
+     "16": 532.6
+    }
+   },
+   {
+    "site": "LINEAR|router_logits",
+    "verdict": "NOT FUSABLE",
+    "reason": "32 tasks per layer, each needs the WHOLE input row, so fusing its row-local producer in would make 32 tasks redo the norm",
+    "cp_delta_us": {
+     "1": 350.8,
+     "8": 398.4,
+     "16": 397.2
+    }
+   },
+   {
+    "site": "MOE_MUL_SUM_ADD|moe_out",
+    "verdict": "NOT FUSABLE into its producer",
+    "reason": "sums over topk experts, each written by a different w2 task -- a cross-task reduction; a barrier is inadmissible under the persistent work-queue scheduler (M3-I3)",
+    "cp_delta_us": {
+     "1": 230.8,
+     "8": 215.9,
+     "16": 173.4
+    }
+   },
+   {
+    "site": "RMS_NORM|post_norm",
+    "verdict": "NOT FUSABLE on the chain",
+    "reason": "its producer (out_proj/o_proj fp8 linear) is column-split 128 ways so cannot hold a whole row; its chain SUCCESSOR is the 32-task router. Its off-chain consumers (moe_xq quant, shared_gate_up quant, sigmoid_gate) are fusable but only ONE of them can host it",
+    "cp_delta_us": {
+     "1": 67.9,
+     "8": 64.4,
+     "16": 64.2
+    }
+   },
+   {
+    "site": "SIGMOID_GATE_MUL_ADD|r_prime, LINEAR|gdn_ba, SILU_MUL|shared_act, LINEAR_FP8|gdn_z",
+    "verdict": "OFF THE EXACT PATH",
+    "reason": "cp_delta 0 at every batch size -- the shared-expert branch and the bf16 ba linear are not on the binding chain, so fusing them buys work-bound only"
+   }
+  ],
+  "next_levers_ranked": [
+   {
+    "rank": 1,
+    "lever": "gdn_recurrent + quantize AND attention + quantize (F4)",
+    "cp_delta_on_top_of_arm_F_us": {
+     "1": 128.7,
+     "8": 129.5,
+     "16": 107.2
+    },
+    "floor_ratio": {
+     "1": 1.034,
+     "8": 1.037,
+     "16": 1.109
+    },
+    "risk": "tile-compatible, but needs care around grid.z>1's arrival-counter epilogue and it touches the attention kernel the parity loop owns"
+   },
+   {
+    "rank": 2,
+    "lever": "moe_mul_sum_add + rms_norm (F3), plus the 3-way at attention layers",
+    "cp_delta_on_top_of_arm_F_us": {
+     "1": 58.1,
+     "8": 62.2,
+     "16": 89.4
+    },
+    "floor_ratio": {
+     "1": 1.054,
+     "8": 1.051,
+     "16": 1.109
+    },
+    "risk": "trivially tile-compatible; the GDN-layer 3-way needs MAX_OUTPUTS_PER_TASK raised from 3, which changes sizeof(TaskDesc) and hence TASK_DESCS_BUFFER_LENGTH (8 on sm100) -- price that first"
+   },
+   {
+    "rank": 3,
+    "lever": "NOT the router pair as a fusion",
+    "reason": "priced and rejected -- the only fusion is a 32x serialization of a 1 MiB weight read onto one CTA. If the router is worth attacking it is as a WIDTH lever (topk_softmax runs at live/lvl 1.0, 40 tasks per step), which is a different issue and was M4-I8's rank-3 lever."
+   }
+  ],
+  "tooling": "opt/m4i9/scripts/fuse_model.py -- per-CALL-SITE chain enumeration (site + per-task output tile from the graph's own tensor descriptors) and joint fusion counterfactuals on cp_exact and the work bound, parameterised by the incremental cost `inc` charged to the host. It imports M4-I8's sched_gap.py rather than reimplementing the reconstruction, so the arm-A floors reproduce M4-I8's exactly. Sets are evaluated JOINTLY on the DAG: one-at-a-time deltas are sub-additive and summing them overstates.",
+  "traps_hit": [
+   "STALE EXTENSION, a NEW variant: `setup.py build_ext --inplace` silently reuses build/lib.*/mirage/core*.so after a C++ source change, and even `rm python/mirage/core*.so` does not help -- it just copies the cache back. libmirage_runtime.a HAD the new symbol while core.so did not. Only purging build/lib.* AND build/temp.* forces the relink. M4-I8's arms were header-only so they never surfaced it.",
+   "A NEW task type must be added in FIVE places or it fails: runtime_header.h (enum), src/kernel/runtime.cc task_type_to_name (omitting it emits `task_desc->task_type == &&` -- a fail-closed COMPILE error, which is the good kind), tma.cuh's switch if the id is inside the (231,256) TMA window (else the default assert(false) fires at init), blackwell/task_header.cuh (include), and profiler_persistent.py (else traces label it UNKNOWN_<id> and tests/runtime_python/test_profiler_task_names.py fails).",
+   "Hoisting tensors shared by two builder branches above the if/else changes DEVICE ALLOCATION ORDER in the generated TU and cost the strong form of gate 1c (240 moved cudaMallocs). Keep the default branch's declaration order byte-identical."
+  ]
  }
 }
