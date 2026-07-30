@@ -1,0 +1,51 @@
+M4-I8 GATE 1c -- is the SHIPPED DEFAULT unchanged by M4-I8?
+
+One TU (bs1, msl=353) compiled with NO -D against two include trees whose only
+difference is persistent_kernel.cuh: pre-M4-I8 (5756c789) vs the M4-I8 tree.
+
+SASS changed lines: 28
+  IMAD.MOV.U32 immediates: 24
+  MOV immediates:          2
+  HFMA2 immediates:        2
+  NON-immediate (real codegen) differences: 0
+
+The header has 31 assert() calls, each embedding __LINE__; the #ifdef
+blocks shift those line numbers, which is what these immediates are.
+
+persistent_kernel ENTRY block:
+  prem4i8_default        96 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | ptxas info    : Used 255 registers, used 16 barriers, 96 bytes cumulative stack size, 5856 bytes smem
+  m4i8_default           96 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | ptxas info    : Used 255 registers, used 16 barriers, 96 bytes cumulative stack size, 5856 bytes smem
+
+VERDICT: PASS -- identical registers/barriers/stack/smem/spills, and every SASS
+difference is an assert() line-number constant. No opcode, control-flow or
+scheduling change on the shipped default path.
+
+full diff:
+<         /*11f0*/                   HFMA2 R8, -RZ, RZ, 0, 7.4923038482666015625e-05 ;                              /* 0x000004e9ff087431 */
+>         /*11f0*/                   HFMA2 R8, -RZ, RZ, 0, 8.0406665802001953125e-05 ;                              /* 0x00000545ff087431 */
+<         /*4dc0*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x534 ;                                               /* 0x00000534ff087424 */
+>         /*4dc0*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x590 ;                                               /* 0x00000590ff087424 */
+<         /*7ba0*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x567 ;                                               /* 0x00000567ff087424 */
+>         /*7ba0*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x5c3 ;                                               /* 0x000005c3ff087424 */
+<         /*0d70*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x39d ;                                               /* 0x0000039dff087424 */
+>         /*0d70*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x3a5 ;                                               /* 0x000003a5ff087424 */
+<         /*16f0*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x3da ;                                               /* 0x000003daff087424 */
+>         /*16f0*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x41f ;                                               /* 0x0000041fff087424 */
+<         /*53a90*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x423 ;                                              /* 0x00000423ff087424 */
+>         /*53a90*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x479 ;                                              /* 0x00000479ff087424 */
+<         /*54d10*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x46f ;                                              /* 0x0000046fff087424 */
+>         /*54d10*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x4c5 ;                                              /* 0x000004c5ff087424 */
+<         /*11a0*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x39d ;                                               /* 0x0000039dff087424 */
+>         /*11a0*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x3a5 ;                                               /* 0x000003a5ff087424 */
+<         /*1aa0*/                   MOV R8, 0x3da ;                                                                /* 0x000003da00087802 */
+>         /*1aa0*/                   MOV R8, 0x41f ;                                                                /* 0x0000041f00087802 */
+<         /*51c70*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x423 ;                                              /* 0x00000423ff087424 */
+>         /*51c70*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x479 ;                                              /* 0x00000479ff087424 */
+<         /*52e00*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x46f ;                                              /* 0x0000046fff087424 */
+>         /*52e00*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x4c5 ;                                              /* 0x000004c5ff087424 */
+<         /*53d90*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x4e9 ;                                              /* 0x000004e9ff087424 */
+>         /*53d90*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x545 ;                                              /* 0x00000545ff087424 */
+<         /*57890*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x534 ;                                              /* 0x00000534ff087424 */
+>         /*57890*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x590 ;                                              /* 0x00000590ff087424 */
+<         /*5a560*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x567 ;                                              /* 0x00000567ff087424 */
+>         /*5a560*/                   IMAD.MOV.U32 R8, RZ, RZ, 0x5c3 ;                                              /* 0x000005c3ff087424 */

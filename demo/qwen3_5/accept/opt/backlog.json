@@ -509,5 +509,164 @@
    "ferret_tag": "v013 (f370cbb) in ferret/workspace5",
    "note": "The loop was still running on workspace5 when the tag was taken; the import is the TAG BLOB (git show v013:kernel.cu), never the worktree file -- the M4-I2 lesson that a live workspace carries unfinished probe code. The tag's frozen `golden` block was verified byte-identical to the 413-line body it replaced before any of it was imported."
   }
+ },
+ "m4i8": {
+  "issue": "M4-I8",
+  "generated_utc": "2026-07-30",
+  "basis": "own clone at HEAD 5756c789 + fresh extension; profiled msl=897/640-step capture at M4-I5's windows; anchor_qc PASS worst_rel_err 0.0 at bs1/8/16; realized-schedule reconstruction verified on 128/128 workers with the step identity closing to 0 ns (opt/m4i8/scripts/sched_gap.py)",
+  "headline": "The step-minus-cp gap is real (step/floor 1.403x/1.564x/1.700x) but is NOT recoverable by scheduling, and closing all of it still misses AC-4. The floors computed from the same per-task durations are 1.179x/1.116x/1.127x of vLLM's whole step at bs1/8/16.",
+  "corrections_to_m4i8_framing": [
+   "at bs16 the WORK bound (5976.0 us) exceeds cp (5638.7 us), so step/cp = 1.0 is arithmetically unreachable there; the issue's 1.03x destination was not attainable",
+   "cp_decompose.py's levelmax charges each level its type's MEAN live duration, which understates a level whose binding producer is slower than its type mean: exact cp is 5275.7 vs levelmax 4803.0 at bs8 (+9.8%) and 5638.7 vs 5484.2 at bs16 (+2.8%). At bs1 the two agree to 0.2%."
+  ],
+  "decomposition_us": {
+   "note": "iterations 288/365/720; exact partition, identity 0 ns",
+   "bs1": {
+    "step": 5795.4,
+    "path_work": 3026.6,
+    "queue_work": 1583.0,
+    "trigger_work": 26.1,
+    "data_gap": 637.2,
+    "resource_gap": 514.1,
+    "tail": 8.5
+   },
+   "bs8": {
+    "step": 8253.8,
+    "path_work": 3590.6,
+    "queue_work": 3407.4,
+    "trigger_work": 22.9,
+    "data_gap": 630.3,
+    "resource_gap": 577.3,
+    "tail": 25.3
+   },
+   "bs16": {
+    "step": 10162.1,
+    "path_work": 3473.9,
+    "queue_work": 5285.9,
+    "trigger_work": 28.2,
+    "data_gap": 574.5,
+    "resource_gap": 756.7,
+    "tail": 43.0
+   }
+  },
+  "floors_us": {
+   "bs1": {
+    "cp_exact": 4130.7,
+    "work_bound": 2039.7,
+    "binding": 4130.7,
+    "vllm": 3503.0,
+    "ratio": 1.179
+   },
+   "bs8": {
+    "cp_exact": 5275.7,
+    "work_bound": 4280.2,
+    "binding": 5275.7,
+    "vllm": 4727.0,
+    "ratio": 1.116
+   },
+   "bs16": {
+    "cp_exact": 5638.7,
+    "work_bound": 5976.0,
+    "binding": 5976.0,
+    "vllm": 5301.0,
+    "ratio": 1.127
+   }
+  },
+  "levers_measured_and_rejected": [
+   {
+    "lever": "MPK_EVENT_WAIT_GPU_SCOPE (arm S): ld.acquire.sys -> ld.acquire.gpu on the local-event-counter spin, the ONLY .sys load in the runtime, paired against atom.add.release.gpu",
+    "disposition": "REJECTED, exact null",
+    "e2e_speedup": {
+     "1": 1.0,
+     "2": 0.9996,
+     "4": 0.9996,
+     "8": 0.9999,
+     "16": 0.9997
+    },
+    "evidence": "42-run interleaved A/B, 0 dirty; re-confirmed rep-for-rep in a second geometry (msl=897/640 steps) to 0.001 ms/step at bs8; ptxas 255 registers unchanged, 0 spill; the COMPLETE SASS diff over 149760 lines is two instructions (census 12 GPU + 2 SYS -> 14 GPU + 0 SYS), so the flag landed and the scope is free on B200",
+    "correctness": "bit-exact by construction; tokens_sha256 identical to base in all 15 (bs,rep) pairs"
+   },
+   {
+    "lever": "MPK_WORKER_OOO_POP (arm O): run the first READY task in the loaded task-desc buffer (window 8) instead of blocking on the head",
+    "disposition": "REJECTED, regression",
+    "e2e_speedup": {
+     "1": 0.9559,
+     "16": 0.9528
+    },
+    "evidence": "pre-registered prediction was -0.3% (batch_8); measured +4.4-4.7% slower. NOT register pressure (254 registers, one BELOW base, 0 spill). The SASS census shows the cause: the readiness scan adds 2 scoped global loads per task plus 2 __syncthreads. That accident measures ~470 ns of makespan per extra scoped load + barrier pair per chain record, against a 1568 ns resource-gap median.",
+    "correctness": "sound (topological queue order => no deadlock; only already-ready tasks promoted; never looks past an unrun TASK_TERMINATE) and empirically bit-exact, tokens_sha256 identical in all 6 pairs"
+   },
+   {
+    "lever": "relaxing FULL FAN-IN where a consumer needs only a subset of producers",
+    "disposition": "REFUTED BY THE TRACE, not attempted",
+    "evidence": "every event is full fan-in (2277/2277) but hol_full = 0 us at every reorder window from 1 to 64: at no stall was a later-queued task already ready. Tasks are prelaunched in graph position order, that order is topological, so each worker's queue is topologically ordered and its head is always its most-ready task. In-order draining is already optimal given this assignment. Only 1837/2348/2480 us of ~500000 us of idle is even partially recoverable."
+   },
+   {
+    "lever": "generalising M4-I7 work-item flattening to stages with live/lvl << 128",
+    "disposition": "REFUTED, no remaining large target",
+    "evidence": "at HEAD the wide stages are packed (bs1 live/lvl: dense fp8 96.2, MoE w13 64.0, MoE w2 126.7, GDN recurrent 128.0). What is left below 128 is quantize 0.3, silu-mul 0.0, rms-norm 0.0, router 1.0, attention 1.0 -- either genuinely tiny or genuinely one-per-layer, not worst-case grids with a serial inner dimension."
+   },
+   {
+    "lever": "splitting or shortening the tail level",
+    "disposition": "REFUTED",
+    "evidence": "tail is 8.5/25.3/43.0 us = 0.1-0.4% of the step"
+   },
+   {
+    "lever": "reducing per-task event/trigger overhead (TASK_SCHD_EVENTS)",
+    "disposition": "REFUTED",
+    "evidence": "26.1/22.9/28.2 us = 0.3-0.5% of the step, and it lands on the producing worker's occupancy rather than the dependency path (the counter increment precedes the profiled pair)"
+   },
+   {
+    "lever": "breaking the static task->worker binding (work stealing / shared ready queue)",
+    "disposition": "NOT ATTEMPTED, bounded and small at current latency",
+    "evidence": "a 128-server HLFET list schedule over the same tasks and the same measured latencies is worth -6.0/-5.4/-5.7%. It only becomes large once the dispatch latency is zero (-32.9/-26.0/-23.5%), and arm S showed that latency is not the wait's memory scope. A large scheduler redesign buys under 6% today."
+   }
+  ],
+  "new_levers_for_the_next_issue": [
+   {
+    "rank": 1,
+    "lever": "attention per-task time at bs1",
+    "mechanism": "10 chain records at 58.8 us each = 615.6 us of the exact chain, live/lvl 1.0. Zeroing it puts the bs1 floor at 3515.1 us = 1.003x vLLM; reaching M4-status's 9.43 us parity target removes ~494 us and puts the floor near 3636 us = 1.038x.",
+    "counterfactual_floor_ratio": 1.003
+   },
+   {
+    "rank": 2,
+    "lever": "MoE w13 task time at bs8/bs16",
+    "mechanism": "1003.0 us of the bs8 exact chain and 1126.3 us at bs16; 235148 us of the 764926 us of bs16 total task work. Zeroing it puts the binding floor at 0.904x (bs8) and 0.851x (bs16) of vLLM.",
+    "counterfactual_floor_ratio": {
+     "8": 0.904,
+     "16": 0.851
+    }
+   },
+   {
+    "rank": 3,
+    "lever": "split the 1-wide MoE router (TASK_MOE_TOPK_SOFTMAX)",
+    "mechanism": "40 chain records, 368.6/522.3/532.6 us at bs1/8/16, live/lvl 1.0 flat in batch size -- one task per layer while 127 workers idle. A top-k/softmax over experts is parallelisable, and M4-I5 already flagged it as batch-independent sole-idle (447/532/602 us).",
+    "counterfactual_cp_delta_us": {
+     "1": 368.6,
+     "8": 522.3,
+     "16": 532.6
+    }
+   },
+   {
+    "rank": 4,
+    "lever": "fuse the tiny element-wise stages into their neighbours",
+    "mechanism": "quantize (95 chain records, 369.3 us of cp), rms-norm (81 records, 116.6 us), sigmoid-gate, mul-sum-add. Together a third of the bs1 chain's record count. Fusing removes BOTH their task time and their dependency level, and each level removed also removes ~1.15 us of dispatch latency. This is the only lever that attacks chain DEPTH rather than task cost.",
+    "counterfactual_cp_delta_us": {
+     "quantize_bs1": 369.3,
+     "rms_norm_bs1": 116.6
+    }
+   },
+   {
+    "rank": 5,
+    "lever": "GDN recurrent task time at bs16",
+    "mechanism": "158448 us of bs16 total task work; zeroing it takes the work bound to 4741.0 and the binding floor to 5291.9 = 0.998x vLLM.",
+    "counterfactual_floor_ratio": {
+     "16": 0.998
+    }
+   }
+  ],
+  "instrumentation_caveat": "the two dispatch-latency terms are differences of profiler timestamps, so each contains two %globaltimer reads absent from the shipped kernel. Measured on the SAME geometry with --no-profiler, 3 reps: inflation x1.0239/1.0269/1.0144, i.e. 82-89% of the term is real runtime cost. M4-I5's quoted x1.11-1.12 was a different geometry and does not apply.",
+  "tooling": "opt/m4i8/scripts/sched_gap.py -- realized-schedule reconstruction, exact step partition, dependency-invariant-verified scheduling simulator, exact floors and per-type floor counterfactuals. Its dep_qc field is mandatory: an earlier version marked events fired at scheduling rather than completion time and produced makespans BELOW the critical path (6077 violations at bs1), which inverted the top-two lever ranking."
  }
 }
