@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
-# M4-I9 GATE 1c -- is the SHIPPED DEFAULT (MPK_FUSE_SILU_QUANT unset) unchanged?
+# M4-I9 GATE 1c -- is the FLAGS-OFF path byte-identical to pristine?
+#
+# 2026-07-30 SCOPE CORRECTION (the check is unchanged; only what it PROVES moved):
+# when written, all three fusion flags defaulted OFF, so arm A was both "the
+# shipped default" and "the opt-out", and this gate covered both at once. The
+# three-flag stack then shipped default-ON, so arm A is now the OPT-OUT ONLY
+# (MPK_FUSE_{SILU,NORM,RECUR}_QUANT=0, spelled out in sweep_m4i9.sh). This gate
+# therefore still proves the thing worth proving -- that turning the flags off
+# reproduces pristine bytes, i.e. the new code is genuinely inert when disabled --
+# but it no longer says anything about the shipped default. What covers the
+# default now is that the three env vars have exactly ONE reader each (the three
+# builder predicates; no C++ getenv, no second Python reader), so unset is
+# identical to =1 by construction and the shipped default IS the measured arm S.
 #
 # The fusion is gated on an env var read in the BUILDER, not on an #ifdef, and
 # the change also touches code that is on every path: a new enum value in

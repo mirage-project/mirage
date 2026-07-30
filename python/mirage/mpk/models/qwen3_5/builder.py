@@ -171,8 +171,18 @@ FP8_DENSE_N_SLICE = {
 
 
 def fuse_silu_quant() -> bool:
-    """True when MPK_FUSE_SILU_QUANT=1 fuses the MoE activation SwiGLU into its
-    quantize (M4-I9). DEFAULT OFF.
+    """True unless MPK_FUSE_SILU_QUANT=0 disables fusing the MoE activation SwiGLU
+    into its quantize (M4-I9). DEFAULT ON since 2026-07-30 -- see SHIP THE STACK below.
+
+    SHIP THE STACK, NOT ONE FLAG. This and the two flags below were flipped on
+    together on the strength of the three-flag arm (`S`), not their solo numbers:
+    e2e 1.026 / 1.034 / 1.038 / 1.021 / 1.004x at bs 1/2/4/8/16 with 15/15 paired
+    reps favouring S at every batch size, AC-3 STABLE and bit-exact 10/10 at all
+    five, and registers/stack/spill unchanged at 255 / 96 B / 0 (the shared
+    register budget is AT its ceiling, so this mattered). DO NOT enable
+    MPK_FUSE_NORM_QUANT alone: solo it MEASURES 0.986x at bs16, a real
+    regression, and only composes to a win on top of this flag -- the mechanism
+    is in fuse_norm_quant's docstring.
 
     The routed-expert chain is `w13 -> moe_silu_mul -> quantize -> w2` and
     `layer_i_moe_act` has exactly one consumer, so the two middle tasks can be
@@ -189,21 +199,36 @@ def fuse_silu_quant() -> bool:
     cp_exact -177.3 / -189.0 / -184.4 us and 45-50 us of chain gap at bs 1/8/16.
     It also drops the bf16 `moe_act` round trip, 256 KiB per layer at mbt=16.
 
-    Not a production default until AC-3 + the e2e A/B have run at this HEAD; it
-    is a compile-time GRAPH change, so a kernel dir must not be reused across
-    values -- the same trap M3-I7 hit with the admission cap.
+    AC-3 + the e2e A/B have now run at this HEAD (opt/m4i9/), which is what
+    promoted it. It is a compile-time GRAPH change, so a kernel dir must not be
+    reused across values -- the same trap M3-I7 hit with the admission cap.
     """
-    return os.environ.get("MPK_FUSE_SILU_QUANT") == "1"
+    return os.environ.get("MPK_FUSE_SILU_QUANT", "1") == "1"
 
 
 def fuse_norm_quant() -> bool:
     """True when MPK_FUSE_NORM_QUANT=1 fuses each layer's PRE-NORM into the
-    quantize that consumes it (M4-I9 flag A). DEFAULT OFF.
+    quantize that consumes it (M4-I9 flag A). DEFAULT ON since 2026-07-30, but
+    ONLY AS PART OF THE STACK -- see the measured caveat below.
 
     Every layer's chain opens `rms_norm -> quantize -> dense_fp8`, and those two
     front tasks have identical geometry (both one task per token row on the same
     [1, hidden] tile), so they can be one. Modelled cp_exact effect on HEAD:
     -62.0 / -63.3 / -67.8 us at bs 1/8/16 over 40 layers.
+
+    THE MODEL WAS WRONG AND THE MEASUREMENT RULES: solo e2e is 1.016 / 0.997 /
+    0.986x at bs 1/8/16 -- a REGRESSION at bs8 and bs16 -- and measured cp_exact
+    moves +42 / +64 us where the model predicted -63 / -68. Mechanism (M4-I9's
+    durable finding): the projection assumed the host absorbs the victim's work
+    for free (`inc = 0`), but `inc` is a function of OCCUPANCY. At bs1 the work
+    bound is 0.58x of vLLM's step, the machine is starved, and the model holds to
+    within 5%. At bs8/bs16 the work bound is at or above cp, so the host's extra
+    work lands on a BUSY worker and -- because the fused task sits on the chain --
+    cp GROWS. A fusion's sign inverts with load. What makes flag F the exception
+    is that F also WIDENS its victim (quantize moves from 16 tasks/layer onto the
+    silu grid's 128); fusing two EQUAL-WIDTH stages buys chain length by spending
+    width, which is only free on a starved machine. This flag is on because the
+    three-flag stack composes to a win at every batch size; do not enable it alone.
 
     Applies at the two PRE-NORM sites only:
       * GDN layers    pre_norm -> gdn_xq        (3 outputs: the bf16 norm is
@@ -223,12 +248,17 @@ def fuse_norm_quant() -> bool:
 
     Compile-time GRAPH change, so a kernel dir must not be reused across values.
     """
-    return os.environ.get("MPK_FUSE_NORM_QUANT") == "1"
+    return os.environ.get("MPK_FUSE_NORM_QUANT", "1") == "1"
 
 
 def fuse_recur_quant() -> bool:
     """True when MPK_FUSE_RECUR_QUANT=1 fuses the GDN out-projection's quantize
-    into the recurrence that produces its input (M4-I9 flag C). DEFAULT OFF.
+    into the recurrence that produces its input (M4-I9 flag C). DEFAULT ON since
+    2026-07-30, as part of the stack (solo e2e 1.018 / 1.002 / 0.999x at bs 1/8/16
+    -- neutral-to-flat on its own; the win is the composition, see
+    fuse_silu_quant). Its measured cp_exact also inverted vs the model (-43 / +25
+    us where the model said -130 / -107) for the occupancy reason documented in
+    fuse_norm_quant.
 
     The largest of M4-I9's remaining admissible fusions: modelled cp_exact effect
     -128.7 / -129.5 / -107.2 us at bs 1/8/16 on top of flag F, over the 30 GDN
@@ -257,7 +287,7 @@ def fuse_recur_quant() -> bool:
 
     Compile-time GRAPH change, so a kernel dir must not be reused across values.
     """
-    return os.environ.get("MPK_FUSE_RECUR_QUANT") == "1"
+    return os.environ.get("MPK_FUSE_RECUR_QUANT", "1") == "1"
 
 
 def fp8_dense_baseline() -> bool:

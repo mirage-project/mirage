@@ -69,8 +69,14 @@ drain () {
 }
 
 arm_env () {
+  # 2026-07-30: arm A is now SPELLED OUT as the explicit opt-out triple. It used
+  # to be the empty string, which meant "HEAD" only for as long as every flag
+  # defaulted OFF -- and the three-flag stack shipped default-ON on 2026-07-30.
+  # An empty arm A would from then on have silently built the STACK and compared
+  # it against itself. Same class of trap as the compile-knob kernel-dir reuse
+  # (M3-I7, M3-I9): a baseline must name every knob it depends on, never inherit it.
   case "$1" in
-    A) echo "" ;;                                     # HEAD, all flags off
+    A) echo "MPK_FUSE_SILU_QUANT=0 MPK_FUSE_NORM_QUANT=0 MPK_FUSE_RECUR_QUANT=0" ;;
     F) echo "MPK_FUSE_SILU_QUANT=1" ;;                # MoE SwiGLU + quantize
     N) echo "MPK_FUSE_NORM_QUANT=1" ;;                # pre-norm + quantize
     C) echo "MPK_FUSE_COMBINE_NORM=1" ;;              # combine + next pre-norm

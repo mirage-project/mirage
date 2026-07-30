@@ -20,7 +20,9 @@ GPU="${CUDA_VISIBLE_DEVICES:?the guard must pin CUDA_VISIBLE_DEVICES}"
 T=${T:-$HOME/mpk-qwen35/mirage-m4i9}
 ARM=${ARM:-F}
 case "$ARM" in
-  A) ARM_ENV="" ;;
+  # 2026-07-30: explicit opt-out triple, not "" -- the three flags shipped
+  # default-ON, so an empty arm A would silently profile the STACK as "HEAD".
+  A) ARM_ENV="MPK_FUSE_SILU_QUANT=0 MPK_FUSE_NORM_QUANT=0 MPK_FUSE_RECUR_QUANT=0" ;;
   F) ARM_ENV="MPK_FUSE_SILU_QUANT=1" ;;
   N) ARM_ENV="MPK_FUSE_NORM_QUANT=1" ;;
   G) ARM_ENV="MPK_FUSE_RECUR_QUANT=1" ;;
