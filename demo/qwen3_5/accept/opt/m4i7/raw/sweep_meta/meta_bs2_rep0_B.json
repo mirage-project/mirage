@@ -31,10 +31,10 @@
         "synth0",
         "synth1"
       ],
-      "wall_ms": 1016.5527954101562,
+      "wall_ms": 992.0419921875,
       "max_decode_steps": 96,
-      "ms_per_decode_step": 10.589091618855795,
-      "tokens_per_s": 188.8736137138183,
+      "ms_per_decode_step": 10.333770751953125,
+      "tokens_per_s": 193.54019437890005,
       "max_seq_length": 353,
       "max_num_batched_tokens": 16,
       "slot_order": "wave",
@@ -49,28 +49,28 @@
     }
   ],
   "slot_isolation": [],
-  "run_seconds": 65.9283938407898,
+  "run_seconds": 65.06977486610413,
   "tokens_sha256": "e1e264118e2002e43966c426137395f8815e5903e7c1dc1cc90a6ce9a6c126c8",
   "gpu_before": [
-    "0, 710 MiB, 0 %, 1965 MHz, 3996 MHz",
-    "1, 84 MiB, 0 %, 120 MHz, 3996 MHz",
-    "2, 106 MiB, 0 %, 120 MHz, 3996 MHz",
-    "3, 114 MiB, 0 %, 120 MHz, 3996 MHz",
+    "0, 126 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "1, 82 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 68 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 112 MiB, 0 %, 120 MHz, 3996 MHz",
     "4, 108 MiB, 0 %, 225 MHz, 3996 MHz",
-    "5, 80 MiB, 0 %, 240 MHz, 3996 MHz",
-    "6, 108 MiB, 0 %, 120 MHz, 3996 MHz",
-    "7, 36310 MiB, 0 %, 1965 MHz, 3996 MHz"
+    "5, 68 MiB, 0 %, 120 MHz, 3996 MHz",
+    "6, 106 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 56 MiB, 0 %, 120 MHz, 3996 MHz"
   ],
   "gpu_after": [
-    "0, 716 MiB, 0 %, 1965 MHz, 3996 MHz",
-    "1, 84 MiB, 0 %, 120 MHz, 3996 MHz",
-    "2, 106 MiB, 0 %, 120 MHz, 3996 MHz",
-    "3, 114 MiB, 0 %, 120 MHz, 3996 MHz",
-    "4, 36556 MiB, 100 %, 1965 MHz, 3996 MHz",
-    "5, 808 MiB, 0 %, 1965 MHz, 3996 MHz",
-    "6, 108 MiB, 0 %, 120 MHz, 3996 MHz",
-    "7, 36310 MiB, 0 %, 1965 MHz, 3996 MHz"
+    "0, 126 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "1, 82 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 68 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 112 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 36556 MiB, 31 %, 1965 MHz, 3996 MHz",
+    "5, 68 MiB, 0 %, 120 MHz, 3996 MHz",
+    "6, 106 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 56 MiB, 0 %, 120 MHz, 3996 MHz"
   ],
   "cuda_visible_devices": "4",
-  "generated_utc": "2026-07-30T07:51:30Z"
+  "generated_utc": "2026-07-30T09:22:28Z"
 }

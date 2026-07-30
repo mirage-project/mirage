@@ -31,10 +31,10 @@
         "synth0",
         "synth1"
       ],
-      "wall_ms": 1033.62060546875,
+      "wall_ms": 1006.9449462890625,
       "max_decode_steps": 96,
-      "ms_per_decode_step": 10.766881306966146,
-      "tokens_per_s": 185.75481079242556,
+      "ms_per_decode_step": 10.489009857177734,
+      "tokens_per_s": 190.67576703928637,
       "max_seq_length": 353,
       "max_num_batched_tokens": 16,
       "slot_order": "wave",
@@ -49,28 +49,28 @@
     }
   ],
   "slot_isolation": [],
-  "run_seconds": 14.494313478469849,
+  "run_seconds": 13.744143009185791,
   "tokens_sha256": "2d88b743b728bab509e805ea26228d7973ed9f32b79a5ea484b37b872c013f57",
   "gpu_before": [
-    "0, 718 MiB, 1 %, 1965 MHz, 3996 MHz",
-    "1, 84 MiB, 0 %, 120 MHz, 3996 MHz",
-    "2, 106 MiB, 0 %, 120 MHz, 3996 MHz",
-    "3, 114 MiB, 0 %, 120 MHz, 3996 MHz",
-    "4, 108 MiB, 0 %, 232 MHz, 3996 MHz",
-    "5, 1560 MiB, 0 %, 1965 MHz, 3996 MHz",
-    "6, 108 MiB, 0 %, 120 MHz, 3996 MHz",
-    "7, 36310 MiB, 0 %, 1965 MHz, 3996 MHz"
+    "0, 126 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "1, 82 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 68 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 112 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 108 MiB, 0 %, 262 MHz, 3996 MHz",
+    "5, 68 MiB, 0 %, 120 MHz, 3996 MHz",
+    "6, 106 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 56 MiB, 0 %, 120 MHz, 3996 MHz"
   ],
   "gpu_after": [
-    "0, 720 MiB, 1 %, 1965 MHz, 3996 MHz",
-    "1, 84 MiB, 0 %, 120 MHz, 3996 MHz",
-    "2, 106 MiB, 0 %, 120 MHz, 3996 MHz",
-    "3, 114 MiB, 0 %, 120 MHz, 3996 MHz",
-    "4, 36556 MiB, 100 %, 1965 MHz, 3996 MHz",
-    "5, 3396 MiB, 0 %, 1965 MHz, 3996 MHz",
-    "6, 108 MiB, 0 %, 120 MHz, 3996 MHz",
-    "7, 36310 MiB, 0 %, 1965 MHz, 3996 MHz"
+    "0, 126 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "1, 82 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 68 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 112 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 36556 MiB, 56 %, 1965 MHz, 3996 MHz",
+    "5, 68 MiB, 0 %, 120 MHz, 3996 MHz",
+    "6, 106 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 56 MiB, 0 %, 120 MHz, 3996 MHz"
   ],
   "cuda_visible_devices": "4",
-  "generated_utc": "2026-07-30T07:52:08Z"
+  "generated_utc": "2026-07-30T09:22:48Z"
 }

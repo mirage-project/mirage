@@ -73,10 +73,10 @@
         "synth14",
         "synth15"
       ],
-      "wall_ms": 3783.0859375,
+      "wall_ms": 3497.31396484375,
       "max_decode_steps": 96,
-      "ms_per_decode_step": 39.407145182291664,
-      "tokens_per_s": 406.0177393207843,
+      "ms_per_decode_step": 36.43035380045573,
+      "tokens_per_s": 439.19419744421606,
       "max_seq_length": 353,
       "max_num_batched_tokens": 16,
       "slot_order": "wave",
@@ -91,28 +91,28 @@
     }
   ],
   "slot_isolation": [],
-  "run_seconds": 17.33225727081299,
+  "run_seconds": 15.6884605884552,
   "tokens_sha256": "22c1720fa6c0c145029d659c7ee34d1bdf84f27dbd4d65ddca1448feb32adf06",
   "gpu_before": [
-    "0, 128 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "0, 8 MiB, 0 %, 1965 MHz, 3996 MHz",
     "1, 82 MiB, 0 %, 120 MHz, 3996 MHz",
-    "2, 76 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 80 MiB, 0 %, 120 MHz, 3996 MHz",
     "3, 112 MiB, 0 %, 120 MHz, 3996 MHz",
-    "4, 108 MiB, 0 %, 232 MHz, 3996 MHz",
+    "4, 108 MiB, 0 %, 195 MHz, 3996 MHz",
     "5, 70 MiB, 0 %, 120 MHz, 3996 MHz",
-    "6, 106 MiB, 0 %, 120 MHz, 3996 MHz",
-    "7, 62 MiB, 0 %, 120 MHz, 3996 MHz"
+    "6, 5114 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "7, 64 MiB, 0 %, 120 MHz, 3996 MHz"
   ],
   "gpu_after": [
-    "0, 128 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "0, 8 MiB, 0 %, 1965 MHz, 3996 MHz",
     "1, 82 MiB, 0 %, 120 MHz, 3996 MHz",
-    "2, 76 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 2402 MiB, 0 %, 1965 MHz, 3996 MHz",
     "3, 112 MiB, 0 %, 120 MHz, 3996 MHz",
-    "4, 37580 MiB, 76 %, 1965 MHz, 3996 MHz",
+    "4, 37580 MiB, 0 %, 1965 MHz, 3996 MHz",
     "5, 70 MiB, 0 %, 120 MHz, 3996 MHz",
-    "6, 106 MiB, 0 %, 120 MHz, 3996 MHz",
-    "7, 62 MiB, 0 %, 120 MHz, 3996 MHz"
+    "6, 5370 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "7, 64 MiB, 0 %, 120 MHz, 3996 MHz"
   ],
   "cuda_visible_devices": "4",
-  "generated_utc": "2026-07-30T09:07:15Z"
+  "generated_utc": "2026-07-30T08:59:08Z"
 }

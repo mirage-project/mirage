@@ -8,28 +8,28 @@ arm B = new(ferret v012 fast)
 == gpu_before audit (each run's OWN pinned device, from its OWN record) ==
    runs: 30   dirty(>500MiB at start): 0   unauditable: 0
    pinned device(s) across all runs: 4
-   observed pinned-device floors (MiB): [108, 110, 131]
+   observed pinned-device floors (MiB): [108, 131]
 
 == per-rep wall_ms (every rep, both arms) ==
  bs arm       rep0       rep1       rep2     median    range
   1   A     1095.5     1093.8     1095.6     1095.5      1.8
-  1   B      824.7      824.0      834.9      824.7     10.9
+  1   B      824.3      824.1      824.3      824.3      0.2
   2   A     1266.7     1273.5     1267.4     1267.4      6.7
-  2   B     1016.6     1033.6     1023.2     1023.2     17.1
+  2   B      992.0     1006.9      997.8      997.8     14.9
   4   A     1616.0     1627.4     1624.1     1624.1     11.4
-  4   B     1332.8     1378.9     1372.9     1372.9     46.1
+  4   B     1310.1     1372.9     1366.0     1366.0     62.8
   8   A     2507.6     2498.8     2508.6     2507.6      9.8
-  8   B     2222.8     2158.0     2180.2     2180.2     64.8
+  8   B     2215.6     2143.1     2172.8     2172.8     72.6
  16   A     3825.4     3842.0     3825.3     3825.4     16.7
- 16   B     3396.2     3433.7     3382.7     3396.2     51.0
+ 16   B     3385.9     3424.0     3371.8     3385.9     52.2
 
 == median wall_ms, and the integration's e2e effect ==
  bs     A base      B new   delta_ms  speedup  B ms/step  A ms/step
-  1     1095.5      824.7     -270.8  1.3284x     8.5906    11.4116
-  2     1267.4     1023.2     -244.3  1.2388x    10.6578    13.2024
-  4     1624.1     1372.9     -251.2  1.1830x    14.3015    16.9182
-  8     2507.6     2180.2     -327.4  1.1502x    22.7109    26.1211
- 16     3825.4     3396.2     -429.2  1.1264x    35.3771    39.8481
+  1     1095.5      824.3     -271.2  1.3291x     8.5861    11.4116
+  2     1267.4      997.8     -269.6  1.2702x    10.3939    13.2024
+  4     1624.1     1366.0     -258.1  1.1890x    14.2292    16.9182
+  8     2507.6     2172.8     -334.8  1.1541x    22.6331    26.1211
+ 16     3825.4     3385.9     -439.5  1.1298x    35.2698    39.8481
 
 == tokens_sha256: does the megakernel emit identical tokens in both arms? ==
    (kernel-level bit-exactness was proven on synthetic tensors; this is

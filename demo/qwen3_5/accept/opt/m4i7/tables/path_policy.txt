@@ -1,0 +1,30 @@
+M4-I7: the MPK_MOE_PATH_POLICY sweep -- which fetch path actually wins in MPK.
+
+The ferret dispatcher chose among PATH 0/1/2 on "do the work items fit one wave"
+(items vs %nsmid), because there one CTA ran one work item. In MPK there is one
+persistent worker per SM owning the whole smem budget, so residency is fixed and
+that denominator is meaningless -- which left the choice open, so it was MEASURED
+with each path pinned as a -D. Arm B only (arm A is unaffected by the pin), 3 reps,
+bs1 and bs16, geometry B, all inside one GPU claim.
+
+ path   bs      rep0      rep1      rep2    median
+    0    1     825.7     826.3     826.2     826.2
+    1    1     823.9     823.6     824.6     823.9
+    2    1     837.1     837.8     842.8     837.8
+    0   16    3452.0    3497.3    3434.0    3452.0
+    1   16    3371.2    3408.7    3355.6    3371.2
+    2   16    3724.1    3783.1    3699.4    3724.1
+
+== relative to PATH 1, the best arm ==
+  bs1   PATH 0:    826.2 ms   -0.28% vs PATH 1
+  bs1   PATH 2:    837.8 ms   -1.66% vs PATH 1
+  bs16  PATH 0:   3452.0 ms   -2.34% vs PATH 1
+  bs16  PATH 2:   3724.1 ms   -9.48% vs PATH 1
+
+SHIPPED: PATH 1 when admissible, else PATH 0. PATH 2 is built and
+bit-exact (Gate 1 covers it) but never selected -- its premise was halving
+per-CTA weight bytes to recruit a second CTA wave, and in MPK the task
+count is fixed by the graph and the flattened work space already saturates
+it, so halving the tile only doubles the per-item gathers, A re-fetches and
+epilogues for the same MMAs. It stays reachable through MPK_MOE_PATH_POLICY
+so the sweep can be repeated if the geometry changes.

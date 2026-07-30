@@ -37,10 +37,10 @@
         "synth2",
         "synth3"
       ],
-      "wall_ms": 1332.8291015625,
+      "wall_ms": 1310.05810546875,
       "max_decode_steps": 96,
-      "ms_per_decode_step": 13.883636474609375,
-      "tokens_per_s": 288.10895526653024,
+      "ms_per_decode_step": 13.646438598632812,
+      "tokens_per_s": 293.1167697043495,
       "max_seq_length": 353,
       "max_num_batched_tokens": 16,
       "slot_order": "wave",
@@ -55,28 +55,28 @@
     }
   ],
   "slot_isolation": [],
-  "run_seconds": 69.50528216362,
+  "run_seconds": 70.63211059570312,
   "tokens_sha256": "5f6983e881c653e63feef34ed4ef6f463c9b070a4d27e85d721aacdc7373a2c4",
   "gpu_before": [
-    "0, 716 MiB, 0 %, 1965 MHz, 3996 MHz",
-    "1, 84 MiB, 0 %, 180 MHz, 3996 MHz",
-    "2, 102 MiB, 0 %, 120 MHz, 3996 MHz",
-    "3, 114 MiB, 0 %, 120 MHz, 3996 MHz",
+    "0, 126 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "1, 82 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 68 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 112 MiB, 0 %, 120 MHz, 3996 MHz",
     "4, 108 MiB, 0 %, 180 MHz, 3996 MHz",
-    "5, 78 MiB, 0 %, 120 MHz, 3996 MHz",
-    "6, 7144 MiB, 0 %, 1965 MHz, 3996 MHz",
-    "7, 38320 MiB, 0 %, 1965 MHz, 3996 MHz"
+    "5, 68 MiB, 0 %, 120 MHz, 3996 MHz",
+    "6, 106 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 56 MiB, 0 %, 120 MHz, 3996 MHz"
   ],
   "gpu_after": [
-    "0, 708 MiB, 0 %, 1965 MHz, 3996 MHz",
-    "1, 84 MiB, 0 %, 120 MHz, 3996 MHz",
-    "2, 1112 MiB, 0 %, 1965 MHz, 3996 MHz",
-    "3, 114 MiB, 0 %, 120 MHz, 3996 MHz",
+    "0, 126 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "1, 82 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 68 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 112 MiB, 0 %, 120 MHz, 3996 MHz",
     "4, 36676 MiB, 100 %, 1965 MHz, 3996 MHz",
-    "5, 78 MiB, 0 %, 120 MHz, 3996 MHz",
-    "6, 5382 MiB, 0 %, 1965 MHz, 3996 MHz",
-    "7, 36428 MiB, 0 %, 1965 MHz, 3996 MHz"
+    "5, 988 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "6, 106 MiB, 0 %, 120 MHz, 3996 MHz",
+    "7, 56 MiB, 0 %, 120 MHz, 3996 MHz"
   ],
   "cuda_visible_devices": "4",
-  "generated_utc": "2026-07-30T07:55:19Z"
+  "generated_utc": "2026-07-30T09:24:26Z"
 }

@@ -102,11 +102,13 @@ namespace kernel {
 //      regression at bs16), this costs NO extra dead-task dispatch and does not
 //      shrink the N tile.
 //  (b) A WIDER FETCH. `PATH 1` stages 4 adjacent K tiles per buffer and pulls
-//      each weight row as one 512 B `cp.async.bulk`; `PATH 2` stages 8 (clamped
-//      to K) at TILE_N=64 and pulls 1 KiB rows. `PATH 0` is the golden fetch
-//      (one K tile per stage, 16 B `cp.async`) with the measured w13-only
-//      `#pragma unroll`. All three feed the SAME `mma.sync.m16n8k32.e4m3` and
-//      apply the SAME per-K-tile fp32 scale product, in ascending K order.
+//      each weight row as one 512 B `cp.async.bulk`; `PATH 0` is the golden
+//      fetch (one K tile per stage, 16 B `cp.async`) with the measured w13-only
+//      `#pragma unroll`. `PATH 2` (8 K tiles, 1 KiB rows, TILE_N=64) is built
+//      and bit-exact but NOT shipped -- it measured -1.7% at bs1 and -10.5% at
+//      bs16 in MPK; the dispatcher below carries the sweep. All three feed the
+//      SAME `mma.sync.m16n8k32.e4m3` and apply the SAME per-K-tile fp32 scale
+//      product, in ascending K order.
 //  (c) A ballot-compaction routing gather on w2 only (bit-identical smem
 //      contents: same ascending-token compaction, different writer lane).
 //
@@ -1335,43 +1337,45 @@ __device__ __forceinline__ void
       MPK_MOE_RUN_PATH(0);
     }
 #else
-    // ---- the shipped rule -------------------------------------------------
-    // In the ferret harness one CTA ran one work item, so "does the grid fit
-    // one wave" (work items vs `%nsmid`) decided whether the wide-smem paths'
+    // ---- the shipped rule, and it is MEASURED, not reasoned ---------------
+    // In the ferret harness one CTA ran one work item, so "does the grid fit one
+    // wave" (work items vs %nsmid) decided whether the wide-smem paths'
     // 1-CTA/SM residency was free. IN MPK THAT DENOMINATOR IS WRONG: there is
     // exactly one persistent worker per SM, each owning the WHOLE dynamic smem
-    // budget, so residency is fixed at 1 CTA/SM no matter which path runs and
-    // the wide layouts cost nothing. What varies instead is how many of the
-    // `expert_stride` EMITTED tasks have work. So the gate keeps the ferret
-    // rule's shape and swaps `%nsmid` for `expert_stride`:
+    // budget, so residency is fixed at 1 CTA/SM whichever path runs and the wide
+    // layouts cost nothing. Which left the question open, so it was swept with
+    // MPK_MOE_PATH_POLICY -- three pinned arms, 3 reps, bs1 and bs16, arms
+    // interleaved in one GPU claim (opt/m4i7/tables/path_policy.txt):
     //
-    //   * PATH 2 (TILE_N=64) doubles the work items. That is a win only while
-    //     the extra items land on tasks that would otherwise be dead, i.e.
-    //     while `num_activated * OUTPUT_SIZE/64 <= expert_stride`. Past that
-    //     point the same tasks just run more, smaller tiles: strictly more
-    //     gathers, A re-fetches and epilogues for the same MMAs.
-    //   * Otherwise PATH 1: TILE_N=128 like the golden path, but 512 B bulk
-    //     weight rows instead of 16 B `cp.async`. The ferret run only ever
-    //     preferred PATH 0 over PATH 1 to protect 4-5 CTAs/SM of residency,
-    //     which does not exist here -- so PATH 1 should dominate PATH 0 at
-    //     every batch size in MPK. That is a falsifiable claim and
-    //     `MPK_MOE_PATH_POLICY` exists to test it.
+    //            bs1 median ms     bs16 median ms
+    //   PATH 0        826.2             3452.0
+    //   PATH 1        823.9             3371.2     <-- best at both
+    //   PATH 2        837.8             3724.1     <-- loses, badly at bs16
+    //
+    // TWO RESULTS. (1) PATH 1 does dominate PATH 0 in MPK, as predicted: the
+    // ferret run only ever preferred PATH 0 to protect 4-5 CTAs/SM of residency,
+    // which does not exist here. The margin is +0.3% at bs1 and +2.4% at bs16.
+    // (2) PATH 2 (TILE_N=64) LOSES at every measured batch size, -1.7% at bs1
+    // and -10.5% at bs16. Its whole premise was halving per-CTA weight bytes to
+    // recruit a second wave of CTAs; in MPK the task count is fixed by the graph
+    // and the flattened work space already saturates it, so halving the tile only
+    // doubles the per-item gathers, A re-fetches and epilogues for the same MMAs.
+    //
+    // So the rule is simply: PATH 1 when admissible, else PATH 0. No runtime
+    // mask read, no branch on the task's critical path. PATH 2 stays REACHABLE
+    // (and bit-exact -- Gate 1 covers it) only through MPK_MOE_PATH_POLICY=2, so
+    // the sweep can be repeated if the geometry changes; e.g. a larger
+    // moe_n_splits would shrink OUTPUT_SIZE and change the trade.
+    //
     // FAIL-CLOSED against a SHORT allocation. In the megakernel this is always
     // MAX_DYNAMIC_SHARED_MEMORY_SIZE, but a standalone launcher can hand the
     // task less (the pybind wrapper used to size its launch off the golden
-    // layout alone), and a wide layout on a short allocation would write past
-    // the arena. Reading %dynamic_smem_size makes the device follow the
-    // allocation exactly -- CTA-uniform, one register read.
+    // layout alone), and PATH 1's 152 KiB layout on a 56 KiB allocation would
+    // write past the arena. Reading %dynamic_smem_size makes the device follow
+    // the allocation exactly -- CTA-uniform, one register read, and it degrades
+    // to PATH 0 rather than corrupting memory.
     uint32_t dyn_smem;
     asm("mov.u32 %0, %%dynamic_smem_size;" : "=r"(dyn_smem));
-    if constexpr (OK2) {
-      int const nact = static_cast<int32_t const *>(mask_ptr)[NUM_EXPERTS];
-      if (nact * (OUTPUT_SIZE / 64) <= expert_stride &&
-          dyn_smem >= (uint32_t)smem_bytes_k(BATCH_SIZE, 2, REDUCTION_SIZE)) {
-        MPK_MOE_RUN_PATH(2);
-        return;
-      }
-    }
     if constexpr (OK1) {
       if (dyn_smem >= (uint32_t)smem_bytes_k(BATCH_SIZE, 1, REDUCTION_SIZE)) {
         MPK_MOE_RUN_PATH(1);

@@ -28,10 +28,10 @@
       "prompt_ids": [
         "synth0"
       ],
-      "wall_ms": 837.7869262695312,
+      "wall_ms": 826.3414916992188,
       "max_decode_steps": 96,
-      "ms_per_decode_step": 8.726947148640951,
-      "tokens_per_s": 114.58760812545201,
+      "ms_per_decode_step": 8.607723871866861,
+      "tokens_per_s": 116.17473038004387,
       "max_seq_length": 353,
       "max_num_batched_tokens": 16,
       "slot_order": "wave",
@@ -46,28 +46,28 @@
     }
   ],
   "slot_isolation": [],
-  "run_seconds": 12.328665494918823,
+  "run_seconds": 15.800039291381836,
   "tokens_sha256": "ad5239e4f5dfd303b08cca1ae30f515c644734768b0dd0246483a65469caae4d",
   "gpu_before": [
-    "0, 6 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "0, 8 MiB, 0 %, 1965 MHz, 3996 MHz",
     "1, 82 MiB, 0 %, 120 MHz, 3996 MHz",
-    "2, 76 MiB, 0 %, 120 MHz, 3996 MHz",
-    "3, 112 MiB, 0 %, 172 MHz, 3996 MHz",
-    "4, 108 MiB, 0 %, 240 MHz, 3996 MHz",
-    "5, 70 MiB, 0 %, 120 MHz, 3996 MHz",
-    "6, 106 MiB, 0 %, 120 MHz, 3996 MHz",
-    "7, 10198 MiB, 0 %, 1965 MHz, 3996 MHz"
-  ],
-  "gpu_after": [
-    "0, 6 MiB, 0 %, 1965 MHz, 3996 MHz",
-    "1, 82 MiB, 0 %, 120 MHz, 3996 MHz",
-    "2, 76 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 80 MiB, 0 %, 120 MHz, 3996 MHz",
     "3, 112 MiB, 0 %, 120 MHz, 3996 MHz",
-    "4, 36436 MiB, 48 %, 1965 MHz, 3996 MHz",
-    "5, 70 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 108 MiB, 0 %, 180 MHz, 3996 MHz",
+    "5, 70 MiB, 0 %, 187 MHz, 3996 MHz",
     "6, 106 MiB, 0 %, 120 MHz, 3996 MHz",
     "7, 64 MiB, 0 %, 120 MHz, 3996 MHz"
   ],
+  "gpu_after": [
+    "0, 8 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "1, 82 MiB, 0 %, 120 MHz, 3996 MHz",
+    "2, 80 MiB, 0 %, 120 MHz, 3996 MHz",
+    "3, 112 MiB, 0 %, 120 MHz, 3996 MHz",
+    "4, 36436 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "5, 70 MiB, 0 %, 120 MHz, 3996 MHz",
+    "6, 36716 MiB, 0 %, 1965 MHz, 3996 MHz",
+    "7, 64 MiB, 0 %, 120 MHz, 3996 MHz"
+  ],
   "cuda_visible_devices": "4",
-  "generated_utc": "2026-07-30T09:05:08Z"
+  "generated_utc": "2026-07-30T08:57:09Z"
 }
