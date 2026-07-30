@@ -1,0 +1,113 @@
+{
+  "batch_size": 4,
+  "note": "informational only -- no perf claim (cold compile)",
+  "waves": [
+    {
+      "batch_size": 4,
+      "wave": 0,
+      "num_requests": 4,
+      "num_distinct_prompts": 4,
+      "prompt_ids": [
+        "p06-poem",
+        "p01-history",
+        "p04-chinese",
+        "p09-translate"
+      ],
+      "wall_ms": 989.8330688476562,
+      "max_decode_steps": 107,
+      "ms_per_decode_step": 9.25077634437062,
+      "tokens_per_s": 432.39614180426304,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 113,
+        "per_request_token_cap_requested": "policy",
+        "per_request_token_cap_compiled": 4,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 4,
+      "wave": 1,
+      "num_requests": 4,
+      "num_distinct_prompts": 4,
+      "prompt_ids": [
+        "p07-format",
+        "p05-cuda",
+        "p08-science",
+        "p10-logic"
+      ],
+      "wall_ms": 948.3545532226562,
+      "max_decode_steps": 98,
+      "ms_per_decode_step": 9.677087277782206,
+      "tokens_per_s": 413.3475172001052,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 107,
+        "per_request_token_cap_requested": "policy",
+        "per_request_token_cap_compiled": 4,
+        "live_slot_migrations": 0,
+        "migrated_slots": [],
+        "straddling_slots": []
+      }
+    },
+    {
+      "batch_size": 4,
+      "wave": 2,
+      "num_requests": 4,
+      "num_distinct_prompts": 2,
+      "prompt_ids": [
+        "p03-python",
+        "p02-math",
+        "p03-python",
+        "p02-math"
+      ],
+      "wall_ms": 910.5559692382812,
+      "max_decode_steps": 87,
+      "ms_per_decode_step": 10.466160565957257,
+      "tokens_per_s": 191.09204253040963,
+      "max_seq_length": 132,
+      "max_num_batched_tokens": 16,
+      "slot_order": "wave",
+      "compaction": {
+        "predicted_iterations": 98,
+        "per_request_token_cap_requested": "policy",
+        "per_request_token_cap_compiled": 4,
+        "live_slot_migrations": 1,
+        "migrated_slots": [
+          2
+        ],
+        "straddling_slots": []
+      }
+    }
+  ],
+  "slot_isolation_checks": [
+    {
+      "batch_size": 4,
+      "wave": 2,
+      "prompt_id": "p03-python",
+      "slots": [
+        0,
+        2
+      ],
+      "identical": true,
+      "first_divergence": null
+    },
+    {
+      "batch_size": 4,
+      "wave": 2,
+      "prompt_id": "p02-math",
+      "slots": [
+        1,
+        3
+      ],
+      "identical": true,
+      "first_divergence": null
+    }
+  ]
+}
