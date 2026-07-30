@@ -1,0 +1,5 @@
+eaecd3c1196aa121e33b37dcee562e02acdc073d1b91a4df501549d708a48560  /home/muhengl/mpk-qwen35/mirage-m4i6/include/mirage/persistent_kernel/tasks/blackwell/topk_softmax_sm100.cuh
+c6a7b1b81504ede138b5f371fb1b4775089ca4402d77728ebba327c52b3f3495  /home/muhengl/mpk-qwen35/mirage-m4i6/python/mirage/mpk/models/qwen3_5/builder.py
+c8ce798b15a64b1b99c20891a1faf485e6f730478319b9ea218c9c67546a398d  /home/muhengl/mpk-qwen35/mirage-m4i6/python/mirage/mpk/persistent_kernel.py
+d551fc254cf0fc2ec58fd19a3dbe686c29a67fc2b3f5b75bea2127c3b3832c14  /home/muhengl/mpk-qwen35/mirage-m4i6/src/kernel/task_register.cc
+79e720bcf76a5033aa3dfeae582d4c1caa482b83e9aba4e060cbd04f4e3efe93  /home/muhengl/mpk-qwen35/mirage-m4i6/demo/qwen3_5/accept/harness/gate_ac3_stable.sh

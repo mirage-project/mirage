@@ -1,0 +1,16 @@
+GATE1 1a test_gate_topk FULL SWEEP                   rc=0   fail_lines=0   PASS
+GATE1 1a test_gate_topk bs=1                         rc=0   fail_lines=0   PASS
+GATE1 1a test_gate_topk bs=2                         rc=0   fail_lines=0   PASS
+GATE1 1a test_gate_topk bs=4                         rc=0   fail_lines=0   PASS
+GATE1 1a test_gate_topk bs=8                         rc=0   fail_lines=0   PASS
+GATE1 1a test_gate_topk bs=16                        rc=0   fail_lines=0   PASS
+GATE1 1a test_gate_topk bs=17                        rc=0   fail_lines=0   PASS
+GATE1 1a test_gate_topk bs=33                        rc=0   fail_lines=0   PASS
+GATE1 1b test_gate_topk_sigmoid                      rc=0   fail_lines=0   PASS
+GATE1 1c test_topk_sigmoid_testmode bs=1             rc=0   fail_lines=0   PASS
+GATE1 1c test_topk_sigmoid_testmode bs=2             rc=0   fail_lines=0   PASS
+GATE1 1c test_topk_sigmoid_testmode bs=4             rc=0   fail_lines=0   PASS
+GATE1 1c test_topk_sigmoid_testmode bs=8             rc=0   fail_lines=0   PASS
+GATE1 1c test_topk_sigmoid_testmode bs=16            rc=0   fail_lines=0   PASS
+GATE1 1c test_topk_sigmoid_testmode bs=17            rc=0   fail_lines=0   PASS
+GATE1 1d test_router_oracle                          rc=0   fail_lines=0   PASS
