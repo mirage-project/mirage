@@ -868,6 +868,14 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   __shared__ int worker_queue_ids[2];
   __shared__ size_t next_task_pos[2];
   __shared__ size_t last_task_pos[2];
+#ifdef MPK_WORKER_OOO_POP
+  // M4-I8 arm O, default-off.  8 B added to the worker's 3 KiB static budget;
+  // TASK_DESCS_BUFFER_LENGTH is 8 here so a 32-bit mask is more than enough.
+  static_assert(TASK_DESCS_BUFFER_LENGTH <= 32,
+                "used_mask is 32 bits wide");
+  __shared__ unsigned used_mask;
+  __shared__ int pick_slot;
+#endif
 
 #ifdef MPK_ENABLE_PROFILING
   PROFILER_CLOSURE_PARAMS_DECL;
@@ -976,8 +984,69 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       __syncthreads();
       queue_pos = 0;
       queue_len = num_loaded_tasks;
+#ifdef MPK_WORKER_OOO_POP
+      if (threadIdx.x == 0) {
+        used_mask = 0u;
+      }
+      __syncthreads();
+#endif
     }
+#ifdef MPK_WORKER_OOO_POP
+    // ---- M4-I8 arm O: out-of-order pop inside the loaded buffer ----------
+    // Pick the FIRST not-yet-run slot whose `dependent_event` has ALREADY
+    // fired.  If none has, fall back to the earliest not-yet-run slot and block
+    // on it, which is exactly the stock behaviour.
+    //
+    // SOUNDNESS.  (1) A task is legal to execute the instant its
+    // `dependent_event` reaches `num_triggers * iteration_num` -- that predicate
+    // IS the runtime's only precondition (the wait loop right below), and event
+    // counters are monotone, so a task we run has satisfied it and a task we
+    // defer cannot become UNready.  (2) No deadlock: `all_tasks` is emitted in
+    // topological order (M4-I5 verified 0 topological violations on the
+    // compiled graph) and a worker's queue is a subsequence of it, so no task
+    // in the buffer can be a producer for an EARLIER task in the same buffer;
+    // deferring a blocked head to run a ready successor therefore cannot
+    // withhold anything the head is waiting for.  (3) We never look past a
+    // not-yet-run TASK_TERMINATE, so the worker cannot exit while tasks its
+    // peers depend on are still sitting unrun in its buffer.
+    if (threadIdx.x == 0) {
+      pick_slot = 0x7fffffff;
+    }
+    __syncthreads();
+    if (threadIdx.x < queue_len && !((used_mask >> threadIdx.x) & 1u)) {
+      int const o = (int)threadIdx.x;
+      bool terminate_ahead = false;
+      for (int k = 0; k < o; k++) {
+        if (!((used_mask >> k) & 1u) &&
+            task_descs[k].task_type == TASK_TERMINATE) {
+          terminate_ahead = true;
+        }
+      }
+      if (!terminate_ahead) {
+        EventId ev = task_descs[o].dependent_event;
+        bool ready = true;
+        if (ev != EVENT_INVALID_ID && !is_nvshmem_event(ev)) {
+          size_t ei = get_event_position_index(ev);
+          EventCounter need =
+              static_cast<EventCounter>(config.all_event_num_triggers[ei]) *
+              get_task_iteration_num(task_ids[o]);
+          ready = ld_acquire_gpu_u64(&config.all_event_counters[ei]) >= need;
+        }
+        if (ready) {
+          atomicMin(&pick_slot, o);
+        }
+      }
+    }
+    __syncthreads();
+    unsigned const unrun = (~used_mask) & ((queue_len >= 32)
+                                              ? 0xffffffffu
+                                              : ((1u << queue_len) - 1u));
+    int const slot = (pick_slot < queue_len) ? pick_slot : (__ffs(unrun) - 1);
+    TaskDesc *task_desc = task_descs + slot;
+#else
+    int const slot = queue_pos;
     TaskDesc *task_desc = task_descs + queue_pos;
+#endif
     // Make sure task is ready before start execution
     if (threadIdx.x == 0) {
       if (task_desc->dependent_event != EVENT_INVALID_ID) {
@@ -988,7 +1057,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
         EventCounter needed_counts =
             static_cast<EventCounter>(
                 config.all_event_num_triggers[event_index]) *
-            get_task_iteration_num(task_ids[queue_pos]);
+            get_task_iteration_num(task_ids[slot]);
         EventCounter actual_counts = 0;
         if (is_nvshmem_event(event_id)) {
 #if defined(USE_NVSHMEM)
@@ -999,11 +1068,28 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
               needed_counts);
 #endif
         } else {
+#ifdef MPK_EVENT_WAIT_GPU_SCOPE
+          // M4-I8 arm S, default-off.  This is the `!is_nvshmem_event` branch,
+          // so the counter being polled is a LOCAL event's, and a local event's
+          // counter is only ever written by `atom_add_release_gpu_u64` on this
+          // device (the trigger path below).  The matching acquire for a
+          // .release.gpu store is therefore .acquire.gpu; `ld.acquire.sys` asks
+          // the memory system for system-scope coherence it cannot need here.
+          // It is the ONLY .sys load in the runtime and it sits on the hottest
+          // spin in the kernel: every task pays at least one execution of this
+          // loop body before it may start.
+          while (actual_counts < needed_counts) {
+            actual_counts =
+                ld_acquire_gpu_u64(&config.all_event_counters[event_index]);
+            __nanosleep(10);
+          }
+#else
           while (actual_counts < needed_counts) {
             actual_counts =
                 ld_acquire_sys_u64(&config.all_event_counters[event_index]);
             __nanosleep(10);
           }
+#endif
         }
       }
     }
@@ -1068,8 +1154,8 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                "event_type(local) count(%llu)\n",
                config.my_gpu_id,
                worker_id,
-               get_task_iteration_num(task_ids[queue_pos]),
-               get_task_position_index(task_ids[queue_pos]),
+               get_task_iteration_num(task_ids[slot]),
+               get_task_position_index(task_ids[slot]),
                event_id,
                count);
 #endif
@@ -1077,11 +1163,11 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
         //     printf("[splitk_ev] event_index=%lu count=%llu num_triggers=%d
         //     iter=%llu\n",
         //           event_index, count, num_triggers,
-        //           get_task_iteration_num(task_ids[queue_pos]));
+        //           get_task_iteration_num(task_ids[slot]));
         // }
 
         if ((count + 1) == static_cast<EventCounter>(num_triggers) *
-                               get_task_iteration_num(task_ids[queue_pos])) {
+                               get_task_iteration_num(task_ids[slot])) {
 #ifdef MPK_ENABLE_PROFILING
           PROFILER_EVENT_START(TASK_SCHD_EVENTS, task_counter);
 #endif
@@ -1140,11 +1226,17 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
                "event_type(remote)\n",
                config.my_gpu_id,
                worker_id,
-               get_task_position_index(task_ids[queue_pos]),
+               get_task_position_index(task_ids[slot]),
                event_id);
 #endif
       }
     }
+#ifdef MPK_WORKER_OOO_POP
+    if (threadIdx.x == 0) {
+      used_mask |= (1u << slot);
+    }
+    __syncthreads();
+#endif
     queue_pos += 1;
   }
 }

@@ -307,6 +307,20 @@ def get_compile_command(
           if os.environ.get("MPK_MOE_BLOCKSCALE_BASELINE") == "1" else []),
         *([f"-DMPK_MOE_PATH_POLICY={os.environ['MPK_MOE_PATH_POLICY']}"]
           if os.environ.get("MPK_MOE_PATH_POLICY") in ("0", "1", "2") else []),
+        # M4-I8's two SCHEDULER arms, both default-off and both compile-time
+        # because they live inside the worker loop of the one megakernel TU.
+        # MPK_EVENT_WAIT_GPU_SCOPE=1  -- poll a local event's counter with
+        #   ld.acquire.gpu instead of ld.acquire.sys (arm S).  The counter is
+        #   written by atom.add.release.gpu, so .sys is a scope mismatch that
+        #   every task pays on the kernel's hottest spin.
+        # MPK_WORKER_OOO_POP=1 -- let a worker run the first READY task in its
+        #   already-loaded task-desc buffer instead of blocking on the head
+        #   (arm O).  The measured step spends 27-52% of its time on the
+        #   critical chain waiting behind unrelated work in its own queue.
+        *(["-DMPK_EVENT_WAIT_GPU_SCOPE=1"]
+          if os.environ.get("MPK_EVENT_WAIT_GPU_SCOPE") == "1" else []),
+        *(["-DMPK_WORKER_OOO_POP=1"]
+          if os.environ.get("MPK_WORKER_OOO_POP") == "1" else []),
         "-lcuda",
         "-lcudart",
         "-lstdc++fs",
