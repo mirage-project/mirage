@@ -64,6 +64,12 @@ blackwell_depends = sorted(
     glob(os.path.join(blackwell_task_dir, '**', '*.cuh'), recursive=True)
 )
 
+# The MEGAKERNEL ships -use_fast_math (persistent_kernel.py), so a gate run only
+# without it would not be validating the shipped arithmetic. Set
+# MOE_TEST_FAST_MATH=1 to build the fast-math arm; the default is the plain arm.
+extra_nvcc = (['-use_fast_math']
+              if os.environ.get("MOE_TEST_FAST_MATH") == "1" else [])
+
 setup(
     name='runtime_kernel_blackwell_fp8_moe_qwen35',
     ext_modules=[
@@ -112,7 +118,7 @@ setup(
                     '-DCUTE_ARCH_TCGEN05_TMEM_ENABLED',
                     '-DCUTE_ARCH_TCGEN05_MXF8F6F4_MMA_ENABLED',
                     '--expt-relaxed-constexpr',
-                ]
+                ] + extra_nvcc
             }
         )
     ],

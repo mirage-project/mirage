@@ -197,6 +197,25 @@ constexpr bool golden_can_run(int out_n, int red_k) {
   return out_n % BLOCK_N == 0 && red_k % GROUP_K == 0;
 }
 
+// The dynamic smem a launcher must provide for this instantiation: the max over
+// the golden layout and every admissible fast layout. In the megakernel every
+// worker already owns MAX_DYNAMIC_SHARED_MEMORY_SIZE, so this matters only to
+// out-of-megakernel harnesses (the pybind test wrapper). The dispatcher ALSO
+// checks %dynamic_smem_size at run time and degrades to the narrow path rather
+// than reading past a short allocation, so getting this wrong is slow, not
+// silently wrong.
+constexpr int launch_smem_bytes(int max_rows, int out_n, int red_k, bool w13) {
+  int need = golden::moe_fp8_blockscale::smem_bytes(max_rows);
+  for (int p = 0; p <= 2; ++p) {
+    if (fast_path_ok(max_rows, out_n, red_k, w13) &&
+        path_admissible(max_rows, p, out_n, red_k, w13)) {
+      int const b = smem_bytes_k(max_rows, p, red_k);
+      need = b > need ? b : need;
+    }
+  }
+  return need;
+}
+
 } // namespace moe_fp8_blockscale_fast
 
 // The MPK-facing entry point: a compile-time dispatcher over `fast_path_ok`,
@@ -311,16 +330,27 @@ __device__ __forceinline__ void
     //     which does not exist here -- so PATH 1 should dominate PATH 0 at
     //     every batch size in MPK. That is a falsifiable claim and
     //     `MPK_MOE_PATH_POLICY` exists to test it.
+    // FAIL-CLOSED against a SHORT allocation. In the megakernel this is always
+    // MAX_DYNAMIC_SHARED_MEMORY_SIZE, but a standalone launcher can hand the
+    // task less (the pybind wrapper used to size its launch off the golden
+    // layout alone), and a wide layout on a short allocation would write past
+    // the arena. Reading %dynamic_smem_size makes the device follow the
+    // allocation exactly -- CTA-uniform, one register read.
+    uint32_t dyn_smem;
+    asm("mov.u32 %0, %%dynamic_smem_size;" : "=r"(dyn_smem));
     if constexpr (OK2) {
       int const nact = static_cast<int32_t const *>(mask_ptr)[NUM_EXPERTS];
-      if (nact * (OUTPUT_SIZE / 64) <= expert_stride) {
+      if (nact * (OUTPUT_SIZE / 64) <= expert_stride &&
+          dyn_smem >= (uint32_t)smem_bytes_k(BATCH_SIZE, 2, REDUCTION_SIZE)) {
         MPK_MOE_RUN_PATH(2);
         return;
       }
     }
     if constexpr (OK1) {
-      MPK_MOE_RUN_PATH(1);
-      return;
+      if (dyn_smem >= (uint32_t)smem_bytes_k(BATCH_SIZE, 1, REDUCTION_SIZE)) {
+        MPK_MOE_RUN_PATH(1);
+        return;
+      }
     }
     MPK_MOE_RUN_PATH(0);
 #endif

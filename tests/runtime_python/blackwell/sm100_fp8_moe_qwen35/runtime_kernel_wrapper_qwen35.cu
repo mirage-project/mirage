@@ -549,8 +549,12 @@ void moe_w13_blockscale_sm100(torch::Tensor input_fp8,
                                               W13_K_SCALE,
               "w13 fallback weight_scale must be the CHECKPOINT block scale "
               "[256, 8, 16] float32");
-  constexpr int smem =
-      kernel::moe_fp8_blockscale::smem_bytes(Q35_BATCH_SIZE * Q35_NUM_TOPK);
+  // M4-I7: size the launch off the DISPATCHER's requirement, not the golden
+  // layout alone -- the fast paths stage up to 8 K tiles at once. The kernel
+  // also re-checks %dynamic_smem_size and degrades to the narrow path rather
+  // than reading past a short allocation, so this is performance, not safety.
+  constexpr int smem = kernel::moe_fp8_blockscale_fast::launch_smem_bytes(
+      Q35_BATCH_SIZE, W13_OUTPUT_SIZE, W13_REDUCTION_SIZE, /*w13=*/true);
   auto *entry =
       q35_moe_blockscale_kernel<true, W13_OUTPUT_SIZE, W13_REDUCTION_SIZE>;
   cudaFuncSetAttribute(
@@ -583,8 +587,8 @@ void moe_w2_blockscale_sm100(torch::Tensor input_fp8,
                                               W2_K_SCALE,
               "w2 fallback weight_scale must be the CHECKPOINT block scale "
               "[256, 16, 4] float32");
-  constexpr int smem =
-      kernel::moe_fp8_blockscale::smem_bytes(Q35_BATCH_SIZE * Q35_NUM_TOPK);
+  constexpr int smem = kernel::moe_fp8_blockscale_fast::launch_smem_bytes(
+      Q35_BATCH_SIZE, W2_OUTPUT_SIZE, W2_REDUCTION_SIZE, /*w13=*/false);
   auto *entry =
       q35_moe_blockscale_kernel<false, W2_OUTPUT_SIZE, W2_REDUCTION_SIZE>;
   cudaFuncSetAttribute(

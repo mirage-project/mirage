@@ -296,6 +296,17 @@ def get_compile_command(
         # knob must be part of the TU, hence a -D and not a runtime check.
         *(["-DMPK_FP8_DENSE_BASELINE=1"]
           if os.environ.get("MPK_FP8_DENSE_BASELINE") == "1" else []),
+        # M4-I7's A/B arm, same shape as M4-I2's above. With
+        # MPK_MOE_BLOCKSCALE_BASELINE=1 the grouped MoE GEMM (tasks 241/242)
+        # compiles its frozen golden body, so the generated code is the
+        # pre-M4-I7 code and both arms come from one tree.
+        # MPK_MOE_PATH_POLICY=<0|1|2> pins one fetch path instead of the shipped
+        # expert_stride rule -- the sweep knob that made the "PATH 1 dominates
+        # PATH 0 in MPK" claim falsifiable.
+        *(["-DMPK_MOE_BLOCKSCALE_BASELINE=1"]
+          if os.environ.get("MPK_MOE_BLOCKSCALE_BASELINE") == "1" else []),
+        *([f"-DMPK_MOE_PATH_POLICY={os.environ['MPK_MOE_PATH_POLICY']}"]
+          if os.environ.get("MPK_MOE_PATH_POLICY") in ("0", "1", "2") else []),
         "-lcuda",
         "-lcudart",
         "-lstdc++fs",
