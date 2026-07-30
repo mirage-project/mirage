@@ -1,0 +1,2138 @@
+{
+  "schema": "final/perf_score/v1",
+  "definitions": {
+    "mpk_decode": "bs*(D_full - D_pre)/(wall_full - wall_pre) [bench-protocol.md, M3-I7 binding]",
+    "mpk_e2e": "full arm wave wall (prefill+decode of the batch)",
+    "vllm": "bench_vllm.py artifacts [bench-protocol.md 5.1/5.2]",
+    "workload": "256/1024, identical at every bs",
+    "ac5_factor_max": 1.25,
+    "pinned_bounds": {
+      "BINDING_MAX_DISPERSION_PCT": 5.0,
+      "BINDING_BOOT_MEDIAN_AGREE_PCT": 3.0,
+      "BINDING_MIN_REPS": 3,
+      "BINDING_MIN_WARMUP": 1
+    },
+    "admission_policy": {
+      "cap_mode": "auto",
+      "cap_min_batch_size": 2,
+      "per_bs": {
+        "1": null,
+        "2": "auto",
+        "4": "auto",
+        "8": "auto",
+        "16": "auto"
+      },
+      "authority": "demo/qwen3_5/accept/admission_policy.py"
+    }
+  },
+  "per_bs": {
+    "1": {
+      "mpk": {
+        "batch_size": 1,
+        "full": {
+          "arm": "full",
+          "expect_max_seq_length": 1280,
+          "reps": [
+            {
+              "tag": "full_bs1_rep0",
+              "file": "timings_bs1_rep0.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6147.76220703125,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "full_bs1_rep1",
+              "file": "timings_bs1_rep1.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6658.927734375,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "full_bs1_rep2",
+              "file": "timings_bs1_rep2.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6157.21875,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            }
+          ],
+          "walls_ms": [
+            6147.76220703125,
+            6658.927734375,
+            6157.21875
+          ],
+          "decode_steps": [
+            1023,
+            1023,
+            1023
+          ],
+          "excluded": [],
+          "problems": [],
+          "n": 3,
+          "median_wall_ms": 6157.21875,
+          "median_D": 1023,
+          "distinct_D": [
+            1023
+          ],
+          "range_pct": 8.301889994467876,
+          "reps_required": 3
+        },
+        "pre": {
+          "arm": "pre",
+          "expect_max_seq_length": 259,
+          "reps": [
+            {
+              "tag": "pre_bs1_rep0",
+              "file": "timings_bs1_rep0.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 266.7147521972656,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "pre_bs1_rep1",
+              "file": "timings_bs1_rep1.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 302.55224609375,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "pre_bs1_rep2",
+              "file": "timings_bs1_rep2.json",
+              "n_waves": 1,
+              "cap_compiled": null,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 270.9396057128906,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 1,
+              "num_distinct_prompts": 1,
+              "prompt_ids": [
+                "syn256-00"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            }
+          ],
+          "walls_ms": [
+            266.7147521972656,
+            302.55224609375,
+            270.9396057128906
+          ],
+          "decode_steps": [
+            2,
+            2,
+            2
+          ],
+          "excluded": [],
+          "problems": [],
+          "n": 3,
+          "median_wall_ms": 270.9396057128906,
+          "median_D": 2,
+          "distinct_D": [
+            2
+          ],
+          "range_pct": 13.227115246657833,
+          "reps_required": 3
+        },
+        "device": {
+          "cuda_visible_devices": "2",
+          "uuid": "f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
+          "phys_index": 2,
+          "name": "NVIDIA B200"
+        },
+        "foreign_floor_mib": 62,
+        "admission_policy_expected": {
+          "compiled_cap": null,
+          "cap_mode": "auto",
+          "cap_min_batch_size": 2,
+          "per_bs": {
+            "1": null,
+            "2": "auto",
+            "4": "auto",
+            "8": "auto",
+            "16": "auto"
+          },
+          "authority": "demo/qwen3_5/accept/admission_policy.py"
+        },
+        "admission_policy_recorded_by_collector": {
+          "cap_mode": "auto",
+          "cap_min_batch_size": 2,
+          "per_bs": {
+            "1": null,
+            "2": "auto",
+            "4": "auto",
+            "8": "auto",
+            "16": "auto"
+          },
+          "authority": "demo/qwen3_5/accept/admission_policy.py"
+        },
+        "problems": [],
+        "decode_tokens_per_second": 173.4542271905207,
+        "e2e_seconds": 6.15721875,
+        "decode_slope_formula": "bs*(D_full - D_pre)/(wall_full - wall_pre)",
+        "dispersion": {
+          "bound_pct": 5.0,
+          "arms": {
+            "full": {
+              "n": 3,
+              "statistic": "fullrange_over_median_pct",
+              "value_pct": 8.301889994467876,
+              "full_range_pct": 8.301889994467876,
+              "iqr_pct": 4.150944997233938,
+              "ok": false
+            },
+            "pre": {
+              "n": 3,
+              "statistic": "fullrange_over_median_pct",
+              "value_pct": 13.227115246657833,
+              "full_range_pct": 13.227115246657833,
+              "iqr_pct": 6.613557623328917,
+              "ok": false
+            }
+          },
+          "ok": false
+        },
+        "measurement_valid": false
+      },
+      "vllm": {
+        "batch_size": 1,
+        "problems": [],
+        "fresh": {
+          "file": "/home/catalyst/m4status-gate/20260730T101424Z/perf/vllm_fresh/bs1.json",
+          "n": 3,
+          "decode": [
+            284.16798551793636,
+            284.1078757534929,
+            284.13382111283465
+          ],
+          "e2e": [
+            3.6174239250831306,
+            3.6195678199874237,
+            3.618471367051825
+          ],
+          "discarded_reps": 0
+        },
+        "fresh_identity": {
+          "vllm_version": "0.25.1",
+          "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+          "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+          "input_len": 256,
+          "output_len": 1024,
+          "reps": 3,
+          "warmup_reps": 1,
+          "language_model_only": "off",
+          "max_dispersion_pct": 5.0,
+          "dispersion_ok": true
+        },
+        "pinned_boots": [
+          {
+            "name": "pinned/full",
+            "n": 3,
+            "decode_median": 285.5105643395262,
+            "e2e_median": 3.601619330991525
+          }
+        ],
+        "pinned_binding": {
+          "source": "full/bs1.json",
+          "decode": 285.5105643395262,
+          "e2e": 3.601619330991525,
+          "binding_valid": true
+        },
+        "drift": {
+          "primary": "fresh",
+          "policy": "fresh sweep is the binding comparator; the pinned capture is the cross-check; disagreement beyond the protocol's own two-boot statistic FAILS the gate (it never selects the favourable number)",
+          "decode": {
+            "rule": "bench-protocol.md \u00a76 two-boot merge (IQR-based)",
+            "boots": [
+              {
+                "name": "pinned/full",
+                "n": 3,
+                "median": 285.5105643395262
+              },
+              {
+                "name": "fresh",
+                "n": 3,
+                "median": 284.13382111283465
+              }
+            ],
+            "n_total": 6,
+            "bounds": {
+              "merged_iqr_over_median_pct": 5.0,
+              "boot_median_max_deviation_pct": 3.0,
+              "min_total_reps": 6
+            },
+            "merged_median": 284.8185659844263,
+            "merged_iqr_over_median_pct": 0.4767412716128382,
+            "merged_fullrange_over_median_pct": 0.5375535596983021,
+            "boot_median_max_deviation_pct": 0.24296111200058554,
+            "valid": true
+          },
+          "e2e": {
+            "rule": "bench-protocol.md \u00a76 two-boot merge (IQR-based)",
+            "boots": [
+              {
+                "name": "pinned/full",
+                "n": 3,
+                "median": 3.601619330991525
+              },
+              {
+                "name": "fresh",
+                "n": 3,
+                "median": 3.618471367051825
+              }
+            ],
+            "n_total": 6,
+            "bounds": {
+              "merged_iqr_over_median_pct": 5.0,
+              "boot_median_max_deviation_pct": 3.0,
+              "min_total_reps": 6
+            },
+            "merged_median": 3.609735066042049,
+            "merged_iqr_over_median_pct": 0.4566389572694932,
+            "merged_fullrange_over_median_pct": 0.547625729997084,
+            "boot_median_max_deviation_pct": 0.242020559679332,
+            "valid": true
+          }
+        },
+        "identity_cross_check": {
+          "pinned": {
+            "vllm_version": "0.25.1",
+            "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+            "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+            "input_len": 256,
+            "output_len": 1024,
+            "language_model_only": "off"
+          },
+          "fresh": {
+            "vllm_version": "0.25.1",
+            "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+            "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+            "input_len": 256,
+            "output_len": 1024,
+            "language_model_only": "off"
+          },
+          "match": true
+        },
+        "decode_tokens_per_second": 284.13382111283465,
+        "e2e_seconds": 3.618471367051825,
+        "measurement_valid": true
+      },
+      "ac4": {
+        "criterion": "AC-4 bs1: mpk decode tok/s STRICTLY GREATER than vLLM",
+        "verdict": "FAIL",
+        "point_estimate_passes": false,
+        "measurement_valid": false,
+        "mpk_decode_tok_s": 173.4542271905207,
+        "vllm_decode_tok_s": 284.13382111283465,
+        "ratio_mpk_over_vllm": 0.6104666685267253,
+        "vllm_pinned_cross_check": 285.5105643395262,
+        "drift_valid": true
+      },
+      "ac5": {
+        "criterion": "AC-5 bs1: mpk e2e <= 1.25x vLLM e2e",
+        "verdict": "FAIL",
+        "point_estimate_passes": false,
+        "measurement_valid": false,
+        "mpk_e2e_s": 6.15721875,
+        "vllm_e2e_s": 3.618471367051825,
+        "ratio_mpk_over_vllm": 1.7016077026516967,
+        "max_ratio": 1.25,
+        "vllm_pinned_cross_check": 3.601619330991525,
+        "drift_valid": true
+      }
+    },
+    "2": {
+      "mpk": {
+        "batch_size": 2,
+        "full": {
+          "arm": "full",
+          "expect_max_seq_length": 1280,
+          "reps": [
+            {
+              "tag": "full_bs2_rep0",
+              "file": "timings_bs2_rep0.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6818.22802734375,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 69,
+              "gpu_index": 2
+            },
+            {
+              "tag": "full_bs2_rep1",
+              "file": "timings_bs2_rep1.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6805.83349609375,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "full_bs2_rep2",
+              "file": "timings_bs2_rep2.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 6674.24462890625,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            }
+          ],
+          "walls_ms": [
+            6818.22802734375,
+            6805.83349609375,
+            6674.24462890625
+          ],
+          "decode_steps": [
+            1023,
+            1023,
+            1023
+          ],
+          "excluded": [],
+          "problems": [],
+          "n": 3,
+          "median_wall_ms": 6805.83349609375,
+          "median_D": 1023,
+          "distinct_D": [
+            1023
+          ],
+          "range_pct": 2.115588024892765,
+          "reps_required": 3
+        },
+        "pre": {
+          "arm": "pre",
+          "expect_max_seq_length": 259,
+          "reps": [
+            {
+              "tag": "pre_bs2_rep0",
+              "file": "timings_bs2_rep0.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 401.1018371582031,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 67,
+              "gpu_index": 2
+            },
+            {
+              "tag": "pre_bs2_rep1",
+              "file": "timings_bs2_rep1.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 397.5659484863281,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "pre_bs2_rep2",
+              "file": "timings_bs2_rep2.json",
+              "n_waves": 1,
+              "cap_compiled": 8,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 396.4389953613281,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 2,
+              "num_distinct_prompts": 2,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            }
+          ],
+          "walls_ms": [
+            401.1018371582031,
+            397.5659484863281,
+            396.4389953613281
+          ],
+          "decode_steps": [
+            2,
+            2,
+            2
+          ],
+          "excluded": [],
+          "problems": [],
+          "n": 3,
+          "median_wall_ms": 397.5659484863281,
+          "median_D": 2,
+          "distinct_D": [
+            2
+          ],
+          "range_pct": 1.1728473765492395,
+          "reps_required": 3
+        },
+        "device": {
+          "cuda_visible_devices": "2",
+          "uuid": "f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
+          "phys_index": 2,
+          "name": "NVIDIA B200"
+        },
+        "foreign_floor_mib": 62,
+        "admission_policy_expected": {
+          "compiled_cap": 8,
+          "cap_mode": "auto",
+          "cap_min_batch_size": 2,
+          "per_bs": {
+            "1": null,
+            "2": "auto",
+            "4": "auto",
+            "8": "auto",
+            "16": "auto"
+          },
+          "authority": "demo/qwen3_5/accept/admission_policy.py"
+        },
+        "admission_policy_recorded_by_collector": {
+          "cap_mode": "auto",
+          "cap_min_batch_size": 2,
+          "per_bs": {
+            "1": null,
+            "2": "auto",
+            "4": "auto",
+            "8": "auto",
+            "16": "auto"
+          },
+          "authority": "demo/qwen3_5/accept/admission_policy.py"
+        },
+        "problems": [],
+        "decode_tokens_per_second": 318.65086543747645,
+        "e2e_seconds": 6.80583349609375,
+        "decode_slope_formula": "bs*(D_full - D_pre)/(wall_full - wall_pre)",
+        "dispersion": {
+          "bound_pct": 5.0,
+          "arms": {
+            "full": {
+              "n": 3,
+              "statistic": "fullrange_over_median_pct",
+              "value_pct": 2.115588024892765,
+              "full_range_pct": 2.115588024892765,
+              "iqr_pct": 1.0577940124463825,
+              "ok": true
+            },
+            "pre": {
+              "n": 3,
+              "statistic": "fullrange_over_median_pct",
+              "value_pct": 1.1728473765492395,
+              "full_range_pct": 1.1728473765492395,
+              "iqr_pct": 0.5864236882746198,
+              "ok": true
+            }
+          },
+          "ok": true
+        },
+        "measurement_valid": true
+      },
+      "vllm": {
+        "batch_size": 2,
+        "problems": [],
+        "fresh": {
+          "file": "/home/catalyst/m4status-gate/20260730T101424Z/perf/vllm_fresh/bs2.json",
+          "n": 3,
+          "decode": [
+            524.4091849154825,
+            529.9796512556082,
+            531.405666044636
+          ],
+          "e2e": [
+            3.9237706989515573,
+            3.8797123529948294,
+            3.8692643139511347
+          ],
+          "discarded_reps": 0
+        },
+        "fresh_identity": {
+          "vllm_version": "0.25.1",
+          "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+          "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+          "input_len": 256,
+          "output_len": 1024,
+          "reps": 3,
+          "warmup_reps": 1,
+          "language_model_only": "off",
+          "max_dispersion_pct": 5.0,
+          "dispersion_ok": true
+        },
+        "pinned_boots": [
+          {
+            "name": "pinned/full",
+            "n": 3,
+            "decode_median": 529.7960084681633,
+            "e2e_median": 3.886238737992244
+          }
+        ],
+        "pinned_binding": {
+          "source": "full/bs2.json",
+          "decode": 529.7960084681633,
+          "e2e": 3.886238737992244,
+          "binding_valid": true
+        },
+        "drift": {
+          "primary": "fresh",
+          "policy": "fresh sweep is the binding comparator; the pinned capture is the cross-check; disagreement beyond the protocol's own two-boot statistic FAILS the gate (it never selects the favourable number)",
+          "decode": {
+            "rule": "bench-protocol.md \u00a76 two-boot merge (IQR-based)",
+            "boots": [
+              {
+                "name": "pinned/full",
+                "n": 3,
+                "median": 529.7960084681633
+              },
+              {
+                "name": "fresh",
+                "n": 3,
+                "median": 529.9796512556082
+              }
+            ],
+            "n_total": 6,
+            "bounds": {
+              "merged_iqr_over_median_pct": 5.0,
+              "boot_median_max_deviation_pct": 3.0,
+              "min_total_reps": 6
+            },
+            "merged_median": 529.848594302202,
+            "merged_iqr_over_median_pct": 0.3942565913361835,
+            "merged_fullrange_over_median_pct": 1.3204679986681278,
+            "boot_median_max_deviation_pct": 0.024734793074028916,
+            "valid": true
+          },
+          "e2e": {
+            "rule": "bench-protocol.md \u00a76 two-boot merge (IQR-based)",
+            "boots": [
+              {
+                "name": "pinned/full",
+                "n": 3,
+                "median": 3.886238737992244
+              },
+              {
+                "name": "fresh",
+                "n": 3,
+                "median": 3.8797123529948294
+              }
+            ],
+            "n_total": 6,
+            "bounds": {
+              "merged_iqr_over_median_pct": 5.0,
+              "boot_median_max_deviation_pct": 3.0,
+              "min_total_reps": 6
+            },
+            "merged_median": 3.88321486049972,
+            "merged_iqr_over_median_pct": 0.40845699553176734,
+            "merged_fullrange_over_median_pct": 1.4036407193139018,
+            "boot_median_max_deviation_pct": 0.09019607801047468,
+            "valid": true
+          }
+        },
+        "identity_cross_check": {
+          "pinned": {
+            "vllm_version": "0.25.1",
+            "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+            "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+            "input_len": 256,
+            "output_len": 1024,
+            "language_model_only": "off"
+          },
+          "fresh": {
+            "vllm_version": "0.25.1",
+            "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+            "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+            "input_len": 256,
+            "output_len": 1024,
+            "language_model_only": "off"
+          },
+          "match": true
+        },
+        "decode_tokens_per_second": 529.9796512556082,
+        "e2e_seconds": 3.8797123529948294,
+        "measurement_valid": true
+      },
+      "ac4": {
+        "criterion": "AC-4 bs2: mpk decode tok/s STRICTLY GREATER than vLLM",
+        "verdict": "FAIL",
+        "point_estimate_passes": false,
+        "measurement_valid": true,
+        "mpk_decode_tok_s": 318.65086543747645,
+        "vllm_decode_tok_s": 529.9796512556082,
+        "ratio_mpk_over_vllm": 0.6012511323454411,
+        "vllm_pinned_cross_check": 529.7960084681633,
+        "drift_valid": true
+      },
+      "ac5": {
+        "criterion": "AC-5 bs2: mpk e2e <= 1.25x vLLM e2e",
+        "verdict": "FAIL",
+        "point_estimate_passes": false,
+        "measurement_valid": true,
+        "mpk_e2e_s": 6.80583349609375,
+        "vllm_e2e_s": 3.8797123529948294,
+        "ratio_mpk_over_vllm": 1.7542108478326204,
+        "max_ratio": 1.25,
+        "vllm_pinned_cross_check": 3.886238737992244,
+        "drift_valid": true
+      }
+    },
+    "4": {
+      "mpk": {
+        "batch_size": 4,
+        "full": {
+          "arm": "full",
+          "expect_max_seq_length": 1280,
+          "reps": [
+            {
+              "tag": "full_bs4_rep0",
+              "file": "timings_bs4_rep0.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 7536.927734375,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 67,
+              "gpu_index": 2
+            },
+            {
+              "tag": "full_bs4_rep1",
+              "file": "timings_bs4_rep1.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 7952.134765625,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "full_bs4_rep2",
+              "file": "timings_bs4_rep2.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 8114.75,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            }
+          ],
+          "walls_ms": [
+            7536.927734375,
+            7952.134765625,
+            8114.75
+          ],
+          "decode_steps": [
+            1023,
+            1023,
+            1023
+          ],
+          "excluded": [],
+          "problems": [],
+          "n": 3,
+          "median_wall_ms": 7952.134765625,
+          "median_D": 1023,
+          "distinct_D": [
+            1023
+          ],
+          "range_pct": 7.266253435778963,
+          "reps_required": 3
+        },
+        "pre": {
+          "arm": "pre",
+          "expect_max_seq_length": 259,
+          "reps": [
+            {
+              "tag": "pre_bs4_rep0",
+              "file": "timings_bs4_rep0.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 680.1577758789062,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "pre_bs4_rep1",
+              "file": "timings_bs4_rep1.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 666.0004272460938,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "pre_bs4_rep2",
+              "file": "timings_bs4_rep2.json",
+              "n_waves": 1,
+              "cap_compiled": 4,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 669.411376953125,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 4,
+              "num_distinct_prompts": 4,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            }
+          ],
+          "walls_ms": [
+            680.1577758789062,
+            666.0004272460938,
+            669.411376953125
+          ],
+          "decode_steps": [
+            2,
+            2,
+            2
+          ],
+          "excluded": [],
+          "problems": [],
+          "n": 3,
+          "median_wall_ms": 669.411376953125,
+          "median_D": 2,
+          "distinct_D": [
+            2
+          ],
+          "range_pct": 2.1148951332812285,
+          "reps_required": 3
+        },
+        "device": {
+          "cuda_visible_devices": "2",
+          "uuid": "f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
+          "phys_index": 2,
+          "name": "NVIDIA B200"
+        },
+        "foreign_floor_mib": 62,
+        "admission_policy_expected": {
+          "compiled_cap": 4,
+          "cap_mode": "auto",
+          "cap_min_batch_size": 2,
+          "per_bs": {
+            "1": null,
+            "2": "auto",
+            "4": "auto",
+            "8": "auto",
+            "16": "auto"
+          },
+          "authority": "demo/qwen3_5/accept/admission_policy.py"
+        },
+        "admission_policy_recorded_by_collector": {
+          "cap_mode": "auto",
+          "cap_min_batch_size": 2,
+          "per_bs": {
+            "1": null,
+            "2": "auto",
+            "4": "auto",
+            "8": "auto",
+            "16": "auto"
+          },
+          "authority": "demo/qwen3_5/accept/admission_policy.py"
+        },
+        "problems": [],
+        "decode_tokens_per_second": 560.7792280498497,
+        "e2e_seconds": 7.952134765625,
+        "decode_slope_formula": "bs*(D_full - D_pre)/(wall_full - wall_pre)",
+        "dispersion": {
+          "bound_pct": 5.0,
+          "arms": {
+            "full": {
+              "n": 3,
+              "statistic": "fullrange_over_median_pct",
+              "value_pct": 7.266253435778963,
+              "full_range_pct": 7.266253435778963,
+              "iqr_pct": 3.6331267178894815,
+              "ok": false
+            },
+            "pre": {
+              "n": 3,
+              "statistic": "fullrange_over_median_pct",
+              "value_pct": 2.1148951332812285,
+              "full_range_pct": 2.1148951332812285,
+              "iqr_pct": 1.0574475666406142,
+              "ok": true
+            }
+          },
+          "ok": false
+        },
+        "measurement_valid": false
+      },
+      "vllm": {
+        "batch_size": 4,
+        "problems": [],
+        "fresh": {
+          "file": "/home/catalyst/m4status-gate/20260730T101424Z/perf/vllm_fresh/bs4.json",
+          "n": 3,
+          "decode": [
+            952.8272827527351,
+            936.361311883166,
+            923.4044792147434
+          ],
+          "e2e": [
+            4.372939654975198,
+            4.448229199042544,
+            4.509149302029982
+          ],
+          "discarded_reps": 0
+        },
+        "fresh_identity": {
+          "vllm_version": "0.25.1",
+          "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+          "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+          "input_len": 256,
+          "output_len": 1024,
+          "reps": 3,
+          "warmup_reps": 1,
+          "language_model_only": "off",
+          "max_dispersion_pct": 5.0,
+          "dispersion_ok": true
+        },
+        "pinned_boots": [
+          {
+            "name": "pinned/full",
+            "n": 3,
+            "decode_median": 934.3478174709361,
+            "e2e_median": 4.45474189100787
+          }
+        ],
+        "pinned_binding": {
+          "source": "full/bs4.json",
+          "decode": 934.3478174709361,
+          "e2e": 4.45474189100787,
+          "binding_valid": true
+        },
+        "drift": {
+          "primary": "fresh",
+          "policy": "fresh sweep is the binding comparator; the pinned capture is the cross-check; disagreement beyond the protocol's own two-boot statistic FAILS the gate (it never selects the favourable number)",
+          "decode": {
+            "rule": "bench-protocol.md \u00a76 two-boot merge (IQR-based)",
+            "boots": [
+              {
+                "name": "pinned/full",
+                "n": 3,
+                "median": 934.3478174709361
+              },
+              {
+                "name": "fresh",
+                "n": 3,
+                "median": 936.361311883166
+              }
+            ],
+            "n_total": 6,
+            "bounds": {
+              "merged_iqr_over_median_pct": 5.0,
+              "boot_median_max_deviation_pct": 3.0,
+              "min_total_reps": 6
+            },
+            "merged_median": 935.354564677051,
+            "merged_iqr_over_median_pct": 2.3908873726265467,
+            "merged_fullrange_over_median_pct": 3.5069923075095897,
+            "boot_median_max_deviation_pct": 0.10763268220779316,
+            "valid": true
+          },
+          "e2e": {
+            "rule": "bench-protocol.md \u00a76 two-boot merge (IQR-based)",
+            "boots": [
+              {
+                "name": "pinned/full",
+                "n": 3,
+                "median": 4.45474189100787
+              },
+              {
+                "name": "fresh",
+                "n": 3,
+                "median": 4.448229199042544
+              }
+            ],
+            "n_total": 6,
+            "bounds": {
+              "merged_iqr_over_median_pct": 5.0,
+              "boot_median_max_deviation_pct": 3.0,
+              "min_total_reps": 6
+            },
+            "merged_median": 4.451485545025207,
+            "merged_iqr_over_median_pct": 2.331478047781282,
+            "merged_fullrange_over_median_pct": 3.393745873495112,
+            "boot_median_max_deviation_pct": 0.07315189389534217,
+            "valid": true
+          }
+        },
+        "identity_cross_check": {
+          "pinned": {
+            "vllm_version": "0.25.1",
+            "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+            "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+            "input_len": 256,
+            "output_len": 1024,
+            "language_model_only": "off"
+          },
+          "fresh": {
+            "vllm_version": "0.25.1",
+            "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+            "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+            "input_len": 256,
+            "output_len": 1024,
+            "language_model_only": "off"
+          },
+          "match": true
+        },
+        "decode_tokens_per_second": 936.361311883166,
+        "e2e_seconds": 4.448229199042544,
+        "measurement_valid": true
+      },
+      "ac4": {
+        "criterion": "AC-4 bs4: mpk decode tok/s STRICTLY GREATER than vLLM",
+        "verdict": "FAIL",
+        "point_estimate_passes": false,
+        "measurement_valid": false,
+        "mpk_decode_tok_s": 560.7792280498497,
+        "vllm_decode_tok_s": 936.361311883166,
+        "ratio_mpk_over_vllm": 0.5988919244453157,
+        "vllm_pinned_cross_check": 934.3478174709361,
+        "drift_valid": true
+      },
+      "ac5": {
+        "criterion": "AC-5 bs4: mpk e2e <= 1.25x vLLM e2e",
+        "verdict": "FAIL",
+        "point_estimate_passes": false,
+        "measurement_valid": false,
+        "mpk_e2e_s": 7.952134765625,
+        "vllm_e2e_s": 4.448229199042544,
+        "ratio_mpk_over_vllm": 1.7877079641796902,
+        "max_ratio": 1.25,
+        "vllm_pinned_cross_check": 4.45474189100787,
+        "drift_valid": true
+      }
+    },
+    "8": {
+      "mpk": {
+        "batch_size": 8,
+        "full": {
+          "arm": "full",
+          "expect_max_seq_length": 1280,
+          "reps": [
+            {
+              "tag": "full_bs8_rep0",
+              "file": "timings_bs8_rep0.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 9276.283203125,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "full_bs8_rep1",
+              "file": "timings_bs8_rep1.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 9988.1962890625,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 68,
+              "gpu_index": 2
+            },
+            {
+              "tag": "full_bs8_rep2",
+              "file": "timings_bs8_rep2.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 10737.5390625,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            }
+          ],
+          "walls_ms": [
+            9276.283203125,
+            9988.1962890625,
+            10737.5390625
+          ],
+          "decode_steps": [
+            1023,
+            1023,
+            1023
+          ],
+          "excluded": [],
+          "problems": [],
+          "n": 3,
+          "median_wall_ms": 9988.1962890625,
+          "median_D": 1023,
+          "distinct_D": [
+            1023
+          ],
+          "range_pct": 14.629827218905753,
+          "reps_required": 3
+        },
+        "pre": {
+          "arm": "pre",
+          "expect_max_seq_length": 259,
+          "reps": [
+            {
+              "tag": "pre_bs8_rep0",
+              "file": "timings_bs8_rep0.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 1399.2080078125,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "pre_bs8_rep1",
+              "file": "timings_bs8_rep1.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 1401.1544189453125,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            },
+            {
+              "tag": "pre_bs8_rep2",
+              "file": "timings_bs8_rep2.json",
+              "n_waves": 1,
+              "cap_compiled": 2,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 1393.496337890625,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 8,
+              "num_distinct_prompts": 8,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            }
+          ],
+          "walls_ms": [
+            1399.2080078125,
+            1401.1544189453125,
+            1393.496337890625
+          ],
+          "decode_steps": [
+            2,
+            2,
+            2
+          ],
+          "excluded": [],
+          "problems": [],
+          "n": 3,
+          "median_wall_ms": 1399.2080078125,
+          "median_D": 2,
+          "distinct_D": [
+            2
+          ],
+          "range_pct": 0.5473154107129521,
+          "reps_required": 3
+        },
+        "device": {
+          "cuda_visible_devices": "2",
+          "uuid": "f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
+          "phys_index": 2,
+          "name": "NVIDIA B200"
+        },
+        "foreign_floor_mib": 62,
+        "admission_policy_expected": {
+          "compiled_cap": 2,
+          "cap_mode": "auto",
+          "cap_min_batch_size": 2,
+          "per_bs": {
+            "1": null,
+            "2": "auto",
+            "4": "auto",
+            "8": "auto",
+            "16": "auto"
+          },
+          "authority": "demo/qwen3_5/accept/admission_policy.py"
+        },
+        "admission_policy_recorded_by_collector": {
+          "cap_mode": "auto",
+          "cap_min_batch_size": 2,
+          "per_bs": {
+            "1": null,
+            "2": "auto",
+            "4": "auto",
+            "8": "auto",
+            "16": "auto"
+          },
+          "authority": "demo/qwen3_5/accept/admission_policy.py"
+        },
+        "problems": [],
+        "decode_tokens_per_second": 950.9851140245436,
+        "e2e_seconds": 9.9881962890625,
+        "decode_slope_formula": "bs*(D_full - D_pre)/(wall_full - wall_pre)",
+        "dispersion": {
+          "bound_pct": 5.0,
+          "arms": {
+            "full": {
+              "n": 3,
+              "statistic": "fullrange_over_median_pct",
+              "value_pct": 14.629827218905753,
+              "full_range_pct": 14.629827218905753,
+              "iqr_pct": 7.314913609452876,
+              "ok": false
+            },
+            "pre": {
+              "n": 3,
+              "statistic": "fullrange_over_median_pct",
+              "value_pct": 0.5473154107129521,
+              "full_range_pct": 0.5473154107129521,
+              "iqr_pct": 0.27365770535647604,
+              "ok": true
+            }
+          },
+          "ok": false
+        },
+        "measurement_valid": false
+      },
+      "vllm": {
+        "batch_size": 8,
+        "problems": [
+          "fresh run's own dispersion check failed (bench-protocol.md 6)"
+        ],
+        "fresh": {
+          "file": "/home/catalyst/m4status-gate/20260730T101424Z/perf/vllm_fresh/bs8.json",
+          "n": 3,
+          "decode": [
+            1776.1446719139847,
+            1670.5512181115778,
+            1734.9970706382192
+          ],
+          "e2e": [
+            4.686131054069847,
+            4.978933128993958,
+            4.823541408055462
+          ],
+          "discarded_reps": 0
+        },
+        "fresh_identity": {
+          "vllm_version": "0.25.1",
+          "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+          "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+          "input_len": 256,
+          "output_len": 1024,
+          "reps": 3,
+          "warmup_reps": 1,
+          "language_model_only": "off",
+          "max_dispersion_pct": 5.0,
+          "dispersion_ok": false
+        },
+        "pinned_boots": [
+          {
+            "name": "pinned/full",
+            "n": 3,
+            "decode_median": 1722.6574778123065,
+            "e2e_median": 4.9649979309760965
+          },
+          {
+            "name": "pinned/full-hibs",
+            "n": 5,
+            "decode_median": 1687.503243207935,
+            "e2e_median": 4.9418178819760215
+          }
+        ],
+        "pinned_binding": {
+          "source": "bs8.merged.json",
+          "decode": 1692.4669356762156,
+          "e2e": 4.953407906476059,
+          "binding_valid": true
+        },
+        "drift": {
+          "primary": "fresh",
+          "policy": "fresh sweep is the binding comparator; the pinned capture is the cross-check; disagreement beyond the protocol's own two-boot statistic FAILS the gate (it never selects the favourable number)",
+          "decode": {
+            "rule": "bench-protocol.md \u00a76 two-boot merge (IQR-based)",
+            "boots": [
+              {
+                "name": "pinned/full",
+                "n": 3,
+                "median": 1722.6574778123065
+              },
+              {
+                "name": "pinned/full-hibs",
+                "n": 5,
+                "median": 1687.503243207935
+              },
+              {
+                "name": "fresh",
+                "n": 3,
+                "median": 1734.9970706382192
+              }
+            ],
+            "n_total": 11,
+            "bounds": {
+              "merged_iqr_over_median_pct": 5.0,
+              "boot_median_max_deviation_pct": 3.0,
+              "min_total_reps": 6
+            },
+            "merged_median": 1697.430628144496,
+            "merged_iqr_over_median_pct": 4.18789651368405,
+            "merged_fullrange_over_median_pct": 6.273489712283071,
+            "boot_median_max_deviation_pct": 2.2131356575548504,
+            "valid": true
+          },
+          "e2e": {
+            "rule": "bench-protocol.md \u00a76 two-boot merge (IQR-based)",
+            "boots": [
+              {
+                "name": "pinned/full",
+                "n": 3,
+                "median": 4.9649979309760965
+              },
+              {
+                "name": "pinned/full-hibs",
+                "n": 5,
+                "median": 4.9418178819760215
+              },
+              {
+                "name": "fresh",
+                "n": 3,
+                "median": 4.823541408055462
+              }
+            ],
+            "n_total": 11,
+            "bounds": {
+              "merged_iqr_over_median_pct": 5.0,
+              "boot_median_max_deviation_pct": 3.0,
+              "min_total_reps": 6
+            },
+            "merged_median": 4.9418178819760215,
+            "merged_iqr_over_median_pct": 4.446948192102515,
+            "merged_fullrange_over_median_pct": 7.647957107449694,
+            "boot_median_max_deviation_pct": 2.393379860312979,
+            "valid": true
+          }
+        },
+        "identity_cross_check": {
+          "pinned": {
+            "vllm_version": "0.25.1",
+            "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+            "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+            "input_len": 256,
+            "output_len": 1024,
+            "language_model_only": "off"
+          },
+          "fresh": {
+            "vllm_version": "0.25.1",
+            "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+            "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+            "input_len": 256,
+            "output_len": 1024,
+            "language_model_only": "off"
+          },
+          "match": true
+        },
+        "decode_tokens_per_second": 1734.9970706382192,
+        "e2e_seconds": 4.823541408055462,
+        "measurement_valid": false
+      },
+      "ac4": {
+        "criterion": "AC-4 bs8: mpk decode tok/s STRICTLY GREATER than vLLM",
+        "verdict": "FAIL",
+        "point_estimate_passes": false,
+        "measurement_valid": false,
+        "mpk_decode_tok_s": 950.9851140245436,
+        "vllm_decode_tok_s": 1734.9970706382192,
+        "ratio_mpk_over_vllm": 0.5481191467803017,
+        "vllm_pinned_cross_check": 1692.4669356762156,
+        "drift_valid": true
+      },
+      "ac5": {
+        "criterion": "AC-5 bs8: mpk e2e <= 1.25x vLLM e2e",
+        "verdict": "FAIL",
+        "point_estimate_passes": false,
+        "measurement_valid": false,
+        "mpk_e2e_s": 9.9881962890625,
+        "vllm_e2e_s": 4.823541408055462,
+        "ratio_mpk_over_vllm": 2.070718470952049,
+        "max_ratio": 1.25,
+        "vllm_pinned_cross_check": 4.953407906476059,
+        "drift_valid": true
+      }
+    },
+    "16": {
+      "mpk": {
+        "batch_size": 16,
+        "full": {
+          "arm": "full",
+          "expect_max_seq_length": 1280,
+          "reps": [
+            {
+              "tag": "full_bs16_rep0",
+              "file": "timings_bs16_rep0.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 12332.1201171875,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "full_bs16_rep1",
+              "file": "timings_bs16_rep1.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 12217.734375,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 86,
+              "gpu_index": 2
+            },
+            {
+              "tag": "full_bs16_rep2",
+              "file": "timings_bs16_rep2.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 12877.8662109375,
+              "D": 1023,
+              "max_seq_length": 1280,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            }
+          ],
+          "walls_ms": [
+            12332.1201171875,
+            12217.734375,
+            12877.8662109375
+          ],
+          "decode_steps": [
+            1023,
+            1023,
+            1023
+          ],
+          "excluded": [],
+          "problems": [],
+          "n": 3,
+          "median_wall_ms": 12332.1201171875,
+          "median_D": 1023,
+          "distinct_D": [
+            1023
+          ],
+          "range_pct": 5.352946854754214,
+          "reps_required": 3
+        },
+        "pre": {
+          "arm": "pre",
+          "expect_max_seq_length": 259,
+          "reps": [
+            {
+              "tag": "pre_bs16_rep0",
+              "file": "timings_bs16_rep0.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 2404.485107421875,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 66,
+              "gpu_index": 2
+            },
+            {
+              "tag": "pre_bs16_rep1",
+              "file": "timings_bs16_rep1.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 2402.4296875,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            },
+            {
+              "tag": "pre_bs16_rep2",
+              "file": "timings_bs16_rep2.json",
+              "n_waves": 1,
+              "cap_compiled": 1,
+              "cap_requested": "policy",
+              "cap_authority": "demo/qwen3_5/accept/admission_policy.py",
+              "wall_ms": 2408.076171875,
+              "D": 2,
+              "max_seq_length": 259,
+              "mbt": 16,
+              "num_requests": 16,
+              "num_distinct_prompts": 16,
+              "prompt_ids": [
+                "syn256-00",
+                "syn256-01",
+                "syn256-02",
+                "syn256-03",
+                "syn256-04",
+                "syn256-05",
+                "syn256-06",
+                "syn256-07",
+                "syn256-08",
+                "syn256-09",
+                "syn256-10",
+                "syn256-11",
+                "syn256-12",
+                "syn256-13",
+                "syn256-14",
+                "syn256-15"
+              ],
+              "gpu_before_mib": 62,
+              "gpu_index": 2
+            }
+          ],
+          "walls_ms": [
+            2404.485107421875,
+            2402.4296875,
+            2408.076171875
+          ],
+          "decode_steps": [
+            2,
+            2,
+            2
+          ],
+          "excluded": [],
+          "problems": [],
+          "n": 3,
+          "median_wall_ms": 2404.485107421875,
+          "median_D": 2,
+          "distinct_D": [
+            2
+          ],
+          "range_pct": 0.2348313307315197,
+          "reps_required": 3
+        },
+        "device": {
+          "cuda_visible_devices": "2",
+          "uuid": "f8a4f1df-8b46-4cbf-3244-a33b90e06aa9",
+          "phys_index": 2,
+          "name": "NVIDIA B200"
+        },
+        "foreign_floor_mib": 62,
+        "admission_policy_expected": {
+          "compiled_cap": 1,
+          "cap_mode": "auto",
+          "cap_min_batch_size": 2,
+          "per_bs": {
+            "1": null,
+            "2": "auto",
+            "4": "auto",
+            "8": "auto",
+            "16": "auto"
+          },
+          "authority": "demo/qwen3_5/accept/admission_policy.py"
+        },
+        "admission_policy_recorded_by_collector": {
+          "cap_mode": "auto",
+          "cap_min_batch_size": 2,
+          "per_bs": {
+            "1": null,
+            "2": "auto",
+            "4": "auto",
+            "8": "auto",
+            "16": "auto"
+          },
+          "authority": "demo/qwen3_5/accept/admission_policy.py"
+        },
+        "problems": [],
+        "decode_tokens_per_second": 1645.507714972457,
+        "e2e_seconds": 12.3321201171875,
+        "decode_slope_formula": "bs*(D_full - D_pre)/(wall_full - wall_pre)",
+        "dispersion": {
+          "bound_pct": 5.0,
+          "arms": {
+            "full": {
+              "n": 3,
+              "statistic": "fullrange_over_median_pct",
+              "value_pct": 5.352946854754214,
+              "full_range_pct": 5.352946854754214,
+              "iqr_pct": 2.676473427377107,
+              "ok": false
+            },
+            "pre": {
+              "n": 3,
+              "statistic": "fullrange_over_median_pct",
+              "value_pct": 0.2348313307315197,
+              "full_range_pct": 0.2348313307315197,
+              "iqr_pct": 0.11741566536575986,
+              "ok": true
+            }
+          },
+          "ok": false
+        },
+        "measurement_valid": false
+      },
+      "vllm": {
+        "batch_size": 16,
+        "problems": [],
+        "fresh": {
+          "file": "/home/catalyst/m4status-gate/20260730T101424Z/perf/vllm_fresh/bs16.json",
+          "n": 3,
+          "decode": [
+            3032.523422454821,
+            3110.208904921179,
+            2960.6277141127916
+          ],
+          "e2e": [
+            5.5670896240044385,
+            5.423569518025033,
+            5.687825358007103
+          ],
+          "discarded_reps": 0
+        },
+        "fresh_identity": {
+          "vllm_version": "0.25.1",
+          "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+          "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+          "input_len": 256,
+          "output_len": 1024,
+          "reps": 3,
+          "warmup_reps": 1,
+          "language_model_only": "off",
+          "max_dispersion_pct": 5.0,
+          "dispersion_ok": true
+        },
+        "pinned_boots": [
+          {
+            "name": "pinned/full",
+            "n": 3,
+            "decode_median": 2988.6001877977455,
+            "e2e_median": 5.5804561609984376
+          },
+          {
+            "name": "pinned/full-hibs",
+            "n": 5,
+            "decode_median": 3020.8010488861078,
+            "e2e_median": 5.555320779007161
+          }
+        ],
+        "pinned_binding": {
+          "source": "bs16.merged.json",
+          "decode": 3018.1111975195627,
+          "e2e": 5.567888470002799,
+          "binding_valid": true
+        },
+        "drift": {
+          "primary": "fresh",
+          "policy": "fresh sweep is the binding comparator; the pinned capture is the cross-check; disagreement beyond the protocol's own two-boot statistic FAILS the gate (it never selects the favourable number)",
+          "decode": {
+            "rule": "bench-protocol.md \u00a76 two-boot merge (IQR-based)",
+            "boots": [
+              {
+                "name": "pinned/full",
+                "n": 3,
+                "median": 2988.6001877977455
+              },
+              {
+                "name": "pinned/full-hibs",
+                "n": 5,
+                "median": 3020.8010488861078
+              },
+              {
+                "name": "fresh",
+                "n": 3,
+                "median": 3032.523422454821
+              }
+            ],
+            "n_total": 11,
+            "bounds": {
+              "merged_iqr_over_median_pct": 5.0,
+              "boot_median_max_deviation_pct": 3.0,
+              "min_total_reps": 6
+            },
+            "merged_median": 3020.8010488861078,
+            "merged_iqr_over_median_pct": 3.421167211166924,
+            "merged_fullrange_over_median_pct": 6.863034367530391,
+            "boot_median_max_deviation_pct": 1.065970931790956,
+            "valid": true
+          },
+          "e2e": {
+            "rule": "bench-protocol.md \u00a76 two-boot merge (IQR-based)",
+            "boots": [
+              {
+                "name": "pinned/full",
+                "n": 3,
+                "median": 5.5804561609984376
+              },
+              {
+                "name": "pinned/full-hibs",
+                "n": 5,
+                "median": 5.555320779007161
+              },
+              {
+                "name": "fresh",
+                "n": 3,
+                "median": 5.5670896240044385
+              }
+            ],
+            "n_total": 11,
+            "bounds": {
+              "merged_iqr_over_median_pct": 5.0,
+              "boot_median_max_deviation_pct": 3.0,
+              "min_total_reps": 6
+            },
+            "merged_median": 5.5670896240044385,
+            "merged_iqr_over_median_pct": 3.5463884511619295,
+            "merged_fullrange_over_median_pct": 6.413005863273097,
+            "boot_median_max_deviation_pct": 0.24009918820714818,
+            "valid": true
+          }
+        },
+        "identity_cross_check": {
+          "pinned": {
+            "vllm_version": "0.25.1",
+            "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+            "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+            "input_len": 256,
+            "output_len": 1024,
+            "language_model_only": "off"
+          },
+          "fresh": {
+            "vllm_version": "0.25.1",
+            "model_id": "Qwen/Qwen3.5-35B-A3B-FP8",
+            "revision": "9d1823d2dee688a6b25e77009dc727688c44936e",
+            "input_len": 256,
+            "output_len": 1024,
+            "language_model_only": "off"
+          },
+          "match": true
+        },
+        "decode_tokens_per_second": 3032.523422454821,
+        "e2e_seconds": 5.5670896240044385,
+        "measurement_valid": true
+      },
+      "ac4": {
+        "criterion": "AC-4 bs16: mpk decode tok/s STRICTLY GREATER than vLLM",
+        "verdict": "FAIL",
+        "point_estimate_passes": false,
+        "measurement_valid": false,
+        "mpk_decode_tok_s": 1645.507714972457,
+        "vllm_decode_tok_s": 3032.523422454821,
+        "ratio_mpk_over_vllm": 0.5426199523433268,
+        "vllm_pinned_cross_check": 3018.1111975195627,
+        "drift_valid": true
+      },
+      "ac5": {
+        "criterion": "AC-5 bs16: mpk e2e <= 1.25x vLLM e2e",
+        "verdict": "FAIL",
+        "point_estimate_passes": false,
+        "measurement_valid": false,
+        "mpk_e2e_s": 12.3321201171875,
+        "vllm_e2e_s": 5.5670896240044385,
+        "ratio_mpk_over_vllm": 2.2151826088829765,
+        "max_ratio": 1.25,
+        "vllm_pinned_cross_check": 5.567888470002799,
+        "drift_valid": true
+      }
+    }
+  },
+  "ac4": {
+    "verdict": "FAIL",
+    "per_bs": {
+      "1": "FAIL",
+      "2": "FAIL",
+      "4": "FAIL",
+      "8": "FAIL",
+      "16": "FAIL"
+    },
+    "criterion": "mpk decode tok/s > vLLM at EVERY batch size (goal AC-4)"
+  },
+  "ac5": {
+    "verdict": "FAIL",
+    "per_bs": {
+      "1": "FAIL",
+      "2": "FAIL",
+      "4": "FAIL",
+      "8": "FAIL",
+      "16": "FAIL"
+    },
+    "criterion": "mpk e2e <= 1.25x vLLM at EVERY batch size (goal AC-5)"
+  },
+  "failures": [
+    "AC-4 bs1: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 173.4542271905207, \"vllm_decode_tok_s\": 284.13382111283465, \"ratio_mpk_over_vllm\": 0.6104666685267253, \"vllm_pinned_cross_check\": 285.5105643395262}",
+    "AC-4 bs2: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 318.65086543747645, \"vllm_decode_tok_s\": 529.9796512556082, \"ratio_mpk_over_vllm\": 0.6012511323454411, \"vllm_pinned_cross_check\": 529.7960084681633}",
+    "AC-4 bs4: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 560.7792280498497, \"vllm_decode_tok_s\": 936.361311883166, \"ratio_mpk_over_vllm\": 0.5988919244453157, \"vllm_pinned_cross_check\": 934.3478174709361}",
+    "AC-4 bs8: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 950.9851140245436, \"vllm_decode_tok_s\": 1734.9970706382192, \"ratio_mpk_over_vllm\": 0.5481191467803017, \"vllm_pinned_cross_check\": 1692.4669356762156}",
+    "AC-4 bs16: mpk decode tok/s STRICTLY GREATER than vLLM: {\"mpk_decode_tok_s\": 1645.507714972457, \"vllm_decode_tok_s\": 3032.523422454821, \"ratio_mpk_over_vllm\": 0.5426199523433268, \"vllm_pinned_cross_check\": 3018.1111975195627}",
+    "AC-5 bs1: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 6.15721875, \"vllm_e2e_s\": 3.618471367051825, \"ratio_mpk_over_vllm\": 1.7016077026516967, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 3.601619330991525}",
+    "AC-5 bs2: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 6.80583349609375, \"vllm_e2e_s\": 3.8797123529948294, \"ratio_mpk_over_vllm\": 1.7542108478326204, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 3.886238737992244}",
+    "AC-5 bs4: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 7.952134765625, \"vllm_e2e_s\": 4.448229199042544, \"ratio_mpk_over_vllm\": 1.7877079641796902, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 4.45474189100787}",
+    "AC-5 bs8: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 9.9881962890625, \"vllm_e2e_s\": 4.823541408055462, \"ratio_mpk_over_vllm\": 2.070718470952049, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 4.953407906476059}",
+    "AC-5 bs16: mpk e2e <= 1.25x vLLM e2e: {\"mpk_e2e_s\": 12.3321201171875, \"vllm_e2e_s\": 5.5670896240044385, \"ratio_mpk_over_vllm\": 2.2151826088829765, \"max_ratio\": 1.25, \"vllm_pinned_cross_check\": 5.567888470002799}"
+  ],
+  "not_evaluable": [
+    "bs8 vllm: fresh run's own dispersion check failed (bench-protocol.md 6)"
+  ],
+  "verdict": "FAIL"
+}

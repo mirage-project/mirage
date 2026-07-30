@@ -1,0 +1,90 @@
+==============================================================================
+MPK Qwen3.5-35B-A3B-FP8 FINAL GATE -- FAIL (exit 1)
+  utc=2026-07-30T11:44:39Z  sha=2fbfe5a9475cca766eadef27ec65eb021dc93cce  host=c762a55b7155  mode=remote
+  stages=integrity,ac3,perf,report  binding=False
+==============================================================================
+  integrity  PASS
+  AC-3       PASS
+  AC-4       FAIL
+  AC-5       FAIL
+
+  AC-4/AC-5 per batch size (mpk vs FRESH vLLM, pinned 256/1024):
+     bs  mpk tok/s  vllm tok/s   ratio          AC-4  mpk e2e s  vllm e2e s      x          AC-5
+      1      173.5       284.1   0.610          FAIL       6.16        3.62   1.70          FAIL
+         mpk full per-rep wall ms [6147.8, 6658.9, 6157.2] D=[1023] n=3 range=8.30%
+         mpk pre  per-rep wall ms [266.7, 302.6, 270.9] D=[2] n=3 range=13.23%
+         vllm fresh per-rep tok/s [284.2, 284.1, 284.1] e2e [3.617, 3.62, 3.618]
+         drift(decode): merged median 284.8185659844263 n=6 IQR/med=0.4767412716128382 boot-dev=0.24296111200058554 valid=True
+      2      318.7       530.0   0.601          FAIL       6.81        3.88   1.75          FAIL
+         mpk full per-rep wall ms [6818.2, 6805.8, 6674.2] D=[1023] n=3 range=2.12%
+         mpk pre  per-rep wall ms [401.1, 397.6, 396.4] D=[2] n=3 range=1.17%
+         vllm fresh per-rep tok/s [524.4, 530.0, 531.4] e2e [3.924, 3.88, 3.869]
+         drift(decode): merged median 529.848594302202 n=6 IQR/med=0.3942565913361835 boot-dev=0.024734793074028916 valid=True
+      4      560.8       936.4   0.599          FAIL       7.95        4.45   1.79          FAIL
+         mpk full per-rep wall ms [7536.9, 7952.1, 8114.8] D=[1023] n=3 range=7.27%
+         mpk pre  per-rep wall ms [680.2, 666.0, 669.4] D=[2] n=3 range=2.11%
+         vllm fresh per-rep tok/s [952.8, 936.4, 923.4] e2e [4.373, 4.448, 4.509]
+         drift(decode): merged median 935.354564677051 n=6 IQR/med=2.3908873726265467 boot-dev=0.10763268220779316 valid=True
+      8      951.0      1735.0   0.548          FAIL       9.99        4.82   2.07          FAIL
+         mpk full per-rep wall ms [9276.3, 9988.2, 10737.5] D=[1023] n=3 range=14.63%
+         mpk pre  per-rep wall ms [1399.2, 1401.2, 1393.5] D=[2] n=3 range=0.55%
+         vllm fresh per-rep tok/s [1776.1, 1670.6, 1735.0] e2e [4.686, 4.979, 4.824]
+         drift(decode): merged median 1697.430628144496 n=11 IQR/med=4.18789651368405 boot-dev=2.2131356575548504 valid=True
+     16     1645.5      3032.5   0.543          FAIL      12.33        5.57   2.22          FAIL
+         mpk full per-rep wall ms [12332.1, 12217.7, 12877.9] D=[1023] n=3 range=5.35%
+         mpk pre  per-rep wall ms [2404.5, 2402.4, 2408.1] D=[2] n=3 range=0.23%
+         vllm fresh per-rep tok/s [3032.5, 3110.2, 2960.6] e2e [5.567, 5.424, 5.688]
+         drift(decode): merged median 3020.8010488861078 n=11 IQR/med=3.421167211166924 boot-dev=1.065970931790956 valid=True
+
+  AC-3 (re-pinned: coherence + >=90% agreement floor + no silent degradation):
+    bs=1   PASS           reps scored 3 errors 0
+         bs1_r1       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs1_r2       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs1_r3       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+    bs=2   PASS           reps scored 3 errors 0
+         bs2_r1       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs2_r2       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs2_r3       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+    bs=4   PASS           reps scored 3 errors 0
+         bs4_r1       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs4_r2       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs4_r3       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+    bs=8   PASS           reps scored 3 errors 0
+         bs8_r1       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs8_r2       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs8_r3       exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+    bs=16  PASS           reps scored 3 errors 0
+         bs16_r1      exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs16_r2      exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+         bs16_r3      exact 10/10  min agreement 0.9375  max ppl ratio 1.000  PASS
+    AC-3(c): 150/150 cases byte-identical to dumps_final; degraded 0, unexplained 0
+    stability diagnostic: STABLE fingerprint divergence 0.0 token divergence 0.0
+
+RESULT bs=1 AC3=PASS AC4=FAIL mpk_decode_tok_s=173.5 vllm_decode_tok_s=284.1 decode_ratio=0.610 AC5=FAIL mpk_e2e_s=6.157 vllm_e2e_s=3.618 e2e_ratio=1.702 e2e_ratio_max=1.25
+RESULT bs=2 AC3=PASS AC4=FAIL mpk_decode_tok_s=318.7 vllm_decode_tok_s=530.0 decode_ratio=0.601 AC5=FAIL mpk_e2e_s=6.806 vllm_e2e_s=3.880 e2e_ratio=1.754 e2e_ratio_max=1.25
+RESULT bs=4 AC3=PASS AC4=FAIL mpk_decode_tok_s=560.8 vllm_decode_tok_s=936.4 decode_ratio=0.599 AC5=FAIL mpk_e2e_s=7.952 vllm_e2e_s=4.448 e2e_ratio=1.788 e2e_ratio_max=1.25
+RESULT bs=8 AC3=PASS AC4=FAIL mpk_decode_tok_s=951.0 vllm_decode_tok_s=1735.0 decode_ratio=0.548 AC5=FAIL mpk_e2e_s=9.988 vllm_e2e_s=4.824 e2e_ratio=2.071 e2e_ratio_max=1.25
+RESULT bs=16 AC3=PASS AC4=FAIL mpk_decode_tok_s=1645.5 vllm_decode_tok_s=3032.5 decode_ratio=0.543 AC5=FAIL mpk_e2e_s=12.332 vllm_e2e_s=5.567 e2e_ratio=2.215 e2e_ratio_max=1.25
+
+  FAILURES
+    - perf: AC-4 bs1: mpk decode tok/s STRICTLY GREATER than vLLM: {"mpk_decode_tok_s": 173.4542271905207, "vllm_decode_tok_s": 284.13382111283465, "ratio_mpk_over_vllm": 0.6104666685267253, "vllm_pinned_cross_check": 285.5105643395262}
+    - perf: AC-4 bs2: mpk decode tok/s STRICTLY GREATER than vLLM: {"mpk_decode_tok_s": 318.65086543747645, "vllm_decode_tok_s": 529.9796512556082, "ratio_mpk_over_vllm": 0.6012511323454411, "vllm_pinned_cross_check": 529.7960084681633}
+    - perf: AC-4 bs4: mpk decode tok/s STRICTLY GREATER than vLLM: {"mpk_decode_tok_s": 560.7792280498497, "vllm_decode_tok_s": 936.361311883166, "ratio_mpk_over_vllm": 0.5988919244453157, "vllm_pinned_cross_check": 934.3478174709361}
+    - perf: AC-4 bs8: mpk decode tok/s STRICTLY GREATER than vLLM: {"mpk_decode_tok_s": 950.9851140245436, "vllm_decode_tok_s": 1734.9970706382192, "ratio_mpk_over_vllm": 0.5481191467803017, "vllm_pinned_cross_check": 1692.4669356762156}
+    - perf: AC-4 bs16: mpk decode tok/s STRICTLY GREATER than vLLM: {"mpk_decode_tok_s": 1645.507714972457, "vllm_decode_tok_s": 3032.523422454821, "ratio_mpk_over_vllm": 0.5426199523433268, "vllm_pinned_cross_check": 3018.1111975195627}
+    - perf: AC-5 bs1: mpk e2e <= 1.25x vLLM e2e: {"mpk_e2e_s": 6.15721875, "vllm_e2e_s": 3.618471367051825, "ratio_mpk_over_vllm": 1.7016077026516967, "max_ratio": 1.25, "vllm_pinned_cross_check": 3.601619330991525}
+    - perf: AC-5 bs2: mpk e2e <= 1.25x vLLM e2e: {"mpk_e2e_s": 6.80583349609375, "vllm_e2e_s": 3.8797123529948294, "ratio_mpk_over_vllm": 1.7542108478326204, "max_ratio": 1.25, "vllm_pinned_cross_check": 3.886238737992244}
+    - perf: AC-5 bs4: mpk e2e <= 1.25x vLLM e2e: {"mpk_e2e_s": 7.952134765625, "vllm_e2e_s": 4.448229199042544, "ratio_mpk_over_vllm": 1.7877079641796902, "max_ratio": 1.25, "vllm_pinned_cross_check": 4.45474189100787}
+    - perf: AC-5 bs8: mpk e2e <= 1.25x vLLM e2e: {"mpk_e2e_s": 9.9881962890625, "vllm_e2e_s": 4.823541408055462, "ratio_mpk_over_vllm": 2.070718470952049, "max_ratio": 1.25, "vllm_pinned_cross_check": 4.953407906476059}
+    - perf: AC-5 bs16: mpk e2e <= 1.25x vLLM e2e: {"mpk_e2e_s": 12.3321201171875, "vllm_e2e_s": 5.5670896240044385, "ratio_mpk_over_vllm": 2.2151826088829765, "max_ratio": 1.25, "vllm_pinned_cross_check": 5.567888470002799}
+
+  NOT EVALUABLE (exit 3 only if nothing failed)
+    - perf: bs8 vllm: fresh run's own dispersion check failed (bench-protocol.md 6)
+
+  HONEST CLAIM
+    NON-BINDING RUN -- not an AC-6 result.
+    The gate is FAIL: perf: AC-4 bs1: mpk decode tok/s STRICTLY GREATER than vLLM: {"mpk_decode_tok_s": 173.4542271905207, "vllm_decode_tok_s": 284.13382111283465, "ratio_mpk_over_vllm": 0.6104666685267253, "vllm_pinned_cross_check": 285.5105643395262}; perf: AC-4 bs2: mpk decode tok/s STRICTLY GREATER than vLLM: {"mpk_decode_tok_s": 318.65086543747645, "vllm_decode_tok_s": 529.9796512556082, "ratio_mpk_over_vllm": 0.6012511323454411, "vllm_pinned_cross_check": 529.7960084681633}; perf: AC-4 bs4: mpk decode tok/s STRICTLY GREATER than vLLM: {"mpk_decode_tok_s": 560.7792280498497, "vllm_decode_tok_s": 936.361311883166, "ratio_mpk_over_vllm": 0.5988919244453157, "vllm_pinned_cross_check": 934.3478174709361}; perf: AC-4 bs8: mpk decode tok/s STRICTLY GREATER than vLLM: {"mpk_decode_tok_s": 950.9851140245436, "vllm_decode_tok_s": 1734.9970706382192, "ratio_mpk_over_vllm": 0.5481191467803017, "vllm_pinned_cross_check": 1692.4669356762156}
+    AC-3(c) diagnostic: 150/150 cases byte-identical to results/dumps_final, 0 degraded (0 unexplained); cold-rep fingerprint divergence 0.0 of scored reps. No claim is made that a single cold run is reproducible.
+
+  machine-readable report: /home/catalyst/m4status-gate/20260730T101424Z/report.json
+==============================================================================

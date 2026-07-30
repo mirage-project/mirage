@@ -1,0 +1,21 @@
+{
+  "gate": "demo/qwen3_5/accept/final.sh",
+  "started_utc": "2026-07-30T10:14:53Z",
+  "host": "c762a55b7155",
+  "run_mode": "remote",
+  "remote_host": "catalyst-B200",
+  "git_sha": "6741b4ad8aaef31d676ecb667220021c59f22fb5",
+  "repo": "/home/catalyst/project",
+  "agent_root": "/home/catalyst/agent",
+  "stages": "integrity,ac3,perf,report",
+  "reps": 3,
+  "batch_sizes": "1,2,4,8,16",
+  "workload": {"input_len": 256, "output_len": 1024},
+  "e2e_factor_max": 1.25,
+  "correct_new_tokens": 64,
+  "baseline_dir": "/home/catalyst/project/demo/qwen3_5/accept/baselines/vllm-0.25.1-20260725",
+  "run_dir": "/home/catalyst/m4status-gate/20260730T101424Z",
+  "no_collect": 0,
+  "skip_hf": 0,
+  "non_binding": 1
+}
