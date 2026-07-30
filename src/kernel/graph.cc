@@ -658,6 +658,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id =
         task_register->register_moe_silu_mul_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
+  } else if (name == "moe_silu_mul_quantize_fp8_sm100") {
+    int variant_id =
+        task_register->register_moe_silu_mul_quantize_fp8_sm100_task(
+            customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        1, 2, TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100, variant_id);
   } else if (name == "moe_w2_linear_sm100") {
     int variant_id = task_register->register_moe_linear_sm100_task(
         customized->bgraph, params, false /*w13_linear*/);

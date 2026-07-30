@@ -2345,7 +2345,61 @@ class PersistentKernel:
         tb_graph.new_input(output, (0, 1, -1), -1, True)
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "moe_silu_mul")
-            
+
+    def moe_silu_mul_quantize_fp8_layer(
+        self,
+        input: DTensor,
+        output_fp8: DTensor,
+        output_scale: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """`moe_silu_mul` FUSED with its only consumer, `quantize_fp8_layer`.
+
+        M4-I9. The routed-expert chain is `w13 -> silu -> quantize -> w2` and the
+        bf16 activation between the middle two has exactly one consumer, so the
+        two tasks can be one. That removes one record from EVERY layer's
+        dependency chain -- and M4-I8 measured what a chain record costs beyond
+        its own duration: ~1.15 us of event visibility or ~1.55 us of queue-pop
+        latency plus a barrier pair, with per-task overhead set by the COUNT of
+        barriers rather than their scope.
+
+        Grid is the SILU grid `(mbt, topk, 1)`, i.e. FINER than the standalone
+        quantize's `(mbt, 1, 1)`: each task owns one `(token, expert-slot)` row
+        of `intermediate_size` elements. Legal because a 128-element group's fp8
+        bytes and its fp32 block scale depend only on that group's own elements
+        and rows carry no state -- the same precondition `quantize_fp8_layer`'s
+        `row_partition` documents. No work is added, it is only spread wider.
+
+        Soundness under the persistent scheduler (the M3-I3 test): NO barrier is
+        needed. Each task owns a disjoint output range, the SwiGLU is elementwise
+        and the amax reduction stays inside one warp, so there is no cross-task
+        reduction, no arrival counter and no co-residency requirement.
+
+        Bit-exactness is by construction and argued at the instruction level in
+        `moe_silu_mul_quantize_fp8_sm100.cuh`: the merged arithmetic is HEAD's
+        own expressions at HEAD's own cast positions, and `fmaxf` is exact.
+        """
+        assert input.num_dims == 3       # (tokens, experts_per_tok, 2 * inter)
+        assert output_fp8.num_dims == 3  # (tokens, experts_per_tok, inter)
+        assert output_scale.num_dims == 3
+        assert input.dim(0) == output_fp8.dim(0) == output_scale.dim(0)
+        assert input.dim(1) == output_fp8.dim(1) == output_scale.dim(1)
+        assert input.dim(2) == output_fp8.dim(2) * 2, (
+            "the fused SwiGLU input must be the gate|up pair: "
+            f"{input.dim(2)} != 2 * {output_fp8.dim(2)}")
+        assert output_fp8.dim(2) % 128 == 0, (
+            f"intermediate size {output_fp8.dim(2)} must be a whole number of "
+            "128-element scale groups (a group may not straddle a row)")
+        assert output_scale.dim(2) == output_fp8.dim(2) // 128
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (0, 1, -1), -1, True)
+        tb_graph.new_input(output_fp8, (0, 1, -1), -1, True)
+        tb_graph.new_input(output_scale, (0, 1, -1), -1, True)
+        self.kn_graph.customized([input, output_fp8, output_scale], tb_graph)
+        self.kn_graph.register_task(tb_graph, "moe_silu_mul_quantize_fp8_sm100")
+
+
     def moe_w2_linear_layer(
         self,
         input: DTensor,

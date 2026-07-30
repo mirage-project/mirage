@@ -1650,6 +1650,12 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     case TASK_MOE_W2_FP8_BLOCKSCALE_SM100: {
       break;
     }
+    // M4-I9's fused SwiGLU+quantize task (id 243): plain register elementwise
+    // over one (token, expert-slot) tile, no TMA, but its id is inside the
+    // window so the switch must cover it.
+    case TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100: {
+      break;
+    }
     default:
       assert(false);
   }

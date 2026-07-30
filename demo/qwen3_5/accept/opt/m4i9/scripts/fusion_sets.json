@@ -1,0 +1,12 @@
+{
+  "F1_rms_pre+quant":            ["QUANTIZE_FP8_SM100|gdn_xq", "QUANTIZE_FP8_SM100|qkvg_proj_xq"],
+  "F2_silu+quant(moe_act)":      ["QUANTIZE_FP8_SM100|moe_actq"],
+  "F3_combine+rms_pre":          ["RMS_NORM_HOPPER|pre_norm"],
+  "F4_recur/attn+quant":         ["QUANTIZE_FP8_SM100|gdn_out_proj_xq", "QUANTIZE_FP8_SM100|o_proj_xq"],
+  "S_A=F1+F2 (clean, shipped)":  ["QUANTIZE_FP8_SM100|gdn_xq", "QUANTIZE_FP8_SM100|qkvg_proj_xq", "QUANTIZE_FP8_SM100|moe_actq"],
+  "S_B=F1+F2+F4 (all quant)":    ["QUANTIZE_FP8_SM100|"],
+  "S_C=S_B+F3":                  ["QUANTIZE_FP8_SM100|", "RMS_NORM_HOPPER|pre_norm"],
+  "S_D=every admissible fusion": ["QUANTIZE_FP8_SM100|", "RMS_NORM_HOPPER|pre_norm", "SILU_MUL|"],
+  "U_all_tiny_free (bound)":     ["QUANTIZE_FP8_SM100|", "RMS_NORM_HOPPER|", "SILU_MUL|", "MOE_TOPK_SOFTMAX_SM100|", "MOE_MUL_SUM_ADD_SM100|", "SIGMOID_GATE_MUL_ADD_SM100|"],
+  "U_all_nonGEMM_free (bound)":  ["QUANTIZE_FP8_SM100|", "RMS_NORM_HOPPER|", "SILU_MUL|", "MOE_TOPK_SOFTMAX_SM100|", "MOE_MUL_SUM_ADD_SM100|", "SIGMOID_GATE_MUL_ADD_SM100|", "GDN_CONV1D_SM100|", "ARGMAX_PARTIAL_SM100|", "ARGMAX_REDUCE_SM100|", "EMBEDDING|", "TASK_LINEAR_SM100|router_logits"]
+}

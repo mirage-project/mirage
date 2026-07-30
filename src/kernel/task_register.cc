@@ -3318,6 +3318,75 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_SILU_MUL, code.to_string());
 }
 
+// M4-I9: `moe_silu_mul` fused into its only consumer, the fp32-block-scale
+// activation quantize. Reads the [.., .., 2*OUTPUT_SIZE] gate|up tile, writes
+// the fp8 activation and its fp32 block scales; the bf16 intermediate is never
+// materialised. Bit-exact by construction -- see the header's argument.
+//
+// Shapes are read off the SAME tile descriptors the two unfused registrations
+// read, so any mismatch is a build error rather than a silent miscompute:
+//   input  [rows, slots, 2*OUTPUT_SIZE]   (grid splits dims 0 and 1)
+//   out_q  [rows, slots, OUTPUT_SIZE]
+//   out_s  [rows, slots, OUTPUT_SIZE/GROUP_SIZE]
+int TaskRegister::register_moe_silu_mul_quantize_fp8_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 2;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  constexpr int GROUP_SIZE = 128;
+  assert(input_ops[0]->output_tensors[0].num_dims == 3);
+  assert(output_ops[0]->output_tensors[0].num_dims == 3);
+  assert(output_ops[1]->output_tensors[0].num_dims == 3);
+  int const batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int const slots = output_ops[0]->output_tensors[0].dim[1];
+  int const output_size = output_ops[0]->output_tensors[0].dim[2];
+  // gate|up: the input tile carries both halves of this tile's rows.
+  assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
+  assert(input_ops[0]->output_tensors[0].dim[1] == slots);
+  assert(input_ops[0]->output_tensors[0].dim[2] == output_size * 2);
+  assert(output_ops[1]->output_tensors[0].dim[0] == batch_size);
+  assert(output_ops[1]->output_tensors[0].dim[1] == slots);
+  assert(output_size % GROUP_SIZE == 0);
+  assert(output_ops[1]->output_tensors[0].dim[2] == output_size / GROUP_SIZE);
+  // Row strides come from the FULL tensors (the pointers a task is handed are
+  // already offset to its own tile), exactly as register_moe_silu_mul_task and
+  // register_quantize_fp8_sm100_task derive theirs.
+  int const input_stride = input_ops[0]->dtensor.dim[2];
+  assert(input_stride == output_ops[0]->dtensor.dim[2] * 2);
+  int const output_stride = output_ops[0]->dtensor.dim[2];
+  int const scale_stride = output_ops[1]->dtensor.dim[2];
+  assert(scale_stride == output_stride / GROUP_SIZE);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::moe_silu_mul_quantize_fp8_task_impl<$, $, $, $, $, $,",
+         batch_size * slots,
+         output_size,
+         GROUP_SIZE,
+         input_stride,
+         output_stride,
+         scale_stride);
+  code.e("    cute::bfloat16_t, __nv_fp8_e4m3>(");
+  code.e("    task_desc->input_ptrs[0],");  // gate|up bf16
+  code.e("    task_desc->output_ptrs[0],"); // activation fp8
+  code.e("    task_desc->output_ptrs[1],"); // fp32 block scale
+  code.e("    1e-10f, -448.0f, 448.0f,");
+  code.e("    $);", batch_size * slots);
+  return register_task_variant(TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100,
+                               code.to_string());
+}
+
 int TaskRegister::register_moe_mul_sum_add_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   bool rank_with_residual = true;

@@ -158,6 +158,13 @@ enum TaskType {
   // descriptor.
   TASK_MOE_W13_FP8_BLOCKSCALE_SM100 = 241,
   TASK_MOE_W2_FP8_BLOCKSCALE_SM100 = 242,
+  // M4-I9: MoE activation SwiGLU + fp32-block-scale FP8 quantize in one task,
+  // i.e. `moe_silu_mul` (118) fused into its only consumer. It removes one
+  // record from every layer's dependency chain and the bf16 `moe_act` round
+  // trip; bit-exact by construction (the merged arithmetic keeps HEAD's cast
+  // positions). Also inside the (231, 256) TMA window, so tma.cuh needs a
+  // no-TMA case for it -- same story as 234/237/238/241/242.
+  TASK_MOE_SILU_MUL_QUANTIZE_FP8_SM100 = 243,
   TASK_MOE_W13_FP8_SM100 = 248,
   TASK_MOE_W2_FP8_SM100 = 249,
   TASK_SPLITK_LINEAR_SM100 = 251,

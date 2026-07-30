@@ -170,6 +170,32 @@ FP8_DENSE_N_SLICE = {
 }
 
 
+def fuse_silu_quant() -> bool:
+    """True when MPK_FUSE_SILU_QUANT=1 fuses the MoE activation SwiGLU into its
+    quantize (M4-I9). DEFAULT OFF.
+
+    The routed-expert chain is `w13 -> moe_silu_mul -> quantize -> w2` and
+    `layer_i_moe_act` has exactly one consumer, so the two middle tasks can be
+    one. Why that is the lever: M4-I8's exact step decomposition showed AC-4's
+    binding floors are `max(longest weighted dependency chain, total task work /
+    128)` = 1.179x / 1.116x / 1.127x of vLLM's whole step at bs 1/8/16, and
+    those survive every scheduler, queue-policy and dispatch-latency fix by
+    construction. The only lever that lowers them is a SHORTER chain, and
+    removing a record removes its duration AND its ~1.15 us of event-visibility
+    latency AND its ~1.55 us of queue-pop latency AND its barrier pair.
+
+    Measured on the M4-I8 buffers (opt/m4i9/): this site is the largest
+    ADMISSIBLE fusion at every batch size -- 40 chain records (one per layer),
+    cp_exact -177.3 / -189.0 / -184.4 us and 45-50 us of chain gap at bs 1/8/16.
+    It also drops the bf16 `moe_act` round trip, 256 KiB per layer at mbt=16.
+
+    Not a production default until AC-3 + the e2e A/B have run at this HEAD; it
+    is a compile-time GRAPH change, so a kernel dir must not be reused across
+    values -- the same trap M3-I7 hit with the admission cap.
+    """
+    return os.environ.get("MPK_FUSE_SILU_QUANT") == "1"
+
+
 def fp8_dense_baseline() -> bool:
     """True when MPK_FP8_DENSE_BASELINE=1 pins the pre-M4-I2 dispatch.
 
@@ -837,14 +863,25 @@ class Qwen35Builder(GraphBuilder):
             moe_routing_indices=routing, moe_mask=mask, output=mid,
             grid_dim=(grid_x, self.moe_n_splits, 1), block_dim=(256, 1, 1),
             w13_linear=True)
-        act = self._t((mbt, topk, inter), bfloat16, f"layer_{i}_moe_act")
-        pk.moe_silu_mul_layer(input=mid, output=act, grid_dim=(mbt, topk, 1),
-                              block_dim=(128, 1, 1))
         aq = self._t((mbt, topk, inter), float8_e4m3, f"layer_{i}_moe_actq")
         as_ = self._t((mbt, topk, inter // BLOCK), float32, f"layer_{i}_moe_acts")
-        pk.quantize_fp8_layer(input=act, output_fp8=aq, output_scale=as_,
-                              grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
-                              scale_ue8m0=False, row_partition=QUANTIZE_ROW_SPLIT)
+        # M4-I9: SwiGLU + activation quantize as ONE task (default off). The
+        # unfused pair is kept for `expose_intermediates`, because the
+        # single-layer test-mode gates and M2-I9's divergence bisection read
+        # `layer_i_moe_act` as a probe point and the fused task never
+        # materialises it.
+        if fuse_silu_quant() and not self.expose_intermediates:
+            pk.moe_silu_mul_quantize_fp8_layer(
+                input=mid, output_fp8=aq, output_scale=as_,
+                grid_dim=(mbt, topk, 1), block_dim=(128, 1, 1))
+        else:
+            act = self._t((mbt, topk, inter), bfloat16, f"layer_{i}_moe_act")
+            pk.moe_silu_mul_layer(input=mid, output=act, grid_dim=(mbt, topk, 1),
+                                  block_dim=(128, 1, 1))
+            pk.quantize_fp8_layer(input=act, output_fp8=aq, output_scale=as_,
+                                  grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+                                  scale_ue8m0=False,
+                                  row_partition=QUANTIZE_ROW_SPLIT)
         down = self._t((mbt, topk, c.hidden_size), bfloat16, f"layer_{i}_moe_down")
         pk.moe_fp8_blockscale_layer(
             input_fp8=aq, input_scale=as_,
