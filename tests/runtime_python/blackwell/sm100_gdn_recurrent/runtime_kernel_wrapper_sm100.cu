@@ -364,7 +364,7 @@ __global__ void __launch_bounds__(128)
                                                 /*HIDDEN_SIZE=*/OUT_STRIDE,
                                                 /*GROUP_SIZE=*/128,
                                                 /*GLOBAL_STRIDE=*/OUT_STRIDE,
-                                                cute::bfloat16_t,
+                                                bfloat16,
                                                 __nv_fp8_e4m3,
                                                 /*SCALE_UE8M0=*/false>(
       input, output_q, output_s, 1e-10f, -448.0f, 448.0f, 1);
@@ -776,7 +776,6 @@ void gdn_recurrent_decode_split_fusedq_sm100(torch::Tensor qkv,
                                             int64_t split,
                                             int64_t depth,
                                             int64_t mode) {
-  c10::cuda::CUDAGuard guard(qkv.device());
   TORCH_CHECK(out_q.scalar_type() == at::kFloat8_e4m3fn &&
                   out_s.scalar_type() == at::kFloat,
               "out_q must be float8_e4m3fn and out_s float32");

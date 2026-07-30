@@ -1,0 +1,35 @@
+M4-I9 -- cp_exact and the work bound, per flag and STACKED
+Same geometry (msl=897, 640 decode steps), same windows, same instrument
+(opt/m4i9/scripts/fuse_model.py over M4-I8's sched_gap.py). Every cell:
+assign_qc PASS, identity_error 0 ns, anchor_qc PASS worst_rel_err 0.0.
+Two consecutive iterations per cell -- cp_exact is a max over chains of ONE
+iteration's realized durations, so the second one is the noise check.
+
+--- iteration 288/365/720 (primary) ---
+arm                           cp1    work1   floor   xvLLM      cp8    work8   floor   xvLLM     cp16   work16   floor   xvLLM
+HEAD, all flags off        4130.7   2039.7  4130.7   1.179   5275.7   4280.2  5275.7   1.116   5638.7   5976.0  5976.0   1.127
+F  silu+quant              3750.1   1955.0  3750.1   1.071   5032.1   4211.9  5032.1   1.065   5404.3   5890.6  5890.6   1.111
+N  norm+quant              4074.5   2043.5  4074.5   1.163   5317.6   4307.1  5317.6   1.125   5702.4   6038.8  6038.8   1.139
+G  recur+quant             4003.2   2034.8  4003.2   1.143   5233.0   4353.2  5233.0   1.107   5663.4   6083.1  6083.1   1.148
+S  all three (STACK)       3797.6   2004.6  3797.6   1.084   4936.7   4243.5  4936.7   1.044   5397.3   5994.4  5994.4   1.131
+
+--- iteration 289/366/721 (robustness) ---
+arm                           cp1    work1   floor   xvLLM      cp8    work8   floor   xvLLM     cp16   work16   floor   xvLLM
+HEAD, all flags off        4110.7   2033.4  4110.7   1.173   5319.1   4287.4  5319.1   1.125   5776.1   6112.8  6112.8   1.153
+F  silu+quant              3728.8   1949.4  3728.8   1.064   5054.5   4211.2  5054.5   1.069   5542.8   6024.9  6024.9   1.137
+N  norm+quant              4067.6   2045.6  4067.6   1.161   5392.1   4336.5  5392.1   1.141   5833.6   6179.2  6179.2   1.166
+G  recur+quant             3994.6   2032.6  3994.6   1.140   5268.4   4358.3  5268.4   1.115   5794.7   6217.8  6217.8   1.173
+S  all three (STACK)       3790.3   1997.4  3790.3   1.082   4955.9   4245.0  4955.9   1.048   5531.4   6130.1  6130.1   1.156
+
+--- deltas against HEAD, primary iteration (what each flag actually did) ---
+arm                          dcp1   dwork1     dcp8   dwork8    dcp16  dwork16
+F  silu+quant              -380.6    -84.7   -243.6    -68.3   -234.4    -85.4
+N  norm+quant               -56.2     +3.8    +41.9    +26.9    +63.7    +62.8
+G  recur+quant             -127.5     -4.9    -42.7    +73.0    +24.7   +107.1
+S  all three (STACK)       -333.1    -35.1   -339.0    -36.7   -241.4    +18.4
+
+--- MODELLED (inc=0) vs MEASURED cp delta, per flag ---
+flag                      bs1 model  bs1 meas  bs8 model  bs8 meas  bs16 model  bs16 meas
+F                            -177.3    -380.6     -189.0    -243.6     -184.4    -234.4
+N                             -62.0     -56.2      -63.3      41.9      -67.8      63.7
+G                            -128.7    -127.5     -129.5     -42.7     -107.2      24.7
