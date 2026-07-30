@@ -247,7 +247,27 @@ than asserted: the same test in the same lane on a **pristine** tree fails ident
 
 ### Gate 3 — AC-3, arm F, all five batch sizes
 
-See `gates/ac3/`.
+`harness/gate_ac3_stable.sh` with `MPK_FUSE_SILU_QUANT=1` exported: 10 pinned prompts, msl 132,
+64 new tokens, a **cold kernel compile per rep**, then the re-pinned three-part report.
+
+* Stage 1 stability: **verdict STABLE**, 3 accepted reps at every batch size, **0 quarantined at
+  every batch size**, fingerprint divergence rate 0.0%, 0 reps starting on a non-clean device
+  (observed foreign floor 104 MiB), one physical GPU throughout.
+* Stage 2 re-pinned report: **bit-exact 10/10 at every one of bs 1/2/4/8/16** against the
+  committed `results/dumps_final`; agreement >= 90% **10/10 at every bs**, worst 0.9375
+  (`p06-poem`); repetition ok.
+* The single reference divergence is `p06-poem` position 60 at every bs,
+  `engine=40581 ref=31000 baseline=40581` — the same token the committed baseline emits, i.e.
+  the M2-adjudicated tie, reported as `same-as-baseline [known-adjudicated]`. `RUN_AC3_EXIT=1`
+  is that pre-existing tie under the old strict-token harness and is superseded by the
+  2026-07-29 re-pin, exactly as in M4-I5, M4-I7 and M4-I8. `REPIN_EXIT=0`.
+
+So the bit-exactness claim is not only the construction argument and the unit test: it is
+measured through 40 real layers on the real checkpoint at all five batch sizes, with the
+megakernel's own `-use_fast_math`, against the committed dumps. This is also the only gate that
+exercises the GRAPH change — one fewer op per layer, a new task type, a task at a finer grid —
+so it covers the annotated-graph rewrite, the event fan-in counts and the task-to-worker
+assignment as well as the arithmetic. (`gates/ac3/`.)
 
 ### Gate 4 — e2e A/B
 
