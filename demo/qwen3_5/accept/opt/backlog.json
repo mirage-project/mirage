@@ -584,7 +584,7 @@
      "16": 0.9997
     },
     "evidence": "42-run interleaved A/B, 0 dirty; re-confirmed rep-for-rep in a second geometry (msl=897/640 steps) to 0.001 ms/step at bs8; ptxas 255 registers unchanged, 0 spill; the COMPLETE SASS diff over 149760 lines is two instructions (census 12 GPU + 2 SYS -> 14 GPU + 0 SYS), so the flag landed and the scope is free on B200",
-    "correctness": "bit-exact by construction; tokens_sha256 identical to base in all 15 (bs,rep) pairs"
+    "correctness": "bit-exact by construction (the complete SASS diff is two scope qualifiers) AND measured: AC-3 stage 1 verdict STABLE with 3 accepted / 0 quarantined reps at every bs, stage 2 bit-exact 10/10 at bs 1/2/4/8/16 vs results/dumps_final, agreement >=90% 10/10, worst 0.9375 (p06-poem, the M2-adjudicated tie, same-as-baseline); tokens_sha256 identical to base in all 15 (bs,rep) A/B pairs"
    },
    {
     "lever": "MPK_WORKER_OOO_POP (arm O): run the first READY task in the loaded task-desc buffer (window 8) instead of blocking on the head",
@@ -667,6 +667,7 @@
    }
   ],
   "instrumentation_caveat": "the two dispatch-latency terms are differences of profiler timestamps, so each contains two %globaltimer reads absent from the shipped kernel. Measured on the SAME geometry with --no-profiler, 3 reps: inflation x1.0239/1.0269/1.0144, i.e. 82-89% of the term is real runtime cost. M4-I5's quoted x1.11-1.12 was a different geometry and does not apply.",
-  "tooling": "opt/m4i8/scripts/sched_gap.py -- realized-schedule reconstruction, exact step partition, dependency-invariant-verified scheduling simulator, exact floors and per-type floor counterfactuals. Its dep_qc field is mandatory: an earlier version marked events fired at scheduling rather than completion time and produced makespans BELOW the critical path (6077 violations at bs1), which inverted the top-two lever ranking."
+  "tooling": "opt/m4i8/scripts/sched_gap.py -- realized-schedule reconstruction, exact step partition, dependency-invariant-verified scheduling simulator, exact floors and per-type floor counterfactuals. Its dep_qc field is mandatory: an earlier version marked events fired at scheduling rather than completion time and produced makespans BELOW the critical path (6077 violations at bs1), which inverted the top-two lever ranking.",
+  "default_path_unchanged": "GATE 1c: one TU compiled with no -D against pre-M4-I8 vs M4-I8 include trees -- 28 changed SASS lines, all immediates (24 IMAD.MOV.U32, 2 MOV, 2 HFMA2), ZERO non-immediate differences; they are the __LINE__ operands of the header's 31 assert() calls, shifted by the #ifdef blocks. persistent_kernel entry identical: 255 registers, 16 barriers, 96 B stack, 5856 B smem, 0 spill."
  }
 }

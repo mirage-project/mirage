@@ -327,24 +327,61 @@ already independent and already ready is bit-exact on the real checkpoint.
 The decomposition's two gap terms are differences of profiler timestamps, so each contains two
 `%globaltimer` reads that do not exist in the shipped kernel. Measured on the *same* msl=897
 geometry, 640 decode steps, same seeds, `--no-profiler`, 3 reps (`ms_per_decode_step`, profiled ÷
-unprofiled):
+unprofiled median):
 
-| bs | profiled | unprofiled (3 reps) | inflation |
-|---|---|---|---|
-| 1 | 6.2185 | 6.0736 / 6.0586 / 6.1334 (med 6.0736) | **x1.0239** |
-| 8 | 10.4921 | 10.3541 … | **x1.0133** |
+| bs | profiled | unprofiled A, 3 reps | med | inflation | share of the latency term that is real |
+|---|---|---|---|---|---|
+| 1 | 6.2185 | 6.0736 / 6.0586 / 6.1334 | 6.0736 | **x1.0239** | 88.2% |
+| 8 | 10.4921 | 10.3541 / 10.2173 / 10.0979 | 10.2173 | **x1.0269** | 82.1% |
+| 16 | 13.8340 | 13.6374 / 13.9070 / 13.2998 | 13.6374 | **x1.0144** | 89.2% |
 
-So the instrument is worth ~2.4% of the bs1 step, about 135 us of the 1151.2 us dispatch-latency
-term — **82-89% of that term is real runtime cost** (bs1 88.2%, bs8 82.1%, bs16 89.2%). M4-I5's quoted x1.11–1.12 was a different
-geometry and does not apply here. (The ratio is measured on the wave-level
-`ms_per_decode_step`; it is applied to the steady-window step as an estimate, not an identity.)
+So the instrument is worth 1.4–2.7% of the step, about 135 us of the 1151.2 us bs1
+dispatch-latency term — **82–89% of that term is real runtime cost.** M4-I5's quoted x1.11–1.12
+was a different geometry and does not apply here. (The ratio is measured on the wave-level
+`ms_per_decode_step` and applied to the steady-window step as an estimate, not an identity.)
 
-### Not run, and why
+This run also re-tested arm S in a *second* geometry, and it is a null there too, rep for rep:
+bs8 A `10.3541 / 10.2173 / 10.0979` against S `10.3530 / 10.2162 / 10.0981` — the two arms track
+each other's per-rep noise to about 1 ns per step. One outlier is recorded rather than deleted:
+`noprof_S_bs16_rep0` came in at 24.015 ms/step against arm A's 13.637. Its own `gpu_before` and
+`gpu_after` both show a clean pinned device (72 MiB), so a mid-run co-tenant is invisible to the
+snapshots; reps 1 and 2 match arm A to 0.0024 and 0.0011 ms/step and supersede it.
 
-The full five-batch-size AC-3 stable gate was run for arm S — see `gates/ac3/`. No AC-3 run is
-owed for arm O: it is a measured regression and is not proposed for integration, and its
-correctness evidence (21/21 identical token streams, of which 6 are its own) is already stronger
-than a coherence check.
+### Gate 5 — AC-3, arm S, all five batch sizes
+
+`harness/gate_ac3_stable.sh`: 10 pinned prompts, msl 132, 64 new tokens, a cold kernel compile per
+rep, with `MPK_EVENT_WAIT_GPU_SCOPE=1` exported.
+
+* Stage 1 stability: **verdict STABLE**, 3 accepted reps at every batch size, **0 quarantined at
+  every batch size** (M4-I7's run of the same gate had 2).
+* Stage 2 re-pinned report: **bit-exact 10/10 at every one of bs 1/2/4/8/16** against the committed
+  `results/dumps_final`; agreement ≥90% 10/10 at every bs, worst 0.9375 (`p06-poem`); repetition ok.
+* The single reference divergence is `p06-poem` position 60 at every bs, `engine=40581 ref=31000
+  baseline=40581` — the same token the committed baseline emits, i.e. the M2-adjudicated tie,
+  reported as `same-as-baseline [known-adjudicated]`. `RUN_AC3_EXIT=1` is that pre-existing tie
+  under the old strict-token harness and is superseded by the 2026-07-29 re-pin, exactly as in
+  M4-I5 and M4-I7.
+
+So the bit-exactness claim for arm S is not just an argument from the SASS diff: it is measured, at
+all five batch sizes, against the committed dumps. No AC-3 run is owed for arm O — it is a measured
+regression that is not proposed for integration, and its 6 byte-identical token streams already
+exceed what a coherence check would add.
+
+### Gate 1c — the shipped default is unchanged
+
+Arm O's edit renamed an index in code *outside* any `#ifdef` (`task_ids[queue_pos]` became
+`task_ids[slot]`, with `int const slot = queue_pos;` in the `#else`), so "that is a no-op" needed
+proving rather than asserting. One TU compiled with **no** `-D` against two include trees whose
+only difference is `persistent_kernel.cuh` (pre-M4-I8 `5756c789` vs this tree):
+
+* 28 changed SASS lines, of which **24 `IMAD.MOV.U32` + 2 `MOV` + 2 `HFMA2` immediates** and
+  **zero non-immediate differences**. The header holds 31 `assert()` calls, each embedding
+  `__LINE__`, and the `#ifdef` blocks shift those line numbers — that is what the immediates are.
+* The `persistent_kernel` entry is identical: 255 registers, 16 barriers, 96 B stack frame, 5856 B
+  smem, 0 spill stores, 0 spill loads.
+
+No opcode, control-flow or scheduling change on the shipped default path.
+(`gates/ptxas/gate1c_default_unchanged.txt`.)
 
 ### The step/cp re-derivation
 
@@ -363,8 +400,9 @@ is real (Gate 4) but it is not the load's scope (Gate 2 + the SASS census).
 unless someone re-litigates them with the numbers above.**
 
 * **Arm S** (`MPK_EVENT_WAIT_GPU_SCOPE`) — an exact null at all five batch sizes (1.0000 /
-  0.9996 / 0.9996 / 0.9999 / 0.9997x). Register-neutral, bit-exact, and the SASS diff is exactly
-  the two intended instructions. The scope mismatch is real and costs nothing.
+  0.9996 / 0.9996 / 0.9999 / 0.9997x), re-confirmed in a second geometry. Register-neutral, AC-3
+  STABLE and bit-exact 10/10 at every bs, and the SASS diff is exactly the two intended
+  instructions. The scope mismatch is real and costs nothing.
 * **Arm O** (`MPK_WORKER_OOO_POP`) — a 4.4–4.7% regression at bs1 and bs16. Sound and bit-exact
   (21/21 tokens), one register *cheaper* than base, but the readiness scan costs more than the
   reordering saves. The simulator's ceiling for *any* reorder window was −0.3 to −2.9% before the
