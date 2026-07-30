@@ -1,0 +1,19 @@
+########## M4-I9 gate 1c: shipped default unchanged  2026-07-30T15:29:33-04:00 ##########
+  /var/tmp/m4i9_sweep4/kernel_A_bs1/test_rank0.cu
+    sha256 30fba2212b9a973425ab9803520c502e  lines 6267  bytes 353568
+  /var/tmp/m4i8_sweep/kernel_A_bs1/test_rank0.cu
+    sha256 30fba2212b9a973425ab9803520c502e  lines 6267  bytes 353568
+
+=== generated-TU diff (arm A, M4-I9 tree) vs (pristine, M4-I8 tree 5756c789) ===
+  BYTE-IDENTICAL. The shipped default emits exactly the same TU.
+
+=== task-type census, both TUs (must match) ===
+  kernel_A_bs1                                   silu=2 quantize=4 fused=0
+  kernel_A_bs1                                   silu=2 quantize=4 fused=0
+
+=== graph shape, both trees (task/event counts must match) ===
+  kernel_A_bs1                 tasks=55528 events=2278 t118=5280 t275=3840 t243=0
+  kernel_A_bs1                 tasks=55528 events=2278 t118=5280 t275=3840 t243=0
+
+GATE1C_VERDICT: PASS (byte-identical TU)
+CHECK_DEFAULT_M4I9_DONE 2026-07-30T15:29:35-04:00

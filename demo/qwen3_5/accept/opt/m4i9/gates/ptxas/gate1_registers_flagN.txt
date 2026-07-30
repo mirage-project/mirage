@@ -1,0 +1,85 @@
+########## M4-I9 ptxas -v, bs=1  2026-07-30T15:27:48-04:00 ##########
+Cuda compilation tools, release 12.8, V12.8.93
+Build cuda_12.8.r12.8/compiler.35583870_0
+tree: /home/muhengl/mpk-qwen35/mirage-m4i9 HEAD=8ff7be39
+=== A  TU=/var/tmp/m4i9_sweep3/kernel_A_bs1/test_rank0.cu ===
+    sha256: 30fba2212b9a973425ab9803520c502e7be2e6e049a4789013b826e5ffdb5cc6  /var/tmp/m4i9_sweep3/kernel_A_bs1/test_rank0.cu
+    TU lines: 6267
+  rc=0
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 4 registers, used 0 barriers
+        64 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 56 registers, used 0 barriers, 64 bytes cumulative stack size
+        48 bytes stack frame, 24 bytes spill stores, 36 bytes spill loads
+    ptxas info    : Used 255 registers, used 16 barriers, 48 bytes cumulative stack size, 5856 bytes smem
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Compiling entry function '_Z17persistent_kernelN6mirage7runtime13RuntimeConfigE' for 'sm_100a'
+        96 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 255 registers, used 16 barriers, 96 bytes cumulative stack size, 5856 bytes smem
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 12 registers, used 0 barriers
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 12 registers, used 0 barriers
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 24 registers, used 0 barriers
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 26 registers, used 0 barriers
+    SASS lines=149760  total_LD=6635
+    TU task-type census: 118(silu)=2 275(quantize)=4 243(fused)=0
+    impl calls: silu+q=0 rms+q=0 comb+rms=0 recur+q=0 | silu=2 rms=1 quant=4
+=== N  TU=/var/tmp/m4i9_sweep3/kernel_N_bs1/test_rank0.cu ===
+    sha256: f88963975299d4047c414deac1ab352ef0c02828587128dc67ae1ff081fbcd57  /var/tmp/m4i9_sweep3/kernel_N_bs1/test_rank0.cu
+    TU lines: 6259
+  rc=0
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 4 registers, used 0 barriers
+        64 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 56 registers, used 0 barriers, 64 bytes cumulative stack size
+        48 bytes stack frame, 24 bytes spill stores, 36 bytes spill loads
+    ptxas info    : Used 255 registers, used 16 barriers, 48 bytes cumulative stack size, 5856 bytes smem
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Compiling entry function '_Z17persistent_kernelN6mirage7runtime13RuntimeConfigE' for 'sm_100a'
+        96 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 255 registers, used 16 barriers, 96 bytes cumulative stack size, 5856 bytes smem
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 12 registers, used 0 barriers
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 12 registers, used 0 barriers
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 24 registers, used 0 barriers
+        0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+    ptxas info    : Used 26 registers, used 0 barriers
+    SASS lines=151872  total_LD=6769
+    TU task-type census: 118(silu)=2 275(quantize)=4 243(fused)=0
+    impl calls: silu+q=0 rms+q=2 comb+rms=0 recur+q=0 | silu=2 rms=1 quant=4
+
+=== summary: registers / stack / spills, both arms ===
+  A       96 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads|ptxas info    : Used 255 registers, used 16 barriers, 96 bytes cumulative stack size, 5856 bytes smem
+  N       96 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads|ptxas info    : Used 255 registers, used 16 barriers, 96 bytes cumulative stack size, 5856 bytes smem
+MK_PTXAS_M4I9_DONE 2026-07-30T15:29:32-04:00

@@ -31,18 +31,30 @@ ACC=$T/demo/qwen3_5/accept
 export MPK_ACCEPT_DIR=$ACC
 export PYTHONPATH=$T/python
 PY=${PY:-$HOME/mpk-qwen35/venv-rm/bin/python}
-M=${M:-/var/tmp/m4i9_ac3}
+ARM=${ARM:-F}
+M=${M:-/var/tmp/m4i9_ac3_$ARM}
 REPS=${REPS:-3}
 BSLIST=${BSLIST:-1,2,4,8,16}
-export MPK_FUSE_SILU_QUANT=${MPK_FUSE_SILU_QUANT:-1}
+# ARM_ENV names the flags under test. One AC-3 per flag AND one for the stack:
+# the stack is a different GRAPH from any single flag, so its annotated-graph
+# rewrite, event fan-in counts and task-to-worker assignment are not covered by
+# the per-flag runs.
+case "$ARM" in
+  F) ARM_ENV="MPK_FUSE_SILU_QUANT=1" ;;
+  N) ARM_ENV="MPK_FUSE_NORM_QUANT=1" ;;
+  G) ARM_ENV="MPK_FUSE_RECUR_QUANT=1" ;;
+  S) ARM_ENV="MPK_FUSE_SILU_QUANT=1 MPK_FUSE_NORM_QUANT=1 MPK_FUSE_RECUR_QUANT=1" ;;
+  *) echo "unknown ARM=$ARM"; exit 2 ;;
+esac
+export $ARM_ENV
 mkdir -p "$M"
 
-echo "########## M4-I9 AC-3 (arm S)  gpu=$GPU  $(date -Is) ##########"
+echo "########## M4-I9 AC-3 (arm $ARM)  gpu=$GPU  $(date -Is) ##########"
 echo "tree: $T  HEAD=$(git -C "$T" rev-parse --short HEAD)"
 echo "fused kernel: $(sha256sum "$T/include/mirage/persistent_kernel/tasks/blackwell/moe_silu_mul_quantize_fp8_sm100.cuh")"
 echo "core.so: $(md5sum "$T"/python/mirage/core.cpython-*.so)"
 "$PY" -c "import sys;sys.path.insert(0,'$T/python');import mirage,os;print('mirage from',os.path.realpath(mirage.__file__))"
-echo "MPK_FUSE_SILU_QUANT=$MPK_FUSE_SILU_QUANT"
+echo "arm=$ARM  env: $ARM_ENV"
 df -BG /var/tmp | tail -1
 
 echo
@@ -90,15 +102,15 @@ done
 ls "$ASSM" | sed 's/^/    /'
 if ls "$ASSM"/bs*.json >/dev/null 2>&1; then
   "$PY" -u "$ACC/harness/run_ac3.py" --engine-dump-dir "$ASSM" \
-      --batch-sizes 1,2,4,8,16 --output-json "$M/run_report_m4i9.json" 2>&1 | tail -30
+      --batch-sizes 1,2,4,8,16 --output-json "$M/run_report_m4i9_$ARM.json" 2>&1 | tail -30
   echo "RUN_AC3_EXIT=${PIPESTATUS[0]}"
   if [ -f "$ACC/opt/m4i4/scripts/ac3_repin_report.py" ]; then
     "$PY" -u "$ACC/opt/m4i4/scripts/ac3_repin_report.py" \
-        --tree "m4i9=$ASSM" --out-json "$M/repin_m4i9.json" 2>&1 | tail -45
+        --tree "m4i9_$ARM=$ASSM" --out-json "$M/repin_m4i9_$ARM.json" 2>&1 | tail -45
     echo "REPIN_EXIT=${PIPESTATUS[0]}"
   fi
 else
   echo "NO DUMPS FOUND -- stage 2 cannot run; see stage 1 output"
 fi
-echo "AC3_M4I9_DONE $(date -Is)"
+echo "AC3_M4I9_${ARM}_DONE $(date -Is)"
 df -BG /var/tmp | tail -1

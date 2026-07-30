@@ -19,7 +19,14 @@ GPU="${CUDA_VISIBLE_DEVICES:?the guard must pin CUDA_VISIBLE_DEVICES}"
 
 T=${T:-$HOME/mpk-qwen35/mirage-m4i9}
 ARM=${ARM:-F}
-ARM_ENV=${ARM_ENV:-MPK_FUSE_SILU_QUANT=1}
+case "$ARM" in
+  A) ARM_ENV="" ;;
+  F) ARM_ENV="MPK_FUSE_SILU_QUANT=1" ;;
+  N) ARM_ENV="MPK_FUSE_NORM_QUANT=1" ;;
+  G) ARM_ENV="MPK_FUSE_RECUR_QUANT=1" ;;
+  S) ARM_ENV="MPK_FUSE_SILU_QUANT=1 MPK_FUSE_NORM_QUANT=1 MPK_FUSE_RECUR_QUANT=1" ;;
+  *) echo "unknown ARM=$ARM"; exit 2 ;;
+esac
 PY=$HOME/mpk-qwen35/venv-rm/bin/python
 M=${M:-/var/tmp/m4i9_prof_$ARM}
 OPT=$T/demo/qwen3_5/accept/opt

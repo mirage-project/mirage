@@ -1,0 +1,49 @@
+ bs | A per-rep (ms)                | med      | N per-rep (ms)                | med      | N/A
+  1 | 783.6 / 785.0 / 783.9        | 783.9    | 771.1 / 771.3 / 771.5        | 771.3    | 1.0164x
+  8 | 2139.7 / 2064.0 / 2097.6     | 2097.6   | 2147.2 / 2092.8 / 2103.5     | 2103.5   | 0.9972x
+ 16 | 3269.7 / 3308.3 / 3255.1     | 3269.7   | 3317.5 / 3357.0 / 3301.2     | 3317.5   | 0.9856x
+
+ bs | paired delta (base - arm), ms, per rep      | mean  | us/step | sign
+  1 |   +12.5 /   +13.8 /   +12.4                |  +12.9|  +134.3 | 3/3 reps favour N
+  8 |    -7.5 /   -28.8 /    -6.0                |  -14.1|  -146.7 | 0/3 reps favour N
+ 16 |   -47.8 /   -48.7 /   -46.1                |  -47.6|  -495.4 | 0/3 reps favour N
+    paired reps favouring the fused arm: 3/9
+
+audit: 18 runs, devices used ['6'], pinned-device floor 120 MiB
+  dirty (before_mib > floor or before_util > 5%): 0
+  unauditable (no own log line for the pinned device): 0
+  tokens_sha256 identical: 9 pairs, differing: 0
+ bs | A per-rep (ms)                | med      | G per-rep (ms)                | med      | G/A
+  1 | 783.6 / 785.0 / 783.9        | 783.9    | 769.8 / 769.9 / 778.1        | 769.9    | 1.0182x
+  8 | 2139.7 / 2064.0 / 2097.6     | 2097.6   | 2137.9 / 2061.3 / 2093.3     | 2093.3   | 1.0020x
+ 16 | 3269.7 / 3308.3 / 3255.1     | 3269.7   | 3271.6 / 3311.3 / 3255.7     | 3271.6   | 0.9994x
+
+ bs | paired delta (base - arm), ms, per rep      | mean  | us/step | sign
+  1 |   +13.8 /   +15.1 /    +5.8                |  +11.6|  +120.6 | 3/3 reps favour G
+  8 |    +1.8 /    +2.6 /    +4.2                |   +2.9|   +30.0 | 3/3 reps favour G
+ 16 |    -1.9 /    -3.0 /    -0.6                |   -1.8|   -19.2 | 0/3 reps favour G
+    paired reps favouring the fused arm: 6/9
+
+audit: 18 runs, devices used ['6'], pinned-device floor 120 MiB
+  dirty (before_mib > floor or before_util > 5%): 0
+  unauditable (no own log line for the pinned device): 0
+  tokens_sha256 identical: 9 pairs, differing: 0
+ bs | A per-rep (ms)                | med      | S per-rep (ms)                | med      | S/A
+  1 | 783.6 / 785.0 / 783.9        | 783.9    | 763.9 / 764.1 / 764.1        | 764.1    | 1.0260x
+  2 | 946.1 / 964.5 / 953.0        | 953.0    | 915.6 / 931.8 / 921.4        | 921.4    | 1.0343x
+  4 | 1250.2 / 1313.9 / 1306.4     | 1306.4   | 1204.5 / 1267.7 / 1259.0     | 1259.0   | 1.0376x
+  8 | 2139.7 / 2064.0 / 2097.6     | 2097.6   | 2117.0 / 2025.9 / 2054.2     | 2054.2   | 1.0211x
+ 16 | 3269.7 / 3308.3 / 3255.1     | 3269.7   | 3257.9 / 3295.0 / 3242.2     | 3257.9   | 1.0036x
+
+ bs | paired delta (base - arm), ms, per rep      | mean  | us/step | sign
+  1 |   +19.7 /   +20.9 /   +19.8                |  +20.2|  +210.0 | 3/3 reps favour S
+  2 |   +30.5 /   +32.7 /   +31.6                |  +31.6|  +329.4 | 3/3 reps favour S
+  4 |   +45.8 /   +46.2 /   +47.4                |  +46.5|  +484.0 | 3/3 reps favour S
+  8 |   +22.7 /   +38.1 /   +43.3                |  +34.7|  +361.3 | 3/3 reps favour S
+ 16 |   +11.8 /   +13.3 /   +12.8                |  +12.7|  +131.8 | 3/3 reps favour S
+    paired reps favouring the fused arm: 15/15
+
+audit: 30 runs, devices used ['6'], pinned-device floor 120 MiB
+  dirty (before_mib > floor or before_util > 5%): 0
+  unauditable (no own log line for the pinned device): 0
+  tokens_sha256 identical: 15 pairs, differing: 0
