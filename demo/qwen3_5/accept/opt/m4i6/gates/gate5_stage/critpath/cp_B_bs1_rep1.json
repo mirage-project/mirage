@@ -1,0 +1,603 @@
+{
+ "batch_size": 1,
+ "window": [
+  1,
+  110
+ ],
+ "step_measured_us": 10911.5,
+ "cp_max_us": 35520.6,
+ "weighting": "levelmax",
+ "weighting_note": "levelmax: every event has num_triggers == n_producers (2277/2277 verified), so a level costs its slowest producer. 'expected' reproduces critpath.py's cp_max_us and understates any mixed-liveness level.",
+ "path_length_tasks": 595,
+ "n_tasks": 55528,
+ "n_events": 2278,
+ "composition": [
+  {
+   "task_type": 154,
+   "name": "TASK_RMS_NORM_HOPPER",
+   "path_tasks": 81,
+   "us_on_path": 26460.4,
+   "pct_of_cp": 74.49,
+   "us_per_path_task": 326.672,
+   "measured_t_live_us": 326.672,
+   "sites_per_step": null
+  },
+  {
+   "task_type": 241,
+   "name": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+   "path_tasks": 40,
+   "us_on_path": 2520.6,
+   "pct_of_cp": 7.1,
+   "us_per_path_task": 63.016,
+   "measured_t_live_us": 63.016,
+   "sites_per_step": 40
+  },
+  {
+   "task_type": 242,
+   "name": "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+   "path_tasks": 40,
+   "us_on_path": 1420.9,
+   "pct_of_cp": 4.0,
+   "us_per_path_task": 35.522,
+   "measured_t_live_us": 35.522,
+   "sites_per_step": 40
+  },
+  {
+   "task_type": 275,
+   "name": "TASK_QUANTIZE_FP8_SM100",
+   "path_tasks": 120,
+   "us_on_path": 1159.6,
+   "pct_of_cp": 3.26,
+   "us_per_path_task": 9.663,
+   "measured_t_live_us": 9.663,
+   "sites_per_step": null
+  },
+  {
+   "task_type": 257,
+   "name": "TASK_ATTN_SM100",
+   "path_tasks": 10,
+   "us_on_path": 944.7,
+   "pct_of_cp": 2.66,
+   "us_per_path_task": 94.471,
+   "measured_t_live_us": 94.471,
+   "sites_per_step": 10
+  },
+  {
+   "task_type": 279,
+   "name": "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+   "path_tasks": 80,
+   "us_on_path": 631.8,
+   "pct_of_cp": 1.78,
+   "us_per_path_task": 7.897,
+   "measured_t_live_us": 7.897,
+   "sites_per_step": 160
+  },
+  {
+   "task_type": 253,
+   "name": "TASK_LINEAR_SM100",
+   "path_tasks": 41,
+   "us_on_path": 613.0,
+   "pct_of_cp": 1.73,
+   "us_per_path_task": 14.95,
+   "measured_t_live_us": 14.95,
+   "sites_per_step": 71
+  },
+  {
+   "task_type": 260,
+   "name": "TASK_MOE_TOPK_SOFTMAX_SM100",
+   "path_tasks": 40,
+   "us_on_path": 447.0,
+   "pct_of_cp": 1.26,
+   "us_per_path_task": 11.174,
+   "measured_t_live_us": 11.174,
+   "sites_per_step": 40
+  },
+  {
+   "task_type": 237,
+   "name": "TASK_GDN_RECURRENT_SM100",
+   "path_tasks": 30,
+   "us_on_path": 366.4,
+   "pct_of_cp": 1.03,
+   "us_per_path_task": 12.213,
+   "measured_t_live_us": 12.213,
+   "sites_per_step": 30
+  },
+  {
+   "task_type": 118,
+   "name": "TASK_SILU_MUL",
+   "path_tasks": 40,
+   "us_on_path": 337.3,
+   "pct_of_cp": 0.95,
+   "us_per_path_task": 8.433,
+   "measured_t_live_us": 8.433,
+   "sites_per_step": null
+  },
+  {
+   "task_type": 234,
+   "name": "TASK_GDN_CONV1D_SM100",
+   "path_tasks": 30,
+   "us_on_path": 268.3,
+   "pct_of_cp": 0.76,
+   "us_per_path_task": 8.945,
+   "measured_t_live_us": 8.945,
+   "sites_per_step": 30
+  },
+  {
+   "task_type": 261,
+   "name": "TASK_MOE_MUL_SUM_ADD_SM100",
+   "path_tasks": 40,
+   "us_on_path": 259.8,
+   "pct_of_cp": 0.73,
+   "us_per_path_task": 6.496,
+   "measured_t_live_us": 6.496,
+   "sites_per_step": null
+  },
+  {
+   "task_type": 101,
+   "name": "TASK_EMBEDDING",
+   "path_tasks": 1,
+   "us_on_path": 59.0,
+   "pct_of_cp": 0.17,
+   "us_per_path_task": 59.019,
+   "measured_t_live_us": 59.019,
+   "sites_per_step": null
+  },
+  {
+   "task_type": 259,
+   "name": "TASK_ARGMAX_PARTIAL_SM100",
+   "path_tasks": 1,
+   "us_on_path": 16.6,
+   "pct_of_cp": 0.05,
+   "us_per_path_task": 16.62,
+   "measured_t_live_us": 16.62,
+   "sites_per_step": null
+  },
+  {
+   "task_type": 258,
+   "name": "TASK_ARGMAX_REDUCE_SM100",
+   "path_tasks": 1,
+   "us_on_path": 15.2,
+   "pct_of_cp": 0.04,
+   "us_per_path_task": 15.18,
+   "measured_t_live_us": 15.18,
+   "sites_per_step": null
+  }
+ ],
+ "per_layer": {
+  "layers_on_path": 40,
+  "path_tasks_per_layer_hist": {
+   "14": 10,
+   "15": 29,
+   "16": 1
+  },
+  "example_gdn_layer": 0,
+  "gdn_layer_chain": [
+   [
+    "TASK_RMS_NORM_HOPPER",
+    1
+   ],
+   [
+    "TASK_QUANTIZE_FP8_SM100",
+    1
+   ],
+   [
+    "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+    1
+   ],
+   [
+    "TASK_GDN_CONV1D_SM100",
+    1
+   ],
+   [
+    "TASK_GDN_RECURRENT_SM100",
+    1
+   ],
+   [
+    "TASK_QUANTIZE_FP8_SM100",
+    1
+   ],
+   [
+    "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+    1
+   ],
+   [
+    "TASK_RMS_NORM_HOPPER",
+    1
+   ],
+   [
+    "TASK_LINEAR_SM100",
+    1
+   ],
+   [
+    "TASK_MOE_TOPK_SOFTMAX_SM100",
+    1
+   ],
+   [
+    "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+    1
+   ],
+   [
+    "TASK_SILU_MUL",
+    1
+   ],
+   [
+    "TASK_QUANTIZE_FP8_SM100",
+    1
+   ],
+   [
+    "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+    1
+   ],
+   [
+    "TASK_MOE_MUL_SUM_ADD_SM100",
+    1
+   ],
+   [
+    "TASK_RMS_NORM_HOPPER",
+    1
+   ]
+  ],
+  "example_attention_layer": 3,
+  "attention_layer_chain": [
+   [
+    "TASK_QUANTIZE_FP8_SM100",
+    1
+   ],
+   [
+    "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+    1
+   ],
+   [
+    "TASK_ATTN_SM100",
+    1
+   ],
+   [
+    "TASK_QUANTIZE_FP8_SM100",
+    1
+   ],
+   [
+    "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+    1
+   ],
+   [
+    "TASK_RMS_NORM_HOPPER",
+    1
+   ],
+   [
+    "TASK_LINEAR_SM100",
+    1
+   ],
+   [
+    "TASK_MOE_TOPK_SOFTMAX_SM100",
+    1
+   ],
+   [
+    "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+    1
+   ],
+   [
+    "TASK_SILU_MUL",
+    1
+   ],
+   [
+    "TASK_QUANTIZE_FP8_SM100",
+    1
+   ],
+   [
+    "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+    1
+   ],
+   [
+    "TASK_MOE_MUL_SUM_ADD_SM100",
+    1
+   ],
+   [
+    "TASK_RMS_NORM_HOPPER",
+    1
+   ]
+  ],
+  "tasks_off_layer": 4
+ },
+ "sensitivity": [
+  {
+   "task_type": 154,
+   "name": "TASK_RMS_NORM_HOPPER",
+   "measured_t_us": 326.672,
+   "vllm_floor_us": null,
+   "floor_source": null,
+   "arms": []
+  },
+  {
+   "task_type": 241,
+   "name": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+   "measured_t_us": 63.016,
+   "vllm_floor_us": 8.414,
+   "floor_source": "vllm_us_per_call (measured)",
+   "arms": [
+    {
+     "arm": "vllm_x2",
+     "target_t_us": 16.828,
+     "scale": 0.267,
+     "cp_us": 33673.1,
+     "d_cp_us": 1847.5,
+     "cp_pct_of_base": 94.8
+    },
+    {
+     "arm": "vllm_x1_parity",
+     "target_t_us": 8.414,
+     "scale": 0.1335,
+     "cp_us": 33336.5,
+     "d_cp_us": 2184.1,
+     "cp_pct_of_base": 93.9
+    },
+    {
+     "arm": "vllm_x0.7",
+     "target_t_us": 5.89,
+     "scale": 0.0935,
+     "cp_us": 33235.6,
+     "d_cp_us": 2285.0,
+     "cp_pct_of_base": 93.6
+    }
+   ]
+  },
+  {
+   "task_type": 242,
+   "name": "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+   "measured_t_us": 35.522,
+   "vllm_floor_us": 7.517,
+   "floor_source": "vllm_us_per_call (measured)",
+   "arms": [
+    {
+     "arm": "vllm_x2",
+     "target_t_us": 15.034,
+     "scale": 0.4232,
+     "cp_us": 34701.1,
+     "d_cp_us": 819.5,
+     "cp_pct_of_base": 97.7
+    },
+    {
+     "arm": "vllm_x1_parity",
+     "target_t_us": 7.517,
+     "scale": 0.2116,
+     "cp_us": 34400.4,
+     "d_cp_us": 1120.2,
+     "cp_pct_of_base": 96.8
+    },
+    {
+     "arm": "vllm_x0.7",
+     "target_t_us": 5.262,
+     "scale": 0.1481,
+     "cp_us": 34310.2,
+     "d_cp_us": 1210.4,
+     "cp_pct_of_base": 96.6
+    }
+   ]
+  },
+  {
+   "task_type": 275,
+   "name": "TASK_QUANTIZE_FP8_SM100",
+   "measured_t_us": 9.663,
+   "vllm_floor_us": null,
+   "floor_source": null,
+   "arms": []
+  },
+  {
+   "task_type": 257,
+   "name": "TASK_ATTN_SM100",
+   "measured_t_us": 94.471,
+   "vllm_floor_us": 9.425,
+   "floor_source": "vllm_us_per_call (measured)",
+   "arms": [
+    {
+     "arm": "vllm_x2",
+     "target_t_us": 18.85,
+     "scale": 0.1995,
+     "cp_us": 34764.4,
+     "d_cp_us": 756.2,
+     "cp_pct_of_base": 97.9
+    },
+    {
+     "arm": "vllm_x1_parity",
+     "target_t_us": 9.425,
+     "scale": 0.0998,
+     "cp_us": 34670.2,
+     "d_cp_us": 850.5,
+     "cp_pct_of_base": 97.6
+    },
+    {
+     "arm": "vllm_x0.7",
+     "target_t_us": 6.598,
+     "scale": 0.0698,
+     "cp_us": 34641.9,
+     "d_cp_us": 878.7,
+     "cp_pct_of_base": 97.5
+    }
+   ]
+  }
+ ],
+ "combined": {
+  "moe_chain_parity": {
+   "stages": [
+    "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+    "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+    "TASK_MOE_TOPK_SOFTMAX_SM100"
+   ],
+   "scales": {
+    "241": 0.1335,
+    "242": 0.2116,
+    "260": 0.3309
+   },
+   "cp_us": 31917.3,
+   "cp_pct_of_base": 89.9
+  },
+  "moe_chain_plus_dense_fp8": {
+   "stages": [
+    "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+    "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+    "TASK_MOE_TOPK_SOFTMAX_SM100",
+    "TASK_LINEAR_FP8_BLOCKSCALE_SM100"
+   ],
+   "scales": {
+    "241": 0.1335,
+    "242": 0.2116,
+    "260": 0.3309
+   },
+   "cp_us": 31917.3,
+   "cp_pct_of_base": 89.9
+  },
+  "moe_chain_plus_dense_fp8_attn": {
+   "stages": [
+    "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+    "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+    "TASK_MOE_TOPK_SOFTMAX_SM100",
+    "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+    "TASK_ATTN_SM100"
+   ],
+   "scales": {
+    "241": 0.1335,
+    "242": 0.2116,
+    "260": 0.3309,
+    "257": 0.0998
+   },
+   "cp_us": 31066.8,
+   "cp_pct_of_base": 87.5
+  },
+  "moe_chain_plus_dense_parity": {
+   "stages": [
+    "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+    "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+    "TASK_MOE_TOPK_SOFTMAX_SM100",
+    "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+    "TASK_LINEAR_SM100"
+   ],
+   "scales": {
+    "241": 0.1335,
+    "242": 0.2116,
+    "260": 0.3309,
+    "253": 0.574
+   },
+   "cp_us": 31764.4,
+   "cp_pct_of_base": 89.4
+  },
+  "all_dominant_parity": {
+   "stages": [
+    "TASK_RMS_NORM_HOPPER",
+    "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+    "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+    "TASK_QUANTIZE_FP8_SM100",
+    "TASK_ATTN_SM100"
+   ],
+   "scales": {
+    "241": 0.1335,
+    "242": 0.2116,
+    "257": 0.0998
+   },
+   "cp_us": 31365.9,
+   "cp_pct_of_base": 88.3
+  },
+  "every_stage_parity": {
+   "stages": [
+    "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+    "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+    "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+    "TASK_MOE_TOPK_SOFTMAX_SM100",
+    "TASK_ATTN_SM100",
+    "TASK_LINEAR_SM100",
+    "TASK_GDN_CONV1D_SM100",
+    "TASK_GDN_RECURRENT_SM100"
+   ],
+   "scales": {
+    "241": 0.1335,
+    "242": 0.2116,
+    "260": 0.3309,
+    "257": 0.0998,
+    "253": 0.574,
+    "234": 0.3339,
+    "237": 0.4467
+   },
+   "cp_us": 30532.4,
+   "cp_pct_of_base": 86.0
+  }
+ },
+ "feasibility": {
+  "vllm_whole_step_us": 3503.0,
+  "cp_base_us": 35520.6,
+  "cp_must_fall_by_us": 32017.6,
+  "greedy_parity_order": [
+   {
+    "added": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+    "task_type": 241,
+    "path_tasks": 40,
+    "measured_t_us": 63.02,
+    "target_t_us": 8.414,
+    "naive_additive_gain_us": 2184.1,
+    "cp_us": 33336.5,
+    "under_vllm_step": false
+   },
+   {
+    "added": "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+    "task_type": 242,
+    "path_tasks": 40,
+    "measured_t_us": 35.52,
+    "target_t_us": 7.517,
+    "naive_additive_gain_us": 1120.2,
+    "cp_us": 32216.3,
+    "under_vllm_step": false
+   },
+   {
+    "added": "TASK_ATTN_SM100",
+    "task_type": 257,
+    "path_tasks": 10,
+    "measured_t_us": 94.47,
+    "target_t_us": 9.425,
+    "naive_additive_gain_us": 850.5,
+    "cp_us": 31365.9,
+    "under_vllm_step": false
+   },
+   {
+    "added": "TASK_MOE_TOPK_SOFTMAX_SM100",
+    "task_type": 260,
+    "path_tasks": 40,
+    "measured_t_us": 11.17,
+    "target_t_us": 3.697,
+    "naive_additive_gain_us": 299.1,
+    "cp_us": 31066.8,
+    "under_vllm_step": false
+   },
+   {
+    "added": "TASK_LINEAR_SM100",
+    "task_type": 253,
+    "path_tasks": 41,
+    "measured_t_us": 14.95,
+    "target_t_us": 8.581,
+    "naive_additive_gain_us": 261.1,
+    "cp_us": 30913.9,
+    "under_vllm_step": false
+   },
+   {
+    "added": "TASK_GDN_RECURRENT_SM100",
+    "task_type": 237,
+    "path_tasks": 30,
+    "measured_t_us": 12.21,
+    "target_t_us": 5.455,
+    "naive_additive_gain_us": 202.7,
+    "cp_us": 30711.2,
+    "under_vllm_step": false
+   },
+   {
+    "added": "TASK_GDN_CONV1D_SM100",
+    "task_type": 234,
+    "path_tasks": 30,
+    "measured_t_us": 8.95,
+    "target_t_us": 2.987,
+    "naive_additive_gain_us": 178.7,
+    "cp_us": 30532.4,
+    "under_vllm_step": false
+   }
+  ],
+  "minimal_sufficient_set": null,
+  "measured_step_over_cp": 0.307,
+  "step_if_cp_met_and_gap_unchanged_us": 9379.2,
+  "note": "cp is a floor on the step, not the step: the measured step is 0.31x cp at this batch size. Closing the per-task latency gap alone leaves that packing factor in place, which is what the width work addresses -- so latency and width are each necessary and neither is sufficient."
+ }
+}

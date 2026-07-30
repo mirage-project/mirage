@@ -333,7 +333,136 @@
    "evidence": "Rank 4 and the biggest RATIO among the non-trivial stages: 5.70/4.93/4.12x vLLM, 731/770/801 us/step of gap, and it got WORSE relative to the previous table (3.36->5.70x at bs1) because the corrected window exposes it. 842-980 us/step for routing 1-16 tokens through a top-8-of-256 softmax is far above any plausible bound.",
    "mechanism": "not yet attributed. The stage was reshaped twice in M3 (I5b's row loop, I5c's compaction race fix, which cost +51-61% on the task by design) and has never had a kernel-level look.",
    "first_step": "attribute before optimising -- I5c knowingly traded speed for correctness here and that trade has never been re-costed.",
-   "disposition": "OPEN -> M4"
+   "disposition": "INTEGRATED (M4-I6): 53% of the 842 us bs1 path contribution recovered, net of a reproducible ~21% shared-register-budget tax on the other stages",
+   "closed_by": "M4-I6 (2026-07-30)",
+   "closed_sha": "PENDING",
+   "result": {
+    "kernel": "ferret workspace5 tag v013 (f370cbb), min_ratio 1.417 vs the FlashInfer TRT-LLM routing kernel: 141.7/150.5/145.6/170.7/170.3 % of its throughput at N_LIVE 1/2/4/8/16, i.e. 29.4-41.4 % less time per call",
+    "e2e_ab": {
+     "1": {
+      "A_median_ms": 1094.6,
+      "B_median_ms": 1049.7,
+      "speedup": 1.0427,
+      "pct": 4.27,
+      "A_reps_ms": [
+       1096.2,
+       1093.4,
+       1094.6
+      ],
+      "B_reps_ms": [
+       1049.7,
+       1046.4,
+       1051.9
+      ]
+     },
+     "2": {
+      "A_median_ms": 1266.7,
+      "B_median_ms": 1217.5,
+      "speedup": 1.0404,
+      "pct": 4.04,
+      "A_reps_ms": [
+       1264.2,
+       1271.4,
+       1266.7
+      ],
+      "B_reps_ms": [
+       1215.2,
+       1227.7,
+       1217.5
+      ]
+     },
+     "4": {
+      "A_median_ms": 1637.7,
+      "B_median_ms": 1559.3,
+      "speedup": 1.0503,
+      "pct": 5.03,
+      "A_reps_ms": [
+       1637.8,
+       1637.7,
+       1626.9
+      ],
+      "B_reps_ms": [
+       1544.3,
+       1598.2,
+       1559.3
+      ]
+     },
+     "8": {
+      "A_median_ms": 2498.1,
+      "B_median_ms": 2407.2,
+      "speedup": 1.0378,
+      "pct": 3.78,
+      "A_reps_ms": [
+       2503.8,
+       2492.9,
+       2498.1
+      ],
+      "B_reps_ms": [
+       2411.8,
+       2402.6,
+       2407.2
+      ]
+     },
+     "16": {
+      "A_median_ms": 3807.0,
+      "B_median_ms": 3688.5,
+      "speedup": 1.0321,
+      "pct": 3.21,
+      "A_reps_ms": [
+       3807.0,
+       3824.2,
+       3807.0
+      ],
+      "B_reps_ms": [
+       3678.4,
+       3690.3,
+       3688.5
+      ]
+     }
+    },
+    "stage": {
+     "1": {
+      "per_task_us_A": 20.486,
+      "per_task_us_B": 9.27,
+      "per_task_speedup": 2.21,
+      "wallspan_us_A": 819.4,
+      "wallspan_us_B": 370.8,
+      "mean_conc_B": 1.0,
+      "recovered_us_own_basis": 448.6,
+      "recovered_frac_of_m4i5_842": 0.533,
+      "vllm_floor_ratio_B": 2.51,
+      "m4i5_target_met": false
+     },
+     "8": {
+      "per_task_us_A": 24.893,
+      "per_task_us_B": 13.476,
+      "per_task_speedup": 1.847,
+      "wallspan_us_A": 995.7,
+      "wallspan_us_B": 539.0,
+      "mean_conc_B": 1.0,
+      "recovered_us_own_basis": 456.7,
+      "recovered_frac_of_m4i5_842": 0.506,
+      "vllm_floor_ratio_B": 2.93,
+      "m4i5_target_met": false
+     },
+     "16": {
+      "per_task_us_A": 23.887,
+      "per_task_us_B": 12.468,
+      "per_task_speedup": 1.916,
+      "wallspan_us_A": 883.8,
+      "wallspan_us_B": 461.3,
+      "mean_conc_B": 1.0,
+      "recovered_us_own_basis": 456.8,
+      "recovered_frac_of_m4i5_842": 0.465,
+      "vllm_floor_ratio_B": 2.09,
+      "m4i5_target_met": false
+     }
+    },
+    "ptxas": "persistent_kernel 238->255 registers (the ceiling at launch_bounds 256,1), 0->4 bytes spill stores/loads, 5824->5856 bytes smem (+32 = the active-expert bitmask); worker_kernel 236->255, same 4-byte spill. Occupancy unchanged (1 CTA of 256 threads per SM by design).",
+    "ac3": "STABLE at all five bs; bit-exact 10/10 per bs vs results/dumps_final; agreement >=90% 10/10; 15/16 reps accepted (1 state-only quarantine at bs1)",
+    "mechanism": "I5c's compaction cost is re-costed and reclaimed: the per-thread serial tile scan (NUM_EXPERTS global loads per thread, all 256 threads) becomes a warp-0 popcount over a shared-memory active-expert bitmask written at the same guarded mark sites, and the rest of the win is latency work on the single serialized CTA -- load prologue hoisted above the init loop, init moved off warp 0, the init-visibility barrier relocated below tile 0's compute with the rank/mark writes deferred and distributed across k lanes, a per-lane bitonic sort-16 of packed order-preserving 64-bit keys replacing the per-round rescan, and padding rows skipping load and compute. Concurrency stays at ~1.0 by construction (one task per layer, grid=(1,1,1)), so unlike M4-I2's dense stage there is no width term: what the kernel saves the step collects directly.",
+    "residual": "The stage is not at the vLLM per-call floor M4-I5 named (3.697 us/task at bs1). Further per-call latency work faces the CTA's own fixed entry/exit + gating-load round trip, which the ferret loop's own diagnostic ladder identified as the config-independent floor; the structural alternative is splitting the row loop across task instances, which needs a cross-task merge of the active-expert compaction that does not exist as a pattern in this codebase."
+   }
   },
   {
    "lever": "schedule_sim diverges from the runtime at bs16/msl=897",
@@ -372,5 +501,13 @@
   "new_levers": "Remaining width residuals, ranked by measured idle-machine time and all needing a cross-task merge: dense fp8 279 (1346us at EVERY bs, already at the finest legal N split, needs split-K); MoE router 260 (447-602us, 1 task/layer, needs a row split with a compaction epilogue); attention split-KV 257 (594-621us, M3-I6a's model confirmed to 1% here); the 16-wide (mbt,1,1) glue 275/261/238/154 (~700us, merge-free but tasks are already 4-6us so the arrival floor bites immediately).",
   "critical_path_composition": "bs1 path = 595 tasks over 40 layers. MoE w13 40 tasks/2194.6us (27.6%), dense fp8 80/1301.8 (16.4%), MoE w2 40/1191.0 (15.0%), router 40/842.1 (10.6%), attention 10/605.0 (7.6%), dense bf16 41/527.1 (6.6%), quantize 120/504.0 (6.3%). The MoE block (router->w13->silu->w2->combine) is 59% of the path. Both layer types carry the SAME 7-task MoE tail, so it is 40x on the chain regardless of layer type.",
   "ac4_feasibility": "FIVE stages at vLLM per-call parity clear the chain floor at every bs: w13, w2, router, dense fp8, attention (bs1 cp 7957.5 -> 3379.1 < 3503). No single stage suffices anywhere (zeroing w13 leaves 5763us at bs1). BUT the measured step is 1.23/1.30/1.47x cp, so meeting the five-stage floor with packing unchanged gives 3868/5548/6986 us -- still above vLLM at every bs. Latency and width are each necessary, neither sufficient. Targets us/task at bs1: w13 54.87->8.41, w2 29.77->7.52, router 21.05->3.70, dense fp8 16.27->8.46 (ALREADY DONE at eee0fe66), attention 60.50->9.43 (needs a kernel change, not a split -- the 29.6us fixed term floors a split near 33us)."
+ },
+ "m4i6": {
+  "router_integration": {
+   "sha": "PENDING",
+   "evidence": "demo/qwen3_5/accept/opt/m4i6/",
+   "ferret_tag": "v013 (f370cbb) in ferret/workspace5",
+   "note": "The loop was still running on workspace5 when the tag was taken; the import is the TAG BLOB (git show v013:kernel.cu), never the worktree file -- the M4-I2 lesson that a live workspace carries unfinished probe code. The tag's frozen `golden` block was verified byte-identical to the 413-line body it replaced before any of it was imported."
+  }
  }
 }

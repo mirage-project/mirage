@@ -35,6 +35,15 @@ PY=$HOME/mpk-qwen35/venv-rm/bin/python
 M=${M:-/var/tmp/m4i6_prof}
 BSLIST="${BSLIST:-1 8 16}"
 ARMS="${ARMS:-A B}"
+# REP exists so the non-router stages' apparent drift can be RE-MEASURED. The
+# first pass (rep 0) showed the router's path contribution falling 445.3 us while
+# the whole path fell only 354.4 us, with the 90.9 us difference sitting in the
+# OTHER stages' per-task times (W13 +53.6, ATTN +14.9, W2 +14.4 us on the path).
+# Two mechanisms fit: single-rep profiled variance, or a real shared-budget tax
+# from the 238->255 register + 4-byte spill gate 2 measured. A second independent
+# rep of both arms tells them apart -- variance will not reproduce the same sign
+# pattern, a budget tax will.
+REP="${REP:-0}"
 MSL=353
 NEWTOK=96
 SEED_BASE=20260730
@@ -59,18 +68,18 @@ drain () {
 
 for BS in $BSLIST; do
   for ARM in $ARMS; do
-    TAG=${ARM}_bs${BS}
+    TAG=${ARM}_bs${BS}_rep${REP}
     T="$TB"; [ "$ARM" = A ] && T="$TA"
     OPT=$T/demo/qwen3_5/accept/opt
     OD=$M/prof_${ARM}
     mkdir -p "$OD"
-    if [ ! -f "$OD/raw_bs${BS}_rep0.npz" ]; then
+    if [ ! -f "$OD/raw_bs${BS}_rep${REP}.npz" ]; then
       # KERNEL DIR PER (arm, bs) AND PER PROFILED/UNPROFILED LANE: the profiled
       # build carries -DMPK_ENABLE_PROFILING, which the reuse cache does not
       # record, so sharing a dir with sweep_router.sh would reload the wrong
       # binary and print "compatibility check passed" (add-mpk-task).
       KDIR=$M/kernel_prof_${ARM}_bs${BS}
-      SEED=$((SEED_BASE + BS*1000))
+      SEED=$((SEED_BASE + BS*1000 + REP))
       RK=""; [ -f "$KDIR/task_graph_rank0.json" ] && RK="--reuse-kernel"
       drain
       echo "--- profiled run $TAG (tree $(basename "$T")) $(date -Is) ---"
@@ -79,13 +88,13 @@ for BS in $BSLIST; do
           --batch-size "$BS" --max-seq-length "$MSL" --max-new-tokens "$NEWTOK" \
           --mbt 16 --page-size 256 --synthetic-prompt-len 256 \
           --synthetic-seed "$SEED" --out-dir "$OD" --kernel-dir "$KDIR" \
-          --rep 0 --save-raw $RK > "$M/logs/${TAG}.log" 2>&1
+          --rep "$REP" --save-raw $RK > "$M/logs/${TAG}.log" 2>&1
       echo "  rc=$? $(grep -h 'wall=' "$M/logs/${TAG}.log" | tail -1)"
     else
       echo "--- $TAG raw cached ---"
     fi
-    RAW=$OD/raw_bs${BS}_rep0.npz
-    META=$OD/meta_bs${BS}_rep0.json
+    RAW=$OD/raw_bs${BS}_rep${REP}.npz
+    META=$OD/meta_bs${BS}_rep${REP}.json
     NAMES=$OD/task_names.json
     if [ -f "$RAW" ] && [ -f "$META" ] && [ -f "$NAMES" ]; then
       ( cd "$OPT" && MPK_ACCEPT_DIR="$T/demo/qwen3_5/accept" PYTHONPATH="$T/python" \

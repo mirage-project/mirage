@@ -1,0 +1,83 @@
+M4-I6 MoE-router stage (task 260 / TASK_MOE_TOPK_SOFTMAX_SM100), ONE
+steady-window decode iteration, profiler ON -- DIAGNOSTIC attribution. The
+performance claim is the --no-profiler A/B in tables/m4i6_tables.txt.
+
+arm A = base(M3-I5b/I5c/I8 router)      arm B = new(ferret v013 router)      NW = 128
+
+== the whole step, and the router stage inside it ==
+ bs arm    step_us  tasks    work_us   us/task    span_us span/step  meanconc
+  1   A     8694.7     40      819.4    20.486      819.4     0.094      1.00
+  1   B     8372.7     40      370.8     9.270      370.8     0.044      1.00
+  8   A     9852.7     40      995.7    24.893      995.7     0.101      1.00
+  8   B     9507.9     40      539.0    13.476      539.0     0.057      1.00
+ 16   A    11034.5     37      883.8    23.887      883.8     0.080      1.00
+ 16   B    10686.8     37      461.3    12.468      461.3     0.043      1.00
+
+mean concurrency near 1.0 is the point: one task per layer per step means
+the stage IS its own critical path, so work_us ~ wall_span_us and per-task
+latency is the only lever. Contrast M4-I2's dense stage, whose concurrency
+rose from well under half the machine to near-saturation.
+
+== before -> after, and the share of M4-I5's path contribution recovered ==
+bs1:
+   per-task LATENCY     20.486 ->     9.270 us  (2.210x)
+   stage WORK            819.4 ->     370.8 us  (2.210x)
+   stage WALLSPAN        819.4 ->     370.8 us  (2.210x, -448.6 us)
+   step                 8694.7 ->    8372.7 us  (-322.0 us)
+   mean concurrency during the stage  1.00 -> 1.00  of 128
+   -- against M4-I5's critical-path basis --
+   M4-I5 recorded T = 21.053 us/task, 842.1 us on the 7957.5 us path (40 tasks)
+   this run's arm A  T = 20.486 us/task (profiler basis ratio A/M4-I5 = 0.973x)
+   RECOVERED on the path (own basis): (20.486 - 9.270) x 40 = 448.6 us
+     = 53.3% of M4-I5's 842.1 us contribution
+   path contribution after: 370.8 us on this basis, 381.1 us rescaled to M4-I5's basis
+   vLLM per-call floor 3.697 us -> arm B is 2.51x it (NOT met)
+   HEADROOM LEFT IN THIS STAGE: it is now 4.4% of the step, so driving task 260 to
+     ZERO would leave 8001.9 us of the 8372.7 us step standing.
+
+bs8:
+   per-task LATENCY     24.893 ->    13.476 us  (1.847x)
+   stage WORK            995.7 ->     539.0 us  (1.847x)
+   stage WALLSPAN        995.7 ->     539.0 us  (1.847x, -456.7 us)
+   step                 9852.7 ->    9507.9 us  (-344.7 us)
+   mean concurrency during the stage  1.00 -> 1.00  of 128
+   -- against M4-I5's critical-path basis --
+   M4-I5 recorded T = 22.582 us/task, 903.3 us on the 8240.9 us path (40 tasks)
+   this run's arm A  T = 24.893 us/task (profiler basis ratio A/M4-I5 = 1.102x)
+   RECOVERED on the path (own basis): (24.893 - 13.476) x 40 = 456.7 us
+     = 50.6% of M4-I5's 903.3 us contribution
+   path contribution after: 539.0 us on this basis, 489.0 us rescaled to M4-I5's basis
+   vLLM per-call floor 4.602 us -> arm B is 2.93x it (NOT met)
+   HEADROOM LEFT IN THIS STAGE: it is now 5.7% of the step, so driving task 260 to
+     ZERO would leave 8968.9 us of the 9507.9 us step standing.
+
+bs16:
+   per-task LATENCY     23.887 ->    12.468 us  (1.916x)
+   stage WORK            883.8 ->     461.3 us  (1.916x)
+   stage WALLSPAN        883.8 ->     461.3 us  (1.916x, -422.5 us)
+   step                11034.5 ->   10686.8 us  (-347.7 us)
+   mean concurrency during the stage  1.00 -> 1.00  of 128
+   -- against M4-I5's critical-path basis --
+   M4-I5 recorded T = 24.552 us/task, 982.1 us on the 8642.0 us path (40 tasks)
+   this run's arm A  T = 23.887 us/task (profiler basis ratio A/M4-I5 = 0.973x)
+   RECOVERED on the path (own basis): (23.887 - 12.468) x 40 = 456.8 us
+     = 46.5% of M4-I5's 982.1 us contribution
+   path contribution after: 498.7 us on this basis, 512.6 us rescaled to M4-I5's basis
+   vLLM per-call floor 5.955 us -> arm B is 2.09x it (NOT met)
+   HEADROOM LEFT IN THIS STAGE: it is now 4.3% of the step, so driving task 260 to
+     ZERO would leave 10225.4 us of the 10686.8 us step standing.
+
+READING IT:
+
+  The profiler inflates per-task time, so arm A's T will not equal M4-I5's
+  recorded T exactly; the 'profiler basis ratio' column is that offset,
+  stated rather than hidden. The RECOVERY is computed from the A->B pair
+  measured in the same session, which is the comparison that is sound; the
+  rescaled path contribution is the same delta expressed in M4-I5's units
+  and is a projection, not a measurement.
+
+  A stage at concurrency ~1.0 has NO width residual to hide behind: what
+  the kernel saves, the step collects, minus only whatever the step's
+  other stages were already overlapping. That is why the honest test of
+  this integration is the e2e A/B, and why the e2e delta should land close
+  to the wallspan delta rather than far below it.

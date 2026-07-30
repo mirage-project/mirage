@@ -1,0 +1,60 @@
+M4-I6 critical-path decomposition, bs1, arm A (base) vs arm B (ferret v013 router)
+Tool: opt/m4i5/scripts/cp_decompose.py --weight levelmax, on each arm's own
+profiled raw + its own compiled task graph. Reps compared: 0, 2
+
+LOST REPS (kept in the record, excluded from the comparison):
+  rep1 arm B: contaminated mid-run by a co-tenant on the pinned device. cp read 35520.6 us with TASK_RMS_NORM_HOPPER alone +26344 us on the path, and the router itself showed NO speedup (19.522 vs arm A's 20.324 us/task) -- so the whole kernel was stalled, not one stage. Its wall was 1227.6 ms against 1082.5 and 1114.1 ms for the two clean arm-B reps. Excluded, not deleted.
+
+== per-stage microseconds ON THE CRITICAL PATH, arm B minus arm A ==
+stage                                 tasks       rep0       rep2
+TASK_MOE_W13_FP8_BLOCKSCALE_SM100        40      +53.6      +53.2
+TASK_MOE_W2_FP8_BLOCKSCALE_SM100         40      +14.4      +15.2
+TASK_MOE_TOPK_SOFTMAX_SM100              40     -445.3     -446.1
+TASK_ATTN_SM100                          10      +14.9      +16.1
+TASK_LINEAR_SM100                        41       -1.5       -1.0
+TASK_LINEAR_FP8_BLOCKSCALE_SM100         80       +3.1       +2.6
+TASK_QUANTIZE_FP8_SM100                 120       -1.1       -1.0
+TASK_GDN_RECURRENT_SM100                 30       -1.8       -2.0
+TASK_GDN_CONV1D_SM100                    30       +1.1       +2.0
+TASK_MOE_MUL_SUM_ADD_SM100               40       +6.0       +6.1
+TASK_SILU_MUL                            40       +0.9       +2.0
+TASK_RMS_NORM_HOPPER                     81       +1.1       +0.3
+TASK_EMBEDDING                            1       +0.0       +0.0
+TASK_ARGMAX_REDUCE_SM100                  1       +0.1       +0.2
+TASK_ARGMAX_PARTIAL_SM100                 1       +0.1       +0.0
+TOTAL (= delta cp)                              -354.4     -352.4
+
+PATH-TASK COUNTS ARE IDENTICAL between arms for every stage, so the chain
+did not re-route -- the deltas are per-task durations, not a different path.
+
+== the router, and the tax ==
+rep0:
+   cp                    7905.4 ->    7550.7 us (-354.7)
+   measured step         9931.4 ->    9613.0 us (-318.4)
+   router ON PATH         840.6 ->     395.3 us   (10.63% -> 5.24% of cp)
+   router us/path-task   21.016 ->     9.882
+   RECOVERED              445.3 us = 52.9% of M4-I5's 842.1 us contribution
+   TAX on other stages    +90.9 us = 20.4% of the recovery given back
+
+rep2:
+   cp                    7901.0 ->    7548.8 us (-352.2)
+   measured step         9913.8 ->    9597.5 us (-316.3)
+   router ON PATH         846.8 ->     400.7 us   (10.72% -> 5.31% of cp)
+   router us/path-task   21.171 ->    10.018
+   RECOVERED              446.1 us = 53.0% of M4-I5's 842.1 us contribution
+   TAX on other stages    +93.7 us = 21.0% of the recovery given back
+
+MECHANISM. The tax is not noise: it reproduces stage for stage across
+independent reps, and it is largest on the largest, most register-hungry
+stages (W13, then attention and W2) while the small elementwise stages
+barely move. That is the shape of a SHARED-REGISTER-BUDGET effect, and gate
+2 measured the cause -- persistent_kernel went 238 -> 255 registers (the
+ceiling at __launch_bounds__(256,1)) and picked up a 4-byte spill that the
+base tree does not have. The v013 candidate holds 16 live u64 sorted keys
+plus the buffered top-k across its k-loop, and that is what consumed the
+headroom every other task body was sharing.
+
+CONSEQUENCE FOR THE CAMPAIGN, not just for this issue: the tree now starts
+at the register ceiling with a spill. The next register-hungry integration
+inherits that, and its own ptxas before/after has to be read against this
+baseline rather than against the pre-M4-I6 one.

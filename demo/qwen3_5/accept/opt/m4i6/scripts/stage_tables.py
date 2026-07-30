@@ -52,11 +52,16 @@ M4I5 = {
 }
 
 
-def load(stage_dir):
+def load(stage_dir, rep=0):
+    """conc_<arm>_bs<n>.json is rep 0 (the original naming); conc_<arm>_bs<n>_rep<r>.json
+    is the rep-parameterised form stage_wallspan.sh writes once REP is set."""
     out = {}
     for f in sorted(glob.glob(os.path.join(stage_dir, "conc_*.json"))):
-        m = re.match(r"conc_([AB])_bs(\d+)\.json$", os.path.basename(f))
+        m = re.match(r"conc_([AB])_bs(\d+)(?:_rep(\d+))?\.json$", os.path.basename(f))
         if not m:
+            continue
+        r = int(m.group(3)) if m.group(3) is not None else 0
+        if r != rep:
             continue
         out[(m.group(1), int(m.group(2)))] = json.load(open(f))
     return out
@@ -82,9 +87,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage-dir", default="/var/tmp/m4i6_prof/stage")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--rep", type=int, default=0)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    d = load(a.stage_dir)
+    d = load(a.stage_dir, a.rep)
     if not d:
         print(f"no conc_*.json under {a.stage_dir}", file=sys.stderr)
         return 2

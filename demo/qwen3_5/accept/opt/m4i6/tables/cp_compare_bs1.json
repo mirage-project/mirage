@@ -1,0 +1,168 @@
+{
+ "bs": 1,
+ "reps": [
+  0,
+  2
+ ],
+ "lost": "rep1 arm B: contaminated mid-run by a co-tenant on the pinned device. cp read 35520.6 us with TASK_RMS_NORM_HOPPER alone +26344 us on the path, and the router itself showed NO speedup (19.522 vs arm A's 20.324 us/task) -- so the whole kernel was stalled, not one stage. Its wall was 1227.6 ms against 1082.5 and 1114.1 ms for the two clean arm-B reps. Excluded, not deleted.",
+ "per_stage": [
+  {
+   "stage": "TASK_MOE_W13_FP8_BLOCKSCALE_SM100",
+   "path_tasks": 40,
+   "delta_us": {
+    "0": 53.59999999999991,
+    "2": 53.19999999999982
+   }
+  },
+  {
+   "stage": "TASK_MOE_W2_FP8_BLOCKSCALE_SM100",
+   "path_tasks": 40,
+   "delta_us": {
+    "0": 14.400000000000091,
+    "2": 15.200000000000045
+   }
+  },
+  {
+   "stage": "TASK_MOE_TOPK_SOFTMAX_SM100",
+   "path_tasks": 40,
+   "delta_us": {
+    "0": -445.3,
+    "2": -446.09999999999997
+   }
+  },
+  {
+   "stage": "TASK_ATTN_SM100",
+   "path_tasks": 10,
+   "delta_us": {
+    "0": 14.899999999999977,
+    "2": 16.100000000000023
+   }
+  },
+  {
+   "stage": "TASK_LINEAR_SM100",
+   "path_tasks": 41,
+   "delta_us": {
+    "0": -1.5,
+    "2": -1.0
+   }
+  },
+  {
+   "stage": "TASK_LINEAR_FP8_BLOCKSCALE_SM100",
+   "path_tasks": 80,
+   "delta_us": {
+    "0": 3.1000000000000227,
+    "2": 2.6000000000000227
+   }
+  },
+  {
+   "stage": "TASK_QUANTIZE_FP8_SM100",
+   "path_tasks": 120,
+   "delta_us": {
+    "0": -1.1000000000000227,
+    "2": -1.0
+   }
+  },
+  {
+   "stage": "TASK_GDN_RECURRENT_SM100",
+   "path_tasks": 30,
+   "delta_us": {
+    "0": -1.8000000000000114,
+    "2": -2.0
+   }
+  },
+  {
+   "stage": "TASK_GDN_CONV1D_SM100",
+   "path_tasks": 30,
+   "delta_us": {
+    "0": 1.0999999999999943,
+    "2": 2.0
+   }
+  },
+  {
+   "stage": "TASK_MOE_MUL_SUM_ADD_SM100",
+   "path_tasks": 40,
+   "delta_us": {
+    "0": 6.0,
+    "2": 6.099999999999994
+   }
+  },
+  {
+   "stage": "TASK_SILU_MUL",
+   "path_tasks": 40,
+   "delta_us": {
+    "0": 0.8999999999999773,
+    "2": 2.0
+   }
+  },
+  {
+   "stage": "TASK_RMS_NORM_HOPPER",
+   "path_tasks": 81,
+   "delta_us": {
+    "0": 1.0999999999999943,
+    "2": 0.29999999999999716
+   }
+  },
+  {
+   "stage": "TASK_EMBEDDING",
+   "path_tasks": 1,
+   "delta_us": {
+    "0": 0.0,
+    "2": 0.0
+   }
+  },
+  {
+   "stage": "TASK_ARGMAX_REDUCE_SM100",
+   "path_tasks": 1,
+   "delta_us": {
+    "0": 0.09999999999999964,
+    "2": 0.1999999999999993
+   }
+  },
+  {
+   "stage": "TASK_ARGMAX_PARTIAL_SM100",
+   "path_tasks": 1,
+   "delta_us": {
+    "0": 0.10000000000000142,
+    "2": 0.0
+   }
+  }
+ ],
+ "summary": [
+  {
+   "rep": 0,
+   "cp_A_us": 7905.4,
+   "cp_B_us": 7550.7,
+   "cp_delta_us": -354.6999999999998,
+   "step_A_us": 9931.4,
+   "step_B_us": 9613.0,
+   "router_path_A_us": 840.6,
+   "router_path_B_us": 395.3,
+   "router_pct_cp_A": 10.63,
+   "router_pct_cp_B": 5.24,
+   "router_us_per_path_task_A": 21.016,
+   "router_us_per_path_task_B": 9.882,
+   "router_recovered_us": 445.3,
+   "router_recovered_frac_of_m4i5": 0.5287970549815937,
+   "other_stages_delta_us": 90.89999999999992,
+   "tax_as_frac_of_recovery": 0.20413204581181207
+  },
+  {
+   "rep": 2,
+   "cp_A_us": 7901.0,
+   "cp_B_us": 7548.8,
+   "cp_delta_us": -352.1999999999998,
+   "step_A_us": 9913.8,
+   "step_B_us": 9597.5,
+   "router_path_A_us": 846.8,
+   "router_path_B_us": 400.7,
+   "router_pct_cp_A": 10.72,
+   "router_pct_cp_B": 5.31,
+   "router_us_per_path_task_A": 21.171,
+   "router_us_per_path_task_B": 10.018,
+   "router_recovered_us": 446.09999999999997,
+   "router_recovered_frac_of_m4i5": 0.5297470609191307,
+   "other_stages_delta_us": 93.6999999999999,
+   "tax_as_frac_of_recovery": 0.21004259134723136
+  }
+ ]
+}
