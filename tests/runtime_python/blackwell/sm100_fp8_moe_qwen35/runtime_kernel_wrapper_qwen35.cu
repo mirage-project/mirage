@@ -54,7 +54,9 @@
 #include <cutlass/numeric_types.h>
 
 #include "blackwell/moe_fp8_blockscale_sm100.cuh"
+#include "blackwell/moe_silu_mul_quantize_fp8_sm100.cuh"
 #include "blackwell/per_token_group_quantize_fp8.cuh"
+#include "tasks/ampere/silu_mul.cuh"
 #include "runtime_header.h"
 #include "tasks/blackwell/fp8_group_gemm_sm100.cuh"
 #include "tasks/hopper/smem_layout_tma.cuh"
@@ -361,6 +363,10 @@ __global__ void __launch_bounds__(128)
   if (rows == R) {                                                             \
     Q35_QUANT_DISPATCH_HIDDEN(512, R)                                          \
     Q35_QUANT_DISPATCH_HIDDEN(2048, R)                                         \
+    /* M4-I9 added 256/1024 so the fusion's off-shape cases have a REFERENCE   \
+       to compare against; the shipped Qwen3.5 sites are still 512 and 2048. */\
+    Q35_QUANT_DISPATCH_HIDDEN(256, R)                                          \
+    Q35_QUANT_DISPATCH_HIDDEN(1024, R)                                         \
     return false;                                                              \
   }
 
@@ -369,6 +375,78 @@ bool dispatch_quantize_f32scale(
   Q35_QUANT_ROWS(Q35_QUANT_DISPATCH_ROWS, 0)
   return false;
 }
+
+// ================================================================
+// M4-I9 -- the two halves of the fusion, side by side.
+//
+// The claim under test is BIT-EXACTNESS BY CONSTRUCTION: the fused task's fp8
+// bytes and fp32 block scales must be byte-identical to running
+// `silu_mul_task_impl` into a bf16 buffer and then
+// `per_token_group_quantize_fp8_task_impl` over that buffer -- which is exactly
+// what HEAD's unfused pair does. Both arms are compiled in the SAME TU with the
+// SAME flags, and the test runs in BOTH nvcc lanes (MOE_TEST_FAST_MATH), because
+// -use_fast_math changes `expf` and `/` and the megakernel ships it.
+//
+// `silu_mul_task_impl` is the ampere-file impl the SM100 registration emits
+// (task_register.cc:register_moe_silu_mul_task), not the *_hopper variant.
+// ================================================================
+template <int ROWS, int OUT>
+__global__ void __launch_bounds__(128)
+    q35_silu_ref_kernel(void const *__restrict__ input,
+                        void *__restrict__ output) {
+  kernel::silu_mul_task_impl<cute::bfloat16_t,
+                             /*BATCH_SIZE=*/ROWS,
+                             /*OUTPUT_SIZE=*/OUT,
+                             /*I_STRIDE=*/2 * OUT,
+                             /*O_STRIDE=*/OUT>(input, output, ROWS);
+}
+
+template <int ROWS, int OUT>
+__global__ void __launch_bounds__(128)
+    q35_silu_quant_fused_kernel(void const *__restrict__ input,
+                                void *__restrict__ output_q,
+                                void *__restrict__ output_s) {
+  kernel::moe_silu_mul_quantize_fp8_task_impl</*NUM_ROWS=*/ROWS,
+                                              /*OUTPUT_SIZE=*/OUT,
+                                              /*GROUP_SIZE=*/128,
+                                              /*I_STRIDE=*/2 * OUT,
+                                              /*O_STRIDE=*/OUT,
+                                              /*S_STRIDE=*/OUT / 128,
+                                              cute::bfloat16_t,
+                                              __nv_fp8_e4m3>(
+      input, output_q, output_s, 1e-10f, -448.0f, 448.0f, ROWS);
+}
+
+#define Q35_SQ_DISPATCH(R, OUT)                                                \
+  if (rows == R && out == OUT) {                                               \
+    if (fused) {                                                               \
+      q35_silu_quant_fused_kernel<R, OUT>                                      \
+          <<<1, 128, 0, at::cuda::getCurrentCUDAStream()>>>(input, a, b);       \
+    } else {                                                                   \
+      q35_silu_ref_kernel<R, OUT>                                              \
+          <<<1, 128, 0, at::cuda::getCurrentCUDAStream()>>>(input, a);          \
+    }                                                                          \
+    return true;                                                               \
+  }
+
+bool dispatch_silu_quant(bool fused,
+                         int rows,
+                         int out,
+                         void const *input,
+                         void *a,
+                         void *b) {
+  Q35_SQ_DISPATCH(1, 512)
+  Q35_SQ_DISPATCH(2, 512)
+  Q35_SQ_DISPATCH(8, 512)
+  Q35_SQ_DISPATCH(16, 512)
+  Q35_SQ_DISPATCH(128, 512)
+  Q35_SQ_DISPATCH(1, 256)
+  Q35_SQ_DISPATCH(1, 1024)
+  Q35_SQ_DISPATCH(8, 1024)
+  return false;
+}
+
+#undef Q35_SQ_DISPATCH
 
 #undef Q35_QUANT_DISPATCH_ROWS
 #undef Q35_QUANT_DISPATCH_HIDDEN
@@ -633,6 +711,45 @@ void quantize_fp8_f32scale_sm100(torch::Tensor input,
   C10_CUDA_CHECK(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()));
 }
 
+void moe_silu_mul_sm100(torch::Tensor input, torch::Tensor output) {
+  c10::cuda::CUDAGuard guard(input.device());
+  TORCH_CHECK(input.is_contiguous() && output.is_contiguous(),
+              "silu tensors must be contiguous");
+  TORCH_CHECK(input.scalar_type() == at::kBFloat16 &&
+                  output.scalar_type() == at::kBFloat16,
+              "silu is bf16 -> bf16");
+  int const out = static_cast<int>(output.size(output.dim() - 1));
+  int const rows = static_cast<int>(output.numel() / out);
+  TORCH_CHECK(input.numel() == output.numel() * 2, "input must be gate|up");
+  TORCH_CHECK(dispatch_silu_quant(false, rows, out, input.data_ptr(),
+                                  output.data_ptr(), nullptr),
+              "unsupported silu shape [rows=", rows, ", out=", out, "]");
+  C10_CUDA_CHECK(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()));
+}
+
+void moe_silu_mul_quantize_fp8_sm100(torch::Tensor input,
+                                    torch::Tensor output_q,
+                                    torch::Tensor output_s) {
+  c10::cuda::CUDAGuard guard(input.device());
+  TORCH_CHECK(input.is_contiguous() && output_q.is_contiguous() &&
+                  output_s.is_contiguous(),
+              "fused silu+quant tensors must be contiguous");
+  TORCH_CHECK(input.scalar_type() == at::kBFloat16, "input must be bfloat16");
+  TORCH_CHECK(output_q.scalar_type() == at::kFloat8_e4m3fn,
+              "output_q must be float8_e4m3fn");
+  TORCH_CHECK(output_s.scalar_type() == at::kFloat, "output_s must be float32");
+  int const out = static_cast<int>(output_q.size(output_q.dim() - 1));
+  int const rows = static_cast<int>(output_q.numel() / out);
+  TORCH_CHECK(input.numel() == output_q.numel() * 2, "input must be gate|up");
+  TORCH_CHECK(out % 128 == 0, "intermediate size must be a multiple of 128");
+  TORCH_CHECK(output_s.numel() == (int64_t)rows * (out / 128),
+              "output_s must be [rows, out/128] float32");
+  TORCH_CHECK(dispatch_silu_quant(true, rows, out, input.data_ptr(),
+                                  output_q.data_ptr(), output_s.data_ptr()),
+              "unsupported fused shape [rows=", rows, ", out=", out, "]");
+  C10_CUDA_CHECK(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream()));
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("quantize_fp8_f32scale_sm100",
         &quantize_fp8_f32scale_sm100,
@@ -652,4 +769,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_w2_blockscale_sm100",
         &moe_w2_blockscale_sm100,
         "fp32-block-scale grouped FP8 MoE GEMM at Qwen3.5 w2 shapes");
+  m.def("moe_silu_mul_sm100",
+        &moe_silu_mul_sm100,
+        "MoE activation SwiGLU alone (the unfused reference half)");
+  m.def("moe_silu_mul_quantize_fp8_sm100",
+        &moe_silu_mul_quantize_fp8_sm100,
+        "M4-I9: MoE activation SwiGLU fused with the fp32-block-scale FP8 "
+        "quantize (one task)");
 }
