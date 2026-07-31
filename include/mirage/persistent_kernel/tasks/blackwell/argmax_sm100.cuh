@@ -91,6 +91,13 @@ __device__ __forceinline__ void block_reduce_max_idx_sm100(T &val,
       idx = block_max_idx;
     }
   }
+
+  // Upstream PR #743. The caller invokes this reduction repeatedly in a row
+  // loop (argmax_reduce walks `num_active_tokens`), so without this the other
+  // warps race ahead into the next row and overwrite smem_vals/smem_idxs while
+  // warp 0 is still consuming this row's warp-level results. Live for us at
+  // mbt=16; a barrier here can only remove the race.
+  wg_barrier.arrive_and_wait();
 }
 
 template <typename T, int BATCH_SIZE, int CHUNK_SIZE, int NUM_PARTIAL_TASKS>
@@ -111,7 +118,12 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
       T local_max = T(-inf);
-      long long local_idx = -1;
+      // Upstream PR #743: default to chunk-internal index 0, not -1. A
+      // degenerate chunk (every `val > local_max` false -- all -inf/NaN, which
+      // a RAGGED partition makes reachable when the vocab does not divide by
+      // num_workers) otherwise leaves the -1 sentinel to be sign-extended to
+      // 0xFFFFFFFFFFFFFFFF when packed with the chunk index below.
+      long long local_idx = 0;
 #pragma unroll
       for (int i = tidx; i < CHUNK_SIZE; i += NUM_THREADS) {
         T val = input[i + batch_idx * CHUNK_SIZE * NUM_PARTIAL_TASKS];
@@ -151,8 +163,13 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
       T local_max = T(-inf);
-      // Pack (chunk_index, relative_index) into a single 64-bit integer
-      long long local_packed_idx = -1;
+      // Pack (chunk_index, relative_index) into a single 64-bit integer.
+      // Upstream PR #743: default to (chunk 0, idx 0) -- a real token id -- so a
+      // degenerate input (all -inf/NaN partial maxima) still yields a valid
+      // index. The old -1 was sign-extended to 0xFFFFFFFFFFFFFFFF and collided
+      // with `eos_token_id = -1` under --ignore-eos, terminating decode after
+      // the FIRST step. That is the signature we hit at 136 workers.
+      long long local_packed_idx = 0;
 
 #pragma unroll
       for (int i = tidx; i < NUM_PARTIAL_TASKS; i += NUM_THREADS) {
