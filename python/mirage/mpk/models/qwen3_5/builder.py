@@ -784,13 +784,51 @@ class Qwen35Builder(GraphBuilder):
                         grid_dim=(grid_for_rmsnorm_linear_layer(
                             self.padded_vocab_size), 1, 1),
                         block_dim=(128, 1, 1))
-        part_v = self._t((self.mbt, pk.num_workers), bfloat16, "argmax_part_value")
-        part_i = self._t((self.mbt, pk.num_workers), int64, "argmax_part_index")
+        # The argmax split must DIVIDE padded_vocab_size, and that is a stricter
+        # requirement than "use every worker". The codegen instantiates
+        # argmax_{partial,reduce}_sm100_kernel<T, mbt, CHUNK_SIZE, N> with
+        # CHUNK_SIZE = padded_vocab_size / N computed by FLOOR division, and the
+        # scan loop runs to CHUNK_SIZE with no bound against the true vocab. So
+        # when N does not divide the vocab, N*CHUNK_SIZE < padded_vocab_size and
+        # the tail token ids are silently never scanned, while every task's slice
+        # offset shifts against the real row stride. Measured: at N=136 the
+        # codegen emits CHUNK_SIZE=1825, tiling only 1825*136 = 248200 of 248320
+        # ids -- decode then produced a deterministic WRONG token from step 0 on
+        # 9 of 10 AC-3 prompts. At N=128 it emits 1940 and 1940*128 = 248320
+        # exactly, which is the only reason the shipped configuration is correct.
+        #
+        # So pick the largest divisor of padded_vocab_size that is <= num_workers
+        # rather than num_workers itself. 248320 = 2^9 * 5 * 97, whose largest
+        # divisor <= 136 is 128 -- i.e. this keeps today's behaviour at 128
+        # workers bit-for-bit while letting the megakernel widen past it. The
+        # argmax is a tiny fraction of the step, so under-using a few workers
+        # here costs far less than the width buys everywhere else.
+        n_argmax = self._argmax_split(pk.num_workers)
+        part_v = self._t((self.mbt, n_argmax), bfloat16, "argmax_part_value")
+        part_i = self._t((self.mbt, n_argmax), int64, "argmax_part_index")
         pk.argmax_partial_layer(input=logits, output=(part_v, part_i),
-                                grid_dim=(pk.num_workers, 1, 1),
+                                grid_dim=(n_argmax, 1, 1),
                                 block_dim=(128, 1, 1))
         pk.argmax_reduce_layer(input=(part_v, part_i), output=self.output_tokens,
                                grid_dim=(1, 1, 1), block_dim=(128, 1, 1))
+
+    def _argmax_split(self, num_workers: int) -> int:
+        """Largest divisor of ``padded_vocab_size`` that is <= ``num_workers``.
+
+        See the call site for why an exact divisor is required rather than
+        merely convenient: the argmax codegen floor-divides and its scan loop
+        has no bound against the true vocab, so a non-divisor silently drops the
+        tail ids and misaligns every slice.
+
+        Returns ``num_workers`` unchanged whenever it already divides, so the
+        128-worker configuration is untouched.
+        """
+        v = self.padded_vocab_size
+        for n in range(min(num_workers, v), 0, -1):
+            if v % n == 0:
+                assert v // n >= 1
+                return n
+        raise AssertionError(f"no argmax split found for vocab {v}")
 
     def _build_layer(self, i: int, h):
         pk, w, c = self.mpk, self.weights, self.config
