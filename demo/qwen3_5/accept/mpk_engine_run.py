@@ -272,9 +272,24 @@ class MPKOfflineAdapter(EngineAdapter):
         # and note this changes the GENERATED code (argmax grid_dim and the
         # (mbt, num_workers) partial buffers both scale with it), so a kernel dir
         # must NOT be reused across values (the M3-I7 / M3-I9 trap).
+        # QWEN3.5 WIDTH POLICY. Upstream PR #743 raises the sm_cnt>=144 tier from
+        # 128 to 136 workers. We apply it HERE rather than in
+        # utils.get_configurations_from_gpu because that function is shared with
+        # every other model, and the widening is only safe once a model's argmax
+        # split divides its padded vocab (see Qwen35Builder._argmax_split). Ours
+        # does; qwen3's builder pairs num_workers with a hardcoded 153600, which
+        # 136 does not divide, so flipping the shared helper would silently break
+        # it in exactly the way 136 broke us. Measured on this model at bs16, 3
+        # paired reps: 3256.0ms -> 3053.7ms, -6.21%, tokens byte-identical.
+        _sm = torch.cuda.get_device_properties(0).multi_processor_count
+        if not os.environ.get("MPK_NUM_WORKERS", "").strip() and _sm >= 144:
+            num_workers = 136
+            num_schedulers = 4 * (_sm - num_workers)
+            print(f"[width-policy] num_workers={num_workers} "
+                  f"num_schedulers={num_schedulers} (sm_cnt={_sm})")
+
         _w_override = os.environ.get("MPK_NUM_WORKERS", "").strip()
         if _w_override:
-            _sm = torch.cuda.get_device_properties(0).multi_processor_count
             num_workers = int(_w_override)
             num_schedulers = 4 * (_sm - num_workers)
             if num_schedulers <= 0:
