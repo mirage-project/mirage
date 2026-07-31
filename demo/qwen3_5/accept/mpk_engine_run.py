@@ -260,6 +260,29 @@ class MPKOfflineAdapter(EngineAdapter):
         max_num_pages = max(batch_size * num_pages_per_req + 4, 8)
 
         num_workers, num_schedulers = mi.get_configurations_from_gpu(0)
+        # MPK_NUM_WORKERS -- explicit override for the megakernel WIDTH, added
+        # 2026-07-31. Upstream PR #743 ("increased num_workers for B200") raises
+        # the sm_cnt>=144 tier from 128 to 136 workers, which on this 148-SM part
+        # trades 8 scheduler SMs for 8 worker SMs. That matters here because
+        # M4-I8's floors are max(critical path, total task work / num_workers) and
+        # bs16 is the one batch size where the WORK BOUND binds (5976.0 us vs a cp
+        # of 5638.7): dividing by 136 instead of 128 drops it to ~5624.5 and flips
+        # bs16 back to critical-path-bound, where our levers actually work.
+        # Set explicitly so an A/B arm NAMES the knob rather than inheriting it --
+        # and note this changes the GENERATED code (argmax grid_dim and the
+        # (mbt, num_workers) partial buffers both scale with it), so a kernel dir
+        # must NOT be reused across values (the M3-I7 / M3-I9 trap).
+        _w_override = os.environ.get("MPK_NUM_WORKERS", "").strip()
+        if _w_override:
+            _sm = torch.cuda.get_device_properties(0).multi_processor_count
+            num_workers = int(_w_override)
+            num_schedulers = 4 * (_sm - num_workers)
+            if num_schedulers <= 0:
+                raise SystemExit(
+                    f"MPK_NUM_WORKERS={num_workers} leaves no SMs for schedulers "
+                    f"on a {_sm}-SM device")
+            print(f"[worker-override] num_workers={num_workers} "
+                  f"num_schedulers={num_schedulers} (sm_cnt={_sm})")
         dev = "cuda"
         step = torch.zeros(total_requests, dtype=torch.int32, device=dev)
         tokens = torch.zeros((total_requests, max_seq_length), dtype=torch.long,
