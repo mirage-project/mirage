@@ -51,7 +51,11 @@ template <typename T,
           // Partial RoPE (GLM-4.6: 64 of 128 dims). Rotates dims
           // [0, ROTARY_DIM), passes the rest through; cos/sin tables are
           // [max_seq_len, ROTARY_DIM]. Default = full-dim NeoX RoPE.
-          int ROTARY_DIM = HEAD_DIM>
+          int ROTARY_DIM = HEAD_DIM,
+          // Sliding-window attention (GPT-OSS: 128). A query at absolute
+          // position p attends to keys in (p - WINDOW_SIZE, p]. 0 = no
+          // window, i.e. plain causal attention over the whole sequence.
+          int WINDOW_SIZE = 0>
 __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -69,7 +73,10 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *cos_ptr,
     void const *sin_ptr,
     float q_eps,
-    float k_eps) {
+    float k_eps,
+    // Attention sinks (GPT-OSS): NUM_QO_PER_KV learned logits, one per query
+    // head of this task's KV head. nullptr = no sinks.
+    void const *sink_ptr = nullptr) {
   constexpr int CONSUMER_WARPGROUP_SYNC_BARRIER_ID = 6;
   constexpr int ROTARY_SYNC_BARRIER_ID = 7;
   cutlass::arch::NamedBarrier wg_barrier(
@@ -117,6 +124,16 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                         TAIL_OFFSET;
     // valid_lens = [seq_len - num_tokens + 1 + i for i in range(num_tokens)]
 
+    // Under a sliding window every query in this task masks out keys older
+    // than (its own position - WINDOW_SIZE], so the whole task can skip
+    // straight to the first tile the EARLIEST query still sees. Without this
+    // a window layer would walk the entire sequence to discard nearly all of
+    // it: 2048 tiles instead of 3 at a 128k context.
+    int const first_kv_iter =
+        WINDOW_SIZE > 0
+            ? max(seq_len - num_tokens - WINDOW_SIZE + 1, 0) / KV_TILE_SIZE
+            : 0;
+
     // Page indices are read directly from global memory (L2-cached)
     int const *page_indices = paged_kv_indices_buffer_ptr + first_page_pos;
     wg_barrier.arrive_and_wait();
@@ -125,6 +142,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
         reinterpret_cast<T const *>(qkv_ptr) + first_token_pos * QKV_STRIDE;
     T const *__restrict__ d_k = d_q + NUM_QO_PER_KV * HEAD_DIM;
     T const *__restrict__ d_v = d_k + HEAD_DIM;
+    T const *__restrict__ d_sink = static_cast<T const *>(sink_ptr);
     T *__restrict__ d_paged_k_cache = reinterpret_cast<T *>(paged_k_cache_ptr);
     T *__restrict__ d_paged_v_cache = reinterpret_cast<T *>(paged_v_cache_ptr);
     T *__restrict__ d_output =
@@ -226,8 +244,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     KVSmem k_buffer_smem(s_k_buffer), v_buffer_smem(s_v_buffer);
 
     int const num_iters = (seq_len + KV_TILE_SIZE - 1) / KV_TILE_SIZE;
-    int curr_iter_len = min(seq_len, KV_TILE_SIZE);
-    int cp_finished_seq_len = 0;
+    int cp_finished_seq_len = first_kv_iter * KV_TILE_SIZE;
+    int curr_iter_len = min(seq_len - cp_finished_seq_len, KV_TILE_SIZE);
     // assert no leafover to be handled when loading qkv
     static_assert(HEAD_DIM % CP_CHUNK_SIZE == 0);
 
@@ -247,7 +265,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       load_smem(q_smem(dst_row, dst_col), q_dmem(src_row, src_col));
     }
 
-    int page_idx_0 = page_indices[0];
+    int page_idx_0 = page_indices[cp_finished_seq_len / PAGE_SIZE];
 #pragma unroll
     for (int chunk_idx = threadIdx.x;
          chunk_idx < curr_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
@@ -295,7 +313,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       }
     }
 
-    for (int iter = 0; iter < num_iters; iter++) {
+    for (int iter = first_kv_iter; iter < num_iters; iter++) {
       int next_iter_len = iter + 1 < num_iters
                               ? min(seq_len - cp_finished_seq_len, KV_TILE_SIZE)
                               : 0;
@@ -335,8 +353,9 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
         cp_async_wait<0>();
       }
 
-      // rotate the buffers
-      if ((iter & 0x1) == 0) {
+      // rotate the buffers; parity is counted from the first tile actually
+      // visited, which is not tile 0 under a sliding window
+      if (((iter - first_kv_iter) & 0x1) == 0) {
         k_smem.set_ptr(s_k_buffer);
         k_buffer_smem.set_ptr(s_k);
         v_smem.set_ptr(s_v_buffer);
@@ -355,8 +374,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       int first_kv_token_to_process =
           iter * KV_TILE_SIZE + curr_iter_len - kv_tokens_to_process;
       if (qk_norm) {
-        // Q norm
-        if (iter == 0) {
+        // Q norm — once, on the first tile this task visits
+        if (iter == first_kv_iter) {
           rms_norm_sm100<T,
                          QOSmem,
                          NUM_QO_PER_KV,
@@ -397,7 +416,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                                              ROTARY_DIM);
         }
       } else if (rope) {
-        if (iter == 0) {
+        if (iter == first_kv_iter) {
 #pragma unroll
           for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
             // q rope
@@ -520,9 +539,11 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
           int col = (warp_idx << 4) + ((lane_idx & 0x3) << 1) +
                     ((frag_idx >> 2) << 3) + (frag_idx & 0x1);
           int token_idx = row / NUM_QO_PER_KV;
+          int key_pos = col + iter * KV_TILE_SIZE;
+          int query_pos = token_idx + seq_len - num_tokens;
           bool is_valid =
-              (row < num_tokens * NUM_QO_PER_KV) &&
-              (col + iter * KV_TILE_SIZE <= token_idx + seq_len - num_tokens);
+              (row < num_tokens * NUM_QO_PER_KV) && (key_pos <= query_pos) &&
+              (WINDOW_SIZE <= 0 || key_pos > query_pos - WINDOW_SIZE);
           x_frag_f[m][frag_idx] = is_valid ? x_frag_f[m][frag_idx] : -inf;
           m_local[m][(frag_idx & 0x3) >> 1] =
               max(m_local[m][(frag_idx & 0x3) >> 1], x_frag_f[m][frag_idx]);
@@ -695,6 +716,13 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                          + frag_idx];
           o_global = o_global * expf(m_prev - m_global) +
                      other_o * expf(other_m - m_global);
+        }
+        // An attention sink is an extra softmax logit that carries no value,
+        // so it only enters the denominator. m_global is already scaled by
+        // sm_scale, and the sink is a logit in those same units, so it is
+        // used as stored.
+        if (d_sink != nullptr) {
+          d_global += expf(float(d_sink[row % NUM_QO_PER_KV]) - m_global);
         }
         o_smem.at(row, col) = bfloat16(o_global / d_global);
       }

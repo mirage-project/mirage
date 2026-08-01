@@ -1,4 +1,5 @@
 // Ampere task impls
+#include "tasks/ampere/clamped_swiglu.cuh"
 #include "tasks/ampere/embedding.cuh"
 #include "tasks/ampere/merge_splitkv.cuh"
 #include "tasks/ampere/multitoken_paged_attention_split_kv.cuh"

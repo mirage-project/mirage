@@ -632,7 +632,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params, false /*with_residual*/);
     task_config[op] =
         std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SM100, variant_id);
-  } else if (name == "linear_with_residual_sm100") {
+  } else if (name == "linear_with_residual_sm100" ||
+             name == "linear_with_bias_sm100") {
+    // Same epilogue: a bias is a residual whose row stride is zero, selected
+    // by params[1]. Two variants of one task type, not a second task type.
     int variant_id = task_register->register_linear_sm100_task(
         customized->bgraph, params, true /*with_residual*/);
     task_config[op] =
@@ -640,7 +643,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "paged_attention_sm100") {
     int variant_id = task_register->register_paged_attention_sm100_task(
         customized->bgraph, params);
-    task_config[op] = std::make_tuple(7, 1, TASK_ATTN_SM100, variant_id);
+    // params[11] marks an 8th input carrying the per-head attention sinks
+    int num_attn_inputs = (params.size() >= 12 && params[11] > 0) ? 8 : 7;
+    task_config[op] =
+        std::make_tuple(num_attn_inputs, 1, TASK_ATTN_SM100, variant_id);
   } else if (name == "argmax_partial_sm100") {
     int variant_id = task_register->register_argmax_partial_sm100_task(
         customized->bgraph, params);
@@ -672,17 +678,29 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "moe_w13_linear_sm100") {
     int variant_id = task_register->register_moe_linear_sm100_task(
         customized->bgraph, params, true /*w13_linear*/);
+    // params[0] marks a 5th input carrying the per-expert bias
     task_config[op] =
-        std::make_tuple(4, 1, TASK_MOE_W13_LINEAR_SM100, variant_id);
+        std::make_tuple((params.size() == 1 && params[0] > 0) ? 5 : 4,
+                        1,
+                        TASK_MOE_W13_LINEAR_SM100,
+                        variant_id);
   } else if (name == "moe_silu_mul") {
     int variant_id =
         task_register->register_moe_silu_mul_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_SILU_MUL, variant_id);
+  } else if (name == "moe_clamped_swiglu") {
+    int variant_id = task_register->register_moe_clamped_swiglu_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_CLAMPED_SWIGLU, variant_id);
   } else if (name == "moe_w2_linear_sm100") {
     int variant_id = task_register->register_moe_linear_sm100_task(
         customized->bgraph, params, false /*w13_linear*/);
+    // params[0] marks a 5th input carrying the per-expert bias
     task_config[op] =
-        std::make_tuple(4, 1, TASK_MOE_W2_LINEAR_SM100, variant_id);
+        std::make_tuple((params.size() == 1 && params[0] > 0) ? 5 : 4,
+                        1,
+                        TASK_MOE_W2_LINEAR_SM100,
+                        variant_id);
   } else if (name == "moe_w13_fp8_sm100") {
     int variant_id = task_register->register_moe_fp8_sm100_task(
         customized->bgraph, params, true /*w13_linear*/);
