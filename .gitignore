@@ -102,3 +102,9 @@ mirage_search_checkpoint.json
 !.claude/agents/
 !.claude/skills/**
 !.claude/agents/**
+
+# emitted per-rank artifacts from *_testmode.py / run_batch_perf runs
+test_rank*.cu
+kernel_metadata_rank*.json
+task_graph_rank*.json
+/outputs/
