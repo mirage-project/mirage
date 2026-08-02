@@ -265,7 +265,27 @@ def main():
         v_cache = mpk.attach_input(
             torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
         )
-        if os.environ.get("MPK_COMPILED_ATTENTION", "0") == "1":
+        # MPK_COMPILED_ATTENTION: "1"/"all" = every layer, "0"/unset = none,
+        # or a spec like "0-13" / "0,2,5" / "first:14" selecting WHICH layers
+        # use the compiled attention core (the rest keep the handwritten
+        # monolith) -- for mixed-graph perf attribution.
+        _ca = os.environ.get("MPK_COMPILED_ATTENTION", "0")
+        def _layer_compiled(idx, spec=_ca):
+            if spec in ("0", "", "none"):
+                return False
+            if spec in ("1", "all"):
+                return True
+            if spec.startswith("first:"):
+                return idx < int(spec.split(":")[1])
+            chosen = set()
+            for part in spec.split(","):
+                if "-" in part:
+                    a, b = part.split("-")
+                    chosen.update(range(int(a), int(b) + 1))
+                else:
+                    chosen.add(int(part))
+            return idx in chosen
+        if _layer_compiled(i):
             # Hybrid: handwritten prep -> COMPILER-GENERATED attention core ->
             # handwritten finalize (see mpk/models/qwen3/builder.py for the
             # same branch with full commentary).
