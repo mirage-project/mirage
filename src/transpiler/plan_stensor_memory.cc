@@ -276,8 +276,8 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
 
   auto get_phy_size = [&](tb::STensor const &stensor) {
     STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
-    size_t size = stensor_meta.num_phy_elems *
-                  type::get_datatype_size(stensor.data_type);
+    size_t size =
+        stensor_meta.num_phy_elems * type::get_datatype_size(stensor.data_type);
     if (blackwell_arch) {
       // UMMA smem descriptors and TMA apply the 128B swizzle to ABSOLUTE
       // address bits, while software copies (write_tC, elementwise kernels)

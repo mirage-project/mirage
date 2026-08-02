@@ -52,8 +52,8 @@ struct BroadcastStrideGetter {
                            cute::Int<0>,
                            cute::tuple_element_t<Is, ColMajorStride>>{}...);
   }
-  using Result = decltype(get(
-      std::make_index_sequence<cute::tuple_size_v<SrcShape>>{}));
+  using Result =
+      decltype(get(std::make_index_sequence<cute::tuple_size_v<SrcShape>>{}));
 };
 
 template <typename DstLayout, typename SrcLayout>

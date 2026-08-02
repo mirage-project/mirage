@@ -328,7 +328,9 @@ class InputTMAAsyncCopy_Blackwell {
       SmemLayoutAtom{},
       append(DstMNKLayout{}, Int<BlackwellAsyncPipeline::Stage>{}),
       // Step follows majorness (K-major -> <1,2,3>, MN-major -> <2,1,3>).
-      std::conditional_t<IsOriginalMInput, Step<_1, _2, _3>, Step<_2, _1, _3>>{}));
+      std::conditional_t<IsOriginalMInput,
+                         Step<_1, _2, _3>,
+                         Step<_2, _1, _3>>{}));
 
 public:
   static __device__ __forceinline__ void prefetch(TMA const &tma) {
@@ -511,9 +513,7 @@ class InputWideOperandSyncCopy {
           make_shape(shape<1>(Mma_Tiler{}), shape<2>(Mma_Tiler{}))))>;
 
   using DstPipeLayout = decltype(UMMA::tile_to_mma_shape(
-      SmemLayoutAtom{},
-      append(DstMNKLayout{}, Int<1>{}),
-      CopyStep{}));
+      SmemLayoutAtom{}, append(DstMNKLayout{}, Int<1>{}), CopyStep{}));
 
 public:
   static __device__ __forceinline__ void

@@ -153,14 +153,12 @@ int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
   transpiler::Transpiler transpiler(&mini, config, input_strides);
   transpiler::CustomOPTranspileResult result =
       transpiler.transpile_single_custom_op();
-  if (result.error_type != transpiler::CUDA_T_SUCCESS ||
-      result.code.empty()) {
+  if (result.error_type != transpiler::CUDA_T_SUCCESS || result.code.empty()) {
     throw std::runtime_error(
         "register_generated_task: the muGraph backend rejected this task body "
         "(transpiler error " +
         std::to_string((int)result.error_type) +
-        (result.error_type ==
-                 transpiler::CUDA_T_UNSUPPORTED_CHAINED_MATMUL
+        (result.error_type == transpiler::CUDA_T_UNSUPPORTED_CHAINED_MATMUL
              ? "). A matmul result feeding another op INSIDE the forloop "
                "(chained matmul / fused attention) is not supported yet."
              : "). Unsupported operand shapes are the usual cause -- see the "
@@ -198,24 +196,27 @@ int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
   for (size_t i = 0; i < num_writes; i++) {
     call += (first_arg ? "" : ", ");
     first_arg = false;
-    call += "(" + std::string(type::get_datatype_str(
-                      op->output_tensors[i].data_type)) +
-            "*)task_desc->output_ptrs[" + std::to_string(i) + "]";
+    call +=
+        "(" +
+        std::string(type::get_datatype_str(op->output_tensors[i].data_type)) +
+        "*)task_desc->output_ptrs[" + std::to_string(i) + "]";
   }
   for (size_t i = 0; i < op->input_tensors.size(); i++) {
-    std::string src = (i < num_reads)
-                          ? ("task_desc->input_ptrs[" + std::to_string(i) + "]")
-                          : ("task_desc->output_ptrs[" +
-                             std::to_string(i - num_reads) + "]");
+    std::string src =
+        (i < num_reads)
+            ? ("task_desc->input_ptrs[" + std::to_string(i) + "]")
+            : ("task_desc->output_ptrs[" + std::to_string(i - num_reads) + "]");
     call += (first_arg ? "" : ", ");
     first_arg = false;
-    call += "(" + std::string(type::get_datatype_str(
-                      op->input_tensors[i].data_type)) +
-            " const*)" + src;
+    call +=
+        "(" +
+        std::string(type::get_datatype_str(op->input_tensors[i].data_type)) +
+        " const*)" + src;
   }
   call += ");";
   code.e("$", call);
-  int const variant_id = register_task_variant(TASK_GENERATED, code.to_string());
+  int const variant_id =
+      register_task_variant(TASK_GENERATED, code.to_string());
   if (!result.tmaParamsList.empty()) {
     GeneratedTmaInfo info;
     info.variant_id = (unsigned)variant_id;

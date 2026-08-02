@@ -37,12 +37,13 @@ template <typename T,
           class ClusterShape_MNK_,
           class TiledMMA_,
           class MmaTiler_MNK_,
-          // swapAB: the caller computes C^T = B^T * A^T so a decode-shaped token
-          // count (M = 1..8) lands in N, which tcgen05 allows at any multiple of
-          // 8, while M takes the weight dim and stays 64/128. The operand roles
-          // invert, so the majors and the tile_to_mma_shape Steps invert with
-          // them -- leaving these hardcoded produced "Not a canonical UMMA_MN
-          // Layout" because the smem atom was selected for the wrong majorness.
+          // swapAB: the caller computes C^T = B^T * A^T so a decode-shaped
+          // token count (M = 1..8) lands in N, which tcgen05 allows at any
+          // multiple of 8, while M takes the weight dim and stays 64/128. The
+          // operand roles invert, so the majors and the tile_to_mma_shape Steps
+          // invert with them -- leaving these hardcoded produced "Not a
+          // canonical UMMA_MN Layout" because the smem atom was selected for
+          // the wrong majorness.
           bool SWAP_AB = false,
           // TASK_BODY: this matmul is an MPK megakernel task body, not a
           // standalone kernel. There, blockIdx.x is the WORKER id (one block
@@ -67,8 +68,10 @@ public:
       SWAP_AB ? UMMA::Major::K : UMMA::Major::MN;
   // CUTLASS picks the Step by majorness: is_mn_major ? Step<_2,_1,_3> :
   // Step<_1,_2,_3> (see sm100_mma_warpspecialized.hpp).
-  using StepA = cute::conditional_t<SWAP_AB, Step<_2, _1, _3>, Step<_1, _2, _3>>;
-  using StepB = cute::conditional_t<SWAP_AB, Step<_1, _2, _3>, Step<_2, _1, _3>>;
+  using StepA =
+      cute::conditional_t<SWAP_AB, Step<_2, _1, _3>, Step<_1, _2, _3>>;
+  using StepB =
+      cute::conditional_t<SWAP_AB, Step<_1, _2, _3>, Step<_2, _1, _3>>;
 
   static constexpr int PIPELINE_STAGE_A = IS_PIPELINE_A ? PIPELINE_STAGES : 1;
   static constexpr int PIPELINE_STAGE_B = IS_PIPELINE_B ? PIPELINE_STAGES : 1;
@@ -81,8 +84,10 @@ public:
   // SmemShape_M/SmemShape_N in
   // cutlass/gemm/collective/builders/sm100_umma_builder.inl.
   using AtomThrSize = decltype(size(typename TiledMMA::AtomThrID{}));
-  using SmemShape_M = decltype(shape_div(get<0>(MmaTiler_MNK{}), AtomThrSize{}));
-  using SmemShape_N = decltype(shape_div(get<1>(MmaTiler_MNK{}), AtomThrSize{}));
+  using SmemShape_M =
+      decltype(shape_div(get<0>(MmaTiler_MNK{}), AtomThrSize{}));
+  using SmemShape_N =
+      decltype(shape_div(get<1>(MmaTiler_MNK{}), AtomThrSize{}));
 
   using SmemLayoutAtom_A =
       decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
@@ -129,10 +134,10 @@ public:
   // is why only the non-pipelined path is limited to a 128B tile pitch.)
   //
   // On that path the two agree only because the transpiler emits the planner's
-  // computed swizzle; it used to hardcode Swizzle<3,3,4>, which differs from the
-  // UMMA's
-  // effective element-unit swizzle (Swizzle<3,3,3>) by one bit of chunk
-  // granularity and made every matmul return right values at wrong positions.
+  // computed swizzle; it used to hardcode Swizzle<3,3,4>, which differs from
+  // the UMMA's effective element-unit swizzle (Swizzle<3,3,3>) by one bit of
+  // chunk granularity and made every matmul return right values at wrong
+  // positions.
   //
   // Do not try to reconstruct the read layout by composing DstPipeLayout with a
   // linearizing layout: that drops the smem_ptr_flag[16b] bit-granularity
@@ -163,8 +168,8 @@ public:
                // shape_div(EpilogueTileShape_MN, TmemWarpShape_MN) with
                // TmemWarpShape = (4,1) -- see sm100_builder.inl. Both extents
                // must follow the tile: the column count was fixed at 128 (only
-               // matching one N), and the row count at 32, which is 128/4 and so
-               // silently assumed M=128. At M=64 that made the R2S copy fail
+               // matching one N), and the row count at 32, which is 128/4 and
+               // so silently assumed M=128. At M=64 that made the R2S copy fail
                // with "AtomTVLayout does not exist in the DataLayout".
                Shape<decltype(shape_div(SmemShape_M{}, Int<4>{})), SmemShape_N>,
                false>());
@@ -243,7 +248,7 @@ public:
         sC); // (MmaC, NumMma_M, NumMma_N) MmaC is half of cta_mma.Mma
     auto tDsC = thr_t2r_copy.partition_D(tCsC); // (CpyD, NumCpy_M, NumCpy_N)
     auto tDtAcc =
-        thr_t2r_copy.partition_S(tCtAcc);      // (CpyS, NumCpy_M, NumCpy_N)
+        thr_t2r_copy.partition_S(tCtAcc); // (CpyS, NumCpy_M, NumCpy_N)
     // TMEM holds fp32 accumulators (the TiledMMA's ElementAccumulator), and the
     // TMEM_LOAD op requires the destination register fragment to have that same
     // element type. Loading straight into a T (bf16) fragment made CUTLASS
@@ -296,15 +301,14 @@ public:
   template <class TmemAccTensor,
             class BlackwellAsyncPipeline_A,
             class BlackwellAsyncPipeline_B>
-  static __device__ __forceinline__ void
-      run(TmemAccTensor &mma_tC,
-          T *__restrict__ a_ptr,
-          T *__restrict__ b_ptr,
-          int k_iter,
-          TiledMMA tiled_mma,
-          int read_stage,
-          BlackwellAsyncPipeline_A &,
-          BlackwellAsyncPipeline_B &) {
+  static __device__ __forceinline__ void run(TmemAccTensor &mma_tC,
+                                             T *__restrict__ a_ptr,
+                                             T *__restrict__ b_ptr,
+                                             int k_iter,
+                                             TiledMMA tiled_mma,
+                                             int read_stage,
+                                             BlackwellAsyncPipeline_A &,
+                                             BlackwellAsyncPipeline_B &) {
     run(mma_tC, a_ptr, b_ptr, k_iter, tiled_mma, read_stage);
   }
 

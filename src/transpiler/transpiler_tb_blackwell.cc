@@ -15,8 +15,8 @@
 
 #include "mirage/threadblock/element_unary.h"
 #include "mirage/threadblock/forloop_accum.h"
-#include "mirage/threadblock/reduction.h"
 #include "mirage/threadblock/operator.h"
+#include "mirage/threadblock/reduction.h"
 #include "mirage/threadblock/smem_tensor.h"
 #include "mirage/transpiler/common.h"
 #include "mirage/transpiler/structs.h"
@@ -391,8 +391,8 @@ CustomOPTranspileResult
   // num_consumer_wgs == 0 warpgroup 0 becomes the producer and nothing consumes
   // the pipeline, so the kernel deadlocks by construction -- and the thread
   // count check below still passes, so it used to compile and hang. Python maps
-  // num_consumer_wgs = num_warp_groups - 1 (core.pyx), i.e. num_warp_groups must
-  // be >= 2 whenever forloop_range > 1.
+  // num_consumer_wgs = num_warp_groups - 1 (core.pyx), i.e. num_warp_groups
+  // must be >= 2 whenever forloop_range > 1.
   if (GPU_CC::B200 != config.target_cc ||
       (config::MAX_NUM_WARP_GROUPS <
        config.num_consumer_wgs + config.num_producer_wgs) ||
@@ -450,11 +450,10 @@ CustomOPTranspileResult
     if (st.num_dims < 2 || !leading_ones) {
       continue;
     }
-    bool narrow_ok =
-        mt.is_xor_swizzled && mt.swizzled_dim >= 0 &&
-        (size_t)mt.strides[mt.swizzled_dim] *
-                type::get_datatype_size(st.data_type) <=
-            128;
+    bool narrow_ok = mt.is_xor_swizzled && mt.swizzled_dim >= 0 &&
+                     (size_t)mt.strides[mt.swizzled_dim] *
+                             type::get_datatype_size(st.data_type) <=
+                         128;
     if (narrow_ok) {
       continue; // the chunked-copy path handles it
     }
@@ -563,13 +562,13 @@ CustomOPTranspileResult
   //
   // This is equivalent to the previous
   //   get<0>(cluster_layout_vmnk.get_flat_coord(cta_rank)) == 0
-  // formulation: cluster_layout_vmnk is make_layout(cluster_shape) tiled_divided
-  // by AtomThrID, so mode 0 of the flat coord is exactly cta_rank % |AtomThrID|.
-  // Computing it from cta_rank directly removes the dependency on tiled_mma,
-  // which does not exist when the graph has no matmul.
-  // 1-SM MMA (see the tiled_mma emission below): AtomThrID == 1, so every CTA
-  // is its own MMA leader and elect_one_cta is unconditionally true. Kept as a
-  // named variable because the accumulator/epilogue paths guard on it.
+  // formulation: cluster_layout_vmnk is make_layout(cluster_shape)
+  // tiled_divided by AtomThrID, so mode 0 of the flat coord is exactly cta_rank
+  // % |AtomThrID|. Computing it from cta_rank directly removes the dependency
+  // on tiled_mma, which does not exist when the graph has no matmul. 1-SM MMA
+  // (see the tiled_mma emission below): AtomThrID == 1, so every CTA is its own
+  // MMA leader and elect_one_cta is unconditionally true. Kept as a named
+  // variable because the accumulator/epilogue paths guard on it.
   int const mma_atom_thr_size = 1;
   code.e("bool elect_one_cta = (cta_rank % $) == 0;", mma_atom_thr_size);
 
@@ -682,8 +681,7 @@ CustomOPTranspileResult
       // The node's LAST op is what other nodes see: the scheduler fuses an
       // elementwise op (e.g. exp) into the matmul node, so the visible output
       // is the fused op's, not the raw matmul's.
-      sguid_t const produced =
-          prod.ops.back().first->output_tensors.at(0).guid;
+      sguid_t const produced = prod.ops.back().first->output_tensors.at(0).guid;
       // IN-LOOP consumers only. A post-loop consumer reads the forloop
       // ACCUMULATOR, which is materialised by the in-register write-back at the
       // end of the kernel -- that is the ordinary fused-epilogue shape (SwiGLU
@@ -724,8 +722,7 @@ CustomOPTranspileResult
           prod.ops.front().first->op_type == type::TB_MATMUL_OP) {
         continue; // matmul producers use the chained path
       }
-      sguid_t const produced =
-          prod.ops.back().first->output_tensors.at(0).guid;
+      sguid_t const produced = prod.ops.back().first->output_tensors.at(0).guid;
       for (TBSchedNode const &cons : sched.loop_nodes) {
         if (cons.type != tb_sched_node_t::OPERATOR ||
             cons.ops.front().first->op_type != type::TB_MATMUL_OP) {
@@ -753,8 +750,8 @@ CustomOPTranspileResult
   }
 
   // Every matmul issues one umma_arrive per forloop iteration, and the epilogue
-  // waits for phase 0 of a barrier expecting `arrive_cnt` of them. Counting only
-  // the iterations assumed exactly one matmul: with two, phase 0 completed
+  // waits for phase 0 of a barrier expecting `arrive_cnt` of them. Counting
+  // only the iterations assumed exactly one matmul: with two, phase 0 completed
   // halfway through the loop and the accumulator write-back raced the MMAs that
   // were still running.
   int num_matmuls = 0;
@@ -781,14 +778,13 @@ CustomOPTranspileResult
     // initialize_barrier(count = 0) is invalid mbarrier usage, and it drove
     // ptxas into an internal compiler error (C7907) at -O1+ on sm_100a.
     // Guard the init; the TMEM allocation part must still run.
-    generate_Tmem_mbarrier_init_code(res,
-                                     num_matmuls > 0
-                                         ? g.forloop_range * num_matmuls *
-                                               g.cluster_dim.x *
-                                               g.cluster_dim.y * g.cluster_dim.z
-                                         : -1 /* skip barrier init */,
-                                     tmem_base_ptr_name,
-                                     mbarrier_ptr_name);
+    generate_Tmem_mbarrier_init_code(
+        res,
+        num_matmuls > 0 ? g.forloop_range * num_matmuls * g.cluster_dim.x *
+                              g.cluster_dim.y * g.cluster_dim.z
+                        : -1 /* skip barrier init */,
+        tmem_base_ptr_name,
+        mbarrier_ptr_name);
     // Each chained matmul gets a count-1 barrier: exactly one MMA completes
     // against it before its result is read, within the same iteration. The
     // CONSUMER's per-matmul barrier (the anti-dependency wait) must be
@@ -969,129 +965,131 @@ CustomOPTranspileResult
         // dim, N, is contiguous -> Major::MN) and the B operand is the old A
         // (K contiguous -> Major::K), so the Major flags swap with the extents.
         e_mma("auto tiled_mma_$ = "
-               "cutlass::gemm::collective::detail::sm100_make_1sm_trivial_"
-               "tiled_mma<$, $, $, Shape<Int<$>, Int<$>>, "
-               "decltype(cluster_shape), UMMA::Major::$, UMMA::Major::$>();",
-               output.guid,
-               get_datatype_str(swap_ab ? input1.data_type : input0.data_type),
-               get_datatype_str(swap_ab ? input0.data_type : input1.data_type),
-               // Third parameter is ElementAccumulator, not the output element
-               // type. tcgen05 F16/BF16 MMA accumulates in fp32 (the result is
-               // narrowed on the way out of TMEM), so passing the bf16 output
-               // type here made CUTLASS reject it with "Unknown type for
-               // CFormat".
-               "float",
-               mma_m,
-               mma_n,
-               swap_ab ? "MN" : "K",
-               swap_ab ? "K" : "MN");
+              "cutlass::gemm::collective::detail::sm100_make_1sm_trivial_"
+              "tiled_mma<$, $, $, Shape<Int<$>, Int<$>>, "
+              "decltype(cluster_shape), UMMA::Major::$, UMMA::Major::$>();",
+              output.guid,
+              get_datatype_str(swap_ab ? input1.data_type : input0.data_type),
+              get_datatype_str(swap_ab ? input0.data_type : input1.data_type),
+              // Third parameter is ElementAccumulator, not the output element
+              // type. tcgen05 F16/BF16 MMA accumulates in fp32 (the result is
+              // narrowed on the way out of TMEM), so passing the bf16 output
+              // type here made CUTLASS reject it with "Unknown type for
+              // CFormat".
+              "float",
+              mma_m,
+              mma_n,
+              swap_ab ? "MN" : "K",
+              swap_ab ? "K" : "MN");
 
-      // Operand tile-width limit, for NON-pipelined operands only (a pipelined
-      // one is exempt -- see operand_ok below).
-      //
-      // The transpiler models smem as dense strides plus one XOR swizzle. That
-      // matches what the UMMA reads as long as an operand's contiguous dim is at
-      // most 128B (64 elements at 16-bit). At exactly 128B the planner yields
-      // Swizzle<3,3,3>, the UMMA's 128B swizzle in element units; narrower dims
-      // scale down consistently with the atom (K=32 -> Swizzle<2,3,3> against
-      // the atom's Sw<2,4,3>, K=16 -> Swizzle<1,3,3>), and those are verified
-      // correct.
-      //
-      // Wider operands diverge two ways. The planner switches branches
-      // (num_chunks_in_inner_dim > num_chunks_in_128B) and emits Swizzle<3,3,4>,
-      // and CUTLASS panel-tiles the layout atom rather than laying rows out
-      // contiguously -- tile_to_shape at K=128 gives
-      // ((_8,_16),(_64,_2)):((_64,_512),(_1,_8192)), so the second K block sits
-      // at +8192 elements, not at a row pitch of 128. No dense-stride layout can
-      // express that. Measured relative error on those shapes is ~1.6, i.e.
-      // silently wrong output, so reject them here instead.
-      {
-        // Test exactly what the planner branches on: the swizzled dim's stride
-        // in bytes, i.e. the row pitch. Above 128B it takes the
-        // num_chunks_in_inner_dim > num_chunks_in_128B path and emits a swizzle
-        // the UMMA does not read. Do NOT use dim[innermost_dim] here -- the
-        // layout resolver does not always make the K/N dim innermost (at K=32 it
-        // picks M), so that measures the wrong axis and rejects working shapes.
-        auto row_pitch_bytes = [](tb::STensor const &t, STensorMeta const &mt) {
-          return (size_t)mt.strides[mt.swizzled_dim] *
-                 type::get_datatype_size(t.data_type);
-        };
-        // Operands only. The constraint comes from the UMMA reading A and B
-        // through smem descriptors, so their layout must be one the hardware
-        // agrees with. C is written by the TMEM->smem copy and read by the S->G
-        // copy, both through SmemLayoutC, so it is self-consistent at any
-        // swizzle -- and measured so: at K=32 only C exceeds 128B (pitch 256B)
-        // and the result is correct (rel 2.3e-3). Including C here rejected that
-        // working shape.
+        // Operand tile-width limit, for NON-pipelined operands only (a
+        // pipelined one is exempt -- see operand_ok below).
         //
-        // Require the operand to be provably readable, not merely
-        // not-provably-bad: XOR-swizzled AND pitch <= 128B. A pitch whose chunk
-        // count is not a power of 2 (K=48 -> 6 chunks) sends the planner down
-        // its shift-based branch, which leaves is_xor_swizzled false and
-        // produces a layout the UMMA cannot read. Keying the check off
-        // is_xor_swizzled alone skipped those tensors entirely and let K=48
-        // through at rel 1.18 -- silently wrong.
-        // The pitch limit applies only to the NON-pipelined path.
+        // The transpiler models smem as dense strides plus one XOR swizzle.
+        // That matches what the UMMA reads as long as an operand's contiguous
+        // dim is at most 128B (64 elements at 16-bit). At exactly 128B the
+        // planner yields Swizzle<3,3,3>, the UMMA's 128B swizzle in element
+        // units; narrower dims scale down consistently with the atom (K=32 ->
+        // Swizzle<2,3,3> against the atom's Sw<2,4,3>, K=16 -> Swizzle<1,3,3>),
+        // and those are verified correct.
         //
-        // A pipelined operand is never addressed through the dense-stride
-        // model: InputTMAAsyncCopy_Blackwell writes
-        // make_tensor(dst_smem, DstPipeLayout{}) and Blackwell_Matmul::run
-        // reads make_tensor(a_ptr, DstPipeLayout_A{}), and both derive that
-        // layout independently from the same cutlass sm100_smem_selector for
-        // the same (major, element, tile). So CUTLASS panel-tiles both sides
-        // identically and the >128B divergence cannot arise. The transpiler's
-        // dense-stride layout is then used only for SIZING, which still agrees:
-        // tile_to_mma_shape is compact, so its per-stage cosize equals the
-        // element count the planner reserved and the pipeline's
-        // transactionBytes expects.
-        //
-        // Measured: N=128 and Ktile=128 are correct at rel ~2.5e-3 on the
-        // pipelined path, the same as N=64. The non-pipelined path keeps the
-        // original guard -- InputChunkedSyncCopy really does index linearly
-        // through the dense-stride layout, where a >128B tile is silently
-        // wrong (~1.6 relative error).
-        auto operand_ok = [&](tb::STensor const &t, STensorMeta const &mt) {
-          if (mt.is_pipelined_input) {
-            return true;
+        // Wider operands diverge two ways. The planner switches branches
+        // (num_chunks_in_inner_dim > num_chunks_in_128B) and emits
+        // Swizzle<3,3,4>, and CUTLASS panel-tiles the layout atom rather than
+        // laying rows out contiguously -- tile_to_shape at K=128 gives
+        // ((_8,_16),(_64,_2)):((_64,_512),(_1,_8192)), so the second K block
+        // sits at +8192 elements, not at a row pitch of 128. No dense-stride
+        // layout can express that. Measured relative error on those shapes is
+        // ~1.6, i.e. silently wrong output, so reject them here instead.
+        {
+          // Test exactly what the planner branches on: the swizzled dim's
+          // stride in bytes, i.e. the row pitch. Above 128B it takes the
+          // num_chunks_in_inner_dim > num_chunks_in_128B path and emits a
+          // swizzle the UMMA does not read. Do NOT use dim[innermost_dim] here
+          // -- the layout resolver does not always make the K/N dim innermost
+          // (at K=32 it picks M), so that measures the wrong axis and rejects
+          // working shapes.
+          auto row_pitch_bytes = [](tb::STensor const &t,
+                                    STensorMeta const &mt) {
+            return (size_t)mt.strides[mt.swizzled_dim] *
+                   type::get_datatype_size(t.data_type);
+          };
+          // Operands only. The constraint comes from the UMMA reading A and B
+          // through smem descriptors, so their layout must be one the hardware
+          // agrees with. C is written by the TMEM->smem copy and read by the
+          // S->G copy, both through SmemLayoutC, so it is self-consistent at
+          // any swizzle -- and measured so: at K=32 only C exceeds 128B (pitch
+          // 256B) and the result is correct (rel 2.3e-3). Including C here
+          // rejected that working shape.
+          //
+          // Require the operand to be provably readable, not merely
+          // not-provably-bad: XOR-swizzled AND pitch <= 128B. A pitch whose
+          // chunk count is not a power of 2 (K=48 -> 6 chunks) sends the
+          // planner down its shift-based branch, which leaves is_xor_swizzled
+          // false and produces a layout the UMMA cannot read. Keying the check
+          // off is_xor_swizzled alone skipped those tensors entirely and let
+          // K=48 through at rel 1.18 -- silently wrong. The pitch limit applies
+          // only to the NON-pipelined path.
+          //
+          // A pipelined operand is never addressed through the dense-stride
+          // model: InputTMAAsyncCopy_Blackwell writes
+          // make_tensor(dst_smem, DstPipeLayout{}) and Blackwell_Matmul::run
+          // reads make_tensor(a_ptr, DstPipeLayout_A{}), and both derive that
+          // layout independently from the same cutlass sm100_smem_selector for
+          // the same (major, element, tile). So CUTLASS panel-tiles both sides
+          // identically and the >128B divergence cannot arise. The transpiler's
+          // dense-stride layout is then used only for SIZING, which still
+          // agrees: tile_to_mma_shape is compact, so its per-stage cosize
+          // equals the element count the planner reserved and the pipeline's
+          // transactionBytes expects.
+          //
+          // Measured: N=128 and Ktile=128 are correct at rel ~2.5e-3 on the
+          // pipelined path, the same as N=64. The non-pipelined path keeps the
+          // original guard -- InputChunkedSyncCopy really does index linearly
+          // through the dense-stride layout, where a >128B tile is silently
+          // wrong (~1.6 relative error).
+          auto operand_ok = [&](tb::STensor const &t, STensorMeta const &mt) {
+            if (mt.is_pipelined_input) {
+              return true;
+            }
+            // Routed through InputWideOperandSyncCopy: written through the same
+            // cutlass-derived DstPipeLayout the UMMA reads, so the dense-stride
+            // pitch limit does not apply.
+            if (wide_matmul_operands.count(t.guid)) {
+              return true;
+            }
+            return mt.is_xor_swizzled && row_pitch_bytes(t, mt) <= 128;
+          };
+          bool unsupported =
+              !operand_ok(input0, meta0) || !operand_ok(input1, meta1);
+          if (unsupported) {
+            if (getenv("MIRAGE_DEBUG_WIDE")) {
+              fprintf(stderr,
+                      "[wide] operand_ok REJECT in0=%lld(%d) in1=%lld(%d)\n",
+                      (long long)input0.guid,
+                      (int)operand_ok(input0, meta0),
+                      (long long)input1.guid,
+                      (int)operand_ok(input1, meta1));
+            }
+            return CustomOPTranspileResult{
+                CUDA_T_LAYOUT_ERROR, func_name, 0, 0, "", {}};
           }
-          // Routed through InputWideOperandSyncCopy: written through the same
-          // cutlass-derived DstPipeLayout the UMMA reads, so the dense-stride
-          // pitch limit does not apply.
-          if (wide_matmul_operands.count(t.guid)) {
-            return true;
-          }
-          return mt.is_xor_swizzled && row_pitch_bytes(t, mt) <= 128;
-        };
-        bool unsupported =
-            !operand_ok(input0, meta0) || !operand_ok(input1, meta1);
-        if (unsupported) {
-          if (getenv("MIRAGE_DEBUG_WIDE")) {
-            fprintf(stderr,
-                    "[wide] operand_ok REJECT in0=%lld(%d) in1=%lld(%d)\n",
-                    (long long)input0.guid,
-                    (int)operand_ok(input0, meta0),
-                    (long long)input1.guid,
-                    (int)operand_ok(input1, meta1));
-          }
-          return CustomOPTranspileResult{
-              CUDA_T_LAYOUT_ERROR, func_name, 0, 0, "", {}};
         }
-      }
 
-      assert(k % 16 == 0);
+        assert(k % 16 == 0);
         e_mma("auto mma_tiler_$ = make_shape(tile_size<0>(tiled_mma_$), "
-               "tile_size<1>(tiled_mma_$), tile_size<2>(tiled_mma_$)*_${});",
-               output.guid,
-               output.guid,
-               output.guid,
-               output.guid,
-               k / 16);
+              "tile_size<1>(tiled_mma_$), tile_size<2>(tiled_mma_$)*_${});",
+              output.guid,
+              output.guid,
+              output.guid,
+              output.guid,
+              k / 16);
 
         e_mma("Layout cluster_layout_vmnk_$ = "
-               "tiled_divide(make_layout(cluster_shape), make_tile(typename "
-               "decltype(tiled_mma_$)::AtomThrID{}));",
-               output.guid,
-               output.guid);
+              "tiled_divide(make_layout(cluster_shape), make_tile(typename "
+              "decltype(tiled_mma_$)::AtomThrID{}));",
+              output.guid,
+              output.guid);
 
         // NOTE: `elect_one_cta` (and the cta_in_cluster_coord_vmnk it was
         // derived from) is now declared once in the kernel prologue. Declaring
@@ -1104,7 +1102,8 @@ CustomOPTranspileResult
         // C needs [M,N] -- all three are the *natural* stensor order, i.e.
         // swap01=false. The epilogue then writes accumulator element
         // (n_idx, m_idx) through the swapped C layout, which is exactly where
-        // output element (m_idx, n_idx) lives, so the S->G copy needs no change.
+        // output element (m_idx, n_idx) lives, so the S->G copy needs no
+        // change.
         code.e("using Matmul$LayoutA = $;",
                output.guid,
                swap_ab ? get_stensor_layout(input1, meta1, num_dims - 2, false)
@@ -1157,8 +1156,8 @@ CustomOPTranspileResult
              (swap_ab ? meta1 : meta0).is_pipelined_input,
              (swap_ab ? meta0 : meta1).is_pipelined_input,
              config.pipeline_stages,
-             output.guid,             // decltype(tiled_mma_$)
-             output.guid,             // decltype(mma_tiler_$)
+             output.guid, // decltype(tiled_mma_$)
+             output.guid, // decltype(mma_tiler_$)
              swap_ab ? "true" : "false",
              // TASK_BODY: in a megakernel task blockIdx is the worker id, so
              // the MMA coordinate must not be derived from it.
@@ -1194,8 +1193,8 @@ CustomOPTranspileResult
   // Get matmul stensor_guid2stensor
   std::map<sguid_t, tb::STensor> SGuid2STensor;
   // Operands of a matmul. A pipeline feeding one of these is driven by a single
-  // elected warp (see use_cta_warp_selector), so its consumer count is 32 rather
-  // than a full warp group -- getting that wrong deadlocks the producer.
+  // elected warp (see use_cta_warp_selector), so its consumer count is 32
+  // rather than a full warp group -- getting that wrong deadlocks the producer.
   std::unordered_set<sguid_t> matmul_operand_guids;
   for (TBSchedNode const &node :
        Combine(Combine(sched.pre_loop_nodes, sched.loop_nodes),
@@ -1356,18 +1355,19 @@ CustomOPTranspileResult
         if (wide_matmul_operands.count(stensor.guid)) {
           emit_wide_operand_atom();
         } else {
-        string dtensor_tile_layout = get_dtensor_tile_layout(
-            dtensor, dtensor_meta, stensor, stensor_meta, d_innermost_dim);
-        code.e(
-            "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
-        // Non-chunked, synchronous copy
-        code.e(
-            "using STensor$InputAtom = tb::InputNonChunkedSyncCopy<$, "
-            "$, DTensor$TileLayout, NUM_THREADS>;",
-            stensor.guid,
-            get_datatype_str(stensor.data_type),
-            mov_last_get_stensor_layout(stensor, stensor_meta, d_innermost_dim),
-            dtensor.guid);
+          string dtensor_tile_layout = get_dtensor_tile_layout(
+              dtensor, dtensor_meta, stensor, stensor_meta, d_innermost_dim);
+          code.e("using DTensor$TileLayout = $;",
+                 dtensor.guid,
+                 dtensor_tile_layout);
+          // Non-chunked, synchronous copy
+          code.e("using STensor$InputAtom = tb::InputNonChunkedSyncCopy<$, "
+                 "$, DTensor$TileLayout, NUM_THREADS>;",
+                 stensor.guid,
+                 get_datatype_str(stensor.data_type),
+                 mov_last_get_stensor_layout(
+                     stensor, stensor_meta, d_innermost_dim),
+                 dtensor.guid);
         }
       } else {
         string dtensor_tile_layout = get_dtensor_tile_layout(
@@ -1435,7 +1435,8 @@ CustomOPTranspileResult
 
           // Consumer count must equal the threads that really call
           // consumer_wait/consumer_release for this pipeline. A matmul operand
-          // is consumed under `if (elect_one_cta && elect_one_warp)` -- one warp
+          // is consumed under `if (elect_one_cta && elect_one_warp)` -- one
+          // warp
           // -- while an elementwise consumer runs on every consumer thread.
           // Passing the warp-group count for a matmul-fed pipeline left the
           // empty-arrive spread incomplete and hung the producer.
@@ -1511,20 +1512,21 @@ CustomOPTranspileResult
                              stensor.dim[1],
                              stensor_meta.c_matrix_guid,
                              stensor.dim[0] != 64 && stensor.dim[0] != 128)
-                  : TiledMMA(get_datatype_str(stensor.data_type),
-                             get_datatype_str(
-                                 SGuid2STensor[stensor_meta.m_matrix_guid]
-                                     .data_type),
-                             // ElementAccumulator: tcgen05 accumulates in fp32
-                             "float",
-                             SGuid2STensor[stensor_meta.m_matrix_guid].dim[0],
-                             stensor.dim[1],
-                             stensor.dim[0],
-                             stensor_meta.c_matrix_guid,
-                             SGuid2STensor[stensor_meta.m_matrix_guid].dim[0] !=
-                                     64 &&
-                                 SGuid2STensor[stensor_meta.m_matrix_guid]
-                                         .dim[0] != 128))));
+                  : TiledMMA(
+                        get_datatype_str(stensor.data_type),
+                        get_datatype_str(
+                            SGuid2STensor[stensor_meta.m_matrix_guid]
+                                .data_type),
+                        // ElementAccumulator: tcgen05 accumulates in fp32
+                        "float",
+                        SGuid2STensor[stensor_meta.m_matrix_guid].dim[0],
+                        stensor.dim[1],
+                        stensor.dim[0],
+                        stensor_meta.c_matrix_guid,
+                        SGuid2STensor[stensor_meta.m_matrix_guid].dim[0] !=
+                                64 &&
+                            SGuid2STensor[stensor_meta.m_matrix_guid].dim[0] !=
+                                128))));
 
           // Resolve this operand's position within the OP, which is what a task
           // indexes its pointers by (see TMAParams::operand_id).
@@ -1546,7 +1548,10 @@ CustomOPTranspileResult
                 code, just_pushed, op, config, /*types_only=*/true);
             code.e("TMA_$ const &tma_$ = *reinterpret_cast<TMA_$ const *>("
                    "tma_ptr_$);",
-                   dtensor.guid, dtensor.guid, dtensor.guid, dtensor.guid);
+                   dtensor.guid,
+                   dtensor.guid,
+                   dtensor.guid,
+                   dtensor.guid);
           }
 
           code.e(
@@ -1564,8 +1569,8 @@ CustomOPTranspileResult
               // the stensor's source-graph position.
               stensor_meta.m_input != atom_swap_ab,
               g.forloop_range,
-              stensor_meta.c_matrix_guid,  // decltype(tiled_mma_$)
-              stensor_meta.c_matrix_guid,  // decltype(mma_tiler_$)
+              stensor_meta.c_matrix_guid, // decltype(tiled_mma_$)
+              stensor_meta.c_matrix_guid, // decltype(mma_tiler_$)
               atom_swap_ab ? "true" : "false",
               // TASK_BODY: the gmem tile coordinate must not come from
               // blockIdx in a task body -- see the flag's comment in input.h.
@@ -1993,9 +1998,10 @@ CustomOPTranspileResult
       // TODO(zy): support other cases such as 1sm mma
       // NOT a 2-SM switch despite its former name (use_2sm_mma). The tcgen05
       // MMA is issued by a single elected warp on the 1-SM path too, and this
-      // is what wraps the matmul node in `if (elect_one_cta && elect_one_warp)`.
-      // Setting it false while "removing 2-SM code" would silently drop that
-      // selector and let all 128 consumer threads issue the MMA.
+      // is what wraps the matmul node in `if (elect_one_cta &&
+      // elect_one_warp)`. Setting it false while "removing 2-SM code" would
+      // silently drop that selector and let all 128 consumer threads issue the
+      // MMA.
       bool mma_needs_single_warp = true;
 
       // The single-CTA / single-warp selector exists so that exactly one warp
@@ -2073,8 +2079,8 @@ CustomOPTranspileResult
             // constant, K pipelined -- the attention shape) referenced a
             // pipeline the non-pipelined operand never had.
             auto stage_of = [&](sguid_t guid) -> string {
-              if (std::find(pipe_ids.begin(), pipe_ids.end(),
-                            (int64_t)guid) != pipe_ids.end()) {
+              if (std::find(pipe_ids.begin(), pipe_ids.end(), (int64_t)guid) !=
+                  pipe_ids.end()) {
                 return fmt("read_idx_$", guid);
               }
               // Pipelined, but waited by an EARLIER node in this iteration
@@ -2151,10 +2157,11 @@ CustomOPTranspileResult
               code.e("cutlass::arch::fence_view_async_shared();");
               // Publish it to the warp that issues the consuming MMA.
               code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
-              // tcgen05 ops must observe the thread sync's ordering before their
-              // next smem operand reads -- the handwritten sm100 tasks pair the
-              // writer-side fence.proxy.async with this fence after the sync. Its
-              // absence tore MMA reads of STANDALONE-elementwise-written operands.
+              // tcgen05 ops must observe the thread sync's ordering before
+              // their next smem operand reads -- the handwritten sm100 tasks
+              // pair the writer-side fence.proxy.async with this fence after
+              // the sync. Its absence tore MMA reads of
+              // STANDALONE-elementwise-written operands.
               code.e("tb::tcgen05_fence_after_thread_sync();");
               code.e("if (elect_one_cta && elect_one_warp) {");
             } else {
@@ -2243,10 +2250,11 @@ CustomOPTranspileResult
               code.e("cutlass::arch::fence_view_async_shared();");
               // Publish it to the warp that issues the consuming MMA.
               code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
-              // tcgen05 ops must observe the thread sync's ordering before their
-              // next smem operand reads -- the handwritten sm100 tasks pair the
-              // writer-side fence.proxy.async with this fence after the sync. Its
-              // absence tore MMA reads of STANDALONE-elementwise-written operands.
+              // tcgen05 ops must observe the thread sync's ordering before
+              // their next smem operand reads -- the handwritten sm100 tasks
+              // pair the writer-side fence.proxy.async with this fence after
+              // the sync. Its absence tore MMA reads of
+              // STANDALONE-elementwise-written operands.
               code.e("tb::tcgen05_fence_after_thread_sync();");
               code.e("if (elect_one_cta && elect_one_warp) {");
             } else {
@@ -2848,8 +2856,8 @@ CustomOPTranspileResult
   //
   // Only emit this when TMEM was actually allocated: `tmem_allocator` is
   // declared by generate_Tmem_mbarrier_init_code (guarded by need_mbarrier) and
-  // `tmem_base_ptr` only when the memory plan reserved a TMEM base. Emitting the
-  // release unconditionally left graphs without a matmul referencing both
+  // `tmem_base_ptr` only when the memory plan reserved a TMEM base. Emitting
+  // the release unconditionally left graphs without a matmul referencing both
   // identifiers before they were declared.
   if (need_mbarrier && has_tmem_base_ptr) {
     code.e("__syncthreads();");
@@ -2890,7 +2898,9 @@ CustomOPTranspileResult
     host.e("static void $_build_tma(void **tma_out, void *const *input_ptrs) {",
            func_name);
     host.e("auto cluster_shape = make_shape(Int<$>{}, Int<$>{}, Int<$>{});",
-           g.cluster_dim.x, g.cluster_dim.y, g.cluster_dim.z);
+           g.cluster_dim.x,
+           g.cluster_dim.y,
+           g.cluster_dim.z);
     host << mma_setup;
     for (auto const &p : tmaParamsList) {
       // input_id indexes the graph's KN inputs, which for a task body are
@@ -2908,7 +2918,9 @@ CustomOPTranspileResult
       host.e("cudaMalloc(&tma_out[$], sizeof(tma_$));", i, guid);
       host.e("cudaMemcpy(tma_out[$], &tma_$, sizeof(tma_$), "
              "cudaMemcpyHostToDevice);",
-             i, guid, guid);
+             i,
+             guid,
+             guid);
     }
     host.e("}");
     code << host;

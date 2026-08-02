@@ -802,8 +802,7 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
             case TB_REDUCTION_2_TO_DIMX_OP: {
               assert(stensor_inputs.size() == 1);
               threadblock::STensor st = tbg->reduction_to_dimx(
-                  stensor_inputs[0],
-                  bop->op_type - TB_REDUCTION_0_TO_DIMX_OP);
+                  stensor_inputs[0], bop->op_type - TB_REDUCTION_0_TO_DIMX_OP);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
