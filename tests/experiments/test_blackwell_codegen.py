@@ -182,12 +182,12 @@ class TestSingleTileCustomOp:
 class TestKnownBroken:
     """Boundary of what works today -- see DESIGN.md for the remaining defects."""
 
-    @pytest.mark.xfail(
-        reason="pipelined/TMA path: input atoms reference guid-suffixed "
-               "tiled_mma/mma_tiler that the TB backend never declares (A2/A3)",
-        strict=True,
-    )
     def test_pipelined_elementwise(self):
+        """Fixed: forloop-tiled inputs consumed only by elementwise ops are
+        demoted from the pipelined path (whose atom needs a consuming matmul's
+        tiled_mma -- it used to emit a dangling `tiled_mma_0`) to an in-loop
+        chunked sync copy with a per-iteration gmem advance. Also verify the
+        numbers, not just compilation."""
         g = _build_silu_mul(
             (32, 1, 1), (256, 1, 1), forloop_range=4, tile=(8, 2048), forloop_dim=1
         )
@@ -197,7 +197,13 @@ class TestKnownBroken:
         with contextlib.redirect_stdout(io.StringIO()):
             res = g.compile(inputs=ins, target_cc=100, num_warp_groups=2,
                             pipeline_stages=2)
-        assert res is not None and g._valid_cuda_kernels
+        assert res is not None and g._valid_cuda_kernels, g.get_error_message()
+        # fd=1 forloop_accum SUMS column tiles, so silu(a)*b is not the
+        # reference here; this guards compilation + a clean launch (the old
+        # failure was a dangling tiled_mma_0 that never compiled).
+        out = g(inputs=ins)[0].float()
+        torch.cuda.synchronize()
+        assert torch.isfinite(out).all(), "pipelined elementwise produced NaN/Inf"
 
     @pytest.mark.xfail(
         reason="Hopper TB backend has the same class of defects as Blackwell "
@@ -308,29 +314,26 @@ class TestBlackwellMatmul:
         assert rel < 0.02, f"relative error {rel}"
 
     @pytest.mark.parametrize("m,k,n", [(128, 128, 64), (128, 64, 128)])
-    def test_oversized_operand_pitch_is_rejected(self, m, k, n):
-        """A/B row pitch >128B must fail loudly, never silently miscompute.
-
-        This covers the NON-pipelined path only (_build_matmul uses
-        forloop_range=1). There the G->S copy is InputChunkedSyncCopy, which
-        indexes linearly through the transpiler's dense-stride + XOR-swizzle
-        model, while CUTLASS panel-tiles wider operands (tile_to_shape at K=128
-        puts the second K block at +8192 elements, not at a row pitch of 128).
-        No dense-stride layout can express that, and these shapes measured ~1.6
-        relative error -- silently wrong output -- before the guard existed.
-
-        A PIPELINED operand has no such limit: TMA writes and the UMMA reads
-        through the same CUTLASS DstPipeLayout, so both panel-tile identically.
-        See test_matmul_wide_tile_pipelined.
-        """
+    def test_oversized_operand_pitch_wide_atom(self, m, k, n):
+        """A/B row pitch >128B on the NON-pipelined path now routes through
+        InputWideOperandSyncCopy, which writes through the same cutlass
+        DstPipeLayout the UMMA reads (agreement by construction, like the
+        pipelined path). These shapes used to be rejected with a layout error
+        because InputChunkedSyncCopy's dense-stride model cannot express
+        cutlass's panel tiling beyond a 128B pitch (~1.6 rel error before the
+        guard). Now they must compile AND be numerically correct."""
         g = self._build_matmul(m, k, n)
         a = torch.randn(m, k, dtype=torch.bfloat16, device="cuda")
         b = torch.randn(k, n, dtype=torch.bfloat16, device="cuda")
         with contextlib.redirect_stdout(io.StringIO()):
             g.compile(inputs=[a, b], target_cc=100, num_warp_groups=1,
                       pipeline_stages=2)
-        assert not g._valid_cuda_kernels
-        assert "layout error" in g.get_error_message()
+        assert g._valid_cuda_kernels, g.get_error_message()
+        out = g(inputs=[a, b])[0].float()
+        torch.cuda.synchronize()
+        ref = a.float() @ b.float()
+        rel = ((out - ref).abs().max() / ref.abs().max()).item()
+        assert rel < 0.02, f"wide-operand matmul rel {rel}"
 
     # Tiles wider than the 128B pitch the non-pipelined path is limited to:
     # N=128 makes the B tile 256B wide, and K=256 over 2 iterations makes the A
@@ -445,6 +448,131 @@ class TestBlackwellMatmul:
         ref = torch.exp(q.float() @ k.float()) @ v.float()
         rel = ((out - ref).abs().max() / ref.abs().max()).item()
         assert rel < 0.02, f"K-loop chained rel {rel}"
+
+    def test_chained_matmul_broadcast_mul(self):
+        """K-looped chained matmul with a NON-UNIFORM (1,64) broadcast mul
+        between the two matmuls. Regression for the smem swizzle-alignment
+        bug: the 128B mask allocation shifted every later buffer off the
+        1024B SW128 swizzle period, so the software-written E tile was read
+        chunk-permuted by the second matmul's UMMA (hardware swizzles
+        absolute address bits, software copies swizzle base-relative).
+        Uniform broadcast values make the permutation invisible -- the
+        random values here are the point of the test."""
+        NH = HD = 64
+        S = 128
+        g = mi.new_kernel_graph()
+        Q = g.new_input(dims=(NH, HD), dtype=mi.bfloat16)
+        KT = g.new_input(dims=(HD, S), dtype=mi.bfloat16)
+        V = g.new_input(dims=(S, HD), dtype=mi.bfloat16)
+        ONES = g.new_input(dims=(1, 64), dtype=mi.bfloat16)
+        tb = mi.new_threadblock_graph(grid_dim=(1, 1, 1), block_dim=(256, 1, 1),
+                                      forloop_range=2, reduction_dimx=64)
+        tQ = tb.new_input(dtensor=Q, input_map=(-1, -1, -1), forloop_dim=-1)
+        tK = tb.new_input(dtensor=KT, input_map=(-1, -1, -1), forloop_dim=1)
+        tV = tb.new_input(dtensor=V, input_map=(-1, -1, -1), forloop_dim=0)
+        tO1 = tb.new_input(dtensor=ONES, input_map=(-1, -1, -1), forloop_dim=-1)
+        E = tb.mul(tb.exp(tb.matmul(tQ, tK)), tO1)
+        acc = tb.forloop_accum(tb.matmul(E, tV), None)
+        tb.new_output(stensor=acc, output_map=(-1, -1, -1))
+        out_op = g.customized([Q, KT, V, ONES], tb)
+        g.mark_output(out_op[0])
+        q = torch.randn(NH, HD, dtype=torch.bfloat16, device="cuda") * 0.1
+        k = torch.randn(HD, S, dtype=torch.bfloat16, device="cuda") * 0.1
+        v = torch.randn(S, HD, dtype=torch.bfloat16, device="cuda")
+        ones = torch.randn(1, 64, dtype=torch.bfloat16, device="cuda").abs() + 0.5
+        with contextlib.redirect_stdout(io.StringIO()):
+            g.compile(inputs=[q, k, v, ones], target_cc=100, num_warp_groups=2,
+                      pipeline_stages=2)
+        assert g._valid_cuda_kernels, g.get_error_message()
+        out = g(inputs=[q, k, v, ones])[0].float()
+        torch.cuda.synchronize()
+        logits = q.float() @ k.float()
+        ref = sum((torch.exp(logits[:, t * 64:(t + 1) * 64]) * ones.float())
+                  @ v.float()[t * 64:(t + 1) * 64] for t in range(S // 64))
+        rel = ((out - ref).abs().max() / ref.abs().max()).item()
+        assert rel < 0.02, f"broadcast-mul chained rel {rel}"
+
+    def test_online_softmax_attention(self):
+        """Full online-softmax attention O = softmax(Q@K^T) @ V through the
+        enable_online_softmax rewrite, K/V tiled over the forloop. Gates the
+        Qwen3 generated-attention path. bf16 exp + rowsum-div lands around
+        rel 2e-2 (fp32 reference), hence the looser bound than the plain
+        chained-matmul tests."""
+        NH = HD = 64
+        FL = 4
+        S = 64 * FL
+        g = mi.new_kernel_graph()
+        Q = g.new_input(dims=(NH, HD), dtype=mi.bfloat16)
+        KT = g.new_input(dims=(HD, S), dtype=mi.bfloat16)
+        V = g.new_input(dims=(S, HD), dtype=mi.bfloat16)
+        tb = mi.new_threadblock_graph(grid_dim=(1, 1, 1), block_dim=(256, 1, 1),
+                                      forloop_range=FL, reduction_dimx=64)
+        tQ = tb.new_input(dtensor=Q, input_map=(-1, -1, -1), forloop_dim=-1)
+        tK = tb.new_input(dtensor=KT, input_map=(-1, -1, -1), forloop_dim=1)
+        tV = tb.new_input(dtensor=V, input_map=(-1, -1, -1), forloop_dim=0)
+        E = tb.exp(tb.matmul(tQ, tK))
+        denom = tb.forloop_accum(E, "sum")
+        numer = tb.forloop_accum(tb.matmul(E, tV), None)
+        out_s = tb.div(numer, denom)
+        tb.new_output(stensor=out_s, output_map=(-1, -1, -1))
+        out_op = g.customized([Q, KT, V], tb)
+        g.mark_output(out_op[0])
+        q = torch.randn(NH, HD, dtype=torch.bfloat16, device="cuda")
+        k = torch.randn(HD, S, dtype=torch.bfloat16, device="cuda")
+        v = torch.randn(S, HD, dtype=torch.bfloat16, device="cuda")
+        with contextlib.redirect_stdout(io.StringIO()):
+            g.compile(inputs=[q, k, v], target_cc=100, num_warp_groups=2,
+                      pipeline_stages=2, enable_online_softmax=True)
+        assert g._valid_cuda_kernels, g.get_error_message()
+        out = g(inputs=[q, k, v])[0].float()
+        torch.cuda.synchronize()
+        ref = torch.softmax(q.float() @ k.float(), dim=-1) @ v.float()
+        rel = ((out - ref).abs().max() / ref.abs().max()).item()
+        assert rel < 0.04, f"online softmax rel {rel}"
+
+    def test_attention_core_qwen3_shape(self):
+        """Full attention core at Qwen3 decode shapes: O = softmax(Q@K^T +
+        mask) @ V with Q (8,128) -- swapAB + WIDE non-pipelined Q through
+        InputWideOperandSyncCopy -- K^T/V pipelined over the KV loop, (1,64)
+        additive mask tiles synced in-loop, online-softmax rewrite. Guards
+        three swapAB-chained regressions found together: the role-flipped
+        IS_PIPELINE_A/B template args (V stage collapse: KV tile 0 consumed
+        every iteration), the MInput+N_LOOP tile advance (K^T M-tile refetch),
+        and the non-matmul-consumed pipelined-input demotion (mask)."""
+        M, HD = 8, 128
+        FL = 4
+        S = 64 * FL
+        g = mi.new_kernel_graph()
+        Q = g.new_input(dims=(M, HD), dtype=mi.bfloat16)
+        KT = g.new_input(dims=(HD, S), dtype=mi.bfloat16)
+        V = g.new_input(dims=(S, HD), dtype=mi.bfloat16)
+        MASK = g.new_input(dims=(1, S), dtype=mi.bfloat16)
+        tb = mi.new_threadblock_graph(grid_dim=(1, 1, 1), block_dim=(256, 1, 1),
+                                      forloop_range=FL, reduction_dimx=64)
+        tQ = tb.new_input(dtensor=Q, input_map=(-1, -1, -1), forloop_dim=-1)
+        tK = tb.new_input(dtensor=KT, input_map=(-1, -1, -1), forloop_dim=1)
+        tV = tb.new_input(dtensor=V, input_map=(-1, -1, -1), forloop_dim=0)
+        tM = tb.new_input(dtensor=MASK, input_map=(-1, -1, -1), forloop_dim=1)
+        E = tb.exp(tb.add(tb.matmul(tQ, tK), tM))
+        denom = tb.forloop_accum(E, "sum")
+        numer = tb.forloop_accum(tb.matmul(E, tV), None)
+        out_s = tb.div(numer, denom)
+        tb.new_output(stensor=out_s, output_map=(-1, -1, -1))
+        out_op = g.customized([Q, KT, V, MASK], tb)
+        g.mark_output(out_op[0])
+        q = torch.randn(M, HD, dtype=torch.bfloat16, device="cuda") * 0.1
+        k = torch.randn(HD, S, dtype=torch.bfloat16, device="cuda") * 0.1
+        v = torch.randn(S, HD, dtype=torch.bfloat16, device="cuda")
+        mask = torch.randn(1, S, dtype=torch.bfloat16, device="cuda") * 0.5
+        with contextlib.redirect_stdout(io.StringIO()):
+            g.compile(inputs=[q, k, v, mask], target_cc=100, num_warp_groups=2,
+                      pipeline_stages=2, enable_online_softmax=True)
+        assert g._valid_cuda_kernels, g.get_error_message()
+        out = g(inputs=[q, k, v, mask])[0].float()
+        torch.cuda.synchronize()
+        ref = torch.softmax(q.float() @ k.float() + mask.float(), dim=-1) @ v.float()
+        rel = ((out - ref).abs().max() / ref.abs().max()).item()
+        assert rel < 0.03, f"attention core rel {rel}"
 
     def test_matmul_identity_is_exact(self):
         """I @ I must be exactly I: catches any operand-layout permutation."""
