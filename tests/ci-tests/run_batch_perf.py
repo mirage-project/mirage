@@ -270,6 +270,7 @@ def main():
         # use the compiled attention core (the rest keep the handwritten
         # monolith) -- for mixed-graph perf attribution.
         _ca = os.environ.get("MPK_COMPILED_ATTENTION", "0")
+        _cm = os.environ.get("MPK_COMPILED_MLP", "0")
         def _layer_compiled(idx, spec=_ca):
             if spec in ("0", "", "none"):
                 return False
@@ -386,14 +387,35 @@ def main():
             input=x, weight=w_norm, output=rmsnorm_out,
             grid_dim=(mpk.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1),
         )
-        mpk.linear_layer(
-            input=rmsnorm_out, weight=w_gatedup, output=mlp_mid,
-            grid_dim=(rmsnorm_num_tasks, 1, 1), block_dim=(128, 1, 1),
-        )
-        mpk.silu_mul_layer(
-            input=mlp_mid, output=silu_mul_out,
-            grid_dim=(rmsnorm_num_tasks // 2, 1, 1), block_dim=(128, 1, 1),
-        )
+        if _layer_compiled(i, spec=_cm):
+            # COMPILER-GENERATED gated-MLP segment: silu(x@Wg^T) * (x@Wu^T)
+            # as ONE task -- both matmuls, the activation, and the multiply
+            # fused, with neither matmul result reaching global memory. The
+            # verified segment (test_generated_swiglu_segment) measured 1.70x
+            # less task time than the handwritten linear+silu_mul pair at
+            # these shapes. Weights go in pre-transposed (K, N).
+            _wg_t = mpk.attach_input(
+                torch_tensor=layer.mlp.gate_proj.weight.t().contiguous(),
+                name=f"layer_{i}_gate_proj_t")
+            _wu_t = mpk.attach_input(
+                torch_tensor=layer.mlp.up_proj.weight.t().contiguous(),
+                name=f"layer_{i}_up_proj_t")
+            _I = layer.mlp.gate_proj.weight.shape[0]
+            mpk.generated_swiglu_layer(
+                input=rmsnorm_out, gate_weight_t=_wg_t, up_weight_t=_wu_t,
+                output=silu_mul_out,
+                grid_dim=(_I // 64, 1, 1), block_dim=(256, 1, 1),
+                forloop_range=hidden_size // 64,
+            )
+        else:
+            mpk.linear_layer(
+                input=rmsnorm_out, weight=w_gatedup, output=mlp_mid,
+                grid_dim=(rmsnorm_num_tasks, 1, 1), block_dim=(128, 1, 1),
+            )
+            mpk.silu_mul_layer(
+                input=mlp_mid, output=silu_mul_out,
+                grid_dim=(rmsnorm_num_tasks // 2, 1, 1), block_dim=(128, 1, 1),
+            )
         # add silu_mul_linear layer
         w = mpk.attach_input(
             torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
