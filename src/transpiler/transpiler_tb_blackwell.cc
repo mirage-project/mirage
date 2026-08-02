@@ -361,9 +361,6 @@ static void generate_Tmem_mbarrier_init_code(CodeKeeper &code,
   // The sync mask for the blocks within the same cluster
   code.e("uint16_t consumer_sync_mask = static_cast<uint16_t>((1u << "
          "size(cluster_shape)) - 1u);");
-  // code.e("uint16_t consumer_sync_mask = (1 << blockIdx.y * gridDim.x +
-  // (blockIdx.x / 2) * 2) | (1 << blockIdx.y * gridDim.x + (blockIdx.x / 2) * 2
-  // + 1);");
 }
 
 // Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
@@ -405,10 +402,8 @@ CustomOPTranspileResult
         CUDA_T_CONFIG_ERROR, func_name, 0, 0, "", {}};
   }
 
-  // int barrier_size = 16 * config.pipeline_stages;
   int tma_barrier_size = 16 * config.pipeline_stages;
 
-  int cluster_barrier_size = 8;
 
   // Get the schedule
   TBSched sched = get_threadblock_schedule(g);
@@ -468,19 +463,6 @@ CustomOPTranspileResult
     }
     if (any_consumer && all_matmul) {
       wide_matmul_operands.insert(st.guid);
-    }
-    if (getenv("MIRAGE_DEBUG_WIDE")) {
-      fprintf(stderr,
-              "[wide] st=%lld fd=%d pipe=%d xor=%d swdim=%d cons=%d allmm=%d "
-              "-> %d\n",
-              (long long)st.guid,
-              in_op->forloop_dim,
-              (int)mt.is_pipelined_input,
-              (int)mt.is_xor_swizzled,
-              mt.swizzled_dim,
-              (int)any_consumer,
-              (int)all_matmul,
-              (int)wide_matmul_operands.count(st.guid));
     }
   }
 
@@ -815,7 +797,6 @@ CustomOPTranspileResult
   int const TMEM_CAPACITY_COLUMNS = 512;
 
   // Initialize all max accumulators
-  int num_init_max_accums = 0;
   for (TBSchedNode const &node : sched.loop_nodes) {
     if (node.type != tb_sched_node_t::OPERATOR) {
       continue;
@@ -836,12 +817,10 @@ CustomOPTranspileResult
              get_datatype_str(accum.data_type),
              num_elems,
              accum.guid);
-      num_init_max_accums += 1;
     }
   }
 
   // Initialize all reduction max
-  int num_init_reductions = 0;
   for (TBSchedNode const &node : sched.loop_nodes) {
     if (node.type != tb_sched_node_t::OPERATOR) {
       continue;
@@ -864,7 +843,6 @@ CustomOPTranspileResult
              get_datatype_str(updated_max.data_type),
              num_elems,
              updated_max.guid);
-      num_init_reductions += 1;
     }
   }
   code.e("");
@@ -1063,14 +1041,6 @@ CustomOPTranspileResult
           bool unsupported =
               !operand_ok(input0, meta0) || !operand_ok(input1, meta1);
           if (unsupported) {
-            if (getenv("MIRAGE_DEBUG_WIDE")) {
-              fprintf(stderr,
-                      "[wide] operand_ok REJECT in0=%lld(%d) in1=%lld(%d)\n",
-                      (long long)input0.guid,
-                      (int)operand_ok(input0, meta0),
-                      (long long)input1.guid,
-                      (int)operand_ok(input1, meta1));
-            }
             return CustomOPTranspileResult{
                 CUDA_T_LAYOUT_ERROR, func_name, 0, 0, "", {}};
           }
@@ -1117,15 +1087,6 @@ CustomOPTranspileResult
                swap_ab ? get_stensor_layout(output, meta2, num_dims - 2, false)
                        : get_stensor_layout(output, meta2, num_dims - 2));
 
-        // code.e("using Mma$Shape_A = decltype(partition_shape_A(tiled_mma,
-        // make_shape(size<0>(mma_tiler), size<2>(mma_tiler))));",
-        //         output.guid);
-        // code.e("using Mma$Shape_B = decltype(partition_shape_B(tiled_mma,
-        // make_shape(size<1>(mma_tiler), size<2>(mma_tiler))));",
-        //         output.guid);
-        // code.e("using Mma$Shape_C = decltype(partition_shape_C(tiled_mma,
-        // make_shape(size<0>(mma_tiler), size<1>(mma_tiler))));",
-        //         output.guid);
 
       } else {
         code.e("using Matmul$LayoutC = $;",
@@ -1226,9 +1187,6 @@ CustomOPTranspileResult
 
   std::map<int64_t, tb::TBInputOp const *> pipeline_inputs;
 
-  // for release smem_read;
-  std::vector<sguid_t> smem_read_output_guids;
-  int pipe_index = 0;
 
   for (TBSchedNode const &node :
        Combine(Combine(sched.pre_loop_nodes, sched.loop_nodes),
@@ -1348,8 +1306,7 @@ CustomOPTranspileResult
                mm_swap_ab ? "true" : "false");
       };
 
-      // assert(use_chunked_copy && use_async_copy);
-      if (!use_chunked_copy) {
+          if (!use_chunked_copy) {
         int d_innermost_dim = dtensor_meta.innermost_dim;
         assert(!use_async_copy);
         if (wide_matmul_operands.count(stensor.guid)) {
@@ -1474,7 +1431,6 @@ CustomOPTranspileResult
                   : SGuid2STensor[stensor_meta.m_matrix_guid].dim[0];
           bool const atom_swap_ab =
               (atom_matmul_m != 64 && atom_matmul_m != 128);
-          pipe_index++;
           barrier_addr += tma_barrier_size;
 
           pipeline_inputs[stensor.guid] = cur_op;
@@ -1863,10 +1819,7 @@ CustomOPTranspileResult
 
     // run producers
     code.e("if (warpgroup_id == $) {", config.num_consumer_wgs);
-    // allocate tma register files
-    uint32_t tma_reg = config.num_consumer_wgs == 1 ? 56 : 32;
 
-    // code.e("tb::wg_decrease_regs<$>();", tma_reg);
     code.e("if (tb::warp_id_in_wg() == 0) {");
 
     code.e("for (uint32_t for_idx = 0; for_idx < $; for_idx++) {",
@@ -2071,7 +2024,6 @@ CustomOPTranspileResult
 
           // always pipeline for MMA
           if (need_advance_pipeline) {
-            smem_read_output_guids.push_back(output_guid);
 
             // Per-operand stage index: a pipelined operand advances with the
             // loop (read_idx_<guid> from its consumer_wait); a non-pipelined
@@ -2195,7 +2147,6 @@ CustomOPTranspileResult
             // could never happen. Emit the non-pipelined Matmul::run overload
             // with read_stage 0 -- the single-tile, no-pipeline shape an MPK
             // task body has.
-            smem_read_output_guids.push_back(output_guid);
 
             code.e("Matmul$Kernel::run(matmul_$_accum, stensor$_ptr, "
                    "stensor$_ptr, $, tiled_mma_$, 0);",
@@ -2741,10 +2692,6 @@ CustomOPTranspileResult
   if (pipe_tma) {
     code.e("else {");
     // allocate register files for wgmma
-    uint32_t mma_reg = config.num_consumer_wgs == 1
-                           ? 256
-                           : (config.num_consumer_wgs == 2 ? 232 : 160);
-    // code.e("tb::wg_increase_regs<$>();", mma_reg);
     code.e("// Consumer main loop");
   }
 

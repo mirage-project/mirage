@@ -123,8 +123,6 @@ public:
   using SmemLayoutB = SmemLayoutB_;                                // [N, K]
   using SmemLayoutC = typename Dim01Swapper<SmemLayoutC_>::Result; // [M, N]
 
-  using M = decltype(get<0>(shape(SmemLayoutA{})));
-  using K = decltype(get<1>(shape(SmemLayoutA{})));
   using N = decltype(get<0>(shape(SmemLayoutB{})));
 
   // NOTE: on the NON-pipelined path the transpiler's own swizzled layout
@@ -145,9 +143,7 @@ public:
 
   static constexpr int global_N = size<1>(ClusterShape_MNK{}) * N{};
   using GmemStrideTypeC = Stride<Int<global_N>, Int<1>>;
-  // using GmemStrideTypeC = Stride<Int<1>, Int<global_N>>;
 
-  using FusionOp = cutlass::epilogue::fusion::FusionOperation;
 
   // Use the sm100_get_tmem_load_op function to automatically select the optimal
   // tmem load operation

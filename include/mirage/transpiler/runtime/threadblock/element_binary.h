@@ -87,8 +87,6 @@ template <typename T,
 class ElementBinaryKernel {
 public:
   using Numel = decltype(cute::size(DstLayout{}));
-  using Src0Numel = decltype(cute::size(Src0Layout{}));
-  using Src1Numel = decltype(cute::size(Src1Layout{}));
 
   using DstCoord2Src0Coord =
       typename DstCoord2SrcCoordGetter<DstLayout, Src0Layout>::Result;
