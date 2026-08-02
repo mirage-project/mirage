@@ -352,10 +352,12 @@ static void generate_Tmem_mbarrier_init_code(CodeKeeper &code,
   code.e("");
   code.e("__syncthreads();");
 
-  code.e("// MMA mbarrier Initialization");
-  code.e("if (elect_one_warp && cute::elect_one_sync()) {");
-  code.e("cute::initialize_barrier(*$, $);", mbarrier_ptr_name, arrive_cnt);
-  code.e("}");
+  if (arrive_cnt > 0) {
+    code.e("// MMA mbarrier Initialization");
+    code.e("if (elect_one_warp && cute::elect_one_sync()) {");
+    code.e("cute::initialize_barrier(*$, $);", mbarrier_ptr_name, arrive_cnt);
+    code.e("}");
+  }
   // The sync mask for the blocks within the same cluster
   code.e("uint16_t consumer_sync_mask = static_cast<uint16_t>((1u << "
          "size(cluster_shape)) - 1u);");
@@ -571,6 +573,15 @@ CustomOPTranspileResult
   // still reading it, so the consumer arrives there each iteration and the
   // producer waits on the PREVIOUS iteration's arrival before storing.
   std::unordered_map<sguid_t, sguid_t> chained_consumer;
+  // GENERIC producers of matmul operands need the same anti-dependency: the
+  // consuming MMA of iteration i reads the tile through the ASYNC proxy, and
+  // nothing else stops iteration i+1's elementwise producer from overwriting
+  // it mid-read. (Q=0 made this invisible -- overwriting with identical
+  // values -- which is how it survived: the online-softmax numerator read
+  // torn E tiles while the uniform-E probe was exact.) Maps the producer
+  // node's output guid to the consuming matmul's output guid, whose
+  // per-matmul barrier the consumer already arrives on each iteration.
+  std::unordered_map<sguid_t, sguid_t> generic_antidep;
   {
     for (TBSchedNode const &prod : sched.loop_nodes) {
       if (prod.type != tb_sched_node_t::OPERATOR ||
@@ -617,6 +628,27 @@ CustomOPTranspileResult
     // (two-stage run()), and N_LOOP tile advance (the last bug: the input atom
     // walked Tiles_K while attention tiles N, refetching K0 forever).
     // Verified: model-A match at rel 4e-3 (attn_localize.py).
+    for (TBSchedNode const &prod : sched.loop_nodes) {
+      if (prod.type != tb_sched_node_t::OPERATOR ||
+          prod.ops.front().first->op_type == type::TB_MATMUL_OP) {
+        continue; // matmul producers use the chained path
+      }
+      sguid_t const produced =
+          prod.ops.back().first->output_tensors.at(0).guid;
+      for (TBSchedNode const &cons : sched.loop_nodes) {
+        if (cons.type != tb_sched_node_t::OPERATOR ||
+            cons.ops.front().first->op_type != type::TB_MATMUL_OP) {
+          continue;
+        }
+        for (auto const &in : cons.ops.front().first->input_tensors) {
+          if (in.guid == produced) {
+            generic_antidep[produced] =
+                cons.ops.back().first->output_tensors.at(0).guid;
+          }
+        }
+      }
+    }
+
     // Anti-dependency needs per consumer type:
     //  * a MATMUL consumer reads through the ASYNC proxy after the elect warp
     //    issues it -- the producer's next-iteration store must wait on the
@@ -649,10 +681,21 @@ CustomOPTranspileResult
     // In 2sm mma, one one cta in each 2-CTA pair issues arrival
     // 1-SM MMA: every CTA issues its own MMA and arrives itself, so there is
     // no division by the 2-CTA pair size that the 2-SM path needed.
+    //
+    // The shared barrier exists only for matmuls whose accumulator is written
+    // back AFTER the loop. When every matmul is chained (its result is
+    // materialised in-loop -- the online-softmax rewrite makes BOTH matmuls
+    // feed rescale accumulators, which read the result from smem each
+    // iteration), nothing ever arrives on it: emitting
+    // initialize_barrier(count = 0) is invalid mbarrier usage, and it drove
+    // ptxas into an internal compiler error (C7907) at -O1+ on sm_100a.
+    // Guard the init; the TMEM allocation part must still run.
     generate_Tmem_mbarrier_init_code(res,
-                                     g.forloop_range * num_matmuls *
-                                         g.cluster_dim.x * g.cluster_dim.y *
-                                         g.cluster_dim.z,
+                                     num_matmuls > 0
+                                         ? g.forloop_range * num_matmuls *
+                                               g.cluster_dim.x *
+                                               g.cluster_dim.y * g.cluster_dim.z
+                                         : -1 /* skip barrier init */,
                                      tmem_base_ptr_name,
                                      mbarrier_ptr_name);
     // Each chained matmul gets a count-1 barrier: exactly one MMA completes
@@ -664,6 +707,11 @@ CustomOPTranspileResult
     std::unordered_set<sguid_t> barriers_to_init(chained.begin(),
                                                  chained.end());
     for (auto const &[prod, cons] : chained_consumer) {
+      barriers_to_init.insert(cons);
+    }
+    // Consumers of GENERIC-produced operands arrive on their barrier too (the
+    // producer's anti-dependency wait targets it), so it must be initialized.
+    for (auto const &[prod, cons] : generic_antidep) {
       barriers_to_init.insert(cons);
     }
     for (sguid_t const cg : barriers_to_init) {
@@ -1580,7 +1628,11 @@ CustomOPTranspileResult
       continue;
     }
     auto [last_op, last_op_meta] = node.ops.back();
-    if (last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP &&
+    // RESCALE accums must be cleared too (Ampere does): they accumulate in
+    // smem via EpilogueStoreAccum, and uncleared they start from whatever the
+    // buffer held -- the online-softmax kernel returned nan from exactly this.
+    if ((last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
+         last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) &&
         !last_op_meta.is_accum_in_reg) {
       tb::TBForloopAccumOp const *accum_op =
           dynamic_cast<tb::TBForloopAccumOp const *>(last_op);
@@ -1702,6 +1754,15 @@ CustomOPTranspileResult
                                          &pipeline_inputs,
                                      bool is_in_loop) {
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
+      // Writer-side proxy fence at every dependency-level boundary: a level
+      // may end with GENERIC-proxy smem writes (elementwise, reduction) whose
+      // next-level reader is a tcgen05 MMA on the ASYNC proxy -- e.g. the
+      // online-softmax exp(x-max) tile feeding E@V. The chained-matmul path
+      // fences its own write_tC_to_sC stores, but generic producers had no
+      // fence and the consuming MMA read stale data (numerator rel ~1.5 while
+      // the generic-read denominator was correct). One fence per level
+      // boundary is cheap and covers every such edge.
+      code.e("cutlass::arch::fence_view_async_shared();");
       // The scheduler inserts one of these between dependency LEVELS. In-loop
       // ones were silently swallowed (an empty branch with a commented-out
       // sync), which was survivable while every in-loop consumer read only its
@@ -1719,6 +1780,20 @@ CustomOPTranspileResult
       assert(output_op == fusion_chain.at(op).back());
       std::string op_type_str;
       to_json(op_type_str, op->op_type);
+      // Generic producer of a matmul operand: do not overwrite the tile while
+      // the consumer's previous-iteration MMA may still be reading it (see
+      // generic_antidep above). The consumer arrives on its per-matmul
+      // barrier once per iteration; arrival i-1 has parity (i-1) & 1.
+      if (is_in_loop && g.forloop_range > 1 &&
+          op->op_type != type::TB_MATMUL_OP &&
+          !output_op->output_tensors.empty() &&
+          generic_antidep.count(output_op->output_tensors.at(0).guid)) {
+        code.e("if (for_idx > 0) {");
+        code.e("cute::wait_barrier(*$_$, (for_idx - 1) & 1);",
+               mbarrier_ptr_name,
+               generic_antidep.at(output_op->output_tensors.at(0).guid));
+        code.e("}");
+      }
       code.e("{");
       code.e("// OP type: $", op_type_str);
 
@@ -1885,16 +1960,28 @@ CustomOPTranspileResult
               code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
               code.e("if (elect_one_cta && elect_one_warp) {");
             } else {
-              code.e("cutlass::arch::umma_arrive($);", mbarrier_ptr_name);
-              // If this matmul CONSUMES a chained intermediate, also arrive on
-              // its own barrier so the producer can wait out the
-              // anti-dependency (see above).
+              // ORDER MATTERS: tcgen05.commit binds only the UNCOMMITTED
+              // MMA group. Arriving on the shared barrier first bound the MMA
+              // there, and the second arrive committed an EMPTY group to the
+              // per-matmul barrier -- which therefore fired IMMEDIATELY, and
+              // every anti-dependency wait on it passed while the MMA was
+              // still reading its operands. The generic-produced operand was
+              // then overwritten mid-read: diffuse chunk-level tearing (~7%
+              // mean error over 55% of elements, Q=0-invariant). The
+              // per-matmul barrier must take the REAL commit; the shared
+              // barrier's arrival is then the empty-group instant one, which
+              // still counts arrivals correctly for the post-loop wait
+              // because the write-back ALSO waits the per-matmul barrier when
+              // it exists (see the write-back emission).
               if (g.forloop_range > 1 &&
-                  (chained.count(a_guid) || chained.count(b_guid))) {
+                  (chained.count(a_guid) || chained.count(b_guid) ||
+                   generic_antidep.count(a_guid) ||
+                   generic_antidep.count(b_guid))) {
                 code.e("cutlass::arch::umma_arrive($_$);",
                        mbarrier_ptr_name,
                        output_guid);
               }
+              code.e("cutlass::arch::umma_arrive($);", mbarrier_ptr_name);
             }
           } else {
             // Non-pipelined operands (plain synchronous G->S copies). This used
@@ -1960,16 +2047,28 @@ CustomOPTranspileResult
               code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
               code.e("if (elect_one_cta && elect_one_warp) {");
             } else {
-              code.e("cutlass::arch::umma_arrive($);", mbarrier_ptr_name);
-              // If this matmul CONSUMES a chained intermediate, also arrive on
-              // its own barrier so the producer can wait out the
-              // anti-dependency (see above).
+              // ORDER MATTERS: tcgen05.commit binds only the UNCOMMITTED
+              // MMA group. Arriving on the shared barrier first bound the MMA
+              // there, and the second arrive committed an EMPTY group to the
+              // per-matmul barrier -- which therefore fired IMMEDIATELY, and
+              // every anti-dependency wait on it passed while the MMA was
+              // still reading its operands. The generic-produced operand was
+              // then overwritten mid-read: diffuse chunk-level tearing (~7%
+              // mean error over 55% of elements, Q=0-invariant). The
+              // per-matmul barrier must take the REAL commit; the shared
+              // barrier's arrival is then the empty-group instant one, which
+              // still counts arrivals correctly for the post-loop wait
+              // because the write-back ALSO waits the per-matmul barrier when
+              // it exists (see the write-back emission).
               if (g.forloop_range > 1 &&
-                  (chained.count(a_guid) || chained.count(b_guid))) {
+                  (chained.count(a_guid) || chained.count(b_guid) ||
+                   generic_antidep.count(a_guid) ||
+                   generic_antidep.count(b_guid))) {
                 code.e("cutlass::arch::umma_arrive($_$);",
                        mbarrier_ptr_name,
                        output_guid);
               }
+              code.e("cutlass::arch::umma_arrive($);", mbarrier_ptr_name);
             }
           }
 
@@ -2037,6 +2136,7 @@ CustomOPTranspileResult
         }
         case type::TB_ADD_OP:
         case type::TB_MUL_OP:
+        case type::TB_SUB_OP:
         case type::TB_DIV_OP:
         case type::TB_POW_OP: {
           tb::STensor const &input0 = op->input_tensors.at(0);
@@ -2065,6 +2165,7 @@ CustomOPTranspileResult
           // Define op type
           string op_type_str = op->op_type == type::TB_ADD_OP   ? "ADD"
                                : op->op_type == type::TB_MUL_OP ? "MUL"
+                               : op->op_type == type::TB_SUB_OP ? "SUB"
                                : op->op_type == type::TB_DIV_OP ? "DIV"
                                : op->op_type == type::TB_POW_OP ? "POW"
                                                                 : "";
@@ -2358,7 +2459,12 @@ CustomOPTranspileResult
           break;
         }
         default: {
-          assert(fmt("Unknown TB op: $", op->op_type).c_str());
+          // assert(fmt(...).c_str()) asserted a non-null POINTER -- always
+          // true, so an unhandled op emitted NOTHING and its consumers read
+          // garbage. TB_SUB_OP fell through here and the online-softmax
+          // x - max simply vanished from the kernel.
+          throw std::runtime_error(
+              fmt("Blackwell TB emitter: unhandled op type $", op->op_type));
         }
       }
       if (use_cta_warp_selector) {
@@ -2449,6 +2555,23 @@ CustomOPTranspileResult
     code.e("// Write back tensor memory accumulators");
     // sync all consumer threads across peer CTA to ensure 2sm mma is done
     code.e("cute::wait_barrier(*$, 0);", mbarrier_ptr_name);
+    // Matmuls whose REAL commit went to their per-matmul barrier (see the
+    // arrive-order note) only empty-group-arrive on the shared barrier, so
+    // additionally wait their own barrier's final arrival.
+    if (g.forloop_range > 1) {
+      std::unordered_set<sguid_t> own_waited;
+      for (auto const &m : {&chained_consumer, &generic_antidep}) {
+        for (auto const &[prod, cons] : *m) {
+          if (!chained.count(cons) && !own_waited.count(cons)) {
+            own_waited.insert(cons);
+            code.e("cute::wait_barrier(*$_$, $);",
+                   mbarrier_ptr_name,
+                   cons,
+                   (g.forloop_range - 1) & 1);
+          }
+        }
+      }
+    }
     code << in_reg_writeback;
   }
 

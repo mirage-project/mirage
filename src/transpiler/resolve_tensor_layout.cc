@@ -495,6 +495,33 @@ void Transpiler::resolve_tensor_layout() {
                   opt.add(s_is_innermost[input.guid][num_dims - 1]);
                 }
               }
+              // Same orientation pin for a matmul OUTPUT that is consumed by
+              // anything other than a plain forloop accumulator. Such outputs
+              // are materialised in-loop by write_tC_to_sC and re-read by
+              // generic ops (chained matmuls, rescale accumulators); every
+              // verified case has innermost = last dim, and when the solver
+              // was left free it picked the other orientation for the
+              // online-softmax numerator tile (write/read disagreed; NUM came
+              // back finite but rel ~1.34). NO_RED-consumed outputs stay
+              // unpinned -- they live in TMEM until the post-loop write-back,
+              // so the ordinary matmul/SwiGLU paths are untouched.
+              if (config.target_cc == GPU_CC::B200) {
+                bool nonaccum_consumer = false;
+                for (tb::TBOperator const *consumer : tb_graph.operators) {
+                  if (consumer == tb_op ||
+                      consumer->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+                    continue;
+                  }
+                  for (auto const &cin : consumer->input_tensors) {
+                    if (cin.guid == output.guid) {
+                      nonaccum_consumer = true;
+                    }
+                  }
+                }
+                if (nonaccum_consumer) {
+                  opt.add(s_is_innermost[output.guid][num_dims - 1]);
+                }
+              }
             } else {
               // Use normal copying if ldmatrix is not supported by hardware
               assert(0 && "Not implemented");
