@@ -27,6 +27,7 @@
 #include "attention_sm100.cuh"
 #include "dflash_attention_sm100.cuh"
 #include "dflash_kv_store_sm100.cuh"
+#include "attention_prep_sm100.cuh"
 #include "dflash_norm_rope_sm100.cuh"
 #include "fp8_group_gemm_sm100.cuh"
 #include "glm_moe_router_sm100.cuh"

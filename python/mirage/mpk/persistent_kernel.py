@@ -565,6 +565,24 @@ class PersistentKernel:
         self._torch_tensor_refs.append(torch_tensor)
         return t
 
+    def attach_strided_view(self, torch_tensor: torch.Tensor, dims: tuple,
+                            strides: tuple, name: str) -> DTensor:
+        """attach_input for an arbitrary strided VIEW of an existing torch
+        tensor (e.g. a transposed per-head slice of the KV cache).
+        attach_input's row/column-major check rejects such views; this skips
+        the check but keeps every registration attach_input performs -- in
+        particular _model_tensors[name], which the generated
+        init_persistent_kernel resolves by name at launch (a missing entry is
+        a map::at abort there)."""
+        dtype = convert_torch_type_to_dtype(torch_tensor.dtype)
+        t = self.kn_graph.new_input(dims=tuple(dims), strides=tuple(strides),
+                                    dtype=dtype)
+        assert name is not None and "." not in name
+        self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
+        self._model_tensors[name] = torch_tensor
+        self._torch_tensor_refs.append(torch_tensor)
+        return t
+
     def new_tensor(
         self,
         dims: tuple,
@@ -2318,6 +2336,127 @@ class PersistentKernel:
         tb_graph.new_output(tb_graph.forloop_accum(y, None), (-1, -1, -1), -1)
         self.kn_graph.customized([input, weight, eps_tensor, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "generated")
+
+    def attention_prep_layer(
+        self,
+        input: DTensor,     # fused QKV [tokens, qkv_stride]
+        k_cache: DTensor,   # [pages, page_size, kv_heads, head_dim]
+        v_cache: DTensor,
+        q_norm: DTensor,
+        k_norm: DTensor,
+        cos_pos_embed: DTensor,
+        sin_pos_embed: DTensor,
+        q_staged: DTensor,   # FOLD-DIM [kvh*max_reqs, 8, head_dim]
+        mask_staged: DTensor, # FOLD-DIM [kvh*max_reqs, 1, S_max], init -30000
+        kt_staged: DTensor,  # FOLD-DIM [kvh*max_reqs, head_dim, S_max]
+        v_staged: DTensor,   # FOLD-DIM [kvh*max_reqs, S_max, head_dim]
+        grid_dim: tuple,
+        block_dim: tuple,
+        qk_norm_eps: float = 1e-6,
+    ):
+        """Handwritten decode prep for the COMPILER-GENERATED attention core:
+        qk-norm + RoPE on the new token, KV-cache append, scaled+zero-padded
+        Q staging, and additive-mask maintenance. One task per (request,
+        kv_head), mirroring paged_attention_layer's grid and slicing."""
+        assert k_cache.num_dims == 4 and v_cache.num_dims == 4
+        head_dim = k_cache.dim(3)
+        num_kv_heads = k_cache.dim(2)
+        num_q_heads = (input.dim(1) // head_dim) - 2 * num_kv_heads
+        assert q_staged.num_dims == 3 and q_staged.dim(1) == 8
+        assert q_staged.dim(0) % num_kv_heads == 0  # fold-dim kvh-major
+        assert mask_staged.num_dims == 3
+        assert mask_staged.dim(2) == self.max_seq_length
+        assert kt_staged.num_dims == 3
+        assert kt_staged.dim(2) == self.max_seq_length
+        assert v_staged.num_dims == 3
+        assert v_staged.dim(1) == self.max_seq_length
+        assert grid_dim[0] == self.max_num_batched_requests
+        assert grid_dim[1] == num_kv_heads
+        import struct
+        eps_bits = struct.unpack("i", struct.pack("f", qk_norm_eps))[0]
+        params = [num_q_heads, num_kv_heads, self.max_seq_length,
+                  self.page_size, eps_bits]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, 1, -1), -1, True)
+        tb_graph.new_input(k_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(v_cache, (-1, 2, -1), 1, True)
+        tb_graph.new_input(q_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(k_norm, (-1, -1, -1), -1, True)
+        tb_graph.new_input(cos_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(sin_pos_embed, (-1, -1, -1), -1, True)
+        tb_graph.new_input(q_staged, (-1, 0, -1), -1, True)
+        tb_graph.new_input(mask_staged, (-1, 0, -1), -1, True)
+        tb_graph.new_input(kt_staged, (-1, 0, -1), -1, True)
+        tb_graph.new_input(v_staged, (-1, 0, -1), -1, True)
+        self.kn_graph.customized(
+            [input, k_cache, v_cache, q_norm, k_norm, cos_pos_embed,
+             sin_pos_embed, q_staged, mask_staged, kt_staged, v_staged],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "attention_prep", params)
+
+    def generated_attention_layer(
+        self,
+        q_staged: DTensor,   # [kvh*max_reqs, 8, head_dim]
+        kt_staged: DTensor,  # [kvh*max_reqs, head_dim, S_max]
+        v_staged: DTensor,   # [kvh*max_reqs, S_max, head_dim]
+        mask_staged: DTensor,  # [kvh*max_reqs, 1, S_max]
+        attn_pad: DTensor,   # [kvh*max_reqs, 8, head_dim]
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """The attention core softmax(Q@K^T + mask)@V as a COMPILER-GENERATED
+        task -- the graph verified standalone by
+        test_attention_core_qwen3_shape. One task per (kv_head, request):
+        grid is 1-D over the FOLD dim (kvh*max_reqs); every operand is a
+        plain contiguous tensor written by attention_prep (same DTensor guids
+        -> real dependency edges). Q is pre-scaled by 1/sqrt(head_dim); the
+        additive mask makes the S_max-compiled graph correct for any
+        seq_len."""
+        assert q_staged.num_dims == 3 and q_staged.dim(1) == 8
+        head_dim = q_staged.dim(2)
+        S_max = kt_staged.dim(2)
+        assert S_max % 64 == 0 and S_max >= 128
+        forloop_range = S_max // 64
+        worker_threads = 256 if self.target_cc >= 90 else 128
+        assert tuple(block_dim) == (worker_threads, 1, 1)
+        assert grid_dim == (q_staged.dim(0), 1, 1)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, forloop_range, 64))
+        tq = tb_graph.new_input(q_staged, (0, -1, -1), -1, True)
+        tk = tb_graph.new_input(kt_staged, (0, -1, -1), 2, True)
+        tv = tb_graph.new_input(v_staged, (0, -1, -1), 1, True)
+        tm = tb_graph.new_input(mask_staged, (0, -1, -1), 2, True)
+        tb_graph.new_input(attn_pad, (0, -1, -1), -1, True)
+        E = tb_graph.exp(tb_graph.add(tb_graph.matmul(tq, tk), tm))
+        denom = tb_graph.forloop_accum(E, "sum")
+        numer = tb_graph.forloop_accum(tb_graph.matmul(E, tv), None)
+        out_s = tb_graph.div(numer, denom)
+        tb_graph.new_output(out_s, (0, -1, -1), -1)
+        self.kn_graph.customized(
+            [q_staged, kt_staged, v_staged, mask_staged, attn_pad], tb_graph)
+        self.kn_graph.register_task(tb_graph, "generated")
+
+    def attention_finalize_layer(
+        self,
+        attn_pad: DTensor,  # [max_reqs, kv_heads, 8, head_dim]
+        output: DTensor,    # [tokens, num_q_heads * head_dim]
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Copies the valid NUM_QO_PER_KV rows per kv head from the padded
+        generated-core output into the packed attention output row for the
+        request's token. One task per request."""
+        assert attn_pad.num_dims == 3 and attn_pad.dim(1) == 8
+        head_dim = attn_pad.dim(2)
+        num_q_heads = output.dim(1) // head_dim
+        assert attn_pad.dim(0) % self.max_num_batched_requests == 0
+        num_kv_heads = attn_pad.dim(0) // self.max_num_batched_requests
+        params = [num_q_heads, num_kv_heads]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(attn_pad, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([attn_pad, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "attention_finalize", params)
 
     def generated_swiglu_layer(
         self,

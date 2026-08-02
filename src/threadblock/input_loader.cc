@@ -58,6 +58,23 @@ TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);
   if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
+    fprintf(stderr,
+            "threadblock input rejected: smem usage %zu > %zu; dtensor dims [",
+            smem_usage,
+            (size_t)mirage::config::MAX_SMEM_SIZE);
+    for (int d = 0; d < dtensor.num_dims; d++) {
+      fprintf(stderr, "%d ", dtensor.dim[d]);
+    }
+    fprintf(stderr,
+            "] imap (%d,%d,%d) fd %d grid (%d,%d,%d) forloop %d\n",
+            input_map.x,
+            input_map.y,
+            input_map.z,
+            forloop_dim,
+            grid_dim.x,
+            grid_dim.y,
+            grid_dim.z,
+            forloop_range);
     delete op;
     return nullptr;
   } else {

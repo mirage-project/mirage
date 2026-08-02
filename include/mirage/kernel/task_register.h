@@ -210,6 +210,10 @@ public:
                                            std::vector<int> const &params);
   int register_dflash_kv_store_sm100_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params);
+  int register_attention_prep_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_attention_finalize_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_eagle3_commit_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
   int register_inkling_sconv_sm100_task(threadblock::Graph const &bgraph,

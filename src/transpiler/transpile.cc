@@ -214,7 +214,12 @@ kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
                     get_tensor_in_new_graph(dtensor_mapping, input_op->dtensor),
                     input_op->input_map,
                     input_op->forloop_dim,
-                    input_op->output_tensors[0].layout);
+                    input_op->output_tensors[0].layout,
+                    // Preserve store_in_dmem: dropping it made spec-only
+                    // inputs of HANDWRITTEN task layers (e.g. a KV cache
+                    // slice) count against the 96KB smem heuristic when a
+                    // later GENERATED task reconstructed the whole graph.
+                    input_op->output_tensors[0].store_in_dmem);
                 stensor_mapping[bop->output_tensors[0].guid] = st;
                 break;
               }
@@ -624,7 +629,8 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
                   get_tensor_in_new_graph(dtensor_mapping, input_op->dtensor),
                   input_op->input_map,
                   input_op->forloop_dim,
-                  input_op->output_tensors[0].layout);
+                  input_op->output_tensors[0].layout,
+                  input_op->output_tensors[0].store_in_dmem);
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }

@@ -115,14 +115,23 @@ int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
     if (kop->op_type != type::KN_INPUT_OP) {
       continue;
     }
+    kn::KNInputOp const *in_op = static_cast<kn::KNInputOp const *>(kop);
     kn::DTensor const &dt = kop->output_tensors[0];
-    std::vector<size_t> strides(dt.num_dims);
-    size_t acc = 1;
-    for (int d = dt.num_dims - 1; d >= 0; d--) {
-      strides[d] = acc;
-      acc *= dt.dim[d];
+    if (in_op->input_strides.size() == (size_t)dt.num_dims) {
+      // The graph input carries explicit strides (e.g. a transposed or
+      // per-request view of the KV cache for the generated attention core).
+      // Synthesizing dense row-major strides here silently read the wrong
+      // elements for any non-contiguous view.
+      input_strides.push_back(in_op->input_strides);
+    } else {
+      std::vector<size_t> strides(dt.num_dims);
+      size_t acc = 1;
+      for (int d = dt.num_dims - 1; d >= 0; d--) {
+        strides[d] = acc;
+        acc *= dt.dim[d];
+      }
+      input_strides.push_back(strides);
     }
-    input_strides.push_back(strides);
   }
 
   transpiler::Transpiler transpiler(kgraph, config, input_strides);
@@ -368,6 +377,123 @@ int TaskRegister::register_dflash_kv_store_sm100_task(
   code.e("    $,", num_tokens);
   code.e("    $);", page_size);
   return register_task_variant(TASK_DFLASH_KV_STORE_SM100, code.to_string());
+}
+
+int TaskRegister::register_attention_prep_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [num_q_heads, num_kv_heads, max_seq_len, page_size,
+  //          qk_norm_eps float bits]
+  // 7 inputs (qkv, k_cache, v_cache, q_norm, k_norm, cos, sin),
+  // 4 outputs, all FOLD-DIM head-major (dim0 = kvh*max_reqs, imap-sliced
+  // by kvh): q_staged [kvh*reqs, 8, hd], mask_staged [kvh*reqs, 1, S],
+  // kt_staged [kvh*reqs, hd, S], v_staged [kvh*reqs, S, hd].
+  assert(params.size() == 5);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 7;
+  int num_outputs = 4;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  int max_seq_len = params[2];
+  int page_size = params[3];
+  float eps = 1e-6f;
+  memcpy(&eps, &params[4], sizeof(float));
+  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  assert(input_ops[1]->dtensor.num_dims == 4);
+  int head_dim = input_ops[1]->dtensor.dim[3];
+  int kv_cache_row_stride = num_kv_heads * head_dim;
+  int num_qo_per_kv = num_q_heads / num_kv_heads;
+  assert(output_ops[0]->dtensor.num_dims == 3); // q_staged
+  assert(output_ops[0]->dtensor.dim[1] == 8);
+  assert(output_ops[1]->dtensor.num_dims == 3); // mask_staged
+  assert(output_ops[1]->dtensor.dim[2] == max_seq_len);
+  assert(output_ops[2]->dtensor.num_dims == 3); // kt_staged
+  assert(output_ops[3]->dtensor.num_dims == 3); // v_staged
+  // HEAD-MAJOR staging: [kvh, max_reqs, ...]; the imaps slice dim0 (kvh),
+  // so within a slice the request stride is just the per-request block.
+  int q_staged_req_stride = 8 * head_dim;
+  int kt_staged_req_stride = head_dim * max_seq_len;
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::attention_prep_sm100_impl<bfloat16, $, $, $, $, $, $, $, "
+         "$>(",
+         num_qo_per_kv,
+         head_dim,
+         qkv_stride,
+         kv_cache_row_stride,
+         page_size,
+         max_seq_len,
+         q_staged_req_stride,
+         kt_staged_req_stride);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->input_ptrs[2],");
+  code.e("    task_desc->input_ptrs[3],");
+  code.e("    task_desc->input_ptrs[4],");
+  code.e("    task_desc->input_ptrs[5],");
+  code.e("    task_desc->input_ptrs[6],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    task_desc->output_ptrs[1],");
+  code.e("    task_desc->output_ptrs[2],");
+  code.e("    task_desc->output_ptrs[3],");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indices_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $f);", eps);
+  return register_task_variant(TASK_ATTN_PREP_SM100, code.to_string());
+}
+
+int TaskRegister::register_attention_finalize_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [num_q_heads, num_kv_heads]. 1 input (attn_pad
+  // [max_reqs, num_kv_heads, 8, head_dim]), 1 output
+  // (attn_out [tokens, num_q_heads * head_dim]).
+  assert(params.size() == 2);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  assert(input_ops[0]->dtensor.num_dims == 3); // fold-dim [kvh*reqs, 8, hd]
+  int head_dim = input_ops[0]->dtensor.dim[2];
+  assert(input_ops[0]->dtensor.dim[0] % num_kv_heads == 0);
+  int num_qo_per_kv = num_q_heads / num_kv_heads;
+  int o_stride = output_ops[0]->dtensor.dim[1];
+  int max_reqs = input_ops[0]->dtensor.dim[0] / num_kv_heads;
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::attention_finalize_sm100_impl<bfloat16, $, $, $, $, $>(",
+         num_kv_heads,
+         num_qo_per_kv,
+         head_dim,
+         o_stride,
+         max_reqs);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    task_desc->task_metadata.request_id);");
+  return register_task_variant(TASK_ATTN_FINALIZE_SM100, code.to_string());
 }
 
 int TaskRegister::register_glm_moe_router_sm100_task(
