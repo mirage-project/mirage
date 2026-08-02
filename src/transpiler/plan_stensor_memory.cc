@@ -276,8 +276,19 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
 
   auto get_phy_size = [&](tb::STensor const &stensor) {
     STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
-    return stensor_meta.num_phy_elems *
-           type::get_datatype_size(stensor.data_type);
+    size_t size = stensor_meta.num_phy_elems *
+                  type::get_datatype_size(stensor.data_type);
+    if (blackwell_arch) {
+      // UMMA smem descriptors and TMA apply the 128B swizzle to ABSOLUTE
+      // address bits, while software copies (write_tC, elementwise kernels)
+      // swizzle relative to the buffer base. A buffer that is not 1024B
+      // aligned (the SW128 swizzle period) makes the two disagree by a
+      // chunk permutation on every software-written, UMMA-read edge. Pad
+      // every allocation to the period so first-fit packing keeps all
+      // offsets 1024B-aligned (the base is shifted to 1024 below).
+      size = (size + 1023) / 1024 * 1024;
+    }
+    return size;
   };
   // auto find_first_used_time = [](sguid_t sguid,
   //                                vector<TBSchedNode> const &nodes,
@@ -403,8 +414,14 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         size_t phy_size = get_phy_size(output_tensor);
         int earlist_free_time =
             find_earlist_free_time(output_tensor.guid, tb_sched.loop_nodes, T);
-        assert(earlist_free_time != -1 &&
-               "An intermediate tensor produced in the for loop is never used");
+        if (earlist_free_time == -1) {
+          // NDEBUG elides plain asserts; a -1 free time becomes a FREE event
+          // at t=-1 that sorts before every ALLOC and throws a bare
+          // out_of_range deep in the planner. Fail loudly instead.
+          throw std::runtime_error(
+              "stensor memory planner: loop intermediate " +
+              std::to_string(output_tensor.guid) + " is never consumed");
+        }
         // in hopper the doubule buffer needs to be continously allocated
         if (!(last_op->op_type == type::TB_INPUT_OP &&
               last_op_meta.is_pipelined_input)) {
@@ -427,9 +444,11 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
       size_t phy_size = get_phy_size(output_tensor);
       int earlist_free_time = find_earlist_free_time(
           output_tensor.guid, tb_sched.post_loop_nodes, 2 * T);
-      assert(
-          earlist_free_time != -1 &&
-          "An intermediate tensor produced after the for loop is never used");
+      if (earlist_free_time == -1) {
+        throw std::runtime_error(
+            "stensor memory planner: post-loop intermediate " +
+            std::to_string(output_tensor.guid) + " is never consumed");
+      }
       tensor_decls.push_back(
           {output_tensor.guid, phy_size, i + 2 * T, earlist_free_time});
     }

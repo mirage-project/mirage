@@ -65,7 +65,16 @@ class DstCoord2SrcCoordGetter {
   using Result_ = Layout<DstShape, BStride>;
 
 public:
-  using Result = decltype(coalesce(Result_{}));
+  // NO coalesce: it collapses stride-0 (broadcast) modes, degenerating e.g.
+  // (64,64):(1,0) to a rank-1 layout whose integer evaluation multiplies the
+  // FULL dst index straight through -- the (1,64) broadcast operand was read
+  // 64x out of bounds into neighboring smem, i.e. deterministic garbage
+  // multipliers. This was THE "torn operand" defect: rel ~0.1-0.7 whenever
+  // the broadcast VALUES were non-uniform, exactly masked by uniform ones /
+  // Q=0 probes, and misdiagnosed as a synchronization race for a long time.
+  // The full-rank map keeps broadcast dims at stride 0 so every dst index
+  // lands on the correct in-bounds source element.
+  using Result = Result_;
 };
 
 template <typename T,
