@@ -29,6 +29,9 @@ TRANSPILE_ERROR_NAMES = {
     4: "unsupported: a matmul result feeding another op inside the forloop "
        "(chained matmul / fused attention); the intermediate is never "
        "materialised from TMEM, so this would be silently wrong",
+    5: "forloop_range=1 with pipelined (forloop_dim tiled) inputs deadlocks "
+       "the Blackwell producer warpgroup; use forloop_dim=-1 at "
+       "forloop_range=1",
     999: "unknown error",
 }
 

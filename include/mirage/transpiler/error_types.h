@@ -28,6 +28,12 @@ enum TranspileErrorType {
   // otherwise surfaced as "block_dim does not match num_warp_groups * 128",
   // which points at the wrong thing entirely.
   CUDA_T_UNSUPPORTED_CHAINED_MATMUL = 4,
+  // forloop_range == 1 with PIPELINED (TMA) inputs: the Blackwell producer
+  // warpgroup deadlocks in producer_acquire (proven by ablating every
+  // consumer wait -- the kernel still hung -- and by plain K-loop attention
+  // hanging identically at FL=1). Pipelining buys nothing at one iteration;
+  // callers should use forloop_dim=-1, as every working FL=1 graph does.
+  CUDA_T_FL1_PIPELINED_DEADLOCK = 5,
   CUDA_T_UNKOWN_ERRORS = 999,
 };
 

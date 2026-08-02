@@ -566,6 +566,16 @@ CustomOPTranspileResult
   // accumulator (with the fused epilogue) to smem, sync, and reset the
   // accumulator to ScaleOut::Zero because it does NOT accumulate across the
   // forloop. That is the fused-attention shape; see the notes in DESIGN.md.
+  // See CUDA_T_FL1_PIPELINED_DEADLOCK in error_types.h.
+  if (g.forloop_range == 1) {
+    for (auto const &[guid, meta] : stensor_metas) {
+      if (meta.is_pipelined_input) {
+        return CustomOPTranspileResult{
+            CUDA_T_FL1_PIPELINED_DEADLOCK, func_name, 0, 0, "", {}};
+      }
+    }
+  }
+
   std::unordered_set<sguid_t> chained;
   // For each chained intermediate, the OUTPUT guid of the matmul that consumes
   // it. Its per-matmul barrier doubles as the anti-dependency barrier: the
@@ -2456,6 +2466,14 @@ CustomOPTranspileResult
           code.e("Kernel::run(stensor$_ptr, stensor$_ptr, thread_idx);",
                  accum.guid,
                  input.guid);
+          break;
+        }
+        case type::TB_INPUT_OP: {
+          // A NON-pipelined input's copy is emitted pre-loop; its scheduler
+          // node reaching this switch needs nothing further. This surfaced
+          // when FL=1 pipelined inputs were demoted to sync copies: the node
+          // hit the (now-throwing) default, which previously ignored it by
+          // accident.
           break;
         }
         default: {
