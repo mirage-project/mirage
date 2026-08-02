@@ -215,6 +215,10 @@ def get_compile_command(
         f"-I{py_include_dir}",
         f"-I{mirage_inc_path}",
         f"-I{os.path.join(mirage_inc_path, 'mirage/persistent_kernel')}",
+        # Compiler-generated task bodies are transpiled muGraph code, so the
+        # megakernel translation unit needs the threadblock runtime they call
+        # into (tb::InputChunkedSyncCopy and friends).
+        f"-I{os.path.join(mirage_inc_path, 'mirage/transpiler/runtime')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/include')}",
         f"-I{os.path.join(mirage_deps_path, 'cutlass/tools/util/include')}",
         f"-I{os.path.join(mirage_deps_path, 'json/include')}",
@@ -2143,6 +2147,222 @@ class PersistentKernel:
         tb_graph.new_input(output, (1, -1, -1), 1, True)
         self.kn_graph.customized([input, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "silu_mul" if self.target_cc == 90 else "silu_mul")
+
+    def generated_silu_mul_layer(
+        self,
+        gate: DTensor,
+        up: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """silu(gate) * up as a COMPILER-GENERATED task.
+
+        Unlike silu_mul_layer, the threadblock graph here carries the actual
+        computation rather than acting as a spec for a handwritten kernel: the
+        muGraph backend transpiles it into the task body (see
+        TaskRegister::register_generated_task). Registered as "generated".
+
+        Takes gate and up as separate tensors rather than one fused
+        [batch, 2*intermediate] input, because expressing that split needs a
+        slice op the threadblock graph does not have.
+        """
+        assert gate.num_dims == 2 and up.num_dims == 2
+        assert output.num_dims == 2
+        # A task body's block size is NOT free: the megakernel launches its
+        # workers at WORKER_NUM_THREADS (persistent_kernel.cuh), and every one
+        # of those threads runs the body. The transpiler bakes NUM_THREADS into
+        # named-barrier widths (tb::wg_sync<N>), so a smaller value makes the
+        # surplus threads trap on a barrier that is not expecting them --
+        # observed as "unspecified launch failure", with compute-sanitizer
+        # pointing at thread (128,0,0) in wg_sync<128>.
+        worker_threads = 256 if self.target_cc >= 90 else 128
+        assert block_dim[0] == worker_threads and block_dim[1] == 1 \
+            and block_dim[2] == 1, (
+            f"generated task block_dim must be ({worker_threads},1,1) to match "
+            f"the megakernel's worker block size, got {block_dim}")
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tg = tb_graph.new_input(gate, (1, -1, -1), -1, True)
+        tu = tb_graph.new_input(up, (1, -1, -1), -1, True)
+        # The output is declared as an input too, exactly as handwritten task
+        # layers do. MPK requires every task tensor to be an attached graph
+        # input: runtime.cc asserts owner_op is a KN_INPUT_OP and looks the
+        # tensor up in io_configs by guid, so a tensor produced by mark_output
+        # has no IODesc and blows up there. The TB_OUTPUT_OP below is purely for
+        # the transpiler's benefit -- it is what makes it emit a store.
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        # forloop_accum is required even at forloop_range=1: a threadblock
+        # graph whose output does not pass through an accumulator segfaults in
+        # Graph::create_customized_op.
+        prod = tb_graph.mul(
+            tb_graph.silu(tb_graph.forloop_accum(tg, None)),
+            tb_graph.forloop_accum(tu, None),
+        )
+        tb_graph.new_output(prod, (1, -1, -1), -1)
+        self.kn_graph.customized([gate, up, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "generated")
+
+    def generated_linear_layer(
+        self,
+        input: DTensor,
+        weight_t: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        forloop_range: int = 1,
+        activation: str = "none",
+    ):
+        """input @ weight_t as a COMPILER-GENERATED task (matmul, not
+        elementwise). Verified in the megakernel at rel ~2e-3 vs torch for
+        M in {8, 64, 128}, K = N = 64.
+
+        This was wrong (rel ~1.5) until the layout solver was pinned. A task
+        graph has no KN_OUTPUT_OP -- MPK passes the destination in as an
+        operand -- so nothing constrained the result's innermost dim, and the
+        solver picked dim 0. The matmul then wrote a numerically CORRECT tile
+        COLUMN-major into the row-major buffer MPK handed it: `out == ref.T`
+        exactly. resolve_tensor_layout.cc now pins every dtensor row-major under
+        emit_device_body. Six earlier suspects (tiling, swapAB, smem alignment,
+        thread count, the extra output-as-input operand, and the blockIdx MMA
+        coordinate) were each disproven by a standalone control.
+
+        weight_t is the ALREADY-TRANSPOSED weight, shape (K, N), because the
+        threadblock matmul consumes A(M,K) @ B(K,N) directly and the graph has
+        no transpose op.
+
+        activation fuses a post-accumulator elementwise op into the same task,
+        so the matmul result never round-trips through global memory.
+
+        forloop_range > 1 splits K across iterations. That turns both operands
+        into pipelined TMA loads, which a task body gets by pointer: the muGraph
+        backend emits a host builder next to the body, the megakernel's task
+        loader calls it and stores the device pointers in the TaskDesc.
+
+        M may be a decode-shaped 1..8: the Blackwell backend computes
+        C^T = B^T * A^T (swapAB) when M is not a legal 1-SM MMA tile.
+        """
+        assert input.num_dims == 2 and weight_t.num_dims == 2
+        assert output.num_dims == 2
+        worker_threads = 256 if self.target_cc >= 90 else 128
+        assert tuple(block_dim) == (worker_threads, 1, 1), (
+            f"generated task block_dim must be ({worker_threads},1,1) to match "
+            f"the megakernel's worker block size, got {block_dim}")
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, forloop_range, 64))
+        # forloop_range > 1 splits K across iterations, which makes both
+        # operands pipelined TMA loads. The atoms are built on the host by the
+        # generated <task>_build_tma() and reach the body as pointers.
+        k_dim = -1 if forloop_range == 1 else 1
+        ti = tb_graph.new_input(input, (-1, -1, -1), k_dim, True)
+        tw = tb_graph.new_input(weight_t, (1, -1, -1),
+                                -1 if forloop_range == 1 else 0, True)
+        # Output declared as an input as well: MPK requires every task tensor to
+        # be an attached graph input (see generated_silu_mul_layer).
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        # Inputs feed the matmul DIRECTLY; only the result passes through the
+        # accumulator. (silu_mul accumulates its inputs instead because it has
+        # no reduction of its own -- the accumulator is what makes the graph's
+        # output legal for create_customized_op.)
+        acc = tb_graph.forloop_accum(tb_graph.matmul(ti, tw), None)
+        # A post-accumulator elementwise op makes this a FUSED SEGMENT rather
+        # than a bare matmul: matmul and activation become one task instead of
+        # two, with the intermediate never leaving shared memory.
+        if activation == "silu":
+            acc = tb_graph.silu(acc)
+        elif activation == "gelu":
+            acc = tb_graph.gelu(acc)
+        elif activation == "relu":
+            acc = tb_graph.relu(acc)
+        elif activation != "none":
+            raise ValueError(
+                f"generated_linear_layer: unknown activation {activation!r}; "
+                f"expected one of none/silu/gelu/relu")
+        tb_graph.new_output(acc, (1, -1, -1), -1)
+        self.kn_graph.customized([input, weight_t, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "generated")
+
+    def generated_rmsnorm_layer(
+        self,
+        input: DTensor,
+        weight: DTensor,
+        eps_tensor: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """RMSNorm as a COMPILER-GENERATED task, decomposed into existing TB
+        ops: y = x / sqrt(mean(x^2) + eps) * w. eps enters as an (M,1) constant
+        input tensor so the formula is exact. Decode-shaped (whole rows resident
+        at forloop_range=1); weight is (1, H).
+
+        Getting this working surfaced four silent compiler defects: reductions
+        dropped by the graph-reconstruction switches, (M,1) broadcast reading
+        the wrong elements, in-loop SYNCTHREADS swallowed by the Blackwell
+        emitter, and fused epilogue scalars replaced with 0.0f. See the
+        respective fixes for details.
+        """
+        assert input.num_dims == 2 and output.num_dims == 2
+        worker_threads = 256 if self.target_cc >= 90 else 128
+        assert tuple(block_dim) == (worker_threads, 1, 1), (
+            f"generated task block_dim must be ({worker_threads},1,1), "
+            f"got {block_dim}")
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tx = tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tw = tb_graph.new_input(weight, (-1, -1, -1), -1, True)
+        te = tb_graph.new_input(eps_tensor, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)
+        H = input.dim(1)
+        r = tb_graph.reduction(tb_graph.square(tx), 1)
+        m = tb_graph.mul_scalar(r, 1.0 / H)
+        denom = tb_graph.sqrt(tb_graph.add(m, te))
+        y = tb_graph.mul(tb_graph.div(tx, denom), tw)
+        tb_graph.new_output(tb_graph.forloop_accum(y, None), (-1, -1, -1), -1)
+        self.kn_graph.customized([input, weight, eps_tensor, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "generated")
+
+    def generated_swiglu_layer(
+        self,
+        input: DTensor,
+        gate_weight_t: DTensor,
+        up_weight_t: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        forloop_range: int = 1,
+    ):
+        """silu(input @ gate_weight_t) * (input @ up_weight_t) as ONE generated
+        task: two K-looped matmuls plus the activation and the elementwise
+        multiply, with neither matmul result ever reaching global memory.
+
+        This is the full gated-MLP segment. Two matmuls in one body needs both
+        of the per-matmul resources the backend used to share: its own TMEM
+        columns (they aliased, giving rel ~2.4) and its share of the MMA
+        mbarrier's arrival count (phase 0 completed halfway through the loop, so
+        the accumulator write-back raced the MMAs still running -- that one hung).
+
+        Both weights are ALREADY TRANSPOSED, shape (K, N), like
+        generated_linear_layer.
+        """
+        assert input.num_dims == 2 and output.num_dims == 2
+        assert gate_weight_t.num_dims == 2 and up_weight_t.num_dims == 2
+        worker_threads = 256 if self.target_cc >= 90 else 128
+        assert tuple(block_dim) == (worker_threads, 1, 1), (
+            f"generated task block_dim must be ({worker_threads},1,1) to match "
+            f"the megakernel's worker block size, got {block_dim}")
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, forloop_range, 64))
+        fd_x = 1 if forloop_range > 1 else -1
+        fd_w = 0 if forloop_range > 1 else -1
+        ti = tb_graph.new_input(input, (-1, -1, -1), fd_x, True)
+        tg = tb_graph.new_input(gate_weight_t, (1, -1, -1), fd_w, True)
+        tu = tb_graph.new_input(up_weight_t, (1, -1, -1), fd_w, True)
+        # Output declared as an input as well (see generated_silu_mul_layer).
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        gate = tb_graph.forloop_accum(tb_graph.matmul(ti, tg), None)
+        up = tb_graph.forloop_accum(tb_graph.matmul(ti, tu), None)
+        tb_graph.new_output(tb_graph.mul(tb_graph.silu(gate), up),
+                            (1, -1, -1), -1)
+        self.kn_graph.customized(
+            [input, gate_weight_t, up_weight_t, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "generated")
 
     def identity_layer(
         self,

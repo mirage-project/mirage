@@ -442,7 +442,30 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   assert(op->op_type == type::KN_CUSTOMIZED_OP);
   KNCustomizedOp const *customized = static_cast<KNCustomizedOp const *>(op);
   TaskRegister *task_register = TaskRegister::get_instance();
-  if (name == "embedding") {
+  if (name == "generated") {
+    // Body transpiled from the threadblock graph rather than dispatched to a
+    // handwritten kernel. Input/output counts come from the op itself, since a
+    // generated body has no fixed arity.
+    // Target the device the megakernel will actually run on. The other
+    // register_* paths do not need this because they dispatch to handwritten
+    // kernels that are already arch-specialized; a generated body is transpiled
+    // here and must be told which backend to emit.
+    int cc_major = 0, cc_minor = 0, cur_device = 0;
+    cudaGetDevice(&cur_device);
+    cudaDeviceGetAttribute(&cc_major, cudaDevAttrComputeCapabilityMajor,
+                           cur_device);
+    cudaDeviceGetAttribute(&cc_minor, cudaDevAttrComputeCapabilityMinor,
+                           cur_device);
+    int variant_id = task_register->register_generated_task(
+        customized, this, cc_major * 10 + cc_minor, params);
+    // MPK counts I/O from the bgraph's TB_INPUT_OPs: the trailing ones are the
+    // writes. A generated task declares its output as an input too, so the read
+    // count is the operand count minus the number of tensors it produces.
+    int const num_writes = (int)customized->output_tensors.size();
+    int const num_reads = (int)customized->input_tensors.size() - num_writes;
+    task_config[op] =
+        std::make_tuple(num_reads, num_writes, TASK_GENERATED, variant_id);
+  } else if (name == "embedding") {
     int variant_id =
         task_register->register_embedding_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_EMBEDDING, variant_id);

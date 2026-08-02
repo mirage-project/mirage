@@ -212,6 +212,10 @@ enum TaskType {
   // Sigmoid+bias top-k router (n_group=1) with folded shared expert.
   TASK_GLM_MOE_ROUTER_SM100 = 401,
   TASK_GLM_TASK_END = 449, // end placeholder, not a real task
+  // Compiler-generated tasks: the body is transpiled from a threadblock graph
+  // by the muGraph backend (TranspilerConfig::emit_device_body) rather than
+  // calling a handwritten kernel. One variant per distinct generated body.
+  TASK_GENERATED = 450,
 };
 
 enum EventType {

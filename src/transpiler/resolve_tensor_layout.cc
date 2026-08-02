@@ -185,6 +185,20 @@ void Transpiler::resolve_tensor_layout() {
     }
     opt.add(z3::atmost(innermost_exprs, 1));
     opt.add(z3::atleast(innermost_exprs, 1));
+    DTensorMeta const &dmeta = this->dtensor_metas[dtensor.guid];
+    bool pinned_elsewhere =
+        dmeta.is_input ||
+        (dmeta.is_output && dmeta.output_idx < output_strides.size());
+    if (config.emit_device_body && !pinned_elsewhere) {
+      // Every tensor a megakernel task body touches is a plain row-major MPK
+      // buffer. Inputs are already pinned by input_strides, but a task graph
+      // has no KN_OUTPUT_OP (MPK passes the destination in as an operand), so
+      // the solver was free to pick dim 0 as innermost for the result -- and it
+      // did. The matmul then wrote a numerically CORRECT tile column-major into
+      // a row-major buffer: `out == ref.T` exactly, rel ~1.5 against ref.
+      // Skip anything already constrained, so this cannot make the model unsat.
+      opt.add(d_is_innermost[dtensor.guid][num_dims - 1]);
+    }
   }
   for (tb::STensor const &stensor : all_stensors) {
     int num_dims = stensor.num_dims;
@@ -466,6 +480,20 @@ void Transpiler::resolve_tensor_layout() {
                                     s_is_swizzled[input.guid][num_dims - 1]));
                 opt.add(z3::implies(!s_is_innermost[input.guid][num_dims - 2],
                                     s_is_swizzled[input.guid][num_dims - 2]));
+                // An INTERMEDIATE operand (produced by another TB op, not
+                // loaded from gmem) must take the orientation every verified
+                // gmem-loaded operand has: innermost = last dim. The emitted
+                // tiled_mma hardcodes each operand's UMMA majorness by ROLE;
+                // left free, the solver picked dim 0 for a matmul-produced
+                // operand (chained matmul), and the consumer then read the tile
+                // through the wrong majorness -- right values, wrong positions.
+                // Gmem-loaded operands already satisfy this via their input
+                // strides, so the constraint only binds intermediates.
+                if (config.target_cc == GPU_CC::B200 &&
+                    input.owner_op != nullptr &&
+                    input.owner_op->op_type != type::TB_INPUT_OP) {
+                  opt.add(s_is_innermost[input.guid][num_dims - 1]);
+                }
               }
             } else {
               // Use normal copying if ldmatrix is not supported by hardware

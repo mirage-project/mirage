@@ -23,6 +23,11 @@ enum TranspileErrorType {
   CUDA_T_INSUFFICIENT_SMEM = 1,
   CUDA_T_LAYOUT_ERROR = 2,
   CUDA_T_CONFIG_ERROR = 3,
+  // A matmul result consumed by another op inside the forloop (the fused
+  // attention shape). Distinct from CONFIG so the message can say so -- it
+  // otherwise surfaced as "block_dim does not match num_warp_groups * 128",
+  // which points at the wrong thing entirely.
+  CUDA_T_UNSUPPORTED_CHAINED_MATMUL = 4,
   CUDA_T_UNKOWN_ERRORS = 999,
 };
 

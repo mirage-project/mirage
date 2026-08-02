@@ -79,19 +79,37 @@ std::array<int, mirage::config::MAX_TENSOR_DIMS>
 // Parse bgraph.operators into (inputs, outputs) by position. Outputs are also
 // TB_INPUT_OPs (see runtime.cc:266-274); their input_map field is the
 // output_map.
+// Two bgraph conventions coexist:
+//
+//   * Handwritten tasks pass a pure I/O SPEC: every op is a TB_INPUT_OP, the
+//     first num_inputs of them are the reads and the rest are the writes. The
+//     computation lives in the .cuh kernel, not in the graph.
+//
+//   * Compiler-generated tasks pass the COMPUTATION ITSELF: reads are
+//     TB_INPUT_OPs, writes are TB_OUTPUT_OPs, and real operators sit between
+//     them. This is the user-defined graph the MPK compiler turns into a task.
+//
+// Detect which by looking for a TB_OUTPUT_OP, so generated tasks are a drop-in
+// replacement for handwritten ones and every existing task type is unaffected.
 void split_bgraph_ops(tb::Graph const &bgraph,
                       int num_inputs,
-                      std::vector<tb::TBInputOp *> &inputs,
-                      std::vector<tb::TBInputOp *> &outputs) {
+                      std::vector<BGraphSlot> &inputs,
+                      std::vector<BGraphSlot> &outputs) {
+  // Only TB_INPUT_OPs describe the task's I/O, for BOTH handwritten and
+  // generated tasks: MPK requires every task tensor to be an attached graph
+  // input (runtime.cc asserts owner_op is a KN_INPUT_OP, and looks the tensor
+  // up in io_configs by guid). A generated task therefore declares its output
+  // as a TB_INPUT_OP like every handwritten task does; the TB_OUTPUT_OP in its
+  // bgraph exists only so the transpiler emits a store, and is skipped here.
   for (auto const &op : bgraph.operators) {
     if (op->op_type != mirage::type::TB_INPUT_OP) {
       continue;
     }
     auto *ip = static_cast<tb::TBInputOp *>(op);
     if ((int)inputs.size() < num_inputs) {
-      inputs.push_back(ip);
+      inputs.push_back({ip->dtensor, ip->input_map, ip->output_tensors[0]});
     } else {
-      outputs.push_back(ip);
+      outputs.push_back({ip->dtensor, ip->input_map, ip->output_tensors[0]});
     }
   }
 }
@@ -294,7 +312,7 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     mirage::runtime::TaskType task_type = std::get<2>(it->second);
     int variant_id = std::get<3>(it->second);
 
-    std::vector<tb::TBInputOp *> input_ops, output_ops;
+    std::vector<BGraphSlot> input_ops, output_ops;
     split_bgraph_ops(cur_op->bgraph, num_inputs, input_ops, output_ops);
     if ((int)input_ops.size() != num_inputs ||
         (int)output_ops.size() != num_outputs) {
@@ -317,8 +335,7 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     // change graph construction; event building reads `is_barrier_edge` and
     // emits one coarse event instead of GCD-based per-tile events.
     for (int in_slot = 0; in_slot < num_inputs; in_slot++) {
-      auto *ip = input_ops[in_slot];
-      DTensor const &cdt = ip->dtensor;
+      DTensor const &cdt = input_ops[in_slot].dtensor;
       size_t base = cdt.resolve_base_guid();
       auto wit = last_writers.find(base);
       if (wit == last_writers.end()) {
@@ -374,10 +391,10 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
         e.out_slot = we.out_slot;
         e.in_slot = in_slot;
         e.tensor_guid = cdt.guid;
-        e.input_map = ip->input_map;
+        e.input_map = input_ops[in_slot].map;
 
         auto const *prod_op = ag.layers[we.layer].op;
-        std::vector<tb::TBInputOp *> prod_inputs, prod_outputs;
+        std::vector<BGraphSlot> prod_inputs, prod_outputs;
         split_bgraph_ops(prod_op->bgraph,
                          ag.layers[we.layer].num_inputs,
                          prod_inputs,
@@ -386,7 +403,7 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
           throw std::runtime_error(
               "build_annotated_graph: invalid out_slot for producer");
         }
-        e.output_map = prod_outputs[we.out_slot]->input_map;
+        e.output_map = prod_outputs[we.out_slot].map;
 
         // View-induced barrier: collapse this edge to a single coarse event
         // ONLY when producer and consumer touch DIFFERENT windows of the
@@ -395,7 +412,7 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
         // is not valid. When both sides reference the SAME view window, the
         // normal GCD per-tile event analysis synchronizes the edge correctly,
         // so keep it fine-grained.
-        DTensor const &pdt = prod_outputs[we.out_slot]->dtensor;
+        DTensor const &pdt = prod_outputs[we.out_slot].dtensor;
         bool view_edge = c_is_virtual || we.is_virtual_writer;
         e.is_barrier_edge = view_edge && !same_view_window(cdt, pdt);
 
@@ -412,7 +429,7 @@ AnnotatedGraph build_annotated_graph(mirage::kernel::Graph const &kn_graph,
     // - Virtual (write-view) writes append a partial entry so multiple
     //   producers writing disjoint slices coexist.
     for (int out_slot = 0; out_slot < num_outputs; out_slot++) {
-      DTensor const &odt = output_ops[out_slot]->dtensor;
+      DTensor const &odt = output_ops[out_slot].dtensor;
       size_t base = odt.resolve_base_guid();
       bool o_is_virtual = odt.is_virtual();
       WriterEntry we{layer_idx, out_slot, compute_bbox(odt), o_is_virtual};

@@ -26,7 +26,7 @@ STensor Graph::new_input(mirage::kernel::DTensor const &dtensor,
                          bool store_in_dmem) {
   TBOperator *op =
       create_input_op(dtensor, input_map, forloop_dim, layout, store_in_dmem);
-  assert(op != nullptr);
+  check_tb_op(op, "input");
   operators.push_back(op);
   return op->output_tensors[0];
 }
@@ -42,7 +42,7 @@ STensor *Graph::new_input(mirage::kernel::DTensor const *dtensor,
       forloop_dim,
       layout,
       store_in_dmem);
-  assert(op != nullptr);
+  check_tb_op(op, "input_loader");
   operators.push_back(op);
   return &op->output_tensors[0];
 }

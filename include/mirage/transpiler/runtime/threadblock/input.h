@@ -259,19 +259,52 @@ template <typename T,
           class SrcLayout,
           class TMA,
           class BlackwellAsyncPipeline,
+          // MInput = "is this the MMA's A operand" (role). Under swapAB the
+          // role no longer matches the stensor's position in the source graph.
           bool MInput,
           int K_ITER,
           class TiledMMA_,
           class Mma_Tiler_,
-          class ClusterShape_MNK_>
+          class ClusterShape_MNK_,
+          bool SWAP_AB = false,
+          // TASK_BODY: this copy belongs to an MPK megakernel task body, where
+          // blockIdx.x is the WORKER id, not a tile index, and the runtime has
+          // already offset the operand pointers to this task's tile. Deriving
+          // the gmem tile coordinate from blockIdx therefore picks the wrong
+          // tile. Same flag, same reason, as Blackwell_Matmul::TASK_BODY.
+          //
+          // This only showed up under swapAB: the coordinate feeds local_tile
+          // through Step<_1,X,_1> for an A operand (M coord = blockIdx.x) and
+          // Step<X,_1,_1> for a B operand (N coord = blockIdx.y). In a
+          // megakernel the grid is 1-D, so blockIdx.y is always 0 and a B
+          // operand was harmless -- but swapAB makes the TILED weight the A
+          // operand, so its coordinate became the worker id and every task read
+          // whichever tile its worker happened to be.
+          bool TASK_BODY = false,
+          // N_LOOP: the forloop tiles this operand's MMA-N dimension rather
+          // than MMA-K -- attention's Q@K^T iterates over KV (the N of that
+          // matmul). The default local_tile coordinate (m, n, _) leaves the
+          // K-tiles mode free for k_iter to index; with one K_mma tile that
+          // re-fetched TILE 0 into every stage (E was recomputed from K0 each
+          // iteration -- localized via an E-accumulator reading exactly 2*E0).
+          // N_LOOP flips the free mode: (m, _, 0) walks the N tiles instead.
+          bool N_LOOP = false>
 class InputTMAAsyncCopy_Blackwell {
 
   using TiledMMA = TiledMMA_;
   using Mma_Tiler = Mma_Tiler_;
   using ClusterShape = ClusterShape_MNK_;
 
+  // Two different notions ride on MInput and must be separated under swapAB:
+  //   * ROLE (MInput): which operand slot -- drives partition_shape_A/B, which
+  //     Mma_Tiler mode to select, and which local_tile Step.
+  //   * MAJORNESS: how the tensor actually sits in gmem. TMA cannot transpose,
+  //     so this follows the tensor, i.e. the ORIGINAL m_input, which is
+  //     (MInput != SWAP_AB). Deriving majorness from the role instead trips
+  //     "Majorness of smem doesn't match majorness of gmem".
+  static constexpr bool IsOriginalMInput = (MInput != SWAP_AB);
   static constexpr UMMA::Major UMMAMajor =
-      MInput ? UMMA::Major::K : UMMA::Major::MN;
+      IsOriginalMInput ? UMMA::Major::K : UMMA::Major::MN;
 
   using SmemLayoutAtom =
       decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
@@ -294,7 +327,8 @@ class InputTMAAsyncCopy_Blackwell {
   using DstPipeLayout = decltype(UMMA::tile_to_mma_shape(
       SmemLayoutAtom{},
       append(DstMNKLayout{}, Int<BlackwellAsyncPipeline::Stage>{}),
-      std::conditional_t<MInput, Step<_1, _2, _3>, Step<_2, _1, _3>>{}));
+      // Step follows majorness (K-major -> <1,2,3>, MN-major -> <2,1,3>).
+      std::conditional_t<IsOriginalMInput, Step<_1, _2, _3>, Step<_2, _1, _3>>{}));
 
 public:
   static __device__ __forceinline__ void prefetch(TMA const &tma) {
@@ -319,8 +353,8 @@ public:
       auto cta_in_cluster_coord_vmnk = cluster_layout_vmnk.get_flat_coord(
           int(cute::block_rank_in_cluster()));
 
-      auto mma_coord_vmnk =
-          get_mma_coord_vmnk<TiledMMA, ClusterShape>(blockIdx.x, blockIdx.y);
+      auto mma_coord_vmnk = get_mma_coord_vmnk<TiledMMA, ClusterShape>(
+          TASK_BODY ? 0 : blockIdx.x, TASK_BODY ? 0 : blockIdx.y);
       auto mma_coord = select<1, 2, 3>(mma_coord_vmnk);
       decltype(auto) gA = [&]() {
         if constexpr (MInput) {
@@ -329,6 +363,12 @@ public:
               mma_tiler,
               mma_coord,
               Step<_1, X, _1>{}); // (MmaTile_M, MmaTile_K, Tiles_K)
+        } else if constexpr (N_LOOP) {
+          return local_tile(
+              mA,
+              mma_tiler,
+              make_coord(get<0>(mma_coord), Underscore{}, Int<0>{}),
+              Step<X, _1, _1>{}); // (MmaTile_N, MmaTile_K, Tiles_N)
         } else {
           return local_tile(
               mA,

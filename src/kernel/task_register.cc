@@ -13,8 +13,12 @@
  * limitations under the License.
  */
 #include "mirage/kernel/task_register.h"
+#include "mirage/kernel/graph.h"
 #include "mirage/kernel/operator.h"
+#include "mirage/transpiler/transpiler.h"
 #include "mirage/transpiler/utils.h"
+
+#include <stdexcept>
 
 namespace mirage {
 namespace runtime {
@@ -86,6 +90,117 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0]);");
   return register_task_variant(TASK_EMBEDDING, code.to_string());
+}
+
+int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
+                                          kn::Graph const *kgraph,
+                                          int target_cc,
+                                          std::vector<int> const &params) {
+  assert(params.size() == 0);
+
+  // Transpile the op's threadblock graph into a callable device function.
+  // emit_device_body makes it `__device__ __forceinline__ void f(char *buf,
+  // outputs..., inputs...)` -- the megakernel owns the launch and the shared
+  // memory, so the body must not declare its own (see the flag's comment in
+  // structs.h). Input strides come from each dtensor's own layout: a task body
+  // is handed raw pointers, so there is no outer graph to negotiate them with.
+  transpiler::TranspilerConfig config;
+  config.target_cc = target_cc;
+  config.emit_device_body = true;
+  // One entry per KN_INPUT_OP in the graph, in order -- the Transpiler consumes
+  // them with a running input index as it rebuilds the graph, so this must
+  // match the graph's inputs, NOT this op's operands.
+  std::vector<std::vector<size_t>> input_strides;
+  for (auto const *kop : kgraph->operators) {
+    if (kop->op_type != type::KN_INPUT_OP) {
+      continue;
+    }
+    kn::DTensor const &dt = kop->output_tensors[0];
+    std::vector<size_t> strides(dt.num_dims);
+    size_t acc = 1;
+    for (int d = dt.num_dims - 1; d >= 0; d--) {
+      strides[d] = acc;
+      acc *= dt.dim[d];
+    }
+    input_strides.push_back(strides);
+  }
+
+  transpiler::Transpiler transpiler(kgraph, config, input_strides);
+  transpiler::CustomOPTranspileResult result =
+      transpiler.transpile_single_custom_op();
+  if (result.error_type != transpiler::CUDA_T_SUCCESS ||
+      result.code.empty()) {
+    throw std::runtime_error(
+        "register_generated_task: the muGraph backend rejected this task body "
+        "(transpiler error " +
+        std::to_string((int)result.error_type) +
+        (result.error_type ==
+                 transpiler::CUDA_T_UNSUPPORTED_CHAINED_MATMUL
+             ? "). A matmul result feeding another op INSIDE the forloop "
+               "(chained matmul / fused attention) is not supported yet."
+             : "). Unsupported operand shapes are the usual cause -- see the "
+               "operand_ok guard in transpiler_tb_blackwell.cc."));
+  }
+
+  // The definition is emitted once per variant, ahead of execute_task.
+  generated_task_defs.push_back(result.code);
+
+  // The variant body forwards the task's pointers to it. The generated
+  // signature is (buf, KN-outputs..., KN-inputs...): the KN outputs are the
+  // tensors produced by the bgraph's TB_OUTPUT_OPs, and the KN inputs are every
+  // tensor the op was given -- including the output tensor, which MPK requires
+  // to be declared as an input (see generated_silu_mul_layer).
+  //
+  // MPK hands the task input_ptrs for the reads and output_ptrs for the writes.
+  // Map the generated function's output parameter onto output_ptrs[0] so the
+  // store lands in the caller's tensor, and feed the trailing "output declared
+  // as an input" operand from output_ptrs too.
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  size_t const num_writes = op->output_tensors.size();
+  size_t const num_reads = op->input_tensors.size() - num_writes;
+  std::string call = result.func_name + "(";
+  bool first_arg = true;
+  // TMA atoms come first in the generated signature. Each is a pointer to a
+  // device-resident copy the host builder uploaded; the loader stored it in the
+  // owning input's TensorDesc (see the TASK_GENERATED case in runtime.cc).
+  for (size_t i = 0; i < result.tmaParamsList.size(); i++) {
+    call += (first_arg ? "" : ", ");
+    first_arg = false;
+    call += "task_desc->input_tma_desc_ptrs[" +
+            std::to_string(result.tmaParamsList[i].operand_id) + "][0]";
+  }
+  for (size_t i = 0; i < num_writes; i++) {
+    call += (first_arg ? "" : ", ");
+    first_arg = false;
+    call += "(" + std::string(type::get_datatype_str(
+                      op->output_tensors[i].data_type)) +
+            "*)task_desc->output_ptrs[" + std::to_string(i) + "]";
+  }
+  for (size_t i = 0; i < op->input_tensors.size(); i++) {
+    std::string src = (i < num_reads)
+                          ? ("task_desc->input_ptrs[" + std::to_string(i) + "]")
+                          : ("task_desc->output_ptrs[" +
+                             std::to_string(i - num_reads) + "]");
+    call += (first_arg ? "" : ", ");
+    first_arg = false;
+    call += "(" + std::string(type::get_datatype_str(
+                      op->input_tensors[i].data_type)) +
+            " const*)" + src;
+  }
+  call += ");";
+  code.e("$", call);
+  int const variant_id = register_task_variant(TASK_GENERATED, code.to_string());
+  if (!result.tmaParamsList.empty()) {
+    GeneratedTmaInfo info;
+    info.variant_id = (unsigned)variant_id;
+    info.builder_name = result.func_name + "_build_tma";
+    for (auto const &p : result.tmaParamsList) {
+      info.input_ids.push_back(p.operand_id);
+    }
+    generated_task_tma.push_back(info);
+  }
+  return variant_id;
 }
 
 int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,

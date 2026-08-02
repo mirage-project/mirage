@@ -19,6 +19,19 @@ from collections import deque
 
 MAX_THREADS = os.cpu_count()
 
+# Mirrors mirage::transpiler::TranspileErrorType in
+# include/mirage/transpiler/error_types.h
+TRANSPILE_ERROR_NAMES = {
+    0: "success",
+    1: "insufficient shared memory",
+    2: "layout error",
+    3: "config error (e.g. block_dim does not match num_warp_groups * 128)",
+    4: "unsupported: a matmul result feeding another op inside the forloop "
+       "(chained matmul / fused attention); the intermediate is never "
+       "materialised from TMEM, so this would be silently wrong",
+    999: "unknown error",
+}
+
 HARD_CODE = """
 #include <Python.h>
 #include <cuda_runtime.h>
@@ -437,6 +450,25 @@ class KNGraph:
             profiling=profiling,
             enable_online_softmax=enable_online_softmax,
         )
+        error_type = result.get("error_type", 0)
+        if error_type != 0:
+            # The transpiler rejected the graph and returned an empty `code`.
+            # Report that directly instead of handing empty source to nvcc and
+            # surfacing the failure as a generic "CUDA compilation error".
+            message = "transpiler error: {}".format(
+                TRANSPILE_ERROR_NAMES.get(error_type, "unknown ({})".format(error_type))
+            )
+            print(
+                "muGraph transpilation failed for target_cc={}: {}".format(
+                    target_cc, message
+                )
+            )
+            self._is_compiled = True
+            self._valid_cuda_kernels = False
+            self._cached_results = None
+            self._error_message = message
+            return Handle([], None) if async_ else None
+
         if result["max_smem_size"] > get_shared_memory_capacity(target_cc):
             # the transpiled kernel exceeds shared memory limit
             print(

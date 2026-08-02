@@ -46,6 +46,10 @@ event_name_list = {
     162: "TASK_MOE_W2_LINEAR_SM90",
     163: "TASK_SPLITK_LINEAR_SWAPAB_HOPPER",
     198: "TASK_HOPPER_TASK_END",
+    # Compiler-generated task bodies (TaskRegister::register_generated_task).
+    # Every variant shares this one id, so a trace with several generated tasks
+    # distinguishes them by event_no, not by name.
+    450: "TASK_GENERATED",
     200: "TASK_SCHD_TASKS",
     201: "TASK_SCHD_EVENTS",
     202: "TASK_GET_EVENT",

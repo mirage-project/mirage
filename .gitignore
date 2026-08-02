@@ -87,6 +87,11 @@ ncu_tmp
 /pr.md
 *.log
 
+# Segmented muGraph experiment: benchmark reports and Mirage search caches
+experiments/outputs/
+mirage_cached_mugraphs_*.json
+mirage_search_checkpoint.json
+
 # Track the agent skill/agent suites (re-include from the `.claude/` rule above).
 # A file can't be re-included while its parent dir is excluded, so: re-include
 # .claude/ itself, re-ignore its other children (settings.local.json, session

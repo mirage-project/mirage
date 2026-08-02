@@ -33,15 +33,36 @@ struct TranspilerConfig {
   // and H100 is 90
   int target_cc;
 
-  bool profiling;
+  bool profiling = false;
 
   // features for GPUs >= Grace Hopper
-  int num_consumer_wgs;
-  int num_producer_wgs;
-  int pipeline_stages;
+  //
+  // These MUST have defaults: callers construct TranspilerConfig as a bare
+  // stack value (e.g. `cdef TranspilerConfig` in core.pyx) and only assign the
+  // warp-group fields when the caller supplied both num_warp_groups and
+  // pipeline_stages. Without defaults the Hopper/Blackwell backends read
+  // garbage and reject the graph with an empty `code` string, which surfaces in
+  // Python as an inscrutable "CUDA compilation error".
+  //
+  // The defaults mirror num_warp_groups=2: one producer + one consumer.
+  int num_consumer_wgs = 1;
+  int num_producer_wgs = 1;
+  int pipeline_stages = 2;
 
   // Whether to enable graph rewriting
   bool enable_online_softmax = false;
+
+  // Emit the custom op as a `__device__ __forceinline__` function taking the
+  // shared-memory block as a parameter, instead of a `__global__` kernel that
+  // declares `extern __shared__`. This is the form an MPK megakernel task body
+  // needs: the megakernel owns the launch and the smem allocation, and calls
+  // the generated function from its task dispatch.
+  //
+  // Only valid when the op needs no TMA descriptors -- those are built on the
+  // host and passed as kernel arguments, which a task body has no way to
+  // receive. The Blackwell backend rejects the combination rather than emitting
+  // a function that references undeclared descriptors.
+  bool emit_device_body = false;
 };
 
 // Directive for an output tensor
@@ -88,6 +109,14 @@ struct TiledMMA {
   int N_tile_size;
   int K_tile_size;
   size_t guid;
+  // swapAB: the device side computes C^T = B^T * A^T when M is not a legal
+  // 1-SM tcgen05 M-tile (64/128), e.g. decode-shaped M = 1..8. M/N_tile_size
+  // stay the *logical* m,n; consumers swap them together with the Major flags.
+  // The host side in transpiler_kn.cc emits tiled_mma_<guid> for TMA atom
+  // construction under the SAME symbol name as the device side, so the two must
+  // agree -- when they did not, an M=8 K-loop failed with "SM100_MMA_F16BF16
+  // M-mode size should be 64 or 128".
+  bool swap_ab = false;
 
   // Constructor
   TiledMMA()
@@ -100,14 +129,19 @@ struct TiledMMA {
            int M_tile_size,
            int N_tile_size,
            int K_tile_size,
-           size_t guid)
+           size_t guid,
+           bool swap_ab = false)
       : A_type(A_type), B_type(B_type), C_type(C_type),
         M_tile_size(M_tile_size), N_tile_size(N_tile_size),
-        K_tile_size(K_tile_size), guid(guid) {}
+        K_tile_size(K_tile_size), guid(guid), swap_ab(swap_ab) {}
 };
 
 struct TMAParams {
-  size_t input_id; // ID of the TMA
+  size_t input_id; // Index among the GRAPH's inputs (dtensor_meta.input_idx)
+  // Index among the OWNING OP's operands. This is what a megakernel task
+  // indexes its input_ptrs[] / input_tma_desc_ptrs[] by, and it differs from
+  // input_id as soon as a graph holds more than one customized op.
+  size_t operand_id = 0;
   size_t guid;
   size_t sguid;
   std::string srcLayout; // String representing the layout

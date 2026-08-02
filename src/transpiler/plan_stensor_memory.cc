@@ -501,36 +501,60 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
 
   // Leave the first 16 bytes of the shared memory for matmul operators
   // TODO(intlsy) Remove this if there is not Matmul op or do not need padding
-  assert(ALIGNMENT >= 16);
-  plan.smem_size += ALIGNMENT;
+  //
+  // Blackwell needs a stronger base alignment than the other backends. A UMMA
+  // operand is read through a swizzled smem layout (Swizzle<3,3,3> in element
+  // units for 16-bit), and the swizzle is only meaningful relative to a base
+  // aligned to its period -- 2^(3+3+3) = 512 elements = 1024 bytes. At the old
+  // 128B base the operands sat at buf+128 and the generated matmul returned the
+  // right values at wrong positions, an m-dependent XOR into the K index that
+  // disappears entirely at 1024B. Raising it past 1024 changes nothing, which
+  // matches the period being exactly 1024B.
+  size_t alignment = blackwell_arch ? 1024 : ALIGNMENT;
+  assert(alignment >= 16);
+  plan.smem_size += alignment;
   for (auto &kv : plan.addrs) {
-    kv.second += ALIGNMENT;
+    kv.second += alignment;
   }
 
   if (blackwell_arch) {
-    bool tmem_init = false;
+    // The body's matmuls share ONE MMA completion barrier, whose arrival count
+    // is (forloop_range x num_matmuls) -- see generate_Tmem_mbarrier_init_code.
+    // This used to reserve one barrier per matmul, but only the first was ever
+    // initialized, arrived on, or waited on; the rest were dead shared memory
+    // that the emitter had to invent names for to avoid a redeclaration.
+    // Reserve exactly the one that is used.
+    //
+    // Both live in the alignment padding ahead of the first stensor (the
+    // blackwell alignment above is 1024B), so this costs no extra smem.
+    // One SHARED barrier for the matmuls whose accumulators are written back
+    // after the loop (arrival count forloop_range x that many), plus one PER
+    // matmul for the chained case: a matmul whose result is consumed inside the
+    // loop must be waited on every iteration, which needs its own phase.
+    // Unused ones cost 16B each and live in the alignment padding ahead of the
+    // first stensor, so they are free in practice.
     size_t usage = 0;
+    bool tmem_init = false;
     for (int i = 0; i < (int)tb_sched.loop_nodes.size(); ++i) {
       TBSchedNode const &node = tb_sched.loop_nodes[i];
-      if (node.type != tb_sched_node_t::OPERATOR) {
+      if (node.type != tb_sched_node_t::OPERATOR ||
+          node.ops.front().first->op_type != type::TB_MATMUL_OP) {
         continue;
       }
-      auto [op, op_meta] = node.ops.front();
-      if (op->op_type == type::TB_MATMUL_OP) {
-        tb::STensor const &stensor = op->output_tensors.at(0);
-        size_t mbarrier_phy_size = 8;      // uint64_t for each barrier
-        size_t tmem_base_ptr_phy_size = 4; // uint32_t for tmem base ptr
-
-        if (!tmem_init) {
-          plan.addrs[TMEM_BASE_PTR_GUID] = 0;
-          usage += tmem_base_ptr_phy_size;
-          tmem_init = true;
-        }
-        // align to 16 bytes
-        plan.addrs[stensor.guid + MBARRIER_GUID_OFFSET] =
-            (usage + 15) / 16 * 16;
-        usage = (usage + 15) / 16 * 16 + mbarrier_phy_size;
+      if (!tmem_init) {
+        plan.addrs[TMEM_BASE_PTR_GUID] = 0;
+        usage += 4; // uint32_t for tmem base ptr
+        // The shared barrier, at a fixed key so the emitter can find it.
+        usage = (usage + 15) / 16 * 16;
+        plan.addrs[MBARRIER_GUID_OFFSET] = usage;
+        usage += 8;
+        tmem_init = true;
       }
+      // Per-matmul barrier, keyed by the node's visible output stensor.
+      usage = (usage + 15) / 16 * 16;
+      plan.addrs[node.ops.back().first->output_tensors.at(0).guid +
+                 MBARRIER_GUID_OFFSET] = usage;
+      usage += 8;
     }
   }
 

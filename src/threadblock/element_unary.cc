@@ -88,7 +88,7 @@ STensor Graph::elementunary_clamp(STensor const &input,
                                   float const &min_val,
                                   float const &max_val) {
   TBOperator *op = create_elementunary_clamp_op(input, min_val, max_val);
-  assert(op != nullptr);
+  check_tb_op(op, "elementunary_clamp");
   operators.push_back(op);
   return op->output_tensors[0];
 }
@@ -97,7 +97,7 @@ STensor *Graph::elementunary_clamp(STensor const *input,
                                    float const &min_val,
                                    float const &max_val) {
   TBOperator *op = create_elementunary_clamp_op(*input, min_val, max_val);
-  assert(op != nullptr);
+  check_tb_op(op, "elementunary_clamp");
   operators.push_back(op);
   return &op->output_tensors[0];
 }
@@ -121,7 +121,7 @@ STensor Graph::elementunary(STensor const &input,
                             mirage::type::TBOperatorType type,
                             float const &scalar) {
   TBOperator *op = create_elementunary_op(input, type, scalar);
-  assert(op != nullptr);
+  check_tb_op(op, "elementunary");
   operators.push_back(op);
   return op->output_tensors[0];
 }
@@ -130,7 +130,7 @@ STensor *Graph::elementunary(STensor const *input,
                              mirage::type::TBOperatorType type,
                              float const &scalar) {
   TBOperator *op = create_elementunary_op(*input, type, scalar);
-  assert(op != nullptr);
+  check_tb_op(op, "elementunary");
   operators.push_back(op);
   return &op->output_tensors[0];
 }

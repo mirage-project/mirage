@@ -22,19 +22,31 @@ namespace threadblock {
 
 STensor Graph::reduction(STensor const &input, int dim) {
   TBOperator *op = create_reduction_op(input, dim);
-  assert(op != nullptr);
+  check_tb_op(op, "reduction");
   operators.push_back(op);
   return op->output_tensors[0];
 }
 
 STensor *Graph::reduction(STensor const *input, int dim) {
   TBOperator *op = create_reduction_op(*input, dim);
-  assert(op != nullptr);
+  check_tb_op(op, "reduction");
   operators.push_back(op);
   return &op->output_tensors[0];
 }
 
+// The reduce dim indexes both the tensor's dims and the TB_REDUCTION_<d>_*
+// op-type triple, so it must be in [0, min(num_dims, 3)). TBReductionOp only
+// asserted it, which NDEBUG compiles out -- an out-of-range dim then wrote
+// output.dim[dim] past the end of the array. Reject it here so the wrapper's
+// check_tb_op() turns it into an exception (see check_tb_op in graph.cc).
+static bool reduce_dim_ok(STensor const &input, int dim) {
+  return dim >= 0 && dim < input.num_dims && dim < 3;
+}
+
 TBOperator *Graph::create_reduction_op(STensor const &input, int dim) {
+  if (!reduce_dim_ok(input, dim)) {
+    return nullptr;
+  }
   TBOperator *op = new TBReductionOp(this, input, dim, 1 /*size*/);
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);
@@ -48,12 +60,15 @@ TBOperator *Graph::create_reduction_op(STensor const &input, int dim) {
 
 STensor Graph::reduction_to_dimx(STensor const &input, int dim) {
   TBOperator *op = create_reduction_to_dimx_op(input, dim);
-  assert(op != nullptr);
+  check_tb_op(op, "reduction_to_dimx");
   operators.push_back(op);
   return op->output_tensors[0];
 }
 
 TBOperator *Graph::create_reduction_to_dimx_op(STensor const &input, int dim) {
+  if (!reduce_dim_ok(input, dim)) {
+    return nullptr;
+  }
   TBOperator *op = new TBReductionOp(this, input, dim, this->reduction_dimx);
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);
@@ -67,19 +82,22 @@ TBOperator *Graph::create_reduction_to_dimx_op(STensor const &input, int dim) {
 
 std::vector<STensor> Graph::reduction_max(STensor const &input, int dim) {
   TBOperator *op = create_reduction_max_op(input, dim);
-  assert(op != nullptr);
+  check_tb_op(op, "reduction_max");
   operators.push_back(op);
   return op->output_tensors;
 }
 
 std::vector<STensor *> Graph::reduction_max(STensor const *input, int dim) {
   TBOperator *op = create_reduction_max_op(*input, dim);
-  assert(op != nullptr);
+  check_tb_op(op, "reduction_max");
   operators.push_back(op);
   return std::vector<STensor *>{&op->output_tensors[0], &op->output_tensors[1]};
 }
 
 TBOperator *Graph::create_reduction_max_op(STensor const &input, int dim) {
+  if (!reduce_dim_ok(input, dim)) {
+    return nullptr;
+  }
   TBOperator *op =
       new TBReductionOp(this, input, dim, -1 /*size = -1 for max*/);
   // Check shmem usage
