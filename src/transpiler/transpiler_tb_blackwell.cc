@@ -418,6 +418,73 @@ CustomOPTranspileResult
   // Get the memory allocation plan
   TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched, true, true);
 
+  // Wide (row pitch > 128B) NON-pipelined matmul operands -- e.g. attention's
+  // Q at head_dim=128 -- cannot go through InputChunkedSyncCopy: the UMMA
+  // reads a non-pipelined operand through DstPipeLayout_A/B and beyond a 128B
+  // pitch no dense-stride solver layout matches its panel tiling. Route them
+  // through InputWideOperandSyncCopy instead, which writes through the same
+  // cutlass-derived layout the matmul reads. Conditions: loaded whole (no
+  // forloop tiling), 2-D tile, consumed ONLY by matmuls (any other consumer
+  // reads the solver layout, which the wide atom does not write).
+  std::unordered_set<sguid_t> wide_matmul_operands;
+  for (tb::TBOperator const *tb_op : g.operators) {
+    if (tb_op->op_type != type::TB_INPUT_OP) {
+      continue;
+    }
+    tb::TBInputOp const *in_op = dynamic_cast<tb::TBInputOp const *>(tb_op);
+    if (in_op->forloop_dim != -1) {
+      continue;
+    }
+    tb::STensor const &st = tb_op->output_tensors.at(0);
+    if (!stensor_metas.count(st.guid)) {
+      continue;
+    }
+    STensorMeta const &mt = stensor_metas.at(st.guid);
+    if (mt.is_pipelined_input) {
+      continue;
+    }
+    bool leading_ones = true;
+    for (int i = 0; i < st.num_dims - 2; ++i) {
+      leading_ones &= (st.dim[i] == 1);
+    }
+    if (st.num_dims < 2 || !leading_ones) {
+      continue;
+    }
+    bool narrow_ok =
+        mt.is_xor_swizzled && mt.swizzled_dim >= 0 &&
+        (size_t)mt.strides[mt.swizzled_dim] *
+                type::get_datatype_size(st.data_type) <=
+            128;
+    if (narrow_ok) {
+      continue; // the chunked-copy path handles it
+    }
+    bool any_consumer = false, all_matmul = true;
+    for (tb::TBOperator const *cons : g.operators) {
+      for (tb::STensor const &it : cons->input_tensors) {
+        if (it.guid == st.guid) {
+          any_consumer = true;
+          all_matmul &= (cons->op_type == type::TB_MATMUL_OP);
+        }
+      }
+    }
+    if (any_consumer && all_matmul) {
+      wide_matmul_operands.insert(st.guid);
+    }
+    if (getenv("MIRAGE_DEBUG_WIDE")) {
+      fprintf(stderr,
+              "[wide] st=%lld fd=%d pipe=%d xor=%d swdim=%d cons=%d allmm=%d "
+              "-> %d\n",
+              (long long)st.guid,
+              in_op->forloop_dim,
+              (int)mt.is_pipelined_input,
+              (int)mt.is_xor_swizzled,
+              mt.swizzled_dim,
+              (int)any_consumer,
+              (int)all_matmul,
+              (int)wide_matmul_operands.count(st.guid));
+    }
+  }
+
   std::vector<TMAParams> tmaParamsList;
 
   // Generate code prologue
@@ -454,7 +521,21 @@ CustomOPTranspileResult
   // meant the surplus threads ran work sized for a smaller group, racing on and
   // overrunning the tile. Size the constants to the threads that really execute
   // the region instead.
-  bool const is_warp_specialized = (g.forloop_range > 1);
+  // The producer/consumer split is only ever EMITTED for pipelined inputs
+  // (the producer loop iterates pipelined_input_ops). A forloop graph whose
+  // tiled inputs were all demoted to in-loop sync copies (no matmul
+  // consumers) has no split: every thread runs the loop, so the barrier
+  // constants must cover the whole block or wg_sync deadlocks.
+  bool has_pipelined_input = false;
+  for (tb::TBOperator const *tb_op : g.operators) {
+    for (tb::STensor const &st : tb_op->output_tensors) {
+      if (stensor_metas.count(st.guid) &&
+          stensor_metas.at(st.guid).is_pipelined_input) {
+        has_pipelined_input = true;
+      }
+    }
+  }
+  bool const is_warp_specialized = (g.forloop_range > 1) && has_pipelined_input;
   int const compute_num_threads =
       is_warp_specialized
           ? config::NUM_THREADS_PER_GROUP * config.num_consumer_wgs
@@ -833,6 +914,18 @@ CustomOPTranspileResult
           node.ops.begin(), node.ops.end(), [](auto &op_and_meta) {
             return op_and_meta.first->op_type == type::TB_EXP_OP;
           });
+      // write_tC_to_sC applies only exp (NUM_EXPS_BEFORE_STORE) and the
+      // accumulator store; any other op fused into a Blackwell matmul's
+      // epilogue chain would silently vanish (a fused SQUARE did exactly
+      // that). Reject instead of emitting wrong code.
+      for (size_t fused_i = 1; fused_i < node.ops.size(); ++fused_i) {
+        auto fused_type = node.ops[fused_i].first->op_type;
+        if (fused_type != type::TB_EXP_OP &&
+            fused_type != type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+          return CustomOPTranspileResult{
+              CUDA_T_UNSUPPORTED_FUSED_EPILOGUE, func_name, 0, 0, "", {}};
+        }
+      }
       bool is_store_accum =
           node.ops.back().first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP;
       bool is_accum_in_reg = node.ops.back().second.is_accum_in_reg;
@@ -961,11 +1054,25 @@ CustomOPTranspileResult
           if (mt.is_pipelined_input) {
             return true;
           }
+          // Routed through InputWideOperandSyncCopy: written through the same
+          // cutlass-derived DstPipeLayout the UMMA reads, so the dense-stride
+          // pitch limit does not apply.
+          if (wide_matmul_operands.count(t.guid)) {
+            return true;
+          }
           return mt.is_xor_swizzled && row_pitch_bytes(t, mt) <= 128;
         };
         bool unsupported =
             !operand_ok(input0, meta0) || !operand_ok(input1, meta1);
         if (unsupported) {
+          if (getenv("MIRAGE_DEBUG_WIDE")) {
+            fprintf(stderr,
+                    "[wide] operand_ok REJECT in0=%lld(%d) in1=%lld(%d)\n",
+                    (long long)input0.guid,
+                    (int)operand_ok(input0, meta0),
+                    (long long)input1.guid,
+                    (int)operand_ok(input1, meta1));
+          }
           return CustomOPTranspileResult{
               CUDA_T_LAYOUT_ERROR, func_name, 0, 0, "", {}};
         }
@@ -1042,8 +1149,13 @@ CustomOPTranspileResult
              num_exps_before_store,
              is_accum_in_reg ? false : is_store_accum,
              config.num_consumer_wgs > 1 ? true : false,
-             meta0.is_pipelined_input,
-             meta1.is_pipelined_input,
+             // IS_PIPELINE_A/B follow the MMA ROLE, which swapAB flips: under
+             // swap the A operand is input1. Passing meta0/meta1 positionally
+             // gave pipelined V a 1-stage read layout whose stage coordinate
+             // collapses to 0 -- the UMMA consumed stage 0 (KV tile 0) every
+             // iteration while the producer dutifully filled both stages.
+             (swap_ab ? meta1 : meta0).is_pipelined_input,
+             (swap_ab ? meta0 : meta1).is_pipelined_input,
              config.pipeline_stages,
              output.guid,             // decltype(tiled_mma_$)
              output.guid,             // decltype(mma_tiler_$)
@@ -1177,10 +1289,73 @@ CustomOPTranspileResult
                offset);
       }
 
+      // Wide (>128B pitch) non-pipelined matmul operand: copy through the
+      // matmul's own cutlass-derived smem layout (see the routing set above).
+      // Needs the consuming matmul's tiled_mma/mma_tiler and role. Applies on
+      // both the chunked and non-chunked branches below -- operand_ok admits
+      // these tensors solely on the promise that this atom loads them.
+      auto emit_wide_operand_atom = [&]() {
+        tb::TBOperator const *mm = nullptr;
+        bool is_in0 = false;
+        for (tb::TBOperator const *cons : g.operators) {
+          if (cons->op_type == type::TB_MATMUL_OP) {
+            if (cons->input_tensors.at(0).guid == stensor.guid) {
+              mm = cons;
+              is_in0 = true;
+            } else if (cons->input_tensors.at(1).guid == stensor.guid) {
+              mm = cons;
+              is_in0 = false;
+            }
+          }
+        }
+        assert(mm != nullptr);
+        // tiled_mma_$/mma_tiler_$ are named after the matmul's SCHED-NODE
+        // output (the fused chain's last op -- e.g. a folded forloop_accum),
+        // not the matmul's own output. Follow the fusion chain for the name.
+        tb::STensor const &mm_out =
+            fusion_chain.at(mm).back()->output_tensors.at(0);
+        int const mm_nd = mm_out.num_dims;
+        int const mm_m = mm_out.dim[mm_nd - 2];
+        bool const mm_swap_ab = (mm_m != 64 && mm_m != 128);
+        bool const role_a = (is_in0 != mm_swap_ab);
+        int const nd = stensor.num_dims;
+        // Natural role order: A wants (M, K), B wants (N, K). input0 is
+        // already (m, k) / under swapAB (n_role, k); input1 is (k, n) and
+        // must be permuted. Strides come from the gmem dtensor tile.
+        int const da = stensor.dim[nd - 2], db = stensor.dim[nd - 1];
+        size_t const sa = dtensor_meta.strides[nd - 2],
+                     sb = dtensor_meta.strides[nd - 1];
+        string src_layout =
+            is_in0
+                ? fmt("Layout<Shape<Int<$>, Int<$>>, Stride<Int<$>, Int<$>>>",
+                      da,
+                      db,
+                      sa,
+                      sb)
+                : fmt("Layout<Shape<Int<$>, Int<$>>, Stride<Int<$>, Int<$>>>",
+                      db,
+                      da,
+                      sb,
+                      sa);
+        code.e("using STensor$InputAtom = tb::InputWideOperandSyncCopy<$, "
+               "$, decltype(tiled_mma_$), decltype(mma_tiler_$), $, $, "
+               "NUM_THREADS>;",
+               stensor.guid,
+               get_datatype_str(stensor.data_type),
+               src_layout,
+               mm_out.guid,
+               mm_out.guid,
+               role_a ? "true" : "false",
+               mm_swap_ab ? "true" : "false");
+      };
+
       // assert(use_chunked_copy && use_async_copy);
       if (!use_chunked_copy) {
         int d_innermost_dim = dtensor_meta.innermost_dim;
         assert(!use_async_copy);
+        if (wide_matmul_operands.count(stensor.guid)) {
+          emit_wide_operand_atom();
+        } else {
         string dtensor_tile_layout = get_dtensor_tile_layout(
             dtensor, dtensor_meta, stensor, stensor_meta, d_innermost_dim);
         code.e(
@@ -1193,12 +1368,15 @@ CustomOPTranspileResult
             get_datatype_str(stensor.data_type),
             mov_last_get_stensor_layout(stensor, stensor_meta, d_innermost_dim),
             dtensor.guid);
+        }
       } else {
         string dtensor_tile_layout = get_dtensor_tile_layout(
             dtensor, dtensor_meta, stensor, stensor_meta, real_innermost_dim);
         code.e(
             "using DTensor$TileLayout = $;", dtensor.guid, dtensor_tile_layout);
-        if (!use_async_copy) {
+        if (!use_async_copy && wide_matmul_operands.count(stensor.guid)) {
+          emit_wide_operand_atom();
+        } else if (!use_async_copy) {
           // Chunked, synchronous copy
           code.e("using STensor$InputAtom = tb::InputChunkedSyncCopy<$, "
                  "$, DTensor$TileLayout, NUM_THREADS>;",
@@ -2176,6 +2354,17 @@ CustomOPTranspileResult
             bool failed = false;
             for (tb::STensor const &stensor : {input0, input1, output}) {
               STensorMeta meta = stensor_metas.at(stensor.guid);
+              // A size-1 (broadcast) dim imposes no iteration-order
+              // constraint: the operand contributes one element regardless of
+              // which dim iterates fastest. Requiring innermost/swizzled on it
+              // made a (1,64) operand veto every candidate dim, iter_dim
+              // stayed -1, the NDEBUG-elided assert below vanished, and
+              // mov_last(-1) permuted all three layouts into deterministic
+              // garbage -- only when a broadcast operand was present, which is
+              // exactly the failure boundary the discriminator measured.
+              if (stensor.dim[i] == 1) {
+                continue;
+              }
               if (i != meta.innermost_dim && meta.swizzled_dim != i) {
                 failed = true;
                 break;
@@ -2186,7 +2375,11 @@ CustomOPTranspileResult
               break;
             }
           }
-          assert(iter_dim != -1);
+          if (iter_dim == -1) {
+            throw std::runtime_error(
+                "Blackwell elementwise binary: no common iteration dim across "
+                "operands (layout conflict)");
+          }
           // Define op type
           string op_type_str = op->op_type == type::TB_ADD_OP   ? "ADD"
                                : op->op_type == type::TB_MUL_OP ? "MUL"
@@ -2484,11 +2677,32 @@ CustomOPTranspileResult
           break;
         }
         case type::TB_INPUT_OP: {
-          // A NON-pipelined input's copy is emitted pre-loop; its scheduler
-          // node reaching this switch needs nothing further. This surfaced
-          // when FL=1 pipelined inputs were demoted to sync copies: the node
-          // hit the (now-throwing) default, which previously ignored it by
-          // accident.
+          // A NON-pipelined fd=-1 input's copy is emitted pre-loop; its
+          // scheduler node reaching this switch needs nothing further. A
+          // NON-pipelined FORLOOP-TILED input (demoted in sched_tb_graph
+          // because no matmul consumes it -- e.g. an attention mask feeding
+          // an add) must be copied HERE, every iteration, with the gmem tile
+          // advanced by for_idx. Visibility to the consuming op comes from
+          // the generic inter-op fence+wg_sync the emitter places between op
+          // blocks -- do NOT sync inside this case: the op body may be
+          // wrapped in a warp/CTA selector, where a warpgroup-wide sync
+          // deadlocks (test_pipelined_elementwise hung at grid=32).
+          tb::TBInputOp const *in_op = dynamic_cast<tb::TBInputOp const *>(op);
+          tb::STensor const &in_st = op->output_tensors.at(0);
+          STensorMeta const &in_mt = stensor_metas.at(in_st.guid);
+          if (is_in_loop && in_op->forloop_dim != -1 &&
+              !in_mt.is_pipelined_input) {
+            int const fd = in_op->forloop_dim;
+            DTensorMeta const &in_dmt = dtensor_metas.at(in_op->dtensor.guid);
+            size_t const tile_advance =
+                (size_t)in_st.dim[fd] * in_dmt.strides[fd];
+            code.e("STensor$InputAtom::run(stensor$_ptr, "
+                   "dtensor$_tile_ptr + for_idx * $, thread_idx);",
+                   in_st.guid,
+                   in_st.guid,
+                   in_op->dtensor.guid,
+                   tile_advance);
+          }
           break;
         }
         default: {

@@ -32,6 +32,9 @@ TRANSPILE_ERROR_NAMES = {
     5: "forloop_range=1 with pipelined (forloop_dim tiled) inputs deadlocks "
        "the Blackwell producer warpgroup; use forloop_dim=-1 at "
        "forloop_range=1",
+    6: "unsupported: a non-exp op fused into a Blackwell matmul's epilogue "
+       "(write_tC_to_sC applies only exp before store; anything else would "
+       "silently vanish)",
     999: "unknown error",
 }
 

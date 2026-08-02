@@ -357,7 +357,18 @@ public:
           TASK_BODY ? 0 : blockIdx.x, TASK_BODY ? 0 : blockIdx.y);
       auto mma_coord = select<1, 2, 3>(mma_coord_vmnk);
       decltype(auto) gA = [&]() {
-        if constexpr (MInput) {
+        if constexpr (MInput && N_LOOP) {
+          // swapAB chained attention: the forloop tiles this operand's
+          // non-K dim, which the swap made the MMA-M (K^T's KV dim becomes
+          // role-A M). The plain MInput branch below frees the K-tiles mode
+          // instead, so every iteration re-fetched M-tile 0 -- the same
+          // refetch signature the B-side N_LOOP flag fixed.
+          return local_tile(
+              mA,
+              mma_tiler,
+              make_coord(Underscore{}, get<1>(mma_coord), Int<0>{}),
+              Step<_1, X, _1>{}); // (MmaTile_M, MmaTile_K, Tiles_M)
+        } else if constexpr (MInput) {
           return local_tile(
               mA,
               mma_tiler,
@@ -430,6 +441,100 @@ public:
            tAsAX(_, write_stage));
 
       pipeline.producer_advance();
+    }
+  }
+};
+
+// A G->S copy for matmul operands whose row pitch exceeds 128B but which are
+// NOT software-pipelined (e.g. attention's Q at head_dim=128: an 8x128 bf16
+// tile with a 256B pitch, loaded once before the loop).
+//
+// Why InputChunkedSyncCopy cannot do this: on the non-pipelined path the UMMA
+// reads through DstPipeLayout_A/B (derived from cutlass's sm100_smem_selector)
+// while the chunked copy writes through the transpiler's dense-stride swizzled
+// layout. The two agree only up to a 128B pitch; beyond it, the selector
+// panel-tiles (tile_to_mma_shape places the second 128B panel at +8192
+// elements, not at a row pitch of 128) and no dense-stride layout can match.
+//
+// So this atom writes through the SAME DstPipeLayout the matmul reads,
+// derived identically to InputTMAAsyncCopy_Blackwell (with a single stage),
+// and pairs addresses via thr_mma.partition_A/B of the gmem tile -- agreement
+// by construction, exactly like the pipelined path, minus TMA and pipeline.
+//
+// NOTE: the smem buffer must be 1024B-aligned (the SW128 swizzle period).
+// This copy swizzles base-relative while the UMMA descriptor swizzles
+// absolute smem address bits; plan_stensor_memory pads all Blackwell
+// allocations to 1024B for exactly this reason.
+template <typename T,
+          class SrcTileLayout, // gmem tile in NATURAL operand order:
+                               // (M, K) for an A operand, (N, K) for B
+          class TiledMMA_,
+          class Mma_Tiler_,
+          bool MInput,  // role AFTER swapAB: true = A operand
+          bool SWAP_AB, // the consuming matmul's swapAB flag
+          int NUM_THREADS>
+class InputWideOperandSyncCopy {
+  using TiledMMA = TiledMMA_;
+  using Mma_Tiler = Mma_Tiler_;
+
+  // Majorness and Step must replicate Blackwell_Matmul's read-side derivation
+  // EXACTLY (UmmaMajorA/B, StepA/B) -- the whole point of this atom is that
+  // write and read agree on DstPipeLayout by construction.
+  static constexpr UMMA::Major UMMAMajor =
+      MInput ? (SWAP_AB ? UMMA::Major::MN : UMMA::Major::K)
+             : (SWAP_AB ? UMMA::Major::K : UMMA::Major::MN);
+  using CopyStep = std::conditional_t<
+      MInput,
+      std::conditional_t<SWAP_AB, Step<_2, _1, _3>, Step<_1, _2, _3>>,
+      std::conditional_t<SWAP_AB, Step<_1, _2, _3>, Step<_2, _1, _3>>>;
+
+  using AtomThrSize = decltype(size(typename TiledMMA::AtomThrID{}));
+  using SmemTileShape = std::conditional_t<
+      MInput,
+      decltype(shape_div(get<0>(Mma_Tiler{}), AtomThrSize{})),
+      decltype(shape_div(get<1>(Mma_Tiler{}), AtomThrSize{}))>;
+
+  using SmemLayoutAtom =
+      decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
+               UMMAMajor,
+               T,
+               SmemTileShape,
+               decltype(get<2>(Mma_Tiler{}))>());
+
+  using DstMNKLayout = std::conditional_t<
+      MInput,
+      decltype(partition_shape_A(
+          TiledMMA{},
+          make_shape(shape<0>(Mma_Tiler{}), shape<2>(Mma_Tiler{})))),
+      decltype(partition_shape_B(
+          TiledMMA{},
+          make_shape(shape<1>(Mma_Tiler{}), shape<2>(Mma_Tiler{}))))>;
+
+  using DstPipeLayout = decltype(UMMA::tile_to_mma_shape(
+      SmemLayoutAtom{},
+      append(DstMNKLayout{}, Int<1>{}),
+      CopyStep{}));
+
+public:
+  static __device__ __forceinline__ void
+      run(T *dst_smem, T const *src_gmem_tile, int thread_idx) {
+    Tensor gA = make_tensor(make_gmem_ptr(src_gmem_tile), SrcTileLayout{});
+    Tensor sFull = make_tensor(make_smem_ptr(dst_smem), DstPipeLayout{});
+
+    TiledMMA tiled_mma;
+    ThrMMA thr_mma = tiled_mma.get_slice(0);
+    decltype(auto) tCgA = [&]() {
+      if constexpr (MInput) {
+        return thr_mma.partition_A(gA);
+      } else {
+        return thr_mma.partition_B(gA);
+      }
+    }();
+    auto tCsA = group_modes<0, rank(sFull) - 1>(sFull)(_, Int<0>{});
+    auto tCgA_flat = group_modes<0, rank(tCgA)>(tCgA);
+    CUTE_STATIC_ASSERT_V(size(tCsA) == size(tCgA_flat));
+    for (int i = thread_idx; i < (int)size(tCsA); i += NUM_THREADS) {
+      tCsA(i) = tCgA_flat(i);
     }
   }
 };

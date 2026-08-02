@@ -34,6 +34,10 @@ enum TranspileErrorType {
   // hanging identically at FL=1). Pipelining buys nothing at one iteration;
   // callers should use forloop_dim=-1, as every working FL=1 graph does.
   CUDA_T_FL1_PIPELINED_DEADLOCK = 5,
+  // A non-exp op fused into a Blackwell matmul's epilogue chain:
+  // write_tC_to_sC applies only exp (NUM_EXPS_BEFORE_STORE), so any other
+  // fused op would silently vanish from the computation (a fused SQUARE did).
+  CUDA_T_UNSUPPORTED_FUSED_EPILOGUE = 6,
   CUDA_T_UNKOWN_ERRORS = 999,
 };
 
