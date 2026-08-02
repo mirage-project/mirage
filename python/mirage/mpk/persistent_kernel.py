@@ -17,6 +17,7 @@ from .multigpu import (
   auto_select_allreduce_implementation
 )
 from typing import Optional
+import struct
 
 HARD_CODE = """
 #include <Python.h>
@@ -565,24 +566,6 @@ class PersistentKernel:
         self._torch_tensor_refs.append(torch_tensor)
         return t
 
-    def attach_strided_view(self, torch_tensor: torch.Tensor, dims: tuple,
-                            strides: tuple, name: str) -> DTensor:
-        """attach_input for an arbitrary strided VIEW of an existing torch
-        tensor (e.g. a transposed per-head slice of the KV cache).
-        attach_input's row/column-major check rejects such views; this skips
-        the check but keeps every registration attach_input performs -- in
-        particular _model_tensors[name], which the generated
-        init_persistent_kernel resolves by name at launch (a missing entry is
-        a map::at abort there)."""
-        dtype = convert_torch_type_to_dtype(torch_tensor.dtype)
-        t = self.kn_graph.new_input(dims=tuple(dims), strides=tuple(strides),
-                                    dtype=dtype)
-        assert name is not None and "." not in name
-        self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
-        self._model_tensors[name] = torch_tensor
-        self._torch_tensor_refs.append(torch_tensor)
-        return t
-
     def new_tensor(
         self,
         dims: tuple,
@@ -875,7 +858,6 @@ class PersistentKernel:
         # Inkling GQA decode attention with relative-position bias.
         # grid_dim[0] = G partitions kv heads: imap slices dim 1 of
         # q/ctx/blk/out and dim 0 of bias.
-        import struct
 
         for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
             assert t.num_dims == 2
@@ -944,7 +926,6 @@ class PersistentKernel:
         # softmax(logsigmoid(selected ++ shared logits)) * route_scale *
         # global_scale. Shared experts are emitted as always-selected experts
         # num_routed..num_routed+n_shared-1 (folded into the expert tensor).
-        import struct
 
         weights, routing_indices, active_ids = output
         assert logits.num_dims == 2
@@ -984,7 +965,6 @@ class PersistentKernel:
         # by routed_scaling_factor. Shared experts are emitted as
         # always-selected experts num_routed..num_routed+n_shared-1 with
         # weight 1.0 (folded into the expert tensor).
-        import struct
 
         weights, routing_indices, active_ids = output
         assert logits.num_dims == 2
@@ -1137,7 +1117,6 @@ class PersistentKernel:
         # params[8]: rotary_dim     (0 = head_dim; GLM-4.6 partial RoPE)
         # params[9]: qk-norm eps float bits (default 1e-6)
         # Trailing pairs are only emitted when non-default (legacy sizes 6/8).
-        import struct
         params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
                   self.max_seq_length, self.page_size]
         if (q_len_override != 0 or tail_offset != 0 or rotary_dim != 0
@@ -1733,7 +1712,6 @@ class PersistentKernel:
         topk_group: int = 4,
         routed_scaling_factor: float = 2.5,
     ):
-        import struct
 
         assert input.num_dims == 2  # (batch_size, num_experts)
         assert bias.num_dims == 1  # (num_experts,)
@@ -2372,7 +2350,6 @@ class PersistentKernel:
         assert v_staged.dim(1) == self.max_seq_length
         assert grid_dim[0] == self.max_num_batched_requests
         assert grid_dim[1] == num_kv_heads
-        import struct
         eps_bits = struct.unpack("i", struct.pack("f", qk_norm_eps))[0]
         params = [num_q_heads, num_kv_heads, self.max_seq_length,
                   self.page_size, eps_bits]
@@ -2414,7 +2391,6 @@ class PersistentKernel:
         additive mask makes the S_max-compiled graph correct for any
         seq_len."""
         assert q_staged.num_dims == 3 and q_staged.dim(1) == 8
-        head_dim = q_staged.dim(2)
         S_max = kt_staged.dim(2)
         assert S_max % 64 == 0 and S_max >= 128
         forloop_range = S_max // 64

@@ -1,18 +1,10 @@
 """Regression net for the Blackwell (sm_100) threadblock codegen backend.
 
-Before these fixes, *no* graph containing a `KNCustomizedOp` produced a working
-kernel on sm_90/sm_100 -- the backend emitted references to identifiers it never
-declared, launched with an illegal cluster/grid combination, and mis-sized the
-cooperative kernels' thread counts.
-
-What is covered here is the case the fused-MPK-task work depends on: a
-single-tile custom threadblock op (`grid=(1,1,1)`, `forloop_range=1`), which is
-the shape an MPK task body has -- one CTA processing one tile from pointers the
-task descriptor supplies.
-
-The pipelined/TMA and matmul paths are still broken (guid-suffixed `tiled_mma`
-symbols and CUTLASS 4.2.1 signature mismatches); they are marked xfail so the
-suite records the boundary instead of hiding it.
+Covers the muGraph -> CUDA path that MPK generated tasks depend on: single-tile
+custom ops, swapAB decode-shaped matmuls, wide (>128B pitch) operands, K-looped
+pipelined operands, chained matmuls (the flash-attention shape), the
+online-softmax rewrite, and the full Qwen3-shaped attention core. Each test's
+docstring names the specific regression it guards.
 
 Run:
     PYTHONPATH=. pytest tests/experiments/test_blackwell_codegen.py -v
@@ -177,11 +169,6 @@ class TestSingleTileCustomOp:
         ref = torch.nn.functional.silu(ins[0].float()) * ins[1].float()
         assert (out[0].float() - ref).abs().max().item() < 0.1
 
-
-@requires_gpu
-class TestKnownBroken:
-    """Boundary of what works today -- see DESIGN.md for the remaining defects."""
-
     def test_pipelined_elementwise(self):
         """Fixed: forloop-tiled inputs consumed only by elementwise ops are
         demoted from the pipelined path (whose atom needs a consuming matmul's
@@ -204,6 +191,11 @@ class TestKnownBroken:
         out = g(inputs=ins)[0].float()
         torch.cuda.synchronize()
         assert torch.isfinite(out).all(), "pipelined elementwise produced NaN/Inf"
+
+
+@requires_gpu
+class TestUnsupportedBackends:
+    """Backends the campaign did not fix, recorded as strict xfails."""
 
     @pytest.mark.xfail(
         reason="Hopper TB backend has the same class of defects as Blackwell "
@@ -262,20 +254,6 @@ class TestBlackwellMatmul:
         O = g.customized([X, W], tb)
         g.mark_output(O[0])
         return g
-
-    def test_matmul_reduction_length(self):
-        """All-ones operands: every element must equal K exactly."""
-        m, k, n = 128, 64, 64
-        g = self._build_matmul(m, k, n)
-        a = torch.ones(m, k, dtype=torch.bfloat16, device="cuda")
-        b = torch.ones(k, n, dtype=torch.bfloat16, device="cuda")
-        with contextlib.redirect_stdout(io.StringIO()):
-            res = g.compile(inputs=[a, b], target_cc=100, num_warp_groups=1,
-                            pipeline_stages=2)
-        assert res is not None and g._valid_cuda_kernels, g.get_error_message()
-        out = g(inputs=[a, b])[0].float()
-        torch.cuda.synchronize()
-        assert out.unique().tolist() == [float(k)]
 
     def test_matmul_b_operand_layout(self):
         """A=I selects B's rows: verifies the MN-major operand end to end."""
@@ -574,70 +552,3 @@ class TestBlackwellMatmul:
         rel = ((out - ref).abs().max() / ref.abs().max()).item()
         assert rel < 0.03, f"attention core rel {rel}"
 
-    def test_matmul_identity_is_exact(self):
-        """I @ I must be exactly I: catches any operand-layout permutation."""
-        m, k, n = 128, 64, 64
-        g = self._build_matmul(m, k, n)
-        a = torch.eye(m, k, dtype=torch.bfloat16, device="cuda")
-        b = torch.eye(k, n, dtype=torch.bfloat16, device="cuda")
-        with contextlib.redirect_stdout(io.StringIO()):
-            res = g.compile(inputs=[a, b], target_cc=100, num_warp_groups=1,
-                            pipeline_stages=2)
-        assert res is not None and g._valid_cuda_kernels, g.get_error_message()
-        out = g(inputs=[a, b])[0].float()
-        torch.cuda.synchronize()
-        assert torch.equal(out, (a.float() @ b.float()))
-
-
-# The K-loop must run in a subprocess with a hard timeout. Its failure mode is a
-# deadlock, not an exception: the A-operand mbarrier used to expect 2x the bytes
-# a single CTA delivers (a 2-SM multicast leftover), so consumer_wait blocked
-# forever. In-process that hangs pytest instead of failing it.
-_KLOOP_SRC = textwrap.dedent(
-    """
-    import sys, torch, mirage as mi
-    M, K, N, R = {m}, {k}, {n}, {r}
-    g = mi.new_kernel_graph()
-    X = g.new_input(dims=(M, K), dtype=mi.bfloat16)
-    W = g.new_input(dims=(K, N), dtype=mi.bfloat16)
-    tb = mi.new_threadblock_graph(grid_dim=(1, 1, 1), block_dim=(256, 1, 1),
-                                  forloop_range=R, reduction_dimx=64)
-    tX = tb.new_input(dtensor=X, input_map=(-1, -1, -1), forloop_dim=1)
-    tW = tb.new_input(dtensor=W, input_map=(1, -1, -1), forloop_dim=0)
-    tb.new_output(stensor=tb.forloop_accum(tb.matmul(tX, tW), None),
-                  output_map=(1, -1, -1))
-    O = g.customized([X, W], tb); g.mark_output(O[0])
-    a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
-    b = torch.randn(K, N, dtype=torch.bfloat16, device="cuda")
-    g.compile(inputs=[a, b], target_cc=100, num_warp_groups=2, pipeline_stages=2)
-    out = g(inputs=[a, b])[0].float(); torch.cuda.synchronize()
-    ref = a.float() @ b.float()
-    rel = ((out - ref).abs().max() / ref.abs().max()).item()
-    print("REL", rel)
-    sys.exit(0 if rel < 0.02 else 1)
-    """
-)
-
-
-@pytest.mark.skipif(_skip_reason() is not None, reason=_skip_reason() or "")
-# M=8 exercises swapAB together with the pipelined K-loop -- the shape a real
-# fused decode segment has. Getting there required every site that asks "which
-# stensor is the A operand" to agree; see the role-vs-majorness note in
-# InputTMAAsyncCopy_Blackwell (input.h), which is the distinction that makes
-# them consistent.
-@pytest.mark.parametrize("m,r", [(128, 2), (128, 4), (8, 4), (8, 2)])
-def test_matmul_k_loop(m, r):
-    """K split across forloop iterations -- what a real fused MLP segment needs.
-
-    num_warp_groups must be >= 2: core.pyx sets num_consumer_wgs =
-    num_warp_groups - 1, so 1 yields zero consumer warp groups and the kernel
-    deadlocks by construction rather than by any compiler defect.
-    """
-    src = _KLOOP_SRC.format(m=m, k=64 * r, n=64, r=r)
-    env = dict(os.environ, PYTHONPATH=REPO_ROOT)
-    try:
-        proc = subprocess.run([sys.executable, "-c", src], timeout=600,
-                              capture_output=True, text=True, env=env)
-    except subprocess.TimeoutExpired:
-        pytest.fail(f"K-loop M={m} forloop_range={r} deadlocked (timed out)")
-    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}"

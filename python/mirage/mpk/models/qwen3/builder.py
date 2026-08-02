@@ -359,7 +359,6 @@ class Qwen3Builder(GraphBuilder):
             #         grid_dim=(1, num_local_kv_heads, 1), #TODO: further divide across batch dim
             #         block_dim=(128, 1, 1),
             #     )
-            # else:
             import os as _os
             if _os.environ.get("MPK_COMPILED_ATTENTION", "0") == "1":
                 # Hybrid path: handwritten prep (qk-norm+RoPE+KV-append+
