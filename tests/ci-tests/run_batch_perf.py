@@ -265,18 +265,66 @@ def main():
         v_cache = mpk.attach_input(
             torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
         )
-        mpk.paged_attention_layer(
-            input=attn_in,
-            k_cache=k_cache,
-            v_cache=v_cache,
-            q_norm=w_q_norm,
-            k_norm=w_k_norm,
-            cos_pos_embed=cos_pos_embed,
-            sin_pos_embed=sin_pos_embed,
-            output=attn_out,
-            grid_dim=(mpk.max_num_batched_requests, num_kv_heads, 1),
-            block_dim=(128, 1, 1),
-        )
+        if os.environ.get("MPK_COMPILED_ATTENTION", "0") == "1":
+            # Hybrid: handwritten prep -> COMPILER-GENERATED attention core ->
+            # handwritten finalize (see mpk/models/qwen3/builder.py for the
+            # same branch with full commentary).
+            _reqs = mpk.max_num_batched_requests
+            _kvh = num_kv_heads
+            _hd = k_cache.dim(3)
+            _S = mpk.max_seq_length
+            _dev = model.model.kv_cache[0][i].device
+            _fold = _kvh * _reqs
+            _q_staged_t = torch.zeros(_fold, 8, _hd,
+                                      dtype=torch.bfloat16, device=_dev)
+            _mask_t = torch.full((_fold, 1, _S), -30000.0,
+                                 dtype=torch.bfloat16, device=_dev)
+            _kt_staged_t = torch.zeros(_fold, _hd, _S,
+                                       dtype=torch.bfloat16, device=_dev)
+            _v_staged_t = torch.zeros(_fold, _S, _hd,
+                                      dtype=torch.bfloat16, device=_dev)
+            _pad_t = torch.zeros(_fold, 8, _hd,
+                                 dtype=torch.bfloat16, device=_dev)
+            q_staged = mpk.attach_input(
+                torch_tensor=_q_staged_t, name=f"layer_{i}_q_staged")
+            mask_staged = mpk.attach_input(
+                torch_tensor=_mask_t, name=f"layer_{i}_attn_mask")
+            kt_staged = mpk.attach_input(
+                torch_tensor=_kt_staged_t, name=f"layer_{i}_kt_staged")
+            v_staged = mpk.attach_input(
+                torch_tensor=_v_staged_t, name=f"layer_{i}_v_staged")
+            attn_pad = mpk.attach_input(
+                torch_tensor=_pad_t, name=f"layer_{i}_attn_pad")
+            mpk.attention_prep_layer(
+                input=attn_in, k_cache=k_cache, v_cache=v_cache,
+                q_norm=w_q_norm, k_norm=w_k_norm,
+                cos_pos_embed=cos_pos_embed, sin_pos_embed=sin_pos_embed,
+                q_staged=q_staged, mask_staged=mask_staged,
+                kt_staged=kt_staged, v_staged=v_staged,
+                grid_dim=(_reqs, _kvh, 1), block_dim=(128, 1, 1),
+            )
+            mpk.generated_attention_layer(
+                q_staged=q_staged, kt_staged=kt_staged, v_staged=v_staged,
+                mask_staged=mask_staged, attn_pad=attn_pad,
+                grid_dim=(_fold, 1, 1), block_dim=(256, 1, 1),
+            )
+            mpk.attention_finalize_layer(
+                attn_pad=attn_pad, output=attn_out,
+                grid_dim=(_reqs, 1, 1), block_dim=(128, 1, 1),
+            )
+        else:
+            mpk.paged_attention_layer(
+                input=attn_in,
+                k_cache=k_cache,
+                v_cache=v_cache,
+                q_norm=w_q_norm,
+                k_norm=w_k_norm,
+                cos_pos_embed=cos_pos_embed,
+                sin_pos_embed=sin_pos_embed,
+                output=attn_out,
+                grid_dim=(mpk.max_num_batched_requests, num_kv_heads, 1),
+                block_dim=(128, 1, 1),
+            )
         # add linear w/ residual
         w = mpk.attach_input(
             torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj"
@@ -394,6 +442,11 @@ def main():
         tokens[0, : min(seq_len, 32)], skip_special_tokens=True
     )
     print(f"Sample output (first 32 tokens of request 0): {sample!r}")
+    # Full first-50-ids per request: the token-parity gate for attention
+    # implementations diffs these lines between runs.
+    for r in range(args.max_num_batched_requests):
+        ids = tokens[r, : min(seq_len, 50)].tolist()
+        print(f"PARITY req {r}: {ids}")
 
     print("")
     print("==================== MPK Batch Perf ====================")

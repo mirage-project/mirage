@@ -110,31 +110,47 @@ int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
   // One entry per KN_INPUT_OP in the graph, in order -- the Transpiler consumes
   // them with a running input index as it rebuilds the graph, so this must
   // match the graph's inputs, NOT this op's operands.
+  // Transpile against a MINIMAL graph holding only this op's operands and a
+  // clone of the op itself. Handing the transpiler the FULL kernel graph made
+  // its reconstruction re-allocate fingerprint device memory for every model
+  // weight and KV cache -- at full-model scale that overflowed the fingerprint
+  // arena (elided-assert segfault inside Graph::new_input). Registration also
+  // becomes O(op) instead of O(model).
+  kn::Graph mini;
+  std::vector<kn::DTensor> mini_inputs;
   std::vector<std::vector<size_t>> input_strides;
-  for (auto const *kop : kgraph->operators) {
-    if (kop->op_type != type::KN_INPUT_OP) {
-      continue;
-    }
-    kn::KNInputOp const *in_op = static_cast<kn::KNInputOp const *>(kop);
-    kn::DTensor const &dt = kop->output_tensors[0];
-    if (in_op->input_strides.size() == (size_t)dt.num_dims) {
-      // The graph input carries explicit strides (e.g. a transposed or
-      // per-request view of the KV cache for the generated attention core).
-      // Synthesizing dense row-major strides here silently read the wrong
-      // elements for any non-contiguous view.
-      input_strides.push_back(in_op->input_strides);
-    } else {
-      std::vector<size_t> strides(dt.num_dims);
-      size_t acc = 1;
-      for (int d = dt.num_dims - 1; d >= 0; d--) {
-        strides[d] = acc;
-        acc *= dt.dim[d];
+  for (auto const &t : op->input_tensors) {
+    std::vector<size_t> strides;
+    if (t.owner_op != nullptr && t.owner_op->op_type == type::KN_INPUT_OP) {
+      kn::KNInputOp const *owner =
+          static_cast<kn::KNInputOp const *>(t.owner_op);
+      if (owner->input_strides.size() == (size_t)t.num_dims) {
+        // Explicit strides (e.g. a strided view); synthesizing dense
+        // row-major strides silently read the wrong elements.
+        strides = owner->input_strides;
       }
-      input_strides.push_back(strides);
     }
+    if (strides.empty()) {
+      strides.resize(t.num_dims);
+      size_t acc = 1;
+      for (int d = t.num_dims - 1; d >= 0; d--) {
+        strides[d] = acc;
+        acc *= t.dim[d];
+      }
+    }
+    std::vector<int> dims(t.dim, t.dim + t.num_dims);
+    mini_inputs.push_back(mini.new_input(dims, strides, t.data_type, t.layout));
+    input_strides.push_back(strides);
   }
+  kn::KNOperator *mini_op = mini.create_customized_op(mini_inputs, op->bgraph);
+  if (mini_op == nullptr) {
+    throw std::runtime_error(
+        "register_generated_task: failed to clone the custom op into the "
+        "registration graph (fingerprint allocation)");
+  }
+  mini.operators.push_back(mini_op);
 
-  transpiler::Transpiler transpiler(kgraph, config, input_strides);
+  transpiler::Transpiler transpiler(&mini, config, input_strides);
   transpiler::CustomOPTranspileResult result =
       transpiler.transpile_single_custom_op();
   if (result.error_type != transpiler::CUDA_T_SUCCESS ||
