@@ -387,7 +387,44 @@ def main():
             input=x, weight=w_norm, output=rmsnorm_out,
             grid_dim=(mpk.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1),
         )
-        if _layer_compiled(i, spec=_cm):
+        if _cm == "fine" or (_cm.startswith("fine:") and _layer_compiled(i, spec=_cm.split(":", 1)[1])):
+            # FINE-GRAINED compiled MLP: gate and up as SEPARATE generated
+            # linears (independent tasks -> 96-way concurrency, matching the
+            # handwritten split) + the generated silu_mul. Same kernels as
+            # the fused segment, opposite granularity trade: two gmem
+            # round-trips bought back 2x wave parallelism for decode-M.
+            _wg_t = mpk.attach_input(
+                torch_tensor=layer.mlp.gate_proj.weight.t().contiguous(),
+                name=f"layer_{i}_gate_proj_t")
+            _wu_t = mpk.attach_input(
+                torch_tensor=layer.mlp.up_proj.weight.t().contiguous(),
+                name=f"layer_{i}_up_proj_t")
+            _I = layer.mlp.gate_proj.weight.shape[0]
+            _gate_out = mpk.attach_input(
+                torch_tensor=torch.zeros(
+                    mpk.max_num_batched_tokens, _I,
+                    dtype=torch.bfloat16, device="cuda"),
+                name=f"layer_{i}_gate_out")
+            _up_out = mpk.attach_input(
+                torch_tensor=torch.zeros(
+                    mpk.max_num_batched_tokens, _I,
+                    dtype=torch.bfloat16, device="cuda"),
+                name=f"layer_{i}_up_out")
+            mpk.generated_linear_layer(
+                input=rmsnorm_out, weight_t=_wg_t, output=_gate_out,
+                grid_dim=(_I // 64, 1, 1), block_dim=(256, 1, 1),
+                forloop_range=hidden_size // 64,
+            )
+            mpk.generated_linear_layer(
+                input=rmsnorm_out, weight_t=_wu_t, output=_up_out,
+                grid_dim=(_I // 64, 1, 1), block_dim=(256, 1, 1),
+                forloop_range=hidden_size // 64,
+            )
+            mpk.generated_silu_mul_layer(
+                gate=_gate_out, up=_up_out, output=silu_mul_out,
+                grid_dim=(_I // 64, 1, 1), block_dim=(256, 1, 1),
+            )
+        elif _layer_compiled(i, spec=_cm):
             # COMPILER-GENERATED gated-MLP segment: silu(x@Wg^T) * (x@Wu^T)
             # as ONE task -- both matmuls, the activation, and the multiply
             # fused, with neither matmul result reaching global memory. The
