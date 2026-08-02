@@ -1784,6 +1784,11 @@ CustomOPTranspileResult
       // execute on every consumer thread, so the consumer-scope named barrier
       // is the right sync in both positions.
       code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
+      // tcgen05 ops must observe the thread sync's ordering before their
+      // next smem operand reads -- the handwritten sm100 tasks pair the
+      // writer-side fence.proxy.async with this fence after the sync. Its
+      // absence tore MMA reads of STANDALONE-elementwise-written operands.
+      code.e("tb::tcgen05_fence_after_thread_sync();");
     } else {
       auto [op, first_op_meta] = sched_node.ops.front();
       auto [output_op, output_op_meta] = sched_node.ops.back();
@@ -1968,6 +1973,11 @@ CustomOPTranspileResult
               code.e("cutlass::arch::fence_view_async_shared();");
               // Publish it to the warp that issues the consuming MMA.
               code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
+              // tcgen05 ops must observe the thread sync's ordering before their
+              // next smem operand reads -- the handwritten sm100 tasks pair the
+              // writer-side fence.proxy.async with this fence after the sync. Its
+              // absence tore MMA reads of STANDALONE-elementwise-written operands.
+              code.e("tb::tcgen05_fence_after_thread_sync();");
               code.e("if (elect_one_cta && elect_one_warp) {");
             } else {
               // ORDER MATTERS: tcgen05.commit binds only the UNCOMMITTED
@@ -2055,6 +2065,11 @@ CustomOPTranspileResult
               code.e("cutlass::arch::fence_view_async_shared();");
               // Publish it to the warp that issues the consuming MMA.
               code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
+              // tcgen05 ops must observe the thread sync's ordering before their
+              // next smem operand reads -- the handwritten sm100 tasks pair the
+              // writer-side fence.proxy.async with this fence after the sync. Its
+              // absence tore MMA reads of STANDALONE-elementwise-written operands.
+              code.e("tb::tcgen05_fence_after_thread_sync();");
               code.e("if (elect_one_cta && elect_one_warp) {");
             } else {
               // ORDER MATTERS: tcgen05.commit binds only the UNCOMMITTED
@@ -2597,6 +2612,11 @@ CustomOPTranspileResult
   if (!sched.post_loop_nodes.empty()) {
     code.e("// The epilogue (kernels outside the loop)");
     code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
+    // tcgen05 ops must observe the thread sync's ordering before their
+    // next smem operand reads -- the handwritten sm100 tasks pair the
+    // writer-side fence.proxy.async with this fence after the sync. Its
+    // absence tore MMA reads of STANDALONE-elementwise-written operands.
+    code.e("tb::tcgen05_fence_after_thread_sync();");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
       CodeKeeper res;
       TranspileErrorType err =
