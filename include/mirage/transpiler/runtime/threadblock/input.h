@@ -20,6 +20,7 @@
 #include "cutlass/gemm/collective/builders/sm90_common.inl"
 #include "cutlass/gemm/gemm.h"
 #include "cutlass/pipeline/pipeline.hpp"
+#include "umma_layout.h"
 #include "utils.h"
 #include <cstdint>
 #include <cute/layout.hpp>
@@ -295,16 +296,10 @@ class InputTMAAsyncCopy_Blackwell {
   using Mma_Tiler = Mma_Tiler_;
   using ClusterShape = ClusterShape_MNK_;
 
-  // Two different notions ride on MInput and must be separated under swapAB:
-  //   * ROLE (MInput): which operand slot -- drives partition_shape_A/B, which
-  //     Mma_Tiler mode to select, and which local_tile Step.
-  //   * MAJORNESS: how the tensor actually sits in gmem. TMA cannot transpose,
-  //     so this follows the tensor, i.e. the ORIGINAL m_input, which is
-  //     (MInput != SWAP_AB). Deriving majorness from the role instead trips
-  //     "Majorness of smem doesn't match majorness of gmem".
-  static constexpr bool IsOriginalMInput = (MInput != SWAP_AB);
-  static constexpr UMMA::Major UMMAMajor =
-      IsOriginalMInput ? UMMA::Major::K : UMMA::Major::MN;
+  // MInput is the ROLE (which operand slot -- drives partition_shape_A/B and
+  // the local_tile Step); majorness follows the TENSOR, since TMA cannot
+  // transpose. See umma_layout.h for the role-vs-majorness rule.
+  static constexpr UMMA::Major UMMAMajor = umma_operand_major(MInput, SWAP_AB);
 
   using SmemLayoutAtom =
       decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
@@ -327,10 +322,7 @@ class InputTMAAsyncCopy_Blackwell {
   using DstPipeLayout = decltype(UMMA::tile_to_mma_shape(
       SmemLayoutAtom{},
       append(DstMNKLayout{}, Int<BlackwellAsyncPipeline::Stage>{}),
-      // Step follows majorness (K-major -> <1,2,3>, MN-major -> <2,1,3>).
-      std::conditional_t<IsOriginalMInput,
-                         Step<_1, _2, _3>,
-                         Step<_2, _1, _3>>{}));
+      UmmaOperandStep<MInput, SWAP_AB>{}));
 
 public:
   static __device__ __forceinline__ void prefetch(TMA const &tma) {
@@ -479,16 +471,10 @@ class InputWideOperandSyncCopy {
   using TiledMMA = TiledMMA_;
   using Mma_Tiler = Mma_Tiler_;
 
-  // Majorness and Step must replicate Blackwell_Matmul's read-side derivation
-  // EXACTLY (UmmaMajorA/B, StepA/B) -- the whole point of this atom is that
-  // write and read agree on DstPipeLayout by construction.
-  static constexpr UMMA::Major UMMAMajor =
-      MInput ? (SWAP_AB ? UMMA::Major::MN : UMMA::Major::K)
-             : (SWAP_AB ? UMMA::Major::K : UMMA::Major::MN);
-  using CopyStep = std::conditional_t<
-      MInput,
-      std::conditional_t<SWAP_AB, Step<_2, _1, _3>, Step<_1, _2, _3>>,
-      std::conditional_t<SWAP_AB, Step<_1, _2, _3>, Step<_2, _1, _3>>>;
+  // Write and read must agree on DstPipeLayout by construction; both derive
+  // it from umma_layout.h's single majorness rule.
+  static constexpr UMMA::Major UMMAMajor = umma_operand_major(MInput, SWAP_AB);
+  using CopyStep = UmmaOperandStep<MInput, SWAP_AB>;
 
   using AtomThrSize = decltype(size(typename TiledMMA::AtomThrID{}));
   using SmemTileShape = std::conditional_t<

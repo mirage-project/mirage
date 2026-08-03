@@ -15,6 +15,7 @@
 using namespace cute;
 
 #include "element_unary.h"
+#include "umma_layout.h"
 
 namespace tb {
 
@@ -62,16 +63,15 @@ public:
   using TiledMMA = TiledMMA_;
   using MmaTiler_MNK = MmaTiler_MNK_;
 
+  // A is role-A, B is role-B; the read-side layouts must match what the
+  // input atoms wrote, so all of them derive majorness and Step from
+  // umma_layout.h's single rule.
   static constexpr UMMA::Major UmmaMajorA =
-      SWAP_AB ? UMMA::Major::MN : UMMA::Major::K;
+      umma_operand_major(/*is_a_role=*/true, SWAP_AB);
   static constexpr UMMA::Major UmmaMajorB =
-      SWAP_AB ? UMMA::Major::K : UMMA::Major::MN;
-  // CUTLASS picks the Step by majorness: is_mn_major ? Step<_2,_1,_3> :
-  // Step<_1,_2,_3> (see sm100_mma_warpspecialized.hpp).
-  using StepA =
-      cute::conditional_t<SWAP_AB, Step<_2, _1, _3>, Step<_1, _2, _3>>;
-  using StepB =
-      cute::conditional_t<SWAP_AB, Step<_1, _2, _3>, Step<_2, _1, _3>>;
+      umma_operand_major(/*is_a_role=*/false, SWAP_AB);
+  using StepA = UmmaOperandStep<true, SWAP_AB>;
+  using StepB = UmmaOperandStep<false, SWAP_AB>;
 
   static constexpr int PIPELINE_STAGE_A = IS_PIPELINE_A ? PIPELINE_STAGES : 1;
   static constexpr int PIPELINE_STAGE_B = IS_PIPELINE_B ? PIPELINE_STAGES : 1;
