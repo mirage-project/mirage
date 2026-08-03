@@ -10,10 +10,10 @@ import argparse
 import os
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 import mirage as mi
-from mirage.mpk.models.gpt_oss.builder import GptOssBuilder
+from mirage.mpk.models.gpt_oss.builder import GptOssBuilder, plan_kv_cache
 
 DEFAULT_PROMPT = "Give me a short introduction to large language models."
 
@@ -71,6 +71,9 @@ if __name__ == "__main__":
         tokens[0, :prompt_len] = input_ids.to("cuda")
         mbt = args.max_num_batched_tokens
         n_req = tokens.shape[0]
+        # KV 2.0: the plan is the source of truth for the cache layout
+        config = AutoConfig.from_pretrained(args.model)
+        kv_plan = plan_kv_cache(config, args.page_size)
         meta_tensors = {
             "step": torch.zeros(n_req, dtype=torch.int32, device="cuda"),
             "tokens": tokens,
@@ -81,18 +84,10 @@ if __name__ == "__main__":
                                          dtype=torch.int32, device="cuda"),
             "qo_indptr_buffer": torch.empty(args.max_num_batched_requests + 1,
                                             dtype=torch.int32, device="cuda"),
-            "paged_kv_indptr_buffer": torch.empty(
-                args.max_num_batched_requests + 1,
-                dtype=torch.int32, device="cuda"),
-            "paged_kv_indices_buffer": torch.empty(args.max_num_pages,
-                                                   dtype=torch.int32,
-                                                   device="cuda"),
-            "paged_kv_indices_snapshot": torch.empty(args.max_num_pages,
-                                                     dtype=torch.int32,
-                                                     device="cuda"),
-            "paged_kv_last_page_len_buffer": torch.empty(
-                args.max_num_batched_requests,
-                dtype=torch.int32, device="cuda"),
+            **kv_plan.build_meta_tensors(
+                max_num_pages=args.max_num_pages,
+                max_num_batched_requests=args.max_num_batched_requests,
+                max_seq_length=seq_len),
         }
 
         num_workers, num_schedulers = mi.get_configurations_from_gpu(0)
@@ -103,15 +98,16 @@ if __name__ == "__main__":
             max_seq_length=seq_len,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=mbt,
-            max_num_pages=args.max_num_pages, page_size=args.page_size,
+            max_num_pages=args.max_num_pages,
+            kv_groups=kv_plan.group_specs(),
             eos_token_id=-1 if args.ignore_eos else 200002,
             meta_tensors=meta_tensors, profiler_tensor=None, trace_name="",
             spec_decode_config=None, use_cutlass_kernel=False,
         )
 
         print("Building the task graph...")
-        GptOssBuilder(mpk).build_from_model(model_name=args.model,
-                                            model_path=args.model)
+        GptOssBuilder(mpk, kv_plan=kv_plan).build_from_model(
+            model_name=args.model, model_path=args.model)
         print("Compiling the megakernel...")
         mpk.compile(output_dir=args.output_dir)
 

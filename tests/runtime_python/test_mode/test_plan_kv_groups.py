@@ -14,6 +14,7 @@ from mirage.mpk.kv_group import (
     KVEventLog,
     KVSpec,
     KVUnificationError,
+    pages_per_request,
     plan_kv_groups,
     plan_uniform_kv_groups,
 )
@@ -60,7 +61,91 @@ def test_dsv4_one_bucket_block_sizes():
     assert pad["c4_indexer"] == 37376 - 283 * 132  # bounded intra-page padding
 
 
-def test_gpt_oss_pad_to_max():
+def test_gpt_oss_real_config_plan():
+    # The real 20B: 24 layers alternating sliding/full from layer 0, 8 KV
+    # heads of 64 on both, so the two streams unify onto one page with no
+    # padding — 2 groups of 12 slots, exactly the bytes of KV 1.0's one
+    # 24-layer cache.
+    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
+
+    class _Cfg:
+        num_key_value_heads = 8
+        head_dim = 64
+        sliding_window = 128
+        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
+                       for i in range(24)]
+
+    plan = plan_kv_cache(_Cfg(), page_size=64)
+    assert plan.target_page_bytes == 64 * 2 * 8 * 64 * 2
+    assert plan.num_slots == 12 and len(plan.groups) == 2
+    by = _by_spec(plan)
+    assert set(by) == {"sliding_attention", "full_attention"}
+    for g in plan.groups:
+        assert g.block_size == 64            # both streams keep the page size
+        assert g.padding_bytes_per_page == 0
+        assert None not in g.layer_ids       # 12 and 12, nothing padded
+    # A layer's group follows its attention kind, and its slot is its index
+    # within that kind.
+    for layer_id, kind in enumerate(_Cfg.layer_types):
+        group_id, slot_id = plan.layer_info(layer_id)
+        assert plan.groups[group_id].spec_name == kind
+        assert slot_id == layer_id // 2
+
+
+def test_gpt_oss_groups_carry_the_window():
+    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
+
+    class _Cfg:
+        num_key_value_heads = 8
+        head_dim = 64
+        sliding_window = 128
+        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
+                       for i in range(24)]
+
+    plan = plan_kv_cache(_Cfg(), page_size=64)
+    windows = {g.spec_name: g.window_size for g in plan.groups}
+    assert windows == {"sliding_attention": 128, "full_attention": 0}
+    # group_specs is what PersistentKernel (and through it the scheduler's
+    # recycling) actually reads.
+    specs = plan.group_specs()
+    assert [s.window_size for s in specs] == [g.window_size for g in plan.groups]
+
+
+def test_pages_per_request_bounded_by_the_window():
+    # A full-attention group holds the whole sequence...
+    assert pages_per_request(64, 0, 512) == 8
+    # ...a windowed one holds the window plus the partial pages at each end,
+    # and stops growing with the sequence.
+    assert pages_per_request(64, 128, 512) == 3
+    assert pages_per_request(64, 128, 8192) == 3
+    # A batch of tokens is allocated for its last token but recycled against
+    # its first, so a wide batch holds one page more.
+    assert pages_per_request(64, 128, 512, max_num_batched_tokens=8) == 4
+    # A window bigger than the sequence recycles nothing.
+    assert pages_per_request(64, 4096, 512) == 8
+
+
+def test_build_meta_tensors_spans_the_whole_sequence():
+    specs = [
+        KVSpec("sw", per_entry_bytes=1024, layer_ids=(0,), window_size=128,
+               preferred_block_size=64),
+        KVSpec("full", per_entry_bytes=1024, layer_ids=(1,),
+               preferred_block_size=64),
+    ]
+    plan = plan_kv_groups(specs)
+    # Recycled slots keep their place, so the index buffer is sized by the
+    # page-table SPAN, not by how many pages are live at once.
+    meta = plan.build_meta_tensors(max_num_pages=8,
+                                   max_num_batched_requests=2,
+                                   max_seq_length=512, device="cpu")
+    assert meta["paged_kv_indices_buffer_0"].shape[0] == 2 * 8
+    # Without max_seq_length the old page-count sizing is kept.
+    meta = plan.build_meta_tensors(max_num_pages=8,
+                                   max_num_batched_requests=2, device="cpu")
+    assert meta["paged_kv_indices_buffer_0"].shape[0] == 8
+
+
+def test_pad_to_max_when_counts_are_close():
     # 12 sw + 13 full (max < 1.5*min): pad to 13, don't split
     specs = [
         KVSpec("sw", per_entry_bytes=1024, layer_ids=tuple(range(12)),

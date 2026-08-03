@@ -2,6 +2,7 @@ import torch
 
 from ..graph_builder import GraphBuilder
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
+from ...kv_group import KVCachePlan, KVSpec, plan_kv_groups
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64
@@ -17,16 +18,47 @@ def _grid_x(output_size: int, cols_per_task: int = 64) -> int:
     return output_size // cols_per_task
 
 
+def plan_kv_cache(config, page_size: int, world_size: int = 1) -> KVCachePlan:
+    """GPT-OSS's two attention kinds are two KV streams.
+
+    The 12 sliding-window layers and the 12 full-attention layers store the
+    same thing per token — K and V for every KV head — so both streams get the
+    same page and the same block size, and the plan is 2 groups of 12 slots.
+
+    Called before ``PersistentKernel`` is constructed — ``kv_groups`` and
+    the page-table meta tensors both come out of the returned plan.
+    """
+    num_kv_heads = config.num_key_value_heads // world_size
+    per_entry_bytes = 2 * num_kv_heads * config.head_dim * 2  # K + V, bf16
+    layer_types = list(config.layer_types)
+
+    sliding = tuple(i for i, t in enumerate(layer_types)
+                    if t == "sliding_attention")
+    full = tuple(i for i, t in enumerate(layer_types)
+                 if t == "full_attention")
+
+    return plan_kv_groups([
+        KVSpec("sliding_attention", per_entry_bytes=per_entry_bytes,
+               layer_ids=sliding, window_size=config.sliding_window,
+               preferred_block_size=page_size),
+        KVSpec("full_attention", per_entry_bytes=per_entry_bytes,
+               layer_ids=full, preferred_block_size=page_size),
+    ])
+
+
 @register_model_builder("gpt_oss", "GptOss", "openai/gpt-oss-20b")
 class GptOssBuilder(GraphBuilder):
     """GPT-OSS-20B: alternating sliding/full attention with per-head sinks, and
     a clamped-alpha SwiGLU MoE. Every projection carries a bias.
     """
 
-    def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
+    def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None,
+                 kv_plan: Optional[KVCachePlan] = None):
         super().__init__(mpk, weights)
         self.max_num_pages = mpk.max_num_pages
-        self.page_size = mpk.page_size
+        # The plan the caller used to build mpk's kv_groups; rebuilt from the
+        # config if absent, which only works when mpk was given a matching one.
+        self.kv_plan = kv_plan
         self.world_size = mpk.world_size
         self.rank = mpk.mpi_rank
         self.input_tokens = mpk.meta_tensors["input_tokens"]
@@ -81,11 +113,24 @@ class GptOssBuilder(GraphBuilder):
         self.cos_table = torch.cat([cos[0], cos[0]], dim=-1).contiguous().to(torch.bfloat16)
         self.sin_table = torch.cat([sin[0], sin[0]], dim=-1).contiguous().to(torch.bfloat16)
 
-        self.k_cache = torch.zeros(
-            (self.num_layers, self.max_num_pages, self.page_size,
-             self.num_kv_heads, self.head_dim),
-            dtype=torch.bfloat16, device="cuda")
-        self.v_cache = torch.zeros_like(self.k_cache)
+        # One page pool for the whole cache. K and V are two COMPONENTS of a page.
+        # Each view keeps the (slots, pages, tokens, H, D) shape the attention 
+        # kernel already expects and differs only in being strided by the whole page.
+        if self.kv_plan is None:
+            self.kv_plan = plan_kv_cache(cfg, self.mpk.page_size,
+                                         self.world_size)
+
+        assert len(self.kv_plan.groups) == len(self.mpk.kv_groups), (
+            f"the builder plans {len(self.kv_plan.groups)} KV group(s) but "
+            f"mpk was built with {len(self.mpk.kv_groups)} — pass "
+            f"kv_groups=plan.group_specs() and the same plan to the builder")
+            
+        entry_shape = (self.num_kv_heads, self.head_dim)
+        self.kv_pool, self.kv_views = self.kv_plan.allocate_pool(
+            {g.spec_name: [("k", entry_shape, torch.bfloat16),
+                           ("v", entry_shape, torch.bfloat16)]
+             for g in self.kv_plan.groups},
+            max_num_pages=self.max_num_pages)
 
         state_dict = model.state_dict()
         self.build_from_dict(state_dict, with_lm_head=True)
@@ -243,8 +288,17 @@ class GptOssBuilder(GraphBuilder):
                 grid_dim=(_grid_x(self.fused_qkv_size, 80), 1, 1),
                 block_dim=(256, 1, 1))
 
-            k_cache = self._attach(self.k_cache[i], f"layer_{i}_k_cache")
-            v_cache = self._attach(self.v_cache[i], f"layer_{i}_v_cache")
+            # Which page table this layer reads, and which slot of the pool it
+            # owns. Attached directly rather than through _attach: a pool view
+            # is strided by the whole page, so .contiguous() would copy it and
+            # silently detach the cache from the pool.
+            group_id, slot_id = self.kv_plan.layer_info(i)
+            k_cache = self.mpk.attach_input(
+                torch_tensor=self.kv_views[group_id]["k"][slot_id],
+                name=f"layer_{i}_k_cache")
+            v_cache = self.mpk.attach_input(
+                torch_tensor=self.kv_views[group_id]["v"][slot_id],
+                name=f"layer_{i}_v_cache")
             sinks = self._attach(
                 sd[f"{prefix}self_attn.sinks"].view(self.num_kv_heads,
                                                     self.num_q_per_kv),
@@ -259,7 +313,7 @@ class GptOssBuilder(GraphBuilder):
                 enable_qk_norm=False,
                 window_size=(self.sliding_window
                              if self.layer_types[i] == "sliding_attention" else 0),
-                sinks=sinks)
+                sinks=sinks, group_id=group_id)
 
             # o_proj has two addends and the epilogue one slot. The residual
             # takes it, since it must be added exactly once ahead of a
