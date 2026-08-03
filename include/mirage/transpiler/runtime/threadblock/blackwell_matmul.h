@@ -143,7 +143,6 @@ public:
   static constexpr int global_N = size<1>(ClusterShape_MNK{}) * N{};
   using GmemStrideTypeC = Stride<Int<global_N>, Int<1>>;
 
-
   // Use the sm100_get_tmem_load_op function to automatically select the optimal
   // tmem load operation
   // CUTLASS 4.2.1 signature is

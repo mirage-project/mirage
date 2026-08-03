@@ -46,9 +46,9 @@ constexpr int Q_STAGED_ROWS = 8;
 // which is fine at decode and acceptable during prefill.
 // ============================================================================
 template <typename T,
-          int NUM_QO_PER_KV, // q heads per kv head (2 for Qwen3)
-          int HEAD_DIM,      // 128
-          int QKV_STRIDE,    // full fused row stride in elements
+          int NUM_QO_PER_KV,       // q heads per kv head (2 for Qwen3)
+          int HEAD_DIM,            // 128
+          int QKV_STRIDE,          // full fused row stride in elements
           int KV_CACHE_ROW_STRIDE, // num_kv_heads * HEAD_DIM (element stride
                                    // between cache rows within a page)
           int PAGE_SIZE,
@@ -56,9 +56,9 @@ template <typename T,
           int Q_STAGED_REQ_STRIDE,  // 8 * HEAD_DIM (per-kvh slice)
           int KT_STAGED_REQ_STRIDE> // HEAD_DIM * MAX_SEQ_LEN (per-kvh slice)
 __device__ __forceinline__ void attention_prep_sm100_impl(
-    void const *qkv_ptr,      // sliced to this kv head: [tokens, 512-col slice]
-    void *paged_k_cache_ptr,  // sliced to this kv head
-    void *paged_v_cache_ptr,  // sliced to this kv head
+    void const *qkv_ptr,     // sliced to this kv head: [tokens, 512-col slice]
+    void *paged_k_cache_ptr, // sliced to this kv head
+    void *paged_v_cache_ptr, // sliced to this kv head
     void const *q_norm_weight_ptr, // [HEAD_DIM]
     void const *k_norm_weight_ptr, // [HEAD_DIM]
     void const *cos_ptr,           // [max_seq, HEAD_DIM] NeoX duplicated
@@ -106,12 +106,12 @@ __device__ __forceinline__ void attention_prep_sm100_impl(
     __trap();
   }
 
-  T const *qkv_base = static_cast<T const *>(qkv_ptr) +
-                      (size_t)first_token_pos * QKV_STRIDE;
+  T const *qkv_base =
+      static_cast<T const *>(qkv_ptr) + (size_t)first_token_pos * QKV_STRIDE;
   T *k_cache = static_cast<T *>(paged_k_cache_ptr);
   T *v_cache = static_cast<T *>(paged_v_cache_ptr);
-  T *q_staged = static_cast<T *>(q_staged_ptr) +
-                (size_t)request_id * Q_STAGED_REQ_STRIDE;
+  T *q_staged =
+      static_cast<T *>(q_staged_ptr) + (size_t)request_id * Q_STAGED_REQ_STRIDE;
   T *mask = static_cast<T *>(mask_ptr) + (size_t)request_id * MAX_SEQ_LEN;
   T *kt_staged = static_cast<T *>(kt_staged_ptr) +
                  (size_t)request_id * KT_STAGED_REQ_STRIDE;
@@ -137,8 +137,8 @@ __device__ __forceinline__ void attention_prep_sm100_impl(
     }
     int const pos = first_new_pos + tok;
     T const *src = qkv_base + (size_t)tok * QKV_STRIDE + (size_t)row * HEAD_DIM;
-    T const *w = static_cast<T const *>(is_k ? k_norm_weight_ptr
-                                             : q_norm_weight_ptr);
+    T const *w =
+        static_cast<T const *>(is_k ? k_norm_weight_ptr : q_norm_weight_ptr);
     T const *cos = static_cast<T const *>(cos_ptr) + (size_t)pos * HEAD_DIM;
     T const *sin = static_cast<T const *>(sin_ptr) + (size_t)pos * HEAD_DIM;
     float x[HEAD_DIM];

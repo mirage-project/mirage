@@ -571,7 +571,6 @@ CustomOPTranspileResult
 
   int tma_barrier_size = 16 * config.pipeline_stages;
 
-
   // Get the schedule
   TBSched sched = get_threadblock_schedule(g);
 
@@ -1112,7 +1111,6 @@ CustomOPTranspileResult
                swap_ab ? get_stensor_layout(output, meta2, num_dims - 2, false)
                        : get_stensor_layout(output, meta2, num_dims - 2));
 
-
       } else {
         code.e("using Matmul$LayoutC = $;",
                output.guid,
@@ -1211,7 +1209,6 @@ CustomOPTranspileResult
                            // (asynchronously G->S copied)
 
   std::map<int64_t, tb::TBInputOp const *> pipeline_inputs;
-
 
   for (TBSchedNode const &node :
        Combine(Combine(sched.pre_loop_nodes, sched.loop_nodes),
@@ -1331,7 +1328,7 @@ CustomOPTranspileResult
                mm_swap_ab ? "true" : "false");
       };
 
-          if (!use_chunked_copy) {
+      if (!use_chunked_copy) {
         int d_innermost_dim = dtensor_meta.innermost_dim;
         assert(!use_async_copy);
         if (wide_matmul_operands.count(stensor.guid)) {
@@ -1454,8 +1451,7 @@ CustomOPTranspileResult
               stensor_meta.m_input
                   ? stensor.dim[0]
                   : SGuid2STensor[stensor_meta.m_matrix_guid].dim[0];
-          bool const atom_swap_ab =
-              matmul_swaps_ab(atom_matmul_m);
+          bool const atom_swap_ab = matmul_swaps_ab(atom_matmul_m);
           barrier_addr += tma_barrier_size;
 
           pipeline_inputs[stensor.guid] = cur_op;
@@ -1493,20 +1489,19 @@ CustomOPTranspileResult
                              stensor.dim[1],
                              stensor_meta.c_matrix_guid,
                              matmul_swaps_ab(stensor.dim[0]))
-                  : TiledMMA(
-                        get_datatype_str(stensor.data_type),
-                        get_datatype_str(
-                            SGuid2STensor[stensor_meta.m_matrix_guid]
-                                .data_type),
-                        // ElementAccumulator: tcgen05 accumulates in fp32
-                        "float",
-                        SGuid2STensor[stensor_meta.m_matrix_guid].dim[0],
-                        stensor.dim[1],
-                        stensor.dim[0],
-                        stensor_meta.c_matrix_guid,
-                        matmul_swaps_ab(
-                            SGuid2STensor[stensor_meta.m_matrix_guid]
-                                .dim[0])))));
+                  : TiledMMA(get_datatype_str(stensor.data_type),
+                             get_datatype_str(
+                                 SGuid2STensor[stensor_meta.m_matrix_guid]
+                                     .data_type),
+                             // ElementAccumulator: tcgen05 accumulates in fp32
+                             "float",
+                             SGuid2STensor[stensor_meta.m_matrix_guid].dim[0],
+                             stensor.dim[1],
+                             stensor.dim[0],
+                             stensor_meta.c_matrix_guid,
+                             matmul_swaps_ab(
+                                 SGuid2STensor[stensor_meta.m_matrix_guid]
+                                     .dim[0])))));
 
           // Resolve this operand's position within the OP, which is what a task
           // indexes its pointers by (see TMAParams::operand_id).
