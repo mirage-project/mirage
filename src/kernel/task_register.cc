@@ -430,7 +430,7 @@ int TaskRegister::register_attention_prep_sm100_task(
   int kv_cache_row_stride = num_kv_heads * head_dim;
   int num_qo_per_kv = num_q_heads / num_kv_heads;
   assert(output_ops[0]->dtensor.num_dims == 3); // q_staged
-  assert(output_ops[0]->dtensor.dim[1] == 8);
+  assert(output_ops[0]->dtensor.dim[1] == 8); // kernel::Q_STAGED_ROWS
   assert(output_ops[1]->dtensor.num_dims == 3); // mask_staged
   assert(output_ops[1]->dtensor.dim[2] == max_seq_len);
   assert(output_ops[2]->dtensor.num_dims == 3); // kt_staged

@@ -17,26 +17,33 @@
 
 namespace kernel {
 
+// The generated core's Q operand is padded to this many rows per kv head:
+// swapAB puts the token count into the MMA's N dimension, which tcgen05
+// requires to be a multiple of 8. Prep zeroes the pad rows so they are
+// benign in the matmul. Must match Q_PAD_ROWS in compiled_attention.py.
+constexpr int Q_STAGED_ROWS = 8;
+
 // ============================================================================
 // Decode-attention PREP for the compiler-generated attention core.
 //
 // One task per (request, kv_head); the layer slices qkv / k_cache / v_cache /
-// q_staged to this task's kv head via imaps, so no head arithmetic is needed
-// on those pointers. For the single new token this task:
+// and the staging buffers to this task's kv head via imaps. For every NEW
+// token of the step (one at decode; several during chunked prefill) it:
 //   1. applies q_norm/k_norm (RMSNorm over HEAD_DIM, fp32 internal) and NeoX
-//      RoPE at position seq_len-1 to the NUM_QO_PER_KV q rows and the k row,
-//   2. appends k and v to the (contiguous, page_size >= seq) KV cache at row
-//      seq_len-1,
-//   3. writes q * 1/sqrt(HEAD_DIM) into the zero-padded staging buffer
-//      q_staged[req][kvh][0..NUM_QO_PER_KV-1][:] (pad rows 2..7 zeroed --
-//      they feed the generated matmul and must be benign, not garbage),
-//   4. clears the additive mask at [req][seq_len-1] (mask starts at -30000
-//      everywhere; exp(logit-30000) == 0 keeps unwritten positions out of
-//      the softmax).
+//      RoPE at the token's absolute position,
+//   2. appends k and v to the (contiguous, page_size >= max_seq) KV cache,
+//      k also TRANSPOSED into kt_staged (the generated core needs a
+//      physically row-major K^T; TMA cannot transpose) and v into v_staged,
+//   3. clears the additive mask at the token's position (mask starts at
+//      -30000 everywhere, so unwritten positions vanish from the softmax).
+// Only the LAST token's q is staged, scaled by 1/sqrt(HEAD_DIM), into the
+// zero-padded q_staged rows [0, NUM_QO_PER_KV) -- decode-only generation
+// consumes no other row's attention output, and the last token sees the
+// full appended history, so causality is free.
 //
-// Modeled on dflash_norm_rope_sm100: one THREAD per row does the full
-// HEAD_DIM norm+rope -- prep touches only NUM_QO_PER_KV+1 rows per task, so
-// this is trivially correct and perf-irrelevant next to the attention core.
+// One THREAD per (token, row) does a full HEAD_DIM norm+rope; the fp32
+// x[]/y[] scratch (1KB per thread at HEAD_DIM=128) spills to local memory,
+// which is fine at decode and acceptable during prefill.
 // ============================================================================
 template <typename T,
           int NUM_QO_PER_KV, // q heads per kv head (2 for Qwen3)
@@ -94,7 +101,9 @@ __device__ __forceinline__ void attention_prep_sm100_impl(
            "generated attention core's static KV views are invalid\n",
            page_idx,
            (int)request_id);
-    assert(false);
+    // Unconditional: assert() is NDEBUG-elided, which would silently remove
+    // this protection from release builds.
+    __trap();
   }
 
   T const *qkv_base = static_cast<T const *>(qkv_ptr) +
@@ -185,49 +194,10 @@ __device__ __forceinline__ void attention_prep_sm100_impl(
       mask[pos] = T(0.0f);
     }
   }
-  for (int p = threadIdx.x; p < (8 - NUM_QO_PER_KV) * HEAD_DIM;
+  for (int p = threadIdx.x; p < (Q_STAGED_ROWS - NUM_QO_PER_KV) * HEAD_DIM;
        p += NUM_THREADS) {
     int const row = NUM_QO_PER_KV + p / HEAD_DIM;
     q_staged[(size_t)row * HEAD_DIM + (p % HEAD_DIM)] = T(0.0f);
-  }
-}
-
-// ============================================================================
-// Decode-attention FINALIZE: copy the valid rows of the padded generated-core
-// output into the packed attention output.
-//   attn_pad : [max_reqs, num_kv_heads, 8, HEAD_DIM] (rows >= NUM_QO_PER_KV
-//              are pad garbage -- never copied)
-//   output   : [tokens, num_q_heads * HEAD_DIM]
-// One task per request; grid (reqs, 1, 1).
-// ============================================================================
-template <typename T,
-          int NUM_KV_HEADS,
-          int NUM_QO_PER_KV,
-          int HEAD_DIM,
-          int O_STRIDE,
-          int MAX_REQS> // attn_pad is HEAD-MAJOR: [kvh, max_reqs, 8, hd]
-__device__ __forceinline__ void attention_finalize_sm100_impl(
-    void const *attn_pad_ptr,
-    void *output_ptr,
-    int const *qo_indptr_buffer_ptr,
-    int16_t request_id) {
-  int const first_token_pos = qo_indptr_buffer_ptr[request_id];
-  int const last_token_pos = qo_indptr_buffer_ptr[request_id + 1];
-  if (first_token_pos == last_token_pos) {
-    return;
-  }
-  constexpr int VALID = NUM_KV_HEADS * NUM_QO_PER_KV * HEAD_DIM;
-  T const *pad = static_cast<T const *>(attn_pad_ptr);
-  // The generated core computes attention for the LAST new token only (see
-  // attention_prep); its output row is the one downstream generation reads.
-  T *out = static_cast<T *>(output_ptr) +
-           (size_t)(last_token_pos - 1) * O_STRIDE;
-  for (int idx = threadIdx.x; idx < VALID; idx += NUM_THREADS) {
-    int const c = idx % HEAD_DIM;
-    int const qh = (idx / HEAD_DIM) % NUM_QO_PER_KV;
-    int const kvh = idx / (HEAD_DIM * NUM_QO_PER_KV);
-    out[(size_t)(kvh * NUM_QO_PER_KV + qh) * HEAD_DIM + c] =
-        pad[(((size_t)kvh * MAX_REQS + request_id) * 8 + qh) * HEAD_DIM + c];
   }
 }
 
