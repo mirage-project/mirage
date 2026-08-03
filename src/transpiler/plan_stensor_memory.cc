@@ -537,21 +537,14 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
   }
 
   if (blackwell_arch) {
-    // The body's matmuls share ONE MMA completion barrier, whose arrival count
-    // is (forloop_range x num_matmuls) -- see generate_Tmem_mbarrier_init_code.
-    // This used to reserve one barrier per matmul, but only the first was ever
-    // initialized, arrived on, or waited on; the rest were dead shared memory
-    // that the emitter had to invent names for to avoid a redeclaration.
-    // Reserve exactly the one that is used.
-    //
-    // Both live in the alignment padding ahead of the first stensor (the
-    // blackwell alignment above is 1024B), so this costs no extra smem.
-    // One SHARED barrier for the matmuls whose accumulators are written back
-    // after the loop (arrival count forloop_range x that many), plus one PER
-    // matmul for the chained case: a matmul whose result is consumed inside the
-    // loop must be waited on every iteration, which needs its own phase.
-    // Unused ones cost 16B each and live in the alignment padding ahead of the
-    // first stensor, so they are free in practice.
+    // MMA barriers: one SHARED barrier for matmuls whose accumulators are
+    // written back after the loop (arrival count forloop_range x that many),
+    // plus one PER matmul for the chained case -- a matmul whose result is
+    // consumed inside the loop must be waited on every iteration, which
+    // needs its own phase. All of them, and the tmem base pointer, must fit
+    // in the alignment padding ahead of the first stensor (the blackwell
+    // base shift above is `alignment` = 1024B); the assert below enforces
+    // that instead of assuming it.
     size_t usage = 0;
     bool tmem_init = false;
     for (int i = 0; i < (int)tb_sched.loop_nodes.size(); ++i) {
@@ -575,14 +568,14 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
                  MBARRIER_GUID_OFFSET] = usage;
       usage += 8;
     }
+    assert(usage <= alignment &&
+           "tmem ptr + MMA barriers overflow the pre-stensor padding");
   }
 
   if (plan.smem_size > mirage::config::MAX_SMEM_SIZE) {
     printf("Warning: planned smem_size(%zu) exceeds MAX_SMEM_SIZE(%zu)\n",
            plan.smem_size,
            mirage::config::MAX_SMEM_SIZE);
-    // for (const auto &kv : plan.addrs)
-    //   printf("sguid(%zu) offset(%zu)\n", kv.first, kv.second);
   }
 
   return plan;
