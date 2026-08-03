@@ -127,11 +127,7 @@ def test_generated_linear_matches_torch(M):
         block_dim=(256, 1, 1),
     )
 
-    # output_dir=None -> a temp dir. Writing MPK artifacts into the source
-    # tree leaves task_graph_rank0.json behind, which trips
-    # test_segmented_mugraph.py's assert_no_task_graph_artifacts guard
-    # (it checks that the segmented path emits no task graph, against a
-    # baseline snapshot of this directory).
+    # output_dir=None -> temp dir (see the note above).
     pk.compile(output_dir=None)
     pk()
     torch.cuda.synchronize()
@@ -200,15 +196,21 @@ def test_generated_linear_k_loop(m, k, fl):
     _run_kloop(m, k, fl, "none", f"K-loop M={m} K={k} FL={fl}")
 
 
-def _run_kloop(m, k, fl, act, label):
-    src = _KLOOP_SRC.format(m=m, k=k, n=64, fl=fl, act=act)
+def _run_generated(src, label, timeout=900):
+    """Run a generated-task probe in a subprocess so a hang surfaces as a
+    test failure instead of wedging the whole session (the failure mode of a
+    bad barrier/pipeline emission is a deadlocked persistent kernel)."""
     env = dict(os.environ, PYTHONPATH=REPO_ROOT)
     try:
-        proc = subprocess.run([sys.executable, "-c", src], timeout=900,
+        proc = subprocess.run([sys.executable, "-c", src], timeout=timeout,
                               capture_output=True, text=True, env=env)
     except subprocess.TimeoutExpired:
         pytest.fail(f"generated {label} deadlocked")
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}"
+
+
+def _run_kloop(m, k, fl, act, label):
+    _run_generated(_KLOOP_SRC.format(m=m, k=k, n=64, fl=fl, act=act), label)
 
 
 @pytest.mark.skipif(_skip_reason() is not None, reason=_skip_reason() or "")
@@ -267,13 +269,7 @@ _SWIGLU_SRC = textwrap.dedent(
 @pytest.mark.parametrize("m,k,fl", [(128, 128, 2), (8, 256, 4), (128, 1024, 16)])
 def test_generated_swiglu_segment(m, k, fl):
     src = _SWIGLU_SRC.format(m=m, k=k, n=64, fl=fl)
-    env = dict(os.environ, PYTHONPATH=REPO_ROOT)
-    try:
-        proc = subprocess.run([sys.executable, "-c", src], timeout=900,
-                              capture_output=True, text=True, env=env)
-    except subprocess.TimeoutExpired:
-        pytest.fail(f"generated SwiGLU M={m} K={k} FL={fl} deadlocked")
-    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}"
+    _run_generated(src, f"SwiGLU M={m} K={k} FL={fl}", timeout=900)
 
 
 _WORKER_SRC = textwrap.dedent(
@@ -316,13 +312,7 @@ _WORKER_SRC = textwrap.dedent(
 @pytest.mark.parametrize("g,nw", [(4, 1), (16, 2), (48, 4)])
 def test_generated_linear_multiple_tasks_per_worker(g, nw):
     src = _WORKER_SRC.format(g=g, nw=nw)
-    env = dict(os.environ, PYTHONPATH=REPO_ROOT)
-    try:
-        proc = subprocess.run([sys.executable, "-c", src], timeout=900,
-                              capture_output=True, text=True, env=env)
-    except subprocess.TimeoutExpired:
-        pytest.fail(f"generated tasks={g} workers={nw} deadlocked")
-    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}"
+    _run_generated(src, f"tasks={g} workers={nw}", timeout=900)
 
 
 _TILED_SRC = textwrap.dedent(
@@ -370,13 +360,7 @@ _TILED_SRC = textwrap.dedent(
                                       (16, 128, 2, 4), (128, 128, 2, 2)])
 def test_generated_linear_tiled_swapab(m, k, fl, g):
     src = _TILED_SRC.format(m=m, k=k, fl=fl, g=g)
-    env = dict(os.environ, PYTHONPATH=REPO_ROOT)
-    try:
-        proc = subprocess.run([sys.executable, "-c", src], timeout=900,
-                              capture_output=True, text=True, env=env)
-    except subprocess.TimeoutExpired:
-        pytest.fail(f"generated tiled M={m} K={k} FL={fl} grid={g} deadlocked")
-    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}"
+    _run_generated(src, f"tiled M={m} K={k} FL={fl} grid={g}", timeout=900)
 
 
 _QWEN_MLP_SRC = textwrap.dedent(
@@ -431,13 +415,7 @@ _QWEN_MLP_SRC = textwrap.dedent(
 @pytest.mark.parametrize("m", [8, 128])
 def test_generated_qwen3_mlp_block(m):
     src = _QWEN_MLP_SRC.format(m=m)
-    env = dict(os.environ, PYTHONPATH=REPO_ROOT)
-    try:
-        proc = subprocess.run([sys.executable, "-c", src], timeout=1200,
-                              capture_output=True, text=True, env=env)
-    except subprocess.TimeoutExpired:
-        pytest.fail(f"generated Qwen3 MLP M={m} deadlocked")
-    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}"
+    _run_generated(src, f"Qwen3 MLP M={m}", timeout=1200)
 
 
 _LAYER_CHAIN_SRC = textwrap.dedent(
@@ -510,10 +488,4 @@ _LAYER_CHAIN_SRC = textwrap.dedent(
 @pytest.mark.parametrize("m", [8])
 def test_generated_qwen3_layer_linear_path(m):
     src = _LAYER_CHAIN_SRC.format(m=m)
-    env = dict(os.environ, PYTHONPATH=REPO_ROOT)
-    try:
-        proc = subprocess.run([sys.executable, "-c", src], timeout=1200,
-                              capture_output=True, text=True, env=env)
-    except subprocess.TimeoutExpired:
-        pytest.fail(f"generated layer chain M={m} deadlocked")
-    assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr[-2000:]}"
+    _run_generated(src, f"layer chain M={m}", timeout=1200)

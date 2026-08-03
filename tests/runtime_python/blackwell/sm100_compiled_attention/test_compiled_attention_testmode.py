@@ -11,7 +11,7 @@ import sys
 
 import torch
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 import mirage as mi
 from mirage import PersistentKernel
 
@@ -133,23 +133,19 @@ def main():
     )
 
     print("Compiling test kernel...")
-    pk.compile(output_dir=os.path.dirname(os.path.abspath(__file__)))
+    # output_dir=None -> temp dir; compiling into the source tree leaves
+    # per-rank artifacts behind.
+    pk.compile(output_dir=None)
     print("Running test kernel...")
     pk()
     torch.cuda.synchronize()
 
-    # Stage-by-stage forensics: every buffer is host-visible.
-    print(f"STAGE q_staged |max| {q_staged_t.abs().max().item():.4f} "
-          f"(rows 0-1 valid, 2-7 zero: row2 |max| "
-          f"{q_staged_t[:, 2:].abs().max().item():.4f})")
-    print(f"STAGE kt_staged |max| {kt_staged_t.abs().max().item():.4f} "
-          f"cols>{T} |max| {kt_staged_t[..., T:].abs().max().item():.4f}")
-    print(f"STAGE k_cache |max| {k_cache.abs().max().item():.4f} "
-          f"v_cache |max| {v_cache.abs().max().item():.4f}")
-    print(f"STAGE v_staged |max| {v_staged_t.abs().max().item():.4f}")
-    print(f"STAGE mask live {int((mask_t[0, 0] == 0).sum().item())} "
-          f"(expect {T})")
-    print(f"STAGE attn_pad |max| {pad_t.abs().max().item():.4f}")
+    # Prep contract checks (host-visible staging buffers).
+    assert q_staged_t[:, 2:].abs().max().item() == 0.0, \
+        "q_staged pad rows must be zeroed"
+    assert int((mask_t[0, 0] == 0).sum().item()) == T, \
+        "mask must have exactly the new positions live"
+
     # Reference: last token attends over all T positions.
     kn = norm_rope_ref(k.float(), kn_w, cos[:T, None, :].expand(T, NUM_KV_HEADS, HEAD_DIM),
                        sin[:T, None, :].expand(T, NUM_KV_HEADS, HEAD_DIM), eps)  # [T, KV, D]
