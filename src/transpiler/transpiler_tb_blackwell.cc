@@ -375,6 +375,151 @@ static void emit_async_proxy_publish(mirage::transpiler::CodeKeeper &code) {
   code.e("tb::tcgen05_fence_after_thread_sync();");
 }
 
+// Wide (row pitch > 128B) NON-pipelined matmul operands -- e.g. attention's
+// Q at head_dim=128 -- cannot go through InputChunkedSyncCopy: the UMMA
+// reads a non-pipelined operand through DstPipeLayout_A/B and beyond a 128B
+// pitch no dense-stride solver layout matches its panel tiling. Route them
+// through InputWideOperandSyncCopy instead, which writes through the same
+// cutlass-derived layout the matmul reads. Conditions: loaded whole (no
+// forloop tiling), 2-D tile, consumed ONLY by matmuls (any other consumer
+// reads the solver layout, which the wide atom does not write).
+static std::unordered_set<sguid_t> build_wide_matmul_operand_set(
+    tb::Graph const &g,
+    std::unordered_map<sguid_t, STensorMeta> const &stensor_metas) {
+  std::unordered_set<sguid_t> wide;
+  for (tb::TBOperator const *tb_op : g.operators) {
+    if (tb_op->op_type != type::TB_INPUT_OP) {
+      continue;
+    }
+    tb::TBInputOp const *in_op = dynamic_cast<tb::TBInputOp const *>(tb_op);
+    if (in_op->forloop_dim != -1) {
+      continue;
+    }
+    tb::STensor const &st = tb_op->output_tensors.at(0);
+    if (!stensor_metas.count(st.guid)) {
+      continue;
+    }
+    STensorMeta const &mt = stensor_metas.at(st.guid);
+    if (mt.is_pipelined_input) {
+      continue;
+    }
+    bool leading_ones = true;
+    for (int i = 0; i < st.num_dims - 2; ++i) {
+      leading_ones &= (st.dim[i] == 1);
+    }
+    if (st.num_dims < 2 || !leading_ones) {
+      continue;
+    }
+    bool narrow_ok = mt.is_xor_swizzled && mt.swizzled_dim >= 0 &&
+                     (size_t)mt.strides[mt.swizzled_dim] *
+                             type::get_datatype_size(st.data_type) <=
+                         128;
+    if (narrow_ok) {
+      continue; // the chunked-copy path handles it
+    }
+    bool any_consumer = false, all_matmul = true;
+    for (tb::TBOperator const *cons : g.operators) {
+      for (tb::STensor const &it : cons->input_tensors) {
+        if (it.guid == st.guid) {
+          any_consumer = true;
+          all_matmul &= (cons->op_type == type::TB_MATMUL_OP);
+        }
+      }
+    }
+    if (any_consumer && all_matmul) {
+      wide.insert(st.guid);
+    }
+  }
+  return wide;
+}
+
+// Chained-matmul analysis over the in-loop schedule.
+//
+// chained: outputs of matmuls whose result is consumed INSIDE the loop (the
+// fused-attention shape) -- these materialise their accumulator to smem every
+// iteration instead of once after the loop.
+//
+// chained_consumer: for each chained intermediate, the OUTPUT guid of the
+// matmul that consumes it. Its per-matmul barrier doubles as the
+// anti-dependency barrier: the producer must not overwrite the tile while the
+// consumer's async MMA is still reading it, so the consumer arrives there
+// each iteration and the producer waits on the PREVIOUS iteration's arrival
+// before storing.
+//
+// generic_antidep: GENERIC producers of matmul operands need the same
+// anti-dependency -- the consuming MMA of iteration i reads the tile through
+// the ASYNC proxy, and nothing else stops iteration i+1's elementwise
+// producer from overwriting it mid-read. Maps the producer node's output guid
+// to the consuming matmul's output guid, whose per-matmul barrier the
+// consumer already arrives on each iteration.
+//
+// Anti-dependency needs differ by consumer type: a MATMUL consumer reads
+// through the ASYNC proxy after the elect warp issues it, so it needs the
+// barrier above; a GENERIC consumer runs on all consumer threads between the
+// loop's wg_syncs, which already order the next iteration's store.
+struct ChainedMatmulInfo {
+  std::unordered_set<sguid_t> chained;
+  std::unordered_map<sguid_t, sguid_t> chained_consumer;
+  std::unordered_map<sguid_t, sguid_t> generic_antidep;
+};
+
+static ChainedMatmulInfo analyze_chained_matmuls(TBSched const &sched) {
+  ChainedMatmulInfo info;
+  for (TBSchedNode const &prod : sched.loop_nodes) {
+    if (prod.type != tb_sched_node_t::OPERATOR ||
+        prod.ops.front().first->op_type != type::TB_MATMUL_OP) {
+      continue;
+    }
+    // The node's LAST op is what other nodes see: the scheduler fuses an
+    // elementwise op (e.g. exp) into the matmul node, so the visible output
+    // is the fused op's, not the raw matmul's.
+    sguid_t const produced = prod.ops.back().first->output_tensors.at(0).guid;
+    // IN-LOOP consumers only. A post-loop consumer reads the forloop
+    // ACCUMULATOR, which is materialised by the in-register write-back at the
+    // end of the kernel -- the ordinary fused-epilogue shape (SwiGLU is
+    // silu/mul on two accumulators) and fully supported.
+    for (TBSchedNode const &cons : sched.loop_nodes) {
+      if (cons.type != tb_sched_node_t::OPERATOR || &cons == &prod) {
+        continue;
+      }
+      for (auto const &[cop, cmeta] : cons.ops) {
+        if (cop->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+          continue; // the only legal in-loop consumer
+        }
+        for (auto const &in : cop->input_tensors) {
+          if (in.guid == produced) {
+            info.chained.insert(produced);
+            if (cop->op_type == type::TB_MATMUL_OP) {
+              info.chained_consumer[produced] =
+                  cons.ops.back().first->output_tensors.at(0).guid;
+            }
+          }
+        }
+      }
+    }
+  }
+  for (TBSchedNode const &prod : sched.loop_nodes) {
+    if (prod.type != tb_sched_node_t::OPERATOR ||
+        prod.ops.front().first->op_type == type::TB_MATMUL_OP) {
+      continue; // matmul producers use the chained path
+    }
+    sguid_t const produced = prod.ops.back().first->output_tensors.at(0).guid;
+    for (TBSchedNode const &cons : sched.loop_nodes) {
+      if (cons.type != tb_sched_node_t::OPERATOR ||
+          cons.ops.front().first->op_type != type::TB_MATMUL_OP) {
+        continue;
+      }
+      for (auto const &in : cons.ops.front().first->input_tensors) {
+        if (in.guid == produced) {
+          info.generic_antidep[produced] =
+              cons.ops.back().first->output_tensors.at(0).guid;
+        }
+      }
+    }
+  }
+  return info;
+}
+
 // A 1-SM tcgen05 MMA needs an M tile of 64 or 128. MPK decode issues
 // M = 1..8 tokens, so those matmuls compute C^T = B^T * A^T instead (swapAB),
 // which puts the token count into N (fine-grained: any multiple of 8 up to
@@ -435,58 +580,8 @@ CustomOPTranspileResult
   // Get the memory allocation plan
   TBMemoryPlan mem_plan = get_threadblock_memory_plan(g, sched, true, true);
 
-  // Wide (row pitch > 128B) NON-pipelined matmul operands -- e.g. attention's
-  // Q at head_dim=128 -- cannot go through InputChunkedSyncCopy: the UMMA
-  // reads a non-pipelined operand through DstPipeLayout_A/B and beyond a 128B
-  // pitch no dense-stride solver layout matches its panel tiling. Route them
-  // through InputWideOperandSyncCopy instead, which writes through the same
-  // cutlass-derived layout the matmul reads. Conditions: loaded whole (no
-  // forloop tiling), 2-D tile, consumed ONLY by matmuls (any other consumer
-  // reads the solver layout, which the wide atom does not write).
-  std::unordered_set<sguid_t> wide_matmul_operands;
-  for (tb::TBOperator const *tb_op : g.operators) {
-    if (tb_op->op_type != type::TB_INPUT_OP) {
-      continue;
-    }
-    tb::TBInputOp const *in_op = dynamic_cast<tb::TBInputOp const *>(tb_op);
-    if (in_op->forloop_dim != -1) {
-      continue;
-    }
-    tb::STensor const &st = tb_op->output_tensors.at(0);
-    if (!stensor_metas.count(st.guid)) {
-      continue;
-    }
-    STensorMeta const &mt = stensor_metas.at(st.guid);
-    if (mt.is_pipelined_input) {
-      continue;
-    }
-    bool leading_ones = true;
-    for (int i = 0; i < st.num_dims - 2; ++i) {
-      leading_ones &= (st.dim[i] == 1);
-    }
-    if (st.num_dims < 2 || !leading_ones) {
-      continue;
-    }
-    bool narrow_ok = mt.is_xor_swizzled && mt.swizzled_dim >= 0 &&
-                     (size_t)mt.strides[mt.swizzled_dim] *
-                             type::get_datatype_size(st.data_type) <=
-                         128;
-    if (narrow_ok) {
-      continue; // the chunked-copy path handles it
-    }
-    bool any_consumer = false, all_matmul = true;
-    for (tb::TBOperator const *cons : g.operators) {
-      for (tb::STensor const &it : cons->input_tensors) {
-        if (it.guid == st.guid) {
-          any_consumer = true;
-          all_matmul &= (cons->op_type == type::TB_MATMUL_OP);
-        }
-      }
-    }
-    if (any_consumer && all_matmul) {
-      wide_matmul_operands.insert(st.guid);
-    }
-  }
+  std::unordered_set<sguid_t> wide_matmul_operands =
+      build_wide_matmul_operand_set(g, stensor_metas);
 
   std::vector<TMAParams> tmaParamsList;
 
@@ -660,98 +755,10 @@ CustomOPTranspileResult
     }
   }
 
-  std::unordered_set<sguid_t> chained;
-  // For each chained intermediate, the OUTPUT guid of the matmul that consumes
-  // it. Its per-matmul barrier doubles as the anti-dependency barrier: the
-  // producer must not overwrite the tile while the consumer's async MMA is
-  // still reading it, so the consumer arrives there each iteration and the
-  // producer waits on the PREVIOUS iteration's arrival before storing.
-  std::unordered_map<sguid_t, sguid_t> chained_consumer;
-  // GENERIC producers of matmul operands need the same anti-dependency: the
-  // consuming MMA of iteration i reads the tile through the ASYNC proxy, and
-  // nothing else stops iteration i+1's elementwise producer from overwriting
-  // it mid-read. (Q=0 made this invisible -- overwriting with identical
-  // values -- which is how it survived: the online-softmax numerator read
-  // torn E tiles while the uniform-E probe was exact.) Maps the producer
-  // node's output guid to the consuming matmul's output guid, whose
-  // per-matmul barrier the consumer already arrives on each iteration.
-  std::unordered_map<sguid_t, sguid_t> generic_antidep;
-  {
-    for (TBSchedNode const &prod : sched.loop_nodes) {
-      if (prod.type != tb_sched_node_t::OPERATOR ||
-          prod.ops.front().first->op_type != type::TB_MATMUL_OP) {
-        continue;
-      }
-      // The node's LAST op is what other nodes see: the scheduler fuses an
-      // elementwise op (e.g. exp) into the matmul node, so the visible output
-      // is the fused op's, not the raw matmul's.
-      sguid_t const produced = prod.ops.back().first->output_tensors.at(0).guid;
-      // IN-LOOP consumers only. A post-loop consumer reads the forloop
-      // ACCUMULATOR, which is materialised by the in-register write-back at the
-      // end of the kernel -- that is the ordinary fused-epilogue shape (SwiGLU
-      // is silu/mul on two accumulators) and is fully supported. Scanning
-      // post-loop nodes here rejected it.
-      for (TBSchedNode const &cons : sched.loop_nodes) {
-        if (cons.type != tb_sched_node_t::OPERATOR || &cons == &prod) {
-          continue;
-        }
-        for (auto const &[cop, cmeta] : cons.ops) {
-          if (cop->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
-            continue; // the only legal in-loop consumer
-          }
-          for (auto const &in : cop->input_tensors) {
-            if (in.guid == produced) {
-              chained.insert(produced);
-              if (cop->op_type == type::TB_MATMUL_OP) {
-                chained_consumer[produced] =
-                    cons.ops.back().first->output_tensors.at(0).guid;
-              }
-            }
-          }
-        }
-      }
-    }
-    // forloop_range == 1 chained matmuls are DONE and on by default
-    // (Q@K^T -> exp -> @V at rel 3.2e-3, pinned by
-    // test_chained_matmul_exp_matmul).
-    //
-    // forloop_range > 1 chained matmuls (flash-attention iteration) are ON:
-    // per-iteration accumulator reset, phase-alternating waits, anti-dep via
-    // the consumer's barrier, both proxy fences, mixed pipelined operands
-    // (two-stage run()), and N_LOOP tile advance (the last bug: the input atom
-    // walked Tiles_K while attention tiles N, refetching K0 forever).
-    // Verified: model-A match at rel 4e-3 (attn_localize.py).
-    for (TBSchedNode const &prod : sched.loop_nodes) {
-      if (prod.type != tb_sched_node_t::OPERATOR ||
-          prod.ops.front().first->op_type == type::TB_MATMUL_OP) {
-        continue; // matmul producers use the chained path
-      }
-      sguid_t const produced = prod.ops.back().first->output_tensors.at(0).guid;
-      for (TBSchedNode const &cons : sched.loop_nodes) {
-        if (cons.type != tb_sched_node_t::OPERATOR ||
-            cons.ops.front().first->op_type != type::TB_MATMUL_OP) {
-          continue;
-        }
-        for (auto const &in : cons.ops.front().first->input_tensors) {
-          if (in.guid == produced) {
-            generic_antidep[produced] =
-                cons.ops.back().first->output_tensors.at(0).guid;
-          }
-        }
-      }
-    }
-
-    // Anti-dependency needs per consumer type:
-    //  * a MATMUL consumer reads through the ASYNC proxy after the elect warp
-    //    issues it -- the producer's next-iteration store must wait on the
-    //    consumer's per-matmul barrier (chained_consumer, emitted below).
-    //  * a GENERIC consumer (reduction_max, rescale accums, elementwise) runs
-    //    on all consumer threads between this iteration's wg_syncs; the next
-    //    iteration's store sits behind the loop-top sync, so thread-level
-    //    barriers already order it. No extra barrier needed -- and rejecting
-    //    these blocked the online-softmax rewrite, whose Q@K^T result is
-    //    consumed by reduction_max.
-  }
+  ChainedMatmulInfo const chain_info = analyze_chained_matmuls(sched);
+  auto const &chained = chain_info.chained;
+  auto const &chained_consumer = chain_info.chained_consumer;
+  auto const &generic_antidep = chain_info.generic_antidep;
 
   // Every matmul issues one umma_arrive per forloop iteration, and the epilogue
   // waits for phase 0 of a barrier expecting `arrive_cnt` of them. Counting
