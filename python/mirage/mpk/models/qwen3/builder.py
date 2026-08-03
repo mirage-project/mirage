@@ -359,73 +359,18 @@ class Qwen3Builder(GraphBuilder):
             #         grid_dim=(1, num_local_kv_heads, 1), #TODO: further divide across batch dim
             #         block_dim=(128, 1, 1),
             #     )
-            import os as _os
-            if _os.environ.get("MPK_COMPILED_ATTENTION", "0") == "1":
-                # Hybrid path: handwritten prep (qk-norm+RoPE+KV-append+
-                # staging) -> COMPILER-GENERATED softmax(QK^T+mask)V core ->
-                # handwritten finalize. Decode-only generation: prefill steps
-                # stage/attend only the LAST token (the only row generation
-                # consumes). All staging buffers are FOLD-DIM kvh-major
-                # (dim0 = kvh*max_reqs) so the core is one generated layer
-                # whose operands share guids with prep's outputs (real
-                # dependency edges).
-                import torch as _torch
-                _reqs = self.mpk.max_num_batched_requests
-                _kvh = self.num_local_kv_heads
-                _hd = self.head_dim
-                _S = self.mpk.max_seq_length
-                _dev = self.k_cache[i].device
-                _fold = _kvh * _reqs
-                _q_staged_t = _torch.zeros(_fold, 8, _hd,
-                                           dtype=_torch.bfloat16, device=_dev)
-                _mask_t = _torch.full((_fold, 1, _S), -30000.0,
-                                      dtype=_torch.bfloat16, device=_dev)
-                _kt_staged_t = _torch.zeros(_fold, _hd, _S,
-                                            dtype=_torch.bfloat16,
-                                            device=_dev)
-                _v_staged_t = _torch.zeros(_fold, _S, _hd,
-                                           dtype=_torch.bfloat16, device=_dev)
-                _pad_t = _torch.zeros(_fold, 8, _hd,
-                                      dtype=_torch.bfloat16, device=_dev)
-                q_staged = self.mpk.attach_input(
-                    torch_tensor=_q_staged_t, name=f"layer_{i}_q_staged")
-                mask_staged = self.mpk.attach_input(
-                    torch_tensor=_mask_t, name=f"layer_{i}_attn_mask")
-                kt_staged = self.mpk.attach_input(
-                    torch_tensor=_kt_staged_t, name=f"layer_{i}_kt_staged")
-                v_staged = self.mpk.attach_input(
-                    torch_tensor=_v_staged_t, name=f"layer_{i}_v_staged")
-                attn_pad = self.mpk.attach_input(
-                    torch_tensor=_pad_t, name=f"layer_{i}_attn_pad")
-                self.mpk.attention_prep_layer(
-                    input=self.attn_in,
-                    k_cache=k_cache,
-                    v_cache=v_cache,
-                    q_norm=w_q_norm,
-                    k_norm=w_k_norm,
-                    cos_pos_embed=self.cos_pos_embed,
-                    sin_pos_embed=self.sin_pos_embed,
-                    q_staged=q_staged,
-                    mask_staged=mask_staged,
-                    kt_staged=kt_staged,
-                    v_staged=v_staged,
-                    grid_dim=(_reqs, _kvh, 1),
-                    block_dim=(128, 1, 1),
-                )
-                self.mpk.generated_attention_layer(
-                    q_staged=q_staged,
-                    kt_staged=kt_staged,
-                    v_staged=v_staged,
-                    mask_staged=mask_staged,
-                    attn_pad=attn_pad,
-                    grid_dim=(_fold, 1, 1),
-                    block_dim=(256, 1, 1),
-                )
-                self.mpk.attention_finalize_layer(
-                    attn_pad=attn_pad,
-                    output=self.attn_out,
-                    grid_dim=(_reqs, 1, 1),
-                    block_dim=(128, 1, 1),
+            from mirage.mpk.models.qwen3.compiled_attention import (
+                build_hybrid_attention, compiled_attention_spec,
+                parse_layer_spec)
+            if parse_layer_spec(compiled_attention_spec(), i):
+                build_hybrid_attention(
+                    self.mpk, layer_idx=i,
+                    attn_in=self.attn_in, attn_out=self.attn_out,
+                    k_cache=k_cache, v_cache=v_cache,
+                    q_norm=w_q_norm, k_norm=w_k_norm,
+                    cos=self.cos_pos_embed, sin=self.sin_pos_embed,
+                    num_kv_heads=self.num_local_kv_heads,
+                    head_dim=self.head_dim,
                 )
             else:
                 self.mpk.paged_attention_layer(

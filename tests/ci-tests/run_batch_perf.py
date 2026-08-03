@@ -223,6 +223,9 @@ def main():
     # A current workaround to use splitk for only B200 GPUs
     use_splitk = (target_cc == 100)
 
+    from mirage.mpk.models.qwen3.compiled_attention import (
+        build_hybrid_attention, compiled_attention_spec, parse_layer_spec)
+    mlp_spec = os.environ.get("MPK_COMPILED_MLP", "0")
     for i, layer in enumerate(model.model.layers):
         w_norm = mpk.attach_input(
             torch_tensor=layer.input_layernorm.weight,
@@ -265,73 +268,13 @@ def main():
         v_cache = mpk.attach_input(
             torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
         )
-        # MPK_COMPILED_ATTENTION: "1"/"all" = every layer, "0"/unset = none,
-        # or a spec like "0-13" / "0,2,5" / "first:14" selecting WHICH layers
-        # use the compiled attention core (the rest keep the handwritten
-        # monolith) -- for mixed-graph perf attribution.
-        _ca = os.environ.get("MPK_COMPILED_ATTENTION", "0")
-        _cm = os.environ.get("MPK_COMPILED_MLP", "0")
-        def _layer_compiled(idx, spec=_ca):
-            if spec in ("0", "", "none"):
-                return False
-            if spec in ("1", "all"):
-                return True
-            if spec.startswith("first:"):
-                return idx < int(spec.split(":")[1])
-            chosen = set()
-            for part in spec.split(","):
-                if "-" in part:
-                    a, b = part.split("-")
-                    chosen.update(range(int(a), int(b) + 1))
-                else:
-                    chosen.add(int(part))
-            return idx in chosen
-        if _layer_compiled(i):
-            # Hybrid: handwritten prep -> COMPILER-GENERATED attention core ->
-            # handwritten finalize (see mpk/models/qwen3/builder.py for the
-            # same branch with full commentary).
-            _reqs = mpk.max_num_batched_requests
-            _kvh = num_kv_heads
-            _hd = k_cache.dim(3)
-            _S = mpk.max_seq_length
-            _dev = model.model.kv_cache[0][i].device
-            _fold = _kvh * _reqs
-            _q_staged_t = torch.zeros(_fold, 8, _hd,
-                                      dtype=torch.bfloat16, device=_dev)
-            _mask_t = torch.full((_fold, 1, _S), -30000.0,
-                                 dtype=torch.bfloat16, device=_dev)
-            _kt_staged_t = torch.zeros(_fold, _hd, _S,
-                                       dtype=torch.bfloat16, device=_dev)
-            _v_staged_t = torch.zeros(_fold, _S, _hd,
-                                      dtype=torch.bfloat16, device=_dev)
-            _pad_t = torch.zeros(_fold, 8, _hd,
-                                 dtype=torch.bfloat16, device=_dev)
-            q_staged = mpk.attach_input(
-                torch_tensor=_q_staged_t, name=f"layer_{i}_q_staged")
-            mask_staged = mpk.attach_input(
-                torch_tensor=_mask_t, name=f"layer_{i}_attn_mask")
-            kt_staged = mpk.attach_input(
-                torch_tensor=_kt_staged_t, name=f"layer_{i}_kt_staged")
-            v_staged = mpk.attach_input(
-                torch_tensor=_v_staged_t, name=f"layer_{i}_v_staged")
-            attn_pad = mpk.attach_input(
-                torch_tensor=_pad_t, name=f"layer_{i}_attn_pad")
-            mpk.attention_prep_layer(
-                input=attn_in, k_cache=k_cache, v_cache=v_cache,
+        if parse_layer_spec(compiled_attention_spec(), i):
+            build_hybrid_attention(
+                mpk, layer_idx=i, attn_in=attn_in, attn_out=attn_out,
+                k_cache=k_cache, v_cache=v_cache,
                 q_norm=w_q_norm, k_norm=w_k_norm,
-                cos_pos_embed=cos_pos_embed, sin_pos_embed=sin_pos_embed,
-                q_staged=q_staged, mask_staged=mask_staged,
-                kt_staged=kt_staged, v_staged=v_staged,
-                grid_dim=(_reqs, _kvh, 1), block_dim=(128, 1, 1),
-            )
-            mpk.generated_attention_layer(
-                q_staged=q_staged, kt_staged=kt_staged, v_staged=v_staged,
-                mask_staged=mask_staged, attn_pad=attn_pad,
-                grid_dim=(_fold, 1, 1), block_dim=(256, 1, 1),
-            )
-            mpk.attention_finalize_layer(
-                attn_pad=attn_pad, output=attn_out,
-                grid_dim=(_reqs, 1, 1), block_dim=(128, 1, 1),
+                cos=cos_pos_embed, sin=sin_pos_embed,
+                num_kv_heads=num_kv_heads, head_dim=k_cache.dim(3),
             )
         else:
             mpk.paged_attention_layer(
@@ -387,61 +330,22 @@ def main():
             input=x, weight=w_norm, output=rmsnorm_out,
             grid_dim=(mpk.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1),
         )
-        if _cm == "fine" or (_cm.startswith("fine:") and _layer_compiled(i, spec=_cm.split(":", 1)[1])):
-            # FINE-GRAINED compiled MLP: gate and up as SEPARATE generated
-            # linears (independent tasks -> 96-way concurrency, matching the
-            # handwritten split) + the generated silu_mul. Same kernels as
-            # the fused segment, opposite granularity trade: two gmem
-            # round-trips bought back 2x wave parallelism for decode-M.
-            _wg_t = mpk.attach_input(
-                torch_tensor=layer.mlp.gate_proj.weight.t().contiguous(),
-                name=f"layer_{i}_gate_proj_t")
-            _wu_t = mpk.attach_input(
-                torch_tensor=layer.mlp.up_proj.weight.t().contiguous(),
-                name=f"layer_{i}_up_proj_t")
-            _I = layer.mlp.gate_proj.weight.shape[0]
-            _gate_out = mpk.attach_input(
-                torch_tensor=torch.zeros(
-                    mpk.max_num_batched_tokens, _I,
-                    dtype=torch.bfloat16, device="cuda"),
-                name=f"layer_{i}_gate_out")
-            _up_out = mpk.attach_input(
-                torch_tensor=torch.zeros(
-                    mpk.max_num_batched_tokens, _I,
-                    dtype=torch.bfloat16, device="cuda"),
-                name=f"layer_{i}_up_out")
-            mpk.generated_linear_layer(
-                input=rmsnorm_out, weight_t=_wg_t, output=_gate_out,
-                grid_dim=(_I // 64, 1, 1), block_dim=(256, 1, 1),
-                forloop_range=hidden_size // 64,
-            )
-            mpk.generated_linear_layer(
-                input=rmsnorm_out, weight_t=_wu_t, output=_up_out,
-                grid_dim=(_I // 64, 1, 1), block_dim=(256, 1, 1),
-                forloop_range=hidden_size // 64,
-            )
-            mpk.generated_silu_mul_layer(
-                gate=_gate_out, up=_up_out, output=silu_mul_out,
-                grid_dim=(_I // 64, 1, 1), block_dim=(256, 1, 1),
-            )
-        elif _layer_compiled(i, spec=_cm):
+        if parse_layer_spec(mlp_spec, i):
             # COMPILER-GENERATED gated-MLP segment: silu(x@Wg^T) * (x@Wu^T)
             # as ONE task -- both matmuls, the activation, and the multiply
-            # fused, with neither matmul result reaching global memory. The
-            # verified segment (test_generated_swiglu_segment) measured 1.70x
-            # less task time than the handwritten linear+silu_mul pair at
-            # these shapes. Weights go in pre-transposed (K, N).
-            _wg_t = mpk.attach_input(
+            # fused, with neither matmul result reaching global memory.
+            # Weights go in pre-transposed (K, N).
+            wg_t = mpk.attach_input(
                 torch_tensor=layer.mlp.gate_proj.weight.t().contiguous(),
                 name=f"layer_{i}_gate_proj_t")
-            _wu_t = mpk.attach_input(
+            wu_t = mpk.attach_input(
                 torch_tensor=layer.mlp.up_proj.weight.t().contiguous(),
                 name=f"layer_{i}_up_proj_t")
-            _I = layer.mlp.gate_proj.weight.shape[0]
+            intermediate = layer.mlp.gate_proj.weight.shape[0]
             mpk.generated_swiglu_layer(
-                input=rmsnorm_out, gate_weight_t=_wg_t, up_weight_t=_wu_t,
+                input=rmsnorm_out, gate_weight_t=wg_t, up_weight_t=wu_t,
                 output=silu_mul_out,
-                grid_dim=(_I // 64, 1, 1), block_dim=(256, 1, 1),
+                grid_dim=(intermediate // 64, 1, 1), block_dim=(256, 1, 1),
                 forloop_range=hidden_size // 64,
             )
         else:
@@ -521,11 +425,6 @@ def main():
         tokens[0, : min(seq_len, 32)], skip_special_tokens=True
     )
     print(f"Sample output (first 32 tokens of request 0): {sample!r}")
-    # Full first-50-ids per request: the token-parity gate for attention
-    # implementations diffs these lines between runs.
-    for r in range(args.max_num_batched_requests):
-        ids = tokens[r, : min(seq_len, 50)].tolist()
-        print(f"PARITY req {r}: {ids}")
 
     print("")
     print("==================== MPK Batch Perf ====================")
