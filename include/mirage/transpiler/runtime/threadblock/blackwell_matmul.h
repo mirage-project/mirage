@@ -131,15 +131,14 @@ public:
   // through DstPipeLayout too, so the two agree by construction there -- which
   // is why only the non-pipelined path is limited to a 128B tile pitch.)
   //
-  // On that path the two agree only because the transpiler emits the planner's
-  // computed swizzle; it used to hardcode Swizzle<3,3,4>, which differs from
-  // the UMMA's effective element-unit swizzle (Swizzle<3,3,3>) by one bit of
-  // chunk granularity and made every matmul return right values at wrong
-  // positions.
+  // On that path the two agree only because the transpiler emits the
+  // planner's computed swizzle (Swizzle<3,3,3>, the UMMA's effective
+  // element-unit swizzle -- one bit of chunk granularity off and every
+  // matmul returns right values at wrong positions).
   //
-  // Do not try to reconstruct the read layout by composing DstPipeLayout with a
+  // Do not reconstruct the read layout by composing DstPipeLayout with a
   // linearizing layout: that drops the smem_ptr_flag[16b] bit-granularity
-  // semantics and silently yields different addresses. This was tried.
+  // semantics and silently yields different addresses.
 
   static constexpr int global_N = size<1>(ClusterShape_MNK{}) * N{};
   using GmemStrideTypeC = Stride<Int<global_N>, Int<1>>;
@@ -150,11 +149,10 @@ public:
   // CUTLASS 4.2.1 signature is
   //   sm100_get_tmem_load_op<GmemStrideTypeD, ElementAccumulator, ElementD,
   //                          TmemShape_MN, bool IsBlockScaleSupported>
-  // Two things were wrong here: the last argument was a FusionOperation *type*
-  // where a bool is expected (an older CUTLASS took the fusion op), and the
-  // accumulator was given as T. tcgen05 accumulates in fp32, and
-  // ElementAccumulator drives num_col_bits in the op selection, so it must be
-  // float to match the TiledMMA's accumulator type.
+  // ElementAccumulator must be float: tcgen05 accumulates in fp32 and this
+  // argument drives num_col_bits in the op selection. (The 4.2.1 signature
+  // takes a bool as its last argument, not the fusion op older releases
+  // took.)
   using TMemLoadOp =
       decltype(cutlass::epilogue::collective::detail::sm100_get_tmem_load_op<
                GmemStrideTypeC,
@@ -163,10 +161,9 @@ public:
                // Per-warp TMEM subpartition shape. CUTLASS derives this as
                // shape_div(EpilogueTileShape_MN, TmemWarpShape_MN) with
                // TmemWarpShape = (4,1) -- see sm100_builder.inl. Both extents
-               // must follow the tile: the column count was fixed at 128 (only
-               // matching one N), and the row count at 32, which is 128/4 and
-               // so silently assumed M=128. At M=64 that made the R2S copy fail
-               // with "AtomTVLayout does not exist in the DataLayout".
+               // must follow the tile; fixing either (e.g. hardcoding
+               // columns to one N or rows to M=128/4) breaks the R2S copy at
+               // other shapes ("AtomTVLayout does not exist").
                Shape<decltype(shape_div(SmemShape_M{}, Int<4>{})), SmemShape_N>,
                false>());
 

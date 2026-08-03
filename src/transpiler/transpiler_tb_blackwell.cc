@@ -686,10 +686,6 @@ CustomOPTranspileResult
   // attempt rounded the `buf` POINTER up at runtime instead, which is unsafe
   // because the shift is not reflected in smem_size and the body can then
   // overrun its allocation.
-  //
-  // For the record this alignment was NOT what made generated matmul tasks
-  // wrong (that was an unpinned output layout, see resolve_tensor_layout.cc);
-  // it is here because the planner's assumption should be stated, not assumed.
   code.e("extern __shared__ __align__(1024) char buf[];");
 
   code.e("");
@@ -738,8 +734,8 @@ CustomOPTranspileResult
   // write_tC_to_sC (see the in-register write-back at the end of this
   // function), so a chained matmul's TMEM result is never materialised into the
   // smem tile the consumer reads -- and any elementwise op fused into that
-  // matmul's epilogue (num_exps_before_store) never runs either. Emitted for
-  // Q@K^T -> exp -> @V it compiled, ran, and returned rel 1.0.
+  // matmul's epilogue (num_exps_before_store) never runs either, so the
+  // emitted kernel is silently wrong.
   //
   // Supporting this needs, per iteration: wait for that matmul's MMA, write its
   // accumulator (with the fused epilogue) to smem, sync, and reset the
@@ -1026,7 +1022,7 @@ CustomOPTranspileResult
           // agrees with. C is written by the TMEM->smem copy and read by the
           // S->G copy, both through SmemLayoutC, so it is self-consistent at
           // any swizzle -- and measured so: at K=32 only C exceeds 128B (pitch
-          // 256B) and the result is correct (rel 2.3e-3). Including C here
+          // 256B) and the result is correct. Including C here
           // rejected that working shape.
           //
           // Require the operand to be provably readable, not merely
@@ -1035,7 +1031,7 @@ CustomOPTranspileResult
           // planner down its shift-based branch, which leaves is_xor_swizzled
           // false and produces a layout the UMMA cannot read. Keying the check
           // off is_xor_swizzled alone skipped those tensors entirely and let
-          // K=48 through at rel 1.18 -- silently wrong. The pitch limit applies
+          // K=48 through, silently wrong. The pitch limit applies
           // only to the NON-pipelined path.
           //
           // A pipelined operand is never addressed through the dense-stride
@@ -1050,7 +1046,7 @@ CustomOPTranspileResult
           // equals the element count the planner reserved and the pipeline's
           // transactionBytes expects.
           //
-          // Measured: N=128 and Ktile=128 are correct at rel ~2.5e-3 on the
+          // N=128 and Ktile=128 are correct on the
           // pipelined path, the same as N=64. The non-pipelined path keeps the
           // original guard -- InputChunkedSyncCopy really does index linearly
           // through the dense-stride layout, where a >128B tile is silently
