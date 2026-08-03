@@ -355,11 +355,23 @@ struct RuntimeConfig {
 #ifndef MPK_NUM_KV_GROUPS
 #define MPK_NUM_KV_GROUPS 1
 #endif
+// Tokens per KV tile in the windowed attention kernel (attention_sm100.cuh's
+// KV_TILE_SIZE). A windowed task starts loading at a tile boundary, not at the
+// exact window edge, so page recycling must round the oldest still-needed
+// position DOWN to this granularity before deciding a page is dead.
+#ifndef MPK_KV_WINDOW_TILE
+#define MPK_KV_WINDOW_TILE 64
+#endif
   int *paged_kv_indptr_buffer[MPK_NUM_KV_GROUPS];    // Metadata for LLM serving (paged attention)
   int *paged_kv_indices_buffer[MPK_NUM_KV_GROUPS];   // Metadata for LLM serving (paged attention)
   int *paged_kv_indices_snapshot[MPK_NUM_KV_GROUPS]; // Scheduler snapshot for in-place compaction
   int *paged_kv_last_page_len_buffer[MPK_NUM_KV_GROUPS]; // Metadata for LLM serving
   int kv_group_block_sizes[MPK_NUM_KV_GROUPS]; // Set at init, used by prepare_next_batch
+  // Sliding-window length in tokens per group, 0 = full attention. Set at
+  // init; prepare_next_batch uses it to recycle pages that have fallen out
+  // of the window. A group may declare a window only if EVERY layer reading
+  // its page table masks with that same window.
+  int kv_group_window_sizes[MPK_NUM_KV_GROUPS];
 #ifdef MPK_KV_EVENT_LOG
   // Allocator event debug log: [0] = record count, then 4-int records
   // (type, group, row, page_id) with type 1=ALLOC, 2=FREE, 3=ITER. Written 

@@ -29,17 +29,18 @@ HARD_CODE = """
 extern std::string g_task_graph_json_path;
 
 static PyObject *init_func(PyObject *self, PyObject *args) {
-  PyObject *meta_list, *py_profiler_buffer, *tensor_names_list, *tensor_ptrs_list, *py_json_path, *kv_block_sizes_list;
+  PyObject *meta_list, *py_profiler_buffer, *tensor_names_list, *tensor_ptrs_list, *py_json_path, *kv_block_sizes_list, *kv_window_sizes_list;
   std::vector<void*> meta_tensors;
   std::vector<std::string> model_tensor_names;
   std::vector<void*> model_tensor_ptrs;
   std::vector<int> kv_group_block_sizes;
+  std::vector<int> kv_group_window_sizes;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
   long long eos_token_id;
   int allocate_nvshmem_teams;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiiLiOOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &tensor_names_list, &tensor_ptrs_list, &py_json_path, &kv_block_sizes_list)) {
+  if (!PyArg_ParseTuple(args, "OOiiiiiiLiOOOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &tensor_names_list, &tensor_ptrs_list, &py_json_path, &kv_block_sizes_list, &kv_window_sizes_list)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -60,6 +61,18 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
       return NULL;
     }
     kv_group_block_sizes.push_back((int)bs);
+  }
+  if(!PyList_Check(kv_window_sizes_list) || PyList_Size(kv_window_sizes_list) != num_kv_groups) {
+    PyErr_SetString(PyExc_TypeError, "kv_group_window_sizes must be a list, one entry per KV group.");
+    return NULL;
+  }
+  for(Py_ssize_t i = 0; i < num_kv_groups; i++) {
+    long ws = PyLong_AsLong(PyList_GetItem(kv_window_sizes_list, i));
+    if (ws < 0) {
+      PyErr_Format(PyExc_ValueError, "kv_group_window_sizes[%zd] must be >= 0 (0 = full attention)", i);
+      return NULL;
+    }
+    kv_group_window_sizes.push_back((int)ws);
   }
   if(!PyList_Check(tensor_names_list)) {
     PyErr_SetString(PyExc_TypeError, "tensor_names must be a list.");
@@ -105,7 +118,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     }
   }
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, model_tensor_names, model_tensor_ptrs, kv_group_block_sizes);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, model_tensor_names, model_tensor_ptrs, kv_group_block_sizes, kv_group_window_sizes);
 
   Py_RETURN_NONE;
 }
@@ -463,12 +476,14 @@ class PersistentKernel:
         ]:
             if _old in self.meta_tensors and _new not in self.meta_tensors:
                 self.meta_tensors[_new] = self.meta_tensors[_old]
-        # Auto-allocate per-group snapshot buffers for in-place compaction
+        # Auto-allocate per-group snapshot buffers for in-place compaction.
+        # Sized like the indices buffer they mirror: by page-table SPAN, which
+        # exceeds max_num_pages once a group recycles pages mid-request.
         for _g in range(len(self.kv_groups)):
             _snap_key = f"paged_kv_indices_snapshot_{_g}"
             if _snap_key not in self.meta_tensors and self.mode != "online_pinned":
                 self.meta_tensors[_snap_key] = torch.empty(
-                    max_num_pages, dtype=torch.int32, device="cuda")
+                    self._kv_indices_span(_g), dtype=torch.int32, device="cuda")
         self.profiler_tensor = profiler_tensor
         self.trace_name = trace_name
         self.use_nvshmem = world_size > 1
@@ -505,8 +520,7 @@ class PersistentKernel:
         paged_kv_indptr_buffer = self.meta_tensors["paged_kv_indptr_buffer_0"]
         assert paged_kv_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"paged_kv_indptr_buffer_0.shape: {paged_kv_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
         paged_kv_indices_buffer = self.meta_tensors["paged_kv_indices_buffer_0"]
-        # TODO: This is because the paged_kv_indices_buffer can be limited by max len on vllm side
-        assert paged_kv_indices_buffer.shape[0] <= self.max_num_pages, f"paged_kv_indices_buffer_0.shape: {paged_kv_indices_buffer.shape}, max_num_pages: {self.max_num_pages}"
+        self._check_kv_capacity()
         paged_kv_last_page_len_buffer = self.meta_tensors["paged_kv_last_page_len_buffer_0"]
         assert paged_kv_last_page_len_buffer.shape[0] <= self.max_num_batched_requests, f"paged_kv_last_page_len_buffer_0.shape: {paged_kv_last_page_len_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
 
@@ -520,6 +534,50 @@ class PersistentKernel:
         assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer_0.dtype: {paged_kv_indptr_buffer.dtype}"
         assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer_0.dtype: {paged_kv_indices_buffer.dtype}"
         assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer_0.dtype: {paged_kv_last_page_len_buffer.dtype}"
+
+    def _kv_indices_span(self, group_id: int) -> int:
+        """Entries a group's page-table index buffer must hold: one slot per
+        page of every batched request's WHOLE sequence. Recycled slots keep
+        their place (holding -1) because the attention kernels index page
+        indices by absolute page number, so this does not shrink with the
+        window."""
+        block_size = self.kv_groups[group_id].block_size
+        pages_per_seq = (self.max_seq_length + block_size - 1) // block_size
+        return max(self.max_num_pages,
+                   self.max_num_batched_requests * pages_per_seq)
+
+    def _check_kv_capacity(self):
+        """Fail at graph-build time if the page pool cannot hold the batch.
+
+        The scheduler pops page ids modulo max_num_pages, so an exhausted
+        free list silently hands out a page that is still in use — the whole
+        batch's KV then interleaves in one page. Compute the worst-case
+        demand instead: per group, the pages one request holds at its worst
+        step (bounded by the window where there is one), times the batch."""
+        from .kv_group import pages_per_request
+
+        per_group = [
+            pages_per_request(g.block_size, g.window_size, self.max_seq_length,
+                              self.max_num_batched_tokens)
+            for g in self.kv_groups
+        ]
+        demand = self.max_num_batched_requests * sum(per_group)
+        assert demand <= self.max_num_pages, (
+            f"KV page pool too small: {self.max_num_batched_requests} "
+            f"request(s) need {demand} pages at once (per group: {per_group}) "
+            f"but max_num_pages is {self.max_num_pages}. Raise max_num_pages, "
+            f"raise the block size, or lower max_seq_length.")
+        for _g in range(len(self.kv_groups)):
+            need = self._kv_indices_span(_g)
+            for _key in (f"paged_kv_indices_buffer_{_g}",
+                         f"paged_kv_indices_snapshot_{_g}"):
+                buf = self.meta_tensors.get(_key)
+                if buf is None:
+                    continue
+                assert buf.shape[0] >= need, (
+                    f"{_key} holds {buf.shape[0]} entries but the page table "
+                    f"spans {need}; pass max_seq_length to "
+                    f"KVCachePlan.build_meta_tensors")
 
     def _apply_test_mode_meta_defaults(self):
         # Allocate any missing meta tensors with shapes derived from the
@@ -1173,7 +1231,8 @@ class PersistentKernel:
         self.kn_graph.register_task(tb_graph, "single_batch_extend_attention", params)
 
     def _resolve_kv_block_size(self, group_id, explicit_page_size=None,
-                               cache_dt=None, cache_page_dim=1):
+                               cache_dt=None, cache_page_dim=1,
+                               layer_window=0):
         """kv_groups[group_id].block_size is the single source of truth for a
         paged layer's logical block size. A caller-passed page_size and the
         attached paged cache's page dimension must both agree — mismatches
@@ -1191,6 +1250,16 @@ class PersistentKernel:
             assert got == block_size, (
                 f"paged cache page dim {got} != kv_groups[{group_id}]"
                 f".block_size {block_size}")
+        # The scheduler recycles a windowed group's out-of-window pages, which
+        # is only safe while EVERY layer on that page table masks with the same
+        # window. Layers that take no window report 0 and so may not sit on a
+        # windowed group.
+        group_window = self.kv_groups[group_id].window_size
+        assert layer_window == group_window, (
+            f"a layer with window_size {layer_window} reads KV group "
+            f"{group_id}, which declares window_size {group_window}; the "
+            f"group's pages are recycled against its own window, so the two "
+            f"must agree")
         return block_size
 
     def paged_attention_layer(
@@ -1221,7 +1290,8 @@ class PersistentKernel:
         assert v_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
         assert k_cache.dim(0) == self.max_num_pages
         assert v_cache.dim(0) == self.max_num_pages
-        block_size = self._resolve_kv_block_size(group_id, cache_dt=k_cache)
+        block_size = self._resolve_kv_block_size(group_id, cache_dt=k_cache,
+                                                 layer_window=window_size)
         assert v_cache.dim(1) == block_size
         head_dim = k_cache.dim(3)
         num_kv_heads = k_cache.dim(2)
@@ -3240,6 +3310,7 @@ class PersistentKernel:
             model_tensor_ptrs,
             "",  # Empty JSON path = use __FILE__ based path during initial compile
             [g.block_size for g in self.kv_groups],
+            [g.window_size for g in self.kv_groups],
         )
 
         self._is_compiled = True
@@ -3359,6 +3430,7 @@ class PersistentKernel:
             model_tensor_ptrs,
             json_path,  # Pass the JSON path for kernel reuse
             [g.block_size for g in self.kv_groups],
+            [g.window_size for g in self.kv_groups],
         )
 
         self._is_compiled = True

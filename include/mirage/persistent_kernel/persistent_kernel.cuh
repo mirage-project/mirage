@@ -239,6 +239,25 @@ __global__ void prepare_kernel(RuntimeConfig config,
 #define MPK_KV_LOG(t, g, r, p)
 #endif
 
+// Index of the oldest page a sliding-window group may still read, for a
+// request whose next batch of queries starts at absolute position `step`.
+//
+// The kernel masks out every key at or below `step - window`, and it starts
+// loading at the tile boundary below that edge (attention_sm100.cuh's
+// first_kv_iter), so pages entirely below that boundary are dead for this
+// step -- and for every later one, since `step` only grows. Returns 0 (free
+// nothing) for a full-attention group.
+__device__ __forceinline__ int first_live_page(int step, int window,
+                                               int block_size) {
+  if (window <= 0) {
+    return 0;
+  }
+  int first_live_token = max(step - window + 1, 0);
+  first_live_token =
+      (first_live_token / MPK_KV_WINDOW_TILE) * MPK_KV_WINDOW_TILE;
+  return first_live_token / block_size;
+}
+
 #ifdef MODE_OFFLINE
 // TODO: parallelize this processing
 __device__ __forceinline__ bool
@@ -305,10 +324,14 @@ __device__ __forceinline__ bool
           int kv_indptr_g = config.paged_kv_indptr_buffer[g][i];
           int num_pg = config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
           for (int j = 0; j < num_pg; j++) {
-            MPK_KV_LOG(2, g, i,
-                       config.paged_kv_indices_buffer[g][kv_indptr_g + j]);
-            config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] =
-                config.paged_kv_indices_buffer[g][kv_indptr_g + j];
+            int page_id = config.paged_kv_indices_buffer[g][kv_indptr_g + j];
+            // -1 marks a slot whose page was already recycled mid-request
+            // (sliding window); the id is back in the queue, don't free twice.
+            if (page_id < 0) {
+              continue;
+            }
+            MPK_KV_LOG(2, g, i, page_id);
+            config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
             page_queue_tail++;
           }
         }
@@ -378,12 +401,37 @@ __device__ __forceinline__ bool
               config.paged_kv_indices_snapshot[g][kv_indptr_g + j];
         }
         for (int j = num_old_pages_g; j < num_new_pages_g; j++) {
+          assert(page_queue_head < page_queue_tail &&
+                 "KV page pool exhausted: raise max_num_pages");
           MPK_KV_LOG(1, g, num_reqs,
                      config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES]);
           config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
               config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
           page_queue_head++;
         }
+#ifndef MPK_SPEC_DECODE
+        // Sliding window: return the pages this request can no longer read.
+        // The page-table SPAN is kept and the slot poisoned with -1, because
+        // the attention kernel indexes page_indices by ABSOLUTE page number
+        // and derives seq_len from the span -- dropping entries would shift
+        // both. Only the physical page goes back to the shared free list.
+        // (Skipped under spec-decode: its TAIL_OFFSET makes the kernel start
+        // earlier than the window edge alone implies.)
+        {
+          int first_live =
+              first_live_page(step, config.kv_group_window_sizes[g], bs);
+          for (int j = 0; j < first_live && j < num_new_pages_g; j++) {
+            int page_id = config.paged_kv_indices_buffer[g][num_pages_g[g] + j];
+            if (page_id < 0) {
+              continue; // already recycled on an earlier step
+            }
+            MPK_KV_LOG(2, g, num_reqs, page_id);
+            config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
+            page_queue_tail++;
+            config.paged_kv_indices_buffer[g][num_pages_g[g] + j] = -1;
+          }
+        }
+#endif
         num_pages_g[g] += num_new_pages_g;
       }
       num_tokens += num_new_tokens;
@@ -418,7 +466,11 @@ __device__ __forceinline__ bool
         config.paged_kv_last_page_len_buffer[g][num_reqs] =
             (_lpl == 0) ? bs : _lpl;
       }
+      // A new request starts at position 0, so nothing has fallen out of a
+      // window yet -- recycling only ever fires on the existing-request path.
       for (int j = 0; j < num_new_pages_g; j++) {
+        assert(page_queue_head < page_queue_tail &&
+               "KV page pool exhausted: raise max_num_pages");
         MPK_KV_LOG(1, g, num_reqs,
                    config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES]);
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
@@ -650,7 +702,10 @@ __device__ __forceinline__ bool
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
             smem_kv_indices[g][kv_indptr_g + j];
       }
+      // NOTE: the online path does not recycle sliding-window pages yet
       for (int j = num_old_pages_g; j < num_new_pages_g; j++) {
+        assert(page_queue_head < page_queue_tail &&
+               "KV page pool exhausted: raise max_num_pages");
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
             config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
         page_queue_head++;
@@ -717,6 +772,8 @@ __device__ __forceinline__ bool
       config.paged_kv_last_page_len_buffer[g][num_reqs] =
           (initial_step + num_new_tokens) % bs;
       for (int j = 0; j < num_new_pages_g; j++) {
+        assert(page_queue_head < page_queue_tail &&
+               "KV page pool exhausted: raise max_num_pages");
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
             config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
         page_queue_head++;
@@ -1544,7 +1601,8 @@ extern "C" void
                            int allocate_nvshmem_teams,
                            std::vector<std::string> model_tensor_names,
                            std::vector<void *> model_tensor_ptrs,
-                           std::vector<int> kv_group_block_sizes) {
+                           std::vector<int> kv_group_block_sizes,
+                           std::vector<int> kv_group_window_sizes) {
   // Build global model tensors map from parallel vectors
   assert(model_tensor_names.size() == model_tensor_ptrs.size());
   global_model_tensors.clear();
@@ -1575,6 +1633,7 @@ extern "C" void
   global_runtime_config.qo_indptr_buffer = static_cast<int *>(meta_tensors[6]);
   // Per-group logical block sizes (tokens per page), only read by prepare_next_batch.
   assert(kv_group_block_sizes.size() == (size_t)MPK_NUM_KV_GROUPS);
+  assert(kv_group_window_sizes.size() == (size_t)MPK_NUM_KV_GROUPS);
   for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
     int base = 7 + g * 4;
     global_runtime_config.paged_kv_indptr_buffer[g] =
@@ -1586,6 +1645,7 @@ extern "C" void
     global_runtime_config.paged_kv_indices_snapshot[g] =
         static_cast<int *>(meta_tensors[base + 3]);
     global_runtime_config.kv_group_block_sizes[g] = kv_group_block_sizes[g];
+    global_runtime_config.kv_group_window_sizes[g] = kv_group_window_sizes[g];
   }
 #if defined(MODE_ONLINE_PINNED)
   {

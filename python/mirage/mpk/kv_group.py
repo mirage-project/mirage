@@ -51,9 +51,10 @@ class KVSpec:
     layer_ids: layers carrying this stream. A layer may appear in several
         specs (e.g. a main cache plus an indexer cache on the same layer).
     compress_ratio: raw tokens folded into one stored entry.
-    window_size: sliding-window length in raw tokens. Reserved: the
-        allocator currently grows window streams like full streams; only
-        attention masking consumes this today.
+    window_size: sliding-window length in raw tokens. The scheduler recycles
+        pages that have fallen out of the window, so a window stream holds
+        roughly the window instead of the whole sequence. Declaring it
+        promises that every layer of this stream masks with that window.
     block_size_multiple_of: kernel constraint on ENTRIES per page (e.g. a
         TMA tile multiple).
     preferred_block_size: this stream's natural block size in raw tokens.
@@ -84,11 +85,51 @@ class KVUnificationError(Exception):
     degrading; multi-bucket planning (several page sizes) is future work."""
 
 
+# Tokens per KV tile in the windowed attention kernel (attention_sm100.cuh's
+# KV_TILE_SIZE, mirrored by MPK_KV_WINDOW_TILE in runtime_header.h). A windowed
+# task starts loading at a tile boundary, not at the exact window edge, so a
+# page only counts as dead once it is entirely below that boundary.
+KV_WINDOW_TILE = 64
+
+
 @dataclass
 class KVGroupSpec:
     """Per-group config consumed by PersistentKernel: the group's page table
-    advances ``block_size`` raw tokens per page."""
+    advances ``block_size`` raw tokens per page.
+
+    ``window_size`` (0 = full attention) lets the scheduler recycle pages that
+    have fallen out of the window mid-request. Declaring it is a PROMISE that
+    every layer reading this group's page table masks with that same window —
+    a full-attention layer on a windowed group would read a recycled page."""
     block_size: int
+    window_size: int = 0
+
+
+def pages_per_request(block_size: int, window_size: int, max_seq_length: int,
+                      max_num_batched_tokens: int = 1) -> int:
+    """Worst-case pages one request holds in a group at any single step.
+
+    Without a window that is the whole sequence. With one, the scheduler
+    returns the pages below the window's tile boundary, so what stays is the
+    window plus the partial pages at each end.
+
+    The two sides are evaluated at different points on purpose, matching the
+    scheduler: pages are allocated for the batch's LAST token but recycled
+    against its FIRST one, so a batch of ``max_num_batched_tokens`` can hold
+    up to that much extra."""
+    worst = 0
+    for boundary in range(0, max_seq_length, block_size):
+        for pos in (boundary, min(boundary + block_size - 1,
+                                  max_seq_length - 1)):
+            span = (pos + 1 + block_size - 1) // block_size
+            freed = 0
+            if window_size > 0:
+                step = max(pos + 1 - max_num_batched_tokens, 0)
+                live_from = max(step - window_size + 1, 0)
+                freed = ((live_from // KV_WINDOW_TILE) * KV_WINDOW_TILE
+                         // block_size)
+            worst = max(worst, span - freed)
+    return worst
 
 
 @dataclass
@@ -107,6 +148,7 @@ class KVCachePlan:
         block_size: int          # raw tokens per page
         entries_per_page: int    # = block_size / compress_ratio
         padding_bytes_per_page: int
+        window_size: int = 0     # 0 = full attention
 
     target_page_bytes: int
     num_slots: int
@@ -116,21 +158,36 @@ class KVCachePlan:
 
     def group_specs(self):
         """The kv_groups= argument for PersistentKernel."""
-        return [KVGroupSpec(block_size=g.block_size) for g in self.groups]
+        return [KVGroupSpec(block_size=g.block_size, window_size=g.window_size)
+                for g in self.groups]
 
     def build_meta_tensors(self, max_num_pages: int,
                            max_num_batched_requests: int,
+                           max_seq_length: Optional[int] = None,
                            dtype=torch.int32, device: str = "cuda"):
         """Page-table buffers (indptr / indices / last_page_len) for every
         group, keyed as PersistentKernel.__init__ expects. Merge into the
-        meta_tensors dict BEFORE constructing PersistentKernel."""
+        meta_tensors dict BEFORE constructing PersistentKernel.
+
+        The indices buffer is indexed by ABSOLUTE page number within a
+        request, so it must cover the whole sequence even when a windowed
+        group holds far fewer pages than that (recycled slots stay in place,
+        holding -1). Pass ``max_seq_length`` to size it for that; without it
+        the buffer only fits ``max_num_pages`` entries, which is enough
+        exactly when no group recycles."""
         out = {}
-        for g in range(len(self.groups)):
-            out[f"paged_kv_indptr_buffer_{g}"] = torch.zeros(
+        for g_id, g in enumerate(self.groups):
+            span = max_num_pages
+            if max_seq_length is not None:
+                span = max(max_num_pages,
+                           max_num_batched_requests
+                           * ((max_seq_length + g.block_size - 1)
+                              // g.block_size))
+            out[f"paged_kv_indptr_buffer_{g_id}"] = torch.zeros(
                 max_num_batched_requests + 1, dtype=dtype, device=device)
-            out[f"paged_kv_indices_buffer_{g}"] = torch.zeros(
-                max_num_pages, dtype=dtype, device=device)
-            out[f"paged_kv_last_page_len_buffer_{g}"] = torch.zeros(
+            out[f"paged_kv_indices_buffer_{g_id}"] = torch.zeros(
+                span, dtype=dtype, device=device)
+            out[f"paged_kv_last_page_len_buffer_{g_id}"] = torch.zeros(
                 max_num_batched_requests, dtype=dtype, device=device)
         return out
 
@@ -302,6 +359,7 @@ def plan_kv_groups(
                 block_size=block_size,
                 entries_per_page=entries,
                 padding_bytes_per_page=padding,
+                window_size=s.window_size or 0,
             ))
 
     return KVCachePlan(
