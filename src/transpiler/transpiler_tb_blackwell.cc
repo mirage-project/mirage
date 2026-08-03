@@ -363,6 +363,28 @@ static void generate_Tmem_mbarrier_init_code(CodeKeeper &code,
          "size(cluster_shape)) - 1u);");
 }
 
+// Publish GENERIC-proxy smem writes (elementwise, reduction, write_tC
+// stores) to a following tcgen05 consumer: writer-side fence.proxy.async,
+// a consumer-scope named-barrier sync, then the tcgen05 fence that orders
+// the MMA's smem reads after the sync. The handwritten sm100 tasks pair
+// these the same way; omitting any leg tears MMA reads of
+// elementwise-written operands.
+static void emit_async_proxy_publish(mirage::transpiler::CodeKeeper &code) {
+  code.e("cutlass::arch::fence_view_async_shared();");
+  code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
+  code.e("tb::tcgen05_fence_after_thread_sync();");
+}
+
+// A 1-SM tcgen05 MMA needs an M tile of 64 or 128. MPK decode issues
+// M = 1..8 tokens, so those matmuls compute C^T = B^T * A^T instead (swapAB),
+// which puts the token count into N (fine-grained: any multiple of 8 up to
+// 256). Every role-keyed attribute -- operand slots, pipeline flags,
+// majorness, tile-advance direction -- must flip with it, so the predicate
+// lives in exactly one place.
+static bool matmul_swaps_ab(int m) {
+  return m != 64 && m != 128;
+}
+
 // Transpile a custom KN operator (i.e. a custom block graph) into CUDA code
 // Will return a CustomOPTranspileResult object. See comments in transpiler.h
 // for more details
@@ -916,7 +938,7 @@ CustomOPTranspileResult
       // it happily builds SM100_MMA_F16BF16_SS<...,8,64,...> and the failure
       // only surfaces later inside get_mma_tC as a CUTLASS error cascade. So
       // validate the effective shape here, on our side, before emitting.
-      bool const swap_ab = (m != 64 && m != 128);
+      bool const swap_ab = matmul_swaps_ab(m);
       int const mma_m = swap_ab ? n : m;
       int const mma_n = swap_ab ? m : n;
       if (config.target_cc == GPU_CC::B200 &&
@@ -1273,7 +1295,7 @@ CustomOPTranspileResult
             fusion_chain.at(mm).back()->output_tensors.at(0);
         int const mm_nd = mm_out.num_dims;
         int const mm_m = mm_out.dim[mm_nd - 2];
-        bool const mm_swap_ab = (mm_m != 64 && mm_m != 128);
+        bool const mm_swap_ab = matmul_swaps_ab(mm_m);
         bool const role_a = (is_in0 != mm_swap_ab);
         int const nd = stensor.num_dims;
         // Natural role order: A wants (M, K), B wants (N, K). input0 is
@@ -1430,7 +1452,7 @@ CustomOPTranspileResult
                   ? stensor.dim[0]
                   : SGuid2STensor[stensor_meta.m_matrix_guid].dim[0];
           bool const atom_swap_ab =
-              (atom_matmul_m != 64 && atom_matmul_m != 128);
+              matmul_swaps_ab(atom_matmul_m);
           barrier_addr += tma_barrier_size;
 
           pipeline_inputs[stensor.guid] = cur_op;
@@ -1467,7 +1489,7 @@ CustomOPTranspileResult
                              SGuid2STensor[stensor_meta.n_matrix_guid].dim[1],
                              stensor.dim[1],
                              stensor_meta.c_matrix_guid,
-                             stensor.dim[0] != 64 && stensor.dim[0] != 128)
+                             matmul_swaps_ab(stensor.dim[0]))
                   : TiledMMA(
                         get_datatype_str(stensor.data_type),
                         get_datatype_str(
@@ -1479,10 +1501,9 @@ CustomOPTranspileResult
                         stensor.dim[1],
                         stensor.dim[0],
                         stensor_meta.c_matrix_guid,
-                        SGuid2STensor[stensor_meta.m_matrix_guid].dim[0] !=
-                                64 &&
-                            SGuid2STensor[stensor_meta.m_matrix_guid].dim[0] !=
-                                128))));
+                        matmul_swaps_ab(
+                            SGuid2STensor[stensor_meta.m_matrix_guid]
+                                .dim[0])))));
 
           // Resolve this operand's position within the OP, which is what a task
           // indexes its pointers by (see TMAParams::operand_id).
@@ -1900,31 +1921,13 @@ CustomOPTranspileResult
                                          &pipeline_inputs,
                                      bool is_in_loop) {
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
-      // Writer-side proxy fence at every dependency-level boundary: a level
-      // may end with GENERIC-proxy smem writes (elementwise, reduction) whose
-      // next-level reader is a tcgen05 MMA on the ASYNC proxy -- e.g. the
-      // online-softmax exp(x-max) tile feeding E@V. The chained-matmul path
-      // fences its own write_tC_to_sC stores, but generic producers had no
-      // fence and the consuming MMA read stale data (numerator rel ~1.5 while
-      // the generic-read denominator was correct). One fence per level
-      // boundary is cheap and covers every such edge.
-      code.e("cutlass::arch::fence_view_async_shared();");
-      // The scheduler inserts one of these between dependency LEVELS. In-loop
-      // ones were silently swallowed (an empty branch with a commented-out
-      // sync), which was survivable while every in-loop consumer read only its
-      // own thread's elements -- elementwise chains partition identically, and
-      // matmuls order themselves through the MMA mbarrier. A REDUCTION reads
-      // the whole row other threads wrote: square -> reduction -> ... returned
-      // the reduction of stale zeros, and a decomposed RMSNorm came back at
-      // rel ~861 (denominator collapsed to sqrt(eps)). All in-loop nodes
-      // execute on every consumer thread, so the consumer-scope named barrier
-      // is the right sync in both positions.
-      code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
-      // tcgen05 ops must observe the thread sync's ordering before their
-      // next smem operand reads -- the handwritten sm100 tasks pair the
-      // writer-side fence.proxy.async with this fence after the sync. Its
-      // absence tore MMA reads of STANDALONE-elementwise-written operands.
-      code.e("tb::tcgen05_fence_after_thread_sync();");
+      // The scheduler inserts one boundary between dependency LEVELS, in-loop
+      // and out. A level may end with generic-proxy smem writes whose
+      // next-level reader is a tcgen05 MMA (e.g. the online-softmax
+      // exp(x - max) tile feeding E@V), and a REDUCTION reads whole rows
+      // other threads wrote -- so every boundary needs the full publish
+      // sequence, on every consumer thread.
+      emit_async_proxy_publish(code);
     } else {
       auto [op, first_op_meta] = sched_node.ops.front();
       auto [output_op, output_op_meta] = sched_node.ops.back();
@@ -2018,7 +2021,7 @@ CustomOPTranspileResult
           // Must match the swapAB decision made when Matmul$Kernel was defined:
           // under swapAB the kernel's A operand is this op's *second* input.
           int const mm_m = output.dim[output.num_dims - 2];
-          bool const swap_ab = (mm_m != 64 && mm_m != 128);
+          bool const swap_ab = matmul_swaps_ab(mm_m);
           sguid_t const a_guid = swap_ab ? input1.guid : input0.guid;
           sguid_t const b_guid = swap_ab ? input0.guid : input1.guid;
 
@@ -2100,21 +2103,7 @@ CustomOPTranspileResult
                      output_guid,
                      output_guid,
                      output_guid);
-              // The store above is a GENERIC-proxy write; the consuming
-              // tcgen05 MMA reads smem through the ASYNC proxy. Without
-              // fence.proxy.async the MMA can read stale data -- intermittent,
-              // and more likely the more iterations run (measured rel grew
-              // 0.12 -> 0.16 from FL=2 to FL=8). Same fence the handwritten
-              // sm100 tasks issue after their smem stores.
-              code.e("cutlass::arch::fence_view_async_shared();");
-              // Publish it to the warp that issues the consuming MMA.
-              code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
-              // tcgen05 ops must observe the thread sync's ordering before
-              // their next smem operand reads -- the handwritten sm100 tasks
-              // pair the writer-side fence.proxy.async with this fence after
-              // the sync. Its absence tore MMA reads of
-              // STANDALONE-elementwise-written operands.
-              code.e("tb::tcgen05_fence_after_thread_sync();");
+              emit_async_proxy_publish(code);
               code.e("if (elect_one_cta && elect_one_warp) {");
             } else {
               // ORDER MATTERS: tcgen05.commit binds only the UNCOMMITTED
@@ -2192,21 +2181,7 @@ CustomOPTranspileResult
                      output_guid,
                      output_guid,
                      output_guid);
-              // The store above is a GENERIC-proxy write; the consuming
-              // tcgen05 MMA reads smem through the ASYNC proxy. Without
-              // fence.proxy.async the MMA can read stale data -- intermittent,
-              // and more likely the more iterations run (measured rel grew
-              // 0.12 -> 0.16 from FL=2 to FL=8). Same fence the handwritten
-              // sm100 tasks issue after their smem stores.
-              code.e("cutlass::arch::fence_view_async_shared();");
-              // Publish it to the warp that issues the consuming MMA.
-              code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
-              // tcgen05 ops must observe the thread sync's ordering before
-              // their next smem operand reads -- the handwritten sm100 tasks
-              // pair the writer-side fence.proxy.async with this fence after
-              // the sync. Its absence tore MMA reads of
-              // STANDALONE-elementwise-written operands.
-              code.e("tb::tcgen05_fence_after_thread_sync();");
+              emit_async_proxy_publish(code);
               code.e("if (elect_one_cta && elect_one_warp) {");
             } else {
               // ORDER MATTERS: tcgen05.commit binds only the UNCOMMITTED
@@ -2780,11 +2755,10 @@ CustomOPTranspileResult
   // Transpile the epilogue of the kernel
   if (!sched.post_loop_nodes.empty()) {
     code.e("// The epilogue (kernels outside the loop)");
+    // Post-loop epilogue boundary: sync + tcgen05 fence (see
+    // emit_async_proxy_publish; the loop's trailing publish already fenced
+    // the async proxy, so no extra writer-side fence is needed here).
     code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
-    // tcgen05 ops must observe the thread sync's ordering before their
-    // next smem operand reads -- the handwritten sm100 tasks pair the
-    // writer-side fence.proxy.async with this fence after the sync. Its
-    // absence tore MMA reads of STANDALONE-elementwise-written operands.
     code.e("tb::tcgen05_fence_after_thread_sync();");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
       CodeKeeper res;
