@@ -87,6 +87,95 @@ def test_generated_silu_mul_matches_torch():
     assert rel < 0.02, f"generated task rel error {rel}; out={out[0, :6].tolist()}"
 
 
+@pytest.mark.skipif(_skip_reason() is not None, reason=_skip_reason() or "")
+def test_generated_gate_up_multi_output_matches_torch():
+    device, dtype = "cuda", torch.bfloat16
+    torch.manual_seed(0)
+    m, k, n = 8, 256, 64
+    x = torch.randn(m, k, dtype=dtype, device=device)
+    wg = torch.randn(k, n, dtype=dtype, device=device)
+    wu = torch.randn(k, n, dtype=dtype, device=device)
+    gate = torch.zeros(m, n, dtype=dtype, device=device)
+    up = torch.zeros_like(gate)
+
+    num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
+    params = PersistentKernel.get_default_init_parameters()
+    params.update(
+        test_mode=True,
+        num_workers=num_workers,
+        num_local_schedulers=num_schedulers,
+        mpi_rank=0,
+        world_size=1,
+        max_num_batched_tokens=m,
+        max_num_batched_requests=m,
+    )
+    pk = PersistentKernel(**params)
+    xd = pk.attach_input(x, name="x")
+    gd = pk.attach_input(wg, name="wg")
+    ud = pk.attach_input(wu, name="wu")
+    gate_d = pk.attach_input(gate, name="gate")
+    up_d = pk.attach_input(up, name="up")
+    pk.generated_gate_up_layer(
+        input=xd,
+        gate_weight_t=gd,
+        up_weight_t=ud,
+        gate_output=gate_d,
+        up_output=up_d,
+        grid_dim=(1, 1, 1),
+        block_dim=(256, 1, 1),
+        forloop_range=k // 64,
+    )
+    pk.compile(output_dir=None)
+    pk()
+    torch.cuda.synchronize()
+
+    gate_ref = x.float() @ wg.float()
+    up_ref = x.float() @ wu.float()
+    gate_rel = ((gate.float() - gate_ref).abs().max()
+                / gate_ref.abs().max()).item()
+    up_rel = ((up.float() - up_ref).abs().max()
+              / up_ref.abs().max()).item()
+    assert max(gate_rel, up_rel) < 0.02
+
+
+@pytest.mark.skipif(_skip_reason() is not None, reason=_skip_reason() or "")
+def test_elementwise_add_hidden_grid_matches_torch():
+    device, dtype = "cuda", torch.bfloat16
+    torch.manual_seed(0)
+    m, hidden = 8, 1024
+    a = torch.randn(m, hidden, dtype=dtype, device=device)
+    b = torch.randn_like(a)
+    out = torch.zeros_like(a)
+
+    num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
+    params = PersistentKernel.get_default_init_parameters()
+    params.update(
+        test_mode=True,
+        num_workers=num_workers,
+        num_local_schedulers=num_schedulers,
+        mpi_rank=0,
+        world_size=1,
+        max_num_batched_tokens=m,
+        max_num_batched_requests=m,
+    )
+    pk = PersistentKernel(**params)
+    ad = pk.attach_input(a, name="a")
+    bd = pk.attach_input(b, name="b")
+    od = pk.attach_input(out, name="out")
+    pk.elementwise_add_layer(
+        input_a=ad,
+        input_b=bd,
+        output=od,
+        grid_dim=(hidden // 64, 1, 1),
+        block_dim=(128, 1, 1),
+    )
+    pk.compile(output_dir=None)
+    pk()
+    torch.cuda.synchronize()
+
+    assert torch.equal(out, (a.float() + b.float()).to(dtype))
+
+
 # M covers both 1-SM MMA tiles (64, 128) and a decode shape that goes through
 # swapAB (8). K = N = 64 keeps every operand tile at a 128B pitch, which is what
 # the Blackwell backend supports without panel tiling.
@@ -270,6 +359,50 @@ _SWIGLU_SRC = textwrap.dedent(
 def test_generated_swiglu_segment(m, k, fl):
     src = _SWIGLU_SRC.format(m=m, k=k, n=64, fl=fl)
     _run_generated(src, f"SwiGLU M={m} K={k} FL={fl}", timeout=900)
+
+
+_SILU_DOWN_SRC = textwrap.dedent(
+    """
+    import sys, torch, mirage
+    from mirage.mpk.persistent_kernel import PersistentKernel
+    M, K, N, FL = {m}, {k}, {n}, {fl}
+    torch.manual_seed(0)
+    gate = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    up = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(K, N, dtype=torch.bfloat16, device="cuda")
+    out = torch.zeros(M, N, dtype=torch.bfloat16, device="cuda")
+    nw, ns = mirage.get_configurations_from_gpu(0)
+    p = PersistentKernel.get_default_init_parameters()
+    p.update(test_mode=True, num_workers=nw, num_local_schedulers=ns,
+             mpi_rank=0, world_size=1, max_num_batched_tokens=max(M, 8),
+             max_num_batched_requests=max(M, 8))
+    pk = PersistentKernel(**p)
+    gd = pk.attach_input(gate, name="gate")
+    ud = pk.attach_input(up, name="up")
+    wd = pk.attach_input(weight, name="weight")
+    od = pk.attach_input(out, name="out")
+    pk.generated_silu_mul_linear_layer(
+        gate=gd, up=ud, weight_t=wd, output=od,
+        grid_dim=(N // 64, 1, 1), block_dim=(256, 1, 1),
+        forloop_range=FL)
+    pk.compile(output_dir=None)
+    pk(); torch.cuda.synchronize()
+    mid = (torch.nn.functional.silu(gate.float()) * up.float())
+    ref = mid.to(torch.bfloat16).float() @ weight.float()
+    rel = ((out.float() - ref).abs().max() / ref.abs().max()).item()
+    print("REL", rel)
+    sys.exit(0 if rel < 0.02 else 1)
+    """
+)
+
+
+@pytest.mark.skipif(_skip_reason() is not None, reason=_skip_reason() or "")
+@pytest.mark.parametrize("m,k,fl,n", [(8, 256, 4, 64),
+                                       (128, 256, 4, 128)])
+def test_generated_silu_mul_down_segment(m, k, fl, n):
+    """SwiGLU and its consuming down projection stay in one task."""
+    src = _SILU_DOWN_SRC.format(m=m, k=k, n=n, fl=fl)
+    _run_generated(src, f"SiLU+down M={m} K={k} FL={fl} N={n}", timeout=900)
 
 
 _WORKER_SRC = textwrap.dedent(

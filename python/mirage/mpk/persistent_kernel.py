@@ -2208,6 +2208,86 @@ class PersistentKernel:
         self.kn_graph.customized([gate, up, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "generated")
 
+    def generated_gate_up_layer(
+        self,
+        input: DTensor,
+        gate_weight_t: DTensor,
+        up_weight_t: DTensor,
+        gate_output: DTensor,
+        up_output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        forloop_range: int = 1,
+    ):
+        """The gate and up projections as one COMPILER-GENERATED task.
+
+        This is the first stage of the deliberately separated three-task MLP:
+        ``gate/up projections -> SiLU multiply -> down projection``.  Both
+        outputs are materialized in global memory for the next generated task.
+        """
+        assert input.num_dims == 2
+        assert gate_weight_t.num_dims == 2 and up_weight_t.num_dims == 2
+        assert gate_output.num_dims == 2 and up_output.num_dims == 2
+        self._generated_task_block_dim(block_dim)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, forloop_range, 64))
+        fd_x = 1 if forloop_range > 1 else -1
+        fd_w = 0 if forloop_range > 1 else -1
+        ti = tb_graph.new_input(input, (-1, -1, -1), fd_x, True)
+        tg = tb_graph.new_input(gate_weight_t, (1, -1, -1), fd_w, True)
+        tu = tb_graph.new_input(up_weight_t, (1, -1, -1), fd_w, True)
+        # Generated-task writes are trailing operands; see
+        # _generated_task_block_dim for the output-as-input invariant.
+        tb_graph.new_input(gate_output, (1, -1, -1), -1, True)
+        tb_graph.new_input(up_output, (1, -1, -1), -1, True)
+        gate = tb_graph.forloop_accum(tb_graph.matmul(ti, tg), None)
+        up = tb_graph.forloop_accum(tb_graph.matmul(ti, tu), None)
+        tb_graph.new_output(gate, (1, -1, -1), -1)
+        tb_graph.new_output(up, (1, -1, -1), -1)
+        self.kn_graph.customized(
+            [input, gate_weight_t, up_weight_t, gate_output, up_output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "generated")
+
+    def generated_silu_mul_linear_layer(
+        self,
+        gate: DTensor,
+        up: DTensor,
+        weight_t: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        forloop_range: int = 1,
+    ):
+        """``silu(gate) * up @ weight_t`` as one generated task.
+
+        The SwiGLU input is produced inside each reduction-loop iteration and
+        consumed directly by the down-projection MMA.  It therefore never
+        round-trips through global memory; only the gate/up projections from
+        the preceding task and the final down-projection output are
+        materialized.
+
+        ``weight_t`` is already transposed and has shape ``(K, N)``, matching
+        :meth:`generated_linear_layer`.
+        """
+        assert gate.num_dims == 2 and up.num_dims == 2
+        assert weight_t.num_dims == 2 and output.num_dims == 2
+        self._generated_task_block_dim(block_dim)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, forloop_range, 64))
+        fd_activation = 1 if forloop_range > 1 else -1
+        fd_weight = 0 if forloop_range > 1 else -1
+        tg = tb_graph.new_input(
+            gate, (-1, -1, -1), fd_activation, True)
+        tu = tb_graph.new_input(
+            up, (-1, -1, -1), fd_activation, True)
+        tw = tb_graph.new_input(weight_t, (1, -1, -1), fd_weight, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
+        swiglu = tb_graph.mul(tb_graph.silu(tg), tu)
+        down = tb_graph.forloop_accum(tb_graph.matmul(swiglu, tw), None)
+        tb_graph.new_output(down, (1, -1, -1), -1)
+        self.kn_graph.customized([gate, up, weight_t, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "generated")
+
     def generated_linear_layer(
         self,
         input: DTensor,
@@ -2500,9 +2580,12 @@ class PersistentKernel:
         assert input_b.num_dims == 2
         assert output.num_dims == 2
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
-        tb_graph.new_input(input_a, (0, -1, -1), -1, True)
-        tb_graph.new_input(input_b, (0, -1, -1), -1, True)
-        tb_graph.new_input(output, (0, -1, -1), -1, True)
+        # The task grid partitions the hidden/output dimension. Mapping grid.x
+        # to dim 0 partitions the decode-token bucket instead and produces an
+        # empty tile whenever hidden_size / tile_size exceeds the token count.
+        tb_graph.new_input(input_a, (1, -1, -1), -1, True)
+        tb_graph.new_input(input_b, (1, -1, -1), -1, True)
+        tb_graph.new_input(output, (1, -1, -1), -1, True)
         self.kn_graph.customized([input_a, input_b, output], tb_graph)
         self.kn_graph.register_task(tb_graph, "elementwise_add_sm100")
 

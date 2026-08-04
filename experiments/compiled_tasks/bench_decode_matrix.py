@@ -26,7 +26,11 @@ MODES = (
     "handwritten",
     "generated_mlp_fused",
     "generated_mlp_separate",
+    "generated_mlp_three_task",
+    "generated_mlp_up_silu_fused",
+    "generated_mlp_silu_down_fused",
     "generated_attention",
+    "generated_attention_mlp_three_task",
 )
 
 
@@ -35,6 +39,11 @@ def parse_args():
     parser.add_argument("--batches", default="1,4,8")
     parser.add_argument("--sequence-lengths", default="128,512")
     parser.add_argument("--gpu-ids", default="0")
+    parser.add_argument(
+        "--modes",
+        default=",".join(MODES),
+        help="comma-separated subset of: " + ",".join(MODES),
+    )
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
@@ -44,10 +53,14 @@ def main():
     args = parse_args()
     batches = [int(v) for v in args.batches.split(",")]
     lengths = [int(v) for v in args.sequence_lengths.split(",")]
+    modes = [v.strip() for v in args.modes.split(",") if v.strip()]
+    unknown_modes = set(modes) - set(MODES)
+    if unknown_modes:
+        raise ValueError(f"unknown modes: {sorted(unknown_modes)}")
     gpu_ids = [v.strip() for v in args.gpu_ids.split(",") if v.strip()]
     gpu_locks = {gpu: threading.Lock() for gpu in gpu_ids}
     jobs = [(mode, batch, length) for length in lengths for batch in batches
-            for mode in MODES]
+            for mode in modes]
 
     with tempfile.TemporaryDirectory(prefix="mpk-decode-matrix-") as temp:
         temp_path = Path(temp)
@@ -73,11 +86,30 @@ def main():
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = gpu
             env["PYTHONPATH"] = str(PYTHON_DIR)
-            if mode in ("generated_mlp_fused", "generated_mlp_separate"):
+            if mode in (
+                "generated_mlp_fused",
+                "generated_mlp_separate",
+                "generated_mlp_three_task",
+                "generated_mlp_up_silu_fused",
+                "generated_mlp_silu_down_fused",
+                "generated_attention_mlp_three_task",
+            ):
                 env["MPK_COMPILED_MLP"] = "all"
             if mode == "generated_mlp_separate":
                 env["MPK_COMPILED_MLP_IMPL"] = "separate"
-            elif mode == "generated_attention":
+            elif mode in (
+                "generated_mlp_three_task",
+                "generated_attention_mlp_three_task",
+            ):
+                env["MPK_COMPILED_MLP_IMPL"] = "three_task"
+            elif mode == "generated_mlp_up_silu_fused":
+                env["MPK_COMPILED_MLP_IMPL"] = "two_task_up_silu"
+            elif mode == "generated_mlp_silu_down_fused":
+                env["MPK_COMPILED_MLP_IMPL"] = "two_task_silu_down"
+            if mode in (
+                "generated_attention",
+                "generated_attention_mlp_three_task",
+            ):
                 env["MPK_COMPILED_ATTENTION"] = "all"
             # Generated-attention compilation is slower than the other modes.
             # Without a per-device lock, modulo assignment can overlap two
@@ -131,7 +163,7 @@ def main():
             rows = list(executor.map(launch, enumerate(jobs)))
 
     rows.sort(key=lambda r: (
-        r["sequence_length"], r["batch"], MODES.index(r["mode"])))
+        r["sequence_length"], r["batch"], modes.index(r["mode"])))
     payload = {
         "description": "Qwen3-0.6B full-model decode sweep, one-token prompt",
         "max_num_batched_tokens": 8,

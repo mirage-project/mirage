@@ -1,7 +1,10 @@
 """Benchmark complete Qwen3 MPK prefill through the first generated token.
 
-All modes use the normal handwritten paged attention. The two generated MLP
-modes compare one fused SwiGLU task against three separate generated tasks.
+All modes use the normal handwritten paged attention. The default matrix
+compares handwritten MLP, three generated tasks, and the two possible
+two-generated-task fusion boundaries. Token counts are prompt lengths per
+request; batch is the number of prompts in the request. The flattened token
+count passed to the runner is therefore ``batch * prompt_length``.
 Generated attention is intentionally excluded: its prep/core path only produces
 the last query row and is not a correct full-model prefill across multiple
 transformer layers.
@@ -24,16 +27,46 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "tests" / "ci-tests" / "run_batch_perf.py"
 PYTHON_DIR = ROOT / "python"
-MODES = ("handwritten", "generated_mlp_fused", "generated_mlp_separate")
+MODES = (
+    "handwritten",
+    "generated_mlp_fused",
+    "generated_mlp_separate",
+    "generated_mlp_three_task",
+    "generated_mlp_up_silu_fused",
+    "generated_mlp_silu_down_fused",
+)
+ABLATION_MODES = (
+    "handwritten",
+    "generated_mlp_three_task",
+    "generated_mlp_up_silu_fused",
+    "generated_mlp_silu_down_fused",
+)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batches", default="1,2,4")
-    parser.add_argument("--prompt-lengths", default="16,32,64,128")
-    parser.add_argument("--max-flattened-tokens", type=int, default=64,
-                        help="Current Qwen3 SM100 attention smem limit is 64")
+    parser.add_argument("--batches", default="1,2,4,8,16")
+    parser.add_argument(
+        "--token-counts",
+        default="32,64,128,256,512,1024",
+        help="prompt tokens per request (one prompt per batch element)",
+    )
+    parser.add_argument(
+        "--prompt-lengths",
+        help="deprecated alias for --token-counts",
+    )
     parser.add_argument("--gpu-ids", default="0")
+    parser.add_argument(
+        "--job-timeout-seconds",
+        type=int,
+        default=900,
+        help="per-mode timeout including compilation (default: 900)",
+    )
+    parser.add_argument(
+        "--modes",
+        default=",".join(ABLATION_MODES),
+        help="comma-separated subset of: " + ",".join(MODES),
+    )
     parser.add_argument("--model", required=True)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
@@ -42,27 +75,36 @@ def parse_args():
 def main():
     args = parse_args()
     batches = [int(v) for v in args.batches.split(",")]
-    prompts = [int(v) for v in args.prompt_lengths.split(",")]
+    modes = [v.strip() for v in args.modes.split(",") if v.strip()]
+    unknown_modes = set(modes) - set(MODES)
+    if unknown_modes:
+        raise ValueError(f"unknown modes: {sorted(unknown_modes)}")
     gpu_ids = [v.strip() for v in args.gpu_ids.split(",") if v.strip()]
-    cases = [(b, p) for p in prompts for b in batches
-             if b * p <= args.max_flattened_tokens]
-    jobs = [(mode, b, p) for b, p in cases for mode in MODES]
+    prompt_lengths = [
+        int(v) for v in (args.prompt_lengths or args.token_counts).split(",")
+    ]
+    cases = [
+        (b, prompt_length, b * prompt_length)
+        for prompt_length in prompt_lengths
+        for b in batches
+    ]
+    jobs = [(mode, b, p, t) for b, p, t in cases for mode in modes]
     locks = {gpu: threading.Lock() for gpu in gpu_ids}
 
     with tempfile.TemporaryDirectory(prefix="mpk-prefill-matrix-") as temp:
         temp_path = Path(temp)
 
         def launch(index_job):
-            _, (mode, batch, prompt) = index_job
-            case_index = cases.index((batch, prompt))
+            _, (mode, batch, prompt, token_count) = index_job
+            case_index = cases.index((batch, prompt, token_count))
             gpu = gpu_ids[case_index % len(gpu_ids)]
-            job_dir = temp_path / f"{mode}-b{batch}-p{prompt}"
+            job_dir = temp_path / f"{mode}-t{token_count}-b{batch}-p{prompt}"
             job_dir.mkdir()
             command = [
                 sys.executable,
                 str(RUNNER),
                 "--model", str(Path(args.model).resolve()),
-                "--max-num-batched-tokens", str(batch * prompt),
+                "--max-num-batched-tokens", str(token_count),
                 "--max-num-batched-requests", str(batch),
                 "--prompt-length", str(prompt),
                 # Exactly one generated token after the prompt: the measured
@@ -74,23 +116,61 @@ def main():
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = gpu
             env["PYTHONPATH"] = str(PYTHON_DIR)
-            if mode in ("generated_mlp_fused", "generated_mlp_separate"):
+            if mode in (
+                "generated_mlp_fused",
+                "generated_mlp_separate",
+                "generated_mlp_three_task",
+                "generated_mlp_up_silu_fused",
+                "generated_mlp_silu_down_fused",
+            ):
                 env["MPK_COMPILED_MLP"] = "all"
             if mode == "generated_mlp_separate":
                 env["MPK_COMPILED_MLP_IMPL"] = "separate"
+            elif mode == "generated_mlp_three_task":
+                env["MPK_COMPILED_MLP_IMPL"] = "three_task"
+            elif mode == "generated_mlp_up_silu_fused":
+                env["MPK_COMPILED_MLP_IMPL"] = "two_task_up_silu"
+            elif mode == "generated_mlp_silu_down_fused":
+                env["MPK_COMPILED_MLP_IMPL"] = "two_task_silu_down"
             with locks[gpu]:
                 start = time.perf_counter()
-                completed = subprocess.run(
-                    command, cwd=job_dir, env=env,
-                    capture_output=True, text=True
-                )
+                try:
+                    completed = subprocess.run(
+                        command,
+                        cwd=job_dir,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=args.job_timeout_seconds,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    stdout = exc.stdout or ""
+                    stderr = exc.stderr or ""
+                    if isinstance(stdout, bytes):
+                        stdout = stdout.decode(errors="replace")
+                    if isinstance(stderr, bytes):
+                        stderr = stderr.decode(errors="replace")
+                    return {
+                        "mode": mode,
+                        "batch": batch,
+                        "prompt_length": prompt,
+                        "flattened_tokens": token_count,
+                        "gpu_id": gpu,
+                        "wall_s_including_compile": time.perf_counter() - start,
+                        "error": (
+                            f"timed out after {args.job_timeout_seconds}s\n"
+                            + stdout[-6000:]
+                            + "\n"
+                            + stderr[-6000:]
+                        ),
+                    }
                 wall_s = time.perf_counter() - start
             log = completed.stdout + "\n" + completed.stderr
             row = {
                 "mode": mode,
                 "batch": batch,
                 "prompt_length": prompt,
-                "flattened_tokens": batch * prompt,
+                "flattened_tokens": token_count,
                 "gpu_id": gpu,
                 "wall_s_including_compile": wall_s,
             }
@@ -134,7 +214,7 @@ def main():
             rows = list(executor.map(launch, enumerate(jobs)))
 
     rows.sort(key=lambda r: (
-        r["prompt_length"], r["batch"], MODES.index(r["mode"])))
+        r["prompt_length"], r["batch"], modes.index(r["mode"])))
     payload = {
         "description": (
             "Qwen3-0.6B complete MPK prefill through first generated token; "
@@ -146,14 +226,14 @@ def main():
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(payload, indent=2) + "\n")
 
-    print("prompt batch flat  mode                    TTFT_ms")
+    print("prompt batch flattened mode                    TTFT_ms")
     for row in rows:
         if "error" in row:
             print(f"{row['prompt_length']:>6} {row['batch']:>5} "
-                  f"{row['flattened_tokens']:>4}  {row['mode']:<22} ERROR")
+                  f"{row['flattened_tokens']:>9}  {row['mode']:<30} ERROR")
         else:
             print(f"{row['prompt_length']:>6} {row['batch']:>5} "
-                  f"{row['flattened_tokens']:>4}  {row['mode']:<22} "
+                  f"{row['flattened_tokens']:>9}  {row['mode']:<30} "
                   f"{row['prefill_to_first_token_ms']:>9.1f}")
     return 1 if any("error" in row for row in rows) else 0
 

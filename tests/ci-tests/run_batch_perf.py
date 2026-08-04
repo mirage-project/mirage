@@ -125,9 +125,16 @@ def main():
 
     mlp_spec = os.environ.get("MPK_COMPILED_MLP", "0")
     mlp_impl = os.environ.get("MPK_COMPILED_MLP_IMPL", "fused")
-    if mlp_impl not in ("fused", "separate"):
+    if mlp_impl not in (
+        "fused",
+        "separate",
+        "three_task",
+        "two_task_up_silu",
+        "two_task_silu_down",
+    ):
         raise ValueError(
-            "MPK_COMPILED_MLP_IMPL must be 'fused' or 'separate', got "
+            "MPK_COMPILED_MLP_IMPL must be 'fused', 'separate', "
+            "'three_task', 'two_task_up_silu', or 'two_task_silu_down', got "
             f"{mlp_impl!r}"
         )
 
@@ -208,7 +215,10 @@ def main():
     )
     generated_mlp_gate = None
     generated_mlp_up = None
-    if mlp_impl == "separate" and mlp_spec not in ("0", "", "none"):
+    if (
+        mlp_impl in ("separate", "three_task", "two_task_silu_down")
+        and mlp_spec not in ("0", "", "none")
+    ):
         generated_mlp_gate = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, intermediate_size),
             dtype=mi.bfloat16,
@@ -374,7 +384,7 @@ def main():
             intermediate = layer.mlp.gate_proj.weight.shape[0]
             generated_grid = (intermediate // 64, 1, 1)
             generated_block = (256, 1, 1)
-            if mlp_impl == "fused":
+            if mlp_impl in ("fused", "two_task_up_silu"):
                 # One task: both matmuls, SiLU, and multiply. Gate/up do not
                 # round-trip through global memory.
                 mpk.generated_swiglu_layer(
@@ -383,7 +393,7 @@ def main():
                     grid_dim=generated_grid, block_dim=generated_block,
                     forloop_range=hidden_size // 64,
                 )
-            else:
+            elif mlp_impl == "separate":
                 # Three tasks with materialized gate/up tensors:
                 #   gate = x @ Wg; up = x @ Wu; out = silu(gate) * up.
                 # This intentionally exposes the scheduling/overlap behavior
@@ -404,6 +414,30 @@ def main():
                     output=silu_mul_out,
                     grid_dim=generated_grid, block_dim=generated_block,
                 )
+            elif mlp_impl in ("three_task", "two_task_silu_down"):
+                # Materialize the gate/up projections together. Three-task
+                # mode materializes SiLU too; two_task_silu_down consumes the
+                # gate/up tensors directly in its fused second task below.
+                assert generated_mlp_gate is not None
+                assert generated_mlp_up is not None
+                mpk.generated_gate_up_layer(
+                    input=rmsnorm_out,
+                    gate_weight_t=wg_t,
+                    up_weight_t=wu_t,
+                    gate_output=generated_mlp_gate,
+                    up_output=generated_mlp_up,
+                    grid_dim=generated_grid,
+                    block_dim=generated_block,
+                    forloop_range=hidden_size // 64,
+                )
+                if mlp_impl == "three_task":
+                    mpk.generated_silu_mul_layer(
+                        gate=generated_mlp_gate,
+                        up=generated_mlp_up,
+                        output=silu_mul_out,
+                        grid_dim=generated_grid,
+                        block_dim=generated_block,
+                    )
         else:
             mpk.linear_layer(
                 input=rmsnorm_out, weight=w_gatedup, output=mlp_mid,
@@ -417,10 +451,60 @@ def main():
         w = mpk.attach_input(
             torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
         )
-        if use_splitk:
-            mlp_out = x
+        if parse_layer_spec(mlp_spec, i) and mlp_impl in (
+            "three_task", "two_task_up_silu", "two_task_silu_down"
+        ):
+            assert use_splitk, "complete generated MLP currently targets B200"
+            w_t = mpk.attach_input(
+                torch_tensor=layer.mlp.down_proj.weight.t().contiguous(),
+                name=f"layer_{i}_down_proj_t",
+            )
+            generated_mlp_down = mpk.new_tensor(
+                dims=(args.max_num_batched_tokens, hidden_size),
+                dtype=mi.bfloat16,
+                name=f"layer_{i}_generated_mlp_down",
+                io_category="cuda_tensor",
+            )
+            next_x = mpk.new_tensor(
+                dims=(args.max_num_batched_tokens, hidden_size),
+                dtype=mi.bfloat16,
+                name=f"layer_{i}_generated_mlp_out",
+                io_category="cuda_tensor",
+            )
+            if mlp_impl == "two_task_silu_down":
+                assert generated_mlp_gate is not None
+                assert generated_mlp_up is not None
+                mpk.generated_silu_mul_linear_layer(
+                    gate=generated_mlp_gate,
+                    up=generated_mlp_up,
+                    weight_t=w_t,
+                    output=generated_mlp_down,
+                    grid_dim=(hidden_size // 64, 1, 1),
+                    block_dim=(256, 1, 1),
+                    forloop_range=intermediate_size // 64,
+                )
+            else:
+                mpk.generated_linear_layer(
+                    input=silu_mul_out,
+                    weight_t=w_t,
+                    output=generated_mlp_down,
+                    grid_dim=(hidden_size // 64, 1, 1),
+                    block_dim=(256, 1, 1),
+                    forloop_range=intermediate_size // 64,
+                )
+            # Residual addition is outside the generated MLP stages and
+            # remains an MPK handwritten task.
+            mpk.elementwise_add_layer(
+                input_a=generated_mlp_down,
+                input_b=x,
+                output=next_x,
+                grid_dim=(hidden_size // 64, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            x = next_x
+        elif use_splitk:
             mpk.splitk_linear_layer(
-                input=silu_mul_out, weight=w, output=mlp_out,
+                input=silu_mul_out, weight=w, output=x,
                 grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
                 block_dim=(256, 1, 1),
             )
@@ -429,7 +513,7 @@ def main():
                 input=silu_mul_out, weight=w, residual=x, output=mlp_out,
                 grid_dim=(hidden_size // 64, 1, 1), block_dim=(128, 1, 1),
             )
-        x = mlp_out
+            x = mlp_out
 
     # add final rmsnorm + lm_head + argmax
     w_norm = mpk.attach_input(
