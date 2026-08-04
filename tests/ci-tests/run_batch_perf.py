@@ -1,7 +1,8 @@
 """MPK batch-size performance test.
 
-Runs the Qwen3 MPK demo pipeline with a 1-token prompt (".") and decodes to
-the full sequence length (default 512 total tokens, --ignore-eos recommended),
+Runs the Qwen3 MPK demo pipeline with a configurable repeated-token prompt and
+decodes to the full sequence length (default 512 total tokens,
+--ignore-eos recommended),
 reporting per-token latency and aggregate throughput. Sweep
 --max-num-batched-tokens / --max-num-batched-requests externally to compare
 batch configurations, e.g.:
@@ -42,6 +43,8 @@ def parse_args():
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--max-seq-length", default=512, type=int,
                         help="Total sequence length (prompt + generation)")
+    parser.add_argument("--prompt-length", default=1, type=int,
+                        help="Prompt tokens per request (repeats the '.' token)")
     parser.add_argument("--model", type=str, default="Qwen/Qwen3-8B",
                         help="Model path on hugging face")
     parser.add_argument("--ignore-eos", action="store_true",
@@ -70,14 +73,23 @@ def main():
 
     total_num_requests = args.max_num_batched_requests
 
-    # 1-token prompt: tokenize "." directly (no chat template).
+    # Tokenize "." directly (no chat template), then repeat that token to make
+    # deterministic synthetic prompts without relying on tokenizer whitespace
+    # behavior. This lets the same runner measure full-model prefill/TTFT.
     model_inputs = tokenizer([PROMPT], return_tensors="pt").to(model.device)
-    prompt_len = model_inputs.input_ids.shape[-1]
-    assert prompt_len == 1, f"Expected 1-token prompt, got {prompt_len} tokens"
+    assert model_inputs.input_ids.shape[-1] == 1
+    prompt_len = args.prompt_length
+    assert prompt_len >= 1
+    assert args.max_seq_length > prompt_len
+    total_prompt_tokens = total_num_requests * prompt_len
+    assert args.max_num_batched_tokens >= total_prompt_tokens, (
+        "max_num_batched_tokens must cover the flattened prefill batch: "
+        f"{args.max_num_batched_tokens} < {total_num_requests} * {prompt_len}")
+    prompt_ids = model_inputs.input_ids[0].repeat(prompt_len)
 
     tokens = torch.full((total_num_requests, args.max_seq_length), 0,
                         dtype=torch.long, device="cuda")
-    tokens[:, :prompt_len] = model_inputs.input_ids[0]
+    tokens[:, :prompt_len] = prompt_ids
     prompt_lengths = torch.full((total_num_requests,), prompt_len,
                                 dtype=torch.int, device="cuda")
 
@@ -110,6 +122,14 @@ def main():
     head_dim = model.config.head_dim
     fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
     fused_outdim_2 = 2 * intermediate_size
+
+    mlp_spec = os.environ.get("MPK_COMPILED_MLP", "0")
+    mlp_impl = os.environ.get("MPK_COMPILED_MLP_IMPL", "fused")
+    if mlp_impl not in ("fused", "separate"):
+        raise ValueError(
+            "MPK_COMPILED_MLP_IMPL must be 'fused' or 'separate', got "
+            f"{mlp_impl!r}"
+        )
 
     num_workers, num_schedulers = mi.get_configurations_from_gpu(0)
     qo_indptr_buffer = torch.empty(
@@ -186,6 +206,19 @@ def main():
         dims=(args.max_num_batched_tokens, fused_outdim_2),
         dtype=mi.bfloat16, name="mlp_mid", io_category="cuda_tensor",
     )
+    generated_mlp_gate = None
+    generated_mlp_up = None
+    if mlp_impl == "separate" and mlp_spec not in ("0", "", "none"):
+        generated_mlp_gate = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, intermediate_size),
+            dtype=mi.bfloat16,
+            name="generated_mlp_gate", io_category="cuda_tensor",
+        )
+        generated_mlp_up = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, intermediate_size),
+            dtype=mi.bfloat16,
+            name="generated_mlp_up", io_category="cuda_tensor",
+        )
     silu_mul_out = mpk.new_tensor(
         dims=(args.max_num_batched_tokens, intermediate_size),
         dtype=mi.bfloat16, name="silu_mul_out", io_category="cuda_tensor",
@@ -225,7 +258,6 @@ def main():
 
     from mirage.mpk.models.qwen3.compiled_attention import (
         build_hybrid_attention, compiled_attention_spec, parse_layer_spec)
-    mlp_spec = os.environ.get("MPK_COMPILED_MLP", "0")
     for i, layer in enumerate(model.model.layers):
         w_norm = mpk.attach_input(
             torch_tensor=layer.input_layernorm.weight,
@@ -331,10 +363,8 @@ def main():
             grid_dim=(mpk.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1),
         )
         if parse_layer_spec(mlp_spec, i):
-            # COMPILER-GENERATED gated-MLP segment: silu(x@Wg^T) * (x@Wu^T)
-            # as ONE task -- both matmuls, the activation, and the multiply
-            # fused, with neither matmul result reaching global memory.
-            # Weights go in pre-transposed (K, N).
+            # Compiler-generated gated MLP. Weights are pre-transposed (K, N)
+            # because generated_linear_layer's TB matmul consumes that layout.
             wg_t = mpk.attach_input(
                 torch_tensor=layer.mlp.gate_proj.weight.t().contiguous(),
                 name=f"layer_{i}_gate_proj_t")
@@ -342,12 +372,38 @@ def main():
                 torch_tensor=layer.mlp.up_proj.weight.t().contiguous(),
                 name=f"layer_{i}_up_proj_t")
             intermediate = layer.mlp.gate_proj.weight.shape[0]
-            mpk.generated_swiglu_layer(
-                input=rmsnorm_out, gate_weight_t=wg_t, up_weight_t=wu_t,
-                output=silu_mul_out,
-                grid_dim=(intermediate // 64, 1, 1), block_dim=(256, 1, 1),
-                forloop_range=hidden_size // 64,
-            )
+            generated_grid = (intermediate // 64, 1, 1)
+            generated_block = (256, 1, 1)
+            if mlp_impl == "fused":
+                # One task: both matmuls, SiLU, and multiply. Gate/up do not
+                # round-trip through global memory.
+                mpk.generated_swiglu_layer(
+                    input=rmsnorm_out, gate_weight_t=wg_t, up_weight_t=wu_t,
+                    output=silu_mul_out,
+                    grid_dim=generated_grid, block_dim=generated_block,
+                    forloop_range=hidden_size // 64,
+                )
+            else:
+                # Three tasks with materialized gate/up tensors:
+                #   gate = x @ Wg; up = x @ Wu; out = silu(gate) * up.
+                # This intentionally exposes the scheduling/overlap behavior
+                # of separate compiler-generated tasks.
+                assert generated_mlp_gate is not None
+                assert generated_mlp_up is not None
+                for weight_t, output in (
+                    (wg_t, generated_mlp_gate),
+                    (wu_t, generated_mlp_up),
+                ):
+                    mpk.generated_linear_layer(
+                        input=rmsnorm_out, weight_t=weight_t, output=output,
+                        grid_dim=generated_grid, block_dim=generated_block,
+                        forloop_range=hidden_size // 64,
+                    )
+                mpk.generated_silu_mul_layer(
+                    gate=generated_mlp_gate, up=generated_mlp_up,
+                    output=silu_mul_out,
+                    grid_dim=generated_grid, block_dim=generated_block,
+                )
         else:
             mpk.linear_layer(
                 input=rmsnorm_out, weight=w_gatedup, output=mlp_mid,
@@ -430,6 +486,13 @@ def main():
     print("==================== MPK Batch Perf ====================")
     print(f"  max_num_batched_tokens:   {args.max_num_batched_tokens}")
     print(f"  max_num_batched_requests: {args.max_num_batched_requests}")
+    active_mlp_impl = (
+        mlp_impl
+        if any(parse_layer_spec(mlp_spec, i)
+               for i in range(len(model.model.layers)))
+        else "handwritten"
+    )
+    print(f"  MLP implementation:       {active_mlp_impl}")
     print(f"  prompt length:            {prompt_len}")
     print(f"  sequence length:          {seq_len} / {args.max_seq_length}")
     print(f"  generated (per request):  {per_request_generated}")
@@ -448,13 +511,16 @@ def main():
     result_path = os.path.join(
         DEFAULT_SAVE_DIR,
         f"batch_perf_t{args.max_num_batched_tokens}"
-        f"_r{args.max_num_batched_requests}.json",
+        f"_r{args.max_num_batched_requests}"
+        f"_p{prompt_len}_s{args.max_seq_length}.json",
     )
     result = {
         "max_num_batched_tokens": args.max_num_batched_tokens,
         "max_num_batched_requests": args.max_num_batched_requests,
         "max_seq_length": args.max_seq_length,
         "model": args.model,
+        "compiled_mlp_layer_spec": mlp_spec,
+        "mlp_implementation": active_mlp_impl,
         "prompt_length": prompt_len,
         "sequence_length": seq_len,
         "generate_length_per_request": per_request_generated,
