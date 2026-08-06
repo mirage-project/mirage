@@ -48,7 +48,10 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import trace_lib as TL  # noqa: E402
 
-NW = 128
+# Realized worker count.  128 was hard-coded through M4-I8 and silently wrong
+# once production moved to 136 workers (tracks 128-135 were discarded);
+# override via MPK_REALIZED_WORKERS for any non-default build.
+NW = int(os.environ.get("MPK_REALIZED_WORKERS", "128"))
 # m3i8's own separator for "this task did real work" on the grouped MoE GEMMs:
 # the empty-task latency tail crosses 1 us for 1.6% of empties, and the
 # histogram is empty from 2 us to 48 us (opt/m3i8/results/f1_closure).

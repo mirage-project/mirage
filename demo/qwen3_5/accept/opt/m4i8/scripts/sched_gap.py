@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter, defaultdict
 from heapq import heappush, heappop
@@ -162,7 +163,26 @@ def predicted_order(gr, n_workers):
     return {k: pos[w == k] for k in range(n_workers)}
 
 
+def worker_groups(n_workers, n_schedulers):
+    # Mirrors get_first_last_ids: scheduler s owns a contiguous run of
+    # base(+1) workers, the +1 going to the first (n_workers % n_schedulers)
+    # schedulers.  At 128/80 this reproduces the old 48x2+32x1 layout whose
+    # 2-groups the previous "two-worker swap" special case covered.
+    base, remainder = divmod(n_workers, n_schedulers)
+    groups, first = [], 0
+    for s in range(n_schedulers):
+        size = base + (1 if s < remainder else 0)
+        groups.append(list(range(first, first + size)))
+        first += size
+    return groups
+
+
 def fit_assignment(per, pred, gr, n_workers):
+    # Generalized from the 128-worker/80-scheduler direct-or-two-swap fit:
+    # each scheduler's persistent next-worker phase can be any cyclic
+    # rotation of its worker group (2-3 workers at 136/48), so try every
+    # rotation per group.  Scheduler count comes from MPK_REALIZED_SCHEDULERS,
+    # else the utils.py law 4*(sm_count - n_workers) with MPK_SM_COUNT=148.
     tt = gr["ttype"]
     obs = {}
     for w in range(n_workers):
@@ -175,23 +195,34 @@ def fit_assignment(per, pred, gr, n_workers):
         return len(o) == len(positions) and bool(np.array_equal(o,
                                                                tt[positions]))
 
-    assign, n_direct, n_swapped, bad, done = {}, 0, 0, [], set()
-    for w in range(n_workers):
-        if w in done:
+    sm_count = int(os.environ.get("MPK_SM_COUNT", "148"))
+    n_schedulers = int(os.environ.get("MPK_REALIZED_SCHEDULERS",
+                                      str(4 * (sm_count - n_workers))))
+    assign, n_direct, n_rotated, bad, rotations = {}, 0, 0, [], {}
+    for group in worker_groups(n_workers, n_schedulers):
+        accepted = None
+        for offset in range(len(group)):
+            if all(match(w, pred[group[(i + offset) % len(group)]])
+                   for i, w in enumerate(group)):
+                accepted = offset
+                break
+        if accepted is None:
+            bad.extend(group)
+            for w in group:
+                assign[w] = pred[w]
             continue
-        if match(w, pred[w]):
-            assign[w] = pred[w]; done.add(w); n_direct += 1
-            continue
-        partner = w + 1 if w % 2 == 0 else w - 1
-        if partner < n_workers and partner not in done \
-                and match(w, pred[partner]) and match(partner, pred[w]):
-            assign[w], assign[partner] = pred[partner], pred[w]
-            done.add(w); done.add(partner); n_swapped += 2
-            continue
-        bad.append(w); assign[w] = pred[w]; done.add(w)
-    return assign, dict(n_workers=n_workers, n_direct=n_direct,
-                        n_swapped=n_swapped, n_mismatch=len(bad),
-                        mismatched_workers=bad[:8],
+        if accepted:
+            rotations[str(group[0])] = accepted
+        for i, w in enumerate(group):
+            assign[w] = pred[group[(i + accepted) % len(group)]]
+        if accepted == 0:
+            n_direct += len(group)
+        else:
+            n_rotated += len(group)
+    return assign, dict(n_workers=n_workers, n_schedulers=n_schedulers,
+                        n_direct=n_direct, n_swapped=n_rotated,
+                        n_rotated=n_rotated, group_rotations=rotations,
+                        n_mismatch=len(bad), mismatched_workers=bad[:8],
                         verdict="PASS" if not bad else "FAIL")
 
 
