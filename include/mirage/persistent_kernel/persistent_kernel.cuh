@@ -1400,6 +1400,11 @@ __global__ __launch_bounds__(WORKER_NUM_THREADS,
 
 __global__ __launch_bounds__(WORKER_NUM_THREADS,
                              1) void worker_kernel(RuntimeConfig config) {
+  // Report residency so the host can gate the scheduler-grid launch on all
+  // worker blocks being placed (see launch_persistent_kernel).
+  if (threadIdx.x == 0) {
+    atomicAdd(config.worker_block_arrival_count, 1ULL);
+  }
   worker_checker(config);
   execute_worker(config);
 }
@@ -1718,6 +1723,12 @@ extern "C" void
              all_events.data(),
              all_events.size() * sizeof(EventDesc),
              cudaMemcpyHostToDevice);
+  // Residency counter for the worker-first launch gate (see
+  // launch_persistent_kernel).
+  global_runtime_config.worker_block_arrival_count =
+      gpu_malloc<unsigned long long int>(sizeof(unsigned long long int));
+  cudaMemset(global_runtime_config.worker_block_arrival_count, 0,
+             sizeof(unsigned long long int));
   // Initialize worker queues
   {
     std::vector<TaskId *> host_worker_queues;
@@ -1827,11 +1838,60 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
     // the interaction between the worker kernel and the scheduler kernel
+    cudaMemsetAsync(global_runtime_config.worker_block_arrival_count,
+                    0,
+                    sizeof(unsigned long long int),
+                    global_runtime_config.worker_stream);
     worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
                     dim3(WORKER_NUM_THREADS, 1, 1),
                     MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
                     global_runtime_config.worker_stream>>>(
         global_runtime_config);
+
+    // Gate the scheduler-grid launch on every worker block being resident.
+    // Both grids are persistent (blocks never retire): if the tiny
+    // scheduler blocks are placed first and scatter across SMs, the
+    // smem-heavy worker blocks (one full SM each) can no longer all fit,
+    // some workers never start, and the in-task dependent-event waits
+    // deadlock the megakernel forever (seen intermittently with
+    // num_workers > 128 on a 148-SM B200/B300, e.g. 144/16 and 136/48;
+    // 128/80 always left enough free SMs to absorb the race). Enforcing
+    // worker-first placement makes the packing deterministic: workers take
+    // one SM each and scheduler blocks pack into the leftover SMs.
+    {
+      cudaStream_t probe_stream;
+      cudaStreamCreateWithFlags(&probe_stream, cudaStreamNonBlocking);
+      unsigned long long int arrived = 0;
+      int const timeout_ms = 60000;
+      int waited_ms = 0;
+      while (true) {
+        cudaMemcpyAsync(&arrived,
+                        global_runtime_config.worker_block_arrival_count,
+                        sizeof(unsigned long long int),
+                        cudaMemcpyDeviceToHost,
+                        probe_stream);
+        cudaStreamSynchronize(probe_stream);
+        if (arrived >= (unsigned long long int)
+                global_runtime_config.num_workers) {
+          break;
+        }
+        if (waited_ms >= timeout_ms) {
+          fprintf(stderr,
+                  "[MPK] FATAL: only %llu of %d worker blocks became "
+                  "resident within %d ms. The GPU cannot host this many "
+                  "persistent worker blocks (check num_workers vs SM count "
+                  "and other kernels occupying SMs). The megakernel would "
+                  "deadlock; launching schedulers anyway for debuggability.\n",
+                  arrived,
+                  global_runtime_config.num_workers,
+                  timeout_ms);
+          break;
+        }
+        usleep(1000);
+        waited_ms += 1;
+      }
+      cudaStreamDestroy(probe_stream);
+    }
 
     scheduler_kernel<<<dim3(global_runtime_config.num_local_schedulers, 1, 1),
                        dim3(32, 1, 1),
