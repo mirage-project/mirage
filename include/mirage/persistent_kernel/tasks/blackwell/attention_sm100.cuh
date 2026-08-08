@@ -374,7 +374,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       int first_kv_token_to_process =
           iter * KV_TILE_SIZE + curr_iter_len - kv_tokens_to_process;
       if (qk_norm) {
-        // Q norm — once, on the first tile this task visits
+        // Q norm -- once, on the first tile this task visits
         if (iter == first_kv_iter) {
           rms_norm_sm100<T,
                          QOSmem,

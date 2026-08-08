@@ -7,7 +7,7 @@ wrong: the prologue's page index, the double-buffer phase (counted from the
 first tile VISITED, not tile 0), and the "apply Q RoPE once" guard.
 
 This needs num_tokens < seq_len, which the megakernel's test mode cannot
-produce — it resets request_ids to -1 at init, so every request is admitted
+produce -- it resets request_ids to -1 at init, so every request is admitted
 fresh and prefills whole. Hence the direct launcher, which takes the page
 table verbatim.
 

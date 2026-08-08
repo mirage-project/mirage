@@ -3,7 +3,7 @@
 Two things have to hold, and only the first is obvious:
 
 1. a windowed run matches a windowed reference;
-2. it differs from the plain-causal reference — without this a WINDOW_SIZE
+2. it differs from the plain-causal reference -- without this a WINDOW_SIZE
    that is silently ignored still passes (1).
 
 The window=0 case doubles as a no-regression check on the untouched

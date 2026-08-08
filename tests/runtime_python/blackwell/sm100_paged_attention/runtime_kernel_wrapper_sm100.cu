@@ -38,19 +38,19 @@ constexpr int O_STRIDE = NUM_QO_PER_KV * HEAD_DIM;
 constexpr int KV_CACHE_STRIDE = NUM_KV_HEADS * HEAD_DIM;
 
 template <int WINDOW_SIZE>
-__global__ void paged_attention_sm100_wrapper(
-    void const *qkv_ptr,
-    void *paged_k_cache_ptr,
-    void *paged_v_cache_ptr,
-    void *output_ptr,
-    int const *qo_indptr_buffer_ptr,
-    int const *paged_kv_indptr_buffer_ptr,
-    int const *paged_kv_indices_buffer_ptr,
-    int const *paged_kv_last_page_len_buffer_ptr,
-    void const *q_norm_weight_ptr,
-    void const *k_norm_weight_ptr,
-    void const *cos_ptr,
-    void const *sin_ptr) {
+__global__ void
+    paged_attention_sm100_wrapper(void const *qkv_ptr,
+                                  void *paged_k_cache_ptr,
+                                  void *paged_v_cache_ptr,
+                                  void *output_ptr,
+                                  int const *qo_indptr_buffer_ptr,
+                                  int const *paged_kv_indptr_buffer_ptr,
+                                  int const *paged_kv_indices_buffer_ptr,
+                                  int const *paged_kv_last_page_len_buffer_ptr,
+                                  void const *q_norm_weight_ptr,
+                                  void const *k_norm_weight_ptr,
+                                  void const *cos_ptr,
+                                  void const *sin_ptr) {
   kernel::multitoken_paged_attention_sm100_task_impl<bfloat16,
                                                      NUM_QO_PER_KV,
                                                      NUM_KV_HEADS,
@@ -119,7 +119,7 @@ static void launch(torch::Tensor qkv,
 
 // WINDOW_SIZE is a template parameter, so the dispatch enumerates the windows
 // the test uses: 0 (full causal), 96 (skips an odd number of KV tiles) and
-// 32 (an even number). The parity matters — the kernel's double-buffer phase
+// 32 (an even number). The parity matters -- the kernel's double-buffer phase
 // is counted from the first tile it visits.
 static void paged_attention_sm100(torch::Tensor qkv,
                                   torch::Tensor k_cache,
@@ -136,8 +136,18 @@ static void paged_attention_sm100(torch::Tensor qkv,
                                   int64_t window_size) {
 #define DISPATCH(W)                                                            \
   case W:                                                                      \
-    launch<W>(qkv, k_cache, v_cache, output, qo_indptr, kv_indptr, kv_indices, \
-              kv_last_page_len, q_norm, k_norm, cos, sin);                     \
+    launch<W>(qkv,                                                             \
+              k_cache,                                                         \
+              v_cache,                                                         \
+              output,                                                          \
+              qo_indptr,                                                       \
+              kv_indptr,                                                       \
+              kv_indices,                                                      \
+              kv_last_page_len,                                                \
+              q_norm,                                                          \
+              k_norm,                                                          \
+              cos,                                                             \
+              sin);                                                            \
     break;
   switch (window_size) {
     DISPATCH(0)
