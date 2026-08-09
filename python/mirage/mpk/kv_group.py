@@ -153,6 +153,11 @@ class KVCachePlan:
     target_page_bytes: int
     num_slots: int
     groups: Tuple["KVCachePlan.Group", ...]
+    # Set once by resolve_pool_size. The page tables and the pool must be
+    # sized by the SAME number, and they are built in different places (the
+    # demo builds the meta tensors, the model builder allocates the pool), so
+    # recording it here lets both read it and lets a mismatch be caught.
+    max_num_pages: Optional[int] = None
 
     # ── what PersistentKernel consumes ────────────────────────────────────
 
@@ -161,8 +166,68 @@ class KVCachePlan:
         return [KVGroupSpec(block_size=g.block_size, window_size=g.window_size)
                 for g in self.groups]
 
-    def build_meta_tensors(self, max_num_pages: int,
-                           max_num_batched_requests: int,
+    # ── sizing the pool ───────────────────────────────────────────────────
+
+    @property
+    def page_id_bytes(self) -> int:
+        """Bytes one page id costs. Drawing it takes that page at every slot,
+        not one layer's page."""
+        return self.num_slots * self.target_page_bytes
+
+    def pages_for_budget(self, budget_bytes: int) -> int:
+        """How many page ids fit in a byte budget, rounded down."""
+        assert budget_bytes >= 0
+        return budget_bytes // self.page_id_bytes
+
+    def _pool_pages(self, given: Optional[int]) -> int:
+        """The page count to size a pool-shaped thing with. Accepts the
+        caller's number, the one resolve_pool_size recorded, or both when they
+        agree — a disagreement means the page tables and the pool would be
+        sized differently, which only shows up as corruption at runtime."""
+        if given is None and self.max_num_pages is None:
+            raise ValueError(
+                "no pool size: pass max_num_pages, or call resolve_pool_size "
+                "on this plan first")
+        if given is not None and self.max_num_pages is not None:
+            if given != self.max_num_pages:
+                raise ValueError(
+                    f"pool size disagreement: {given} pages passed here but "
+                    f"the plan was sized to {self.max_num_pages}")
+        return given if given is not None else self.max_num_pages
+
+    def budget_bytes(self, num_pages: int) -> int:
+        """Bytes a pool of ``num_pages`` ids occupies — the inverse, for
+        reporting a page count back to the user in the units they care
+        about."""
+        return num_pages * self.page_id_bytes
+
+    def pages_needed(self, max_num_batched_requests: int, max_seq_length: int,
+                     max_num_batched_tokens: int = 1) -> int:
+        """Floor: page ids the batch holds at once in the worst case. Below
+        this the free list wraps and re-hands a page that is still in use."""
+        return max_num_batched_requests * sum(
+            pages_per_request(g.block_size, g.window_size, max_seq_length,
+                              max_num_batched_tokens)
+            for g in self.groups)
+
+    def pool_size(self, budget_bytes: int, max_num_batched_requests: int,
+                  max_seq_length: int, max_num_batched_tokens: int = 1) -> int:
+        """Page count for a byte budget, checked against the floor."""
+        pages = self.pages_for_budget(budget_bytes)
+        floor = self.pages_needed(max_num_batched_requests, max_seq_length,
+                                  max_num_batched_tokens)
+        if pages < floor:
+            raise ValueError(
+                f"KV budget too small: {format_bytes(budget_bytes)} gives {pages} "
+                f"page(s), but {max_num_batched_requests} request(s) at "
+                f"{max_seq_length} tokens need {floor} "
+                f"({format_bytes(self.budget_bytes(floor))}). Raise the budget, raise "
+                f"--page-size, or lower max_seq_length.")
+        return pages
+
+
+    def build_meta_tensors(self, max_num_pages: Optional[int] = None,
+                           max_num_batched_requests: int = 1,
                            max_seq_length: Optional[int] = None,
                            dtype=torch.int32, device: str = "cuda"):
         """Page-table buffers (indptr / indices / last_page_len) for every
@@ -175,6 +240,7 @@ class KVCachePlan:
         holding -1). Pass ``max_seq_length`` to size it for that; without it
         the buffer only fits ``max_num_pages`` entries, which is enough
         exactly when no group recycles."""
+        max_num_pages = self._pool_pages(max_num_pages)
         out = {}
         for g_id, g in enumerate(self.groups):
             span = max_num_pages
@@ -231,7 +297,7 @@ class KVCachePlan:
 
     # ── allocation ────────────────────────────────────────────────────────
 
-    def allocate_pool(self, entry_layouts, max_num_pages: int,
+    def allocate_pool(self, entry_layouts, max_num_pages: Optional[int] = None,
                       device: str = "cuda"):
         """The entire KV cache as ONE allocation, plus typed views.
 
@@ -261,6 +327,7 @@ class KVCachePlan:
         any intra-page padding. Kernels must therefore address a page by its
         stride and never assume pages sit back to back — see
         ``page_stride_elems``."""
+        max_num_pages = self._pool_pages(max_num_pages)
         pool = torch.zeros(self.num_slots, max_num_pages,
                            self.target_page_bytes, dtype=torch.uint8,
                            device=device)
@@ -307,6 +374,95 @@ class KVCachePlan:
 
 
 # ── planner ───────────────────────────────────────────────────────────────
+
+
+def format_bytes(nbytes: int) -> str:
+    """Human-readable byte count, so page counts and budgets can be reported
+    in the same units the user typed."""
+    for unit, scale in (("GiB", 1024**3), ("MiB", 1024**2), ("KiB", 1024)):
+        if nbytes >= scale:
+            return f"{nbytes / scale:.2f} {unit}"
+    return f"{nbytes} B"
+
+
+def resolve_kv_budget(spec, device: int = 0) -> int:
+    """Turn a user-facing budget into bytes.
+
+    Accepts a raw byte count(``"24GiB"`` / ``"512MiB"`` / ``12345678``), or
+     a fraction of the device's TOTAL memory (``0.6``, or ``"60%"``).
+
+    The fraction is of TOTAL, not free. Whether the budget actually fits is
+    a separate check at allocation time."""
+    if isinstance(spec, (int,)) and not isinstance(spec, bool):
+        return int(spec)
+    if isinstance(spec, float):
+        frac = spec
+    else:
+        text = str(spec).strip()
+        units = {"KIB": 1024, "MIB": 1024**2, "GIB": 1024**3, "TIB": 1024**4,
+                 "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4,
+                 "B": 1}
+        upper = text.upper()
+        for suffix, scale in sorted(units.items(), key=lambda kv: -len(kv[0])):
+            if upper.endswith(suffix):
+                return int(float(text[:-len(suffix)]) * scale)
+        frac = float(text[:-1]) / 100 if upper.endswith("%") else float(text)
+    if not 0 < frac <= 1:
+        raise ValueError(
+            f"KV budget fraction must be in (0, 1], got {frac}. Use a suffix "
+            f"like '24GiB' for an absolute size.")
+    total = torch.cuda.get_device_properties(device).total_memory
+    return int(total * frac)
+
+
+def resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
+                      max_num_pages: Optional[int] = None,
+                      max_seq_length: int,
+                      max_num_batched_requests: int = 1,
+                      max_num_batched_tokens: int = 1,
+                      device: int = 0, verbose: bool = True) -> int:
+    """The page count to build the pool with, from a byte budget or an
+    explicit count. Every demo needs this, so it lives here rather than being
+    re-derived per model.
+
+    Exactly one of ``kv_budget`` / ``max_num_pages`` may be given. A byte
+    budget is the better knob: a page id costs slots x page_bytes, so the same
+    page COUNT is 24 MiB at one block size and 1536 MiB at another. The count
+    is kept for tests that need a fixed, machine-independent number.
+
+    Raises ValueError with both units when the pool would be below what the
+    batch needs, or larger than what is free right now."""
+    if (kv_budget is None) == (max_num_pages is None):
+        raise ValueError("give exactly one of kv_budget / max_num_pages")
+
+    if max_num_pages is not None:
+        pages = max_num_pages
+        floor = plan.pages_needed(max_num_batched_requests, max_seq_length,
+                                  max_num_batched_tokens)
+        if pages < floor:
+            raise ValueError(
+                f"max_num_pages {pages} is below the {floor} this batch needs "
+                f"({format_bytes(plan.budget_bytes(floor))})")
+        source = "explicit page count"
+    else:
+        budget = resolve_kv_budget(kv_budget, device)
+        pages = plan.pool_size(budget, max_num_batched_requests,
+                               max_seq_length, max_num_batched_tokens)
+        source = f"budget {kv_budget}"
+
+    plan.max_num_pages = pages          # both sizing sites read it from here
+    used = plan.budget_bytes(pages)
+    free, total = torch.cuda.mem_get_info(device)
+    if verbose:
+        print(f"KV pool: {pages} pages x "
+              f"{format_bytes(plan.page_id_bytes)} = {format_bytes(used)}  "
+              f"({source}; device has {format_bytes(free)} free of "
+              f"{format_bytes(total)})")
+    if used > free:
+        raise ValueError(
+            f"the KV pool alone ({format_bytes(used)}) exceeds free memory "
+            f"({format_bytes(free)}), before the model weights")
+    return pages
 
 
 def plan_kv_groups(

@@ -560,6 +560,15 @@ __device__ __forceinline__ bool
 // Lock-free power-of-2 rings: index = cursor & (MPK_PINNED_RING_CAPACITY - 1).
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
+  // Online scheduler stages snapshots page in STATIC shared memory, capped
+  // at 48 KB per block on every architecture. So online_pinned puts a hard 
+  // ceiling on the pool: groups x pages x 4 B must fit.
+  static_assert(MPK_NUM_KV_GROUPS * (long)MPK_MAX_NUM_PAGES * sizeof(int) <=
+                    40 * 1024,
+                "online_pinned scheduler: MPK_NUM_KV_GROUPS x "
+                "MPK_MAX_NUM_PAGES exceeds its static shared-memory budget. "
+                "Lower the KV budget, raise the page size (fewer, larger pages), "
+                "or use the offline scheduler.");
   __shared__ int smem_kv_indices[MPK_NUM_KV_GROUPS][MPK_MAX_NUM_PAGES];
   int page_queue_head = *config.page_queue_head;
   int page_queue_tail = *config.page_queue_tail;

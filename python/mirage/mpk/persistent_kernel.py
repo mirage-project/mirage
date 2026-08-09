@@ -561,6 +561,18 @@ class PersistentKernel:
                               self.max_num_batched_tokens)
             for g in self.kv_groups
         ]
+        # online_pinned stages the whole page-index table in STATIC shared
+        # memory (persistent_kernel.cuh's smem_kv_indices), which is capped at
+        # 48 KB per block, put a ceiling on the pool. The kernel static_asserts
+        # this too instead of failing inside nvcc.
+        if self.mode == "online_pinned":
+            smem = len(self.kv_groups) * self.max_num_pages * 4
+            assert smem <= 40 * 1024, (
+                f"online_pinned: {len(self.kv_groups)} group(s) x "
+                f"{self.max_num_pages} pages needs {smem / 1024:.1f} KiB of "
+                f"static shared memory, over the ~40 KiB budget. Lower the KV "
+                f"budget or raise the page size (fewer, larger pages).")
+
         demand = self.max_num_batched_requests * sum(per_group)
         assert demand <= self.max_num_pages, (
             f"KV page pool too small: {self.max_num_batched_requests} "

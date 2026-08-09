@@ -125,6 +125,71 @@ def test_pages_per_request_bounded_by_the_window():
     assert pages_per_request(64, 4096, 512) == 8
 
 
+def test_page_id_bytes_is_the_whole_column():
+    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
+
+    class _Cfg:
+        num_key_value_heads = 8
+        head_dim = 64
+        sliding_window = 128
+        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
+                       for i in range(24)]
+
+    # A page id is that page at every slot, so it costs slots x page bytes
+    small = plan_kv_cache(_Cfg(), page_size=64)
+    big = plan_kv_cache(_Cfg(), page_size=4096)
+    assert small.page_id_bytes == 12 * 128 * 1024
+    assert big.page_id_bytes == 64 * small.page_id_bytes
+    assert small.budget_bytes(16) == 24 * 1024**2
+    assert big.budget_bytes(16) == 1536 * 1024**2
+
+
+def test_pages_for_budget_rounds_down_and_round_trips():
+    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
+
+    class _Cfg:
+        num_key_value_heads = 8
+        head_dim = 64
+        sliding_window = 128
+        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
+                       for i in range(24)]
+
+    plan = plan_kv_cache(_Cfg(), page_size=64)          # 1.5 MiB per page id
+    assert plan.pages_for_budget(24 * 1024**2) == 16
+    assert plan.pages_for_budget(24 * 1024**2 - 1) == 15   # never over-commit
+    assert plan.pages_for_budget(0) == 0
+    for n in (1, 7, 100):
+        assert plan.pages_for_budget(plan.budget_bytes(n)) == n
+
+
+def test_resolve_kv_budget_parses_sizes():
+    from mirage.mpk.kv_group import resolve_kv_budget
+
+    assert resolve_kv_budget("24GiB") == 24 * 1024**3
+    assert resolve_kv_budget("512MiB") == 512 * 1024**2
+    assert resolve_kv_budget("1GB") == 1000**3        # decimal suffix
+    assert resolve_kv_budget(25165824) == 25165824    # an int is raw bytes
+    with _raises(ValueError):
+        resolve_kv_budget("24")
+
+
+def test_pool_size_refuses_to_undercut_the_floor():
+    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
+
+    class _Cfg:
+        num_key_value_heads = 8
+        head_dim = 64
+        sliding_window = 128
+        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
+                       for i in range(24)]
+
+    plan = plan_kv_cache(_Cfg(), page_size=64)        # 1.5 MiB per page id
+    assert plan.pages_needed(1, 512, 8) == 12         # 4 sliding + 8 full
+    assert plan.pool_size(64 * 1024**2, 1, 512, 8) == 42
+    with _raises(ValueError):
+        plan.pool_size(8 * 1024**2, 1, 512, 8)        # 5 pages < floor 12
+
+
 def test_build_meta_tensors_spans_the_whole_sequence():
     specs = [
         KVSpec("sw", per_entry_bytes=1024, layer_ids=(0,), window_size=128,
