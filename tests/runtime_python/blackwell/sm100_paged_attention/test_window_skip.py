@@ -33,7 +33,7 @@ KV_TILE_SIZE = 64          # must match the kernel's tile
 NUM_TOKENS = 8             # new tokens this call
 SEQ_LEN = 200              # cached prefix + the new tokens
 # A non-identity page table proves the skip still resolves pages through the
-# indirection rather than assuming page i holds tokens [64i, 64i+64).
+# indirection, never assuming page i holds tokens [64i, 64i+64).
 PAGE_TABLE = [5, 2, 7, 1]
 WINDOWS = (0, 96, 32)      # skips 0, 1 (odd) and 2 (even) leading tiles
 

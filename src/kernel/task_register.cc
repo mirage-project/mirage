@@ -1981,8 +1981,8 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   // params[0]: add the extra term on this rank (a residual is added once, on
   //            rank 0, because the following allreduce would otherwise sum it
   //            world_size times)
-  // params[1]: the extra term is a BROADCAST BIAS -- one row reused by every
-  //            token -- rather than a per-token residual (optional, default 0)
+  // params[1]: the extra term is a BROADCAST BIAS, one row reused by every
+  //            token (optional, default 0)
   bool rank_with_residual = with_residual;
   bool broadcast_bias = false;
   if (with_residual) {
@@ -2300,9 +2300,9 @@ int TaskRegister::register_paged_attention_sm100_task(
   // params[7]: tail_offset    (optional, default 0)
   // params[8]: rotary_dim     (optional, 0 = head_dim; GLM-4.6 partial RoPE)
   // params[9]: qk-norm eps as float bits (optional, default 1e-6)
-  // params[10]: window_size   (optional, 0 = full causal; GPT-OSS sliding)
+  // params[10]: window_size   (optional, 0 = full causal)
   // params[11]: has_sink      (optional, 1 = an 8th input holds the per-head
-  //             attention sinks; GPT-OSS)
+  //             attention sinks)
   assert(params.size() == 6 || params.size() == 8 || params.size() == 10 ||
          params.size() == 11 || params.size() == 12);
   std::vector<tb::TBInputOp *> input_ops;
@@ -2735,8 +2735,8 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   // The kernel splits a row of experts across THREADS_PER_ROW = num_experts /
   // VPT lanes and requires that to be a half warp or a whole warp, with VPT a
   // multiple of the per-load element count (BYTES_PER_LDG / sizeof(T)). VPT 8
-  // with 16-byte loads covers 128 and 256 experts; narrower rows (GPT-OSS has
-  // 32) need both values scaled down, which keeps those two cases unchanged.
+  // with 16-byte loads covers 128 and 256 experts; a narrower row needs both
+  // values scaled down, which leaves those two cases unchanged.
   int vpt = 8, bytes_per_ldg = 16;
   if (num_experts / vpt != 16 && num_experts / vpt != 32) {
     vpt = num_experts / 16;

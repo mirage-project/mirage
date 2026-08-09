@@ -72,7 +72,7 @@ def run_hf(args, tokenizer, ids, num_new):
         out = model.generate(
             inp,
             # pad_token_id == eos_token_id here, so generate() cannot infer
-            # the mask; pass it rather than take the fallback
+            # the mask; pass it explicitly to avoid the fallback
             attention_mask=torch.ones_like(inp),
             max_new_tokens=num_new, do_sample=False,
             temperature=None, top_p=None, top_k=None,

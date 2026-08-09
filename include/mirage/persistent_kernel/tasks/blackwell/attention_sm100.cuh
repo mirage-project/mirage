@@ -52,9 +52,9 @@ template <typename T,
           // [0, ROTARY_DIM), passes the rest through; cos/sin tables are
           // [max_seq_len, ROTARY_DIM]. Default = full-dim NeoX RoPE.
           int ROTARY_DIM = HEAD_DIM,
-          // Sliding-window attention (GPT-OSS: 128). A query at absolute
-          // position p attends to keys in (p - WINDOW_SIZE, p]. 0 = no
-          // window, i.e. plain causal attention over the whole sequence.
+          // Sliding-window attention. A query at absolute position p attends
+          // to keys in (p - WINDOW_SIZE, p]. 0 = no window, i.e. plain causal
+          // attention over the whole sequence.
           int WINDOW_SIZE = 0>
 __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *qkv_ptr,
@@ -74,8 +74,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *sin_ptr,
     float q_eps,
     float k_eps,
-    // Attention sinks (GPT-OSS): NUM_QO_PER_KV learned logits, one per query
-    // head of this task's KV head. nullptr = no sinks.
+    // Attention sinks: NUM_QO_PER_KV learned logits, one per query head of
+    // this task's KV head. nullptr = no sinks.
     void const *sink_ptr = nullptr) {
   constexpr int CONSUMER_WARPGROUP_SYNC_BARRIER_ID = 6;
   constexpr int ROTARY_SYNC_BARRIER_ID = 7;
@@ -127,8 +127,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     // Under a sliding window every query in this task masks out keys older
     // than (its own position - WINDOW_SIZE], so the whole task can skip
     // straight to the first tile the EARLIEST query still sees. Without this
-    // a window layer would walk the entire sequence to discard nearly all of
-    // it: 2048 tiles instead of 3 at a 128k context.
+    // a window layer walks the entire sequence to discard nearly all of it:
+    // at a 128k context, 2048 tiles for the 3 the mask keeps.
     int const first_kv_iter =
         WINDOW_SIZE > 0
             ? max(seq_len - num_tokens - WINDOW_SIZE + 1, 0) / KV_TILE_SIZE

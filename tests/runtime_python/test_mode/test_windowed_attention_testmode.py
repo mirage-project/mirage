@@ -15,7 +15,7 @@ fall entirely outside the window, and that path needs seq_len > num_tokens
 (a cached prefix). Test mode cannot produce one: the device-side init resets
 request_ids to -1 (persistent_kernel.cuh:158), so every request is admitted
 fresh and the scheduler always schedules a whole prefill, giving
-num_tokens == seq_len. The skip is covered by the direct-kernel test instead.
+num_tokens == seq_len. The direct-kernel test covers the skip.
 """
 
 import os

@@ -24,9 +24,8 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
   // static_assert(BATCH_SIZE == 1);
   extern __shared__ char smem[];
   // The copy width comes from one thread's contiguous slice when the row
-  // splits evenly over the threads. It need not: GPT-OSS's 2880 does not
-  // divide 256. Then the width is chosen from the row instead, and the tile
-  // loop below covers a last, partial tile.
+  // splits evenly over the threads. When it does not, the width comes from
+  // the whole row and the tile loop below covers a short last tile.
   constexpr bool EVEN_SPLIT = (HIDDEN_DIM % NUM_THREADS == 0);
   constexpr int BYTES_PER_THREAD =
       EVEN_SPLIT ? (HIDDEN_DIM / NUM_THREADS) * (int)sizeof(T)

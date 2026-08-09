@@ -12,8 +12,8 @@ token or drifts by a task's column offset.
 
 Note the task counts: the SM100 output TMA needs each task's column slice
 16-byte aligned, i.e. a multiple of 8 columns. hidden = 2880 over the demo
-helper's 96 tasks would give 30 columns and fail, so these use 45 (64 columns)
-instead.
+helper's 96 tasks would give 30 columns and fail, so these use 45 tasks of
+64 columns.
 """
 
 import os

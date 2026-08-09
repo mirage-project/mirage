@@ -1074,8 +1074,8 @@ class PersistentKernel:
         tail_offset: int = 0,
         rotary_dim: int = 0,        # 0 = full head_dim; GLM-4.6 partial RoPE
         qk_norm_eps: float = 1e-6,
-        window_size: int = 0,       # 0 = full causal; GPT-OSS sliding window
-        sinks: DTensor = None,      # per-head attention sinks; GPT-OSS
+        window_size: int = 0,       # 0 = full causal
+        sinks: DTensor = None,      # per-head attention sinks
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
@@ -1116,7 +1116,7 @@ class PersistentKernel:
         # params[7]: tail_offset    (only included if non-zero; for Eagle3 K>1 chain)
         # params[8]: rotary_dim     (0 = head_dim; GLM-4.6 partial RoPE)
         # params[9]: qk-norm eps float bits (default 1e-6)
-        # params[10]: window_size   (0 = full causal; GPT-OSS sliding window)
+        # params[10]: window_size   (0 = full causal)
         # params[11]: has_sink      (1 = an 8th input holds the sinks)
         # Trailing pairs are only emitted when non-default (legacy sizes 6/8).
         import struct
@@ -1986,8 +1986,8 @@ class PersistentKernel:
             out = (clamp(up, -limit, limit) + 1)
                   * min(gate, limit) * sigmoid(min(gate, limit) * alpha)
 
-        `input` holds gate then up, as moe_silu_mul does. GPT-OSS ships the two
-        interleaved instead, which the weight loader de-interleaves once.
+        `input` holds gate then up, as moe_silu_mul does. A checkpoint that
+        stores the two interleaved must be de-interleaved by its loader.
         """
         import struct
 
