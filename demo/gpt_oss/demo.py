@@ -13,6 +13,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 import mirage as mi
+from mirage.mpk.kv_group import resolve_pool_size
 from mirage.mpk.models.gpt_oss.builder import GptOssBuilder, plan_kv_cache
 
 DEFAULT_PROMPT = "Give me a short introduction to large language models."
@@ -37,8 +38,14 @@ if __name__ == "__main__":
     parser.add_argument("--max-num-batched-requests", default=1, type=int,
                         help="Max number of requests in a batch")
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
-    parser.add_argument("--max-num-pages", default=16, type=int,
-                        help="Max num pages")
+    parser.add_argument("--kv-budget", type=str, default=None,
+                        help="Memory for the KV pool: an absolute size "
+                             "('24GiB') or a fraction of the device's TOTAL "
+                             "memory ('0.6'). Exclusive with --max-num-pages")
+    parser.add_argument("--max-num-pages", default=None, type=int,
+                        help="Size the pool by page count instead; a page id "
+                             "costs slots x page_bytes, which changes with "
+                             "--page-size")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--ignore-eos", action="store_true",
                         help="Ignore eos token during generation")
@@ -74,6 +81,14 @@ if __name__ == "__main__":
         # KV 2.0: the plan is the source of truth for the cache layout
         config = AutoConfig.from_pretrained(args.model)
         kv_plan = plan_kv_cache(config, args.page_size)
+        try:
+            max_num_pages = resolve_pool_size(
+                kv_plan, kv_budget=args.kv_budget,
+                max_num_pages=args.max_num_pages, max_seq_length=seq_len,
+                max_num_batched_requests=args.max_num_batched_requests,
+                max_num_batched_tokens=mbt)
+        except ValueError as e:
+            raise SystemExit(str(e))
         meta_tensors = {
             "step": torch.zeros(n_req, dtype=torch.int32, device="cuda"),
             "tokens": tokens,
@@ -85,7 +100,6 @@ if __name__ == "__main__":
             "qo_indptr_buffer": torch.empty(args.max_num_batched_requests + 1,
                                             dtype=torch.int32, device="cuda"),
             **kv_plan.build_meta_tensors(
-                max_num_pages=args.max_num_pages,
                 max_num_batched_requests=args.max_num_batched_requests,
                 max_seq_length=seq_len),
         }
@@ -98,7 +112,7 @@ if __name__ == "__main__":
             max_seq_length=seq_len,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=mbt,
-            max_num_pages=args.max_num_pages,
+            max_num_pages=max_num_pages,
             kv_groups=kv_plan.group_specs(),
             eos_token_id=-1 if args.ignore_eos else 200002,
             meta_tensors=meta_tensors, profiler_tensor=None, trace_name="",
