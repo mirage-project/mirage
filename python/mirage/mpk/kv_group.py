@@ -580,7 +580,10 @@ class KVEventLog:
     ``verify()`` replays the log and asserts allocator invariants.
 
     Log format: log[0] = event count; event i is 4 ints at [4i+1 .. 4i+4] =
-    (type, group_id, request_slot, page_id), type 1=ALLOC, 2=FREE, 3=ITER.
+    (type, group_id, request_slot, page_id), type 1=ALLOC, 2=FREE, 3=ITER,
+    4=MOVE (a request changed batch slot: request_slot -> page_id). MOVE is
+    the page-table compaction path, which only runs when requests finish at
+    different iterations.
     """
 
     def __init__(self, pk, plan: KVCachePlan, capacity: int = 65536,
@@ -592,7 +595,8 @@ class KVEventLog:
     def verify(self):
         """Replay the log; assert no double-alloc, no free of an unowned
         page, and zero pages still live at the end. Returns
-        {"iterations": int, "per_group": [{"allocs": int, "frees": int}]}."""
+        {"iterations": int, "compactions": int,
+         "per_group": [{"allocs": int, "frees": int}]}."""
         return self.replay(self.log, self.num_groups)
 
     @staticmethod
@@ -604,10 +608,14 @@ class KVEventLog:
         live = [set() for _ in range(num_groups)]
         stats = [{"allocs": 0, "frees": 0} for _ in range(num_groups)]
         iterations = 0
+        compactions = 0
         for i in range(count):
             etype, g, _req, page = events[4 * i + 1: 4 * i + 5]
             if etype == 3:
                 iterations += 1
+                continue
+            if etype == 4:
+                compactions += 1
                 continue
             assert 0 <= g < num_groups, f"event {i}: group_id {g} out of range"
             if etype == 1:
@@ -626,4 +634,5 @@ class KVEventLog:
                 raise ValueError(f"event {i}: unknown event type {etype}")
         leaked = {g: sorted(pages) for g, pages in enumerate(live) if pages}
         assert not leaked, f"pages leaked at end of log: {leaked}"
-        return {"iterations": iterations, "per_group": stats}
+        return {"iterations": iterations, "compactions": compactions,
+                "per_group": stats}

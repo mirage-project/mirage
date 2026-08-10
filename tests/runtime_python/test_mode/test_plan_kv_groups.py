@@ -522,7 +522,8 @@ def test_kv_event_log_roundtrip():
         ev.log[4 * i + 1], ev.log[4 * i + 2], ev.log[4 * i + 3], \
             ev.log[4 * i + 4] = t, g, r, p
     result = ev.verify()
-    assert result == {"iterations": 1, "per_group": [{"allocs": 2, "frees": 2}]}
+    assert result == {"iterations": 1, "compactions": 0,
+                      "per_group": [{"allocs": 2, "frees": 2}]}
 
 
 def test_kv_event_log_replay_catches_leak_and_double_alloc():
@@ -547,8 +548,13 @@ def test_kv_event_log_replay_catches_leak_and_double_alloc():
     # well-formed 2 groups, symmetric
     good = _make_log([(1, 0, 0, 0), (1, 1, 0, 5), (2, 0, 0, 0), (2, 1, 0, 5)])
     result = KVEventLog.replay(good, num_groups=2)
-    assert result == {"iterations": 0, "per_group": [
+    assert result == {"iterations": 0, "compactions": 0, "per_group": [
         {"allocs": 1, "frees": 1}, {"allocs": 1, "frees": 1}]}
+
+    # A MOVE carries no group id (-1) and must not be range-checked as one.
+    moved = _make_log([(1, 0, 0, 0), (4, -1, 1, 0), (2, 0, 0, 0)])
+    result = KVEventLog.replay(moved, num_groups=1)
+    assert result["compactions"] == 1
 
 
 if __name__ == "__main__":
