@@ -223,6 +223,9 @@ __global__ void prepare_kernel(RuntimeConfig config,
 
 // Debug-only allocator event log: appends one (type, group, row, page_id)
 // record. Only safe from single-threaded scheduler context.
+// Types: 1 = page ALLOC, 2 = page FREE, 3 = scheduling-pass marker,
+// 4 = a request MOVED batch slot (row -> page_id field), which is the
+// page-table compaction path.
 #ifdef MPK_KV_EVENT_LOG
 #define MPK_KV_LOG(t, g, r, p)                                                 \
   do {                                                                         \
@@ -359,6 +362,12 @@ __device__ __forceinline__ bool
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
     int16_t request_id = config.request_ids[i];
     if (request_id != -1) {
+      if (num_reqs != i) {
+        // An earlier slot's request finished, so this one moves down: every
+        // per-request buffer is rewritten at `num_reqs` while still being read
+        // at `i`. Recorded so a test can prove this path actually ran.
+        MPK_KV_LOG(4, -1, i, num_reqs);
+      }
       config.request_ids[num_reqs] = request_id;
       config.qo_indptr_buffer[num_reqs] = num_tokens;
       int step = config.step[request_id];
