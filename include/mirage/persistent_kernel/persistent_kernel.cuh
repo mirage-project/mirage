@@ -222,10 +222,9 @@ __global__ void prepare_kernel(RuntimeConfig config,
 }
 
 // Debug-only allocator event log: appends one (type, group, row, page_id)
-// record. Only safe from single-threaded scheduler context.
-// Types: 1 = page ALLOC, 2 = page FREE, 3 = scheduling-pass marker,
-// 4 = a request MOVED batch slot (row -> page_id field), which is the
-// page-table compaction path.
+// record. Only safe from single-threaded scheduler context. Types:
+// 1 = page ALLOC, 2 = page FREE, 3 = scheduling-pass marker, 4 = a request
+// moved batch slot (row -> page_id field).
 #ifdef MPK_KV_EVENT_LOG
 #define MPK_KV_LOG(t, g, r, p)                                                 \
   do {                                                                         \
@@ -242,13 +241,11 @@ __global__ void prepare_kernel(RuntimeConfig config,
 #define MPK_KV_LOG(t, g, r, p)
 #endif
 
-// Index of the oldest page a sliding-window group may still read, for a
-// request whose next queries start at absolute position `step`. The kernel
-// starts loading at the tile boundary below `step - window`, so pages
-// entirely below it are dead, and stay dead as `step` grows. 0 for a
-// full-attention group.
-__device__ __forceinline__ int first_live_page(int step, int window,
-                                               int block_size) {
+// Index of the oldest page a sliding-window group may still read, given a
+// request whose next queries start at `step`. The kernel starts loading at
+// the tile boundary below `step - window`. 0 for a full-attention group.
+__device__ __forceinline__ int
+    first_live_page(int step, int window, int block_size) {
   if (window <= 0) {
     return 0;
   }
@@ -339,8 +336,8 @@ __device__ __forceinline__ bool
     }
   }
 
-  // Step 2: snapshot kv_indices per group into global memory buffers (needed for
-  // in-place compaction where destination may overlap source)
+  // Step 2: snapshot kv_indices per group into global memory buffers (needed
+  // for in-place compaction where destination may overlap source)
   for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
     int snap_count =
         config.paged_kv_indptr_buffer[g][MPK_MAX_NUM_BATCHED_REQUESTS];
@@ -361,8 +358,7 @@ __device__ __forceinline__ bool
     if (request_id != -1) {
       if (num_reqs != i) {
         // An earlier slot's request finished, so this one moves down: every
-        // per-request buffer is rewritten at `num_reqs` while still read at
-        // `i`.
+        // per-request buffer is rewritten at `num_reqs` and still read at `i`.
         MPK_KV_LOG(4, -1, i, num_reqs);
       }
       config.request_ids[num_reqs] = request_id;
@@ -409,7 +405,9 @@ __device__ __forceinline__ bool
         for (int j = num_old_pages_g; j < num_new_pages_g; j++) {
           assert(page_queue_head < page_queue_tail &&
                  "KV page pool exhausted: raise max_num_pages");
-          MPK_KV_LOG(1, g, num_reqs,
+          MPK_KV_LOG(1,
+                     g,
+                     num_reqs,
                      config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES]);
           config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
               config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
@@ -417,11 +415,10 @@ __device__ __forceinline__ bool
         }
 #ifndef MPK_SPEC_DECODE
         // Sliding window: return the pages this request can no longer read.
-        // The page-table SPAN is kept and the slot poisoned with -1, since the
-        // kernel indexes page_indices by absolute page number and derives
-        // seq_len from the span. Only the physical page is freed. Skipped
-        // under spec-decode, whose TAIL_OFFSET starts the kernel earlier than
-        // the window edge implies.
+        // The page-table span is kept and the slot poisoned with -1, since
+        // the kernel indexes page_indices by absolute page number and takes
+        // seq_len from the span. Skipped under spec-decode, whose TAIL_OFFSET
+        // starts the kernel earlier than the window edge implies.
         {
           int first_live =
               first_live_page(step, config.kv_group_window_sizes[g], bs);
@@ -476,7 +473,9 @@ __device__ __forceinline__ bool
       for (int j = 0; j < num_new_pages_g; j++) {
         assert(page_queue_head < page_queue_tail &&
                "KV page pool exhausted: raise max_num_pages");
-        MPK_KV_LOG(1, g, num_reqs,
+        MPK_KV_LOG(1,
+                   g,
+                   num_reqs,
                    config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES]);
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
             config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
@@ -567,12 +566,12 @@ __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
   // This scheduler stages the page table in STATIC shared memory, capped at
   // 48 KB per block, so groups x pages x 4 B is a hard ceiling on the pool.
-  static_assert(MPK_NUM_KV_GROUPS * (long)MPK_MAX_NUM_PAGES * sizeof(int) <=
-                    40 * 1024,
-                "online_pinned scheduler: MPK_NUM_KV_GROUPS x "
-                "MPK_MAX_NUM_PAGES exceeds its static shared-memory budget. "
-                "Lower the KV budget, raise the page size (fewer, larger pages), "
-                "or use the offline scheduler.");
+  static_assert(
+      MPK_NUM_KV_GROUPS * (long)MPK_MAX_NUM_PAGES * sizeof(int) <= 40 * 1024,
+      "online_pinned scheduler: MPK_NUM_KV_GROUPS x "
+      "MPK_MAX_NUM_PAGES exceeds its static shared-memory budget. "
+      "Lower the KV budget, raise the page size (fewer, larger pages), "
+      "or use the offline scheduler.");
   __shared__ int smem_kv_indices[MPK_NUM_KV_GROUPS][MPK_MAX_NUM_PAGES];
   int page_queue_head = *config.page_queue_head;
   int page_queue_tail = *config.page_queue_tail;
@@ -780,8 +779,7 @@ __device__ __forceinline__ bool
     for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
       int bs = config.kv_group_block_sizes[g];
       config.paged_kv_indptr_buffer[g][num_reqs] = num_pages_g[g];
-      int num_new_pages_g =
-          (initial_step + num_new_tokens + bs - 1) / bs;
+      int num_new_pages_g = (initial_step + num_new_tokens + bs - 1) / bs;
       config.paged_kv_last_page_len_buffer[g][num_reqs] =
           (initial_step + num_new_tokens) % bs;
       for (int j = 0; j < num_new_pages_g; j++) {
@@ -1644,7 +1642,8 @@ extern "C" void
   global_runtime_config.new_token_nums = static_cast<int *>(meta_tensors[4]);
   global_runtime_config.prompt_length = static_cast<int *>(meta_tensors[5]);
   global_runtime_config.qo_indptr_buffer = static_cast<int *>(meta_tensors[6]);
-  // Per-group logical block sizes (tokens per page), only read by prepare_next_batch.
+  // Per-group logical block sizes (tokens per page), only read by
+  // prepare_next_batch.
   assert(kv_group_block_sizes.size() == (size_t)MPK_NUM_KV_GROUPS);
   assert(kv_group_window_sizes.size() == (size_t)MPK_NUM_KV_GROUPS);
   for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {

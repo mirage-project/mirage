@@ -61,8 +61,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_32_64(
     float k_eps) {
   // PAGE_SIZE stays the LOGICAL page size (tokens per page) used for
   // seq_len and page_offset; only row addressing scales by the stride.
-  constexpr int PAGE_ROWS =
-      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
+  constexpr int PAGE_ROWS = PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
   constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);

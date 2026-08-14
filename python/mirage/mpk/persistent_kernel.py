@@ -447,8 +447,8 @@ class PersistentKernel:
         self.max_num_batched_requests = max_num_batched_requests
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_pages = max_num_pages
-        # kv_groups is the source of truth for block sizes; page_size alone is
-        # the single-group shorthand. Passing both must agree.
+        # kv_groups is the source of truth for block sizes; page_size is the
+        # single-group shorthand and must agree when both are given.
         if kv_groups is None:
             assert page_size is not None, (
                 "PersistentKernel needs kv_groups (or page_size as the "
@@ -475,9 +475,8 @@ class PersistentKernel:
         ]:
             if _old in self.meta_tensors and _new not in self.meta_tensors:
                 self.meta_tensors[_new] = self.meta_tensors[_old]
-        # Per-group snapshot buffers for in-place compaction, sized like the
-        # indices buffer they mirror: by page-table SPAN, which exceeds
-        # max_num_pages once a group recycles.
+        # Per-group snapshot buffers for in-place compaction, sized by
+        # page-table SPAN like the indices buffer they mirror.
         for _g in range(len(self.kv_groups)):
             _snap_key = f"paged_kv_indices_snapshot_{_g}"
             if _snap_key not in self.meta_tensors and self.mode != "online_pinned":
@@ -564,8 +563,8 @@ class PersistentKernel:
                               self.max_num_batched_tokens)
             for g in self.kv_groups
         ]
-        # online_pinned stages the whole page-index table in STATIC shared
-        # memory, put a ceiling on the pool.
+        # online_pinned stages the page table in STATIC shared memory, which
+        # caps the pool.
         if self.mode == "online_pinned":
             smem = len(self.kv_groups) * self.max_num_pages * 4
             assert smem <= 40 * 1024, (
@@ -1268,9 +1267,7 @@ class PersistentKernel:
         group_window = self.kv_groups[group_id].window_size
         assert layer_window == group_window, (
             f"a layer with window_size {layer_window} reads KV group "
-            f"{group_id}, which declares window_size {group_window}; the "
-            f"group's pages are recycled against its own window, so the two "
-            f"must agree")
+            f"{group_id}, which declares {group_window}")
         return block_size
 
     def paged_attention_layer(

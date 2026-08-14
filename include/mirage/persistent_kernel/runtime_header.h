@@ -344,14 +344,14 @@ struct RuntimeConfig {
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;
-  int *step;                      // Metadata for LLM serving
-  long long *tokens;              // Metadata for LLM serving
-  long long *input_tokens;        // Metadata for LLM serving
-  long long *output_tokens;       // Metadata for LLM serving
-  long long eos_token_id;         // Metadata for LLM serving
-  int max_seq_length;             // Metadata for LLM serving
-  int *new_token_nums;            // Metadata for LLM serving
-  int *qo_indptr_buffer;          // Metadata for LLM serving (paged attention)
+  int *step;                // Metadata for LLM serving
+  long long *tokens;        // Metadata for LLM serving
+  long long *input_tokens;  // Metadata for LLM serving
+  long long *output_tokens; // Metadata for LLM serving
+  long long eos_token_id;   // Metadata for LLM serving
+  int max_seq_length;       // Metadata for LLM serving
+  int *new_token_nums;      // Metadata for LLM serving
+  int *qo_indptr_buffer;    // Metadata for LLM serving (paged attention)
 #ifndef MPK_NUM_KV_GROUPS
 #define MPK_NUM_KV_GROUPS 1
 #endif
@@ -361,19 +361,25 @@ struct RuntimeConfig {
 #ifndef MPK_KV_WINDOW_TILE
 #define MPK_KV_WINDOW_TILE 64
 #endif
-  int *paged_kv_indptr_buffer[MPK_NUM_KV_GROUPS];    // Metadata for LLM serving (paged attention)
-  int *paged_kv_indices_buffer[MPK_NUM_KV_GROUPS];   // Metadata for LLM serving (paged attention)
-  int *paged_kv_indices_snapshot[MPK_NUM_KV_GROUPS]; // Scheduler snapshot for in-place compaction
-  int *paged_kv_last_page_len_buffer[MPK_NUM_KV_GROUPS]; // Metadata for LLM serving
-  int kv_group_block_sizes[MPK_NUM_KV_GROUPS]; // Set at init, used by prepare_next_batch
+  int *paged_kv_indptr_buffer[MPK_NUM_KV_GROUPS];    // Metadata for LLM serving
+                                                     // (paged attention)
+  int *paged_kv_indices_buffer[MPK_NUM_KV_GROUPS];   // Metadata for LLM serving
+                                                     // (paged attention)
+  int *paged_kv_indices_snapshot[MPK_NUM_KV_GROUPS]; // Scheduler snapshot for
+                                                     // in-place compaction
+  int *paged_kv_last_page_len_buffer[MPK_NUM_KV_GROUPS]; // Metadata for LLM
+                                                         // serving
+  int kv_group_block_sizes[MPK_NUM_KV_GROUPS];           // Set at init, used by
+                                                         // prepare_next_batch
   // Sliding-window length in tokens per group, 0 = full attention. A group
   // may declare a window only if EVERY layer reading its page table masks
   // with that same window.
   int kv_group_window_sizes[MPK_NUM_KV_GROUPS];
 #ifdef MPK_KV_EVENT_LOG
   // Allocator event debug log: [0] = record count, then 4-int records
-  // (type, group, row, page_id) with type 1=ALLOC, 2=FREE, 3=ITER. Written 
-  // single-threaded from prepare_next_batch; replayed host-side by allocator tests.
+  // (type, group, row, page_id) with type 1=ALLOC, 2=FREE, 3=ITER. Written
+  // single-threaded from prepare_next_batch; replayed host-side by allocator
+  // tests.
   int *kv_event_log;
 #endif
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \

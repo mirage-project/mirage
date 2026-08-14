@@ -77,8 +77,7 @@ __device__ __forceinline__ void
   }
   // PAGE_SIZE stays the LOGICAL page size (tokens per page) used for
   // seq_len and page_offset; only row addressing scales by the stride.
-  constexpr int PAGE_ROWS =
-      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
+  constexpr int PAGE_ROWS = PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
   // NOTE(Jinchen): The input is a packed QKV tensor, which may contain
