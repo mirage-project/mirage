@@ -37,7 +37,12 @@ if __name__ == "__main__":
                         help="Max number of tokens in a batch")
     parser.add_argument("--max-num-batched-requests", default=1, type=int,
                         help="Max number of requests in a batch")
-    parser.add_argument("--page-size", default=4096, type=int, help="Page size")
+    parser.add_argument("--page-size", default=64, type=int,
+                        help="Tokens per page for the anchor KV stream (the "
+                             "one with the largest per-token footprint); "
+                             "other streams pack more tokens into the same "
+                             "page and the startup report shows what each "
+                             "got. Must be a multiple of the kernel's KV tile")
     parser.add_argument("--kv-budget", type=str, default=None,
                         help="Memory for the KV pool: an absolute size "
                              "('24GiB') or a fraction of the device's TOTAL "

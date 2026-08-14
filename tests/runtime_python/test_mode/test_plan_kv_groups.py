@@ -2,8 +2,9 @@
 
 The DSV4 byte figures: per-256-token bytes 37,376 / 1,168 / 8,448 for c4-main / c128-main / indexer
 => per-entry 584 B (ratio 4), 584 B (ratio 128), 132 B (ratio 4); SWA is 584 B/token at ratio 1.
-The corrected 1-bucket model's block sizes (c4_main=256, c128_main=8192, c4_indexer=1132, swa=64)
-are the golden expectations the planner must reproduce exactly.
+The corrected 1-bucket model's block sizes (c4_main=256, c128_main=8192, c4_indexer=1088, swa=64)
+are the golden expectations. The indexer is 1088, not the 1132 a tightest fit gives, because
+block sizes must be a multiple of the kernel's 64-token KV tile.
 """
 
 from contextlib import contextmanager
@@ -52,13 +53,127 @@ def test_dsv4_one_bucket_block_sizes():
     got = {g.spec_name: g.block_size for g in plan.groups}
     assert got == {
         "c4_main": 256,      # 64 entries x4 — the page-size anchor
-        "c128_main": 8192,   # 64 entries x128
-        "c4_indexer": 1132,  # 283 entries x4
+        "c128_main": 8192,   # 64 entries x128, an exact 32x ratio of the page
+        "c4_indexer": 1088,  # 272 entries x4, floored to the 64-token tile
         "swa": 64,           # 64 entries x1
     }
+    # A tightest fit gives 283 entries = 1132 tokens, and 1132 % 64 = 44, so
+    # the kernels' static_assert would fail in nvcc. Padding buys legality.
     pad = {g.spec_name: g.padding_bytes_per_page for g in plan.groups}
     assert pad["c4_main"] == 0 and pad["swa"] == 0 and pad["c128_main"] == 0
-    assert pad["c4_indexer"] == 37376 - 283 * 132  # bounded intra-page padding
+    assert pad["c4_indexer"] == 37376 - 272 * 132   # 1472 B, 3.9% of the page
+    for g in plan.groups:
+        assert g.block_size % 64 == 0, f"{g.spec_name} is not tile-legal"
+
+
+def test_exact_ratio_branch_is_lossless_and_tile_safe():
+    # A stream whose natural page divides the shared one scales its block size
+    # by that integer instead of being re-packed: no padding, tile divisibility
+    # survives by construction.
+    specs = [
+        KVSpec("fat", per_entry_bytes=2048, layer_ids=(0,),
+               preferred_block_size=256),                    # anchor, 512 KiB
+        KVSpec("thin", per_entry_bytes=512, layer_ids=(1,),
+               preferred_block_size=256),                    # 128 KiB, 4x under
+    ]
+    plan = plan_kv_groups(specs)
+    by = {g.spec_name: g for g in plan.groups}
+    assert plan.target_page_bytes == 256 * 2048
+    assert by["fat"].block_size == 256
+    assert by["thin"].block_size == 256 * 4        # scaled, not re-packed
+    assert by["fat"].padding_bytes_per_page == 0
+    assert by["thin"].padding_bytes_per_page == 0  # exact ratio wastes nothing
+    for g in plan.groups:
+        assert g.block_size % 64 == 0
+
+
+def test_block_size_is_floored_to_the_declared_tile():
+    # Same stream, two tiles: a bigger tile costs padding.
+    def plan_with(tile):
+        return plan_kv_groups([
+            KVSpec("anchor", per_entry_bytes=584, layer_ids=(0,),
+                   compress_ratio=4, preferred_block_size=256),
+            KVSpec("idx", per_entry_bytes=132, layer_ids=(1,),
+                   compress_ratio=4, preferred_block_size=256,
+                   block_size_multiple_of=tile),
+        ])
+
+    got = {t: {g.spec_name: g for g in plan_with(t).groups} for t in (16, 64)}
+    # 283 entries fit; tile 64 needs groups of 16 -> 272, tile 16 -> 280.
+    assert got[64]["idx"].block_size == 1088 and got[64]["idx"].entries_per_page == 272
+    assert got[16]["idx"].block_size == 1120 and got[16]["idx"].entries_per_page == 280
+    assert got[16]["idx"].padding_bytes_per_page < got[64]["idx"].padding_bytes_per_page
+    assert got[64]["idx"].block_size % 64 == 0
+    assert got[16]["idx"].block_size % 16 == 0
+
+
+def test_a_stream_that_cannot_fit_one_tile_is_refused():
+    # 8 entries fit, but a 64-token tile needs 64. Say so rather than emit a
+    # block size the kernel will reject.
+    specs = [
+        KVSpec("fat", per_entry_bytes=8, layer_ids=(0,),
+               preferred_block_size=800),
+        KVSpec("thin", per_entry_bytes=800, layer_ids=(1,),
+               preferred_block_size=8),
+    ]
+    with _raises(KVUnificationError):
+        plan_kv_groups(specs, target_page_bytes=6400)
+    # ...and declaring the tile it can actually satisfy makes it feasible.
+    relaxed = [
+        specs[0],
+        KVSpec("thin", per_entry_bytes=800, layer_ids=(1,),
+               preferred_block_size=8, block_size_multiple_of=1),
+    ]
+    plan = plan_kv_groups(relaxed, target_page_bytes=6400)
+    assert {g.spec_name: g.entries_per_page for g in plan.groups}["thin"] == 8
+
+
+def test_an_illegal_anchor_page_size_is_refused_not_floored():
+    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
+
+    class _Cfg:
+        num_key_value_heads = 8
+        head_dim = 64
+        sliding_window = 128
+        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
+                       for i in range(24)]
+
+    # 100 is not a multiple of the 64-token tile; flooring it would silently
+    # give 64 and strand a third of every page.
+    with _raises(KVUnificationError):
+        plan_kv_cache(_Cfg(), page_size=100)
+    for legal in (64, 128, 4096):
+        assert plan_kv_cache(_Cfg(), page_size=legal).groups[0].block_size == legal
+
+
+def test_the_report_names_the_anchor_and_flags_a_dead_window():
+    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
+
+    class _Cfg:
+        num_key_value_heads = 8
+        head_dim = 64
+        sliding_window = 128
+        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
+                       for i in range(24)]
+
+    # A block larger than what the sequence leaves behind means no page ever
+    # falls outside the window.
+    dead = plan_kv_cache(_Cfg(), page_size=4096).describe(max_seq_length=512)
+    assert "anchor 'sliding_attention'" in dead
+    assert "NEVER recycles" in dead and "WARNING" in dead
+    # At the tile it recycles, and the report says from when.
+    live = plan_kv_cache(_Cfg(), page_size=64).describe(max_seq_length=512)
+    assert "NEVER recycles" not in live and "recycles from step" in live
+
+
+def test_default_tile_follows_the_device():
+    from mirage.mpk.kv_group import default_kv_tile
+
+    # Ampere dispatches between the 64 and 128 variants in C++ templates, so
+    # only 128 is safe for both there.
+    assert default_kv_tile(100) == 64      # sm100
+    assert default_kv_tile(90) == 64       # sm90
+    assert default_kv_tile(80) == 128      # sm80
 
 
 def test_gpt_oss_real_config_plan():
@@ -329,10 +444,12 @@ def test_allocate_pool_handles_streams_with_different_entry_sizes():
     # Entries of 8 B and 800 B carve the same 6400 B page into 800 and 8
     # slots respectively. One pool serves both; this is the case a single
     # shared entry layout could not express.
+    # tile 1: synthetic entry sizes, exercising pool geometry rather than
+    # anything a real kernel would accept.
     fat = KVSpec("fat", per_entry_bytes=8, layer_ids=(0,),
-                preferred_block_size=64)
+                preferred_block_size=64, block_size_multiple_of=1)
     thin = KVSpec("thin", per_entry_bytes=800, layer_ids=(1,),
-                 preferred_block_size=8)
+                 preferred_block_size=8, block_size_multiple_of=1)
     plan = plan_kv_groups([fat, thin], target_page_bytes=6400)
     by = {g.spec_name: g for g in plan.groups}
     assert by["fat"].entries_per_page == 800
@@ -375,7 +492,7 @@ def test_allocate_pool_shares_one_allocation_across_streams():
     assert plan.target_page_bytes == 37376
     by = {g.spec_name: g for g in plan.groups}
     assert by["main"].entries_per_page == 64        # 584 B x 64, no padding
-    assert by["indexer"].entries_per_page == 283    # 132 B x 283, 20 B spare
+    assert by["indexer"].entries_per_page == 272    # floored to the tile
 
     pages = 8
     pool, views = plan.allocate_pool(
@@ -386,14 +503,14 @@ def test_allocate_pool_shares_one_allocation_across_streams():
     main = views[by["main"].group_id]["kv"]
     idx = views[by["indexer"].group_id]["kv"]
     assert tuple(main.shape) == (plan.num_slots, pages, 64, 292)
-    assert tuple(idx.shape) == (plan.num_slots, pages, 283, 66)
+    assert tuple(idx.shape) == (plan.num_slots, pages, 272, 66)
     # Both are views on the one allocation, not copies of it.
     assert main.data_ptr() == idx.data_ptr() == pool.data_ptr()
     # One addressing rule for padded and unpadded streams alike.
     stride = plan.page_stride_elems(torch.bfloat16)
     assert stride == 37376 // 2
     assert main.stride(1) == idx.stride(1) == stride
-    assert idx.stride(1) > 283 * 66     # strictly wider than packed
+    assert idx.stride(1) > 272 * 66     # strictly wider than packed
 
     with _raises(KeyError):
         plan.allocate_pool({"main": [("kv", (292,), torch.bfloat16)]},
