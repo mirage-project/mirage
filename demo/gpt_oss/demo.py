@@ -44,9 +44,8 @@ if __name__ == "__main__":
                              "page and the startup report shows what each "
                              "got. Must be a multiple of the kernel's KV tile")
     parser.add_argument("--kv-budget", type=str, default=None,
-                        help="Memory for the KV pool: an absolute size "
-                             "('24GiB') or a fraction of the device's TOTAL "
-                             "memory ('0.6'). Exclusive with --max-num-pages")
+                        help="Memory for the KV pool, as an absolute size "
+                             "('24GiB'). Exclusive with --max-num-pages")
     parser.add_argument("--max-num-pages", default=None, type=int,
                         help="Size the pool by page count instead; a page id "
                              "costs slots x page_bytes, which changes with "

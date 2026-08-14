@@ -289,15 +289,19 @@ class GptOssBuilder(GraphBuilder):
                 block_dim=(256, 1, 1))
 
             # Which page table this layer reads, and which slot of the pool it
-            # owns. Attached directly rather than through _attach: a pool view
-            # is strided by the whole page, so .contiguous() would copy it and
-            # silently detach the cache from the pool.
+            # owns. Attached directly rather than through _attach, which would
+            # call .contiguous() and copy a page-strided view out of the pool;
+            # assert_in_pool is what catches that if it ever happens.
             group_id, slot_id = self.kv_plan.layer_info(i)
             k_cache = self.mpk.attach_input(
-                torch_tensor=self.kv_views[group_id]["k"][slot_id],
+                torch_tensor=self.kv_plan.assert_in_pool(
+                    self.kv_views[group_id]["k"][slot_id],
+                    f"layer_{i} k_cache"),
                 name=f"layer_{i}_k_cache")
             v_cache = self.mpk.attach_input(
-                torch_tensor=self.kv_views[group_id]["v"][slot_id],
+                torch_tensor=self.kv_plan.assert_in_pool(
+                    self.kv_views[group_id]["v"][slot_id],
+                    f"layer_{i} v_cache"),
                 name=f"layer_{i}_v_cache")
             sinks = self._attach(
                 sd[f"{prefix}self_attn.sinks"].view(self.num_kv_heads,
