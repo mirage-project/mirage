@@ -1157,9 +1157,8 @@ class PersistentKernel:
             graph_inputs.append(sinks)
         tb_graph.new_input(output, (-1, 1, -1), -1, True)
         self.kn_graph.customized(graph_inputs + [output], tb_graph)
-        # Only the SM100 kernel implements these; the others would drop the
-        # extra params in a Release build and silently compute plain causal
-        # attention with no sink.
+        # SM100 only: the other kernels drop the extra params in a Release
+        # build and fall back to plain causal attention with no sink.
         assert (window_size == 0 and not has_sink) or self.target_cc == 100, (
             f"window_size={window_size} / sinks are only implemented for "
             f"sm100, got target_cc={self.target_cc}")
@@ -2128,25 +2127,24 @@ class PersistentKernel:
         graph_inputs = [input, weight] + ([bias] if bias is not None else [])
         self.kn_graph.customized(graph_inputs + [output], tb_graph)
 
-        # A bias reuses the residual epilogue with a zero row stride, so it is
-        # sm100-only; elsewhere the extra param would be dropped in a Release
-        # build and the bias silently lost.
+        # A bias reuses the residual epilogue with a zero row stride, which
+        # only sm100 implements; elsewhere the param is dropped in a Release
+        # build and the bias lost.
         assert bias is None or self.target_cc == 100, (
             f"linear_layer(bias=...) is only implemented for sm100, "
             f"got target_cc={self.target_cc}")
         if self.target_cc == 100:
             # The SM100 output TMA needs each task's column slice 16-byte
-            # aligned. A misaligned slice fails descriptor creation at launch
-            # and then dies as an illegal instruction, so catch it here.
+            # aligned; a misaligned one dies at launch as an illegal
+            # instruction.
             cols_per_task = output.dim(1) // grid_dim[0]
             assert output.dim(1) % grid_dim[0] == 0 and cols_per_task % 8 == 0, (
                 f"linear_layer: {output.dim(1)} output columns over "
                 f"{grid_dim[0]} tasks gives {output.dim(1) / grid_dim[0]} "
                 f"columns each; it must divide evenly into a multiple of 8")
         if bias is not None:
-            # params[0]=1: a bias is added on EVERY rank (unlike a residual,
-            # it is not double-counted by a following allreduce, because the
-            # projection it belongs to is column-parallel).
+            # params[0]=1: a bias is added on every rank. Unlike a residual
+            # it is column-parallel, so an allreduce does not double-count it.
             self.kn_graph.register_task(
                 tb_graph, "linear_with_bias_sm100", [1, 1])
         elif self.target_cc >= 100 and self.target_cc < 120:

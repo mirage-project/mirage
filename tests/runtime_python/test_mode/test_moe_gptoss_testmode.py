@@ -1,5 +1,5 @@
-"""Test-mode coverage for GPT-OSS's MoE pieces: the clamped-alpha SwiGLU and
-the per-expert biases on both expert GEMMs.
+"""Test-mode coverage for the clamped-alpha SwiGLU and the per-expert biases
+on both expert GEMMs.
 
 Three layers in one task graph, each checked independently so a failure names
 its own kernel:
@@ -8,9 +8,8 @@ its own kernel:
   w13     [B, K] @ [E, 2I, K].T + bias[E, 2I]
   w2      [B, topk, I] @ [E, K, I].T + bias[E, K]
 
-The biases differ per expert AND per column, which is what makes the kernel's
-`gBias(..., expert_idx)` indexing falsifiable: a bias that ignored the expert,
-or reused one expert's row, would still pass a uniform bias.
+Biases differ per expert and per column, so bias indexing that drops the
+expert fails.
 """
 
 import os
@@ -93,9 +92,8 @@ def main():
     rt = pk.attach_input(routing, name="routing")
     mk = pk.attach_input(mask, name="mask")
 
-    # --- clamped SwiGLU, twice: once on values small enough that no clamp
-    # fires (so the gating formula itself is checked tightly) and once on
-    # values that straddle the clamp in both directions.
+    # --- clamped SwiGLU, twice: once below the clamp so the gating formula
+    # is checked on its own, once straddling it in both directions.
     swiglu_cases = []
     for tag, scale in (("swiglu_small", 0.5), ("swiglu_clamped", 6.0)):
         mid = torch.randn(BATCH, NUM_TOPK, 2 * INTER, dtype=dtype,
@@ -135,9 +133,7 @@ def main():
         weight=pk.attach_input(w2, name="w2"),
         moe_routing_indices=rt, moe_mask=mk,
         output=pk.attach_input(w2_out, name="w2_out"),
-        # 64 columns per task, not the 128 the Qwen3 demos use: GPT-OSS's
-        # hidden size of 2880 is not divisible by 128, so this is the tiling
-        # its w2 has to run at.
+        # 64 columns per task: 2880 is not divisible by 128.
         grid_dim=(8, HIDDEN // 64, 1), block_dim=(256, 1, 1),
         bias=pk.attach_input(b2, name="b2"),
     )
@@ -156,8 +152,8 @@ def main():
     ]
     for name, got, ref in checks:
         diff = (got.float() - ref).abs().max().item()
-        # The kernels write bf16, so the tolerance has to scale with the
-        # output's magnitude: one bf16 ulp is ~0.4% of the value.
+        # bf16 output, so the tolerance scales with magnitude: one ulp is
+        # ~0.4% of the value.
         tol = max(0.02, 0.01 * ref.abs().max().item())
         print(f"[{name}] max |kernel - reference| = {diff:.4f} "
               f"(tol {tol:.4f}, |ref|max {ref.abs().max().item():.2f})")
@@ -165,8 +161,8 @@ def main():
             ok = False
             print(f"[{name}] FAILED")
 
-    # The two swiglu cases only mean what they claim if one of them really
-    # clamps and the other really does not.
+    # The two swiglu cases only mean what they claim if one clamps and the
+    # other does not.
     for tag, mid, _ in swiglu_cases:
         frac = ((mid[..., :INTER].float() > LIMIT) |
                 (mid[..., INTER:].float().abs() > LIMIT)).float().mean().item()

@@ -23,9 +23,9 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
                                                      float eps) {
   // static_assert(BATCH_SIZE == 1);
   extern __shared__ char smem[];
-  // The copy width comes from one thread's contiguous slice when the row
-  // splits evenly over the threads. When it does not, the width comes from
-  // the whole row and the tile loop below covers a short last tile.
+  // The copy width is one thread's contiguous slice when the row splits
+  // evenly over the threads, and the whole row when it does not -- the tile
+  // loop below then covers a short last tile.
   constexpr bool EVEN_SPLIT = (HIDDEN_DIM % NUM_THREADS == 0);
   constexpr int BYTES_PER_THREAD =
       EVEN_SPLIT ? (HIDDEN_DIM / NUM_THREADS) * (int)sizeof(T)
@@ -42,7 +42,7 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
   }();
   constexpr int CHUNK_SIZE = BYTES_PER_CP / sizeof(T);
   // Every chunk is whole, so a chunk is in range exactly when it starts in
-  // range -- which is what the guards below test.
+  // range.
   static_assert(HIDDEN_DIM % CHUNK_SIZE == 0);
   constexpr int TILE_SIZE = NUM_THREADS * CHUNK_SIZE;
   constexpr int NUM_TILES = (HIDDEN_DIM + TILE_SIZE - 1) / TILE_SIZE;

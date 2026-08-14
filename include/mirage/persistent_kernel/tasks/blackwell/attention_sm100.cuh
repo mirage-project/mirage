@@ -53,8 +53,7 @@ template <typename T,
           // [max_seq_len, ROTARY_DIM]. Default = full-dim NeoX RoPE.
           int ROTARY_DIM = HEAD_DIM,
           // Sliding-window attention. A query at absolute position p attends
-          // to keys in (p - WINDOW_SIZE, p]. 0 = no window, i.e. plain causal
-          // attention over the whole sequence.
+          // to keys in (p - WINDOW_SIZE, p]. 0 = no window.
           int WINDOW_SIZE = 0>
 __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *qkv_ptr,
@@ -124,11 +123,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                         TAIL_OFFSET;
     // valid_lens = [seq_len - num_tokens + 1 + i for i in range(num_tokens)]
 
-    // Under a sliding window every query in this task masks out keys older
-    // than (its own position - WINDOW_SIZE], so the whole task can skip
-    // straight to the first tile the EARLIEST query still sees. Without this
-    // a window layer walks the entire sequence to discard nearly all of it:
-    // at a 128k context, 2048 tiles for the 3 the mask keeps.
+    // Under a sliding window the task can skip straight to the first tile
+    // the EARLIEST query still sees.
     int const first_kv_iter =
         WINDOW_SIZE > 0
             ? max(seq_len - num_tokens - WINDOW_SIZE + 1, 0) / KV_TILE_SIZE
@@ -353,8 +349,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
         cp_async_wait<0>();
       }
 
-      // rotate the buffers; parity is counted from the first tile actually
-      // visited, which is not tile 0 under a sliding window
+      // rotate the buffers; parity counts from the first tile visited, which
+      // is not tile 0 under a sliding window
       if (((iter - first_kv_iter) & 0x1) == 0) {
         k_smem.set_ptr(s_k_buffer);
         k_buffer_smem.set_ptr(s_k);
@@ -718,9 +714,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                      other_o * expf(other_m - m_global);
         }
         // An attention sink is an extra softmax logit that carries no value,
-        // so it only enters the denominator. m_global is already scaled by
-        // sm_scale, and the sink is a logit in those same units, so it is
-        // used as stored.
+        // so it enters only the denominator. It is stored in sm_scale units,
+        // as m_global is.
         if (d_sink != nullptr) {
           d_global += expf(float(d_sink[row % NUM_QO_PER_KV]) - m_global);
         }

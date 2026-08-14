@@ -5,10 +5,9 @@ unchanged and what needs proving is that every token reads the one stored row
 and that the column slicing across tasks stays aligned.
 
 The three shapes are GPT-OSS's real dense projections, including the router's
-32-column output -- narrower than any shape in tree, since Qwen3-30B has 128
-experts. Each shape is run with and without a bias: the difference must be
-exactly the bias, which is what catches a bias that lands on only the first
-token or drifts by a task's column offset.
+32-column output. Each shape is run with and without a bias: the difference
+must be exactly the bias, which is what catches a bias that lands on only the
+first token or drifts by a task's column offset.
 
 Note the task counts: the SM100 output TMA needs each task's column slice
 16-byte aligned, i.e. a multiple of 8 columns. hidden = 2880 over the demo
@@ -58,8 +57,7 @@ def main():
     for name, out_features, num_tasks in CONFIGS:
         assert out_features % num_tasks == 0
         w = torch.randn(out_features, HIDDEN, dtype=dtype, device=device) * 0.05
-        # Per-column values, so a bias applied with the wrong column offset
-        # cannot pass.
+        # Per-column values, so a wrong column offset fails.
         b = torch.randn(1, out_features, dtype=dtype, device=device)
         w_dt = pk.attach_input(w, name=f"{name}_w")
         b_dt = pk.attach_input(b, name=f"{name}_b")
@@ -94,7 +92,7 @@ def main():
 
         d_plain = (out_plain.float() - ref_plain).abs().max().item()
         d_bias = (out_bias.float() - ref_bias).abs().max().item()
-        # The bias must show up on EVERY token, at the right column.
+        # The bias must show up on every token, at the right column.
         delta = (out_bias.float() - out_plain.float())
         d_delta = (delta - b.float()).abs().max().item()
         print(f"[{name}] {out_features} cols over {num_tasks} tasks "

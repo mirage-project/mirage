@@ -634,8 +634,8 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         std::make_tuple(2, 1, TASK_SPLITK_LINEAR_SM100, variant_id);
   } else if (name == "linear_with_residual_sm100" ||
              name == "linear_with_bias_sm100") {
-    // Same epilogue: a bias is a residual whose row stride is zero, selected
-    // by params[1]. Two variants of one task type, not a second task type.
+    // A bias is a residual whose row stride is zero, selected by params[1]:
+    // two variants of one task type, not a second task type.
     int variant_id = task_register->register_linear_sm100_task(
         customized->bgraph, params, true /*with_residual*/);
     task_config[op] =

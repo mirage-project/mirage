@@ -174,8 +174,8 @@ if __name__ == "__main__":
         with torch.no_grad():
             out = model.generate(
                 inp,
-                # pad_token_id == eos_token_id here, so generate() cannot infer
-                # the mask; pass it explicitly to avoid the fallback
+                # pad_token_id == eos_token_id here, so generate() cannot
+                # infer the mask; pass it explicitly
                 attention_mask=torch.ones_like(inp),
                 max_new_tokens=output_len, do_sample=False,
                 temperature=None, top_p=None, top_k=None,

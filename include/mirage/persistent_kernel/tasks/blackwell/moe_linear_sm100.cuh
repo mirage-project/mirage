@@ -744,9 +744,8 @@ __device__ __forceinline__ void
           //   cute::print("\n");
           // } epilogue_wg_barrier.arrive_and_wait();
 
-          // The output tile is MMA_M wide, but this task's slice of the
-          // output need not be a whole number of tiles: one lane per output
-          // column, so lanes at or past OUTPUT_SIZE have no column to write.
+          // One lane per output column; lanes at or past OUTPUT_SIZE have
+          // no column to write.
           int32_t const out_col = m_tile * MMA_M + threadIdx.x;
           bool const out_col_valid = out_col < OUTPUT_SIZE;
 
@@ -757,8 +756,8 @@ __device__ __forceinline__ void
             if (out_col_valid) {
               cute::copy(tCgBias(cute::_, threadIdx.x), tCrBiasTypeBias);
             } else {
-              // Reading here would take another expert's row, and past the
-              // tensor entirely on the last column group.
+              // Reading here would take another expert's row, or run past
+              // the tensor on the last column group.
               CUTE_UNROLL
               for (int i = 0; i < tCrBiasTypeBias.size(); i++) {
                 tCrBiasTypeBias[i] = TypeBias(0);

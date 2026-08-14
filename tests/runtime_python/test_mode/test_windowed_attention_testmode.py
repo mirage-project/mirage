@@ -1,21 +1,13 @@
 """Test-mode coverage for the sliding-window mask in paged attention (SM100).
 
-Two things have to hold, and only the first is obvious:
+Each window is checked two ways: it matches a windowed reference, and it
+differs from the plain-causal one, so an ignored WINDOW_SIZE fails.
 
-1. a windowed run matches a windowed reference;
-2. it differs from the plain-causal reference -- without this a WINDOW_SIZE
-   that is silently ignored still passes (1).
+window=0 is the no-regression control on the full-causal path, and confirms
+the identity RoPE tables (cos=1, sin=0) used here are the identity.
 
-The window=0 case doubles as a no-regression check on the untouched
-full-causal path, and as a check that the identity RoPE tables (cos=1, sin=0)
-used here really are the identity.
-
-SCOPE: this covers the MASK only. The kernel also skips leading KV tiles that
-fall entirely outside the window, and that path needs seq_len > num_tokens
-(a cached prefix). Test mode cannot produce one: the device-side init resets
-request_ids to -1 (persistent_kernel.cuh:158), so every request is admitted
-fresh and the scheduler always schedules a whole prefill, giving
-num_tokens == seq_len. The direct-kernel test covers the skip.
+SCOPE: the MASK only. Skipping leading KV tiles that fall outside the window
+needs seq_len > num_tokens and is covered by test_windowed_attention_direct.py.
 """
 
 import os
@@ -27,7 +19,7 @@ import mirage
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 NUM_KV_HEADS = 1
-NUM_QO_PER_KV = 8          # GQA 8:1, as in GPT-OSS
+NUM_QO_PER_KV = 8          # GQA 8:1
 NUM_Q_HEADS = NUM_KV_HEADS * NUM_QO_PER_KV
 HEAD_DIM = 64
 PAGE_SIZE = 64
@@ -79,7 +71,7 @@ def main():
     pk = PersistentKernel(**params)
 
     # cos = 1, sin = 0 makes the kernel's RoPE the identity, so the reference
-    # does not have to model it. The window=0 case proves the assumption.
+    # does not model it.
     cos = torch.ones(MAX_SEQ_LENGTH, HEAD_DIM, dtype=torch.bfloat16,
                      device=device)
     sin = torch.zeros(MAX_SEQ_LENGTH, HEAD_DIM, dtype=torch.bfloat16,
@@ -140,8 +132,8 @@ def main():
                       f"window is being ignored")
                 ok = False
 
-        # The new tokens are the whole sequence here, so they land in the
-        # first page the scheduler handed out, rows 0..NUM_TOKENS.
+        # The new tokens are the whole sequence, so they land in the first
+        # page, rows 0..NUM_TOKENS.
         written = k_cache[:, :NUM_TOKENS, 0].reshape(-1, HEAD_DIM)
         k_new = qkv[:, NUM_Q_HEADS * HEAD_DIM : (NUM_Q_HEADS + 1) * HEAD_DIM]
         if not any(torch.equal(k_cache[p, :NUM_TOKENS, 0], k_new)

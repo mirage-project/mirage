@@ -1978,9 +1978,9 @@ int TaskRegister::register_embedding_hopper_task(
 int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params,
                                              bool with_residual) {
-  // params[0]: add the extra term on this rank (a residual is added once, on
-  //            rank 0, because the following allreduce would otherwise sum it
-  //            world_size times)
+  // params[0]: add the extra term on this rank. A residual is added on rank
+  //            0 only, since the following allreduce would otherwise sum it
+  //            world_size times
   // params[1]: the extra term is a BROADCAST BIAS, one row reused by every
   //            token (optional, default 0)
   bool rank_with_residual = with_residual;
@@ -2101,8 +2101,8 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   code.e("TMA_OUT "
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
-  // Bias Tensor setup. A broadcast bias is the same epilogue with a ZERO row
-  // stride, so every token reads the one stored row; the kernel is unchanged.
+  // A broadcast bias is the same epilogue with a zero row stride, so every
+  // token reads the one stored row.
   code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
          "cute::make_stride($, cute::Int<1>{}));",
          batch_size,
@@ -2732,11 +2732,11 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // The kernel splits a row of experts across THREADS_PER_ROW = num_experts /
-  // VPT lanes and requires that to be a half warp or a whole warp, with VPT a
-  // multiple of the per-load element count (BYTES_PER_LDG / sizeof(T)). VPT 8
-  // with 16-byte loads covers 128 and 256 experts; a narrower row needs both
-  // values scaled down, which leaves those two cases unchanged.
+  // The kernel splits a row of experts across THREADS_PER_ROW = num_experts
+  // / VPT lanes, which must be a half or whole warp, with VPT a multiple of
+  // the per-load element count (BYTES_PER_LDG / sizeof(T)). VPT 8 with
+  // 16-byte loads covers 128 and 256 experts; a narrower row needs both
+  // scaled down.
   int vpt = 8, bytes_per_ldg = 16;
   if (num_experts / vpt != 16 && num_experts / vpt != 32) {
     vpt = num_experts / 16;

@@ -16,16 +16,14 @@
 #include "tasks/common/common_header.cuh"
 namespace kernel {
 
-// Clamped-alpha SwiGLU: both halves are clamped, the gate is gated by a
-// scaled sigmoid, and the up half is offset by one.
+// Clamped-alpha SwiGLU:
 //
 //   gate = min(gate, limit)
 //   up   = clamp(up, -limit, limit)
 //   out  = (up + 1) * gate * sigmoid(gate * alpha)
 //
-// Layout follows silu_mul's: gate first, up OUTPUT_SIZE elements later. A
-// checkpoint that stores the halves interleaved must be de-interleaved by its
-// weight loader.
+// Layout: gate first, up OUTPUT_SIZE elements later. A checkpoint that stores
+// the halves interleaved must be de-interleaved by its weight loader.
 template <typename T,
           int BATCH_SIZE,
           int OUTPUT_SIZE,

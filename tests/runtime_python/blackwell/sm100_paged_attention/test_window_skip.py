@@ -1,15 +1,13 @@
 """The sliding window's leading-tile skip, on a request with a cached prefix.
 
-When a window layer decodes, seq_len is long and only the last few KV tiles
-are inside the window, so the kernel starts its KV loop past the leading
-tiles. Four things move with that loop start and three of them are silent if
-wrong: the prologue's page index, the double-buffer phase (counted from the
-first tile VISITED, not tile 0), and the "apply Q RoPE once" guard.
+Decoding a window layer starts the KV loop past the leading tiles. Three
+things move with that loop start and fail silently if wrong: the prologue's
+page index, the double-buffer phase (counted from the first tile visited, not
+tile 0), and the "apply Q RoPE once" guard.
 
 This needs num_tokens < seq_len, which the megakernel's test mode cannot
-produce -- it resets request_ids to -1 at init, so every request is admitted
-fresh and prefills whole. Hence the direct launcher, which takes the page
-table verbatim.
+produce -- it resets request_ids to -1 at init, so every request prefills
+whole. Hence the direct launcher, which takes the page table verbatim.
 
 Build first:  python setup.py build_ext --inplace
 """

@@ -1,11 +1,10 @@
 """RMSNorm on a hidden size that is not a whole number of thread-tiles.
 
-The kernel used to require HIDDEN_DIM to divide both NUM_THREADS and the
-copy-async tile. GPT-OSS's 2880 divides neither (2880 % 256 = 64), so the tile
-loop now covers a short last tile.
+HIDDEN_DIM used to have to divide both NUM_THREADS and the copy-async tile;
+the tile loop now covers a short last tile.
 
-Both widths run in one task graph: 4096 keeps the old even-split path and is
-the no-regression control, 2880 exercises the new one.
+Both widths run in one task graph: 4096 is the even-split no-regression
+control, 2880 (2880 % 256 = 64) exercises the short tile.
 """
 
 import os
@@ -72,8 +71,8 @@ def main():
         if diff >= tol:
             print(f"[{name}] FAILED: disagrees with the reference")
             ok = False
-        # A row that silently normalised over the wrong length would still
-        # look smooth, so check the scale directly.
+        # Check the scale directly: normalising over the wrong length still
+        # looks smooth.
         got_rms = out.float().pow(2).mean(dim=-1).sqrt()
         ref_rms = ref.float().pow(2).mean(dim=-1).sqrt()
         if (got_rms - ref_rms).abs().max().item() >= 0.05:

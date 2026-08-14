@@ -3,16 +3,14 @@
 A sink is an extra softmax logit that carries no value, so it only enters the
 denominator. Three cases as three layers of one task graph:
 
-  nosink  no sinks input at all -- the reference path, and a no-regression
-          check on the untouched kernel
-  inert   sinks so negative that exp(sink - m) underflows to zero, which must
-          reproduce `nosink`. A sink of ZERO would not: zero is a real logit.
-  real    distinct random sinks, one per query head. They must match a
-          reference that concatenates the sink logit and drops its column,
-          and must differ from `nosink`.
+  nosink  no sinks input at all -- the reference path and no-regression control
+  inert   sinks negative enough that exp(sink - m) underflows to zero, so they
+          must reproduce `nosink`. Zero would not: zero is a real logit.
+  real    distinct random sinks, one per query head. Must match a reference
+          that concatenates the sink logit and drops its column, and must
+          differ from `nosink`.
 
-The sinks differ PER HEAD on purpose: with one shared value a wrong head
-index inside the kernel would still pass.
+Sinks differ per head, so a wrong head index fails.
 """
 
 import os

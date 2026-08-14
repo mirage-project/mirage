@@ -9,9 +9,8 @@ from ....core import bfloat16, float32, int32, int64
 from typing import Optional
 
 
-# The SM100 linear wants each task's output column slice 16-byte aligned (a
-# multiple of 8); the MoE group GEMM wants the same. 2880 is not a multiple of
-# 128, so the Qwen3 demos' "output // 128" rule does not carry over.
+# The SM100 linear and the MoE group GEMM both want each task's output column
+# slice 16-byte aligned, i.e. a multiple of 8.
 def _grid_x(output_size: int, cols_per_task: int = 64) -> int:
     assert output_size % cols_per_task == 0
     assert cols_per_task % 8 == 0
@@ -46,9 +45,8 @@ class GptOssBuilder(GraphBuilder):
         assert self.world_size == 1, "GPT-OSS is single-GPU for now"
 
         # Loaded on the host: the conversions below transpose and
-        # de-interleave whole expert tensors, so holding the original and
-        # the converted copy on the GPU at once would need twice the
-        # model. Each converted tensor moves to the GPU in _attach.
+        # de-interleave whole expert tensors, so holding both copies on the
+        # GPU would need twice the model. _attach moves each one over.
         model = AutoModelForCausalLM.from_pretrained(
             source, dtype=torch.bfloat16, device_map="cpu")
         self.tokenizer = AutoTokenizer.from_pretrained(source)
@@ -58,9 +56,8 @@ class GptOssBuilder(GraphBuilder):
         self.hidden_size = cfg.hidden_size
         self.intermediate_size = cfg.intermediate_size
         self.vocab_size = cfg.vocab_size
-        # Padded so that both grid rules land on legal column slices: 201728 is
-        # a multiple of 256, which is what grid_for_rmsnorm_linear_layer picks
-        # at this width.
+        # 201728 is a multiple of 256, the slice
+        # grid_for_rmsnorm_linear_layer picks at this width.
         self.padded_vocab_size = 201728
         self.num_q_heads = cfg.num_attention_heads
         self.num_kv_heads = cfg.num_key_value_heads
@@ -74,10 +71,10 @@ class GptOssBuilder(GraphBuilder):
         self.swiglu_limit = getattr(cfg, "swiglu_limit", 7.0)
         self.fused_qkv_size = (self.num_q_heads + 2 * self.num_kv_heads) * self.head_dim
 
-        # RoPE straight from the model's own module, so YaRN (including its
-        # attention_scaling) is never re-derived here. GPT-OSS's tables are
-        # half-width because they are broadcast against the two rotate-half
-        # chunks; MPK's kernel indexes a full head_dim row, so duplicate them.
+        # RoPE from the model's own module, so YaRN and its attention_scaling
+        # are not re-derived here. Its tables are half-width, broadcast against
+        # the two rotate-half chunks; MPK's kernel indexes a full head_dim row,
+        # so duplicate them.
         dummy = torch.empty(0, dtype=torch.bfloat16)
         positions = torch.arange(self.mpk.max_seq_length).unsqueeze(0)
         cos, sin = model.model.rotary_emb(dummy, positions)
@@ -264,10 +261,9 @@ class GptOssBuilder(GraphBuilder):
                              if self.layer_types[i] == "sliding_attention" else 0),
                 sinks=sinks)
 
-            # o_proj: A@B + bias + x is two addends and the epilogue has one
-            # slot. The residual goes in the fused slot (it is the one that
-            # must be added exactly once ahead of a tensor-parallel allreduce)
-            # and the bias follows as a separate add.
+            # o_proj has two addends and the epilogue one slot. The residual
+            # takes it, since it must be added exactly once ahead of a
+            # tensor-parallel allreduce; the bias follows as a separate add.
             self.mpk.linear_with_residual_layer(
                 input=self.attn_out,
                 weight=self._attach(sd[f"{prefix}self_attn.o_proj.weight"],
