@@ -57,8 +57,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_split_sm100_task_impl(
 
   // PAGE_SIZE stays the LOGICAL page size (tokens per page) for
   // seq_len and pos_in_page; only row addressing uses the stride.
-  constexpr int PAGE_ROWS =
-      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
+  constexpr int PAGE_ROWS = PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
 
   // Sequence metadata
   int const first_token_pos = qo_indptr_buffer_ptr[request_id];

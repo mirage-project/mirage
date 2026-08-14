@@ -87,8 +87,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
   // Physical rows per page. PAGE_SIZE stays the LOGICAL page size (tokens
   // per page) used for seq_len math and page_offset; only row addressing
   // scales by the stride.
-  constexpr int PAGE_ROWS =
-      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
+  constexpr int PAGE_ROWS = PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
   cutlass::arch::NamedBarrier wg_barrier(
       NUM_THREADS, /*bar-id*/ CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
   if (threadIdx.x < NUM_THREADS) {

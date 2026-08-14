@@ -423,18 +423,14 @@ class Qwen3Model(Qwen3PreTrainedModel):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        # KV 2.0: the plan is the single source of truth for cache shape.
-        # Caller passes one in; built here otherwise, which is also the
+        # The caller passes a plan in; built here otherwise, which is the
         # only option through from_pretrained.
         kv_plan = kv_plan or plan_qwen3_kv_cache(config, world_size, page_size)
         self.kv_plan = kv_plan
-        # One page pool for the whole cache. K and V are two COMPONENTS of a
-        # page, matching per_entry_bytes above, which counts both: a page id
-        # therefore covers a layer's K and V together, drawn once from the
-        # shared free list. Each view keeps the (L, N, P, H, D) shape the
-        # layers and kernels already expect — L is kv_plan.num_slots, N the
-        # max number of pages, P the page size in tokens — and differs only
-        # in being strided by the whole page.
+        # One page pool for the whole cache. K and V are two components of a
+        # page, so a page id covers a layer's K and V together. Each view is
+        # (L, N, P, H, D) = slots, pages, page size in tokens, heads, dim, and
+        # is strided by the whole page.
         entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
         self.kv_pool, kv_views = kv_plan.allocate_pool(
             {g.spec_name: [("k", entry_shape, torch.bfloat16),

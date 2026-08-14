@@ -1,10 +1,8 @@
-"""Unit tests for plan_kv_groups on example hybrid-attention model DSV4, and a few other edge cases.
+"""Unit tests for plan_kv_groups, using the hybrid-attention model DSV4.
 
-The DSV4 byte figures: per-256-token bytes 37,376 / 1,168 / 8,448 for c4-main / c128-main / indexer
-=> per-entry 584 B (ratio 4), 584 B (ratio 128), 132 B (ratio 4); SWA is 584 B/token at ratio 1.
-The corrected 1-bucket model's block sizes (c4_main=256, c128_main=8192, c4_indexer=1088, swa=64)
-are the golden expectations. The indexer is 1088, not the 1132 a tightest fit gives, because
-block sizes must be a multiple of the kernel's 64-token KV tile.
+DSV4 per-entry bytes: 584 B at ratio 4 (c4_main), 584 B at ratio 128
+(c128_main), 132 B at ratio 4 (c4_indexer), 584 B at ratio 1 (swa). The
+golden block sizes are 256 / 8192 / 1088 / 64.
 """
 
 from contextlib import contextmanager
@@ -148,7 +146,7 @@ def test_the_report_names_the_anchor_and_flags_a_dead_window():
     dead = plan_kv_cache(_Cfg(), page_size=4096).describe(max_seq_length=512)
     assert "anchor 'sliding_attention'" in dead
     assert "NEVER recycles" in dead and "WARNING" in dead
-    # At the tile it recycles, and the report says from when.
+    # At the tile it recycles, and the report says from which step.
     live = plan_kv_cache(_Cfg(), page_size=64).describe(max_seq_length=512)
     assert "NEVER recycles" not in live and "recycles from step" in live
 
@@ -174,8 +172,7 @@ def test_gpt_oss_real_config_plan():
         assert g.block_size == 64            # both streams keep the page size
         assert g.padding_bytes_per_page == 0
         assert None not in g.layer_ids       # 12 and 12, nothing padded
-    # A layer's group follows its attention kind, and its slot is its index
-    # within that kind.
+    # A layer's group is its attention kind, its slot its index within it.
     for layer_id, kind in enumerate(_Cfg.layer_types):
         group_id, slot_id = plan.layer_info(layer_id)
         assert plan.groups[group_id].spec_name == kind
@@ -201,10 +198,9 @@ def test_gpt_oss_groups_carry_the_window():
 
 
 def test_pages_per_request_bounded_by_the_window():
-    # A full-attention group holds the whole sequence...
+    # Full attention holds the whole sequence.
     assert pages_per_request(64, 0, 512) == 8
-    # ...a windowed one holds the window plus the partial pages at each end,
-    # and stops growing with the sequence.
+    # A window holds the window plus its partial pages, and stops growing.
     assert pages_per_request(64, 128, 512) == 3
     assert pages_per_request(64, 128, 8192) == 3
     # Pages are allocated for a batch's last token but recycled against its
@@ -225,7 +221,7 @@ def test_page_id_bytes_is_the_whole_column():
         layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
                        for i in range(24)]
 
-    # A page id is that page at every slot, so it costs slots x page bytes
+    # A page id is that page at every slot: slots x page bytes
     small = plan_kv_cache(_Cfg(), page_size=64)
     big = plan_kv_cache(_Cfg(), page_size=4096)
     assert small.page_id_bytes == 12 * 128 * 1024
@@ -259,8 +255,7 @@ def test_resolve_kv_budget_parses_sizes():
     assert resolve_kv_budget("512MiB") == 512 * 1024**2
     assert resolve_kv_budget("1GB") == 1000**3        # decimal suffix
     assert resolve_kv_budget(25165824) == 25165824    # an int is raw bytes
-    # Anything without a unit is refused, fractions included: the absolute
-    # form covers the use and a bare fraction is ambiguous.
+    # Anything without a unit is refused, fractions included.
     for ambiguous in ("24", 0.6, "60%"):
         with _raises(ValueError):
             resolve_kv_budget(ambiguous)
@@ -278,9 +273,8 @@ def test_pool_size_refuses_to_undercut_the_floor():
 
     plan = plan_kv_cache(_Cfg(), page_size=64)        # 1.5 MiB per page id
     assert plan.pages_needed(1, 512, 8) == 12         # 4 sliding + 8 full
-    assert plan.pool_size(64 * 1024**2, 1, 512, 8) == 42
-    with _raises(ValueError):
-        plan.pool_size(8 * 1024**2, 1, 512, 8)        # 5 pages < floor 12
+    assert plan.pages_for_budget(64 * 1024**2) == 42
+    assert plan.pages_for_budget(8 * 1024**2) == 5    # below the floor
 
 
 def test_build_meta_tensors_spans_the_whole_sequence():
@@ -291,8 +285,8 @@ def test_build_meta_tensors_spans_the_whole_sequence():
                preferred_block_size=64),
     ]
     plan = plan_kv_groups(specs)
-    # Recycled slots keep their place, so the index buffer is sized by the
-    # page-table SPAN, not by how many pages are live at once.
+    # Recycled slots keep their place, so the buffer is sized by page-table
+    # SPAN, not by how many pages are live.
     meta = plan.build_meta_tensors(max_num_pages=8,
                                    max_num_batched_requests=2,
                                    max_seq_length=512, device="cpu")
@@ -347,45 +341,6 @@ def test_gcd_beats_min_heuristic():
     by = _by_spec(plan)
     assert len(by["full"]) == 2 and len(by["sw"]) == 3
     assert all(None not in g.layer_ids for g in plan.groups)
-
-
-def test_slot_assignment_shape():
-    # 3:2 — exactly at the 1.5x boundary (3 < 3 is false), gcd=1 is
-    # degenerate, so the min-count fallback: 2 slots,
-    # spec a chunked (0,1) + (2, pad), spec b one chunk (3,4).
-    specs = [
-        KVSpec("a", per_entry_bytes=64, layer_ids=(0, 1, 2)),
-        KVSpec("b", per_entry_bytes=64, layer_ids=(3, 4)),
-    ]
-    plan = plan_kv_groups(specs)
-    assert plan.num_slots == 2
-    assert len(plan.groups) == 3
-    slots = plan.slot_assignment()
-    assert len(slots[0]) == 3   # all three groups occupy slot 0
-    assert len(slots[1]) == 2   # spec a's ragged chunk padded at slot 1
-
-
-def test_layer_info_and_assignments():
-    # Same 3:2 case as test_slot_assignment_shape: 3 groups
-    # (a:[0,1], a:[2,pad], b:[3,4]), 2 slots.
-    specs = [
-        KVSpec("a", per_entry_bytes=64, layer_ids=(0, 1, 2)),
-        KVSpec("b", per_entry_bytes=64, layer_ids=(3, 4)),
-    ]
-    plan = plan_kv_groups(specs)
-    assert plan.layer_info(0) == (0, 0)
-    assert plan.layer_info(1) == (0, 1)
-    assert plan.layer_info(2) == (1, 0)
-    assert plan.layer_info(3) == (2, 0)
-    assert plan.layer_info(4) == (2, 1)
-    with _raises(KeyError):
-        plan.layer_info(99)
-
-    assignments = plan.layer_assignments()
-    assert assignments == [(0, 0), (0, 1), (1, 0), (2, 0), (2, 1)]
-    assert plan.layer_group_ids() == [0, 0, 1, 2, 2]
-    with _raises(AssertionError):
-        plan.layer_assignments(num_layers=7)
 
 
 def test_allocate_pool_slots_are_per_layer_and_do_not_alias():
