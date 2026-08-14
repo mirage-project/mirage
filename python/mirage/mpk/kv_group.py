@@ -55,8 +55,10 @@ class KVSpec:
         pages that have fallen out of the window, so a window stream holds
         roughly the window instead of the whole sequence. Declaring it
         promises that every layer of this stream masks with that window.
-    block_size_multiple_of: kernel constraint on ENTRIES per page (e.g. a
-        TMA tile multiple).
+    block_size_multiple_of: the attention kernel's KV tile, in raw TOKENS
+        (the kernels' `PAGE_SIZE` holds tokens despite the name, and they
+        static_assert `PAGE_SIZE % KV_TILE_SIZE == 0`). None takes
+        default_kv_tile().
     preferred_block_size: this stream's natural block size in raw tokens.
         The largest resulting page across specs becomes the shared page size.
     """
@@ -65,7 +67,7 @@ class KVSpec:
     layer_ids: Tuple[int, ...]
     compress_ratio: int = 1
     window_size: Optional[int] = None
-    block_size_multiple_of: int = 1
+    block_size_multiple_of: Optional[int] = None
     preferred_block_size: Optional[int] = None
 
     def __post_init__(self):
@@ -90,6 +92,25 @@ class KVUnificationError(Exception):
 # task starts loading at a tile boundary, not at the exact window edge, so a
 # page only counts as dead once it is entirely below that boundary.
 KV_WINDOW_TILE = 64
+
+
+def default_kv_tile(target_cc: Optional[int] = None) -> int:
+    """KV tile to assume for a spec that declares none.
+
+    Blackwell and Hopper are all 64. Ampere picks between 64 and 128 variants
+    inside C++ templates, so 128 is the only assumption safe for both.
+
+    Not 128 everywhere: a dense stream may fit exactly 64 entries in the page
+    (DSV4's window stream does), and flooring that to 128 leaves zero, making
+    a legal plan infeasible. Guessing too small only costs a static_assert.
+    """
+    if target_cc is None:
+        try:
+            props = torch.cuda.get_device_properties(0)
+            target_cc = props.major * 10 + props.minor
+        except Exception:
+            return 64
+    return 64 if target_cc >= 90 else 128
 
 
 @dataclass
@@ -149,10 +170,16 @@ class KVCachePlan:
         entries_per_page: int    # = block_size / compress_ratio
         padding_bytes_per_page: int
         window_size: int = 0     # 0 = full attention
+        tile: int = 64           # kernel KV tile block_size is a multiple of
+        tile_declared: bool = False   # False = took the device default
 
     target_page_bytes: int
     num_slots: int
     groups: Tuple["KVCachePlan.Group", ...]
+    # Stream whose preferred block size set the shared page; every other
+    # stream derives from it. Named so that "asked 256, got 1088" is
+    # explainable.
+    anchor_spec: Optional[str] = None
     # Set once by resolve_pool_size. The page tables and the pool must be
     # sized by the SAME number, and they are built in different places (the
     # demo builds the meta tensors, the model builder allocates the pool), so
@@ -256,6 +283,63 @@ class KVCachePlan:
             out[f"paged_kv_last_page_len_buffer_{g_id}"] = torch.zeros(
                 max_num_batched_requests, dtype=dtype, device=device)
         return out
+
+    # ── explaining the plan ───────────────────────────────────────────────
+
+    def first_recycled_step(self, group) -> Optional[int]:
+        """Step at which a windowed group first frees a page, or None if it
+        never does. Mirrors the scheduler's first_live_page arithmetic."""
+        if group.window_size <= 0:
+            return None
+        step = group.window_size
+        # first_live_page(step, W, bs) >= 1, mirroring the scheduler exactly
+        while step < group.window_size + group.block_size + KV_WINDOW_TILE:
+            live_from = max(step - group.window_size + 1, 0)
+            freed = ((live_from // KV_WINDOW_TILE) * KV_WINDOW_TILE
+                     // group.block_size)
+            if freed >= 1:
+                return step
+            step += 1
+        return None
+
+    def describe(self, max_seq_length: Optional[int] = None) -> str:
+        """How the shared page turned into each stream's block size. Streams
+        with smaller entries pack more tokens into the same page, so the
+        derivation is worth showing rather than leaving to be guessed."""
+        lines = [
+            f"KV page: {format_bytes(self.target_page_bytes)} x "
+            f"{self.num_slots} slot(s) = {format_bytes(self.page_id_bytes)} "
+            f"per page id  (anchor '{self.anchor_spec}')"
+        ]
+        warnings = []
+        for g in self.groups:
+            src = "declared" if g.tile_declared else "device default"
+            pad = (f", {g.padding_bytes_per_page} B padding"
+                   if g.padding_bytes_per_page else "")
+            note = ""
+            if g.window_size:
+                first = self.first_recycled_step(g)
+                if first is None or (max_seq_length is not None
+                                     and first >= max_seq_length):
+                    note = "  <-- window NEVER recycles"
+                    warnings.append(
+                        f"group {g.group_id} ('{g.spec_name}') has a "
+                        f"{g.window_size}-token window but a {g.block_size}-"
+                        f"token block, so no page ever falls fully outside the "
+                        f"window"
+                        + (f" within {max_seq_length} tokens"
+                           if max_seq_length is not None else "")
+                        + ". The window costs memory and saves none; lower the "
+                        "block size.")
+                else:
+                    note = f", recycles from step {first}"
+            lines.append(
+                f"  group {g.group_id} '{g.spec_name}': block {g.block_size} "
+                f"tokens ({g.entries_per_page} entries, tile {g.tile} "
+                f"{src}){pad}{note}")
+        for w in warnings:
+            lines.append(f"WARNING: {w}")
+        return "\n".join(lines)
 
     # ── per-layer wiring ──────────────────────────────────────────────────
 
@@ -451,6 +535,8 @@ def resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
         source = f"budget {kv_budget}"
 
     plan.max_num_pages = pages          # both sizing sites read it from here
+    if verbose:
+        print(plan.describe(max_seq_length))
     used = plan.budget_bytes(pages)
     free, total = torch.cuda.mem_get_info(device)
     if verbose:
@@ -469,16 +555,17 @@ def plan_kv_groups(
     specs,
     target_page_bytes: Optional[int] = None,
     default_block_size: int = 64,
+    target_cc: Optional[int] = None,
 ) -> KVCachePlan:
     """Turn KVSpec declarations into a KVCachePlan.
 
     1. Pick the shared page size: by default the largest natural page across
-       specs (preferred_block_size worth of entries), so the densest stream
-       keeps its preferred block size.
-    2. For every stream, pack as many entries per page as fit (floor,
-       honoring block_size_multiple_of; leftover bytes are bounded
-       intra-page padding). A stream whose single entry does not fit raises
-       KVUnificationError.
+       specs (the ANCHOR — preferred_block_size worth of entries), so the
+       densest stream keeps its preferred block size exactly.
+    2. Derive every other stream's block size from that page, either by an
+       exact integer ratio or by packing and padding — see ``_fit_block_size``.
+       Both honour the stream's kernel tile; a stream that cannot fit one
+       tile's worth of entries raises KVUnificationError.
     3. Chunk each stream's layers into groups of ``_group_size`` layers so
        all groups share one slot layout.
     """
@@ -487,18 +574,33 @@ def plan_kv_groups(
     names = [s.name for s in specs]
     assert len(set(names)) == len(names), f"duplicate spec names: {names}"
 
-    if target_page_bytes is None:
-        target_page_bytes = max(
-            ((s.preferred_block_size or default_block_size)
-             // s.compress_ratio) * s.per_entry_bytes
-            for s in specs)
-        # TODO(padding): this maximises block sizes but ignores how evenly
-        # each stream's entries tile the page, so a stream whose entry size
-        # does not divide the target pays for it. Padding is already
-        # measured per group, so a later pass can score several candidate
-        # page sizes and pick the one with the least total padding.
+    tiles = {s.name: (s.block_size_multiple_of if s.block_size_multiple_of
+                      else default_kv_tile(target_cc)) for s in specs}
 
-    per_spec = {s.name: _fit_block_size(s, target_page_bytes) for s in specs}
+    # The stream wanting the largest page keeps its preferred block size
+    # exactly; every other stream derives from it.
+    anchor = max(specs, key=lambda s: _natural_page_bytes(s,
+                                                          default_block_size))
+    if target_page_bytes is None:
+        target_page_bytes = _natural_page_bytes(anchor, default_block_size)
+        # The anchor's request is honoured exactly, so an illegal one must be
+        # rejected rather than floored: 100 against a 64-token tile would come
+        # back as 64 and strand a third of every page, silently.
+        anchor_block = anchor.preferred_block_size or default_block_size
+        anchor_tile = tiles[anchor.name]
+        if anchor_block % anchor_tile:
+            raise KVUnificationError(
+                f"page size {anchor_block} tokens is not a multiple of the "
+                f"{anchor_tile}-token KV tile of the anchor stream "
+                f"'{anchor.name}'. The attention kernels require it "
+                f"(static_assert(PAGE_SIZE % KV_TILE_SIZE == 0)); use "
+                f"{anchor_block // anchor_tile * anchor_tile} or "
+                f"{(anchor_block // anchor_tile + 1) * anchor_tile}.")
+
+    per_spec = {s.name: _fit_block_size(s, target_page_bytes, tiles[s.name],
+                                        default_block_size)
+                for s in specs}
+    declared = {s.name: s.block_size_multiple_of is not None for s in specs}
     group_size = _group_size([len(s.layer_ids) for s in specs])
 
     groups = []
@@ -516,12 +618,15 @@ def plan_kv_groups(
                 entries_per_page=entries,
                 padding_bytes_per_page=padding,
                 window_size=s.window_size or 0,
+                tile=tiles[s.name],
+                tile_declared=declared[s.name],
             ))
 
     return KVCachePlan(
         target_page_bytes=target_page_bytes,
         num_slots=group_size,
         groups=tuple(groups),
+        anchor_spec=anchor.name,
     )
 
 
@@ -535,17 +640,57 @@ def plan_uniform_kv_groups(num_layers: int, per_entry_bytes: int,
     return plan_kv_groups([spec])
 
 
-def _fit_block_size(spec: KVSpec, target_page_bytes: int):
-    """Largest entry count fitting one page, floored to the kernel's entry
-    multiple. Returns (block_size_tokens, entries, padding_bytes)."""
+def _natural_page_bytes(spec: KVSpec, default_block_size: int) -> int:
+    """Bytes this stream alone would want for a page, at its preferred block
+    size. The largest across streams anchors the shared page."""
+    block = spec.preferred_block_size or default_block_size
+    return (block // spec.compress_ratio) * spec.per_entry_bytes
+
+
+def _fit_block_size(spec: KVSpec, target_page_bytes: int, tile: int,
+                    default_block_size: int):
+    """Tokens of this stream one shared page holds, as
+    (block_size_tokens, entries, padding_bytes).
+
+    Two ways onto the shared page, tried in order:
+
+    1. Exact ratio: the page is a whole multiple of what this stream wants,
+       so scale its block size by that integer. No padding, and the tile
+       divisibility survives by construction.
+    2. Pack and pad: fit what the page holds, floored so block_size stays a
+       multiple of the tile. Without that floor the planner emits arbitrary
+       block sizes. Padding buys legality.
+
+    Padding is safe because every MPK kernel addresses pages by stride.
+    """
+    natural = _natural_page_bytes(spec, default_block_size)
+    if natural > 0 and target_page_bytes % natural == 0:
+        ratio = target_page_bytes // natural
+        block_size = (spec.preferred_block_size or default_block_size) * ratio
+        entries = block_size // spec.compress_ratio
+        if block_size % tile == 0:
+            return block_size, entries, (target_page_bytes
+                                         - entries * spec.per_entry_bytes)
+        # The preferred block size was not tile-legal to begin with; fall
+        # through and floor it rather than propagating the violation.
+
+    # Entries must land on a tile boundary once converted back to tokens.
+    entries_per_tile = max(tile // spec.compress_ratio, 1)
     entries = target_page_bytes // spec.per_entry_bytes
-    entries -= entries % spec.block_size_multiple_of
+    entries -= entries % entries_per_tile
     if entries <= 0:
+        want = entries_per_tile * spec.per_entry_bytes
         raise KVUnificationError(
-            f"spec {spec.name}: one entry ({spec.per_entry_bytes} B, "
-            f"multiple_of {spec.block_size_multiple_of}) does not fit a "
-            f"{target_page_bytes} B page")
+            f"spec '{spec.name}': a {target_page_bytes} B page holds "
+            f"{target_page_bytes // spec.per_entry_bytes} entries of "
+            f"{spec.per_entry_bytes} B, but its {tile}-token tile needs whole "
+            f"groups of {entries_per_tile} (>= {want} B/page). Raise another "
+            f"stream's preferred_block_size, or lower this one's "
+            f"block_size_multiple_of if its kernel allows a smaller tile.")
     block_size = entries * spec.compress_ratio
+    assert block_size % tile == 0, (
+        f"spec '{spec.name}': derived block_size {block_size} is not a "
+        f"multiple of the {tile}-token kernel tile")
     padding = target_page_bytes - entries * spec.per_entry_bytes
     return block_size, entries, padding
 
