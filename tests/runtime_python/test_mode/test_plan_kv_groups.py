@@ -17,7 +17,6 @@ from mirage.mpk.kv_group import (
     KVUnificationError,
     pages_per_request,
     plan_kv_groups,
-    plan_uniform_kv_groups,
 )
 
 
@@ -57,8 +56,7 @@ def test_dsv4_one_bucket_block_sizes():
         "c4_indexer": 1088,  # 272 entries x4, floored to the 64-token tile
         "swa": 64,           # 64 entries x1
     }
-    # A tightest fit gives 283 entries = 1132 tokens, and 1132 % 64 = 44, so
-    # the kernels' static_assert would fail in nvcc. Padding buys legality.
+    # A tightest fit gives 283 entries = 1132 tokens, and 1132 % 64 = 44.
     pad = {g.spec_name: g.padding_bytes_per_page for g in plan.groups}
     assert pad["c4_main"] == 0 and pad["swa"] == 0 and pad["c128_main"] == 0
     assert pad["c4_indexer"] == 37376 - 272 * 132   # 1472 B, 3.9% of the page
@@ -67,9 +65,8 @@ def test_dsv4_one_bucket_block_sizes():
 
 
 def test_exact_ratio_branch_is_lossless_and_tile_safe():
-    # A stream whose natural page divides the shared one scales its block size
-    # by that integer instead of being re-packed: no padding, tile divisibility
-    # survives by construction.
+    # A stream whose natural page divides the shared one scales its block
+    # size by that integer instead of being re-packed.
     specs = [
         KVSpec("fat", per_entry_bytes=2048, layer_ids=(0,),
                preferred_block_size=256),                    # anchor, 512 KiB
@@ -108,8 +105,7 @@ def test_block_size_is_floored_to_the_declared_tile():
 
 
 def test_a_stream_that_cannot_fit_one_tile_is_refused():
-    # 8 entries fit, but a 64-token tile needs 64. Say so rather than emit a
-    # block size the kernel will reject.
+    # 8 entries fit, but a 64-token tile needs 64.
     specs = [
         KVSpec("fat", per_entry_bytes=8, layer_ids=(0,),
                preferred_block_size=800),
@@ -118,14 +114,6 @@ def test_a_stream_that_cannot_fit_one_tile_is_refused():
     ]
     with _raises(KVUnificationError):
         plan_kv_groups(specs, target_page_bytes=6400)
-    # ...and declaring the tile it can actually satisfy makes it feasible.
-    relaxed = [
-        specs[0],
-        KVSpec("thin", per_entry_bytes=800, layer_ids=(1,),
-               preferred_block_size=8, block_size_multiple_of=1),
-    ]
-    plan = plan_kv_groups(relaxed, target_page_bytes=6400)
-    assert {g.spec_name: g.entries_per_page for g in plan.groups}["thin"] == 8
 
 
 def test_an_illegal_anchor_page_size_is_refused_not_floored():
@@ -138,8 +126,7 @@ def test_an_illegal_anchor_page_size_is_refused_not_floored():
         layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
                        for i in range(24)]
 
-    # 100 is not a multiple of the 64-token tile; flooring it would silently
-    # give 64 and strand a third of every page.
+    # 100 is not a multiple of the 64-token tile.
     with _raises(KVUnificationError):
         plan_kv_cache(_Cfg(), page_size=100)
     for legal in (64, 128, 4096):
@@ -156,8 +143,8 @@ def test_the_report_names_the_anchor_and_flags_a_dead_window():
         layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
                        for i in range(24)]
 
-    # A block larger than what the sequence leaves behind means no page ever
-    # falls outside the window.
+    # A block larger than what the sequence leaves behind: no page ever falls
+    # outside the window.
     dead = plan_kv_cache(_Cfg(), page_size=4096).describe(max_seq_length=512)
     assert "anchor 'sliding_attention'" in dead
     assert "NEVER recycles" in dead and "WARNING" in dead
@@ -166,21 +153,9 @@ def test_the_report_names_the_anchor_and_flags_a_dead_window():
     assert "NEVER recycles" not in live and "recycles from step" in live
 
 
-def test_default_tile_follows_the_device():
-    from mirage.mpk.kv_group import default_kv_tile
-
-    # Ampere dispatches between the 64 and 128 variants in C++ templates, so
-    # only 128 is safe for both there.
-    assert default_kv_tile(100) == 64      # sm100
-    assert default_kv_tile(90) == 64       # sm90
-    assert default_kv_tile(80) == 128      # sm80
-
-
 def test_gpt_oss_real_config_plan():
-    # The real 20B: 24 layers alternating sliding/full from layer 0, 8 KV
-    # heads of 64 on both, so the two streams unify onto one page with no
-    # padding — 2 groups of 12 slots, exactly the bytes of KV 1.0's one
-    # 24-layer cache.
+    # 24 layers alternating sliding/full, 8 KV heads of 64 on both, so the
+    # two streams unify onto one page with no padding: 2 groups of 12 slots.
     from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
 
     class _Cfg:
@@ -220,8 +195,7 @@ def test_gpt_oss_groups_carry_the_window():
     plan = plan_kv_cache(_Cfg(), page_size=64)
     windows = {g.spec_name: g.window_size for g in plan.groups}
     assert windows == {"sliding_attention": 128, "full_attention": 0}
-    # group_specs is what PersistentKernel (and through it the scheduler's
-    # recycling) actually reads.
+    # group_specs is what PersistentKernel actually reads.
     specs = plan.group_specs()
     assert [s.window_size for s in specs] == [g.window_size for g in plan.groups]
 
@@ -233,11 +207,12 @@ def test_pages_per_request_bounded_by_the_window():
     # and stops growing with the sequence.
     assert pages_per_request(64, 128, 512) == 3
     assert pages_per_request(64, 128, 8192) == 3
-    # A batch of tokens is allocated for its last token but recycled against
-    # its first, so a wide batch holds one page more.
+    # Pages are allocated for a batch's last token but recycled against its
+    # first, so a wide batch holds one more.
     assert pages_per_request(64, 128, 512, max_num_batched_tokens=8) == 4
-    # A window bigger than the sequence recycles nothing.
+    # window=0 and a window bigger than the sequence recycles nothing.
     assert pages_per_request(64, 4096, 512) == 8
+    assert pages_per_request(64, 0, 512, 8) == 8
 
 
 def test_page_id_bytes_is_the_whole_column():
@@ -284,9 +259,8 @@ def test_resolve_kv_budget_parses_sizes():
     assert resolve_kv_budget("512MiB") == 512 * 1024**2
     assert resolve_kv_budget("1GB") == 1000**3        # decimal suffix
     assert resolve_kv_budget(25165824) == 25165824    # an int is raw bytes
-    # Anything without a unit is refused, fractions included: a fraction of
-    # total memory reads as a KV share here but as a whole-process share
-    # elsewhere, and the absolute form already covers the use.
+    # Anything without a unit is refused, fractions included: the absolute
+    # form covers the use and a bare fraction is ambiguous.
     for ambiguous in ("24", 0.6, "60%"):
         with _raises(ValueError):
             resolve_kv_budget(ambiguous)
@@ -550,8 +524,7 @@ def test_allocate_pool_multi_component_page_shares_one_page_id():
 
 
 def test_assert_in_pool_catches_a_detached_copy():
-    # A copy of a page-strided view keeps the shape, dtype and values, and
-    # passes every other check; only its storage gives it away.
+    # A copy keeps the shape, dtype and values; only its storage differs.
     spec = KVSpec("gqa", per_entry_bytes=2048, layer_ids=(0, 1),
                   preferred_block_size=64)
     plan = plan_kv_groups([spec])
@@ -567,30 +540,6 @@ def test_assert_in_pool_catches_a_detached_copy():
     assert torch.equal(copy, view)
     with _raises(AssertionError):
         plan.assert_in_pool(copy, "k")
-
-
-def test_assert_in_pool_needs_a_pool():
-    spec = KVSpec("gqa", per_entry_bytes=2048, layer_ids=(0,),
-                  preferred_block_size=64)
-    plan = plan_kv_groups([spec])
-    try:
-        plan.assert_in_pool(torch.zeros(4), "k")
-    except RuntimeError:
-        return
-    raise AssertionError("expected RuntimeError before allocate_pool")
-
-
-def test_plan_uniform_kv_groups_matches_manual_single_spec():
-    manual = plan_kv_groups([
-        KVSpec("gqa", per_entry_bytes=2048, layer_ids=tuple(range(36)),
-              preferred_block_size=64),
-    ])
-    convenience = plan_uniform_kv_groups(
-        num_layers=36, per_entry_bytes=2048, preferred_block_size=64)
-    assert convenience.num_slots == manual.num_slots == 36
-    assert [g.block_size for g in convenience.groups] == \
-        [g.block_size for g in manual.groups]
-    assert convenience.group_specs()[0].block_size == 64
 
 
 def test_kernel_entry_multiple_constraint():

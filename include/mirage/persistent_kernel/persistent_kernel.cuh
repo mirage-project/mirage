@@ -243,13 +243,10 @@ __global__ void prepare_kernel(RuntimeConfig config,
 #endif
 
 // Index of the oldest page a sliding-window group may still read, for a
-// request whose next batch of queries starts at absolute position `step`.
-//
-// The kernel masks out every key at or below `step - window`, and it starts
-// loading at the tile boundary below that edge (attention_sm100.cuh's
-// first_kv_iter), so pages entirely below that boundary are dead for this
-// step -- and for every later one, since `step` only grows. Returns 0 (free
-// nothing) for a full-attention group.
+// request whose next queries start at absolute position `step`. The kernel
+// starts loading at the tile boundary below `step - window`, so pages
+// entirely below it are dead, and stay dead as `step` grows. 0 for a
+// full-attention group.
 __device__ __forceinline__ int first_live_page(int step, int window,
                                                int block_size) {
   if (window <= 0) {
@@ -328,8 +325,8 @@ __device__ __forceinline__ bool
           int num_pg = config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
           for (int j = 0; j < num_pg; j++) {
             int page_id = config.paged_kv_indices_buffer[g][kv_indptr_g + j];
-            // -1 marks a slot whose page was already recycled mid-request
-            // (sliding window); the id is back in the queue, don't free twice.
+            // -1 marks a slot recycled mid-request; the id is already back
+            // in the queue.
             if (page_id < 0) {
               continue;
             }
@@ -364,8 +361,8 @@ __device__ __forceinline__ bool
     if (request_id != -1) {
       if (num_reqs != i) {
         // An earlier slot's request finished, so this one moves down: every
-        // per-request buffer is rewritten at `num_reqs` while still being read
-        // at `i`. Recorded so a test can prove this path actually ran.
+        // per-request buffer is rewritten at `num_reqs` while still read at
+        // `i`.
         MPK_KV_LOG(4, -1, i, num_reqs);
       }
       config.request_ids[num_reqs] = request_id;
@@ -420,12 +417,11 @@ __device__ __forceinline__ bool
         }
 #ifndef MPK_SPEC_DECODE
         // Sliding window: return the pages this request can no longer read.
-        // The page-table SPAN is kept and the slot poisoned with -1, because
-        // the attention kernel indexes page_indices by ABSOLUTE page number
-        // and derives seq_len from the span -- dropping entries would shift
-        // both. Only the physical page goes back to the shared free list.
-        // (Skipped under spec-decode: its TAIL_OFFSET makes the kernel start
-        // earlier than the window edge alone implies.)
+        // The page-table SPAN is kept and the slot poisoned with -1, since the
+        // kernel indexes page_indices by absolute page number and derives
+        // seq_len from the span. Only the physical page is freed. Skipped
+        // under spec-decode, whose TAIL_OFFSET starts the kernel earlier than
+        // the window edge implies.
         {
           int first_live =
               first_live_page(step, config.kv_group_window_sizes[g], bs);
@@ -475,8 +471,8 @@ __device__ __forceinline__ bool
         config.paged_kv_last_page_len_buffer[g][num_reqs] =
             (_lpl == 0) ? bs : _lpl;
       }
-      // A new request starts at position 0, so nothing has fallen out of a
-      // window yet -- recycling only ever fires on the existing-request path.
+      // A new request starts at position 0, so nothing has left a window
+      // yet.
       for (int j = 0; j < num_new_pages_g; j++) {
         assert(page_queue_head < page_queue_tail &&
                "KV page pool exhausted: raise max_num_pages");
@@ -569,9 +565,8 @@ __device__ __forceinline__ bool
 // Lock-free power-of-2 rings: index = cursor & (MPK_PINNED_RING_CAPACITY - 1).
 __device__ __forceinline__ bool
     prepare_next_batch(RuntimeConfig const &config) {
-  // Online scheduler stages snapshots page in STATIC shared memory, capped
-  // at 48 KB per block on every architecture. So online_pinned puts a hard 
-  // ceiling on the pool: groups x pages x 4 B must fit.
+  // This scheduler stages the page table in STATIC shared memory, capped at
+  // 48 KB per block, so groups x pages x 4 B is a hard ceiling on the pool.
   static_assert(MPK_NUM_KV_GROUPS * (long)MPK_MAX_NUM_PAGES * sizeof(int) <=
                     40 * 1024,
                 "online_pinned scheduler: MPK_NUM_KV_GROUPS x "

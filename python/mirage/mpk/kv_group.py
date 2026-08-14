@@ -88,21 +88,16 @@ class KVUnificationError(Exception):
 
 
 # Tokens per KV tile in the windowed attention kernel (attention_sm100.cuh's
-# KV_TILE_SIZE, mirrored by MPK_KV_WINDOW_TILE in runtime_header.h). A windowed
-# task starts loading at a tile boundary, not at the exact window edge, so a
-# page only counts as dead once it is entirely below that boundary.
+# KV_TILE_SIZE, mirrored by MPK_KV_WINDOW_TILE). A windowed task starts
+# loading at a tile boundary, so a page is dead only once entirely below it.
 KV_WINDOW_TILE = 64
 
 
 def default_kv_tile(target_cc: Optional[int] = None) -> int:
     """KV tile to assume for a spec that declares none.
 
-    Blackwell and Hopper are all 64. Ampere picks between 64 and 128 variants
-    inside C++ templates, so 128 is the only assumption safe for both.
-
-    Not 128 everywhere: a dense stream may fit exactly 64 entries in the page
-    (DSV4's window stream does), and flooring that to 128 leaves zero, making
-    a legal plan infeasible. Guessing too small only costs a static_assert.
+    Blackwell and Hopper are all 64. Ampere picks between 64- and 128-tile
+    variants inside C++ templates, so only 128 is safe for both.
     """
     if target_cc is None:
         try:
@@ -177,13 +172,11 @@ class KVCachePlan:
     num_slots: int
     groups: Tuple["KVCachePlan.Group", ...]
     # Stream whose preferred block size set the shared page; every other
-    # stream derives from it. Named so that "asked 256, got 1088" is
-    # explainable.
+    # stream derives from it.
     anchor_spec: Optional[str] = None
-    # Set once by resolve_pool_size. The page tables and the pool must be
-    # sized by the SAME number, and they are built in different places (the
-    # demo builds the meta tensors, the model builder allocates the pool), so
-    # recording it here lets both read it and lets a mismatch be caught.
+    # Set once by resolve_pool_size. The page tables and the pool are built
+    # in different places and must be sized by the SAME number, so both read
+    # it from here.
     max_num_pages: Optional[int] = None
 
     # ── what PersistentKernel consumes ────────────────────────────────────
@@ -258,10 +251,9 @@ class KVCachePlan:
                            max_seq_length: Optional[int] = None,
                            dtype=torch.int32, device: str = "cuda"):
         """Page-table buffers (indptr / indices / last_page_len) for every
-        group, keyed as PersistentKernel.__init__ expects. Merge into the
-        meta_tensors dict BEFORE constructing PersistentKernel.
+        group. Merge into meta_tensors dict before constructing PersistentKernel.
 
-        The indices buffer is indexed by ABSOLUTE page number within a
+        The indices buffer is indexed by absolute page number within a
         request, so it must cover the whole sequence even when a windowed
         group holds far fewer pages than that (recycled slots stay in place,
         holding -1). Pass ``max_seq_length`` to size it for that; without it
@@ -288,7 +280,7 @@ class KVCachePlan:
 
     def first_recycled_step(self, group) -> Optional[int]:
         """Step at which a windowed group first frees a page, or None if it
-        never does. Mirrors the scheduler's first_live_page arithmetic."""
+        never does. Mirrors the scheduler's first_live_page."""
         if group.window_size <= 0:
             return None
         step = group.window_size
@@ -304,8 +296,7 @@ class KVCachePlan:
 
     def describe(self, max_seq_length: Optional[int] = None) -> str:
         """How the shared page turned into each stream's block size. Streams
-        with smaller entries pack more tokens into the same page, so the
-        derivation is worth showing rather than leaving to be guessed."""
+        with smaller entries pack more tokens into the same page."""
         lines = [
             f"KV page: {format_bytes(self.target_page_bytes)} x "
             f"{self.num_slots} slot(s) = {format_bytes(self.page_id_bytes)} "
@@ -453,13 +444,10 @@ class KVCachePlan:
     def assert_in_pool(self, tensor, name: str = "tensor"):
         """A cache tensor is a view ON the pool, not a copy of one.
 
-        Pool views are strided by the whole page, so any operation that
-        materialises them -- `.contiguous()`, `.clone()`, `.to()` on an
-        already-resident tensor -- yields a packed tensor that still has the
-        right shape, dtype and values, and still passes every other check. It
-        just no longer shares storage with the pool, so the pages the
-        scheduler hands out address nothing. This is the only observable that
-        separates the two.
+        Pool views are strided by the whole page, so anything that
+        materialises them keeps the shape, dtype and values but no longer
+        shares storage. Storage identity is the only thing that separates
+        the two.
         """
         if getattr(self, "_pool_span", None) is None:
             raise RuntimeError("allocate_pool has not run on this plan")
@@ -605,9 +593,8 @@ def plan_kv_groups(
                                                           default_block_size))
     if target_page_bytes is None:
         target_page_bytes = _natural_page_bytes(anchor, default_block_size)
-        # The anchor's request is honoured exactly, so an illegal one must be
-        # rejected rather than floored: 100 against a 64-token tile would come
-        # back as 64 and strand a third of every page, silently.
+        # The anchor's request is honoured exactly, so an illegal one is
+        # rejected rather than floored.
         anchor_block = anchor.preferred_block_size or default_block_size
         anchor_tile = tiles[anchor.name]
         if anchor_block % anchor_tile:
@@ -652,16 +639,6 @@ def plan_kv_groups(
     )
 
 
-def plan_uniform_kv_groups(num_layers: int, per_entry_bytes: int,
-                          preferred_block_size: int) -> KVCachePlan:
-    """Single-stream shorthand: one spec covering every layer. Model
-    constructors use this when the caller passes no explicit plan."""
-    spec = KVSpec("uniform", per_entry_bytes=per_entry_bytes,
-                 layer_ids=tuple(range(num_layers)),
-                 preferred_block_size=preferred_block_size)
-    return plan_kv_groups([spec])
-
-
 def _natural_page_bytes(spec: KVSpec, default_block_size: int) -> int:
     """Bytes this stream alone would want for a page, at its preferred block
     size. The largest across streams anchors the shared page."""
@@ -674,16 +651,12 @@ def _fit_block_size(spec: KVSpec, target_page_bytes: int, tile: int,
     """Tokens of this stream one shared page holds, as
     (block_size_tokens, entries, padding_bytes).
 
-    Two ways onto the shared page, tried in order:
-
-    1. Exact ratio: the page is a whole multiple of what this stream wants,
-       so scale its block size by that integer. No padding, and the tile
-       divisibility survives by construction.
+    1. Exact ratio: the page is a whole multiple of what this stream wants, so
+       scale its block size by that integer. No padding, and tile divisibility
+       survives by construction.
     2. Pack and pad: fit what the page holds, floored so block_size stays a
-       multiple of the tile. Without that floor the planner emits arbitrary
-       block sizes. Padding buys legality.
-
-    Padding is safe because every MPK kernel addresses pages by stride.
+       multiple of the tile. Padding is safe because every MPK kernel
+       addresses pages by stride.
     """
     natural = _natural_page_bytes(spec, default_block_size)
     if natural > 0 and target_page_bytes % natural == 0:

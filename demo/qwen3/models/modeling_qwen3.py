@@ -402,25 +402,31 @@ class Qwen3PreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
+def plan_qwen3_kv_cache(config, world_size: int, page_size: int):
+    """Qwen3 stores one kind of KV state, so the plan is a single stream over
+    every layer."""
+    from mirage.mpk.kv_group import KVSpec, plan_kv_groups
+
+    per_entry_bytes = (
+        2 * (config.num_key_value_heads // world_size) * config.head_dim * 2
+    )  # K + V, bf16
+    return plan_kv_groups([
+        KVSpec("attention", per_entry_bytes=per_entry_bytes,
+               layer_ids=tuple(range(config.num_hidden_layers)),
+               preferred_block_size=page_size),
+    ])
+
+
 class Qwen3Model(Qwen3PreTrainedModel):
     def __init__(self, config: Qwen3Config, world_size: int, max_num_pages: int,
                 page_size: int, kv_plan=None):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        # KV 2.0: kv_plan is the single source of truth for cache shape. Declare KVSpec type by 
-        # type (only one on qwen3), and the KV cache manager handles the planning and allocation.
-        if kv_plan is None:
-            from mirage.mpk.kv_group import plan_uniform_kv_groups
-
-            per_entry_bytes = (
-                2 * (config.num_key_value_heads // world_size) * config.head_dim * 2
-            )  # K + V, bf16
-            kv_plan = plan_uniform_kv_groups(
-                num_layers=config.num_hidden_layers,
-                per_entry_bytes=per_entry_bytes,
-                preferred_block_size=page_size)
-                
+        # KV 2.0: the plan is the single source of truth for cache shape.
+        # Caller passes one in; built here otherwise, which is also the
+        # only option through from_pretrained.
+        kv_plan = kv_plan or plan_qwen3_kv_cache(config, world_size, page_size)
         self.kv_plan = kv_plan
         # One page pool for the whole cache. K and V are two COMPONENTS of a
         # page, matching per_entry_bytes above, which counts both: a page id
