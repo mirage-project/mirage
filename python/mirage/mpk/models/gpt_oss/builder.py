@@ -56,8 +56,6 @@ class GptOssBuilder(GraphBuilder):
                  kv_plan: Optional[KVCachePlan] = None):
         super().__init__(mpk, weights)
         self.max_num_pages = mpk.max_num_pages
-        # The plan the caller used to build mpk's kv_groups; rebuilt from the
-        # config if absent, which only works when mpk was given a matching one.
         self.kv_plan = kv_plan
         self.world_size = mpk.world_size
         self.rank = mpk.mpi_rank
@@ -116,10 +114,8 @@ class GptOssBuilder(GraphBuilder):
         # One page pool for the whole cache. K and V are two COMPONENTS of a page.
         # Each view keeps the (slots, pages, tokens, H, D) shape the attention 
         # kernel already expects and differs only in being strided by the whole page.
-        if self.kv_plan is None:
-            self.kv_plan = plan_kv_cache(cfg, self.mpk.page_size,
-                                         self.world_size)
-
+        assert self.kv_plan is not None, (
+            "pass kv_plan=plan_kv_cache(config, page_size)")
         assert len(self.kv_plan.groups) == len(self.mpk.kv_groups), (
             f"the builder plans {len(self.kv_plan.groups)} KV group(s) but "
             f"mpk was built with {len(self.mpk.kv_groups)} — pass "
@@ -288,10 +284,9 @@ class GptOssBuilder(GraphBuilder):
                 grid_dim=(_grid_x(self.fused_qkv_size, 80), 1, 1),
                 block_dim=(256, 1, 1))
 
-            # Which page table this layer reads, and which slot of the pool it
-            # owns. Attached directly rather than through _attach, which would
-            # call .contiguous() and copy a page-strided view out of the pool;
-            # assert_in_pool is what catches that if it ever happens.
+            # Which page table this layer reads, and which slot of the pool
+            # it owns. Attached directly rather than through _attach, whose
+            # .contiguous() would copy the view out of the pool.
             group_id, slot_id = self.kv_plan.layer_info(i)
             k_cache = self.mpk.attach_input(
                 torch_tensor=self.kv_plan.assert_in_pool(

@@ -388,8 +388,7 @@ def _page_stride_rows(*caches):
     A cache carved out of the shared KV pool is strided by the whole page,
     which is wider than its own entries whenever the page carries padding or
     a sibling component (K next to V). A dedicated cache is packed, and the
-    two coincide. Kernels take this instead of assuming pages sit back to
-    back; every cache in one task must agree."""
+    two coincide."""
     rows = []
     for c in caches:
         if c is None:
@@ -476,9 +475,9 @@ class PersistentKernel:
         ]:
             if _old in self.meta_tensors and _new not in self.meta_tensors:
                 self.meta_tensors[_new] = self.meta_tensors[_old]
-        # Auto-allocate per-group snapshot buffers for in-place compaction.
-        # Sized like the indices buffer they mirror: by page-table SPAN, which
-        # exceeds max_num_pages once a group recycles pages mid-request.
+        # Per-group snapshot buffers for in-place compaction, sized like the
+        # indices buffer they mirror: by page-table SPAN, which exceeds
+        # max_num_pages once a group recycles.
         for _g in range(len(self.kv_groups)):
             _snap_key = f"paged_kv_indices_snapshot_{_g}"
             if _snap_key not in self.meta_tensors and self.mode != "online_pinned":
@@ -556,15 +555,17 @@ class PersistentKernel:
         step (bounded by the window where there is one), times the batch."""
         from .kv_group import pages_per_request
 
+        # Currently only offline scheduler returns pages fallen out of a window.
+        recycles = self.mode == "offline"
         per_group = [
-            pages_per_request(g.block_size, g.window_size, self.max_seq_length,
+            pages_per_request(g.block_size,
+                              g.window_size if recycles else 0,
+                              self.max_seq_length,
                               self.max_num_batched_tokens)
             for g in self.kv_groups
         ]
         # online_pinned stages the whole page-index table in STATIC shared
-        # memory (persistent_kernel.cuh's smem_kv_indices), which is capped at
-        # 48 KB per block, put a ceiling on the pool. The kernel static_asserts
-        # this too instead of failing inside nvcc.
+        # memory, put a ceiling on the pool.
         if self.mode == "online_pinned":
             smem = len(self.kv_groups) * self.max_num_pages * 4
             assert smem <= 40 * 1024, (
@@ -1262,10 +1263,8 @@ class PersistentKernel:
             assert got == block_size, (
                 f"paged cache page dim {got} != kv_groups[{group_id}]"
                 f".block_size {block_size}")
-        # The scheduler recycles a windowed group's out-of-window pages, which
-        # is only safe while EVERY layer on that page table masks with the same
-        # window. Layers that take no window report 0 and so may not sit on a
-        # windowed group.
+        # Recycling a windowed group's pages is only safe while EVERY layer
+        # on that page table masks with the same window.
         group_window = self.kv_groups[group_id].window_size
         assert layer_window == group_window, (
             f"a layer with window_size {layer_window} reads KV group "

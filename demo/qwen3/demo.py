@@ -1,4 +1,4 @@
-from models.modeling_qwen3 import Qwen3ForCausalLM
+from models.modeling_qwen3 import Qwen3ForCausalLM, plan_qwen3_kv_cache
 from transformers import AutoTokenizer, AutoConfig
 from safetensors.torch import load_model
 import torch
@@ -9,6 +9,7 @@ import os, json
 from models.qwen3_shard_loader import Qwen3ShardLoader
 from mirage.mpk.base_dynamic_shard_loader import ShardType
 from mirage.mpk.models.utils import grid_for_splitk_linear_layer
+from mirage.mpk.kv_group import resolve_pool_size
 
 
 mapping = {
@@ -73,6 +74,9 @@ if __name__ == "__main__":
     parser.add_argument("--max-num-batched-tokens", default=8, type=int, help="Max number of tokens in a batch")
     parser.add_argument("--max-num-batched-requests", default=1, type=int, help="Max number of requests in a batch")
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
+    parser.add_argument("--kv-budget", type=str, default=None,
+                        help="Memory for the KV pool, as an absolute size "
+                             "('24GiB'). Exclusive with --max-num-pages")
     parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--trace-name", default="", help="Perfetto trace output name")
@@ -176,26 +180,46 @@ if __name__ == "__main__":
     torch.set_default_dtype(torch.bfloat16)
 
     torch.cuda.set_device(rank)
+
+    kv_plan = plan_qwen3_kv_cache(
+        AutoConfig.from_pretrained(args.model_path or model_name),
+        world_size, args.page_size)
+    try:
+        max_num_pages = resolve_pool_size(
+            kv_plan, kv_budget=args.kv_budget,
+            max_num_pages=None if args.kv_budget else args.max_num_pages,
+            max_seq_length=args.max_seq_length,
+            max_num_batched_requests=args.max_num_batched_requests,
+            max_num_batched_tokens=args.max_num_batched_tokens,
+            device=rank, verbose=args.use_mirage)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
     if args.model_path is not None or world_size == 1:
       with torch.device("cuda"):
           if args.model_path is not None:
               # load model locally (necessary for multi-GPU case)
               print(f"Load model from model path: {args.model_path}")
               config = AutoConfig.from_pretrained(args.model_path)
-              model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
+              model = Qwen3ForCausalLM(config, world_size, max_num_pages, args.page_size, kv_plan=kv_plan)
               load_model(
                   model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
               )
               # model = Qwen3ForCausalLM.from_pretrained(args.model_path, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
               tokenizer = AutoTokenizer.from_pretrained(args.model_path)
           else:
-              model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+              # No kv_plan here: from_pretrained serialises unknown kwargs
+              # through GenerationConfig, which a plan does not survive. The
+              # constructor rebuilds one from the same config.
+              model = Qwen3ForCausalLM.from_pretrained(
+                  model_name, world_size, max_num_pages=max_num_pages,
+                  page_size=args.page_size).to("cuda")
               tokenizer = AutoTokenizer.from_pretrained(model_name)
     else: # Use dynamic shard loader to load directly from HF and shard.
         print("Detected multi-GPU run without a local path specified. Will use the DynamicShardLoader class.")
         with torch.device("meta"):
             config = AutoConfig.from_pretrained(model_name)
-            model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
+            model = Qwen3ForCausalLM(config, world_size, max_num_pages, args.page_size, kv_plan=kv_plan)
 
         device = torch.device(f"cuda:{rank}")
         loader = Qwen3ShardLoader(model, model_name, mapping, rank, world_size, device)
@@ -203,6 +227,10 @@ if __name__ == "__main__":
 
         with torch.device("cuda"):
             tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # Adopt whichever plan the model ended up holding, so exactly one is live.
+    kv_plan = model.model.kv_plan
+    kv_plan.max_num_pages = max_num_pages
 
     total_num_requests = 1 if not args.use_mirage else args.max_num_batched_requests
     # get all model weight tensors
@@ -297,14 +325,12 @@ if __name__ == "__main__":
         )
             
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
-        # KV 2.0: A KVCachePlan is built internally in modeling_qwen3.py.
-        kv_plan = model.model.kv_plan
         # Create auxiliary buffers for paged (with kv_plan builder) KV and QO
         qo_indptr_buffer = torch.empty(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
         kv_meta_tensors = kv_plan.build_meta_tensors(
-            max_num_pages=args.max_num_pages,
-            max_num_batched_requests=args.max_num_batched_requests)
+            max_num_batched_requests=args.max_num_batched_requests,
+            max_seq_length=args.max_seq_length)
         mpk = mi.PersistentKernel(
             mode="offline",
             world_size=world_size,
@@ -315,7 +341,7 @@ if __name__ == "__main__":
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
-            max_num_pages=args.max_num_pages,
+            max_num_pages=max_num_pages,
             kv_groups=kv_plan.group_specs(),
             eos_token_id=model.config.eos_token_id if not args.ignore_eos else -1,
             meta_tensors={

@@ -1333,8 +1333,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   // params[11]: has_sink      (optional; sm100-only, must be 0 here)
   // params[12]: group_id      (optional, default 0)
   // Positions match the sm100 variant: Python emits one packing for every
-  // target_cc, so a field keeps its index even where this backend cannot
-  // support it.
+  // target_cc, so a field keeps its index even where it is unsupported.
   assert(params.size() == 6 || params.size() == 8 || params.size() == 10 ||
          params.size() == 11 || params.size() == 12 || params.size() == 13 ||
          params.size() == 14);
