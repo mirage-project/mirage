@@ -284,8 +284,12 @@ def test_resolve_kv_budget_parses_sizes():
     assert resolve_kv_budget("512MiB") == 512 * 1024**2
     assert resolve_kv_budget("1GB") == 1000**3        # decimal suffix
     assert resolve_kv_budget(25165824) == 25165824    # an int is raw bytes
-    with _raises(ValueError):
-        resolve_kv_budget("24")
+    # Anything without a unit is refused, fractions included: a fraction of
+    # total memory reads as a KV share here but as a whole-process share
+    # elsewhere, and the absolute form already covers the use.
+    for ambiguous in ("24", 0.6, "60%"):
+        with _raises(ValueError):
+            resolve_kv_budget(ambiguous)
 
 
 def test_pool_size_refuses_to_undercut_the_floor():
@@ -543,6 +547,37 @@ def test_allocate_pool_multi_component_page_shares_one_page_id():
     k.fill_(1.0)
     v.fill_(2.0)
     assert (k == 1.0).all() and (v == 2.0).all()
+
+
+def test_assert_in_pool_catches_a_detached_copy():
+    # A copy of a page-strided view keeps the shape, dtype and values, and
+    # passes every other check; only its storage gives it away.
+    spec = KVSpec("gqa", per_entry_bytes=2048, layer_ids=(0, 1),
+                  preferred_block_size=64)
+    plan = plan_kv_groups([spec])
+    _pool, views = plan.allocate_pool(
+        {"gqa": [("k", (8, 64), torch.bfloat16),
+                 ("v", (8, 64), torch.bfloat16)]},
+        max_num_pages=8, device="cpu")
+    view = views[0]["k"][0]
+    assert plan.assert_in_pool(view, "k") is view
+
+    copy = view.contiguous()
+    assert copy.shape == view.shape and copy.dtype == view.dtype
+    assert torch.equal(copy, view)
+    with _raises(AssertionError):
+        plan.assert_in_pool(copy, "k")
+
+
+def test_assert_in_pool_needs_a_pool():
+    spec = KVSpec("gqa", per_entry_bytes=2048, layer_ids=(0,),
+                  preferred_block_size=64)
+    plan = plan_kv_groups([spec])
+    try:
+        plan.assert_in_pool(torch.zeros(4), "k")
+    except RuntimeError:
+        return
+    raise AssertionError("expected RuntimeError before allocate_pool")
 
 
 def test_plan_uniform_kv_groups_matches_manual_single_spec():

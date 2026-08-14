@@ -415,6 +415,8 @@ class KVCachePlan:
         pool = torch.zeros(self.num_slots, max_num_pages,
                            self.target_page_bytes, dtype=torch.uint8,
                            device=device)
+        self._pool_span = (pool.data_ptr(),
+                           pool.data_ptr() + pool.numel() * pool.element_size())
         views = {}
         for g in self.groups:
             if g.spec_name not in entry_layouts:
@@ -448,6 +450,36 @@ class KVCachePlan:
             views[g.group_id] = comps
         return pool, views
 
+    def assert_in_pool(self, tensor, name: str = "tensor"):
+        """A cache tensor is a view ON the pool, not a copy of one.
+
+        Pool views are strided by the whole page, so any operation that
+        materialises them -- `.contiguous()`, `.clone()`, `.to()` on an
+        already-resident tensor -- yields a packed tensor that still has the
+        right shape, dtype and values, and still passes every other check. It
+        just no longer shares storage with the pool, so the pages the
+        scheduler hands out address nothing. This is the only observable that
+        separates the two.
+        """
+        if getattr(self, "_pool_span", None) is None:
+            raise RuntimeError("allocate_pool has not run on this plan")
+        lo, hi = self._pool_span
+        ptr = tensor.data_ptr()
+        if not lo <= ptr < hi:
+            raise AssertionError(
+                f"{name} is not a view on the KV pool: its storage is at "
+                f"0x{ptr:x}, outside the pool's [0x{lo:x}, 0x{hi:x}). "
+                f"Something copied it -- .contiguous() on a page-strided view "
+                f"is the usual cause -- so the scheduler's page ids will "
+                f"address the pool while the kernels read the copy.")
+        want = self.page_stride_elems(tensor.dtype)
+        got = tensor.stride(0)
+        if got != want:
+            raise AssertionError(
+                f"{name} has page stride {got}, expected {want}: it lives in "
+                f"the pool but is no longer addressed a whole page at a time.")
+        return tensor
+
     def page_stride_elems(self, dtype) -> int:
         """Elements between consecutive pages of a pool view of ``dtype`` —
         what a kernel must multiply a page id by. Always the full page, not
@@ -469,34 +501,24 @@ def format_bytes(nbytes: int) -> str:
     return f"{nbytes} B"
 
 
-def resolve_kv_budget(spec, device: int = 0) -> int:
-    """Turn a user-facing budget into bytes.
+def resolve_kv_budget(spec) -> int:
+    """Turn a user-facing KV budget into bytes.
 
-    Accepts a raw byte count(``"24GiB"`` / ``"512MiB"`` / ``12345678``), or
-     a fraction of the device's TOTAL memory (``0.6``, or ``"60%"``).
-
-    The fraction is of TOTAL, not free. Whether the budget actually fits is
-    a separate check at allocation time."""
-    if isinstance(spec, (int,)) and not isinstance(spec, bool):
+    Absolute sizes only: ``"24GiB"``, ``"512MiB"``, or a raw int. A bare
+    number as a string is rejected, since its unit would be a guess.
+    """
+    if isinstance(spec, int) and not isinstance(spec, bool):
         return int(spec)
-    if isinstance(spec, float):
-        frac = spec
-    else:
-        text = str(spec).strip()
-        units = {"KIB": 1024, "MIB": 1024**2, "GIB": 1024**3, "TIB": 1024**4,
-                 "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4,
-                 "B": 1}
-        upper = text.upper()
-        for suffix, scale in sorted(units.items(), key=lambda kv: -len(kv[0])):
-            if upper.endswith(suffix):
-                return int(float(text[:-len(suffix)]) * scale)
-        frac = float(text[:-1]) / 100 if upper.endswith("%") else float(text)
-    if not 0 < frac <= 1:
-        raise ValueError(
-            f"KV budget fraction must be in (0, 1], got {frac}. Use a suffix "
-            f"like '24GiB' for an absolute size.")
-    total = torch.cuda.get_device_properties(device).total_memory
-    return int(total * frac)
+    text = str(spec).strip()
+    units = {"KIB": 1024, "MIB": 1024**2, "GIB": 1024**3, "TIB": 1024**4,
+             "KB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4,
+             "B": 1}
+    upper = text.upper()
+    for suffix, scale in sorted(units.items(), key=lambda kv: -len(kv[0])):
+        if upper.endswith(suffix):
+            return int(float(text[:-len(suffix)]) * scale)
+    raise ValueError(
+        f"KV budget {spec!r} needs a unit, e.g. '24GiB' or '512MiB'.")
 
 
 def resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
@@ -529,7 +551,7 @@ def resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
                 f"({format_bytes(plan.budget_bytes(floor))})")
         source = "explicit page count"
     else:
-        budget = resolve_kv_budget(kv_budget, device)
+        budget = resolve_kv_budget(kv_budget)
         pages = plan.pool_size(budget, max_num_batched_requests,
                                max_seq_length, max_num_batched_tokens)
         source = f"budget {kv_budget}"
