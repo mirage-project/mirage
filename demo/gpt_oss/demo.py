@@ -38,18 +38,13 @@ if __name__ == "__main__":
     parser.add_argument("--max-num-batched-requests", default=1, type=int,
                         help="Max number of requests in a batch")
     parser.add_argument("--page-size", default=64, type=int,
-                        help="Tokens per page for the anchor KV stream (the "
-                             "one with the largest per-token footprint); "
-                             "other streams pack more tokens into the same "
-                             "page and the startup report shows what each "
-                             "got. Must be a multiple of the kernel's KV tile")
+                        help="Tokens per page for the KV stream with largest per-token "
+                             "footprint (same for the two KV streams in GPT-OSS).")
     parser.add_argument("--kv-budget", type=str, default=None,
-                        help="Memory for the KV pool, as an absolute size "
-                             "('24GiB'). Exclusive with --max-num-pages")
+                        help="Memory budget for KV cache as a size('24GiB')."
+                             "Exclusive with --max-num-pages")
     parser.add_argument("--max-num-pages", default=None, type=int,
-                        help="Size the pool by page count instead; a page id "
-                             "costs slots x page_bytes, which changes with "
-                             "--page-size")
+                        help="Max num pages. Exclusive with --kv-budget")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--ignore-eos", action="store_true",
                         help="Ignore eos token during generation")

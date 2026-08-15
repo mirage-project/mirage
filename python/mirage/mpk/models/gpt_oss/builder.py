@@ -19,11 +19,9 @@ def _grid_x(output_size: int, cols_per_task: int = 64) -> int:
 
 
 def plan_kv_cache(config, page_size: int, world_size: int = 1) -> KVCachePlan:
-    """GPT-OSS's two attention kinds are two KV streams.
-
-    The 12 sliding-window layers and the 12 full-attention layers store the
-    same thing per token — K and V for every KV head — so both streams get the
-    same page and the same block size, and the plan is 2 groups of 12 slots.
+    """GPT-OSS's two attention kinds has two KV streams: 12 sliding-window layers
+    and 12 full-attention layers store, storing the same thing per token. The two
+    streams share a 12 slots pool and has the same block size (logical page size).
 
     Called before ``PersistentKernel`` is constructed — ``kv_groups`` and
     the page-table meta tensors both come out of the returned plan.
@@ -111,9 +109,8 @@ class GptOssBuilder(GraphBuilder):
         self.cos_table = torch.cat([cos[0], cos[0]], dim=-1).contiguous().to(torch.bfloat16)
         self.sin_table = torch.cat([sin[0], sin[0]], dim=-1).contiguous().to(torch.bfloat16)
 
-        # One page pool for the whole cache. K and V are two COMPONENTS of a page.
-        # Each view keeps the (slots, pages, tokens, H, D) shape the attention 
-        # kernel already expects and differs only in being strided by the whole page.
+        # One page pool for cache (K and V co-located in one page), in shape
+        # (slots, pages, tokens, H, D).
         assert self.kv_plan is not None, (
             "pass kv_plan=plan_kv_cache(config, page_size)")
         assert len(self.kv_plan.groups) == len(self.mpk.kv_groups), (
