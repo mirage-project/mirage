@@ -242,8 +242,7 @@ __global__ void prepare_kernel(RuntimeConfig config,
 #endif
 
 // Index of the oldest page a sliding-window group may still read, given a
-// request whose next queries start at `step`. The kernel starts loading at
-// the tile boundary below `step - window`. 0 for a full-attention group.
+// request whose next queries start at `step`.
 __device__ __forceinline__ int
     first_live_page(int step, int window, int block_size) {
   if (window <= 0) {
@@ -415,10 +414,7 @@ __device__ __forceinline__ bool
         }
 #ifndef MPK_SPEC_DECODE
         // Sliding window: return the pages this request can no longer read.
-        // The page-table span is kept and the slot poisoned with -1, since
-        // the kernel indexes page_indices by absolute page number and takes
-        // seq_len from the span. Skipped under spec-decode, whose TAIL_OFFSET
-        // starts the kernel earlier than the window edge implies.
+        // The page-table span is kept and the slot poisoned with -1.
         {
           int first_live =
               first_live_page(step, config.kv_group_window_sizes[g], bs);
@@ -468,8 +464,7 @@ __device__ __forceinline__ bool
         config.paged_kv_last_page_len_buffer[g][num_reqs] =
             (_lpl == 0) ? bs : _lpl;
       }
-      // A new request starts at position 0, so nothing has left a window
-      // yet.
+      // A new request starts at pos 0, nothing has left a window yet.
       for (int j = 0; j < num_new_pages_g; j++) {
         assert(page_queue_head < page_queue_tail &&
                "KV page pool exhausted: raise max_num_pages");
@@ -1642,8 +1637,7 @@ extern "C" void
   global_runtime_config.new_token_nums = static_cast<int *>(meta_tensors[4]);
   global_runtime_config.prompt_length = static_cast<int *>(meta_tensors[5]);
   global_runtime_config.qo_indptr_buffer = static_cast<int *>(meta_tensors[6]);
-  // Per-group logical block sizes (tokens per page), only read by
-  // prepare_next_batch.
+  // Per-group logical block sizes (tokens per page)
   assert(kv_group_block_sizes.size() == (size_t)MPK_NUM_KV_GROUPS);
   assert(kv_group_window_sizes.size() == (size_t)MPK_NUM_KV_GROUPS);
   for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {

@@ -355,9 +355,7 @@ struct RuntimeConfig {
 #ifndef MPK_NUM_KV_GROUPS
 #define MPK_NUM_KV_GROUPS 1
 #endif
-// Tokens per KV tile in the windowed attention kernel (attention_sm100.cuh's
-// KV_TILE_SIZE). A windowed task starts loading at a tile boundary, so page
-// recycling rounds the oldest still-needed position down to it.
+// Tokens per KV tile in the windowed attention kernel.
 #ifndef MPK_KV_WINDOW_TILE
 #define MPK_KV_WINDOW_TILE 64
 #endif
@@ -371,15 +369,12 @@ struct RuntimeConfig {
                                                          // serving
   int kv_group_block_sizes[MPK_NUM_KV_GROUPS];           // Set at init, used by
                                                          // prepare_next_batch
-  // Sliding-window length in tokens per group, 0 = full attention. A group
-  // may declare a window only if EVERY layer reading its page table masks
-  // with that same window.
+  // Sliding-window length in tokens per group, 0 = full attention.
   int kv_group_window_sizes[MPK_NUM_KV_GROUPS];
 #ifdef MPK_KV_EVENT_LOG
   // Allocator event debug log: [0] = record count, then 4-int records
   // (type, group, row, page_id) with type 1=ALLOC, 2=FREE, 3=ITER. Written
-  // single-threaded from prepare_next_batch; replayed host-side by allocator
-  // tests.
+  // single-threaded from prepare_next_batch.
   int *kv_event_log;
 #endif
 #if defined(MODE_OFFLINE) || defined(MODE_ONLINE) ||                           \

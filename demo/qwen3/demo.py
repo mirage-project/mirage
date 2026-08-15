@@ -73,11 +73,10 @@ if __name__ == "__main__":
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
     parser.add_argument("--max-num-batched-tokens", default=8, type=int, help="Max number of tokens in a batch")
     parser.add_argument("--max-num-batched-requests", default=1, type=int, help="Max number of requests in a batch")
-    parser.add_argument("--page-size", default=4096, type=int, help="Page size")
+    parser.add_argument("--page-size", default=4096, type=int, help="Tokens per page")
     parser.add_argument("--kv-budget", type=str, default=None,
-                        help="Memory for the KV pool, as an absolute size "
-                             "('24GiB'). Exclusive with --max-num-pages")
-    parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
+                        help="Memory budget for KV cache as a size('24GiB'). Exclusive with --max-num-pages")
+    parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages. Exclusive with --kv-budget")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--trace-name", default="", help="Perfetto trace output name")
     parser.add_argument(

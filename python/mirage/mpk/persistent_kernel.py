@@ -240,6 +240,11 @@ def _detect_cxx_standard():
         pass
     return "-std=c++17"
 
+def _spec_decode_enabled(mpk) -> bool:
+    cfg = getattr(mpk, "spec_decode_config", None)
+    return cfg is not None and getattr(cfg, "method", None) == "eagle3"
+
+
 def get_compile_command(
     mpk,
     target_cc,
@@ -338,8 +343,7 @@ def get_compile_command(
             f"-DMPK_KV_EVENT_LOG={mpk.meta_tensors['kv_event_log'].numel()}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
 
-    spec_cfg = getattr(mpk, 'spec_decode_config', None)
-    if spec_cfg is not None and getattr(spec_cfg, 'method', None) == 'eagle3':
+    if _spec_decode_enabled(mpk):
         flags = flags + ["-DMPK_SPEC_DECODE"]
 
     if use_nvshmem:
@@ -382,13 +386,12 @@ def get_compile_command(
 
 
 def _page_stride_rows(*caches):
-    """Rows between consecutive pages of a paged cache shaped
+    """Rows between consecutive pages of a cache shaped
     [num_pages, entries_per_page, *entry_shape].
 
     A cache carved out of the shared KV pool is strided by the whole page,
     which is wider than its own entries whenever the page carries padding or
-    a sibling component (K next to V). A dedicated cache is packed, and the
-    two coincide."""
+    multiple components (K and V)."""
     rows = []
     for c in caches:
         if c is None:
@@ -475,8 +478,7 @@ class PersistentKernel:
         ]:
             if _old in self.meta_tensors and _new not in self.meta_tensors:
                 self.meta_tensors[_new] = self.meta_tensors[_old]
-        # Per-group snapshot buffers for in-place compaction, sized by
-        # page-table SPAN like the indices buffer they mirror.
+        # Per-group snapshot buffers for in-place compaction sized by page-table span.
         for _g in range(len(self.kv_groups)):
             _snap_key = f"paged_kv_indices_snapshot_{_g}"
             if _snap_key not in self.meta_tensors and self.mode != "online_pinned":
@@ -535,27 +537,19 @@ class PersistentKernel:
 
     def _kv_indices_span(self, group_id: int) -> int:
         """Entries a group's page-table index buffer must hold: one slot per
-        page of every batched request's WHOLE sequence. Recycled slots keep
-        their place (holding -1) because the attention kernels index page
-        indices by absolute page number, so this does not shrink with the
-        window."""
+        page of every batched request's whole sequence."""
         block_size = self.kv_groups[group_id].block_size
         pages_per_seq = (self.max_seq_length + block_size - 1) // block_size
         return max(self.max_num_pages,
                    self.max_num_batched_requests * pages_per_seq)
 
     def _check_kv_capacity(self):
-        """Fail at graph-build time if the page pool cannot hold the batch.
-
-        The scheduler pops page ids modulo max_num_pages, so an exhausted
-        free list silently hands out a page that is still in use — the whole
-        batch's KV then interleaves in one page. Compute the worst-case
-        demand instead: per group, the pages one request holds at its worst
-        step (bounded by the window where there is one), times the batch."""
+        """Fail at graph-build time if the page pool cannot hold the batch
+        at worst-case demand."""
         from .kv_group import pages_per_request
 
-        # Currently only offline scheduler returns pages fallen out of a window.
-        recycles = self.mode == "offline"
+        # Only the offline scheduler returns pages fallen out of a window.
+        recycles = self.mode == "offline" and not _spec_decode_enabled(self)
         per_group = [
             pages_per_request(g.block_size,
                               g.window_size if recycles else 0,

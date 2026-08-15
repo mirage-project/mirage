@@ -49,9 +49,7 @@ template <typename T,
           // [0, ROTARY_DIM), passes the rest through; cos/sin tables are
           // [max_seq_len, ROTARY_DIM]. Default = full-dim NeoX RoPE.
           int ROTARY_DIM = HEAD_DIM,
-          // Rows between consecutive pages of the KV cache. A page from a
-          // shared pool can be wider than this stream's own entries, so page
-          // ids scale by this rather than by PAGE_SIZE. 0 = packed layout.
+          // Rows between consecutive pages. 0 = packed layout.
           int PAGE_STRIDE_ROWS = 0>
 __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     void *paged_k_cache_ptr,
@@ -73,9 +71,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     void *output_ptr,
     void *lse = nullptr,
     int kv_idx = 0) {
-  // PAGE_SIZE stays the LOGICAL page size (tokens per page) used for
-  // seq_len and page_offset; only row addressing scales by the stride.
-  constexpr int PAGE_ROWS = PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
+  // Stride between consecutive pages of K or V.
+  constexpr int PAGE_STRIDE =
+      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
   constexpr int KV_TILE_SIZE = 64;
@@ -330,7 +328,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         // int page_idx = page_indices[(dst_row + cp_finished_seq_len) /
         // PAGE_SIZE];
         int page_offset = (dst_row + kv_cache_offset) % PAGE_SIZE;
-        int src_row = page_idx_0 * PAGE_ROWS + page_offset;
+        int src_row = page_idx_0 * PAGE_STRIDE + page_offset;
         load_smem(k_buffer_smem(dst_row, col),
                   paged_k_cache_dmem(src_row, col));
         load_smem(v_buffer_smem(dst_row, col),
@@ -376,7 +374,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
             int page_offset =
                 (dst_row + (iter + 1) * KV_TILE_SIZE + kv_cache_offset) %
                 PAGE_SIZE;
-            int src_row = page_idx * PAGE_ROWS + page_offset;
+            int src_row = page_idx * PAGE_STRIDE + page_offset;
             load_smem(k_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
             load_smem(v_smem(dst_row, col), paged_v_cache_dmem(src_row, col));
           } else {
@@ -570,7 +568,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
               (token_idx + first_kv_token_to_process + kv_cache_offset) %
               PAGE_SIZE;
           int src_row = (token_idx + first_kv_token_to_process) % KV_TILE_SIZE;
-          int dst_row = page_idx * PAGE_ROWS + page_offset;
+          int dst_row = page_idx * PAGE_STRIDE + page_offset;
           paged_k_cache_dmem.at(dst_row, col) = k_smem.at(src_row, col);
           paged_v_cache_dmem.at(dst_row, col) = v_smem.at(src_row, col);
         }

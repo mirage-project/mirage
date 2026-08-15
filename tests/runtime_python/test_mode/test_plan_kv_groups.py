@@ -1,8 +1,5 @@
-"""Unit tests for plan_kv_groups, using the hybrid-attention model DSV4.
-
-DSV4 per-entry bytes: 584 B at ratio 4 (c4_main), 584 B at ratio 128
-(c128_main), 132 B at ratio 4 (c4_indexer), 584 B at ratio 1 (swa). The
-golden block sizes are 256 / 8192 / 1088 / 64.
+"""
+Unit tests for plan_kv_groups.
 """
 
 from contextlib import contextmanager
@@ -261,7 +258,7 @@ def test_resolve_kv_budget_parses_sizes():
             resolve_kv_budget(ambiguous)
 
 
-def test_pool_size_refuses_to_undercut_the_floor():
+def test_a_small_budget_lands_under_the_floor():
     from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
 
     class _Cfg:
@@ -274,6 +271,7 @@ def test_pool_size_refuses_to_undercut_the_floor():
     plan = plan_kv_cache(_Cfg(), page_size=64)        # 1.5 MiB per page id
     assert plan.pages_needed(1, 512, 8) == 12         # 4 sliding + 8 full
     assert plan.pages_for_budget(64 * 1024**2) == 42
+    # resolve_pool_size is what refuses this; it needs CUDA, so not here.
     assert plan.pages_for_budget(8 * 1024**2) == 5    # below the floor
 
 
