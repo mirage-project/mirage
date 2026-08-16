@@ -191,25 +191,23 @@ class KVCachePlan:
                               max_num_batched_tokens)
             for g in self.groups)
 
-    def build_meta_tensors(self, max_num_pages: Optional[int] = None,
+    def build_meta_tensors(self, *, max_seq_length: int,
+                           max_num_pages: Optional[int] = None,
                            max_num_batched_requests: int = 1,
-                           max_seq_length: Optional[int] = None,
                            dtype=torch.int32, device: str = "cuda"):
         """Page-table buffers (indptr / indices / last_page_len) for every
         group. Merge into meta_tensors dict before constructing PersistentKernel.
 
         The indices buffer is indexed by absolute page number within a
-        request. Without ``max_seq_length`` it only fits ``max_num_pages`` entries.
+        request. A recycled slot keeps its place holding -1 and the span no
+        longer follows the live page count, so ``max_seq_length`` is required.
         """
         max_num_pages = self._pool_pages(max_num_pages)
         out = {}
         for g_id, g in enumerate(self.groups):
-            span = max_num_pages
-            if max_seq_length is not None:
-                span = max(max_num_pages,
-                           max_num_batched_requests
-                           * ((max_seq_length + g.block_size - 1)
-                              // g.block_size))
+            span = max(max_num_pages,
+                       max_num_batched_requests
+                       * ((max_seq_length + g.block_size - 1) // g.block_size))
             out[f"paged_kv_indptr_buffer_{g_id}"] = torch.zeros(
                 max_num_batched_requests + 1, dtype=dtype, device=device)
             out[f"paged_kv_indices_buffer_{g_id}"] = torch.zeros(

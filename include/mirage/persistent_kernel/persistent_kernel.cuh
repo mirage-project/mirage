@@ -241,6 +241,15 @@ __global__ void prepare_kernel(RuntimeConfig config,
 #define MPK_KV_LOG(t, g, r, p)
 #endif
 
+#define MPK_REQUIRE_FREE_PAGE(head, tail)                                      \
+  do {                                                                         \
+    if ((head) >= (tail)) {                                                    \
+      printf("[MPK] KV page pool exhausted: raise the KV budget, raise the "   \
+             "page size, or lower max_seq_length\n");                          \
+      __trap();                                                                \
+    }                                                                          \
+  } while (0)
+
 // Index of the oldest page a sliding-window group may still read, given a
 // request whose next queries start at `step`.
 __device__ __forceinline__ int
@@ -402,8 +411,7 @@ __device__ __forceinline__ bool
               config.paged_kv_indices_snapshot[g][kv_indptr_g + j];
         }
         for (int j = num_old_pages_g; j < num_new_pages_g; j++) {
-          assert(page_queue_head < page_queue_tail &&
-                 "KV page pool exhausted: raise max_num_pages");
+          MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
           MPK_KV_LOG(1,
                      g,
                      num_reqs,
@@ -466,8 +474,7 @@ __device__ __forceinline__ bool
       }
       // A new request starts at pos 0, nothing has left a window yet.
       for (int j = 0; j < num_new_pages_g; j++) {
-        assert(page_queue_head < page_queue_tail &&
-               "KV page pool exhausted: raise max_num_pages");
+        MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
         MPK_KV_LOG(1,
                    g,
                    num_reqs,
@@ -711,8 +718,7 @@ __device__ __forceinline__ bool
       }
       // NOTE: the online path does not recycle sliding-window pages yet
       for (int j = num_old_pages_g; j < num_new_pages_g; j++) {
-        assert(page_queue_head < page_queue_tail &&
-               "KV page pool exhausted: raise max_num_pages");
+        MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
             config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
         page_queue_head++;
@@ -778,8 +784,7 @@ __device__ __forceinline__ bool
       config.paged_kv_last_page_len_buffer[g][num_reqs] =
           (initial_step + num_new_tokens) % bs;
       for (int j = 0; j < num_new_pages_g; j++) {
-        assert(page_queue_head < page_queue_tail &&
-               "KV page pool exhausted: raise max_num_pages");
+        MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
             config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
         page_queue_head++;
