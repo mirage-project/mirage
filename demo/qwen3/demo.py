@@ -9,7 +9,7 @@ import os, json
 from models.qwen3_shard_loader import Qwen3ShardLoader
 from mirage.mpk.base_dynamic_shard_loader import ShardType
 from mirage.mpk.models.utils import grid_for_splitk_linear_layer
-from mirage.mpk.kv_group import resolve_pool_size
+from mirage.mpk.kv_planner import resolve_pool_size
 
 
 mapping = {

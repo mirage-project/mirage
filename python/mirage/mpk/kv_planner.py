@@ -1,18 +1,18 @@
-"""KV cache planning for models with more than one kind of KV state.
+"""KV cache planner that supports hybrid KV streams.
 
-Several KV streams with different per-token byte costs share ONE physical
-page pool: every page is the same number of bytes, handed out at runtime from
-a single free list.
+KV streams with different sizes and layouts share one cache pool: pages in
+the same physical size are handed out at runtime from a single free list.
 
-- stream (KVSpec): one kind of KV state, declared by the model builder.
-- page: one fixed-size row of physical memory (target_page_bytes).
-- block_size: raw tokens one page holds for a given stream; streams with
-  smaller or compressed entries pack more tokens per page.
-- group: one page table, shared by layers that advance through pages in
-  lockstep. A stream with many layers is split into same-shaped groups.
+Pool shape: ``[num_slots, max_num_pages, target_page_bytes]``.
+
+- stream (KVSpec): one type of cache element, declared by the model builder.
+- page: one row of physical memory.
+- block_size: raw tokens one page holds for a given stream.
+- group: partitioned (by layers) or grouped KVSpec that share one page.
 - slot: index of one physical tensor. Layer i of every group shares the
-  tensor at slot i; pages are byte-identical across groups.
+  tensor at slot i.
 
+Usage:
     plan = plan_kv_groups([KVSpec(...), KVSpec(...)])
     pool, views = plan.allocate_pool(entry_layouts, max_num_pages)
     pk = PersistentKernel(kv_groups=plan.group_specs(),
@@ -32,18 +32,15 @@ import torch
 class KVSpec:
     """One KV stream declared by a model builder.
 
-    per_entry_bytes: bytes of one stored entry (one raw token when
-        uncompressed; one compressed record otherwise).
-    layer_ids: layers carrying this stream. A layer may appear in several
-        specs (e.g. a main cache plus an indexer cache on the same layer).
+    per_entry_bytes: bytes of one stored entry.
+    layer_ids: layers carrying this stream.
     compress_ratio: raw tokens folded into one stored entry.
-    window_size: sliding-window length in raw tokens. Declaring it promises
-        that every layer of this stream masks with that window.
-    block_size_multiple_of: the attention kernel's KV tile, in raw TOKENS.
-        The kernels static_assert PAGE_SIZE % KV_TILE_SIZE == 0, where their
-        PAGE_SIZE holds tokens. None takes default_kv_tile().
+    window_size: sliding-window length in raw tokens.
+    block_size_multiple_of: restrictions for block size, in raw tokens,
+        e.g., by the attention kernel's KV tile. None takes default_kv_tile().
     preferred_block_size: this stream's natural block size in raw tokens.
-        The largest resulting page across specs becomes the shared page size.
+        The largest resulting page across specs becomes the shared page size, 
+        and other specs pack to the same size.
     """
     name: str
     per_entry_bytes: int
@@ -66,7 +63,8 @@ class KVSpec:
 
 class KVUnificationError(Exception):
     """A stream does not fit the shared page size, so a single-page-size plan
-    is impossible. Multi-bucket planning might be a future work."""
+    is impossible. Multi-bucket planning might be a future work for models work
+    better with multiple page sizes."""
 
 
 # Tokens per KV tile in the windowed attention kernel. A windowed task starts
@@ -75,11 +73,7 @@ KV_WINDOW_TILE = 64
 
 
 def default_kv_tile(target_cc: Optional[int] = None) -> int:
-    """KV tile to assume for a spec that declares none.
-
-    Blackwell and Hopper are all 64. Ampere picks between 64- and 128-tile
-    variants inside C++ templates, so only 128 is safe for both.
-    """
+    """KV tile to assume for a spec that declares none."""
     if target_cc is None:
         try:
             props = torch.cuda.get_device_properties(0)
@@ -125,8 +119,7 @@ def pages_per_request(block_size: int, window_size: int, max_seq_length: int,
 @dataclass
 class KVCachePlan:
     """Planner output: a prescription only. The builder allocates tensors
-    (``allocate_pool``) and wires layers (``layer_info``); the plan itself
-    holds no GPU state."""
+    (``allocate_pool``) and wires layers (``layer_info``)."""
 
     @dataclass
     class Group:
@@ -206,9 +199,8 @@ class KVCachePlan:
         group. Merge into meta_tensors dict before constructing PersistentKernel.
 
         The indices buffer is indexed by absolute page number within a
-        request, so it covers the whole sequence even where a windowed group
-        holds fewer pages (recycled slots stay in place, holding -1). Without
-        ``max_seq_length`` it only fits ``max_num_pages`` entries."""
+        request. Without ``max_seq_length`` it only fits ``max_num_pages`` entries.
+        """
         max_num_pages = self._pool_pages(max_num_pages)
         out = {}
         for g_id, g in enumerate(self.groups):
@@ -252,18 +244,16 @@ class KVCachePlan:
             note = ""
             if g.window_size:
                 first = self.first_recycled_step(g)
-                if first is None or (max_seq_length is not None
-                                     and first >= max_seq_length):
-                    note = "  <-- window NEVER recycles"
+                if max_seq_length is not None and first >= max_seq_length:
+                    note = "  <-- window never recycles here"
                     warnings.append(
-                        f"group {g.group_id} ('{g.spec_name}') has a "
-                        f"{g.window_size}-token window but a {g.block_size}-"
-                        f"token block, so no page ever falls fully outside the "
-                        f"window"
-                        + (f" within {max_seq_length} tokens"
-                           if max_seq_length is not None else "")
-                        + ". The window costs memory and saves none; lower the "
-                        "block size.")
+                        f"group {g.group_id} ('{g.spec_name}') declares a "
+                        f"{g.window_size}-token window, but a {g.block_size}-"
+                        f"token block only frees its first page at step "
+                        f"{first}, past this {max_seq_length}-token run. The "
+                        f"window is inert at this length -- not a leak, and "
+                        f"not a reason to lower the block size, which would "
+                        f"raise the page count.")
                 else:
                     note = f", recycles from step {first}"
             lines.append(
@@ -287,24 +277,18 @@ class KVCachePlan:
                       device: str = "cuda"):
         """The entire KV cache as ONE allocation, plus typed views.
 
-        Physical layout: ``[num_slots, max_num_pages, target_page_bytes]``
-        raw bytes. A page id denotes page ``p`` of EVERY slot, and only one
-        group holds a given id at a time.
+        Shape: ``[num_slots, max_num_pages, target_page_bytes]``. A page id 
+        denotes page ``p`` of every slot, and held by one group at a time.
 
-        A stream may carve its page into several COMPONENTS (K and V for a
-        GQA stream, one blob for a latent one), laid out component-major
-        inside the page.
+        A stream may carve its page into several components (K and V), laid
+        out component-major inside the page.
 
         entry_layouts: ``{spec_name: [(component_name, entry_shape, dtype),
             ...]}``; the components' per-entry bytes must sum to at most the
             stream's per_entry_bytes.
         Returns ``(pool, views)``; ``views[group_id][component_name]`` is
             shaped ``[num_slots, max_num_pages, entries_per_page,
-            *entry_shape]`` and aliases ``pool``.
-
-        EVERY view has page stride == target_page_bytes, which exceeds its
-        packed entry span under multiple components or intra-page padding, so
-        kernels address a page by its stride — see ``page_stride_elems``."""
+            *entry_shape]`` and aliases ``pool``."""
         max_num_pages = self._pool_pages(max_num_pages)
         pool = torch.zeros(self.num_slots, max_num_pages,
                            self.target_page_bytes, dtype=torch.uint8,
@@ -345,13 +329,7 @@ class KVCachePlan:
         return pool, views
 
     def assert_in_pool(self, tensor, name: str = "tensor"):
-        """A cache tensor is a view ON the pool, not a copy of one.
-
-        Pool views are strided by the whole page, so anything that
-        materialises them keeps the shape, dtype and values but no longer
-        shares storage. Storage identity is the only thing that separates
-        the two.
-        """
+        """Assert if a cache tensor is a view ON the pool, not a copy of one."""
         if getattr(self, "_pool_span", None) is None:
             raise RuntimeError("allocate_pool has not run on this plan")
         lo, hi = self._pool_span
@@ -463,14 +441,12 @@ def plan_kv_groups(
     """Turn KVSpec declarations into a KVCachePlan.
 
     1. Pick the shared page size: by default the largest natural page across
-       specs (the ANCHOR — preferred_block_size worth of entries), so the
-       densest stream keeps its preferred block size exactly.
+       specs (the ANCHOR — preferred_block_size worth of entries).
     2. Derive every other stream's block size from that page, either by an
-       exact integer ratio or by packing and padding — see ``_fit_block_size``.
-       Both honour the stream's kernel tile; a stream that cannot fit one
-       tile's worth of entries raises KVUnificationError.
+       exact integer ratio or by packing and padding. A stream that cannot fit 
+       one tile's worth of entries raises KVUnificationError.
     3. Chunk each stream's layers into groups of ``_group_size`` layers so
-       all groups share one slot layout.
+       all groups share one slot layout with minimal waste.
     """
     specs = list(specs)
     assert specs, "need at least one KVSpec"
@@ -480,8 +456,6 @@ def plan_kv_groups(
     tiles = {s.name: (s.block_size_multiple_of if s.block_size_multiple_of
                       else default_kv_tile(target_cc)) for s in specs}
 
-    # The stream wanting the largest page keeps its preferred block size
-    # exactly; every other stream derives from it.
     anchor = max(specs, key=lambda s: _natural_page_bytes(s,
                                                           default_block_size))
     if target_page_bytes is None:
@@ -532,35 +506,23 @@ def plan_kv_groups(
 
 
 def _natural_page_bytes(spec: KVSpec, default_block_size: int) -> int:
-    """Bytes this stream alone would want for a page, at its preferred block
-    size. The largest across streams anchors the shared page."""
+    """Bytes a stream needs for a page, at its preferred block size."""
     block = spec.preferred_block_size or default_block_size
     return (block // spec.compress_ratio) * spec.per_entry_bytes
 
 
 def _fit_block_size(spec: KVSpec, target_page_bytes: int, tile: int,
                     default_block_size: int):
-    """Tokens of this stream one shared page holds, as
-    (block_size_tokens, entries, padding_bytes).
+    """Page capacity for a stream as (block_size_tokens, entries, padding_bytes).
 
-    1. Exact ratio: the page is a whole multiple of what this stream wants, so
-       scale its block size by that integer. No padding, and tile divisibility
-       survives by construction.
-    2. Pack and pad: fit what the page holds, floored so block_size stays a
-       multiple of the tile. Padding is safe because every MPK kernel
-       addresses pages by stride.
+    Fit what the page holds, floored to a multiple of the tile and the leftover 
+    is padding. Safe because MPK kernels address pages by stride.
+
+    TODO: Co-optimize with the put/get granularity to balance the padding overhead
+    and scheduler cost.
+    TODO: A stream whose page size does not scale with block_size (Mamba-style)
+    will need pads without repacking.
     """
-    natural = _natural_page_bytes(spec, default_block_size)
-    if natural > 0 and target_page_bytes % natural == 0:
-        ratio = target_page_bytes // natural
-        block_size = (spec.preferred_block_size or default_block_size) * ratio
-        entries = block_size // spec.compress_ratio
-        if block_size % tile == 0:
-            return block_size, entries, (target_page_bytes
-                                         - entries * spec.per_entry_bytes)
-        # The preferred block size was not tile-legal to begin with; fall
-        # through and floor it rather than propagating the violation.
-
     # Entries must land on a tile boundary once converted back to tokens.
     entries_per_tile = max(tile // spec.compress_ratio, 1)
     entries = target_page_bytes // spec.per_entry_bytes
@@ -584,8 +546,7 @@ def _group_size(layer_counts):
     """Slots per group. A group with k real layers padded to S slots strands
     (S-k)/S of every page it holds, so:
 
-    - near-equal counts (hi < 1.5 * lo): pad the smaller stream up — bounded
-      waste, fewest groups;
+    - near-equal counts (hi < 1.5 * lo): pad the smaller stream up;
     - otherwise, a usable gcd (>= lo/2): split with zero padding;
     - degenerate gcd: fall back to the smallest count (only the ragged last
       chunk gets padded)."""
@@ -605,7 +566,7 @@ class KVEventLog:
     """Record-and-verify instrumentation for the runtime page allocator.
 
     Constructing one wires a ``kv_event_log`` meta tensor into the kernel
-    before pk.compile(). After the kernel ran, ``verify()`` replays the log
+    before compilation. After the kernel ran, ``verify()`` replays the log
     and asserts allocator invariants.
 
     Log format: log[0] = event count; event i is 4 ints at [4i+1 .. 4i+4] =

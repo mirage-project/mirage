@@ -6,7 +6,7 @@ from contextlib import contextmanager
 
 import torch
 
-from mirage.mpk.kv_group import (
+from mirage.mpk.kv_planner import (
     KVEventLog,
     KVSpec,
     KVUnificationError,
@@ -31,7 +31,21 @@ def _by_spec(plan):
     return out
 
 
-def test_dsv4_one_bucket_block_sizes():
+class _GptOssCfg:
+    """gpt-oss-20b's shape: 24 layers alternating sliding/full, 8 KV heads of 64."""
+    num_key_value_heads = 8
+    head_dim = 64
+    sliding_window = 128
+    layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
+                   for i in range(24)]
+
+
+def _gpt_oss_plan(page_size):
+    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
+    return plan_kv_cache(_GptOssCfg(), page_size=page_size)
+
+
+def test_four_streams_at_mixed_compression_share_one_page():
     specs = [
         KVSpec("c4_main", per_entry_bytes=584, layer_ids=(0,),
                compress_ratio=4, preferred_block_size=256),
@@ -59,9 +73,9 @@ def test_dsv4_one_bucket_block_sizes():
         assert g.block_size % 64 == 0, f"{g.spec_name} is not tile-legal"
 
 
-def test_exact_ratio_branch_is_lossless_and_tile_safe():
-    # A stream whose natural page divides the shared one scales its block
-    # size by that integer instead of being re-packed.
+def test_an_exact_multiple_page_is_lossless_and_tile_safe():
+    # A stream whose natural page divides the shared one keeps its block
+    # size scaled by that integer: the tile floor removes nothing.
     specs = [
         KVSpec("fat", per_entry_bytes=2048, layer_ids=(0,),
                preferred_block_size=256),                    # anchor, 512 KiB
@@ -112,55 +126,31 @@ def test_a_stream_that_cannot_fit_one_tile_is_refused():
 
 
 def test_an_illegal_anchor_page_size_is_refused_not_floored():
-    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
-
-    class _Cfg:
-        num_key_value_heads = 8
-        head_dim = 64
-        sliding_window = 128
-        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
-                       for i in range(24)]
-
     # 100 is not a multiple of the 64-token tile.
     with _raises(KVUnificationError):
-        plan_kv_cache(_Cfg(), page_size=100)
+        _gpt_oss_plan(100)
     for legal in (64, 128, 4096):
-        assert plan_kv_cache(_Cfg(), page_size=legal).groups[0].block_size == legal
+        assert _gpt_oss_plan(legal).groups[0].block_size == legal
 
 
 def test_the_report_names_the_anchor_and_flags_a_dead_window():
-    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
-
-    class _Cfg:
-        num_key_value_heads = 8
-        head_dim = 64
-        sliding_window = 128
-        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
-                       for i in range(24)]
-
-    # A block larger than what the sequence leaves behind: no page ever falls
-    # outside the window.
-    dead = plan_kv_cache(_Cfg(), page_size=4096).describe(max_seq_length=512)
+    # A block whose first recycle lands past the run: the window is inert
+    # here, so the report says so without telling the user to shrink it.
+    dead = _gpt_oss_plan(4096).describe(max_seq_length=512)
     assert "anchor 'sliding_attention'" in dead
-    assert "NEVER recycles" in dead and "WARNING" in dead
-    # At the tile it recycles, and the report says from which step.
-    live = plan_kv_cache(_Cfg(), page_size=64).describe(max_seq_length=512)
-    assert "NEVER recycles" not in live and "recycles from step" in live
+    assert "never recycles here" in dead and "WARNING" in dead
+    assert "not a reason to lower the block size" in dead
+    # The same plan over a long enough run does recycle, so no warning.
+    assert "WARNING" not in _gpt_oss_plan(4096).describe(max_seq_length=131072)
+    # At the tile it recycles early, and the report says from which step.
+    live = _gpt_oss_plan(64).describe(max_seq_length=512)
+    assert "never recycles" not in live and "recycles from step" in live
 
 
 def test_gpt_oss_real_config_plan():
     # 24 layers alternating sliding/full, 8 KV heads of 64 on both, so the
     # two streams unify onto one page with no padding: 2 groups of 12 slots.
-    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
-
-    class _Cfg:
-        num_key_value_heads = 8
-        head_dim = 64
-        sliding_window = 128
-        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
-                       for i in range(24)]
-
-    plan = plan_kv_cache(_Cfg(), page_size=64)
+    plan = _gpt_oss_plan(64)
     assert plan.target_page_bytes == 64 * 2 * 8 * 64 * 2
     assert plan.num_slots == 12 and len(plan.groups) == 2
     by = _by_spec(plan)
@@ -170,23 +160,14 @@ def test_gpt_oss_real_config_plan():
         assert g.padding_bytes_per_page == 0
         assert None not in g.layer_ids       # 12 and 12, nothing padded
     # A layer's group is its attention kind, its slot its index within it.
-    for layer_id, kind in enumerate(_Cfg.layer_types):
+    for layer_id, kind in enumerate(_GptOssCfg.layer_types):
         group_id, slot_id = plan.layer_info(layer_id)
         assert plan.groups[group_id].spec_name == kind
         assert slot_id == layer_id // 2
 
 
 def test_gpt_oss_groups_carry_the_window():
-    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
-
-    class _Cfg:
-        num_key_value_heads = 8
-        head_dim = 64
-        sliding_window = 128
-        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
-                       for i in range(24)]
-
-    plan = plan_kv_cache(_Cfg(), page_size=64)
+    plan = _gpt_oss_plan(64)
     windows = {g.spec_name: g.window_size for g in plan.groups}
     assert windows == {"sliding_attention": 128, "full_attention": 0}
     # group_specs is what PersistentKernel actually reads.
@@ -209,18 +190,9 @@ def test_pages_per_request_bounded_by_the_window():
 
 
 def test_page_id_bytes_is_the_whole_column():
-    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
-
-    class _Cfg:
-        num_key_value_heads = 8
-        head_dim = 64
-        sliding_window = 128
-        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
-                       for i in range(24)]
-
     # A page id is that page at every slot: slots x page bytes
-    small = plan_kv_cache(_Cfg(), page_size=64)
-    big = plan_kv_cache(_Cfg(), page_size=4096)
+    small = _gpt_oss_plan(64)
+    big = _gpt_oss_plan(4096)
     assert small.page_id_bytes == 12 * 128 * 1024
     assert big.page_id_bytes == 64 * small.page_id_bytes
     assert small.budget_bytes(16) == 24 * 1024**2
@@ -228,16 +200,7 @@ def test_page_id_bytes_is_the_whole_column():
 
 
 def test_pages_for_budget_rounds_down_and_round_trips():
-    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
-
-    class _Cfg:
-        num_key_value_heads = 8
-        head_dim = 64
-        sliding_window = 128
-        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
-                       for i in range(24)]
-
-    plan = plan_kv_cache(_Cfg(), page_size=64)          # 1.5 MiB per page id
+    plan = _gpt_oss_plan(64)          # 1.5 MiB per page id
     assert plan.pages_for_budget(24 * 1024**2) == 16
     assert plan.pages_for_budget(24 * 1024**2 - 1) == 15   # never over-commit
     assert plan.pages_for_budget(0) == 0
@@ -246,7 +209,7 @@ def test_pages_for_budget_rounds_down_and_round_trips():
 
 
 def test_resolve_kv_budget_parses_sizes():
-    from mirage.mpk.kv_group import resolve_kv_budget
+    from mirage.mpk.kv_planner import resolve_kv_budget
 
     assert resolve_kv_budget("24GiB") == 24 * 1024**3
     assert resolve_kv_budget("512MiB") == 512 * 1024**2
@@ -259,87 +222,34 @@ def test_resolve_kv_budget_parses_sizes():
 
 
 def test_a_small_budget_lands_under_the_floor():
-    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
-
-    class _Cfg:
-        num_key_value_heads = 8
-        head_dim = 64
-        sliding_window = 128
-        layer_types = ["sliding_attention" if i % 2 == 0 else "full_attention"
-                       for i in range(24)]
-
-    plan = plan_kv_cache(_Cfg(), page_size=64)        # 1.5 MiB per page id
+    plan = _gpt_oss_plan(64)        # 1.5 MiB per page id
     assert plan.pages_needed(1, 512, 8) == 12         # 4 sliding + 8 full
     assert plan.pages_for_budget(64 * 1024**2) == 42
     # resolve_pool_size is what refuses this; it needs CUDA, so not here.
     assert plan.pages_for_budget(8 * 1024**2) == 5    # below the floor
 
 
-def test_build_meta_tensors_spans_the_whole_sequence():
-    specs = [
-        KVSpec("sw", per_entry_bytes=1024, layer_ids=(0,), window_size=128,
-               preferred_block_size=64),
-        KVSpec("full", per_entry_bytes=1024, layer_ids=(1,),
-               preferred_block_size=64),
-    ]
-    plan = plan_kv_groups(specs)
-    # Recycled slots keep their place, so the buffer is sized by page-table
-    # SPAN, not by how many pages are live.
-    meta = plan.build_meta_tensors(max_num_pages=8,
-                                   max_num_batched_requests=2,
-                                   max_seq_length=512, device="cpu")
-    assert meta["paged_kv_indices_buffer_0"].shape[0] == 2 * 8
-    # Without max_seq_length the old page-count sizing is kept.
-    meta = plan.build_meta_tensors(max_num_pages=8,
-                                   max_num_batched_requests=2, device="cpu")
-    assert meta["paged_kv_indices_buffer_0"].shape[0] == 8
-
-
-def test_pad_to_max_when_counts_are_close():
-    # 12 sw + 13 full (max < 1.5*min): pad to 13, don't split
-    specs = [
-        KVSpec("sw", per_entry_bytes=1024, layer_ids=tuple(range(12)),
-               window_size=128, preferred_block_size=64),
-        KVSpec("full", per_entry_bytes=1024, layer_ids=tuple(range(12, 25)),
-               preferred_block_size=64),
-    ]
-    plan = plan_kv_groups(specs)
-    assert plan.num_slots == 13
-    assert len(plan.groups) == 2
-    by = _by_spec(plan)
-    assert by["sw"][0].layer_ids.count(None) == 1  # padded 12 -> 13
-    assert by["full"][0].layer_ids.count(None) == 0
-
-
-def test_gemma3_ratio_split():
-    # 20 sw + 4 full (5:1): group_size = gcd = 4, sw splits into 5 groups
-    specs = [
-        KVSpec("sw", per_entry_bytes=512, layer_ids=tuple(range(20)),
-               window_size=1024, preferred_block_size=64),
-        KVSpec("full", per_entry_bytes=512, layer_ids=tuple(range(20, 24)),
-               preferred_block_size=64),
-    ]
-    plan = plan_kv_groups(specs)
-    assert plan.num_slots == 4
-    by = _by_spec(plan)
-    assert len(by["sw"]) == 5 and len(by["full"]) == 1
-    assert all(None not in g.layer_ids for g in plan.groups)  # zero padding
-
-
-def test_gcd_beats_min_heuristic():
-    # 20 full + 30 sw: a min-based rule would give group_size=20 (10 padding
-    # layers); gcd gives 10 with zero padding.
-    specs = [
-        KVSpec("full", per_entry_bytes=256, layer_ids=tuple(range(20))),
-        KVSpec("sw", per_entry_bytes=256, layer_ids=tuple(range(20, 50)),
-               window_size=256),
-    ]
-    plan = plan_kv_groups(specs)
-    assert plan.num_slots == 10
-    by = _by_spec(plan)
-    assert len(by["full"]) == 2 and len(by["sw"]) == 3
-    assert all(None not in g.layer_ids for g in plan.groups)
-
+def test_group_size_picks_slots_per_group():
+    # Slots per group: pad up when the layer counts are close, otherwise
+    # split on a usable gcd. Padding strands (S-k)/S of every page the group
+    # holds, so it is only worth it when the counts are near-equal.
+    for note, n_a, n_b, slots, groups, padded in [
+        ("12 vs 13: close, pad rather than split", 12, 13, 13, (1, 1), 1),
+        ("20 vs 4 at 5:1: gcd 4, zero padding", 20, 4, 4, (5, 1), 0),
+        ("20 vs 30: gcd 10 beats a min-based 20", 20, 30, 10, (2, 3), 0),
+    ]:
+        specs = [
+            KVSpec("a", per_entry_bytes=512, layer_ids=tuple(range(n_a)),
+                   window_size=128, preferred_block_size=64),
+            KVSpec("b", per_entry_bytes=512,
+                   layer_ids=tuple(range(n_a, n_a + n_b)),
+                   preferred_block_size=64),
+        ]
+        plan = plan_kv_groups(specs)
+        by = _by_spec(plan)
+        assert plan.num_slots == slots, note
+        assert (len(by["a"]), len(by["b"])) == groups, note
+        assert sum(g.layer_ids.count(None) for g in plan.groups) == padded, note
 
 def test_allocate_pool_slots_are_per_layer_and_do_not_alias():
     # per_entry_bytes must match what the caller actually stores: an (8, 16)
@@ -504,14 +414,6 @@ def test_kernel_entry_multiple_constraint():
     assert g.block_size == 32
 
 
-def test_unification_failure_is_loud():
-    fat = KVSpec("fat", per_entry_bytes=100000, layer_ids=(0,))
-    thin = KVSpec("thin", per_entry_bytes=8, layer_ids=(1,),
-                  preferred_block_size=64)
-    with _raises(KVUnificationError):
-        plan_kv_groups([fat, thin], target_page_bytes=512)
-
-
 def test_group_specs_feed_persistent_kernel():
     specs = [
         KVSpec("full", per_entry_bytes=584, layer_ids=(0,),
@@ -524,12 +426,12 @@ def test_group_specs_feed_persistent_kernel():
     assert [g.block_size for g in gs] == [64, 64]
 
 
-def test_build_meta_tensors_shapes_and_keys():
+def test_build_meta_tensors():
     specs = [
         KVSpec("full", per_entry_bytes=64, layer_ids=(0, 1),
-              preferred_block_size=64),
+               preferred_block_size=64),
         KVSpec("sw", per_entry_bytes=64, layer_ids=(2, 3), window_size=128,
-              preferred_block_size=64),
+               preferred_block_size=64),
     ]
     plan = plan_kv_groups(specs)
     assert len(plan.groups) == 2
@@ -542,10 +444,15 @@ def test_build_meta_tensors_shapes_and_keys():
     }
     for g in range(2):
         assert meta[f"paged_kv_indptr_buffer_{g}"].shape == (5,)
-        assert meta[f"paged_kv_indices_buffer_{g}"].shape == (32,)
         assert meta[f"paged_kv_last_page_len_buffer_{g}"].shape == (4,)
         assert meta[f"paged_kv_indptr_buffer_{g}"].dtype == torch.int32
-
+        # Without max_seq_length the indices buffer is sized by page count.
+        assert meta[f"paged_kv_indices_buffer_{g}"].shape == (32,)
+    # With it, by page-table SPAN instead: recycled slots keep their place,
+    # so the buffer must cover the whole sequence, not just the live pages.
+    meta = plan.build_meta_tensors(max_num_pages=8, max_num_batched_requests=2,
+                                   max_seq_length=512, device="cpu")
+    assert meta["paged_kv_indices_buffer_0"].shape[0] == 2 * (512 // 64)
 
 class _FakePK:
     """Duck-typed PersistentKernel stand-in: KVEventLog only needs
@@ -612,7 +519,6 @@ def test_kv_event_log_replay_catches_leak_and_double_alloc():
 
 
 if __name__ == "__main__":
-    import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
         fn()

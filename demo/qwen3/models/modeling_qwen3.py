@@ -405,7 +405,7 @@ class Qwen3PreTrainedModel(PreTrainedModel):
 def plan_qwen3_kv_cache(config, world_size: int, page_size: int):
     """Qwen3 stores one kind of KV state, so the plan is a single stream over
     every layer."""
-    from mirage.mpk.kv_group import KVSpec, plan_kv_groups
+    from mirage.mpk.kv_planner import KVSpec, plan_kv_groups
 
     per_entry_bytes = (
         2 * (config.num_key_value_heads // world_size) * config.head_dim * 2
