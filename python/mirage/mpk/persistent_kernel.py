@@ -17,7 +17,7 @@ from .multigpu import (
   auto_select_allreduce_implementation
 )
 from typing import Optional
-from .kv_group import KVGroupSpec
+from .kv_planner import KVGroupSpec
 
 HARD_CODE = """
 #include <Python.h>
@@ -546,7 +546,7 @@ class PersistentKernel:
     def _check_kv_capacity(self):
         """Fail at graph-build time if the page pool cannot hold the batch
         at worst-case demand."""
-        from .kv_group import pages_per_request
+        from .kv_planner import pages_per_request
 
         # Only the offline scheduler returns pages fallen out of a window.
         recycles = self.mode == "offline" and not _spec_decode_enabled(self)

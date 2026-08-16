@@ -13,7 +13,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 import mirage as mi
-from mirage.mpk.kv_group import resolve_pool_size
+from mirage.mpk.kv_planner import resolve_pool_size
 from mirage.mpk.models.gpt_oss.builder import GptOssBuilder, plan_kv_cache
 
 DEFAULT_PROMPT = "Give me a short introduction to large language models."

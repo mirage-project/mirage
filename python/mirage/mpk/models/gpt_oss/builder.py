@@ -2,7 +2,7 @@ import torch
 
 from ..graph_builder import GraphBuilder
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
-from ...kv_group import KVCachePlan, KVSpec, plan_kv_groups
+from ...kv_planner import KVCachePlan, KVSpec, plan_kv_groups
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64
