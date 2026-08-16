@@ -1,12 +1,12 @@
 """GPT-OSS-20B on MPK. Pass --use-mirage for the megakernel, omit it for the
-HuggingFace reference; --save-tokens writes both to outputs/gpt_oss/ for a diff.
+HuggingFace reference.
 
 The checkpoint must be plain bf16. The released one is MXFP4, which MPK has no
 kernels for; convert it once with Mxfp4Config(dequantize=True).
+TODO: native MXFP4 support.
 """
 
 import argparse
-import json
 import os
 
 import torch
@@ -15,24 +15,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import mirage as mi
 from mirage.mpk.models.gpt_oss.builder import GptOssBuilder
 
-DEFAULT_SAVE_DIR = os.path.join("outputs", "gpt_oss")
-MAX_SAVE_TOKENS = 100
 DEFAULT_PROMPT = "Give me a short introduction to large language models."
-
-
-def dump(save_path, mode, token_ids, text, per_tok_ms, prompt_len):
-    """Both paths report through here, so their numbers stay comparable."""
-    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-    with open(save_path, "w") as f:
-        json.dump({
-            "token_ids": token_ids[:MAX_SAVE_TOKENS],
-            "text": text,
-            "latency_ms_per_token": per_tok_ms,
-            "prompt_length": prompt_len,
-            "generate_length": len(token_ids),
-            "mode": mode,
-        }, f, indent=2)
-    print(f"Saved tokens to {save_path}")
 
 
 if __name__ == "__main__":
@@ -59,27 +42,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--ignore-eos", action="store_true",
                         help="Ignore eos token during generation")
-    parser.add_argument(
-        "--save-tokens",
-        nargs="?",
-        const="auto",
-        default=None,
-        help=(
-            "Optionally dump first N generated token_ids, text, and latency to "
-            "JSON. If path omitted, saves to "
-            "outputs/gpt_oss/{torch_output.json|mpk_output.json}."
-        ),
-    )
     args = parser.parse_args()
-
-    if args.save_tokens:
-        if args.save_tokens == "auto":
-            filename = "mpk_output.json" if args.use_mirage else "torch_output.json"
-            save_path = os.path.join(DEFAULT_SAVE_DIR, filename)
-        else:
-            save_path = args.save_tokens
-    else:
-        save_path = None
 
     print("Input arguments:", args)
     torch.set_default_dtype(torch.bfloat16)
@@ -174,8 +137,8 @@ if __name__ == "__main__":
         with torch.no_grad():
             out = model.generate(
                 inp,
-                # pad_token_id == eos_token_id here, so generate() cannot
-                # infer the mask; pass it explicitly
+                # pad_token_id == eos_token_id here, so generate() cannot infer
+                # the mask; pass it explicitly to avoid the fallback
                 attention_mask=torch.ones_like(inp),
                 max_new_tokens=output_len, do_sample=False,
                 temperature=None, top_p=None, top_k=None,
@@ -194,7 +157,3 @@ if __name__ == "__main__":
     print(response)
     print("Prompt length {}, generate length {}, per-token latency {:.3f} ms"
           .format(prompt_len, tokens_generated, per_tok_ms))
-
-    if save_path:
-        dump(save_path, "mpk" if args.use_mirage else "torch",
-             token_ids, response, per_tok_ms, prompt_len)
