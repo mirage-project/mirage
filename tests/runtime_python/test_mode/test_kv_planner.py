@@ -435,7 +435,7 @@ def test_build_meta_tensors():
     ]
     plan = plan_kv_groups(specs)
     assert len(plan.groups) == 2
-    meta = plan.build_meta_tensors(max_num_pages=32,
+    meta = plan.build_meta_tensors(max_num_pages=32, max_seq_length=64,
                                    max_num_batched_requests=4, device="cpu")
     assert set(meta.keys()) == {
         f"paged_kv_{field}_buffer_{g}"
@@ -446,7 +446,7 @@ def test_build_meta_tensors():
         assert meta[f"paged_kv_indptr_buffer_{g}"].shape == (5,)
         assert meta[f"paged_kv_last_page_len_buffer_{g}"].shape == (4,)
         assert meta[f"paged_kv_indptr_buffer_{g}"].dtype == torch.int32
-        # Without max_seq_length the indices buffer is sized by page count.
+        # span = max(pages, requests * ceil(seq/block)) = max(32, 4*1) = 32
         assert meta[f"paged_kv_indices_buffer_{g}"].shape == (32,)
     # With it, by page-table SPAN instead: recycled slots keep their place,
     # so the buffer must cover the whole sequence, not just the live pages.
