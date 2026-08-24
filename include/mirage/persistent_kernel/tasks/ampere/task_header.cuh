@@ -5,6 +5,7 @@
 #endif // MIRAGE_USE_CUTLASS_KERNEL
 
 #include "argmax.cuh"
+#include "clamped_swiglu.cuh"
 #include "embedding.cuh"
 #include "identity.cuh"
 #include "multitoken_paged_attention.cuh"

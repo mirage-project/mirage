@@ -76,7 +76,7 @@ unsigned long long int const EVENT_NVSHMEM_TAG = 0x1e00000000000000;
 unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 typedef unsigned long long int EventCounter;
 
-int const MAX_INPUTS_PER_TASK = 7;
+int const MAX_INPUTS_PER_TASK = 8;
 int const MAX_OUTPUTS_PER_TASK = 3;
 // B200 has 148 SMs — need more workers than the default 128
 int const MAX_NUM_WORKERS = 160;
@@ -212,6 +212,11 @@ enum TaskType {
   // Sigmoid+bias top-k router (n_group=1) with folded shared expert.
   TASK_GLM_MOE_ROUTER_SM100 = 401,
   TASK_GLM_TASK_END = 449, // end placeholder, not a real task
+  // GPT-OSS (openai) tasks, SM100
+  TASK_GPT_OSS_TASK_BEGIN = 450, // begin placeholder, not a real task
+  // Clamped-alpha SwiGLU: (clamp(up) + 1) * clamp(gate) * sigmoid(gate*alpha)
+  TASK_CLAMPED_SWIGLU = 451,
+  TASK_GPT_OSS_TASK_END = 499, // end placeholder, not a real task
 };
 
 enum EventType {

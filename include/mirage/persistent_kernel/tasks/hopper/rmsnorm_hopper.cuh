@@ -23,9 +23,13 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
                                                      float eps) {
   // static_assert(BATCH_SIZE == 1);
   extern __shared__ char smem[];
-  static_assert(HIDDEN_DIM % NUM_THREADS == 0);
-  constexpr int ELTS_PER_THREAD = HIDDEN_DIM / NUM_THREADS;
-  constexpr int BYTES_PER_THREAD = ELTS_PER_THREAD * sizeof(T);
+  // The copy width is one thread's contiguous slice when the row splits
+  // evenly over the threads, and the whole row when it does not -- the tile
+  // loop below then covers a short last tile.
+  constexpr bool EVEN_SPLIT = (HIDDEN_DIM % NUM_THREADS == 0);
+  constexpr int BYTES_PER_THREAD =
+      EVEN_SPLIT ? (HIDDEN_DIM / NUM_THREADS) * (int)sizeof(T)
+                 : HIDDEN_DIM * (int)sizeof(T);
   constexpr int BYTES_PER_CP = []() {
     if constexpr (BYTES_PER_THREAD % 16 == 0) {
       return 16; // 128bit copy-async
@@ -37,9 +41,11 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
     }
   }();
   constexpr int CHUNK_SIZE = BYTES_PER_CP / sizeof(T);
+  // Every chunk is whole, so a chunk is in range exactly when it starts in
+  // range.
+  static_assert(HIDDEN_DIM % CHUNK_SIZE == 0);
   constexpr int TILE_SIZE = NUM_THREADS * CHUNK_SIZE;
-  static_assert(HIDDEN_DIM % TILE_SIZE == 0);
-  constexpr int NUM_TILES = HIDDEN_DIM / TILE_SIZE;
+  constexpr int NUM_TILES = (HIDDEN_DIM + TILE_SIZE - 1) / TILE_SIZE;
   constexpr int NUM_CHUNKS_OUTPUT =
       HIDDEN_DIM / CHUNK_SIZE; // NUM_CHUNKS_OUTPUT per batch
   constexpr int NUM_WARPS = NUM_THREADS / NUM_THREADS_PER_WARP;
@@ -74,11 +80,12 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
         static_cast<T *>(output_ptr) + batch_idx * HIDDEN_DIM;
     // Warm up input tiles for the first atoms
     {
-      load_smem<T, BYTES_PER_CP>(shared_input_buffer + threadIdx.x * CHUNK_SIZE,
-                                 curr_d_input + threadIdx.x * CHUNK_SIZE);
-      load_smem<T, BYTES_PER_CP>(shared_weight_buffer +
-                                     threadIdx.x * CHUNK_SIZE,
-                                 d_weight + threadIdx.x * CHUNK_SIZE);
+      int const off = threadIdx.x * CHUNK_SIZE;
+      if (off < HIDDEN_DIM) {
+        load_smem<T, BYTES_PER_CP>(shared_input_buffer + off,
+                                   curr_d_input + off);
+        load_smem<T, BYTES_PER_CP>(shared_weight_buffer + off, d_weight + off);
+      }
       cp_async_fence();
     }
 
@@ -87,23 +94,22 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
     for (int for_idx = 0; for_idx < NUM_TILES; for_idx++) {
       // copy
       if (for_idx + 1 < NUM_TILES) {
-        load_smem<T, BYTES_PER_CP>(shared_input_buffer +
-                                       threadIdx.x * CHUNK_SIZE +
-                                       (for_idx + 1) * TILE_SIZE,
-                                   curr_d_input + threadIdx.x * CHUNK_SIZE +
-                                       (for_idx + 1) * TILE_SIZE);
-        load_smem<T, BYTES_PER_CP>(
-            shared_weight_buffer + threadIdx.x * CHUNK_SIZE +
-                (for_idx + 1) * TILE_SIZE,
-            d_weight + threadIdx.x * CHUNK_SIZE + (for_idx + 1) * TILE_SIZE);
+        int const off = threadIdx.x * CHUNK_SIZE + (for_idx + 1) * TILE_SIZE;
+        if (off < HIDDEN_DIM) {
+          load_smem<T, BYTES_PER_CP>(shared_input_buffer + off,
+                                     curr_d_input + off);
+          load_smem<T, BYTES_PER_CP>(shared_weight_buffer + off,
+                                     d_weight + off);
+        }
         cp_async_fence();
         cp_async_wait<1>();
       } else if (for_idx + 1 == NUM_TILES) {
         cp_async_wait<0>();
       }
       __syncthreads();
-#pragma unroll
-      for (int i = threadIdx.x; i < TILE_SIZE; i += NUM_THREADS) {
+      // The last tile is short when HIDDEN_DIM is not a whole number of tiles
+      int const tile_len = min(TILE_SIZE, HIDDEN_DIM - for_idx * TILE_SIZE);
+      for (int i = threadIdx.x; i < tile_len; i += NUM_THREADS) {
         float val = (float)shared_input_buffer[for_idx * TILE_SIZE + i];
         sum += val * val;
       }

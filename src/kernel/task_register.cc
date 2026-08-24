@@ -1978,10 +1978,17 @@ int TaskRegister::register_embedding_hopper_task(
 int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params,
                                              bool with_residual) {
+  // params[0]: add the extra term on this rank. A residual is added on rank
+  //            0 only, since the following allreduce would otherwise sum it
+  //            world_size times
+  // params[1]: the extra term is a BROADCAST BIAS, one row reused by every
+  //            token (optional, default 0)
   bool rank_with_residual = with_residual;
+  bool broadcast_bias = false;
   if (with_residual) {
-    assert(params.size() == 1);
+    assert(params.size() == 1 || params.size() == 2);
     rank_with_residual = (params[0] == 1);
+    broadcast_bias = (params.size() == 2) && (params[1] > 0);
   } else {
     assert(params.size() == 0);
   }
@@ -2094,12 +2101,13 @@ int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
   code.e("TMA_OUT "
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
-  // Bias Tensor setup
+  // A broadcast bias is the same epilogue with a zero row stride, so every
+  // token reads the one stored row.
   code.e("cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $), "
          "cute::make_stride($, cute::Int<1>{}));",
          batch_size,
          output_size,
-         output_stride);
+         broadcast_bias ? 0 : output_stride);
   code.e("cute::Tensor mBias = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "$)), layout_Bias);",
@@ -2292,10 +2300,15 @@ int TaskRegister::register_paged_attention_sm100_task(
   // params[7]: tail_offset    (optional, default 0)
   // params[8]: rotary_dim     (optional, 0 = head_dim; GLM-4.6 partial RoPE)
   // params[9]: qk-norm eps as float bits (optional, default 1e-6)
-  assert(params.size() == 6 || params.size() == 8 || params.size() == 10);
+  // params[10]: window_size   (optional, 0 = full causal)
+  // params[11]: has_sink      (optional, 1 = an 8th input holds the per-head
+  //             attention sinks)
+  assert(params.size() == 6 || params.size() == 8 || params.size() == 10 ||
+         params.size() == 11 || params.size() == 12);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 7;
+  bool has_sink = (params.size() >= 12) && (params[11] > 0);
+  int num_inputs = has_sink ? 8 : 7;
   int num_outputs = 1;
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
@@ -2324,6 +2337,7 @@ int TaskRegister::register_paged_attention_sm100_task(
   if (params.size() >= 10) {
     memcpy(&qk_eps, &params[9], sizeof(float));
   }
+  int window_size = (params.size() >= 11) ? params[10] : 0;
   // Assert that k_cache has the same head_dim
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
@@ -2332,10 +2346,11 @@ int TaskRegister::register_paged_attention_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  // Pass Q_LEN_OVERRIDE, TAIL_OFFSET, MAX_TOKENS, and ROTARY_DIM explicitly.
+  // Pass Q_LEN_OVERRIDE, TAIL_OFFSET, MAX_TOKENS, ROTARY_DIM, and WINDOW_SIZE
+  // explicitly.
   code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
          "$, $, "
-         "$, $, $, $, $, $, $, $>(",
+         "$, $, $, $, $, $, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          kv_stride,
@@ -2347,7 +2362,8 @@ int TaskRegister::register_paged_attention_sm100_task(
          q_len_override,
          tail_offset,
          max_tokens,
-         rotary_dim);
+         rotary_dim,
+         window_size);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -2364,7 +2380,8 @@ int TaskRegister::register_paged_attention_sm100_task(
   code.e("    task_desc->input_ptrs[5],");
   code.e("    task_desc->input_ptrs[6],");
   code.e("    $f,", qk_eps);
-  code.e("    $f);", qk_eps);
+  code.e("    $f,", qk_eps);
+  code.e("    $);", has_sink ? "task_desc->input_ptrs[7]" : "nullptr");
   return register_task_variant(TASK_ATTN_SM100, code.to_string());
 }
 
@@ -2715,11 +2732,21 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
+  // The kernel splits a row of experts across THREADS_PER_ROW = num_experts
+  // / VPT lanes, which must be a half or whole warp, with VPT a multiple of
+  // the per-load element count (BYTES_PER_LDG / sizeof(T)). VPT 8 with
+  // 16-byte loads covers 128 and 256 experts; a narrower row needs both
+  // scaled down.
+  int vpt = 8, bytes_per_ldg = 16;
+  if (num_experts / vpt != 16 && num_experts / vpt != 32) {
+    vpt = num_experts / 16;
+    bytes_per_ldg = std::min(16, vpt * (int)sizeof(uint16_t));
+  }
   code.e("kernel::topk_softmax_task_impl<cute::bfloat16_t, $, $, $, $>(",
-         /*VPT=*/8,
+         /*VPT=*/vpt,
          /*EXPERTS=*/num_experts,
          /*WARPS_PER_TB=*/8,
-         /*BYTES_PER_LDG=*/16);
+         /*BYTES_PER_LDG=*/bytes_per_ldg);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    nullptr,");
   code.e("    task_desc->output_ptrs[0],");
@@ -2805,12 +2832,15 @@ int TaskRegister::register_moe_linear_sm100_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
     bool w13_linear) {
-  assert(params.size() == 0);
+  // params[0]: a 5th input holds a per-expert bias -- one row per expert,
+  //            reused by every token (optional, default 0)
+  assert(params.size() == 0 || params.size() == 1);
+  bool has_bias = (params.size() == 1) && (params[0] > 0);
   int num_experts = 0, num_experts_per_tok = 0, batch_size = 0, output_size = 0,
       orig_output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 4;
+  int num_inputs = has_bias ? 5 : 4;
   int num_outputs = 1;
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
@@ -2897,19 +2927,23 @@ int TaskRegister::register_moe_linear_sm100_task(
   code.e("TMA_A "
          "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0])"
          ");");
-  // Bias Tensor setup
+  // Bias Tensor setup. A per-expert bias is the same epilogue with a ZERO row
+  // stride, so every token routed to an expert reads that expert's one stored
+  // row; the kernel is unchanged.
   code.e(
       "cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $, $), "
       "cute::make_stride($, cute::Int<1>{}, $));",
       batch_size,
       output_size,
       num_experts,
-      output_stride,
-      output_stride * batch_size);
+      has_bias ? 0 : output_stride,
+      // one bias row per expert, as wide as the UNPARTITIONED output: this
+      // task's grid.y slice is already folded into the base pointer
+      has_bias ? orig_output_size : output_stride * batch_size);
   code.e("cute::Tensor mBias = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "$)), layout_Bias);",
-         "nullptr");
+         has_bias ? "task_desc->input_ptrs[4]" : "nullptr");
   // Topk_indices Tensor setup
   code.e("cute::Layout layout_routing_indices = "
          "cute::make_layout(cute::make_shape($, $), "
@@ -2977,7 +3011,7 @@ int TaskRegister::register_moe_linear_sm100_task(
          num_experts_per_tok,
          expert_stride,
          w13_linear ? "true" : "false",
-         /*no_bias*/ "true",
+         /*no_bias*/ has_bias ? "false" : "true",
          num_ab_stages,
          num_acc_stages,
          num_c_stages);
@@ -3291,6 +3325,58 @@ int TaskRegister::register_moe_silu_mul_task(threadblock::Graph const &bgraph,
   code.e("    task_desc->output_ptrs[0],");
   code.e("    $);", num_experts_per_tok * batch_size);
   return register_task_variant(TASK_SILU_MUL, code.to_string());
+}
+
+int TaskRegister::register_moe_clamped_swiglu_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: clamp limit as float bits
+  // params[1]: sigmoid scale (alpha) as float bits
+  assert(params.size() == 2);
+  float limit, alpha;
+  memcpy(&limit, &params[0], sizeof(float));
+  memcpy(&alpha, &params[1], sizeof(float));
+  int batch_size = 0, num_experts_per_tok = 0, output_size = 0, input_stride,
+      output_stride;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 3);
+  batch_size = output_ops[0]->output_tensors[0].dim[0];
+  num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
+  output_size = output_ops[0]->output_tensors[0].dim[2];
+  assert(input_ops[0]->output_tensors[0].num_dims == 3);
+  assert(input_ops[0]->output_tensors[0].dim[2] == output_size * 2);
+  assert(input_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(input_ops[0]->dtensor.owner_op);
+  input_stride = input_ops[0]->dtensor.dim[2];
+  assert(input_stride == static_cast<int>(kn_input_op->input_strides[1]));
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn_input_op = static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::clamped_swiglu_task_impl<bfloat16, $, $, $, $>(",
+         batch_size,
+         output_size,
+         input_stride,
+         output_stride);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    $f,", limit);
+  code.e("    $f,", alpha);
+  code.e("    $);", num_experts_per_tok * batch_size);
+  return register_task_variant(TASK_CLAMPED_SWIGLU, code.to_string());
 }
 
 int TaskRegister::register_moe_mul_sum_add_sm100_task(
