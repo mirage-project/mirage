@@ -16,6 +16,7 @@
 #pragma once
 #include "../common/copy_sm80.cuh"
 #include "../common/dmem_layout.cuh"
+#include "../common/kv_tiles.h"
 // #include "../element_binary.cuh"
 // #include "../element_unary.cuh"
 // #include "../mma.cuh"
@@ -76,7 +77,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
-  constexpr int KV_TILE_SIZE = 64;
+  constexpr int KV_TILE_SIZE = KV_TILE_HOPPER;
   constexpr int MAX_PAGES_PER_REQUEST =
       (MAX_SEQ_LEN + PAGE_SIZE - 1) / PAGE_SIZE;
   constexpr int THREADS_PER_WARPGROUP = 128;
@@ -272,7 +273,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
   // Currently assume that PAGE_SIZE is a multiplier of KV_TILE_SIZE
   // so that we access a single page in one iteration
-  static_assert(PAGE_SIZE % KV_TILE_SIZE == 0);
+  static_assert(PAGE_SIZE % KV_TILE_SIZE == 0,
+                "PAGE_SIZE must be a whole number of KV tiles, so that "
+                "one iteration stays within a single page");
 
   //  define barries
   Barrier *q_barrier = reinterpret_cast<Barrier *>(smem + S_Q_BARRIER_OFFSET);

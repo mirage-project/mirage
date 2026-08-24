@@ -22,6 +22,7 @@
 #include "rotary_embedding.cuh"
 #include "smem_layout.cuh"
 #include "tasks/common/common_header.cuh"
+#include "tasks/common/kv_tiles.h"
 #include "tasks/hopper/norm_hopper.cuh"
 #include "tasks/hopper/rotary_embedding_hopper.cuh"
 #include "tasks/hopper/utils.cuh"
@@ -78,7 +79,7 @@ __device__ __forceinline__ void
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
   constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
-  constexpr int KV_TILE_SIZE = 128;
+  constexpr int KV_TILE_SIZE = KV_TILE_AMPERE_32_64;
   constexpr int MAX_PAGES_PER_REQUEST =
       (MAX_SEQ_LEN + PAGE_SIZE - 1) / PAGE_SIZE;
   constexpr int THREADS_PER_WARPGROUP = 128;
@@ -302,7 +303,9 @@ __device__ __forceinline__ void
 
   // Currently assume that PAGE_SIZE is a multiplier of KV_TILE_SIZE
   // so that we access a single page in one iteration
-  static_assert(PAGE_SIZE % KV_TILE_SIZE == 0);
+  static_assert(PAGE_SIZE % KV_TILE_SIZE == 0,
+                "PAGE_SIZE must be a whole number of KV tiles, so that "
+                "one iteration stays within a single page");
 
   // 8 * 4 * 16(8 bytes per load)
 #pragma unroll

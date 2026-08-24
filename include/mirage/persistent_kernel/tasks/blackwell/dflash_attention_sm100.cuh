@@ -16,6 +16,7 @@
 #include "tasks/ampere/mma.cuh"
 #include "tasks/ampere/smem_layout.cuh"
 #include "tasks/common/common_header.cuh"
+#include "tasks/common/kv_tiles.h"
 
 #include <cutlass/arch/barrier.h>
 
@@ -219,7 +220,12 @@ __device__ __forceinline__ void dflash_attention_sm100(void const *q_ptr,
     constexpr int KVS = KV_STRIDE > 0 ? KV_STRIDE : NUM_KV_HEADS * HEAD_DIM;
     constexpr int OS = O_STRIDE > 0 ? O_STRIDE : NUM_Q_HEADS * HEAD_DIM;
     constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
-    constexpr int KV_TILE_SIZE = 64;
+    constexpr int KV_TILE_SIZE = KV_TILE_SM100;
+    // sliding_window arrives at runtime here, so unlike attention_sm100 this
+    // cannot be conditioned on it: the tile must always match the granularity
+    // prepare_next_batch frees a window's pages at.
+    static_assert(KV_TILE_SIZE == KV_WINDOW_TILE,
+                  "a windowed kernel must tile at MPK_KV_WINDOW_TILE");
     constexpr int M_ROWS = B * NUM_QO_PER_KV;      // 64
     constexpr int MMA_N_TILES = KV_TILE_SIZE / 16; // 4 (score cols per tile)
     constexpr int MMA_K_TILES = HEAD_DIM / 16;     // QK k-dim / PV n-dim

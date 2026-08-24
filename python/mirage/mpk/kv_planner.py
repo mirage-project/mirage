@@ -69,7 +69,25 @@ class KVUnificationError(Exception):
 
 # Tokens per KV tile in the windowed attention kernel. A windowed task starts
 # loading at a tile boundary, so a page is dead only once entirely below it.
-KV_WINDOW_TILE = 64
+#
+# The scheduler uses the same number under the name MPK_KV_WINDOW_TILE, and the
+# two must agree exactly or prepare_next_batch frees pages the kernel is still
+# reading. Read it from the header rather than mirroring the literal.
+def _window_tile_from_header(fallback: int = 64) -> int:
+    import re
+    from pathlib import Path
+
+    header = (Path(__file__).resolve().parents[3] / "include" / "mirage" /
+              "persistent_kernel" / "runtime_header.h")
+    try:
+        m = re.search(r"^#define\s+MPK_KV_WINDOW_TILE\s+(\d+)\s*$",
+                      header.read_text(), re.M)
+    except OSError:
+        return fallback
+    return int(m.group(1)) if m else fallback
+
+
+KV_WINDOW_TILE = _window_tile_from_header()
 
 
 def default_kv_tile(target_cc: Optional[int] = None) -> int:

@@ -17,6 +17,7 @@
 #include "norm_sm100.cuh"
 #include "tasks/ampere/mma.cuh"
 #include "tasks/common/common_header.cuh"
+#include "tasks/common/kv_tiles.h"
 // #include "../element_binary.cuh"
 // #include "../element_unary.cuh"
 // #include "../reduction.cuh"
@@ -98,7 +99,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     // [max_num_pages, page_size, num_kv_heads, head_dim]
 
     constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
-    constexpr int KV_TILE_SIZE = 64;
+    constexpr int KV_TILE_SIZE = KV_TILE_SM100;
     // NOTE(Jinchen): we use m16n16k16 mma to compute matrix multiplication
     constexpr int MMA_ITERS_M = (MAX_TOKENS * NUM_QO_PER_KV + 15) / 16;
 
@@ -265,7 +266,16 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
 
     // Currently assume that PAGE_SIZE is a multiplier of KV_TILE_SIZE
     // so that we access a single page in one iteration
-    static_assert(PAGE_SIZE % KV_TILE_SIZE == 0);
+    static_assert(PAGE_SIZE % KV_TILE_SIZE == 0,
+                  "PAGE_SIZE must be a whole number of KV tiles, so that "
+                  "one iteration stays within a single page");
+    // first_kv_iter below floors the window's start to KV_TILE_SIZE, while
+    // prepare_next_batch's first_live_page floors it to MPK_KV_WINDOW_TILE
+    // to decide which pages are safe to hand back. If the scheduler's tile
+    // were the larger of the two it would free a page this kernel still
+    // reads.
+    static_assert(WINDOW_SIZE <= 0 || KV_TILE_SIZE == KV_WINDOW_TILE,
+                  "a windowed kernel must tile at MPK_KV_WINDOW_TILE");
 
 #pragma unroll
     for (int chunk_idx = threadIdx.x;
