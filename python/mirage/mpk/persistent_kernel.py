@@ -2051,6 +2051,7 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        add_residual_once: bool = True,
     ):
         # Currently assume that input/output
         assert input.num_dims == 3  # (batch_size, num_experts_per_tok, hidden_size)
@@ -2065,16 +2066,22 @@ class PersistentKernel:
         self.kn_graph.customized([input, weight, residual, output], tb_graph)
 
         # Under tensor parallelism the MoE output is row-parallel and followed by
-        # an allreduce. The residual must be added on exactly one rank, otherwise
-        # the allreduce sums it world_size times (double-counted residual). Mirror
-        # the rank-0-only guard used by linear_with_residual_layer; the SM100
-        # kernel skips the residual add when its pointer is null (params[0]==0).
-        params = []
+        # an allreduce, so how the residual combines with it depends on what the
+        # caller passed:
+        #   add_residual_once=True  - the residual holds the same value on every
+        #       rank (a skip connection). Exactly one rank may add it, or the
+        #       allreduce counts it world_size times (double-counted residual).
+        #   add_residual_once=False - the residual is a per-rank partial that the
+        #       allreduce is meant to sum, such as a row-parallel shared-expert
+        #       output. Every rank must add the partial it was given, or the
+        #       other ranks' contributions are dropped.
+        # The SM100 kernel skips the residual add when its pointer is null
+        # (params[0]==0).
         enable_residual = 1
-        if self.world_size > 1 and self.mpi_rank != 0:
+        if add_residual_once and self.world_size > 1 and self.mpi_rank != 0:
             enable_residual = 0
-        params.append(enable_residual)
-        self.kn_graph.register_task(tb_graph, "moe_mul_sum_add_sm100", params)
+        self.kn_graph.register_task(
+            tb_graph, "moe_mul_sum_add_sm100", [enable_residual])
 
     def splitk_linear_layer(
         self,
