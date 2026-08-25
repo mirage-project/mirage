@@ -33,6 +33,7 @@ DEFAULT_SAVE_DIR = os.path.join("outputs", "qwen3")
 PAGE_SIZE = 4096
 PROMPT = "."
 
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-num-batched-tokens", default=8, type=int,
