@@ -43,6 +43,10 @@
 
 namespace kernel {
 
+#ifndef MIRAGE_SM100_FP8_UTCCP_HELPERS_DEFINED
+#define MIRAGE_SM100_FP8_UTCCP_HELPERS_DEFINED
+// The swapAB FP8 header carries the same helper implementation. Keep one
+// guarded definition because both headers are included by task_header.cuh.
 namespace detail {
 
 // 128 uint32 elements per aligned scale chunk, same assumption as deepgemm.
@@ -65,6 +69,7 @@ __device__ __forceinline__ void
 }
 
 } // namespace detail
+#endif // MIRAGE_SM100_FP8_UTCCP_HELPERS_DEFINED
 
 template <typename T_,
           typename TMA_A,
