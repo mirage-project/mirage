@@ -43,15 +43,14 @@ template <typename T,
           int SEQ_LEN,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
+          int PAGE_STRIDE,
           int MAX_TOKENS = 8,
           bool PARTITION_KV = true,
           int NUM_KV_CHUNKS = 1,
           // Partial RoPE (GLM-4.6: 64 of 128 dims). Rotates dims
           // [0, ROTARY_DIM), passes the rest through; cos/sin tables are
           // [max_seq_len, ROTARY_DIM]. Default = full-dim NeoX RoPE.
-          int ROTARY_DIM = HEAD_DIM,
-          // Rows between consecutive pages. 0 = packed layout.
-          int PAGE_STRIDE_ROWS = 0>
+          int ROTARY_DIM = HEAD_DIM>
 __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     void *paged_k_cache_ptr,
     void *paged_v_cache_ptr,
@@ -72,9 +71,6 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     void *output_ptr,
     void *lse = nullptr,
     int kv_idx = 0) {
-  // Stride between consecutive pages of K or V.
-  constexpr int PAGE_STRIDE =
-      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
   constexpr int KV_TILE_SIZE = KV_TILE_HOPPER;

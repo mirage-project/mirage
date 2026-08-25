@@ -598,12 +598,12 @@ int TaskRegister::register_paged_attention_task(
   // params[6]: q_len_override (must be 0 — Eagle3 chain is sm100-only)
   // params[7]: tail_offset    (must be 0 — Eagle3 chain is sm100-only)
   // params[8]: group_id
-  // params[9]: page_stride_rows (0 = packed pages)
+  // params[9]: page_stride (token slots between pages)
   // Fixed 10-param form shared with the sm100 variant.
   assert(params.size() == 10);
   assert(params[6] == 0 && params[7] == 0);
   int group_id = params[8];
-  int page_stride_rows = params[9];
+  int page_stride = params[9];
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -646,8 +646,8 @@ int TaskRegister::register_paged_attention_task(
          head_dim,
          max_seq_len,
          page_size,
-         max_tokens,
-         page_stride_rows);
+         page_stride,
+         max_tokens);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -1334,9 +1334,8 @@ int TaskRegister::register_paged_attention_hopper_task(
   // params[12]: group_id      (optional, default 0)
   // Positions match the sm100 variant: Python emits one packing for every
   // target_cc, so a field keeps its index even where it is unsupported.
-  assert(params.size() == 6 || params.size() == 8 || params.size() == 10 ||
-         params.size() == 11 || params.size() == 12 || params.size() == 13 ||
-         params.size() == 14);
+  // page_stride is mandatory and sits last, so the tail is always complete.
+  assert(params.size() == 14);
   if (params.size() >= 8) {
     assert(params[6] == 0 && params[7] == 0 &&
            "q_len_override/tail_offset are not supported on Hopper");
@@ -1350,8 +1349,8 @@ int TaskRegister::register_paged_attention_hopper_task(
   int group_id =
       (params.size() >= 13)
           ? params[12]
-          : 0; // params[13]: page_stride_rows (optional, 0 = packed pages)
-  int page_stride_rows = (params.size() >= 14) ? params[13] : 0;
+          : 0; // params[13]: page_stride (token slots between pages)
+  int page_stride = params[13];
 
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -1519,11 +1518,11 @@ int TaskRegister::register_paged_attention_hopper_task(
          -1,          /* SEQ_LEN (not used for non-split KV tasks)          */
          max_seq_len, /* MAX_SEQ_LEN                */
          page_size,   /* PAGE_SIZE                  */
+         page_stride, /* PAGE_STRIDE           */
          max_tokens,  /* MAX_TOKENS                 */
          "false",     /* PARTITION_KV               */
          1,           /* NUM_KV_CHUNKS              */
-         rotary_dim,  /* ROTARY_DIM               */
-         page_stride_rows /* PAGE_STRIDE_ROWS         */
+         rotary_dim   /* ROTARY_DIM               */
   );
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -2340,12 +2339,11 @@ int TaskRegister::register_paged_attention_sm100_task(
   //             attention sinks)
   // params[12]: group_id      (optional, default 0: which KV group's page
   //             table this layer reads)
-  // params[13]: page_stride_rows (optional, 0 = packed pages)
-  assert(params.size() == 6 || params.size() == 8 || params.size() == 10 ||
-         params.size() == 11 || params.size() == 12 || params.size() == 13 ||
-         params.size() == 14);
+  // params[13]: page_stride (token slots between pages)
+  // page_stride is mandatory and sits last, so the tail is always complete.
+  assert(params.size() == 14);
   int group_id = (params.size() >= 13) ? params[12] : 0;
-  int page_stride_rows = (params.size() >= 14) ? params[13] : 0;
+  int page_stride = params[13];
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   bool has_sink = (params.size() >= 12) && (params[11] > 0);
@@ -2400,12 +2398,12 @@ int TaskRegister::register_paged_attention_sm100_task(
          head_dim,
          max_seq_len,
          page_size,
+         page_stride,
          q_len_override,
          tail_offset,
          max_tokens,
          rotary_dim,
-         window_size,
-         page_stride_rows);
+         window_size);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -3947,10 +3945,10 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
   // params[5]: page_size
   // params[6]: num_kv_chunks
   // params[7]: group_id
-  // params[8]: page_stride_rows (0 = packed pages)
+  // params[8]: page_stride (token slots between pages)
   assert(params.size() == 9);
   int group_id = params[7];
-  int page_stride_rows = params[8];
+  int page_stride = params[8];
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -4000,10 +3998,10 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
          SEQ_LEN_PER_BLOCK,
          max_seq_len,
          page_size,
+         page_stride,
          max_tokens,
          "true", // PARTITION_KV
-         num_kv_chunks,
-         page_stride_rows);
+         num_kv_chunks);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -4507,7 +4505,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
   // params[5]: page_size
   // params[6]: num_kv_chunks
   // params[7]: group_id
-  // params[8]: page_stride_rows (0 = packed pages)
+  // params[8]: page_stride (token slots between pages)
   assert(params.size() == 9);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -4536,7 +4534,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
   int page_size = params[5];
   int num_kv_chunks = params[6];
   int group_id = params[7];
-  int page_stride_rows = params[8];
+  int page_stride = params[8];
   // Assert that k_cache has the same head_dim
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
@@ -4561,10 +4559,10 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
          SEQ_LEN_PER_BLOCK, /* SEQ_LEN */
          max_seq_len,       /* MAX_SEQ_LEN */
          page_size,         /* PAGE_SIZE */
+         page_stride,  /* PAGE_STRIDE */
          max_tokens,        /* MAX_TOKENS */
          "true",            /* PARTITION_KV */
-         num_kv_chunks,     /* NUM_KV_CHUNKS */
-         page_stride_rows /* PAGE_STRIDE_ROWS */);
+         num_kv_chunks /* NUM_KV_CHUNKS */);
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
   code.e("    runtime_config.qo_indptr_buffer,");
@@ -4873,7 +4871,7 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
   // params[3]: group_id
   assert(params.size() == 5);
   int group_id = params[3];
-  int page_stride_rows = params[4];
+  int page_stride = params[4];
 
   int d_k = params[0];
   int d_v = params[1];
@@ -4912,8 +4910,8 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
          d_k,
          d_v,
          page_size,
-         k_pe_row_stride,
-         page_stride_rows);
+         page_stride,
+         k_pe_row_stride);
   code.e("    c_latent_new_ptr_,");
   code.e("    k_pe_new_ptr_,");
   code.e("    task_desc->input_ptrs[2],"); // paged_cache
@@ -4940,7 +4938,7 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
   int d_v = params[1];
   int page_size = params[2];
   int group_id = params[3];
-  int page_stride_rows = params[4];
+  int page_stride = params[4];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4972,8 +4970,8 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
          d_k,
          d_v,
          page_size,
-         k_pe_row_stride,
-         page_stride_rows);
+         page_stride,
+         k_pe_row_stride);
   code.e("    c_latent_new_ptr_,");
   code.e("    k_pe_new_ptr_,");
   code.e("    task_desc->input_ptrs[2],"); // paged_cache

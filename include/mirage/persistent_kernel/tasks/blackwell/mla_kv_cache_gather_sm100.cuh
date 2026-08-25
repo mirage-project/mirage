@@ -36,9 +36,8 @@ namespace kernel {
 template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
           int D_V,       // Latent dim (512)
           int PAGE_SIZE, // Page size (e.g., 128)
-          int K_PE_ROW_STRIDE = D_K - D_V,
-          // Rows between consecutive pages. 0 = packed layout.
-          int PAGE_STRIDE_ROWS = 0>
+          int PAGE_STRIDE,
+          int K_PE_ROW_STRIDE = D_K - D_V>
 __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
     void const *c_latent_new_ptr, // [num_tokens, D_V] new c_latent (normed)
     void const *k_pe_new_ptr,     // [num_tokens, K_PE_ROW_STRIDE] new k_pe
@@ -54,9 +53,6 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   int const NUM_THREADS = 128;
   int const ROPE_DIM = D_K - D_V; // 64
 
-  // Stride between consecutive pages of K or V.
-  constexpr int PAGE_STRIDE =
-      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
 
   // Get sequence metadata for this request
   int const first_token_pos = qo_indptr_buffer_ptr[request_id];

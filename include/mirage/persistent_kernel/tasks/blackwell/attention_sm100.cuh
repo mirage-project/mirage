@@ -41,6 +41,7 @@ template <typename T,
           int HEAD_DIM,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
+          int PAGE_STRIDE,
           int Q_LEN_OVERRIDE = 0,
           int TAIL_OFFSET = 0,
           // MAX_TOKENS = per-call query rows (= mbt). Must be >= mbt yet small
@@ -57,9 +58,7 @@ template <typename T,
           int ROTARY_DIM = HEAD_DIM,
           // Sliding-window attention. A query at absolute position p attends
           // to keys in (p - WINDOW_SIZE, p]. 0 = no window.
-          int WINDOW_SIZE = 0,
-          // Rows between consecutive pages. 0 = packed layout.
-          int PAGE_STRIDE_ROWS = 0>
+          int WINDOW_SIZE = 0>
 __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -83,9 +82,6 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *sink_ptr = nullptr) {
   constexpr int CONSUMER_WARPGROUP_SYNC_BARRIER_ID = 6;
   constexpr int ROTARY_SYNC_BARRIER_ID = 7;
-  // Stride between consecutive pages of K or V.
-  constexpr int PAGE_STRIDE =
-      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
   cutlass::arch::NamedBarrier wg_barrier(
       NUM_THREADS, /*bar-id*/ CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
   if (threadIdx.x < NUM_THREADS) {

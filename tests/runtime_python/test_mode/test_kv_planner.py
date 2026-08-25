@@ -306,7 +306,7 @@ def test_allocate_pool_handles_streams_with_different_entry_sizes():
     assert tuple(views[by["thin"].group_id]["kv"].shape) == \
         (plan.num_slots, 16, 8, 400)
     # Same page stride for both, since a page is a page.
-    stride = plan.page_stride_elems(torch.bfloat16)
+    stride = plan.elems_per_page(torch.bfloat16)
     assert views[by["fat"].group_id]["kv"].stride(1) == stride
     assert views[by["thin"].group_id]["kv"].stride(1) == stride
 
@@ -348,7 +348,7 @@ def test_allocate_pool_shares_one_allocation_across_streams():
     # Both are views on the one allocation, not copies of it.
     assert main.data_ptr() == idx.data_ptr() == pool.data_ptr()
     # One addressing rule for padded and unpadded streams alike.
-    stride = plan.page_stride_elems(torch.bfloat16)
+    stride = plan.elems_per_page(torch.bfloat16)
     assert stride == 37376 // 2
     assert main.stride(1) == idx.stride(1) == stride
     assert idx.stride(1) > 272 * 66     # strictly wider than packed
@@ -379,7 +379,7 @@ def test_allocate_pool_multi_component_page_shares_one_page_id():
     assert tuple(k.shape) == tuple(v.shape) == (2, 8, 64, 8, 64)
     # V starts halfway into the page; both are page-strided by the whole page.
     assert v.data_ptr() - pool.data_ptr() == 64 * 1024
-    assert k.stride(1) == v.stride(1) == plan.page_stride_elems(torch.bfloat16)
+    assert k.stride(1) == v.stride(1) == plan.elems_per_page(torch.bfloat16)
     # Writing one component must not disturb the other.
     k.fill_(1.0)
     v.fill_(2.0)

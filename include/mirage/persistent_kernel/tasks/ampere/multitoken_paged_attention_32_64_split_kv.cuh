@@ -42,11 +42,10 @@ template <typename T,
           int SEQ_LEN,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
+          int PAGE_STRIDE,
           int MAX_TOKENS = 8,
           bool PARTITION_KV = true,
-          int NUM_KV_CHUNKS = 1,
-          // Rows between consecutive pages. 0 = packed layout.
-          int PAGE_STRIDE_ROWS = 0>
+          int NUM_KV_CHUNKS = 1>
 __device__ __forceinline__ void
     multitoken_paged_attention_task_impl_32_64_split_kv(
         void const *qkv_ptr,
@@ -73,9 +72,6 @@ __device__ __forceinline__ void
     return;
   }
 
-  // Stride between consecutive pages of K or V.
-  constexpr int PAGE_STRIDE =
-      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
   constexpr int NUM_QO_PER_KV = NUM_QO_HEADS / NUM_KV_HEADS;
 
   constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);

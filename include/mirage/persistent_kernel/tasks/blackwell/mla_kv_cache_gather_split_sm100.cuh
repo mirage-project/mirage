@@ -29,9 +29,8 @@ namespace kernel {
 template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
           int D_V,       // Latent dim (512)
           int PAGE_SIZE, // Page size (e.g., 128)
-          int K_PE_ROW_STRIDE = D_K - D_V,
-          // Rows between consecutive pages. 0 = packed layout.
-          int PAGE_STRIDE_ROWS = 0>
+          int PAGE_STRIDE,
+          int K_PE_ROW_STRIDE = D_K - D_V>
 // Row stride of the `k_pe_new_ptr` buffer, in bf16 elements. DeepSeek
 // V3's builder allocates k_pe_out as [mbt, 128] (padded to MMA_M=128
 // alignment, real rope data is first 64 cols). If row stride isn't
@@ -54,9 +53,6 @@ __device__ __forceinline__ void mla_kv_cache_gather_split_sm100_task_impl(
   int const NUM_THREADS = 128;
   constexpr int ROPE_DIM = D_K - D_V; // 64
 
-  // Stride between consecutive pages of K or V.
-  constexpr int PAGE_STRIDE =
-      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
 
   // Sequence metadata
   int const first_token_pos = qo_indptr_buffer_ptr[request_id];

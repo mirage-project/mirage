@@ -354,17 +354,20 @@ class KVCachePlan:
             raise AssertionError(
                 f"{name} is not a view on the KV pool: storage 0x{ptr:x} is "
                 f"outside [0x{lo:x}, 0x{hi:x})")
-        want = self.page_stride_elems(tensor.dtype)
+        want = self.elems_per_page(tensor.dtype)
         got = tensor.stride(0)
         if got != want:
             raise AssertionError(
                 f"{name} has page stride {got}, expected {want}: it lives in "
-                f"the pool but is no longer addressed a whole page at a time.")
+                f"the pool but is no longer addressed a whole page at a time. "
+                f"(Pass views[g][c][slot_id], not views[g][c].)")
         return tensor
 
-    def page_stride_elems(self, dtype) -> int:
-        """Elements between consecutive pages of a pool view of ``dtype``.
-        Always the full page, not the view's packed entry span."""
+    def elems_per_page(self, dtype) -> int:
+        """How wide one page is, in elements of ``dtype``.
+
+        Always the full page, not the view's packed entry span. NOT the
+        kernel's PAGE_STRIDE in token, which is this divided by the width."""
         itemsize = torch.empty(0, dtype=dtype).element_size()
         assert self.target_page_bytes % itemsize == 0
         return self.target_page_bytes // itemsize

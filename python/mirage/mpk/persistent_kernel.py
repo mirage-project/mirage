@@ -385,13 +385,20 @@ def get_compile_command(
     return common_cmd + specific_cmd + flags
 
 
-def _page_stride_rows(*caches):
-    """Rows between consecutive pages of a cache shaped
+def _page_stride(*caches):
+    """Token slots between consecutive pages of a cache shaped
     [num_pages, entries_per_page, *entry_shape].
 
     A cache carved out of the shared KV pool is strided by the whole page,
     which is wider than its own entries whenever the page carries padding or
-    multiple components (K and V)."""
+    other components (K and V share one page).
+
+    The unit is one token's data for one component -- what the kernel calls
+    KV_CACHE_STRIDE, which task_register.cc derives independently as
+    head_dim * num_kv_heads. The two agree only because every caller asserts
+    the cache is rank 4 (num_pages, page_size, kv_heads, head_dim); a cache
+    of any other rank would make prod(dims[2:]) and that product differ, and
+    the kernel would scale this stride by the wrong row width."""
     rows = []
     for c in caches:
         if c is None:
@@ -1349,7 +1356,7 @@ class PersistentKernel:
         # params[10]: window_size    (0 = full causal)
         # params[11]: has_sink       (1 = an 8th input holds the sinks)
         # params[12]: group_id       (which KV group's page table this reads)
-        # params[13]: page_stride_rows (0 = packed pages)
+        # params[13]: page_stride (token slots between pages, always present)
         # A field keeps its index, so the tail is emitted up to the last
         # non-default one and then rounded up to a size the C++ side accepts.
         import struct
@@ -1360,10 +1367,7 @@ class PersistentKernel:
             assert sinks.dim(1) == num_q_heads // num_kv_heads
         eps_bits = struct.unpack("i", struct.pack("f", qk_norm_eps))[0]
         default_eps_bits = struct.unpack("i", struct.pack("f", 1e-6))[0]
-        # Packed pages are the default; 0 tells the kernel to derive the
-        # stride from the page size.
-        stride_rows = _page_stride_rows(k_cache, v_cache)
-        stride_field = 0 if stride_rows == block_size else stride_rows
+        stride_field = _page_stride(k_cache, v_cache)
         tail = [q_len_override, tail_offset, rotary_dim, eps_bits,
                 window_size, has_sink, group_id, stride_field]
         defaults = [0, 0, 0, default_eps_bits, 0, 0, 0, 0]
@@ -1464,7 +1468,7 @@ class PersistentKernel:
         # params[5]: page_size
         # params[6]: num_kv_chunks
         params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, block_size, num_kv_chunks, group_id,
-                  _page_stride_rows(k_cache, v_cache)]
+                  _page_stride(k_cache, v_cache)]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
@@ -1558,7 +1562,7 @@ class PersistentKernel:
         page_size = self._resolve_kv_block_size(
             group_id, explicit_page_size=page_size, cache_dt=paged_cache)
         params = [d_k, d_v, page_size, group_id,
-                  _page_stride_rows(paged_cache)]
+                  _page_stride(paged_cache)]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
         tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
@@ -1590,7 +1594,7 @@ class PersistentKernel:
         page_size = self._resolve_kv_block_size(
             group_id, explicit_page_size=page_size, cache_dt=paged_cache)
         params = [d_k, d_v, page_size, group_id,
-                  _page_stride_rows(paged_cache)]
+                  _page_stride(paged_cache)]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
         tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
