@@ -8,7 +8,10 @@ import os, json
 
 from models.qwen3_shard_loader import Qwen3ShardLoader
 from mirage.mpk.base_dynamic_shard_loader import ShardType
-from mirage.mpk.models.utils import grid_for_splitk_linear_layer
+from mirage.mpk.models.utils import (
+    aligned_lm_head_workers,
+    grid_for_splitk_linear_layer,
+)
 
 
 mapping = {
@@ -52,7 +55,7 @@ def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
         return 96
     elif size % 64 == 0:
         return 64
-    
+
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
 def max_factor_leq_n(m: int, n: int) -> int:
@@ -442,12 +445,7 @@ if __name__ == "__main__":
             io_category="cuda_tensor",
         )
 
-        def _aligned_lm_head_workers(out_width, max_workers, align=8):
-            for g in range(max_workers, 0, -1):
-                if out_width % g == 0 and (out_width // g) % align == 0:
-                    return g
-            return 1
-        lm_head_workers = _aligned_lm_head_workers(vocab_size, num_workers)
+        lm_head_workers = aligned_lm_head_workers(vocab_size, num_workers)
         argmax_part_value = mpk.new_tensor(
             dims=(args.max_num_batched_tokens, lm_head_workers),
             dtype=mi.bfloat16,

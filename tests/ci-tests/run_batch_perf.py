@@ -27,19 +27,11 @@ sys.path.insert(0, DEMO_DIR)
 from models.modeling_qwen3 import Qwen3ForCausalLM  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 from demo import grid_for_rmsnorm_linear_layer  # noqa: E402
+from mirage.mpk.models.utils import aligned_lm_head_workers  # noqa: E402
 
 DEFAULT_SAVE_DIR = os.path.join("outputs", "qwen3")
 PAGE_SIZE = 4096
 PROMPT = "."
-
-
-def _aligned_lm_head_workers(out_width, max_workers, align=8):
-    """Choose the largest worker count with aligned columns per task."""
-    for workers in range(max_workers, 0, -1):
-        if out_width % workers == 0 and (out_width // workers) % align == 0:
-            return workers
-    return 1
-
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -120,7 +112,7 @@ def main():
     fused_outdim_2 = 2 * intermediate_size
 
     num_workers, num_schedulers = mi.get_configurations_from_gpu(0)
-    lm_head_workers = _aligned_lm_head_workers(vocab_size, num_workers)
+    lm_head_workers = aligned_lm_head_workers(vocab_size, num_workers)
     qo_indptr_buffer = torch.empty(
         args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
     paged_kv_indptr_buffer = torch.empty(

@@ -2817,8 +2817,7 @@ int TaskRegister::register_prob_scatter_sm100_task(
 int TaskRegister::register_moe_topk_softmax_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 0);
-  int batch_size = 0, num_experts = 0, num_experts_per_tok = 0, input_stride,
-      output_stride;
+  int batch_size = 0, num_experts = 0, num_experts_per_tok = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 1;
@@ -2843,9 +2842,6 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
   assert(input_ops[0]->output_tensors[0].dim[1] == num_experts);
-  // get input stride
-  input_stride = static_cast<int>(input_ops[0]->dtensor.stride[0]);
-  output_stride = static_cast<int>(output_ops[0]->dtensor.stride[0]);
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   // The kernel splits a row of experts across THREADS_PER_ROW = num_experts

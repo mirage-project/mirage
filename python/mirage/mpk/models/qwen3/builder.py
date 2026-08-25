@@ -1,7 +1,13 @@
 from safetensors.torch import load_model
 import torch
 
-from ..utils import grid_for_rmsnorm_linear_layer, grid_for_splitk_linear_layer, shuffle_tensors, inplace_shuffle_tensors
+from ..utils import (
+    aligned_lm_head_workers,
+    grid_for_rmsnorm_linear_layer,
+    grid_for_splitk_linear_layer,
+    inplace_shuffle_tensors,
+    shuffle_tensors,
+)
 from ..graph_builder import GraphBuilder, MirageModelConfig
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
@@ -117,6 +123,9 @@ class Qwen3Builder(GraphBuilder):
         else:
             fixed_tensor = False
         self.max_num_batched_tokens = self.mpk.max_num_batched_tokens
+        self.lm_head_workers = aligned_lm_head_workers(
+            self.padded_vocab_size, self.mpk.num_workers
+        )
         if fixed_tensor:
             self.y_tensor = torch.zeros(self.max_num_batched_tokens, self.hidden_size, dtype=torch.bfloat16, device="cuda")
             self.y = self.mpk.attach_input(torch_tensor=self.y_tensor, name="embed_out")
@@ -156,10 +165,20 @@ class Qwen3Builder(GraphBuilder):
                 self.argmax_in_tensor = torch.zeros(self.max_num_batched_tokens, self.padded_vocab_size, dtype=torch.bfloat16, device="cuda")
                 self.argmax_in = self.mpk.attach_input(torch_tensor=self.argmax_in_tensor, name="argmax_in")
                 
-                self.argmax_part_value_tensor = torch.zeros(self.max_num_batched_tokens, self.mpk.num_workers, dtype=torch.bfloat16, device="cuda")
+                self.argmax_part_value_tensor = torch.zeros(
+                    self.max_num_batched_tokens,
+                    self.lm_head_workers,
+                    dtype=torch.bfloat16,
+                    device="cuda",
+                )
                 self.argmax_part_value = self.mpk.attach_input(torch_tensor=self.argmax_part_value_tensor, name="argmax_part_value")
                 
-                self.argmax_part_index_tensor = torch.zeros(self.max_num_batched_tokens, self.mpk.num_workers, dtype=torch.int64, device="cuda")
+                self.argmax_part_index_tensor = torch.zeros(
+                    self.max_num_batched_tokens,
+                    self.lm_head_workers,
+                    dtype=torch.int64,
+                    device="cuda",
+                )
                 self.argmax_part_index = self.mpk.attach_input(torch_tensor=self.argmax_part_index_tensor, name="argmax_part_index")
 
         else:
@@ -237,13 +256,13 @@ class Qwen3Builder(GraphBuilder):
                     io_category="cuda_tensor",
                 )
                 self.argmax_part_value = self.mpk.new_tensor(
-                    dims=(self.max_num_batched_tokens, self.mpk.num_workers),
+                    dims=(self.max_num_batched_tokens, self.lm_head_workers),
                     dtype=bfloat16,
                     name="argmax_part_value",
                     io_category="cuda_tensor",
                 )
                 self.argmax_part_index = self.mpk.new_tensor(
-                    dims=(self.max_num_batched_tokens, self.mpk.num_workers),
+                    dims=(self.max_num_batched_tokens, self.lm_head_workers),
                     dtype=int64,
                     name="argmax_part_index",
                     io_category="cuda_tensor",
@@ -605,7 +624,7 @@ class Qwen3Builder(GraphBuilder):
                 input=self.rmsnorm_out,
                 weight=self.w_proj,
                 output=self.argmax_in,
-                grid_dim=(grid_for_rmsnorm_linear_layer(self.w_proj.dim(0)), 1, 1),
+                grid_dim=(self.lm_head_workers, 1, 1),
                 block_dim=(128, 1, 1),
             )
 
@@ -617,7 +636,7 @@ class Qwen3Builder(GraphBuilder):
             #                                1)
             #     argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
             # else:
-            argmax_partial_grid_dim = (self.mpk.num_workers, 1, 1)
+            argmax_partial_grid_dim = (self.lm_head_workers, 1, 1)
             argmax_reduce_grid_dim = (1, 1, 1)
             self.mpk.argmax_partial_layer(
                 input=self.argmax_in,

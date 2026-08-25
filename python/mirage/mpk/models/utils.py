@@ -14,6 +14,27 @@ def grid_for_rmsnorm_linear_layer(size):
     elif size % 64 == 0:
         return 64
 
+
+def aligned_lm_head_workers(
+    out_width: int, max_workers: int, align: int = 8
+) -> int:
+    """Choose the largest worker count with an aligned output slice.
+
+    The SM100 BF16 lm-head path divides the output evenly between workers and
+    requires each slice to preserve its 16-byte (8-element) alignment. Argmax
+    must use the same partition so its partial-output shape stays consistent.
+    """
+    if out_width <= 0 or max_workers <= 0 or align <= 0:
+        raise ValueError("out_width, max_workers, and align must be positive")
+    for workers in range(max_workers, 0, -1):
+        if out_width % workers == 0 and (out_width // workers) % align == 0:
+            return workers
+    raise ValueError(
+        f"Cannot partition output width {out_width} into at most {max_workers} "
+        f"workers with {align}-element alignment"
+    )
+
+
 def grid_for_splitk_linear_layer(output_size, reduction_size):
     """Grid for the split-K linear task (SM100).
 

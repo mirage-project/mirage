@@ -236,6 +236,7 @@ public:
                                           std::vector<int> const &params);
   int register_eagle3_commit_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
+  // Eagle3 tasks end
   int register_inkling_sconv_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
   int register_inkling_moe_router_sm100_task(threadblock::Graph const &bgraph,
@@ -244,7 +245,6 @@ public:
                                             std::vector<int> const &params);
   int register_glm_moe_router_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
-  // Eagle3 tasks end
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(
