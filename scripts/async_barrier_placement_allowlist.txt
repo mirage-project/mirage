@@ -21,6 +21,12 @@
 # safe: any model that does dispatch it is exposed.
 include/mirage/persistent_kernel/tasks/blackwell/linear_fp8_sm100.cuh
 
+# The upstream 1d2d FP8 path uses CUTLASS pipeline storage backed by the
+# arena. It is included for the upstream SM100 task suite but is not dispatched
+# by the DeepSeek/Qwen paths validated here; defer migration until that path is
+# exercised on B200.
+include/mirage/persistent_kernel/tasks/blackwell/linear_fp8_1d2d_sm100.cuh
+
 # --- Hopper (sm_90a) ---------------------------------------------------------
 # Not compiled into any sm_100a megakernel, so none of these is on the validated
 # path. All are the same shape: TMA `expect_tx` barriers only, no
