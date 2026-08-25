@@ -2413,6 +2413,7 @@ int TaskRegister::register_paged_attention_sm100_task(
     }
   }
   assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int max_tokens = input_ops[0]->dtensor.dim[0];
   int qkv_stride = row_stride(input_ops[0]->dtensor);
   int output_size = output_ops[0]->dtensor.dim[1];
   int num_q_heads = params[0];
