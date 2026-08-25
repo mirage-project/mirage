@@ -33,6 +33,14 @@ PAGE_SIZE = 4096
 PROMPT = "."
 
 
+def _aligned_lm_head_workers(out_width, max_workers, align=8):
+    """Choose the largest worker count with aligned columns per task."""
+    for workers in range(max_workers, 0, -1):
+        if out_width % workers == 0 and (out_width // workers) % align == 0:
+            return workers
+    return 1
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-num-batched-tokens", default=8, type=int,
@@ -112,6 +120,7 @@ def main():
     fused_outdim_2 = 2 * intermediate_size
 
     num_workers, num_schedulers = mi.get_configurations_from_gpu(0)
+    lm_head_workers = _aligned_lm_head_workers(vocab_size, num_workers)
     qo_indptr_buffer = torch.empty(
         args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
     paged_kv_indptr_buffer = torch.empty(
@@ -199,11 +208,11 @@ def main():
         dtype=mi.bfloat16, name="argmax_in", io_category="cuda_tensor",
     )
     argmax_part_value = mpk.new_tensor(
-        dims=(args.max_num_batched_tokens, mpk.num_workers),
+        dims=(args.max_num_batched_tokens, lm_head_workers),
         dtype=mi.bfloat16, name="argmax_part_value", io_category="cuda_tensor",
     )
     argmax_part_index = mpk.new_tensor(
-        dims=(args.max_num_batched_tokens, mpk.num_workers),
+        dims=(args.max_num_batched_tokens, lm_head_workers),
         dtype=mi.int64, name="argmax_part_index", io_category="cuda_tensor",
     )
     argmax_out = mpk.attach_input(torch_tensor=output_tokens, name="output_token")
@@ -357,12 +366,12 @@ def main():
     )
     mpk.linear_layer(
         input=rmsnorm_out, weight=w_proj, output=argmax_in,
-        grid_dim=(mpk.num_workers, 1, 1), block_dim=(128, 1, 1),
+        grid_dim=(lm_head_workers, 1, 1), block_dim=(128, 1, 1),
     )
     mpk.argmax_partial_layer(
         input=argmax_in,
         output=(argmax_part_value, argmax_part_index),
-        grid_dim=(mpk.num_workers, 1, 1),
+        grid_dim=(lm_head_workers, 1, 1),
         block_dim=(128, 1, 1),
     )
     mpk.argmax_reduce_layer(
