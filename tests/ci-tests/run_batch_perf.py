@@ -287,6 +287,7 @@ def main():
                 input=attn_out, weight=w, output=attn_proj_out,
                 grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
                 block_dim=(256, 1, 1),
+                accumulate=True,
             )
         else:
             mpk.linear_with_residual_layer(
@@ -336,6 +337,7 @@ def main():
                 input=silu_mul_out, weight=w, output=mlp_out,
                 grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
                 block_dim=(256, 1, 1),
+                accumulate=True,
             )
         else:
             mpk.linear_with_residual_layer(
