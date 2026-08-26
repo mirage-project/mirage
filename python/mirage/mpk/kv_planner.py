@@ -61,6 +61,100 @@ class KVSpec:
                 f"of compress_ratio")
 
 
+def _itemsize(dtype) -> int:
+    return torch.empty(0, dtype=dtype).element_size()
+
+
+@dataclass(frozen=True)
+class KVStream:
+    """One KV stream, declared by what a page holds rather than by a byte count.
+
+    ``components`` is the per-token payload -- for GQA the K and V halves,
+    each ``(entry_name, entry_shape, dtype)``. ``per_entry_bytes`` follows from
+    it, so the fact is stated once, in the place that describes the shape.
+    Hand-writing the byte count was protected in one direction only: too small
+    tripped an assert, too large silently doubled the page.
+    """
+    name: str
+    layers: Tuple[int, ...]
+    components: Tuple[Tuple[str, Tuple[int, ...], "torch.dtype"], ...]
+    window: int = 0
+    compress_ratio: int = 1
+    block_size_multiple_of: Optional[int] = None
+    preferred_block_size: Optional[int] = None
+
+    @property
+    def per_entry_bytes(self) -> int:
+        return sum(reduce(lambda a, b: a * b, shape, 1) * _itemsize(dtype)
+                   for _, shape, dtype in self.components)
+
+    def _spec(self) -> KVSpec:
+        assert self.components, f"stream {self.name}: no components declared"
+        names = [c[0] for c in self.components]
+        assert len(set(names)) == len(names), (
+            f"stream {self.name}: duplicate component names {names}")
+        return KVSpec(name=self.name,
+                      per_entry_bytes=self.per_entry_bytes,
+                      layer_ids=tuple(self.layers),
+                      compress_ratio=self.compress_ratio,
+                      window_size=self.window or None,
+                      block_size_multiple_of=self.block_size_multiple_of,
+                      preferred_block_size=self.preferred_block_size)
+
+
+def build_kv_cache(streams, *,
+                   kv_budget=None,
+                   max_num_pages: Optional[int] = None,
+                   max_seq_length: Optional[int] = None,
+                   max_num_batched_requests: int = 1,
+                   max_num_batched_tokens: int = 1,
+                   device: str = "cuda",
+                   verbose: bool = True,
+                   **plan_kwargs) -> "KVCachePlan":
+    """Declare the KV streams, plan the page geometry, size the pool and
+    allocate it -- the whole cache, in one call.
+
+    Give exactly one of ``kv_budget`` (bytes, the better knob) or
+    ``max_num_pages``. ``max_seq_length`` is required with a budget, since
+    that is what the pool is being sized to hold; with an explicit page count
+    it is optional, and supplying it adds the floor check that the pool can
+    hold one request of that length.
+
+    The returned object owns the pool. ``attach(mpk, layer)`` is the only way
+    to a cache tensor, so no caller can hold one that skipped the
+    pool-identity check, and the component layout is stated once -- in the
+    stream -- rather than restated at allocation time.
+    """
+    streams = list(streams)
+    plan = plan_kv_groups([s._spec() for s in streams], **plan_kwargs)
+    plan._layouts = {s.name: list(s.components) for s in streams}
+    if kv_budget is not None and max_seq_length is None:
+        raise ValueError(
+            "max_seq_length is required with kv_budget: a budget is sized to "
+            "hold a request of some length, and there is nothing to size to "
+            "without it")
+    _resolve_pool_size(plan, kv_budget=kv_budget, max_num_pages=max_num_pages,
+                       max_seq_length=max_seq_length,
+                       max_num_batched_requests=max_num_batched_requests,
+                       max_num_batched_tokens=max_num_batched_tokens,
+                       device=_device_index(device), verbose=verbose)
+    return plan._materialize(device=device)
+
+
+def _device_index(device) -> int:
+    """The ordinal mem_get_info wants, from whatever form the caller gave.
+
+    A bare "cuda" means the CURRENT device, not device 0 -- every rank of a
+    multi-GPU run passes "cuda" and must measure its own card.
+    """
+    if isinstance(device, int):
+        return device
+    dev = torch.device(device)
+    if dev.type != "cuda":
+        return 0
+    return dev.index if dev.index is not None else torch.cuda.current_device()
+
+
 class KVUnificationError(Exception):
     """A stream does not fit the shared page size, so a single-page-size plan
     is impossible. Multi-bucket planning might be a future work for models work
@@ -162,6 +256,12 @@ class KVCachePlan:
     # Set once by resolve_pool_size. The page tables and the pool are built
     # in different places and both read from here.
     max_num_pages: Optional[int] = None
+    # Filled in by declare_kv / materialize: the component layouts the streams
+    # declared, and the pool built from them. Holding the views here is what
+    # lets attach() be the only way to reach a cache tensor.
+    _layouts: Optional[dict] = None
+    _pool: Optional["torch.Tensor"] = None
+    _views: Optional[dict] = None
 
     # ── what PersistentKernel consumes ────────────────────────────────────
 
@@ -280,7 +380,7 @@ class KVCachePlan:
             lines.append(f"WARNING: {w}")
         return "\n".join(lines)
 
-    def layer_info(self, layer_id: int) -> Tuple[int, int]:
+    def _layer_info(self, layer_id: int) -> Tuple[int, int]:
         """(group_id, slot_id) for one model layer."""
         for g in self.groups:
             if layer_id in g.layer_ids:
@@ -289,8 +389,64 @@ class KVCachePlan:
 
     # ── allocation ────────────────────────────────────────────────────────
 
-    def allocate_pool(self, entry_layouts, max_num_pages: Optional[int] = None,
-                      device: str = "cuda"):
+    def _materialize(self, *, max_num_pages: Optional[int] = None,
+                     device: str = "cuda"):
+        """Allocate the pool from the declared layouts and keep the views.
+
+        Replaces allocate_pool plus carrying ``views`` around: the plan holds
+        them, so no caller can end up with a cache tensor that never went
+        through the identity check -- attach() is the only way back out."""
+        if self._layouts is None:
+            raise RuntimeError(
+                "this plan was not built by declare_kv(), so it does not know "
+                "the component layouts; use declare_kv([KVStream(...), ...])")
+        self._pool, self._views = self._allocate_pool(
+            self._layouts, max_num_pages, device)
+        return self
+
+    def views(self, group_id: int):
+        """{component: (slots, pages, page size, *entry shape)} for one group.
+
+        The escape hatch for callers that still attach by hand. attach() is
+        the one that folds in the pool-identity check -- prefer it."""
+        if self._views is None:
+            raise RuntimeError("materialize() has not run on this plan")
+        return self._views[group_id]
+
+    def attach(self, mpk, layer_id: int, prefix: str = "layer"):
+        """Everything paged_attention_layer needs for one layer:
+
+            mpk.paged_attention_layer(..., **kv.attach(mpk, i))
+
+        Folds layer_info, the views[group][component][slot] walk and the
+        pool-identity check into one accessor. That check cannot be skipped
+        here, which is the point: it is the only thing that catches a cache
+        that has been copied out of the pool by a stray .contiguous(), and one
+        of the two hand-written call sites it replaced had omitted it."""
+        if self._views is None:
+            raise RuntimeError("materialize() has not run on this plan")
+        group_id, slot_id = self._layer_info(layer_id)
+        out = {"group_id": group_id}
+        for name, entry_shape, dtype in self._layouts[
+                self.groups[group_id].spec_name]:
+            view = self._views[group_id][name][slot_id]
+            # Guards the planner, not the caller: the view is built from this
+            # same declaration, so a mismatch means the pool was laid out
+            # differently than the stream asked for.
+            assert tuple(view.shape[2:]) == tuple(entry_shape), (
+                f"{name} view has entry shape {tuple(view.shape[2:])} but the "
+                f"stream declared {tuple(entry_shape)}")
+            assert view.dtype == dtype, (
+                f"{name} view is {view.dtype}, declared {dtype}")
+            out[f"{name}_cache"] = mpk.attach_input(
+                torch_tensor=self._assert_in_pool(
+                    view, f"{prefix}_{layer_id} {name}_cache"),
+                name=f"{prefix}_{layer_id}_{name}_cache")
+        return out
+
+    def _allocate_pool(self, entry_layouts,
+                       max_num_pages: Optional[int] = None,
+                       device: str = "cuda"):
         """The entire KV cache as ONE allocation, plus typed views.
 
         Shape: ``[num_slots, max_num_pages, target_page_bytes]``. A page id 
@@ -344,10 +500,10 @@ class KVCachePlan:
             views[g.group_id] = comps
         return pool, views
 
-    def assert_in_pool(self, tensor, name: str = "tensor"):
+    def _assert_in_pool(self, tensor, name: str = "tensor"):
         """Assert if a cache tensor is a view ON the pool, not a copy of one."""
         if getattr(self, "_pool_span", None) is None:
-            raise RuntimeError("allocate_pool has not run on this plan")
+            raise RuntimeError("the pool has not been allocated on this plan")
         lo, hi = self._pool_span
         ptr = tensor.data_ptr()
         if not lo <= ptr < hi:
@@ -405,17 +561,20 @@ def resolve_kv_budget(spec) -> int:
         f"KV budget {spec!r} needs a unit, e.g. '24GiB' or '512MiB'.")
 
 
-def resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
-                      max_num_pages: Optional[int] = None,
-                      max_seq_length: int,
-                      max_num_batched_requests: int = 1,
-                      max_num_batched_tokens: int = 1,
-                      device: int = 0, verbose: bool = True) -> int:
+def _resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
+                       max_num_pages: Optional[int] = None,
+                       max_seq_length: Optional[int] = None,
+                       max_num_batched_requests: int = 1,
+                       max_num_batched_tokens: int = 1,
+                       device: int = 0, verbose: bool = True) -> int:
     """The page count to build the pool with, from a byte budget or an
     explicit count.
 
     Exactly one of ``kv_budget`` / ``max_num_pages`` may be given. A byte
-    budget is the better knob and max_num_pages should be deprecated in the future.
+    budget is the better knob and max_num_pages should be deprecated in the
+    future. Without ``max_seq_length`` there is no length to check the pool
+    against, so the floor check is skipped -- build_kv_cache requires one
+    alongside a budget for exactly that reason.
     """
     if (kv_budget is None) == (max_num_pages is None):
         raise ValueError("give exactly one of kv_budget / max_num_pages")
@@ -426,13 +585,15 @@ def resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
         pages = plan.pages_for_budget(resolve_kv_budget(kv_budget))
         source = f"budget {kv_budget}"
 
-    floor = plan.pages_needed(max_num_batched_requests, max_seq_length,
-                              max_num_batched_tokens)
-    if pages < floor:
-        raise ValueError(
-            f"KV pool too small: {source} gives {pages} page(s), but "
-            f"{max_num_batched_requests} request(s) at {max_seq_length} tokens "
-            f"need {floor} ({format_bytes(plan.budget_bytes(floor))})")
+    if max_seq_length is not None:
+        floor = plan.pages_needed(max_num_batched_requests, max_seq_length,
+                                  max_num_batched_tokens)
+        if pages < floor:
+            raise ValueError(
+                f"KV pool too small: {source} gives {pages} page(s), but "
+                f"{max_num_batched_requests} request(s) at {max_seq_length} "
+                f"tokens need {floor} "
+                f"({format_bytes(plan.budget_bytes(floor))})")
 
     plan.max_num_pages = pages          # both sizing sites read it from here
     if verbose:

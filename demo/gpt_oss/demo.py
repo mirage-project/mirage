@@ -13,8 +13,8 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 import mirage as mi
-from mirage.mpk.kv_planner import resolve_pool_size
-from mirage.mpk.models.gpt_oss.builder import GptOssBuilder, plan_kv_cache
+from mirage.mpk.kv_planner import build_kv_cache
+from mirage.mpk.models.gpt_oss.builder import GptOssBuilder, kv_streams
 
 DEFAULT_PROMPT = "Give me a short introduction to large language models."
 
@@ -79,10 +79,10 @@ if __name__ == "__main__":
         n_req = tokens.shape[0]
         # KV 2.0: the plan is the source of truth for the cache layout
         config = AutoConfig.from_pretrained(args.model)
-        kv_plan = plan_kv_cache(config, args.page_size)
         try:
-            max_num_pages = resolve_pool_size(
-                kv_plan, kv_budget=args.kv_budget,
+            kv_plan = build_kv_cache(
+                kv_streams(config, args.page_size),
+                kv_budget=args.kv_budget,
                 max_num_pages=args.max_num_pages, max_seq_length=seq_len,
                 max_num_batched_requests=args.max_num_batched_requests,
                 max_num_batched_tokens=mbt)
@@ -111,7 +111,7 @@ if __name__ == "__main__":
             max_seq_length=seq_len,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=mbt,
-            max_num_pages=max_num_pages,
+            max_num_pages=kv_plan.max_num_pages,
             kv_groups=kv_plan.group_specs(),
             eos_token_id=-1 if args.ignore_eos else 200002,
             meta_tensors=meta_tensors, profiler_tensor=None, trace_name="",

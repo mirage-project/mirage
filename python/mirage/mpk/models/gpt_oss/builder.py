@@ -2,7 +2,7 @@ import torch
 
 from ..graph_builder import GraphBuilder
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
-from ...kv_planner import KVCachePlan, KVSpec, plan_kv_groups
+from ...kv_planner import KVCachePlan, KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64
@@ -18,16 +18,15 @@ def _grid_x(output_size: int, cols_per_task: int = 64) -> int:
     return output_size // cols_per_task
 
 
-def plan_kv_cache(config, page_size: int, world_size: int = 1) -> KVCachePlan:
-    """GPT-OSS's two attention kinds has two KV streams: 12 sliding-window layers
-    and 12 full-attention layers store, storing the same thing per token. The two
-    streams share a 12 slots pool and has the same block size (logical page size).
+def kv_streams(config, page_size: int, world_size: int = 1) -> list[KVStream]:
+    """GPT-OSS's two attention kinds are two KV streams: 12 sliding-window
+    layers and 12 full-attention layers, storing the same thing per token. The
+    two share a 12-slot pool and take the same block size (logical page size).
 
-    Called before ``PersistentKernel`` is constructed — ``kv_groups`` and
-    the page-table meta tensors both come out of the returned plan.
+    Says what this model's KV is, not how big to make it -- the caller passes
+    these to ``build_kv_cache`` along with the budget.
     """
     num_kv_heads = config.num_key_value_heads // world_size
-    per_entry_bytes = 2 * num_kv_heads * config.head_dim * 2  # K + V, bf16
     layer_types = list(config.layer_types)
 
     sliding = tuple(i for i, t in enumerate(layer_types)
@@ -35,13 +34,15 @@ def plan_kv_cache(config, page_size: int, world_size: int = 1) -> KVCachePlan:
     full = tuple(i for i, t in enumerate(layer_types)
                  if t == "full_attention")
 
-    return plan_kv_groups([
-        KVSpec("sliding_attention", per_entry_bytes=per_entry_bytes,
-               layer_ids=sliding, window_size=config.sliding_window,
-               preferred_block_size=page_size),
-        KVSpec("full_attention", per_entry_bytes=per_entry_bytes,
-               layer_ids=full, preferred_block_size=page_size),
-    ])
+    kv = [("k", (num_kv_heads, config.head_dim), torch.bfloat16),
+          ("v", (num_kv_heads, config.head_dim), torch.bfloat16)]
+    return [
+        KVStream("sliding_attention", layers=sliding, components=kv,
+                 window=config.sliding_window,
+                 preferred_block_size=page_size),
+        KVStream("full_attention", layers=full, components=kv,
+                 preferred_block_size=page_size),
+    ]
 
 
 @register_model_builder("gpt_oss", "GptOss", "openai/gpt-oss-20b")
@@ -109,21 +110,14 @@ class GptOssBuilder(GraphBuilder):
         self.cos_table = torch.cat([cos[0], cos[0]], dim=-1).contiguous().to(torch.bfloat16)
         self.sin_table = torch.cat([sin[0], sin[0]], dim=-1).contiguous().to(torch.bfloat16)
 
-        # One page pool for cache (K and V co-located in one page), in shape
-        # (slots, pages, tokens, H, D).
+        # The pool (K and V co-located in one page, shape (slots, pages,
+        # tokens, H, D)) is already allocated: build_kv_cache did it.
         assert self.kv_plan is not None, (
-            "pass kv_plan=plan_kv_cache(config, page_size)")
+            "pass kv_plan=build_kv_cache(kv_streams(config, page_size), ...)")
         assert len(self.kv_plan.groups) == len(self.mpk.kv_groups), (
             f"the builder plans {len(self.kv_plan.groups)} KV group(s) but "
             f"mpk was built with {len(self.mpk.kv_groups)} — pass "
             f"kv_groups=plan.group_specs() and the same plan to the builder")
-            
-        entry_shape = (self.num_kv_heads, self.head_dim)
-        self.kv_pool, self.kv_views = self.kv_plan.allocate_pool(
-            {g.spec_name: [("k", entry_shape, torch.bfloat16),
-                           ("v", entry_shape, torch.bfloat16)]
-             for g in self.kv_plan.groups},
-            max_num_pages=self.max_num_pages)
 
         state_dict = model.state_dict()
         self.build_from_dict(state_dict, with_lm_head=True)
@@ -281,26 +275,13 @@ class GptOssBuilder(GraphBuilder):
                 grid_dim=(_grid_x(self.fused_qkv_size, 80), 1, 1),
                 block_dim=(256, 1, 1))
 
-            # Which page table this layer reads, and which slot of the pool
-            # it owns. Attached directly rather than through _attach, whose
-            # .contiguous() would copy the view out of the pool.
-            group_id, slot_id = self.kv_plan.layer_info(i)
-            k_cache = self.mpk.attach_input(
-                torch_tensor=self.kv_plan.assert_in_pool(
-                    self.kv_views[group_id]["k"][slot_id],
-                    f"layer_{i} k_cache"),
-                name=f"layer_{i}_k_cache")
-            v_cache = self.mpk.attach_input(
-                torch_tensor=self.kv_plan.assert_in_pool(
-                    self.kv_views[group_id]["v"][slot_id],
-                    f"layer_{i} v_cache"),
-                name=f"layer_{i}_v_cache")
+            kv = self.kv_plan.attach(self.mpk, i)
             sinks = self._attach(
                 sd[f"{prefix}self_attn.sinks"].view(self.num_kv_heads,
                                                     self.num_q_per_kv),
                 f"layer_{i}_sinks")
             self.mpk.paged_attention_layer(
-                input=self.attn_in, k_cache=k_cache, v_cache=v_cache,
+                input=self.attn_in, **kv,
                 q_norm=self.norm_dummy, k_norm=self.norm_dummy,
                 cos_pos_embed=self.cos_dt, sin_pos_embed=self.sin_dt,
                 output=self.attn_out,
@@ -309,7 +290,7 @@ class GptOssBuilder(GraphBuilder):
                 enable_qk_norm=False,
                 window_size=(self.sliding_window
                              if self.layer_types[i] == "sliding_attention" else 0),
-                sinks=sinks, group_id=group_id)
+                sinks=sinks)
 
             # o_proj has two addends and the epilogue one slot. The residual
             # takes it, since it must be added exactly once ahead of a

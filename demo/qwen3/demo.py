@@ -1,4 +1,4 @@
-from models.modeling_qwen3 import Qwen3ForCausalLM, plan_qwen3_kv_cache
+from models.modeling_qwen3 import Qwen3ForCausalLM
 from transformers import AutoTokenizer, AutoConfig
 from safetensors.torch import load_model
 import torch
@@ -9,7 +9,6 @@ import os, json
 from models.qwen3_shard_loader import Qwen3ShardLoader
 from mirage.mpk.base_dynamic_shard_loader import ShardType
 from mirage.mpk.models.utils import grid_for_splitk_linear_layer
-from mirage.mpk.kv_planner import resolve_pool_size
 
 
 mapping = {
@@ -194,19 +193,12 @@ if __name__ == "__main__":
 
     torch.cuda.set_device(rank)
 
-    kv_plan = plan_qwen3_kv_cache(
-        AutoConfig.from_pretrained(args.model_path or model_name),
-        world_size, args.page_size)
-    try:
-        max_num_pages = resolve_pool_size(
-            kv_plan, kv_budget=args.kv_budget,
-            max_num_pages=None if args.kv_budget else args.max_num_pages,
-            max_seq_length=args.max_seq_length,
-            max_num_batched_requests=args.max_num_batched_requests,
-            max_num_batched_tokens=args.max_num_batched_tokens,
-            device=rank, verbose=args.use_mirage)
-    except ValueError as e:
-        raise SystemExit(str(e))
+    # The model builds the KV cache; the sizing knobs ride in as plain ints so
+    # they survive from_pretrained, which an object does not.
+    kv_sizing = dict(kv_budget=args.kv_budget,
+                     max_seq_length=args.max_seq_length,
+                     max_num_batched_requests=args.max_num_batched_requests,
+                     max_num_batched_tokens=args.max_num_batched_tokens)
 
     if args.model_path is not None or world_size == 1:
       with torch.device("cuda"):
@@ -214,25 +206,24 @@ if __name__ == "__main__":
               # load model locally (necessary for multi-GPU case)
               print(f"Load model from model path: {args.model_path}")
               config = AutoConfig.from_pretrained(args.model_path)
-              model = Qwen3ForCausalLM(config, world_size, max_num_pages, args.page_size, kv_plan=kv_plan)
+              model = Qwen3ForCausalLM(config, world_size, args.max_num_pages,
+                                       args.page_size, **kv_sizing)
               load_model(
                   model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
               )
               # model = Qwen3ForCausalLM.from_pretrained(args.model_path, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
               tokenizer = AutoTokenizer.from_pretrained(args.model_path)
           else:
-              # No kv_plan here: from_pretrained serialises unknown kwargs
-              # through GenerationConfig, which a plan does not survive. The
-              # constructor rebuilds one from the same config.
               model = Qwen3ForCausalLM.from_pretrained(
-                  model_name, world_size, max_num_pages=max_num_pages,
-                  page_size=args.page_size).to("cuda")
+                  model_name, world_size, max_num_pages=args.max_num_pages,
+                  page_size=args.page_size, **kv_sizing).to("cuda")
               tokenizer = AutoTokenizer.from_pretrained(model_name)
     else: # Use dynamic shard loader to load directly from HF and shard.
         print("Detected multi-GPU run without a local path specified. Will use the DynamicShardLoader class.")
         with torch.device("meta"):
             config = AutoConfig.from_pretrained(model_name)
-            model = Qwen3ForCausalLM(config, world_size, max_num_pages, args.page_size, kv_plan=kv_plan)
+            model = Qwen3ForCausalLM(config, world_size, args.max_num_pages,
+                                     args.page_size, **kv_sizing)
 
         device = torch.device(f"cuda:{rank}")
         loader = Qwen3ShardLoader(model, model_name, mapping, rank, world_size, device)
@@ -241,9 +232,11 @@ if __name__ == "__main__":
         with torch.device("cuda"):
             tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # Adopt whichever plan the model ended up holding, so exactly one is live.
+    # Exactly one cache exists and the model holds it.
     kv_plan = model.model.kv_plan
-    kv_plan.max_num_pages = max_num_pages
+    max_num_pages = kv_plan.max_num_pages
+    if args.use_mirage:
+        print(kv_plan.describe(args.max_seq_length))
 
     total_num_requests = 1 if not args.use_mirage else args.max_num_batched_requests
     # get all model weight tensors
@@ -595,15 +588,8 @@ if __name__ == "__main__":
             w_k_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm"
             )
-            # kv_plan.layer_info() resolves (group_id, slot_id) for this layer.
-            # For single spec, slot_id == layer_idx.
-            group_id, slot_id = kv_plan.layer_info(i)
-            k_cache = mpk.attach_input(
-                torch_tensor=model.model.kv_cache[0][slot_id], name=f"layer_{i}_k_cache"
-            ) 
-            v_cache = mpk.attach_input(
-                torch_tensor=model.model.kv_cache[1][slot_id], name=f"layer_{i}_v_cache"
-            )
+            kv = kv_plan.attach(mpk, i)
+            k_cache, v_cache, group_id = kv["k_cache"], kv["v_cache"], kv["group_id"]
             # TODO: Later attention kernels should be merged as one
             if spec_decode_config:
                 mpk.single_batch_extend_attention_layer(

@@ -9,9 +9,12 @@ import torch
 from mirage.mpk.kv_planner import (
     KVEventLog,
     KVSpec,
+    KVStream,
     KVUnificationError,
     pages_per_request,
     plan_kv_groups,
+    build_kv_cache,
+    _resolve_pool_size,
 )
 
 
@@ -41,8 +44,11 @@ class _GptOssCfg:
 
 
 def _gpt_oss_plan(page_size):
-    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
-    return plan_kv_cache(_GptOssCfg(), page_size=page_size)
+    """The real model's streams, planned but not allocated -- these tests are
+    about page geometry, not about owning a pool."""
+    from mirage.mpk.models.gpt_oss.builder import kv_streams
+    return plan_kv_groups([s._spec() for s in
+                           kv_streams(_GptOssCfg(), page_size=page_size)])
 
 
 def test_four_streams_at_mixed_compression_share_one_page():
@@ -161,7 +167,7 @@ def test_gpt_oss_real_config_plan():
         assert None not in g.layer_ids       # 12 and 12, nothing padded
     # A layer's group is its attention kind, its slot its index within it.
     for layer_id, kind in enumerate(_GptOssCfg.layer_types):
-        group_id, slot_id = plan.layer_info(layer_id)
+        group_id, slot_id = plan._layer_info(layer_id)
         assert plan.groups[group_id].spec_name == kind
         assert slot_id == layer_id // 2
 
@@ -225,7 +231,8 @@ def test_a_small_budget_lands_under_the_floor():
     plan = _gpt_oss_plan(64)        # 1.5 MiB per page id
     assert plan.pages_needed(1, 512, 8) == 12         # 4 sliding + 8 full
     assert plan.pages_for_budget(64 * 1024**2) == 42
-    # resolve_pool_size is what refuses this; it needs CUDA, so not here.
+    # resolve_pool_size is what refuses this; see the tests at the bottom,
+    # which stub mem_get_info rather than needing a device.
     assert plan.pages_for_budget(8 * 1024**2) == 5    # below the floor
 
 
@@ -264,7 +271,7 @@ def test_allocate_pool_slots_are_per_layer_and_do_not_alias():
     plan = plan_kv_groups(specs)
     assert plan.num_slots == 2
     layout = [("kv", (8, 16), torch.bfloat16)]
-    pool, views = plan.allocate_pool({"full": layout, "window": layout},
+    pool, views = plan._allocate_pool({"full": layout, "window": layout},
                                      max_num_pages=32, device="cpu")
     by = {g.spec_name: g.group_id for g in plan.groups}
     cache = views[by["full"]]["kv"]
@@ -296,7 +303,7 @@ def test_allocate_pool_handles_streams_with_different_entry_sizes():
     assert by["fat"].entries_per_page == 800
     assert by["thin"].entries_per_page == 8
 
-    pool, views = plan.allocate_pool(
+    pool, views = plan._allocate_pool(
         {"fat": [("kv", (4,), torch.bfloat16)],      # 8 B entries
          "thin": [("kv", (400,), torch.bfloat16)]},  # 800 B entries
         max_num_pages=16, device="cpu")
@@ -312,7 +319,7 @@ def test_allocate_pool_handles_streams_with_different_entry_sizes():
 
     # A layout claiming more than the page holds is refused, not truncated.
     with _raises(AssertionError):
-        plan.allocate_pool(
+        plan._allocate_pool(
             {"fat": [("kv", (4,), torch.bfloat16)],
              "thin": [("kv", (4000,), torch.bfloat16)]},
             max_num_pages=16, device="cpu")
@@ -336,7 +343,7 @@ def test_allocate_pool_shares_one_allocation_across_streams():
     assert by["indexer"].entries_per_page == 272    # floored to the tile
 
     pages = 8
-    pool, views = plan.allocate_pool(
+    pool, views = plan._allocate_pool(
         {"main": [("kv", (292,), torch.bfloat16)],
          "indexer": [("kv", (66,), torch.bfloat16)]},
         max_num_pages=pages, device="cpu")
@@ -354,7 +361,7 @@ def test_allocate_pool_shares_one_allocation_across_streams():
     assert idx.stride(1) > 272 * 66     # strictly wider than packed
 
     with _raises(KeyError):
-        plan.allocate_pool({"main": [("kv", (292,), torch.bfloat16)]},
+        plan._allocate_pool({"main": [("kv", (292,), torch.bfloat16)]},
                            max_num_pages=pages, device="cpu")
 
 
@@ -370,7 +377,7 @@ def test_allocate_pool_multi_component_page_shares_one_page_id():
     assert plan.target_page_bytes == 64 * 2048
     assert g.entries_per_page == 64
 
-    pool, views = plan.allocate_pool(
+    pool, views = plan._allocate_pool(
         {"gqa": [("k", (8, 64), torch.bfloat16),
                  ("v", (8, 64), torch.bfloat16)]},
         max_num_pages=8, device="cpu")
@@ -391,18 +398,18 @@ def test_assert_in_pool_catches_a_detached_copy():
     spec = KVSpec("gqa", per_entry_bytes=2048, layer_ids=(0, 1),
                   preferred_block_size=64)
     plan = plan_kv_groups([spec])
-    _pool, views = plan.allocate_pool(
+    _pool, views = plan._allocate_pool(
         {"gqa": [("k", (8, 64), torch.bfloat16),
                  ("v", (8, 64), torch.bfloat16)]},
         max_num_pages=8, device="cpu")
     view = views[0]["k"][0]
-    assert plan.assert_in_pool(view, "k") is view
+    assert plan._assert_in_pool(view, "k") is view
 
     copy = view.contiguous()
     assert copy.shape == view.shape and copy.dtype == view.dtype
     assert torch.equal(copy, view)
     with _raises(AssertionError):
-        plan.assert_in_pool(copy, "k")
+        plan._assert_in_pool(copy, "k")
 
 
 def test_kernel_entry_multiple_constraint():
@@ -524,3 +531,178 @@ if __name__ == "__main__":
         fn()
         print(f"{fn.__name__} OK")
     print(f"PASSED: {len(fns)} planner tests")
+
+
+# ── the declaration surface models actually use ───────────────────────────
+
+
+class _StubMPK:
+    """Stands in for PersistentKernel: attach() only needs attach_input."""
+
+    def __init__(self):
+        self.attached = []
+
+    def attach_input(self, torch_tensor, name):
+        self.attached.append(name)
+        return name
+
+
+def _gpt_oss_shaped_streams(h=8, d=64, page=64):
+    kv = [("k", (h, d), torch.bfloat16), ("v", (h, d), torch.bfloat16)]
+    return [
+        KVStream("sliding_attention", layers=(0, 2), window=128,
+                 components=kv, preferred_block_size=page),
+        KVStream("full_attention", layers=(1, 3),
+                 components=kv, preferred_block_size=page),
+    ]
+
+
+def test_kvstream_derives_the_byte_count_the_hand_formula_gave():
+    h, d = 8, 64
+    stream = KVStream("s", layers=(0,),
+                      components=[("k", (h, d), torch.bfloat16),
+                                  ("v", (h, d), torch.bfloat16)])
+    # what every builder used to write out by hand: K + V, bf16
+    assert stream.per_entry_bytes == 2 * h * d * 2
+
+
+def test_build_kv_cache_matches_the_equivalent_kvspec_plan():
+    """The new surface is a re-spelling, not a different planner."""
+    with _free_memory(64 << 30):
+        new = build_kv_cache(_gpt_oss_shaped_streams(),
+                             max_num_pages=4, device="cpu", verbose=False)
+    old = plan_kv_groups([
+        KVSpec("sliding_attention", per_entry_bytes=2 * 8 * 64 * 2,
+               layer_ids=(0, 2), window_size=128, preferred_block_size=64),
+        KVSpec("full_attention", per_entry_bytes=2 * 8 * 64 * 2,
+               layer_ids=(1, 3), preferred_block_size=64),
+    ])
+    assert new.target_page_bytes == old.target_page_bytes
+    assert new.num_slots == old.num_slots
+    assert [g.block_size for g in new.groups] == [g.block_size for g in old.groups]
+
+
+def test_attach_hands_out_pool_views_and_the_group_id():
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_gpt_oss_shaped_streams(),
+                              max_num_pages=4, device="cpu", verbose=False)
+    mpk = _StubMPK()
+    seen = {}
+    for layer in (0, 1, 2, 3):
+        got = plan.attach(mpk, layer)
+        assert set(got) == {"k_cache", "v_cache", "group_id"}
+        seen[layer] = got["group_id"]
+    # layers of one stream share a page table, the two streams do not
+    assert seen[0] == seen[2] and seen[1] == seen[3] and seen[0] != seen[1]
+    assert len(mpk.attached) == 8
+
+
+def test_attach_refuses_a_cache_copied_out_of_the_pool():
+    """The check attach() folds in is the only thing that catches the
+    .contiguous() trap: the copy has the right shape, dtype and values."""
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_gpt_oss_shaped_streams(),
+                              max_num_pages=4, device="cpu", verbose=False)
+    view = plan.views(0)["k"][0]
+    copy = view.contiguous()
+    assert copy.shape == view.shape and copy.dtype == view.dtype
+    assert torch.equal(copy, view)
+    with _raises(AssertionError):
+        plan._assert_in_pool(copy, "copied")
+
+
+def test_materialize_refuses_a_plan_that_never_declared_layouts():
+    plan = plan_kv_groups([
+        KVSpec("s", per_entry_bytes=2048, layer_ids=(0,),
+               preferred_block_size=64)])
+    with _raises(RuntimeError):
+        plan._materialize(max_num_pages=2, device="cpu")
+
+
+# ── resolve_pool_size ─────────────────────────────────────────────────────
+
+
+@contextmanager
+def _free_memory(free_bytes, total_bytes=None):
+    """Pin what the device reports free. resolve_pool_size refuses a pool that
+    does not fit, and that branch is otherwise only reachable by owning a
+    particular card."""
+    real = torch.cuda.mem_get_info
+    torch.cuda.mem_get_info = lambda device=0: (
+        free_bytes, total_bytes if total_bytes is not None else free_bytes)
+    try:
+        yield
+    finally:
+        torch.cuda.mem_get_info = real
+
+
+def _one_stream_plan(page_size=64):
+    """Planned but NOT sized -- these tests drive the sizing step itself."""
+    return plan_kv_groups([
+        KVSpec("attention", per_entry_bytes=2 * 8 * 64 * 2,
+               layer_ids=tuple(range(4)), preferred_block_size=page_size)])
+
+
+def test_resolve_pool_size_takes_exactly_one_of_the_two_knobs():
+    plan = _one_stream_plan()
+    with _raises(ValueError):        # neither
+        _resolve_pool_size(plan, max_seq_length=512, verbose=False)
+    with _raises(ValueError):        # both
+        _resolve_pool_size(plan, kv_budget="1GiB", max_num_pages=64,
+                          max_seq_length=512, verbose=False)
+
+
+def test_resolve_pool_size_publishes_the_count_on_the_plan():
+    """Both sizing sites read plan.max_num_pages, not the return value."""
+    plan = _one_stream_plan()
+    assert plan.max_num_pages is None
+    with _free_memory(64 << 30):
+        got = _resolve_pool_size(plan, max_num_pages=4096, max_seq_length=512,
+                                verbose=False)
+    assert got == 4096 and plan.max_num_pages == 4096
+
+
+def test_resolve_pool_size_refuses_a_pool_below_one_requests_floor():
+    plan = _one_stream_plan()
+    floor = plan.pages_needed(1, 8192, 1)
+    with _free_memory(64 << 30), _raises(ValueError):
+        _resolve_pool_size(plan, max_num_pages=floor - 1,
+                          max_seq_length=8192, verbose=False)
+    with _free_memory(64 << 30):     # the floor itself is allowed
+        _resolve_pool_size(plan, max_num_pages=floor, max_seq_length=8192,
+                          verbose=False)
+
+
+def test_resolve_pool_size_refuses_a_pool_that_does_not_fit_in_free_memory():
+    """Caught before the allocation, so the failure names the pool rather than
+    arriving as a CUDA OOM from inside allocate."""
+    plan = _one_stream_plan()
+    pages = 1 << 20
+    need = plan.budget_bytes(pages)
+    with _free_memory(need - 1), _raises(ValueError):
+        _resolve_pool_size(plan, max_num_pages=pages, max_seq_length=512,
+                          verbose=False)
+    with _free_memory(need):
+        assert _resolve_pool_size(plan, max_num_pages=pages,
+                                 max_seq_length=512, verbose=False) == pages
+
+
+def test_build_kv_cache_requires_max_seq_length_with_a_budget():
+    """A budget is sized to hold a request of some length; without one there
+    is nothing to size to, and an undersized pool surfaces as a run-time
+    deadlock rather than an error here."""
+    with _raises(ValueError):
+        build_kv_cache(_gpt_oss_shaped_streams(), kv_budget="1GiB",
+                       device="cpu", verbose=False)
+
+
+def test_resolve_pool_size_skips_the_floor_check_without_a_length():
+    """An explicit page count and no length: nothing to compare, so the pool
+    is taken as given. This is the pre-KV2 contract the unmigrated demos
+    still run on."""
+    plan = _one_stream_plan()
+    tiny = 1
+    assert tiny < plan.pages_needed(1, 8192, 1)
+    with _free_memory(64 << 30):
+        assert _resolve_pool_size(plan, max_num_pages=tiny,
+                                  verbose=False) == tiny
