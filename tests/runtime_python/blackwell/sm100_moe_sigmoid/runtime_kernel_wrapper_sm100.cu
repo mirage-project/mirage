@@ -46,6 +46,7 @@ __global__ __launch_bounds__(256) void topk_sigmoid_kernel(
   kernel::topk_sigmoid_task_impl<T,
                                  VPT,
                                  EXPERTS,
+                                 EXPERTS,
                                  WARPS_PER_TB,
                                  BYTES_PER_LDG,
                                  NUM_GROUPS,
@@ -60,7 +61,8 @@ __global__ __launch_bounds__(256) void topk_sigmoid_kernel(
                                                mpk_active_expert_ids,
                                                /*start_expert=*/0,
                                                /*end_expert=*/EXPERTS,
-                                               routed_scaling_factor);
+                                               routed_scaling_factor,
+                                               /*num_active_rows=*/num_rows);
   __syncthreads();
 }
 
@@ -106,6 +108,126 @@ void topk_sigmoid_sm100_kernel(torch::Tensor gating_output,
                                      mpk_active_expert_ids_ptr,
                                      BATCH_SIZE,
                                      routed_scaling_factor);
+  } else {
+    printf("Unsupported configuration: num_experts=%d num_groups=%d "
+           "topk_group=%d\n",
+           OUTPUT_SIZE,
+           num_groups,
+           topk_group);
+  }
+
+  cudaError_t err = cudaGetLastError();
+  if (err != cudaSuccess) {
+    printf("CUDA kernel launch error: %s\n", cudaGetErrorString(err));
+  }
+}
+
+// ====================== Multi-CTA topk_sigmoid (PR696) ======================
+// Three-kernel prefill path: (1) pre-init the marker array globally, (2)
+// distribute the row-chunks across CTAs with FUSE_COMPACTION=false, (3)
+// compact in a separate kernel. (1) and (3) are needed because a multi-CTA
+// topk cannot do the marker init / compaction inline without racing across
+// CTAs that have no shared barrier.
+
+template <int EXPERTS>
+__global__ void init_active_markers_kernel(void *mpk_active_expert_ids) {
+  int *ids = static_cast<int *>(mpk_active_expert_ids);
+  for (int i = threadIdx.x; i < EXPERTS; i += blockDim.x) {
+    ids[i] = -1;
+  }
+  if (threadIdx.x == 0) {
+    ids[EXPERTS] = 0;
+  }
+}
+
+template <int EXPERTS>
+__global__ void compact_active_markers_kernel(void *mpk_active_expert_ids) {
+  kernel::compact_active_experts_ballot<EXPERTS>(
+      static_cast<int *>(mpk_active_expert_ids));
+}
+
+template <typename T,
+          int EXPERTS,
+          int BYTES_PER_LDG,
+          int NUM_GROUPS,
+          int TOPK_GROUP,
+          int EXPERTS_PER_GROUP,
+          int TOPK_EXPERTS>
+__global__ __launch_bounds__(256) void topk_sigmoid_kernel_multicta(
+    void *__restrict__ gating_output,
+    void *__restrict__ bias,
+    void *__restrict__ topk_weights,
+    void *__restrict__ mpk_routing_indices,
+    void *__restrict__ mpk_active_expert_ids,
+    int num_rows,
+    float routed_scaling_factor) {
+  using C = kernel::detail::TopkConstants<T, EXPERTS, BYTES_PER_LDG>;
+  static constexpr int VPT = C::VPT;
+  static constexpr int WARPS_PER_TB = 8;
+  kernel::topk_sigmoid_task_impl<T,
+                                 VPT,
+                                 EXPERTS,
+                                 EXPERTS,
+                                 WARPS_PER_TB,
+                                 BYTES_PER_LDG,
+                                 NUM_GROUPS,
+                                 TOPK_GROUP,
+                                 EXPERTS_PER_GROUP,
+                                 TOPK_EXPERTS,
+                                 /*FUSE_COMPACTION=*/false>(
+      gating_output,
+      bias,
+      /*finished=*/nullptr,
+      topk_weights,
+      num_rows,
+      mpk_routing_indices,
+      mpk_active_expert_ids,
+      /*start_expert=*/0,
+      /*end_expert=*/EXPERTS,
+      routed_scaling_factor,
+      /*num_active_rows=*/num_rows);
+}
+
+void topk_sigmoid_sm100_multicta(torch::Tensor gating_output,
+                                 torch::Tensor bias,
+                                 torch::Tensor topk_weights,
+                                 torch::Tensor mpk_routing_indices,
+                                 torch::Tensor mpk_active_expert_ids,
+                                 float routed_scaling_factor,
+                                 int num_groups,
+                                 int topk_group) {
+  int const BATCH_SIZE = static_cast<int>(gating_output.size(0));
+  int const OUTPUT_SIZE = static_cast<int>(gating_output.size(1));
+
+  void *gating_output_ptr = gating_output.data_ptr();
+  void *bias_ptr = bias.data_ptr();
+  void *topk_weights_ptr = topk_weights.data_ptr();
+  void *mpk_routing_indices_ptr = mpk_routing_indices.data_ptr();
+  void *mpk_active_expert_ids_ptr = mpk_active_expert_ids.data_ptr();
+
+  dim3 block_dim(256, 1, 1);
+
+  if (OUTPUT_SIZE == 256 && num_groups == 8 && topk_group == 4) {
+    using T = bfloat16;
+    constexpr int EXP = 256;
+    constexpr int BPL = 16;
+    // ROWS_PER_CTA = WARPS_PER_TB * ROWS_PER_WARP = 8 * (32*VPT/EXP). For
+    // EXP=256, VPT=8 this is 8. Size the grid so each CTA owns one chunk.
+    constexpr int ROWS_PER_CTA = 8;
+    int const num_chunks = (BATCH_SIZE + ROWS_PER_CTA - 1) / ROWS_PER_CTA;
+    dim3 grid_dim(num_chunks, 1, 1);
+
+    init_active_markers_kernel<EXP>
+        <<<1, block_dim>>>(mpk_active_expert_ids_ptr);
+    topk_sigmoid_kernel_multicta<T, EXP, BPL, 8, 4, 32, 8>
+        <<<grid_dim, block_dim, 0>>>(gating_output_ptr,
+                                     bias_ptr,
+                                     topk_weights_ptr,
+                                     mpk_routing_indices_ptr,
+                                     mpk_active_expert_ids_ptr,
+                                     BATCH_SIZE,
+                                     routed_scaling_factor);
+    compact_active_markers_kernel<EXP><<<1, 32>>>(mpk_active_expert_ids_ptr);
   } else {
     printf("Unsupported configuration: num_experts=%d num_groups=%d "
            "topk_group=%d\n",
@@ -206,6 +328,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("topk_sigmoid_sm100",
         &topk_sigmoid_sm100_kernel,
         "TopK Sigmoid group-aware fused SM100");
+  m.def("topk_sigmoid_sm100_multicta",
+        &topk_sigmoid_sm100_multicta,
+        "TopK Sigmoid multi-CTA prefill path (PR696): init + multi-CTA + "
+        "compaction");
   m.def("topk_softmax_sm100",
         &topk_softmax_sm100_kernel,
         "TopK Softmax fused SM100 (for benchmark comparison)");

@@ -135,10 +135,6 @@ __device__ __forceinline__ void
   }
 
   int kv_cache_offset = PARTITION_KV ? kv_idx * SEQ_LEN : 0;
-  // if(threadIdx.x == 0){
-  //   printf("seq_len %d, global_seq_len %d, kv_cache_offset %d\n", seq_len,
-  //   global_seq_len, kv_cache_offset);
-  // }
 
   // valid_lens = [seq_len - num_tokens + 1 + i for i in range(num_tokens)]
   // seq_len = 7 * 64 + 64 = 512
@@ -239,10 +235,6 @@ __device__ __forceinline__ void
        S_K_NORM_SUM_OFFSET + S_K_NORM_SUM_SIZE)
           ? (S_O_BUFFER_OFFSET + S_O_BUFFER_SIZE)
           : (S_K_NORM_SUM_OFFSET + S_K_NORM_SUM_SIZE);
-  // if (threadIdx.x == 0){
-  //   printf("S_TOTAL_OFFSET %llu, MAX_DYNAMIC_SHARED_MEMORY_SIZE %llu\n",
-  //   S_TOTAL_OFFSET, mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
-  // }
   assert(S_TOTAL_OFFSET <= mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
 
   extern __shared__ char smem[];
@@ -284,13 +276,7 @@ __device__ __forceinline__ void
   int const num_iters = (seq_len + KV_TILE_SIZE - 1) / KV_TILE_SIZE;
   int curr_iter_len = min(seq_len, KV_TILE_SIZE);
 
-  // printf("num_iters %d, curr_iter_len %d, seq_len %d, num_tokens %d\n",
-  // num_iters, curr_iter_len, seq_len, num_tokens);
   // PAGE_SIZE = 4
-  // if(threadIdx.x == 0){
-  //   printf("seq_length %d, %d, %d, %d, %d\n", seq_len, KV_TILE_SIZE,
-  //   num_pages, PAGE_SIZE, paged_kv_last_page_len_buffer_ptr[request_id]);
-  // }
   int cp_finished_seq_len = 0;
   // assert no leafover to be handled when loading qkv
   static_assert(HEAD_DIM % CP_CHUNK_SIZE == 0);
@@ -332,22 +318,11 @@ __device__ __forceinline__ void
       load_smem(k_buffer_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
       load_smem(v_buffer_smem(dst_row, col), paged_v_cache_dmem(src_row, col));
 
-      // if((float)k_buffer_smem.at(dst_row, col) >=  0.2f){
-      //   printf("kv idx %d, dst_row %d, dst_col %d, src_row %d, value %f\n",
-      //   kv_idx, dst_row, col, src_row, (float)k_buffer_smem.at(dst_row,
-      //   col));
-      // }
-
     } else {
       // load from QKV
       int src_row = dst_row + cp_finished_seq_len - (seq_len - num_tokens);
       load_smem(k_buffer_smem(dst_row, col), k_dmem(src_row, col));
       load_smem(v_buffer_smem(dst_row, col), v_dmem(src_row, col));
-      // if((float)k_buffer_smem.at(dst_row, col) >=  0.2f){
-      //   printf("kv idx %d, dst_row %d, dst_col %d, src_row %d, value %f\n",
-      //   kv_idx, dst_row, col, src_row, (float)k_buffer_smem.at(dst_row,
-      //   col));
-      // }
     }
   }
   cp_async_fence();
@@ -397,26 +372,12 @@ __device__ __forceinline__ void
               (dst_row + cp_finished_seq_len + kv_cache_offset) % PAGE_SIZE;
           int src_row = page_idx * PAGE_SIZE + page_offset;
 
-          // if((float)k_buffer_smem.at(dst_row, col) >= 0.2f){
-          //   printf("kv idx %d, dst_row %d, dst_col %d, src_row %d, value
-          //   %f\n", kv_idx, dst_row, col, src_row,
-          //   (float)k_buffer_smem.at(dst_row, col));
-          // }
           load_smem(k_smem(dst_row, col), (paged_k_cache_dmem(src_row, col)));
           load_smem(v_smem(dst_row, col), (paged_v_cache_dmem(src_row, col)));
         } else {
           // load from QKV
 
           int src_row = dst_row + cp_finished_seq_len - (seq_len - num_tokens);
-          // if(threadIdx.x == 0){
-          // printf("blockIdx.x %d, src_row %d, dst_row %d, col %d\n",
-          // blockIdx.x, src_row, dst_row, col);
-          // }
-          // if((float)k_buffer_smem.at(dst_row, col) >= 0.2f){
-          //   printf("kv idx %d, dst_row %d, dst_col %d, src_row %d, value
-          //   %f\n", kv_idx, dst_row, col, src_row,
-          //   (float)k_buffer_smem.at(dst_row, col));
-          // }
           load_smem(k_smem(dst_row, col), (k_dmem(src_row, col)));
           load_smem(v_smem(dst_row, col), (v_dmem(src_row, col)));
         }
@@ -557,9 +518,6 @@ __device__ __forceinline__ void
       }
     }
 
-    // printf("kv idx %d, kv cache first value %f, kv_tokens_to_process %d\n",
-    // kv_idx, (float)paged_k_cache_dmem.at(0, 0), kv_tokens_to_process);
-
     // compute X = QK^T
     // NOTE(Jinchen): we use m16n16k16 mma, and let warp layout be
     // 1x4x1, so mma iterates over m and k dimensions
@@ -598,23 +556,12 @@ __device__ __forceinline__ void
           ldsm(src_ptr_Q, q_frag);
           ldsm(src_ptr_KT, kt_frag);
 
-          // if(threadIdx.x == 0 ){
-          //     printf("kv idx %d, q frag is n %d, k %d, value %f\n", kv_idx,
-          //     n,k, (float)src_ptr_Q[0]); printf("kv idx %d, kt_frag frag is n
-          //     %d, k %d, kt_col %d,curr_iter_len %d, value %f\n", kv_idx, n,k,
-          //     kt_col, curr_iter_len , (float)src_ptr_KT[0]);
-          // }
           mma_m16n16k16_bf16bf16bf32(
               x_frag_f[m][n], q_frag, kt_frag, x_frag_f[m][n]);
         }
       }
     }
     wg_sync<128>(CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
-
-    // if(threadIdx.x == 0){
-    //   printf("QKT, kv idx %d, x_frag_f[0][0][0] %f\n", kv_idx,
-    //   x_frag_f[0][0][0]);
-    // }
 
     float m_prev[GLOBAL_ITERS_M][2];
 #pragma unroll
@@ -640,12 +587,6 @@ __device__ __forceinline__ void
           bool is_valid = (row < num_tokens * NUM_QO_PER_KV) &&
                           ((col + iter * KV_TILE_SIZE + kv_cache_offset) <=
                            (token_idx + global_seq_len - num_tokens));
-          //  if(threadIdx.x < 64){
-          //   printf("blockIdx.x %d, is valid %d, row %d, col%d, val %d,
-          //   token_idx %d, global_seq_len %d, num_tokens %d, \n", blockIdx.x,
-          //   is_valid, row, col, col + iter * KV_TILE_SIZE + kv_cache_offset,
-          //   token_idx, global_seq_len, num_tokens);
-          // }
           x_frag_f[m][n][frag_idx] = is_valid ? x_frag_f[m][n][frag_idx] : -inf;
           m_local[m][(frag_idx & 0x3) >> 1] =
               max(m_local[m][(frag_idx & 0x3) >> 1], x_frag_f[m][n][frag_idx]);
@@ -799,10 +740,6 @@ __device__ __forceinline__ void
     int src_col = elem_idx % HEAD_DIM;
     int dst_row = src_row / NUM_QO_PER_KV;
     int dst_col = src_col + (src_row % NUM_QO_PER_KV) * HEAD_DIM;
-
-    // printf("blockIdx.x %d, threadIdx.x %d, dst_row %d, dst_col %d, val
-    // %f\n",blockIdx.x,  threadIdx.x, dst_row, dst_col,
-    // (float)o_smem.at(src_row, src_col));
 
     o_dmem.at(dst_row, dst_col) = o_smem.at(src_row, src_col);
   }

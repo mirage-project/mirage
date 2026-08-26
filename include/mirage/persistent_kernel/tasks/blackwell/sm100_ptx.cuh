@@ -17,6 +17,8 @@
 // election. Shared by any SM100 kernel using tensor cores (MLA decode, MTP,
 // future kernels).
 #pragma once
+#ifndef MIRAGE_PK_TASKS_SM100_PTX_CUH_
+#define MIRAGE_PK_TASKS_SM100_PTX_CUH_
 
 #include <cuda.h>
 #include <stdint.h>
@@ -87,3 +89,5 @@ __device__ __forceinline__ void tcgen05_commit(int mbar_addr) {
 
 } // namespace sm100_ptx
 } // namespace kernel
+
+#endif // MIRAGE_PK_TASKS_SM100_PTX_CUH_

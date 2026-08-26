@@ -57,9 +57,17 @@ static constexpr int RD_TB = 512;
 static constexpr int MAX_SK = 32;
 
 // SMEM for main kernel
-static constexpr int MTP_SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES; // 160KB
+// +1024 because the runtime rounds the extern shared-memory base up to a
+// 1024-byte boundary before issuing 128B-swizzle TMA copies.
+static constexpr int MTP_SMEM_SIZE = NUM_QK_STAGES * 2 * TILE_BYTES + 1024;
 
 } // namespace mla_mtp
+
+// MPK worker CTAs are wider than the standalone MLA decode kernel. The MLA
+// body uses only the first 128 threads, so internal sync must not use barrier
+// 0 with the full MPK CTA. Use the same user barrier convention as the TP
+// MLA decode variants.
+#define MLA_MTP_SYNC_ACTIVE() asm volatile("bar.sync 12, 128;" ::: "memory")
 } // namespace kernel
 
 // sm100_ptx.cuh defines kernel::sm100_ptx — must be included at global scope
@@ -74,7 +82,7 @@ namespace kernel {
 // mla_mtp::NUM_HEADS=128. In TP mode, this is num_heads/tp_size.
 // Used for Q-tensor indexing and bounds checks so the kernel correctly handles
 // the per-rank local head count without needing padded buffers.
-template <bool SINGLE_TILE>
+template <bool SINGLE_TILE, bool WRITE_FINAL>
 __device__ __noinline__ void
     mla_mtp_decode_sm100_task_impl(CUtensorMap const *Q_tm_ptr,
                                    CUtensorMap const *KV_tm_ptr,
@@ -93,9 +101,13 @@ __device__ __noinline__ void
   using namespace ::kernel::sm100_ptx;
 
   int const tid = threadIdx.x;
-  // MPK workers have 256 threads but MLA kernel uses 128.
-  // Cannot return early — must participate in all __syncthreads().
-  bool const active = (tid < TB);
+  // MPK workers have 256 threads but this MLA kernel uses 128. Threads outside
+  // the active half return and the active half synchronizes with a named
+  // 128-thread barrier inside the kernel body.
+  if (tid >= TB) {
+    return;
+  }
+  bool const active = true;
   int const wid = tid / 32;
 
   // gi/t0/t1 checks are uniform across all threads (same params).
@@ -124,9 +136,9 @@ __device__ __noinline__ void
   int const hpb = local_num_heads / num_head_groups;
 
   extern __shared__ __align__(1024) char smem_buf[];
-  int const smem_base = __cvta_generic_to_shared(smem_buf);
+  int const smem_base_raw = __cvta_generic_to_shared(smem_buf);
 
-  int const work_smem = smem_base;
+  int const work_smem = (smem_base_raw + 1023) & ~1023;
 
   __shared__ uint64_t mbar_buf[12];
   __shared__ int tmem_addr_buf[1];
@@ -135,22 +147,23 @@ __device__ __noinline__ void
   int const mainloop_bar = __cvta_generic_to_shared(&mbar_buf[2 * MAX_STAGES]);
   int const q_bar = __cvta_generic_to_shared(&mbar_buf[2 * MAX_STAGES + 1]);
 
-  if (wid == 0 && elect_sync()) {
-    for (int i = 0; i < MAX_STAGES; i++) {
-      mbar_init(tma_bar + i * 8, 1);
-      mbar_init(mma_bar + i * 8, 1);
+  if (wid == 0) {
+    if (elect_sync()) {
+      for (int i = 0; i < MAX_STAGES; i++) {
+        mbar_init(tma_bar + i * 8, 1);
+        mbar_init(mma_bar + i * 8, 1);
+      }
+      mbar_init(mainloop_bar, 1);
+      mbar_init(q_bar, 1);
+      asm volatile("fence.mbarrier_init.release.cluster;");
     }
-    mbar_init(mainloop_bar, 1);
-    mbar_init(q_bar, 1);
-    asm volatile("fence.mbarrier_init.release.cluster;");
-  } else if (wid == 1) {
     int addr_smem = __cvta_generic_to_shared(tmem_addr_buf);
     asm volatile(
         "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::
             "r"(addr_smem),
         "r"(D_V));
   }
-  __syncthreads();
+  MLA_MTP_SYNC_ACTIVE();
   int const taddr = tmem_addr_buf[0];
 
   int const hpb_bytes = hpb * BK * 2;
@@ -167,13 +180,22 @@ __device__ __noinline__ void
   float row_max = -1e30f;
   float row_sum = 0.0f;
 
-  float o_save[128];
+  // o_save holds the pre-rescale O accumulator for the online-softmax merge
+  // across tiles; it is ONLY read/written on the multi-tile correction path
+  // (tile > t0). At SINGLE_TILE (num_splits>=tiles-per-split, the bs=1 decode
+  // contract for this TP1 kernel) that path is statically dead, but the
+  // unconditional [128] forced ptxas to reserve a 128-register payload that
+  // overflowed the megakernel's per-task budget (C7600 at 216 on CUDA 13.x).
+  // Match the TP8 kernel: size it to 1 when SINGLE_TILE so the dead path
+  // costs no registers. (TP1-only kernel; semantics-identical for both configs
+  // since the guards below already gate every o_save access on tile > t0.)
+  float o_save[SINGLE_TILE ? 1 : 128];
 
   for (int tile = t0; tile < t1; tile++) {
     int const kvs = tile * TILE_S;
     int const tlen = min(TILE_S, kv_len - kvs);
 
-    if (active && tile > t0) {
+    if (!SINGLE_TILE && active && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
         int addr = taddr + (tid << 16) + c;
         asm volatile(
@@ -201,7 +223,7 @@ __device__ __noinline__ void
     }
 
     // QK Phase
-    __syncthreads();
+    MLA_MTP_SYNC_ACTIVE();
     if (wid == 0 && elect_sync()) {
       for (int i = 0; i < NUM_QK_STAGES; i++) {
         mbar_init(tma_bar + i * 8, 1);
@@ -210,7 +232,7 @@ __device__ __noinline__ void
       mbar_init(mainloop_bar, 1);
       asm volatile("fence.mbarrier_init.release.cluster;");
     }
-    __syncthreads();
+    MLA_MTP_SYNC_ACTIVE();
 
     if (wid == 0 && elect_sync()) {
       int phase = 0;
@@ -275,7 +297,7 @@ __device__ __noinline__ void
       tcgen05_commit(mainloop_bar);
     }
 
-    __syncthreads();
+    MLA_MTP_SYNC_ACTIVE();
     mbar_wait(mainloop_bar, 0);
 
     // Softmax Phase
@@ -441,10 +463,10 @@ __device__ __noinline__ void
     float nm = fmaxf(row_max, tile_max);
     float corr = __expf(row_max - nm);
     float ts = tile_sum * __expf(tile_max - nm);
-    __syncthreads();
+    MLA_MTP_SYNC_ACTIVE();
 
     // Scale O[128:511] in TMEM
-    if (active && tile > t0) {
+    if (!SINGLE_TILE && active && tile > t0) {
       for (int c = TILE_S; c < D_V; c += 16) {
         float t16[16];
         int addr = taddr + (tid << 16) + c;
@@ -502,9 +524,9 @@ __device__ __noinline__ void
 
     // PV Phase
     int V_buf_base = work_smem + 2 * TILE_BYTES;
-    int pv_acc_base = (tile > t0) ? 1 : 0;
+    int pv_acc_base = (!SINGLE_TILE && tile > t0) ? 1 : 0;
 
-    __syncthreads();
+    MLA_MTP_SYNC_ACTIVE();
 
     if (wid == 0 && elect_sync()) {
       int phase = 0;
@@ -555,7 +577,7 @@ __device__ __noinline__ void
       tcgen05_commit(mainloop_bar);
     }
 
-    __syncthreads();
+    MLA_MTP_SYNC_ACTIVE();
     if (active) {
       mbar_wait(mainloop_bar, 0);
     }
@@ -564,7 +586,7 @@ __device__ __noinline__ void
     if (active) {
       asm volatile("tcgen05.fence::after_thread_sync;");
     }
-    if (active && tile > t0) {
+    if (!SINGLE_TILE && active && tile > t0) {
       for (int c = 0; c < TILE_S; c += 16) {
         float t16[16];
         int addr = taddr + (tid << 16) + c;
@@ -622,6 +644,11 @@ __device__ __noinline__ void
   if (active) {
     asm volatile("tcgen05.fence::after_thread_sync;");
     float inv = (row_sum > 0) ? 1.0f / row_sum : 0.0f;
+    constexpr bool write_final = WRITE_FINAL;
+    int const q_final = tid / hpb;
+    int const h_final = gi * hpb + (tid % hpb);
+    bool const final_row_valid =
+        (q_final < Q_LEN) && (h_final < local_num_heads);
     for (int vc = 0; vc < V_CHUNKS; vc++) {
       int out_taddr = taddr + vc * BK;
       for (int c = 0; c < BK; c += 16) {
@@ -652,17 +679,26 @@ __device__ __noinline__ void
 #pragma unroll
         for (int i = 0; i < 16; i++) {
           nv_bfloat16 val = __float2bfloat16(t16[i] * inv);
-          Oout[base_d + i * 128] = val;
+          if (write_final) {
+            if (final_row_valid) {
+              int const o_base =
+                  (bi * Q_LEN + q_final) * local_num_heads * D_V +
+                  h_final * D_V;
+              Oa[o_base + vc * BK + c + i] = val;
+            }
+          } else {
+            Oout[base_d + i * 128] = val;
+          }
         }
       }
     }
 
-    if (active) {
+    if (!write_final) {
       La[block_linear * 128 + tid] = logf(fmaxf(row_sum, 1e-30f)) + row_max;
     }
   } // end if (active) for epilogue
 
-  __syncthreads();
+  MLA_MTP_SYNC_ACTIVE();
   if (wid == 0) {
     asm volatile(
         "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(taddr),
@@ -707,7 +743,16 @@ __device__ __noinline__ void
     return;
   }
 
-  __shared__ float la_smem[MAX_SK * 128];
+  // la_smem lives in the megakernel's DYNAMIC shared region, NOT static
+  // __shared__: a static MAX_SK*128 float array (16KB at MAX_SK=32) pushes
+  // worker_kernel's static SMEM to ~23KB, and static + the 221KB dynamic
+  // allocation exceeds the SM100 per-CTA limit (232,448B) — the launch then
+  // fails for ANY megakernel whose graph contains this task (TP1 graphs +
+  // the reduce testmode suite; the launch error otherwise surfaces as a
+  // silent hang). The dynamic region is unused by
+  // this task otherwise; capacity (MAX_SK*128*4 = 16KB <= 221KB) is fine.
+  extern __shared__ __align__(16) uint8_t mpk_dyn_smem_mtp_reduce[];
+  float *la_smem = reinterpret_cast<float *>(mpk_dyn_smem_mtp_reduce);
   int la_block_base = (bi * num_head_groups * sk + gi * sk) * 128;
   int la_total = sk * 128;
   for (int i = tid; i < la_total; i += NUM_THREADS_) {

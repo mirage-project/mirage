@@ -16,12 +16,38 @@
 #include "../common/utils.cuh"
 namespace kernel {
 
-template <typename T, int BATCH_SIZE, int HIDDEN_DIM, int NUM_THREADS = 256>
+// IN_ROW_STRIDE / OUT_ROW_STRIDE default to HIDDEN_DIM for contiguous
+// callers; for column-slice RMSNorm the codegen passes the parent's
+// row stride so multi-row CTAs walk the underlying buffer correctly.
+// Per-task base pointers are pre-offset by the runtime (using the
+// narrow view's stride[0] + view_offset), so the kernel no longer
+// needs its own IN_OFFSET / OUT_OFFSET shift.
+template <typename T,
+          int BATCH_SIZE,
+          int HIDDEN_DIM,
+          int NUM_THREADS = 256,
+          int IN_ROW_STRIDE = HIDDEN_DIM,
+          int OUT_ROW_STRIDE = HIDDEN_DIM>
 __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
                                                      void const *weight_ptr,
                                                      void *output_ptr,
-                                                     float eps) {
+                                                     float eps,
+                                                     int row_count_cap = -1) {
   // static_assert(BATCH_SIZE == 1);
+  // Row_count_cap (default -1 = disabled) lets the codegen
+  // shrink grid_dim from (mbt, 1, 1) to (mbt//8, 1, 1) so each CTA handles
+  // BATCH_SIZE > 1 rows via the existing batch_idx loop. On decode iters
+  // (active_rows=1), CTA 0 with BATCH_SIZE=8 must stop after the active row
+  // so it doesn't overwrite rows [1, BATCH_SIZE) with normalized stale bf16
+  // data. row_count_cap = active_rows - cta_first_row >= 0 bounds the loop;
+  // negative value preserves legacy "process all BATCH_SIZE rows" semantics.
+  //
+  // IN_ROW_STRIDE / OUT_ROW_STRIDE (default = HIDDEN_DIM): physical row
+  // stride of the underlying buffer. When the input/output is a column-
+  // slice of a wider buffer (e.g., q_a_layernorm reading cols [0:1536) of
+  // qkv_a_out (mbt, 2176)), the codegen passes the full row width here so
+  // batch_idx advances by the correct stride. Default == HIDDEN_DIM
+  // preserves legacy contiguous behaviour.
   extern __shared__ char smem[];
   // The copy width is one thread's contiguous slice when the row splits
   // evenly over the threads, and the whole row when it does not -- the tile
@@ -73,11 +99,23 @@ __device__ __forceinline__ void rms_norm_hopper_impl(void const *input_ptr,
   float *reduce_smem = reinterpret_cast<float *>(smem + REDUCE_BUFFER_OFFSET);
 
   for (int batch_idx = 0; batch_idx < BATCH_SIZE; batch_idx++) {
-    // get the current batch input, weight, and output pointers
+    // Active-rows gate: with grid_dim shrunk so BATCH_SIZE > 1, decode
+    // iters (active_rows < BATCH_SIZE rows for CTA 0) must skip the
+    // inactive tail so we don't normalize and write back stale bf16. The
+    // remaining rows are left untouched, preserving last-iter content;
+    // downstream consumers all have request_id >= active_rows early-exit
+    // checks so they will not read those rows.
+    if (row_count_cap >= 0 && batch_idx >= row_count_cap) {
+      return;
+    }
+    // get the current batch input, weight, and output pointers.
+    // batch_idx walks by IN_ROW_STRIDE / OUT_ROW_STRIDE so multi-row
+    // CTAs land on consecutive rows of the underlying buffer (which
+    // may be wider than HIDDEN_DIM when the caller passed a narrow view).
     T const *__restrict__ curr_d_input =
-        static_cast<T const *>(input_ptr) + batch_idx * HIDDEN_DIM;
+        static_cast<T const *>(input_ptr) + batch_idx * IN_ROW_STRIDE;
     T *__restrict__ curr_d_output =
-        static_cast<T *>(output_ptr) + batch_idx * HIDDEN_DIM;
+        static_cast<T *>(output_ptr) + batch_idx * OUT_ROW_STRIDE;
     // Warm up input tiles for the first atoms
     {
       int const off = threadIdx.x * CHUNK_SIZE;

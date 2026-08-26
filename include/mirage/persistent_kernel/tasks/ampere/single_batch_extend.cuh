@@ -14,17 +14,17 @@
  */
 
 #pragma once
-#include "common.h"
-#include "copy_sm80.cuh"
-#include "dmem_layout.cuh"
-#include "element_binary.cuh"
-#include "element_unary.cuh"
-#include "mma.cuh"
-#include "norm.cuh"
-#include "reduction.cuh"
-#include "rotary_embedding.cuh"
-#include "smem_layout.cuh"
-#include "utils.cuh"
+#include "tasks/ampere/element_binary.cuh"
+#include "tasks/ampere/element_unary.cuh"
+#include "tasks/ampere/mma.cuh"
+#include "tasks/ampere/norm.cuh"
+#include "tasks/ampere/reduction.cuh"
+#include "tasks/ampere/rotary_embedding.cuh"
+#include "tasks/ampere/smem_layout.cuh"
+#include "tasks/common/common_header.cuh"
+#include "tasks/common/copy_sm80.cuh"
+#include "tasks/common/dmem_layout.cuh"
+#include "tasks/common/utils.cuh"
 namespace kernel {
 
 // kernel Input: 9X128, K_Cache: 4KX128, V_Cache:4KX128

@@ -27,6 +27,7 @@ sys.path.insert(0, DEMO_DIR)
 from models.modeling_qwen3 import Qwen3ForCausalLM  # noqa: E402
 from transformers import AutoTokenizer  # noqa: E402
 from demo import grid_for_rmsnorm_linear_layer  # noqa: E402
+from mirage.mpk.models.utils import aligned_lm_head_workers  # noqa: E402
 
 DEFAULT_SAVE_DIR = os.path.join("outputs", "qwen3")
 PAGE_SIZE = 4096
@@ -112,6 +113,7 @@ def main():
     fused_outdim_2 = 2 * intermediate_size
 
     num_workers, num_schedulers = mi.get_configurations_from_gpu(0)
+    lm_head_workers = aligned_lm_head_workers(vocab_size, num_workers)
     qo_indptr_buffer = torch.empty(
         args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
     paged_kv_indptr_buffer = torch.empty(
@@ -199,11 +201,11 @@ def main():
         dtype=mi.bfloat16, name="argmax_in", io_category="cuda_tensor",
     )
     argmax_part_value = mpk.new_tensor(
-        dims=(args.max_num_batched_tokens, mpk.num_workers),
+        dims=(args.max_num_batched_tokens, lm_head_workers),
         dtype=mi.bfloat16, name="argmax_part_value", io_category="cuda_tensor",
     )
     argmax_part_index = mpk.new_tensor(
-        dims=(args.max_num_batched_tokens, mpk.num_workers),
+        dims=(args.max_num_batched_tokens, lm_head_workers),
         dtype=mi.int64, name="argmax_part_index", io_category="cuda_tensor",
     )
     argmax_out = mpk.attach_input(torch_tensor=output_tokens, name="output_token")
@@ -287,6 +289,7 @@ def main():
                 input=attn_out, weight=w, output=attn_proj_out,
                 grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
                 block_dim=(256, 1, 1),
+                accumulate=True,
             )
         else:
             mpk.linear_with_residual_layer(
@@ -336,6 +339,7 @@ def main():
                 input=silu_mul_out, weight=w, output=mlp_out,
                 grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
                 block_dim=(256, 1, 1),
+                accumulate=True,
             )
         else:
             mpk.linear_with_residual_layer(
@@ -355,12 +359,12 @@ def main():
     )
     mpk.linear_layer(
         input=rmsnorm_out, weight=w_proj, output=argmax_in,
-        grid_dim=(mpk.num_workers, 1, 1), block_dim=(128, 1, 1),
+        grid_dim=(lm_head_workers, 1, 1), block_dim=(128, 1, 1),
     )
     mpk.argmax_partial_layer(
         input=argmax_in,
         output=(argmax_part_value, argmax_part_index),
-        grid_dim=(mpk.num_workers, 1, 1),
+        grid_dim=(lm_head_workers, 1, 1),
         block_dim=(128, 1, 1),
     )
     mpk.argmax_reduce_layer(

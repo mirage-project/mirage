@@ -1,3 +1,18 @@
+/* Copyright 2025 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #pragma once
 #include <cstdio>
 #include <iostream>
@@ -20,6 +35,44 @@
 // using namespace cute;
 
 namespace kernel {
+
+// ---------------------------------------------------------------------------
+// ASYNC-AGENT SAFETY.
+//
+// Declare this in STATIC __shared__ — never inside a storage struct that is
+// placed in the `extern __shared__` arena:
+//
+//   __shared__ PipedBarriers<NUM_AB_STAGE, NUM_ACC_STAGE> sm_bars;
+//
+// Every task body's `extern __shared__` declaration aliases ONE arena at ONE
+// base, and a persistent worker CTA runs heterogeneous tasks back-to-back
+// separated only by __syncthreads(). __syncthreads() orders THREADS; it drains
+// no ASYNCHRONOUS agent. A TMA `expect_tx` completion or a
+// `tcgen05.commit ... mbarrier::arrive` keeps writing an mbarrier's state word
+// after the issuing task has nominally ended, so an ARENA-RESIDENT barrier
+// lets a late arrival land in memory the NEXT task has already reused — a
+// fault or silent corruption depending only on what occupies that byte.
+//
+// nvcc SUMS per-branch static __shared__ (it does not overlay mutually
+// exclusive dispatch branches) and places all of it BELOW the dynamic arena
+// base, so a barrier block declared this way belongs to one task instantiation
+// alone. A late arrival then lands on storage no other task ever touches.
+//
+// Keeping the TMEM allocation slot here too is deliberate: it sat immediately
+// after the barrier array and was the observed victim of a sibling task's
+// arrival (read back as an mbarrier state word, 0x001ffffe, and fed to
+// tcgen05.mma as a TMEM base).
+template <int Num_AB_Stage, int Num_ACC_Stage>
+struct PipedBarriers {
+  alignas(16) cute::uint64_t ab_full_mbar_ptr[Num_AB_Stage];
+  alignas(16) cute::uint64_t ab_empty_mbar_ptr[Num_AB_Stage];
+
+  alignas(16) cute::uint64_t acc_full_mbar_ptr[Num_ACC_Stage];
+  alignas(16) cute::uint64_t acc_empty_mbar_ptr[Num_ACC_Stage];
+
+  alignas(16) cute::uint32_t tmem_base_ptr; // Base pointer for TMEM allocation
+  alignas(16) cute::uint32_t tmem_columns;  // TMEM column allocation size
+};
 
 // Linear task storage. The shared memory buffers for A, B, and C matrices.
 template <class TypeA, // Tensor A data type

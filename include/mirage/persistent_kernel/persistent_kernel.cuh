@@ -39,6 +39,8 @@
 #include <nvshmemx.h>
 #endif
 #endif
+#include <chrono>
+#include <cstdlib>
 #include <map>
 #include <thread>
 #include <unistd.h>
@@ -109,6 +111,23 @@ using namespace mirage::runtime;
 __device__ __forceinline__ void
     _execute_task(TaskDesc const *task_desc,
                   RuntimeConfig const &runtime_config);
+
+// Dispatch behind a non-inlined boundary: keep execute_worker's queue/event
+// state out of the heavy task-body call frames so each task body gets the
+// per-task register budget instead of sharing (and spilling) the worker frame.
+// The single-token decode build (MPK_DSV3_FORCEINLINE, set by the builder when
+// mbt == 1) folds the lean decode dispatch into the worker frame instead.
+static __device__
+#ifdef MPK_DSV3_FORCEINLINE
+    __forceinline__
+#else
+    __noinline__
+#endif
+    void
+    execute_task_noinline(TaskDesc const *task_desc,
+                          RuntimeConfig const &runtime_config) {
+  _execute_task(task_desc, runtime_config);
+}
 
 __device__ __forceinline__ bool is_termination_event(size_t event_loc,
                                                      EventDesc e) {
@@ -401,13 +420,6 @@ __device__ __forceinline__ bool
   // Step 5: update page head tail
   *config.page_queue_head = page_queue_head;
   *config.page_queue_tail = page_queue_tail;
-
-  // printf("Next batch: steps[%d %d %d %d] num_active_tokens(%d)\n",
-  //        config.step[0],
-  //        config.step[1],
-  //        config.step[2],
-  //        config.step[3],
-  //        config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);
 
   if (num_tokens == 0) {
     return false;
@@ -748,9 +760,6 @@ __device__ __forceinline__ void terminate_schedulers(RuntimeConfig config) {
     // CTAs before incrementing its last_ready_event_id
     size_t old;
     do {
-      // old = atomicCAS(&config.sched_queue_last_ready_event_id[i],
-      //                 last_event_id,
-      //                 last_event_id + 1);
       old = atom_cas_release_gpu_u64(&config.sched_queue_last_ready_event_id[i],
                                      last_event_id,
                                      last_event_id + 1);
@@ -801,6 +810,11 @@ __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   static_assert(sizeof(TaskDesc) % sizeof(int) == 0);
   // assert(blockDim.x >= 128);
 }
+
+// Worker-grid residency handshake counter: each split-launch worker CTA bumps
+// this once at entry so the host confirms full residency before launching the
+// scheduler kernel (see launch_persistent_kernel).
+__device__ unsigned int mpk_worker_entry_count = 0;
 
 __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   // Make sure overall smem usage here do not exceed 3KB
@@ -975,22 +989,21 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
       // Dispatch trace: D=dispatch start, F=finish
       bool _trace_t =
           task_desc->task_type == 275 || task_desc->task_type == 276 ||
-          task_desc->task_type == 277 || task_desc->task_type == 287 ||
-          task_desc->task_type == 288 || task_desc->task_type == 248 ||
-          task_desc->task_type == 249 || task_desc->task_type == 302 ||
-          task_desc->task_type == 278 || task_desc->task_type == 154 ||
-          task_desc->task_type == 280 || task_desc->task_type == 118 ||
-          task_desc->task_type == 281 || task_desc->task_type == 253 ||
-          task_desc->task_type == 258 || task_desc->task_type == 259 ||
-          task_desc->task_type == 261 || task_desc->task_type == 262 ||
-          task_desc->task_type == 101;
+          task_desc->task_type == 277 || task_desc->task_type == 288 ||
+          task_desc->task_type == 248 || task_desc->task_type == 249 ||
+          task_desc->task_type == 302 || task_desc->task_type == 278 ||
+          task_desc->task_type == 154 || task_desc->task_type == 280 ||
+          task_desc->task_type == 118 || task_desc->task_type == 281 ||
+          task_desc->task_type == 253 || task_desc->task_type == 258 ||
+          task_desc->task_type == 259 || task_desc->task_type == 261 ||
+          task_desc->task_type == 262 || task_desc->task_type == 101;
 #ifdef MPK_ENABLE_VERBOSE
       if (threadIdx.x == 0) {
         printf("[worker] _execute_task EXECUTE_TASK %d\n",
                task_desc->task_type);
       }
 #endif
-      _execute_task(task_desc, config);
+      execute_task_noinline(task_desc, config);
     }
     __syncthreads();
 
@@ -1384,6 +1397,11 @@ __global__ __launch_bounds__(WORKER_NUM_THREADS,
 
 __global__ __launch_bounds__(WORKER_NUM_THREADS,
                              1) void worker_kernel(RuntimeConfig config) {
+  // Residency handshake: report this worker CTA resident as its first
+  // observable action (see launch_persistent_kernel).
+  if (threadIdx.x == 0) {
+    atomicAdd(&mpk_worker_entry_count, 1u);
+  }
   worker_checker(config);
   execute_worker(config);
 }
@@ -1614,7 +1632,15 @@ extern "C" void
   global_runtime_config.num_gpus = npes;
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
+  // split_worker_scheduler=true launches worker_kernel + scheduler_kernel as
+  // two independent grids; false fuses them into one collective launch.
   global_runtime_config.split_worker_scheduler = true;
+#ifdef MPK_ENABLE_PROFILING
+  // The profiler shares one buffer across the grid; the split worker and
+  // scheduler grids write it with different block counts (colliding header and
+  // slots), so profile through the single fused launch instead.
+  global_runtime_config.split_worker_scheduler = false;
+#endif
 
   std::vector<FullTaskDesc> all_fulltasks;
   std::vector<EventDesc> all_events;
@@ -1624,11 +1650,6 @@ extern "C" void
   std::vector<TaskDesc> all_tasks;
   for (auto const &ft : all_fulltasks) {
     TaskDesc task_desc(ft);
-    // if (ft.task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100 || ft.task_type
-    // == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) {
-    //   printf("ft.kv_idx %d\n", ft.kv_idx);
-    //   printf("ft.merge_task_offset %d\n", ft.merge_task_offset);
-    // }
     all_tasks.push_back(task_desc);
   }
 
@@ -1637,14 +1658,6 @@ extern "C" void
   global_runtime_config.worker_queue_last_ready_task_id =
       gpu_malloc<unsigned long long int>((num_workers * 2) *
                                          sizeof(unsigned long long int));
-  // std::vector<unsigned long long int> host_worker_queue_last_task_id;
-  // for (int i = 0; i < 2 * num_workers; i++) {
-  //   host_worker_queue_last_task_id.push_back(0);
-  // }
-  // cudaMemcpy(global_runtime_config.worker_queue_last_ready_task_id,
-  //            host_worker_queue_last_task_id.data(),
-  //            (num_workers * 2) * sizeof(unsigned long long int),
-  //            cudaMemcpyHostToDevice);
   //  Initialize scheduler queue last event id
   //  We maintain one extra scheduler queue for the global scheduler
   global_runtime_config.sched_queue_last_ready_event_id =
@@ -1653,19 +1666,6 @@ extern "C" void
   global_runtime_config.sched_queue_next_free_event_id =
       gpu_malloc<unsigned long long int>((num_schedulers + 1) *
                                          sizeof(unsigned long long int));
-
-  // std::vector<unsigned long long int> host_sched_queue_last_event_id;
-  // for (int i = 0; i < (num_schedulers + 1); i++) {
-  //   host_sched_queue_last_event_id.push_back(0);
-  // }
-  // cudaMemcpy(global_runtime_config.sched_queue_last_ready_event_id,
-  //            host_sched_queue_last_event_id.data(),
-  //            (num_schedulers + 1) * sizeof(unsigned long long int),
-  //            cudaMemcpyHostToDevice);
-  // cudaMemcpy(global_runtime_config.sched_queue_next_free_event_id,
-  //            host_sched_queue_last_event_id.data(),
-  //            (num_schedulers + 1) * sizeof(unsigned long long int),
-  //            cudaMemcpyHostToDevice);
   //  Initialize all event counters
   global_runtime_config.all_event_counters =
       gpu_malloc<EventCounter>(all_events.size() * sizeof(EventCounter));
@@ -1679,9 +1679,6 @@ extern "C" void
              host_all_event_counters.data(),
              all_events.size() * sizeof(int),
              cudaMemcpyHostToDevice);
-  // cudaMemset(global_runtime_config.all_event_counters,
-  //            0,
-  //            all_events.size() * sizeof(EventCounter));
   //  Initialize all tasks
   fprintf(stderr,
           "[MPK INIT] Total tasks: %zu, Total events: %zu\n",
@@ -1807,6 +1804,34 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                         global_runtime_config.prepare_done_event,
                         0);
 
+    // Worker-grid residency handshake: the worker and scheduler grids launch
+    // on two concurrent streams with no co-residency guarantee. Persistent
+    // workers never yield their SM, so if scheduler (or another process's) CTAs
+    // win SM placement first the losing worker CTAs never start and the build
+    // wedges silently. Reset an entry counter, launch workers, and wait until
+    // every worker CTA reports entry before launching the scheduler; abort on
+    // timeout rather than wedge. Escape hatch:
+    // MPK_DISABLE_RESIDENCY_HANDSHAKE=1.
+    bool const residency_handshake =
+        (std::getenv("MPK_DISABLE_RESIDENCY_HANDSHAKE") == nullptr);
+    cudaEvent_t residency_reset_done = nullptr;
+    if (residency_handshake) {
+      static unsigned int const kZero = 0;
+      CUDA_CHECK(cudaMemcpyToSymbolAsync(mpk_worker_entry_count,
+                                         &kZero,
+                                         sizeof(unsigned int),
+                                         0,
+                                         cudaMemcpyHostToDevice,
+                                         global_runtime_config.worker_stream));
+      // Order the reset happen-before the poll: they live on different streams
+      // and launch_persistent_kernel can be called repeatedly in one process,
+      // so the poll could otherwise read the previous launch's counter value.
+      CUDA_CHECK(cudaEventCreateWithFlags(&residency_reset_done,
+                                          cudaEventDisableTiming));
+      CUDA_CHECK(cudaEventRecord(residency_reset_done,
+                                 global_runtime_config.worker_stream));
+    }
+
     // The split kernel does not support NVSHMEM because
     // nvshmemx_collective_launch launches kernels sequentially, which blocks
     // the interaction between the worker kernel and the scheduler kernel
@@ -1815,6 +1840,47 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                     MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
                     global_runtime_config.worker_stream>>>(
         global_runtime_config);
+
+    if (residency_handshake) {
+      // Poll the entry counter from the scheduler stream (the worker stream is
+      // now occupied by the never-returning persistent worker kernel). Abort
+      // after ~30s: full residency normally settles well under a second, so a
+      // timeout means the device cannot host num_workers co-resident CTAs.
+      CUDA_CHECK(cudaStreamWaitEvent(
+          global_runtime_config.scheduler_stream, residency_reset_done, 0));
+      unsigned int resident = 0;
+      auto const t0 = std::chrono::steady_clock::now();
+      while (true) {
+        CUDA_CHECK(
+            cudaMemcpyFromSymbolAsync(&resident,
+                                      mpk_worker_entry_count,
+                                      sizeof(unsigned int),
+                                      0,
+                                      cudaMemcpyDeviceToHost,
+                                      global_runtime_config.scheduler_stream));
+        CUDA_CHECK(
+            cudaStreamSynchronize(global_runtime_config.scheduler_stream));
+        if (resident >= (unsigned int)global_runtime_config.num_workers) {
+          break;
+        }
+        double const waited =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+                .count();
+        if (waited > 30.0) {
+          fprintf(stderr,
+                  "FATAL: worker grid failed to become fully resident: only "
+                  "%u of %d worker CTAs started after %.1fs (another process "
+                  "likely holds SMs). Refusing to launch into a guaranteed "
+                  "wedge.\n",
+                  resident,
+                  global_runtime_config.num_workers,
+                  waited);
+          abort();
+        }
+        usleep(2000);
+      }
+      CUDA_CHECK(cudaEventDestroy(residency_reset_done));
+    }
 
     scheduler_kernel<<<dim3(global_runtime_config.num_local_schedulers, 1, 1),
                        dim3(32, 1, 1),

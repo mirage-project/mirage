@@ -6,6 +6,9 @@ import os
 import sys
 import json
 import socket
+import re
+import time
+import hashlib
 
 from mirage.mpk.models.deepseek_v3.builder import DeepSeekV3Builder
 from mirage.mpk.models.graph_builder import MirageModelConfig
@@ -13,6 +16,7 @@ from mirage.mpk.models.graph_builder import MirageModelConfig
 
 DEFAULT_SAVE_DIR = os.path.join("outputs", "deepseek_v3")
 MAX_SAVE_TOKENS = 100
+DEFAULT_PROFILER_BUFFER_ENTRIES = 6000 * 128
 
 # DeepSeek V3 architecture constants
 # MLA: 128 heads, compressed KV dim 512, rope dim 64, total head dim 576
@@ -20,6 +24,16 @@ DEEPSEEK_V3_NUM_HEADS = 128
 DEEPSEEK_V3_KV_LORA_RANK = 512
 DEEPSEEK_V3_QK_ROPE_HEAD_DIM = 64
 DEEPSEEK_V3_HEAD_DIM_TOTAL = DEEPSEEK_V3_KV_LORA_RANK + DEEPSEEK_V3_QK_ROPE_HEAD_DIM  # 576
+
+
+def get_profiler_buffer_entries() -> int:
+    raw_value = os.environ.get("MPK_PROFILER_BUFFER_ENTRIES")
+    if raw_value is None:
+        return DEFAULT_PROFILER_BUFFER_ENTRIES
+    entries = int(raw_value)
+    if entries <= 0:
+        raise ValueError("MPK_PROFILER_BUFFER_ENTRIES must be positive")
+    return entries
 
 
 def grid_for_rmsnorm_linear_layer(size: int):
@@ -78,12 +92,13 @@ if __name__ == "__main__":
                              "actual prompt text. The generated tokens are a "
                              "deterministic cycle over a small vocab subset so "
                              "numerical behavior is reproducible across runs.")
-    parser.add_argument("--mtp", type=int, default=0, choices=[0, 1, 2, 3],
-                        help="MTP speculative decoding. 0=disabled, 1-3=number of "
-                             "speculative tokens drafted per step.")
-    parser.add_argument("--rejection-sample-method", default="strict", type=str,
-                        choices=["strict", "probabilistic", "synthetic"],
-                        help="Rejection sampling method for speculative decoding")
+    parser.add_argument("--ep-size", type=int, default=1,
+                        help="Expert-parallel group count for routed MoE experts. "
+                             "Non-MoE layers and shared experts keep TP=world_size; "
+                             "routed experts use TP=world_size/ep_size.")
+    parser.add_argument("--disable-vocab-parallel-lm-head", action="store_true",
+                        help="Disable the TP vocab-parallel LM head fast path. "
+                             "By default it is enabled for TP>1.")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--trace-name", default="", help="Perfetto trace output name")
     parser.add_argument("--ignore-eos", action="store_true",
@@ -99,9 +114,14 @@ if __name__ == "__main__":
                             "Optionally dump first N generated token_ids, text, and latency to JSON. "
                             "If path omitted, saves to outputs/deepseek_v3/{torch_output.json|mpk_output.json}."
                         ))
-    parser.add_argument("--layers", type=str, default=None,
-                        help="Comma-separated list of layer indices to load (e.g. '0,3,60') "
-                             "or a range '0-39'.")
+    parser.add_argument("--weight-cache-dir", type=str,
+                        default=os.environ.get("MPK_DEEPSEEK_WEIGHT_CACHE_DIR"),
+                        help=(
+                            "Optional directory for MPK-ready per-rank weight cache. "
+                            "When set, converted/fused/sharded tensors are saved after "
+                            "the first run and loaded directly by later runs with the "
+                            "same model/TP/EP/vocab-parallel settings."
+                        ))
 
     args = parser.parse_args()
 
@@ -142,8 +162,16 @@ if __name__ == "__main__":
     if rank != 0:
         print = lambda *_, **__: None
 
+
     print("Input arguments:", args)
     print(f"world_size({world_size}) rank({rank})")
+    if args.ep_size < 1 or world_size % args.ep_size != 0:
+        raise ValueError(
+            f"--ep-size must divide world_size: ep_size={args.ep_size}, "
+            f"world_size={world_size}"
+        )
+    if 256 % args.ep_size != 0:
+        raise ValueError(f"--ep-size must divide 256 routed experts: {args.ep_size}")
     torch.set_default_dtype(torch.bfloat16)
     torch.cuda.set_device(rank)
 
@@ -161,6 +189,19 @@ if __name__ == "__main__":
     qk_rope_head_dim = getattr(config, "qk_rope_head_dim", DEEPSEEK_V3_QK_ROPE_HEAD_DIM)
     ckv_kpe_dim = kv_lora_rank + qk_rope_head_dim  # 576 for DeepSeek V3
     num_attention_heads = config.num_attention_heads
+    expected_config = {
+        "hidden_size": 7168,
+        "num_attention_heads": DEEPSEEK_V3_NUM_HEADS,
+        "kv_lora_rank": DEEPSEEK_V3_KV_LORA_RANK,
+        "qk_rope_head_dim": DEEPSEEK_V3_QK_ROPE_HEAD_DIM,
+    }
+    for field_name, expected_value in expected_config.items():
+        actual_value = getattr(config, field_name, None)
+        if actual_value != expected_value:
+            raise ValueError(
+                f"DeepSeek V3 builder constant mismatch: config.{field_name}="
+                f"{actual_value}, expected {expected_value}."
+            )
 
     print(f"Model config: hidden_size={hidden_size}, num_layers={num_layers}, "
           f"vocab_size={vocab_size}, num_heads={num_attention_heads}, "
@@ -180,13 +221,9 @@ if __name__ == "__main__":
         (args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda"
     )
 
-    # Tokenize prompt (or synthesize a fixed-length prompt for stress tests)
+    # Tokenize prompt or synthesize a fixed-length prompt.
     if args.prompt_length > 0:
-        pl = min(args.prompt_length, args.max_seq_length - 16)
-        # Deterministic synthetic prompt: cycle over a small subset of the
-        # vocab. Excludes special IDs (pad, bos, eos, etc.) by staying in
-        # [1024, 1024 + 4096) which is safely inside any tokenizer's main
-        # text vocabulary for DeepSeek V3 (vocab_size = 129280).
+        pl = min(args.prompt_length, args.max_seq_length - 1)
         synth = torch.arange(pl, dtype=torch.long, device="cuda") % 4096 + 1024
         for r in range(total_num_requests):
             tokens[r, :pl] = synth
@@ -194,8 +231,6 @@ if __name__ == "__main__":
             (total_num_requests,), pl,
             dtype=torch.int, device="cuda"
         )
-        print(f"[stress] Using synthetic prompt of length {pl} "
-              f"(max_seq_length={args.max_seq_length}).")
     elif args.prompts_json:
         prompt_list = json.loads(args.prompts_json)
         if not isinstance(prompt_list, list) or not prompt_list:
@@ -229,8 +264,6 @@ if __name__ == "__main__":
         prompt_lengths = torch.tensor(
             prompt_lens, dtype=torch.int, device="cuda"
         )
-        print(f"[batch] Using {len(prompt_list)} distinct prompts; "
-              f"prompt_lengths={prompt_lengths.tolist()}")
     else:
         messages = [
             {"role": "user", "content": args.prompt},
@@ -260,23 +293,32 @@ if __name__ == "__main__":
 
         # Pad vocab_size for task graph creation
         padded_vocab_size = ((vocab_size + 255) // 256) * 256
+        vocab_parallel_lm_head = (
+            world_size > 1
+            and not args.disable_vocab_parallel_lm_head
+        )
+        lm_head_local_vocab_padded = None
+        lm_head_vocab_offset = 0
+        lm_head_valid_vocab_size = padded_vocab_size
+        if vocab_parallel_lm_head:
+            local_nominal = (padded_vocab_size + world_size - 1) // world_size
+            lm_head_local_vocab_padded = ((local_nominal + 255) // 256) * 256
+            lm_head_vocab_offset = rank * lm_head_local_vocab_padded
+            lm_head_valid_vocab_size = max(
+                0,
+                min(lm_head_local_vocab_padded,
+                    padded_vocab_size - lm_head_vocab_offset),
+            )
 
         if args.profiling:
             profiler_tensor = torch.zeros(
-                3000 * 128, dtype=torch.uint64, device="cuda"
+                get_profiler_buffer_entries(),
+                dtype=torch.uint64,
+                device="cuda",
             ).contiguous()
         else:
             profiler_tensor = None
 
-        # MTP speculative decoding config
-        if args.mtp > 0:
-            spec_decode_config = mi.spec_decode_class(
-                "lookahead",
-                ngram_size=3,
-                spec_length=args.mtp,
-            )
-        else:
-            spec_decode_config = None
 
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
 
@@ -311,6 +353,7 @@ if __name__ == "__main__":
         mpk = mi.PersistentKernel(
             mode="offline",
             world_size=world_size,
+            spec_decode_config=None,
             mpi_rank=rank,
             num_workers=num_workers,
             num_local_schedulers=num_schedulers,
@@ -337,117 +380,177 @@ if __name__ == "__main__":
             trace_name=(
                 f"{args.trace_name}_rank{rank}" if args.trace_name else ""
             ),
-            spec_decode_config=spec_decode_config,
             use_cutlass_kernel=True,
+        )
+        mpk.ep_size = args.ep_size
+        mpk.deepseek_vocab_parallel_lm_head = vocab_parallel_lm_head
+        mpk.deepseek_lm_head_vocab_offset = lm_head_vocab_offset
+        mpk.deepseek_lm_head_valid_vocab_size = lm_head_valid_vocab_size
+        mpk.deepseek_lm_head_local_vocab_padded = (
+            lm_head_local_vocab_padded or padded_vocab_size
         )
 
         # Load state dict from converted weights
         print(f"Loading model weights from: {args.model_path}")
-        from safetensors.torch import load_file
+        load_start_time = time.perf_counter()
+        from safetensors.torch import load_file, save_file
         from safetensors import safe_open
 
-        def _parse_layers(spec):
-            result = []
-            for part in spec.split(','):
-                if '-' in part:
-                    lo, hi = part.split('-', 1)
-                    result.extend(range(int(lo), int(hi) + 1))
-                else:
-                    result.append(int(part))
-            return result
+        layer_indices_arg = None
+        layer_indices_for_load = list(range(num_layers))
+        absorb_layers = list(range(num_layers))
 
-        # Determine which layers we need
-        layer_indices_for_load = None
-        if args.layers:
-            layer_indices_for_load = _parse_layers(args.layers)
-            # Also need MTP layer if --mtp
-            if args.mtp > 0:
-                layer_indices_for_load.append(num_layers)  # layer 61
+        num_routed_experts_for_load = getattr(
+            config,
+            "n_routed_experts",
+            getattr(config, "num_experts", 256),
+        )
+        routed_tp_size_for_load = world_size // args.ep_size
+        ep_rank_for_load = rank // routed_tp_size_for_load
+        local_num_experts_for_load = num_routed_experts_for_load // args.ep_size
+        local_expert_start_for_load = ep_rank_for_load * local_num_experts_for_load
+        local_expert_end_for_load = (
+            local_expert_start_for_load + local_num_experts_for_load
+        )
+        local_expert_ids_for_load = (
+            set(range(local_expert_start_for_load, local_expert_end_for_load))
+            if args.ep_size > 1
+            else None
+        )
+        expert_key_re = re.compile(r"^model\.layers\.\d+\.mlp\.experts\.(\d+)\.")
+
+        cache_file = None
+        state_dict_from_cache = False
+        if args.weight_cache_dir:
+            cache_payload = {
+                "format": "deepseek_v3_mpk_fp8_runtime_cache_v2",
+                "model_path": os.path.realpath(args.model_path),
+                "world_size": world_size,
+                "rank": rank,
+                "mtp": 0,  # MTP removed; key field kept for cache compat
+                "ep_size": args.ep_size,
+                "vocab_parallel_lm_head": vocab_parallel_lm_head,
+                "lm_head_local_vocab_padded": lm_head_local_vocab_padded,
+                "lm_head_vocab_offset": lm_head_vocab_offset,
+                "lm_head_valid_vocab_size": lm_head_valid_vocab_size,
+                "hidden_size": hidden_size,
+                "vocab_size": vocab_size,
+                "num_layers": num_layers,
+            }
+            cache_key = hashlib.sha256(
+                json.dumps(cache_payload, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:24]
+            cache_dir = os.path.join(args.weight_cache_dir, cache_key)
+            cache_file = os.path.join(cache_dir, f"rank{rank}.safetensors")
+            if os.path.exists(cache_file):
+                cache_load_device = f"cuda:{rank}"
+                print(f"  Loading MPK weight cache: {cache_file}")
+                cache_load_start = time.perf_counter()
+                state_dict = load_file(cache_file, device=cache_load_device)
+                state_dict_from_cache = True
+                print(
+                    f"  Weight cache load time: "
+                    f"{time.perf_counter() - cache_load_start:.3f}s"
+                )
+
+        _conv_sem_fh = None
+        _conv_sem_k = int(os.environ.get("MPK_CONVERT_SEMAPHORE", "0") or "0")
+        needs_conversion = False
 
         weight_file = os.path.join(
             args.model_path, f"model{rank}-mp{world_size}.safetensors"
         )
-        if os.path.exists(weight_file):
+        if state_dict_from_cache:
+            pass
+        elif os.path.exists(weight_file):
             state_dict = load_file(weight_file, device=f"cuda:{rank}")
         else:
-            # Selective loading: only load needed layers from sharded files
             index_file = os.path.join(args.model_path, "model.safetensors.index.json")
-            if os.path.exists(index_file) and layer_indices_for_load is not None:
-                # Smart loading: use index to only load relevant shards/keys
-                print(f"  Selective loading for layers: {layer_indices_for_load}")
+            if os.path.exists(index_file):
+                needs_conversion = True
+                if _conv_sem_k > 0 and world_size > 1:
+                    import fcntl
+                    _sem_dir = os.path.join(
+                        args.weight_cache_dir or os.environ.get("TMPDIR", "/tmp"),
+                        "_mpk_convert_sem")
+                    os.makedirs(_sem_dir, exist_ok=True)
+                    _conv_sem_fh = open(
+                        os.path.join(_sem_dir, f"slot{rank % _conv_sem_k}"), "w")
+                    _sem_t0 = time.perf_counter()
+                    sys.stderr.write(f"[convert-sem] rank {rank}: waiting for slot "
+                                     f"{rank % _conv_sem_k} (K={_conv_sem_k})\n")
+                    fcntl.flock(_conv_sem_fh, fcntl.LOCK_EX)
+                    sys.stderr.write(f"[convert-sem] rank {rank}: slot acquired after "
+                                     f"{time.perf_counter() - _sem_t0:.1f}s\n")
+                print(f"  Loading HF-index weights for layers: {layer_indices_for_load}")
                 state_dict = {}
                 with open(index_file) as f:
                     index = json.load(f)
-                # Build key filter: global keys + selected layer keys
+                # Load global weights and all transformer layers from the HF index.
                 needed_prefixes = ["model.embed_tokens.", "model.norm.", "lm_head."]
                 for li in layer_indices_for_load:
                     needed_prefixes.append(f"model.layers.{li}.")
-                # Group keys by shard file
                 shard_to_keys = {}
                 for key, shard in index["weight_map"].items():
                     if any(key.startswith(p) for p in needed_prefixes):
+                        expert_match = expert_key_re.match(key)
+                        if (
+                            local_expert_ids_for_load is not None
+                            and expert_match is not None
+                            and int(expert_match.group(1)) not in local_expert_ids_for_load
+                        ):
+                            continue
                         shard_to_keys.setdefault(shard, []).append(key)
-                # Load only needed shards and keys
-                # Load to CPU first, then move to GPU. This avoids GPU OOM when
-                # multiple TP ranks each load full (un-sharded) weights — the
-                # builder will shard them later during weight conversion.
                 _load_device = "cpu" if world_size > 1 else f"cuda:{rank}"
+                sliced_lm_head = False
                 for shard, keys in sorted(shard_to_keys.items()):
                     shard_path = os.path.join(args.model_path, shard)
                     print(f"  Loading {len(keys)} keys from {shard}")
                     with safe_open(shard_path, framework="pt", device=_load_device) as f:
                         for key in keys:
-                            state_dict[key] = f.get_tensor(key)
+                            if key == "lm_head.weight" and vocab_parallel_lm_head:
+                                lm_head_slice = f.get_slice(key)
+                                full_shape = lm_head_slice.get_shape()
+                                tensor = lm_head_slice[
+                                    lm_head_vocab_offset:
+                                    lm_head_vocab_offset + lm_head_valid_vocab_size,
+                                    :,
+                                ]
+                                if lm_head_valid_vocab_size < lm_head_local_vocab_padded:
+                                    pad = torch.zeros(
+                                        lm_head_local_vocab_padded
+                                        - lm_head_valid_vocab_size,
+                                        full_shape[1],
+                                        dtype=tensor.dtype,
+                                        device=tensor.device,
+                                    )
+                                    tensor = torch.cat([tensor, pad], dim=0)
+                                state_dict[key] = tensor.contiguous()
+                                sliced_lm_head = True
+                            else:
+                                state_dict[key] = f.get_tensor(key)
                 print(f"  Loaded {len(state_dict)} keys total (device={_load_device})")
+                if sliced_lm_head:
+                    print(
+                        "  Sliced lm_head.weight during load: "
+                        f"rows {lm_head_vocab_offset}:"
+                        f"{lm_head_vocab_offset + lm_head_valid_vocab_size} "
+                        f"-> local padded {lm_head_local_vocab_padded}"
+                    )
             else:
-                # Full loading (no index or no layer filter)
-                import glob
-                shard_files = sorted(glob.glob(
-                    os.path.join(args.model_path, "model-*.safetensors")
-                ))
-                if shard_files:
-                    state_dict = {}
-                    for shard_file in shard_files:
-                        state_dict.update(load_file(shard_file, device=f"cuda:{rank}"))
-                else:
-                    candidates = [
-                        os.path.join(args.model_path, "model.safetensors"),
-                    ]
-                    state_dict = None
-                    for candidate in candidates:
-                        if os.path.exists(candidate):
-                            state_dict = load_file(candidate, device=f"cuda:{rank}")
-                            break
-                    if state_dict is None:
-                        raise FileNotFoundError(
-                            f"Could not find model weights at {args.model_path}. "
-                            f"Expected {weight_file} or model.safetensors or model-*.safetensors"
-                        )
+                raise RuntimeError("No valid weight files found for indexed loading.")
+        print(f"  Weight read time: {time.perf_counter() - load_start_time:.3f}s")
 
-        # Parse layer indices
-        layer_indices_arg = None
-        if args.layers:
-            layer_indices_arg = _parse_layers(args.layers)
-
-        # Weight conversion (absorption + fusion) is needed whenever --layers
-        # is used for selective loading.
-        _need_conversion = bool(args.layers)
-        if _need_conversion:
-            test_layers = layer_indices_arg if layer_indices_arg else list(range(num_layers))
-
-            # Phase 1: Absorption. Matches vLLM/SGLang where runtime uses absorption.
-            print("\nPhase 1: Weight absorption (q_b + o_proj fusion)...")
-            import sys
+        # Raw HF-index weights need MPK conversion; cache and per-rank files do not.
+        if needs_conversion:
+            print("\nConverting weights for MPK builder (FP8 preserved)...")
+            convert_start_time = time.perf_counter()
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
             from convert import (
                 dequantize_fp8, absorb_kv_into_q, get_model_params, is_fp8,
-                find_scale_for_weight,
             )
             config_dict = AutoConfig.from_pretrained(args.model_path).to_dict()
             mp = get_model_params(config_dict)
-            absorb_layers = list(test_layers)
-            if args.mtp > 0:
-                absorb_layers.append(num_layers)
 
             def _quantize_f32_to_checkpoint_fp8(w_f32, block_size=128):
                 """Quantize float32 weight to FP8 + per-2D-block scale_inv."""
@@ -475,45 +578,137 @@ if __name__ == "__main__":
                     q_s_key = f"{q_key}_scale_inv"
                     kv_s_key = f"{kv_key}_scale_inv"
                     if is_fp8(q_w) and q_s_key in state_dict:
-                        q_f32 = dequantize_fp8(q_w.cuda(), state_dict[q_s_key].cuda())
+                        q_f32 = dequantize_fp8(q_w.to("cuda"), state_dict[q_s_key].to("cuda"))
                     else:
-                        q_f32 = q_w.cuda().float()
+                        q_f32 = q_w.to("cuda").float()
                     if is_fp8(kv_w) and kv_s_key in state_dict:
-                        kv_f32 = dequantize_fp8(kv_w.cuda(), state_dict[kv_s_key].cuda())
+                        kv_f32 = dequantize_fp8(kv_w.to("cuda"), state_dict[kv_s_key].to("cuda"))
                     else:
-                        kv_f32 = kv_w.cuda().float()
-                    kv_bf16 = kv_f32.to(torch.bfloat16)
-                    absorbed = absorb_kv_into_q(q_f32, kv_f32, mp).to(torch.bfloat16)
-                    state_dict[q_key] = absorbed
-                    if q_s_key in state_dict:
-                        del state_dict[q_s_key]
-                    # Fuse V un-absorption into o_proj
+                        kv_f32 = kv_w.to("cuda").float()
+                    absorbed_f32 = absorb_kv_into_q(q_f32, kv_f32, mp)
+                    q_fp8, q_scale = _quantize_f32_to_checkpoint_fp8(absorbed_f32)
+                    state_dict[q_key] = q_fp8
+                    state_dict[q_s_key] = q_scale
                     num_heads_loc = mp["num_heads"]
                     qk_nope = mp["qk_nope_head_dim"]
+                    qk_rope = mp["qk_rope_head_dim"]
                     v_dim = mp["v_head_dim"]
                     kv_lora_rank = mp["kv_lora_rank"]
-                    # Split absorbed q_b into q_b_nope (H*D_CKV=512) and
-                    # q_b_pe (H*D_KPE=64). Required by the chunked-prefill
-                    # MLA kernel which takes Q_nope / Q_pe as separate tensors.
-                    # Absorbed layout is per-head [nope(512) | pe(64)].
                     H_ = num_heads_loc
-                    absorbed_r = absorbed.reshape(H_, 576, -1)
-                    q_b_nope = absorbed_r[:, :kv_lora_rank, :].contiguous().reshape(H_ * kv_lora_rank, -1)
-                    q_b_pe = absorbed_r[:, kv_lora_rank:, :].contiguous().reshape(H_ * (576 - kv_lora_rank), -1)
-                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope
-                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe
+
+                    # Prefill keeps q_nope/q_pe separate; decode uses absorbed q_b/o_proj.
+                    q_orig = q_f32.reshape(H_, qk_nope + qk_rope, -1)
+                    q_b_nope_f32 = q_orig[:, :qk_nope, :].contiguous().reshape(
+                        H_ * qk_nope, -1)
+                    q_b_pe_f32 = q_orig[:, qk_nope:, :].contiguous().reshape(
+                        H_ * qk_rope, -1)
+                    q_b_nope_fp8, q_b_nope_scale = _quantize_f32_to_checkpoint_fp8(
+                        q_b_nope_f32)
+                    q_b_pe_fp8, q_b_pe_scale = _quantize_f32_to_checkpoint_fp8(
+                        q_b_pe_f32)
+                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope_fp8
+                    state_dict[f"{attn}q_b_nope.weight_scale_inv"] = q_b_nope_scale
+                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe_fp8
+                    state_dict[f"{attn}q_b_pe.weight_scale_inv"] = q_b_pe_scale
+                    # Build row-swapped q_b so dim=0 TP sharding preserves [nope; pe].
+                    H_local_w = H_ // world_size
+                    if H_ % world_size != 0:
+                        raise ValueError(
+                            f"num_heads {H_} not divisible by world_size "
+                            f"{world_size} — row-swap fused q_b can't shard")
+                    rank_parts = []
+                    for r in range(world_size):
+                        rank_heads = q_orig[r * H_local_w : (r + 1) * H_local_w]
+                        # (H_local, 192, K)
+                        rank_nope = rank_heads[:, :qk_nope, :].reshape(
+                            H_local_w * qk_nope, -1)        # (H_local*128, K)
+                        rank_pe = rank_heads[:, qk_nope:, :].reshape(
+                            H_local_w * qk_rope, -1)        # (H_local*64, K)
+                        rank_parts.append(rank_nope)
+                        rank_parts.append(rank_pe)
+                    q_b_unabs_f32 = torch.cat(rank_parts, dim=0).contiguous()
+                    q_b_unabs_fp8, q_b_unabs_scale = (
+                        _quantize_f32_to_checkpoint_fp8(q_b_unabs_f32))
+                    state_dict[f"{attn}q_b_proj_unabsorbed.weight"] = q_b_unabs_fp8
+                    state_dict[f"{attn}q_b_proj_unabsorbed.weight_scale_inv"] = q_b_unabs_scale
+
                     kv_head_dim = qk_nope + v_dim
-                    kv_b_reshaped = kv_bf16.reshape(num_heads_loc, kv_head_dim, kv_lora_rank)
-                    W_UV = kv_b_reshaped[:, :v_dim, :]
+                    kv_b_reshaped = kv_f32.reshape(
+                        num_heads_loc, kv_head_dim, kv_lora_rank)
+                    W_UK = kv_b_reshaped[:, :qk_nope, :]
+                    W_UV = kv_b_reshaped[:, qk_nope:, :]
+                    kv_b_k_f32 = W_UK.contiguous().reshape(H_ * qk_nope, kv_lora_rank)
+                    kv_b_v_f32 = W_UV.contiguous().reshape(H_ * v_dim, kv_lora_rank)
+                    kv_b_k_fp8, kv_b_k_scale = _quantize_f32_to_checkpoint_fp8(
+                        kv_b_k_f32)
+                    kv_b_v_fp8, kv_b_v_scale = _quantize_f32_to_checkpoint_fp8(
+                        kv_b_v_f32)
+                    state_dict[f"{attn}kv_b_k.weight"] = kv_b_k_fp8
+                    state_dict[f"{attn}kv_b_k.weight_scale_inv"] = kv_b_k_scale
+                    state_dict[f"{attn}kv_b_v.weight"] = kv_b_v_fp8
+                    state_dict[f"{attn}kv_b_v.weight_scale_inv"] = kv_b_v_scale
+
+                    # Repack kv_b_k for the decode Q BMM path.
+                    W_UK_bmm = W_UK.transpose(-2, -1).contiguous()  # (H, 512, 128)
+                    bmm_amax = W_UK_bmm.abs().amax(dim=-1, keepdim=True).clamp(
+                        min=1e-12)
+                    bmm_scale_inv_f32 = (bmm_amax / 448.0).squeeze(-1)  # (H, 512)
+                    bmm_w_q = (W_UK_bmm / bmm_amax).clamp(-448, 448).to(
+                        torch.float8_e4m3fn).contiguous()  # (H, 512, 128) FP8
+                    # UE8M0 encode with CEIL log2 to match the kernel.
+                    pos = torch.where(
+                        bmm_scale_inv_f32 > 0, bmm_scale_inv_f32,
+                        torch.full_like(bmm_scale_inv_f32, 1e-30))
+                    log2_val = torch.ceil(torch.log2(pos))
+                    ue = (log2_val + 127.0).clamp(0, 255).to(torch.uint8)
+                    ue = torch.where(bmm_scale_inv_f32 > 0, ue,
+                                     torch.zeros_like(ue))
+                    bmm_scale_packed = ue.to(torch.uint32).unsqueeze(-1).contiguous()
+                    state_dict[f"{attn}kv_b_k_bmm.weight"] = bmm_w_q
+                    state_dict[f"{attn}kv_b_k_bmm.weight_scale_ue8m0"] = (
+                        bmm_scale_packed)
+
+                    # Repack kv_b_v for cache compatibility.
+                    W_UV_bmm = W_UV.contiguous()  # (H, 128, 512)
+                    bmm_v_amax = W_UV_bmm.abs().amax(dim=-1, keepdim=True).clamp(
+                        min=1e-12)
+                    bmm_v_scale_inv_f32 = (bmm_v_amax / 448.0).squeeze(-1)  # (H, 128)
+                    bmm_v_w_q = (W_UV_bmm / bmm_v_amax).clamp(-448, 448).to(
+                        torch.float8_e4m3fn).contiguous()  # (H, 128, 512) FP8
+                    pos_v = torch.where(
+                        bmm_v_scale_inv_f32 > 0, bmm_v_scale_inv_f32,
+                        torch.full_like(bmm_v_scale_inv_f32, 1e-30))
+                    log2_v = torch.ceil(torch.log2(pos_v))
+                    ue_v = (log2_v + 127.0).clamp(0, 255).to(torch.uint8)
+                    ue_v = torch.where(bmm_v_scale_inv_f32 > 0, ue_v,
+                                       torch.zeros_like(ue_v))
+                    bmm_v_scale_packed = ue_v.to(torch.uint32).unsqueeze(-1).contiguous()
+                    state_dict[f"{attn}kv_b_v_bmm.weight"] = bmm_v_w_q
+                    state_dict[f"{attn}kv_b_v_bmm.weight_scale_ue8m0"] = (
+                        bmm_v_scale_packed)
+
+                    # Repack kv_b_v for dense decode BMM2.
+                    kv_lora_blk = kv_lora_rank // 128  # = 4 for K=512
+                    state_dict[f"{attn}kv_b_v_bmm_dense.weight"] = (
+                        kv_b_v_fp8.reshape(H_, v_dim, kv_lora_rank).contiguous().clone())
+                    state_dict[f"{attn}kv_b_v_bmm_dense.weight_scale_inv"] = (
+                        kv_b_v_scale.reshape(H_, 1, kv_lora_blk).to(
+                            torch.float32).contiguous().clone())
+
+                    # Preserve original W_O for prefill.
                     o_key = f"{attn}o_proj.weight"
                     if o_key in state_dict:
                         o_w = state_dict[o_key]
                         o_s_key = f"{o_key}_scale_inv"
+                        state_dict[f"{attn}o_proj_original.weight"] = o_w
+                        if o_s_key in state_dict:
+                            state_dict[f"{attn}o_proj_original.weight_scale_inv"] = (
+                                state_dict[o_s_key])
                         if is_fp8(o_w) and o_s_key in state_dict:
-                            o_bf16 = dequantize_fp8(o_w.cuda(), state_dict[o_s_key].cuda()).to(torch.bfloat16)
+                            o_bf16 = dequantize_fp8(o_w.to("cuda"), state_dict[o_s_key].to("cuda")).to(torch.bfloat16)
                             del state_dict[o_s_key]
                         else:
-                            o_bf16 = o_w.cuda().to(torch.bfloat16)
+                            o_bf16 = o_w.to("cuda").to(torch.bfloat16)
                         hidden_dim = o_bf16.shape[0]
                         o_reshaped = o_bf16.reshape(hidden_dim, num_heads_loc, v_dim)
                         o_fused_f32 = torch.einsum('dhn,hnk->dhk', o_reshaped.float(), W_UV.float())
@@ -521,122 +716,11 @@ if __name__ == "__main__":
                         o_fp8, o_scale = _quantize_f32_to_checkpoint_fp8(o_flat)
                         state_dict[o_key] = o_fp8
                         state_dict[o_s_key] = o_scale
-                        print(f"  L{li}: FP8 absorbed q_b {absorbed.shape}, FP8 fused o_proj [{hidden_dim}, {num_heads_loc*kv_lora_rank}]")
                     del state_dict[kv_key]
                     if kv_s_key in state_dict:
                         del state_dict[kv_s_key]
 
-            # Phase 2: Convert remaining weights for MPK builder
-            # (gate+up fusion, expert fusion, alignment)
-            # - Keep FP8 weights + scale_inv as-is (builder uses FP8 GEMM pipeline)
-            # - Only dequant kv_b_proj for absorption into q_b_proj
-            # - Fuse gate+up for dense layers and per-expert weights
-            print("\nConverting weights for MPK builder (in-memory, FP8 preserved)...")
-            import sys
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
-            from convert import (
-                dequantize_fp8, absorb_kv_into_q, get_model_params, is_fp8,
-                find_scale_for_weight,
-            )
-            config_dict = AutoConfig.from_pretrained(args.model_path).to_dict()
-            mp = get_model_params(config_dict)
-
-            # Absorption already done in Phase 1. Skip layers already absorbed.
-            absorb_layers = list(test_layers)
-            if args.mtp > 0:
-                absorb_layers.append(num_layers)
-            for li in absorb_layers:
-                attn = f"model.layers.{li}.self_attn."
-                q_key = f"{attn}q_b_proj.weight"
-                kv_key = f"{attn}kv_b_proj.weight"
-                if q_key in state_dict and kv_key in state_dict:
-                    # Dequant both for absorption (GPU)
-                    q_w = state_dict[q_key]
-                    kv_w = state_dict[kv_key]
-                    q_s_key = f"{q_key}_scale_inv"
-                    kv_s_key = f"{kv_key}_scale_inv"
-                    # Keep dequanted weights in float32 for absorption (not BF16).
-                    # BF16 truncation was causing cosine 0.831 for Q absorbed.
-                    if is_fp8(q_w) and q_s_key in state_dict:
-                        q_f32 = dequantize_fp8(q_w.cuda(), state_dict[q_s_key].cuda())  # float32
-                    else:
-                        q_f32 = q_w.cuda().float()
-                    if is_fp8(kv_w) and kv_s_key in state_dict:
-                        kv_f32 = dequantize_fp8(kv_w.cuda(), state_dict[kv_s_key].cuda())  # float32
-                    else:
-                        kv_f32 = kv_w.cuda().float()
-                    # Keep BF16 copies for V un-absorption (o_proj needs kv_b in BF16 format)
-                    kv_bf16 = kv_f32.to(torch.bfloat16)
-                    absorbed_f32 = absorb_kv_into_q(q_f32, kv_f32, mp)  # float32 inputs
-                    # Keep absorbed weight in BF16 (no FP8 requantization).
-                    # FP8 requantization adds compounding error across residual layers.
-                    # BF16 GEMM is used — matches reference and vLLM/SGLang.
-                    absorbed = absorbed_f32.to(torch.bfloat16)
-                    if q_s_key in state_dict:
-                        del state_dict[q_s_key]  # remove FP8 scale → triggers BF16 GEMM
-                    print(f"  BF16 absorbed q_b: {absorbed.shape}")
-                    # Fuse V un-absorption into o_proj:
-                    # o_proj_fused[h] = o_proj[h] @ W_UV[h]
-                    # where W_UV[h] = kv_b_proj V part: [v_orig, kv_lora_rank]
-                    num_heads_loc = mp["num_heads"]  # use full heads, shard later
-                    qk_nope = mp["qk_nope_head_dim"]
-                    v_dim = mp["v_head_dim"]
-                    kv_lora_rank = mp["kv_lora_rank"]
-                    kv_head_dim = qk_nope + v_dim
-                    kv_b_reshaped = kv_bf16.reshape(num_heads_loc, kv_head_dim, kv_lora_rank)
-                    W_UV = kv_b_reshaped[:, :v_dim, :]  # [H, v_dim, kv_lora_rank]
-
-                    # Fuse into o_proj: o_proj [hidden, H*v_dim] → o_proj_fused [hidden, H*kv_lora]
-                    o_key = f"{attn}o_proj.weight"
-                    if o_key in state_dict:
-                        o_w = state_dict[o_key]
-                        if is_fp8(o_w):
-                            o_s_key = f"{o_key}_scale_inv"
-                            if o_s_key in state_dict:
-                                o_bf16 = dequantize_fp8(o_w.cuda(), state_dict[o_s_key].cuda()).to(torch.bfloat16)
-                                del state_dict[o_s_key]
-                            else:
-                                o_bf16 = o_w.cuda().to(torch.bfloat16)
-                        else:
-                            o_bf16 = o_w.cuda().to(torch.bfloat16)
-                        # o_bf16: [hidden, H*v_dim] → reshape [hidden, H, v_dim]
-                        hidden = o_bf16.shape[0]
-                        o_reshaped = o_bf16.reshape(hidden, num_heads_loc, v_dim)
-                        # o_fused[h] = o_reshaped[:, h, :] @ W_UV[h] → [hidden, kv_lora_rank]
-                        # Batched: o_fused = einsum('dhn,hnk->dhk', o_reshaped, W_UV) → [hidden, H, kv_lora]
-                        o_fused = torch.einsum('dhn,hnk->dhk', o_reshaped.float(), W_UV.float())
-                        state_dict[o_key] = o_fused.reshape(hidden, num_heads_loc * kv_lora_rank).to(torch.bfloat16)
-                        print(f"  Fused o_proj: [{hidden}, {num_heads_loc*v_dim}] → [{hidden}, {num_heads_loc*kv_lora_rank}]")
-
-                    # Replace q_b_proj with absorbed FP8 version (scale_inv already set above)
-                    state_dict[q_key] = absorbed
-                    # q_s_key kept (set during FP8 quantization above)
-
-                    # Split absorbed q_b into q_b_nope_absorbed (H*D_CKV=512) and
-                    # q_b_pe (H*D_KPE=64) for the chunked-prefill path. The
-                    # mla_prefill kernel takes Q_nope and Q_pe as SEPARATE dense
-                    # tensors, while the decode kernel consumes the fused
-                    # [H*576] tensor. Keeping both forms lets the builder
-                    # dispatch to the right kernel based on max_num_batched_tokens.
-                    # Per-head layout of `absorbed`: [nope(512) | pe(64)] rows.
-                    H = num_heads_loc
-                    absorbed_r = absorbed.reshape(H, 576, -1)
-                    q_b_nope = absorbed_r[:, :512, :].contiguous().reshape(H * 512, -1)
-                    q_b_pe = absorbed_r[:, 512:, :].contiguous().reshape(H * 64, -1)
-                    state_dict[f"{attn}q_b_nope.weight"] = q_b_nope
-                    state_dict[f"{attn}q_b_pe.weight"] = q_b_pe
-
-                    # Remove kv_b_proj (absorbed into q)
-                    del state_dict[kv_key]
-                    if kv_s_key in state_dict:
-                        del state_dict[kv_s_key]
-
-            # Fuse gate_proj + up_proj for dense MLP layers (keep FP8).
-            # IMPORTANT: silu_mul kernel reads `gate` from the first half of
-            # each block and `up` from the second half (per-block layout). The
-            # FP8 linear partitions the output dim by `grid_for_rmsnorm_linear_layer`
-            # into N tasks, so silu_mul uses N/2 tasks. We must INTERLEAVE
-            # gate/up at granularity = N/2 chunks per tensor (NOT torch.cat).
+            # Fuse gate_proj + up_proj for dense MLP layers.
             from mirage.mpk.models.utils import shuffle_tensors as _shuffle_tensors
             from mirage.mpk.models.utils import grid_for_rmsnorm_linear_layer as _grid_fn
             for li in absorb_layers:
@@ -650,8 +734,7 @@ if __name__ == "__main__":
                     split = _grid_fn(out_dim_total) // 2
                     state_dict[f"{prefix}gate_up_proj.weight"] = _shuffle_tensors(
                         [g, u], split=split, dim=0)
-                    # Fuse scales with the SAME interleave (each scale row covers
-                    # 128 weight rows, so the chunk-row count = chunk_weight_rows/128).
+                    # Fuse scales with the same interleave.
                     gs_key = f"{gate_key}_scale_inv"
                     us_key = f"{up_key}_scale_inv"
                     if gs_key in state_dict and us_key in state_dict:
@@ -660,19 +743,64 @@ if __name__ == "__main__":
                         state_dict[f"{prefix}gate_up_proj.weight_scale_inv"] = (
                             _shuffle_tensors([gs, us], split=split, dim=0))
 
+            # Fuse q_a_proj + kv_a_proj_with_mqa into qkv_a_proj.
+            FUSED_ROWS = 2176  # 1536 q_a + 512 c_latent + 64 k_pe + 64 pad
+            for li in absorb_layers:
+                attn = f"model.layers.{li}.self_attn."
+                q_a_key = f"{attn}q_a_proj.weight"
+                kv_a_key = f"{attn}kv_a_proj_with_mqa.weight"
+                if q_a_key not in state_dict or kv_a_key not in state_dict:
+                    continue
+                q_a_w = state_dict[q_a_key]
+                kv_a_w = state_dict[kv_a_key]
+                q_a_s_key = f"{q_a_key}_scale_inv"
+                kv_a_s_key = f"{kv_a_key}_scale_inv"
+                q_a_s = state_dict.get(q_a_s_key)
+                kv_a_s = state_dict.get(kv_a_s_key)
+                if q_a_s is None or kv_a_s is None:
+                    raise RuntimeError(
+                        f"layer {li}: q_a_proj/kv_a_proj_with_mqa FP8 scales "
+                        f"missing — MPK requires FP8 DeepSeek-V3 weights.")
+                assert q_a_w.shape[0] == 1536 and kv_a_w.shape[0] == 576, (
+                    f"layer {li}: unexpected q_a/kv_a shape "
+                    f"({q_a_w.shape}, {kv_a_w.shape})")
+                K = q_a_w.shape[1]
+                fused_w = torch.zeros(
+                    (FUSED_ROWS, K), dtype=q_a_w.dtype, device=q_a_w.device)
+                fused_w[0:1536] = q_a_w
+                fused_w[1536:2048] = kv_a_w[:512]
+                fused_w[2048:2112] = kv_a_w[512:576]
+                # rows [2112:2176) stay zero (pad to 128-row MMA tile)
+                scale_rows = FUSED_ROWS // 128
+                fused_s = torch.zeros(
+                    (scale_rows, q_a_s.shape[1]),
+                    dtype=q_a_s.dtype, device=q_a_s.device)
+                fused_s[0:12] = q_a_s
+                fused_s[12:17] = kv_a_s
+                state_dict[f"{attn}qkv_a_proj.weight"] = fused_w
+                state_dict[f"{attn}qkv_a_proj.weight_scale_inv"] = fused_s.contiguous()
+
             # Fuse per-expert weights into experts.w13/w2 tensors (keep FP8)
             for li in absorb_layers:
                 ep = f"model.layers.{li}.mlp.experts."
-                expert_keys = [k for k in list(state_dict.keys())
-                               if k.startswith(ep) and ".gate_proj.weight" in k
-                               and not k.endswith("_scale_inv")]
-                if expert_keys:
-                    n_exp = len(expert_keys)
-                    print(f"  Fusing {n_exp} experts for layer {li}")
+                expert_id_re = re.compile(
+                    rf"^{re.escape(ep)}(\d+)\.gate_proj\.weight$"
+                )
+                expert_ids = []
+                for k in list(state_dict.keys()):
+                    m = expert_id_re.match(k)
+                    if m is not None:
+                        expert_ids.append(int(m.group(1)))
+                expert_ids.sort()
+                if expert_ids:
+                    print(f"  Fusing {len(expert_ids)} experts for layer {li}")
                     w13_list, w2_list = [], []
                     s13_list, s2_list = [], []
-                    has_scale = f"{ep}0.gate_proj.weight_scale_inv" in state_dict
-                    for e in range(n_exp):
+                    has_scale = (
+                        f"{ep}{expert_ids[0]}.gate_proj.weight_scale_inv"
+                        in state_dict
+                    )
+                    for e in expert_ids:
                         g = state_dict.pop(f"{ep}{e}.gate_proj.weight")
                         u = state_dict.pop(f"{ep}{e}.up_proj.weight")
                         d = state_dict.pop(f"{ep}{e}.down_proj.weight")
@@ -708,11 +836,30 @@ if __name__ == "__main__":
                 state_dict[k] = t
 
             print(f"  Converted: {len(state_dict)} keys (FP8 weights preserved)")
+            print(
+                f"  Weight conversion time: "
+                f"{time.perf_counter() - convert_start_time:.3f}s"
+            )
 
-            # TP weight sharding: shard weights for multi-GPU inference
+            # TP/EP weight sharding happens after conversion. For TP>1, tensors
+            # stay on CPU until this step to avoid GPU OOM from full
+            # unsharded weights. A future shard-aware converter could reduce
+            # CPU peak memory further, but the current path is deterministic
+            # and keeps absorption/fusion math identical across ranks.
             if world_size > 1:
                 from convert import shard_tensor
                 import re
+                num_routed_experts = getattr(
+                    config,
+                    "n_routed_experts",
+                    getattr(config, "num_experts", 256),
+                )
+                routed_tp_size = world_size // args.ep_size
+                routed_tp_rank = rank % routed_tp_size
+                ep_rank = rank // routed_tp_size
+                local_num_experts = num_routed_experts // args.ep_size
+                local_expert_start = ep_rank * local_num_experts
+                local_expert_end = local_expert_start + local_num_experts
                 # Sharding rules for POST-CONVERSION keys (absorbed, fused).
                 # dim=0: row-parallel (shard output), dim=1: col-parallel (shard input),
                 # None: replicate. For 3D expert tensors, None (replicated).
@@ -723,14 +870,37 @@ if __name__ == "__main__":
                     (r"self_attn\.q_a_proj\.weight",                         None),  # ReplicatedLinear (vLLM): hidden→q_lora_rank, output feeds full-width q_b_proj
                     (r"self_attn\.q_a_layernorm\.weight",                    None),
                     (r"self_attn\.q_b_proj\.weight",                         0),     # ColumnParallelLinear: shard output heads
-                    # Split q_b_proj (absorbed) for the chunked-prefill MLA
-                    # kernel, which expects Q_nope and Q_pe as separate dense
-                    # tensors. Both are column-parallel on the head dim (same
-                    # sharding as q_b_proj).
+                    # Prefill path uses original q_b split and kv_b
+                    # decompression, both column-parallel on local heads.
                     (r"self_attn\.q_b_nope\.weight",                         0),
                     (r"self_attn\.q_b_pe\.weight",                           0),
+                    # FuseTensor: unabsorbed q_b_proj,
+                    # emitted by the converter for cache compatibility (the
+                    # fused prefill-Q experiment that consumed it was
+                    # removed). Same column-parallel sharding as q_b_proj.
+                    (r"self_attn\.q_b_proj_unabsorbed\.weight",              0),
+                    (r"self_attn\.kv_b_k\.weight",                           0),
+                    (r"self_attn\.kv_b_v\.weight",                           0),
+                    # BMM repack of kv_b_k: per-head (H, 512, 128); shard
+                    # head dim (dim=0). The packed UE8M0 scale (H, 512, 1)
+                    # shards the same way.
+                    (r"self_attn\.kv_b_k_bmm\.weight",                       0),
+                    (r"self_attn\.kv_b_k_bmm\.weight_scale_ue8m0",           0),
+                    # BMM repack of kv_b_v: per-head (H, 128, 512); shard
+                    # head dim (dim=0). Same sharding as kv_b_k_bmm.
+                    (r"self_attn\.kv_b_v_bmm\.weight",                       0),
+                    (r"self_attn\.kv_b_v_bmm\.weight_scale_ue8m0",           0),
+                    # Dense-BMM repack of kv_b_v: weight (H, 128, 512) FP8 +
+                    # float32 block scale (H, 1, 4). Shard head dim (dim=0).
+                    (r"self_attn\.kv_b_v_bmm_dense\.weight",                 0),
+                    (r"self_attn\.kv_b_v_bmm_dense\.weight_scale_inv",       0),
                     (r"self_attn\.kv_a_proj_with_mqa\.weight",               None),
                     (r"self_attn\.kv_a_layernorm\.weight",                   None),
+                    # FuseTensor part-a:
+                    # fused q_a_proj + kv_a_proj_with_mqa weight, replicated
+                    # like its constituents.
+                    (r"self_attn\.qkv_a_proj\.weight",                       None),
+                    (r"self_attn\.o_proj_original\.weight",                  1),
                     (r"self_attn\.o_proj\.weight",                           1),
                     (r"input_layernorm\.weight$",                            None),
                     (r"post_attention_layernorm\.weight$",                   None),
@@ -738,12 +908,12 @@ if __name__ == "__main__":
                     (r"mlp\.down_proj\.weight",                              1),
                     (r"mlp\.gate\.weight$",                                  None),
                     (r"mlp\.gate\.e_score_correction_bias$",                 None),
-                    # MoE experts w13/w2: TP-sharded per vLLM pattern (no EP).
-                    # Every rank has all experts, each with TP-sharded weights.
+                    # MoE experts w13/w2: routed experts can be EP-sharded.
+                    # Each EP group keeps a disjoint expert range and shards the
+                    # intermediate dimension across routed_tp_size=world_size/EP.
                     # w13 [E, 2*inter, hidden]: column-parallel on intermediate (dim=1)
                     # w2  [E, hidden, inter]:   row-parallel on intermediate    (dim=2)
                     # AllReduce after moe_mul_sum_add sums partial contributions.
-                    # Builder uses moe_intermediate_size = FULL//world_size, matching this.
                     (r"mlp\.experts\.w13\.weight",                           1),
                     (r"mlp\.experts\.w2\.weight",                            2),
                     # Shared expert: gate_proj/up_proj are separate keys (not fused
@@ -766,10 +936,53 @@ if __name__ == "__main__":
                             return dim
                     return None  # default: replicate
 
-                print(f"\n  TP sharding (world_size={world_size}, rank={rank})...")
+                print(
+                    f"\n  TP/EP sharding (world_size={world_size}, rank={rank}, "
+                    f"ep_size={args.ep_size}, routed_tp_size={routed_tp_size}, "
+                    f"local_experts=[{local_expert_start},{local_expert_end}))..."
+                )
                 for k in list(state_dict.keys()):
                     base_key = k.replace("_scale_inv", "")
                     shard_dim = _get_tp_shard_dim(base_key)
+                    if base_key == "lm_head.weight" and vocab_parallel_lm_head:
+                        if state_dict[k].shape[0] == lm_head_local_vocab_padded:
+                            shard = state_dict[k].contiguous()
+                        else:
+                            start = lm_head_vocab_offset
+                            valid = lm_head_valid_vocab_size
+                            if valid > 0:
+                                shard = state_dict[k].narrow(0, start, valid).contiguous()
+                            else:
+                                shard = state_dict[k].new_empty(
+                                    (0, state_dict[k].shape[1])
+                                )
+                            if valid < lm_head_local_vocab_padded:
+                                pad = torch.zeros(
+                                    lm_head_local_vocab_padded - valid,
+                                    state_dict[k].shape[1],
+                                    dtype=state_dict[k].dtype,
+                                    device=state_dict[k].device,
+                                )
+                                shard = torch.cat([shard, pad], dim=0).contiguous()
+                        state_dict[k] = shard
+                        continue
+                    is_routed_expert = (
+                        "mlp.experts.w13.weight" in base_key
+                        or "mlp.experts.w2.weight" in base_key
+                    )
+                    tp_rank_for_key = routed_tp_rank if is_routed_expert else rank
+                    tp_size_for_key = routed_tp_size if is_routed_expert else world_size
+                    if is_routed_expert and args.ep_size > 1:
+                        if state_dict[k].shape[0] == num_routed_experts:
+                            state_dict[k] = state_dict[k].narrow(
+                                0, local_expert_start, local_num_experts
+                            ).contiguous()
+                        elif state_dict[k].shape[0] != local_num_experts:
+                            raise ValueError(
+                                f"{k}: unexpected expert dimension "
+                                f"{state_dict[k].shape[0]}, expected "
+                                f"{num_routed_experts} or {local_num_experts}"
+                            )
                     if shard_dim is not None and state_dict[k].dim() >= 2:
                         # Special handling for experts.w13: it's cat([gate, up], dim=1)
                         # so naive dim=1 shard takes all-gate or all-up per rank.
@@ -779,32 +992,54 @@ if __name__ == "__main__":
                             half = w.shape[shard_dim] // 2
                             gate_half = w.narrow(shard_dim, 0, half)
                             up_half = w.narrow(shard_dim, half, half)
-                            gate_shard = shard_tensor(gate_half, shard_dim, rank, world_size)
-                            up_shard = shard_tensor(up_half, shard_dim, rank, world_size)
-                            old_shape = tuple(w.shape)
+                            gate_shard = shard_tensor(
+                                gate_half, shard_dim, tp_rank_for_key, tp_size_for_key)
+                            up_shard = shard_tensor(
+                                up_half, shard_dim, tp_rank_for_key, tp_size_for_key)
                             state_dict[k] = torch.cat([gate_shard, up_shard], dim=shard_dim).contiguous()
-                            if rank == 0:
-                                print(f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} (w13 split-shard dim={shard_dim})")
                         else:
-                            old_shape = tuple(state_dict[k].shape)
-                            state_dict[k] = shard_tensor(state_dict[k], shard_dim, rank, world_size)
-                            if rank == 0 and old_shape != tuple(state_dict[k].shape):
-                                print(f"    {k}: {old_shape} → {tuple(state_dict[k].shape)} (dim={shard_dim})")
-                    elif shard_dim is not None and state_dict[k].dim() < 2:
-                        if rank == 0 and "shared_experts" in k:
-                            print(f"    [WARN] {k}: dim={state_dict[k].dim()} < 2, shard_dim={shard_dim} → SKIPPED (1D tensor)")
-                    else:
-                        if rank == 0 and "shared_experts" in k:
-                            print(f"    [INFO] {k}: shard_dim={shard_dim}, shape={tuple(state_dict[k].shape)} → {'REPLICATED' if shard_dim is None else 'BUG'}")
+                            state_dict[k] = shard_tensor(
+                                state_dict[k], shard_dim, tp_rank_for_key, tp_size_for_key)
+
+            if cache_file is not None:
+                os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+                cache_save_start = time.perf_counter()
+                cache_state_dict = {}
+                for k, t in state_dict.items():
+                    cache_state_dict[k] = t.detach().cpu().contiguous()
+                tmp_cache_file = f"{cache_file}.tmp.{os.getpid()}"
+                save_file(
+                    cache_state_dict,
+                    tmp_cache_file,
+                    metadata={"cache_payload": json.dumps(cache_payload, sort_keys=True)},
+                )
+                os.replace(tmp_cache_file, cache_file)
+                print(
+                    f"  Saved MPK weight cache: {cache_file} "
+                    f"({time.perf_counter() - cache_save_start:.3f}s)"
+                )
+                del cache_state_dict
 
         # Move state_dict to GPU after conversion + TP sharding.
         # Loading to CPU first (when TP>1) avoids single-GPU OOM from
         # holding full un-sharded weights before the sharding step above.
-        if world_size > 1:
+        if world_size > 1 and not state_dict_from_cache:
             print(f"  Moving {len(state_dict)} tensors to cuda:{rank}...")
             for k in state_dict:
                 if state_dict[k].device.type == "cpu":
                     state_dict[k] = state_dict[k].to(f"cuda:{rank}")
+
+        # Release the conversion semaphore only AFTER the weights moved to the
+        # GPU and the big CPU intermediates are dropped — the next wave's ranks
+        # need that host RAM. gc first so glibc actually returns the pages.
+        if _conv_sem_fh is not None:
+            import fcntl
+            import gc
+            gc.collect()
+            fcntl.flock(_conv_sem_fh, fcntl.LOCK_UN)
+            _conv_sem_fh.close()
+            _conv_sem_fh = None
+            sys.stderr.write(f"[convert-sem] rank {rank}: slot released\n")
 
         # Build MLA model config for the builder
         model_config = MirageModelConfig(
@@ -817,22 +1052,22 @@ if __name__ == "__main__":
             num_layers=num_layers,
             k_cache=[ckv_kpe_cache[i] for i in range(num_layers)],
             v_cache=[ckv_kpe_cache[i] for i in range(num_layers)],
+            # DeepSeek builder precomputes RoPE cos/sin internally because MLA
+            # uses the compressed KV cache and separate c_latent/k_pe paths.
             position_embeddings=None,
+            rope_theta=getattr(config, "rope_theta", 10000.0),
+            rope_parameters=getattr(config, "rope_parameters", None)
+            or getattr(config, "rope_scaling", None),
+            max_position_embeddings=getattr(config, "max_position_embeddings", None),
             state_dict=state_dict,
             with_lm_head=True,
         )
 
+
+
         # Build the computation graph using the DeepSeek V3 builder
         builder = DeepSeekV3Builder(mpk)
         builder.build_from_config(model_config, layer_indices=layer_indices_arg)
-
-        results = mpk.kn_graph.generate_task_graph(
-            num_gpus=world_size, my_gpu_id=rank
-        )
-        with open(f"task_graph_{rank}.json", "w") as f:
-            f.write(results["json_file"])
-        with open(f"kernel_{rank}.cu", "w") as f:
-            f.write(results["cuda_code"])
 
         mpk.compile(output_dir=args.output_dir)
 
@@ -844,27 +1079,29 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        print("tokens.shape = ", tokens.shape)
+
+        _step_cpu_pre = step.detach().cpu().tolist()
         for r in range(total_num_requests):
-            generated_ids = tokens[r, : step[r] + 1]
+            step_r = int(_step_cpu_pre[r])
+            generated_ids = tokens[r, : step_r + 1]
             response = tokenizer.decode(generated_ids, skip_special_tokens=True)
             if total_num_requests > 1:
                 print(f"[request {r}]")
             print(response)
 
-        if total_num_requests > 1:
-            print(f"Output length of each batch is same: {(step.max() == step.min()).item()}")
+        step_cpu = step.detach().cpu().tolist()
+        step_max = max(step_cpu)
 
         print("Prompt length {}, generate length {}, per-token latency (both prefill and decode): {:.3f} ms".format(
-            prompt_lengths[0], step.max().item() + 1 - prompt_lengths[0],
-            run_time / (step.max().item() + 1)
+            prompt_lengths[0].item(), step_max + 1 - int(prompt_lengths[0].item()),
+            run_time / (step_max + 1)
         ))
 
         # Dump outputs to json
         if save_path and rank == 0:
             out = []
             for r in range(total_num_requests):
-                end_idx = step[r].item() + 1
+                end_idx = int(step_cpu[r]) + 1
                 prompt_len = prompt_lengths[r].item()
                 tokens_generated = max(0, end_idx - prompt_len)
                 per_tok_ms = run_time / max(tokens_generated, 1)
@@ -889,87 +1126,12 @@ if __name__ == "__main__":
             print(f"Saved tokens to {save_path}")
 
     else:
-        # Native PyTorch path (without Mirage)
-        # DeepSeek V3 requires the model implementation for non-Mirage inference
-        try:
-            from transformers import AutoModelForCausalLM
-            print(f"Loading DeepSeek V3 model from: {args.model_path}")
-            with torch.device("cuda"):
-                model = AutoModelForCausalLM.from_pretrained(
-                    args.model_path,
-                    torch_dtype=torch.bfloat16,
-                    trust_remote_code=True,
-                ).to("cuda")
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load DeepSeek V3 model for native inference: {e}. "
-                "For native PyTorch inference, ensure transformers supports the model "
-                "or use --use-mirage for Mirage megakernel inference."
-            )
+        raise RuntimeError(
+            "This DeepSeek-V3 demo runs the Mirage path only; pass --use-mirage.")
 
-        prompt_len = prompt_lengths[0].item()
-        output_len = (
-            args.max_new_tokens
-            if args.max_new_tokens is not None
-            else (tokens.size(1) - prompt_len)
-        )
-        output_len = max(0, min(output_len, tokens.size(1) - prompt_len))
-        decode_limit = prompt_len + output_len
-        prev_pos = 0
-        stream = torch.cuda.Stream()
-
-        for cur_pos in range(prompt_len, decode_limit):
-            step.fill_(cur_pos - 1)
-            input_ids = tokens[:1, prev_pos:cur_pos]
-            with torch.no_grad():
-                logits = model(input_ids=input_ids).logits
-            next_token = logits[:, -1, :].argmax(dim=-1)
-            tokens[0, cur_pos] = next_token[0]
-            prev_pos = cur_pos
-            eos_id = config.eos_token_id
-            if isinstance(eos_id, list):
-                if next_token[0].item() in eos_id:
-                    break
-            elif next_token[0].item() == eos_id:
-                break
-            if cur_pos == prompt_len:
-                torch.cuda.synchronize()
-                starter.record()
-
-        ender.record()
-        torch.cuda.synchronize()
-        run_time = starter.elapsed_time(ender)
-
-        end_idx = prev_pos + 1
-        generated_ids = tokens[:1, :end_idx]
-        response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        print(response)
-        print(
-            "Prompt length {}, generate length {}, per-token latency {} ms".format(
-                prompt_len, cur_pos - prompt_len,
-                run_time / max(cur_pos - prompt_len, 1)
-            )
-        )
-
-        # Dump outputs to json
-        if save_path and rank == 0:
-            tokens_generated = max(0, end_idx - prompt_len)
-            per_tok_ms = run_time / max(tokens_generated, 1)
-            slice_end = min(end_idx, prompt_len + MAX_SAVE_TOKENS)
-            token_ids = tokens[0, prompt_len:slice_end].tolist()
-            out = {
-                "token_ids": token_ids,
-                "text": tokenizer.decode(
-                    tokens[0, :end_idx], skip_special_tokens=True
-                ),
-                "latency_ms_per_token": per_tok_ms,
-                "prompt_length": prompt_len,
-                "generate_length": tokens_generated,
-                "mode": "torch",
-            }
-            with open(save_path, "w") as f:
-                json.dump(out, f, indent=2)
-            print(f"Saved tokens to {save_path}")
-
-    if world_size > 1:
+    if "mpk" in locals() and hasattr(mpk, "finalize") and not getattr(
+        mpk, "__finalized__", True
+    ):
+        mpk.finalize()
+    if world_size > 1 and dist.is_initialized():
         dist.destroy_process_group()

@@ -143,7 +143,6 @@ struct smem_row {
     size_t offset_in_bank = in_block_idx & ((1 << M) - 1);
     size_t phy_offset = (block_idx << (M + S + B)) + (irow << (M + S)) +
                         (icol << M) + offset_in_bank;
-    // printf("phy_offset %d, %d\n", (int)logical_idx, (int)phy_offset);
     return &base_ptr[phy_offset];
   }
   __device__ __forceinline__ T &at(size_t logical_idx_row,

@@ -19,6 +19,7 @@
 #include "mirage/transpiler/utils.h"
 #include "mirage/utils/json_utils.h"
 #include <queue>
+#include <set>
 
 namespace mirage {
 namespace kernel {
@@ -335,7 +336,7 @@ void register_mugraph(
                 (task_type == TASK_PAGED_ATTENTION_2) ||
                 (task_type == TASK_PAGED_ATTENTION_HOPPER) ||
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100) ||
-                (TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
+                (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER) ||
                 (task_type == TASK_ATTN_SM100)) {
               // Note that we assume grid_dim.x corresponds to
@@ -348,9 +349,27 @@ void register_mugraph(
                 task_type == TASK_MOE_W13_LINEAR_SM90 ||
                 task_type == TASK_MOE_W2_LINEAR_SM90 ||
                 task_type == TASK_MOE_W13_FP8_SM100 ||
-                task_type == TASK_MOE_W2_FP8_SM100) {
+                task_type == TASK_MOE_W2_FP8_SM100 ||
+                task_type == TASK_MOE_PERMUTE_SM100) {
               task.task_metadata.expert_offset = bid.x;
+              if (task_type == TASK_MOE_PERMUTE_SM100 &&
+                  bgraph.grid_dim.y > 1) {
+                task.task_metadata.merge_task_offset = bid.y;
+              }
             }
+            // moe_unpermute uses request_id = bid.x (token index) and
+            // kv_idx = bid.y (HIDDEN_SPLIT partition index — see
+            // moe_unpermute_sm100.cuh). grid.y > 1 lets multiple CTAs
+            // share one token by splitting the HIDDEN axis.
+            if (task_type == TASK_MOE_UNPERMUTE_SM100) {
+              task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
+            }
+            // assemble_q_decode: grid.x = token index (dim_map (0,-1,-1)
+            // offsets each CTA's ptr to its token). request_id = bid.x lets
+            // the task_register gate inactive-token CTAs at decode — with
+            // active_rows=1 only token 0 survives, freeing the other 127
+            // workers for the concurrent attention-branch GEMMs.
             // Set paged attention split kv task kv_idx
             if (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100 ||
                 task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100 ||
@@ -387,13 +406,27 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.y;
               task.task_metadata.merge_task_offset = bid.z;
             }
+            // Chunked TP8 prefill: grid=(H, num_q_blocks, B).
+            if (task_type == TASK_MLA_PREFILL_TP8_CHUNKED_SM100) {
+              task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
+              task.task_metadata.merge_task_offset = bid.z;
+            }
             // MTP decode: grid=(sk, num_head_groups, B)
             // request_id=gi (head_group from bid.y), kv_idx=si (split from
             // bid.x) expert_offset stores hpb for TMA box dimension
             if (task_type == TASK_MLA_MTP_DECODE_SM100) {
-              task.task_metadata.kv_idx = bid.x;            // si (split_idx)
-              task.task_metadata.request_id = bid.y;        // gi (head_group)
-              task.task_metadata.merge_task_offset = bid.z; // batch
+              task.task_metadata.kv_idx = bid.x;     // si (split_idx)
+              task.task_metadata.request_id = bid.y; // gi (head_group)
+              int num_head_groups = static_cast<int>(bgraph.grid_dim.y);
+              if (num_head_groups < 1) {
+                num_head_groups = 1;
+              }
+              int hpb = 128 / num_head_groups;
+              // Pack hpb for TMA descriptor creation. The low 16 bits remain
+              // the batch id consumed by the generated kernel wrapper.
+              task.task_metadata.merge_task_offset =
+                  ((hpb & 0xffff) << 16) | (static_cast<int>(bid.z) & 0xffff);
             }
             // MTP reduce: grid=(D_V/RD_DV, num_head_groups, B)
             if (task_type == TASK_MLA_MTP_REDUCE_SM100) {
@@ -401,19 +434,13 @@ void register_mugraph(
               task.task_metadata.request_id = bid.y;        // gi (head_group)
               task.task_metadata.merge_task_offset = bid.z; // batch
             }
-            // MLA-MTP TP variants: decode grid=(num_groups*sk[*2 if TP=4], B,
-            // 1) Python layer encodes block_x = gi*sk+si (or
-            // (block_x<<1)|v_half for TP=4) into kv_idx, batch into request_id.
-            // Kernel unpacks v_half from low bit of block_x for TP=4.
-            if (task_type == TASK_MLA_MTP_DECODE_TP2_SM100 ||
-                task_type == TASK_MLA_MTP_DECODE_TP4_SM100 ||
-                task_type == TASK_MLA_MTP_DECODE_TP8_SM100) {
+            // MLA-MTP TP8 decode: Python layer packs decode metadata into
+            // block_x; batch is stored in request_id.
+            if (task_type == TASK_MLA_MTP_DECODE_TP8_SM100) {
               task.task_metadata.kv_idx = bid.x;     // (gi*sk+si) or packed
               task.task_metadata.request_id = bid.y; // batch
             }
-            if (task_type == TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100 ||
-                task_type == TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 ||
-                task_type == TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100) {
+            if (task_type == TASK_MLA_MTP_DECODE_TP_REDUCE_SM100) {
               task.task_metadata.kv_idx = bid.x;            // dv_block_idx
               task.task_metadata.request_id = bid.y;        // gi
               task.task_metadata.merge_task_offset = bid.z; // batch
@@ -428,12 +455,67 @@ void register_mugraph(
             if (task_type == TASK_MLA_KV_GATHER_SM100) {
               task.task_metadata.request_id = bid.x;
             }
-            // Set request_id for FP8 quantize (row index for column-major scale
-            // output)
-            if (task_type == TASK_QUANTIZE_FP8_SM100) {
+            // bs=1 contiguous KV append: request_id = bid.x
+            if (task_type == TASK_MLA_KV_APPEND_SM100) {
               task.task_metadata.request_id = bid.x;
             }
-            if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE) {
+            // DeepSeek MLA RoPE: grid=(request_slot, local_head, q_tile).
+            if (task_type == TASK_DEEPSEEK_MLA_ROPE_SM100) {
+              task.task_metadata.request_id = bid.x;
+              task.task_metadata.kv_idx = bid.y;
+              task.task_metadata.merge_task_offset = bid.z;
+            }
+            // FP8 dense + grouped GEMM: grid=(num_workers, 1, 1).
+            // request_id is the worker index used by the persistent
+            // tiling loop. Grouped variants share the same metadata
+            // shape; m_indices selects the active expert per output tile.
+            if (task_type == TASK_FP8_GEMM_DENSE_SM100 ||
+                task_type == TASK_DSV3_ROUTER_GATE_GEMV_SM100 ||
+                task_type == TASK_FP8_GROUP_GEMM_LARGEM_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
+            // FFN mega-task: grid=(num_workers, 1, 1). merge_task_offset
+            // is the logical CTA id consumed in place of blockIdx.x.
+            if (task_type == TASK_FFN_FULL_MEGAKERNEL_SM100) {
+              task.task_metadata.merge_task_offset = bid.x;
+            }
+            // Attention mega-task: grid=(num_workers, 1, 1). Same convention
+            // as the FFN mega-task — merge_task_offset is the logical CTA id
+            // (worker_idx) consumed in place of blockIdx.x. The decode
+            // position is sourced inside the task from runtime_config.step[0]
+            // (the same source mla_mtp_decode uses), so no extra metadata
+            // (request_id/kv_idx) is set here.
+            if (task_type == TASK_ATTN_BLOCK_MEGAKERNEL_SM100) {
+              task.task_metadata.merge_task_offset = bid.x;
+            }
+            // SiLU + Mul (NEW MoE 2D path): grid=(num_workers, 1, 1).
+            // Each CTA owns one BM=BM_PADDING-row slice of the permuted
+            // buffer, so request_id = bid.x identifies the expert this
+            // CTA processes. The codegen uses it to early-return when
+            // active_expert_mask says no token routed to that expert.
+            if (task_type == TASK_SILU_MUL) {
+              task.task_metadata.request_id = bid.x;
+            }
+            // MTP token-management helpers use grid.x as the active request
+            // slot so they can map slot -> global request id at runtime.
+            if (task_type == TASK_MTP_PREPARE_VERIFY ||
+                task_type == TASK_MTP_BUILD_EMBED_INPUT) {
+              task.task_metadata.request_id = bid.x;
+            }
+            // FP8 quantize uses grid=(group_tile, row, 1). request_id is the
+            // logical row; kv_idx is the hidden-group tile.
+            if (task_type == TASK_QUANTIZE_FP8_SM100) {
+              task.task_metadata.request_id = bid.y;
+              task.task_metadata.kv_idx = bid.x;
+            }
+            // Fused RMSNorm + FP8 quantize: grid=(mbt/ROWS_PER_TASK,1,1).
+            // request_id is the row-block index used by the kernel to skip
+            // CTAs past the active-rows boundary on decode iters.
+            if (task_type == TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100) {
+              task.task_metadata.request_id = bid.x;
+            }
+            if (task_type == TASK_NVSHMEM_TILE_ALLREDUCE ||
+                task_type == TASK_NVSHMEM_GLOBAL_ARGMAX) {
               task.task_metadata.task_offset =
                   bid.x + bid.y * bgraph.grid_dim.x +
                   bid.z * bgraph.grid_dim.x * bgraph.grid_dim.y;
@@ -623,8 +705,9 @@ void register_mugraph(
                 }
               } else {
                 assert(task_ids.size() == 1);
-                all_tasks[task_ids[0]].trigger_event =
+                EventId new_ev =
                     get_event_id(my_gpu_id, event_pos, nvshmem_event);
+                all_tasks[task_ids[0]].trigger_event = new_ev;
                 event_desc.num_triggers++;
               }
             }
@@ -940,7 +1023,13 @@ void register_mugraph(
   all_events.push_back(
       EventDesc(EVENT_END_OF_TASK_GRAPH, end_num_triggers, 0, 0));
 
-  // Prelaunch all tasks at the begining of an iteration
+  // Prelaunch all tasks at the beginning of an iteration. Downstream tasks use
+  // dependent_event to wait for their producer event before executing.
+  //
+  // The scheduler has a partially implemented event-driven path, but switching
+  // DeepSeek graphs to root-only launch currently hangs even on a single
+  // selected layer. Keep the established MPK execution contract here and fix
+  // selective-layer issues without changing that contract.
   all_events[1].first_task_id = 2;
   all_events[1].last_task_id = all_tasks.size();
   for (size_t e = 2; e < all_events.size(); e++) {
@@ -1037,6 +1126,8 @@ TaskGraphResult print_task_graph(
   mirage::transpiler::CodeKeeper tgbody;
   tgbody.inc_indent();
   code.e("#include \"persistent_kernel.cuh\"");
+  code.e("#include \"tasks/blackwell/ffn_full_megakernel_sm100.cuh\"");
+  code.e("#include \"tasks/blackwell/attn_block_megakernel_sm100.cuh\"");
   if (use_json_format) {
     code.e("#include <nlohmann/json.hpp>");
     code.e("#include <fstream>");
@@ -1174,15 +1265,20 @@ TaskGraphResult print_task_graph(
     // MLA kernels (outside SM100_TMA range but need TMA)
     code.e("if (task.at(\"task_type\") == TASK_MLA_DECODE_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_SM100 || "
-           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP2_SM100 || "
-           "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP4_SM100 || "
            "task.at(\"task_type\") == TASK_MLA_MTP_DECODE_TP8_SM100 || "
-           "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_SM100) {");
+           "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_SM100 || "
+           "task.at(\"task_type\") == TASK_MLA_PREFILL_TP8_CHUNKED_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     // FP8 linear tasks need TMA (outside SM100_TMA range)
     code.e("if (task.at(\"task_type\") == TASK_LINEAR_FP8_SM100 || "
-           "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100) {");
+           "task.at(\"task_type\") == TASK_LINEAR_FP8_WITH_RESIDUAL_SM100 || "
+           "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_SM100 || "
+           "task.at(\"task_type\") == TASK_LINEAR_FP8_BMM_DENSE_SM100) {");
+    code.e("create_tma_desc_by_task(task_desc);");
+    code.e("}");
+    code.e("if (task.at(\"task_type\") == TASK_FP8_GEMM_DENSE_SM100 || "
+           "task.at(\"task_type\") == TASK_FP8_GROUP_GEMM_LARGEM_SM100) {");
     code.e("create_tma_desc_by_task(task_desc);");
     code.e("}");
     code.e("#endif");
@@ -1720,6 +1816,7 @@ TaskGraphResult print_task_graph(
     assert(global_json_filled[task_id]);
     json_task_graph["all_tasks"].push_back(global_json_tasks[task_id]);
   }
+
   // Add all events
   for (auto const &event : all_events) {
     tgbody.e(
@@ -1811,23 +1908,20 @@ TaskGraphResult print_task_graph(
       "TASK_INKLING_MOE_ROUTER_SM100";
   task_type_to_name[TASK_INKLING_ATTENTION_SM100] =
       "TASK_INKLING_ATTENTION_SM100";
+  task_type_to_name[TASK_MLA_PREFILL_TP8_CHUNKED_SM100] =
+      "TASK_MLA_PREFILL_TP8_CHUNKED_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_SM100] = "TASK_MLA_MTP_DECODE_SM100";
   task_type_to_name[TASK_MLA_MTP_REDUCE_SM100] = "TASK_MLA_MTP_REDUCE_SM100";
-  task_type_to_name[TASK_MLA_MTP_DECODE_TP2_SM100] =
-      "TASK_MLA_MTP_DECODE_TP2_SM100";
-  task_type_to_name[TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100] =
-      "TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100";
-  task_type_to_name[TASK_MLA_MTP_DECODE_TP4_SM100] =
-      "TASK_MLA_MTP_DECODE_TP4_SM100";
-  task_type_to_name[TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100] =
-      "TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_MTP_DECODE_TP_REDUCE_SM100] =
+      "TASK_MLA_MTP_DECODE_TP_REDUCE_SM100";
   task_type_to_name[TASK_MLA_MTP_DECODE_TP8_SM100] =
       "TASK_MLA_MTP_DECODE_TP8_SM100";
-  task_type_to_name[TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100] =
-      "TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100";
+  task_type_to_name[TASK_MLA_KV_APPEND_SM100] = "TASK_MLA_KV_APPEND_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_SM100] = "TASK_MLA_KV_GATHER_SM100";
   task_type_to_name[TASK_MLA_KV_GATHER_SPLIT_SM100] =
       "TASK_MLA_KV_GATHER_SPLIT_SM100";
+  task_type_to_name[TASK_DEEPSEEK_MLA_ROPE_SM100] =
+      "TASK_DEEPSEEK_MLA_ROPE_SM100";
   task_type_to_name[TASK_MTP_VERIFY_STRICT] = "TASK_MTP_VERIFY_STRICT";
   task_type_to_name[TASK_MTP_ACCEPT_COMMIT] = "TASK_MTP_ACCEPT_COMMIT";
   task_type_to_name[TASK_MTP_TOKEN_SCATTER] = "TASK_MTP_TOKEN_SCATTER";
@@ -1841,6 +1935,28 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_LINEAR_FP8_SM100] = "TASK_LINEAR_FP8_SM100";
   task_type_to_name[TASK_LINEAR_FP8_WITH_RESIDUAL_SM100] =
       "TASK_LINEAR_FP8_WITH_RESIDUAL_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_SWAPAB_SM100] =
+      "TASK_LINEAR_FP8_SWAPAB_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100] =
+      "TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100";
+  task_type_to_name[TASK_FP8_GEMM_DENSE_SM100] = "TASK_FP8_GEMM_DENSE_SM100";
+  task_type_to_name[TASK_DSV3_ROUTER_GATE_GEMV_SM100] =
+      "TASK_DSV3_ROUTER_GATE_GEMV_SM100";
+  task_type_to_name[TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100] =
+      "TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100";
+  task_type_to_name[TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100] =
+      "TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_BMM_SM100] = "TASK_LINEAR_FP8_BMM_SM100";
+  task_type_to_name[TASK_LINEAR_FP8_BMM_DENSE_SM100] =
+      "TASK_LINEAR_FP8_BMM_DENSE_SM100";
+  task_type_to_name[TASK_FP8_GROUP_GEMM_LARGEM_SM100] =
+      "TASK_FP8_GROUP_GEMM_LARGEM_SM100";
+  task_type_to_name[TASK_FFN_FULL_MEGAKERNEL_SM100] =
+      "TASK_FFN_FULL_MEGAKERNEL_SM100";
+  task_type_to_name[TASK_ATTN_BLOCK_MEGAKERNEL_SM100] =
+      "TASK_ATTN_BLOCK_MEGAKERNEL_SM100";
+  task_type_to_name[TASK_MOE_PERMUTE_SM100] = "TASK_MOE_PERMUTE_SM100";
+  task_type_to_name[TASK_MOE_UNPERMUTE_SM100] = "TASK_MOE_UNPERMUTE_SM100";
   task_type_to_name[TASK_TENSOR_INIT] = "TASK_TENSOR_INIT";
   task_type_to_name[TASK_MOE_TOPK_SOFTMAX_SM100] =
       "TASK_MOE_TOPK_SOFTMAX_SM100";
@@ -1873,21 +1989,36 @@ TaskGraphResult print_task_graph(
       "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT";
   task_type_to_name[TASK_NVSHMEM_TILE_ALLREDUCE] =
       "TASK_NVSHMEM_TILE_ALLREDUCE";
+  task_type_to_name[TASK_NVSHMEM_GLOBAL_ARGMAX] = "TASK_NVSHMEM_GLOBAL_ARGMAX";
 
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");
   code.e("                   RuntimeConfig const &runtime_config) {");
+  code.e("  (void)task_desc;");
+  code.e("  (void)runtime_config;");
   TaskRegister *task_register = TaskRegister::get_instance();
+  // Emit only the (task_type, variant) pairs the graph actually uses — keeps
+  // the generated dispatch chain (and the JIT nvcc time) proportional to the
+  // model, not to everything ever registered.
+  std::map<TaskType, std::set<int>> used_task_variants;
+  for (FullTaskDesc const &task_desc : all_tasks) {
+    used_task_variants[task_desc.task_type].insert(task_desc.variant_id);
+  }
   bool first_task = true;
   for (auto const &task : task_register->all_task_variants) {
-    for (size_t variant_id = 0; variant_id < task.second.size(); variant_id++) {
+    auto used_it = used_task_variants.find(task.first);
+    if (used_it == used_task_variants.end()) {
+      continue;
+    }
+    for (int variant_id : used_it->second) {
+      assert(static_cast<size_t>(variant_id) < task.second.size());
       std::string cond = first_task ? "if" : "else if";
       assert(task_type_to_name.find(task.first) != task_type_to_name.end());
       code.e("$ (task_desc->task_type == $ && task_desc->variant_id == $) {",
              cond,
              task_type_to_name[task.first],
              variant_id);
-      code.e("$", task.second[variant_id]);
+      code.e("$", task.second[static_cast<size_t>(variant_id)]);
       code.e("}");
       first_task = false;
     }

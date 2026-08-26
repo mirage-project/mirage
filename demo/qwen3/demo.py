@@ -8,7 +8,10 @@ import os, json
 
 from models.qwen3_shard_loader import Qwen3ShardLoader
 from mirage.mpk.base_dynamic_shard_loader import ShardType
-from mirage.mpk.models.utils import grid_for_splitk_linear_layer
+from mirage.mpk.models.utils import (
+    aligned_lm_head_workers,
+    grid_for_splitk_linear_layer,
+)
 
 
 mapping = {
@@ -52,7 +55,7 @@ def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
         return 96
     elif size % 64 == 0:
         return 64
-    
+
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
 def max_factor_leq_n(m: int, n: int) -> int:
@@ -441,14 +444,16 @@ if __name__ == "__main__":
             name="argmax_in",
             io_category="cuda_tensor",
         )
+
+        lm_head_workers = aligned_lm_head_workers(vocab_size, num_workers)
         argmax_part_value = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
+            dims=(args.max_num_batched_tokens, lm_head_workers),
             dtype=mi.bfloat16,
             name="argmax_part_value",
             io_category="cuda_tensor",
         )
         argmax_part_index = mpk.new_tensor(
-            dims=(args.max_num_batched_tokens, mpk.num_workers),
+            dims=(args.max_num_batched_tokens, lm_head_workers),
             dtype=mi.int64,
             name="argmax_part_index",
             io_category="cuda_tensor",
@@ -611,6 +616,7 @@ if __name__ == "__main__":
                     output=attn_proj_out,
                     grid_dim=grid_for_splitk_linear_layer(hidden_size, w.dim(1)),
                     block_dim=(256, 1, 1),
+                    accumulate=True,
                 )
             else:
                 mpk.linear_with_residual_layer(
@@ -691,6 +697,7 @@ if __name__ == "__main__":
                     output=mlp_out,
                     grid_dim=grid_for_splitk_linear_layer(hidden_size, w.dim(1)),
                     block_dim=(256, 1, 1),
+                    accumulate=True,
                 )
             else:
                 mpk.linear_with_residual_layer(
@@ -729,7 +736,7 @@ if __name__ == "__main__":
             input=rmsnorm_out,
             weight=w_proj,
             output=argmax_in,
-            grid_dim=(mpk.num_workers, 1, 1),
+            grid_dim=(lm_head_workers, 1, 1),
             block_dim=(128, 1, 1),
         )
         #mpk.rmsnorm_linear_layer(
@@ -747,7 +754,7 @@ if __name__ == "__main__":
                                        1)
             argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
         else:
-            argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
+            argmax_partial_grid_dim = (lm_head_workers, 1, 1)
             argmax_reduce_grid_dim = (1, 1, 1)
         mpk.argmax_partial_layer(
             input=argmax_in,

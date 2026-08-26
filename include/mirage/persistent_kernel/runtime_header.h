@@ -49,10 +49,10 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
 #endif
 #else
 #if MPK_TARGET_CC >= 90
-// B200: 228KB total smem. PR 651 MLA reduce adds ~16KB static smem
-// (la_smem[MAX_SK*128]). Reduce dynamic budget to stay under total limit.
+// B200: 222KB dynamic smem (under the 228KB hardware total after the worker
+// reserved static; sized to fit the FP8 group GEMM NS=6/BN=128 ~216KB).
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
-    207 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+    222 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #elif MPK_TARGET_CC >= 86
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
@@ -76,7 +76,7 @@ unsigned long long int const EVENT_NVSHMEM_TAG = 0x1e00000000000000;
 unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 typedef unsigned long long int EventCounter;
 
-int const MAX_INPUTS_PER_TASK = 8;
+int const MAX_INPUTS_PER_TASK = 14;
 int const MAX_OUTPUTS_PER_TASK = 3;
 // B200 has 148 SMs — need more workers than the default 128
 int const MAX_NUM_WORKERS = 160;
@@ -130,8 +130,11 @@ enum TaskType {
   TASK_CONCAT = 233,
   TASK_EAGLE3_D2T_REMAP = 235,
   TASK_EAGLE3_COMMIT = 236,
+  TASK_SPLITK_LINEAR_FP8_SWAPAB_SM100 = 246,
+  TASK_LINEAR_FP8_SWAPAB_SM100 = 247,
   TASK_MOE_W13_FP8_SM100 = 248,
   TASK_MOE_W2_FP8_SM100 = 249,
+  TASK_LINEAR_FP8_SWAPAB_WITH_RESIDUAL_SM100 = 250,
   TASK_SPLITK_LINEAR_SM100 = 251,
   TASK_LINEAR_WITH_RESIDUAL_SM100 = 252,
   TASK_LINEAR_SM100 = 253,
@@ -160,6 +163,7 @@ enum TaskType {
   TASK_LINEAR_FP8_SM100 = 276,
   TASK_LINEAR_FP8_WITH_RESIDUAL_SM100 = 277,
   TASK_MLA_KV_GATHER_SM100 = 278,
+  TASK_LINEAR_FP8_BMM_SM100 = 279,
   TASK_MOE_TOPK_SIGMOID_SM100 = 280,
   TASK_ELEMENTWISE_ADD_SM100 = 281,
   TASK_SOFTMAX_GATHER_SM100 = 282,
@@ -167,19 +171,11 @@ enum TaskType {
   TASK_PROB_SCATTER_SM100 = 284,
   TASK_MTP_FLOAT_SCATTER = 285,
   TASK_PROB_EXTRACT_SM100 = 286,
-  // MLA-MTP TP variants (q1..q4, kv4096; ferret-derived, no-PDL):
-  TASK_MLA_MTP_DECODE_TP2_SM100 = 287,
-  TASK_MLA_MTP_DECODE_TP2_REDUCE_SM100 = 288,
-  TASK_MLA_MTP_DECODE_TP4_SM100 = 289,
-  TASK_MLA_MTP_DECODE_TP4_REDUCE_SM100 = 290,
   TASK_MLA_MTP_DECODE_TP8_SM100 = 291,
-  TASK_MLA_MTP_DECODE_TP8_REDUCE_SM100 = 292,
-  // KV gather variant that writes split CKV/KPE output (for chunked prefill):
+  // retired: 287, 288, 289, 290
+  TASK_MLA_MTP_DECODE_TP_REDUCE_SM100 = 292,
   TASK_MLA_KV_GATHER_SPLIT_SM100 = 293,
-  // MTP embedding-input builder (vLLM-aligned): produces per-iteration MTP
-  // input tokens = shifted ground-truth prompt + current iter's argmax tail.
   TASK_MTP_BUILD_EMBED_INPUT = 294,
-  // MLA prefill TP=8: unabsorbed, TMA K/V, seq_len<=4096.
   TASK_MLA_PREFILL_TP8_SM100 = 295,
   // DFlash non-causal block attention (correctness-first), SM100.
   TASK_DFLASH_ATTENTION_SM100 = 296,
@@ -187,7 +183,25 @@ enum TaskType {
   TASK_DFLASH_NORM_ROPE_SM100 = 297,
   // DFlash standalone paged KV-cache store (L4 materialize write), SM100.
   TASK_DFLASH_KV_STORE_SM100 = 298,
-  TASK_SM100_TASK_END = 299, // SM100 end placeholder, not a real task
+  // DeepSeek-V3 MLA decode/prefill tasks.
+  TASK_MLA_PREFILL_TP8_CHUNKED_SM100 = 328,
+  TASK_DEEPSEEK_MLA_ROPE_SM100 = 304,
+  // BF16 CUDA-core GEMV for the DSv3 router gate (hidden @ W_gate.T -> logits).
+  TASK_DSV3_ROUTER_GATE_GEMV_SM100 = 318,
+  TASK_FP8_GEMM_DENSE_SM100 = 306,
+  TASK_FUSED_RMSNORM_QUANTIZE_FP8_SM100 = 309,
+  TASK_FP8_GROUP_GEMM_LARGEM_SM100 = 312, // BN=128, NS=6
+  TASK_MOE_PERMUTE_SM100 = 313,
+  TASK_MOE_UNPERMUTE_SM100 = 314,
+  TASK_LINEAR_FP8_BMM_DENSE_SM100 = 322,
+  // bs=1 contiguous KV append (replaces paged-cache append + gather).
+  TASK_MLA_KV_APPEND_SM100 = 323,
+  // Fused decode-attention megakernel (default decode attention path).
+  TASK_ATTN_BLOCK_MEGAKERNEL_SM100 = 319,
+  // Fully-fused FFN megakernel (default decode MoE-FFN path): rmsnorm +
+  // router-gate-GEMV + topk-sigmoid + the MoE chain.
+  TASK_FFN_FULL_MEGAKERNEL_SM100 = 325,
+  TASK_SM100_TASK_END = 330, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
@@ -197,6 +211,7 @@ enum TaskType {
   TASK_MULTIGPU_TASK_BEGIN = 300, // begin placeholder, not a real task
   TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 301,
   TASK_NVSHMEM_TILE_ALLREDUCE = 302,
+  TASK_NVSHMEM_GLOBAL_ARGMAX = 303,
   TASK_MULTIGPU_TASK_END = 349, // end placeholder, not a real task
   // Inkling (Thinking Machines) tasks, SM100
   TASK_INKLING_TASK_BEGIN = 350, // begin placeholder, not a real task

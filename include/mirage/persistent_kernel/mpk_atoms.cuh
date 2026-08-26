@@ -49,7 +49,13 @@ __device__ __forceinline__ unsigned long long int
 __device__ __forceinline__ unsigned long long int
     ld_acquire_gpu_u64(unsigned long long int *addr) {
   unsigned long long int val;
-  asm volatile("ld.acquire.gpu.u64 %0, [%1];" : "=l"(val) : "l"(addr));
+  // "memory" clobber required: the PTX acquire gives hardware ordering, but
+  // without it the compiler may hoist later relaxed payload loads above this
+  // acquire (the consumer must read flag-then-payload).
+  asm volatile("ld.acquire.gpu.u64 %0, [%1];"
+               : "=l"(val)
+               : "l"(addr)
+               : "memory");
   return val;
 }
 
@@ -66,13 +72,19 @@ __device__ __forceinline__ unsigned long long int
 __device__ __forceinline__ unsigned long long int
     ld_relaxed_gpu_u64(unsigned long long int *addr) {
   unsigned long long int val;
-  asm volatile("ld.relaxed.gpu.u64 %0, [%1];" : "=l"(val) : "l"(addr));
+  asm volatile("ld.relaxed.gpu.u64 %0, [%1];"
+               : "=l"(val)
+               : "l"(addr)
+               : "memory");
   return val;
 }
 
 __device__ __forceinline__ void st_relaxed_gpu_u64(unsigned long long int *addr,
                                                    unsigned long long int val) {
-  asm volatile("st.relaxed.gpu.u64 [%0], %1;" : : "l"(addr), "l"(val));
+  asm volatile("st.relaxed.gpu.u64 [%0], %1;"
+               :
+               : "l"(addr), "l"(val)
+               : "memory");
 }
 
 // System-scope acquire load (int32): safe to use for pinned CPU↔GPU rings.

@@ -16,15 +16,34 @@
 #include "tasks/common/common_header.cuh"
 namespace kernel {
 
-template <typename T, int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
+// Vectorized zero-fill for the splitk-linear output tile.
+//
+// Caller wires this as a (1 input, 2 outputs) MPK task whose grid_dim and
+// per-tensor input_maps mirror the downstream splitk linear:
+//   * output_ptrs[0] -> the linear's output buffer (this kernel zeroes it)
+//   * output_ptrs[1] -> the linear's input (untouched; pure dep edge)
+//   * input_ptrs[0]  -> the linear's input (untouched; pure dep edge)
+//
+// Stores are 16-byte (int4) — alignment is guaranteed by the splitk linear's
+// own constraint that per-task OUTPUT_SIZE and full OUTPUT_STRIDE are
+// multiples of 128 bf16 (= 256 bytes).
+template <int BATCH_SIZE, int OUTPUT_SIZE, int OUTPUT_STRIDE>
 __device__ __forceinline__ void
-    tensor_init_sm100_task_impl(void *input_ptr, float init_val = 0.0f) {
-  T *__restrict__ d_input = static_cast<T *>(input_ptr);
-  for (int row_idx = 0; row_idx < BATCH_SIZE; ++row_idx) {
-    for (int i = threadIdx.x; i < OUTPUT_SIZE; i += blockDim.x) {
-      d_input[row_idx * OUTPUT_STRIDE + i] = T(init_val);
+    tensor_init_zero_sm100_task_impl(void *target_ptr) {
+  using bf16 = cute::bfloat16_t;
+  static_assert(OUTPUT_SIZE % 8 == 0,
+                "tensor_init: OUTPUT_SIZE must be multiple of 8 (16B vec)");
+  bf16 *base = static_cast<bf16 *>(target_ptr);
+  constexpr int VEC = 8; // 8 bf16 = 16 bytes
+  constexpr int VEC_PER_ROW = OUTPUT_SIZE / VEC;
+  int4 const zero = {0, 0, 0, 0};
+#pragma unroll
+  for (int row = 0; row < BATCH_SIZE; ++row) {
+    int4 *row_ptr = reinterpret_cast<int4 *>(base + row * OUTPUT_STRIDE);
+    for (int i = threadIdx.x; i < VEC_PER_ROW; i += blockDim.x) {
+      row_ptr[i] = zero;
     }
   }
-} // tensor_init_sm100_task_impl
+} // tensor_init_zero_sm100_task_impl
 
 } // namespace kernel

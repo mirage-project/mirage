@@ -17,6 +17,8 @@
 
 #include "mirage/persistent_kernel/runtime_header.h"
 #include "mirage/threadblock/graph.h"
+#include <string>
+#include <vector>
 
 namespace mirage {
 namespace runtime {
@@ -143,26 +145,18 @@ public:
                                      std::vector<int> const &params);
   int register_mla_prefill_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
+  int register_mla_prefill_absorbed_sm100_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params);
   int register_mla_prefill_tp8_sm100_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params);
-  int register_mla_mtp_decode_sm100_task(threadblock::Graph const &bgraph,
-                                         std::vector<int> const &params);
-  int register_mla_mtp_reduce_sm100_task(threadblock::Graph const &bgraph,
-                                         std::vector<int> const &params);
-  // MLA-MTP TP variants (ferret-derived, no-PDL). Each: TP=2/4/8, with paired
-  // reduce. Differ in NUM_HEADS (64/32/16); TP=4 also splits V across two
-  // CTAs (z=2); TP=8 takes Q_LEN_real (Q_LEN padded to even).
-  int register_mla_mtp_decode_tp2_sm100_task(threadblock::Graph const &bgraph,
-                                             std::vector<int> const &params);
-  int register_mla_mtp_decode_tp2_reduce_sm100_task(
+  int register_mla_prefill_tp8_chunked_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
-  int register_mla_mtp_decode_tp4_sm100_task(threadblock::Graph const &bgraph,
-                                             std::vector<int> const &params);
-  int register_mla_mtp_decode_tp4_reduce_sm100_task(
-      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  // MLA-MTP TP8 decode (no-PDL), with paired reduce. NUM_HEADS=16; takes
+  // Q_LEN_real (Q_LEN padded to even).
   int register_mla_mtp_decode_tp8_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params);
-  int register_mla_mtp_decode_tp8_reduce_sm100_task(
+  // TP8 split-KV reduce (one TASK_MLA_MTP_DECODE_TP_REDUCE enum).
+  int register_mla_mtp_decode_tp_reduce_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_quantize_fp8_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params,
@@ -170,9 +164,51 @@ public:
   int register_linear_fp8_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params,
                                      bool with_residual);
+  int register_linear_fp8_swapAB_sm100_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params,
+                                            bool with_residual);
+  int register_splitk_linear_fp8_swapAB_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_linear_fp8_bmm_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_linear_fp8_bmm_dense_sm100_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params);
+  // Unified dense FP8 GEMM family (one TASK_FP8_GEMM_DENSE_SM100 enum).
+  // `mediumm` picks the smallm/mediumm tile flavor; the *_fp8out_* fn picks
+  // the epilogue-UE8M0-quantize flavor; decode_splitk is the split-K
+  // decode variant. All register variants under the same task type.
+  int register_fp8_gemm_dense_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params,
+                                         bool mediumm);
+  // BF16 CUDA-core GEMV for DSv3 router gate. params: [M,N,K,
+  // num_workers]. Selected by the builder at mbt==1.
+  int register_dsv3_router_gate_gemv_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fused_rmsnorm_quantize_fp8_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_fp8_group_gemm_largem_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_ffn_full_megakernel_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params);
+  int register_attn_block_megakernel_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_moe_permute_sm100_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_moe_unpermute_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params);
+  int register_mla_kv_append_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params);
   int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
   int register_mla_kv_gather_split_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params);
+  int register_deepseek_mla_rope_q_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params);
+  int register_deepseek_mla_rope_q_fused_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_deepseek_mla_rope_q_split_sm100_task(
+      threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_deepseek_mla_rope_k_sm100_task(threadblock::Graph const &bgraph,
                                               std::vector<int> const &params);
   // MTP tasks
   int register_mtp_verify_strict_task(threadblock::Graph const &bgraph,
@@ -200,6 +236,7 @@ public:
                                           std::vector<int> const &params);
   int register_eagle3_commit_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
+  // Eagle3 tasks end
   int register_inkling_sconv_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
   int register_inkling_moe_router_sm100_task(threadblock::Graph const &bgraph,
@@ -214,6 +251,8 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_nvshmem_tile_allreduce_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);
+  int register_nvshmem_global_argmax_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
   // Multi-GPU tasks end
   int register_task_variant(TaskType type, std::string const &code);
 

@@ -13,9 +13,8 @@ from sm100_fp8_scale_layout import (
     BLOCK_K,
     allocate_packed_ue8m0_scale,
     allocate_packed_ue8m0_scale_deepgemm_style,
-    quantize_to_fp8_packed_ue8m0,
-    quantize_to_fp8_deepgemm_style,
 )
+from pytorch_reference import quantize_fp8_ref
 
 torch.set_printoptions(sci_mode=False, profile="full")
 
@@ -48,7 +47,7 @@ for batch_size in batch_sizes:
 
         runtime_kernel_blackwell.quantize_fp8_sm100(x, output, scales, group_size=block_k)
 
-        quant_ref, scale_ref = quantize_to_fp8_packed_ue8m0(x)
+        quant_ref, scale_ref = quantize_fp8_ref(x, scale_ue8m0=True, layout="row_major")
 
         assert scales.shape == scale_ref.shape
         assert scales.stride() == scale_ref.stride()
@@ -67,7 +66,9 @@ for batch_size in batch_sizes:
         runtime_kernel_blackwell.quantize_fp8_sm100(
             zero_x, zero_output, zero_scales, group_size=block_k
         )
-        zero_quant_ref, zero_scale_ref = quantize_to_fp8_packed_ue8m0(zero_x)
+        zero_quant_ref, zero_scale_ref = quantize_fp8_ref(
+            zero_x, scale_ue8m0=True, layout="row_major"
+        )
 
         assert zero_scales.shape == zero_scale_ref.shape
         assert zero_scales.stride() == zero_scale_ref.stride()
@@ -99,7 +100,9 @@ legacy_scales = allocate_packed_ue8m0_scale_deepgemm_style(
 runtime_kernel_blackwell.quantize_fp8_sm100(
     legacy_x, legacy_output, legacy_scales, group_size=block_k
 )
-legacy_quant_ref, legacy_scale_ref = quantize_to_fp8_deepgemm_style(legacy_x)
+legacy_quant_ref, legacy_scale_ref = quantize_fp8_ref(
+    legacy_x, scale_ue8m0=True, layout="deepgemm_col_major"
+)
 assert legacy_scales.shape == legacy_scale_ref.shape
 assert legacy_scales.stride() == legacy_scale_ref.stride()
 torch.testing.assert_close(legacy_scales, legacy_scale_ref, rtol=0, atol=0)

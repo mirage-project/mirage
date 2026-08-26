@@ -54,11 +54,6 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
   // __global__ void /* __launch_bounds__(128, 1) */
   // gemm_multi_stage(void *Dptr, const void *Aptr, const void *Bptr, const void
   // *Rptr, int m, int n, int k) {
-#if 0
-  if (threadIdx.x == 0) {
-    printf("Entering linear_kernel with BATCH_SIZE: %d, OUTPUT_SIZE: %d, REDUCTION_SIZE: %d, O_STRIDE: %d, PIPE_MAX: %d, residual: %d\n", BATCH_SIZE, OUTPUT_SIZE, REDUCTION_SIZE, O_STRIDE, PIPE_MAX, residual);
-  }
-#endif
   using T = std::conditional_t<std::is_same_v<T_, bfloat16>,
                                cute::bfloat16_t,
                                float>; // A temporary hack
@@ -78,13 +73,6 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
                                     float>;
   using namespace cute;
   // if (threadIdx.x == 0) {
-  //   printf("SmemLayoutAtom: \n"); print(typename Config::SmemLayoutAtom{});
-  //   printf("\n"); printf("SmemLayoutA: \n"); print(typename
-  //   Config::SmemLayoutA{}); printf("\n"); printf("SmemLayoutB: \n");
-  //   print(typename Config::SmemLayoutB{}); printf("\n");
-  //   printf("SmemLayoutAtomC: \n"); print(typename Config::SmemLayoutAtomC{});
-  //   printf("\n"); printf("SmemLayoutC: \n"); print(typename
-  //   Config::SmemLayoutC{}); printf("\n");
   // }
   // return;
 
@@ -120,20 +108,6 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
 
   int idx = threadIdx.x;
 
-#if 0
-  if (idx == 0) {
-    printf("kTileM: %d, ", kTileM); 
-    printf("kTileN: %d, ", kTileN);
-    printf("LoopM: %d, ", LoopM);
-    printf("LoopN: %d, ", LoopN);
-    printf("kTileK: %d, ", kTileK);
-    printf("kStage: %d, ", kStage);
-    printf("m: %d, ", m);
-    printf("n: %d, ", n);
-    printf("k: %d\n", k);
-  }
-#endif
-
   Tensor A = make_tensor(make_gmem_ptr((T *)input_ptr),
                          make_shape(BATCH_SIZE, REDUCTION_SIZE),
                          make_stride(REDUCTION_SIZE, Int<1>{}));
@@ -167,29 +141,17 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
         cA, make_tile(Int<kTileM>{}, Int<kTileK>{}), make_coord(m_iter, _));
 #pragma unroll
     for (int n_iter = 0; n_iter < LoopN; ++n_iter) {
-      Tensor gB = local_tile(
-          B,
-          make_tile(Int<kTileN>{}, Int<kTileK>{}),
-          make_coord(n_iter, _)); // (kTileN, kTileK, n, k)
-                                  // (_128,_128,1,32):(4096,_1,524288,_128)
-      Tensor gD = local_tile(
-          D,
-          make_tile(Int<kTileM>{}, Int<kTileN>{}),
-          make_coord(m_iter, n_iter)); // (kTileM, kTileN, m, n)
-                                       // (_16,_128,1,1):(128,_1,2048,_128)
-      Tensor gR = local_tile(
-          R,
-          make_tile(Int<kTileM>{}, Int<kTileN>{}),
-          make_coord(m_iter, n_iter)); // (kTileM, kTileN, m, n)
-                                       // (_16,_128,1,1):(128,_1,2048,_128)
-#if 0
-      if (idx == 0) {
-        printf("gA: \n"); print(gA); printf("\n");
-        printf("gB: \n"); print(gB); printf("\n");
-        printf("gD: \n"); print(gD); printf("\n");
-        printf("gR: \n"); print(gR); printf("\n");
-      }
-#endif
+      Tensor gB = local_tile(B,
+                             make_tile(Int<kTileN>{}, Int<kTileK>{}),
+                             make_coord(n_iter, _)); // (kTileN, kTileK, n, k)
+      Tensor gD =
+          local_tile(D,
+                     make_tile(Int<kTileM>{}, Int<kTileN>{}),
+                     make_coord(m_iter, n_iter)); // (kTileM, kTileN, m, n)
+      Tensor gR =
+          local_tile(R,
+                     make_tile(Int<kTileM>{}, Int<kTileN>{}),
+                     make_coord(m_iter, n_iter)); // (kTileM, kTileN, m, n)
 
       // shared memory
       auto sA =
@@ -216,14 +178,6 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
           gB(_, _, 0)); // (MMA, MMA_N, MMA_K) ((_2,_2),_4,_8)
       auto tCrD = thr_mma.partition_fragment_C(
           gD); // (MMA, MMA_M, MMA_N) ((_2,_2),_1,_4):((_1,_2),_0,_4)
-
-#if 0
-      if (idx == 0) {
-        printf("tCrA: \n"); print(tCrA); printf("\n");
-        printf("tCrB: \n"); print(tCrB); printf("\n");
-        printf("tCrD: \n"); print(tCrD); printf("\n");
-      }
-#endif
 
       // Load residual from global memory to shared memory
       auto r2s_tiled_copy_c = make_tiled_copy_C(R2SCopyAtomC{}, tiled_mma);
@@ -274,17 +228,6 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
       auto tCrB_view = s2r_thr_copy_b.retile_D(
           tCrB); // ? (CPY, CPY_N, CPY_K) ((_8,_2),_1,_8)
 
-#if 0
-      if (idx == 0) {
-        printf("sA: \n"); print(sA); printf("\n");
-        printf("tAsA: \n"); print(tAsA); printf("\n");
-        printf("tCrA_view: \n"); print(tCrA_view); printf("\n");
-        printf("sB: \n"); print(sB); printf("\n");
-        printf("tBsB: \n"); print(tBsB); printf("\n");
-        printf("tCrB_view: \n"); print(tCrB_view); printf("\n");
-      }
-#endif
-
       G2SCopyA g2s_tiled_copy_a;
       auto g2s_thr_copy_a = g2s_tiled_copy_a.get_slice(idx);
       auto tAgA_copy = g2s_thr_copy_a.partition_S(
@@ -323,15 +266,6 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
         tBpB(in, 0) =
             elem_less(get<0>(tBcB(0, in, 0, 0)), shape<0>(B)); // n < N ?
       }
-
-#if 0
-      if (idx == 0) {
-        printf("tAgA_copy: \n"); print(tAgA_copy); printf("\n");
-        printf("tAsA_copy: \n"); print(tAsA_copy); printf("\n");
-        printf("tBgB_copy: \n"); print(tBgB_copy); printf("\n");
-        printf("tBsB_copy: \n"); print(tBsB_copy); printf("\n");
-      }
-#endif
 
       int itile_to_read = 0;
       int ismem_read_stage = 0;
@@ -427,9 +361,7 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
 
       auto tCrC_r2s = r2s_thr_copy_c.retile_S(
           tCrD); // (CPY, CPY_M, CPY_N) ((_2,_8),_1,_1):((_1,_2),_0,_0)
-      auto tCsC_r2s = r2s_thr_copy_c.partition_D(
-          sC); // (CPY, _1, _1, pipe)
-               // ((_2,(_2,(_2,_2))),_1,_1,_2):((_1,(_1024,(_32,72))),_0,_0,_2048)
+      auto tCsC_r2s = r2s_thr_copy_c.partition_D(sC); // (CPY, _1, _1, pipe)
 
       auto tCsC_s2g = s2g_thr_copy_c.partition_S(
           sC); // (CPY, _1, _1, pipe) ((_8,_1),_1,_2,_2):((_1,_0),_0,72,_2048)
@@ -447,24 +379,6 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
           make_tensor_like<T>(tCrC_r2s); // ((_2,_8),_1,_1):((_1,_2),_0,_0)
       cute::copy(tCrC_r2s, tC_tmp);
 
-#if 0
-      if (idx == 0) {
-        printf("tCrC_r2s: \n"); print(tCrC_r2s); printf("\n");
-        printf("tCsC_r2s: \n"); print(tCsC_r2s); printf("\n");
-        printf("tCsC_s2g: \n"); print(tCsC_s2g); printf("\n");
-        printf("tCgC_s2g: \n"); print(tCgC_s2g); printf("\n");
-        // printf("tCgC_s2gx: \n"); print(tCgC_s2gx); printf("\n");
-        // printf("tCrC_r2sx: \n"); print(tCrC_r2sx); printf("\n");
-        printf("tC_tmp: \n"); print(tC_tmp); printf("\n");
-        // printf("tC_tmp(_, 0): \n"); print(tC_tmp(_, 0)); printf("\n");
-        printf("tCsC_r2s(_, 0, 0, 0): \n"); print(tCsC_r2s(_, 0, 0, 0)); printf("\n");
-        printf("tCsC_r2s(_, 0, 0, 1): \n"); print(tCsC_r2s(_, 0, 0, 1)); printf("\n");
-        printf("tCsC_r2s(_, 0, 0, _): \n"); print(tCsC_r2s(_, 0, 0, _)); printf("\n");
-        printf("tCsC_r2s(_, _, _, 0): \n"); print(tCsC_r2s(_, _, _, 0)); printf("\n");
-        printf("r2s_tiled_copy_c: \n"); print(r2s_tiled_copy_c); printf("\n");
-        printf("s2g_tiled_copy_c: \n"); print(s2g_tiled_copy_c); printf("\n");
-      }
-#endif
       cute::copy(r2s_tiled_copy_c, tC_tmp, tCsC_r2s(_, _, _, 0));
       // ((_2,_4),_1,_1) -> ((_2,(_2,_2)),_1,_1)
       __syncthreads();

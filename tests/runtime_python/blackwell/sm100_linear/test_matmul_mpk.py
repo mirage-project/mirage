@@ -1,5 +1,6 @@
 import torch
 import runtime_kernel_blackwell
+from pytorch_reference import linear_ref
 
 torch.set_printoptions(sci_mode=False, profile="full")
 # torch.set_printoptions(sci_mode=False)
@@ -28,7 +29,7 @@ for reduction_size in reduction_sizes:
         if not has_residual:
             residual = None
         runtime_kernel_blackwell.linear_sm100_mpk(x, w, residual, output) # with residual and swapAB
-        torch_out = torch.matmul(x, torch.transpose(w, 0, 1))
+        torch_out = linear_ref(x, w)
         if has_residual:
             torch_out = torch_out + residual
         

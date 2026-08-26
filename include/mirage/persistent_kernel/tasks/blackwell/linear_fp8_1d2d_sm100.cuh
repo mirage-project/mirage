@@ -43,29 +43,6 @@
 
 namespace kernel {
 
-namespace detail {
-
-// 128 uint32 elements per aligned scale chunk, same assumption as deepgemm.
-static constexpr int kNumUTCCPAlignedElems = 128;
-
-// Warp-local transpose required before UTCCP.
-// Input/output is a contiguous 128 x uint32 region in shared memory.
-__device__ __forceinline__ void
-    utccp_required_smem_warp_transpose(uint32_t *smem_ptr, int lane_idx) {
-  uint32_t values[4];
-#pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    values[i] = smem_ptr[(i ^ (lane_idx >> 3)) * 32 + lane_idx];
-  }
-  __syncwarp();
-#pragma unroll
-  for (int i = 0; i < 4; ++i) {
-    smem_ptr[lane_idx * 4 + (i ^ (lane_idx >> 3))] = values[i];
-  }
-}
-
-} // namespace detail
-
 template <typename T_,
           typename TMA_A,
           typename TMA_B,

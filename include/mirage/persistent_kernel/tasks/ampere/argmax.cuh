@@ -84,7 +84,9 @@ __device__ __forceinline__ void
 #pragma unroll
   for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
     T local_max = T(-inf);
-    long long local_idx = -1;
+    // Default to 0 (a valid index), not -1: a degenerate all-(-inf)/NaN input
+    // never beats local_max, and -1 sign-extends into a bogus token id.
+    long long local_idx = 0;
 #pragma unroll
     for (int i = tidx; i < CHUNK_SIZE; i += NUM_THREADS) {
       T val = input[i + batch_idx * CHUNK_SIZE * NUM_PARTIAL_TASKS];
@@ -122,8 +124,9 @@ __device__ __forceinline__ void
 #pragma unroll
   for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
     T local_max = T(-inf);
-    // Pack (chunk_index, relative_index) into a single 64-bit integer
-    long long local_packed_idx = -1;
+    // Packed (chunk_index, relative_index). Default 0, not -1: -1 sign-extends
+    // to 0xFFFF...FFFF and collided with eos_token_id=-1 under --ignore-eos.
+    long long local_packed_idx = 0;
 
 #pragma unroll
     for (int i = tidx; i < NUM_PARTIAL_TASKS; i += blockDim.x) {
@@ -139,17 +142,10 @@ __device__ __forceinline__ void
     block_reduce_max_idx(local_max, local_packed_idx);
 
     if (tidx == 0) {
-      if (local_packed_idx != -1) {
-        long long winning_chunk_idx = local_packed_idx >> 32;
-        long long winning_relative_idx = local_packed_idx & 0xFFFFFFFF;
-        final_output[batch_idx] =
-            winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
-        // tokens[step + 1] = winning_chunk_idx * CHUNK_SIZE +
-        // winning_relative_idx;
-      } else {
-        final_output[batch_idx] = -1;
-        // tokens[step + 1] = -1;
-      }
+      long long winning_chunk_idx = local_packed_idx >> 32;
+      long long winning_relative_idx = local_packed_idx & 0xFFFFFFFF;
+      final_output[batch_idx] =
+          winning_chunk_idx * CHUNK_SIZE + winning_relative_idx;
     }
   }
 }

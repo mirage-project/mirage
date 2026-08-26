@@ -22,6 +22,29 @@
 #include <cutlass/cutlass.h>
 #include <cutlass/numeric_types.h>
 
+namespace kernel::detail {
+
+// 128 uint32 elements per aligned scale chunk, matching the UTCCP layout.
+static constexpr int kNumUTCCPAlignedElems = 128;
+
+// Warp-local transpose required before UTCCP.
+// Input/output is a contiguous 128 x uint32 region in shared memory.
+__device__ __forceinline__ void
+    utccp_required_smem_warp_transpose(uint32_t *smem_ptr, int lane_idx) {
+  uint32_t values[4];
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    values[i] = smem_ptr[(i ^ (lane_idx >> 3)) * 32 + lane_idx];
+  }
+  __syncwarp();
+#pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    smem_ptr[lane_idx * 4 + (i ^ (lane_idx >> 3))] = values[i];
+  }
+}
+
+} // namespace kernel::detail
+
 namespace kernel::sm100 {
 // adapted from the DeepGEMM SM100 Blackwell path: provide the minimum
 // descriptor, TMEM, block-scaled MMA helpers needed by Mirage's block-scaled

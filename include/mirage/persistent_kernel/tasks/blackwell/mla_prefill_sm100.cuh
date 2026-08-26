@@ -213,23 +213,30 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
     int const H,
     float const sm_scale_log2,
     int const head,
-    int const q_block // were blockIdx.x, blockIdx.y
-) {
+    int const q_block, // were blockIdx.x, blockIdx.y
+    int q_nope_row_stride = 0,
+    int q_nope_head_stride = mla_prefill::PF_D_CKV,
+    int q_pe_row_stride = 0,
+    int q_pe_head_stride = mla_prefill::PF_D_KPE,
+    int ckv_row_stride = mla_prefill::PF_D_CKV,
+    int kpe_row_stride = mla_prefill::PF_D_KPE,
+    int kpe_offset = 0) {
   using namespace mla_prefill;
 
-  // Dual-dispatch gate (opt/mla-dual-dispatch): when both the prefill and
-  // the MLA/MTP decode kernels are registered for the same attention step,
-  // the prefill kernel only handles large chunks. For small Q_LEN (decode /
-  // MTP verify) the dedicated decode kernel is ~10x faster; skip prefill
-  // entirely and let the decode kernel write attn_out. See builder.py's
-  // dual-dispatch comment. Threshold 16 is matched against the decode
-  // kernels' Q_LEN > 8 skip so decode (Q_LEN ≤ 8) and prefill (Q_LEN ≥ 16)
-  // have non-overlapping domains.
-  if (Q_LEN < 16) {
+  // The caller decides whether the current runtime batch is prompt prefill or
+  // decode/verify. Prompt tails may be shorter than the decode kernel's
+  // Q_LEN<=8 domain and must still use causal prefill semantics.
+  if (Q_LEN < 1) {
     return;
   }
 
   int const q_start = q_block * PF_BM;
+  if (q_nope_row_stride == 0) {
+    q_nope_row_stride = H * PF_D_CKV;
+  }
+  if (q_pe_row_stride == 0) {
+    q_pe_row_stride = H * PF_D_KPE;
+  }
   // Global position in the full sequence = (history) + position within chunk.
   // History length = S - Q_LEN. When Q_LEN == S (single-chunk prefill with no
   // history), q_pos_in_seq == q_pos_in_chunk and the math collapses to the
@@ -281,9 +288,9 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       int row = i / (PF_D_CKV / 8);
       int col = i % (PF_D_CKV / 8);
       int q_idx = q_start + row;
-      int smem_addr = q_nope_smem + swizzle<STRIDE_NOPE>(row, col);
-      bf16 const *gmem_ptr = Q_nope + (long long)q_idx * H * PF_D_CKV +
-                             (long long)head * PF_D_CKV + col * 8;
+      int smem_addr = q_nope_smem + mla_prefill::swizzle<STRIDE_NOPE>(row, col);
+      bf16 const *gmem_ptr = Q_nope + (long long)q_idx * q_nope_row_stride +
+                             (long long)head * q_nope_head_stride + col * 8;
       if (q_idx < Q_LEN) {
         cp_async_128b(smem_addr, gmem_ptr);
       } else {
@@ -295,9 +302,9 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       int row = i / (PF_D_KPE / 8);
       int col = i % (PF_D_KPE / 8);
       int q_idx = q_start + row;
-      int smem_addr = q_pe_smem + swizzle<STRIDE_PE>(row, col);
-      bf16 const *gmem_ptr = Q_pe + (long long)q_idx * H * PF_D_KPE +
-                             (long long)head * PF_D_KPE + col * 8;
+      int smem_addr = q_pe_smem + mla_prefill::swizzle<STRIDE_PE>(row, col);
+      bf16 const *gmem_ptr = Q_pe + (long long)q_idx * q_pe_row_stride +
+                             (long long)head * q_pe_head_stride + col * 8;
       if (q_idx < Q_LEN) {
         cp_async_128b(smem_addr, gmem_ptr);
       } else {
@@ -314,11 +321,11 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
   constexpr int STRIDE_NOPE_B = PF_D_CKV * sizeof(bf16);
   constexpr int STRIDE_PE_B = PF_D_KPE * sizeof(bf16);
   int q_nope_ldm_base =
-      q_nope_smem +
-      swizzle<STRIDE_NOPE_B>(warp_m * 16 + (lane_id % 16), lane_id / 16);
+      q_nope_smem + mla_prefill::swizzle<STRIDE_NOPE_B>(
+                        warp_m * 16 + (lane_id % 16), lane_id / 16);
   int q_pe_ldm_base =
-      q_pe_smem +
-      swizzle<STRIDE_PE_B>(warp_m * 16 + (lane_id % 16), lane_id / 16);
+      q_pe_smem + mla_prefill::swizzle<STRIDE_PE_B>(
+                      warp_m * 16 + (lane_id % 16), lane_id / 16);
 
   // Initialize accumulators
   float o_frag[PF_NUM_MMA_D_V_HALF][8];
@@ -329,7 +336,8 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       o_frag[i][j] = 0.0f;
     }
 
-  float m_state[2] = {-INFINITY, -INFINITY};
+  constexpr float PF_MASK_NEG_INF = -1.0e4f;
+  float m_state[2] = {PF_MASK_NEG_INF, PF_MASK_NEG_INF};
   float d_state[2] = {1.0f, 1.0f};
 
   constexpr int NUM_N_SHARD_GLOBAL = PF_NUM_MMA_N16 / 2;
@@ -357,16 +365,18 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         int row = i / (PF_D_CKV / 8);
         int col = i % (PF_D_CKV / 8);
         int kv_idx = kv_base + row;
-        int addr = ckv_smem(stage) + swizzle<STRIDE_CKV>(row, col);
-        bf16 const *ptr = CKV + (long long)kv_idx * PF_D_CKV + col * 8;
+        int addr = ckv_smem(stage) + mla_prefill::swizzle<STRIDE_CKV>(row, col);
+        bf16 const *ptr = CKV + (long long)kv_idx * ckv_row_stride + col * 8;
         cp_async_128b(addr, ptr);
       }
       for (int i = tid; i < KPE_LOADS; i += PF_NUM_THREADS) {
         int row = i / (PF_D_KPE / 8);
         int col = i % (PF_D_KPE / 8);
         int kv_idx = kv_base + row;
-        int addr = kpe_smem(stage) + swizzle<STRIDE_KPE_B>(row, col);
-        bf16 const *ptr = KPE + (long long)kv_idx * PF_D_KPE + col * 8;
+        int addr =
+            kpe_smem(stage) + mla_prefill::swizzle<STRIDE_KPE_B>(row, col);
+        bf16 const *ptr =
+            KPE + (long long)kv_idx * kpe_row_stride + kpe_offset + col * 8;
         cp_async_128b(addr, ptr);
       }
     } else {
@@ -374,16 +384,18 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         int row = i / (PF_D_CKV / 8);
         int col = i % (PF_D_CKV / 8);
         int kv_idx = kv_base + row;
-        int addr = ckv_smem(stage) + swizzle<STRIDE_CKV>(row, col);
-        bf16 const *ptr = CKV + (long long)kv_idx * PF_D_CKV + col * 8;
+        int addr = ckv_smem(stage) + mla_prefill::swizzle<STRIDE_CKV>(row, col);
+        bf16 const *ptr = CKV + (long long)kv_idx * ckv_row_stride + col * 8;
         cp_async_128b_pred(addr, ptr, kv_idx < S);
       }
       for (int i = tid; i < KPE_LOADS; i += PF_NUM_THREADS) {
         int row = i / (PF_D_KPE / 8);
         int col = i % (PF_D_KPE / 8);
         int kv_idx = kv_base + row;
-        int addr = kpe_smem(stage) + swizzle<STRIDE_KPE_B>(row, col);
-        bf16 const *ptr = KPE + (long long)kv_idx * PF_D_KPE + col * 8;
+        int addr =
+            kpe_smem(stage) + mla_prefill::swizzle<STRIDE_KPE_B>(row, col);
+        bf16 const *ptr =
+            KPE + (long long)kv_idx * kpe_row_stride + kpe_offset + col * 8;
         cp_async_128b_pred(addr, ptr, kv_idx < S);
       }
     }
@@ -421,9 +433,11 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
     // Fused QK
     {
       int kpe_ldm_base_addr =
-          kpe_smem(stage) + swizzle<STRIDE_KPE_B2>(k_row, k_col_base);
+          kpe_smem(stage) +
+          mla_prefill::swizzle<STRIDE_KPE_B2>(k_row, k_col_base);
       int ckv_ldm_base_addr =
-          ckv_smem(stage) + swizzle<STRIDE_CKV_B>(k_row, k_col_base);
+          ckv_smem(stage) +
+          mla_prefill::swizzle<STRIDE_CKV_B>(k_row, k_col_base);
 
 #pragma unroll
       for (int mma_k = 0; mma_k < PF_NUM_MMA_D_KPE_K; mma_k++) {
@@ -494,7 +508,7 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
           int q_pos_seq = q_hist + q_pos;
           int kv_pos = kv_base + mma_n_global * 16 + kv_col;
           if (!((kv_pos <= q_pos_seq) && (kv_pos < S) && (q_pos < Q_LEN))) {
-            s_frag[nl][reg_id] = -INFINITY;
+            s_frag[nl][reg_id] = PF_MASK_NEG_INF;
           }
         }
       }
@@ -533,9 +547,13 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       for (int j = 0; j < 2; j++) {
         m_state[j] = fmaxf(m_wg[0 * PF_BM + warp_m * 16 + j * 8 + lane_id / 4],
                            m_wg[1 * PF_BM + warp_m * 16 + j * 8 + lane_id / 4]);
-        float neg_m_scaled = -(m_state[j] * sm_scale_log2);
+        bool const has_valid_score = (m_state[j] > PF_MASK_NEG_INF * 0.5f);
+        float neg_m_scaled =
+            has_valid_score ? -(m_state[j] * sm_scale_log2) : 0.0f;
         float scale =
-            fast_exp2f(__fmaf_rn(m_prev[j], sm_scale_log2, neg_m_scaled));
+            (has_valid_score && (m_prev[j] > PF_MASK_NEG_INF * 0.5f))
+                ? fast_exp2f(__fmaf_rn(m_prev[j], sm_scale_log2, neg_m_scaled))
+                : 0.0f;
         d_state[j] *= scale;
 #pragma unroll
         for (int mma_d = 0; mma_d < PF_NUM_MMA_D_V_HALF; mma_d++) {
@@ -546,14 +564,21 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
         }
 #pragma unroll
         for (int nl = 0; nl < NUM_N_SHARD; nl++) {
-          s_frag[nl][j * 2 + 0] = fast_exp2f(
-              __fmaf_rn(s_frag[nl][j * 2 + 0], sm_scale_log2, neg_m_scaled));
-          s_frag[nl][j * 2 + 1] = fast_exp2f(
-              __fmaf_rn(s_frag[nl][j * 2 + 1], sm_scale_log2, neg_m_scaled));
-          s_frag[nl][j * 2 + 4] = fast_exp2f(
-              __fmaf_rn(s_frag[nl][j * 2 + 4], sm_scale_log2, neg_m_scaled));
-          s_frag[nl][j * 2 + 5] = fast_exp2f(
-              __fmaf_rn(s_frag[nl][j * 2 + 5], sm_scale_log2, neg_m_scaled));
+          if (has_valid_score) {
+            s_frag[nl][j * 2 + 0] = fast_exp2f(
+                __fmaf_rn(s_frag[nl][j * 2 + 0], sm_scale_log2, neg_m_scaled));
+            s_frag[nl][j * 2 + 1] = fast_exp2f(
+                __fmaf_rn(s_frag[nl][j * 2 + 1], sm_scale_log2, neg_m_scaled));
+            s_frag[nl][j * 2 + 4] = fast_exp2f(
+                __fmaf_rn(s_frag[nl][j * 2 + 4], sm_scale_log2, neg_m_scaled));
+            s_frag[nl][j * 2 + 5] = fast_exp2f(
+                __fmaf_rn(s_frag[nl][j * 2 + 5], sm_scale_log2, neg_m_scaled));
+          } else {
+            s_frag[nl][j * 2 + 0] = 0.0f;
+            s_frag[nl][j * 2 + 1] = 0.0f;
+            s_frag[nl][j * 2 + 4] = 0.0f;
+            s_frag[nl][j * 2 + 5] = 0.0f;
+          }
         }
       }
     }
@@ -582,16 +607,20 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
       int col_unit2 = p_col2 / 8;
       int col_off = (p_col % 8) * (int)sizeof(bf16);
       int col_off2 = (p_col2 % 8) * (int)sizeof(bf16);
-      int a0 = p_smem + swizzle<P_STRIDE>(p_row, col_unit) + col_off;
+      int a0 =
+          p_smem + mla_prefill::swizzle<P_STRIDE>(p_row, col_unit) + col_off;
       asm volatile("st.shared.u32 [%0], %1;" ::"r"(a0),
                    "r"(p_f16_local[nl][0]));
-      int a1 = p_smem + swizzle<P_STRIDE>(p_row + 8, col_unit) + col_off;
+      int a1 = p_smem + mla_prefill::swizzle<P_STRIDE>(p_row + 8, col_unit) +
+               col_off;
       asm volatile("st.shared.u32 [%0], %1;" ::"r"(a1),
                    "r"(p_f16_local[nl][1]));
-      int a2 = p_smem + swizzle<P_STRIDE>(p_row, col_unit2) + col_off2;
+      int a2 =
+          p_smem + mla_prefill::swizzle<P_STRIDE>(p_row, col_unit2) + col_off2;
       asm volatile("st.shared.u32 [%0], %1;" ::"r"(a2),
                    "r"(p_f16_local[nl][2]));
-      int a3 = p_smem + swizzle<P_STRIDE>(p_row + 8, col_unit2) + col_off2;
+      int a3 = p_smem + mla_prefill::swizzle<P_STRIDE>(p_row + 8, col_unit2) +
+               col_off2;
       asm volatile("st.shared.u32 [%0], %1;" ::"r"(a3),
                    "r"(p_f16_local[nl][3]));
     }
@@ -607,15 +636,16 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
 #pragma unroll
       for (int mma_kv = 0; mma_kv < PF_NUM_MMA_KV; mma_kv++) {
         uint32_t p_frag[4];
-        int p_addr =
-            p_smem + swizzle<P_STRIDE>(p_ldm_row, mma_kv * 2 + p_ldm_col);
+        int p_addr = p_smem + mla_prefill::swizzle<P_STRIDE>(
+                                  p_ldm_row, mma_kv * 2 + p_ldm_col);
         ldmatrix_x4(p_frag, p_addr);
 #pragma unroll
         for (int mma_d = 0; mma_d < PF_NUM_MMA_D_V_HALF; mma_d++) {
           uint32_t v_frag[4];
           int v_r = v_row + mma_kv * 16;
           int v_c = v_col_base + mma_d * 2;
-          int v_addr = ckv_smem(stage) + swizzle<STRIDE_CKV_B>(v_r, v_c);
+          int v_addr =
+              ckv_smem(stage) + mla_prefill::swizzle<STRIDE_CKV_B>(v_r, v_c);
           ldmatrix_x4_trans(v_frag, v_addr);
           mma_m16n16k16_bf16(p_frag, v_frag, o_frag[mma_d]);
         }
@@ -655,9 +685,12 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
                    d_wg_smem[1 * PF_BM + warp_m * 16 + j * 8 + lane_id / 4];
     }
     float d_rcp[2];
+    bool norm_valid[2];
 #pragma unroll
     for (int j = 0; j < 2; j++) {
-      if (m_state[j] != -INFINITY) {
+      norm_valid[j] =
+          (m_state[j] > PF_MASK_NEG_INF * 0.5f) && (d_state[j] > 0.0f);
+      if (norm_valid[j]) {
         asm volatile("rcp.approx.ftz.f32 %0, %1;"
                      : "=f"(d_rcp[j])
                      : "f"(d_state[j]));
@@ -670,7 +703,8 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
 #pragma unroll
       for (int reg_id = 0; reg_id < 8; reg_id++) {
         int j = (reg_id % 4) / 2;
-        o_frag[mma_d][reg_id] *= d_rcp[j];
+        o_frag[mma_d][reg_id] =
+            norm_valid[j] ? (o_frag[mma_d][reg_id] * d_rcp[j]) : 0.0f;
       }
   }
 
@@ -707,6 +741,83 @@ __device__ __noinline__ void mla_prefill_sm100_task_impl(
               make_float2(o_frag[mma_d][6], o_frag[mma_d][7]));
           *reinterpret_cast<bf16_2 *>(&O[base_offset + 2 * t + 8]) = val6;
         }
+      }
+    }
+  }
+
+  // The first token in an empty-context prefill can only attend to its own
+  // KV row. The MMA softmax path above is numerically fragile for this
+  // single-score row under -use_fast_math; overwrite it with the exact causal
+  // result O[0, head, :] = V[0, :] to keep chunk prefill deterministic.
+  if (q_hist == 0 && q_start == 0) {
+    for (int d = tid; d < PF_D_V; d += PF_NUM_THREADS) {
+      O[(long long)head * PF_D_V + d] = CKV[d];
+    }
+  }
+
+  // For the first row of later q-blocks, the current KV tile contributes only
+  // the diagonal key. The MMA path above is fragile for that one-score tile;
+  // merge the diagonal term back into the already-computed history result.
+  if (q_start > 0 && q_start < Q_LEN) {
+    float *tmp = reinterpret_cast<float *>(smem_raw);
+    float denom_old = 0.0f;
+    float max_old = PF_MASK_NEG_INF;
+    if (tid == 0) {
+      tmp[0] = d_state[0];
+      tmp[1] = m_state[0];
+    }
+    __syncthreads();
+    denom_old = tmp[0];
+    max_old = tmp[1];
+
+    int const diag_idx = q_hist + q_start;
+    float local_score = 0.0f;
+    for (int d = tid; d < PF_D_CKV; d += PF_NUM_THREADS) {
+      float q =
+          __bfloat162float(Q_nope[(long long)q_start * q_nope_row_stride +
+                                  (long long)head * q_nope_head_stride + d]);
+      float k = __bfloat162float(CKV[(long long)diag_idx * ckv_row_stride + d]);
+      local_score += q * k;
+    }
+    for (int d = tid; d < PF_D_KPE; d += PF_NUM_THREADS) {
+      float q = __bfloat162float(Q_pe[(long long)q_start * q_pe_row_stride +
+                                      (long long)head * q_pe_head_stride + d]);
+      float k = __bfloat162float(
+          KPE[(long long)diag_idx * kpe_row_stride + kpe_offset + d]);
+      local_score += q * k;
+    }
+    tmp[tid] = local_score;
+    __syncthreads();
+    for (int stride = PF_NUM_THREADS / 2; stride > 0; stride >>= 1) {
+      if (tid < stride) {
+        tmp[tid] += tmp[tid + stride];
+      }
+      __syncthreads();
+    }
+    if (tid == 0) {
+      float diag_score = tmp[0];
+      float max_new = fmaxf(max_old, diag_score);
+      float old_scale = (denom_old > 0.0f)
+                            ? fast_exp2f((max_old - max_new) * sm_scale_log2)
+                            : 0.0f;
+      float diag_p = fast_exp2f((diag_score - max_new) * sm_scale_log2);
+      tmp[0] = denom_old * old_scale;
+      tmp[1] = diag_p;
+      tmp[2] = tmp[0] + tmp[1];
+    }
+    __syncthreads();
+    float old_weight = tmp[0];
+    float diag_weight = tmp[1];
+    float denom_new = tmp[2];
+    if (denom_new > 0.0f) {
+      long long out_base =
+          (long long)q_start * H * PF_D_V + (long long)head * PF_D_V;
+      long long v_base = (long long)diag_idx * ckv_row_stride;
+      for (int d = tid; d < PF_D_V; d += PF_NUM_THREADS) {
+        float old_o = __bfloat162float(O[out_base + d]);
+        float diag_v = __bfloat162float(CKV[v_base + d]);
+        O[out_base + d] = __float2bfloat16(
+            (old_o * old_weight + diag_v * diag_weight) / denom_new);
       }
     }
   }
