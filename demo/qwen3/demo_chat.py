@@ -62,7 +62,7 @@ def build_mirage_graph(model, world_size, rank, args, tokens_tensor, step_tensor
         (
             model.lm_head.weight,
             torch.full(
-                (153600 - model.config.vocab_size, hidden_size), 0, device="cuda"
+                (153600 - model.config.vocab_size, hidden_size), -1e4, device="cuda"
             ),
         ),
         0,
