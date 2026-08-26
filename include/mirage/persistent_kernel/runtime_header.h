@@ -401,9 +401,10 @@ struct RuntimeConfig {
   // CPU→GPU shutdown signal: CPU writes 1 to request kernel termination.
   // GPU polls with ld.acquire.sys when the batch is empty.
   int32_t volatile *pinned_shutdown; // 0=running, 1=shutdown requested
-  // Per-request step progress: GPU writes after each decode step so CPU can
-  // poll for streaming output without touching GPU memory.
-  int32_t *pinned_step; // [total_inflight], pinned, indexed by buffer row
+  // Per-row progress and release handshake. GPU publishes a nonnegative decode
+  // step. After it reads completed output, CPU stores -1 to release the row.
+  int32_t volatile
+      *pinned_step; // [total_inflight], pinned, indexed by buffer row
   // Pinned inbox: CPU writes prompt tokens here before submitting a request
   // via the ring buffer. GPU copies from inbox to the allocated buffer row.
   int64_t *pinned_inbox_tokens; // [MPK_PINNED_RING_CAPACITY * max_seq_length],
@@ -411,7 +412,7 @@ struct RuntimeConfig {
   // Pinned rid→row mapping: GPU writes pinned_rid_at_row[row] = rid when
   // allocating a buffer row so CPU can discover which row its request is
   // on by scanning rows, then poll pinned_step[row] for per-step streaming.
-  int32_t *pinned_rid_at_row; // [total_inflight], pinned
+  int32_t volatile *pinned_rid_at_row; // [total_inflight], pinned
   // Running queue rid tracking: request_rids[i] stores the original rid
   // for active batch slot i (GPU device memory).
   int *request_rids; // [MPK_MAX_NUM_BATCHED_REQUESTS]

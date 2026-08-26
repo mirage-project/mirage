@@ -18,8 +18,8 @@ class _StreamingMonitor:
     """Single background thread that monitors all active streaming sessions.
 
     Replaces the per-request polling thread (Thread B) with one shared daemon
-    that drains completions, polls step progress, and enqueues tokens for
-    every registered session.  This eliminates the thread explosion that
+    that polls completion state and step progress, then enqueues tokens for
+    every registered session. This eliminates the thread explosion that
     causes GIL contention under concurrent load.
     """
 
@@ -45,35 +45,45 @@ class _StreamingMonitor:
             }
         return q
 
+    def unregister(self, rid: int) -> None:
+        """Remove a session whose request could not be published."""
+        with self._lock:
+            self._sessions.pop(rid, None)
+
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                # Drain completions and flush waiting queue.
-                self._runtime.drain_completions()
-
                 with self._lock:
                     for rid, s in list(self._sessions.items()):
+                        released = False
                         try:
+                            # Completion is authoritative and may arrive before
+                            # the monitor observes the transient row mapping.
+                            completion = self._runtime.get_completion(rid)
+                            if completion is not None:
+                                row, final_step = completion
+                                try:
+                                    self._yield_remaining(s, row, final_step)
+                                finally:
+                                    released = self._runtime.release_request(rid)
+                                if not released:
+                                    raise RuntimeError(
+                                        f"missing completion for rid={rid}")
+                                del self._sessions[rid]
+                                continue
+
                             # Phase 1 — discover buffer row.
                             if s['row'] == -1:
                                 row = self._runtime.find_row_for_rid(rid)
                                 if row >= 0:
                                     s['row'] = row
                                 elif time.monotonic() > s['deadline']:
+                                    self._runtime.abandon_request(rid)
                                     s['q'].put(("__timeout__", True))
                                     del self._sessions[rid]
                                 continue
 
                             row = s['row']
-
-                            # Check completion via runtime bookkeeping.
-                            with self._runtime._lock:
-                                if rid in self._runtime._completions:
-                                    _, final_step = self._runtime._completions[rid]
-                                    self._yield_remaining(s, row, final_step)
-                                    self._runtime.release_request(rid)
-                                    del self._sessions[rid]
-                                    continue
 
                             # Phase 2 — poll step progress, read only new tokens.
                             current_step = self._runtime.get_current_step_at_row(row)
@@ -87,12 +97,17 @@ class _StreamingMonitor:
 
                             # Check timeout.
                             if time.monotonic() > s['deadline']:
+                                self._runtime.abandon_request(rid)
                                 s['q'].put(("__timeout__", True))
                                 del self._sessions[rid]
 
                         except Exception:
-                            s['q'].put(("__error__", True))
-                            del self._sessions[rid]
+                            try:
+                                if not released:
+                                    self._runtime.abandon_request(rid)
+                            finally:
+                                s['q'].put(("__error__", True))
+                                del self._sessions[rid]
 
             except Exception:
                 pass
@@ -115,6 +130,25 @@ class _StreamingMonitor:
 
     def shutdown(self) -> None:
         self._stop.set()
+        self._thread.join()
+        with self._lock:
+            sessions = list(self._sessions.items())
+            self._sessions.clear()
+        cleanup_error: Exception | None = None
+        for rid, session in sessions:
+            # The GPU has no per-request cancellation. Mark each request so
+            # the runtime releases its row if a completion arrives later, and
+            # always wake the user-facing generator.
+            try:
+                self._runtime.abandon_request(rid)
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            finally:
+                session['q'].put(("__closed__", True))
+        if cleanup_error is not None:
+            raise RuntimeError(
+                "failed to abandon a streaming request") from cleanup_error
 
 
 class LLMEngine:
@@ -145,14 +179,16 @@ class LLMEngine:
         self._submit_lock = threading.RLock()
 
         # Shared streaming monitor — replaces per-request polling threads.
-        self._monitor = _StreamingMonitor(self.runtime, self.tokenizer_manager)
+        self._monitor: _StreamingMonitor
 
         # Background kernel bookkeeping.
         self._kernel_launched: threading.Event = threading.Event()
         self._kernel_thread: threading.Thread | None = None
+        self._closed = False
 
         # Launch MPK kernels
         self._ensure_kernel_running()
+        self._monitor = _StreamingMonitor(self.runtime, self.tokenizer_manager)
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -184,25 +220,39 @@ class LLMEngine:
         token_ids = self.tokenizer_manager.tokenize(prompt, use_template)
         prompt_len = len(token_ids)
 
-        rid = self._next_rid
-        self._next_rid += 1
-
         t = torch.tensor(token_ids, dtype=torch.int64)
+        stream_queue: queue.Queue | None = None
         with self._submit_lock:
-            self.runtime.submit(rid, t)
+            if self._closed:
+                raise RuntimeError("LLMEngine is closed")
+            rid = self._next_rid
+            self._next_rid += 1
+            if stream:
+                stream_queue = self._monitor.register(
+                    rid, prompt_len, timeout)
+            try:
+                self.runtime.submit(rid, t)
+            except Exception:
+                if stream:
+                    self._monitor.unregister(rid)
+                raise
 
         if stream:
-            return self._submit_stream(rid, prompt_len, timeout, poll_interval)
+            assert stream_queue is not None
+            return self._submit_stream(rid, stream_queue)
         else:
             buffer_row, final_step = self.runtime.wait_for_request(
                 rid, timeout, poll_interval)
-            full_tokens = self.runtime.read_tokens_at_row(buffer_row, final_step)
-            output_ids = full_tokens[prompt_len:].tolist()
-            self.runtime.release_request(rid)
-            return {
-                "text": self.tokenizer_manager.decode(output_ids),
-                "token_ids": output_ids,
-            }
+            try:
+                full_tokens = self.runtime.read_tokens_at_row(
+                    buffer_row, final_step)
+                output_ids = full_tokens[prompt_len:].tolist()
+                return {
+                    "text": self.tokenizer_manager.decode(output_ids),
+                    "token_ids": output_ids,
+                }
+            finally:
+                self.runtime.release_request(rid)
 
     # ── Internal ──────────────────────────────────────────────────────────
 
@@ -214,6 +264,7 @@ class LLMEngine:
             if self._kernel_launched.is_set():
                 return
             self.runtime.reset()
+            self.runtime.start()
             self._kernel_thread = threading.Thread(
                 target=self.model_runner, daemon=True)
             self._kernel_thread.start()
@@ -222,9 +273,7 @@ class LLMEngine:
     def _submit_stream(
         self,
         rid: int,
-        prompt_len: int,
-        timeout: float,
-        poll_interval: float,
+        q: queue.Queue,
     ):
         """Generator: yield ``(text, is_final)`` as tokens are decoded.
 
@@ -232,8 +281,6 @@ class LLMEngine:
         spawning a dedicated polling thread, so the number of polling
         threads stays constant regardless of concurrent request count.
         """
-        q = self._monitor.register(rid, prompt_len, timeout)
-
         def generator():
             while True:
                 try:
@@ -246,6 +293,9 @@ class LLMEngine:
                 if text == "__error__":
                     raise RuntimeError(
                         f"stream error for rid={rid}")
+                if text == "__closed__":
+                    raise RuntimeError(
+                        f"engine closed while streaming rid={rid}")
                 yield (text, is_final)
                 if is_final:
                     break
@@ -254,5 +304,20 @@ class LLMEngine:
 
     def close(self) -> None:
         """Signal the GPU kernel to shut down at the next idle cycle."""
-        self._monitor.shutdown()
-        self.runtime.shutdown()
+        with self._submit_lock:
+            if self._closed:
+                return
+            self._closed = True
+        monitor_error: Exception | None = None
+        try:
+            self._monitor.shutdown()
+        except Exception as exc:
+            monitor_error = exc
+        try:
+            self.runtime.request_shutdown()
+            if self._kernel_thread is not None:
+                self._kernel_thread.join()
+        finally:
+            self.runtime.stop()
+        if monitor_error is not None:
+            raise monitor_error

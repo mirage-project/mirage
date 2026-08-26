@@ -101,14 +101,16 @@ class ModelRunner:
     # ── Execution ─────────────────────────────────────────────────────────────
 
     def __call__(self) -> None:
-        """Launch the MPK persistent kernel.
+        """Launch the MPK kernel and block until runtime shutdown completes.
 
-        Blocks until all requests submitted to the ring buffer have been
-        processed.  Intended to run in a background thread so the main thread
-        can concurrently submit requests and poll completions via
-        :attr:`runtime`.
+        Intended to run in a background thread so the main thread can submit
+        requests and poll completions through :attr:`runtime`.
         """
         self.mpk()
+        # The split worker/scheduler launch is asynchronous. Keep this Python
+        # thread alive until both GPU streams exit so LLMEngine.close() can
+        # safely join it before stopping completion draining or freeing state.
+        self.mpk.persistent_kernel.wait()
 
     # ── Private helpers ───────────────────────────────────────────────────────
 

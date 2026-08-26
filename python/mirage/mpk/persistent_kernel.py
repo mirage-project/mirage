@@ -20,6 +20,7 @@ from typing import Optional
 
 HARD_CODE = """
 #include <Python.h>
+#include <cstdint>
 #include <cuda_runtime.h>
 #include <string>
 #include <vector>
@@ -114,9 +115,52 @@ static PyObject *launch_func(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+static PyObject *wait_func(PyObject *self, PyObject *args) {
+  cudaError_t err;
+  Py_BEGIN_ALLOW_THREADS
+  err = wait_persistent_kernel();
+  Py_END_ALLOW_THREADS
+  if (err != cudaSuccess) {
+    PyErr_Format(PyExc_RuntimeError,
+                 "persistent kernel failed: %s",
+                 cudaGetErrorString(err));
+    return NULL;
+  }
+  Py_RETURN_NONE;
+}
+
 static PyObject *finalize_func(PyObject *self, PyObject *args) {
   finalize_persistent_kernel();
 
+  Py_RETURN_NONE;
+}
+
+static PyObject *load_i32_acquire(PyObject *self, PyObject *args) {
+  PyObject *py_ptr;
+  Py_ssize_t index;
+  if (!PyArg_ParseTuple(args, "On", &py_ptr, &index)) {
+    return NULL;
+  }
+  auto *ptr = static_cast<int32_t *>(PyLong_AsVoidPtr(py_ptr));
+  if (PyErr_Occurred()) {
+    return NULL;
+  }
+  int32_t value = __atomic_load_n(ptr + index, __ATOMIC_ACQUIRE);
+  return PyLong_FromLong(value);
+}
+
+static PyObject *store_i32_release(PyObject *self, PyObject *args) {
+  PyObject *py_ptr;
+  Py_ssize_t index;
+  int value;
+  if (!PyArg_ParseTuple(args, "Oni", &py_ptr, &index, &value)) {
+    return NULL;
+  }
+  auto *ptr = static_cast<int32_t *>(PyLong_AsVoidPtr(py_ptr));
+  if (PyErr_Occurred()) {
+    return NULL;
+  }
+  __atomic_store_n(ptr + index, static_cast<int32_t>(value), __ATOMIC_RELEASE);
   Py_RETURN_NONE;
 }
 
@@ -124,7 +168,10 @@ static PyMethodDef ModuleMethods[] = {
   {"init_func", init_func, METH_VARARGS, "initialize persistent kernel"},
   {"init_request_func", init_request_func, METH_VARARGS, "initialize request resources"},
   {"launch_func", launch_func, METH_VARARGS, "launch persistent kernel"},
+  {"wait_func", wait_func, METH_NOARGS, "wait for persistent kernel"},
   {"finalize_func", finalize_func, METH_VARARGS, "finalize persistent kernel"},
+  {"load_i32_acquire", load_i32_acquire, METH_VARARGS, "acquire-load int32"},
+  {"store_i32_release", store_i32_release, METH_VARARGS, "release-store int32"},
   {NULL, NULL, 0, NULL} // sentinel
 };
 
@@ -2997,7 +3044,10 @@ class PersistentKernel:
         spec.loader.exec_module(mod)
         self.init_func = getattr(mod, "init_func")
         self.launch_func = getattr(mod, "launch_func")
+        self.wait_func = getattr(mod, "wait_func")
         self.finalize_func = getattr(mod, "finalize_func")
+        self.load_i32_acquire = getattr(mod, "load_i32_acquire")
+        self.store_i32_release = getattr(mod, "store_i32_release")
         print("Finished megakernel compilation...")
 
         expected_order = [
@@ -3120,7 +3170,12 @@ class PersistentKernel:
         self.init_func = getattr(mod, "init_func")
         self.launch_func = getattr(mod, "launch_func")
         self.init_request_func = getattr(mod, "init_request_func")
+        if self.mode == "online_pinned":
+            self.wait_func = getattr(mod, "wait_func")
         self.finalize_func = getattr(mod, "finalize_func")
+        if self.mode == "online_pinned":
+            self.load_i32_acquire = getattr(mod, "load_i32_acquire")
+            self.store_i32_release = getattr(mod, "store_i32_release")
         
         # Prepare meta tensors
         meta_tensors = list()
@@ -3214,6 +3269,10 @@ class PersistentKernel:
     def __del__(self):
         if not self.__finalized__:
             self.finalize()
+
+    def wait(self) -> None:
+        """Block until both persistent GPU streams have exited."""
+        self.wait_func()
 
     def finalize(self):
         assert not self.__finalized__
