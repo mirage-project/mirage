@@ -1366,21 +1366,12 @@ class PersistentKernel:
             assert sinks.dim(0) == num_kv_heads
             assert sinks.dim(1) == num_q_heads // num_kv_heads
         eps_bits = struct.unpack("i", struct.pack("f", qk_norm_eps))[0]
-        default_eps_bits = struct.unpack("i", struct.pack("f", 1e-6))[0]
-        stride_field = _page_stride(k_cache, v_cache)
-        tail = [q_len_override, tail_offset, rotary_dim, eps_bits,
-                window_size, has_sink, group_id, stride_field]
-        defaults = [0, 0, 0, default_eps_bits, 0, 0, 0, 0]
-        n = 0
-        for idx, (got, want) in enumerate(zip(tail, defaults)):
-            if got != want:
-                n = idx + 1
-        for allowed in (0, 2, 4, 5, 6, 7, 8):   # total sizes 6,8,10,11,12,13,14
-            if allowed >= n:
-                n = allowed
-                break
         params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
-                  self.max_seq_length, block_size] + tail[:n]
+                  self.max_seq_length, block_size,
+                  q_len_override, tail_offset, rotary_dim, eps_bits,
+                  window_size, has_sink, group_id,
+                  _page_stride(k_cache, v_cache)]
+        assert len(params) == 14
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
