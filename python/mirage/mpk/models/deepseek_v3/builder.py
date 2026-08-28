@@ -1143,6 +1143,11 @@ class DeepSeekV3Builder(GraphBuilder):
                          residual=None)
 
         # Final: moe_output = sum(routed_experts * weights) + shared_residual
+        # shared_residual is the shared expert's down_proj output, which is
+        # row-parallel: each rank holds a partial sum that the allreduce on
+        # moe_output is meant to add up. The skip connection is applied
+        # separately after that allreduce, so this residual must be added on
+        # every rank rather than only on rank 0.
         self.mpk.moe_mul_sum_add_layer(
             input=moe_down_out,
             weight=moe_topk_weights,
@@ -1150,6 +1155,7 @@ class DeepSeekV3Builder(GraphBuilder):
             output=moe_output,
             grid_dim=(self.max_num_batched_tokens, 1, 1),
             block_dim=(128, 1, 1),
+            add_residual_once=False,
         )
         self.mlp_out = moe_output
 
@@ -1631,10 +1637,13 @@ class DeepSeekV3Builder(GraphBuilder):
                          grid_dim=(self.hidden_size // 64, 1, 1),
                          block_dim=(128, 1, 1), residual=_mtp_resid)
 
+        # shared_residual is a row-parallel partial (see _build_moe_mlp); every
+        # rank must add its own so the following allreduce sums them.
         self.mpk.moe_mul_sum_add_layer(
             input=moe_down_out, weight=moe_topk_weights,
             residual=shared_residual, output=moe_output,
-            grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1))
+            grid_dim=(mbt, 1, 1), block_dim=(128, 1, 1),
+            add_residual_once=False)
         self.mlp_out = moe_output
 
     def _build_mtp_layer(self, state_dict: dict):
