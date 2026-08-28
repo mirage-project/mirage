@@ -261,6 +261,21 @@ class MPK:
             "pinned_inbox_tokens":     args.pinned_inbox_tokens,
             "pinned_rid_at_row":       args.pinned_rid_at_row,
         }
+        # KV 2.0: a migrated builder declares its streams, and the plan is what
+        # supplies kv_groups and the page-table meta tensors -- both of which
+        # PersistentKernel needs at construction, before any builder runs. A
+        # builder that has not been migrated returns None and keeps the old
+        # single-group page_size= path.
+        self.kv_plan = self._build_kv_plan(args)
+        if self.kv_plan is not None:
+            meta_tensors.update(self.kv_plan.build_meta_tensors(
+                max_seq_length=self.max_seq_length,
+                max_num_batched_requests=args.max_num_batched_requests))
+            for _legacy in ("paged_kv_indptr_buffer", "paged_kv_indices_buffer",
+                            "paged_kv_last_page_len_buffer",
+                            "paged_kv_indices_snapshot"):
+                meta_tensors.pop(_legacy, None)
+
         self.persistent_kernel = PersistentKernel(
             mode=args.mode,
             world_size=self.world_size,
@@ -271,8 +286,11 @@ class MPK:
             max_seq_length=self.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=self.max_num_batched_tokens,
-            max_num_pages=args.max_num_pages,
-            page_size=args.page_size,
+            max_num_pages=(self.kv_plan.max_num_pages if self.kv_plan is not None
+                           else args.max_num_pages),
+            page_size=None if self.kv_plan is not None else args.page_size,
+            kv_groups=(self.kv_plan.group_specs() if self.kv_plan is not None
+                       else None),
             meta_tensors=meta_tensors,
             profiler_tensor=self.profiler_tensor,
             trace_name=args.trace_name,
@@ -286,6 +304,10 @@ class MPK:
             sampling_seed=args.sampling_seed,
             sampling_topk_max=args.sampling_topk_max,
         )
+        # The builder is handed the PersistentKernel, not this object, so the
+        # plan has to live there for `self.mpk.kv_plan` to resolve.
+        self.persistent_kernel.kv_plan = self.kv_plan
+
         self.meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors.values()]
         self.profiler_buffer_ptr = (
             self.persistent_kernel.profiler_tensor.data_ptr() if self.persistent_kernel.profiler_tensor is not None else 0
@@ -295,6 +317,34 @@ class MPK:
         self.task_graph_generated = False
         self.is_compiled = False
         
+    def _build_kv_plan(self, args):
+        """Ask the registered builder for its KV streams and size the pool.
+
+        Returns None for a model that is not on the page pool yet.
+        """
+        if args.model_name is None:
+            return None
+        try:
+            builder_cls = get_builder(args.model_name)
+        except ValueError:
+            return None
+        streams_fn = getattr(builder_cls, "kv_streams", None)
+        if streams_fn is None:
+            return None
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(args.model_path or args.model_name)
+        streams = streams_fn(config, args.page_size, self.world_size)
+        if not streams:
+            return None
+        from .kv_planner import build_kv_cache
+        return build_kv_cache(
+            streams,
+            max_num_pages=args.max_num_pages,
+            max_seq_length=self.max_seq_length,
+            max_num_batched_requests=args.max_num_batched_requests,
+            max_num_batched_tokens=self.max_num_batched_tokens,
+            verbose=False)
+
     def init_mpi(self):
         try:
             from mpi4py import MPI

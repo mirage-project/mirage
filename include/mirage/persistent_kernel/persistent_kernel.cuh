@@ -713,9 +713,7 @@ __device__ __forceinline__ bool
       {
         // A full last page has (step + num_new_tokens) % bs == 0, and the
         // kernel reads seq_len = (num_pages-1)*PAGE_SIZE + last_page_len --
-        // so writing 0 there costs it one whole page of context. Offline has
-        // carried this since ce7bd8ed; the block sizes KV 2.0 derives make it
-        // fire every bs tokens instead of only on an exact 4096 boundary.
+        // so writing 0 there costs it one whole page of context.
         int _lpl = (step + num_new_tokens) % bs;
         config.paged_kv_last_page_len_buffer[g][num_reqs] =
             (_lpl == 0) ? bs : _lpl;
@@ -724,13 +722,27 @@ __device__ __forceinline__ bool
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
             smem_kv_indices[g][kv_indptr_g + j];
       }
-      // NOTE: the online path does not recycle sliding-window pages yet
       for (int j = num_old_pages_g; j < num_new_pages_g; j++) {
         MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
             config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
         page_queue_head++;
       }
+#ifndef MPK_SPEC_DECODE
+      {
+        int first_live =
+            first_live_page(step, config.kv_group_window_sizes[g], bs);
+        for (int j = 0; j < first_live && j < num_new_pages_g; j++) {
+          int page_id = config.paged_kv_indices_buffer[g][num_pages_g[g] + j];
+          if (page_id < 0) {
+            continue; // already recycled on an earlier step
+          }
+          config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
+          page_queue_tail++;
+          config.paged_kv_indices_buffer[g][num_pages_g[g] + j] = -1;
+        }
+      }
+#endif
       num_pages_g[g] += num_new_pages_g;
     }
 

@@ -51,11 +51,19 @@ class GptOssBuilder(GraphBuilder):
     a clamped-alpha SwiGLU MoE. Every projection carries a bias.
     """
 
+    # The registry looks this up before the PersistentKernel exists; see
+    # GraphBuilder.kv_streams.
+    kv_streams = staticmethod(kv_streams)
+
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None,
                  kv_plan: Optional[KVCachePlan] = None):
         super().__init__(mpk, weights)
         self.max_num_pages = mpk.max_num_pages
-        self.kv_plan = kv_plan
+        # Two callers, two sources: demo/gpt_oss/demo.py builds the plan and
+        # passes it here; through MPK the plan is built from kv_streams()
+        # before the PersistentKernel exists and arrives on it.
+        self.kv_plan = kv_plan if kv_plan is not None else getattr(
+            mpk, "kv_plan", None)
         self.world_size = mpk.world_size
         self.rank = mpk.mpi_rank
         self.input_tokens = mpk.meta_tensors["input_tokens"]

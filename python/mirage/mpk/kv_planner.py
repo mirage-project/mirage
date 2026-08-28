@@ -303,7 +303,13 @@ class KVCachePlan:
     def pages_needed(self, max_num_batched_requests: int, max_seq_length: int,
                      max_num_batched_tokens: int = 1) -> int:
         """Floor: page ids the batch holds at once in the worst case. Below
-        it the free list wraps and re-hands a live page."""
+        it the free list wraps and re-hands a live page.
+
+        Assumes a windowed group recycles, which offline and online_pinned do
+        but spec-decode does not. The planner does not know the mode, so under
+        spec-decode this floor is too low and the real check is
+        PersistentKernel._check_kv_capacity at graph-build time -- same
+        arithmetic, mode-aware, later error."""
         return max_num_batched_requests * sum(
             pages_per_request(g.block_size, g.window_size, max_seq_length,
                               max_num_batched_tokens)
@@ -332,6 +338,13 @@ class KVCachePlan:
                 span, dtype=dtype, device=device)
             out[f"paged_kv_last_page_len_buffer_{g_id}"] = torch.zeros(
                 max_num_batched_requests, dtype=dtype, device=device)
+            # In-place compaction snapshots the index buffer, so it needs the
+            # same span. PersistentKernel fills these in when they are absent,
+            # but not in online_pinned mode, which allocates nothing itself --
+            # and the span formula it would use is this one, so compute it
+            # once here rather than keeping two copies in step.
+            out[f"paged_kv_indices_snapshot_{g_id}"] = torch.zeros(
+                span, dtype=dtype, device=device)
         return out
 
     # ── explaining the plan ───────────────────────────────────────────────

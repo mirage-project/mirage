@@ -576,8 +576,13 @@ class PersistentKernel:
         at worst-case demand."""
         from .kv_planner import pages_per_request
 
-        # Only the offline scheduler returns pages fallen out of a window.
-        recycles = self.mode == "offline" and not _spec_decode_enabled(self)
+        # Which schedulers return pages that have fallen out of a window.
+        # Kept in step with the #ifndef MPK_SPEC_DECODE guards around the
+        # reclaim blocks in persistent_kernel.cuh: offline and online_pinned
+        # both recycle; spec-decode does not, because TAIL_OFFSET moves the
+        # boundary first_live_page reproduces.
+        recycles = (self.mode in ("offline", "online_pinned")
+                    and not _spec_decode_enabled(self))
         per_group = [
             pages_per_request(g.block_size,
                               g.window_size if recycles else 0,

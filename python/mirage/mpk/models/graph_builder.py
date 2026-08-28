@@ -46,6 +46,18 @@ class GraphBuilder(abc.ABC):
         self.mpk = mpk
         self.weights = weights or {}
 
+    @staticmethod
+    def kv_streams(config, page_size: int, world_size: int = 1):
+        """This model's KV streams, or None if it is not on the page pool yet.
+
+        Called BEFORE the PersistentKernel exists, because the plan supplies
+        its kv_groups and the page-table meta tensors. A builder that returns
+        None keeps the old single-group `page_size=` path and hand-rolls its
+        own caches; migrating one means overriding this and reaching the
+        caches through `self.mpk.kv_plan.attach(self.mpk, layer)`.
+        """
+        return None
+
     @abc.abstractmethod
     def build_from_model(self, model_path: str | None = None):
         raise NotImplementedError("build_from_model is not implemented")

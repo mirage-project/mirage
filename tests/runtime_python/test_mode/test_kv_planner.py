@@ -448,7 +448,13 @@ def test_build_meta_tensors():
         f"paged_kv_{field}_buffer_{g}"
         for g in range(2)
         for field in ("indptr", "indices", "last_page_len")
-    }
+    } | {f"paged_kv_indices_snapshot_{g}" for g in range(2)}
+    # the snapshot is compaction's scratch copy of the index buffer, so it
+    # must match it exactly -- PersistentKernel does not size it in
+    # online_pinned mode, which allocates nothing of its own
+    for g in range(2):
+        assert (meta[f"paged_kv_indices_snapshot_{g}"].shape
+                == meta[f"paged_kv_indices_buffer_{g}"].shape)
     for g in range(2):
         assert meta[f"paged_kv_indptr_buffer_{g}"].shape == (5,)
         assert meta[f"paged_kv_last_page_len_buffer_{g}"].shape == (4,)
