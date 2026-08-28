@@ -447,8 +447,8 @@ class Qwen3Model(Qwen3PreTrainedModel):
             verbose=False)
         self.kv_plan = kv_plan
         (group_id,) = {g.group_id for g in kv_plan.groups}
-        # Kept as a plain tuple: demo_chat / demo_hopper / demo_sampling /
-        # demo_kernel_reuse still attach these by hand.
+        # For the eager PyTorch path only: Qwen3Attention writes
+        # key_cache[layer, 0, step] directly.
         views = kv_plan.views(group_id)
         self.kv_cache = (views["k"], views["v"])
         self.embed_tokens = nn.Embedding(

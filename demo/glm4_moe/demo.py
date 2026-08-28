@@ -202,12 +202,19 @@ def main():
                                 dtype=torch.int32, device="cuda")
     qo_indptr_buffer = torch.empty(args.max_num_batched_requests + 1,
                                    dtype=torch.int32, device="cuda")
-    paged_kv_indptr_buffer = torch.empty(args.max_num_batched_requests + 1,
-                                         dtype=torch.int32, device="cuda")
-    paged_kv_indices_buffer = torch.empty(args.max_num_pages,
-                                          dtype=torch.int32, device="cuda")
-    paged_kv_last_page_len_buffer = torch.empty(args.max_num_batched_requests,
-                                                dtype=torch.int32, device="cuda")
+    from mirage.mpk.kv_planner import build_kv_cache
+    from mirage.mpk.models.glm4_moe.builder import kv_streams
+    from transformers import AutoConfig
+    try:
+        kv_plan = build_kv_cache(
+            kv_streams(AutoConfig.from_pretrained(args.model_path or args.model),
+                       args.page_size),
+            max_num_pages=args.max_num_pages,
+            max_seq_length=args.max_seq_length,
+            max_num_batched_requests=args.max_num_batched_requests,
+            max_num_batched_tokens=args.max_num_batched_tokens)
+    except ValueError as e:
+        raise SystemExit(str(e))
 
     profiler_tensor = (torch.zeros(3000 * 128, dtype=torch.uint64, device="cuda")
                        if args.profiling else None)
@@ -223,8 +230,8 @@ def main():
         max_seq_length=args.max_seq_length,
         max_num_batched_requests=args.max_num_batched_requests,
         max_num_batched_tokens=args.max_num_batched_tokens,
-        max_num_pages=args.max_num_pages,
-        page_size=args.page_size,
+        max_num_pages=kv_plan.max_num_pages,
+        kv_groups=kv_plan.group_specs(),
         eos_token_id=-1 if args.ignore_eos else eos_token_id,
         meta_tensors={
             "step": step,
@@ -234,9 +241,9 @@ def main():
             "num_new_tokens": num_new_tokens,
             "prompt_lengths": prompt_lengths,
             "qo_indptr_buffer": qo_indptr_buffer,
-            "paged_kv_indptr_buffer": paged_kv_indptr_buffer,
-            "paged_kv_indices_buffer": paged_kv_indices_buffer,
-            "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
+            **kv_plan.build_meta_tensors(
+                max_seq_length=args.max_seq_length,
+                max_num_batched_requests=args.max_num_batched_requests),
         },
         profiler_tensor=profiler_tensor,
         trace_name=(f"{args.trace_name}_rank0" if args.trace_name else ""),
@@ -245,6 +252,7 @@ def main():
     print(f"Loading GLM-4.6 weights from: {args.model_path}")
     state_dict = load_state_dict(args.model_path, layers, num_layers)
 
+    mpk.kv_plan = kv_plan
     builder = Glm4MoeBuilder(mpk)
     builder.build_from_dict(state_dict, with_lm_head=True)
 

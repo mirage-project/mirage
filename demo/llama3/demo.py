@@ -83,19 +83,26 @@ def setup_env():
 
 def load_model_and_tokenizer(args, world_size, rank):
     model_name = args.model
+    kv_sizing = dict(kv_budget=getattr(args, "kv_budget", None),
+                     max_seq_length=args.max_seq_length,
+                     max_num_batched_requests=args.max_num_batched_requests,
+                     max_num_batched_tokens=args.max_num_batched_tokens)
     
     with torch.device("cuda"):
         if args.model_path is not None:
             # Load model locally (necessary for multi-GPU case)
             print(f"Load model from model path: {args.model_path}")
             config = AutoConfig.from_pretrained(args.model_path)
-            model = Llama3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
+            model = Llama3ForCausalLM(config, world_size, args.max_num_pages,
+                                      args.page_size, **kv_sizing)
             load_model(
                 model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
             )
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
         else:
-            model = Llama3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+            model = Llama3ForCausalLM.from_pretrained(
+                model_name, world_size, max_num_pages=args.max_num_pages,
+                page_size=args.page_size, **kv_sizing).to("cuda")
 
             tokenizer = AutoTokenizer.from_pretrained(model_name)
     
@@ -255,7 +262,8 @@ def setup_mirage_configuration(model, args, world_size, rank):
     }
 
 
-def create_persistent_kernel(args, world_size, rank, input_data, config, eos_token_id_for_mirage):
+def create_persistent_kernel(args, world_size, rank, input_data, config,
+                             eos_token_id_for_mirage, kv_plan):
     import mirage as mi
 
     if args.profiling:
@@ -276,12 +284,6 @@ def create_persistent_kernel(args, world_size, rank, input_data, config, eos_tok
     # Create auxiliary buffers for paged KV and QO
     qo_indptr_buffer = torch.empty(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-    paged_kv_indptr_buffer = torch.empty(
-        args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-    paged_kv_indices_buffer = torch.empty(
-        args.max_num_pages, dtype=torch.int32, device="cuda")
-    paged_kv_last_page_len_buffer = torch.empty(
-        args.max_num_batched_requests, dtype=torch.int32, device="cuda")
 
     # Get GPU configurations
     num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
@@ -297,8 +299,8 @@ def create_persistent_kernel(args, world_size, rank, input_data, config, eos_tok
         max_seq_length=args.max_seq_length,
         max_num_batched_requests=args.max_num_batched_requests,
         max_num_batched_tokens=args.max_num_batched_tokens,
-        max_num_pages=args.max_num_pages,
-        page_size=args.page_size,
+        max_num_pages=kv_plan.max_num_pages,
+        kv_groups=kv_plan.group_specs(),
         eos_token_id=eos_token_id_for_mirage,
         meta_tensors={
                 "step": input_data['step'],
@@ -308,9 +310,9 @@ def create_persistent_kernel(args, world_size, rank, input_data, config, eos_tok
                 "num_new_tokens": input_data['num_new_tokens'],
                 "prompt_lengths": input_data['prompt_lengths'],
                 "qo_indptr_buffer": qo_indptr_buffer,
-                "paged_kv_indptr_buffer": paged_kv_indptr_buffer,
-                "paged_kv_indices_buffer": paged_kv_indices_buffer,
-                "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
+                **kv_plan.build_meta_tensors(
+                    max_seq_length=args.max_seq_length,
+                    max_num_batched_requests=args.max_num_batched_requests),
             },
         profiler_tensor=profiler_tensor,
         trace_name=args.trace_name,
@@ -533,15 +535,8 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
     )
     
     # 2. Attention computation (Llama3 doesn't use q_norm/k_norm)
-    k_cache = mpk.attach_input(
-        torch_tensor=model.model.kv_cache[0][layer_idx], 
-        name=f"layer_{layer_idx}_k_cache"
-    )
-    v_cache = mpk.attach_input(
-        torch_tensor=model.model.kv_cache[1][layer_idx], 
-        name=f"layer_{layer_idx}_v_cache"
-    )
-    
+    kv = model.model.kv_plan.attach(mpk, layer_idx)
+    k_cache, v_cache = kv["k_cache"], kv["v_cache"]    
     attn_out_block_dim = get_block_dim()
     if spec_decode_config:
         mpk.single_batch_extend_attention_layer(
@@ -754,8 +749,7 @@ def build_mirage_graph(model, args, world_size, rank, input_data, eos_token_id_f
     
     # Create persistent kernel
     mpk, spec_decode_config = create_persistent_kernel(
-        args, world_size, rank, input_data, config, eos_token_id_for_mirage
-    )
+        args, world_size, rank, input_data, config, eos_token_id_for_mirage, model.model.kv_plan)
     
     # Handle speculative decoding token input if needed
     spec_tokens = None

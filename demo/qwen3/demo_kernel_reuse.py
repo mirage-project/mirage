@@ -249,12 +249,8 @@ def build_mpk_graph(
         w_k_norm = mpk.attach_input(
             torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm"
         )
-        k_cache = mpk.attach_input(
-            torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache"
-        )
-        v_cache = mpk.attach_input(
-            torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
-        )
+        kv = model.model.kv_plan.attach(mpk, i)
+        k_cache, v_cache = kv["k_cache"], kv["v_cache"]
         
         mpk.paged_attention_layer(
             input=attn_in,
@@ -407,6 +403,9 @@ def create_mpk(model, args, world_size, rank, meta_tensors):
     """Create a PersistentKernel instance."""
     import mirage as mi
     
+    # The model owns the KV pool; attach() is the only way to a layer's
+    # view of it, and it folds in the pool-identity check.
+    kv_plan = model.model.kv_plan
     num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
     
     mpk = mi.PersistentKernel(
@@ -419,8 +418,8 @@ def create_mpk(model, args, world_size, rank, meta_tensors):
         max_seq_length=args.max_seq_length,
         max_num_batched_requests=args.max_num_batched_requests,
         max_num_batched_tokens=args.max_num_batched_tokens,
-        max_num_pages=args.max_num_pages,
-        page_size=args.page_size,
+        max_num_pages=kv_plan.max_num_pages,
+        kv_groups=kv_plan.group_specs(),
         eos_token_id=model.config.eos_token_id,
         meta_tensors=meta_tensors,
         profiler_tensor=None,
@@ -489,6 +488,7 @@ def main():
             model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
             load_model(model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors")
             tokenizer = AutoTokenizer.from_pretrained(args.model_path)
+
         else:
             model = Qwen3ForCausalLM.from_pretrained(
                 args.model, world_size, 
@@ -496,6 +496,10 @@ def main():
                 page_size=args.page_size
             ).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(args.model)
+
+    # The model owns the KV pool; every page-table buffer below comes from
+    # its plan, so they cannot drift apart.
+    kv_plan = model.model.kv_plan
     print("Model loaded.")
 
     # Prepare tensors
@@ -517,9 +521,6 @@ def main():
     num_new_tokens = torch.full((total_num_requests,), 1, dtype=torch.int32, device="cuda")
     prompt_lengths = torch.full((total_num_requests,), 0, dtype=torch.int32, device="cuda")
     qo_indptr_buffer = torch.empty(args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-    paged_kv_indptr_buffer = torch.empty(args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-    paged_kv_indices_buffer = torch.empty(args.max_num_pages, dtype=torch.int32, device="cuda")
-    paged_kv_last_page_len_buffer = torch.empty(args.max_num_batched_requests, dtype=torch.int32, device="cuda")
 
     meta_tensors = {
         "step": step,
@@ -529,9 +530,11 @@ def main():
         "num_new_tokens": num_new_tokens,
         "prompt_lengths": prompt_lengths,
         "qo_indptr_buffer": qo_indptr_buffer,
-        "paged_kv_indptr_buffer": paged_kv_indptr_buffer,
-        "paged_kv_indices_buffer": paged_kv_indices_buffer,
-        "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
+        # Page tables come from the plan, so the block size, the cache
+        # shape and these buffers cannot drift apart.
+        **kv_plan.build_meta_tensors(
+            max_seq_length=args.max_seq_length,
+            max_num_batched_requests=args.max_num_batched_requests),
     }
 
     # Clean output directory
@@ -577,8 +580,9 @@ def main():
     del mpk1
     
     # Reset KV caches
-    model.model.kv_cache[0].zero_()
-    model.model.kv_cache[1].zero_()
+    # One pool holds every layer's K and V, so zero it once rather than
+    # reaching for the two views.
+    model.model.kv_plan.zero_()
     
     # ========================================
     # PHASE 2: Load pre-compiled kernel
@@ -637,9 +641,11 @@ def main():
         "num_new_tokens": torch.full((args_mismatch.max_num_batched_requests,), 1, dtype=torch.int32, device="cuda"),
         "prompt_lengths": torch.full((args_mismatch.max_num_batched_requests,), 0, dtype=torch.int32, device="cuda"),
         "qo_indptr_buffer": torch.empty(args_mismatch.max_num_batched_requests + 1, dtype=torch.int32, device="cuda"),
-        "paged_kv_indptr_buffer": torch.empty(args_mismatch.max_num_batched_requests + 1, dtype=torch.int32, device="cuda"),
-        "paged_kv_indices_buffer": paged_kv_indices_buffer,
-        "paged_kv_last_page_len_buffer": torch.empty(args_mismatch.max_num_batched_requests, dtype=torch.int32, device="cuda"),
+        # Deliberately sized for the WRONG request count -- that is what this
+        # negative test is proving the compatibility check catches.
+        **kv_plan.build_meta_tensors(
+            max_seq_length=args.max_seq_length,
+            max_num_batched_requests=args_mismatch.max_num_batched_requests),
     }
     
     try:

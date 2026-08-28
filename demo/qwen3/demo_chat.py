@@ -85,6 +85,9 @@ def build_mirage_graph(model, world_size, rank, args, tokens_tensor, step_tensor
     )
 
     # --- Persistent Kernel Setup ---
+    # The model owns the KV pool; attach() is the only way to a layer's
+    # view of it, and it folds in the pool-identity check.
+    kv_plan = model.model.kv_plan
     mpk = mi.PersistentKernel(
         world_size=world_size,
         mpi_rank=rank,
@@ -145,8 +148,8 @@ def build_mirage_graph(model, world_size, rank, args, tokens_tensor, step_tensor
 
         w_q_norm = mpk.attach_input(torch_tensor=layer.self_attn.q_norm.weight, name=f"layer_{i}_q_norm")
         w_k_norm = mpk.attach_input(torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm")
-        k_cache = mpk.attach_input(torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache")
-        v_cache = mpk.attach_input(torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache")
+        kv = kv_plan.attach(mpk, i)
+        k_cache, v_cache = kv["k_cache"], kv["v_cache"]
         mpk.attention_layer(input=attn_in, q_norm=w_q_norm, k_norm=w_k_norm, k_cache=k_cache, v_cache=v_cache, cos_pos_embed=cos_pos_embed, sin_pos_embed=sin_pos_embed, output=attn_out, grid_dim=(batch_size, num_local_kv_heads, 1), block_dim=(128, 1, 1))
 
         w_o_proj = mpk.attach_input(torch_tensor=layer.self_attn.o_proj.weight, name=f"layer_{i}_o_proj")

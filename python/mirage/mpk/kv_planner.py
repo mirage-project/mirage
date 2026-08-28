@@ -417,11 +417,23 @@ class KVCachePlan:
             self._layouts, max_num_pages, device)
         return self
 
+    def zero_(self):
+        """Clear the whole cache. One allocation backs every group and slot,
+        so this is one memset rather than a walk over the views."""
+        if self._pool is None:
+            raise RuntimeError("materialize() has not run on this plan")
+        self._pool.zero_()
+        return self
+
     def views(self, group_id: int):
         """{component: (slots, pages, page size, *entry shape)} for one group.
 
-        The escape hatch for callers that still attach by hand. attach() is
-        the one that folds in the pool-identity check -- prefer it."""
+        For code that indexes the cache directly rather than handing it to the
+        megakernel -- demo/qwen3's eager PyTorch reference writes
+        key_cache[layer, 0, step] itself, and needs the tensors, not an
+        attachment. Anything feeding a paged-attention task wants attach()
+        instead, which resolves the slot and checks the view is still on the
+        pool."""
         if self._views is None:
             raise RuntimeError("materialize() has not run on this plan")
         return self._views[group_id]

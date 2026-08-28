@@ -184,29 +184,22 @@ if __name__ == "__main__":
     dummy_x_for_device = torch.empty(1, dtype=torch.bfloat16, device=model.device)
     position_embeddings = model.model.rotary_emb(dummy_x_for_device, positions)
     
-    # kv_cache tensors
-    key_cache_torch = torch.empty(
-        (
-            model.config.num_hidden_layers,
-            args.max_num_pages,
-            args.page_size,
-            model.config.num_key_value_heads // world_size,
-            model.config.head_dim,
-        ),
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    value_cache_torch = torch.empty(
-        (
-            model.config.num_hidden_layers,
-            args.max_num_pages,
-            args.page_size,
-            model.config.num_key_value_heads // world_size,
-            model.config.head_dim,
-        ),
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
+    from mirage.mpk.kv_planner import KVStream, build_kv_cache
+    _kv_entry = (model.config.num_key_value_heads // world_size,
+                 model.config.head_dim)
+    try:
+        kv_plan = build_kv_cache(
+            [KVStream("attention",
+                      layers=tuple(range(model.config.num_hidden_layers)),
+                      components=[("k", _kv_entry, torch.bfloat16),
+                                  ("v", _kv_entry, torch.bfloat16)],
+                      preferred_block_size=args.page_size)],
+            max_num_pages=args.max_num_pages,
+            max_seq_length=args.max_seq_length,
+            max_num_batched_requests=args.max_num_batched_requests,
+            max_num_batched_tokens=args.max_num_batched_tokens)
+    except ValueError as e:
+        raise SystemExit(str(e))
 
     # get all model weight tensors
     input_tokens = torch.full((args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
@@ -262,12 +255,6 @@ if __name__ == "__main__":
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
         qo_indptr_buffer = torch.empty(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        paged_kv_indptr_buffer = torch.empty(
-            args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        paged_kv_indices_buffer = torch.empty(
-            args.max_num_pages, dtype=torch.int32, device="cuda")
-        paged_kv_last_page_len_buffer = torch.empty(
-            args.max_num_batched_requests, dtype=torch.int32, device="cuda")
         mpk = mi.PersistentKernel(
             mode="offline",
             world_size=world_size,
@@ -278,8 +265,8 @@ if __name__ == "__main__":
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
-            max_num_pages=args.max_num_pages,
-            page_size=args.page_size,
+            max_num_pages=kv_plan.max_num_pages,
+            kv_groups=kv_plan.group_specs(),
             eos_token_id=model.config.eos_token_id if not args.ignore_eos else -1,
             meta_tensors={
                 "step": step,
@@ -289,9 +276,9 @@ if __name__ == "__main__":
                 "num_new_tokens": num_new_tokens,
                 "prompt_lengths": prompt_lengths,
                 "qo_indptr_buffer": qo_indptr_buffer,
-                "paged_kv_indptr_buffer": paged_kv_indptr_buffer,
-                "paged_kv_indices_buffer": paged_kv_indices_buffer,
-                "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
+                **kv_plan.build_meta_tensors(
+                    max_seq_length=args.max_seq_length,
+                    max_num_batched_requests=args.max_num_batched_requests),
             },
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
@@ -543,12 +530,8 @@ if __name__ == "__main__":
             w_k_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm"
             )
-            k_cache = mpk.attach_input(
-                torch_tensor=key_cache_torch[i], name=f"layer_{i}_k_cache"
-            )
-            v_cache = mpk.attach_input(
-                torch_tensor=value_cache_torch[i], name=f"layer_{i}_v_cache"
-            )
+            kv = kv_plan.attach(mpk, i)
+            k_cache, v_cache = kv["k_cache"], kv["v_cache"]
             # TODO: Later attention kernels should be merged as one
             if spec_decode_config:
                 mpk.single_batch_extend_attention_layer(
