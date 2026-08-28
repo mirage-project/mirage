@@ -710,8 +710,16 @@ __device__ __forceinline__ bool
           config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
       config.paged_kv_indptr_buffer[g][num_reqs] = num_pages_g[g];
       int num_new_pages_g = (step + num_new_tokens + bs - 1) / bs;
-      config.paged_kv_last_page_len_buffer[g][num_reqs] =
-          (step + num_new_tokens) % bs;
+      {
+        // A full last page has (step + num_new_tokens) % bs == 0, and the
+        // kernel reads seq_len = (num_pages-1)*PAGE_SIZE + last_page_len --
+        // so writing 0 there costs it one whole page of context. Offline has
+        // carried this since ce7bd8ed; the block sizes KV 2.0 derives make it
+        // fire every bs tokens instead of only on an exact 4096 boundary.
+        int _lpl = (step + num_new_tokens) % bs;
+        config.paged_kv_last_page_len_buffer[g][num_reqs] =
+            (_lpl == 0) ? bs : _lpl;
+      }
       for (int j = 0; j < num_old_pages_g; j++) {
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
             smem_kv_indices[g][kv_indptr_g + j];
@@ -781,8 +789,11 @@ __device__ __forceinline__ bool
       int bs = config.kv_group_block_sizes[g];
       config.paged_kv_indptr_buffer[g][num_reqs] = num_pages_g[g];
       int num_new_pages_g = (initial_step + num_new_tokens + bs - 1) / bs;
-      config.paged_kv_last_page_len_buffer[g][num_reqs] =
-          (initial_step + num_new_tokens) % bs;
+      {
+        int _lpl = (initial_step + num_new_tokens) % bs;
+        config.paged_kv_last_page_len_buffer[g][num_reqs] =
+            (_lpl == 0) ? bs : _lpl;
+      }
       for (int j = 0; j < num_new_pages_g; j++) {
         MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
