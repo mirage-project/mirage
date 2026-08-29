@@ -20,7 +20,7 @@ Usage:
     group_id, slot_id = plan.layer_info(layer_id)
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from functools import reduce
 from math import gcd
 from typing import Optional, Sequence, Tuple
@@ -102,6 +102,71 @@ class KVStream:
                       preferred_block_size=self.preferred_block_size)
 
 
+def _hashable(v):
+    """A dict key from a declared field, whether it came in as a list or a
+    tuple. ``components`` is routinely a list, and shapes inside it tuples."""
+    if isinstance(v, (list, tuple)):
+        return tuple(_hashable(x) for x in v)
+    return v
+
+
+def _merge_identical_streams(streams):
+    """Fold streams that would lay a page out identically into one stream.
+
+    A group IS a page table: a block size, a window, and one page geometry.
+    Two streams that agree on all of that want the same page table, and
+    keeping them apart only costs -- the pool carries ONE slot count for every
+    group, so a stream with very few layers drags that count down for
+    everyone. DeepSeek-V3 declared as 61 attention layers plus 1 MTP layer is
+    the case: gcd(61, 1) is 1, so _group_size returns 1 and the plan becomes
+    62 single-slot groups instead of one group of 62.
+
+    So a model declares by MEANING (attention and MTP are different modules)
+    and the planner groups by LAYOUT -- which is what vLLM's
+    get_kv_cache_groups does, dispatching on the specs with no notion of a
+    stream at all. Its uniform-spec path puts DeepSeek-V3's main layers and
+    its MTP layer in a single group for the same reason.
+
+    The key is every KVStream field but ``name`` and ``layers``, read off the
+    dataclass so that a field added later is included by default. That is the
+    safe direction: a key that misses a field fuses streams that are not
+    actually alike, and no assert downstream would catch it.
+
+    ``components`` must be in the key, which is why this runs here on streams
+    rather than in ``plan_kv_groups``: KVSpec keeps only ``per_entry_bytes``,
+    and two streams can agree on that while laying the page out differently
+    (one 8-head K entry against a 4-head K/V pair are both 2048 bytes). The
+    component layout is what ``attach`` reads back per layer, so fusing those
+    would hand a layer a view of the wrong shape.
+
+    Layers of a merged stream are sorted, so the layer-to-slot mapping does
+    not depend on declaration order. A stream that is not merged is returned
+    untouched.
+    """
+    key_fields = [f.name for f in fields(KVStream)
+                  if f.name not in ("name", "layers")]
+    order, folded = [], {}
+    for s in streams:
+        key = tuple(_hashable(getattr(s, f)) for f in key_fields)
+        if key not in folded:
+            order.append(key)
+            folded[key] = [s, [], []]
+        folded[key][1].append(s.name)
+        folded[key][2].extend(s.layers)
+
+    out = []
+    for key in order:
+        exemplar, names, layers = folded[key]
+        if len(names) == 1:
+            out.append(exemplar)
+            continue
+        # Duplicate layer ids across the merged streams would be a model bug;
+        # KVSpec.__post_init__ rejects them under the merged name.
+        out.append(replace(exemplar, name="+".join(names),
+                           layers=tuple(sorted(layers))))
+    return out
+
+
 def build_kv_cache(streams, *,
                    kv_budget=None,
                    max_num_pages: Optional[int] = None,
@@ -125,7 +190,7 @@ def build_kv_cache(streams, *,
     pool-identity check, and the component layout is stated once -- in the
     stream -- rather than restated at allocation time.
     """
-    streams = list(streams)
+    streams = _merge_identical_streams(list(streams))
     plan = plan_kv_groups([s._spec() for s in streams], **plan_kwargs)
     plan._layouts = {s.name: list(s.components) for s in streams}
     if kv_budget is not None and max_seq_length is None:

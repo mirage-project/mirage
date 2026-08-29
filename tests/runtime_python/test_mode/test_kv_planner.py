@@ -6,6 +6,9 @@ from contextlib import contextmanager
 
 import torch
 
+from mirage.mpk.models.gpt_oss.builder import (
+    kv_streams as kv_streams_gpt_oss,
+)
 from mirage.mpk.kv_planner import (
     KVEventLog,
     KVSpec,
@@ -14,6 +17,7 @@ from mirage.mpk.kv_planner import (
     pages_per_request,
     plan_kv_groups,
     build_kv_cache,
+    _merge_identical_streams,
     _resolve_pool_size,
 )
 
@@ -46,9 +50,8 @@ class _GptOssCfg:
 def _gpt_oss_plan(page_size):
     """The real model's streams, planned but not allocated -- these tests are
     about page geometry, not about owning a pool."""
-    from mirage.mpk.models.gpt_oss.builder import kv_streams
     return plan_kv_groups([s._spec() for s in
-                           kv_streams(_GptOssCfg(), page_size=page_size)])
+                           kv_streams_gpt_oss(_GptOssCfg(), page_size=page_size)])
 
 
 def test_four_streams_at_mixed_compression_share_one_page():
@@ -712,3 +715,121 @@ def test_resolve_pool_size_skips_the_floor_check_without_a_length():
     with _free_memory(64 << 30):
         assert _resolve_pool_size(plan, max_num_pages=tiny,
                                   verbose=False) == tiny
+
+
+# ── merging streams that lay a page out identically ────────────────────────
+
+
+def _dsv3_shaped_streams():
+    """DeepSeek-V3's shape: 61 attention layers and 1 MTP layer. MTP is a
+    speculative draft module built from a plain DeepseekV2DecoderLayer, so its
+    KV is the same thing per token as the main layers' -- which is why vLLM's
+    uniform-spec path puts all 62 in one group."""
+    entry = [("kv", (1, 576), torch.bfloat16)]     # MLA: 512 latent + 64 rope
+    return [
+        KVStream("attention", layers=tuple(range(61)), components=entry,
+                 preferred_block_size=64),
+        KVStream("mtp", layers=(61,), components=entry,
+                 preferred_block_size=64),
+    ]
+
+
+def test_identical_streams_merge_into_one_group():
+    """Declared as two streams, _group_size sees counts [61, 1]: gcd is 1, so
+    it returns 1 and the plan is 62 single-slot groups. Merged first, it sees
+    [62] and returns 62 -- one group, no padding."""
+    unmerged = plan_kv_groups([s._spec() for s in _dsv3_shaped_streams()])
+    assert len(unmerged.groups) == 62 and unmerged.num_slots == 1
+
+    merged = _merge_identical_streams(_dsv3_shaped_streams())
+    assert [s.name for s in merged] == ["attention+mtp"]
+    plan = plan_kv_groups([s._spec() for s in merged])
+    assert len(plan.groups) == 1 and plan.num_slots == 62
+    # Every layer still resolves, and to a distinct slot.
+    slots = [plan._layer_info(i) for i in range(62)]
+    assert sorted(s for _, s in slots) == list(range(62))
+    assert {g for g, _ in slots} == {0}
+
+
+def test_merged_stream_sorts_its_layers():
+    """Slot assignment must not depend on which stream was declared first."""
+    a, b = _dsv3_shaped_streams()
+    forward = _merge_identical_streams([a, b])[0].layers
+    backward = _merge_identical_streams([b, a])[0].layers
+    assert forward == backward == tuple(range(62))
+
+
+def test_gpt_oss_streams_do_not_merge():
+    """The counter-example that keeps the merge honest: gpt-oss's two streams
+    agree on everything but the window, and a window is what a group recycles
+    against. Fusing them would give the full-attention layers a windowed page
+    table and free pages still being read."""
+    streams = kv_streams_gpt_oss(_GptOssCfg(), page_size=64)
+    assert len(_merge_identical_streams(streams)) == 2
+    plan = plan_kv_groups([s._spec() for s in _merge_identical_streams(streams)])
+    assert len(plan.groups) == 2 and plan.num_slots == 12
+
+
+def test_equal_byte_size_is_not_equal_layout():
+    """Both of these are 1024 bytes per entry, and merging them would hand a
+    layer a view of the wrong shape. This is why the merge runs on KVStream
+    and not inside plan_kv_groups, which sees only per_entry_bytes."""
+    one = KVStream("one", layers=(0,), preferred_block_size=64,
+                   components=[("k", (8, 64), torch.bfloat16)])
+    two = KVStream("two", layers=(1,), preferred_block_size=64,
+                   components=[("k", (4, 64), torch.bfloat16),
+                               ("v", (4, 64), torch.bfloat16)])
+    assert one.per_entry_bytes == two.per_entry_bytes == 1024
+    assert len(_merge_identical_streams([one, two])) == 2
+
+
+def test_merge_key_covers_every_declared_field():
+    """Two streams differing in ANY declared field must stay apart. The table
+    is asserted to cover every field of KVStream, so adding a field to the
+    dataclass fails here until it is given a value to differ by -- a key that
+    silently missed a field would fuse streams that are not alike, and nothing
+    downstream would catch it."""
+    from dataclasses import fields as _fields
+
+    base = dict(components=[("k", (4, 64), torch.bfloat16)], window=0,
+                compress_ratio=1, block_size_multiple_of=None,
+                preferred_block_size=64)
+    others = dict(components=[("k", (8, 64), torch.bfloat16)], window=128,
+                  compress_ratio=2, block_size_multiple_of=64,
+                  preferred_block_size=128)
+
+    declared = {f.name for f in _fields(KVStream)} - {"name", "layers"}
+    assert declared == set(base) == set(others), (
+        f"KVStream fields {sorted(declared)} are not all covered by this "
+        f"test's table {sorted(base)}")
+
+    for field, other in others.items():
+        a = KVStream("a", layers=(0,), **base)
+        b = KVStream("b", layers=(1,), **{**base, field: other})
+        assert len(_merge_identical_streams([a, b])) == 2, (
+            f"streams differing only in {field!r} were merged")
+
+    # ...and two that differ in nothing but name and layers do merge, so the
+    # loop above is not passing because merging is broken outright.
+    a = KVStream("a", layers=(0,), **base)
+    b = KVStream("b", layers=(1,), **base)
+    assert len(_merge_identical_streams([a, b])) == 1
+
+
+def test_merged_stream_allocates_and_every_layer_gets_its_view():
+    """The integration risk of merging: the group's spec_name becomes the
+    merged name, and _layouts is keyed by stream name. If those stopped
+    lining up it would surface only here, at allocation."""
+    plan = build_kv_cache(_dsv3_shaped_streams(), max_num_pages=4,
+                          device="cpu", verbose=False)
+    assert plan.groups[0].spec_name == "attention+mtp"
+    for layer in range(62):
+        group_id, slot = plan._layer_info(layer)
+        view = plan._views[group_id]["kv"][slot]
+        assert tuple(view.shape[2:]) == (1, 576)
+        assert view.dtype == torch.bfloat16
+    # Distinct layers must not alias each other.
+    a = plan._views[0]["kv"][plan._layer_info(0)[1]]
+    b = plan._views[0]["kv"][plan._layer_info(61)[1]]
+    a.fill_(1.0); b.fill_(2.0)
+    assert a.flatten()[0].item() == 1.0 and b.flatten()[0].item() == 2.0
