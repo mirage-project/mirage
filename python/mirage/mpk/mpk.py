@@ -24,6 +24,7 @@ class MPKMetadata:
     max_num_batched_tokens: int = 0
     max_num_pages: int = 0
     page_size: int = 0
+    kv_budget: Optional[str] = None
     max_sm_num: int = 108
     device: str = "cuda"
     # model 
@@ -275,6 +276,20 @@ class MPK:
                             "paged_kv_last_page_len_buffer",
                             "paged_kv_indices_snapshot"):
                 meta_tensors.pop(_legacy, None)
+        else:
+            # No plan: the KV 1.0 single-group page table. Fill in whatever the
+            # caller did not pass, because this is the only place that knows a
+            # plan did not happen -- online_pinned allocates nothing of its own
+            # and PersistentKernel skips its snapshot fallback in that mode, so
+            # a missing buffer surfaces as a None in meta_tensors_ptr.
+            _n = args.max_num_batched_requests
+            for _key, _len in (("paged_kv_indptr_buffer", _n + 1),
+                               ("paged_kv_indices_buffer", args.max_num_pages),
+                               ("paged_kv_last_page_len_buffer", _n),
+                               ("paged_kv_indices_snapshot", args.max_num_pages)):
+                if meta_tensors.get(_key) is None:
+                    meta_tensors[_key] = torch.zeros(_len, dtype=torch.int32,
+                                                     device="cuda")
 
         self.persistent_kernel = PersistentKernel(
             mode=args.mode,
@@ -308,6 +323,7 @@ class MPK:
         # plan has to live there for `self.mpk.kv_plan` to resolve.
         self.persistent_kernel.kv_plan = self.kv_plan
 
+        self.meta_tensors = meta_tensors
         self.meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors.values()]
         self.profiler_buffer_ptr = (
             self.persistent_kernel.profiler_tensor.data_ptr() if self.persistent_kernel.profiler_tensor is not None else 0
@@ -333,13 +349,19 @@ class MPK:
             return None
         from transformers import AutoConfig
         config = AutoConfig.from_pretrained(args.model_path or args.model_name)
-        streams = streams_fn(config, args.page_size, self.world_size)
+        # page_size is the stream's PREFERRED block size, so passing one with a
+        # budget would pin the geometry to the KV 1.0 number and leave the
+        # planner nothing to derive. A budget means: derive it.
+        page_size = None if args.kv_budget is not None else args.page_size
+        streams = streams_fn(config, page_size, self.world_size)
         if not streams:
             return None
         from .kv_planner import build_kv_cache
         return build_kv_cache(
             streams,
-            max_num_pages=args.max_num_pages,
+            kv_budget=args.kv_budget,
+            max_num_pages=(None if args.kv_budget is not None
+                           else args.max_num_pages),
             max_seq_length=self.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=self.max_num_batched_tokens,
@@ -384,22 +406,13 @@ class MPK:
         if self.qo_indptr_buffer is None:
             print(f"Compensating qo indptr buffer tensor")
             self.qo_indptr_buffer = torch.empty(
-                self.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        if self.paged_kv_indptr_buffer is None:
-            print(f"Compensating paged kv indptr buffer tensor")
-            self.paged_kv_indptr_buffer = torch.empty(
-                self.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        if self.paged_kv_indices_buffer is None:
-            print(f"Compensating paged kv indices buffer tensor")
-            self.paged_kv_indices_buffer = torch.empty(
-                self.max_num_pages, dtype=torch.int32, device="cuda")
-        if not hasattr(self, 'paged_kv_indices_snapshot') or self.paged_kv_indices_snapshot is None:
-            self.paged_kv_indices_snapshot = torch.empty(
-                self.max_num_pages, dtype=torch.int32, device="cuda")
-        if self.paged_kv_last_page_len_buffer is None:
-            print(f"Compensating paged kv last page len buffer tensor")
-            self.paged_kv_last_page_len_buffer = torch.empty(
-                self.max_num_batched_requests, dtype=torch.int32, device="cuda")
+                self.total_num_requests + 1, dtype=torch.int32, device="cuda")
+        # No paged_kv_* here. This runs before the KV plan exists, so it cannot
+        # know the page geometry -- and for a model on the pool the plan builds
+        # one set per group anyway. __init__ fills the KV 1.0 table when there
+        # is no plan. (The block that used to sit here read
+        # self.max_num_batched_requests and self.max_num_pages, neither of
+        # which MPK has, so it could only ever have raised.)
  
     def get_tensors(self):
         """
@@ -457,9 +470,9 @@ class MPK:
         self.num_new_tokens.fill_(0)
         self.prompt_lengths.fill_(0)
         self.qo_indptr_buffer.fill_(0)
-        self.paged_kv_indptr_buffer.fill_(0)
-        self.paged_kv_indices_buffer.fill_(0)
-        self.paged_kv_last_page_len_buffer.fill_(0)
+        for _name, _tensor in self.meta_tensors.items():
+            if _name.startswith("paged_kv_"):
+                _tensor.fill_(0)
         
     def print_buffers(self, logger = None):
         if logger is not None:
@@ -470,9 +483,9 @@ class MPK:
             logger.info(f"num_new_tokens: {self.num_new_tokens}")
             logger.info(f"prompt_lengths: {self.prompt_lengths}")
             logger.info(f"qo_indptr_buffer: {self.qo_indptr_buffer}")
-            logger.info(f"paged_kv_indptr_buffer: {self.paged_kv_indptr_buffer}")
-            logger.info(f"paged_kv_indices_buffer: {self.paged_kv_indices_buffer}")
-            logger.info(f"paged_kv_last_page_len_buffer: {self.paged_kv_last_page_len_buffer}")
+            for _name, _tensor in self.meta_tensors.items():
+                if _name.startswith("paged_kv_"):
+                    logger.info(f"{_name}: {_tensor}")
             
     def init_per_request(self):
         self.persistent_kernel.init_func(

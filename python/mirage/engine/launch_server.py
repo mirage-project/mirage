@@ -181,6 +181,11 @@ def main():
     parser.add_argument("--max-num-batched-requests", default=4, type=int)
     parser.add_argument("--max-num-batched-tokens", default=8, type=int)
     parser.add_argument("--max-seq-length", default=512, type=int)
+    parser.add_argument("--kv-budget", default="2GiB",
+                        help="Bytes for the KV page pool (e.g. 2GiB, 512MiB). "
+                             "The planner derives the block size and page "
+                             "count from it. 'none' falls back to "
+                             "--page-size/--max-num-pages.")
     parser.add_argument("--max-num-pages", default=16, type=int)
     parser.add_argument("--page-size", default=4096, type=int)
     parser.add_argument("--output-dir", default=None, help="Output directory for compiled artifacts")
@@ -194,6 +199,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--sampling-topk-max", type=int, default=32)
     args = parser.parse_args()
+    kv_budget = None if args.kv_budget.lower() == "none" else args.kv_budget
     if args.do_sample and args.temperature <= 0.0:
         parser.error("--do-sample needs --temperature > 0")
 
@@ -203,6 +209,7 @@ def main():
         max_num_batched_requests=args.max_num_batched_requests,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_seq_length=args.max_seq_length,
+        kv_budget=kv_budget,
         max_num_pages=args.max_num_pages,
         page_size=args.page_size,
         output_dir=args.output_dir,

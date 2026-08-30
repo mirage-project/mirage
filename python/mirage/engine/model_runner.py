@@ -32,8 +32,22 @@ class RunnerConfig:
     max_num_batched_requests: int = 4
     max_num_batched_tokens: int = 8
     max_seq_length: int = 512
+    kv_budget: Optional[str] = "2GiB"
+    """Bytes for the KV page pool.
+
+    The sizing knob for a model on the KV 2.0 page pool: the planner derives
+    the block size and the page count from it, so a request pays for the
+    tokens it holds rather than for a whole page. ``max_num_pages`` and
+    ``page_size`` below say the same thing in KV 1.0 terms and are the only
+    knobs for a builder that does not declare its KV streams yet. Set this to
+    None to fall back to them for a migrated model too -- an A/B escape hatch,
+    not a configuration to want.
+    """
+
     max_num_pages: int = 16
     page_size: int = 4096
+    """KV 1.0 sizing, for a model that is not on the page pool. Ignored
+    whenever ``kv_budget`` is set and the builder declares its streams."""
 
     pinned_ring_capacity: int = 8
     """Power-of-2 capacity for the CPU↔GPU pinned ring buffers."""
@@ -88,6 +102,7 @@ class ModelRunner:
             max_seq_length=config.max_seq_length,
             max_num_batched_requests=config.max_num_batched_requests,
             max_num_batched_tokens=config.max_num_batched_tokens,
+            kv_budget=config.kv_budget,
             max_num_pages=config.max_num_pages,
             page_size=config.page_size,
             pinned_ring_capacity=config.pinned_ring_capacity,
@@ -178,10 +193,6 @@ class ModelRunner:
             num_new_tokens=torch.ones(n_req, dtype=torch.int32, device="cuda"),
             prompt_lengths=torch.zeros(n_req, dtype=torch.int32, device="cuda"),
             qo_indptr_buffer=torch.zeros(n_req + 1, dtype=torch.int32, device="cuda"),
-            paged_kv_indptr_buffer=torch.zeros(n_req + 1, dtype=torch.int32, device="cuda"),
-            paged_kv_indices_buffer=torch.zeros(config.max_num_pages, dtype=torch.int32, device="cuda"),
-            paged_kv_last_page_len_buffer=torch.zeros(n_req, dtype=torch.int32, device="cuda"),
-            paged_kv_indices_snapshot=torch.zeros(config.max_num_pages, dtype=torch.int32, device="cuda"),
             # Pinned ring buffers for CPU↔GPU communication.  pin_memory()
             # gives a stable physical address so no DMA copy is needed.
             pinned_req_ready=torch.zeros(cap, dtype=torch.int32).pin_memory(),
