@@ -104,6 +104,7 @@ KNRMSNormOp::KNRMSNormOp(Graph *_kgraph,
   for (size_t i = 0; i < normalized_shape.size(); i++) {
     normalized_size *= normalized_shape[i];
   }
+  this->normalized_shape = normalized_shape;
   // Shape-preserving op: dim[] and stride[] both carry over from `input`
   // verbatim via the DTensor copy; no need to recompute strides.
   DTensor output = input;
@@ -127,7 +128,8 @@ KNRMSNormOp::~KNRMSNormOp() {
 KNRMSNormOp::operator json() const {
   return json{{"op_type", op_type},
               {"input_tensors", input_tensors},
-              {"output_tensors", output_tensors}};
+              {"output_tensors", output_tensors},
+              {"normalized_shape", normalized_shape}};
 }
 
 #ifdef MIRAGE_FINGERPRINT_USE_CPU

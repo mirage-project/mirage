@@ -359,7 +359,6 @@ class Qwen3Builder(GraphBuilder):
             #         grid_dim=(1, num_local_kv_heads, 1), #TODO: further divide across batch dim
             #         block_dim=(128, 1, 1),
             #     )
-            # else:
             self.mpk.paged_attention_layer(
                 input=self.attn_in,
                 k_cache=k_cache,

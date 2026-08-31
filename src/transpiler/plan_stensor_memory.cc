@@ -276,8 +276,19 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
 
   auto get_phy_size = [&](tb::STensor const &stensor) {
     STensorMeta const &stensor_meta = stensor_metas.at(stensor.guid);
-    return stensor_meta.num_phy_elems *
-           type::get_datatype_size(stensor.data_type);
+    size_t size =
+        stensor_meta.num_phy_elems * type::get_datatype_size(stensor.data_type);
+    if (blackwell_arch) {
+      // UMMA smem descriptors and TMA apply the 128B swizzle to ABSOLUTE
+      // address bits, while software copies (write_tC, elementwise kernels)
+      // swizzle relative to the buffer base. A buffer that is not 1024B
+      // aligned (the SW128 swizzle period) makes the two disagree by a
+      // chunk permutation on every software-written, UMMA-read edge. Pad
+      // every allocation to the period so first-fit packing keeps all
+      // offsets 1024B-aligned (the base is shifted to 1024 below).
+      size = (size + 1023) / 1024 * 1024;
+    }
+    return size;
   };
   // auto find_first_used_time = [](sguid_t sguid,
   //                                vector<TBSchedNode> const &nodes,
@@ -403,8 +414,14 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         size_t phy_size = get_phy_size(output_tensor);
         int earlist_free_time =
             find_earlist_free_time(output_tensor.guid, tb_sched.loop_nodes, T);
-        assert(earlist_free_time != -1 &&
-               "An intermediate tensor produced in the for loop is never used");
+        if (earlist_free_time == -1) {
+          // NDEBUG elides plain asserts; a -1 free time becomes a FREE event
+          // at t=-1 that sorts before every ALLOC and throws a bare
+          // out_of_range deep in the planner. Fail loudly instead.
+          throw std::runtime_error(
+              "stensor memory planner: loop intermediate " +
+              std::to_string(output_tensor.guid) + " is never consumed");
+        }
         // in hopper the doubule buffer needs to be continously allocated
         if (!(last_op->op_type == type::TB_INPUT_OP &&
               last_op_meta.is_pipelined_input)) {
@@ -427,9 +444,11 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
       size_t phy_size = get_phy_size(output_tensor);
       int earlist_free_time = find_earlist_free_time(
           output_tensor.guid, tb_sched.post_loop_nodes, 2 * T);
-      assert(
-          earlist_free_time != -1 &&
-          "An intermediate tensor produced after the for loop is never used");
+      if (earlist_free_time == -1) {
+        throw std::runtime_error(
+            "stensor memory planner: post-loop intermediate " +
+            std::to_string(output_tensor.guid) + " is never consumed");
+      }
       tensor_decls.push_back(
           {output_tensor.guid, phy_size, i + 2 * T, earlist_free_time});
     }
@@ -501,45 +520,62 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
 
   // Leave the first 16 bytes of the shared memory for matmul operators
   // TODO(intlsy) Remove this if there is not Matmul op or do not need padding
-  assert(ALIGNMENT >= 16);
-  plan.smem_size += ALIGNMENT;
+  //
+  // Blackwell needs a stronger base alignment than the other backends. A UMMA
+  // operand is read through a swizzled smem layout (Swizzle<3,3,3> in element
+  // units for 16-bit), and the swizzle is only meaningful relative to a base
+  // aligned to its period -- 2^(3+3+3) = 512 elements = 1024 bytes. At the old
+  // 128B base the operands sat at buf+128 and the generated matmul returned the
+  // right values at wrong positions, an m-dependent XOR into the K index that
+  // disappears entirely at 1024B. Raising it past 1024 changes nothing, which
+  // matches the period being exactly 1024B.
+  size_t alignment = blackwell_arch ? 1024 : ALIGNMENT;
+  assert(alignment >= 16);
+  plan.smem_size += alignment;
   for (auto &kv : plan.addrs) {
-    kv.second += ALIGNMENT;
+    kv.second += alignment;
   }
 
   if (blackwell_arch) {
-    bool tmem_init = false;
+    // MMA barriers: one SHARED barrier for matmuls whose accumulators are
+    // written back after the loop (arrival count forloop_range x that many),
+    // plus one PER matmul for the chained case -- a matmul whose result is
+    // consumed inside the loop must be waited on every iteration, which
+    // needs its own phase. All of them, and the tmem base pointer, must fit
+    // in the alignment padding ahead of the first stensor (the blackwell
+    // base shift above is `alignment` = 1024B); the assert below enforces
+    // that instead of assuming it.
     size_t usage = 0;
+    bool tmem_init = false;
     for (int i = 0; i < (int)tb_sched.loop_nodes.size(); ++i) {
       TBSchedNode const &node = tb_sched.loop_nodes[i];
-      if (node.type != tb_sched_node_t::OPERATOR) {
+      if (node.type != tb_sched_node_t::OPERATOR ||
+          node.ops.front().first->op_type != type::TB_MATMUL_OP) {
         continue;
       }
-      auto [op, op_meta] = node.ops.front();
-      if (op->op_type == type::TB_MATMUL_OP) {
-        tb::STensor const &stensor = op->output_tensors.at(0);
-        size_t mbarrier_phy_size = 8;      // uint64_t for each barrier
-        size_t tmem_base_ptr_phy_size = 4; // uint32_t for tmem base ptr
-
-        if (!tmem_init) {
-          plan.addrs[TMEM_BASE_PTR_GUID] = 0;
-          usage += tmem_base_ptr_phy_size;
-          tmem_init = true;
-        }
-        // align to 16 bytes
-        plan.addrs[stensor.guid + MBARRIER_GUID_OFFSET] =
-            (usage + 15) / 16 * 16;
-        usage = (usage + 15) / 16 * 16 + mbarrier_phy_size;
+      if (!tmem_init) {
+        plan.addrs[TMEM_BASE_PTR_GUID] = 0;
+        usage += 4; // uint32_t for tmem base ptr
+        // The shared barrier, at a fixed key so the emitter can find it.
+        usage = (usage + 15) / 16 * 16;
+        plan.addrs[MBARRIER_GUID_OFFSET] = usage;
+        usage += 8;
+        tmem_init = true;
       }
+      // Per-matmul barrier, keyed by the node's visible output stensor.
+      usage = (usage + 15) / 16 * 16;
+      plan.addrs[node.ops.back().first->output_tensors.at(0).guid +
+                 MBARRIER_GUID_OFFSET] = usage;
+      usage += 8;
     }
+    assert(usage <= alignment &&
+           "tmem ptr + MMA barriers overflow the pre-stensor padding");
   }
 
   if (plan.smem_size > mirage::config::MAX_SMEM_SIZE) {
     printf("Warning: planned smem_size(%zu) exceeds MAX_SMEM_SIZE(%zu)\n",
            plan.smem_size,
            mirage::config::MAX_SMEM_SIZE);
-    // for (const auto &kv : plan.addrs)
-    //   printf("sguid(%zu) offset(%zu)\n", kv.first, kv.second);
   }
 
   return plan;

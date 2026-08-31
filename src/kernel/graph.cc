@@ -257,6 +257,21 @@ void from_json(json const &j, Graph &g) {
         guid_mapping[output.guid] = guidO;
         break;
       }
+      case type::KNOperatorType::KN_RMS_NORM_OP: {
+        // Without this case the op fell to `default: assert(false)`, which is
+        // elided under NDEBUG -- the following JSON access then threw
+        // type_error.304 into std::terminate, aborting the process. Any search
+        // over a graph containing an rms_norm died that way.
+        size_t guid, guidO;
+        std::vector<int> normalized_shape;
+        jop.at("input_tensors")[0].at("guid").get_to(guid);
+        jop.at("output_tensors")[0].at("guid").get_to(guidO);
+        jop.at("normalized_shape").get_to(normalized_shape);
+        DTensor const &output =
+            g.rms_norm(get_tensor_from_guid(guid), normalized_shape);
+        guid_mapping[output.guid] = guidO;
+        break;
+      }
       case type::KNOperatorType::KN_CLAMP_OP: {
         size_t guid, guidO;
         jop.at("input_tensors")[0].at("guid").get_to(guid);
@@ -442,7 +457,30 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   assert(op->op_type == type::KN_CUSTOMIZED_OP);
   KNCustomizedOp const *customized = static_cast<KNCustomizedOp const *>(op);
   TaskRegister *task_register = TaskRegister::get_instance();
-  if (name == "embedding") {
+  if (name == "generated") {
+    // Body transpiled from the threadblock graph rather than dispatched to a
+    // handwritten kernel. Input/output counts come from the op itself, since a
+    // generated body has no fixed arity.
+    // Target the device the megakernel will actually run on. The other
+    // register_* paths do not need this because they dispatch to handwritten
+    // kernels that are already arch-specialized; a generated body is transpiled
+    // here and must be told which backend to emit.
+    int cc_major = 0, cc_minor = 0, cur_device = 0;
+    cudaGetDevice(&cur_device);
+    cudaDeviceGetAttribute(&cc_major, cudaDevAttrComputeCapabilityMajor,
+                           cur_device);
+    cudaDeviceGetAttribute(&cc_minor, cudaDevAttrComputeCapabilityMinor,
+                           cur_device);
+    int variant_id = task_register->register_generated_task(
+        customized, this, cc_major * 10 + cc_minor, params);
+    // MPK counts I/O from the bgraph's TB_INPUT_OPs: the trailing ones are the
+    // writes. A generated task declares its output as an input too, so the read
+    // count is the operand count minus the number of tensors it produces.
+    int const num_writes = (int)customized->output_tensors.size();
+    int const num_reads = (int)customized->input_tensors.size() - num_writes;
+    task_config[op] =
+        std::make_tuple(num_reads, num_writes, TASK_GENERATED, variant_id);
+  } else if (name == "embedding") {
     int variant_id =
         task_register->register_embedding_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(2, 1, TASK_EMBEDDING, variant_id);
@@ -464,6 +502,16 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_DFLASH_NORM_ROPE_SM100, variant_id);
+  } else if (name == "attention_prep") {
+    int variant_id = task_register->register_attention_prep_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(7, 4, TASK_ATTN_PREP_SM100, variant_id);
+  } else if (name == "attention_finalize") {
+    int variant_id = task_register->register_attention_finalize_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_ATTN_FINALIZE_SM100, variant_id);
   } else if (name == "dflash_kv_store") {
     int variant_id = task_register->register_dflash_kv_store_sm100_task(
         customized->bgraph, params);

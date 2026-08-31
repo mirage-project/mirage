@@ -25,7 +25,11 @@ int cython_search(mirage::kernel::Graph const *input_graph,
                   char const *filename,
                   bool verbose,
                   char const *default_config,
-                  bool is_formal_verified) {
+                  bool is_formal_verified,
+                  int max_num_threadblock_graph_inputs,
+                  int max_num_threadblock_graph_outputs,
+                  int max_num_threadblock_graph_op,
+                  int max_num_kernel_graph_op) {
   if (filename) {
     std::ifstream generated_graphs_file(filename, std::ifstream::binary);
     if (generated_graphs_file) {
@@ -54,6 +58,31 @@ int cython_search(mirage::kernel::Graph const *input_graph,
     }
     if (is_formal_verified) {
       config.verifier_type = search::VerifierType::FORMAL_VERIFIER;
+    }
+    // Graph-size limits. The defaults (3 threadblock-graph inputs, 2 outputs,
+    // 9 ops) silently make some specs unsearchable: a FOUR-input spec returns
+    // zero candidates with no diagnostic, even one with no matmul chaining at
+    // all, which is what put the attention core (Q, K^T, V, mask) out of
+    // reach. Applied after the default_config preset so an explicit value
+    // wins over one a preset chose.
+    if (max_num_threadblock_graph_inputs > 0) {
+      config.max_num_threadblock_graph_inputs = max_num_threadblock_graph_inputs;
+    }
+    if (max_num_threadblock_graph_outputs > 0) {
+      config.max_num_threadblock_graph_outputs =
+          max_num_threadblock_graph_outputs;
+    }
+    if (max_num_threadblock_graph_op > 0) {
+      config.max_num_threadblock_graph_op = max_num_threadblock_graph_op;
+    }
+    // NOTE this counts KN_INPUT_OPs as well, so the usable budget is
+    // (inputs + compute + output). At the default of 5 a THREE-input spec fits
+    // exactly -- 3 inputs + one customized op + one output -- and a
+    // four-input one cannot fit at all, which is the real reason a 4-input
+    // spec returns zero candidates. Raising max_num_threadblock_graph_inputs
+    // alone does nothing.
+    if (max_num_kernel_graph_op > 0) {
+      config.max_num_kernel_graph_op = max_num_kernel_graph_op;
     }
     // Customized imaps
     if (imap_to_explore.size() > 0) {

@@ -12,9 +12,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <cstdlib>
 #include "mirage/kernel/task_register.h"
+#include "mirage/kernel/graph.h"
 #include "mirage/kernel/operator.h"
+#include "mirage/transpiler/transpiler.h"
 #include "mirage/transpiler/utils.h"
+
+#include <stdexcept>
 
 namespace mirage {
 namespace runtime {
@@ -86,6 +91,193 @@ int TaskRegister::register_embedding_task(threadblock::Graph const &bgraph,
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->output_ptrs[0]);");
   return register_task_variant(TASK_EMBEDDING, code.to_string());
+}
+
+int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
+                                          kn::Graph const *kgraph,
+                                          int target_cc,
+                                          std::vector<int> const &params) {
+  // params[0], when present, is the A/B pipeline depth for THIS task.
+  // TranspilerConfig is built per op, so the plumbing was always per-task --
+  // only the policy was global. See the pipeline_stages comment below.
+  assert(params.size() <= 2);
+
+  // Transpile the op's threadblock graph into a callable device function.
+  // emit_device_body makes it `__device__ __forceinline__ void f(char *buf,
+  // outputs..., inputs...)` -- the megakernel owns the launch and the shared
+  // memory, so the body must not declare its own (see the flag's comment in
+  // structs.h). Input strides come from each dtensor's own layout: a task body
+  // is handed raw pointers, so there is no outer graph to negotiate them with.
+  transpiler::TranspilerConfig config;
+  config.target_cc = target_cc;
+  config.emit_device_body = true;
+  // A generated body double-buffers its TMA loads (TranspilerConfig's default
+  // pipeline_stages = 2) where the hand-written linear_sm100_mpk runs
+  // NUM_AB_STAGE = 8. At decode the weight tile streams from HBM with a cold
+  // L2, so two stages barely cover the load latency -- measured, a generated
+  // matmul costs 2.9x the hand-written one at an IDENTICAL grid and block
+  // count. Env-gated and defaulting to the old value so the default build is
+  // unchanged; more stages cost smem, which plan_stensor_memory multiplies by
+  // this number.
+  int stages = 0;
+  if (params.size() >= 1) {
+    stages = params[0];                       // per-task, from the lowering
+  } else if (char const *env = std::getenv("MPK_GENERATED_PIPELINE_STAGES")) {
+    stages = std::atoi(env);                  // global fallback
+  }
+  if (stages >= 2 && stages <= 8) {
+    config.pipeline_stages = stages;
+  }
+  // params[1]: pad the MMA's N mode (see TranspilerConfig::pad_mma_n).
+  if (params.size() >= 2) {
+    config.pad_mma_n = params[1] != 0;
+  } else if (char const *env = std::getenv("MPK_GENERATED_PAD_MMA_N")) {
+    config.pad_mma_n = std::atoi(env) != 0;
+  }
+  // One entry per KN_INPUT_OP in the graph, in order -- the Transpiler consumes
+  // them with a running input index as it rebuilds the graph, so this must
+  // match the graph's inputs, NOT this op's operands.
+  // Transpile against a MINIMAL graph holding only this op's operands and a
+  // clone of the op itself. Handing the transpiler the FULL kernel graph made
+  // its reconstruction re-allocate fingerprint device memory for every model
+  // weight and KV cache -- at full-model scale that overflowed the fingerprint
+  // arena (elided-assert segfault inside Graph::new_input). Registration also
+  // becomes O(op) instead of O(model).
+  kn::Graph mini;
+  std::vector<kn::DTensor> mini_inputs;
+  std::vector<std::vector<size_t>> input_strides;
+  for (auto const &t : op->input_tensors) {
+    std::vector<size_t> strides;
+    if (t.owner_op != nullptr && t.owner_op->op_type == type::KN_INPUT_OP) {
+      kn::KNInputOp const *owner =
+          static_cast<kn::KNInputOp const *>(t.owner_op);
+      if (owner->input_strides.size() == (size_t)t.num_dims) {
+        // Explicit strides (e.g. a strided view); synthesizing dense
+        // row-major strides silently read the wrong elements.
+        strides = owner->input_strides;
+      }
+    }
+    if (strides.empty()) {
+      strides.resize(t.num_dims);
+      size_t acc = 1;
+      for (int d = t.num_dims - 1; d >= 0; d--) {
+        strides[d] = acc;
+        acc *= t.dim[d];
+      }
+    }
+    std::vector<int> dims(t.dim, t.dim + t.num_dims);
+    mini_inputs.push_back(mini.new_input(dims, strides, t.data_type, t.layout));
+    input_strides.push_back(strides);
+  }
+  kn::KNOperator *mini_op = mini.create_customized_op(mini_inputs, op->bgraph);
+  if (mini_op == nullptr) {
+    throw std::runtime_error(
+        "register_generated_task: failed to clone the custom op into the "
+        "registration graph (fingerprint allocation)");
+  }
+  mini.operators.push_back(mini_op);
+
+  transpiler::Transpiler transpiler(&mini, config, input_strides);
+  transpiler::CustomOPTranspileResult result =
+      transpiler.transpile_single_custom_op();
+  if (result.error_type != transpiler::CUDA_T_SUCCESS || result.code.empty()) {
+    throw std::runtime_error(
+        "register_generated_task: the muGraph backend rejected this task body "
+        "(transpiler error " +
+        std::to_string((int)result.error_type) +
+        (result.error_type == transpiler::CUDA_T_UNSUPPORTED_CHAINED_MATMUL
+             ? "). A matmul result feeding another op INSIDE the forloop "
+               "(chained matmul / fused attention) is not supported yet."
+             : "). Unsupported operand shapes are the usual cause -- see the "
+               "operand_ok guard in transpiler_tb_blackwell.cc."));
+  }
+
+  // A task body that plans more shared memory than a worker has does NOT fail
+  // at registration on its own: plan_stensor_memory only PRINTS a warning
+  // (plan_stensor_memory.cc:575), the megakernel compiles, and the run then
+  // dies with an illegal memory access. Measured: a 256-wide K tile plans
+  // 264192 B against this cap. Refuse it here, where the message can name the
+  // task and the caller can pick another candidate.
+  // runtime_header.h owns this table, but it pulls in cuda_runtime/nvshmem and
+  // resolves MPK_TARGET_CC at COMPILE time, while target_cc arrives here at
+  // runtime. Mirror the smaller (non-online) budget and the larger reserve, so
+  // this guard never accepts something the megakernel would reject: for B200
+  // that is 207K - 6K = 205824, exactly what the runtime prints.
+  int const smem_budget = (target_cc >= 90   ? 207 * 1024
+                           : target_cc >= 86 ? 99 * 1024
+                                             : 163 * 1024) -
+                          6 * 1024;
+  if ((int)result.smem_size > smem_budget) {
+    throw std::runtime_error(
+        "register_generated_task: this task body plans " +
+        std::to_string(result.smem_size) +
+        " bytes of shared memory, over the " + std::to_string(smem_budget) +
+        "-byte budget a worker has. A wider K tile or a deeper pipeline is "
+        "the usual cause -- both multiply the per-stage buffers.");
+  }
+
+  // The definition is emitted once per variant, ahead of execute_task.
+  generated_task_defs.push_back(result.code);
+
+  // The variant body forwards the task's pointers to it. The generated
+  // signature is (buf, KN-outputs..., KN-inputs...): the KN outputs are the
+  // tensors produced by the bgraph's TB_OUTPUT_OPs, and the KN inputs are every
+  // tensor the op was given -- including the output tensor, which MPK requires
+  // to be declared as an input (see generated_silu_mul_layer).
+  //
+  // MPK hands the task input_ptrs for the reads and output_ptrs for the writes.
+  // Map the generated function's output parameter onto output_ptrs[0] so the
+  // store lands in the caller's tensor, and feed the trailing "output declared
+  // as an input" operand from output_ptrs too.
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  size_t const num_writes = op->output_tensors.size();
+  size_t const num_reads = op->input_tensors.size() - num_writes;
+  std::string call = result.func_name + "(";
+  bool first_arg = true;
+  // TMA atoms come first in the generated signature. Each is a pointer to a
+  // device-resident copy the host builder uploaded; the loader stored it in the
+  // owning input's TensorDesc (see the TASK_GENERATED case in runtime.cc).
+  for (size_t i = 0; i < result.tmaParamsList.size(); i++) {
+    call += (first_arg ? "" : ", ");
+    first_arg = false;
+    call += "task_desc->input_tma_desc_ptrs[" +
+            std::to_string(result.tmaParamsList[i].operand_id) + "][0]";
+  }
+  for (size_t i = 0; i < num_writes; i++) {
+    call += (first_arg ? "" : ", ");
+    first_arg = false;
+    call +=
+        "(" +
+        std::string(type::get_datatype_str(op->output_tensors[i].data_type)) +
+        "*)task_desc->output_ptrs[" + std::to_string(i) + "]";
+  }
+  for (size_t i = 0; i < op->input_tensors.size(); i++) {
+    std::string src =
+        (i < num_reads)
+            ? ("task_desc->input_ptrs[" + std::to_string(i) + "]")
+            : ("task_desc->output_ptrs[" + std::to_string(i - num_reads) + "]");
+    call += (first_arg ? "" : ", ");
+    first_arg = false;
+    call +=
+        "(" +
+        std::string(type::get_datatype_str(op->input_tensors[i].data_type)) +
+        " const*)" + src;
+  }
+  call += ");";
+  code.e("$", call);
+  int const variant_id =
+      register_task_variant(TASK_GENERATED, code.to_string());
+  if (!result.tmaParamsList.empty()) {
+    GeneratedTmaInfo info;
+    info.variant_id = (unsigned)variant_id;
+    info.builder_name = result.func_name + "_build_tma";
+    for (auto const &p : result.tmaParamsList) {
+      info.input_ids.push_back(p.operand_id);
+    }
+    generated_task_tma.push_back(info);
+  }
+  return variant_id;
 }
 
 int TaskRegister::register_rmsnorm_task(threadblock::Graph const &bgraph,
@@ -253,6 +445,123 @@ int TaskRegister::register_dflash_kv_store_sm100_task(
   code.e("    $,", num_tokens);
   code.e("    $);", page_size);
   return register_task_variant(TASK_DFLASH_KV_STORE_SM100, code.to_string());
+}
+
+int TaskRegister::register_attention_prep_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [num_q_heads, num_kv_heads, max_seq_len, page_size,
+  //          qk_norm_eps float bits]
+  // 7 inputs (qkv, k_cache, v_cache, q_norm, k_norm, cos, sin),
+  // 4 outputs, all FOLD-DIM head-major (dim0 = kvh*max_reqs, imap-sliced
+  // by kvh): q_staged [kvh*reqs, 8, hd], mask_staged [kvh*reqs, 1, S],
+  // kt_staged [kvh*reqs, hd, S], v_staged [kvh*reqs, S, hd].
+  assert(params.size() == 5);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 7;
+  int num_outputs = 4;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  int max_seq_len = params[2];
+  int page_size = params[3];
+  float eps = 1e-6f;
+  memcpy(&eps, &params[4], sizeof(float));
+  int qkv_stride = input_ops[0]->dtensor.dim[1];
+  assert(input_ops[1]->dtensor.num_dims == 4);
+  int head_dim = input_ops[1]->dtensor.dim[3];
+  int kv_cache_row_stride = num_kv_heads * head_dim;
+  int num_qo_per_kv = num_q_heads / num_kv_heads;
+  assert(output_ops[0]->dtensor.num_dims == 3); // q_staged
+  assert(output_ops[0]->dtensor.dim[1] == 8); // kernel::Q_STAGED_ROWS
+  assert(output_ops[1]->dtensor.num_dims == 3); // mask_staged
+  assert(output_ops[1]->dtensor.dim[2] == max_seq_len);
+  assert(output_ops[2]->dtensor.num_dims == 3); // kt_staged
+  assert(output_ops[3]->dtensor.num_dims == 3); // v_staged
+  // HEAD-MAJOR staging: [kvh, max_reqs, ...]; the imaps slice dim0 (kvh),
+  // so within a slice the request stride is just the per-request block.
+  int q_staged_req_stride = 8 * head_dim;
+  int kt_staged_req_stride = head_dim * max_seq_len;
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::attention_prep_sm100_impl<bfloat16, $, $, $, $, $, $, $, "
+         "$>(",
+         num_qo_per_kv,
+         head_dim,
+         qkv_stride,
+         kv_cache_row_stride,
+         page_size,
+         max_seq_len,
+         q_staged_req_stride,
+         kt_staged_req_stride);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->input_ptrs[2],");
+  code.e("    task_desc->input_ptrs[3],");
+  code.e("    task_desc->input_ptrs[4],");
+  code.e("    task_desc->input_ptrs[5],");
+  code.e("    task_desc->input_ptrs[6],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    task_desc->output_ptrs[1],");
+  code.e("    task_desc->output_ptrs[2],");
+  code.e("    task_desc->output_ptrs[3],");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer,");
+  code.e("    runtime_config.paged_kv_indices_buffer,");
+  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    task_desc->task_metadata.request_id,");
+  code.e("    $f);", eps);
+  return register_task_variant(TASK_ATTN_PREP_SM100, code.to_string());
+}
+
+int TaskRegister::register_attention_finalize_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [num_q_heads, num_kv_heads]. 1 input (attn_pad
+  // [max_reqs, num_kv_heads, 8, head_dim]), 1 output
+  // (attn_out [tokens, num_q_heads * head_dim]).
+  assert(params.size() == 2);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  int num_q_heads = params[0];
+  int num_kv_heads = params[1];
+  assert(input_ops[0]->dtensor.num_dims == 3); // fold-dim [kvh*reqs, 8, hd]
+  int head_dim = input_ops[0]->dtensor.dim[2];
+  assert(input_ops[0]->dtensor.dim[0] % num_kv_heads == 0);
+  int num_qo_per_kv = num_q_heads / num_kv_heads;
+  int o_stride = output_ops[0]->dtensor.dim[1];
+  int max_reqs = input_ops[0]->dtensor.dim[0] / num_kv_heads;
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::attention_finalize_sm100_impl<bfloat16, $, $, $, $, $>(",
+         num_kv_heads,
+         num_qo_per_kv,
+         head_dim,
+         o_stride,
+         max_reqs);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    runtime_config.qo_indptr_buffer,");
+  code.e("    task_desc->task_metadata.request_id);");
+  return register_task_variant(TASK_ATTN_FINALIZE_SM100, code.to_string());
 }
 
 int TaskRegister::register_glm_moe_router_sm100_task(

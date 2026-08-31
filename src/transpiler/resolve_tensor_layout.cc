@@ -185,6 +185,20 @@ void Transpiler::resolve_tensor_layout() {
     }
     opt.add(z3::atmost(innermost_exprs, 1));
     opt.add(z3::atleast(innermost_exprs, 1));
+    DTensorMeta const &dmeta = this->dtensor_metas[dtensor.guid];
+    bool pinned_elsewhere =
+        dmeta.is_input ||
+        (dmeta.is_output && dmeta.output_idx < output_strides.size());
+    if (config.emit_device_body && !pinned_elsewhere) {
+      // Every tensor a megakernel task body touches is a plain row-major MPK
+      // buffer. Inputs are already pinned by input_strides, but a task graph
+      // has no KN_OUTPUT_OP (MPK passes the destination in as an operand), so
+      // the solver was free to pick dim 0 as innermost for the result -- and it
+      // did. The matmul then wrote a numerically CORRECT tile column-major into
+      // a row-major buffer: `out == ref.T` exactly, rel ~1.5 against ref.
+      // Skip anything already constrained, so this cannot make the model unsat.
+      opt.add(d_is_innermost[dtensor.guid][num_dims - 1]);
+    }
   }
   for (tb::STensor const &stensor : all_stensors) {
     int num_dims = stensor.num_dims;
@@ -456,6 +470,7 @@ void Transpiler::resolve_tensor_layout() {
                 stensor_metas[input1.guid].m_matrix_guid = input0.guid;
                 stensor_metas[input0.guid].c_matrix_guid = output.guid;
                 stensor_metas[input1.guid].c_matrix_guid = output.guid;
+                stensor_metas[output.guid].matmul_output = true;
                 costs.push_back(
                     z3::ite(!s_is_innermost[input.guid][num_dims - 1] &&
                                 !s_is_innermost[input.guid][num_dims - 2],
@@ -466,6 +481,47 @@ void Transpiler::resolve_tensor_layout() {
                                     s_is_swizzled[input.guid][num_dims - 1]));
                 opt.add(z3::implies(!s_is_innermost[input.guid][num_dims - 2],
                                     s_is_swizzled[input.guid][num_dims - 2]));
+                // An INTERMEDIATE operand (produced by another TB op, not
+                // loaded from gmem) must take the orientation every verified
+                // gmem-loaded operand has: innermost = last dim. The emitted
+                // tiled_mma hardcodes each operand's UMMA majorness by ROLE;
+                // left free, the solver picked dim 0 for a matmul-produced
+                // operand (chained matmul), and the consumer then read the tile
+                // through the wrong majorness -- right values, wrong positions.
+                // Gmem-loaded operands already satisfy this via their input
+                // strides, so the constraint only binds intermediates.
+                if (config.target_cc == GPU_CC::B200 &&
+                    input.owner_op != nullptr &&
+                    input.owner_op->op_type != type::TB_INPUT_OP) {
+                  opt.add(s_is_innermost[input.guid][num_dims - 1]);
+                }
+              }
+              // Same orientation pin for a matmul OUTPUT that is consumed by
+              // anything other than a plain forloop accumulator. Such outputs
+              // are materialised in-loop by write_tC_to_sC and re-read by
+              // generic ops (chained matmuls, rescale accumulators); every
+              // verified case has innermost = last dim, and when the solver
+              // was left free it picked the other orientation for the
+              // online-softmax numerator tile (write/read disagreed; NUM came
+              // back finite but rel ~1.34). NO_RED-consumed outputs stay
+              // unpinned -- they live in TMEM until the post-loop write-back,
+              // so the ordinary matmul/SwiGLU paths are untouched.
+              if (config.target_cc == GPU_CC::B200) {
+                bool nonaccum_consumer = false;
+                for (tb::TBOperator const *consumer : tb_graph.operators) {
+                  if (consumer == tb_op ||
+                      consumer->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+                    continue;
+                  }
+                  for (auto const &cin : consumer->input_tensors) {
+                    if (cin.guid == output.guid) {
+                      nonaccum_consumer = true;
+                    }
+                  }
+                }
+                if (nonaccum_consumer) {
+                  opt.add(s_is_innermost[output.guid][num_dims - 1]);
+                }
               }
             } else {
               // Use normal copying if ldmatrix is not supported by hardware
@@ -811,6 +867,27 @@ void Transpiler::resolve_tensor_layout() {
                         stensor.dim,
                         innermost_dim,
                         type::get_datatype_size(stensor.data_type));
+
+    // config.pad_mma_n widens the MMA's N mode, and under swapAB that mode is
+    // the ROW count of the m_input operand (the activations) and of the
+    // matmul's output tile. The buffer must hold what the MMA will read, or
+    // the UMMA runs past it into the next tensor.
+    //
+    // Only for a row-major tile: rows are then contiguous, so the extra rows
+    // sit directly after row m-1 at the same stride and scaling num_phy_elems
+    // is exactly right. If the ROW dim is innermost the padding would have to
+    // go between columns instead, so leave those alone and let the emitter
+    // skip padding too (both sides test the same condition).
+    if (this->config.pad_mma_n && this->config.target_cc == GPU_CC::B200 &&
+        num_dims >= 2 && innermost_dim == num_dims - 1 &&
+        (meta.m_input || meta.matmul_output)) {
+      int const rows = stensor.dim[num_dims - 2];
+      int const padded = padded_mma_n(rows, true);
+      if (padded > rows) {
+        meta.num_phy_elems =
+            meta.num_phy_elems / (size_t)rows * (size_t)padded;
+      }
+    }
   }
 }
 

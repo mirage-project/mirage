@@ -262,8 +262,8 @@ cdef extern from "mirage/kernel/graph.h" namespace "mirage::kernel":
                   int dim,
                   CppDTensor **outputs) except +
         void register_task(const char *task_type,
-                           vector[int] params)
-        TaskGraphResult generate_task_graph(int num_gpus, int my_gpu_id)
+                           vector[int] params) except +
+        TaskGraphResult generate_task_graph(int num_gpus, int my_gpu_id) except +
 
         vector[CppKNOperator*] operators
 
@@ -297,47 +297,47 @@ cdef extern from "mirage/threadblock/graph.h" namespace "mirage::threadblock":
         CppTBGraph(dim3 grid_dim,
                    dim3 block_dim,
                    int forloop_range,
-                   int reduction_dimx)
+                   int reduction_dimx) except +
 
         CppSTensor* new_input(const CppDTensor* dtensor,
                              int3 input_map,
                              int forloop_dim,
                              SmemLayout layout,
-                             bool store_in_dmem)
+                             bool store_in_dmem) except +
         CppDTensor* new_output(const CppSTensor* stensor,
                             int3 output_map,
                             int forloop_dim,
-                            TBEpilogueType epilogue)
+                            TBEpilogueType epilogue) except +
         CppSTensor* matmul(const CppSTensor *A,
-                        const CppSTensor *B)
-        CppSTensor* exp(const CppSTensor *A)
-        CppSTensor* silu(const CppSTensor *A)
-        CppSTensor* gelu(const CppSTensor *A)
-        CppSTensor* relu(const CppSTensor *A)
-        CppSTensor* clamp(const CppSTensor *A, float min_val, float max_val)
-        CppSTensor* square(const CppSTensor *A)
-        CppSTensor* sqrt(const CppSTensor *A)
-        CppSTensor* mul_scalar(const CppSTensor *A, float scalar)
+                        const CppSTensor *B) except +
+        CppSTensor* exp(const CppSTensor *A) except +
+        CppSTensor* silu(const CppSTensor *A) except +
+        CppSTensor* gelu(const CppSTensor *A) except +
+        CppSTensor* relu(const CppSTensor *A) except +
+        CppSTensor* clamp(const CppSTensor *A, float min_val, float max_val) except +
+        CppSTensor* square(const CppSTensor *A) except +
+        CppSTensor* sqrt(const CppSTensor *A) except +
+        CppSTensor* mul_scalar(const CppSTensor *A, float scalar) except +
         CppSTensor* add(const CppSTensor *A,
-                     const CppSTensor *B)
+                     const CppSTensor *B) except +
         CppSTensor* mul(const CppSTensor *A,
-                     const CppSTensor *B)
+                     const CppSTensor *B) except +
         CppSTensor* div(const CppSTensor *A,
-                     const CppSTensor *B)
+                     const CppSTensor *B) except +
         CppSTensor* sub(const CppSTensor *A,
-                     const CppSTensor *B)
-        CppSTensor* reduction(const CppSTensor *A, int dim)
-        vector[CppSTensor*] reduction_max(const CppSTensor *A, int dim)
-        CppSTensor* rms_norm(const CppSTensor *A)
+                     const CppSTensor *B) except +
+        CppSTensor* reduction(const CppSTensor *A, int dim) except +
+        vector[CppSTensor*] reduction_max(const CppSTensor *A, int dim) except +
+        CppSTensor* rms_norm(const CppSTensor *A) except +
         CppSTensor* concat(const CppSTensor *A,
                         const CppSTensor *B,
-                        int dim)
+                        int dim) except +
         CppSTensor* forloop_accum(const CppSTensor *A,
-                               TBOperatorType optype)
+                               TBOperatorType optype) except +
         CppSTensor* forloop_accum_rescale(const CppSTensor *A,
                                const CppSTensor *B,
-                               TBOperatorType optype)
-        CppSTensor* forloop_accum_max(const CppSTensor *A)
+                               TBOperatorType optype) except +
+        CppSTensor* forloop_accum_max(const CppSTensor *A) except +
         dim3 grid_dim
         dim3 block_dim
         int forloop_range
@@ -367,7 +367,11 @@ cdef extern from "mirage/search/search_c.h" namespace "mirage::search_c":
                            const char * filename,
                            bool verbose,
                            const char * default_config,
-                           bool is_formal_verified)
+                           bool is_formal_verified,
+                           int max_num_threadblock_graph_inputs,
+                           int max_num_threadblock_graph_outputs,
+                           int max_num_threadblock_graph_op,
+                           int max_num_kernel_graph_op)
     
     cdef void cython_to_json(const CppKNGraph *input_graph,
                              const char *filename)
@@ -381,11 +385,13 @@ cdef extern from "mirage/transpiler/transpile.h" namespace "mirage::transpiler":
         int pipeline_stages;
         bool profiling;
         bool enable_online_softmax;
+        bool emit_device_body;
     ctypedef struct OutputTensorDirective:
         size_t alloc_size
         vector[int] shape
         vector[size_t] strides
     ctypedef struct TranspileResult:
+        int error_type
         string code
         size_t buf_size
         size_t max_smem_size

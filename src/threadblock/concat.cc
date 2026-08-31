@@ -22,14 +22,14 @@ namespace threadblock {
 
 STensor Graph::concat(STensor const &A, STensor const &B, int concat_dim) {
   TBOperator *op = create_concat_op(A, B, concat_dim);
-  assert(op != nullptr);
+  check_tb_op(op, "concat");
   operators.push_back(op);
   return op->output_tensors[0];
 }
 
 STensor *Graph::concat(STensor const *A, STensor const *B, int concat_dim) {
   TBOperator *op = create_concat_op(*A, *B, concat_dim);
-  assert(op != nullptr);
+  check_tb_op(op, "concat");
   operators.push_back(op);
   return &op->output_tensors[0];
 }

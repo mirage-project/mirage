@@ -1,5 +1,7 @@
 #include "mirage/search/search_context.h"
 
+#include <stdexcept>
+
 namespace mirage {
 namespace search {
 
@@ -16,6 +18,11 @@ void from_json(json const &j, SearchContext &c) {
           }
         }
       }
+      // Falling off the end returned an indeterminate pair, which was then
+      // used to index kn_graph->operators. Say what went wrong instead.
+      throw std::runtime_error(
+          "SearchContext from_json: no kernel-graph tensor with guid " +
+          std::to_string(guid));
     };
 
     c.tb_graph = std::make_shared<threadblock::Graph>();

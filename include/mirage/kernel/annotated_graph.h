@@ -121,6 +121,20 @@ struct JoinGroupInfo {
   std::array<int, 3> lcm_last3;
 };
 
+// One I/O slot of a task's threadblock graph: the tensor plus its tile map.
+// Outputs carry output_map where inputs carry input_map, so the map cannot be
+// recovered from the DTensor alone. Shared by the two places that split a
+// bgraph into reads and writes (annotated_graph.cc and runtime.cc), which must
+// agree -- see the convention note on split_bgraph_ops.
+struct BGraphSlot {
+  DTensor dtensor;
+  int3 map;
+  // The threadblock-level tile. For a TB_INPUT_OP this is the op's output
+  // (the tile it loads into); for a TB_OUTPUT_OP it is the op's input (the
+  // tile it stores from).
+  threadblock::STensor stensor;
+};
+
 struct LayerInfo {
   mirage::kernel::KNCustomizedOp const *op = nullptr;
   // Non-stripped edges only. in/out_edges.size() reflects the DAG topology

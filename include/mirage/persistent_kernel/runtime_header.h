@@ -77,7 +77,9 @@ unsigned long long int const EVENT_INVALID_ID = 0x7ffffffffffffffe;
 typedef unsigned long long int EventCounter;
 
 int const MAX_INPUTS_PER_TASK = 7;
-int const MAX_OUTPUTS_PER_TASK = 3;
+// 4: attention_prep writes q_staged + mask_staged + kt_staged + v_staged
+// for the compiler-generated attention core.
+int const MAX_OUTPUTS_PER_TASK = 4;
 // B200 has 148 SMs — need more workers than the default 128
 int const MAX_NUM_WORKERS = 160;
 
@@ -187,14 +189,20 @@ enum TaskType {
   TASK_DFLASH_NORM_ROPE_SM100 = 297,
   // DFlash standalone paged KV-cache store (L4 materialize write), SM100.
   TASK_DFLASH_KV_STORE_SM100 = 298,
-  TASK_SM100_TASK_END = 299, // SM100 end placeholder, not a real task
+  // Decode-attention prep for the compiler-generated attention core:
+  // qk-norm + RoPE + KV append + scaled Q staging + mask maintenance.
+  TASK_ATTN_PREP_SM100 = 299,
+  // Copies the valid rows of the padded generated-core output into the
+  // packed attention output.
+  TASK_ATTN_FINALIZE_SM100 = 300,
+  TASK_SM100_TASK_END = 301, // SM100 end placeholder, not a real task
   TASK_SCHD_TASKS = 200,
   TASK_SCHD_EVENTS = 201,
   TASK_GET_EVENT = 202,
   TASK_GET_NEXT_TASK = 203,
   TASK_SCHD_PREPARE_BATCH = 204,
   // Multi-GPU tasks
-  TASK_MULTIGPU_TASK_BEGIN = 300, // begin placeholder, not a real task
+  TASK_MULTIGPU_TASK_BEGIN = 310, // begin placeholder, not a real task
   TASK_NVSHMEM_ALLGATHER_STRIDED_PUT = 301,
   TASK_NVSHMEM_TILE_ALLREDUCE = 302,
   TASK_MULTIGPU_TASK_END = 349, // end placeholder, not a real task
@@ -212,6 +220,10 @@ enum TaskType {
   // Sigmoid+bias top-k router (n_group=1) with folded shared expert.
   TASK_GLM_MOE_ROUTER_SM100 = 401,
   TASK_GLM_TASK_END = 449, // end placeholder, not a real task
+  // Compiler-generated tasks: the body is transpiled from a threadblock graph
+  // by the muGraph backend (TranspilerConfig::emit_device_body) rather than
+  // calling a handwritten kernel. One variant per distinct generated body.
+  TASK_GENERATED = 450,
 };
 
 enum EventType {

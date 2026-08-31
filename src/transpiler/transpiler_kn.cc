@@ -14,6 +14,7 @@
  */
 
 #include "mirage/transpiler/transpiler.h"
+#include <stdexcept>
 
 #include <algorithm>
 #include <unordered_set>
@@ -208,18 +209,32 @@ static void generate_tma_code_hopper(CodeKeeper &exec,
   }
 }
 
-static void generate_tma_code_blackwell(CodeKeeper &exec,
-                                        std::vector<TMAParams> &tmaParamsList,
-                                        bool use_2sm_mma,
-                                        kn::KNOperator const *cur_op,
-                                        TranspilerConfig const &config) {
-  if (use_2sm_mma) {
+// types_only emits just the compile-time part -- every `using` alias plus a
+// TMA_$ alias naming the atom's type -- and skips the two lines that need a
+// runtime gmem pointer (g_tensor_$ and the make_tma_atom_ call). A megakernel
+// task body needs exactly that: it must know the atom's type to reinterpret the
+// device-resident copy the host built, but it cannot build one itself. The
+// decltype naming the type is unevaluated, so referring to the __host__
+// make_tma_atom_*_sm100 from device code is fine.
+void generate_tma_code_blackwell(CodeKeeper &exec,
+                                 std::vector<TMAParams> &tmaParamsList,
+                                 kn::KNOperator const *cur_op,
+                                 TranspilerConfig const &config,
+                                 bool types_only) {
+  {
     for (int i = 0; i < tmaParamsList.size(); i++) {
       auto const &tmaParams = tmaParamsList.at(i);
-      if (tmaParams.m_input) {
+      // Select by the operand's role in the MMA, not by which matrix it was in
+      // the source graph. Under swapAB the stensor flagged m_input is the MMA's
+      // *B* operand, so branching on m_input alone built the descriptor with the
+      // wrong partition_shape/major/Step and the kernel deadlocked.
+      bool const is_mma_a = tmaParams.m_input != tmaParams.tiled_mma.swap_ab;
+      bool const swap_ab = tmaParams.tiled_mma.swap_ab;
+      if (is_mma_a) {
         exec.e(fmt("static constexpr cute::UMMA::Major UMMAMajor_$ = "
-                   "UMMA::Major::K;",
-                   tmaParams.guid));
+                   "UMMA::Major::$;",
+                   tmaParams.guid,
+                   swap_ab ? "MN" : "K"));
 
         exec.e(fmt("using DstMNKLayout_$ = "
                    "decltype(partition_shape_A(tiled_mma_$, "
@@ -232,29 +247,44 @@ static void generate_tma_code_blackwell(CodeKeeper &exec,
         exec.e(fmt(
             "using SrcMNKLayout_$ = $;", tmaParams.guid, tmaParams.srcLayout));
 
+        // The smem layout atom must be selected from the *per-CTA* tile, not
+        // the full 2-SM MMA tile: with a 2x1SM atom the M mode spans two CTAs,
+        // so passing get<0>(mma_tiler) made the atom twice the shape it is
+        // tiled into ("tile_to_shape: block shape does not divide the target
+        // shape"). This mirrors sm100_umma_builder.inl's SmemShape_M, which
+        // divides by size(AtomThrID).
+        exec.e(fmt("using SmemShape_M_$ = decltype(cute::shape_div("
+                   "cute::get<0>(mma_tiler_$), "
+                   "cute::size(typename decltype(tiled_mma_$)::AtomThrID{})));",
+                   tmaParams.guid,
+                   tmaParams.tiled_mma.guid,
+                   tmaParams.tiled_mma.guid));
+
         exec.e(fmt("using SmemLayoutAtom_$ = "
                    "decltype(cutlass::gemm::collective::detail::sm100_"
                    "smem_selector<"
-                   "UMMAMajor_$, $, decltype(get<0>(mma_tiler_$)), "
+                   "UMMAMajor_$, $, SmemShape_M_$, "
                    "decltype(get<2>(mma_tiler_$))>());",
                    tmaParams.guid,
                    tmaParams.guid,
                    get_datatype_str(cur_op->input_tensors[0].data_type),
-                   tmaParams.tiled_mma.guid,
+                   tmaParams.guid,
                    tmaParams.tiled_mma.guid));
 
         exec.e(fmt("using DstPipeLayout_$ = "
                    "decltype(UMMA::tile_to_mma_shape(SmemLayoutAtom_${}, "
                    "append(DstMNKLayout_${}, Int<$>{}), "
-                   "Step<_1, _2, _3>{}));",
+                   "Step<$>{}));",
                    tmaParams.guid,
                    tmaParams.guid,
                    tmaParams.guid,
-                   config.pipeline_stages));
+                   config.pipeline_stages,
+                   swap_ab ? "_2, _1, _3" : "_1, _2, _3"));
       } else {
         exec.e(fmt("static constexpr cute::UMMA::Major UMMAMajor_$ = "
-                   "UMMA::Major::MN;",
-                   tmaParams.guid));
+                   "UMMA::Major::$;",
+                   tmaParams.guid,
+                   swap_ab ? "K" : "MN"));
 
         exec.e(fmt("using DstMNKLayout_$ = "
                    "decltype(partition_shape_B(tiled_mma_$, "
@@ -267,63 +297,96 @@ static void generate_tma_code_blackwell(CodeKeeper &exec,
         exec.e(fmt(
             "using SrcMNKLayout_$ = $;", tmaParams.guid, tmaParams.srcLayout));
 
+        // Same per-CTA divide as the A operand above (SmemShape_N in
+        // sm100_umma_builder.inl).
+        exec.e(fmt("using SmemShape_N_$ = decltype(cute::shape_div("
+                   "cute::get<1>(mma_tiler_$), "
+                   "cute::size(typename decltype(tiled_mma_$)::AtomThrID{})));",
+                   tmaParams.guid,
+                   tmaParams.tiled_mma.guid,
+                   tmaParams.tiled_mma.guid));
+
         exec.e(fmt("using SmemLayoutAtom_$ = "
                    "decltype(cutlass::gemm::collective::detail::sm100_"
                    "smem_selector<"
-                   "UMMAMajor_$, $, decltype(get<1>(mma_tiler_$)), "
+                   "UMMAMajor_$, $, SmemShape_N_$, "
                    "decltype(get<2>(mma_tiler_$))>());",
                    tmaParams.guid,
                    tmaParams.guid,
                    get_datatype_str(cur_op->input_tensors[0].data_type),
-                   tmaParams.tiled_mma.guid,
+                   tmaParams.guid,
                    tmaParams.tiled_mma.guid));
 
+        // tile_to_mma_shape must tile MN-major operands in the opposite order
+        // -- CUTLASS selects Step<_2,_1,_3> vs Step<_1,_2,_3> on is_mn_major
+        // (see sm100_mma_warpspecialized.hpp SmemLayoutB). Using the K-major
+        // order for an MN-major operand failed with "tile_to_shape: block shape
+        // does not divide the target shape". Under swapAB this operand is
+        // K-major, so the order inverts with it.
         exec.e(fmt("using DstPipeLayout_$ = "
                    "decltype(UMMA::tile_to_mma_shape(SmemLayoutAtom_${}, "
                    "append(DstMNKLayout_${}, Int<$>{}), "
-                   "Step<_1, _2, _3>{}));",
+                   "Step<$>{}));",
                    tmaParams.guid,
                    tmaParams.guid,
                    tmaParams.guid,
-                   config.pipeline_stages));
+                   config.pipeline_stages,
+                   swap_ab ? "_1, _2, _3" : "_2, _1, _3"));
       }
 
+      // The gmem tensor's TYPE does not depend on the pointer's value, so the
+      // types_only form builds it from a null pointer purely to name it.
       exec.e(fmt("auto g_tensor_$ = "
-                 "make_tensor(make_gmem_ptr<$>(dtensor$), "
+                 "make_tensor(make_gmem_ptr<$>($), "
                  "SrcMNKLayout_${});",
                  tmaParams.guid,
                  get_datatype_str(cur_op->input_tensors[0].data_type),
-                 tmaParams.guid,
+                 types_only ? fmt("($*)nullptr",
+                                  get_datatype_str(
+                                      cur_op->input_tensors[0].data_type))
+                            : fmt("dtensor$", tmaParams.guid),
                  tmaParams.guid));
 
-      if (tmaParams.multicast_direction == "N_MODE") {
-        exec.e(fmt("auto tma_$ = "
-                   "make_tma_atom_A_sm100(SM100_TMA_2SM_LOAD_MULTICAST{"
-                   "}, g_tensor_$, "
+      // 1-SM only: the MPK runtime executes tasks as single CTAs, so there is
+      // no CTA pair to multicast to. The N_MODE/M_MODE branches that emitted
+      // SM100_TMA_2SM_LOAD_MULTICAST are gone. THROW rather than assert: the
+      // original defect here was an assert(false) that NDEBUG compiled out,
+      // leaving tma_$ undeclared with no diagnostic, so an assert would
+      // reproduce exactly the bug this replaced.
+      if (tmaParams.multicast_direction != "NOT_MULTICAST") {
+        throw std::runtime_error(
+            "Blackwell codegen is 1-SM only; multicast TMA atoms are not "
+            "emitted (multicast_direction=" +
+            tmaParams.multicast_direction + ")");
+      }
+      {
+        // Non-multicast (1-SM MMA). CUTLASS selects a plain SM90_TMA_LOAD when
+        // AtomThrID == 1 (sm100_cluster_shape_to_tma_atom_A/B), so no
+        // mma_tiler / tiled_mma / cluster_layout_vmnk is involved -- the same
+        // form the Hopper generator above emits. Previously this branch was an
+        // assert(false), which NDEBUG compiled out, silently leaving tma_$
+        // undeclared.
+        // CUTLASS still routes 1-SM through make_tma_atom_A/B_sm100 (see
+        // sm100_mma_warpspecialized.hpp); only the *op* changes -- plain
+        // SM90_TMA_LOAD instead of the 2-SM multicast variant. Reusing the
+        // sm100 atom keeps the rank-4 MMA-partitioned DstPipeLayout, which the
+        // Hopper-style make_tma_copy form cannot consume.
+        exec.e(fmt("$ = "
+                   "$make_tma_atom_$_sm100(SM90_TMA_LOAD{}, g_tensor_$, "
                    "DstPipeLayout_${}(_, _, _, Int<0>{}), mma_tiler_$, "
-                   "tiled_mma_$, cluster_layout_vmnk_$);",
-                   tmaParams.guid,
-                   tmaParams.guid,
-                   tmaParams.guid,
-                   tmaParams.tiled_mma.guid,
-                   tmaParams.tiled_mma.guid,
-                   tmaParams.tiled_mma.guid));
-      } else if (tmaParams.multicast_direction == "M_MODE") {
-        exec.e(fmt("auto tma_$ = "
-                   "make_tma_atom_B_sm100(SM100_TMA_2SM_LOAD_MULTICAST{"
-                   "}, g_tensor_$, "
-                   "DstPipeLayout_${}(_, _, _, Int<0>{}), mma_tiler_$, "
-                   "tiled_mma_$, cluster_layout_vmnk_$);",
-                   tmaParams.guid,
+                   "tiled_mma_$, cluster_layout_vmnk_$)$;",
+                   types_only ? fmt("using TMA_$", tmaParams.guid)
+                              : fmt("auto tma_$", tmaParams.guid),
+                   types_only ? "decltype(" : "",
+                   // MMA role, not source-graph position: swapAB makes the
+                   // m_input stensor the MMA's B operand.
+                   is_mma_a ? "A" : "B",
                    tmaParams.guid,
                    tmaParams.guid,
                    tmaParams.tiled_mma.guid,
                    tmaParams.tiled_mma.guid,
-                   tmaParams.tiled_mma.guid));
-      } else {
-        // TODO (zy): Support other multicast directions such as not
-        // multicast
-        assert(false && "Unsupported multicast direction");
+                   tmaParams.tiled_mma.guid,
+                   types_only ? ")" : ""));
       }
     }
   }
@@ -705,7 +768,6 @@ TranspileResult Transpiler::transpile_ugraph() {
 
         std::vector<TiledMMA> tiled_mmas;
         // TODO (zy): Support 1sm_mma
-        bool use_2sm_mma = true;
         // get tma params;
         if (config.target_cc >= GPU_CC::H100) {
           // for inputs that needs tma async copy, init the TMAs
@@ -726,12 +788,32 @@ TranspileResult Transpiler::transpile_ugraph() {
               m_inputs.append(", ");
               tma_dst_pipe_layouts.append(", ");
             }
-            if (tmaParams.m_input) {
+            // Collect the TiledMMA for *every* TMA param, not just the
+            // A-matrix ones. generate_tma_code_blackwell references
+            // tiled_mma_$ / mma_tiler_$ / cluster_layout_vmnk_$ for both the A
+            // (m_input) and B (n_input) operands, so keying the host-side
+            // declarations off m_input alone left the B-operand's symbols
+            // undefined whenever the matching A input was not TMA-pipelined.
+            // Dedup by guid: A and B of the same matmul share one TiledMMA
+            // (both are constructed with that matmul's c_matrix_guid).
+            bool already_declared = false;
+            for (auto const &existing : tiled_mmas) {
+              if (existing.guid == tmaParams.tiled_mma.guid) {
+                already_declared = true;
+                break;
+              }
+            }
+            if (!already_declared) {
               tiled_mmas.push_back(tmaParams.tiled_mma);
             }
           }
           // init tiled_mmas
-          if (config.target_cc == GPU_CC::B200 && use_2sm_mma) {
+          // These host-side declarations (cluster_dim/cluster_shape and the
+          // per-matmul tiled_mma/mma_tiler) are needed for BOTH the 1-SM and
+          // 2-SM paths: the TMA layout derivation and the B200 cluster launch
+          // reference them regardless of multicast. Gating them on use_2sm_mma
+          // left them undeclared once 1-SM became the default.
+          if (config.target_cc == GPU_CC::B200) {
             exec.e("dim3 cluster_dim($, $, $);",
                    bgraph.cluster_dim.x,
                    bgraph.cluster_dim.y,
@@ -745,20 +827,27 @@ TranspileResult Transpiler::transpile_ugraph() {
 
             // declare tiled_mma on host, as tma requires it
             for (auto const &tiled_mma : tiled_mmas) {
+              // Must mirror the device-side emission exactly (same symbol
+              // name): under swapAB the extents, the operand types and the
+              // Major flags all invert together.
               exec.e("TiledMMA tiled_mma_$ = "
-                     "cutlass::gemm::collective::detail::sm100_make_2sm_"
+                     "cutlass::gemm::collective::detail::sm100_make_1sm_"
                      "trivial_tiled_mma<"
                      "$, $, $, "
                      "Shape<Int<$>, Int<$>>, "
                      "decltype(cluster_shape), "
-                     "UMMA::Major::K, "
-                     "UMMA::Major::MN>();",
+                     "UMMA::Major::$, "
+                     "UMMA::Major::$>();",
                      tiled_mma.guid,
-                     tiled_mma.A_type,
-                     tiled_mma.B_type,
+                     tiled_mma.swap_ab ? tiled_mma.B_type : tiled_mma.A_type,
+                     tiled_mma.swap_ab ? tiled_mma.A_type : tiled_mma.B_type,
                      tiled_mma.C_type,
-                     tiled_mma.M_tile_size,
-                     tiled_mma.N_tile_size);
+                     tiled_mma.swap_ab ? tiled_mma.N_tile_size
+                                       : tiled_mma.M_tile_size,
+                     tiled_mma.swap_ab ? tiled_mma.M_tile_size
+                                       : tiled_mma.N_tile_size,
+                     tiled_mma.swap_ab ? "MN" : "K",
+                     tiled_mma.swap_ab ? "K" : "MN");
 
               exec.e("Layout cluster_layout_vmnk_$ = "
                      "tiled_divide(make_layout(cluster_shape), "
@@ -785,12 +874,19 @@ TranspileResult Transpiler::transpile_ugraph() {
             CodeKeeper res;
             if (config.target_cc == GPU_CC::B200) {
               generate_tma_code_blackwell(
-                  res, result.tmaParamsList, use_2sm_mma, cur_op, config);
+                  res, result.tmaParamsList, cur_op, config);
             } else if (config.target_cc == GPU_CC::H100) {
               generate_tma_code_hopper(
                   res, result.tmaParamsList, cur_op, config);
             }
             exec << res;
+
+            // NOTE: a standalone kernel keeps passing each atom by value as a
+            // CUTE_GRID_CONSTANT parameter. Uploading it to global memory (what
+            // a task body must do) would mean a cudaMalloc plus an H2D copy per
+            // operand on EVERY launch -- the atom embeds the gmem base pointer,
+            // so it cannot be uploaded once and reused. Only the task path,
+            // which builds its atoms once at registration, pays that.
 
             exec.e("");
           }
@@ -809,6 +905,18 @@ TranspileResult Transpiler::transpile_ugraph() {
                      tma_tmps,
                      result.smem_size);
             }
+          } else if (config.target_cc == GPU_CC::B200) {
+            // The B200 launch path below goes through
+            // cutlass::launch_kernel_on_cluster, which needs `kernel_ptr`.
+            // Without TMA params the kernel is not templated, but the pointer
+            // still has to exist -- previously it was only declared in the
+            // tmaParamsList branch, so any Blackwell custom op that uses plain
+            // synchronous copies (i.e. no TMA) referenced an undeclared
+            // `kernel_ptr`.
+            exec.e(fmt("auto kernel_ptr = &$;", result.func_name));
+            exec.e("cudaFuncSetAttribute(kernel_ptr, "
+                   "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",
+                   result.smem_size);
           } else {
             exec.e("cudaFuncSetAttribute($, "
                    "cudaFuncAttributeMaxDynamicSharedMemorySize, $);",

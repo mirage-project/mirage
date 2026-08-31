@@ -275,11 +275,10 @@ void register_mugraph(
   // Per-task tensor descriptor. The TBInputOp's stensor carries the per-task
   // tile shape; strides come straight off the DTensor (set at new_input or
   // view-construction time). Views thus need no parent lookup here.
-  auto get_tensor_desc = [](tb::TBInputOp *const &tb_op) -> TensorDesc {
+  auto get_tensor_desc = [](BGraphSlot const &slot) -> TensorDesc {
     TensorDesc desc;
-    assert(tb_op->output_tensors.size() == 1);
-    tb::STensor stensor = tb_op->output_tensors[0];
-    DTensor const &dt = tb_op->dtensor;
+    tb::STensor const &stensor = slot.stensor;
+    DTensor const &dt = slot.dtensor;
     desc.num_dims = stensor.num_dims;
     desc.data_type = stensor.data_type;
     for (int d = stensor.num_dims - 1; d >= 0; d--) {
@@ -291,19 +290,29 @@ void register_mugraph(
 
   // Split a customized op's bgraph into input_ops / output_ops (same quirk
   // as before: outputs live as TBInputOps after the num_inputs mark).
+  // Mirrors split_bgraph_ops in annotated_graph.cc -- see the convention note
+  // there. A handwritten task's bgraph is a pure I/O spec (all TB_INPUT_OPs); a
+  // compiler-generated task's bgraph carries the computation, so its writes are
+  // TB_OUTPUT_OPs and real operators sit in between. Asserting every op is a
+  // TB_INPUT_OP aborted the process on a generated task.
   auto split_ops = [](kn::KNCustomizedOp const *op,
                       int num_inputs,
                       int num_outputs,
-                      std::vector<tb::TBInputOp *> &input_ops,
-                      std::vector<tb::TBInputOp *> &output_ops) {
+                      std::vector<BGraphSlot> &input_ops,
+                      std::vector<BGraphSlot> &output_ops) {
     input_ops.clear();
     output_ops.clear();
+    // See split_bgraph_ops in annotated_graph.cc: only TB_INPUT_OPs describe a
+    // task's I/O. A generated task's TB_OUTPUT_OP is for the transpiler only.
     for (auto const &sub_op : op->bgraph.operators) {
-      assert(sub_op->op_type == mirage::type::TB_INPUT_OP);
+      if (sub_op->op_type != mirage::type::TB_INPUT_OP) {
+        continue;
+      }
+      auto *ip = static_cast<tb::TBInputOp *>(sub_op);
       if ((int)input_ops.size() < num_inputs) {
-        input_ops.push_back(static_cast<tb::TBInputOp *>(sub_op));
+        input_ops.push_back({ip->dtensor, ip->input_map, ip->output_tensors[0]});
       } else {
-        output_ops.push_back(static_cast<tb::TBInputOp *>(sub_op));
+        output_ops.push_back({ip->dtensor, ip->input_map, ip->output_tensors[0]});
       }
     }
     assert((int)input_ops.size() == num_inputs);
@@ -316,8 +325,8 @@ void register_mugraph(
                                  TaskType task_type,
                                  int variant_id,
                                  int num_subtasks,
-                                 std::vector<tb::TBInputOp *> const &input_ops,
-                                 std::vector<tb::TBInputOp *> const &output_ops)
+                                 std::vector<BGraphSlot> const &input_ops,
+                                 std::vector<BGraphSlot> const &output_ops)
       -> std::vector<FullTaskDesc> {
     std::vector<FullTaskDesc> tasks;
     tb::Graph const &bgraph = cur_op->bgraph;
@@ -645,7 +654,7 @@ void register_mugraph(
     tb::Graph const &bgraph = cur_op->bgraph;
     dim3 cur_grid = bgraph.grid_dim;
 
-    std::vector<tb::TBInputOp *> input_ops, output_ops;
+    std::vector<BGraphSlot> input_ops, output_ops;
     split_ops(cur_op, num_inputs, num_outputs, input_ops, output_ops);
 
     int cur_num_subtasks = get_num_subtasks(num_gpus, task_type);
@@ -707,7 +716,7 @@ void register_mugraph(
       tb::Graph const &pgraph = P.op->bgraph;
       // Build bid-lex tasks for every branch in advance.
       std::vector<std::vector<FullTaskDesc>> branch_tasks;
-      std::vector<std::vector<tb::TBInputOp *>> branch_inputs, branch_outputs;
+      std::vector<std::vector<BGraphSlot>> branch_inputs, branch_outputs;
       std::vector<int> branch_num_subtasks;
       std::vector<bool> branch_is_multigpu;
       branch_tasks.reserve(fg.outgoing_edges.size());
@@ -716,7 +725,7 @@ void register_mugraph(
       for (int eidx : fg.outgoing_edges) {
         EdgeInfo const &e = ag.edges[eidx];
         LayerInfo const &B = ag.layers[e.cons_layer];
-        std::vector<tb::TBInputOp *> b_in, b_out;
+        std::vector<BGraphSlot> b_in, b_out;
         split_ops(B.op, B.num_inputs, B.num_outputs, b_in, b_out);
         int b_ns = get_num_subtasks(num_gpus, B.task_type);
         bool b_mg = (B.task_type == TASK_NVSHMEM_ALLGATHER_STRIDED_PUT);
@@ -1033,6 +1042,7 @@ TaskGraphResult print_task_graph(
     std::map<mirage::type::GuidType, IODesc> const &io_configs,
     bool use_json_format) {
   using mirage::runtime::IODesc;
+  TaskRegister *task_register = TaskRegister::get_instance();
   mirage::transpiler::CodeKeeper code;
   mirage::transpiler::CodeKeeper tgbody;
   tgbody.inc_indent();
@@ -1044,6 +1054,13 @@ TaskGraphResult print_task_graph(
     code.e("using json = nlohmann::json;");
   }
   code.e("using namespace mirage::runtime;");
+  // The generated TMA builders are defined next to their task bodies, far below
+  // -- after the cute includes they need. The task loader above calls them, so
+  // declare them here.
+  for (auto const &info : task_register->generated_task_tma) {
+    code.e("static void $(void **tma_out, void *const *input_ptrs);",
+           info.builder_name);
+  }
   // Global variable for runtime JSON path (for kernel reuse across directories)
   if (use_json_format) {
     code.e("");
@@ -1158,6 +1175,33 @@ TaskGraphResult print_task_graph(
 
     code.e("task_desc.outputs[task_desc.num_outputs++] = output;");
     code.e("}");
+
+    // A generated task body builds its TMA atoms through the host builder the
+    // muGraph backend emitted next to it. Deliberately outside MPK_ENABLE_TMA:
+    // a generated body that takes descriptors cannot run without them, so
+    // skipping this would fault rather than fall back.
+    if (!task_register->generated_task_tma.empty()) {
+      code.e("if (task.at(\"task_type\") == TASK_GENERATED) {");
+      code.e("void *mpk_gen_bases[MAX_INPUTS_PER_TASK];");
+      code.e("for (int i = 0; i < task_desc.num_inputs; i++) {");
+      code.e("mpk_gen_bases[i] = task_desc.inputs[i].base_ptr;");
+      code.e("}");
+      code.e("switch (task_desc.variant_id) {");
+      for (auto const &info : task_register->generated_task_tma) {
+        code.e("case $: {", info.variant_id);
+        code.e("void *mpk_gen_tma[$];", info.input_ids.size());
+        code.e("$(mpk_gen_tma, mpk_gen_bases);", info.builder_name);
+        for (size_t i = 0; i < info.input_ids.size(); i++) {
+          code.e("task_desc.inputs[$].tma_desc_ptrs[0] = mpk_gen_tma[$];",
+                 info.input_ids[i], i);
+        }
+        code.e("break;");
+        code.e("}");
+      }
+      code.e("default: break;");
+      code.e("}");
+      code.e("}");
+    }
 
     // create TMA desc for each task
     code.e("#ifdef MPK_ENABLE_TMA");
@@ -1388,17 +1432,24 @@ TaskGraphResult print_task_graph(
         dynamic_cast<kn::KNCustomizedOp const *>(op);
     tb::Graph const &bgraph = cur_op->bgraph;
     dim3 bid;
-    std::vector<tb::TBInputOp *> input_ops;
-    std::vector<tb::TBInputOp *> output_ops;
+    std::vector<BGraphSlot> input_ops;
+    std::vector<BGraphSlot> output_ops;
     int num_inputs = std::get<0>(task_config);
     // int num_outputs = std::get<1>(task_config);
     TaskType task_type = std::get<2>(task_config);
-    for (auto const &op : bgraph.operators) {
-      assert(op->op_type == mirage::type::TB_INPUT_OP);
+    // Same two-convention split as split_ops above (that one is a lambda in a
+    // different function, so the logic is repeated rather than shared): a
+    // handwritten task's bgraph is a pure I/O spec of TB_INPUT_OPs, while a
+    // generated task's carries the computation and writes via TB_OUTPUT_OPs.
+    for (auto const &bop : bgraph.operators) {
+      if (bop->op_type != mirage::type::TB_INPUT_OP) {
+        continue;
+      }
+      auto *ip = static_cast<tb::TBInputOp *>(bop);
       if (input_ops.size() < (size_t)num_inputs) {
-        input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+        input_ops.push_back({ip->dtensor, ip->input_map, ip->output_tensors[0]});
       } else {
-        output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+        output_ops.push_back({ip->dtensor, ip->input_map, ip->output_tensors[0]});
       }
     }
 
@@ -1442,7 +1493,7 @@ TaskGraphResult print_task_graph(
                 {"task_offset", task_desc.task_metadata.task_offset}};
 
             for (int i = 0; i < task_desc.num_inputs; i++) {
-              if (input_ops[i]->dtensor == kernel::DTensor::EMPTY_TENSOR) {
+              if (input_ops[i].dtensor == kernel::DTensor::EMPTY_TENSOR) {
                 json json_dims = json::array();
                 json json_strides = json::array();
                 json_task["inputs"].push_back(
@@ -1454,12 +1505,12 @@ TaskGraphResult print_task_graph(
                 continue;
               }
               off_t offset = 0;
-              int num_dims = input_ops[i]->dtensor.num_dims;
-              int3 input_map = input_ops[i]->input_map;
+              int num_dims = input_ops[i].dtensor.num_dims;
+              int3 input_map = input_ops[i].map;
               // For views, the IODesc lives under the root storage tensor's
               // GUID; resolve_base_guid() returns the view's own guid for
               // non-virtual tensors (no-op for the common path).
-              DTensor const &in_dt = input_ops[i]->dtensor;
+              DTensor const &in_dt = input_ops[i].dtensor;
               size_t io_lookup_guid = in_dt.resolve_base_guid();
               IODesc io_desc = io_configs.find(io_lookup_guid)->second;
               if (!in_dt.is_virtual()) {
@@ -1634,12 +1685,12 @@ TaskGraphResult print_task_graph(
               off_t offset = 0;
               if (task_type == runtime::TASK_NVSHMEM_ALLGATHER_STRIDED_PUT) {
                 // A special case for buffer-style tensors.
-                offset = my_gpu_id * input_ops[0]->dtensor.num_elements();
+                offset = my_gpu_id * input_ops[0].dtensor.num_elements();
               }
-              int3 output_map = output_ops[i]->input_map;
+              int3 output_map = output_ops[i].map;
               // Views as outputs (write-views) resolve to the parent storage's
               // IODesc via base_guid; view_offset is added below.
-              DTensor const &out_dt = output_ops[i]->dtensor;
+              DTensor const &out_dt = output_ops[i].dtensor;
               IODesc io_desc =
                   io_configs.find(out_dt.resolve_base_guid())->second;
               assert(io_desc.type != IODesc::FusedTorchTensor);
@@ -1804,6 +1855,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_DFLASH_NORM_ROPE_SM100] =
       "TASK_DFLASH_NORM_ROPE_SM100";
   task_type_to_name[TASK_DFLASH_KV_STORE_SM100] = "TASK_DFLASH_KV_STORE_SM100";
+  task_type_to_name[TASK_ATTN_PREP_SM100] = "TASK_ATTN_PREP_SM100";
+  task_type_to_name[TASK_ATTN_FINALIZE_SM100] = "TASK_ATTN_FINALIZE_SM100";
   task_type_to_name[TASK_GLM_MOE_ROUTER_SM100] = "TASK_GLM_MOE_ROUTER_SM100";
   task_type_to_name[TASK_INKLING_SCONV_SM100] = "TASK_INKLING_SCONV_SM100";
   task_type_to_name[TASK_INKLING_MOE_ROUTER_SM100] =
@@ -1873,10 +1926,56 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_NVSHMEM_TILE_ALLREDUCE] =
       "TASK_NVSHMEM_TILE_ALLREDUCE";
 
+  // Compiler-generated task bodies. These are transpiled muGraph device
+  // functions (see TaskRegister::register_generated_task); they must be defined
+  // before _execute_task, whose TASK_GENERATED variants call them by name.
+  task_type_to_name[TASK_GENERATED] = "TASK_GENERATED";
+  if (!task_register->generated_task_defs.empty()) {
+    // The bodies call the threadblock runtime (tb::InputChunkedSyncCopy etc.)
+    // and use cute's type names (bfloat16_t). Pull those in only when a
+    // generated task is actually present, so a megakernel built purely from
+    // handwritten tasks is byte-identical to before.
+    // Deliberately NOT threadblock/threadblock.h: that umbrella pulls in
+    // threadblock/profiler.h, which redefines tb::get_block_idx and friends
+    // already provided by persistent_kernel/profiler.h in this TU. Include the
+    // pieces a generated body actually uses instead.
+    //
+    // cute must be in scope BEFORE these headers -- they use `_` and other cute
+    // names at namespace scope without qualifying them.
+    // MPK compiles with -DMIRAGE_GRACE_BLACKWELL, but the transpiler runtime
+    // tests for MIRAGE_BLACKWELL. Without the alias, tb::wg_sync falls through
+    // to its `#elif defined(__CUDA_ARCH__)` branch and emits `brkpt` -- the
+    // generated task then died with "unspecified launch failure", which
+    // compute-sanitizer reported as a Trace/breakpoint trap (an actual brkpt,
+    // not a memory error).
+    code.e("#if defined(MIRAGE_GRACE_BLACKWELL) && !defined(MIRAGE_BLACKWELL)");
+    code.e("#define MIRAGE_BLACKWELL");
+    code.e("#endif");
+    code.e("#include <cute/tensor.hpp>");
+    code.e("using namespace cute;");
+    code.e("#include \"threadblock/utils.h\"");
+    code.e("#include \"threadblock/input.h\"");
+    code.e("#include \"threadblock/output.h\"");
+    code.e("#include \"threadblock/epilogues.h\"");
+    code.e("#include \"threadblock/element_unary.h\"");
+    code.e("#include \"threadblock/element_binary.h\"");
+    code.e("#include \"threadblock/forloop_accum.h\"");
+    code.e("#include \"threadblock/reduction.h\"");
+    code.e("#include \"threadblock/matmul.h\"");
+    code.e("#include \"threadblock/blackwell_matmul.h\"");
+    // Needed as soon as a body has a K-loop: pipelined operands are TMA loads
+    // driven by tb::BlackwellAsyncPipeline.
+    code.e("#include \"threadblock/blackwell_pipeline.h\"");
+    code.e("");
+    for (auto const &def : task_register->generated_task_defs) {
+      code.e("$", def);
+      code.e("");
+    }
+  }
+
   code.e("__device__ __forceinline__");
   code.e("void _execute_task(TaskDesc const* task_desc,");
   code.e("                   RuntimeConfig const &runtime_config) {");
-  TaskRegister *task_register = TaskRegister::get_instance();
   bool first_task = true;
   for (auto const &task : task_register->all_task_variants) {
     for (size_t variant_id = 0; variant_id < task.second.size(); variant_id++) {

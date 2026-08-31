@@ -23,7 +23,7 @@ namespace threadblock {
 STensor Graph::forloop_accum(STensor const &input,
                              mirage::type::TBOperatorType type) {
   TBOperator *op = create_forloop_accum_op(input, type);
-  assert(op != nullptr);
+  check_tb_op(op, "forloop_accum");
   operators.push_back(op);
   return op->output_tensors[0];
 }
@@ -31,7 +31,7 @@ STensor Graph::forloop_accum(STensor const &input,
 STensor *Graph::forloop_accum(STensor const *input,
                               mirage::type::TBOperatorType type) {
   TBOperator *op = create_forloop_accum_op(*input, type);
-  assert(op != nullptr);
+  check_tb_op(op, "forloop_accum");
   operators.push_back(op);
   return &op->output_tensors[0];
 }
@@ -58,7 +58,7 @@ STensor Graph::forloop_accum_rescale(STensor const &input,
                                      STensor const &rescale,
                                      mirage::type::TBOperatorType type) {
   TBOperator *op = create_forloop_accum_rescale_op(input, rescale, type);
-  assert(op != nullptr);
+  check_tb_op(op, "forloop_accum_rescale");
   operators.push_back(op);
   return op->output_tensors[0];
 }
@@ -67,7 +67,7 @@ STensor *Graph::forloop_accum_rescale(STensor const *input,
                                       STensor const *rescale,
                                       mirage::type::TBOperatorType type) {
   TBOperator *op = create_forloop_accum_rescale_op(*input, *rescale, type);
-  assert(op != nullptr);
+  check_tb_op(op, "forloop_accum_rescale");
   operators.push_back(op);
   return &op->output_tensors[0];
 }
@@ -94,14 +94,14 @@ TBOperator *
 
 STensor Graph::forloop_accum_max(STensor const &input) {
   TBOperator *op = create_forloop_accum_max_op(input);
-  assert(op != nullptr);
+  check_tb_op(op, "forloop_accum_max");
   operators.push_back(op);
   return op->output_tensors[0];
 }
 
 STensor *Graph::forloop_accum_max(STensor const *input) {
   TBOperator *op = create_forloop_accum_max_op(*input);
-  assert(op != nullptr);
+  check_tb_op(op, "forloop_accum_max");
   operators.push_back(op);
   return &op->output_tensors[0];
 }

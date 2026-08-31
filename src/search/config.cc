@@ -25,6 +25,15 @@ GeneratorConfig GeneratorConfig::get_default_config() {
           type::KN_MUL_OP,
           type::KN_DIV_OP,
           type::KN_POW_OP,
+          // KN_REDUCTION_2_OP stays out. Enabling it does not merely fail to
+          // find schedules -- it corrupts memory: a reduction spec crashes
+          // with "stack smashing detected". With it out, search returns zero
+          // candidates for a reduction instead, which is at least safe.
+          //
+          // This is what blocks expressing a softmax in a searched task: the
+          // numerator exp(Q@K^T + mask) @ V searches fine, but the
+          // denominator needs a reduction. See
+          // tests/runtime_python/test_mode/test_attention_in_graph.py.
           // type::KN_REDUCTION_2_OP,
           type::KN_CUSTOMIZED_OP,
       } /* knop_to_explore */,

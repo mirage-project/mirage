@@ -1,7 +1,8 @@
 """MPK batch-size performance test.
 
-Runs the Qwen3 MPK demo pipeline with a 1-token prompt (".") and decodes to
-the full sequence length (default 512 total tokens, --ignore-eos recommended),
+Runs the Qwen3 MPK demo pipeline with a configurable repeated-token prompt and
+decodes to the full sequence length (default 512 total tokens,
+--ignore-eos recommended),
 reporting per-token latency and aggregate throughput. Sweep
 --max-num-batched-tokens / --max-num-batched-requests externally to compare
 batch configurations, e.g.:
@@ -33,6 +34,26 @@ PAGE_SIZE = 4096
 PROMPT = "."
 
 
+def parse_layer_spec(spec, layer_idx):
+    """Which layers an env flag selects: "0"/""/"none" = no layers,
+    "1"/"all" = every layer, "first:N" = layers below N, or a comma list of
+    indices and inclusive ranges like "0,2,5-8". MPK_COMPILED_MLP is one."""
+    if spec in ("0", "", "none"):
+        return False
+    if spec in ("1", "all"):
+        return True
+    if spec.startswith("first:"):
+        return layer_idx < int(spec.split(":")[1])
+    chosen = set()
+    for part in spec.split(","):
+        if "-" in part:
+            lo, hi = part.split("-")
+            chosen.update(range(int(lo), int(hi) + 1))
+        else:
+            chosen.add(int(part))
+    return layer_idx in chosen
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-num-batched-tokens", default=8, type=int,
@@ -42,10 +63,17 @@ def parse_args():
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--max-seq-length", default=512, type=int,
                         help="Total sequence length (prompt + generation)")
+    parser.add_argument("--prompt-length", default=1, type=int,
+                        help="Prompt tokens per request (repeats the '.' token)")
     parser.add_argument("--model", type=str, default="Qwen/Qwen3-8B",
                         help="Model path on hugging face")
     parser.add_argument("--ignore-eos", action="store_true",
                         help="Ignore eos token during generation")
+    parser.add_argument("--profiling", action="store_true",
+                        help="Record per-task begin/end events; writes a "
+                             "perfetto trace and a CSV next to --output-dir. "
+                             "Both model sources take it, so per-task "
+                             "durations are comparable across them.")
     return parser.parse_args()
 
 
@@ -70,14 +98,23 @@ def main():
 
     total_num_requests = args.max_num_batched_requests
 
-    # 1-token prompt: tokenize "." directly (no chat template).
+    # Tokenize "." directly (no chat template), then repeat that token to make
+    # deterministic synthetic prompts without relying on tokenizer whitespace
+    # behavior. This lets the same runner measure full-model prefill/TTFT.
     model_inputs = tokenizer([PROMPT], return_tensors="pt").to(model.device)
-    prompt_len = model_inputs.input_ids.shape[-1]
-    assert prompt_len == 1, f"Expected 1-token prompt, got {prompt_len} tokens"
+    assert model_inputs.input_ids.shape[-1] == 1
+    prompt_len = args.prompt_length
+    assert prompt_len >= 1
+    assert args.max_seq_length > prompt_len
+    total_prompt_tokens = total_num_requests * prompt_len
+    assert args.max_num_batched_tokens >= total_prompt_tokens, (
+        "max_num_batched_tokens must cover the flattened prefill batch: "
+        f"{args.max_num_batched_tokens} < {total_num_requests} * {prompt_len}")
+    prompt_ids = model_inputs.input_ids[0].repeat(prompt_len)
 
     tokens = torch.full((total_num_requests, args.max_seq_length), 0,
                         dtype=torch.long, device="cuda")
-    tokens[:, :prompt_len] = model_inputs.input_ids[0]
+    tokens[:, :prompt_len] = prompt_ids
     prompt_lengths = torch.full((total_num_requests,), prompt_len,
                                 dtype=torch.int, device="cuda")
 
@@ -110,6 +147,28 @@ def main():
     head_dim = model.config.head_dim
     fused_outdim_1 = (num_q_heads + 2 * num_kv_heads) * head_dim
     fused_outdim_2 = 2 * intermediate_size
+
+    # Searched once, replayed per layer (see the searched_silu_mul branch).
+    searched_silu_mul_sched = None
+    searched_linear_sched = None
+    mlp_spec = os.environ.get("MPK_COMPILED_MLP", "0")
+    mlp_impl = os.environ.get("MPK_COMPILED_MLP_IMPL", "fused")
+    if mlp_impl not in (
+        "fused",
+        "separate",
+        "three_task",
+        "searched_silu_mul",
+        "searched_linear",
+        "two_task_up_silu",
+        "two_task_silu_down",
+    ):
+        raise ValueError(
+            "MPK_COMPILED_MLP_IMPL must be 'fused', 'separate', "
+            "'three_task', 'searched_silu_mul', 'searched_linear', "
+            "'two_task_up_silu', or "
+            "'two_task_silu_down', got "
+            f"{mlp_impl!r}"
+        )
 
     num_workers, num_schedulers = mi.get_configurations_from_gpu(0)
     qo_indptr_buffer = torch.empty(
@@ -146,7 +205,11 @@ def main():
             "paged_kv_indices_buffer": paged_kv_indices_buffer,
             "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
         },
-        profiler_tensor=None,
+        profiler_tensor=(
+            torch.zeros(
+                int(os.environ.get("MPK_PROFILER_ENTRIES", 3000 * 128)),
+                dtype=torch.uint64, device="cuda").contiguous()
+            if args.profiling else None),
         trace_name="",
         spec_decode_config=None,
         use_cutlass_kernel=True,
@@ -186,6 +249,23 @@ def main():
         dims=(args.max_num_batched_tokens, fused_outdim_2),
         dtype=mi.bfloat16, name="mlp_mid", io_category="cuda_tensor",
     )
+    generated_mlp_gate = None
+    generated_mlp_up = None
+    if (
+        mlp_impl in ("separate", "searched_silu_mul", "searched_linear",
+                     "three_task", "two_task_silu_down")
+        and mlp_spec not in ("0", "", "none")
+    ):
+        generated_mlp_gate = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, intermediate_size),
+            dtype=mi.bfloat16,
+            name="generated_mlp_gate", io_category="cuda_tensor",
+        )
+        generated_mlp_up = mpk.new_tensor(
+            dims=(args.max_num_batched_tokens, intermediate_size),
+            dtype=mi.bfloat16,
+            name="generated_mlp_up", io_category="cuda_tensor",
+        )
     silu_mul_out = mpk.new_tensor(
         dims=(args.max_num_batched_tokens, intermediate_size),
         dtype=mi.bfloat16, name="silu_mul_out", io_category="cuda_tensor",
@@ -208,6 +288,43 @@ def main():
     )
     argmax_out = mpk.attach_input(torch_tensor=output_tokens, name="output_token")
 
+    # MPK_MODEL_SOURCE=mugraph builds the model from the low-level IR
+    # (models/qwen3/builder_low_level_ir.py)
+    # instead of the imperative *_layer calls below. The boundaries are the
+    # same ones these calls imply -- partition_as_today derives them from the
+    # graph -- so what changes is that every task body is generated.
+    if os.environ.get("MPK_MODEL_SOURCE", "imperative") == "mugraph":
+        from mirage.mpk.models.qwen3 import builder_low_level_ir as LLIR
+        from mirage.mpk.models.qwen3.builder_low_level_ir import Qwen3Shapes
+
+        shapes = Qwen3Shapes.from_hf(model.config, args.max_num_batched_tokens)
+        shapes.max_seq = position_embeddings[0].shape[1]
+        shapes.vocab_padded = vocab_size
+        default_hw = "lm_head," + ",".join(f"l{i}.qkv" for i in range(model.config.num_hidden_layers))
+        hw = tuple(x for x in os.environ.get("MPK_HANDWRITTEN", default_hw).split(",") if x)
+        
+        graph, groups = LLIR.plan(shapes)
+        bindings, raw_weights = LLIR.bind_weights(
+            mpk, model, shapes, lm_head_weight=lm_head_weight, hand_written=hw,
+            cos=position_embeddings[0][0, :shapes.max_seq, :],
+            sin=position_embeddings[1][0, :shapes.max_seq, :]
+        )
+
+        bindings["input_tokens"] = x
+        meta = {"argmax_value": argmax_part_value,
+                "argmax_index": argmax_part_index,
+                "output_token": argmax_out}
+
+        graph, groups, _ = LLIR.build(
+            mpk, shapes, bindings, meta, planned=(graph, groups),
+            raw_weights=raw_weights, hand_written=hw, verbose=True)
+        print(f"  model source:             mugraph "
+              f"({len(graph)} nodes -> {len(groups)} tasks)", flush=True)
+        mpk.compile(output_dir=args.output_dir)
+        return run_and_report(args, mpk, model, tokenizer, tokens, step,
+                              prompt_len, total_num_requests, mlp_spec,
+                              mlp_impl, "mugraph")
+
     # Add Embed
     w = mpk.attach_input(
         torch_tensor=model.model.embed_tokens.weight, name="embed_tokens"
@@ -220,7 +337,6 @@ def main():
 
     target_cc = (torch.cuda.get_device_properties(0).major * 10
                  + torch.cuda.get_device_properties(0).minor)
-    # A current workaround to use splitk for only B200 GPUs
     use_splitk = (target_cc == 100)
 
     for i, layer in enumerate(model.model.layers):
@@ -318,22 +434,239 @@ def main():
             input=x, weight=w_norm, output=rmsnorm_out,
             grid_dim=(mpk.max_num_batched_tokens, 1, 1), block_dim=(128, 1, 1),
         )
-        mpk.linear_layer(
-            input=rmsnorm_out, weight=w_gatedup, output=mlp_mid,
-            grid_dim=(rmsnorm_num_tasks, 1, 1), block_dim=(128, 1, 1),
-        )
-        mpk.silu_mul_layer(
-            input=mlp_mid, output=silu_mul_out,
-            grid_dim=(rmsnorm_num_tasks // 2, 1, 1), block_dim=(128, 1, 1),
-        )
+        if parse_layer_spec(mlp_spec, i):
+            # Compiler-generated gated MLP. Weights are pre-transposed (K, N)
+            # because generated_linear_layer's TB matmul consumes that layout.
+            wg_t = mpk.attach_input(
+                torch_tensor=layer.mlp.gate_proj.weight.t().contiguous(),
+                name=f"layer_{i}_gate_proj_t")
+            wu_t = mpk.attach_input(
+                torch_tensor=layer.mlp.up_proj.weight.t().contiguous(),
+                name=f"layer_{i}_up_proj_t")
+            intermediate = layer.mlp.gate_proj.weight.shape[0]
+            generated_grid = (intermediate // 64, 1, 1)
+            generated_block = (256, 1, 1)
+            if mlp_impl in ("fused", "two_task_up_silu"):
+                # One task: both matmuls, SiLU, and multiply. Gate/up do not
+                # round-trip through global memory.
+                mpk.generated_swiglu_layer(
+                    input=rmsnorm_out, gate_weight_t=wg_t, up_weight_t=wu_t,
+                    output=silu_mul_out,
+                    grid_dim=generated_grid, block_dim=generated_block,
+                    forloop_range=hidden_size // 64,
+                )
+            elif mlp_impl == "separate":
+                # Three tasks with materialized gate/up tensors:
+                #   gate = x @ Wg; up = x @ Wu; out = silu(gate) * up.
+                # This intentionally exposes the scheduling/overlap behavior
+                # of separate compiler-generated tasks.
+                assert generated_mlp_gate is not None
+                assert generated_mlp_up is not None
+                for weight_t, output in (
+                    (wg_t, generated_mlp_gate),
+                    (wu_t, generated_mlp_up),
+                ):
+                    mpk.generated_linear_layer(
+                        input=rmsnorm_out, weight_t=weight_t, output=output,
+                        grid_dim=generated_grid, block_dim=generated_block,
+                        forloop_range=hidden_size // 64,
+                    )
+                mpk.generated_silu_mul_layer(
+                    gate=generated_mlp_gate, up=generated_mlp_up,
+                    output=silu_mul_out,
+                    grid_dim=generated_grid, block_dim=generated_block,
+                )
+            elif mlp_impl == "searched_silu_mul":
+                # 'separate', with the SiLU-mul task's schedule discovered by
+                # search() instead of hand-written. The search runs ONCE and
+                # the resulting schedule is replayed for every layer: the task
+                # type is identical across all of them, which is the property
+                # that makes per-task search affordable at model scale.
+                assert generated_mlp_gate is not None
+                assert generated_mlp_up is not None
+                for weight_t, output in (
+                    (wg_t, generated_mlp_gate),
+                    (wu_t, generated_mlp_up),
+                ):
+                    mpk.generated_linear_layer(
+                        input=rmsnorm_out, weight_t=weight_t, output=output,
+                        grid_dim=generated_grid, block_dim=generated_block,
+                        forloop_range=hidden_size // 64,
+                    )
+                if searched_silu_mul_sched is None:
+                    from mirage.mpk.lowering.task_search import (
+                        Schedule, TaskSpec, TensorSpec, search_task_schedules)
+                    # A ranking driver evaluates ONE candidate per process by
+                    # building the whole model with it, so it hands the chosen
+                    # schedule in rather than having each run search again
+                    # (search is randomized; re-searching would not even give
+                    # the same candidate set).
+                    sched_json = os.environ.get("MPK_SEARCHED_SCHEDULE_JSON")
+                    if sched_json:
+                        with open(sched_json) as f:
+                            cands = json.load(f)
+                        idx = int(os.environ.get("MPK_SEARCHED_SCHEDULE_INDEX", "0"))
+                        searched_silu_mul_sched = Schedule.from_dict(cands[idx])
+                        print(f"[searched] candidate {idx}/{len(cands)}: "
+                              f"{searched_silu_mul_sched.describe()}", flush=True)
+                    else:
+                        # NOT `tokens` -- that name holds the decoded-token
+                        # tensor this script reports at the end.
+                        n_tok = args.max_num_batched_tokens
+                        searched_silu_mul_sched = search_task_schedules(
+                            TaskSpec(
+                                "silu_mul",
+                                lambda kn, t: kn.mul(kn.silu(t[0]), t[1]),
+                                [TensorSpec((n_tok, intermediate)),
+                                 TensorSpec((n_tok, intermediate))],
+                            ),
+                            grid_dim=generated_grid,
+                        )[0]
+                        print(f"[searched] {searched_silu_mul_sched.describe()}",
+                              flush=True)
+                from mirage.mpk.lowering.task_search import register_searched_task
+                register_searched_task(
+                    mpk, searched_silu_mul_sched,
+                    inputs=[generated_mlp_gate, generated_mlp_up],
+                    output=silu_mul_out)
+            elif mlp_impl == "searched_linear":
+                # 'separate', with the two gate/up PROJECTIONS' schedules
+                # discovered rather than written, and silu_mul left as the
+                # hand-written bgraph. The matmuls are where the time is, and
+                # unlike silu_mul they have a real schedule space: the K-loop
+                # split (forloop_range) is a free choice search makes.
+                # One schedule serves both projections and all 28 layers --
+                # same shapes, same task type.
+                assert generated_mlp_gate is not None
+                assert generated_mlp_up is not None
+                if searched_linear_sched is None:
+                    from mirage.mpk.lowering.task_search import (
+                        Schedule, TaskSpec, TensorSpec, search_task_schedules)
+                    sched_json = os.environ.get("MPK_SEARCHED_SCHEDULE_JSON")
+                    if sched_json:
+                        with open(sched_json) as f:
+                            cands = json.load(f)
+                        idx = int(os.environ.get("MPK_SEARCHED_SCHEDULE_INDEX", "0"))
+                        searched_linear_sched = Schedule.from_dict(cands[idx])
+                        print(f"[searched] candidate {idx}/{len(cands)}: "
+                              f"{searched_linear_sched.describe()}", flush=True)
+                    else:
+                        n_tok = args.max_num_batched_tokens
+                        searched_linear_sched = search_task_schedules(
+                            TaskSpec(
+                                "linear",
+                                lambda kn, t: kn.matmul(t[0], t[1]),
+                                [TensorSpec((n_tok, hidden_size)),
+                                 TensorSpec((hidden_size, intermediate))],
+                            ),
+                            grid_dim=generated_grid,
+                        )[0]
+                        print(f"[searched] {searched_linear_sched.describe()}",
+                              flush=True)
+                from mirage.mpk.lowering.task_search import register_searched_task
+                for weight_t, output in (
+                    (wg_t, generated_mlp_gate),
+                    (wu_t, generated_mlp_up),
+                ):
+                    register_searched_task(
+                        mpk, searched_linear_sched,
+                        inputs=[rmsnorm_out, weight_t], output=output)
+                mpk.generated_silu_mul_layer(
+                    gate=generated_mlp_gate, up=generated_mlp_up,
+                    output=silu_mul_out,
+                    grid_dim=generated_grid, block_dim=generated_block,
+                )
+            elif mlp_impl in ("three_task", "two_task_silu_down"):
+                # Materialize the gate/up projections together. Three-task
+                # mode materializes SiLU too; two_task_silu_down consumes the
+                # gate/up tensors directly in its fused second task below.
+                assert generated_mlp_gate is not None
+                assert generated_mlp_up is not None
+                mpk.generated_gate_up_layer(
+                    input=rmsnorm_out,
+                    gate_weight_t=wg_t,
+                    up_weight_t=wu_t,
+                    gate_output=generated_mlp_gate,
+                    up_output=generated_mlp_up,
+                    grid_dim=generated_grid,
+                    block_dim=generated_block,
+                    forloop_range=hidden_size // 64,
+                )
+                if mlp_impl == "three_task":
+                    mpk.generated_silu_mul_layer(
+                        gate=generated_mlp_gate,
+                        up=generated_mlp_up,
+                        output=silu_mul_out,
+                        grid_dim=generated_grid,
+                        block_dim=generated_block,
+                    )
+        else:
+            mpk.linear_layer(
+                input=rmsnorm_out, weight=w_gatedup, output=mlp_mid,
+                grid_dim=(rmsnorm_num_tasks, 1, 1), block_dim=(128, 1, 1),
+            )
+            mpk.silu_mul_layer(
+                input=mlp_mid, output=silu_mul_out,
+                grid_dim=(rmsnorm_num_tasks // 2, 1, 1), block_dim=(128, 1, 1),
+            )
         # add silu_mul_linear layer
         w = mpk.attach_input(
             torch_tensor=layer.mlp.down_proj.weight, name=f"layer_{i}_down_proj"
         )
-        if use_splitk:
-            mlp_out = x
+        if parse_layer_spec(mlp_spec, i) and mlp_impl in (
+            "three_task", "two_task_up_silu", "two_task_silu_down"
+        ):
+            assert use_splitk, "complete generated MLP currently targets B200"
+            w_t = mpk.attach_input(
+                torch_tensor=layer.mlp.down_proj.weight.t().contiguous(),
+                name=f"layer_{i}_down_proj_t",
+            )
+            generated_mlp_down = mpk.new_tensor(
+                dims=(args.max_num_batched_tokens, hidden_size),
+                dtype=mi.bfloat16,
+                name=f"layer_{i}_generated_mlp_down",
+                io_category="cuda_tensor",
+            )
+            next_x = mpk.new_tensor(
+                dims=(args.max_num_batched_tokens, hidden_size),
+                dtype=mi.bfloat16,
+                name=f"layer_{i}_generated_mlp_out",
+                io_category="cuda_tensor",
+            )
+            if mlp_impl == "two_task_silu_down":
+                assert generated_mlp_gate is not None
+                assert generated_mlp_up is not None
+                mpk.generated_silu_mul_linear_layer(
+                    gate=generated_mlp_gate,
+                    up=generated_mlp_up,
+                    weight_t=w_t,
+                    output=generated_mlp_down,
+                    grid_dim=(hidden_size // 64, 1, 1),
+                    block_dim=(256, 1, 1),
+                    forloop_range=intermediate_size // 64,
+                )
+            else:
+                mpk.generated_linear_layer(
+                    input=silu_mul_out,
+                    weight_t=w_t,
+                    output=generated_mlp_down,
+                    grid_dim=(hidden_size // 64, 1, 1),
+                    block_dim=(256, 1, 1),
+                    forloop_range=intermediate_size // 64,
+                )
+            # Residual addition is outside the generated MLP stages and
+            # remains an MPK handwritten task.
+            mpk.elementwise_add_layer(
+                input_a=generated_mlp_down,
+                input_b=x,
+                output=next_x,
+                grid_dim=(hidden_size // 64, 1, 1),
+                block_dim=(128, 1, 1),
+            )
+            x = next_x
+        elif use_splitk:
             mpk.splitk_linear_layer(
-                input=silu_mul_out, weight=w, output=mlp_out,
+                input=silu_mul_out, weight=w, output=x,
                 grid_dim=(hidden_size // 128, 128 * 128 // hidden_size, 1),
                 block_dim=(256, 1, 1),
             )
@@ -342,7 +675,7 @@ def main():
                 input=silu_mul_out, weight=w, residual=x, output=mlp_out,
                 grid_dim=(hidden_size // 64, 1, 1), block_dim=(128, 1, 1),
             )
-        x = mlp_out
+            x = mlp_out
 
     # add final rmsnorm + lm_head + argmax
     w_norm = mpk.attach_input(
@@ -372,6 +705,18 @@ def main():
 
     mpk.compile(output_dir=args.output_dir)
 
+    return run_and_report(args, mpk, model, tokenizer, tokens, step,
+                          prompt_len, total_num_requests,
+                          mlp_spec, mlp_impl, "imperative")
+
+
+def run_and_report(args, mpk, model, tokenizer, tokens, step, prompt_len,
+                   total_num_requests, mlp_spec, mlp_impl, source):
+    """Launch the megakernel, time it, and print the summary.
+
+    Shared by both model sources: the imperative *_layer calls and the
+    graph path (MPK_MODEL_SOURCE=mugraph), so their numbers are produced
+    by identical code and are comparable."""
     starter = torch.cuda.Event(enable_timing=True)
     ender = torch.cuda.Event(enable_timing=True)
 
@@ -399,6 +744,14 @@ def main():
     print("==================== MPK Batch Perf ====================")
     print(f"  max_num_batched_tokens:   {args.max_num_batched_tokens}")
     print(f"  max_num_batched_requests: {args.max_num_batched_requests}")
+    print(f"  model source:             {source}")
+    active_mlp_impl = (
+        mlp_impl
+        if any(parse_layer_spec(mlp_spec, i)
+               for i in range(len(model.model.layers)))
+        else "handwritten"
+    )
+    print(f"  MLP implementation:       {active_mlp_impl}")
     print(f"  prompt length:            {prompt_len}")
     print(f"  sequence length:          {seq_len} / {args.max_seq_length}")
     print(f"  generated (per request):  {per_request_generated}")
@@ -412,18 +765,36 @@ def main():
         print(f"WARNING: expected to decode to {args.max_seq_length} tokens "
               f"with --ignore-eos, but stopped at {seq_len}")
 
+    # Token ids for cross-configuration comparison. Greedy argmax makes the
+    # decode deterministic in principle, so two configurations that compute the
+    # same thing should agree -- until bf16 rounding differences flip a
+    # near-tie, after which the sequences diverge for good.
+    dump_tokens = os.environ.get("MPK_DUMP_TOKENS")
+    if dump_tokens:
+        with open(dump_tokens, "w") as f:
+            json.dump({
+                "tokens": tokens[:, :seq_len].tolist(),
+                "prompt_length": prompt_len,
+                "sequence_length": seq_len,
+                "mlp_implementation": active_mlp_impl,
+            }, f)
+        print(f"Saved token ids to {dump_tokens}")
+
     # -------- Dump result JSON ----------
     os.makedirs(DEFAULT_SAVE_DIR, exist_ok=True)
     result_path = os.path.join(
         DEFAULT_SAVE_DIR,
         f"batch_perf_t{args.max_num_batched_tokens}"
-        f"_r{args.max_num_batched_requests}.json",
+        f"_r{args.max_num_batched_requests}"
+        f"_p{prompt_len}_s{args.max_seq_length}.json",
     )
     result = {
         "max_num_batched_tokens": args.max_num_batched_tokens,
         "max_num_batched_requests": args.max_num_batched_requests,
         "max_seq_length": args.max_seq_length,
         "model": args.model,
+        "compiled_mlp_layer_spec": mlp_spec,
+        "mlp_implementation": active_mlp_impl,
         "prompt_length": prompt_len,
         "sequence_length": seq_len,
         "generate_length_per_request": per_request_generated,
@@ -435,6 +806,7 @@ def main():
     with open(result_path, "w") as f:
         json.dump(result, f, indent=2)
     print(f"Saved perf result to {result_path}")
+
 
 
 if __name__ == "__main__":

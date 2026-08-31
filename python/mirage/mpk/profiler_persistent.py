@@ -46,6 +46,35 @@ event_name_list = {
     162: "TASK_MOE_W2_LINEAR_SM90",
     163: "TASK_SPLITK_LINEAR_SWAPAB_HOPPER",
     198: "TASK_HOPPER_TASK_END",
+    # Compiler-generated task bodies (TaskRegister::register_generated_task).
+    # Every variant shares this one id, so a trace with several generated tasks
+    # distinguishes them by event_no, not by name.
+    450: "TASK_GENERATED",
+    # Kept in sync with runtime_header.h. An id missing here used to make
+    # export_to_perfetto_trace raise KeyError and discard the whole trace.
+    0: "TASK_TERMINATE",
+    164: "TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER",
+    231: "TASK_SM100_TMA_START_TASK",
+    232: "TASK_COPY",
+    233: "TASK_CONCAT",
+    235: "TASK_EAGLE3_D2T_REMAP",
+    236: "TASK_EAGLE3_COMMIT",
+    256: "TASK_SM100_TMA_END_TASK",
+    295: "TASK_MLA_PREFILL_TP8_SM100",
+    296: "TASK_DFLASH_ATTENTION_SM100",
+    297: "TASK_DFLASH_NORM_ROPE_SM100",
+    299: "TASK_ATTN_PREP_SM100",
+    300: "TASK_ATTN_FINALIZE_SM100",
+    310: "TASK_MULTIGPU_TASK_BEGIN",
+    349: "TASK_MULTIGPU_TASK_END",
+    350: "TASK_INKLING_TASK_BEGIN",
+    351: "TASK_INKLING_SCONV_SM100",
+    352: "TASK_INKLING_MOE_ROUTER_SM100",
+    353: "TASK_INKLING_ATTENTION_SM100",
+    399: "TASK_INKLING_TASK_END",
+    400: "TASK_GLM_TASK_BEGIN",
+    401: "TASK_GLM_MOE_ROUTER_SM100",
+    449: "TASK_GLM_TASK_END",
     200: "TASK_SCHD_TASKS",
     201: "TASK_SCHD_EVENTS",
     202: "TASK_GET_EVENT",
@@ -167,8 +196,17 @@ def export_to_perfetto_trace(
             tid_map[(block_idx, group_idx)] = tid
 
     for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
-        event = event_name_list[event_idx] + f"_{event_no}"
-        tid = tid_map[(block_idx, group_idx)]
+        # decode_tag packs block x group into 8 bits, so on a large grid the
+        # derived block can fall outside the map; and an id the header defines
+        # but this file has not caught up with would KeyError. Either one used
+        # to discard the entire trace, so create the track on demand and fall
+        # back to the numeric name.
+        event = event_name_list.get(event_idx, f"TASK_{event_idx}") + f"_{event_no}"
+        key = (block_idx, group_idx)
+        if key not in tid_map:
+            pid = tgen.create_group(f"block_{block_idx}")
+            tid_map[key] = pid.create_group(f"group_{group_idx}")
+        tid = tid_map[key]
 
         if (block_idx, group_idx, event_idx) in track_map:
             track = track_map[(block_idx, group_idx, event_idx)]

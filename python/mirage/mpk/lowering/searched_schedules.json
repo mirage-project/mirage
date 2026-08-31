@@ -1,0 +1,156 @@
+{
+  "linear|8x1024;1024x3072|grid=48x1x1|block=256x1x1": {
+    "provenance": {
+      "beats": {
+        "hand-written generated_linear_layer (forloop_range=16)": 4401.4
+      },
+      "config": "28 layers, batch 8, 128 tokens, B200, MPK_COMPILED_MLP_IMPL=searched_linear",
+      "how": "experiments/searched_tasks/rank_by_model.py --task linear --repeats 3",
+      "measured_tok_per_s": 4720.3,
+      "model": "Qwen/Qwen3-0.6B",
+      "repeats": 3,
+      "speedup": "1.072x whole-model"
+    },
+    "schedule": {
+      "block_dim": [
+        256,
+        1,
+        1
+      ],
+      "forloop_range": 4,
+      "grid_dim": [
+        48,
+        1,
+        1
+      ],
+      "name": "linear",
+      "num_inputs": 2,
+      "ops": [
+        {
+          "dtensor": {
+            "guid": 10001094
+          },
+          "forloop_dim": 1,
+          "input_map": {
+            "x": -1,
+            "y": -1,
+            "z": -1
+          },
+          "input_tensors": [],
+          "op_type": "tb_input_op",
+          "output_tensors": [
+            {
+              "dim": [
+                8,
+                256
+              ],
+              "guid": 20002593,
+              "num_dims": 2
+            }
+          ]
+        },
+        {
+          "dtensor": {
+            "guid": 10001095
+          },
+          "forloop_dim": 0,
+          "input_map": {
+            "x": 1,
+            "y": -1,
+            "z": -1
+          },
+          "input_tensors": [],
+          "op_type": "tb_input_op",
+          "output_tensors": [
+            {
+              "dim": [
+                256,
+                64
+              ],
+              "guid": 20002594,
+              "num_dims": 2
+            }
+          ]
+        },
+        {
+          "input_tensors": [
+            {
+              "dim": [
+                8,
+                256
+              ],
+              "guid": 20002593,
+              "num_dims": 2
+            },
+            {
+              "dim": [
+                256,
+                64
+              ],
+              "guid": 20002594,
+              "num_dims": 2
+            }
+          ],
+          "op_type": "tb_matmul_op",
+          "output_tensors": [
+            {
+              "dim": [
+                8,
+                64
+              ],
+              "guid": 20002595,
+              "num_dims": 2
+            }
+          ]
+        },
+        {
+          "input_tensors": [
+            {
+              "dim": [
+                8,
+                64
+              ],
+              "guid": 20002595,
+              "num_dims": 2
+            }
+          ],
+          "op_type": "tb_forloop_accum_no_red_op",
+          "output_tensors": [
+            {
+              "dim": [
+                8,
+                64
+              ],
+              "guid": 20002596,
+              "num_dims": 2
+            }
+          ]
+        },
+        {
+          "dtensor": {
+            "guid": 10001096
+          },
+          "forloop_dim": -1,
+          "input_tensors": [
+            {
+              "dim": [
+                8,
+                64
+              ],
+              "guid": 20002596,
+              "num_dims": 2
+            }
+          ],
+          "op_type": "tb_output_op",
+          "output_map": {
+            "x": 1,
+            "y": -1,
+            "z": -1
+          },
+          "output_tensors": []
+        }
+      ],
+      "reduction_dimx": 64
+    }
+  }
+}

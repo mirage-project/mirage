@@ -33,15 +33,46 @@ struct TranspilerConfig {
   // and H100 is 90
   int target_cc;
 
-  bool profiling;
+  bool profiling = false;
 
   // features for GPUs >= Grace Hopper
-  int num_consumer_wgs;
-  int num_producer_wgs;
-  int pipeline_stages;
+  //
+  // These MUST have defaults: callers construct TranspilerConfig as a bare
+  // stack value (e.g. `cdef TranspilerConfig` in core.pyx) and only assign the
+  // warp-group fields when the caller supplied both num_warp_groups and
+  // pipeline_stages. Without defaults the Hopper/Blackwell backends read
+  // garbage and reject the graph with an empty `code` string, which surfaces in
+  // Python as an inscrutable "CUDA compilation error".
+  //
+  // The defaults mirror num_warp_groups=2: one producer + one consumer.
+  int num_consumer_wgs = 1;
+  int num_producer_wgs = 1;
+  int pipeline_stages = 2;
+
+  // Pad the MMA's N mode up to MMA_N_MIN_PADDED. tcgen05 accepts any N that is
+  // a multiple of 8 up to 256, so an MPK decode batch -- M = 1..8 tokens, which
+  // swapAB puts in the MMA's N -- is legal exactly as it is. Legal is not
+  // necessarily fast: the hand-written linear_sm100 pads the same 8 tokens to
+  // MMA_N = 16, spending half the accumulator on rows it discards to get a
+  // wider instruction. Whether that trade pays for a GENERATED body is a
+  // measurement, so it is a flag rather than a rule. Default off: the default
+  // build must be unchanged.
+  bool pad_mma_n = false;
 
   // Whether to enable graph rewriting
   bool enable_online_softmax = false;
+
+  // Emit the custom op as a `__device__ __forceinline__` function taking the
+  // shared-memory block as a parameter, instead of a `__global__` kernel that
+  // declares `extern __shared__`. This is the form an MPK megakernel task body
+  // needs: the megakernel owns the launch and the smem allocation, and calls
+  // the generated function from its task dispatch.
+  //
+  // Only valid when the op needs no TMA descriptors -- those are built on the
+  // host and passed as kernel arguments, which a task body has no way to
+  // receive. The Blackwell backend rejects the combination rather than emitting
+  // a function that references undeclared descriptors.
+  bool emit_device_body = false;
 };
 
 // Directive for an output tensor
@@ -88,6 +119,14 @@ struct TiledMMA {
   int N_tile_size;
   int K_tile_size;
   size_t guid;
+  // swapAB: the device side computes C^T = B^T * A^T when M is not a legal
+  // 1-SM tcgen05 M-tile (64/128), e.g. decode-shaped M = 1..8. M/N_tile_size
+  // stay the *logical* m,n; consumers swap them together with the Major flags.
+  // The host side in transpiler_kn.cc emits tiled_mma_<guid> for TMA atom
+  // construction under the SAME symbol name as the device side, so the two must
+  // agree -- when they did not, an M=8 K-loop failed with "SM100_MMA_F16BF16
+  // M-mode size should be 64 or 128".
+  bool swap_ab = false;
 
   // Constructor
   TiledMMA()
@@ -100,14 +139,19 @@ struct TiledMMA {
            int M_tile_size,
            int N_tile_size,
            int K_tile_size,
-           size_t guid)
+           size_t guid,
+           bool swap_ab = false)
       : A_type(A_type), B_type(B_type), C_type(C_type),
         M_tile_size(M_tile_size), N_tile_size(N_tile_size),
-        K_tile_size(K_tile_size), guid(guid) {}
+        K_tile_size(K_tile_size), guid(guid), swap_ab(swap_ab) {}
 };
 
 struct TMAParams {
-  size_t input_id; // ID of the TMA
+  size_t input_id; // Index among the GRAPH's inputs (dtensor_meta.input_idx)
+  // Index among the OWNING OP's operands. This is what a megakernel task
+  // indexes its input_ptrs[] / input_tma_desc_ptrs[] by, and it differs from
+  // input_id as soon as a graph holds more than one customized op.
+  size_t operand_id = 0;
   size_t guid;
   size_t sguid;
   std::string srcLayout; // String representing the layout
@@ -204,6 +248,18 @@ struct DTensorMeta {
 
 // Metadata for STensors during transpiling
 // STensors with the same `guid` share one STensorMeta
+// The MMA N mode a padded task uses. Kept next to STensorMeta because TWO
+// passes must agree on it: transpiler_tb_blackwell emits the MMA shape, and
+// resolve_tensor_layout sizes the smem buffer the MMA reads. If they disagree
+// the UMMA reads past its operand into the neighbouring tensor -- wrong
+// numbers, not a crash.
+constexpr int MMA_N_MIN_PADDED = 16;
+
+inline int padded_mma_n(int mma_n, bool enabled) {
+  return (enabled && mma_n > 0 && mma_n < MMA_N_MIN_PADDED) ? MMA_N_MIN_PADDED
+                                                            : mma_n;
+}
+
 struct STensorMeta {
   // Innermost dimension (dimension with stride=1)
   int innermost_dim;
@@ -228,6 +284,11 @@ struct STensorMeta {
 
   // is N input for matmul
   bool n_input = false;
+
+  // is the OUTPUT (C tile) of a matmul. c_matrix_guid is only set on the
+  // operands, so the output needs its own mark -- config.pad_mma_n has to
+  // widen the C tile too, since write_tC_to_sC lands mma_n rows in it.
+  bool matmul_output = false;
 
   // the guid of the matrix tensor
   // if have a m matrix as pair with this tensor, which means this matrix is A

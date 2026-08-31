@@ -147,8 +147,17 @@ void KernelGraphGenerator::generate_next_operator(
 #pragma omp task
 #endif
     {
-      generate_next_operator(
-          c_copied, verify, verified_graphs, search_depth, true);
+      // An exception thrown here cannot unwind out of the OpenMP region: it
+      // reaches std::terminate and aborts the process, so neither a host
+      // try/catch nor Cython's `except +` can see it. One malformed sub-tree
+      // used to take the whole search down -- an rms_norm in the graph did
+      // exactly that. Drop the sub-tree instead.
+      try {
+        generate_next_operator(
+            c_copied, verify, verified_graphs, search_depth, true);
+      } catch (std::exception const &e) {
+        fprintf(stderr, "[search] dropping a sub-tree: %s\n", e.what());
+      }
     }
     return;
   }
@@ -415,15 +424,23 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 #pragma omp single
 #endif
     {
-      generate_next_operator(
-          c,
-          [this](SearchContext const &c) {
-            return c.level == SearchLevel::LV_KERNEL &&
-                   this->verify(*c.kn_graph);
-          },
-          verified_graphs,
-          /*search_depth=*/0,
-          /*is_a_new_thread_start=*/true);
+      // Same unwinding rule as the omp task bodies: an exception escaping the
+      // parallel region reaches std::terminate. The root call needs its own
+      // guard because the whole DFS runs inside it -- a throw from any depth
+      // that is not already inside a task lands here.
+      try {
+        generate_next_operator(
+            c,
+            [this](SearchContext const &c) {
+              return c.level == SearchLevel::LV_KERNEL &&
+                     this->verify(*c.kn_graph);
+            },
+            verified_graphs,
+            /*search_depth=*/0,
+            /*is_a_new_thread_start=*/true);
+      } catch (std::exception const &e) {
+        fprintf(stderr, "[search] aborted the walk: %s\n", e.what());
+      }
     }
   }
 
@@ -598,11 +615,18 @@ void KernelGraphGenerator::generate_next_symbolic_operator(
 #if !defined(MIRAGE_FINGERPRINT_USE_CPU) || defined(MIRAGE_USE_FORMAL_VERIFIER)
 #pragma omp task
 #endif
-    generate_next_symbolic_operator(kn_graph_copy,
-                                    tb_graph_copy,
-                                    input_dtensor_indices_for_tb_graph,
-                                    level,
-                                    -search_depth);
+    {
+      // Same reason as the non-symbolic path above.
+      try {
+        generate_next_symbolic_operator(kn_graph_copy,
+                                        tb_graph_copy,
+                                        input_dtensor_indices_for_tb_graph,
+                                        level,
+                                        -search_depth);
+      } catch (std::exception const &e) {
+        fprintf(stderr, "[search] dropping a sub-tree: %s\n", e.what());
+      }
+    }
     return;
   }
 

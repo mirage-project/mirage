@@ -24,6 +24,8 @@
 #include "tasks/blackwell/allreduce.cuh"
 #endif
 #include "argmax_sm100.cuh"
+#include "attention_finalize_sm100.cuh"
+#include "attention_prep_sm100.cuh"
 #include "attention_sm100.cuh"
 #include "dflash_attention_sm100.cuh"
 #include "dflash_kv_store_sm100.cuh"

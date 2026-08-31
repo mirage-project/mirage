@@ -988,6 +988,23 @@ cdef class CyKNGraph:
             operators.append(self._get_kn_operator_info(op))
         return operators
 
+    def get_customized_op_bgraphs(self):
+        # Live CyTBGraph handles for every KN_CUSTOMIZED_OP, in operator
+        # order. get_graph_structure() returns a plain-dict snapshot whose
+        # "bgraph" entry carries grid_dim/forloop_range/operators but NOT
+        # block_dim -- which a caller needs to tell whether a discovered
+        # schedule matches the megakernel's worker block size.
+        bgraphs = []
+        ops = self.p_kgraph.operators
+        for i in range(ops.size()):
+            op = CyKNOperator(None)
+            op.c_ptr = ops[i]
+            if op.op_type == "kn_customized_op":
+                ptr = ctypes.cast(<unsigned long long>(op.c_ptr), ctypes.c_void_p)
+                cop = CyKNCustomizedOp(ptr)
+                bgraphs.append(cop.get_bgraph())
+        return bgraphs
+
     def get_num_inputs(self):
         return self.p_kgraph.get_num_input_dtensors()
 
@@ -1297,6 +1314,14 @@ cdef class CyTBGraph:
                 "z": self.p_bgraph.grid_dim.z
             }
 
+    property block_dim:
+        def __get__(self):
+            return {
+                "x": self.p_bgraph.block_dim.x,
+                "y": self.p_bgraph.block_dim.y,
+                "z": self.p_bgraph.block_dim.z
+            }
+
     property forloop_range:
         def __get__(self):
             return self.p_bgraph.forloop_range
@@ -1311,7 +1336,7 @@ cdef class CyTBGraph:
                 operators.append(CyTBOperator(ptr))
             return operators
 
-def search(CyKNGraph input_graph, *, str backend = "cuda", int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, bool verbose, str default_config = None, bool is_formal_verified):
+def search(CyKNGraph input_graph, *, str backend = "cuda", int max_num_new_graphs = 1024, list imaps = None, list omaps = None, list griddims = None, list blockdims = None, list fmaps = None, list franges = None, str previous_checkpoint = None, bool verbose, str default_config = None, bool is_formal_verified, int max_tb_graph_inputs = -1, int max_tb_graph_outputs = -1, int max_tb_graph_ops = -1, int max_kn_graph_ops = -1):
     # set cimaps
     cdef vector[MInt3] cimaps
     cimaps.resize(0)
@@ -1346,9 +1371,16 @@ def search(CyKNGraph input_graph, *, str backend = "cuda", int max_num_new_graph
             cgriddims[i].y = griddims[i][1]
             cgriddims[i].z = griddims[i][2]
     # set blockdims
-    assert blockdims is None, "TODO: support blockdims"
     cdef vector[MDim3] cblockdims
     cblockdims.resize(0)
+    if blockdims is not None:
+        cblockdims.resize(len(blockdims))
+        for i in range(len(blockdims)):
+            assert type(blockdims[i]) is tuple, "Each blockdim must be a tuple of 3 integers"
+            assert len(blockdims[i]) == 3, "Each blockdim must be a tuple of 3 integers"
+            cblockdims[i].x = blockdims[i][0]
+            cblockdims[i].y = blockdims[i][1]
+            cblockdims[i].z = blockdims[i][2]
     # set fmaps
     cdef vector[int] cfmaps
     cfmaps.resize(0)
@@ -1386,7 +1418,8 @@ def search(CyKNGraph input_graph, *, str backend = "cuda", int max_num_new_graph
         cconfig = py_byte_string_config
     # set is_formal_verified
     cis_formal_verifed = is_formal_verified
-    num = cython_search(input_graph.p_kgraph, cbackend, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cprevious_checkpoint, cverbose, cconfig, cis_formal_verifed)
+    # Graph-size limits; <= 0 keeps whatever the default config / preset chose.
+    num = cython_search(input_graph.p_kgraph, cbackend, max_num_new_graphs, cnewgraphs, cimaps, comaps, cgriddims, cblockdims, cfmaps, cfranges, cprevious_checkpoint, cverbose, cconfig, cis_formal_verifed, max_tb_graph_inputs, max_tb_graph_outputs, max_tb_graph_ops, max_kn_graph_ops)
     new_graphs = list()
     for i in range(num):
         ptr = ctypes.cast(<unsigned long long>cnewgraphs[i], ctypes.c_void_p)
@@ -1396,12 +1429,13 @@ def search(CyKNGraph input_graph, *, str backend = "cuda", int max_num_new_graph
 
 # Generate CUDA program for a uGraph
 # Return (CUDA code, buffer size in bytes)
-def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups = -1, int pipeline_stages = -1, bool profiling = False, bool enable_online_softmax = False) -> dict:
+def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_strides, int num_warp_groups = -1, int pipeline_stages = -1, bool profiling = False, bool enable_online_softmax = False, bool emit_device_body = False) -> dict:
     # Set transpiler_config
     cdef TranspilerConfig transpiler_config
     transpiler_config.target_cc = target_cc
     transpiler_config.profiling = profiling
     transpiler_config.enable_online_softmax = enable_online_softmax
+    transpiler_config.emit_device_body = emit_device_body
 
     if num_warp_groups != -1 and pipeline_stages != -1:
         transpiler_config.num_producer_wgs = 1;
@@ -1437,6 +1471,9 @@ def generate_cuda_program(CyKNGraph input_graph, *, int target_cc, list input_st
         })
 
     return {
+        # 0 == CUDA_T_SUCCESS; any other value means the transpiler rejected the
+        # graph and `code` is empty. See mirage/transpiler/error_types.h.
+        "error_type": <int>result.error_type,
         "code": result.code.decode("UTF-8"),
         "buf_size": result.buf_size,
         "max_smem_size": result.max_smem_size,

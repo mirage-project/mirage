@@ -26,7 +26,7 @@ STensor Graph::new_input(mirage::kernel::DTensor const &dtensor,
                          bool store_in_dmem) {
   TBOperator *op =
       create_input_op(dtensor, input_map, forloop_dim, layout, store_in_dmem);
-  assert(op != nullptr);
+  check_tb_op(op, "input_loader");
   operators.push_back(op);
   return op->output_tensors[0];
 }
@@ -42,7 +42,7 @@ STensor *Graph::new_input(mirage::kernel::DTensor const *dtensor,
       forloop_dim,
       layout,
       store_in_dmem);
-  assert(op != nullptr);
+  check_tb_op(op, "input_loader");
   operators.push_back(op);
   return &op->output_tensors[0];
 }
@@ -55,7 +55,8 @@ TBOperator *Graph::create_input_op(mirage::kernel::DTensor const &dtensor,
   TBInputOp *op = new TBInputOp(
       this, dtensor, input_map, forloop_dim, layout, store_in_dmem);
 
-  // Check shmem usage
+  // Check shmem usage. Rejection surfaces as check_tb_op's exception at the
+  // call sites; the failing layer is identifiable from the python traceback.
   size_t smem_usage = calculate_shared_memory_usage(op);
   if (smem_usage > mirage::config::MAX_SMEM_SIZE) {
     delete op;
