@@ -12,6 +12,40 @@ from ...persistent_kernel import PersistentKernel
 from ....core import bfloat16, int64
 
 
+def draft_kv_stream(draft_config, layer_id: int, page_size: int,
+                    world_size: int = 1):
+    """The Eagle3 draft's KV, declared as a stream at its own layer id.
+
+    The draft is a separate model with its own single decoder layer, so it is
+    its own stream -- but it wants the SAME page table as the target, and it
+    gets it whenever the two agree on geometry: build_kv_cache folds streams
+    that lay a page out identically, and the draft then becomes one more slot
+    on the target's pages. That is what the hand-rolled version did by
+    accident, holding its own buffer while reading the target's page table
+    through the default group_id=0.
+
+    If a draft ever disagrees (different kv heads or head_dim) the streams stay
+    apart and the draft gets a page table of its own. That is still correct --
+    every group's page count and last_page_len come from the same step and the
+    same num_new_tokens, so only the page ids differ, and the tail_offset
+    arithmetic is unaffected -- but it is worth noticing, because _group_size
+    then has to pick one slot count for a 48-layer stream and a 1-layer one and
+    settles on 1, i.e. one group per layer. Callers should check for that.
+
+    layer_id must not collide with a target layer; the target's
+    num_hidden_layers is the natural choice, as with DeepSeek-V3's MTP.
+    """
+    from ...kv_planner import KVStream
+
+    entry = (int(draft_config["num_key_value_heads"]) // world_size,
+             int(draft_config["head_dim"]))
+    return KVStream("eagle3_draft",
+                    layers=(layer_id,),
+                    components=[("k", entry, torch.bfloat16),
+                                ("v", entry, torch.bfloat16)],
+                    preferred_block_size=page_size)
+
+
 def _resolve_draft_path(model_path_or_repo: str) -> str:
     """Resolve a HF repo id or local path to a directory containing weights."""
     if os.path.isdir(model_path_or_repo):
@@ -36,12 +70,19 @@ class Eagle3Builder:
 
     Usage from a target builder / demo:
 
+        # The draft's KV is a stream of the caller's plan; declare it when
+        # the pool is built, then hand the builder the layer id it went in at.
+        streams.append(draft_kv_stream(cfg, layer_id=target_num_layers,
+                                       page_size=page_size))
+        ...
+        mpk.kv_plan = kv_plan
         eagle3 = Eagle3Builder(
             mpk=mpk, draft_state_dict=sd, draft_config=cfg,
             target_hidden_size=2048,
             target_w_embed=shared_embed_dtensor,
             cos_pos_embed=cos_dt, sin_pos_embed=sin_dt,
             num_draft_steps=4,
+            draft_layer_id=target_num_layers,
         )
         eagle3.build_draft_loop(
             aux_h0=aux_h0_dtensor, aux_h1=..., aux_h2=...,
@@ -66,6 +107,7 @@ class Eagle3Builder:
         sin_pos_embed,                     # DTensor (max_pos, head_dim)
         num_draft_steps: int = 4,
         use_aux_norm: bool = False,
+        draft_layer_id: int = None,
     ):
         assert mpk.world_size == 1, "Eagle3 builder v1 only supports world_size=1"
         if use_aux_norm:
@@ -75,8 +117,19 @@ class Eagle3Builder:
         self.sd = draft_state_dict
         self.cfg = draft_config
         self.mbt = mpk.max_num_batched_tokens
-        self.max_num_pages = mpk.max_num_pages
-        self.page_size = mpk.page_size
+
+        # The draft's KV is a stream of the caller's plan, at its own layer id.
+        # It used to be a torch.zeros of the builder's own plus the default
+        # group_id=0, i.e. its own storage read through the TARGET's page
+        # table -- which happened to be right only because the two geometries
+        # matched.
+        self.kv_plan = getattr(mpk, "kv_plan", None)
+        assert self.kv_plan is not None and draft_layer_id is not None, (
+            "Eagle3 needs the KV plan and the layer id its draft was declared "
+            "at: build the pool with draft_kv_stream(draft_config, "
+            "layer_id=<target num_hidden_layers>, ...) alongside the target's "
+            "streams, set mpk.kv_plan, and pass draft_layer_id here")
+        self.draft_layer_id = draft_layer_id
 
         self.hidden_size = int(draft_config["hidden_size"])
         assert self.hidden_size == target_hidden_size, (
@@ -173,14 +226,13 @@ class Eagle3Builder:
         assert self._lm_head_w.shape == (self._padded_draft_vocab, self.hidden_size)
         self._kept_tensors.append(self._lm_head_w)
 
-        # Paged draft KV cache (own buffer, single layer). Layout
-        # (max_num_pages, page_size, num_kv_heads, head_dim)
-        self._k_cache_buf = torch.zeros(
-            (self.max_num_pages, self.page_size, self.num_kv_heads, self.head_dim),
-            dtype=torch.bfloat16, device="cuda")
-        self._v_cache_buf = torch.zeros_like(self._k_cache_buf)
-        self._kept_tensors.append(self._k_cache_buf)
-        self._kept_tensors.append(self._v_cache_buf)
+        # Paged draft KV cache: a slot on the plan's pages. Nothing to keep
+        # alive here -- the plan owns the one allocation behind every slot.
+        _kv = self.kv_plan.attach(self.mpk, self.draft_layer_id,
+                                  prefix="eagle3_draft")
+        self.k_cache = _kv["k_cache"]
+        self.v_cache = _kv["v_cache"]
+        self.kv_group_id = _kv["group_id"]
 
         # Dummy q_norm/k_norm (head_dim,) for paged_attention_layer slot.
         self._dummy_norm_buf = torch.zeros(
@@ -211,9 +263,8 @@ class Eagle3Builder:
             self.sd["norm.weight"].contiguous(), "eagle3_norm")
         self.w_lm_head = self._attach(self._lm_head_w, "eagle3_lm_head")
         self.d2t = self._attach(self._d2t, "eagle3_d2t")
-        # Paged draft KV cache (separate from target's paged cache).
-        self.k_cache = self._attach(self._k_cache_buf, "eagle3_k_cache")
-        self.v_cache = self._attach(self._v_cache_buf, "eagle3_v_cache")
+        # k_cache / v_cache came from kv_plan.attach() -- already DTensors on
+        # the pool, and attach() is the only path that checks that.
         self.dummy_norm = self._attach(
             self._dummy_norm_buf, "eagle3_dummy_qk_norm")
 
@@ -365,6 +416,7 @@ class Eagle3Builder:
                               self.num_kv_heads, 1),
                     block_dim=bd_small,
                     enable_qk_norm=False,
+                    group_id=self.kv_group_id,
                 )
             else:
                 self.mpk.paged_attention_layer(
@@ -380,6 +432,7 @@ class Eagle3Builder:
                     enable_qk_norm=False,
                     q_len_override=1,
                     tail_offset=K - step,
+                    group_id=self.kv_group_id,
                 )
 
             self.mpk.linear_with_residual_layer(
@@ -449,13 +502,24 @@ class Eagle3Builder:
         return self.all_draft_ids
 
 
+def load_eagle3_draft_config(draft_model_path_or_repo: str):
+    """Just the draft's config.json.
+
+    The KV pool has to be sized before the PersistentKernel exists, which is
+    long before the draft weights are wanted, so the stream declaration needs
+    a way to read the geometry without pulling in the checkpoint.
+    """
+    path = _resolve_draft_path(draft_model_path_or_repo)
+    with open(os.path.join(path, "config.json")) as fp:
+        return json.load(fp)
+
+
 def load_eagle3_draft(draft_model_path_or_repo: str):
     """Resolve checkpoint path, load state_dict and config.
 
     Returns (state_dict, config_dict).
     """
     path = _resolve_draft_path(draft_model_path_or_repo)
-    with open(os.path.join(path, "config.json")) as fp:
-        config = json.load(fp)
+    config = load_eagle3_draft_config(path)
     state_dict = _load_draft_state_dict(path)
     return state_dict, config

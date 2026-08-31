@@ -11,6 +11,12 @@ denominator. Three cases as three layers of one task graph:
           differ from `nosink`.
 
 Sinks differ per head, so a wrong head index fails.
+
+The three cases are three LAYERS of one KV stream, so they share a page table
+and take three slots of the same page -- the shape eagle3's draft and
+DeepSeek-V3's MTP layer have. That makes this the place where slot isolation
+for paged_attention_layer is checked: each case's K must land in its own slot
+and nowhere else.
 """
 
 import os
@@ -19,6 +25,7 @@ import sys
 import torch
 
 import mirage
+from mirage.mpk.kv_planner import KVStream, build_kv_cache
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 NUM_KV_HEADS = 1
@@ -61,6 +68,22 @@ def main():
     device = "cuda"
     dtype = torch.bfloat16
 
+    # One stream over three layers: same geometry, so one group with three
+    # slots on every page.
+    entry = (NUM_KV_HEADS, HEAD_DIM)
+    plan = build_kv_cache(
+        [KVStream("attention", layers=(0, 1, 2),
+                  components=[("k", entry, dtype), ("v", entry, dtype)],
+                  preferred_block_size=PAGE_SIZE)],
+        max_num_pages=MAX_NUM_PAGES,
+        max_seq_length=MAX_SEQ_LENGTH,
+        max_num_batched_requests=1,
+        max_num_batched_tokens=NUM_TOKENS,
+        verbose=False)
+    assert len(plan.groups) == 1 and plan.num_slots == 3, (
+        f"expected one group of three slots, got {len(plan.groups)} group(s) "
+        f"and {plan.num_slots} slot(s)")
+
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
     params.update(
@@ -70,12 +93,15 @@ def main():
         max_seq_length=MAX_SEQ_LENGTH,
         max_num_batched_requests=1,
         max_num_batched_tokens=NUM_TOKENS,
-        max_num_pages=MAX_NUM_PAGES,
-        page_size=PAGE_SIZE,
+        max_num_pages=plan.max_num_pages,
+        kv_groups=plan.group_specs(),
+        page_size=None,   # kv_groups is the source of truth for the block size
     )
     params["meta_tensors"] = {
         "prompt_lengths": torch.tensor([NUM_TOKENS], dtype=torch.int32,
                                        device=device),
+        **plan.build_meta_tensors(max_num_batched_requests=1,
+                                  max_seq_length=MAX_SEQ_LENGTH),
     }
     pk = PersistentKernel(**params)
 
@@ -101,19 +127,17 @@ def main():
     }
 
     cases = []
-    for tag, sinks in sink_values.items():
-        k_cache = torch.zeros(MAX_NUM_PAGES, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM,
-                              dtype=dtype, device=device)
-        v_cache = torch.zeros_like(k_cache)
+    for layer_id, (tag, sinks) in enumerate(sink_values.items()):
         out = torch.zeros(NUM_TOKENS, NUM_Q_HEADS * HEAD_DIM,
                           dtype=dtype, device=device)
         sinks_dt = (pk.attach_input(sinks, name=f"{tag}_sinks")
                     if sinks is not None else None)
 
+        kv = plan.attach(pk, layer_id)
         pk.paged_attention_layer(
             input=qkv_dt,
-            k_cache=pk.attach_input(k_cache, name=f"{tag}_k_cache"),
-            v_cache=pk.attach_input(v_cache, name=f"{tag}_v_cache"),
+            k_cache=kv["k_cache"], v_cache=kv["v_cache"],
+            group_id=kv["group_id"],
             q_norm=norm_dt, k_norm=norm_dt,
             cos_pos_embed=cos_dt, sin_pos_embed=sin_dt,
             output=pk.attach_input(out, name=f"{tag}_out"),
@@ -121,7 +145,7 @@ def main():
             enable_qk_norm=False,
             sinks=sinks_dt,
         )
-        cases.append((tag, sinks, out))
+        cases.append((tag, sinks, out, plan._layer_info(layer_id)[1]))
 
     print("Compiling test kernel...")
     pk.compile(output_dir=os.path.dirname(os.path.abspath(__file__)))
@@ -131,13 +155,22 @@ def main():
 
     ok = True
     nosink_out = None
-    for tag, sinks, out in cases:
+    k_view = plan.views(0)["k"]
+    k_new = qkv[:, NUM_Q_HEADS * HEAD_DIM : (NUM_Q_HEADS + 1) * HEAD_DIM]
+    for tag, sinks, out, slot in cases:
         flat = None if sinks is None else sinks.reshape(-1)
         ref = reference(qkv, flat)
         diff = (out.float() - ref.float()).abs().max().item()
         print(f"[{tag}] max |kernel - reference| = {diff:.4f}")
         if diff >= 0.05:
             print(f"[{tag}] FAILED: disagrees with the reference")
+            ok = False
+
+        # Slot isolation: every case shares the page table and writes the
+        # same K rows, so a slot resolved wrong would still look right in the
+        # output. It shows up here: the rows must be in THIS layer's slot.
+        if not torch.equal(k_view[slot, 0, :NUM_TOKENS, 0], k_new):
+            print(f"[{tag}] FAILED: K rows are not in slot {slot} of page 0")
             ok = False
 
         if tag == "nosink":
@@ -156,11 +189,21 @@ def main():
                 print("[real] FAILED: the sinks are being ignored")
                 ok = False
 
+    # Nothing outside the three slots may hold data, and each slot holds only
+    # its own layer's rows.
+    for slot in range(plan.num_slots):
+        rows = int((k_view[slot].abs().sum(dim=-1) > 0).sum().item())
+        if rows != NUM_TOKENS:
+            print(f"FAILED: slot {slot} holds {rows} K rows, expected "
+                  f"{NUM_TOKENS} -- a layer wrote outside its own slot")
+            ok = False
+
     pk.finalize()
     if not ok:
         sys.exit(1)
     print("\nPASSED: attention sinks enter the softmax denominator per head, "
-          "an underflowing sink is inert, and no-sink is unchanged")
+          "an underflowing sink is inert, no-sink is unchanged, and each "
+          "layer's K stayed in its own slot of the shared page")
 
 
 if __name__ == "__main__":

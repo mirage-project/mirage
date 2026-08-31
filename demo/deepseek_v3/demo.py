@@ -9,6 +9,8 @@ import socket
 
 from mirage.mpk.models.deepseek_v3.builder import DeepSeekV3Builder
 from mirage.mpk.models.graph_builder import MirageModelConfig
+from mirage.mpk.models.deepseek_v3.builder import kv_streams
+from mirage.mpk.kv_planner import build_kv_cache
 
 
 DEFAULT_SAVE_DIR = os.path.join("outputs", "deepseek_v3")
@@ -61,7 +63,11 @@ if __name__ == "__main__":
     parser.add_argument("--page-size", default=128, type=int,
                         help="Page size for KV cache")
     parser.add_argument("--max-num-pages", default=64, type=int,
-                        help="Max number of pages")
+                        help="Max number of pages. Exclusive with --kv-budget")
+    parser.add_argument("--kv-budget", type=str, default=None,
+                        help="Bytes for the KV page pool (e.g. 8GiB). The "
+                             "planner derives the block size and page count "
+                             "from it; exclusive with --max-num-pages")
     parser.add_argument("--max-seq-length", default=4096, type=int,
                         help="Max sequence length")
     parser.add_argument("--prompt", type=str,
@@ -284,24 +290,17 @@ if __name__ == "__main__":
         qo_indptr_buffer = torch.empty(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda"
         )
-        paged_kv_indptr_buffer = torch.empty(
-            args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda"
-        )
-        paged_kv_indices_buffer = torch.empty(
-            args.max_num_pages, dtype=torch.int32, device="cuda"
-        )
-        paged_kv_last_page_len_buffer = torch.empty(
-            args.max_num_batched_requests, dtype=torch.int32, device="cuda"
-        )
-
-        # MLA uses a single combined ckv_kpe cache per layer
-        # Shape: (num_layers, max_num_pages, page_size, ckv_kpe_dim)
-        # where ckv_kpe_dim = kv_lora_rank + qk_rope_head_dim = 576
-        ckv_kpe_cache = torch.zeros(
-            (num_layers, args.max_num_pages, args.page_size, ckv_kpe_dim),
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
+        kv_plan = build_kv_cache(
+            kv_streams(config, args.page_size, world_size,
+                       num_mtp_layers=1 if args.mtp > 0 else 0),
+            kv_budget=args.kv_budget,
+            max_num_pages=None if args.kv_budget else args.max_num_pages,
+            max_seq_length=args.max_seq_length,
+            max_num_batched_requests=args.max_num_batched_requests,
+            max_num_batched_tokens=args.max_num_batched_tokens)
+        kv_meta_tensors = kv_plan.build_meta_tensors(
+            max_num_batched_requests=args.max_num_batched_requests,
+            max_seq_length=args.max_seq_length)
 
         eos_token_id = config.eos_token_id if not args.ignore_eos else -1
         # Handle eos_token_id being a list (common in DeepSeek V3)
@@ -318,8 +317,8 @@ if __name__ == "__main__":
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
-            max_num_pages=args.max_num_pages,
-            page_size=args.page_size,
+            max_num_pages=kv_plan.max_num_pages,
+            kv_groups=kv_plan.group_specs(),
             eos_token_id=eos_token_id,
             meta_tensors={
                 "step": step,
@@ -329,9 +328,7 @@ if __name__ == "__main__":
                 "num_new_tokens": num_new_tokens,
                 "prompt_lengths": prompt_lengths,
                 "qo_indptr_buffer": qo_indptr_buffer,
-                "paged_kv_indptr_buffer": paged_kv_indptr_buffer,
-                "paged_kv_indices_buffer": paged_kv_indices_buffer,
-                "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
+                **kv_meta_tensors,
             },
             profiler_tensor=profiler_tensor,
             trace_name=(
@@ -340,6 +337,8 @@ if __name__ == "__main__":
             spec_decode_config=spec_decode_config,
             use_cutlass_kernel=True,
         )
+
+        mpk.kv_plan = kv_plan
 
         # Load state dict from converted weights
         print(f"Loading model weights from: {args.model_path}")
@@ -815,8 +814,8 @@ if __name__ == "__main__":
             local_num_kv_heads=1,  # MLA uses single KV head (shared latent)
             head_dim=ckv_kpe_dim,  # 576 for MLA
             num_layers=num_layers,
-            k_cache=[ckv_kpe_cache[i] for i in range(num_layers)],
-            v_cache=[ckv_kpe_cache[i] for i in range(num_layers)],
+            k_cache=None,
+            v_cache=None,
             position_embeddings=None,
             state_dict=state_dict,
             with_lm_head=True,

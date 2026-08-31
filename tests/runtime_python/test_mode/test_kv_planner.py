@@ -833,3 +833,60 @@ def test_merged_stream_allocates_and_every_layer_gets_its_view():
     b = plan._views[0]["kv"][plan._layer_info(61)[1]]
     a.fill_(1.0); b.fill_(2.0)
     assert a.flatten()[0].item() == 1.0 and b.flatten()[0].item() == 2.0
+
+
+def test_deepseek_v3_declares_one_group_over_61_layers_plus_mtp():
+    """The model's own declaration, not a stand-in for it.
+
+    DeepSeek-V3 is not runnable here, so this is where its KV geometry is
+    pinned: 61 MLA layers and the MTP predictor land in ONE group (declared
+    apart, folded by layout), one 576-wide bf16 entry per token per layer, and
+    a page that the entries fill exactly.
+
+    That last part is what makes the page stride equal the block size, which
+    is what the hand-rolled [num_layers, pages, page_size, 576] cache had --
+    so the MLA kernels' addressing is unchanged by the migration.
+    """
+    from mirage.mpk.models.deepseek_v3.builder import kv_streams
+
+    class _Config:
+        num_hidden_layers = 61
+        num_nextn_predict_layers = 1
+
+    streams = kv_streams(_Config(), page_size=64)
+    assert [s.name for s in streams] == ["mla", "mtp"]
+    assert streams[0].per_entry_bytes == 576 * 2      # 512 latent + 64 rope
+    assert streams[1].layers == (61,)
+
+    plan = build_kv_cache(streams, max_num_pages=4, device="cpu",
+                          verbose=False)
+    assert len(plan.groups) == 1, (
+        f"MLA and MTP must share a page table, got "
+        f"{[(g.group_id, g.spec_name) for g in plan.groups]}")
+    group = plan.groups[0]
+    assert group.spec_name == "mla+mtp"
+    assert len(group.layer_ids) == 62 and 61 in group.layer_ids
+    assert group.block_size == 64 and group.entries_per_page == 64
+    assert group.padding_bytes_per_page == 0
+
+    # One entry per token, so a page holds block_size rows and the per-layer
+    # view is strided by exactly one page.
+    view = plan._views[0]["kv"][plan._layer_info(3)[1]]
+    assert tuple(view.shape) == (plan.max_num_pages, 64, 576)
+    assert view.stride() == (64 * 576, 576, 1)
+
+
+def test_deepseek_v3_leaves_the_mtp_slot_out_when_mtp_is_off():
+    """A slot costs 1/62 of every page whether or not MTP runs, so the demo
+    passes 0 when --mtp is 0."""
+    from mirage.mpk.models.deepseek_v3.builder import kv_streams
+
+    class _Config:
+        num_hidden_layers = 61
+        num_nextn_predict_layers = 1
+
+    streams = kv_streams(_Config(), page_size=64, num_mtp_layers=0)
+    assert [s.name for s in streams] == ["mla"]
+    plan = build_kv_cache(streams, max_num_pages=4, device="cpu",
+                          verbose=False)
+    assert plan.num_slots == 61

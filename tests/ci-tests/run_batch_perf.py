@@ -64,7 +64,13 @@ def main():
 
     with torch.device("cuda"):
         model = Qwen3ForCausalLM.from_pretrained(
-            args.model, 1, max_num_pages=max_num_pages, page_size=PAGE_SIZE
+            args.model, 1, max_num_pages=max_num_pages, page_size=PAGE_SIZE,
+            # Handing the plan the batch it must hold turns the pool size from
+            # an assumption into a checked one: build_kv_cache refuses a count
+            # that cannot cover max_num_batched_requests at max_seq_length.
+            max_seq_length=args.max_seq_length,
+            max_num_batched_requests=args.max_num_batched_requests,
+            max_num_batched_tokens=args.max_num_batched_tokens,
         ).to("cuda")
         tokenizer = AutoTokenizer.from_pretrained(args.model)
 
@@ -114,12 +120,9 @@ def main():
     num_workers, num_schedulers = mi.get_configurations_from_gpu(0)
     qo_indptr_buffer = torch.empty(
         args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-    paged_kv_indptr_buffer = torch.empty(
-        args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-    paged_kv_indices_buffer = torch.empty(
-        max_num_pages, dtype=torch.int32, device="cuda")
-    paged_kv_last_page_len_buffer = torch.empty(
-        args.max_num_batched_requests, dtype=torch.int32, device="cuda")
+    # Exactly one cache exists and the model holds it; the plan owns the page
+    # tables too, sized by the page-table span rather than by the page count.
+    kv_plan = model.model.kv_plan
 
     mpk = mi.PersistentKernel(
         mode="offline",
@@ -131,8 +134,8 @@ def main():
         max_seq_length=args.max_seq_length,
         max_num_batched_requests=args.max_num_batched_requests,
         max_num_batched_tokens=args.max_num_batched_tokens,
-        max_num_pages=max_num_pages,
-        page_size=PAGE_SIZE,
+        max_num_pages=kv_plan.max_num_pages,
+        kv_groups=kv_plan.group_specs(),
         eos_token_id=model.config.eos_token_id if not args.ignore_eos else -1,
         meta_tensors={
             "step": step,
@@ -142,9 +145,9 @@ def main():
             "num_new_tokens": num_new_tokens,
             "prompt_lengths": prompt_lengths,
             "qo_indptr_buffer": qo_indptr_buffer,
-            "paged_kv_indptr_buffer": paged_kv_indptr_buffer,
-            "paged_kv_indices_buffer": paged_kv_indices_buffer,
-            "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
+            **kv_plan.build_meta_tensors(
+                max_num_batched_requests=args.max_num_batched_requests,
+                max_seq_length=args.max_seq_length),
         },
         profiler_tensor=None,
         trace_name="",
@@ -259,16 +262,14 @@ def main():
         w_k_norm = mpk.attach_input(
             torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm"
         )
-        k_cache = mpk.attach_input(
-            torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache"
-        )
-        v_cache = mpk.attach_input(
-            torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
-        )
+        # attach() resolves the layer's slot and checks the view is still on
+        # the pool; indexing kv_cache[0][i] by hand skipped both.
+        kv = kv_plan.attach(mpk, i)
         mpk.paged_attention_layer(
             input=attn_in,
-            k_cache=k_cache,
-            v_cache=v_cache,
+            k_cache=kv["k_cache"],
+            v_cache=kv["v_cache"],
+            group_id=kv["group_id"],
             q_norm=w_q_norm,
             k_norm=w_k_norm,
             cos_pos_embed=cos_pos_embed,

@@ -52,6 +52,35 @@ RMS_NORM_EPS = 1e-6
 _MOE_FP8_MMA_M = 128
 
 
+def kv_streams(config, page_size: int, world_size: int = 1,
+               num_mtp_layers: Optional[int] = None):
+    """DeepSeek-V3 keeps ONE latent entry per token per layer.
+
+    num_mtp_layers defaults to the checkpoint's num_nextn_predict_layers. Pass
+    0 to leave the MTP slot out when MTP is off -- it costs 1/62 of every page.
+    """
+    from ...kv_planner import KVStream
+
+    num_layers = getattr(config, "num_hidden_layers", NUM_LAYERS)
+    if num_mtp_layers is None:
+        num_mtp_layers = getattr(config, "num_nextn_predict_layers", 0)
+    components = [("kv", (QK_HEAD_DIM_TOTAL,), torch.bfloat16)]
+    streams = [
+        KVStream("mla",
+                 layers=tuple(range(num_layers)),
+                 components=components,
+                 preferred_block_size=page_size),
+    ]
+    if num_mtp_layers:
+        streams.append(
+            KVStream("mtp",
+                     layers=tuple(range(num_layers,
+                                        num_layers + num_mtp_layers)),
+                     components=components,
+                     preferred_block_size=page_size))
+    return streams
+
+
 def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
     max_y = min(preferred, max(1, output_size // _MOE_FP8_MMA_M))
     for y in range(max_y, 0, -1):
@@ -62,6 +91,8 @@ def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
 
 @register_model_builder("deepseek-v3", "DeepSeek-V3", "deepseek-ai/DeepSeek-V3")
 class DeepSeekV3Builder(GraphBuilder):
+    kv_streams = staticmethod(kv_streams)
+
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
         self.max_num_pages = mpk.max_num_pages
@@ -94,6 +125,18 @@ class DeepSeekV3Builder(GraphBuilder):
         # MTP config
         self.mtp_config = getattr(mpk, 'spec_decode_config', None)
 
+    def _kv_cache(self, layer_id: int):
+        """This layer's paged cache, attached once.
+
+        attach() calls mpk.attach_input, which declares a C++ variable, so a
+        second call for the same layer would redeclare it.
+        """
+        cached = self._layer_caches.get(layer_id)
+        if cached is None:
+            cached = self.kv_plan.attach(self.mpk, layer_id)["kv_cache"]
+            self._layer_caches[layer_id] = cached
+        return cached
+
     def build_from_model(self, model_name: str, model_path: str = None):
         raise NotImplementedError(
             "DeepSeek V3 is too large for direct HuggingFace loading. "
@@ -106,7 +149,12 @@ class DeepSeekV3Builder(GraphBuilder):
         Args:
             layer_indices: If provided, only build these specific layer indices.
         """
-        self.ckv_kpe_cache = model_config.k_cache  # [num_layers, num_pages, page_size, 576]
+        self.kv_plan = getattr(self.mpk, "kv_plan", None)
+        assert self.kv_plan is not None, (
+            "DeepSeek-V3 declares kv_streams, so a KV plan must exist before "
+            "the builder runs -- pass kv_plan=build_kv_cache(kv_streams(...)) "
+            "and set mpk.kv_plan, or build through MPK which does it for you")
+        self._layer_caches = {}
         self.position_embeddings = model_config.position_embeddings
 
         self.build_from_dict(
@@ -695,9 +743,7 @@ class DeepSeekV3Builder(GraphBuilder):
         # Both write `self.attn_out`. Builder order is prefill -> decode; the
         # MPK event graph serialises the two writes, so whichever kernel really
         # runs produces the final value (the other becomes a no-op).
-        layer_cache = self.mpk.attach_input(
-            torch_tensor=self.ckv_kpe_cache[layer_idx],
-            name=f"layer_{layer_idx}_kv_cache")
+        layer_cache = self._kv_cache(layer_idx)
         q_len_mla = self.max_num_batched_tokens
         kv_len_max = self.mpk.max_seq_length
         if self._use_prefill:
@@ -1703,17 +1749,8 @@ class DeepSeekV3Builder(GraphBuilder):
             name="mtp_eh_proj_hidden",
         )
 
-        # ---- MTP KV cache (separate from main model) ----
-        # IMPORTANT: keep the PyTorch tensor alive on self so GPU memory is not
-        # freed — the persistent kernel stores the raw data pointer.
-        self._mtp_ckv_kpe_cache_buf = torch.zeros(
-            (self.mpk.max_num_pages, self.mpk.page_size, self.qk_head_dim),
-            dtype=torch.bfloat16, device="cuda",
-        )
-        self.mtp_ckv_kpe_cache_tensor = self.mpk.attach_input(
-            torch_tensor=self._mtp_ckv_kpe_cache_buf,
-            name="mtp_ckv_kpe_cache",
-        )
+        # ---- MTP KV cache ----
+        self.mtp_ckv_kpe_cache_tensor = self._kv_cache(self.num_layers)
 
         # ---- Intermediate tensors ----
         mbt = self.max_num_batched_tokens
