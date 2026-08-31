@@ -3170,12 +3170,10 @@ class PersistentKernel:
         self.init_func = getattr(mod, "init_func")
         self.launch_func = getattr(mod, "launch_func")
         self.init_request_func = getattr(mod, "init_request_func")
-        if self.mode == "online_pinned":
-            self.wait_func = getattr(mod, "wait_func")
+        self.wait_func = getattr(mod, "wait_func")
         self.finalize_func = getattr(mod, "finalize_func")
-        if self.mode == "online_pinned":
-            self.load_i32_acquire = getattr(mod, "load_i32_acquire")
-            self.store_i32_release = getattr(mod, "store_i32_release")
+        self.load_i32_acquire = getattr(mod, "load_i32_acquire")
+        self.store_i32_release = getattr(mod, "store_i32_release")
         
         # Prepare meta tensors
         meta_tensors = list()
