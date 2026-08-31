@@ -471,6 +471,18 @@ __device__ __forceinline__ bool
   int free_row_top = *config.free_row_top;
   int const ring_mask = MPK_PINNED_RING_CAPACITY - 1;
 
+  // Reclaim rows only after the CPU has copied their completed output and
+  // release-stored -1 to pinned_step. The owner mapping stays stable for the
+  // full CPU read, so a completion can never refer to a reused row.
+  for (int row = 0; row < MPK_MAX_NUM_BATCHED_REQUESTS; row++) {
+    int32_t owner = ld_acquire_sys_i32(&config.pinned_rid_at_row[row]);
+    int32_t progress = ld_acquire_sys_i32(&config.pinned_step[row]);
+    if (owner >= 0 && progress == -1) {
+      st_release_sys_i32(&config.pinned_rid_at_row[row], -1);
+      config.free_rows[free_row_top++] = row;
+    }
+  }
+
   // ── Step 1: finalize previous batch ────────────────────────────────────────
   for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
     int16_t row = config.request_ids[i];
@@ -512,15 +524,17 @@ __device__ __forceinline__ bool
       // Write completion entry so CPU background thread can collect the
       // output. Reports the original rid (not the buffer row).
       int comp_slot = gpu_comp_tail & ring_mask;
+      while (ld_acquire_sys_i32(&config.pinned_comp_ready[comp_slot]) != 0) {
+        __nanosleep(100);
+      }
       config.pinned_comp_request_id[comp_slot] = (int32_t)rid;
       config.pinned_comp_buffer_row[comp_slot] = (int32_t)row;
       config.pinned_comp_final_step[comp_slot] = (int32_t)(step + num_tokens);
       st_release_sys_i32(&config.pinned_comp_ready[comp_slot], 1);
       gpu_comp_tail++;
 
-      // Free the buffer row back to the pool.
-      config.free_rows[free_row_top++] = (int)row;
-      config.pinned_rid_at_row[row] = (int32_t)-1;
+      // Retain the row and owner until the CPU acknowledges its completed
+      // read through pinned_step[row] = -1.
       // Mark batch slot as empty.
       config.request_ids[i] = -1;
       config.request_rids[i] = -1;
@@ -618,8 +632,10 @@ __device__ __forceinline__ bool
     }
     config.prompt_length[row] = prompt_len;
     config.step[row] = initial_step;
-    // Let CPU discover which row this rid is on by scanning pinned_rid_at_row.
-    config.pinned_rid_at_row[row] = (int32_t)new_rid;
+    // Reset progress before release-publishing the owner. An observer that
+    // finds new_rid must not see progress or tokens from the prior lease.
+    st_release_sys_i32(&config.pinned_step[row], initial_step);
+    st_release_sys_i32(&config.pinned_rid_at_row[row], new_rid);
 
     // Clear the ring slot so CPU can reuse it.
     st_release_sys_i32(&config.pinned_req_ready[req_slot], 0);
@@ -1520,11 +1536,12 @@ extern "C" void
       static_cast<int32_t *>(meta_tensors[18]);
   global_runtime_config.pinned_shutdown =
       static_cast<int32_t volatile *>(meta_tensors[19]);
-  global_runtime_config.pinned_step = static_cast<int32_t *>(meta_tensors[20]);
+  global_runtime_config.pinned_step =
+      static_cast<int32_t volatile *>(meta_tensors[20]);
   global_runtime_config.pinned_inbox_tokens =
       static_cast<int64_t *>(meta_tensors[21]);
   global_runtime_config.pinned_rid_at_row =
-      static_cast<int32_t *>(meta_tensors[22]);
+      static_cast<int32_t volatile *>(meta_tensors[22]);
 #endif
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;
@@ -1857,6 +1874,17 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
     }
     printf("Finished Launch Persistent Kernel\n");
   }
+}
+
+extern "C" cudaError_t wait_persistent_kernel() {
+  if (!global_runtime_config.split_worker_scheduler) {
+    return cudaSuccess;
+  }
+  cudaError_t worker_err =
+      cudaStreamSynchronize(global_runtime_config.worker_stream);
+  cudaError_t scheduler_err =
+      cudaStreamSynchronize(global_runtime_config.scheduler_stream);
+  return worker_err != cudaSuccess ? worker_err : scheduler_err;
 }
 
 extern "C" void finalize_persistent_kernel() {

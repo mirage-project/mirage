@@ -26,9 +26,9 @@ Usage::
 """
 
 import collections
-import time
 import threading
-from typing import Deque, Dict, List, Optional, Tuple
+import time
+from typing import Deque, Dict, List, Tuple
 
 import torch
 
@@ -64,9 +64,9 @@ class OnlinePinnedRuntime:
         self._cpu_req_ack   = 0  # last slot known to be consumed by GPU
         self._cpu_comp_head = 0
 
-        # CPU-side waiting queue: holds (rid, token_ids) tuples that couldn't
-        # be written to the ring because it was full.
-        self._waiting: Deque[Tuple[int, torch.Tensor]] = collections.deque()
+        # CPU-side waiting queue: holds (rid, token_ids, initial_step) tuples
+        # that could not be written to the ring because it was full.
+        self._waiting: Deque[Tuple[int, torch.Tensor, int]] = collections.deque()
         self._waiting_lock = threading.Lock()
 
         # Dedicated stream for HtoD / DtoH copies.
@@ -81,13 +81,14 @@ class OnlinePinnedRuntime:
 
         # Completion tracking: rid → (buffer_row, final_step)
         self._completions: Dict[int, Tuple[int, int]] = {}
+        self._abandoned: set[int] = set()
         self._lock = threading.RLock()
 
-        # Persistent drain thread — ensures completions are drained and waiting
-        # requests are flushed even when no streaming threads are alive.
+        # The drain thread starts only after reset() has initialized all shared
+        # state. Starting it here races reset() and can corrupt ring cursors.
         self._drain_stop = threading.Event()
-        self._drain_thread = threading.Thread(target=self._drain_loop, daemon=True)
-        self._drain_thread.start()
+        self._drain_thread: threading.Thread | None = None
+        self._drain_error: Exception | None = None
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -109,29 +110,20 @@ class OnlinePinnedRuntime:
         True if the request was written to the ring, False if enqueued to
         the CPU waiting deque.
         """
-        prompt_len = token_ids.shape[0]
+        self._raise_drain_error()
 
-        # Atomically claim the next ring slot.  Must be serialised with
-        # flush_waiting() so the two paths never grab the same slot.
+        # Keep the producer lock until ready=1 is published. Otherwise a
+        # flusher can reserve a later slot and leave a permanent hole in the
+        # ordered request ring.
         with self._ring_lock:
             slot = self._cpu_req_tail & self._mask
-            if self._req_ready[slot].item() != 0:
+            if self._load_i32_acquire(self._req_ready, slot) != 0:
                 # Ring full — enqueue to CPU-side waiting.
                 with self._waiting_lock:
                     self._waiting.append((rid, token_ids.clone(), initial_step))
                 return False
-            self._cpu_req_tail += 1  # reserve slot
-
-        # Copy prompt tokens to this slot's inbox.
-        with torch.cuda.stream(self._write_stream):
-            self._inbox_tokens[slot, :prompt_len].copy_(token_ids, non_blocking=True)
-        self._write_stream.synchronize()
-
-        # Publish ring entry.
-        self._req_request_id[slot]   = rid
-        self._req_prompt_len[slot]   = prompt_len
-        self._req_initial_step[slot] = initial_step
-        self._req_ready[slot] = 1
+            self._publish_request_locked(slot, rid, token_ids, initial_step)
+            self._cpu_req_tail += 1
         return True
 
     def flush_waiting(self) -> int:
@@ -141,34 +133,42 @@ class OnlinePinnedRuntime:
         Called from :meth:`drain_completions` so waiting requests are
         gradually fed into the ring as slots free up.
         """
-        # Reserve ring slot first (serialised with submit), then pop from
-        # the waiting deque.  This ordering prevents a lost request if the
-        # ring is full: we never remove a request from waiting unless we
-        # have a guaranteed ring slot.
         with self._ring_lock:
             slot = self._cpu_req_tail & self._mask
-            if self._req_ready[slot].item() != 0:
+            if self._load_i32_acquire(self._req_ready, slot) != 0:
                 return 0  # ring still full
-            self._cpu_req_tail += 1  # reserve slot
+            with self._waiting_lock:
+                if not self._waiting:
+                    return 0
+                request = self._waiting.popleft()
 
-        with self._waiting_lock:
-            if not self._waiting:
-                # Rare: submit() drained the deque between our check and now.
-                # Put the reserved slot back.
-                with self._ring_lock:
-                    self._cpu_req_tail -= 1
-                return 0
-            rid, token_ids, initial_step = self._waiting.popleft()
+            rid, token_ids, initial_step = request
+            try:
+                self._publish_request_locked(slot, rid, token_ids, initial_step)
+            except Exception:
+                with self._waiting_lock:
+                    self._waiting.appendleft(request)
+                raise
+            self._cpu_req_tail += 1
+        return 1
 
+    def _publish_request_locked(
+        self,
+        slot: int,
+        rid: int,
+        token_ids: torch.Tensor,
+        initial_step: int,
+    ) -> None:
+        """Copy and publish one request while ``_ring_lock`` is held."""
         prompt_len = token_ids.shape[0]
         with torch.cuda.stream(self._write_stream):
-            self._inbox_tokens[slot, :prompt_len].copy_(token_ids, non_blocking=True)
+            self._inbox_tokens[slot, :prompt_len].copy_(
+                token_ids, non_blocking=True)
         self._write_stream.synchronize()
-        self._req_request_id[slot]   = rid
-        self._req_prompt_len[slot]   = prompt_len
+        self._req_request_id[slot] = rid
+        self._req_prompt_len[slot] = prompt_len
         self._req_initial_step[slot] = initial_step
-        self._req_ready[slot] = 1
-        return 1
+        self._store_i32_release(self._req_ready, slot, 1)
 
     def drain_completions(self) -> List[Tuple[int, int, int]]:
         """Non-blocking poll: collect all newly completed requests.
@@ -176,18 +176,25 @@ class OnlinePinnedRuntime:
         Returns a list of ``(rid, buffer_row, final_step)`` tuples for
         requests that have finished since the last call.
         """
+        self._raise_drain_error()
         finished = []
         while True:
             with self._lock:
                 slot = self._cpu_comp_head & self._mask
-                if self._comp_ready[slot].item() == 0:
+                if self._load_i32_acquire(self._comp_ready, slot) == 0:
                     break
                 rid         = int(self._comp_request_id[slot].item())
                 buffer_row  = int(self._comp_buffer_row[slot].item())
                 final_step  = int(self._comp_final_step[slot].item())
-                self._comp_ready[slot] = 0
+                if rid in self._abandoned:
+                    self._release_row_locked(rid, buffer_row)
+                    self._abandoned.remove(rid)
+                else:
+                    self._completions[rid] = (buffer_row, final_step)
+                # Do not make the slot reusable until completion bookkeeping
+                # and any abandoned-row release both succeed.
+                self._store_i32_release(self._comp_ready, slot, 0)
                 self._cpu_comp_head += 1
-                self._completions[rid] = (buffer_row, final_step)
             finished.append((rid, buffer_row, final_step))
 
         # Flush all waiting requests while ring slots are free.
@@ -196,14 +203,15 @@ class OnlinePinnedRuntime:
         return finished
 
     def _drain_loop(self) -> None:
-        """Persistent background loop that drains completions and flushes
-        waiting requests, ensuring forward progress even when all per-request
-        streaming threads have exited."""
+        """Drain completions and flush queued requests in the background."""
         while not self._drain_stop.is_set():
             try:
                 self.drain_completions()
-            except Exception:
-                pass
+            except Exception as exc:
+                with self._lock:
+                    self._drain_error = exc
+                self._drain_stop.set()
+                break
             self._drain_stop.wait(0.0002)
 
     def wait_for_request(
@@ -224,6 +232,7 @@ class OnlinePinnedRuntime:
                 if rid in self._completions:
                     return self._completions[rid]
             if time.monotonic() > deadline:
+                self.abandon_request(rid)
                 raise TimeoutError(
                     f"wait_for_request timed out for rid={rid}"
                 )
@@ -249,14 +258,47 @@ class OnlinePinnedRuntime:
         self._write_stream.synchronize()
         return result
 
-    def release_request(self, rid: int) -> None:
-        """Remove a completed request from the completion bookkeeping."""
+    def get_completion(self, rid: int) -> Tuple[int, int] | None:
+        """Return the completion for *rid*, if the GPU has published it."""
         with self._lock:
-            self._completions.pop(rid, None)
+            self._raise_drain_error_locked()
+            return self._completions.get(rid)
+
+    def release_request(self, rid: int) -> bool:
+        """Acknowledge that the CPU finished reading a completed row."""
+        with self._lock:
+            completion = self._completions.get(rid)
+            if completion is None:
+                return False
+            buffer_row, _ = completion
+            self._release_row_locked(rid, buffer_row)
+            del self._completions[rid]
+            return True
+
+    def abandon_request(self, rid: int) -> None:
+        """Release *rid* when it completes without retaining its output."""
+        with self._lock:
+            completion = self._completions.get(rid)
+            if completion is None:
+                self._abandoned.add(rid)
+                return
+            buffer_row, _ = completion
+            self._release_row_locked(rid, buffer_row)
+            del self._completions[rid]
+
+    def _release_row_locked(self, rid: int, buffer_row: int) -> None:
+        owner = self._load_i32_acquire(self._pinned_rid_at_row, buffer_row)
+        if owner != rid:
+            raise RuntimeError(
+                f"row {buffer_row} belongs to rid={owner}, expected rid={rid}"
+            )
+        # -1 is a phase-disjoint CPU release acknowledgement. The GPU keeps
+        # the owner mapping and row stable until it observes this value.
+        self._store_i32_release(self._pinned_step, buffer_row, -1)
 
     def get_current_step_at_row(self, buffer_row: int) -> int:
         """Return the latest decode step written by the GPU for *buffer_row*."""
-        return int(self._pinned_step[buffer_row].item())
+        return self._load_i32_acquire(self._pinned_step, buffer_row)
 
     def find_row_for_rid(self, rid: int) -> int:
         """Scan ``pinned_rid_at_row`` to find which buffer row holds *rid*.
@@ -264,7 +306,7 @@ class OnlinePinnedRuntime:
         Returns the row index, or -1 if the GPU hasn't assigned a row yet.
         """
         for r in range(self._total_inflight):
-            if int(self._pinned_rid_at_row[r].item()) == rid:
+            if self._load_i32_acquire(self._pinned_rid_at_row, r) == rid:
                 return r
         return -1
 
@@ -274,22 +316,69 @@ class OnlinePinnedRuntime:
         with self._waiting_lock:
             return len(self._waiting)
 
-    def shutdown(self) -> None:
-        """Signal the GPU persistent kernel to terminate."""
-        self._shutdown[0] = 1
+    def request_shutdown(self) -> None:
+        """Signal the GPU persistent kernel to terminate when it is idle."""
+        self._store_i32_release(self._shutdown, 0, 1)
+
+    def stop(self) -> None:
+        """Stop the completion drainer after the GPU kernel has exited."""
         self._drain_stop.set()
+        if self._drain_thread is not None:
+            self._drain_thread.join()
+
+    def shutdown(self) -> None:
+        """Signal the GPU kernel and stop the completion drainer."""
+        self.request_shutdown()
+        self.stop()
+
+    def start(self) -> None:
+        """Start the background completion drainer after shared state is reset."""
+        if self._drain_thread is not None and self._drain_thread.is_alive():
+            return
+        self._raise_drain_error()
+        self._drain_stop.clear()
+        self._drain_thread = threading.Thread(
+            target=self._drain_loop, daemon=True)
+        self._drain_thread.start()
 
     def reset(self) -> None:
         """Clear completion bookkeeping and ring state for a new session."""
-        self._cpu_req_tail    = 0
-        self._cpu_req_ack     = 0
-        self._cpu_comp_head   = 0
-        self._shutdown[0]     = 0
+        if self._drain_thread is not None and self._drain_thread.is_alive():
+            raise RuntimeError("cannot reset a running online runtime")
+
+        with self._ring_lock:
+            self._cpu_req_tail = 0
+            self._cpu_req_ack = 0
+            with self._waiting_lock:
+                self._waiting.clear()
+            self._req_ready.zero_()
+            self._req_request_id.zero_()
+
         with self._lock:
+            self._cpu_comp_head = 0
             self._completions.clear()
-        with self._waiting_lock:
-            self._waiting.clear()
-        self._comp_ready.zero_()
-        self._req_ready.zero_()
-        self._req_request_id.zero_()
+            self._abandoned.clear()
+            self._drain_error = None
+            self._comp_ready.zero_()
+
+        self._shutdown.zero_()
+        self._pinned_step.zero_()
         self._pinned_rid_at_row.fill_(-1)
+
+    def _load_i32_acquire(self, tensor: torch.Tensor, index: int) -> int:
+        return int(self._mpk.persistent_kernel.load_i32_acquire(
+            tensor.data_ptr(), index))
+
+    def _store_i32_release(
+        self, tensor: torch.Tensor, index: int, value: int,
+    ) -> None:
+        self._mpk.persistent_kernel.store_i32_release(
+            tensor.data_ptr(), index, value)
+
+    def _raise_drain_error(self) -> None:
+        with self._lock:
+            self._raise_drain_error_locked()
+
+    def _raise_drain_error_locked(self) -> None:
+        if self._drain_error is not None:
+            raise RuntimeError("completion drainer failed") from self._drain_error
