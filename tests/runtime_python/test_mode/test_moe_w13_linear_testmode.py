@@ -2,13 +2,17 @@
 Test: BF16 MoE W13 linear via PersistentKernel test_mode.
 
 Tests the MoE gate+up fused linear projection (moe_w13_linear_layer) using
-the Qwen3-30B-A3B configuration from demo/qwen3/demo_30B_A3B.py:
-  - hidden_size = 4096
-  - moe_intermediate_size = 2560  (fused output = 5120)
+the Qwen3-30B-A3B configuration from demo/qwen3/demo_30B_A3B.py /
+HuggingFace config.json:
+  - hidden_size = 2048
+  - moe_intermediate_size = 768  (fused output = 1536)
   - num_experts = 128
   - num_experts_per_tok = 8
-  - grid_dim = (10, 12, 1)
+  - grid_dim = (10, fused_outdim // 128, 1) = (10, 12, 1)
   - block_dim = (256, 1, 1)
+
+grid.y must equal fused_outdim // 128 so every 128-wide output tile is covered;
+a smaller grid leaves later tiles as zeros and fails the reference comparison.
 
 For each token, the kernel selects its top-k experts and computes:
   output[token, slot, :] = input[token, :] @ weight[expert, :, :].T
@@ -31,18 +35,21 @@ def test_moe_w13_linear():
     dtype = torch.bfloat16
     torch.manual_seed(42)
 
-    # Qwen3-30B-A3B configuration
+    # Qwen3-30B-A3B configuration (matches HF config.json / demo_30B_A3B.py)
     batch_size = 1
-    hidden_size = 4096
-    intermediate_size = 2560  # model.config.moe_intermediate_size
-    fused_outdim = 2 * intermediate_size  # 5120 (gate + up fused)
+    hidden_size = 2048
+    intermediate_size = 768  # model.config.moe_intermediate_size
+    fused_outdim = 2 * intermediate_size  # 1536 (gate + up fused)
     num_experts = 128
     num_experts_per_tok = 8
+    # grid.x=10 matches the BF16 w13 expert_stride hardcoded in task_register.cc;
+    # grid.y tiles the fused N dim at 128 columns per CTA (OUTPUT_ATOM_SIZE).
+    grid_dim = (10, fused_outdim // 128, 1)
 
     print(f"\n{'='*60}")
     print(f"Test: BF16 MoE W13 linear (Qwen3-30B-A3B config)")
     print(f"  B={batch_size}, K={hidden_size}, N={fused_outdim}, "
-          f"E={num_experts}, topk={num_experts_per_tok}")
+          f"E={num_experts}, topk={num_experts_per_tok}, grid={grid_dim}")
 
     # --- Create tensors ---
     input_act = torch.randn(batch_size, hidden_size, dtype=dtype, device=device) * 0.1
@@ -97,14 +104,15 @@ def test_moe_w13_linear():
     mask_dt = pk.attach_input(moe_mask, name="moe_mask")
     output_dt = pk.attach_input(output, name="output")
 
-    # grid_dim and block_dim match demo/qwen3/demo_30B_A3B.py line 620-628
+    # grid_dim matches demo/qwen3/demo_30B_A3B.py:
+    #   (10, fused_outdim_2 // world_size // 128, 1) with world_size=1
     pk.moe_w13_linear_layer(
         input=input_dt,
         weight=weight_dt,
         moe_routing_indices=routing_dt,
         moe_mask=mask_dt,
         output=output_dt,
-        grid_dim=(10, 12, 1),
+        grid_dim=grid_dim,
         block_dim=(256, 1, 1),
     )
 
