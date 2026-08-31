@@ -342,6 +342,11 @@ void register_mugraph(
               // the request dimension
               task.task_metadata.request_id = bid.x;
             }
+            // Argmax partial tasks: grid_dim.x partitions the vocab dimension
+            if (task_type == TASK_ARGMAX_PARTIAL ||
+                task_type == TASK_ARGMAX_PARTIAL_SM100) {
+              task.task_metadata.task_offset = bid.x;
+            }
             // Set expert_offset for MoE tasks
             if (task_type == TASK_MOE_W13_LINEAR_SM100 ||
                 task_type == TASK_MOE_W2_LINEAR_SM100 ||

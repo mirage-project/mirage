@@ -920,7 +920,9 @@ int TaskRegister::register_linear_task(threadblock::Graph const &bgraph,
 int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
   // params[0]: num_partial_tasks
-  assert(params.size() == 1);
+  // params[1] (optional): real vocab size; positions at/after it are lm_head
+  // padding rows and are excluded from the argmax
+  assert(params.size() == 1 || params.size() == 2);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 1;
@@ -940,16 +942,21 @@ int TaskRegister::register_argmax_partial_task(threadblock::Graph const &bgraph,
   int num_elements = input_ops[0]->output_tensors[0].dim[1];
   int num_partial_tasks = params[0];
 
+  int vocab_size =
+      params.size() == 2 ? params[1] : num_elements * num_partial_tasks;
+
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::argmax_partial_kernel<bfloat16, $, $, $>(",
+  code.e("kernel::argmax_partial_kernel<bfloat16, $, $, $, $>(",
          batch_size,
          num_elements,
-         num_partial_tasks);
+         num_partial_tasks,
+         vocab_size);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    task_desc->output_ptrs[1],");
-  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
+  code.e("    task_desc->task_metadata.task_offset * $);", num_elements);
   return register_task_variant(TASK_ARGMAX_PARTIAL, code.to_string());
 }
 
@@ -2388,7 +2395,9 @@ int TaskRegister::register_paged_attention_sm100_task(
 int TaskRegister::register_argmax_partial_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_partial_tasks
-  assert(params.size() == 1);
+  // params[1] (optional): real vocab size; positions at/after it are lm_head
+  // padding rows and are excluded from the argmax
+  assert(params.size() == 1 || params.size() == 2);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 1;
@@ -2408,16 +2417,21 @@ int TaskRegister::register_argmax_partial_sm100_task(
   int num_elements = input_ops[0]->output_tensors[0].dim[1];
   int num_partial_tasks = params[0];
 
+  int vocab_size =
+      params.size() == 2 ? params[1] : num_elements * num_partial_tasks;
+
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::argmax_partial_sm100_kernel<bfloat16, $, $, $>(",
+  code.e("kernel::argmax_partial_sm100_kernel<bfloat16, $, $, $, $>(",
          batch_size,
          num_elements,
-         num_partial_tasks);
+         num_partial_tasks,
+         vocab_size);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    task_desc->output_ptrs[1],");
-  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
+  code.e("    task_desc->task_metadata.task_offset * $);", num_elements);
   return register_task_variant(TASK_ARGMAX_PARTIAL_SM100, code.to_string());
 }
 

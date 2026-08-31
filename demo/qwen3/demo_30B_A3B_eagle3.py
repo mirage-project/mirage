@@ -236,7 +236,7 @@ if __name__ == "__main__":
             (
                 model.lm_head.weight,
                 torch.full(
-                    (153600 - model.config.vocab_size, hidden_size), -1e4, device="cuda"
+                    (153600 - model.config.vocab_size, hidden_size), 0, device="cuda"
                 ),
             ),
             0,
@@ -769,6 +769,7 @@ if __name__ == "__main__":
             output=(argmax_part_value, argmax_part_index),
             grid_dim=argmax_partial_grid_dim,
             block_dim=(256, 1, 1),
+            vocab_size=model.config.vocab_size,
         )
         mpk.argmax_reduce_layer(
             input=(argmax_part_value, argmax_part_index),
