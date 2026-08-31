@@ -309,9 +309,11 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
                             : 0;
     if (next_iter_len > 0) {
       int page_idx = page_indices[cp_finished_seq_len / PAGE_SIZE];
+      // Prefetch bound must be next_iter_len (tile being loaded), not
+      // curr_iter_len (tile being consumed). Same bug as #698 / #692.
 #pragma unroll
       for (int chunk_idx = threadIdx.x;
-           chunk_idx < curr_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
+           chunk_idx < next_iter_len * HEAD_DIM / CP_CHUNK_SIZE;
            chunk_idx += NUM_THREADS) {
         int dst_row = chunk_idx / (HEAD_DIM / CP_CHUNK_SIZE);
         int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;

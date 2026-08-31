@@ -315,11 +315,9 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
                               : 0;
       if (next_iter_len > 0) {
         int page_idx = page_indices[cp_finished_seq_len / PAGE_SIZE];
-        // FIX: loop bound was `curr_iter_len` (stale first-iter value); should
-        // be `next_iter_len` (the tile being loaded). The original OOB-read
-        // QKV input for `dst_row >= next_iter_len`, which lands in
-        // unmapped memory at higher mbt values → illegal access. See plan
-        // /home/letianr/.claude/plans/mpk-eagle3-k-greater-than-1-chain-flow.md
+        // Prefetch bound must be next_iter_len (tile being loaded), not
+        // curr_iter_len (tile being consumed). Using the stale first-iter
+        // length OOBs into QKV when next_iter_len < curr_iter_len (#698/#692).
 #pragma unroll
         for (int chunk_idx = threadIdx.x;
              chunk_idx < next_iter_len * HEAD_DIM / CP_CHUNK_SIZE;

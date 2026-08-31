@@ -382,9 +382,11 @@ __device__ __forceinline__ void
       int page_idx =
           page_indices[(cp_finished_seq_len + kv_cache_offset) / PAGE_SIZE];
 
+      // Prefetch bound must be next_iter_len (tile being loaded), not
+      // curr_iter_len (tile being consumed). Same bug as #698 / #692.
 #pragma unroll
       for (int chunk_idx = threadIdx.x;
-           chunk_idx < curr_iter_len * HEAD_DIM_COPY_ITER;
+           chunk_idx < next_iter_len * HEAD_DIM_COPY_ITER;
            chunk_idx += NUM_THREADS) {
         int dst_row = chunk_idx / HEAD_DIM_COPY_ITER;
         int col = (chunk_idx % HEAD_DIM_COPY_ITER) * CP_CHUNK_SIZE;
