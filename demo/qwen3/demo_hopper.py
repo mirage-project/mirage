@@ -638,6 +638,7 @@ if __name__ == "__main__":
             output=(argmax_part_value, argmax_part_index),
             grid_dim=argmax_partial_grid_dim,
             block_dim=(256, 1, 1),
+            vocab_size=model.config.vocab_size,
         )
         mpk.argmax_reduce_layer(
             input=(argmax_part_value, argmax_part_index),

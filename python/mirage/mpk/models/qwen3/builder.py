@@ -622,6 +622,7 @@ class Qwen3Builder(GraphBuilder):
                 output=(self.argmax_part_value, self.argmax_part_index),
                 grid_dim=argmax_partial_grid_dim,
                 block_dim=(128, 1, 1),
+                vocab_size=self.vocab_size,
             )
             self.mpk.argmax_reduce_layer(
                 input=(self.argmax_part_value, self.argmax_part_index),

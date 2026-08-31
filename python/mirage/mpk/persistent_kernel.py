@@ -2374,6 +2374,7 @@ class PersistentKernel:
         output: tuple[DTensor, DTensor],
         grid_dim: tuple,
         block_dim: tuple,
+        vocab_size: int = None,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (batch_size, vocab_size)
@@ -2383,15 +2384,18 @@ class PersistentKernel:
         assert output_index.num_dims == 2  # (batch_size, num_tasks)
         num_tasks = grid_dim[0]
         self.argmax_partial_output_size = input.dim(1) // num_tasks
+        # vocab_size: real vocab size when input.dim(1) is padded (e.g. the
+        # lm_head padded to 153600); positions at/after it never win argmax.
+        params = [num_tasks] if vocab_size is None else [num_tasks, vocab_size]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(input, (1, 0, -1), -1, True)
         tb_graph.new_input(output_value, (1, 0, -1), -1, True)
         tb_graph.new_input(output_index, (1, 0, -1), -1, True)
         self.kn_graph.customized([input, output_value, output_index], tb_graph)
         if self.target_cc == 100 or self.target_cc == 90:
-            self.kn_graph.register_task(tb_graph, "argmax_partial_sm100", [num_tasks])
+            self.kn_graph.register_task(tb_graph, "argmax_partial_sm100", params)
         else:
-            self.kn_graph.register_task(tb_graph, "argmax_partial", [num_tasks])
+            self.kn_graph.register_task(tb_graph, "argmax_partial", params)
 
     def argmax_reduce_layer(
         self,
