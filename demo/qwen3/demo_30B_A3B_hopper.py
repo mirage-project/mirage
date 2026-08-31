@@ -229,7 +229,7 @@ if __name__ == "__main__":
             (
                 model.lm_head.weight,
                 torch.full(
-                    (153600 - model.config.vocab_size, hidden_size), -1e4, device="cuda"
+                    (153600 - model.config.vocab_size, hidden_size), 0, device="cuda"
                 ),
             ),
             0,
