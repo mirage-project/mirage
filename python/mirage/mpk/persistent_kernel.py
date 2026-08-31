@@ -1216,6 +1216,29 @@ class PersistentKernel:
         assert output.num_dims == 2  # (batch_size, hidden_size / world_size)
         assert k_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
         assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
+        # This kernel is NOT paged: it takes no page table and no page stride,
+        # and indexes the cache flat by absolute token (task_register derives
+        # the row stride as head_dim*num_kv_heads and the sequence length as
+        # runtime_config.step[0]). Flat indexing lands on the right token only
+        # while consecutive pages of this cache sit exactly one block apart --
+        # free under KV 1.0, where a layer owned a packed
+        # [pages, page_size, kv_heads, head_dim] tensor, and NOT free on the
+        # KV 2.0 pool: K and V share a page component-major, so K's pages are
+        # two blocks apart and token `block_size` reads V's half of page 0.
+        #
+        # A sequence that fits in one block never leaves the first page, so
+        # that case stays correct whatever the stride is. Refuse the rest
+        # rather than read the wrong half silently.
+        block_size = k_cache.dim(1)
+        if self.max_seq_length > block_size:
+            stride = _page_stride(k_cache, v_cache)
+            assert stride == block_size, (
+                f"single_batch_extend indexes the KV cache flat by absolute "
+                f"token, but this cache's pages are {stride} rows apart with "
+                f"a {block_size}-token block, and max_seq_length "
+                f"{self.max_seq_length} crosses a page. Raise the block size "
+                f"to >= max_seq_length (--page-size), or move this path onto "
+                f"paged attention.")
         head_dim = k_cache.dim(3)
         num_kv_heads = k_cache.dim(2)
         num_q_heads = output.dim(1) // head_dim # 32
