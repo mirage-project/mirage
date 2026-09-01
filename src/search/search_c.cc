@@ -37,7 +37,13 @@ int cython_search(mirage::kernel::Graph const *input_graph,
       generated_graphs_file >> j;
       int num = 0;
       for (json const &graph : j) {
-        assert(num < max_num_graphs);
+        if (num >= max_num_graphs) {
+          fprintf(stderr,
+                  "[search] checkpoint holds more than %d graphs; keeping the "
+                  "first %d. Raise max_num_new_graphs to see the rest.\n",
+                  max_num_graphs, max_num_graphs);
+          break;
+        }
         new_graphs[num] = new kernel::Graph();
         from_json(graph, *new_graphs[num]);
         num++;
@@ -59,12 +65,6 @@ int cython_search(mirage::kernel::Graph const *input_graph,
     if (is_formal_verified) {
       config.verifier_type = search::VerifierType::FORMAL_VERIFIER;
     }
-    // Graph-size limits. The defaults (3 threadblock-graph inputs, 2 outputs,
-    // 9 ops) silently make some specs unsearchable: a FOUR-input spec returns
-    // zero candidates with no diagnostic, even one with no matmul chaining at
-    // all, which is what put the attention core (Q, K^T, V, mask) out of
-    // reach. Applied after the default_config preset so an explicit value
-    // wins over one a preset chose.
     if (max_num_threadblock_graph_inputs > 0) {
       config.max_num_threadblock_graph_inputs = max_num_threadblock_graph_inputs;
     }
@@ -75,12 +75,6 @@ int cython_search(mirage::kernel::Graph const *input_graph,
     if (max_num_threadblock_graph_op > 0) {
       config.max_num_threadblock_graph_op = max_num_threadblock_graph_op;
     }
-    // NOTE this counts KN_INPUT_OPs as well, so the usable budget is
-    // (inputs + compute + output). At the default of 5 a THREE-input spec fits
-    // exactly -- 3 inputs + one customized op + one output -- and a
-    // four-input one cannot fit at all, which is the real reason a 4-input
-    // spec returns zero candidates. Raising max_num_threadblock_graph_inputs
-    // alone does nothing.
     if (max_num_kernel_graph_op > 0) {
       config.max_num_kernel_graph_op = max_num_kernel_graph_op;
     }
@@ -135,7 +129,20 @@ int cython_search(mirage::kernel::Graph const *input_graph,
     gen.generate_kernel_graphs();
     int num = 0;
     for (json const &j : gen.generated_graphs) {
-      assert(num < max_num_graphs);
+      // new_graphs is the CALLER's buffer and max_num_graphs is its capacity.
+      // The assert that used to guard this is compiled out by NDEBUG in the
+      // Release build, so a search returning more graphs than the caller sized
+      // for wrote past the end -- the Cython wrapper's is a 1024-element STACK
+      // array, so the symptom was "stack smashing detected", uncatchable and
+      // with nothing pointing at the cause.
+      if (num >= max_num_graphs) {
+        fprintf(stderr,
+                "[search] found %zu graphs but the caller has room for %d; "
+                "keeping the first %d. Raise max_num_new_graphs to see the "
+                "rest.\n",
+                gen.generated_graphs.size(), max_num_graphs, max_num_graphs);
+        break;
+      }
       new_graphs[num] = new kernel::Graph();
       from_json(j, *new_graphs[num]);
       num++;

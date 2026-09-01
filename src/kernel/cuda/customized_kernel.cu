@@ -39,6 +39,8 @@
 #include "mirage/utils/fingerprint_functions.h"
 #include "mirage/warp/cuda/matmul.h"
 
+#include <cstdlib>
+
 namespace mirage {
 namespace kernel {
 
@@ -517,7 +519,14 @@ bool KNCustomizedOp::fingerprint(void) {
   assert(kgraph->gpu_dim.y == 1);
   assert(kgraph->gpu_dim.z == 1);
 
-  assert(bgraph.smem_offset <= mirage::config::MAX_SMEM_FP_SIZE);
+  if ((size_t)bgraph.smem_offset > mirage::config::MAX_SMEM_FP_SIZE) {
+    fprintf(stderr,
+            "[fp] SMEM OVERFLOW: bgraph.smem_offset=%zu > MAX_SMEM_FP_SIZE=%zu "
+            "(%zu ops, forloop_range=%d)\n",
+            (size_t)bgraph.smem_offset, mirage::config::MAX_SMEM_FP_SIZE,
+            bgraph.operators.size(), bgraph.forloop_range);
+    return false;
+  }
   mirage::kernel::DeviceMemoryManager *dmm =
       mirage::kernel::DeviceMemoryManager::get_instance();
 
@@ -525,6 +534,17 @@ bool KNCustomizedOp::fingerprint(void) {
   assert(bgraph.grid_dim.x * bgraph.grid_dim.y * bgraph.grid_dim.z <=
          mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
 
+  if (getenv("MIRAGE_FP_TRACE")) {
+    fprintf(stderr, "[fp] grid=(%d,%d,%d) blk=%d fl=%d smem=%zu ops=",
+            bgraph.grid_dim.x, bgraph.grid_dim.y, bgraph.grid_dim.z,
+            bgraph.block_dim.x, bgraph.forloop_range,
+            (size_t)bgraph.smem_offset);
+    for (auto const *o : bgraph.operators) {
+      fprintf(stderr, "%d,", (int)o->op_type);
+    }
+    fprintf(stderr, "\n");
+    fflush(stderr);
+  }
   for (int gpu_id = 0; gpu_id < kgraph->gpu_dim.x; gpu_id++) {
     compute_customizedop_fingerprint<<<bgraph.grid_dim, bgraph.block_dim>>>(
         new_params,

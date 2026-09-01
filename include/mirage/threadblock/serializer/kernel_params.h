@@ -25,8 +25,15 @@ namespace mirage {
 namespace threadblock {
 
 struct alignas(16) NewKernelParams {
-  static int const MAX_NUM_OPERATORS = 16;
-  static int const MAX_NUM_PARAMETERS = 160;
+  // These bound FIXED arrays that are passed BY VALUE as a CUDA kernel
+  // argument, and every serializer bounded them with an assert -- which NDEBUG
+  // deletes from the Release build. A threadblock graph with more ops than fits
+  // then serialized past `parameters`, corrupting the members after it, and the
+  // fingerprint kernel read garbage offsets ("Cuda failure: 700" during
+  // search). Sized for the graphs search can reach at max_tb_graph_ops ~= 24;
+  // the attention core alone needs 15 ops and ~150 parameters.
+  static int const MAX_NUM_OPERATORS = 24;
+  static int const MAX_NUM_PARAMETERS = 512;
   static int const MAX_NUM_DMEM_INPUTS = 4;
   static int const MAX_NUM_DMEM_OUTPUTS = 4;
   int num_operators, num_parameters, num_dmem_inputs, num_dmem_outputs;

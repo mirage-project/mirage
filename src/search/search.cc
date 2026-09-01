@@ -147,11 +147,6 @@ void KernelGraphGenerator::generate_next_operator(
 #pragma omp task
 #endif
     {
-      // An exception thrown here cannot unwind out of the OpenMP region: it
-      // reaches std::terminate and aborts the process, so neither a host
-      // try/catch nor Cython's `except +` can see it. One malformed sub-tree
-      // used to take the whole search down -- an rms_norm in the graph did
-      // exactly that. Drop the sub-tree instead.
       try {
         generate_next_operator(
             c_copied, verify, verified_graphs, search_depth, true);
@@ -424,10 +419,6 @@ void KernelGraphGenerator::generate_kernel_graphs() {
 #pragma omp single
 #endif
     {
-      // Same unwinding rule as the omp task bodies: an exception escaping the
-      // parallel region reaches std::terminate. The root call needs its own
-      // guard because the whole DFS runs inside it -- a throw from any depth
-      // that is not already inside a task lands here.
       try {
         generate_next_operator(
             c,

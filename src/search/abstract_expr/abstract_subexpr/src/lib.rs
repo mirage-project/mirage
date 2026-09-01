@@ -69,35 +69,41 @@ pub fn rules(mut nums: Vec<u32>) -> Vec<Rewrite> {
 
     let mut extra_rules: Vec<Rewrite> = Vec::new();
 
+    nums.sort();
     nums.dedup();
+    // EVERY factor pair of n, not just repeated division by the smallest prime.
+    // The old loop shrank `n` inside the inner loop, so `j * j <= n` collapsed
+    // and it only ever peeled the smallest prime off the top: for 3072 = 2^10*3
+    // it emitted (sum 3072)=(sum 2 (sum 1536)) ... down to (sum 6)=(sum 2 (sum 3)),
+    // but never a pair carrying the 3 at the top, such as (sum 3072)=(sum 24
+    // (sum 128)). A tiled matmul's abstract expression is (sum forloop_range
+    // (sum k_tile ...)), so without that pair it can never be shown equal to
+    // the spec's (sum K ...) -- the candidate is pruned and search returns only
+    // the trivial kernel-level graph. Powers of two were unaffected because
+    // every factor pair of 2^a is reachable by repeated halving.
     for &mut num in &mut nums {
-        let mut n = num;
+        let n = num;
         let mut j = 2;
-
         while j * j <= n {
             if n % j == 0 {
-                while n % j == 0 {
-                    let k = n / j;
-                    if k == 1 {
-                        break;
+                for (a, b) in [(j, n / j), (n / j, j)] {
+                    if b == 1 {
+                        continue;
                     }
                     let base = format!("(sum {} ?a)", n);
-                    let jk_expr = format!("(sum {} (sum {} ?a))", j, k);
-
-                    let rule_name = format!("factor-{}-{}", k, j);
+                    let ab_expr = format!("(sum {} (sum {} ?a))", a, b);
+                    let rule_name = format!("factor-{}-{}-{}", n, a, b);
                     if !extra_rules.iter().any(|r| r.name.as_str() == rule_name) {
                         let lhs: Pattern<Expr> = base.parse().unwrap();
-                        let rhs: Pattern<Expr> = jk_expr.parse().unwrap();
+                        let rhs: Pattern<Expr> = ab_expr.parse().unwrap();
                         extra_rules.push(Rewrite::new(rule_name, lhs, rhs).unwrap());
                     }
-
-                        let rule_name_inv = format!("factor-{}-{}-inv", k, j);
-                        if !extra_rules.iter().any(|r| r.name.as_str() == rule_name_inv) {
-                            let lhs_inv: Pattern<Expr> = jk_expr.parse().unwrap();
-                            let rhs_inv: Pattern<Expr> = base.parse().unwrap();
-                            extra_rules.push(Rewrite::new(rule_name_inv, lhs_inv, rhs_inv).unwrap());
-                        }
-                    n = n / j;
+                    let rule_name_inv = format!("factor-{}-{}-{}-inv", n, a, b);
+                    if !extra_rules.iter().any(|r| r.name.as_str() == rule_name_inv) {
+                        let lhs_inv: Pattern<Expr> = ab_expr.parse().unwrap();
+                        let rhs_inv: Pattern<Expr> = base.parse().unwrap();
+                        extra_rules.push(Rewrite::new(rule_name_inv, lhs_inv, rhs_inv).unwrap());
+                    }
                 }
             }
             j = j + 1;

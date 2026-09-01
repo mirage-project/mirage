@@ -146,13 +146,26 @@ bool Graph::allocate(DTensor &tensor, bool allocate_fingerprint) {
   allocated_data_tensors.push_back(std::make_pair(ret, aligns_size));
   tensor.data_offset = ret;
 
-  if (allocate_fingerprint) {
+  // disable_fingerprint must be honoured HERE too, not only in can_allocate:
+  // that one returns true unconditionally when the flag is set, so allocating
+  // anyway means the capacity check is skipped AND the memory is taken --
+  // a guaranteed silent overflow past MAX_DMEM_FP_SIZE on any large graph.
+  // Nothing reads a fingerprint outside probabilistic_verifier, so the model
+  // path (PersistentKernel sets disable_fingerprint=True) needs none.
+  if (allocate_fingerprint && !disable_fingerprint) {
     assert(dmem_fp_offset % 16 == 0);
     ret = dmem_fp_offset;
     aligns_size = ((tensor.fingerprint_size() + 15) & ~15);
     dmem_fp_offset += aligns_size;
     tensor.fp_offset = ret;
+    if ((size_t)dmem_fp_offset > mirage::config::MAX_DMEM_FP_SIZE) {
+      fprintf(stderr, "[dmem] FP ARENA OVERFLOW: offset=%ld cap=%zu\n",
+              (long)dmem_fp_offset, mirage::config::MAX_DMEM_FP_SIZE);
+      abort();
+    }
     allocated_fp_tensors.push_back(std::make_pair(ret, aligns_size));
+  } else {
+    tensor.fp_offset = -1; // no fingerprint: matches Graph::free's convention
   }
 
   return true;
@@ -165,6 +178,17 @@ void Graph::free(DTensor &tensor) {
   // allocated memory for its fingerprint
 
   if (tensor.fp_offset >= 0) {
+    if (allocated_fp_tensors.empty() ||
+        allocated_fp_tensors.back().first != tensor.fp_offset) {
+      fprintf(stderr,
+              "[dmem] FREE OUT OF ORDER: fp_offset=%ld top=%ld depth=%zu\n",
+              (long)tensor.fp_offset,
+              allocated_fp_tensors.empty()
+                  ? -1L
+                  : (long)allocated_fp_tensors.back().first,
+              allocated_fp_tensors.size());
+      abort();
+    }
     assert(allocated_fp_tensors.size() > 0);
     assert(allocated_fp_tensors.back().first == tensor.fp_offset);
     assert(allocated_fp_tensors.back().second ==
@@ -258,10 +282,6 @@ void from_json(json const &j, Graph &g) {
         break;
       }
       case type::KNOperatorType::KN_RMS_NORM_OP: {
-        // Without this case the op fell to `default: assert(false)`, which is
-        // elided under NDEBUG -- the following JSON access then threw
-        // type_error.304 into std::terminate, aborting the process. Any search
-        // over a graph containing an rms_norm died that way.
         size_t guid, guidO;
         std::vector<int> normalized_shape;
         jop.at("input_tensors")[0].at("guid").get_to(guid);
@@ -458,13 +478,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   KNCustomizedOp const *customized = static_cast<KNCustomizedOp const *>(op);
   TaskRegister *task_register = TaskRegister::get_instance();
   if (name == "generated") {
-    // Body transpiled from the threadblock graph rather than dispatched to a
-    // handwritten kernel. Input/output counts come from the op itself, since a
-    // generated body has no fixed arity.
-    // Target the device the megakernel will actually run on. The other
-    // register_* paths do not need this because they dispatch to handwritten
-    // kernels that are already arch-specialized; a generated body is transpiled
-    // here and must be told which backend to emit.
     int cc_major = 0, cc_minor = 0, cur_device = 0;
     cudaGetDevice(&cur_device);
     cudaDeviceGetAttribute(&cc_major, cudaDevAttrComputeCapabilityMajor,
@@ -473,9 +486,6 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
                            cur_device);
     int variant_id = task_register->register_generated_task(
         customized, this, cc_major * 10 + cc_minor, params);
-    // MPK counts I/O from the bgraph's TB_INPUT_OPs: the trailing ones are the
-    // writes. A generated task declares its output as an input too, so the read
-    // count is the operand count minus the number of tensors it produces.
     int const num_writes = (int)customized->output_tensors.size();
     int const num_reads = (int)customized->input_tensors.size() - num_writes;
     task_config[op] =

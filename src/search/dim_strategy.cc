@@ -113,14 +113,6 @@ std::vector<dim3>
     return std::vector<int>(dims.begin(), dims.end());
   };
 
-  // An explicit grid_dim_to_explore is a constraint, not a suggestion. The
-  // generated candidates and the occupancy filter below both assume the graph
-  // becomes a STANDALONE kernel that has to fill the GPU, which is why the
-  // filter demands >= 32 threadblocks. An MPK task is the opposite: one
-  // threadblock's worth of work, instantiated per grid cell and scheduled
-  // across persistent workers by the megakernel -- grid_dim (1,1,1) is normal
-  // there (see the hand-written generated_swiglu_layer). Without this, asking
-  // for (1,1,1) silently yields a 128-block grid instead.
   if (!config.grid_dim_to_explore.empty()) {
     std::vector<dim3> cands = config.grid_dim_to_explore;
     if (config.randomized_branches) {
@@ -168,11 +160,6 @@ std::vector<dim3>
     DimStrategy::get_block_dim_cand(std::vector<DTensor> const &tensors,
                                     dim3 grid_dim) {
   std::vector<dim3> cands = config.block_dim_to_explore;
-  // {128,1,1} is the default when the caller expressed no preference. If it
-  // DID pass block_dim_to_explore, appending another size anyway both wastes
-  // search on candidates the caller cannot use and lets one of them win.
-  // MPK is the case that needs this: its workers launch at 256 threads, so a
-  // 128-thread task body traps in wg_sync.
   if (cands.empty()) {
     cands.push_back({128, 1, 1});
   }
@@ -513,10 +500,25 @@ std::vector<std::vector<int>> DimStrategy::get_nary_input(int num_tensors,
   return result;
 }
 
+namespace {
+
+std::vector<std::vector<int>> few_input_cands(int num_inputs) {
+  if (num_inputs == 1) {
+    return {{0}};
+  }
+  return {};
+}
+
+} // namespace
+
 std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
     std::vector<DTensor> const &all_input) {
 
   int num_inputs = all_input.size();
+
+  if (num_inputs < 2) {
+    return few_input_cands(num_inputs);
+  }
 
   if (config._enable_concat_matmul_transformation && all_input.size() == 4) {
     return {{0, 1, 2, 3}};
@@ -524,16 +526,6 @@ std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
   if (all_input.size() == 3) {
     return {{0, 1, 2}};
   }
-  // With more than three inputs the only combination offered used to be the
-  // LAST TWO, so no candidate could ever consume them all and a >3-input spec
-  // never produced a fused task -- independent of every limit. Raising
-  // max_num_threadblock_graph_inputs did nothing on its own; measured on
-  // a+b+c+d, the simplest possible 4-input spec, search returned 161 graphs
-  // and zero fully fused. Offer the all-inputs combination when the
-  // configured limit allows it.
-  //
-  // Inert at the default limit of 3, so this changes nothing unless a caller
-  // raises it.
   std::vector<std::vector<int>> cands;
   if (num_inputs > 3 &&
       num_inputs <= (int)config.max_num_threadblock_graph_inputs) {
@@ -632,6 +624,10 @@ std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
 std::vector<std::vector<int>> DimStrategy::get_customized_input_cand_idx(
     std::vector<SymbolicDTensor> const &all_inputs) {
   int num_inputs = all_inputs.size();
+
+  if (num_inputs < 2) {
+    return few_input_cands(num_inputs);
+  }
 
   if (all_inputs.size() == 3) {
     return {{0, 1, 2}};

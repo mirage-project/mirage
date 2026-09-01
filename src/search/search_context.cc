@@ -9,7 +9,7 @@ void from_json(json const &j, SearchContext &c) {
   c.kn_graph = std::make_shared<kernel::Graph>();
   from_json(j.at("kn_graph"), *c.kn_graph);
   if (j.contains("tb_graph")) {
-    auto get_index = [&](int guid) {
+    auto get_index = [&](type::GuidType guid) {
       for (size_t i = 0; i < j.at("kn_graph").size(); ++i) {
         auto op = j.at("kn_graph")[i];
         for (size_t k = 0; k < op.at("output_tensors").size(); ++k) {
@@ -18,8 +18,6 @@ void from_json(json const &j, SearchContext &c) {
           }
         }
       }
-      // Falling off the end returned an indeterminate pair, which was then
-      // used to index kn_graph->operators. Say what went wrong instead.
       throw std::runtime_error(
           "SearchContext from_json: no kernel-graph tensor with guid " +
           std::to_string(guid));
