@@ -1,12 +1,4 @@
-"""Choosing task boundaries instead of writing them.
-
-The five MPK_COMPILED_MLP_IMPL variants are the partition space today, one
-hand-written each. partition.py enumerates that space and filters it down to
-what MPK can actually lower.
-
-The filters here are all pure graph shape or memoised search probes; the
-measurement that picks a winner is a separate step (rank_partitions.py).
-"""
+"""Choosing task boundaries instead of writing them."""
 import pytest
 
 from mirage.mpk.lowering import make_group
@@ -26,14 +18,7 @@ def _one_layer():
 
 
 def test_todays_partition_is_legal():
-    """The baseline has to survive its own filter, or the filter is wrong.
-
-    It very nearly did not: MPK's check rejects a task that is both a
-    join-consumer and a fork-consumer, and a transformer layer's residual add
-    looks exactly like that until you account for residual stripping -- a
-    direct edge u->v is dropped when a longer path u->...->v exists. Without
-    that step every partition, including this one, is rejected.
-    """
+    """The baseline has to survive its own filter, or the filter is wrong."""
     g = build_qwen3(QWEN3, num_layers=2)
     assert check_fork_join(g, partition_as_today(g)) is None
 
@@ -84,11 +69,6 @@ def test_cheap_filters_keep_the_baseline_reachable():
 def test_the_shipped_partition_is_enumerated():
     """The enumeration must contain the partition MPK actually runs, EXACTLY
     -- not merely something with similar tags.
-
-    It is the partition this project has whole-model numbers for, so if the
-    enumeration cannot propose it there is nothing to rank against. Comparing
-    node sets rather than tags matters: two partitions can share every tag and
-    still cut the graph differently.
     """
     g, layer = _one_layer()
     in_layer = set(layer)

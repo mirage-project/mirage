@@ -215,10 +215,6 @@ kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
                     input_op->input_map,
                     input_op->forloop_dim,
                     input_op->output_tensors[0].layout,
-                    // Preserve store_in_dmem: dropping it made spec-only
-                    // inputs of HANDWRITTEN task layers (e.g. a KV cache
-                    // slice) count against the 96KB smem heuristic when a
-                    // later GENERATED task reconstructed the whole graph.
                     input_op->output_tensors[0].store_in_dmem);
                 stensor_mapping[bop->output_tensors[0].guid] = st;
                 break;
@@ -442,11 +438,6 @@ kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
                 stensor_mapping[bop->output_tensors[0].guid] = st;
                 break;
               }
-              // Plain (non-accum) reductions had NO case here: they fell into
-              // the default, their output never entered stensor_mapping, and
-              // get_tensor_in_new_graph's assert -- compiled out by NDEBUG --
-              // let a default-constructed STensor flow into the next op, which
-              // then failed with a shape error pointing nowhere near the cause.
               case TB_REDUCTION_0_OP:
               case TB_REDUCTION_1_OP:
               case TB_REDUCTION_2_OP: {
@@ -467,9 +458,6 @@ kernel::Graph const *rewrite_graph_for_online_softmax(kernel::Graph const *g) {
                 break;
               }
               default: {
-                // Throw rather than assert: NDEBUG compiles the assert out and
-                // the op is then silently DROPPED -- its consumers read a
-                // default-constructed stensor (see the reduction note above).
                 throw std::runtime_error(
                     "transpiler graph reconstruction: unsupported "
                     "threadblock operator type " +
@@ -545,10 +533,6 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
         // Each KNOutputOp takes one input and has no output
         assert(dtensor_inputs.size() == 1);
         kernel::KNOutputOp *output_op = static_cast<kernel::KNOutputOp *>(op);
-        // NOTE: a device body's tensors are pinned row-major by
-        // resolve_tensor_layout, not here -- see the emit_device_body branch
-        // there. A task graph has no KN_OUTPUT_OP at all (MPK passes the
-        // destination in as an operand), so this path never sees them.
         g->mark_output(dtensor_inputs[0], output_op->output_strides);
         if (!output_op->output_strides.empty()) {
           assert(output_op->output_strides.size() ==
@@ -783,11 +767,6 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               stensor_mapping[bop->output_tensors[0].guid] = st;
               break;
             }
-            // Plain reductions had no case in THIS switch either (the twin
-            // switch in rewrite_graph_for_online_softmax had the same gap):
-            // the op was silently dropped and its consumers read a
-            // default-constructed stensor via the NDEBUG-elided assert in
-            // get_tensor_in_new_graph.
             case TB_REDUCTION_0_OP:
             case TB_REDUCTION_1_OP:
             case TB_REDUCTION_2_OP: {
@@ -807,8 +786,6 @@ Transpiler::Transpiler(kernel::Graph const *_graph,
               break;
             }
             default: {
-              // Throw, not assert: NDEBUG elides the assert and the op is then
-              // silently dropped (see the reduction note above).
               throw std::runtime_error(
                   "transpiler graph rebuild: unsupported threadblock operator "
                   "type " +

@@ -63,14 +63,6 @@ void Transpiler::get_threadblock_swizzle_plan_blackwell(
           update_innermost_min_chunk_size(input_stensor.guid, num_16B_elems);
         }
       } else if (op->op_type == type::TB_MATMUL_OP) {
-        // The 16B/8-element chunk is what makes this come out as Swizzle<3,3,3>
-        // for a 16-bit operand, which is exactly the UMMA's 128B swizzle
-        // expressed in element units. Do not "fix" this to 32B chunks to match
-        // the Swizzle<3,4,3> that CUTLASS's sm100_smem_selector prints: that
-        // atom carries a smem_ptr_flag[16b] and is evaluated at bit
-        // granularity, so the two agree only in this form. Emitting <3,3,4>
-        // here made every generated matmul return right values at wrong
-        // positions.
         tb::STensor const &input_stensor0 = op->input_tensors.at(0);
         tb::STensor const &input_stensor1 = op->input_tensors.at(1);
         tb::STensor const &output_stensor = last_op->output_tensors.at(0);

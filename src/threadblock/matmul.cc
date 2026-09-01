@@ -22,16 +22,6 @@
 namespace mirage {
 namespace threadblock {
 
-// create_matmul_op returns nullptr for a shape it cannot build -- mismatched
-// dims, a TB-level batch matmul, or (most often) an operand set that exceeds
-// MAX_SMEM_SIZE. The assert that used to guard this is compiled out by NDEBUG
-// in the Release build, so the nullptr was dereferenced immediately below and
-// the whole process segfaulted with no diagnostic. Reported as an exception
-// instead; CCore.pxd declares these `except +` so it surfaces in Python.
-//
-// The other threadblock ops had the same latent segfault and now go through the
-// shared check_tb_op() in graph.cc; matmul keeps its own check only because it
-// can name the offending operand shapes.
 static void check_matmul_op(TBOperator const *op,
                             STensor const &A,
                             STensor const &B) {
@@ -75,7 +65,6 @@ TBOperator *Graph::create_matmul_op(STensor const &A, STensor const &B) {
   if (A.after_accum != B.after_accum) {
     return nullptr;
   }
-
   TBMatmulOp *op = new TBMatmulOp(this, A, B);
   // Check shmem usage
   size_t smem_usage = calculate_shared_memory_usage(op);

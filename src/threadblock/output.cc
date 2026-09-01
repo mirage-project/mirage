@@ -26,7 +26,7 @@ mirage::kernel::DTensor
                        mirage::type::TBEpilogueType epilogue) {
   TBOperator *op =
       create_output_op(stensor, output_map, output_forloop_dim, epilogue);
-  check_tb_op(op, "output");
+  assert(op != nullptr);
   operators.push_back(op);
   return static_cast<TBOutputOp *>(op)->dtensor;
 }
@@ -38,7 +38,7 @@ mirage::kernel::DTensor *
                       mirage::type::TBEpilogueType epilogue) {
   TBOperator *op =
       create_output_op(*stensor, output_map, output_forloop_dim, epilogue);
-  check_tb_op(op, "output");
+  assert(op != nullptr);
   operators.push_back(op);
   return &(static_cast<TBOutputOp *>(op)->dtensor);
 }

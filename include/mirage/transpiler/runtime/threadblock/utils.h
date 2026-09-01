@@ -118,10 +118,6 @@ static __device__ __forceinline__ auto get_cta_mma(int blockIdx_x,
 }
 
 
-// tcgen05 ops must observe a preceding thread sync's ordering before their
-// next smem operand reads. Raw asm fails ptxas on the plain compute_100
-// target this TU also builds for, so gate on the same macro cutlass's own
-// tcgen05 wrappers use (see cutlass/arch/barrier.h umma_arrive).
 __device__ __forceinline__ void tcgen05_fence_after_thread_sync() {
 #if defined(CUTLASS_ARCH_TCGEN_ENABLED)
   asm volatile("tcgen05.fence::after_thread_sync;");

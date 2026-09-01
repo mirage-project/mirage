@@ -197,12 +197,6 @@ public:
   operator json() const;
 
 public:
-  // cluster_dim defaults to a trivial cluster: the Blackwell path generates
-  // 1-SM MMA with no multicast (the MPK runtime executes tasks as single CTAs),
-  // so there is no CTA pairing to express. A non-trivial default also produced
-  // cluster-wide sync masks and, for grids it did not divide, an illegal
-  // cluster launch that failed silently. Graph::Graph clamps this to divide
-  // grid_dim.
   dim3 grid_dim, block_dim, cluster_dim{1, 1, 1};
   int forloop_range;
   int reduction_dimx;
@@ -217,17 +211,6 @@ public:
 
 void from_json(json const &j, Graph &g);
 
-// Every Graph::<op>() wrapper calls create_<op>_op(), which returns nullptr for
-// shapes it cannot build -- mismatched dims, an unsupported variant, or (most
-// often) operands that exceed MAX_SMEM_SIZE. Those returns used to be guarded
-// by `assert(op != nullptr)`, which NDEBUG compiles out of the Release build:
-// the nullptr was then dereferenced on the next line and the process segfaulted
-// with no diagnostic. (That is what the "undiagnosed N=256 segfault" was.)
-//
-// Throw instead, so the failure names the op and survives NDEBUG. CCore.pxd
-// declares the affected entry points `except +`, so it surfaces in Python as an
-// exception rather than killing the interpreter.
-TBOperator *check_tb_op(TBOperator *op, char const *op_name);
 
 } // namespace threadblock
 } // namespace mirage

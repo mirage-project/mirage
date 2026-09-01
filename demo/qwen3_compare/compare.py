@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""Qwen3 hand-written against Qwen3 compiler-generated, side by side.
-
-    python demo/qwen3_compare/compare.py --gpu 6
-
-Each variant is one `run_batch_perf.py` subprocess, because a process gets one
-megakernel and one CUDA context. Both go through that script's run_and_report,
-so the numbers come from identical timing code and this file needs no
-model-building logic of its own.
-
-README.md explains what the variants mean, what stays hand-written in the
-graph path, and why the `tokens` column is a smoke test rather than a proof.
-"""
+"""Qwen3 hand-written against Qwen3 compiler-generated, side by side."""
 import argparse
 import json
 import os
@@ -60,9 +49,6 @@ def run_variant(name, args, tokens_path):
     out = proc.stdout + proc.stderr
     throughput = THROUGHPUT.search(out)
     if not throughput:
-        # No summary line means the build never got there. The reason is
-        # almost always in the last few lines: an over-smem refusal, a search
-        # that found nothing, an OOM.
         print(f"  FAILED (exit {proc.returncode})", flush=True)
         print("\n".join("    " + l for l in out.splitlines()[-12:]), flush=True)
         return None

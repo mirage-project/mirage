@@ -30,16 +30,6 @@
 namespace mirage {
 namespace threadblock {
 
-TBOperator *check_tb_op(TBOperator *op, char const *op_name) {
-  if (op == nullptr) {
-    throw std::runtime_error(
-        std::string("threadblock ") + op_name +
-        ": unsupported operands; dims may mismatch, the variant may be "
-        "unsupported, or the operands may exceed shared memory");
-  }
-  return op;
-}
-
 Graph::Graph()
     : grid_dim(1, 1, 1), block_dim(1, 1, 1), forloop_range(1),
       reduction_dimx(1), smem_offset(0) {}
@@ -57,15 +47,6 @@ Graph::Graph(dim3 _grid_dim,
          mirage::config::MAX_NUM_THREADBLOCKS_PER_KERNEL);
   assert(reduction_dimx > 0);
 
-  // cluster_dim defaults to {4, 4, 1} (see graph.h). CUDA requires each grid
-  // dimension to be an exact multiple of the corresponding cluster dimension,
-  // so that default is only legal for grids that happen to be divisible by it.
-  // On Blackwell the generated kernel is launched via
-  // cutlass::launch_kernel_on_cluster, and an illegal cluster/grid combination
-  // makes the launch fail silently -- the output tensor is simply never
-  // written. Clamp each dimension to the largest divisor of the grid so small
-  // grids (e.g. a single-tile grid_dim of {1,1,1}) degrade to a trivial
-  // cluster instead of producing an invalid launch.
   auto clamp_to_divisor = [](unsigned int cluster, unsigned int grid) {
     return std::gcd(cluster, grid == 0 ? 1u : grid);
   };
@@ -255,7 +236,13 @@ NewKernelParams Graph::get_new_kernel_params(bool fingerprint) const {
   params.num_dmem_inputs = 0;
   params.num_dmem_outputs = 0;
 
-  assert(params.num_operators <= NewKernelParams::MAX_NUM_OPERATORS);
+  if (params.num_operators > NewKernelParams::MAX_NUM_OPERATORS) {
+    fprintf(stderr,
+            "[bgraph] %d operators exceeds NewKernelParams::MAX_NUM_OPERATORS "
+            "(%d); raise it rather than serializing past the array.\n",
+            params.num_operators, NewKernelParams::MAX_NUM_OPERATORS);
+    abort();
+  }
   // Our serializer assumes that input loaders are the first operators
   // and that output savers are the last operators
   for (size_t i = 0; i < operators.size(); i++) {

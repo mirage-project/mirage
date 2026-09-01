@@ -46,12 +46,7 @@ event_name_list = {
     162: "TASK_MOE_W2_LINEAR_SM90",
     163: "TASK_SPLITK_LINEAR_SWAPAB_HOPPER",
     198: "TASK_HOPPER_TASK_END",
-    # Compiler-generated task bodies (TaskRegister::register_generated_task).
-    # Every variant shares this one id, so a trace with several generated tasks
-    # distinguishes them by event_no, not by name.
     450: "TASK_GENERATED",
-    # Kept in sync with runtime_header.h. An id missing here used to make
-    # export_to_perfetto_trace raise KeyError and discard the whole trace.
     0: "TASK_TERMINATE",
     164: "TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER",
     231: "TASK_SM100_TMA_START_TASK",
@@ -63,8 +58,6 @@ event_name_list = {
     295: "TASK_MLA_PREFILL_TP8_SM100",
     296: "TASK_DFLASH_ATTENTION_SM100",
     297: "TASK_DFLASH_NORM_ROPE_SM100",
-    299: "TASK_ATTN_PREP_SM100",
-    300: "TASK_ATTN_FINALIZE_SM100",
     310: "TASK_MULTIGPU_TASK_BEGIN",
     349: "TASK_MULTIGPU_TASK_END",
     350: "TASK_INKLING_TASK_BEGIN",
@@ -152,12 +145,7 @@ def decode_tag(tag, num_blocks, num_groups):
 
 
 def _decode_events(profiler_buffer: torch.Tensor):
-    """Yield decoded events from an on-device profiler buffer.
-
-    First yield is a header tuple ("__header__", num_blocks, num_groups);
-    subsequent yields are (block_idx, group_idx, event_idx, event_no,
-    event_type, timestamp).
-    """
+    """Yield decoded events from an on-device profiler buffer."""
     profiler_buffer_host = profiler_buffer.cpu()
     num_blocks, num_groups = profiler_buffer_host[:1].view(dtype=torch.int32)
     num_blocks = int(num_blocks)
@@ -196,11 +184,6 @@ def export_to_perfetto_trace(
             tid_map[(block_idx, group_idx)] = tid
 
     for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
-        # decode_tag packs block x group into 8 bits, so on a large grid the
-        # derived block can fall outside the map; and an id the header defines
-        # but this file has not caught up with would KeyError. Either one used
-        # to discard the entire trace, so create the track on demand and fall
-        # back to the numeric name.
         event = event_name_list.get(event_idx, f"TASK_{event_idx}") + f"_{event_no}"
         key = (block_idx, group_idx)
         if key not in tid_map:
@@ -228,22 +211,13 @@ def export_to_csv(
     profiler_buffer: torch.Tensor,
     file_name: str,
 ) -> None:
-    """Write one CSV row per fully-paired task event (and per kInstant event).
-
-    Columns: task_type_id, task_type_name, block_idx, group_idx, event_no,
-             begin_ts, end_ts, duration_ns.
-
-    Raises RuntimeError on a dangling BEGIN with no matching END (indicates
-    profiler buffer overflow or a code bug). Timestamps are raw 32-bit
-    %globaltimer_lo values; durations are computed modulo 2^32, so traces
-    longer than ~4.3s will be incorrect — same limitation as the perfetto
-    export.
-    """
+    """Write one CSV row per fully-paired task event (and per kInstant event)."""
     events = _decode_events(profiler_buffer)
     next(events)  # discard header
 
     pending = {}  # (block, group, event_idx) -> (event_no, begin_ts)
     rows = []
+    unpaired = 0
 
     for block_idx, group_idx, event_idx, event_no, event_type, timestamp in events:
         key = (block_idx, group_idx, event_idx)
@@ -251,19 +225,12 @@ def export_to_csv(
 
         if event_type == EventType.kBegin.value:
             if key in pending:
-                prev_no, prev_ts = pending[key]
-                raise RuntimeError(
-                    f"dangling BEGIN: block={block_idx} group={group_idx} "
-                    f"event={name} event_no={prev_no} ts={prev_ts} has no END "
-                    f"before next BEGIN at event_no={event_no}"
-                )
+                unpaired += 1        # previous BEGIN never got its END
             pending[key] = (event_no, timestamp)
         elif event_type == EventType.kEnd.value:
             if key not in pending:
-                raise RuntimeError(
-                    f"END without matching BEGIN: block={block_idx} "
-                    f"group={group_idx} event={name} event_no={event_no}"
-                )
+                unpaired += 1
+                continue
             begin_no, begin_ts = pending.pop(key)
             duration = (timestamp - begin_ts) & 0xFFFFFFFF
             rows.append(
@@ -276,14 +243,10 @@ def export_to_csv(
                  timestamp, timestamp, 0)
             )
 
-    if pending:
-        (b, g, e), (no, ts) = next(iter(pending.items()))
-        name = event_name_list.get(e, f"UNKNOWN_{e}")
-        raise RuntimeError(
-            f"{len(pending)} dangling BEGIN event(s) with no matching END "
-            f"(profiler buffer likely overflowed). Example: block={b} "
-            f"group={g} event={name} event_no={no} ts={ts}"
-        )
+    unpaired += len(pending)
+    if unpaired:
+        print(f"[profiler] {file_name}: {len(rows)} paired events, "
+              f"{unpaired} unpaired (dropped)")
 
     with open(file_name, "w", newline="") as f:
         writer = csv.writer(f)

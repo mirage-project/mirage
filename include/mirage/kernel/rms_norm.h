@@ -32,9 +32,6 @@ public:
 
 public:
   int normalized_size;
-  // Kept so the op can be serialized and rebuilt. normalized_size alone is
-  // not enough: create_rms_norm_op requires normalized_shape to match the
-  // input's TRAILING dims elementwise, which a single product cannot express.
   std::vector<int> normalized_shape;
 };
 

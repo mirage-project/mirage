@@ -1,20 +1,4 @@
-"""A Group: the set of nodes lowered together as one MPK task.
-
-Where node.py holds the model with the task boundary still open, this is the
-boundary itself -- and it is DERIVED, never asserted. make_group takes a set of
-node indices and computes what the group reads, what it produces, and whether
-that is a legal task at all; group_to_taskspec_build turns it back into a
-muGraph for search.
-
-Deriving rather than declaring is the point. A partition proposes node sets; if
-external inputs and the live output had to be spelled out alongside, every
-proposal would be a chance to spell them out wrongly, and the failure would
-surface deep inside MPK's lowering with nothing pointing back.
-
-lower_group() is the other half: one group in, one registered MPK task out. It
-is the only place that knows the three ways a group can become a task -- an
-opaque handler, a hand-written override, or a searched schedule.
-"""
+"""A Group: the set of nodes lowered together as one MPK task."""
 from __future__ import annotations
 
 import dataclasses
@@ -26,17 +10,18 @@ from .task_search import TaskSpec, TensorSpec, default_forloop
 
 @dataclasses.dataclass
 class Group:
-    """A set of node indices lowered together as one task.
-
-    `external_inputs` are values the group reads but does not produce;
-    `output` is the single value it produces that anything outside reads.
-    task_search requires exactly one output per task, so a group producing two
-    live values is not lowerable and the partitioner must not emit one.
-    """
+    """A set of node indices lowered together as one task."""
     nodes: tuple[int, ...]
     external_inputs: tuple[Value, ...]
     output: Value
     tag: str = ""
+    # An opaque task may write several tensors; output stays outputs[0] so
+    # every existing caller is unchanged.
+    extra_outputs: tuple[Value, ...] = ()
+
+    @property
+    def outputs(self) -> tuple:
+        return (self.output,) + self.extra_outputs
 
     def __repr__(self) -> str:
         return f"Group({self.tag or list(self.nodes)}, {len(self.external_inputs)} in)"
@@ -67,6 +52,17 @@ def make_group(graph: ModelGraph, node_ids, tag: str = "") -> Group:
     live = [v for v in produced
             if any(c not in inside for c in graph.consumers(v))
             or v in graph.outputs]
+    # A muGraph task has exactly one output. An OPAQUE task may have several:
+    # attention prep stages q/k^T/v/mask for the generated core, and each has
+    # to be a real Value or MPK cannot see that the core depends on the prep.
+    if opaque:
+        # An opaque task's outputs are whatever it DECLARES, not whatever
+        # happens to be read: attention prep stages four tensors and the task
+        # writes all four whether or not every one has a consumer yet.
+        n = graph.nodes[ids[0]]
+        return Group(nodes=ids, external_inputs=tuple(external),
+                     output=n.output, tag=tag,
+                     extra_outputs=tuple(n.attrs.get("extra_outputs", ())))
     if len(live) != 1:
         raise ValueError(
             f"group {tag or ids} has {len(live)} live outputs, need exactly 1: "
@@ -76,11 +72,7 @@ def make_group(graph: ModelGraph, node_ids, tag: str = "") -> Group:
 
 
 def group_to_taskspec_build(graph: ModelGraph, group: Group) -> Callable:
-    """The `build` lambda for a TaskSpec: replay the group on a fresh KNGraph.
-
-    Signature matches task_search.TaskSpec -- (kn, t) where t is the list of
-    input tensors, in the same order as group.external_inputs.
-    """
+    """The `build` lambda for a TaskSpec: replay the group on a fresh KNGraph."""
     def build(kn, t):
         env = {v.name: t[i] for i, v in enumerate(group.external_inputs)}
         out = None
@@ -93,37 +85,19 @@ def group_to_taskspec_build(graph: ModelGraph, group: Group) -> Callable:
     return build
 
 
-# search() explores randomly and returns as soon as one candidate verifies, so
-# a single draw can come back with nothing usable even where schedules exist --
-# typically it yields 3-4 candidates, but a draw that only produced the trivial
-# plain-op graph raises "a task is one fused op; candidate has 0". Retry rather
-# than fail the whole lowering on one unlucky draw.
 SEARCH_ATTEMPTS = 3
 
-# Some groups search will never fuse, however many draws you give it. Measured:
-# a matmul whose K is not a power of two never produces a customized op --
-# K=1024 and K=2048 fuse, K=1280/1536/2560/3072 do not, at any grid and at
-# every forloop_range tried (K tile 64, 128, 256, 512). Qwen3's down projection
-# is (8,3072)@(3072,1024), which is exactly that shape, and is why it has always
-# carried a hand-written schedule.
-#
-# So a group may name a fallback: a PersistentKernel layer method that
-# registers the same computation with a hand-written schedule. lower() uses it
-# only after search has genuinely failed, and says so.
 
 
-def _search_with_retry(spec, grid, tag: str, forloop=None):
-    """Ask for `forloop` first, then let search choose.
-
-    Constraining the forloop is a perf decision, not a correctness one, so a
-    spec that has no schedule at the asked-for K tile should still lower --
-    just more slowly -- rather than fall all the way through to a fallback."""
+def _search_with_retry(spec, grid, tag: str, forloop=None, max_ops=None):
+    """Ask for `forloop` first, then let search choose."""
     last = None
     for fl in ([forloop] if forloop and forloop > 1 else []) + [None]:
         for _ in range(SEARCH_ATTEMPTS):
             try:
                 return task_search.search_task_schedules(
-                    spec, grid_dim=grid, forloop_range=fl)[0]
+                    spec, grid_dim=grid, forloop_range=fl, max_ops=max_ops,
+                    wide_inputs=len(spec.inputs) > 3)[0]
             except task_search.TaskSearchError as e:
                 last = e
     raise task_search.TaskSearchError(
@@ -142,38 +116,13 @@ def to_taskspec(graph: ModelGraph, group: Group) -> TaskSpec:
 
 def lower_group(pk, graph: ModelGraph, group: Group, ins, out, *,
                 grid_for, forloop_for=None, stages_for=None, overrides=None,
-                fallbacks=None, opaque=None, memo=None, verbose=False):
-    """Register ONE group as an MPK task, writing its result into `out`.
-
-    Three ways a group becomes a task, in the order they are tried:
-
-      opaque    the graph cannot model it at all -- embedding, a KV-cache
-                append, attention, argmax -- so a registered handler supplies
-                the hand-written task.
-      override  the graph CAN model it and search CAN schedule it, but the
-                hand-written task is known to win. Search succeeding is not
-                search winning: the lm_head searches fine and lowers to a
-                2374-block task where linear_sm100 uses 148.
-      searched  the normal path -- cache, then memo, then search, then (only
-                if search found nothing at all) a fallback schedule.
-
-    `memo` is shared across the whole partition: Qwen3 has 28 identical layers,
-    so without it a 312-group model runs 312 searches for about seven distinct
-    questions. A remembered None is a remembered FAILURE, and takes the
-    fallback without searching again.
-
-    grid_for/forloop_for/stages_for are CALLABLES, not values, because an
-    opaque group has no schedule to ask for: argmax's output last dim is 1 and
-    default_grid rejects anything not a multiple of 64. Resolving them before
-    the opaque branch would fail on a group that never needed them.
-    """
+                opaque=None, memo=None, verbose=False, outs=None):
+    """Register ONE group as an MPK task, writing its result into `out`."""
     opaque = opaque or {}
     memo = {} if memo is None else memo
 
     def pick(table):
-        """fallbacks/overrides are either {tag: fn} or a callable. The callable
-        form gets the whole group, which is what you need when several groups
-        share a tag and only one of them needs the treatment."""
+        """overrides is either {tag: fn} or a callable taking the group."""
         if callable(table):
             return table(group)
         return (table or {}).get(group.tag)
@@ -188,7 +137,7 @@ def lower_group(pk, graph: ModelGraph, group: Group, ins, out, *,
                 f"model it, so lowering needs one")
         if verbose:
             print(f"[lower] {name}: hand-written task", flush=True)
-        fn(pk, group, ins, out)
+        fn(pk, group, ins, outs if outs is not None else [out])
         return
 
     grid = tuple(grid_for(group))
@@ -214,22 +163,21 @@ def lower_group(pk, graph: ModelGraph, group: Group, ins, out, *,
         sched, source = memo[sig], "memo"
     elif sched is None:
         try:
-            sched = _search_with_retry(spec, grid, group.tag, forloop)
+            # A fused group needs room for its own ops: 4 inputs + an
+            # accumulator + an output on top of the body itself.
+            n_ops = len(group.nodes) + len(group.external_inputs) + 4
+            sched = _search_with_retry(spec, grid, group.tag, forloop,
+                                       max_ops=max(9, n_ops))
             memo[sig] = sched
             source = "search"
         except task_search.TaskSearchError:
             memo[sig] = None
 
     if sched is None:
-        fb = pick(fallbacks)
-        if fb is None:
-            raise task_search.TaskSearchError(
-                f"group {group.tag!r}: search found nothing, no fallback")
-        if verbose:
-            print(f"[lower] {group.tag}: search found nothing, using the "
-                  f"hand-written schedule", flush=True)
-        fb(pk, ins, out, grid)
-        return
+        shapes = " @ ".join("x".join(str(d) for d in dims) for dims in in_dims)
+        raise task_search.TaskSearchError(
+            f"group {group.tag!r} ({shapes}, grid={grid}, "
+            f"forloop_range={forloop}): search found no usable schedule.")
 
     if verbose:
         print(f"[lower] {group.tag or group.output.name}: {source} "

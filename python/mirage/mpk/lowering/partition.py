@@ -1,19 +1,4 @@
-"""Choose where the task boundaries go, instead of writing them by hand.
-
-Today the five MPK_COMPILED_MLP_IMPL variants ARE the partition space: someone
-wrote each one. The spread between them is large -- measured on Qwen3-0.6B
-decode, up+SiLU fusion ran 12.3% better than three-task and SiLU+down 26.5%
-worse -- so it is worth searching rather than guessing.
-
-Enumeration is over contiguous runs of the topological order. That is not
-every set partition, but it is every partition whose groups are convex, which
-is the only kind that lowers: a group with a node outside it on a path between
-two nodes inside would need its own input to come from its own output.
-
-The expensive part is asking search whether a group is schedulable at all.
-Candidates share groups heavily -- most differ in one cut -- so that answer is
-memoised per group signature, which is what makes the space tractable.
-"""
+"""Choose where the task boundaries go, instead of writing them by hand."""
 from __future__ import annotations
 
 import dataclasses
@@ -24,13 +9,8 @@ from .group import Group, make_group
 from .node import ModelGraph, is_opaque
 
 
-# A group of this many muGraph ops is already past what search will schedule
-# (max_num_threadblock_graph_op is 9 and counts TB_INPUT_OPs), so do not
-# enumerate beyond it.
 MAX_GROUP_OPS = 6
 
-# task_search pins block_dim, and search's own cap on how many tensors one
-# threadblock graph may read.
 MAX_GROUP_INPUTS = 3
 
 
@@ -52,10 +32,7 @@ def enumerate_partitions(
     *,
     max_group_ops: int = MAX_GROUP_OPS,
 ) -> Iterator[list[Group]]:
-    """Candidate partitions of `node_ids` (default: the whole graph).
-
-    An opaque node cannot be fused, so it forces a cut on both sides.
-    """
+    """Candidate partitions of `node_ids` (default: the whole graph)."""
     ids = list(range(len(graph))) if node_ids is None else sorted(node_ids)
     forced = set()
     for pos, i in enumerate(ids):
@@ -70,8 +47,6 @@ def enumerate_partitions(
             yield [make_group(graph, ids[a:b], _tag(graph, ids[a:b]))
                    for a, b in runs]
         except ValueError:
-            # More than one live output, or an opaque node grouped with
-            # something. Not a legal task -- skip the candidate.
             continue
 
 
@@ -82,9 +57,6 @@ def _tag(graph: ModelGraph, ids) -> str:
     return "_".join(ops)
 
 
-# ---------------------------------------------------------------------------
-# Feasibility, cheapest test first.
-# ---------------------------------------------------------------------------
 
 @dataclasses.dataclass
 class Rejection:
@@ -93,13 +65,7 @@ class Rejection:
 
 
 def _edges(graph: ModelGraph, partition: list[Group]) -> dict[int, set[int]]:
-    """Producer group -> consumer groups, after residual stripping.
-
-    build_annotated_graph drops a direct edge u->v when a path u->...->v of
-    length >= 2 also exists (step (c)); the residual add in a transformer layer
-    is exactly that shape. Skipping this step makes every partition look like a
-    join+fork violation, including the one MPK runs today.
-    """
+    """Producer group -> consumer groups, after residual stripping."""
     produced_by = {}
     for gi, g in enumerate(partition):
         for i in g.nodes:
@@ -129,13 +95,7 @@ def _edges(graph: ModelGraph, partition: list[Group]) -> dict[int, set[int]]:
 
 
 def check_fork_join(graph: ModelGraph, partition: list[Group]) -> Optional[str]:
-    """MPK gives a task one trigger_event and one dependent_event.
-
-    build_annotated_graph rejects a layer that is both a join-consumer and a
-    fork-consumer -- "a task cannot have two trigger_events" -- and the mirror
-    case on the producer side (annotated_graph.cc:600-678). Pure graph shape,
-    so it costs nothing and runs first.
-    """
+    """MPK gives a task one trigger_event and one dependent_event."""
     succ = _edges(graph, partition)
     pred: dict[int, set[int]] = {gi: set() for gi in range(len(partition))}
     for u, cs in succ.items():
@@ -207,18 +167,7 @@ except Exception as e:
 
 
 class Schedulable:
-    """Memoised 'can search schedule this group at all?', probed out of process.
-
-    Out of process because search can ABORT rather than raise: some group
-    shapes make it throw a nlohmann::json type_error, which reaches
-    std::terminate and takes the interpreter with it. In-process probing meant
-    one bad shape killed a whole filter run. A crashed probe is simply recorded
-    as unschedulable.
-
-    Memoised per signature, not per group: Qwen3 has 28 identical layers and
-    most candidates differ by one cut, so a 160-candidate space asks search a
-    few dozen distinct questions.
-    """
+    """Memoised 'can search schedule this group at all?', probed out of process."""
 
     def __init__(self, graph: ModelGraph, grid_for=None, verbose: bool = False,
                  timeout: int = 900, require_fused_only: bool = True):
@@ -227,11 +176,6 @@ class Schedulable:
         self.grid_for = grid_for or default_grid
         self.verbose = verbose
         self.timeout = timeout
-        # A single-node group is what MPK runs today, as a hand-written task,
-        # so it is lowerable whether or not search can schedule it -- lower()
-        # falls back. Only a FUSED group has to be searchable, because fusing
-        # is the thing being proposed. Set False to demand search for every
-        # group, which is stricter than the baseline.
         self.require_fused_only = require_fused_only
         self.cache: dict[tuple, Optional[str]] = {}
 
@@ -242,8 +186,6 @@ class Schedulable:
 
         from .node import OPS
 
-        # Describe the group so the child can rebuild the build lambda without
-        # importing this graph: op fn names, and which env slots feed each.
         slot = {v.name: i for i, v in enumerate(group.external_inputs)}
         ops, attrs = [], []
         for i in group.nodes:
@@ -263,8 +205,6 @@ class Schedulable:
                                   timeout=self.timeout)
         except subprocess.TimeoutExpired:
             return f"search timed out after {self.timeout}s"
-        # search prints progress with no trailing newline, so the marker can
-        # land mid-line -- find it anywhere, not at a line start.
         marker = "@@PROBE@@ "
         idx = proc.stdout.rfind(marker)
         line = (proc.stdout[idx + len(marker):].split("\n", 1)[0].strip()
@@ -341,28 +281,7 @@ def feasible_partitions(
 
 def assign_buffers(graph: ModelGraph, partition: list[Group],
                    pinned: Optional[dict] = None, alias=None) -> dict:
-    """Map each group output to a buffer name, reusing buffers by liveness.
-
-    MPK has no intermediate DTensors, so every boundary needs a pre-allocated
-    tensor. Allocating one per boundary would grow with depth -- 28 layers x
-    several boundaries -- which is why Qwen3Builder pre-allocates rmsnorm_out /
-    attn_in / mlp_mid ONCE and rewrites them every layer
-    (builder.py:114-250). This reproduces that automatically.
-
-    Safe because build_annotated_graph binds a read to whichever producer most
-    recently wrote the buffer (annotated_graph.cc:144-158): as long as
-    registration follows topological order and a buffer is only reused after
-    its last reader, the most-recent writer is the right one.
-
-    An ALIASED group writes in place into one of its inputs, so its output
-    physically lives in THAT buffer. Two things follow, and getting either
-    wrong produces a model that runs and computes nonsense: the output must be
-    assigned the same buffer, and that buffer must stay live until the
-    OUTPUT's last reader -- not the input's. Releasing it at the aliased group
-    hands a still-live tensor to a later group.
-
-    Returns value name -> buffer name. Pinned values keep their own buffer.
-    """
+    """Map each group output to a buffer name, reusing buffers by liveness."""
     pinned = pinned or {}
     owner = {i: gi for gi, g in enumerate(partition) for i in g.nodes}
 

@@ -35,14 +35,6 @@ static __device__ __forceinline__ T perform_element_binary_op(T a, T b) {
 // coordinate in SrcLayout, so that the composition of this layout and SrcLayout
 // results in a layout that converts a logical coordinate in DstLayout to a
 // physical coordinate in SrcLayout.
-//
-// A src dim of size 1 under a larger dst dim is a BROADCAST and must get
-// stride 0, so every dst coordinate along it maps to src coordinate 0. The
-// previous version used the src's plain column-major strides and compensated
-// with `elem_idx % src_numel` at the call site -- which is only correct when
-// the broadcast dim happens to be the slowest-varying in the dst enumeration.
-// A (1,H) operand met that by accident; an (M,1) operand did not, and
-// mul/div by a per-row vector returned rel ~0.6-0.8 silently.
 template <typename SrcShape, typename ColMajorStride>
 struct BroadcastStrideGetter {
   template <size_t... Is>
@@ -65,15 +57,6 @@ class DstCoord2SrcCoordGetter {
   using Result_ = Layout<DstShape, BStride>;
 
 public:
-  // NO coalesce: it collapses stride-0 (broadcast) modes, degenerating e.g.
-  // (64,64):(1,0) to a rank-1 layout whose integer evaluation multiplies the
-  // FULL dst index straight through -- the (1,64) broadcast operand was read
-  // 64x out of bounds into neighboring smem, i.e. deterministic garbage
-  // multipliers. This was THE "torn operand" defect: rel ~0.1-0.7 whenever
-  // the broadcast VALUES were non-uniform, exactly masked by uniform ones /
-  // Q=0 probes, and misdiagnosed as a synchronization race for a long time.
-  // The full-rank map keeps broadcast dims at stride 0 so every dst index
-  // lands on the correct in-bounds source element.
   using Result = Result_;
 };
 
@@ -113,9 +96,6 @@ public:
     auto src0_layout_dst_coord = DstCoord2Src0PhyPos{};
     auto src1_layout_dst_coord = DstCoord2Src1PhyPos{};
     for (int elem_idx = thread_idx; elem_idx < numel; elem_idx += NUM_THREADS) {
-      // Full index: broadcast dims carry stride 0 in the composed map (see
-      // BroadcastStrideGetter), so no modulo trickery is needed and the result
-      // is independent of which dim the dst enumeration varies fastest.
       int64_t src0_phy_pos = src0_layout_dst_coord(elem_idx);
       int64_t src1_phy_pos = src1_layout_dst_coord(elem_idx);
       int64_t dst_phy_pos = dst_layout(elem_idx);

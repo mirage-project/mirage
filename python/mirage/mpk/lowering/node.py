@@ -1,36 +1,10 @@
-"""A model as one inspectable graph, ahead of any decision about tasks.
-
-MPK already holds a whole-model kernel graph -- PersistentKernel.kn_graph
-accumulates one KNCustomizedOp per *_layer call across every layer. But almost
-every node in it is opaque: linear_layer builds a threadblock graph with only
-new_input calls and then binds a hand-written .cuh by name, so nothing can see
-what the node computes and nothing can repartition it. Where the task
-boundaries fall is decided by whoever wrote the Python.
-
-This module holds the model in a form where that decision is still open: plain
-SSA nodes over named values, no grid, no tiling, no task boundaries. The IR is
-deliberately small and separate from KNGraph -- a group has to be re-emitted as
-a TaskSpec `build` lambda anyway, and KNGraph has no "take these operators as a
-subgraph" API.
-
-A Value is written exactly once, by the single Node whose index it carries as
-`producer`. That is what makes consumers() unambiguous, and so what lets
-group.py derive a task boundary from a node set mechanically rather than by
-annotation.
-
-Nothing here talks to the GPU or to MPK. Grouping lives in group.py, lowering
-in the package __init__.
-"""
+"""A model as one inspectable graph, ahead of any decision about tasks."""
 from __future__ import annotations
 
 import contextlib
 import dataclasses
 from typing import Optional
 
-# op name -> arity. An op's name is ALSO the KNGraph method group.py calls to
-# replay it, so an entry here is a promise that KNGraph has a method of that
-# name -- `sub` was listed once and does not, which would have surfaced as an
-# AttributeError deep inside a task build rather than here.
 OPS: dict[str, int] = {
     "matmul": 2,
     "add": 2,
@@ -43,6 +17,7 @@ OPS: dict[str, int] = {
     "sqrt": 1,
     "square": 1,
     "rms_norm": 1,
+    "reduction": 1,
 }
 
 # A node whose op starts with this is not a muGraph op at all
@@ -103,6 +78,16 @@ class ModelGraph:
         return Value(name=f"{base}v{self._n}", dims=tuple(dims),
                      producer=len(self.nodes))
 
+    def opaque_multi(self, name: str, inputs, dims_list, **attrs) -> list:
+        """An opaque task that writes SEVERAL tensors -- attention prep stages
+        q/k^T/v/mask for the generated core. Every output is a real Value, so
+        the reader's dependency on the writer stays visible to MPK."""
+        outs = [self._fresh(d) for d in dims_list]
+        self.nodes.append(Node(op=OPAQUE + name, inputs=tuple(inputs),
+                               output=outs[0], layer=self._layer, tag=self._tag,
+                               attrs=dict(attrs, extra_outputs=tuple(outs[1:]))))
+        return outs
+
     def opaque(self, name: str, inputs, dims, **attrs) -> Value:
         """A hand-written task the graph does not model. Its result is a real
         value, so everything downstream stays connected."""
@@ -136,6 +121,12 @@ class ModelGraph:
     def add(self, a, b): return self._binary("add", a, b)
     def mul(self, a, b): return self._binary("mul", a, b)
     def div(self, a, b): return self._binary("div", a, b)
+
+    def reduction(self, x: Value, dim: int) -> Value:
+        """Sum over `dim`, keeping it at extent 1 -- the softmax denominator."""
+        dims = list(x.dims)
+        dims[dim] = 1
+        return self._emit("reduction", (x,), tuple(dims), dim=dim)
 
     def silu(self, x): return self._emit("silu", (x,), x.dims)
     def gelu(self, x): return self._emit("gelu", (x,), x.dims)

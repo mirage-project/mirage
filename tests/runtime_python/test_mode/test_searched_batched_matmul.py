@@ -1,27 +1,4 @@
-"""Search can schedule a BATCHED (3D) matmul as an MPK task.
-
-This was believed impossible. It is not -- search proposes batched matmuls
-freely; what blocked them was the tile they came out with. Two shape rules
-govern a 1-SM tcgen05 MMA, both mirrored in task_search._check_matmul_tiles:
-
-  M: the tile must be 64 or 128, else the transpiler computes C^T = B^T * A^T
-     (swapAB), which moves N into the M slot -- so the 64/128 rule lands on N
-     instead. Decode-sized M (1..8) always swaps.
-
-  K: the per-iteration tile must be a whole number of MMA K-atoms (16 bf16
-     elements).
-
-For a batched matmul on a 1D grid, gridDim.x is spent on the batch, so the
-whole of N sits in one threadblock; swapAB then needs N itself to be 64 or
-128, and any wider N is rejected. Giving the grid a SECOND dimension splits N
-and the constraint is satisfied. That is the entire fix -- no change to
-search's candidate generation was needed.
-
-The K rule needed a transpiler change: it validated M and N but not K, so a
-K-splitting forloop_range emitted code that died inside CUTLASS
-(`tile_to_mma_shape` divides by a K mode that truncated to 0) as an nvcc
-template cascade rather than a diagnosable error.
-"""
+"""Search can schedule a BATCHED (3D) matmul as an MPK task."""
 import subprocess
 import sys
 import textwrap
@@ -87,20 +64,11 @@ def test_k_tile_must_be_whole_mma_atoms(k, ok):
 
 
 def test_mma_k_atom_matches_the_transpiler():
-    # transpiler_tb_blackwell.cc derives it as 32 bytes / sizeof(element);
-    # bf16 is 2 bytes. If that constant moves, this mirror must move with it.
     assert MMA_K_ATOM == 32 // 2
 
 
 # ------------------------------------------------------------------ on-GPU
 
-# search() is randomized and its Python-side validators cannot fully mirror
-# the transpiler -- the transpiler is the final authority, and some of its
-# rejections are nvcc template cascades or host aborts rather than error
-# codes. So a caller must try candidates in order until one registers,
-# compiles and runs, which is what rank_by_model.py does with one subprocess
-# per candidate. These tests do the same: pinning index 0 made them flaky for
-# reasons that were never about correctness.
 
 _ENUM_SRC = textwrap.dedent(
     """
@@ -122,18 +90,11 @@ _ENUM_SRC = textwrap.dedent(
     """
 )
 
-# search() explores randomly and stops on its own budget, so a single draw can
-# come up empty even where candidates exist (6 sampled draws of the
-# attention-scores spec returned 3, 3, 4, 3, 3, 3). Retry rather than encode
-# that as a failure.
 _ENUM_ATTEMPTS = 3
 
 
 def _walk_candidates(spec_src, grid, required, run_src, label):
-    """Enumerate, then try each candidate in its own process.
-
-    Returns (n_candidates, index_that_worked, rel).
-    """
+    """Enumerate, then try each candidate in its own process."""
     import json
     import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
@@ -148,8 +109,6 @@ def _walk_candidates(spec_src, grid, required, run_src, label):
     assert n, (f"{label}: search found no usable schedule in "
                f"{_ENUM_ATTEMPTS} draws")
     assert "CAND 0" in out
-    # Every candidate must carry the whole spec inside the task body; one that
-    # left an op at kernel level would silently drop it.
     for i, c in enumerate(cands):
         kinds = [o["op_type"] for o in c["ops"]]
         for req in required:
@@ -207,11 +166,7 @@ _BMM_RUN = textwrap.dedent(
 
 @pytest.mark.skipif(_skip_reason() is not None, reason=_skip_reason() or "")
 def test_searched_batched_matmul_matches_torch():
-    """A discovered batched-matmul schedule computes torch.bmm.
-
-    The second grid dimension is what makes this possible: it splits N so
-    swapAB's M tile is 64 rather than the full 256. See the module docstring.
-    """
+    """A discovered batched-matmul schedule computes torch.bmm."""
     spec = ('spec = TaskSpec("bmm", lambda kn, t: kn.matmul(t[0], t[1]),\n'
             '                [TensorSpec((8, 8, 128)), TensorSpec((8, 128, 256))])')
     n, i, rel = _walk_candidates(spec, (8, 4, 1),
@@ -258,15 +213,7 @@ _SCORES_RUN = textwrap.dedent(
 
 @pytest.mark.skipif(_skip_reason() is not None, reason=_skip_reason() or "")
 def test_searched_attention_scores_matches_torch():
-    """exp(Q@K^T + mask) -- a batched matmul with a fused epilogue.
-
-    This is the piece of attention search can reach. The full core
-    softmax(QK^T+m)@V chains a second matmul off the exp; search returns zero
-    candidates for it, so generated_attention_layer stays hand-written.
-
-    Every candidate is required to contain the exp: one that left it as a
-    separate kernel-level op would silently compute only matmul+add.
-    """
+    """exp(Q@K^T + mask) -- a batched matmul with a fused epilogue."""
     spec = ('spec = TaskSpec("scores",\n'
             '                lambda kn, t: kn.exp(kn.add(kn.matmul(t[0], t[1]), t[2])),\n'
             '                [TensorSpec((8, 8, 128)), TensorSpec((8, 128, 128)),\n'
@@ -285,9 +232,6 @@ def test_a_leaked_kernel_op_is_rejected():
     the customized one. The kernel graph is still equivalent to the spec, but
     MPK registers only the customized op as the task body, so the leftover
     would be silently dropped -- exactly the failure that has no symptom.
-
-    Measured on exp(Q@K^T + mask): 6 of 14 otherwise-valid candidates put the
-    exp outside, computing only matmul+add inside the task.
     """
     from mirage.mpk.lowering.task_search import _KN_STRUCTURAL_OPS, TaskSearchError
 
@@ -374,14 +318,6 @@ def test_batched_matmul_k_split_is_rejected(ops, ok, why):
     ("Majorness of smem doesn't match majorness of gmem") that aborts the
     process -- neither is a returnable error code, which is why search must
     not propose it.
-
-    Scoped to A, and only when A is a gmem load. A plain batched matmul has to
-    split BOTH operands on K together for the accumulation to mean anything,
-    so A and B move as a pair and A is the one to test. Attention is the case
-    this must NOT reject: it splits V on V's K dim, but the consuming matmul's
-    A operand is exp(...), recomputed in-loop rather than loaded, so nothing
-    streams a K-split A through TMA. An earlier, broader version of this check
-    rejected that verified-correct schedule.
     """
     from mirage.mpk.lowering.task_search import (_check_batched_matmul_forloop,
                                         TaskSearchError)
@@ -397,15 +333,6 @@ def test_batched_matmul_k_split_is_rejected(ops, ok, why):
 def test_a_candidate_missing_part_of_the_spec_is_rejected():
     """search() verifies equivalence with probabilistic fingerprints, and that
     check false-accepts.
-
-    Measured on exp(Q@K^T + mask) at grid=(8,1,1): about one draw in six
-    returned a candidate whose task body was matmul + add + accumulate with
-    the exp simply GONE -- not moved to kernel level (the leaked-op check
-    would have caught that), absent. Its kernel graph was the clean
-    input/input/input/customized/output, so nothing structural gave it away.
-    Registering it would have computed the wrong thing silently.
-
-    Over 20 draws after this check went in, none got through.
     """
     from mirage.mpk.lowering.task_search import (_check_computes_the_spec,
                                         TaskSearchError)
@@ -496,9 +423,6 @@ _ATTN_SRC = textwrap.dedent(
     from mirage.mpk.lowering.task_search import (
         TaskSpec, TensorSpec, search_task_schedules, register_searched_task)
 
-    # S = 4 * 64: the K loop runs FOUR iterations, each carrying live data.
-    # That is the case the N_LOOP fix is about -- before it, anything past the
-    # first 64-column tile was silently wrong (rel ~1.1).
     FOLD, M, D, S = 8, 8, 128, {s}
 
     spec = TaskSpec("attn",
@@ -506,15 +430,10 @@ _ATTN_SRC = textwrap.dedent(
                         kn.exp(kn.add(kn.matmul(t[0], t[1]), t[3])), t[2]),
                     [TensorSpec((FOLD, M, D)), TensorSpec((FOLD, D, S)),
                      TensorSpec((FOLD, S, D)), TensorSpec((FOLD, M, S))])
-    # Four inputs, so the wide path; imaps pinned to the batch dim, which is
-    # what a per-instance MPK task wants and what keeps the space small.
     scheds = search_task_schedules(spec, grid_dim=(FOLD, 1, 1),
                                    wide_inputs=True, forloop_range={fl})
     print("NSCHED", len(scheds), flush=True)
     assert scheds
-    # A forloop_range request is an upper bound, not a pin: search also offers
-    # the untiled fl=1 form and it can come first. Take the multi-iteration
-    # one, which is the whole point here.
     tiled = [x for x in scheds if x.forloop_range == {fl}]
     assert tiled, [x.describe() for x in scheds]
     sched = tiled[0]
@@ -560,18 +479,6 @@ def test_searched_attention_core_matches_torch(s, fl):
     """The FULL attention core -- exp(Q@K^T + mask) @ V: four inputs, a
     batched matmul, a chained matmul, and a multi-iteration K loop --
     discovered by search, registered as an MPK task, and numerically right.
-
-    This is also the regression test for the N_LOOP fix in
-    transpiler_tb_blackwell.cc. That flag picks which mode local_tile leaves
-    free for the loop to walk, and it was derived as `forloop_dim == 1`, which
-    names the N dim only for a 2-D operand. Batched, N is the LAST dim, so the
-    flag inverted: K^T (batch, D, S) tiled on S lost N_LOOP and V (batch, S,
-    D) tiled on its K gained it. Everything compiled and ran; the answer was
-    just wrong past the first tile (rel ~1.1 at fl=2, ~1.13 at fl=4), while
-    the 2-D form of the same graph was correct to 2.2e-3.
-
-    So both fl values matter: fl=2 is the minimal repro and fl=4 is the real
-    Qwen3 decode shape.
     """
     out = _run(_ATTN_SRC.format(s=s, fl=fl),
                f"searched attention core S={s} fl={fl}", timeout=3600)

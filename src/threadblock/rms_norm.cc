@@ -22,14 +22,14 @@ namespace threadblock {
 
 STensor Graph::rms_norm(STensor const &input) {
   TBOperator *op = create_rms_norm_op(input);
-  check_tb_op(op, "rms_norm");
+  assert(op != nullptr);
   operators.push_back(op);
   return op->output_tensors[0];
 }
 
 STensor *Graph::rms_norm(STensor const *input) {
   TBOperator *op = create_rms_norm_op(*input);
-  check_tb_op(op, "rms_norm");
+  assert(op != nullptr);
   operators.push_back(op);
   return &op->output_tensors[0];
 }

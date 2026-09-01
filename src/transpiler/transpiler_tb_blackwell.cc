@@ -121,14 +121,6 @@ static string get_stensor_layout(tb::STensor const &stensor,
       return get_layout_detail::get_swap_01_layout(stensor, meta, start_dim);
     } else {
       // XOR-based swizzling
-      // Use the planner's computed swizzle. These were hardcoded to
-      // Swizzle<3,3,4>, which made every generated Blackwell matmul return the
-      // right values at wrong positions: the UMMA reads its operands through a
-      // 128B swizzle over 16B chunks, which in raw element units is
-      // Swizzle<3,3,3>, and 3,3,4 differs from it by one bit of chunk
-      // granularity. Verified against a PyTorch reference by sweeping <B,M,S>:
-      // only <3,3,3> gives an exact match at (M,N,K)=(128,64,64), and that is
-      // precisely what get_threadblock_swizzle_plan_blackwell computes here.
       return fmt(
           "decltype(composition(Swizzle<$, $, $>{}, ${}))",
           meta.xor_swizzle_b,
@@ -232,14 +224,6 @@ static string append_epilogue_scalars(
   if (chain.size() == 1) {
     return res.append("0.0f};");
   }
-  // Mirrors the Ampere version (transpiler_tb.cc). The old Blackwell copy
-  // replaced the LAST chain element's scalar with 0.0f unconditionally, on the
-  // assumption that the last op is always the store -- but when an op with a
-  // real scalar is the final fused op (e.g. reduction with mul_scalar fused
-  // into its epilogue), that dropped the scalar and the epilogue multiplied by
-  // ZERO. A decomposed RMSNorm lost its 1/H exactly this way. Only a trailing
-  // forloop-accum stands for the store epilogue; everything else contributes
-  // its own scalar, with the store's 0.0f appended afterwards.
   bool store_last = true;
   for (size_t i = 1; i < chain.size(); i++) {
     if (i == chain.size() - 1 &&
@@ -339,9 +323,6 @@ static void generate_Tmem_mbarrier_init_code(CodeKeeper &code,
                                              string &mbarrier_ptr_name) {
   code.e("// Tensory Memory Allocation");
 
-  // 1-SM MMA must use the 1-SM TMEM allocator: Allocator2Sm emits
-  // cta_group::2 TMEM instructions, and ptxas rejects a kernel that mixes
-  // .cta_group::1 (the 1-SM tcgen05 MMA) with .cta_group::2.
   code.e("using TmemAllocator = cute::TMEM::Allocator1Sm;");
   code.e("TmemAllocator tmem_allocator{};");
   code.e("if (elect_one_warp) { ");
@@ -363,26 +344,12 @@ static void generate_Tmem_mbarrier_init_code(CodeKeeper &code,
          "size(cluster_shape)) - 1u);");
 }
 
-// Publish GENERIC-proxy smem writes (elementwise, reduction, write_tC
-// stores) to a following tcgen05 consumer: writer-side fence.proxy.async,
-// a consumer-scope named-barrier sync, then the tcgen05 fence that orders
-// the MMA's smem reads after the sync. The handwritten sm100 tasks pair
-// these the same way; omitting any leg tears MMA reads of
-// elementwise-written operands.
 static void emit_async_proxy_publish(mirage::transpiler::CodeKeeper &code) {
   code.e("cutlass::arch::fence_view_async_shared();");
   code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
   code.e("tb::tcgen05_fence_after_thread_sync();");
 }
 
-// Wide (row pitch > 128B) NON-pipelined matmul operands -- e.g. attention's
-// Q at head_dim=128 -- cannot go through InputChunkedSyncCopy: the UMMA
-// reads a non-pipelined operand through DstPipeLayout_A/B and beyond a 128B
-// pitch no dense-stride solver layout matches its panel tiling. Route them
-// through InputWideOperandSyncCopy instead, which writes through the same
-// cutlass-derived layout the matmul reads. Conditions: loaded whole (no
-// forloop tiling), 2-D tile, consumed ONLY by matmuls (any other consumer
-// reads the solver layout, which the wide atom does not write).
 static std::unordered_set<sguid_t> build_wide_matmul_operand_set(
     tb::Graph const &g,
     std::unordered_map<sguid_t, STensorMeta> const &stensor_metas) {
@@ -433,30 +400,6 @@ static std::unordered_set<sguid_t> build_wide_matmul_operand_set(
   return wide;
 }
 
-// Chained-matmul analysis over the in-loop schedule.
-//
-// chained: outputs of matmuls whose result is consumed INSIDE the loop (the
-// fused-attention shape) -- these materialise their accumulator to smem every
-// iteration instead of once after the loop.
-//
-// chained_consumer: for each chained intermediate, the OUTPUT guid of the
-// matmul that consumes it. Its per-matmul barrier doubles as the
-// anti-dependency barrier: the producer must not overwrite the tile while the
-// consumer's async MMA is still reading it, so the consumer arrives there
-// each iteration and the producer waits on the PREVIOUS iteration's arrival
-// before storing.
-//
-// generic_antidep: GENERIC producers of matmul operands need the same
-// anti-dependency -- the consuming MMA of iteration i reads the tile through
-// the ASYNC proxy, and nothing else stops iteration i+1's elementwise
-// producer from overwriting it mid-read. Maps the producer node's output guid
-// to the consuming matmul's output guid, whose per-matmul barrier the
-// consumer already arrives on each iteration.
-//
-// Anti-dependency needs differ by consumer type: a MATMUL consumer reads
-// through the ASYNC proxy after the elect warp issues it, so it needs the
-// barrier above; a GENERIC consumer runs on all consumer threads between the
-// loop's wg_syncs, which already order the next iteration's store.
 struct ChainedMatmulInfo {
   std::unordered_set<sguid_t> chained;
   std::unordered_map<sguid_t, sguid_t> chained_consumer;
@@ -470,14 +413,7 @@ static ChainedMatmulInfo analyze_chained_matmuls(TBSched const &sched) {
         prod.ops.front().first->op_type != type::TB_MATMUL_OP) {
       continue;
     }
-    // The node's LAST op is what other nodes see: the scheduler fuses an
-    // elementwise op (e.g. exp) into the matmul node, so the visible output
-    // is the fused op's, not the raw matmul's.
     sguid_t const produced = prod.ops.back().first->output_tensors.at(0).guid;
-    // IN-LOOP consumers only. A post-loop consumer reads the forloop
-    // ACCUMULATOR, which is materialised by the in-register write-back at the
-    // end of the kernel -- the ordinary fused-epilogue shape (SwiGLU is
-    // silu/mul on two accumulators) and fully supported.
     for (TBSchedNode const &cons : sched.loop_nodes) {
       if (cons.type != tb_sched_node_t::OPERATOR || &cons == &prod) {
         continue;
@@ -520,12 +456,6 @@ static ChainedMatmulInfo analyze_chained_matmuls(TBSched const &sched) {
   return info;
 }
 
-// A 1-SM tcgen05 MMA needs an M tile of 64 or 128. MPK decode issues
-// M = 1..8 tokens, so those matmuls compute C^T = B^T * A^T instead (swapAB),
-// which puts the token count into N (fine-grained: any multiple of 8 up to
-// 256). Every role-keyed attribute -- operand slots, pipeline flags,
-// majorness, tile-advance direction -- must flip with it, so the predicate
-// lives in exactly one place.
 static bool matmul_swaps_ab(int m) {
   return m != 64 && m != 128;
 }
@@ -551,12 +481,6 @@ CustomOPTranspileResult
   int cur_custom_kernel_idx = custom_kernel_idx_counter++;
   string func_name = fmt("custom_kernel_$", cur_custom_kernel_idx);
 
-  // A warp-specialized region needs at least one consumer warp group. With
-  // num_consumer_wgs == 0 warpgroup 0 becomes the producer and nothing consumes
-  // the pipeline, so the kernel deadlocks by construction -- and the thread
-  // count check below still passes, so it used to compile and hang. Python maps
-  // num_consumer_wgs = num_warp_groups - 1 (core.pyx), i.e. num_warp_groups
-  // must be >= 2 whenever forloop_range > 1.
   if (GPU_CC::B200 != config.target_cc ||
       (config::MAX_NUM_WARP_GROUPS <
        config.num_consumer_wgs + config.num_producer_wgs) ||
@@ -586,10 +510,6 @@ CustomOPTranspileResult
 
   // Generate code prologue
   CodeKeeper code;
-  // Mirror of the MMA declarations the TMA atoms are derived from. A task body
-  // needs them a second time on the HOST, in the builder that constructs and
-  // uploads the atoms (see the builder emission at the end of this function).
-  // Only populated in device-body mode.
   CodeKeeper mma_setup;
   auto e_mma = [&](auto const &fmt_str, auto const &...args) {
     code.e(fmt_str, args...);
@@ -607,22 +527,6 @@ CustomOPTranspileResult
   }
   code.e("int thread_idx = $;", thread_idx);
 
-  // Warp specialization (a dedicated producer warp group issuing TMA loads plus
-  // consumer warp groups doing the compute) is only emitted when there are
-  // pipelined inputs, which in turn requires a real for-loop to pipeline
-  // across. With forloop_range == 1 no producer/consumer split is generated at
-  // all, so *every* thread in the block runs the copy and compute kernels.
-  //
-  // Those kernels are templated on NUM_THREADS / CONSUMER_NUM_THREADS. Leaving
-  // both pinned at one warp group while the block actually has more threads
-  // meant the surplus threads ran work sized for a smaller group, racing on and
-  // overrunning the tile. Size the constants to the threads that really execute
-  // the region instead.
-  // The producer/consumer split is only ever EMITTED for pipelined inputs
-  // (the producer loop iterates pipelined_input_ops). A forloop graph whose
-  // tiled inputs were all demoted to in-loop sync copies (no matmul
-  // consumers) has no split: every thread runs the loop, so the barrier
-  // constants must cover the whole block or wg_sync deadlocks.
   bool has_pipelined_input = false;
   for (tb::TBOperator const *tb_op : g.operators) {
     for (tb::STensor const &st : tb_op->output_tensors) {
@@ -650,41 +554,10 @@ CustomOPTranspileResult
   code.e("uint32_t elect_one_warp = (threadIdx.x / 32 == 0); ");
   code.e("int cta_rank = cute::block_rank_in_cluster();");
 
-  // `elect_one_cta` selects the leader CTA of each 2-SM MMA pair. It MUST be
-  // declared here, unconditionally: the forloop-accumulator and epilogue paths
-  // emit `if (elect_one_cta && elect_one_warp)` (see
-  // add_cta_warp_selector_if_need) for every graph, including graphs with no
-  // matmul at all. Declaring it only inside the matmul branch left those graphs
-  // referencing an undeclared identifier, so any pure-elementwise custom op
-  // failed to compile.
-  //
-  // This is equivalent to the previous
-  //   get<0>(cluster_layout_vmnk.get_flat_coord(cta_rank)) == 0
-  // formulation: cluster_layout_vmnk is make_layout(cluster_shape)
-  // tiled_divided by AtomThrID, so mode 0 of the flat coord is exactly cta_rank
-  // % |AtomThrID|. Computing it from cta_rank directly removes the dependency
-  // on tiled_mma, which does not exist when the graph has no matmul. 1-SM MMA
-  // (see the tiled_mma emission below): AtomThrID == 1, so every CTA is its own
-  // MMA leader and elect_one_cta is unconditionally true. Kept as a named
-  // variable because the accumulator/epilogue paths guard on it.
   int const mma_atom_thr_size = 1;
   code.e("bool elect_one_cta = (cta_rank % $) == 0;", mma_atom_thr_size);
 
   code.e("// STensors");
-  // Declared in BOTH modes. An MPK task body owns its shared-memory
-  // declaration exactly like a handwritten .cuh task does (see e.g.
-  // tasks/blackwell/mla_mtp_decode_tp8_sm100.cuh); there is no smem pointer to
-  // receive from the megakernel.
-  //
-  // 1024B is the period of the Swizzle<3,3,3> the UMMA reads its operands
-  // through, and what plan_stensor_memory aligns operand offsets to. Those
-  // offsets are relative to `buf`, so the base must carry the alignment too. A
-  // standalone kernel gets it for free (dynamic smem starts the window); a task
-  // body does not, since the worker kernel has static __shared__ ahead of it.
-  // Declaring the alignment is the right way to ask for it -- an earlier
-  // attempt rounded the `buf` POINTER up at runtime instead, which is unsafe
-  // because the shift is not reflected in smem_size and the body can then
-  // overrun its allocation.
   code.e("extern __shared__ __align__(1024) char buf[];");
 
   code.e("");
@@ -700,15 +573,9 @@ CustomOPTranspileResult
       code.e("uint32_t *$ = (uint32_t*)(buf + $);", tmem_base_ptr_name, addr);
       has_tmem_base_ptr = true;
     } else if (guid == mem_plan.mbarrier_buf_guid_offset) {
-      // The SHARED completion barrier for matmuls whose accumulators are
-      // written back after the loop.
       code.e("uint64_t *$ = (uint64_t*)(buf + $);", mbarrier_ptr_name, addr);
       need_mbarrier = true;
     } else if (guid > mem_plan.mbarrier_buf_guid_offset) {
-      // Per-matmul barrier, used only by a CHAINED matmul (one whose result is
-      // consumed inside the loop and must therefore be waited on each
-      // iteration). Declared for every matmul; the unused ones are dropped by
-      // the compiler.
       code.e("uint64_t *$_$ = (uint64_t*)(buf + $);",
              mbarrier_ptr_name,
              guid - mem_plan.mbarrier_buf_guid_offset,
@@ -722,25 +589,9 @@ CustomOPTranspileResult
     }
   }
 
-  // Erase the lowest 16 bytes to 0 for GEMM. Must happen BEFORE the TMEM
-  // allocation below, which stores the allocated TMEM base into buf+0.
   code.e("*((uint128_t*)buf) = 0ul;");
   code.e("");
 
-  // A matmul whose result is consumed by ANOTHER op inside the loop (rather
-  // than only by its forloop accumulator) is not supported yet, and used to
-  // produce garbage silently. Only the final accumulators get a
-  // write_tC_to_sC (see the in-register write-back at the end of this
-  // function), so a chained matmul's TMEM result is never materialised into the
-  // smem tile the consumer reads -- and any elementwise op fused into that
-  // matmul's epilogue (num_exps_before_store) never runs either, so the
-  // emitted kernel is silently wrong.
-  //
-  // Supporting this needs, per iteration: wait for that matmul's MMA, write its
-  // accumulator (with the fused epilogue) to smem, sync, and reset the
-  // accumulator to ScaleOut::Zero because it does NOT accumulate across the
-  // forloop. That is the fused-attention shape; see the notes in DESIGN.md.
-  // See CUDA_T_FL1_PIPELINED_DEADLOCK in error_types.h.
   if (g.forloop_range == 1) {
     for (auto const &[guid, meta] : stensor_metas) {
       if (meta.is_pipelined_input) {
@@ -755,11 +606,6 @@ CustomOPTranspileResult
   auto const &chained_consumer = chain_info.chained_consumer;
   auto const &generic_antidep = chain_info.generic_antidep;
 
-  // Every matmul issues one umma_arrive per forloop iteration, and the epilogue
-  // waits for phase 0 of a barrier expecting `arrive_cnt` of them. Counting
-  // only the iterations assumed exactly one matmul: with two, phase 0 completed
-  // halfway through the loop and the accumulator write-back raced the MMAs that
-  // were still running.
   int num_matmuls = 0;
   for (TBSchedNode const &node :
        Combine(sched.loop_nodes, sched.post_loop_nodes)) {
@@ -773,17 +619,6 @@ CustomOPTranspileResult
   if (need_mbarrier) {
     CodeKeeper res;
     // In 2sm mma, one one cta in each 2-CTA pair issues arrival
-    // 1-SM MMA: every CTA issues its own MMA and arrives itself, so there is
-    // no division by the 2-CTA pair size that the 2-SM path needed.
-    //
-    // The shared barrier exists only for matmuls whose accumulator is written
-    // back AFTER the loop. When every matmul is chained (its result is
-    // materialised in-loop -- the online-softmax rewrite makes BOTH matmuls
-    // feed rescale accumulators, which read the result from smem each
-    // iteration), nothing ever arrives on it: emitting
-    // initialize_barrier(count = 0) is invalid mbarrier usage, and it drove
-    // ptxas into an internal compiler error (C7907) at -O1+ on sm_100a.
-    // Guard the init; the TMEM allocation part must still run.
     generate_Tmem_mbarrier_init_code(
         res,
         num_matmuls > 0 ? g.forloop_range * num_matmuls * g.cluster_dim.x *
@@ -791,19 +626,11 @@ CustomOPTranspileResult
                         : -1 /* skip barrier init */,
         tmem_base_ptr_name,
         mbarrier_ptr_name);
-    // Each chained matmul gets a count-1 barrier: exactly one MMA completes
-    // against it before its result is read, within the same iteration. The
-    // CONSUMER's per-matmul barrier (the anti-dependency wait) must be
-    // initialized too -- it was declared and waited on but never initialized,
-    // and mbarrier ops on raw shared memory died with "unspecified launch
-    // failure".
     std::unordered_set<sguid_t> barriers_to_init(chained.begin(),
                                                  chained.end());
     for (auto const &[prod, cons] : chained_consumer) {
       barriers_to_init.insert(cons);
     }
-    // Consumers of GENERIC-produced operands arrive on their barrier too (the
-    // producer's anti-dependency wait targets it), so it must be initialized.
     for (auto const &[prod, cons] : generic_antidep) {
       barriers_to_init.insert(cons);
     }
@@ -912,10 +739,6 @@ CustomOPTranspileResult
           node.ops.begin(), node.ops.end(), [](auto &op_and_meta) {
             return op_and_meta.first->op_type == type::TB_EXP_OP;
           });
-      // write_tC_to_sC applies only exp (NUM_EXPS_BEFORE_STORE) and the
-      // accumulator store; any other op fused into a Blackwell matmul's
-      // epilogue chain would silently vanish (a fused SQUARE did exactly
-      // that). Reject instead of emitting wrong code.
       for (size_t fused_i = 1; fused_i < node.ops.size(); ++fused_i) {
         auto fused_type = node.ops[fused_i].first->op_type;
         if (fused_type != type::TB_EXP_OP &&
@@ -931,27 +754,9 @@ CustomOPTranspileResult
       // For threadblock matmul, cute requires 2-d matrices as inputs / outputs,
       // we assert that all other leading dimensions are of size 1, and only use
       // the last two dimensions when generating layouts
-      // swapAB: 1-SM tcgen05 requires an M-tile of 64 or 128, but MPK decode
-      // issues M = 1..8 tokens. Computing C^T = B^T * A^T puts the token count
-      // into N (which is fine-grained: any multiple of 8 up to 256) and the
-      // weight's output dim into M.
-      //
-      // sm100_make_1sm_trivial_tiled_mma does NOT reject an illegal M -- at M=8
-      // it happily builds SM100_MMA_F16BF16_SS<...,8,64,...> and the failure
-      // only surfaces later inside get_mma_tC as a CUTLASS error cascade. So
-      // validate the effective shape here, on our side, before emitting.
       bool const swap_ab = matmul_swaps_ab(m);
       int const mma_m = swap_ab ? n : m;
       int const mma_n_exact = swap_ab ? m : n;
-      // config.pad_mma_n widens N to MMA_N_MIN_PADDED. resolve_tensor_layout
-      // sizes the m_input and output buffers with the SAME helper on the SAME
-      // condition (row-major tile, B200); if the two ever diverge the UMMA
-      // reads past its operand and the numbers are quietly wrong.
-      //
-      // The extra rows need no zeroing. Each N lane is an independent output
-      // column -- a discarded token -- so garbage there cannot reach the rows
-      // that are stored. The loads are TMA, which zero-fills out of bounds,
-      // and the stores are TMA, which drops out-of-bounds writes.
       bool const pad_n = config.pad_mma_n && swap_ab &&
                          config.target_cc == GPU_CC::B200 &&
                          meta0.innermost_dim == input0.num_dims - 1 &&
@@ -964,14 +769,6 @@ CustomOPTranspileResult
             CUDA_T_CONFIG_ERROR, func_name, 0, 0, "", {}};
       }
 
-      // The K tile must be a whole number of MMA K-atoms. The tcgen05 F16/BF16
-      // atom consumes a 32-byte K slice (16 bf16 elements), and MmaTiler's K
-      // mode is built by dividing the operand shape by it. A K below one atom
-      // truncates that mode to 0 and CUTLASS then divides by zero deep inside
-      // tile_to_mma_shape -- an nvcc template-error cascade rather than a
-      // diagnosable failure. The M/N guard above exists for exactly this
-      // reason; K was simply missed, and a K-splitting forloop_range reaches
-      // it easily (K=128 with forloop_range=64 leaves K=2).
       if (config.target_cc == GPU_CC::B200) {
         int const mma_k_atom =
             32 / static_cast<int>(type::get_datatype_size(
@@ -984,20 +781,6 @@ CustomOPTranspileResult
 
       if (config.target_cc == GPU_CC::B200) {
 
-        // These are suffixed with the matmul's output (C-matrix) guid for two
-        // reasons: an unsuffixed name is re-declared in the same scope by every
-        // matmul op (breaking any graph with two or more matmuls, e.g. a gated
-        // MLP), and the *host* side already emits the guid-suffixed forms for
-        // TMA-atom construction (transpiler_kn.cc). TiledMMA::guid is set to
-        // exactly this c_matrix_guid, so both sides now agree.
-        // 1-SM MMA. The MPK runtime executes tasks as single CTAs and has no
-        // multicast, so the 2-SM (2x1SM) atom is not usable: it pairs CTAs via
-        // a cluster and requires the multicast TMA atoms. 1-SM also relaxes the
-        // M-tile constraint from {128, 256} to {64, 128}, and gives
-        // AtomThrID == 1 so the per-CTA shape divides are identities.
-        // Under swapAB the roles invert: the A operand is the old B (its MN
-        // dim, N, is contiguous -> Major::MN) and the B operand is the old A
-        // (K contiguous -> Major::K), so the Major flags swap with the extents.
         e_mma("auto tiled_mma_$ = "
               "cutlass::gemm::collective::detail::sm100_make_1sm_trivial_"
               "tiled_mma<$, $, $, Shape<Int<$>, Int<$>>, "
@@ -1005,90 +788,22 @@ CustomOPTranspileResult
               output.guid,
               get_datatype_str(swap_ab ? input1.data_type : input0.data_type),
               get_datatype_str(swap_ab ? input0.data_type : input1.data_type),
-              // Third parameter is ElementAccumulator, not the output element
-              // type. tcgen05 F16/BF16 MMA accumulates in fp32 (the result is
-              // narrowed on the way out of TMEM), so passing the bf16 output
-              // type here made CUTLASS reject it with "Unknown type for
-              // CFormat".
               "float",
               mma_m,
               mma_n,
               swap_ab ? "MN" : "K",
               swap_ab ? "K" : "MN");
 
-        // Operand tile-width limit, for NON-pipelined operands only (a
-        // pipelined one is exempt -- see operand_ok below).
-        //
-        // The transpiler models smem as dense strides plus one XOR swizzle.
-        // That matches what the UMMA reads as long as an operand's contiguous
-        // dim is at most 128B (64 elements at 16-bit). At exactly 128B the
-        // planner yields Swizzle<3,3,3>, the UMMA's 128B swizzle in element
-        // units; narrower dims scale down consistently with the atom (K=32 ->
-        // Swizzle<2,3,3> against the atom's Sw<2,4,3>, K=16 -> Swizzle<1,3,3>),
-        // and those are verified correct.
-        //
-        // Wider operands diverge two ways. The planner switches branches
-        // (num_chunks_in_inner_dim > num_chunks_in_128B) and emits
-        // Swizzle<3,3,4>, and CUTLASS panel-tiles the layout atom rather than
-        // laying rows out contiguously -- tile_to_shape at K=128 gives
-        // ((_8,_16),(_64,_2)):((_64,_512),(_1,_8192)), so the second K block
-        // sits at +8192 elements, not at a row pitch of 128. No dense-stride
-        // layout can express that. Measured relative error on those shapes is
-        // ~1.6, i.e. silently wrong output, so reject them here instead.
         {
-          // Test exactly what the planner branches on: the swizzled dim's
-          // stride in bytes, i.e. the row pitch. Above 128B it takes the
-          // num_chunks_in_inner_dim > num_chunks_in_128B path and emits a
-          // swizzle the UMMA does not read. Do NOT use dim[innermost_dim] here
-          // -- the layout resolver does not always make the K/N dim innermost
-          // (at K=32 it picks M), so that measures the wrong axis and rejects
-          // working shapes.
           auto row_pitch_bytes = [](tb::STensor const &t,
                                     STensorMeta const &mt) {
             return (size_t)mt.strides[mt.swizzled_dim] *
                    type::get_datatype_size(t.data_type);
           };
-          // Operands only. The constraint comes from the UMMA reading A and B
-          // through smem descriptors, so their layout must be one the hardware
-          // agrees with. C is written by the TMEM->smem copy and read by the
-          // S->G copy, both through SmemLayoutC, so it is self-consistent at
-          // any swizzle -- and measured so: at K=32 only C exceeds 128B (pitch
-          // 256B) and the result is correct. Including C here
-          // rejected that working shape.
-          //
-          // Require the operand to be provably readable, not merely
-          // not-provably-bad: XOR-swizzled AND pitch <= 128B. A pitch whose
-          // chunk count is not a power of 2 (K=48 -> 6 chunks) sends the
-          // planner down its shift-based branch, which leaves is_xor_swizzled
-          // false and produces a layout the UMMA cannot read. Keying the check
-          // off is_xor_swizzled alone skipped those tensors entirely and let
-          // K=48 through, silently wrong. The pitch limit applies
-          // only to the NON-pipelined path.
-          //
-          // A pipelined operand is never addressed through the dense-stride
-          // model: InputTMAAsyncCopy_Blackwell writes
-          // make_tensor(dst_smem, DstPipeLayout{}) and Blackwell_Matmul::run
-          // reads make_tensor(a_ptr, DstPipeLayout_A{}), and both derive that
-          // layout independently from the same cutlass sm100_smem_selector for
-          // the same (major, element, tile). So CUTLASS panel-tiles both sides
-          // identically and the >128B divergence cannot arise. The transpiler's
-          // dense-stride layout is then used only for SIZING, which still
-          // agrees: tile_to_mma_shape is compact, so its per-stage cosize
-          // equals the element count the planner reserved and the pipeline's
-          // transactionBytes expects.
-          //
-          // N=128 and Ktile=128 are correct on the
-          // pipelined path, the same as N=64. The non-pipelined path keeps the
-          // original guard -- InputChunkedSyncCopy really does index linearly
-          // through the dense-stride layout, where a >128B tile is silently
-          // wrong (~1.6 relative error).
           auto operand_ok = [&](tb::STensor const &t, STensorMeta const &mt) {
             if (mt.is_pipelined_input) {
               return true;
             }
-            // Routed through InputWideOperandSyncCopy: written through the same
-            // cutlass-derived DstPipeLayout the UMMA reads, so the dense-stride
-            // pitch limit does not apply.
             if (wide_matmul_operands.count(t.guid)) {
               return true;
             }
@@ -1117,19 +832,7 @@ CustomOPTranspileResult
               output.guid,
               output.guid);
 
-        // NOTE: `elect_one_cta` (and the cta_in_cluster_coord_vmnk it was
-        // derived from) is now declared once in the kernel prologue. Declaring
-        // it here re-declared it in the same scope for every matmul op, which
-        // broke any graph with two or more matmuls (e.g. a gated MLP).
 
-        // Blackwell_Matmul takes A as [K,M], B as [N,K], C as [N,M].
-        // Unswapped, each of those is the dim-swapped view of the stensor.
-        // Under swapAB, A := old B needs [K,N], B := old A needs [M,K], and
-        // C needs [M,N] -- all three are the *natural* stensor order, i.e.
-        // swap01=false. The epilogue then writes accumulator element
-        // (n_idx, m_idx) through the swapped C layout, which is exactly where
-        // output element (m_idx, n_idx) lives, so the S->G copy needs no
-        // change.
         code.e("using Matmul$LayoutA = $;",
                output.guid,
                swap_ab ? get_stensor_layout(input1, meta1, num_dims - 2, false)
@@ -1164,24 +867,13 @@ CustomOPTranspileResult
              num_exps_before_store,
              is_accum_in_reg ? false : is_store_accum,
              config.num_consumer_wgs > 1 ? true : false,
-             // IS_PIPELINE_A/B follow the MMA ROLE, which swapAB flips: under
-             // swap the A operand is input1. Passing meta0/meta1 positionally
-             // gave pipelined V a 1-stage read layout whose stage coordinate
-             // collapses to 0 -- the UMMA consumed stage 0 (KV tile 0) every
-             // iteration while the producer dutifully filled both stages.
              (swap_ab ? meta1 : meta0).is_pipelined_input,
              (swap_ab ? meta0 : meta1).is_pipelined_input,
              config.pipeline_stages,
              output.guid, // decltype(tiled_mma_$)
              output.guid, // decltype(mma_tiler_$)
              swap_ab ? "true" : "false",
-             // TASK_BODY: in a megakernel task blockIdx is the worker id, so
-             // the MMA coordinate must not be derived from it.
              config.emit_device_body ? "true" : "false");
-      // Give every matmul in this body its own TMEM columns. A 128-lane fp32
-      // accumulator occupies mma_n columns, so hand out [offset, offset+mma_n)
-      // and advance. All of them previously shared *tmem_base_ptr, which made
-      // the second matmul clobber the first's accumulator.
       if (tmem_col_offset == 0) {
         code.e("auto matmul_$_accum = Matmul$Kernel::get_mma_tC(blockIdx.x, "
                "blockIdx.y, *tmem_base_ptr);",
@@ -1196,8 +888,6 @@ CustomOPTranspileResult
       }
       tmem_col_offset += mma_n;
       if (tmem_col_offset > TMEM_CAPACITY_COLUMNS) {
-        // Allocator1Sm hands out Sm100TmemCapacityColumns columns in total.
-        // Overflowing them silently aliases accumulators again, so reject.
         return CustomOPTranspileResult{
             CUDA_T_LAYOUT_ERROR, func_name, 0, 0, "", {}};
       }
@@ -1208,9 +898,6 @@ CustomOPTranspileResult
 
   // Get matmul stensor_guid2stensor
   std::map<sguid_t, tb::STensor> SGuid2STensor;
-  // Operands of a matmul. A pipeline feeding one of these is driven by a single
-  // elected warp (see use_cta_warp_selector), so its consumer count is 32
-  // rather than a full warp group -- getting that wrong deadlocks the producer.
   std::unordered_set<sguid_t> matmul_operand_guids;
   for (TBSchedNode const &node :
        Combine(Combine(sched.pre_loop_nodes, sched.loop_nodes),
@@ -1227,10 +914,6 @@ CustomOPTranspileResult
       SGuid2STensor[output.guid] = output;
       matmul_operand_guids.insert(input0.guid);
       matmul_operand_guids.insert(input1.guid);
-      // If an stensor feeds two matmuls, the first one wins. That is only
-      // sound if both require the same layout; the shapes that reach here are
-      // validated numerically, so a mismatch would show up as a wrong result
-      // rather than silently.
     }
   }
 
@@ -1267,13 +950,6 @@ CustomOPTranspileResult
       // shape of STensor * forloop_range
       string offset = "";
       int3 imap = cur_op->input_map;
-      // In device-body (MPK task) mode the caller hands us pointers ALREADY
-      // offset to this task's tile: runtime.cc computes each task's offset from
-      // the map and its block id when building the TensorDesc
-      // (`input$.base_ptr = base + offset`). Applying a blockIdx offset on top
-      // double-counts it -- and in a persistent megakernel blockIdx.x is the
-      // WORKER id (one block per SM), not a tile index, so it indexed far past
-      // the tensor and faulted with "unspecified launch failure".
       for (int dim = 0; dim < 3 && !config.emit_device_body; ++dim) {
         int div_dim = dim == 0 ? imap.x : dim == 1 ? imap.y : imap.z;
         if (div_dim >= 0) {
@@ -1300,11 +976,6 @@ CustomOPTranspileResult
                offset);
       }
 
-      // Wide (>128B pitch) non-pipelined matmul operand: copy through the
-      // matmul's own cutlass-derived smem layout (see the routing set above).
-      // Needs the consuming matmul's tiled_mma/mma_tiler and role. Applies on
-      // both the chunked and non-chunked branches below -- operand_ok admits
-      // these tensors solely on the promise that this atom loads them.
       auto emit_wide_operand_atom = [&]() {
         tb::TBOperator const *mm = nullptr;
         bool is_in0 = false;
@@ -1320,9 +991,6 @@ CustomOPTranspileResult
           }
         }
         assert(mm != nullptr);
-        // tiled_mma_$/mma_tiler_$ are named after the matmul's SCHED-NODE
-        // output (the fused chain's last op -- e.g. a folded forloop_accum),
-        // not the matmul's own output. Follow the fusion chain for the name.
         tb::STensor const &mm_out =
             fusion_chain.at(mm).back()->output_tensors.at(0);
         int const mm_nd = mm_out.num_dims;
@@ -1330,9 +998,6 @@ CustomOPTranspileResult
         bool const mm_swap_ab = matmul_swaps_ab(mm_m);
         bool const role_a = (is_in0 != mm_swap_ab);
         int const nd = stensor.num_dims;
-        // Natural role order: A wants (M, K), B wants (N, K). input0 is
-        // already (m, k) / under swapAB (n_role, k); input1 is (k, n) and
-        // must be permuted. Strides come from the gmem dtensor tile.
         int const da = stensor.dim[nd - 2], db = stensor.dim[nd - 1];
         size_t const sa = dtensor_meta.strides[nd - 2],
                      sb = dtensor_meta.strides[nd - 1];
@@ -1410,25 +1075,10 @@ CustomOPTranspileResult
 
           // imap;
           int forloop_dim = cur_op->forloop_dim;
-          // NOTE: this stays keyed off the stensor's own position, NOT the MMA
-          // role, even under swapAB. The smem layout's majorness must match the
-          // gmem tensor's -- TMA cannot transpose -- and that is a property of
-          // how the tensor is laid out, not of which operand slot it feeds.
-          // Deriving it from the MMA role instead tripped CUTLASS's
-          // "Majorness of smem doesn't match majorness of gmem" assertion.
-          // Only the descriptor derivation (partition_shape_A/B, Major, Step,
-          // make_tma_atom_A/B) follows the role -- see transpiler_kn.cc.
           bool m_input = stensor_meta.m_input;
           string smem_layout = mov_last_get_stensor_layout(
               stensor, stensor_meta, real_innermost_dim, !m_input);
 
-          // Drop leading BATCH dims from the TMA view. A matmul operand's
-          // leading stensor dims are all 1 (threadblock::Graph::
-          // create_matmul_op requires it), and MPK hands each task its own
-          // slice pointer, so the tile this task loads is purely 2-D. The
-          // chunked path already builds its tile layout that way; the TMA
-          // path was describing the WHOLE batched tensor instead, which left
-          // an extra mode for local_tile to tile against the MMA tiler's K.
           int lead = 0;
           while (lead < dtensor.num_dims - 2 && stensor.dim[lead] == 1) {
             lead++;
@@ -1456,13 +1106,6 @@ CustomOPTranspileResult
                                     map_to_cute_int(dims),
                                     map_to_cute_int(strides));
 
-          // Consumer count must equal the threads that really call
-          // consumer_wait/consumer_release for this pipeline. A matmul operand
-          // is consumed under `if (elect_one_cta && elect_one_warp)` -- one
-          // warp
-          // -- while an elementwise consumer runs on every consumer thread.
-          // Passing the warp-group count for a matmul-fed pipeline left the
-          // empty-arrive spread incomplete and hung the producer.
           int const pipeline_num_consumers =
               matmul_operand_guids.count(stensor.guid)
                   ? 32
@@ -1478,19 +1121,10 @@ CustomOPTranspileResult
               barrier_addr,
               config.num_consumer_wgs,
               config.num_consumer_wgs,
-              // Exactly the bytes this CTA's TMA delivers. The old
-              // `(m_input ? 2 : 1)` doubling was a 2-SM multicast artifact --
-              // there the A tile arrives from a 2-CTA pair, so the mbarrier
-              // expects two contributions. With 1-SM and no multicast only one
-              // arrives, the transaction count is never satisfied, and
-              // consumer_wait blocks forever: this was the K-loop hang.
               stensor_meta.num_phy_elems *
                   type::get_datatype_size(stensor.data_type),
               pipeline_num_consumers);
 
-          // The MMA objects this input feeds belong to the matmul that consumes
-          // it, identified by c_matrix_guid -- the same guid the host side uses
-          // when it declares tiled_mma_$ / mma_tiler_$.
           int const atom_matmul_m =
               stensor_meta.m_input
                   ? stensor.dim[0]
@@ -1514,10 +1148,6 @@ CustomOPTranspileResult
               partition_logic,
               g.forloop_range,
               m_input ? forloop_dim : (dtensor.num_dims - 1 - forloop_dim),
-              // 1-SM MMA has no multicast: CUTLASS selects a plain
-              // SM90_TMA_LOAD for AtomThrID == 1 (see
-              // sm100_cluster_shape_to_tma_atom_A). The N_MODE/M_MODE
-              // directions are 2-SM-only and are not emitted any more.
               "NOT_MULTICAST",
               stensor_meta.m_input
                   ? TiledMMA(get_datatype_str(stensor.data_type),
@@ -1526,8 +1156,6 @@ CustomOPTranspileResult
                                      .data_type),
                              // ElementAccumulator: tcgen05 accumulates in fp32
                              "float",
-                             // 1-SM MMA: M tile is this CTA's tile, not the
-                             // 2-CTA pair's, so no doubling.
                              stensor.dim[0],
                              SGuid2STensor[stensor_meta.n_matrix_guid].dim[1],
                              stensor.dim[1],
@@ -1547,8 +1175,6 @@ CustomOPTranspileResult
                                  SGuid2STensor[stensor_meta.m_matrix_guid]
                                      .dim[0])))));
 
-          // Resolve this operand's position within the OP, which is what a task
-          // indexes its pointers by (see TMAParams::operand_id).
           for (size_t k = 0; k < op->input_tensors.size(); k++) {
             if (op->input_tensors[k].guid == dtensor.guid) {
               tmaParamsList.back().operand_id = k;
@@ -1556,11 +1182,6 @@ CustomOPTranspileResult
             }
           }
 
-          // A task body has no kernel parameters, so it cannot be templated on
-          // the atom's type the way the standalone kernel is. Name the type
-          // here instead -- everything it derives from (tiled_mma_$,
-          // mma_tiler_$, cluster_layout_vmnk_$) is already declared above --
-          // and bind a reference to the device-resident copy the host built.
           if (config.emit_device_body) {
             std::vector<TMAParams> just_pushed{tmaParamsList.back()};
             generate_tma_code_blackwell(
@@ -1584,27 +1205,12 @@ CustomOPTranspileResult
               SrcMNKLayout,
               dtensor.guid,
               stensor.guid,
-              // MInput here is the MMA ROLE, which swapAB inverts relative to
-              // the stensor's source-graph position.
               stensor_meta.m_input != atom_swap_ab,
               g.forloop_range,
               stensor_meta.c_matrix_guid, // decltype(tiled_mma_$)
               stensor_meta.c_matrix_guid, // decltype(mma_tiler_$)
               atom_swap_ab ? "true" : "false",
-              // TASK_BODY: the gmem tile coordinate must not come from
-              // blockIdx in a task body -- see the flag's comment in input.h.
               config.emit_device_body ? "true" : "false",
-              // N_LOOP: an original-B operand (K,N convention) whose forloop
-              // tiles its N rather than its K -- see input.h.
-              //
-              // N is the LAST dim, not dim 1. Hardcoding 1 was right only for
-              // a 2D operand and silently INVERTED the flag for a batched
-              // one, where (batch, K, N) puts N at dim 2 and K at dim 1: the
-              // attention core's K^T (batch, D, S) tiled on S got N_LOOP
-              // false, and V (batch, S, D) tiled on its K got N_LOOP true.
-              // Both wrong, both silent -- exp(Q@K^T+mask)@V returned rel
-              // ~1.05 for any sequence past one 64-column tile while the 2D
-              // form of the identical graph was correct to 2.2e-3.
               (!stensor_meta.m_input &&
                cur_op->forloop_dim == dtensor.num_dims - 1)
                   ? "true"
@@ -1626,11 +1232,6 @@ CustomOPTranspileResult
       }
       TMAParams &params = tmaParamsList.at(i);
       tmplt.append("class TMA_" + std::to_string(params.guid));
-      // A standalone kernel takes the atom by value in the constant bank; a
-      // task body takes a pointer to a device-resident copy the host builder
-      // uploaded. Both are legal operand locations for cp.async.bulk.tensor,
-      // and the pointer form is the only one a task can use -- it is called
-      // from device code and has no kernel parameters of its own.
       tma.append(config.emit_device_body
                      ? ("void const *tma_ptr_" + std::to_string(params.guid))
                      : ("CUTE_GRID_CONSTANT TMA_" +
@@ -1645,11 +1246,6 @@ CustomOPTranspileResult
       tma.append(", ");
     }
 
-    // A megakernel task body: the caller owns the launch and the smem block, so
-    // emit a __device__ function taking `buf` rather than a __global__ kernel
-    // that declares `extern __shared__`. TMA atoms arrive as `void const *` to
-    // host-built, device-resident copies -- a task has no kernel parameters and
-    // cannot be templated by the megakernel's call site.
     if (config.emit_device_body) {
       code.e_front(
           "__device__ __forceinline__ void $($$, $) {",
@@ -1710,8 +1306,6 @@ CustomOPTranspileResult
               }));
     }
 
-    // A task body is called from device code with concrete arguments, so it
-    // must not be a template -- it derives each TMA_$ locally instead.
     if (!config.emit_device_body) {
       code.e_front(tmplt);
     }
@@ -1722,11 +1316,6 @@ CustomOPTranspileResult
   // add mem_size based on tma copies
   mem_plan.smem_size += tmaParamsList.size() * config.pipeline_stages * 16;
 
-  // NOTE: the "erase the lowest 16 bytes" write that the Ampere backend emits
-  // here has been moved up, before the TMEM allocation. On Blackwell the memory
-  // plan places tmem_base_ptr at buf+0, so zeroing the low 16 bytes at this
-  // point wiped the TMEM address that tmem_allocator.allocate() had just stored
-  // -- the epilogue then called tmem_allocator.free() on address 0.
   code.e("");
 
   // Launch G->S copy atoms for all pre-loop-ops
@@ -1785,8 +1374,6 @@ CustomOPTranspileResult
         int num_tbs = dim == 0   ? g.grid_dim.x
                       : dim == 1 ? g.grid_dim.y
                                  : g.grid_dim.z;
-        // See the input side above: an MPK task body receives pre-offset
-        // pointers, so it must not add a blockIdx-derived offset of its own.
         if (num_tbs > 1 && !config.emit_device_body) {
           // The output tensor MUST be divided along this dimension, as stated
           // in the paper
@@ -1851,9 +1438,6 @@ CustomOPTranspileResult
       continue;
     }
     auto [last_op, last_op_meta] = node.ops.back();
-    // RESCALE accums must be cleared too (Ampere does): they accumulate in
-    // smem via EpilogueStoreAccum, and uncleared they start from whatever the
-    // buffer held -- the online-softmax kernel returned nan from exactly this.
     if ((last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
          last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP) &&
         !last_op_meta.is_accum_in_reg) {
@@ -1974,12 +1558,6 @@ CustomOPTranspileResult
                                          &pipeline_inputs,
                                      bool is_in_loop) {
     if (sched_node.type == tb_sched_node_t::SYNCTHREADS) {
-      // The scheduler inserts one boundary between dependency LEVELS, in-loop
-      // and out. A level may end with generic-proxy smem writes whose
-      // next-level reader is a tcgen05 MMA (e.g. the online-softmax
-      // exp(x - max) tile feeding E@V), and a REDUCTION reads whole rows
-      // other threads wrote -- so every boundary needs the full publish
-      // sequence, on every consumer thread.
       emit_async_proxy_publish(code);
     } else {
       auto [op, first_op_meta] = sched_node.ops.front();
@@ -1987,10 +1565,6 @@ CustomOPTranspileResult
       assert(output_op == fusion_chain.at(op).back());
       std::string op_type_str;
       to_json(op_type_str, op->op_type);
-      // Generic producer of a matmul operand: do not overwrite the tile while
-      // the consumer's previous-iteration MMA may still be reading it (see
-      // generic_antidep above). The consumer arrives on its per-matmul
-      // barrier once per iteration; arrival i-1 has parity (i-1) & 1.
       if (is_in_loop && g.forloop_range > 1 &&
           op->op_type != type::TB_MATMUL_OP &&
           !output_op->output_tensors.empty() &&
@@ -2005,22 +1579,8 @@ CustomOPTranspileResult
       code.e("// OP type: $", op_type_str);
 
       // TODO(zy): support other cases such as 1sm mma
-      // NOT a 2-SM switch despite its former name (use_2sm_mma). The tcgen05
-      // MMA is issued by a single elected warp on the 1-SM path too, and this
-      // is what wraps the matmul node in `if (elect_one_cta &&
-      // elect_one_warp)`. Setting it false while "removing 2-SM code" would
-      // silently drop that selector and let all 128 consumer threads issue the
-      // MMA.
       bool mma_needs_single_warp = true;
 
-      // The single-CTA / single-warp selector exists so that exactly one warp
-      // of the leader CTA *issues* the tcgen05 MMA. It must only wrap ops that
-      // are issued that way. Cooperative kernels -- forloop accumulate,
-      // element-wise unary/binary, reductions -- are parameterized over
-      // NUM_THREADS / CONSUMER_NUM_THREADS and require every one of those
-      // threads to participate. Wrapping them in `elect_one_warp` left just 32
-      // of the expected 128 threads running, so most of each tile was never
-      // written and the kernel silently produced wrong results.
       bool node_has_matmul = false;
       for (auto const &node_entry : sched_node.ops) {
         if (node_entry.first->op_type == type::TB_MATMUL_OP) {
@@ -2071,8 +1631,6 @@ CustomOPTranspileResult
           tb::STensor const &input1 = op->input_tensors.at(1);
           tb::STensor const &output = output_op->output_tensors.at(0);
           sguid_t output_guid = output.guid;
-          // Must match the swapAB decision made when Matmul$Kernel was defined:
-          // under swapAB the kernel's A operand is this op's *second* input.
           int const mm_m = output.dim[output.num_dims - 2];
           bool const swap_ab = matmul_swaps_ab(mm_m);
           sguid_t const a_guid = swap_ab ? input1.guid : input0.guid;
@@ -2081,23 +1639,11 @@ CustomOPTranspileResult
           // always pipeline for MMA
           if (need_advance_pipeline) {
 
-            // Per-operand stage index: a pipelined operand advances with the
-            // loop (read_idx_<guid> from its consumer_wait); a non-pipelined
-            // one has a single stage and must stay at 0. Mixed matmuls (Q
-            // constant, K pipelined -- the attention shape) referenced a
-            // pipeline the non-pipelined operand never had.
             auto stage_of = [&](sguid_t guid) -> string {
               if (std::find(pipe_ids.begin(), pipe_ids.end(), (int64_t)guid) !=
                   pipe_ids.end()) {
                 return fmt("read_idx_$", guid);
               }
-              // Pipelined, but waited by an EARLIER node in this iteration
-              // (consumer_wait is issued once per pipeline; SwiGLU's two
-              // matmuls share the x pipeline). Its read_idx is out of scope
-              // here, but every pipeline advances once per iteration, so the
-              // stage is for_idx modulo the stage count. Returning "0" here
-              // instead made the second matmul read stage 0 forever -- every
-              // SwiGLU test failed.
               if (stensor_metas.at(guid).is_pipelined_input) {
                 return fmt("(for_idx % $)", config.pipeline_stages);
               }
@@ -2110,35 +1656,15 @@ CustomOPTranspileResult
                    output_guid,
                    a_guid,
                    b_guid,
-                   // k_iter drives the accumulator reset: run() zeroes at
-                   // k_iter == 0 only. A K-LOOP matmul accumulates across
-                   // iterations (pass for_idx); a CHAINED one computes a fresh
-                   // tile every iteration and must reset every time (pass 0).
                    chained.count(output_guid) ? "0" : "for_idx",
                    output_guid,
                    stage_of(a_guid),
                    stage_of(b_guid));
-            // One warp of each block arrives at the barrier. The 2x1SM
-            // variant issues a .cta_group::2 arrive, which ptxas refuses to mix
-            // with the .cta_group::1 tcgen05 MMA the 1-SM path emits; with no
-            // cluster pairing there is also nothing to multicast to.
-            // A CHAINED matmul (its result is read inside the loop) arrives on
-            // its own barrier, then the consumer threads wait for the MMA and
-            // materialise the accumulator into the smem tile the next matmul
-            // reads. write_tC_to_sC also runs whatever elementwise op the
-            // scheduler fused into this matmul's epilogue
-            // (NUM_EXPS_BEFORE_STORE) -- for Q@K^T -> exp -> @V that exp lives
-            // here and nowhere else.
             if (chained.count(output_guid)) {
               code.e("cutlass::arch::umma_arrive($_$);",
                      mbarrier_ptr_name,
                      output_guid);
               code.e("}"); // close the elect_one_cta && elect_one_warp block
-              // Anti-dependency: the consumer's MMA of the PREVIOUS iteration
-              // must have finished reading this tile before it is overwritten.
-              // The consumer arrives on its own per-matmul barrier once per
-              // iteration; before store i (i >= 1) wait for arrival i-1, whose
-              // phase parity is (i-1) & 1.
               if (g.forloop_range > 1 && chained_consumer.count(output_guid)) {
                 code.e("if (for_idx > 0) {");
                 code.e("cute::wait_barrier(*$_$, (for_idx - 1) & 1);",
@@ -2146,8 +1672,6 @@ CustomOPTranspileResult
                        chained_consumer.at(output_guid));
                 code.e("}");
               }
-              // This matmul arrives once per iteration, so the phase to wait
-              // out alternates with for_idx.
               code.e("cute::wait_barrier(*$_$, for_idx & 1);",
                      mbarrier_ptr_name,
                      output_guid);
@@ -2159,19 +1683,6 @@ CustomOPTranspileResult
               emit_async_proxy_publish(code);
               code.e("if (elect_one_cta && elect_one_warp) {");
             } else {
-              // ORDER MATTERS: tcgen05.commit binds only the UNCOMMITTED
-              // MMA group. Arriving on the shared barrier first bound the MMA
-              // there, and the second arrive committed an EMPTY group to the
-              // per-matmul barrier -- which therefore fired IMMEDIATELY, and
-              // every anti-dependency wait on it passed while the MMA was
-              // still reading its operands. The generic-produced operand was
-              // then overwritten mid-read: diffuse chunk-level tearing (~7%
-              // mean error over 55% of elements, Q=0-invariant). The
-              // per-matmul barrier must take the REAL commit; the shared
-              // barrier's arrival is then the empty-group instant one, which
-              // still counts arrivals correctly for the post-loop wait
-              // because the write-back ALSO waits the per-matmul barrier when
-              // it exists (see the write-back emission).
               if (g.forloop_range > 1 &&
                   (chained.count(a_guid) || chained.count(b_guid) ||
                    generic_antidep.count(a_guid) ||
@@ -2183,12 +1694,6 @@ CustomOPTranspileResult
               code.e("cutlass::arch::umma_arrive($);", mbarrier_ptr_name);
             }
           } else {
-            // Non-pipelined operands (plain synchronous G->S copies). This used
-            // to emit *nothing at all*: the MMA was skipped silently and the
-            // epilogue then deadlocked on wait_barrier() for an arrival that
-            // could never happen. Emit the non-pipelined Matmul::run overload
-            // with read_stage 0 -- the single-tile, no-pipeline shape an MPK
-            // task body has.
 
             code.e("Matmul$Kernel::run(matmul_$_accum, stensor$_ptr, "
                    "stensor$_ptr, $, tiled_mma_$, 0);",
@@ -2196,27 +1701,13 @@ CustomOPTranspileResult
                    output_guid,
                    a_guid,
                    b_guid,
-                   // See the pipelined form above: chained matmuls reset their
-                   // accumulator every iteration.
                    chained.count(output_guid) ? "0" : "for_idx",
                    output_guid);
-            // A CHAINED matmul (its result is read inside the loop) arrives on
-            // its own barrier, then the consumer threads wait for the MMA and
-            // materialise the accumulator into the smem tile the next matmul
-            // reads. write_tC_to_sC also runs whatever elementwise op the
-            // scheduler fused into this matmul's epilogue
-            // (NUM_EXPS_BEFORE_STORE) -- for Q@K^T -> exp -> @V that exp lives
-            // here and nowhere else.
             if (chained.count(output_guid)) {
               code.e("cutlass::arch::umma_arrive($_$);",
                      mbarrier_ptr_name,
                      output_guid);
               code.e("}"); // close the elect_one_cta && elect_one_warp block
-              // Anti-dependency: the consumer's MMA of the PREVIOUS iteration
-              // must have finished reading this tile before it is overwritten.
-              // The consumer arrives on its own per-matmul barrier once per
-              // iteration; before store i (i >= 1) wait for arrival i-1, whose
-              // phase parity is (i-1) & 1.
               if (g.forloop_range > 1 && chained_consumer.count(output_guid)) {
                 code.e("if (for_idx > 0) {");
                 code.e("cute::wait_barrier(*$_$, (for_idx - 1) & 1);",
@@ -2224,8 +1715,6 @@ CustomOPTranspileResult
                        chained_consumer.at(output_guid));
                 code.e("}");
               }
-              // This matmul arrives once per iteration, so the phase to wait
-              // out alternates with for_idx.
               code.e("cute::wait_barrier(*$_$, for_idx & 1);",
                      mbarrier_ptr_name,
                      output_guid);
@@ -2237,19 +1726,6 @@ CustomOPTranspileResult
               emit_async_proxy_publish(code);
               code.e("if (elect_one_cta && elect_one_warp) {");
             } else {
-              // ORDER MATTERS: tcgen05.commit binds only the UNCOMMITTED
-              // MMA group. Arriving on the shared barrier first bound the MMA
-              // there, and the second arrive committed an EMPTY group to the
-              // per-matmul barrier -- which therefore fired IMMEDIATELY, and
-              // every anti-dependency wait on it passed while the MMA was
-              // still reading its operands. The generic-produced operand was
-              // then overwritten mid-read: diffuse chunk-level tearing (~7%
-              // mean error over 55% of elements, Q=0-invariant). The
-              // per-matmul barrier must take the REAL commit; the shared
-              // barrier's arrival is then the empty-group instant one, which
-              // still counts arrivals correctly for the post-loop wait
-              // because the write-back ALSO waits the per-matmul barrier when
-              // it exists (see the write-back emission).
               if (g.forloop_range > 1 &&
                   (chained.count(a_guid) || chained.count(b_guid) ||
                    generic_antidep.count(a_guid) ||
@@ -2341,14 +1817,6 @@ CustomOPTranspileResult
             bool failed = false;
             for (tb::STensor const &stensor : {input0, input1, output}) {
               STensorMeta meta = stensor_metas.at(stensor.guid);
-              // A size-1 (broadcast) dim imposes no iteration-order
-              // constraint: the operand contributes one element regardless of
-              // which dim iterates fastest. Requiring innermost/swizzled on it
-              // made a (1,64) operand veto every candidate dim, iter_dim
-              // stayed -1, the NDEBUG-elided assert below vanished, and
-              // mov_last(-1) permuted all three layouts into deterministic
-              // garbage -- only when a broadcast operand was present, which is
-              // exactly the failure boundary the discriminator measured.
               if (stensor.dim[i] == 1) {
                 continue;
               }
@@ -2517,9 +1985,6 @@ CustomOPTranspileResult
           assert(0 && "Not implemented");
           break;
         }
-        // ===== Online-softmax ops, ported from the Ampere backend
-        // (transpiler_tb.cc); shared runtime kernels in reduction.h /
-        // forloop_accum.h -- only the emission was missing here.
         case type::TB_REDUCTION_0_MAX_OP:
         case type::TB_REDUCTION_1_MAX_OP:
         case type::TB_REDUCTION_2_MAX_OP: {
@@ -2568,8 +2033,6 @@ CustomOPTranspileResult
           code.e("using InLayout = $;", in_layout);
           code.e("using UpdatedMaxLayout = $;", updated_max_layout);
           code.e("using DiffLayout = $;", diff_layout);
-          // Should not have epilogue
-          // Define and run the kernel
           code.e("using Kernel = tb::ReductionMaxKernel<$, "
                  "UpdatedMaxLayout, DiffLayout, InLayout, $, NUM_THREADS>;",
                  get_datatype_str(input.data_type),
@@ -2664,16 +2127,6 @@ CustomOPTranspileResult
           break;
         }
         case type::TB_INPUT_OP: {
-          // A NON-pipelined fd=-1 input's copy is emitted pre-loop; its
-          // scheduler node reaching this switch needs nothing further. A
-          // NON-pipelined FORLOOP-TILED input (demoted in sched_tb_graph
-          // because no matmul consumes it -- e.g. an attention mask feeding
-          // an add) must be copied HERE, every iteration, with the gmem tile
-          // advanced by for_idx. Visibility to the consuming op comes from
-          // the generic inter-op fence+wg_sync the emitter places between op
-          // blocks -- do NOT sync inside this case: the op body may be
-          // wrapped in a warp/CTA selector, where a warpgroup-wide sync
-          // deadlocks (test_pipelined_elementwise hung at grid=32).
           tb::TBInputOp const *in_op = dynamic_cast<tb::TBInputOp const *>(op);
           tb::STensor const &in_st = op->output_tensors.at(0);
           STensorMeta const &in_mt = stensor_metas.at(in_st.guid);
@@ -2693,10 +2146,6 @@ CustomOPTranspileResult
           break;
         }
         default: {
-          // assert(fmt(...).c_str()) asserted a non-null POINTER -- always
-          // true, so an unhandled op emitted NOTHING and its consumers read
-          // garbage. TB_SUB_OP fell through here and the online-softmax
-          // x - max simply vanished from the kernel.
           throw std::runtime_error(
               fmt("Blackwell TB emitter: unhandled op type $", op->op_type));
         }
@@ -2785,9 +2234,6 @@ CustomOPTranspileResult
     code.e("// Write back tensor memory accumulators");
     // sync all consumer threads across peer CTA to ensure 2sm mma is done
     code.e("cute::wait_barrier(*$, 0);", mbarrier_ptr_name);
-    // Matmuls whose REAL commit went to their per-matmul barrier (see the
-    // arrive-order note) only empty-group-arrive on the shared barrier, so
-    // additionally wait their own barrier's final arrival.
     if (g.forloop_range > 1) {
       std::unordered_set<sguid_t> own_waited;
       for (auto const &m : {&chained_consumer, &generic_antidep}) {
@@ -2808,9 +2254,6 @@ CustomOPTranspileResult
   // Transpile the epilogue of the kernel
   if (!sched.post_loop_nodes.empty()) {
     code.e("// The epilogue (kernels outside the loop)");
-    // Post-loop epilogue boundary: sync + tcgen05 fence (see
-    // emit_async_proxy_publish; the loop's trailing publish already fenced
-    // the async proxy, so no extra writer-side fence is needed here).
     code.e("tb::wg_sync<CONSUMER_NUM_THREADS>(8);");
     code.e("tb::tcgen05_fence_after_thread_sync();");
     for (TBSchedNode const &sched_node : sched.post_loop_nodes) {
@@ -2826,28 +2269,9 @@ CustomOPTranspileResult
   if (pipe_tma) {
     code.e("}");
   }
-  // Release tensor memory.
-  //
-  // Only emit this when TMEM was actually allocated: `tmem_allocator` is
-  // declared by generate_Tmem_mbarrier_init_code (guarded by need_mbarrier) and
-  // `tmem_base_ptr` only when the memory plan reserved a TMEM base. Emitting
-  // the release unconditionally left graphs without a matmul referencing both
-  // identifiers before they were declared.
   if (need_mbarrier && has_tmem_base_ptr) {
     code.e("__syncthreads();");
     code.e("if (elect_one_warp) { ");
-    // release_allocation_lock() is tcgen05.relinquish_alloc_permit: it tells
-    // the hardware this CTA will never allocate TMEM again. That is right for a
-    // standalone kernel, whose CTA exits straight after -- but fatal for a
-    // megakernel task body, which runs on a PERSISTENT worker CTA that must
-    // allocate again for the next task. Relinquishing per task made the second
-    // generated matmul on a given worker die with "unspecified launch failure";
-    // it went unnoticed because every test had at least as many workers as
-    // tasks. The dealloc below is a separate instruction (tcgen05.dealloc) and
-    // is still issued every time, so the columns are returned either way.
-    //
-    // cute's Allocator1Sm also requires that repeated allocations come from the
-    // SAME warp; elect_one_warp is warp 0 in every task, so that holds.
     if (!config.emit_device_body) {
       code.e("tmem_allocator.release_allocation_lock(); ");
     }
@@ -2858,13 +2282,6 @@ CustomOPTranspileResult
 
   code.e("}"); // kernel
 
-  // A task body's TMA atoms have to be built somewhere. The standalone path
-  // builds them inline in the launch scaffolding, which a task does not have,
-  // so emit a __host__ builder alongside the body. It takes the task's input
-  // base pointers, reconstructs the same atoms, and uploads each to global
-  // memory; the megakernel calls it once at task-registration time and stores
-  // the pointers in the TaskDesc. Everything here is a host-side mirror of what
-  // the body derives at compile time.
   if (config.emit_device_body && !tmaParamsList.empty()) {
     CodeKeeper host;
     host.e("");
@@ -2877,9 +2294,6 @@ CustomOPTranspileResult
            g.cluster_dim.z);
     host << mma_setup;
     for (auto const &p : tmaParamsList) {
-      // input_id indexes the graph's KN inputs, which for a task body are
-      // exactly the op's operands in order -- the same correspondence
-      // register_generated_task relies on for input_strides.
       host.e("$ *dtensor$ = ($*)input_ptrs[$];",
              get_datatype_str(op->input_tensors.at(p.operand_id).data_type),
              p.guid,

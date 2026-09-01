@@ -19,8 +19,6 @@
 #include "mirage/threadblock/graph.h"
 
 namespace mirage {
-// Forward-declared rather than included: kernel/graph.h includes this header,
-// so including it back would be circular.
 namespace kernel {
 class Graph;
 class KNCustomizedOp;
@@ -37,9 +35,6 @@ public:
   static TaskRegister *get_instance();
   int register_embedding_task(threadblock::Graph const &bgraph,
                               std::vector<int> const &params);
-  // Transpile `op`'s threadblock graph into a device function and register a
-  // variant that calls it. Unlike the other register_* methods, which emit a
-  // call to a handwritten kernel, this one generates the body from the graph.
   int register_generated_task(kernel::KNCustomizedOp const *op,
                               kernel::Graph const *kgraph,
                               int target_cc,
@@ -208,12 +203,12 @@ public:
                                            std::vector<int> const &params);
   int register_dflash_norm_rope_sm100_task(threadblock::Graph const &bgraph,
                                            std::vector<int> const &params);
-  int register_dflash_kv_store_sm100_task(threadblock::Graph const &bgraph,
-                                          std::vector<int> const &params);
   int register_attention_prep_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
   int register_attention_finalize_sm100_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
+  int register_dflash_kv_store_sm100_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
   int register_eagle3_commit_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
   int register_inkling_sconv_sm100_task(threadblock::Graph const &bgraph,
@@ -235,21 +230,11 @@ public:
 
 public:
   std::map<TaskType, std::vector<std::string>> all_task_variants;
-  // Device-function definitions for TASK_GENERATED variants, in variant order.
-  // These must be emitted into the megakernel translation unit *before* the
-  // execute_task dispatch that calls them (see runtime.cc).
   std::vector<std::string> generated_task_defs;
 
-  // TMA descriptors a generated task body needs. A task has no kernel
-  // parameters, so the atoms are built on the host by the emitted
-  // <func_name>_build_tma() and handed to the body as pointers to
-  // device-resident copies. One entry per TASK_GENERATED variant that uses TMA;
-  // variants without it do not appear.
   struct GeneratedTmaInfo {
     unsigned variant_id;
     std::string builder_name;
-    // Which of the task's inputs each descriptor belongs to, in the order the
-    // builder writes them. Also the slot in TensorDesc::tma_desc_ptrs.
     std::vector<size_t> input_ids;
   };
   std::vector<GeneratedTmaInfo> generated_task_tma;

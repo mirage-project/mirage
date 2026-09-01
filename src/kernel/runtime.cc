@@ -290,11 +290,6 @@ void register_mugraph(
 
   // Split a customized op's bgraph into input_ops / output_ops (same quirk
   // as before: outputs live as TBInputOps after the num_inputs mark).
-  // Mirrors split_bgraph_ops in annotated_graph.cc -- see the convention note
-  // there. A handwritten task's bgraph is a pure I/O spec (all TB_INPUT_OPs); a
-  // compiler-generated task's bgraph carries the computation, so its writes are
-  // TB_OUTPUT_OPs and real operators sit in between. Asserting every op is a
-  // TB_INPUT_OP aborted the process on a generated task.
   auto split_ops = [](kn::KNCustomizedOp const *op,
                       int num_inputs,
                       int num_outputs,
@@ -302,8 +297,6 @@ void register_mugraph(
                       std::vector<BGraphSlot> &output_ops) {
     input_ops.clear();
     output_ops.clear();
-    // See split_bgraph_ops in annotated_graph.cc: only TB_INPUT_OPs describe a
-    // task's I/O. A generated task's TB_OUTPUT_OP is for the transpiler only.
     for (auto const &sub_op : op->bgraph.operators) {
       if (sub_op->op_type != mirage::type::TB_INPUT_OP) {
         continue;
@@ -1054,9 +1047,6 @@ TaskGraphResult print_task_graph(
     code.e("using json = nlohmann::json;");
   }
   code.e("using namespace mirage::runtime;");
-  // The generated TMA builders are defined next to their task bodies, far below
-  // -- after the cute includes they need. The task loader above calls them, so
-  // declare them here.
   for (auto const &info : task_register->generated_task_tma) {
     code.e("static void $(void **tma_out, void *const *input_ptrs);",
            info.builder_name);
@@ -1176,10 +1166,6 @@ TaskGraphResult print_task_graph(
     code.e("task_desc.outputs[task_desc.num_outputs++] = output;");
     code.e("}");
 
-    // A generated task body builds its TMA atoms through the host builder the
-    // muGraph backend emitted next to it. Deliberately outside MPK_ENABLE_TMA:
-    // a generated body that takes descriptors cannot run without them, so
-    // skipping this would fault rather than fall back.
     if (!task_register->generated_task_tma.empty()) {
       code.e("if (task.at(\"task_type\") == TASK_GENERATED) {");
       code.e("void *mpk_gen_bases[MAX_INPUTS_PER_TASK];");
@@ -1437,10 +1423,6 @@ TaskGraphResult print_task_graph(
     int num_inputs = std::get<0>(task_config);
     // int num_outputs = std::get<1>(task_config);
     TaskType task_type = std::get<2>(task_config);
-    // Same two-convention split as split_ops above (that one is a lambda in a
-    // different function, so the logic is repeated rather than shared): a
-    // handwritten task's bgraph is a pure I/O spec of TB_INPUT_OPs, while a
-    // generated task's carries the computation and writes via TB_OUTPUT_OPs.
     for (auto const &bop : bgraph.operators) {
       if (bop->op_type != mirage::type::TB_INPUT_OP) {
         continue;
@@ -1854,9 +1836,9 @@ TaskGraphResult print_task_graph(
       "TASK_DFLASH_ATTENTION_SM100";
   task_type_to_name[TASK_DFLASH_NORM_ROPE_SM100] =
       "TASK_DFLASH_NORM_ROPE_SM100";
-  task_type_to_name[TASK_DFLASH_KV_STORE_SM100] = "TASK_DFLASH_KV_STORE_SM100";
   task_type_to_name[TASK_ATTN_PREP_SM100] = "TASK_ATTN_PREP_SM100";
   task_type_to_name[TASK_ATTN_FINALIZE_SM100] = "TASK_ATTN_FINALIZE_SM100";
+  task_type_to_name[TASK_DFLASH_KV_STORE_SM100] = "TASK_DFLASH_KV_STORE_SM100";
   task_type_to_name[TASK_GLM_MOE_ROUTER_SM100] = "TASK_GLM_MOE_ROUTER_SM100";
   task_type_to_name[TASK_INKLING_SCONV_SM100] = "TASK_INKLING_SCONV_SM100";
   task_type_to_name[TASK_INKLING_MOE_ROUTER_SM100] =
@@ -1926,28 +1908,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_NVSHMEM_TILE_ALLREDUCE] =
       "TASK_NVSHMEM_TILE_ALLREDUCE";
 
-  // Compiler-generated task bodies. These are transpiled muGraph device
-  // functions (see TaskRegister::register_generated_task); they must be defined
-  // before _execute_task, whose TASK_GENERATED variants call them by name.
   task_type_to_name[TASK_GENERATED] = "TASK_GENERATED";
   if (!task_register->generated_task_defs.empty()) {
-    // The bodies call the threadblock runtime (tb::InputChunkedSyncCopy etc.)
-    // and use cute's type names (bfloat16_t). Pull those in only when a
-    // generated task is actually present, so a megakernel built purely from
-    // handwritten tasks is byte-identical to before.
-    // Deliberately NOT threadblock/threadblock.h: that umbrella pulls in
-    // threadblock/profiler.h, which redefines tb::get_block_idx and friends
-    // already provided by persistent_kernel/profiler.h in this TU. Include the
-    // pieces a generated body actually uses instead.
-    //
-    // cute must be in scope BEFORE these headers -- they use `_` and other cute
-    // names at namespace scope without qualifying them.
-    // MPK compiles with -DMIRAGE_GRACE_BLACKWELL, but the transpiler runtime
-    // tests for MIRAGE_BLACKWELL. Without the alias, tb::wg_sync falls through
-    // to its `#elif defined(__CUDA_ARCH__)` branch and emits `brkpt` -- the
-    // generated task then died with "unspecified launch failure", which
-    // compute-sanitizer reported as a Trace/breakpoint trap (an actual brkpt,
-    // not a memory error).
     code.e("#if defined(MIRAGE_GRACE_BLACKWELL) && !defined(MIRAGE_BLACKWELL)");
     code.e("#define MIRAGE_BLACKWELL");
     code.e("#endif");
@@ -1963,8 +1925,6 @@ TaskGraphResult print_task_graph(
     code.e("#include \"threadblock/reduction.h\"");
     code.e("#include \"threadblock/matmul.h\"");
     code.e("#include \"threadblock/blackwell_matmul.h\"");
-    // Needed as soon as a body has a K-loop: pipelined operands are TMA loads
-    // driven by tb::BlackwellAsyncPipeline.
     code.e("#include \"threadblock/blackwell_pipeline.h\"");
     code.e("");
     for (auto const &def : task_register->generated_task_defs) {

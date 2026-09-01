@@ -1,15 +1,4 @@
-"""The model as a graph, partitioned, lowered to MPK tasks.
-
-Today task boundaries are decided in Python: someone writes
-mpk.generated_linear_layer(...) then mpk.generated_silu_mul_layer(...) and that
-IS the partition. node.py holds the same computation with the boundary
-still open -- plain SSA nodes -- and lower.py turns a chosen grouping into
-tasks via task_search.
-
-These tests pin the two halves: that a grouping derives the right task
-boundary (pure Python, no GPU), and that lowering one really does compute the
-right thing (on GPU, against torch).
-"""
+"""The model as a graph, partitioned, lowered to MPK tasks."""
 import subprocess
 import sys
 import textwrap
@@ -53,7 +42,7 @@ def test_graph_shapes_follow_the_ops():
 
 def test_grouping_derives_the_task_boundary():
     """A group's inputs and output fall out of the node set -- nobody declares
-    them. These are exactly today's MPK_COMPILED_MLP_IMPL=separate tasks."""
+    them."""
     g = _qwen3_mlp()
     expected = {
         "gate":     ([0],    ["x", "w_gate"],       (T, I)),
@@ -68,7 +57,7 @@ def test_grouping_derives_the_task_boundary():
 
 
 def test_a_group_with_two_live_outputs_is_rejected():
-    """MPK tasks may write several tensors -- generated_gate_up_layer does --
+    """MPK tasks may write several tensors --
     but task_search only replays a schedule with exactly one TB_OUTPUT_OP, so
     a two-output group is not lowerable through this path. Catch it where the
     message can say why, not inside the transpiler."""
@@ -167,15 +156,14 @@ _MLP_SRC = textwrap.dedent(
             "w_down": pk.attach_input(wd, name="wd")}
     od = pk.attach_input(o, name="o")
 
-    # K=3072 is not a power of two and search never fuses such a matmul, so the
-    # down projection falls back to the hand-written schedule -- see lower.py.
-    def down_fallback(pk, ins, out, grid):
-        pk.generated_linear_layer(input=ins[0], weight_t=ins[1], output=out,
-                                  grid_dim=grid, block_dim=(256, 1, 1),
-                                  forloop_range=ins[0].dim(1) // 64)
+    wd_raw = pk.attach_input(wd.t().contiguous(), name="wd_raw")
+
+    def down_handwritten(pk, ins, out, grid):
+        pk.linear_layer(input=ins[0], weight=wd_raw, output=out,
+                        grid_dim=(pk.num_workers, 1, 1), block_dim=(128, 1, 1))
 
     lower(pk, g, partition, bind, outputs={out.name: od},
-          fallbacks={"down": down_fallback}, verbose=True)
+          overrides={"down": down_handwritten}, verbose=True)
     pk.compile(output_dir=None)
     pk(); torch.cuda.synchronize()
 
@@ -190,12 +178,6 @@ _MLP_SRC = textwrap.dedent(
 )
 
 
-# The two MLP shapes that matter, as the partition literal _MLP_SRC needs.
-# `separate` is today's boundaries, so a failure there is the graph or the
-# lowering. `fused` is a gate+up+SwiGLU group, whose task is SEARCHED -- its correctness rests on search's own
-# equivalence check, which has false-accepted before (one draw in six once
-# dropped an exp and still verified). Measuring it against torch is the only
-# thing that says the winning partition computes the model.
 _MLP_PARTITIONS = {
     "separate": ('[make_group(g, [0], "linear"), make_group(g, [1], "linear"),'
                  ' make_group(g, [2, 3], "silu_mul"), make_group(g, [4], "down")]'),
@@ -231,8 +213,6 @@ QWEN3_06B = Qwen3Shapes(tokens=8, hidden=1024, intermediate=3072,
 def test_one_layer_has_the_expected_shape():
     g = build_qwen3(QWEN3_06B, num_layers=1)
     ops = [n.op for n in g.nodes]
-    # embedding | norm qkv attn o resid | norm gate up silu mul down resid |
-    # final norm, lm_head, argmax
     assert ops == [
         "opaque:embedding",
         "opaque:rmsnorm", "matmul", "opaque:attention", "matmul", "add",
@@ -265,7 +245,7 @@ def test_full_model_partitions_and_covers():
 
 def test_as_today_fuses_what_mpk_already_fuses():
     """rms_norm+mul is MPK's rmsnorm_layer; silu+mul is silu_mul_layer. The
-    matmuls stay separate, which is MPK_COMPILED_MLP_IMPL=separate."""
+    matmuls stay separate."""
     g = build_qwen3(QWEN3_06B, num_layers=1)
     tags = [p.tag for p in partition_as_today(g)]
     assert tags == [
@@ -282,9 +262,6 @@ def test_a_matmul_group_asks_for_a_64_wide_k_tile():
     and those tasks ran 24.5 us/call against 3.9-7.1 us for the hand-written
     ones, which is most of the graph path's deficit. Every generated_* layer
     uses K // 64, so lowering asks for that.
-
-    Only where the matmul is the group's first op; elsewhere the forloop runs
-    over the output and 1 is right.
     """
     from mirage.mpk.lowering import default_forloop
     g = _qwen3_mlp()
@@ -296,11 +273,6 @@ def test_a_matmul_group_asks_for_a_64_wide_k_tile():
 def test_the_k_loop_does_not_depend_on_where_the_matmul_sits():
     """A group that fuses `silu | mul | down` has a matmul as its LAST node,
     and it still needs a K loop over 3072.
-
-    Testing only node 0 gave that group forloop_range=1, i.e. one 3072-wide K
-    step -- past the 256 a TMA box side allows -- so search returned nothing
-    and, with three inputs, _pick_fallback offered no fallback either. The
-    group died at lowering for a reason that had nothing to do with it.
     """
     from mirage.mpk.lowering import (default_forloop, forloop_candidates,
                                   grid_candidates, make_group)
@@ -320,18 +292,7 @@ def test_the_k_loop_does_not_depend_on_where_the_matmul_sits():
 
 
 def test_the_validator_rejects_the_hang_without_losing_the_fusion():
-    """The accumulator rule has to separate two shapes search proposes.
-
-    REJECT: [input, input, accum, accum, silu, mul, output] -- accumulating the
-    raw INPUTS. An identity at forloop_range == 1, so equivalence checking
-    passes it; the task then registers, compiles and hangs the megakernel
-    (measured: two hours, no token).
-
-    KEEP: accum(matmul) with the activations AFTER, feeding the output. That
-    is the fused gate+up+SwiGLU task, and an earlier, stricter version of this
-    check ("the output must come from an accum") silently removed it from the
-    partition search space.
-    """
+    """The accumulator rule has to separate two shapes search proposes."""
     from mirage.mpk.lowering.task_search import _check_accum_operands, TaskSearchError
 
     def ops(spec):
@@ -366,16 +327,6 @@ def test_the_validator_rejects_the_hang_without_losing_the_fusion():
 def test_the_matmul_n_tile_is_a_searched_axis():
     """The N tile a matmul group gets becomes the MMA's M under swapAB, so it
     is a real choice with only two legal values.
-
-    At decode M is the token count, so matmul_swaps_ab (m != 64 && m != 128)
-    is always true and the OUTPUT's N lands in the MMA's M slot -- where
-    tcgen05 1-SM accepts 64 or 128 and nothing else. The hand-written
-    linear_sm100 hardcodes MMA_M = 128; lowering has always used 64, which
-    issues an MMA covering half the output columns per instruction.
-
-    Widening is not free: it halves the block count (192 -> 96 matmul blocks
-    per layer), and at decode occupancy is scarce. So this is enumerated, not
-    decided here.
     """
     from mirage.mpk.lowering import grid_candidates, default_grid, MATMUL_N_TILES
 
@@ -395,18 +346,7 @@ def test_the_matmul_n_tile_is_a_searched_axis():
 
 
 def test_k_tile_and_pipeline_depth_are_enumerated_per_group():
-    """Two more axes that were fixed constants, now candidates.
-
-    K tile: Mirage's search DOES explore franges on its own, but it picks any
-    value that verifies, and verifying says nothing about speed -- for gate/up
-    (K=1024) it chose forloop_range=64, a K tile of 16, the minimum bf16 MMA
-    atom. Pinning it to K/64 fixed that but replaced one fixed policy with
-    another; these are the legal alternatives.
-
-    Pipeline depth: TranspilerConfig is built PER OP inside
-    register_generated_task, so the plumbing was always per-task -- only the
-    policy was global. It now travels as params[0].
-    """
+    """Two more axes that were fixed constants, now candidates."""
     from mirage.mpk.lowering import (MATMUL_K_TILES, MMA_K_ATOM,
                                   forloop_candidates, default_forloop)
 

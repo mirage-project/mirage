@@ -31,10 +31,6 @@ namespace transpiler {
 
 using std::vector;
 
-// Defined in transpiler_kn.cc. Emits the CuTe declarations a Blackwell TMA
-// operand needs. With types_only the output is compile-time only (usable inside
-// a __device__ task body); otherwise it also constructs the atom, which needs a
-// host-side gmem pointer.
 void generate_tma_code_blackwell(CodeKeeper &exec,
                                  std::vector<TMAParams> &tmaParamsList,
                                  kn::KNOperator const *cur_op,
@@ -144,22 +140,6 @@ public:
     return this->transpile_ugraph();
   }
 
-  // Transpile the graph's LAST custom op and return just its function, rather
-  // than the whole uGraph's code + host launch scaffolding.
-  //
-  // This is what MPK task registration needs: a task body is a single custom op
-  // compiled to a callable device function (see TranspilerConfig::
-  // emit_device_body), registered right after the op is appended (mirroring
-  // Graph::register_task's own use of operators.back()).
-  //
-  // Takes no op pointer on purpose. The Transpiler CONSTRUCTOR REBUILDS THE
-  // GRAPH into its own `g`, so a pointer into the caller's graph is not a valid
-  // key for dtensor_metas/stensor_metas -- passing one fails with
-  // "unordered_map::at". Resolve the op against `g` here instead.
-  //
-  // The resolve/plan passes are the same prologue generate_code() runs; they
-  // operate on the whole graph and are cheap, so there is no need to subset
-  // them per op.
   CustomOPTranspileResult transpile_single_custom_op() {
     this->resolve_distributed_config();
     this->resolve_dtensor_meta();
@@ -174,11 +154,6 @@ public:
     }
     assert(last != nullptr && "graph has no customized op to transpile");
     auto const *custom = static_cast<kn::KNCustomizedOp const *>(last);
-    // Dispatch by architecture exactly as transpile_ugraph does.
-    // transpile_kn_custom_op is the GENERIC (pre-Hopper) backend, not a
-    // dispatcher -- calling it directly emitted an Ampere-style __global__
-    // kernel that ignored emit_device_body, and the megakernel then failed with
-    // "a __global__ function call must be configured".
     if (config.target_cc == GPU_CC::H100) {
       return this->transpile_kn_custom_op_hopper(custom);
     } else if (config.target_cc == GPU_CC::B200) {

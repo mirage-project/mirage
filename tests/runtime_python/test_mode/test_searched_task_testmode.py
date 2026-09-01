@@ -1,16 +1,4 @@
-"""A searched schedule runs as an MPK task, and matches the hand-written one.
-
-test_generated_task_testmode.py covers the same SwiGLU segment with the
-schedule written by hand (generated_swiglu_layer). This runs the identical
-computation and tolerance with the schedule DISCOVERED by search() instead,
-so a pass means the superoptimizer produced something MPK can execute and
-that is numerically right -- on a task where the correct answer is already
-known.
-
-Search is randomized and slow, so each case runs in its own subprocess with a
-generous timeout, the same isolation test_generated_task_testmode.py uses for
-its deadlock-prone cases.
-"""
+"""A searched schedule runs as an MPK task, and matches the hand-written one."""
 import subprocess
 import sys
 import textwrap
@@ -87,8 +75,6 @@ def _run(src, label, timeout=2400):
 
 
 @pytest.mark.skipif(_skip_reason() is not None, reason=_skip_reason() or "")
-# Same shapes as test_generated_swiglu_segment, so a failure here against a
-# pass there isolates the searched schedule as the difference.
 @pytest.mark.parametrize("m,k,fl", [(128, 128, 2), (8, 256, 4)])
 def test_searched_swiglu_matches_torch(m, k, fl):
     src = _SEARCHED_SWIGLU_SRC.format(m=m, k=k, n=64, fl=fl)

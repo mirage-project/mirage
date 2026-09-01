@@ -42,6 +42,13 @@ public:
           Int<REDUCTION_FACTOR * SRC_REDUCTION_DIM_COORD_STRIDE>{})));
   static_assert(is_static_v<DstCoord2SrcCoord>);
 
+  static constexpr int LANES_PER_DST =
+      (NUM_THREADS % 32 == 0 && REDUCTION_FACTOR >= 32 &&
+       DST_NUMEL <= NUM_THREADS / 32)
+          ? 32
+          : 1;
+  static constexpr int DSTS_AT_ONCE = NUM_THREADS / LANES_PER_DST;
+
   static __device__ __forceinline__ void run(T *__restrict__ dst,
                                              T const *__restrict__ src,
                                              int thread_idx,
@@ -49,19 +56,29 @@ public:
     auto src_layout = SrcLayout{};
     auto dst_layout = DstLayout{};
     auto dst_coord2src_coord = DstCoord2SrcCoord{};
-    for (int dst_elem_idx = thread_idx; dst_elem_idx < DST_NUMEL;
-         dst_elem_idx += NUM_THREADS) {
+    int const lane = thread_idx % LANES_PER_DST;
+    for (int dst_elem_idx = thread_idx / LANES_PER_DST;
+         dst_elem_idx < DST_NUMEL;
+         dst_elem_idx += DSTS_AT_ONCE) {
       int src_elem_idx =
           dst_coord2src_coord(dst_elem_idx); // The logical index of the first
                                              // element in the reduction group
       float result = 0;
       CUTE_UNROLL
-      for (int i = 0; i < REDUCTION_FACTOR; ++i) {
+      for (int i = lane; i < REDUCTION_FACTOR; i += LANES_PER_DST) {
         result += (float)
             src[src_layout(src_elem_idx + i * SRC_REDUCTION_DIM_COORD_STRIDE)];
       }
-      auto dst_phy_pos = dst_layout(dst_elem_idx);
-      Epilogue::run((T)result, dst, dst_phy_pos, epilogue_scalars);
+      if constexpr (LANES_PER_DST > 1) {
+        CUTE_UNROLL
+        for (int offset = LANES_PER_DST / 2; offset > 0; offset >>= 1) {
+          result += __shfl_xor_sync(0xffffffff, result, offset);
+        }
+      }
+      if (lane == 0) {
+        auto dst_phy_pos = dst_layout(dst_elem_idx);
+        Epilogue::run((T)result, dst, dst_phy_pos, epilogue_scalars);
+      }
     }
   }
 };

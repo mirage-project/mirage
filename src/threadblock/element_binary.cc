@@ -73,9 +73,6 @@ STensor Graph::elementbinary(STensor const &input1,
                              mirage::type::TBOperatorType type) {
   TBOperator *op = create_elementbinary_op(input1, input2, type);
   if (op == nullptr) {
-    // Name the operands: dims-mismatch and accum-phase-mismatch are
-    // indistinguishable without them, and this failure surfaces far from the
-    // graph construction (e.g. inside the transpiler's graph rebuild).
     throw std::runtime_error("threadblock elementbinary(op " +
                              std::to_string((int)type) + "): unsupported " +
                              eb_shape(input1) + " x " + eb_shape(input2));
@@ -88,7 +85,7 @@ STensor *Graph::elementbinary(STensor const *input1,
                               STensor const *input2,
                               mirage::type::TBOperatorType type) {
   TBOperator *op = create_elementbinary_op(*input1, *input2, type);
-  check_tb_op(op, "elementbinary");
+  assert(op != nullptr);
   operators.push_back(op);
   return &op->output_tensors[0];
 }

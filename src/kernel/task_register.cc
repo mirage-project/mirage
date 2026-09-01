@@ -97,28 +97,11 @@ int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
                                           kn::Graph const *kgraph,
                                           int target_cc,
                                           std::vector<int> const &params) {
-  // params[0], when present, is the A/B pipeline depth for THIS task.
-  // TranspilerConfig is built per op, so the plumbing was always per-task --
-  // only the policy was global. See the pipeline_stages comment below.
   assert(params.size() <= 2);
 
-  // Transpile the op's threadblock graph into a callable device function.
-  // emit_device_body makes it `__device__ __forceinline__ void f(char *buf,
-  // outputs..., inputs...)` -- the megakernel owns the launch and the shared
-  // memory, so the body must not declare its own (see the flag's comment in
-  // structs.h). Input strides come from each dtensor's own layout: a task body
-  // is handed raw pointers, so there is no outer graph to negotiate them with.
   transpiler::TranspilerConfig config;
   config.target_cc = target_cc;
   config.emit_device_body = true;
-  // A generated body double-buffers its TMA loads (TranspilerConfig's default
-  // pipeline_stages = 2) where the hand-written linear_sm100_mpk runs
-  // NUM_AB_STAGE = 8. At decode the weight tile streams from HBM with a cold
-  // L2, so two stages barely cover the load latency -- measured, a generated
-  // matmul costs 2.9x the hand-written one at an IDENTICAL grid and block
-  // count. Env-gated and defaulting to the old value so the default build is
-  // unchanged; more stages cost smem, which plan_stensor_memory multiplies by
-  // this number.
   int stages = 0;
   if (params.size() >= 1) {
     stages = params[0];                       // per-task, from the lowering
@@ -134,15 +117,6 @@ int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
   } else if (char const *env = std::getenv("MPK_GENERATED_PAD_MMA_N")) {
     config.pad_mma_n = std::atoi(env) != 0;
   }
-  // One entry per KN_INPUT_OP in the graph, in order -- the Transpiler consumes
-  // them with a running input index as it rebuilds the graph, so this must
-  // match the graph's inputs, NOT this op's operands.
-  // Transpile against a MINIMAL graph holding only this op's operands and a
-  // clone of the op itself. Handing the transpiler the FULL kernel graph made
-  // its reconstruction re-allocate fingerprint device memory for every model
-  // weight and KV cache -- at full-model scale that overflowed the fingerprint
-  // arena (elided-assert segfault inside Graph::new_input). Registration also
-  // becomes O(op) instead of O(model).
   kn::Graph mini;
   std::vector<kn::DTensor> mini_inputs;
   std::vector<std::vector<size_t>> input_strides;
@@ -152,8 +126,6 @@ int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
       kn::KNInputOp const *owner =
           static_cast<kn::KNInputOp const *>(t.owner_op);
       if (owner->input_strides.size() == (size_t)t.num_dims) {
-        // Explicit strides (e.g. a strided view); synthesizing dense
-        // row-major strides silently read the wrong elements.
         strides = owner->input_strides;
       }
     }
@@ -184,25 +156,10 @@ int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
     throw std::runtime_error(
         "register_generated_task: the muGraph backend rejected this task body "
         "(transpiler error " +
-        std::to_string((int)result.error_type) +
-        (result.error_type == transpiler::CUDA_T_UNSUPPORTED_CHAINED_MATMUL
-             ? "). A matmul result feeding another op INSIDE the forloop "
-               "(chained matmul / fused attention) is not supported yet."
-             : "). Unsupported operand shapes are the usual cause -- see the "
-               "operand_ok guard in transpiler_tb_blackwell.cc."));
+        std::to_string((int)result.error_type) + "): " +
+        transpiler::error_type_reason(result.error_type));
   }
 
-  // A task body that plans more shared memory than a worker has does NOT fail
-  // at registration on its own: plan_stensor_memory only PRINTS a warning
-  // (plan_stensor_memory.cc:575), the megakernel compiles, and the run then
-  // dies with an illegal memory access. Measured: a 256-wide K tile plans
-  // 264192 B against this cap. Refuse it here, where the message can name the
-  // task and the caller can pick another candidate.
-  // runtime_header.h owns this table, but it pulls in cuda_runtime/nvshmem and
-  // resolves MPK_TARGET_CC at COMPILE time, while target_cc arrives here at
-  // runtime. Mirror the smaller (non-online) budget and the larger reserve, so
-  // this guard never accepts something the megakernel would reject: for B200
-  // that is 207K - 6K = 205824, exactly what the runtime prints.
   int const smem_budget = (target_cc >= 90   ? 207 * 1024
                            : target_cc >= 86 ? 99 * 1024
                                              : 163 * 1024) -
@@ -219,25 +176,12 @@ int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
   // The definition is emitted once per variant, ahead of execute_task.
   generated_task_defs.push_back(result.code);
 
-  // The variant body forwards the task's pointers to it. The generated
-  // signature is (buf, KN-outputs..., KN-inputs...): the KN outputs are the
-  // tensors produced by the bgraph's TB_OUTPUT_OPs, and the KN inputs are every
-  // tensor the op was given -- including the output tensor, which MPK requires
-  // to be declared as an input (see generated_silu_mul_layer).
-  //
-  // MPK hands the task input_ptrs for the reads and output_ptrs for the writes.
-  // Map the generated function's output parameter onto output_ptrs[0] so the
-  // store lands in the caller's tensor, and feed the trailing "output declared
-  // as an input" operand from output_ptrs too.
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   size_t const num_writes = op->output_tensors.size();
   size_t const num_reads = op->input_tensors.size() - num_writes;
   std::string call = result.func_name + "(";
   bool first_arg = true;
-  // TMA atoms come first in the generated signature. Each is a pointer to a
-  // device-resident copy the host builder uploaded; the loader stored it in the
-  // owning input's TensorDesc (see the TASK_GENERATED case in runtime.cc).
   for (size_t i = 0; i < result.tmaParamsList.size(); i++) {
     call += (first_arg ? "" : ", ");
     first_arg = false;
@@ -411,42 +355,6 @@ int TaskRegister::register_dflash_norm_rope_sm100_task(
   return register_task_variant(TASK_DFLASH_NORM_ROPE_SM100, code.to_string());
 }
 
-int TaskRegister::register_dflash_kv_store_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: [head_dim]. 2 inputs (kv_in [num_tokens, NKV*D], slot_mapping
-  // [num_tokens] int32), 1 output (cache [num_pages, page_size, NKV, D]).
-  assert(params.size() == 1);
-  int head_dim = params[0];
-  std::vector<tb::TBInputOp *> input_ops;
-  std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 2;
-  int num_outputs = 1;
-  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
-  for (auto const &op : bgraph.operators) {
-    assert(op->op_type == mirage::type::TB_INPUT_OP);
-    if (input_ops.size() < (size_t)num_inputs) {
-      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
-    } else {
-      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
-    }
-  }
-  assert(input_ops[0]->dtensor.num_dims == 2);
-  int num_tokens = input_ops[0]->dtensor.dim[0];
-  assert(output_ops[0]->dtensor.num_dims == 4);
-  int page_size = output_ops[0]->dtensor.dim[1];
-  int num_kv_heads = output_ops[0]->dtensor.dim[2];
-  mirage::transpiler::CodeKeeper code;
-  code.inc_indent();
-  code.e(
-      "kernel::dflash_kv_store_sm100<bfloat16, $, $>(", num_kv_heads, head_dim);
-  code.e("    task_desc->input_ptrs[0],");  // kv_in
-  code.e("    task_desc->input_ptrs[1],");  // slot_mapping (int32)
-  code.e("    task_desc->output_ptrs[0],"); // cache
-  code.e("    $,", num_tokens);
-  code.e("    $);", page_size);
-  return register_task_variant(TASK_DFLASH_KV_STORE_SM100, code.to_string());
-}
-
 int TaskRegister::register_attention_prep_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: [num_q_heads, num_kv_heads, max_seq_len, page_size,
@@ -562,6 +470,42 @@ int TaskRegister::register_attention_finalize_sm100_task(
   code.e("    runtime_config.qo_indptr_buffer,");
   code.e("    task_desc->task_metadata.request_id);");
   return register_task_variant(TASK_ATTN_FINALIZE_SM100, code.to_string());
+}
+
+int TaskRegister::register_dflash_kv_store_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: [head_dim]. 2 inputs (kv_in [num_tokens, NKV*D], slot_mapping
+  // [num_tokens] int32), 1 output (cache [num_pages, page_size, NKV, D]).
+  assert(params.size() == 1);
+  int head_dim = params[0];
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  int num_tokens = input_ops[0]->dtensor.dim[0];
+  assert(output_ops[0]->dtensor.num_dims == 4);
+  int page_size = output_ops[0]->dtensor.dim[1];
+  int num_kv_heads = output_ops[0]->dtensor.dim[2];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e(
+      "kernel::dflash_kv_store_sm100<bfloat16, $, $>(", num_kv_heads, head_dim);
+  code.e("    task_desc->input_ptrs[0],");  // kv_in
+  code.e("    task_desc->input_ptrs[1],");  // slot_mapping (int32)
+  code.e("    task_desc->output_ptrs[0],"); // cache
+  code.e("    $,", num_tokens);
+  code.e("    $);", page_size);
+  return register_task_variant(TASK_DFLASH_KV_STORE_SM100, code.to_string());
 }
 
 int TaskRegister::register_glm_moe_router_sm100_task(

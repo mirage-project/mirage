@@ -1,13 +1,4 @@
-"""Qwen3 built from the graph, not from a call order.
-
-The MLP test covers graph -> partition -> search -> register on one block.
-This is the whole model: embedding, decoder layers, final norm, lm_head and
-argmax, lowered through builder_low_level_ir onto a real PersistentKernel, then
-compiled and run.
-
-Two layers rather than 28 -- the path is identical and the build is a
-megakernel compile either way.
-"""
+"""Qwen3 built from the graph, not from a call order."""
 import subprocess
 import sys
 import textwrap
@@ -117,9 +108,6 @@ def test_model_lowers_from_the_graph_and_runs():
     """Every opaque node reaches a hand-written task, every muGraph group
     reaches search (or its fallback), and the megakernel produces
     in-vocabulary tokens.
-
-    Weights are random, so this is a wiring and liveness gate, not a numeric
-    one -- the numeric gate is test_model_graph.py::test_lowered_mlp_matches_torch.
     """
     proc = subprocess.run([sys.executable, "-c", _MODEL_SRC],
                           capture_output=True, text=True, timeout=3600)
@@ -128,9 +116,6 @@ def test_model_lowers_from_the_graph_and_runs():
     assert "LOWERED" in proc.stdout and "COMPILED" in proc.stdout, tail
     assert "VALID" in proc.stdout, tail
 
-    # The opaque four must all have been dispatched to hand-written tasks, and
-    # at least one group must have been scheduled by search rather than fallen
-    # back -- otherwise this proves nothing about the searched path.
     lowered = [l for l in proc.stdout.splitlines() if l.startswith("[lower]")]
     for name in ("embedding", "rmsnorm", "attention", "argmax"):
         assert any(f"{name}: hand-written" in l for l in lowered), name

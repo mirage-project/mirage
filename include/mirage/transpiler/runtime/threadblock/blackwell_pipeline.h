@@ -5,11 +5,6 @@
 
 namespace tb {
 
-// AtomThrShape_MNK must match the MMA atom's CTA granularity: PipelineTmaUmmaAsync
-// emits .cta_group::2 UMMA barrier ops for Shape<_2,_1,_1>. The transpiler now
-// generates 1-SM MMA (the MPK runtime is single-CTA with no multicast), so
-// defaulting to the 2-CTA shape made ptxas reject the kernel for mixing
-// .cta_group::1 and .cta_group::2.
 template <int _Stage,
           class ClusterShape_MNK_,
           class AtomThrShape_MNK_ = Shape<_1, _1, _1>>
@@ -48,17 +43,6 @@ public:
                             : MainloopPipeline::ThreadCategory::NonParticipant),
             (threadIdx.x % cutlass::NumThreadsPerWarpGroup) == 0 &&
                 is_leader_cta,
-            // The consumer count must match the threads that actually call
-            // consumer_wait/consumer_release for THIS pipeline, and
-            // PipelineTmaUmmaAsync only accepts 32 or a multiple of 128
-            // (sm100_pipeline.hpp: it spreads the empty-arrive duty across the
-            // participating threads, and for any other count no thread signals
-            // at all -- the producer then blocks forever).
-            //
-            // A matmul-consumed pipeline is driven by one elected warp, so it
-            // passes 32; an elementwise-consumed one runs on every consumer
-            // thread and passes 128 * num_consumer_wgs. The caller decides,
-            // because only the transpiler knows which op consumes the stensor.
             num_consumers},
         pipeline_storage(shared_memory_offset),
         pipeline(*(pipeline_storage.mainloop),
@@ -67,8 +51,6 @@ public:
                  cute::true_type{}, // InitBarriers
                  cute::true_type{}) // InitMasks
   {
-    // Fail loudly rather than deadlock: PipelineTmaUmmaAsync silently disables
-    // every empty-arrive signaller for counts outside {32, k*128}.
     assert((num_consumers == cutlass::NumThreadsPerWarp ||
             num_consumers % cutlass::NumThreadsPerWarpGroup == 0) &&
            "BlackwellAsyncPipeline: num_consumers must be 32 or a multiple of "

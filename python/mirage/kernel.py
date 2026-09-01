@@ -19,8 +19,6 @@ from collections import deque
 
 MAX_THREADS = os.cpu_count()
 
-# Mirrors mirage::transpiler::TranspileErrorType in
-# include/mirage/transpiler/error_types.h
 TRANSPILE_ERROR_NAMES = {
     0: "success",
     1: "insufficient shared memory",
@@ -458,9 +456,6 @@ class KNGraph:
         )
         error_type = result.get("error_type", 0)
         if error_type != 0:
-            # The transpiler rejected the graph and returned an empty `code`.
-            # Report that directly instead of handing empty source to nvcc and
-            # surfacing the failure as a generic "CUDA compilation error".
             message = "transpiler error: {}".format(
                 TRANSPILE_ERROR_NAMES.get(error_type, "unknown ({})".format(error_type))
             )

@@ -1,14 +1,4 @@
-"""Regression net for the Blackwell (sm_100) threadblock codegen backend.
-
-Covers the muGraph -> CUDA path that MPK generated tasks depend on: single-tile
-custom ops, swapAB decode-shaped matmuls, wide (>128B pitch) operands, K-looped
-pipelined operands, chained matmuls (the flash-attention shape), the
-online-softmax rewrite, and the full Qwen3-shaped attention core. Each test's
-docstring names the specific regression it guards.
-
-Run:
-    PYTHONPATH=. pytest tests/experiments/test_blackwell_codegen.py -v
-"""
+"""Regression net for the Blackwell (sm_100) threadblock codegen backend."""
 
 from __future__ import annotations
 
@@ -46,11 +36,7 @@ TILE_M, TILE_N = 8, 64
 
 
 def _build_silu_mul(grid, block, forloop_range, tile=(TILE_M, TILE_N), forloop_dim=-1):
-    """silu(a) * b over one tile -- the shape of a fused MPK task body.
-
-    ``forloop_dim=1`` makes the inputs *pipelined*, which is what turns on the
-    TMA producer/consumer warp-specialized path.
-    """
+    """silu(a) * b over one tile -- the shape of a fused MPK task body."""
     m, n = tile
     imap = (-1, -1, -1) if grid == (1, 1, 1) else (1, -1, -1)
     g = mi.new_kernel_graph()
@@ -61,8 +47,6 @@ def _build_silu_mul(grid, block, forloop_range, tile=(TILE_M, TILE_N), forloop_d
     )
     ta = tb.new_input(dtensor=a, input_map=imap, forloop_dim=forloop_dim)
     tbb = tb.new_input(dtensor=b, input_map=imap, forloop_dim=forloop_dim)
-    # forloop_accum is required: Graph::create_customized_op segfaults when a
-    # threadblock graph's output does not pass through an accumulator.
     out = tb.mul(tb.silu(tb.forloop_accum(ta, None)), tb.forloop_accum(tbb, None))
     tb.new_output(stensor=out, output_map=imap)
     outs = g.customized([a, b], tb)
@@ -150,12 +134,7 @@ class TestSingleTileCustomOp:
         assert res is not None and g._valid_cuda_kernels
 
     def test_unpipelined_multi_tile_grid(self):
-        """A multi-CTA grid must get a cluster that divides it.
-
-        cluster_dim was hardcoded {4,4,1}; for grids not divisible by it the
-        cluster launch failed silently and the output was never written, so this
-        asserts on the numerics rather than on the (unexported) cluster_dim.
-        """
+        """A multi-CTA grid must get a cluster that divides it."""
         g = _build_silu_mul((32, 1, 1), (128, 1, 1), forloop_range=1, tile=(8, 2048))
         ins = [
             torch.randn(8, 2048, dtype=torch.bfloat16, device="cuda") for _ in range(2)
@@ -185,9 +164,6 @@ class TestSingleTileCustomOp:
             res = g.compile(inputs=ins, target_cc=100, num_warp_groups=2,
                             pipeline_stages=2)
         assert res is not None and g._valid_cuda_kernels, g.get_error_message()
-        # fd=1 forloop_accum SUMS column tiles, so silu(a)*b is not the
-        # reference here; this guards compilation + a clean launch (the old
-        # failure was a dangling tiled_mma_0 that never compiled).
         out = g(inputs=ins)[0].float()
         torch.cuda.synchronize()
         assert torch.isfinite(out).all(), "pipelined elementwise produced NaN/Inf"
@@ -215,27 +191,7 @@ class TestUnsupportedBackends:
 
 
 class TestBlackwellMatmul:
-    """A generated 1-SM UMMA matmul must agree with PyTorch.
-
-    The matmul now compiles and runs (it previously emitted no MMA at all and
-    deadlocked), and its reduction is correct -- all-ones operands give exactly
-    K in every output element. What remains is a layout defect in the A operand.
-
-    The G->S copy and the MMA no longer disagree about the swizzle: the copy is
-    now pointed at Blackwell_Matmul::SmemLayout{A,B}_MMA_*, which is derived from
-    the same DstPipeLayout the UMMA reads, and the operand base is 1024B aligned
-    so the swizzle pattern is anchored correctly. Both were real defects and both
-    are fixed. B (MN-major) is correct as a result.
-
-    The layout defect that made this return right values at wrong positions was
-    get_stensor_layout() hardcoding Swizzle<3,3,4>. The UMMA reads its operands
-    through a 128B swizzle over 16B chunks, which in raw element units is
-    Swizzle<3,3,3> -- one bit of chunk granularity apart. Sweeping <B,M,S>
-    against a PyTorch reference, only <3,3,3> matches exactly, and that is what
-    get_threadblock_swizzle_plan_blackwell already computed; its result was just
-    being discarded. Operands also need a 1024B base (the swizzle period), which
-    is why the alignment is raised for blackwell_arch.
-    """
+    """A generated 1-SM UMMA matmul must agree with PyTorch."""
 
     def _build_matmul(self, m, k, n):
         g = mi.new_kernel_graph()
@@ -270,8 +226,6 @@ class TestBlackwellMatmul:
         torch.cuda.synchronize()
         assert torch.equal(out[0], b[0].float())
 
-    # M in {8, 16} exercises swapAB: 1-SM tcgen05 needs an M-tile of 64/128, so a
-    # decode-shaped token count is moved into N by computing C^T = B^T * A^T.
     @pytest.mark.parametrize(
         "m,k",
         [(128, 16), (128, 32), (128, 64), (64, 64), (8, 64), (16, 64)],
@@ -313,11 +267,6 @@ class TestBlackwellMatmul:
         rel = ((out - ref).abs().max() / ref.abs().max()).item()
         assert rel < 0.02, f"wide-operand matmul rel {rel}"
 
-    # Tiles wider than the 128B pitch the non-pipelined path is limited to:
-    # N=128 makes the B tile 256B wide, and K=256 over 2 iterations makes the A
-    # tile 128 elements (256B) along K. Both are correct here because a
-    # pipelined operand is written by TMA and read by the UMMA through the same
-    # CUTLASS DstPipeLayout, derived on both sides from sm100_smem_selector.
     @pytest.mark.parametrize("m,k,n,r", [(128, 128, 128, 2), (128, 256, 64, 2),
                                          (128, 256, 128, 4), (8, 256, 128, 4)])
     def test_matmul_wide_tile_pipelined(self, m, k, n, r):
@@ -352,14 +301,6 @@ class TestBlackwellMatmul:
         g.mark_output(O[0])
         return g
 
-    # A CHAINED matmul: Q@K^T -> exp -> @V, the attention core. The first
-    # matmul's result is consumed by the second INSIDE the loop, which needs
-    # (a) a per-matmul count-1 barrier waited before the read, (b) the fused exp
-    # actually applied in write_tC_to_sC (it was accepted and silently dropped),
-    # and (c) the intermediate pinned to the gmem-operand orientation by the
-    # layout solver (left free it picked the other dim; right values, wrong
-    # positions). No softmax denominator on purpose -- inputs are scaled so exp
-    # stays in range; online softmax is separate work.
     def test_chained_matmul_exp_matmul(self):
         NH = HD = S = 64
         g = mi.new_kernel_graph()

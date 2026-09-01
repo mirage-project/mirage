@@ -79,28 +79,10 @@ std::array<int, mirage::config::MAX_TENSOR_DIMS>
 // Parse bgraph.operators into (inputs, outputs) by position. Outputs are also
 // TB_INPUT_OPs (see runtime.cc:266-274); their input_map field is the
 // output_map.
-// Two bgraph conventions coexist:
-//
-//   * Handwritten tasks pass a pure I/O SPEC: every op is a TB_INPUT_OP, the
-//     first num_inputs of them are the reads and the rest are the writes. The
-//     computation lives in the .cuh kernel, not in the graph.
-//
-//   * Compiler-generated tasks pass the COMPUTATION ITSELF: reads are
-//     TB_INPUT_OPs, writes are TB_OUTPUT_OPs, and real operators sit between
-//     them. This is the user-defined graph the MPK compiler turns into a task.
-//
-// Detect which by looking for a TB_OUTPUT_OP, so generated tasks are a drop-in
-// replacement for handwritten ones and every existing task type is unaffected.
 void split_bgraph_ops(tb::Graph const &bgraph,
                       int num_inputs,
                       std::vector<BGraphSlot> &inputs,
                       std::vector<BGraphSlot> &outputs) {
-  // Only TB_INPUT_OPs describe the task's I/O, for BOTH handwritten and
-  // generated tasks: MPK requires every task tensor to be an attached graph
-  // input (runtime.cc asserts owner_op is a KN_INPUT_OP, and looks the tensor
-  // up in io_configs by guid). A generated task therefore declares its output
-  // as a TB_INPUT_OP like every handwritten task does; the TB_OUTPUT_OP in its
-  // bgraph exists only so the transpiler emits a store, and is skipped here.
   for (auto const &op : bgraph.operators) {
     if (op->op_type != mirage::type::TB_INPUT_OP) {
       continue;

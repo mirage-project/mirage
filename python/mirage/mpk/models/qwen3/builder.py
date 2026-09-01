@@ -345,20 +345,6 @@ class Qwen3Builder(GraphBuilder):
                 torch_tensor=self.v_cache[i], name=f"layer_{i}_v_cache"
             )
             
-            # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
-            # if spec_decode_config:
-            #     self.mpk.single_batch_extend_attention_layer(
-            #         input=attn_in,
-            #         k_cache=k_cache,
-            #         v_cache=v_cache,
-            #         q_norm=w_q_norm,
-            #         k_norm=w_k_norm,
-            #         cos_pos_embed=cos_pos_embed,
-            #         sin_pos_embed=sin_pos_embed,
-            #         output=attn_out,
-            #         grid_dim=(1, num_local_kv_heads, 1), #TODO: further divide across batch dim
-            #         block_dim=(128, 1, 1),
-            #     )
             self.mpk.paged_attention_layer(
                 input=self.attn_in,
                 k_cache=k_cache,
@@ -536,12 +522,6 @@ class Qwen3Builder(GraphBuilder):
                 0,
             )
             assert self.lm_head_weight.stride()[0] == self.hidden_size
-        # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
-        # if spec_decode_config and spec_decode_config.method == "promptlookup":
-        #     all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
-        #     num_tokens_extend = spec_decode_config.spec_length + 1
-        # else:
-        #     num_tokens_extend = 1
             
         self.x = self.mpk.attach_input(torch_tensor=self.input_tokens, name="input_token")
         self.cos_pos_embed = self.mpk.attach_input(
@@ -556,17 +536,6 @@ class Qwen3Builder(GraphBuilder):
         self.new_intermediate_tensors()
         
         argmax_out = self.mpk.attach_input(torch_tensor=self.output_tokens, name="output_token")
-        # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
-        # add spec tokens layer
-        # if spec_decode_config:
-        #     spec_tokens = self.mpk.draft_forward_layer_dispatcher(
-        #         spec_decode_config = spec_decode_config, 
-        #         tokens = all_tokens,
-        #         grid_dim=(96, 1, 1),
-        #         block_dim=(128, 1, 1),
-        #     )
-        #     x = spec_tokens
-        # Add Embed
         
         self.w = self.mpk.attach_input(
             torch_tensor=state_dict["model.embed_tokens.weight"], name="embed_tokens"
@@ -606,14 +575,6 @@ class Qwen3Builder(GraphBuilder):
                 block_dim=(128, 1, 1),
             )
 
-            # add argmax layer
-            # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
-            # if spec_decode_config and spec_decode_config.method == "promptlookup":
-            #     argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
-            #                                spec_decode_config.spec_length + 1, 
-            #                                1)
-            #     argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
-            # else:
             argmax_partial_grid_dim = (self.mpk.num_workers, 1, 1)
             argmax_reduce_grid_dim = (1, 1, 1)
             self.mpk.argmax_partial_layer(
@@ -628,15 +589,6 @@ class Qwen3Builder(GraphBuilder):
                 grid_dim=argmax_reduce_grid_dim,
                 block_dim=(128, 1, 1),
             )
-            # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
-            # if spec_decode_config:
-            #     verify_out = self.mpk.verify_layer_dispatcher(
-            #         spec_decode_config = spec_decode_config,
-            #         spec_tokens = spec_tokens,
-            #         target_output = argmax_out,
-            #         grid_dim = (1, 1, 1),
-            #         block_dim = (128, 1, 1),
-            #     )
             
     def encode(self, text: str):
         return self.tokenizer.encode(text, add_special_tokens=True)

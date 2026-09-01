@@ -260,35 +260,13 @@ template <typename T,
           class SrcLayout,
           class TMA,
           class BlackwellAsyncPipeline,
-          // MInput = "is this the MMA's A operand" (role). Under swapAB the
-          // role no longer matches the stensor's position in the source graph.
           bool MInput,
           int K_ITER,
           class TiledMMA_,
           class Mma_Tiler_,
           class ClusterShape_MNK_,
           bool SWAP_AB = false,
-          // TASK_BODY: this copy belongs to an MPK megakernel task body, where
-          // blockIdx.x is the WORKER id, not a tile index, and the runtime has
-          // already offset the operand pointers to this task's tile. Deriving
-          // the gmem tile coordinate from blockIdx therefore picks the wrong
-          // tile. Same flag, same reason, as Blackwell_Matmul::TASK_BODY.
-          //
-          // This only showed up under swapAB: the coordinate feeds local_tile
-          // through Step<_1,X,_1> for an A operand (M coord = blockIdx.x) and
-          // Step<X,_1,_1> for a B operand (N coord = blockIdx.y). In a
-          // megakernel the grid is 1-D, so blockIdx.y is always 0 and a B
-          // operand was harmless -- but swapAB makes the TILED weight the A
-          // operand, so its coordinate became the worker id and every task read
-          // whichever tile its worker happened to be.
           bool TASK_BODY = false,
-          // N_LOOP: the forloop tiles this operand's MMA-N dimension rather
-          // than MMA-K -- attention's Q@K^T iterates over KV (the N of that
-          // matmul). The default local_tile coordinate (m, n, _) leaves the
-          // K-tiles mode free for k_iter to index; with one K_mma tile that
-          // re-fetched TILE 0 into every stage (E was recomputed from K0 each
-          // iteration -- localized via an E-accumulator reading exactly 2*E0).
-          // N_LOOP flips the free mode: (m, _, 0) walks the N tiles instead.
           bool N_LOOP = false>
 class InputTMAAsyncCopy_Blackwell {
 
@@ -296,9 +274,6 @@ class InputTMAAsyncCopy_Blackwell {
   using Mma_Tiler = Mma_Tiler_;
   using ClusterShape = ClusterShape_MNK_;
 
-  // MInput is the ROLE (which operand slot -- drives partition_shape_A/B and
-  // the local_tile Step); majorness follows the TENSOR, since TMA cannot
-  // transpose. See umma_layout.h for the role-vs-majorness rule.
   static constexpr UMMA::Major UMMAMajor = umma_operand_major(MInput, SWAP_AB);
 
   using SmemLayoutAtom =
@@ -352,11 +327,6 @@ public:
       auto mma_coord = select<1, 2, 3>(mma_coord_vmnk);
       decltype(auto) gA = [&]() {
         if constexpr (MInput && N_LOOP) {
-          // swapAB chained attention: the forloop tiles this operand's
-          // non-K dim, which the swap made the MMA-M (K^T's KV dim becomes
-          // role-A M). The plain MInput branch below frees the K-tiles mode
-          // instead, so every iteration re-fetched M-tile 0 -- the same
-          // refetch signature the B-side N_LOOP flag fixed.
           return local_tile(
               mA,
               mma_tiler,
@@ -439,26 +409,6 @@ public:
   }
 };
 
-// A G->S copy for matmul operands whose row pitch exceeds 128B but which are
-// NOT software-pipelined (e.g. attention's Q at head_dim=128: an 8x128 bf16
-// tile with a 256B pitch, loaded once before the loop).
-//
-// Why InputChunkedSyncCopy cannot do this: on the non-pipelined path the UMMA
-// reads through DstPipeLayout_A/B (derived from cutlass's sm100_smem_selector)
-// while the chunked copy writes through the transpiler's dense-stride swizzled
-// layout. The two agree only up to a 128B pitch; beyond it, the selector
-// panel-tiles (tile_to_mma_shape places the second 128B panel at +8192
-// elements, not at a row pitch of 128) and no dense-stride layout can match.
-//
-// So this atom writes through the SAME DstPipeLayout the matmul reads,
-// derived identically to InputTMAAsyncCopy_Blackwell (with a single stage),
-// and pairs addresses via thr_mma.partition_A/B of the gmem tile -- agreement
-// by construction, exactly like the pipelined path, minus TMA and pipeline.
-//
-// NOTE: the smem buffer must be 1024B-aligned (the SW128 swizzle period).
-// This copy swizzles base-relative while the UMMA descriptor swizzles
-// absolute smem address bits; plan_stensor_memory pads all Blackwell
-// allocations to 1024B for exactly this reason.
 template <typename T,
           class SrcTileLayout, // gmem tile in NATURAL operand order:
                                // (M, K) for an A operand, (N, K) for B
@@ -471,8 +421,6 @@ class InputWideOperandSyncCopy {
   using TiledMMA = TiledMMA_;
   using Mma_Tiler = Mma_Tiler_;
 
-  // Write and read must agree on DstPipeLayout by construction; both derive
-  // it from umma_layout.h's single majorness rule.
   static constexpr UMMA::Major UMMAMajor = umma_operand_major(MInput, SWAP_AB);
   using CopyStep = UmmaOperandStep<MInput, SWAP_AB>;
 

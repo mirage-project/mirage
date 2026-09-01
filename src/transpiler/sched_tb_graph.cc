@@ -198,13 +198,6 @@ TBSched Transpiler::get_threadblock_schedule(tb::Graph const &tb_graph) {
         op_meta.is_pipelined_input = op_meta.is_chunked_input &&
                                      input_op->forloop_dim != -1 &&
                                      config.target_cc >= GPU_CC::A100;
-        // Blackwell's pipelined atom (InputTMAAsyncCopy_Blackwell) derives
-        // its smem layout from the CONSUMING MATMUL (c_matrix_guid /
-        // tiled_mma_$). A forloop-tiled input consumed only by elementwise
-        // ops -- e.g. an additive attention mask feeding an add -- has no
-        // such matmul and used to emit a dangling `tiled_mma_0`. Demote it
-        // to a per-iteration chunked sync copy (emitted in-loop by the
-        // Blackwell emitter's TB_INPUT_OP case).
         if (op_meta.is_pipelined_input && config.target_cc == GPU_CC::B200) {
           bool matmul_consumer = false;
           for (tb::TBOperator const *cons : tb_graph.operators) {

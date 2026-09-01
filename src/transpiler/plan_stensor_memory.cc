@@ -279,13 +279,6 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
     size_t size =
         stensor_meta.num_phy_elems * type::get_datatype_size(stensor.data_type);
     if (blackwell_arch) {
-      // UMMA smem descriptors and TMA apply the 128B swizzle to ABSOLUTE
-      // address bits, while software copies (write_tC, elementwise kernels)
-      // swizzle relative to the buffer base. A buffer that is not 1024B
-      // aligned (the SW128 swizzle period) makes the two disagree by a
-      // chunk permutation on every software-written, UMMA-read edge. Pad
-      // every allocation to the period so first-fit packing keeps all
-      // offsets 1024B-aligned (the base is shifted to 1024 below).
       size = (size + 1023) / 1024 * 1024;
     }
     return size;
@@ -415,9 +408,6 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
         int earlist_free_time =
             find_earlist_free_time(output_tensor.guid, tb_sched.loop_nodes, T);
         if (earlist_free_time == -1) {
-          // NDEBUG elides plain asserts; a -1 free time becomes a FREE event
-          // at t=-1 that sorts before every ALLOC and throws a bare
-          // out_of_range deep in the planner. Fail loudly instead.
           throw std::runtime_error(
               "stensor memory planner: loop intermediate " +
               std::to_string(output_tensor.guid) + " is never consumed");
@@ -520,15 +510,6 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
 
   // Leave the first 16 bytes of the shared memory for matmul operators
   // TODO(intlsy) Remove this if there is not Matmul op or do not need padding
-  //
-  // Blackwell needs a stronger base alignment than the other backends. A UMMA
-  // operand is read through a swizzled smem layout (Swizzle<3,3,3> in element
-  // units for 16-bit), and the swizzle is only meaningful relative to a base
-  // aligned to its period -- 2^(3+3+3) = 512 elements = 1024 bytes. At the old
-  // 128B base the operands sat at buf+128 and the generated matmul returned the
-  // right values at wrong positions, an m-dependent XOR into the K index that
-  // disappears entirely at 1024B. Raising it past 1024 changes nothing, which
-  // matches the period being exactly 1024B.
   size_t alignment = blackwell_arch ? 1024 : ALIGNMENT;
   assert(alignment >= 16);
   plan.smem_size += alignment;
@@ -537,14 +518,6 @@ TBMemoryPlan Transpiler::get_threadblock_memory_plan(tb::Graph const &tb_graph,
   }
 
   if (blackwell_arch) {
-    // MMA barriers: one SHARED barrier for matmuls whose accumulators are
-    // written back after the loop (arrival count forloop_range x that many),
-    // plus one PER matmul for the chained case -- a matmul whose result is
-    // consumed inside the loop must be waited on every iteration, which
-    // needs its own phase. All of them, and the tmem base pointer, must fit
-    // in the alignment padding ahead of the first stensor (the blackwell
-    // base shift above is `alignment` = 1024B); the assert below enforces
-    // that instead of assuming it.
     size_t usage = 0;
     bool tmem_init = false;
     for (int i = 0; i < (int)tb_sched.loop_nodes.size(); ++i) {
