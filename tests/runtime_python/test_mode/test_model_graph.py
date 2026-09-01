@@ -6,7 +6,7 @@ import textwrap
 import pytest
 import torch
 
-from mirage.mpk.lowering import (ModelGraph, make_group,
+from mirage.mpk.lowering import (ModelGraph, default_partition, make_group,
                                      group_to_taskspec_build)
 from mirage.mpk.lowering import check_covers, default_grid
 
@@ -202,7 +202,7 @@ def test_lowered_mlp_matches_torch(shape):
 # ------------------------------------------------------ Qwen3 as one graph
 
 from mirage.mpk.models.qwen3.builder_low_level_ir import (
-    Qwen3Shapes, build_qwen3, partition_as_today)
+    OPAQUE_RUNS, Qwen3Shapes, build_qwen3)
 from mirage.mpk.lowering import is_opaque
 
 QWEN3_06B = Qwen3Shapes(tokens=8, hidden=1024, intermediate=3072,
@@ -238,7 +238,7 @@ def test_what_stays_opaque_and_why():
 def test_full_model_partitions_and_covers():
     g = build_qwen3(QWEN3_06B)
     assert len(g) == 340, len(g)
-    parts = partition_as_today(g)
+    parts = default_partition(g, opaque_runs=OPAQUE_RUNS)
     check_covers(g, parts)                      # raises if it does not
     assert len(parts) == 312, len(parts)
 
@@ -247,7 +247,7 @@ def test_as_today_fuses_what_mpk_already_fuses():
     """rms_norm+mul is MPK's rmsnorm_layer; silu+mul is silu_mul_layer. The
     matmuls stay separate."""
     g = build_qwen3(QWEN3_06B, num_layers=1)
-    tags = [p.tag for p in partition_as_today(g)]
+    tags = [p.tag for p in default_partition(g, opaque_runs=OPAQUE_RUNS)]
     assert tags == [
         "embedding", "rmsnorm", "matmul", "attention", "matmul", "add",
         "rmsnorm", "matmul", "matmul", "silu_mul", "matmul", "add",
@@ -333,7 +333,7 @@ def test_the_matmul_n_tile_is_a_searched_axis():
     assert MATMUL_N_TILES == (64, 128), "tcgen05 1-SM takes no other M tile"
 
     g = build_qwen3(QWEN3_06B, num_layers=1)
-    parts = partition_as_today(g)
+    parts = default_partition(g, opaque_runs=OPAQUE_RUNS)
     mm = [p for p in parts if p.tag.startswith("matmul")]
     for p in mm:
         n = p.output.dims[-1]
@@ -354,7 +354,7 @@ def test_k_tile_and_pipeline_depth_are_enumerated_per_group():
         "a K tile must be whole MMA K-atoms, and no TMA box side exceeds 256")
 
     g = build_qwen3(QWEN3_06B, num_layers=1)
-    parts = partition_as_today(g)
+    parts = default_partition(g, opaque_runs=OPAQUE_RUNS)
     for p in parts:
         cands = forloop_candidates(g, p)
         if not p.tag.startswith("matmul"):

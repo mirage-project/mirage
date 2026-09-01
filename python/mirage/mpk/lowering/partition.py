@@ -6,7 +6,7 @@ import itertools
 from typing import Iterator, Optional
 
 from .group import Group, make_group
-from .node import ModelGraph, is_opaque
+from .node import ModelGraph, OPAQUE, is_opaque
 
 
 MAX_GROUP_OPS = 6
@@ -92,6 +92,52 @@ def _edges(graph: ModelGraph, partition: list[Group]) -> dict[int, set[int]]:
             frontier = nxt
         stripped[u] -= seen                # v also reachable the long way
     return stripped
+
+
+def default_partition(graph: ModelGraph, opaque_runs=()) -> list[Group]:
+    """Where the task boundaries go: one group per node, plus two fusions.
+
+    This is the partition MPK runs. enumerate_partitions below proposes
+    alternatives; nothing ranks them, so this is the one the lowering uses.
+
+    Rule 1, by DATAFLOW rather than position: a silu or rms_norm whose ONLY
+    consumer is a mul becomes one task -- silu*up, and rms_norm(x)*weight,
+    which MPK already fuses. Checking the consumer rather than the next index
+    is what stops it pairing two unrelated adjacent nodes.
+
+    Rule 2: `opaque_runs` names (start, end, tag) triples of OPAQUE task names.
+    Every node strictly between such a pair becomes one group. The caller names
+    them because the task names are the model's, but the reason is general --
+    the run's pieces are not separately schedulable. Qwen3 passes
+    ("attn_prep", "attn_finalize", "attn_core"): a bare reduction leaves the
+    reduction at kernel level, which MPK cannot register as a task.
+    """
+    fused = {}
+    for i, n in enumerate(graph.nodes):
+        if n.op in ("silu", "rms_norm"):
+            cons = graph.consumers(n.output)
+            if len(cons) == 1 and graph.nodes[cons[0]].op == "mul":
+                tag = "silu_mul" if n.op == "silu" else "rmsnorm"
+                fused[i] = ([i, cons[0]], tag)
+            continue
+        for start, end, tag in opaque_runs:
+            if n.op == OPAQUE + start:
+                stop = next(j for j in range(i + 1, len(graph.nodes))
+                            if graph.nodes[j].op == OPAQUE + end)
+                fused[i + 1] = (list(range(i + 1, stop)), tag)
+
+    absorbed = {i for ids, _ in fused.values() for i in ids} - set(fused)
+    groups = []
+    for i, n in enumerate(graph.nodes):
+        if i in absorbed:
+            continue
+        if i in fused:
+            groups.append(make_group(graph, *fused[i]))
+        elif is_opaque(n.op):
+            groups.append(make_group(graph, [i], n.op.split(":", 1)[1]))
+        else:
+            groups.append(make_group(graph, [i], n.op))
+    return groups
 
 
 def check_fork_join(graph: ModelGraph, partition: list[Group]) -> Optional[str]:
@@ -280,7 +326,7 @@ def feasible_partitions(
 
 
 def assign_buffers(graph: ModelGraph, partition: list[Group],
-                   pinned: Optional[dict] = None, alias=None) -> dict:
+                   pinned: Optional[dict] = None) -> dict:
     """Map each group output to a buffer name, reusing buffers by liveness."""
     pinned = pinned or {}
     owner = {i: gi for gi, g in enumerate(partition) for i in g.nodes}
@@ -305,19 +351,6 @@ def assign_buffers(graph: ModelGraph, partition: list[Group],
             free.setdefault(entry[1], []).append(entry[2])
 
         name = g.output.name
-        ali = alias(g) if alias is not None else None
-        if ali is not None and name not in pinned:
-            src = g.external_inputs[ali].name
-            buf = assignment.get(src, src)
-            assignment[name] = buf
-            keep = last_read.get(name, gi)
-            for k, entry in enumerate(busy):
-                if entry[2] == buf:
-                    busy[k] = (max(entry[0], keep), entry[1], buf)
-                    break
-            else:
-                busy.append((keep, tuple(g.output.dims), buf))
-            continue
 
         if name in pinned:
             assignment[name] = name

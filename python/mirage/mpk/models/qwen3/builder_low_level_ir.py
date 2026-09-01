@@ -1,12 +1,20 @@
-"""Qwen3 built from the low-level IR instead of from a call order."""
+"""Qwen3 built from the low-level IR instead of from a call order.
+
+builder.py decides where every task begins and ends by the order it calls
+mpk.*_layer. This assembles the same model out of the IR's node vocabulary --
+lowering.OPS, which the superoptimizer schedules, and lowering.OPAQUE_OPS,
+which hand-written MPK tasks compute -- and hands the result to lower(). The
+task boundaries then come from dataflow rather than from this file's call
+order, and everything reusable lives in lowering/: where the boundaries go
+(default_partition), what computes an opaque node (standard_handlers), and the
+schedule knobs (knobs_from_env). What is left here is Qwen3.
+"""
 from __future__ import annotations
 
 import dataclasses
 import os
 
-from ...lowering import (MATMUL_K_TILES, MATMUL_N_TILES, default_forloop,
-                         forloop_candidates, grid_candidates, has_rms_norm,
-                         is_opaque, lower, make_group)
+from ...lowering import default_partition, lower
 from ...lowering.node import ModelGraph, Value
 
 
@@ -25,6 +33,11 @@ class Qwen3Shapes:
     max_seq: int = 4096          # RoPE table length
     seq_len: int = 512           # decode window; the staging buffers' S
     max_reqs: int = 8
+    # argmax reduces through one slot per WORKER -- not per SM. On a B200
+    # those differ (128 vs 148), and a wrong extent here is not a crash:
+    # the reduction reads the wrong slots and the model decodes garbage.
+    # The caller must set it from pk.num_workers.
+    num_workers: int = 0
     # tcgen05 needs the MMA's N a multiple of 8, and swapAB puts the decode
     # token count there -- prep zeroes the pad rows so they are benign.
     q_pad: int = 8
@@ -55,7 +68,8 @@ class Qwen3Shapes:
 
 
 def rmsnorm(g: ModelGraph, x: Value, w: Value) -> Value:
-    """Qwen3's norm is rms_norm(x) * weight, opaque by default."""
+    """Qwen3's norm: rms_norm(x) * weight, two ops the partition pairs back
+    into one task. It has a muGraph op, so it is never opaque."""
     return g.mul(g.rms_norm(x), w)
 
 
@@ -84,7 +98,7 @@ def build_layer(g: ModelGraph, x: Value, w: dict, s: Qwen3Shapes,
                  w["k_cache"], w["v_cache"]],
                 [(fold, s.q_pad, s.head_dim), (fold, 1, s.seq_len),
                  (fold, s.head_dim, s.seq_len), (fold, s.seq_len, s.head_dim)],
-                layer=layer)
+                layer=layer, num_kv_heads=s.num_kv_heads)
             e = g.exp(g.add(g.matmul(q_st, kt_st), mask_st))
             pad = g.matmul(g.div(e, g.reduction(e, 2)), v_st)
             attn = g.opaque("attn_finalize", [pad], (s.tokens, s.attn_dim),
@@ -93,7 +107,8 @@ def build_layer(g: ModelGraph, x: Value, w: dict, s: Qwen3Shapes,
             attn = g.opaque("attention",
                             [qkv, w["q_norm"], w["k_norm"], w["cos"], w["sin"],
                              w["k_cache"], w["v_cache"]],
-                            (s.tokens, s.attn_dim), layer=layer)
+                            (s.tokens, s.attn_dim), layer=layer,
+                            num_kv_heads=s.num_kv_heads)
         x = g.add(x, g.matmul(attn, w["o"]))
 
     with g.scope(layer=layer, tag=f"l{layer}.mlp"):
@@ -110,7 +125,8 @@ def build_qwen3(s: Qwen3Shapes, *, num_layers: int | None = None) -> ModelGraph:
     tokens = g.new_input((s.tokens, 1), "input_tokens", role="feed")
     embed_w = g.new_input((s.vocab, s.hidden), "embed")
     with g.scope(tag="embed"):
-        x = g.opaque("embedding", [tokens, embed_w], (s.tokens, s.hidden))
+        x = g.opaque("embedding", [tokens, embed_w], (s.tokens, s.hidden),
+                     tokens=s.tokens)
 
     for i in range(n):
         w = {
@@ -134,153 +150,27 @@ def build_qwen3(s: Qwen3Shapes, *, num_layers: int | None = None) -> ModelGraph:
     with g.scope(tag="head"):
         x = rmsnorm(g, x, g.new_input((1, s.hidden), "final_norm"))
         logits = g.matmul(x, g.new_input((s.hidden, s.out_vocab), "lm_head"))
-        out = g.opaque("argmax", [logits], (s.tokens, 1))
+        out, _, _ = g.opaque_multi(
+            "argmax", [logits],
+            [(s.tokens, 1), (s.tokens, s.num_workers),
+             (s.tokens, s.num_workers)],
+            dtypes=[None, None, "int64"])
     g.mark_output(out)
     return g
 
 
 
-def partition_as_today(g: ModelGraph) -> list:
-    """One group per node, except silu+mul which MPK already fuses into
-    silu_mul_layer.
-    """
-    pair_with, tag_of = {}, {}
-    for i, n in enumerate(g.nodes):
-        if n.op not in ("silu", "rms_norm"):
-            continue
-        cons = g.consumers(n.output)
-        if len(cons) == 1 and g.nodes[cons[0]].op == "mul":
-            pair_with[i] = cons[0]
-            tag_of[i] = "silu_mul" if n.op == "silu" else "rmsnorm"
-
-    # The attention core -- every node between attn_prep and attn_finalize --
-    # is ONE task. Its pieces are not separately schedulable: a bare reduction
-    # leaves the reduction at kernel level, which MPK cannot register.
-    core = {}
-    prep = [i for i, n in enumerate(g.nodes) if n.op == "opaque:attn_prep"]
-    for p_i in prep:
-        fin = next(j for j in range(p_i + 1, len(g.nodes))
-                   if g.nodes[j].op == "opaque:attn_finalize")
-        core[p_i + 1] = list(range(p_i + 1, fin))
-
-    absorbed = set(pair_with.values()) | {i for v in core.values() for i in v}
-    absorbed -= set(core)
-    groups = []
-    for i, n in enumerate(g.nodes):
-        if i in absorbed:
-            continue
-        if i in core:
-            groups.append(make_group(g, core[i], "attn_core"))
-        elif i in pair_with:
-            groups.append(make_group(g, [i, pair_with[i]], tag_of[i]))
-        elif is_opaque(n.op):
-            groups.append(make_group(g, [i], n.op.split(":", 1)[1]))
-        else:
-            groups.append(make_group(g, [i], n.op))
-    return groups
-
-
-
-def grid_from_env(graph):
-    """The grid each group is given, from MPK_MATMUL_N_TILE / MPK_NORM_ROWS."""
-    tile = int(os.environ.get("MPK_MATMUL_N_TILE", "64"))
-    if tile not in MATMUL_N_TILES:
-        raise ValueError(f"MPK_MATMUL_N_TILE must be one of "
-                         f"{MATMUL_N_TILES}, got {tile}")
-    norm_rows = int(os.environ.get("MPK_NORM_ROWS", "1"))
-
-    def pick(group):
-        cands = grid_candidates(graph, group)
-        if len(group.output.dims) == 3:
-            return cands[0]          # batched: split the batch dim
-        if has_rms_norm(graph, group):
-            want = (max(1, group.output.dims[0] // norm_rows), 1, 1)
-        else:
-            want = (group.output.dims[-1] // tile, 1, 1)
-        return want if want in cands else cands[0]
-
-    return pick
-
-
-def knobs_from_env(graph):
-    """The per-group K tile and pipeline depth, from the env."""
-    k_tile = int(os.environ.get("MPK_MATMUL_K_TILE", "128"))
-    if k_tile not in MATMUL_K_TILES:
-        raise ValueError(f"MPK_MATMUL_K_TILE must be one of {MATMUL_K_TILES}, "
-                         f"got {k_tile}")
-    stages = int(os.environ.get("MPK_MATMUL_STAGES", "4"))
-    if not 2 <= stages <= 8:
-        raise ValueError(f"MPK_MATMUL_STAGES must be in [2, 8], got {stages}")
-
-    def forloop_for(group):
-        want = default_forloop(graph, group, k_tile)
-        cands = forloop_candidates(graph, group)
-        return want if want in cands else default_forloop(graph, group)
-
-    def stages_for(group):
-        return stages
-
-    return forloop_for, stages_for
-
-
-
-def opaque_handlers(pk, shapes: Qwen3Shapes, meta: dict):
-    """A handler per opaque op. Each is handed the group and its already-bound
-    input DTensors, in the order the graph names them."""
-
-    def embedding(pk, group, ins, outs):
-        (out,) = outs
-        tokens, weight = ins
-        pk.embed_layer(input=tokens, weight=weight, output=out,
-                       grid_dim=(shapes.tokens, 1, 1), block_dim=(128, 1, 1))
-
-    def attention(pk, group, ins, outs):
-        (out,) = outs
-        qkv, q_norm, k_norm, cos, sin, k_cache, v_cache = ins
-        pk.paged_attention_layer(
-            input=qkv, k_cache=k_cache, v_cache=v_cache,
-            q_norm=q_norm, k_norm=k_norm,
-            cos_pos_embed=cos, sin_pos_embed=sin, output=out,
-            grid_dim=(pk.max_num_batched_requests, shapes.num_kv_heads, 1),
-            block_dim=(128, 1, 1))
-
-    def attn_prep(pk, group, ins, outs):
-        qkv, q_norm, k_norm, cos, sin, k_cache, v_cache = ins
-        q_st, mask_st, kt_st, v_st = outs
-        pk.attention_prep_layer(
-            input=qkv, k_cache=k_cache, v_cache=v_cache,
-            q_norm=q_norm, k_norm=k_norm, cos_pos_embed=cos, sin_pos_embed=sin,
-            q_staged=q_st, mask_staged=mask_st, kt_staged=kt_st,
-            v_staged=v_st,
-            grid_dim=(pk.max_num_batched_requests, shapes.num_kv_heads, 1),
-            block_dim=(128, 1, 1))
-
-    def attn_finalize(pk, group, ins, outs):
-        (pad,) = ins
-        (out,) = outs
-        pk.attention_finalize_layer(
-            attn_pad=pad, output=out,
-            grid_dim=(pk.max_num_batched_requests, 1, 1), block_dim=(128, 1, 1))
-
-    def argmax(pk, group, ins, outs):
-        (out,) = outs
-        (logits,) = ins
-        pk.argmax_partial_layer(
-            input=logits, output=(meta["argmax_value"], meta["argmax_index"]),
-            grid_dim=(pk.num_workers, 1, 1), block_dim=(128, 1, 1))
-        pk.argmax_reduce_layer(
-            input=(meta["argmax_value"], meta["argmax_index"]), output=out,
-            grid_dim=(1, 1, 1), block_dim=(128, 1, 1))
-
-    return {"embedding": embedding, "attention": attention,
-            "attn_prep": attn_prep, "attn_finalize": attn_finalize,
-            "argmax": argmax}
+# The one run of nodes only Qwen3 can name: everything between the two opaque
+# halves of attention is a single task. default_partition supplies the rest,
+# and the cuts it derives are the ones builder.py's *_layer call order implies
+# -- which is what makes the graph path comparable to it.
+OPAQUE_RUNS = (("attn_prep", "attn_finalize", "attn_core"),)
 
 
 def plan(shapes: Qwen3Shapes, *, num_layers=None):
     """The graph and its groups, before any weight is bound."""
     graph = build_qwen3(shapes, num_layers=num_layers)
-    return graph, partition_as_today(graph)
+    return graph, default_partition(graph, opaque_runs=OPAQUE_RUNS)
 
 
 def bind_weights(pk, model, shapes: Qwen3Shapes, *, num_layers=None,
@@ -335,13 +225,8 @@ def bind_weights(pk, model, shapes: Qwen3Shapes, *, num_layers=None,
 def build(pk, shapes: Qwen3Shapes, bindings: dict, meta: dict, *,
           num_layers=None, planned=None, verbose: bool = False):
     """Lower Qwen3 onto `pk`."""
-    graph, groups = planned if planned is not None else plan(
-        shapes, num_layers=num_layers)
-    forloop_for, stages_for = knobs_from_env(graph)
+    graph, groups = planned if planned is not None else plan(shapes, num_layers=num_layers)
     return graph, groups, lower(
         pk, graph, groups, bindings,
-        grid_for=grid_from_env(graph),
-        forloop_for=forloop_for, stages_for=stages_for,
         outputs={graph.outputs[0].name: meta["output_token"]},
-        opaque=opaque_handlers(pk, shapes, meta),
-        reuse_buffers=True, verbose=verbose)
+        verbose=verbose)

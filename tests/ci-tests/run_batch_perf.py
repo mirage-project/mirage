@@ -238,7 +238,7 @@ def main():
     # MPK_MODEL_SOURCE=mugraph builds the model from the low-level IR
     # (models/qwen3/builder_low_level_ir.py)
     # instead of the imperative *_layer calls below. The boundaries are the
-    # same ones these calls imply -- partition_as_today derives them from the
+    # same ones these calls imply -- default_partition derives them from the
     # graph -- so what changes is that every task body is generated.
     if os.environ.get("MPK_MODEL_SOURCE", "imperative") == "mugraph":
         from mirage.mpk.models.qwen3 import builder_low_level_ir as LLIR
@@ -249,6 +249,7 @@ def main():
         shapes.vocab_padded = vocab_size
         shapes.seq_len = args.max_seq_length
         shapes.max_reqs = args.max_num_batched_requests
+        shapes.num_workers = mpk.num_workers
         
         graph, groups = LLIR.plan(shapes)
         bindings = LLIR.bind_weights(

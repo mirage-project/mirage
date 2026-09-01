@@ -13,25 +13,17 @@
  * limitations under the License.
  */
 #pragma once
-#include "attention_prep_sm100.cuh" // Q_STAGED_ROWS
+#include "attention_prep_sm100.cuh"
 #include "tasks/common/common_header.cuh"
 
 namespace kernel {
 
-// ============================================================================
-// Decode-attention FINALIZE: copy the valid rows of the padded generated-core
-// output into the packed attention output.
-//   attn_pad : FOLD-DIM [kv_heads * max_reqs, Q_STAGED_ROWS, HEAD_DIM]
-//              (rows >= NUM_QO_PER_KV are pad garbage -- never copied)
-//   output   : [tokens, num_q_heads * HEAD_DIM]
-// One task per request; grid (reqs, 1, 1).
-// ============================================================================
 template <typename T,
           int NUM_KV_HEADS,
           int NUM_QO_PER_KV,
           int HEAD_DIM,
           int O_STRIDE,
-          int MAX_REQS> // attn_pad is HEAD-MAJOR: [kvh, max_reqs, 8, hd]
+          int MAX_REQS>
 __device__ __forceinline__ void
     attention_finalize_sm100_impl(void const *attn_pad_ptr,
                                   void *output_ptr,
@@ -44,8 +36,6 @@ __device__ __forceinline__ void
   }
   constexpr int VALID = NUM_KV_HEADS * NUM_QO_PER_KV * HEAD_DIM;
   T const *pad = static_cast<T const *>(attn_pad_ptr);
-  // The generated core computes attention for the LAST new token only (see
-  // attention_prep); its output row is the one downstream generation reads.
   T *out =
       static_cast<T *>(output_ptr) + (size_t)(last_token_pos - 1) * O_STRIDE;
   for (int idx = threadIdx.x; idx < VALID; idx += NUM_THREADS) {
@@ -59,4 +49,4 @@ __device__ __forceinline__ void
   }
 }
 
-} // namespace kernel
+}

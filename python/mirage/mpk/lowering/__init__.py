@@ -15,16 +15,19 @@ from typing import Callable, Optional
 
 from .group import (Group, group_to_taskspec_build, lower_group, make_group,
                     to_taskspec)
-from .node import ModelGraph, Node, OPAQUE, OPS, Value, is_opaque
+from .node import (ModelGraph, Node, OPAQUE, OPAQUE_OPS, OPS, Value,
+                   is_opaque)
+from .opaque import standard_handlers
 from .partition import (MAX_GROUP_INPUTS, MAX_GROUP_OPS, Rejection,
                         Schedulable, assign_buffers, check_covers,
-                        check_fork_join, check_shapes, enumerate_partitions,
+                        check_fork_join, check_shapes, default_partition,
+                        enumerate_partitions,
                         feasible_partitions, group_signature)
 from .task_search import (MATMUL_K_TILES, MATMUL_N_TILES, MMA_K_ATOM,
                           MPK_BLOCK_DIM, Schedule, TaskSearchError, TaskSpec,
                           TensorSpec, cache_key, default_forloop, default_grid,
                           batched_grid_candidates, forloop_candidates, grid_candidates,
-                          has_rms_norm,
+                          has_rms_norm, knobs_from_env,
                           lookup_schedule, register_searched_task,
                           rows_grid_candidates, search_task_schedule,
                           search_task_schedules, store_schedule)
@@ -36,15 +39,11 @@ def lower(
     partition: list[Group],
     bindings: dict,
     *,
-    grid_for: Callable[[Group], tuple] = default_grid,
-    forloop_for=None,
-    stages_for=None,
-    dtype=None,
     outputs: Optional[dict] = None,
     overrides=None,
-    alias=None,
     opaque: Optional[dict] = None,
-    reuse_buffers: bool = False,
+    knobs=None,
+    dtype=None,
     verbose: bool = False,
 ) -> dict:
     """Register every group as an MPK task."""
@@ -53,9 +52,16 @@ def lower(
     check_covers(graph, partition)
     dtype = dtype if dtype is not None else mi.bfloat16
     outputs = outputs or {}
+    # The graph already says which nodes are opaque; standard_handlers covers
+    # every name OPAQUE_OPS declares, so a caller overrides this only to
+    # substitute a task of its own.
+    opaque = standard_handlers() if opaque is None else opaque
+    # The schedule knobs are always the same triple; a caller overrides them
+    # only to sweep one. Buffers are always reused: one tensor per boundary
+    # grows with depth, which nothing model-sized can afford.
+    grid_for, forloop_for, stages_for = knobs or knobs_from_env(graph)
     env = dict(bindings)
-    buf_of = (assign_buffers(graph, partition, outputs, alias) if reuse_buffers
-              else {})
+    buf_of = assign_buffers(graph, partition, outputs)
     memo: dict[tuple, object] = {}
     pool: dict[str, object] = {}
 
@@ -72,18 +78,16 @@ def lower(
         resolved = []
         for v in g.outputs:
             out = outputs.get(v.name)
-            ali = (alias(g) if (alias is not None and out is None
-                                and v is g.output) else None)
-            if ali is not None:
-                out = ins[ali]
-            elif out is None:
+            if out is None:
                 buf = buf_of.get(v.name)
                 if buf is not None and buf in pool:
                     out = pool[buf]
                 else:
                     nm = buf or f"mg_{v.name.replace('.', '_')}"
-                    out = pk.new_tensor(dims=v.dims, dtype=dtype, name=nm,
-                                        io_category="cuda_tensor")
+                    out = pk.new_tensor(
+                        dims=v.dims,
+                        dtype=getattr(mi, v.dtype) if v.dtype else dtype,
+                        name=nm, io_category="cuda_tensor")
                     if buf is not None:
                         pool[buf] = out
             resolved.append(out)

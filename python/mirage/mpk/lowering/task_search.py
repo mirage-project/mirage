@@ -276,6 +276,54 @@ def forloop_candidates(graph, group) -> list[int]:
             if t % MMA_K_ATOM == 0 and k % t == 0 and k // t >= 1]
 
 
+def knobs_from_env(graph):
+    """The per-group schedule knobs, as env-selected candidates.
+
+    Returns (grid_for, forloop_for, stages_for) -- the three callables lower()
+    takes. Each knob is enumerated above and ranked by nothing here: which
+    value wins is whole-model throughput, so these exist to be swept.
+
+      MPK_MATMUL_N_TILE  64 (default) | 128   the MMA's M under swapAB
+      MPK_MATMUL_K_TILE  64 | 128 (default) | 256
+      MPK_MATMUL_STAGES  2..8, 4 (default)
+      MPK_NORM_ROWS      rows per block for a group that reduces its last dim
+
+    A group the requested value does not divide keeps cands[0], the default
+    for its kind, rather than failing the whole lowering.
+    """
+    import os
+
+    def _one(name, default, allowed=None, lo=None, hi=None):
+        v = int(os.environ.get(name, default))
+        if allowed is not None and v not in allowed:
+            raise ValueError(f"{name} must be one of {allowed}, got {v}")
+        if lo is not None and not lo <= v <= hi:
+            raise ValueError(f"{name} must be in [{lo}, {hi}], got {v}")
+        return v
+
+    n_tile = _one("MPK_MATMUL_N_TILE", "64", MATMUL_N_TILES)
+    k_tile = _one("MPK_MATMUL_K_TILE", "128", MATMUL_K_TILES)
+    stages = _one("MPK_MATMUL_STAGES", "4", lo=2, hi=8)
+    norm_rows = _one("MPK_NORM_ROWS", "1", lo=1, hi=1024)
+
+    def grid_for(group):
+        cands = grid_candidates(graph, group)
+        if len(group.output.dims) == 3:
+            return cands[0]                      # batched: split the batch dim
+        if has_rms_norm(graph, group):
+            want = (max(1, group.output.dims[0] // norm_rows), 1, 1)
+        else:
+            want = (group.output.dims[-1] // n_tile, 1, 1)
+        return want if want in cands else cands[0]
+
+    def forloop_for(group):
+        want = default_forloop(graph, group, k_tile)
+        return (want if want in forloop_candidates(graph, group)
+                else default_forloop(graph, group))
+
+    return grid_for, forloop_for, lambda group: stages
+
+
 def default_forloop(graph, group, k_tile: int = 64) -> int:
     """How many K steps a matmul group should take -- i.e. a K tile of 64."""
     if not _has_matmul(graph, group):

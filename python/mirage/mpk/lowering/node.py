@@ -20,6 +20,22 @@ OPS: dict[str, int] = {
     "reduction": 1,
 }
 
+# The OTHER half of the vocabulary: a node the graph cannot model, computed by
+# a hand-written MPK task. name -> (arity, number of outputs). A model builds
+# its graph out of OPS and these; lowering/opaque.py supplies the task that
+# computes each one, and asserts it covers this table.
+#
+# They are declared here, beside OPS, because together the two ARE the set of
+# nodes a model may use -- and because an arity checked at graph construction
+# is a mismatch caught before the operand order reaches a kernel.
+OPAQUE_OPS: dict[str, tuple[int, int]] = {
+    "embedding": (2, 1),        # (tokens, table) -- a gather
+    "attention": (7, 1),        # the monolithic paged-attention task
+    "attn_prep": (7, 4),        # qk-norm, RoPE, cache append, staging
+    "attn_finalize": (1, 1),    # pack the padded core output
+    "argmax": (1, 3),           # a reduction to indices: token, value, index
+}
+
 # A node whose op starts with this is not a muGraph op at all
 OPAQUE = "opaque:"
 
@@ -35,6 +51,11 @@ class Value:
     dims: tuple[int, ...]
     producer: Optional[int] = None      # index into ModelGraph.nodes
     role: str = "activation"            # "activation" | "weight" | "feed"
+    # None means the graph's default (bfloat16). Only an opaque task needs
+    # anything else: argmax reduces through an INDEX buffer, and reading an
+    # int64 index out of a bf16 allocation is a misaligned access, not a
+    # wrong number -- the run dies in cudaDeviceSynchronize with no hint.
+    dtype: Optional[str] = None
 
     def __repr__(self) -> str:
         return f"{self.name}{list(self.dims)}"
@@ -72,17 +93,33 @@ class ModelGraph:
     def mark_output(self, v: Value) -> None:
         self.outputs.append(v)
 
-    def _fresh(self, dims) -> Value:
+    def _fresh(self, dims, dtype=None) -> Value:
         self._n += 1
         base = f"{self._tag}." if self._tag else ""
         return Value(name=f"{base}v{self._n}", dims=tuple(dims),
-                     producer=len(self.nodes))
+                     producer=len(self.nodes), dtype=dtype)
 
-    def opaque_multi(self, name: str, inputs, dims_list, **attrs) -> list:
+    def _check_opaque(self, name: str, inputs, n_out: int) -> None:
+        if name not in OPAQUE_OPS:
+            raise ValueError(
+                f"unknown opaque task {name!r}; OPAQUE_OPS declares "
+                f"{sorted(OPAQUE_OPS)}")
+        arity, outs = OPAQUE_OPS[name]
+        if len(inputs) != arity:
+            raise ValueError(f"opaque {name!r} takes {arity} inputs, got "
+                             f"{len(inputs)}")
+        if n_out != outs:
+            raise ValueError(f"opaque {name!r} writes {outs} tensors, got "
+                             f"{n_out}")
+
+    def opaque_multi(self, name: str, inputs, dims_list, dtypes=None,
+                     **attrs) -> list:
         """An opaque task that writes SEVERAL tensors -- attention prep stages
         q/k^T/v/mask for the generated core. Every output is a real Value, so
         the reader's dependency on the writer stays visible to MPK."""
-        outs = [self._fresh(d) for d in dims_list]
+        self._check_opaque(name, inputs, len(dims_list))
+        dtypes = dtypes or [None] * len(dims_list)
+        outs = [self._fresh(d, t) for d, t in zip(dims_list, dtypes)]
         self.nodes.append(Node(op=OPAQUE + name, inputs=tuple(inputs),
                                output=outs[0], layer=self._layer, tag=self._tag,
                                attrs=dict(attrs, extra_outputs=tuple(outs[1:]))))
@@ -91,6 +128,7 @@ class ModelGraph:
     def opaque(self, name: str, inputs, dims, **attrs) -> Value:
         """A hand-written task the graph does not model. Its result is a real
         value, so everything downstream stays connected."""
+        self._check_opaque(name, inputs, 1)
         out = self._fresh(dims)
         self.nodes.append(Node(op=OPAQUE + name, inputs=tuple(inputs),
                                output=out, layer=self._layer, tag=self._tag,

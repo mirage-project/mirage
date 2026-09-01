@@ -1,9 +1,9 @@
 """Choosing task boundaries instead of writing them."""
 import pytest
 
-from mirage.mpk.lowering import make_group
+from mirage.mpk.lowering import default_partition, make_group
 from mirage.mpk.models.qwen3.builder_low_level_ir import (
-    Qwen3Shapes, build_qwen3, partition_as_today)
+    OPAQUE_RUNS, Qwen3Shapes, build_qwen3)
 from mirage.mpk.lowering.partition import (check_fork_join, check_shapes,
                                    enumerate_partitions, feasible_partitions,
                                    group_signature, MAX_GROUP_INPUTS)
@@ -20,7 +20,7 @@ def _one_layer():
 def test_todays_partition_is_legal():
     """The baseline has to survive its own filter, or the filter is wrong."""
     g = build_qwen3(QWEN3, num_layers=2)
-    assert check_fork_join(g, partition_as_today(g)) is None
+    assert check_fork_join(g, default_partition(g, opaque_runs=OPAQUE_RUNS)) is None
 
 
 def test_opaque_nodes_force_cuts():
@@ -75,7 +75,7 @@ def test_the_shipped_partition_is_enumerated():
     kept, _ = feasible_partitions(g, layer, schedulable=None)
     found = {tuple(tuple(sorted(x.nodes)) for x in p) for p in kept}
 
-    want = tuple(tuple(sorted(x.nodes)) for x in partition_as_today(g)
+    want = tuple(tuple(sorted(x.nodes)) for x in default_partition(g, opaque_runs=OPAQUE_RUNS)
                  if set(x.nodes) <= in_layer)
     assert want in found, (
         f"as_today is not in the {len(found)} enumerated partitions: {want}")

@@ -18,6 +18,9 @@ class Group:
     # An opaque task may write several tensors; output stays outputs[0] so
     # every existing caller is unchanged.
     extra_outputs: tuple[Value, ...] = ()
+    # An opaque node's attrs: the parameters its hand-written task needs and
+    # the graph cannot otherwise supply, e.g. attention's kv-head count.
+    attrs: dict = dataclasses.field(default_factory=dict)
 
     @property
     def outputs(self) -> tuple:
@@ -62,7 +65,9 @@ def make_group(graph: ModelGraph, node_ids, tag: str = "") -> Group:
         n = graph.nodes[ids[0]]
         return Group(nodes=ids, external_inputs=tuple(external),
                      output=n.output, tag=tag,
-                     extra_outputs=tuple(n.attrs.get("extra_outputs", ())))
+                     extra_outputs=tuple(n.attrs.get("extra_outputs", ())),
+                     attrs={k: v for k, v in n.attrs.items()
+                            if k != "extra_outputs"})
     if len(live) != 1:
         raise ValueError(
             f"group {tag or ids} has {len(live)} live outputs, need exactly 1: "
@@ -133,8 +138,12 @@ def lower_group(pk, graph: ModelGraph, group: Group, ins, out, *,
         fn = opaque.get(name)
         if fn is None:
             raise ValueError(
-                f"no handler for opaque task {name!r}; the graph cannot "
-                f"model it, so lowering needs one")
+                f"no handler for opaque task {name!r}; the graph cannot model "
+                f"it, so lowering needs one. lowering.standard_handlers("
+                f"shapes, meta) supplies the four every decoder has "
+                f"(embedding, attention, attn_prep/attn_finalize, argmax); "
+                f"pass its result as lower(..., opaque=...). Got: "
+                f"{sorted(opaque) or 'nothing'}")
         if verbose:
             print(f"[lower] {name}: hand-written task", flush=True)
         fn(pk, group, ins, outs if outs is not None else [out])
