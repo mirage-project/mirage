@@ -74,6 +74,11 @@ class KVStream:
     it, so the fact is stated once, in the place that describes the shape.
     Hand-writing the byte count was protected in one direction only: too small
     tripped an assert, too large silently doubled the page.
+
+    ``paged=False`` declares the other kind of reader: one that addresses the
+    cache as a single flat ``[capacity, width]`` array. It gets no group, no 
+    page table and no say in the shared page size; the plan still owns its 
+    storage, and hands it out through ``attach()``. See ``FlatStream``.
     """
     name: str
     layers: Tuple[int, ...]
@@ -82,17 +87,42 @@ class KVStream:
     compress_ratio: int = 1
     block_size_multiple_of: Optional[int] = None
     preferred_block_size: Optional[int] = None
+    paged: bool = True
 
     @property
     def per_entry_bytes(self) -> int:
         return sum(reduce(lambda a, b: a * b, shape, 1) * _itemsize(dtype)
                    for _, shape, dtype in self.components)
 
-    def _spec(self) -> KVSpec:
+    def _check_components(self):
         assert self.components, f"stream {self.name}: no components declared"
         names = [c[0] for c in self.components]
         assert len(set(names)) == len(names), (
             f"stream {self.name}: duplicate component names {names}")
+
+    def _flat(self, capacity: int) -> "FlatStream":
+        """The unpaged form. Every paging knob must be at its default -- they
+        all describe a page, and accepting one would silently ignore it."""
+        self._check_components()
+        for field_name, value in (("window", self.window),
+                                  ("compress_ratio", self.compress_ratio),
+                                  ("block_size_multiple_of",
+                                   self.block_size_multiple_of),
+                                  ("preferred_block_size",
+                                   self.preferred_block_size)):
+            default = KVStream.__dataclass_fields__[field_name].default
+            if value != default:
+                raise ValueError(
+                    f"stream '{self.name}' is paged=False but sets "
+                    f"{field_name}={value!r}; that describes a page, and an "
+                    f"unpaged stream has none.")
+        return FlatStream(name=self.name, layers=tuple(self.layers),
+                          components=tuple(tuple(c) for c in self.components),
+                          capacity=capacity)
+
+    def _spec(self) -> KVSpec:
+        assert self.paged, f"stream {self.name}: not paged, use _flat()"
+        self._check_components()
         return KVSpec(name=self.name,
                       per_entry_bytes=self.per_entry_bytes,
                       layer_ids=tuple(self.layers),
@@ -167,6 +197,31 @@ def _merge_identical_streams(streams):
     return out
 
 
+@dataclass(frozen=True)
+class FlatStream:
+    """A stream whose reader wants one contiguous ``[capacity, width]`` array.
+
+    Outside the pool by necessity: a constant-stride reader cannot be handed
+    its storage a page at a time from a shared free list. NOT outside the plan,
+    which allocates it, budgets it, and is still the only way to reach it.
+    ``capacity`` is in tokens -- a flat cache is indexed by absolute position,
+    so it holds the whole run.
+    """
+    name: str
+    layers: Tuple[int, ...]
+    components: Tuple[Tuple[str, Tuple[int, ...], "torch.dtype"], ...]
+    capacity: int
+
+    @property
+    def per_entry_bytes(self) -> int:
+        return sum(reduce(lambda a, b: a * b, shape, 1) * _itemsize(dtype)
+                   for _, shape, dtype in self.components)
+
+    @property
+    def nbytes(self) -> int:
+        return len(self.layers) * self.capacity * self.per_entry_bytes
+
+
 def build_kv_cache(streams, *,
                    kv_budget=None,
                    max_num_pages: Optional[int] = None,
@@ -189,15 +244,50 @@ def build_kv_cache(streams, *,
     to a cache tensor, so no caller can hold one that skipped the
     pool-identity check, and the component layout is stated once -- in the
     stream -- rather than restated at allocation time.
+
+    A ``paged=False`` stream is split off here and never reaches
+    ``plan_kv_groups``: it takes no part in choosing the shared page size, in
+    ``_group_size``, or in the page tables, so a model that has one plans
+    exactly as it would without it. The plan still owns and budgets its
+    storage. That containment is the point -- removing the flag later changes
+    the declaration and nothing else.
     """
-    streams = _merge_identical_streams(list(streams))
-    plan = plan_kv_groups([s._spec() for s in streams], **plan_kwargs)
-    plan._layouts = {s.name: list(s.components) for s in streams}
+    streams = list(streams)
+    flat_streams = [st for st in streams if not st.paged]
+    paged_streams = _merge_identical_streams(
+        [st for st in streams if st.paged])
+    if not streams:
+        raise ValueError(
+            "no KV streams declared. A model with no KV cache at all is not "
+            "supported yet; a model whose kernels read a flat cache declares "
+            "KVStream(..., paged=False).")
     if kv_budget is not None and max_seq_length is None:
         raise ValueError(
             "max_seq_length is required with kv_budget: a budget is sized to "
             "hold a request of some length, and there is nothing to size to "
             "without it")
+    if flat_streams:
+        if max_seq_length is None:
+            raise ValueError(
+                f"max_seq_length is required by unpaged stream(s) "
+                f"{[st.name for st in flat_streams]}: a flat cache is indexed "
+                f"by absolute position, so its capacity IS the run length")
+        if max_num_batched_requests != 1:
+            raise ValueError(
+                f"unpaged stream(s) {[st.name for st in flat_streams]} with "
+                f"max_num_batched_requests={max_num_batched_requests}: a flat "
+                f"cache is indexed by absolute position with no request "
+                f"dimension, so two requests would write the same rows. This "
+                f"was always true of these kernels; declaring the stream is "
+                f"what makes it checkable.")
+
+    if paged_streams:
+        plan = plan_kv_groups([st._spec() for st in paged_streams],
+                              **plan_kwargs)
+    else:
+        plan = _plan_with_no_paged_streams(max_seq_length, **plan_kwargs)
+    plan._layouts = {st.name: list(st.components) for st in paged_streams}
+    plan.flat_streams = tuple(st._flat(max_seq_length) for st in flat_streams)
     _resolve_pool_size(plan, kv_budget=kv_budget, max_num_pages=max_num_pages,
                        max_seq_length=max_seq_length,
                        max_num_batched_requests=max_num_batched_requests,
@@ -321,12 +411,17 @@ class KVCachePlan:
     # Set once by resolve_pool_size. The page tables and the pool are built
     # in different places and both read from here.
     max_num_pages: Optional[int] = None
+    # Streams whose reader is not paged: no group, no page table, storage
+    # owned here anyway. Empty for every model whose kernels index by page.
+    flat_streams: Tuple["FlatStream", ...] = ()
     # Filled in by declare_kv / materialize: the component layouts the streams
     # declared, and the pool built from them. Holding the views here is what
     # lets attach() be the only way to reach a cache tensor.
     _layouts: Optional[dict] = None
     _pool: Optional["torch.Tensor"] = None
     _views: Optional[dict] = None
+    _flat_pool: Optional["torch.Tensor"] = None
+    _flat_views: Optional[dict] = None
 
     # ── what PersistentKernel consumes ────────────────────────────────────
 
@@ -342,10 +437,25 @@ class KVCachePlan:
         """Bytes one page id costs: that page at every slot."""
         return self.num_slots * self.target_page_bytes
 
+    @property
+    def flat_bytes(self) -> int:
+        """Bytes the unpaged streams occupy."""
+        return sum(st.nbytes for st in self.flat_streams)
+
     def pages_for_budget(self, budget_bytes: int) -> int:
-        """How many page ids fit in a byte budget, rounded down."""
+        """How many page ids fit in a byte budget, rounded down. The unpaged
+        streams are not negotiable, so they are spent first."""
         assert budget_bytes >= 0
-        return budget_bytes // self.page_id_bytes
+        remaining = budget_bytes - self.flat_bytes
+        if remaining < 0:
+            raise ValueError(
+                f"the unpaged streams alone need "
+                f"{format_bytes(self.flat_bytes)}, more than the "
+                f"{format_bytes(budget_bytes)} budget")
+        if self.page_id_bytes == 0:
+            # placeholder group only; the floor decides the count
+            return 0
+        return remaining // self.page_id_bytes
 
     def _pool_pages(self, given: Optional[int]) -> int:
         """The page count to size a pool-shaped thing with: the caller's
@@ -362,8 +472,8 @@ class KVCachePlan:
         return given if given is not None else self.max_num_pages
 
     def budget_bytes(self, num_pages: int) -> int:
-        """Bytes a pool of ``num_pages`` ids occupies."""
-        return num_pages * self.page_id_bytes
+        """Bytes the whole cache occupies, which is what a budget must cover."""
+        return num_pages * self.page_id_bytes + self.flat_bytes
 
     def pages_needed(self, max_num_batched_requests: int, max_seq_length: int,
                      max_num_batched_tokens: int = 1) -> int:
@@ -425,6 +535,17 @@ class KVCachePlan:
     def describe(self, max_seq_length: Optional[int] = None) -> str:
         """How the shared page turned into each stream's block size. Streams
         with smaller entries pack more tokens into the same page."""
+        flat_lines = [
+            f"  unpaged '{st.name}': {len(st.layers)} layer(s) x "
+            f"{st.capacity} tokens x {st.per_entry_bytes} B = "
+            f"{format_bytes(st.nbytes)}  (no group, no page table -- the "
+            f"kernel reads it flat)"
+            for st in self.flat_streams]
+        if not self.anchor_spec:
+            return "\n".join(
+                ["KV cache: no paged stream; one placeholder group holding "
+                 "nothing, so the runtime still compiles at "
+                 "MPK_NUM_KV_GROUPS=1"] + flat_lines)
         lines = [
             f"KV page: {format_bytes(self.target_page_bytes)} x "
             f"{self.num_slots} slot(s) = {format_bytes(self.page_id_bytes)} "
@@ -454,6 +575,7 @@ class KVCachePlan:
                 f"  group {g.group_id} '{g.spec_name}': block {g.block_size} "
                 f"tokens ({g.entries_per_page} entries, tile {g.tile} "
                 f"{src}){pad}{note}")
+        lines += flat_lines
         for w in warnings:
             lines.append(f"WARNING: {w}")
         return "\n".join(lines)
@@ -463,7 +585,19 @@ class KVCachePlan:
         for g in self.groups:
             if layer_id in g.layer_ids:
                 return g.group_id, g.layer_ids.index(layer_id)
+        for st in self.flat_streams:
+            if layer_id in st.layers:
+                raise KeyError(
+                    f"layer {layer_id} belongs to unpaged stream "
+                    f"'{st.name}', which has no group or page table; reach it "
+                    f"through attach()")
         raise KeyError(f"layer {layer_id} not covered by any group")
+
+    def _flat_stream_of(self, layer_id: int):
+        for st in self.flat_streams:
+            if layer_id in st.layers:
+                return st
+        return None
 
     # ── allocation ────────────────────────────────────────────────────────
 
@@ -480,6 +614,7 @@ class KVCachePlan:
                 "the component layouts; use declare_kv([KVStream(...), ...])")
         self._pool, self._views = self._allocate_pool(
             self._layouts, max_num_pages, device)
+        self._flat_pool, self._flat_views = self._allocate_flat(device)
         return self
 
     def zero_(self):
@@ -488,6 +623,8 @@ class KVCachePlan:
         if self._pool is None:
             raise RuntimeError("materialize() has not run on this plan")
         self._pool.zero_()
+        if self._flat_pool is not None:
+            self._flat_pool.zero_()
         return self
 
     def views(self, group_id: int):
@@ -515,6 +652,9 @@ class KVCachePlan:
         of the two hand-written call sites it replaced had omitted it."""
         if self._views is None:
             raise RuntimeError("materialize() has not run on this plan")
+        flat = self._flat_stream_of(layer_id)
+        if flat is not None:
+            return self._attach_flat(mpk, flat, layer_id, prefix)
         group_id, slot_id = self._layer_info(layer_id)
         out = {"group_id": group_id}
         for name, entry_shape, dtype in self._layouts[
@@ -533,6 +673,73 @@ class KVCachePlan:
                     view, f"{prefix}_{layer_id} {name}_cache"),
                 name=f"{prefix}_{layer_id}_{name}_cache")
         return out
+
+    def _attach_flat(self, mpk, stream, layer_id: int, prefix: str):
+        """attach() for an unpaged layer: the same keys a paged one gets, so
+        a builder reads the same names either way. ``group_id`` is None rather
+        than 0 -- 0 is a real group, and would send a paged task to someone
+        else's page table.
+        """
+        out = {"group_id": None}
+        for name, entry_shape, dtype in stream.components:
+            view = self._flat_views[layer_id][name]
+            assert tuple(view.shape[1:]) == tuple(entry_shape), (
+                f"{name} view has entry shape {tuple(view.shape[1:])} but the "
+                f"stream declared {tuple(entry_shape)}")
+            assert view.dtype == dtype, (
+                f"{name} view is {view.dtype}, declared {dtype}")
+            out[f"{name}_cache"] = mpk.attach_input(
+                torch_tensor=self._assert_in_flat(
+                    view, stream, f"{prefix}_{layer_id} {name}_cache"),
+                name=f"{prefix}_{layer_id}_{name}_cache")
+        return out
+
+    def _allocate_flat(self, device: str = "cuda"):
+        """The unpaged streams as ONE allocation, plus per-layer typed views
+        (``views[layer_id][component]``). Laid out stream / layer / component,
+        so a view has the shape and stride of the tensor it replaces.
+        """
+        total = self.flat_bytes
+        buf = torch.zeros(total, dtype=torch.uint8, device=device)
+        self._flat_span = (buf.data_ptr(), buf.data_ptr() + total)
+        views, off = {}, 0
+        for st in self.flat_streams:
+            for layer_id in st.layers:
+                comps = {}
+                for cname, entry_shape, dtype in st.components:
+                    entry_elems = reduce(lambda a, b: a * b, entry_shape, 1)
+                    itemsize = _itemsize(dtype)
+                    span = st.capacity * entry_elems
+                    assert off % itemsize == 0, (
+                        f"component '{st.name}.{cname}' starts at byte {off}, "
+                        f"not a multiple of its {itemsize} B element")
+                    comps[cname] = buf.view(dtype)[
+                        off // itemsize:off // itemsize + span].view(
+                        st.capacity, *entry_shape)
+                    off += span * itemsize
+                views[layer_id] = comps
+        assert off == total, f"flat allocation walked {off} of {total} B"
+        return buf, views
+
+    def _assert_in_flat(self, tensor, stream, name: str = "tensor"):
+        """The unpaged twin of _assert_in_pool: still on the plan's buffer,
+        and still addressed one token row at a time."""
+        if getattr(self, "_flat_span", None) is None:
+            raise RuntimeError(
+                "the unpaged streams have not been allocated on this plan")
+        lo, hi = self._flat_span
+        ptr = tensor.data_ptr()
+        if not lo <= ptr < hi:
+            raise AssertionError(
+                f"{name} is not a view on the KV cache: storage 0x{ptr:x} is "
+                f"outside [0x{lo:x}, 0x{hi:x})")
+        want = reduce(lambda a, b: a * b, tensor.shape[1:], 1)
+        got = tensor.stride(0)
+        if got != want:
+            raise AssertionError(
+                f"{name} has row stride {got}, expected {want}: it lives in "
+                f"the cache but is no longer addressed one token at a time")
+        return tensor
 
     def _allocate_pool(self, entry_layouts,
                        max_num_pages: Optional[int] = None,
@@ -559,6 +766,9 @@ class KVCachePlan:
                            pool.data_ptr() + pool.numel() * pool.element_size())
         views = {}
         for g in self.groups:
+            if g.spec_name is None:      # placeholder group, holds nothing
+                views[g.group_id] = {}
+                continue
             if g.spec_name not in entry_layouts:
                 raise KeyError(
                     f"no entry layout given for stream '{g.spec_name}'")
@@ -671,6 +881,14 @@ def _resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
 
     if max_num_pages is not None:
         pages, source = max_num_pages, "explicit page count"
+    elif plan.page_id_bytes == 0:
+        # A page id holds nothing here, so the budget buys no pages and only
+        # has to cover the unpaged streams; the floor sets the count.
+        plan.pages_for_budget(resolve_kv_budget(kv_budget))   # budget check
+        pages = plan.pages_needed(max_num_batched_requests,
+                                  max_seq_length or 1,
+                                  max_num_batched_tokens)
+        source = f"budget {kv_budget} (no paged streams)"
     else:
         pages = plan.pages_for_budget(resolve_kv_budget(kv_budget))
         source = f"budget {kv_budget}"
@@ -691,15 +909,52 @@ def _resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
     used = plan.budget_bytes(pages)
     free, total = torch.cuda.mem_get_info(device)
     if verbose:
+        flat = (f" + {format_bytes(plan.flat_bytes)} unpaged"
+                if plan.flat_streams else "")
         print(f"KV pool: {pages} pages x "
-              f"{format_bytes(plan.page_id_bytes)} = {format_bytes(used)}  "
+              f"{format_bytes(plan.page_id_bytes)}{flat} = "
+              f"{format_bytes(used)}  "
               f"({source}; device has {format_bytes(free)} free of "
               f"{format_bytes(total)})")
     if used > free:
         raise ValueError(
-            f"the KV pool alone ({format_bytes(used)}) exceeds free memory "
+            f"the KV cache alone ({format_bytes(used)}) exceeds free memory "
             f"({format_bytes(free)}), before the model weights")
     return pages
+
+
+def _plan_with_no_paged_streams(max_seq_length: Optional[int],
+                                target_page_bytes: Optional[int] = None,
+                                default_block_size: int = 64,
+                                target_cc: Optional[int] = None
+                                ) -> KVCachePlan:
+    """The plan for a model whose every stream is unpaged.
+
+    It still carries ONE group, holding nothing -- not for the planner, but
+    because the runtime is compiled against MPK_NUM_KV_GROUPS and declares
+    ``int *paged_kv_indptr_buffer[G]`` and ``__shared__ int
+    smem_kv_indices[G][...]``; G == 0 makes those zero-length. Zero slots, so
+    zero bytes; a block as long as the run, so one page id per request.
+    """
+    if max_seq_length is None:
+        raise ValueError(
+            "a plan with only unpaged streams needs max_seq_length to size "
+            "its placeholder group")
+    if target_page_bytes is not None:
+        raise ValueError(
+            "target_page_bytes was given but no stream is paged, so there is "
+            "no page to size")
+    tile = default_kv_tile(target_cc)
+    block = -(-max(max_seq_length, 1) // tile) * tile
+    return KVCachePlan(
+        target_page_bytes=0,
+        num_slots=0,
+        groups=(KVCachePlan.Group(
+            group_id=0, spec_name=None, layer_ids=(), block_size=block,
+            entries_per_page=block, padding_bytes_per_page=0,
+            window_size=0, tile=tile, tile_declared=False),),
+        anchor_spec=None,
+    )
 
 
 def plan_kv_groups(

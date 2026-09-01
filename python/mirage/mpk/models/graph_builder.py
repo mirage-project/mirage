@@ -48,15 +48,21 @@ class GraphBuilder(abc.ABC):
 
     @staticmethod
     def kv_streams(config, page_size: int, world_size: int = 1):
-        """This model's KV streams, or None if it is not on the page pool yet.
+        """This model's KV streams. EVERY builder must override this.
 
         Called BEFORE the PersistentKernel exists, because the plan supplies
-        its kv_groups and the page-table meta tensors. A builder that returns
-        None keeps the old single-group `page_size=` path and hand-rolls its
-        own caches; migrating one means overriding this and reaching the
-        caches through `self.mpk.kv_plan.attach(self.mpk, layer)`.
+        its kv_groups and the page-table meta tensors. Caches are then reached
+        through `self.mpk.kv_plan.attach(self.mpk, layer)`.
+
+        A list of KVStream is the normal answer; a stream whose kernel reads
+        the cache flat says `paged=False`. `[]` is reserved for a model with
+        no KV cache at all, and is refused until one exists. Inheriting this
+        base is an error: it used to mean "fall back to KV 1.0", silently and
+        indistinguishably from "no KV".
         """
-        return None
+        raise NotImplementedError(
+            "this builder does not declare its KV streams; override "
+            "kv_streams()")
 
     @abc.abstractmethod
     def build_from_model(self, model_path: str | None = None):

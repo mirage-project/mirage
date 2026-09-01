@@ -35,6 +35,10 @@ from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64
 
+# Streams declare component dtypes as TORCH dtypes; `bfloat16` imported above
+# is mirage's own, for MPK tensors.
+bfloat16_t = torch.bfloat16
+
 # ---- Inkling architecture constants (config.json text_config) --------------
 HIDDEN_SIZE = 6144
 NUM_Q_HEADS = 64
@@ -67,12 +71,78 @@ LOGITS_MUP_DIV = 24.0
 EOS_TOKEN_ID = 200006
 
 
+def _text_config(config):
+    """Inkling's architecture lives under text_config; a flat config or a
+    plain dict is accepted too, as in build_from_model."""
+    inner = getattr(config, "text_config", None)
+    if inner is None and isinstance(config, dict):
+        inner = config.get("text_config")
+    return inner if inner is not None else config
+
+
+def _cfg_get(config, name, default):
+    if isinstance(config, dict):
+        return config.get(name, default)
+    return getattr(config, name, default)
+
+
+def inkling_kv_streams(config, page_size: int, world_size: int = 1):
+    """Inkling's two attention kinds are two KV streams, both UNPAGED.
+
+    inkling_attention reads context as one flat [max_ctx, kv_width] array
+    (`ctx_k + j * KV_STRIDE`) and the store writes absolute rows, so there is
+    no page table to give it.
+    """
+    from ...kv_planner import KVStream
+
+    if world_size != 1:
+        raise NotImplementedError(
+            "Inkling v1 supports world_size == 1 only, so its KV is not "
+            "sharded; see InklingBuilder.__init__")
+    tc = _text_config(config)
+    num_layers = _cfg_get(tc, "num_hidden_layers", NUM_LAYERS)
+    head_dim = _cfg_get(tc, "head_dim", HEAD_DIM)
+    local_layer_ids = _cfg_get(tc, "local_layer_ids", None)
+    if local_layer_ids is not None:
+        local_layer_ids = set(local_layer_ids)
+        is_local = lambda i: i in local_layer_ids          # noqa: E731
+    else:
+        is_local = lambda i: (i + 1) % 6 != 0              # noqa: E731
+
+    def stream(name, nkv, layers):
+        return KVStream(
+            name, layers=layers,
+            components=[("k", (nkv, head_dim), bfloat16_t),
+                        ("v", (nkv, head_dim), bfloat16_t)],
+            paged=False)
+
+    local = tuple(i for i in range(num_layers) if is_local(i))
+    glob = tuple(i for i in range(num_layers) if not is_local(i))
+    out = []
+    if local:
+        out.append(stream("local_attention", LOCAL_KV_HEADS, local))
+    if glob:
+        out.append(stream("global_attention", GLOBAL_KV_HEADS, glob))
+    return out
+
+
 @register_model_builder("Inkling", "thinkingmachines/Inkling", "inkling")
 class InklingBuilder(GraphBuilder):
-    def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
+    # The registry looks this up before the PersistentKernel exists; see
+    # GraphBuilder.kv_streams.
+    kv_streams = staticmethod(inkling_kv_streams)
+
+    def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None,
+                 kv_plan=None):
         super().__init__(mpk, weights)
-        self.max_num_pages = mpk.max_num_pages
-        self.page_size = mpk.page_size
+        # The plan owns the KV caches, unpaged though they are. Two callers,
+        # two sources, as in GptOssBuilder: a demo may build the plan and pass
+        # it, and through MPK it is built from kv_streams() before the
+        # PersistentKernel exists and arrives on it.
+        self.kv_plan = kv_plan if kv_plan is not None else getattr(
+            mpk, "kv_plan", None)
+        assert self.kv_plan is not None, (
+            "Inkling declares kv_streams, so MPK should have built a plan")
         self.world_size = mpk.world_size
         self.rank = mpk.mpi_rank
         self.input_tokens = mpk.meta_tensors["input_tokens"]
@@ -141,9 +211,10 @@ class InklingBuilder(GraphBuilder):
 
     @property
     def max_ctx(self) -> int:
-        if self.max_num_pages and self.page_size:
-            return self.max_num_pages * self.page_size
-        return getattr(self.mpk, "max_seq_length", None) or 8192
+        """Rows the flat cache holds. Indexed by absolute position, so this IS
+        the run length -- it used to be spelled `max_num_pages * page_size`,
+        which said nothing about pages."""
+        return self.mpk.max_seq_length
 
     # ------------------------------------------------------------- loading
     def build_from_config(self, model_config: MirageModelConfig):
@@ -398,15 +469,14 @@ class InklingBuilder(GraphBuilder):
             grid_dim=(grid_for_rmsnorm_linear_layer(extent), 1, 1),
             block_dim=(128, 1, 1))
 
-        # KV caches: 2D for attention reads, 4D view for the paged store
-        k_cache = self._attach(
-            self._pin(torch.zeros(self.max_ctx, kv_width,
-                                  dtype=torch.bfloat16, device="cuda")),
-            f"layer_{i}_k_cache")
-        v_cache = self._attach(
-            self._pin(torch.zeros(self.max_ctx, kv_width,
-                                  dtype=torch.bfloat16, device="cuda")),
-            f"layer_{i}_v_cache")
+        # KV caches from the plan: [max_ctx, nkv, D] per component. Once the
+        # kernel is paged this becomes `inkling_attention_layer(..., **kv)`
+        # and the views below go away.
+        kv = self.kv_plan.attach(mpk, i)
+        assert kv["group_id"] is None, (
+            f"layer {i} resolved to group {kv['group_id']}: inkling declares "
+            f"unpaged streams, and these tasks read the cache flat")
+        k_cache, v_cache = kv["k_cache"], kv["v_cache"]
         mpk.dflash_kv_store_layer(
             kv_in=k_normed, slot_mapping=self.step_dt,
             cache=mpk.view(k_cache, [self.max_ctx, 1, nkv, D]),
@@ -417,7 +487,9 @@ class InklingBuilder(GraphBuilder):
             grid_dim=(1, 1, 1), block_dim=(128, 1, 1), head_dim=D)
 
         mpk.inkling_attention_layer(
-            q=self.q_normed, ctx_k=k_cache, ctx_v=v_cache,
+            q=self.q_normed,
+            ctx_k=mpk.view(k_cache, [self.max_ctx, kv_width]),
+            ctx_v=mpk.view(v_cache, [self.max_ctx, kv_width]),
             blk_k=k_normed, blk_v=v_conv, bias=bias_buf, step=self.step_dt,
             output=self.attn_out,
             grid_dim=(nkv, 1, 1), block_dim=(128, 1, 1),

@@ -793,10 +793,10 @@ def test_merge_key_covers_every_declared_field():
 
     base = dict(components=[("k", (4, 64), torch.bfloat16)], window=0,
                 compress_ratio=1, block_size_multiple_of=None,
-                preferred_block_size=64)
+                preferred_block_size=64, paged=True)
     others = dict(components=[("k", (8, 64), torch.bfloat16)], window=128,
                   compress_ratio=2, block_size_multiple_of=64,
-                  preferred_block_size=128)
+                  preferred_block_size=128, paged=False)
 
     declared = {f.name for f in _fields(KVStream)} - {"name", "layers"}
     assert declared == set(base) == set(others), (
@@ -890,3 +890,296 @@ def test_deepseek_v3_leaves_the_mtp_slot_out_when_mtp_is_off():
     plan = build_kv_cache(streams, max_num_pages=4, device="cpu",
                           verbose=False)
     assert plan.num_slots == 61
+
+
+# ── unpaged streams ───────────────────────────────────────────────────────
+# Two halves: what the plan does for a flat stream, and what it does NOT do to
+# everyone else's plan.
+
+
+def _flat_streams(layers=(0, 1), h=8, d=64):
+    kv = [("k", (h, d), torch.bfloat16), ("v", (h, d), torch.bfloat16)]
+    return [KVStream("flat", layers=layers, components=kv, paged=False)]
+
+
+def test_unpaged_stream_gets_storage_but_no_group_or_page_table():
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_flat_streams(), kv_budget="1GiB",
+                              max_seq_length=256, device="cpu", verbose=False)
+    assert plan.flat_streams and not plan._layouts
+    assert plan.anchor_spec is None
+    # one placeholder group, holding nothing: the runtime is compiled against
+    # MPK_NUM_KV_GROUPS and declares arrays of that length.
+    assert len(plan.groups) == 1 and plan.groups[0].spec_name is None
+    assert plan.num_slots == 0 and plan.target_page_bytes == 0
+    assert plan.page_id_bytes == 0
+    assert plan.flat_bytes == 2 * 256 * (2 * 8 * 64 * 2)
+    assert plan.budget_bytes(plan.max_num_pages) == plan.flat_bytes
+
+
+def test_an_unpaged_stream_leaves_the_paged_plan_alone():
+    """The containment property, and the reason this is a stream flag rather
+    than a planner special case: an unpaged stream must not move a single
+    number in the plan the paged streams would have got."""
+    with _free_memory(64 << 30):
+        alone = build_kv_cache(_gpt_oss_shaped_streams(), max_num_pages=4,
+                               device="cpu", verbose=False)
+        together = build_kv_cache(
+            _gpt_oss_shaped_streams() + _flat_streams(layers=(8, 9)),
+            max_num_pages=4, max_seq_length=64, device="cpu", verbose=False)
+    assert together.target_page_bytes == alone.target_page_bytes
+    assert together.num_slots == alone.num_slots
+    assert together.anchor_spec == alone.anchor_spec
+    assert [(g.spec_name, g.block_size, g.window_size, g.entries_per_page)
+            for g in together.groups] == \
+           [(g.spec_name, g.block_size, g.window_size, g.entries_per_page)
+            for g in alone.groups]
+    # ...and the flat stream is nonetheless there and budgeted
+    assert together.flat_bytes > 0
+    assert together.budget_bytes(4) == alone.budget_bytes(4) + \
+        together.flat_bytes
+
+
+def test_unpaged_streams_refuse_every_knob_that_describes_a_page():
+    """All four describe a page. Accepting one on a stream that has no page
+    would silently ignore it -- a declared 512-token window that frees nothing
+    reads as an allocation the model is not getting."""
+    from dataclasses import fields as _fields
+
+    kv = [("k", (8, 64), torch.bfloat16)]
+    offenders = dict(window=128, compress_ratio=2,
+                     block_size_multiple_of=64, preferred_block_size=128)
+    paging_knobs = {f.name for f in _fields(KVStream)} - {
+        "name", "layers", "components", "paged"}
+    assert paging_knobs == set(offenders), (
+        f"KVStream paging knobs {sorted(paging_knobs)} are not all covered by "
+        f"this test's table {sorted(offenders)}")
+
+    for knob, value in offenders.items():
+        stream = KVStream("flat", layers=(0,), components=kv, paged=False,
+                          **{knob: value})
+        with _raises(ValueError):
+            stream._flat(capacity=128)
+    # the same stream without the knob is accepted, so the loop above is not
+    # passing because _flat refuses everything
+    KVStream("flat", layers=(0,), components=kv, paged=False)._flat(128)
+
+
+def test_unpaged_stream_needs_a_length_and_refuses_a_batch():
+    """Both limits were always true of these kernels; declaring the stream is
+    what turns them into checks."""
+    with _raises(ValueError):
+        build_kv_cache(_flat_streams(), max_num_pages=4, device="cpu",
+                       verbose=False)                       # no max_seq_length
+    with _free_memory(64 << 30):
+        with _raises(ValueError):
+            build_kv_cache(_flat_streams(), kv_budget="1GiB",
+                           max_seq_length=256, max_num_batched_requests=2,
+                           device="cpu", verbose=False)
+
+
+def test_the_budget_pays_for_the_unpaged_streams_first():
+    flat_bytes = 2 * 256 * (2 * 8 * 64 * 2)
+    with _free_memory(64 << 30):
+        with _raises(ValueError):
+            build_kv_cache(_flat_streams(), kv_budget=flat_bytes - 1,
+                           max_seq_length=256, device="cpu", verbose=False)
+        # and a budget that covers them, but nothing more, still plans
+        plan = build_kv_cache(_flat_streams(), kv_budget=flat_bytes,
+                              max_seq_length=256, device="cpu", verbose=False)
+    assert plan.flat_bytes == flat_bytes
+
+
+def test_attach_hands_out_flat_views_with_no_group_id():
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_flat_streams(), kv_budget="1GiB",
+                              max_seq_length=256, device="cpu", verbose=False)
+    mpk = _StubMPK()
+    for layer in (0, 1):
+        got = plan.attach(mpk, layer)
+        # same key set a paged layer gets; group_id None, not 0 (0 is real)
+        assert set(got) == {"k_cache", "v_cache", "group_id"}
+        assert got["group_id"] is None
+    assert len(mpk.attached) == 4
+    k0 = plan._flat_views[0]["k"]
+    assert k0.shape == (256, 8, 64) and k0.dtype == torch.bfloat16
+    # the two layers do not alias, and K and V within a layer do not either
+    assert k0.data_ptr() != plan._flat_views[1]["k"].data_ptr()
+    assert k0.data_ptr() != plan._flat_views[0]["v"].data_ptr()
+
+
+def test_attach_refuses_a_flat_cache_copied_off_the_plan():
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_flat_streams(), kv_budget="1GiB",
+                              max_seq_length=256, device="cpu", verbose=False)
+    view = plan._flat_views[0]["k"]
+    stream = plan.flat_streams[0]
+    copy = view.clone()
+    assert copy.shape == view.shape and torch.equal(copy, view)
+    with _raises(AssertionError):
+        plan._assert_in_flat(copy, stream, "copied")
+    # ...and a view still on the buffer but no longer one token row per step
+    strided = view[:, :4, :]
+    assert strided.data_ptr() == view.data_ptr()
+    with _raises(AssertionError):
+        plan._assert_in_flat(strided, stream, "strided")
+    # the honest view passes, so the two above are not failing for free
+    plan._assert_in_flat(view, stream, "view")
+
+
+def test_layer_info_names_the_unpaged_stream_instead_of_going_missing():
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_flat_streams(), kv_budget="1GiB",
+                              max_seq_length=256, device="cpu", verbose=False)
+    try:
+        plan._layer_info(0)
+    except KeyError as e:
+        assert "unpaged stream 'flat'" in str(e), str(e)
+    else:
+        raise AssertionError("expected KeyError")
+
+
+def test_a_plan_with_no_streams_at_all_is_refused():
+    with _raises(ValueError):
+        build_kv_cache([], max_num_pages=4, device="cpu", verbose=False)
+
+
+# ── the declaration is mandatory (three-state kv_streams) ─────────────────
+
+
+def test_every_registered_builder_declares_its_kv_streams():
+    """Inheriting GraphBuilder.kv_streams used to mean "fall back to KV 1.0",
+    indistinguishably from "this model has no KV"."""
+    from mirage.mpk.model_registry import _MODEL_BUILDERS
+    from mirage.mpk.models.graph_builder import GraphBuilder
+    import mirage.mpk.models  # noqa: F401  (registers the builders)
+
+    assert _MODEL_BUILDERS, "no builders registered; the import above moved"
+    undeclared = sorted({
+        cls.__name__ for cls in _MODEL_BUILDERS.values()
+        if getattr(cls, "kv_streams", None) is GraphBuilder.kv_streams})
+    assert not undeclared, (
+        f"{undeclared} inherit GraphBuilder.kv_streams; a model whose kernels "
+        f"read the cache flat declares KVStream(..., paged=False)")
+
+    with _raises(NotImplementedError):
+        GraphBuilder.kv_streams(None, 64)
+
+
+def test_inkling_declares_the_layout_its_builder_used_to_allocate():
+    """Inkling needs a checkpoint to run, so the evidence is the layout: each
+    layer must get exactly the tensor `torch.zeros(max_ctx, kv_width)` was."""
+    from mirage.mpk.models.inkling.builder import inkling_kv_streams
+
+    class _Cfg:
+        num_hidden_layers = 66
+        head_dim = 128
+
+    streams = inkling_kv_streams(_Cfg(), page_size=64)
+    assert [st.name for st in streams] == ["local_attention",
+                                           "global_attention"]
+    assert all(not st.paged for st in streams)
+    local, glob = streams
+    # (i+1) % 6 != 0 -> 55 local, 11 global; the global ones are 5, 11, ..., 65
+    assert len(local.layers) == 55 and len(glob.layers) == 11
+    assert glob.layers == tuple(range(5, 66, 6))
+    assert local.per_entry_bytes == 2 * 16 * 128 * 2      # K+V, 16 kv heads
+    assert glob.per_entry_bytes == 2 * 8 * 128 * 2        # ...and 8
+
+    max_ctx = 8192
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(streams, kv_budget="8GiB",
+                              max_seq_length=max_ctx, device="cpu",
+                              verbose=False)
+    # exactly what 55 * 8192 * 8192 + 11 * 8192 * 4096 came to by hand
+    assert plan.flat_bytes == 55 * max_ctx * 8192 + 11 * max_ctx * 4096
+    for layer, nkv in ((0, 16), (5, 8)):
+        for comp in ("k", "v"):
+            view = plan._flat_views[layer][comp]
+            assert view.shape == (max_ctx, nkv, 128)
+            assert view.dtype == torch.bfloat16
+            # the builder views this as [max_ctx, nkv * 128]; that is only the
+            # same tensor if the rows are contiguous and packed
+            assert view.stride() == (nkv * 128, 128, 1)
+            assert view.is_contiguous()
+
+
+def test_dflash_declares_one_unpaged_stream_at_its_own_layer_ids():
+    from mirage.mpk.models.dflash.builder import dflash_kv_streams
+
+    cfg = {"num_hidden_layers": 6, "num_key_value_heads": 8, "head_dim": 128}
+    streams = dflash_kv_streams(cfg, layer_id_base=61)
+    assert len(streams) == 1 and not streams[0].paged
+    # off the target's ids, as Eagle3's draft stream is
+    assert streams[0].layers == tuple(range(61, 67))
+    assert streams[0].per_entry_bytes == 2 * 8 * 128 * 2
+    # a window is NOT declared: the draft writes verifier context at absolute
+    # slots, so SWA is a compute-time limit, not an allocation (vLLM's
+    # laguna_dflash nulls attn.sliding_window for the same reason)
+    assert streams[0].window == 0
+
+
+def test_an_unpaged_plan_builds_a_persistent_kernel():
+    """The placeholder group's reason for existing, checked rather than
+    argued: PersistentKernel is compiled against MPK_NUM_KV_GROUPS, so an
+    unpaged model must still present exactly one group."""
+    if not torch.cuda.is_available():
+        import pytest
+        pytest.skip("needs a device: PersistentKernel attaches cuda tensors")
+    from mirage.mpk.persistent_kernel import PersistentKernel
+    from mirage.mpk.models.inkling.builder import inkling_kv_streams
+
+    class _Cfg:
+        num_hidden_layers = 66
+        head_dim = 128
+
+    S = 2048
+    plan = build_kv_cache(inkling_kv_streams(_Cfg(), page_size=64),
+                          kv_budget="4GiB", max_seq_length=S, verbose=False)
+    meta = dict(plan.build_meta_tensors(max_seq_length=S,
+                                        max_num_batched_requests=1))
+    meta.update({
+        "step": torch.zeros(1, dtype=torch.int32, device="cuda"),
+        "tokens": torch.zeros(1, S, dtype=torch.int64, device="cuda"),
+        "input_tokens": torch.zeros(1, 1, dtype=torch.int64, device="cuda"),
+        "output_tokens": torch.zeros(1, 1, dtype=torch.int64, device="cuda"),
+        "num_new_tokens": torch.zeros(1, dtype=torch.int32, device="cuda"),
+        "prompt_lengths": torch.zeros(1, dtype=torch.int32, device="cuda"),
+        "qo_indptr_buffer": torch.zeros(2, dtype=torch.int32, device="cuda"),
+    })
+    pk = PersistentKernel(
+        mode="offline", world_size=1, mpi_rank=0, num_workers=96,
+        num_local_schedulers=4, num_remote_schedulers=0, max_seq_length=S,
+        max_num_batched_requests=1, max_num_batched_tokens=1,
+        max_num_pages=plan.max_num_pages, page_size=None,
+        kv_groups=plan.group_specs(), meta_tensors=meta, profiler_tensor=None,
+        trace_name=None, spec_decode_config=None, use_cutlass_kernel=False)
+    assert len(pk.kv_groups) == 1
+    pk._check_kv_capacity()          # one page id per request, and it fits
+
+    kv = plan.attach(pk, 0)
+    assert kv["group_id"] is None
+    k = kv["k_cache"]
+    assert k.num_dims == 3
+    assert [k.dim(i) for i in range(3)] == [S, 16, 128]
+
+
+def test_dflash_attaches_each_layers_cache_once():
+    """Both halves of a DFlash step want the same layer's cache, and
+    attach_input makes a new graph input per call. DFlashBuilder needs weights
+    to construct, so this drives the accessor directly."""
+    from mirage.mpk.models.dflash.builder import (
+        DFlashBuilder, dflash_kv_streams,
+    )
+    cfg = {"num_hidden_layers": 2, "num_key_value_heads": 8, "head_dim": 128}
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(dflash_kv_streams(cfg, layer_id_base=61),
+                              kv_budget="64MiB", max_seq_length=128,
+                              device="cpu", verbose=False)
+    b = object.__new__(DFlashBuilder)
+    b.mpk, b.kv_plan, b.layer_id_base, b._kv_cache = (
+        _StubMPK(), plan, 61, {})
+    first = b._kv(0)
+    assert b._kv(0) is first and b._kv(0)[0] is first[0]
+    b._kv(1)
+    assert len(b.mpk.attached) == 4, b.mpk.attached      # 2 layers x (k, v)

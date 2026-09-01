@@ -336,7 +336,10 @@ class MPK:
     def _build_kv_plan(self, args):
         """Ask the registered builder for its KV streams and size the pool.
 
-        Returns None for a model that is not on the page pool yet.
+        Returns None only when there is no registered builder to ask -- a
+        caller driving PersistentKernel directly (test mode, demos that build
+        their own plan). A registered builder must declare; see
+        GraphBuilder.kv_streams.
         """
         if args.model_name is None:
             return None
@@ -344,9 +347,13 @@ class MPK:
             builder_cls = get_builder(args.model_name)
         except ValueError:
             return None
+        from .models.graph_builder import GraphBuilder
         streams_fn = getattr(builder_cls, "kv_streams", None)
-        if streams_fn is None:
-            return None
+        if streams_fn is None or streams_fn is GraphBuilder.kv_streams:
+            raise NotImplementedError(
+                f"{builder_cls.__name__} ({args.model_name}) does not declare "
+                f"its KV streams. Override kv_streams(); a model whose kernels "
+                f"read the cache flat declares KVStream(..., paged=False).")
         from transformers import AutoConfig
         config = AutoConfig.from_pretrained(args.model_path or args.model_name)
         # page_size is the stream's PREFERRED block size, so passing one with a
@@ -354,8 +361,13 @@ class MPK:
         # planner nothing to derive. A budget means: derive it.
         page_size = None if args.kv_budget is not None else args.page_size
         streams = streams_fn(config, page_size, self.world_size)
+        if streams is None:
+            raise NotImplementedError(
+                f"{builder_cls.__name__}.kv_streams() returned None.")
         if not streams:
-            return None
+            raise NotImplementedError(
+                f"{builder_cls.__name__}.kv_streams() declared no KV cache; "
+                f"attention-free models are not supported yet.")
         from .kv_planner import build_kv_cache
         return build_kv_cache(
             streams,
