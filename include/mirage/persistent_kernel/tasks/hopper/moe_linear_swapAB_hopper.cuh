@@ -416,7 +416,8 @@ __device__ __forceinline__ void
 
             int32_t token_idx =
                 n_tile * MMA_N + tid_in_wg / cp_async_group_size;
-            int32_t topk_idx = tRoutingIndex(token_idx);
+            int32_t topk_idx =
+                (token_idx < BATCH_SIZE) ? tRoutingIndex(token_idx) : 0;
             if (token_idx < BATCH_SIZE && topk_idx > 0) {
               if constexpr (W13_LINEAR) {
                 cute::copy(
@@ -557,17 +558,17 @@ __device__ __forceinline__ void
                         (((i & 3) >> 1) << 3) + m_base;
             int n_idx = ((i >> 2) << 3) + ((idx_in_warp & 3) << 1) + (i & 1);
 
-            int topk_idx = tRoutingIndex(n_idx);
+            int topk_idx = (n_idx < BATCH_SIZE) ? tRoutingIndex(n_idx) : 0;
 
-            bool pred = (n_idx < BATCH_SIZE && tRoutingIndex(n_idx) > 0 &&
-                         m_idx < OUTPUT_SIZE);
+            bool pred =
+                (n_idx < BATCH_SIZE && topk_idx > 0 && m_idx < OUTPUT_SIZE);
             TypeC fragD = TypeAcc_to_TypeC(accum(i));
 
             if constexpr (!NOBIAS) {
               fragD += mBias(n_idx, m_idx, expert_idx);
             }
             if (pred) {
-              mOutput(n_idx, m_idx, tRoutingIndex(n_idx) - 1) = fragD;
+              mOutput(n_idx, m_idx, topk_idx - 1) = fragD;
             }
           }
         } // end for n_tile
