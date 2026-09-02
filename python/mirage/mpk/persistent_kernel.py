@@ -17,7 +17,6 @@ from .multigpu import (
   auto_select_allreduce_implementation
 )
 from typing import Optional
-from .kv_planner import KVGroupSpec
 
 HARD_CODE = """
 #include <Python.h>
@@ -444,7 +443,6 @@ class PersistentKernel:
         sampling_seed: int = 42,
         sampling_topk_max: int = 32,
         kv_groups: list = None,
-        page_size: int = None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -478,17 +476,16 @@ class PersistentKernel:
         self.max_num_batched_requests = max_num_batched_requests
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_pages = max_num_pages
-        # kv_groups is the source of truth for block sizes; page_size is the
-        # single-group shorthand and must agree when both are given.
-        if kv_groups is None:
-            assert page_size is not None, (
-                "PersistentKernel needs kv_groups (or page_size as the "
-                "single-group shorthand)")
-            kv_groups = [KVGroupSpec(block_size=page_size)]
-        elif page_size is not None:
-            assert page_size == kv_groups[0].block_size, (
-                f"page_size {page_size} disagrees with "
-                f"kv_groups[0].block_size {kv_groups[0].block_size}")
+        # kv_groups is the only source of truth for the page geometry. The
+        # page_size= shorthand is gone: it named group 0's block size, which
+        # stopped being a property of the kernel once there could be more than
+        # one group, and it left a graph that needs no PAGE TABLE nothing to
+        # say but an invented number. That answer is kv_groups=[] -- which
+        # says nothing about whether a KV cache exists: inkling and dflash
+        # have one, read flat, and declare zero groups.
+        assert kv_groups is not None, (
+            "PersistentKernel needs kv_groups; pass [] for a graph with no "
+            "paged KV cache")
         self.kv_groups = kv_groups
         self.eos_token_id = eos_token_id
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
@@ -535,12 +532,23 @@ class PersistentKernel:
         qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
         # Asserts "==" below is not guaranteed by vllm, because the shape is changed depending on real situation. But the mem space won't change.
         assert qo_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"qo_indptr_buffer.shape: {qo_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
-        paged_kv_indptr_buffer = self.meta_tensors["paged_kv_indptr_buffer_0"]
-        assert paged_kv_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"paged_kv_indptr_buffer_0.shape: {paged_kv_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
-        paged_kv_indices_buffer = self.meta_tensors["paged_kv_indices_buffer_0"]
         self._check_kv_capacity()
-        paged_kv_last_page_len_buffer = self.meta_tensors["paged_kv_last_page_len_buffer_0"]
-        assert paged_kv_last_page_len_buffer.shape[0] <= self.max_num_batched_requests, f"paged_kv_last_page_len_buffer_0.shape: {paged_kv_last_page_len_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
+        # EVERY group's page table, not just group 0's -- and none at all for a
+        # model that declared no paged KV, where this loop does not run.
+        for _g in range(len(self.kv_groups)):
+            _indptr = self.meta_tensors[f"paged_kv_indptr_buffer_{_g}"]
+            _lastlen = self.meta_tensors[f"paged_kv_last_page_len_buffer_{_g}"]
+            assert _indptr.shape[0] <= self.max_num_batched_requests + 1, (
+                f"paged_kv_indptr_buffer_{_g}.shape: {_indptr.shape}, "
+                f"max_num_batched_requests: {self.max_num_batched_requests}")
+            assert _lastlen.shape[0] <= self.max_num_batched_requests, (
+                f"paged_kv_last_page_len_buffer_{_g}.shape: {_lastlen.shape}, "
+                f"max_num_batched_requests: {self.max_num_batched_requests}")
+            for _name in ("indptr_buffer", "indices_buffer",
+                          "last_page_len_buffer"):
+                _t = self.meta_tensors[f"paged_kv_{_name}_{_g}"]
+                assert _t.dtype == torch.int32, (
+                    f"paged_kv_{_name}_{_g}.dtype: {_t.dtype}")
 
         # check type of meta_tensors
         assert self.meta_tensors["tokens"].dtype == torch.int64, f"tokens.dtype: {self.meta_tensors['tokens'].dtype}"
@@ -549,9 +557,6 @@ class PersistentKernel:
         assert self.meta_tensors["num_new_tokens"].dtype == torch.int32, f"num_new_tokens.dtype: {self.meta_tensors['num_new_tokens'].dtype}"
         assert self.meta_tensors["prompt_lengths"].dtype == torch.int32, f"prompt_lengths.dtype: {self.meta_tensors['prompt_lengths'].dtype}"
         assert qo_indptr_buffer.dtype == torch.int32, f"qo_indptr_buffer.dtype: {qo_indptr_buffer.dtype}"
-        assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer_0.dtype: {paged_kv_indptr_buffer.dtype}"
-        assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer_0.dtype: {paged_kv_indices_buffer.dtype}"
-        assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer_0.dtype: {paged_kv_last_page_len_buffer.dtype}"
 
     def _kv_indices_span(self, group_id: int) -> int:
         """Entries a group's page-table index buffer must hold: one slot per
@@ -667,7 +672,11 @@ class PersistentKernel:
             "max_num_batched_requests": 1,
             "max_num_batched_tokens": 1,
             "max_num_pages": 1,
-            "page_size": 1,
+            # No page table by default. Most test-mode graphs have no KV
+            # cache at all; inkling/dflash attention have one but read it
+            # flat. Either way they want zero groups; the ones that really
+            # do page override this.
+            "kv_groups": [],
             "meta_tensors": dict(),
             "profiler_tensor": None,
             "trace_name": "test_trace",

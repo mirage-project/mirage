@@ -382,7 +382,7 @@ __device__ __forceinline__ bool
 
   // Step 3: prepare next batch
   int num_reqs = 0, num_tokens = 0;
-  int num_pages_g[MPK_NUM_KV_GROUPS];
+  int num_pages_g[MPK_NUM_KV_GROUPS_ARRAY];
   for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
     num_pages_g[g] = 0;
   }
@@ -600,7 +600,7 @@ __device__ __forceinline__ bool
       "MPK_MAX_NUM_PAGES exceeds its static shared-memory budget. "
       "Lower the KV budget, raise the page size (fewer, larger pages), "
       "or use the offline scheduler.");
-  __shared__ int smem_kv_indices[MPK_NUM_KV_GROUPS][MPK_MAX_NUM_PAGES];
+  __shared__ int smem_kv_indices[MPK_NUM_KV_GROUPS_ARRAY][MPK_MAX_NUM_PAGES];
   int page_queue_head = *config.page_queue_head;
   int page_queue_tail = *config.page_queue_tail;
   int gpu_req_head = *config.gpu_req_head;
@@ -700,7 +700,7 @@ __device__ __forceinline__ bool
 
   // ── Step 3: compact active requests ────────────────────────────────────────
   int num_reqs = 0, num_tokens = 0;
-  int num_pages_g[MPK_NUM_KV_GROUPS];
+  int num_pages_g[MPK_NUM_KV_GROUPS_ARRAY];
   for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
     num_pages_g[g] = 0;
   }

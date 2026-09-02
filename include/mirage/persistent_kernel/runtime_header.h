@@ -361,6 +361,8 @@ struct RuntimeConfig {
 #ifndef MPK_NUM_KV_GROUPS
 #define MPK_NUM_KV_GROUPS 1
 #endif
+// A model with no paged KV declares zero groups.
+#define MPK_NUM_KV_GROUPS_ARRAY (MPK_NUM_KV_GROUPS > 0 ? MPK_NUM_KV_GROUPS : 1)
 // Tokens per KV tile in the windowed attention kernel.
 #ifndef MPK_KV_WINDOW_TILE
 #define MPK_KV_WINDOW_TILE 64

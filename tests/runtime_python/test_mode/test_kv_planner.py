@@ -898,10 +898,8 @@ def test_unpaged_stream_gets_storage_but_no_group_or_page_table():
                               max_seq_length=256, device="cpu", verbose=False)
     assert plan.flat_streams and not plan._layouts
     assert plan.anchor_spec is None
-    # one placeholder group, holding nothing: the runtime is compiled against
-    # MPK_NUM_KV_GROUPS and declares arrays of that length.
-    assert len(plan.groups) == 1 and plan.groups[0].spec_name is None
-    assert plan.num_slots == 0 and plan.target_page_bytes == 0
+    assert plan.groups == () and plan.num_slots == 0
+    assert plan.target_page_bytes == 0
     assert plan.page_id_bytes == 0
     assert plan.flat_bytes == 2 * 256 * (2 * 8 * 64 * 2)
     assert plan.budget_bytes(plan.max_num_pages) == plan.flat_bytes
@@ -1028,9 +1026,9 @@ def test_dflash_declares_one_unpaged_stream_at_its_own_layer_ids():
 
 
 def test_an_unpaged_plan_builds_a_persistent_kernel():
-    """The placeholder group's reason for existing, checked rather than
-    argued: PersistentKernel is compiled against MPK_NUM_KV_GROUPS, so an
-    unpaged model must still present exactly one group."""
+    """A model with no paged KV presents ZERO groups, and PersistentKernel
+    takes them -- checked against the real constructor and capacity check,
+    since MPK_NUM_KV_GROUPS becomes a -D and dimensions device-side arrays."""
     if not torch.cuda.is_available():
         import pytest
         pytest.skip("needs a device: PersistentKernel attaches cuda tensors")
@@ -1059,11 +1057,11 @@ def test_an_unpaged_plan_builds_a_persistent_kernel():
         mode="offline", world_size=1, mpi_rank=0, num_workers=96,
         num_local_schedulers=4, num_remote_schedulers=0, max_seq_length=S,
         max_num_batched_requests=1, max_num_batched_tokens=1,
-        max_num_pages=plan.max_num_pages, page_size=None,
+        max_num_pages=plan.max_num_pages,
         kv_groups=plan.group_specs(), meta_tensors=meta, profiler_tensor=None,
         trace_name=None, spec_decode_config=None, use_cutlass_kernel=False)
-    assert len(pk.kv_groups) == 1
-    pk._check_kv_capacity()          # one page id per request, and it fits
+    assert pk.kv_groups == []
+    pk._check_kv_capacity()          # nothing demands a page, and it fits
 
     kv = plan.attach(pk, 0)
     assert kv["group_id"] is None

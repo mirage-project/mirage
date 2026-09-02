@@ -315,10 +315,6 @@ class MPK:
         if streams is None:
             raise NotImplementedError(
                 f"{builder_cls.__name__}.kv_streams() returned None.")
-        if not streams:
-            raise NotImplementedError(
-                f"{builder_cls.__name__}.kv_streams() declared no KV cache; "
-                f"attention-free models are not supported yet.")
         return build_kv_cache(
             streams,
             kv_budget=args.kv_budget,

@@ -95,7 +95,6 @@ def main():
         max_num_batched_tokens=NUM_TOKENS,
         max_num_pages=plan.max_num_pages,
         kv_groups=plan.group_specs(),
-        page_size=None,   # kv_groups is the source of truth for the block size
     )
     params["meta_tensors"] = {
         "prompt_lengths": torch.tensor([NUM_TOKENS], dtype=torch.int32,

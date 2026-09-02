@@ -20,6 +20,7 @@ import sys
 import torch
 
 import mirage
+from mirage.mpk.kv_planner import KVGroupSpec
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -67,7 +68,8 @@ def main():
     params["num_local_schedulers"] = num_schedulers
     params["max_num_batched_tokens"] = T
     params["max_num_batched_requests"] = 1
-    params["page_size"] = 64
+    PAGE_SIZE = 64
+    params["kv_groups"] = [KVGroupSpec(block_size=PAGE_SIZE)]
     params["max_num_pages"] = 4
     params["max_seq_length"] = 256
     params["meta_tensors"] = {
@@ -93,7 +95,7 @@ def main():
         qn_w = (0.5 + torch.rand(HEAD_DIM, device=device)).to(torch.bfloat16)
         kn_w = (0.5 + torch.rand(HEAD_DIM, device=device)).to(torch.bfloat16)
         cos, sin = make_cos_sin(params["max_seq_length"], rd, theta, device)
-        k_cache = torch.zeros(params["max_num_pages"], params["page_size"],
+        k_cache = torch.zeros(params["max_num_pages"], PAGE_SIZE,
                               NUM_KV_HEADS, HEAD_DIM,
                               dtype=torch.bfloat16, device=device)
         v_cache = torch.zeros_like(k_cache)

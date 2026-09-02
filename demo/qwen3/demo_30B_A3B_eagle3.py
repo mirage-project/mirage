@@ -207,7 +207,6 @@ if __name__ == "__main__":
         _streams.append(draft_kv_stream(
             load_eagle3_draft_config(args.eagle3_draft_path),
             layer_id=_draft_layer_id,
-            page_size=args.page_size,
             world_size=world_size))
     try:
         kv_plan = build_kv_cache(

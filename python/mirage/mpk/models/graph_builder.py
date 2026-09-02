@@ -58,11 +58,9 @@ class GraphBuilder(abc.ABC):
         its kv_groups and the page-table meta tensors. Caches are then reached
         through `self.mpk.kv_plan.attach(self.mpk, layer)`.
 
-        A list of KVStream is the normal answer; a stream whose kernel reads
-        the cache flat says `paged=False`. `[]` is reserved for a model with
-        no KV cache at all, and is refused until one exists. Inheriting this
-        base is an error: it used to mean "fall back to KV 1.0", silently and
-        indistinguishably from "no KV".
+        A stream whose kernel reads the cache flat says `paged=False`, and gets
+        storage and a budget but no page table. `[]` means this model has no KV
+        cache AT ALL (different from `paged=False`).
         """
         raise NotImplementedError(
             "this builder does not declare its KV streams; override "

@@ -227,7 +227,7 @@ if __name__ == "__main__":
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
             max_num_pages=args.max_num_pages,
-            page_size=args.page_size,
+            kv_groups=[mi.mpk.kv_planner.KVGroupSpec(block_size=args.page_size)],
             eos_token_id=model.config.eos_token_id,
             meta_tensors={
                 "step": step,
@@ -405,7 +405,7 @@ if __name__ == "__main__":
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
             max_num_pages=args.max_num_pages,
-            page_size=args.page_size,
+            kv_groups=[mi.mpk.kv_planner.KVGroupSpec(block_size=args.page_size)],
             eos_token_id=model.config.eos_token_id,
             meta_tensors={
                 "step": step.clone(),

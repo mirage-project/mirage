@@ -256,11 +256,6 @@ def build_kv_cache(streams, *,
     flat_streams = [st for st in streams if not st.paged]
     paged_streams = _merge_identical_streams(
         [st for st in streams if st.paged])
-    if not streams:
-        raise ValueError(
-            "no KV streams declared. A model with no KV cache at all is not "
-            "supported yet; a model whose kernels read a flat cache declares "
-            "KVStream(..., paged=False).")
     if kv_budget is not None and max_seq_length is None:
         raise ValueError(
             "max_seq_length is required with kv_budget: a budget is sized to "
@@ -285,7 +280,7 @@ def build_kv_cache(streams, *,
         plan = plan_kv_groups([st._spec() for st in paged_streams],
                               **plan_kwargs)
     else:
-        plan = _plan_with_no_paged_streams(max_seq_length, **plan_kwargs)
+        plan = _plan_with_no_paged_streams(**plan_kwargs)
     plan._layouts = {st.name: list(st.components) for st in paged_streams}
     plan.flat_streams = tuple(st._flat(max_seq_length) for st in flat_streams)
     _resolve_pool_size(plan, kv_budget=kv_budget, max_num_pages=max_num_pages,
@@ -453,8 +448,7 @@ class KVCachePlan:
                 f"{format_bytes(self.flat_bytes)}, more than the "
                 f"{format_bytes(budget_bytes)} budget")
         if self.page_id_bytes == 0:
-            # placeholder group only; the floor decides the count
-            return 0
+            return 0                 # no paged group; the floor sets the count
         return remaining // self.page_id_bytes
 
     def _pool_pages(self, given: Optional[int]) -> int:
@@ -543,9 +537,7 @@ class KVCachePlan:
             for st in self.flat_streams]
         if not self.anchor_spec:
             return "\n".join(
-                ["KV cache: no paged stream; one placeholder group holding "
-                 "nothing, so the runtime still compiles at "
-                 "MPK_NUM_KV_GROUPS=1"] + flat_lines)
+                ["KV cache: no paged stream, so ZERO KV groups"] + flat_lines)
         lines = [
             f"KV page: {format_bytes(self.target_page_bytes)} x "
             f"{self.num_slots} slot(s) = {format_bytes(self.page_id_bytes)} "
@@ -882,8 +874,8 @@ def _resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
     if max_num_pages is not None:
         pages, source = max_num_pages, "explicit page count"
     elif plan.page_id_bytes == 0:
-        # A page id holds nothing here, so the budget buys no pages and only
-        # has to cover the unpaged streams; the floor sets the count.
+        # No paged group: a page id holds nothing, so the budget buys no pages
+        # and only has to cover the unpaged streams.
         plan.pages_for_budget(resolve_kv_budget(kv_budget))   # budget check
         pages = plan.pages_needed(max_num_batched_requests,
                                   max_seq_length or 1,
@@ -903,6 +895,8 @@ def _resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
                 f"tokens need {floor} "
                 f"({format_bytes(plan.budget_bytes(floor))})")
 
+    # MPK_MAX_NUM_PAGES cannot be zero even when nothing allocates a page.
+    pages = max(pages, 1)
     plan.max_num_pages = pages          # both sizing sites read it from here
     if verbose:
         print(plan.describe(max_seq_length))
@@ -923,38 +917,19 @@ def _resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
     return pages
 
 
-def _plan_with_no_paged_streams(max_seq_length: Optional[int],
-                                target_page_bytes: Optional[int] = None,
+def _plan_with_no_paged_streams(target_page_bytes: Optional[int] = None,
                                 default_block_size: int = 64,
                                 target_cc: Optional[int] = None
                                 ) -> KVCachePlan:
-    """The plan for a model whose every stream is unpaged.
+    """The plan for a model with no paged KV get ZERO groups.
 
-    It still carries ONE group, holding nothing -- not for the planner, but
-    because the runtime is compiled against MPK_NUM_KV_GROUPS and declares
-    ``int *paged_kv_indptr_buffer[G]`` and ``__shared__ int
-    smem_kv_indices[G][...]``; G == 0 makes those zero-length. Zero slots, so
-    zero bytes; a block as long as the run, so one page id per request.
     """
-    if max_seq_length is None:
-        raise ValueError(
-            "a plan with only unpaged streams needs max_seq_length to size "
-            "its placeholder group")
     if target_page_bytes is not None:
         raise ValueError(
             "target_page_bytes was given but no stream is paged, so there is "
             "no page to size")
-    tile = default_kv_tile(target_cc)
-    block = -(-max(max_seq_length, 1) // tile) * tile
-    return KVCachePlan(
-        target_page_bytes=0,
-        num_slots=0,
-        groups=(KVCachePlan.Group(
-            group_id=0, spec_name=None, layer_ids=(), block_size=block,
-            entries_per_page=block, padding_bytes_per_page=0,
-            window_size=0, tile=tile, tile_declared=False),),
-        anchor_spec=None,
-    )
+    return KVCachePlan(target_page_bytes=0, num_slots=0, groups=(),
+                       anchor_spec=None)
 
 
 def plan_kv_groups(
