@@ -366,6 +366,31 @@ __device__ __forceinline__ bool
           }
         }
       }
+#ifndef MPK_SPEC_DECODE
+      else {
+        // Sliding window: return the pages this request can no longer read.
+        // The page-table span is kept and the slot poisoned with -1.
+        int new_step = step + step_advance;
+        for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
+          int bs = config.kv_group_block_sizes[g];
+          int kv_indptr_g = config.paged_kv_indptr_buffer[g][i];
+          int num_old_pages_g =
+              config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
+          int first_live =
+              first_live_page(new_step, config.kv_group_window_sizes[g], bs);
+          for (int j = 0; j < first_live && j < num_old_pages_g; j++) {
+            int page_id = config.paged_kv_indices_buffer[g][kv_indptr_g + j];
+            if (page_id < 0) {
+              continue; // recycled on an earlier step
+            }
+            MPK_KV_LOG(2, g, i, page_id);
+            config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
+            page_queue_tail++;
+            config.paged_kv_indices_buffer[g][kv_indptr_g + j] = -1;
+          }
+        }
+      }
+#endif
     }
   }
 
@@ -446,24 +471,6 @@ __device__ __forceinline__ bool
               config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
           page_queue_head++;
         }
-#ifndef MPK_SPEC_DECODE
-        // Sliding window: return the pages this request can no longer read.
-        // The page-table span is kept and the slot poisoned with -1.
-        {
-          int first_live =
-              first_live_page(step, config.kv_group_window_sizes[g], bs);
-          for (int j = 0; j < first_live && j < num_new_pages_g; j++) {
-            int page_id = config.paged_kv_indices_buffer[g][num_pages_g[g] + j];
-            if (page_id < 0) {
-              continue; // already recycled on an earlier step
-            }
-            MPK_KV_LOG(2, g, num_reqs, page_id);
-            config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
-            page_queue_tail++;
-            config.paged_kv_indices_buffer[g][num_pages_g[g] + j] = -1;
-          }
-        }
-#endif
         num_pages_g[g] += num_new_pages_g;
       }
       num_tokens += num_new_tokens;
@@ -687,6 +694,30 @@ __device__ __forceinline__ bool
         }
       }
     }
+#ifndef MPK_SPEC_DECODE
+    else {
+      // Sliding window: return the pages this request can no longer read.
+      // The page-table span is kept and the slot poisoned with -1.
+      int new_step = step + num_tokens;
+      for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
+        int bs = config.kv_group_block_sizes[g];
+        int kv_indptr_g = config.paged_kv_indptr_buffer[g][i];
+        int num_old_pages_g =
+            config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
+        int first_live =
+            first_live_page(new_step, config.kv_group_window_sizes[g], bs);
+        for (int j = 0; j < first_live && j < num_old_pages_g; j++) {
+          int page_id = config.paged_kv_indices_buffer[g][kv_indptr_g + j];
+          if (page_id < 0) {
+            continue; // already recycled on an earlier step
+          }
+          config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
+          page_queue_tail++;
+          config.paged_kv_indices_buffer[g][kv_indptr_g + j] = -1;
+        }
+      }
+    }
+#endif
   }
 
   // ── Step 2: snapshot current kv_indices per group to shared memory ─────────
@@ -755,21 +786,6 @@ __device__ __forceinline__ bool
             config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
         page_queue_head++;
       }
-#ifndef MPK_SPEC_DECODE
-      {
-        int first_live =
-            first_live_page(step, config.kv_group_window_sizes[g], bs);
-        for (int j = 0; j < first_live && j < num_new_pages_g; j++) {
-          int page_id = config.paged_kv_indices_buffer[g][num_pages_g[g] + j];
-          if (page_id < 0) {
-            continue; // already recycled on an earlier step
-          }
-          config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
-          page_queue_tail++;
-          config.paged_kv_indices_buffer[g][num_pages_g[g] + j] = -1;
-        }
-      }
-#endif
       num_pages_g[g] += num_new_pages_g;
     }
 

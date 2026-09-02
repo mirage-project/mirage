@@ -39,11 +39,10 @@ class MirageModelConfig:
 class GraphBuilder(abc.ABC):
     """Base for the per-model task-graph builders.
 
-    A subclass reaches its KV caches through `self.mpk.kv_plan` -- one way in,
-    not two. Whoever constructs the PersistentKernel necessarily already has
-    the plan (its kv_groups and page tables come from it), so it rides on the
-    kernel; a second constructor argument would only be another way to say the
-    same thing, and a way for the two to disagree.
+    A subclass reaches its KV caches through `self.mpk.kv_plan`. Whoever
+    constructs the PersistentKernel already holds the plan -- its kv_groups
+    and page tables come from it -- so the plan rides on the kernel rather
+    than being passed to the builder separately.
     """
 
     def __init__(self, mpk, weights: Optional[Dict[str, Any]] = None):
@@ -68,14 +67,8 @@ class GraphBuilder(abc.ABC):
 
     @staticmethod
     def load_config(model_name: str, model_path: str | None = None):
-        """The config to hand kv_streams(). AutoConfig by default.
-
-        A hook because AutoConfig does not know every architecture MPK
-        supports -- Inkling is not in transformers' mapping, and its builder
-        already reads config.json directly. Without this, declaring KV streams
-        would silently require every registered model to be AutoConfig-
-        loadable, which is a requirement about transformers, not about MPK.
-        """
+        """The config to hand kv_streams(). AutoConfig by default; override
+        it for an architecture transformers does not know."""
         from transformers import AutoConfig
 
         return AutoConfig.from_pretrained(model_path or model_name)

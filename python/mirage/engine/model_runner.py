@@ -33,21 +33,17 @@ class RunnerConfig:
     max_num_batched_tokens: int = 8
     max_seq_length: int = 512
     kv_budget: Optional[str] = "2GiB"
-    """Bytes for the KV page pool.
-
-    The sizing knob for a model on the KV 2.0 page pool: the planner derives
-    the block size and the page count from it, so a request pays for the
-    tokens it holds rather than for a whole page. ``max_num_pages`` and
-    ``page_size`` below say the same thing in KV 1.0 terms and are the only
-    knobs for a builder that does not declare its KV streams yet. Set this to
-    None to fall back to them for a migrated model too -- an A/B escape hatch,
-    not a configuration to want.
-    """
+    """Bytes for the KV cache, e.g. "2GiB". The planner buys as many pages as
+    fit. Give exactly one of this and ``max_num_pages``."""
 
     max_num_pages: int = 16
+    """Page count, as an alternative to ``kv_budget``. Set ``kv_budget`` to
+    None to use it."""
+
     page_size: int = 4096
-    """KV 1.0 sizing, for a model that is not on the page pool. Ignored
-    whenever ``kv_budget`` is set and the builder declares its streams."""
+    """Tokens per page for the anchor stream; other streams derive their block
+    size from the page it sets. Independent of the two knobs above. 0 leaves
+    the choice to the planner."""
 
     pinned_ring_capacity: int = 8
     """Power-of-2 capacity for the CPU↔GPU pinned ring buffers."""

@@ -2,17 +2,17 @@
 into a target model's MPK task graph.
 
 Mirrors Eagle3Builder, but the DFlash draft is a SINGLE non-causal forward per
-decode step (not Eagle3's K autoregressive steps), it owns a PAGED KV cache that
+decode step (not Eagle3's K autoregressive steps), it owns a flat KV cache that
 accumulates committed context K/V across decode steps, and it shares the target's
 embedding + lm_head.
 
 Pipeline per decode step (all in one megakernel):
   L2  ctx = hidden_norm(fc(target_hidden[S, K*H_t]))                  -> [S, H_d]
   L4  per draft layer: k = k_norm(k_proj(ctx)) + YaRN-RoPE; v = v_proj(ctx);
-      dflash_kv_store writes (k,v) into that layer's paged cache at the committed
+      dflash_kv_store writes (k,v) into that layer's cache at the committed
       slots (OVERWRITING the draft's temporary block-K/V there).
   L5  draft block [t0, MASK*(B-1)] runs a non-causal forward; each layer reads its
-      paged cache (context) + this block's K/V; sliding_window=2048 on layers 0-4,
+      cache (context) + this block's K/V; sliding_window=2048 on layers 0-4,
       full on the last layer.
   L6  final_hidden -> target lm_head -> argmax over the s=B-1 MASK slots -> draft
       tokens (chain = [t0, d1..d_{B-1}]).
@@ -44,18 +44,17 @@ The draft's KV is declared alongside the target's and owned by the plan:
     # draft_tokens: DTensor [B,1] int64 (slot 0 = bonus echo; [1:B] = the s drafts)
 
 The caches persist across steps so context accumulates; `slot_start` is the
-committed-length offset where this step's new context K/V get written. They are
-declared `paged=False`: the reader walks them flat, so the plan owns and budgets
-the storage but hands out no page ids (see `dflash_kv_streams`).
+committed-length offset where this step's new context K/V get written. The plan
+owns and budgets them; they carry no page table (see `dflash_kv_streams`).
 
 NOTE on cross-iter / runtime driving: this builder constructs ONE decode step's
 draft graph. Two ways to drive it:
   (a) integrated (target in MPK): append after the target fwd in the same graph,
-      like Eagle3Builder.build_draft_loop; the runtime's persistent paged cache +
-      slot_mapping accumulate context across steps.
-  (b) replay/per-step (target external): the demo holds the paged caches and calls
-      build_step on a fresh PersistentKernel each step (ctx_len grows -> recompile);
-      the caches (torch tensors held by this builder) persist and accumulate.
+      like Eagle3Builder.build_draft_loop; the persistent cache + slot_mapping
+      accumulate context across steps.
+  (b) replay/per-step (target external): build_step runs on a fresh
+      PersistentKernel each step (ctx_len grows -> recompile); the plan's caches
+      persist and accumulate.
 The validated reference for both is tests/runtime_python/blackwell/sm100_dflash/
 {test_dflash_full_step_testmode.py (single step), test_dflash_paged_xiter.py
 (cross-iter to EOS)}.
@@ -76,21 +75,15 @@ def _gpl(out_dim: int) -> int:
 
 
 def dflash_kv_streams(draft_config, layer_id_base: int, world_size: int = 1):
-    """The DFlash draft's KV: one UNPAGED stream at its own layer ids.
+    """The DFlash draft's KV: one unpaged stream at its own layer ids.
 
-    Like Eagle3's draft_kv_stream, `layer_id_base` (the target's layer count)
-    keeps the draft's ids off the target's. Unlike Eagle3's, `paged=False`:
-    dflash_attention reads context as one flat [ctx_len, kv_size] array, and
-    the draft writes ABSOLUTE slots because it overwrites verifier context in
-    place. No `window` for the same reason vLLM's laguna_dflash nulls
-    attn.sliding_window -- SWA is a compute-time limit here, not an
-    allocation; the per-layer window goes to the attention task.
+    `layer_id_base` (the target's layer count) keeps the draft's ids off the
+    target's, as in Eagle3's draft_kv_stream. `paged=False` because
+    dflash_attention reads context as one flat [ctx_len, kv_size] array and
+    the draft writes absolute slots, overwriting verifier context in place.
 
-    Paging it is Eagle3's migration again (009ae3f9) plus a page-table
-    indirection in the 64-key tile loop, and it is not free: measured, next to
-    a 61-layer MLA target the draft's 64-token tile forces a 256 KiB page,
-    anchors the plan, and drags the target from block 64 to 192 at 15.6% pad.
-    That trade wants a target to measure against; K2.6 is not in MPK yet.
+    No `window` here: SWA is a compute-time limit for this draft, not an
+    allocation, so the per-layer window goes to the attention task.
     """
     from ...kv_planner import KVStream
 
@@ -260,8 +253,8 @@ class DFlashBuilder:
     def _kv(self, i: int):
         """This draft layer's (k_cache, v_cache), from the plan.
 
-        Memoized for the reason `_attach` is: both build_step halves want the
-        same layer, and attach_input makes a NEW graph input every call.
+        Memoized: both halves of build_step want the same layer, and
+        attach_input creates a new graph input on every call.
         """
         if i not in self._kv_cache:
             kv = self.kv_plan.attach(self.mpk, self.layer_id_base + i,
@@ -277,7 +270,7 @@ class DFlashBuilder:
     def materialize_context_kv(self, target_hidden, slot_start, num_new):
         """L2 + L4: project `target_hidden` [num_new, K*H_t] for the newly-committed
         tokens into ctx, then per layer compute k_norm+RoPE'd K and raw V and
-        dflash_kv_store them into each layer's paged cache at slots
+        dflash_kv_store them into each layer's cache at slots
         [slot_start : slot_start+num_new] (overwriting any temp block-K/V there).
 
         `target_hidden` is a DTensor [num_new, K*H_t]. Appends graph layers.
@@ -306,8 +299,7 @@ class DFlashBuilder:
             vw = self._attach(w["v"], f"dflash_L{i}_v")
             kn = self._attach(w["kn"], f"dflash_L{i}_kn")
             kc, vc = self._kv(i)
-            # page_size 1: a paged store is then the absolute-slot write
-            # this always did.
+            # page_size 1 makes the paged store an absolute-slot write.
             kc4 = mpk.view(kc, [self.max_seq_len, 1, self.num_kv_heads,
                                 self.head_dim])
             vc4 = mpk.view(vc, [self.max_seq_len, 1, self.num_kv_heads,
@@ -329,7 +321,7 @@ class DFlashBuilder:
     # ------------------------------------------------------ L5+L6: draft + sample
     def build_draft_forward(self, query_embed, ctx_len, query_pos_start):
         """L5 + L6: non-causal draft over the B-token block `query_embed` [B, H]
-        (already embedded [t0, MASK*(B-1)]), reading each layer's paged cache for
+        (already embedded [t0, MASK*(B-1)]), reading each layer's cache for
         context [0:ctx_len] with the per-layer sliding window; then lm_head + argmax.
 
         Returns (final_hidden_dt [B,H], draft_tokens_dt [B,1] int64). The s drafts

@@ -87,11 +87,11 @@ def _cfg_get(config, name, default):
 
 
 def inkling_kv_streams(config, page_size: int, world_size: int = 1):
-    """Inkling's two attention kinds are two KV streams, both UNPAGED.
+    """Inkling's two attention kinds, as two unpaged KV streams.
 
     inkling_attention reads context as one flat [max_ctx, kv_width] array
-    (`ctx_k + j * KV_STRIDE`) and the store writes absolute rows, so there is
-    no page table to give it.
+    (`ctx_k + j * KV_STRIDE`) and the store writes absolute rows, so neither
+    wants a page table.
     """
     from ...kv_planner import KVStream
 
@@ -205,9 +205,8 @@ class InklingBuilder(GraphBuilder):
 
     @property
     def max_ctx(self) -> int:
-        """Rows the flat cache holds. Indexed by absolute position, so this IS
-        the run length -- it used to be spelled `max_num_pages * page_size`,
-        which said nothing about pages."""
+        """Rows the flat cache holds. It is indexed by absolute position, so
+        this is the run length."""
         return self.mpk.max_seq_length
 
     # ------------------------------------------------------------- loading
@@ -472,9 +471,7 @@ class InklingBuilder(GraphBuilder):
             grid_dim=(grid_for_rmsnorm_linear_layer(extent), 1, 1),
             block_dim=(128, 1, 1))
 
-        # KV caches from the plan: [max_ctx, nkv, D] per component. Once the
-        # kernel is paged this becomes `inkling_attention_layer(..., **kv)`
-        # and the views below go away.
+        # KV caches from the plan: [max_ctx, nkv, D] per component.
         kv = self.kv_plan.attach(mpk, i)
         assert kv["group_id"] is None, (
             f"layer {i} resolved to group {kv['group_id']}: inkling declares "

@@ -16,21 +16,16 @@ def draft_kv_stream(draft_config, layer_id: int, page_size: int,
                     world_size: int = 1):
     """The Eagle3 draft's KV, declared as a stream at its own layer id.
 
-    The draft is a separate model with its own single decoder layer, so it is
-    its own stream -- but it wants the SAME page table as the target, and it
-    gets it whenever the two agree on geometry: build_kv_cache folds streams
-    that lay a page out identically, and the draft then becomes one more slot
-    on the target's pages. That is what the hand-rolled version did by
-    accident, holding its own buffer while reading the target's page table
-    through the default group_id=0.
+    The draft is a separate model with its own decoder layer, so it is its own
+    stream, but it wants the target's page table. build_kv_cache folds streams
+    that lay a page out identically, so a draft matching the target's kv heads
+    and head_dim becomes one more slot on the target's pages.
 
-    If a draft ever disagrees (different kv heads or head_dim) the streams stay
-    apart and the draft gets a page table of its own. That is still correct --
-    every group's page count and last_page_len come from the same step and the
-    same num_new_tokens, so only the page ids differ, and the tail_offset
-    arithmetic is unaffected -- but it is worth noticing, because _group_size
-    then has to pick one slot count for a 48-layer stream and a 1-layer one and
-    settles on 1, i.e. one group per layer. Callers should check for that.
+    A draft that does NOT match keeps a page table of its own. Still correct --
+    every group's page count and last_page_len come from the same step and
+    num_new_tokens -- but _group_size must then serve a 48-layer stream and a
+    1-layer one with one slot count, and settles on 1: a group per layer.
+    Callers should check for that.
 
     layer_id must not collide with a target layer; the target's
     num_hidden_layers is the natural choice, as with DeepSeek-V3's MTP.
@@ -119,10 +114,6 @@ class Eagle3Builder:
         self.mbt = mpk.max_num_batched_tokens
 
         # The draft's KV is a stream of the caller's plan, at its own layer id.
-        # It used to be a torch.zeros of the builder's own plus the default
-        # group_id=0, i.e. its own storage read through the TARGET's page
-        # table -- which happened to be right only because the two geometries
-        # matched.
         self.kv_plan = getattr(mpk, "kv_plan", None)
         assert self.kv_plan is not None and draft_layer_id is not None, (
             "Eagle3 needs the KV plan and the layer id its draft was declared "

@@ -67,18 +67,16 @@ def _itemsize(dtype) -> int:
 
 @dataclass(frozen=True)
 class KVStream:
-    """One KV stream, declared by what a page holds rather than by a byte count.
+    """One KV stream: what a page holds, for which layers.
 
     ``components`` is the per-token payload -- for GQA the K and V halves,
-    each ``(entry_name, entry_shape, dtype)``. ``per_entry_bytes`` follows from
-    it, so the fact is stated once, in the place that describes the shape.
-    Hand-writing the byte count was protected in one direction only: too small
-    tripped an assert, too large silently doubled the page.
+    each ``(entry_name, entry_shape, dtype)``. ``per_entry_bytes`` derives
+    from it.
 
-    ``paged=False`` declares the other kind of reader: one that addresses the
-    cache as a single flat ``[capacity, width]`` array. It gets no group, no 
-    page table and no say in the shared page size; the plan still owns its 
-    storage, and hands it out through ``attach()``. See ``FlatStream``.
+    ``paged=False`` means the reader addresses the cache as one flat
+    ``[capacity, width]`` array. Such a stream gets no group, no page table
+    and no say in the shared page size; the plan still owns its storage and
+    hands it out through ``attach()``. See ``FlatStream``.
     """
     name: str
     layers: Tuple[int, ...]
@@ -152,10 +150,7 @@ def _merge_identical_streams(streams):
     62 single-slot groups instead of one group of 62.
 
     So a model declares by MEANING (attention and MTP are different modules)
-    and the planner groups by LAYOUT -- which is what vLLM's
-    get_kv_cache_groups does, dispatching on the specs with no notion of a
-    stream at all. Its uniform-spec path puts DeepSeek-V3's main layers and
-    its MTP layer in a single group for the same reason.
+    and the planner groups by LAYOUT.
 
     The key is every KVStream field but ``name`` and ``layers``, read off the
     dataclass so that a field added later is included by default. That is the
@@ -242,15 +237,12 @@ def build_kv_cache(streams, *,
 
     The returned object owns the pool. ``attach(mpk, layer)`` is the only way
     to a cache tensor, so no caller can hold one that skipped the
-    pool-identity check, and the component layout is stated once -- in the
-    stream -- rather than restated at allocation time.
+    pool-identity check.
 
     A ``paged=False`` stream is split off here and never reaches
     ``plan_kv_groups``: it takes no part in choosing the shared page size, in
-    ``_group_size``, or in the page tables, so a model that has one plans
-    exactly as it would without it. The plan still owns and budgets its
-    storage. That containment is the point -- removing the flag later changes
-    the declaration and nothing else.
+    ``_group_size``, or in the page tables. The plan still owns and budgets
+    its storage. With no paged stream at all the plan has zero groups.
     """
     streams = list(streams)
     flat_streams = [st for st in streams if not st.paged]
@@ -638,10 +630,9 @@ class KVCachePlan:
             mpk.paged_attention_layer(..., **kv.attach(mpk, i))
 
         Folds layer_info, the views[group][component][slot] walk and the
-        pool-identity check into one accessor. That check cannot be skipped
-        here, which is the point: it is the only thing that catches a cache
-        that has been copied out of the pool by a stray .contiguous(), and one
-        of the two hand-written call sites it replaced had omitted it."""
+        pool-identity check into one accessor. The identity check is what
+        catches a cache copied out of the pool by a stray .contiguous(), and
+        cannot be skipped."""
         if self._views is None:
             raise RuntimeError("materialize() has not run on this plan")
         flat = self._flat_stream_of(layer_id)
@@ -729,8 +720,8 @@ class KVCachePlan:
         got = tensor.stride(0)
         if got != want:
             raise AssertionError(
-                f"{name} has row stride {got}, expected {want}: it lives in "
-                f"the cache but is no longer addressed one token at a time")
+                f"{name} has row stride {got}, expected {want}: it is on the "
+                f"cache but not addressed one token at a time")
         return tensor
 
     def _allocate_pool(self, entry_layouts,
@@ -806,8 +797,8 @@ class KVCachePlan:
         got = tensor.stride(0)
         if got != want:
             raise AssertionError(
-                f"{name} has page stride {got}, expected {want}: it lives in "
-                f"the pool but is no longer addressed a whole page at a time. "
+                f"{name} has page stride {got}, expected {want}: it is on the "
+                f"pool but not addressed a whole page at a time. "
                 f"(Pass views[g][c][slot_id], not views[g][c].)")
         return tensor
 
@@ -921,8 +912,10 @@ def _plan_with_no_paged_streams(target_page_bytes: Optional[int] = None,
                                 default_block_size: int = 64,
                                 target_cc: Optional[int] = None
                                 ) -> KVCachePlan:
-    """The plan for a model with no paged KV get ZERO groups.
+    """The plan for a model with no paged KV: zero groups, zero bytes.
 
+    The runtime compiles at MPK_NUM_KV_GROUPS == 0; device-side arrays that
+    would go zero-length size with MPK_NUM_KV_GROUPS_ARRAY instead.
     """
     if target_page_bytes is not None:
         raise ValueError(

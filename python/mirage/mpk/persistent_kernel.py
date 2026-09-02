@@ -476,13 +476,9 @@ class PersistentKernel:
         self.max_num_batched_requests = max_num_batched_requests
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_pages = max_num_pages
-        # kv_groups is the only source of truth for the page geometry. The
-        # page_size= shorthand is gone: it named group 0's block size, which
-        # stopped being a property of the kernel once there could be more than
-        # one group, and it left a graph that needs no PAGE TABLE nothing to
-        # say but an invented number. That answer is kv_groups=[] -- which
-        # says nothing about whether a KV cache exists: inkling and dflash
-        # have one, read flat, and declare zero groups.
+        # kv_groups is the page geometry, one entry per page table. [] means
+        # this graph needs no page table -- which is not the same as having no
+        # KV cache: inkling and dflash have one and read it flat.
         assert kv_groups is not None, (
             "PersistentKernel needs kv_groups; pass [] for a graph with no "
             "paged KV cache")
@@ -1246,18 +1242,11 @@ class PersistentKernel:
         assert k_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
         assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
         # This kernel is NOT paged: it takes no page table and no page stride,
-        # and indexes the cache flat by absolute token (task_register derives
-        # the row stride as head_dim*num_kv_heads and the sequence length as
-        # runtime_config.step[0]). Flat indexing lands on the right token only
-        # while consecutive pages of this cache sit exactly one block apart --
-        # free under KV 1.0, where a layer owned a packed
-        # [pages, page_size, kv_heads, head_dim] tensor, and NOT free on the
-        # KV 2.0 pool: K and V share a page component-major, so K's pages are
-        # two blocks apart and token `block_size` reads V's half of page 0.
+        # and indexes the cache flat by absolute token. That lands on the right 
+        # token only while consecutive pages sit exactly one block apart.
         #
-        # A sequence that fits in one block never leaves the first page, so
-        # that case stays correct whatever the stride is. Refuse the rest
-        # rather than read the wrong half silently.
+        # A sequence inside one block never leaves the first page and is safe
+        # at any stride. Refuse the rest rather than read the wrong half.
         block_size = k_cache.dim(1)
         if self.max_seq_length > block_size:
             stride = _page_stride(k_cache, v_cache)
