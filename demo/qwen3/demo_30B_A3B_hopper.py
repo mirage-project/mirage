@@ -548,6 +548,7 @@ if __name__ == "__main__":
                 )
             else:
                 mpk.paged_attention_layer(
+                    group_id=kv["group_id"],
                     input=attn_in,
                     k_cache=k_cache,
                     v_cache=v_cache,

@@ -107,6 +107,7 @@ def main():
             dts[tname] = pk.attach_input(tt, name=f"{name}_{tname}")
 
         pk.paged_attention_layer(
+            group_id=0,  # one group in this graph
             input=dts["qkv"], k_cache=dts["k_cache"], v_cache=dts["v_cache"],
             q_norm=dts["qn"], k_norm=dts["kn"],
             cos_pos_embed=dts["cos"], sin_pos_embed=dts["sin"],

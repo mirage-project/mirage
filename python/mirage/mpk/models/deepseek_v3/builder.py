@@ -768,6 +768,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 mla_params=(self.num_local_q_heads, kv_len_max,
                             self.kv_lora_rank, QK_ROPE_HEAD_DIM,
                             self.v_head_dim),
+                group_id=kv_group,
                 grid_dim=(self.num_local_q_heads, num_q_blocks,
                           self.mpk.max_num_batched_requests),
                 block_dim=(256, 1, 1),
@@ -791,7 +792,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp2_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=kv_group)
             self.mpk.mla_mtp_decode_tp2_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -799,7 +800,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp4_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=kv_group)
             self.mpk.mla_mtp_decode_tp4_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -807,7 +808,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp8_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=kv_group)
             self.mpk.mla_mtp_decode_tp8_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -815,7 +816,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=kv_group)
             self.mpk.mla_mtp_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -1419,6 +1420,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 mla_params=(self.num_local_q_heads, kv_len_max,
                             self.kv_lora_rank, QK_ROPE_HEAD_DIM,
                             self.v_head_dim),
+                group_id=self.mtp_kv_group,
                 grid_dim=(self.num_local_q_heads, num_q_blocks, 1),
                 block_dim=(256, 1, 1),
             )
@@ -1438,7 +1440,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp2_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=self.mtp_kv_group)
             self.mpk.mla_mtp_decode_tp2_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -1446,7 +1448,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp4_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=self.mtp_kv_group)
             self.mpk.mla_mtp_decode_tp4_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -1454,7 +1456,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp8_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=self.mtp_kv_group)
             self.mpk.mla_mtp_decode_tp8_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -1462,7 +1464,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=self.mtp_kv_group)
             self.mpk.mla_mtp_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)

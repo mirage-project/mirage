@@ -22,7 +22,7 @@ The draft's KV is declared alongside the target's and owned by the plan:
 
     streams = target_streams + dflash_kv_streams(
         draft_cfg, layer_id_base=target_num_layers)
-    kv_plan = build_kv_cache(streams, kv_budget=..., max_seq_length=4096, ...)
+    mpk.kv_plan = build_kv_cache(streams, kv_budget=..., max_seq_length=4096)
 
     dflash = DFlashBuilder(
         mpk=mpk,
@@ -31,7 +31,7 @@ The draft's KV is declared alongside the target's and owned by the plan:
         target_w_lm_head=shared_lm_head_2d,    # [vocab, H_t] torch.bf16 (target's)
         num_speculative_tokens=7,
         max_seq_len=4096,
-        kv_plan=kv_plan, layer_id_base=target_num_layers,
+        layer_id_base=target_num_layers,
     )
     # cos/sin cache built once from the rope config (YaRN, mscale=1.4159):
     #   self.cos_sin built in __init__; re-used by every step.
@@ -121,8 +121,7 @@ class DFlashBuilder:
         target_w_lm_head: torch.Tensor,  # [vocab, H_t] shared target lm_head
         num_speculative_tokens: int = 7,
         max_seq_len: int = 4096,
-        kv_plan=None,                    # KVCachePlan owning the draft's KV
-        layer_id_base: int = 0,          # the draft's layer ids in that plan
+        layer_id_base: int = 0,          # the draft's layer ids in mpk.kv_plan
         mscale: float = 1.4159,          # vLLM/sglang native YaRN mscale for K2.6
         cos_sin_cache: torch.Tensor | None = None,  # [max_seq_len, head_dim], optional
         device: str = "cuda",
@@ -160,17 +159,12 @@ class DFlashBuilder:
         self.eps = float(draft_config.get("rms_norm_eps", 1e-5))
         self.mscale = mscale
         self.max_seq_len = max_seq_len
-        # The plan owns the draft's KV. It used to carve its own
-        # [max_num_pages, page_size=8, ...] buffers and read them back
-        # flattened -- the 4D shape never reached a reader, and slot s was row
-        # s either way.
-        self.kv_plan = kv_plan if kv_plan is not None else getattr(
-            mpk, "kv_plan", None)
+        self.kv_plan = getattr(mpk, "kv_plan", None)
         if self.kv_plan is None:
             raise ValueError(
-                "DFlashBuilder needs the KVCachePlan that owns its caches; "
-                "declare them with dflash_kv_streams(draft_config, "
-                "layer_id_base) and pass the plan (or set mpk.kv_plan)")
+                "DFlashBuilder needs mpk.kv_plan; declare the draft's caches "
+                "with dflash_kv_streams(draft_config, layer_id_base) and set "
+                "the plan on the PersistentKernel")
         self.layer_id_base = layer_id_base
         self._kv_cache = {}          # layer -> (k_cache, v_cache) DTensors
 

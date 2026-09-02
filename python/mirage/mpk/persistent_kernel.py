@@ -496,15 +496,6 @@ class PersistentKernel:
         # generated persistent-kernel code (attach_input stores raw pointers).
         self._torch_tensor_refs = []
         self.meta_tensors = meta_tensors
-        # Backward compat: remap old-style paged_kv_* keys to per-group _0 keys
-        for _old, _new in [
-            ("paged_kv_indptr_buffer",       "paged_kv_indptr_buffer_0"),
-            ("paged_kv_indices_buffer",      "paged_kv_indices_buffer_0"),
-            ("paged_kv_last_page_len_buffer","paged_kv_last_page_len_buffer_0"),
-            ("paged_kv_indices_snapshot",    "paged_kv_indices_snapshot_0"),
-        ]:
-            if _old in self.meta_tensors and _new not in self.meta_tensors:
-                self.meta_tensors[_new] = self.meta_tensors[_old]
         # Per-group snapshot buffers for in-place compaction sized by page-table span.
         for _g in range(len(self.kv_groups)):
             _snap_key = f"paged_kv_indices_snapshot_{_g}"
@@ -982,6 +973,16 @@ class PersistentKernel:
         # column slice (dim 1) of every tensor via imap (1, -1, -1).
         for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
             assert t.num_dims == 2
+        # These read the cache FLAT: task_register derives KV_STRIDE from
+        # dtensor.dim[1], the row WIDTH, so the rows must actually be that far
+        # apart. True for an unpaged stream (K and V get separate contiguous
+        # regions); false for a page-pool cache viewed as 2D, whose rows are a
+        # whole shared page apart.
+        for _c in (ctx_k, ctx_v):
+            assert _c.stride[0] == _c.dim(1), (
+                f"context cache rows are {_c.stride[0]} elements apart but "
+                f"{_c.dim(1)} wide: this task addresses it flat, so a cache "
+                f"sharing its page with another component cannot be passed.")
         G = grid_dim[0]
         if G > 1:
             for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
@@ -1036,6 +1037,15 @@ class PersistentKernel:
         # DFlash standalone paged KV-cache store (L4 materialize write/overwrite).
         assert kv_in.num_dims == 2
         assert cache.num_dims == 4
+        _dense = 1
+        for _d in range(cache.num_dims - 1, 0, -1):
+            assert cache.stride[_d] == _dense, (
+                f"dflash_kv_store needs a densely packed cache; dim {_d} has "
+                f"stride {cache.stride[_d]}, expected {_dense}.")
+            _dense *= cache.dim(_d)
+        assert cache.stride[0] == _dense, (
+            f"dflash_kv_store needs pages laid out back to back; page stride "
+            f"is {cache.stride[0]}, expected {_dense}")
         params = [head_dim]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(kv_in, (-1, -1, -1), -1, True)
@@ -1070,6 +1080,16 @@ class PersistentKernel:
         for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
             assert t.num_dims == 2
         assert bias.num_dims == 2 and bias.dim(1) == extent
+        # These read the cache FLAT: task_register derives KV_STRIDE from
+        # dtensor.dim[1], the row WIDTH, so the rows must actually be that far
+        # apart. True for an unpaged stream (K and V get separate contiguous
+        # regions); false for a page-pool cache viewed as 2D, whose rows are a
+        # whole shared page apart.
+        for _c in (ctx_k, ctx_v):
+            assert _c.stride[0] == _c.dim(1), (
+                f"context cache rows are {_c.stride[0]} elements apart but "
+                f"{_c.dim(1)} wide: this task addresses it flat, so a cache "
+                f"sharing its page with another component cannot be passed.")
         G = grid_dim[0]
         if G > 1:
             for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
@@ -1363,7 +1383,8 @@ class PersistentKernel:
         qk_norm_eps: float = 1e-6,
         window_size: int = 0,       # 0 = full causal
         sinks: DTensor = None,      # per-head attention sinks
-        group_id: int = 0,          # which KV group's page table this reads
+        *,
+        group_id: int,          # which KV group's page table this reads
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
@@ -1470,7 +1491,8 @@ class PersistentKernel:
         attention_params: tuple,
         grid_dim: tuple,
         block_dim: tuple,
-        group_id: int = 0,
+        *,
+        group_id: int,          # which KV group's page table this reads
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
@@ -1554,7 +1576,8 @@ class PersistentKernel:
         attention_params: tuple,
         grid_dim: tuple,
         block_dim: tuple,
-        group_id: int = 0,
+        *,
+        group_id: int,          # which KV group's page table this reads
     ):
         assert lse.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv / world_size, num_kv_heads)
         assert output_tmp.num_dims == 3  # (num_tokens, num_chunks, hidden_size / world_size)
@@ -1599,6 +1622,7 @@ class PersistentKernel:
         mla_params: tuple,      # (d_k, d_v)
         grid_dim: tuple,
         block_dim: tuple,
+        *,
         group_id: int,          # required: which page table this layer reads
     ):
         d_k, d_v = mla_params
@@ -1625,6 +1649,7 @@ class PersistentKernel:
         mla_params: tuple,      # (d_k, d_v)
         grid_dim: tuple,
         block_dim: tuple,
+        *,
         group_id: int,          # required: which page table this layer reads
     ):
         """Gather paged KV into SEPARATE CKV / KPE contiguous buffers.
@@ -1658,7 +1683,8 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         q_len: int = 1,
-        group_id: int = 0,
+        *,
+        group_id: int,          # which KV group's page table this reads
     ):
         # Allow q_len passed via mla_params 6-tuple as well as separate arg.
         if len(mla_params) == 6:
@@ -1721,7 +1747,8 @@ class PersistentKernel:
         mla_params: tuple, # (num_heads, seq_len, d_ckv, d_kpe, d_v)
         grid_dim: tuple,   # (H, num_q_blocks, B)
         block_dim: tuple,  # (256, 1, 1)
-        group_id: int = 0,
+        *,
+        group_id: int,          # which KV group's page table this reads
     ):
         num_heads, seq_len, d_ckv, d_kpe, d_v = mla_params
         params = [num_heads, seq_len, d_ckv, d_kpe, d_v, group_id]
@@ -1778,7 +1805,8 @@ class PersistentKernel:
         output_lse: DTensor,       # La: partial LSE buffer
         q_len: int,
         kv_len: int,
-        group_id: int = 0,
+        *,
+        group_id: int,          # which KV group's page table this reads
     ):
         # Derive internal params (DeepSeek V3: 128 heads, TILE_S=128)
         hpb = 128 // q_len
@@ -1843,7 +1871,7 @@ class PersistentKernel:
         self,
         q_input, kv_input, output_partial, output_lse,
         q_len, kv_len, num_heads,
-        task_name, has_v_split=False, q_len_real=None, group_id=0,
+        task_name, group_id, has_v_split=False, q_len_real=None,
     ):
         """Internal helper for TP=2/4/8 decode dispatch.
           q_len: padded Q_LEN passed to the kernel
@@ -1915,7 +1943,8 @@ class PersistentKernel:
 
     def mla_mtp_decode_tp2_layer(
         self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
-        group_id: int = 0,
+        *,
+        group_id: int,          # which KV group's page table this reads
     ):
         self._mla_mtp_decode_tp_layer(
             q_input, kv_input, output_partial, output_lse,
@@ -1933,7 +1962,8 @@ class PersistentKernel:
 
     def mla_mtp_decode_tp4_layer(
         self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
-        group_id: int = 0,
+        *,
+        group_id: int,          # which KV group's page table this reads
     ):
         # TP=4 V-split: 2× tasks (v_half=0,1). Each writes to a disjoint TMEM
         # column range; output_partial is a single buffer covering both.
@@ -1953,7 +1983,7 @@ class PersistentKernel:
 
     def mla_mtp_decode_tp8_layer(
         self, q_input, kv_input, output_partial, output_lse,
-        q_len_real, kv_len, group_id: int = 0,
+        q_len_real, kv_len, group_id: int,
     ):
         # TP=8 pads Q_LEN to even
         q_len = (q_len_real + 1) & ~1

@@ -2,7 +2,7 @@ import torch
 
 from ..graph_builder import GraphBuilder
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
-from ...kv_planner import KVCachePlan, KVStream
+from ...kv_planner import KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64
@@ -55,14 +55,9 @@ class GptOssBuilder(GraphBuilder):
     # GraphBuilder.kv_streams.
     kv_streams = staticmethod(kv_streams)
 
-    def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None,
-                 kv_plan: Optional[KVCachePlan] = None):
+    def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
-        # Two callers, two sources: demo/gpt_oss/demo.py builds the plan and
-        # passes it here; through MPK the plan is built from kv_streams()
-        # before the PersistentKernel exists and arrives on it.
-        self.kv_plan = kv_plan if kv_plan is not None else getattr(
-            mpk, "kv_plan", None)
+        self.kv_plan = getattr(mpk, "kv_plan", None)
         self.world_size = mpk.world_size
         self.rank = mpk.mpi_rank
         self.input_tokens = mpk.meta_tensors["input_tokens"]
@@ -120,7 +115,8 @@ class GptOssBuilder(GraphBuilder):
         # The pool (K and V co-located in one page, shape (slots, pages,
         # tokens, H, D)) is already allocated: build_kv_cache did it.
         assert self.kv_plan is not None, (
-            "pass kv_plan=build_kv_cache(kv_streams(config, page_size), ...)")
+            "set mpk.kv_plan = build_kv_cache(kv_streams(config, page_size), "
+            "...) before constructing the builder")
         assert len(self.kv_plan.groups) == len(self.mpk.kv_groups), (
             f"the builder plans {len(self.kv_plan.groups)} KV group(s) but "
             f"mpk was built with {len(self.mpk.kv_groups)} — pass "

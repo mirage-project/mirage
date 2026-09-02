@@ -348,6 +348,7 @@ if __name__ == "__main__":
         # )
 
         mpk.paged_attention_split_kv_layer(
+            group_id=0,  # one group in this graph
             input=attn_in,
             k_cache=k_cache,
             v_cache=v_cache,
@@ -362,6 +363,7 @@ if __name__ == "__main__":
         )
 
         mpk.paged_attention_split_kv_merge_layer(
+            group_id=0,  # one group in this graph
             lse=lse,
             output_tmp=attn_out_tmp,
             output=attn_out,
@@ -467,6 +469,7 @@ if __name__ == "__main__":
         # )
 
         mpk2.paged_attention_layer(
+            group_id=0,  # one group in this graph
             input=attn_in_2,
             k_cache=k_cache_2,
             v_cache=v_cache_2,

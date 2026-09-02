@@ -132,15 +132,9 @@ class InklingBuilder(GraphBuilder):
     # GraphBuilder.kv_streams.
     kv_streams = staticmethod(inkling_kv_streams)
 
-    def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None,
-                 kv_plan=None):
+    def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
-        # The plan owns the KV caches, unpaged though they are. Two callers,
-        # two sources, as in GptOssBuilder: a demo may build the plan and pass
-        # it, and through MPK it is built from kv_streams() before the
-        # PersistentKernel exists and arrives on it.
-        self.kv_plan = kv_plan if kv_plan is not None else getattr(
-            mpk, "kv_plan", None)
+        self.kv_plan = getattr(mpk, "kv_plan", None)
         assert self.kv_plan is not None, (
             "Inkling declares kv_streams, so MPK should have built a plan")
         self.world_size = mpk.world_size

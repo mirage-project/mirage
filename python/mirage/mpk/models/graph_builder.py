@@ -37,6 +37,15 @@ class MirageModelConfig:
 
 
 class GraphBuilder(abc.ABC):
+    """Base for the per-model task-graph builders.
+
+    A subclass reaches its KV caches through `self.mpk.kv_plan` -- one way in,
+    not two. Whoever constructs the PersistentKernel necessarily already has
+    the plan (its kv_groups and page tables come from it), so it rides on the
+    kernel; a second constructor argument would only be another way to say the
+    same thing, and a way for the two to disagree.
+    """
+
     def __init__(self, mpk, weights: Optional[Dict[str, Any]] = None):
         self.mpk = mpk
         self.weights = weights or {}

@@ -553,6 +553,7 @@ def add_transformer_layer(mpk, layer_idx, layer, x, inputs, tensors, config, wor
         )
     else:
         mpk.paged_attention_layer(
+            group_id=kv["group_id"],
             input=tensors['attn_in'],
             k_cache=k_cache,
             v_cache=v_cache,
