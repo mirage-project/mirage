@@ -250,8 +250,18 @@ def main():
         shapes.seq_len = args.max_seq_length
         shapes.max_reqs = args.max_num_batched_requests
         shapes.num_workers = mpk.num_workers
+        # MPK_SPLIT_ATTENTION=1: generate the attention core instead of using
+        # the hand-written task.
+        shapes.split_attention = os.environ.get("MPK_SPLIT_ATTENTION") == "1"
         
-        graph, groups = LLIR.plan(shapes)
+        # MPK_FUSE=0 builds the unfused partition (one task per node),
+        # so two real partitions of the same model can be compared.
+        # MPK_PARTITION="2,1,1,..." replays a ranked candidate's group sizes
+        # across every layer; MPK_FUSE=0 gives one task per node.
+        _pat = os.environ.get("MPK_PARTITION")
+        graph, groups = LLIR.plan(
+            shapes, fuse=os.environ.get("MPK_FUSE", "1") != "0",
+            pattern=[int(x) for x in _pat.split(",")] if _pat else None)
         bindings = LLIR.bind_weights(
             mpk, model, shapes, lm_head_weight=lm_head_weight,
             cos=position_embeddings[0][0, :shapes.max_seq, :],

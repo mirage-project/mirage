@@ -12,6 +12,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <algorithm>
+#include <cctype>
+#include <map>
 #include <cstdlib>
 #include "mirage/kernel/task_register.h"
 #include "mirage/kernel/graph.h"
@@ -173,6 +176,59 @@ int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
         "the usual cause -- both multiply the per-stage buffers.");
   }
 
+  // Content-addressed cache of compiled groups: 28 identical layers used to
+  // emit 28 identical device functions (282 for 39 distinct computations).
+  // register_task_variant() dedupes by code text but never matched, because
+  // kernel and parameter names carry a counter and a DTensor guid.
+  // See docs/superoptimizer_ir.md.
+  auto canonicalize = [](std::string body, std::string const &fname) {
+    size_t pos = 0;
+    while ((pos = body.find(fname, pos)) != std::string::npos) {
+      body.replace(pos, fname.size(), "__F");
+      pos += 3;
+    }
+    std::string out;
+    out.reserve(body.size());
+    std::map<std::string, std::string> seen;
+    for (size_t i = 0; i < body.size();) {
+      size_t j = i;
+      while (j < body.size() &&
+             (isalnum((unsigned char)body[j]) || body[j] == '_')) {
+        j++;
+      }
+      if (j == i) {
+        out += body[i++];
+        continue;
+      }
+      std::string tok = body.substr(i, j - i);
+      size_t run = 0, best = 0;
+      for (char c : tok) {
+        run = isdigit((unsigned char)c) ? run + 1 : 0;
+        best = std::max(best, run);
+      }
+      if (best >= 6) {
+        auto it = seen.find(tok);
+        if (it == seen.end()) {
+          it = seen.emplace(tok, "__id" + std::to_string(seen.size())).first;
+        }
+        out += it->second;
+      } else {
+        out += tok;
+      }
+      i = j;
+    }
+    return out;
+  };
+
+  static std::map<std::string, int> variant_of_body;
+  std::string const canon = canonicalize(result.code, result.func_name);
+  {
+    auto it = variant_of_body.find(canon);
+    if (it != variant_of_body.end()) {
+      return it->second;
+    }
+  }
+
   // The definition is emitted once per variant, ahead of execute_task.
   generated_task_defs.push_back(result.code);
 
@@ -212,6 +268,7 @@ int TaskRegister::register_generated_task(kn::KNCustomizedOp const *op,
   code.e("$", call);
   int const variant_id =
       register_task_variant(TASK_GENERATED, code.to_string());
+  variant_of_body[canon] = variant_id;
   if (!result.tmaParamsList.empty()) {
     GeneratedTmaInfo info;
     info.variant_id = (unsigned)variant_id;

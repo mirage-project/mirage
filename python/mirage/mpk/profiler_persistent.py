@@ -47,6 +47,9 @@ event_name_list = {
     163: "TASK_SPLITK_LINEAR_SWAPAB_HOPPER",
     198: "TASK_HOPPER_TASK_END",
     450: "TASK_GENERATED",
+    # 450+v is generated-task variant v: distinct searched tasks share the
+    # TASK_GENERATED type but differ in cost, so the profile separates them.
+    **{450 + v: f"TASK_GENERATED[shape{v}]" for v in range(1, 61)},
     0: "TASK_TERMINATE",
     164: "TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER",
     231: "TASK_SM100_TMA_START_TASK",

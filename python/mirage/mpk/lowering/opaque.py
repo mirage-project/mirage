@@ -1,16 +1,8 @@
-"""What computes a node the graph cannot model.
+"""Handlers for the nodes the IR cannot express.
 
-Four things in a decoder LLM have no muGraph op at any level: embedding is a
-gather, argmax is a reduction to indices, and attention both scatters into the
-KV cache -- a side effect, not a value -- and, on the split path, stages
-tensors for the generated core. There is no gather, scatter or index op in the
-IR, so these stay hand-written MPK tasks and the graph carries them as opaque
-nodes: still real nodes, so the graph stays connected and a partition can see
-the boundary, but lower() hands them here instead of to search.
-
-None of this is model-specific: every decoder has these same four holes and
-the MPK layers that fill them are generic. A model supplies only its token
-count, its kv-head count, and the buffers argmax reduces through.
+embedding is a gather, argmax a reduction to indices, and attention appends to
+the KV cache -- none is a value produced from inputs, so each stays a
+hand-written MPK task. Nothing here is model-specific.
 """
 
 
@@ -18,18 +10,8 @@ from .node import OPAQUE_OPS
 
 
 def standard_handlers():
-    """The handler table, complete and parameterless.
-
-    Everything a handler needs comes from the node: its inputs, its declared
-    outputs, and group.attrs for the few numbers the graph cannot otherwise
-    carry (a token count, a kv-head count). That is what lets lower() default
-    this rather than making every caller pass it.
-
-    Each handler receives the group, its already-bound input DTensors in the
-    order the graph names them, and one output tensor per declared output. Both
-    attention paths are registered; which one fires is decided by the graph,
-    and only one set of nodes is ever present.
-    """
+    """The handler table: group, bound input DTensors, one tensor per declared
+    output. Parameterless -- a handler reads what it needs from group.attrs."""
 
     def embedding(pk, group, ins, outs):
         (out,) = outs
@@ -38,8 +20,7 @@ def standard_handlers():
                        grid_dim=(group.attrs["tokens"], 1, 1), block_dim=(128, 1, 1))
 
     def _attn_args(pk, group, ins):
-        """The seven inputs both attention paths read, and their shared grid:
-        one block per (request, kv head)."""
+        """Seven inputs; one block per (request, kv head)."""
         qkv, q_norm, k_norm, cos, sin, k_cache, v_cache = ins
         return dict(
             input=qkv, k_cache=k_cache, v_cache=v_cache, q_norm=q_norm,
@@ -49,7 +30,10 @@ def standard_handlers():
             block_dim=(128, 1, 1))
 
     def attention(pk, group, ins, outs):
-        pk.paged_attention_layer(output=outs[0], **_attn_args(pk, group, ins))
+        """All of attention as one task. The split path cannot lower today --
+        see docs/superoptimizer_ir.md."""
+        (out,) = outs
+        pk.paged_attention_layer(output=out, **_attn_args(pk, group, ins))
 
     def attn_prep(pk, group, ins, outs):
         q_st, mask_st, kt_st, v_st = outs
@@ -65,9 +49,7 @@ def standard_handlers():
             grid_dim=(pk.max_num_batched_requests, 1, 1), block_dim=(128, 1, 1))
 
     def argmax(pk, group, ins, outs):
-        # The two-stage reduction's scratch buffers are DECLARED outputs, not
-        # tensors the caller threads in: that is what keeps their dependency
-        # on this task visible to MPK.
+        # Scratch buffers are DECLARED outputs so MPK sees the dependency.
         (logits,) = ins
         out, part_value, part_index = outs
         pk.argmax_partial_layer(

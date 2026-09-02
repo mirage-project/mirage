@@ -94,27 +94,14 @@ def _edges(graph: ModelGraph, partition: list[Group]) -> dict[int, set[int]]:
     return stripped
 
 
-def default_partition(graph: ModelGraph, opaque_runs=()) -> list[Group]:
-    """Where the task boundaries go: one group per node, plus two fusions.
-
-    This is the partition MPK runs. enumerate_partitions below proposes
-    alternatives; nothing ranks them, so this is the one the lowering uses.
-
-    Rule 1, by DATAFLOW rather than position: a silu or rms_norm whose ONLY
-    consumer is a mul becomes one task -- silu*up, and rms_norm(x)*weight,
-    which MPK already fuses. Checking the consumer rather than the next index
-    is what stops it pairing two unrelated adjacent nodes.
-
-    Rule 2: `opaque_runs` names (start, end, tag) triples of OPAQUE task names.
-    Every node strictly between such a pair becomes one group. The caller names
-    them because the task names are the model's, but the reason is general --
-    the run's pieces are not separately schedulable. Qwen3 passes
-    ("attn_prep", "attn_finalize", "attn_core"): a bare reduction leaves the
-    reduction at kernel level, which MPK cannot register as a task.
-    """
+def default_partition(graph: ModelGraph, opaque_runs=(),
+                      fuse: bool = True) -> list[Group]:
+    """One group per node, plus two fusions: a silu/rms_norm whose only
+    consumer is a mul, and every node between an `opaque_runs` pair."""
     fused = {}
     for i, n in enumerate(graph.nodes):
-        if n.op in ("silu", "rms_norm"):
+        # fuse=False gives one task per node, for partition comparisons.
+        if fuse and n.op in ("silu", "rms_norm"):
             cons = graph.consumers(n.output)
             if len(cons) == 1 and graph.nodes[cons[0]].op == "mul":
                 tag = "silu_mul" if n.op == "silu" else "rmsnorm"
@@ -171,9 +158,7 @@ def check_shapes(group: Group) -> Optional[str]:
 
 
 def group_signature(graph: ModelGraph, group: Group) -> tuple:
-    """What makes two groups the same question for search. Deliberately not
-    the node ids: the same op sequence on the same shapes in a different layer
-    is the same search, and Qwen3 has 28 identical layers."""
+    """What makes two groups the same search: ops and shapes, not node ids."""
     return (tuple(graph.nodes[i].op for i in group.nodes),
             tuple(v.dims for v in group.external_inputs),
             group.output.dims)
@@ -188,6 +173,9 @@ spec_dims = json.loads(sys.argv[1])
 ops = json.loads(sys.argv[2])
 attrs = json.loads(sys.argv[3])
 grid = tuple(json.loads(sys.argv[4]))
+out_dims = tuple(json.loads(sys.argv[5]))
+forloop = json.loads(sys.argv[6])
+max_ops = json.loads(sys.argv[7])
 
 def build(kn, t):
     env = list(t)
@@ -203,23 +191,66 @@ def build(kn, t):
     return out
 
 spec = TaskSpec("probe", build, [TensorSpec(tuple(d)) for d in spec_dims])
+# Ask EXACTLY what lower_group asks -- same grid, same forloop, same op
+# budget. A probe that searches a different configuration answers a different
+# question and calls groups buildable that the real lowering rejects.
 try:
-    task_search.search_task_schedules(spec, grid_dim=grid)
-    print(chr(10) + "@@PROBE@@ OK")
-except Exception as e:
-    print(chr(10) + "@@PROBE@@ NO " + type(e).__name__ + ": "
-          + str(e)[:200].replace(chr(10), " "))
+    scheds = task_search.search_task_schedules(
+        spec, grid_dim=grid, forloop_range=forloop, max_ops=max_ops,
+        wide_inputs=len(spec_dims) > 3)
+except Exception:
+    try:
+        scheds = task_search.search_task_schedules(
+            spec, grid_dim=grid, forloop_range=None, max_ops=max_ops,
+            wide_inputs=len(spec_dims) > 3)
+    except Exception as e:
+        print(chr(10) + "@@PROBE@@ NO search " + type(e).__name__ + ": "
+              + str(e)[:200].replace(chr(10), " "))
+        sys.exit(0)
+
+# Search returning a schedule is only the FIRST gate. The transpiler still has
+# to emit a body for it, and it rejects some -- "an operand layout the MMA
+# cannot read" -- at register_generated_task. A probe that stops at search
+# calls those groups buildable and they are not, so go all the way to
+# registration. Any schedule that registers makes the group buildable.
+import mirage
+from mirage.mpk.persistent_kernel import PersistentKernel
+
+nw, ns = mirage.get_configurations_from_gpu(0)
+p = PersistentKernel.get_default_init_parameters()
+p.update(test_mode=True, num_workers=nw, num_local_schedulers=ns, mpi_rank=0,
+         world_size=1, max_num_batched_tokens=8, max_num_batched_requests=8)
+last = None
+for i, sched in enumerate(scheds):
+    try:
+        pk = PersistentKernel(**p)
+        ins = [pk.new_tensor(dims=tuple(d), name="probe_in%d" % j)
+               for j, d in enumerate(spec_dims)]
+        out = pk.new_tensor(dims=out_dims, name="probe_out")
+        task_search.register_searched_task(pk, sched, inputs=ins, output=out)
+        print(chr(10) + "@@PROBE@@ OK")
+        sys.exit(0)
+    except Exception as e:
+        last = type(e).__name__ + ": " + str(e)[:160].replace(chr(10), " ")
+print(chr(10) + "@@PROBE@@ NO register " + str(last))
 """
 
 
 class Schedulable:
-    """Memoised 'can search schedule this group at all?', probed out of process."""
+    """Memoised 'can this group be BUILT?', probed out of process.
 
-    def __init__(self, graph: ModelGraph, grid_for=None, verbose: bool = False,
+    Buildable means both gates pass: search returns a schedule, and the
+    transpiler accepts it at registration. Checking only the first calls
+    groups buildable that fail later with an MMA operand-layout error.
+    """
+
+    def __init__(self, graph: ModelGraph, grid_for=None, forloop_for=None,
+                 verbose: bool = False,
                  timeout: int = 900, require_fused_only: bool = True):
-        from .task_search import default_grid
+        from .task_search import default_forloop, default_grid
         self.graph = graph
         self.grid_for = grid_for or default_grid
+        self.forloop_for = forloop_for or default_forloop
         self.verbose = verbose
         self.timeout = timeout
         self.require_fused_only = require_fused_only
@@ -244,7 +275,11 @@ class Schedulable:
             slot[n.output.name] = len(group.external_inputs) + len(ops) - 1
 
         args = [_json.dumps([list(v.dims) for v in group.external_inputs]),
-                _json.dumps(ops), _json.dumps(attrs), _json.dumps(list(grid))]
+                _json.dumps(ops), _json.dumps(attrs), _json.dumps(list(grid)),
+                _json.dumps(list(group.output.dims)),
+                _json.dumps(self.forloop_for(group)),
+                _json.dumps(max(9, len(group.nodes)
+                                + len(group.external_inputs) + 4))]
         try:
             proc = subprocess.run([_sys.executable, "-c", _PROBE_SRC] + args,
                                   capture_output=True, text=True,
@@ -326,7 +361,8 @@ def feasible_partitions(
 
 
 def assign_buffers(graph: ModelGraph, partition: list[Group],
-                   pinned: Optional[dict] = None) -> dict:
+                   pinned: Optional[dict] = None,
+                   reuse: bool = True) -> dict:
     """Map each group output to a buffer name, reusing buffers by liveness."""
     pinned = pinned or {}
     owner = {i: gi for gi, g in enumerate(partition) for i in g.nodes}
@@ -356,7 +392,11 @@ def assign_buffers(graph: ModelGraph, partition: list[Group],
             assignment[name] = name
             continue
         key = tuple(g.output.dims)
-        pool = free.get(key)
+        # Reuse frees a buffer once the partition INDEX of its last reader has
+        # passed, which assumes groups run in order. MPK runs a DAG, so two
+        # groups sharing a recycled buffer may overlap. reuse=False pins one
+        # buffer per group to test that.
+        pool = free.get(key) if reuse else None
         if pool:
             buf = pool.pop()
         else:

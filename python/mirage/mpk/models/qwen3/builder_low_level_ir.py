@@ -1,13 +1,9 @@
 """Qwen3 built from the low-level IR instead of from a call order.
 
 builder.py decides where every task begins and ends by the order it calls
-mpk.*_layer. This assembles the same model out of the IR's node vocabulary --
-lowering.OPS, which the superoptimizer schedules, and lowering.OPAQUE_OPS,
-which hand-written MPK tasks compute -- and hands the result to lower(). The
-task boundaries then come from dataflow rather than from this file's call
-order, and everything reusable lives in lowering/: where the boundaries go
-(default_partition), what computes an opaque node (standard_handlers), and the
-schedule knobs (knobs_from_env). What is left here is Qwen3.
+mpk.*_layer. This assembles the same model from the IR's node vocabulary and
+hands it to lower(), so the boundaries come from dataflow. What is left here
+is Qwen3. See docs/superoptimizer_ir.md.
 """
 from __future__ import annotations
 
@@ -33,14 +29,9 @@ class Qwen3Shapes:
     max_seq: int = 4096          # RoPE table length
     seq_len: int = 512           # decode window; the staging buffers' S
     max_reqs: int = 8
-    # argmax reduces through one slot per WORKER -- not per SM. On a B200
-    # those differ (128 vs 148), and a wrong extent here is not a crash:
-    # the reduction reads the wrong slots and the model decodes garbage.
-    # The caller must set it from pk.num_workers.
-    num_workers: int = 0
-    # tcgen05 needs the MMA's N a multiple of 8, and swapAB puts the decode
-    # token count there -- prep zeroes the pad rows so they are benign.
-    q_pad: int = 8
+    num_workers: int = 0     # MUST come from pk.num_workers, not the SM count
+    q_pad: int = 8           # tcgen05 wants the MMA's N a multiple of 8
+    split_attention: bool = False   # the searched core cannot lower today
 
     @property
     def out_vocab(self) -> int:
@@ -66,10 +57,8 @@ class Qwen3Shapes:
                    head_dim=head_dim, vocab=cfg.vocab_size)
 
 
-
 def rmsnorm(g: ModelGraph, x: Value, w: Value) -> Value:
-    """Qwen3's norm: rms_norm(x) * weight, two ops the partition pairs back
-    into one task. It has a muGraph op, so it is never opaque."""
+    """rms_norm(x) * weight -- two ops the partition pairs into one task."""
     return g.mul(g.rms_norm(x), w)
 
 
@@ -80,40 +69,49 @@ def mlp(g: ModelGraph, x: Value, wg: Value, wu: Value, wd: Value) -> Value:
     return g.matmul(g.mul(g.silu(gate), up), wd)
 
 
+def _attn_inputs(qkv: Value, w: dict) -> list:
+    """What either attention path reads, in task order."""
+    return [qkv, w["q_norm"], w["k_norm"], w["cos"], w["sin"], w["k_cache"], w["v_cache"]]
+
+
+def attention(g: ModelGraph, qkv: Value, w: dict, s: Qwen3Shapes,
+              layer: int) -> Value:
+    """One opaque task, or prep + a searched core + finalize.
+
+    Prep is opaque because it appends to the KV cache. The split form does not
+    lower today -- see docs/superoptimizer_ir.md.
+    """
+    if not s.split_attention:
+        return g.opaque("attention", _attn_inputs(qkv, w),
+                        (s.tokens, s.attn_dim),
+                        layer=layer, num_kv_heads=s.num_kv_heads)
+
+    fold = s.num_kv_heads * s.max_reqs
+    q, mask, kt, v = g.opaque_multi(
+        "attn_prep", _attn_inputs(qkv, w),
+        [(fold, s.q_pad, s.head_dim),
+         (fold, 1, s.seq_len),
+         (fold, s.head_dim, s.seq_len),
+         (fold, s.seq_len, s.head_dim)],
+        inits=[None, -30000.0, None, None],
+        layer=layer, num_kv_heads=s.num_kv_heads)
+
+    e = g.exp(g.add(g.matmul(q, kt), mask))
+    core = g.matmul(g.div(e, g.reduction(e, 2)), v)
+    return g.opaque("attn_finalize", [core], (s.tokens, s.attn_dim),
+                    layer=layer)
+
+
 def build_layer(g: ModelGraph, x: Value, w: dict, s: Qwen3Shapes,
                 layer: int) -> Value:
     """One decoder layer. `w` holds this layer's weights by short name."""
-    with g.scope(layer=layer, tag=f"l{layer}.attn"):
-        h = rmsnorm(g, x, w["in_norm"])
-        qkv = g.matmul(h, w["qkv"])
-        if os.environ.get("MPK_GRAPH_ATTENTION") == "1":
-            # prep is opaque because it APPENDS to the KV cache -- a side
-            # effect no dataflow graph can express -- and stages q/k^T/v/mask
-            # in the fold-dim (kv_head-major) layout the core reads. The core
-            # itself is a real subgraph, so search schedules it.
-            fold = s.num_kv_heads * s.max_reqs
-            q_st, mask_st, kt_st, v_st = g.opaque_multi(
-                "attn_prep",
-                [qkv, w["q_norm"], w["k_norm"], w["cos"], w["sin"],
-                 w["k_cache"], w["v_cache"]],
-                [(fold, s.q_pad, s.head_dim), (fold, 1, s.seq_len),
-                 (fold, s.head_dim, s.seq_len), (fold, s.seq_len, s.head_dim)],
-                layer=layer, num_kv_heads=s.num_kv_heads)
-            e = g.exp(g.add(g.matmul(q_st, kt_st), mask_st))
-            pad = g.matmul(g.div(e, g.reduction(e, 2)), v_st)
-            attn = g.opaque("attn_finalize", [pad], (s.tokens, s.attn_dim),
-                            layer=layer)
-        else:
-            attn = g.opaque("attention",
-                            [qkv, w["q_norm"], w["k_norm"], w["cos"], w["sin"],
-                             w["k_cache"], w["v_cache"]],
-                            (s.tokens, s.attn_dim), layer=layer,
-                            num_kv_heads=s.num_kv_heads)
-        x = g.add(x, g.matmul(attn, w["o"]))
+    h = rmsnorm(g, x, w["in_norm"])
+    qkv = g.matmul(h, w["qkv"])
+    x = g.add(x, g.matmul(attention(g, qkv, w, s, layer), w["o"]))
 
-    with g.scope(layer=layer, tag=f"l{layer}.mlp"):
-        h = rmsnorm(g, x, w["post_norm"])
-        x = g.add(x, mlp(g, h, w["gate"], w["up"], w["down"]))
+    h = rmsnorm(g, x, w["post_norm"])
+    x = g.add(x, mlp(g, h, w["gate"], w["up"], w["down"]))
+
     return x
 
 
@@ -124,9 +122,8 @@ def build_qwen3(s: Qwen3Shapes, *, num_layers: int | None = None) -> ModelGraph:
 
     tokens = g.new_input((s.tokens, 1), "input_tokens", role="feed")
     embed_w = g.new_input((s.vocab, s.hidden), "embed")
-    with g.scope(tag="embed"):
-        x = g.opaque("embedding", [tokens, embed_w], (s.tokens, s.hidden),
-                     tokens=s.tokens)
+    x = g.opaque("embedding", [tokens, embed_w], (s.tokens, s.hidden),
+                 tokens=s.tokens)
 
     for i in range(n):
         w = {
@@ -147,30 +144,98 @@ def build_qwen3(s: Qwen3Shapes, *, num_layers: int | None = None) -> ModelGraph:
         }
         x = build_layer(g, x, w, s, i)
 
-    with g.scope(tag="head"):
-        x = rmsnorm(g, x, g.new_input((1, s.hidden), "final_norm"))
-        logits = g.matmul(x, g.new_input((s.hidden, s.out_vocab), "lm_head"))
-        out, _, _ = g.opaque_multi(
-            "argmax", [logits],
-            [(s.tokens, 1), (s.tokens, s.num_workers),
-             (s.tokens, s.num_workers)],
-            dtypes=[None, None, "int64"])
+    x = rmsnorm(g, x, g.new_input((1, s.hidden), "final_norm"))
+    logits = g.matmul(x, g.new_input((s.hidden, s.out_vocab), "lm_head"))
+    out, _, _ = g.opaque_multi(
+        "argmax", [logits],
+        [(s.tokens, 1), (s.tokens, s.num_workers), (s.tokens, s.num_workers)],
+        dtypes=[None, None, "int64"])
     g.mark_output(out)
     return g
 
 
 
-# The one run of nodes only Qwen3 can name: everything between the two opaque
-# halves of attention is a single task. default_partition supplies the rest,
-# and the cuts it derives are the ones builder.py's *_layer call order implies
-# -- which is what makes the graph path comparable to it.
+# Everything between the two opaque halves of attention is one task.
 OPAQUE_RUNS = (("attn_prep", "attn_finalize", "attn_core"),)
 
 
-def plan(shapes: Qwen3Shapes, *, num_layers=None):
+def _split_core(graph, groups, at: int):
+    """Cut each attn_core group after `at` nodes.
+
+    default_partition makes the whole core one task, and that one cannot be
+    registered: 6 ops over 4 inputs leave ops outside the fused threadblock
+    graph. Smaller pieces do lower -- every split works except one that leaves
+    a group starting with `reduction`.
+    """
+    from ...lowering.group import make_group
+
+    out = []
+    for grp in groups:
+        ids = list(grp.nodes)
+        if grp.tag != "attn_core" or not 0 < at < len(ids):
+            out.append(grp)
+            continue
+        head, tail = ids[:at], ids[at:]
+        if graph.nodes[tail[0]].op == "reduction":
+            raise ValueError("a group starting with `reduction` cannot lower")
+        out.append(make_group(graph, head, "attn_core_a"))
+        out.append(make_group(graph, tail, "attn_core_b"))
+    return out
+
+
+def _apply_pattern(graph, pattern):
+    """Re-cut every run of non-opaque nodes using `pattern` cyclically.
+
+    A candidate is ranked on ONE layer; the layers are identical, so the same
+    run lengths replayed across the graph give the whole model that partition.
+    A run length that would build an illegal group (too many inputs, a bad
+    shape) falls back to single nodes for that piece rather than failing.
+    """
+    from ...lowering.group import make_group
+    from ...lowering.node import is_opaque as _op
+    from ...lowering.partition import _tag
+
+    groups, run = [], []
+
+    def cut(ids):
+        try:
+            groups.append(make_group(graph, ids, _tag(graph, ids)))
+        except ValueError:
+            for i in ids:
+                groups.append(make_group(graph, [i], graph.nodes[i].op))
+
+    def flush():
+        # Restart the pattern at every run. Cycling it continuously across the
+        # graph lets the phase drift after the first run, so later layers get
+        # cuts the ranking never validated -- and they fail to lower.
+        k = 0
+        while run:
+            n = min(pattern[k % len(pattern)], len(run))
+            cut(run[:n])
+            del run[:n]
+            k += 1
+
+    for i, nd in enumerate(graph.nodes):
+        if _op(nd.op):
+            flush()
+            groups.append(make_group(graph, [i], nd.op.split(":", 1)[1]))
+        else:
+            run.append(i)
+    flush()
+    return groups
+
+
+def plan(shapes: Qwen3Shapes, *, num_layers=None, fuse: bool = True,
+         core_split: int = 5, pattern=None):
     """The graph and its groups, before any weight is bound."""
     graph = build_qwen3(shapes, num_layers=num_layers)
-    return graph, default_partition(graph, opaque_runs=OPAQUE_RUNS)
+    runs = OPAQUE_RUNS if shapes.split_attention else ()
+    groups = default_partition(graph, opaque_runs=runs, fuse=fuse)
+    if shapes.split_attention:
+        groups = _split_core(graph, groups, core_split)
+    if pattern:
+        groups = _apply_pattern(graph, tuple(pattern))
+    return graph, groups
 
 
 def bind_weights(pk, model, shapes: Qwen3Shapes, *, num_layers=None,
@@ -181,8 +246,7 @@ def bind_weights(pk, model, shapes: Qwen3Shapes, *, num_layers=None,
     n = shapes.num_layers if num_layers is None else num_layers
     at = lambda t, nm: pk.attach_input(torch_tensor=t, name=nm)
 
-    # HF stores a norm weight 1-D; the graph declares it (1, hidden) because a
-    # searched task multiplies a (rows, hidden) tile by it.
+    # HF stores norm weights 1-D; the graph declares them (1, hidden).
     at_norm = lambda t, nm: at(t.reshape(1, -1).contiguous(), nm)
 
     b = {"embed": at(model.model.embed_tokens.weight, "embed")}
@@ -225,7 +289,12 @@ def bind_weights(pk, model, shapes: Qwen3Shapes, *, num_layers=None,
 def build(pk, shapes: Qwen3Shapes, bindings: dict, meta: dict, *,
           num_layers=None, planned=None, verbose: bool = False):
     """Lower Qwen3 onto `pk`."""
-    graph, groups = planned if planned is not None else plan(shapes, num_layers=num_layers)
+    if planned is not None:
+        graph, groups = planned
+    else:
+        # MPK_FUSE=0: one task per node, for partition comparisons.
+        graph, groups = plan(shapes, num_layers=num_layers,
+                             fuse=os.environ.get("MPK_FUSE", "1") != "0")
     return graph, groups, lower(
         pk, graph, groups, bindings,
         outputs={graph.outputs[0].name: meta["output_token"]},

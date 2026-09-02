@@ -10,6 +10,7 @@
 #include "mirage/utils/containers.h"
 #include "mirage/utils/json_utils.h"
 
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <thread>
@@ -25,7 +26,11 @@ KernelGraphGenerator::KernelGraphGenerator(
     : config(config), dim_strategy(DimStrategy(config)),
       checkpoint_filename(checkpoint_filename), verbose(verbose),
       num_total_random_tests(0), num_valid_kernel_graphs(0),
-      num_total_states(0), num_tasks(0), multithread_threshold_depth(5) {
+      num_total_states(0), num_tasks(0), multithread_threshold_depth(5),
+      search_max_states(0) {
+  if (char const *e = std::getenv("MIRAGE_SEARCH_MAX_STATES")) {
+    search_max_states = std::atoi(e);
+  }
   // setting num_thread
   unsigned int max_num_threads = std::thread::hardware_concurrency();
   if (config.search_thread > max_num_threads) {
@@ -132,6 +137,10 @@ void KernelGraphGenerator::generate_next_operator(
     std::vector<SerializedSearchContext> &verified_graphs,
     size_t search_depth,
     bool is_a_new_thread_start) {
+  if (search_max_states > 0 &&
+      num_total_states.load() >= search_max_states) {
+    return;
+  }
   ++num_total_states;
   if (num_total_states % 100 == 1) {
     show_statistics();

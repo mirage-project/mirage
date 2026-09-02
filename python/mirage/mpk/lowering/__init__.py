@@ -11,6 +11,8 @@ aborts rather than degrading.
 """
 from __future__ import annotations
 
+import os
+
 from typing import Callable, Optional
 
 from .group import (Group, group_to_taskspec_build, lower_group, make_group,
@@ -23,6 +25,8 @@ from .partition import (MAX_GROUP_INPUTS, MAX_GROUP_OPS, Rejection,
                         check_fork_join, check_shapes, default_partition,
                         enumerate_partitions,
                         feasible_partitions, group_signature)
+from .predict import (Candidate, CostTable, Trace, rank, report, simulate,
+                      task_counter)
 from .task_search import (MATMUL_K_TILES, MATMUL_N_TILES, MMA_K_ATOM,
                           MPK_BLOCK_DIM, Schedule, TaskSearchError, TaskSpec,
                           TensorSpec, cache_key, default_forloop, default_grid,
@@ -61,7 +65,8 @@ def lower(
     # grows with depth, which nothing model-sized can afford.
     grid_for, forloop_for, stages_for = knobs or knobs_from_env(graph)
     env = dict(bindings)
-    buf_of = assign_buffers(graph, partition, outputs)
+    buf_of = assign_buffers(graph, partition, outputs,
+                            reuse=os.environ.get("MPK_REUSE_BUFFERS", "1") != "0")
     memo: dict[tuple, object] = {}
     pool: dict[str, object] = {}
 
@@ -84,10 +89,20 @@ def lower(
                     out = pool[buf]
                 else:
                     nm = buf or f"mg_{v.name.replace('.', '_')}"
-                    out = pk.new_tensor(
-                        dims=v.dims,
-                        dtype=getattr(mi, v.dtype) if v.dtype else dtype,
-                        name=nm, io_category="cuda_tensor")
+                    if v.init is not None:
+                        # A partially-written buffer needs a defined start;
+                        # attach real storage rather than cudaMalloc's leftovers.
+                        import torch
+                        out = pk.attach_input(
+                            torch_tensor=torch.full(
+                                v.dims, v.init, dtype=torch.bfloat16,
+                                device="cuda"),
+                            name=nm)
+                    else:
+                        out = pk.new_tensor(
+                            dims=v.dims,
+                            dtype=getattr(mi, v.dtype) if v.dtype else dtype,
+                            name=nm, io_category="cuda_tensor")
                     if buf is not None:
                         pool[buf] = out
             resolved.append(out)

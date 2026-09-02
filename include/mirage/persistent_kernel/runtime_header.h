@@ -252,15 +252,18 @@ struct EventDesc {
 
 struct FullTaskDesc {
   FullTaskDesc(TaskType t, int _variant_id)
-      : task_type(t), variant_id(_variant_id), num_inputs(0), num_outputs(0),
-        trigger_event(EVENT_INVALID_ID), dependent_event(EVENT_INVALID_ID) {
+      : task_type(t), variant_id(_variant_id), profile_id(0), num_inputs(0),
+        num_outputs(0), trigger_event(EVENT_INVALID_ID),
+        dependent_event(EVENT_INVALID_ID) {
     task_metadata.raw_payload = ~0ull;
   }
-  FullTaskDesc() {
+  FullTaskDesc() : profile_id(0) {
     task_metadata.raw_payload = ~0ull;
   }
   TaskType task_type;
   unsigned variant_id;
+  // Per-shape id the profiler reports; stamped in runtime.cc.
+  unsigned profile_id;
   int num_inputs, num_outputs;
   EventId trigger_event;
   EventId dependent_event;
@@ -289,8 +292,8 @@ static_assert(
 struct alignas(16) TaskDesc {
   TaskDesc(FullTaskDesc t)
       : task_type(t.task_type), variant_id(t.variant_id),
-        trigger_event(t.trigger_event), dependent_event(t.dependent_event),
-        task_metadata(t.task_metadata) {
+        profile_id(t.profile_id), trigger_event(t.trigger_event),
+        dependent_event(t.dependent_event), task_metadata(t.task_metadata) {
     for (int i = 0; i < t.num_inputs; i++) {
       input_ptrs[i] = t.inputs[i].base_ptr;
     }
@@ -310,11 +313,12 @@ struct alignas(16) TaskDesc {
     }
 #endif
   }
-  TaskDesc() {
+  TaskDesc() : profile_id(0) {
     task_metadata.raw_payload = ~0ull;
   }
   TaskType task_type;
   unsigned variant_id;
+  unsigned profile_id;   // see FullTaskDesc::profile_id
   EventId trigger_event;
   EventId dependent_event;
   void *input_ptrs[MAX_INPUTS_PER_TASK];

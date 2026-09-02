@@ -50,6 +50,7 @@ private:
   std::atomic<int> num_total_random_tests;
   std::atomic<int> num_valid_kernel_graphs;
   std::atomic<int> num_total_states;
+  int search_max_states;   // MIRAGE_SEARCH_MAX_STATES; 0 = exhaustive
   std::atomic<int> num_symbolic_graphs;
 
   // Time

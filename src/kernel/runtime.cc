@@ -312,6 +312,41 @@ void register_mugraph(
     assert((int)output_ops.size() == num_outputs);
   };
 
+  // Per-SHAPE id for the profiler: task_type is TASK_GENERATED for all
+  // generated tasks and variant_id is per registration, so neither names the
+  // computation. See docs/superoptimizer_ir.md.
+  auto generated_shape_index = [&](kn::KNCustomizedOp const *cur_op) -> int {
+    static std::map<std::string, int> index_of;
+    auto dims_of = [](kn::DTensor const &t) {
+      std::string d;
+      for (int i = 0; i < t.num_dims; i++) {
+        d += (i ? "x" : "") + std::to_string(t.dim[i]);
+      }
+      return d;
+    };
+    std::string ins, outs, ops;
+    for (auto const &t : cur_op->input_tensors) {
+      ins += (ins.empty() ? "" : ",") + dims_of(t);
+    }
+    for (auto const &t : cur_op->output_tensors) {
+      outs += (outs.empty() ? "" : ",") + dims_of(t);
+    }
+    for (auto const &sub_op : cur_op->bgraph.operators) {
+      ops += (ops.empty() ? "" : ",") + std::to_string((int)sub_op->op_type);
+    }
+    std::string const sig = "in=" + ins + " out=" + outs + " ops=" + ops;
+    auto it = index_of.find(sig);
+    if (it != index_of.end()) {
+      return it->second;
+    }
+    int const id = (int)index_of.size();
+    index_of[sig] = id;
+    if (std::getenv("MPK_DUMP_SHAPE_INDEX")) {
+      fprintf(stderr, "[shape-index] %d %s\n", id, sig.c_str());
+    }
+    return id;
+  };
+
   // Build the bid-lex ordered task vector for a layer (same metadata logic as
   // the original code).
   auto build_tasks_bid_lex = [&](kn::KNCustomizedOp const *cur_op,
@@ -329,6 +364,9 @@ void register_mugraph(
         for (bid.z = 0; bid.z < bgraph.grid_dim.z; bid.z++) {
           for (int subtask_id = 0; subtask_id < num_subtasks; subtask_id++) {
             FullTaskDesc task(task_type, variant_id);
+            if (task_type == TASK_GENERATED) {
+              task.profile_id = (unsigned)generated_shape_index(cur_op);
+            }
             // Set request_id for attention and paged_attention
             if ((task_type == TASK_ATTENTION_1) ||
                 (task_type == TASK_ATTENTION_2) ||
@@ -1111,6 +1149,10 @@ TaskGraphResult print_task_graph(
            "task.at(\"merge_task_offset\").get<int>();");
     code.e("task_desc.task_metadata.task_offset = "
            "task.at(\"task_offset\").get<int>();");
+    code.e("if (task.contains(\"profile_id\")) {");
+    code.e("task_desc.profile_id = "
+           "task.at(\"profile_id\").get<unsigned>();");
+    code.e("}");
     code.e("if (task.at(\"trigger_event\").is_number_integer()) {");
     code.e("task_desc.trigger_event = task.at(\"trigger_event\").get<unsigned "
            "long long int>();");
@@ -1283,6 +1325,11 @@ TaskGraphResult print_task_graph(
           size *= desc.tensor.dim[i];
         }
         code.e("CUDA_CHECK(cudaMalloc(&$, $));", desc.name, size);
+        // Zero it. A hand-written task reads only the positions it wrote, so
+        // uninitialised memory never mattered; a GENERATED task reads its
+        // operands densely, and 0 * NaN is NaN -- one stale bit pattern in the
+        // unwritten tail of a staging buffer poisons the whole result.
+        code.e("CUDA_CHECK(cudaMemset($, 0, $));", desc.name, size);
         if (use_json_format) {
           code.e("all_tensors[\"$\"] = $;", desc.name, desc.name);
         }
@@ -1472,7 +1519,8 @@ TaskGraphResult print_task_graph(
                 {"kv_idx", task_desc.task_metadata.kv_idx},
                 {"merge_task_offset",
                  task_desc.task_metadata.merge_task_offset},
-                {"task_offset", task_desc.task_metadata.task_offset}};
+                {"task_offset", task_desc.task_metadata.task_offset},
+                {"profile_id", task_desc.profile_id}};
 
             for (int i = 0; i < task_desc.num_inputs; i++) {
               if (input_ops[i].dtensor == kernel::DTensor::EMPTY_TENSOR) {

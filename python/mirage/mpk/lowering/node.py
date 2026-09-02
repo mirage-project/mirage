@@ -1,7 +1,6 @@
 """A model as one inspectable graph, ahead of any decision about tasks."""
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 from typing import Optional
 
@@ -30,7 +29,7 @@ OPS: dict[str, int] = {
 # is a mismatch caught before the operand order reaches a kernel.
 OPAQUE_OPS: dict[str, tuple[int, int]] = {
     "embedding": (2, 1),        # (tokens, table) -- a gather
-    "attention": (7, 1),        # the monolithic paged-attention task
+    "attention": (7, 1),        # the whole of attention as one task
     "attn_prep": (7, 4),        # qk-norm, RoPE, cache append, staging
     "attn_finalize": (1, 1),    # pack the padded core output
     "argmax": (1, 3),           # a reduction to indices: token, value, index
@@ -56,17 +55,21 @@ class Value:
     # int64 index out of a bf16 allocation is a misaligned access, not a
     # wrong number -- the run dies in cudaDeviceSynchronize with no hint.
     dtype: Optional[str] = None
+    # A value a task only PARTIALLY writes needs a defined starting state.
+    # Attention prep writes mask[pos]=0 to mark one position valid and never
+    # touches the rest, so the buffer must start at -30000: cudaMalloc leaves
+    # it undefined, and zero means "every position is valid".
+    init: Optional[float] = None
 
     def __repr__(self) -> str:
         return f"{self.name}{list(self.dims)}"
+
 
 @dataclasses.dataclass
 class Node:
     op: str
     inputs: tuple[Value, ...]
     output: Value
-    layer: Optional[int] = None         # which transformer layer, for replication
-    tag: str = ""                       # human label, e.g. "mlp.gate"
     attrs: dict = dataclasses.field(default_factory=dict)
 
     def __repr__(self) -> str:
@@ -82,8 +85,6 @@ class ModelGraph:
         self.inputs: list[Value] = []
         self.outputs: list[Value] = []
         self._n = 0
-        self._layer: Optional[int] = None
-        self._tag: str = ""
 
     def new_input(self, dims, name: str, role: str = "weight") -> Value:
         v = Value(name=name, dims=tuple(dims), producer=None, role=role)
@@ -93,58 +94,55 @@ class ModelGraph:
     def mark_output(self, v: Value) -> None:
         self.outputs.append(v)
 
-    def _fresh(self, dims, dtype=None) -> Value:
+    def _fresh(self, dims, dtype=None, init=None) -> Value:
         self._n += 1
-        base = f"{self._tag}." if self._tag else ""
-        return Value(name=f"{base}v{self._n}", dims=tuple(dims),
-                     producer=len(self.nodes), dtype=dtype)
+        return Value(name=f"v{self._n}", dims=tuple(dims),
+                     producer=len(self.nodes), dtype=dtype, init=init)
 
-    def _check_opaque(self, name: str, inputs, n_out: int) -> None:
-        if name not in OPAQUE_OPS:
-            raise ValueError(
-                f"unknown opaque task {name!r}; OPAQUE_OPS declares "
-                f"{sorted(OPAQUE_OPS)}")
-        arity, outs = OPAQUE_OPS[name]
+    def opaque(self, name: str, inputs, dims, **attrs) -> Value:
+        """One node for a task the graph cannot model. Its result is a real
+        Value, so everything downstream stays connected."""
+        return self.opaque_multi(name, inputs, [dims], **attrs)[0]
+
+    def opaque_multi(self, name: str, inputs, dims_list, dtypes=None,
+                     inits=None, **attrs) -> list:
+        """The same, for a task that writes SEVERAL tensors -- attention prep
+        stages q/k^T/v/mask for the generated core. Every output is a real
+        Value, so the reader's dependency on the writer stays visible to MPK.
+
+        Arity is checked here, at construction, not at lowering.
+        """
+        arity, n_out = OPAQUE_OPS.get(name, (None, None))
+        if arity is None:
+            raise ValueError(f"unknown opaque task {name!r}; OPAQUE_OPS "
+                             f"declares {sorted(OPAQUE_OPS)}")
         if len(inputs) != arity:
             raise ValueError(f"opaque {name!r} takes {arity} inputs, got "
                              f"{len(inputs)}")
-        if n_out != outs:
-            raise ValueError(f"opaque {name!r} writes {outs} tensors, got "
-                             f"{n_out}")
-
-    def opaque_multi(self, name: str, inputs, dims_list, dtypes=None,
-                     **attrs) -> list:
-        """An opaque task that writes SEVERAL tensors -- attention prep stages
-        q/k^T/v/mask for the generated core. Every output is a real Value, so
-        the reader's dependency on the writer stays visible to MPK."""
-        self._check_opaque(name, inputs, len(dims_list))
-        dtypes = dtypes or [None] * len(dims_list)
-        outs = [self._fresh(d, t) for d, t in zip(dims_list, dtypes)]
-        self.nodes.append(Node(op=OPAQUE + name, inputs=tuple(inputs),
-                               output=outs[0], layer=self._layer, tag=self._tag,
-                               attrs=dict(attrs, extra_outputs=tuple(outs[1:]))))
+        if len(dims_list) != n_out:
+            raise ValueError(f"opaque {name!r} writes {n_out} tensors, got "
+                             f"{len(dims_list)}")
+        outs = [self._fresh(d, t, i)
+                for d, t, i in zip(dims_list, dtypes or [None] * n_out,
+                                   inits or [None] * n_out)]
+        self._append(OPAQUE + name, inputs, outs[0],
+                     dict(attrs, extra_outputs=tuple(outs[1:])))
         return outs
 
-    def opaque(self, name: str, inputs, dims, **attrs) -> Value:
-        """A hand-written task the graph does not model. Its result is a real
-        value, so everything downstream stays connected."""
-        self._check_opaque(name, inputs, 1)
-        out = self._fresh(dims)
-        self.nodes.append(Node(op=OPAQUE + name, inputs=tuple(inputs),
-                               output=out, layer=self._layer, tag=self._tag,
+    def _append(self, op: str, inputs, out: Value, attrs: dict) -> None:
+        self.nodes.append(Node(op=op, inputs=tuple(inputs), output=out,
                                attrs=attrs))
-        return out
 
     def _emit(self, op: str, inputs, dims, **attrs) -> Value:
-        assert len(inputs) == OPS[op], \
-            f"{op} takes {OPS[op]}, got {len(inputs)}"
+        if len(inputs) != OPS[op]:
+            raise ValueError(f"{op} takes {OPS[op]} inputs, got {len(inputs)}")
         out = self._fresh(dims)
-        self.nodes.append(Node(op=op, inputs=tuple(inputs), output=out,
-                               layer=self._layer, tag=self._tag, attrs=attrs))
+        self._append(op, inputs, out, attrs)
         return out
 
     def matmul(self, a: Value, b: Value) -> Value:
-        assert a.dims[-1] == b.dims[-2], f"matmul shape: {a} @ {b}"
+        if a.dims[-1] != b.dims[-2]:
+            raise ValueError(f"matmul shape: {a} @ {b}")
         return self._emit("matmul", (a, b), a.dims[:-1] + (b.dims[-1],))
 
     def rms_norm(self, x: Value, normalized_shape=None) -> Value:
@@ -172,17 +170,6 @@ class ModelGraph:
     def exp(self, x): return self._emit("exp", (x,), x.dims)
     def sqrt(self, x): return self._emit("sqrt", (x,), x.dims)
     def square(self, x): return self._emit("square", (x,), x.dims)
-
-    @contextlib.contextmanager
-    def scope(self, layer: Optional[int] = None, tag: str = ""):
-        """Label the nodes emitted inside, so a partition found on one layer
-        can be replicated to the rest."""
-        prev = (self._layer, self._tag)
-        self._layer, self._tag = layer, tag
-        try:
-            yield self
-        finally:
-            self._layer, self._tag = prev
 
     def consumers(self, v: Value) -> list[int]:
         return [i for i, n in enumerate(self.nodes) if v in n.inputs]

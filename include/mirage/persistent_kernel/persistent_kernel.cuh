@@ -960,8 +960,13 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
     __syncthreads();
 
 #ifdef MPK_ENABLE_PROFILING
+    unsigned prof_event_idx = task_desc->task_type;
+    if (task_desc->task_type == TASK_GENERATED &&
+        task_desc->profile_id < 61u) {
+      prof_event_idx = TASK_GENERATED + task_desc->profile_id;
+    }
     if (task_desc->task_type != TASK_TERMINATE) {
-      PROFILER_EVENT_START(task_desc->task_type, task_counter);
+      PROFILER_EVENT_START(prof_event_idx, task_counter);
     }
 #endif
 
@@ -996,7 +1001,7 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
 
 #ifdef MPK_ENABLE_PROFILING
     if (task_desc->task_type != TASK_TERMINATE) {
-      PROFILER_EVENT_END(task_desc->task_type, task_counter++);
+      PROFILER_EVENT_END(prof_event_idx, task_counter++);
     }
 #endif
 
