@@ -490,7 +490,6 @@ class PersistentKernel:
                 f"page_size {page_size} disagrees with "
                 f"kv_groups[0].block_size {kv_groups[0].block_size}")
         self.kv_groups = kv_groups
-        self.page_size = kv_groups[0].block_size
         self.eos_token_id = eos_token_id
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
         # Prevent GC of PyTorch tensors whose GPU pointers are baked into the
@@ -694,7 +693,7 @@ class PersistentKernel:
             "max_num_batched_requests": self.max_num_batched_requests,
             "max_num_batched_tokens": self.max_num_batched_tokens,
             "max_num_pages": self.max_num_pages,
-            "page_size": self.page_size,
+            "kv_groups": [[g.block_size, g.window_size] for g in self.kv_groups],
             "world_size": self.world_size,
             "rank": self.mpi_rank,
             "cuda_cc": self.target_cc,
@@ -715,7 +714,8 @@ class PersistentKernel:
             ("max_num_batched_requests", self.max_num_batched_requests),
             ("max_num_batched_tokens", self.max_num_batched_tokens),
             ("max_num_pages", self.max_num_pages),
-            ("page_size", self.page_size),
+            ("kv_groups",
+             [[g.block_size, g.window_size] for g in self.kv_groups]),
             ("world_size", self.world_size),
             ("rank", self.mpi_rank),
             ("cuda_cc", self.target_cc),
@@ -1292,21 +1292,45 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, "single_batch_extend_attention", params)
 
-    def _resolve_kv_block_size(self, group_id, explicit_page_size=None,
-                               cache_dt=None, cache_page_dim=1,
-                               layer_window=0):
+    def meta_tensor_ptrs(self):
+        """Meta-tensor pointers in the order init_func reads them."""
+        keys = ["step", "tokens", "input_tokens", "output_tokens",
+                "num_new_tokens", "prompt_lengths", "qo_indptr_buffer"]
+        for g in range(len(self.kv_groups)):
+            keys += [f"paged_kv_indptr_buffer_{g}",
+                     f"paged_kv_indices_buffer_{g}",
+                     f"paged_kv_last_page_len_buffer_{g}",
+                     f"paged_kv_indices_snapshot_{g}"]
+        if self.mode == "online_pinned":
+            keys += ["pinned_req_ready", "pinned_req_request_id",
+                     "pinned_req_prompt_len", "pinned_req_initial_step",
+                     "pinned_comp_ready", "pinned_comp_request_id",
+                     "pinned_comp_buffer_row", "pinned_comp_final_step",
+                     "pinned_shutdown", "pinned_step", "pinned_inbox_tokens",
+                     "pinned_rid_at_row"]
+        if "kv_event_log" in self.meta_tensors:
+            keys.append("kv_event_log")
+
+        ptrs = []
+        for key in keys:
+            tensor = self.meta_tensors.get(key)
+            if tensor is None:
+                if self.test_mode:
+                    ptrs.append(0)          # test mode tolerates a null slot
+                    continue
+                raise ValueError(f"Missing meta tensor: {key}")
+            ptrs.append(tensor.data_ptr())
+        return ptrs
+
+    def _resolve_kv_block_size(self, group_id, cache_dt=None,
+                               cache_page_dim=1, layer_window=0):
         """kv_groups[group_id].block_size is the single source of truth for a
-        paged layer's logical block size. A caller-passed page_size and the
-        attached paged cache's page dimension must both agree — mismatches
-        used to silently corrupt data; fail at graph-build time instead."""
+        paged layer's logical block size, and the attached paged cache's page
+        dimension must agree."""
         assert 0 <= group_id < len(self.kv_groups), (
             f"group_id {group_id} out of range: {len(self.kv_groups)} "
             f"kv_group(s) declared")
         block_size = self.kv_groups[group_id].block_size
-        if explicit_page_size is not None:
-            assert explicit_page_size == block_size, (
-                f"page_size {explicit_page_size} passed to a group-{group_id} "
-                f"layer, but kv_groups[{group_id}].block_size = {block_size}")
         if cache_dt is not None:
             got = cache_dt.dim(cache_page_dim)
             assert got == block_size, (
@@ -1572,14 +1596,14 @@ class PersistentKernel:
         k_pe_new: DTensor,
         paged_cache: DTensor,
         contiguous_kv: DTensor,
-        mla_params: tuple,
+        mla_params: tuple,      # (d_k, d_v)
         grid_dim: tuple,
         block_dim: tuple,
-        group_id: int = 0,
+        group_id: int,          # required: which page table this layer reads
     ):
-        d_k, d_v, page_size = mla_params
-        page_size = self._resolve_kv_block_size(
-            group_id, explicit_page_size=page_size, cache_dt=paged_cache)
+        d_k, d_v = mla_params
+        page_size = self._resolve_kv_block_size(group_id,
+                                                cache_dt=paged_cache)
         params = [d_k, d_v, page_size, group_id,
                   _page_stride(paged_cache)]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
@@ -1598,10 +1622,10 @@ class PersistentKernel:
         paged_cache: DTensor,
         ckv_sep: DTensor,     # [max_seq_len, D_V=512] output
         kpe_sep: DTensor,     # [max_seq_len, D_K-D_V=64] output
-        mla_params: tuple,
+        mla_params: tuple,      # (d_k, d_v)
         grid_dim: tuple,
         block_dim: tuple,
-        group_id: int = 0,
+        group_id: int,          # required: which page table this layer reads
     ):
         """Gather paged KV into SEPARATE CKV / KPE contiguous buffers.
 
@@ -1609,9 +1633,9 @@ class PersistentKernel:
         to two dense tensors instead of a single concatenated [S, D_K] buffer.
         This is the layout ``mla_prefill_sm100`` expects.
         """
-        d_k, d_v, page_size = mla_params
-        page_size = self._resolve_kv_block_size(
-            group_id, explicit_page_size=page_size, cache_dt=paged_cache)
+        d_k, d_v = mla_params
+        page_size = self._resolve_kv_block_size(group_id,
+                                                cache_dt=paged_cache)
         params = [d_k, d_v, page_size, group_id,
                   _page_stride(paged_cache)]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
@@ -3376,52 +3400,7 @@ class PersistentKernel:
         self.store_i32_release = getattr(mod, "store_i32_release")
         print("Finished megakernel compilation...")
 
-        _paged_kv_keys = []
-        for _g in range(len(self.kv_groups)):
-            _paged_kv_keys += [
-                f"paged_kv_indptr_buffer_{_g}",
-                f"paged_kv_indices_buffer_{_g}",
-                f"paged_kv_last_page_len_buffer_{_g}",
-                f"paged_kv_indices_snapshot_{_g}",
-            ]
-        expected_order = [
-            "step",
-            "tokens",
-            "input_tokens",
-            "output_tokens",
-            "num_new_tokens",
-            "prompt_lengths",
-            "qo_indptr_buffer",
-        ] + _paged_kv_keys
-        pinned_extra_order=[
-            "pinned_req_ready",
-            "pinned_req_request_id",
-            "pinned_req_prompt_len",
-            "pinned_req_initial_step",
-            "pinned_comp_ready",
-            "pinned_comp_request_id",
-            "pinned_comp_buffer_row",
-            "pinned_comp_final_step",
-            "pinned_shutdown",
-            "pinned_step",
-            "pinned_inbox_tokens",
-            "pinned_rid_at_row",
-        ]
-        meta_tensors_ptr = []
-        for key in expected_order:
-            if key not in self.meta_tensors:
-                if self.test_mode:
-                    # In test mode, we can allow missing meta tensors and pass null pointer
-                    meta_tensors_ptr.append(0)  
-                else:
-                  raise ValueError(f"Missing meta tensor: {key}")
-            else:
-              meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
-        if self.mode=="online_pinned":
-            for key in pinned_extra_order:
-                meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
-        if "kv_event_log" in self.meta_tensors:
-            meta_tensors_ptr.append(self.meta_tensors["kv_event_log"].data_ptr())
+        meta_tensors_ptr = self.meta_tensor_ptrs()
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )
@@ -3509,36 +3488,7 @@ class PersistentKernel:
         self.load_i32_acquire = getattr(mod, "load_i32_acquire")
         self.store_i32_release = getattr(mod, "store_i32_release")
         
-        # Prepare meta tensors
-        meta_tensors = list()
-        meta_tensors.append(self.meta_tensors["step"])
-        meta_tensors.append(self.meta_tensors["tokens"])
-        meta_tensors.append(self.meta_tensors["input_tokens"])
-        meta_tensors.append(self.meta_tensors["output_tokens"])
-        meta_tensors.append(self.meta_tensors["num_new_tokens"])
-        meta_tensors.append(self.meta_tensors["prompt_lengths"])
-        meta_tensors.append(self.meta_tensors["qo_indptr_buffer"])
-        for _g in range(len(self.kv_groups)):
-            meta_tensors.append(self.meta_tensors[f"paged_kv_indptr_buffer_{_g}"])
-            meta_tensors.append(self.meta_tensors[f"paged_kv_indices_buffer_{_g}"])
-            meta_tensors.append(self.meta_tensors[f"paged_kv_last_page_len_buffer_{_g}"])
-            meta_tensors.append(self.meta_tensors[f"paged_kv_indices_snapshot_{_g}"])
-        if self.mode == "online_pinned":
-            meta_tensors.append(self.meta_tensors["pinned_req_ready"])
-            meta_tensors.append(self.meta_tensors["pinned_req_request_id"])
-            meta_tensors.append(self.meta_tensors["pinned_req_prompt_len"])
-            meta_tensors.append(self.meta_tensors["pinned_req_initial_step"])
-            meta_tensors.append(self.meta_tensors["pinned_comp_ready"])
-            meta_tensors.append(self.meta_tensors["pinned_comp_request_id"])
-            meta_tensors.append(self.meta_tensors["pinned_comp_buffer_row"])
-            meta_tensors.append(self.meta_tensors["pinned_comp_final_step"])
-            meta_tensors.append(self.meta_tensors["pinned_shutdown"])
-            meta_tensors.append(self.meta_tensors["pinned_step"])
-            meta_tensors.append(self.meta_tensors["pinned_inbox_tokens"])
-            meta_tensors.append(self.meta_tensors["pinned_rid_at_row"])
-        if "kv_event_log" in self.meta_tensors:
-            meta_tensors.append(self.meta_tensors["kv_event_log"])
-        meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
+        meta_tensors_ptr = self.meta_tensor_ptrs()
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )

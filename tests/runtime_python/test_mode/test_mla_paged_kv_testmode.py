@@ -143,12 +143,14 @@ def main():
                            dtype=torch.bfloat16, device=device)
         contiguous_kv = torch.zeros(MAX_SEQ_LENGTH, D_K, dtype=torch.bfloat16,
                                     device=device)
+        kv = plan.attach(pk, layer)
         pk.mla_kv_gather_layer(
             c_latent_new=pk.attach_input(c_latent, name=f"{tag}_c_latent"),
             k_pe_new=pk.attach_input(k_pe, name=f"{tag}_k_pe"),
-            paged_cache=plan.attach(pk, layer)["kv_cache"],
+            paged_cache=kv["kv_cache"],
             contiguous_kv=pk.attach_input(contiguous_kv, name=f"{tag}_kv"),
-            mla_params=(D_K, D_V, PAGE_SIZE),
+            mla_params=(D_K, D_V),
+            group_id=kv["group_id"],
             grid_dim=(1, 1, 1),
             block_dim=(128, 1, 1),
         )
@@ -213,8 +215,6 @@ def main():
                 break
 
     # Exactly the slots under test hold exactly seq_len rows, and no others.
-    # This is what a wrong slot offset or a wrong page stride trips: writing
-    # page 1 through a stride of anything but one page lands in a neighbour.
     touched = {slot_of[layer] for layer in LAYERS_UNDER_TEST}
     written = [int((view[s].abs().sum(dim=-1) > 0).sum().item())
                for s in range(plan.num_slots)]
@@ -231,8 +231,7 @@ def main():
     if not ok:
         sys.exit(1)
     print("\nPASSED: the MLA gather appends to and reads back from the "
-          "plan-backed page pool, across a page boundary, without touching "
-          "another layer's slot")
+          "plan-backed page pool, across a page boundary.")
 
 
 if __name__ == "__main__":

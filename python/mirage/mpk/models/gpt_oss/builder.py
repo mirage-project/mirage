@@ -58,7 +58,6 @@ class GptOssBuilder(GraphBuilder):
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None,
                  kv_plan: Optional[KVCachePlan] = None):
         super().__init__(mpk, weights)
-        self.max_num_pages = mpk.max_num_pages
         # Two callers, two sources: demo/gpt_oss/demo.py builds the plan and
         # passes it here; through MPK the plan is built from kv_streams()
         # before the PersistentKernel exists and arrives on it.

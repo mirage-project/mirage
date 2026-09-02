@@ -226,6 +226,16 @@ class InklingBuilder(GraphBuilder):
             self.vocab_size = model_config.vocab_size
         self.build_from_dict(model_config.state_dict, model_config.with_lm_head)
 
+    @staticmethod
+    def load_config(model_name: str, model_path: str | None = None):
+        path = model_path or model_name
+        if not os.path.isdir(path):
+            from huggingface_hub import snapshot_download
+
+            path = snapshot_download(model_name)
+        with open(os.path.join(path, "config.json")) as f:
+            return json.load(f)
+
     def build_from_model(self, model_name: str, model_path: str | None = None):
         from transformers import AutoTokenizer
 
@@ -237,8 +247,7 @@ class InklingBuilder(GraphBuilder):
         self.model_name = model_name
         self.model_path = path
 
-        with open(os.path.join(path, "config.json")) as f:
-            cfg = json.load(f)
+        cfg = self.load_config(model_name, path)
         tc = cfg.get("text_config", cfg)
         self.hidden_size = tc.get("hidden_size", self.hidden_size)
         self.num_layers = tc.get("num_hidden_layers", self.num_layers)

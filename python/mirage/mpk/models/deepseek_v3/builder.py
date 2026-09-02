@@ -95,8 +95,6 @@ class DeepSeekV3Builder(GraphBuilder):
 
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
-        self.max_num_pages = mpk.max_num_pages
-        self.page_size = mpk.page_size
         self.world_size = mpk.world_size
         self.num_workers = mpk.num_workers
         self._use_nvshmem = mpk.use_nvshmem  # True only if nvshmem is actually enabled
@@ -126,14 +124,15 @@ class DeepSeekV3Builder(GraphBuilder):
         self.mtp_config = getattr(mpk, 'spec_decode_config', None)
 
     def _kv_cache(self, layer_id: int):
-        """This layer's paged cache, attached once.
+        """This layer's paged cache and its group id, attached once.
 
         attach() calls mpk.attach_input, which declares a C++ variable, so a
         second call for the same layer would redeclare it.
         """
         cached = self._layer_caches.get(layer_id)
         if cached is None:
-            cached = self.kv_plan.attach(self.mpk, layer_id)["kv_cache"]
+            kv = self.kv_plan.attach(self.mpk, layer_id)
+            cached = (kv["kv_cache"], kv["group_id"])
             self._layer_caches[layer_id] = cached
         return cached
 
@@ -743,7 +742,7 @@ class DeepSeekV3Builder(GraphBuilder):
         # Both write `self.attn_out`. Builder order is prefill -> decode; the
         # MPK event graph serialises the two writes, so whichever kernel really
         # runs produces the final value (the other becomes a no-op).
-        layer_cache = self._kv_cache(layer_idx)
+        layer_cache, kv_group = self._kv_cache(layer_idx)
         q_len_mla = self.max_num_batched_tokens
         kv_len_max = self.mpk.max_seq_length
         if self._use_prefill:
@@ -754,7 +753,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 paged_cache=layer_cache,
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
-                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                mla_params=(self.qk_head_dim, self.v_head_dim),
+                group_id=kv_group,
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
             )
@@ -781,7 +781,8 @@ class DeepSeekV3Builder(GraphBuilder):
             k_pe_new=self.k_pe_out,
             paged_cache=layer_cache,
             contiguous_kv=self.contiguous_kv,
-            mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+            mla_params=(self.qk_head_dim, self.v_head_dim),
+            group_id=kv_group,
             grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
             block_dim=(128, 1, 1),
         )
@@ -1403,7 +1404,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 paged_cache=self.mtp_ckv_kpe_cache_tensor,
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
-                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                mla_params=(self.qk_head_dim, self.v_head_dim),
+                group_id=self.mtp_kv_group,
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
             )
@@ -1426,7 +1428,8 @@ class DeepSeekV3Builder(GraphBuilder):
             k_pe_new=self.k_pe_out,
             paged_cache=self.mtp_ckv_kpe_cache_tensor,
             contiguous_kv=self.contiguous_kv,
-            mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+            mla_params=(self.qk_head_dim, self.v_head_dim),
+            group_id=self.mtp_kv_group,
             grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
             block_dim=(128, 1, 1),
         )
@@ -1750,7 +1753,8 @@ class DeepSeekV3Builder(GraphBuilder):
         )
 
         # ---- MTP KV cache ----
-        self.mtp_ckv_kpe_cache_tensor = self._kv_cache(self.num_layers)
+        (self.mtp_ckv_kpe_cache_tensor,
+         self.mtp_kv_group) = self._kv_cache(self.num_layers)
 
         # ---- Intermediate tensors ----
         mbt = self.max_num_batched_tokens

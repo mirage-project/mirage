@@ -58,7 +58,7 @@ using namespace mirage::runtime;
 // #define MPK_MAX_NUM_BATCHED_REQUESTS 16
 // #define MPK_MAX_NUM_BATCHED_TOKENS 64
 // #define MPK_MAX_NUM_PAGES 1024
-// #define MPK_PAGE_SIZE 64
+// #define MPK_NUM_KV_GROUPS 1
 
 #if defined(MIRAGE_GRACE_HOPPER)
 #define WORKER_NUM_THREADS 256

@@ -86,8 +86,6 @@ class Glm4MoeBuilder(GraphBuilder):
 
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
-        self.max_num_pages = mpk.max_num_pages
-        self.page_size = mpk.page_size
         self.world_size = mpk.world_size
         self.rank = mpk.mpi_rank
         self.input_tokens = mpk.meta_tensors["input_tokens"]
