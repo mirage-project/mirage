@@ -2002,6 +2002,135 @@ class PersistentKernel:
         self.kn_graph.register_task(
             tb_graph, "linear_fp8_with_residual_sm100", params)
 
+    def quantize_nvfp4_layer(
+        self,
+        input: DTensor,
+        output_fp4: DTensor,
+        output_scale: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Quantize BF16 input to packed NVFP4 (uint8) + ue4m3 scales (uint8).
+
+        Runs as a single persistent task (use grid_dim=(1,1,1)); the kernel
+        loops over all padded batch rows internally. The scale-factor layout
+        (interleaved for the 1d2d GEMM, or swapAB per-tile for small batch) is
+        inferred from output_scale's leading dim — the same tensor the
+        downstream linear_nvfp4_layer reads — so the caller just allocates
+        output_scale for the path it will use; no extra dimension is needed.
+        """
+        assert input.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_fp4, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output_fp4, output_scale], tb_graph)
+        self.kn_graph.register_task(tb_graph, "quantize_nvfp4_sm100")
+
+    def quantize_mxfp4_layer(
+        self,
+        input: DTensor,
+        output_fp4: DTensor,
+        output_scale: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Quantize BF16 input to packed MXFP4 (e2m1, uint8) + e8m0 scales (uint8).
+
+        Identical to quantize_nvfp4_layer (single persistent task; scale layout
+        inferred from output_scale's leading dim) except MXFP4 uses a group size
+        of 32 and e8m0 (power-of-two) scales.
+        """
+        assert input.num_dims == 2  # (batch_size, hidden_size)
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_fp4, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output_scale, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([input, output_fp4, output_scale], tb_graph)
+        self.kn_graph.register_task(tb_graph, "quantize_mxfp4_sm100")
+
+    def linear_nvfp4_layer(
+        self,
+        input_fp4: DTensor,
+        weight_fp4: DTensor,
+        input_scale: DTensor,
+        weight_scale: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        bias: DTensor = None,
+    ):
+        """NVFP4 GEMM: output[batch, N] = input_fp4 @ weight_fp4^T.
+
+        Inputs are pre-quantized packed fp4 (uint8) + ue4m3 scale tensors. Runs
+        as a single persistent task (use grid_dim=(1,1,1)). The path is chosen by
+        batch size, mirroring the standalone dispatcher: small batch (<128) uses
+        swapAB (weight->A, activation->MMA_N); larger batch uses the 1d2d 1SM
+        kernel (output tile per (BLOCK_M, BLOCK_N)). Input order is identical for
+        both and must match the register functions: weight, activation,
+        SFA(weight scale), SFB(input scale), [bias], then output.
+        """
+        assert input_fp4.num_dims == 2   # (batch_size, K/2) packed
+        assert weight_fp4.num_dims == 2  # (output_size, K/2) packed
+        assert output.num_dims == 2      # (batch_size, output_size)
+        params = [1] if bias is not None else []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(weight_fp4, (-1, -1, -1), -1, True)    # A
+        tb_graph.new_input(input_fp4, (-1, -1, -1), -1, True)     # B
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)  # SFA (raw)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)   # SFB (raw)
+        inputs = [weight_fp4, input_fp4, weight_scale, input_scale]
+        if bias is not None:
+            tb_graph.new_input(bias, (-1, -1, -1), -1, True)      # bias (raw)
+            inputs.append(bias)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)        # C
+        inputs.append(output)
+        self.kn_graph.customized(inputs, tb_graph)
+        batch_size = output.dim(0)
+        task_name = ("linear_nvfp4_sm100" if batch_size < 128
+                     else "linear_nvfp4_1d2d_sm100")
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
+    def linear_mxfp4_layer(
+        self,
+        input_fp4: DTensor,
+        weight_fp4: DTensor,
+        input_scale: DTensor,
+        weight_scale: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+        bias: DTensor = None,
+    ):
+        """MXFP4 GEMM: output[batch, N] = input_fp4 @ weight_fp4^T.
+
+        Identical structure to linear_nvfp4_layer (same input order, same
+        single-persistent-task model, same batch-size path selection: swapAB for
+        batch<128, 1d2d 1SM otherwise). MXFP4 differs only in the kernel (UE8M0
+        scales / scale_vec::2X); the e2m1+e8m0 scale tensors are passed the same
+        way: weight, activation, SFA(weight scale), SFB(input scale), [bias].
+        """
+        assert input_fp4.num_dims == 2   # (batch_size, K/2) packed
+        assert weight_fp4.num_dims == 2  # (output_size, K/2) packed
+        assert output.num_dims == 2      # (batch_size, output_size)
+        params = [1] if bias is not None else []
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(weight_fp4, (-1, -1, -1), -1, True)    # A
+        tb_graph.new_input(input_fp4, (-1, -1, -1), -1, True)     # B
+        tb_graph.new_input(weight_scale, (-1, -1, -1), -1, True)  # SFA (raw)
+        tb_graph.new_input(input_scale, (-1, -1, -1), -1, True)   # SFB (raw)
+        inputs = [weight_fp4, input_fp4, weight_scale, input_scale]
+        if bias is not None:
+            tb_graph.new_input(bias, (-1, -1, -1), -1, True)      # bias (raw)
+            inputs.append(bias)
+        tb_graph.new_input(output, (-1, -1, -1), -1, True)        # C
+        inputs.append(output)
+        self.kn_graph.customized(inputs, tb_graph)
+        batch_size = output.dim(0)
+        task_name = ("linear_mxfp4_sm100" if batch_size < 128
+                     else "linear_mxfp4_1d2d_sm100")
+        self.kn_graph.register_task(tb_graph, task_name, params)
+
     def moe_silu_mul_layer(
         self,
         input: DTensor,

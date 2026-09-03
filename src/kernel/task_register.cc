@@ -4684,6 +4684,273 @@ int TaskRegister::register_linear_fp8_sm100_task(
   }
 }
 
+static int round_to_swapab_tile(int needed) {
+  return needed <= 8    ? 8
+         : needed <= 16 ? 16
+         : needed <= 32 ? 32
+         : needed <= 64 ? 64
+                        : 128;
+}
+
+static int nvfp4_swapab_mma_n(int batch_size, int output_size) {
+  static int sm_count = 0;
+  if (sm_count == 0) {
+    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0);
+  }
+  int const budget = sm_count / ((output_size + 127) / 128);
+  int const needed = (budget >= 1) ? (batch_size + budget - 1) / budget : 128;
+  return round_to_swapab_tile(needed);
+}
+
+static int nvfp4_mma_n_from_scale(int batch_size, int num_n_tiles) {
+  if (num_n_tiles <= (batch_size + 127) / 128) {
+    return 0; // interleaved (also the single-128-tile case)
+  }
+  return round_to_swapab_tile((batch_size + num_n_tiles - 1) / num_n_tiles);
+}
+
+static void nvfp4_split_ops(threadblock::Graph const &bgraph,
+                            int num_inputs,
+                            int num_outputs,
+                            std::vector<tb::TBInputOp *> &input_ops,
+                            std::vector<tb::TBInputOp *> &output_ops) {
+  assert(bgraph.operators.size() == (size_t)(num_inputs + num_outputs));
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    auto *iop = static_cast<tb::TBInputOp *>(op);
+    (input_ops.size() < (size_t)num_inputs ? input_ops : output_ops)
+        .push_back(iop);
+  }
+}
+
+int TaskRegister::register_quantize_nvfp4_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  nvfp4_split_ops(bgraph, 1, 2, input_ops, output_ops);
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int hidden_size = input_ops[0]->output_tensors[0].dim[1];
+  int input_stride = input_ops[0]->dtensor.dim[1];
+  constexpr int GROUP_SIZE = 16;
+  int mma_n = nvfp4_mma_n_from_scale(batch_size, output_ops[1]->dtensor.dim[0]);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::quantize_nvfp4_sm100_task_impl<$, $, $, cute::bfloat16_t>(",
+         hidden_size,
+         GROUP_SIZE,
+         input_stride);
+  code.e("    task_desc->input_ptrs[0],");  // bf16 input
+  code.e("    task_desc->output_ptrs[0],"); // packed fp4
+  code.e("    task_desc->output_ptrs[1],"); // ue4m3 scales
+  code.e("    $, 1e-6f, -6.0f, 6.0f, 32 * 4 * 4, $);", batch_size, mma_n);
+  return register_task_variant(TASK_QUANTIZE_NVFP4_SM100, code.to_string());
+}
+
+int TaskRegister::register_quantize_mxfp4_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  nvfp4_split_ops(bgraph, 1, 2, input_ops, output_ops);
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int hidden_size = input_ops[0]->output_tensors[0].dim[1];
+  int input_stride = input_ops[0]->dtensor.dim[1];
+  constexpr int GROUP_SIZE = 32;
+  int mma_n = nvfp4_mma_n_from_scale(batch_size, output_ops[1]->dtensor.dim[0]);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::quantize_mxfp4_sm100_task_impl<$, $, $, cute::bfloat16_t>(",
+         hidden_size,
+         GROUP_SIZE,
+         input_stride);
+  code.e("    task_desc->input_ptrs[0],");  // bf16 input
+  code.e("    task_desc->output_ptrs[0],"); // packed e2m1
+  code.e("    task_desc->output_ptrs[1],"); // e8m0 scales
+  code.e("    $, 1e-6f, -6.0f, 6.0f, 32 * 4 * 4, $);", batch_size, mma_n);
+  return register_task_variant(TASK_QUANTIZE_MXFP4_SM100, code.to_string());
+}
+
+int TaskRegister::register_linear_nvfp4_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  bool with_bias = (params.size() == 1 && params[0] == 1);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  nvfp4_split_ops(bgraph, with_bias ? 5 : 4, 1, input_ops, output_ops);
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int output_size = output_ops[0]->output_tensors[0].dim[1];
+  // weight_fp4 is [output, K] with K packed two-per-byte: logical K = 2 * cols.
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  int reduction_size = input_ops[0]->dtensor.dim[1] * 2;
+  int mma_n = nvfp4_swapab_mma_n(batch_size, output_size);
+  constexpr int BLOCK_K = 256;
+  // Pipeline depth: deepest that fits the ~224KB SMEM / 512-col TMEM budget.
+  int num_stages = (mma_n <= 64) ? 8 : (mma_n <= 128 ? 6 : 4);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::linear_nvfp4_swapAB_sm100_task_impl<$, $, $, $, $, $>(",
+         mma_n,
+         output_size,
+         reduction_size,
+         BLOCK_K,
+         num_stages,
+         with_bias ? "false" : "true"); // NOBIAS
+  code.e("    static_cast<CUtensorMap const*>("
+         "task_desc->input_tma_desc_ptrs[0][0]),"); // A (weight)
+  code.e("    static_cast<CUtensorMap const*>("
+         "task_desc->input_tma_desc_ptrs[1][0]),"); // B (activation)
+  code.e("    static_cast<CUtensorMap const*>("
+         "task_desc->output_tma_desc_ptrs[0][0]),");                 // C
+  code.e("    static_cast<char const*>(task_desc->input_ptrs[2]),"); // SFA
+  code.e("    static_cast<char const*>(task_desc->input_ptrs[3]),"); // SFB
+  if (with_bias) {
+    code.e("    static_cast<cute::bfloat16_t const*>("
+           "task_desc->input_ptrs[4]),"); // bias
+  } else {
+    code.e("    nullptr,");
+  }
+  // M, N, then (cta_idx=0, num_ctas=1): one persistent CTA sweeps all tiles.
+  code.e("    $, $, 0, 1);", batch_size, output_size);
+  return register_task_variant(TASK_LINEAR_NVFP4_SM100, code.to_string());
+}
+
+int TaskRegister::register_linear_nvfp4_1d2d_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  bool with_bias = (params.size() == 1 && params[0] == 1);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  nvfp4_split_ops(bgraph, with_bias ? 5 : 4, 1, input_ops, output_ops);
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int output_size = output_ops[0]->output_tensors[0].dim[1];
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  int reduction_size = input_ops[0]->dtensor.dim[1] * 2;
+  constexpr int BLOCK_M = 128;
+  constexpr int BLOCK_K = 256;
+  // BLOCK_N: largest of {128,64,32} dividing the batch (must match tma.cuh).
+  int block_n = (batch_size % 128 == 0)  ? 128
+                : (batch_size % 64 == 0) ? 64
+                                         : 32;
+  int num_stages = 6;
+  int epi_batch_la = (block_n == 128) ? 2 : 1;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::linear_nvfp4_1d2d_sm100_task_impl<$, $, $, $, $, $>(",
+         reduction_size,
+         BLOCK_M,
+         block_n,
+         BLOCK_K,
+         num_stages,
+         epi_batch_la);
+  code.e("    static_cast<CUtensorMap const*>("
+         "task_desc->input_tma_desc_ptrs[0][0]),"); // A (weight)
+  code.e("    static_cast<CUtensorMap const*>("
+         "task_desc->input_tma_desc_ptrs[1][0]),"); // B (activation)
+  code.e("    static_cast<char const*>(task_desc->input_ptrs[2]),"); // SFA
+  code.e("    static_cast<char const*>(task_desc->input_ptrs[3]),"); // SFB
+  code.e("    static_cast<type::bfloat16_t*>(task_desc->output_ptrs[0]),"); // C
+  if (with_bias) {
+    code.e("    static_cast<type::bfloat16_t const*>("
+           "task_desc->input_ptrs[4]),"); // bias
+  } else {
+    code.e("    static_cast<type::bfloat16_t const*>(nullptr),");
+  }
+  // M=output_size, N=batch_size, then (tile_base=0, num_tasks=1).
+  code.e("    $, $, 0, 1);", output_size, batch_size);
+  return register_task_variant(TASK_LINEAR_NVFP4_1D2D_SM100, code.to_string());
+}
+
+int TaskRegister::register_linear_mxfp4_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  bool with_bias = (params.size() == 1 && params[0] == 1);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  nvfp4_split_ops(bgraph, with_bias ? 5 : 4, 1, input_ops, output_ops);
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int output_size = output_ops[0]->output_tensors[0].dim[1];
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  int reduction_size = input_ops[0]->dtensor.dim[1] * 2;
+  int mma_n = nvfp4_swapab_mma_n(batch_size, output_size);
+  constexpr int BLOCK_K = 256;
+  int num_stages = (mma_n <= 64) ? 8 : (mma_n <= 128 ? 6 : 4);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::linear_mxfp4_swapAB_sm100_task_impl<$, $, $, $, $, $>(",
+         mma_n,
+         output_size,
+         reduction_size,
+         BLOCK_K,
+         num_stages,
+         with_bias ? "false" : "true"); // NOBIAS
+  code.e("    static_cast<CUtensorMap const*>("
+         "task_desc->input_tma_desc_ptrs[0][0]),"); // A (weight)
+  code.e("    static_cast<CUtensorMap const*>("
+         "task_desc->input_tma_desc_ptrs[1][0]),"); // B (activation)
+  code.e("    static_cast<CUtensorMap const*>("
+         "task_desc->output_tma_desc_ptrs[0][0]),");                 // C
+  code.e("    static_cast<char const*>(task_desc->input_ptrs[2]),"); // SFA
+  code.e("    static_cast<char const*>(task_desc->input_ptrs[3]),"); // SFB
+  if (with_bias) {
+    code.e("    static_cast<type::bfloat16_t const*>("
+           "task_desc->input_ptrs[4]),"); // bias
+  } else {
+    code.e("    static_cast<type::bfloat16_t const*>(nullptr),");
+  }
+  code.e(
+      "    $, $, 0, 1);", batch_size, output_size); // M, N, cta_idx, num_ctas
+  return register_task_variant(TASK_LINEAR_MXFP4_SM100, code.to_string());
+}
+
+int TaskRegister::register_linear_mxfp4_1d2d_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  bool with_bias = (params.size() == 1 && params[0] == 1);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  nvfp4_split_ops(bgraph, with_bias ? 5 : 4, 1, input_ops, output_ops);
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int output_size = output_ops[0]->output_tensors[0].dim[1];
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  int reduction_size = input_ops[0]->dtensor.dim[1] * 2;
+  constexpr int BLOCK_M = 128;
+  constexpr int BLOCK_K = 256;
+  int block_n = (batch_size % 128 == 0)  ? 128
+                : (batch_size % 64 == 0) ? 64
+                                         : 32;
+  int num_stages = 6;
+  int epi_batch_la = (block_n == 128) ? 2 : 1;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::linear_mxfp4_1d2d_sm100_task_impl<0, 0, $, $, $, $, $, "
+         "false, $>(",
+         reduction_size,
+         BLOCK_M,
+         block_n,
+         BLOCK_K,
+         num_stages,
+         epi_batch_la);
+  code.e("    static_cast<CUtensorMap const*>("
+         "task_desc->input_tma_desc_ptrs[0][0]),"); // A (weight)
+  code.e("    static_cast<CUtensorMap const*>("
+         "task_desc->input_tma_desc_ptrs[1][0]),"); // B (activation)
+  code.e("    static_cast<char const*>(task_desc->input_ptrs[2]),"); // SFA
+  code.e("    static_cast<char const*>(task_desc->input_ptrs[3]),"); // SFB
+  code.e("    static_cast<type::bfloat16_t*>(task_desc->output_ptrs[0]),"); // C
+  if (with_bias) {
+    code.e("    static_cast<type::bfloat16_t const*>("
+           "task_desc->input_ptrs[4]),"); // bias
+  } else {
+    code.e("    static_cast<type::bfloat16_t const*>(nullptr),");
+  }
+  code.e(
+      "    $, $, 0, 1);", output_size, batch_size); // M, N, tile_base, ntasks
+  return register_task_variant(TASK_LINEAR_MXFP4_1D2D_SM100, code.to_string());
+}
+
 int TaskRegister::register_mla_kv_gather_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: d_k (576)

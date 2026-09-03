@@ -46,8 +46,12 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
       : std::is_same_v<T, __half>          ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16
       : std::is_same_v<T, float>           ? CU_TENSOR_MAP_DATA_TYPE_FLOAT32
       : std::is_same_v<T, double>          ? CU_TENSOR_MAP_DATA_TYPE_FLOAT64
+      : std::is_same_v<T, cutlass::float_ue4m3_t>
+          ? CU_TENSOR_MAP_DATA_TYPE_UINT8
       : std::is_same_v<T, cutlass::float_e4m3_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
       : std::is_same_v<T, cutlass::float_e5m2_t> ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+      : std::is_same_v<T, cutlass::float_e2m1_t>
+          ? CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B
       : std::is_same_v<T, cutlass::float_ue8m0_t>
           ? CU_TENSOR_MAP_DATA_TYPE_UINT8
       : std::is_same_v<T, uint8_t>  ? CU_TENSOR_MAP_DATA_TYPE_UINT8
@@ -80,8 +84,8 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     gmem_prob_shape[2] = 1;
     gmem_prob_shape[3] = 1;
     gmem_prob_shape[4] = 1;
-    gmem_prob_stride[0] = sizeof(T);
-    gmem_prob_stride[1] = gmem_stride[1] * sizeof(T);
+    gmem_prob_stride[0] = 1;
+    gmem_prob_stride[1] = gmem_stride[1] * cutlass::sizeof_bits<T>::value / 8;
     gmem_prob_stride[2] = 0;
     gmem_prob_stride[3] = 0;
     gmem_prob_stride[4] = 0;
@@ -91,9 +95,9 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     gmem_prob_shape[2] = gmem_shape[0];
     gmem_prob_shape[3] = 1;
     gmem_prob_shape[4] = 1;
-    gmem_prob_stride[0] = sizeof(T);
-    gmem_prob_stride[1] = gmem_stride[1] * sizeof(T);
-    gmem_prob_stride[2] = gmem_stride[2] * sizeof(T);
+    gmem_prob_stride[0] = 1;
+    gmem_prob_stride[1] = gmem_stride[1] * cutlass::sizeof_bits<T>::value / 8;
+    gmem_prob_stride[2] = gmem_stride[2] * cutlass::sizeof_bits<T>::value / 8;
     gmem_prob_stride[3] = 0;
     gmem_prob_stride[4] = 0;
   } else if constexpr (NDIM == 4) {
@@ -102,10 +106,10 @@ __host__ static inline void fill_tma_desc(CUtensorMap *tma_desc,
     gmem_prob_shape[2] = gmem_shape[1];
     gmem_prob_shape[3] = gmem_shape[0];
     gmem_prob_shape[4] = 1;
-    gmem_prob_stride[0] = sizeof(T);
-    gmem_prob_stride[1] = gmem_stride[1] * sizeof(T);
-    gmem_prob_stride[2] = gmem_stride[2] * sizeof(T);
-    gmem_prob_stride[3] = gmem_stride[3] * sizeof(T);
+    gmem_prob_stride[0] = 1;
+    gmem_prob_stride[1] = gmem_stride[1] * cutlass::sizeof_bits<T>::value / 8;
+    gmem_prob_stride[2] = gmem_stride[2] * cutlass::sizeof_bits<T>::value / 8;
+    gmem_prob_stride[3] = gmem_stride[3] * cutlass::sizeof_bits<T>::value / 8;
     gmem_prob_stride[4] = 0;
   } else {
     assert(false);
@@ -965,6 +969,116 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_LINEAR_NVFP4_SM100:
+    case TASK_LINEAR_MXFP4_SM100: {
+      constexpr uint32_t BLOCK_M = 128;
+      bool is_output = (param_id == (size_t)(task_desc.num_inputs));
+
+      auto check = [](CUresult r, char const *what) {
+        if (r != CUDA_SUCCESS) {
+          char const *err;
+          cuGetErrorString(r, &err);
+          std::cerr << "TMA fp4 " << what << " failed: " << err << std::endl;
+        }
+      };
+
+      auto mma_n = [&]() -> uint32_t {
+        int batch = (int)task_desc.inputs[1].dim[0];
+        int output_size = (int)task_desc.outputs[0].dim[1];
+        static int sm_count = 0;
+        if (sm_count == 0) {
+          cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0);
+        }
+        int budget = sm_count / ((output_size + 127) / 128);
+        int needed = (budget >= 1) ? (batch + budget - 1) / budget : 128;
+        return needed <= 8    ? 8
+               : needed <= 16 ? 16
+               : needed <= 32 ? 32
+               : needed <= 64 ? 64
+                              : 128;
+      };
+
+      if (param_id == 0 || param_id == 1) { // A (tile_rows=BLOCK_M) / B (MMA_N)
+        uint64_t k = (uint64_t)tensor_desc.dim[1] * 2;
+        uint32_t tile_rows = (param_id == 0) ? BLOCK_M : mma_n();
+        uint64_t gd[3] = {256, (uint64_t)tensor_desc.dim[0], k / 256};
+        uint64_t gs[2] = {k / 2, 128};
+        uint32_t bd[3] = {256, tile_rows, 1};
+        uint32_t es[3] = {1, 1, 1};
+        check(cuTensorMapEncodeTiled(tma_desc,
+                                     CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
+                                     3,
+                                     tensor_desc.base_ptr,
+                                     gd,
+                                     gs,
+                                     bd,
+                                     es,
+                                     CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                     CU_TENSOR_MAP_SWIZZLE_128B,
+                                     CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                     CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
+              param_id == 0 ? "A" : "B");
+      } else if (is_output) { // C: globalDim={output,batch},
+                              // box={BLOCK_M,MMA_N}
+        uint64_t gd[2] = {(uint64_t)tensor_desc.dim[1],
+                          (uint64_t)tensor_desc.dim[0]};
+        uint64_t gs[1] = {(uint64_t)tensor_desc.stride[0] * sizeof(bfloat16)};
+        uint32_t bd[2] = {BLOCK_M, mma_n()};
+        uint32_t es[2] = {1, 1};
+        check(cuTensorMapEncodeTiled(tma_desc,
+                                     CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                                     2,
+                                     tensor_desc.base_ptr,
+                                     gd,
+                                     gs,
+                                     bd,
+                                     es,
+                                     CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                     CU_TENSOR_MAP_SWIZZLE_NONE,
+                                     CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                     CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
+              "C");
+      }
+      break;
+    }
+    case TASK_LINEAR_NVFP4_1D2D_SM100:
+    case TASK_LINEAR_MXFP4_1D2D_SM100: {
+      if (param_id > 1) {
+        break;
+      }
+      auto check = [](CUresult r, char const *what) {
+        if (r != CUDA_SUCCESS) {
+          char const *err;
+          cuGetErrorString(r, &err);
+          std::cerr << "TMA fp4 1d2d " << what << " failed: " << err
+                    << std::endl;
+        }
+      };
+      uint64_t k = (uint64_t)tensor_desc.dim[1] * 2;
+      int batch = (int)tensor_desc.dim[0];
+      uint32_t tile_rows = (param_id == 0)      ? 128
+                           : (batch % 128 == 0) ? 128
+                           : (batch % 64 == 0)  ? 64
+                                                : 32;
+      uint64_t gd[3] = {256, (uint64_t)tensor_desc.dim[0], k / 256};
+      uint64_t gs[2] = {k / 2, 128};
+      uint32_t bd[3] = {256, tile_rows, 1};
+      uint32_t es[3] = {1, 1, 1};
+      check(cuTensorMapEncodeTiled(tma_desc,
+                                   CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN8B,
+                                   3,
+                                   tensor_desc.base_ptr,
+                                   gd,
+                                   gs,
+                                   bd,
+                                   es,
+                                   CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                   CU_TENSOR_MAP_SWIZZLE_128B,
+                                   CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                                   CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE),
+            param_id == 0 ? "A" : "B");
+      break;
+    }
     case TASK_SPLITK_LINEAR_SM100: {
       int const cp_async_size = 64;
       size_t const smem_repeat_row = 1;
@@ -1617,6 +1731,24 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
         TensorDesc &tensor_desc = task_desc.inputs[param_id];
         create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       }
+      break;
+    }
+    case TASK_LINEAR_NVFP4_SM100:
+    case TASK_LINEAR_MXFP4_SM100: {
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0); // A
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0); // B
+      create_tma_desc_for_tensor(
+          task_desc, task_desc.outputs[0], task_desc.num_inputs, 0); // C
+      break;
+    }
+    case TASK_LINEAR_NVFP4_1D2D_SM100:
+    case TASK_LINEAR_MXFP4_1D2D_SM100: {
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[0], 0, 0); // A
+      create_tma_desc_for_tensor(task_desc, task_desc.inputs[1], 1, 0); // B
+      break;
+    }
+    case TASK_QUANTIZE_NVFP4_SM100:
+    case TASK_QUANTIZE_MXFP4_SM100: {
       break;
     }
     // Eagle3 kernels don't need TMA.

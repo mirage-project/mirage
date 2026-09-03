@@ -170,6 +170,18 @@ public:
   int register_linear_fp8_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params,
                                      bool with_residual);
+  int register_quantize_nvfp4_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_linear_nvfp4_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_linear_nvfp4_1d2d_sm100_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params);
+  int register_linear_mxfp4_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_linear_mxfp4_1d2d_sm100_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params);
+  int register_quantize_mxfp4_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
   int register_mla_kv_gather_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
   int register_mla_kv_gather_split_sm100_task(threadblock::Graph const &bgraph,
