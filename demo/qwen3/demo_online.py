@@ -14,6 +14,7 @@ Then run the demo::
 
 import argparse
 import json
+import sys
 import time
 import threading
 import urllib.request
@@ -62,25 +63,31 @@ def _read_sse(req: urllib.request.Request, timeout: int):
                 return
             try:
                 obj = json.loads(payload)
-                text = obj["choices"][0]["delta"].get("content", "")
-                yield (text, False)
             except json.JSONDecodeError:
                 continue
+            if "error" in obj:
+                raise RuntimeError(obj["error"])
+            text = obj["choices"][0]["delta"].get("content", "")
+            yield (text, False)
     yield ("", True)
 
 
 # ── runners ──────────────────────────────────────────────────────────────────
 
 
-def run_single(prompt: str, timeout: int = 300) -> None:
+def run_single(prompt: str, timeout: int = 300) -> bool:
     t0 = time.monotonic()
     text = chat(prompt, timeout=timeout)
     elapsed = time.monotonic() - t0
     print(f"  {text[:300]}...")
     print(f"\n  Finished in {elapsed:.1f}s")
+    ok = bool(text and text.strip())
+    if not ok:
+        print("  ERROR: empty response")
+    return ok
 
 
-def run_concurrent(prompts: list[str], timeout: int = 300) -> None:
+def run_concurrent(prompts: list[str], timeout: int = 300) -> bool:
     results: list[tuple[int, str] | None] = [None] * len(prompts)
 
     def _worker(idx: int, prompt: str):
@@ -98,21 +105,33 @@ def run_concurrent(prompts: list[str], timeout: int = 300) -> None:
         t.join()
     elapsed = time.monotonic() - t0
 
+    ok = True
     for r in results:
         if r is None:
+            ok = False
             continue
         i, text = r
         print(f"  [{i}]  →  {text[:150].replace(chr(10), ' ')}...")
+        if text.startswith("ERROR:") or not text.strip():
+            ok = False
     print(f"\n  {len(prompts)} requests finished in {elapsed:.1f}s")
+    return ok
 
 
-def run_stream(prompt: str, timeout: int = 300) -> None:
+def run_stream(prompt: str, timeout: int = 300) -> bool:
     print(f"\n[stream] {prompt!r}\n")
+    got = 0
     for text, is_final in chat(prompt, stream=True, timeout=timeout):
         if is_final:
             print("\n\n--- DONE ---")
         else:
             print(text, end="", flush=True)
+            if text:
+                got += 1
+    ok = got > 0
+    if not ok:
+        print("\n  ERROR: stream produced no tokens")
+    return ok
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -138,7 +157,7 @@ def main() -> None:
         return
 
     if args.stream:
-        run_stream("Explain what a GPU is in one sentence.", timeout=args.timeout)
+        ok = run_stream("Explain what a GPU is in one sentence.", timeout=args.timeout)
     elif args.concurrent > 0:
         prompts = [
             "Introduce yourself.",
@@ -149,10 +168,12 @@ def main() -> None:
             "Do you think Attack on Titan really have a good end?"
         ][: args.concurrent]
         print(f"\n=== {len(prompts)} concurrent requests ===\n")
-        run_concurrent(prompts, timeout=args.timeout)
+        ok = run_concurrent(prompts, timeout=args.timeout)
     else:
         print("\n=== Single request ===\n")
-        run_single("Say hello.", timeout=args.timeout)
+        ok = run_single("Say hello.", timeout=args.timeout)
+
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
