@@ -34,7 +34,12 @@ constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 3 * 1024;
 
 #if defined(MODE_ONLINE_NOTOKEN) || defined(MODE_MULTI_TURN)
 // Have to be smaller for vllm compatibility, or program will stuck
-#if MPK_TARGET_CC >= 90
+#if MPK_TARGET_CC == 120
+// Consumer/workstation Blackwell (SM120, e.g. RTX Pro 6000): ~99KB max
+// dynamic smem per block, unlike datacenter Hopper/Blackwell's ~220KB.
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#elif MPK_TARGET_CC >= 90
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     220 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #elif MPK_TARGET_CC >= 86
@@ -48,7 +53,12 @@ constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
     163 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
 #endif
 #else
-#if MPK_TARGET_CC >= 90
+#if MPK_TARGET_CC == 120
+// Consumer/workstation Blackwell (SM120, e.g. RTX Pro 6000): ~99KB max
+// dynamic smem per block, unlike datacenter Hopper/Blackwell's ~207-220KB.
+constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =
+    99 * 1024 - WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE;
+#elif MPK_TARGET_CC >= 90
 // B200: 228KB total smem. PR 651 MLA reduce adds ~16KB static smem
 // (la_smem[MAX_SK*128]). Reduce dynamic budget to stay under total limit.
 constexpr int MAX_DYNAMIC_SHARED_MEMORY_SIZE =

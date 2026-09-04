@@ -710,7 +710,11 @@ class PersistentKernel:
         tb_graph.new_input(weight, (-1, -1, -1), 0, True)
         tb_graph.new_input(output, (0, -1, -1), 1, True)
         self.kn_graph.customized([input, weight, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "rmsnorm_hopper" if self.target_cc >= 90 else "rmsnorm")
+        # SM120 (consumer Blackwell) has no TMA/WGMMA and uses the ampere
+        # task set, not the Hopper-specific kernel.
+        self.kn_graph.register_task(
+            tb_graph,
+            "rmsnorm_hopper" if 90 <= self.target_cc < 120 else "rmsnorm")
 
     def rmsnorm_linear_layer(
         self,
@@ -2209,7 +2213,9 @@ class PersistentKernel:
                 # self.kn_graph.register_task(tb_graph, "linear_cutlass_hopper")
             else:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper")
-        elif self.target_cc >= 80 and self.target_cc < 90:
+        elif (self.target_cc >= 80 and self.target_cc < 90) or self.target_cc == 120:
+            # SM120 (consumer/workstation Blackwell): no tcgen05/WGMMA, use
+            # the ampere task set.
             self.kn_graph.register_task(tb_graph, "linear")
         else:
             assert False, f"Unsupported compute capability: {self.target_cc}"
@@ -2248,7 +2254,9 @@ class PersistentKernel:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper", params)
             else:
                 self.kn_graph.register_task(tb_graph, "linear_swapAB_with_residual_hopper", params)
-        elif self.target_cc >= 80 and self.target_cc < 90:
+        elif (self.target_cc >= 80 and self.target_cc < 90) or self.target_cc == 120:
+            # SM120 (consumer/workstation Blackwell): no tcgen05/WGMMA, use
+            # the ampere task set.
             self.kn_graph.register_task(tb_graph, "linear_with_residual")
         else:
             assert False, f"Unsupported compute capability: {self.target_cc}"
