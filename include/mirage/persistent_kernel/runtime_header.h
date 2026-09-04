@@ -344,6 +344,15 @@ struct RuntimeConfig {
   TaskId **worker_queues;
   EventId **sched_queues;
   TaskId *first_tasks;
+  // Number of worker blocks that have become resident on an SM (each worker
+  // block increments this once at kernel entry). launch_persistent_kernel
+  // polls it in split worker/scheduler mode to guarantee worker-first
+  // placement: both persistent grids are released by the same event on two
+  // streams, and if the tiny scheduler blocks win the race and scatter
+  // across SMs, the smem-heavy worker grid can no longer fully place, so
+  // some workers never start and the dependent-event chain deadlocks
+  // (observed with >128 workers on a 148-SM GPU, e.g. 144/16 or 136/48).
+  unsigned long long int *worker_block_arrival_count;
   int *step;                      // Metadata for LLM serving
   long long *tokens;              // Metadata for LLM serving
   long long *input_tokens;        // Metadata for LLM serving
