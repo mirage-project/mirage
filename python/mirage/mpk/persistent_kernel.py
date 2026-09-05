@@ -2444,6 +2444,90 @@ class PersistentKernel:
         # Register task with seed parameter
         self.kn_graph.register_task(tb_graph, "sampling_sm100", [seed])
 
+    def sampling_partial_layer(
+        self,
+        input: DTensor,                  # [batch_size, padded_vocab_size]
+        output: tuple[DTensor, DTensor], # values fp32, token ids int64
+        grid_dim: tuple,
+        block_dim: tuple,
+        vocab_size: int = None,
+        topk_max: int = 32,
+        temperature: float = 1.0,
+    ):
+        # Per-chunk stage of temperature/top-k/top-p sampling: keeps the
+        # topk_max largest scaled logits of each vocab chunk plus the chunk's
+        # max and exp-sum, so the reduce stage can rebuild the exact softmax
+        # normalizer without rereading the logits.
+        import struct
+
+        assert input.num_dims == 2
+        output_value, output_index = output
+        assert output_value.num_dims == 2  # [batch, num_tasks * (topk_max+2)]
+        assert output_index.num_dims == 2  # [batch, num_tasks * topk_max]
+        num_tasks = grid_dim[0]
+        assert output_value.dim(1) == num_tasks * (topk_max + 2)
+        assert output_index.dim(1) == num_tasks * topk_max
+        # The union of the per-chunk lists contains the global top-topk_max, so
+        # a larger top_k (or a wider nucleus) could not be served exactly.
+        assert 0 < topk_max <= 128
+        self.sampling_num_partial_tasks = num_tasks
+        self.sampling_topk_max = topk_max
+        # vocab_size: real vocab size when input.dim(1) is padded (e.g. the
+        # lm_head padded to 153600); padding rows must never be sampled.
+        vocab = input.dim(1) if vocab_size is None else vocab_size
+        temp_bits = struct.unpack("i", struct.pack("f", temperature))[0]
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (1, 0, -1), -1, True)
+        tb_graph.new_input(output_value, (1, 0, -1), -1, True)
+        tb_graph.new_input(output_index, (1, 0, -1), -1, True)
+        self.kn_graph.customized([input, output_value, output_index], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph,
+            "sampling_partial_sm100",
+            [num_tasks, vocab, topk_max, temp_bits],
+        )
+
+    def sampling_reduce_layer(
+        self,
+        input: tuple[DTensor, DTensor],
+        output: DTensor,                 # [batch_size, 1] int64 token ids
+        grid_dim: tuple,
+        block_dim: tuple,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        top_k: int = 0,
+        seed: int = 42,
+    ):
+        # Applies top-k then top-p to the merged candidates and draws with the
+        # Gumbel-Max trick. temperature <= 0 decodes greedily, which keeps one
+        # compiled graph usable for both sampled and deterministic decoding.
+        import struct
+
+        assert len(input) == 2
+        input_value, input_index = input
+        assert input_value.num_dims == 2
+        assert input_index.num_dims == 2
+        assert output.num_dims == 2
+        assert 0.0 < top_p <= 1.0
+        topk_max = self.sampling_topk_max
+        num_tasks = self.sampling_num_partial_tasks
+        # top_k above topk_max cannot be answered from the per-chunk lists.
+        assert top_k <= topk_max, (
+            f"top_k={top_k} exceeds the per-chunk candidate budget "
+            f"topk_max={topk_max}; raise topk_max in sampling_partial_layer")
+        top_p_bits = struct.unpack("i", struct.pack("f", top_p))[0]
+        greedy = 1 if temperature <= 0.0 else 0
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input_value, (1, 0, -1), -1, True)
+        tb_graph.new_input(input_index, (1, 0, -1), -1, True)
+        tb_graph.new_input(output, (0, 1, -1), -1, True)
+        self.kn_graph.customized([input_value, input_index, output], tb_graph)
+        self.kn_graph.register_task(
+            tb_graph,
+            "sampling_reduce_sm100",
+            [num_tasks, topk_max, top_p_bits, top_k, greedy, seed],
+        )
+
     def find_ngram_partial_layer(
         self, input: DTensor, output: DTensor, grid_dim: tuple, block_dim: tuple, ngram_size: int = 3):
         # Currently assume that input/output

@@ -55,6 +55,7 @@
 #include "mul_sum_add_sm100.cuh"
 #include "per_token_group_quantize_fp8.cuh"
 #include "prob_scatter_sm100.cuh"
+#include "sampling_sm100.cuh"
 #include "sm100_ptx.cuh"
 #include "softmax_gather_sm100.cuh"
 #include "tasks/common/sampling.cuh"
