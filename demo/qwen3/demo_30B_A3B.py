@@ -6,11 +6,9 @@ import torch.distributed as dist
 import argparse
 import os
 
-# ! Caveat
-# If you want to run this script, you should do this manual modification:
-# Change `include/mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh` line 43
-# from `int MAX_TOKENS = 8` to `int MAX_TOKENS = 1`.
-# And this demo currently cannot run with multigpu.
+# Qwen3-30B-A3B MoE demo. Prefill batching is controlled by
+# --max-num-batched-tokens (default 8). Values above 16 require the router
+# row-block loop in topk_softmax_sm100.cuh.
 
 # print limitation
 # torch.set_printoptions(threshold=2000)
@@ -46,7 +44,7 @@ def max_factor_leq_n(m: int, n: int) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
-    parser.add_argument("--max-num-batched-tokens", default=1, type=int, help="Max number of tokens in a batch")
+    parser.add_argument("--max-num-batched-tokens", default=8, type=int, help="Max number of tokens in a batch")
     parser.add_argument("--max-num-batched-requests", default=1, type=int, help="Max number of requests in a batch")
     parser.add_argument("--page-size", default=4096, type=int, help="Page size")
     parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
