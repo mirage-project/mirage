@@ -46,6 +46,14 @@ class RunnerConfig:
 
     use_cutlass_kernel: bool = True
 
+    # Compile-time sampling config (one setting per server process).
+    do_sample: bool = False
+    temperature: float = 0.8
+    top_p: float = 0.95
+    top_k: int = 20
+    sampling_seed: int = 42
+    sampling_topk_max: int = 32
+
 
 # ── ModelRunner ───────────────────────────────────────────────────────────────
 
@@ -90,6 +98,12 @@ class ModelRunner:
             model_path=config.model_path,
             model_config=MirageModelConfig(with_lm_head=True),
             use_cutlass_kernel=config.use_cutlass_kernel,
+            do_sample=config.do_sample,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            top_k=config.top_k,
+            sampling_seed=config.sampling_seed,
+            sampling_topk_max=config.sampling_topk_max,
             **self.meta_tensors,
         )
         self.mpk = MPK(mpk_meta)

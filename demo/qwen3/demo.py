@@ -853,6 +853,26 @@ if __name__ == "__main__":
                 stream=stream,
             )
             next_token = logits.argmax(dim=-1)
+            if args.do_sample:
+                # Match the megakernel path: temperature → top-k → top-p → draw.
+                row = logits[0, -1, : model.config.vocab_size].float()
+                row = row / args.temperature
+                if args.top_k > 0:
+                    kth = torch.topk(row, min(args.top_k, row.numel())).values[-1]
+                    row = row.masked_fill(row < kth, float("-inf"))
+                if args.top_p < 1.0:
+                    sorted_logits, sorted_idx = torch.sort(row, descending=True)
+                    probs = torch.softmax(sorted_logits, dim=-1)
+                    cum = torch.cumsum(probs, dim=-1)
+                    keep = cum <= args.top_p
+                    keep[..., 0] = True
+                    row = row.clone()
+                    row[sorted_idx[~keep]] = float("-inf")
+                probs = torch.softmax(row, dim=-1)
+                g = torch.Generator(device=probs.device)
+                g.manual_seed(args.seed + cur_pos)
+                next_token = torch.multinomial(probs, 1, generator=g)
+                next_token = next_token.view(1, 1)
             next_token = next_token[0, -1]
             tokens[0, cur_pos] = next_token
             prev_pos = cur_pos

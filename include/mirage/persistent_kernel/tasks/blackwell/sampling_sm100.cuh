@@ -32,10 +32,11 @@
  */
 
 #pragma once
+#include "runtime_header.h"
 #include "tasks/common/utils.cuh"
 
-#include <cutlass/arch/barrier.h>
 #include <curand_kernel.h>
+#include <cutlass/arch/barrier.h>
 
 namespace kernel {
 
@@ -43,8 +44,8 @@ int constexpr SAMPLING_MAX_WARPS = 32;
 // Named barriers owned by these kernels; argmax_sm100 uses 6.
 int constexpr SAMPLING_BAR_ID = 7;
 
-__device__ __forceinline__ void
-    warp_reduce_max_idx_sampling(float &val, int &idx) {
+__device__ __forceinline__ void warp_reduce_max_idx_sampling(float &val,
+                                                             int &idx) {
 #pragma unroll
   for (int offset = 16; offset > 0; offset /= 2) {
     float other_val = __shfl_down_sync(0xffffffff, val, offset);
@@ -125,6 +126,29 @@ __device__ __forceinline__ float sampling_gumbel_noise(uint64_t philox_seed,
   return -__logf(-__logf(u + kEPSILON) + kEPSILON);
 }
 
+// Map a logits row to the decode step of the request that owns it. Falls back
+// to `fallback_offset + batch_idx` when request metadata is unset (test_mode).
+__device__ __forceinline__ unsigned long long
+    sampling_philox_offset_for_row(int batch_idx,
+                                   int const *steps,
+                                   int const *request_ids,
+                                   int const *qo_indptr,
+                                   unsigned long long fallback_offset) {
+  for (int r = 0; r < MPK_MAX_NUM_BATCHED_REQUESTS; ++r) {
+    int const start = qo_indptr[r];
+    int const end = qo_indptr[r + 1];
+    if (batch_idx >= start && batch_idx < end) {
+      int const rid = request_ids[r];
+      if (rid >= 0) {
+        return (unsigned long long)steps[rid] * MPK_MAX_NUM_BATCHED_TOKENS +
+               (unsigned long long)batch_idx;
+      }
+      break;
+    }
+  }
+  return fallback_offset + (unsigned long long)batch_idx;
+}
+
 /*
  * Per-chunk stage. Writes, for its chunk of the vocabulary:
  *   output_val[0 .. TOPK_MAX-1] : the TOPK_MAX largest logits, scaled by
@@ -152,6 +176,12 @@ __device__ __forceinline__ void
   static_assert(TOPK_MAX > 0 && TOPK_MAX <= NUM_THREADS,
                 "TOPK_MAX must fit one candidate per thread in the reduce "
                 "stage's Gumbel draw");
+  // Whole chunk lives in smem. Qwen3 with 128 workers → CHUNK=1200 floats.
+  static_assert(sizeof(float) * CHUNK_SIZE +
+                        sizeof(float) * SAMPLING_MAX_WARPS +
+                        sizeof(int) * SAMPLING_MAX_WARPS + 256 <=
+                    mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE,
+                "sampling_partial smem exceeds the megakernel dynamic budget");
 
   T const *__restrict__ input = static_cast<T const *>(input_ptr);
   float *__restrict__ output_val = static_cast<float *>(output_val_ptr);
@@ -162,12 +192,10 @@ __device__ __forceinline__ void
   int const valid_len = max(0, min(CHUNK_SIZE, VOCAB_SIZE - chunk_start));
 
   extern __shared__ char smem[];
-  char *base =
-      reinterpret_cast<char *>((reinterpret_cast<uintptr_t>(smem) + 127) / 128 *
-                               128);
+  char *base = reinterpret_cast<char *>(
+      (reinterpret_cast<uintptr_t>(smem) + 127) / 128 * 128);
   float *scratch_val = reinterpret_cast<float *>(base);
-  int *scratch_idx =
-      reinterpret_cast<int *>(scratch_val + SAMPLING_MAX_WARPS);
+  int *scratch_idx = reinterpret_cast<int *>(scratch_val + SAMPLING_MAX_WARPS);
   float *chunk = reinterpret_cast<float *>(scratch_idx + SAMPLING_MAX_WARPS);
 
   cutlass::arch::NamedBarrier bar(NUM_THREADS, SAMPLING_BAR_ID);
@@ -178,11 +206,12 @@ __device__ __forceinline__ void
 
   for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
     for (int i = tidx; i < CHUNK_SIZE; i += NUM_THREADS) {
-      chunk[i] = i < valid_len
-                     ? static_cast<float>(
-                           input[i + batch_idx * CHUNK_SIZE * NUM_PARTIAL_TASKS])
-                           * inv_temperature
-                     : -INFINITY;
+      chunk[i] =
+          i < valid_len
+              ? static_cast<float>(
+                    input[i + batch_idx * CHUNK_SIZE * NUM_PARTIAL_TASKS]) *
+                    inv_temperature
+              : -INFINITY;
     }
     bar.arrive_and_wait();
 
@@ -253,10 +282,19 @@ __device__ __forceinline__ void
                                  int top_k,
                                  bool greedy,
                                  unsigned long long philox_seed,
-                                 unsigned long long philox_offset) {
+                                 unsigned long long philox_fallback_offset,
+                                 int const *steps,
+                                 int const *request_ids,
+                                 int const *qo_indptr) {
   int constexpr NUM_CANDIDATES = NUM_PARTIAL_TASKS * TOPK_MAX;
   static_assert(TOPK_MAX <= NUM_THREADS,
                 "one thread per surviving candidate is assumed below");
+  static_assert(sizeof(float) * (2 * NUM_CANDIDATES + TOPK_MAX) +
+                        sizeof(int) * (NUM_CANDIDATES + TOPK_MAX) +
+                        sizeof(float) * SAMPLING_MAX_WARPS +
+                        sizeof(int) * SAMPLING_MAX_WARPS + 256 <=
+                    mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE,
+                "sampling_reduce smem exceeds the megakernel dynamic budget");
 
   float const *__restrict__ partial_val =
       static_cast<float const *>(input_val_ptr);
@@ -269,12 +307,10 @@ __device__ __forceinline__ void
   int const idx_stride = NUM_PARTIAL_TASKS * TOPK_MAX;
 
   extern __shared__ char smem[];
-  char *base =
-      reinterpret_cast<char *>((reinterpret_cast<uintptr_t>(smem) + 127) / 128 *
-                               128);
+  char *base = reinterpret_cast<char *>(
+      (reinterpret_cast<uintptr_t>(smem) + 127) / 128 * 128);
   float *scratch_val = reinterpret_cast<float *>(base);
-  int *scratch_idx =
-      reinterpret_cast<int *>(scratch_val + SAMPLING_MAX_WARPS);
+  int *scratch_idx = reinterpret_cast<int *>(scratch_val + SAMPLING_MAX_WARPS);
   float *cand_val = reinterpret_cast<float *>(scratch_idx + SAMPLING_MAX_WARPS);
   int *cand_idx = reinterpret_cast<int *>(cand_val + NUM_CANDIDATES);
   float *sel_val = reinterpret_cast<float *>(cand_idx + NUM_CANDIDATES);
@@ -286,8 +322,7 @@ __device__ __forceinline__ void
     return;
   }
 
-  int const k_limit =
-      (top_k > 0 && top_k < TOPK_MAX) ? top_k : TOPK_MAX;
+  int const k_limit = (top_k > 0 && top_k < TOPK_MAX) ? top_k : TOPK_MAX;
 
   for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
     for (int i = tidx; i < NUM_CANDIDATES; i += NUM_THREADS) {
@@ -295,8 +330,7 @@ __device__ __forceinline__ void
       int const slot = i % TOPK_MAX;
       cand_val[i] =
           partial_val[batch_idx * val_stride + chunk * (TOPK_MAX + 2) + slot];
-      cand_idx[i] =
-          static_cast<int>(partial_idx[batch_idx * idx_stride + i]);
+      cand_idx[i] = static_cast<int>(partial_idx[batch_idx * idx_stride + i]);
     }
 
     // Rebuild the exact softmax normalizer from the per-chunk (max, sum) pairs.
@@ -317,9 +351,8 @@ __device__ __forceinline__ void
     for (int c = tidx; c < NUM_PARTIAL_TASKS; c += NUM_THREADS) {
       float const chunk_max =
           partial_val[batch_idx * val_stride + c * (TOPK_MAX + 2) + TOPK_MAX];
-      float const chunk_sum =
-          partial_val[batch_idx * val_stride + c * (TOPK_MAX + 2) + TOPK_MAX +
-                      1];
+      float const chunk_sum = partial_val[batch_idx * val_stride +
+                                          c * (TOPK_MAX + 2) + TOPK_MAX + 1];
       if (chunk_max > -INFINITY) {
         total += chunk_sum * __expf(chunk_max - global_max);
       }
@@ -360,12 +393,14 @@ __device__ __forceinline__ void
 
     int winner = num_selected > 0 ? 0 : -1;
     if (!greedy && num_selected > 0) {
+      unsigned long long const row_offset = sampling_philox_offset_for_row(
+          batch_idx, steps, request_ids, qo_indptr, philox_fallback_offset);
       float noisy = -INFINITY;
       int pos = -1;
       if (tidx < num_selected) {
         noisy = sel_val[tidx] +
                 sampling_gumbel_noise(philox_seed,
-                                      philox_offset + batch_idx,
+                                      row_offset,
                                       static_cast<uint64_t>(sel_idx[tidx]));
         pos = tidx;
       }

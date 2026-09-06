@@ -73,6 +73,13 @@ class MPKMetadata:
     spec_decode_config: Optional[object] = None
     # use cutlass kernel
     use_cutlass_kernel: bool = True
+    # Token sampling (compiled into the graph; one config per process)
+    do_sample: bool = False
+    temperature: float = 0.0
+    top_p: float = 1.0
+    top_k: int = 0
+    sampling_seed: int = 42
+    sampling_topk_max: int = 32
     
     def check_valid(self):
         if self.weight_from_model:
@@ -272,6 +279,12 @@ class MPK:
             spec_decode_config=self.spec_decode_config,
             use_cutlass_kernel=args.use_cutlass_kernel,
             pinned_ring_capacity=args.pinned_ring_capacity,
+            do_sample=args.do_sample,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            sampling_seed=args.sampling_seed,
+            sampling_topk_max=args.sampling_topk_max,
         )
         self.meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors.values()]
         self.profiler_buffer_ptr = (

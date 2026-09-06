@@ -2609,9 +2609,12 @@ int TaskRegister::register_sampling_reduce_sm100_task(
   code.e("    $,", top_k);
   code.e("    $,", greedy);
   code.e("    $ULL,", seed);
-  // The decode step advances the Philox stream, so the same logits drawn at a
-  // later step do not reuse the same noise.
-  code.e("    (unsigned long long)runtime_config.step[0] * $);", batch_size);
+  // Fallback when request_ids are unset (test_mode). Production paths resolve
+  // the Philox offset from the owning request's step via qo_indptr.
+  code.e("    (unsigned long long)runtime_config.step[0] * $,", batch_size);
+  code.e("    runtime_config.step,");
+  code.e("    runtime_config.request_ids,");
+  code.e("    runtime_config.qo_indptr_buffer);");
   return register_task_variant(TASK_SAMPLING_SM100, code.to_string());
 }
 

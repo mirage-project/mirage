@@ -372,10 +372,31 @@ class PersistentKernel:
         eos_token_id: int64 = -1,
         pinned_ring_capacity: int = 0,
         test_mode: bool = False,
+        do_sample: bool = False,
+        temperature: float = 0.0,
+        top_p: float = 1.0,
+        top_k: int = 0,
+        sampling_seed: int = 42,
+        sampling_topk_max: int = 32,
     ):
         self.__finalized__ = False
         self._is_compiled = False
         self.test_mode = test_mode
+        self.do_sample = do_sample
+        self.temperature = temperature
+        self.top_p = top_p
+        self.top_k = top_k
+        self.sampling_seed = sampling_seed
+        self.sampling_topk_max = sampling_topk_max
+        if do_sample and temperature <= 0.0:
+            raise ValueError(
+                "do_sample=True requires temperature > 0 "
+                "(temperature <= 0 is greedy decoding)")
+        if top_k > sampling_topk_max:
+            raise ValueError(
+                f"top_k={top_k} exceeds sampling_topk_max={sampling_topk_max}")
+        if not (0.0 < top_p <= 1.0):
+            raise ValueError(f"top_p must be in (0, 1], got {top_p}")
 
         if mode not in valid_persistent_kernel_modes:
             raise ValueError(f"Invalid persistent kernel mode: {mode}")
@@ -2432,7 +2453,13 @@ class PersistentKernel:
         block_dim: tuple,
         seed: int = 42,
     ):
-        """Sampling from logits using Gumbel-Max trick for stochastic token generation."""
+        """Sampling from logits using Gumbel-Max trick for stochastic token generation.
+
+        Deprecated for production use: no temperature/top-k/top-p, no vocab-pad
+        bound, writes int into int64 output_tokens, and freezes the Philox
+        offset at compile time. Prefer sampling_partial_layer +
+        sampling_reduce_layer.
+        """
         assert logits.num_dims == 2      # (batch_size, vocab_size)
         assert output.num_dims == 2      # (batch_size, 1)
 
