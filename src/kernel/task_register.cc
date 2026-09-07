@@ -595,7 +595,15 @@ int TaskRegister::register_paged_attention_task(
   // params[3]: rotary_emd
   // params[4]: max_seq_len
   // params[5]: page_size
-  assert(params.size() == 6);
+  // params[6]: q_len_override (must be 0 — Eagle3 chain is sm100-only)
+  // params[7]: tail_offset    (must be 0 — Eagle3 chain is sm100-only)
+  // params[8]: group_id
+  // params[9]: page_stride_rows (0 = packed pages)
+  // Fixed 10-param form shared with the sm100 variant.
+  assert(params.size() == 10);
+  assert(params[6] == 0 && params[7] == 0);
+  int group_id = params[8];
+  int page_stride_rows = params[9];
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -629,7 +637,7 @@ int TaskRegister::register_paged_attention_task(
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   code.e("kernel::multitoken_paged_attention_task_impl<bfloat16, $, $, $, $, "
-         "$, $, $, $, $>(",
+         "$, $, $, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          kv_stride,
@@ -638,15 +646,16 @@ int TaskRegister::register_paged_attention_task(
          head_dim,
          max_seq_len,
          page_size,
-         max_tokens);
+         max_tokens,
+         page_stride_rows);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    runtime_config.qo_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indices_buffer,");
-  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_indices_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_last_page_len_buffer[$],", group_id);
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
@@ -1320,11 +1329,29 @@ int TaskRegister::register_paged_attention_hopper_task(
   // params[7]: tail_offset    (optional; sm100-only, must be 0 here)
   // params[8]: rotary_dim     (optional, 0 = head_dim; GLM-4.6 partial RoPE)
   // params[9]: qk-norm eps as float bits (optional, default 1e-6)
-  assert(params.size() == 6 || params.size() == 8 || params.size() == 10);
+  // params[10]: window_size   (optional; sm100-only, must be 0 here)
+  // params[11]: has_sink      (optional; sm100-only, must be 0 here)
+  // params[12]: group_id      (optional, default 0)
+  // Positions match the sm100 variant: Python emits one packing for every
+  // target_cc, so a field keeps its index even where it is unsupported.
+  assert(params.size() == 6 || params.size() == 8 || params.size() == 10 ||
+         params.size() == 11 || params.size() == 12 || params.size() == 13 ||
+         params.size() == 14);
   if (params.size() >= 8) {
     assert(params[6] == 0 && params[7] == 0 &&
            "q_len_override/tail_offset are not supported on Hopper");
   }
+  if (params.size() >= 11) {
+    assert(params[10] == 0 && "sliding window is not supported on Hopper");
+  }
+  if (params.size() >= 12) {
+    assert(params[11] == 0 && "attention sinks are not supported on Hopper");
+  }
+  int group_id =
+      (params.size() >= 13)
+          ? params[12]
+          : 0; // params[13]: page_stride_rows (optional, 0 = packed pages)
+  int page_stride_rows = (params.size() >= 14) ? params[13] : 0;
 
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -1495,14 +1522,15 @@ int TaskRegister::register_paged_attention_hopper_task(
          max_tokens,  /* MAX_TOKENS                 */
          "false",     /* PARTITION_KV               */
          1,           /* NUM_KV_CHUNKS              */
-         rotary_dim   /* ROTARY_DIM                 */
+         rotary_dim,  /* ROTARY_DIM               */
+         page_stride_rows /* PAGE_STRIDE_ROWS         */
   );
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
   code.e("    runtime_config.qo_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indices_buffer,");
-  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_indices_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_last_page_len_buffer[$],", group_id);
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0); // qk_norm
   code.e("    $,", params[3] > 0); // rope
@@ -2310,8 +2338,14 @@ int TaskRegister::register_paged_attention_sm100_task(
   // params[10]: window_size   (optional, 0 = full causal)
   // params[11]: has_sink      (optional, 1 = an 8th input holds the per-head
   //             attention sinks)
+  // params[12]: group_id      (optional, default 0: which KV group's page
+  //             table this layer reads)
+  // params[13]: page_stride_rows (optional, 0 = packed pages)
   assert(params.size() == 6 || params.size() == 8 || params.size() == 10 ||
-         params.size() == 11 || params.size() == 12);
+         params.size() == 11 || params.size() == 12 || params.size() == 13 ||
+         params.size() == 14);
+  int group_id = (params.size() >= 13) ? params[12] : 0;
+  int page_stride_rows = (params.size() >= 14) ? params[13] : 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   bool has_sink = (params.size() >= 12) && (params[11] > 0);
@@ -2357,7 +2391,7 @@ int TaskRegister::register_paged_attention_sm100_task(
   // explicitly.
   code.e("kernel::multitoken_paged_attention_sm100_task_impl<bfloat16, $, $, "
          "$, $, "
-         "$, $, $, $, $, $, $, $, $>(",
+         "$, $, $, $, $, $, $, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          kv_stride,
@@ -2370,15 +2404,16 @@ int TaskRegister::register_paged_attention_sm100_task(
          tail_offset,
          max_tokens,
          rotary_dim,
-         window_size);
+         window_size,
+         page_stride_rows);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    runtime_config.qo_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indices_buffer,");
-  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_indices_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_last_page_len_buffer[$],", group_id);
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
@@ -3798,7 +3833,11 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
   // params[4]: max_seq_len
   // params[5]: page_size
   // params[6]: num_kv_chunks
-  assert(params.size() == 7);
+  // params[7]: group_id
+  // params[8]: page_stride_rows (0 = packed pages)
+  assert(params.size() == 9);
+  int group_id = params[7];
+  int page_stride_rows = params[8];
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -3837,7 +3876,7 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
   code.inc_indent();
   code.e("kernel::multitoken_paged_attention_split_kv_task_impl<bfloat16, $, "
          "$, $, $, $, $, "
-         "$, $, $, $, $, $, $>(",
+         "$, $, $, $, $, $, $, $>(",
          num_q_heads / num_kv_heads,
          1,
          num_kv_heads,
@@ -3850,15 +3889,16 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
          page_size,
          max_tokens,
          "true", // PARTITION_KV
-         num_kv_chunks);
+         num_kv_chunks,
+         page_stride_rows);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
   code.e("    task_desc->output_ptrs[1],");
   code.e("    runtime_config.qo_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indices_buffer,");
-  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_indices_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_last_page_len_buffer[$],", group_id);
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
@@ -3881,7 +3921,9 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
   // params[2]: max_seq_len
   // params[3]: page_size
   // params[4]: num_kv_heads
-  assert(params.size() == 5);
+  // params[5]: group_id
+  assert(params.size() == 6);
+  int group_id = params[5];
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 2;
@@ -3925,8 +3967,8 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    runtime_config.qo_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_last_page_len_buffer[$],", group_id);
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    task_desc->task_metadata.merge_task_offset);");
@@ -3942,13 +3984,15 @@ int TaskRegister::register_mla_decode_sm100_task(
   // params[3]: num_splits
   // params[4]: kv_len (max, not used — runtime kv_len from page table)
   // params[5]: q_len (number of queries per block, for prefill batching;
-  //                   default 1 for decode-only)
-  assert(params.size() >= 5 && params.size() <= 6);
+  //                   1 for decode-only)
+  // params[6]: group_id
+  assert(params.size() == 7);
+  int group_id = params[6];
   int num_heads = params[0];
   int d_k = params[1];
   int d_v = params[2];
   int num_splits = params[3];
-  int q_len = (params.size() >= 6) ? params[5] : 1;
+  int q_len = params[5];
   // num_head_groups derived from q_len: each block handles q_len queries × hpb
   // heads. TP-aware: hpb = min(128/q_len, num_heads). In single-GPU
   // (num_heads=128), this equals 128/q_len (original behavior). In TP, caps hpb
@@ -3981,10 +4025,15 @@ int TaskRegister::register_mla_decode_sm100_task(
     code.e(
         "  int gi_ = task_desc->task_metadata.request_id;  // head group idx");
   }
-  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[$][bi_];",
+         group_id);
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[$][bi_ + 1];",
+         group_id);
+  code.e("  int kv_len_ = (lp_ - fp_ - 1) * "
+         "runtime_config.kv_group_block_sizes[$] + "
+         "runtime_config.paged_kv_last_page_len_buffer[$][bi_];",
+         group_id,
+         group_id);
   if (!single_query) {
     code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
     code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
@@ -4107,12 +4156,14 @@ int TaskRegister::register_mla_prefill_sm100_task(
   // params[2]: d_ckv (e.g. 512)
   // params[3]: d_kpe (e.g. 64)
   // params[4]: d_v (e.g. 512)
-  assert(params.size() == 5);
+  // params[5]: group_id
+  assert(params.size() == 6);
   int num_heads = params[0];
   int seq_len = params[1];
   int d_ckv = params[2];
   int d_kpe = params[3];
   int d_v = params[4];
+  int group_id = params[5];
   // DeepSeek V3 MLA softmax_scale = q_head_dim^-0.5 * mscale^2 (≈ 0.13525)
   // d_ckv+d_kpe (576) is the absorbed latent dim, NOT the dot-product scale.
   // q_head_dim = 192 (qk_nope=128 + qk_rope=64); mscale from YARN.
@@ -4143,10 +4194,15 @@ int TaskRegister::register_mla_prefill_sm100_task(
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
   code.e("  int head_ = task_desc->task_metadata.merge_task_offset;");
   code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
-  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int S_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[$][bi_];",
+         group_id);
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[$][bi_ + 1];",
+         group_id);
+  code.e("  int S_ = (lp_ - fp_ - 1) * "
+         "runtime_config.kv_group_block_sizes[$] + "
+         "runtime_config.paged_kv_last_page_len_buffer[$][bi_];",
+         group_id,
+         group_id);
   code.e("  int Q_LEN_ = runtime_config.qo_indptr_buffer[bi_ + 1] - "
          "runtime_config.qo_indptr_buffer[bi_];");
   code.e("  auto *q_nope_ptr_ = static_cast<const "
@@ -4229,7 +4285,9 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
   // params[1]: q_len
   // params[2]: kv_len
   // params[3]: num_splits (sk)
-  assert(params.size() == 4);
+  // params[4]: group_id
+  assert(params.size() == 5);
+  int group_id = params[4];
   int num_head_groups = params[0];
   int q_len = params[1];
   int kv_len = params[2];
@@ -4243,10 +4301,15 @@ int TaskRegister::register_mla_mtp_decode_sm100_task(
   code.inc_indent();
   code.e("{");
   code.e("  int bi_ = task_desc->task_metadata.merge_task_offset;");
-  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[$][bi_];",
+         group_id);
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[$][bi_ + 1];",
+         group_id);
+  code.e("  int kv_len_ = (lp_ - fp_ - 1) * "
+         "runtime_config.kv_group_block_sizes[$] + "
+         "runtime_config.paged_kv_last_page_len_buffer[$][bi_];",
+         group_id,
+         group_id);
   code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
   code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
   code.e("  int q_len_rt_ = qo_lp_ - qo_fp_;");
@@ -4330,7 +4393,9 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
   // params[4]: max_seq_len
   // params[5]: page_size
   // params[6]: num_kv_chunks
-  assert(params.size() == 7);
+  // params[7]: group_id
+  // params[8]: page_stride_rows (0 = packed pages)
+  assert(params.size() == 9);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -4357,6 +4422,8 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
   int max_seq_len = params[4];
   int page_size = params[5];
   int num_kv_chunks = params[6];
+  int group_id = params[7];
+  int page_stride_rows = params[8];
   // Assert that k_cache has the same head_dim
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
@@ -4369,7 +4436,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
   code.inc_indent();
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, "
          "$, $, $, $, $, "
-         "$, $, $, $, $, $, $>(",
+         "$, $, $, $, $, $, $, $>(",
          num_q_heads / num_kv_heads, /* NUM_QO_HEADS */
          1,                          /* NUM_KV_HEADS */
          num_kv_heads,               /* NUM_QO_GROUPS */
@@ -4383,13 +4450,14 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
          page_size,         /* PAGE_SIZE */
          max_tokens,        /* MAX_TOKENS */
          "true",            /* PARTITION_KV */
-         num_kv_chunks);    /* NUM_KV_CHUNKS */
+         num_kv_chunks,     /* NUM_KV_CHUNKS */
+         page_stride_rows /* PAGE_STRIDE_ROWS */);
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
   code.e("    runtime_config.qo_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indices_buffer,");
-  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_indices_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_last_page_len_buffer[$],", group_id);
   code.e("    task_desc->task_metadata.request_id,");
   code.e("    $,", params[2] > 0);
   code.e("    $,", params[3] > 0);
@@ -4689,7 +4757,10 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
   // params[0]: d_k (576)
   // params[1]: d_v (512)
   // params[2]: page_size (128)
-  assert(params.size() == 3);
+  // params[3]: group_id
+  assert(params.size() == 5);
+  int group_id = params[3];
+  int page_stride_rows = params[4];
 
   int d_k = params[0];
   int d_v = params[1];
@@ -4703,10 +4774,15 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
   code.e("{");
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
   code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
-  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int S_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[$][bi_];",
+         group_id);
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[$][bi_ + 1];",
+         group_id);
+  code.e("  int S_ = (lp_ - fp_ - 1) * "
+         "runtime_config.kv_group_block_sizes[$] + "
+         "runtime_config.paged_kv_last_page_len_buffer[$][bi_];",
+         group_id,
+         group_id);
   code.e("  auto *c_latent_new_ptr_ = static_cast<const "
          "nv_bfloat16*>(task_desc->input_ptrs[0]) + "
          "qo_fp_ * $;",
@@ -4719,19 +4795,20 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
          "static_cast<nv_bfloat16*>(task_desc->input_ptrs[3]) + "
          "bi_ * S_ * $;",
          d_k);
-  code.e("kernel::mla_kv_cache_gather_sm100_task_impl<$, $, $, $>(",
+  code.e("kernel::mla_kv_cache_gather_sm100_task_impl<$, $, $, $, $>(",
          d_k,
          d_v,
          page_size,
-         k_pe_row_stride);
+         k_pe_row_stride,
+         page_stride_rows);
   code.e("    c_latent_new_ptr_,");
   code.e("    k_pe_new_ptr_,");
   code.e("    task_desc->input_ptrs[2],"); // paged_cache
   code.e("    contiguous_kv_ptr_,");
   code.e("    runtime_config.qo_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indices_buffer,");
-  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_indices_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_last_page_len_buffer[$],", group_id);
   code.e("    task_desc->task_metadata.request_id);");
   code.e("}");
   return register_task_variant(TASK_MLA_KV_GATHER_SM100, code.to_string());
@@ -4743,11 +4820,14 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
   // the non-split variant plus TWO separate output pointers: ckv_sep and
   // kpe_sep. Layout: ckv_sep [max_seq, D_V=512], kpe_sep [max_seq, D_K-D_V=64].
   // params[0]: d_k, params[1]: d_v, params[2]: page_size
-  assert(params.size() == 3);
+  // params[3]: group_id
+  assert(params.size() == 5);
 
   int d_k = params[0];
   int d_v = params[1];
   int page_size = params[2];
+  int group_id = params[3];
+  int page_stride_rows = params[4];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4775,11 +4855,12 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
          "static_cast<nv_bfloat16*>(task_desc->input_ptrs[4]) + "
          "bi_ * MPK_MAX_SEQ_LENGTH * $;",
          d_k - d_v);
-  code.e("kernel::mla_kv_cache_gather_split_sm100_task_impl<$, $, $, $>(",
+  code.e("kernel::mla_kv_cache_gather_split_sm100_task_impl<$, $, $, $, $>(",
          d_k,
          d_v,
          page_size,
-         k_pe_row_stride);
+         k_pe_row_stride,
+         page_stride_rows);
   code.e("    c_latent_new_ptr_,");
   code.e("    k_pe_new_ptr_,");
   code.e("    task_desc->input_ptrs[2],"); // paged_cache
@@ -4789,9 +4870,9 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
   code.e("    ckv_sep_ptr_,");
   code.e("    kpe_sep_ptr_,");
   code.e("    runtime_config.qo_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indptr_buffer,");
-  code.e("    runtime_config.paged_kv_indices_buffer,");
-  code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+  code.e("    runtime_config.paged_kv_indptr_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_indices_buffer[$],", group_id);
+  code.e("    runtime_config.paged_kv_last_page_len_buffer[$],", group_id);
   code.e("    task_desc->task_metadata.request_id);");
   code.e("}");
   return register_task_variant(TASK_MLA_KV_GATHER_SPLIT_SM100,
@@ -4987,11 +5068,13 @@ int TaskRegister::register_eagle3_commit_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 4);
+  // params[4]: group_id
+  assert(params.size() == 5);
   int num_groups = params[0];
   int q_len = params[1];
   int kv_len = params[2];
   int num_splits = params[3];
+  int group_id = params[4];
   int kvt = (kv_len + 128 - 1) / 128;
   int tps = (kvt + num_splits - 1) / num_splits;
   int single_tile = (tps == 1) ? 1 : 0;
@@ -5001,10 +5084,15 @@ int TaskRegister::register_mla_mtp_decode_tp2_sm100_task(
   code.inc_indent();
   code.e("{");
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
-  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[$][bi_];",
+         group_id);
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[$][bi_ + 1];",
+         group_id);
+  code.e("  int kv_len_ = (lp_ - fp_ - 1) * "
+         "runtime_config.kv_group_block_sizes[$] + "
+         "runtime_config.paged_kv_last_page_len_buffer[$][bi_];",
+         group_id,
+         group_id);
   // Compute runtime Q_LEN from qo_indptr (dual-dispatch: kernel uses this
   // to apply the Q_LEN>8 early-exit and correct causal masking).
   code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
@@ -5075,11 +5163,13 @@ int TaskRegister::register_mla_mtp_decode_tp2_reduce_sm100_task(
 
 int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 4);
+  // params[4]: group_id
+  assert(params.size() == 5);
   int num_groups = params[0];
   int q_len = params[1];
   int kv_len = params[2];
   int num_splits = params[3];
+  int group_id = params[4];
   int kvt = (kv_len + 128 - 1) / 128;
   int tps = (kvt + num_splits - 1) / num_splits;
   int single_tile = (tps == 1) ? 1 : 0;
@@ -5089,10 +5179,15 @@ int TaskRegister::register_mla_mtp_decode_tp4_sm100_task(
   code.inc_indent();
   code.e("{");
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
-  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[$][bi_];",
+         group_id);
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[$][bi_ + 1];",
+         group_id);
+  code.e("  int kv_len_ = (lp_ - fp_ - 1) * "
+         "runtime_config.kv_group_block_sizes[$] + "
+         "runtime_config.paged_kv_last_page_len_buffer[$][bi_];",
+         group_id,
+         group_id);
   // Dual-dispatch: pass runtime Q_LEN from qo_indptr for early-exit gate.
   code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
   code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");
@@ -5165,12 +5260,14 @@ int TaskRegister::register_mla_mtp_decode_tp4_reduce_sm100_task(
 
 int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  assert(params.size() == 5);
+  // params[5]: group_id
+  assert(params.size() == 6);
   int num_groups = params[0];
   int q_len_padded = params[1];
   int kv_len = params[2];
   int num_splits = params[3];
   int q_len_real = params[4];
+  int group_id = params[5];
   int kvt = (kv_len + 128 - 1) / 128;
   int tps = (kvt + num_splits - 1) / num_splits;
   int single_tile = (tps == 1) ? 1 : 0;
@@ -5180,10 +5277,15 @@ int TaskRegister::register_mla_mtp_decode_tp8_sm100_task(
   code.inc_indent();
   code.e("{");
   code.e("  int bi_ = task_desc->task_metadata.request_id;");
-  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[bi_];");
-  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[bi_ + 1];");
-  code.e("  int kv_len_ = (lp_ - fp_ - 1) * MPK_PAGE_SIZE + "
-         "runtime_config.paged_kv_last_page_len_buffer[bi_];");
+  code.e("  int fp_ = runtime_config.paged_kv_indptr_buffer[$][bi_];",
+         group_id);
+  code.e("  int lp_ = runtime_config.paged_kv_indptr_buffer[$][bi_ + 1];",
+         group_id);
+  code.e("  int kv_len_ = (lp_ - fp_ - 1) * "
+         "runtime_config.kv_group_block_sizes[$] + "
+         "runtime_config.paged_kv_last_page_len_buffer[$][bi_];",
+         group_id,
+         group_id);
   // Dual-dispatch: pass runtime Q_LEN_real; pad to even for Q_LEN_padded.
   code.e("  int qo_fp_ = runtime_config.qo_indptr_buffer[bi_];");
   code.e("  int qo_lp_ = runtime_config.qo_indptr_buffer[bi_ + 1];");

@@ -17,6 +17,7 @@ from .multigpu import (
   auto_select_allreduce_implementation
 )
 from typing import Optional
+from .kv_planner import KVGroupSpec
 
 HARD_CODE = """
 #include <Python.h>
@@ -28,16 +29,18 @@ HARD_CODE = """
 extern std::string g_task_graph_json_path;
 
 static PyObject *init_func(PyObject *self, PyObject *args) {
-  PyObject *meta_list, *py_profiler_buffer, *tensor_names_list, *tensor_ptrs_list, *py_json_path;
+  PyObject *meta_list, *py_profiler_buffer, *tensor_names_list, *tensor_ptrs_list, *py_json_path, *kv_block_sizes_list, *kv_window_sizes_list;
   std::vector<void*> meta_tensors;
   std::vector<std::string> model_tensor_names;
   std::vector<void*> model_tensor_ptrs;
+  std::vector<int> kv_group_block_sizes;
+  std::vector<int> kv_group_window_sizes;
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
   long long eos_token_id;
   int allocate_nvshmem_teams;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiiLiOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &tensor_names_list, &tensor_ptrs_list, &py_json_path)) {
+  if (!PyArg_ParseTuple(args, "OOiiiiiiLiOOOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &tensor_names_list, &tensor_ptrs_list, &py_json_path, &kv_block_sizes_list, &kv_window_sizes_list)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -45,6 +48,31 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   if(!PyList_Check(meta_list)) {
     PyErr_SetString(PyExc_TypeError, "arg1 must be a list.");
     return NULL;
+  }
+  if(!PyList_Check(kv_block_sizes_list)) {
+    PyErr_SetString(PyExc_TypeError, "kv_group_block_sizes must be a list.");
+    return NULL;
+  }
+  Py_ssize_t num_kv_groups = PyList_Size(kv_block_sizes_list);
+  for(Py_ssize_t i = 0; i < num_kv_groups; i++) {
+    long bs = PyLong_AsLong(PyList_GetItem(kv_block_sizes_list, i));
+    if (bs <= 0) {
+      PyErr_Format(PyExc_ValueError, "kv_group_block_sizes[%zd] must be a positive int", i);
+      return NULL;
+    }
+    kv_group_block_sizes.push_back((int)bs);
+  }
+  if(!PyList_Check(kv_window_sizes_list) || PyList_Size(kv_window_sizes_list) != num_kv_groups) {
+    PyErr_SetString(PyExc_TypeError, "kv_group_window_sizes must be a list, one entry per KV group.");
+    return NULL;
+  }
+  for(Py_ssize_t i = 0; i < num_kv_groups; i++) {
+    long ws = PyLong_AsLong(PyList_GetItem(kv_window_sizes_list, i));
+    if (ws < 0) {
+      PyErr_Format(PyExc_ValueError, "kv_group_window_sizes[%zd] must be >= 0 (0 = full attention)", i);
+      return NULL;
+    }
+    kv_group_window_sizes.push_back((int)ws);
   }
   if(!PyList_Check(tensor_names_list)) {
     PyErr_SetString(PyExc_TypeError, "tensor_names must be a list.");
@@ -90,7 +118,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     }
   }
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, model_tensor_names, model_tensor_ptrs);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, model_tensor_names, model_tensor_ptrs, kv_group_block_sizes, kv_group_window_sizes);
 
   Py_RETURN_NONE;
 }
@@ -212,6 +240,11 @@ def _detect_cxx_standard():
         pass
     return "-std=c++17"
 
+def _spec_decode_enabled(mpk) -> bool:
+    cfg = getattr(mpk, "spec_decode_config", None)
+    return cfg is not None and getattr(cfg, "method", None) == "eagle3"
+
+
 def get_compile_command(
     mpk,
     target_cc,
@@ -304,11 +337,13 @@ def get_compile_command(
 
     flags = flags + [f"-DMPK_MAX_NUM_BATCHED_TOKENS={mpk.max_num_batched_tokens}"]
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
-    flags = flags + [f"-DMPK_PAGE_SIZE={mpk.page_size}"]
+    flags = flags + [f"-DMPK_NUM_KV_GROUPS={len(mpk.kv_groups)}"]
+    if "kv_event_log" in mpk.meta_tensors:
+        flags = flags + [
+            f"-DMPK_KV_EVENT_LOG={mpk.meta_tensors['kv_event_log'].numel()}"]
     flags = flags + [f"-DMPK_MAX_SEQ_LENGTH={mpk.max_seq_length}"]
 
-    spec_cfg = getattr(mpk, 'spec_decode_config', None)
-    if spec_cfg is not None and getattr(spec_cfg, 'method', None) == 'eagle3':
+    if _spec_decode_enabled(mpk):
         flags = flags + ["-DMPK_SPEC_DECODE"]
 
     if use_nvshmem:
@@ -350,6 +385,30 @@ def get_compile_command(
     return common_cmd + specific_cmd + flags
 
 
+def _page_stride_rows(*caches):
+    """Rows between consecutive pages of a cache shaped
+    [num_pages, entries_per_page, *entry_shape].
+
+    A cache carved out of the shared KV pool is strided by the whole page,
+    which is wider than its own entries whenever the page carries padding or
+    multiple components (K and V)."""
+    rows = []
+    for c in caches:
+        if c is None:
+            continue
+        row_elems = 1
+        for d in range(2, c.num_dims):
+            row_elems *= c.dim(d)
+        stride = c.stride[0]
+        assert stride % row_elems == 0, (
+            f"paged cache page stride {stride} is not a multiple of its "
+            f"{row_elems}-element row")
+        rows.append(stride // row_elems)
+    assert len(set(rows)) == 1, (
+        f"paged caches in one task disagree on page stride: {rows}")
+    return rows[0]
+
+
 class PersistentKernel:
     def __init__(
         self,
@@ -363,7 +422,6 @@ class PersistentKernel:
         max_num_batched_requests: int,
         max_num_batched_tokens: int,
         max_num_pages: int,
-        page_size: int,
         meta_tensors: dict,
         profiler_tensor: torch.Tensor,
         trace_name: str,
@@ -372,6 +430,8 @@ class PersistentKernel:
         eos_token_id: int64 = -1,
         pinned_ring_capacity: int = 0,
         test_mode: bool = False,
+        kv_groups: list = None,
+        page_size: int = None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -390,17 +450,40 @@ class PersistentKernel:
         self.max_num_batched_requests = max_num_batched_requests
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_pages = max_num_pages
-        self.page_size = page_size
+        # kv_groups is the source of truth for block sizes; page_size is the
+        # single-group shorthand and must agree when both are given.
+        if kv_groups is None:
+            assert page_size is not None, (
+                "PersistentKernel needs kv_groups (or page_size as the "
+                "single-group shorthand)")
+            kv_groups = [KVGroupSpec(block_size=page_size)]
+        elif page_size is not None:
+            assert page_size == kv_groups[0].block_size, (
+                f"page_size {page_size} disagrees with "
+                f"kv_groups[0].block_size {kv_groups[0].block_size}")
+        self.kv_groups = kv_groups
+        self.page_size = kv_groups[0].block_size
         self.eos_token_id = eos_token_id
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
         # Prevent GC of PyTorch tensors whose GPU pointers are baked into the
         # generated persistent-kernel code (attach_input stores raw pointers).
         self._torch_tensor_refs = []
         self.meta_tensors = meta_tensors
-        # Auto-allocate scheduler snapshot buffer for in-place compaction
-        if "paged_kv_indices_snapshot" not in self.meta_tensors and self.mode != "online_pinned":
-            self.meta_tensors["paged_kv_indices_snapshot"] = torch.empty(
-                max_num_pages, dtype=torch.int32, device="cuda")
+        # Backward compat: remap old-style paged_kv_* keys to per-group _0 keys
+        for _old, _new in [
+            ("paged_kv_indptr_buffer",       "paged_kv_indptr_buffer_0"),
+            ("paged_kv_indices_buffer",      "paged_kv_indices_buffer_0"),
+            ("paged_kv_last_page_len_buffer","paged_kv_last_page_len_buffer_0"),
+            ("paged_kv_indices_snapshot",    "paged_kv_indices_snapshot_0"),
+        ]:
+            if _old in self.meta_tensors and _new not in self.meta_tensors:
+                self.meta_tensors[_new] = self.meta_tensors[_old]
+        # Per-group snapshot buffers for in-place compaction sized by page-table span.
+        for _g in range(len(self.kv_groups)):
+            _snap_key = f"paged_kv_indices_snapshot_{_g}"
+            if _snap_key not in self.meta_tensors and self.mode != "online_pinned":
+                self.meta_tensors[_snap_key] = torch.empty(
+                    self._kv_indices_span(_g), dtype=torch.int32, device="cuda")
         self.profiler_tensor = profiler_tensor
         self.trace_name = trace_name
         self.use_nvshmem = world_size > 1
@@ -434,14 +517,12 @@ class PersistentKernel:
         qo_indptr_buffer = self.meta_tensors["qo_indptr_buffer"]
         # Asserts "==" below is not guaranteed by vllm, because the shape is changed depending on real situation. But the mem space won't change.
         assert qo_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"qo_indptr_buffer.shape: {qo_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
-        paged_kv_indptr_buffer = self.meta_tensors["paged_kv_indptr_buffer"]
-        assert paged_kv_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"paged_kv_indptr_buffer.shape: {paged_kv_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
-        paged_kv_indices_buffer = self.meta_tensors["paged_kv_indices_buffer"]
-        # assert paged_kv_indices_buffer.shape == (self.max_num_pages,), f"paged_kv_indices_buffer.shape: {paged_kv_indices_buffer.shape}, max_num_pages: {self.max_num_pages}"
-        # TODO: This is because the paged_kv_indices_buffer can be limited by max len on vllm side
-        assert paged_kv_indices_buffer.shape[0] <= self.max_num_pages, f"paged_kv_indices_buffer.shape: {paged_kv_indices_buffer.shape}, max_num_pages: {self.max_num_pages}"
-        paged_kv_last_page_len_buffer = self.meta_tensors["paged_kv_last_page_len_buffer"]
-        assert paged_kv_last_page_len_buffer.shape[0] <= self.max_num_batched_requests, f"paged_kv_last_page_len_buffer.shape: {paged_kv_last_page_len_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
+        paged_kv_indptr_buffer = self.meta_tensors["paged_kv_indptr_buffer_0"]
+        assert paged_kv_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"paged_kv_indptr_buffer_0.shape: {paged_kv_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
+        paged_kv_indices_buffer = self.meta_tensors["paged_kv_indices_buffer_0"]
+        self._check_kv_capacity()
+        paged_kv_last_page_len_buffer = self.meta_tensors["paged_kv_last_page_len_buffer_0"]
+        assert paged_kv_last_page_len_buffer.shape[0] <= self.max_num_batched_requests, f"paged_kv_last_page_len_buffer_0.shape: {paged_kv_last_page_len_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
 
         # check type of meta_tensors
         assert self.meta_tensors["tokens"].dtype == torch.int64, f"tokens.dtype: {self.meta_tensors['tokens'].dtype}"
@@ -450,9 +531,59 @@ class PersistentKernel:
         assert self.meta_tensors["num_new_tokens"].dtype == torch.int32, f"num_new_tokens.dtype: {self.meta_tensors['num_new_tokens'].dtype}"
         assert self.meta_tensors["prompt_lengths"].dtype == torch.int32, f"prompt_lengths.dtype: {self.meta_tensors['prompt_lengths'].dtype}"
         assert qo_indptr_buffer.dtype == torch.int32, f"qo_indptr_buffer.dtype: {qo_indptr_buffer.dtype}"
-        assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer.dtype: {paged_kv_indptr_buffer.dtype}"
-        assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer.dtype: {paged_kv_indices_buffer.dtype}"
-        assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer.dtype: {paged_kv_last_page_len_buffer.dtype}"
+        assert paged_kv_indptr_buffer.dtype == torch.int32, f"paged_kv_indptr_buffer_0.dtype: {paged_kv_indptr_buffer.dtype}"
+        assert paged_kv_indices_buffer.dtype == torch.int32, f"paged_kv_indices_buffer_0.dtype: {paged_kv_indices_buffer.dtype}"
+        assert paged_kv_last_page_len_buffer.dtype == torch.int32, f"paged_kv_last_page_len_buffer_0.dtype: {paged_kv_last_page_len_buffer.dtype}"
+
+    def _kv_indices_span(self, group_id: int) -> int:
+        """Entries a group's page-table index buffer must hold: one slot per
+        page of every batched request's whole sequence."""
+        block_size = self.kv_groups[group_id].block_size
+        pages_per_seq = (self.max_seq_length + block_size - 1) // block_size
+        return max(self.max_num_pages,
+                   self.max_num_batched_requests * pages_per_seq)
+
+    def _check_kv_capacity(self):
+        """Fail at graph-build time if the page pool cannot hold the batch
+        at worst-case demand."""
+        from .kv_planner import pages_per_request
+
+        # Only the offline scheduler returns pages fallen out of a window.
+        recycles = self.mode == "offline" and not _spec_decode_enabled(self)
+        per_group = [
+            pages_per_request(g.block_size,
+                              g.window_size if recycles else 0,
+                              self.max_seq_length,
+                              self.max_num_batched_tokens)
+            for g in self.kv_groups
+        ]
+        # online_pinned stages the page table in STATIC shared memory, which
+        # caps the pool.
+        if self.mode == "online_pinned":
+            smem = len(self.kv_groups) * self.max_num_pages * 4
+            assert smem <= 40 * 1024, (
+                f"online_pinned: {len(self.kv_groups)} group(s) x "
+                f"{self.max_num_pages} pages needs {smem / 1024:.1f} KiB of "
+                f"static shared memory, over the ~40 KiB budget. Lower the KV "
+                f"budget or raise the page size (fewer, larger pages).")
+
+        demand = self.max_num_batched_requests * sum(per_group)
+        assert demand <= self.max_num_pages, (
+            f"KV page pool too small: {self.max_num_batched_requests} "
+            f"request(s) need {demand} pages at once (per group: {per_group}) "
+            f"but max_num_pages is {self.max_num_pages}. Raise max_num_pages, "
+            f"raise the block size, or lower max_seq_length.")
+        for _g in range(len(self.kv_groups)):
+            need = self._kv_indices_span(_g)
+            for _key in (f"paged_kv_indices_buffer_{_g}",
+                         f"paged_kv_indices_snapshot_{_g}"):
+                buf = self.meta_tensors.get(_key)
+                if buf is None:
+                    continue
+                assert buf.shape[0] >= need, (
+                    f"{_key} holds {buf.shape[0]} entries but the page table "
+                    f"spans {need}; pass max_seq_length to "
+                    f"KVCachePlan.build_meta_tensors")
 
     def _apply_test_mode_meta_defaults(self):
         # Allocate any missing meta tensors with shapes derived from the
@@ -487,17 +618,18 @@ class PersistentKernel:
             self.meta_tensors["qo_indptr_buffer"] = torch.zeros(
                 self.max_num_batched_requests + 1,
                 dtype=torch.int32, device=device)
-        if "paged_kv_indptr_buffer" not in self.meta_tensors:
-            self.meta_tensors["paged_kv_indptr_buffer"] = torch.zeros(
-                self.max_num_batched_requests + 1,
-                dtype=torch.int32, device=device)
-        if "paged_kv_indices_buffer" not in self.meta_tensors:
-            self.meta_tensors["paged_kv_indices_buffer"] = torch.zeros(
-                self.max_num_pages, dtype=torch.int32, device=device)
-        if "paged_kv_last_page_len_buffer" not in self.meta_tensors:
-            self.meta_tensors["paged_kv_last_page_len_buffer"] = torch.zeros(
-                self.max_num_batched_requests,
-                dtype=torch.int32, device=device)
+        for _g in range(len(self.kv_groups)):
+            if f"paged_kv_indptr_buffer_{_g}" not in self.meta_tensors:
+                self.meta_tensors[f"paged_kv_indptr_buffer_{_g}"] = torch.zeros(
+                    self.max_num_batched_requests + 1,
+                    dtype=torch.int32, device=device)
+            if f"paged_kv_indices_buffer_{_g}" not in self.meta_tensors:
+                self.meta_tensors[f"paged_kv_indices_buffer_{_g}"] = torch.zeros(
+                    self.max_num_pages, dtype=torch.int32, device=device)
+            if f"paged_kv_last_page_len_buffer_{_g}" not in self.meta_tensors:
+                self.meta_tensors[f"paged_kv_last_page_len_buffer_{_g}"] = torch.zeros(
+                    self.max_num_batched_requests,
+                    dtype=torch.int32, device=device)
 
     @classmethod
     def get_default_init_parameters(cls):
@@ -1104,6 +1236,34 @@ class PersistentKernel:
         )
         self.kn_graph.register_task(tb_graph, "single_batch_extend_attention", params)
 
+    def _resolve_kv_block_size(self, group_id, explicit_page_size=None,
+                               cache_dt=None, cache_page_dim=1,
+                               layer_window=0):
+        """kv_groups[group_id].block_size is the single source of truth for a
+        paged layer's logical block size. A caller-passed page_size and the
+        attached paged cache's page dimension must both agree — mismatches
+        used to silently corrupt data; fail at graph-build time instead."""
+        assert 0 <= group_id < len(self.kv_groups), (
+            f"group_id {group_id} out of range: {len(self.kv_groups)} "
+            f"kv_group(s) declared")
+        block_size = self.kv_groups[group_id].block_size
+        if explicit_page_size is not None:
+            assert explicit_page_size == block_size, (
+                f"page_size {explicit_page_size} passed to a group-{group_id} "
+                f"layer, but kv_groups[{group_id}].block_size = {block_size}")
+        if cache_dt is not None:
+            got = cache_dt.dim(cache_page_dim)
+            assert got == block_size, (
+                f"paged cache page dim {got} != kv_groups[{group_id}]"
+                f".block_size {block_size}")
+        # Recycling a windowed group's pages is only safe while EVERY layer
+        # on that page table masks with the same window.
+        group_window = self.kv_groups[group_id].window_size
+        assert layer_window == group_window, (
+            f"a layer with window_size {layer_window} reads KV group "
+            f"{group_id}, which declares {group_window}")
+        return block_size
+
     def paged_attention_layer(
         self,
         input: DTensor,
@@ -1123,6 +1283,7 @@ class PersistentKernel:
         qk_norm_eps: float = 1e-6,
         window_size: int = 0,       # 0 = full causal
         sinks: DTensor = None,      # per-head attention sinks
+        group_id: int = 0,          # which KV group's page table this reads
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
@@ -1131,8 +1292,9 @@ class PersistentKernel:
         assert v_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
         assert k_cache.dim(0) == self.max_num_pages
         assert v_cache.dim(0) == self.max_num_pages
-        assert k_cache.dim(1) == self.page_size
-        assert v_cache.dim(1) == self.page_size
+        block_size = self._resolve_kv_block_size(group_id, cache_dt=k_cache,
+                                                 layer_window=window_size)
+        assert v_cache.dim(1) == block_size
         head_dim = k_cache.dim(3)
         num_kv_heads = k_cache.dim(2)
         num_q_heads = output.dim(1) // head_dim
@@ -1159,32 +1321,41 @@ class PersistentKernel:
         # params[3]: rotary_embed
         # params[4]: max_seq_len
         # params[5]: page_size
-        # params[6]: q_len_override (only included if non-zero; for Eagle3 K>1 chain)
-        # params[7]: tail_offset    (only included if non-zero; for Eagle3 K>1 chain)
-        # params[8]: rotary_dim     (0 = head_dim; GLM-4.6 partial RoPE)
-        # params[9]: qk-norm eps float bits (default 1e-6)
-        # params[10]: window_size   (0 = full causal)
-        # params[11]: has_sink      (1 = an 8th input holds the sinks)
-        # Trailing pairs are only emitted when non-default (legacy sizes 6/8).
+        # params[6]:  q_len_override (Eagle3 K>1 chain)
+        # params[7]:  tail_offset    (Eagle3 K>1 chain)
+        # params[8]:  rotary_dim     (0 = head_dim; GLM-4.6 partial RoPE)
+        # params[9]:  qk-norm eps float bits (default 1e-6)
+        # params[10]: window_size    (0 = full causal)
+        # params[11]: has_sink       (1 = an 8th input holds the sinks)
+        # params[12]: group_id       (which KV group's page table this reads)
+        # params[13]: page_stride_rows (0 = packed pages)
+        # A field keeps its index, so the tail is emitted up to the last
+        # non-default one and then rounded up to a size the C++ side accepts.
         import struct
         has_sink = 1 if sinks is not None else 0
         if has_sink:
             assert sinks.num_dims == 2  # (num_kv_heads, num_q_heads/num_kv)
             assert sinks.dim(0) == num_kv_heads
             assert sinks.dim(1) == num_q_heads // num_kv_heads
+        eps_bits = struct.unpack("i", struct.pack("f", qk_norm_eps))[0]
+        default_eps_bits = struct.unpack("i", struct.pack("f", 1e-6))[0]
+        # Packed pages are the default; 0 tells the kernel to derive the
+        # stride from the page size.
+        stride_rows = _page_stride_rows(k_cache, v_cache)
+        stride_field = 0 if stride_rows == block_size else stride_rows
+        tail = [q_len_override, tail_offset, rotary_dim, eps_bits,
+                window_size, has_sink, group_id, stride_field]
+        defaults = [0, 0, 0, default_eps_bits, 0, 0, 0, 0]
+        n = 0
+        for idx, (got, want) in enumerate(zip(tail, defaults)):
+            if got != want:
+                n = idx + 1
+        for allowed in (0, 2, 4, 5, 6, 7, 8):   # total sizes 6,8,10,11,12,13,14
+            if allowed >= n:
+                n = allowed
+                break
         params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
-                  self.max_seq_length, self.page_size]
-        if (q_len_override != 0 or tail_offset != 0 or rotary_dim != 0
-                or qk_norm_eps != 1e-6 or window_size != 0 or has_sink):
-            params.extend([q_len_override, tail_offset])
-        if (rotary_dim != 0 or qk_norm_eps != 1e-6 or window_size != 0
-                or has_sink):
-            eps_bits = struct.unpack("i", struct.pack("f", qk_norm_eps))[0]
-            params.extend([rotary_dim, eps_bits])
-        if window_size != 0 or has_sink:
-            params.append(window_size)
-        if has_sink:
-            params.append(has_sink)
+                  self.max_seq_length, block_size] + tail[:n]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
@@ -1231,6 +1402,7 @@ class PersistentKernel:
         attention_params: tuple,
         grid_dim: tuple,
         block_dim: tuple,
+        group_id: int = 0,
     ):
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
@@ -1238,8 +1410,8 @@ class PersistentKernel:
         assert v_cache.num_dims == 4  # (num_pages, page_size, kv_heads, head_dim)
         assert k_cache.dim(0) == self.max_num_pages
         assert v_cache.dim(0) == self.max_num_pages
-        assert k_cache.dim(1) == self.page_size
-        assert v_cache.dim(1) == self.page_size
+        block_size = self._resolve_kv_block_size(group_id, cache_dt=k_cache)
+        assert v_cache.dim(1) == block_size
         assert output.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv * head_dim / world_size, num_kv_heads)
         assert lse.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv / world_size, num_kv_heads)
 
@@ -1270,7 +1442,8 @@ class PersistentKernel:
         # params[4]: max_seq_len
         # params[5]: page_size
         # params[6]: num_kv_chunks
-        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, self.page_size, num_kv_chunks]
+        params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed, self.max_seq_length, block_size, num_kv_chunks, group_id,
+                  _page_stride_rows(k_cache, v_cache)]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
@@ -1313,6 +1486,7 @@ class PersistentKernel:
         attention_params: tuple,
         grid_dim: tuple,
         block_dim: tuple,
+        group_id: int = 0,
     ):
         assert lse.num_dims == 3  # (num_tokens, num_kv_chunks * num_qo_per_kv / world_size, num_kv_heads)
         assert output_tmp.num_dims == 3  # (num_tokens, num_chunks, hidden_size / world_size)
@@ -1327,7 +1501,8 @@ class PersistentKernel:
         # params[2]: max_seq_len
         # params[3]: page_size
         # params[4]: num_kv_heads
-        params = [num_qo_heads_per_kv, head_dim, self.max_seq_length, self.page_size, num_kv_heads]
+        block_size = self._resolve_kv_block_size(group_id)
+        params = [num_qo_heads_per_kv, head_dim, self.max_seq_length, block_size, num_kv_heads, group_id]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(lse, (-1, 2, -1), -1, True)
@@ -1356,9 +1531,13 @@ class PersistentKernel:
         mla_params: tuple,
         grid_dim: tuple,
         block_dim: tuple,
+        group_id: int = 0,
     ):
         d_k, d_v, page_size = mla_params
-        params = [d_k, d_v, page_size]
+        page_size = self._resolve_kv_block_size(
+            group_id, explicit_page_size=page_size, cache_dt=paged_cache)
+        params = [d_k, d_v, page_size, group_id,
+                  _page_stride_rows(paged_cache)]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
         tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
@@ -1378,6 +1557,7 @@ class PersistentKernel:
         mla_params: tuple,
         grid_dim: tuple,
         block_dim: tuple,
+        group_id: int = 0,
     ):
         """Gather paged KV into SEPARATE CKV / KPE contiguous buffers.
 
@@ -1386,7 +1566,10 @@ class PersistentKernel:
         This is the layout ``mla_prefill_sm100`` expects.
         """
         d_k, d_v, page_size = mla_params
-        params = [d_k, d_v, page_size]
+        page_size = self._resolve_kv_block_size(
+            group_id, explicit_page_size=page_size, cache_dt=paged_cache)
+        params = [d_k, d_v, page_size, group_id,
+                  _page_stride_rows(paged_cache)]
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(c_latent_new, (-1, 1, -1), -1, True)
         tb_graph.new_input(k_pe_new, (-1, 1, -1), -1, True)
@@ -1407,13 +1590,14 @@ class PersistentKernel:
         grid_dim: tuple,
         block_dim: tuple,
         q_len: int = 1,
+        group_id: int = 0,
     ):
         # Allow q_len passed via mla_params 6-tuple as well as separate arg.
         if len(mla_params) == 6:
             num_heads, d_k, d_v, num_splits, kv_len, q_len = mla_params
         else:
             num_heads, d_k, d_v, num_splits, kv_len = mla_params
-        params = [num_heads, d_k, d_v, num_splits, kv_len, q_len]
+        params = [num_heads, d_k, d_v, num_splits, kv_len, q_len, group_id]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_input, (0, -1, -1), -1, True)
@@ -1469,9 +1653,10 @@ class PersistentKernel:
         mla_params: tuple, # (num_heads, seq_len, d_ckv, d_kpe, d_v)
         grid_dim: tuple,   # (H, num_q_blocks, B)
         block_dim: tuple,  # (256, 1, 1)
+        group_id: int = 0,
     ):
         num_heads, seq_len, d_ckv, d_kpe, d_v = mla_params
-        params = [num_heads, seq_len, d_ckv, d_kpe, d_v]
+        params = [num_heads, seq_len, d_ckv, d_kpe, d_v, group_id]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         # Kernel reads based on task_metadata.{request_id=head, kv_idx=q_block}
@@ -1525,6 +1710,7 @@ class PersistentKernel:
         output_lse: DTensor,       # La: partial LSE buffer
         q_len: int,
         kv_len: int,
+        group_id: int = 0,
     ):
         # Derive internal params (DeepSeek V3: 128 heads, TILE_S=128)
         hpb = 128 // q_len
@@ -1533,7 +1719,7 @@ class PersistentKernel:
         num_head_groups = 128 // hpb
         num_splits = (kv_len + 128 - 1) // 128
 
-        params = [num_head_groups, q_len, kv_len, num_splits]
+        params = [num_head_groups, q_len, kv_len, num_splits, group_id]
         grid_dim = (num_splits, num_head_groups, self.max_num_batched_requests)
         block_dim = (128, 1, 1)
 
@@ -1589,7 +1775,7 @@ class PersistentKernel:
         self,
         q_input, kv_input, output_partial, output_lse,
         q_len, kv_len, num_heads,
-        task_name, has_v_split=False, q_len_real=None,
+        task_name, has_v_split=False, q_len_real=None, group_id=0,
     ):
         """Internal helper for TP=2/4/8 decode dispatch.
           q_len: padded Q_LEN passed to the kernel
@@ -1614,9 +1800,9 @@ class PersistentKernel:
 
         if num_heads == 16:  # TP=8
             params = [num_groups, q_len, kv_len, num_splits,
-                      q_len_real if q_len_real is not None else q_len]
+                      q_len_real if q_len_real is not None else q_len, group_id]
         else:  # TP=2 and TP=4
-            params = [num_groups, q_len, kv_len, num_splits]
+            params = [num_groups, q_len, kv_len, num_splits, group_id]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         tb_graph.new_input(q_input, (-1, -1, -1), -1, True)
@@ -1661,11 +1847,12 @@ class PersistentKernel:
 
     def mla_mtp_decode_tp2_layer(
         self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+        group_id: int = 0,
     ):
         self._mla_mtp_decode_tp_layer(
             q_input, kv_input, output_partial, output_lse,
             q_len, kv_len, num_heads=64,
-            task_name="mla_mtp_decode_tp2_sm100",
+            task_name="mla_mtp_decode_tp2_sm100", group_id=group_id,
         )
 
     def mla_mtp_decode_tp2_reduce_layer(
@@ -1678,13 +1865,14 @@ class PersistentKernel:
 
     def mla_mtp_decode_tp4_layer(
         self, q_input, kv_input, output_partial, output_lse, q_len, kv_len,
+        group_id: int = 0,
     ):
         # TP=4 V-split: 2× tasks (v_half=0,1). Each writes to a disjoint TMEM
         # column range; output_partial is a single buffer covering both.
         self._mla_mtp_decode_tp_layer(
             q_input, kv_input, output_partial, output_lse,
             q_len, kv_len, num_heads=32,
-            task_name="mla_mtp_decode_tp4_sm100", has_v_split=True,
+            task_name="mla_mtp_decode_tp4_sm100", has_v_split=True, group_id=group_id,
         )
 
     def mla_mtp_decode_tp4_reduce_layer(
@@ -1697,14 +1885,14 @@ class PersistentKernel:
 
     def mla_mtp_decode_tp8_layer(
         self, q_input, kv_input, output_partial, output_lse,
-        q_len_real, kv_len,
+        q_len_real, kv_len, group_id: int = 0,
     ):
         # TP=8 pads Q_LEN to even
         q_len = (q_len_real + 1) & ~1
         self._mla_mtp_decode_tp_layer(
             q_input, kv_input, output_partial, output_lse,
             q_len, kv_len, num_heads=16,
-            task_name="mla_mtp_decode_tp8_sm100", q_len_real=q_len_real,
+            task_name="mla_mtp_decode_tp8_sm100", q_len_real=q_len_real, group_id=group_id,
         )
 
     def mla_mtp_decode_tp8_reduce_layer(
@@ -3054,6 +3242,14 @@ class PersistentKernel:
         self.store_i32_release = getattr(mod, "store_i32_release")
         print("Finished megakernel compilation...")
 
+        _paged_kv_keys = []
+        for _g in range(len(self.kv_groups)):
+            _paged_kv_keys += [
+                f"paged_kv_indptr_buffer_{_g}",
+                f"paged_kv_indices_buffer_{_g}",
+                f"paged_kv_last_page_len_buffer_{_g}",
+                f"paged_kv_indices_snapshot_{_g}",
+            ]
         expected_order = [
             "step",
             "tokens",
@@ -3062,11 +3258,7 @@ class PersistentKernel:
             "num_new_tokens",
             "prompt_lengths",
             "qo_indptr_buffer",
-            "paged_kv_indptr_buffer",
-            "paged_kv_indices_buffer",
-            "paged_kv_last_page_len_buffer",
-            "paged_kv_indices_snapshot",
-        ]
+        ] + _paged_kv_keys
         pinned_extra_order=[
             "pinned_req_ready",
             "pinned_req_request_id",
@@ -3094,6 +3286,8 @@ class PersistentKernel:
         if self.mode=="online_pinned":
             for key in pinned_extra_order:
                 meta_tensors_ptr.append(self.meta_tensors[key].data_ptr())
+        if "kv_event_log" in self.meta_tensors:
+            meta_tensors_ptr.append(self.meta_tensors["kv_event_log"].data_ptr())
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
         )
@@ -3117,6 +3311,8 @@ class PersistentKernel:
             model_tensor_names,
             model_tensor_ptrs,
             "",  # Empty JSON path = use __FILE__ based path during initial compile
+            [g.block_size for g in self.kv_groups],
+            [g.window_size for g in self.kv_groups],
         )
 
         self._is_compiled = True
@@ -3188,10 +3384,11 @@ class PersistentKernel:
         meta_tensors.append(self.meta_tensors["num_new_tokens"])
         meta_tensors.append(self.meta_tensors["prompt_lengths"])
         meta_tensors.append(self.meta_tensors["qo_indptr_buffer"])
-        meta_tensors.append(self.meta_tensors["paged_kv_indptr_buffer"])
-        meta_tensors.append(self.meta_tensors["paged_kv_indices_buffer"])
-        meta_tensors.append(self.meta_tensors["paged_kv_last_page_len_buffer"])
-        meta_tensors.append(self.meta_tensors["paged_kv_indices_snapshot"])
+        for _g in range(len(self.kv_groups)):
+            meta_tensors.append(self.meta_tensors[f"paged_kv_indptr_buffer_{_g}"])
+            meta_tensors.append(self.meta_tensors[f"paged_kv_indices_buffer_{_g}"])
+            meta_tensors.append(self.meta_tensors[f"paged_kv_last_page_len_buffer_{_g}"])
+            meta_tensors.append(self.meta_tensors[f"paged_kv_indices_snapshot_{_g}"])
         if self.mode == "online_pinned":
             meta_tensors.append(self.meta_tensors["pinned_req_ready"])
             meta_tensors.append(self.meta_tensors["pinned_req_request_id"])
@@ -3205,6 +3402,8 @@ class PersistentKernel:
             meta_tensors.append(self.meta_tensors["pinned_step"])
             meta_tensors.append(self.meta_tensors["pinned_inbox_tokens"])
             meta_tensors.append(self.meta_tensors["pinned_rid_at_row"])
+        if "kv_event_log" in self.meta_tensors:
+            meta_tensors.append(self.meta_tensors["kv_event_log"])
         meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0
@@ -3232,6 +3431,8 @@ class PersistentKernel:
             model_tensor_names,
             model_tensor_ptrs,
             json_path,  # Pass the JSON path for kernel reuse
+            [g.block_size for g in self.kv_groups],
+            [g.window_size for g in self.kv_groups],
         )
 
         self._is_compiled = True
