@@ -197,8 +197,7 @@ if __name__ == "__main__":
     _streams = [KVStream("attention",
                          layers=tuple(range(model.config.num_hidden_layers)),
                          components=[("k", _kv_entry, torch.bfloat16),
-                                     ("v", _kv_entry, torch.bfloat16)],
-                         preferred_block_size=args.page_size)]
+                                     ("v", _kv_entry, torch.bfloat16)])]
     _draft_layer_id = model.config.num_hidden_layers
     if args.eagle3:
         from mirage.mpk.models.eagle3.builder import (
@@ -211,6 +210,7 @@ if __name__ == "__main__":
     try:
         kv_plan = build_kv_cache(
             _streams,
+            block_size=args.page_size,
             max_num_pages=args.max_num_pages,
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,

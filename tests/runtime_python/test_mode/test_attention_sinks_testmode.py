@@ -73,8 +73,8 @@ def main():
     entry = (NUM_KV_HEADS, HEAD_DIM)
     plan = build_kv_cache(
         [KVStream("attention", layers=(0, 1, 2),
-                  components=[("k", entry, dtype), ("v", entry, dtype)],
-                  preferred_block_size=PAGE_SIZE)],
+                  components=[("k", entry, dtype), ("v", entry, dtype)])],
+        block_size=PAGE_SIZE,
         max_num_pages=MAX_NUM_PAGES,
         max_seq_length=MAX_SEQ_LENGTH,
         max_num_batched_requests=1,

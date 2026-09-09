@@ -50,7 +50,7 @@ class GraphBuilder(abc.ABC):
         self.weights = weights or {}
 
     @staticmethod
-    def kv_streams(config, page_size: int, world_size: int = 1):
+    def kv_streams(config, world_size: int = 1):
         """This model's KV streams. EVERY builder must override this.
 
         Called BEFORE the PersistentKernel exists, because the plan supplies
@@ -59,7 +59,9 @@ class GraphBuilder(abc.ABC):
 
         A stream whose kernel reads the cache flat says `paged=False`, and gets
         storage and a budget but no page table. `[]` means this model has no KV
-        cache AT ALL (different from `paged=False`).
+        cache AT ALL (different from `paged=False`). Says what the KV is, not
+        how big to make it -- the caller passes these to `build_kv_cache`
+        along with `block_size`/`target_page_bytes`.
         """
         raise NotImplementedError(
             "this builder does not declare its KV streams; override "

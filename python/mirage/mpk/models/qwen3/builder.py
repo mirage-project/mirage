@@ -9,12 +9,8 @@ from ....core import bfloat16, int64, float32
 
 from typing import Optional
 
-def qwen3_kv_streams(config, page_size: int, world_size: int = 1):
-    """Qwen3 stores one kind of KV, so it is a single stream over every layer.
-
-    Says what the KV is, not how big to make it -- build_kv_cache takes these
-    plus the budget, and MPK calls this before the PersistentKernel exists.
-    """
+def qwen3_kv_streams(config, world_size: int = 1):
+    """Qwen3 stores one kind of KV, so it is a single stream over every layer."""
     from ...kv_planner import KVStream
 
     entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
@@ -22,8 +18,7 @@ def qwen3_kv_streams(config, page_size: int, world_size: int = 1):
         KVStream("attention",
                  layers=tuple(range(config.num_hidden_layers)),
                  components=[("k", entry_shape, torch.bfloat16),
-                             ("v", entry_shape, torch.bfloat16)],
-                 preferred_block_size=page_size),
+                             ("v", entry_shape, torch.bfloat16)]),
     ]
 
 

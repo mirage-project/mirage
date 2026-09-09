@@ -1,7 +1,4 @@
-"""KV cache planner that supports hybrid KV streams.
-
-KV streams with different sizes and layouts share one cache pool: pages in
-the same physical size are handed out at runtime from a single free list.
+"""KV cache planner: hybrid KV streams share one pool, one physical page size.
 
 Pool shape: ``[num_slots, max_num_pages, target_page_bytes]``.
 
@@ -20,6 +17,7 @@ Usage:
     group_id, slot_id = plan.layer_info(layer_id)
 """
 
+import warnings
 from dataclasses import dataclass, fields, replace
 from functools import reduce
 from math import gcd
@@ -30,17 +28,15 @@ import torch
 
 @dataclass(frozen=True)
 class KVSpec:
-    """One KV stream declared by a model builder.
+    """One KV stream, in the planner's own vocabulary (see ``KVStream`` for
+    the model-builder-facing form this is normally derived from).
 
     per_entry_bytes: bytes of one stored entry.
     layer_ids: layers carrying this stream.
     compress_ratio: raw tokens folded into one stored entry.
     window_size: sliding-window length in raw tokens.
-    block_size_multiple_of: restrictions for block size, in raw tokens,
-        e.g., by the attention kernel's KV tile. None takes default_kv_tile().
-    preferred_block_size: this stream's natural block size in raw tokens.
-        The largest resulting page across specs becomes the shared page size, 
-        and other specs pack to the same size.
+    block_size_multiple_of: restriction on block size, in raw tokens (e.g.
+        the attention kernel's KV tile). None takes default_kv_tile().
     """
     name: str
     per_entry_bytes: int
@@ -48,17 +44,12 @@ class KVSpec:
     compress_ratio: int = 1
     window_size: Optional[int] = None
     block_size_multiple_of: Optional[int] = None
-    preferred_block_size: Optional[int] = None
 
     def __post_init__(self):
         assert self.per_entry_bytes > 0 and self.compress_ratio >= 1
         assert len(self.layer_ids) > 0
         assert len(set(self.layer_ids)) == len(self.layer_ids), \
             f"spec {self.name}: duplicate layer ids"
-        if self.preferred_block_size is not None:
-            assert self.preferred_block_size % self.compress_ratio == 0, (
-                f"spec {self.name}: preferred_block_size must be a multiple "
-                f"of compress_ratio")
 
 
 def _itemsize(dtype) -> int:
@@ -67,16 +58,18 @@ def _itemsize(dtype) -> int:
 
 @dataclass(frozen=True)
 class KVStream:
-    """One KV stream: what a page holds, for which layers.
+    """One KV stream: what a page holds, for which layers. The declaration
+    surface a model builder uses; ``build_kv_cache`` turns it into a
+    ``KVSpec`` (paged) or ``FlatStream`` (unpaged).
 
     ``components`` is the per-token payload -- for GQA the K and V halves,
     each ``(entry_name, entry_shape, dtype)``. ``per_entry_bytes`` derives
     from it.
 
     ``paged=False`` means the reader addresses the cache as one flat
-    ``[capacity, width]`` array. Such a stream gets no group, no page table
-    and no say in the shared page size; the plan still owns its storage and
-    hands it out through ``attach()``. See ``FlatStream``.
+    ``[capacity, width]`` array: no group, no page table, no say in the
+    shared page size. The plan still owns and budgets its storage. See
+    ``FlatStream``.
     """
     name: str
     layers: Tuple[int, ...]
@@ -84,7 +77,6 @@ class KVStream:
     window: int = 0
     compress_ratio: int = 1
     block_size_multiple_of: Optional[int] = None
-    preferred_block_size: Optional[int] = None
     paged: bool = True
 
     @property
@@ -99,15 +91,13 @@ class KVStream:
             f"stream {self.name}: duplicate component names {names}")
 
     def _flat(self, capacity: int) -> "FlatStream":
-        """The unpaged form. Every paging knob must be at its default -- they
-        all describe a page, and accepting one would silently ignore it."""
+        """The unpaged form. Every paging knob must be at its default, since
+        accepting one on an unpaged stream would silently ignore it."""
         self._check_components()
         for field_name, value in (("window", self.window),
                                   ("compress_ratio", self.compress_ratio),
                                   ("block_size_multiple_of",
-                                   self.block_size_multiple_of),
-                                  ("preferred_block_size",
-                                   self.preferred_block_size)):
+                                   self.block_size_multiple_of)):
             default = KVStream.__dataclass_fields__[field_name].default
             if value != default:
                 raise ValueError(
@@ -126,8 +116,7 @@ class KVStream:
                       layer_ids=tuple(self.layers),
                       compress_ratio=self.compress_ratio,
                       window_size=self.window or None,
-                      block_size_multiple_of=self.block_size_multiple_of,
-                      preferred_block_size=self.preferred_block_size)
+                      block_size_multiple_of=self.block_size_multiple_of)
 
 
 def _hashable(v):
@@ -141,32 +130,25 @@ def _hashable(v):
 def _merge_identical_streams(streams):
     """Fold streams that would lay a page out identically into one stream.
 
-    A group IS a page table: a block size, a window, and one page geometry.
-    Two streams that agree on all of that want the same page table, and
-    keeping them apart only costs -- the pool carries ONE slot count for every
-    group, so a stream with very few layers drags that count down for
-    everyone. DeepSeek-V3 declared as 61 attention layers plus 1 MTP layer is
-    the case: gcd(61, 1) is 1, so _group_size returns 1 and the plan becomes
-    62 single-slot groups instead of one group of 62.
+    A group IS a page table, and the pool carries one slot count per group,
+    so a stream with very few layers drags that count down for everyone it
+    stays apart from (DeepSeek-V3's 61 attention + 1 MTP layer: gcd(61, 1)=1,
+    so unmerged this is 62 single-slot groups instead of one group of 62). A
+    model declares by MEANING (attention vs. MTP); the planner groups by
+    LAYOUT.
 
-    So a model declares by MEANING (attention and MTP are different modules)
-    and the planner groups by LAYOUT.
-
-    The key is every KVStream field but ``name`` and ``layers``, read off the
-    dataclass so that a field added later is included by default. That is the
-    safe direction: a key that misses a field fuses streams that are not
-    actually alike, and no assert downstream would catch it.
-
-    ``components`` must be in the key, which is why this runs here on streams
-    rather than in ``plan_kv_groups``: KVSpec keeps only ``per_entry_bytes``,
+    Key = every KVStream field but ``name``/``layers``, read off the
+    dataclass so a field added later is included by default -- a key that
+    misses a field would silently fuse streams that are not alike.
+    ``components`` must be in the key: KVSpec only keeps ``per_entry_bytes``,
     and two streams can agree on that while laying the page out differently
-    (one 8-head K entry against a 4-head K/V pair are both 2048 bytes). The
-    component layout is what ``attach`` reads back per layer, so fusing those
-    would hand a layer a view of the wrong shape.
+    (e.g. an 8-head K entry vs. a 4-head K/V pair, both 2048 B) -- ``attach``
+    reads the component layout back per layer, so fusing those would hand a
+    layer the wrong-shaped view. This is why the merge runs here, on streams,
+    rather than inside ``plan_kv_groups``.
 
-    Layers of a merged stream are sorted, so the layer-to-slot mapping does
-    not depend on declaration order. A stream that is not merged is returned
-    untouched.
+    Layers of a merged stream are sorted, so slot assignment does not depend
+    on declaration order. A stream that is not merged is returned untouched.
     """
     key_fields = [f.name for f in fields(KVStream)
                   if f.name not in ("name", "layers")]
@@ -197,8 +179,8 @@ class FlatStream:
     """A stream whose reader wants one contiguous ``[capacity, width]`` array.
 
     Outside the pool by necessity: a constant-stride reader cannot be handed
-    its storage a page at a time from a shared free list. NOT outside the plan,
-    which allocates it, budgets it, and is still the only way to reach it.
+    its storage a page at a time from a shared free list. Still inside the
+    plan, which allocates it, budgets it, and is the only way to reach it.
     ``capacity`` is in tokens -- a flat cache is indexed by absolute position,
     so it holds the whole run.
     """
@@ -230,19 +212,19 @@ def build_kv_cache(streams, *,
     allocate it -- the whole cache, in one call.
 
     Give exactly one of ``kv_budget`` (bytes, the better knob) or
-    ``max_num_pages``. ``max_seq_length`` is required with a budget, since
-    that is what the pool is being sized to hold; with an explicit page count
-    it is optional, and supplying it adds the floor check that the pool can
-    hold one request of that length.
+    ``max_num_pages``. ``max_seq_length`` is required with a budget (that is
+    what the pool is sized to hold); with an explicit page count it is
+    optional, and adds the floor check that the pool holds one request of
+    that length.
 
-    The returned object owns the pool. ``attach(mpk, layer)`` is the only way
+    The returned plan owns the pool; ``attach(mpk, layer)`` is the only way
     to a cache tensor, so no caller can hold one that skipped the
     pool-identity check.
 
     A ``paged=False`` stream is split off here and never reaches
-    ``plan_kv_groups``: it takes no part in choosing the shared page size, in
-    ``_group_size``, or in the page tables. The plan still owns and budgets
-    its storage. With no paged stream at all the plan has zero groups.
+    ``plan_kv_groups``: no say in the shared page size, ``_group_size``, or
+    the page tables, but the plan still owns and budgets its storage. With no
+    paged stream at all the plan has zero groups.
     """
     streams = list(streams)
     flat_streams = [st for st in streams if not st.paged]
@@ -392,9 +374,6 @@ class KVCachePlan:
     target_page_bytes: int
     num_slots: int
     groups: Tuple["KVCachePlan.Group", ...]
-    # Stream whose preferred block size set the shared page; every other
-    # stream derives from it.
-    anchor_spec: Optional[str] = None
     # Set once by resolve_pool_size. The page tables and the pool are built
     # in different places and both read from here.
     max_num_pages: Optional[int] = None
@@ -481,11 +460,12 @@ class KVCachePlan:
                            max_num_batched_requests: int = 1,
                            dtype=torch.int32, device: str = "cuda"):
         """Page-table buffers (indptr / indices / last_page_len) for every
-        group. Merge into meta_tensors dict before constructing PersistentKernel.
+        group. Merge into the meta_tensors dict before constructing
+        PersistentKernel.
 
         The indices buffer is indexed by absolute page number within a
-        request. A recycled slot keeps its place holding -1 and the span no
-        longer follows the live page count, so ``max_seq_length`` is required.
+        request; a recycled slot keeps its place holding -1, so its span
+        follows ``max_seq_length`` rather than the live page count.
         """
         max_num_pages = self._pool_pages(max_num_pages)
         out = {}
@@ -527,13 +507,13 @@ class KVCachePlan:
             f"{format_bytes(st.nbytes)}  (no group, no page table -- the "
             f"kernel reads it flat)"
             for st in self.flat_streams]
-        if not self.anchor_spec:
+        if not self.groups:
             return "\n".join(
                 ["KV cache: no paged stream, so ZERO KV groups"] + flat_lines)
         lines = [
             f"KV page: {format_bytes(self.target_page_bytes)} x "
             f"{self.num_slots} slot(s) = {format_bytes(self.page_id_bytes)} "
-            f"per page id  (anchor '{self.anchor_spec}')"
+            f"per page id"
         ]
         warnings = []
         for g in self.groups:
@@ -729,10 +709,9 @@ class KVCachePlan:
                        device: str = "cuda"):
         """The entire KV cache as ONE allocation, plus typed views.
 
-        Shape: ``[num_slots, max_num_pages, target_page_bytes]``. A page id 
-        denotes page ``p`` of every slot, and held by one group at a time.
-
-        A stream may carve its page into several components (K and V), laid
+        Shape: ``[num_slots, max_num_pages, target_page_bytes]``. A page id
+        denotes page ``p`` of every slot, held by one group at a time. A
+        stream may carve its page into several components (K and V), laid
         out component-major inside the page.
 
         entry_layouts: ``{spec_name: [(component_name, entry_shape, dtype),
@@ -851,13 +830,9 @@ def _resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
                        max_num_batched_tokens: int = 1,
                        device: int = 0, verbose: bool = True) -> int:
     """The page count to build the pool with, from a byte budget or an
-    explicit count.
-
-    Exactly one of ``kv_budget`` / ``max_num_pages`` may be given. A byte
-    budget is the better knob and max_num_pages should be deprecated in the
-    future. Without ``max_seq_length`` there is no length to check the pool
-    against, so the floor check is skipped -- build_kv_cache requires one
-    alongside a budget for exactly that reason.
+    explicit count. Exactly one of ``kv_budget`` / ``max_num_pages`` may be
+    given. Without ``max_seq_length`` the floor check is skipped --
+    ``build_kv_cache`` requires one alongside a budget for that reason.
     """
     if (kv_budget is None) == (max_num_pages is None):
         raise ValueError("give exactly one of kv_budget / max_num_pages")
@@ -909,7 +884,7 @@ def _resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
 
 
 def _plan_with_no_paged_streams(target_page_bytes: Optional[int] = None,
-                                default_block_size: int = 64,
+                                block_size: int = 64,
                                 target_cc: Optional[int] = None
                                 ) -> KVCachePlan:
     """The plan for a model with no paged KV: zero groups, zero bytes.
@@ -921,59 +896,69 @@ def _plan_with_no_paged_streams(target_page_bytes: Optional[int] = None,
         raise ValueError(
             "target_page_bytes was given but no stream is paged, so there is "
             "no page to size")
-    return KVCachePlan(target_page_bytes=0, num_slots=0, groups=(),
-                       anchor_spec=None)
+    return KVCachePlan(target_page_bytes=0, num_slots=0, groups=())
 
 
 def plan_kv_groups(
     specs,
     target_page_bytes: Optional[int] = None,
-    default_block_size: int = 64,
+    block_size: Optional[int] = None,
     target_cc: Optional[int] = None,
 ) -> KVCachePlan:
     """Turn KVSpec declarations into a KVCachePlan.
 
-    1. Pick the shared page size: by default the largest natural page across
-       specs (the ANCHOR — preferred_block_size worth of entries).
-    2. Derive every other stream's block size from that page, either by an
-       exact integer ratio or by packing and padding. A stream that cannot fit 
-       one tile's worth of entries raises KVUnificationError.
-    3. Chunk each stream's layers into groups of ``_group_size`` layers so
-       all groups share one slot layout with minimal waste.
+    Give exactly one of ``target_page_bytes`` (bytes, exact) or ``block_size``
+    (tokens); neither given defaults to ``block_size=64``. They drive
+    different fitting rules for every spec that is not the one setting the
+    page size:
+
+    - ``target_page_bytes``: greedy packing (``_fit_block_size``) -- every
+      spec gets as many entries as fit, floored to its own tile. Use this
+      when the exact byte budget is already known (e.g. it must unify
+      several ``compress_ratio``s that no single token count can at once).
+    - ``block_size``: each spec computes its own tile-legal native size in
+      isolation (``_native_fit``); the largest becomes ``target_page_bytes``.
+      Every other spec then scales up by an exact integer ratio (zero
+      padding) or, failing that, keeps its native size and pads the rest,
+      never repacked (``_fit_to_anchor``) -- matching vLLM's
+      ``unify_kv_cache_spec_page_size``. Coarser than the greedy path when a
+      spec's ratio to the anchor isn't clean; see
+      [[mpk-kv2-remove-preferred-block-size]] for why that trade was chosen.
+
+    A spec that cannot fit even one tile's worth of entries raises
+    KVUnificationError; one that fits but pays padding warns instead of
+    failing silently (``_warn_if_page_wastes_bytes``).
+
+    Layers are then chunked into groups of ``_group_size`` layers so all
+    groups share one slot layout with minimal waste.
     """
     specs = list(specs)
     assert specs, "need at least one KVSpec"
     names = [s.name for s in specs]
     assert len(set(names)) == len(names), f"duplicate spec names: {names}"
+    if target_page_bytes is not None and block_size is not None:
+        raise ValueError("give exactly one of block_size or target_page_bytes")
 
     tiles = {s.name: (s.block_size_multiple_of if s.block_size_multiple_of
                       else default_kv_tile(target_cc)) for s in specs}
 
-    anchor = max(specs, key=lambda s: _natural_page_bytes(s,
-                                                          default_block_size))
     if target_page_bytes is None:
-        target_page_bytes = _natural_page_bytes(anchor, default_block_size)
-        # The anchor's request is honoured exactly, so an illegal one is
-        # rejected rather than floored.
-        anchor_block = anchor.preferred_block_size or default_block_size
-        anchor_tile = tiles[anchor.name]
-        if anchor_block % anchor_tile:
-            raise KVUnificationError(
-                f"page size {anchor_block} is not a multiple of the "
-                f"{anchor_tile}-token KV tile of anchor stream "
-                f"'{anchor.name}'; use "
-                f"{anchor_block // anchor_tile * anchor_tile} or "
-                f"{(anchor_block // anchor_tile + 1) * anchor_tile}")
-
-    per_spec = {s.name: _fit_block_size(s, target_page_bytes, tiles[s.name],
-                                        default_block_size)
-                for s in specs}
+        native = {s.name: _native_fit(s, block_size or 64, tiles[s.name])
+                 for s in specs}
+        target_page_bytes = max(native_bytes for _, native_bytes in native.values())
+        per_spec = {s.name: _fit_to_anchor(s, native[s.name], target_page_bytes)
+                    for s in specs}
+    else:
+        per_spec = {s.name: _fit_block_size(s, target_page_bytes, tiles[s.name])
+                    for s in specs}
     declared = {s.name: s.block_size_multiple_of is not None for s in specs}
     group_size = _group_size([len(s.layer_ids) for s in specs])
+    _warn_if_group_size_starved(specs, group_size)
+    _warn_if_page_wastes_bytes(specs, target_page_bytes, per_spec)
 
     groups = []
     for s in specs:
-        block_size, entries, padding = per_spec[s.name]
+        spec_block_size, entries, padding = per_spec[s.name]
         layers = list(s.layer_ids)
         for start in range(0, len(layers), group_size):
             chunk = layers[start:start + group_size]
@@ -982,7 +967,7 @@ def plan_kv_groups(
                 group_id=len(groups),
                 spec_name=s.name,
                 layer_ids=tuple(chunk),
-                block_size=block_size,
+                block_size=spec_block_size,
                 entries_per_page=entries,
                 padding_bytes_per_page=padding,
                 window_size=s.window_size or 0,
@@ -994,27 +979,56 @@ def plan_kv_groups(
         target_page_bytes=target_page_bytes,
         num_slots=group_size,
         groups=tuple(groups),
-        anchor_spec=anchor.name,
     )
 
 
-def _natural_page_bytes(spec: KVSpec, default_block_size: int) -> int:
-    """Bytes a stream needs for a page, at its preferred block size."""
-    block = spec.preferred_block_size or default_block_size
-    return (block // spec.compress_ratio) * spec.per_entry_bytes
+def _native_fit(spec: KVSpec, block_size: int, tile: int) -> Tuple[int, int]:
+    """This spec's own tile-legal (entries, bytes) at ``block_size`` tokens,
+    with no cross-spec reconciliation yet: every spec is measured the same
+    way before any page-sharing decision is made. Raises KVUnificationError
+    if it can't fit one tile's worth of entries even in isolation."""
+    entries_per_tile = max(tile // spec.compress_ratio, 1)
+    entries = block_size // spec.compress_ratio
+    entries -= entries % entries_per_tile
+    if entries <= 0:
+        want = entries_per_tile * spec.per_entry_bytes
+        raise KVUnificationError(
+            f"spec '{spec.name}': {block_size} tokens give "
+            f"{block_size // spec.compress_ratio} entries, short of the "
+            f"{entries_per_tile} its {tile}-token tile needs "
+            f"(>= {want} B/page at this compress_ratio)")
+    return entries, entries * spec.per_entry_bytes
 
 
-def _fit_block_size(spec: KVSpec, target_page_bytes: int, tile: int,
-                    default_block_size: int):
+def _fit_to_anchor(spec: KVSpec, native: Tuple[int, int],
+                   target_page_bytes: int):
+    """Reconcile this spec's ``_native_fit`` result against the shared page:
+    (block_size_tokens, entries, padding_bytes).
+
+    Scales up by an exact integer ratio when one exists (zero padding);
+    otherwise leaves the spec at its native size and pads the rest -- NEVER
+    repacked here, unlike ``_fit_block_size``. This is what lets a
+    Mamba-style spec (page size fixed by state shape) share the pool: it
+    always takes the "pad" branch.
+    """
+    native_entries, native_bytes = native
+    if target_page_bytes % native_bytes == 0:
+        entries = native_entries * (target_page_bytes // native_bytes)
+        padding = 0
+    else:
+        entries = native_entries
+        padding = target_page_bytes - native_bytes
+    block_size = entries * spec.compress_ratio
+    return block_size, entries, padding
+
+
+def _fit_block_size(spec: KVSpec, target_page_bytes: int, tile: int):
     """Page capacity for a stream as (block_size_tokens, entries, padding_bytes).
 
-    Fit what the page holds, floored to a multiple of the tile and the leftover 
-    is padding. Safe because MPK kernels address pages by stride.
-
-    TODO: Co-optimize with the put/get granularity to balance the padding overhead
-    and scheduler cost.
-    TODO: A stream whose page size does not scale with block_size (Mamba-style)
-    will need pads without repacking.
+    Fits what the page holds, floored to a tile multiple; the leftover is
+    padding. Always repacks (unlike ``_fit_to_anchor``) -- used only for the
+    ``target_page_bytes`` path, where the caller already picked an exact
+    byte budget and wants it used well.
     """
     # Entries must land on a tile boundary once converted back to tokens.
     entries_per_tile = max(tile // spec.compress_ratio, 1)
@@ -1050,6 +1064,73 @@ def _group_size(layer_counts):
     if g == lo or (g > 1 and g >= lo // 2):
         return g
     return lo
+
+
+def _warn_if_group_size_starved(specs, group_size: int) -> None:
+    """Flag a spec that fragments because a much smaller one set group_size.
+
+    Mirrors ``_group_size``'s branches to tell its two good outcomes (pad up
+    to hi; split on a real gcd > 1) from its one bad one, with one deliberate
+    difference: unlike ``_group_size``, this does NOT treat ``g == lo`` as
+    clean, since when lo is small (e.g. 1) that holds trivially for any spec
+    sizes -- gcd with 1 is always 1. That case is exactly what's worth
+    flagging: a 1-layer speculative-decode draft next to a 48-layer target
+    with a different page layout (so ``_merge_identical_streams`` can't fold
+    them) forces group_size=1, fragmenting the target into 48 single-slot
+    groups with zero padding, which a padding-only check would call clean.
+    """
+    counts = [len(s.layer_ids) for s in specs]
+    lo, hi = min(counts), max(counts)
+    if hi < lo * 1.5 or hi == lo:
+        return  # padded up to hi, or already uniform -- no fragmentation
+    g = reduce(gcd, counts)
+    if g > 1 and (g == lo or g >= lo // 2):
+        return  # a real (> 1) usable gcd: every spec divides it, zero waste
+
+    setters = [s.name for s in specs if len(s.layer_ids) == group_size]
+    setter = repr(setters[0]) if setters else "a smaller stream"
+    for s in specs:
+        count = len(s.layer_ids)
+        if count <= group_size:
+            continue
+        chunks = -(-count // group_size)
+        padding = chunks * group_size - count
+        warnings.warn(
+            f"KV plan: stream {s.name!r} ({count} layers) shares no clean "
+            f"multiple with the {group_size}-layer group size that "
+            f"{setter} set, so it fragments into {chunks} group(s)"
+            + (f" ({padding} padded layer(s) on the last one)"
+               if padding else " with no per-page padding, but "
+               f"{chunks}x the group-table and scheduler overhead a single "
+               f"group would cost") +
+            ". A small extra stream (e.g. a speculative-decode draft) "
+            "forces this on an otherwise-uniform target when its page "
+            "layout doesn't match closely enough to merge via "
+            "_merge_identical_streams.", stacklevel=3)
+
+
+def _warn_if_page_wastes_bytes(specs, target_page_bytes: int,
+                               per_spec: dict) -> None:
+    """Flag a spec whose entries do not tile the shared page exactly.
+
+    A non-exact spec is floored to a tile multiple and the remainder reported
+    as ``padding_bytes_per_page``, charged on EVERY page its group ever
+    holds -- so even a "small" per-page percentage compounds across the
+    pool. Warn unconditionally (no threshold) and let the caller judge, same
+    philosophy as ``_warn_if_group_size_starved``.
+    """
+    for s in specs:
+        _, entries, padding = per_spec[s.name]
+        if padding <= 0:
+            continue
+        pct = 100 * padding / target_page_bytes
+        warnings.warn(
+            f"KV plan: stream {s.name!r} wastes {padding} B ({pct:.1f}%) of "
+            f"every {target_page_bytes} B page -- its {entries} entries of "
+            f"{s.per_entry_bytes} B do not tile the page exactly. Pick a "
+            f"block_size/target_page_bytes divisible by this spec's entry "
+            f"size (or its own block_size_multiple_of tile) if the waste "
+            f"matters.", stacklevel=3)
 
 
 # ── debug ─────────────────────────────────────────────────────────────────

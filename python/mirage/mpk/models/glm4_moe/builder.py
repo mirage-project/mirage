@@ -63,7 +63,7 @@ VOCAB_SIZE = 151552
 EOS_TOKEN_ID = 151329
 
 
-def kv_streams(config, page_size: int, world_size: int = 1):
+def kv_streams(config, world_size: int = 1):
     """GLM-4.6 is plain causal attention with one kind of KV, so it is a
     single stream over every layer.
     """
@@ -74,8 +74,7 @@ def kv_streams(config, page_size: int, world_size: int = 1):
         KVStream("attention",
                  layers=tuple(range(config.num_hidden_layers)),
                  components=[("k", entry_shape, torch.bfloat16),
-                             ("v", entry_shape, torch.bfloat16)],
-                 preferred_block_size=page_size),
+                             ("v", entry_shape, torch.bfloat16)]),
     ]
 
 

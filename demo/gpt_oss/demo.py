@@ -81,7 +81,8 @@ if __name__ == "__main__":
         config = AutoConfig.from_pretrained(args.model)
         try:
             kv_plan = build_kv_cache(
-                kv_streams(config, args.page_size),
+                kv_streams(config),
+                block_size=args.page_size,
                 kv_budget=args.kv_budget,
                 max_num_pages=args.max_num_pages, max_seq_length=seq_len,
                 max_num_batched_requests=args.max_num_batched_requests,

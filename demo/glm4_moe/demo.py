@@ -207,8 +207,8 @@ def main():
     from transformers import AutoConfig
     try:
         kv_plan = build_kv_cache(
-            kv_streams(AutoConfig.from_pretrained(args.model_path or args.model),
-                       args.page_size),
+            kv_streams(AutoConfig.from_pretrained(args.model_path or args.model)),
+            block_size=args.page_size,
             max_num_pages=args.max_num_pages,
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,

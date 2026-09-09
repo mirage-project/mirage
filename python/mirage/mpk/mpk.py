@@ -309,12 +309,15 @@ class MPK:
                 f"its KV streams. Override kv_streams(); a model whose kernels "
                 f"read the cache flat declares KVStream(..., paged=False).")
         config = builder_cls.load_config(args.model_name, args.model_path)
-        # page_size is the anchor stream's PREFERRED block size. Falsy means
-        # "no preference"; MPKMetadata.page_size defaults to 0.
-        streams = streams_fn(config, args.page_size or None, self.world_size)
+        streams = streams_fn(config, self.world_size)
         if streams is None:
             raise NotImplementedError(
                 f"{builder_cls.__name__}.kv_streams() returned None.")
+        # page_size is the plan-wide page size every stream is fit against.
+        # Falsy means "no preference"; MPKMetadata.page_size defaults to 0,
+        # in which case build_kv_cache's own default (64) applies.
+        block_size_kwargs = (
+            {"block_size": args.page_size} if args.page_size else {})
         return build_kv_cache(
             streams,
             kv_budget=args.kv_budget,
@@ -323,7 +326,8 @@ class MPK:
             max_seq_length=self.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=self.max_num_batched_tokens,
-            verbose=False)
+            verbose=False,
+            **block_size_kwargs)
 
     def init_mpi(self):
         try:

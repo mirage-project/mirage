@@ -41,9 +41,8 @@ class RunnerConfig:
     None to use it."""
 
     page_size: int = 4096
-    """Tokens per page for the anchor stream; other streams derive their block
-    size from the page it sets. Independent of the two knobs above. 0 leaves
-    the choice to the planner."""
+    """Tokens per page, shared by every stream in the plan. Independent of the
+    two knobs above. 0 leaves the choice to the planner's own default."""
 
     pinned_ring_capacity: int = 8
     """Power-of-2 capacity for the CPU↔GPU pinned ring buffers."""

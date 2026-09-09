@@ -12,8 +12,7 @@ from ...persistent_kernel import PersistentKernel
 from ....core import bfloat16, int64
 
 
-def draft_kv_stream(draft_config, layer_id: int, page_size: int,
-                    world_size: int = 1):
+def draft_kv_stream(draft_config, layer_id: int, world_size: int = 1):
     """The Eagle3 draft's KV, declared as a stream at its own layer id.
 
     The draft is a separate model with its own decoder layer, so it is its own
@@ -24,8 +23,8 @@ def draft_kv_stream(draft_config, layer_id: int, page_size: int,
     A draft that does NOT match keeps a page table of its own. Still correct --
     every group's page count and last_page_len come from the same step and
     num_new_tokens -- but _group_size must then serve a 48-layer stream and a
-    1-layer one with one slot count, and settles on 1: a group per layer.
-    Callers should check for that.
+    1-layer one with one slot count, and settles on 1: a group per layer
+    (`_warn_if_group_size_starved` flags this at plan time).
 
     layer_id must not collide with a target layer; the target's
     num_hidden_layers is the natural choice, as with DeepSeek-V3's MTP.
@@ -37,8 +36,7 @@ def draft_kv_stream(draft_config, layer_id: int, page_size: int,
     return KVStream("eagle3_draft",
                     layers=(layer_id,),
                     components=[("k", entry, torch.bfloat16),
-                                ("v", entry, torch.bfloat16)],
-                    preferred_block_size=page_size)
+                                ("v", entry, torch.bfloat16)])
 
 
 def _resolve_draft_path(model_path_or_repo: str) -> str:

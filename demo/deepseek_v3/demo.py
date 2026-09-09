@@ -291,8 +291,9 @@ if __name__ == "__main__":
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda"
         )
         kv_plan = build_kv_cache(
-            kv_streams(config, args.page_size, world_size,
+            kv_streams(config, world_size,
                        num_mtp_layers=1 if args.mtp > 0 else 0),
+            block_size=args.page_size,
             kv_budget=args.kv_budget,
             max_num_pages=None if args.kv_budget else args.max_num_pages,
             max_seq_length=args.max_seq_length,

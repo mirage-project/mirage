@@ -312,11 +312,8 @@ class Llama3PreTrainedModel(PreTrainedModel):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
 
-def llama3_kv_streams(config, world_size: int, page_size: int):
-    """Llama-3 stores one kind of KV, so it is a single stream over every
-    layer. Says what the KV is, not how big to make it -- build_kv_cache
-    takes these plus the budget.
-    """
+def llama3_kv_streams(config, world_size: int):
+    """Llama-3 stores one kind of KV, so it is one stream over every layer."""
     from mirage.mpk.kv_planner import KVStream
 
     entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
@@ -324,8 +321,7 @@ def llama3_kv_streams(config, world_size: int, page_size: int):
         KVStream("attention",
                  layers=tuple(range(config.num_hidden_layers)),
                  components=[("k", entry_shape, torch.bfloat16),
-                             ("v", entry_shape, torch.bfloat16)],
-                 preferred_block_size=page_size),
+                             ("v", entry_shape, torch.bfloat16)]),
     ]
 
 
@@ -344,7 +340,8 @@ class Llama3Model(Llama3PreTrainedModel):
         from mirage.mpk.kv_planner import build_kv_cache
 
         kv_plan = kv_plan or build_kv_cache(
-            llama3_kv_streams(config, world_size, page_size),
+            llama3_kv_streams(config, world_size),
+            block_size=page_size,
             kv_budget=kv_budget,
             max_num_pages=None if kv_budget else max_num_pages,
             max_seq_length=max_seq_length,

@@ -66,8 +66,9 @@ def main():
         [KVStream(f"w{w}", layers=(i,),
                   components=[("k", entry, torch.bfloat16),
                               ("v", entry, torch.bfloat16)],
-                  window=w, preferred_block_size=PAGE_SIZE)
+                  window=w)
          for i, w in enumerate(WINDOWS)],
+        block_size=PAGE_SIZE,
         max_num_pages=4 * len(WINDOWS),
         max_seq_length=MAX_SEQ_LENGTH,
         max_num_batched_requests=1,

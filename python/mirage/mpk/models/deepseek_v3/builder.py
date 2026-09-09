@@ -52,7 +52,7 @@ RMS_NORM_EPS = 1e-6
 _MOE_FP8_MMA_M = 128
 
 
-def kv_streams(config, page_size: int, world_size: int = 1,
+def kv_streams(config, world_size: int = 1,
                num_mtp_layers: Optional[int] = None):
     """DeepSeek-V3 keeps ONE latent entry per token per layer.
 
@@ -68,16 +68,14 @@ def kv_streams(config, page_size: int, world_size: int = 1,
     streams = [
         KVStream("mla",
                  layers=tuple(range(num_layers)),
-                 components=components,
-                 preferred_block_size=page_size),
+                 components=components),
     ]
     if num_mtp_layers:
         streams.append(
             KVStream("mtp",
                      layers=tuple(range(num_layers,
                                         num_layers + num_mtp_layers)),
-                     components=components,
-                     preferred_block_size=page_size))
+                     components=components))
     return streams
 
 
