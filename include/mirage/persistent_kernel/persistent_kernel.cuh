@@ -688,8 +688,13 @@ __device__ __forceinline__ bool
         int kv_indptr_g = config.paged_kv_indptr_buffer[g][i];
         int num_pg = config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
         for (int j = 0; j < num_pg; j++) {
-          config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] =
-              config.paged_kv_indices_buffer[g][kv_indptr_g + j];
+          int page_id = config.paged_kv_indices_buffer[g][kv_indptr_g + j];
+          // -1 marks a slot recycled mid-request; the id is already back
+          // in the queue.
+          if (page_id < 0) {
+            continue;
+          }
+          config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
           page_queue_tail++;
         }
       }
