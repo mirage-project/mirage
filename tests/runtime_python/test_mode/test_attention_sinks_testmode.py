@@ -11,12 +11,6 @@ denominator. Three cases as three layers of one task graph:
           differ from `nosink`.
 
 Sinks differ per head, so a wrong head index fails.
-
-The three cases are three LAYERS of one KV stream, so they share a page table
-and take three slots of the same page -- the shape eagle3's draft and
-DeepSeek-V3's MTP layer have. That makes this the place where slot isolation
-for paged_attention_layer is checked: each case's K must land in its own slot
-and nowhere else.
 """
 
 import os
@@ -68,8 +62,7 @@ def main():
     device = "cuda"
     dtype = torch.bfloat16
 
-    # One stream over three layers: same geometry, so one group with three
-    # slots on every page.
+    # One stream over three layers.
     entry = (NUM_KV_HEADS, HEAD_DIM)
     plan = build_kv_cache(
         [KVStream("attention", layers=(0, 1, 2),

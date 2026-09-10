@@ -77,7 +77,6 @@ if __name__ == "__main__":
         tokens = torch.zeros(n_req, seq_len, dtype=torch.long, device="cuda")
         tokens[:, :prompt_len] = input_ids.to("cuda")
         mbt = args.max_num_batched_tokens
-        # KV 2.0: the plan is the source of truth for the cache layout
         config = AutoConfig.from_pretrained(args.model)
         try:
             kv_plan = build_kv_cache(

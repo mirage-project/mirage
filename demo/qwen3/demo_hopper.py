@@ -256,8 +256,6 @@ if __name__ == "__main__":
                 "num_new_tokens": num_new_tokens,
                 "prompt_lengths": prompt_lengths,
                 "qo_indptr_buffer": qo_indptr_buffer,
-                # Page tables come from the plan, so the block size, the cache
-                # shape and these buffers cannot drift apart.
                 **kv_plan.build_meta_tensors(
                     max_seq_length=args.max_seq_length,
                     max_num_batched_requests=args.max_num_batched_requests),

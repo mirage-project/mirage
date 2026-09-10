@@ -31,12 +31,11 @@ import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
+from ...kv_planner import KVKind, KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64
 
-# Streams declare component dtypes as TORCH dtypes; `bfloat16` imported above
-# is mirage's own, for MPK tensors.
 bfloat16_t = torch.bfloat16
 
 # ---- Inkling architecture constants (config.json text_config) --------------
@@ -72,8 +71,7 @@ EOS_TOKEN_ID = 200006
 
 
 def _text_config(config):
-    """Inkling's architecture lives under text_config; a flat config or a
-    plain dict is accepted too, as in build_from_model."""
+    """Inkling's architecture lives under text_config."""
     inner = getattr(config, "text_config", None)
     if inner is None and isinstance(config, dict):
         inner = config.get("text_config")
@@ -86,15 +84,18 @@ def _cfg_get(config, name, default):
     return getattr(config, name, default)
 
 
-def inkling_kv_streams(config, page_size: int, world_size: int = 1):
+def is_local_layer(layer_idx: int, local_layer_ids=None) -> bool:
+    """Local (windowed, 16 KV heads) vs global (full, 8 KV heads)."""
+    if local_layer_ids is not None:
+        return layer_idx in set(local_layer_ids)
+    return (layer_idx + 1) % 6 != 0
+
+
+def inkling_kv_streams(config, world_size: int = 1):
     """Inkling's two attention kinds, as two unpaged KV streams.
 
-    inkling_attention reads context as one flat [max_ctx, kv_width] array
-    (`ctx_k + j * KV_STRIDE`) and the store writes absolute rows, so neither
-    wants a page table.
-    """
-    from ...kv_planner import KVStream
-
+    inkling_attention currently reads context as one flat [max_ctx, kv_width]
+    array (`ctx_k + j * KV_STRIDE`) and the store writes absolute rows."""
     if world_size != 1:
         raise NotImplementedError(
             "Inkling v1 supports world_size == 1 only, so its KV is not "
@@ -103,18 +104,16 @@ def inkling_kv_streams(config, page_size: int, world_size: int = 1):
     num_layers = _cfg_get(tc, "num_hidden_layers", NUM_LAYERS)
     head_dim = _cfg_get(tc, "head_dim", HEAD_DIM)
     local_layer_ids = _cfg_get(tc, "local_layer_ids", None)
-    if local_layer_ids is not None:
-        local_layer_ids = set(local_layer_ids)
-        is_local = lambda i: i in local_layer_ids          # noqa: E731
-    else:
-        is_local = lambda i: (i + 1) % 6 != 0              # noqa: E731
+
+    def is_local(i):
+        return is_local_layer(i, local_layer_ids)
 
     def stream(name, nkv, layers):
         return KVStream(
             name, layers=layers,
             components=[("k", (nkv, head_dim), bfloat16_t),
                         ("v", (nkv, head_dim), bfloat16_t)],
-            paged=False)
+            kind=KVKind.FLAT)
 
     local = tuple(i for i in range(num_layers) if is_local(i))
     glob = tuple(i for i in range(num_layers) if not is_local(i))
@@ -128,15 +127,12 @@ def inkling_kv_streams(config, page_size: int, world_size: int = 1):
 
 @register_model_builder("Inkling", "thinkingmachines/Inkling", "inkling")
 class InklingBuilder(GraphBuilder):
-    # The registry looks this up before the PersistentKernel exists; see
-    # GraphBuilder.kv_streams.
     kv_streams = staticmethod(inkling_kv_streams)
 
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
         self.kv_plan = getattr(mpk, "kv_plan", None)
-        assert self.kv_plan is not None, (
-            "Inkling declares kv_streams, so MPK should have built a plan")
+        assert self.kv_plan is not None
         self.world_size = mpk.world_size
         self.rank = mpk.mpi_rank
         self.input_tokens = mpk.meta_tensors["input_tokens"]
@@ -199,9 +195,7 @@ class InklingBuilder(GraphBuilder):
         return t.float().contiguous().cuda()
 
     def _is_local(self, layer_idx: int) -> bool:
-        if self.local_layer_ids is not None:
-            return layer_idx in self.local_layer_ids
-        return (layer_idx + 1) % 6 != 0
+        return is_local_layer(layer_idx, self.local_layer_ids)
 
     @property
     def max_ctx(self) -> int:

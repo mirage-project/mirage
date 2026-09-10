@@ -85,8 +85,6 @@ def build_mirage_graph(model, world_size, rank, args, tokens_tensor, step_tensor
     )
 
     # --- Persistent Kernel Setup ---
-    # The model owns the KV pool; attach() is the only way to a layer's
-    # view of it, and it folds in the pool-identity check.
     kv_plan = model.model.kv_plan
     mpk = mi.PersistentKernel(
         world_size=world_size,

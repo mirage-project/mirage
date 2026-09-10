@@ -198,15 +198,16 @@ if __name__ == "__main__":
                          layers=tuple(range(model.config.num_hidden_layers)),
                          components=[("k", _kv_entry, torch.bfloat16),
                                      ("v", _kv_entry, torch.bfloat16)])]
-    _draft_layer_id = model.config.num_hidden_layers
+    _draft_stream = None
     if args.eagle3:
         from mirage.mpk.models.eagle3.builder import (
             draft_kv_stream, load_eagle3_draft_config,
         )
-        _streams.append(draft_kv_stream(
+        _draft_stream = draft_kv_stream(
             load_eagle3_draft_config(args.eagle3_draft_path),
-            layer_id=_draft_layer_id,
-            world_size=world_size))
+            layer_id=model.config.num_hidden_layers,
+            world_size=world_size)
+        _streams.append(_draft_stream)
     try:
         kv_plan = build_kv_cache(
             _streams,
@@ -217,18 +218,6 @@ if __name__ == "__main__":
             max_num_batched_tokens=args.max_num_batched_tokens)
     except ValueError as e:
         raise SystemExit(str(e))
-    if args.eagle3 and len(kv_plan.groups) != 1:
-        # The draft's geometry differs from the target's, so the streams did
-        # not merge -- and _group_size then has to serve a 48-layer stream and
-        # a 1-layer one with ONE slot count, which it settles at 1: a group per
-        # layer. Correct, but the scheduler walks (2G+W) page tables an
-        # iteration. Fail rather than quietly pay 49x for it.
-        raise SystemExit(
-            f"Eagle3 draft KV did not merge with the target's: "
-            f"{len(kv_plan.groups)} groups for "
-            f"{model.config.num_hidden_layers} + 1 layers. The draft's "
-            f"num_key_value_heads/head_dim must match the target's for them "
-            f"to share a page table.")
 
     # get all model weight tensors
     input_tokens = torch.full((args.max_num_batched_tokens, 1), 0, dtype=torch.long, device="cuda")
@@ -329,8 +318,6 @@ if __name__ == "__main__":
             spec_decode_config=spec_decode_config,
             use_cutlass_kernel=args.use_cutlass_kernel
         )
-        # Eagle3Builder reaches its draft cache through the plan, so the plan
-        # has to be findable from the PersistentKernel it is handed.
         mpk.kv_plan = kv_plan
         
         if spec_decode_config and spec_decode_config.method == "promptlookup":
@@ -811,7 +798,7 @@ if __name__ == "__main__":
             draft_sd, draft_cfg = load_eagle3_draft(args.eagle3_draft_path)
             eagle3 = Eagle3Builder(
                 mpk=mpk,
-                draft_layer_id=_draft_layer_id,
+                draft_stream=_draft_stream,
                 draft_state_dict=draft_sd,
                 draft_config=draft_cfg,
                 target_hidden_size=hidden_size,

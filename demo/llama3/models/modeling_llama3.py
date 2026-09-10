@@ -33,6 +33,7 @@ from transformers.modeling_utils import PreTrainedModel
 from .configuration_llama3 import Llama3Config
 import time
 
+from mirage.mpk.kv_planner import KVStream, build_kv_cache
 from .rope import apply_rotary_pos_emb_triton
 
 class Llama3RMSNorm(nn.Module):
@@ -314,8 +315,6 @@ class Llama3PreTrainedModel(PreTrainedModel):
 
 def llama3_kv_streams(config, world_size: int):
     """Llama-3 stores one kind of KV, so it is one stream over every layer."""
-    from mirage.mpk.kv_planner import KVStream
-
     entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
     return [
         KVStream("attention",
@@ -334,11 +333,7 @@ class Llama3Model(Llama3PreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         
-        # The cache is one page pool; the plan owns it and attach() is the
-        # only way to a layer's view of it for the megakernel. The tuple below
-        # is for the eager PyTorch path, which indexes the tensors directly.
-        from mirage.mpk.kv_planner import build_kv_cache
-
+        # The tuple below is for the eager PyTorch path, which indexes the tensors directly.
         kv_plan = kv_plan or build_kv_cache(
             llama3_kv_streams(config, world_size),
             block_size=page_size,

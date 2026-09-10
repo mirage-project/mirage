@@ -1,9 +1,4 @@
-"""Test-mode coverage for DeepSeek-V3's MLA cache on the KV 2.0 page pool.
-
-DeepSeek-V3 is not runnable here (671B, and TP is blocked on NVSHMEM), so the
-thing that CAN be checked is the part the migration actually changed: whether
-the cache the planner hands a layer is addressed by the MLA kernels exactly the
-way the hand-rolled `[num_layers, pages, page_size, 576]` tensor was.
+"""Test-mode coverage for DeepSeek-V3's MLA cache on the unified KV page pool.
 
 `mla_kv_gather` is the whole KV path in one task -- it appends the new tokens
 to the paged cache and gathers the sequence back out of it -- so running it
@@ -58,7 +53,8 @@ def main():
     device = "cuda"
 
     plan = build_kv_cache(
-        kv_streams(_Config(), PAGE_SIZE, world_size=1),
+        kv_streams(_Config(), world_size=1),
+        block_size=PAGE_SIZE,
         max_num_pages=MAX_NUM_PAGES,
         max_seq_length=MAX_SEQ_LENGTH,
         max_num_batched_requests=1,

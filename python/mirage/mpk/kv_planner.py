@@ -19,11 +19,23 @@ Usage:
 
 import warnings
 from dataclasses import dataclass, fields, replace
+from enum import Enum
 from functools import reduce
 from math import gcd
 from typing import Optional, Sequence, Tuple
 
 import torch
+
+
+class KVKind(Enum):
+    """How the planner treats a stream. The planner branches on this and on
+    nothing else -- a stream's NAME never changes how it is planned."""
+    PAGED = "paged"       # grows with tokens, gets a group and a page table
+    FLAT = "flat"         # read as one [capacity, width] array, no page table
+    BOUNDED = "bounded"   # fixed one entry per request, ever -- still gets a
+                          # group and shares the pool's free list, but never
+                          # more than 1 entry/page regardless of what the
+                          # shared page size turns out to be
 
 
 @dataclass(frozen=True)
@@ -33,10 +45,13 @@ class KVSpec:
 
     per_entry_bytes: bytes of one stored entry.
     layer_ids: layers carrying this stream.
-    compress_ratio: raw tokens folded into one stored entry.
+    compress_ratio: raw tokens folded into one stored entry. For a bounded
+        spec, the whole run folds into its one entry.
     window_size: sliding-window length in raw tokens.
     block_size_multiple_of: restriction on block size, in raw tokens (e.g.
         the attention kernel's KV tile). None takes default_kv_tile().
+    bounded: never more than 1 entry, regardless of the shared page size.
+        See ``KVKind.BOUNDED``.
     """
     name: str
     per_entry_bytes: int
@@ -44,12 +59,16 @@ class KVSpec:
     compress_ratio: int = 1
     window_size: Optional[int] = None
     block_size_multiple_of: Optional[int] = None
+    bounded: bool = False
 
     def __post_init__(self):
         assert self.per_entry_bytes > 0 and self.compress_ratio >= 1
         assert len(self.layer_ids) > 0
         assert len(set(self.layer_ids)) == len(self.layer_ids), \
             f"spec {self.name}: duplicate layer ids"
+        assert not (self.bounded and self.window_size), (
+            f"spec {self.name}: bounded and window_size are exclusive -- a "
+            f"fixed one-entry state is never recycled by a sliding window")
 
 
 def _itemsize(dtype) -> int:
@@ -66,10 +85,15 @@ class KVStream:
     each ``(entry_name, entry_shape, dtype)``. ``per_entry_bytes`` derives
     from it.
 
-    ``paged=False`` means the reader addresses the cache as one flat
+    ``kind=KVKind.FLAT`` means the reader addresses the cache as one flat
     ``[capacity, width]`` array: no group, no page table, no say in the
     shared page size. The plan still owns and budgets its storage. See
     ``FlatStream``.
+
+    A layer carrying several streams gets each one's kwargs namespaced by its
+    ``name`` (``**kv_swa`` supplies ``swa_k_cache``, ...) -- names are
+    required unique, so this cannot collide; a layer with one stream gets the
+    bare ``k_cache``/``group_id``.
     """
     name: str
     layers: Tuple[int, ...]
@@ -77,7 +101,12 @@ class KVStream:
     window: int = 0
     compress_ratio: int = 1
     block_size_multiple_of: Optional[int] = None
-    paged: bool = True
+    kind: KVKind = KVKind.PAGED
+
+    @property
+    def paged(self) -> bool:
+        """Not FLAT: gets a group, a page table, a slot in the shared pool."""
+        return self.kind is not KVKind.FLAT
 
     @property
     def per_entry_bytes(self) -> int:
@@ -101,7 +130,7 @@ class KVStream:
             default = KVStream.__dataclass_fields__[field_name].default
             if value != default:
                 raise ValueError(
-                    f"stream '{self.name}' is paged=False but sets "
+                    f"stream '{self.name}' is kind=KVKind.FLAT but sets "
                     f"{field_name}={value!r}; that describes a page, and an "
                     f"unpaged stream has none.")
         return FlatStream(name=self.name, layers=tuple(self.layers),
@@ -111,12 +140,18 @@ class KVStream:
     def _spec(self) -> KVSpec:
         assert self.paged, f"stream {self.name}: not paged, use _flat()"
         self._check_components()
+        if self.kind is KVKind.BOUNDED and self.window:
+            raise ValueError(
+                f"stream '{self.name}' is kind=KVKind.BOUNDED but sets "
+                f"window={self.window!r}; a fixed one-entry state is never "
+                f"recycled by a sliding window.")
         return KVSpec(name=self.name,
                       per_entry_bytes=self.per_entry_bytes,
                       layer_ids=tuple(self.layers),
                       compress_ratio=self.compress_ratio,
                       window_size=self.window or None,
-                      block_size_multiple_of=self.block_size_multiple_of)
+                      block_size_multiple_of=self.block_size_multiple_of,
+                      bounded=self.kind is KVKind.BOUNDED)
 
 
 def _hashable(v):
@@ -133,22 +168,16 @@ def _merge_identical_streams(streams):
     A group IS a page table, and the pool carries one slot count per group,
     so a stream with very few layers drags that count down for everyone it
     stays apart from (DeepSeek-V3's 61 attention + 1 MTP layer: gcd(61, 1)=1,
-    so unmerged this is 62 single-slot groups instead of one group of 62). A
-    model declares by MEANING (attention vs. MTP); the planner groups by
-    LAYOUT.
+    so unmerged this is 62 single-slot groups instead of one group of 62).
 
-    Key = every KVStream field but ``name``/``layers``, read off the
-    dataclass so a field added later is included by default -- a key that
-    misses a field would silently fuse streams that are not alike.
-    ``components`` must be in the key: KVSpec only keeps ``per_entry_bytes``,
-    and two streams can agree on that while laying the page out differently
-    (e.g. an 8-head K entry vs. a 4-head K/V pair, both 2048 B) -- ``attach``
-    reads the component layout back per layer, so fusing those would hand a
-    layer the wrong-shaped view. This is why the merge runs here, on streams,
-    rather than inside ``plan_kv_groups``.
+    Key = every KVStream field describing the PAGE, read off the dataclass so
+    a field added later is included by default. ``components`` must be in the
+    key, otherwise two streams can agree on ``per_entry_bytes`` while laid out
+    differently. Two streams with the same key covering the same layer are
+    refused rather than merged.
 
-    Layers of a merged stream are sorted, so slot assignment does not depend
-    on declaration order. A stream that is not merged is returned untouched.
+    Returns ``(merged_streams, {declared name: merged name})``; the map is how
+    ``attach`` finds the group a declared stream ended up in.
     """
     key_fields = [f.name for f in fields(KVStream)
                   if f.name not in ("name", "layers")]
@@ -158,20 +187,28 @@ def _merge_identical_streams(streams):
         if key not in folded:
             order.append(key)
             folded[key] = [s, [], []]
-        folded[key][1].append(s.name)
-        folded[key][2].extend(s.layers)
+        exemplar, names, layers = folded[key]
+        overlap = set(layers) & set(s.layers)
+        if overlap:
+            raise ValueError(
+                f"streams {names + [s.name]!r} declare the identical page "
+                f"layout and all cover layer(s) {sorted(overlap)}.")
+        names.append(s.name)
+        layers.extend(s.layers)
 
-    out = []
+    out, merged_name = [], {}
     for key in order:
         exemplar, names, layers = folded[key]
         if len(names) == 1:
             out.append(exemplar)
+            merged_name[names[0]] = exemplar.name
             continue
-        # Duplicate layer ids across the merged streams would be a model bug;
-        # KVSpec.__post_init__ rejects them under the merged name.
-        out.append(replace(exemplar, name="+".join(names),
-                           layers=tuple(sorted(layers))))
-    return out
+        fused = replace(exemplar, name="+".join(names),
+                        layers=tuple(sorted(layers)))
+        out.append(fused)
+        for n in names:
+            merged_name[n] = fused.name
+    return out, merged_name
 
 
 @dataclass(frozen=True)
@@ -199,6 +236,20 @@ class FlatStream:
         return len(self.layers) * self.capacity * self.per_entry_bytes
 
 
+def _check_stream_names(streams) -> None:
+    """Stream names are unique. A repeat silently loses a layout (``_layouts``
+    is keyed by name), and since ``attach()`` namespaces a shared layer's
+    kwargs by name, a repeat would also collide there -- unique names rule
+    both out at once."""
+    seen = set()
+    for st in streams:
+        if st.name in seen:
+            raise ValueError(
+                f"two streams are both named {st.name!r}; stream names must "
+                f"be unique")
+        seen.add(st.name)
+
+
 def build_kv_cache(streams, *,
                    kv_budget=None,
                    max_num_pages: Optional[int] = None,
@@ -221,14 +272,19 @@ def build_kv_cache(streams, *,
     to a cache tensor, so no caller can hold one that skipped the
     pool-identity check.
 
-    A ``paged=False`` stream is split off here and never reaches
-    ``plan_kv_groups``: no say in the shared page size, ``_group_size``, or
-    the page tables, but the plan still owns and budgets its storage. With no
-    paged stream at all the plan has zero groups.
+    A ``kind=KVKind.FLAT`` stream is split off here and never reaches
+    ``plan_kv_groups``: no say in the shared page size, no page table, but
+    the plan still owns and budgets its storage. With no paged stream at all
+    the plan has zero groups.
+
+    Several streams may cover one layer -- a windowed, a compressed and an
+    indexer cache on one layer is a real shape (DeepSeek V4) -- and
+    ``attach`` namespaces each by name so they cannot collide.
     """
     streams = list(streams)
+    _check_stream_names(streams)
     flat_streams = [st for st in streams if not st.paged]
-    paged_streams = _merge_identical_streams(
+    paged_streams, merged_name = _merge_identical_streams(
         [st for st in streams if st.paged])
     if kv_budget is not None and max_seq_length is None:
         raise ValueError(
@@ -257,6 +313,10 @@ def build_kv_cache(streams, *,
         plan = _plan_with_no_paged_streams(**plan_kwargs)
     plan._layouts = {st.name: list(st.components) for st in paged_streams}
     plan.flat_streams = tuple(st._flat(max_seq_length) for st in flat_streams)
+    # attach() resolves per DECLARED stream, not per merged group: a layer can
+    # carry several streams, and each keeps its own components and kwargs.
+    plan._declared = tuple(streams)
+    plan._merged_name = merged_name
     _resolve_pool_size(plan, kv_budget=kv_budget, max_num_pages=max_num_pages,
                        max_seq_length=max_seq_length,
                        max_num_batched_requests=max_num_batched_requests,
@@ -279,18 +339,23 @@ def _device_index(device) -> int:
     return dev.index if dev.index is not None else torch.cuda.current_device()
 
 
-class KVUnificationError(Exception):
+class KVUnificationError(ValueError):
     """A stream does not fit the shared page size, so a single-page-size plan
     is impossible. Multi-bucket planning might be a future work for models work
-    better with multiple page sizes."""
+    better with multiple page sizes.
+
+    A ValueError, not a bare Exception: it is a bad CLI/config choice (the
+    page size a caller picked), the same class of mistake every demo's
+    `except ValueError: raise SystemExit(...)` guard already exists to turn
+    into a clean message instead of a raw traceback -- it should not need its
+    own separate except clause at every call site to get that.
+    """
 
 
 # Tokens per KV tile in the windowed attention kernel. A windowed task starts
 # loading at a tile boundary, so a page is dead only once entirely below it.
 #
-# The scheduler uses the same number under the name MPK_KV_WINDOW_TILE, and the
-# two must agree exactly or prepare_next_batch frees pages the kernel is still
-# reading. Read it from the header rather than mirroring the literal.
+# The scheduler uses the same number under the name MPK_KV_WINDOW_TILE.
 def _window_tile_from_header(fallback: int = 64) -> int:
     import re
     from pathlib import Path
@@ -388,6 +453,10 @@ class KVCachePlan:
     _views: Optional[dict] = None
     _flat_pool: Optional["torch.Tensor"] = None
     _flat_views: Optional[dict] = None
+    # The streams as DECLARED, before merging, plus where each one landed.
+    # A layer may appear in several; attach() walks them all.
+    _declared: Tuple["KVStream", ...] = ()
+    _merged_name: Optional[dict] = None
 
     # ── what PersistentKernel consumes ────────────────────────────────────
 
@@ -395,6 +464,11 @@ class KVCachePlan:
         """The kv_groups= argument for PersistentKernel."""
         return [KVGroupSpec(block_size=g.block_size, window_size=g.window_size)
                 for g in self.groups]
+
+    def merged_with(self, stream_name: str) -> str:
+        """The group a declared, paged stream ended up in after merging.
+        Two streams sharing this value share one page table."""
+        return (self._merged_name or {}).get(stream_name, stream_name)
 
     # ── sizing the pool ───────────────────────────────────────────────────
 
@@ -545,10 +619,20 @@ class KVCachePlan:
         return "\n".join(lines)
 
     def _layer_info(self, layer_id: int) -> Tuple[int, int]:
-        """(group_id, slot_id) for one model layer."""
-        for g in self.groups:
-            if layer_id in g.layer_ids:
-                return g.group_id, g.layer_ids.index(layer_id)
+        """(group_id, slot_id) for a layer sitting in exactly ONE group. A
+        layer in several has no single answer -- that caller wants
+        ``attach()``, which returns every cache the layer carries."""
+        hits = [(g.group_id, g.layer_ids.index(layer_id))
+                for g in self.groups if layer_id in g.layer_ids]
+        if len(hits) > 1:
+            names = ", ".join(repr(self.groups[gid].spec_name)
+                              for gid, _ in hits)
+            raise KeyError(
+                f"layer {layer_id} is in {len(hits)} groups ({names}), so it "
+                f"has no single group id; use attach(), which returns every "
+                f"cache the layer carries")
+        if hits:
+            return hits[0]
         for st in self.flat_streams:
             if layer_id in st.layers:
                 raise KeyError(
@@ -557,11 +641,32 @@ class KVCachePlan:
                     f"through attach()")
         raise KeyError(f"layer {layer_id} not covered by any group")
 
-    def _flat_stream_of(self, layer_id: int):
-        for st in self.flat_streams:
-            if layer_id in st.layers:
-                return st
-        return None
+    def _group_of(self, stream: "KVStream", layer_id: int) -> Tuple[int, int]:
+        """(group_id, slot_id) holding this DECLARED stream's layer. The
+        stream may have been folded into a merged one, so match on the
+        merged name, not the declared one."""
+        spec_name = (self._merged_name or {}).get(stream.name, stream.name)
+        for g in self.groups:
+            if g.spec_name == spec_name and layer_id in g.layer_ids:
+                return g.group_id, g.layer_ids.index(layer_id)
+        raise KeyError(
+            f"stream '{stream.name}' (planned as '{spec_name}') has no group "
+            f"holding layer {layer_id}")
+
+    def _layer_streams(self, layer_id: int):
+        """Every declared stream on this layer, as
+        ``(stream, group_id | None, slot_id | None)``. Unpaged streams have no
+        group, so both ids are None."""
+        out = []
+        for st in self._declared:
+            if layer_id not in st.layers:
+                continue
+            if st.paged:
+                group_id, slot_id = self._group_of(st, layer_id)
+                out.append((st, group_id, slot_id))
+            else:
+                out.append((st, None, None))
+        return out
 
     # ── allocation ────────────────────────────────────────────────────────
 
@@ -605,62 +710,57 @@ class KVCachePlan:
         return self._views[group_id]
 
     def attach(self, mpk, layer_id: int, prefix: str = "layer"):
-        """Everything paged_attention_layer needs for one layer:
+        """Everything this layer's tasks need, for EVERY cache it carries:
 
             mpk.paged_attention_layer(..., **kv.attach(mpk, i))
 
-        Folds layer_info, the views[group][component][slot] walk and the
-        pool-identity check into one accessor. The identity check is what
-        catches a cache copied out of the pool by a stray .contiguous(), and
-        cannot be skipped."""
+        Folds group/slot resolution, the views walk and the pool-identity
+        check (which catches a cache copied out by a stray ``.contiguous()``)
+        into one accessor. A layer with several streams returns them all,
+        each namespaced by its own name (names are required unique, so this
+        cannot collide); a layer with one stream gets bare keys.
+        ``window_size`` appears only where a window was declared; absent
+        means 0, the default every layer function already takes.
+        """
         if self._views is None:
             raise RuntimeError("materialize() has not run on this plan")
-        flat = self._flat_stream_of(layer_id)
-        if flat is not None:
-            return self._attach_flat(mpk, flat, layer_id, prefix)
-        group_id, slot_id = self._layer_info(layer_id)
-        out = {"group_id": group_id}
-        for name, entry_shape, dtype in self._layouts[
-                self.groups[group_id].spec_name]:
-            view = self._views[group_id][name][slot_id]
-            # Guards the planner, not the caller: the view is built from this
-            # same declaration, so a mismatch means the pool was laid out
-            # differently than the stream asked for.
-            assert tuple(view.shape[2:]) == tuple(entry_shape), (
-                f"{name} view has entry shape {tuple(view.shape[2:])} but the "
-                f"stream declared {tuple(entry_shape)}")
-            assert view.dtype == dtype, (
-                f"{name} view is {view.dtype}, declared {dtype}")
-            out[f"{name}_cache"] = mpk.attach_input(
-                torch_tensor=self._assert_in_pool(
-                    view, f"{prefix}_{layer_id} {name}_cache"),
-                name=f"{prefix}_{layer_id}_{name}_cache")
-        return out
-
-    def _attach_flat(self, mpk, stream, layer_id: int, prefix: str):
-        """attach() for an unpaged layer: the same keys a paged one gets, so
-        a builder reads the same names either way. ``group_id`` is None rather
-        than 0 -- 0 is a real group, and would send a paged task to someone
-        else's page table.
-        """
-        out = {"group_id": None}
-        for name, entry_shape, dtype in stream.components:
-            view = self._flat_views[layer_id][name]
-            assert tuple(view.shape[1:]) == tuple(entry_shape), (
-                f"{name} view has entry shape {tuple(view.shape[1:])} but the "
-                f"stream declared {tuple(entry_shape)}")
-            assert view.dtype == dtype, (
-                f"{name} view is {view.dtype}, declared {dtype}")
-            out[f"{name}_cache"] = mpk.attach_input(
-                torch_tensor=self._assert_in_flat(
-                    view, stream, f"{prefix}_{layer_id} {name}_cache"),
-                name=f"{prefix}_{layer_id}_{name}_cache")
+        entries = self._layer_streams(layer_id)
+        if not entries:
+            raise KeyError(f"layer {layer_id} is not covered by any KV stream")
+        solo = len(entries) == 1
+        out = {}
+        for stream, group_id, slot_id in entries:
+            key = (lambda s: s) if solo else (lambda s, n=stream.name: f"{n}_{s}")
+            out[key("group_id")] = group_id
+            if stream.window:
+                out[key("window_size")] = stream.window
+            for name, entry_shape, dtype in stream.components:
+                if group_id is None:
+                    view = self._flat_views[(stream.name, layer_id)][name]
+                    entry_dims = view.shape[1:]
+                else:
+                    view = self._views[group_id][name][slot_id]
+                    entry_dims = view.shape[2:]
+                # Guards the planner, not the caller: the view is built from
+                # this same declaration, so a mismatch means the pool was laid
+                # out differently than the stream asked for.
+                assert tuple(entry_dims) == tuple(entry_shape), (
+                    f"{name} view has entry shape {tuple(entry_dims)} but "
+                    f"stream '{stream.name}' declared {tuple(entry_shape)}")
+                assert view.dtype == dtype, (
+                    f"{name} view is {view.dtype}, declared {dtype}")
+                label = f"{prefix}_{layer_id}_{key(name)}_cache"
+                check = self._assert_in_flat if group_id is None else self._assert_in_pool
+                out[key(f"{name}_cache")] = mpk.attach_input(
+                    torch_tensor=check(view, label), name=label)
         return out
 
     def _allocate_flat(self, device: str = "cuda"):
-        """The unpaged streams as ONE allocation, plus per-layer typed views
-        (``views[layer_id][component]``). Laid out stream / layer / component,
-        so a view has the shape and stride of the tensor it replaces.
+        """The unpaged streams as ONE allocation, plus typed views keyed
+        ``views[(stream name, layer_id)][component]``. Laid out stream / layer
+        / component, so a view has the shape and stride of the tensor it
+        replaces. The stream name is part of the key because one layer may
+        carry more than one unpaged stream.
         """
         total = self.flat_bytes
         buf = torch.zeros(total, dtype=torch.uint8, device=device)
@@ -680,11 +780,11 @@ class KVCachePlan:
                         off // itemsize:off // itemsize + span].view(
                         st.capacity, *entry_shape)
                     off += span * itemsize
-                views[layer_id] = comps
+                views[(st.name, layer_id)] = comps
         assert off == total, f"flat allocation walked {off} of {total} B"
         return buf, views
 
-    def _assert_in_flat(self, tensor, stream, name: str = "tensor"):
+    def _assert_in_flat(self, tensor, name: str = "tensor"):
         """The unpaged twin of _assert_in_pool: still on the plan's buffer,
         and still addressed one token row at a time."""
         if getattr(self, "_flat_span", None) is None:
@@ -922,8 +1022,7 @@ def plan_kv_groups(
       padding) or, failing that, keeps its native size and pads the rest,
       never repacked (``_fit_to_anchor``) -- matching vLLM's
       ``unify_kv_cache_spec_page_size``. Coarser than the greedy path when a
-      spec's ratio to the anchor isn't clean; see
-      [[mpk-kv2-remove-preferred-block-size]] for why that trade was chosen.
+      spec's ratio to the anchor isn't clean.
 
     A spec that cannot fit even one tile's worth of entries raises
     KVUnificationError; one that fits but pays padding warns instead of
@@ -984,9 +1083,12 @@ def plan_kv_groups(
 
 def _native_fit(spec: KVSpec, block_size: int, tile: int) -> Tuple[int, int]:
     """This spec's own tile-legal (entries, bytes) at ``block_size`` tokens,
-    with no cross-spec reconciliation yet: every spec is measured the same
-    way before any page-sharing decision is made. Raises KVUnificationError
-    if it can't fit one tile's worth of entries even in isolation."""
+    with no cross-spec reconciliation yet. Raises KVUnificationError if it
+    can't fit one tile's worth of entries even in isolation. A bounded spec
+    skips the tile arithmetic -- it is always exactly 1 entry.
+    """
+    if spec.bounded:
+        return 1, spec.per_entry_bytes
     entries_per_tile = max(tile // spec.compress_ratio, 1)
     entries = block_size // spec.compress_ratio
     entries -= entries % entries_per_tile
@@ -1007,11 +1109,17 @@ def _fit_to_anchor(spec: KVSpec, native: Tuple[int, int],
 
     Scales up by an exact integer ratio when one exists (zero padding);
     otherwise leaves the spec at its native size and pads the rest -- NEVER
-    repacked here, unlike ``_fit_block_size``. This is what lets a
-    Mamba-style spec (page size fixed by state shape) share the pool: it
-    always takes the "pad" branch.
+    repacked here, unlike ``_fit_block_size``. A bounded spec always takes the
+    pad branch: scaling its entries up would defeat the point of a fixed
+    one-per-request state.
     """
     native_entries, native_bytes = native
+    if spec.bounded:
+        if target_page_bytes < native_bytes:
+            raise KVUnificationError(
+                f"spec '{spec.name}': a bounded state needs {native_bytes} B "
+                f"but the shared page is only {target_page_bytes} B")
+        return spec.compress_ratio, 1, target_page_bytes - native_bytes
     if target_page_bytes % native_bytes == 0:
         entries = native_entries * (target_page_bytes // native_bytes)
         padding = 0
@@ -1028,8 +1136,17 @@ def _fit_block_size(spec: KVSpec, target_page_bytes: int, tile: int):
     Fits what the page holds, floored to a tile multiple; the leftover is
     padding. Always repacks (unlike ``_fit_to_anchor``) -- used only for the
     ``target_page_bytes`` path, where the caller already picked an exact
-    byte budget and wants it used well.
+    byte budget and wants it used well. A bounded spec is the one exception:
+    it stays at 1 entry rather than being packed with copies nothing reads.
     """
+    if spec.bounded:
+        if target_page_bytes < spec.per_entry_bytes:
+            raise KVUnificationError(
+                f"spec '{spec.name}': a bounded state needs "
+                f"{spec.per_entry_bytes} B but the shared page is only "
+                f"{target_page_bytes} B")
+        return (spec.compress_ratio, 1,
+               target_page_bytes - spec.per_entry_bytes)
     # Entries must land on a tile boundary once converted back to tokens.
     entries_per_tile = max(tile // spec.compress_ratio, 1)
     entries = target_page_bytes // spec.per_entry_bytes

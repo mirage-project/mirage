@@ -34,6 +34,7 @@ from .configuration_qwen3 import Qwen3Config
 import time
 
 import mirage as mi
+from mirage.mpk.kv_planner import KVStream, build_kv_cache
 from .rope import apply_rotary_pos_emb_triton
 
 
@@ -404,8 +405,6 @@ class Qwen3PreTrainedModel(PreTrainedModel):
 
 def qwen3_kv_streams(config, world_size: int):
     """Qwen3 stores one type of KV, so it is a single stream over every layer."""
-    from mirage.mpk.kv_planner import KVStream
-
     entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
     return [
         KVStream("attention",
@@ -425,13 +424,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         # The cache is built HERE, not by the caller, because from_pretrained
-        # cannot carry an object through GenerationConfig -- the sizing knobs
-        # are ints and strings, which it does carry. One page pool for the
-        # whole cache: K and V are two components of a page, so a page id
-        # covers a layer's K and V together. Each view is (L, N, P, H, D) =
-        # slots, pages, page size in tokens, heads, dim, page-strided.
-        from mirage.mpk.kv_planner import build_kv_cache
-
+        # cannot carry an object through GenerationConfig.
         kv_plan = kv_plan or build_kv_cache(
             qwen3_kv_streams(config, world_size),
             block_size=page_size,

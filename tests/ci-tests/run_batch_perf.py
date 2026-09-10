@@ -65,9 +65,6 @@ def main():
     with torch.device("cuda"):
         model = Qwen3ForCausalLM.from_pretrained(
             args.model, 1, max_num_pages=max_num_pages, page_size=PAGE_SIZE,
-            # Handing the plan the batch it must hold turns the pool size from
-            # an assumption into a checked one: build_kv_cache refuses a count
-            # that cannot cover max_num_batched_requests at max_seq_length.
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
@@ -120,8 +117,6 @@ def main():
     num_workers, num_schedulers = mi.get_configurations_from_gpu(0)
     qo_indptr_buffer = torch.empty(
         args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-    # Exactly one cache exists and the model holds it; the plan owns the page
-    # tables too, sized by the page-table span rather than by the page count.
     kv_plan = model.model.kv_plan
 
     mpk = mi.PersistentKernel(
@@ -262,8 +257,6 @@ def main():
         w_k_norm = mpk.attach_input(
             torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm"
         )
-        # attach() resolves the layer's slot and checks the view is still on
-        # the pool; indexing kv_cache[0][i] by hand skipped both.
         kv = kv_plan.attach(mpk, i)
         mpk.paged_attention_layer(
             input=attn_in,

@@ -16,6 +16,7 @@ from typing import Optional
 
 from ..utils import grid_for_rmsnorm_linear_layer
 from ..graph_builder import GraphBuilder, MirageModelConfig
+from ...kv_planner import KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float8_e4m3, float32, uint32, int32, int64
@@ -57,10 +58,8 @@ def kv_streams(config, world_size: int = 1,
     """DeepSeek-V3 keeps ONE latent entry per token per layer.
 
     num_mtp_layers defaults to the checkpoint's num_nextn_predict_layers. Pass
-    0 to leave the MTP slot out when MTP is off -- it costs 1/62 of every page.
+    0 to leave the MTP slot out when MTP is off.
     """
-    from ...kv_planner import KVStream
-
     num_layers = getattr(config, "num_hidden_layers", NUM_LAYERS)
     if num_mtp_layers is None:
         num_mtp_layers = getattr(config, "num_nextn_predict_layers", 0)
@@ -122,11 +121,7 @@ class DeepSeekV3Builder(GraphBuilder):
         self.mtp_config = getattr(mpk, 'spec_decode_config', None)
 
     def _kv_cache(self, layer_id: int):
-        """This layer's paged cache and its group id, attached once.
-
-        attach() calls mpk.attach_input, which declares a C++ variable, so a
-        second call for the same layer would redeclare it.
-        """
+        """This layer's paged cache and its group id, attached once."""
         cached = self._layer_caches.get(layer_id)
         if cached is None:
             kv = self.kv_plan.attach(self.mpk, layer_id)
@@ -147,10 +142,7 @@ class DeepSeekV3Builder(GraphBuilder):
             layer_indices: If provided, only build these specific layer indices.
         """
         self.kv_plan = getattr(self.mpk, "kv_plan", None)
-        assert self.kv_plan is not None, (
-            "DeepSeek-V3 declares kv_streams, so a KV plan must exist before "
-            "the builder runs -- pass kv_plan=build_kv_cache(kv_streams(...)) "
-            "and set mpk.kv_plan, or build through MPK which does it for you")
+        assert self.kv_plan is not None
         self._layer_caches = {}
         self.position_embeddings = model_config.position_embeddings
 

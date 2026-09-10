@@ -21,9 +21,7 @@ def _grid_x(output_size: int, cols_per_task: int = 64) -> int:
 def kv_streams(config, world_size: int = 1) -> list[KVStream]:
     """GPT-OSS's two attention kinds are two KV streams: 12 sliding-window
     layers and 12 full-attention layers, storing the same thing per token. The
-    two share a 12-slot pool and take the same block size (logical page size,
-    set once for the whole plan by whoever calls build_kv_cache).
-    """
+    two share a 12-slot pool and take the same block size."""
     num_kv_heads = config.num_key_value_heads // world_size
     layer_types = list(config.layer_types)
 
@@ -47,8 +45,6 @@ class GptOssBuilder(GraphBuilder):
     a clamped-alpha SwiGLU MoE. Every projection carries a bias.
     """
 
-    # The registry looks this up before the PersistentKernel exists; see
-    # GraphBuilder.kv_streams.
     kv_streams = staticmethod(kv_streams)
 
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
@@ -108,16 +104,7 @@ class GptOssBuilder(GraphBuilder):
         self.cos_table = torch.cat([cos[0], cos[0]], dim=-1).contiguous().to(torch.bfloat16)
         self.sin_table = torch.cat([sin[0], sin[0]], dim=-1).contiguous().to(torch.bfloat16)
 
-        # The pool (K and V co-located in one page, shape (slots, pages,
-        # tokens, H, D)) is already allocated: build_kv_cache did it.
-        assert self.kv_plan is not None, (
-            "set mpk.kv_plan = build_kv_cache(kv_streams(config), "
-            "block_size=page_size, ...) before constructing the "
-            "builder")
-        assert len(self.kv_plan.groups) == len(self.mpk.kv_groups), (
-            f"the builder plans {len(self.kv_plan.groups)} KV group(s) but "
-            f"mpk was built with {len(self.mpk.kv_groups)} — pass "
-            f"kv_groups=plan.group_specs() and the same plan to the builder")
+        assert self.kv_plan is not None
 
         state_dict = model.state_dict()
         self.build_from_dict(state_dict, with_lm_head=True)
@@ -288,8 +275,6 @@ class GptOssBuilder(GraphBuilder):
                 grid_dim=(self.mpk.max_num_batched_requests, self.num_kv_heads, 1),
                 block_dim=(256, 1, 1),
                 enable_qk_norm=False,
-                window_size=(self.sliding_window
-                             if self.layer_types[i] == "sliding_attention" else 0),
                 sinks=sinks)
 
             # o_proj has two addends and the epilogue one slot. The residual

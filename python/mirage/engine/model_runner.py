@@ -33,16 +33,13 @@ class RunnerConfig:
     max_num_batched_tokens: int = 8
     max_seq_length: int = 512
     kv_budget: Optional[str] = "2GiB"
-    """Bytes for the KV cache, e.g. "2GiB". The planner buys as many pages as
-    fit. Give exactly one of this and ``max_num_pages``."""
+    """Bytes for the KV cache. Give exactly one of this and ``max_num_pages``."""
 
     max_num_pages: int = 16
-    """Page count, as an alternative to ``kv_budget``. Set ``kv_budget`` to
-    None to use it."""
 
     page_size: int = 4096
-    """Tokens per page, shared by every stream in the plan. Independent of the
-    two knobs above. 0 leaves the choice to the planner's own default."""
+    """Logical tokens per page, shared by every kv stream. 0 leaves the choice to 
+    the planner's own default."""
 
     pinned_ring_capacity: int = 8
     """Power-of-2 capacity for the CPU↔GPU pinned ring buffers."""

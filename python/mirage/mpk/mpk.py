@@ -246,8 +246,7 @@ class MPK:
             "pinned_inbox_tokens":     args.pinned_inbox_tokens,
             "pinned_rid_at_row":       args.pinned_rid_at_row,
         }
-        # KV 2.0: the plan supplies kv_groups and the page-table meta tensors,
-        # both of which PersistentKernel needs at construction.
+        # The plan supplies kv_groups and the page-table meta tensors.
         self.kv_plan = self._build_kv_plan(args)
         meta_tensors.update(self.kv_plan.build_meta_tensors(
             max_seq_length=self.max_seq_length,
@@ -278,8 +277,6 @@ class MPK:
             sampling_seed=args.sampling_seed,
             sampling_topk_max=args.sampling_topk_max,
         )
-        # The builder is handed the PersistentKernel, not this object, so the
-        # plan has to live there for `self.mpk.kv_plan` to resolve.
         self.persistent_kernel.kv_plan = self.kv_plan
 
         self.meta_tensors = meta_tensors
@@ -306,16 +303,15 @@ class MPK:
         if streams_fn is None or streams_fn is GraphBuilder.kv_streams:
             raise NotImplementedError(
                 f"{builder_cls.__name__} ({args.model_name}) does not declare "
-                f"its KV streams. Override kv_streams(); a model whose kernels "
-                f"read the cache flat declares KVStream(..., paged=False).")
+                f"its KV streams.")
         config = builder_cls.load_config(args.model_name, args.model_path)
         streams = streams_fn(config, self.world_size)
         if streams is None:
             raise NotImplementedError(
                 f"{builder_cls.__name__}.kv_streams() returned None.")
         # page_size is the plan-wide page size every stream is fit against.
-        # Falsy means "no preference"; MPKMetadata.page_size defaults to 0,
-        # in which case build_kv_cache's own default (64) applies.
+        # MPKMetadata.page_size defaults to 0, in which case build_kv_cache's
+        # own default (64) applies.
         block_size_kwargs = (
             {"block_size": args.page_size} if args.page_size else {})
         return build_kv_cache(

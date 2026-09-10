@@ -221,9 +221,6 @@ __device__ __forceinline__ void dflash_attention_sm100(void const *q_ptr,
     constexpr int OS = O_STRIDE > 0 ? O_STRIDE : NUM_Q_HEADS * HEAD_DIM;
     constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
     constexpr int KV_TILE_SIZE = KV_TILE_SM100;
-    // sliding_window arrives at runtime here, so unlike attention_sm100 this
-    // cannot be conditioned on it: the tile must always match the granularity
-    // prepare_next_batch frees a window's pages at.
     static_assert(KV_TILE_SIZE == KV_WINDOW_TILE,
                   "a windowed kernel must tile at MPK_KV_WINDOW_TILE");
     constexpr int M_ROWS = B * NUM_QO_PER_KV;      // 64

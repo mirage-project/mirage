@@ -48,6 +48,12 @@ class GraphBuilder(abc.ABC):
     def __init__(self, mpk, weights: Optional[Dict[str, Any]] = None):
         self.mpk = mpk
         self.weights = weights or {}
+        plan = getattr(mpk, "kv_plan", None)
+        if plan is not None:
+            assert len(plan.groups) == len(mpk.kv_groups), (
+                f"mpk.kv_plan has {len(plan.groups)} KV group(s) but mpk was "
+                f"built with {len(mpk.kv_groups)} -- pass "
+                f"kv_groups=plan.group_specs() and this same plan together")
 
     @staticmethod
     def kv_streams(config, world_size: int = 1):
@@ -56,12 +62,6 @@ class GraphBuilder(abc.ABC):
         Called BEFORE the PersistentKernel exists, because the plan supplies
         its kv_groups and the page-table meta tensors. Caches are then reached
         through `self.mpk.kv_plan.attach(self.mpk, layer)`.
-
-        A stream whose kernel reads the cache flat says `paged=False`, and gets
-        storage and a budget but no page table. `[]` means this model has no KV
-        cache AT ALL (different from `paged=False`). Says what the KV is, not
-        how big to make it -- the caller passes these to `build_kv_cache`
-        along with `block_size`/`target_page_bytes`.
         """
         raise NotImplementedError(
             "this builder does not declare its KV streams; override "

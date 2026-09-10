@@ -65,9 +65,8 @@ if __name__ == "__main__":
     parser.add_argument("--max-num-pages", default=64, type=int,
                         help="Max number of pages. Exclusive with --kv-budget")
     parser.add_argument("--kv-budget", type=str, default=None,
-                        help="Bytes for the KV page pool (e.g. 8GiB). The "
-                             "planner derives the block size and page count "
-                             "from it; exclusive with --max-num-pages")
+                        help="Memory budget for KV cache as a size('24GiB')."
+                             "Exclusive with --max-num-pages")
     parser.add_argument("--max-seq-length", default=4096, type=int,
                         help="Max sequence length")
     parser.add_argument("--prompt", type=str,

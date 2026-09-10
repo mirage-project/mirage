@@ -8,29 +8,13 @@ from ..utils import (
     grid_for_rmsnorm_linear_layer,
     shuffle_tensors,
 )
+from ...kv_planner import KVStream
 from ...persistent_kernel import PersistentKernel
 from ....core import bfloat16, int64
 
 
 def draft_kv_stream(draft_config, layer_id: int, world_size: int = 1):
-    """The Eagle3 draft's KV, declared as a stream at its own layer id.
-
-    The draft is a separate model with its own decoder layer, so it is its own
-    stream, but it wants the target's page table. build_kv_cache folds streams
-    that lay a page out identically, so a draft matching the target's kv heads
-    and head_dim becomes one more slot on the target's pages.
-
-    A draft that does NOT match keeps a page table of its own. Still correct --
-    every group's page count and last_page_len come from the same step and
-    num_new_tokens -- but _group_size must then serve a 48-layer stream and a
-    1-layer one with one slot count, and settles on 1: a group per layer
-    (`_warn_if_group_size_starved` flags this at plan time).
-
-    layer_id must not collide with a target layer; the target's
-    num_hidden_layers is the natural choice, as with DeepSeek-V3's MTP.
-    """
-    from ...kv_planner import KVStream
-
+    """The Eagle3 draft's KV, declared as a stream at its own layer id."""
     entry = (int(draft_config["num_key_value_heads"]) // world_size,
              int(draft_config["head_dim"]))
     return KVStream("eagle3_draft",
@@ -63,10 +47,8 @@ class Eagle3Builder:
 
     Usage from a target builder / demo:
 
-        # The draft's KV is a stream of the caller's plan; declare it when
-        # the pool is built, then hand the builder the layer id it went in at.
-        streams.append(draft_kv_stream(cfg, layer_id=target_num_layers,
-                                       page_size=page_size))
+        draft_stream = draft_kv_stream(cfg, layer_id=target_num_layers)
+        streams.append(draft_stream)
         ...
         mpk.kv_plan = kv_plan
         eagle3 = Eagle3Builder(
@@ -75,7 +57,7 @@ class Eagle3Builder:
             target_w_embed=shared_embed_dtensor,
             cos_pos_embed=cos_dt, sin_pos_embed=sin_dt,
             num_draft_steps=4,
-            draft_layer_id=target_num_layers,
+            draft_stream=draft_stream,
         )
         eagle3.build_draft_loop(
             aux_h0=aux_h0_dtensor, aux_h1=..., aux_h2=...,
@@ -100,7 +82,7 @@ class Eagle3Builder:
         sin_pos_embed,                     # DTensor (max_pos, head_dim)
         num_draft_steps: int = 4,
         use_aux_norm: bool = False,
-        draft_layer_id: int = None,
+        draft_stream=None,
     ):
         assert mpk.world_size == 1, "Eagle3 builder v1 only supports world_size=1"
         if use_aux_norm:
@@ -113,12 +95,9 @@ class Eagle3Builder:
 
         # The draft's KV is a stream of the caller's plan, at its own layer id.
         self.kv_plan = getattr(mpk, "kv_plan", None)
-        assert self.kv_plan is not None and draft_layer_id is not None, (
-            "Eagle3 needs the KV plan and the layer id its draft was declared "
-            "at: build the pool with draft_kv_stream(draft_config, "
-            "layer_id=<target num_hidden_layers>, ...) alongside the target's "
-            "streams, set mpk.kv_plan, and pass draft_layer_id here")
-        self.draft_layer_id = draft_layer_id
+        assert self.kv_plan is not None and draft_stream is not None
+        assert len(draft_stream.layers) == 1
+        self.draft_layer_id = draft_stream.layers[0]
 
         self.hidden_size = int(draft_config["hidden_size"])
         assert self.hidden_size == target_hidden_size, (
@@ -215,8 +194,7 @@ class Eagle3Builder:
         assert self._lm_head_w.shape == (self._padded_draft_vocab, self.hidden_size)
         self._kept_tensors.append(self._lm_head_w)
 
-        # Paged draft KV cache: a slot on the plan's pages. Nothing to keep
-        # alive here -- the plan owns the one allocation behind every slot.
+        # Paged draft KV cache: a slot on the plan's pages.
         _kv = self.kv_plan.attach(self.mpk, self.draft_layer_id,
                                   prefix="eagle3_draft")
         self.k_cache = _kv["k_cache"]
@@ -252,8 +230,7 @@ class Eagle3Builder:
             self.sd["norm.weight"].contiguous(), "eagle3_norm")
         self.w_lm_head = self._attach(self._lm_head_w, "eagle3_lm_head")
         self.d2t = self._attach(self._d2t, "eagle3_d2t")
-        # k_cache / v_cache came from kv_plan.attach() -- already DTensors on
-        # the pool, and attach() is the only path that checks that.
+        # k_cache / v_cache came from kv_plan.attach()
         self.dummy_norm = self._attach(
             self._dummy_norm_buf, "eagle3_dummy_qk_norm")
 
@@ -492,12 +469,6 @@ class Eagle3Builder:
 
 
 def load_eagle3_draft_config(draft_model_path_or_repo: str):
-    """Just the draft's config.json.
-
-    The KV pool has to be sized before the PersistentKernel exists, which is
-    long before the draft weights are wanted, so the stream declaration needs
-    a way to read the geometry without pulling in the checkpoint.
-    """
     path = _resolve_draft_path(draft_model_path_or_repo)
     with open(os.path.join(path, "config.json")) as fp:
         return json.load(fp)

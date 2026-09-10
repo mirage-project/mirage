@@ -20,9 +20,10 @@ Pipeline per decode step (all in one megakernel):
 Usage from a target builder / demo (once the K2.6 target main body is in MPK).
 The draft's KV is declared alongside the target's and owned by the plan:
 
-    streams = target_streams + dflash_kv_streams(
-        draft_cfg, layer_id_base=target_num_layers)
-    mpk.kv_plan = build_kv_cache(streams, kv_budget=..., max_seq_length=4096)
+    draft_streams = dflash_kv_streams(draft_cfg,
+                                      layer_id_base=target_num_layers)
+    mpk.kv_plan = build_kv_cache(target_streams + draft_streams,
+                                 kv_budget=..., max_seq_length=4096)
 
     dflash = DFlashBuilder(
         mpk=mpk,
@@ -31,7 +32,7 @@ The draft's KV is declared alongside the target's and owned by the plan:
         target_w_lm_head=shared_lm_head_2d,    # [vocab, H_t] torch.bf16 (target's)
         num_speculative_tokens=7,
         max_seq_len=4096,
-        layer_id_base=target_num_layers,
+        draft_streams=draft_streams,
     )
     # cos/sin cache built once from the rope config (YaRN, mscale=1.4159):
     #   self.cos_sin built in __init__; re-used by every step.
@@ -45,7 +46,7 @@ The draft's KV is declared alongside the target's and owned by the plan:
 
 The caches persist across steps so context accumulates; `slot_start` is the
 committed-length offset where this step's new context K/V get written. The plan
-owns and budgets them; they carry no page table (see `dflash_kv_streams`).
+owns and budgets them, though currently they carry no page table.
 
 NOTE on cross-iter / runtime driving: this builder constructs ONE decode step's
 draft graph. Two ways to drive it:
@@ -66,6 +67,7 @@ import math
 import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer
+from ...kv_planner import KVKind, KVStream
 from ....core import bfloat16, int64
 
 
@@ -78,18 +80,10 @@ def dflash_kv_streams(draft_config, layer_id_base: int, world_size: int = 1):
     """The DFlash draft's KV: one unpaged stream at its own layer ids.
 
     `layer_id_base` (the target's layer count) keeps the draft's ids off the
-    target's, as in Eagle3's draft_kv_stream. `paged=False` because
-    dflash_attention reads context as one flat [ctx_len, kv_size] array and
-    the draft writes absolute slots, overwriting verifier context in place.
-
-    No `window` here: SWA is a compute-time limit for this draft, not an
-    allocation, so the per-layer window goes to the attention task.
+    target's. `kind=KVKind.FLAT` because as currently dflash_attention is unpaged.
     """
-    from ...kv_planner import KVStream
-
     if world_size != 1:
-        raise NotImplementedError(
-            "the DFlash draft's KV is not sharded; world_size must be 1")
+        raise NotImplementedError("the DFlash draft's KV is not sharded")
     num_layers = int(draft_config["num_hidden_layers"])
     num_kv_heads = int(draft_config["num_key_value_heads"])
     head_dim = int(draft_config.get("head_dim", 128))
@@ -100,7 +94,7 @@ def dflash_kv_streams(draft_config, layer_id_base: int, world_size: int = 1):
                                     layer_id_base + num_layers)),
                  components=[("k", entry, torch.bfloat16),
                              ("v", entry, torch.bfloat16)],
-                 paged=False),
+                 kind=KVKind.FLAT),
     ]
 
 
@@ -114,7 +108,7 @@ class DFlashBuilder:
         target_w_lm_head: torch.Tensor,  # [vocab, H_t] shared target lm_head
         num_speculative_tokens: int = 7,
         max_seq_len: int = 4096,
-        layer_id_base: int = 0,          # the draft's layer ids in mpk.kv_plan
+        draft_streams=None,              # what dflash_kv_streams() returned
         mscale: float = 1.4159,          # vLLM/sglang native YaRN mscale for K2.6
         cos_sin_cache: torch.Tensor | None = None,  # [max_seq_len, head_dim], optional
         device: str = "cuda",
@@ -153,12 +147,11 @@ class DFlashBuilder:
         self.mscale = mscale
         self.max_seq_len = max_seq_len
         self.kv_plan = getattr(mpk, "kv_plan", None)
-        if self.kv_plan is None:
-            raise ValueError(
-                "DFlashBuilder needs mpk.kv_plan; declare the draft's caches "
-                "with dflash_kv_streams(draft_config, layer_id_base) and set "
-                "the plan on the PersistentKernel")
-        self.layer_id_base = layer_id_base
+        assert self.kv_plan is not None and draft_streams is not None
+        self.layer_ids = tuple(sorted(
+            l for st in draft_streams for l in st.layers))
+        assert len(self.layer_ids) == self.num_layers
+        self.layer_id_base = self.layer_ids[0]
         self._kv_cache = {}          # layer -> (k_cache, v_cache) DTensors
 
         self.target_w_embed = target_w_embed.contiguous()
@@ -251,18 +244,11 @@ class DFlashBuilder:
                        self.cos_full, self.sin_full]
 
     def _kv(self, i: int):
-        """This draft layer's (k_cache, v_cache), from the plan.
-
-        Memoized: both halves of build_step want the same layer, and
-        attach_input creates a new graph input on every call.
-        """
+        """This draft layer's (k_cache, v_cache), from the plan."""
         if i not in self._kv_cache:
-            kv = self.kv_plan.attach(self.mpk, self.layer_id_base + i,
+            kv = self.kv_plan.attach(self.mpk, self.layer_ids[i],
                                      prefix="dflash")
-            assert kv["group_id"] is None, (
-                f"draft layer {i} resolved to group {kv['group_id']}: dflash "
-                f"declares unpaged streams, and these tasks read the cache "
-                f"flat")
+            assert kv["group_id"] is None # as currently dflash_attention is unpaged
             self._kv_cache[i] = (kv["k_cache"], kv["v_cache"])
         return self._kv_cache[i]
 

@@ -182,10 +182,8 @@ def main():
     parser.add_argument("--max-num-batched-tokens", default=8, type=int)
     parser.add_argument("--max-seq-length", default=512, type=int)
     parser.add_argument("--kv-budget", default="2GiB",
-                        help="Bytes for the KV page pool (e.g. 2GiB, 512MiB). "
-                             "The planner derives the block size and page "
-                             "count from it. 'none' falls back to "
-                             "--page-size/--max-num-pages.")
+                        help="Memory budget for KV cache as a size. 'none' falls back to "
+                             "--max-num-pages.")
     parser.add_argument("--max-num-pages", default=16, type=int)
     parser.add_argument("--page-size", default=4096, type=int)
     parser.add_argument("--output-dir", default=None, help="Output directory for compiled artifacts")

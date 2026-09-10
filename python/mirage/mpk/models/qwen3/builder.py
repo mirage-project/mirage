@@ -3,6 +3,7 @@ import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer, grid_for_splitk_linear_layer, shuffle_tensors, inplace_shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
+from ...kv_planner import KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, int64, float32
@@ -10,9 +11,7 @@ from ....core import bfloat16, int64, float32
 from typing import Optional
 
 def qwen3_kv_streams(config, world_size: int = 1):
-    """Qwen3 stores one kind of KV, so it is a single stream over every layer."""
-    from ...kv_planner import KVStream
-
+    """Qwen3 stores one type of KV, so it is a single stream over every layer."""
     entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
     return [
         KVStream("attention",
@@ -101,11 +100,7 @@ class Qwen3Builder(GraphBuilder):
         
         self.num_layers = len(self.model.model.layers)
         
-        # The KV cache is one page pool, already allocated by MPK from the
-        # streams declared above; attach() below is the only way to a layer's
-        # view of it.
-        assert getattr(self.mpk, "kv_plan", None) is not None, (
-            "Qwen3 declares kv_streams, so MPK should have built a plan")
+        assert getattr(self.mpk, "kv_plan", None) is not None
         
         print(f"build_from_model: Model name: {self.model_name}, num_layers: {self.num_layers}, hidden_size: {self.hidden_size}, intermediate_size: {self.intermediate_size}, vocab_size: {self.vocab_size}, num_q_heads: {self.num_q_heads}, num_kv_heads: {self.num_kv_heads}, num_local_q_heads: {self.num_local_q_heads}, num_local_kv_heads: {self.num_local_kv_heads}, head_dim: {self.head_dim}, fused_outdim_1: {self.fused_outdim_1}, fused_outdim_2: {self.fused_outdim_2}")
         

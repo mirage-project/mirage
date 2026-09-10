@@ -6,14 +6,7 @@ differs from the plain-causal one, so an ignored WINDOW_SIZE fails.
 window=0 is the no-regression control on the full-causal path, and confirms
 the identity RoPE tables (cos=1, sin=0) used here are the identity.
 
-Each window gets its OWN KV group. That is not a detail of the harness, it is
-the rule: a group IS a page table, and prepare_next_batch frees a page once it
-falls out of THE GROUP's window -- so two layers masking with different windows
-cannot share one, or the shorter window reclaims pages the longer one is still
-reading. paged_attention_layer enforces it (_resolve_kv_block_size checks that
-the layer's window equals the group's), which is what this test used to violate
-by running all three windows against a single default group; it had been
-failing ever since that check landed. Do not collapse them back into one group.
+Each window gets its OWN KV group.
 
 SCOPE: the MASK only. Skipping leading KV tiles that fall outside the window
 needs seq_len > num_tokens and is covered by test_windowed_attention_direct.py.
@@ -74,9 +67,7 @@ def main():
         max_num_batched_requests=1,
         max_num_batched_tokens=NUM_TOKENS,
         verbose=False)
-    assert len(plan.groups) == len(WINDOWS), (
-        f"each window needs its own page table, got {len(plan.groups)} "
-        f"group(s) for {len(WINDOWS)} windows")
+    assert len(plan.groups) == len(WINDOWS)
 
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()

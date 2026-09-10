@@ -193,8 +193,6 @@ if __name__ == "__main__":
 
     torch.cuda.set_device(rank)
 
-    # The model builds the KV cache; the sizing knobs ride in as plain ints so
-    # they survive from_pretrained, which an object does not.
     kv_sizing = dict(kv_budget=args.kv_budget,
                      max_seq_length=args.max_seq_length,
                      max_num_batched_requests=args.max_num_batched_requests,

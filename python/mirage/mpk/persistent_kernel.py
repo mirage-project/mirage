@@ -753,10 +753,13 @@ class PersistentKernel:
         is_col_major = len(dims) == 2 and strides[0] == 1 and strides[1] >= dims[0]
         assert is_row_major or is_col_major, \
             f"Tensor must be row-major or column-major, got dims={dims} strides={strides}"
-        dtype = convert_torch_type_to_dtype(torch_tensor.dtype)
-        t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
+        if name in self._model_tensors:
+            raise ValueError(
+                f"graph input {name!r} is already attached.")
+        dtype = convert_torch_type_to_dtype(torch_tensor.dtype)
+        t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
         # Track tensor for kernel reuse - tensor pointer can be passed at runtime
         self._model_tensors[name] = torch_tensor

@@ -250,18 +250,6 @@ __global__ void prepare_kernel(RuntimeConfig config,
     }                                                                          \
   } while (0)
 
-// A request's page count may never shrink. Rebuilding the page table copies
-// `old` entries and then records a span of `new`, so if new < old the last
-// (old - new) page ids fall outside the request's slice AND outside the free
-// walk on retirement, which counts indptr[i+1] - indptr[i]: they are lost
-// until the pool is rebuilt.
-//
-// It cannot shrink while step advances by exactly the tokens whose pages were
-// allocated, because then
-//   new = ceil((step + n_prev + n)/bs) >= ceil((step + n_prev)/bs) = old.
-// MPK_SPEC_DECODE breaks that premise: step advances by accepted_count, which
-// is at most the candidates allocated for. Cheap to state, so state it rather
-// than rely on the argument holding for every future scheduler.
 #define MPK_REQUIRE_PAGES_NOT_SHRINKING(g, old_pages, new_pages)               \
   do {                                                                         \
     if ((new_pages) < (old_pages)) {                                           \
@@ -774,9 +762,6 @@ __device__ __forceinline__ bool
       int num_new_pages_g = (step + num_new_tokens + bs - 1) / bs;
       MPK_REQUIRE_PAGES_NOT_SHRINKING(g, num_old_pages_g, num_new_pages_g);
       {
-        // A full last page has (step + num_new_tokens) % bs == 0, and the
-        // kernel reads seq_len = (num_pages-1)*PAGE_SIZE + last_page_len --
-        // so writing 0 there costs it one whole page of context.
         int _lpl = (step + num_new_tokens) % bs;
         config.paged_kv_last_page_len_buffer[g][num_reqs] =
             (_lpl == 0) ? bs : _lpl;

@@ -33,6 +33,7 @@ import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
+from ...kv_planner import KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64
@@ -64,11 +65,7 @@ EOS_TOKEN_ID = 151329
 
 
 def kv_streams(config, world_size: int = 1):
-    """GLM-4.6 is plain causal attention with one kind of KV, so it is a
-    single stream over every layer.
-    """
-    from ...kv_planner import KVStream
-
+    """GLM-4.6 is plain causal attention with one type of KV."""
     entry_shape = (NUM_KV_HEADS // world_size, HEAD_DIM)
     return [
         KVStream("attention",
@@ -180,8 +177,7 @@ class Glm4MoeBuilder(GraphBuilder):
             self._pin(emb.sin().to(torch.bfloat16)), "sin_pos_embed")
 
         # KV caches
-        assert getattr(self.mpk, "kv_plan", None) is not None, (
-            "GLM-4.6 declares kv_streams, so MPK should have built a plan")
+        assert getattr(self.mpk, "kv_plan", None) is not None
 
         # lm head / argmax
         self.padded_vocab_size = ((self.vocab_size + 255) // 256) * 256

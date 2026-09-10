@@ -272,9 +272,7 @@ __device__ __forceinline__ void
 
   // Currently assume that PAGE_SIZE is a multiplier of KV_TILE_SIZE
   // so that we access a single page in one iteration
-  static_assert(PAGE_SIZE % KV_TILE_SIZE == 0,
-                "PAGE_SIZE must be a whole number of KV tiles, so that "
-                "one iteration stays within a single page");
+  static_assert(PAGE_SIZE % KV_TILE_SIZE == 0);
 
 #pragma unroll
   for (int chunk_idx = threadIdx.x;

@@ -404,8 +404,6 @@ def create_mpk(model, args, world_size, rank, meta_tensors):
     """Create a PersistentKernel instance."""
     import mirage as mi
     
-    # The model owns the KV pool; attach() is the only way to a layer's
-    # view of it, and it folds in the pool-identity check.
     kv_plan = model.model.kv_plan
     num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
     
@@ -498,8 +496,6 @@ def main():
             ).to("cuda")
             tokenizer = AutoTokenizer.from_pretrained(args.model)
 
-    # The model owns the KV pool; every page-table buffer below comes from
-    # its plan, so they cannot drift apart.
     kv_plan = model.model.kv_plan
     print("Model loaded.")
 
@@ -531,8 +527,6 @@ def main():
         "num_new_tokens": num_new_tokens,
         "prompt_lengths": prompt_lengths,
         "qo_indptr_buffer": qo_indptr_buffer,
-        # Page tables come from the plan, so the block size, the cache
-        # shape and these buffers cannot drift apart.
         **kv_plan.build_meta_tensors(
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests),
@@ -581,8 +575,6 @@ def main():
     del mpk1
     
     # Reset KV caches
-    # One pool holds every layer's K and V, so zero it once rather than
-    # reaching for the two views.
     model.model.kv_plan.zero_()
     
     # ========================================
@@ -642,8 +634,7 @@ def main():
         "num_new_tokens": torch.full((args_mismatch.max_num_batched_requests,), 1, dtype=torch.int32, device="cuda"),
         "prompt_lengths": torch.full((args_mismatch.max_num_batched_requests,), 0, dtype=torch.int32, device="cuda"),
         "qo_indptr_buffer": torch.empty(args_mismatch.max_num_batched_requests + 1, dtype=torch.int32, device="cuda"),
-        # Deliberately sized for the WRONG request count -- that is what this
-        # negative test is proving the compatibility check catches.
+        # Sized for the WRONG request count.
         **kv_plan.build_meta_tensors(
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args_mismatch.max_num_batched_requests),

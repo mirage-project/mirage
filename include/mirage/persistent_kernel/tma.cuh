@@ -390,7 +390,6 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       using T = bfloat16;
       constexpr int B = 3, M = 3, S = 3;
       constexpr int TMA_CP_ASYNC_SIZE = 64;
-      // qualified: this file is mirage::runtime, the tiles live in kernel
       constexpr int KV_TILE_SIZE = kernel::KV_TILE_SM100;
       size_t const smem_repeat_row = 1;
 
