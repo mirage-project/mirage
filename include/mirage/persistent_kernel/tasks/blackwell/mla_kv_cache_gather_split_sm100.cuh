@@ -53,7 +53,6 @@ __device__ __forceinline__ void mla_kv_cache_gather_split_sm100_task_impl(
   int const NUM_THREADS = 128;
   constexpr int ROPE_DIM = D_K - D_V; // 64
 
-
   // Sequence metadata
   int const first_token_pos = qo_indptr_buffer_ptr[request_id];
   int const last_token_pos = qo_indptr_buffer_ptr[request_id + 1];

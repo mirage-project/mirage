@@ -37,9 +37,10 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
   int my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests;
   long long eos_token_id;
   int allocate_nvshmem_teams;
+  int kv_worst_case_pages_per_request;
   void *profiler_buffer;
 
-  if (!PyArg_ParseTuple(args, "OOiiiiiiLiOOOOO", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &tensor_names_list, &tensor_ptrs_list, &py_json_path, &kv_block_sizes_list, &kv_window_sizes_list)) {
+  if (!PyArg_ParseTuple(args, "OOiiiiiiLiOOOOOi", &meta_list, &py_profiler_buffer, &my_mpi_rank, &num_workers, &num_local_schedulers, &num_remote_schedulers, &max_seq_length, &total_num_requests, &eos_token_id, &allocate_nvshmem_teams, &tensor_names_list, &tensor_ptrs_list, &py_json_path, &kv_block_sizes_list, &kv_window_sizes_list, &kv_worst_case_pages_per_request)) {
     PyErr_SetString(PyExc_TypeError, "Invalid parameters");
     return NULL;
   }
@@ -117,7 +118,7 @@ static PyObject *init_func(PyObject *self, PyObject *args) {
     }
   }
 
-  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, model_tensor_names, model_tensor_ptrs, kv_group_block_sizes, kv_group_window_sizes);
+  init_persistent_kernel(meta_tensors, profiler_buffer, my_mpi_rank, num_workers, num_local_schedulers, num_remote_schedulers, max_seq_length, total_num_requests, eos_token_id, allocate_nvshmem_teams, model_tensor_names, model_tensor_ptrs, kv_group_block_sizes, kv_group_window_sizes, kv_worst_case_pages_per_request);
 
   Py_RETURN_NONE;
 }
@@ -385,19 +386,9 @@ def get_compile_command(
 
 
 def _page_stride(*caches):
-    """Token slots between consecutive pages of a cache shaped
-    [num_pages, entries_per_page, *entry_shape].
-
-    A cache carved out of the shared KV pool is strided by the whole page,
-    which is wider than its own entries whenever the page carries padding or
-    other components (K and V share one page).
-
-    The unit is one token's data for one component -- what the kernel calls
-    KV_CACHE_STRIDE, which task_register.cc derives independently as
-    head_dim * num_kv_heads. The two agree only because every caller asserts
-    the cache is rank 4 (num_pages, page_size, kv_heads, head_dim); a cache
-    of any other rank would make prod(dims[2:]) and that product differ, and
-    the kernel would scale this stride by the wrong row width."""
+    """Row stride (token slots per page) of a paged cache, in the same units
+    as task_register.cc's independently-derived KV_CACHE_STRIDE. Only agrees
+    with it for rank-4 caches (num_pages, page_size, kv_heads, head_dim)."""
     rows = []
     for c in caches:
         if c is None:
@@ -477,8 +468,7 @@ class PersistentKernel:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_num_pages = max_num_pages
         # kv_groups is the page geometry, one entry per page table. [] means
-        # this graph needs no page table -- which is not the same as having no
-        # KV cache: inkling and dflash have one and read it flat.
+        # this graph needs no kv cache (unpaged cache has one page table).
         assert kv_groups is not None, (
             "PersistentKernel needs kv_groups; pass [] for a graph with no "
             "paged KV cache")
@@ -529,8 +519,6 @@ class PersistentKernel:
         # Asserts "==" below is not guaranteed by vllm, because the shape is changed depending on real situation. But the mem space won't change.
         assert qo_indptr_buffer.shape[0] <= self.max_num_batched_requests+1, f"qo_indptr_buffer.shape: {qo_indptr_buffer.shape}, max_num_batched_requests: {self.max_num_batched_requests}"
         self._check_kv_capacity()
-        # EVERY group's page table, not just group 0's -- and none at all for a
-        # model that declared no paged KV, where this loop does not run.
         for _g in range(len(self.kv_groups)):
             _indptr = self.meta_tensors[f"paged_kv_indptr_buffer_{_g}"]
             _lastlen = self.meta_tensors[f"paged_kv_last_page_len_buffer_{_g}"]
@@ -568,10 +556,6 @@ class PersistentKernel:
         from .kv_planner import pages_per_request
 
         # Which schedulers return pages that have fallen out of a window.
-        # Kept in step with the #ifndef MPK_SPEC_DECODE guards around the
-        # reclaim blocks in persistent_kernel.cuh: offline and online_pinned
-        # both recycle; spec-decode does not, because TAIL_OFFSET moves the
-        # boundary first_live_page reproduces.
         recycles = (self.mode in ("offline", "online_pinned")
                     and not _spec_decode_enabled(self))
         per_group = [
@@ -591,12 +575,20 @@ class PersistentKernel:
                 f"static shared memory, over the ~40 KiB budget. Lower the KV "
                 f"budget or raise the page size (fewer, larger pages).")
 
-        demand = self.max_num_batched_requests * sum(per_group)
-        assert demand <= self.max_num_pages, (
-            f"KV page pool too small: {self.max_num_batched_requests} "
-            f"request(s) need {demand} pages at once (per group: {per_group}) "
-            f"but max_num_pages is {self.max_num_pages}. Raise max_num_pages, "
+        # Only one request is guaranteed to fit.
+        per_request = sum(per_group)
+        assert per_request <= self.max_num_pages, (
+            f"KV page pool too small for even one request at max_seq_length: "
+            f"needs {per_request} pages (per group: {per_group}) but "
+            f"max_num_pages is {self.max_num_pages}. Raise max_num_pages, "
             f"raise the block size, or lower max_seq_length.")
+        self.kv_worst_case_pages_per_request = per_request
+        demand = self.max_num_batched_requests * per_request
+        if demand > self.max_num_pages:
+            print(f"[MPK] KV pool oversubscribed: {self.max_num_batched_requests} "
+                  f"request(s) at max_seq_length need {demand} pages, only "
+                  f"{self.max_num_pages} available. Concurrency throttles at "
+                  f"runtime instead of failing here.")
         for _g in range(len(self.kv_groups)):
             need = self._kv_indices_span(_g)
             for _key in (f"paged_kv_indices_buffer_{_g}",
@@ -668,10 +660,6 @@ class PersistentKernel:
             "max_num_batched_requests": 1,
             "max_num_batched_tokens": 1,
             "max_num_pages": 1,
-            # No page table by default. Most test-mode graphs have no KV
-            # cache at all; inkling/dflash attention have one but read it
-            # flat. Either way they want zero groups; the ones that really
-            # do page override this.
             "kv_groups": [],
             "meta_tensors": dict(),
             "profiler_tensor": None,
@@ -981,16 +969,11 @@ class PersistentKernel:
         # column slice (dim 1) of every tensor via imap (1, -1, -1).
         for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
             assert t.num_dims == 2
-        # These read the cache FLAT: task_register derives KV_STRIDE from
-        # dtensor.dim[1], the row WIDTH, so the rows must actually be that far
-        # apart. True for an unpaged stream (K and V get separate contiguous
-        # regions); false for a page-pool cache viewed as 2D, whose rows are a
-        # whole shared page apart.
+        # These read the cache FLAT
         for _c in (ctx_k, ctx_v):
             assert _c.stride[0] == _c.dim(1), (
                 f"context cache rows are {_c.stride[0]} elements apart but "
-                f"{_c.dim(1)} wide: this task addresses it flat, so a cache "
-                f"sharing its page with another component cannot be passed.")
+                f"{_c.dim(1)} wide: this task addresses it flat.")
         G = grid_dim[0]
         if G > 1:
             for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
@@ -1088,16 +1071,10 @@ class PersistentKernel:
         for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
             assert t.num_dims == 2
         assert bias.num_dims == 2 and bias.dim(1) == extent
-        # These read the cache FLAT: task_register derives KV_STRIDE from
-        # dtensor.dim[1], the row WIDTH, so the rows must actually be that far
-        # apart. True for an unpaged stream (K and V get separate contiguous
-        # regions); false for a page-pool cache viewed as 2D, whose rows are a
-        # whole shared page apart.
         for _c in (ctx_k, ctx_v):
             assert _c.stride[0] == _c.dim(1), (
                 f"context cache rows are {_c.stride[0]} elements apart but "
-                f"{_c.dim(1)} wide: this task addresses it flat, so a cache "
-                f"sharing its page with another component cannot be passed.")
+                f"{_c.dim(1)} wide: this task addresses it flat.")
         G = grid_dim[0]
         if G > 1:
             for t in (q, ctx_k, ctx_v, blk_k, blk_v, output):
@@ -1244,22 +1221,12 @@ class PersistentKernel:
         assert output.num_dims == 2  # (batch_size, hidden_size / world_size)
         assert k_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
         assert v_cache.num_dims == 4  # (batch_size, seq_len, kv_heads, head_dim)
-        # This kernel is NOT paged: it takes no page table and no page stride,
-        # and indexes the cache flat by absolute token. That lands on the right 
-        # token only while consecutive pages sit exactly one block apart.
-        #
-        # A sequence inside one block never leaves the first page and is safe
-        # at any stride. Refuse the rest rather than read the wrong half.
+        # This kernel is NOT paged. A sequence inside one block never leaves the
+        # first page and is safe at any stride. Refuse the rest.
         block_size = k_cache.dim(1)
         if self.max_seq_length > block_size:
             stride = _page_stride(k_cache, v_cache)
-            assert stride == block_size, (
-                f"single_batch_extend indexes the KV cache flat by absolute "
-                f"token, but this cache's pages are {stride} rows apart with "
-                f"a {block_size}-token block, and max_seq_length "
-                f"{self.max_seq_length} crosses a page. Raise the block size "
-                f"to >= max_seq_length (--page-size), or move this path onto "
-                f"paged attention.")
+            assert stride == block_size
         head_dim = k_cache.dim(3)
         num_kv_heads = k_cache.dim(2)
         num_q_heads = output.dim(1) // head_dim # 32
@@ -2314,14 +2281,10 @@ class PersistentKernel:
         limit: float = 7.0,
         alpha: float = 1.702,
     ):
-        """Gated activation with both halves clamped and a scaled sigmoid:
+        """out = (clamp(up, -limit, limit) + 1) * min(gate, limit)
+                 * sigmoid(min(gate, limit) * alpha)
 
-            out = (clamp(up, -limit, limit) + 1)
-                  * min(gate, limit) * sigmoid(min(gate, limit) * alpha)
-
-        `input` holds gate then up, as moe_silu_mul does. A checkpoint that
-        stores the two interleaved must be de-interleaved by its loader.
-        """
+        `input` holds gate then up, as moe_silu_mul does."""
         import struct
 
         assert input.num_dims == 3  # (batch_size, num_expert_per_tok, 2 * intermediate_size)
@@ -3457,6 +3420,7 @@ class PersistentKernel:
             "",  # Empty JSON path = use __FILE__ based path during initial compile
             [g.block_size for g in self.kv_groups],
             [g.window_size for g in self.kv_groups],
+            self.kv_worst_case_pages_per_request,
         )
 
         self._is_compiled = True
@@ -3548,6 +3512,7 @@ class PersistentKernel:
             json_path,  # Pass the JSON path for kernel reuse
             [g.block_size for g in self.kv_groups],
             [g.window_size for g in self.kv_groups],
+            self.kv_worst_case_pages_per_request,
         )
 
         self._is_compiled = True

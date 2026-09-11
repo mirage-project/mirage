@@ -40,9 +40,7 @@ class GraphBuilder(abc.ABC):
     """Base for the per-model task-graph builders.
 
     A subclass reaches its KV caches through `self.mpk.kv_plan`. Whoever
-    constructs the PersistentKernel already holds the plan -- its kv_groups
-    and page tables come from it -- so the plan rides on the kernel rather
-    than being passed to the builder separately.
+    constructs the PersistentKernel holds the plan.
     """
 
     def __init__(self, mpk, weights: Optional[Dict[str, Any]] = None):
@@ -64,8 +62,7 @@ class GraphBuilder(abc.ABC):
         through `self.mpk.kv_plan.attach(self.mpk, layer)`.
         """
         raise NotImplementedError(
-            "this builder does not declare its KV streams; override "
-            "kv_streams()")
+            "this builder does not declare its KV streams")
 
     @staticmethod
     def load_config(model_name: str, model_path: str | None = None):

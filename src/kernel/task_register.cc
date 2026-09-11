@@ -1358,9 +1358,8 @@ int TaskRegister::register_paged_attention_hopper_task(
   // Positions match the sm100 variant: Python emits one packing for every
   // target_cc, so a field keeps its index even where it is unsupported.
   if (params.size() != 14) {
-    throw std::runtime_error(
-        "paged_attention_hopper expects 14 params, got " +
-        std::to_string(params.size()));
+    throw std::runtime_error("paged_attention_hopper expects 14 params, got " +
+                             std::to_string(params.size()));
   }
   assert(params[6] == 0 && params[7] == 0 &&
          "q_len_override/tail_offset are not supported on Hopper");
@@ -2355,9 +2354,8 @@ int TaskRegister::register_paged_attention_sm100_task(
   // params[12]: group_id      (which KV group's page table this layer reads)
   // params[13]: page_stride   (token slots between pages)
   if (params.size() != 14) {
-    throw std::runtime_error(
-        "paged_attention_sm100 expects 14 params, got " +
-        std::to_string(params.size()));
+    throw std::runtime_error("paged_attention_sm100 expects 14 params, got " +
+                             std::to_string(params.size()));
   }
   int group_id = params[12];
   int page_stride = params[13];
@@ -4575,7 +4573,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
          SEQ_LEN_PER_BLOCK, /* SEQ_LEN */
          max_seq_len,       /* MAX_SEQ_LEN */
          page_size,         /* PAGE_SIZE */
-         page_stride,  /* PAGE_STRIDE */
+         page_stride,       /* PAGE_STRIDE */
          max_tokens,        /* MAX_TOKENS */
          "true",            /* PARTITION_KV */
          num_kv_chunks /* NUM_KV_CHUNKS */);

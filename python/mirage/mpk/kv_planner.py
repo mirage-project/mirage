@@ -1,20 +1,11 @@
 """KV cache planner: hybrid KV streams share one pool, one physical page size.
 
 Pool shape: ``[num_slots, max_num_pages, target_page_bytes]``.
-
 - stream (KVSpec): one type of cache element, declared by the model builder.
 - page: one row of physical memory.
 - block_size: raw tokens one page holds for a given stream.
 - group: partitioned (by layers) or grouped KVSpec that share one page.
-- slot: index of one physical tensor. Layer i of every group shares the
-  tensor at slot i.
-
-Usage:
-    plan = plan_kv_groups([KVSpec(...), KVSpec(...)])
-    pool, views = plan.allocate_pool(entry_layouts, max_num_pages)
-    pk = PersistentKernel(kv_groups=plan.group_specs(),
-                          meta_tensors={**plan.build_meta_tensors(...)})
-    group_id, slot_id = plan.layer_info(layer_id)
+- slot: index of one physical tensor; layer i of every group shares slot i.
 """
 
 import warnings
@@ -40,18 +31,14 @@ class KVKind(Enum):
 
 @dataclass(frozen=True)
 class KVSpec:
-    """One KV stream, in the planner's own vocabulary (see ``KVStream`` for
-    the model-builder-facing form this is normally derived from).
+    """One KV stream, in the planner's own vocabulary (``KVStream`` is the
+    model-builder-facing form this derives from).
 
-    per_entry_bytes: bytes of one stored entry.
-    layer_ids: layers carrying this stream.
-    compress_ratio: raw tokens folded into one stored entry. For a bounded
-        spec, the whole run folds into its one entry.
-    window_size: sliding-window length in raw tokens.
-    block_size_multiple_of: restriction on block size, in raw tokens (e.g.
-        the attention kernel's KV tile). None takes default_kv_tile().
+    compress_ratio: raw tokens folded into one entry (a bounded spec folds
+        the whole run into one).
+    block_size_multiple_of: block-size restriction in raw tokens (e.g. the
+        attention kernel's KV tile); None takes default_kv_tile().
     bounded: never more than 1 entry, regardless of the shared page size.
-        See ``KVKind.BOUNDED``.
     """
     name: str
     per_entry_bytes: int
@@ -77,23 +64,15 @@ def _itemsize(dtype) -> int:
 
 @dataclass(frozen=True)
 class KVStream:
-    """One KV stream: what a page holds, for which layers. The declaration
-    surface a model builder uses; ``build_kv_cache`` turns it into a
-    ``KVSpec`` (paged) or ``FlatStream`` (unpaged).
+    """One KV stream: what a page holds, for which layers.
+    ``build_kv_cache`` turns it into a ``KVSpec`` (paged) or ``FlatStream``.
 
-    ``components`` is the per-token payload -- for GQA the K and V halves,
-    each ``(entry_name, entry_shape, dtype)``. ``per_entry_bytes`` derives
-    from it.
+    ``kind=KVKind.FLAT``: read as one flat ``[capacity, width]`` array -- no
+    group, no page table, no say in the page size (still owned/budgeted
+    here).
 
-    ``kind=KVKind.FLAT`` means the reader addresses the cache as one flat
-    ``[capacity, width]`` array: no group, no page table, no say in the
-    shared page size. The plan still owns and budgets its storage. See
-    ``FlatStream``.
-
-    A layer carrying several streams gets each one's kwargs namespaced by its
-    ``name`` (``**kv_swa`` supplies ``swa_k_cache``, ...) -- names are
-    required unique, so this cannot collide; a layer with one stream gets the
-    bare ``k_cache``/``group_id``.
+    A layer with several streams gets each namespaced by its (unique)
+    ``name``; one stream gets bare ``k_cache``/``group_id``.
     """
     name: str
     layers: Tuple[int, ...]
@@ -165,19 +144,16 @@ def _hashable(v):
 def _merge_identical_streams(streams):
     """Fold streams that would lay a page out identically into one stream.
 
-    A group IS a page table, and the pool carries one slot count per group,
-    so a stream with very few layers drags that count down for everyone it
-    stays apart from (DeepSeek-V3's 61 attention + 1 MTP layer: gcd(61, 1)=1,
-    so unmerged this is 62 single-slot groups instead of one group of 62).
+    A group IS a page table; a stream with few layers drags the pool's slot
+    count down for everyone (DeepSeek-V3: 61 attention + 1 MTP layer,
+    unmerged gcd(61,1)=1 -> 62 single-slot groups instead of one 62-slot
+    group).
 
-    Key = every KVStream field describing the PAGE, read off the dataclass so
-    a field added later is included by default. ``components`` must be in the
-    key, otherwise two streams can agree on ``per_entry_bytes`` while laid out
-    differently. Two streams with the same key covering the same layer are
-    refused rather than merged.
+    Key = every KVStream field describing the PAGE (not name/layers), so a
+    later-added field is included by default; two streams with the same key
+    covering the same layer are refused, not merged.
 
-    Returns ``(merged_streams, {declared name: merged name})``; the map is how
-    ``attach`` finds the group a declared stream ended up in.
+    Returns ``(merged_streams, {declared_name: merged_name})``.
     """
     key_fields = [f.name for f in fields(KVStream)
                   if f.name not in ("name", "layers")]
@@ -215,11 +191,10 @@ def _merge_identical_streams(streams):
 class FlatStream:
     """A stream whose reader wants one contiguous ``[capacity, width]`` array.
 
-    Outside the pool by necessity: a constant-stride reader cannot be handed
-    its storage a page at a time from a shared free list. Still inside the
-    plan, which allocates it, budgets it, and is the only way to reach it.
-    ``capacity`` is in tokens -- a flat cache is indexed by absolute position,
-    so it holds the whole run.
+    Outside the pool: a constant-stride reader can't be handed pages from a
+    shared free list. Still owned and budgeted by the plan. ``capacity`` is
+    in tokens -- a flat cache is indexed by absolute position, so it holds
+    the whole run.
     """
     name: str
     layers: Tuple[int, ...]
@@ -237,10 +212,8 @@ class FlatStream:
 
 
 def _check_stream_names(streams) -> None:
-    """Stream names are unique. A repeat silently loses a layout (``_layouts``
-    is keyed by name), and since ``attach()`` namespaces a shared layer's
-    kwargs by name, a repeat would also collide there -- unique names rule
-    both out at once."""
+    """Names must be unique: a repeat would silently lose a layout (keyed by
+    name) and collide in attach()'s per-stream namespacing."""
     seen = set()
     for st in streams:
         if st.name in seen:
@@ -259,27 +232,18 @@ def build_kv_cache(streams, *,
                    device: str = "cuda",
                    verbose: bool = True,
                    **plan_kwargs) -> "KVCachePlan":
-    """Declare the KV streams, plan the page geometry, size the pool and
-    allocate it -- the whole cache, in one call.
+    """Declare the KV streams, plan the geometry, size and allocate the pool
+    -- the whole cache in one call.
 
-    Give exactly one of ``kv_budget`` (bytes, the better knob) or
-    ``max_num_pages``. ``max_seq_length`` is required with a budget (that is
-    what the pool is sized to hold); with an explicit page count it is
-    optional, and adds the floor check that the pool holds one request of
-    that length.
+    Give exactly one of ``kv_budget`` (bytes) or ``max_num_pages``.
+    ``max_seq_length`` is required with a budget; with an explicit page
+    count it only adds the one-request floor check.
 
-    The returned plan owns the pool; ``attach(mpk, layer)`` is the only way
-    to a cache tensor, so no caller can hold one that skipped the
-    pool-identity check.
-
-    A ``kind=KVKind.FLAT`` stream is split off here and never reaches
-    ``plan_kv_groups``: no say in the shared page size, no page table, but
-    the plan still owns and budgets its storage. With no paged stream at all
-    the plan has zero groups.
-
-    Several streams may cover one layer -- a windowed, a compressed and an
-    indexer cache on one layer is a real shape (DeepSeek V4) -- and
-    ``attach`` namespaces each by name so they cannot collide.
+    The returned plan owns the pool -- ``attach(mpk, layer)`` is the only
+    way to a cache tensor. ``kind=KVKind.FLAT`` streams are split off before
+    ``plan_kv_groups`` (no page table, still owned/budgeted). Several
+    streams may cover one layer (windowed + compressed + indexer on one
+    layer, e.g. DeepSeek V4); ``attach`` namespaces each by name.
     """
     streams = list(streams)
     _check_stream_names(streams)
@@ -326,11 +290,9 @@ def build_kv_cache(streams, *,
 
 
 def _device_index(device) -> int:
-    """The ordinal mem_get_info wants, from whatever form the caller gave.
-
-    A bare "cuda" means the CURRENT device, not device 0 -- every rank of a
-    multi-GPU run passes "cuda" and must measure its own card.
-    """
+    """The ordinal mem_get_info wants. A bare "cuda" means the CURRENT
+    device, not device 0 -- every rank of a multi-GPU run passes "cuda" and
+    must measure its own card."""
     if isinstance(device, int):
         return device
     dev = torch.device(device)
@@ -340,15 +302,12 @@ def _device_index(device) -> int:
 
 
 class KVUnificationError(ValueError):
-    """A stream does not fit the shared page size, so a single-page-size plan
-    is impossible. Multi-bucket planning might be a future work for models work
-    better with multiple page sizes.
+    """A stream does not fit the shared page size -- a single-page-size plan
+    is impossible.
 
-    A ValueError, not a bare Exception: it is a bad CLI/config choice (the
-    page size a caller picked), the same class of mistake every demo's
-    `except ValueError: raise SystemExit(...)` guard already exists to turn
-    into a clean message instead of a raw traceback -- it should not need its
-    own separate except clause at every call site to get that.
+    A ValueError, not a bare Exception: every demo's
+    ``except ValueError: raise SystemExit(...)`` guard already exists to
+    turn this into a clean message, so it needs no separate except clause.
     """
 
 
@@ -386,11 +345,9 @@ def default_kv_tile(target_cc: Optional[int] = None) -> int:
 
 @dataclass
 class KVGroupSpec:
-    """Per-group config consumed by PersistentKernel: the group's page table
-    advances ``block_size`` raw tokens per page.
-
-    ``window_size`` (0 = full attention) lets the scheduler recycle pages that
-    have fallen out of the window mid-request."""
+    """Per-group config for PersistentKernel: the page table advances
+    ``block_size`` tokens per page. ``window_size=0`` is full attention;
+    nonzero lets the scheduler recycle out-of-window pages."""
     block_size: int
     window_size: int = 0
 
@@ -399,9 +356,9 @@ def pages_per_request(block_size: int, window_size: int, max_seq_length: int,
                       max_num_batched_tokens: int = 1) -> int:
     """Worst-case pages one request holds in a group at any single step.
 
-    Matching the scheduler, pages are counted as allocated for the batch's
-    LAST token and recycled against its FIRST, so a wide batch holds up to
-    ``max_num_batched_tokens`` extra."""
+    Pages are counted as allocated for the batch's LAST token and recycled
+    against its FIRST, so a wide batch holds up to ``max_num_batched_tokens``
+    extra."""
     worst = 0
     for boundary in range(0, max_seq_length, block_size):
         for pos in (boundary, min(boundary + block_size - 1,
@@ -516,14 +473,12 @@ class KVCachePlan:
 
     def pages_needed(self, max_num_batched_requests: int, max_seq_length: int,
                      max_num_batched_tokens: int = 1) -> int:
-        """Floor: page ids the batch holds at once in the worst case. Below
-        it the free list wraps and re-hands a live page.
+        """Floor: page ids the batch holds at once, worst case. Below it the
+        free list wraps and re-hands a live page.
 
-        Assumes a windowed group recycles, which offline and online_pinned do
-        but spec-decode does not. The planner does not know the mode, so under
-        spec-decode this floor is too low and the real check is
-        PersistentKernel._check_kv_capacity at graph-build time -- same
-        arithmetic, mode-aware, later error."""
+        Assumes windowed groups recycle (true for offline/online_pinned, not
+        spec-decode) -- the mode-aware, authoritative check is
+        PersistentKernel._check_kv_capacity."""
         return max_num_batched_requests * sum(
             pages_per_request(g.block_size, g.window_size, max_seq_length,
                               max_num_batched_tokens)
@@ -534,12 +489,11 @@ class KVCachePlan:
                            max_num_batched_requests: int = 1,
                            dtype=torch.int32, device: str = "cuda"):
         """Page-table buffers (indptr / indices / last_page_len) for every
-        group. Merge into the meta_tensors dict before constructing
-        PersistentKernel.
+        group; merge into meta_tensors before constructing PersistentKernel.
 
-        The indices buffer is indexed by absolute page number within a
-        request; a recycled slot keeps its place holding -1, so its span
-        follows ``max_seq_length`` rather than the live page count.
+        The indices buffer is indexed by absolute page number; a recycled
+        slot keeps -1, so its span follows max_seq_length, not the live page
+        count.
         """
         max_num_pages = self._pool_pages(max_num_pages)
         out = {}
@@ -672,11 +626,9 @@ class KVCachePlan:
 
     def _materialize(self, *, max_num_pages: Optional[int] = None,
                      device: str = "cuda"):
-        """Allocate the pool from the declared layouts and keep the views.
-
-        Replaces allocate_pool plus carrying ``views`` around: the plan holds
-        them, so no caller can end up with a cache tensor that never went
-        through the identity check -- attach() is the only way back out."""
+        """Allocate the pool and keep the views, so no caller ends up with a
+        cache tensor that skipped the identity check -- attach() is the only
+        way out."""
         if self._layouts is None:
             raise RuntimeError(
                 "this plan was not built by declare_kv(), so it does not know "
@@ -699,28 +651,23 @@ class KVCachePlan:
     def views(self, group_id: int):
         """{component: (slots, pages, page size, *entry shape)} for one group.
 
-        For code that indexes the cache directly rather than handing it to the
-        megakernel -- demo/qwen3's eager PyTorch reference writes
-        key_cache[layer, 0, step] itself, and needs the tensors, not an
-        attachment. Anything feeding a paged-attention task wants attach()
-        instead, which resolves the slot and checks the view is still on the
-        pool."""
+        For code indexing the cache directly instead of through the
+        megakernel (e.g. demo/qwen3's eager PyTorch reference). A
+        paged-attention task should use attach() instead, which resolves the
+        slot and checks pool identity."""
         if self._views is None:
             raise RuntimeError("materialize() has not run on this plan")
         return self._views[group_id]
 
     def attach(self, mpk, layer_id: int, prefix: str = "layer"):
-        """Everything this layer's tasks need, for EVERY cache it carries:
+        """Everything layer `i`'s tasks need, for every cache it carries:
 
             mpk.paged_attention_layer(..., **kv.attach(mpk, i))
 
-        Folds group/slot resolution, the views walk and the pool-identity
-        check (which catches a cache copied out by a stray ``.contiguous()``)
-        into one accessor. A layer with several streams returns them all,
-        each namespaced by its own name (names are required unique, so this
-        cannot collide); a layer with one stream gets bare keys.
-        ``window_size`` appears only where a window was declared; absent
-        means 0, the default every layer function already takes.
+        Resolves group/slot, walks the views, and checks pool identity in
+        one call. Several streams on one layer are returned namespaced by
+        name; one stream gets bare keys. window_size appears only where a
+        window was declared.
         """
         if self._views is None:
             raise RuntimeError("materialize() has not run on this plan")
@@ -756,12 +703,10 @@ class KVCachePlan:
         return out
 
     def _allocate_flat(self, device: str = "cuda"):
-        """The unpaged streams as ONE allocation, plus typed views keyed
-        ``views[(stream name, layer_id)][component]``. Laid out stream / layer
-        / component, so a view has the shape and stride of the tensor it
-        replaces. The stream name is part of the key because one layer may
-        carry more than one unpaged stream.
-        """
+        """The unpaged streams as ONE allocation, keyed
+        ``views[(stream_name, layer_id)][component]``. The stream name is
+        part of the key since one layer may carry more than one unpaged
+        stream."""
         total = self.flat_bytes
         buf = torch.zeros(total, dtype=torch.uint8, device=device)
         self._flat_span = (buf.data_ptr(), buf.data_ptr() + total)
@@ -810,16 +755,15 @@ class KVCachePlan:
         """The entire KV cache as ONE allocation, plus typed views.
 
         Shape: ``[num_slots, max_num_pages, target_page_bytes]``. A page id
-        denotes page ``p`` of every slot, held by one group at a time. A
+        denotes page ``p`` of every slot, held by one group at a time; a
         stream may carve its page into several components (K and V), laid
-        out component-major inside the page.
+        out component-major.
 
         entry_layouts: ``{spec_name: [(component_name, entry_shape, dtype),
-            ...]}``; the components' per-entry bytes must sum to at most the
-            stream's per_entry_bytes.
-        Returns ``(pool, views)``; ``views[group_id][component_name]`` is
-            shaped ``[num_slots, max_num_pages, entries_per_page,
-            *entry_shape]`` and aliases ``pool``."""
+            ...]}``. Returns ``(pool, views)``; ``views[group_id][component]``
+            is shaped ``[num_slots, max_num_pages, entries_per_page,
+            *entry_shape]``.
+        """
         max_num_pages = self._pool_pages(max_num_pages)
         pool = torch.zeros(self.num_slots, max_num_pages,
                            self.target_page_bytes, dtype=torch.uint8,
@@ -882,10 +826,9 @@ class KVCachePlan:
         return tensor
 
     def elems_per_page(self, dtype) -> int:
-        """How wide one page is, in elements of ``dtype``.
-
-        Always the full page, not the view's packed entry span. NOT the
-        kernel's PAGE_STRIDE in token, which is this divided by the width."""
+        """Page width in elements of ``dtype`` -- the full page, not the
+        view's packed entry span; not the kernel's PAGE_STRIDE (that's this
+        divided by width)."""
         itemsize = torch.empty(0, dtype=dtype).element_size()
         assert self.target_page_bytes % itemsize == 0
         return self.target_page_bytes // itemsize
@@ -904,11 +847,8 @@ def format_bytes(nbytes: int) -> str:
 
 
 def resolve_kv_budget(spec) -> int:
-    """Turn a user-facing KV budget into bytes.
-
-    Absolute sizes only: ``"24GiB"``, ``"512MiB"``, or a raw int. A bare
-    number as a string is rejected.
-    """
+    """Turn a user-facing KV budget into bytes: ``"24GiB"``, ``"512MiB"``, or
+    a raw int. A bare number as a string is rejected."""
     if isinstance(spec, int) and not isinstance(spec, bool):
         return int(spec)
     text = str(spec).strip()
@@ -929,11 +869,10 @@ def _resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
                        max_num_batched_requests: int = 1,
                        max_num_batched_tokens: int = 1,
                        device: int = 0, verbose: bool = True) -> int:
-    """The page count to build the pool with, from a byte budget or an
-    explicit count. Exactly one of ``kv_budget`` / ``max_num_pages`` may be
-    given. Without ``max_seq_length`` the floor check is skipped --
-    ``build_kv_cache`` requires one alongside a budget for that reason.
-    """
+    """Page count to build the pool with, from a byte budget or an explicit
+    count -- exactly one of ``kv_budget``/``max_num_pages``. Without
+    ``max_seq_length`` the floor check is skipped (``build_kv_cache``
+    requires one alongside a budget)."""
     if (kv_budget is None) == (max_num_pages is None):
         raise ValueError("give exactly one of kv_budget / max_num_pages")
 
@@ -952,13 +891,13 @@ def _resolve_pool_size(plan: "KVCachePlan", *, kv_budget=None,
         source = f"budget {kv_budget}"
 
     if max_seq_length is not None:
-        floor = plan.pages_needed(max_num_batched_requests, max_seq_length,
-                                  max_num_batched_tokens)
+        # Only one request is guaranteed to fit; more is a runtime bet (see
+        # kv_worst_case_pages_per_request in persistent_kernel.cuh).
+        floor = plan.pages_needed(1, max_seq_length, max_num_batched_tokens)
         if pages < floor:
             raise ValueError(
                 f"KV pool too small: {source} gives {pages} page(s), but "
-                f"{max_num_batched_requests} request(s) at {max_seq_length} "
-                f"tokens need {floor} "
+                f"even one request at {max_seq_length} tokens needs {floor} "
                 f"({format_bytes(plan.budget_bytes(floor))})")
 
     # MPK_MAX_NUM_PAGES cannot be zero even when nothing allocates a page.
@@ -987,11 +926,9 @@ def _plan_with_no_paged_streams(target_page_bytes: Optional[int] = None,
                                 block_size: int = 64,
                                 target_cc: Optional[int] = None
                                 ) -> KVCachePlan:
-    """The plan for a model with no paged KV: zero groups, zero bytes.
-
-    The runtime compiles at MPK_NUM_KV_GROUPS == 0; device-side arrays that
-    would go zero-length size with MPK_NUM_KV_GROUPS_ARRAY instead.
-    """
+    """Plan for a model with no paged KV: zero groups, zero bytes. Compiles
+    at MPK_NUM_KV_GROUPS==0; device arrays that would go zero-length size
+    with MPK_NUM_KV_GROUPS_ARRAY instead."""
     if target_page_bytes is not None:
         raise ValueError(
             "target_page_bytes was given but no stream is paged, so there is "
@@ -1007,26 +944,18 @@ def plan_kv_groups(
 ) -> KVCachePlan:
     """Turn KVSpec declarations into a KVCachePlan.
 
-    Give exactly one of ``target_page_bytes`` (bytes, exact) or ``block_size``
-    (tokens); neither given defaults to ``block_size=64``. They drive
-    different fitting rules for every spec that is not the one setting the
-    page size:
-
+    Give exactly one of ``target_page_bytes`` (bytes, exact) or
+    ``block_size`` (tokens); default ``block_size=64``.
     - ``target_page_bytes``: greedy packing (``_fit_block_size``) -- every
-      spec gets as many entries as fit, floored to its own tile. Use this
-      when the exact byte budget is already known (e.g. it must unify
-      several ``compress_ratio``s that no single token count can at once).
+      spec gets as many entries as fit, floored to its own tile.
     - ``block_size``: each spec computes its own tile-legal native size in
       isolation (``_native_fit``); the largest becomes ``target_page_bytes``.
-      Every other spec then scales up by an exact integer ratio (zero
-      padding) or, failing that, keeps its native size and pads the rest,
-      never repacked (``_fit_to_anchor``) -- matching vLLM's
-      ``unify_kv_cache_spec_page_size``. Coarser than the greedy path when a
-      spec's ratio to the anchor isn't clean.
+      Others scale by an exact integer ratio (zero padding) or keep native
+      size and pad (``_fit_to_anchor``) -- matches vLLM's
+      ``unify_kv_cache_spec_page_size``.
 
-    A spec that cannot fit even one tile's worth of entries raises
-    KVUnificationError; one that fits but pays padding warns instead of
-    failing silently (``_warn_if_page_wastes_bytes``).
+    A spec that can't fit one tile's entries raises KVUnificationError; one
+    that fits but pays padding warns instead.
 
     Layers are then chunked into groups of ``_group_size`` layers so all
     groups share one slot layout with minimal waste.
@@ -1082,10 +1011,9 @@ def plan_kv_groups(
 
 
 def _native_fit(spec: KVSpec, block_size: int, tile: int) -> Tuple[int, int]:
-    """This spec's own tile-legal (entries, bytes) at ``block_size`` tokens,
-    with no cross-spec reconciliation yet. Raises KVUnificationError if it
-    can't fit one tile's worth of entries even in isolation. A bounded spec
-    skips the tile arithmetic -- it is always exactly 1 entry.
+    """This spec's tile-legal (entries, bytes) at ``block_size`` tokens, no
+    cross-spec reconciliation. Raises KVUnificationError if it can't fit one
+    tile even alone. A bounded spec skips tile arithmetic (always 1 entry).
     """
     if spec.bounded:
         return 1, spec.per_entry_bytes
@@ -1104,14 +1032,11 @@ def _native_fit(spec: KVSpec, block_size: int, tile: int) -> Tuple[int, int]:
 
 def _fit_to_anchor(spec: KVSpec, native: Tuple[int, int],
                    target_page_bytes: int):
-    """Reconcile this spec's ``_native_fit`` result against the shared page:
-    (block_size_tokens, entries, padding_bytes).
-
-    Scales up by an exact integer ratio when one exists (zero padding);
-    otherwise leaves the spec at its native size and pads the rest -- NEVER
-    repacked here, unlike ``_fit_block_size``. A bounded spec always takes the
-    pad branch: scaling its entries up would defeat the point of a fixed
-    one-per-request state.
+    """Reconcile ``_native_fit`` against the shared page: (block_size,
+    entries, padding). Scales by an exact integer ratio if one exists (zero
+    padding), else keeps native size and pads -- never repacked, unlike
+    ``_fit_block_size``. A bounded spec always pads: scaling its entries
+    would defeat a fixed one-per-request state.
     """
     native_entries, native_bytes = native
     if spec.bounded:
@@ -1131,13 +1056,11 @@ def _fit_to_anchor(spec: KVSpec, native: Tuple[int, int],
 
 
 def _fit_block_size(spec: KVSpec, target_page_bytes: int, tile: int):
-    """Page capacity for a stream as (block_size_tokens, entries, padding_bytes).
-
-    Fits what the page holds, floored to a tile multiple; the leftover is
-    padding. Always repacks (unlike ``_fit_to_anchor``) -- used only for the
-    ``target_page_bytes`` path, where the caller already picked an exact
-    byte budget and wants it used well. A bounded spec is the one exception:
-    it stays at 1 entry rather than being packed with copies nothing reads.
+    """Page capacity as (block_size, entries, padding_bytes): fits what the
+    page holds, floored to a tile, leftover is padding. Always repacks
+    (unlike ``_fit_to_anchor``) -- used for the ``target_page_bytes`` path.
+    A bounded spec stays at 1 entry instead of being packed with copies
+    nothing reads.
     """
     if spec.bounded:
         if target_page_bytes < spec.per_entry_bytes:
@@ -1186,15 +1109,12 @@ def _group_size(layer_counts):
 def _warn_if_group_size_starved(specs, group_size: int) -> None:
     """Flag a spec that fragments because a much smaller one set group_size.
 
-    Mirrors ``_group_size``'s branches to tell its two good outcomes (pad up
-    to hi; split on a real gcd > 1) from its one bad one, with one deliberate
-    difference: unlike ``_group_size``, this does NOT treat ``g == lo`` as
-    clean, since when lo is small (e.g. 1) that holds trivially for any spec
-    sizes -- gcd with 1 is always 1. That case is exactly what's worth
-    flagging: a 1-layer speculative-decode draft next to a 48-layer target
-    with a different page layout (so ``_merge_identical_streams`` can't fold
-    them) forces group_size=1, fragmenting the target into 48 single-slot
-    groups with zero padding, which a padding-only check would call clean.
+    Mirrors ``_group_size``'s branches but does NOT treat ``g == lo`` as
+    clean here, since a small ``lo`` (e.g. 1) makes gcd-with-1 trivially 1 --
+    exactly the case worth flagging: a 1-layer spec-decode draft next to a
+    48-layer target with a different page layout forces group_size=1,
+    fragmenting the target into 48 single-slot groups with zero padding,
+    which a padding-only check would call clean.
     """
     counts = [len(s.layer_ids) for s in specs]
     lo, hi = min(counts), max(counts)
@@ -1228,13 +1148,11 @@ def _warn_if_group_size_starved(specs, group_size: int) -> None:
 
 def _warn_if_page_wastes_bytes(specs, target_page_bytes: int,
                                per_spec: dict) -> None:
-    """Flag a spec whose entries do not tile the shared page exactly.
+    """Flag a spec whose entries don't tile the shared page exactly.
 
-    A non-exact spec is floored to a tile multiple and the remainder reported
-    as ``padding_bytes_per_page``, charged on EVERY page its group ever
-    holds -- so even a "small" per-page percentage compounds across the
-    pool. Warn unconditionally (no threshold) and let the caller judge, same
-    philosophy as ``_warn_if_group_size_starved``.
+    The remainder is charged as padding on EVERY page its group ever holds,
+    so even a small per-page percentage compounds across the pool. Warns
+    unconditionally, no threshold.
     """
     for s in specs:
         _, entries, padding = per_spec[s.name]
@@ -1256,14 +1174,13 @@ def _warn_if_page_wastes_bytes(specs, target_page_bytes: int,
 class KVEventLog:
     """Record-and-verify instrumentation for the runtime page allocator.
 
-    Constructing one wires a ``kv_event_log`` meta tensor into the kernel
-    before compilation. After the kernel ran, ``verify()`` replays the log
-    and asserts allocator invariants.
+    Wires a ``kv_event_log`` meta tensor into the kernel before compile;
+    ``verify()`` replays it after the run and asserts allocator invariants.
 
-    Log format: log[0] = event count; event i is 4 ints at [4i+1 .. 4i+4] =
-    (type, group_id, request_slot, page_id), type 1=ALLOC, 2=FREE, 3=ITER,
-    4=MOVE. A MOVE carries no group and reuses the last two fields for the
-    request's old and new batch slot.
+    Format: log[0] = event count; event i is 4 ints at [4i+1..4i+4] =
+    (type, group_id, request_slot, page_id), type 1=ALLOC 2=FREE 3=ITER
+    4=MOVE. MOVE carries no group and reuses the last two fields for the
+    request's old/new batch slot.
     """
 
     def __init__(self, pk, plan: KVCachePlan, capacity: int = 65536,
@@ -1274,9 +1191,8 @@ class KVEventLog:
 
     def verify(self):
         """Replay the log; assert no double-alloc, no free of an unowned
-        page, and zero pages still live at the end. Returns
-        {"iterations": int, "compactions": int,
-         "per_group": [{"allocs": int, "frees": int}]}."""
+        page, and nothing live at the end. Returns {"iterations",
+        "compactions", "per_group": [{"allocs", "frees"}]}."""
         return self.replay(self.log, self.num_groups)
 
     @staticmethod

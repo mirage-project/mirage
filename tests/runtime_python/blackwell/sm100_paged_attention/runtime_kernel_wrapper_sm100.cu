@@ -60,7 +60,8 @@ __global__ void
                                                      HEAD_DIM,
                                                      MAX_SEQ_LEN,
                                                      PAGE_SIZE,
-                                                     // packed cache, page stride = PAGE_SIZE.
+                                                     // packed cache, page
+                                                     // stride = PAGE_SIZE.
                                                      PAGE_SIZE,
                                                      0,
                                                      0,

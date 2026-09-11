@@ -18,10 +18,12 @@
 namespace kernel {
 
 // How many KV tokens a paged-attention kernel loads per iteration.
-constexpr int KV_TILE_SM100 = 64;        // attention_sm100, dflash_sm100, tma
-constexpr int KV_TILE_HOPPER = 64;       // multitoken_paged_attention_hopper
-constexpr int KV_TILE_AMPERE_4_16 = 64;  // multitoken_paged_attention_4_16{,_split_kv}
-constexpr int KV_TILE_AMPERE_32_64 = 128; // multitoken_paged_attention_32_64{,_split_kv}
+constexpr int KV_TILE_SM100 = 64;  // attention_sm100, dflash_sm100, tma
+constexpr int KV_TILE_HOPPER = 64; // multitoken_paged_attention_hopper
+constexpr int KV_TILE_AMPERE_4_16 =
+    64; // multitoken_paged_attention_4_16{,_split_kv}
+constexpr int KV_TILE_AMPERE_32_64 =
+    128; // multitoken_paged_attention_32_64{,_split_kv}
 
 // The granularity prepare_next_batch frees a sliding window's pages at. Every
 // kernel that supports a window must tile at exactly this; the 128-token

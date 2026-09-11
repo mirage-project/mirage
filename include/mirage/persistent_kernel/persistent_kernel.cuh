@@ -466,9 +466,12 @@ __device__ __forceinline__ bool
     }
   }
 
-  // Add new prefill requests until we reach capacity
+  // Add new prefill requests until we reach capacity. Eevery admitted
+  // request is guaranteed its own pages for life.
   while (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
-         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS) {
+         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS &&
+         (num_reqs + 1) * config.kv_worst_case_pages_per_request <=
+             MPK_MAX_NUM_PAGES) {
     int next_request_id = *config.next_request_id;
     if (next_request_id >= config.total_num_requests) {
       break;
@@ -786,8 +789,11 @@ __device__ __forceinline__ bool
   // ── Step 4: drain request ring → directly admit to running batch ──────────
   // Each ring slot has its own independent inbox; entries that cannot be
   // admitted yet stay in the ring (ready=1) and will be retried next iteration.
+  // Every admitted request is guaranteed its own pages for life.
   while (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
-         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS && free_row_top > 0) {
+         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS && free_row_top > 0 &&
+         (num_reqs + 1) * config.kv_worst_case_pages_per_request <=
+             MPK_MAX_NUM_PAGES) {
     int req_slot = gpu_req_head & ring_mask;
     int32_t rdy = ld_acquire_sys_i32(&config.pinned_req_ready[req_slot]);
     if (rdy == 0) {
@@ -1667,7 +1673,8 @@ extern "C" void
                            std::vector<std::string> model_tensor_names,
                            std::vector<void *> model_tensor_ptrs,
                            std::vector<int> kv_group_block_sizes,
-                           std::vector<int> kv_group_window_sizes) {
+                           std::vector<int> kv_group_window_sizes,
+                           int kv_worst_case_pages_per_request) {
   assert(num_local_schedulers > 0 &&
          num_local_schedulers % SCHEDULERS_PER_BLOCK == 0);
 
@@ -1715,6 +1722,8 @@ extern "C" void
     global_runtime_config.kv_group_block_sizes[g] = kv_group_block_sizes[g];
     global_runtime_config.kv_group_window_sizes[g] = kv_group_window_sizes[g];
   }
+  global_runtime_config.kv_worst_case_pages_per_request =
+      kv_worst_case_pages_per_request;
 #if defined(MODE_ONLINE_PINNED)
   {
     // Group buffers occupy [7, 7 + 4*MPK_NUM_KV_GROUPS); the pinned-ring

@@ -34,7 +34,8 @@ from .configuration_qwen3 import Qwen3Config
 import time
 
 import mirage as mi
-from mirage.mpk.kv_planner import KVStream, build_kv_cache
+from mirage.mpk.kv_planner import build_kv_cache
+from mirage.mpk.models.qwen3.builder import qwen3_kv_streams
 from .rope import apply_rotary_pos_emb_triton
 
 
@@ -401,17 +402,6 @@ class Qwen3PreTrainedModel(PreTrainedModel):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
-
-
-def qwen3_kv_streams(config, world_size: int):
-    """Qwen3 stores one type of KV, so it is a single stream over every layer."""
-    entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
-    return [
-        KVStream("attention",
-                 layers=tuple(range(config.num_hidden_layers)),
-                 components=[("k", entry_shape, torch.bfloat16),
-                             ("v", entry_shape, torch.bfloat16)]),
-    ]
 
 
 class Qwen3Model(Qwen3PreTrainedModel):
