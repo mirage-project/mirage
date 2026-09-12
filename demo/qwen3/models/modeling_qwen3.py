@@ -34,7 +34,7 @@ from .configuration_qwen3 import Qwen3Config
 import time
 
 import mirage as mi
-from mirage.mpk.kv_planner import build_kv_cache
+from mirage.mpk.kvcache import build_kv_cache
 from mirage.mpk.models.qwen3.builder import qwen3_kv_streams
 from .rope import apply_rotary_pos_emb_triton
 

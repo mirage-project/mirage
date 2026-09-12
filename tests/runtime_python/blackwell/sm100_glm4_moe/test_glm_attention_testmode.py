@@ -20,7 +20,7 @@ import sys
 import torch
 
 import mirage
-from mirage.mpk.kv_planner import KVGroupConfig
+from mirage.mpk.kvcache import KVGroupConfig
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

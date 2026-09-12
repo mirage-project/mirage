@@ -177,7 +177,7 @@ if __name__ == "__main__":
     dummy_x_for_device = torch.empty(1, dtype=torch.bfloat16, device=model.device)
     position_embeddings = model.model.rotary_emb(dummy_x_for_device, positions)
     
-    from mirage.mpk.kv_planner import KVStream, build_kv_cache
+    from mirage.mpk.kvcache import KVStream, build_kv_cache
     _kv_entry = (model.config.num_key_value_heads // world_size,
                  model.config.head_dim)
     try:

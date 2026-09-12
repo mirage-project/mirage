@@ -8,7 +8,7 @@ from ..utils import (
     grid_for_rmsnorm_linear_layer,
     shuffle_tensors,
 )
-from ...kv_planner import KVStream
+from ...kvcache import KVStream
 from ...persistent_kernel import PersistentKernel
 from ....core import bfloat16, int64
 

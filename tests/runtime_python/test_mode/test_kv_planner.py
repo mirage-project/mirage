@@ -7,7 +7,7 @@ import torch
 from mirage.mpk.models.gpt_oss.builder import (
     kv_streams as kv_streams_gpt_oss,
 )
-from mirage.mpk.kv_planner import (
+from mirage.mpk.kvcache import (
     KVEventLog,
     KVMode,
     KVSpec,
@@ -16,9 +16,9 @@ from mirage.mpk.kv_planner import (
     pages_per_request,
     plan_kv_groups,
     build_kv_cache,
-    _merge_identical_streams,
-    _resolve_pool_size,
 )
+from mirage.mpk.kvcache.kv_stream import _merge_identical_streams
+from mirage.mpk.kvcache.kv_planner import _resolve_pool_size
 
 
 @contextmanager
@@ -280,7 +280,7 @@ def test_pages_for_budget_rounds_down_and_round_trips():
 
 
 def test_resolve_kv_budget_parses_sizes():
-    from mirage.mpk.kv_planner import resolve_kv_budget
+    from mirage.mpk.kvcache import resolve_kv_budget
 
     assert resolve_kv_budget("24GiB") == 24 * 1024**3
     assert resolve_kv_budget("512MiB") == 512 * 1024**2

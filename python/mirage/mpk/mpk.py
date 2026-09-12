@@ -278,7 +278,7 @@ class MPK:
         
     def _build_kv_plan(self, args):
         """The registered builder's KV streams, planned and allocated."""
-        from .kv_planner import build_kv_cache
+        from .kvcache import build_kv_cache
         from .models.graph_builder import GraphBuilder
 
         if args.model_name is None:

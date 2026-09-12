@@ -16,7 +16,7 @@ from typing import Optional
 
 from ..utils import grid_for_rmsnorm_linear_layer
 from ..graph_builder import GraphBuilder, MirageModelConfig
-from ...kv_planner import KVStream
+from ...kvcache import KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float8_e4m3, float32, uint32, int32, int64

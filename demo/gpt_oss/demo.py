@@ -13,7 +13,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 import mirage as mi
-from mirage.mpk.kv_planner import build_kv_cache
+from mirage.mpk.kvcache import build_kv_cache
 from mirage.mpk.models.gpt_oss.builder import GptOssBuilder, kv_streams
 
 DEFAULT_PROMPT = "Give me a short introduction to large language models."

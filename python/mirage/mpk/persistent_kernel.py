@@ -532,7 +532,7 @@ class PersistentKernel:
     def _check_kv_capacity(self):
         """Fail at graph-build time if the page pool cannot hold the batch
         at worst-case demand."""
-        from .kv_planner import pages_per_request
+        from .kvcache import pages_per_request
 
         # Which schedulers return pages that have fallen out of a window.
         recycles = (self.mode in ("offline", "online_pinned")

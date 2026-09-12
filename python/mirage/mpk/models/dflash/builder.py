@@ -67,7 +67,7 @@ import math
 import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer
-from ...kv_planner import KVMode, KVStream
+from ...kvcache import KVMode, KVStream
 from ....core import bfloat16, int64
 
 
