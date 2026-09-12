@@ -67,7 +67,7 @@ import math
 import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer
-from ...kv_planner import KVKind, KVStream
+from ...kv_planner import KVMode, KVStream
 from ....core import bfloat16, int64
 
 
@@ -80,7 +80,7 @@ def dflash_kv_streams(draft_config, layer_id_base: int, world_size: int = 1):
     """The DFlash draft's KV: one unpaged stream at its own layer ids.
 
     `layer_id_base` (the target's layer count) keeps the draft's ids off the
-    target's. `kind=KVKind.FLAT` because as currently dflash_attention is unpaged.
+    target's. `kind=KVMode.FLAT` because as currently dflash_attention is unpaged.
     """
     if world_size != 1:
         raise NotImplementedError("the DFlash draft's KV is not sharded")
@@ -94,7 +94,7 @@ def dflash_kv_streams(draft_config, layer_id_base: int, world_size: int = 1):
                                     layer_id_base + num_layers)),
                  components=[("k", entry, torch.bfloat16),
                              ("v", entry, torch.bfloat16)],
-                 kind=KVKind.FLAT),
+                 kind=KVMode.FLAT),
     ]
 
 

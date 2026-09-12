@@ -20,7 +20,7 @@ import sys
 import torch
 
 import mirage
-from mirage.mpk.kv_planner import KVGroupSpec
+from mirage.mpk.kv_planner import KVGroupConfig
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -69,7 +69,7 @@ def main():
     params["max_num_batched_tokens"] = T
     params["max_num_batched_requests"] = 1
     PAGE_SIZE = 64
-    params["kv_groups"] = [KVGroupSpec(block_size=PAGE_SIZE)]
+    params["kv_groups"] = [KVGroupConfig(block_size=PAGE_SIZE)]
     params["max_num_pages"] = 4
     params["max_seq_length"] = 256
     params["meta_tensors"] = {

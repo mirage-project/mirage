@@ -19,7 +19,7 @@ import sys
 import torch
 
 import mirage
-from mirage.mpk.kv_planner import KVGroupSpec
+from mirage.mpk.kv_planner import KVGroupConfig
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 NUM_LAYERS = 4  # 3 dense + 1 MoE
@@ -87,7 +87,7 @@ def main():
     params["max_num_batched_tokens"] = 1
     params["max_num_batched_requests"] = 1
     # must be a multiple of the 64-key KV tile
-    params["kv_groups"] = [KVGroupSpec(block_size=64)]
+    params["kv_groups"] = [KVGroupConfig(block_size=64)]
     params["max_num_pages"] = 1
     params["max_seq_length"] = 64
     tokens = torch.zeros((1, 64), dtype=torch.int64, device=device)

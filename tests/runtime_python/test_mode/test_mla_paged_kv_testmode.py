@@ -51,7 +51,7 @@ def main():
     # group or MTP would cost 61x the scheduler work.
     if len(plan.groups) != 1:
         print(f"FAILED: {len(plan.groups)} groups, expected 1: "
-              f"{[(g.group_id, g.spec_name) for g in plan.groups]}")
+              f"{[(g.group_id, g.stream_name) for g in plan.groups]}")
         ok = False
     group = plan.groups[0]
     if len(group.layer_ids) != NUM_LAYERS + NUM_MTP:

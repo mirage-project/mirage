@@ -31,7 +31,7 @@ import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
-from ...kv_planner import KVKind, KVStream
+from ...kv_planner import KVMode, KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64
@@ -113,7 +113,7 @@ def inkling_kv_streams(config, world_size: int = 1):
             name, layers=layers,
             components=[("k", (nkv, head_dim), bfloat16_t),
                         ("v", (nkv, head_dim), bfloat16_t)],
-            kind=KVKind.FLAT)
+            kind=KVMode.FLAT)
 
     local = tuple(i for i in range(num_layers) if is_local(i))
     glob = tuple(i for i in range(num_layers) if not is_local(i))

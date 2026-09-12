@@ -599,7 +599,7 @@ class PersistentKernel:
                 assert buf.shape[0] >= need, (
                     f"{_key} holds {buf.shape[0]} entries but the page table "
                     f"spans {need}; pass max_seq_length to "
-                    f"KVCachePlan.build_meta_tensors")
+                    f"KVCache.build_meta_tensors")
 
     def _apply_test_mode_meta_defaults(self):
         # Allocate any missing meta tensors with shapes derived from the
