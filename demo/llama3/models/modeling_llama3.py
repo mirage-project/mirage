@@ -33,7 +33,7 @@ from transformers.modeling_utils import PreTrainedModel
 from .configuration_llama3 import Llama3Config
 import time
 
-from mirage.mpk.kv_planner import KVStream, build_kv_cache
+from mirage.mpk.kvcache import KVStream, build_kv_cache
 from .rope import apply_rotary_pos_emb_triton
 
 class Llama3RMSNorm(nn.Module):
@@ -322,7 +322,6 @@ def llama3_kv_streams(config, world_size: int):
                  components=[("k", entry_shape, torch.bfloat16),
                              ("v", entry_shape, torch.bfloat16)]),
     ]
-
 
 class Llama3Model(Llama3PreTrainedModel):
     def __init__(self, config: Llama3Config, world_size: int = 1,

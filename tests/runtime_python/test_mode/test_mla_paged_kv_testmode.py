@@ -7,7 +7,7 @@ import sys
 import torch
 
 import mirage
-from mirage.mpk.kv_planner import build_kv_cache
+from mirage.mpk.kvcache import build_kv_cache
 from mirage.mpk.models.deepseek_v3.builder import kv_streams
 from mirage.mpk.persistent_kernel import PersistentKernel
 
@@ -96,7 +96,7 @@ def main():
     }
     pk = PersistentKernel(**params)
     pk.kv_plan = plan
-    from mirage.mpk.kv_planner import KVEventLog
+    from mirage.mpk.kvcache import KVEventLog
     event_log = KVEventLog(pk, plan)
 
     cases = []

@@ -19,7 +19,7 @@ import sys
 import torch
 
 import mirage
-from mirage.mpk.kv_planner import KVGroupConfig
+from mirage.mpk.kvcache import KVGroupConfig
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 NUM_LAYERS = 4  # 3 dense + 1 MoE

@@ -31,7 +31,7 @@ import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
-from ...kv_planner import KVMode, KVStream
+from ...kvcache import KVMode, KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64

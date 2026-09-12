@@ -10,7 +10,7 @@ import socket
 from mirage.mpk.models.deepseek_v3.builder import DeepSeekV3Builder
 from mirage.mpk.models.graph_builder import MirageModelConfig
 from mirage.mpk.models.deepseek_v3.builder import kv_streams
-from mirage.mpk.kv_planner import build_kv_cache
+from mirage.mpk.kvcache import build_kv_cache
 
 
 DEFAULT_SAVE_DIR = os.path.join("outputs", "deepseek_v3")

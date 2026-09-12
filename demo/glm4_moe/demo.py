@@ -202,7 +202,7 @@ def main():
                                 dtype=torch.int32, device="cuda")
     qo_indptr_buffer = torch.empty(args.max_num_batched_requests + 1,
                                    dtype=torch.int32, device="cuda")
-    from mirage.mpk.kv_planner import build_kv_cache
+    from mirage.mpk.kvcache import build_kv_cache
     from mirage.mpk.models.glm4_moe.builder import kv_streams
     from transformers import AutoConfig
     try:

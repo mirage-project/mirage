@@ -19,7 +19,7 @@ import sys
 import torch
 
 import mirage
-from mirage.mpk.kv_planner import KVStream, build_kv_cache
+from mirage.mpk.kvcache import KVStream, build_kv_cache
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 NUM_KV_HEADS = 1
