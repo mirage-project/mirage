@@ -48,10 +48,14 @@ def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
         # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
         assert size % 256 == 0, "FATAL: Linear layer size not supported, it's {size}."
         return size // 256
-    if size % 96 == 0:
+    if size % 96 == 0 and (size // 96) % 128 == 0:
         return 96
-    elif size % 64 == 0:
+    elif size % 64 == 0 and (size // 64) % 128 == 0:
         return 64
+    # 96-way and 64-way both fail to leave a 128-aligned per-task OUTPUT_SIZE
+    # here; fall back to the 256-based split, which is tile-aligned.
+    assert size % 256 == 0, "FATAL: Linear layer size not supported, it's {size}."
+    return size // 256
     
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
