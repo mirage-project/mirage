@@ -55,8 +55,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
                                               HEAD_DIM,
                                               MAX_SEQ_LEN,
                                               PAGE_SIZE,
-                                              MAX_TOKENS,
-                                              PAGE_STRIDE>(
+                                              PAGE_STRIDE,
+                                              MAX_TOKENS>(
         qkv_ptr,
         paged_k_cache_ptr,
         paged_v_cache_ptr,
@@ -84,8 +84,8 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
                                                HEAD_DIM,
                                                MAX_SEQ_LEN,
                                                PAGE_SIZE,
-                                               MAX_TOKENS,
-                                               PAGE_STRIDE>(
+                                               PAGE_STRIDE,
+                                               MAX_TOKENS>(
         qkv_ptr,
         paged_k_cache_ptr,
         paged_v_cache_ptr,
