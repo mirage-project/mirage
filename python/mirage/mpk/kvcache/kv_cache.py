@@ -486,11 +486,13 @@ class KVCache:
             raise AssertionError(
                 f"{name} is not a view on the KV pool: storage 0x{ptr:x} is "
                 f"outside [0x{lo:x}, 0x{hi:x})")
-        want = self.elems_per_page(tensor.dtype)
-        got = tensor.stride(0)
-        if got != want:
-            raise AssertionError(
-                f"{name} has page stride {got}, expected {want}.")
+        # A single-page pool has nothing to stride to.
+        if tensor.shape[0] > 1:
+            want = self.elems_per_page(tensor.dtype)
+            got = tensor.stride(0)
+            if got != want:
+                raise AssertionError(
+                    f"{name} has page stride {got}, expected {want}.")
         return tensor
 
     def elems_per_page(self, dtype) -> int:

@@ -289,15 +289,18 @@ if __name__ == "__main__":
         qo_indptr_buffer = torch.empty(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda"
         )
-        kv_plan = build_kv_cache(
-            kv_streams(config, world_size,
-                       num_mtp_layers=1 if args.mtp > 0 else 0),
-            block_size=args.page_size,
-            kv_budget=args.kv_budget,
-            max_num_pages=None if args.kv_budget else args.max_num_pages,
-            max_seq_length=args.max_seq_length,
-            max_num_batched_requests=args.max_num_batched_requests,
-            max_num_batched_tokens=args.max_num_batched_tokens)
+        try:
+            kv_plan = build_kv_cache(
+                kv_streams(config, world_size,
+                        num_mtp_layers=1 if args.mtp > 0 else 0),
+                block_size=args.page_size,
+                kv_budget=args.kv_budget,
+                max_num_pages=None if args.kv_budget else args.max_num_pages,
+                max_seq_length=args.max_seq_length,
+                max_num_batched_requests=args.max_num_batched_requests,
+                max_num_batched_tokens=args.max_num_batched_tokens)
+        except ValueError as e:
+            raise SystemExit(str(e))
         kv_meta_tensors = kv_plan.build_meta_tensors(
             max_num_batched_requests=args.max_num_batched_requests,
             max_seq_length=args.max_seq_length)
@@ -317,8 +320,7 @@ if __name__ == "__main__":
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
-            max_num_pages=kv_plan.max_num_pages,
-            kv_groups=kv_plan.group_specs(),
+            kv_plan=kv_plan,
             eos_token_id=eos_token_id,
             meta_tensors={
                 "step": step,
@@ -337,8 +339,6 @@ if __name__ == "__main__":
             spec_decode_config=spec_decode_config,
             use_cutlass_kernel=True,
         )
-
-        mpk.kv_plan = kv_plan
 
         # Load state dict from converted weights
         print(f"Loading model weights from: {args.model_path}")

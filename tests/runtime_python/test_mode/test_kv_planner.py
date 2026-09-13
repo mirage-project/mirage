@@ -1165,8 +1165,7 @@ def test_an_unpaged_plan_builds_a_persistent_kernel():
         mode="offline", world_size=1, mpi_rank=0, num_workers=96,
         num_local_schedulers=4, num_remote_schedulers=0, max_seq_length=S,
         max_num_batched_requests=1, max_num_batched_tokens=1,
-        max_num_pages=plan.max_num_pages,
-        kv_groups=plan.group_specs(), meta_tensors=meta, profiler_tensor=None,
+        kv_plan=plan, meta_tensors=meta, profiler_tensor=None,
         trace_name=None, spec_decode_config=None, use_cutlass_kernel=False)
     assert pk.kv_groups == []
     pk._check_kv_capacity()          # nothing demands a page, and it fits

@@ -418,7 +418,6 @@ class PersistentKernel:
         max_seq_length: int,
         max_num_batched_requests: int,
         max_num_batched_tokens: int,
-        max_num_pages: int,
         meta_tensors: dict,
         profiler_tensor: torch.Tensor,
         trace_name: str,
@@ -427,7 +426,7 @@ class PersistentKernel:
         eos_token_id: int64 = -1,
         pinned_ring_capacity: int = 0,
         test_mode: bool = False,
-        kv_groups: list = None,
+        kv_plan=None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -445,13 +444,12 @@ class PersistentKernel:
         self.max_seq_length = max_seq_length
         self.max_num_batched_requests = max_num_batched_requests
         self.max_num_batched_tokens = max_num_batched_tokens
-        self.max_num_pages = max_num_pages
-        # kv_groups is the page geometry, one entry per page table. [] means
-        # this graph needs no kv cache (unpaged cache has one page table).
-        assert kv_groups is not None, (
-            "PersistentKernel needs kv_groups; pass [] for a graph with no "
-            "paged KV cache")
-        self.kv_groups = kv_groups
+        # kv_plan is the only way in: pass build_kv_cache([]) for a graph
+        # with no KV cache (its group_specs() is [], max_num_pages is 1).
+        assert kv_plan is not None, ("PersistentKernel needs a kv_plan")
+        self.kv_groups = kv_plan.group_specs()
+        self.max_num_pages = kv_plan.max_num_pages
+        self.kv_plan = kv_plan
         self.eos_token_id = eos_token_id
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
         # Prevent GC of PyTorch tensors whose GPU pointers are baked into the
@@ -535,8 +533,10 @@ class PersistentKernel:
         from .kvcache import pages_per_request
 
         # Which schedulers return pages that have fallen out of a window.
+        # Any spec-decode writes/rolls back more than one token per step.
+        spec_method = getattr(self.spec_decode_config, "method", None)
         recycles = (self.mode in ("offline", "online_pinned")
-                    and not _spec_decode_enabled(self))
+                    and spec_method is None)
         per_group = [
             pages_per_request(g.block_size,
                               g.window_size if recycles else 0,
@@ -628,6 +628,7 @@ class PersistentKernel:
 
     @classmethod
     def get_default_init_parameters(cls):
+        from .kvcache import build_kv_cache
         return {
             "mode": "offline",
             "world_size": 1,
@@ -638,8 +639,7 @@ class PersistentKernel:
             "max_seq_length": 1,
             "max_num_batched_requests": 1,
             "max_num_batched_tokens": 1,
-            "max_num_pages": 1,
-            "kv_groups": [],
+            "kv_plan": build_kv_cache([], max_num_pages=1, verbose=False),
             "meta_tensors": dict(),
             "profiler_tensor": None,
             "trace_name": "test_trace",

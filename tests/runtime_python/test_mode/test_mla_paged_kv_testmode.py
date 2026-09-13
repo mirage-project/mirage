@@ -85,8 +85,7 @@ def main():
         max_seq_length=MAX_SEQ_LENGTH,
         max_num_batched_requests=1,
         max_num_batched_tokens=MAX_BATCHED_TOKENS,
-        max_num_pages=plan.max_num_pages,
-        kv_groups=plan.group_specs(),
+        kv_plan=plan,
     )
     params["meta_tensors"] = {
         "prompt_lengths": torch.tensor([PROMPT_LEN], dtype=torch.int32,
@@ -95,7 +94,6 @@ def main():
                                   max_seq_length=MAX_SEQ_LENGTH),
     }
     pk = PersistentKernel(**params)
-    pk.kv_plan = plan
     from mirage.mpk.kvcache import KVEventLog
     event_log = KVEventLog(pk, plan)
 

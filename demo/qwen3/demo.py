@@ -222,7 +222,6 @@ if __name__ == "__main__":
 
     # Exactly one cache exists and the model holds it.
     kv_plan = model.model.kv_plan
-    max_num_pages = kv_plan.max_num_pages
     if args.use_mirage:
         print(kv_plan.describe(args.max_seq_length))
 
@@ -335,8 +334,7 @@ if __name__ == "__main__":
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
-            max_num_pages=max_num_pages,
-            kv_groups=kv_plan.group_specs(),
+            kv_plan=kv_plan,
             eos_token_id=model.config.eos_token_id if not args.ignore_eos else -1,
             meta_tensors={
                 "step": step,

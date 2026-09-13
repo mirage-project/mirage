@@ -255,8 +255,7 @@ class MPK:
             max_seq_length=self.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=self.max_num_batched_tokens,
-            max_num_pages=self.kv_plan.max_num_pages,
-            kv_groups=self.kv_plan.group_specs(),
+            kv_plan=self.kv_plan,
             meta_tensors=meta_tensors,
             profiler_tensor=self.profiler_tensor,
             trace_name=args.trace_name,
@@ -264,7 +263,6 @@ class MPK:
             use_cutlass_kernel=args.use_cutlass_kernel,
             pinned_ring_capacity=args.pinned_ring_capacity,
         )
-        self.persistent_kernel.kv_plan = self.kv_plan
 
         self.meta_tensors = meta_tensors
         self.meta_tensors_ptr = self.persistent_kernel.meta_tensor_ptrs()
