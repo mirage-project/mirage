@@ -538,7 +538,8 @@ __device__ __forceinline__ void
 
             // CP_ASYNC for loading B
             int32_t token_idx = n_tile * MMA_N + lane_idx / cp_async_group_size;
-            int32_t topk_idx = tRoutingIndex(token_idx);
+            int32_t topk_idx =
+                (token_idx < BATCH_SIZE) ? tRoutingIndex(token_idx) : 0;
             if (token_idx < BATCH_SIZE && topk_idx > 0) {
               if constexpr (W13_LINEAR) {
                 cute::copy(copyB,
@@ -801,7 +802,7 @@ __device__ __forceinline__ void
           CUTE_UNROLL
           for (int i = 0; i < MMA_N; ++i) {
             int32_t n_idx = n_tile * MMA_N + i;
-            int32_t topk_idx = tRoutingIndex(n_idx);
+            int32_t topk_idx = (n_idx < BATCH_SIZE) ? tRoutingIndex(n_idx) : 0;
             if (n_idx < BATCH_SIZE && topk_idx > 0 && out_col_valid) {
               mOutput(n_idx, topk_idx - 1, out_col) = tCrC[i];
             }

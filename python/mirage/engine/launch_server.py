@@ -94,7 +94,7 @@ async def _stream_bridge(
         text, is_final, error = await queue.get()
 
         if error:
-            yield f"data: {{\"error\": \"{error}\"}}\n\n"
+            yield "data: " + json.dumps({"error": error}) + "\n\n"
             break
 
         chunk = json.dumps({
@@ -189,8 +189,17 @@ def main():
     parser.add_argument("--output-dir", default=None, help="Output directory for compiled artifacts")
     parser.add_argument("--request-timeout", default=7200.0, type=float,
                         help="Per-request timeout in seconds (default: 7200)")
+    parser.add_argument("--do-sample", dest="do_sample", action="store_true",
+                        help="Enable temperature/top-k/top-p sampling (compiled into the graph)")
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top_p", type=float, default=0.95)
+    parser.add_argument("--top_k", type=int, default=20)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--sampling-topk-max", type=int, default=32)
     args = parser.parse_args()
     kv_budget = None if args.kv_budget.lower() == "none" else args.kv_budget
+    if args.do_sample and args.temperature <= 0.0:
+        parser.error("--do-sample needs --temperature > 0")
 
     config = RunnerConfig(
         model=args.model,
@@ -202,6 +211,12 @@ def main():
         max_num_pages=args.max_num_pages,
         page_size=args.page_size,
         output_dir=args.output_dir,
+        do_sample=args.do_sample,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        sampling_seed=args.seed,
+        sampling_topk_max=args.sampling_topk_max,
     )
     app.state.runner_config = config
     app.state.request_timeout = args.request_timeout

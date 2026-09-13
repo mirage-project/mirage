@@ -310,7 +310,7 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
         bool const node_uses_expert =
             expert >= start_expert && expert < end_expert;
         bool const should_process_row = row_is_active && node_uses_expert;
-        int const out_idx = TOPK_EXPERTS * thread_row + k_idx;
+        int const out_idx = thread_row * TOPK_EXPERTS + k_idx;
         output[out_idx] = orig_score;
         weight_sum += orig_score;
 
@@ -340,7 +340,7 @@ __device__ __forceinline__ void topk_sigmoid_task_impl(
     if (thread_group_idx == 0) {
       float inv_sum = 1.0f / (weight_sum + 1e-20f);
       for (int k_idx = 0; k_idx < TOPK_EXPERTS; ++k_idx) {
-        int const out_idx = TOPK_EXPERTS * thread_row + k_idx;
+        int const out_idx = thread_row * TOPK_EXPERTS + k_idx;
         output[out_idx] = output[out_idx] * inv_sum * routed_scaling_factor;
       }
     }

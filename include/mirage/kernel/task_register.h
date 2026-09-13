@@ -103,6 +103,10 @@ public:
                                         std::vector<int> const &params);
   int register_sampling_sm100_task(threadblock::Graph const &bgraph,
                                    std::vector<int> const &params);
+  int register_sampling_partial_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  int register_sampling_reduce_sm100_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
   int register_tensor_init_task(threadblock::Graph const &bgraph,
                                 std::vector<int> const &params);
   int register_elementwise_add_sm100_task(threadblock::Graph const &bgraph,

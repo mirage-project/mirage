@@ -344,7 +344,8 @@ void register_mugraph(
             }
             // Argmax partial tasks: grid_dim.x partitions the vocab dimension
             if (task_type == TASK_ARGMAX_PARTIAL ||
-                task_type == TASK_ARGMAX_PARTIAL_SM100) {
+                task_type == TASK_ARGMAX_PARTIAL_SM100 ||
+                task_type == TASK_SAMPLING_PARTIAL_SM100) {
               task.task_metadata.task_offset = bid.x;
             }
             // Set expert_offset for MoE tasks
@@ -1800,6 +1801,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_ARGMAX_PARTIAL_SM100] = "TASK_ARGMAX_PARTIAL_SM100";
   task_type_to_name[TASK_ARGMAX_REDUCE_SM100] = "TASK_ARGMAX_REDUCE_SM100";
   task_type_to_name[TASK_SAMPLING_SM100] = "TASK_SAMPLING_SM100";
+  task_type_to_name[TASK_SAMPLING_PARTIAL_SM100] =
+      "TASK_SAMPLING_PARTIAL_SM100";
   task_type_to_name[TASK_MLA_DECODE_SM100] = "TASK_MLA_DECODE_SM100";
   task_type_to_name[TASK_MLA_REDUCE_SM100] = "TASK_MLA_REDUCE_SM100";
   task_type_to_name[TASK_MLA_PREFILL_SM100] = "TASK_MLA_PREFILL_SM100";

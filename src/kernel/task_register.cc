@@ -2552,6 +2552,119 @@ int TaskRegister::register_sampling_sm100_task(threadblock::Graph const &bgraph,
   return register_task_variant(TASK_SAMPLING_SM100, code.to_string());
 }
 
+int TaskRegister::register_sampling_partial_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_partial_tasks
+  // params[1]: real vocab size; positions at/after it are lm_head padding rows
+  // params[2]: number of candidates kept per chunk
+  // params[3]: temperature, bit-cast to int
+  assert(params.size() == 4);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 2;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int num_elements = input_ops[0]->output_tensors[0].dim[1];
+  int num_partial_tasks = params[0];
+  int vocab_size = params[1];
+  int topk_max = params[2];
+  float temperature;
+  memcpy(&temperature, &params[3], sizeof(float));
+  // Greedy decoding compiles the same graph with an unscaled logit; the reduce
+  // task then skips the noise entirely.
+  float inv_temperature = temperature > 0.0f ? 1.0f / temperature : 1.0f;
+  // Each block owns one chunk's slice of the candidate buffers.
+  assert(output_ops[0]->output_tensors[0].dim[1] == topk_max + 2);
+  assert(output_ops[1]->output_tensors[0].dim[1] == topk_max);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::sampling_partial_sm100_kernel<bfloat16, $, $, $, $, $>(",
+         batch_size,
+         num_elements,
+         num_partial_tasks,
+         topk_max,
+         vocab_size);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    task_desc->output_ptrs[1],");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
+  code.e("    $f,", inv_temperature);
+  code.e("    task_desc->task_metadata.task_offset * $);", num_elements);
+  return register_task_variant(TASK_SAMPLING_PARTIAL_SM100, code.to_string());
+}
+
+int TaskRegister::register_sampling_reduce_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: num_partial_tasks
+  // params[1]: number of candidates kept per chunk
+  // params[2]: top_p, bit-cast to int
+  // params[3]: top_k (0 disables the top-k filter)
+  // params[4]: 1 when temperature <= 0, i.e. greedy decoding
+  // params[5]: RNG seed
+  assert(params.size() == 6);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int num_partial_tasks = params[0];
+  int topk_max = params[1];
+  float top_p;
+  memcpy(&top_p, &params[2], sizeof(float));
+  int top_k = params[3];
+  bool greedy = params[4] != 0;
+  int seed = params[5];
+  assert(input_ops[0]->output_tensors[0].dim[1] ==
+         num_partial_tasks * (topk_max + 2));
+  assert(input_ops[1]->output_tensors[0].dim[1] ==
+         num_partial_tasks * topk_max);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::sampling_reduce_sm100_kernel<bfloat16, $, $, $>(",
+         batch_size,
+         num_partial_tasks,
+         topk_max);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
+  code.e("    $f,", top_p);
+  code.e("    $,", top_k);
+  code.e("    $,", greedy);
+  code.e("    $ULL,", seed);
+  // Fallback when request_ids are unset (test_mode). Production paths resolve
+  // the Philox offset from the owning request's step via qo_indptr.
+  code.e("    (unsigned long long)runtime_config.step[0] * $,", batch_size);
+  code.e("    runtime_config.step,");
+  code.e("    runtime_config.request_ids,");
+  code.e("    runtime_config.qo_indptr_buffer);");
+  return register_task_variant(TASK_SAMPLING_SM100, code.to_string());
+}
+
 int TaskRegister::register_tensor_init_task(threadblock::Graph const &bgraph,
                                             std::vector<int> const &params) {
   assert(params.size() == 0);

@@ -129,6 +129,17 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=1.0)
     parser.add_argument("--do-sample", dest="do_sample", action="store_true", help="Enable sampling (default off)")
+    parser.add_argument("--top_k", type=int, default=0, help="Keep only the top_k logits when sampling (0 disables)")
+    parser.add_argument("--seed", type=int, default=42, help="RNG seed for sampling")
+    parser.add_argument(
+        "--sampling-topk-max",
+        type=int,
+        default=32,
+        help=(
+            "Candidates kept per vocabulary chunk when sampling. Upper bound "
+            "on --top_k and on the nucleus size that can be served exactly."
+        ),
+    )
     parser.add_argument(
         "--save-tokens",
         nargs="?",
@@ -147,6 +158,9 @@ if __name__ == "__main__":
 
     parser.add_argument("--split-kv-cache", action="store_true", help="Use split-kv cache")
     args = parser.parse_args()
+    if args.do_sample and args.temperature <= 0.0:
+        parser.error("--do-sample needs --temperature > 0 "
+                     "(temperature 0 is greedy decoding, i.e. no --do-sample)")
     try:
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
@@ -469,6 +483,24 @@ if __name__ == "__main__":
             name="argmax_part_index",
             io_category="cuda_tensor",
         )
+        # Temperature/top-k/top-p sampling keeps its candidates in fp32 and
+        # needs topk_max + 2 slots per worker (candidates, chunk max, chunk
+        # exp-sum); greedy decoding keeps using the argmax buffers above.
+        if args.do_sample:
+            sampling_part_value = mpk.new_tensor(
+                dims=(args.max_num_batched_tokens,
+                      mpk.num_workers * (args.sampling_topk_max + 2)),
+                dtype=mi.float32,
+                name="sampling_part_value",
+                io_category="cuda_tensor",
+            )
+            sampling_part_index = mpk.new_tensor(
+                dims=(args.max_num_batched_tokens,
+                      mpk.num_workers * args.sampling_topk_max),
+                dtype=mi.int64,
+                name="sampling_part_index",
+                io_category="cuda_tensor",
+            )
         argmax_out = mpk.attach_input(torch_tensor=output_tokens, name="output_token")
         #argmax_out = mpk.new_tensor(
         #    dims=(args.max_num_batched_tokens, 1),
@@ -756,27 +788,48 @@ if __name__ == "__main__":
         #    block_dim=(128, 1, 1),
         #)
         # add argmax layer
-        if spec_decode_config and spec_decode_config.method == "promptlookup":
-            argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
-                                       spec_decode_config.spec_length + 1, 
-                                       1)
-            argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
+        if args.do_sample:
+            mpk.sampling_partial_layer(
+                input=argmax_in,
+                output=(sampling_part_value, sampling_part_index),
+                grid_dim=(mpk.num_workers, 1, 1),
+                block_dim=(128, 1, 1),
+                vocab_size=model.config.vocab_size,
+                topk_max=args.sampling_topk_max,
+                temperature=args.temperature,
+            )
+            mpk.sampling_reduce_layer(
+                input=(sampling_part_value, sampling_part_index),
+                output=argmax_out,
+                grid_dim=(1, 1, 1),
+                block_dim=(128, 1, 1),
+                temperature=args.temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
+                seed=args.seed,
+            )
         else:
-            argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
-            argmax_reduce_grid_dim = (1, 1, 1)
-        mpk.argmax_partial_layer(
-            input=argmax_in,
-            output=(argmax_part_value, argmax_part_index),
-            grid_dim=argmax_partial_grid_dim,
-            block_dim=(128, 1, 1),
-            vocab_size=model.config.vocab_size,
-        )
-        mpk.argmax_reduce_layer(
-            input=(argmax_part_value, argmax_part_index),
-            output=argmax_out,
-            grid_dim=argmax_reduce_grid_dim,
-            block_dim=(128, 1, 1),
-        )
+            if spec_decode_config and spec_decode_config.method == "promptlookup":
+                argmax_partial_grid_dim = (max_factor_leq_n(153600, 96 // (spec_decode_config.spec_length + 1)), 
+                                           spec_decode_config.spec_length + 1, 
+                                           1)
+                argmax_reduce_grid_dim = (1, spec_decode_config.spec_length + 1, 1)
+            else:
+                argmax_partial_grid_dim = (mpk.num_workers, 1, 1)
+                argmax_reduce_grid_dim = (1, 1, 1)
+            mpk.argmax_partial_layer(
+                input=argmax_in,
+                output=(argmax_part_value, argmax_part_index),
+                grid_dim=argmax_partial_grid_dim,
+                block_dim=(128, 1, 1),
+                vocab_size=model.config.vocab_size,
+            )
+            mpk.argmax_reduce_layer(
+                input=(argmax_part_value, argmax_part_index),
+                output=argmax_out,
+                grid_dim=argmax_reduce_grid_dim,
+                block_dim=(128, 1, 1),
+            )
         if spec_decode_config:
             verify_out = mpk.verify_layer_dispatcher(
                 spec_decode_config = spec_decode_config,
@@ -815,6 +868,26 @@ if __name__ == "__main__":
                 stream=stream,
             )
             next_token = logits.argmax(dim=-1)
+            if args.do_sample:
+                # Match the megakernel path: temperature → top-k → top-p → draw.
+                row = logits[0, -1, : model.config.vocab_size].float()
+                row = row / args.temperature
+                if args.top_k > 0:
+                    kth = torch.topk(row, min(args.top_k, row.numel())).values[-1]
+                    row = row.masked_fill(row < kth, float("-inf"))
+                if args.top_p < 1.0:
+                    sorted_logits, sorted_idx = torch.sort(row, descending=True)
+                    probs = torch.softmax(sorted_logits, dim=-1)
+                    cum = torch.cumsum(probs, dim=-1)
+                    keep = cum <= args.top_p
+                    keep[..., 0] = True
+                    row = row.clone()
+                    row[sorted_idx[~keep]] = float("-inf")
+                probs = torch.softmax(row, dim=-1)
+                g = torch.Generator(device=probs.device)
+                g.manual_seed(args.seed + cur_pos)
+                next_token = torch.multinomial(probs, 1, generator=g)
+                next_token = next_token.view(1, 1)
             next_token = next_token[0, -1]
             tokens[0, cur_pos] = next_token
             prev_pos = cur_pos
