@@ -22,8 +22,9 @@ The draft's KV is declared alongside the target's and owned by the plan:
 
     draft_streams = dflash_kv_streams(draft_cfg,
                                       layer_id_base=target_num_layers)
-    mpk.kv_plan = build_kv_cache(target_streams + draft_streams,
-                                 kv_budget=..., max_seq_length=4096)
+    kv_plan = build_kv_cache(target_streams + draft_streams,
+                             kv_budget=..., max_seq_length=4096)
+    mpk = PersistentKernel(..., kv_plan=kv_plan)
 
     dflash = DFlashBuilder(
         mpk=mpk,

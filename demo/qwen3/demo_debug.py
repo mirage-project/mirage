@@ -226,8 +226,13 @@ if __name__ == "__main__":
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
-            max_num_pages=args.max_num_pages,
-            kv_groups=[mi.mpk.kvcache.KVGroupConfig(block_size=args.page_size)],
+            kv_plan=mi.mpk.kvcache.build_kv_cache(
+                [mi.mpk.kvcache.KVStream(
+                    "gqa", layers=(0,),
+                    components=[("k", (num_local_kv_heads, head_dim), torch.bfloat16),
+                                ("v", (num_local_kv_heads, head_dim), torch.bfloat16)])],
+                block_size=args.page_size, max_num_pages=args.max_num_pages,
+                max_seq_length=args.max_seq_length, verbose=False),
             eos_token_id=model.config.eos_token_id,
             meta_tensors={
                 "step": step,
@@ -404,8 +409,13 @@ if __name__ == "__main__":
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
-            max_num_pages=args.max_num_pages,
-            kv_groups=[mi.mpk.kvcache.KVGroupConfig(block_size=args.page_size)],
+            kv_plan=mi.mpk.kvcache.build_kv_cache(
+                [mi.mpk.kvcache.KVStream(
+                    "gqa", layers=(0,),
+                    components=[("k", (num_local_kv_heads, head_dim), torch.bfloat16),
+                                ("v", (num_local_kv_heads, head_dim), torch.bfloat16)])],
+                block_size=args.page_size, max_num_pages=args.max_num_pages,
+                max_seq_length=args.max_seq_length, verbose=False),
             eos_token_id=model.config.eos_token_id,
             meta_tensors={
                 "step": step.clone(),

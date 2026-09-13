@@ -50,7 +50,7 @@ class Eagle3Builder:
         draft_stream = draft_kv_stream(cfg, layer_id=target_num_layers)
         streams.append(draft_stream)
         ...
-        mpk.kv_plan = kv_plan
+        mpk = PersistentKernel(..., kv_plan=kv_plan)
         eagle3 = Eagle3Builder(
             mpk=mpk, draft_state_dict=sd, draft_config=cfg,
             target_hidden_size=2048,

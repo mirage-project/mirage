@@ -48,10 +48,7 @@ class GraphBuilder(abc.ABC):
         self.weights = weights or {}
         plan = getattr(mpk, "kv_plan", None)
         if plan is not None:
-            assert len(plan.groups) == len(mpk.kv_groups), (
-                f"mpk.kv_plan has {len(plan.groups)} KV group(s) but mpk was "
-                f"built with {len(mpk.kv_groups)} -- pass "
-                f"kv_groups=plan.group_specs() and this same plan together")
+            assert len(plan.groups) == len(mpk.kv_groups)
 
     @staticmethod
     def kv_streams(config, world_size: int = 1):

@@ -111,15 +111,13 @@ if __name__ == "__main__":
             max_seq_length=seq_len,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=mbt,
-            max_num_pages=kv_plan.max_num_pages,
-            kv_groups=kv_plan.group_specs(),
+            kv_plan=kv_plan,
             eos_token_id=-1 if args.ignore_eos else 200002,
             meta_tensors=meta_tensors, profiler_tensor=None, trace_name="",
             spec_decode_config=None, use_cutlass_kernel=False,
         )
 
         print("Building the task graph...")
-        mpk.kv_plan = kv_plan
         GptOssBuilder(mpk).build_from_model(
             model_name=args.model, model_path=args.model)
         print("Compiling the megakernel...")

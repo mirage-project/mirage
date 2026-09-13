@@ -230,8 +230,7 @@ def main():
         max_seq_length=args.max_seq_length,
         max_num_batched_requests=args.max_num_batched_requests,
         max_num_batched_tokens=args.max_num_batched_tokens,
-        max_num_pages=kv_plan.max_num_pages,
-        kv_groups=kv_plan.group_specs(),
+        kv_plan=kv_plan,
         eos_token_id=-1 if args.ignore_eos else eos_token_id,
         meta_tensors={
             "step": step,
@@ -252,7 +251,6 @@ def main():
     print(f"Loading GLM-4.6 weights from: {args.model_path}")
     state_dict = load_state_dict(args.model_path, layers, num_layers)
 
-    mpk.kv_plan = kv_plan
     builder = Glm4MoeBuilder(mpk)
     builder.build_from_dict(state_dict, with_lm_head=True)
 

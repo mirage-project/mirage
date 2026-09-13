@@ -298,8 +298,7 @@ if __name__ == "__main__":
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
-            max_num_pages=kv_plan.max_num_pages,
-            kv_groups=kv_plan.group_specs(),
+            kv_plan=kv_plan,
             eos_token_id=model.config.eos_token_id if not args.ignore_eos else -1,
             meta_tensors={
                 "step": step,
@@ -318,8 +317,6 @@ if __name__ == "__main__":
             spec_decode_config=spec_decode_config,
             use_cutlass_kernel=args.use_cutlass_kernel
         )
-        mpk.kv_plan = kv_plan
-        
         if spec_decode_config and spec_decode_config.method == "promptlookup":
             all_tokens = mpk.attach_input(torch_tensor=tokens, name="all_tokens")
             num_tokens_extend = spec_decode_config.spec_length + 1
