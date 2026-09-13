@@ -107,7 +107,8 @@ Commonly overridden keys:
 | `num_local_schedulers` | 4 | Set from `mirage.get_configurations_from_gpu(0)` |
 | `max_num_batched_tokens` | 1 | Set to your test's batch size if the task kernel uses this compile-time constant |
 | `max_num_batched_requests` | 1 | Same as above |
-| `max_num_pages` / `page_size` / `max_seq_length` | 1 | Bump these so `prepare_next_batch` can fit your prefill (`max_num_pages * page_size >= prompt_length`) |
+| `max_seq_length` | 1 | Bump so `prepare_next_batch` can fit your prefill |
+| `kv_plan` | `build_kv_cache([], max_num_pages=1)` (no KV) | For a paged-attention test, build a real plan and let `PersistentKernel` derive `kv_groups`/`max_num_pages` from it: `params["kv_plan"] = build_kv_cache([KVStream("name", layers=(0,), components=[("k", entry_shape, dtype), ("v", entry_shape, dtype)])], block_size=page_size, max_num_pages=N, max_seq_length=max_seq_length)`. See `test_windowed_attention_testmode.py` for a full example. |
 | `world_size` / `mpi_rank` | 1 / 0 | For multi-GPU tests; set from `mpi4py.MPI.COMM_WORLD` |
 | `use_cutlass_kernel` | False | Set `True` if your layer uses CUTLASS-based kernels |
 | `meta_tensors` | `{}` | Auto-defaulted; **override only the entries that drive your test scenario** (typically `prompt_lengths` and/or `tokens`) — see "Meta-Tensor Defaults" below |

@@ -48,10 +48,14 @@ def grid_for_rmsnorm_linear_layer(size: int, use_cutlass_kernel: bool = True):
         # same prompt) if the OUTPUT_SIZE is too big, try to figure it out.
         assert size % 256 == 0, "FATAL: Linear layer size not supported, it's {size}."
         return size // 256
-    if size % 96 == 0:
+    if size % 96 == 0 and (size // 96) % 128 == 0:
         return 96
-    elif size % 64 == 0:
+    elif size % 64 == 0 and (size // 64) % 128 == 0:
         return 64
+    # 96-way and 64-way both fail to leave a 128-aligned per-task OUTPUT_SIZE
+    # here; fall back to the 256-based split, which is tile-aligned.
+    assert size % 256 == 0, "FATAL: Linear layer size not supported, it's {size}."
+    return size // 256
     
 # Return the largest factor of m that is less than or equal to n
 # This is used to determine the grid size
@@ -72,8 +76,10 @@ if __name__ == "__main__":
     parser.add_argument("--use-mirage", action="store_true", help="Use Mirage kernels")
     parser.add_argument("--max-num-batched-tokens", default=8, type=int, help="Max number of tokens in a batch")
     parser.add_argument("--max-num-batched-requests", default=1, type=int, help="Max number of requests in a batch")
-    parser.add_argument("--page-size", default=4096, type=int, help="Page size")
-    parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages")
+    parser.add_argument("--page-size", default=4096, type=int, help="Tokens per page")
+    parser.add_argument("--kv-budget", type=str, default=None,
+                        help="Memory budget for KV cache as a size('24GiB'). Exclusive with --max-num-pages")
+    parser.add_argument("--max-num-pages", default=16, type=int, help="Max num pages. Exclusive with --kv-budget")
     parser.add_argument("--output-dir", help="Output files directory")
     parser.add_argument("--trace-name", default="", help="Perfetto trace output name")
     parser.add_argument(
@@ -190,26 +196,36 @@ if __name__ == "__main__":
     torch.set_default_dtype(torch.bfloat16)
 
     torch.cuda.set_device(rank)
+
+    kv_sizing = dict(kv_budget=args.kv_budget,
+                     max_seq_length=args.max_seq_length,
+                     max_num_batched_requests=args.max_num_batched_requests,
+                     max_num_batched_tokens=args.max_num_batched_tokens)
+
     if args.model_path is not None or world_size == 1:
       with torch.device("cuda"):
           if args.model_path is not None:
               # load model locally (necessary for multi-GPU case)
               print(f"Load model from model path: {args.model_path}")
               config = AutoConfig.from_pretrained(args.model_path)
-              model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
+              model = Qwen3ForCausalLM(config, world_size, args.max_num_pages,
+                                       args.page_size, **kv_sizing)
               load_model(
                   model, f"{args.model_path}/model{rank}-mp{world_size}.safetensors"
               )
               # model = Qwen3ForCausalLM.from_pretrained(args.model_path, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
               tokenizer = AutoTokenizer.from_pretrained(args.model_path)
           else:
-              model = Qwen3ForCausalLM.from_pretrained(model_name, world_size, max_num_pages=args.max_num_pages, page_size=args.page_size).to("cuda")
+              model = Qwen3ForCausalLM.from_pretrained(
+                  model_name, world_size, max_num_pages=args.max_num_pages,
+                  page_size=args.page_size, **kv_sizing).to("cuda")
               tokenizer = AutoTokenizer.from_pretrained(model_name)
     else: # Use dynamic shard loader to load directly from HF and shard.
         print("Detected multi-GPU run without a local path specified. Will use the DynamicShardLoader class.")
         with torch.device("meta"):
             config = AutoConfig.from_pretrained(model_name)
-            model = Qwen3ForCausalLM(config, world_size, args.max_num_pages, args.page_size)
+            model = Qwen3ForCausalLM(config, world_size, args.max_num_pages,
+                                     args.page_size, **kv_sizing)
 
         device = torch.device(f"cuda:{rank}")
         loader = Qwen3ShardLoader(model, model_name, mapping, rank, world_size, device)
@@ -217,6 +233,11 @@ if __name__ == "__main__":
 
         with torch.device("cuda"):
             tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # Exactly one cache exists and the model holds it.
+    kv_plan = model.model.kv_plan
+    if args.use_mirage:
+        print(kv_plan.describe(args.max_seq_length))
 
     total_num_requests = 1 if not args.use_mirage else args.max_num_batched_requests
     # get all model weight tensors
@@ -311,14 +332,12 @@ if __name__ == "__main__":
         )
             
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
+        # Create auxiliary buffers for paged (with kv_plan builder) KV and QO
         qo_indptr_buffer = torch.empty(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        paged_kv_indptr_buffer = torch.empty(
-            args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        paged_kv_indices_buffer = torch.empty(
-            args.max_num_pages, dtype=torch.int32, device="cuda")
-        paged_kv_last_page_len_buffer = torch.empty(
-            args.max_num_batched_requests, dtype=torch.int32, device="cuda")
+        kv_meta_tensors = kv_plan.build_meta_tensors(
+            max_num_batched_requests=args.max_num_batched_requests,
+            max_seq_length=args.max_seq_length)
         mpk = mi.PersistentKernel(
             mode="offline",
             world_size=world_size,
@@ -329,8 +348,7 @@ if __name__ == "__main__":
             max_seq_length=args.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=args.max_num_batched_tokens,
-            max_num_pages=args.max_num_pages,
-            page_size=args.page_size,
+            kv_plan=kv_plan,
             eos_token_id=model.config.eos_token_id if not args.ignore_eos else -1,
             meta_tensors={
                 "step": step,
@@ -340,9 +358,7 @@ if __name__ == "__main__":
                 "num_new_tokens": num_new_tokens,
                 "prompt_lengths": prompt_lengths,
                 "qo_indptr_buffer": qo_indptr_buffer,
-                "paged_kv_indptr_buffer": paged_kv_indptr_buffer,
-                "paged_kv_indices_buffer": paged_kv_indices_buffer,
-                "paged_kv_last_page_len_buffer": paged_kv_last_page_len_buffer,
+                **kv_meta_tensors,
             },
             profiler_tensor=profiler_tensor,
             trace_name=args.trace_name,
@@ -572,12 +588,8 @@ if __name__ == "__main__":
             w_k_norm = mpk.attach_input(
                 torch_tensor=layer.self_attn.k_norm.weight, name=f"layer_{i}_k_norm"
             )
-            k_cache = mpk.attach_input(
-                torch_tensor=model.model.kv_cache[0][i], name=f"layer_{i}_k_cache"
-            ) 
-            v_cache = mpk.attach_input(
-                torch_tensor=model.model.kv_cache[1][i], name=f"layer_{i}_v_cache"
-            )
+            kv = kv_plan.attach(mpk, i)
+            k_cache, v_cache, group_id = kv["k_cache"], kv["v_cache"], kv["group_id"]
             # TODO: Later attention kernels should be merged as one
             if spec_decode_config:
                 mpk.single_batch_extend_attention_layer(
@@ -606,6 +618,7 @@ if __name__ == "__main__":
                     attention_params=(num_local_q_heads, num_kv_cache_chunks),
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, num_kv_cache_chunks),
                     block_dim=(128, 1, 1),
+                    group_id=group_id,
                 )
 
                 mpk.paged_attention_split_kv_merge_layer(
@@ -615,6 +628,7 @@ if __name__ == "__main__":
                     attention_params=(num_local_q_heads, head_dim),
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
                     block_dim=(128, 1, 1),
+                    group_id=group_id,
                 )
             else:
                 mpk.paged_attention_layer(
@@ -628,6 +642,7 @@ if __name__ == "__main__":
                     output=attn_out,
                     grid_dim=(mpk.max_num_batched_requests, num_local_kv_heads, 1),
                     block_dim=(128, 1, 1),
+                    group_id=group_id,
                 )
             
             

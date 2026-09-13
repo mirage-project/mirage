@@ -25,6 +25,7 @@ template <typename T,
           int HEAD_DIM,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
+          int PAGE_STRIDE,
           int MAX_TOKENS = 8>
 __device__ __forceinline__ void multitoken_paged_attention_task_impl(
     void const *qkv_ptr,
@@ -54,6 +55,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
                                               HEAD_DIM,
                                               MAX_SEQ_LEN,
                                               PAGE_SIZE,
+                                              PAGE_STRIDE,
                                               MAX_TOKENS>(
         qkv_ptr,
         paged_k_cache_ptr,
@@ -82,6 +84,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl(
                                                HEAD_DIM,
                                                MAX_SEQ_LEN,
                                                PAGE_SIZE,
+                                               PAGE_STRIDE,
                                                MAX_TOKENS>(
         qkv_ptr,
         paged_k_cache_ptr,

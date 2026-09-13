@@ -3,18 +3,30 @@ import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer, grid_for_splitk_linear_layer, shuffle_tensors, inplace_shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
+from ...kvcache import KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, int64, float32
 
 from typing import Optional
 
+def qwen3_kv_streams(config, world_size: int = 1):
+    """Qwen3 stores one type of KV, so it is a single stream over every layer."""
+    entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
+    return [
+        KVStream("attention",
+                 layers=tuple(range(config.num_hidden_layers)),
+                 components=[("k", entry_shape, torch.bfloat16),
+                             ("v", entry_shape, torch.bfloat16)]),
+    ]
+
+
 @register_model_builder("Qwen3", "Qwen/Qwen3-8B", "Qwen/Qwen3-1.7B", "Qwen/Qwen3-14B", "Qwen/Qwen3-32B", "Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B", "Qwen3.5-0.8B")
 class Qwen3Builder(GraphBuilder):
+    kv_streams = staticmethod(qwen3_kv_streams)
+
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
-        self.max_num_pages = mpk.max_num_pages
-        self.page_size = mpk.page_size
         self.world_size = mpk.world_size
         self.input_tokens = mpk.meta_tensors["input_tokens"]
         self.output_tokens = mpk.meta_tensors["output_tokens"]
@@ -35,8 +47,6 @@ class Qwen3Builder(GraphBuilder):
                               model_config: MirageModelConfig):
         self.position_embeddings = model_config.position_embeddings
         
-        self.k_cache = model_config.k_cache # (num_layers, max_num_pages, page_size, num_kv_heads // world_size, head_dim)
-        self.v_cache = model_config.v_cache # (num_layers, max_num_pages, page_size, num_kv_heads // world_size, head_dim)
         
         self.hidden_size = model_config.hidden_size
         self.intermediate_size = model_config.intermediate_size
@@ -90,28 +100,7 @@ class Qwen3Builder(GraphBuilder):
         
         self.num_layers = len(self.model.model.layers)
         
-        self.k_cache = torch.empty(
-            (
-                self.num_layers,
-                self.max_num_pages,
-                self.page_size,
-                self.num_local_kv_heads,
-                self.head_dim,
-            ),
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
-        self.v_cache = torch.empty(
-            (
-                self.num_layers,
-                self.max_num_pages,
-                self.page_size,
-                self.num_local_kv_heads,
-                self.head_dim,
-            ),
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
+        assert getattr(self.mpk, "kv_plan", None) is not None
         
         print(f"build_from_model: Model name: {self.model_name}, num_layers: {self.num_layers}, hidden_size: {self.hidden_size}, intermediate_size: {self.intermediate_size}, vocab_size: {self.vocab_size}, num_q_heads: {self.num_q_heads}, num_kv_heads: {self.num_kv_heads}, num_local_q_heads: {self.num_local_q_heads}, num_local_kv_heads: {self.num_local_kv_heads}, head_dim: {self.head_dim}, fused_outdim_1: {self.fused_outdim_1}, fused_outdim_2: {self.fused_outdim_2}")
         
@@ -373,13 +362,8 @@ class Qwen3Builder(GraphBuilder):
             w_k_norm = self.mpk.attach_input(
                 torch_tensor=state_dict[f"{prefix}self_attn.k_norm.weight"], name=f"layer_{i}_k_norm"
             )
-            # TODO: KV cache handling
-            k_cache = self.mpk.attach_input(
-                torch_tensor=self.k_cache[i], name=f"layer_{i}_k_cache"
-            )
-            v_cache = self.mpk.attach_input(
-                torch_tensor=self.v_cache[i], name=f"layer_{i}_v_cache"
-            )
+            kv = self.mpk.kv_plan.attach(self.mpk, i)
+            k_cache, v_cache = kv["k_cache"], kv["v_cache"]
             
             # TODO(Jianan Ji): spec_decode_config handling (see previous implementation)
             # if spec_decode_config:
@@ -400,6 +384,7 @@ class Qwen3Builder(GraphBuilder):
                 input=self.attn_in,
                 k_cache=k_cache,
                 v_cache=v_cache,
+                group_id=kv["group_id"],
                 q_norm=w_q_norm,
                 k_norm=w_k_norm,
                 cos_pos_embed=self.cos_pos_embed,

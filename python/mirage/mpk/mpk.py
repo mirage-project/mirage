@@ -24,6 +24,7 @@ class MPKMetadata:
     max_num_batched_tokens: int = 0
     max_num_pages: int = 0
     page_size: int = 0
+    kv_budget: Optional[str] = None
     max_sm_num: int = 108
     device: str = "cuda"
     # model 
@@ -43,10 +44,6 @@ class MPKMetadata:
     num_new_tokens: Optional[torch.Tensor] = None
     prompt_lengths: Optional[torch.Tensor] = None
     qo_indptr_buffer: Optional[torch.Tensor] = None
-    paged_kv_indptr_buffer: Optional[torch.Tensor] = None
-    paged_kv_indices_buffer: Optional[torch.Tensor] = None
-    paged_kv_last_page_len_buffer: Optional[torch.Tensor] = None
-    paged_kv_indices_snapshot: Optional[torch.Tensor] = None
     # MirageModelConfig
     model_config: Optional[MirageModelConfig] = None
     # profiling
@@ -85,9 +82,8 @@ class MPKMetadata:
         if self.weight_from_model:
             assert (self.model_name is not None) or (self.model_path is not None), "model_name or model_path is required when weight_from_model is True"
         else:
+            # No kvcache check, as the plan owns the caches.
             assert self.model_config.state_dict is not None, "state_dict is required when weight_from_model is False"
-            assert self.model_config.k_cache is not None, "k_cache is required when weight_from_model is False"
-            assert self.model_config.v_cache is not None, "v_cache is required when weight_from_model is False"
             
     def info_as_string(self):
         info = "MPKMetadata info:"
@@ -113,9 +109,6 @@ class MPKMetadata:
         info += f"Num new tokens: {self.num_new_tokens.shape if self.num_new_tokens is not None else 'None'}\n"
         info += f"Prompt lengths: {self.prompt_lengths.shape if self.prompt_lengths is not None else 'None'}\n"
         info += f"QO indptr buffer: {self.qo_indptr_buffer.shape if self.qo_indptr_buffer is not None else 'None'}\n"
-        info += f"Paged KV indptr buffer: {self.paged_kv_indptr_buffer.shape if self.paged_kv_indptr_buffer is not None else 'None'}\n"
-        info += f"Paged KV indices buffer: {self.paged_kv_indices_buffer.shape if self.paged_kv_indices_buffer is not None else 'None'}\n"
-        info += f"Paged KV last page len buffer: {self.paged_kv_last_page_len_buffer.shape if self.paged_kv_last_page_len_buffer is not None else 'None'}\n"
         info += f"Model config: \n"
         info += self.model_config.info_as_string()
         info += f"Profiler tensor: {self.profiler_tensor.shape if self.profiler_tensor is not None else 'None'}\n"
@@ -200,11 +193,7 @@ class MPK:
         self.num_new_tokens = args.num_new_tokens
         self.prompt_lengths = args.prompt_lengths
         self.qo_indptr_buffer = args.qo_indptr_buffer
-        self.paged_kv_indptr_buffer = args.paged_kv_indptr_buffer
-        self.paged_kv_indices_buffer = args.paged_kv_indices_buffer
-        self.paged_kv_last_page_len_buffer = args.paged_kv_last_page_len_buffer
-        self.paged_kv_indices_snapshot = args.paged_kv_indices_snapshot
-        
+
         self.pinned_ring_capacity    = args.pinned_ring_capacity
         self.pinned_req_ready        = args.pinned_req_ready
         self.pinned_req_request_id   = args.pinned_req_request_id
@@ -242,10 +231,6 @@ class MPK:
             "num_new_tokens": self.num_new_tokens,
             "prompt_lengths": self.prompt_lengths,
             "qo_indptr_buffer": self.qo_indptr_buffer,
-            "paged_kv_indptr_buffer": self.paged_kv_indptr_buffer,
-            "paged_kv_indices_buffer": self.paged_kv_indices_buffer,
-            "paged_kv_last_page_len_buffer": self.paged_kv_last_page_len_buffer,
-            "paged_kv_indices_snapshot": self.paged_kv_indices_snapshot,
             # Pinned ring buffers — allocated upstream by
             # ModelRunner._allocate_meta_tensors, passed via MPKMetadata.
             "pinned_req_ready":        args.pinned_req_ready,
@@ -261,6 +246,12 @@ class MPK:
             "pinned_inbox_tokens":     args.pinned_inbox_tokens,
             "pinned_rid_at_row":       args.pinned_rid_at_row,
         }
+        # The plan supplies kv_groups and the page-table meta tensors.
+        self.kv_plan = self._build_kv_plan(args)
+        meta_tensors.update(self.kv_plan.build_meta_tensors(
+            max_seq_length=self.max_seq_length,
+            max_num_batched_requests=args.max_num_batched_requests))
+
         self.persistent_kernel = PersistentKernel(
             mode=args.mode,
             world_size=self.world_size,
@@ -271,8 +262,7 @@ class MPK:
             max_seq_length=self.max_seq_length,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=self.max_num_batched_tokens,
-            max_num_pages=args.max_num_pages,
-            page_size=args.page_size,
+            kv_plan=self.kv_plan,
             meta_tensors=meta_tensors,
             profiler_tensor=self.profiler_tensor,
             trace_name=args.trace_name,
@@ -286,7 +276,9 @@ class MPK:
             sampling_seed=args.sampling_seed,
             sampling_topk_max=args.sampling_topk_max,
         )
-        self.meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors.values()]
+
+        self.meta_tensors = meta_tensors
+        self.meta_tensors_ptr = self.persistent_kernel.meta_tensor_ptrs()
         self.profiler_buffer_ptr = (
             self.persistent_kernel.profiler_tensor.data_ptr() if self.persistent_kernel.profiler_tensor is not None else 0
         )
@@ -295,6 +287,42 @@ class MPK:
         self.task_graph_generated = False
         self.is_compiled = False
         
+    def _build_kv_plan(self, args):
+        """The registered builder's KV streams, planned and allocated."""
+        from .kvcache import build_kv_cache
+        from .models.graph_builder import GraphBuilder
+
+        if args.model_name is None:
+            raise ValueError(
+                "A model_name is needed to find the builder that declares the "
+                "KV streams.")
+        builder_cls = get_builder(args.model_name)
+        streams_fn = getattr(builder_cls, "kv_streams", None)
+        if streams_fn is None or streams_fn is GraphBuilder.kv_streams:
+            raise NotImplementedError(
+                f"{builder_cls.__name__} ({args.model_name}) does not declare "
+                f"its KV streams.")
+        config = builder_cls.load_config(args.model_name, args.model_path)
+        streams = streams_fn(config, self.world_size)
+        if streams is None:
+            raise NotImplementedError(
+                f"{builder_cls.__name__}.kv_streams() returned None.")
+        # page_size is the plan-wide page size every stream is fit against.
+        # MPKMetadata.page_size defaults to 0, in which case build_kv_cache's
+        # own default (64) applies.
+        block_size_kwargs = (
+            {"block_size": args.page_size} if args.page_size else {})
+        return build_kv_cache(
+            streams,
+            kv_budget=args.kv_budget,
+            max_num_pages=(None if args.kv_budget is not None
+                           else args.max_num_pages),
+            max_seq_length=self.max_seq_length,
+            max_num_batched_requests=args.max_num_batched_requests,
+            max_num_batched_tokens=self.max_num_batched_tokens,
+            verbose=False,
+            **block_size_kwargs)
+
     def init_mpi(self):
         try:
             from mpi4py import MPI
@@ -334,22 +362,7 @@ class MPK:
         if self.qo_indptr_buffer is None:
             print(f"Compensating qo indptr buffer tensor")
             self.qo_indptr_buffer = torch.empty(
-                self.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        if self.paged_kv_indptr_buffer is None:
-            print(f"Compensating paged kv indptr buffer tensor")
-            self.paged_kv_indptr_buffer = torch.empty(
-                self.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        if self.paged_kv_indices_buffer is None:
-            print(f"Compensating paged kv indices buffer tensor")
-            self.paged_kv_indices_buffer = torch.empty(
-                self.max_num_pages, dtype=torch.int32, device="cuda")
-        if not hasattr(self, 'paged_kv_indices_snapshot') or self.paged_kv_indices_snapshot is None:
-            self.paged_kv_indices_snapshot = torch.empty(
-                self.max_num_pages, dtype=torch.int32, device="cuda")
-        if self.paged_kv_last_page_len_buffer is None:
-            print(f"Compensating paged kv last page len buffer tensor")
-            self.paged_kv_last_page_len_buffer = torch.empty(
-                self.max_num_batched_requests, dtype=torch.int32, device="cuda")
+                self.total_num_requests + 1, dtype=torch.int32, device="cuda")
  
     def get_tensors(self):
         """
@@ -407,9 +420,9 @@ class MPK:
         self.num_new_tokens.fill_(0)
         self.prompt_lengths.fill_(0)
         self.qo_indptr_buffer.fill_(0)
-        self.paged_kv_indptr_buffer.fill_(0)
-        self.paged_kv_indices_buffer.fill_(0)
-        self.paged_kv_last_page_len_buffer.fill_(0)
+        for _name, _tensor in self.meta_tensors.items():
+            if _name.startswith("paged_kv_"):
+                _tensor.fill_(0)
         
     def print_buffers(self, logger = None):
         if logger is not None:
@@ -420,9 +433,9 @@ class MPK:
             logger.info(f"num_new_tokens: {self.num_new_tokens}")
             logger.info(f"prompt_lengths: {self.prompt_lengths}")
             logger.info(f"qo_indptr_buffer: {self.qo_indptr_buffer}")
-            logger.info(f"paged_kv_indptr_buffer: {self.paged_kv_indptr_buffer}")
-            logger.info(f"paged_kv_indices_buffer: {self.paged_kv_indices_buffer}")
-            logger.info(f"paged_kv_last_page_len_buffer: {self.paged_kv_last_page_len_buffer}")
+            for _name, _tensor in self.meta_tensors.items():
+                if _name.startswith("paged_kv_"):
+                    logger.info(f"{_name}: {_tensor}")
             
     def init_per_request(self):
         self.persistent_kernel.init_func(

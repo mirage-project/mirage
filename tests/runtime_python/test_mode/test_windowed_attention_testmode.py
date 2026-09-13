@@ -6,6 +6,8 @@ differs from the plain-causal one, so an ignored WINDOW_SIZE fails.
 window=0 is the no-regression control on the full-causal path, and confirms
 the identity RoPE tables (cos=1, sin=0) used here are the identity.
 
+Each window gets its OWN KV group.
+
 SCOPE: the MASK only. Skipping leading KV tiles that fall outside the window
 needs seq_len > num_tokens and is covered by test_windowed_attention_direct.py.
 """
@@ -16,6 +18,7 @@ import sys
 import torch
 
 import mirage
+from mirage.mpk.kvcache import KVStream, build_kv_cache
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 NUM_KV_HEADS = 1
@@ -23,7 +26,6 @@ NUM_QO_PER_KV = 8          # GQA 8:1
 NUM_Q_HEADS = NUM_KV_HEADS * NUM_QO_PER_KV
 HEAD_DIM = 64
 PAGE_SIZE = 64
-MAX_NUM_PAGES = 4
 MAX_SEQ_LENGTH = 256
 NUM_TOKENS = 8             # = max_num_batched_tokens = seq_len here
 WINDOWS = (0, 4, 6)
@@ -52,6 +54,21 @@ def main():
     torch.manual_seed(0)
     device = "cuda"
 
+    entry = (NUM_KV_HEADS, HEAD_DIM)
+    plan = build_kv_cache(
+        [KVStream(f"w{w}", layers=(i,),
+                  components=[("k", entry, torch.bfloat16),
+                              ("v", entry, torch.bfloat16)],
+                  window=w)
+         for i, w in enumerate(WINDOWS)],
+        block_size=PAGE_SIZE,
+        max_num_pages=4 * len(WINDOWS),
+        max_seq_length=MAX_SEQ_LENGTH,
+        max_num_batched_requests=1,
+        max_num_batched_tokens=NUM_TOKENS,
+        verbose=False)
+    assert len(plan.groups) == len(WINDOWS)
+
     num_workers, num_schedulers = mirage.get_configurations_from_gpu(0)
     params = PersistentKernel.get_default_init_parameters()
     params.update(
@@ -61,12 +78,13 @@ def main():
         max_seq_length=MAX_SEQ_LENGTH,
         max_num_batched_requests=1,
         max_num_batched_tokens=NUM_TOKENS,
-        max_num_pages=MAX_NUM_PAGES,
-        page_size=PAGE_SIZE,
+        kv_plan=plan,
     )
     params["meta_tensors"] = {
         "prompt_lengths": torch.tensor([NUM_TOKENS], dtype=torch.int32,
                                        device=device),
+        **plan.build_meta_tensors(max_num_batched_requests=1,
+                                  max_seq_length=MAX_SEQ_LENGTH),
     }
     pk = PersistentKernel(**params)
 
@@ -82,29 +100,28 @@ def main():
     norm_dt = pk.attach_input(norm_w, name="dummy_norm")
 
     cases = []
-    for window_size in WINDOWS:
+    for layer_id, window_size in enumerate(WINDOWS):
         tag = f"w{window_size}"
         qkv = torch.randn(NUM_TOKENS,
                           (NUM_Q_HEADS + 2 * NUM_KV_HEADS) * HEAD_DIM,
                           dtype=torch.bfloat16, device=device)
-        k_cache = torch.zeros(MAX_NUM_PAGES, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM,
-                              dtype=torch.bfloat16, device=device)
-        v_cache = torch.zeros_like(k_cache)
         out = torch.zeros(NUM_TOKENS, NUM_Q_HEADS * HEAD_DIM,
                           dtype=torch.bfloat16, device=device)
 
+        kv = plan.attach(pk, layer_id)
+        group_id, slot = plan._layer_info(layer_id)
         pk.paged_attention_layer(
             input=pk.attach_input(qkv, name=f"{tag}_qkv"),
-            k_cache=pk.attach_input(k_cache, name=f"{tag}_k_cache"),
-            v_cache=pk.attach_input(v_cache, name=f"{tag}_v_cache"),
+            k_cache=kv["k_cache"], v_cache=kv["v_cache"],
             q_norm=norm_dt, k_norm=norm_dt,
             cos_pos_embed=cos_dt, sin_pos_embed=sin_dt,
             output=pk.attach_input(out, name=f"{tag}_out"),
             grid_dim=(1, NUM_KV_HEADS, 1), block_dim=(256, 1, 1),
             enable_qk_norm=False,
             window_size=window_size,
+            group_id=kv["group_id"],
         )
-        cases.append((window_size, qkv, k_cache, out))
+        cases.append((window_size, qkv, plan.views(group_id)["k"][slot], out))
 
     print("Compiling test kernel...")
     pk.compile(output_dir=os.path.dirname(os.path.abspath(__file__)))
@@ -133,13 +150,12 @@ def main():
                 ok = False
 
         # The new tokens are the whole sequence, so they land in the first
-        # page, rows 0..NUM_TOKENS.
-        written = k_cache[:, :NUM_TOKENS, 0].reshape(-1, HEAD_DIM)
+        # page of the group's page table, rows 0..NUM_TOKENS.
         k_new = qkv[:, NUM_Q_HEADS * HEAD_DIM : (NUM_Q_HEADS + 1) * HEAD_DIM]
         if not any(torch.equal(k_cache[p, :NUM_TOKENS, 0], k_new)
-                   for p in range(MAX_NUM_PAGES)):
+                   for p in range(k_cache.shape[0])):
             print(f"[w={window_size}] FAILED: new K rows never reached the "
-                  f"paged cache (written sample {written[0, :4].tolist()})")
+                  f"paged cache")
             ok = False
 
     pk.finalize()

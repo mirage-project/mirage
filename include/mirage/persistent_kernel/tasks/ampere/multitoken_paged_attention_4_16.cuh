@@ -22,6 +22,7 @@
 #include "rotary_embedding.cuh"
 #include "smem_layout.cuh"
 #include "tasks/common/common_header.cuh"
+#include "tasks/common/kv_tiles.h"
 
 namespace kernel {
 
@@ -36,6 +37,7 @@ template <typename T,
           int HEAD_DIM,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
+          int PAGE_STRIDE,
           int MAX_TOKENS = 8>
 __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
     void const *qkv_ptr,
@@ -65,7 +67,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
   // [max_num_pages, page_size, num_kv_heads, head_dim]
 
   constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
-  constexpr int KV_TILE_SIZE = 64;
+  constexpr int KV_TILE_SIZE = KV_TILE_AMPERE_4_16;
   constexpr int MAX_PAGES_PER_REQUEST =
       (MAX_SEQ_LEN + PAGE_SIZE - 1) / PAGE_SIZE;
 
@@ -269,7 +271,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
       // int page_idx = page_indices[(dst_row + cp_finished_seq_len) /
       // PAGE_SIZE];
       int page_offset = (dst_row + cp_finished_seq_len) % PAGE_SIZE;
-      int src_row = page_idx_0 * PAGE_SIZE + page_offset;
+      int src_row = page_idx_0 * PAGE_STRIDE + page_offset;
       load_smem(k_buffer_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
       load_smem(v_buffer_smem(dst_row, col), paged_v_cache_dmem(src_row, col));
     } else {
@@ -322,7 +324,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
           // int page_idx =
           //    page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
           int page_offset = (dst_row + cp_finished_seq_len) % PAGE_SIZE;
-          int src_row = page_idx * PAGE_SIZE + page_offset;
+          int src_row = page_idx * PAGE_STRIDE + page_offset;
           load_smem(k_smem(dst_row, col), paged_k_cache_dmem(src_row, col));
           load_smem(v_smem(dst_row, col), paged_v_cache_dmem(src_row, col));
         } else {
@@ -430,7 +432,7 @@ __device__ __forceinline__ void multitoken_paged_attention_task_impl_4_16(
         // PAGE_SIZE];
         int page_offset = (token_idx + first_kv_token_to_process) % PAGE_SIZE;
         int src_row = (token_idx + first_kv_token_to_process) % KV_TILE_SIZE;
-        int dst_row = page_idx * PAGE_SIZE + page_offset;
+        int dst_row = page_idx * PAGE_STRIDE + page_offset;
         paged_k_cache_dmem.at(dst_row, col) = k_smem.at(src_row, col);
         paged_v_cache_dmem.at(dst_row, col) = v_smem.at(src_row, col);
       }

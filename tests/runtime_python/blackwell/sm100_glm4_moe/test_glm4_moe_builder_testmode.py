@@ -19,6 +19,8 @@ import sys
 import torch
 
 import mirage
+from mirage.mpk.kvcache import build_kv_cache
+from mirage.mpk.models.glm4_moe.builder import kv_streams as glm4_moe_kv_streams
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 NUM_LAYERS = 4  # 3 dense + 1 MoE
@@ -85,8 +87,10 @@ def main():
     params["num_local_schedulers"] = num_schedulers
     params["max_num_batched_tokens"] = 1
     params["max_num_batched_requests"] = 1
-    params["page_size"] = 64  # must be a multiple of the 64-key KV tile
-    params["max_num_pages"] = 1
+    # block_size must be a multiple of the 64-key KV tile
+    params["kv_plan"] = build_kv_cache(
+        glm4_moe_kv_streams(model.config, world_size=1),
+        block_size=64, max_num_pages=1, max_seq_length=64, verbose=False)
     params["max_seq_length"] = 64
     tokens = torch.zeros((1, 64), dtype=torch.int64, device=device)
     tokens[0, 0] = PROMPT_TOKEN
