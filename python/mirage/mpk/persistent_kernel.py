@@ -284,6 +284,8 @@ def get_compile_command(
     flags = flags + [f"-DMPK_TARGET_CC={target_cc}", "-DMIRAGE_BACKEND_USE_CUDA"]
     if test_mode:
         flags = flags + ["-DMPK_TEST_MODE"]
+    if getattr(mpk, "test_inject_batch", False):
+        flags = flags + ["-DMPK_TEST_INJECT_BATCH"]
     if mpk.mode == "offline":
         flags = flags + ["-DMODE_OFFLINE"]
     elif mpk.mode == "online":
@@ -372,6 +374,7 @@ class PersistentKernel:
         eos_token_id: int64 = -1,
         pinned_ring_capacity: int = 0,
         test_mode: bool = False,
+        test_inject_batch: bool = False,
         do_sample: bool = False,
         temperature: float = 0.0,
         top_p: float = 1.0,
@@ -382,6 +385,13 @@ class PersistentKernel:
         self.__finalized__ = False
         self._is_compiled = False
         self.test_mode = test_mode
+        # Run the caller's qo_indptr / paged_kv_indptr / last_page_len as the
+        # batch instead of letting prepare_next_batch() build one. Lets a test
+        # drive the kernel with a pre-seeded KV cache (seq_len > num_tokens),
+        # which the generated batch only reaches after several iterations.
+        if test_inject_batch and not test_mode:
+            raise ValueError("test_inject_batch requires test_mode=True")
+        self.test_inject_batch = test_inject_batch
         self.do_sample = do_sample
         self.temperature = temperature
         self.top_p = top_p

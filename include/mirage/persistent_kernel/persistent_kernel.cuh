@@ -157,10 +157,14 @@ __global__ void init_kernel(RuntimeConfig config) {
     for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
       config.request_ids[i] = -1;
     }
+#ifndef MPK_TEST_INJECT_BATCH
+    // Under MPK_TEST_INJECT_BATCH the host supplies a ready-made batch in
+    // these buffers, so zeroing them here would discard it.
     for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS + 1; i++) {
       config.qo_indptr_buffer[i] = 0;
       config.paged_kv_indptr_buffer[i] = 0;
     }
+#endif
     // Page manager
     *config.page_queue_head = 0;
     *config.page_queue_tail = MPK_MAX_NUM_PAGES;
@@ -1248,12 +1252,20 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
 #ifdef MPK_ENABLE_PROFILING
         PROFILER_EVENT_START(TASK_SCHD_PREPARE_BATCH, sched_profiling_cnt);
 #endif
-#ifdef MODE_ONLINE_NOTOKEN
-        if (!prepare_next_batch(config, iteration_num))
+#ifdef MPK_TEST_INJECT_BATCH
+        // Test-mode batch injection: the host already described one ready
+        // batch in qo_indptr / paged_kv_indptr / last_page_len, so the runtime
+        // must not build its own over the top of it. Run exactly that batch
+        // (iteration 1) and stop. This is what lets a test_mode kernel be
+        // driven with a pre-seeded KV cache, i.e. with real history, which
+        // prepare_next_batch() can only produce over several iterations.
+        bool const batch_ready = (iteration_num == 0);
+#elif defined(MODE_ONLINE_NOTOKEN)
+        bool const batch_ready = prepare_next_batch(config, iteration_num);
 #else
-        if (!prepare_next_batch(config))
+        bool const batch_ready = prepare_next_batch(config);
 #endif
-        {
+        if (!batch_ready) {
 #ifdef MPK_ENABLE_PROFILING
           PROFILER_EVENT_END(TASK_SCHD_PREPARE_BATCH, sched_profiling_cnt++);
 #endif
