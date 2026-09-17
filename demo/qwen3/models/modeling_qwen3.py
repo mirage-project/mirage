@@ -420,7 +420,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
         # N is the max number of pages (i.e., 1), 
         # P is the page size (i.e., config.max_embedding_positions), 
         # H is the number of key-value heads, and D is the hidden dim size
-        key_cache = torch.empty(
+        key_cache = torch.zeros(
             (
                 config.num_hidden_layers,
                 max_num_pages,
@@ -431,7 +431,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
             dtype=torch.bfloat16,
             device="cuda",
         )
-        value_cache = torch.empty(
+        value_cache = torch.zeros(
             (
                 config.num_hidden_layers,
                 max_num_pages,

@@ -311,13 +311,13 @@ if __name__ == "__main__":
         )
             
         num_workers, num_schedulers = mi.get_configurations_from_gpu(rank)
-        qo_indptr_buffer = torch.empty(
+        qo_indptr_buffer = torch.zeros(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        paged_kv_indptr_buffer = torch.empty(
+        paged_kv_indptr_buffer = torch.zeros(
             args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-        paged_kv_indices_buffer = torch.empty(
+        paged_kv_indices_buffer = torch.zeros(
             args.max_num_pages, dtype=torch.int32, device="cuda")
-        paged_kv_last_page_len_buffer = torch.empty(
+        paged_kv_last_page_len_buffer = torch.zeros(
             args.max_num_batched_requests, dtype=torch.int32, device="cuda")
         mpk = mi.PersistentKernel(
             mode="offline",
