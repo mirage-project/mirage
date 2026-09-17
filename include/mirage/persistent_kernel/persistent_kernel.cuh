@@ -1833,11 +1833,20 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
                     global_runtime_config.worker_stream>>>(
         global_runtime_config);
 
-    scheduler_kernel<<<dim3(global_runtime_config.num_local_schedulers, 1, 1),
-                       dim3(32, 1, 1),
-                       0 /*smem*/,
-                       global_runtime_config.scheduler_stream>>>(
-        global_runtime_config);
+    // Pack scheduler warps into blocks so they leave enough SMs for workers,
+    // even when CUDA starts the schedulers before the workers.
+    int schedulers_per_block =
+        std::min(4, global_runtime_config.num_local_schedulers);
+    while (global_runtime_config.num_local_schedulers % schedulers_per_block) {
+      --schedulers_per_block;
+    }
+    scheduler_kernel<<<
+        dim3(global_runtime_config.num_local_schedulers / schedulers_per_block,
+             1,
+             1),
+        dim3(32 * schedulers_per_block, 1, 1),
+        0 /*smem*/,
+        global_runtime_config.scheduler_stream>>>(global_runtime_config);
 
 #ifdef MODE_OFFLINE
     cudaEventRecord(global_runtime_config.worker_done_event,
