@@ -12,6 +12,7 @@ from .config import RunnerConfig
 from ..mpk.mpk import MPK, MPKMetadata
 from ..mpk import OnlinePinnedRuntime
 from ..mpk.models.graph_builder import MirageModelConfig
+from ..serving_config import CONFIG_WORDS
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────

@@ -224,6 +224,10 @@ class MPK:
         self.pinned_step             = args.pinned_step
         self.pinned_inbox_tokens     = args.pinned_inbox_tokens
         self.pinned_rid_at_row       = args.pinned_rid_at_row
+        self.pinned_generation_config= args.pinned_generation_config
+        self.generation_config       = args.generation_config
+        self.pinned_cancel           = args.pinned_cancel
+        self.pinned_finish_reason    = args.pinned_finish_reason
 
         self.profiler_tensor = args.profiler_tensor
         self.spec_decode_config = args.spec_decode_config
@@ -268,10 +272,9 @@ class MPK:
             "pinned_inbox_tokens":     args.pinned_inbox_tokens,
             "pinned_rid_at_row":       args.pinned_rid_at_row,
             "pinned_generation_config": args.pinned_generation_config,
-            "generation_config": args.generation_config,
-            "pinned_cancel": args.pinned_cancel,
-            "pinned_finish_reason": args.pinned_finish_reason,
-
+            "generation_config":        args.generation_config,
+            "pinned_cancel":            args.pinned_cancel,
+            "pinned_finish_reason":     args.pinned_finish_reason,
         }
         self.persistent_kernel = PersistentKernel(
             mode=args.mode,
