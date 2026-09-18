@@ -12,18 +12,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from .protocol import ChatRequest, TextRequest
-from .responses import CompletionResponse, encode_sse
+from .output import GenerationEvent
 
-DEFAULT_MODEL = "Qwen/Qwen3-8B"
-DEFAULT_REQUEST_TIMEOUT = 120.0
 DISCONNECT_POLL_INTERVAL = 0.05
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,54 @@ def error_response(message, status=400, param=None, code=None):
     return JSONResponse(status_code=status, content={"error": {
         "message": message, "type": "invalid_request_error" if status < 500 else "server_error",
         "param": param, "code": code}})
+
+
+def encode_sse(value):
+    return "data: " + json.dumps(value, ensure_ascii=False) + "\n\n"
+
+
+@dataclass(frozen=True)
+class CompletionResponse:
+    model: str
+    chat: bool
+    created: int = field(default_factory=lambda: int(time.time()))
+    suffix: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    def envelope(self, choices, *, stream=False, usage=None):
+        result = dict(
+            id=("chatcmpl-" if self.chat else "cmpl-") + self.suffix,
+            created=self.created, model=self.model, choices=choices,
+            object=("chat.completion.chunk" if stream else "chat.completion")
+                   if self.chat else "text_completion",
+        )
+        if usage is not None:
+            result["usage"] = usage
+        return result
+
+    def choice(self, text, reason=None, *, stream=False, role=False):
+        result = dict(index=0, finish_reason=reason)
+        if self.chat:
+            content = {} if stream and reason else {"content": text}
+            if role or not stream:
+                content["role"] = "assistant"
+            result["delta" if stream else "message"] = content
+        else:
+            result["text"] = text
+        return result
+
+    def initial_chunk(self):
+        return self.envelope([self.choice("", stream=True, role=True)], stream=True)
+
+    def chunks(self, event: GenerationEvent, include_usage=False):
+        if event.text:
+            yield self.envelope([self.choice(event.text, stream=True)], stream=True)
+        if event.finish_reason is not None:
+            yield self.envelope([self.choice("", event.finish_reason, stream=True)], stream=True)
+            if include_usage:
+                yield self.envelope([], stream=True, usage=event.usage)
+
+    def completed(self, text, event: GenerationEvent):
+        return self.envelope([self.choice(text, event.finish_reason)], usage=event.usage)
 
 
 @asynccontextmanager
@@ -46,31 +96,29 @@ async def lifespan(app):
         await asyncio.to_thread(app.state.engine.close)
 
 
-def create_app(engine=None, *, model=None, request_timeout=DEFAULT_REQUEST_TIMEOUT, sampling_defaults=None):
-    app = FastAPI(title="Mirage OpenAI API", lifespan=lifespan if engine is None else None)
-    app.state.engine = engine
-    app.state.served_model = model
-    app.state.sampling_defaults = dict(sampling_defaults or {})
-    app.state.request_timeout = request_timeout
+app = FastAPI(title="MPK LLM Engine", lifespan=lifespan)
 
-    @app.get("/health")
-    async def health():
-        return {"status": "ok"}
 
-    @app.get("/v1/models")
-    async def models():
-        return {"object": "list", "data": [{"id": app.state.served_model, "object": "model",
-                                           "created": 0, "owned_by": "mirage"}]}
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
-    @app.post("/v1/chat/completions")
-    async def chat(request: Request):
-        return await complete(request, chat=True)
 
-    @app.post("/v1/completions")
-    async def text(request: Request):
-        return await complete(request, chat=False)
+@app.get("/v1/models")
+async def models():
+    return {"object": "list", "data": [{"id": app.state.served_model, "object": "model",
+                                       "created": 0, "owned_by": "mirage"}]}
 
-    return app
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    return await complete(request, chat=True)
+
+
+@app.post("/v1/completions")
+async def completions(request: Request):
+    return await complete(request, chat=False)
+
 
 async def complete(request, chat):
     try:
@@ -95,7 +143,7 @@ async def complete(request, chat):
         kwargs = {"messages": [m.template_message() for m in req.messages]} if chat else {"prompt": req.prompt}
         prepared = await asyncio.to_thread(engine.prepare, params=params, **kwargs)
         submission = asyncio.create_task(asyncio.to_thread(
-            engine.generate, prepared, request.app.state.request_timeout))
+            engine.generate, prepared, request.app.state.request_timeout, poll=True))
         try:
             session = await asyncio.shield(submission)
         except asyncio.CancelledError:
@@ -115,17 +163,16 @@ async def complete(request, chat):
         return error_response("Unable to start generation", 503)
 
     response = CompletionResponse(model, chat)
-    iterator = iter(session)
 
     async def events():
         try:
-            while True:
-                event = await asyncio.to_thread(next, iterator, None)
+            for event in session:
                 if event is None:
-                    break
-                yield event
+                    await asyncio.sleep(0.002)
+                else:
+                    yield event
         finally:
-            # Session cancellation is thread-safe, even while next() is blocked.
+            # Nonblocking iteration keeps next() and close() on the event loop.
             session.close()
 
     if req.stream:
@@ -176,9 +223,6 @@ async def complete(request, chat):
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-
-
-app = create_app()
 
 
 def main():

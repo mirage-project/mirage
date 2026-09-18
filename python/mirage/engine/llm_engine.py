@@ -29,23 +29,6 @@ class PreparedGeneration:
     params: SamplingParams
 
 
-class GenerationSession:
-    """A cancellable handle to an API request on the shared streaming monitor."""
-    def __init__(self, engine, rid, queue):
-        self.engine = engine
-        self.rid = rid
-        self.queue = queue
-
-    def __iter__(self):
-        try:
-            yield from self.engine._submit_stream(self.rid, self.queue)
-        finally:
-            self.close()
-
-    def close(self):
-        self.engine._monitor.cancel(self.rid)
-
-
 class _StreamingMonitor:
     """Single background thread that monitors all active streaming sessions.
 
@@ -283,8 +266,8 @@ class LLMEngine:
                              self.vocab_size, self.eos_ids)
         return PreparedGeneration(tuple(ids), tuple(packed), params)
 
-    def generate(self, request: PreparedGeneration, timeout=120.0):
-        """Submit an API request using the existing shared streaming monitor."""
+    def generate(self, request: PreparedGeneration, timeout=120.0, *, poll=False):
+        """Return a cancellable generator; poll=True yields None while waiting."""
         tokens = torch.tensor(request.token_ids, dtype=torch.int64)
         output = OutputProcessor(self.tokenizer_manager, request.params.stop, self.eos_ids,
                                  request.params.stop_token_sequences)
@@ -300,7 +283,16 @@ class LLMEngine:
             except Exception:
                 self._monitor.unregister(rid)
                 raise
-        return GenerationSession(self, rid, q)
+        def generator():
+            try:
+                yield  # Prime cleanup before returning the submitted request.
+                yield from self._submit_stream(rid, q, poll=poll)
+            finally:
+                self._monitor.cancel(rid)
+
+        result = generator()
+        next(result)
+        return result
 
     def submit(
         self,
@@ -386,6 +378,8 @@ class LLMEngine:
         self,
         rid: int,
         q: queue.Queue,
+        *,
+        poll: bool = False,
     ):
         """Generator: yield ``(text, is_final)`` as tokens are decoded.
 
@@ -396,8 +390,10 @@ class LLMEngine:
         def generator():
             while True:
                 try:
-                    item = q.get(timeout=0.05)
+                    item = q.get(timeout=0 if poll else 0.05)
                 except queue.Empty:
+                    if poll:
+                        yield None
                     continue
                 if isinstance(item, GenerationEvent):
                     yield item
