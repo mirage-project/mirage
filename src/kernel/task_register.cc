@@ -2470,9 +2470,23 @@ int TaskRegister::register_argmax_reduce_sm100_task(
   return register_task_variant(TASK_ARGMAX_REDUCE_SM100, code.to_string());
 }
 
+int TaskRegister::register_serving_sampling_task(threadblock::Graph const &bgraph) {
+  assert(bgraph.operators.size() == 3);
+  auto *input = static_cast<tb::TBInputOp *>(bgraph.operators[0]);
+  auto logits = input->output_tensors[0];
+  assert(logits.num_dims == 2);
+  mirage::transpiler::CodeKeeper code;
+  code.e("mirage::serving::sample_request(");
+  code.e("    static_cast<bfloat16 const *>(task_desc->input_ptrs[0]),");
+  code.e("    static_cast<float *>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<long long *>(task_desc->output_ptrs[0]),");
+  code.e("    $, task_desc->task_metadata.request_id, runtime_config);", logits.dim[1]);
+  return register_task_variant(TASK_SERVING_SAMPLING, code.to_string());
+}
+
 int TaskRegister::register_sampling_sm100_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
-  // params[0]: seed
+  // params[0]: seed (legacy standalone sampler)
   assert(params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;

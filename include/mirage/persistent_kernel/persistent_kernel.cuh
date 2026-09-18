@@ -52,6 +52,8 @@
 #include "tasks/ampere/task_header.cuh"
 #endif
 
+#include "tasks/common/serving_sampling.cuh"
+
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 // Configurations for the MPK runtime
@@ -512,10 +514,13 @@ __device__ __forceinline__ bool
 #ifdef MPK_ENABLE_PROFILING
     bool done = true;
 #else
-    bool done = (step + num_tokens + 1 >= config.max_seq_length) ||
-                ((config.tokens[row * MPK_MAX_SEQ_LENGTH + step + num_tokens] ==
-                  config.eos_token_id) &&
-                 (step + num_tokens >= prompt_len));
+    bool cancelled = ld_acquire_sys_i32(&config.pinned_cancel[row]) == config.request_rids[i];
+    int reason = mirage::serving::finish_reason(
+        config.generation_config + row * mirage::serving::CONFIG_WORDS,
+        config.tokens + row * MPK_MAX_SEQ_LENGTH, step + num_tokens + 1,
+        prompt_len, config.max_seq_length, cancelled, config.eos_token_id);
+    bool done = reason != mirage::serving::FINISH_NONE;
+    config.pinned_finish_reason[row] = reason;
 #endif
 
     if (done) {
@@ -591,7 +596,7 @@ __device__ __forceinline__ bool
     int num_new_pages =
         (step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
     config.paged_kv_last_page_len_buffer[num_reqs] =
-        (step + num_new_tokens) % MPK_PAGE_SIZE;
+        (step + num_new_tokens - 1) % MPK_PAGE_SIZE + 1;
 
     for (int j = 0; j < num_old_pages; j++) {
       config.paged_kv_indices_buffer[num_pages + j] =
@@ -630,6 +635,10 @@ __device__ __forceinline__ bool
       config.tokens[row * MPK_MAX_SEQ_LENGTH + j] =
           config.pinned_inbox_tokens[inbox_base + j];
     }
+    for (int j = 0; j < mirage::serving::CONFIG_WORDS; ++j) {
+      config.generation_config[row * mirage::serving::CONFIG_WORDS + j] = config.pinned_generation_config[req_slot * mirage::serving::CONFIG_WORDS + j];
+    }
+    config.pinned_finish_reason[row] = 0;
     config.prompt_length[row] = prompt_len;
     config.step[row] = initial_step;
     // Reset progress before release-publishing the owner. An observer that
@@ -659,7 +668,7 @@ __device__ __forceinline__ bool
     int num_new_pages =
         (initial_step + num_new_tokens + MPK_PAGE_SIZE - 1) / MPK_PAGE_SIZE;
     config.paged_kv_last_page_len_buffer[num_reqs] =
-        (initial_step + num_new_tokens) % MPK_PAGE_SIZE;
+        (initial_step + num_new_tokens - 1) % MPK_PAGE_SIZE + 1;
 
     for (int j = 0; j < num_new_pages; j++) {
       config.paged_kv_indices_buffer[num_pages + j] =
@@ -1453,7 +1462,7 @@ static std::map<std::string, void *> global_model_tensors;
 // meta_tensors[8]: paged_kv_indices_buffer
 // meta_tensors[9]: paged_kv_last_page_len_buffer
 // meta_tensors[10]: paged_kv_indices_snapshot
-// MODE_ONLINE_PINNED only (indices 11..22):
+// MODE_ONLINE_PINNED only (indices 11..26):
 // meta_tensors[11]: pinned_req_ready
 // meta_tensors[12]: pinned_req_request_id
 // meta_tensors[13]: pinned_req_prompt_len
@@ -1466,6 +1475,10 @@ static std::map<std::string, void *> global_model_tensors;
 // meta_tensors[20]: pinned_step
 // meta_tensors[21]: pinned_inbox_tokens
 // meta_tensors[22]: pinned_rid_at_row
+// meta_tensors[23]: pinned_generation_config
+// meta_tensors[24]: generation_config
+// meta_tensors[25]: pinned_cancel
+// meta_tensors[26]: pinned_finish_reason
 
 extern "C" void init_request_resources() {
   init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
@@ -1493,10 +1506,10 @@ extern "C" void
     global_model_tensors[model_tensor_names[i]] = model_tensor_ptrs[i];
   }
   // meta_tensors[0..10] are always required.
-  // meta_tensors[11..22]: pinned ring pointers (MODE_ONLINE_PINNED only,
+  // meta_tensors[11..26]: pinned ring and generation pointers (MODE_ONLINE_PINNED only,
   //   passed as CPU-side void* from Python's pinned tensors)
 #if defined(MODE_ONLINE_PINNED)
-  assert(meta_tensors.size() == 23);
+  assert(meta_tensors.size() == 27);
 #else
   assert(meta_tensors.size() == 11);
 #endif
@@ -1542,6 +1555,10 @@ extern "C" void
       static_cast<int64_t *>(meta_tensors[21]);
   global_runtime_config.pinned_rid_at_row =
       static_cast<int32_t volatile *>(meta_tensors[22]);
+  global_runtime_config.pinned_generation_config = static_cast<int64_t *>(meta_tensors[23]);
+  global_runtime_config.generation_config = static_cast<int64_t *>(meta_tensors[24]);
+  global_runtime_config.pinned_cancel = static_cast<int32_t volatile *>(meta_tensors[25]);
+  global_runtime_config.pinned_finish_reason = static_cast<int32_t *>(meta_tensors[26]);
 #endif
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;

@@ -172,10 +172,11 @@ class Glm4MoeBuilder(GraphBuilder):
         # lm head / argmax
         self.padded_vocab_size = ((self.vocab_size + 255) // 256) * 256
         self.argmax_in = self._buf("argmax_in", (mbt, self.padded_vocab_size))
-        self.argmax_part_value = self._buf(
-            "argmax_part_value", (mbt, self.mpk.num_workers))
-        self.argmax_part_index = self._buf(
-            "argmax_part_index", (mbt, self.mpk.num_workers), dtype=int64)
+        if self.mpk.mode != "online_pinned":
+            self.argmax_part_value = self._buf(
+                "argmax_part_value", (mbt, self.mpk.num_workers))
+            self.argmax_part_index = self._buf(
+                "argmax_part_index", (mbt, self.mpk.num_workers), dtype=int64)
 
     # ------------------------------------------------------------- layers
     def _build_attention(self, i: int, state_dict: dict):
@@ -437,14 +438,17 @@ class Glm4MoeBuilder(GraphBuilder):
             input=self.rmsnorm_out, weight=w_lm, output=self.argmax_in,
             grid_dim=(grid_for_rmsnorm_linear_layer(self.padded_vocab_size), 1, 1),
             block_dim=(128, 1, 1))
-        mpk.argmax_partial_layer(
-            input=self.argmax_in,
-            output=(self.argmax_part_value, self.argmax_part_index),
-            grid_dim=(mpk.num_workers, 1, 1), block_dim=(128, 1, 1))
-        mpk.argmax_reduce_layer(
-            input=(self.argmax_part_value, self.argmax_part_index),
-            output=argmax_out,
-            grid_dim=(1, 1, 1), block_dim=(128, 1, 1))
+        if mpk.mode == "online_pinned":
+            mpk.serving_sampling_layer(self.argmax_in, argmax_out)
+        else:
+            mpk.argmax_partial_layer(
+                input=self.argmax_in,
+                output=(self.argmax_part_value, self.argmax_part_index),
+                grid_dim=(mpk.num_workers, 1, 1), block_dim=(128, 1, 1))
+            mpk.argmax_reduce_layer(
+                input=(self.argmax_part_value, self.argmax_part_index),
+                output=argmax_out,
+                grid_dim=(1, 1, 1), block_dim=(128, 1, 1))
 
     # ------------------------------------------------------------- tokenizer
     def encode(self, text: str):

@@ -443,18 +443,19 @@ class DeepSeekV3Builder(GraphBuilder):
             )
 
         # Argmax
-        self.argmax_part_value = self.mpk.new_tensor(
-            dims=(mbt, self.mpk.num_workers),
-            dtype=bfloat16,
-            name="argmax_part_value",
-            io_category="cuda_tensor",
-        )
-        self.argmax_part_index = self.mpk.new_tensor(
-            dims=(mbt, self.mpk.num_workers),
-            dtype=int64,
-            name="argmax_part_index",
-            io_category="cuda_tensor",
-        )
+        if self.mpk.mode != "online_pinned":
+            self.argmax_part_value = self.mpk.new_tensor(
+                dims=(mbt, self.mpk.num_workers),
+                dtype=bfloat16,
+                name="argmax_part_value",
+                io_category="cuda_tensor",
+            )
+            self.argmax_part_index = self.mpk.new_tensor(
+                dims=(mbt, self.mpk.num_workers),
+                dtype=int64,
+                name="argmax_part_index",
+                io_category="cuda_tensor",
+            )
 
     def _safe_attach(self, tensor, name):
         """Attach tensor. FP8 is now natively supported in core.pyx.
@@ -2239,17 +2240,20 @@ class DeepSeekV3Builder(GraphBuilder):
                 torch_tensor=self.output_tokens, name="output_token",
             )
             argmax_out = self.argmax_out_dtensor
-            self.mpk.argmax_partial_layer(
-                input=lm_head_out, output=(self.argmax_part_value, self.argmax_part_index),
-                grid_dim=(self.mpk.num_workers, 1, 1),
-                block_dim=(128, 1, 1),
-            )
-            self.mpk.argmax_reduce_layer(
-                input=(self.argmax_part_value, self.argmax_part_index),
-                output=argmax_out,
-                grid_dim=(1, 1, 1),
-                block_dim=(128, 1, 1),
-            )
+            if self.mpk.mode == "online_pinned":
+                self.mpk.serving_sampling_layer(lm_head_out, argmax_out)
+            else:
+                self.mpk.argmax_partial_layer(
+                    input=lm_head_out, output=(self.argmax_part_value, self.argmax_part_index),
+                    grid_dim=(self.mpk.num_workers, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
+                self.mpk.argmax_reduce_layer(
+                    input=(self.argmax_part_value, self.argmax_part_index),
+                    output=argmax_out,
+                    grid_dim=(1, 1, 1),
+                    block_dim=(128, 1, 1),
+                )
 
         # Optional MTP layer
         self._build_mtp_layer(state_dict)

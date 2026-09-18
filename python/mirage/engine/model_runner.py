@@ -4,56 +4,17 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 from typing import Optional
 
 import torch
 import torch.distributed as dist
+from .config import RunnerConfig
 from ..mpk.mpk import MPK, MPKMetadata
 from ..mpk import OnlinePinnedRuntime
 from ..mpk.models.graph_builder import MirageModelConfig
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-
-@dataclass
-class RunnerConfig:
-    """Configuration for :class:`ModelRunner`.
-
-    All capacity limits are upper bounds; the actual batch size per session is
-    determined by the number of requests submitted to the ring buffer.
-    """
-    model: str
-    """HuggingFace model name *or* local model directory."""
-
-    model_path: Optional[str] = None
-    """Path to pre-sharded safetensors (required for multi-GPU local loads)."""
-
-    max_num_batched_requests: int = 4
-    max_num_batched_tokens: int = 8
-    max_seq_length: int = 512
-    max_num_pages: int = 16
-    page_size: int = 4096
-
-    pinned_ring_capacity: int = 8
-    """Power-of-2 capacity for the CPU↔GPU pinned ring buffers."""
-
-    tensor_parallel_size: int = 1
-    """Number of GPUs for tensor parallelism (matches ``mpirun -n`` count)."""
-
-    output_dir: Optional[str] = None
-    """Directory for compiled kernel artefacts; ``None`` uses a temp dir."""
-
-    use_cutlass_kernel: bool = True
-
-    # Compile-time sampling config (one setting per server process).
-    do_sample: bool = False
-    temperature: float = 0.8
-    top_p: float = 0.95
-    top_k: int = 20
-    sampling_seed: int = 42
-    sampling_topk_max: int = 32
-
 
 # ── ModelRunner ───────────────────────────────────────────────────────────────
 
@@ -98,18 +59,23 @@ class ModelRunner:
             model_path=config.model_path,
             model_config=MirageModelConfig(with_lm_head=True),
             use_cutlass_kernel=config.use_cutlass_kernel,
-            do_sample=config.do_sample,
-            temperature=config.temperature,
-            top_p=config.top_p,
-            top_k=config.top_k,
-            sampling_seed=config.sampling_seed,
-            sampling_topk_max=config.sampling_topk_max,
             **self.meta_tensors,
         )
         self.mpk = MPK(mpk_meta)
         self.mpk.build()
         self.runtime = OnlinePinnedRuntime(self.mpk)
         self.tokenizer = self.mpk.tokenizer
+        self.vocab_size = self.mpk.model_builder.vocab_size
+        model_config = getattr(getattr(self.mpk.model_builder, "model", None), "config", None)
+        context_limit = getattr(model_config, "max_position_embeddings", config.max_seq_length)
+        if config.max_seq_length > context_limit:
+            raise ValueError("configured context capacity exceeds the model position limit")
+        generation_config = getattr(getattr(self.mpk.model_builder, "model", None), "generation_config", None)
+        eos = getattr(generation_config, "eos_token_id", None)
+        if eos is None:
+            eos = self.tokenizer.eos_token_id
+        self.eos_ids = list(dict.fromkeys(eos if isinstance(eos, list) else [eos]))
+        self.eos_ids = [token for token in self.eos_ids if token is not None]
         self.mpk.compile(output_dir=config.output_dir)
 
     # ── Execution ─────────────────────────────────────────────────────────────
