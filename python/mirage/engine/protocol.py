@@ -59,15 +59,22 @@ class StreamOptions(APIModel):
     include_usage: bool = False
 
 
-class CompletionRequest(SamplingOptions):
+class CompletionRequest(APIModel):
     model: str
+
+    temperature: float = Field(default=1.0, ge=0, le=2)
+    top_p: float = Field(default=1.0, gt=0, le=1)
+    top_k: StrictInt = Field(default=0, ge=0)
+    frequency_penalty: float = Field(default=0, ge=-2, le=2)
+    presence_penalty: float = Field(default=0, ge=-2, le=2)
+    repetition_penalty: float = Field(default=1, gt=0)
+    seed: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
+    logit_bias: dict[int, float] = Field(
+        default_factory=dict,
+        max_length=abi.MAX_BIASES,
+    )
+
     stream: bool = False
-    stream_options: StreamOptions | None = None
-    max_tokens: StrictInt | None = Field(default=None, gt=0)
-    max_completion_tokens: StrictInt | None = Field(default=None, gt=0)
-    stop: str | list[str] | None = None
-    n: Literal[1] = 1
-    user: str | None = None
 
     @model_validator(mode="after")
     def check_options(self):
@@ -80,12 +87,19 @@ class CompletionRequest(SamplingOptions):
         return self
 
     def sampling_params(self):
-        # The shared sampling fields have already been validated at ingress.
-        options = {name: getattr(self, name) for name in SamplingOptions.model_fields}
-        options["seed"] = self.seed if self.seed is not None else secrets.randbits(63)
-        return SamplingParams.model_construct(
-            **options, max_new_tokens=self.max_completion_tokens or self.max_tokens,
-            stop=tuple([self.stop] if isinstance(self.stop, str) else self.stop or []),
+        stops = [self.stop] if isinstance(self.stop, str) else self.stop or []
+
+        return SamplingParams(
+            temperature=self.temperature,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            frequency_penalty=self.frequency_penalty,
+            presence_penalty=self.presence_penalty,
+            repetition_penalty=self.repetition_penalty,
+            seed=self.seed if self.seed is not None else secrets.randbits(63),
+            logit_bias=self.logit_bias,
+            max_new_tokens=self.max_completion_tokens or self.max_tokens,
+            stop=tuple(stops),
         )
 
 

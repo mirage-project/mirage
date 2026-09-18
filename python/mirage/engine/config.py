@@ -81,7 +81,5 @@ class RunnerConfig:
         if self.developer_role not in ("native", "system", "reject"):
             raise ValueError("invalid developer role adapter")
         if self.do_sample:
-            from .sampling import SamplingOptions
-            SamplingOptions(**self.sampling_defaults())
             if self.temperature <= 0:
                 raise ValueError("do_sample=True requires temperature > 0")
