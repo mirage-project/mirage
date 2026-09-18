@@ -241,21 +241,6 @@ class MPK:
         print(f"num_workers: {self.num_workers}, num_schedulers: {self.num_schedulers}")
         # init meta tensors
         # Versioned serving settings: ring payload is copied into private row state.
-        if args.mode == "online_pinned":
-            shapes = [(args.pinned_ring_capacity, CONFIG_WORDS), (args.max_num_batched_requests, CONFIG_WORDS),
-                      (args.max_num_batched_requests,), (args.max_num_batched_requests,)]
-            for name, shape in zip(
-                    ("pinned_generation_config", "generation_config", "pinned_cancel", "pinned_finish_reason"), shapes):
-                tensor = getattr(args, name)
-                if tensor is None:
-                    dtype = torch.int64 if len(shape) == 2 else torch.int32
-                    tensor = torch.zeros(shape, dtype=dtype, device="cuda" if name == "generation_config" else "cpu")
-                    if name.startswith("pinned_"):
-                        tensor = tensor.pin_memory()
-                    if name == "pinned_cancel":
-                        tensor.fill_(-1)
-                    setattr(args, name, tensor)
-                setattr(self, name, tensor)
         meta_tensors = {
             "step": self.step,
             "tokens": self.tokens,

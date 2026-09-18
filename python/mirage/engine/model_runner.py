@@ -148,6 +148,7 @@ class ModelRunner:
             paged_kv_indices_buffer=torch.zeros(config.max_num_pages, dtype=torch.int32, device="cuda"),
             paged_kv_last_page_len_buffer=torch.zeros(n_req, dtype=torch.int32, device="cuda"),
             paged_kv_indices_snapshot=torch.zeros(config.max_num_pages, dtype=torch.int32, device="cuda"),
+            generation_config=torch.zeros(n_req, CONFIG_WORDS, dtype=torch.int64, device="cuda"),
             # Pinned ring buffers for CPU↔GPU communication.  pin_memory()
             # gives a stable physical address so no DMA copy is needed.
             pinned_req_ready=torch.zeros(cap, dtype=torch.int32).pin_memory(),
@@ -162,4 +163,7 @@ class ModelRunner:
             pinned_step=torch.zeros(n_req, dtype=torch.int32).pin_memory(),
             pinned_inbox_tokens=torch.zeros(cap, config.max_seq_length, dtype=torch.int64).pin_memory(),
             pinned_rid_at_row=torch.full((n_req,), -1, dtype=torch.int32).pin_memory(),
+            pinned_generation_config=torch.zeros(cap, CONFIG_WORDS, dtype=torch.int64).pin_memory(),
+            pinned_cancel=torch.full((n_req,), -1, dtype=torch.int32).pin_memory(),
+            pinned_finish_reason=torch.zeros(n_req, dtype=torch.int32).pin_memory(),
         )
