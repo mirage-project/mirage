@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, f
 
 from mirage import serving_config as abi
 
-TokenId = Annotated[StrictInt, Field(ge=0)]
 StopSequence = Annotated[tuple[TokenId, ...], Field(min_length=1, max_length=abi.MAX_STOP_TOKENS)]
 
 
@@ -24,29 +23,16 @@ class SamplingOptions(BaseModel):
     presence_penalty: float = Field(default=0, ge=-2, le=2)
     repetition_penalty: float = Field(default=1, gt=0)
     seed: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
-    logit_bias: Mapping[TokenId, float] = Field(default_factory=dict, max_length=abi.MAX_BIASES)
+    logit_bias: dict[int, float] = Field(default_factory=dict, max_length=abi.MAX_BIASES)
     cache_history: bool = True
     stop_token_sequences: tuple[StopSequence, ...] = Field(default=(), max_length=abi.MAX_STOPS)
-
-    @field_validator("logit_bias", mode="before")
-    @classmethod
-    def normalize_bias_ids(cls, value):
-        # JSON object keys are strings; Python callers use integer token IDs.
-        if isinstance(value, dict):
-            return {int(k) if isinstance(k, str) and k.isdecimal() else k: v
-                    for k, v in value.items()}
-        return value
-
+    
     @field_validator("logit_bias")
     @classmethod
     def check_biases(cls, value):
         if any(not -100 <= bias <= 100 for bias in value.values()):
             raise ValueError("logit_bias values must be in [-100, 100]")
-        return MappingProxyType(value)
-
-    @field_serializer("logit_bias")
-    def serialize_biases(self, value):
-        return dict(value)
+        return value
 
     @field_validator("repetition_penalty")
     @classmethod
