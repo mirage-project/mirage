@@ -7,8 +7,6 @@ from .persistent_kernel import PersistentKernel
 from .speculative import spec_decode_class
 from ..utils import get_configurations_from_gpu
 
-from ..serving_config import CONFIG_WORDS
-
 import torch
 import torch.distributed as dist
 
@@ -224,7 +222,7 @@ class MPK:
         self.pinned_step             = args.pinned_step
         self.pinned_inbox_tokens     = args.pinned_inbox_tokens
         self.pinned_rid_at_row       = args.pinned_rid_at_row
-        self.pinned_generation_config= args.pinned_generation_config
+        self.pinned_generation_config = args.pinned_generation_config
         self.generation_config       = args.generation_config
         self.pinned_cancel           = args.pinned_cancel
         self.pinned_finish_reason    = args.pinned_finish_reason
