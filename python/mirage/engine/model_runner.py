@@ -65,22 +65,6 @@ class RunnerConfig:
         return dict(temperature=self.temperature, top_p=self.top_p,
                     top_k=self.top_k, seed=self.sampling_seed)
 
-    def __post_init__(self):
-        import math
-        if min(self.max_num_batched_requests, self.max_num_batched_tokens,
-               self.max_seq_length, self.max_num_pages, self.page_size,
-               self.max_pending_requests) <= 0:
-            raise ValueError("capacity limits must be positive")
-        if self.pinned_ring_capacity <= 0 or self.pinned_ring_capacity & (self.pinned_ring_capacity - 1):
-            raise ValueError("pinned_ring_capacity must be a power of two")
-        if self.max_num_pages < self.max_num_batched_requests * math.ceil(self.max_seq_length / self.page_size):
-            raise ValueError("KV page pool must cover the configured maximum concurrent sequences")
-        if self.developer_role not in ("native", "system", "reject"):
-            raise ValueError("invalid developer role adapter")
-        if self.do_sample:
-            if self.temperature <= 0:
-                raise ValueError("do_sample=True requires temperature > 0")
-
 
 # ── ModelRunner ───────────────────────────────────────────────────────────────
 

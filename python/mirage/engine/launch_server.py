@@ -63,12 +63,6 @@ def create_app(engine=None, *, model=None, request_timeout=DEFAULT_REQUEST_TIMEO
 
     return app
 
-
-def _next(iterator):
-    # StopIteration must not propagate through an asyncio Future.
-    return next(iterator, None)
-
-
 async def complete(request, chat):
     try:
         body = await request.json()
@@ -117,7 +111,7 @@ async def complete(request, chat):
     async def events():
         try:
             while True:
-                event = await asyncio.to_thread(_next, iterator)
+                event = await asyncio.to_thread(next, iterator, None)
                 if event is None:
                     break
                 yield event
