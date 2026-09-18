@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, f
 
 from mirage import serving_config as abi
 
-StopSequence = Annotated[tuple[TokenId, ...], Field(min_length=1, max_length=abi.MAX_STOP_TOKENS)]
+StopSequence = Annotated[tuple[int, ...], Field(min_length=1, max_length=abi.MAX_STOP_TOKENS)]
 
 
 class SamplingOptions(BaseModel):
@@ -70,7 +70,9 @@ class SamplingParams(SamplingOptions):
             raise ValueError("invalid model EOS token IDs")
         if any(not 0 <= t < vocab_size for t in self.logit_bias):
             raise ValueError("logit_bias token ID exceeds model vocabulary")
-        if any(t >= vocab_size for seq in self.stop_token_sequences for t in seq):
+        if any(not 0 <= t < vocab_size
+            for seq in self.stop_token_sequences
+            for t in seq):
             raise ValueError("stop token ID exceeds model vocabulary")
         words = [0] * abi.CONFIG_WORDS
         for name, value in (
