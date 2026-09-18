@@ -14,6 +14,8 @@ from .protocol import ChatRequest, TextRequest
 from .responses import CompletionResponse, encode_sse
 from .config import DEFAULT_MODEL, DEFAULT_REQUEST_TIMEOUT, RunnerConfig, ServerConfig
 
+DISCONNECT_POLL_INTERVAL = 0.05
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,13 +36,12 @@ async def lifespan(app):
         await asyncio.to_thread(app.state.engine.close)
 
 
-def create_app(engine=None, *, model=None, request_timeout=DEFAULT_REQUEST_TIMEOUT,
-               config=None, sampling_defaults=None):
+def create_app(engine=None, *, model=None, request_timeout=DEFAULT_REQUEST_TIMEOUT, sampling_defaults=None):
     app = FastAPI(title="Mirage OpenAI API", lifespan=lifespan if engine is None else None)
     app.state.engine = engine
     app.state.served_model = model
     app.state.sampling_defaults = dict(sampling_defaults or {})
-    app.state.server_config = config or ServerConfig(request_timeout=request_timeout)
+    app.state.request_timeout = request_timeout
 
     @app.get("/health")
     async def health():
@@ -75,7 +76,7 @@ async def complete(request, chat):
         
         req = (ChatRequest if chat else TextRequest).model_validate(body)
         params = req.sampling_params()
-        
+
     except ValidationError as exc:
         first = exc.errors(include_input=False)[0]
         return error_response(first["msg"], param=".".join(map(str, first["loc"])))
@@ -90,7 +91,7 @@ async def complete(request, chat):
         kwargs = {"messages": [m.template_message() for m in req.messages]} if chat else {"prompt": req.prompt}
         prepared = await asyncio.to_thread(engine.prepare, params=params, **kwargs)
         submission = asyncio.create_task(asyncio.to_thread(
-            engine.generate, prepared, request.app.state.server_config.request_timeout))
+            engine.generate, prepared, request.app.state.request_timeout))
         try:
             session = await asyncio.shield(submission)
         except asyncio.CancelledError:
@@ -158,7 +159,7 @@ async def complete(request, chat):
     task = asyncio.create_task(collect())
     try:
         while not task.done():
-            await asyncio.wait({task}, timeout=request.app.state.server_config.disconnect_poll_interval)
+            await asyncio.wait({task}, timeout=DISCONNECT_POLL_INTERVAL)
             if await request.is_disconnected():
                 task.cancel()
                 return error_response("Client disconnected", 499)
@@ -199,7 +200,7 @@ def main():
                         dest="use_cutlass_kernel",
                         help="Use Mirage's PTX linear kernels (needed when a CUTLASS task exceeds the GPU shared-memory limit)")
     parser.set_defaults(use_cutlass_kernel=runner_defaults.use_cutlass_kernel)
-    parser.add_argument("--request-timeout", type=float, default=server_defaults.request_timeout)
+    parser.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT)
     parser.add_argument("--do-sample", action="store_true",
                         help="Use startup sampling defaults for omitted request fields; explicit request values override them")
     parser.add_argument("--temperature", type=float, default=runner_defaults.temperature)
@@ -216,7 +217,7 @@ def main():
         parser.error(str(exc))
     app.state.sampling_defaults = app.state.runner_config.sampling_defaults()
     app.state.served_model = args.served_model_name or args.model
-    app.state.server_config = ServerConfig(host=args.host, port=args.port, request_timeout=args.request_timeout)
+    app.state.request_timeout = args.request_timeout
     uvicorn.run(app, host=args.host, port=args.port)
 
 

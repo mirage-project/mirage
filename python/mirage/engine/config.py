@@ -5,21 +5,6 @@ from typing import Optional
 DEFAULT_MODEL = "Qwen/Qwen3-8B"
 DEFAULT_REQUEST_TIMEOUT = 120.0
 
-
-@dataclass(frozen=True)
-class EngineConfig:
-    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
-    poll_interval: float = 0.002
-
-
-@dataclass(frozen=True)
-class ServerConfig:
-    host: str = "0.0.0.0"
-    port: int = 8000
-    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
-    disconnect_poll_interval: float = 0.05
-
-
 @dataclass
 class RunnerConfig:
     """Configuration for :class:`ModelRunner`.

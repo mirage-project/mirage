@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 
-from .config import EngineConfig
+from .config import DEFAULT_REQUEST_TIMEOUT
 from .output import GenerationEvent, OutputProcessor
 from .sampling import SamplingParams
 from .tokenizer_manager import TokenizerManager
@@ -49,7 +49,7 @@ class GenerationSession:
 
 
 class LLMEngine:
-    def __init__(self, model_runner, config: EngineConfig | None = None):
+    def __init__(self, model_runner):
         self.config = config or EngineConfig()
         self.model_runner = model_runner
         self.runtime = model_runner.runtime
@@ -94,7 +94,7 @@ class LLMEngine:
 
     def generate(self, request: PreparedGeneration, timeout=None):
         import torch
-        timeout = self.config.request_timeout if timeout is None else timeout
+        timeout = DEFAULT_REQUEST_TIMEOUT if timeout is None else timeout
         with self._lock:
             if self._closed:
                 raise RuntimeError("engine is closed")
@@ -180,7 +180,7 @@ class LLMEngine:
                         self.runtime.abandon_request(rid)
                         session.queue.put(exc)
                         self._sessions.pop(rid, None)
-            self._stop.wait(self.config.poll_interval)
+            self._stop.wait(0.002)
 
     def close(self):
         with self._lock:
