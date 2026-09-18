@@ -1,4 +1,13 @@
-"""OpenAI-compatible text generation server backed by Mirage's persistent kernel."""
+"""Launch the Mirage LLM Engine as an OpenAI-compatible HTTP server.
+
+Usage::
+
+    python -m mirage.engine.launch_server \\
+        --model Qwen/Qwen3-8B \\
+        --max-num-batched-requests 4 \\
+        --port 8000
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -176,39 +185,57 @@ def main():
     import uvicorn
     from .model_runner import RunnerConfig
 
-    parser = argparse.ArgumentParser(description=__doc__)
-    runner_defaults = RunnerConfig(model=DEFAULT_MODEL)
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--model-path")
+    parser = argparse.ArgumentParser(description="Mirage LLM Engine Server")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--port", default=8000, type=int, help="Port to listen on")
+    parser.add_argument("--model", default="Qwen/Qwen3-8B", help="HuggingFace model name")
+    parser.add_argument("--model-path", default=None, help="Path to local model")
     parser.add_argument("--served-model-name")
-    for name in ("max_num_batched_requests", "max_num_batched_tokens", "max_seq_length",
-                 "max_num_pages", "page_size", "pinned_ring_capacity", "max_pending_requests"):
-        parser.add_argument("--" + name.replace("_", "-"), type=int,
-                            default=getattr(runner_defaults, name))
-    parser.add_argument("--developer-role", choices=["system", "native", "reject"], default=runner_defaults.developer_role,
-                        help="Explicit model adapter; system maps developer messages to system messages")
-    parser.add_argument("--output-dir")
-    parser.add_argument("--no-use-cutlass-kernel", action="store_false",
-                        dest="use_cutlass_kernel",
-                        help="Use Mirage's PTX linear kernels (needed when a CUTLASS task exceeds the GPU shared-memory limit)")
-    parser.set_defaults(use_cutlass_kernel=runner_defaults.use_cutlass_kernel)
-    parser.add_argument("--request-timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT)
-    parser.add_argument("--do-sample", action="store_true",
-                        help="Use startup sampling defaults for omitted request fields; explicit request values override them")
-    parser.add_argument("--temperature", type=float, default=runner_defaults.temperature)
-    parser.add_argument("--top-p", "--top_p", dest="top_p", type=float, default=runner_defaults.top_p)
-    parser.add_argument("--top-k", "--top_k", dest="top_k", type=int, default=runner_defaults.top_k)
-    parser.add_argument("--seed", dest="sampling_seed", type=int, default=runner_defaults.sampling_seed)
-    parser.add_argument("--sampling-topk-max", type=int, default=runner_defaults.sampling_topk_max,
-                        help="Compatibility option for the SM100 graph sampler; does not limit per-request HTTP sampling")
+    parser.add_argument("--developer-role", choices=["system", "native", "reject"], default="system")
+    parser.add_argument("--pinned-ring-capacity", type=int, default=8)
+    parser.add_argument("--max-pending-requests", type=int, default=128)
+    parser.add_argument("--no-use-cutlass-kernel", action="store_false", dest="use_cutlass_kernel")
+    parser.add_argument("--max-num-batched-requests", default=4, type=int)
+    parser.add_argument("--max-num-batched-tokens", default=8, type=int)
+    parser.add_argument("--max-seq-length", default=512, type=int)
+    parser.add_argument("--max-num-pages", default=16, type=int)
+    parser.add_argument("--page-size", default=4096, type=int)
+    parser.add_argument("--output-dir", default=None, help="Output directory for compiled artifacts")
+    parser.add_argument("--request-timeout", default=7200.0, type=float,
+                        help="Per-request timeout in seconds (default: 7200)")
+    parser.add_argument("--do-sample", dest="do_sample", action="store_true",
+                        help="Set sampling defaults for omitted request fields")
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top-p", "--top_p", type=float, default=0.95)
+    parser.add_argument("--top-k", "--top_k", type=int, default=20)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--sampling-topk-max", type=int, default=32)
     args = parser.parse_args()
-    config_keys = RunnerConfig.__dataclass_fields__
-    
-    app.state.runner_config = RunnerConfig(**{k: v for k, v in vars(args).items() if k in config_keys})
-   
-    app.state.sampling_defaults = app.state.runner_config.sampling_defaults()
+    if args.do_sample and args.temperature <= 0.0:
+        parser.error("--do-sample needs --temperature > 0")
+
+    config = RunnerConfig(
+        model=args.model,
+        model_path=args.model_path,
+        developer_role=args.developer_role,
+        pinned_ring_capacity=args.pinned_ring_capacity,
+        max_pending_requests=args.max_pending_requests,
+        use_cutlass_kernel=args.use_cutlass_kernel,
+        max_num_batched_requests=args.max_num_batched_requests,
+        max_num_batched_tokens=args.max_num_batched_tokens,
+        max_seq_length=args.max_seq_length,
+        max_num_pages=args.max_num_pages,
+        page_size=args.page_size,
+        output_dir=args.output_dir,
+        do_sample=args.do_sample,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        sampling_seed=args.seed,
+        sampling_topk_max=args.sampling_topk_max,
+    )
+    app.state.runner_config = config
+    app.state.sampling_defaults = config.sampling_defaults()
     app.state.served_model = args.served_model_name or args.model
     app.state.request_timeout = args.request_timeout
     uvicorn.run(app, host=args.host, port=args.port)

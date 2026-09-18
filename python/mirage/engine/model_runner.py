@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Optional
 
-from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 from ..mpk.mpk import MPK, MPKMetadata
@@ -55,8 +55,6 @@ class RunnerConfig:
     top_p: float = 0.95
     top_k: int = 20
     sampling_seed: int = 42
-    # Retained for callers of the upstream RunnerConfig. Only the standalone
-    # SM100 graph sampler uses a fixed candidate budget; HTTP sampling does not.
     sampling_topk_max: int = 32
 
     def sampling_defaults(self):
@@ -109,6 +107,12 @@ class ModelRunner:
             model_path=config.model_path,
             model_config=MirageModelConfig(with_lm_head=True),
             use_cutlass_kernel=config.use_cutlass_kernel,
+            do_sample=config.do_sample,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            top_k=config.top_k,
+            sampling_seed=config.sampling_seed,
+            sampling_topk_max=config.sampling_topk_max,
             **self.meta_tensors,
         )
         self.mpk = MPK(mpk_meta)
