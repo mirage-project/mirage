@@ -6,7 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
-from .sampling import SamplingOptions, SamplingParams, validate_stops
+from .sampling import SamplingParams, validate_stops
+from mirage import serving_config as abi
 # Compatibility exports; the definition is shared with the CUDA runtime.
 from mirage.serving_config import CONFIG_WORDS, MAX_BIASES, MAX_EOS
 
@@ -75,6 +76,12 @@ class CompletionRequest(APIModel):
     )
 
     stream: bool = False
+    stream_options: StreamOptions | None = None
+    max_tokens: StrictInt | None = Field(default=None, gt=0)
+    max_completion_tokens: StrictInt | None = Field(default=None, gt=0)
+    stop: str | list[str] | None = None
+    n: Literal[1] = 1
+    user: str | None = None
 
     @model_validator(mode="after")
     def check_options(self):

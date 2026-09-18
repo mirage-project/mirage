@@ -19,13 +19,13 @@ def validate_stops(stops):
 class SamplingParams(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, frozen=True, validate_default=True)
     
-    temperature: float = Field(default=1.0, ge=0, le=2)
+    temperature: float = Field(default=0.0, ge=0, le=2)
     top_p: float = Field(default=1.0, gt=0, le=1)
     top_k: StrictInt = Field(default=0, ge=0)
     frequency_penalty: float = Field(default=0, ge=-2, le=2)
     presence_penalty: float = Field(default=0, ge=-2, le=2)
     repetition_penalty: float = Field(default=1, gt=0)
-    seed: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
+    seed: StrictInt = Field(default=42, ge=0, le=2**63 - 1)
     logit_bias: dict[int, float] = Field(default_factory=dict, max_length=abi.MAX_BIASES)
     cache_history: bool = True
     stop_token_sequences: tuple[StopSequence, ...] = Field(default=(), max_length=abi.MAX_STOPS)
