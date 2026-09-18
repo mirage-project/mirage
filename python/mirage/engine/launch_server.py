@@ -72,7 +72,10 @@ async def complete(request, chat):
         body = await request.json()
         if isinstance(body, dict):
             body = {**request.app.state.sampling_defaults, **body}
+        
         req = (ChatRequest if chat else TextRequest).model_validate(body)
+        params = req.sampling_params()
+        
     except ValidationError as exc:
         first = exc.errors(include_input=False)[0]
         return error_response(first["msg"], param=".".join(map(str, first["loc"])))
@@ -82,7 +85,7 @@ async def complete(request, chat):
     if req.model != model:
         return error_response(f"Model '{req.model}' is not served", 404, "model", "model_not_found")
     engine = request.app.state.engine
-    params = req.sampling_params()
+    
     try:
         kwargs = {"messages": [m.template_message() for m in req.messages]} if chat else {"prompt": req.prompt}
         prepared = await asyncio.to_thread(engine.prepare, params=params, **kwargs)
