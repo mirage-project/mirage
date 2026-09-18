@@ -7,7 +7,6 @@ import queue
 import threading
 import time
 
-from .config import DEFAULT_REQUEST_TIMEOUT
 from .output import GenerationEvent, OutputProcessor
 from .sampling import SamplingParams
 from .tokenizer_manager import TokenizerManager
@@ -91,9 +90,8 @@ class LLMEngine:
                              self.vocab_size, self.eos_ids)
         return PreparedGeneration(tuple(ids), tuple(packed), params)
 
-    def generate(self, request: PreparedGeneration, timeout=None):
+    def generate(self, request: PreparedGeneration, timeout=120.0):
         import torch
-        timeout = DEFAULT_REQUEST_TIMEOUT if timeout is None else timeout
         with self._lock:
             if self._closed:
                 raise RuntimeError("engine is closed")
@@ -113,7 +111,7 @@ class LLMEngine:
                 raise
             return session
 
-    def submit(self, prompt: str | None = None, use_template=True, timeout=None, poll_interval=None,
+    def submit(self, prompt: str | None = None, use_template=True, timeout=120.0, poll_interval=None,
                stream=False, sampling_params=None, messages=None):
         """Python compatibility API. HTTP uses prepare/generate structured events."""
         request = self.prepare(prompt=None if messages is not None else prompt,

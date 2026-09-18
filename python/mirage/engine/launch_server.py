@@ -182,6 +182,8 @@ app = create_app()
 
 def main():
     import uvicorn
+    from .model_runner import RunnerConfig
+
     parser = argparse.ArgumentParser(description=__doc__)
     runner_defaults = RunnerConfig(model=DEFAULT_MODEL)
     parser.add_argument("--host", default="0.0.0.0")
