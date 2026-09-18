@@ -8,8 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from .sampling import SamplingParams, validate_stops
 from mirage import serving_config as abi
-# Compatibility exports; the definition is shared with the CUDA runtime.
-from mirage.serving_config import CONFIG_WORDS, MAX_BIASES, MAX_EOS
 
 
 class APIModel(BaseModel):

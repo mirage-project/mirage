@@ -1,7 +1,6 @@
 """Generation settings, validated once independently of HTTP and ring transport."""
 from __future__ import annotations
 
-import math
 import struct
 from typing import Annotated
 
@@ -34,6 +33,30 @@ class SamplingParams(BaseModel):
     stop: tuple[str, ...] = ()
 
     _check_stops = field_validator("stop")(validate_stops)
+
+    @field_validator("logit_bias")
+    @classmethod
+    def check_biases(cls, value):
+        if any(not -100 <= bias <= 100 for bias in value.values()):
+            raise ValueError("logit_bias values must be in [-100, 100]")
+        return value
+
+
+    @field_validator("repetition_penalty")
+    @classmethod
+    def check_repetition(cls, value):
+        try:
+            repetition = struct.unpack("f", struct.pack("f", value))[0]
+        except OverflowError as exc:
+            raise ValueError(
+                "repetition_penalty must fit a positive finite float32"
+            ) from exc
+
+        if repetition == 0 or not math.isfinite(repetition):
+            raise ValueError(
+                "repetition_penalty must fit a positive finite float32"
+            )
+        return value
 
     def pack(self, prompt_len, max_seq_length, vocab_size, eos_ids):
         """Bind validated options to model limits and serialize the ring payload."""
