@@ -129,8 +129,6 @@ async def complete(request, chat):
                     for chunk in response.chunks(event, include_usage):
                         yield encode_sse(chunk)
                 yield "data: [DONE]\n\n"
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:
                 logger.exception("Streaming generation failed")
                 message = "Generation timed out" if isinstance(exc, TimeoutError) else "Generation failed"
@@ -207,10 +205,9 @@ def main():
                         help="Compatibility option for the SM100 graph sampler; does not limit per-request HTTP sampling")
     args = parser.parse_args()
     config_keys = RunnerConfig.__dataclass_fields__
-    try:
-        app.state.runner_config = RunnerConfig(**{k: v for k, v in vars(args).items() if k in config_keys})
-    except ValueError as exc:
-        parser.error(str(exc))
+    
+    app.state.runner_config = RunnerConfig(**{k: v for k, v in vars(args).items() if k in config_keys})
+   
     app.state.sampling_defaults = app.state.runner_config.sampling_defaults()
     app.state.served_model = args.served_model_name or args.model
     app.state.request_timeout = args.request_timeout
