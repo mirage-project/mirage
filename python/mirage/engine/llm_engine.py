@@ -1,9 +1,9 @@
-"""LLMEngine — concurrent serving loop backed on persistent kernel + ring buffer."""
+"""LLMEngine — concurrent serving loop backed on persistent kernel + ring buffer.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import queue
 import threading
@@ -11,13 +11,11 @@ import time
 
 import torch
 
+from .model_runner import ModelRunner
 from .output import GenerationEvent, OutputProcessor
 from .sampling import SamplingParams
 from .tokenizer_manager import TokenizerManager
-
-if TYPE_CHECKING:
-    from .model_runner import ModelRunner
-    from ..mpk.online_pinned_runtime import OnlinePinnedRuntime
+from ..mpk.online_pinned_runtime import OnlinePinnedRuntime
 
 
 @dataclass(frozen=True)
@@ -75,67 +73,51 @@ class _StreamingMonitor:
         while not self._stop.is_set():
             try:
                 with self._lock:
-                    for rid, session in list(self._sessions.items()):
+                    for rid, s in list(self._sessions.items()):
                         released = False
                         try:
                             completion = self._runtime.get_completion(rid)
-
                             if completion is not None:
                                 row, final_step = completion
                                 try:
-                                    self._yield_remaining(
-                                        session, row, final_step
-                                    )
+                                    self._yield_remaining(s, row, final_step)
                                 finally:
                                     released = self._runtime.release_request(rid)
-
                                 if not released:
                                     raise RuntimeError(
-                                        f"missing completion for rid={rid}"
-                                    )
-
+                                        f"missing completion for rid={rid}")
                                 del self._sessions[rid]
                                 continue
 
-                            if session["row"] == -1:
+                            if s["row"] == -1:
                                 row = self._runtime.find_row_for_rid(rid)
                                 if row >= 0:
-                                    session["row"] = row
-                                elif time.monotonic() > session["deadline"]:
+                                    s["row"] = row
+                                elif time.monotonic() > s["deadline"]:
                                     self._runtime.abandon_request(rid)
-                                    session["q"].put(("__timeout__", True))
+                                    s["q"].put(("__timeout__", True))
                                     del self._sessions[rid]
                                 continue
 
-                            row = session["row"]
-                            current_step = self._runtime.get_current_step_at_row(
-                                row
-                            )
+                            row = s["row"]
+                            current_step = self._runtime.get_current_step_at_row(row)
 
-                            if session["output"] is not None:
-                                if self._yield_output(
-                                    session, row, current_step
-                                ):
+                            if s["output"] is not None:
+                                if self._yield_output(s, row, current_step):
                                     self._runtime.abandon_request(rid)
                                     del self._sessions[rid]
                                     continue
-
-                            elif current_step > session["last_step"]:
+                            elif current_step > s["last_step"]:
                                 new_tokens = self._runtime.read_tokens_range(
-                                    row,
-                                    session["last_step"] + 1,
-                                    current_step,
-                                )
-                                for token in new_tokens.tolist():
-                                    text = self._tokenizer_manager.decode_single(
-                                        token
-                                    )
-                                    session["last_step"] += 1
-                                    session["q"].put((text, False))
+                                    row, s["last_step"] + 1, current_step)
+                                for tid in new_tokens.tolist():
+                                    text = self._tokenizer_manager.decode_single(tid)
+                                    s["last_step"] += 1
+                                    s["q"].put((text, False))
 
-                            if time.monotonic() > session["deadline"]:
+                            if time.monotonic() > s["deadline"]:
                                 self._runtime.abandon_request(rid)
-                                session["q"].put(("__timeout__", True))
+                                s["q"].put(("__timeout__", True))
                                 del self._sessions[rid]
 
                         except Exception:
@@ -143,7 +125,7 @@ class _StreamingMonitor:
                                 if not released:
                                     self._runtime.abandon_request(rid)
                             finally:
-                                session["q"].put(("__error__", True))
+                                s["q"].put(("__error__", True))
                                 self._sessions.pop(rid, None)
 
             except Exception:
@@ -153,65 +135,52 @@ class _StreamingMonitor:
 
     def _yield_output(
         self,
-        session: dict,
+        s: dict,
         row: int,
         step: int,
         final: bool = False,
     ) -> bool:
-        output = session["output"]
+        output = s["output"]
         text = ""
 
-        if step > session["last_step"]:
+        if step > s["last_step"]:
             tokens = self._runtime.read_tokens_range(
-                row, session["last_step"] + 1, step
-            )
+                row, s["last_step"] + 1, step)
             for token in tokens.tolist():
                 text += output.push(token)
-            session["last_step"] = step
+            s["last_step"] = step
 
         reason = "stop" if output.stopped else None
-
         if final:
             reason = reason or self._runtime.finish_reason(row)
             text += output.flush()
 
         if text or reason:
-            session["q"].put(
-                GenerationEvent(
-                    text,
-                    reason,
-                    session["prompt_len"],
-                    len(output.token_ids),
-                )
-            )
+            s["q"].put(GenerationEvent(
+                text,
+                reason,
+                s["prompt_len"],
+                len(output.token_ids),
+            ))
 
         return reason is not None
 
-    def _yield_remaining(
-        self,
-        session: dict,
-        row: int,
-        final_step: int,
-    ) -> None:
-        if session["output"] is not None:
-            self._yield_output(session, row, final_step, final=True)
+    def _yield_remaining(self, s: dict, row: int, final_step: int) -> None:
+        if s["output"] is not None:
+            self._yield_output(s, row, final_step, final=True)
             return
 
-        if final_step > session["last_step"]:
+        if final_step > s["last_step"]:
             new_tokens = self._runtime.read_tokens_range(
-                row,
-                session["last_step"] + 1,
-                final_step,
-            )
+                row, s["last_step"] + 1, final_step)
             new_ids = new_tokens.tolist()
-
-            for index, token in enumerate(new_ids):
-                text = self._tokenizer_manager.decode_single(token)
-                is_final = index == len(new_ids) - 1
-                session["q"].put((text, is_final))
-                session["last_step"] += 1
+            for j, tid in enumerate(new_ids):
+                text = self._tokenizer_manager.decode_single(tid)
+                is_final = j == len(new_ids) - 1
+                s["q"].put((text, is_final))
+                s["last_step"] += 1
         else:
-            session["q"].put(("", True))
+            s["q"].put(("", True))
 
     def shutdown(self) -> None:
         self._stop.set()
@@ -222,7 +191,6 @@ class _StreamingMonitor:
             self._sessions.clear()
 
         cleanup_error: Exception | None = None
-
         for rid, session in sessions:
             try:
                 self._runtime.abandon_request(rid)
@@ -234,20 +202,17 @@ class _StreamingMonitor:
 
         if cleanup_error is not None:
             raise RuntimeError(
-                "failed to abandon a streaming request"
-            ) from cleanup_error
+                "failed to abandon a streaming request") from cleanup_error
 
 
 class LLMEngine:
-    """Generation loop backed by the online_pinned persistent kernel."""
+    """Generation loop backed by the ``online_pinned`` persistent kernel."""
 
     def __init__(self, model_runner: ModelRunner) -> None:
         self.model_runner = model_runner
         self.runtime: OnlinePinnedRuntime = model_runner.runtime
         self.tokenizer_manager = TokenizerManager(
-            model_runner.tokenizer,
-            model_runner.config.developer_role,
-        )
+            model_runner.tokenizer, model_runner.config.developer_role)
         self.vocab_size = model_runner.vocab_size
         self.eos_ids = model_runner.eos_ids
 
@@ -259,9 +224,7 @@ class LLMEngine:
 
         self._ensure_kernel_running()
         self._monitor = _StreamingMonitor(
-            self.runtime,
-            self.tokenizer_manager,
-        )
+            self.runtime, self.tokenizer_manager)
 
     def prepare(
         self,
@@ -276,8 +239,7 @@ class LLMEngine:
 
         if params is None:
             params = SamplingParams(
-                **self.model_runner.config.sampling_defaults()
-            )
+                **self.model_runner.config.sampling_defaults())
 
         if messages is not None:
             token_ids = self.tokenizer_manager.tokenize_messages(messages)
@@ -286,10 +248,7 @@ class LLMEngine:
         else:
             token_ids = self.tokenizer_manager.tokenize_raw(prompt)
 
-        if any(
-            token < 0 or token >= self.vocab_size
-            for token in token_ids
-        ):
+        if any(t < 0 or t >= self.vocab_size for t in token_ids):
             raise ValueError("prompt token exceeds model vocabulary")
 
         config = params.pack(
@@ -298,23 +257,15 @@ class LLMEngine:
             self.vocab_size,
             self.eos_ids,
         )
-
         return PreparedGeneration(
-            tuple(token_ids),
-            tuple(config),
-            params,
-        )
+            tuple(token_ids), tuple(config), params)
 
     def generate(
         self,
         request: PreparedGeneration,
         timeout=120.0,
     ):
-        tokens = torch.tensor(
-            request.token_ids,
-            dtype=torch.int64,
-        )
-
+        tokens = torch.tensor(request.token_ids, dtype=torch.int64)
         output = OutputProcessor(
             self.tokenizer_manager,
             request.params.stop,
@@ -339,10 +290,7 @@ class LLMEngine:
 
             try:
                 self.runtime.submit(
-                    rid,
-                    tokens,
-                    generation_config=request.config,
-                )
+                    rid, tokens, generation_config=request.config)
             except Exception:
                 self._monitor.unregister(rid)
                 raise
@@ -359,10 +307,7 @@ class LLMEngine:
     ):
         """Submit a single prompt for generation."""
 
-        token_ids = self.tokenizer_manager.tokenize(
-            prompt,
-            use_template,
-        )
+        token_ids = self.tokenizer_manager.tokenize(prompt, use_template)
         prompt_len = len(token_ids)
 
         config = SamplingParams(
@@ -374,11 +319,7 @@ class LLMEngine:
             self.eos_ids,
         )
 
-        tokens = torch.tensor(
-            token_ids,
-            dtype=torch.int64,
-        )
-
+        tokens = torch.tensor(token_ids, dtype=torch.int64)
         stream_queue: queue.Queue | None = None
 
         with self._submit_lock:
@@ -390,17 +331,11 @@ class LLMEngine:
 
             if stream:
                 stream_queue = self._monitor.register(
-                    rid,
-                    prompt_len,
-                    timeout,
-                )
+                    rid, prompt_len, timeout)
 
             try:
                 self.runtime.submit(
-                    rid,
-                    tokens,
-                    generation_config=config,
-                )
+                    rid, tokens, generation_config=config)
             except Exception:
                 if stream:
                     self._monitor.unregister(rid)
@@ -411,18 +346,11 @@ class LLMEngine:
             return self._submit_stream(rid, stream_queue)
 
         buffer_row, final_step = self.runtime.wait_for_request(
-            rid,
-            timeout,
-            poll_interval,
-        )
-
+            rid, timeout, poll_interval)
         try:
             full_tokens = self.runtime.read_tokens_at_row(
-                buffer_row,
-                final_step,
-            )
+                buffer_row, final_step)
             output_ids = full_tokens[prompt_len:].tolist()
-
             return {
                 "text": self.tokenizer_manager.decode(output_ids),
                 "token_ids": output_ids,
@@ -440,11 +368,8 @@ class LLMEngine:
 
             self.runtime.reset()
             self.runtime.start()
-
             self._kernel_thread = threading.Thread(
-                target=self.model_runner,
-                daemon=True,
-            )
+                target=self.model_runner, daemon=True)
             self._kernel_thread.start()
             self._kernel_launched.set()
 
@@ -470,21 +395,15 @@ class LLMEngine:
 
                 if text == "__timeout__":
                     raise TimeoutError(
-                        f"stream timed out for rid={rid}"
-                    )
-
+                        f"stream timed out for rid={rid}")
                 if text == "__error__":
                     raise RuntimeError(
-                        f"stream error for rid={rid}"
-                    )
-
+                        f"stream error for rid={rid}")
                 if text == "__closed__":
                     raise RuntimeError(
-                        f"engine closed while streaming rid={rid}"
-                    )
+                        f"engine closed while streaming rid={rid}")
 
                 yield text, is_final
-
                 if is_final:
                     break
 
@@ -497,7 +416,6 @@ class LLMEngine:
             self._closed = True
 
         monitor_error: Exception | None = None
-
         try:
             self._monitor.shutdown()
         except Exception as exc:
@@ -505,7 +423,6 @@ class LLMEngine:
 
         try:
             self.runtime.request_shutdown()
-
             if self._kernel_thread is not None:
                 self._kernel_thread.join()
         finally:
