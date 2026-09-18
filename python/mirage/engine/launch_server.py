@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from .protocol import ChatRequest, TextRequest
 from .responses import CompletionResponse, encode_sse
-from .config import DEFAULT_MODEL, DEFAULT_REQUEST_TIMEOUT, RunnerConfig, ServerConfig
+from .config import DEFAULT_MODEL, DEFAULT_REQUEST_TIMEOUT, RunnerConfig
 
 DISCONNECT_POLL_INTERVAL = 0.05
 
@@ -182,10 +182,9 @@ app = create_app()
 def main():
     import uvicorn
     parser = argparse.ArgumentParser(description=__doc__)
-    server_defaults = ServerConfig()
     runner_defaults = RunnerConfig(model=DEFAULT_MODEL)
-    parser.add_argument("--host", default=server_defaults.host)
-    parser.add_argument("--port", type=int, default=server_defaults.port)
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--model-path")
     parser.add_argument("--served-model-name")

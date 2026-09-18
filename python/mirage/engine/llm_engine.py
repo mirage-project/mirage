@@ -50,7 +50,6 @@ class GenerationSession:
 
 class LLMEngine:
     def __init__(self, model_runner):
-        self.config = config or EngineConfig()
         self.model_runner = model_runner
         self.runtime = model_runner.runtime
         self.tokenizer_manager = TokenizerManager(model_runner.tokenizer,
