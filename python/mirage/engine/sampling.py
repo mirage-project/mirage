@@ -1,6 +1,7 @@
 """Generation settings, validated once independently of HTTP and ring transport."""
 from __future__ import annotations
 
+import math
 import struct
 from typing import Annotated
 
