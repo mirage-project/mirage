@@ -12,8 +12,9 @@ from pydantic import ValidationError
 
 from .protocol import ChatRequest, TextRequest
 from .responses import CompletionResponse, encode_sse
-from .config import DEFAULT_MODEL, DEFAULT_REQUEST_TIMEOUT, RunnerConfig
 
+DEFAULT_MODEL = "Qwen/Qwen3-8B"
+DEFAULT_REQUEST_TIMEOUT = 120.0
 DISCONNECT_POLL_INTERVAL = 0.05
 
 logger = logging.getLogger(__name__)
