@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
-from .sampling import SamplingParams, validate_stops
+from .sampling import SamplingParams
 from mirage import serving_config as abi
 
 
@@ -77,7 +77,6 @@ class CompletionRequest(APIModel):
     stream_options: StreamOptions | None = None
     max_tokens: StrictInt | None = Field(default=None, gt=0)
     max_completion_tokens: StrictInt | None = Field(default=None, gt=0)
-    stop: str | list[str] | None = None
     n: Literal[1] = 1
     user: str | None = None
 
@@ -86,14 +85,11 @@ class CompletionRequest(APIModel):
         if self.max_tokens is not None and self.max_completion_tokens is not None:
             if self.max_tokens != self.max_completion_tokens:
                 raise ValueError("max_tokens and max_completion_tokens conflict")
-        validate_stops([self.stop] if isinstance(self.stop, str) else self.stop or [])
         if self.stream_options is not None and not self.stream:
             raise ValueError("stream_options requires stream=true")
         return self
 
     def sampling_params(self):
-        stops = [self.stop] if isinstance(self.stop, str) else self.stop or []
-
         return SamplingParams(
             temperature=self.temperature,
             top_p=self.top_p,
@@ -104,7 +100,6 @@ class CompletionRequest(APIModel):
             seed=self.seed if self.seed is not None else secrets.randbits(63),
             logit_bias=self.logit_bias,
             max_new_tokens=self.max_completion_tokens or self.max_tokens,
-            stop=tuple(stops),
         )
 
 

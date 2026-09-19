@@ -51,37 +51,30 @@ def error_response(message, status=400, param=None):
         "param": param, "code": None}})
 
 
-def _decode_output(tokens, tokenizer, stops):
+def _decode_output(tokens, tokenizer):
     """Yield text deltas, finish reasons, and token counts for HTTP responses."""
     ids, emitted = [], ""
     for token, reason in tokens:
         if token is not None:
             ids.append(token)
         text = tokenizer.decode(ids)
-        matches = [text.find(stop) for stop in stops if stop in text]
-        if matches:
-            text, reason = text[:min(matches)], "stop"
-        elif not reason:
-            # Keep incomplete UTF-8 and stop prefixes out of streamed text.
+        if not reason:
+            # Keep incomplete UTF-8 out of streamed text.
             text = text.rstrip("\ufffd")
-            hold = max((size for stop in stops for size in range(1, len(stop))
-                        if text.endswith(stop[:size])), default=0)
-            if hold:
-                text = text[:-hold]
         yield text[len(emitted):], reason, len(ids)
         emitted = text
         if reason:
             break
 
 
-async def _stream_bridge(tokens, tokenizer, stops):
+async def _stream_bridge(tokens, tokenizer):
     """Bridge the engine's synchronous stream to the HTTP event loop."""
     loop = asyncio.get_running_loop()
     queue = asyncio.Queue()
 
     def run():
         try:
-            for item in _decode_output(tokens, tokenizer, stops):
+            for item in _decode_output(tokens, tokenizer):
                 loop.call_soon_threadsafe(queue.put_nowait, item)
         except Exception as exc:
             loop.call_soon_threadsafe(queue.put_nowait, exc)
@@ -151,7 +144,7 @@ async def complete(request: Request, chat: bool):
                 result["choices"] = []
         return result
 
-    events = _stream_bridge(tokens, tokenizer, params.stop)
+    events = _stream_bridge(tokens, tokenizer)
     if req.stream:
         async def sse():
             def encode(value):

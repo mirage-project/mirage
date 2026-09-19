@@ -11,7 +11,9 @@ import torch
 import torch.distributed as dist
 from ..mpk.mpk import MPK, MPKMetadata
 from ..mpk import OnlinePinnedRuntime
+from ..mpk.model_registry import get_builder
 from ..mpk.models.graph_builder import MirageModelConfig
+from ..mpk.models.qwen3.builder import Qwen3Builder
 from ..serving_config import CONFIG_WORDS
 
 
@@ -80,6 +82,8 @@ class ModelRunner:
         rank: Optional[int] = None,
     ) -> None:
         self.config = config
+        if get_builder(config.model) is not Qwen3Builder:
+            raise ValueError("Serving sampling currently supports only Qwen3 models")
 
         # ── Distributed init ──────────────────────────────────────────────
         self.rank, self.world_size = self._init_distributed(rank)

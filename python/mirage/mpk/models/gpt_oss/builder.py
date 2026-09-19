@@ -183,13 +183,12 @@ class GptOssBuilder(GraphBuilder):
                                                name="mlp_sum_out", io_category="cuda_tensor")
         self.argmax_in = self.mpk.new_tensor(dims=(mbt, self.padded_vocab_size), dtype=bfloat16,
                                              name="argmax_in", io_category="cuda_tensor")
-        if self.mpk.mode != "online_pinned":
-            self.argmax_part_value = self.mpk.new_tensor(
-                dims=(mbt, self.mpk.num_workers), dtype=bfloat16,
-                name="argmax_part_value", io_category="cuda_tensor")
-            self.argmax_part_index = self.mpk.new_tensor(
-                dims=(mbt, self.mpk.num_workers), dtype=int64,
-                name="argmax_part_index", io_category="cuda_tensor")
+        self.argmax_part_value = self.mpk.new_tensor(
+            dims=(mbt, self.mpk.num_workers), dtype=bfloat16,
+            name="argmax_part_value", io_category="cuda_tensor")
+        self.argmax_part_index = self.mpk.new_tensor(
+            dims=(mbt, self.mpk.num_workers), dtype=int64,
+            name="argmax_part_index", io_category="cuda_tensor")
         argmax_out = self.mpk.attach_input(torch_tensor=self.output_tokens,
                                            name="output_token")
 
@@ -214,16 +213,13 @@ class GptOssBuilder(GraphBuilder):
             output=self.argmax_in,
             grid_dim=(grid_for_rmsnorm_linear_layer(self.padded_vocab_size), 1, 1),
             block_dim=(256, 1, 1))
-        if self.mpk.mode == "online_pinned":
-            self.mpk.serving_sampling_layer(self.argmax_in, argmax_out)
-        else:
-            self.mpk.argmax_partial_layer(
-                input=self.argmax_in,
-                output=(self.argmax_part_value, self.argmax_part_index),
-                grid_dim=(self.mpk.num_workers, 1, 1), block_dim=(256, 1, 1))
-            self.mpk.argmax_reduce_layer(
-                input=(self.argmax_part_value, self.argmax_part_index),
-                output=argmax_out, grid_dim=(1, 1, 1), block_dim=(256, 1, 1))
+        self.mpk.argmax_partial_layer(
+            input=self.argmax_in,
+            output=(self.argmax_part_value, self.argmax_part_index),
+            grid_dim=(self.mpk.num_workers, 1, 1), block_dim=(256, 1, 1))
+        self.mpk.argmax_reduce_layer(
+            input=(self.argmax_part_value, self.argmax_part_index),
+            output=argmax_out, grid_dim=(1, 1, 1), block_dim=(256, 1, 1))
 
     def build_layers(self, sd: dict):
         mbt = self.mpk.max_num_batched_tokens

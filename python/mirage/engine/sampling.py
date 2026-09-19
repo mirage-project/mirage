@@ -3,18 +3,11 @@ from __future__ import annotations
 
 import math
 import struct
-from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from mirage import serving_config as abi
 
-StopSequence = Annotated[tuple[int, ...], Field(min_length=1, max_length=abi.MAX_STOP_TOKENS)]
-
-def validate_stops(stops):
-    if len(stops) > abi.MAX_STOPS or any(not s for s in stops):
-        raise ValueError(f"stop must contain one to {abi.MAX_STOPS} nonempty strings")
-    return stops
 
 class SamplingParams(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, frozen=True, validate_default=True)
@@ -28,12 +21,8 @@ class SamplingParams(BaseModel):
     seed: StrictInt = Field(default=42, ge=0, le=2**63 - 1)
     logit_bias: dict[int, float] = Field(default_factory=dict, max_length=abi.MAX_BIASES)
     cache_history: bool = True
-    stop_token_sequences: tuple[StopSequence, ...] = Field(default=(), max_length=abi.MAX_STOPS)
     
     max_new_tokens: StrictInt | None = Field(default=None, gt=0)
-    stop: tuple[str, ...] = ()
-
-    _check_stops = field_validator("stop")(validate_stops)
 
     @field_validator("logit_bias")
     @classmethod
@@ -73,18 +62,11 @@ class SamplingParams(BaseModel):
         if any(not 0 <= t < vocab_size for t in self.logit_bias):
             raise ValueError("logit_bias token ID exceeds model vocabulary")
         
-        if any(
-            not 0 <= t < vocab_size
-            for seq in self.stop_token_sequences
-            for t in seq):
-            raise ValueError("stop token ID exceeds model vocabulary")
-        
         words = [0] * abi.CONFIG_WORDS
         for name, value in (
             ("MAX_NEW_TOKENS", budget), ("SEED", self.seed), ("VOCAB_SIZE", vocab_size),
             ("TOP_K", min(self.top_k, vocab_size)), ("EOS_COUNT", len(eos_ids)),
             ("BIAS_COUNT", len(self.logit_bias)), ("CACHE_HISTORY", int(self.cache_history)),
-            ("STOP_COUNT", len(self.stop_token_sequences)),
         ):
             words[getattr(abi, name)] = value
 
@@ -96,10 +78,6 @@ class SamplingParams(BaseModel):
         for i, (token, bias) in enumerate(sorted(self.logit_bias.items())):
             start = abi.BIASES + abi.BIAS_STRIDE * i
             words[start:start + abi.BIAS_STRIDE] = [token, _bits(bias)]
-
-        for i, sequence in enumerate(self.stop_token_sequences):
-            start = abi.STOP_SEQUENCES + abi.STOP_STRIDE * i
-            words[start:start + len(sequence) + 1] = [len(sequence), *sequence]
 
         return words
 
