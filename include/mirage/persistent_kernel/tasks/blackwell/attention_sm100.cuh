@@ -179,12 +179,20 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     constexpr size_t S_V_BUFFER_OFFSET = S_V_OFFSET + S_V_SIZE;
     constexpr size_t S_V_BUFFER_SIZE = S_K_SIZE;
 
-    constexpr size_t S_O_OFFSET = S_V_BUFFER_OFFSET + S_V_BUFFER_SIZE;
+    // O reuses Q's storage: Q is dead before the epilogue writes O. Q's last
+    // read is the QK^T MMA inside the KV loop, and three block-wide barriers
+    // separate it from the first o_smem store -- the two remaining in the
+    // final KV iteration, plus the one the reduction takes after spilling a
+    // tile's accumulator fragments. Both views are QOSmem over the same
+    // extents, so the alias is exact. This drops MAX_TOKENS * NUM_QO_PER_KV *
+    // HEAD_DIM elements from the budget, which is what lets
+    // max_num_batched_tokens go past 25 for GQA 8:1 (issue #740).
+    constexpr size_t S_O_OFFSET = S_Q_OFFSET;
     constexpr size_t S_O_SIZE = S_Q_SIZE;
 
     // align to size of float
     constexpr size_t S_Q_NORM_SUM_OFFSET =
-        ((S_O_OFFSET + S_O_SIZE + sizeof(float) - 1) &
+        ((S_V_BUFFER_OFFSET + S_V_BUFFER_SIZE + sizeof(float) - 1) &
          ~size_t(sizeof(float) - 1));
     constexpr size_t S_Q_NORM_SUM_SIZE =
         sizeof(float) * 4; // 4 floats for 4 warps
