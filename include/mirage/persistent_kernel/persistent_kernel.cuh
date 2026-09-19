@@ -804,10 +804,10 @@ __device__ __forceinline__ void persistent_checker(RuntimeConfig config) {
   assert(gridDim.y == 1);
   assert(gridDim.z == 1);
   // Each worker SM serves a single worker
-  // Each scheduelr SM serves four schedulers
+  // Each scheduler SM serves four schedulers
   int const num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
-  int const num_schedulers_per_sm = std::min((int)blockDim.x / 32, 4);
+  int const num_schedulers_per_sm = SCHEDULERS_PER_BLOCK;
   assert(num_schedulers % num_schedulers_per_sm == 0);
   assert(gridDim.x ==
          config.num_workers + num_schedulers / num_schedulers_per_sm);
@@ -1115,14 +1115,12 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
   }
 }
 
-// need to alter as there is only one warp per block
 __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
                                                   int offset) {
   int const num_schedulers =
       config.num_local_schedulers + config.num_remote_schedulers;
-  // if we have more than 4 warps per thread block
-  // only the first 4 warps will run schedulers
-  int const num_schedulers_per_sm = std::min((int)blockDim.x / 32, 4);
+  // Only the first SCHEDULERS_PER_BLOCK warps run schedulers.
+  int const num_schedulers_per_sm = SCHEDULERS_PER_BLOCK;
   int const warp_id = threadIdx.x / 32;
   // CANNOT use syncthreads below
 
@@ -1394,7 +1392,7 @@ __global__ __launch_bounds__(WORKER_NUM_THREADS,
   if (blockIdx.x < config.num_workers) {
     execute_worker(config);
   } else {
-    execute_scheduler(config, -(4 * config.num_workers));
+    execute_scheduler(config, -(SCHEDULERS_PER_BLOCK * config.num_workers));
   }
 }
 
@@ -1632,6 +1630,12 @@ extern "C" void
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
   global_runtime_config.split_worker_scheduler = true;
+  // Split launch is currently forced. Keep both cases so switching to combined
+  // launch validates the total scheduler count.
+  assert((global_runtime_config.split_worker_scheduler ? num_local_schedulers
+                                                       : num_schedulers) %
+             SCHEDULERS_PER_BLOCK ==
+         0);
 
   std::vector<FullTaskDesc> all_fulltasks;
   std::vector<EventDesc> all_events;
@@ -1835,16 +1839,11 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
 
     // Pack scheduler warps into blocks so they leave enough SMs for workers,
     // even when CUDA starts the schedulers before the workers.
-    int schedulers_per_block =
-        std::min(4, global_runtime_config.num_local_schedulers);
-    while (global_runtime_config.num_local_schedulers % schedulers_per_block) {
-      --schedulers_per_block;
-    }
     scheduler_kernel<<<
-        dim3(global_runtime_config.num_local_schedulers / schedulers_per_block,
+        dim3(global_runtime_config.num_local_schedulers / SCHEDULERS_PER_BLOCK,
              1,
              1),
-        dim3(32 * schedulers_per_block, 1, 1),
+        dim3(32 * SCHEDULERS_PER_BLOCK, 1, 1),
         0 /*smem*/,
         global_runtime_config.scheduler_stream>>>(global_runtime_config);
 
@@ -1862,7 +1861,8 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
     printf("Finished Launching Persistent Kernel (Async)\n");
   } else {
     printf("a single persistent kernel\n");
-    int num_sms_to_use = global_runtime_config.num_workers + num_schedulers / 4;
+    int num_sms_to_use = global_runtime_config.num_workers +
+                         num_schedulers / SCHEDULERS_PER_BLOCK;
 #ifdef USE_NVSHMEM
     void *args[] = {&global_runtime_config};
     nvshmemx_collective_launch((void const *)persistent_kernel,
