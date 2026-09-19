@@ -1,9 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+// Uniform/Gumbel transform adapted from vLLM PR #51367 at
+// 6af68f63030a7b27f8c07fad5b6237dcb3964e5c.
+// Copyright contributors to the vLLM project (uniform/Gumbel transform).
 #pragma once
 #include <cuda_runtime.h>
 #include <stdint.h>
 #include <math.h>
 #include <cub/block/block_radix_sort.cuh>
 #include "mirage/persistent_kernel/serving_config.h"
+#include <curand_kernel.h>
 
 namespace mirage { namespace serving {
 __device__ inline float option(int64_t value) {
@@ -14,47 +19,115 @@ __device__ inline uint64_t score_key(float score, uint32_t token) {
   bits = (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
   return (uint64_t(bits) << 32) | (0xffffffffu - token);
 }
-__device__ inline uint64_t mix(uint64_t x) {
-  x += 0x9e3779b97f4a7c15ull;
-  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
-  x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
-  return x ^ (x >> 31);
-}
+struct Sum {
+  __device__ float operator()(float a, float b) const { return a + b; }
+};
+struct Maximum {
+  __device__ uint64_t operator()(uint64_t a, uint64_t b) const { return a > b ? a : b; }
+};
+struct Draw {
+  float score = -INFINITY, noise = 0;
+  int token = 0;
+};
 
-__device__ inline float warp_sum(float value) {
-  for (int offset = WARP_SIZE / 2; offset; offset /= 2)
-    value += __shfl_xor_sync(0xffffffff, value, offset);
-  return value;
-}
-__device__ inline uint64_t warp_max(uint64_t value) {
-  for (int offset = WARP_SIZE / 2; offset; offset /= 2) {
-    uint64_t other = __shfl_xor_sync(0xffffffff, value, offset);
-    value = value > other ? value : other;
+// Compare score + temperature * noise without rounding a large common logit
+// offset into the noise. This is equivalent to centered Gumbel-max, but needs
+// neither a preliminary maximum nor a second vocabulary pass. Near cancellation,
+// use FP64 to resolve the sign instead of depending on the reduction order.
+struct ChooseDraw {
+  float temperature;
+  __device__ Draw operator()(Draw a, Draw b) const {
+    if (!isfinite(a.score) || !isfinite(b.score))
+      return score_key(a.score, a.token) >= score_key(b.score, b.token) ? a : b;
+    if (a.score == b.score) {
+      if (a.noise != b.noise) return a.noise > b.noise ? a : b;
+      return a.token < b.token ? a : b;
+    }
+    float delta = a.score - b.score;
+    float shift = temperature * (b.noise - a.noise);
+    float margin = delta - shift;
+    // Eight FP32 epsilons conservatively cover the subtraction/product errors.
+    if (fabsf(margin) > 0x1p-20f * (fabsf(delta) + fabsf(shift)))
+      return margin > 0 ? a : b;
+    double exact = (double(a.score) - b.score) + double(temperature) * (double(a.noise) - b.noise);
+    if (exact != 0) return exact > 0 ? a : b;
+    return a.token < b.token ? a : b;
   }
+};
+
+template<typename T>
+__device__ inline T shuffle_xor(T value, int offset) {
+  return __shfl_xor_sync(0xffffffff, value, offset);
+}
+__device__ inline Draw shuffle_xor(Draw value, int offset) {
+  return {shuffle_xor(value.score, offset), shuffle_xor(value.noise, offset),
+          shuffle_xor(value.token, offset)};
+}
+template<typename T, typename Op>
+__device__ inline T warp_reduce(T value, Op op) {
+  for (int offset = WARP_SIZE / 2; offset; offset /= 2)
+    value = op(value, shuffle_xor(value, offset));
   return value;
 }
 
-// Only warp aggregates cross global memory. All warps compute the final
-// aggregate in registers; two barriers protect publication and scratch reuse.
-// This state remains separate from the probe sort's shared-memory workspace.
-__device__ inline float sum(float value, float *workspace) {
+// Only warp aggregates use scratch. The barriers protect publication and reuse.
+// T{} is the identity: zero for sums/unsigned maxima, -infinity for draws.
+template<typename T, typename Op>
+__device__ inline T block_reduce(T value, float *workspace, Op op) {
   int lane = threadIdx.x % WARP_SIZE, warp = threadIdx.x / WARP_SIZE;
-  value = warp_sum(value);
-  if (lane == 0) workspace[warp] = value;
+  auto partial = reinterpret_cast<T *>(workspace);
+  value = warp_reduce(value, op);
+  if (lane == 0) partial[warp] = value;
   __syncthreads();
-  value = warp_sum(lane < blockDim.x / WARP_SIZE ? workspace[lane] : 0.f);
+  value = warp_reduce(lane < blockDim.x / WARP_SIZE ? partial[lane] : T{}, op);
   __syncthreads();
   return value;
 }
-__device__ inline uint64_t maximum(uint64_t value, uint64_t *workspace) {
-  int lane = threadIdx.x % WARP_SIZE, warp = threadIdx.x / WARP_SIZE;
-  value = warp_max(value);
-  if (lane == 0) workspace[warp] = value;
-  __syncthreads();
-  value = warp_max(lane < blockDim.x / WARP_SIZE ? workspace[lane] : uint64_t(0));
-  __syncthreads();
-  return value;
+
+// Reconstruct (bits + 0.5) / 2^32 from two exact 16-bit conversions.
+// Keeping all source bits is important at u -> 0, the winning Gumbel tail.
+__device__ inline float sampling_uniform(uint32_t bits) {
+  return float(bits >> 16) * 0x1p-16f +
+         (float(bits & 0xffffu) + 0.5f) * 0x1p-32f;
 }
+
+__device__ inline float gumbel_from_uniform(float u) {
+  // Degree-8 expansion of -log1p(-u). Unlike log(1-u), it preserves tiny u.
+  // This is the polynomial and endpoint handling used by vLLM's FP32 path.
+  float polynomial = 1.f / 8.f;
+  #pragma unroll
+  for (int order = 7; order >= 1; --order)
+    polynomial = 1.f / order + u * polynomial;
+  float exponential = u < 0.25f ? u * polynomial
+                                : -logf(fmaxf(1.f - u, 0x1p-24f));
+  return -logf(exponential);
+}
+
+// Philox subsequence = generation position, offset = token ID. A thread caches
+// the most recent group of four: dense vector loads reuse all curand4 outputs;
+// sparse candidate lists remain independent of traversal order and block size.
+// The stream depends only on seed, position, and token, never the batch slot.
+struct SamplingRng {
+  uint64_t seed;
+  uint32_t position;
+  mutable uint32_t group = 0xffffffffu;
+  mutable uint4 values{};
+  __device__ SamplingRng(uint64_t seed, uint32_t position)
+      : seed(seed), position(position) {}
+  __device__ uint32_t bits(uint32_t token) const {
+    if (group != token / 4) {
+      curandStatePhilox4_32_10_t state;
+      curand_init(seed, position, token & ~uint32_t(3), &state);
+      values = curand4(&state);
+      group = token / 4;
+    }
+    return (token & 3) == 0 ? values.x : (token & 3) == 1 ? values.y
+                    : (token & 3) == 2 ? values.z : values.w;
+  }
+  __device__ float gumbel(uint32_t token) const {
+    return gumbel_from_uniform(sampling_uniform(bits(token)));
+  }
+};
 
 // Probe evenly spaced tokens for a useful cutoff. The caller verifies the full
 // row's candidate count before using it; an unrepresentative probe is harmless.
@@ -84,7 +157,7 @@ __device__ inline uint64_t sampled_top_k_bound(float const *scores, int vocab,
   #pragma unroll
   for (int i = 0; i < Items; ++i)
     if (int(threadIdx.x) * Items + i == rank - 1) found = keys[i];
-  return maximum(found, reinterpret_cast<uint64_t *>(workspace));
+  return block_reduce(found, workspace, Maximum{});
 }
 
 // Exact most-significant-digit selection, four bits per pass. Per-thread
@@ -95,8 +168,8 @@ __device__ inline uint64_t sampled_top_k_bound(float const *scores, int vocab,
 // Unlike a probability-only cutoff, the 64-bit key keeps exactly k tokens and
 // the smallest nucleus even when many logits are identical.
 // candidate_end is a per-thread strided-list end; -1 starts with the full row.
-// Compact=false preserves a supplied list for subsequent filtering and sampling.
-template<bool Weighted, bool Compact = true>
+// A supplied list is preserved for subsequent filtering and sampling.
+template<bool Weighted>
 __device__ inline uint64_t cutoff(float const *scores, int *tokens,
                                   int vocab, uint64_t lower, float target,
                                   float *workspace, int candidate_end = -1) {
@@ -105,7 +178,8 @@ __device__ inline uint64_t cutoff(float const *scores, int *tokens,
   int warps = blockDim.x / WARP_SIZE;
   int size = candidate_end >= 0 ? candidate_end : vocab;
   bool compacted = candidate_end >= 0;
-  bool compact = Compact && lower != 0;
+  bool preserve = compacted;
+  bool compact = !preserve && lower != 0;
   for (int shift = 64 - RADIX_BITS; shift >= 0; shift -= RADIX_BITS) {
     uint64_t digit_mask = uint64_t(RADIX_BINS - 1) << shift;
     // Inverted token IDs have fixed leading ones above the vocabulary range.
@@ -141,10 +215,10 @@ __device__ inline uint64_t cutoff(float const *scores, int *tokens,
     }
     #pragma unroll
     for (int bin = 0; bin < RADIX_BINS; ++bin) {
-      float mass = warp_sum(bins[bin]);
+      float mass = warp_reduce(bins[bin], Sum{});
       if (lane == 0) workspace[warp * RADIX_BINS + bin] = mass;
       if constexpr (Weighted) {
-        float count = warp_sum(counts[bin]);
+        float count = warp_reduce(counts[bin], Sum{});
         if (lane == 0) workspace[(warps + warp) * RADIX_BINS + bin] = count;
       }
     }
@@ -172,7 +246,7 @@ __device__ inline uint64_t cutoff(float const *scores, int *tokens,
     prefix |= uint64_t(selected) << shift;
     mask |= digit_mask;
     // Avoid copying the entire vocabulary while all keys share this prefix.
-    compact = Compact && candidates < vocab;
+    compact = !preserve && candidates < vocab;
     if (candidates == 1.f) {
       uint64_t found = 0;
       for (int i = threadIdx.x; i < size; i += blockDim.x) {
@@ -180,82 +254,67 @@ __device__ inline uint64_t cutoff(float const *scores, int *tokens,
         uint64_t key = score_key(scores[v], v);
         if (key >= lower && (key & mask) == prefix) found = key;
       }
-      return maximum(found, reinterpret_cast<uint64_t *>(workspace));
+      return block_reduce(found, workspace, Maximum{});
     }
   }
   return prefix;
 }
 
-__device__ inline float gumbel_noise(int v, uint64_t random_base) {
-  uint64_t random = mix(random_base ^ mix(uint64_t(v) + 1));
-  // Keep the 53-bit draw's tails while evaluating logarithms in FP32.
-  // Near one, form 1-u from integer bits and use log1p: rounding u to FP32
-  // first would produce an endpoint or truncate the Gumbel upper tail.
-  uint64_t bits = random >> 11;
-  float exponential;
-  if (bits >= (uint64_t(1) << 52)) {
-    float tail = (float(((uint64_t(1) << 53) - 1) - bits) + 0.5f) * 0x1.0p-53f;
-    exponential = -log1pf(-tail);
-  } else {
-    float u = (float(bits) + 0.5f) * 0x1.0p-53f;
-    exponential = -logf(u);
+// Each thread owns a strided candidate list. An end of -1 means scan the row.
+struct SamplingCandidates {
+  uint64_t lower;
+  int end;
+};
+
+// Center/scale scores, validate the probe, then select the exact top-k cutoff.
+// Keeping the accepted list also saves full-row reads during top-p and the draw.
+__device__ inline SamplingCandidates prepare_candidates(
+    float *scores, int *candidates, int vocab, int k, float max_score,
+    float temperature, float *workspace) {
+  // Softmax and Gumbel-max are invariant to a common logit shift. Center
+  // before scaling: dividing positive logits first can overflow at small
+  // temperatures and make distinct logits tie at +infinity. Greedy/top-k=1
+  // require no temperature arithmetic at all.
+  bool probe = k > 0 && k <= 256 && vocab >= 4096 && blockDim.x == 128;
+  uint64_t lower = 0;
+  int candidate_end = -1;
+  if (probe) {
+    lower = sampled_top_k_bound(scores, vocab, k, max_score, temperature, workspace);
   }
-  return -logf(exponential);
+  // Scale once, validating and collecting the probe's candidates in this pass.
+  {
+    __syncthreads();
+    int end = threadIdx.x;
+    float count = 0;
+    for (int v = threadIdx.x; v < vocab; v += blockDim.x) {
+      float score = (scores[v] - max_score) / temperature;
+      scores[v] = score;
+      if (probe && score_key(score, v) >= lower) {
+        candidates[end] = v;
+        end += blockDim.x;
+        count += 1;
+      }
+    }
+    __syncthreads();
+    if (probe) {
+      float available = block_reduce(count, workspace, Sum{});
+      uint64_t busiest = block_reduce(uint64_t(count), workspace, Maximum{});
+      // Preserved lists must stay short in every lane, not just on average.
+      // A highly skewed row can place all promising tokens in one thread.
+      if (available >= k && available <= 1024 && busiest <= 32) candidate_end = end;
+      else lower = 0;  // Fall back for narrow, broad, or unbalanced probes.
+    }
+  }
+  if (k > 0) {
+    lower = cutoff<false>(scores, candidates, vocab, lower, float(k), workspace, candidate_end);
+  }
+  return {lower, candidate_end};
 }
 
 __device__ inline uint64_t sampled_key(float score, int v, uint64_t lower,
-                                       uint64_t random_base) {
+                                       SamplingRng const &rng) {
   if (score_key(score, v) < lower || !isfinite(score)) return 0;
-  return score_key(score + gumbel_noise(v, random_base), v);
-}
-
-struct Draw {
-  float score, noise;
-  int token;
-};
-
-// Compare score + temperature * noise without rounding a large common logit
-// offset into the noise. This is equivalent to centered Gumbel-max, but needs
-// neither a preliminary maximum nor a second vocabulary pass. Near cancellation,
-// use FP64 to resolve the sign instead of depending on the reduction order.
-__device__ inline Draw better_draw(Draw a, Draw b, float temperature) {
-  if (!isfinite(a.score) || !isfinite(b.score))
-    return score_key(a.score, a.token) >= score_key(b.score, b.token) ? a : b;
-  if (a.score == b.score) {
-    if (a.noise != b.noise) return a.noise > b.noise ? a : b;
-    return a.token < b.token ? a : b;
-  }
-  float delta = a.score - b.score;
-  float shift = temperature * (b.noise - a.noise);
-  float margin = delta - shift;
-  // Eight FP32 epsilons conservatively cover the subtraction/product errors.
-  if (fabsf(margin) > 0x1p-20f * (fabsf(delta) + fabsf(shift)))
-    return margin > 0 ? a : b;
-  double exact = (double(a.score) - b.score) + double(temperature) * (double(a.noise) - b.noise);
-  if (exact != 0) return exact > 0 ? a : b;
-  return a.token < b.token ? a : b;
-}
-
-__device__ inline Draw warp_draw(Draw value, float temperature) {
-  for (int offset = WARP_SIZE / 2; offset; offset /= 2) {
-    Draw other{__shfl_xor_sync(0xffffffff, value.score, offset),
-               __shfl_xor_sync(0xffffffff, value.noise, offset),
-               __shfl_xor_sync(0xffffffff, value.token, offset)};
-    value = better_draw(value, other, temperature);
-  }
-  return value;
-}
-
-__device__ inline Draw best_draw(Draw value, float temperature, float *workspace) {
-  int lane = threadIdx.x % WARP_SIZE, warp = threadIdx.x / WARP_SIZE;
-  auto draws = reinterpret_cast<Draw *>(workspace);
-  value = warp_draw(value, temperature);
-  if (lane == 0) draws[warp] = value;
-  __syncthreads();
-  value = lane < blockDim.x / WARP_SIZE ? draws[lane] : Draw{-INFINITY, 0, 0};
-  value = warp_draw(value, temperature);
-  __syncthreads();
-  return value;
+  return score_key(score + rng.gumbel(v), v);
 }
 
 // Load adjacent values together while handling unaligned rows and tails.
@@ -287,7 +346,6 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
   int *generated_counts = counts + padded_vocab;
   float *workspace = scratch + SCRATCH_VOCAB_ARRAYS * padded_vocab;
   // Four float arrays ensure eight-byte alignment, even for odd vocabularies.
-  uint64_t *keys = reinterpret_cast<uint64_t *>(workspace);
   int *seen = reinterpret_cast<int *>(workspace + SCRATCH_WORKSPACE);
   float repetition = option(cfg[REPETITION_PENALTY]);
   float frequency = option(cfg[FREQUENCY_PENALTY]);
@@ -335,8 +393,9 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
   bool greedy = __longlong_as_double(cfg[TEMPERATURE]) == 0.0 || k == 1;
   float temperature = fmaxf(option(cfg[TEMPERATURE]), 0x1.0p-126f);
   bool unfiltered = !greedy && !top_k && top_p == 1.f;
-  uint64_t random_base = uint64_t(cfg[SEED]) ^ mix(uint64_t(generation_position));
-  Draw draw{-INFINITY, 0, 0};
+  SamplingRng rng{uint64_t(cfg[SEED]), uint32_t(generation_position)};
+  Draw draw;
+  ChooseDraw choose{temperature};
   uint64_t best = 0;
   auto consume = [&](int v, float score, int total, int generated) {
     if (penalties) {
@@ -345,8 +404,8 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
     }
     if (isnan(score)) score = -INFINITY;
     if (unfiltered) {
-      Draw candidate{score, isfinite(score) ? gumbel_noise(v, random_base) : 0.f, v};
-      draw = better_draw(draw, candidate, temperature);
+      Draw candidate{score, isfinite(score) ? rng.gumbel(v) : 0.f, v};
+      draw = choose(draw, candidate);
     } else {
       if (!greedy) scores[v] = score;
       uint64_t key = score_key(score, v);
@@ -380,91 +439,49 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
     }
   }
   if (unfiltered) {
-    draw = best_draw(draw, temperature, workspace);
+    draw = block_reduce(draw, workspace, choose);
     if (threadIdx.x == 0) *output = draw.token;
     return;
   }
-  best = maximum(best, keys);
+  best = block_reduce(best, workspace, Maximum{});
   int best_token = 0xffffffffu - uint32_t(best);
-  if (greedy) {
+  float max_score = greedy ? 0.f : scores[best_token];
+  if (greedy || !isfinite(max_score)) {
     if (threadIdx.x == 0) *output = best_token;
     return;
   }
-  float max_score = scores[best_token];
-  if (!isfinite(max_score)) {
-    if (threadIdx.x == 0) *output = best_token;
-    return;
-  }
-  // Softmax and Gumbel-max are invariant to a common logit shift. Center
-  // before scaling: dividing positive logits first can overflow at small
-  // temperatures and make distinct logits tie at +infinity. Greedy/top-k=1
-  // require no temperature arithmetic at all.
-  bool probe = top_k && k <= 256 && vocab >= 4096 && blockDim.x == 128;
-  uint64_t lower = 0;
-  int candidate_end = -1;
-  if (probe) {
-    lower = sampled_top_k_bound(scores, vocab, k, max_score, temperature, workspace);
-  }
-  // Scale once, validating and collecting the probe's candidates in this pass.
-  {
-    __syncthreads();
-    int end = threadIdx.x;
-    float count = 0;
-    for (int v = threadIdx.x; v < vocab; v += blockDim.x) {
-      float score = (scores[v] - max_score) / temperature;
-      scores[v] = score;
-      if (probe && score_key(score, v) >= lower) {
-        candidates[end] = v;
-        end += blockDim.x;
-        count += 1;
-      }
-    }
-    __syncthreads();
-    if (probe) {
-      float available = sum(count, workspace);
-      uint64_t busiest = maximum(uint64_t(count), keys);
-      // Preserved lists must stay short in every lane, not just on average.
-      // A highly skewed row can place all promising tokens in one thread.
-      if (available >= k && available <= 1024 && busiest <= 32) candidate_end = end;
-      else lower = 0;  // Fall back for narrow, broad, or unbalanced probes.
-    }
-  }
-  if (top_k) {
-    lower = candidate_end >= 0
-        ? cutoff<false, false>(scores, candidates, vocab, lower, float(k), workspace, candidate_end)
-        : cutoff<false>(scores, candidates, vocab, lower, float(k), workspace);
-  }
+  auto selected = prepare_candidates(scores, candidates, vocab, top_k ? k : 0,
+                                     max_score, temperature, workspace);
+  uint64_t lower = selected.lower;
+  int candidate_end = selected.end;
   if (top_p < 1.f) {
     float mass = 0;
     int end = threadIdx.x;
-    bool sparse = top_k;
     int size = candidate_end >= 0 ? candidate_end : vocab;
     for (int i = threadIdx.x; i < size; i += blockDim.x) {
       int v = candidate_end >= 0 ? candidates[i] : i;
       if (score_key(scores[v], v) >= lower) {
         mass += expf(scores[v]);
-        if (sparse) {
+        if (top_k) {
           candidates[end] = v;
           end += blockDim.x;
         }
       }
     }
-    if (sparse) candidate_end = end;
-    mass = sum(mass, workspace);
+    if (top_k) candidate_end = end;
+    mass = block_reduce(mass, workspace, Sum{});
     if (top_p * mass <= 1.f) {
       // The highest logit's unnormalized weight is one.
       if (threadIdx.x == 0) *output = best_token;
       return;
     }
-    lower = sparse ? cutoff<true, false>(scores, candidates, vocab, lower, top_p * mass,
-                                         workspace, candidate_end)
-                   : cutoff<true>(scores, candidates, vocab, lower, top_p * mass, workspace);
+    lower = cutoff<true>(scores, candidates, vocab, lower, top_p * mass, workspace, candidate_end);
   }
   best = 0;
   if (candidate_end >= 0) {
     for (int i = threadIdx.x; i < candidate_end; i += blockDim.x) {
       int v = candidates[i];
-      uint64_t key = sampled_key(scores[v], v, lower, random_base);
+      uint64_t key = sampled_key(scores[v], v, lower, rng);
       best = key > best ? key : best;
     }
   } else {
@@ -474,12 +491,12 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
       for (int i = 0; i < 4; ++i) {
         int v = base + i;
         if (v >= vocab) continue;
-        uint64_t key = sampled_key(values.values[i], v, lower, random_base);
+        uint64_t key = sampled_key(values.values[i], v, lower, rng);
         best = key > best ? key : best;
       }
     }
   }
-  best = maximum(best, keys);
+  best = block_reduce(best, workspace, Maximum{});
   if (threadIdx.x == 0) *output = best ? 0xffffffffu - uint32_t(best) : best_token;
 }
 
