@@ -46,7 +46,6 @@ class RunnerConfig:
     """Directory for compiled kernel artefacts; ``None`` uses a temp dir."""
 
     use_cutlass_kernel: bool = True
-    max_pending_requests: int = 128
     developer_role: str = "system"
 
     # Startup defaults for per-request sampling in online_pinned mode.
@@ -120,10 +119,6 @@ class ModelRunner:
         self.runtime = OnlinePinnedRuntime(self.mpk)
         self.tokenizer = self.mpk.tokenizer
         self.vocab_size = self.mpk.model_builder.vocab_size
-        model_config = getattr(getattr(self.mpk.model_builder, "model", None), "config", None)
-        context_limit = getattr(model_config, "max_position_embeddings", config.max_seq_length)
-        if config.max_seq_length > context_limit:
-            raise ValueError("configured context capacity exceeds the model position limit")
         generation_config = getattr(getattr(self.mpk.model_builder, "model", None), "generation_config", None)
         eos = getattr(generation_config, "eos_token_id", None)
         if eos is None:

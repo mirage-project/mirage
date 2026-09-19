@@ -14,89 +14,177 @@ import argparse
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from .protocol import ChatRequest, TextRequest
-from .output import GenerationEvent
-
-DISCONNECT_POLL_INTERVAL = 0.05
 
 logger = logging.getLogger(__name__)
 
 
-def error_response(message, status=400, param=None, code=None):
-    return JSONResponse(status_code=status, content={"error": {
-        "message": message, "type": "invalid_request_error" if status < 500 else "server_error",
-        "param": param, "code": code}})
-
-
-def encode_sse(value):
-    return "data: " + json.dumps(value, ensure_ascii=False) + "\n\n"
-
-
-@dataclass(frozen=True)
-class CompletionResponse:
-    model: str
-    chat: bool
-    created: int = field(default_factory=lambda: int(time.time()))
-    suffix: str = field(default_factory=lambda: uuid.uuid4().hex)
-
-    def envelope(self, choices, *, stream=False, usage=None):
-        result = dict(
-            id=("chatcmpl-" if self.chat else "cmpl-") + self.suffix,
-            created=self.created, model=self.model, choices=choices,
-            object=("chat.completion.chunk" if stream else "chat.completion")
-                   if self.chat else "text_completion",
-        )
-        if usage is not None:
-            result["usage"] = usage
-        return result
-
-    def choice(self, text, reason=None, *, stream=False, role=False):
-        result = dict(index=0, finish_reason=reason)
-        if self.chat:
-            content = {} if stream and reason else {"content": text}
-            if role or not stream:
-                content["role"] = "assistant"
-            result["delta" if stream else "message"] = content
-        else:
-            result["text"] = text
-        return result
-
-    def initial_chunk(self):
-        return self.envelope([self.choice("", stream=True, role=True)], stream=True)
-
-    def chunks(self, event: GenerationEvent, include_usage=False):
-        if event.text:
-            yield self.envelope([self.choice(event.text, stream=True)], stream=True)
-        if event.finish_reason is not None:
-            yield self.envelope([self.choice("", event.finish_reason, stream=True)], stream=True)
-            if include_usage:
-                yield self.envelope([], stream=True, usage=event.usage)
-
-    def completed(self, text, event: GenerationEvent):
-        return self.envelope([self.choice(text, event.finish_reason)], usage=event.usage)
-
-
 @asynccontextmanager
-async def lifespan(app):
+async def lifespan(app: FastAPI):
     from .model_runner import ModelRunner
     from .llm_engine import LLMEngine
     app.state.engine = LLMEngine(ModelRunner(app.state.runner_config))
     try:
         yield
     finally:
-        await asyncio.to_thread(app.state.engine.close)
+        app.state.engine.close()
 
 
 app = FastAPI(title="MPK LLM Engine", lifespan=lifespan)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def error_response(message, status=400, param=None):
+    return JSONResponse(status_code=status, content={"error": {
+        "message": message, "type": "invalid_request_error" if status < 500 else "server_error",
+        "param": param, "code": None}})
+
+
+def _decode_output(tokens, tokenizer, stops):
+    """Yield text deltas, finish reasons, and token counts for HTTP responses."""
+    ids, emitted = [], ""
+    for token, reason in tokens:
+        if token is not None:
+            ids.append(token)
+        text = tokenizer.decode(ids)
+        matches = [text.find(stop) for stop in stops if stop in text]
+        if matches:
+            text, reason = text[:min(matches)], "stop"
+        elif not reason:
+            # Keep incomplete UTF-8 and stop prefixes out of streamed text.
+            text = text.rstrip("\ufffd")
+            hold = max((size for stop in stops for size in range(1, len(stop))
+                        if text.endswith(stop[:size])), default=0)
+            if hold:
+                text = text[:-hold]
+        yield text[len(emitted):], reason, len(ids)
+        emitted = text
+        if reason:
+            break
+
+
+async def _stream_bridge(tokens, tokenizer, stops):
+    """Bridge the engine's synchronous stream to the HTTP event loop."""
+    loop = asyncio.get_running_loop()
+    queue = asyncio.Queue()
+
+    def run():
+        try:
+            for item in _decode_output(tokens, tokenizer, stops):
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    threading.Thread(target=run, daemon=True).start()
+    while True:
+        item = await queue.get()
+        if item is None:
+            break
+        if isinstance(item, Exception):
+            raise item
+        yield item
+
+
+async def complete(request: Request, chat: bool):
+    engine = request.app.state.engine
+    model = request.app.state.served_model
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            body = {**request.app.state.sampling_defaults, **body}
+        req = (ChatRequest if chat else TextRequest).model_validate(body)
+        params = req.sampling_params()
+    except ValidationError as exc:
+        first = exc.errors(include_input=False)[0]
+        return error_response(first["msg"], param=".".join(map(str, first["loc"])))
+    except ValueError:
+        return error_response("Invalid or empty JSON body")
+    if req.model != model:
+        return error_response(f"Model '{req.model}' is not served", 404, "model")
+    try:
+        tokenizer = engine.tokenizer_manager
+        ids = (tokenizer.tokenize_messages([m.template_message() for m in req.messages])
+               if chat else tokenizer.tokenize_raw(req.prompt))
+        tokens = await asyncio.to_thread(
+            engine.submit, ids, stream=True, sampling_params=params,
+            return_token_ids=True, timeout=request.app.state.request_timeout)
+    except ValueError as exc:
+        return error_response(str(exc))
+    except Exception:
+        logger.exception("Failed to submit generation")
+        return error_response("Unable to start generation", 503)
+
+    response_id = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex
+    created = int(time.time())
+
+    def usage(count):
+        return dict(prompt_tokens=len(ids), completion_tokens=count, total_tokens=len(ids) + count)
+
+    def response(text="", reason=None, *, role=False, usage=None):
+        choice = dict(index=0, finish_reason=reason)
+        if chat:
+            content = {} if req.stream and reason else {"content": text}
+            if role or not req.stream:
+                content["role"] = "assistant"
+            choice["delta" if req.stream else "message"] = content
+        else:
+            choice["text"] = text
+        result = dict(id=response_id, created=created, model=model, choices=[choice],
+                      object=("chat.completion.chunk" if req.stream else "chat.completion")
+                             if chat else "text_completion")
+        if usage is not None:
+            result["usage"] = usage
+            if req.stream:
+                result["choices"] = []
+        return result
+
+    events = _stream_bridge(tokens, tokenizer, params.stop)
+    if req.stream:
+        async def sse():
+            def encode(value):
+                return "data: " + json.dumps(value, ensure_ascii=False) + "\n\n"
+            try:
+                if chat:
+                    yield encode(response(role=True))
+                async for text, reason, count in events:
+                    if text:
+                        yield encode(response(text))
+                    if reason:
+                        yield encode(response(reason=reason))
+                        if req.stream_options and req.stream_options.include_usage:
+                            yield encode(response(usage=usage(count)))
+            except Exception:
+                logger.exception("Streaming generation failed")
+                yield encode({"error": {"message": "Generation failed", "type": "server_error",
+                                        "param": None, "code": None}})
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(sse(), media_type="text/event-stream")
+    try:
+        result = ""
+        async for text, reason, count in events:
+            result += text
+        return response(result, reason, usage=usage(count))
+    except TimeoutError:
+        return error_response("Generation timed out", 504)
+    except Exception:
+        logger.exception("Generation failed")
+        return error_response("Generation failed", 500)
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
 @app.get("/health")
@@ -120,109 +208,7 @@ async def completions(request: Request):
     return await complete(request, chat=False)
 
 
-async def complete(request, chat):
-    try:
-        body = await request.json()
-        if isinstance(body, dict):
-            body = {**request.app.state.sampling_defaults, **body}
-        
-        req = (ChatRequest if chat else TextRequest).model_validate(body)
-        params = req.sampling_params()
-
-    except ValidationError as exc:
-        first = exc.errors(include_input=False)[0]
-        return error_response(first["msg"], param=".".join(map(str, first["loc"])))
-    except (ValueError, UnicodeDecodeError):
-        return error_response("Invalid or empty JSON body")
-    model = request.app.state.served_model
-    if req.model != model:
-        return error_response(f"Model '{req.model}' is not served", 404, "model", "model_not_found")
-    engine = request.app.state.engine
-    
-    try:
-        kwargs = {"messages": [m.template_message() for m in req.messages]} if chat else {"prompt": req.prompt}
-        prepared = await asyncio.to_thread(engine.prepare, params=params, **kwargs)
-        submission = asyncio.create_task(asyncio.to_thread(
-            engine.generate, prepared, request.app.state.request_timeout, poll=True))
-        try:
-            session = await asyncio.shield(submission)
-        except asyncio.CancelledError:
-            # Publishing may already be running in a worker thread. Recover its
-            # handle before propagating cancellation so no request is orphaned.
-            try:
-                abandoned = await submission
-                abandoned.close()
-            finally:
-                raise
-    except ValueError as exc:
-        return error_response(str(exc))
-    except OverflowError as exc:
-        return error_response(str(exc), 429, code="server_overloaded")
-    except Exception:
-        logger.exception("Failed to submit generation")
-        return error_response("Unable to start generation", 503)
-
-    response = CompletionResponse(model, chat)
-
-    async def events():
-        try:
-            for event in session:
-                if event is None:
-                    await asyncio.sleep(0.002)
-                else:
-                    yield event
-        finally:
-            # Nonblocking iteration keeps next() and close() on the event loop.
-            session.close()
-
-    if req.stream:
-        async def sse():
-            try:
-                if chat:
-                    yield encode_sse(response.initial_chunk())
-                include_usage = bool(req.stream_options and req.stream_options.include_usage)
-                async for event in events():
-                    for chunk in response.chunks(event, include_usage):
-                        yield encode_sse(chunk)
-                yield "data: [DONE]\n\n"
-            except Exception as exc:
-                logger.exception("Streaming generation failed")
-                message = "Generation timed out" if isinstance(exc, TimeoutError) else "Generation failed"
-                yield encode_sse({"error": {"message": message, "type": "server_error", "param": None, "code": None}})
-                yield "data: [DONE]\n\n"
-            finally:
-                session.close()
-        return StreamingResponse(sse(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-    async def collect():
-        result = ""
-        final = None
-        async for event in events():
-            result += event.text
-            final = event
-        if final is None or final.finish_reason is None:
-            raise RuntimeError("generation ended without a terminal event")
-        return response.completed(result, final)
-
-    task = asyncio.create_task(collect())
-    try:
-        while not task.done():
-            await asyncio.wait({task}, timeout=DISCONNECT_POLL_INTERVAL)
-            if await request.is_disconnected():
-                task.cancel()
-                return error_response("Client disconnected", 499)
-        return await task
-    except TimeoutError:
-        return error_response("Generation timed out", 504)
-    except Exception:
-        logger.exception("Generation failed")
-        return error_response("Generation failed", 500)
-    finally:
-        session.close()
-        if not task.done():
-            task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 
 def main():
@@ -237,7 +223,6 @@ def main():
     parser.add_argument("--served-model-name")
     parser.add_argument("--developer-role", choices=["system", "native", "reject"], default="system")
     parser.add_argument("--pinned-ring-capacity", type=int, default=8)
-    parser.add_argument("--max-pending-requests", type=int, default=128)
     parser.add_argument("--no-use-cutlass-kernel", action="store_false", dest="use_cutlass_kernel")
     parser.add_argument("--max-num-batched-requests", default=4, type=int)
     parser.add_argument("--max-num-batched-tokens", default=8, type=int)
@@ -263,7 +248,6 @@ def main():
         model_path=args.model_path,
         developer_role=args.developer_role,
         pinned_ring_capacity=args.pinned_ring_capacity,
-        max_pending_requests=args.max_pending_requests,
         use_cutlass_kernel=args.use_cutlass_kernel,
         max_num_batched_requests=args.max_num_batched_requests,
         max_num_batched_tokens=args.max_num_batched_tokens,

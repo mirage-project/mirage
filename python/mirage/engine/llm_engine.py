@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import queue
@@ -12,21 +11,12 @@ import time
 
 import torch
 
-from .output import GenerationEvent, OutputProcessor
 from .sampling import SamplingParams
 from .tokenizer_manager import TokenizerManager
 
 if TYPE_CHECKING:
     from .model_runner import ModelRunner
     from ..mpk.online_pinned_runtime import OnlinePinnedRuntime
-
-
-@dataclass(frozen=True)
-class PreparedGeneration:
-    """Tokenized API input and its per-request generation settings."""
-    token_ids: tuple[int, ...]
-    config: tuple[int, ...]
-    params: SamplingParams
 
 
 class _StreamingMonitor:
@@ -48,15 +38,13 @@ class _StreamingMonitor:
         self._thread.start()
 
     def register(self, rid: int, prompt_len: int, timeout: float,
-                 output: OutputProcessor | None = None, max_pending: int | None = None) -> queue.Queue:
+                 return_token_ids: bool = False) -> queue.Queue:
         """Register a streaming session and return its token queue."""
         q: queue.Queue = queue.Queue()
         with self._lock:
-            if max_pending is not None and len(self._sessions) >= max_pending:
-                raise OverflowError("server request queue is full")
             self._sessions[rid] = {
                 'q': q,
-                'output': output,
+                'return_token_ids': return_token_ids,
                 'prompt_len': prompt_len,
                 'row': -1,
                 'last_step': prompt_len - 1,
@@ -68,15 +56,6 @@ class _StreamingMonitor:
         """Remove a session whose request could not be published."""
         with self._lock:
             self._sessions.pop(rid, None)
-
-    def cancel(self, rid: int) -> None:
-        with self._lock:
-            session = self._sessions.pop(rid, None)
-            if session is not None:
-                try:
-                    self._runtime.abandon_request(rid)
-                finally:
-                    session['q'].put(("__cancelled__", True))
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -115,16 +94,11 @@ class _StreamingMonitor:
 
                             # Phase 2 — poll step progress, read only new tokens.
                             current_step = self._runtime.get_current_step_at_row(row)
-                            if s['output'] is not None:
-                                if self._yield_output(s, row, current_step):
-                                    self._runtime.abandon_request(rid)
-                                    del self._sessions[rid]
-                                    continue
-                            elif current_step > s['last_step']:
+                            if current_step > s['last_step']:
                                 new_tokens = self._runtime.read_tokens_range(
                                     row, s['last_step'] + 1, current_step)
                                 for tid in new_tokens.tolist():
-                                    text = self._tokenizer_manager.decode_single(tid)
+                                    text = tid if s['return_token_ids'] else self._tokenizer_manager.decode_single(tid)
                                     s['last_step'] += 1
                                     s['q'].put((text, False))
 
@@ -147,39 +121,24 @@ class _StreamingMonitor:
 
             self._stop.wait(0.002)  # 2 ms polling interval
 
-    def _yield_output(self, s: dict, row: int, step: int, final: bool = False) -> bool:
-        """Decode API output with stop matching, usage, and a finish reason."""
-        output = s['output']
-        text = ""
-        if step > s['last_step']:
-            tokens = self._runtime.read_tokens_range(row, s['last_step'] + 1, step)
-            for token in tokens.tolist():
-                text += output.push(token)
-            s['last_step'] = step
-        reason = "stop" if output.stopped else None
-        if final:
-            reason = reason or self._runtime.finish_reason(row)
-            text += output.flush()
-        if text or reason:
-            s['q'].put(GenerationEvent(text, reason, s['prompt_len'], len(output.token_ids)))
-        return reason is not None
-
     def _yield_remaining(self, s: dict, row: int, final_step: int) -> None:
         """Yield all remaining tokens for a completed request."""
-        if s['output'] is not None:
-            self._yield_output(s, row, final_step, final=True)
-            return
         if final_step > s['last_step']:
             new_tokens = self._runtime.read_tokens_range(
                 row, s['last_step'] + 1, final_step)
             new_ids = new_tokens.tolist()
             for j, tid in enumerate(new_ids):
-                text = self._tokenizer_manager.decode_single(tid)
+                text = tid if s['return_token_ids'] else self._tokenizer_manager.decode_single(tid)
                 is_final = (j == len(new_ids) - 1)
+                if is_final and s['return_token_ids']:
+                    is_final = self._runtime.finish_reason(row)
                 s['q'].put((text, is_final))
                 s['last_step'] += 1
         else:
-            s['q'].put(("", True))
+            if s['return_token_ids']:
+                s['q'].put((None, self._runtime.finish_reason(row)))
+            else:
+                s['q'].put(("", True))
 
     def shutdown(self) -> None:
         self._stop.set()
@@ -248,59 +207,16 @@ class LLMEngine:
 
     # ── Public API ────────────────────────────────────────────────────────
 
-    def prepare(self, *, prompt=None, messages=None, params=None, use_template=False):
-        """Validate and tokenize an API request before starting its response."""
-        if (prompt is None) == (messages is None):
-            raise ValueError("provide exactly one of prompt or messages")
-        if params is None:
-            params = SamplingParams(**self.model_runner.config.sampling_defaults())
-        if messages is not None:
-            ids = self.tokenizer_manager.tokenize_messages(messages)
-        elif use_template:
-            ids = self.tokenizer_manager.tokenize(prompt)
-        else:
-            ids = self.tokenizer_manager.tokenize_raw(prompt)
-        if any(t < 0 or t >= self.vocab_size for t in ids):
-            raise ValueError("prompt token exceeds model vocabulary")
-        packed = params.pack(len(ids), self.model_runner.config.max_seq_length,
-                             self.vocab_size, self.eos_ids)
-        return PreparedGeneration(tuple(ids), tuple(packed), params)
-
-    def generate(self, request: PreparedGeneration, timeout=120.0, *, poll=False):
-        """Return a cancellable generator; poll=True yields None while waiting."""
-        tokens = torch.tensor(request.token_ids, dtype=torch.int64)
-        output = OutputProcessor(self.tokenizer_manager, request.params.stop, self.eos_ids,
-                                 request.params.stop_token_sequences)
-        with self._submit_lock:
-            if self._closed:
-                raise RuntimeError("LLMEngine is closed")
-            rid = self._next_rid
-            self._next_rid += 1
-            q = self._monitor.register(rid, len(tokens), timeout, output,
-                                       self.model_runner.config.max_pending_requests)
-            try:
-                self.runtime.submit(rid, tokens, generation_config=request.config)
-            except Exception:
-                self._monitor.unregister(rid)
-                raise
-        def generator():
-            try:
-                yield  # Prime cleanup before returning the submitted request.
-                yield from self._submit_stream(rid, q, poll=poll)
-            finally:
-                self._monitor.cancel(rid)
-
-        result = generator()
-        next(result)
-        return result
-
     def submit(
         self,
-        prompt: str,
+        prompt: str | list[int],
         use_template: bool = True,
         timeout: float = 120.0,
         poll_interval: float = 1e-4,
         stream: bool = False,
+        *,
+        sampling_params: SamplingParams | None = None,
+        return_token_ids: bool = False,
     ):
         """Submit a single prompt for generation.
 
@@ -308,21 +224,26 @@ class LLMEngine:
         serialises the ring-buffer write under an internal lock.
 
         Args:
-            prompt:        String prompt.
+            prompt:        String prompt or already-tokenized input.
             use_template:  Apply chat template before tokenizing.
             timeout:       Seconds to wait before raising :exc:`TimeoutError`.
             poll_interval: Seconds between completion-ring polls.
             stream:        If True, returns a generator yielding ``(text,
                            is_final)`` tuples. Otherwise returns a dict.
+            sampling_params: Per-request sampling settings; omitted uses startup defaults.
+            return_token_ids: Stream ``(token_id, finish_reason)`` for API formatting.
+                              The reason is False until completion; token_id may be None.
 
         Returns:
             When stream=False: ``{"text": str, "token_ids": list[int]}``
             When stream=True:  generator yielding ``(text, is_final)``
         """
-        token_ids = self.tokenizer_manager.tokenize(prompt, use_template)
+        token_ids = (self.tokenizer_manager.tokenize(prompt, use_template)
+                     if isinstance(prompt, str) else prompt)
         prompt_len = len(token_ids)
-        config = SamplingParams(**self.model_runner.config.sampling_defaults()).pack(
-            prompt_len, self.model_runner.config.max_seq_length, self.vocab_size, self.eos_ids)
+        params = sampling_params or SamplingParams(**self.model_runner.config.sampling_defaults())
+        config = params.pack(prompt_len, self.model_runner.config.max_seq_length,
+                             self.vocab_size, self.eos_ids)
 
         t = torch.tensor(token_ids, dtype=torch.int64)
         stream_queue: queue.Queue | None = None
@@ -333,7 +254,7 @@ class LLMEngine:
             self._next_rid += 1
             if stream:
                 stream_queue = self._monitor.register(
-                    rid, prompt_len, timeout)
+                    rid, prompt_len, timeout, return_token_ids)
             try:
                 self.runtime.submit(rid, t, generation_config=config)
             except Exception:
@@ -378,8 +299,6 @@ class LLMEngine:
         self,
         rid: int,
         q: queue.Queue,
-        *,
-        poll: bool = False,
     ):
         """Generator: yield ``(text, is_final)`` as tokens are decoded.
 
@@ -390,19 +309,9 @@ class LLMEngine:
         def generator():
             while True:
                 try:
-                    item = q.get(timeout=0 if poll else 0.05)
+                    text, is_final = q.get(timeout=0.05)
                 except queue.Empty:
-                    if poll:
-                        yield None
                     continue
-                if isinstance(item, GenerationEvent):
-                    yield item
-                    if item.finish_reason is not None:
-                        break
-                    continue
-                text, is_final = item
-                if text == "__cancelled__":
-                    raise RuntimeError(f"request cancelled for rid={rid}")
                 if text == "__timeout__":
                     raise TimeoutError(
                         f"stream timed out for rid={rid}")
