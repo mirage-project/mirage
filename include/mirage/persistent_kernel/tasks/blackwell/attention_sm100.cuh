@@ -44,9 +44,11 @@ template <typename T,
           int TAIL_OFFSET = 0,
           // MAX_TOKENS = per-call query rows (= mbt). Must be >= mbt yet small
           // enough that the per-row smem buffers (S_Q/S_O) fit
-          // MAX_DYNAMIC_SHARED_MEMORY. The cross-warp output reduction buffer
-          // is chunked per MMA m-tile, so it no longer grows with MAX_TOKENS
-          // (issue #702); the default 8 fits smem even for GQA ratios >= 8:1.
+          // MAX_DYNAMIC_SHARED_MEMORY. The cross-warp reduction buffers (o,
+          // and m/d since #740) are chunked per MMA m-tile, so they no longer
+          // grow with MAX_TOKENS (issue #702); the default 8 fits smem even
+          // for GQA ratios >= 8:1. S_Q and S_O still scale with MAX_TOKENS,
+          // so a large enough mbt still trips the static_assert below.
           int MAX_TOKENS = 8,
           // Partial RoPE (GLM-4.6: 64 of 128 dims). Rotates dims
           // [0, ROTARY_DIM), passes the rest through; cos/sin tables are
@@ -193,12 +195,15 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
 
     constexpr size_t S_M_BUFFER_OFFSET =
         S_K_NORM_SUM_OFFSET + S_K_NORM_SUM_SIZE;
-    constexpr size_t S_M_BUFFER_SIZE =
-        sizeof(float) * MMA_ITERS_M * NUM_THREADS * 2;
+    // Like S_O_BUFFER below, the m and d buffers hold ONE MMA m-tile at a
+    // time: the reduction publishes tile m's per-thread values, consumes
+    // them, then reuses the buffer for tile m+1. Sizing them for all
+    // MMA_ITERS_M tiles at once made total smem grow with MAX_TOKENS, which
+    // capped max_num_batched_tokens at 20 for GQA 8:1 (issue #740).
+    constexpr size_t S_M_BUFFER_SIZE = sizeof(float) * NUM_THREADS * 2;
 
     constexpr size_t S_D_BUFFER_OFFSET = S_M_BUFFER_OFFSET + S_M_BUFFER_SIZE;
-    constexpr size_t S_D_BUFFER_SIZE =
-        sizeof(float) * MMA_ITERS_M * NUM_THREADS * 2;
+    constexpr size_t S_D_BUFFER_SIZE = sizeof(float) * NUM_THREADS * 2;
 
     constexpr size_t S_O_BUFFER_OFFSET = S_D_BUFFER_OFFSET + S_D_BUFFER_SIZE;
     // The cross-warp output reduction is chunked over MMA m-tiles, so this
@@ -624,24 +629,18 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
       curr_iter_len = next_iter_len;
     }
 
-    // write per-thread m and d to buffers in shared memory (these stay small
-    // enough to hold all MMA m-tiles at once)
-#pragma unroll
+    // get global m, d, and o, one MMA m-tile at a time: publish this tile's
+    // per-thread m and d, spill its accumulator fragments to the
+    // (single-tile) o buffer, reduce across the 4 warps, then reuse all
+    // three buffers for the next tile. Both barriers are reached uniformly
+    // by all threads since the loop bounds do not depend on threadIdx.
     for (int m = 0; m < MMA_ITERS_M; m++) {
       m_local[m][0] *= m_local[m][0] != -inf ? sm_scale : 1.f;
       m_local[m][1] *= m_local[m][1] != -inf ? sm_scale : 1.f;
-      s_m_buffer[m * NUM_THREADS * 2 + threadIdx.x * 2] = m_local[m][0];
-      s_m_buffer[m * NUM_THREADS * 2 + threadIdx.x * 2 + 1] = m_local[m][1];
-      s_d_buffer[m * NUM_THREADS * 2 + threadIdx.x * 2] = d[m][0];
-      s_d_buffer[m * NUM_THREADS * 2 + threadIdx.x * 2 + 1] = d[m][1];
-    }
-
-    // get global m, d, and o, one MMA m-tile at a time: spill this tile's
-    // accumulator fragments to the (single-tile) o buffer, reduce across the
-    // 4 warps, then reuse the buffer for the next tile. Both barriers are
-    // reached uniformly by all threads since the loop bounds do not depend
-    // on threadIdx.
-    for (int m = 0; m < MMA_ITERS_M; m++) {
+      s_m_buffer[threadIdx.x * 2] = m_local[m][0];
+      s_m_buffer[threadIdx.x * 2 + 1] = m_local[m][1];
+      s_d_buffer[threadIdx.x * 2] = d[m][0];
+      s_d_buffer[threadIdx.x * 2 + 1] = d[m][1];
 #pragma unroll
       for (int n = 0; n < HEAD_DIM / 16; n++) {
 #pragma unroll
@@ -689,12 +688,10 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
         // 4 local values per row
 #pragma unroll
         for (int local_idx = 0; local_idx < 4; local_idx++) {
-          // access the shared memory buffer
-          int md_smem_offset =
-              m * NUM_THREADS * 2   // mma iter m
-              + local_idx * 32 * 2  // 32 threads per local value
-              + t_idx * 2           // corresponding thread
-              + (frag_idx % 4) / 2; // first half or second half
+          // access the shared memory buffer (it holds only this m-tile)
+          int md_smem_offset = local_idx * 32 * 2 // 32 threads per local value
+                               + t_idx * 2        // corresponding thread
+                               + (frag_idx % 4) / 2; // first or second half
           float m_prev = m_global,
                 d_prev = d_global; // save previous values
           float other_m = s_m_buffer[md_smem_offset],
