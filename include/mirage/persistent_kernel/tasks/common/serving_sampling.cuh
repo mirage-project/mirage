@@ -58,11 +58,12 @@ __device__ inline uint64_t maximum(uint64_t value, uint64_t *workspace) {
 
 // Probe evenly spaced tokens for a useful cutoff. The caller verifies the full
 // row's candidate count before using it; an unrepresentative probe is harmless.
-template<int Threads>
+// The serving task launches 128 threads per request.
 __device__ inline uint64_t sampled_top_k_bound(float const *scores, int vocab,
                                                int k, float max_score,
                                                float temperature, float *workspace) {
   constexpr int ProbeSize = 1024;
+  constexpr int Threads = 128;
   constexpr int Items = ProbeSize / Threads;
   // Aim to retain roughly four times k tokens, with a conservative minimum rank.
   int rank = min(k, max(4, int((int64_t(k) * 4 * ProbeSize + vocab - 1) / vocab)));
@@ -398,14 +399,11 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
   // before scaling: dividing positive logits first can overflow at small
   // temperatures and make distinct logits tie at +infinity. Greedy/top-k=1
   // require no temperature arithmetic at all.
-  bool probe = top_k && k <= 256 && vocab >= 4096 &&
-               (blockDim.x == 128 || blockDim.x == 256);
+  bool probe = top_k && k <= 256 && vocab >= 4096 && blockDim.x == 128;
   uint64_t lower = 0;
   int candidate_end = -1;
   if (probe) {
-    lower = blockDim.x == 128
-        ? sampled_top_k_bound<128>(scores, vocab, k, max_score, temperature, workspace)
-        : sampled_top_k_bound<256>(scores, vocab, k, max_score, temperature, workspace);
+    lower = sampled_top_k_bound(scores, vocab, k, max_score, temperature, workspace);
   }
   // Scale once, validating and collecting the probe's candidates in this pass.
   {

@@ -2,17 +2,22 @@
 
 Start the server first::
 
-    python -m mirage.engine.launch_server --max-num-batched-tokens 4
+    python -m mirage.engine.launch_server --model Qwen/Qwen3-0.6B
 
 Then run the demo::
 
     python demo/qwen3/demo_online.py                  # single request
     python demo/qwen3/demo_online.py --concurrent 3   # 3 concurrent requests
     python demo/qwen3/demo_online.py --stream          # streaming (SSE)
+    python demo/qwen3/demo_online.py --stream --sample # per-request top-k/top-p
+
+The served model is discovered via /v1/models. Requests generate at most 128
+tokens by default; prompt plus output must fit the server's context capacity.
 
 """
 
 import argparse
+from functools import partial
 import json
 import sys
 import time
@@ -23,16 +28,26 @@ import urllib.error
 BASE = "http://127.0.0.1:8000"
 
 
-def chat(prompt: str, stream: bool = False, timeout: int = 300):
+def chat(prompt: str, stream: bool = False, timeout: int = 300, *,
+         base: str = BASE, model: str, max_tokens: int = 128, sample: bool = False):
     """Send one chat-completion request.  Returns decoded text for non-stream,
     or yields (text, is_final) tuples for stream."""
-    body = json.dumps({
+    payload = {
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
+        "max_completion_tokens": max_tokens,
+        "temperature": .8 if sample else 0,
+        "top_k": 20 if sample else 0,
+        "top_p": .95 if sample else 1,
+        "seed": 42,
         "stream": stream,
-    }).encode()
+    }
+    if stream:
+        payload["stream_options"] = {"include_usage": True}
+    body = json.dumps(payload).encode()
 
     req = urllib.request.Request(
-        f"{BASE}/v1/chat/completions",
+        f"{base}/v1/chat/completions",
         data=body,
         headers={"Content-Type": "application/json"},
     )
@@ -47,37 +62,40 @@ def chat(prompt: str, stream: bool = False, timeout: int = 300):
 
 def _read_sse(req: urllib.request.Request, timeout: int):
     """Generator that yields (text, is_final) from an SSE stream."""
-    resp = urllib.request.urlopen(req, timeout=timeout)
-    buffer = ""
-    while True:
-        chunk = resp.read(256).decode("utf-8", errors="replace")
-        if not chunk:
-            break
-        buffer += chunk
-        while "\n\n" in buffer:
-            line, buffer = buffer.split("\n\n", 1)
-            if not line.startswith("data: "):
+    finished = False
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # Read complete SSE lines without waiting for an arbitrary byte count.
+        # Decoding each complete line also preserves split UTF-8 codepoints.
+        for raw in resp:
+            line = raw.decode("utf-8").strip()
+            if not line.startswith("data:"):
                 continue
-            payload = line[6:]
+            payload = line[5:].strip()
             if payload == "[DONE]":
+                if not finished:
+                    raise RuntimeError("Stream ended without a finish reason")
+                yield ("", True)
                 return
-            try:
-                obj = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
+            obj = json.loads(payload)
             if "error" in obj:
                 raise RuntimeError(obj["error"])
-            text = obj["choices"][0]["delta"].get("content", "")
-            yield (text, False)
-    yield ("", True)
+            choices = obj.get("choices", [])
+            if not choices:  # final usage event
+                continue
+            choice = choices[0]
+            finished |= choice.get("finish_reason") is not None
+            text = choice.get("delta", {}).get("content", "")
+            if text:
+                yield (text, False)
+    raise RuntimeError("Incomplete stream: missing [DONE]")
 
 
 # ── runners ──────────────────────────────────────────────────────────────────
 
 
-def run_single(prompt: str, timeout: int = 300) -> bool:
+def run_single(client, prompt: str) -> bool:
     t0 = time.monotonic()
-    text = chat(prompt, timeout=timeout)
+    text = client(prompt)
     elapsed = time.monotonic() - t0
     print(f"  {text[:300]}...")
     print(f"\n  Finished in {elapsed:.1f}s")
@@ -87,12 +105,12 @@ def run_single(prompt: str, timeout: int = 300) -> bool:
     return ok
 
 
-def run_concurrent(prompts: list[str], timeout: int = 300) -> bool:
+def run_concurrent(client, prompts: list[str]) -> bool:
     results: list[tuple[int, str] | None] = [None] * len(prompts)
 
     def _worker(idx: int, prompt: str):
         try:
-            results[idx] = (idx, chat(prompt, timeout=timeout))
+            results[idx] = (idx, client(prompt))
         except Exception as e:
             results[idx] = (idx, f"ERROR: {e}")
 
@@ -118,10 +136,10 @@ def run_concurrent(prompts: list[str], timeout: int = 300) -> bool:
     return ok
 
 
-def run_stream(prompt: str, timeout: int = 300) -> bool:
+def run_stream(client, prompt: str) -> bool:
     print(f"\n[stream] {prompt!r}\n")
     got = 0
-    for text, is_final in chat(prompt, stream=True, timeout=timeout):
+    for text, is_final in client(prompt, stream=True):
         if is_final:
             print("\n\n--- DONE ---")
         else:
@@ -143,38 +161,64 @@ def main() -> None:
     parser.add_argument("--concurrent", type=int, default=0, help="Number of concurrent requests")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--model", help="Served model name (default: discover via /v1/models)")
+    parser.add_argument("--max-tokens", type=int, default=128)
+    parser.add_argument("--sample", action="store_true",
+                        help="Send temperature=.8, top_k=20, top_p=.95, seed=42")
     args = parser.parse_args()
+    if args.concurrent < 0 or args.max_tokens < 1 or args.timeout < 1:
+        parser.error("Concurrency must be nonnegative; token budget and timeout must be positive")
 
-    global BASE
-    BASE = f"http://127.0.0.1:{args.port}"
+    base = f"http://127.0.0.1:{args.port}"
 
     # Quick health check
     try:
-        urllib.request.urlopen(f"{BASE}/docs", timeout=5)
-    except Exception:
-        print(f"Cannot reach server at {BASE}. Start it first:")
-        print(f"  python -m mirage.engine.launch_server --max-num-batched-tokens 4")
-        return
+        with urllib.request.urlopen(f"{base}/health", timeout=5) as resp:
+            resp.read()
+        with urllib.request.urlopen(f"{base}/v1/models", timeout=5) as resp:
+            models = [entry["id"] for entry in json.load(resp)["data"]]
+        model = args.model
+        if model is None:
+            if len(models) != 1:
+                raise ValueError("Supply --model when the server does not list exactly one model")
+            model = models[0]
+        if model not in models:
+            raise ValueError(f"Server does not serve {model}")
+    except Exception as exc:
+        print(f"Cannot use server at {base}: {exc}", file=sys.stderr)
+        print(f"Start it with: python -m mirage.engine.launch_server "
+              f"--model Qwen/Qwen3-0.6B --port {args.port}", file=sys.stderr)
+        sys.exit(1)
+
+    client = partial(chat, base=base, model=model, timeout=args.timeout,
+                     max_tokens=args.max_tokens, sample=args.sample)
+    print(f"Model: {model}; sampling: {args.sample}; output budget: {args.max_tokens}")
 
     if args.stream:
-        ok = run_stream("Explain what a GPU is in one sentence.", timeout=args.timeout)
+        ok = run_stream(client, "Explain what a GPU is in one sentence.")
     elif args.concurrent > 0:
         prompts = [
-            "Introduce yourself.",
-            "How to implement GEMM kernel at nvidia blackwell gpu, please explain in detail.",
-            "Explain the difference between lpl and lck.",
-            "What is buggy in CMU? CMU means Carnegie Mellon University",
-            "Lebron James and Steven Curry, who is the goat?",
-            "Do you think Attack on Titan really have a good end?"
-        ][: args.concurrent]
+            "Introduce yourself in one sentence.",
+            "Explain what matrix multiplication does.",
+            "Why is the sky blue?",
+            "Name three programming languages.",
+        ]
+        prompts = [prompts[i % len(prompts)] for i in range(args.concurrent)]
         print(f"\n=== {len(prompts)} concurrent requests ===\n")
-        ok = run_concurrent(prompts, timeout=args.timeout)
+        ok = run_concurrent(client, prompts)
     else:
         print("\n=== Single request ===\n")
-        ok = run_single("Say hello.", timeout=args.timeout)
+        ok = run_single(client, "Say hello.")
 
     sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except urllib.error.HTTPError as exc:
+        print(f"HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')}", file=sys.stderr)
+        sys.exit(1)
+    except (urllib.error.URLError, TimeoutError, RuntimeError) as exc:
+        print(f"Request failed: {exc}", file=sys.stderr)
+        sys.exit(1)

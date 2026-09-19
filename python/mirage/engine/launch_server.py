@@ -214,9 +214,6 @@ def main():
     parser.add_argument("--model", default="Qwen/Qwen3-8B", help="HuggingFace model name")
     parser.add_argument("--model-path", default=None, help="Path to local model")
     parser.add_argument("--served-model-name")
-    parser.add_argument("--developer-role", choices=["system", "native", "reject"], default="system")
-    parser.add_argument("--pinned-ring-capacity", type=int, default=8)
-    parser.add_argument("--no-use-cutlass-kernel", action="store_false", dest="use_cutlass_kernel")
     parser.add_argument("--max-num-batched-requests", default=4, type=int)
     parser.add_argument("--max-num-batched-tokens", default=8, type=int)
     parser.add_argument("--max-seq-length", default=512, type=int)
@@ -228,8 +225,6 @@ def main():
     parser.add_argument("--do-sample", dest="do_sample", action="store_true",
                         help="Set sampling defaults for omitted request fields")
     parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--top-p", "--top_p", type=float, default=0.95)
-    parser.add_argument("--top-k", "--top_k", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--sampling-topk-max", type=int, default=32)
     args = parser.parse_args()
@@ -239,9 +234,6 @@ def main():
     config = RunnerConfig(
         model=args.model,
         model_path=args.model_path,
-        developer_role=args.developer_role,
-        pinned_ring_capacity=args.pinned_ring_capacity,
-        use_cutlass_kernel=args.use_cutlass_kernel,
         max_num_batched_requests=args.max_num_batched_requests,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_seq_length=args.max_seq_length,
@@ -250,8 +242,6 @@ def main():
         output_dir=args.output_dir,
         do_sample=args.do_sample,
         temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
         sampling_seed=args.seed,
         sampling_topk_max=args.sampling_topk_max,
     )
