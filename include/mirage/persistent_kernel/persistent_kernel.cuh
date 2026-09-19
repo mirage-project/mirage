@@ -1848,6 +1848,12 @@ extern "C" void
   global_runtime_config.my_gpu_id = mype;
   global_runtime_config.num_graphs = 1;
   global_runtime_config.split_worker_scheduler = true;
+  // Split launch is currently forced. Keep both cases so switching to combined
+  // launch validates the total scheduler count.
+  assert((global_runtime_config.split_worker_scheduler ? num_local_schedulers
+                                                       : num_schedulers) %
+             SCHEDULERS_PER_BLOCK ==
+         0);
 
   std::vector<FullTaskDesc> all_fulltasks;
   std::vector<EventDesc> all_events;
