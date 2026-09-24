@@ -2486,7 +2486,7 @@ int TaskRegister::register_serving_sampling_task(threadblock::Graph const &bgrap
 
 int TaskRegister::register_sampling_sm100_task(threadblock::Graph const &bgraph,
                                                std::vector<int> const &params) {
-  // params[0]: seed (legacy standalone sampler)
+  // params[0]: seed
   assert(params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
