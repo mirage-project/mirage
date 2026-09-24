@@ -30,7 +30,7 @@ class FakeEngine:
 @pytest.fixture
 def client(monkeypatch):
     engine = FakeEngine()
-    for key, value in dict(engine=engine, served_model="test", sampling_defaults={},
+    for key, value in dict(engine=engine, served_model="test",
                            request_timeout=120).items():
         monkeypatch.setattr(app.state, key, value, raising=False)
     client = TestClient(app)
@@ -96,10 +96,9 @@ def test_wrong_model(client):
     assert response.json()["error"]["param"] == "model"
 
 
-def test_sampling_defaults(client, monkeypatch):
-    monkeypatch.setattr(app.state, "sampling_defaults", {"temperature": .8, "top_k": 2})
+def test_request_defaults_and_overrides(client):
     client.post("/v1/completions", json={"model": "test", "prompt": "hi"})
-    assert (client.engine.params.temperature, client.engine.params.top_k) == (.8, 2)
+    assert (client.engine.params.temperature, client.engine.params.top_k) == (1, 0)
     client.post("/v1/completions", json={"model": "test", "prompt": "hi",
                                                  "temperature": 0, "top_k": 1})
     assert (client.engine.params.temperature, client.engine.params.top_k) == (0, 1)

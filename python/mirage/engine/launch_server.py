@@ -23,6 +23,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
+from .model_runner import ModelRunner, RunnerConfig
+from .llm_engine import LLMEngine
 from .protocol import ChatRequest, TextRequest
 
 logger = logging.getLogger(__name__)
@@ -30,13 +32,13 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from .model_runner import ModelRunner
-    from .llm_engine import LLMEngine
-    app.state.engine = LLMEngine(ModelRunner(app.state.runner_config))
+    runner = ModelRunner(app.state.runner_config)
+    engine = LLMEngine(runner)
+    app.state.engine = engine
     try:
         yield
     finally:
-        app.state.engine.close()
+        engine.close()
 
 
 app = FastAPI(title="MPK LLM Engine", lifespan=lifespan)
@@ -96,8 +98,6 @@ async def complete(request: Request, chat: bool):
     model = request.app.state.served_model
     try:
         body = await request.json()
-        if isinstance(body, dict):
-            body = {**request.app.state.sampling_defaults, **body}
         req = (ChatRequest if chat else TextRequest).model_validate(body)
         params = req.sampling_params()
     except ValidationError as exc:
@@ -206,7 +206,6 @@ async def completions(request: Request):
 
 def main():
     import uvicorn
-    from .model_runner import RunnerConfig
 
     parser = argparse.ArgumentParser(description="Mirage LLM Engine Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
@@ -222,14 +221,7 @@ def main():
     parser.add_argument("--output-dir", default=None, help="Output directory for compiled artifacts")
     parser.add_argument("--request-timeout", default=7200.0, type=float,
                         help="Per-request timeout in seconds (default: 7200)")
-    parser.add_argument("--do-sample", dest="do_sample", action="store_true",
-                        help="Set sampling defaults for omitted request fields")
-    parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--sampling-topk-max", type=int, default=32)
     args = parser.parse_args()
-    if args.do_sample and args.temperature <= 0.0:
-        parser.error("--do-sample needs --temperature > 0")
 
     config = RunnerConfig(
         model=args.model,
@@ -240,13 +232,8 @@ def main():
         max_num_pages=args.max_num_pages,
         page_size=args.page_size,
         output_dir=args.output_dir,
-        do_sample=args.do_sample,
-        temperature=args.temperature,
-        sampling_seed=args.seed,
-        sampling_topk_max=args.sampling_topk_max,
     )
     app.state.runner_config = config
-    app.state.sampling_defaults = config.sampling_defaults()
     app.state.served_model = args.served_model_name or args.model
     app.state.request_timeout = args.request_timeout
     uvicorn.run(app, host=args.host, port=args.port)

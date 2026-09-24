@@ -6,13 +6,14 @@ Start the server first::
 
 Then run the demo::
 
-    python demo/qwen3/demo_online.py                  # single request
-    python demo/qwen3/demo_online.py --concurrent 3   # 3 concurrent requests
-    python demo/qwen3/demo_online.py --stream          # streaming (SSE)
-    python demo/qwen3/demo_online.py --stream --sample # per-request top-k/top-p
+    python demo/qwen3/demo_online.py --model Qwen/Qwen3-0.6B
+    python demo/qwen3/demo_online.py --model Qwen/Qwen3-0.6B --concurrent 3
+    python demo/qwen3/demo_online.py --model Qwen/Qwen3-0.6B --stream
+    python demo/qwen3/demo_online.py --stream --model Qwen/Qwen3-0.6B \
+        --temperature .8 --top-p .95 --top-k 20
 
-The served model is discovered via /v1/models. Requests generate at most 128
-tokens by default; prompt plus output must fit the server's context capacity.
+Requests generate at most 128 tokens by default; prompt plus output must fit
+the server's context capacity.
 
 """
 
@@ -29,21 +30,17 @@ BASE = "http://127.0.0.1:8000"
 
 
 def chat(prompt: str, stream: bool = False, timeout: int = 300, *,
-         base: str = BASE, model: str, max_tokens: int = 128, sample: bool = False):
+         base: str = BASE, model: str, max_tokens: int = 128,
+         sampling: dict | None = None):
     """Send one chat-completion request.  Returns decoded text for non-stream,
     or yields (text, is_final) tuples for stream."""
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_completion_tokens": max_tokens,
-        "temperature": .8 if sample else 0,
-        "top_k": 20 if sample else 0,
-        "top_p": .95 if sample else 1,
-        "seed": 42,
         "stream": stream,
     }
-    if stream:
-        payload["stream_options"] = {"include_usage": True}
+    payload.update(sampling or {})
     body = json.dumps(payload).encode()
 
     req = urllib.request.Request(
@@ -161,38 +158,25 @@ def main() -> None:
     parser.add_argument("--concurrent", type=int, default=0, help="Number of concurrent requests")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--timeout", type=int, default=120)
-    parser.add_argument("--model", help="Served model name (default: discover via /v1/models)")
+    parser.add_argument("--model", default="Qwen/Qwen3-8B", help="Served model name")
     parser.add_argument("--max-tokens", type=int, default=128)
-    parser.add_argument("--sample", action="store_true",
-                        help="Send temperature=.8, top_k=20, top_p=.95, seed=42")
+    for name in ("temperature", "top_p", "frequency_penalty", "presence_penalty",
+                 "repetition_penalty"):
+        parser.add_argument("--" + name.replace("_", "-"), type=float)
+    for name in ("top_k", "seed"):
+        parser.add_argument("--" + name.replace("_", "-"), type=int)
     args = parser.parse_args()
     if args.concurrent < 0 or args.max_tokens < 1 or args.timeout < 1:
         parser.error("Concurrency must be nonnegative; token budget and timeout must be positive")
 
     base = f"http://127.0.0.1:{args.port}"
 
-    # Quick health check
-    try:
-        with urllib.request.urlopen(f"{base}/health", timeout=5) as resp:
-            resp.read()
-        with urllib.request.urlopen(f"{base}/v1/models", timeout=5) as resp:
-            models = [entry["id"] for entry in json.load(resp)["data"]]
-        model = args.model
-        if model is None:
-            if len(models) != 1:
-                raise ValueError("Supply --model when the server does not list exactly one model")
-            model = models[0]
-        if model not in models:
-            raise ValueError(f"Server does not serve {model}")
-    except Exception as exc:
-        print(f"Cannot use server at {base}: {exc}", file=sys.stderr)
-        print(f"Start it with: python -m mirage.engine.launch_server "
-              f"--model Qwen/Qwen3-0.6B --port {args.port}", file=sys.stderr)
-        sys.exit(1)
-
-    client = partial(chat, base=base, model=model, timeout=args.timeout,
-                     max_tokens=args.max_tokens, sample=args.sample)
-    print(f"Model: {model}; sampling: {args.sample}; output budget: {args.max_tokens}")
+    sampling = {name: value for name in (
+        "temperature", "top_p", "top_k", "seed", "frequency_penalty",
+        "presence_penalty", "repetition_penalty")
+        if (value := getattr(args, name)) is not None}
+    client = partial(chat, base=base, model=args.model, timeout=args.timeout,
+                     max_tokens=args.max_tokens, sampling=sampling)
 
     if args.stream:
         ok = run_stream(client, "Explain what a GPU is in one sentence.")

@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import queue
 import threading
 import time
@@ -12,11 +10,9 @@ import time
 import torch
 
 from .sampling import SamplingParams
+from .model_runner import ModelRunner
 from .tokenizer_manager import TokenizerManager
-
-if TYPE_CHECKING:
-    from .model_runner import ModelRunner
-    from ..mpk.online_pinned_runtime import OnlinePinnedRuntime
+from ..mpk.online_pinned_runtime import OnlinePinnedRuntime
 
 
 class _StreamingMonitor:
