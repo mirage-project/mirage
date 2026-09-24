@@ -61,7 +61,6 @@ constexpr int FINISH_LENGTH = 2;
 constexpr int FINISH_CANCELLED = 3;
 
 // Sampler implementation and scratch allocation constants.
-constexpr int SCRATCH_VOCAB_ARRAYS = 4;
 constexpr int MAX_SAMPLING_THREADS = 256;
 constexpr int WARP_SIZE = 32;
 constexpr int RADIX_BITS = 4;
@@ -74,7 +73,10 @@ constexpr int SAMPLING_SHARED_BYTES = 16 * 1024;
 __host__ __device__
 #endif
 constexpr int sampling_scratch_words(int vocab) {
-  return SCRATCH_VOCAB_ARRAYS * vocab + SCRATCH_WORKSPACE + SCRATCH_STATE_WORDS;
+  // Generated-token frequency plus two bitsets (all tokens and generated).
+  // Round the count array to an even word count for uint64 CTA reductions.
+  return ((vocab + 1) & ~1) + 2 * ((vocab + 31) / 32) +
+         SCRATCH_WORKSPACE + SCRATCH_STATE_WORDS;
 }
 
 inline void pack_config(ServingConfig *out, int64_t budget, int64_t seed,
