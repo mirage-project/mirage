@@ -21,6 +21,76 @@ import array
 import numpy as np
 import torch
 from libcpp.string cimport string
+from libcpp.vector cimport vector
+from libc.stdint cimport int64_t
+from libc.string cimport memcpy
+
+cdef extern from "mirage/persistent_kernel/serving_config.h" namespace "mirage::serving":
+    cdef cppclass ServingConfig:
+        pass
+    cdef int CONFIG_WORDS
+    cdef int MAX_EOS
+    cdef int MAX_BIASES
+    cdef int FINISH_NONE
+    cdef int FINISH_STOP
+    cdef int FINISH_LENGTH
+    cdef int FINISH_CANCELLED
+    void pack_config(ServingConfig *out, int64_t budget, int64_t seed, int64_t vocab,
+                     double temperature, double top_p, int64_t top_k,
+                     double frequency, double presence, double repetition,
+                     bint cache_history, const int64_t *eos, int eos_count,
+                     const int64_t *bias_ids, const double *bias_values,
+                     int bias_count)
+
+cdef extern from "mirage/persistent_kernel/serving_sampler_config.h" namespace "mirage::serving":
+    int sampling_scratch_words(int vocab)
+
+def serving_config_words():
+    return CONFIG_WORDS
+
+def serving_max_eos():
+    return MAX_EOS
+
+def serving_max_biases():
+    return MAX_BIASES
+
+def serving_scratch_words(int vocab):
+    return sampling_scratch_words(vocab)
+
+def serving_finish_reason_name(int reason):
+    if reason == FINISH_NONE:
+        return "none"
+    if reason == FINISH_STOP:
+        return "stop"
+    if reason == FINISH_LENGTH:
+        return "length"
+    if reason == FINISH_CANCELLED:
+        return "cancelled"
+    return "length"
+
+def pack_serving_config(int64_t budget, int64_t seed, int64_t vocab,
+                        double temperature, double top_p, int64_t top_k,
+                        double frequency, double presence, double repetition,
+                        bint cache_history, eos_ids, biases):
+    cdef ServingConfig config
+    cdef vector[int64_t] out = vector[int64_t](CONFIG_WORDS)
+    cdef vector[int64_t] eos
+    cdef vector[int64_t] bias_ids
+    cdef vector[double] bias_values
+    cdef object token, value
+    if len(eos_ids) > MAX_EOS or len(biases) > MAX_BIASES:
+        raise ValueError("too many EOS IDs or logit biases")
+    for token in eos_ids:
+        eos.push_back(token)
+    for token, value in sorted(biases.items()):
+        bias_ids.push_back(token)
+        bias_values.push_back(value)
+    pack_config(&config, budget, seed, vocab, temperature, top_p, top_k,
+                frequency, presence, repetition, cache_history,
+                eos.data(), <int>eos.size(), bias_ids.data(),
+                bias_values.data(), <int>bias_ids.size())
+    memcpy(&out[0], &config, sizeof(ServingConfig))
+    return [out[i] for i in range(CONFIG_WORDS)]
 
 # Code snippet from OpenAI Triton
 

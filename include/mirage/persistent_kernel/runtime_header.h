@@ -16,6 +16,7 @@
 #pragma once
 
 #include "mirage/config.h"
+#include "mirage/persistent_kernel/serving_config.h"
 #include <cuda_runtime.h>
 
 #ifdef USE_NVSHMEM
@@ -420,8 +421,8 @@ struct RuntimeConfig {
   // allocating a buffer row so CPU can discover which row its request is
   // on by scanning rows, then poll pinned_step[row] for per-step streaming.
   int32_t volatile *pinned_rid_at_row; // [total_inflight], pinned
-  int64_t *pinned_generation_config; // [ring_capacity, serving::CONFIG_WORDS], immutable until admitted
-  int64_t *generation_config; // [max_requests, serving::CONFIG_WORDS], indexed by buffer row
+  serving::ServingConfig *pinned_generation_config; // [ring_capacity], immutable until admitted
+  serving::ServingConfig *generation_config; // [max_requests], indexed by buffer row
   int32_t volatile *pinned_cancel; // cancellation request ID, not a reusable boolean
   int32_t *pinned_finish_reason; // row: 1=stop, 2=length, 3=cancelled
   // Running queue rid tracking: request_rids[i] stores the original rid

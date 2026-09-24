@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from .sampling import SamplingParams
-from mirage import serving_config as abi
+from mirage import core
 
 
 class APIModel(BaseModel):
@@ -70,7 +70,7 @@ class CompletionRequest(APIModel):
     seed: StrictInt | None = Field(default=None, ge=0, le=2**63 - 1)
     logit_bias: dict[int, float] = Field(
         default_factory=dict,
-        max_length=abi.MAX_BIASES,
+        max_length=core.serving_max_biases(),
     )
 
     stream: bool = False

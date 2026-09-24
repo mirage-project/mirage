@@ -8,11 +8,12 @@
 #include <math.h>
 #include <cub/block/block_radix_sort.cuh>
 #include "mirage/persistent_kernel/serving_config.h"
+#include "mirage/persistent_kernel/serving_sampler_config.h"
 #include <curand_kernel.h>
 
 namespace mirage { namespace serving {
-__device__ inline float option(int64_t value) {
-  return static_cast<float>(__longlong_as_double(value));
+__device__ inline float option(double value) {
+  return static_cast<float>(value);
 }
 __device__ inline uint64_t score_key(float score, uint32_t token) {
   uint32_t bits = __float_as_uint(score == 0.f ? 0.f : score);
@@ -335,11 +336,11 @@ __device__ inline SampleVector<T, Width> load_vector(T const *values, int start,
 
 template<typename T, typename Token>
 __device__ inline void sample(T const *logits, float *scratch, Token *output,
-                              int padded_vocab, int64_t const *cfg,
+                              int padded_vocab, ServingConfig const *cfg,
                               long long const *history, int history_len,
                               int prompt_len, int generation_position,
                               bool reuse_history = false) {
-  int vocab = min(padded_vocab, int(cfg[VOCAB_SIZE]));
+  int vocab = min(padded_vocab, int(cfg->vocab_size));
   float *scores = scratch;
   int *candidates = reinterpret_cast<int *>(scores + padded_vocab);
   int *counts = candidates + padded_vocab;
@@ -347,14 +348,14 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
   float *workspace = scratch + SCRATCH_VOCAB_ARRAYS * padded_vocab;
   // Four float arrays ensure eight-byte alignment, even for odd vocabularies.
   int *seen = reinterpret_cast<int *>(workspace + SCRATCH_WORKSPACE);
-  float repetition = option(cfg[REPETITION_PENALTY]);
-  float frequency = option(cfg[FREQUENCY_PENALTY]);
-  float presence = option(cfg[PRESENCE_PENALTY]);
+  float repetition = option(cfg->repetition_penalty);
+  float frequency = option(cfg->frequency_penalty);
+  float presence = option(cfg->presence_penalty);
   bool penalties = frequency != 0 || presence != 0 || repetition != 1;
   if (penalties) {
     // Reuse only private row state initialized by this request's first sample.
     // Disabling caching rebuilds the histograms for each generated token.
-    bool cached = reuse_history && cfg[CACHE_HISTORY] && generation_position > 0;
+    bool cached = reuse_history && cfg->cache_history && generation_position > 0;
     int begin = cached ? *seen : 0;
     if (!cached) {
       for (int v = threadIdx.x; v < vocab; v += blockDim.x) {
@@ -374,26 +375,25 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
     __syncthreads();
     if (threadIdx.x == 0) *seen = history_len;
   }
-  int bias_count = int(cfg[BIAS_COUNT]);
+  int bias_count = int(cfg->bias_count);
   if (bias_count) {
     for (int v = threadIdx.x; v < vocab; v += blockDim.x)
       scores[v] = static_cast<float>(logits[v]);
     __syncthreads();
     for (int j = threadIdx.x; j < bias_count; j += blockDim.x) {
-      int offset = BIASES + BIAS_STRIDE * j;
-      scores[cfg[offset]] += option(cfg[offset + 1]);
+      scores[cfg->biases[j].token] += option(cfg->biases[j].value);
     }
     __syncthreads();
   }
   // Inspect the original double so a positive temperature that underflows
   // FP32 does not silently become greedy (tied maxima must still be sampled).
-  int k = int(cfg[TOP_K]);
-  float top_p = option(cfg[TOP_P]);
+  int k = int(cfg->top_k);
+  float top_p = option(cfg->top_p);
   bool top_k = k > 0 && k < vocab;
-  bool greedy = __longlong_as_double(cfg[TEMPERATURE]) == 0.0 || k == 1;
-  float temperature = fmaxf(option(cfg[TEMPERATURE]), 0x1.0p-126f);
+  bool greedy = cfg->temperature == 0.0 || k == 1;
+  float temperature = fmaxf(option(cfg->temperature), 0x1.0p-126f);
   bool unfiltered = !greedy && !top_k && top_p == 1.f;
-  SamplingRng rng{uint64_t(cfg[SEED]), uint32_t(generation_position)};
+  SamplingRng rng{uint64_t(cfg->seed), uint32_t(generation_position)};
   Draw draw;
   ChooseDraw choose{temperature};
   uint64_t best = 0;
@@ -515,7 +515,7 @@ __device__ inline void sample_request(T const *logits, float *scratch, long long
     int prompt = config.prompt_length[row];
     if (position + 1 < prompt) continue;
     sample(logits + i * padded_vocab, scratch, output + i, padded_vocab,
-           config.generation_config + row * CONFIG_WORDS,
+           config.generation_config + row,
            config.tokens + row * MPK_MAX_SEQ_LENGTH, position + 1, prompt,
            position + 1 - prompt, true);
     __syncthreads();

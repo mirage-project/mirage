@@ -516,7 +516,7 @@ __device__ __forceinline__ bool
 #else
     bool cancelled = ld_acquire_sys_i32(&config.pinned_cancel[row]) == config.request_rids[i];
     int reason = mirage::serving::finish_reason(
-        config.generation_config + row * mirage::serving::CONFIG_WORDS,
+        config.generation_config + row,
         config.tokens + row * MPK_MAX_SEQ_LENGTH, step + num_tokens + 1,
         prompt_len, config.max_seq_length, cancelled, config.eos_token_id);
     bool done = reason != mirage::serving::FINISH_NONE;
@@ -635,9 +635,7 @@ __device__ __forceinline__ bool
       config.tokens[row * MPK_MAX_SEQ_LENGTH + j] =
           config.pinned_inbox_tokens[inbox_base + j];
     }
-    for (int j = 0; j < mirage::serving::CONFIG_WORDS; ++j) {
-      config.generation_config[row * mirage::serving::CONFIG_WORDS + j] = config.pinned_generation_config[req_slot * mirage::serving::CONFIG_WORDS + j];
-    }
+    config.generation_config[row] = config.pinned_generation_config[req_slot];
     config.pinned_finish_reason[row] = 0;
     config.prompt_length[row] = prompt_len;
     config.step[row] = initial_step;
@@ -1556,8 +1554,8 @@ extern "C" void
       static_cast<int64_t *>(meta_tensors[21]);
   global_runtime_config.pinned_rid_at_row =
       static_cast<int32_t volatile *>(meta_tensors[22]);
-  global_runtime_config.pinned_generation_config = static_cast<int64_t *>(meta_tensors[23]);
-  global_runtime_config.generation_config = static_cast<int64_t *>(meta_tensors[24]);
+  global_runtime_config.pinned_generation_config = static_cast<mirage::serving::ServingConfig *>(meta_tensors[23]);
+  global_runtime_config.generation_config = static_cast<mirage::serving::ServingConfig *>(meta_tensors[24]);
   global_runtime_config.pinned_cancel = static_cast<int32_t volatile *>(meta_tensors[25]);
   global_runtime_config.pinned_finish_reason = static_cast<int32_t *>(meta_tensors[26]);
 #endif

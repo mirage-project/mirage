@@ -30,7 +30,7 @@ import threading
 import time
 from typing import Deque, Dict, List, Tuple
 
-from mirage.serving_config import CONFIG_WORDS, FINISH_STOP, FINISH_LENGTH, FINISH_CANCELLED
+from mirage.core import serving_config_words, serving_finish_reason_name
 
 import torch
 
@@ -128,7 +128,7 @@ class OnlinePinnedRuntime:
             generation_config = SamplingParams().pack(len(token_ids), self._inbox_tokens.shape[1], vocab,
                                                      [self._mpk.persistent_kernel.eos_token_id])
         generation_config = torch.tensor(generation_config, dtype=torch.int64)
-        if generation_config.shape != (CONFIG_WORDS,):
+        if generation_config.shape != (serving_config_words(),):
             raise ValueError("invalid generation configuration ABI")
 
         # Keep the producer lock until ready=1 is published. Otherwise a
@@ -303,7 +303,7 @@ class OnlinePinnedRuntime:
             return True
 
     def finish_reason(self, row: int) -> str:
-        return {FINISH_STOP: "stop", FINISH_LENGTH: "length", FINISH_CANCELLED: "cancelled"}.get(int(self._finish_reason[row]), "length")
+        return serving_finish_reason_name(int(self._finish_reason[row]))
 
     def cancel_request(self, rid: int) -> bool:
         """Return True if removed before publication, otherwise await GPU completion."""

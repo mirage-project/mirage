@@ -1,38 +1,106 @@
 #pragma once
-#include <stdint.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
 
 namespace mirage { namespace serving {
-#define SERVING_CONSTANT(name, value) constexpr int name = value;
-#include "serving_config.def"
-#undef SERVING_CONSTANT
 
-#ifdef __CUDACC__
-__host__ __device__
-#endif
-constexpr int sampling_scratch_words(int vocab) {
-  return SCRATCH_VOCAB_ARRAYS * vocab + SCRATCH_WORKSPACE + SCRATCH_STATE_WORDS;
+constexpr int MAX_EOS = 16;
+constexpr int MAX_BIASES = 256;
+
+struct LogitBias {
+  int64_t token;
+  double value;
+};
+
+// Fixed-size ring record shared by the host packer and persistent CUDA worker.
+// All fields are eight bytes so the record also fits the existing int64 buffers.
+struct ServingConfig {
+  int64_t max_new_tokens;
+  int64_t seed;
+  int64_t vocab_size;
+  double temperature;
+  double top_p;
+  int64_t top_k;
+  double frequency_penalty;
+  double presence_penalty;
+  double repetition_penalty;
+  int64_t eos_count;
+  int64_t bias_count;
+  int64_t cache_history;
+  int64_t eos_ids[MAX_EOS];
+  LogitBias biases[MAX_BIASES];
+};
+
+constexpr int CONFIG_WORDS = sizeof(ServingConfig) / sizeof(int64_t);
+static_assert(std::is_standard_layout<ServingConfig>::value, "ServingConfig must have stable layout");
+static_assert(std::is_trivially_copyable<ServingConfig>::value, "ServingConfig must be copyable");
+static_assert(sizeof(ServingConfig) == 540 * sizeof(int64_t), "ServingConfig size changed");
+static_assert(sizeof(LogitBias) == 2 * sizeof(int64_t), "bias entry size changed");
+static_assert(offsetof(ServingConfig, max_new_tokens) == 0 * sizeof(int64_t), "budget layout changed");
+static_assert(offsetof(ServingConfig, seed) == 1 * sizeof(int64_t), "seed layout changed");
+static_assert(offsetof(ServingConfig, vocab_size) == 2 * sizeof(int64_t), "vocab layout changed");
+static_assert(offsetof(ServingConfig, temperature) == 3 * sizeof(int64_t), "temperature layout changed");
+static_assert(offsetof(ServingConfig, top_p) == 4 * sizeof(int64_t), "top-p layout changed");
+static_assert(offsetof(ServingConfig, top_k) == 5 * sizeof(int64_t), "top-k layout changed");
+static_assert(offsetof(ServingConfig, frequency_penalty) == 6 * sizeof(int64_t), "frequency layout changed");
+static_assert(offsetof(ServingConfig, presence_penalty) == 7 * sizeof(int64_t), "presence layout changed");
+static_assert(offsetof(ServingConfig, repetition_penalty) == 8 * sizeof(int64_t), "repetition layout changed");
+static_assert(offsetof(ServingConfig, eos_count) == 9 * sizeof(int64_t), "EOS count layout changed");
+static_assert(offsetof(ServingConfig, bias_count) == 10 * sizeof(int64_t), "bias count layout changed");
+static_assert(offsetof(ServingConfig, cache_history) == 11 * sizeof(int64_t), "history layout changed");
+static_assert(offsetof(ServingConfig, eos_ids) == 12 * sizeof(int64_t), "EOS layout changed");
+static_assert(offsetof(ServingConfig, biases) == 28 * sizeof(int64_t), "bias layout changed");
+
+constexpr int FINISH_NONE = 0;
+constexpr int FINISH_STOP = 1;
+constexpr int FINISH_LENGTH = 2;
+constexpr int FINISH_CANCELLED = 3;
+
+inline void pack_config(ServingConfig *out, int64_t budget, int64_t seed,
+                        int64_t vocab, double temperature, double top_p,
+                        int64_t top_k, double frequency, double presence,
+                        double repetition, bool cache_history,
+                        int64_t const *eos, int eos_count,
+                        int64_t const *bias_ids, double const *bias_values,
+                        int bias_count) {
+  *out = {};
+  out->max_new_tokens = budget;
+  out->seed = seed;
+  out->vocab_size = vocab;
+  out->temperature = temperature;
+  out->top_p = top_p;
+  out->top_k = top_k;
+  out->frequency_penalty = frequency;
+  out->presence_penalty = presence;
+  out->repetition_penalty = repetition;
+  out->eos_count = eos_count;
+  out->bias_count = bias_count;
+  out->cache_history = cache_history;
+  for (int i = 0; i < eos_count; ++i) out->eos_ids[i] = eos[i];
+  for (int i = 0; i < bias_count; ++i)
+    out->biases[i] = {bias_ids[i], bias_values[i]};
 }
 
-// Called by the scheduler after committing an output token. Only generated
-// tokens can trigger EOS termination.
-// Keep this host/device so the same stopping rules can be tested without CUDA.
 #ifdef __CUDACC__
 __host__ __device__
 #endif
-inline int finish_reason(int64_t const *cfg, long long const *history,
+inline int finish_reason(ServingConfig const *cfg, long long const *history,
                          int history_len, int prompt_len, int max_seq_length,
                          bool cancelled, long long fallback_eos = -1) {
   if (cancelled) return FINISH_CANCELLED;
   int generated = history_len - prompt_len;
   if (generated > 0) {
     auto token = history[history_len - 1];
-    if (cfg[EOS_COUNT] == 0 && token == fallback_eos) return FINISH_STOP;
-    for (int j = 0; j < cfg[EOS_COUNT]; ++j)
-      if (token == cfg[EOS_IDS + j]) return FINISH_STOP;
+    if (cfg->eos_count == 0 && token == fallback_eos) return FINISH_STOP;
+    for (int j = 0; j < cfg->eos_count; ++j)
+      if (token == cfg->eos_ids[j]) return FINISH_STOP;
   }
   if (history_len >= max_seq_length ||
-      (cfg[MAX_NEW_TOKENS] > 0 && generated >= cfg[MAX_NEW_TOKENS]))
+      (cfg->max_new_tokens > 0 && generated >= cfg->max_new_tokens))
     return FINISH_LENGTH;
   return FINISH_NONE;
 }
+
 }} // namespace mirage::serving

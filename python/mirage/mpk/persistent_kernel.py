@@ -8,7 +8,7 @@ import sysconfig
 import json
 
 from ..core import *
-from ..serving_config import sampling_scratch_words
+from ..core import serving_scratch_words
 from ..kernel import get_key_paths, KNGraph, TBGraph
 from .speculative import (
     SpecDecodeConfig,
@@ -2451,7 +2451,7 @@ class PersistentKernel:
         if self.mode != "online_pinned":
             raise ValueError("serving_sampling_layer requires online_pinned mode")
         scratch = self.new_tensor(
-            (self.max_num_batched_requests, sampling_scratch_words(logits.dim(1))),
+            (self.max_num_batched_requests, serving_scratch_words(logits.dim(1))),
             dtype=float32, name="serving_sampling_scratch")
         tb_graph = TBGraph(CyTBGraph((self.max_num_batched_requests, 1, 1), (128, 1, 1), 1, 64))
         for tensor in (logits, scratch, output):
