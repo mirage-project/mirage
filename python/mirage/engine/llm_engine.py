@@ -178,8 +178,7 @@ class LLMEngine:
     def __init__(self, model_runner: ModelRunner) -> None:
         self.model_runner = model_runner
         self.runtime: OnlinePinnedRuntime = model_runner.runtime
-        self.tokenizer_manager = TokenizerManager(
-            model_runner.tokenizer, model_runner.config.developer_role)
+        self.tokenizer_manager = TokenizerManager(model_runner.tokenizer)
         self.vocab_size = model_runner.vocab_size
         self.eos_ids = model_runner.eos_ids
 

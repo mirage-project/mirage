@@ -96,6 +96,17 @@ def test_wrong_model(client):
     assert response.json()["error"]["param"] == "model"
 
 
+@pytest.mark.parametrize("message", [
+    {"role": "developer", "content": "instruction"},
+    {"role": "tool", "content": "result", "tool_call_id": "a"},
+    {"role": "assistant", "content": "done", "tool_calls": [{"id": "a"}]},
+])
+def test_unsupported_chat_history(client, message):
+    response = client.post("/v1/chat/completions", json={
+        "model": "test", "messages": [message]})
+    assert response.status_code == 400
+
+
 def test_request_defaults_and_overrides(client):
     client.post("/v1/completions", json={"model": "test", "prompt": "hi"})
     assert (client.engine.params.temperature, client.engine.params.top_k) == (1, 0)

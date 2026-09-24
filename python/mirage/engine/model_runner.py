@@ -50,7 +50,6 @@ class RunnerConfig:
     # Use Mirage's PTX kernels by default; the Ampere CUTLASS serving tiles
     # exceed the shared-memory budget on GPUs such as the RTX A5000.
     use_cutlass_kernel: bool = False
-    developer_role: str = "system"
 
     # Startup defaults for per-request sampling in online_pinned mode.
     do_sample: bool = False
