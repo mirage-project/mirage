@@ -26,6 +26,9 @@
 namespace mirage {
 namespace runtime {
 
+// Scheduler count per block, used for launch dimensions and scheduler IDs.
+constexpr int SCHEDULERS_PER_BLOCK = 4;
+
 #if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
 constexpr int WORKER_RESERVED_STATIC_SHARED_MEMORY_SIZE = 6 * 1024;
 #else
