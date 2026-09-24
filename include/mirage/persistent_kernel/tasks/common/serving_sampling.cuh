@@ -239,26 +239,32 @@ struct SamplingScoreReader {
   uint32_t const *seen_generated;
   float repetition, frequency, presence;
   float center, temperature;
+  int bias_count;
 
   __device__ float raw(int v) const {
     float score = static_cast<float>(logits[v]);
     // Bias IDs are sorted by the host packer. Keep the small bias table in
     // ServingConfig instead of materializing a modified vocabulary row.
-    int lo = 0, hi = int(cfg->bias_count);
-    while (lo < hi) {
-      int mid = (lo + hi) / 2;
-      if (cfg->biases[mid].token < v) lo = mid + 1;
-      else hi = mid;
+    if (bias_count) {
+      int lo = 0, hi = bias_count;
+      while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (cfg->biases[mid].token < v) lo = mid + 1;
+        else hi = mid;
+      }
+      if (lo < bias_count && cfg->biases[lo].token == v)
+        score += option(cfg->biases[lo].value);
     }
-    if (lo < cfg->bias_count && cfg->biases[lo].token == v)
-      score += option(cfg->biases[lo].value);
     if (repetition != 1.f &&
         (seen_total[v >> 5] & (uint32_t(1) << (v & 31))))
       score = score > 0 ? score / repetition : score * repetition;
-    if (frequency != 0.f) score -= frequency * frequency_counts[v];
-    if (presence != 0.f &&
-        (seen_generated[v >> 5] & (uint32_t(1) << (v & 31))))
-      score -= presence;
+    // Most vocabulary IDs never occur in the generated history. Avoid a
+    // dense count-array read unless its bit is set.
+    if ((frequency != 0.f || presence != 0.f) &&
+        (seen_generated[v >> 5] & (uint32_t(1) << (v & 31)))) {
+      if (frequency != 0.f) score -= frequency * frequency_counts[v];
+      if (presence != 0.f) score -= presence;
+    }
     return isnan(score) ? -INFINITY : score;
   }
   __device__ float operator()(int v) const {
@@ -402,7 +408,8 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
   }
   SamplingScoreReader<T> reader{logits, cfg, frequency_counts,
                                 seen_total, seen_generated, repetition,
-                                frequency, presence, 0.f, 1.f};
+                                frequency, presence, 0.f, 1.f,
+                                int(cfg->bias_count)};
   // Inspect the original double so a positive temperature that underflows
   // FP32 does not silently become greedy (tied maxima must still be sampled).
   int k = int(cfg->top_k);
@@ -447,7 +454,7 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
     for (int v = threadIdx.x; v < vocab; v += blockDim.x)
       consume(v);
   } else {
-    constexpr int Width = 4;
+    constexpr int Width = 16;
     for (int base = Width * threadIdx.x; base < vocab; base += Width * blockDim.x) {
       #pragma unroll
       for (int i = 0; i < Width; ++i) {
