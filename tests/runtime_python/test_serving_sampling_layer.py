@@ -1,16 +1,18 @@
-"""Synthetic-logit checks for the CUDA sampler used by serving_sampling_layer."""
+"""Synthetic logits through the production online_pinned serving sampling task."""
 
 from collections import Counter
-import ctypes
-from pathlib import Path
+from types import SimpleNamespace
 import shutil
-import subprocess
 
+import mirage
 import numpy as np
 import pytest
 import torch
 
+from mirage.engine.model_runner import ModelRunner
 from mirage.engine.sampling import SamplingParams
+from mirage.mpk.online_pinned_runtime import OnlinePinnedRuntime
+from mirage.mpk.persistent_kernel import PersistentKernel
 
 
 REAL_VOCAB = 8
@@ -19,39 +21,74 @@ LOGITS = np.array([-1, -1.4, -1.8, -2.2] + [-30] * 4 + [0] * 8,
 
 
 @pytest.fixture(scope="module")
-def sample(tmp_path_factory):
+def sample():
     if not torch.cuda.is_available() or not shutil.which("nvcc"):
         pytest.skip("CUDA and nvcc are required")
-    root = Path(__file__).resolve().parents[2]
-    output = tmp_path_factory.mktemp("serving_sampling") / "sampling.so"
-    major, minor = torch.cuda.get_device_capability()
-    subprocess.run([
-        "nvcc", "-O3", "-std=c++17", f"-arch=sm_{major}{minor}",
-        "-shared", "-Xcompiler=-fPIC", "-use_fast_math",
-        f"-I{root / 'include'}", str(root / "tests/engine/sampling_cuda.cu"),
-        "-o", str(output),
-    ], check=True)
-    kernel = ctypes.CDLL(str(output)).sample_test
-    kernel.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
-                       ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
-                       ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                       ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
 
-    def draw(settings, seeds=range(512), history=(), prompt_len=0):
+    device = torch.cuda.current_device()
+    workers, schedulers = mirage.get_configurations_from_gpu(device)
+    capacity = 32
+    config = SimpleNamespace(max_num_batched_requests=capacity,
+                             max_num_batched_tokens=capacity,
+                             max_seq_length=16, max_num_pages=capacity,
+                             pinned_ring_capacity=64)
+    meta = ModelRunner._allocate_meta_tensors(config)
+    params = PersistentKernel.get_default_init_parameters()
+    params.update(mode="online_pinned", test_mode=True, num_workers=workers,
+                  num_local_schedulers=schedulers,
+                  max_num_batched_requests=capacity,
+                  max_num_batched_tokens=capacity,
+                  max_seq_length=config.max_seq_length,
+                  max_num_pages=config.max_num_pages, page_size=16,
+                  pinned_ring_capacity=config.pinned_ring_capacity,
+                  meta_tensors=meta)
+    pk = PersistentKernel(**params)
+    logits = torch.tensor(LOGITS, dtype=torch.bfloat16, device=device).repeat(capacity, 1)
+    output = meta["output_tokens"]
+    pk.serving_sampling_layer(pk.attach_input(logits, name="logits"),
+                              pk.attach_input(output, name="output"))
+    pk.compile()
+
+    adapter = SimpleNamespace(metadata=SimpleNamespace(mode="online_pinned"),
+                              pinned_ring_capacity=config.pinned_ring_capacity,
+                              total_num_requests=capacity, persistent_kernel=pk,
+                              **meta)
+    runtime = OnlinePinnedRuntime(adapter)
+    runtime.reset()
+    runtime.start()
+    pk()
+    next_rid = 0
+
+    def draw(settings, seeds=range(512), history=(), prompt_len=0, max_new_tokens=1):
+        nonlocal next_rid
+        # The online path requires a nonempty prompt.
+        prompt = list(history[:prompt_len]) or [REAL_VOCAB - 1]
         seeds = list(seeds)
-        logits = np.tile(LOGITS, (len(seeds), 1))
-        configs = np.array([
-            SamplingParams(**settings, seed=seed).pack(1, 32, REAL_VOCAB, [])
-            for seed in seeds], dtype=np.int64)
-        history = np.asarray(history, dtype=np.int64)
-        output_ids = np.empty(len(seeds), dtype=np.int64)
-        error = kernel(0, logits.ctypes.data, configs.ctypes.data,
-                       history.ctypes.data, len(history), prompt_len, 0,
-                       len(LOGITS), len(seeds), output_ids.ctypes.data, 128, 1)
-        assert error == 0, f"CUDA error {error}"
-        return output_ids.tolist()
+        requests = []
+        for seed in seeds:
+            rid = next_rid
+            next_rid += 1
+            sampling = SamplingParams(**settings, seed=seed,
+                                      max_new_tokens=max_new_tokens)
+            payload = sampling.pack(len(prompt), config.max_seq_length, REAL_VOCAB, [])
+            runtime.submit(rid, torch.tensor(prompt, dtype=torch.int64),
+                           generation_config=payload)
+            requests.append(rid)
+        result = []
+        for rid in requests:
+            row, step = runtime.wait_for_request(rid, timeout=60)
+            assert runtime.finish_reason(row) == "length"
+            result.append(int(runtime.read_tokens_at_row(row, step)[-1]))
+            assert runtime.release_request(rid)
+        return result
 
-    return draw
+    try:
+        yield draw
+    finally:
+        runtime.request_shutdown()
+        pk.wait()
+        runtime.stop()
+        pk.finalize()
 
 
 def test_greedy_and_seed(sample):
@@ -68,8 +105,6 @@ def test_greedy_and_seed(sample):
     {"temperature": 1, "top_k": 3, "top_p": .75},
 ])
 def test_sampling_distribution(sample, settings):
-    # BF16 is the serving logits dtype. Only the first eight tokens are real;
-    # the padded logits are zero and would win if vocab_size were ignored.
     scores = torch.tensor(LOGITS[:REAL_VOCAB], dtype=torch.bfloat16).float()
     scores /= settings["temperature"]
     order = torch.argsort(scores, descending=True)[:settings.get("top_k", REAL_VOCAB)]
@@ -90,8 +125,9 @@ def test_sampling_distribution(sample, settings):
         assert abs(actual - probability) < tolerance, (settings, token, actual, probability)
 
 
-def test_prompt_and_generated_penalties(sample):
+def test_prompt_penalties(sample):
     assert sample({"temperature": 0, "repetition_penalty": 2}, [1], [0], 1) == [1]
     assert sample({"temperature": 0, "frequency_penalty": 2,
                    "presence_penalty": 2}, [1], [0], 1) == [0]
-    assert sample({"temperature": 0, "frequency_penalty": 2}, [1], [0], 0) == [1]
+    assert sample({"temperature": 0, "frequency_penalty": 2}, [1], [0], 1,
+                  max_new_tokens=2) == [1]
