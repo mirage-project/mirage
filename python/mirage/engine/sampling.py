@@ -3,9 +3,8 @@ from __future__ import annotations
 
 import math
 import struct
-from types import MappingProxyType
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from mirage import core
 
@@ -30,11 +29,7 @@ class SamplingParams(BaseModel):
     def check_biases(cls, value):
         if any(not -100 <= bias <= 100 for bias in value.values()):
             raise ValueError("logit_bias values must be in [-100, 100]")
-        return MappingProxyType(dict(value))
-
-    @field_serializer("logit_bias")
-    def serialize_biases(self, value):
-        return dict(value)
+        return value
 
 
     @field_validator("repetition_penalty")

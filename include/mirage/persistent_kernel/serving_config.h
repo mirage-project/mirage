@@ -36,6 +36,8 @@ struct ServingConfig {
 constexpr int CONFIG_WORDS = sizeof(ServingConfig) / sizeof(int64_t);
 static_assert(std::is_standard_layout<ServingConfig>::value, "ServingConfig must have stable layout");
 static_assert(std::is_trivially_copyable<ServingConfig>::value, "ServingConfig must be copyable");
+static_assert(alignof(ServingConfig) <= alignof(int64_t),
+              "ServingConfig alignment exceeds int64 backing storage");
 static_assert(sizeof(ServingConfig) == 540 * sizeof(int64_t), "ServingConfig size changed");
 static_assert(sizeof(LogitBias) == 2 * sizeof(int64_t), "bias entry size changed");
 static_assert(offsetof(ServingConfig, max_new_tokens) == 0 * sizeof(int64_t), "budget layout changed");
@@ -57,6 +59,23 @@ constexpr int FINISH_NONE = 0;
 constexpr int FINISH_STOP = 1;
 constexpr int FINISH_LENGTH = 2;
 constexpr int FINISH_CANCELLED = 3;
+
+// Sampler implementation and scratch allocation constants.
+constexpr int SCRATCH_VOCAB_ARRAYS = 4;
+constexpr int MAX_SAMPLING_THREADS = 256;
+constexpr int WARP_SIZE = 32;
+constexpr int RADIX_BITS = 4;
+constexpr int RADIX_BINS = 16;
+constexpr int SCRATCH_WORKSPACE = 2 * RADIX_BINS * MAX_SAMPLING_THREADS / WARP_SIZE;
+constexpr int SCRATCH_STATE_WORDS = 2;
+constexpr int SAMPLING_SHARED_BYTES = 16 * 1024;
+
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+constexpr int sampling_scratch_words(int vocab) {
+  return SCRATCH_VOCAB_ARRAYS * vocab + SCRATCH_WORKSPACE + SCRATCH_STATE_WORDS;
+}
 
 inline void pack_config(ServingConfig *out, int64_t budget, int64_t seed,
                         int64_t vocab, double temperature, double top_p,

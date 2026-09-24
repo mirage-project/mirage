@@ -35,15 +35,13 @@ cdef extern from "mirage/persistent_kernel/serving_config.h" namespace "mirage::
     cdef int FINISH_STOP
     cdef int FINISH_LENGTH
     cdef int FINISH_CANCELLED
+    int sampling_scratch_words(int vocab)
     void pack_config(ServingConfig *out, int64_t budget, int64_t seed, int64_t vocab,
                      double temperature, double top_p, int64_t top_k,
                      double frequency, double presence, double repetition,
                      bint cache_history, const int64_t *eos, int eos_count,
                      const int64_t *bias_ids, const double *bias_values,
                      int bias_count)
-
-cdef extern from "mirage/persistent_kernel/serving_sampler_config.h" namespace "mirage::serving":
-    int sampling_scratch_words(int vocab)
 
 def serving_config_words():
     return CONFIG_WORDS
@@ -66,7 +64,7 @@ def serving_finish_reason_name(int reason):
         return "length"
     if reason == FINISH_CANCELLED:
         return "cancelled"
-    return "length"
+    raise ValueError(f"unknown finish reason: {reason}")
 
 def pack_serving_config(int64_t budget, int64_t seed, int64_t vocab,
                         double temperature, double top_p, int64_t top_k,

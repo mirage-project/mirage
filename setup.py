@@ -133,7 +133,6 @@ def config_cython():
                         "-fopenmp",
                         "-lrt",
                         f"-Wl,-rpath,{path.join('$ORIGIN', 'lib')}",
-                        f"-Wl,-rpath,{path.join(z3_path, 'lib')}",
                         f"-Wl,-rpath,{path.join('$ORIGIN', '..', '..', 'build', 'abstract_subexpr', 'release')}",
                         f"-Wl,-rpath,{path.join('$ORIGIN', '..', '..', 'build', 'formal_verifier', 'release')}",
                     ],

@@ -8,7 +8,6 @@
 #include <math.h>
 #include <cub/block/block_radix_sort.cuh>
 #include "mirage/persistent_kernel/serving_config.h"
-#include "mirage/persistent_kernel/serving_sampler_config.h"
 #include <curand_kernel.h>
 
 namespace mirage { namespace serving {
