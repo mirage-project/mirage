@@ -1862,6 +1862,59 @@ class PersistentKernel:
         else:
             assert False
             
+    def moe_w13_mxfp4_layer(
+        self,
+        input: DTensor,
+        weight_mxfp4: DTensor,
+        weight_scale: DTensor,
+        moe_routing_indices: DTensor,
+        moe_mask: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Run routed W13 with packed E2M1 weights and E8M0 block scales.
+
+        Weight shapes are (experts, output, reduction/2) uint8 and
+        (experts, output, reduction/32) uint8 respectively. Scales cover
+        consecutive groups of 32 values along the reduction dimension.
+        Hopper decodes weight tiles to BF16 in shared memory before WGMMA.
+        """
+        assert self.target_cc == 90, "MXFP4 routed MoE is Hopper-only"
+        assert input.num_dims == 2
+        assert weight_mxfp4.num_dims == 3 and weight_scale.num_dims == 3
+        assert moe_routing_indices.num_dims == 2 and moe_mask.num_dims == 1
+        assert output.num_dims == 3
+        assert weight_mxfp4.dtype == uint8 and weight_scale.dtype == uint8
+        assert weight_mxfp4.stride == (
+            weight_mxfp4.dim(1) * weight_mxfp4.dim(2),
+            weight_mxfp4.dim(2),
+            1,
+        )
+        assert weight_scale.stride == (
+            weight_scale.dim(1) * weight_scale.dim(2),
+            weight_scale.dim(2),
+            1,
+        )
+        assert weight_mxfp4.dim(2) * 2 == input.dim(1)
+        assert weight_scale.dim(2) * 32 == input.dim(1)
+        assert weight_mxfp4.dim(0) == weight_scale.dim(0) == moe_mask.dim(0) - 1
+        assert weight_mxfp4.dim(1) == weight_scale.dim(1) == output.dim(2)
+        assert weight_mxfp4.dim(0) == moe_routing_indices.dim(0)
+        assert weight_mxfp4.dim(1) % 64 == 0 and input.dim(1) % 64 == 0
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 1, True)
+        tb_graph.new_input(weight_mxfp4, (-1, 1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, 1, -1), -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_mask, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, 2, -1), -1, True)
+        self.kn_graph.customized(
+            [input, weight_mxfp4, weight_scale, moe_routing_indices, moe_mask, output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "moe_w13_mxfp4_sm90")
+
     def moe_w13_fp8_layer(
         self,
         input_fp8: DTensor,
@@ -2111,6 +2164,53 @@ class PersistentKernel:
         else:
             assert False
         
+    def moe_w2_mxfp4_layer(
+        self,
+        input: DTensor,
+        weight_mxfp4: DTensor,
+        weight_scale: DTensor,
+        moe_routing_indices: DTensor,
+        moe_mask: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        """Run routed W2 with packed E2M1 weights and E8M0 block scales."""
+        assert self.target_cc == 90, "MXFP4 routed MoE is Hopper-only"
+        assert input.num_dims == 3
+        assert weight_mxfp4.num_dims == 3 and weight_scale.num_dims == 3
+        assert moe_routing_indices.num_dims == 2 and moe_mask.num_dims == 1
+        assert output.num_dims == 3
+        assert weight_mxfp4.dtype == uint8 and weight_scale.dtype == uint8
+        assert weight_mxfp4.stride == (
+            weight_mxfp4.dim(1) * weight_mxfp4.dim(2),
+            weight_mxfp4.dim(2),
+            1,
+        )
+        assert weight_scale.stride == (
+            weight_scale.dim(1) * weight_scale.dim(2),
+            weight_scale.dim(2),
+            1,
+        )
+        assert weight_mxfp4.dim(2) * 2 == input.dim(2)
+        assert weight_scale.dim(2) * 32 == input.dim(2)
+        assert weight_mxfp4.dim(0) == weight_scale.dim(0) == moe_mask.dim(0) - 1
+        assert weight_mxfp4.dim(1) == weight_scale.dim(1) == output.dim(2)
+        assert weight_mxfp4.dim(0) == moe_routing_indices.dim(0)
+        assert weight_mxfp4.dim(1) % 64 == 0 and input.dim(2) % 64 == 0
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), 2, True)
+        tb_graph.new_input(weight_mxfp4, (-1, 1, -1), -1, True)
+        tb_graph.new_input(weight_scale, (-1, 1, -1), -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_mask, (-1, -1, -1), -1, True)
+        tb_graph.new_input(output, (-1, 2, -1), -1, True)
+        self.kn_graph.customized(
+            [input, weight_mxfp4, weight_scale, moe_routing_indices, moe_mask, output],
+            tb_graph,
+        )
+        self.kn_graph.register_task(tb_graph, "moe_w2_mxfp4_sm90")
+
     def moe_mul_sum_add_layer(
         self,
         input: DTensor,
