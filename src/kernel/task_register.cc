@@ -3567,12 +3567,14 @@ int TaskRegister::register_moe_linear_sm90_task(
     threadblock::Graph const &bgraph,
     std::vector<int> const &params,
     bool w13_linear) {
-  assert(params.size() == 0);
+  // params[0]: a fifth input holds one bias row per expert (optional)
+  assert(params.size() == 0 || params.size() == 1);
+  bool has_bias = params.size() == 1 && params[0] > 0;
   int num_experts = 0, num_experts_per_tok = 0, batch_size = 0, output_size = 0,
       orig_output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 4;
+  int num_inputs = has_bias ? 5 : 4;
   int num_outputs = 1;
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
@@ -3612,6 +3614,11 @@ int TaskRegister::register_moe_linear_sm90_task(
       static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[1]);
   orig_output_size = input_ops[1]->dtensor.dim[1];
+  if (has_bias) {
+    assert(input_ops[4]->output_tensors[0].num_dims == 2);
+    assert(input_ops[4]->output_tensors[0].dim[0] == num_experts);
+    assert(input_ops[4]->dtensor.dim[1] == orig_output_size);
+  }
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -3660,12 +3667,12 @@ int TaskRegister::register_moe_linear_sm90_task(
       batch_size,
       output_size,
       num_experts,
-      output_stride,
-      output_stride * batch_size);
+      has_bias ? 0 : output_stride,
+      has_bias ? orig_output_size : output_stride * batch_size);
   code.e("cute::Tensor mBias = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "$)), layout_Bias);",
-         "nullptr");
+         has_bias ? "task_desc->input_ptrs[4]" : "nullptr");
   // Topk_indices Tensor setup
   code.e("cute::Layout layout_routing_indices = "
          "cute::make_layout(cute::make_shape($, $), "
@@ -3733,7 +3740,7 @@ int TaskRegister::register_moe_linear_sm90_task(
          num_experts_per_tok,
          expert_stride,
          w13_linear ? "true" : "false",
-         /*no_bias*/ "true",
+         /*no_bias*/ has_bias ? "false" : "true",
          num_ab_stages);
   code.e("    tma_a,");
   code.e("    mInput,");

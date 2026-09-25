@@ -1853,12 +1853,10 @@ class PersistentKernel:
         tb_graph.new_input(output, (-1, 2, -1), -1, True)
         self.kn_graph.customized(graph_inputs + [output], tb_graph)
 
-        assert bias is None or self.target_cc == 100, (
-            "moe_w13_linear_layer(bias=...) is only implemented for sm100")
         if self.target_cc == 100:
             self.kn_graph.register_task(tb_graph, "moe_w13_linear_sm100", params)
         elif self.target_cc == 90:
-            self.kn_graph.register_task(tb_graph, "moe_w13_linear_sm90")
+            self.kn_graph.register_task(tb_graph, "moe_w13_linear_sm90", params)
         else:
             assert False
             
@@ -2102,12 +2100,10 @@ class PersistentKernel:
         tb_graph.new_input(output, (-1, 2, -1), -1, True)
         self.kn_graph.customized(graph_inputs + [output], tb_graph)
 
-        assert bias is None or self.target_cc == 100, (
-            "moe_w2_linear_layer(bias=...) is only implemented for sm100")
         if self.target_cc == 100:
             self.kn_graph.register_task(tb_graph, "moe_w2_linear_sm100", params)
         elif self.target_cc == 90:
-            self.kn_graph.register_task(tb_graph, "moe_w2_linear_sm90")
+            self.kn_graph.register_task(tb_graph, "moe_w2_linear_sm90", params)
         else:
             assert False
         
