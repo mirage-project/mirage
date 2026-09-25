@@ -15,13 +15,13 @@ the megakernel issues, not approximations of them.
 ## Running
 
 ```bash
-make run                      # print the tables
-make run JSON=b200            # also record the numbers in b200_sync.json
+make run                      # print both benchmarks' tables
+make run JSON=b200            # also record b200_sync.json and b200_tma.json
 make run SM=90a               # build for a different target (default 100a)
 ```
 
-A plain CUDA binary with no PyTorch dependency (it links NVML for the
-shared-GPU check), so it builds against whatever toolkit is installed. The
+Plain CUDA binaries with no PyTorch dependency (they link NVML for the
+shared-GPU check), so they build against whatever toolkit is installed. The
 extension-based harnesses under `tests/runtime_python/blackwell/` currently
 cannot build when the CUDA toolkit and PyTorch disagree on version.
 
@@ -218,7 +218,129 @@ themselves; and inside a container whose PID namespace differs from the
 host's, NVML's process IDs do not match the benchmark's own, so every run is
 marked provisional.
 
+## TMA loads (`tma_bandwidth`)
+
+What a TMA load costs as the megakernel issues it. The instruction is copied
+from `tasks/hopper/tma_2d.cuh`, which the SM100 linear task uses; the tensor
+map is encoded as `tma.cuh`'s `fill_tma_desc` builds the runtime's
+descriptors; the mbarrier helpers are `tasks/hopper/barrier.cuh`'s, which
+issue the same instructions as the CuTe helpers the linear task calls. That
+is a 5-D tile-mode `cp.async.bulk.tensor` into `shared::cluster` memory from
+a bf16 tensor map in global memory, 128B swizzle, no L2 promotion, a box 64
+elements (128 B) wide.
+Tiles walk a row-major matrix 7168 elements wide (the DeepSeek-V3 hidden
+size) along K, as the linear task's loader does. Tile heights run from 8 rows
+(1 KiB, decode-sized activations) to 256 rows (32 KiB, the TMA box limit).
+
+### Measured: NVIDIA B200, 148 SMs, driver 13020
+
+L2 126 MiB; HBM peak 7,672 GB/s from memory clock × bus width. Clean run; a
+second clean run on another B200 in the same node agrees with every median
+to within 1%.
+
+Latency of one tile in flight, from issuing the load to the mbarrier wait
+returning, on every SM in turn (2,368 samples per row):
+
+| tile | from HBM, median (p10–p90) | from L2, median (p10–p90) |
+|---|---|---|
+| 8 rows, 1 KiB | 526 ns (511–727) | 179 ns (172–188) |
+| 16 rows, 2 KiB | 536 ns (519–762) | 183 ns (175–192) |
+| 32 rows, 4 KiB | 590 ns (528–776) | 191 ns (183–199) |
+| 64 rows, 8 KiB | 687 ns (549–791) | 208 ns (201–216) |
+| 128 rows, 16 KiB | 785 ns (650–824) | 240 ns (233–249) |
+| 256 rows, 32 KiB | 843 ns (748–883) | 307 ns (299–315) |
+
+One SM streaming from HBM through a ring of stages with one loader warp,
+every SM in turn (GB/s per SM, median; p10–p90 within ±5%):
+
+| tile \ stages | 1 | 2 | 4 | 6 |
+|---|---|---|---|---|
+| 1 KiB | 1.6 | 3.2 | 6.2 | 8.4 |
+| 2 KiB | 3.1 | 6.2 | 12.0 | 16.4 |
+| 4 KiB | 5.9 | 11.7 | 22.8 | 31.3 |
+| 8 KiB | 11.1 | 21.6 | 41.7 | 57.7 |
+| 16 KiB | 19.6 | 38.5 | 74.2 | 105.8 |
+| 32 KiB | 36.5 | 71.5 | 136.3 | 191.9 |
+
+The same with 4 stages per loader warp and 1, 2 or 4 loader warps:
+
+| tile \ loader warps | 1 | 2 | 4 |
+|---|---|---|---|
+| 2 KiB | 12.0 | 23.7 | 46.9 |
+| 8 KiB | 41.7 | 82.0 | 160.1 |
+
+Aggregate from HBM, every participating SM streaming its own slice of a
+4 GiB matrix (GB/s, median of 7; min–max within ±0.6%):
+
+| SMs | 16 KiB × 4 stages | 32 KiB × 6 stages | 2 KiB × 6 stages | 2 KiB × 4 stages × 4 warps |
+|---|---|---|---|---|
+| 1 | 76.9 | 206.4 | 16.4 | 46.9 |
+| 2 | 154.1 | 413.3 | 32.7 | 93.1 |
+| 8 | 619.3 | 1,602.5 | 129.7 | 375.6 |
+| 32 | 2,331.3 | 5,142.6 | 525.4 | 1,498.5 |
+| 74 | 4,641.6 | 6,894.7 | 1,206.8 | 3,176.7 |
+| 148 | 6,520.0 (85% of peak) | 6,876.0 (90%) | 2,332.8 (30%) | 5,305.8 (69%) |
+
+### What these say
+
+**One SM's TMA throughput is set by how much it has in flight.** Throughput
+grows almost in proportion to the number of stages — 1.6, 3.2, 6.2, 8.4 GB/s
+for 1 KiB tiles at 1, 2, 4, 6 stages — because each tile takes ~0.5–0.9 µs to
+arrive from HBM and a loader can only have as many tiles moving as it has
+stages. Bigger tiles carry more bytes per trip: six 32 KiB stages give one SM
+192 GB/s, six 1 KiB stages give 8.4.
+
+**It does not matter how the in-flight tiles are split.** With 4 stages per
+warp, one loader warp gets 12.0 GB/s from 2 KiB tiles, two get 23.7 and four
+get 46.9 — in proportion to the tiles in flight, as more stages in one warp
+give. So there is no per-warp limit in the wait-and-reissue loop; a loader
+needs more in flight, not more loaders.
+
+**Small tiles cannot use HBM without a lot of them in flight.** The most any
+configuration reached is 6.9 TB/s, 90% of the computed peak, with 32 KiB
+tiles and 6 stages (192 KiB in flight per SM) — and 74 SMs already reach it;
+all 148 get the same. With 16 KiB tiles and 4 stages (64 KiB in flight) 148
+SMs reach 6.5 TB/s, 85%. With 2 KiB tiles and 6 stages (12 KiB in flight)
+they reach 2.3 TB/s, 30% — every SM is waiting on latency, not bandwidth —
+and 16 tiles in flight per SM bring that to 5.3 TB/s. A memory-bound decode
+task loading narrow tiles is limited by its pipeline depth long before HBM.
+
+**From L2, a tile lands in ~180–310 ns**, 3–4× sooner than from HBM, so a
+tile another task just wrote or read is much cheaper to load.
+
+### Method
+
+**Data is checked, not assumed.** Before timing, tiles of every height —
+aligned, and at an odd row deep in the matrix — are loaded through the same
+path and every element is compared with where the 128B swizzle must put it
+(the 16-byte chunk `c` of row `r` lands at chunk `c ^ (r & 7)`). Every
+element within a tile holds a distinct value, so a misplaced element cannot
+pass by coincidence. After that, every latency load checks its tile's first
+element; each streaming loader checks the first element of the last tile in
+each stage, and that its incrementally advanced coordinates end exactly where
+the tile index says they should. The run fails on any mismatch.
+
+**HBM means HBM.** Each HBM measurement reads tiles nobody has read since L2
+was flushed, from a matrix 32× larger than L2. The flush reads twice L2's size
+through L2, so it also leaves no dirty lines whose write-back would add
+traffic to the timed reads. The aggregate is checked against the HBM peak: a
+result above it would mean data came from L2, and fails the run.
+
+**Two clocks agree.** Per-SM numbers use `clock64()`. The aggregate uses
+`%globaltimer`, which all SMs share, from the first SM starting to the last
+finishing, and is cross-checked against CUDA events around the launch; the
+event window contains the device window, so it may only be slower (it is, by
+up to about 1.5%), never faster.
+
+**The loop is a real loader's.** Stage index, phase and coordinates advance
+incrementally, as in the linear task's loader. A first version computed them
+with 64-bit division by a runtime stage count, and that alone cut the 2 KiB
+aggregate from 2.3 to 0.9 TB/s and made throughput look capped at a fixed time
+per tile, independent of tile size. The tensor map's location (global memory,
+as MPK passes it, vs. a `__grid_constant__` parameter or a prefetched
+descriptor) was checked separately and makes no difference.
+
 ## Scope
 
-Synchronization primitives (issue #771, phase 1). TMA bandwidth and MMA
-issue rate are not covered here.
+Synchronization primitives and TMA loads (issue #771). MMA issue rate is not
+covered here.
