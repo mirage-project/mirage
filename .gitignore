@@ -97,3 +97,8 @@ ncu_tmp
 !.claude/agents/
 !.claude/skills/**
 !.claude/agents/**
+
+# built microbenchmark binaries
+benchmark/microbench/sync_primitives
+benchmark/microbench/.build_flags
+benchmark/microbench/*.json
