@@ -353,6 +353,8 @@ void register_mugraph(
                 task_type == TASK_MOE_W2_LINEAR_SM100 ||
                 task_type == TASK_MOE_W13_LINEAR_SM90 ||
                 task_type == TASK_MOE_W2_LINEAR_SM90 ||
+                task_type == TASK_MOE_W13_MXFP4_SM90 ||
+                task_type == TASK_MOE_W2_MXFP4_SM90 ||
                 task_type == TASK_MOE_W13_FP8_SM100 ||
                 task_type == TASK_MOE_W2_FP8_SM100) {
               task.task_metadata.expert_offset = bid.x;
@@ -1868,6 +1870,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_PROB_EXTRACT_SM100] = "TASK_PROB_EXTRACT_SM100";
   task_type_to_name[TASK_MOE_W13_LINEAR_SM90] = "TASK_MOE_W13_LINEAR_SM90";
   task_type_to_name[TASK_MOE_W2_LINEAR_SM90] = "TASK_MOE_W2_LINEAR_SM90";
+  task_type_to_name[TASK_MOE_W13_MXFP4_SM90] = "TASK_MOE_W13_MXFP4_SM90";
+  task_type_to_name[TASK_MOE_W2_MXFP4_SM90] = "TASK_MOE_W2_MXFP4_SM90";
   task_type_to_name[TASK_SPLITK_LINEAR_SWAPAB_HOPPER] =
       "TASK_SPLITK_LINEAR_SWAPAB_HOPPER";
   task_type_to_name[TASK_PAGED_ATTENTION_SPLIT_KV_SM100] =

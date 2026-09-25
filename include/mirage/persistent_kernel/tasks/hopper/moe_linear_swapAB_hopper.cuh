@@ -47,6 +47,18 @@
 #include "utils.cuh"
 namespace kernel {
 
+// E2M1 values are stored low nibble first; MXFP4 scales use the E8M0
+// exponent-only encoding (2^(encoded_exponent - 127)).
+CUTE_DEVICE float decode_mxfp4_value(uint8_t packed, bool high_nibble) {
+  uint8_t nibble = high_nibble ? (packed >> 4) : (packed & 0x0f);
+  constexpr float values[16] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f,
+                                4.0f, 6.0f, 0.0f, -0.5f, -1.0f, -1.5f,
+                                -2.0f, -3.0f, -4.0f, -6.0f};
+  return values[nibble];
+}
+
+struct NoMoeWeightTMA {};
+
 // MoE Linear task storage. The shared memory buffers for A, B, and C matrices.
 template <class TypeA, // Tensor A data type
           class TypeB, // Tensor B data type
@@ -91,6 +103,7 @@ template <typename T_,
           int EXPERT_STRIDE,
           bool W13_LINEAR,
           bool NOBIAS,
+          bool MXFP4_WEIGHT = false,
           int NUM_AB_STAGE = 8>
 __device__ __forceinline__ void
     moe_linear_sm90_task_impl(const TMA_A &tma_a,
@@ -99,7 +112,9 @@ __device__ __forceinline__ void
                               IndicesTensor mRoutingIndices,
                               MaskTensor mMask,
                               OutputTensor mOutput,
-                              int const expert_offset) {
+                              int const expert_offset,
+                              uint8_t const *packed_weight = nullptr,
+                              uint8_t const *weight_scale = nullptr) {
   int warp_idx = cutlass::canonical_warp_idx_sync();
 
   // Construct the MMA grid coordinate from the CTA grid coordinate
@@ -397,21 +412,58 @@ __device__ __forceinline__ void
                   tma_wr_ab_empty_phase);
             }
 
-            // TMA for loading A
-            // only one thread will issue the tma instruction
-            if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
-              int tma_coords_A[2] = {k_tile * TILE_SIZE,
-                                     m_tile * OUTPUT_ATOM_SIZE +
-                                         expert_idx * OUTPUT_STRIDE};
-              weight_smem.set_ptr(shared_weight + smem_wr_buffer *
-                                                      OUTPUT_ATOM_SIZE *
-                                                      TILE_SIZE);
-              cute::set_barrier_transaction_bytes(
-                  shared_storage.a_full_mbar_ptr[smem_wr_buffer],
-                  tma_transaction_bytes_A);
-              tma_a.tma_cp_async(a_full_mbar_ptr[smem_wr_buffer],
-                                 weight_smem.base_ptr,
-                                 tma_coords_A);
+            if constexpr (MXFP4_WEIGHT) {
+              // Decode this expert's packed 64x64 weight tile directly into
+              // the existing BF16 WGMMA shared-memory layout.
+              int const tid = threadIdx.x % NUM_THREAD_PER_WARPGROUP;
+              int const tile_elems = OUTPUT_ATOM_SIZE * TILE_SIZE;
+              for (int elem = tid; elem < tile_elems;
+                   elem += NUM_THREAD_PER_WARPGROUP) {
+                int const row = elem / TILE_SIZE;
+                int const col = elem % TILE_SIZE;
+                int const global_row = m_tile * OUTPUT_ATOM_SIZE + row;
+                int const global_col = k_tile * TILE_SIZE + col;
+                if (global_row < OUTPUT_SIZE) {
+                  size_t const packed_offset =
+                      (static_cast<size_t>(expert_idx) * OUTPUT_STRIDE +
+                       global_row) * (REDUCTION_SIZE / 2) + global_col / 2;
+                  size_t const scale_offset =
+                      (static_cast<size_t>(expert_idx) * OUTPUT_STRIDE +
+                       global_row) * (REDUCTION_SIZE / 32) + global_col / 32;
+                  float const value = decode_mxfp4_value(
+                      packed_weight[packed_offset], (global_col & 1) != 0);
+                  int const exponent =
+                      static_cast<int>(weight_scale[scale_offset]);
+                  float const scale =
+                      exponent == 0 ? 0.0f : ldexpf(1.0f, exponent - 127);
+                  sA(row, col, smem_wr_buffer) = static_cast<T_>(value * scale);
+                } else {
+                  sA(row, col, smem_wr_buffer) = static_cast<T_>(0.0f);
+                }
+              }
+              wg_sync<NUM_THREAD_PER_WARPGROUP>(7);
+              tma::async_proxy_fence();
+              wg_sync<NUM_THREAD_PER_WARPGROUP>(7);
+              if (tid == 0) {
+                cute::arrive_barrier(
+                    shared_storage.a_full_mbar_ptr[smem_wr_buffer]);
+              }
+            } else {
+              // TMA for loading A; only one thread issues the instruction.
+              if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
+                int tma_coords_A[2] = {k_tile * TILE_SIZE,
+                                       m_tile * OUTPUT_ATOM_SIZE +
+                                           expert_idx * OUTPUT_STRIDE};
+                weight_smem.set_ptr(shared_weight + smem_wr_buffer *
+                                                        OUTPUT_ATOM_SIZE *
+                                                        TILE_SIZE);
+                cute::set_barrier_transaction_bytes(
+                    shared_storage.a_full_mbar_ptr[smem_wr_buffer],
+                    tma_transaction_bytes_A);
+                tma_a.tma_cp_async(a_full_mbar_ptr[smem_wr_buffer],
+                                   weight_smem.base_ptr,
+                                   tma_coords_A);
+              }
             }
 
             int32_t token_idx =
