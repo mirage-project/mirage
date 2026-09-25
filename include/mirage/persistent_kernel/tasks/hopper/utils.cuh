@@ -28,7 +28,13 @@ static __device__ __forceinline__ void wg_decrease_regs() {
 // sync inside a warp group
 template <int GROUP_THREADS>
 static __device__ __forceinline__ void wg_sync(uint32_t barrier_id) {
-#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL)
+// bar.sync with a named barrier is portable PTX (sm_70+); SM120 (consumer
+// Blackwell) builds have no warp-group specialization but still reach this
+// helper through shared code paths, so route them to the portable form
+// instead of the brkpt fallback (which is only meant to catch genuinely
+// unsupported architectures at runtime).
+#if defined(MIRAGE_GRACE_HOPPER) || defined(MIRAGE_GRACE_BLACKWELL) ||        \
+    (defined(MPK_TARGET_CC) && MPK_TARGET_CC == 120)
   asm volatile("bar.sync %0, %1;\n" ::"r"(barrier_id), "n"(GROUP_THREADS));
 #elif defined(__CUDA_ARCH__)
   asm volatile("brkpt;\n" ::);
