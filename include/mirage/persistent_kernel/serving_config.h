@@ -71,10 +71,24 @@ constexpr int SAMPLING_SHARED_BYTES = 16 * 1024;
 #ifdef __CUDACC__
 __host__ __device__
 #endif
+constexpr int sampling_frequency_words(int vocab) {
+  return (vocab + 1) & ~1;
+}
+
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+constexpr int sampling_bitset_words(int vocab) {
+  return (vocab + 31) / 32;
+}
+
+#ifdef __CUDACC__
+__host__ __device__
+#endif
 constexpr int sampling_scratch_words(int vocab) {
   // Generated-token frequency plus two bitsets (all tokens and generated).
   // Round the count array to an even word count for uint64 CTA reductions.
-  return ((vocab + 1) & ~1) + 2 * ((vocab + 31) / 32) +
+  return sampling_frequency_words(vocab) + 2 * sampling_bitset_words(vocab) +
          SCRATCH_WORKSPACE + SCRATCH_STATE_WORDS;
 }
 
