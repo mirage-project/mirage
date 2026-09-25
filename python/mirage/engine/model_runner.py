@@ -218,6 +218,5 @@ class ModelRunner:
             pinned_inbox_tokens=torch.zeros(cap, config.max_seq_length, dtype=torch.int64).pin_memory(),
             pinned_rid_at_row=torch.full((n_req,), -1, dtype=torch.int32).pin_memory(),
             pinned_generation_config=torch.zeros(cap, serving_config_words(), dtype=torch.int64).pin_memory(),
-            pinned_cancel=torch.full((n_req,), -1, dtype=torch.int32).pin_memory(),
             pinned_finish_reason=torch.zeros(n_req, dtype=torch.int32).pin_memory(),
         )

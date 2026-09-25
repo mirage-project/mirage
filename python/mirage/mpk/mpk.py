@@ -70,7 +70,6 @@ class MPKMetadata:
     pinned_rid_at_row: Optional[torch.Tensor] = None
     pinned_generation_config: Optional[torch.Tensor] = None
     generation_config: Optional[torch.Tensor] = None
-    pinned_cancel: Optional[torch.Tensor] = None
     pinned_finish_reason: Optional[torch.Tensor] = None
     # spec decode config
     spec_decode: Optional[str] = None
@@ -224,7 +223,6 @@ class MPK:
         self.pinned_rid_at_row       = args.pinned_rid_at_row
         self.pinned_generation_config = args.pinned_generation_config
         self.generation_config       = args.generation_config
-        self.pinned_cancel           = args.pinned_cancel
         self.pinned_finish_reason    = args.pinned_finish_reason
 
         self.profiler_tensor = args.profiler_tensor
@@ -271,7 +269,6 @@ class MPK:
             "pinned_rid_at_row":       args.pinned_rid_at_row,
             "pinned_generation_config": args.pinned_generation_config,
             "generation_config":        args.generation_config,
-            "pinned_cancel":            args.pinned_cancel,
             "pinned_finish_reason":     args.pinned_finish_reason,
         }
         self.persistent_kernel = PersistentKernel(

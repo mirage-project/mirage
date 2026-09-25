@@ -3207,7 +3207,6 @@ class PersistentKernel:
             "pinned_rid_at_row",
             "pinned_generation_config",
             "generation_config",
-            "pinned_cancel",
             "pinned_finish_reason",
         ]
         meta_tensors_ptr = []
@@ -3336,7 +3335,6 @@ class PersistentKernel:
             meta_tensors.append(self.meta_tensors["pinned_rid_at_row"])
             meta_tensors.append(self.meta_tensors["pinned_generation_config"])
             meta_tensors.append(self.meta_tensors["generation_config"])
-            meta_tensors.append(self.meta_tensors["pinned_cancel"])
             meta_tensors.append(self.meta_tensors["pinned_finish_reason"])
 
         meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]

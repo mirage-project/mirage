@@ -18,7 +18,6 @@ the server's context capacity.
 """
 
 import argparse
-from functools import partial
 import json
 import sys
 import time
@@ -160,14 +159,20 @@ def main() -> None:
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--model", default="Qwen/Qwen3-8B", help="Served model name")
     parser.add_argument("--max-tokens", type=int, default=128)
-    for name in ("temperature", "top_p", "frequency_penalty", "presence_penalty",
-                 "repetition_penalty"):
-        parser.add_argument("--" + name.replace("_", "-"), type=float)
-    for name in ("top_k", "seed"):
-        parser.add_argument("--" + name.replace("_", "-"), type=int)
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--top-p", type=float)
+    parser.add_argument("--top-k", type=int)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--frequency-penalty", type=float)
+    parser.add_argument("--presence-penalty", type=float)
+    parser.add_argument("--repetition-penalty", type=float)
     args = parser.parse_args()
-    if args.concurrent < 0 or args.max_tokens < 1 or args.timeout < 1:
-        parser.error("Concurrency must be nonnegative; token budget and timeout must be positive")
+    if args.concurrent < 0:
+        parser.error("--concurrent must be nonnegative")
+    if args.max_tokens < 1:
+        parser.error("--max-tokens must be positive")
+    if args.timeout < 1:
+        parser.error("--timeout must be positive")
 
     base = f"http://127.0.0.1:{args.port}"
 
@@ -175,8 +180,10 @@ def main() -> None:
         "temperature", "top_p", "top_k", "seed", "frequency_penalty",
         "presence_penalty", "repetition_penalty")
         if (value := getattr(args, name)) is not None}
-    client = partial(chat, base=base, model=args.model, timeout=args.timeout,
-                     max_tokens=args.max_tokens, sampling=sampling)
+    def client(prompt, stream=False):
+        return chat(prompt, stream=stream, base=base, model=args.model,
+                    timeout=args.timeout, max_tokens=args.max_tokens,
+                    sampling=sampling)
 
     if args.stream:
         ok = run_stream(client, "Explain what a GPU is in one sentence.")

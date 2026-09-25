@@ -423,8 +423,7 @@ struct RuntimeConfig {
   int32_t volatile *pinned_rid_at_row; // [total_inflight], pinned
   serving::ServingConfig *pinned_generation_config; // [ring_capacity], immutable until admitted
   serving::ServingConfig *generation_config; // [max_requests], indexed by buffer row
-  int32_t volatile *pinned_cancel; // cancellation request ID, not a reusable boolean
-  int32_t *pinned_finish_reason; // row: 1=stop, 2=length, 3=cancelled
+  int32_t *pinned_finish_reason; // row: 1=stop, 2=length
   // Running queue rid tracking: request_rids[i] stores the original rid
   // for active batch slot i (GPU device memory).
   int *request_rids; // [MPK_MAX_NUM_BATCHED_REQUESTS]

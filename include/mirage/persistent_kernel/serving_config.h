@@ -58,7 +58,6 @@ static_assert(offsetof(ServingConfig, biases) == 28 * sizeof(int64_t), "bias lay
 constexpr int FINISH_NONE = 0;
 constexpr int FINISH_STOP = 1;
 constexpr int FINISH_LENGTH = 2;
-constexpr int FINISH_CANCELLED = 3;
 
 // Sampler implementation and scratch allocation constants.
 constexpr int MAX_SAMPLING_THREADS = 256;
@@ -109,8 +108,7 @@ __host__ __device__
 #endif
 inline int finish_reason(ServingConfig const *cfg, long long const *history,
                          int history_len, int prompt_len, int max_seq_length,
-                         bool cancelled, long long fallback_eos = -1) {
-  if (cancelled) return FINISH_CANCELLED;
+                         long long fallback_eos = -1) {
   int generated = history_len - prompt_len;
   if (generated > 0) {
     auto token = history[history_len - 1];

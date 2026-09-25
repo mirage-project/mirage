@@ -514,11 +514,10 @@ __device__ __forceinline__ bool
 #ifdef MPK_ENABLE_PROFILING
     bool done = true;
 #else
-    bool cancelled = ld_acquire_sys_i32(&config.pinned_cancel[row]) == config.request_rids[i];
     int reason = mirage::serving::finish_reason(
         config.generation_config + row,
         config.tokens + row * MPK_MAX_SEQ_LENGTH, step + num_tokens + 1,
-        prompt_len, config.max_seq_length, cancelled, config.eos_token_id);
+        prompt_len, config.max_seq_length, config.eos_token_id);
     bool done = reason != mirage::serving::FINISH_NONE;
     config.pinned_finish_reason[row] = reason;
 #endif
@@ -1458,7 +1457,7 @@ static std::map<std::string, void *> global_model_tensors;
 // meta_tensors[8]: paged_kv_indices_buffer
 // meta_tensors[9]: paged_kv_last_page_len_buffer
 // meta_tensors[10]: paged_kv_indices_snapshot
-// MODE_ONLINE_PINNED only (indices 11..26):
+// MODE_ONLINE_PINNED only (indices 11..25):
 // meta_tensors[11]: pinned_req_ready
 // meta_tensors[12]: pinned_req_request_id
 // meta_tensors[13]: pinned_req_prompt_len
@@ -1473,8 +1472,7 @@ static std::map<std::string, void *> global_model_tensors;
 // meta_tensors[22]: pinned_rid_at_row
 // meta_tensors[23]: pinned_generation_config
 // meta_tensors[24]: generation_config
-// meta_tensors[25]: pinned_cancel
-// meta_tensors[26]: pinned_finish_reason
+// meta_tensors[25]: pinned_finish_reason
 
 extern "C" void init_request_resources() {
   init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
@@ -1505,10 +1503,10 @@ extern "C" void
     global_model_tensors[model_tensor_names[i]] = model_tensor_ptrs[i];
   }
   // meta_tensors[0..10] are always required.
-  // meta_tensors[11..26]: pinned ring and generation pointers (MODE_ONLINE_PINNED only,
+  // meta_tensors[11..25]: pinned ring and generation pointers (MODE_ONLINE_PINNED only,
   //   passed as CPU-side void* from Python's pinned tensors)
 #if defined(MODE_ONLINE_PINNED)
-  assert(meta_tensors.size() == 27);
+  assert(meta_tensors.size() == 26);
 #else
   assert(meta_tensors.size() == 11);
 #endif
@@ -1556,8 +1554,7 @@ extern "C" void
       static_cast<int32_t volatile *>(meta_tensors[22]);
   global_runtime_config.pinned_generation_config = static_cast<mirage::serving::ServingConfig *>(meta_tensors[23]);
   global_runtime_config.generation_config = static_cast<mirage::serving::ServingConfig *>(meta_tensors[24]);
-  global_runtime_config.pinned_cancel = static_cast<int32_t volatile *>(meta_tensors[25]);
-  global_runtime_config.pinned_finish_reason = static_cast<int32_t *>(meta_tensors[26]);
+  global_runtime_config.pinned_finish_reason = static_cast<int32_t *>(meta_tensors[25]);
 #endif
   global_runtime_config.num_workers = num_workers;
   global_runtime_config.num_local_schedulers = num_local_schedulers;

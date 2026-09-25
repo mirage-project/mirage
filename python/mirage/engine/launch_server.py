@@ -149,20 +149,15 @@ async def complete(request: Request, chat: bool):
         async def sse():
             def encode(value):
                 return "data: " + json.dumps(value, ensure_ascii=False) + "\n\n"
-            try:
-                if chat:
-                    yield encode(response(role=True))
-                async for text, reason, count in events:
-                    if text:
-                        yield encode(response(text))
-                    if reason:
-                        yield encode(response(reason=reason))
-                        if req.stream_options and req.stream_options.include_usage:
-                            yield encode(response(usage=usage(count)))
-            except Exception:
-                logger.exception("Streaming generation failed")
-                yield encode({"error": {"message": "Generation failed", "type": "server_error",
-                                        "param": None, "code": None}})
+            if chat:
+                yield encode(response(role=True))
+            async for text, reason, count in events:
+                if text:
+                    yield encode(response(text))
+                if reason:
+                    yield encode(response(reason=reason))
+                    if req.stream_options and req.stream_options.include_usage:
+                        yield encode(response(usage=usage(count)))
             yield "data: [DONE]\n\n"
         return StreamingResponse(sse(), media_type="text/event-stream")
     try:

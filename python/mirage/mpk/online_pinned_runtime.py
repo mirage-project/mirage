@@ -62,9 +62,7 @@ class OnlinePinnedRuntime:
         self._pinned_rid_at_row = mpk.pinned_rid_at_row       # int32[max_batched], pinned
 
         self._generation_config = mpk.pinned_generation_config
-        self._cancel = mpk.pinned_cancel
         self._finish_reason = mpk.pinned_finish_reason
-        self._cancelled: set[int] = set()
 
         # CPU-private ring cursors.
         self._cpu_req_tail  = 0  # next ring slot to write
@@ -199,11 +197,6 @@ class OnlinePinnedRuntime:
         """
         self._raise_drain_error()
         finished = []
-        with self._lock:
-            for rid in self._cancelled:
-                row = self.find_row_for_rid(rid)
-                if row >= 0:
-                    self._store_i32_release(self._cancel, row, rid)
         while True:
             with self._lock:
                 slot = self._cpu_comp_head & self._mask
@@ -212,7 +205,6 @@ class OnlinePinnedRuntime:
                 rid         = int(self._comp_request_id[slot].item())
                 buffer_row  = int(self._comp_buffer_row[slot].item())
                 final_step  = int(self._comp_final_step[slot].item())
-                self._cancelled.discard(rid)
                 if rid in self._abandoned:
                     self._release_row_locked(rid, buffer_row)
                     self._abandoned.remove(rid)
@@ -305,26 +297,8 @@ class OnlinePinnedRuntime:
     def finish_reason(self, row: int) -> str:
         return serving_finish_reason_name(int(self._finish_reason[row]))
 
-    def cancel_request(self, rid: int) -> bool:
-        """Return True if removed before publication, otherwise await GPU completion."""
-        with self._ring_lock:
-            with self._waiting_lock:
-                for request in self._waiting:
-                    if request[0] == rid:
-                        self._waiting.remove(request)
-                        return True
-        with self._lock:
-            if rid not in self._completions:
-                self._cancelled.add(rid)
-                row = self.find_row_for_rid(rid)
-                if row >= 0:
-                    self._store_i32_release(self._cancel, row, rid)
-        return False
-
     def abandon_request(self, rid: int) -> None:
         """Release *rid* when it completes without retaining its output."""
-        if self.cancel_request(rid):
-            return
         with self._lock:
             completion = self._completions.get(rid)
             if completion is None:
@@ -406,8 +380,6 @@ class OnlinePinnedRuntime:
             self._cpu_comp_head = 0
             self._completions.clear()
             self._abandoned.clear()
-            self._cancelled.clear()
-            self._cancel.fill_(-1)
             self._finish_reason.zero_()
             self._drain_error = None
             self._comp_ready.zero_()

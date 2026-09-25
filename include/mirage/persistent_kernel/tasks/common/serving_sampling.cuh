@@ -508,6 +508,22 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
   if (top_k)
     lower = cutoff<false>(reader, vocab, lower, float(k), workspace,
                           candidates, candidate_count);
+  if (candidate_count >= 0) {
+    // The exact cutoff keeps only k unique score keys for subsequent passes.
+    extern __shared__ __align__(16) unsigned char sampling_shared[];
+    auto *compact = reinterpret_cast<int *>(sampling_shared) + 1024;
+    __shared__ int compact_count;
+    if (threadIdx.x == 0) compact_count = 0;
+    __syncthreads();
+    for (int i = threadIdx.x; i < candidate_count; i += blockDim.x) {
+      int v = candidates[i];
+      if (score_key(reader(v), v) >= lower)
+        compact[atomicAdd(&compact_count, 1)] = v;
+    }
+    __syncthreads();
+    candidates = compact;
+    candidate_count = compact_count;
+  }
   if (top_p < 1.f) {
     float mass = 0;
     int size = candidate_count >= 0 ? candidate_count : vocab;
