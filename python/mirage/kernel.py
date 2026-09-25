@@ -146,7 +146,7 @@ def get_cc_cmd(
         "-DMIRAGE_BACKEND_USE_CUDA",
         "-shared",
         "-std=c++17",
-        "-use_fast_math",
+        # "-use_fast_math", # # converts powf to exp(y * log(x)), which returns NaN on negative values
         "-lcublas",
         "-Xcompiler=-fPIC",
         "--expt-relaxed-constexpr",
