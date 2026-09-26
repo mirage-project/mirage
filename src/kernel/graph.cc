@@ -764,6 +764,16 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] = std::make_tuple(
         2, 1, TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100, variant_id);
+  } else if (name == "sparse_mla_sm100" || name == "sparse_mla_reduce_sm100") {
+    bool const reduce = name == "sparse_mla_reduce_sm100";
+    assert(params.size() == 8);
+    int variant_id = task_register->register_sparse_mla_sm100_task(
+        customized->bgraph, params, reduce);
+    task_config[op] = std::make_tuple(reduce ? 2 : 4,
+                                      reduce || params[4] == 1 ? 1 : 2,
+                                      reduce ? TASK_SPARSE_MLA_REDUCE_SM100
+                                             : TASK_SPARSE_MLA_SM100,
+                                      variant_id);
   } else if (name == "mla_decode_sm100") {
     int variant_id = task_register->register_mla_decode_sm100_task(
         customized->bgraph, params);

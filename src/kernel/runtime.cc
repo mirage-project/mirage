@@ -364,6 +364,14 @@ void register_mugraph(
               task.task_metadata.kv_idx = bid.z;
               task.task_metadata.merge_task_offset = bid.y;
             }
+            // Sparse MLA: grid=(query, head_group, split). The query uses the
+            // 32-bit metadata slot, not the 16-bit request_id/kv_idx fields.
+            if (task_type == TASK_SPARSE_MLA_SM100 ||
+                task_type == TASK_SPARSE_MLA_REDUCE_SM100) {
+              task.task_metadata.merge_task_offset = bid.x;
+              task.task_metadata.request_id = bid.y;
+              task.task_metadata.kv_idx = bid.z;
+            }
             // Set MLA decode metadata: request_id=batch (bid.y), kv_idx=split
             // (bid.x)
             if (task_type == TASK_MLA_DECODE_SM100) {
@@ -1804,6 +1812,9 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_SAMPLING_PARTIAL_SM100] =
       "TASK_SAMPLING_PARTIAL_SM100";
   task_type_to_name[TASK_MLA_DECODE_SM100] = "TASK_MLA_DECODE_SM100";
+  task_type_to_name[TASK_SPARSE_MLA_SM100] = "TASK_SPARSE_MLA_SM100";
+  task_type_to_name[TASK_SPARSE_MLA_REDUCE_SM100] =
+      "TASK_SPARSE_MLA_REDUCE_SM100";
   task_type_to_name[TASK_MLA_REDUCE_SM100] = "TASK_MLA_REDUCE_SM100";
   task_type_to_name[TASK_MLA_PREFILL_SM100] = "TASK_MLA_PREFILL_SM100";
   task_type_to_name[TASK_MLA_PREFILL_TP8_SM100] = "TASK_MLA_PREFILL_TP8_SM100";

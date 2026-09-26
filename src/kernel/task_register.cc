@@ -4089,6 +4089,67 @@ int TaskRegister::register_paged_attention_split_kv_merge_sm100_task(
                                code.to_string());
 }
 
+int TaskRegister::register_sparse_mla_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool reduce) {
+  // H, R, page_size, index_capacity, splits, requests, pages, scale float bits.
+  assert(params.size() == 8);
+  assert(params[0] == 8 || params[0] == 16 || params[0] == 32 ||
+         params[0] == 64);
+  assert(params[1] == 0 || params[1] == 64);
+  assert(params[4] == 1 || params[4] == 2 || params[4] == 4 || params[4] == 8);
+  assert(!reduce || params[4] > 1);
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  if (reduce) {
+    code.e("kernel::sparse_mla_reduce_sm100_task_impl<$, $>(",
+           params[0],
+           params[4]);
+    code.e("    static_cast<const float*>(task_desc->input_ptrs[0]),");
+    code.e("    static_cast<const float*>(task_desc->input_ptrs[1]),");
+    code.e("    task_desc->output_ptrs[0],");
+  } else {
+    code.e("static_assert(sizeof(kernel::sparse_mla::SharedStorage<$>) <= "
+           "mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE, "
+           "\"sparse MLA shared memory exceeds worker budget\");",
+           params[1]);
+    code.e("kernel::sparse_mla_sm100_task_impl<$, $, $, $>(",
+           params[0],
+           params[1],
+           params[2],
+           params[4]);
+    code.e("    task_desc->input_ptrs[0], task_desc->input_ptrs[1],");
+    code.e("    static_cast<const int*>(task_desc->input_ptrs[2]),");
+    code.e("    static_cast<const int*>(task_desc->input_ptrs[3]),");
+    if (params[4] == 1) {
+      code.e("    task_desc->output_ptrs[0], nullptr, nullptr,");
+    } else {
+      code.e("    nullptr, static_cast<float*>(task_desc->output_ptrs[0]),");
+      code.e("    static_cast<float*>(task_desc->output_ptrs[1]),");
+    }
+    code.e("    runtime_config.qo_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_indptr_buffer,");
+    code.e("    runtime_config.paged_kv_indices_buffer,");
+    code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+    code.e("    $, $, __int_as_float($), $,",
+           params[5],
+           params[6],
+           params[7],
+           params[3]);
+  }
+  code.e("    (int)task_desc->task_metadata.merge_task_offset,");
+  if (reduce) {
+    code.e("    (int)task_desc->task_metadata.request_id);");
+  } else {
+    code.e("    (int)task_desc->task_metadata.request_id,");
+    code.e("    (int)task_desc->task_metadata.kv_idx);");
+  }
+  return register_task_variant(reduce ? TASK_SPARSE_MLA_REDUCE_SM100
+                                      : TASK_SPARSE_MLA_SM100,
+                               code.to_string());
+}
+
 int TaskRegister::register_mla_decode_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params[0]: num_heads (e.g. 128)

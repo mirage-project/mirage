@@ -143,6 +143,9 @@ public:
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   int register_mla_decode_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params);
+  int register_sparse_mla_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params,
+                                     bool reduce);
   int register_mla_reduce_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params);
   int register_mla_prefill_sm100_task(threadblock::Graph const &bgraph,
