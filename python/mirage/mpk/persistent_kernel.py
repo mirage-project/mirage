@@ -8,6 +8,7 @@ import sysconfig
 import json
 
 from ..core import *
+from ..core import serving_scratch_words
 from ..kernel import get_key_paths, KNGraph, TBGraph
 from .speculative import (
     SpecDecodeConfig,
@@ -2445,6 +2446,19 @@ class PersistentKernel:
                 tb_graph, "argmax_reduce", [self.argmax_partial_output_size]
             )
 
+    def serving_sampling_layer(self, logits: DTensor, output: DTensor):
+        """Explicit online sampling task; one CTA per active request slot."""
+        if self.mode != "online_pinned":
+            raise ValueError("serving_sampling_layer requires online_pinned mode")
+        scratch = self.new_tensor(
+            (self.max_num_batched_requests, serving_scratch_words(logits.dim(1))),
+            dtype=float32, name="serving_sampling_scratch")
+        tb_graph = TBGraph(CyTBGraph((self.max_num_batched_requests, 1, 1), (128, 1, 1), 1, 64))
+        for tensor in (logits, scratch, output):
+            tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
+        self.kn_graph.customized([logits, scratch, output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "serving_sampling", [])
+
     def sampling_sm100_layer(
         self,
         logits: DTensor,      # [batch_size, vocab_size]
@@ -3191,6 +3205,9 @@ class PersistentKernel:
             "pinned_step",
             "pinned_inbox_tokens",
             "pinned_rid_at_row",
+            "pinned_generation_config",
+            "generation_config",
+            "pinned_finish_reason",
         ]
         meta_tensors_ptr = []
         for key in expected_order:
@@ -3316,6 +3333,10 @@ class PersistentKernel:
             meta_tensors.append(self.meta_tensors["pinned_step"])
             meta_tensors.append(self.meta_tensors["pinned_inbox_tokens"])
             meta_tensors.append(self.meta_tensors["pinned_rid_at_row"])
+            meta_tensors.append(self.meta_tensors["pinned_generation_config"])
+            meta_tensors.append(self.meta_tensors["generation_config"])
+            meta_tensors.append(self.meta_tensors["pinned_finish_reason"])
+
         meta_tensors_ptr = [tensor.data_ptr() for tensor in meta_tensors]
         profiler_buffer_ptr = (
             self.profiler_tensor.data_ptr() if self.profiler_tensor is not None else 0

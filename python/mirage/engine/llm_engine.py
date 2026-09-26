@@ -9,6 +9,7 @@ import time
 
 import torch
 
+from .sampling import SamplingParams
 from .model_runner import ModelRunner
 from .tokenizer_manager import TokenizerManager
 from ..mpk.online_pinned_runtime import OnlinePinnedRuntime
@@ -32,12 +33,14 @@ class _StreamingMonitor:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def register(self, rid: int, prompt_len: int, timeout: float) -> queue.Queue:
+    def register(self, rid: int, prompt_len: int, timeout: float,
+                 return_token_ids: bool = False) -> queue.Queue:
         """Register a streaming session and return its token queue."""
         q: queue.Queue = queue.Queue()
         with self._lock:
             self._sessions[rid] = {
                 'q': q,
+                'return_token_ids': return_token_ids,
                 'prompt_len': prompt_len,
                 'row': -1,
                 'last_step': prompt_len - 1,
@@ -91,7 +94,7 @@ class _StreamingMonitor:
                                 new_tokens = self._runtime.read_tokens_range(
                                     row, s['last_step'] + 1, current_step)
                                 for tid in new_tokens.tolist():
-                                    text = self._tokenizer_manager.decode_single(tid)
+                                    text = tid if s['return_token_ids'] else self._tokenizer_manager.decode_single(tid)
                                     s['last_step'] += 1
                                     s['q'].put((text, False))
 
@@ -121,12 +124,17 @@ class _StreamingMonitor:
                 row, s['last_step'] + 1, final_step)
             new_ids = new_tokens.tolist()
             for j, tid in enumerate(new_ids):
-                text = self._tokenizer_manager.decode_single(tid)
+                text = tid if s['return_token_ids'] else self._tokenizer_manager.decode_single(tid)
                 is_final = (j == len(new_ids) - 1)
+                if is_final and s['return_token_ids']:
+                    is_final = self._runtime.finish_reason(row)
                 s['q'].put((text, is_final))
                 s['last_step'] += 1
         else:
-            s['q'].put(("", True))
+            if s['return_token_ids']:
+                s['q'].put((None, self._runtime.finish_reason(row)))
+            else:
+                s['q'].put(("", True))
 
     def shutdown(self) -> None:
         self._stop.set()
@@ -171,6 +179,8 @@ class LLMEngine:
         self.model_runner = model_runner
         self.runtime: OnlinePinnedRuntime = model_runner.runtime
         self.tokenizer_manager = TokenizerManager(model_runner.tokenizer)
+        self.vocab_size = model_runner.vocab_size
+        self.eos_ids = model_runner.eos_ids
 
         # Monotonically incrementing request id (never wraps).
         self._next_rid: int = 0
@@ -194,11 +204,14 @@ class LLMEngine:
 
     def submit(
         self,
-        prompt: str,
+        prompt: str | list[int],
         use_template: bool = True,
         timeout: float = 120.0,
         poll_interval: float = 1e-4,
         stream: bool = False,
+        *,
+        sampling_params: SamplingParams | None = None,
+        return_token_ids: bool = False,
     ):
         """Submit a single prompt for generation.
 
@@ -206,19 +219,26 @@ class LLMEngine:
         serialises the ring-buffer write under an internal lock.
 
         Args:
-            prompt:        String prompt.
+            prompt:        String prompt or already-tokenized input.
             use_template:  Apply chat template before tokenizing.
             timeout:       Seconds to wait before raising :exc:`TimeoutError`.
             poll_interval: Seconds between completion-ring polls.
             stream:        If True, returns a generator yielding ``(text,
                            is_final)`` tuples. Otherwise returns a dict.
+            sampling_params: Per-request sampling settings; omitted uses startup defaults.
+            return_token_ids: Stream ``(token_id, finish_reason)`` for API formatting.
+                              The reason is False until completion; token_id may be None.
 
         Returns:
             When stream=False: ``{"text": str, "token_ids": list[int]}``
             When stream=True:  generator yielding ``(text, is_final)``
         """
-        token_ids = self.tokenizer_manager.tokenize(prompt, use_template)
+        token_ids = (self.tokenizer_manager.tokenize(prompt, use_template)
+                     if isinstance(prompt, str) else prompt)
         prompt_len = len(token_ids)
+        params = sampling_params or SamplingParams(**self.model_runner.config.sampling_defaults())
+        config = params.pack(prompt_len, self.model_runner.config.max_seq_length,
+                             self.vocab_size, self.eos_ids)
 
         t = torch.tensor(token_ids, dtype=torch.int64)
         stream_queue: queue.Queue | None = None
@@ -229,9 +249,9 @@ class LLMEngine:
             self._next_rid += 1
             if stream:
                 stream_queue = self._monitor.register(
-                    rid, prompt_len, timeout)
+                    rid, prompt_len, timeout, return_token_ids)
             try:
-                self.runtime.submit(rid, t)
+                self.runtime.submit(rid, t, generation_config=config)
             except Exception:
                 if stream:
                     self._monitor.unregister(rid)

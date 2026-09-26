@@ -16,6 +16,7 @@
 #pragma once
 
 #include "mirage/config.h"
+#include "mirage/persistent_kernel/serving_config.h"
 #include <cuda_runtime.h>
 
 #ifdef USE_NVSHMEM
@@ -109,6 +110,7 @@ enum TaskType {
   TASK_RMS_NORM = 119,
   TASK_LINEAR = 120,
   TASK_IDENTITY = 121,
+  TASK_SERVING_SAMPLING = 122,
   // Hopper Tasks
   TASK_HOPPER_TASK_BEGIN = 150, // Hopper start placeholder, not a real task
   TASK_LINEAR_WITH_RESIDUAL_HOPPER = 151,
@@ -419,6 +421,9 @@ struct RuntimeConfig {
   // allocating a buffer row so CPU can discover which row its request is
   // on by scanning rows, then poll pinned_step[row] for per-step streaming.
   int32_t volatile *pinned_rid_at_row; // [total_inflight], pinned
+  serving::ServingConfig *pinned_generation_config; // [ring_capacity], immutable until admitted
+  serving::ServingConfig *generation_config; // [max_requests], indexed by buffer row
+  int32_t *pinned_finish_reason; // row: 1=stop, 2=length
   // Running queue rid tracking: request_rids[i] stores the original rid
   // for active batch slot i (GPU device memory).
   int *request_rids; // [MPK_MAX_NUM_BATCHED_REQUESTS]

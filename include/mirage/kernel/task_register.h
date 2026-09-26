@@ -101,6 +101,7 @@ public:
                                          std::vector<int> const &params);
   int register_argmax_reduce_sm100_task(threadblock::Graph const &bgraph,
                                         std::vector<int> const &params);
+  int register_serving_sampling_task(threadblock::Graph const &bgraph);
   int register_sampling_sm100_task(threadblock::Graph const &bgraph,
                                    std::vector<int> const &params);
   int register_sampling_partial_sm100_task(threadblock::Graph const &bgraph,
