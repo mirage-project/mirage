@@ -2476,7 +2476,7 @@ int TaskRegister::register_serving_sampling_task(threadblock::Graph const &bgrap
   auto logits = input->output_tensors[0];
   assert(logits.num_dims == 2);
   mirage::transpiler::CodeKeeper code;
-  code.e("mirage::serving::sample_request(");
+  code.e("mirage::serving::sample_request<WORKER_NUM_THREADS>(");
   code.e("    static_cast<bfloat16 const *>(task_desc->input_ptrs[0]),");
   code.e("    static_cast<float *>(task_desc->input_ptrs[1]),");
   code.e("    static_cast<long long *>(task_desc->output_ptrs[0]),");

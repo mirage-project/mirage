@@ -459,7 +459,8 @@ __device__ inline int sample_unfiltered(T const *logits, int vocab,
   return block_reduce(draw, workspace, choose).token;
 }
 
-template<typename Reader>
+// Production supplies the worker size at compile time; direct sample() calls use 0.
+template<int BlockThreads = 0, typename Reader>
 __device__ inline int sample_filtered(Reader const &reader, int vocab, int k,
                                       float top_p, int best_token,
                                       SamplingRng const &rng, float *workspace) {
@@ -467,11 +468,14 @@ __device__ inline int sample_filtered(Reader const &reader, int vocab, int k,
   int const *candidates = nullptr;
   int candidate_count = -1;
   constexpr int ShortlistCapacity = 1024;
+  constexpr int MinProbeVocab = 4096;
   static_assert(2 * ShortlistCapacity * sizeof(int) <= SAMPLING_SHARED_BYTES);
   // The probe rank targets at least ~4*k candidates for rows this large;
-  // k > capacity/4 would likely overflow. The 4096 floor limits probe cost;
-  // CUB sorting uses 128 threads.
-  if (k <= ShortlistCapacity / 4 && vocab >= 4096 && blockDim.x == 128) {
+  // k > capacity/4 would likely overflow. The vocabulary floor limits probe
+  // cost; CUB's sort uses exactly 128 threads.
+  bool probe_threads = BlockThreads == 128;
+  if constexpr (BlockThreads == 0) probe_threads = blockDim.x == 128;
+  if (k <= ShortlistCapacity / 4 && vocab >= MinProbeVocab && probe_threads) {
     uint64_t probe = sampled_top_k_bound(reader, vocab, k, workspace);
     extern __shared__ __align__(16) unsigned char sampling_shared[];
     auto *shortlist = reinterpret_cast<int *>(sampling_shared);
@@ -532,7 +536,7 @@ __device__ inline int sample_filtered(Reader const &reader, int vocab, int k,
   return best ? 0xffffffffu - uint32_t(best) : best_token;
 }
 
-template<typename T>
+template<int BlockThreads = 0, typename T>
 __device__ inline int sample_token(T const *logits, int vocab,
                                    ServingConfig const *cfg,
                                    SamplingScoreReader<T> reader, bool penalties,
@@ -569,10 +573,10 @@ __device__ inline int sample_token(T const *logits, int vocab,
   if (!top_k && top_p < 1.f)
     return dual_pivot_top_p(reader, vocab, top_p, best_token, rng, workspace);
   // The remaining path always has top-k enabled.
-  return sample_filtered(reader, vocab, k, top_p, best_token, rng, workspace);
+  return sample_filtered<BlockThreads>(reader, vocab, k, top_p, best_token, rng, workspace);
 }
 
-template<typename T, typename Token>
+template<int BlockThreads = 0, typename T, typename Token>
 __device__ inline void sample(T const *logits, float *scratch, Token *output,
                               int padded_vocab, ServingConfig const *cfg,
                               long long const *history, int history_len,
@@ -591,13 +595,13 @@ __device__ inline void sample(T const *logits, float *scratch, Token *output,
                                 state.seen_total, state.seen_generated, repetition,
                                 frequency, presence, 0.f, 1.f,
                                 int(cfg->bias_count)};
-  int token = sample_token(logits, vocab, cfg, reader, penalties,
-                           generation_position, state.workspace);
+  int token = sample_token<BlockThreads>(logits, vocab, cfg, reader, penalties,
+                                         generation_position, state.workspace);
   if (threadIdx.x == 0) *output = token;
 }
 
 #if defined(MODE_ONLINE_PINNED)
-template<typename T>
+template<int BlockThreads, typename T>
 __device__ inline void sample_request(T const *logits, float *scratch, long long *output,
                                      int padded_vocab, int slot,
                                      mirage::runtime::RuntimeConfig const &config) {
@@ -610,10 +614,10 @@ __device__ inline void sample_request(T const *logits, float *scratch, long long
   for (int i = start; i < end; ++i) {
     int position = config.step[row] + i - start;
     if (position + 1 < prompt) continue;
-    sample(logits + i * padded_vocab, scratch, output + i, padded_vocab,
-           config.generation_config + row,
-           config.tokens + row * MPK_MAX_SEQ_LENGTH, position + 1, prompt,
-           position + 1 - prompt, true);
+    sample<BlockThreads>(logits + i * padded_vocab, scratch, output + i, padded_vocab,
+                         config.generation_config + row,
+                         config.tokens + row * MPK_MAX_SEQ_LENGTH, position + 1, prompt,
+                         position + 1 - prompt, true);
     __syncthreads();
   }
 }

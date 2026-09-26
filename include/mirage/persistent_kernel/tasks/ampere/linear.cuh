@@ -216,18 +216,13 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
         int src_stage_offset = istage << log2_TILE_SIZE;
 
 #pragma unroll
-        for (int chunk = 0; chunk < NUM_CHUNKS_A / NUM_THREADS; chunk++) {
-          int tid = threadIdx.x;
-          int threadCol = (tid & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
-          int threadRow = tid >> log2_CHUNKS_PER_ROW_A;
-          constexpr int ROWS_PER_ITERATION = NUM_THREADS / CHUNKS_PER_ROW_A;
-
-          int dst_col = threadCol;
+        // A partial CTA still has input chunks to load (e.g. batch size 1).
+        for (int chunk = threadIdx.x; chunk < NUM_CHUNKS_A;
+             chunk += NUM_THREADS) {
+          int dst_col = (chunk & (CHUNKS_PER_ROW_A - 1)) << log2_CHUNK_SIZE;
           int src_col = dst_col + src_stage_offset;
-
-          int row_within = threadRow + chunk * ROWS_PER_ITERATION;
-          int src_row = row_within;
-          int dst_row = row_within;
+          int src_row = chunk >> log2_CHUNKS_PER_ROW_A;
+          int dst_row = src_row;
 
           load_smem(input_smem(dst_row, dst_col, istage),
                     input_dmem(src_row, src_col));
@@ -267,7 +262,9 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
       int warmup_smem_row = (lane_idx & 0xF);
       int warmup_n_col =
           (warp_col << 4) + ((lane_idx >> 4) << 3) + (lane_idx & 0x7);
-      T *warmup_input_ptr = input_smem(warmup_smem_row, warmup_m_col, 0);
+      T *warmup_input_ptr = warmup_smem_row < BATCH_SIZE
+                                ? input_smem(warmup_smem_row, warmup_m_col, 0)
+                                : zero_buffer(0, 0);
       DCHECK(warmup_n_col < OUTPUT_ATOM_SIZE);
       T *warmup_weight_ptr = weight_smem(warmup_n_row, warmup_n_col, 0);
 
@@ -294,22 +291,13 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
               // Prefetch next weight tile into ring buffer stage_write
               // Load input tile at the first output tile
 #pragma unroll
-              for (int chunk = 0; chunk < NUM_CHUNKS_A / NUM_THREADS; chunk++) {
-                // we don't need to hoist the threadCol and threadRow,,
-                // accorrding to experiment, the nvcc could hoist these const.
-                int tid = threadIdx.x;
-                int threadCol = (tid & (CHUNKS_PER_ROW_A - 1))
-                                << log2_CHUNK_SIZE;
-                int threadRow = tid >> log2_CHUNKS_PER_ROW_A;
-                constexpr int ROWS_PER_ITERATION =
-                    NUM_THREADS / CHUNKS_PER_ROW_A; // 8
-
-                int dst_col = threadCol;
+              for (int chunk = threadIdx.x; chunk < NUM_CHUNKS_A;
+                   chunk += NUM_THREADS) {
+                int dst_col = (chunk & (CHUNKS_PER_ROW_A - 1))
+                              << log2_CHUNK_SIZE;
                 int src_col = dst_col + src_stage_offset;
-
-                int row_within = threadRow + chunk * ROWS_PER_ITERATION;
-                int src_row = row_within;
-                int dst_row = row_within;
+                int src_row = chunk >> log2_CHUNKS_PER_ROW_A;
+                int dst_row = src_row;
 
                 load_smem(input_smem(dst_row, dst_col, ismem_write_stage),
                           input_dmem(src_row, src_col));
@@ -370,10 +358,10 @@ __device__ __forceinline__ void linear_kernel(void const *input_ptr,
                       (((lane_idx & 0xF) >> 3) << 3);
 
           int smem_row = m_row;
-          T *valid_input_ptr = input_smem(smem_row, m_col, ismem_read_stage);
-          // we don't need to check for is_input_valid, because we will use
-          // num_active_tokens for the output, we will just pick valid output.
-          T *input_ptr = valid_input_ptr;
+          // Tensor-core loads cover 16 rows even for smaller input buffers.
+          T *input_ptr = smem_row < BATCH_SIZE
+                             ? input_smem(smem_row, m_col, ismem_read_stage)
+                             : zero_buffer(0, 0);
 
           T *valid_weight_ptr = weight_smem(n_row, n_col, ismem_read_stage);
           T *weight_ptr = valid_weight_ptr;

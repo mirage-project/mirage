@@ -19,6 +19,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
@@ -30,16 +31,20 @@ from .protocol import ChatRequest, TextRequest
 logger = logging.getLogger(__name__)
 
 
+# ── Lifespan ──────────────────────────────────────────────────────────────────
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    runner = ModelRunner(app.state.runner_config)
+    config: RunnerConfig = app.state.runner_config
+    runner = ModelRunner(config)
     engine = LLMEngine(runner)
     app.state.engine = engine
-    try:
-        yield
-    finally:
-        engine.close()
+    yield
+    engine.close()
 
+
+# ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI(title="MPK LLM Engine", lifespan=lifespan)
 
@@ -70,9 +75,15 @@ def _decode_output(tokens, tokenizer):
 
 
 async def _stream_bridge(tokens, tokenizer):
-    """Bridge the engine's synchronous stream to the HTTP event loop."""
+    """Bridge a synchronous streaming generator to async token updates.
+
+    Each request gets its own daemon thread so concurrent requests are never
+    gated by the default ``ThreadPoolExecutor`` pool size. Items produced by
+    the thread are handed to the event loop via ``call_soon_threadsafe`` so
+    that the asyncio queue is accessed only from the event-loop thread.
+    """
     loop = asyncio.get_running_loop()
-    queue = asyncio.Queue()
+    queue: asyncio.Queue = asyncio.Queue()
 
     def run():
         try:
@@ -93,38 +104,14 @@ async def _stream_bridge(tokens, tokenizer):
         yield item
 
 
-async def complete(request: Request, chat: bool):
-    engine = request.app.state.engine
-    model = request.app.state.served_model
-    try:
-        body = await request.json()
-        req = (ChatRequest if chat else TextRequest).model_validate(body)
-        params = req.sampling_params()
-    except ValidationError as exc:
-        first = exc.errors(include_input=False)[0]
-        return error_response(first["msg"], param=".".join(map(str, first["loc"])))
-    except ValueError:
-        return error_response("Invalid or empty JSON body")
-    if req.model != model:
-        return error_response(f"Model '{req.model}' is not served", 404, "model")
-    try:
-        tokenizer = engine.tokenizer_manager
-        ids = (tokenizer.tokenize_messages([m.template_message() for m in req.messages])
-               if chat else tokenizer.tokenize_raw(req.prompt))
-        tokens = await asyncio.to_thread(
-            engine.submit, ids, stream=True, sampling_params=params,
-            return_token_ids=True, timeout=request.app.state.request_timeout)
-    except ValueError as exc:
-        return error_response(str(exc))
-    except Exception:
-        logger.exception("Failed to submit generation")
-        return error_response("Unable to start generation", 503)
-
+async def _completion_response(req, chat, model, prompt_tokens, tokens, tokenizer):
+    """Format a submitted request as a response or SSE stream."""
     response_id = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex
     created = int(time.time())
 
     def usage(count):
-        return dict(prompt_tokens=len(ids), completion_tokens=count, total_tokens=len(ids) + count)
+        return dict(prompt_tokens=prompt_tokens, completion_tokens=count,
+                    total_tokens=prompt_tokens + count)
 
     def response(text="", reason=None, *, role=False, usage=None):
         choice = dict(index=0, finish_reason=reason)
@@ -172,6 +159,35 @@ async def complete(request: Request, chat: bool):
         return error_response("Generation failed", 500)
 
 
+async def complete(request: Request, chat: bool):
+    engine = request.app.state.engine
+    model = request.app.state.served_model
+    try:
+        body = await request.json()
+        req = (ChatRequest if chat else TextRequest).model_validate(body)
+        params = req.sampling_params()
+    except ValidationError as exc:
+        first = exc.errors(include_input=False)[0]
+        return error_response(first["msg"], param=".".join(map(str, first["loc"])))
+    except ValueError:
+        return error_response("Invalid or empty JSON body")
+    if req.model != model:
+        return error_response(f"Model '{req.model}' is not served", 404, "model")
+    try:
+        tokenizer = engine.tokenizer_manager
+        ids = (tokenizer.tokenize_messages([m.template_message() for m in req.messages])
+               if chat else tokenizer.tokenize_raw(req.prompt))
+        tokens = await asyncio.to_thread(
+            engine.submit, ids, stream=True, sampling_params=params,
+            return_token_ids=True, timeout=request.app.state.request_timeout)
+    except ValueError as exc:
+        return error_response(str(exc))
+    except Exception:
+        logger.exception("Failed to submit generation")
+        return error_response("Unable to start generation", 503)
+    return await _completion_response(req, chat, model, len(ids), tokens, tokenizer)
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
@@ -200,8 +216,6 @@ async def completions(request: Request):
 
 
 def main():
-    import uvicorn
-
     parser = argparse.ArgumentParser(description="Mirage LLM Engine Server")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", default=8000, type=int, help="Port to listen on")
