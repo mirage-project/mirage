@@ -51,9 +51,22 @@ namespace kernel {
 // exponent-only encoding (2^(encoded_exponent - 127)).
 CUTE_DEVICE float decode_mxfp4_value(uint8_t packed, bool high_nibble) {
   uint8_t nibble = high_nibble ? (packed >> 4) : (packed & 0x0f);
-  constexpr float values[16] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f,
-                                4.0f, 6.0f, 0.0f, -0.5f, -1.0f, -1.5f,
-                                -2.0f, -3.0f, -4.0f, -6.0f};
+  constexpr float values[16] = {0.0f,
+                                0.5f,
+                                1.0f,
+                                1.5f,
+                                2.0f,
+                                3.0f,
+                                4.0f,
+                                6.0f,
+                                0.0f,
+                                -0.5f,
+                                -1.0f,
+                                -1.5f,
+                                -2.0f,
+                                -3.0f,
+                                -4.0f,
+                                -6.0f};
   return values[nibble];
 }
 
@@ -426,10 +439,14 @@ __device__ __forceinline__ void
                 if (global_row < OUTPUT_SIZE) {
                   size_t const packed_offset =
                       (static_cast<size_t>(expert_idx) * OUTPUT_STRIDE +
-                       global_row) * (REDUCTION_SIZE / 2) + global_col / 2;
+                       global_row) *
+                          (REDUCTION_SIZE / 2) +
+                      global_col / 2;
                   size_t const scale_offset =
                       (static_cast<size_t>(expert_idx) * OUTPUT_STRIDE +
-                       global_row) * (REDUCTION_SIZE / 32) + global_col / 32;
+                       global_row) *
+                          (REDUCTION_SIZE / 32) +
+                      global_col / 32;
                   float const value = decode_mxfp4_value(
                       packed_weight[packed_offset], (global_col & 1) != 0);
                   int const exponent =

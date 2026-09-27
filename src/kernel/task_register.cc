@@ -3663,9 +3663,10 @@ int TaskRegister::register_moe_linear_sm90_task(
 
   code.inc_indent();
   if (!mxfp4_weight) {
-    code.e("TMA_A "
-           "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0])"
-           ");");
+    code.e(
+        "TMA_A "
+        "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0])"
+        ");");
   }
   // Bias Tensor setup
   code.e(
@@ -3689,7 +3690,8 @@ int TaskRegister::register_moe_linear_sm90_task(
          batch_size);
   code.e("cute::Tensor mRoutingIndices = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::int32_t*>("
-         "task_desc->input_ptrs[$])), layout_routing_indices);", routing_op_idx);
+         "task_desc->input_ptrs[$])), layout_routing_indices);",
+         routing_op_idx);
   // Topk_mask Tensor setup
   code.e("cute::Layout layout_expert_mask = "
          "cute::make_layout(cute::make_shape($), "
@@ -3697,7 +3699,8 @@ int TaskRegister::register_moe_linear_sm90_task(
          num_experts);
   code.e("cute::Tensor mMask = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::int32_t*>("
-         "task_desc->input_ptrs[$])), layout_expert_mask);", mask_op_idx);
+         "task_desc->input_ptrs[$])), layout_expert_mask);",
+         mask_op_idx);
   // Output Tensor setup
   code.e("cute::Layout layout_output = cute::make_layout(cute::make_shape($, "
          "$, $), "
@@ -3757,12 +3760,12 @@ int TaskRegister::register_moe_linear_sm90_task(
   code.e("    mMask,");
   code.e("    mOutput,");
   code.e("    task_desc->task_metadata.expert_offset,");
-  code.e("    $ ,", mxfp4_weight
-                          ? "static_cast<uint8_t const*>(task_desc->input_ptrs[1])"
-                          : "nullptr");
-  code.e("    $);", mxfp4_weight
-                         ? "static_cast<uint8_t const*>(task_desc->input_ptrs[2])"
-                         : "nullptr");
+  code.e("    $ ,",
+         mxfp4_weight ? "static_cast<uint8_t const*>(task_desc->input_ptrs[1])"
+                      : "nullptr");
+  code.e("    $);",
+         mxfp4_weight ? "static_cast<uint8_t const*>(task_desc->input_ptrs[2])"
+                      : "nullptr");
   if (w13_linear) {
     return register_task_variant(mxfp4_weight ? TASK_MOE_W13_MXFP4_SM90
                                               : TASK_MOE_W13_LINEAR_SM90,
