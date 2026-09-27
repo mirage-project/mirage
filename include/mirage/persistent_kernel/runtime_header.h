@@ -223,6 +223,23 @@ enum TaskType {
   // Clamped-alpha SwiGLU: (clamp(up) + 1) * clamp(gate) * sigmoid(gate*alpha)
   TASK_CLAMPED_SWIGLU = 451,
   TASK_GPT_OSS_TASK_END = 499, // end placeholder, not a real task
+  // static megakernel tasks (Kimi K3 MoE, include/mirage/static_megakernel/), SM100 / SM103
+  TASK_STATIC_TASK_BEGIN = 500, // begin placeholder, not a real task
+  // bf16 [8 x K-range] x [K-range x 128] tile; kind (router / latent /
+  // shared gate_up / shared down) is params[0], K is params[1]; the K parts
+  // are grid y
+  TASK_GEMM_TILE_SM100 = 501,
+  // one token: sum router K-split partials, sigmoid + bias, top-16, renorm
+  TASK_ROUTE_SM100 = 502,
+  // one latent K-tile: sum partials, MXFP8 quantize, all-gather
+  TASK_QUANT_SM100 = 503,
+  // one shared gate_up tile: SiTU -> h_s
+  TASK_SACT_SM100 = 504,
+  // the routed-expert phase on one worker (dynamic queue of W13/W2 items)
+  TASK_EXPERT_QUEUE_SM100 = 505,
+  // [R|S] exchange, RMSNorm, latent_up, y (one task per worker)
+  TASK_TAIL_SM100 = 506,
+  TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 
 enum EventType {

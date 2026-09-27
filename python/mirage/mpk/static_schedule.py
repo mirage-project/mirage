@@ -1,0 +1,430 @@
+"""Schedule files -> layer.cu -> built, loaded and given the tensors of every GPU.
+
+A schedule file (schedule_gpu<g>.json, written by compiler.compile_plan) has:
+  nodes                per graph node: name, grid, params, input_grids (the grid of the node writing each input; null: graph input)
+  all_tasks            per task: node, pos (grid position), deps (the task ids it waits for)
+  worker_task_queues   per SM, the task ids in the order the SM runs them
+
+layer.cu = four parts, each written by one function below:
+  header_code     includes; StaticTask {node, x, y, z} (one entry of an SM's list), StaticGrid / StaticParams (a node's grid and
+                  params as template constants); the structs the family's host code receives; the family's header
+  task_tables     per GPU, the entries of every SM's list one after another, and where each SM's list begins
+  kernel_code     layer_kernel: the family's kernel_begin, a loop over this SM's entries with one `case` per node that calls the
+                  node's task function (family task_function, e.g. static_mk::run_route) with its grid, its params and its inputs'
+                  producers' grids as template arguments, the family's kernel_end
+  host_code       HOST_CODE below: init (also the per-SM task tables on each GPU), one launch on every GPU, wait, timing, Python
+The family (declared with StaticMegakernel.declare_host_state) supplies every name that is not the generator's (FAMILY_KEYS).
+
+  write_schedule(path, nodes, all_tasks, queues, info)      checks the lists cannot deadlock, writes the file
+  generate_code(pk, schedules) -> str                       layer.cu
+  compile_static(pk, schedule_paths, gpu_tensors, out_dir, extra_flags, code=None) -> StaticKernel
+"""
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sysconfig
+from typing import Dict, List, Optional, Tuple
+
+
+# ---------------- schedule file ----------------
+def check_deadlock_free(all_tasks: List[dict], queues: List[List[int]]) -> None:
+    """Raise unless every task can run.
+      1. every task is in exactly one SM's list
+      2. put an edge a -> b for "b waits for a": b depends on a (deps), or a is right before b in an SM's list (the SM runs b
+         only after a). Remove, again and again, the tasks nothing waits on any more (a topological sort). If some tasks never
+         get removed, they wait for each other in a circle: that plan would hang on the GPU."""
+    num_tasks = len(all_tasks)
+    seen = [0] * num_tasks
+    for sm_list in queues:
+        for t in sm_list:
+            seen[t] += 1
+    wrong = [t for t in range(num_tasks) if seen[t] != 1]
+    if wrong:
+        raise ValueError(f"tasks {wrong[:8]} are in {[seen[t] for t in wrong[:8]]} lists, must be in 1")
+
+    edges = [(d, t) for t in range(num_tasks) for d in all_tasks[t]["deps"]]
+    edges += [(sm_list[i - 1], sm_list[i]) for sm_list in queues for i in range(1, len(sm_list))]
+    successors: Dict[int, List[int]] = {}
+    waiting_for = [0] * num_tasks
+    for a, b in edges:
+        successors.setdefault(a, []).append(b)
+        waiting_for[b] += 1
+    ready = [t for t in range(num_tasks) if waiting_for[t] == 0]
+    done = 0
+    while ready:
+        t = ready.pop()
+        done += 1
+        for s in successors.get(t, []):
+            waiting_for[s] -= 1
+            if waiting_for[s] == 0:
+                ready.append(s)
+    if done != num_tasks:
+        raise ValueError(f"the task lists can deadlock: {num_tasks - done} of {num_tasks} tasks wait for each other in a circle")
+
+
+def write_schedule(path: str, nodes: Dict[str, dict], all_tasks: List[dict], queues: List[List[int]], info: dict) -> None:
+    check_deadlock_free(all_tasks, queues)
+    doc = {"nodes": nodes, "all_tasks": all_tasks, "worker_task_queues": queues, "info": info}
+    with open(path, "w") as f:
+        json.dump(doc, f, indent=1)
+
+
+# ---------------- code generation ----------------
+FAMILY_KEYS = ["header", "init", "reset", "finalize", "report", "timing", "args", "kernel_params", "launch_args", "threads",
+               "dynamic_smem", "max_tasks", "kernel_begin", "task_begin", "task_function", "task_args", "kernel_end"]
+
+
+def family_of(pk) -> dict:
+    """The task family's declaration: pk._host_states has one entry per family (declare_host_state); the generator builds one
+    family (MoE: "moe", declared by expert_queue_layer). Raises if a key of FAMILY_KEYS is missing."""
+    families = getattr(pk, "_host_states", {})
+    if len(families) != 1:
+        raise ValueError(f"the graph has {len(families)} task families with kernel pieces ({list(families)}); "
+                         f"the generator builds one")
+    (name, family), = families.items()
+    missing = [k for k in FAMILY_KEYS if k not in family]
+    if missing:
+        raise ValueError(f"task family {name}: declaration misses {missing}")
+    return family
+
+
+def header_code(family: dict, num_gpus: int) -> List[str]:
+    return [f"// layer.cu -- generated by mirage.mpk.static_schedule.compile_static from the graph and {num_gpus} "
+            f"schedule.json files",
+            "#include <cuda.h>", "#include <cuda_runtime.h>", "#include <chrono>", "#include <map>", "#include <string>",
+            "#include <vector>", "",
+            "struct StaticTask { int node, x, y, z; };   // one entry of an SM's list: the graph node and the task's grid position",
+            "template <int X, int Y, int Z> struct StaticGrid { static constexpr int x = X, y = Y, z = Z; };   // a node's grid",
+            "template <int... P> struct StaticParams { static constexpr int v[sizeof...(P) + 1] = {P..., 0}; };   // a node's params",
+            "",
+            "// what the task family's host code sees of one GPU / of all GPUs",
+            "struct StaticGpuView {",
+            "  int gpu;                                  // CUDA device index",
+            "  std::map<std::string, void *> tensors;    // the graph's tensors on this GPU, by name",
+            "  cudaStream_t stream;",
+            "};",
+            "struct StaticContext { int num_gpus = 0, num_lists = 0; std::vector<StaticGpuView> gpus; };",
+            f'#include "{family["header"]}"', ""]
+
+
+def task_tables(schedules: List[dict]) -> List[str]:
+    """Per GPU g two C++ arrays:
+      static_tasks_gpu<g>       the entries of SM 0's list, then SM 1's, ...: {node, x, y, z}
+      static_list_begin_gpu<g>  SM k's entries are [begin[k], begin[k + 1])
+    Example: SM 0 = [route task 0, expert queue task 0, tail task 0] -> {31, 0, 0, 0}, {36, 0, 0, 0}, {37, 0, 0, 0}; begin = {0, 3, ..}.
+    static_init copies them into a per-SM table on each GPU (max_tasks entries per SM, the rest node = -1)."""
+    lines = []
+    for g, schedule in enumerate(schedules):
+        entries, begin = [], [0]
+        for sm_list in schedule["worker_task_queues"]:
+            for t in sm_list:
+                task = schedule["all_tasks"][t]
+                entries.append("{%d, %d, %d, %d}" % (task["node"], *task["pos"]))
+            begin.append(len(entries))
+        lines.append(f"static const StaticTask static_tasks_gpu{g}[] = {{{', '.join(entries)}}};")
+        lines.append(f"static const int static_list_begin_gpu{g}[] = {{{', '.join(map(str, begin))}}};")
+    return lines
+
+
+def task_call(family: dict, node: dict) -> str:
+    """One node's call in the kernel loop: the family's task function for the node's name, with template arguments its grid,
+    its params, and per input the grid of the node that writes it (StaticGrid<0, 0, 0> for a graph input).
+    static_mk::run_route<StaticGrid<8, 1, 1>, StaticParams<>, StaticGrid<7, 14, 1>, StaticGrid<0, 0, 0>, StaticGrid<0, 0, 0>>(maps, g, L, tk)"""
+    grid = lambda g: "StaticGrid<%d, %d, %d>" % tuple(g if g else (0, 0, 0))
+    args = [grid(node["grid"]), "StaticParams<%s>" % ", ".join(str(p) for p in node["params"])]
+    args += [grid(g) for g in node["input_grids"]]
+    return f"{family['task_function'].format(name=node['name'])}<{', '.join(args)}>({family['task_args']})"
+
+
+def kernel_code(family: dict, nodes: Dict[str, dict]) -> List[str]:
+    """layer_kernel. For the MoE family it reads:
+        __global__ void __launch_bounds__(256, 1) layer_kernel(const __grid_constant__ static_mk::Maps maps, static_mk::G g, StaticTask const *static_tasks) {
+          static_mk::KernelLocals L; static_mk::kernel_begin(maps, g, L);
+          StaticTask const *my = static_tasks + blockIdx.x * (static_mk::MAX_TASKS_PER_SM);   // this SM's list
+          for (int ti = 0; ti < static_mk::MAX_TASKS_PER_SM; ti++) {
+            StaticTask const tk = my[ti];
+            if (tk.node < 0) break;
+            [the family's task_begin, if any]
+            switch (tk.node) {
+              case 30: static_mk::run_gemm_tile<StaticGrid<7, 14, 1>, StaticParams<0, 7168>, ...>(maps, g, L, tk); break;
+              ...                                                 // one case per node (task_call)
+            }
+          }
+          static_mk::kernel_end(g, L);
+        }"""
+    lines = ["", "// ---- the kernel ----",
+             f"__global__ void __launch_bounds__({family['threads']}, 1) layer_kernel({family['kernel_params']}, StaticTask const *static_tasks) {{",
+             f"  {family['kernel_begin']}",
+             f"  StaticTask const *my = static_tasks + blockIdx.x * ({family['max_tasks']});",
+             f"  for (int ti = 0; ti < {family['max_tasks']}; ti++) {{",
+             "    StaticTask const tk = my[ti];",
+             "    if (tk.node < 0) break;"]
+    if family["task_begin"]:
+        lines.append(f"    {family['task_begin']}")
+    lines.append("    switch (tk.node) {")
+    for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])):
+        lines.append(f"      case {idx}: {task_call(family, node)}; break;")
+    lines += ["    }", "  }", f"  {family['kernel_end']}", "}", ""]
+    return lines
+
+
+def host_code(pk, family: dict, schedules: List[dict]) -> List[str]:
+    """HOST_CODE with every @NAME@ replaced: the family's function names, its arguments (family "args": role -> tensor name
+    and the split counts, e.g. {"router_ksplit": "14"}), the number of GPUs and of SMs (lists)."""
+    args = family["args"](pk) if callable(family["args"]) else dict(family["args"])
+    args_code = ", ".join('{"%s", "%s"}' % (k, v) for k, v in args.items())
+    num_gpus = len(schedules)
+    fill = {
+        "@NUM_GPUS@": str(num_gpus),
+        "@INIT@": f"{family['init']}(g_ctx, std::map<std::string, std::string>{{{args_code}}});",
+        "@RESET@": family["reset"], "@FINALIZE@": family["finalize"], "@REPORT@": family["report"],
+        "@TIMING@": family["timing"], "@LAUNCH_ARGS@": family["launch_args"],
+        "@THREADS@": str(family["threads"]), "@SMEM@": family["dynamic_smem"],
+        "@TASKS@": ", ".join(f"static_tasks_gpu{g}" for g in range(num_gpus)),
+        "@MAX_TASKS@": family["max_tasks"],
+        "@BEGINS@": ", ".join(f"static_list_begin_gpu{g}" for g in range(num_gpus)),
+        "@NLISTS@": str(len(schedules[0]["worker_task_queues"])),
+    }
+    code = HOST_CODE
+    for placeholder, value in fill.items():
+        code = code.replace(placeholder, value)
+    return [code]
+
+
+def generate_code(pk, schedules: List[dict]) -> str:
+    """layer.cu for pk's task family and one schedule per GPU. All GPUs run the same kernel, so their nodes (grids, params)
+    and number of SM lists must be the same; only their task tables differ."""
+    family = family_of(pk)
+    nodes = schedules[0]["nodes"]
+    for g, schedule in enumerate(schedules):
+        if schedule["nodes"] != nodes:
+            raise ValueError(f"schedule of GPU {g}: nodes differ from GPU 0's (one kernel for every GPU)")
+        if len(schedule["worker_task_queues"]) != len(schedules[0]["worker_task_queues"]):
+            raise ValueError("every GPU needs the same number of task lists")
+    lines = header_code(family, len(schedules))
+    lines += task_tables(schedules)
+    lines += kernel_code(family, nodes)
+    lines += host_code(pk, family, schedules)
+    return "\n".join(lines)
+
+
+HOST_CODE = r"""
+// ---- host: all GPUs of this process ----
+#include <Python.h>
+#define ST_CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { fprintf(stderr, "layer: %s @%d: %s\n", #x, __LINE__, cudaGetErrorString(e_)); exit(1); } } while (0)
+static StaticTask const *const static_tasks_of[@NUM_GPUS@] = {@TASKS@};
+static int const *const static_list_begin[@NUM_GPUS@] = {@BEGINS@};
+struct StaticGpu { cudaStream_t stream = nullptr; cudaEvent_t e0 = nullptr, e1 = nullptr; void *flush = nullptr; size_t flush_bytes = 0; StaticTask *tasks = nullptr; };
+static std::vector<StaticGpu> g_st;
+static StaticContext g_ctx;
+static unsigned long long g_launches = 0;
+
+// per GPU: a stream, two events, the kernel's shared memory size, the per-SM task table on the GPU (max_tasks entries per SM:
+// the SM's list, then node = -1); the view the family gets (its tensors); then the family's init (MoE: moe_host_init)
+static void static_init(std::vector<std::map<std::string, void *>> const &tensors) {
+  int const n = @NUM_GPUS@;
+  if ((int)tensors.size() != n) { fprintf(stderr, "layer: built for %d GPUs, got tensors for %zu\n", n, tensors.size()); exit(1); }
+  g_st.assign(n, StaticGpu());
+  g_ctx.num_gpus = n; g_ctx.num_lists = @NLISTS@; g_ctx.gpus.assign(n, StaticGpuView());
+  for (int g = 0; g < n; g++) {
+    ST_CK(cudaSetDevice(g));
+    ST_CK(cudaStreamCreate(&g_st[g].stream)); ST_CK(cudaEventCreate(&g_st[g].e0)); ST_CK(cudaEventCreate(&g_st[g].e1));
+    ST_CK(cudaFuncSetAttribute(layer_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)(@SMEM@)));
+    int const max_tasks = (int)(@MAX_TASKS@);
+    std::vector<StaticTask> table((size_t)@NLISTS@ * max_tasks, StaticTask{-1, 0, 0, 0});
+    for (int sm = 0; sm < @NLISTS@; sm++) {
+      int const b = static_list_begin[g][sm], n = static_list_begin[g][sm + 1] - b;
+      if (n > max_tasks - 1) { fprintf(stderr, "layer: GPU %d SM %d: %d tasks, at most %d\n", g, sm, n, max_tasks - 1); exit(1); }
+      for (int i = 0; i < n; i++) table[(size_t)sm * max_tasks + i] = static_tasks_of[g][b + i];
+    }
+    ST_CK(cudaMalloc(&g_st[g].tasks, table.size() * sizeof(StaticTask)));
+    ST_CK(cudaMemcpy(g_st[g].tasks, table.data(), table.size() * sizeof(StaticTask), cudaMemcpyHostToDevice));
+    StaticGpuView &v = g_ctx.gpus[g];
+    v.gpu = g; v.tensors = tensors[g]; v.stream = g_st[g].stream;
+  }
+  @INIT@
+}
+
+// one launch on every GPU: per GPU the L2 write (flush_bytes > 0) and the family's reset on its stream; wait for every GPU (so
+// all GPUs start together); then per GPU: event, kernel, event
+static void static_launch(size_t flush_bytes) {
+  int const n = (int)g_st.size();
+  for (int g = 0; g < n; g++) {
+    StaticGpu &s = g_st[g]; ST_CK(cudaSetDevice(g));
+    if (flush_bytes > 0) {
+      if (s.flush_bytes < flush_bytes) { if (s.flush) ST_CK(cudaFree(s.flush)); ST_CK(cudaMalloc(&s.flush, flush_bytes)); s.flush_bytes = flush_bytes; }
+      ST_CK(cudaMemsetAsync(s.flush, (int)(g_launches & 0xff), flush_bytes, s.stream));
+    }
+    @RESET@(g_ctx, g, s.stream, g_launches);
+  }
+  for (int g = 0; g < n; g++) { ST_CK(cudaSetDevice(g)); ST_CK(cudaStreamSynchronize(g_st[g].stream)); }
+  for (int gpu = 0; gpu < n; gpu++) {
+    StaticGpu &s = g_st[gpu]; ST_CK(cudaSetDevice(gpu));
+    ST_CK(cudaEventRecord(s.e0, s.stream));
+    layer_kernel<<<@NLISTS@, @THREADS@, (int)(@SMEM@), s.stream>>>(@LAUNCH_ARGS@, s.tasks);
+    ST_CK(cudaGetLastError());
+    ST_CK(cudaEventRecord(s.e1, s.stream));
+  }
+  g_launches++;
+}
+
+// wait for every GPU's end event; timeout_s > 0: give up after that long (*timed_out = true)
+static cudaError_t static_wait(double timeout_s, bool *timed_out) {
+  auto const t0 = std::chrono::steady_clock::now(); *timed_out = false;
+  for (size_t g = 0; g < g_st.size(); g++) {
+    ST_CK(cudaSetDevice((int)g));
+    for (;;) {
+      cudaError_t e = cudaEventQuery(g_st[g].e1);
+      if (e == cudaSuccess) break;
+      if (e != cudaErrorNotReady) return e;
+      if (timeout_s > 0 && std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() > timeout_s) { *timed_out = true; return cudaSuccess; }
+    }
+  }
+  return cudaSuccess;
+}
+
+static void static_finalize() {
+  @FINALIZE@(g_ctx);
+  for (size_t g = 0; g < g_st.size(); g++) { cudaSetDevice((int)g); if (g_st[g].flush) cudaFree(g_st[g].flush); if (g_st[g].tasks) cudaFree(g_st[g].tasks); cudaEventDestroy(g_st[g].e0); cudaEventDestroy(g_st[g].e1); cudaStreamDestroy(g_st[g].stream); }
+  g_st.clear();
+}
+
+// ---- Python binding: module __mirage_static_launcher ----
+static PyObject *py_init(PyObject *self, PyObject *args) {
+  PyObject *py_names, *py_ptrs;
+  if (!PyArg_ParseTuple(args, "OO", &py_names, &py_ptrs)) return NULL;
+  if (!PyList_Check(py_names) || !PyList_Check(py_ptrs) || PyList_Size(py_names) != PyList_Size(py_ptrs)) { PyErr_SetString(PyExc_TypeError, "names / pointers: one list per GPU"); return NULL; }
+  std::vector<std::map<std::string, void *>> tensors(PyList_Size(py_names));
+  for (Py_ssize_t g = 0; g < PyList_Size(py_names); g++) {
+    PyObject *nl = PyList_GetItem(py_names, g), *pl = PyList_GetItem(py_ptrs, g);
+    if (!PyList_Check(nl) || !PyList_Check(pl) || PyList_Size(nl) != PyList_Size(pl)) { PyErr_SetString(PyExc_TypeError, "bad tensor lists"); return NULL; }
+    for (Py_ssize_t i = 0; i < PyList_Size(nl); i++) { const char *s = PyUnicode_AsUTF8(PyList_GetItem(nl, i)); if (!s) return NULL; tensors[g][s] = PyLong_AsVoidPtr(PyList_GetItem(pl, i)); }
+  }
+  if (PyErr_Occurred()) return NULL;
+  static_init(tensors);
+  Py_RETURN_NONE;
+}
+static PyObject *py_launch(PyObject *self, PyObject *args) {
+  unsigned long long flush = 0;
+  if (!PyArg_ParseTuple(args, "|K", &flush)) return NULL;
+  static_launch((size_t)flush);
+  Py_RETURN_NONE;
+}
+static PyObject *py_wait(PyObject *self, PyObject *args) {
+  double timeout_s = 0.0;
+  if (!PyArg_ParseTuple(args, "|d", &timeout_s)) return NULL;
+  cudaError_t err; bool timed_out = false;
+  Py_BEGIN_ALLOW_THREADS
+  err = static_wait(timeout_s, &timed_out);
+  Py_END_ALLOW_THREADS
+  if (timed_out) { PyErr_Format(PyExc_TimeoutError, "layer kernel not finished after %d s", (int)timeout_s); return NULL; }
+  if (err != cudaSuccess) { PyErr_Format(PyExc_RuntimeError, "layer kernel failed: %s", cudaGetErrorString(err)); return NULL; }
+  Py_RETURN_NONE;
+}
+// per GPU (start barrier passed, end) of the last launch, globaltimer ns, as the family measures them
+static PyObject *py_timing(PyObject *self, PyObject *args) {
+  PyObject *out = PyList_New((Py_ssize_t)g_st.size());
+  for (size_t g = 0; g < g_st.size(); g++) { long long bar = 0, end = 0; @TIMING@(g_ctx, (int)g, bar, end); PyList_SetItem(out, (Py_ssize_t)g, Py_BuildValue("(LL)", bar, end)); }
+  return out;
+}
+static PyObject *py_report(PyObject *self, PyObject *args) { @REPORT@(g_ctx); fflush(stdout); fflush(stderr); Py_RETURN_NONE; }
+static PyObject *py_finalize(PyObject *self, PyObject *args) { static_finalize(); Py_RETURN_NONE; }
+static PyMethodDef StaticMethods[] = {
+  {"init_func", py_init, METH_VARARGS, "the graph's tensors of every GPU (names, pointers): the family's init"},
+  {"launch_func", py_launch, METH_VARARGS, "one launch on every GPU (optional bytes written first to empty L2)"},
+  {"wait_func", py_wait, METH_VARARGS, "wait for every GPU (optional timeout in seconds)"},
+  {"timing_func", py_timing, METH_NOARGS, "per GPU (start barrier passed, end) globaltimer ns of the last launch, as the family measures them"},
+  {"report_func", py_report, METH_NOARGS, "the family's diagnostics (also for a launch that has not finished)"},
+  {"finalize_func", py_finalize, METH_NOARGS, "free everything"},
+  {NULL, NULL, 0, NULL}};
+static struct PyModuleDef StaticModuleDef = {PyModuleDef_HEAD_INIT, "__mirage_static_launcher", NULL, -1, StaticMethods, NULL, NULL, NULL, NULL};
+PyMODINIT_FUNC PyInit___mirage_static_launcher(void) { return PyModule_Create(&StaticModuleDef); }
+"""
+
+
+class StaticKernel:
+    """The built layer, driving len(schedule_paths) GPUs from this process."""
+
+    def __init__(self, module, num_gpus: int, cu_path: str, so_path: str):
+        self.module = module
+        self.num_gpus = num_gpus
+        self.cu_path = cu_path
+        self.so_path = so_path
+        self._finalized = False
+
+    def launch(self, l2_flush_bytes: int = 0):
+        """One launch on every GPU. l2_flush_bytes > 0: write that many bytes on each GPU first (empties L2)."""
+        self.module.launch_func(int(l2_flush_bytes))
+
+    def wait(self, timeout_s: float = 0.0):
+        """Wait for every GPU; timeout_s > 0 raises TimeoutError after that long (the kernel is then still running)."""
+        self.module.wait_func(float(timeout_s))
+
+    def timing(self) -> List[Tuple[int, int]]:
+        """Per GPU (start barrier passed, end) of the last launch, globaltimer ns, as the task family measures them."""
+        return self.module.timing_func()
+
+    def span_us(self) -> float:
+        """Max over GPUs of (end - start barrier passed) of the last launch, in microseconds."""
+        return max(end - start for start, end in self.timing()) / 1e3
+
+    def report(self):
+        self.module.report_func()
+
+    def finalize(self):
+        if not self._finalized:
+            self.module.finalize_func()
+            self._finalized = True
+
+
+def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]] = None) -> List[str]:
+    """-O3 -std=c++17, the GPU's own arch, -lcuda, plus what a Python extension
+    needs (-shared, -fPIC, the Python headers)."""
+    import torch
+    from ..kernel import get_key_paths
+    _, include_path, _ = get_key_paths()
+    major, minor = torch.cuda.get_device_capability(0)
+    arch = f"{major}{minor}a" if major >= 9 else f"{major}{minor}"
+    scheme = sysconfig.get_default_scheme() if hasattr(sysconfig, "get_default_scheme") else sysconfig._get_default_scheme()
+    if scheme == "posix_local":
+        scheme = "posix_prefix"
+    python_include = sysconfig.get_paths(scheme=scheme)["include"]
+    return ([shutil.which("nvcc"), "-O3", "-std=c++17", "-gencode", f"arch=compute_{arch},code=sm_{arch}",
+             f"-I{include_path}", f"-I{os.path.join(include_path, 'mirage/persistent_kernel')}", f"-I{python_include}",
+             "-shared", "-Xcompiler=-fPIC", "-lcuda", cu_path, "-o", so_path]
+            + list(extra_flags or []))
+
+
+def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dict]] = None, out_dir: Optional[str] = None,
+                   extra_flags: Optional[List[str]] = None, code: Optional[str] = None) -> StaticKernel:
+    """  1. read the schedule files; write <out_dir>/layer.cu = generate_code (or `code`: a layer.cu given by the caller)
+       2. nvcc it into a Python extension (compile_command) and load it
+       3. init_func: every GPU's tensors (gpu_tensors[g] = {name: torch tensor on GPU g}) -> static_init -> the family's init"""
+    num_gpus = len(schedule_paths)
+    gpu_tensors = gpu_tensors or [dict(pk._model_tensors)]
+    assert len(gpu_tensors) == num_gpus, "one tensor dict per GPU"
+    out_dir = out_dir or os.path.dirname(os.path.abspath(schedule_paths[0]))
+    os.makedirs(out_dir, exist_ok=True)
+
+    schedules = []
+    for path in schedule_paths:
+        with open(path) as f:
+            schedules.append(json.load(f))
+    cu_path = os.path.join(out_dir, "layer.cu")
+    so_path = os.path.join(out_dir, "layer" + sysconfig.get_config_var("EXT_SUFFIX"))
+    with open(cu_path, "w") as f:
+        f.write(code if code is not None else generate_code(pk, schedules))
+
+    command = compile_command(cu_path, so_path, extra_flags)
+    print("building the layer:", " ".join(command), flush=True)
+    subprocess.check_call(command)
+
+    spec = importlib.util.spec_from_file_location("__mirage_static_launcher", so_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    names = [list(tensors.keys()) for tensors in gpu_tensors]
+    pointers = [[t.data_ptr() for t in tensors.values()] for tensors in gpu_tensors]
+    module.init_func(names, pointers)
+    return StaticKernel(module, num_gpus, cu_path, so_path)

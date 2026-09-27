@@ -333,9 +333,10 @@ def get_compile_command(
             "-DMIRAGE_GRACE_HOPPER",
             "-DNDEBUG",
         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
-    elif target_cc == 100:
+    elif target_cc in (100, 103):
+        # B200 (10.0) and B300 (10.3): same task code, arch-specific build
         specific_cmd = [
-            "-gencode=arch=compute_100a,code=sm_100a",
+            f"-gencode=arch=compute_{target_cc}a,code=sm_{target_cc}a",
             "-DMPK_ENABLE_TMA",
             "-DMIRAGE_GRACE_BLACKWELL",
         ]
@@ -429,6 +430,7 @@ class PersistentKernel:
         self.use_cutlass_kernel = use_cutlass_kernel
         # Dictionary to track attached model tensors for kernel reuse
         self._model_tensors = {}
+        self._tensor_names = {}   # DTensor guid -> name (frontend bookkeeping)
         self._spec_decode_handlers = {
             "promptlookup": self.prompt_lookup_spec_handler,
         }
@@ -617,6 +619,7 @@ class PersistentKernel:
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
+        self._tensor_names[t.guid] = name
         self.kn_graph.attach_torch_tensor(t, torch_tensor, name)
         # Track tensor for kernel reuse - tensor pointer can be passed at runtime
         self._model_tensors[name] = torch_tensor
@@ -644,6 +647,7 @@ class PersistentKernel:
         t = self.kn_graph.new_input(dims=dims, strides=strides, dtype=dtype)
         # FIXME: currently assert that name is not None
         assert name is not None
+        self._tensor_names[t.guid] = name
         safe_name = name.replace('.', '_') if name else name
         if io_category == "cuda_tensor":
             self.kn_graph.attach_cuda_tensor(t, safe_name)
