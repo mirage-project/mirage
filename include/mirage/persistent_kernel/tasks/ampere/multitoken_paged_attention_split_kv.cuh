@@ -29,7 +29,9 @@ template <typename T,
           int PAGE_SIZE,
           int MAX_TOKENS = 8,
           bool PARTITION_KV = true,
-          int NUM_KV_CHUNKS = 1>
+          int NUM_KV_CHUNKS = 1,
+          // Rows between consecutive pages. 0 = packed layout.
+          int PAGE_STRIDE_ROWS = 0>
 __device__ __forceinline__ void multitoken_paged_attention_split_kv_task_impl(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -64,7 +66,8 @@ __device__ __forceinline__ void multitoken_paged_attention_split_kv_task_impl(
                                                        PAGE_SIZE,
                                                        MAX_TOKENS,
                                                        PARTITION_KV,
-                                                       NUM_KV_CHUNKS>(
+                                                       NUM_KV_CHUNKS,
+                                                       PAGE_STRIDE_ROWS>(
         qkv_ptr,
         paged_k_cache_ptr,
         paged_v_cache_ptr,
@@ -98,7 +101,8 @@ __device__ __forceinline__ void multitoken_paged_attention_split_kv_task_impl(
                                                         PAGE_SIZE,
                                                         MAX_TOKENS,
                                                         PARTITION_KV,
-                                                        NUM_KV_CHUNKS>(
+                                                        NUM_KV_CHUNKS,
+                                                        PAGE_STRIDE_ROWS>(
         qkv_ptr,
         paged_k_cache_ptr,
         paged_v_cache_ptr,

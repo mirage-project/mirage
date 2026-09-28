@@ -36,7 +36,9 @@ namespace kernel {
 template <int D_K,       // Total KV dim (576 = 512 latent + 64 rope)
           int D_V,       // Latent dim (512)
           int PAGE_SIZE, // Page size (e.g., 128)
-          int K_PE_ROW_STRIDE = D_K - D_V>
+          int K_PE_ROW_STRIDE = D_K - D_V,
+          // Rows between consecutive pages. 0 = packed layout.
+          int PAGE_STRIDE_ROWS = 0>
 __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
     void const *c_latent_new_ptr, // [num_tokens, D_V] new c_latent (normed)
     void const *k_pe_new_ptr,     // [num_tokens, K_PE_ROW_STRIDE] new k_pe
@@ -51,6 +53,10 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
   int const tid = threadIdx.x;
   int const NUM_THREADS = 128;
   int const ROPE_DIM = D_K - D_V; // 64
+
+  // Stride between consecutive pages of K or V.
+  constexpr int PAGE_STRIDE =
+      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
 
   // Get sequence metadata for this request
   int const first_token_pos = qo_indptr_buffer_ptr[request_id];
@@ -86,7 +92,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
     int const seq_pos = kv_start_pos + tok;
     int const page_idx = page_indices[seq_pos / PAGE_SIZE];
     int const pos_in_page = seq_pos % PAGE_SIZE;
-    T *dst = paged_cache + (page_idx * PAGE_SIZE + pos_in_page) * D_K;
+    T *dst = paged_cache + (page_idx * PAGE_STRIDE + pos_in_page) * D_K;
     T const *src_lat = c_latent_new + tok * D_V;
     T const *src_pe = k_pe_new + tok * K_PE_ROW_STRIDE;
 
@@ -129,7 +135,8 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
         int const page_idx = page_indices[seq_pos / PAGE_SIZE];
         int const pos_in_page = seq_pos % PAGE_SIZE;
         v[k] = *reinterpret_cast<uint4 const *>(
-            paged_cache + (long)(page_idx * PAGE_SIZE + pos_in_page) * D_K + d);
+            paged_cache + (long)(page_idx * PAGE_STRIDE + pos_in_page) * D_K +
+            d);
         dsts[k] = contiguous_kv + (long)seq_pos * D_K + d;
       }
 #pragma unroll
@@ -144,7 +151,7 @@ __device__ __forceinline__ void mla_kv_cache_gather_sm100_task_impl(
       int const pos_in_page = seq_pos % PAGE_SIZE;
       *reinterpret_cast<uint4 *>(contiguous_kv + (long)seq_pos * D_K + d) =
           *reinterpret_cast<uint4 const *>(
-              paged_cache + (long)(page_idx * PAGE_SIZE + pos_in_page) * D_K +
+              paged_cache + (long)(page_idx * PAGE_STRIDE + pos_in_page) * D_K +
               d);
     }
   }
