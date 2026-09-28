@@ -60,6 +60,18 @@ using namespace mirage::runtime;
 // #define MPK_MAX_NUM_PAGES 1024
 // #define MPK_PAGE_SIZE 64
 
+// Caps attention's per-CTA buffer sizing by one request instead of the whole
+// batch. Default = MPK_MAX_NUM_BATCHED_TOKENS, i.e. unchanged behavior.
+#ifndef MPK_MAX_TOKENS_PER_REQUEST
+#define MPK_MAX_TOKENS_PER_REQUEST MPK_MAX_NUM_BATCHED_TOKENS
+#endif
+static_assert(MPK_MAX_TOKENS_PER_REQUEST >= 1 &&
+                  MPK_MAX_TOKENS_PER_REQUEST <= MPK_MAX_NUM_BATCHED_TOKENS,
+              "MPK_MAX_TOKENS_PER_REQUEST must be in [1, MAX_NUM_BATCHED_TOKENS]");
+// Room left for one request in a batch that already holds `num_tokens` rows.
+#define MPK_TOKEN_ROOM(num_tokens)                                             \
+  min(MPK_MAX_TOKENS_PER_REQUEST, MPK_MAX_NUM_BATCHED_TOKENS - (num_tokens))
+
 #if defined(MIRAGE_GRACE_HOPPER)
 #define WORKER_NUM_THREADS 256
 #define SINGLE_KERNEL_NUM_THREADS 256
@@ -375,17 +387,15 @@ __device__ __forceinline__ bool
       int num_new_tokens = config.prompt_length[request_id] - step;
       if (num_new_tokens > 0) {
         // Prefill requests
-        num_new_tokens =
-            min(num_new_tokens, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+        num_new_tokens = min(num_new_tokens, MPK_TOKEN_ROOM(num_tokens));
       } else {
         // Decode requests
 #ifdef MPK_SPEC_DECODE
         // Eagle3 / spec-decode: feed K+1 candidate tokens (1 bonus + K drafts)
         // per decode iter. mbt is compile-time set to K+1.
-        num_new_tokens = min(MPK_MAX_NUM_BATCHED_TOKENS,
-                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+        num_new_tokens = MPK_TOKEN_ROOM(num_tokens);
 #else
-        num_new_tokens = min(1, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+        num_new_tokens = min(1, MPK_TOKEN_ROOM(num_tokens));
 #endif
       }
       // Move tokens to input_tokens
@@ -456,7 +466,7 @@ __device__ __forceinline__ bool
     config.qo_indptr_buffer[num_reqs] = num_tokens;
     // Prefill request
     int num_new_tokens = min(config.prompt_length[next_request_id],
-                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+                             MPK_TOKEN_ROOM(num_tokens));
     // Move tokens to input tokens
     for (int j = 0; j < num_new_tokens; j++) {
       config.input_tokens[num_tokens + j] =
@@ -693,9 +703,9 @@ __device__ __forceinline__ bool
     int remaining = config.prompt_length[row] - step;
     int num_new_tokens;
     if (remaining > 0) {
-      num_new_tokens = min(remaining, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+      num_new_tokens = min(remaining, MPK_TOKEN_ROOM(num_tokens));
     } else {
-      num_new_tokens = min(1, MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+      num_new_tokens = min(1, MPK_TOKEN_ROOM(num_tokens));
     }
 
     for (int j = 0; j < num_new_tokens; j++) {
@@ -769,8 +779,8 @@ __device__ __forceinline__ bool
     config.qo_indptr_buffer[num_reqs] = num_tokens;
 
     int remaining = prompt_len - initial_step;
-    int num_new_tokens = min(remaining > 0 ? remaining : 1,
-                             MPK_MAX_NUM_BATCHED_TOKENS - num_tokens);
+    int num_new_tokens =
+        min(remaining > 0 ? remaining : 1, MPK_TOKEN_ROOM(num_tokens));
 
     for (int j = 0; j < num_new_tokens; j++) {
       config.input_tokens[num_tokens + j] =
