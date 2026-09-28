@@ -44,13 +44,13 @@ class SparseMLAGPUTests(unittest.TestCase):
         cls.extension = runtime_kernel_sparse_mla
         torch.backends.cuda.matmul.allow_tf32 = False
 
-    def check_case(self, case):
+    def check_case(self, case, scale=0.0625):
         tensors = to_cuda(case)
         q = tensors[0]
-        expected = torch_reference(*tensors, 0.0625)
+        expected = torch_reference(*tensors, scale)
         for splits in (1, 2, 4, 8):
             workspace = allocate_workspace(q, splits)
-            self.extension.run(*tensors, *workspace, 0.0625, splits)
+            self.extension.run(*tensors, *workspace, scale, splits)
             torch.cuda.synchronize()
             assert_close(workspace[0], expected)
             if splits > 1:
@@ -59,7 +59,7 @@ class SparseMLAGPUTests(unittest.TestCase):
             # Reuse the SAME workspaces after all selections become empty.
             saved_counts = tensors[3].clone()
             tensors[3].zero_()
-            self.extension.run(*tensors, *workspace, 0.0625, splits)
+            self.extension.run(*tensors, *workspace, scale, splits)
             torch.cuda.synchronize()
             self.assertEqual(torch.count_nonzero(workspace[0]).item(), 0)
             if splits > 1:
@@ -86,6 +86,89 @@ class SparseMLAGPUTests(unittest.TestCase):
                     if count >= 4:
                         case[2][0, :4] = [-1, 99999, 2200, -2]
                     self.check_case(case)
+
+    def test_all_invalid_indices_reuse_workspace(self):
+        for rope in (0, 64):
+            for count in (1, 65, 129, 513):
+                case = make_case(rope_dim=rope, query_lengths=(2,),
+                                 seq_lengths=(514,), capacity=count)
+                invalid = np.empty_like(case[2])
+                invalid[0] = np.resize([-1, -2, 514, 99999, 513], count)
+                invalid[1] = np.resize([-1, -2, 514, 99999], count)
+                for splits in (1, 2, 4, 8):
+                    with self.subTest(rope=rope, count=count, splits=splits):
+                        tensors = to_cuda(case)
+                        workspace = allocate_workspace(tensors[0], splits)
+                        self.extension.run(*tensors, *workspace, 0.0625, splits)
+                        torch.cuda.synchronize()
+                        assert_close(workspace[0], torch_reference(*tensors, 0.0625))
+                        tensors[2].copy_(torch.tensor(invalid, device="cuda", dtype=torch.int32))
+                        self.assertTrue((tensors[3] == count).all())
+                        self.extension.run(*tensors, *workspace, 0.0625, splits)
+                        torch.cuda.synchronize()
+                        self.assertEqual(torch.count_nonzero(workspace[0]).item(), 0)
+                        if splits > 1:
+                            self.assertEqual(torch.count_nonzero(workspace[1]).item(), 0)
+                            self.assertTrue(torch.isneginf(workspace[2]).all())
+
+    def test_tile_and_split_boundary_partials(self):
+        for rope in (0, 64):
+            for page_size in (64, 128):
+                for count in (1, 63, 64, 65, 127, 128, 129,
+                              255, 256, 257, 511, 512, 513):
+                    case = make_case(rope_dim=rope, query_lengths=(1,),
+                                     seq_lengths=(count,), page_size=page_size,
+                                     capacity=count)
+                    case[0].fill(0)
+                    case[2][0] = np.arange(count)
+                    tensors = to_cuda(case)
+                    sequence = tensors[1][tensors[6].long()].reshape(-1, 512 + rope).float()
+                    for splits in (1, 2, 4, 8):
+                        with self.subTest(rope=rope, page_size=page_size,
+                                          count=count, splits=splits):
+                            workspace = allocate_workspace(tensors[0], splits)
+                            self.extension.run(*tensors, *workspace, 0.0625, splits)
+                            torch.cuda.synchronize()
+                            expected = sequence[:count, :512].mean(dim=0)
+                            assert_close(workspace[0], expected.expand_as(workspace[0]))
+                            if splits == 1:
+                                continue
+                            tiles_per_split = ((count + 63) // 64 + splits - 1) // splits
+                            for split in range(splits):
+                                start = split * tiles_per_split * 64
+                                end = min(start + tiles_per_split * 64, count)
+                                partial = workspace[1][0, split]
+                                lse = workspace[2][0, split]
+                                if start >= end:
+                                    self.assertEqual(torch.count_nonzero(partial).item(), 0)
+                                    self.assertTrue(torch.isneginf(lse).all())
+                                else:
+                                    expected_partial = sequence[start:end, :512].mean(dim=0)
+                                    torch.testing.assert_close(
+                                        partial, expected_partial.expand_as(partial),
+                                        atol=1e-5, rtol=1e-5)
+                                    torch.testing.assert_close(
+                                        lse, torch.full_like(lse, float(np.log(end - start))),
+                                        atol=1e-5, rtol=1e-5)
+
+    def test_empty_tiles_before_and_after_valid_selection(self):
+        for rope in (0, 64):
+            for slot in (0, 63, 64, 127, 128, 255, 256, 511, 512):
+                with self.subTest(rope=rope, slot=slot):
+                    case = make_case(rope_dim=rope, query_lengths=(1,),
+                                     seq_lengths=(1,), capacity=513)
+                    case[2].fill(-1)
+                    case[2][0, slot] = 0
+                    case[3][:] = 513
+                    self.check_case(case)
+
+    def test_explicit_scale_values(self):
+        for rope in (0, 64):
+            case = make_case(rope_dim=rope, query_lengths=(2,),
+                             seq_lengths=(257,), capacity=257)
+            for scale in (0.0001, 0.0625, 0.1, 0.125, 1.0, 16.0):
+                with self.subTest(rope=rope, scale=scale):
+                    self.check_case(case, scale=scale)
 
     def test_order_invariance_and_inactive_query(self):
         case = list(make_case(rope_dim=0, query_lengths=(1,), seq_lengths=(193,)))

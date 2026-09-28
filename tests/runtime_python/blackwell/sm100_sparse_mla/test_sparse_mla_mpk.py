@@ -13,11 +13,11 @@ from test_sparse_mla import HAS_SM100, assert_close, to_cuda, torch
 
 @unittest.skipUnless(HAS_SM100, "requires SM100, CUDA PyTorch and built Mirage")
 class SparseMLAMPKTests(unittest.TestCase):
-    def run_case(self, rope, query_len, splits):
+    def run_case(self, rope, query_len, splits, heads=8):
         import mirage
         from mirage.mpk.persistent_kernel import PersistentKernel
 
-        case = make_case(rope_dim=rope, heads=8, query_lengths=(query_len,),
+        case = make_case(rope_dim=rope, heads=heads, query_lengths=(query_len,),
                          seq_lengths=(query_len,), capacity=128)
         q, cache, indices, counts, qo, ki, pages, last = to_cuda(case)
         # Use one page; the offline page allocator starts with physical page 0.
@@ -33,7 +33,7 @@ class SparseMLAMPKTests(unittest.TestCase):
         )
         pk = PersistentKernel(**params)
         try:
-            out = torch.full((query_len, 8, 512), float("nan"),
+            out = torch.full((query_len, heads, 512), float("nan"),
                              dtype=torch.bfloat16, device="cuda")
             q_dt = pk.attach_input(q, name="sparse_q")
             cache_dt = pk.attach_input(cache, name="sparse_cache")
@@ -57,10 +57,15 @@ class SparseMLAMPKTests(unittest.TestCase):
                 pk()
                 torch.cuda.synchronize()
                 assert_close(out, expected)
+                for start in range(0, heads, 16):
+                    assert_close(out[:, start:start + 16], expected[:, start:start + 16])
                 if second is not None:
                     expected_second = torch_reference(
                         out, cache, indices, counts, qo, ki, pages, last, 0.125)
                     assert_close(second, expected_second)
+                    for start in range(0, heads, 16):
+                        assert_close(second[:, start:start + 16],
+                                     expected_second[:, start:start + 16])
         finally:
             pk.finalize()
 
@@ -75,6 +80,13 @@ class SparseMLAMPKTests(unittest.TestCase):
             for splits in (1, 4):
                 with self.subTest(rope=rope, splits=splits):
                     self.run_case(rope, 5, splits)
+
+    def test_multiple_head_groups_and_consumer(self):
+        for rope in (0, 64):
+            for heads in (32, 64):
+                for splits in (1, 2, 4, 8):
+                    with self.subTest(rope=rope, heads=heads, splits=splits):
+                        self.run_case(rope, 5, splits, heads=heads)
 
 
 if __name__ == "__main__":

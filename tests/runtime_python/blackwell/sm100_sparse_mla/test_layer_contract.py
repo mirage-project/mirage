@@ -101,20 +101,82 @@ class SparseMLALayerContractTests(unittest.TestCase):
 
     def test_split_reduce_consumes_both_producer_outputs(self):
         for rope in (0, 64):
-            for splits in (2, 4, 8):
-                pk = Kernel()
-                args = self.inputs(rope, 64)
-                pk.sparse_mla_layer(*args, softmax_scale=0.0625, num_splits=splits)
-                producer, consumer = pk.kn_graph.tasks
-                self.assertEqual(producer[1].config[:2], ((3, 4, splits), (256, 1, 1)))
-                self.assertEqual(consumer[0], "sparse_mla_reduce_sm100")
-                partial, lse = producer[1].tensors[-2:]
-                self.assertEqual(partial.shape, (3, splits, 64, 512))
-                self.assertEqual(lse.shape, (3, splits, 64))
-                self.assertEqual(consumer[1].tensors, [partial, lse, args[-1]])
+            for heads in (8, 16, 32, 64):
+                for splits in (2, 4, 8):
+                    with self.subTest(rope=rope, heads=heads, splits=splits):
+                        pk = Kernel()
+                        args = self.inputs(rope, heads)
+                        pk.sparse_mla_layer(*args, softmax_scale=0.0625, num_splits=splits)
+                        producer, consumer = pk.kn_graph.tasks
+                        groups = (heads + 15) // 16
+                        self.assertEqual(producer[0], "sparse_mla_sm100")
+                        self.assertEqual(producer[1].config[:2],
+                                         ((3, groups, splits), (256, 1, 1)))
+                        self.assertEqual(producer[1].tensors[:4], args[:4])
+                        self.assertEqual(producer[2][:7], [heads, rope, 64, 2304, splits, 2, 4])
+                        self.assertEqual(consumer[0], "sparse_mla_reduce_sm100")
+                        self.assertEqual(consumer[1].config[:2],
+                                         ((3, groups, 1), (256, 1, 1)))
+                        self.assertEqual(consumer[2], producer[2])
+                        partial, lse = producer[1].tensors[-2:]
+                        self.assertEqual(partial.shape, (3, splits, heads, 512))
+                        self.assertEqual(lse.shape, (3, splits, heads))
+                        self.assertEqual((partial.dtype, lse.dtype), ("fp32", "fp32"))
+                        self.assertEqual(consumer[1].tensors, [partial, lse, args[-1]])
+
+    def test_multi_head_group_downstream_consumer(self):
+        for heads in (32, 64):
+            for splits in (1, 2, 4, 8):
+                with self.subTest(heads=heads, splits=splits):
+                    pk = Kernel()
+                    args = self.inputs(rope=0, heads=heads)
+                    pk.sparse_mla_layer(*args, softmax_scale=0.0625, num_splits=splits)
+                    first_output = pk.kn_graph.tasks[-1][1].tensors[-1]
+                    self.assertIs(first_output, args[-1])
+                    second_output = Tensor((3, heads, 512))
+                    pk.sparse_mla_layer(first_output, *args[1:4], second_output,
+                                        softmax_scale=0.125)
+                    self.assertEqual(len(pk.kn_graph.tasks), 2 if splits == 1 else 3)
+                    first, second = pk.kn_graph.tasks[0], pk.kn_graph.tasks[-1]
+                    self.assertEqual(first[1].config[0], (3, heads // 16, splits))
+                    self.assertEqual(second[0], "sparse_mla_sm100")
+                    self.assertEqual(second[1].config[0], (3, heads // 16, 1))
+                    self.assertEqual(second[1].tensors,
+                                     [first_output, *args[1:4], second_output])
+                    self.assertEqual(second[2][:5], [heads, 0, 64, 2304, 1])
+                    self.assertEqual(len(pk.allocated_names), 0 if splits == 1 else 2)
+
+    def test_tile_and_split_boundary_capacities(self):
+        for capacity in (1, 63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513):
+            for splits in (1, 2, 4, 8):
+                with self.subTest(capacity=capacity, splits=splits):
+                    pk = Kernel()
+                    args = self.inputs(heads=32)
+                    args[2] = Tensor((3, capacity), "int32")
+                    pk.sparse_mla_layer(*args, softmax_scale=0.0625, num_splits=splits)
+                    self.assertEqual(len(pk.kn_graph.tasks), 1 if splits == 1 else 2)
+                    producer = pk.kn_graph.tasks[0]
+                    self.assertEqual(producer[2][3:5], [capacity, splits])
+                    self.assertEqual(producer[1].config[0], (3, 2, splits))
+                    self.assertIs(pk.kn_graph.tasks[-1][1].tensors[-1], args[-1])
+
+    def test_scale_float32_bits_are_preserved(self):
+        for scale, bits in ((2.0 ** -149, 0x00000001),
+                            (2.0 ** -126, 0x00800000),
+                            (0.0625, 0x3D800000), (0.1, 0x3DCCCCCD),
+                            (0.125, 0x3E000000), (1.0, 0x3F800000),
+                            (float.fromhex("0x1.fffffep+127"), 0x7F7FFFFF)):
+            for splits in (1, 2, 4, 8):
+                with self.subTest(scale=scale, splits=splits):
+                    pk = Kernel()
+                    pk.sparse_mla_layer(*self.inputs(), softmax_scale=scale,
+                                        num_splits=splits)
+                    for _, _, params in pk.kn_graph.tasks:
+                        self.assertEqual(params[-1], bits)
 
     def test_invalid_public_arguments(self):
-        for scale in (0, -1, float("nan"), float("inf"), 1e100, 1e-100):
+        for scale in (0, -1, float("nan"), float("inf"), float("-inf"),
+                      1e100, 1e-100, 2.0 ** -150, 2.0 ** 128):
             with self.subTest(scale=scale), self.assertRaises(ValueError):
                 Kernel().sparse_mla_layer(*self.inputs(), softmax_scale=scale)
         for splits in (0, 3, 16, True):

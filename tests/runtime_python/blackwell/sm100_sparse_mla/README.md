@@ -54,6 +54,17 @@ python -m unittest test_reference -v
 python -m unittest test_layer_contract -v
 ```
 
+The compile-only matrix requires NVCC with SM100a support, but neither PyTorch
+nor an SM100 GPU. It instantiates 64 compute variants (all supported head counts,
+RoPE dimensions, page sizes and split counts) and 12 reduce variants. It produces
+an object file only; it does not execute kernels or build the PyTorch/MPK wrappers.
+
+```bash
+nvcc -O3 -std=c++17 -arch=sm_100a -lineinfo --expt-relaxed-constexpr \
+  -Xptxas=-v -I../../../../include -c compile_sparse_mla.cu \
+  -o /tmp/compile_sparse_mla.o
+```
+
 On a Blackwell SM100 host, use CUDA 12.8+ and CUDA-enabled PyTorch. The standalone
 launcher supports page sizes 64/128. The MPK wrapper specializes its configured
 page size. GPU tests deliberately fail if CUDA is available but the extension
@@ -84,6 +95,20 @@ result should be inferred from the CPU tests.
 
 ## Current validation status
 
-Developed on macOS ARM64 without NVCC, CUDA PyTorch or an NVIDIA GPU. GPU build,
-correctness, sanitizers and performance are pending. See the planning document
-at `docs/sparse_mla_plan.zh-CN.md` for scope and design decisions.
+Validated commit `9b43d1b9` with the additional tests in this working tree on
+the Catalyst cluster through Slurm:
+
+- CPU reference and Python layer contract: 15 tests passed with Python 3.12
+  and NumPy 2.5.3. Coverage includes all-invalid selections, tile/split boundaries,
+  explicit scale values and multi-head-group graph dependencies.
+- Full unittest discovery: 25 tests, 15 passed and 10 GPU/MPK tests skipped.
+  The isolated validation environment does not contain CUDA PyTorch or built Mirage.
+- Compile-only matrix: CUDA 13.2.51 targeting `sm_100a`, all 76 device entry
+  points compiled successfully in Slurm job 14175 on `catalyst-0-11`.
+- The allocated GPU was an RTX A5000, compute capability 8.6, not SM100.
+  No kernel execution, GPU correctness, MPK runtime, sanitizer or performance
+  validation was performed. Skips and compilation success are not GPU test passes.
+
+The standalone PyTorch extension and full Mirage integration still need to be
+built and tested on an SM100 machine. See `docs/sparse_mla_plan.zh-CN.md` for
+scope and design decisions.

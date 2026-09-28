@@ -31,6 +31,62 @@ class SparseMLAReferenceTests(unittest.TestCase):
         np.testing.assert_array_equal(out[1], 0)
         self.assertTrue(np.isfinite(out).all())
 
+    def test_all_invalid_indices_with_positive_counts(self):
+        for rope in (0, 64):
+            for count in (1, 63, 64, 65, 129, 513):
+                with self.subTest(rope=rope, count=count):
+                    case = make_case(rope_dim=rope, query_lengths=(2,),
+                                     seq_lengths=(130,), capacity=count + 1)
+                    case[2][0, :count] = np.resize([-1, -2, 130, 99999, 129], count)
+                    case[2][1, :count] = np.resize([-1, -2, 130, 99999], count)
+                    case[2][:, count] = 0
+                    case[3][:] = count
+                    out = numpy_reference(*case, 0.0625)
+                    self.assertTrue(np.isfinite(out).all())
+                    np.testing.assert_array_equal(out, 0)
+
+    def test_tile_and_split_boundary_prefixes(self):
+        for rope in (0, 64):
+            for page_size in (64, 128):
+                for count in (0, 1, 63, 64, 65, 127, 128, 129,
+                              255, 256, 257, 511, 512, 513):
+                    with self.subTest(rope=rope, page_size=page_size, count=count):
+                        case = make_case(rope_dim=rope, query_lengths=(1,),
+                                         seq_lengths=(515,), page_size=page_size,
+                                         capacity=count + 1)
+                        q, cache, indices, counts, _, _, pages, _ = case
+                        q.fill(0)
+                        indices[0, :count] = np.arange(count)[::-1]
+                        indices[0, count] = 514
+                        counts[:] = count
+                        out = numpy_reference(*case, 0.0625)
+                        sequence = cache[pages].reshape(-1, cache.shape[-1])
+                        expected = (sequence[:count, :512].mean(axis=0, dtype=np.float64)
+                                    if count else np.zeros(512))
+                        self.assertTrue(np.isfinite(out).all())
+                        np.testing.assert_allclose(
+                            out[0], np.broadcast_to(expected, out[0].shape),
+                            atol=1e-6, rtol=1e-5)
+
+    def test_explicit_scale_matches_two_token_softmax(self):
+        for rope in (0, 64):
+            case = make_case(rope_dim=rope, query_lengths=(1,),
+                             seq_lengths=(2,), capacity=2)
+            q, cache, indices, counts, _, _, pages, _ = case
+            q.fill(0)
+            q[:, :, -1] = 1
+            cache.fill(0)
+            cache[pages[0], 1, :512] = 1
+            cache[pages[0], 1, -1] = 1
+            indices[0] = [0, 1]
+            counts[:] = 2
+            for scale in (0.0001, 0.0625, 0.1, 0.125, 1.0, 16.0):
+                with self.subTest(rope=rope, scale=scale):
+                    out = numpy_reference(*case, scale)
+                    self.assertTrue(np.isfinite(out).all())
+                    np.testing.assert_allclose(
+                        out, 1 / (1 + np.exp(-scale)), atol=1e-7, rtol=1e-6)
+
     def test_order_invariance_and_remote_token(self):
         case = make_case(query_lengths=(1,), seq_lengths=(130,), capacity=8)
         case[2][0] = [0, 64, 129, -1, -1, -1, -1, -1]
