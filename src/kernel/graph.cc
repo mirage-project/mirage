@@ -18,9 +18,11 @@
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/task_register.h"
+#include "mirage/threadblock/operator.h"
 #include "mirage/utils/hash_utils.h"
 
 #include <algorithm>
+#include <new>
 #include <iostream>
 
 namespace mirage {
@@ -437,8 +439,85 @@ DTensor *Graph::shuffle_tensors(std::vector<DTensor const *> inputs,
 }
 
 void Graph::register_task(char const *task_type, std::vector<int> params) {
+  register_task_for_op(operators.back(), task_type, params);
+}
+
+int Graph::get_num_operators() const {
+  return static_cast<int>(operators.size());
+}
+
+void Graph::regrid(int op_idx, dim3 grid_dim, std::vector<int> params) {
+  assert(op_idx >= 0 && op_idx < (int)operators.size());
+  KNOperator *op = operators[op_idx];
+  assert(op->op_type == type::KN_CUSTOMIZED_OP);
+  KNCustomizedOp *customized = static_cast<KNCustomizedOp *>(op);
+  struct Input {
+    DTensor dtensor;
+    int3 input_map;
+    int forloop_dim;
+    layout::SmemLayout layout;
+    bool store_in_dmem;
+  };
+  std::vector<Input> inputs;
+  for (auto const *tb_op : customized->bgraph.operators) {
+    assert(tb_op->op_type == type::TB_INPUT_OP);
+    auto const *in = static_cast<threadblock::TBInputOp const *>(tb_op);
+    inputs.push_back({in->dtensor,
+                      in->input_map,
+                      in->forloop_dim,
+                      in->output_tensors[0].layout,
+                      in->output_tensors[0].store_in_dmem});
+  }
+  dim3 block_dim = customized->bgraph.block_dim;
+  int forloop_range = customized->bgraph.forloop_range;
+  int reduction_dimx = customized->bgraph.reduction_dimx;
+  customized->bgraph.~Graph();
+  new (&customized->bgraph)
+      threadblock::Graph(grid_dim, block_dim, forloop_range, reduction_dimx);
+  for (auto const &in : inputs) {
+    customized->bgraph.new_input(
+        in.dtensor, in.input_map, in.forloop_dim, in.layout, in.store_in_dmem);
+  }
+  std::string name = task_name_params.at(op).first;
+  task_config.erase(op);
+  register_task_for_op(op, name.c_str(), params);
+}
+
+int Graph::get_task_info(int op_idx, char *name, int name_len, int *params, int max_params, int *grid,
+                         int *io, DTensor **tensors, int max_tensors) {
+  assert(op_idx >= 0 && op_idx < (int)operators.size());
+  KNOperator *op = operators[op_idx];
+  auto np = task_name_params.find(op);
+  auto tc = task_config.find(op);
+  if (np == task_name_params.end() || tc == task_config.end()) {
+    return -1;
+  }
+  snprintf(name, name_len, "%s", np->second.first.c_str());
+  int nparams = std::min((int)np->second.second.size(), max_params);
+  for (int i = 0; i < nparams; i++) {
+    params[i] = np->second.second[i];
+  }
+  KNCustomizedOp *customized = static_cast<KNCustomizedOp *>(op);
+  grid[0] = customized->bgraph.grid_dim.x;
+  grid[1] = customized->bgraph.grid_dim.y;
+  grid[2] = customized->bgraph.grid_dim.z;
+  io[0] = std::get<0>(tc->second);
+  io[1] = std::get<1>(tc->second);
+  io[2] = nparams;
+  io[3] = static_cast<int>(std::get<2>(tc->second)); // task type
+  io[4] = std::get<3>(tc->second);                   // variant id
+  int ntensors = std::min((int)op->input_tensors.size(), max_tensors);
+  for (int i = 0; i < ntensors; i++) {
+    tensors[i] = &op->input_tensors[i];
+  }
+  return ntensors;
+}
+
+void Graph::register_task_for_op(KNOperator const *op,
+                                 char const *task_type,
+                                 std::vector<int> params) {
   std::string name = std::string(task_type);
-  KNOperator const *op = operators.back();
+  task_name_params[op] = std::make_pair(name, params);
   assert(op->op_type == type::KN_CUSTOMIZED_OP);
   KNCustomizedOp const *customized = static_cast<KNCustomizedOp const *>(op);
   TaskRegister *task_register = TaskRegister::get_instance();
@@ -930,6 +1009,32 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
+  } else if (name == "gemm_tile") {
+    int variant_id = task_register->register_gemm_tile_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_GEMM_TILE_SM100, variant_id);
+  } else if (name == "route") {
+    int variant_id = task_register->register_route_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_ROUTE_SM100, variant_id);
+  } else if (name == "quant") {
+    int variant_id = task_register->register_quant_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_QUANT_SM100, variant_id);
+  } else if (name == "sact") {
+    int variant_id = task_register->register_sact_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_SACT_SM100, variant_id);
+  } else if (name == "expert_queue") {
+    int variant_id = task_register->register_expert_queue_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(7, 2, TASK_EXPERT_QUEUE_SM100, variant_id);
+  } else if (name == "tail") {
+    int variant_id = task_register->register_tail_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(7, 1, TASK_TAIL_SM100, variant_id);
   }
 
   else {
