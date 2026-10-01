@@ -17,6 +17,7 @@
 #include "norm_sm100.cuh"
 #include "tasks/ampere/mma.cuh"
 #include "tasks/common/common_header.cuh"
+#include "tasks/common/kv_tiles.h"
 // #include "../element_binary.cuh"
 // #include "../element_unary.cuh"
 // #include "../reduction.cuh"
@@ -40,6 +41,7 @@ template <typename T,
           int HEAD_DIM,
           int MAX_SEQ_LEN,
           int PAGE_SIZE,
+          int PAGE_STRIDE,
           int Q_LEN_OVERRIDE = 0,
           int TAIL_OFFSET = 0,
           // MAX_TOKENS = per-call query rows (= mbt). Must be >= mbt yet small
@@ -56,9 +58,7 @@ template <typename T,
           int ROTARY_DIM = HEAD_DIM,
           // Sliding-window attention. A query at absolute position p attends
           // to keys in (p - WINDOW_SIZE, p]. 0 = no window.
-          int WINDOW_SIZE = 0,
-          // Rows between consecutive pages. 0 = packed layout.
-          int PAGE_STRIDE_ROWS = 0>
+          int WINDOW_SIZE = 0>
 __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *qkv_ptr,
     void *paged_k_cache_ptr,
@@ -82,9 +82,6 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     void const *sink_ptr = nullptr) {
   constexpr int CONSUMER_WARPGROUP_SYNC_BARRIER_ID = 6;
   constexpr int ROTARY_SYNC_BARRIER_ID = 7;
-  // Stride between consecutive pages of K or V.
-  constexpr int PAGE_STRIDE =
-      PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
   cutlass::arch::NamedBarrier wg_barrier(
       NUM_THREADS, /*bar-id*/ CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
   if (threadIdx.x < NUM_THREADS) {
@@ -98,7 +95,7 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     // [max_num_pages, page_size, num_kv_heads, head_dim]
 
     constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
-    constexpr int KV_TILE_SIZE = 64;
+    constexpr int KV_TILE_SIZE = KV_TILE_SM100;
     // NOTE(Jinchen): we use m16n16k16 mma to compute matrix multiplication
     constexpr int MMA_ITERS_M = (MAX_TOKENS * NUM_QO_PER_KV + 15) / 16;
 
@@ -266,6 +263,8 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
     // Currently assume that PAGE_SIZE is a multiplier of KV_TILE_SIZE
     // so that we access a single page in one iteration
     static_assert(PAGE_SIZE % KV_TILE_SIZE == 0);
+    static_assert(WINDOW_SIZE <= 0 || KV_TILE_SIZE == KV_WINDOW_TILE,
+                  "a windowed kernel must tile at MPK_KV_WINDOW_TILE");
 
 #pragma unroll
     for (int chunk_idx = threadIdx.x;

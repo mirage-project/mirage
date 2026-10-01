@@ -1,18 +1,24 @@
-"""
-Unit tests for plan_kv_groups.
-"""
+"""Unit tests for the KV cache planner."""
 
 from contextlib import contextmanager
 
 import torch
 
-from mirage.mpk.kv_planner import (
+from mirage.mpk.models.gpt_oss.builder import (
+    kv_streams as kv_streams_gpt_oss,
+)
+from mirage.mpk.kvcache import (
     KVEventLog,
+    KVMode,
     KVSpec,
+    KVStream,
     KVUnificationError,
     pages_per_request,
     plan_kv_groups,
+    build_kv_cache,
 )
+from mirage.mpk.kvcache.kv_stream import _merge_identical_streams
+from mirage.mpk.kvcache.kv_planner import _resolve_pool_size
 
 
 @contextmanager
@@ -27,7 +33,7 @@ def _raises(exc_type):
 def _by_spec(plan):
     out = {}
     for g in plan.groups:
-        out.setdefault(g.spec_name, []).append(g)
+        out.setdefault(g.stream_name, []).append(g)
     return out
 
 
@@ -41,24 +47,29 @@ class _GptOssCfg:
 
 
 def _gpt_oss_plan(page_size):
-    from mirage.mpk.models.gpt_oss.builder import plan_kv_cache
-    return plan_kv_cache(_GptOssCfg(), page_size=page_size)
+    """The real model's streams, planned but not allocated -- page geometry
+    only."""
+    return plan_kv_groups([s._spec() for s in kv_streams_gpt_oss(_GptOssCfg())],
+                          block_size=page_size)
 
 
 def test_four_streams_at_mixed_compression_share_one_page():
     specs = [
         KVSpec("c4_main", per_entry_bytes=584, layer_ids=(0,),
-               compress_ratio=4, preferred_block_size=256),
+               compress_ratio=4),
         KVSpec("c128_main", per_entry_bytes=584, layer_ids=(1,),
-               compress_ratio=128, preferred_block_size=256),
+               compress_ratio=128),
         KVSpec("c4_indexer", per_entry_bytes=132, layer_ids=(2,),
-               compress_ratio=4, preferred_block_size=256),
+               compress_ratio=4),
         KVSpec("swa", per_entry_bytes=584, layer_ids=(3,),
-               window_size=128, preferred_block_size=64),
+               window_size=128),
     ]
-    plan = plan_kv_groups(specs)
+    # 37376 B is what c4_main and swa both need at 64 entries; given
+    # explicitly since no single block_size (token count) yields it for
+    # both when their compress ratios differ.
+    plan = plan_kv_groups(specs, target_page_bytes=37376)
     assert plan.target_page_bytes == 37376
-    got = {g.spec_name: g.block_size for g in plan.groups}
+    got = {g.stream_name: g.block_size for g in plan.groups}
     assert got == {
         "c4_main": 256,      # 64 entries x4 — the page-size anchor
         "c128_main": 8192,   # 64 entries x128, an exact 32x ratio of the page
@@ -66,24 +77,22 @@ def test_four_streams_at_mixed_compression_share_one_page():
         "swa": 64,           # 64 entries x1
     }
     # A tightest fit gives 283 entries = 1132 tokens, and 1132 % 64 = 44.
-    pad = {g.spec_name: g.padding_bytes_per_page for g in plan.groups}
+    pad = {g.stream_name: g.padding_bytes_per_page for g in plan.groups}
     assert pad["c4_main"] == 0 and pad["swa"] == 0 and pad["c128_main"] == 0
     assert pad["c4_indexer"] == 37376 - 272 * 132   # 1472 B, 3.9% of the page
     for g in plan.groups:
-        assert g.block_size % 64 == 0, f"{g.spec_name} is not tile-legal"
+        assert g.block_size % 64 == 0, f"{g.stream_name} is not tile-legal"
 
 
 def test_an_exact_multiple_page_is_lossless_and_tile_safe():
     # A stream whose natural page divides the shared one keeps its block
     # size scaled by that integer: the tile floor removes nothing.
     specs = [
-        KVSpec("fat", per_entry_bytes=2048, layer_ids=(0,),
-               preferred_block_size=256),                    # anchor, 512 KiB
-        KVSpec("thin", per_entry_bytes=512, layer_ids=(1,),
-               preferred_block_size=256),                    # 128 KiB, 4x under
+        KVSpec("fat", per_entry_bytes=2048, layer_ids=(0,)),   # 512 KiB @ 256
+        KVSpec("thin", per_entry_bytes=512, layer_ids=(1,)),   # 128 KiB, 4x under
     ]
-    plan = plan_kv_groups(specs)
-    by = {g.spec_name: g for g in plan.groups}
+    plan = plan_kv_groups(specs, block_size=256)
+    by = {g.stream_name: g for g in plan.groups}
     assert plan.target_page_bytes == 256 * 2048
     assert by["fat"].block_size == 256
     assert by["thin"].block_size == 256 * 4        # scaled, not re-packed
@@ -93,18 +102,47 @@ def test_an_exact_multiple_page_is_lossless_and_tile_safe():
         assert g.block_size % 64 == 0
 
 
+def test_block_size_pads_a_non_exact_spec_instead_of_repacking_it():
+    # indexer's native page (also 256 tokens) is not an exact divisor of
+    # main's, so the block_size path pads it at 64 entries rather.
+    specs = [
+        KVSpec("main", per_entry_bytes=584, layer_ids=(0,), compress_ratio=4),
+        KVSpec("indexer", per_entry_bytes=132, layer_ids=(1,),
+               compress_ratio=4),
+    ]
+    plan = plan_kv_groups(specs, block_size=256)
+    assert plan.target_page_bytes == 37376
+    by = {g.stream_name: g for g in plan.groups}
+    assert by["main"].block_size == 256 and by["main"].padding_bytes_per_page == 0
+    assert by["indexer"].block_size == 256          # native, NOT 1088
+    assert by["indexer"].entries_per_page == 64     # native, NOT 272
+    assert by["indexer"].padding_bytes_per_page == 37376 - 64 * 132
+
+
+def test_block_size_and_target_page_bytes_are_exclusive():
+    with _raises(ValueError):
+        plan_kv_groups([KVSpec("s", per_entry_bytes=64, layer_ids=(0,))],
+                       block_size=64, target_page_bytes=4096)
+    # either alone, or neither, is fine
+    plan_kv_groups([KVSpec("s", per_entry_bytes=64, layer_ids=(0,))],
+                   block_size=64)
+    plan_kv_groups([KVSpec("s", per_entry_bytes=64, layer_ids=(0,))],
+                   target_page_bytes=4096)
+    plan_kv_groups([KVSpec("s", per_entry_bytes=64, layer_ids=(0,))])
+
+
 def test_block_size_is_floored_to_the_declared_tile():
-    # Same stream, two tiles: a bigger tile costs padding.
+    # Same stream, two tiles: a bigger tile costs padding. Explicit
+    # target_page_bytes so idx is greedily repacked (_pack_to_page_size).
     def plan_with(tile):
         return plan_kv_groups([
             KVSpec("anchor", per_entry_bytes=584, layer_ids=(0,),
-                   compress_ratio=4, preferred_block_size=256),
+                   compress_ratio=4),
             KVSpec("idx", per_entry_bytes=132, layer_ids=(1,),
-                   compress_ratio=4, preferred_block_size=256,
-                   block_size_multiple_of=tile),
-        ])
+                   compress_ratio=4, block_size_multiple_of=tile),
+        ], target_page_bytes=37376)
 
-    got = {t: {g.spec_name: g for g in plan_with(t).groups} for t in (16, 64)}
+    got = {t: {g.stream_name: g for g in plan_with(t).groups} for t in (16, 64)}
     # 283 entries fit; tile 64 needs groups of 16 -> 272, tile 16 -> 280.
     assert got[64]["idx"].block_size == 1088 and got[64]["idx"].entries_per_page == 272
     assert got[16]["idx"].block_size == 1120 and got[16]["idx"].entries_per_page == 280
@@ -113,43 +151,73 @@ def test_block_size_is_floored_to_the_declared_tile():
     assert got[16]["idx"].block_size % 16 == 0
 
 
+def test_page_wastes_bytes_warns_only_when_a_spec_does_not_tile_exactly():
+    import warnings
+
+    exact = [
+        KVSpec("a", per_entry_bytes=512, layer_ids=(0,)),
+        KVSpec("b", per_entry_bytes=256, layer_ids=(1,)),   # divides "a"'s page
+    ]
+    ragged = [
+        KVSpec("a", per_entry_bytes=584, layer_ids=(0,), compress_ratio=4),
+        KVSpec("idx", per_entry_bytes=132, layer_ids=(1,), compress_ratio=4),
+    ]
+    for specs, expect_warning in [(exact, False), (ragged, True)]:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            plan_kv_groups(specs, block_size=256)
+        if expect_warning:
+            assert len(caught) == 1
+            msg = str(caught[0].message)
+            assert "'idx'" in msg and "%" in msg and "do not tile" in msg
+        else:
+            assert not caught, [str(w.message) for w in caught]
+
+
 def test_a_stream_that_cannot_fit_one_tile_is_refused():
     # 8 entries fit, but a 64-token tile needs 64.
     specs = [
-        KVSpec("fat", per_entry_bytes=8, layer_ids=(0,),
-               preferred_block_size=800),
-        KVSpec("thin", per_entry_bytes=800, layer_ids=(1,),
-               preferred_block_size=8),
+        KVSpec("fat", per_entry_bytes=8, layer_ids=(0,)),
+        KVSpec("thin", per_entry_bytes=800, layer_ids=(1,)),
     ]
     with _raises(KVUnificationError):
         plan_kv_groups(specs, target_page_bytes=6400)
 
 
-def test_an_illegal_anchor_page_size_is_refused_not_floored():
-    # 100 is not a multiple of the 64-token tile.
-    with _raises(KVUnificationError):
-        _gpt_oss_plan(100)
+def test_a_block_size_off_the_tile_floors_instead_of_refusing():
+    # 100 isn't a multiple of the default 64-token tile, so it floors to 64.
+    spec = KVSpec("attn", per_entry_bytes=2048, layer_ids=(0,))
+    off_tile = plan_kv_groups([spec], block_size=100).groups[0]
+    assert off_tile.block_size == 64 and off_tile.padding_bytes_per_page == 0
     for legal in (64, 128, 4096):
-        assert _gpt_oss_plan(legal).groups[0].block_size == legal
+        g = plan_kv_groups([spec], block_size=legal).groups[0]
+        assert g.block_size == legal and g.padding_bytes_per_page == 0
 
 
-def test_the_report_names_the_anchor_and_flags_a_dead_window():
-    # A block whose first recycle lands past the run: the window is inert
-    # here, so the report says so without telling the user to shrink it.
-    dead = _gpt_oss_plan(4096).describe(max_seq_length=512)
-    assert "anchor 'sliding_attention'" in dead
-    assert "never recycles here" in dead and "WARNING" in dead
-    assert "not a reason to lower the block size" in dead
-    # The same plan over a long enough run does recycle, so no warning.
-    assert "WARNING" not in _gpt_oss_plan(4096).describe(max_seq_length=131072)
-    # At the tile it recycles early, and the report says from which step.
-    live = _gpt_oss_plan(64).describe(max_seq_length=512)
-    assert "never recycles" not in live and "recycles from step" in live
+def _windowed_plan(block_size):
+    return plan_kv_groups([KVSpec("attn", per_entry_bytes=2048, layer_ids=(0,),
+                                  window_size=128)], block_size=block_size)
+
+
+def test_the_report_flags_a_dead_window():
+    # Checked against first_recycled_step directly, not describe()'s exact
+    # wording, so a reword can't break this.
+    dead_plan = _windowed_plan(4096)
+    first = dead_plan.first_recycled_step(dead_plan.groups[0])
+    assert first >= 512      # inert at a 512-token run
+    assert "WARNING" in dead_plan.describe(max_seq_length=512)
+    assert first < 131072    # but recycles over a long enough run
+    assert "WARNING" not in dead_plan.describe(max_seq_length=131072)
+
+    live_plan = _windowed_plan(64)
+    live_first = live_plan.first_recycled_step(live_plan.groups[0])
+    assert live_first < 512  # recycles early at the tile
+    live = live_plan.describe(max_seq_length=512)
+    assert "WARNING" not in live and str(live_first) in live
 
 
 def test_gpt_oss_real_config_plan():
-    # 24 layers alternating sliding/full, 8 KV heads of 64 on both, so the
-    # two streams unify onto one page with no padding: 2 groups of 12 slots.
+    # Both streams unify onto one page with no padding: 2 groups of 12 slots.
     plan = _gpt_oss_plan(64)
     assert plan.target_page_bytes == 64 * 2 * 8 * 64 * 2
     assert plan.num_slots == 12 and len(plan.groups) == 2
@@ -161,18 +229,9 @@ def test_gpt_oss_real_config_plan():
         assert None not in g.layer_ids       # 12 and 12, nothing padded
     # A layer's group is its attention kind, its slot its index within it.
     for layer_id, kind in enumerate(_GptOssCfg.layer_types):
-        group_id, slot_id = plan.layer_info(layer_id)
-        assert plan.groups[group_id].spec_name == kind
+        group_id, slot_id = plan._layer_info(layer_id)
+        assert plan.groups[group_id].stream_name == kind
         assert slot_id == layer_id // 2
-
-
-def test_gpt_oss_groups_carry_the_window():
-    plan = _gpt_oss_plan(64)
-    windows = {g.spec_name: g.window_size for g in plan.groups}
-    assert windows == {"sliding_attention": 128, "full_attention": 0}
-    # group_specs is what PersistentKernel actually reads.
-    specs = plan.group_specs()
-    assert [s.window_size for s in specs] == [g.window_size for g in plan.groups]
 
 
 def test_pages_per_request_bounded_by_the_window():
@@ -189,10 +248,22 @@ def test_pages_per_request_bounded_by_the_window():
     assert pages_per_request(64, 0, 512, 8) == 8
 
 
+def _twelve_slot_plan(block_size, windowed=False):
+    """A synthetic 12-slot plan matching gpt-oss's real page size."""
+    if windowed:
+        specs = [KVSpec("sliding", per_entry_bytes=2048,
+                        layer_ids=tuple(range(12)), window_size=128),
+                 KVSpec("full", per_entry_bytes=2048,
+                       layer_ids=tuple(range(12, 24)))]
+    else:
+        specs = [KVSpec("a", per_entry_bytes=2048, layer_ids=tuple(range(12)))]
+    return plan_kv_groups(specs, block_size=block_size)
+
+
 def test_page_id_bytes_is_the_whole_column():
     # A page id is that page at every slot: slots x page bytes
-    small = _gpt_oss_plan(64)
-    big = _gpt_oss_plan(4096)
+    small = _twelve_slot_plan(64)
+    big = _twelve_slot_plan(4096)
     assert small.page_id_bytes == 12 * 128 * 1024
     assert big.page_id_bytes == 64 * small.page_id_bytes
     assert small.budget_bytes(16) == 24 * 1024**2
@@ -200,7 +271,7 @@ def test_page_id_bytes_is_the_whole_column():
 
 
 def test_pages_for_budget_rounds_down_and_round_trips():
-    plan = _gpt_oss_plan(64)          # 1.5 MiB per page id
+    plan = _twelve_slot_plan(64)          # 1.5 MiB per page id
     assert plan.pages_for_budget(24 * 1024**2) == 16
     assert plan.pages_for_budget(24 * 1024**2 - 1) == 15   # never over-commit
     assert plan.pages_for_budget(0) == 0
@@ -209,7 +280,7 @@ def test_pages_for_budget_rounds_down_and_round_trips():
 
 
 def test_resolve_kv_budget_parses_sizes():
-    from mirage.mpk.kv_planner import resolve_kv_budget
+    from mirage.mpk.kvcache import resolve_kv_budget
 
     assert resolve_kv_budget("24GiB") == 24 * 1024**3
     assert resolve_kv_budget("512MiB") == 512 * 1024**2
@@ -222,17 +293,16 @@ def test_resolve_kv_budget_parses_sizes():
 
 
 def test_a_small_budget_lands_under_the_floor():
-    plan = _gpt_oss_plan(64)        # 1.5 MiB per page id
+    plan = _twelve_slot_plan(64, windowed=True)   # 1.5 MiB per page id
     assert plan.pages_needed(1, 512, 8) == 12         # 4 sliding + 8 full
     assert plan.pages_for_budget(64 * 1024**2) == 42
-    # resolve_pool_size is what refuses this; it needs CUDA, so not here.
+    # resolve_pool_size (tested below) is what actually refuses this.
     assert plan.pages_for_budget(8 * 1024**2) == 5    # below the floor
 
 
 def test_group_size_picks_slots_per_group():
     # Slots per group: pad up when the layer counts are close, otherwise
-    # split on a usable gcd. Padding strands (S-k)/S of every page the group
-    # holds, so it is only worth it when the counts are near-equal.
+    # split on a usable gcd.
     for note, n_a, n_b, slots, groups, padded in [
         ("12 vs 13: close, pad rather than split", 12, 13, 13, (1, 1), 1),
         ("20 vs 4 at 5:1: gcd 4, zero padding", 20, 4, 4, (5, 1), 0),
@@ -240,10 +310,9 @@ def test_group_size_picks_slots_per_group():
     ]:
         specs = [
             KVSpec("a", per_entry_bytes=512, layer_ids=tuple(range(n_a)),
-                   window_size=128, preferred_block_size=64),
+                   window_size=128),
             KVSpec("b", per_entry_bytes=512,
-                   layer_ids=tuple(range(n_a, n_a + n_b)),
-                   preferred_block_size=64),
+                   layer_ids=tuple(range(n_a, n_a + n_b))),
         ]
         plan = plan_kv_groups(specs)
         by = _by_spec(plan)
@@ -251,22 +320,132 @@ def test_group_size_picks_slots_per_group():
         assert (len(by["a"]), len(by["b"])) == groups, note
         assert sum(g.layer_ids.count(None) for g in plan.groups) == padded, note
 
+
+def test_group_size_warns_only_when_a_tiny_stream_forces_fragmentation():
+    # A too-small stream drags group_size down and fragments everyone else.
+    import warnings
+
+    for note, n_a, n_b, expect_warning in [
+        ("12 vs 13: close, pad rather than split", 12, 13, False),
+        ("20 vs 4 at 5:1: gcd 4, zero padding", 20, 4, False),
+        ("20 vs 30: gcd 10 beats a min-based 20", 20, 30, False),
+        ("61 vs 1: no gcd but 1, draft starves the target", 61, 1, True),
+    ]:
+        specs = [
+            KVSpec("a", per_entry_bytes=512, layer_ids=tuple(range(n_a))),
+            KVSpec("b", per_entry_bytes=512,
+                   layer_ids=tuple(range(n_a, n_a + n_b))),
+        ]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            plan_kv_groups(specs)
+        if expect_warning:
+            assert len(caught) == 1, note
+            msg = str(caught[0].message)
+            assert "'a'" in msg and "'b'" in msg and "61 group" in msg, note
+        else:
+            assert not caught, (note, [str(w.message) for w in caught])
+
+
+# ── bounded specs (fixed one entry per request, e.g. a Mamba/KDA state) ─────
+
+
+def test_bounded_spec_never_exceeds_one_entry_even_when_not_the_anchor():
+    """Regression: a bounded spec used to get packed to several entries with
+    zero reported padding, though only entry 0 is ever read. Both fitting
+    paths, plus the default path."""
+    bounded = KVSpec("state", per_entry_bytes=8192, layer_ids=(0,),
+                     compress_ratio=4096, bounded=True)
+    attn = KVSpec("attn", per_entry_bytes=1152, layer_ids=(1,))
+
+    # _pack_to_page_size: would pack to 9 entries if not bounded.
+    plan = plan_kv_groups([bounded, attn], target_page_bytes=73728)
+    g = {g.stream_name: g for g in plan.groups}["state"]
+    assert g.entries_per_page == 1
+    assert g.padding_bytes_per_page == 73728 - 8192, (
+        "padding must be the honest remainder, not 0")
+
+    # _unify_to_page_size: bounded isn't the anchor here, so it would have
+    # scaled up under the old "exact ratio -> zero padding" rule.
+    plan = plan_kv_groups([
+        KVSpec("state", per_entry_bytes=1024, layer_ids=(0,),
+              compress_ratio=4096, bounded=True),
+        KVSpec("attn", per_entry_bytes=1024, layer_ids=(1,)),
+    ], block_size=256)
+    g = {g.stream_name: g for g in plan.groups}["state"]
+    assert g.entries_per_page == 1, (
+        "an exact scale-up ratio must not apply to a bounded spec")
+
+    # Default path: before `bounded`, this shape needed a manual retry with
+    # an explicit target_page_bytes.
+    plan = plan_kv_groups([
+        KVSpec("state", per_entry_bytes=2_170_880, layer_ids=(0,),
+              compress_ratio=4096, bounded=True),
+        KVSpec("attn", per_entry_bytes=1152, layer_ids=(1,)),
+    ])
+    g = {g.stream_name: g for g in plan.groups}["state"]
+    assert g.entries_per_page == 1 and g.padding_bytes_per_page == 0
+
+
+def test_bounded_spec_holds_exactly_one_page_per_request():
+    """A bounded group never grows past 1 page, unlike a normal spec."""
+    bounded = KVSpec("state", per_entry_bytes=8192, layer_ids=(0,),
+                     compress_ratio=4096, bounded=True)
+    plan = plan_kv_groups([bounded], target_page_bytes=8192)
+    g = plan.groups[0]
+    for seq_len in (1, 4096):
+        assert pages_per_request(g.block_size, g.window_size, seq_len) == 1
+
+
+def test_bounded_and_window_are_exclusive():
+    """Checked at both entry points: raw KVSpec and KVStream._spec()."""
+    with _raises(AssertionError):
+        KVSpec("state", per_entry_bytes=8192, layer_ids=(0,),
+              bounded=True, window_size=128)
+    with _raises(ValueError):
+        KVStream("state", layers=(0,),
+                 components=[("s", (2048,), torch.bfloat16)],
+                 kind=KVMode.BOUNDED, window=128)._spec()
+
+
+def test_bounded_stream_end_to_end_with_a_normal_stream():
+    """Bounded + a normal stream through the FULL build_kv_cache pipeline --
+    the other bounded tests stop at plan_kv_groups."""
+    state_bytes = 12288 * 3 * 2 + 32 * 128 * 128 * 4   # conv bf16 + recurrent fp32
+    state = KVStream("state", layers=tuple(range(21)), compress_ratio=4096,
+                     kind=KVMode.BOUNDED,
+                     components=[("conv", (12288, 3), torch.bfloat16),
+                                 ("recur", (32, 128, 128), torch.float32)])
+    attn = KVStream("attn", layers=tuple(range(21, 27)),
+                    components=[("kv", (576,), torch.bfloat16)])
+    with _free_memory(64 << 30):
+        plan = build_kv_cache([state, attn], target_page_bytes=state_bytes,
+                              max_num_pages=256, max_seq_length=4096,
+                              device="cpu", verbose=False)
+    by = {g.stream_name: g for g in plan.groups}
+    assert by["state"].entries_per_page == 1
+    assert by["state"].padding_bytes_per_page == 0   # state set the page itself
+    assert by["attn"].entries_per_page == 1856       # measured, kept as a pin
+    assert plan.pages_needed(1, 4096, 1) == 13        # 1 (state) + 12 (attn)
+
+    mpk = _StubMPK()
+    kv = plan.attach(mpk, 0)
+    assert plan.groups[kv["group_id"]].stream_name == "state"
+
+
 def test_allocate_pool_slots_are_per_layer_and_do_not_alias():
-    # per_entry_bytes must match what the caller actually stores: an (8, 16)
-    # bf16 entry is 256 B. Going through the pool makes the two agree by
-    # construction — declaring 64 here would overrun the page budget.
+    # An (8, 16) bf16 entry is 256 B, matching per_entry_bytes by construction.
     specs = [
-        KVSpec("full", per_entry_bytes=256, layer_ids=(0, 1),
-              preferred_block_size=64),
+        KVSpec("full", per_entry_bytes=256, layer_ids=(0, 1)),
         KVSpec("window", per_entry_bytes=256, layer_ids=(2, 3),
-              window_size=128, preferred_block_size=64),
+              window_size=128),
     ]
     plan = plan_kv_groups(specs)
     assert plan.num_slots == 2
     layout = [("kv", (8, 16), torch.bfloat16)]
-    pool, views = plan.allocate_pool({"full": layout, "window": layout},
+    pool, views = plan._allocate_pool({"full": layout, "window": layout},
                                      max_num_pages=32, device="cpu")
-    by = {g.spec_name: g.group_id for g in plan.groups}
+    by = {g.stream_name: g.group_id for g in plan.groups}
     cache = views[by["full"]]["kv"]
     assert tuple(cache.shape) == (2, 32, 64, 8, 16)
     assert cache.dtype == torch.bfloat16
@@ -283,20 +462,17 @@ def test_allocate_pool_slots_are_per_layer_and_do_not_alias():
 
 def test_allocate_pool_handles_streams_with_different_entry_sizes():
     # Entries of 8 B and 800 B carve the same 6400 B page into 800 and 8
-    # slots respectively. One pool serves both; this is the case a single
-    # shared entry layout could not express.
-    # tile 1: synthetic entry sizes, exercising pool geometry rather than
-    # anything a real kernel would accept.
+    # slots respectively. One pool serves both.
     fat = KVSpec("fat", per_entry_bytes=8, layer_ids=(0,),
-                preferred_block_size=64, block_size_multiple_of=1)
+                block_size_multiple_of=1)
     thin = KVSpec("thin", per_entry_bytes=800, layer_ids=(1,),
-                 preferred_block_size=8, block_size_multiple_of=1)
+                 block_size_multiple_of=1)
     plan = plan_kv_groups([fat, thin], target_page_bytes=6400)
-    by = {g.spec_name: g for g in plan.groups}
+    by = {g.stream_name: g for g in plan.groups}
     assert by["fat"].entries_per_page == 800
     assert by["thin"].entries_per_page == 8
 
-    pool, views = plan.allocate_pool(
+    pool, views = plan._allocate_pool(
         {"fat": [("kv", (4,), torch.bfloat16)],      # 8 B entries
          "thin": [("kv", (400,), torch.bfloat16)]},  # 800 B entries
         max_num_pages=16, device="cpu")
@@ -306,37 +482,34 @@ def test_allocate_pool_handles_streams_with_different_entry_sizes():
     assert tuple(views[by["thin"].group_id]["kv"].shape) == \
         (plan.num_slots, 16, 8, 400)
     # Same page stride for both, since a page is a page.
-    stride = plan.page_stride_elems(torch.bfloat16)
+    stride = plan.elems_per_page(torch.bfloat16)
     assert views[by["fat"].group_id]["kv"].stride(1) == stride
     assert views[by["thin"].group_id]["kv"].stride(1) == stride
 
     # A layout claiming more than the page holds is refused, not truncated.
     with _raises(AssertionError):
-        plan.allocate_pool(
+        plan._allocate_pool(
             {"fat": [("kv", (4,), torch.bfloat16)],
              "thin": [("kv", (4000,), torch.bfloat16)]},
             max_num_pages=16, device="cpu")
 
 
 def test_allocate_pool_shares_one_allocation_across_streams():
-    # Two streams with different entry sizes read the SAME bytes: a page id
-    # is owned by one stream at a time, so nothing is stranded. Entries that
-    # do not tile the page leave bounded padding, and every view is strided
-    # by the whole page rather than by its packed entry span.
+    # Two streams with different entry sizes and views read the SAME bytes.
     specs = [
         KVSpec("main", per_entry_bytes=584, layer_ids=(0, 1),
-               compress_ratio=4, preferred_block_size=256),
+               compress_ratio=4),
         KVSpec("indexer", per_entry_bytes=132, layer_ids=(2, 3),
-               compress_ratio=4, preferred_block_size=256),
+               compress_ratio=4),
     ]
-    plan = plan_kv_groups(specs)
+    plan = plan_kv_groups(specs, target_page_bytes=37376)
     assert plan.target_page_bytes == 37376
-    by = {g.spec_name: g for g in plan.groups}
+    by = {g.stream_name: g for g in plan.groups}
     assert by["main"].entries_per_page == 64        # 584 B x 64, no padding
     assert by["indexer"].entries_per_page == 272    # floored to the tile
 
     pages = 8
-    pool, views = plan.allocate_pool(
+    pool, views = plan._allocate_pool(
         {"main": [("kv", (292,), torch.bfloat16)],
          "indexer": [("kv", (66,), torch.bfloat16)]},
         max_num_pages=pages, device="cpu")
@@ -348,29 +521,26 @@ def test_allocate_pool_shares_one_allocation_across_streams():
     # Both are views on the one allocation, not copies of it.
     assert main.data_ptr() == idx.data_ptr() == pool.data_ptr()
     # One addressing rule for padded and unpadded streams alike.
-    stride = plan.page_stride_elems(torch.bfloat16)
+    stride = plan.elems_per_page(torch.bfloat16)
     assert stride == 37376 // 2
     assert main.stride(1) == idx.stride(1) == stride
     assert idx.stride(1) > 272 * 66     # strictly wider than packed
 
     with _raises(KeyError):
-        plan.allocate_pool({"main": [("kv", (292,), torch.bfloat16)]},
+        plan._allocate_pool({"main": [("kv", (292,), torch.bfloat16)]},
                            max_num_pages=pages, device="cpu")
 
 
 def test_allocate_pool_multi_component_page_shares_one_page_id():
     # A GQA stream stores K and V. They are two COMPONENTS of one page, so a
-    # single page id covers both — no second page table, no second draw from
-    # the free list. 8 kv heads x 64 dim bf16 => 1024 B per token per
-    # component, 2048 B for K+V.
-    spec = KVSpec("gqa", per_entry_bytes=2048, layer_ids=(0, 1),
-                  preferred_block_size=64)
+    # single page id covers both.
+    spec = KVSpec("gqa", per_entry_bytes=2048, layer_ids=(0, 1))
     plan = plan_kv_groups([spec])
     (g,) = plan.groups
     assert plan.target_page_bytes == 64 * 2048
     assert g.entries_per_page == 64
 
-    pool, views = plan.allocate_pool(
+    pool, views = plan._allocate_pool(
         {"gqa": [("k", (8, 64), torch.bfloat16),
                  ("v", (8, 64), torch.bfloat16)]},
         max_num_pages=8, device="cpu")
@@ -379,7 +549,7 @@ def test_allocate_pool_multi_component_page_shares_one_page_id():
     assert tuple(k.shape) == tuple(v.shape) == (2, 8, 64, 8, 64)
     # V starts halfway into the page; both are page-strided by the whole page.
     assert v.data_ptr() - pool.data_ptr() == 64 * 1024
-    assert k.stride(1) == v.stride(1) == plan.page_stride_elems(torch.bfloat16)
+    assert k.stride(1) == v.stride(1) == plan.elems_per_page(torch.bfloat16)
     # Writing one component must not disturb the other.
     k.fill_(1.0)
     v.fill_(2.0)
@@ -388,21 +558,20 @@ def test_allocate_pool_multi_component_page_shares_one_page_id():
 
 def test_assert_in_pool_catches_a_detached_copy():
     # A copy keeps the shape, dtype and values; only its storage differs.
-    spec = KVSpec("gqa", per_entry_bytes=2048, layer_ids=(0, 1),
-                  preferred_block_size=64)
+    spec = KVSpec("gqa", per_entry_bytes=2048, layer_ids=(0, 1))
     plan = plan_kv_groups([spec])
-    _pool, views = plan.allocate_pool(
+    _pool, views = plan._allocate_pool(
         {"gqa": [("k", (8, 64), torch.bfloat16),
                  ("v", (8, 64), torch.bfloat16)]},
         max_num_pages=8, device="cpu")
     view = views[0]["k"][0]
-    assert plan.assert_in_pool(view, "k") is view
+    assert plan._assert_in_pool(view, "k") is view
 
     copy = view.contiguous()
     assert copy.shape == view.shape and copy.dtype == view.dtype
     assert torch.equal(copy, view)
     with _raises(AssertionError):
-        plan.assert_in_pool(copy, "k")
+        plan._assert_in_pool(copy, "k")
 
 
 def test_kernel_entry_multiple_constraint():
@@ -416,22 +585,19 @@ def test_kernel_entry_multiple_constraint():
 
 def test_group_specs_feed_persistent_kernel():
     specs = [
-        KVSpec("full", per_entry_bytes=584, layer_ids=(0,),
-               preferred_block_size=64),
-        KVSpec("sw", per_entry_bytes=584, layer_ids=(1,), window_size=128,
-               preferred_block_size=64),
+        KVSpec("full", per_entry_bytes=584, layer_ids=(0,)),
+        KVSpec("sw", per_entry_bytes=584, layer_ids=(1,), window_size=128),
     ]
     plan = plan_kv_groups(specs)
     gs = plan.group_specs()
     assert [g.block_size for g in gs] == [64, 64]
+    assert [g.window_size for g in gs] == [0, 128]
 
 
 def test_build_meta_tensors():
     specs = [
-        KVSpec("full", per_entry_bytes=64, layer_ids=(0, 1),
-               preferred_block_size=64),
-        KVSpec("sw", per_entry_bytes=64, layer_ids=(2, 3), window_size=128,
-               preferred_block_size=64),
+        KVSpec("full", per_entry_bytes=64, layer_ids=(0, 1)),
+        KVSpec("sw", per_entry_bytes=64, layer_ids=(2, 3), window_size=128),
     ]
     plan = plan_kv_groups(specs)
     assert len(plan.groups) == 2
@@ -441,15 +607,20 @@ def test_build_meta_tensors():
         f"paged_kv_{field}_buffer_{g}"
         for g in range(2)
         for field in ("indptr", "indices", "last_page_len")
-    }
+    } | {f"paged_kv_indices_snapshot_{g}" for g in range(2)}
+    # The snapshot mirrors the index buffer -- online_pinned mode sizes
+    # neither itself.
+    for g in range(2):
+        assert (meta[f"paged_kv_indices_snapshot_{g}"].shape
+                == meta[f"paged_kv_indices_buffer_{g}"].shape)
     for g in range(2):
         assert meta[f"paged_kv_indptr_buffer_{g}"].shape == (5,)
         assert meta[f"paged_kv_last_page_len_buffer_{g}"].shape == (4,)
         assert meta[f"paged_kv_indptr_buffer_{g}"].dtype == torch.int32
         # span = max(pages, requests * ceil(seq/block)) = max(32, 4*1) = 32
         assert meta[f"paged_kv_indices_buffer_{g}"].shape == (32,)
-    # With it, by page-table SPAN instead: recycled slots keep their place,
-    # so the buffer must cover the whole sequence, not just the live pages.
+    # Span covers the whole sequence, not just the live pages, so a
+    # recycled slot keeps its place.
     meta = plan.build_meta_tensors(max_num_pages=8, max_num_batched_requests=2,
                                    max_seq_length=512, device="cpu")
     assert meta["paged_kv_indices_buffer_0"].shape[0] == 2 * (512 // 64)
@@ -463,14 +634,12 @@ class _FakePK:
 
 
 def test_kv_event_log_roundtrip():
-    specs = [KVSpec("full", per_entry_bytes=64, layer_ids=(0,),
-                    preferred_block_size=64)]
+    specs = [KVSpec("full", per_entry_bytes=64, layer_ids=(0,))]
     plan = plan_kv_groups(specs)
     pk = _FakePK()
     ev = KVEventLog(pk, plan, capacity=64, device="cpu")
     assert pk.meta_tensors["kv_event_log"] is ev.log
-    # Hand-craft a symmetric alloc/free sequence for group 0: pages 0 and 1
-    # allocated, an iteration marker, then both freed.
+    # Group 0: alloc pages 0 and 1, an iteration marker, then free both.
     events = [
         (1, 0, 0, 0),
         (1, 0, 0, 1),
@@ -518,9 +687,491 @@ def test_kv_event_log_replay_catches_leak_and_double_alloc():
     assert result["compactions"] == 1
 
 
-if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for fn in fns:
-        fn()
-        print(f"{fn.__name__} OK")
-    print(f"PASSED: {len(fns)} planner tests")
+# ── the declaration surface models actually use ───────────────────────────
+
+
+class _StubMPK:
+    """Stands in for PersistentKernel: attach() only needs attach_input."""
+
+    def __init__(self):
+        self.attached = []
+
+    def attach_input(self, torch_tensor, name):
+        self.attached.append(name)
+        return name
+
+
+def _gpt_oss_shaped_streams(h=8, d=64):
+    kv = [("k", (h, d), torch.bfloat16), ("v", (h, d), torch.bfloat16)]
+    return [
+        KVStream("sliding_attention", layers=(0, 2), window=128,
+                 components=kv),
+        KVStream("full_attention", layers=(1, 3), components=kv),
+    ]
+
+
+def test_attach_hands_out_pool_views_and_the_group_id():
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_gpt_oss_shaped_streams(),
+                              max_num_pages=4, device="cpu", verbose=False)
+    mpk = _StubMPK()
+    seen = {}
+    for layer in (0, 1, 2, 3):
+        got = plan.attach(mpk, layer)
+        want = {"k_cache", "v_cache", "group_id"}
+        if layer % 2 == 0:
+            want |= {"window_size"}
+            assert got["window_size"] == 128
+        assert set(got) == want
+        seen[layer] = got["group_id"]
+    # layers of one stream share a page table, the two streams do not
+    assert seen[0] == seen[2] and seen[1] == seen[3] and seen[0] != seen[1]
+    assert len(mpk.attached) == 8
+
+
+def _dsv4_shaped_streams(layers=(0, 1)):
+    """DeepSeek-V4 shape: one layer, three caches (windowed, compressed,
+    indexer)."""
+    return [
+        KVStream("swa", layers=layers, window=128,
+                 components=[("k", (8, 64), torch.bfloat16),
+                             ("v", (8, 64), torch.bfloat16)]),
+        KVStream("c4", layers=layers, compress_ratio=4,
+                 components=[("kv", (576,), torch.bfloat16)]),
+        KVStream("indexer", layers=layers, compress_ratio=4,
+                 components=[("kv", (132,), torch.uint8)]),
+    ]
+
+
+def test_one_layer_can_carry_several_caches_and_attach_returns_them_all():
+    """A task needs both caches plus a page table each, from one call."""
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_dsv4_shaped_streams(), max_num_pages=8,
+                              target_page_bytes=128 * 1024, device="cpu",
+                              verbose=False)
+    mpk = _StubMPK()
+    got = plan.attach(mpk, 0)
+    assert set(got) == {
+        "swa_k_cache", "swa_v_cache", "swa_group_id", "swa_window_size",
+        "c4_kv_cache", "c4_group_id",
+        "indexer_kv_cache", "indexer_group_id",
+    }
+    assert got["swa_window_size"] == 128
+    # _layer_info used to return the FIRST group holding a layer, silently
+    # handing back one cache and hiding the rest; it must refuse instead.
+    with _raises(KeyError):
+        plan._layer_info(0)
+    # three DIFFERENT page tables, so a task can read all three at once
+    assert len({got["swa_group_id"], got["c4_group_id"],
+                got["indexer_group_id"]}) == 3
+    # every cache got its own graph input; a collision here would have made
+    # attach_input silently overwrite one in the kernel-reuse tensor map
+    assert len(mpk.attached) == len(set(mpk.attached)) == 4
+
+
+def test_identical_geometry_on_one_layer_is_refused():
+    """Same page geometry, same layer: refused regardless of distinct names
+    -- the fix, if ever needed, is a real geometry difference, not
+    auto-splitting."""
+    kv = [("k", (8, 64), torch.bfloat16)]
+    with _raises(ValueError):
+        build_kv_cache([KVStream("a", layers=(0,), components=kv),
+                        KVStream("b", layers=(0,), components=kv)],
+                       max_num_pages=4, device="cpu", verbose=False)
+    # a real geometry difference (here: window) makes them legitimately two
+    # caches
+    with _free_memory(64 << 30):
+        build_kv_cache([KVStream("a", layers=(0,), components=kv),
+                        KVStream("b", layers=(0,), components=kv,
+                                 window=128)],
+                       max_num_pages=4, device="cpu", verbose=False)
+
+
+def test_two_streams_cannot_share_a_name():
+    """_layouts is keyed by stream name, so a repeat silently loses a layout."""
+    kv = [("k", (8, 64), torch.bfloat16)]
+    with _raises(ValueError):
+        build_kv_cache([KVStream("dup", layers=(0,), components=kv),
+                        KVStream("dup", layers=(1,), components=kv)],
+                       max_num_pages=4, device="cpu", verbose=False)
+
+
+def test_merged_streams_still_attach_with_bare_keys_per_layer():
+    """Two streams fold into one group (DSv3 mla+mtp), but attach() resolves
+    per LAYER -- merging is invisible to attach()."""
+    kv = [("k", (8, 64), torch.bfloat16)]
+    streams = [KVStream("a", layers=(0,), components=kv),
+               KVStream("b", layers=(1,), components=kv)]
+    merged, name_of = _merge_identical_streams(streams)
+    assert len(merged) == 1, "identical layout, disjoint layers should merge"
+    assert name_of == {"a": "a+b", "b": "a+b"}
+
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(streams, max_num_pages=4, device="cpu",
+                              verbose=False)
+    mpk = _StubMPK()
+    assert set(plan.attach(mpk, 0)) == {"k_cache", "group_id"}
+    assert set(plan.attach(mpk, 1)) == {"k_cache", "group_id"}
+
+
+def test_attach_refuses_a_cache_copied_out_of_the_pool():
+    """The check attach() folds in is the only thing that catches the
+    .contiguous() trap: the copy has the right shape, dtype and values."""
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_gpt_oss_shaped_streams(),
+                              max_num_pages=4, device="cpu", verbose=False)
+    view = plan.views(0)["k"][0]
+    copy = view.contiguous()
+    assert copy.shape == view.shape and copy.dtype == view.dtype
+    assert torch.equal(copy, view)
+    with _raises(AssertionError):
+        plan._assert_in_pool(copy, "copied")
+
+
+def test_materialize_refuses_a_plan_that_never_declared_layouts():
+    plan = plan_kv_groups([
+        KVSpec("s", per_entry_bytes=2048, layer_ids=(0,))])
+    with _raises(RuntimeError):
+        plan._materialize(max_num_pages=2, device="cpu")
+
+
+# ── resolve_pool_size ─────────────────────────────────────────────────────
+
+
+@contextmanager
+def _free_memory(free_bytes, total_bytes=None):
+    """Pin what the device reports free, so the OOM-refusal branch is
+    testable without owning a particular card."""
+    real = torch.cuda.mem_get_info
+    torch.cuda.mem_get_info = lambda device=0: (
+        free_bytes, total_bytes if total_bytes is not None else free_bytes)
+    try:
+        yield
+    finally:
+        torch.cuda.mem_get_info = real
+
+
+def _one_stream_plan():
+    """Planned but NOT sized -- these tests drive the sizing step itself."""
+    return plan_kv_groups([
+        KVSpec("attention", per_entry_bytes=2 * 8 * 64 * 2,
+               layer_ids=tuple(range(4)))])
+
+
+def test_resolve_pool_size_takes_exactly_one_of_the_two_knobs():
+    plan = _one_stream_plan()
+    with _raises(ValueError):        # neither
+        _resolve_pool_size(plan, max_seq_length=512, verbose=False)
+    with _raises(ValueError):        # both
+        _resolve_pool_size(plan, kv_budget="1GiB", max_num_pages=64,
+                          max_seq_length=512, verbose=False)
+
+
+def test_resolve_pool_size_publishes_the_count_on_the_plan():
+    """Both sizing sites read plan.max_num_pages, not the return value."""
+    plan = _one_stream_plan()
+    assert plan.max_num_pages is None
+    with _free_memory(64 << 30):
+        got = _resolve_pool_size(plan, max_num_pages=4096, max_seq_length=512,
+                                verbose=False)
+    assert got == 4096 and plan.max_num_pages == 4096
+
+
+def test_resolve_pool_size_refuses_a_pool_below_one_requests_floor():
+    plan = _one_stream_plan()
+    floor = plan.pages_needed(1, 8192, 1)
+    with _free_memory(64 << 30), _raises(ValueError):
+        _resolve_pool_size(plan, max_num_pages=floor - 1,
+                          max_seq_length=8192, verbose=False)
+    with _free_memory(64 << 30):     # the floor itself is allowed
+        _resolve_pool_size(plan, max_num_pages=floor, max_seq_length=8192,
+                          verbose=False)
+
+
+def test_resolve_pool_size_refuses_a_pool_that_does_not_fit_in_free_memory():
+    """Caught before the allocation, so the failure names the pool rather than
+    arriving as a CUDA OOM from inside allocate."""
+    plan = _one_stream_plan()
+    pages = 1 << 20
+    need = plan.budget_bytes(pages)
+    with _free_memory(need - 1), _raises(ValueError):
+        _resolve_pool_size(plan, max_num_pages=pages, max_seq_length=512,
+                          verbose=False)
+    with _free_memory(need):
+        assert _resolve_pool_size(plan, max_num_pages=pages,
+                                 max_seq_length=512, verbose=False) == pages
+
+
+def test_build_kv_cache_requires_max_seq_length_with_a_budget():
+    """Without a length, nothing to size the budget to -- an undersized pool
+    would surface as a runtime deadlock instead of an error here."""
+    with _raises(ValueError):
+        build_kv_cache(_gpt_oss_shaped_streams(), kv_budget="1GiB",
+                       device="cpu", verbose=False)
+
+
+def test_resolve_pool_size_skips_the_floor_check_without_a_length():
+    """No length to compare against: the pool is taken as given."""
+    plan = _one_stream_plan()
+    tiny = 1
+    assert tiny < plan.pages_needed(1, 8192, 1)
+    with _free_memory(64 << 30):
+        assert _resolve_pool_size(plan, max_num_pages=tiny,
+                                  verbose=False) == tiny
+
+
+# ── merging streams that lay a page out identically ────────────────────────
+
+
+def _dsv3_shaped_streams():
+    """DeepSeek-V3: 61 attention layers + 1 MTP layer, whose KV is the same
+    per-token shape as the main layers'."""
+    entry = [("kv", (1, 576), torch.bfloat16)]     # MLA: 512 latent + 64 rope
+    return [
+        KVStream("attention", layers=tuple(range(61)), components=entry),
+        KVStream("mtp", layers=(61,), components=entry),
+    ]
+
+
+def test_identical_streams_merge_into_one_group():
+    """Unmerged, _group_size sees [61, 1] -> gcd 1 -> 62 single-slot groups.
+    Merged first, it sees [62] -> one 62-slot group, no padding."""
+    unmerged = plan_kv_groups([s._spec() for s in _dsv3_shaped_streams()])
+    assert len(unmerged.groups) == 62 and unmerged.num_slots == 1
+
+    merged, _ = _merge_identical_streams(_dsv3_shaped_streams())
+    assert [s.name for s in merged] == ["attention+mtp"]
+    plan = plan_kv_groups([s._spec() for s in merged])
+    assert len(plan.groups) == 1 and plan.num_slots == 62
+    # Every layer still resolves, and to a distinct slot.
+    slots = [plan._layer_info(i) for i in range(62)]
+    assert sorted(s for _, s in slots) == list(range(62))
+    assert {g for g, _ in slots} == {0}
+
+
+def test_merged_stream_sorts_its_layers():
+    """Slot assignment must not depend on which stream was declared first."""
+    a, b = _dsv3_shaped_streams()
+    forward = _merge_identical_streams([a, b])[0][0].layers
+    backward = _merge_identical_streams([b, a])[0][0].layers
+    assert forward == backward == tuple(range(62))
+
+
+def test_equal_byte_size_is_not_equal_layout():
+    """Same per_entry_bytes, different shape -- why merging runs on
+    KVStream, not inside plan_kv_groups (which only sees per_entry_bytes)."""
+    one = KVStream("one", layers=(0,),
+                   components=[("k", (8, 64), torch.bfloat16)])
+    two = KVStream("two", layers=(1,),
+                   components=[("k", (4, 64), torch.bfloat16),
+                               ("v", (4, 64), torch.bfloat16)])
+    assert one.per_entry_bytes == two.per_entry_bytes == 1024
+    assert len(_merge_identical_streams([one, two])[0]) == 2
+
+
+def test_merge_key_covers_every_declared_field():
+    """Two streams differing in ANY page field must stay apart -- loops every
+    KVStream field so a later-added one can't silently fuse unalike streams."""
+    from dataclasses import fields as _fields
+
+    base = dict(components=[("k", (4, 64), torch.bfloat16)], window=0,
+                compress_ratio=1, block_size_multiple_of=None,
+                kind=KVMode.PAGED)
+    others = dict(components=[("k", (8, 64), torch.bfloat16)], window=128,
+                  compress_ratio=2, block_size_multiple_of=64,
+                  kind=KVMode.FLAT)
+
+    declared = {f.name for f in _fields(KVStream)} - {"name", "layers"}
+    assert declared == set(base) == set(others), (
+        f"KVStream fields {sorted(declared)} are not all covered by this "
+        f"test's table {sorted(base)}")
+
+    for field, other in others.items():
+        a = KVStream("a", layers=(0,), **base)
+        b = KVStream("b", layers=(1,), **{**base, field: other})
+        assert len(_merge_identical_streams([a, b])[0]) == 2, (
+            f"streams differing only in {field!r} were merged")
+
+    # ...and two that differ in nothing but name and layers do merge, so the
+    # loop above is not passing because merging is broken outright.
+    a = KVStream("a", layers=(0,), **base)
+    b = KVStream("b", layers=(1,), **base)
+    assert len(_merge_identical_streams([a, b])[0]) == 1
+
+
+def test_merged_stream_allocates_and_every_layer_gets_its_view():
+    """The merged group's stream_name and _layouts' key (stream name) must
+    stay in sync -- a drift would only surface here, at allocation."""
+    plan = build_kv_cache(_dsv3_shaped_streams(), max_num_pages=4,
+                          device="cpu", verbose=False)
+    assert plan.groups[0].stream_name == "attention+mtp"
+    for layer in range(62):
+        group_id, slot = plan._layer_info(layer)
+        view = plan._views[group_id]["kv"][slot]
+        assert tuple(view.shape[2:]) == (1, 576)
+        assert view.dtype == torch.bfloat16
+    # Distinct layers must not alias each other.
+    a = plan._views[0]["kv"][plan._layer_info(0)[1]]
+    b = plan._views[0]["kv"][plan._layer_info(61)[1]]
+    a.fill_(1.0); b.fill_(2.0)
+    assert a.flatten()[0].item() == 1.0 and b.flatten()[0].item() == 2.0
+
+
+# ── unpaged streams ───────────────────────────────────────────────────────
+
+
+def _flat_streams(layers=(0, 1), h=8, d=64):
+    kv = [("k", (h, d), torch.bfloat16), ("v", (h, d), torch.bfloat16)]
+    return [KVStream("flat", layers=layers, components=kv,
+                     kind=KVMode.FLAT)]
+
+
+def test_unpaged_stream_gets_storage_but_no_group_or_page_table():
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_flat_streams(), kv_budget="1GiB",
+                              max_seq_length=256, device="cpu", verbose=False)
+    assert plan.flat_streams and not plan._layouts
+    assert plan.groups == () and plan.num_slots == 0
+    assert plan.target_page_bytes == 0
+    assert plan.page_id_bytes == 0
+    assert plan.flat_bytes == 2 * 256 * (2 * 8 * 64 * 2)
+    assert plan.budget_bytes(plan.max_num_pages) == plan.flat_bytes
+
+
+def test_an_unpaged_stream_leaves_the_paged_plan_alone():
+    """Containment: an unpaged stream must not move a single number in the
+    paged plan -- why this is a stream flag, not a planner special case."""
+    with _free_memory(64 << 30):
+        alone = build_kv_cache(_gpt_oss_shaped_streams(), max_num_pages=4,
+                               device="cpu", verbose=False)
+        together = build_kv_cache(
+            _gpt_oss_shaped_streams() + _flat_streams(layers=(8, 9)),
+            max_num_pages=4, max_seq_length=64, device="cpu", verbose=False)
+    assert together.target_page_bytes == alone.target_page_bytes
+    assert together.num_slots == alone.num_slots
+    assert [(g.stream_name, g.block_size, g.window_size, g.entries_per_page)
+            for g in together.groups] == \
+           [(g.stream_name, g.block_size, g.window_size, g.entries_per_page)
+            for g in alone.groups]
+    # ...and the flat stream is nonetheless there and budgeted
+    assert together.flat_bytes > 0
+    assert together.budget_bytes(4) == alone.budget_bytes(4) + \
+        together.flat_bytes
+
+
+def test_unpaged_streams_refuse_every_knob_that_describes_a_page():
+    """All three describe a page; accepting one on an unpaged stream would
+    silently ignore it (e.g. a declared window that frees nothing)."""
+    from dataclasses import fields as _fields
+
+    kv = [("k", (8, 64), torch.bfloat16)]
+    offenders = dict(window=128, compress_ratio=2, block_size_multiple_of=64)
+    paging_knobs = {f.name for f in _fields(KVStream)} - {
+        "name", "layers", "components", "kind"}
+    assert paging_knobs == set(offenders), (
+        f"KVStream paging knobs {sorted(paging_knobs)} are not all covered by "
+        f"this test's table {sorted(offenders)}")
+
+    for knob, value in offenders.items():
+        stream = KVStream("flat", layers=(0,), components=kv,
+                          kind=KVMode.FLAT, **{knob: value})
+        with _raises(ValueError):
+            stream._flat(capacity=128)
+    # the same stream without the knob is accepted, so the loop above is not
+    # passing because _flat refuses everything
+    KVStream("flat", layers=(0,), components=kv, kind=KVMode.FLAT)._flat(128)
+
+
+def test_attach_hands_out_flat_views_with_no_group_id():
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_flat_streams(), kv_budget="1GiB",
+                              max_seq_length=256, device="cpu", verbose=False)
+    mpk = _StubMPK()
+    for layer in (0, 1):
+        got = plan.attach(mpk, layer)
+        # same key set a paged layer gets; group_id None, not 0 (0 is real)
+        assert set(got) == {"k_cache", "v_cache", "group_id"}
+        assert got["group_id"] is None
+    assert len(mpk.attached) == 4
+    k0 = plan._flat_views[("flat", 0)]["k"]
+    assert k0.shape == (256, 8, 64) and k0.dtype == torch.bfloat16
+    # the two layers do not alias, and K and V within a layer do not either
+    assert k0.data_ptr() != plan._flat_views[("flat", 1)]["k"].data_ptr()
+    assert k0.data_ptr() != plan._flat_views[("flat", 0)]["v"].data_ptr()
+
+
+def test_attach_refuses_a_flat_cache_copied_off_the_plan():
+    with _free_memory(64 << 30):
+        plan = build_kv_cache(_flat_streams(), kv_budget="1GiB",
+                              max_seq_length=256, device="cpu", verbose=False)
+    view = plan._flat_views[("flat", 0)]["k"]
+    copy = view.clone()
+    assert copy.shape == view.shape and torch.equal(copy, view)
+    with _raises(AssertionError):
+        plan._assert_in_flat(copy, "copied")
+    # ...and a view still on the buffer but no longer one token row per step
+    strided = view[:, :4, :]
+    assert strided.data_ptr() == view.data_ptr()
+    with _raises(AssertionError):
+        plan._assert_in_flat(strided, "strided")
+    # the honest view passes, so the two above are not failing for free
+    plan._assert_in_flat(view, "view")
+
+
+# ── the declaration is mandatory (three-state kv_streams) ─────────────────
+
+
+def test_every_registered_builder_declares_its_kv_streams():
+    """A builder that inherits the base kv_streams has not declared anything."""
+    from mirage.mpk.model_registry import _MODEL_BUILDERS
+    from mirage.mpk.models.graph_builder import GraphBuilder
+    import mirage.mpk.models  # noqa: F401  (registers the builders)
+
+    assert _MODEL_BUILDERS, "no builders registered; the import above moved"
+    undeclared = sorted({
+        cls.__name__ for cls in _MODEL_BUILDERS.values()
+        if getattr(cls, "kv_streams", None) is GraphBuilder.kv_streams})
+    assert not undeclared, (
+        f"{undeclared} inherit GraphBuilder.kv_streams; a model whose kernels "
+        f"read the cache flat declares KVStream(..., kind=KVMode.FLAT)")
+
+    with _raises(NotImplementedError):
+        GraphBuilder.kv_streams(None)
+
+
+def test_an_unpaged_plan_builds_a_persistent_kernel():
+    """Zero KV groups against the real constructor and capacity check --
+    MPK_NUM_KV_GROUPS becomes a -D that dimensions device-side arrays."""
+    if not torch.cuda.is_available():
+        import pytest
+        pytest.skip("needs a device: PersistentKernel attaches cuda tensors")
+    from mirage.mpk.persistent_kernel import PersistentKernel
+
+    S = 2048
+    plan = build_kv_cache(_flat_streams(layers=(0,), h=16, d=128),
+                          kv_budget="4GiB", max_seq_length=S, verbose=False)
+    meta = dict(plan.build_meta_tensors(max_seq_length=S,
+                                        max_num_batched_requests=1))
+    meta.update({
+        "step": torch.zeros(1, dtype=torch.int32, device="cuda"),
+        "tokens": torch.zeros(1, S, dtype=torch.int64, device="cuda"),
+        "input_tokens": torch.zeros(1, 1, dtype=torch.int64, device="cuda"),
+        "output_tokens": torch.zeros(1, 1, dtype=torch.int64, device="cuda"),
+        "num_new_tokens": torch.zeros(1, dtype=torch.int32, device="cuda"),
+        "prompt_lengths": torch.zeros(1, dtype=torch.int32, device="cuda"),
+        "qo_indptr_buffer": torch.zeros(2, dtype=torch.int32, device="cuda"),
+    })
+    pk = PersistentKernel(
+        mode="offline", world_size=1, mpi_rank=0, num_workers=96,
+        num_local_schedulers=4, num_remote_schedulers=0, max_seq_length=S,
+        max_num_batched_requests=1, max_num_batched_tokens=1,
+        kv_plan=plan, meta_tensors=meta, profiler_tensor=None,
+        trace_name=None, spec_decode_config=None, use_cutlass_kernel=False)
+    assert pk.kv_groups == []
+    pk._check_kv_capacity()          # nothing demands a page, and it fits
+
+    kv = plan.attach(pk, 0)
+    assert kv["group_id"] is None
+    k = kv["k_cache"]
+    assert k.num_dims == 3
+    assert [k.dim(i) for i in range(3)] == [S, 16, 128]

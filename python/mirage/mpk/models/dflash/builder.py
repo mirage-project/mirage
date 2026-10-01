@@ -2,22 +2,29 @@
 into a target model's MPK task graph.
 
 Mirrors Eagle3Builder, but the DFlash draft is a SINGLE non-causal forward per
-decode step (not Eagle3's K autoregressive steps), it owns a PAGED KV cache that
+decode step (not Eagle3's K autoregressive steps), it owns a flat KV cache that
 accumulates committed context K/V across decode steps, and it shares the target's
 embedding + lm_head.
 
 Pipeline per decode step (all in one megakernel):
   L2  ctx = hidden_norm(fc(target_hidden[S, K*H_t]))                  -> [S, H_d]
   L4  per draft layer: k = k_norm(k_proj(ctx)) + YaRN-RoPE; v = v_proj(ctx);
-      dflash_kv_store writes (k,v) into that layer's paged cache at the committed
+      dflash_kv_store writes (k,v) into that layer's cache at the committed
       slots (OVERWRITING the draft's temporary block-K/V there).
   L5  draft block [t0, MASK*(B-1)] runs a non-causal forward; each layer reads its
-      paged cache (context) + this block's K/V; sliding_window=2048 on layers 0-4,
+      cache (context) + this block's K/V; sliding_window=2048 on layers 0-4,
       full on the last layer.
   L6  final_hidden -> target lm_head -> argmax over the s=B-1 MASK slots -> draft
       tokens (chain = [t0, d1..d_{B-1}]).
 
-Usage from a target builder / demo (once the K2.6 target main body is in MPK):
+Usage from a target builder / demo (once the K2.6 target main body is in MPK).
+The draft's KV is declared alongside the target's and owned by the plan:
+
+    draft_streams = dflash_kv_streams(draft_cfg,
+                                      layer_id_base=target_num_layers)
+    kv_plan = build_kv_cache(target_streams + draft_streams,
+                             kv_budget=..., max_seq_length=4096)
+    mpk = PersistentKernel(..., kv_plan=kv_plan)
 
     dflash = DFlashBuilder(
         mpk=mpk,
@@ -26,6 +33,7 @@ Usage from a target builder / demo (once the K2.6 target main body is in MPK):
         target_w_lm_head=shared_lm_head_2d,    # [vocab, H_t] torch.bf16 (target's)
         num_speculative_tokens=7,
         max_seq_len=4096,
+        draft_streams=draft_streams,
     )
     # cos/sin cache built once from the rope config (YaRN, mscale=1.4159):
     #   self.cos_sin built in __init__; re-used by every step.
@@ -37,17 +45,18 @@ Usage from a target builder / demo (once the K2.6 target main body is in MPK):
         target_hidden_dt, input_ids_dt, ctx_len=S, slot_start=committed_len)
     # draft_tokens: DTensor [B,1] int64 (slot 0 = bonus echo; [1:B] = the s drafts)
 
-The paged caches persist across steps so context accumulates; `slot_start` is the
-committed-length offset where this step's new context K/V get written.
+The caches persist across steps so context accumulates; `slot_start` is the
+committed-length offset where this step's new context K/V get written. The plan
+owns and budgets them, though currently they carry no page table.
 
 NOTE on cross-iter / runtime driving: this builder constructs ONE decode step's
 draft graph. Two ways to drive it:
   (a) integrated (target in MPK): append after the target fwd in the same graph,
-      like Eagle3Builder.build_draft_loop; the runtime's persistent paged cache +
-      slot_mapping accumulate context across steps.
-  (b) replay/per-step (target external): the demo holds the paged caches and calls
-      build_step on a fresh PersistentKernel each step (ctx_len grows -> recompile);
-      the caches (torch tensors held by this builder) persist and accumulate.
+      like Eagle3Builder.build_draft_loop; the persistent cache + slot_mapping
+      accumulate context across steps.
+  (b) replay/per-step (target external): build_step runs on a fresh
+      PersistentKernel each step (ctx_len grows -> recompile); the plan's caches
+      persist and accumulate.
 The validated reference for both is tests/runtime_python/blackwell/sm100_dflash/
 {test_dflash_full_step_testmode.py (single step), test_dflash_paged_xiter.py
 (cross-iter to EOS)}.
@@ -59,12 +68,35 @@ import math
 import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer
+from ...kvcache import KVMode, KVStream
 from ....core import bfloat16, int64
 
 
 def _gpl(out_dim: int) -> int:
     """Grid for a linear/rmsnorm layer (96 if 96-aligned else 64)."""
     return 96 if out_dim % 96 == 0 else 64
+
+
+def dflash_kv_streams(draft_config, layer_id_base: int, world_size: int = 1):
+    """The DFlash draft's KV: one unpaged stream at its own layer ids.
+
+    `layer_id_base` (the target's layer count) keeps the draft's ids off the
+    target's. `kind=KVMode.FLAT` because as currently dflash_attention is unpaged.
+    """
+    if world_size != 1:
+        raise NotImplementedError("the DFlash draft's KV is not sharded")
+    num_layers = int(draft_config["num_hidden_layers"])
+    num_kv_heads = int(draft_config["num_key_value_heads"])
+    head_dim = int(draft_config.get("head_dim", 128))
+    entry = (num_kv_heads, head_dim)
+    return [
+        KVStream("dflash_draft",
+                 layers=tuple(range(layer_id_base,
+                                    layer_id_base + num_layers)),
+                 components=[("k", entry, torch.bfloat16),
+                             ("v", entry, torch.bfloat16)],
+                 kind=KVMode.FLAT),
+    ]
 
 
 class DFlashBuilder:
@@ -77,7 +109,7 @@ class DFlashBuilder:
         target_w_lm_head: torch.Tensor,  # [vocab, H_t] shared target lm_head
         num_speculative_tokens: int = 7,
         max_seq_len: int = 4096,
-        page_size: int = 8,
+        draft_streams=None,              # what dflash_kv_streams() returned
         mscale: float = 1.4159,          # vLLM/sglang native YaRN mscale for K2.6
         cos_sin_cache: torch.Tensor | None = None,  # [max_seq_len, head_dim], optional
         device: str = "cuda",
@@ -114,9 +146,14 @@ class DFlashBuilder:
         self.kv_size = self.num_kv_heads * self.head_dim
         self.eps = float(draft_config.get("rms_norm_eps", 1e-5))
         self.mscale = mscale
-        self.page_size = page_size
         self.max_seq_len = max_seq_len
-        self.max_num_pages = (max_seq_len + page_size - 1) // page_size
+        self.kv_plan = getattr(mpk, "kv_plan", None)
+        assert self.kv_plan is not None and draft_streams is not None
+        self.layer_ids = tuple(sorted(
+            l for st in draft_streams for l in st.layers))
+        assert len(self.layer_ids) == self.num_layers
+        self.layer_id_base = self.layer_ids[0]
+        self._kv_cache = {}          # layer -> (k_cache, v_cache) DTensors
 
         self.target_w_embed = target_w_embed.contiguous()
         self.target_w_lm_head = target_w_lm_head.contiguous()
@@ -204,26 +241,23 @@ class DFlashBuilder:
                 down=w(p + "mlp.down_proj.weight"),
             ))
 
-        # Draft-owned paged KV caches, ONE per layer, separate from the target's.
-        # Layout [max_num_pages, page_size, num_kv_heads, head_dim]; contiguous
-        # pages -> slot s maps to flat row s.
-        self.k_cache_bufs = []
-        self.v_cache_bufs = []
-        for i in range(self.num_layers):
-            kb = torch.zeros((self.max_num_pages, self.page_size, self.num_kv_heads,
-                              self.head_dim), dtype=self.dtype, device=self.device)
-            vb = torch.zeros_like(kb)
-            self.k_cache_bufs.append(kb)
-            self.v_cache_bufs.append(vb)
-        self._kept += self.k_cache_bufs + self.v_cache_bufs
         self._kept += [self.target_w_embed, self.target_w_lm_head,
                        self.cos_full, self.sin_full]
+
+    def _kv(self, i: int):
+        """This draft layer's (k_cache, v_cache), from the plan."""
+        if i not in self._kv_cache:
+            kv = self.kv_plan.attach(self.mpk, self.layer_ids[i],
+                                     prefix="dflash")
+            assert kv["group_id"] is None # as currently dflash_attention is unpaged
+            self._kv_cache[i] = (kv["k_cache"], kv["v_cache"])
+        return self._kv_cache[i]
 
     # --------------------------------------------------------- L2+L4: materialize
     def materialize_context_kv(self, target_hidden, slot_start, num_new):
         """L2 + L4: project `target_hidden` [num_new, K*H_t] for the newly-committed
         tokens into ctx, then per layer compute k_norm+RoPE'd K and raw V and
-        dflash_kv_store them into each layer's paged cache at slots
+        dflash_kv_store them into each layer's cache at slots
         [slot_start : slot_start+num_new] (overwriting any temp block-K/V there).
 
         `target_hidden` is a DTensor [num_new, K*H_t]. Appends graph layers.
@@ -251,8 +285,12 @@ class DFlashBuilder:
             kw = self._attach(w["k"], f"dflash_L{i}_k")
             vw = self._attach(w["v"], f"dflash_L{i}_v")
             kn = self._attach(w["kn"], f"dflash_L{i}_kn")
-            kc = self._attach(self.k_cache_bufs[i], f"dflash_kcache_{i}")
-            vc = self._attach(self.v_cache_bufs[i], f"dflash_vcache_{i}")
+            kc, vc = self._kv(i)
+            # page_size 1 makes the paged store an absolute-slot write.
+            kc4 = mpk.view(kc, [self.max_seq_len, 1, self.num_kv_heads,
+                                self.head_dim])
+            vc4 = mpk.view(vc, [self.max_seq_len, 1, self.num_kv_heads,
+                                self.head_dim])
             kraw = self._new((S, self.kv_size), f"dflash_L{i}_kraw")
             Kn = self._new((S, self.kv_size), f"dflash_L{i}_Kn")
             vraw = self._new((S, self.kv_size), f"dflash_L{i}_vraw")
@@ -260,17 +298,17 @@ class DFlashBuilder:
                              grid_dim=(_gpl(self.kv_size), 1, 1), block_dim=bd)
             mpk.dflash_norm_rope_layer(x=kraw, weight=kn, cos=cos_c, sin=sin_c, output=Kn,
                                        grid_dim=(1, 1, 1), block_dim=bd, head_dim=self.head_dim)
-            mpk.dflash_kv_store_layer(kv_in=Kn, slot_mapping=slot, cache=kc,
+            mpk.dflash_kv_store_layer(kv_in=Kn, slot_mapping=slot, cache=kc4,
                                       grid_dim=(1, 1, 1), block_dim=bd, head_dim=self.head_dim)
             mpk.linear_layer(input=ctx, weight=vw, output=vraw,
                              grid_dim=(_gpl(self.kv_size), 1, 1), block_dim=bd)
-            mpk.dflash_kv_store_layer(kv_in=vraw, slot_mapping=slot, cache=vc,
+            mpk.dflash_kv_store_layer(kv_in=vraw, slot_mapping=slot, cache=vc4,
                                       grid_dim=(1, 1, 1), block_dim=bd, head_dim=self.head_dim)
 
     # ------------------------------------------------------ L5+L6: draft + sample
     def build_draft_forward(self, query_embed, ctx_len, query_pos_start):
         """L5 + L6: non-causal draft over the B-token block `query_embed` [B, H]
-        (already embedded [t0, MASK*(B-1)]), reading each layer's paged cache for
+        (already embedded [t0, MASK*(B-1)]), reading each layer's cache for
         context [0:ctx_len] with the per-layer sliding window; then lm_head + argmax.
 
         Returns (final_hidden_dt [B,H], draft_tokens_dt [B,1] int64). The s drafts
@@ -279,7 +317,7 @@ class DFlashBuilder:
         H, B = self.hidden_size, self.B
         I = self.intermediate_size
         gut = grid_for_rmsnorm_linear_layer(2 * I)
-        cap = self.max_num_pages * self.page_size
+        cap = self.max_seq_len
         cosB = mpk.narrow(self._attach(self.cos_full, "dflash_cos_full"), 0, query_pos_start, B)
         sinB = mpk.narrow(self._attach(self.sin_full, "dflash_sin_full"), 0, query_pos_start, B)
 
@@ -299,8 +337,7 @@ class DFlashBuilder:
             dw = self._attach(w["down"], f"dflash_L{i}_down")
             gu = mpk.shuffle_tensors(inputs=[gw, uw], shuffled_dim=0,
                                      num_groups=gut // 2, name=f"dflash_L{i}_gateup")
-            kc = self._attach(self.k_cache_bufs[i], f"dflash_kcache_{i}")
-            vc = self._attach(self.v_cache_bufs[i], f"dflash_vcache_{i}")
+            kc, vc = self._kv(i)
             ck = mpk.narrow(mpk.view(kc, [cap, self.kv_size]), 0, 0, ctx_len)
             cv = mpk.narrow(mpk.view(vc, [cap, self.kv_size]), 0, 0, ctx_len)
 

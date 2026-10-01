@@ -31,9 +31,12 @@ import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
+from ...kvcache import KVMode, KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64
+
+bfloat16_t = torch.bfloat16
 
 # ---- Inkling architecture constants (config.json text_config) --------------
 HIDDEN_SIZE = 6144
@@ -67,12 +70,69 @@ LOGITS_MUP_DIV = 24.0
 EOS_TOKEN_ID = 200006
 
 
+def _text_config(config):
+    """Inkling's architecture lives under text_config."""
+    inner = getattr(config, "text_config", None)
+    if inner is None and isinstance(config, dict):
+        inner = config.get("text_config")
+    return inner if inner is not None else config
+
+
+def _cfg_get(config, name, default):
+    if isinstance(config, dict):
+        return config.get(name, default)
+    return getattr(config, name, default)
+
+
+def is_local_layer(layer_idx: int, local_layer_ids=None) -> bool:
+    """Local (windowed, 16 KV heads) vs global (full, 8 KV heads)."""
+    if local_layer_ids is not None:
+        return layer_idx in set(local_layer_ids)
+    return (layer_idx + 1) % 6 != 0
+
+
+def inkling_kv_streams(config, world_size: int = 1):
+    """Inkling's two attention kinds, as two unpaged KV streams.
+
+    inkling_attention currently reads context as one flat [max_ctx, kv_width]
+    array (`ctx_k + j * KV_STRIDE`) and the store writes absolute rows."""
+    if world_size != 1:
+        raise NotImplementedError(
+            "Inkling v1 supports world_size == 1 only, so its KV is not "
+            "sharded; see InklingBuilder.__init__")
+    tc = _text_config(config)
+    num_layers = _cfg_get(tc, "num_hidden_layers", NUM_LAYERS)
+    head_dim = _cfg_get(tc, "head_dim", HEAD_DIM)
+    local_layer_ids = _cfg_get(tc, "local_layer_ids", None)
+
+    def is_local(i):
+        return is_local_layer(i, local_layer_ids)
+
+    def stream(name, nkv, layers):
+        return KVStream(
+            name, layers=layers,
+            components=[("k", (nkv, head_dim), bfloat16_t),
+                        ("v", (nkv, head_dim), bfloat16_t)],
+            kind=KVMode.FLAT)
+
+    local = tuple(i for i in range(num_layers) if is_local(i))
+    glob = tuple(i for i in range(num_layers) if not is_local(i))
+    out = []
+    if local:
+        out.append(stream("local_attention", LOCAL_KV_HEADS, local))
+    if glob:
+        out.append(stream("global_attention", GLOBAL_KV_HEADS, glob))
+    return out
+
+
 @register_model_builder("Inkling", "thinkingmachines/Inkling", "inkling")
 class InklingBuilder(GraphBuilder):
+    kv_streams = staticmethod(inkling_kv_streams)
+
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
-        self.max_num_pages = mpk.max_num_pages
-        self.page_size = mpk.page_size
+        self.kv_plan = getattr(mpk, "kv_plan", None)
+        assert self.kv_plan is not None
         self.world_size = mpk.world_size
         self.rank = mpk.mpi_rank
         self.input_tokens = mpk.meta_tensors["input_tokens"]
@@ -135,15 +195,13 @@ class InklingBuilder(GraphBuilder):
         return t.float().contiguous().cuda()
 
     def _is_local(self, layer_idx: int) -> bool:
-        if self.local_layer_ids is not None:
-            return layer_idx in self.local_layer_ids
-        return (layer_idx + 1) % 6 != 0
+        return is_local_layer(layer_idx, self.local_layer_ids)
 
     @property
     def max_ctx(self) -> int:
-        if self.max_num_pages and self.page_size:
-            return self.max_num_pages * self.page_size
-        return getattr(self.mpk, "max_seq_length", None) or 8192
+        """Rows the flat cache holds. It is indexed by absolute position, so
+        this is the run length."""
+        return self.mpk.max_seq_length
 
     # ------------------------------------------------------------- loading
     def build_from_config(self, model_config: MirageModelConfig):
@@ -154,6 +212,16 @@ class InklingBuilder(GraphBuilder):
         if model_config.vocab_size:
             self.vocab_size = model_config.vocab_size
         self.build_from_dict(model_config.state_dict, model_config.with_lm_head)
+
+    @staticmethod
+    def load_config(model_name: str, model_path: str | None = None):
+        path = model_path or model_name
+        if not os.path.isdir(path):
+            from huggingface_hub import snapshot_download
+
+            path = snapshot_download(model_name)
+        with open(os.path.join(path, "config.json")) as f:
+            return json.load(f)
 
     def build_from_model(self, model_name: str, model_path: str | None = None):
         from transformers import AutoTokenizer
@@ -166,8 +234,7 @@ class InklingBuilder(GraphBuilder):
         self.model_name = model_name
         self.model_path = path
 
-        with open(os.path.join(path, "config.json")) as f:
-            cfg = json.load(f)
+        cfg = self.load_config(model_name, path)
         tc = cfg.get("text_config", cfg)
         self.hidden_size = tc.get("hidden_size", self.hidden_size)
         self.num_layers = tc.get("num_hidden_layers", self.num_layers)
@@ -398,15 +465,12 @@ class InklingBuilder(GraphBuilder):
             grid_dim=(grid_for_rmsnorm_linear_layer(extent), 1, 1),
             block_dim=(128, 1, 1))
 
-        # KV caches: 2D for attention reads, 4D view for the paged store
-        k_cache = self._attach(
-            self._pin(torch.zeros(self.max_ctx, kv_width,
-                                  dtype=torch.bfloat16, device="cuda")),
-            f"layer_{i}_k_cache")
-        v_cache = self._attach(
-            self._pin(torch.zeros(self.max_ctx, kv_width,
-                                  dtype=torch.bfloat16, device="cuda")),
-            f"layer_{i}_v_cache")
+        # KV caches from the plan: [max_ctx, nkv, D] per component.
+        kv = self.kv_plan.attach(mpk, i)
+        assert kv["group_id"] is None, (
+            f"layer {i} resolved to group {kv['group_id']}: inkling declares "
+            f"unpaged streams, and these tasks read the cache flat")
+        k_cache, v_cache = kv["k_cache"], kv["v_cache"]
         mpk.dflash_kv_store_layer(
             kv_in=k_normed, slot_mapping=self.step_dt,
             cache=mpk.view(k_cache, [self.max_ctx, 1, nkv, D]),
@@ -417,7 +481,9 @@ class InklingBuilder(GraphBuilder):
             grid_dim=(1, 1, 1), block_dim=(128, 1, 1), head_dim=D)
 
         mpk.inkling_attention_layer(
-            q=self.q_normed, ctx_k=k_cache, ctx_v=v_cache,
+            q=self.q_normed,
+            ctx_k=mpk.view(k_cache, [self.max_ctx, kv_width]),
+            ctx_v=mpk.view(v_cache, [self.max_ctx, kv_width]),
             blk_k=k_normed, blk_v=v_conv, bias=bias_buf, step=self.step_dt,
             output=self.attn_out,
             grid_dim=(nkv, 1, 1), block_dim=(128, 1, 1),

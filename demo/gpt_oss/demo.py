@@ -13,8 +13,8 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 import mirage as mi
-from mirage.mpk.kv_planner import resolve_pool_size
-from mirage.mpk.models.gpt_oss.builder import GptOssBuilder, plan_kv_cache
+from mirage.mpk.kvcache import build_kv_cache
+from mirage.mpk.models.gpt_oss.builder import GptOssBuilder, kv_streams
 
 DEFAULT_PROMPT = "Give me a short introduction to large language models."
 
@@ -73,16 +73,16 @@ if __name__ == "__main__":
         # The megakernel stops at max_seq_length, so shorten it to make
         # --max-new-tokens the binding limit.
         seq_len = min(args.max_seq_length, prompt_len + output_len)
-        tokens = torch.zeros(1, seq_len, dtype=torch.long, device="cuda")
-        tokens[0, :prompt_len] = input_ids.to("cuda")
+        n_req = args.max_num_batched_requests
+        tokens = torch.zeros(n_req, seq_len, dtype=torch.long, device="cuda")
+        tokens[:, :prompt_len] = input_ids.to("cuda")
         mbt = args.max_num_batched_tokens
-        n_req = tokens.shape[0]
-        # KV 2.0: the plan is the source of truth for the cache layout
         config = AutoConfig.from_pretrained(args.model)
-        kv_plan = plan_kv_cache(config, args.page_size)
         try:
-            max_num_pages = resolve_pool_size(
-                kv_plan, kv_budget=args.kv_budget,
+            kv_plan = build_kv_cache(
+                kv_streams(config),
+                block_size=args.page_size,
+                kv_budget=args.kv_budget,
                 max_num_pages=args.max_num_pages, max_seq_length=seq_len,
                 max_num_batched_requests=args.max_num_batched_requests,
                 max_num_batched_tokens=mbt)
@@ -111,15 +111,14 @@ if __name__ == "__main__":
             max_seq_length=seq_len,
             max_num_batched_requests=args.max_num_batched_requests,
             max_num_batched_tokens=mbt,
-            max_num_pages=max_num_pages,
-            kv_groups=kv_plan.group_specs(),
+            kv_plan=kv_plan,
             eos_token_id=-1 if args.ignore_eos else 200002,
             meta_tensors=meta_tensors, profiler_tensor=None, trace_name="",
             spec_decode_config=None, use_cutlass_kernel=False,
         )
 
         print("Building the task graph...")
-        GptOssBuilder(mpk, kv_plan=kv_plan).build_from_model(
+        GptOssBuilder(mpk).build_from_model(
             model_name=args.model, model_path=args.model)
         print("Compiling the megakernel...")
         mpk.compile(output_dir=args.output_dir)
@@ -130,11 +129,20 @@ if __name__ == "__main__":
         torch.cuda.synchronize()
         run_time = starter.elapsed_time(ender)
 
-        end_idx = min(meta_tensors["step"][0].item() + 1,
-                      prompt_len + output_len)
-        token_ids = tokens[0, prompt_len:end_idx].cpu().tolist()
+        # Each request stops on its own step, so decode each with its own end.
+        steps = meta_tensors["step"].cpu().tolist()
+        ends = [min(s + 1, prompt_len + output_len) for s in steps]
+        completions = [tokens[r, prompt_len:ends[r]].cpu().tolist()
+                       for r in range(n_req)]
+        end_idx, token_ids = ends[0], completions[0]
         response = tokenizer.decode(tokens[0, :end_idx],
                                     skip_special_tokens=True)
+        if n_req > 1:
+            odd = [r for r in range(1, n_req) if completions[r] != token_ids]
+            print(f"{n_req} requests, generated lengths "
+                  f"{[len(c) for c in completions]}: "
+                  + ("all slots agree" if not odd
+                     else f"SLOTS {odd} DIVERGE from slot 0"))
         mpk.finalize()
     else:
         print("Loading the HuggingFace reference...")

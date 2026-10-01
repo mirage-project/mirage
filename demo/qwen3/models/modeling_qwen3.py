@@ -34,6 +34,8 @@ from .configuration_qwen3 import Qwen3Config
 import time
 
 import mirage as mi
+from mirage.mpk.kvcache import build_kv_cache
+from mirage.mpk.models.qwen3.builder import qwen3_kv_streams
 from .rope import apply_rotary_pos_emb_triton
 
 
@@ -402,46 +404,32 @@ class Qwen3PreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
 
 
-def plan_qwen3_kv_cache(config, world_size: int, page_size: int):
-    """Qwen3 stores one kind of KV state, so the plan is a single stream over
-    every layer."""
-    from mirage.mpk.kv_planner import KVSpec, plan_kv_groups
-
-    per_entry_bytes = (
-        2 * (config.num_key_value_heads // world_size) * config.head_dim * 2
-    )  # K + V, bf16
-    return plan_kv_groups([
-        KVSpec("attention", per_entry_bytes=per_entry_bytes,
-               layer_ids=tuple(range(config.num_hidden_layers)),
-               preferred_block_size=page_size),
-    ])
-
-
 class Qwen3Model(Qwen3PreTrainedModel):
     def __init__(self, config: Qwen3Config, world_size: int, max_num_pages: int,
-                page_size: int, kv_plan=None):
+                page_size: int, kv_plan=None, kv_budget=None,
+                max_seq_length: int = None,
+                max_num_batched_requests: int = 1,
+                max_num_batched_tokens: int = 1):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        # The caller passes a plan in; built here otherwise, which is the
-        # only option through from_pretrained.
-        kv_plan = kv_plan or plan_qwen3_kv_cache(config, world_size, page_size)
+        # The cache is built HERE, not by the caller, because from_pretrained
+        # cannot carry an object through GenerationConfig.
+        kv_plan = kv_plan or build_kv_cache(
+            qwen3_kv_streams(config, world_size),
+            block_size=page_size,
+            kv_budget=kv_budget,
+            max_num_pages=None if kv_budget else max_num_pages,
+            max_seq_length=max_seq_length,
+            max_num_batched_requests=max_num_batched_requests,
+            max_num_batched_tokens=max_num_batched_tokens,
+            verbose=False)
         self.kv_plan = kv_plan
-        # One page pool for the whole cache. K and V are two components of a
-        # page, so a page id covers a layer's K and V together. Each view is
-        # (L, N, P, H, D) = slots, pages, page size in tokens, heads, dim, and
-        # is strided by the whole page.
-        entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
-        self.kv_pool, kv_views = kv_plan.allocate_pool(
-            {g.spec_name: [("k", entry_shape, torch.bfloat16),
-                           ("v", entry_shape, torch.bfloat16)]
-             for g in kv_plan.groups},
-            max_num_pages=max_num_pages)
         (group_id,) = {g.group_id for g in kv_plan.groups}
-        key_cache = kv_views[group_id]["k"]
-        value_cache = kv_views[group_id]["v"]
-
-        self.kv_cache = (key_cache, value_cache)
+        # For the eager PyTorch path only: Qwen3Attention writes
+        # key_cache[layer, 0, step] directly.
+        views = kv_plan.views(group_id)
+        self.kv_cache = (views["k"], views["v"])
         self.embed_tokens = nn.Embedding(
             config.vocab_size, config.hidden_size, self.padding_idx
         )
@@ -503,10 +491,11 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
 class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
 
-    def __init__(self, config, world_size, max_num_pages, page_size, kv_plan=None):
+    def __init__(self, config, world_size, max_num_pages, page_size,
+                 kv_plan=None, **kv_sizing):
         super().__init__(config)
         self.model = Qwen3Model(config, world_size, max_num_pages, page_size,
-                                kv_plan=kv_plan)
+                                kv_plan=kv_plan, **kv_sizing)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing

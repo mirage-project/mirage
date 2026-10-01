@@ -16,6 +16,7 @@ from typing import Optional
 
 from ..utils import grid_for_rmsnorm_linear_layer
 from ..graph_builder import GraphBuilder, MirageModelConfig
+from ...kvcache import KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float8_e4m3, float32, uint32, int32, int64
@@ -52,6 +53,31 @@ RMS_NORM_EPS = 1e-6
 _MOE_FP8_MMA_M = 128
 
 
+def kv_streams(config, world_size: int = 1,
+               num_mtp_layers: Optional[int] = None):
+    """DeepSeek-V3 keeps ONE latent entry per token per layer.
+
+    num_mtp_layers defaults to the checkpoint's num_nextn_predict_layers. Pass
+    0 to leave the MTP slot out when MTP is off.
+    """
+    num_layers = getattr(config, "num_hidden_layers", NUM_LAYERS)
+    if num_mtp_layers is None:
+        num_mtp_layers = getattr(config, "num_nextn_predict_layers", 0)
+    components = [("kv", (QK_HEAD_DIM_TOTAL,), torch.bfloat16)]
+    streams = [
+        KVStream("mla",
+                 layers=tuple(range(num_layers)),
+                 components=components),
+    ]
+    if num_mtp_layers:
+        streams.append(
+            KVStream("mtp",
+                     layers=tuple(range(num_layers,
+                                        num_layers + num_mtp_layers)),
+                     components=components))
+    return streams
+
+
 def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
     max_y = min(preferred, max(1, output_size // _MOE_FP8_MMA_M))
     for y in range(max_y, 0, -1):
@@ -62,10 +88,10 @@ def _moe_fp8_m_split(output_size: int, preferred: int) -> int:
 
 @register_model_builder("deepseek-v3", "DeepSeek-V3", "deepseek-ai/DeepSeek-V3")
 class DeepSeekV3Builder(GraphBuilder):
+    kv_streams = staticmethod(kv_streams)
+
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
-        self.max_num_pages = mpk.max_num_pages
-        self.page_size = mpk.page_size
         self.world_size = mpk.world_size
         self.num_workers = mpk.num_workers
         self._use_nvshmem = mpk.use_nvshmem  # True only if nvshmem is actually enabled
@@ -94,6 +120,15 @@ class DeepSeekV3Builder(GraphBuilder):
         # MTP config
         self.mtp_config = getattr(mpk, 'spec_decode_config', None)
 
+    def _kv_cache(self, layer_id: int):
+        """This layer's paged cache and its group id, attached once."""
+        cached = self._layer_caches.get(layer_id)
+        if cached is None:
+            kv = self.kv_plan.attach(self.mpk, layer_id)
+            cached = (kv["kv_cache"], kv["group_id"])
+            self._layer_caches[layer_id] = cached
+        return cached
+
     def build_from_model(self, model_name: str, model_path: str = None):
         raise NotImplementedError(
             "DeepSeek V3 is too large for direct HuggingFace loading. "
@@ -106,7 +141,9 @@ class DeepSeekV3Builder(GraphBuilder):
         Args:
             layer_indices: If provided, only build these specific layer indices.
         """
-        self.ckv_kpe_cache = model_config.k_cache  # [num_layers, num_pages, page_size, 576]
+        self.kv_plan = getattr(self.mpk, "kv_plan", None)
+        assert self.kv_plan is not None
+        self._layer_caches = {}
         self.position_embeddings = model_config.position_embeddings
 
         self.build_from_dict(
@@ -695,9 +732,7 @@ class DeepSeekV3Builder(GraphBuilder):
         # Both write `self.attn_out`. Builder order is prefill -> decode; the
         # MPK event graph serialises the two writes, so whichever kernel really
         # runs produces the final value (the other becomes a no-op).
-        layer_cache = self.mpk.attach_input(
-            torch_tensor=self.ckv_kpe_cache[layer_idx],
-            name=f"layer_{layer_idx}_kv_cache")
+        layer_cache, kv_group = self._kv_cache(layer_idx)
         q_len_mla = self.max_num_batched_tokens
         kv_len_max = self.mpk.max_seq_length
         if self._use_prefill:
@@ -708,7 +743,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 paged_cache=layer_cache,
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
-                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                mla_params=(self.qk_head_dim, self.v_head_dim),
+                group_id=kv_group,
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
             )
@@ -722,6 +758,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 mla_params=(self.num_local_q_heads, kv_len_max,
                             self.kv_lora_rank, QK_ROPE_HEAD_DIM,
                             self.v_head_dim),
+                group_id=kv_group,
                 grid_dim=(self.num_local_q_heads, num_q_blocks,
                           self.mpk.max_num_batched_requests),
                 block_dim=(256, 1, 1),
@@ -735,7 +772,8 @@ class DeepSeekV3Builder(GraphBuilder):
             k_pe_new=self.k_pe_out,
             paged_cache=layer_cache,
             contiguous_kv=self.contiguous_kv,
-            mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+            mla_params=(self.qk_head_dim, self.v_head_dim),
+            group_id=kv_group,
             grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
             block_dim=(128, 1, 1),
         )
@@ -744,7 +782,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp2_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=kv_group)
             self.mpk.mla_mtp_decode_tp2_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -752,7 +790,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp4_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=kv_group)
             self.mpk.mla_mtp_decode_tp4_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -760,7 +798,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp8_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=kv_group)
             self.mpk.mla_mtp_decode_tp8_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -768,7 +806,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=kv_group)
             self.mpk.mla_mtp_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -1357,7 +1395,8 @@ class DeepSeekV3Builder(GraphBuilder):
                 paged_cache=self.mtp_ckv_kpe_cache_tensor,
                 ckv_sep=self.ckv_sep,
                 kpe_sep=self.kpe_sep,
-                mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+                mla_params=(self.qk_head_dim, self.v_head_dim),
+                group_id=self.mtp_kv_group,
                 grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
                 block_dim=(128, 1, 1),
             )
@@ -1371,6 +1410,7 @@ class DeepSeekV3Builder(GraphBuilder):
                 mla_params=(self.num_local_q_heads, kv_len_max,
                             self.kv_lora_rank, QK_ROPE_HEAD_DIM,
                             self.v_head_dim),
+                group_id=self.mtp_kv_group,
                 grid_dim=(self.num_local_q_heads, num_q_blocks, 1),
                 block_dim=(256, 1, 1),
             )
@@ -1380,7 +1420,8 @@ class DeepSeekV3Builder(GraphBuilder):
             k_pe_new=self.k_pe_out,
             paged_cache=self.mtp_ckv_kpe_cache_tensor,
             contiguous_kv=self.contiguous_kv,
-            mla_params=(self.qk_head_dim, self.v_head_dim, self.mpk.page_size),
+            mla_params=(self.qk_head_dim, self.v_head_dim),
+            group_id=self.mtp_kv_group,
             grid_dim=(self.mpk.max_num_batched_requests, 1, 1),
             block_dim=(128, 1, 1),
         )
@@ -1389,7 +1430,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp2_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=self.mtp_kv_group)
             self.mpk.mla_mtp_decode_tp2_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -1397,7 +1438,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp4_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=self.mtp_kv_group)
             self.mpk.mla_mtp_decode_tp4_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -1405,7 +1446,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_tp8_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=self.mtp_kv_group)
             self.mpk.mla_mtp_decode_tp8_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -1413,7 +1454,7 @@ class DeepSeekV3Builder(GraphBuilder):
             self.mpk.mla_mtp_decode_layer(
                 self.q_nope_pe, self.contiguous_kv,
                 self.mla_partial_o, self.mla_partial_lse,
-                q_len_mla, kv_len_max)
+                q_len_mla, kv_len_max, group_id=self.mtp_kv_group)
             self.mpk.mla_mtp_reduce_layer(
                 self.mla_partial_o, self.mla_partial_lse,
                 self.attn_out, q_len_mla, kv_len_max)
@@ -1703,17 +1744,9 @@ class DeepSeekV3Builder(GraphBuilder):
             name="mtp_eh_proj_hidden",
         )
 
-        # ---- MTP KV cache (separate from main model) ----
-        # IMPORTANT: keep the PyTorch tensor alive on self so GPU memory is not
-        # freed — the persistent kernel stores the raw data pointer.
-        self._mtp_ckv_kpe_cache_buf = torch.zeros(
-            (self.mpk.max_num_pages, self.mpk.page_size, self.qk_head_dim),
-            dtype=torch.bfloat16, device="cuda",
-        )
-        self.mtp_ckv_kpe_cache_tensor = self.mpk.attach_input(
-            torch_tensor=self._mtp_ckv_kpe_cache_buf,
-            name="mtp_ckv_kpe_cache",
-        )
+        # ---- MTP KV cache ----
+        (self.mtp_ckv_kpe_cache_tensor,
+         self.mtp_kv_group) = self._kv_cache(self.num_layers)
 
         # ---- Intermediate tensors ----
         mbt = self.max_num_batched_tokens

@@ -33,6 +33,7 @@ import torch
 
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
 from ..graph_builder import GraphBuilder, MirageModelConfig
+from ...kvcache import KVStream
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64
@@ -63,12 +64,24 @@ VOCAB_SIZE = 151552
 EOS_TOKEN_ID = 151329
 
 
+def kv_streams(config, world_size: int = 1):
+    """GLM-4.6 is plain causal attention with one type of KV."""
+    entry_shape = (NUM_KV_HEADS // world_size, HEAD_DIM)
+    return [
+        KVStream("attention",
+                 layers=tuple(range(config.num_hidden_layers)),
+                 components=[("k", entry_shape, torch.bfloat16),
+                             ("v", entry_shape, torch.bfloat16)]),
+    ]
+
+
 @register_model_builder("Glm4Moe", "zai-org/GLM-4.6", "glm4_moe", "glm-4.6")
 class Glm4MoeBuilder(GraphBuilder):
+
+    kv_streams = staticmethod(kv_streams)
+
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None):
         super().__init__(mpk, weights)
-        self.max_num_pages = mpk.max_num_pages
-        self.page_size = mpk.page_size
         self.world_size = mpk.world_size
         self.rank = mpk.mpi_rank
         self.input_tokens = mpk.meta_tensors["input_tokens"]
@@ -164,10 +177,7 @@ class Glm4MoeBuilder(GraphBuilder):
             self._pin(emb.sin().to(torch.bfloat16)), "sin_pos_embed")
 
         # KV caches
-        self.k_cache_t = torch.zeros(
-            (self.num_layers, self.max_num_pages, self.page_size,
-             NUM_KV_HEADS, HEAD_DIM), dtype=torch.bfloat16, device="cuda")
-        self.v_cache_t = torch.zeros_like(self.k_cache_t)
+        assert getattr(self.mpk, "kv_plan", None) is not None
 
         # lm head / argmax
         self.padded_vocab_size = ((self.vocab_size + 255) // 256) * 256
@@ -224,10 +234,9 @@ class Glm4MoeBuilder(GraphBuilder):
         w_k_norm = self._attach(
             self._get(state_dict, f"{prefix}k_norm.weight"),
             f"layer_{i}_k_norm")
-        k_cache = self._attach(self.k_cache_t[i], f"layer_{i}_k_cache")
-        v_cache = self._attach(self.v_cache_t[i], f"layer_{i}_v_cache")
+        kv = self.mpk.kv_plan.attach(self.mpk, i)
         mpk.paged_attention_layer(
-            input=self.attn_in, k_cache=k_cache, v_cache=v_cache,
+            input=self.attn_in, **kv,
             q_norm=w_q_norm, k_norm=w_k_norm,
             cos_pos_embed=self.cos_pos_embed,
             sin_pos_embed=self.sin_pos_embed,

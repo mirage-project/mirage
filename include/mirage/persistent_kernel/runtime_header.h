@@ -361,6 +361,8 @@ struct RuntimeConfig {
 #ifndef MPK_NUM_KV_GROUPS
 #define MPK_NUM_KV_GROUPS 1
 #endif
+// A model with no paged KV declares zero groups.
+#define MPK_NUM_KV_GROUPS_ARRAY (MPK_NUM_KV_GROUPS > 0 ? MPK_NUM_KV_GROUPS : 1)
 // Tokens per KV tile in the windowed attention kernel.
 #ifndef MPK_KV_WINDOW_TILE
 #define MPK_KV_WINDOW_TILE 64
@@ -377,6 +379,10 @@ struct RuntimeConfig {
                                                          // prepare_next_batch
   // Sliding-window length in tokens per group, 0 = full attention.
   int kv_group_window_sizes[MPK_NUM_KV_GROUPS];
+  // Pages one request needs at max_seq_length, summed over every group.
+  // The admission gate keeps num_reqs * this <= MPK_MAX_NUM_PAGES so an
+  // admitted request can never be starved of pages later.
+  int kv_worst_case_pages_per_request;
 #ifdef MPK_KV_EVENT_LOG
   // Allocator event debug log: [0] = record count, then 4-int records
   // (type, group, row, page_id) with type 1=ALLOC, 2=FREE, 3=ITER. Written

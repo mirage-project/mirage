@@ -58,7 +58,7 @@ using namespace mirage::runtime;
 // #define MPK_MAX_NUM_BATCHED_REQUESTS 16
 // #define MPK_MAX_NUM_BATCHED_TOKENS 64
 // #define MPK_MAX_NUM_PAGES 1024
-// #define MPK_PAGE_SIZE 64
+// #define MPK_NUM_KV_GROUPS 1
 
 #if defined(MIRAGE_GRACE_HOPPER)
 #define WORKER_NUM_THREADS 256
@@ -250,6 +250,19 @@ __global__ void prepare_kernel(RuntimeConfig config,
     }                                                                          \
   } while (0)
 
+#define MPK_REQUIRE_PAGES_NOT_SHRINKING(g, old_pages, new_pages)               \
+  do {                                                                         \
+    if ((new_pages) < (old_pages)) {                                           \
+      printf("[MPK] KV group %d: page count went %d -> %d for one request; "   \
+             "the pages beyond the new span would be dropped from the page "   \
+             "table and never freed\n",                                        \
+             (g),                                                              \
+             (old_pages),                                                      \
+             (new_pages));                                                     \
+      __trap();                                                                \
+    }                                                                          \
+  } while (0)
+
 // Index of the oldest page a sliding-window group may still read, given a
 // request whose next queries start at `step`.
 __device__ __forceinline__ int
@@ -341,6 +354,31 @@ __device__ __forceinline__ bool
           }
         }
       }
+#ifndef MPK_SPEC_DECODE
+      else {
+        // Sliding window: return the pages this request can no longer read.
+        // The page-table span is kept and the slot poisoned with -1.
+        int new_step = step + step_advance;
+        for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
+          int bs = config.kv_group_block_sizes[g];
+          int kv_indptr_g = config.paged_kv_indptr_buffer[g][i];
+          int num_old_pages_g =
+              config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
+          int first_live =
+              first_live_page(new_step, config.kv_group_window_sizes[g], bs);
+          for (int j = 0; j < first_live && j < num_old_pages_g; j++) {
+            int page_id = config.paged_kv_indices_buffer[g][kv_indptr_g + j];
+            if (page_id < 0) {
+              continue; // recycled on an earlier step
+            }
+            MPK_KV_LOG(2, g, i, page_id);
+            config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
+            page_queue_tail++;
+            config.paged_kv_indices_buffer[g][kv_indptr_g + j] = -1;
+          }
+        }
+      }
+#endif
     }
   }
 
@@ -357,7 +395,7 @@ __device__ __forceinline__ bool
 
   // Step 3: prepare next batch
   int num_reqs = 0, num_tokens = 0;
-  int num_pages_g[MPK_NUM_KV_GROUPS];
+  int num_pages_g[MPK_NUM_KV_GROUPS_ARRAY];
   for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
     num_pages_g[g] = 0;
   }
@@ -401,6 +439,7 @@ __device__ __forceinline__ bool
             config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
         config.paged_kv_indptr_buffer[g][num_reqs] = num_pages_g[g];
         int num_new_pages_g = (step + num_new_tokens + bs - 1) / bs;
+        MPK_REQUIRE_PAGES_NOT_SHRINKING(g, num_old_pages_g, num_new_pages_g);
         {
           int _lpl = (step + num_new_tokens) % bs;
           config.paged_kv_last_page_len_buffer[g][num_reqs] =
@@ -420,24 +459,6 @@ __device__ __forceinline__ bool
               config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
           page_queue_head++;
         }
-#ifndef MPK_SPEC_DECODE
-        // Sliding window: return the pages this request can no longer read.
-        // The page-table span is kept and the slot poisoned with -1.
-        {
-          int first_live =
-              first_live_page(step, config.kv_group_window_sizes[g], bs);
-          for (int j = 0; j < first_live && j < num_new_pages_g; j++) {
-            int page_id = config.paged_kv_indices_buffer[g][num_pages_g[g] + j];
-            if (page_id < 0) {
-              continue; // already recycled on an earlier step
-            }
-            MPK_KV_LOG(2, g, num_reqs, page_id);
-            config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
-            page_queue_tail++;
-            config.paged_kv_indices_buffer[g][num_pages_g[g] + j] = -1;
-          }
-        }
-#endif
         num_pages_g[g] += num_new_pages_g;
       }
       num_tokens += num_new_tokens;
@@ -445,9 +466,12 @@ __device__ __forceinline__ bool
     }
   }
 
-  // Add new prefill requests until we reach capacity
+  // Add new prefill requests until we reach capacity. Eevery admitted
+  // request is guaranteed its own pages for life.
   while (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
-         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS) {
+         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS &&
+         (num_reqs + 1) * config.kv_worst_case_pages_per_request <=
+             MPK_MAX_NUM_PAGES) {
     int next_request_id = *config.next_request_id;
     if (next_request_id >= config.total_num_requests) {
       break;
@@ -574,7 +598,7 @@ __device__ __forceinline__ bool
       "MPK_MAX_NUM_PAGES exceeds its static shared-memory budget. "
       "Lower the KV budget, raise the page size (fewer, larger pages), "
       "or use the offline scheduler.");
-  __shared__ int smem_kv_indices[MPK_NUM_KV_GROUPS][MPK_MAX_NUM_PAGES];
+  __shared__ int smem_kv_indices[MPK_NUM_KV_GROUPS_ARRAY][MPK_MAX_NUM_PAGES];
   int page_queue_head = *config.page_queue_head;
   int page_queue_tail = *config.page_queue_tail;
   int gpu_req_head = *config.gpu_req_head;
@@ -655,12 +679,41 @@ __device__ __forceinline__ bool
         int kv_indptr_g = config.paged_kv_indptr_buffer[g][i];
         int num_pg = config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
         for (int j = 0; j < num_pg; j++) {
-          config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] =
-              config.paged_kv_indices_buffer[g][kv_indptr_g + j];
+          int page_id = config.paged_kv_indices_buffer[g][kv_indptr_g + j];
+          // -1 marks a slot recycled mid-request; the id is already back
+          // in the queue.
+          if (page_id < 0) {
+            continue;
+          }
+          config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
           page_queue_tail++;
         }
       }
     }
+#ifndef MPK_SPEC_DECODE
+    else {
+      // Sliding window: return the pages this request can no longer read.
+      // The page-table span is kept and the slot poisoned with -1.
+      int new_step = step + num_tokens;
+      for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
+        int bs = config.kv_group_block_sizes[g];
+        int kv_indptr_g = config.paged_kv_indptr_buffer[g][i];
+        int num_old_pages_g =
+            config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
+        int first_live =
+            first_live_page(new_step, config.kv_group_window_sizes[g], bs);
+        for (int j = 0; j < first_live && j < num_old_pages_g; j++) {
+          int page_id = config.paged_kv_indices_buffer[g][kv_indptr_g + j];
+          if (page_id < 0) {
+            continue; // already recycled on an earlier step
+          }
+          config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] = page_id;
+          page_queue_tail++;
+          config.paged_kv_indices_buffer[g][kv_indptr_g + j] = -1;
+        }
+      }
+    }
+#endif
   }
 
   // ── Step 2: snapshot current kv_indices per group to shared memory ─────────
@@ -674,7 +727,7 @@ __device__ __forceinline__ bool
 
   // ── Step 3: compact active requests ────────────────────────────────────────
   int num_reqs = 0, num_tokens = 0;
-  int num_pages_g[MPK_NUM_KV_GROUPS];
+  int num_pages_g[MPK_NUM_KV_GROUPS_ARRAY];
   for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
     num_pages_g[g] = 0;
   }
@@ -710,13 +763,16 @@ __device__ __forceinline__ bool
           config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
       config.paged_kv_indptr_buffer[g][num_reqs] = num_pages_g[g];
       int num_new_pages_g = (step + num_new_tokens + bs - 1) / bs;
-      config.paged_kv_last_page_len_buffer[g][num_reqs] =
-          (step + num_new_tokens) % bs;
+      MPK_REQUIRE_PAGES_NOT_SHRINKING(g, num_old_pages_g, num_new_pages_g);
+      {
+        int _lpl = (step + num_new_tokens) % bs;
+        config.paged_kv_last_page_len_buffer[g][num_reqs] =
+            (_lpl == 0) ? bs : _lpl;
+      }
       for (int j = 0; j < num_old_pages_g; j++) {
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
             smem_kv_indices[g][kv_indptr_g + j];
       }
-      // NOTE: the online path does not recycle sliding-window pages yet
       for (int j = num_old_pages_g; j < num_new_pages_g; j++) {
         MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
@@ -733,8 +789,11 @@ __device__ __forceinline__ bool
   // ── Step 4: drain request ring → directly admit to running batch ──────────
   // Each ring slot has its own independent inbox; entries that cannot be
   // admitted yet stay in the ring (ready=1) and will be retried next iteration.
+  // Every admitted request is guaranteed its own pages for life.
   while (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
-         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS && free_row_top > 0) {
+         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS && free_row_top > 0 &&
+         (num_reqs + 1) * config.kv_worst_case_pages_per_request <=
+             MPK_MAX_NUM_PAGES) {
     int req_slot = gpu_req_head & ring_mask;
     int32_t rdy = ld_acquire_sys_i32(&config.pinned_req_ready[req_slot]);
     if (rdy == 0) {
@@ -781,8 +840,11 @@ __device__ __forceinline__ bool
       int bs = config.kv_group_block_sizes[g];
       config.paged_kv_indptr_buffer[g][num_reqs] = num_pages_g[g];
       int num_new_pages_g = (initial_step + num_new_tokens + bs - 1) / bs;
-      config.paged_kv_last_page_len_buffer[g][num_reqs] =
-          (initial_step + num_new_tokens) % bs;
+      {
+        int _lpl = (initial_step + num_new_tokens) % bs;
+        config.paged_kv_last_page_len_buffer[g][num_reqs] =
+            (_lpl == 0) ? bs : _lpl;
+      }
       for (int j = 0; j < num_new_pages_g; j++) {
         MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
         config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
@@ -1611,7 +1673,8 @@ extern "C" void
                            std::vector<std::string> model_tensor_names,
                            std::vector<void *> model_tensor_ptrs,
                            std::vector<int> kv_group_block_sizes,
-                           std::vector<int> kv_group_window_sizes) {
+                           std::vector<int> kv_group_window_sizes,
+                           int kv_worst_case_pages_per_request) {
   assert(num_local_schedulers > 0 &&
          num_local_schedulers % SCHEDULERS_PER_BLOCK == 0);
 
@@ -1659,6 +1722,8 @@ extern "C" void
     global_runtime_config.kv_group_block_sizes[g] = kv_group_block_sizes[g];
     global_runtime_config.kv_group_window_sizes[g] = kv_group_window_sizes[g];
   }
+  global_runtime_config.kv_worst_case_pages_per_request =
+      kv_worst_case_pages_per_request;
 #if defined(MODE_ONLINE_PINNED)
   {
     // Group buffers occupy [7, 7 + 4*MPK_NUM_KV_GROUPS); the pinned-ring

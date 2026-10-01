@@ -32,8 +32,14 @@ class RunnerConfig:
     max_num_batched_requests: int = 4
     max_num_batched_tokens: int = 8
     max_seq_length: int = 512
+    kv_budget: Optional[str] = "2GiB"
+    """Bytes for the KV cache. Give exactly one of this and ``max_num_pages``."""
+
     max_num_pages: int = 16
+
     page_size: int = 4096
+    """Logical tokens per page, shared by every kv stream. 0 leaves the choice to 
+    the planner's own default."""
 
     pinned_ring_capacity: int = 8
     """Power-of-2 capacity for the CPU↔GPU pinned ring buffers."""
@@ -88,6 +94,7 @@ class ModelRunner:
             max_seq_length=config.max_seq_length,
             max_num_batched_requests=config.max_num_batched_requests,
             max_num_batched_tokens=config.max_num_batched_tokens,
+            kv_budget=config.kv_budget,
             max_num_pages=config.max_num_pages,
             page_size=config.page_size,
             pinned_ring_capacity=config.pinned_ring_capacity,
@@ -178,10 +185,6 @@ class ModelRunner:
             num_new_tokens=torch.ones(n_req, dtype=torch.int32, device="cuda"),
             prompt_lengths=torch.zeros(n_req, dtype=torch.int32, device="cuda"),
             qo_indptr_buffer=torch.zeros(n_req + 1, dtype=torch.int32, device="cuda"),
-            paged_kv_indptr_buffer=torch.zeros(n_req + 1, dtype=torch.int32, device="cuda"),
-            paged_kv_indices_buffer=torch.zeros(config.max_num_pages, dtype=torch.int32, device="cuda"),
-            paged_kv_last_page_len_buffer=torch.zeros(n_req, dtype=torch.int32, device="cuda"),
-            paged_kv_indices_snapshot=torch.zeros(config.max_num_pages, dtype=torch.int32, device="cuda"),
             # Pinned ring buffers for CPU↔GPU communication.  pin_memory()
             # gives a stable physical address so no DMA copy is needed.
             pinned_req_ready=torch.zeros(cap, dtype=torch.int32).pin_memory(),

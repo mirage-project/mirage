@@ -16,6 +16,9 @@
 #include "mirage/kernel/operator.h"
 #include "mirage/transpiler/utils.h"
 
+#include <stdexcept>
+#include <string>
+
 namespace mirage {
 namespace runtime {
 
@@ -597,13 +600,31 @@ int TaskRegister::register_paged_attention_task(
   // params[5]: page_size
   // params[6]: q_len_override (must be 0 — Eagle3 chain is sm100-only)
   // params[7]: tail_offset    (must be 0 — Eagle3 chain is sm100-only)
-  // params[8]: group_id
-  // params[9]: page_stride_rows (0 = packed pages)
-  // Fixed 10-param form shared with the sm100 variant.
-  assert(params.size() == 10);
+  // params[8]: rotary_dim     (must be 0 — no partial RoPE here)
+  // params[9]: qk-norm eps as float bits (must be the 1e-6f this emits)
+  // params[10]: window_size   (must be 0 — sm100-only)
+  // params[11]: has_sink      (must be 0 — sm100-only)
+  // params[12]: group_id      (which KV group's page table this layer reads)
+  // params[13]: page_stride   (token slots between pages)
+  //
+  // Checked with a throw, not an assert: the Release build is -DNDEBUG.
+  if (params.size() != 14) {
+    throw std::runtime_error("paged_attention expects 14 params, got " +
+                             std::to_string(params.size()));
+  }
   assert(params[6] == 0 && params[7] == 0);
-  int group_id = params[8];
-  int page_stride_rows = params[9];
+  assert(params[8] == 0 && "partial RoPE is not supported here");
+  assert(params[10] == 0 && "sliding window is not supported here");
+  assert(params[11] == 0 && "attention sinks are not supported here");
+  // The kernel call below hardcodes 1e-6f, so a caller asking for anything
+  // else would be silently ignored.
+  int default_eps_bits;
+  float default_eps = 1e-6f;
+  memcpy(&default_eps_bits, &default_eps, sizeof(float));
+  assert(params[9] == default_eps_bits &&
+         "a custom qk-norm eps is not supported here");
+  int group_id = params[12];
+  int page_stride = params[13];
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -646,8 +667,8 @@ int TaskRegister::register_paged_attention_task(
          head_dim,
          max_seq_len,
          page_size,
-         max_tokens,
-         page_stride_rows);
+         page_stride,
+         max_tokens);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -1325,33 +1346,27 @@ int TaskRegister::register_paged_attention_hopper_task(
   // params[3]: rotary_emd
   // params[4]: max_seq_len
   // params[5]: page_size
-  // params[6]: q_len_override (optional; sm100-only, must be 0 here)
-  // params[7]: tail_offset    (optional; sm100-only, must be 0 here)
-  // params[8]: rotary_dim     (optional, 0 = head_dim; GLM-4.6 partial RoPE)
-  // params[9]: qk-norm eps as float bits (optional, default 1e-6)
-  // params[10]: window_size   (optional; sm100-only, must be 0 here)
-  // params[11]: has_sink      (optional; sm100-only, must be 0 here)
-  // params[12]: group_id      (optional, default 0)
+  // params[6]: q_len_override (sm100-only, must be 0 here)
+  // params[7]: tail_offset    (sm100-only, must be 0 here)
+  // params[8]: rotary_dim     (0 = head_dim; GLM-4.6 partial RoPE)
+  // params[9]: qk-norm eps as float bits
+  // params[10]: window_size   (sm100-only, must be 0 here)
+  // params[11]: has_sink      (sm100-only, must be 0 here)
+  // params[12]: group_id      (which KV group's page table this layer reads)
+  // params[13]: page_stride   (token slots between pages)
+  //
   // Positions match the sm100 variant: Python emits one packing for every
   // target_cc, so a field keeps its index even where it is unsupported.
-  assert(params.size() == 6 || params.size() == 8 || params.size() == 10 ||
-         params.size() == 11 || params.size() == 12 || params.size() == 13 ||
-         params.size() == 14);
-  if (params.size() >= 8) {
-    assert(params[6] == 0 && params[7] == 0 &&
-           "q_len_override/tail_offset are not supported on Hopper");
+  if (params.size() != 14) {
+    throw std::runtime_error("paged_attention_hopper expects 14 params, got " +
+                             std::to_string(params.size()));
   }
-  if (params.size() >= 11) {
-    assert(params[10] == 0 && "sliding window is not supported on Hopper");
-  }
-  if (params.size() >= 12) {
-    assert(params[11] == 0 && "attention sinks are not supported on Hopper");
-  }
-  int group_id =
-      (params.size() >= 13)
-          ? params[12]
-          : 0; // params[13]: page_stride_rows (optional, 0 = packed pages)
-  int page_stride_rows = (params.size() >= 14) ? params[13] : 0;
+  assert(params[6] == 0 && params[7] == 0 &&
+         "q_len_override/tail_offset are not supported on Hopper");
+  assert(params[10] == 0 && "sliding window is not supported on Hopper");
+  assert(params[11] == 0 && "attention sinks are not supported on Hopper");
+  int group_id = params[12];
+  int page_stride = params[13];
 
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -1501,11 +1516,10 @@ int TaskRegister::register_paged_attention_hopper_task(
   //        "tma_output(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs["
   //        "0][0]));");
 
-  int rotary_dim = (params.size() >= 9 && params[8] > 0) ? params[8] : head_dim;
-  float qk_eps = 1e-6f;
-  if (params.size() >= 10) {
-    memcpy(&qk_eps, &params[9], sizeof(float));
-  }
+  int rotary_dim = params[8] > 0 ? params[8] : head_dim;
+  // The emitter packs the bits of 1e-6f when the caller did not set one.
+  float qk_eps;
+  memcpy(&qk_eps, &params[9], sizeof(float));
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
          "$, $, $, $, $, "
          "$, $, $, $, $>(",
@@ -1519,11 +1533,11 @@ int TaskRegister::register_paged_attention_hopper_task(
          -1,          /* SEQ_LEN (not used for non-split KV tasks)          */
          max_seq_len, /* MAX_SEQ_LEN                */
          page_size,   /* PAGE_SIZE                  */
+         page_stride, /* PAGE_STRIDE           */
          max_tokens,  /* MAX_TOKENS                 */
          "false",     /* PARTITION_KV               */
          1,           /* NUM_KV_CHUNKS              */
-         rotary_dim,  /* ROTARY_DIM               */
-         page_stride_rows /* PAGE_STRIDE_ROWS         */
+         rotary_dim   /* ROTARY_DIM               */
   );
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -2331,24 +2345,23 @@ int TaskRegister::register_paged_attention_sm100_task(
   // params[3]: rotary_emd
   // params[4]: max_seq_len
   // params[5]: page_size
-  // params[6]: q_len_override (optional, default 0)
-  // params[7]: tail_offset    (optional, default 0)
-  // params[8]: rotary_dim     (optional, 0 = head_dim; GLM-4.6 partial RoPE)
-  // params[9]: qk-norm eps as float bits (optional, default 1e-6)
-  // params[10]: window_size   (optional, 0 = full causal)
-  // params[11]: has_sink      (optional, 1 = an 8th input holds the per-head
-  //             attention sinks)
-  // params[12]: group_id      (optional, default 0: which KV group's page
-  //             table this layer reads)
-  // params[13]: page_stride_rows (optional, 0 = packed pages)
-  assert(params.size() == 6 || params.size() == 8 || params.size() == 10 ||
-         params.size() == 11 || params.size() == 12 || params.size() == 13 ||
-         params.size() == 14);
-  int group_id = (params.size() >= 13) ? params[12] : 0;
-  int page_stride_rows = (params.size() >= 14) ? params[13] : 0;
+  // params[6]: q_len_override (0 = one query row per request)
+  // params[7]: tail_offset    (0 = no tail)
+  // params[8]: rotary_dim     (0 = head_dim; GLM-4.6 partial RoPE)
+  // params[9]: qk-norm eps as float bits
+  // params[10]: window_size   (0 = full causal)
+  // params[11]: has_sink      (1 = an 8th input holds the per-head sinks)
+  // params[12]: group_id      (which KV group's page table this layer reads)
+  // params[13]: page_stride   (token slots between pages)
+  if (params.size() != 14) {
+    throw std::runtime_error("paged_attention_sm100 expects 14 params, got " +
+                             std::to_string(params.size()));
+  }
+  int group_id = params[12];
+  int page_stride = params[13];
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  bool has_sink = (params.size() >= 12) && (params[11] > 0);
+  bool has_sink = params[11] > 0;
   int num_inputs = has_sink ? 8 : 7;
   int num_outputs = 1;
 
@@ -2371,14 +2384,13 @@ int TaskRegister::register_paged_attention_sm100_task(
   int kv_stride = head_dim * num_kv_heads;
   int max_seq_len = params[4];
   int page_size = params[5];
-  int q_len_override = (params.size() >= 7) ? params[6] : 0;
-  int tail_offset = (params.size() >= 8) ? params[7] : 0;
-  int rotary_dim = (params.size() >= 9 && params[8] > 0) ? params[8] : head_dim;
-  float qk_eps = 1e-6f;
-  if (params.size() >= 10) {
-    memcpy(&qk_eps, &params[9], sizeof(float));
-  }
-  int window_size = (params.size() >= 11) ? params[10] : 0;
+  int q_len_override = params[6];
+  int tail_offset = params[7];
+  int rotary_dim = params[8] > 0 ? params[8] : head_dim;
+
+  float qk_eps;
+  memcpy(&qk_eps, &params[9], sizeof(float));
+  int window_size = params[10];
   // Assert that k_cache has the same head_dim
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
@@ -2400,12 +2412,12 @@ int TaskRegister::register_paged_attention_sm100_task(
          head_dim,
          max_seq_len,
          page_size,
+         page_stride,
          q_len_override,
          tail_offset,
          max_tokens,
          rotary_dim,
-         window_size,
-         page_stride_rows);
+         window_size);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -3947,10 +3959,10 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
   // params[5]: page_size
   // params[6]: num_kv_chunks
   // params[7]: group_id
-  // params[8]: page_stride_rows (0 = packed pages)
+  // params[8]: page_stride (token slots between pages)
   assert(params.size() == 9);
   int group_id = params[7];
-  int page_stride_rows = params[8];
+  int page_stride = params[8];
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
   int num_inputs = 7;
@@ -4000,10 +4012,10 @@ int TaskRegister::register_paged_attention_split_kv_sm100_task(
          SEQ_LEN_PER_BLOCK,
          max_seq_len,
          page_size,
+         page_stride,
          max_tokens,
          "true", // PARTITION_KV
-         num_kv_chunks,
-         page_stride_rows);
+         num_kv_chunks);
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -4507,7 +4519,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
   // params[5]: page_size
   // params[6]: num_kv_chunks
   // params[7]: group_id
-  // params[8]: page_stride_rows (0 = packed pages)
+  // params[8]: page_stride (token slots between pages)
   assert(params.size() == 9);
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -4536,7 +4548,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
   int page_size = params[5];
   int num_kv_chunks = params[6];
   int group_id = params[7];
-  int page_stride_rows = params[8];
+  int page_stride = params[8];
   // Assert that k_cache has the same head_dim
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);
@@ -4561,10 +4573,10 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
          SEQ_LEN_PER_BLOCK, /* SEQ_LEN */
          max_seq_len,       /* MAX_SEQ_LEN */
          page_size,         /* PAGE_SIZE */
+         page_stride,       /* PAGE_STRIDE */
          max_tokens,        /* MAX_TOKENS */
          "true",            /* PARTITION_KV */
-         num_kv_chunks,     /* NUM_KV_CHUNKS */
-         page_stride_rows /* PAGE_STRIDE_ROWS */);
+         num_kv_chunks /* NUM_KV_CHUNKS */);
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
   code.e("    runtime_config.qo_indptr_buffer,");
@@ -4873,7 +4885,7 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
   // params[3]: group_id
   assert(params.size() == 5);
   int group_id = params[3];
-  int page_stride_rows = params[4];
+  int page_stride = params[4];
 
   int d_k = params[0];
   int d_v = params[1];
@@ -4912,8 +4924,8 @@ int TaskRegister::register_mla_kv_gather_sm100_task(
          d_k,
          d_v,
          page_size,
-         k_pe_row_stride,
-         page_stride_rows);
+         page_stride,
+         k_pe_row_stride);
   code.e("    c_latent_new_ptr_,");
   code.e("    k_pe_new_ptr_,");
   code.e("    task_desc->input_ptrs[2],"); // paged_cache
@@ -4940,7 +4952,7 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
   int d_v = params[1];
   int page_size = params[2];
   int group_id = params[3];
-  int page_stride_rows = params[4];
+  int page_stride = params[4];
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -4972,8 +4984,8 @@ int TaskRegister::register_mla_kv_gather_split_sm100_task(
          d_k,
          d_v,
          page_size,
-         k_pe_row_stride,
-         page_stride_rows);
+         page_stride,
+         k_pe_row_stride);
   code.e("    c_latent_new_ptr_,");
   code.e("    k_pe_new_ptr_,");
   code.e("    task_desc->input_ptrs[2],"); // paged_cache

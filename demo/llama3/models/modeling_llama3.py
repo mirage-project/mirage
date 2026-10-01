@@ -33,6 +33,7 @@ from transformers.modeling_utils import PreTrainedModel
 from .configuration_llama3 import Llama3Config
 import time
 
+from mirage.mpk.kvcache import KVStream, build_kv_cache
 from .rope import apply_rotary_pos_emb_triton
 
 class Llama3RMSNorm(nn.Module):
@@ -312,37 +313,39 @@ class Llama3PreTrainedModel(PreTrainedModel):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
 
+def llama3_kv_streams(config, world_size: int):
+    """Llama-3 stores one kind of KV, so it is one stream over every layer."""
+    entry_shape = (config.num_key_value_heads // world_size, config.head_dim)
+    return [
+        KVStream("attention",
+                 layers=tuple(range(config.num_hidden_layers)),
+                 components=[("k", entry_shape, torch.bfloat16),
+                             ("v", entry_shape, torch.bfloat16)]),
+    ]
+
 class Llama3Model(Llama3PreTrainedModel):
     def __init__(self, config: Llama3Config, world_size: int = 1,
-        max_num_pages: int = 1, page_size: int = 4096):
+        max_num_pages: int = 1, page_size: int = 4096, kv_plan=None,
+        kv_budget=None, max_seq_length: int = None,
+        max_num_batched_requests: int = 1, max_num_batched_tokens: int = 1):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         
-        key_cache = torch.empty(
-            (
-                config.num_hidden_layers,
-                max_num_pages,
-                page_size,
-                config.num_key_value_heads // world_size,
-                config.head_dim,
-            ),
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
-        value_cache = torch.empty(
-            (
-                config.num_hidden_layers,
-                max_num_pages,
-                page_size,
-                config.num_key_value_heads // world_size,
-                config.head_dim,
-            ),
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
-
-        self.kv_cache = (key_cache, value_cache)
+        # The tuple below is for the eager PyTorch path, which indexes the tensors directly.
+        kv_plan = kv_plan or build_kv_cache(
+            llama3_kv_streams(config, world_size),
+            block_size=page_size,
+            kv_budget=kv_budget,
+            max_num_pages=None if kv_budget else max_num_pages,
+            max_seq_length=max_seq_length,
+            max_num_batched_requests=max_num_batched_requests,
+            max_num_batched_tokens=max_num_batched_tokens,
+            verbose=False)
+        self.kv_plan = kv_plan
+        (group_id,) = {g.group_id for g in kv_plan.groups}
+        views = kv_plan.views(group_id)
+        self.kv_cache = (views["k"], views["v"])
         
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
@@ -393,9 +396,11 @@ class Llama3Model(Llama3PreTrainedModel):
         return (hidden_states,)
 
 class Llama3ForCausalLM(Llama3PreTrainedModel, GenerationMixin):
-    def __init__(self, config, world_size=1, max_num_pages=1, page_size=4096):
+    def __init__(self, config, world_size=1, max_num_pages=1, page_size=4096,
+                 kv_plan=None, **kv_sizing):
         super().__init__(config)
-        self.model = Llama3Model(config, world_size, max_num_pages, page_size)
+        self.model = Llama3Model(config, world_size, max_num_pages, page_size,
+                                 kv_plan=kv_plan, **kv_sizing)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.post_init()

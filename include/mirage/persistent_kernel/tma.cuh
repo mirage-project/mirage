@@ -16,6 +16,7 @@
 #pragma once
 #include "runtime_header.h"
 #include "tasks/common/common_header.cuh"
+#include "tasks/common/kv_tiles.h"
 #include <cuda.h>
 #include <cutlass/float8.h>
 #include <cutlass/numeric_types.h>
@@ -389,7 +390,7 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       using T = bfloat16;
       constexpr int B = 3, M = 3, S = 3;
       constexpr int TMA_CP_ASYNC_SIZE = 64;
-      constexpr int KV_TILE_SIZE = 64;
+      constexpr int KV_TILE_SIZE = kernel::KV_TILE_SM100;
       size_t const smem_repeat_row = 1;
 
       auto &qkv =

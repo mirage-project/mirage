@@ -107,12 +107,6 @@ if __name__ == "__main__":
     # num_workers, num_schedulers = mi.get_configurations_from_gpu(self.rank)
     qo_indptr_buffer = torch.zeros(
         args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-    paged_kv_indptr_buffer = torch.zeros(
-        args.max_num_batched_requests + 1, dtype=torch.int32, device="cuda")
-    paged_kv_indices_buffer = torch.zeros(
-        args.max_num_pages, dtype=torch.int32, device="cuda")
-    paged_kv_last_page_len_buffer = torch.zeros(
-        args.max_num_batched_requests, dtype=torch.int32, device="cuda")
     
     mirage_model_config = MirageModelConfig(with_lm_head=True)
     
@@ -136,9 +130,6 @@ if __name__ == "__main__":
         num_new_tokens=num_new_tokens,
         prompt_lengths=prompt_lengths,
         qo_indptr_buffer=qo_indptr_buffer,
-        paged_kv_indptr_buffer=paged_kv_indptr_buffer,
-        paged_kv_indices_buffer=paged_kv_indices_buffer,
-        paged_kv_last_page_len_buffer=paged_kv_last_page_len_buffer,
         # model config
         model_config=mirage_model_config,
         # meta tensors end

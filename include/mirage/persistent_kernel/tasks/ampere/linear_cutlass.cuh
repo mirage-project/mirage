@@ -29,8 +29,9 @@ namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
 
-// Use PIPE_MAX=2 for sm89 (Ada Lovelace) to avoid out of shared memory
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 890)
+// Use PIPE_MAX=2 for sm86/sm89 (consumer/prosumer Ampere + Ada Lovelace) to
+// avoid out of shared memory.
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 860 || __CUDA_ARCH__ == 890)
 constexpr int DEFAULT_PIPE_MAX = 2;
 #else
 constexpr int DEFAULT_PIPE_MAX = 3;
