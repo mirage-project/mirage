@@ -335,6 +335,9 @@ __device__ __noinline__ void mla_mtp_tp2_main(CUtensorMap const *Q_tm_ptr,
 
     MLA_TP_SYNC_ACTIVE();
     ptx::mbar_wait(mainloop_bar, 0);
+    // All active warps must finish the wait before warp 0 reinitializes the
+    // same barriers for PV. Completion alone does not order those accesses.
+    MLA_TP_SYNC_ACTIVE();
 
     asm volatile("tcgen05.fence::after_thread_sync;");
 

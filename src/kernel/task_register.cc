@@ -4129,9 +4129,10 @@ int TaskRegister::register_sparse_mla_sm100_task(
       code.e("    static_cast<float*>(task_desc->output_ptrs[1]),");
     }
     code.e("    runtime_config.qo_indptr_buffer,");
-    code.e("    runtime_config.paged_kv_indptr_buffer,");
-    code.e("    runtime_config.paged_kv_indices_buffer,");
-    code.e("    runtime_config.paged_kv_last_page_len_buffer,");
+    // Sparse MLA currently uses the default full-attention KV group.
+    code.e("    runtime_config.paged_kv_indptr_buffer[0],");
+    code.e("    runtime_config.paged_kv_indices_buffer[0],");
+    code.e("    runtime_config.paged_kv_last_page_len_buffer[0],");
     code.e("    $, $, __int_as_float($), $,",
            params[5],
            params[6],
