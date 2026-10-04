@@ -374,12 +374,39 @@ The globaltimer read and the block fence are on-SM, but the store's latency
 depends on where the ring lands, so a single-SM sample would not stand for
 all of them.
 
-### Results
+### Results: NVIDIA H100 80GB HBM3, 132 SMs, driver 13020
 
-Run `make run` on a B200 to populate this table; the JSON keys are
-`profiler_event_start_ns`, `profiler_event_end_ns`, `profiler_event_pair_ns`,
-`globaltimer_read_ns`, `store_relaxed_ns`, `threadfence_block_marginal_ns`
-(each as `_med`, `_p10`, `_p90`, `_min`, `_max`).
+SM clock measured at runtime: 1.98 GHz. The shared-GPU guard reported one
+other process (a container PID-namespace false positive the README notes
+elsewhere), but the ALU sentinel spread was 1.0000 and the SM clock was
+unchanged, so the run is clean. Every row pools 132 SMs; p10–p90 within
+0.01 ns of the median except where noted.
+
+| primitive | median | p10 | p90 |
+|---|---|---|---|
+| `PROFILER_EVENT_START` (full) | 31.33 ns | 31.33 | 31.33 |
+| `PROFILER_EVENT_END` (full) | 29.56 ns | 29.56 | 29.56 |
+| `START+END` pair (one task event) | 58.48 ns | 58.48 | 58.48 |
+| `mov.u32 %globaltimer_lo` (read only) | 15.72 ns | 15.71 | 15.72 |
+| `st.b64` to profiler ring (relaxed) | 0.94 ns | 0.94 | 0.94 |
+| `__threadfence_block()` marginal | 11.27 ns | 11.27 | 11.27 |
+
+The full START is the sum of its parts: the `%globaltimer_lo` read (15.72 ns)
+plus the relaxed store (0.94 ns) plus `__threadfence_block()` (11.27 ns) plus
+the tag build and pointer advance (~3 ns), totalling ~31 ns. The pair
+(58.48 ns) is the cost one task — or, with stage profiling on, one stage —
+adds to the kernel wall time. The relaxed store (0.94 ns) matches
+`sync_primitives`' fire-and-forget store (0.99 ns); `__threadfence_block()`
+(11.27 ns) is an intra-CTA fence, an order of magnitude below the
+device-scope `__threadfence()` (~217 ns near in `sync_primitives`), which is
+why the profiler uses the block fence and not the device fence.
+
+A B200 run is still wanted: the absolute numbers will differ (SM clock,
+globaltimer increment period, store/fence latency), and the stage-profiler
+PRs target B200. Run `make run JSON=b200` on a B200 to populate the
+`b200_profiler_stamp.json` keys (`profiler_event_start_ns`, ...,
+`threadfence_block_marginal_ns`, each as `_med`, `_p10`, `_p90`, `_min`,
+`_max`).
 
 ### What this says
 

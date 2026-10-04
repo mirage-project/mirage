@@ -34,6 +34,7 @@
 
 #include "microbench_common.cuh"
 
+#include <cstdint>
 #include <map>
 
 constexpr int R_SM = 3;
@@ -70,10 +71,10 @@ __global__ void stamp_start_per_sm(uint64_t *ring,
   }
   wait_turn(ticket);
   uint32_t const tag_base = encode_tag((uint32_t)blockIdx.x, 0, 0);
-  uint64_t *write_ptr = ring + (uint64_t)blockIdx.x;
   uint64_t const stride = (uint64_t)gridDim.x;
   uint64_t acc = 0;
   for (int r = 0; r < R_SM; r++) {
+    uint64_t *write_ptr = ring + (uint64_t)blockIdx.x;
     ProfilerEntry e;
     long long t0 = clock64();
     for (int i = 0; i < iters; i++) {
@@ -104,10 +105,10 @@ __global__ void stamp_end_per_sm(uint64_t *ring,
   }
   wait_turn(ticket);
   uint32_t const tag_base = encode_tag((uint32_t)blockIdx.x, 0, 0);
-  uint64_t *write_ptr = ring + (uint64_t)blockIdx.x;
   uint64_t const stride = (uint64_t)gridDim.x;
   uint64_t acc = 0;
   for (int r = 0; r < R_SM; r++) {
+    uint64_t *write_ptr = ring + (uint64_t)blockIdx.x;
     ProfilerEntry e;
     long long t0 = clock64();
     for (int i = 0; i < iters; i++) {
@@ -138,10 +139,10 @@ __global__ void stamp_pair_per_sm(uint64_t *ring,
   }
   wait_turn(ticket);
   uint32_t const tag_base = encode_tag((uint32_t)blockIdx.x, 0, 0);
-  uint64_t *write_ptr = ring + (uint64_t)blockIdx.x;
   uint64_t const stride = (uint64_t)gridDim.x;
   uint64_t acc = 0;
   for (int r = 0; r < R_SM; r++) {
+    uint64_t *write_ptr = ring + (uint64_t)blockIdx.x;
     ProfilerEntry e;
     long long t0 = clock64();
     for (int i = 0; i < iters; i++) {
@@ -190,7 +191,10 @@ __global__ void globaltimer_per_sm(unsigned long long *ticket,
 }
 
 // 64-bit store to the ring alone (relaxed), and store + __threadfence_block,
-// so the fence's marginal cost is the difference.
+// so the fence's marginal cost is the difference. Matches the fence
+// measurement in sync_primitives.cu: a fixed per-block address, no per-iter
+// read (a read after the store would serialize the stores and conflate the
+// store's round-trip with the fence).
 __global__ void store_fence_per_sm(uint64_t *ring,
                                    unsigned long long *ticket,
                                    int iters,
@@ -202,30 +206,24 @@ __global__ void store_fence_per_sm(uint64_t *ring,
     return;
   }
   wait_turn(ticket);
-  uint64_t *write_ptr = ring + (uint64_t)blockIdx.x;
-  uint64_t const stride = (uint64_t)gridDim.x;
-  uint64_t acc = 0;
+  uint64_t *const slot = ring + (uint64_t)blockIdx.x;
   for (int r = 0; r < R_SM; r++) {
     long long t0 = clock64();
     for (int i = 0; i < iters; i++) {
-      *write_ptr = (uint64_t)i;
-      write_ptr += stride;
-      acc += *write_ptr;
+      *slot = (uint64_t)i;
     }
     long long t1 = clock64();
     double store = (double)(t1 - t0) / iters;
     t0 = clock64();
     for (int i = 0; i < iters; i++) {
-      *write_ptr = (uint64_t)i;
-      write_ptr += stride;
+      *slot = (uint64_t)i;
       __threadfence_block();
-      acc += *write_ptr;
     }
     t1 = clock64();
     out_store[blockIdx.x * R_SM + r] = store;
     out_fence[blockIdx.x * R_SM + r] = (double)(t1 - t0) / iters - store;
   }
-  sink[blockIdx.x] = acc;
+  sink[blockIdx.x] = *slot;
   smid_out[blockIdx.x] = sm_id();
   pass_turn(ticket);
 }
