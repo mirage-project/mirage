@@ -1,7 +1,7 @@
 # Primitive cost microbenchmarks
 
-What the megakernel runtime's synchronization primitives actually cost, measured
-rather than assumed.
+What the megakernel runtime's synchronization primitives and profiler stamp
+actually cost, measured rather than assumed.
 
 Every dependency edge in the task graph is one of these operations: a worker
 finishing a task bumps an event counter with `atom.add.release.gpu.u64`, the
@@ -10,13 +10,16 @@ polling with `ld.acquire.gpu.u64`, and stages hand off through fences and
 barriers. The
 kernels under test are copied verbatim from
 `include/mirage/persistent_kernel/mpk_atoms.cuh`, so these are the instructions
-the megakernel issues, not approximations of them.
+the megakernel issues, not approximations of them. The profiler stamp
+benchmark does the same for the event-recording primitives in
+`include/mirage/persistent_kernel/profiler.h`.
 
 ## Running
 
 ```bash
-make run                      # print both benchmarks' tables
-make run JSON=b200            # also record b200_sync.json and b200_tma.json
+make run                      # print all three benchmarks' tables
+make run JSON=b200            # also record b200_sync.json, b200_tma.json and
+                              #             b200_profiler_stamp.json
 make run SM=90a               # build for a different target (default 100a)
 ```
 
@@ -340,7 +343,56 @@ per tile, independent of tile size. The tensor map's location (global memory,
 as MPK passes it, vs. a `__grid_constant__` parameter or a prefetched
 descriptor) was checked separately and makes no difference.
 
+## Profiler stamp cost (`profiler_stamp`)
+
+What the on-device profiler's event-recording stamp costs, so the stamp
+itself is never mistaken for kernel work in the trace. The runtime's profiler
+(`include/mirage/persistent_kernel/profiler.h`) writes one 64-bit entry per
+event: a tag (event id, block/group, begin/end) and a timestamp read from
+`%globaltimer_lo`. `PROFILER_EVENT_START` is
+
+`if (write_thread) { entry.tag = ...; entry.delta = get_timestamp(); *write_ptr = entry.raw; write_ptr += stride; } __threadfence_block();`
+and `PROFILER_EVENT_END` is the same with the fence before the body. Every
+task pays a START+END pair; with stage profiling on, every stage of every
+task pays another pair. The PTX is copied verbatim from `profiler.h`, and the
+store hits the same global-memory ring the runtime uses, so the
+memory-system cost is included.
+
+### What it measures
+
+- `PROFILER_EVENT_START` (full) — tag build + `%globaltimer_lo` read + 64-bit
+  store to the ring + pointer advance + `__threadfence_block()`.
+- `PROFILER_EVENT_END` (full) — `__threadfence_block()` + the same body.
+- `START+END` pair — the cost one task (or one stage) event adds to the kernel.
+- `mov.u32 %globaltimer_lo` — the timestamp read alone.
+- `st.b64` to the ring (relaxed), and `__threadfence_block()` marginal over
+  that store, so the fence's contribution to the stamp is isolated.
+
+Each is measured on every SM in turn (see microbench_common.cuh), one write
+thread per block, matching `PROFILER_INIT`'s `profiler_write_thread_predicate`.
+The globaltimer read and the block fence are on-SM, but the store's latency
+depends on where the ring lands, so a single-SM sample would not stand for
+all of them.
+
+### Results
+
+Run `make run` on a B200 to populate this table; the JSON keys are
+`profiler_event_start_ns`, `profiler_event_end_ns`, `profiler_event_pair_ns`,
+`globaltimer_read_ns`, `store_relaxed_ns`, `threadfence_block_marginal_ns`
+(each as `_med`, `_p10`, `_p90`, `_min`, `_max`).
+
+### What this says
+
+The stamp cost is the floor below which a stage event cannot resolve: the
+profiler timestamps with `%globaltimer_lo`, which on B200 advances only every
+32 ns (see the TMA section's clock note), so a stage shorter than that is not
+resolved by the trace regardless of how cheap the stamp is. The `START+END`
+pair number is what every task (and, with stage profiling on, every stage)
+adds to the kernel wall time; it is the cost the stage-profiler PRs must
+justify against the work they measure.
+
 ## Scope
 
-Synchronization primitives and TMA loads (issue #771). MMA issue rate is not
-covered here.
+Synchronization primitives, TMA loads and the profiler stamp (issue #771).
+MMA issue rate is not covered here; it needs `tcgen05` (Blackwell) and is
+deferred to a follow-up developed on a B200.
