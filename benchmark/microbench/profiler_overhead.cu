@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-// Cost of the on-device profiler stamp the megakernel emits around every task
+// Overhead of the on-device profiler the megakernel emits around every task
 // and (with stage profiling on) every stage of every task.
 //
 // The runtime's profiler (include/mirage/persistent_kernel/profiler.h) records
@@ -24,7 +24,7 @@
 //   __threadfence_block();
 // and PROFILER_EVENT_END is the same with the fence before the body. Every
 // task pays a START+END pair; with stage profiling on, every stage of every
-// task pays another pair. The stamp cost is indistinguishable from kernel
+// task pays another pair. The overhead is indistinguishable from kernel
 // work in the trace unless it is measured and reported -- which this does.
 //
 // The PTX below is copied verbatim from profiler.h so the numbers are the

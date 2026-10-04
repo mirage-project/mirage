@@ -1,7 +1,7 @@
 # Primitive cost microbenchmarks
 
-What the megakernel runtime's synchronization primitives and profiler stamp
-actually cost, measured rather than assumed.
+What the megakernel runtime's synchronization primitives and profiler
+overhead actually cost, measured rather than assumed.
 
 Every dependency edge in the task graph is one of these operations: a worker
 finishing a task bumps an event counter with `atom.add.release.gpu.u64`, the
@@ -10,7 +10,7 @@ polling with `ld.acquire.gpu.u64`, and stages hand off through fences and
 barriers. The
 kernels under test are copied verbatim from
 `include/mirage/persistent_kernel/mpk_atoms.cuh`, so these are the instructions
-the megakernel issues, not approximations of them. The profiler stamp
+the megakernel issues, not approximations of them. The profiler overhead
 benchmark does the same for the event-recording primitives in
 `include/mirage/persistent_kernel/profiler.h`.
 
@@ -19,7 +19,7 @@ benchmark does the same for the event-recording primitives in
 ```bash
 make run                      # print all three benchmarks' tables
 make run JSON=b200            # also record b200_sync.json, b200_tma.json and
-                              #             b200_profiler_stamp.json
+                              #             b200_profiler_overhead.json
 make run SM=90a               # build for a different target (default 100a)
 ```
 
@@ -343,7 +343,7 @@ per tile, independent of tile size. The tensor map's location (global memory,
 as MPK passes it, vs. a `__grid_constant__` parameter or a prefetched
 descriptor) was checked separately and makes no difference.
 
-## Profiler stamp cost (`profiler_stamp`)
+## Profiler overhead (`profiler_overhead`)
 
 What the on-device profiler's event-recording stamp costs, so the stamp
 itself is never mistaken for kernel work in the trace. The runtime's profiler
@@ -404,7 +404,7 @@ why the profiler uses the block fence and not the device fence.
 A B200 run is still wanted: the absolute numbers will differ (SM clock,
 globaltimer increment period, store/fence latency), and the stage-profiler
 PRs target B200. Run `make run JSON=b200` on a B200 to populate the
-`b200_profiler_stamp.json` keys (`profiler_event_start_ns`, ...,
+`b200_profiler_overhead.json` keys (`profiler_event_start_ns`, ...,
 `threadfence_block_marginal_ns`, each as `_med`, `_p10`, `_p90`, `_min`,
 `_max`).
 
@@ -420,6 +420,6 @@ justify against the work they measure.
 
 ## Scope
 
-Synchronization primitives, TMA loads and the profiler stamp (issue #771).
+Synchronization primitives, TMA loads and the profiler overhead (issue #771).
 MMA issue rate is not covered here; it needs `tcgen05` (Blackwell) and is
 deferred to a follow-up developed on a B200.
