@@ -1566,6 +1566,112 @@ class PersistentKernel:
             raise ValueError(f"Unsupported target CC: {self.target_cc}")
             
     # MLA (Multi-head Latent Attention) Layers
+    def sparse_mla_layer(
+        self,
+        q: DTensor,
+        kv_cache: DTensor,
+        token_indices: DTensor,
+        index_counts: DTensor,
+        output: DTensor,
+        *,
+        softmax_scale: float,
+        num_splits: int = 1,
+    ):
+        """Sparse MLA over a populated paged latent cache (SM100, BF16).
+
+        q: [T, H, 512 + R], with the key projection absorbed and RoPE applied.
+        kv_cache: [num_pages, page_size, 512 + R], including this query chunk.
+        token_indices: int32 [T, K], request-local logical token positions.
+        index_counts: int32 [T], lengths of the prefixes to read in indices.
+        output: [T, H, 512], before the value/output projection.
+
+        R is 64 (GLM-5.3) or 0 (GLM-5.3-Flash). Indexer/IndexPool and cache
+        writes are external. Valid indices must be unique; -1 padding,
+        out-of-range indices and future tokens are masked. Empty rows produce
+        zero. Runtime query/page metadata supports decode and chunked prefill.
+        Scale is explicit: it must NOT be inferred from the latent dimension.
+        """
+        import math
+        import struct
+
+        if self.target_cc != 100:
+            raise ValueError("sparse_mla_layer requires SM100")
+        if type(num_splits) is not int or num_splits not in (1, 2, 4, 8):
+            raise ValueError("num_splits must be 1, 2, 4 or 8")
+        scale = float(softmax_scale)
+        if not math.isfinite(scale) or scale <= 0:
+            raise ValueError("softmax_scale must be finite and positive")
+        try:
+            scale_bytes = struct.pack("f", scale)
+        except OverflowError as exc:
+            raise ValueError("softmax_scale must fit float32") from exc
+        scale_fp32 = struct.unpack("f", scale_bytes)[0]
+        if not math.isfinite(scale_fp32) or scale_fp32 <= 0:
+            raise ValueError("softmax_scale must be positive finite float32")
+
+        for tensor, rank, dt, label in (
+            (q, 3, bfloat16, "q"), (kv_cache, 3, bfloat16, "kv_cache"),
+            (token_indices, 2, int32, "token_indices"),
+            (index_counts, 1, int32, "index_counts"),
+            (output, 3, bfloat16, "output"),
+        ):
+            if tensor.num_dims != rank or tensor.dtype != dt:
+                raise ValueError(f"{label}: expected rank {rank} and dtype {dt}")
+            dims, strides = tensor.shape, tensor.stride
+            stride = 1
+            for dim, actual_stride in zip(reversed(dims), reversed(strides)):
+                if dim <= 0 or actual_stride != stride:
+                    raise ValueError(f"{label} must be a nonempty contiguous tensor")
+                stride *= dim
+
+        num_tokens, num_heads, d_qk = (q.dim(i) for i in range(3))
+        capacity = token_indices.dim(1)
+        if num_heads not in (8, 16, 32, 64) or d_qk not in (512, 576):
+            raise ValueError("sparse MLA supports H=8/16/32/64 and D_QK=512/576")
+        if num_tokens != self.max_num_batched_tokens:
+            raise ValueError("q capacity must equal max_num_batched_tokens")
+        if tuple(kv_cache.dim(i) for i in range(3)) != (
+            self.max_num_pages, self.page_size, d_qk
+        ):
+            raise ValueError("kv_cache shape must match the MPK page configuration")
+        if token_indices.dim(0) != num_tokens or index_counts.dim(0) != num_tokens:
+            raise ValueError("indices and counts must have the same T as q")
+        if tuple(output.dim(i) for i in range(3)) != (num_tokens, num_heads, 512):
+            raise ValueError("output must have shape [T, H, 512]")
+        output_base = output.base_guid or output.guid
+        if any(output_base == (tensor.base_guid or tensor.guid)
+               for tensor in (q, kv_cache, token_indices, index_counts)):
+            raise ValueError("sparse MLA output must not alias an input")
+
+        scale_bits = struct.unpack("i", scale_bytes)[0]
+        params = [num_heads, d_qk - 512, self.page_size, capacity, num_splits,
+                  self.max_num_batched_requests, self.max_num_pages, scale_bits]
+        head_groups = (num_heads + 15) // 16
+        inputs = [q, kv_cache, token_indices, index_counts]
+        if num_splits == 1:
+            outputs = [output]
+        else:
+            partial = self.new_tensor(
+                dims=(num_tokens, num_splits, num_heads, 512), dtype=float32,
+                name=f"sparse_mla_partial_{output.guid}")
+            lse = self.new_tensor(
+                dims=(num_tokens, num_splits, num_heads), dtype=float32,
+                name=f"sparse_mla_lse_{output.guid}")
+            outputs = [partial, lse]
+        tb_graph = TBGraph(CyTBGraph(
+            (num_tokens, head_groups, num_splits), (256, 1, 1), 1, 64))
+        for tensor in inputs + outputs:
+            tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
+        self.kn_graph.customized(inputs + outputs, tb_graph)
+        self.kn_graph.register_task(tb_graph, "sparse_mla_sm100", params)
+        if num_splits > 1:
+            tb_graph = TBGraph(CyTBGraph(
+                (num_tokens, head_groups, 1), (256, 1, 1), 1, 64))
+            for tensor in (partial, lse, output):
+                tb_graph.new_input(tensor, (-1, -1, -1), -1, True)
+            self.kn_graph.customized([partial, lse, output], tb_graph)
+            self.kn_graph.register_task(tb_graph, "sparse_mla_reduce_sm100", params)
+
     def mla_kv_gather_layer(
         self,
         c_latent_new: DTensor,
