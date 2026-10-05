@@ -5370,16 +5370,19 @@ int TaskRegister::register_mla_mtp_decode_tp8_reduce_sm100_task(
                                code.to_string());
 }
 
-// ---- the K3 MoE task family (include/mirage/static_megakernel/) ----
-// These task types exist so that StaticMegakernel's layer calls (static_megakernel.py) create graph nodes (with their name,
-// params and grid, which compiler.py reads). Their tasks run only in the generated layer (static_schedule.compile_static, the
-// task functions in static_megakernel/moe_kernel.cuh); MPK's runtime cannot run them, so the code registered here stops the
-// kernel if it is ever reached. The shape checks stay.
+// ---- the static megakernel task types (include/mirage/static_megakernel/)
+// ---- These task types exist so that StaticMegakernel's layer calls
+// (static_megakernel.py) create graph nodes (with their name, params and grid,
+// which compiler.py reads). Their tasks run only in the generated layer
+// (static_schedule.compile_static, the task functions in
+// static_megakernel/tasks/<name>.cuh); MPK's runtime cannot run them, so the
+// code registered here stops the kernel if it is ever reached. The shape checks
+// stay.
 static void static_split_ops(threadblock::Graph const &bgraph,
-                         int num_inputs,
-                         int num_outputs,
-                         std::vector<tb::TBInputOp *> &input_ops,
-                         std::vector<tb::TBInputOp *> &output_ops) {
+                             int num_inputs,
+                             int num_outputs,
+                             std::vector<tb::TBInputOp *> &input_ops,
+                             std::vector<tb::TBInputOp *> &output_ops) {
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
   for (auto const &op : bgraph.operators) {
     assert(op->op_type == mirage::type::TB_INPUT_OP);
@@ -5391,8 +5394,10 @@ static void static_split_ops(threadblock::Graph const &bgraph,
   }
 }
 
-// the registered code of a static megakernel task: a trap (with the task's name and params, so each params set is its own variant)
-static std::string static_build_only_task(char const *name, std::vector<int> const &params) {
+// the registered code of a static megakernel task: a trap (with the task's name
+// and params, so each params set is its own variant)
+static std::string static_build_only_task(char const *name,
+                                          std::vector<int> const &params) {
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
   std::string p;
@@ -5406,50 +5411,57 @@ static std::string static_build_only_task(char const *name, std::vector<int> con
 
 int TaskRegister::register_gemm_tile_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params[0]: epilogue kind (0 router, 1 latent, 2 shared gate_up, 3 shared
-  // down); params[1]: K; the K split is the grid's y. inputs: activation
-  // [T, K], weight [N, K], G, Maps; output: [T, N] fp32.
-  assert(params.size() == 2);
-  int kind = params[0];
-  assert(kind >= 0 && kind <= 3);
+  // params: {mode (how the K parts are combined: 0 one slot per part, 1
+  // fixed-point add, 2 plain store), K, N, polled (1: the activation is its
+  // producer's 0xFF-prefilled bf16 buffer, polled into the ring's stages)}
+  // (static_megakernel/core.cuh Combine); the K split is the grid's y; its
+  // tensor maps are the node's slots. inputs: activation [T, K], weight [N, K],
+  // G, Maps; output: [T, N] fp32.
+  assert(params.size() == 4);
+  assert(params[0] >= 0 && params[0] <= 2 &&
+         (params[3] == 0 || params[3] == 1) &&
+         (params[3] == 0 || params[0] == 0));
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(bgraph, 4, 1, input_ops, output_ops);
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(input_ops[1]->dtensor.num_dims == 2);
   assert(input_ops[1]->dtensor.dim[1] == input_ops[0]->dtensor.dim[1]);
   assert(input_ops[1]->dtensor.dim[1] == params[1]);
+  assert(input_ops[1]->dtensor.dim[0] == params[2]);
   return register_task_variant(TASK_GEMM_TILE_SM100,
                                static_build_only_task("gemm_tile", params));
 }
 
-int TaskRegister::register_route_sm100_task(
+int TaskRegister::register_topk_route_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // no params (the router's K split is the router node's grid y). inputs:
-  // router logits [T, E] fp32, bias [E] fp32, G; output: routing pairs [T, 16].
-  // Grid x = token.
-  assert(params.empty());
+  // params: {E (experts), K (experts per token)}. inputs: router logits [T, E]
+  // fp32, bias [E] fp32, G; output: routing pairs [T, K]. Grid x = token.
+  assert(params.size() == 2);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(bgraph, 3, 1, input_ops, output_ops);
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(output_ops[0]->dtensor.num_dims == 2);
-  assert(output_ops[0]->dtensor.dim[1] == 16);
-  return register_task_variant(TASK_ROUTE_SM100,
-                               static_build_only_task("route", params));
+  assert(input_ops[0]->dtensor.dim[1] == params[0]);
+  assert(output_ops[0]->dtensor.dim[1] == params[1]);
+  return register_task_variant(TASK_TOPK_ROUTE_SM100,
+                               static_build_only_task("topk_route", params));
 }
 
-int TaskRegister::register_quant_sm100_task(
+int TaskRegister::register_sum_quant_send_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // no params (latent_down's K split is its grid y). inputs: latent z [T, L]
-  // fp32, G; output: z_q [T, L] e4m3 bytes. Grid x = 128-column block of z.
-  assert(params.empty());
+  // params: {L (z's width)}. inputs: latent z [T, L] fp32, G; output: z_q [T,
+  // L] e4m3 bytes. Grid x = 128-column block of z.
+  assert(params.size() == 1);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(bgraph, 2, 1, input_ops, output_ops);
   assert(input_ops[0]->dtensor.num_dims == 2);
-  return register_task_variant(TASK_QUANT_SM100,
-                               static_build_only_task("quant", params));
+  assert(input_ops[0]->dtensor.dim[1] == params[0]);
+  return register_task_variant(
+      TASK_SUM_QUANT_SEND_SM100,
+      static_build_only_task("sum_quant_send", params));
 }
 
-int TaskRegister::register_sact_sm100_task(
+int TaskRegister::register_situ_and_mul_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // no params (shared gate_up's K split is its grid y). inputs: shared gate_up
   // [T, 2 * SHR] fp32, G; output: h_s [T, SHR] bf16. Grid x = 64-feature block.
@@ -5459,31 +5471,87 @@ int TaskRegister::register_sact_sm100_task(
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(output_ops[0]->dtensor.num_dims == 2);
   assert(input_ops[0]->dtensor.dim[1] == 2 * output_ops[0]->dtensor.dim[1]);
-  return register_task_variant(TASK_SACT_SM100,
-                               static_build_only_task("sact", params));
+  return register_task_variant(TASK_SITU_AND_MUL_SM100,
+                               static_build_only_task("situ_and_mul", params));
 }
 
-int TaskRegister::register_expert_queue_sm100_task(
+int TaskRegister::register_moe_experts_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // inputs: z_q, routing pairs, h_s, W13 bank, W2 bank, G, Maps; outputs:
-  // routed sum R [T, L] fp32, shared down S [T, H] fp32. One task per SM.
-  assert(params.size() == 0);
-  std::vector<tb::TBInputOp *> input_ops, output_ops;
-  static_split_ops(bgraph, 7, 2, input_ops, output_ops);
-  return register_task_variant(TASK_EXPERT_QUEUE_SM100,
-                               static_build_only_task("expert_queue", params));
-}
-
-int TaskRegister::register_tail_sm100_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // inputs: R, S, prefix, gamma, latent_up weight, G, Maps; output: y [T, H]
-  // bf16. One task per SM.
-  assert(params.size() == 0);
+  // params: {IR (the expert intermediate on this GPU)}. inputs: z_q, routing
+  // pairs, h_s, W13 bank, W2 bank, G, Maps; output: the routed rows R [T x K,
+  // L] fp32 (shared down is its own gemm_tile node). One task per SM
+  // (static_megakernel/tasks/moe_experts.cuh).
+  assert(params.size() == 1 && params[0] > 0 && params[0] % 128 == 0);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(bgraph, 7, 1, input_ops, output_ops);
-  assert(output_ops[0]->dtensor.num_dims == 2);
-  return register_task_variant(TASK_TAIL_SM100,
-                               static_build_only_task("tail", params));
+  return register_task_variant(TASK_MOE_EXPERTS_SM100,
+                               static_build_only_task("moe_experts", params));
+}
+
+// a task type with num_params params (static_megakernel/tasks/sum_gpus.cuh,
+// sum_send.cuh: none; residual_add.cuh: {H})
+static int register_static_task(TaskRegister *r,
+                                TaskType type,
+                                char const *name,
+                                threadblock::Graph const &bgraph,
+                                std::vector<int> const &params,
+                                int num_inputs,
+                                size_t num_params) {
+  assert(params.size() == num_params);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, num_inputs, 1, input_ops, output_ops);
+  return r->register_task_variant(type, static_build_only_task(name, params));
+}
+
+int TaskRegister::register_allreduce_send_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {W (the row width), rows per token in the input (added in order)}.
+  // inputs: a node's output [T x rows, W] fp32, G; output: what is sent (its
+  // buffer in the exchange region: [GPUs][T][W] bf16)
+  assert(params.size() == 2 && params[0] > 0 && params[0] % 8 == 0 &&
+         params[1] >= 1);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 2, 1, input_ops, output_ops);
+  return register_task_variant(
+      TASK_ALLREDUCE_SEND_SM100,
+      static_build_only_task("allreduce_send", params));
+}
+
+int TaskRegister::register_sum_rmsnorm_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // inputs: [R|S] sent, gamma, G; output: Rn [T, LAT] bf16. Grid (Q, T).
+  // params: {mode, eps (fp32 bits)}; mode 0: the Q tasks of a token swap their
+  // sums of squares through global memory, 1: each task adds the squares of the
+  // whole row itself (no swap), 2: Q = 2 tasks on the 2 CTAs of a cluster swap
+  // them in shared memory
+  assert(params.size() == 2 && params[0] >= 0 && params[0] <= 2);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 3, 1, input_ops, output_ops);
+  return register_task_variant(TASK_SUM_RMSNORM_SM100,
+                               static_build_only_task("sum_rmsnorm", params));
+}
+
+int TaskRegister::register_sum_gpus_sm100_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params) {
+  // inputs: [R|S] sent, G; output: Ssum [T, H] bf16. Grid (8, T).
+  return register_static_task(
+      this, TASK_SUM_GPUS_SM100, "sum_gpus", bgraph, params, 2, 0);
+}
+
+int TaskRegister::register_sum_send_sm100_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params) {
+  // inputs: a gemm_tile node's K parts [T, H] fp32 (rows split over the GPUs),
+  // G; output: o [T, H] bf16. Grid (H / 128, Q), each GPU its own row blocks.
+  return register_static_task(
+      this, TASK_SUM_SEND_SM100, "sum_send", bgraph, params, 2, 0);
+}
+
+int TaskRegister::register_residual_add_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {H}. inputs: addend (Ssum), input (o), residual, G; output: y [T,
+  // H] bf16.
+  return register_static_task(
+      this, TASK_RESIDUAL_ADD_SM100, "residual_add", bgraph, params, 4, 1);
 }
 
 } // namespace runtime

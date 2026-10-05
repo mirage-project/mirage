@@ -192,11 +192,20 @@ public:
   // maps, then register its task again with its stored name and `params`
   void regrid(int op_idx, dim3 grid_dim, std::vector<int> params);
   int get_num_operators() const;
-  // task of operator `op_idx`: name (into `name`, at most name_len bytes), params (at most max_params),
-  // grid (3 ints), io (5 ints) = {num_inputs, num_outputs, num_params, task_type, variant_id}, and pointers to the operator's tensors in
-  // registration order (at most max_tensors). Returns the number of tensors, -1 if no task is registered.
-  int get_task_info(int op_idx, char *name, int name_len, int *params, int max_params, int *grid,
-                    int *io, DTensor **tensors, int max_tensors);
+  // task of operator `op_idx`: name (into `name`, at most name_len bytes),
+  // params (at most max_params), grid (3 ints), io (5 ints) = {num_inputs,
+  // num_outputs, num_params, task_type, variant_id}, and pointers to the
+  // operator's tensors in registration order (at most max_tensors). Returns the
+  // number of tensors, -1 if no task is registered.
+  int get_task_info(int op_idx,
+                    char *name,
+                    int name_len,
+                    int *params,
+                    int max_params,
+                    int *grid,
+                    int *io,
+                    DTensor **tensors,
+                    int max_tensors);
   runtime::TaskGraphResult generate_task_graph(int num_gpus, int my_gpu_id);
 
   // helper functions

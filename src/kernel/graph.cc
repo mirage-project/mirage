@@ -22,8 +22,8 @@
 #include "mirage/utils/hash_utils.h"
 
 #include <algorithm>
-#include <new>
 #include <iostream>
+#include <new>
 
 namespace mirage {
 namespace kernel {
@@ -483,8 +483,15 @@ void Graph::regrid(int op_idx, dim3 grid_dim, std::vector<int> params) {
   register_task_for_op(op, name.c_str(), params);
 }
 
-int Graph::get_task_info(int op_idx, char *name, int name_len, int *params, int max_params, int *grid,
-                         int *io, DTensor **tensors, int max_tensors) {
+int Graph::get_task_info(int op_idx,
+                         char *name,
+                         int name_len,
+                         int *params,
+                         int max_params,
+                         int *grid,
+                         int *io,
+                         DTensor **tensors,
+                         int max_tensors) {
   assert(op_idx >= 0 && op_idx < (int)operators.size());
   KNOperator *op = operators[op_idx];
   auto np = task_name_params.find(op);
@@ -1012,29 +1019,47 @@ void Graph::register_task_for_op(KNOperator const *op,
   } else if (name == "gemm_tile") {
     int variant_id = task_register->register_gemm_tile_sm100_task(
         customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(4, 1, TASK_GEMM_TILE_SM100, variant_id);
-  } else if (name == "route") {
-    int variant_id = task_register->register_route_sm100_task(
+    task_config[op] = std::make_tuple(4, 1, TASK_GEMM_TILE_SM100, variant_id);
+  } else if (name == "topk_route") {
+    int variant_id = task_register->register_topk_route_sm100_task(
         customized->bgraph, params);
-    task_config[op] = std::make_tuple(3, 1, TASK_ROUTE_SM100, variant_id);
-  } else if (name == "quant") {
-    int variant_id = task_register->register_quant_sm100_task(
-        customized->bgraph, params);
-    task_config[op] = std::make_tuple(2, 1, TASK_QUANT_SM100, variant_id);
-  } else if (name == "sact") {
-    int variant_id = task_register->register_sact_sm100_task(
-        customized->bgraph, params);
-    task_config[op] = std::make_tuple(2, 1, TASK_SACT_SM100, variant_id);
-  } else if (name == "expert_queue") {
-    int variant_id = task_register->register_expert_queue_sm100_task(
+    task_config[op] = std::make_tuple(3, 1, TASK_TOPK_ROUTE_SM100, variant_id);
+  } else if (name == "sum_quant_send") {
+    int variant_id = task_register->register_sum_quant_send_sm100_task(
         customized->bgraph, params);
     task_config[op] =
-        std::make_tuple(7, 2, TASK_EXPERT_QUEUE_SM100, variant_id);
-  } else if (name == "tail") {
-    int variant_id = task_register->register_tail_sm100_task(
+        std::make_tuple(2, 1, TASK_SUM_QUANT_SEND_SM100, variant_id);
+  } else if (name == "situ_and_mul") {
+    int variant_id = task_register->register_situ_and_mul_sm100_task(
         customized->bgraph, params);
-    task_config[op] = std::make_tuple(7, 1, TASK_TAIL_SM100, variant_id);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_SITU_AND_MUL_SM100, variant_id);
+  } else if (name == "moe_experts") {
+    int variant_id = task_register->register_moe_experts_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(7, 1, TASK_MOE_EXPERTS_SM100, variant_id);
+  } else if (name == "allreduce_send") {
+    int variant_id = task_register->register_allreduce_send_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_ALLREDUCE_SEND_SM100, variant_id);
+  } else if (name == "sum_rmsnorm") {
+    int variant_id = task_register->register_sum_rmsnorm_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_SUM_RMSNORM_SM100, variant_id);
+  } else if (name == "sum_gpus") {
+    int variant_id =
+        task_register->register_sum_gpus_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_SUM_GPUS_SM100, variant_id);
+  } else if (name == "sum_send") {
+    int variant_id =
+        task_register->register_sum_send_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_SUM_SEND_SM100, variant_id);
+  } else if (name == "residual_add") {
+    int variant_id = task_register->register_residual_add_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_RESIDUAL_ADD_SM100, variant_id);
   }
 
   else {

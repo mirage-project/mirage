@@ -1,91 +1,97 @@
-// config.cuh -- sizes of the Kimi K3 MoE layer (8 GPUs, 8 tokens, sm_100a / sm_103a) and the shared-memory, counter and
-// exchange-region layouts derived from them. The K split counts of the router, latent_down and shared gate_up GEMMs are not here:
-// the compiler chooses them, and they reach the task functions as template arguments (moe_kernel.cuh).
+// config.cuh -- what the kernel templates share: the kernel-wide sizes, which
+// the generated layer (static_schedule.header_code) defines from the graph and
+// the schedules before it includes core.cuh:
+//   STATIC_TOKENS   tokens per step (StaticMegakernel.tokens: the graph's
+//   tensors' first dimension); also the MMA N STATIC_GPUS     GPUs the layer is
+//   divided over (StaticMegakernel.num_gpus) STATIC_SMS      task lists per GPU
+//   = CTAs of the launch, one per SM (the schedules)
+// and the ring's shared-memory layout. Every other size (the hidden, the
+// experts, ...) is a node's: its params or its producers' (StaticNode,
+// StaticParams), checked by its task type's file. Where each buffer is, and the
+// cross-GPU exchange region's layout, come from the layers
+// (static_megakernel.py) through the generated layer too.
 #pragma once
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
+
+#if !defined(STATIC_TOKENS) || !defined(STATIC_GPUS) || !defined(STATIC_SMS)
+#error                                                                         \
+    "config.cuh: the generated layer defines STATIC_TOKENS, STATIC_GPUS, STATIC_SMS"
+#endif
 
 namespace static_mk {
 
-// ---- model shape ----
-constexpr int T = 8;            // tokens per step (speculative verify: 1 + 7 draft tokens); also the MMA N
-constexpr int H = 7168;         // hidden
-constexpr int LAT = 3584;       // MoE latent width (latent_down output)
-constexpr int NE = 896;         // experts
-constexpr int IR = 384;         // expert intermediate per GPU (3072 / 8)
-constexpr int SHR = 768;        // shared-expert intermediate per GPU (6144 / 8)
-constexpr int TPMAX = 8;        // GPUs
-constexpr int NSLOT = 128;      // at most T x 16 experts are used in one step: one slot each
+// ---- kernel-wide sizes (the generated layer's) ----
+constexpr int T = STATIC_TOKENS; // tokens per step; also the MMA N
+constexpr int GPUS =
+    STATIC_GPUS; // GPUs (an exchange buffer has one slot per GPU)
+constexpr int NSM = STATIC_SMS; // CTAs of the launch, one per SM
+static_assert(T == 8,
+              "the GEMM ring (runtime.cuh) is written for 8 tokens: MMA N = 8, "
+              "8 accumulator columns per issuer");
 
-// ---- machine ----
-constexpr int NSM = 148;
+// ---- pipeline depths ----
+constexpr int SMAX = 5; // stages of the weight ring (6 do not fit in shared
+                        // memory next to moe_experts' shared tables)
+constexpr int W2QD = 4; // entries in moe_experts' shared-memory copy (loader ->
+                        // issuers / epilogue; runtime.cuh Rt)
 
-// ---- pipeline depths (measured on the hand-written reference kernel) ----
-constexpr int SMAX = 5;         // stages of the weight ring (6 does not fit next to the 17 KB of static shared tables)
-constexpr int W2_CHUNK = 4;     // W2 items per expert-queue entry
-constexpr int W2QD = 4;         // entries in the expert queue's shared-memory copy (loader -> issuers / epilogue)
-constexpr int MAXSEG = 4;       // h_q segments resident per SM in the W2 part
-
-// ---- tile counts (128-wide tiles unless noted) ----
-constexpr int KT_H = H / 128;       // 56 K tiles of the hidden
-constexpr int KT_LAT = LAT / 128;   // 28 K tiles of the latent
-constexpr int KT_SH = SHR / 128;    // 6 K tiles of the shared intermediate
-constexpr int MT13 = IR / 64;       // 6 W13 items per expert: 64 features each (64 gate rows + 64 up rows)
-constexpr int OT2 = LAT / 128;      // 28 W2 output tiles per expert
-constexpr int KT2 = IR / 128;       // 3 W2 K tiles
-constexpr int N_SDOWN = KT_H * 2;   // shared down entries in the expert queue: 56 row tiles x 2 K halves
-constexpr int N_SGU_TILES = 2 * SHR / 128;   // 12 shared gate_up row tiles
-constexpr int N_SACT = N_SGU_TILES;          // sact tasks, one per row tile (C_HS reaches this when h_s is complete)
-constexpr int N_UPTILE = 98;        // latent_up tiles in the tail: 7 row tiles x 14 K parts of 2 K tiles
-static_assert(OT2 % W2_CHUNK == 0, "W2 chunks must not cross expert slots");
-
-// ---- shared memory (offsets from the 1024-aligned dynamic base) ----
-constexpr int W_STAGE = 32768, A_STAGE = 2048, SF_CHUNK = 512;
-constexpr int FSTAGE = W_STAGE + A_STAGE;           // one ring stage: 32 KB weight tile + 2 KB activation tile
-constexpr int OFF_W = 0;                            // SMAX ring stages
-constexpr int OFF_WSF = SMAX * FSTAGE;              // SMAX x 2 weight scale chunks
-constexpr int OFF_XSF = OFF_W;                      // z scale chunks, staged once at the phase switch in the (then idle) ring area
-constexpr int OFF_HQ = OFF_WSF + SMAX * 2 * SF_CHUNK;   // 3 KB + 1.5 KB not used by any task; kept so the later offsets stay the
-constexpr int OFF_HSF = OFF_HQ + KT2 * 1024;            // measured ones (the shared-memory layout alone moved the layer time by 3 us)
-constexpr int OFF_ACC = OFF_HSF + KT2 * SF_CHUNK;   // 128 x 8 fp32: a W13 item's accumulator, for SiTU across rows
-constexpr int SEGB = 5120;                          // one h_q segment: 3 K tiles (3 KB) + 3 scale chunks (1.5 KB), padded
-constexpr int OFF_HQ2 = ((OFF_ACC + 4096 + 1023) / 1024) * 1024;   // MAXSEG h_q segments
-constexpr int OFF_GLUE = OFF_W;                     // route's scratch, in the ring area (no load is in flight during route)
-constexpr int SMEM_BYTES = OFF_HQ2 + MAXSEG * SEGB + 1024;
-static_assert(OFF_HQ % 1024 == 0, "128-B swizzled tiles are 1024-aligned");
-static_assert(SMEM_BYTES <= 227 * 1024, "shared memory budget");
+// ---- the ring's shared memory (offsets from the 1024-aligned dynamic base); a
+// task type that needs more declares its own after
+//      RING_BYTES (its smem_<name>) ----
+constexpr int W_STAGE = 32768, A_STAGE = T * 256,
+              SF_CHUNK = 512; // SF_CHUNK: one MX scale chunk (128 rows x 4 B)
+constexpr int FSTAGE = W_STAGE + A_STAGE; // one ring stage: a 32 KB weight tile
+                                          // + the activation tile (T x 256 B)
+constexpr int OFF_W = 0;                  // SMAX ring stages
+constexpr int OFF_WSF = SMAX * FSTAGE;    // SMAX x 2 weight scale chunks
+constexpr int RING_BYTES = OFF_WSF + SMAX * 2 * SF_CHUNK;
+// the launch's dynamic shared memory for a need of `need` bytes from the base:
+// + 1024, the base is 1024-aligned at run time
+__host__ __device__ constexpr int smem_launch_bytes(int need) {
+  return ((need + 1023) / 1024) * 1024 + 1024;
+}
 
 // ---- MMA instruction descriptors ----
-constexpr uint32_t IDESC_BF16 = (1u << 4) | (1u << 7) | (1u << 10) | ((T / 8u) << 17) | ((128u / 16u) << 24);   // kind::f16: bf16 x bf16 -> fp32, M128 N8
-constexpr uint32_t IDESC_MX = 0x08820280u;                                                                        // kind::mxf8f6f4: e2m1 x e4m3 -> fp32, ue8m0, M128 N8
-constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ull, EVICT_LAST = 0x14F0000000000000ull;                     // L2 cache hints
+// kind::f16: bf16 x bf16 -> fp32, M = m, N = T
+__host__ __device__ constexpr uint32_t idesc_bf16(uint32_t m) {
+  return (1u << 4) | (1u << 7) | (1u << 10) | ((T / 8u) << 17) |
+         ((m / 16u) << 24);
+}
+constexpr uint32_t IDESC_BF16 = idesc_bf16(128);
+constexpr uint32_t IDESC_MX =
+    0x08820280u; // kind::mxf8f6f4: e2m1 x e4m3 -> fp32, ue8m0 scales, M128 N8
+constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ull,
+                   EVICT_LAST = 0x14F0000000000000ull; // L2 cache hints
 
-// ---- the generated layer's task table ----
-constexpr int MAX_TASKS_PER_SM = 64;   // entries per SM (the list, then an end entry)
+// ---- the generated layer's task table, its slots ----
+constexpr int MAX_TASKS_PER_SM =
+    64;                      // entries per SM (the list, then an end entry)
+constexpr int MAX_BUFS = 24; // buffer slots (G::buf): node outputs, scratch
+                             // buffers, graph tensors read by pointer
+constexpr int MAX_MAPS = 32; // tensor map slots (Maps::m)
 
-// ---- counters (u32, zeroed before each launch). The positions are the measured ones: counters in one 128-B line contend. ----
-constexpr int C_HS = 3;          // sact tasks done; shared down waits for N_SACT
-constexpr int C_W2NEXT = 5;      // the expert queue's next entry (atomic add returns it)
-constexpr int C_SGU = 40;        // [N_SGU_TILES] per shared gate_up row tile: K parts added; sact waits for all of them
-constexpr int C_HQ = 64;         // [NSLOT] per expert slot: W13 items that wrote their h_q; W2 waits for MT13
-constexpr int C_EXPDONE = 200;   // SMs done with the expert queue; the tail waits for NSM
-constexpr int NCNT = C_EXPDONE + 1;
+// ---- counters (u32, zeroed before each launch). Counters in one 128-B line
+// slow each other down, so each node has its own lines:
+//      static_megakernel.py gives each node its lines, the node's first counter
+//      is StaticNode::counter ----
+constexpr int NODE_COUNTER_LINES = 16;
+constexpr int NCNT = 32 * NODE_COUNTER_LINES;
 
-// ---- exchange region between the GPUs (the same layout in every GPU's copy; a multimem.st lands in all copies) ----
-constexpr size_t RG_ZQ = 0;                                          // z_q [T][LAT] e4m3 (quant -> every GPU's expert queue)
-constexpr size_t RG_ZSF = RG_ZQ + (size_t)T * LAT;                   // z_q scale chunks [KT_LAT][512]
-constexpr size_t O_RANK = (size_t)T * (H / TPMAX) * 2;               // one GPU's latent_up output: [T][H / TPMAX] bf16
-constexpr size_t RG_O = ((RG_ZSF + (size_t)KT_LAT * SF_CHUNK + 4095) / 4096) * 4096;   // [TPMAX] latent_up outputs (tail)
-constexpr size_t RG_HELLO = RG_O + TPMAX * O_RANK;                   // start barrier: one 16-B slot per GPU holds its launch number
-constexpr size_t RG_END = RG_HELLO + TPMAX * 16;
-// [R | S] partial sums go through separate peer-mapped buffers (G::rs_all), one [TPMAX][RS_RANK] buffer per GPU
-constexpr size_t RS_RANK = (size_t)T * (LAT + H) * 4;
+// ---- per-SM time stamps read by the host (host.cuh), g.stamps[sm * NSTAMP +
+// i]: the kernel's start and end, and two a task type
+//      may write (moe_experts: its queue's start and end) ----
+constexpr int STAMP_START = 0, STAMP_TASK0 = 1, STAMP_TASK1 = 2, STAMP_END = 3,
+              NSTAMP = 4;
+// STATIC_RESET_IN_KERNEL (a build where one launch is a whole run, e.g. for a
+// CUDA graph): the buffers other GPUs write into, and the 0xFF-polled ones with
+// one reader, are reset by their reader for the next launch (REARM);
+// kernel_begin resets this GPU's other buffers. Off: the host resets all before
+// a launch
+#ifdef STATIC_RESET_IN_KERNEL
+constexpr bool REARM = true;
+#else
+constexpr bool REARM = false;
+#endif
 
-// ---- tail SM groups ----
-constexpr int N_RSM = 32;   // SMs 0..31 sum and normalise R: (token, 896-column quarter) each
-constexpr int N_SSM = 64;   // SMs 32..95 sum S: (token, 896-column eighth) each
-
-// ---- per-SM time stamps read by the host (moe_host_timing, moe_host_phase_stamps), g.stamps[sm * NSTAMP + i] ----
-constexpr int STAMP_START = 0, STAMP_QUEUE_START = 1, STAMP_QUEUE_END = 2, STAMP_END = 3, NSTAMP = 4;
-
-}  // namespace static_mk
+} // namespace static_mk

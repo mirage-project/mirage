@@ -9,11 +9,11 @@ builds the input from the graph.
 The input (built by search.search_plan), with the MoE numbers:
   groups     {entry name: its choices}; one choice = {node: option}; exactly one choice per entry is used. search.py gives
              each node its own entry: "30": [{30: "7x4x1"}, {30: "7x7x1"}, {30: "7x8x1"}, {30: "7x14x1"}] = the router (node 30)
-             in 4, 7, 8 or 14 K parts; a node with nothing to choose has one: "31": [{31: "8x1x1"}] (route)
+             in 4, 7, 8 or 14 K parts; a node with nothing to choose has one: "31": [{31: "8x1x1"}] (topk_route)
   tasks      one SolverTask per task of every option: id "gpus_0_2_4_6:30:7x14x1:2.5.0" = GPUs 0, 2, 4, 6; node 30; option
              7x14x1; task (2, 5, 0). A task exists in the plan only if its option is chosen.
   deps       (producer task id, consumer task id): the consumer reads data the producer writes
-  pools      the expert queue, one per GPU set: its work is shared by the SMs at run time, so it is not placed task by task
+  pools      a one-task-per-SM node (MoE: moe_experts), one per GPU set: its work is shared by the SMs at run time, so it is not placed task by task
   gpu_sets   ["gpus_0_2_4_6", "gpus_1_3_5_7"]: each set of GPUs with the same work gets its own copy of the 148 SMs
   num_sms    148;  max_tasks_per_sm  61
   fixed_options, fixed_lists   a given plan (e.g. the hand plan): its options and its per-SM lists; the solver then only
@@ -25,14 +25,22 @@ The variables (time in units of TICK = 10 ns, so all times are integers):
   on[task, gpu set, SM]    yes/no: the task runs on this SM
   start[task], end[task]   when the task starts and ends on its SM
   C                        when the layer ends; made as small as possible
-The rules (numbered as in the code):
+The rules (numbered as in the code), then the goal:
   1. each entry uses exactly one of its choices
   2. a task of a used option runs on exactly one SM of its GPU set; a task of an unused option on none; two tasks on the same
      SM never overlap in time; at most max_tasks_per_sm tasks on an SM
   3. a task ends at least its duration after every task it depends on has ended (applied only when both are used)
-  4. the expert queue opens when its input tasks have ended; each SM joins it when its own tasks are done (and it is open);
-     the SMs share its work, so it ends when 148 x end >= work + the sum of the join times; the tail runs after it
-  5. C >= the end of every used task, and >= the expert queue's end + the tail's time; minimise C
+  4. a pool (moe_experts) opens when its input tasks have ended; each SM joins it when its own tasks before it are done (and it is
+     open); the SMs share its work, so it ends when 148 x end >= work + the sum of the join times; the tasks after it start when
+     it has ended. A task runs after it when it reads its output (or reads a task that does: allreduce_send and the layer's last
+     steps); any other task (e.g. sum_gpus, which reads S from the shared-down node) may run before or after it on its SM, and
+     the solver chooses (post[task]); a given plan fixes it by the task's list position
+  5. the tasks of a concurrent group (they wait for each other while they run) start at the same time, on different SMs
+  6. a task with a first-on-SM time (MoE: a GEMM tile; nothing before it on its SM hides its first loads) takes first_extra_us
+     more when it starts before first_extra_us: first[task] = 1 adds it to the length; first[task] = 0 needs start >=
+     first_extra_us. A task can start that early only as the first task of its SM, as long as the first tasks of the SMs are
+     such tasks themselves (MoE: only the GEMM tiles have no inputs from other tasks); starting late on purpose gains nothing
+The goal: C >= the end of every used task and of every pool; minimise C.
 """
 import time
 from dataclasses import dataclass
@@ -52,18 +60,19 @@ class SolverTask:
     gpu_set: str                 # "gpus_0_2_4_6" or "gpus_1_3_5_7"
     duration_us: float           # its measured time on an SM (with duration_by: the longest of those times)
     # when its time depends on another node's option: {(that node, its option): us}. Route task t: {(30, "7x4x1"): ..., ...,
-    # (30, "7x14x1"): ...} = route's time when the router uses 4 ... 14 K parts (it adds that many partial sums).
+    # (30, "7x14x1"): ...} = topk_route's time when the router uses 4 ... 14 K parts (it adds that many partial sums).
     duration_by: Optional[Dict[OptionKey, float]] = None
+    first_extra_us: float = 0.0  # its time first on its SM minus duration_us (rule 6); 0: the same wherever it is
 
 
 @dataclass
 class Pool:
-    """The expert queue of one GPU set: work the SMs share at run time."""
+    """A pool (MoE: moe_experts) of one GPU set: work the SMs share at run time."""
     id: str                      # e.g. "36@gpus_0_2_4_6"
     gpu_set: str
     work_us: float               # its total work, summed over all SMs (measured: about 7500 us)
-    inputs: List[str]            # tasks that must end before any SM can start on it (route, quant, sact tasks)
-    after_us: float              # time from its end to the layer's end (the tail, about 23 us)
+    inputs: List[str]            # tasks that must end before any SM can start on it (topk_route, sum_quant_send, situ_and_mul tasks)
+    after: List[str] = None      # placed tasks that run after it (allreduce_send reads its output, and everything after allreduce_send)
 
 
 @dataclass
@@ -74,6 +83,8 @@ class Result:
     solve_s: float
     chosen: Dict[int, str]       # node graph_idx -> its chosen option
     lists: Dict[str, List[List[str]]]      # GPU set -> per SM, the task ids in start order
+    times: Dict[str, Tuple[float, float]] = None    # used task id -> (start, end) in us (a hint for a later solve)
+    post: set = None                                 # used task ids that run after the pool on their SM
 
 
 def ticks(us: float) -> int:
@@ -83,12 +94,14 @@ def ticks(us: float) -> int:
 
 def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps: List[Tuple[str, str]], pools: List[Pool],
           gpu_sets: List[str], num_sms: int, max_tasks_per_sm: int, time_limit_s: float = 60.0, workers: int = 16,
-          fixed_options: Optional[Dict[int, str]] = None, fixed_lists: Optional[Dict[str, List[List[str]]]] = None) -> Result:
-    """Build the model (rules 1-5 above), solve it for at most time_limit_s seconds with `workers` threads, read the plan."""
+          fixed_options: Optional[Dict[int, str]] = None, fixed_lists: Optional[Dict[str, List[List[str]]]] = None,
+          concurrent: List[List[str]] = (), fixed_post: Optional[set] = None, hint: Optional["Result"] = None) -> Result:
+    """Build the model (rules 1-6 and the goal above), solve it for at most time_limit_s seconds with `workers` threads, read the plan.
+    hint: a solved plan (e.g. a given plan's Result) the solver starts from: its options, SMs, start times and end."""
     model = cp_model.CpModel()
     fixed_options = fixed_options or {}
     # the latest time any variable may take: all durations one after another + the queue's work spread over the SMs + 3 us
-    horizon = ticks(sum(t.duration_us for t in tasks) + sum(p.work_us for p in pools) / num_sms + 300)
+    horizon = ticks(sum(t.duration_us + t.first_extra_us for t in tasks) + sum(p.work_us for p in pools) / num_sms + 300)
 
     # ---- rule 1: exactly one choice per entry; use[node, option] = 1 when the chosen choice contains that option.
     # Entry "30" with 4 choices: x[("30", 0..3)], exactly one of them is 1; use[(30, "7x14x1")] = x[("30", 3)], and so on.
@@ -126,10 +139,18 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
         end[t.id] = model.NewIntVar(0, horizon, f"e_{t.id}")
         if t.duration_by:
             # the length depends on another node's option: the sum over its options of use[option] x the time for it
-            # (exactly one use is 1, so it is the time for the chosen option)
+            # (exactly one use is 1, so it is the time for the chosen option). Only for a used task: a combination with no
+            # measured time (the other node's chosen option not in duration_by) then rules out using this task's option
             times = {key: ticks(us) for key, us in t.duration_by.items()}
             length[t.id] = model.NewIntVar(min(times.values()), max(times.values()), f"len_{t.id}")
-            model.Add(length[t.id] == sum(tm * use[key] for key, tm in times.items()))
+            model.Add(length[t.id] == sum(tm * use[key] for key, tm in times.items())).OnlyEnforceIf(used[t.id])
+        elif t.first_extra_us > 0:
+            # rule 6: first[task] = 1 adds the extra; without it the task must start after the extra (so not first on its SM)
+            base, extra = ticks(t.duration_us), ticks(t.first_extra_us)
+            first = model.NewBoolVar(f"first_{t.id}")
+            length[t.id] = model.NewIntVar(base, base + extra, f"len_{t.id}")
+            model.Add(length[t.id] == base + extra * first)
+            model.Add(start[t.id] >= extra).OnlyEnforceIf([used[t.id], first.Not()])
         else:
             length[t.id] = ticks(t.duration_us)
         model.Add(end[t.id] == start[t.id] + length[t.id])
@@ -161,30 +182,84 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
         if src in by_id and dst in by_id:
             model.Add(end[dst] >= end[src] + length[dst]).OnlyEnforceIf([used[src], used[dst]])
 
-    # ---- rules 4 and 5: the expert queue, and the layer's end C
+    # ---- rule 4: a pool (its work is shared by the SMs at run time; MoE: moe_experts); the goal: the layer's end C
     C = model.NewIntVar(0, horizon, "C")
+    post = {}                                        # task id -> 1, 0 or a yes/no: runs after the pool on its SM
     for p in pools:
-        opens = model.NewIntVar(0, horizon, f"open_{p.id}")           # the queue opens after its inputs
+        opens = model.NewIntVar(0, horizon, f"open_{p.id}")           # the pool can start once its inputs have ended
         for tid in p.inputs:
             if tid in by_id:
                 model.Add(opens >= end[tid]).OnlyEnforceIf(used[tid])
+        after = set(p.after or ())
+        # post[tid]: the task runs after the pool on its SM. 1 for the tasks in after (they read its output); 0 for its inputs;
+        # a given plan: 1 for the tasks listed after the pool entry; otherwise the solver chooses
+        inputs = set(p.inputs)
+        for t in tasks:
+            if t.gpu_set != p.gpu_set:
+                continue
+            if t.id in after:
+                post[t.id] = 1
+            elif t.id in inputs:
+                post[t.id] = 0
+            elif fixed_post is not None:
+                post[t.id] = 1 if t.id in fixed_post else 0
+            else:
+                post[t.id] = model.NewBoolVar(f"post_{t.id}")
         joins = []
-        for sm in range(num_sms):                    # each SM joins after the queue opens and after its own tasks end
+        for sm in range(num_sms):                    # SM k joins once the pool can start and SM k's own earlier tasks have ended
             join = model.NewIntVar(0, horizon, f"join_{p.id}_{sm}")
             model.Add(join >= opens)
             for tid, b in on_sm.get((p.gpu_set, sm), []):
-                model.Add(join >= end[tid]).OnlyEnforceIf(b)
+                v = post[tid]
+                if not isinstance(v, int):
+                    model.Add(join >= end[tid]).OnlyEnforceIf([b, v.Not()])
+                elif v == 0:
+                    model.Add(join >= end[tid]).OnlyEnforceIf(b)
             joins.append(join)
         ends = model.NewIntVar(0, horizon, f"end_{p.id}")
         work = ticks(p.work_us)
-        # from its join to the end each SM works on the queue: the work done = sum over SMs of (end - join)
-        # = 148 x end - sum of joins, which must be at least the queue's work
+        # SM k works on the pool from join_k to the end: the work done = sum over SMs of (end - join_k)
+        # = 148 x end - sum of joins, which must be at least the pool's work W. Example, 2 SMs, W = 10 us, joins 0 and 4:
+        # (end - 0) + (end - 4) = 10 -> end = 7
         model.Add(num_sms * ends >= work + sum(joins))
         model.Add(ends >= opens + work // num_sms)
-        model.Add(C >= ends + ticks(p.after_us))    # then the tail
+        # and it ends only after every SM has joined: the tasks after it wait for every SM's pool task to finish (MoE:
+        # allreduce_send waits until C_EXPDONE = 148), and an SM that joins late still runs its pool task (it finds no items left)
+        for join in joins:
+            model.Add(ends >= join)
+        model.Add(C >= ends)
+        for tid, v in post.items():                  # the tasks after it start when it has ended
+            if by_id[tid].gpu_set != p.gpu_set or (isinstance(v, int) and v == 0):
+                continue
+            model.Add(start[tid] >= ends).OnlyEnforceIf([used[tid]] if isinstance(v, int) else [used[tid], v])
     for t in tasks:
         model.Add(C >= end[t.id]).OnlyEnforceIf(used[t.id])
+
+    # ---- rule 5: a concurrent group starts together, and at most one of its tasks is on an SM
+    for group in concurrent:
+        members = [tid for tid in group if tid in by_id]
+        for a, b in zip(members, members[1:]):
+            model.Add(start[b] == start[a]).OnlyEnforceIf([used[a], used[b]])
+        for g in gpu_sets:
+            for sm in range(num_sms):
+                bs = [on[(tid, g, sm)] for tid in members if (tid, g, sm) in on]
+                if len(bs) > 1:
+                    model.Add(sum(bs) <= 1)
     model.Minimize(C)
+
+    # ---- a start: the hinted plan's choices, SMs, start times and end (CP-SAT completes the variables not hinted)
+    if hint is not None:
+        for (name, i), v in x.items():
+            model.AddHint(v, int(all(hint.chosen.get(node) == opt for node, opt in groups[name][i].items())))
+        where = {tid: (g, sm) for g, per_sm in hint.lists.items() for sm, sm_list in enumerate(per_sm) for tid in sm_list}
+        for (tid, g, sm), b in on.items():
+            model.AddHint(b, int(where.get(tid) == (g, sm)))
+        for t in tasks:
+            model.AddHint(start[t.id], ticks(hint.times[t.id][0]) if t.id in hint.times else 0)
+        for tid, v in post.items():
+            if not isinstance(v, int):
+                model.AddHint(v, int(tid in hint.post))
+        model.AddHint(C, ticks(hint.predicted_us))
 
     # ---- solve, then read the plan: the used options, and per SM the tasks placed on it in start order
     solver = cp_model.CpSolver()
@@ -203,5 +278,8 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
     for per_sm in lists.values():
         for sm_list in per_sm:
             sm_list.sort(key=lambda tid: solver.Value(start[tid]))
+    times = {t.id: (round(solver.Value(start[t.id]) * TICK, 3), round(solver.Value(end[t.id]) * TICK, 3))
+             for t in tasks if solver.Value(used[t.id])}
+    post_ids = {tid for tid, v in post.items() if solver.Value(used[tid]) and (v == 1 if isinstance(v, int) else solver.Value(v))}
     return Result(solver.StatusName(status), round(solver.Value(C) * TICK, 3), round(solver.BestObjectiveBound() * TICK, 3),
-                  solve_s, chosen, lists)
+                  solve_s, chosen, lists, times, post_ids)
