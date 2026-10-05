@@ -2341,9 +2341,11 @@ int TaskRegister::register_paged_attention_sm100_task(
   // params[12]: group_id      (optional, default 0: which KV group's page
   //             table this layer reads)
   // params[13]: page_stride_rows (optional, 0 = packed pages)
+  // params[14]: max_tokens_per_request (optional; rows the per-CTA buffers
+  //             hold. Absent = max num batched tokens)
   assert(params.size() == 6 || params.size() == 8 || params.size() == 10 ||
          params.size() == 11 || params.size() == 12 || params.size() == 13 ||
-         params.size() == 14);
+         params.size() == 14 || params.size() == 15);
   int group_id = (params.size() >= 13) ? params[12] : 0;
   int page_stride_rows = (params.size() >= 14) ? params[13] : 0;
   std::vector<tb::TBInputOp *> input_ops;
@@ -2379,6 +2381,14 @@ int TaskRegister::register_paged_attention_sm100_task(
     memcpy(&qk_eps, &params[9], sizeof(float));
   }
   int window_size = (params.size() >= 11) ? params[10] : 0;
+  int const max_tokens_per_request = (params.size() >= 15) ? params[14] : 0;
+  if (max_tokens_per_request > 0) {
+    // A request never holds more query rows than this, so the task only
+    // needs buffers for that many. The scheduler enforces the same cap.
+    assert(max_tokens_per_request <= max_tokens);
+    assert(q_len_override <= max_tokens_per_request);
+    max_tokens = max_tokens_per_request;
+  }
   // Assert that k_cache has the same head_dim
   assert(input_ops[1]->output_tensors[0].num_dims == 4);
   assert(head_dim == input_ops[1]->output_tensors[0].dim[3]);

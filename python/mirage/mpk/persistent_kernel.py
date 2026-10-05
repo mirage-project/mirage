@@ -336,6 +336,7 @@ def get_compile_command(
     flags = flags + [f"-DMPK_MAX_NUM_BATCHED_REQUESTS={mpk.max_num_batched_requests}"]
 
     flags = flags + [f"-DMPK_MAX_NUM_BATCHED_TOKENS={mpk.max_num_batched_tokens}"]
+    flags = flags + [f"-DMPK_MAX_TOKENS_PER_REQUEST={mpk.max_tokens_per_request}"]
     flags = flags + [f"-DMPK_MAX_NUM_PAGES={mpk.max_num_pages}"]
     flags = flags + [f"-DMPK_NUM_KV_GROUPS={len(mpk.kv_groups)}"]
     if "kv_event_log" in mpk.meta_tensors:
@@ -438,6 +439,7 @@ class PersistentKernel:
         sampling_topk_max: int = 32,
         kv_groups: list = None,
         page_size: int = None,
+        max_tokens_per_request: Optional[int] = None,
     ):
         self.__finalized__ = False
         self._is_compiled = False
@@ -484,6 +486,17 @@ class PersistentKernel:
                 f"kv_groups[0].block_size {kv_groups[0].block_size}")
         self.kv_groups = kv_groups
         self.page_size = kv_groups[0].block_size
+        # Caps attention's per-CTA buffer sizing by one request instead of
+        # the whole batch. Unset = MPK_MAX_TOKENS_PER_REQUEST env var, else
+        # the whole batch (unchanged behavior).
+        if max_tokens_per_request is None:
+            env_t = os.environ.get("MPK_MAX_TOKENS_PER_REQUEST")
+            max_tokens_per_request = (int(env_t) if env_t
+                                      else max_num_batched_tokens)
+        assert 1 <= max_tokens_per_request <= max_num_batched_tokens, (
+            f"max_tokens_per_request={max_tokens_per_request} must be in "
+            f"[1, max_num_batched_tokens={max_num_batched_tokens}]")
+        self.max_tokens_per_request = max_tokens_per_request
         self.eos_token_id = eos_token_id
         self.kn_graph = KNGraph(CyKNGraph(disable_fingerprint=True))
         # Prevent GC of PyTorch tensors whose GPU pointers are baked into the
@@ -681,6 +694,7 @@ class PersistentKernel:
             "max_seq_length": self.max_seq_length,
             "max_num_batched_requests": self.max_num_batched_requests,
             "max_num_batched_tokens": self.max_num_batched_tokens,
+            "max_tokens_per_request": self.max_tokens_per_request,
             "max_num_pages": self.max_num_pages,
             "page_size": self.page_size,
             "world_size": self.world_size,
@@ -702,6 +716,7 @@ class PersistentKernel:
             ("max_seq_length", self.max_seq_length),
             ("max_num_batched_requests", self.max_num_batched_requests),
             ("max_num_batched_tokens", self.max_num_batched_tokens),
+            ("max_tokens_per_request", self.max_tokens_per_request),
             ("max_num_pages", self.max_num_pages),
             ("page_size", self.page_size),
             ("world_size", self.world_size),
@@ -1377,6 +1392,14 @@ class PersistentKernel:
                 break
         params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
                   self.max_seq_length, block_size] + tail[:n]
+        if self.target_cc == 100:
+            # params[14]: max_tokens_per_request (rows the CTA buffers hold).
+            params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
+                      self.max_seq_length, block_size] + tail
+            assert q_len_override <= self.max_tokens_per_request, (
+                f"q_len_override={q_len_override} exceeds "
+                f"max_tokens_per_request={self.max_tokens_per_request}")
+            params.append(self.max_tokens_per_request)
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
