@@ -11,7 +11,10 @@ import torch
 import torch.distributed as dist
 from ..mpk.mpk import MPK, MPKMetadata
 from ..mpk import OnlinePinnedRuntime
+from ..mpk.model_registry import get_builder
 from ..mpk.models.graph_builder import MirageModelConfig
+from ..mpk.models.qwen3.builder import Qwen3Builder
+from ..core import serving_config_words
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -44,15 +47,23 @@ class RunnerConfig:
     output_dir: Optional[str] = None
     """Directory for compiled kernel artefacts; ``None`` uses a temp dir."""
 
-    use_cutlass_kernel: bool = True
+    # Use Mirage's PTX kernels by default; the Ampere CUTLASS serving tiles
+    # exceed the shared-memory budget on GPUs such as the RTX A5000.
+    use_cutlass_kernel: bool = False
 
-    # Compile-time sampling config (one setting per server process).
+    # Startup defaults for per-request sampling in online_pinned mode.
     do_sample: bool = False
     temperature: float = 0.8
     top_p: float = 0.95
     top_k: int = 20
     sampling_seed: int = 42
     sampling_topk_max: int = 32
+
+    def sampling_defaults(self):
+        if not self.do_sample:
+            return {}
+        return dict(temperature=self.temperature, top_p=self.top_p,
+                    top_k=self.top_k, seed=self.sampling_seed)
 
 
 # ── ModelRunner ───────────────────────────────────────────────────────────────
@@ -72,6 +83,8 @@ class ModelRunner:
         rank: Optional[int] = None,
     ) -> None:
         self.config = config
+        if get_builder(config.model) is not Qwen3Builder:
+            raise ValueError("Serving sampling currently supports only Qwen3 models")
 
         # ── Distributed init ──────────────────────────────────────────────
         self.rank, self.world_size = self._init_distributed(rank)
@@ -110,6 +123,13 @@ class ModelRunner:
         self.mpk.build()
         self.runtime = OnlinePinnedRuntime(self.mpk)
         self.tokenizer = self.mpk.tokenizer
+        self.vocab_size = self.mpk.model_builder.vocab_size
+        generation_config = getattr(getattr(self.mpk.model_builder, "model", None), "generation_config", None)
+        eos = getattr(generation_config, "eos_token_id", None)
+        if eos is None:
+            eos = self.tokenizer.eos_token_id
+        self.eos_ids = list(dict.fromkeys(eos if isinstance(eos, list) else [eos]))
+        self.eos_ids = [token for token in self.eos_ids if token is not None]
         self.mpk.compile(output_dir=config.output_dir)
 
     # ── Execution ─────────────────────────────────────────────────────────────
@@ -182,6 +202,7 @@ class ModelRunner:
             paged_kv_indices_buffer=torch.zeros(config.max_num_pages, dtype=torch.int32, device="cuda"),
             paged_kv_last_page_len_buffer=torch.zeros(n_req, dtype=torch.int32, device="cuda"),
             paged_kv_indices_snapshot=torch.zeros(config.max_num_pages, dtype=torch.int32, device="cuda"),
+            generation_config=torch.zeros(n_req, serving_config_words(), dtype=torch.int64, device="cuda"),
             # Pinned ring buffers for CPU↔GPU communication.  pin_memory()
             # gives a stable physical address so no DMA copy is needed.
             pinned_req_ready=torch.zeros(cap, dtype=torch.int32).pin_memory(),
@@ -196,4 +217,6 @@ class ModelRunner:
             pinned_step=torch.zeros(n_req, dtype=torch.int32).pin_memory(),
             pinned_inbox_tokens=torch.zeros(cap, config.max_seq_length, dtype=torch.int64).pin_memory(),
             pinned_rid_at_row=torch.full((n_req,), -1, dtype=torch.int32).pin_memory(),
+            pinned_generation_config=torch.zeros(cap, serving_config_words(), dtype=torch.int64).pin_memory(),
+            pinned_finish_reason=torch.zeros(n_req, dtype=torch.int32).pin_memory(),
         )

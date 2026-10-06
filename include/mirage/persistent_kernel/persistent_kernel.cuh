@@ -52,6 +52,8 @@
 #include "tasks/ampere/task_header.cuh"
 #endif
 
+#include "tasks/common/serving_sampling.cuh"
+
 using bfloat16 = type::bfloat16_t;
 using namespace mirage::runtime;
 // Configurations for the MPK runtime
@@ -633,10 +635,12 @@ __device__ __forceinline__ bool
 #ifdef MPK_ENABLE_PROFILING
     bool done = true;
 #else
-    bool done = (step + num_tokens + 1 >= config.max_seq_length) ||
-                ((config.tokens[row * MPK_MAX_SEQ_LENGTH + step + num_tokens] ==
-                  config.eos_token_id) &&
-                 (step + num_tokens >= prompt_len));
+    int reason = mirage::serving::finish_reason(
+        config.generation_config + row,
+        config.tokens + row * MPK_MAX_SEQ_LENGTH, step + num_tokens + 1,
+        prompt_len, config.max_seq_length, config.eos_token_id);
+    bool done = reason != mirage::serving::FINISH_NONE;
+    config.pinned_finish_reason[row] = reason;
 #endif
 
     if (done) {
@@ -762,6 +766,8 @@ __device__ __forceinline__ bool
       config.tokens[row * MPK_MAX_SEQ_LENGTH + j] =
           config.pinned_inbox_tokens[inbox_base + j];
     }
+    config.generation_config[row] = config.pinned_generation_config[req_slot];
+    config.pinned_finish_reason[row] = 0;
     config.prompt_length[row] = prompt_len;
     config.step[row] = initial_step;
     // Reset progress before release-publishing the owner. An observer that
@@ -1583,23 +1589,14 @@ static std::map<std::string, void *> global_model_tensors;
 // meta_tensors[4]: new_tokens_nums
 // meta_tensors[5]: prompt_length
 // meta_tensors[6]: qo_indptr_buffer
-// meta_tensors[7]: paged_kv_indptr_buffer
-// meta_tensors[8]: paged_kv_indices_buffer
-// meta_tensors[9]: paged_kv_last_page_len_buffer
-// meta_tensors[10]: paged_kv_indices_snapshot
-// MODE_ONLINE_PINNED only (indices 11..22):
-// meta_tensors[11]: pinned_req_ready
-// meta_tensors[12]: pinned_req_request_id
-// meta_tensors[13]: pinned_req_prompt_len
-// meta_tensors[14]: pinned_req_initial_step
-// meta_tensors[15]: pinned_comp_ready
-// meta_tensors[16]: pinned_comp_request_id
-// meta_tensors[17]: pinned_comp_buffer_row
-// meta_tensors[18]: pinned_comp_final_step
-// meta_tensors[19]: pinned_shutdown
-// meta_tensors[20]: pinned_step
-// meta_tensors[21]: pinned_inbox_tokens
-// meta_tensors[22]: pinned_rid_at_row
+// meta_tensors[7 + 4*g .. 10 + 4*g]: KV group g's indptr, indices,
+// last_page_len, and snapshot buffers.
+// MODE_ONLINE_PINNED only, starting at pbase = 7 + 4*MPK_NUM_KV_GROUPS:
+// pbase + 0..11: pinned request and completion ring buffers
+// pbase + 12: pinned_generation_config
+// pbase + 13: generation_config
+// pbase + 14: pinned_finish_reason
+// MPK_KV_EVENT_LOG only: kv_event_log follows all other buffers.
 
 extern "C" void init_request_resources() {
   init_kernel<<<dim3(1, 1, 1), dim3(INIT_NUM_THREADS, 1, 1)>>>(
@@ -1634,11 +1631,11 @@ extern "C" void
   // meta_tensors[0..6] are always required.
   // meta_tensors[7 .. 7+MPK_NUM_KV_GROUPS*4-1]: per-group KV buffers,
   //   interleaved as [indptr, indices, last_page_len, snapshot] × G groups.
-  // meta_tensors[7+G*4 .. +11]: pinned ring pointers (MODE_ONLINE_PINNED only,
-  //   passed as CPU-side void* from Python's pinned tensors)
+  // MODE_ONLINE_PINNED adds 12 ring pointers and 3 serving pointers.
+  // Pinned pointers are passed as CPU-side void* from Python's pinned tensors.
   size_t expected_num_meta = 7 + MPK_NUM_KV_GROUPS * 4;
 #if defined(MODE_ONLINE_PINNED)
-  expected_num_meta += 12;
+  expected_num_meta += 15;
 #endif
 #ifdef MPK_KV_EVENT_LOG
   expected_num_meta += 1;
@@ -1698,6 +1695,12 @@ extern "C" void
         static_cast<int64_t *>(meta_tensors[pbase + 10]);
     global_runtime_config.pinned_rid_at_row =
         static_cast<int32_t volatile *>(meta_tensors[pbase + 11]);
+    global_runtime_config.pinned_generation_config =
+        static_cast<mirage::serving::ServingConfig *>(meta_tensors[pbase + 12]);
+    global_runtime_config.generation_config =
+        static_cast<mirage::serving::ServingConfig *>(meta_tensors[pbase + 13]);
+    global_runtime_config.pinned_finish_reason =
+        static_cast<int32_t *>(meta_tensors[pbase + 14]);
   }
 #endif
 #ifdef MPK_KV_EVENT_LOG
