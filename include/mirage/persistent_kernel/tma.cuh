@@ -1147,6 +1147,10 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_MOE_W13_MXFP4_SM90:
+    case TASK_MOE_W2_MXFP4_SM90:
+      // Packed MXFP4 weights and scales are decoded by the Hopper kernel.
+      break;
     case TASK_MLA_DECODE_SM100: {
       // MLA uses 3D TMA descriptors with 128B swizzle.
       // Q tensor: [B*NUM_HEADS, D_K] → 3D TMA (BK=64, B*NUM_HEADS, D_K/BK)
@@ -1553,6 +1557,10 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       break;
     }
+    case TASK_MOE_W13_MXFP4_SM90:
+    case TASK_MOE_W2_MXFP4_SM90:
+      // No TMA descriptors: weights are decoded from packed global memory.
+      break;
     case TASK_MOE_W13_FP8_SM100:
     case TASK_MOE_W2_FP8_SM100: {
       // only weight_fp8 (param_id=2) has 1 tma_desc

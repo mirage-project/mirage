@@ -121,7 +121,8 @@ struct alignas(16) STensor {
     using namespace mirage::type;
     size_t data_type_size = 1;
     switch (data_type) {
-      case DT_INT8: {
+      case DT_INT8:
+      case DT_UINT8: {
         data_type_size = 1;
         break;
       }
