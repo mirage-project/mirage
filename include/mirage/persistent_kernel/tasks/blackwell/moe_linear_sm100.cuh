@@ -543,12 +543,12 @@ __device__ __forceinline__ void
             if (token_idx < BATCH_SIZE && topk_idx > 0) {
               if constexpr (W13_LINEAR) {
                 cute::copy(copyB,
-                           tBgB(_, _, _, _, k_tile),
-                           tBsB(_, _, _, _, smem_wr_buffer));
+                           tBgB(_, _, _, n_tile, k_tile),
+                           tBsB(_, _, _, 0, smem_wr_buffer));
               } else {
                 cute::copy(copyB,
-                           tBgB(_, _, _, _, k_tile, topk_idx - 1),
-                           tBsB(_, _, _, _, smem_wr_buffer));
+                           tBgB(_, _, _, n_tile, k_tile, topk_idx - 1),
+                           tBsB(_, _, _, 0, smem_wr_buffer));
               }
             }
 

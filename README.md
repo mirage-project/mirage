@@ -128,6 +128,7 @@ month = jul
 @inproceedings{cheng2026mpk,
 title={MPK: A Compiler and Runtime for Mega-Kernelizing Tensor Programs}, 
 author={Xinhao Cheng and Zhihao Zhang and Yu Zhou and Jianan Ji and Jinchen Jiang and Zepeng Zhao and Ziruo Xiao and Zihao Ye and Yingyi Huang and Ruihang Lai and Hongyi Jin and Bohan Hou and Mengdi Wu and Yixin Dong and Anthony Yip and Zihao Ye and Songting Wang and Wenqin Yang and Xupeng Miao and Tianqi Chen and Zhihao Jia},
+booktitle = {20th USENIX Symposium on Operating Systems Design and Implementation (OSDI 26)},
 year={2026},
 address={Seattle, WA},
 publisher = {USENIX Association},
