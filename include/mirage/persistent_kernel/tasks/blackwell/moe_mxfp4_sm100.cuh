@@ -76,6 +76,8 @@ __device__ __forceinline__ void moe_mxfp4_sm100_task_impl(
   constexpr int BK = 64;
   constexpr int NUM_STAGES = 2;
   constexpr int NUM_ACC_STAGE = 1;
+  // tcgen05.alloc rejects a column count below 32. The accumulator is 16.
+  constexpr int TMEM_COLUMNS = 32;
   static_assert(REDUCTION_SIZE % BK == 0, "K must be a multiple of the MMA K tile");
   static_assert(BK == 64, "bf16 tcgen05 K atom is 16; four atoms make the K tile");
 
@@ -158,7 +160,7 @@ __device__ __forceinline__ void moe_mxfp4_sm100_task_impl(
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   TmemAllocator tmem_allocator{};
   if (warp_idx == 0) {
-    tmem_allocator.allocate(MMA_N * NUM_ACC_STAGE, &shared.tmem_base_ptr);
+    tmem_allocator.allocate(TMEM_COLUMNS, &shared.tmem_base_ptr);
   }
   __syncthreads();
   tCtAcc.data() = shared.tmem_base_ptr;
@@ -290,7 +292,7 @@ __device__ __forceinline__ void moe_mxfp4_sm100_task_impl(
 
   __syncthreads();
   if (warp_idx == 0) {
-    tmem_allocator.free(shared.tmem_base_ptr, MMA_N * NUM_ACC_STAGE);
+    tmem_allocator.free(shared.tmem_base_ptr, TMEM_COLUMNS);
   }
 }
 
