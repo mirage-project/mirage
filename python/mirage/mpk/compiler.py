@@ -1,6 +1,6 @@
 """Plan -> one schedule file per GPU (schedule_gpu<g>.json), which static_schedule.py turns into layer.cu.
 
-A plan:  {"grids": {graph_idx: grid},                     e.g. {30: (7, 14, 1), 32: (28, 8, 1), 34: (12, 8, 1)}
+A plan:  {"grids": {graph_idx: grid},                     e.g. {26: (7, 14, 1), 28: (28, 8, 1), 30: (12, 8, 1)}
           "lists": per GPU, per SM, the ordered (graph_idx, grid position) of the SM's tasks}
 Nodes not in "grids" keep the grid their layer method gave them. A one_task_per_sm node's task x must be in SM x's list.
 
@@ -12,7 +12,7 @@ compile_plan:
        lists_of_gpu     the plan's lists as task ids (every task exactly once; one_task_per_sm task x on SM x; the tasks of a
                         concurrent group on different SMs)
        write_schedule   deadlock check; the file: the nodes (grid, params, the grids of their inputs' producers), the tasks
-                        ({node, position, deps}), the per-SM lists, the concurrent groups
+                        ({node, position, deps}), the per-SM lists
 """
 import itertools
 import json
@@ -34,7 +34,7 @@ class Node:
     grid: Tuple[int, int, int]
     inputs: list                  # DTensors
     outputs: list
-    info: dict                    # what the layer method declared (static_megakernel._add_node): maps, changeable_grid_dims,
+    info: dict                    # what the layer method declared (static_megakernel._add_node): input_maps, changeable_grid_dims,
                                   # rows_split_over_gpus, one_task_per_sm, concurrent_along_axis, ...
 
 
@@ -42,7 +42,7 @@ def graph_nodes(pk) -> List[Node]:
     """The graph's static-schedule nodes (the ones pk._static_nodes has), in graph order, with their grid and params now."""
     nodes = []
     for graph_idx, info in sorted(pk._static_nodes.items()):
-        name, params, grid, num_inputs, num_outputs, tensors, _, _ = pk.kn_graph.get_task_info(graph_idx)
+        name, params, grid, num_inputs, num_outputs, tensors = pk.kn_graph.get_task_info(graph_idx)
         assert name == info["name"], f"graph node {graph_idx} is {name}, its record says {info['name']}"
         nodes.append(Node(graph_idx, name, list(params), tuple(grid), tensors[:num_inputs],
                           tensors[num_inputs:num_inputs + num_outputs], info))
@@ -76,7 +76,7 @@ def candidate_grids(node: Node) -> List[Tuple[int, int, int]]:
             continue
         spec = node.info["changeable_grid_dims"][axis]
         unit, lo, hi = (spec, 1, None) if isinstance(spec, int) else tuple(spec)
-        cut = [dims(t)[m[axis]] for t, m in zip(tensors, node.info["maps"]) if m[axis] >= 0]
+        cut = [dims(t)[m[axis]] for t, m in zip(tensors, node.info["input_maps"]) if m[axis] >= 0]
         if not cut:
             raise ValueError(f"node {node.graph_idx} ({node.name}): grid axis {axis} is changeable but no tensor map uses it")
         units = min(d // unit for d in cut)
@@ -152,7 +152,7 @@ def gpu_tasks(pk, nodes: List[Node], gpu: int, num_gpus: int) -> List[Task]:
         for pos in itertools.product(*(range(size) for size in n.grid)):
             if not lo <= pos[0] < hi:
                 continue
-            slices = [(tname(pk, t), box(t, m, n.grid, pos)) for t, m in zip(tensors, n.info["maps"])]
+            slices = [(tname(pk, t), box(t, m, n.grid, pos)) for t, m in zip(tensors, n.info["input_maps"])]
             tasks.append(Task(len(tasks), n.graph_idx, tuple(pos), slices[:len(n.inputs)], slices[len(n.inputs):]))
     return tasks
 
@@ -177,7 +177,7 @@ def concurrent_groups(tasks: List[Task], nodes: List[Node]) -> List[List[int]]:
     """The tasks that must run at the same time: for a node with concurrent_along_axis a, the tasks whose positions differ only
     in axis a. sum_rmsnorm (2, 8, 1), axis 0: the 2 half tasks of each token -> 8 groups of 2."""
     groups: Dict[tuple, List[int]] = {}
-    axis_of = {n.graph_idx: n.info.get("concurrent_along_axis") for n in nodes}
+    axis_of = {n.graph_idx: n.info["concurrent_along_axis"] for n in nodes}
     for t in tasks:
         a = axis_of[t.node]
         if a is not None:
@@ -228,13 +228,14 @@ def lists_of_gpu(tasks: List[Task], nodes: List[Node], plan_lists: List[list], n
 
 def in_cluster_pairs(node: Node) -> bool:
     """The node's concurrent groups run on cluster pairs: compile_plan gave it its cluster_pair_params."""
-    return node.info.get("cluster_pair_params") is not None and list(node.params) == list(node.info["cluster_pair_params"])
+    return node.info["cluster_pair_params"] is not None and list(node.params) == list(node.info["cluster_pair_params"])
 
 
-def can_pair(node: Node) -> bool:
-    """The node may run its concurrent groups on cluster pairs: it has cluster_pair_params and groups of 2 tasks."""
-    a = node.info.get("concurrent_along_axis")
-    return node.info.get("cluster_pair_params") is not None and a is not None and node.grid[a] == 2
+def can_pair(node: Node, grid: Optional[tuple] = None) -> bool:
+    """The node may run its concurrent groups on cluster pairs: it has cluster_pair_params and groups of 2 tasks (with `grid`, or
+    its own grid)."""
+    a = node.info["concurrent_along_axis"]
+    return node.info["cluster_pair_params"] is not None and a is not None and (grid or node.grid)[a] == 2
 
 
 def pair_clusters(nodes: List[Node], paired: set, plan_lists: List[list], num_sms: int, gpu: int) -> List[list]:
@@ -301,28 +302,28 @@ def pair_clusters(nodes: List[Node], paired: set, plan_lists: List[list], num_sm
 
 def node_table(nodes: List[Node]) -> Dict[str, dict]:
     """What the kernel's case for each node needs: its name, grid, params, its first counter and its output buffer slot (-1:
-    none; static_megakernel._add_node), its own slots and whether it has a dry pass, and per input the node that writes it (grid,
-    counter, buffer slot, params; None for a graph input). Route after router K14: {"name": "topk_route", "grid": [8, 1, 1], "params": [896, 16], "counter": -1, "buf": -1,
-    "inputs": [{"grid": [7, 14, 1], "counter": -1, "buf": 0, "params": [0, 7168, 896, 0, 2]}, None, None, None]}."""
+    none; static_megakernel._add_node), its own buffer and map slots and whether it has a dry pass, and per input the node that writes it (grid,
+    counter, buffer slot, params; None for a graph input). topk_route after the router in 14 K parts: {"name": "topk_route",
+    "grid": [8, 1, 1], "params": [896, 16], "counter": -1, "buf": 2, "inputs": [{"grid": [7, 14, 1], "counter": -1, "buf": 0,
+    "params": [0, 7168, 896, 0]}, None], "buf_slots": [1], "map_slots": [], "dry": True}."""
     table = {}
     for n in nodes:
         producers = [producer_of(t, nodes) for t in n.inputs]
         table[str(n.graph_idx)] = {"name": n.name, "grid": list(n.grid), "params": list(n.params),
-                                   "counter": n.info.get("counter", -1), "buf": n.info.get("buf", -1),
-                                   "inputs": [{"grid": list(p.grid), "counter": p.info.get("counter", -1),
-                                               "buf": p.info.get("buf", -1), "params": list(p.params)} if p else None
+                                   "counter": n.info["counter"], "buf": n.info["buf"],
+                                   "inputs": [{"grid": list(p.grid), "counter": p.info["counter"],
+                                               "buf": p.info["buf"], "params": list(p.params)} if p else None
                                               for p in producers],
-                                   "slots": list(n.info.get("slots", [])), "dry": bool(n.info.get("dry")),
-                                   "one_task_per_sm": n.info["one_task_per_sm"],
-                                   "concurrent_along_axis": n.info.get("concurrent_along_axis")}
+                                   "buf_slots": list(n.info["buf_slots"]), "map_slots": list(n.info["map_slots"]),
+                                   "dry": n.info["dry"]}
     return table
 
 
-def compile_plan(pk, plan: dict, out_dir: str, num_gpus: int, num_sms: int,
-                 max_tasks_per_sm: Optional[int] = None) -> Tuple[List[str], dict]:
-    """Returns (the schedule file paths in GPU order, {"grids": {name#graph_idx: grid}}). See the module comment.
-    max_tasks_per_sm: the most tasks one SM's list may hold (MoE: 63 = the 64 entries of static_mk::MAX_TASKS_PER_SM minus the end
-    marker); None: not checked here (the generated host code checks it when the layer is loaded)."""
+def compile_plan(pk, plan: dict, out_dir: str) -> Tuple[List[str], dict]:
+    """Returns (the schedule file paths in GPU order, {"grids": {name#graph_idx: grid}}). See the module comment. For pk's GPUs
+    and SMs (StaticMegakernel.num_gpus, num_sms); an SM's list holds at most static_schedule.MAX_TASKS_PER_SM - 1 tasks (then
+    the end entry)."""
+    num_gpus, num_sms, max_tasks = pk.num_gpus, pk._num_sms(), static_schedule.MAX_TASKS_PER_SM - 1
     if len(plan["lists"]) != num_gpus:
         raise ValueError(f"the plan has lists for {len(plan['lists'])} GPUs, compiling for {num_gpus}")
     os.makedirs(out_dir, exist_ok=True)
@@ -349,11 +350,12 @@ def compile_plan(pk, plan: dict, out_dir: str, num_gpus: int, num_sms: int,
         add_dependencies(tasks)
         lists = lists_of_gpu(tasks, nodes, plan_lists[gpu], num_sms, gpu)
         longest = max(len(sm_list) for sm_list in lists)
-        if max_tasks_per_sm is not None and longest > max_tasks_per_sm:
-            raise ValueError(f"GPU {gpu}: an SM has {longest} tasks, at most {max_tasks_per_sm}")
+        if longest > max_tasks:
+            raise ValueError(f"GPU {gpu}: an SM has {longest} tasks, at most {max_tasks}")
         all_tasks = [{"node": t.node, "pos": list(t.pos), "deps": t.deps} for t in tasks]
         paths.append(os.path.join(out_dir, f"schedule_gpu{gpu}.json"))
-        static_schedule.write_schedule(paths[-1], table, all_tasks, lists, dict(info, gpu=gpu), concurrent_groups(tasks, nodes))
+        static_schedule.write_schedule(paths[-1], table, all_tasks, lists, {"cluster_size": cluster_size, "gpu": gpu},
+                                       concurrent_groups(tasks, nodes))
     print(f"plan: grids {info['grids']} | {'cluster launch (2 CTAs)' if cluster_size == 2 else 'plain launch'}", flush=True)
     return paths, info
 

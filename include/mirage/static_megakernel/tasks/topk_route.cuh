@@ -40,12 +40,11 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
   // scratch: sc_s [NE] sigmoid scores, [NE] not used, key_s [NE] + cand_s
   // [NCAND] 64-bit keys, sel_s [K], wsel_s [K]
   float *sc_s = reinterpret_cast<float *>(sm);
-  uint32_t *hist = reinterpret_cast<uint32_t *>(sc_s + 2 * NE);
-  int *sel_s = reinterpret_cast<int *>(hist + 2 * (NE + NCAND));
-  float *wsel_s = reinterpret_cast<float *>(sel_s + K);
   unsigned long long *key_s = reinterpret_cast<unsigned long long *>(
-      hist); // key = orderable (score + bias) << 32 | (~expert id)
+      sc_s + 2 * NE); // key = orderable (score + bias) << 32 | (~expert id)
   unsigned long long *cand_s = key_s + NE;
+  int *sel_s = reinterpret_cast<int *>(cand_s + NCAND);
+  float *wsel_s = reinterpret_cast<float *>(sel_s + K);
   // pass 0 (only when the code is cold: !warm) is the dry pass: the same code
   // on bias-only scores, no loads, no stores; one copy of the code for both
   // passes (unroll 1), so pass 0 loads the instructions pass 1 runs
@@ -190,9 +189,14 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
 }
 
 // topk_route task x = token x; adds the router's LOGITS::y partial sums (K
-// parts in slots); PARAMS {NE (experts), K (experts per token)}; SLOTS {the
+// parts in slots); PARAMS {NE (experts), K (experts per token)}; BUF_SLOTS {the
 // score correction bias (a graph tensor, [NE] fp32)}; warm: above
-template <class SELF, class PARAMS, class SLOTS, class LOGITS, class... REST>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class LOGITS,
+          class... REST>
 __device__ __forceinline__ void run_topk_route(Maps const &,
                                                G const &g,
                                                KernelLocals &L,
@@ -202,15 +206,20 @@ __device__ __forceinline__ void run_topk_route(Maps const &,
   static_assert(LOGITS::v[0] == COMBINE_SLOTS && LOGITS::v[2] == NE,
                 "topk_route: the router's NE logits, its K parts in slots");
   static_assert(SELF::buf >= 0, "topk_route: its output pairs");
-  topk_route_task<LOGITS::y, NE, K>(buf_at<float const>(g, slot_at<SLOTS, 0>()),
-                                    buf_at<float>(g, LOGITS::buf),
-                                    buf_at<unsigned long long>(g, SELF::buf),
-                                    tk.x,
-                                    L.sm,
-                                    warm STAGE_STAMP_ARG(L.stage_stamps));
+  topk_route_task<LOGITS::y, NE, K>(
+      buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()),
+      buf_at<float>(g, LOGITS::buf),
+      buf_at<unsigned long long>(g, SELF::buf),
+      tk.x,
+      L.sm,
+      warm STAGE_STAMP_ARG(L.stage_stamps));
 }
 // dynamic shared memory: the scratch, inside the ring area
-template <class SELF, class PARAMS, class SLOTS, class... IN>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class... IN>
 constexpr int smem_topk_route() {
   static_assert(topk_scratch_bytes<PARAMS::v[0], PARAMS::v[1]>() <= RING_BYTES,
                 "topk_route: its scratch in the ring area");

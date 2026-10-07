@@ -102,7 +102,12 @@ __device__ __forceinline__ void
 // sum_send task (row block x of this GPU's, slice y of SELF::y): adds UP's
 // UP::y K parts (UP: a GEMM in slots, its rows split over the GPUs; UP::v[2] =
 // its rows N)
-template <class SELF, class PARAMS, class SLOTS, class UP, class... REST>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class UP,
+          class... REST>
 __device__ __forceinline__ void run_sum_send(Maps const &,
                                              G const &g,
                                              KernelLocals &,
@@ -118,7 +123,11 @@ __device__ __forceinline__ void run_sum_send(Maps const &,
       g, buf_at<float>(g, UP::buf), tk.x, tk.y);
 }
 
-template <class SELF, class PARAMS, class SLOTS, class... IN>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class... IN>
 constexpr int smem_sum_send() {
   return 0;
 }

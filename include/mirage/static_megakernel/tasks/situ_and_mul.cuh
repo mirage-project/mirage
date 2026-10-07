@@ -95,7 +95,12 @@ __device__ __forceinline__ void
 // shared gate_up's SGU::y partial sums. Each 128-row block of shared gate_up
 // gets one counter add per task: SGU::y with 128-row tasks, 2 SGU::y with
 // 64-row tasks (SGU::x = 2 SHR / 64)
-template <class SELF, class PARAMS, class SLOTS, class SGU, class... REST>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class SGU,
+          class... REST>
 __device__ __forceinline__ void run_situ_and_mul(Maps const &,
                                                  G const &g,
                                                  KernelLocals &,
@@ -118,7 +123,11 @@ __device__ __forceinline__ void run_situ_and_mul(Maps const &,
       tk.x);
 }
 
-template <class SELF, class PARAMS, class SLOTS, class... IN>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class... IN>
 constexpr int smem_situ_and_mul() {
   return 0;
 }

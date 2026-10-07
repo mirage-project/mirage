@@ -58,7 +58,6 @@ __host__ __device__ constexpr uint32_t idesc_bf16(uint32_t m) {
   return (1u << 4) | (1u << 7) | (1u << 10) | ((T / 8u) << 17) |
          ((m / 16u) << 24);
 }
-constexpr uint32_t IDESC_BF16 = idesc_bf16(128);
 constexpr uint32_t IDESC_MX =
     0x08820280u; // kind::mxf8f6f4: e2m1 x e4m3 -> fp32, ue8m0 scales, M128 N8
 constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ull,
@@ -92,6 +91,19 @@ constexpr int STAMP_START = 0, STAMP_TASK0 = 1, STAMP_TASK1 = 2, STAMP_END = 3,
 constexpr bool REARM = true;
 #else
 constexpr bool REARM = false;
+#endif
+
+#ifdef STATIC_RESET_IN_KERNEL
+// STATIC_PDL_TRIGGER: when the kernel lets the next kernel launch (PDL,
+// griddepcontrol.launch_dependents; a no-op without a programmatic launch): 0
+// at its end (implicit), 1 at its start, 2 (default) when a CTA starts a
+// residual_add task (CTAs without one: at their end)
+#ifndef STATIC_PDL_TRIGGER
+#define STATIC_PDL_TRIGGER 2
+#endif
+constexpr int PDL_TRIGGER = STATIC_PDL_TRIGGER;
+static_assert(PDL_TRIGGER >= 0 && PDL_TRIGGER <= 2,
+              "STATIC_PDL_TRIGGER: 0 (end), 1 (start), 2 (residual_add)");
 #endif
 
 } // namespace static_mk

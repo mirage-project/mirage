@@ -11,10 +11,11 @@
 // then includes this file and the task types' files (tasks/<name>.cuh), each
 // with its body and its task function run_<name>. A task function's template
 // arguments: its node (StaticNode: grid, first counter, output buffer slot),
-// its params (StaticParams), its own slots (StaticSlots: the buffers, graph
-// tensors and tensor maps its layer declared, in the layer's order), then per
-// input the node that writes it (StaticNode with that node's params as v[];
-// StaticNode<0, 0, 0>: a graph input).
+// its params (StaticParams), its own buffer slots (StaticBufSlots: indices
+// into G::buf of the scratch buffers, graph tensors and other buffers its layer
+// declared) and map slots (StaticMapSlots: indices into Maps::m), each in the
+// layer's order, then per input the node that writes it (StaticNode with that
+// node's params as v[]; StaticNode<0, 0, 0>: a graph input).
 #pragma once
 #include "config.cuh"
 #include "runtime.cuh"
@@ -58,22 +59,18 @@ struct G {
   void *buf[MAX_BUFS]; // by slot: the nodes' outputs (an exchange buffer: this
                        // GPU's copy, set 0), scratch buffers, graph tensors
                        // read by pointer
-  uint32_t *cnt; // counters (NCNT): the nodes' lines
-  int rank, tp;  // this GPU, number of GPUs
-  unsigned gen;  // launch number + 1; the start barrier waits until every GPU's
-                 // hello slot holds it
+  uint32_t *cnt;       // counters (NCNT): the nodes' lines
+  int rank;            // this GPU (of GPUS)
+  unsigned gen; // launch number + 1; the start barrier waits until every GPU's
+                // hello slot holds it
 #ifdef STATIC_RESET_IN_KERNEL
   unsigned *gen_ptr; // the launch number in device memory (gen unused): every
                      // SM reads it + 1 at the start, SM 0 stores it back once
                      // all SMs have (a CUDA graph replay gets a new one)
-  unsigned *arrive; // SMs done with the resets, over all launches (only grows)
-  ResetList resets; // the buffers kernel_begin resets (the host's list)
-  int pdl_trigger;  // when this kernel lets the next one launch
-                    // (griddepcontrol.launch_dependents): 0 at its end
-                    // (implicit), 1 at its start, 2 when a CTA starts a
-                   // residual_add task (CTAs without one: at their end)
+  unsigned *arrive;  // SMs done with the resets, over all launches (only grows)
+  ResetList resets;  // the buffers kernel_begin resets (the host's list)
 #endif
-  unsigned char *mc, *rv; // the exchange region: multicast address (tp > 1),
+  unsigned char *mc, *rv; // the exchange region: multicast address (GPUS > 1),
                           // this GPU's copy (2 sets)
   long long *stamps; // [NSM][NSTAMP] time stamps (globaltimer ns) read by the
                      // host (config.cuh STAMP_*)
@@ -95,21 +92,19 @@ __device__ __forceinline__ P *buf_at(G const &g, int slot) {
 // a multicast store into this launch's set of every GPU's exchange region (off:
 // an offset in the set)
 __device__ __forceinline__ void push16(G const &g, size_t off, uint4 v) {
-  push16_mc(g.mc, g.rv, g.tp, off + rg_set(), v);
+  push16_mc(g.mc, g.rv, off + rg_set(), v);
 }
 
-// params[I] of a node, 0 when the node has fewer params (StaticParams<P...>::v
-// holds P..., 0)
+// params[I] of a node (StaticParams<P...>::v holds P..., 0)
 template <class PARAMS, int I>
 __host__ __device__ constexpr int param_at() {
-  if constexpr (sizeof(PARAMS::v) / sizeof(int) > I + 1) {
-    return PARAMS::v[I];
-  } else {
-    return 0;
-  }
+  static_assert(sizeof(PARAMS::v) / sizeof(int) > I + 1,
+                "the node has fewer params");
+  return PARAMS::v[I];
 }
 
-// slot I of a node's own slots (StaticSlots<S...>::v holds S..., -1)
+// entry I of a node's buffer slots or map slots (StaticBufSlots<S...>::v,
+// StaticMapSlots<S...>::v hold S..., -1)
 template <class SLOTS, int I>
 __host__ __device__ constexpr int slot_at() {
   static_assert(sizeof(SLOTS::v) / sizeof(int) > I + 1,
@@ -154,12 +149,8 @@ template <size_t RANK>
 __device__ __forceinline__ void
     allreduce_land_bf16(G const &g, unsigned char const *row, int v, float *s) {
   uint4 u[GPUS];
-  bool ok[GPUS];
+  bool ok[GPUS] = {};
   bool all;
-#pragma unroll
-  for (int r = 0; r < GPUS; r++) {
-    ok[r] = r >= g.tp;
-  }
   do {
     all = true;
 #pragma unroll
@@ -183,22 +174,20 @@ __device__ __forceinline__ void
 #pragma unroll
   for (int r = 0; r < GPUS;
        r++) { // a fixed bound (unrolled), so u stays in registers
-    if (r < g.tp) {
-      uint32_t const wd[4] = {u[r].x, u[r].y, u[r].z, u[r].w};
+    uint32_t const wd[4] = {u[r].x, u[r].y, u[r].z, u[r].w};
 #pragma unroll
-      for (int k = 0; k < 4; k++) {
-        float2 const f = __bfloat1622float2(
-            *reinterpret_cast<__nv_bfloat162 const *>(&wd[k]));
-        s[2 * k] += f.x;
-        s[2 * k + 1] += f.y;
-      }
+    for (int k = 0; k < 4; k++) {
+      float2 const f =
+          __bfloat1622float2(*reinterpret_cast<__nv_bfloat162 const *>(&wd[k]));
+      s[2 * k] += f.x;
+      s[2 * k + 1] += f.y;
     }
   }
 }
 template <size_t RANK>
 __device__ __forceinline__ void
     allreduce_rearm(G const &g, unsigned char const *row, int v) {
-  for (int r = 0; r < g.tp; r++) {
+  for (int r = 0; r < GPUS; r++) {
     rearm16(row + (size_t)r * RANK + (size_t)v * 16);
   }
 }
@@ -226,9 +215,7 @@ struct KernelLocals {
 
 // before the task loop: shared memory, barriers, the resets
 // (STATIC_RESET_IN_KERNEL) or the start barrier over the GPUs, TMEM
-__device__ __forceinline__ void
-    kernel_begin(Maps const &maps, G const &g, KernelLocals &L) {
-  (void)maps;
+__device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
   extern __shared__ __align__(1024) char smem_raw[];
   L.base = (su32(smem_raw) + 1023u) & ~1023u;
   L.sm = smem_raw + (L.base - su32(smem_raw));
@@ -252,7 +239,7 @@ __device__ __forceinline__ void
   // only this kernel's own buffers, never the previous kernel's output (x,
   // prefix). Both instructions are no-ops without a programmatic launch.
   if (threadIdx.x == 0) {
-    if (g.pdl_trigger == 1) {
+    if constexpr (PDL_TRIGGER == 1) {
       asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
     }
     t_start = gtime();
@@ -303,7 +290,7 @@ __device__ __forceinline__ void
              EXCHANGE_HELLO + (size_t)g.rank * 16,
              make_uint4(gen, gen, gen, gen));
     }
-    for (int r = 0; r < g.tp; r++) {
+    for (int r = 0; r < GPUS; r++) {
       unsigned const volatile *hp =
           (unsigned const volatile *)(g.rv + EXCHANGE_HELLO + (size_t)r * 16 +
                                       rg_set());

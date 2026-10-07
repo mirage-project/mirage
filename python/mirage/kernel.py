@@ -810,7 +810,7 @@ class KNGraph:
         return self.cygraph.get_num_operators()
 
     def get_task_info(self, op_idx: int):
-        """(name, params, grid_dim, num_inputs, num_outputs, tensors, task_type, variant_id) of the task registered for operator op_idx, or None."""
+        """(name, params, grid_dim, num_inputs, num_outputs, tensors) of the task registered for operator op_idx, or None."""
         return self.cygraph.get_task_info(op_idx)
 
     def generate_task_graph(self, num_gpus: int, my_gpu_id: int):

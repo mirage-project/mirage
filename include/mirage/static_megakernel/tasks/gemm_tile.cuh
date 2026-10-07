@@ -138,8 +138,7 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
                       tb,
                       warp == 1 ? 0 : 1,
                       gi,
-                      a,
-                      0 STAGE_STAMP_ARG((warp == 1 && stamp)
+                      a STAGE_STAMP_ARG((warp == 1 && stamp)
                                             ? stamp + 1
                                             : nullptr)); // stamp[1] landed
     }
@@ -183,18 +182,23 @@ __device__ __noinline__ void ring_reinit_behind_queue() {
 // SELF::y -> the node's output buffer (SELF::buf). PARAMS: {mode (Combine), K,
 // N (the weight's rows), polled (1: the activation is ACT's 0xFF-prefilled bf16
 // buffer, polled into the stages; the node's rows are split over the GPUs and
-// its output holds this GPU's rows only)}. SLOTS: {the weight's map (Maps::m;
-// its 64-row box at the next slot), the activation's map (-1: polled)}.
-// ROWS = N / SELF::x: 128, or 64 (e.g. N = 896 rows in 14 tasks).
+// its output holds this GPU's rows only)}. MAP_SLOTS: {the weight's map
+// (Maps::m; its 64-row box at the next slot), the activation's map (-1:
+// polled)}. ROWS = N / SELF::x: 128, or 64 (e.g. N = 896 rows in 14 tasks).
 // ACT: the node that writes the activation (none: a graph input); without
 // polling its tasks are counted in its counter.
-template <class SELF, class PARAMS, class SLOTS, class ACT, class... IN>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class ACT,
+          class... IN>
 __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                                               G const &g,
                                               KernelLocals &L,
                                               StaticTask const &tk) {
   constexpr int mode = PARAMS::v[0], K = PARAMS::v[1], N = PARAMS::v[2],
-                WMAP = slot_at<SLOTS, 0>(), AMAP = slot_at<SLOTS, 1>();
+                WMAP = slot_at<MAP_SLOTS, 0>(), AMAP = slot_at<MAP_SLOTS, 1>();
   constexpr bool POLLED = param_at<PARAMS, 3>() == 1;
   static_assert(
       K > 0 && K % (128 * SELF::y) == 0,
@@ -303,7 +307,11 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
 }
 
 // dynamic shared memory: the ring
-template <class SELF, class PARAMS, class SLOTS, class... IN>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class... IN>
 constexpr int smem_gemm_tile() {
   return RING_BYTES;
 }

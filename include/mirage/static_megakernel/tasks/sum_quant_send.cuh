@@ -22,7 +22,7 @@ __host__ __device__ constexpr size_t zq_bytes(int L) {
 
 template <int NSPLIT, size_t ZOFF, int LAT> // ZOFF: the output's offset in the
                                             // exchange region; LAT: z's width
-                                            __device__ __forceinline__ void
+__device__ __forceinline__ void
     sum_quant_send_task(G const &g, float *zpart, int kt) {
   constexpr size_t ZQ_SF = zq_scales_at(LAT);
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
@@ -68,12 +68,10 @@ template <int NSPLIT, size_t ZOFF, int LAT> // ZOFF: the output's offset in the
                   __shfl_xor_sync(
                       0xffffffffu, amax, d)); // over the 8 lanes of the group
       }
-      amax = fmaxf(amax, 1.0e-30f);
-      float e = ceilf(log2f(
-          amax *
-          (1.0f / 448.0f))); // scale exponent: amax / 2^e <= 448 (e4m3 max)
-      e = fminf(fmaxf(e, -127.f), 127.f);
-      float const sc = exp2f(-e);
+      // scale exponent: amax / 2^ex <= 448 (e4m3 max)
+      int ex = ceil_log2_bits(fmaxf(amax, 1.0e-30f) * (1.0f / 448.0f));
+      ex = ex < -127 ? -127 : (ex > 127 ? 127 : ex);
+      float const sc = __uint_as_float((uint32_t)(127 - ex) << 23); // 2^-ex
       uint32_t const q = (uint32_t)cvt_e4m3(z.x * sc) |
                          ((uint32_t)cvt_e4m3(z.y * sc) << 8) |
                          ((uint32_t)cvt_e4m3(z.z * sc) << 16) |
@@ -82,7 +80,7 @@ template <int NSPLIT, size_t ZOFF, int LAT> // ZOFF: the output's offset in the
                                     4 * lane + rg_set()) = q;
       if ((lane & 7) == 0) {
         g.rv[ZOFF + ZQ_SF + kt * SF_CHUNK + t * 16 + (lane >> 3) + rg_set()] =
-            (uint8_t)(int)(e + 127.f);
+            (uint8_t)(ex + 127);
       }
     }
     asm volatile("bar.sync 1, 128;" ::: "memory");
@@ -121,7 +119,12 @@ template <int NSPLIT, size_t ZOFF, int LAT> // ZOFF: the output's offset in the
 
 // sum_quant_send task x = z columns [128 x, 128 x + 128); adds latent_down's
 // Z::y partial sums (K parts in slots). PARAMS {L (z's width)}
-template <class SELF, class PARAMS, class SLOTS, class Z, class... REST>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class Z,
+          class... REST>
 __device__ __forceinline__ void run_sum_quant_send(Maps const &,
                                                    G const &g,
                                                    KernelLocals &,
@@ -136,7 +139,11 @@ __device__ __forceinline__ void run_sum_quant_send(Maps const &,
       g, buf_at<float>(g, Z::buf), tk.x);
 }
 
-template <class SELF, class PARAMS, class SLOTS, class... IN>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class... IN>
 constexpr int smem_sum_quant_send() {
   return 0;
 }

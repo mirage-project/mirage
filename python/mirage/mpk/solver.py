@@ -8,14 +8,14 @@ builds the input from the graph.
 
 The input (built by search.search_plan), with the MoE numbers:
   groups     {entry name: its choices}; one choice = {node: option}; exactly one choice per entry is used. search.py gives
-             each node its own entry: "30": [{30: "7x4x1"}, {30: "7x7x1"}, {30: "7x8x1"}, {30: "7x14x1"}] = the router (node 30)
-             in 4, 7, 8 or 14 K parts; a node with nothing to choose has one: "31": [{31: "8x1x1"}] (topk_route)
-  tasks      one SolverTask per task of every option: id "gpus_0_2_4_6:30:7x14x1:2.5.0" = GPUs 0, 2, 4, 6; node 30; option
+             each node its own entry: "26": [{26: "7x4x1"}, {26: "7x7x1"}, {26: "7x8x1"}, {26: "7x14x1"}] = the router (node 26)
+             in 4, 7, 8 or 14 K parts; a node with nothing to choose has one: "27": [{27: "8x1x1"}] (topk_route)
+  tasks      one SolverTask per task of every option: id "gpus_0_2_4_6:26:7x14x1:2.5.0" = GPUs 0, 2, 4, 6; node 26; option
              7x14x1; task (2, 5, 0). A task exists in the plan only if its option is chosen.
   deps       (producer task id, consumer task id): the consumer reads data the producer writes
   pools      a one-task-per-SM node (MoE: moe_experts), one per GPU set: its work is shared by the SMs at run time, so it is not placed task by task
   gpu_sets   ["gpus_0_2_4_6", "gpus_1_3_5_7"]: each set of GPUs with the same work gets its own copy of the 148 SMs
-  num_sms    148;  max_tasks_per_sm  61
+  num_sms    148;  max_tasks_per_sm  62 (static_schedule.MAX_TASKS_PER_SM = 64 entries, minus the end entry and the pool's task)
   fixed_options, fixed_lists   a given plan (e.g. the hand plan): its options and its per-SM lists; the solver then only
              computes its start times and its end (to compare it with a searched plan)
 
@@ -54,7 +54,7 @@ OptionKey = Tuple[int, str]      # (node graph_idx, option name), e.g. (30, "7x1
 
 @dataclass
 class SolverTask:
-    id: str                      # e.g. "gpus_0_2_4_6:30:7x14x1:2.5.0"
+    id: str                      # e.g. "gpus_0_2_4_6:28:7x14x1:2.5.0"
     node: int                    # graph_idx of its node
     option: str                  # the option this task belongs to
     gpu_set: str                 # "gpus_0_2_4_6" or "gpus_1_3_5_7"
@@ -68,7 +68,7 @@ class SolverTask:
 @dataclass
 class Pool:
     """A pool (MoE: moe_experts) of one GPU set: work the SMs share at run time."""
-    id: str                      # e.g. "36@gpus_0_2_4_6"
+    id: str                      # e.g. "38@gpus_0_2_4_6"
     gpu_set: str
     work_us: float               # its total work, summed over all SMs (measured: about 7500 us)
     inputs: List[str]            # tasks that must end before any SM can start on it (topk_route, sum_quant_send, situ_and_mul tasks)
@@ -85,6 +85,7 @@ class Result:
     lists: Dict[str, List[List[str]]]      # GPU set -> per SM, the task ids in start order
     times: Dict[str, Tuple[float, float]] = None    # used task id -> (start, end) in us (a hint for a later solve)
     post: set = None                                 # used task ids that run after the pool on their SM
+    pools: Dict[str, dict] = None                    # pool id -> {"open", "joins" (per SM), "end"} in us
 
 
 def ticks(us: float) -> int:
@@ -185,6 +186,7 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
     # ---- rule 4: a pool (its work is shared by the SMs at run time; MoE: moe_experts); the goal: the layer's end C
     C = model.NewIntVar(0, horizon, "C")
     post = {}                                        # task id -> 1, 0 or a yes/no: runs after the pool on its SM
+    pool_vars = {}                                   # pool id -> (opens, joins, ends)
     for p in pools:
         opens = model.NewIntVar(0, horizon, f"open_{p.id}")           # the pool can start once its inputs have ended
         for tid in p.inputs:
@@ -228,6 +230,7 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
         for join in joins:
             model.Add(ends >= join)
         model.Add(C >= ends)
+        pool_vars[p.id] = (opens, joins, ends)
         for tid, v in post.items():                  # the tasks after it start when it has ended
             if by_id[tid].gpu_set != p.gpu_set or (isinstance(v, int) and v == 0):
                 continue
@@ -281,5 +284,7 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
     times = {t.id: (round(solver.Value(start[t.id]) * TICK, 3), round(solver.Value(end[t.id]) * TICK, 3))
              for t in tasks if solver.Value(used[t.id])}
     post_ids = {tid for tid, v in post.items() if solver.Value(used[tid]) and (v == 1 if isinstance(v, int) else solver.Value(v))}
+    us = lambda v: round(solver.Value(v) * TICK, 3)
+    pool_times = {pid: {"open": us(o), "joins": [us(j) for j in js], "end": us(e)} for pid, (o, js, e) in pool_vars.items()}
     return Result(solver.StatusName(status), round(solver.Value(C) * TICK, 3), round(solver.BestObjectiveBound() * TICK, 3),
-                  solve_s, chosen, lists, times, post_ids)
+                  solve_s, chosen, lists, times, post_ids, pool_times)

@@ -49,9 +49,9 @@ struct QueueEntry {
 // HSF (h_q and its scales, the node's scratch); counters CNT (the node's first:
 // SMs done), W2NEXT = CNT + 32 (the queue's next entry), CHQ = CNT + 64 .. (per
 // expert slot the W13 items that wrote their h_q); tensor maps (Maps::m) of the
-// expert weights and scales, of z_q (ZQ, ZQ2, XSF28: set 0, set 1 at + 1) and
-// of h_q (HQ3, HSF3); ZOFF: z_q's offset in the exchange region; the sizes NE,
-// K, LAT, IR and the tile counts from them
+// expert weights and scales, of z_q (ZQ, ZQ_KT: K-tiled, ZQ_SF: its scales; set
+// 0, set 1 at + 1) and of h_q (HQ_KT, HQ_SF); ZOFF: z_q's offset in the
+// exchange region; the sizes NE, K, LAT, IR and the tile counts from them
 template <int HQ_,
           int HSF_,
           int CNT_,
@@ -64,10 +64,10 @@ template <int HQ_,
           int W2SF_,
           int W2SFX2_,
           int ZQ_,
-          int ZQ2_,
-          int XSF28_,
-          int HQ3_,
-          int HSF3_,
+          int ZQ_KT_,
+          int ZQ_SF_,
+          int HQ_KT_,
+          int HQ_SF_,
           size_t ZOFF_,
           int NE_,
           int K_,
@@ -79,8 +79,8 @@ struct ExpertSlots {
   static constexpr int W13 = W13_, W13X2 = W13X2_, W13SF = W13SF_,
                        W13SFX2 = W13SFX2_, W2 = W2_, W2X2 = W2X2_, W2SF = W2SF_,
                        W2SFX2 = W2SFX2_;
-  static constexpr int ZQ = ZQ_, ZQ2 = ZQ2_, XSF28 = XSF28_, HQ3 = HQ3_,
-                       HSF3 = HSF3_;
+  static constexpr int ZQ = ZQ_, ZQ_KT = ZQ_KT_, ZQ_SF = ZQ_SF_, HQ_KT = HQ_KT_,
+                       HQ_SF = HQ_SF_;
   static constexpr size_t ZOFF = ZOFF_;
   static constexpr int NE = NE_, K = K_, LAT = LAT_, IR = IR_;
   static constexpr int NPAIR = T * K; // routing pairs of a step
@@ -238,18 +238,16 @@ __device__ __forceinline__ void build_table() {
 
 // ---- shared memory after the ring (offsets from the dynamic base; keep this
 // layout: the layer's time depends on where these
-//      are): OFF_HQ the W2 ring's barriers (w2_bar), then KT2 x 1 KB and KT2
-//      scale chunks not used, OFF_ACC a W13 item's accumulator (128 rows x T
+//      are): OFF_W2BAR the W2 ring's barriers (w2_bar), then KT2 x (1 KB + a
+//      scale chunk) not used, OFF_ACC a W13 item's accumulator (128 rows x T
 //      fp32, for SiTU across rows). The z scale chunks are staged once at the
-//      phase switch in the (then idle) ring area (OFF_XSF) ----
+//      phase switch in the (then idle) ring area (OFF_ZQ_SF) ----
 template <class RES>
 struct ExpertSmem {
-  static constexpr int OFF_XSF = OFF_W, OFF_HQ = RING_BYTES,
-                       OFF_HSF = OFF_HQ + RES::KT2 * 1024,
-                       OFF_ACC = OFF_HSF + RES::KT2 * SF_CHUNK;
+  static constexpr int OFF_ZQ_SF = OFF_W, OFF_W2BAR = RING_BYTES,
+                       OFF_ACC = OFF_W2BAR + RES::KT2 * (1024 + SF_CHUNK);
   static constexpr int BYTES =
       OFF_ACC + 128 * T * 4; // the node's need from the base
-  static_assert(OFF_HQ % 1024 == 0, "128-B swizzled tiles are 1024-aligned");
   static_assert(RES::KT_LAT * SF_CHUNK <= OFF_WSF,
                 "the z scale chunks in the ring area");
   // ---- W2 ring: one tile per stage (KT2 x 16 KB weight pieces | KT2 scale
@@ -266,7 +264,7 @@ struct ExpertSmem {
   static_assert(W2_ST * W2_STB <= OFF_WSF,
                 "the W2 ring lies inside the W13 ring's area");
   // TMEM columns: z_q scales 72 + 4 kt, W13 weight scales 232.. (runtime.cuh
-  // issue_job_warp SF_SLOTS), W2 weight / h_q scales SFA_W2 / SFB_W2 + 4 KT2 s
+  // issue_job_warp), W2 weight / h_q scales SFA_W2 / SFB_W2 + 4 KT2 s
   // + 4 kt
   static constexpr int SFA_W2 = 272, SFB_W2 = 320;
   static_assert(72 + 4 * RES::KT_LAT <= 232 &&
@@ -274,16 +272,16 @@ struct ExpertSmem {
                     SFB_W2 + 4 * RES::KT2 * W2_ST <= 512,
                 "moe_experts: the TMEM columns of the scales");
 };
-// mbarriers and one word in the (otherwise unused) OFF_HQ area: full [3], empty
-// [3], ready (warp 0 has re-laid the ring), then warp 7's ring stage counter
-// (W13 stages it has armed)
+// mbarriers and one word in the (otherwise unused) OFF_W2BAR area: full [3],
+// empty [3], ready (warp 0 has re-laid the ring), then warp 7's ring stage
+// counter (W13 stages it has armed)
 template <class RES>
 __device__ __forceinline__ uint32_t w2_bar(uint32_t base, int i) {
-  return base + ExpertSmem<RES>::OFF_HQ + 8 * i;
+  return base + ExpertSmem<RES>::OFF_W2BAR + 8 * i;
 }
 template <class RES>
 __device__ __forceinline__ uint32_t w2_w7gl(uint32_t base) {
-  return base + ExpertSmem<RES>::OFF_HQ + 64;
+  return base + ExpertSmem<RES>::OFF_W2BAR + 64;
 }
 // arm W2 tile k of this SM: wait for its ring slot, load the weights and
 // scales, and once all W13 items of the tile's expert are done (CHQ counter,
@@ -348,8 +346,8 @@ __device__ __forceinline__ void w2_arm(Maps const &maps,
     asm volatile("fence.proxy.async.global;" ::: "memory");
     chk_slot = slot;
   }
-  tma3(&maps.m[RES::HQ3], f, st + W2_HQ, 0, slot * T, 0, EVICT_LAST);
-  tma3(&maps.m[RES::HSF3], f, st + W2_HSF, 0, 0, slot * KT2, EVICT_LAST);
+  tma3(&maps.m[RES::HQ_KT], f, st + W2_HQ, 0, slot * T, 0, EVICT_LAST);
+  tma3(&maps.m[RES::HQ_SF], f, st + W2_HSF, 0, 0, slot * KT2, EVICT_LAST);
 }
 
 // all 8 warps of the SM, until the queue is empty. gl / gi0 / gi1: ring stage
@@ -430,7 +428,7 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
     j.wmap2 = &maps.m[RES::W13X2];
     j.sfmap2 = &maps.m[RES::W13SFX2];
     j.amap = &maps.m[RES::ZQ + dbuf_par];
-    j.amap2 = &maps.m[RES::ZQ2 + dbuf_par];
+    j.amap2 = &maps.m[RES::ZQ_KT + dbuf_par];
     j.tile0 = j.chunk0 = ex * (MT13 * KT_LAT) + e.b * KT_LAT;
   };
   if (warp == 0) {
@@ -455,8 +453,8 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
           prefetch_tmap(&maps.m[RES::W2]);
           prefetch_tmap(&maps.m[RES::W2SFX2]);
           prefetch_tmap(&maps.m[RES::W2SF]);
-          prefetch_tmap(&maps.m[RES::HQ3]);
-          prefetch_tmap(&maps.m[RES::HSF3]);
+          prefetch_tmap(&maps.m[RES::HQ_KT]);
+          prefetch_tmap(&maps.m[RES::HQ_SF]);
           maps_pf = true;
         }
         w2q[qpos][0] = e.kind;
@@ -613,7 +611,7 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
         if (wtt0 >= 4) {
           mbar_wait(rt.acc_empty0 + 8 * a, ((wtt0 >> 2) - 1) & 1);
         }
-        issue_job_warp<128, true, true>(
+        issue_job_warp(
             j,
             baseu,
             tbu,
@@ -777,7 +775,7 @@ __device__ __forceinline__ void
                         int &gl,
                         int &gi0,
                         int &gi1) {
-  constexpr int KT_LAT = RES::KT_LAT, OFF_XSF = ExpertSmem<RES>::OFF_XSF;
+  constexpr int KT_LAT = RES::KT_LAT, OFF_ZQ_SF = ExpertSmem<RES>::OFF_ZQ_SF;
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   if (threadIdx.x == 0) {
     ring_reinit(false);
@@ -786,9 +784,9 @@ __device__ __forceinline__ void
   __syncthreads();
   if (threadIdx.x == 0) {
     mbar_expect(rt.misc0, KT_LAT * SF_CHUNK);
-    tma3(&maps.m[RES::XSF28 + dbuf_par],
+    tma3(&maps.m[RES::ZQ_SF + dbuf_par],
          rt.misc0,
-         base + OFF_XSF,
+         base + OFF_ZQ_SF,
          0,
          0,
          0,
@@ -798,7 +796,7 @@ __device__ __forceinline__ void
   fence_after();
   if (warp == 1 && lane == 0) {
     for (int kt = 0; kt < KT_LAT; kt++) {
-      cp_sf(tb + 72 + 4 * kt, base + OFF_XSF + kt * SF_CHUNK);
+      cp_sf(tb + 72 + 4 * kt, base + OFF_ZQ_SF + kt * SF_CHUNK);
     }
     tc_commit(rt.misc0 + 16);
   }
@@ -849,29 +847,34 @@ __device__ __forceinline__ void wait_z_landed(G const &g) {
   } while (!all);
 }
 
-// the node's ExpertSlots: its slots (moe_experts_layer: h_q, its scales; the
-// maps w13, w13 x2, w13 scales, x2, w2, w2 x2, w2 scales, x2, z_q, z_q x2 K
-// tiles, z_q's scale chunks (each 2 slots: the exchange region's sets), h_q,
-// h_q's scales), its counter, z_q's offset, the sizes: NE and K from
-// topk_route's params (PAIRS), LAT from sum_quant_send's (ZQ), IR its own
-// params[0]
-template <class SELF, class PARAMS, class SLOTS, class ZQ, class PAIRS>
-using ExpertSlotsOf = ExpertSlots<slot_at<SLOTS, 0>(),
-                                  slot_at<SLOTS, 1>(),
+// the node's ExpertSlots: its buffer slots (moe_experts_layer: h_q, its
+// scales), its map slots (w13, w13 x2, w13 scales, x2, w2, w2 x2, w2 scales,
+// x2, z_q, z_q x2 K tiles, z_q's scale chunks (each 2 slots: the exchange
+// region's sets), h_q, h_q's scales), its counter, z_q's offset, the sizes: NE
+// and K from topk_route's params (PAIRS), LAT from sum_quant_send's (ZQ), IR
+// its own params[0]
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class ZQ,
+          class PAIRS>
+using ExpertSlotsOf = ExpertSlots<slot_at<BUF_SLOTS, 0>(),
+                                  slot_at<BUF_SLOTS, 1>(),
                                   SELF::counter,
-                                  slot_at<SLOTS, 2>(),
-                                  slot_at<SLOTS, 3>(),
-                                  slot_at<SLOTS, 4>(),
-                                  slot_at<SLOTS, 5>(),
-                                  slot_at<SLOTS, 6>(),
-                                  slot_at<SLOTS, 7>(),
-                                  slot_at<SLOTS, 8>(),
-                                  slot_at<SLOTS, 9>(),
-                                  slot_at<SLOTS, 10>(),
-                                  slot_at<SLOTS, 11>(),
-                                  slot_at<SLOTS, 12>(),
-                                  slot_at<SLOTS, 13>(),
-                                  slot_at<SLOTS, 14>(),
+                                  slot_at<MAP_SLOTS, 0>(),
+                                  slot_at<MAP_SLOTS, 1>(),
+                                  slot_at<MAP_SLOTS, 2>(),
+                                  slot_at<MAP_SLOTS, 3>(),
+                                  slot_at<MAP_SLOTS, 4>(),
+                                  slot_at<MAP_SLOTS, 5>(),
+                                  slot_at<MAP_SLOTS, 6>(),
+                                  slot_at<MAP_SLOTS, 7>(),
+                                  slot_at<MAP_SLOTS, 8>(),
+                                  slot_at<MAP_SLOTS, 9>(),
+                                  slot_at<MAP_SLOTS, 10>(),
+                                  slot_at<MAP_SLOTS, 11>(),
+                                  slot_at<MAP_SLOTS, 12>(),
                                   exchange_offset[ZQ::buf],
                                   PAIRS::v[0],
                                   PAIRS::v[1],
@@ -881,13 +884,13 @@ using ExpertSlotsOf = ExpertSlots<slot_at<SLOTS, 0>(),
 // moe_experts task (one per SM, task x on SM x): wait for z_q, phase switch,
 // routing table, then the queue (above) -> the routed rows [T][K][LAT] in the
 // node's output buffer; its counter counts the SMs done. IN: its inputs'
-// producers, in the layer's order (z_q, pairs, h_s, ...). PARAMS {IR}
+// producers, in the layer's order (z_q, pairs, ...). PARAMS {IR}
 template <class SELF,
           class PARAMS,
-          class SLOTS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
           class ZQ,
           class PAIRS,
-          class HS,
           class... REST>
 __device__ __forceinline__ void run_moe_experts(Maps const &maps,
                                                 G const &g,
@@ -898,7 +901,7 @@ __device__ __forceinline__ void run_moe_experts(Maps const &maps,
       "moe_experts: its output rows, its counter, topk_route's pairs");
   static_assert(ZQ::buf >= 0 && exchange_bytes[ZQ::buf] == zq_bytes(ZQ::v[0]),
                 "moe_experts: z_q in the exchange region");
-  using RES = ExpertSlotsOf<SELF, PARAMS, SLOTS, ZQ, PAIRS>;
+  using RES = ExpertSlotsOf<SELF, PARAMS, BUF_SLOTS, MAP_SLOTS, ZQ, PAIRS>;
   int const sm_id = L.sm_id;
   __syncthreads(); // every warp is done with the placed tiles (the loader runs
                    // ahead of the landings)
@@ -950,12 +953,14 @@ __device__ __forceinline__ void run_moe_experts(Maps const &maps,
 // dynamic shared memory: the ring, then ExpertSmem's
 template <class SELF,
           class PARAMS,
-          class SLOTS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
           class ZQ,
           class PAIRS,
           class... REST>
 constexpr int smem_moe_experts() {
-  return ExpertSmem<ExpertSlotsOf<SELF, PARAMS, SLOTS, ZQ, PAIRS>>::BYTES;
+  return ExpertSmem<
+      ExpertSlotsOf<SELF, PARAMS, BUF_SLOTS, MAP_SLOTS, ZQ, PAIRS>>::BYTES;
 }
 
 } // namespace static_mk

@@ -82,9 +82,14 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
 // allreduce_send task x: slice x of SELF::x of its input (the output of node
 // SRC, complete once all SRC's tasks are counted) to every GPU, into the node's
 // output (an exchange buffer, [GPUS][T][W] bf16). PARAMS {W (the row width),
-// rows per token in the input (GROUP: added in order)}; SLOTS {an exchange
-// buffer to re-arm once SRC is done, or -1}
-template <class SELF, class PARAMS, class SLOTS, class SRC, class... REST>
+// rows per token in the input (GROUP: added in order)}; BUF_SLOTS {an
+// exchange buffer to re-arm once SRC is done, or -1}
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class SRC,
+          class... REST>
 __device__ __forceinline__ void run_allreduce_send(Maps const &,
                                                    G const &g,
                                                    KernelLocals &L,
@@ -103,14 +108,18 @@ __device__ __forceinline__ void run_allreduce_send(Maps const &,
                       GROUP,
                       W,
                       exchange_offset[SELF::buf],
-                      slot_at<SLOTS, 0>()>(
+                      slot_at<BUF_SLOTS, 0>()>(
       g,
       buf_at<float const>(g, SRC::buf),
       g.cnt + SRC::counter,
       tk.x STAGE_STAMP_ARG(L.stage_stamps));
 }
 
-template <class SELF, class PARAMS, class SLOTS, class... IN>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class... IN>
 constexpr int smem_allreduce_send() {
   return 0;
 }

@@ -277,10 +277,15 @@ __device__ __forceinline__ void
 // bits)}: mode 2: the 2 tasks of a token are the 2 CTAs of a cluster (the
 // kernel launched with clusters of 2, the pair on CTAs 2k, 2k + 1:
 // compiler.compile_plan decides); 1: each task adds the whole row's squares
-// itself; 0: the token's tasks swap their sums through ss_part. SLOTS {gamma (a
-// graph tensor, [LAT] bf16), ss_part (scratch, [T][4] fp32, 0xFF before each
-// launch)}
-template <class SELF, class PARAMS, class SLOTS, class SEND, class... IN>
+// itself; 0: the token's tasks swap their sums through ss_part. BUF_SLOTS
+// {gamma (a graph tensor, [LAT] bf16), ss_part (scratch, [T][4] fp32, 0xFF
+// before each launch)}
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class SEND,
+          class... IN>
 __device__ __forceinline__ void run_sum_rmsnorm(Maps const &,
                                                 G const &g,
                                                 KernelLocals &L,
@@ -295,7 +300,7 @@ __device__ __forceinline__ void run_sum_rmsnorm(Maps const &,
   constexpr size_t ROFF = exchange_offset[SEND::buf];
   __nv_bfloat16 *const rn = buf_at<__nv_bfloat16>(g, SELF::buf);
   __nv_bfloat16 const *const gamma =
-      buf_at<__nv_bfloat16 const>(g, slot_at<SLOTS, 0>());
+      buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 0>());
   if constexpr (param_at<PARAMS, 0>() == 2) {
     sum_rmsnorm_cluster_task<ROFF, LAT, EPS>(
         g, gamma, rn, tk.x, tk.y STAGE_STAMP_ARG(L.stage_stamps));
@@ -306,14 +311,18 @@ __device__ __forceinline__ void run_sum_rmsnorm(Maps const &,
     sum_rmsnorm_task<SELF::x, ROFF, LAT, EPS>(
         g,
         gamma,
-        buf_at<float>(g, slot_at<SLOTS, 1>()),
+        buf_at<float>(g, slot_at<BUF_SLOTS, 1>()),
         rn,
         tk.x,
         tk.y STAGE_STAMP_ARG(L.stage_stamps));
   }
 }
 
-template <class SELF, class PARAMS, class SLOTS, class... IN>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class... IN>
 constexpr int smem_sum_rmsnorm() {
   return 0;
 }

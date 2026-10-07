@@ -2,41 +2,21 @@
 // it in the layer's host part and calls the functions at the end of this file).
 // It builds what the layers declared (static_megakernel.py host_slot_args), the
 // same way for every task type:
-//   "buf.<slot>" -> "<kind> <name> <bytes> <reset> <by reader>"   G::buf[slot].
-//   kind: out (a node's output: the graph tensor of that
-//                                                       name if the caller gave
-//                                                       one, else allocated
-//                                                       here), scratch
-//                                                       (allocated here),
-//                                                       tensor (the graph
-//                                                       tensor of that name,
-//                                                       read by pointer),
-//                                                       exchange (in the
-//                                                       exchange region at
-//                                                       core.cuh
-//                                                       exchange_offset[slot];
-//                                                       both sets). Reset
-//                                                       before each launch to
-//                                                       the byte value <reset>
-//                                                       (-1: none); <by reader>
-//                                                       1: its one reader
-//                                                       re-arms it in the
-//                                                       kernel (REARM), so a
-//                                                       STATIC_RESET_IN_KERNEL
-//                                                       host fills it only once
-//   "map.<slot>" -> "<kind> <source> <dims...>"         Maps::m[slot]. source:
-//   t:<tensor name> (a graph tensor or a node's output
-//                                                       buffer by its tensor
-//                                                       name) or b:<buffer
-//                                                       slot>+<byte offset>.
-//                                                       kind and dims: bf16
-//                                                       <rows> <K> <box rows> |
-//                                                       wblk <pieces> <box
-//                                                       pieces> | sf <chunks>
-//                                                       <box chunks> | act8 <K
-//                                                       bytes> <rows> | act8kt
-//                                                       <K bytes> <rows> <K
-//                                                       tiles>
+//   "buf.<slot>" -> "<kind> <name> <bytes> <reset> <by reader>": G::buf[slot].
+//     kind: out (a node's output: the graph tensor of that name if the caller
+//       gave one, else allocated here), scratch (allocated here; 0 bytes:
+//       none), tensor (the graph tensor of that name, read by pointer) or
+//       exchange (in the exchange region at core.cuh exchange_offset[slot];
+//       both sets).
+//     reset: the byte value it is filled with before each launch (-1: none).
+//     by reader 1: its one reader re-arms it in the kernel (REARM), so a
+//       STATIC_RESET_IN_KERNEL host fills it only once.
+//   "map.<slot>" -> "<kind> <source> <dims...>": Maps::m[slot].
+//     source: t:<tensor name> (a graph tensor or a node's output buffer by its
+//       tensor name) or b:<buffer slot>+<byte offset>.
+//     kind and dims: bf16 <rows> <K> <box rows> | wblk <pieces> <box pieces> |
+//       sf <chunks> <box chunks> | act8 <K bytes> <rows> |
+//       act8kt <K bytes> <rows> <K tiles>
 // The node output buffers are allocated first, then the scratch buffers, then
 // the counters and the time stamps. Keep this order: the buffers' addresses
 // decide where they fall in L2, and a different order makes the layer slower.
@@ -195,14 +175,13 @@ static void map_act8(CUtensorMap *m, void *base, uint64_t Kb, uint64_t rows) {
 // ---- exchange region: one allocation per GPU bound to one multicast object; a
 // multimem.st through the multicast address mcVA
 //      lands in every GPU's copy. recv[r] = GPU r's copy.
-static void
-    mc_alloc(int tp, size_t need, unsigned char *&mcVA, unsigned char *recv[]) {
-  for (int r = 0; r < tp; r++) {
+static void mc_alloc(size_t need, unsigned char *&mcVA, unsigned char *recv[]) {
+  for (int r = 0; r < GPUS; r++) {
     MKS_CK(cudaSetDevice(r));
     MKS_CK(cudaFree(0));
   }
   CUmulticastObjectProp mp = {};
-  mp.numDevices = tp;
+  mp.numDevices = GPUS;
   mp.handleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
   size_t mgran = 0;
   MKS_CU(cuMulticastGetGranularity(
@@ -211,18 +190,18 @@ static void
   mp.size = mcSize;
   CUmemGenericAllocationHandle mcH;
   MKS_CU(cuMulticastCreate(&mcH, &mp));
-  for (int r = 0; r < tp; r++) {
+  for (int r = 0; r < GPUS; r++) {
     CUdevice dev;
     MKS_CU(cuDeviceGet(&dev, r));
     MKS_CU(cuMulticastAddDevice(mcH, dev));
   }
   CUmemAccessDesc ad[GPUS];
-  for (int r = 0; r < tp; r++) {
+  for (int r = 0; r < GPUS; r++) {
     ad[r].location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     ad[r].location.id = r;
     ad[r].flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
   }
-  for (int r = 0; r < tp; r++) {
+  for (int r = 0; r < GPUS; r++) {
     CUmemAllocationProp ap = {};
     ap.type = CU_MEM_ALLOCATION_TYPE_PINNED;
     ap.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
@@ -238,7 +217,7 @@ static void
     CUdeviceptr va;
     MKS_CU(cuMemAddressReserve(&va, asz, 0, 0, 0));
     MKS_CU(cuMemMap(va, asz, 0, ph, 0));
-    MKS_CU(cuMemSetAccess(va, asz, ad, tp));
+    MKS_CU(cuMemSetAccess(va, asz, ad, GPUS));
     recv[r] = reinterpret_cast<unsigned char *>(va);
     MKS_CK(cudaSetDevice(r));
     MKS_CK(cudaMemset(recv[r], 0, mcSize));
@@ -246,7 +225,7 @@ static void
   CUdeviceptr va;
   MKS_CU(cuMemAddressReserve(&va, mcSize, 0, 0, 0));
   MKS_CU(cuMemMap(va, mcSize, 0, mcH, 0));
-  MKS_CU(cuMemSetAccess(va, mcSize, ad, tp));
+  MKS_CU(cuMemSetAccess(va, mcSize, ad, GPUS));
   mcVA = reinterpret_cast<unsigned char *>(va);
 }
 
@@ -348,6 +327,9 @@ static void build_bufs(GpuState &s,
         s.g.buf[i] = p;
         continue;
       }
+      if (bytes == 0) { // a scratch buffer this build's node does not read
+        continue;
+      }
       if (!p) {
         p = dmalloc<unsigned char>(s, bytes);
         MKS_CK(cudaMemset(p, 0, bytes));
@@ -433,10 +415,11 @@ static void build_maps(Maps &maps,
 static void static_host_init(StaticContext &ctx,
                              std::map<std::string, std::string> const &args) {
   using namespace static_host;
-  int const tp = ctx.num_gpus;
-  if (tp != GPUS) {
-    fprintf(
-        stderr, "static_host: %d GPUs, the layer is built for %d\n", tp, GPUS);
+  if (ctx.num_gpus != GPUS) {
+    fprintf(stderr,
+            "static_host: %d GPUs, the layer is built for %d\n",
+            ctx.num_gpus,
+            GPUS);
     exit(1);
   }
   if (ctx.num_lists != NSM) {
@@ -449,10 +432,10 @@ static void static_host_init(StaticContext &ctx,
   }
   MKS_CU(cuInit(0));
   // peer access between every pair of GPUs
-  if (tp > 1) {
-    for (int r = 0; r < tp; r++) {
+  if (GPUS > 1) {
+    for (int r = 0; r < GPUS; r++) {
       MKS_CK(cudaSetDevice(r));
-      for (int p = 0; p < tp; p++) {
+      for (int p = 0; p < GPUS; p++) {
         if (p != r) {
           int can = 0;
           MKS_CK(cudaDeviceCanAccessPeer(&can, r, p));
@@ -475,23 +458,21 @@ static void static_host_init(StaticContext &ctx,
     }
   }
   unsigned char *mcVA = nullptr, *recv[GPUS] = {};
-  if (tp > 1) {
-    mc_alloc(tp,
-             2 * EXCHANGE_SET,
+  if (GPUS > 1) {
+    mc_alloc(2 * EXCHANGE_SET,
              mcVA,
              recv); // the exchange region's two sets (core.cuh EXCHANGE_SET),
                     // zero-filled
   }
-  g_gpus.assign(tp, GpuState());
-  for (int r = 0; r < tp; r++) {
+  g_gpus.assign(GPUS, GpuState());
+  for (int r = 0; r < GPUS; r++) {
     StaticGpuView const &v = ctx.gpus[r];
     GpuState &s = g_gpus[r];
     MKS_CK(cudaSetDevice(v.gpu));
     G &g = s.g;
     g = G{};
     g.rank = r;
-    g.tp = tp;
-    if (tp > 1) {
+    if (GPUS > 1) {
       g.mc = mcVA;
       g.rv = recv[r];
     } else {
@@ -507,8 +488,7 @@ static void static_host_init(StaticContext &ctx,
 
 // before each launch, on the GPU's stream: every buffer of s.resets, the
 // stamps; then the launch number g.gen
-static void static_host_reset(StaticContext &ctx,
-                              int r,
+static void static_host_reset(int r,
                               cudaStream_t st,
                               unsigned long long launch_number) {
   using namespace static_host;
@@ -519,73 +499,31 @@ static void static_host_reset(StaticContext &ctx,
   }
   MKS_CK(cudaMemsetAsync(g.stamps, 0, NSM * NSTAMP * 8, st));
   g.gen = (unsigned)(launch_number + 1);
-  (void)ctx;
 }
 
-// the span of the last launch on GPU r: bar = the last SM past the start
-// barrier, end = the latest SM end; globaltimer ns
-static void static_host_timing(StaticContext &ctx,
-                               int r,
-                               long long &bar,
-                               long long &end) {
+// GPU r's instrumentation buffer `name`, for a test harness to read (p =
+// nullptr: no such buffer): "counters" [NCNT] uint32 (the nodes' lines,
+// NODE_COUNTER_LINES of 32), "stamps" [NSM][NSTAMP] globaltimer ns (config.cuh
+// STAMP_*), "start_barrier" [1] globaltimer ns (the last SM past the start
+// barrier)
+static void static_host_buffer(int r,
+                               std::string const &name,
+                               void const *&p,
+                               size_t &bytes) {
   using namespace static_host;
   G const &g = g_gpus[r].g;
-  MKS_CK(cudaSetDevice(ctx.gpus[r].gpu));
-  std::vector<long long> st(NSM * NSTAMP);
-  MKS_CK(cudaMemcpy(
-      st.data(), g.stamps, NSM * NSTAMP * 8, cudaMemcpyDeviceToHost));
-  MKS_CK(cudaMemcpy(&bar, g.start_barrier, 8, cudaMemcpyDeviceToHost));
-  end = 0;
-  for (int i = 0; i < NSM; i++) {
-    end = std::max(end, st[i * NSTAMP + STAMP_END]);
+  p = nullptr;
+  bytes = 0;
+  if (name == "counters") {
+    p = g.cnt;
+    bytes = NCNT * 4;
+  } else if (name == "stamps") {
+    p = g.stamps;
+    bytes = NSM * NSTAMP * 8;
+  } else if (name == "start_barrier") {
+    p = g.start_barrier;
+    bytes = 8;
   }
-}
-
-// per GPU: the counters per line and how many SMs passed each stamp (readable
-// while a launch has not finished: a non-blocking stream)
-static void static_host_report(StaticContext &ctx) {
-  using namespace static_host;
-  for (size_t r = 0; r < g_gpus.size(); r++) {
-    G const &g = g_gpus[r].g;
-    cudaSetDevice(ctx.gpus[r].gpu);
-    cudaStream_t nb;
-    if (cudaStreamCreateWithFlags(&nb, cudaStreamNonBlocking) != cudaSuccess) {
-      return;
-    }
-    std::vector<uint32_t> cnt(NCNT);
-    std::vector<long long> stm(NSM * NSTAMP);
-    cudaMemcpyAsync(cnt.data(), g.cnt, NCNT * 4, cudaMemcpyDeviceToHost, nb);
-    cudaMemcpyAsync(
-        stm.data(), g.stamps, NSM * NSTAMP * 8, cudaMemcpyDeviceToHost, nb);
-    if (cudaStreamSynchronize(nb) != cudaSuccess) {
-      printf("layer GPU %zu: diagnostics not readable\n", r);
-      cudaStreamDestroy(nb);
-      continue;
-    }
-    int n_past[NSTAMP] = {0};
-    for (int i = 0; i < NSM; i++) {
-      for (int k = 0; k < NSTAMP; k++) {
-        n_past[k] += stm[i * NSTAMP + k] != 0;
-      }
-    }
-    printf("layer GPU %zu: counters (line: sum):", r);
-    for (int l = 0; l < NODE_COUNTER_LINES; l++) {
-      unsigned sum = 0;
-      for (int k = 0; k < 32; k++) {
-        sum += cnt[32 * l + k];
-      }
-      if (sum) {
-        printf(" %d: %u", l, sum);
-      }
-    }
-    printf(" | SMs past: start %d, task stamp 0 %d, task stamp 1 %d, end %d\n",
-           n_past[STAMP_START],
-           n_past[STAMP_TASK0],
-           n_past[STAMP_TASK1],
-           n_past[STAMP_END]);
-    cudaStreamDestroy(nb);
-  }
-  fflush(stdout);
 }
 
 static void static_host_finalize(StaticContext &ctx) {

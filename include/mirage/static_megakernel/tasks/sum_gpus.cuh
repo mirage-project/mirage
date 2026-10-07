@@ -12,7 +12,7 @@ namespace static_mk {
 // node's buffer)
 template <size_t SOFF, int H, int Q> // SOFF: the sent sums' offset in the
                                      // exchange region
-                                     __device__ __forceinline__ void
+__device__ __forceinline__ void
     sum_gpus_task(G const &g, __nv_bfloat16 *ssum, int q, int t) {
   constexpr size_t S_RANK =
       (size_t)T * H * 2;      // one GPU's partial sums in the sent buffer
@@ -36,7 +36,12 @@ template <size_t SOFF, int H, int Q> // SOFF: the sent sums' offset in the
 }
 // sum_gpus task (part x, token y): SEND = the allreduce_send node whose output
 // it adds (rows of H = its params[0])
-template <class SELF, class PARAMS, class SLOTS, class SEND, class... IN>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class SEND,
+          class... IN>
 __device__ __forceinline__ void run_sum_gpus(Maps const &,
                                              G const &g,
                                              KernelLocals &,
@@ -49,7 +54,11 @@ __device__ __forceinline__ void run_sum_gpus(Maps const &,
       g, buf_at<__nv_bfloat16>(g, SELF::buf), tk.x, tk.y);
 }
 
-template <class SELF, class PARAMS, class SLOTS, class... IN>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class... IN>
 constexpr int smem_sum_gpus() {
   return 0;
 }

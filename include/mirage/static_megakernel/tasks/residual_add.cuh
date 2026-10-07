@@ -11,12 +11,11 @@ namespace static_mk {
 // residual_add task x of NSLICE (ssum: sum_gpus's buffer)
 template <int NSLICE, size_t OOFF, int H> // OOFF: o's offset in the exchange
                                           // region
-                                          __device__ __forceinline__ void
-    residual_add_task(G const &g,
-                      __nv_bfloat16 *ssum,
-                      __nv_bfloat16 const *prefix,
-                      __nv_bfloat16 *y,
-                      int x) {
+__device__ __forceinline__ void residual_add_task(G const &g,
+                                                  __nv_bfloat16 *ssum,
+                                                  __nv_bfloat16 const *prefix,
+                                                  __nv_bfloat16 *y,
+                                                  int x) {
   constexpr size_t O_RANK = o_rank_bytes(H);
   int const nv = T * H / 8, lo = (int)((long long)nv * x / NSLICE),
             hi = (int)((long long)nv * (x + 1) / NSLICE);
@@ -30,12 +29,8 @@ template <int NSLICE, size_t OOFF, int H> // OOFF: o's offset in the exchange
     unsigned char const *sp =
         reinterpret_cast<unsigned char const *>(ssum + (size_t)t * H + c);
     uint4 su = ld16_relaxed(sp);
-    uint4 const ou =
-        (r < g.tp)
-            ? poll16(g.rv + OOFF + (size_t)r * O_RANK +
-                     (size_t)t * (H / GPUS) * 2 + cc * 2 + rg_set())
-            : make_uint4(0u, 0u, 0u, 0u); // r < g.tp always (the host requires
-                                          // tp == GPUS); a bound check
+    uint4 const ou = poll16(g.rv + OOFF + (size_t)r * O_RANK +
+                            (size_t)t * (H / GPUS) * 2 + cc * 2 + rg_set());
     while (!valid16w(su)) {
       __nanosleep(64);
       su = ld16_relaxed(sp);
@@ -54,10 +49,8 @@ template <int NSLICE, size_t OOFF, int H> // OOFF: o's offset in the exchange
     if constexpr (REARM) { // the one reader of these 16 B of S and of o; after
                            // y is written
       rearm16(sp);
-      if (r < g.tp) {
-        rearm16(g.rv + OOFF + (size_t)r * O_RANK + (size_t)t * (H / GPUS) * 2 +
-                cc * 2 + rg_set());
-      }
+      rearm16(g.rv + OOFF + (size_t)r * O_RANK + (size_t)t * (H / GPUS) * 2 +
+              cc * 2 + rg_set());
     }
   }
   __syncthreads();
@@ -65,10 +58,11 @@ template <int NSLICE, size_t OOFF, int H> // OOFF: o's offset in the exchange
 
 // residual_add task x: slice x of SELF::x of y; SSUM: the addend's node
 // (sum_gpus), O: the input's node (sum_send, its output in the exchange
-// region); PARAMS {H}; SLOTS {the residual, y (graph tensors, [T][H] bf16)}
+// region); PARAMS {H}; BUF_SLOTS {the residual, y (graph tensors, [T][H] bf16)}
 template <class SELF,
           class PARAMS,
-          class SLOTS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
           class SSUM,
           class O,
           class... IN>
@@ -83,7 +77,7 @@ __device__ __forceinline__ void run_residual_add(Maps const &,
                     exchange_bytes[O::buf] == (size_t)GPUS * o_rank_bytes(H),
                 "residual_add: S from sum_gpus's buffer, o from sum_send's");
 #ifdef STATIC_RESET_IN_KERNEL
-  if (g.pdl_trigger == 2) {
+  if constexpr (PDL_TRIGGER == 2) {
     asm volatile("griddepcontrol.launch_dependents;" ::
                      : "memory"); // PDL: near the end (the last task)
   }
@@ -91,12 +85,16 @@ __device__ __forceinline__ void run_residual_add(Maps const &,
   residual_add_task<SELF::x, exchange_offset[O::buf], H>(
       g,
       buf_at<__nv_bfloat16>(g, SSUM::buf),
-      buf_at<__nv_bfloat16 const>(g, slot_at<SLOTS, 0>()),
-      buf_at<__nv_bfloat16>(g, slot_at<SLOTS, 1>()),
+      buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 0>()),
+      buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 1>()),
       tk.x);
 }
 
-template <class SELF, class PARAMS, class SLOTS, class... IN>
+template <class SELF,
+          class PARAMS,
+          class BUF_SLOTS,
+          class MAP_SLOTS,
+          class... IN>
 constexpr int smem_residual_add() {
   return 0;
 }

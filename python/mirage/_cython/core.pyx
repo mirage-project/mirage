@@ -1141,11 +1141,11 @@ cdef class CyKNGraph:
         return self.p_kgraph.get_num_operators()
 
     def get_task_info(self, int op_idx):
-        """(name, params, grid_dim, num_inputs, num_outputs, tensors, task_type, variant_id) of the task registered for operator op_idx, or None."""
+        """(name, params, grid_dim, num_inputs, num_outputs, tensors) of the task registered for operator op_idx, or None."""
         cdef char cname[256]
         cdef int cparams[64]
         cdef int cgrid[3]
-        cdef int cio[5]
+        cdef int cio[3]
         cdef CppDTensor* ctensors[64]
         n = self.p_kgraph.get_task_info(op_idx, cname, 256, cparams, 64, cgrid, cio, ctensors, 64)
         if n < 0:
@@ -1154,7 +1154,7 @@ cdef class CyKNGraph:
         for i in range(n):
             ptr = ctypes.cast(<unsigned long long>ctensors[i], ctypes.c_void_p)
             tensors.append(DTensor(ptr))
-        return (cname.decode("UTF-8"), [cparams[i] for i in range(cio[2])], (cgrid[0], cgrid[1], cgrid[2]), cio[0], cio[1], tensors, cio[3], cio[4])
+        return (cname.decode("UTF-8"), [cparams[i] for i in range(cio[2])], (cgrid[0], cgrid[1], cgrid[2]), cio[0], cio[1], tensors)
 
     def generate_task_graph(self, int num_gpus, int my_gpu_id):
         cdef TaskGraphResult result = self.p_kgraph.generate_task_graph(num_gpus, my_gpu_id)

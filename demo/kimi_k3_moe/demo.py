@@ -4,22 +4,28 @@
   2. build_graph     the layer as 15 layer calls (no grid, no K split yet)
   3. compile_plan    the plan (a plan file; default solver_plan.json) -> the graph regridded to the plan's grids,
                      schedules/schedule_gpu<g>.json                          (python/mirage/mpk/compiler.py)
+                     --search COSTS: the plan is the solver's instead, starting from the plan file (search.search_plan with
+                     the cost record files COSTS; needs OR-Tools) -> <out>/plan.json, and <out>/plan_view.json with the solver's
+                     predicted timeline (python plan_viewer.py <out>/plan_view.json)
   4. compile_static  build/layer.cu from the schedules, built and loaded     (python/mirage/mpk/static_schedule.py)
   5. check_launch    one launch; y vs SGLang's y, y the same on all GPUs, each GPU's partial sums vs their fp32 references
   6. timed_launches  --reps launches, 512 MB read on every GPU before each (empties L2); span per launch
+                     --record FILE: the timing build; the per-task times become cost records (cost_records.py) appended to FILE
+Steps 5-6 run the layer through the test harness (python/mirage/mpk/static_harness.py).
 
-python demo.py --layer-dir ~/mk/moe_layer [--plan PLAN_FILE] [--out DIR] [--reps 20] [--compare-y y_rank0.bin]
+python demo.py --layer-dir ~/mk/moe_layer [--plan PLAN_FILE] [--search COSTS ...] [--record FILE] [--out DIR] [--reps 20]
+               [--compare-y y_rank0.bin]
 Weight files: <layer_dir>/ holds the tensors every GPU has (router, latent_down, latent_up, gamma, bias, the 8-token input x and the
 residual prefix, SGLang's y), <layer_dir>_r<g>/ GPU g's shard (shared gate_up / down, expert banks).
 """
-import argparse, os, socket, statistics, sys, json
+import argparse, os, socket, statistics, subprocess, sys, json
 from collections import Counter
 import numpy as np
 import torch
 from mirage.mpk.static_megakernel import StaticMegakernel
 from mirage.mpk import compiler
+from mirage.mpk.static_harness import Harness
 from mirage.core import bfloat16, float32, int64, uint8
-from mirage.utils import get_configurations_from_gpu
 
 T, H, L, E, TOPK = 8, 7168, 3584, 896, 16       # tokens, hidden, latent, experts, routed experts per token
 IR_LOCAL, SHR_LOCAL = 384, 768                   # routed / shared intermediate per GPU at TP8
@@ -74,13 +80,7 @@ def routed_partial(w: dict) -> torch.Tensor:
 
 def build_kernel(num_gpus: int = 8) -> StaticMegakernel:
     """The StaticMegakernel for the layer divided over num_gpus GPUs (the weight files are TP8 shards)."""
-    params = StaticMegakernel.get_default_init_parameters()
-    qo_indptr = torch.zeros(T + 1, dtype=torch.int32, device="cuda")
-    qo_indptr[T] = T
-    num_workers, num_schedulers = get_configurations_from_gpu(0)
-    params.update(mode="offline", test_mode=True, world_size=1, mpi_rank=0, num_workers=num_workers, num_local_schedulers=num_schedulers,
-                  max_num_batched_tokens=T, max_num_batched_requests=T, meta_tensors={"qo_indptr_buffer": qo_indptr})
-    return StaticMegakernel(num_gpus=num_gpus, **params)
+    return StaticMegakernel(num_gpus=num_gpus)
 
 
 def build_graph(mpk: StaticMegakernel, w: dict, rmsnorm_recompute: bool = False):
@@ -89,38 +89,36 @@ def build_graph(mpk: StaticMegakernel, w: dict, rmsnorm_recompute: bool = False)
     swapping their sums of squares (in a cluster of 2 CTAs when compile_plan can pair them), or each adding the whole row's
     (rmsnorm_recompute)."""
     a = lambda k: mpk.attach_input(torch_tensor=w[k], name=k)
-    nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name, io_category="cuda_tensor")
+    nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
     x, prefix = a("moe_in"), a("moe_prefix")
     w_router, bias = a("router_weight"), a("score_correction_bias")
     w_down, w_up, gamma = a("latent_down_weight"), a("latent_up_weight"), a("routed_expert_norm_weight")
     w_sgu, w_sd = a("shared_gate_up_weight"), a("shared_down_weight")
     w13, w13_sf, w2, w2_sf = a("w13_blocks"), a("w13_scales"), a("w2_blocks"), a("w2_scales")
-    G = nt((4096,), uint8, "globals")   # the layer state G (filled by static_megakernel/host.cuh)
-    M = nt((4096,), uint8, "maps")      # the tensor maps (filled by host.cuh)
     logits = nt((T, E), float32, "router_logits"); pairs = nt((T, TOPK), int64, "routing_pairs")
     z = nt((T, L), float32, "latent_z"); z_q = nt((T, L), uint8, "latent_z_mxfp8")
-    sgu = nt((T, 2 * SHR_LOCAL), float32, "shared_gate_up"); h_s = nt((T, SHR_LOCAL), bfloat16, "shared_act")
+    sgu = nt((T, 2 * SHR_LOCAL), int64, "shared_gate_up"); h_s = nt((T, SHR_LOCAL), bfloat16, "shared_act")
     Rn = nt((T, L), bfloat16, "routed_normed"); Ssum = nt((T, H), bfloat16, "shared_summed")
     up_part = nt((T, H), float32, "latent_up_partial"); o = nt((T, H), bfloat16, "latent_up_out")   # each GPU: its own rows
     R, S, y = a("routed_sum_partial"), a("shared_down_partial"), a("moe_out")
-    mpk.gemm_tile_layer(input=x, weight=w_router, globals=G, maps=M, output=logits)                       # router: logits = x . Wg^T (fp32)
-    mpk.topk_route_layer(input=logits, bias=bias, globals=G, output=pairs)                                     # sigmoid + bias, top-16, renorm
-    mpk.gemm_tile_layer(input=x, weight=w_down, globals=G, maps=M, output=z, rows_split_over_gpus=True)   # latent_down: z = x . Wdown^T
-    mpk.sum_quant_send_layer(input=z, globals=G, output=z_q)                                                       # MXFP8 quantize + all-gather
-    mpk.gemm_tile_layer(input=x, weight=w_sgu, globals=G, maps=M, output=sgu, combine="add")              # shared gate_up
-    mpk.situ_and_mul_layer(input=sgu, globals=G, output=h_s)                                                      # SiTU
-    r_sent, s_sent = nt((T, L), float32, "r_sent"), nt((T, H), float32, "s_sent")
-    mpk.gemm_tile_layer(input=h_s, weight=w_sd, globals=G, maps=M, output=S, combine="store")          # shared down: S = h_s . Wsd^T
-    mpk.allreduce_send_layer(input=S, globals=G, output=s_sent, num_tasks=56)                            # S to every GPU, early
-    mpk.moe_experts_layer(z_q=z_q, pairs=pairs, h_s=h_s, w13=w13, w2=w2, globals=G, maps=M, output=(R,),  # W13 + SiTU + requant, W2
-                           w13_scales=w13_sf, w2_scales=w2_sf)
-    mpk.allreduce_send_layer(input=R, globals=G, output=r_sent)                                          # R to every GPU
-    mpk.sum_rmsnorm_layer(input=r_sent, gamma=gamma, globals=G, output=Rn, recompute=rmsnorm_recompute)    # R over the GPUs, RMSNorm
-    mpk.sum_gpus_layer(input=s_sent, globals=G, output=Ssum)                                              # S over the GPUs
-    mpk.gemm_tile_layer(input=Rn, weight=w_up, globals=G, maps=M, output=up_part, rows_split_over_gpus=True,
-                        input_polled=True)                                                                   # latent_up (K parts)
-    mpk.sum_send_layer(input=up_part, globals=G, output=o)                                               # add the K parts, to every GPU
-    mpk.residual_add_layer(input=o, addend=Ssum, residual=prefix, globals=G, output=y)                         # y = o + S + prefix
+    mpk.gemm_tile_layer(input=x, weight=w_router, output=logits)                               # router: logits = x . Wg^T (fp32)
+    mpk.topk_route_layer(input=logits, bias=bias, output=pairs)                                # sigmoid + bias, top-16, renorm
+    mpk.gemm_tile_layer(input=x, weight=w_down, output=z, rows_split_over_gpus=True)           # latent_down: z = x . Wdown^T
+    mpk.sum_quant_send_layer(input=z, output=z_q)                                              # MXFP8 quantize + all-gather
+    mpk.gemm_tile_layer(input=x, weight=w_sgu, output=sgu, combine="add")                      # shared gate_up
+    mpk.situ_and_mul_layer(input=sgu, output=h_s)                                              # SiTU
+    r_sent, s_sent = nt((T, L), bfloat16, "r_sent"), nt((T, H), bfloat16, "s_sent")
+    mpk.gemm_tile_layer(input=h_s, weight=w_sd, output=S, combine="store")                     # shared down: S = h_s . Wsd^T
+    mpk.allreduce_send_layer(input=S, output=s_sent)                                           # S to every GPU, early
+    mpk.moe_experts_layer(z_q=z_q, pairs=pairs, w13=w13, w13_scales=w13_sf, w2=w2, w2_scales=w2_sf,
+                          output=R)                                                            # W13 + SiTU + requant, W2
+    mpk.allreduce_send_layer(input=R, output=r_sent)                                           # R to every GPU
+    mpk.sum_rmsnorm_layer(input=r_sent, gamma=gamma, output=Rn, recompute=rmsnorm_recompute)   # R over the GPUs, RMSNorm
+    mpk.sum_gpus_layer(input=s_sent, output=Ssum)                                              # S over the GPUs
+    mpk.gemm_tile_layer(input=Rn, weight=w_up, output=up_part, rows_split_over_gpus=True,
+                        input_polled=True)                                                     # latent_up (K parts)
+    mpk.sum_send_layer(input=up_part, output=o)                                                # add the K parts, to every GPU
+    mpk.residual_add_layer(input=o, addend=Ssum, residual=prefix, output=y)                    # y = o + S + prefix
     return y
 
 
@@ -146,14 +144,15 @@ def build(layer_dir: str, ngpu: int, rmsnorm_recompute: bool = False):
     return ws, mpk
 
 
-def launch_and_wait(sk, wait_s: float, what: str) -> None:
-    """One launch (512 MB read on every GPU first: L2 emptied); a launch that does not finish: its counters, then exit."""
-    sk.launch(l2_flush_bytes=512 << 20)
+FLUSH_BYTES = 512 << 20   # read on every GPU before each launch: L2 emptied (Harness.flush_l2)
+
+
+def launch_and_wait(h: Harness, wait_s: float, what: str) -> None:
+    """One launch, L2 emptied first; a launch that does not finish (the harness printed its counters): exit."""
     try:
-        sk.wait(timeout_s=wait_s)
+        h.launch(FLUSH_BYTES, timeout_s=wait_s)
     except (TimeoutError, RuntimeError) as e:
         print(f"KERNEL DID NOT FINISH{what}:", e, flush=True)
-        sk.report()
         os._exit(2)
 
 
@@ -171,11 +170,11 @@ def worst_blocks(R: torch.Tensor, R_ref: torch.Tensor, n: int = 8) -> list:
     return out
 
 
-def check_launch(sk, ws, layer_dir: str, out_dir: str, compare_y=None) -> bool:
+def check_launch(h: Harness, ws, layer_dir: str, out_dir: str, compare_y=None) -> bool:
     """Step 5: one launch, then y (GPU 0) vs SGLang's y (relRMS < 2e-2), y bit-identical on the other GPUs, and per GPU the
     routed / shared-down partial sums vs their fp32 references (relRMS < 1e-3). Writes y_gpu0.bin. Returns whether all pass."""
     ngpu = len(ws)
-    launch_and_wait(sk, 60, "")
+    launch_and_wait(h, 60, "")
     y0 = ws[0]["moe_out"].cpu()
     y_ref = read_file(f"{layer_dir}/y_ref_bf16.bin", (T, H), "bf16")
     e_y = relrms(y0.float(), y_ref.float())
@@ -203,35 +202,23 @@ def check_launch(sk, ws, layer_dir: str, out_dir: str, compare_y=None) -> bool:
         n_diff = (y0.view(torch.int16) != yc.view(torch.int16)).sum().item()
         print(f"y (GPU 0) bit-identical to {compare_y}: {eq} (relRMS {relrms(y0.float(), yc.float()):.3e}, {n_diff} of {T * H} values differ)")
     y0.view(torch.int16).numpy().tofile(os.path.join(out_dir, "y_gpu0.bin"))
-    sk.report()   # the counters and per-SM stamps of the checked launch (host.cuh static_host_report)
+    h.report()   # the counters and per-SM stamps of the checked launch
     return ok
 
 
-def timed_launches(sk, ws, reps: int, wait_s: float, after_launch=None) -> list:
-    """Step 6: `reps` launches, 512 MB read on every GPU before each (L2 emptied). Per launch: the span = max over GPUs of
-    (latest SM end - last SM past the start barrier), as static_host_timing measures it, and y / GPU 0's routed rows and shared sums
-    compared with the first launch's (all expected the same: every sum runs in a fixed order).
-    after_launch(): called after each launch (e.g. a tool that reads the timing build's stamps there). Returns the spans (us)."""
-    differs = lambda a, b: a.view(torch.int32) != b.view(torch.int32)   # value by value, as bits
-    spans, n_diff, rel_diff, per_token, rs_diff = [], [], [], [], []
-    y0 = ws[0]["moe_out"].cpu()
-    R0, S0 = ws[0]["routed_sum_partial"].cpu(), ws[0]["shared_down_partial"].cpu()
-    for rep in range(reps):
-        launch_and_wait(sk, wait_s, f" at timed launch {rep}")
-        spans.append(sk.span_us())
-        if after_launch:
-            after_launch()
-        y = ws[0]["moe_out"].cpu()
-        y_differs = y.view(torch.int16) != y0.view(torch.int16)
-        n_diff.append(int(y_differs.sum()))
-        rel_diff.append(relrms(y.float(), y0.float()))
-        per_token.append(tuple(y_differs.sum(1).tolist()))
-        rs_diff.append((int(differs(ws[0]["routed_sum_partial"].cpu(), R0).sum()), int(differs(ws[0]["shared_down_partial"].cpu(), S0).sum())))
-    print(f"y (GPU 0) of each timed launch vs the checked launch: values differing min {min(n_diff)} max {max(n_diff)} of {T * H}, "
-          f"relRMS max {max(rel_diff):.3e}")
-    print("  values differing per token (token 0..7) -> number of timed launches:", dict(Counter(per_token)))
+def timed_launches(h: Harness, ws, reps: int, wait_s: float, after_launch=None) -> list:
+    """Step 6: `reps` launches, L2 emptied before each. Per launch: the span = max over GPUs of (latest SM end - last SM past the
+    start barrier) (Harness.span_us), and y / GPU 0's routed rows and shared sums compared with the checked launch's, bit by bit
+    (all expected the same: every sum runs in a fixed order). after_launch(i): called after launch i (e.g. a tool that reads the
+    timing build's stamps there). Returns the spans (us)."""
+    watch = {"y": ws[0]["moe_out"], "R": ws[0]["routed_sum_partial"], "S": ws[0]["shared_down_partial"]}
+    spans, changed = h.repeat(reps, watch, FLUSH_BYTES, wait_s, after_launch)
+    n_y = [int(c["y"].sum()) for c in changed]
+    print(f"y (GPU 0) of each timed launch vs the checked launch: values differing min {min(n_y)} max {max(n_y)} of {T * H}")
+    print("  values differing per token (token 0..7) -> number of timed launches:",
+          dict(Counter(tuple(c["y"].sum(1).tolist()) for c in changed)))
     print("  GPU 0's R, S of each timed launch vs the checked launch: (R values differing, S values differing) -> number of launches:",
-          dict(Counter(rs_diff)))
+          dict(Counter((int(c["R"].sum()), int(c["S"].sum())) for c in changed)))
     return spans
 
 
@@ -249,24 +236,45 @@ def main():
     p.add_argument("--rmsnorm-recompute", action="store_true", help="sum_rmsnorm: each task adds the squares of the whole row itself "
                    "(no swap between a token's tasks)")
     p.add_argument("--compare-y", default=None, help="a y file (bf16 [8, 7168], e.g. another build's y) to compare y with, value by value")
+    p.add_argument("--search", nargs="+", default=None, metavar="COSTS", help="cost record files: the solver's plan, from --plan")
+    p.add_argument("--costs-code", default="current", help="with --search: the records of these kernel templates: current "
+                   "(static_schedule.code_tag), any, or a tag")
+    p.add_argument("--time", type=float, default=300, help="with --search: the solver's time limit (s)")
+    p.add_argument("--record", default=None, metavar="FILE", help="the timing build; this run's cost records appended to FILE")
     args = p.parse_args()
     os.makedirs(args.out, exist_ok=True)
     ngpu = args.gpus
-    num_sms = torch.cuda.get_device_properties(0).multi_processor_count
     ws, mpk = build(args.layer_dir, ngpu, args.rmsnorm_recompute)
     print_nodes(mpk, "graph nodes as written (default grids):")
     plan = compiler.plan_from_file(args.plan)
-    # 63 = 64 entries per SM list (static_mk::MAX_TASKS_PER_SM, static_megakernel/config.cuh) minus the end marker
-    paths, info = compiler.compile_plan(mpk, plan, os.path.join(args.out, "schedules"), ngpu, num_sms, max_tasks_per_sm=63)
+    if args.search:
+        from mirage.mpk import plan_viewer, search, static_schedule
+        code = {"current": static_schedule.code_tag(), "any": None}.get(args.costs_code, args.costs_code)
+        costs = search.Costs(args.search, code=code, gpu=torch.cuda.get_device_name(0))
+        plan, summary = search.search_plan(mpk, costs, time_limit_s=args.time, start_from=plan)
+        compiler.write_plan_file(os.path.join(args.out, "plan.json"), plan)
+        plan_viewer.save(os.path.join(args.out, "plan_view.json"), plan, summary, f"searched from {args.plan}")
+    paths, info = compiler.compile_plan(mpk, plan, os.path.join(args.out, "schedules"))
     print_nodes(mpk, "graph nodes after compiling:")
-    sk = mpk.compile_static(paths, gpu_tensors=ws, out_dir=os.path.join(args.out, "build"), extra_flags=args.nvcc_flag)
+    sk = mpk.compile_static(paths, gpu_tensors=ws, out_dir=os.path.join(args.out, "build"), extra_flags=args.nvcc_flag,
+                            profile=args.record is not None)
     cases = [line.strip() for line in open(sk.cu_path).read().splitlines() if line.strip().startswith("case ")]
     print("generated layer:", sk.cu_path, "| kernel task loop branches:", cases)
-    if not check_launch(sk, ws, args.layer_dir, args.out, args.compare_y):
+    h = Harness(sk)
+    if not check_launch(h, ws, args.layer_dir, args.out, args.compare_y):
         print("CHECK FAILED: no timing")
         sk.finalize()
         sys.exit(1)
-    spans = timed_launches(sk, ws, args.reps, args.wait)
+    launches = []   # --record: per timed launch, the per-task times and the per-GPU span ends
+    spans = timed_launches(h, ws, args.reps, args.wait,
+                           after_launch=(lambda i: launches.append((h.task_times(), h.timing()))) if args.record else None)
+    if args.record:
+        from mirage.mpk import cost_records
+        nvcc = subprocess.run(["nvcc", "--version"], capture_output=True, text=True).stdout.strip().splitlines()[-1]
+        machine = {"gpu": torch.cuda.get_device_name(0), "cuda": nvcc}
+        records = cost_records.records_of_run(mpk, paths, launches, os.path.basename(os.path.normpath(args.out)), machine)
+        cost_records.append_records(args.record, records)
+        print(f"cost records: {len(records)} added to {args.record} (code {records[0]['code'] if records else '-'}, {machine})")
     print(f"machine {socket.gethostname()} {torch.cuda.get_device_name(0)} x {ngpu}, plan {args.plan}, grids {info['grids']}, "
           f"{args.reps} launches (L2 emptied before each): "
           f"span min {min(spans):.1f} median {statistics.median(spans):.1f} max {max(spans):.1f} us "

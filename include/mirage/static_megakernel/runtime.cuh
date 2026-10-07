@@ -327,9 +327,9 @@ __device__ __forceinline__ bool
 
 // store 16 bytes at offset `off` of the exchange region of EVERY GPU (multicast
 // address mc), or of the local copy rv with one GPU
-__device__ __forceinline__ void push16_mc(
-    unsigned char *mc, unsigned char *rv, int tp, size_t off, uint4 v) {
-  if (tp > 1) { // multimem.st exists only for .f32 vectors
+__device__ __forceinline__ void
+    push16_mc(unsigned char *mc, unsigned char *rv, size_t off, uint4 v) {
+  if constexpr (GPUS > 1) { // multimem.st exists only for .f32 vectors
     asm volatile("multimem.st.weak.global.v4.f32 [%0], {%1, %2, %3, %4};" ::"l"(
                      mc + off),
                  "f"(__uint_as_float(v.x)),
@@ -466,9 +466,6 @@ __device__ __forceinline__ bool issuer_lane() {
     return p != 0;
   }
 }
-__device__ __forceinline__ bool lane_is_0() {
-  return (threadIdx.x & 31) == 0;
-}
 template <bool WARP>
 __device__ __forceinline__ int
     warp_same(int v) { // lane 0's value in every lane (WARP), so the compiler
@@ -601,21 +598,18 @@ __device__ __forceinline__ void load_job(TileJob const &j,
 __device__ __forceinline__ void prefetch_tmap(void const *m) {
   asm volatile("prefetch.tensormap [%0];" ::"l"(m) : "memory");
 }
-// issuer iss (0 or 1): consume the job's stages into accumulator stage a (kind
-// 0: the stages with s % 2 == iss; kind 1: piece iss of every stage). Both
-// issuers wait on EVERY stage in order (parity rule). TMEM columns: acc = tb +
-// 8 a + 32 iss (8 fp32 each); weight scales at tb + 64 + 4 iss; kind 1's z_q
-// scales from sfb_base. timing build: *stamp = when the job's first stage has
-// landed
+// issuer iss (0 or 1): consume the job's stages into accumulator stage a (a
+// kind 0 job: gemm_tile; the stages with s % 2 == iss). Both issuers wait on
+// EVERY stage in order (parity rule). TMEM columns: acc = tb + 8 a + 32 iss (8
+// fp32 each). timing build: *stamp = when the job's first stage has landed
 template <int ROWS = 128>
 __device__ __forceinline__ void issue_job(TileJob const &j,
                                           uint32_t base,
                                           uint32_t tb,
                                           int iss,
                                           int &g,
-                                          int a,
-                                          uint32_t sfb_base STAGE_STAMP_PARAM) {
-  uint32_t const acc = tb + 8 * a + 32 * iss, sfa = tb + 64 + 4 * iss;
+                                          int a STAGE_STAMP_PARAM) {
+  uint32_t const acc = tb + 8 * a + 32 * iss;
   bool first = true;
   for (int s = 0; s < j.nst; s++, g++) {
     bool const mine = (s & 1) == iss;
@@ -631,33 +625,16 @@ __device__ __forceinline__ void issue_job(TileJob const &j,
       mbar_arrive(rt.empty0 + 8 * st);
       continue;
     }
-    if (j.kind == 0) {
-      uint32_t const wst = base + st * FSTAGE,
-                     ast = base + st * FSTAGE + W_STAGE;
-      for (int at = 0; at < 2; at++) { // two 64-column halves of K 128 (ROWS x
-                                       // 128 B each), 4 MMAs of K 16 each
-        uint64_t const dw = mkdesc(wst + at * ROWS * 128),
-                       dx = mkdesc(ast + at * 1024);
-        for (int k = 0; k < 4; k++) {
-          mma_bf16<ROWS>(
-              acc, dw + 2 * k, dx + 2 * k, (first && k == 0) ? 0u : 1u);
-        }
-        first = false;
+    uint32_t const wst = base + st * FSTAGE, ast = base + st * FSTAGE + W_STAGE;
+    for (int at = 0; at < 2; at++) { // two 64-column halves of K 128 (ROWS x
+                                     // 128 B each), 4 MMAs of K 16 each
+      uint64_t const dw = mkdesc(wst + at * ROWS * 128),
+                     dx = mkdesc(ast + at * 1024);
+      for (int k = 0; k < 4; k++) {
+        mma_bf16<ROWS>(
+            acc, dw + 2 * k, dx + 2 * k, (first && k == 0) ? 0u : 1u);
       }
-    } else { // kind 1 (W13)
-      int const na = (j.natoms - 2 * s < 2) ? j.natoms - 2 * s : 2;
-      for (int at = 0; at < na; at++) {
-        int const atom = 2 * s + at;
-        cp_sf(sfa, base + OFF_WSF + (st * 2 + at) * SF_CHUNK);
-        uint64_t const dw = mkdesc(base + st * FSTAGE + at * 16384);
-        uint64_t const db = mkdesc(base + st * FSTAGE + W_STAGE + at * 1024);
-        uint32_t const sfb = sfb_base + 4 * (j.k0 + atom);
-        mma_mx(acc, dw, db, idesc_mx(0), first ? 0u : 1u, sfa, sfb);
-        mma_mx(acc, dw + 2, db + 2, idesc_mx(1), 1u, sfa, sfb);
-        mma_mx(acc, dw + 4, db + 4, idesc_mx(2), 1u, sfa, sfb);
-        mma_mx(acc, dw + 6, db + 6, idesc_mx(3), 1u, sfa, sfb);
-        first = false;
-      }
+      first = false;
     }
     tc_commit(rt.empty0 + 8 * st); // `empty` count 2: the owning issuer's MMAs
                                    // done + the other issuer's arrive
@@ -666,12 +643,12 @@ __device__ __forceinline__ void issue_job(TileJob const &j,
                                    // issuers at least one stage / piece
 }
 
-// issue_job for a whole warp (all 32 lanes call it; one elected lane issues
-// each operation): moe_experts' issuers SF_SLOTS: each (ring stage st, piece
-// at) has its own weight-scale slot in TMEM, columns 232 + 4 (2 st + at) (free
-// columns; moe_experts.cuh), so a scale copy never overwrites the slot the
-// previous piece's MMAs read; false: one slot per issuer
-template <int ROWS = 128, bool WARP = true, bool SF_SLOTS = false>
+// moe_experts' issuer iss for a kind 1 job (W13: piece iss of every stage),
+// run by a whole warp (all 32 lanes call it; one elected lane issues each
+// operation). Each (ring stage st, piece at) has its own weight-scale slot in
+// TMEM, columns 232 + 4 (2 st + at) (free columns; moe_experts.cuh), so a scale
+// copy never overwrites the slot the previous piece's MMAs read; z_q's scales
+// from sfb_base
 __device__ __forceinline__ void
     issue_job_warp(TileJob const &j,
                    uint32_t base,
@@ -680,7 +657,7 @@ __device__ __forceinline__ void
                    int &g,
                    int a,
                    uint32_t sfb_base STAGE_STAMP_PARAM) {
-  uint32_t const acc = tb + 8 * a + 32 * iss, sfa = tb + 64 + 4 * iss;
+  uint32_t const acc = tb + 8 * a + 32 * iss;
   bool first = true;
   for (int s = 0; s < j.nst; s++, g++) {
     bool const mine = (s & 1) == iss;
@@ -692,56 +669,37 @@ __device__ __forceinline__ void
     // seen the fill: the loader re-arms the slot only after BOTH issuers passed
     // it (otherwise an issuer 5+ stages behind waits for a `full` phase that
     // already completed twice: deadlock)
-    bool const one =
-        issuer_lane<WARP>(); // the lane that issues (WARP: one elected lane;
-                             // otherwise this thread)
+    bool const one = issuer_lane<true>(); // the elected lane that issues
     if (!mine) {
       if (one) {
         mbar_arrive(rt.empty0 + 8 * st);
       }
       continue;
     }
-    if (j.kind == 0) {
-      uint32_t const wst = base + st * FSTAGE,
-                     ast = base + st * FSTAGE + W_STAGE;
-      for (int at = 0; at < 2; at++) { // two 64-column halves of K 128 (ROWS x
-                                       // 128 B each), 4 MMAs of K 16 each
-        uint64_t const dw = mkdesc(wst + at * ROWS * 128),
-                       dx = mkdesc(ast + at * 1024);
-        if (one) {
-          for (int k = 0; k < 4; k++) {
-            mma_bf16<ROWS>(
-                acc, dw + 2 * k, dx + 2 * k, (first && k == 0) ? 0u : 1u);
-          }
-        }
-        first = false;
+    int const na = (j.natoms - 2 * s < 2) ? j.natoms - 2 * s : 2;
+    for (int at = 0; at < na; at++) {
+      int const atom = 2 * s + at;
+      uint32_t const sfp = tb + 232 + 4 * (st * 2 + at);
+      if (one) {
+        cp_sf(sfp, base + OFF_WSF + (st * 2 + at) * SF_CHUNK);
       }
-    } else { // kind 1 (W13)
-      int const na = (j.natoms - 2 * s < 2) ? j.natoms - 2 * s : 2;
-      for (int at = 0; at < na; at++) {
-        int const atom = 2 * s + at;
-        uint32_t const sfp = SF_SLOTS ? tb + 232 + 4 * (st * 2 + at) : sfa;
-        if (one) {
-          cp_sf(sfp, base + OFF_WSF + (st * 2 + at) * SF_CHUNK);
-        }
-        uint64_t const dw = mkdesc(base + st * FSTAGE + at * 16384);
-        uint64_t const db = mkdesc(base + st * FSTAGE + W_STAGE + at * 1024);
-        uint32_t const sfb = sfb_base + 4 * (j.k0 + atom);
-        if (one) {
-          mma_mx(acc, dw, db, idesc_mx(0), first ? 0u : 1u, sfp, sfb);
-          mma_mx(acc, dw + 2, db + 2, idesc_mx(1), 1u, sfp, sfb);
-          mma_mx(acc, dw + 4, db + 4, idesc_mx(2), 1u, sfp, sfb);
-          mma_mx(acc, dw + 6, db + 6, idesc_mx(3), 1u, sfp, sfb);
-        }
-        first = false;
+      uint64_t const dw = mkdesc(base + st * FSTAGE + at * 16384);
+      uint64_t const db = mkdesc(base + st * FSTAGE + W_STAGE + at * 1024);
+      uint32_t const sfb = sfb_base + 4 * (j.k0 + atom);
+      if (one) {
+        mma_mx(acc, dw, db, idesc_mx(0), first ? 0u : 1u, sfp, sfb);
+        mma_mx(acc, dw + 2, db + 2, idesc_mx(1), 1u, sfp, sfb);
+        mma_mx(acc, dw + 4, db + 4, idesc_mx(2), 1u, sfp, sfb);
+        mma_mx(acc, dw + 6, db + 6, idesc_mx(3), 1u, sfp, sfb);
       }
+      first = false;
     }
     if (one) {
       tc_commit(rt.empty0 + 8 * st); // `empty` count 2: the owning issuer's
                                      // MMAs done + the other issuer's arrive
     }
   }
-  if (issuer_lane<WARP>()) {
+  if (issuer_lane<true>()) {
     tc_commit(rt.acc_full0 + 8 * a); // `acc_full` count 2: every job gives both
                                      // issuers at least one stage / piece
   }
