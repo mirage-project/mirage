@@ -39,6 +39,43 @@ __host__ __device__ __forceinline__ float ue8m0(unsigned scale) {
   return exp2f(static_cast<float>(static_cast<int>(scale) - 127));
 }
 
+// Nearest E2M1 code. The sign bit is set when x is negative.
+__host__ __device__ __forceinline__ int quantize_e2m1(float x) {
+  float a = fabsf(x);
+  int mag = 0;
+  if (a >= 5.0f) {
+    mag = 7;
+  } else if (a >= 3.5f) {
+    mag = 6;
+  } else if (a >= 2.5f) {
+    mag = 5;
+  } else if (a >= 1.75f) {
+    mag = 4;
+  } else if (a >= 1.25f) {
+    mag = 3;
+  } else if (a >= 0.75f) {
+    mag = 2;
+  } else if (a >= 0.25f) {
+    mag = 1;
+  }
+  return (x < 0.0f ? 8 : 0) | mag;
+}
+
+// UE8M0 byte such that 6 * 2^(byte-127) covers amax. Zero maps to exponent 0.
+__host__ __device__ __forceinline__ int quantize_ue8m0(float amax) {
+  if (!(amax > 0.0f)) {
+    return 127;
+  }
+  int biased = static_cast<int>(ceilf(log2f(amax / 6.0f))) + 127;
+  if (biased < 0) {
+    return 0;
+  }
+  if (biased > 254) {
+    return 254;
+  }
+  return biased;
+}
+
 // blocks: K/2 bytes, low nibble at even K. scales: K/32 bytes.
 __host__ __device__ __forceinline__ float
     dequant(const uint8_t *row_bytes, const uint8_t *row_scales, int k) {
