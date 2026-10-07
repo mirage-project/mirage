@@ -212,6 +212,28 @@ public:
                                             std::vector<int> const &params);
   int register_glm_moe_router_sm100_task(threadblock::Graph const &bgraph,
                                          std::vector<int> const &params);
+  // the static megakernel task types (include/mirage/static_megakernel/); run
+  // only in the generated static layer
+  int register_gemm_tile_sm100_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params);
+  int register_topk_route_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
+  int register_sum_quant_send_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_situ_and_mul_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_moe_experts_sm100_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_allreduce_send_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_sum_rmsnorm_sm100_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_sum_gpus_sm100_task(threadblock::Graph const &bgraph,
+                                   std::vector<int> const &params);
+  int register_sum_send_sm100_task(threadblock::Graph const &bgraph,
+                                   std::vector<int> const &params);
+  int register_residual_add_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(

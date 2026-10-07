@@ -18,10 +18,12 @@
 #include "mirage/kernel/customized.h"
 #include "mirage/kernel/device_memory_manager.h"
 #include "mirage/kernel/task_register.h"
+#include "mirage/threadblock/operator.h"
 #include "mirage/utils/hash_utils.h"
 
 #include <algorithm>
 #include <iostream>
+#include <new>
 
 namespace mirage {
 namespace kernel {
@@ -437,8 +439,90 @@ DTensor *Graph::shuffle_tensors(std::vector<DTensor const *> inputs,
 }
 
 void Graph::register_task(char const *task_type, std::vector<int> params) {
+  register_task_for_op(operators.back(), task_type, params);
+}
+
+int Graph::get_num_operators() const {
+  return static_cast<int>(operators.size());
+}
+
+void Graph::regrid(int op_idx, dim3 grid_dim, std::vector<int> params) {
+  assert(op_idx >= 0 && op_idx < (int)operators.size());
+  KNOperator *op = operators[op_idx];
+  assert(op->op_type == type::KN_CUSTOMIZED_OP);
+  KNCustomizedOp *customized = static_cast<KNCustomizedOp *>(op);
+  struct Input {
+    DTensor dtensor;
+    int3 input_map;
+    int forloop_dim;
+    layout::SmemLayout layout;
+    bool store_in_dmem;
+  };
+  std::vector<Input> inputs;
+  for (auto const *tb_op : customized->bgraph.operators) {
+    assert(tb_op->op_type == type::TB_INPUT_OP);
+    auto const *in = static_cast<threadblock::TBInputOp const *>(tb_op);
+    inputs.push_back({in->dtensor,
+                      in->input_map,
+                      in->forloop_dim,
+                      in->output_tensors[0].layout,
+                      in->output_tensors[0].store_in_dmem});
+  }
+  dim3 block_dim = customized->bgraph.block_dim;
+  int forloop_range = customized->bgraph.forloop_range;
+  int reduction_dimx = customized->bgraph.reduction_dimx;
+  customized->bgraph.~Graph();
+  new (&customized->bgraph)
+      threadblock::Graph(grid_dim, block_dim, forloop_range, reduction_dimx);
+  for (auto const &in : inputs) {
+    customized->bgraph.new_input(
+        in.dtensor, in.input_map, in.forloop_dim, in.layout, in.store_in_dmem);
+  }
+  std::string name = task_name_params.at(op).first;
+  task_config.erase(op);
+  register_task_for_op(op, name.c_str(), params);
+}
+
+int Graph::get_task_info(int op_idx,
+                         char *name,
+                         int name_len,
+                         int *params,
+                         int max_params,
+                         int *grid,
+                         int *io,
+                         DTensor **tensors,
+                         int max_tensors) {
+  assert(op_idx >= 0 && op_idx < (int)operators.size());
+  KNOperator *op = operators[op_idx];
+  auto np = task_name_params.find(op);
+  auto tc = task_config.find(op);
+  if (np == task_name_params.end() || tc == task_config.end()) {
+    return -1;
+  }
+  snprintf(name, name_len, "%s", np->second.first.c_str());
+  int nparams = std::min((int)np->second.second.size(), max_params);
+  for (int i = 0; i < nparams; i++) {
+    params[i] = np->second.second[i];
+  }
+  KNCustomizedOp *customized = static_cast<KNCustomizedOp *>(op);
+  grid[0] = customized->bgraph.grid_dim.x;
+  grid[1] = customized->bgraph.grid_dim.y;
+  grid[2] = customized->bgraph.grid_dim.z;
+  io[0] = std::get<0>(tc->second);
+  io[1] = std::get<1>(tc->second);
+  io[2] = nparams;
+  int ntensors = std::min((int)op->input_tensors.size(), max_tensors);
+  for (int i = 0; i < ntensors; i++) {
+    tensors[i] = &op->input_tensors[i];
+  }
+  return ntensors;
+}
+
+void Graph::register_task_for_op(KNOperator const *op,
+                                 char const *task_type,
+                                 std::vector<int> params) {
   std::string name = std::string(task_type);
-  KNOperator const *op = operators.back();
+  task_name_params[op] = std::make_pair(name, params);
   assert(op->op_type == type::KN_CUSTOMIZED_OP);
   KNCustomizedOp const *customized = static_cast<KNCustomizedOp const *>(op);
   TaskRegister *task_register = TaskRegister::get_instance();
@@ -930,6 +1014,50 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_NVSHMEM_TILE_ALLREDUCE, variant_id);
+  } else if (name == "gemm_tile") {
+    int variant_id = task_register->register_gemm_tile_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_GEMM_TILE_SM100, variant_id);
+  } else if (name == "topk_route") {
+    int variant_id = task_register->register_topk_route_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_TOPK_ROUTE_SM100, variant_id);
+  } else if (name == "sum_quant_send") {
+    int variant_id = task_register->register_sum_quant_send_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_SUM_QUANT_SEND_SM100, variant_id);
+  } else if (name == "situ_and_mul") {
+    int variant_id = task_register->register_situ_and_mul_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_SITU_AND_MUL_SM100, variant_id);
+  } else if (name == "moe_experts") {
+    int variant_id = task_register->register_moe_experts_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(4, 1, TASK_MOE_EXPERTS_SM100, variant_id);
+  } else if (name == "allreduce_send") {
+    int variant_id = task_register->register_allreduce_send_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_ALLREDUCE_SEND_SM100, variant_id);
+  } else if (name == "sum_rmsnorm") {
+    int variant_id = task_register->register_sum_rmsnorm_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_SUM_RMSNORM_SM100, variant_id);
+  } else if (name == "sum_gpus") {
+    int variant_id =
+        task_register->register_sum_gpus_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_SUM_GPUS_SM100, variant_id);
+  } else if (name == "sum_send") {
+    int variant_id =
+        task_register->register_sum_send_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_SUM_SEND_SM100, variant_id);
+  } else if (name == "residual_add") {
+    int variant_id = task_register->register_residual_add_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_RESIDUAL_ADD_SM100, variant_id);
   }
 
   else {
