@@ -718,6 +718,16 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
     int variant_id = task_register->register_moe_fp8_sm100_task(
         customized->bgraph, params, false /*w13_linear*/);
     task_config[op] = std::make_tuple(6, 1, TASK_MOE_W2_FP8_SM100, variant_id);
+  } else if (name == "moe_w13_mxfp4_sm100") {
+    int variant_id = task_register->register_moe_mxfp4_sm100_task(
+        customized->bgraph, params, true /*w13_linear*/);
+    task_config[op] =
+        std::make_tuple(6, 1, TASK_MOE_W13_MXFP4_SM100, variant_id);
+  } else if (name == "moe_w2_mxfp4_sm100") {
+    int variant_id = task_register->register_moe_mxfp4_sm100_task(
+        customized->bgraph, params, false /*w13_linear*/);
+    task_config[op] =
+        std::make_tuple(6, 1, TASK_MOE_W2_MXFP4_SM100, variant_id);
   } else if (name == "elementwise_add_sm100") {
     int variant_id = task_register->register_elementwise_add_sm100_task(
         customized->bgraph, params);

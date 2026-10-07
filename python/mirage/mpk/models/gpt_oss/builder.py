@@ -1,11 +1,18 @@
 import torch
 
+import math
+
 from ..graph_builder import GraphBuilder
 from ..utils import grid_for_rmsnorm_linear_layer, shuffle_tensors
 from ...kv_planner import KVCachePlan, KVSpec, plan_kv_groups
 from ...persistent_kernel import PersistentKernel
 from ...model_registry import register_model_builder
 from ....core import bfloat16, float32, int32, int64
+from .mxfp4 import (
+    Mxfp4Checkpoint,
+    checkpoint_expert_format,
+    convert_expert_weight,
+)
 
 from typing import Optional
 
@@ -44,10 +51,24 @@ def plan_kv_cache(config, page_size: int, world_size: int = 1) -> KVCachePlan:
     ])
 
 
-@register_model_builder("gpt_oss", "GptOss", "openai/gpt-oss-20b")
+def _moe_out_grid(output_size: int, tile: int = 128):
+    """grid.x strides active experts. grid.y splits N into slices of
+    ``gcd(output_size, tile)`` columns, so 5760 lands on 128-wide tiles and
+    2880 lands on 64-wide tiles. The MMA tile stays 128; a short slice is
+    zero-padded inside the kernel."""
+    slice_cols = math.gcd(output_size, tile)
+    return (8, output_size // slice_cols, 1)
+
+
+@register_model_builder(
+    "gpt_oss", "GptOss", "openai/gpt-oss-20b", "openai/gpt-oss-120b")
 class GptOssBuilder(GraphBuilder):
-    """GPT-OSS-20B: alternating sliding/full attention with per-head sinks, and
-    a clamped-alpha SwiGLU MoE. Every projection carries a bias.
+    """GPT-OSS (20B and 120B): alternating sliding/full attention with per-head
+    sinks, and a clamped-alpha SwiGLU MoE. Every projection carries a bias.
+
+    The released checkpoints quantize expert weights to MXFP4. Attention,
+    router, embeddings and lm_head stay bf16. A plain bf16 checkpoint still
+    builds through the bf16 expert GEMM.
     """
 
     def __init__(self, mpk: PersistentKernel, weights: Optional[dict] = None,
@@ -61,6 +82,7 @@ class GptOssBuilder(GraphBuilder):
         self.output_tokens = mpk.meta_tensors["output_tokens"]
         self.tokenizer = None
         self.eos_token_id = 200002
+        self.mxfp4 = False
         self._keep = []  # converted weights must outlive the graph build
 
     # ---------------------------------------------------------------- loading
@@ -71,12 +93,12 @@ class GptOssBuilder(GraphBuilder):
         source = model_path or model_name
         self.config = AutoConfig.from_pretrained(source)
         assert self.world_size == 1, "GPT-OSS is single-GPU for now"
+        # torch_dtype on the config is bf16 for attention and embeddings.
+        # Expert format follows quantization_config, or the packed *_blocks
+        # tensors when that field was dropped. The bf16 AutoModel load
+        # dequantizes MXFP4, so it is only the unpacked-checkpoint path.
+        self.mxfp4 = checkpoint_expert_format(self.config, source) == "mxfp4"
 
-        # Loaded on the host: the conversions below transpose and
-        # de-interleave whole expert tensors, so holding both copies on the
-        # GPU would need twice the model. _attach moves each one over.
-        model = AutoModelForCausalLM.from_pretrained(
-            source, dtype=torch.bfloat16, device_map="cpu")
         self.tokenizer = AutoTokenizer.from_pretrained(source)
         self.eos_token_id = self.config.eos_token_id
 
@@ -102,10 +124,26 @@ class GptOssBuilder(GraphBuilder):
         # RoPE from the model's own module, so YaRN and its attention_scaling
         # are not re-derived here. Its tables are half-width, broadcast against
         # the two rotate-half chunks; MPK's kernel indexes a full head_dim row,
-        # so duplicate them.
+        # so duplicate them. The MXFP4 path builds that module from the config
+        # instead of materializing the whole model (120B bf16 does not fit).
+        if self.mxfp4:
+            from transformers.models.gpt_oss.modeling_gpt_oss import (
+                GptOssRotaryEmbedding,
+            )
+            rotary = GptOssRotaryEmbedding(cfg)
+            weights = Mxfp4Checkpoint(source)
+        else:
+            # Loaded on the host: the conversions below transpose and
+            # de-interleave whole expert tensors, so holding both copies on the
+            # GPU would need twice the model. _attach moves each one over.
+            model = AutoModelForCausalLM.from_pretrained(
+                source, dtype=torch.bfloat16, device_map="cpu")
+            rotary = model.model.rotary_emb
+            weights = model.state_dict()
+
         dummy = torch.empty(0, dtype=torch.bfloat16)
         positions = torch.arange(self.mpk.max_seq_length).unsqueeze(0)
-        cos, sin = model.model.rotary_emb(dummy, positions)
+        cos, sin = rotary(dummy, positions)
         self.cos_table = torch.cat([cos[0], cos[0]], dim=-1).contiguous().to(torch.bfloat16)
         self.sin_table = torch.cat([sin[0], sin[0]], dim=-1).contiguous().to(torch.bfloat16)
 
@@ -117,7 +155,7 @@ class GptOssBuilder(GraphBuilder):
             f"the builder plans {len(self.kv_plan.groups)} KV group(s) but "
             f"mpk was built with {len(self.mpk.kv_groups)} — pass "
             f"kv_groups=plan.group_specs() and the same plan to the builder")
-            
+
         entry_shape = (self.num_kv_heads, self.head_dim)
         self.kv_pool, self.kv_views = self.kv_plan.allocate_pool(
             {g.spec_name: [("k", entry_shape, torch.bfloat16),
@@ -125,8 +163,7 @@ class GptOssBuilder(GraphBuilder):
              for g in self.kv_plan.groups},
             max_num_pages=self.max_num_pages)
 
-        state_dict = model.state_dict()
-        self.build_from_dict(state_dict, with_lm_head=True)
+        self.build_from_dict(weights, with_lm_head=True)
 
     def build_from_config(self, model_config):
         raise NotImplementedError(
@@ -169,6 +206,32 @@ class GptOssBuilder(GraphBuilder):
                 self._attach(b13, f"layer_{i}_b13"),
                 self._attach(w2, f"layer_{i}_w2"),
                 self._attach(b2, f"layer_{i}_b2"))
+
+    def _experts_mxfp4(self, sd, prefix, i):
+        """Native checkpoint layout, de-interleaved onto the GEMM layout.
+
+        gate_up blocks are [E, 2I, H/32, 16] with gate/up interleaved on dim 1.
+        down blocks are [E, H, I/32, 16], already [E, N, K] for the down GEMM.
+        The released file stores both biases as bf16.
+        """
+        gu_b, gu_s, gu_bias = convert_expert_weight(
+            sd[f"{prefix}mlp.experts.gate_up_proj_blocks"],
+            sd[f"{prefix}mlp.experts.gate_up_proj_scales"],
+            sd[f"{prefix}mlp.experts.gate_up_proj_bias"],
+            deinterleave=True,
+        )
+        dn_b, dn_s, dn_bias = convert_expert_weight(
+            sd[f"{prefix}mlp.experts.down_proj_blocks"],
+            sd[f"{prefix}mlp.experts.down_proj_scales"],
+            sd[f"{prefix}mlp.experts.down_proj_bias"],
+            deinterleave=False,
+        )
+        return (self._attach(gu_b, f"layer_{i}_w13_blocks"),
+                self._attach(gu_s, f"layer_{i}_w13_scales"),
+                self._attach(gu_bias, f"layer_{i}_b13"),
+                self._attach(dn_b, f"layer_{i}_w2_blocks"),
+                self._attach(dn_s, f"layer_{i}_w2_scales"),
+                self._attach(dn_bias, f"layer_{i}_b2"))
 
     # ------------------------------------------------------------------ graph
 
@@ -267,7 +330,8 @@ class GptOssBuilder(GraphBuilder):
         for i in range(self.num_layers):
             prefix = f"model.layers.{i}."
             w_qkv, b_qkv = self._fused_qkv(sd, prefix, i)
-            w13, b13, w2, b2 = self._experts(sd, prefix, i)
+            if not self.mxfp4:
+                w13, b13, w2, b2 = self._experts(sd, prefix, i)
 
             self.mpk.rmsnorm_layer(
                 input=self.x,
@@ -346,20 +410,36 @@ class GptOssBuilder(GraphBuilder):
                 input=self.gate_out,
                 output=(self.topk_weight, self.routing_indices, self.moe_mask),
                 grid_dim=(1, 1, 1), block_dim=(256, 1, 1))
-            self.mpk.moe_w13_linear_layer(
-                input=self.rmsnorm_out, weight=w13, bias=b13,
-                moe_routing_indices=self.routing_indices, moe_mask=self.moe_mask,
-                output=self.mlp_mid,
-                grid_dim=(10, _grid_x(2 * ii, 128), 1), block_dim=(256, 1, 1))
+            if self.mxfp4:
+                w13_b, w13_s, b13, w2_b, w2_s, b2 = self._experts_mxfp4(
+                    sd, prefix, i)
+                self.mpk.moe_w13_mxfp4_layer(
+                    input=self.rmsnorm_out, blocks=w13_b, scales=w13_s, bias=b13,
+                    moe_routing_indices=self.routing_indices, moe_mask=self.moe_mask,
+                    output=self.mlp_mid,
+                    grid_dim=_moe_out_grid(2 * ii), block_dim=(256, 1, 1))
+            else:
+                self.mpk.moe_w13_linear_layer(
+                    input=self.rmsnorm_out, weight=w13, bias=b13,
+                    moe_routing_indices=self.routing_indices, moe_mask=self.moe_mask,
+                    output=self.mlp_mid,
+                    grid_dim=(10, _grid_x(2 * ii, 128), 1), block_dim=(256, 1, 1))
             self.mpk.moe_clamped_swiglu_layer(
                 input=self.mlp_mid, output=self.swiglu_out,
                 grid_dim=(mbt, topk, 1), block_dim=(256, 1, 1),
                 limit=self.swiglu_limit, alpha=1.702)
-            self.mpk.moe_w2_linear_layer(
-                input=self.swiglu_out, weight=w2, bias=b2,
-                moe_routing_indices=self.routing_indices, moe_mask=self.moe_mask,
-                output=self.mlp_out,
-                grid_dim=(8, _grid_x(h, 64), 1), block_dim=(256, 1, 1))
+            if self.mxfp4:
+                self.mpk.moe_w2_mxfp4_layer(
+                    input=self.swiglu_out, blocks=w2_b, scales=w2_s, bias=b2,
+                    moe_routing_indices=self.routing_indices, moe_mask=self.moe_mask,
+                    output=self.mlp_out,
+                    grid_dim=_moe_out_grid(h), block_dim=(256, 1, 1))
+            else:
+                self.mpk.moe_w2_linear_layer(
+                    input=self.swiglu_out, weight=w2, bias=b2,
+                    moe_routing_indices=self.routing_indices, moe_mask=self.moe_mask,
+                    output=self.mlp_out,
+                    grid_dim=(8, _grid_x(h, 64), 1), block_dim=(256, 1, 1))
             self.mpk.moe_mul_sum_add_layer(
                 input=self.mlp_out, weight=self.topk_weight, residual=self.x,
                 output=self.mlp_sum_out,

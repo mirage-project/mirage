@@ -1,9 +1,11 @@
-"""GPT-OSS-20B on MPK. Pass --use-mirage for the megakernel, omit it for the
+"""GPT-OSS on MPK. Pass --use-mirage for the megakernel, omit it for the
 HuggingFace reference.
 
-The checkpoint must be plain bf16. The released one is MXFP4, which MPK has no
-kernels for; convert it once with Mxfp4Config(dequantize=True).
-TODO: native MXFP4 support.
+20B and 120B share this demo. A released MXFP4 checkpoint (expert weights
+only; attention, router, embeddings and lm_head stay bf16) is consumed
+directly. The expert GEMM is the SM100 tcgen05 kernel, so --use-mirage on
+that checkpoint needs a B200. A dequantized bf16 checkpoint still runs on
+the bf16 expert path.
 """
 
 import argparse
@@ -25,7 +27,7 @@ if __name__ == "__main__":
                         help="Use Mirage kernels")
     parser.add_argument("--model", type=str,
                         default="/raid/catalyst/models/gpt-oss-20b-bf16",
-                        help="Local bf16 checkpoint directory")
+                        help="Local checkpoint (bf16, or the released MXFP4 20B/120B)")
     parser.add_argument("--prompt", type=str, default=DEFAULT_PROMPT)
     parser.add_argument("--raw-prompt", action="store_true",
                         help="Skip the chat template")

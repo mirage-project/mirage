@@ -222,6 +222,9 @@ enum TaskType {
   TASK_GPT_OSS_TASK_BEGIN = 450, // begin placeholder, not a real task
   // Clamped-alpha SwiGLU: (clamp(up) + 1) * clamp(gate) * sigmoid(gate*alpha)
   TASK_CLAMPED_SWIGLU = 451,
+  // MXFP4 grouped expert GEMM (E2M1 + UE8M0 weights, bf16 activations).
+  TASK_MOE_W13_MXFP4_SM100 = 452,
+  TASK_MOE_W2_MXFP4_SM100 = 453,
   TASK_GPT_OSS_TASK_END = 499, // end placeholder, not a real task
 };
 

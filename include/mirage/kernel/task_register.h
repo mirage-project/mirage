@@ -131,6 +131,9 @@ public:
   int register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params,
                                   bool w13_linear);
+  int register_moe_mxfp4_sm100_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params,
+                                    bool w13_linear);
   int register_moe_silu_mul_task(threadblock::Graph const &bgraph,
                                  std::vector<int> const &params);
   int register_moe_clamped_swiglu_task(threadblock::Graph const &bgraph,

@@ -354,7 +354,9 @@ void register_mugraph(
                 task_type == TASK_MOE_W13_LINEAR_SM90 ||
                 task_type == TASK_MOE_W2_LINEAR_SM90 ||
                 task_type == TASK_MOE_W13_FP8_SM100 ||
-                task_type == TASK_MOE_W2_FP8_SM100) {
+                task_type == TASK_MOE_W2_FP8_SM100 ||
+                task_type == TASK_MOE_W13_MXFP4_SM100 ||
+                task_type == TASK_MOE_W2_MXFP4_SM100) {
               task.task_metadata.expert_offset = bid.x;
             }
             // Set paged attention split kv task kv_idx
@@ -1814,6 +1816,8 @@ TaskGraphResult print_task_graph(
   task_type_to_name[TASK_DFLASH_KV_STORE_SM100] = "TASK_DFLASH_KV_STORE_SM100";
   task_type_to_name[TASK_GLM_MOE_ROUTER_SM100] = "TASK_GLM_MOE_ROUTER_SM100";
   task_type_to_name[TASK_CLAMPED_SWIGLU] = "TASK_CLAMPED_SWIGLU";
+  task_type_to_name[TASK_MOE_W13_MXFP4_SM100] = "TASK_MOE_W13_MXFP4_SM100";
+  task_type_to_name[TASK_MOE_W2_MXFP4_SM100] = "TASK_MOE_W2_MXFP4_SM100";
   task_type_to_name[TASK_INKLING_SCONV_SM100] = "TASK_INKLING_SCONV_SM100";
   task_type_to_name[TASK_INKLING_MOE_ROUTER_SM100] =
       "TASK_INKLING_MOE_ROUTER_SM100";

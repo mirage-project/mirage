@@ -2321,7 +2321,77 @@ class PersistentKernel:
             self.kn_graph.register_task(tb_graph, "moe_w2_linear_sm90")
         else:
             assert False
-        
+
+    def moe_w13_mxfp4_layer(
+        self,
+        input: DTensor,
+        blocks: DTensor,
+        scales: DTensor,
+        moe_routing_indices: DTensor,
+        moe_mask: DTensor,
+        bias: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # input   (batch, K)                         bf16
+        # blocks  (experts, 2*intermediate, K/2)     uint8  E2M1, two nibbles per byte
+        # scales  (experts, 2*intermediate, K/32)    uint8  UE8M0
+        # bias    (experts, 2*intermediate)          bf16
+        # output  (batch, topk, 2*intermediate)      bf16
+        assert input.num_dims == 2
+        assert blocks.num_dims == 3 and scales.num_dims == 3
+        assert bias.num_dims == 2
+        assert output.num_dims == 3
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(blocks, (-1, 1, -1), -1, True)
+        tb_graph.new_input(scales, (-1, 1, -1), -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_mask, (-1, -1, -1), -1, True)
+        tb_graph.new_input(bias, (-1, 1, -1), -1, True)
+        tb_graph.new_input(output, (-1, 2, -1), -1, True)
+        self.kn_graph.customized(
+            [input, blocks, scales, moe_routing_indices, moe_mask, bias, output],
+            tb_graph)
+        assert self.target_cc == 100, "MXFP4 expert GEMM requires SM100 (Blackwell)"
+        self.kn_graph.register_task(tb_graph, "moe_w13_mxfp4_sm100")
+
+    def moe_w2_mxfp4_layer(
+        self,
+        input: DTensor,
+        blocks: DTensor,
+        scales: DTensor,
+        moe_routing_indices: DTensor,
+        moe_mask: DTensor,
+        bias: DTensor,
+        output: DTensor,
+        grid_dim: tuple,
+        block_dim: tuple,
+    ):
+        # input   (batch, topk, K)                bf16
+        # blocks  (experts, hidden, K/2)          uint8
+        # scales  (experts, hidden, K/32)         uint8
+        # bias    (experts, hidden)               bf16
+        # output  (batch, topk, hidden)           bf16
+        assert input.num_dims == 3
+        assert blocks.num_dims == 3 and scales.num_dims == 3
+        assert bias.num_dims == 2
+        assert output.num_dims == 3
+        tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
+        tb_graph.new_input(input, (-1, -1, -1), -1, True)
+        tb_graph.new_input(blocks, (-1, 1, -1), -1, True)
+        tb_graph.new_input(scales, (-1, 1, -1), -1, True)
+        tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
+        tb_graph.new_input(moe_mask, (-1, -1, -1), -1, True)
+        tb_graph.new_input(bias, (-1, 1, -1), -1, True)
+        tb_graph.new_input(output, (-1, 2, -1), -1, True)
+        self.kn_graph.customized(
+            [input, blocks, scales, moe_routing_indices, moe_mask, bias, output],
+            tb_graph)
+        assert self.target_cc == 100, "MXFP4 expert GEMM requires SM100 (Blackwell)"
+        self.kn_graph.register_task(tb_graph, "moe_w2_mxfp4_sm100")
+
     def moe_mul_sum_add_layer(
         self,
         input: DTensor,

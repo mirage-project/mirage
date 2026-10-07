@@ -3201,6 +3201,98 @@ int TaskRegister::register_moe_linear_sm100_task(
   }
 }
 
+int TaskRegister::register_moe_mxfp4_sm100_task(
+    threadblock::Graph const &bgraph,
+    std::vector<int> const &params,
+    bool w13_linear) {
+  // Six inputs, bias included. GPT-OSS expert biases are not optional.
+  //   [0] input    bf16   [batch, K] or [batch, topk, K]
+  //   [1] blocks   uint8  [E, N, K/2]
+  //   [2] scales   uint8  [E, N, K/32]
+  //   [3] routing  int32  [E, batch]
+  //   [4] mask     int32  [E+1]
+  //   [5] bias     bf16   [E, N]
+  //   output       bf16   [batch, topk, N]
+  assert(params.size() == 0);
+  int num_inputs = 6;
+  int num_outputs = 1;
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+
+  assert(output_ops[0]->output_tensors[0].num_dims == 3);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
+  int output_size = output_ops[0]->output_tensors[0].dim[2];
+
+  int reduction_size = 0;
+  if (w13_linear) {
+    assert(input_ops[0]->output_tensors[0].num_dims == 2);
+    reduction_size = input_ops[0]->output_tensors[0].dim[1];
+  } else {
+    assert(input_ops[0]->output_tensors[0].num_dims == 3);
+    reduction_size = input_ops[0]->output_tensors[0].dim[2];
+    assert(input_ops[0]->output_tensors[0].dim[1] == num_experts_per_tok);
+  }
+
+  assert(input_ops[1]->output_tensors[0].num_dims == 3);
+  int num_experts = input_ops[1]->output_tensors[0].dim[0];
+  assert(input_ops[1]->output_tensors[0].dim[1] == output_size);
+  assert(input_ops[1]->output_tensors[0].dim[2] * 2 == reduction_size);
+  assert(input_ops[2]->output_tensors[0].num_dims == 3);
+  assert(input_ops[2]->output_tensors[0].dim[0] == num_experts);
+  assert(input_ops[2]->output_tensors[0].dim[1] == output_size);
+  assert(input_ops[2]->output_tensors[0].dim[2] * 32 == reduction_size);
+  assert(input_ops[3]->output_tensors[0].dim[0] == num_experts);
+  assert(input_ops[3]->output_tensors[0].dim[1] == batch_size);
+  assert(input_ops[4]->output_tensors[0].dim[0] == num_experts + 1);
+  assert(input_ops[5]->output_tensors[0].num_dims == 2);
+  assert(input_ops[5]->output_tensors[0].dim[0] == num_experts);
+  assert(input_ops[5]->output_tensors[0].dim[1] == output_size);
+  assert(reduction_size % 64 == 0);
+
+  assert(output_ops[0]->dtensor.owner_op->op_type == type::KN_INPUT_OP);
+  kn::KNInputOp *kn_input_op =
+      static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
+  int output_stride = static_cast<int>(kn_input_op->input_strides[1]);
+  int orig_output_size = input_ops[1]->dtensor.dim[1];
+  int expert_stride = bgraph.grid_dim.x;
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::moe_mxfp4_sm100_task_impl<$, $, $, $, $, $, $, $, $, false>(",
+         batch_size,
+         output_size,
+         orig_output_size,
+         reduction_size,
+         num_experts,
+         num_experts_per_tok,
+         expert_stride,
+         output_stride,
+         w13_linear ? "true" : "false");
+  code.e("    static_cast<cute::bfloat16_t const *>(task_desc->input_ptrs[0]),");
+  code.e("    static_cast<uint8_t const *>(task_desc->input_ptrs[1]),");
+  code.e("    static_cast<uint8_t const *>(task_desc->input_ptrs[2]),");
+  code.e("    static_cast<int32_t const *>(task_desc->input_ptrs[3]),");
+  code.e("    static_cast<int32_t const *>(task_desc->input_ptrs[4]),");
+  code.e("    static_cast<cute::bfloat16_t const *>(task_desc->input_ptrs[5]),");
+  code.e("    static_cast<cute::bfloat16_t *>(task_desc->output_ptrs[0]),");
+  code.e("    task_desc->task_metadata.expert_offset);");
+  if (w13_linear) {
+    return register_task_variant(TASK_MOE_W13_MXFP4_SM100, code.to_string());
+  } else {
+    return register_task_variant(TASK_MOE_W2_MXFP4_SM100, code.to_string());
+  }
+}
+
 int TaskRegister::register_moe_fp8_sm100_task(threadblock::Graph const &bgraph,
                                               std::vector<int> const &params,
                                               bool w13_linear) {
