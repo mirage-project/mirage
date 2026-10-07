@@ -1072,6 +1072,31 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       }
       break;
     }
+    case TASK_MOE_W13_MXFP4_SM100:
+    case TASK_MOE_W2_MXFP4_SM100: {
+      // Packed E2M1 rows, 128B-swizzled into the MMA tile. param 1 is blocks.
+      if (param_id == 1) {
+        int const num_experts = tensor_desc.dim[0];
+        int const output_size = tensor_desc.dim[1];
+        int const row_bytes = tensor_desc.dim[2];
+        int const orig_output_size =
+            tensor_desc.stride[0] / tensor_desc.stride[1];
+        uint64_t gmem_shape[2] = {
+            static_cast<uint64_t>((num_experts - 1) * orig_output_size +
+                                  output_size),
+            static_cast<uint64_t>(row_bytes)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(tensor_desc.stride[1])};
+        uint32_t smem_shape[2] = {128, 128};
+        fill_tma_desc<uint8_t, 3, 3, 3, 2>(tma_desc,
+                                           tensor_desc.base_ptr,
+                                           gmem_shape,
+                                           gmem_stride,
+                                           smem_shape,
+                                           1,
+                                           1);
+      }
+      break;
+    }
     case TASK_MOE_W13_FP8_SM100:
     case TASK_MOE_W2_FP8_SM100: {
       // FP8 E4M3 weight TMA (param_id == 2 is the weight tensor)
@@ -1550,6 +1575,13 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
           (param_id < task_desc.num_inputs)
               ? task_desc.inputs[param_id]
               : task_desc.outputs[param_id - task_desc.num_inputs];
+      create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
+      break;
+    }
+    case TASK_MOE_W13_MXFP4_SM100:
+    case TASK_MOE_W2_MXFP4_SM100: {
+      size_t param_id = 1;
+      TensorDesc &tensor_desc = task_desc.inputs[param_id];
       create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       break;
     }

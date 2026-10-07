@@ -40,6 +40,7 @@
 
 #include "mxfp4.cuh"
 
+#include <cuda.h>
 #include <cstdint>
 
 namespace kernel {
@@ -53,7 +54,8 @@ template <int BATCH,
           int EXPERT_STRIDE,
           int OUTPUT_STRIDE,
           bool W13_LINEAR,
-          bool NO_BIAS>
+          bool NO_BIAS,
+          int WEIGHT_ROW_BYTES = REDUCTION_SIZE / 2>
 __device__ __forceinline__ void moe_mxfp4_sm100_task_impl(
     cute::bfloat16_t const *__restrict__ input,
     uint8_t const *__restrict__ blocks,
@@ -62,7 +64,8 @@ __device__ __forceinline__ void moe_mxfp4_sm100_task_impl(
     int32_t const *__restrict__ mask,
     cute::bfloat16_t const *__restrict__ bias,
     cute::bfloat16_t *__restrict__ output,
-    int expert_offset) {
+    int expert_offset,
+    CUtensorMap const *weight_tma = nullptr) {
   using cute::Int;
   using cute::_;
   using Element = cutlass::float_e2m1_t;
@@ -129,6 +132,8 @@ __device__ __forceinline__ void moe_mxfp4_sm100_task_impl(
 
   __shared__ uint32_t tmem_base;
   __shared__ uint64_t mma_done;
+  __shared__ uint64_t tma_full;
+  constexpr int kTmaBytes = MMA_M * (BK / 2);
   using TmemAllocator = cute::TMEM::Allocator1Sm;
   TmemAllocator tmem_allocator{};
   if (warp_idx == 0) {
@@ -180,8 +185,26 @@ __device__ __forceinline__ void moe_mxfp4_sm100_task_impl(
         }
         __syncthreads();
 
-        // Weights: one thread owns a 32-K block so both nibbles of each byte
-        // are stored by the same thread.
+        if (tid == 0) {
+          cutlass::arch::ClusterTransactionBarrier::init(&tma_full, 1);
+        }
+        __syncthreads();
+        if (weight_tma != nullptr && tid == 0) {
+          cute::set_barrier_transaction_bytes(tma_full, kTmaBytes);
+          int col = k_tile * (BK / 2);
+          int row = expert * ORIG_OUTPUT_SIZE + m_tile * MMA_M;
+          uint64_t desc = reinterpret_cast<uint64_t>(weight_tma);
+          uint32_t mbar = static_cast<uint32_t>(__cvta_generic_to_shared(&tma_full));
+          uint32_t dst = static_cast<uint32_t>(__cvta_generic_to_shared(raw + kSmemA));
+          asm volatile(
+              "cp.async.bulk.tensor.5d.shared::cta.global.tile.mbarrier::complete_tx::bytes"
+              " [%0], [%1, {%3, %4, %5, %6, %7}], [%2];" ::"r"(dst),
+              "l"(desc), "r"(mbar), "r"(col), "r"(row), "r"(0), "r"(0), "r"(0)
+              : "memory");
+        }
+
+        // Scales stay scalar: a scale row is K/32 bytes, which is not 16-byte
+        // aligned, so it cannot be a TMA stride. Weights are the TMA tile.
         for (int job = tid; job < MMA_M * (BK / 32); job += blockDim.x) {
           int row = job / (BK / 32);
           int s = job - row * (BK / 32);
@@ -189,28 +212,33 @@ __device__ __forceinline__ void moe_mxfp4_sm100_task_impl(
           int gk = k_tile * BK + s * 32;
           uint8_t raw_bytes[16];
           uint8_t scale_byte = 127;
-          if (grow < OUTPUT_SIZE && gk < REDUCTION_SIZE) {
+          bool in_tile = grow < OUTPUT_SIZE && gk < REDUCTION_SIZE;
+          if (in_tile) {
             size_t row_index = static_cast<size_t>(expert) * ORIG_OUTPUT_SIZE + grow;
-            uint8_t const *src = blocks + row_index * (REDUCTION_SIZE / 2) + (gk >> 1);
             int valid = REDUCTION_SIZE - gk;
             if (valid > 32) {
               valid = 32;
             }
-            for (int b = 0; b < 16; ++b) {
-              raw_bytes[b] = (b * 2 < valid) ? src[b] : 0;
-            }
             if (valid > 0) {
               scale_byte = scales[row_index * (REDUCTION_SIZE / 32) + (gk >> 5)];
             }
-          } else {
+            if (weight_tma == nullptr) {
+              uint8_t const *src = blocks + row_index * WEIGHT_ROW_BYTES + (gk >> 1);
+              for (int b = 0; b < 16; ++b) {
+                raw_bytes[b] = (b * 2 < valid) ? src[b] : 0;
+              }
+            }
+          } else if (weight_tma == nullptr) {
             for (int b = 0; b < 16; ++b) {
               raw_bytes[b] = 0;
             }
           }
-          for (int b = 0; b < 16; ++b) {
-            int k = s * 32 + b * 2;
-            sA(row, k, 0, 0) = Element::bitcast(static_cast<uint8_t>(raw_bytes[b] & 15));
-            sA(row, k + 1, 0, 0) = Element::bitcast(static_cast<uint8_t>(raw_bytes[b] >> 4));
+          if (weight_tma == nullptr) {
+            for (int b = 0; b < 16; ++b) {
+              int k = s * 32 + b * 2;
+              sA(row, k, 0, 0) = Element::bitcast(static_cast<uint8_t>(raw_bytes[b] & 15));
+              sA(row, k + 1, 0, 0) = Element::bitcast(static_cast<uint8_t>(raw_bytes[b] >> 4));
+            }
           }
           sfa_raw[sf_offset(row, s)] = ElementSF::bitcast(scale_byte);
         }
@@ -264,6 +292,9 @@ __device__ __forceinline__ void moe_mxfp4_sm100_task_impl(
             sB(token, s * 32 + k + 1, 0, 0) = Element::bitcast(static_cast<uint8_t>(n1));
           }
           sfb_raw[sf_offset(token, s)] = ElementSF::bitcast(static_cast<uint8_t>(scale_byte));
+        }
+        if (weight_tma != nullptr) {
+          cute::wait_barrier(tma_full, 0);
         }
         __syncthreads();
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");

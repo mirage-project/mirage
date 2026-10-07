@@ -3246,7 +3246,8 @@ int TaskRegister::register_moe_mxfp4_sm100_task(
   assert(input_ops[1]->output_tensors[0].num_dims == 3);
   int num_experts = input_ops[1]->output_tensors[0].dim[0];
   assert(input_ops[1]->output_tensors[0].dim[1] == output_size);
-  assert(input_ops[1]->output_tensors[0].dim[2] * 2 == reduction_size);
+  int weight_row_bytes = input_ops[1]->output_tensors[0].dim[2];
+  assert(weight_row_bytes * 2 >= reduction_size);
   assert(input_ops[2]->output_tensors[0].num_dims == 3);
   assert(input_ops[2]->output_tensors[0].dim[0] == num_experts);
   assert(input_ops[2]->output_tensors[0].dim[1] == output_size);
@@ -3268,7 +3269,7 @@ int TaskRegister::register_moe_mxfp4_sm100_task(
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
-  code.e("kernel::moe_mxfp4_sm100_task_impl<$, $, $, $, $, $, $, $, $, false>(",
+  code.e("kernel::moe_mxfp4_sm100_task_impl<$, $, $, $, $, $, $, $, $, false, $>(",
          batch_size,
          output_size,
          orig_output_size,
@@ -3277,7 +3278,8 @@ int TaskRegister::register_moe_mxfp4_sm100_task(
          num_experts_per_tok,
          expert_stride,
          output_stride,
-         w13_linear ? "true" : "false");
+         w13_linear ? "true" : "false",
+         weight_row_bytes);
   code.e("    static_cast<cute::bfloat16_t const *>(task_desc->input_ptrs[0]),");
   code.e("    static_cast<uint8_t const *>(task_desc->input_ptrs[1]),");
   code.e("    static_cast<uint8_t const *>(task_desc->input_ptrs[2]),");
@@ -3285,7 +3287,8 @@ int TaskRegister::register_moe_mxfp4_sm100_task(
   code.e("    static_cast<int32_t const *>(task_desc->input_ptrs[4]),");
   code.e("    static_cast<cute::bfloat16_t const *>(task_desc->input_ptrs[5]),");
   code.e("    static_cast<cute::bfloat16_t *>(task_desc->output_ptrs[0]),");
-  code.e("    task_desc->task_metadata.expert_offset);");
+  code.e("    task_desc->task_metadata.expert_offset,");
+  code.e("    static_cast<CUtensorMap const *>(task_desc->input_tma_desc_ptrs[1][0]));");
   if (w13_linear) {
     return register_task_variant(TASK_MOE_W13_MXFP4_SM100, code.to_string());
   } else {

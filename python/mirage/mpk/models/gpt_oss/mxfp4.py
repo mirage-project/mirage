@@ -113,6 +113,14 @@ def convert_expert_weight(
             f"MXFP4 K mismatch: blocks {tuple(blocks.shape)} "
             f"scales {tuple(scales.shape)}"
         )
+    # tcgen05's 128B swizzle needs a row stride that is a multiple of 128
+    # bytes. K=2880 packs to 1440 bytes, so pad the tail with zeros.
+    row_bytes = blocks.shape[-1]
+    padded = (row_bytes + 127) // 128 * 128
+    if padded != row_bytes:
+        out = torch.zeros(*blocks.shape[:-1], padded, dtype=torch.uint8)
+        out[..., :row_bytes] = blocks
+        blocks = out
     return blocks.contiguous(), scales.contiguous(), bias.contiguous()
 
 
