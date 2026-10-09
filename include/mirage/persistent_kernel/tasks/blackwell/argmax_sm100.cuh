@@ -16,6 +16,7 @@
 #include "tasks/common/utils.cuh"
 
 #include <cutlass/arch/barrier.h>
+#include <math_constants.h>
 
 namespace kernel {
 template <typename T>
@@ -58,7 +59,7 @@ __device__ __forceinline__ void block_reduce_max_idx_sm100(T &val,
 
   // Only thread 0 holds the final result
   if (my_warp_id == 0) {
-    T block_max_val = T(-inf);
+    T block_max_val = T(-CUDART_INF_F);
     long long block_max_idx = -1;
 
     int num_warps = (NUM_THREADS + 31) >> log2_constexpr(NUM_THREADS_PER_WARP);
@@ -100,7 +101,7 @@ __device__ __forceinline__ void
 // TODO: try vectorize
 #pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
-      T local_max = T(-inf);
+      T local_max = T(-CUDART_INF_F);
       long long local_idx = -1;
 #pragma unroll
       for (int i = tidx; i < valid_len; i += NUM_THREADS) {
@@ -140,7 +141,7 @@ __device__ __forceinline__ void
 // TODO: try vectorize
 #pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
-      T local_max = T(-inf);
+      T local_max = T(-CUDART_INF_F);
       // Pack (chunk_index, relative_index) into a single 64-bit integer
       long long local_packed_idx = -1;
 
