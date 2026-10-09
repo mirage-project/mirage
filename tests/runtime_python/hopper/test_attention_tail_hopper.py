@@ -13,12 +13,20 @@ import tempfile
 import torch
 
 
-def check_case(lib, capacity, active, context):
+def check_case(lib, capacity, active, context, q_scale=None):
     qkv = torch.randn(capacity, 1280, device="cuda", dtype=torch.bfloat16) * 0.2
     kc = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16) * 0.2
     vc = torch.randn_like(kc)
     out = torch.full((capacity, 1024), float("nan"), device="cuda",
                      dtype=torch.bfloat16)
+    if q_scale is not None:
+        qkv.zero_()
+        qkv[:, :1024].view(capacity, 8, 128)[:, :, 0] = q_scale
+        qkv[:, 1024] = -200
+        qkv[:, 1152:] = 1
+        kc.zero_()
+        kc[:, 0] = -200
+        vc.fill_(1)
     k = torch.cat((kc[:context], qkv[:active, 1024:1152])).float()
     v = torch.cat((vc[:context], qkv[:active, 1152:])).float()
     q = qkv[:active, :1024].reshape(active, 8, 128).float()
@@ -37,7 +45,7 @@ def check_case(lib, capacity, active, context):
     ok = finite and error < 0.005
     # A decode task must leave the inactive output rows untouched.
     ok = ok and torch.isnan(out[active:]).all().item()
-    print(f"capacity={capacity} active={active} context={context} "
+    print(f"capacity={capacity} active={active} context={context} q_scale={q_scale} "
           f"finite={finite} max_error={error:.6f} {'PASS' if ok else 'FAIL'}",
           flush=True)
     return ok
@@ -69,6 +77,10 @@ def main():
         results = [check_case(lib, capacity, active, context)
                    for capacity, active in [(1, 1), (8, 1), (8, 8)]
                    for context in [0, 39, 56, 63, 64, 65, 120, 128]]
+        results += [check_case(lib, capacity, active, context, q_scale)
+                    for capacity, active in [(1, 1), (8, 1), (8, 8)]
+                    for context in [0, 63, 64, 65, 128]
+                    for q_scale in [249, 250, 251, 512]]
     assert all(results), f"{results.count(False)}/{len(results)} cases failed"
 
 

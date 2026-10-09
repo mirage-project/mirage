@@ -28,6 +28,7 @@
 #include "tma.cuh"
 #include "utils.cuh"
 #include "wgmma.cuh"
+#include <math_constants.h>
 #define USE_TMA_Q 0
 namespace kernel {
 
@@ -428,8 +429,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     float m_local[MMA_ITERS_M][2];
 #pragma unroll
     for (int m = 0; m < MMA_ITERS_M; m++) {
-      m_local[m][0] = -inf;
-      m_local[m][1] = -inf;
+      m_local[m][0] = -CUDART_INF_F;
+      m_local[m][1] = -CUDART_INF_F;
     }
     float d[MMA_ITERS_M][2];
 #pragma unroll
@@ -630,7 +631,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           bool is_valid =
               (row < num_tokens * NUM_QO_PER_KV) &&
               (col + iter * KV_TILE_SIZE <= token_idx + seq_len - num_tokens);
-          x_frag_f[m][frag_idx] = is_valid ? x_frag_f[m][frag_idx] : -inf;
+          x_frag_f[m][frag_idx] =
+              is_valid ? x_frag_f[m][frag_idx] : -CUDART_INF_F;
           m_local[m][(frag_idx & 0x3) >> 1] =
               max(m_local[m][(frag_idx & 0x3) >> 1], x_frag_f[m][frag_idx]);
         }
@@ -647,10 +649,15 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       float rescale[MMA_ITERS_M][2];
 #pragma unroll
       for (int m = 0; m < MMA_ITERS_M; m++) {
+        // Empty rows must not evaluate -infinity - -infinity.
         rescale[m][0] =
-            ptx_exp2(m_prev[m][0] * sm_scale - m_local[m][0] * sm_scale);
+            m_local[m][0] == -CUDART_INF_F
+                ? 1.f
+                : ptx_exp2(m_prev[m][0] * sm_scale - m_local[m][0] * sm_scale);
         rescale[m][1] =
-            ptx_exp2(m_prev[m][1] * sm_scale - m_local[m][1] * sm_scale);
+            m_local[m][1] == -CUDART_INF_F
+                ? 1.f
+                : ptx_exp2(m_prev[m][1] * sm_scale - m_local[m][1] * sm_scale);
       }
 
       // update d: get partial sum
@@ -662,7 +669,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 #pragma unroll
         for (int frag_idx = 0; frag_idx < 32; frag_idx++) {
           x_frag_f[m][frag_idx] =
-              x_frag_f[m][frag_idx] != -inf
+              x_frag_f[m][frag_idx] != -CUDART_INF_F
                   ? ptx_exp2(x_frag_f[m][frag_idx] * sm_scale -
                              m_local[m][(frag_idx & 0x3) >> 1] * sm_scale)
                   : 0.f;
@@ -720,8 +727,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     // write intermediate results to buffer in shared memory
 #pragma unroll
     for (int m = 0; m < MMA_ITERS_M; m++) {
-      m_local[m][0] *= m_local[m][0] != -inf ? sm_scale : 1.f;
-      m_local[m][1] *= m_local[m][1] != -inf ? sm_scale : 1.f;
+      m_local[m][0] *= sm_scale;
+      m_local[m][1] *= sm_scale;
       s_m_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 2 +
                  threadIdx.x * 2] = m_local[m][0];
       s_m_buffer[m * CONSUMER_WARPGROUPS * THREADS_PER_WARPGROUP * 2 +
@@ -755,7 +762,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
       int frag_idx = ((col % 64) / 8) * 4 + ((row % 16) / 8) * 2 + (col % 2);
 
-      float m_global = -inf;
+      float m_global = -CUDART_INF_F;
       float d_global = 1.f;
       float o_global = 0.f;
 
