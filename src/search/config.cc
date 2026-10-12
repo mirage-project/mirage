@@ -6,7 +6,7 @@ namespace search {
 GeneratorConfig GeneratorConfig::get_default_config() {
   return {
       9 /* max_num_threadblock_graph_op */,
-      5 /* max_num_kernel_graph_op */,
+      9 /* max_num_kernel_graph_op */,
       1 /* max_num_threadblock_graphs */,
       3 /* max_num_threadblock_graph_inputs */,
       2 /* max_num_threadblock_graph_outputs */,
