@@ -2026,7 +2026,12 @@ class PersistentKernel:
             [input, bias, moe_topk_weight, moe_routing_indices, moe_masks],
             tb_graph,
         )
-        self.kn_graph.register_task(tb_graph, "moe_topk_sigmoid_sm100", params)
+        self.kn_graph.register_task(
+            tb_graph,
+            "moe_topk_sigmoid_hopper" if self.target_cc == 90
+            else "moe_topk_sigmoid_sm100",
+            params,
+        )
 
     def moe_w13_linear_layer(
         self,
@@ -2565,7 +2570,11 @@ class PersistentKernel:
         tb_graph.new_input(input_b, (0, -1, -1), -1, True)
         tb_graph.new_input(output, (0, -1, -1), -1, True)
         self.kn_graph.customized([input_a, input_b, output], tb_graph)
-        self.kn_graph.register_task(tb_graph, "elementwise_add_sm100")
+        self.kn_graph.register_task(
+            tb_graph,
+            "elementwise_add_hopper" if self.target_cc == 90
+            else "elementwise_add_sm100",
+        )
 
     def silu_mul_linear_with_residual_layer(
         self,
@@ -2721,7 +2730,8 @@ class PersistentKernel:
         self.kn_graph.customized([input, output_value, output_index], tb_graph)
         self.kn_graph.register_task(
             tb_graph,
-            "sampling_partial_sm100",
+            "sampling_partial_hopper" if self.target_cc == 90
+            else "sampling_partial_sm100",
             [num_tasks, vocab, topk_max, temp_bits],
         )
 
@@ -2762,7 +2772,8 @@ class PersistentKernel:
         self.kn_graph.customized([input_value, input_index, output], tb_graph)
         self.kn_graph.register_task(
             tb_graph,
-            "sampling_reduce_sm100",
+            "sampling_reduce_hopper" if self.target_cc == 90
+            else "sampling_reduce_sm100",
             [num_tasks, topk_max, top_p_bits, top_k, greedy, seed],
         )
 

@@ -1619,6 +1619,11 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       }
       break;
     }
+    // Hopper-range tasks that only use plain global loads.
+    case TASK_ELEMENTWISE_ADD_HOPPER:
+    case TASK_MOE_TOPK_SIGMOID_HOPPER:
+    case TASK_SAMPLING_PARTIAL_HOPPER:
+    case TASK_SAMPLING_REDUCE_HOPPER:
     // Eagle3 kernels don't need TMA.
     case TASK_COPY:
     case TASK_CONCAT:

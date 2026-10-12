@@ -345,7 +345,8 @@ void register_mugraph(
             // Argmax partial tasks: grid_dim.x partitions the vocab dimension
             if (task_type == TASK_ARGMAX_PARTIAL ||
                 task_type == TASK_ARGMAX_PARTIAL_SM100 ||
-                task_type == TASK_SAMPLING_PARTIAL_SM100) {
+                task_type == TASK_SAMPLING_PARTIAL_SM100 ||
+                task_type == TASK_SAMPLING_PARTIAL_HOPPER) {
               task.task_metadata.task_offset = bid.x;
             }
             // Set expert_offset for MoE tasks
@@ -1876,6 +1877,14 @@ TaskGraphResult print_task_graph(
       "TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100";
   task_type_to_name[TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER] =
       "TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER";
+  task_type_to_name[TASK_ELEMENTWISE_ADD_HOPPER] =
+      "TASK_ELEMENTWISE_ADD_HOPPER";
+  task_type_to_name[TASK_MOE_TOPK_SIGMOID_HOPPER] =
+      "TASK_MOE_TOPK_SIGMOID_HOPPER";
+  task_type_to_name[TASK_SAMPLING_PARTIAL_HOPPER] =
+      "TASK_SAMPLING_PARTIAL_HOPPER";
+  task_type_to_name[TASK_SAMPLING_REDUCE_HOPPER] =
+      "TASK_SAMPLING_REDUCE_HOPPER";
   // Multi-gpu tasks
   task_type_to_name[TASK_NVSHMEM_ALLGATHER_STRIDED_PUT] =
       "TASK_NVSHMEM_ALLGATHER_STRIDED_PUT";
