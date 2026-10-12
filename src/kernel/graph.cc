@@ -630,6 +630,26 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
             customized->bgraph, params);
     task_config[op] =
         std::make_tuple(7, 2, TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER, variant_id);
+  } else if (name == "elementwise_add_hopper") {
+    int variant_id = task_register->register_elementwise_add_hopper_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_ELEMENTWISE_ADD_HOPPER, variant_id);
+  } else if (name == "moe_topk_sigmoid_hopper") {
+    int variant_id = task_register->register_moe_topk_sigmoid_hopper_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 3, TASK_MOE_TOPK_SIGMOID_HOPPER, variant_id);
+  } else if (name == "sampling_partial_hopper") {
+    int variant_id = task_register->register_sampling_partial_hopper_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 2, TASK_SAMPLING_PARTIAL_HOPPER, variant_id);
+  } else if (name == "sampling_reduce_hopper") {
+    int variant_id = task_register->register_sampling_reduce_hopper_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_SAMPLING_REDUCE_HOPPER, variant_id);
   }
   // SM100 tasks
   else if (name == "linear_sm100") {

@@ -87,6 +87,14 @@ public:
       threadblock::Graph const &bgraph,
       std::vector<int> const &params,
       bool with_residual);
+  int register_elementwise_add_hopper_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  int register_moe_topk_sigmoid_hopper_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params);
+  int register_sampling_partial_hopper_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params);
+  int register_sampling_reduce_hopper_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
   int register_paged_attention_split_kv_hopper_task(
       threadblock::Graph const &bgraph, std::vector<int> const &params);
   // SM100 tasks

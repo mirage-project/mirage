@@ -2009,6 +2009,207 @@ int TaskRegister::register_embedding_hopper_task(
   return register_task_variant(TASK_EMBEDDING_HOPPER, code.to_string());
 }
 
+int TaskRegister::register_elementwise_add_hopper_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  assert(params.size() == 0);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = output_ops[0]->output_tensors[0].dim[0];
+  int output_size = output_ops[0]->output_tensors[0].dim[1];
+  int output_stride = output_ops[0]->dtensor.dim[1];
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::elementwise_add_hopper_task_impl<bfloat16, $, $, $>(",
+         batch_size,
+         output_size,
+         output_stride);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0]);");
+  return register_task_variant(TASK_ELEMENTWISE_ADD_HOPPER, code.to_string());
+}
+
+int TaskRegister::register_moe_topk_sigmoid_hopper_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params[0]: number of expert groups
+  // params[1]: number of groups kept per token
+  // params[2]: routed_scaling_factor, bit-cast to int
+  assert(params.size() == 3);
+  int num_groups = params[0];
+  int topk_group = params[1];
+  float scaling_factor;
+  memcpy(&scaling_factor, &params[2], sizeof(float));
+
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 3;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(output_ops[0]->output_tensors[0].num_dims == 2);
+  assert(output_ops[1]->output_tensors[0].num_dims == 2);
+  assert(output_ops[2]->output_tensors[0].num_dims == 1);
+  int num_experts = output_ops[1]->output_tensors[0].dim[0];
+  int batch_size = output_ops[1]->output_tensors[0].dim[1];
+  int num_experts_per_tok = output_ops[0]->output_tensors[0].dim[1];
+  assert(output_ops[0]->output_tensors[0].dim[0] == batch_size);
+  assert(output_ops[2]->output_tensors[0].dim[0] == num_experts + 1);
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  assert(input_ops[0]->output_tensors[0].dim[0] == batch_size);
+  assert(input_ops[0]->output_tensors[0].dim[1] == num_experts);
+  assert(input_ops[1]->output_tensors[0].num_dims == 1);
+  assert(input_ops[1]->output_tensors[0].dim[0] == num_experts);
+  // One warp per token row and one lane per num_experts / 32 experts; the
+  // whole batch is handled by a single task since it also clears and fills
+  // the shared routing buffers.
+  assert(num_experts % 32 == 0);
+  assert(num_experts % num_groups == 0);
+  assert(num_experts_per_tok <= 32);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::topk_sigmoid_hopper_task_impl<bfloat16, $, $, $, $>(",
+         num_experts,
+         num_groups,
+         topk_group,
+         num_experts_per_tok);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    $,", batch_size);
+  code.e("    task_desc->output_ptrs[1],");
+  code.e("    task_desc->output_ptrs[2],");
+  code.e("    $f);", scaling_factor);
+  return register_task_variant(TASK_MOE_TOPK_SIGMOID_HOPPER, code.to_string());
+}
+
+int TaskRegister::register_sampling_partial_hopper_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Same params as register_sampling_partial_sm100_task:
+  // params[0]: num_partial_tasks
+  // params[1]: real vocab size; positions at/after it are lm_head padding rows
+  // params[2]: number of candidates kept per chunk
+  // params[3]: temperature, bit-cast to int
+  assert(params.size() == 4);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 1;
+  int num_outputs = 2;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int num_elements = input_ops[0]->output_tensors[0].dim[1];
+  int num_partial_tasks = params[0];
+  int vocab_size = params[1];
+  int topk_max = params[2];
+  float temperature;
+  memcpy(&temperature, &params[3], sizeof(float));
+  float inv_temperature = temperature > 0.0f ? 1.0f / temperature : 1.0f;
+  assert(output_ops[0]->output_tensors[0].dim[1] == topk_max + 2);
+  assert(output_ops[1]->output_tensors[0].dim[1] == topk_max);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::sampling_partial_hopper_kernel<bfloat16, $, $, $, $, $>(",
+         batch_size,
+         num_elements,
+         num_partial_tasks,
+         topk_max,
+         vocab_size);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    task_desc->output_ptrs[1],");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
+  code.e("    $f,", inv_temperature);
+  code.e("    task_desc->task_metadata.task_offset * $);", num_elements);
+  return register_task_variant(TASK_SAMPLING_PARTIAL_HOPPER, code.to_string());
+}
+
+int TaskRegister::register_sampling_reduce_hopper_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // Same params as register_sampling_reduce_sm100_task:
+  // params[0]: num_partial_tasks
+  // params[1]: number of candidates kept per chunk
+  // params[2]: top_p, bit-cast to int
+  // params[3]: top_k (0 disables the top-k filter)
+  // params[4]: 1 when temperature <= 0, i.e. greedy decoding
+  // params[5]: RNG seed
+  assert(params.size() == 6);
+  std::vector<tb::TBInputOp *> input_ops;
+  std::vector<tb::TBInputOp *> output_ops;
+  int num_inputs = 2;
+  int num_outputs = 1;
+  assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
+  for (auto const &op : bgraph.operators) {
+    assert(op->op_type == mirage::type::TB_INPUT_OP);
+    if (input_ops.size() < (size_t)num_inputs) {
+      input_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    } else {
+      output_ops.push_back(static_cast<tb::TBInputOp *>(op));
+    }
+  }
+  assert(input_ops[0]->output_tensors[0].num_dims == 2);
+  int batch_size = input_ops[0]->output_tensors[0].dim[0];
+  int num_partial_tasks = params[0];
+  int topk_max = params[1];
+  float top_p;
+  memcpy(&top_p, &params[2], sizeof(float));
+  int top_k = params[3];
+  bool greedy = params[4] != 0;
+  int seed = params[5];
+  assert(input_ops[0]->output_tensors[0].dim[1] ==
+         num_partial_tasks * (topk_max + 2));
+  assert(input_ops[1]->output_tensors[0].dim[1] ==
+         num_partial_tasks * topk_max);
+
+  mirage::transpiler::CodeKeeper code;
+  code.inc_indent();
+  code.e("kernel::sampling_reduce_hopper_kernel<bfloat16, $, $, $>(",
+         batch_size,
+         num_partial_tasks,
+         topk_max);
+  code.e("    task_desc->input_ptrs[0],");
+  code.e("    task_desc->input_ptrs[1],");
+  code.e("    task_desc->output_ptrs[0],");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS],");
+  code.e("    $f,", top_p);
+  code.e("    $,", top_k);
+  code.e("    $,", greedy);
+  code.e("    $ULL,", seed);
+  code.e("    (unsigned long long)runtime_config.step[0] * $,", batch_size);
+  code.e("    runtime_config.step,");
+  code.e("    runtime_config.request_ids,");
+  code.e("    runtime_config.qo_indptr_buffer);");
+  return register_task_variant(TASK_SAMPLING_REDUCE_HOPPER, code.to_string());
+}
+
 // SM100 Tasks
 int TaskRegister::register_linear_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params,

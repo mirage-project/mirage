@@ -13,13 +13,16 @@
 #include "tasks/cute/hopper/gemm_ws.cuh"
 #include "tasks/cute/hopper/gemm_ws_cooperative.cuh"
 #include "tasks/cute/hopper/gemm_ws_mpk.cuh"
+#include "tasks/hopper/elementwise_add_hopper.cuh"
 #include "tasks/hopper/embedding_hopper.cuh"
 #include "tasks/hopper/linear_hopper.cuh"
 #include "tasks/hopper/linear_swapAB_hopper.cuh"
 #include "tasks/hopper/moe_linear_swapAB_hopper.cuh"
 #include "tasks/hopper/multitoken_paged_attention_hopper.cuh"
 #include "tasks/hopper/rmsnorm_hopper.cuh"
+#include "tasks/hopper/sampling_hopper.cuh"
 #include "tasks/hopper/silu_mul_hopper.cuh"
+#include "tasks/hopper/topk_sigmoid_hopper.cuh"
 // Blackwell task impls
 
 #include "tasks/blackwell/argmax_sm100.cuh"
