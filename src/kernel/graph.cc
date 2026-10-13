@@ -1058,9 +1058,23 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(3, 1, TASK_RESIDUAL_ADD_SM100, variant_id);
-  }
-
-  else {
+  } else if (name == "hc_mix") {
+    int variant_id =
+        task_register->register_hc_mix_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_HC_MIX_SM100, variant_id);
+  } else if (name == "hc_pre") {
+    int variant_id =
+        task_register->register_hc_pre_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_HC_PRE_SM100, variant_id);
+  } else if (name == "kda_decode") {
+    int variant_id = task_register->register_kda_decode_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_KDA_DECODE_SM100, variant_id);
+  } else if (name == "hc_post") {
+    int variant_id =
+        task_register->register_hc_post_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_HC_POST_SM100, variant_id);
+  } else {
     printf("Unsupported task name: %s\n", name);
     assert(false && "Unsupported task type");
   }

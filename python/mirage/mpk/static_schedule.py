@@ -113,12 +113,17 @@ TIME_SLOTS = STAGE_SLOT + 2
 def config_checks(used: List[str]) -> List[str]:
     """static_asserts that the Python copies of the kernel's sizes (here and in static_megakernel.py) are config.cuh's and the
     used task types'."""
-    from .static_megakernel import MAX_BUFS, MAX_MAPS, MAX_SUM_PARTS, NODE_COUNTER_LINES, RING_STAGES, SF_CHUNK
+    from .static_megakernel import (HC_COEF, HC_MIX_STRIDE, MAX_BUFS, MAX_MAPS, MAX_SUM_PARTS, NODE_COUNTER_LINES, RING_STAGES,
+                                    SF_CHUNK)
     checks = [f"static_mk::MAX_TASKS_PER_SM == {MAX_TASKS_PER_SM}", f"static_mk::MAX_BUFS == {MAX_BUFS}",
               f"static_mk::MAX_MAPS == {MAX_MAPS}", f"static_mk::NODE_COUNTER_LINES == {NODE_COUNTER_LINES}",
               f"static_mk::SMAX == {RING_STAGES}", f"static_mk::SF_CHUNK == {SF_CHUNK}"]
     if "sum_send" in used:
         checks.append(f"static_mk::MAX_SUM_PARTS == {MAX_SUM_PARTS}")
+    if "hc_mix" in used:
+        checks.append(f"static_mk::HC_MIX_STRIDE == {HC_MIX_STRIDE}")
+    if "hc_pre" in used:
+        checks.append(f"static_mk::HC_COEF == {HC_COEF}")
     return [f"static_assert({' && '.join(checks)}, \"the Python copies of the kernel's sizes (static_schedule.py, "
             'static_megakernel.py)");']
 
