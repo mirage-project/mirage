@@ -71,6 +71,8 @@ struct GpuState {
       resets; // every buffer filled before each launch (static_host_reset)
   std::map<std::string, void *> bufs; // the node output buffers by tensor name
   std::vector<void *> owned;          // cudaMalloc'd here
+  void *flush = nullptr; // serving mode: the buffer static_host_prelude reads
+  size_t flush_bytes = 0;
 };
 static std::vector<GpuState> g_gpus;
 
@@ -407,6 +409,83 @@ static void build_maps(Maps &maps,
   }
 }
 
+#ifdef STATIC_RESET_IN_KERNEL
+// serving mode (STATIC_RESET_IN_KERNEL: one launch is a whole run, as a CUDA
+// graph replays it): kernel_begin reads the launch number at g.gen_ptr, counts
+// the SMs done with their resets in g.arrive and fills the buffers of g.resets
+// itself, so no host step runs between launches. Once here: those two words,
+// the reset list (s.resets without the buffers their reader re-arms, REARM),
+// and the re-armed buffers filled for the first launch
+static void build_serving(GpuState &s) {
+  G &g = s.g;
+  g.gen_ptr = dmalloc<unsigned>(s, 4);
+  g.arrive = dmalloc<unsigned>(s, 4);
+  MKS_CK(cudaMemset(g.gen_ptr, 0, 4));
+  MKS_CK(cudaMemset(g.arrive, 0, 4));
+  ResetList &rl = g.resets;
+  rl.cnt = 0;
+  for (BufReset const &b : s.resets) {
+    if (b.by_reader) {
+      MKS_CK(cudaMemset(b.p, b.value, b.bytes));
+      continue;
+    }
+    if (rl.cnt == MAX_RESETS || b.bytes % 16 != 0 || (uintptr_t)b.p % 16 != 0) {
+      fprintf(stderr,
+              "static_host: reset %d (%zu bytes): at most %d resets, each "
+              "whole 16-B words\n",
+              rl.cnt,
+              b.bytes,
+              MAX_RESETS);
+      exit(1);
+    }
+    rl.p[rl.cnt] = (unsigned char *)b.p;
+    rl.n[rl.cnt] = b.bytes;
+    rl.v[rl.cnt] = (unsigned)b.value;
+    rl.cnt++;
+  }
+}
+
+// a test harness in serving mode: n16 16-B words read at p, so L2 holds none of
+// the layer's data (read, not written: no dirty lines); *sink is written only
+// for a sum the zero-filled buffer never gives
+__global__ void
+    static_flush_kernel(uint4 const *p, size_t n16, unsigned *sink) {
+  unsigned acc = 0;
+  for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n16;
+       i += (size_t)gridDim.x * blockDim.x) {
+    uint4 const v = p[i];
+    acc ^= v.x ^ v.y ^ v.z ^ v.w;
+  }
+  if (acc == 0x9E3779B9u) {
+    *sink = acc;
+  }
+}
+
+// a test harness in serving mode: the GPUs line up on the GPU before a timed
+// launch, as the layer before lines them up in a server. Round n: GPU rank
+// writes n into its slot on every GPU and waits until its own slots all hold
+// n. The slots: the start barrier's area of set 0 (EXCHANGE_HELLO, one 16-B
+// slot per GPU; a serving-mode kernel has no start barrier)
+struct AlignSlots {
+  unsigned *p[GPUS];
+};
+__global__ void static_align_kernel(AlignSlots s, int rank, unsigned n) {
+  int const q = threadIdx.x;
+  if (q < GPUS) {
+    asm volatile("st.relaxed.sys.global.u32 [%0], %1;" ::"l"(s.p[q] + rank),
+                 "r"(n)
+                 : "memory");
+    unsigned v;
+    do {
+      asm volatile("ld.relaxed.sys.global.u32 %0, [%1];"
+                   : "=r"(v)
+                   : "l"(s.p[rank] + q)
+                   : "memory");
+    } while (v < n);
+  }
+}
+#endif
+
 } // namespace static_host
 
 // ---- what the generated layer calls ----
@@ -483,14 +562,19 @@ static void static_host_init(StaticContext &ctx,
     build_bufs(s, v.tensors, args);
     build_shell_buffers(s);
     build_maps(s.maps, s, v.tensors, args);
+#ifdef STATIC_RESET_IN_KERNEL
+    build_serving(s);
+#endif
   }
 }
 
 // before each launch, on the GPU's stream: every buffer of s.resets, the
-// stamps; then the launch number g.gen
+// stamps; then the launch number g.gen. Serving mode: nothing (the kernel
+// resets its buffers and keeps its launch number)
 static void static_host_reset(int r,
                               cudaStream_t st,
                               unsigned long long launch_number) {
+#ifndef STATIC_RESET_IN_KERNEL
   using namespace static_host;
   GpuState &s = g_gpus[r];
   G &g = s.g;
@@ -499,7 +583,45 @@ static void static_host_reset(int r,
   }
   MKS_CK(cudaMemsetAsync(g.stamps, 0, NSM * NSTAMP * 8, st));
   g.gen = (unsigned)(launch_number + 1);
+#endif
 }
+
+#ifdef STATIC_RESET_IN_KERNEL
+// serving mode, a test harness, before a timed launch on GPU r's stream (no
+// host wait: the GPU runs the flush while the host queues the launch): read
+// flush_bytes (> 0) to empty L2, then (several GPUs) line the GPUs up, round
+// `round` (static_align_kernel)
+static void static_host_prelude(int r,
+                                cudaStream_t st,
+                                size_t flush_bytes,
+                                unsigned round) {
+  using namespace static_host;
+  GpuState &s = g_gpus[r];
+  if (flush_bytes > 0) {
+    if (s.flush_bytes < flush_bytes + 4) {
+      if (s.flush) {
+        MKS_CK(cudaFree(s.flush));
+      }
+      MKS_CK(cudaMalloc(&s.flush, flush_bytes + 4));
+      MKS_CK(cudaMemset(s.flush, 0, flush_bytes + 4));
+      s.flush_bytes = flush_bytes + 4;
+    }
+    static_flush_kernel<<<NSM * 4, 256, 0, st>>>(
+        (uint4 const *)s.flush,
+        flush_bytes / 16,
+        (unsigned *)((unsigned char *)s.flush + flush_bytes));
+    MKS_CK(cudaGetLastError());
+  }
+  if (GPUS > 1) {
+    AlignSlots a{};
+    for (int q = 0; q < GPUS; q++) {
+      a.p[q] = (unsigned *)(g_gpus[q].g.rv + EXCHANGE_HELLO);
+    }
+    static_align_kernel<<<1, 32, 0, st>>>(a, r, round);
+    MKS_CK(cudaGetLastError());
+  }
+}
+#endif
 
 // GPU r's instrumentation buffer `name`, for a test harness to read (p =
 // nullptr: no such buffer): "counters" [NCNT] uint32 (the nodes' lines,
@@ -532,6 +654,9 @@ static void static_host_finalize(StaticContext &ctx) {
     cudaSetDevice(ctx.gpus[r].gpu);
     for (void *p : g_gpus[r].owned) {
       cudaFree(p);
+    }
+    if (g_gpus[r].flush) {
+      cudaFree(g_gpus[r].flush);
     }
   }
   g_gpus.clear();

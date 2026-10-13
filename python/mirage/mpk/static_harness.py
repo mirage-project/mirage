@@ -4,6 +4,8 @@ wait) and hands out its instrumentation buffers (StaticKernel.read, layout); eve
   Harness(sk)
     flush_l2(nbytes)                 read nbytes on every GPU: L2 emptied and left clean, as before a layer in a real model
     launch(flush_bytes, timeout_s)   flush_l2, one launch, wait; timeout_s > 0: report() and TimeoutError after that long
+                                     (serving mode, -DSTATIC_RESET_IN_KERNEL: the flush on each GPU's stream, no host wait)
+    elapsed_us()                     serving mode: per GPU the event time of the last launch's kernel (as a server sees it)
     timing() / span_us()             per GPU (last SM past the start barrier, latest SM end) of the last launch
     report()                         per GPU the counters per line and how many SMs passed each stamp (also while a launch hangs)
     task_times()                     timing build: per GPU, SM and list entry (start, last warp's end, stage stamps 0 and 1)
@@ -34,10 +36,16 @@ class Harness:
 
     def launch(self, flush_bytes: int = 0, timeout_s: float = 0.0) -> None:
         """flush_bytes > 0: flush_l2 first. One launch on every GPU, then wait for it. timeout_s > 0: a launch not finished after
-        that long: report(), then TimeoutError (the kernel is still running). A failed kernel: report(), then RuntimeError."""
-        if flush_bytes > 0:
-            self.flush_l2(flush_bytes)
-        self.sk.launch()
+        that long: report(), then TimeoutError (the kernel is still running). A failed kernel: report(), then RuntimeError.
+        Serving mode (a build with -DSTATIC_RESET_IN_KERNEL): the kernel resets its own buffers; the flush runs on each GPU's
+        stream and the launch is queued behind it with no host wait (StaticKernel.launch), so elapsed_us() is the kernel's time
+        as a server sees it."""
+        if self.layout.get("serving"):
+            self.sk.launch(flush_bytes)
+        else:
+            if flush_bytes > 0:
+                self.flush_l2(flush_bytes)
+            self.sk.launch()
         try:
             if timeout_s <= 0:
                 self.sk.wait()
@@ -49,6 +57,14 @@ class Harness:
         except (TimeoutError, RuntimeError):
             self.report()
             raise
+
+    def elapsed_us(self) -> List[float]:
+        """Serving mode: per GPU the microseconds between the events right before and after the last launch's kernel, with L2
+        emptied and the GPUs lined up first (launch with flush_bytes > 0). The layer's time is the largest. Not meaningful in the
+        harness mode: there the events also time the host's launch after its wait."""
+        if not self.layout.get("serving"):
+            raise RuntimeError("elapsed_us: a serving-mode build only (-DSTATIC_RESET_IN_KERNEL)")
+        return self.sk.elapsed_us()
 
     def _array(self, g: int, name: str, dtype) -> np.ndarray:
         return np.frombuffer(self.sk.read(g, name), dtype=dtype)
