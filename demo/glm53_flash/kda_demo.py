@@ -6,7 +6,8 @@
   3. graph        7 layer calls: hc_mix -> hc_pre -> gemm_tile (q|k|v|b|f_a|g_a) -> kda_decode -> gemm_tile (o_proj)
                   -> allreduce_send -> hc_post
   4. plan         --plan FILE: hand_plan.json (default: hand-picked grids, round-robin placement) or solver_plan.json
-                  (search.search_plan on cost records measured on 4 B200s); --search COSTS: the solver's plan from --plan
+                  (search.search_plan on cost records measured on 4 B200s); kernels/<plan>_layer.cu is the layer each one
+                  gives; --search COSTS: the solver's plan from --plan
   5. build, run   one launch; R' vs the reference (relRMS < 1e-3, bit-identical on every GPU), o / states per GPU
   6. time         --reps launches, L2 emptied before each; --record [FILE]: the timing build, the stamps of each launch to
                   OUT/task_times.json, cost records appended to FILE
