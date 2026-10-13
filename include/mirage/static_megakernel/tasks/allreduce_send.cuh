@@ -79,11 +79,48 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
   __syncthreads();
 }
 
+// the same from a gemm_tile node's output in slots (COMBINE_SLOTS, src fp32
+// [NSPLIT][T][W], 0xFF-prefilled, no counter): each 8-column vector's NSPLIT
+// parts are polled until they have landed and added in order
+template <int NSLICE, int NSPLIT, int W, size_t OFF>
+__device__ __forceinline__ void
+    allreduce_send_slots_task(G const &g, float const *src, int x) {
+  constexpr int C8 = W / 8;
+  int const nb = T * C8, blo = (int)((long long)nb * x / NSLICE),
+            bhi = (int)((long long)nb * (x + 1) / NSLICE);
+  for (int i = blo + threadIdx.x; i < bhi; i += 256) {
+    int const t = i / C8, c = i - t * C8;
+    float4 p0 = make_float4(0.f, 0.f, 0.f, 0.f), p1 = p0;
+#pragma unroll 1
+    for (int p = 0; p < NSPLIT; p++) {
+      float const *s = src + ((size_t)p * T + t) * W + 8 * c;
+      float4 a, b;
+      do {
+        a = ldf4_poll(s);
+        b = ldf4_poll(s + 4);
+      } while (!(validf4(a) && validf4(b)));
+      p0.x += a.x;
+      p0.y += a.y;
+      p0.z += a.z;
+      p0.w += a.w;
+      p1.x += b.x;
+      p1.y += b.y;
+      p1.z += b.z;
+      p1.w += b.w;
+    }
+    size_t const dst =
+        OFF + (size_t)g.rank * ((size_t)T * W * 2) + ((size_t)t * C8 + c) * 16;
+    push16(g, dst, pack_bf16x8(p0, p1));
+  }
+  __syncthreads();
+}
+
 // allreduce_send task x: slice x of SELF::x of its input (the output of node
-// SRC, complete once all SRC's tasks are counted) to every GPU, into the node's
-// output (an exchange buffer, [GPUS][T][W] bf16). PARAMS {W (the row width),
-// rows per token in the input (GROUP: added in order)}; BUF_SLOTS {an
-// exchange buffer to re-arm once SRC is done, or -1}
+// SRC, complete once all SRC's tasks are counted; or a gemm_tile node's K
+// parts in slots, polled) to every GPU, into the node's output (an exchange
+// buffer, [GPUS][T][W] bf16). PARAMS {W (the row width), rows per token in the
+// input (GROUP: added in order)}; BUF_SLOTS {an exchange buffer to re-arm once
+// SRC is done, or -1}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -97,22 +134,30 @@ __device__ __forceinline__ void run_allreduce_send(Maps const &,
   constexpr int W = PARAMS::v[0], GROUP = PARAMS::v[1];
   static_assert(W % 8 == 0 && GROUP >= 1,
                 "allreduce_send: params {row width, rows per token}");
-  static_assert(SRC::buf >= 0 && SRC::counter >= 0,
-                "allreduce_send: its input is a node's output buffer, the node "
-                "counts its tasks");
   static_assert(
       SELF::buf >= 0 && exchange_bytes[SELF::buf] == (size_t)GPUS * T * W * 2,
       "allreduce_send: its output, [GPUS][T][W] bf16 in the exchange region");
-  allreduce_send_task<SELF::x,
-                      SRC::x * SRC::y * SRC::z,
-                      GROUP,
-                      W,
-                      exchange_offset[SELF::buf],
-                      slot_at<BUF_SLOTS, 0>()>(
-      g,
-      buf_at<float const>(g, SRC::buf),
-      g.cnt + SRC::counter,
-      tk.x STAGE_STAMP_ARG(L.stage_stamps));
+  if constexpr (SRC::counter < 0) {
+    static_assert(SRC::buf >= 0 && SRC::v[0] == COMBINE_SLOTS &&
+                      SRC::v[3] == 0 && SRC::v[2] == W && GROUP == 1,
+                  "allreduce_send: an input without a counter must be a "
+                  "gemm_tile node's output in slots, rows of W");
+    allreduce_send_slots_task<SELF::x, SRC::y, W, exchange_offset[SELF::buf]>(
+        g, buf_at<float const>(g, SRC::buf), tk.x);
+  } else {
+    static_assert(SRC::buf >= 0,
+                  "allreduce_send: its input is a node's output buffer");
+    allreduce_send_task<SELF::x,
+                        SRC::x * SRC::y * SRC::z,
+                        GROUP,
+                        W,
+                        exchange_offset[SELF::buf],
+                        slot_at<BUF_SLOTS, 0>()>(
+        g,
+        buf_at<float const>(g, SRC::buf),
+        g.cnt + SRC::counter,
+        tk.x STAGE_STAMP_ARG(L.stage_stamps));
+  }
 }
 
 template <class SELF,

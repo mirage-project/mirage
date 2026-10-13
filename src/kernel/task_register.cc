@@ -5553,5 +5553,42 @@ int TaskRegister::register_residual_add_sm100_task(
       this, TASK_RESIDUAL_ADD_SM100, "residual_add", bgraph, params, 3, 1);
 }
 
+int TaskRegister::register_hc_mix_sm100_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params) {
+  // params: {HC (streams), H, NMIX = HC (HC + 2)}. inputs: the residual streams
+  // [T, HC H] bf16, fn [NMIX, HC H] fp32; output: the partial mixes (its
+  // buffer [K parts][T][32] fp32). Grid x = K part.
+  return register_static_task(
+      this, TASK_HC_MIX_SM100, "hc_mix", bgraph, params, 2, 3);
+}
+
+int TaskRegister::register_hc_pre_sm100_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params) {
+  // params: {H, rms eps, hc eps, norm eps, post multiplier (fp32 bits),
+  // Sinkhorn iterations}. inputs: hc_mix's output, the residual streams;
+  // output: x [T, H] bf16 (its buffer also holds the coefficients). Grid x =
+  // token.
+  return register_static_task(
+      this, TASK_HC_PRE_SM100, "hc_pre", bgraph, params, 2, 6);
+}
+
+int TaskRegister::register_kda_decode_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {local heads, head dim, gate lower bound, o_norm eps (fp32
+  // bits)}. inputs: the merged projection (a gemm_tile node's K parts);
+  // output: o [T, heads x head dim] bf16. Grid (token, head).
+  return register_static_task(
+      this, TASK_KDA_DECODE_SM100, "kda_decode", bgraph, params, 1, 4);
+}
+
+int TaskRegister::register_hc_post_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params) {
+  // params: {H, HC}. inputs: the sent partial sums (an allreduce_send node's
+  // output), the residual streams, hc_pre's output; output: the new residual
+  // streams [T, HC H] bf16. Grid (column part, token).
+  return register_static_task(
+      this, TASK_HC_POST_SM100, "hc_post", bgraph, params, 3, 2);
+}
+
 } // namespace runtime
 } // namespace mirage

@@ -234,6 +234,14 @@ public:
                                    std::vector<int> const &params);
   int register_residual_add_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params);
+  int register_hc_mix_sm100_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params);
+  int register_hc_pre_sm100_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params);
+  int register_kda_decode_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
+  int register_hc_post_sm100_task(threadblock::Graph const &bgraph,
+                                  std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(
