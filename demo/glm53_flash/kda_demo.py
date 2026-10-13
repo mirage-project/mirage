@@ -5,8 +5,8 @@
                   copied into the 4 mHC streams), so the conv / recurrent states hold real history
   3. graph        7 layer calls: hc_mix -> hc_pre -> gemm_tile (q|k|v|b|f_a|g_a) -> kda_decode -> gemm_tile (o_proj)
                   -> allreduce_send -> hc_post
-  4. plan         --plan FILE, or plan_gen.round_robin_plan (in_proj / o_proj: --in-rows / --o-rows row tiles,
-                  --in-parts / --o-parts K parts); --search COSTS: the solver's
+  4. plan         --plan FILE: hand_plan.json (default: hand-picked grids, round-robin placement) or solver_plan.json
+                  (search.search_plan on cost records measured on 4 B200s); --search COSTS: the solver's plan from --plan
   5. build, run   one launch; R' vs the reference (relRMS < 1e-3, bit-identical on every GPU), o / states per GPU
   6. time         --reps launches, L2 emptied before each; --record [FILE]: the timing build, the stamps of each launch to
                   OUT/task_times.json, cost records appended to FILE
@@ -28,11 +28,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import kda_reference as ref  # noqa: E402
 
 from mirage.core import bfloat16, float32  # noqa: E402
-from mirage.mpk import compiler, plan_gen  # noqa: E402
+from mirage.mpk import compiler  # noqa: E402
 from mirage.mpk.static_harness import Harness  # noqa: E402
 from mirage.mpk.static_megakernel import HC_MIX_STRIDE, StaticMegakernel  # noqa: E402
 
 T, HC = 8, 4                 # tokens (requests) per step, mHC streams
+HC_PARTS, AR_TASKS = 64, 32  # hc_mix's K parts and allreduce_send's tasks (the plans' grids)
 FLUSH_BYTES = 512 << 20      # read on every GPU before each launch: L2 emptied
 
 
@@ -72,7 +73,7 @@ def gpu_tensors(w, R, conv, rec, rank: int, tp: int) -> dict:
     }
 
 
-def build_graph(mpk: StaticMegakernel, t: dict, hc_parts: int, ar_tasks: int) -> None:
+def build_graph(mpk: StaticMegakernel, t: dict) -> None:
     """The KDA sublayer as 7 layer calls (no K split yet: the plan decides)."""
     a = lambda k: mpk.attach_input(torch_tensor=t[k], name=k)
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
@@ -86,13 +87,13 @@ def build_graph(mpk: StaticMegakernel, t: dict, hc_parts: int, ar_tasks: int) ->
     proj = nt((T, w_in.dim(0)), float32, "kda_proj")
     part = nt((T, H), float32, "kda_out_part")
     sent = nt((T, H), bfloat16, "kda_sent")
-    mpk.hc_mix_layer(residual=R, fn=fn, output=mix, num_parts=hc_parts)                     # mHC pre, part 1
+    mpk.hc_mix_layer(residual=R, fn=fn, output=mix, num_parts=HC_PARTS)                     # mHC pre, part 1
     mpk.hc_pre_layer(mix=mix, residual=R, hc_small=hc_small, gamma=gamma, output=x)          # mHC pre, part 2 + RMSNorm
     mpk.gemm_tile_layer(input=x, weight=w_in, output=proj, combine="slots", reader_rearms=False)   # q|k|v|b|f_a|g_a
     mpk.kda_decode_layer(proj=proj, conv_weight=conv_w, f_b=f_b, g_b=g_b, small=small, conv_state=conv_state,
                          rec_state=rec_state, rows=rows, output=o)                          # conv, gates, delta rule, o_norm
     mpk.gemm_tile_layer(input=o, weight=w_o, output=part, combine="slots", reader_rearms=False)    # o_proj (partial)
-    mpk.allreduce_send_layer(input=part, output=sent, num_tasks=ar_tasks)                    # to every GPU
+    mpk.allreduce_send_layer(input=part, output=sent, num_tasks=AR_TASKS)                    # to every GPU
     mpk.hc_post_layer(sent=sent, residual=R, x=x, output=R_out)                              # sum + mHC post
 
 
@@ -102,15 +103,6 @@ def print_nodes(mpk, title: str) -> None:
         ins = [compiler.tname(mpk, t) for t in n.inputs]
         outs = [compiler.tname(mpk, t) for t in n.outputs]
         print(f"  node {n.graph_idx:2d} {n.name:<15} grid {n.grid} params {n.params}   in {ins} -> out {outs}")
-
-
-def default_plan(mpk, args) -> dict:
-    """Round robin; in_proj and o_proj in --in-rows / --o-rows row tiles and --in-parts / --o-parts K parts."""
-    nodes = {n.graph_idx: n for n in compiler.graph_nodes(mpk)}
-    k_in, k_o = plan_gen.node_index(mpk, "gemm_tile", 0), plan_gen.node_index(mpk, "gemm_tile", 1)
-    rows = lambda k: nodes[k].outputs[0].dim(1)   # the GEMM's N
-    return plan_gen.round_robin_plan(mpk, {k_in: (rows(k_in) // args.in_rows, args.in_parts, 1),
-                                           k_o: (rows(k_o) // args.o_rows, args.o_parts, 1)})
 
 
 def check(ws, expect, tp: int) -> bool:
@@ -140,13 +132,8 @@ def main():
     p.add_argument("--gpus", type=int, default=4)
     p.add_argument("--warm", type=int, default=16, help="reference decode steps before the tested one")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--hc-parts", type=int, default=64, help="hc_mix K parts")
-    p.add_argument("--ar-tasks", type=int, default=32, help="allreduce_send tasks")
-    p.add_argument("--in-parts", type=int, default=2, help="default plan: in_proj K parts")
-    p.add_argument("--o-parts", type=int, default=2, help="default plan: o_proj K parts")
-    p.add_argument("--in-rows", type=int, default=128, choices=(64, 128), help="default plan: in_proj rows per task")
-    p.add_argument("--o-rows", type=int, default=128, choices=(64, 128), help="default plan: o_proj rows per task")
-    p.add_argument("--plan", default=None, help="a plan file (compiler.write_plan_file); default: round robin")
+    p.add_argument("--plan", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "hand_plan.json"),
+                   help="a plan file (compiler.write_plan_file): hand_plan.json or solver_plan.json")
     p.add_argument("--search", nargs="+", default=None, metavar="COSTS", help="cost record files: the solver's plan")
     p.add_argument("--time", type=float, default=300, help="with --search: the solver's time limit (s)")
     p.add_argument("--record", nargs="?", const="", default=None, metavar="FILE",
@@ -169,9 +156,9 @@ def main():
     ws = [gpu_tensors(w, R, conv, rec, g, tp) for g in range(tp)]
 
     mpk = StaticMegakernel(num_gpus=tp)
-    build_graph(mpk, ws[0], args.hc_parts, args.ar_tasks)
+    build_graph(mpk, ws[0])
     print_nodes(mpk, "graph nodes as written:")
-    plan = compiler.plan_from_file(args.plan) if args.plan else default_plan(mpk, args)
+    plan = compiler.plan_from_file(args.plan)
     if args.search:
         from mirage.mpk import plan_viewer, search, static_schedule
         costs = search.Costs(args.search, code=static_schedule.code_tag(), gpu=torch.cuda.get_device_name(0))
