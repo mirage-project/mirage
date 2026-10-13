@@ -1,18 +1,23 @@
 // tasks/residual_add.cuh -- y = bf16(bf16(o + S) + prefix), task x of grid
-// (NSLICE, 1, 1) = slice x of y ([T][H] bf16; H = the node's params[0]): o from
-// the GPU that owns the columns (sum_send), S from sum_gpus's buffer, prefix
-// (the residual) a graph input
+// (NSLICE, 1, 1) = slice x of y ([T][H] bf16; H = the node's params[0]): S from
+// sum_gpus's buffer, prefix (the residual) a graph input. o has one of two
+// sources; its buffer distinguishes them:
+//   sum_send: in the exchange region, from the GPU that owns the columns (K3)
+//   sum_gpus: a second sum_gpus buffer ([T][H] bf16, this GPU), polled as S
+//      (GLM-5.3: o = the routed sum, S = the shared expert's sum)
 #pragma once
 #include "../core.cuh"
 #include "sum_send.cuh" // the layout of its input o
 
 namespace static_mk {
 
-// residual_add task x of NSLICE (ssum: sum_gpus's buffer)
-template <int NSLICE, size_t OOFF, int H> // OOFF: o's offset in the exchange
-                                          // region
+// residual_add task x of NSLICE (ssum: sum_gpus's buffer). OSUM false: o is
+// at OOFF in the exchange region (sum_send). OSUM true: o is osum, a sum_gpus
+// buffer.
+template <int NSLICE, size_t OOFF, int H, bool OSUM>
 __device__ __forceinline__ void residual_add_task(G const &g,
                                                   __nv_bfloat16 *ssum,
+                                                  __nv_bfloat16 *osum,
                                                   __nv_bfloat16 const *prefix,
                                                   __nv_bfloat16 *y,
                                                   int x) {
@@ -29,8 +34,11 @@ __device__ __forceinline__ void residual_add_task(G const &g,
     unsigned char const *sp =
         reinterpret_cast<unsigned char const *>(ssum + (size_t)t * H + c);
     uint4 su = ld16_relaxed(sp);
-    uint4 const ou = poll16(g.rv + OOFF + (size_t)r * O_RANK +
-                            (size_t)t * (H / GPUS) * 2 + cc * 2 + rg_set());
+    unsigned char const *op =
+        OSUM ? reinterpret_cast<unsigned char const *>(osum + (size_t)t * H + c)
+             : g.rv + OOFF + (size_t)r * O_RANK + (size_t)t * (H / GPUS) * 2 +
+                   cc * 2 + rg_set();
+    uint4 const ou = poll16(op);
     while (!valid16w(su)) {
       __nanosleep(64);
       su = ld16_relaxed(sp);
@@ -49,8 +57,7 @@ __device__ __forceinline__ void residual_add_task(G const &g,
     if constexpr (REARM) { // the one reader of these 16 B of S and of o; after
                            // y is written
       rearm16(sp);
-      rearm16(g.rv + OOFF + (size_t)r * O_RANK + (size_t)t * (H / GPUS) * 2 +
-              cc * 2 + rg_set());
+      rearm16(op);
     }
   }
   __syncthreads();
@@ -58,7 +65,8 @@ __device__ __forceinline__ void residual_add_task(G const &g,
 
 // residual_add task x: slice x of SELF::x of y; SSUM: the addend's node
 // (sum_gpus), O: the input's node (sum_send, its output in the exchange
-// region); PARAMS {H}; BUF_SLOTS {the residual, y (graph tensors, [T][H] bf16)}
+// region; or sum_gpus); PARAMS {H}; BUF_SLOTS {the residual, y (graph tensors,
+// [T][H] bf16)}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -71,20 +79,25 @@ __device__ __forceinline__ void run_residual_add(Maps const &,
                                                  KernelLocals &,
                                                  StaticTask const &tk) {
   constexpr int H = PARAMS::v[0];
+  constexpr bool OSUM = exchange_bytes[O::buf] == 0; // o from sum_gpus
   static_assert(H % (8 * GPUS) == 0,
                 "residual_add: whole 8-column vectors of every GPU's part");
-  static_assert(SSUM::buf >= 0 && O::buf >= 0 &&
-                    exchange_bytes[O::buf] == (size_t)GPUS * o_rank_bytes(H),
-                "residual_add: S from sum_gpus's buffer, o from sum_send's");
+  static_assert(
+      SSUM::buf >= 0 && O::buf >= 0 &&
+          (OSUM ? exchange_bytes[O::buf] == 0
+                : exchange_bytes[O::buf] == (size_t)GPUS * o_rank_bytes(H)),
+      "residual_add: S from sum_gpus's buffer, o from sum_send's "
+      "(or from a second sum_gpus buffer)");
 #ifdef STATIC_RESET_IN_KERNEL
   if constexpr (PDL_TRIGGER == 2) {
     asm volatile("griddepcontrol.launch_dependents;" ::
                      : "memory"); // PDL: near the end (the last task)
   }
 #endif
-  residual_add_task<SELF::x, exchange_offset[O::buf], H>(
+  residual_add_task<SELF::x, exchange_offset[O::buf], H, OSUM>(
       g,
       buf_at<__nv_bfloat16>(g, SSUM::buf),
+      buf_at<__nv_bfloat16>(g, O::buf),
       buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 0>()),
       buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 1>()),
       tk.x);

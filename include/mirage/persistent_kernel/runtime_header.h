@@ -248,6 +248,17 @@ enum TaskType {
   TASK_SUM_SEND_SM100 = 509,
   // y = (input + addend) + residual (tasks/residual_add.cuh)
   TASK_RESIDUAL_ADD_SM100 = 510,
+  // Quantize this GPU's bf16 activation to FP8 with fp32 group scales.
+  // scaled_moe_experts and scaled_gemm_tile read it (tasks/group_quant.cuh).
+  TASK_GROUP_QUANT_SM100 = 511,
+  // Compute an e4m3 [8 x K-range] x [K-range x 128] tile.
+  // The epilogue applies fp32 scales per K tile (tasks/scaled_gemm_tile.cuh).
+  TASK_SCALED_GEMM_TILE_SM100 = 512,
+  // Compute SiLU(gate) * up for a feature block (tasks/silu_and_mul.cuh).
+  TASK_SILU_AND_MUL_SM100 = 513,
+  // Process routed expert work on one SM, with e4m3 weights and fp32 scales
+  // (tasks/scaled_moe_experts.cuh).
+  TASK_SCALED_MOE_EXPERTS_SM100 = 514,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 

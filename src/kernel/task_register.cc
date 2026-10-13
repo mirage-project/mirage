@@ -5434,9 +5434,10 @@ int TaskRegister::register_gemm_tile_sm100_task(
 
 int TaskRegister::register_topk_route_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {E (experts), K (experts per token)}. inputs: router logits [T, E]
-  // fp32, bias [E] fp32; output: routing pairs [T, K]. Grid x = token.
-  assert(params.size() == 2);
+  // params: {E (experts), K (experts per token)[, the routed scaling factor
+  // (fp32 bits)]}. inputs: router logits [T, E] fp32, bias [E] fp32; output:
+  // routing pairs [T, K]. Grid x = token.
+  assert(params.size() == 2 || params.size() == 3);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(bgraph, 2, 1, input_ops, output_ops);
   assert(input_ops[0]->dtensor.num_dims == 2);
@@ -5551,6 +5552,67 @@ int TaskRegister::register_residual_add_sm100_task(
   // bf16.
   return register_static_task(
       this, TASK_RESIDUAL_ADD_SM100, "residual_add", bgraph, params, 3, 1);
+}
+
+int TaskRegister::register_group_quant_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {L}. inputs: x [T, L] bf16; output: z_q [T, L] e4m3 bytes (its
+  // buffer: then the fp32 scales). Grid x = 128-column block.
+  return register_static_task(
+      this, TASK_GROUP_QUANT_SM100, "group_quant", bgraph, params, 1, 1);
+}
+
+int TaskRegister::register_scaled_gemm_tile_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {mode (as gemm_tile), K, N, the layout of the weight scales (0 one
+  // for each 128 x 128 block, 1 gate / up pairs)}; the K split is the grid's y.
+  // inputs: activation [T, K] e4m3 bytes (a group_quant node's output), weight
+  // [N, K] e4m3 bytes, weight scales fp32 ([N / 128, K / 128] for layout 0,
+  // [N / 256, K / 128, 2] for layout 1); output: [T, N] fp32 (int64 fixed
+  // point for mode 1).
+  assert(params.size() == 4);
+  assert(params[0] >= 0 && params[0] <= 2 &&
+         (params[3] == 0 || params[3] == 1));
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 3, 1, input_ops, output_ops);
+  assert(input_ops[1]->dtensor.num_dims == 2);
+  assert(input_ops[1]->dtensor.dim[1] == params[1]);
+  assert(input_ops[1]->dtensor.dim[0] == params[2]);
+  return register_task_variant(
+      TASK_SCALED_GEMM_TILE_SM100,
+      static_build_only_task("scaled_gemm_tile", params));
+}
+
+int TaskRegister::register_silu_and_mul_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // SiLU (tasks/silu_and_mul.cuh). No params (shared gate_up's K split is its
+  // grid y). inputs: shared gate_up [T, 2 * SHR] int64 fixed point; output: h_s
+  // [T, SHR] bf16. Grid x = a block of F features (default 64; F = 32, 64, 96
+  // or 128).
+  assert(params.empty());
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 1, 1, input_ops, output_ops);
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  assert(output_ops[0]->dtensor.num_dims == 2);
+  assert(input_ops[0]->dtensor.dim[1] == 2 * output_ops[0]->dtensor.dim[1]);
+  return register_task_variant(TASK_SILU_AND_MUL_SM100,
+                               static_build_only_task("silu_and_mul", params));
+}
+
+int TaskRegister::register_scaled_moe_experts_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {IR (the expert intermediate on this GPU)}. inputs: z_q (a
+  // group_quant node's output), routing pairs, W13 bank, W2 bank (e4m3, in
+  // pieces; their fp32 scales are buffer slots); output: the routed rows R
+  // [T x K, L] fp32 (L = the hidden size H). One task per SM
+  // (static_megakernel/tasks/scaled_moe_experts.cuh).
+  assert(params.size() == 1 && params[0] > 0 && params[0] % 128 == 0 &&
+         params[0] <= 256);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 4, 1, input_ops, output_ops);
+  return register_task_variant(
+      TASK_SCALED_MOE_EXPERTS_SM100,
+      static_build_only_task("scaled_moe_experts", params));
 }
 
 } // namespace runtime

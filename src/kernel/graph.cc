@@ -1058,6 +1058,25 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(3, 1, TASK_RESIDUAL_ADD_SM100, variant_id);
+  } else if (name == "group_quant") {
+    int variant_id = task_register->register_group_quant_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_GROUP_QUANT_SM100, variant_id);
+  } else if (name == "scaled_gemm_tile") {
+    int variant_id = task_register->register_scaled_gemm_tile_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_SCALED_GEMM_TILE_SM100, variant_id);
+  } else if (name == "silu_and_mul") {
+    int variant_id = task_register->register_silu_and_mul_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_SILU_AND_MUL_SM100, variant_id);
+  } else if (name == "scaled_moe_experts") {
+    int variant_id = task_register->register_scaled_moe_experts_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_SCALED_MOE_EXPERTS_SM100, variant_id);
   }
 
   else {
