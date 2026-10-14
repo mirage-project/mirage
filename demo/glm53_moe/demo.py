@@ -131,14 +131,14 @@ def check_plan(plan: str, gpus: int, sms: int) -> dict:
 
 
 def build(ws: list, out: str, plan: str, search: list = None, costs_code: str = "current", time_limit_s: float = 300,
-          profile: bool = False):
+          profile: bool = False, extra_flags: list = None):
     """Build the graph, compile its plan, and load the kernel for GPUs 0..len(ws)-1.
 
     ws contains the tensors from load_weights. plan: a saved plan file.
     search: cost record files. Then the solver searches a plan, starting from the plan above (search.search_plan), and
     writes it to out/plan.json and its predicted timeline to out/plan_view.json. costs_code: the records of these kernel
     templates: "current" (static_schedule.code_tag), "any", or a tag.
-    profile: the timing build (for cost records).
+    profile: the timing build (for cost records). extra_flags: more nvcc flags (e.g. -DSTATIC_RESET_IN_KERNEL).
     Write schedules to out/schedules and the compiled layer to out/build.
     Return the kernel and the information from compile_plan, with "paths" (the schedule files) and "mpk" (the graph).
     """
@@ -155,7 +155,8 @@ def build(ws: list, out: str, plan: str, search: list = None, costs_code: str = 
         compiler.write_plan_file(os.path.join(out, "plan.json"), p)
         plan_viewer.save(os.path.join(out, "plan_view.json"), p, summary, f"searched from {plan}")
     paths, info = compiler.compile_plan(mpk, p, os.path.join(out, "schedules"))
-    sk = mpk.compile_static(paths, gpu_tensors=ws, out_dir=os.path.join(out, "build"), profile=profile)
+    sk = mpk.compile_static(paths, gpu_tensors=ws, out_dir=os.path.join(out, "build"), extra_flags=extra_flags,
+                            profile=profile)
     return sk, dict(info, paths=paths, mpk=mpk)
 
 
@@ -181,6 +182,8 @@ def main():
                     "(static_schedule.code_tag), any, or a tag")
     ap.add_argument("--time", type=float, default=300, help="with --search: the solver's time limit (s)")
     ap.add_argument("--record", default=None, metavar="FILE", help="the timing build; this run's cost records appended to FILE")
+    ap.add_argument("--nvcc-flag", action="append", default=[], help="an nvcc flag for the layer (repeatable), e.g. "
+                    "-DSTATIC_RESET_IN_KERNEL: the kernel resets its buffers itself, no host memsets or sync per launch")
     args = ap.parse_args()
     # check the GPU count, the TP size and the plan before the download and the weight load
     tp = args.tp or args.gpus
@@ -196,7 +199,8 @@ def main():
         x = torch.randn(T, H, generator=torch.Generator().manual_seed(1)).to(torch.bfloat16)
     ws = load_weights(checkpoint_reader(snapshot), args.layer, args.gpus, x, tp=args.tp, rank=args.rank)
     sk, info = build(ws, args.out, args.plan, search=args.search,
-                     costs_code=args.costs_code, time_limit_s=args.time, profile=args.record is not None)
+                     costs_code=args.costs_code, time_limit_s=args.time, profile=args.record is not None,
+                     extra_flags=args.nvcc_flag)
     h = Harness(sk)
     h.launch(timeout_s=60)
     y = ws[0]["moe_out"].cpu()
