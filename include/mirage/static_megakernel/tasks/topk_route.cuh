@@ -2,8 +2,9 @@
 // partial sums of row t (lpart = the router node's output, K parts in slots
 // (gemm_tile.cuh COMBINE_SLOTS), in a fixed order so that every GPU routes the
 // same way), sigmoid, + score correction bias, top K of the NE experts,
-// renormalise the K sigmoid scores -> K (expert, weight) pairs, written to
-// `pairs` (the node's buffer, [T][K]) as expert << 32 | weight bits
+// renormalise the K sigmoid scores (and multiply them by the routed scaling
+// factor, if there is one) -> K (expert, weight) pairs, written to `pairs`
+// (the node's buffer, [T][K]) as expert << 32 | weight bits
 // (0xFF-prefilled: moe_experts polls them). warm = false (this node's first
 // task on the SM: its code is cold; static_schedule.case_code): first a dry
 // pass, the same code on bias-only scores without loading or storing anything
@@ -21,7 +22,8 @@ constexpr int topk_scratch_bytes() {
   return 2 * NE * 4 + 2 * (NE + 8 * K) * 4 + 2 * K * 4;
 }
 
-template <int NSPLIT, int NE, int K>
+// SCALE_BITS: the fp32 bits of the routed scaling factor (0: none)
+template <int NSPLIT, int NE, int K, int SCALE_BITS = 0>
 __device__ __forceinline__ void topk_route_task(float const *bias,
                                                 float *lpart,
                                                 unsigned long long *pairs,
@@ -162,7 +164,10 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
         sum += wsel_s[k];
       }
       if (real) {
-        float const w = wsel_s[threadIdx.x] / sum;
+        float w = wsel_s[threadIdx.x] / sum;
+        if constexpr (SCALE_BITS != 0) {
+          w *= __int_as_float(SCALE_BITS);
+        }
         pairs[t * K + threadIdx.x] =
             ((unsigned long long)(unsigned)sel_s[threadIdx.x] << 32) |
             (unsigned long long)__float_as_uint(w);
@@ -189,8 +194,9 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
 }
 
 // topk_route task x = token x; adds the router's LOGITS::y partial sums (K
-// parts in slots); PARAMS {NE (experts), K (experts per token)}; BUF_SLOTS {the
-// score correction bias (a graph tensor, [NE] fp32)}; warm: above
+// parts in slots); PARAMS {NE (experts), K (experts per token)[, the routed
+// scaling factor as fp32 bits]}; BUF_SLOTS {the score correction bias (a graph
+// tensor, [NE] fp32)}; warm: above
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -203,10 +209,13 @@ __device__ __forceinline__ void run_topk_route(Maps const &,
                                                StaticTask const &tk,
                                                bool warm) {
   constexpr int NE = PARAMS::v[0], K = PARAMS::v[1];
+  // v[2]: the scaling factor's bits, or v's closing 0 when there are 2 params
+  // (param_at requires the param)
+  constexpr int SCALE_BITS = PARAMS::v[2];
   static_assert(LOGITS::v[0] == COMBINE_SLOTS && LOGITS::v[2] == NE,
                 "topk_route: the router's NE logits, its K parts in slots");
   static_assert(SELF::buf >= 0, "topk_route: its output pairs");
-  topk_route_task<LOGITS::y, NE, K>(
+  topk_route_task<LOGITS::y, NE, K, SCALE_BITS>(
       buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()),
       buf_at<float>(g, LOGITS::buf),
       buf_at<unsigned long long>(g, SELF::buf),

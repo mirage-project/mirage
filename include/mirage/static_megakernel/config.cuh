@@ -60,6 +60,8 @@ __host__ __device__ constexpr uint32_t idesc_bf16(uint32_t m) {
 }
 constexpr uint32_t IDESC_MX =
     0x08820280u; // kind::mxf8f6f4: e2m1 x e4m3 -> fp32, ue8m0 scales, M128 N8
+// Select e4m3 weights: change the A type in bits 7..9 from 5 (e2m1) to 0.
+constexpr uint32_t IDESC_MX_E4M3 = IDESC_MX & ~(7u << 7);
 constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ull,
                    EVICT_LAST = 0x14F0000000000000ull; // L2 cache hints
 
