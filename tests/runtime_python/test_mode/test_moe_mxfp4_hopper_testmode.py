@@ -39,6 +39,7 @@ def _make_pk(batch_size):
         world_size=1,
         max_num_batched_tokens=batch_size,
         max_num_batched_requests=batch_size,
+        max_num_pages=batch_size,
     )
     return PersistentKernel(**params)
 
