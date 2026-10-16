@@ -153,6 +153,10 @@ __device__ __forceinline__ TaskId compute_task_id(size_t iteration_num,
 }
 
 __global__ void init_kernel(RuntimeConfig config) {
+  // Sets up device printf before the worker launch (avoids sm90 hang).
+  if (gridDim.x != 1) {
+    printf("[MPK] init_kernel expects a single block\n");
+  }
   assert(gridDim.x == 1);
   assert(gridDim.y == 1);
   assert(gridDim.z == 1);
