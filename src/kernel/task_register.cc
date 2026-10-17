@@ -3814,12 +3814,15 @@ int TaskRegister::register_moe_linear_sm90_task(
     std::vector<int> const &params,
     bool w13_linear,
     bool mxfp4_weight) {
-  assert(params.size() == 0);
+  // params[0]: a last input holds one bias row per expert (optional)
+  assert(params.size() == 0 || params.size() == 1);
+  bool const has_bias = params.size() == 1 && params[0] > 0;
   int num_experts = 0, num_experts_per_tok = 0, batch_size = 0, output_size = 0,
       orig_output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = mxfp4_weight ? 5 : 4;
+  int const bias_op_idx = mxfp4_weight ? 5 : 4;
+  int num_inputs = bias_op_idx + (has_bias ? 1 : 0);
   int num_outputs = 1;
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
@@ -3869,6 +3872,12 @@ int TaskRegister::register_moe_linear_sm90_task(
       static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[1]);
   orig_output_size = input_ops[1]->dtensor.dim[1];
+  if (has_bias) {
+    assert(input_ops[bias_op_idx]->output_tensors[0].num_dims == 2);
+    assert(input_ops[bias_op_idx]->output_tensors[0].dim[0] == num_experts);
+    assert(input_ops[bias_op_idx]->output_tensors[0].dim[1] == output_size);
+    assert(input_ops[bias_op_idx]->dtensor.dim[1] == orig_output_size);
+  }
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -3914,19 +3923,20 @@ int TaskRegister::register_moe_linear_sm90_task(
         "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0])"
         ");");
   }
-  // Bias Tensor setup
+  // Bias Tensor setup: indexed (token, row, expert); every token of an
+  // expert shares one row of this task's column slice.
   code.e(
       "cute::Layout layout_Bias = cute::make_layout(cute::make_shape($, $, $), "
-      "cute::make_stride($, cute::Int<1>{}, $));",
+      "cute::make_stride(cute::Int<0>{}, cute::Int<1>{}, $));",
       batch_size,
       output_size,
       num_experts,
-      output_stride,
-      output_stride * batch_size);
+      orig_output_size);
   code.e("cute::Tensor mBias = "
          "cute::make_tensor(cute::make_gmem_ptr(static_cast<cute::bfloat16_t*>("
          "$)), layout_Bias);",
-         "nullptr");
+         has_bias ? "task_desc->input_ptrs[" + std::to_string(bias_op_idx) + "]"
+                  : std::string("nullptr"));
   // Topk_indices Tensor setup
   code.e("cute::Layout layout_routing_indices = "
          "cute::make_layout(cute::make_shape($, $), "
@@ -3996,7 +4006,7 @@ int TaskRegister::register_moe_linear_sm90_task(
          num_experts_per_tok,
          expert_stride,
          w13_linear ? "true" : "false",
-         /*no_bias*/ "true",
+         /*no_bias*/ has_bias ? "false" : "true",
          mxfp4_weight ? "true" : "false",
          num_ab_stages);
   code.e("    $ ,", mxfp4_weight ? "TMA_A{}" : "tma_a");

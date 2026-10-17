@@ -2069,12 +2069,10 @@ class PersistentKernel:
         tb_graph.new_input(output, (-1, 2, -1), -1, True)
         self.kn_graph.customized(graph_inputs + [output], tb_graph)
 
-        assert bias is None or self.target_cc == 100, (
-            "moe_w13_linear_layer(bias=...) is only implemented for sm100")
         if self.target_cc == 100:
             self.kn_graph.register_task(tb_graph, "moe_w13_linear_sm100", params)
         elif self.target_cc == 90:
-            self.kn_graph.register_task(tb_graph, "moe_w13_linear_sm90")
+            self.kn_graph.register_task(tb_graph, "moe_w13_linear_sm90", params)
         else:
             assert False
             
@@ -2088,6 +2086,7 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        bias: DTensor = None,
     ):
         """Run routed W13 with packed E2M1 weights and E8M0 block scales.
 
@@ -2124,12 +2123,18 @@ class PersistentKernel:
         tb_graph.new_input(weight_scale, (-1, 1, -1), -1, True)
         tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
         tb_graph.new_input(moe_mask, (-1, -1, -1), -1, True)
+        graph_inputs = [input, weight_mxfp4, weight_scale, moe_routing_indices, moe_mask]
+        params = []
+        if bias is not None:
+            assert bias.num_dims == 2  # (num_experts, output_size)
+            assert bias.dim(0) == weight_mxfp4.dim(0)
+            assert bias.dim(1) == weight_mxfp4.dim(1)
+            tb_graph.new_input(bias, (-1, 1, -1), -1, True)
+            graph_inputs.append(bias)
+            params = [1]
         tb_graph.new_input(output, (-1, 2, -1), -1, True)
-        self.kn_graph.customized(
-            [input, weight_mxfp4, weight_scale, moe_routing_indices, moe_mask, output],
-            tb_graph,
-        )
-        self.kn_graph.register_task(tb_graph, "moe_w13_mxfp4_sm90")
+        self.kn_graph.customized(graph_inputs + [output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "moe_w13_mxfp4_sm90", params)
 
     def moe_w13_fp8_layer(
         self,
@@ -2371,12 +2376,10 @@ class PersistentKernel:
         tb_graph.new_input(output, (-1, 2, -1), -1, True)
         self.kn_graph.customized(graph_inputs + [output], tb_graph)
 
-        assert bias is None or self.target_cc == 100, (
-            "moe_w2_linear_layer(bias=...) is only implemented for sm100")
         if self.target_cc == 100:
             self.kn_graph.register_task(tb_graph, "moe_w2_linear_sm100", params)
         elif self.target_cc == 90:
-            self.kn_graph.register_task(tb_graph, "moe_w2_linear_sm90")
+            self.kn_graph.register_task(tb_graph, "moe_w2_linear_sm90", params)
         else:
             assert False
         
@@ -2390,6 +2393,7 @@ class PersistentKernel:
         output: DTensor,
         grid_dim: tuple,
         block_dim: tuple,
+        bias: DTensor = None,
     ):
         """Run routed W2 with packed E2M1 weights and E8M0 block scales."""
         assert self.target_cc == 90, "MXFP4 routed MoE is Hopper-only"
@@ -2420,12 +2424,18 @@ class PersistentKernel:
         tb_graph.new_input(weight_scale, (-1, 1, -1), -1, True)
         tb_graph.new_input(moe_routing_indices, (-1, -1, -1), -1, True)
         tb_graph.new_input(moe_mask, (-1, -1, -1), -1, True)
+        graph_inputs = [input, weight_mxfp4, weight_scale, moe_routing_indices, moe_mask]
+        params = []
+        if bias is not None:
+            assert bias.num_dims == 2  # (num_experts, output_size)
+            assert bias.dim(0) == weight_mxfp4.dim(0)
+            assert bias.dim(1) == weight_mxfp4.dim(1)
+            tb_graph.new_input(bias, (-1, 1, -1), -1, True)
+            graph_inputs.append(bias)
+            params = [1]
         tb_graph.new_input(output, (-1, 2, -1), -1, True)
-        self.kn_graph.customized(
-            [input, weight_mxfp4, weight_scale, moe_routing_indices, moe_mask, output],
-            tb_graph,
-        )
-        self.kn_graph.register_task(tb_graph, "moe_w2_mxfp4_sm90")
+        self.kn_graph.customized(graph_inputs + [output], tb_graph)
+        self.kn_graph.register_task(tb_graph, "moe_w2_mxfp4_sm90", params)
 
     def moe_mul_sum_add_layer(
         self,

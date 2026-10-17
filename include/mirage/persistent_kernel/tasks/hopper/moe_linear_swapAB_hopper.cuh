@@ -631,13 +631,14 @@ __device__ __forceinline__ void
 
             bool pred =
                 (n_idx < BATCH_SIZE && topk_idx > 0 && m_idx < OUTPUT_SIZE);
-            TypeC fragD = TypeAcc_to_TypeC(accum(i));
-
-            if constexpr (!NOBIAS) {
-              fragD += mBias(n_idx, m_idx, expert_idx);
-            }
             if (pred) {
-              mOutput(n_idx, m_idx, topk_idx - 1) = fragD;
+              // Add the bias in fp32 and round once; rows past OUTPUT_SIZE
+              // would read the next task's bias slice.
+              TypeAcc acc = accum(i);
+              if constexpr (!NOBIAS) {
+                acc += TypeBias_to_TypeAcc(mBias(n_idx, m_idx, expert_idx));
+              }
+              mOutput(n_idx, m_idx, topk_idx - 1) = TypeAcc_to_TypeC(acc);
             }
           }
         } // end for n_tile
