@@ -1,5 +1,6 @@
 // Ampere task impls
 #include "tasks/ampere/argmax.cuh"
+#include "tasks/ampere/clamped_swiglu.cuh"
 #include "tasks/ampere/embedding.cuh"
 #include "tasks/ampere/merge_splitkv.cuh"
 #include "tasks/ampere/reduction.cuh"
