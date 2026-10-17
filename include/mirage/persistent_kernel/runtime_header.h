@@ -223,6 +223,9 @@ enum TaskType {
   // Clamped-alpha SwiGLU: (clamp(up) + 1) * clamp(gate) * sigmoid(gate*alpha)
   TASK_CLAMPED_SWIGLU = 451,
   TASK_GPT_OSS_TASK_END = 499, // end placeholder, not a real task
+  // Sparse MLA over a paged latent cache, SM100 (ordinary pointers, no TMA).
+  TASK_SPARSE_MLA_SM100 = 500,
+  TASK_SPARSE_MLA_REDUCE_SM100 = 501,
 };
 
 enum EventType {
