@@ -3352,7 +3352,11 @@ class PersistentKernel:
         print("Compiling megakernel using the following command line:")
         print(cc_cmd)
         subprocess.check_call(cc_cmd)
-        
+        # build_only stops before loading, so a build for another GPU
+        # architecture than the local one can still be checked.
+        if kwargs.get("build_only", False):
+            return
+
         # Copy .so to output_dir if specified
         if output_dir is not None:
             so_output_path = os.path.join(output_dir, f"mpk_launcher_rank{self.mpi_rank}.cpython-{sys.version_info.major}{sys.version_info.minor}-x86_64-linux-gnu.so")
