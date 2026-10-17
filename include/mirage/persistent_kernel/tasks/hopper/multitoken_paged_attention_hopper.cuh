@@ -71,6 +71,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     void *output_ptr,
     void *lse = nullptr,
     int kv_idx = 0) {
+  // Catches a template argument landing in the wrong slot at codegen time.
+  static_assert(ROTARY_DIM > 0 && ROTARY_DIM <= HEAD_DIM && ROTARY_DIM % 2 == 0,
+                "ROTARY_DIM must be even and in (0, HEAD_DIM]");
   // Stride between consecutive pages of K or V.
   constexpr int PAGE_STRIDE =
       PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
