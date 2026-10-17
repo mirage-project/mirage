@@ -223,6 +223,32 @@ enum TaskType {
   // Clamped-alpha SwiGLU: (clamp(up) + 1) * clamp(gate) * sigmoid(gate*alpha)
   TASK_CLAMPED_SWIGLU = 451,
   TASK_GPT_OSS_TASK_END = 499, // end placeholder, not a real task
+  // static megakernel tasks (include/mirage/static_megakernel/), SM100 / SM103;
+  // they run only in the generated static-schedule layer
+  TASK_STATIC_TASK_BEGIN = 500, // begin placeholder, not a real task
+  // bf16 [8 x K-range] x [K-range x 128 or 64] tile; params[0] says how the K
+  // parts (grid y) are combined; the activation by tensor map or polled
+  TASK_GEMM_TILE_SM100 = 501,
+  // one token: add the router's K parts, sigmoid + bias, top-k, renorm
+  TASK_TOPK_ROUTE_SM100 = 502,
+  // 128 columns: add the K parts, MXFP8 quantize, send to every GPU
+  TASK_SUM_QUANT_SEND_SM100 = 503,
+  // SiTU(gate) * up of a block of features (SGLang's situ_and_mul)
+  TASK_SITU_AND_MUL_SM100 = 504,
+  // the routed experts on one SM (a dynamic queue of W13 / W2 entries)
+  TASK_MOE_EXPERTS_SM100 = 505,
+  // all-reduce: send this GPU's partial sum to every GPU
+  // (tasks/allreduce_send.cuh)
+  TASK_ALLREDUCE_SEND_SM100 = 506,
+  // add the GPUs' partial sums, then RMSNorm (tasks/sum_rmsnorm.cuh)
+  TASK_SUM_RMSNORM_SM100 = 507,
+  // add the GPUs' partial sums (tasks/sum_gpus.cuh)
+  TASK_SUM_GPUS_SM100 = 508,
+  // add a GEMM's K parts, send to every GPU (tasks/sum_send.cuh)
+  TASK_SUM_SEND_SM100 = 509,
+  // y = (input + addend) + residual (tasks/residual_add.cuh)
+  TASK_RESIDUAL_ADD_SM100 = 510,
+  TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 
 enum EventType {
