@@ -13,16 +13,22 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import ValidationError
 
 from .model_runner import ModelRunner, RunnerConfig
 from .llm_engine import LLMEngine
+from .protocol import ChatRequest, TextRequest
+
+logger = logging.getLogger(__name__)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -46,127 +52,164 @@ app = FastAPI(title="MPK LLM Engine", lifespan=lifespan)
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-async def _parse_json(request: Request) -> dict:
-    """Parse JSON body, returning 400 on empty or malformed input."""
-    try:
-        return await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid or empty JSON body")
+def error_response(message, status=400, param=None):
+    return JSONResponse(status_code=status, content={"error": {
+        "message": message, "type": "invalid_request_error" if status < 500 else "server_error",
+        "param": param, "code": None}})
 
 
-def _extract_prompt(messages: list[dict]) -> str:
-    """Pull the last user message from an OpenAI chat messages list."""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            return msg["content"]
-    return ""
+def _decode_output(tokens, tokenizer):
+    """Yield text deltas, finish reasons, and token counts for HTTP responses."""
+    ids, emitted = [], ""
+    for token, reason in tokens:
+        if token is not None:
+            ids.append(token)
+        text = tokenizer.decode(ids)
+        if not reason:
+            # Keep incomplete UTF-8 out of streamed text.
+            text = text.rstrip("\ufffd")
+        yield text[len(emitted):], reason, len(ids)
+        emitted = text
+        if reason:
+            break
 
 
-async def _stream_bridge(
-    engine: LLMEngine, prompt: str, timeout: float,
-) -> AsyncGenerator[str, None]:
-    """Bridge a synchronous streaming generator to async SSE chunks.
+async def _stream_bridge(tokens, tokenizer):
+    """Bridge a synchronous streaming generator to async token updates.
 
     Each request gets its own daemon thread so concurrent requests are never
-    gated by the default ``ThreadPoolExecutor`` pool size.  Items produced by
+    gated by the default ``ThreadPoolExecutor`` pool size. Items produced by
     the thread are handed to the event loop via ``call_soon_threadsafe`` so
     that the asyncio queue is accessed only from the event-loop thread.
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
 
-    def _put(text: str, is_final: bool, error: str | None) -> None:
-        """Called on the event-loop thread; safe to touch the asyncio queue."""
-        queue.put_nowait((text, is_final, error))
-
-    def _run() -> None:
+    def run():
         try:
-            gen = engine.submit(prompt, stream=True, timeout=timeout)
-            for text, is_final in gen:
-                loop.call_soon_threadsafe(_put, text, is_final, None)
-        except BaseException as exc:
-            loop.call_soon_threadsafe(_put, "", True, str(exc))
+            for item in _decode_output(tokens, tokenizer):
+                loop.call_soon_threadsafe(queue.put_nowait, item)
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
 
-    thread = threading.Thread(target=_run, daemon=True)
-    thread.start()
-
+    threading.Thread(target=run, daemon=True).start()
     while True:
-        text, is_final, error = await queue.get()
-
-        if error:
-            yield "data: " + json.dumps({"error": error}) + "\n\n"
+        item = await queue.get()
+        if item is None:
             break
+        if isinstance(item, Exception):
+            raise item
+        yield item
 
-        chunk = json.dumps({
-            "choices": [{"delta": {"content": text}, "index": 0}],
-        })
-        yield f"data: {chunk}\n\n"
-        if is_final:
-            break
 
-    thread.join()
-    yield "data: [DONE]\n\n"
+async def _completion_response(req, chat, model, prompt_tokens, tokens, tokenizer):
+    """Format a submitted request as a response or SSE stream."""
+    response_id = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex
+    created = int(time.time())
+
+    def usage(count):
+        return dict(prompt_tokens=prompt_tokens, completion_tokens=count,
+                    total_tokens=prompt_tokens + count)
+
+    def response(text="", reason=None, *, role=False, usage=None):
+        choice = dict(index=0, finish_reason=reason)
+        if chat:
+            content = {} if req.stream and reason else {"content": text}
+            if role or not req.stream:
+                content["role"] = "assistant"
+            choice["delta" if req.stream else "message"] = content
+        else:
+            choice["text"] = text
+        result = dict(id=response_id, created=created, model=model, choices=[choice],
+                      object=("chat.completion.chunk" if req.stream else "chat.completion")
+                             if chat else "text_completion")
+        if usage is not None:
+            result["usage"] = usage
+            if req.stream:
+                result["choices"] = []
+        return result
+
+    events = _stream_bridge(tokens, tokenizer)
+    if req.stream:
+        async def sse():
+            def encode(value):
+                return "data: " + json.dumps(value, ensure_ascii=False) + "\n\n"
+            if chat:
+                yield encode(response(role=True))
+            async for text, reason, count in events:
+                if text:
+                    yield encode(response(text))
+                if reason:
+                    yield encode(response(reason=reason))
+                    if req.stream_options and req.stream_options.include_usage:
+                        yield encode(response(usage=usage(count)))
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(sse(), media_type="text/event-stream")
+    try:
+        result = ""
+        async for text, reason, count in events:
+            result += text
+        return response(result, reason, usage=usage(count))
+    except TimeoutError:
+        return error_response("Generation timed out", 504)
+    except Exception:
+        logger.exception("Generation failed")
+        return error_response("Generation failed", 500)
+
+
+async def complete(request: Request, chat: bool):
+    engine = request.app.state.engine
+    model = request.app.state.served_model
+    try:
+        body = await request.json()
+        req = (ChatRequest if chat else TextRequest).model_validate(body)
+        params = req.sampling_params()
+    except ValidationError as exc:
+        first = exc.errors(include_input=False)[0]
+        return error_response(first["msg"], param=".".join(map(str, first["loc"])))
+    except ValueError:
+        return error_response("Invalid or empty JSON body")
+    if req.model != model:
+        return error_response(f"Model '{req.model}' is not served", 404, "model")
+    try:
+        tokenizer = engine.tokenizer_manager
+        ids = (tokenizer.tokenize_messages([m.template_message() for m in req.messages])
+               if chat else tokenizer.tokenize_raw(req.prompt))
+        tokens = await asyncio.to_thread(
+            engine.submit, ids, stream=True, sampling_params=params,
+            return_token_ids=True, timeout=request.app.state.request_timeout)
+    except ValueError as exc:
+        return error_response(str(exc))
+    except Exception:
+        logger.exception("Failed to submit generation")
+        return error_response("Unable to start generation", 503)
+    return await _completion_response(req, chat, model, len(ids), tokens, tokenizer)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.get("/v1/models")
+async def models():
+    return {"object": "list", "data": [{"id": app.state.served_model, "object": "model",
+                                       "created": 0, "owned_by": "mirage"}]}
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    body = await _parse_json(request)
-    prompt = _extract_prompt(body.get("messages", []))
-    stream = body.get("stream", False)
-    timeout = request.app.state.request_timeout
-
-    if stream:
-        return StreamingResponse(
-            _stream_bridge(request.app.state.engine, prompt, timeout),
-            media_type="text/event-stream",
-        )
-    else:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None, lambda: request.app.state.engine.submit(
-                prompt, timeout=timeout),
-        )
-        return {
-            "id": "chatcmpl-0",
-            "object": "chat.completion",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": result["text"]},
-                "finish_reason": "stop",
-            }],
-        }
+    return await complete(request, chat=True)
 
 
 @app.post("/v1/completions")
 async def completions(request: Request):
-    body = await _parse_json(request)
-    prompt = body.get("prompt", "")
-    stream = body.get("stream", False)
-    timeout = request.app.state.request_timeout
-
-    if stream:
-        return StreamingResponse(
-            _stream_bridge(request.app.state.engine, prompt, timeout),
-            media_type="text/event-stream",
-        )
-    else:
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None, lambda: request.app.state.engine.submit(
-                prompt, timeout=timeout),
-        )
-        return {
-            "id": "cmpl-0",
-            "object": "text_completion",
-            "choices": [{
-                "index": 0,
-                "text": result["text"],
-                "finish_reason": "stop",
-            }],
-        }
+    return await complete(request, chat=False)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -178,6 +221,7 @@ def main():
     parser.add_argument("--port", default=8000, type=int, help="Port to listen on")
     parser.add_argument("--model", default="Qwen/Qwen3-8B", help="HuggingFace model name")
     parser.add_argument("--model-path", default=None, help="Path to local model")
+    parser.add_argument("--served-model-name")
     parser.add_argument("--max-num-batched-requests", default=4, type=int)
     parser.add_argument("--max-num-batched-tokens", default=8, type=int)
     parser.add_argument("--max-seq-length", default=512, type=int)
@@ -186,16 +230,7 @@ def main():
     parser.add_argument("--output-dir", default=None, help="Output directory for compiled artifacts")
     parser.add_argument("--request-timeout", default=7200.0, type=float,
                         help="Per-request timeout in seconds (default: 7200)")
-    parser.add_argument("--do-sample", dest="do_sample", action="store_true",
-                        help="Enable temperature/top-k/top-p sampling (compiled into the graph)")
-    parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--top_p", type=float, default=0.95)
-    parser.add_argument("--top_k", type=int, default=20)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--sampling-topk-max", type=int, default=32)
     args = parser.parse_args()
-    if args.do_sample and args.temperature <= 0.0:
-        parser.error("--do-sample needs --temperature > 0")
 
     config = RunnerConfig(
         model=args.model,
@@ -206,14 +241,9 @@ def main():
         max_num_pages=args.max_num_pages,
         page_size=args.page_size,
         output_dir=args.output_dir,
-        do_sample=args.do_sample,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        sampling_seed=args.seed,
-        sampling_topk_max=args.sampling_topk_max,
     )
     app.state.runner_config = config
+    app.state.served_model = args.served_model_name or args.model
     app.state.request_timeout = args.request_timeout
     uvicorn.run(app, host=args.host, port=args.port)
 
