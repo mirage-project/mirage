@@ -2528,11 +2528,10 @@ class PersistentKernel:
         graph_inputs = [input, weight] + ([bias] if bias is not None else [])
         self.kn_graph.customized(graph_inputs + [output], tb_graph)
 
-        # A bias reuses the residual epilogue with a zero row stride, which
-        # only sm100 implements; elsewhere the param is dropped in a Release
-        # build and the bias lost.
-        assert bias is None or self.target_cc == 100, (
-            f"linear_layer(bias=...) is only implemented for sm100, "
+        # sm100 reuses the residual epilogue with a zero row stride; sm90's
+        # swapAB kernel has a bias epilogue of its own.
+        assert bias is None or self.target_cc in (90, 100), (
+            f"linear_layer(bias=...) is only implemented for sm90 and sm100, "
             f"got target_cc={self.target_cc}")
         if self.target_cc == 100:
             # The SM100 output TMA needs each task's column slice 16-byte
@@ -2543,7 +2542,10 @@ class PersistentKernel:
                 f"linear_layer: {output.dim(1)} output columns over "
                 f"{grid_dim[0]} tasks gives {output.dim(1) / grid_dim[0]} "
                 f"columns each; it must divide evenly into a multiple of 8")
-        if bias is not None:
+        if bias is not None and self.target_cc == 90:
+            # params[0]=1: the bias is a 3rd input, added on every rank
+            self.kn_graph.register_task(tb_graph, "linear_swapAB_hopper", [1])
+        elif bias is not None:
             # params[0]=1: a bias is added on every rank. Unlike a residual
             # it is column-parallel, so an allreduce does not double-count it.
             self.kn_graph.register_task(

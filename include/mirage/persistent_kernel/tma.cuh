@@ -559,9 +559,26 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
                                             smem_shape,
                                             smem_repeat_row,
                                             smem_repeat_col);
+      } else if (param_id == 2 && task_desc.num_inputs == 3 &&
+                 task_desc.task_type == TASK_LINEAR_SWAPAB_HOPPER) {
+        // TMA_BIAS: a single row, unswizzled to match the kernel's smem view
+        int const output_size = tensor_desc.dim[1];
+        int const output_stride = (tensor_desc.stride[0]);
+        int const output_tma_cp_size = output_size < 64 ? output_size : 64;
+        uint64_t gmem_shape[2] = {1, static_cast<uint64_t>(output_size)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_stride)};
+        uint32_t smem_shape[2] = {1, static_cast<uint32_t>(output_tma_cp_size)};
+        size_t smem_repeat_col = output_atom_size / output_tma_cp_size;
+        fill_tma_desc<bfloat16, 0, 0, 0, 2>(tma_desc,
+                                            tensor_desc.base_ptr,
+                                            gmem_shape,
+                                            gmem_stride,
+                                            smem_shape,
+                                            smem_repeat_row,
+                                            smem_repeat_col);
       } else if (param_id == 3 && task_desc.task_type ==
                                       TASK_LINEAR_SWAPAB_WITH_RESIDUAL_HOPPER ||
-                 param_id == 2 &&
+                 param_id == task_desc.num_inputs &&
                      task_desc.task_type == TASK_LINEAR_SWAPAB_HOPPER) {
         // TMA_OUT
         int const batch_size = tensor_desc.dim[0];

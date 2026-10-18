@@ -1591,16 +1591,19 @@ int TaskRegister::register_linear_swapAB_hopper_task(
     bool with_residual) {
   // assert(params.size() == 0);
   bool rank_with_residual = with_residual;
+  // without a residual, params[0] marks a 3rd input holding a bias row
+  bool has_bias = false;
   if (with_residual) {
     assert(params.size() == 1);
     rank_with_residual = (params[0] == 1);
   } else {
-    assert(params.size() == 0);
+    assert(params.size() == 0 || params.size() == 1);
+    has_bias = params.size() == 1 && params[0] > 0;
   }
   int batch_size = 0, output_size = 0, reduction_size = 0, output_stride = 0;
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = with_residual ? 3 : 2;
+  int num_inputs = (with_residual || has_bias) ? 3 : 2;
   int num_outputs = 1;
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
@@ -1621,6 +1624,11 @@ int TaskRegister::register_linear_swapAB_hopper_task(
   kn::KNInputOp *kn_input_op =
       static_cast<kn::KNInputOp *>(output_ops[0]->dtensor.owner_op);
   output_stride = static_cast<int>(kn_input_op->input_strides[0]);
+  if (has_bias) {
+    assert(input_ops[2]->output_tensors[0].num_dims == 2);
+    assert(input_ops[2]->output_tensors[0].dim[0] == 1);
+    assert(input_ops[2]->output_tensors[0].dim[1] == output_size);
+  }
 
   mirage::transpiler::CodeKeeper code;
   code.inc_indent();
@@ -1688,6 +1696,24 @@ int TaskRegister::register_linear_swapAB_hopper_task(
         SMEM_M_SIZE * output_tma_cp_size /*SMEM_STRIDE_*/
     );
   }
+  if (has_bias) {
+    // one unswizzled row, broadcast over the batch in the epilogue
+    code.e("using TMA_BIAS = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, "
+           "$, $, $, $, $, $, true>;",
+           0,
+           0,
+           0,
+           1,                                     /*GMEM_ROW_*/
+           output_size,                           /*GMEM_COL_*/
+           1,                                     /*SMEM_ROW_*/
+           output_tma_cp_size,                    /*SMEM_COL_*/
+           output_stride,                         /*GMEM_STRIDE_ROW_*/
+           1,                                     /*GMEM_STRIDE_COL_*/
+           1,                                     /*SMEM_REPEAT_ROW_*/
+           output_atom_size / output_tma_cp_size, /*SMEM_REPEAT_COL_*/
+           output_tma_cp_size                     /*SMEM_STRIDE_*/
+    );
+  }
 
   code.e("using TMA_OUT = kernel::tma::tma_2d<bfloat16, $, $, $, $, $, $, $, "
          "$, $, $, $, $, true>;",
@@ -1716,20 +1742,26 @@ int TaskRegister::register_linear_swapAB_hopper_task(
            "tma_residual(static_cast<CUtensorMap*>(task_desc->input_tma_desc_"
            "ptrs[2][0]));");
   }
+  if (has_bias) {
+    code.e("TMA_BIAS "
+           "tma_bias(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs["
+           "2][0]));");
+  }
   code.e("TMA_OUT "
          "tma_out(static_cast<CUtensorMap*>(task_desc->output_tma_desc_ptrs[0]["
          "0]));");
 
   code.e(
       "kernel::linear_swapAB_kernel_hopper<bfloat16, $, $, $, $, TMA_A, TMA_B, "
-      "TMA_OUT, $, $, $>(",
+      "TMA_OUT, $, $, $, $>(",
       batch_size,
       output_size,
       reduction_size,
       Kstages,
       (with_residual && rank_with_residual) ? "TMA_RESIDUAL" : "void",
       output_stride,
-      "false" /*SplitK*/);
+      "false" /*SplitK*/,
+      has_bias ? "TMA_BIAS" : "void");
   code.e("    tma_a,");
   code.e("    tma_b,");
   code.e("    tma_out, ");
@@ -1739,6 +1771,10 @@ int TaskRegister::register_linear_swapAB_hopper_task(
   } else {
     code.e("    nullptr,");
     code.e("    false/*residual*/");
+  }
+  if (has_bias) {
+    // column-parallel output: every rank adds the bias to its own columns
+    code.e("    , &tma_bias, true");
   }
 
   code.e(");");

@@ -40,13 +40,17 @@ template <typename T,
           typename TMA_OUT,
           typename TMA_RESIDUAL = void,
           int OUTPUT_STRIDE = OUTPUT_SIZE,
-          bool SplitK = false>
+          bool SplitK = false,
+          typename TMA_BIAS = void>
 __device__ __forceinline__ void linear_swapAB_kernel_hopper(
     const TMA_A &tma_a,
     const TMA_B &tma_b,
     const TMA_OUT &tma_out,
     const TMA_RESIDUAL *tma_residual = nullptr,
-    bool add_residual /*used in multi-GPU*/ = true) {
+    bool add_residual /*used in multi-GPU*/ = true,
+    const TMA_BIAS *tma_bias = nullptr,
+    bool add_bias /*used in multi-GPU, disable on non-zero SplitK ranks*/ =
+        true) {
 
   constexpr int TILE_SIZE =
       REDUCTION_SIZE < TMA_A::SMEM_COL * TMA_A::SMEM_REPEAT_COL
@@ -65,6 +69,7 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
   constexpr int OUTPUT_TMA_TILE_SIZE = OUTPUT_SIZE < 64 ? OUTPUT_SIZE : 64;
   constexpr int OUTPUT_ATOM_SIZE = 64; // this is padded if OUTPUT_SIZE < 64
   constexpr bool HAS_RESIDUAL = !std::is_void<TMA_RESIDUAL>::value;
+  constexpr bool HAS_BIAS = !std::is_void<TMA_BIAS>::value;
 
   // NOTE(Yu): Assume batch size is smaller than 16, and padding the batch size
   // to 16
@@ -76,6 +81,10 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
   constexpr int TMA_TRANS_BYTES_B = sizeof(T) * BATCH_SIZE * TILE_SIZE;
   constexpr int TMA_TRANS_BYTES_RESIDUAL =
       HAS_RESIDUAL ? sizeof(T) * BATCH_SIZE * OUTPUT_TMA_TILE_SIZE : 0;
+  constexpr int TMA_TRANS_BYTES_BIAS =
+      HAS_BIAS ? sizeof(T) * OUTPUT_TMA_TILE_SIZE *
+                     (OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE)
+               : 0;
 
   // using SM90_64x64x16_F32BF16BF16
   constexpr int NUM_ITER_N =
@@ -105,12 +114,18 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
        sizeof(T) * Kstages * TILE_SIZE * OUTPUT_ATOM_SIZE + 1023) /
       1024 * 1024;
 
-  constexpr size_t SHARED_MM_OUTPUT_BUFFER_OFFSET =
+  constexpr size_t SHARED_BIAS_BUFFER_OFFSET =
       HAS_RESIDUAL
           ? (SHARED_RESIDUAL_BUFFER_OFFSET +
              sizeof(T) * SMEM_M_SIZE * OUTPUT_ATOM_SIZE * Kstages + 1023) /
                 1024 * 1024
           : SHARED_RESIDUAL_BUFFER_OFFSET;
+
+  constexpr size_t SHARED_MM_OUTPUT_BUFFER_OFFSET =
+      HAS_BIAS ? (SHARED_BIAS_BUFFER_OFFSET +
+                  sizeof(T) * OUTPUT_ATOM_SIZE * Kstages + 1023) /
+                     1024 * 1024
+               : SHARED_BIAS_BUFFER_OFFSET;
 
   constexpr size_t SHARED_INPUT_BARRIER_OFFSET =
       (SHARED_MM_OUTPUT_BUFFER_OFFSET +
@@ -130,8 +145,15 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
   constexpr size_t SHARED_RESIDUAL_DONE_OFFSET =
       (SHARED_COMPUTE_DONE_OFFSET + 8 * Kstages + 7) / 8 * 8;
 
-  constexpr size_t TOTAL_SHARED_MEMORY =
-      SHARED_RESIDUAL_DONE_OFFSET + 8 * Kstages;
+  constexpr size_t SHARED_BIAS_BARRIER_OFFSET =
+      HAS_BIAS ? (SHARED_RESIDUAL_DONE_OFFSET + 8 * Kstages + 7) / 8 * 8
+               : SHARED_RESIDUAL_DONE_OFFSET;
+
+  constexpr size_t SHARED_BIAS_DONE_OFFSET =
+      HAS_BIAS ? (SHARED_BIAS_BARRIER_OFFSET + 8 * Kstages + 7) / 8 * 8
+               : SHARED_BIAS_BARRIER_OFFSET;
+
+  constexpr size_t TOTAL_SHARED_MEMORY = SHARED_BIAS_DONE_OFFSET + 8 * Kstages;
 
   static_assert(TOTAL_SHARED_MEMORY <=
                 mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE);
@@ -143,6 +165,8 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
   // residual
   T *shared_residual =
       HAS_RESIDUAL ? (T *)(smem + SHARED_RESIDUAL_BUFFER_OFFSET) : nullptr;
+  // bias (single row of OUTPUT_ATOM_SIZE elements per stage, no swizzle)
+  T *shared_bias = HAS_BIAS ? (T *)(smem + SHARED_BIAS_BUFFER_OFFSET) : nullptr;
   // output
   T *mm_output = (T *)(smem + SHARED_MM_OUTPUT_BUFFER_OFFSET);
 
@@ -174,6 +198,18 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
                                 OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE>;
   ResidualSmem residual_smem(shared_residual);
 
+  // bias is viewed as a [1, OUTPUT_SIZE] row-major vector; each stage holds
+  // one OUTPUT_ATOM_SIZE-wide tile loaded via a swizzle-none TMA descriptor,
+  // so the smem layout below is unswizzled (B = M = S = 0) as well
+  using BiasSmem = smem_tma<T,
+                            0,
+                            0,
+                            0,
+                            1,
+                            OUTPUT_TMA_TILE_SIZE,
+                            OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE>;
+  BiasSmem bias_smem(shared_bias);
+
   using A_DESC = wgmma::mma_descriptor<WeightSmem>;
   using B_DESC = wgmma::mma_descriptor<InputSmem>;
   using OutputSmem = smem_tma<T, B, M, S, SMEM_M_SIZE, OUTPUT_ATOM_SIZE, 1>;
@@ -194,6 +230,12 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
       HAS_RESIDUAL
           ? reinterpret_cast<Barrier *>(smem + SHARED_RESIDUAL_DONE_OFFSET)
           : nullptr;
+  Barrier *bias_barrier =
+      HAS_BIAS ? reinterpret_cast<Barrier *>(smem + SHARED_BIAS_BARRIER_OFFSET)
+               : nullptr;
+  Barrier *bias_done =
+      HAS_BIAS ? reinterpret_cast<Barrier *>(smem + SHARED_BIAS_DONE_OFFSET)
+               : nullptr;
 
   // init the barriers
   if (threadIdx.x == 0) {
@@ -204,6 +246,10 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
       if constexpr (HAS_RESIDUAL) {
         initialize_barrier(residual_barrier[i], 1);
         initialize_barrier(residual_done[i], 1);
+      }
+      if constexpr (HAS_BIAS) {
+        initialize_barrier(bias_barrier[i], 1);
+        initialize_barrier(bias_done[i], 1);
       }
     }
   }
@@ -220,11 +266,16 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
       if constexpr (HAS_RESIDUAL) {
         prefetch_tma_descriptor(tma_residual->desc_ptr);
       }
+      if constexpr (HAS_BIAS) {
+        prefetch_tma_descriptor(tma_bias->desc_ptr);
+      }
     }
     for (int output_atom_idx = 0; output_atom_idx < NUM_ITER_N;
          output_atom_idx++) {
       int slot_residual = output_atom_idx % Kstages;
       int phase_residual = (output_atom_idx / Kstages) & 1;
+      int slot_bias = slot_residual;
+      int phase_bias = phase_residual;
 
       // launch tma for residual
       if (lane_idx == 0 && warp_idx == (NUM_WARPGROUPS * WARPGROUP_WARPS - 4)) {
@@ -241,6 +292,19 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
                 residual_barrier[slot_residual],
                 residual_smem(0, 0),
                 {output_atom_idx * OUTPUT_TMA_TILE_SIZE, 0});
+          }
+        }
+
+        // launch tma for bias
+        if constexpr (HAS_BIAS) {
+          if (add_bias) {
+            wait(bias_done[slot_bias], phase_bias ^ 1);
+            bias_smem.set_ptr(shared_bias + slot_bias * OUTPUT_ATOM_SIZE);
+            set_barrier_transaction_bytes(bias_barrier[slot_bias],
+                                          TMA_TRANS_BYTES_BIAS);
+            tma_bias->tma_cp_async(bias_barrier[slot_bias],
+                                   bias_smem(0, 0),
+                                   {output_atom_idx * OUTPUT_TMA_TILE_SIZE, 0});
           }
         }
       }
@@ -320,6 +384,8 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
 
       int slot_residual;
       int phase_residual;
+      int slot_bias;
+      int phase_bias;
       if constexpr (HAS_RESIDUAL) {
         if (add_residual) {
           slot_residual = output_atom_idx % Kstages;
@@ -327,6 +393,14 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
           wait(residual_barrier[slot_residual], phase_residual);
           residual_smem.set_ptr(shared_residual + slot_residual * SMEM_M_SIZE *
                                                       OUTPUT_TMA_TILE_SIZE);
+        }
+      }
+      if constexpr (HAS_BIAS) {
+        if (add_bias) {
+          slot_bias = output_atom_idx % Kstages;
+          phase_bias = output_atom_idx / Kstages & 1;
+          wait(bias_barrier[slot_bias], phase_bias);
+          bias_smem.set_ptr(shared_bias + slot_bias * OUTPUT_ATOM_SIZE);
         }
       }
       // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-register-fragment-wgmma-64n16:~:text=The%20layout%20of%20the%20fragments%20held%20by%20different%20threads%20is%20shown%20in%20Figure%20149.
@@ -340,17 +414,27 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
       for (uint32_t i = 0; i < (SMEM_M_SIZE >> 2); i++) {
         int row = ((warp_idx & 3) << 4) + ((i & 1) << 3) + (lane_idx >> 2);
         int col = ((i >> 1) << 3) + ((lane_idx & 3) << 1);
+        float acc0 = s_frag[i << 1];
+        float acc1 = s_frag[(i << 1) + 1];
+        if constexpr (HAS_BIAS) {
+          if (add_bias) {
+            // bias only depends on the output feature (row), broadcast
+            // across the batch (col); added in fp32 so the sum rounds once
+            float b = float(bias_smem.at(0, row));
+            acc0 += b;
+            acc1 += b;
+          }
+        }
+        bfloat16 v0 = bfloat16(acc0);
+        bfloat16 v1 = bfloat16(acc1);
         if constexpr (HAS_RESIDUAL) {
           if (add_residual) {
-            mm_output_smem.at(col, row) =
-                bfloat16(s_frag[i << 1]) + residual_smem.at(col, row);
-            mm_output_smem.at(col + 1, row) =
-                bfloat16(s_frag[(i << 1) + 1]) + residual_smem.at(col + 1, row);
+            v0 = v0 + residual_smem.at(col, row);
+            v1 = v1 + residual_smem.at(col + 1, row);
           }
-        } else {
-          mm_output_smem.at(col, row) = bfloat16(s_frag[i << 1]);
-          mm_output_smem.at(col + 1, row) = bfloat16(s_frag[(i << 1) + 1]);
         }
+        mm_output_smem.at(col, row) = v0;
+        mm_output_smem.at(col + 1, row) = v1;
       }
 
       // make sure generic proxy's modification to smem is visible to tma store
@@ -376,6 +460,11 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
         if constexpr (HAS_RESIDUAL) {
           if (add_residual) {
             arrive(residual_done[slot_residual], 1);
+          }
+        }
+        if constexpr (HAS_BIAS) {
+          if (add_bias) {
+            arrive(bias_done[slot_bias], 1);
           }
         }
       }

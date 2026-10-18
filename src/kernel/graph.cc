@@ -575,8 +575,12 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "linear_swapAB_hopper") {
     int variant_id = task_register->register_linear_swapAB_hopper_task(
         customized->bgraph, params, false /*with_residual*/);
+    // params[0] marks a 3rd input carrying the bias row
     task_config[op] =
-        std::make_tuple(2, 1, TASK_LINEAR_SWAPAB_HOPPER, variant_id);
+        std::make_tuple((params.size() == 1 && params[0] > 0) ? 3 : 2,
+                        1,
+                        TASK_LINEAR_SWAPAB_HOPPER,
+                        variant_id);
   } else if (name == "linear_swapAB_with_residual_hopper") {
     int variant_id = task_register->register_linear_swapAB_hopper_task(
         customized->bgraph, params, true /*with_residual*/);
