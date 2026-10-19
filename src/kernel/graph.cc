@@ -566,8 +566,10 @@ void Graph::register_task(char const *task_type, std::vector<int> params) {
   } else if (name == "paged_attention_hopper") {
     int variant_id = task_register->register_paged_attention_hopper_task(
         customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple(7, 1, TASK_PAGED_ATTENTION_HOPPER, variant_id);
+    // params[11] marks an 8th input carrying the per-head attention sinks
+    int num_attn_inputs = (params.size() >= 12 && params[11] > 0) ? 8 : 7;
+    task_config[op] = std::make_tuple(
+        num_attn_inputs, 1, TASK_PAGED_ATTENTION_HOPPER, variant_id);
   } else if (name == "rmsnorm_hopper") {
     int variant_id =
         task_register->register_rmsnorm_hopper_task(customized->bgraph, params);

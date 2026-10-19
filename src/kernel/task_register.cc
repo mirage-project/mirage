@@ -1329,8 +1329,9 @@ int TaskRegister::register_paged_attention_hopper_task(
   // params[7]: tail_offset    (optional; sm100-only, must be 0 here)
   // params[8]: rotary_dim     (optional, 0 = head_dim; GLM-4.6 partial RoPE)
   // params[9]: qk-norm eps as float bits (optional, default 1e-6)
-  // params[10]: window_size   (optional; sm100-only, must be 0 here)
-  // params[11]: has_sink      (optional; sm100-only, must be 0 here)
+  // params[10]: window_size   (optional, 0 = full attention)
+  // params[11]: has_sink      (optional, 1 = an 8th input holds the per-head
+  //             attention sinks)
   // params[12]: group_id      (optional, default 0)
   // Positions match the sm100 variant: Python emits one packing for every
   // target_cc, so a field keeps its index even where it is unsupported.
@@ -1341,21 +1342,17 @@ int TaskRegister::register_paged_attention_hopper_task(
     assert(params[6] == 0 && params[7] == 0 &&
            "q_len_override/tail_offset are not supported on Hopper");
   }
-  if (params.size() >= 11) {
-    assert(params[10] == 0 && "sliding window is not supported on Hopper");
-  }
-  if (params.size() >= 12) {
-    assert(params[11] == 0 && "attention sinks are not supported on Hopper");
-  }
   int group_id =
       (params.size() >= 13)
           ? params[12]
           : 0; // params[13]: page_stride_rows (optional, 0 = packed pages)
   int page_stride_rows = (params.size() >= 14) ? params[13] : 0;
+  int window_size = (params.size() >= 11) ? params[10] : 0;
+  bool has_sink = (params.size() >= 12) && (params[11] > 0);
 
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
-  int num_inputs = 7;
+  int num_inputs = has_sink ? 8 : 7;
   int num_outputs = 1;
 
   assert(bgraph.operators.size() == (size_t)num_inputs + num_outputs);
@@ -1508,7 +1505,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   }
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
          "$, $, $, $, $, "
-         "$, $, $, $, $, $>(",
+         "$, $, $, $, $, $, $>(",
          num_q_heads_per_kv, /* NUM_QO_HEADS               */
          1,                  /* NUM_KV_HEADS               */
          num_kv_heads,       /* NUM_QO_GROUPS              */
@@ -1523,7 +1520,8 @@ int TaskRegister::register_paged_attention_hopper_task(
          "false",     /* PARTITION_KV               */
          1,           /* NUM_KV_CHUNKS              */
          rotary_dim,  /* ROTARY_DIM               */
-         page_stride_rows /* PAGE_STRIDE_ROWS         */
+         page_stride_rows, /* PAGE_STRIDE_ROWS         */
+         window_size       /* WINDOW_SIZE              */
   );
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -1543,7 +1541,8 @@ int TaskRegister::register_paged_attention_hopper_task(
   code.e("    task_desc->input_ptrs[0],");
   code.e("    task_desc->output_ptrs[0],");
   code.e("    nullptr,"); // lse, not used for non-split KV tasks
-  code.e("    0);");      // kv_idx, not used for non-split KV tasks
+  code.e("    0,");       // kv_idx, not used for non-split KV tasks
+  code.e("    $);", has_sink ? "task_desc->input_ptrs[7]" : "nullptr");
 
   return register_task_variant(TASK_PAGED_ATTENTION_HOPPER, code.to_string());
 }

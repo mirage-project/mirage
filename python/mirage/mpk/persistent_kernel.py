@@ -1419,11 +1419,11 @@ class PersistentKernel:
             graph_inputs.append(sinks)
         tb_graph.new_input(output, (-1, 1, -1), -1, True)
         self.kn_graph.customized(graph_inputs + [output], tb_graph)
-        # SM100 only: the other kernels drop the extra params in a Release
-        # build and fall back to plain causal attention with no sink.
-        assert (window_size == 0 and not has_sink) or self.target_cc == 100, (
+        # The other kernels drop the extra params in a Release build and fall
+        # back to plain causal attention with no sink or window.
+        assert (window_size == 0 and not has_sink) or self.target_cc in (90, 100), (
             f"window_size={window_size} / sinks are only implemented for "
-            f"sm100, got target_cc={self.target_cc}")
+            f"sm90 and sm100, got target_cc={self.target_cc}")
         if self.target_cc == 90:
             self.kn_graph.register_task(tb_graph, "paged_attention_hopper", params)
         elif self.target_cc == 100:

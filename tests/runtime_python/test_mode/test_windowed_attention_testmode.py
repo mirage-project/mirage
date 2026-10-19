@@ -1,4 +1,4 @@
-"""Test-mode coverage for the sliding-window mask in paged attention (SM100).
+"""Test-mode coverage for the sliding-window mask in paged attention (SM90/SM100).
 
 Each window is checked two ways: it matches a windowed reference, and it
 differs from the plain-causal one, so an ignored WINDOW_SIZE fails.
@@ -16,6 +16,7 @@ import sys
 import torch
 
 import mirage
+from mirage.mpk.kv_planner import KVGroupSpec
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 NUM_KV_HEADS = 1
@@ -23,7 +24,7 @@ NUM_QO_PER_KV = 8          # GQA 8:1
 NUM_Q_HEADS = NUM_KV_HEADS * NUM_QO_PER_KV
 HEAD_DIM = 64
 PAGE_SIZE = 64
-MAX_NUM_PAGES = 4
+MAX_NUM_PAGES = 8          # the three groups share one pool
 MAX_SEQ_LENGTH = 256
 NUM_TOKENS = 8             # = max_num_batched_tokens = seq_len here
 WINDOWS = (0, 4, 6)
@@ -63,6 +64,9 @@ def main():
         max_num_batched_tokens=NUM_TOKENS,
         max_num_pages=MAX_NUM_PAGES,
         page_size=PAGE_SIZE,
+        # A layer's window must match its KV group's, so one group per window.
+        kv_groups=[KVGroupSpec(block_size=PAGE_SIZE, window_size=w)
+                   for w in WINDOWS],
     )
     params["meta_tensors"] = {
         "prompt_lengths": torch.tensor([NUM_TOKENS], dtype=torch.int32,
@@ -82,7 +86,7 @@ def main():
     norm_dt = pk.attach_input(norm_w, name="dummy_norm")
 
     cases = []
-    for window_size in WINDOWS:
+    for group_id, window_size in enumerate(WINDOWS):
         tag = f"w{window_size}"
         qkv = torch.randn(NUM_TOKENS,
                           (NUM_Q_HEADS + 2 * NUM_KV_HEADS) * HEAD_DIM,
@@ -103,6 +107,7 @@ def main():
             grid_dim=(1, NUM_KV_HEADS, 1), block_dim=(256, 1, 1),
             enable_qk_norm=False,
             window_size=window_size,
+            group_id=group_id,
         )
         cases.append((window_size, qkv, k_cache, out))
 
