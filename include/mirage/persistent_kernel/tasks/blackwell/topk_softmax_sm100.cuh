@@ -77,7 +77,10 @@ __device__ __forceinline__ void topk_softmax_task_impl(
                                                   // experts
     int const start_expert,
     int const end_expert,
-    bool const renormalize) {
+    bool const renormalize,
+    // Rows at or past this hold no token this step (a batch is padded to
+    // num_rows) and are left unrouted; -1 routes every row.
+    int const num_valid_rows = -1) {
   // Pointers
   T *input = static_cast<T *>(input_ptr);
   float *output = static_cast<float *>(output_ptr);
@@ -158,7 +161,9 @@ __device__ __forceinline__ void topk_softmax_task_impl(
     }
     if (thread_row < num_rows) {
 
-      bool const row_is_active = finished ? !finished[thread_row] : true;
+      bool const row_is_active =
+          (finished ? !finished[thread_row] : true) &&
+          (num_valid_rows < 0 || thread_row < num_valid_rows);
 
       // Compute per-thread read pointers
       T *thread_row_ptr = input + thread_row * ELTS_PER_ROW;

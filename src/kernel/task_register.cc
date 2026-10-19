@@ -3164,7 +3164,15 @@ int TaskRegister::register_moe_topk_softmax_sm100_task(
   code.e("    task_desc->output_ptrs[2],");
   code.e("    0,");
   code.e("    $,", num_experts);
-  code.e("    true);");
+  code.e("    true,");
+  // Route only this step's tokens: the rows past them still hold an earlier
+  // step's activations and would switch on experts nobody reads. Test mode
+  // leaves qo_indptr unset, so it routes the whole batch.
+  code.e("#ifdef MPK_TEST_MODE");
+  code.e("    -1);");
+  code.e("#else");
+  code.e("    runtime_config.qo_indptr_buffer[MPK_MAX_NUM_BATCHED_REQUESTS]);");
+  code.e("#endif");
   return register_task_variant(TASK_MOE_TOPK_SOFTMAX_SM100, code.to_string());
 }
 
