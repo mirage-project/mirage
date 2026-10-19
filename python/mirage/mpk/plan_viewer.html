@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Megakernel Schedule Viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  --bg: #f5f7f8; --surface: #ffffff; --ink: #1a2027; --muted: #5d6873; --line: #dbe1e5; --soft: #eef2f4;
+  --accent: #0e6b89; --accent-ink: #ffffff; --warn: #a8501c; --dep: #0e6b89; --dependent: #a8501c;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111418; --surface: #181c21; --ink: #e5e9ed; --muted: #93a0ab; --line: #2b3239; --soft: #20262c;
+    --accent: #4fb0cf; --accent-ink: #0b1216; --warn: #e08a52; --dep: #4fb0cf; --dependent: #e08a52; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111418; --surface: #181c21; --ink: #e5e9ed; --muted: #93a0ab; --line: #2b3239; --soft: #20262c;
+  --accent: #4fb0cf; --accent-ink: #0b1216; --warn: #e08a52; --dep: #4fb0cf; --dependent: #e08a52; color-scheme: dark;
+}
+body { background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); margin: 0; }
+.wrap { max-width: 1440px; margin: 0 auto; padding-inline: 16px; padding-block: 20px 64px; display: grid; gap: 16px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; text-wrap: balance; }
+h2 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
+.sub { color: var(--muted); max-width: 72ch; margin: 2px 0 0; }
+.mono { font-family: var(--mono); font-size: 12.5px; }
+.muted { color: var(--muted); }
+section.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+.filebar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.drop { border: 1.5px dashed var(--line); border-radius: 8px; padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.drop.over { border-color: var(--accent); background: var(--soft); }
+label.btn, button { font: 500 13px var(--sans); padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); cursor: pointer; }
+label.btn { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button:focus-visible, label.btn:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 12.5px var(--mono); }
+.err { color: var(--warn); }
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px 20px; }
+.stat .k { color: var(--muted); font-size: 12px; letter-spacing: .02em; }
+.stat .v { font: 500 17px var(--mono); font-variant-numeric: tabular-nums; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td.num { font-variant-numeric: tabular-nums; text-align: right; }
+input.dur { width: 72px; font: 12.5px var(--mono); padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--ink); }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+.opt { display: inline-block; font: 12px var(--mono); padding: 0 6px; margin: 1px 2px 1px 0; border-radius: 4px; border: 1px solid var(--line); }
+.opt.nomeas { color: var(--muted); border-style: dashed; opacity: .7; }
+.opt.chosen { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+.tl { overflow-x: auto; }
+.tl svg text { fill: var(--muted); font: 10px var(--mono); }
+.note { font-size: 12.5px; color: var(--muted); }
+.sel { font-size: 13px; margin-top: 8px; min-height: 1.5em; }
+.modes { display: flex; gap: 0; } .modes button { border-radius: 0; } .modes button:first-child { border-radius: 6px 0 0 6px; } .modes button:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+.chip.pick::before { content: '☐ '; } .chip.pick.on::before { content: '☑ '; }
+.cmphead { display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: baseline; margin-bottom: 6px; } .cmphead b { font-weight: 600; }
+.diff { color: var(--warn); font-weight: 500; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 18px; font: 12px var(--mono); color: var(--ink); margin: 4px 0 8px; } .lg { white-space: nowrap; }
+#tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; font: 12px/1.45 var(--mono); box-shadow: 0 4px 16px rgba(0,0,0,.14); z-index: 5; max-width: 360px; }
+@media (prefers-reduced-motion: no-preference) { button, label.btn { transition: background .12s; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Megakernel Schedule Viewer</h1>
+    <p class="sub">Open the files the static megakernel compiler writes: <span class="mono">schedule_gpu&lt;g&gt;.json</span> (the per-SM task lists of one GPU) or a solver <span class="mono">result.json</span> (plan_viewer.save). Files stay in this browser.</p>
+  </header>
+
+  <section class="panel">
+    <div class="drop" id="drop">
+      <label class="btn" for="file">Open files<input type="file" id="file" accept=".json,application/json" multiple hidden></label>
+      <span class="muted">or drop JSON files here</span>
+      <div class="modes" role="group" aria-label="view"><button id="mode-one">One file</button><button id="mode-cmp">Compare</button></div>
+      <div class="chips" id="chips"></div>
+    </div>
+    <div class="err" id="err"></div>
+  </section>
+
+  <div id="view" style="display:grid; gap:16px"></div>
+</div>
+<div id="tip" hidden></div>
+
+<script type="application/json" id="preload">[]</script>
+<script>
+(() => {
+const PALETTE = ['#3f7cac', '#e0892f', '#5a9e57', '#cf5561', '#6aa9a4', '#c9a93a', '#9b72a6', '#d98aa0', '#8c6d56', '#7fae62', '#5c6bc0', '#b0643d',
+                 '#2e9e8f', '#a3478f', '#6b7f2a', '#d4602f', '#4a5a8c', '#b89a2e', '#7d4e9e', '#3d8fc4'];
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fmt = v => (Math.round(v * 100) / 100).toString();
+const gridStr = g => g ? g.join('×') : '—';
+const files = [];                 // {name, kind: 'schedule' | 'result', data, dependents (schedule), set (result: shown GPU set)}
+let cur = -1;                     // the file shown in "One file"
+let mode = 'one';
+const picked = new Set();         // the files shown in "Compare"
+const durations = {};             // node idx -> steps of one task, used when no result file gives times
+let durSource = null;             // index of the result file whose predicted task times (us) the schedule timelines use; null: list order only
+let selected = null;              // selected task id ("One file", schedule)
+const tip = document.getElementById('tip');
+const colorMap = {}; let colorN = 0;
+function colorFor(idx, name) { const k = idx + ':' + name; if (!(k in colorMap)) colorMap[k] = PALETTE[colorN++ % PALETTE.length]; return colorMap[k]; }
+function showTip(e, html) { tip.innerHTML = html; tip.hidden = false; tip.style.left = Math.min(e.clientX + 14, innerWidth - 370) + 'px'; tip.style.top = (e.clientY + 14) + 'px'; }
+function hideTip() { tip.hidden = true; }
+const width = () => Math.max(900, Math.min(1400, document.querySelector('.wrap').clientWidth - 40));
+
+// ---------------- loading ----------------
+function kindOf(d) {
+  if (d && d.worker_task_queues && d.all_tasks && d.nodes) return 'schedule';
+  if (d && d.summary && d.summary.timeline) return 'result';
+  return null;
+}
+function add(name, data) {
+  const kind = kindOf(data);
+  if (!kind) throw new Error(`${name}: not a schedule file (needs nodes, all_tasks, worker_task_queues) or a result file (needs summary.timeline)`);
+  const f = { name, kind, data };
+  if (kind === 'schedule') {
+    const keys = Object.keys(data.nodes).sort((a, b) => +a - +b);
+    keys.forEach(k => { colorFor(k, data.nodes[k].name); if (!(k in durations)) durations[k] = 1; });
+    f.dependents = data.all_tasks.map(() => []);
+    data.all_tasks.forEach((t, i) => t.deps.forEach(d => f.dependents[d].push(i)));
+  } else {
+    data.summary.candidates.forEach(c => colorFor(c.node, c.name));
+    f.set = Object.keys(data.summary.timeline)[0];
+  }
+  const i = files.findIndex(g => g.name === name);
+  const at = i >= 0 ? i : files.length;
+  if (i >= 0) files[i] = f; else files.push(f);
+  return at;
+}
+async function openFiles(list) {
+  const err = document.getElementById('err'); err.textContent = '';
+  let last = -1;
+  for (const f of list) {
+    try { last = add(f.name, JSON.parse(await f.text())); picked.add(last); }
+    catch (e) { err.textContent = (e instanceof SyntaxError ? `${f.name}: not valid JSON (${e.message})` : e.message); }
+  }
+  if (last >= 0) { cur = last; selected = null; render(); }
+}
+document.getElementById('file').addEventListener('change', e => openFiles([...e.target.files]));
+const drop = document.getElementById('drop');
+drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); openFiles([...e.dataTransfer.files]); });
+document.getElementById('mode-one').onclick = () => { mode = 'one'; render(); };
+document.getElementById('mode-cmp').onclick = () => { mode = 'compare'; render(); };
+
+function chips() {
+  document.getElementById('mode-one').classList.toggle('on', mode === 'one');
+  document.getElementById('mode-cmp').classList.toggle('on', mode === 'compare');
+  const el = document.getElementById('chips');
+  el.innerHTML = files.map((f, i) => {
+    const what = f.kind === 'schedule' ? `schedule, GPU ${f.data.info && f.data.info.gpu !== undefined ? f.data.info.gpu : '?'}` : 'solver result';
+    const on = mode === 'one' ? i === cur : picked.has(i);
+    return `<button class="chip ${mode === 'compare' ? 'pick' : ''} ${on ? 'on' : ''}" data-i="${i}" title="${esc(what)}" aria-pressed="${on}">${esc(f.name)}</button>`;
+  }).join('');
+  el.querySelectorAll('button').forEach(b => b.onclick = () => {
+    const i = +b.dataset.i;
+    if (mode === 'one') { cur = i; selected = null; } else if (picked.has(i)) picked.delete(i); else picked.add(i);
+    render();
+  });
+}
+
+// ---------------- schedule files: timeline ----------------
+// A schedule file has the per-SM lists and the dependencies, but no times. The times come from a loaded result file (the
+// solver's inputs, in us): each node's time for its grid in this schedule (topk_route / sum_quant_send / situ_and_mul: for the grid of the node writing
+// their input); a node the result treats as a pool (the expert queue) is work W shared by the SMs; the time after the pool
+// (the tail) goes to the other one-task-per-SM nodes. Without a result file every task counts as 1 step (not a time).
+function durModel(s) {
+  const r = durSource !== null && files[durSource] && files[durSource].kind === 'result' ? files[durSource].data.summary : null;
+  if (!r) return { order: true, per: {}, pools: {}, missing: [] };
+  const opt = g => g.join('x');
+  const pools = Object.values(r.timeline).flatMap(g => g.pools);
+  const per = {}, poolOf = {}, missing = [];
+  const after = Object.entries(s.nodes).filter(([k, n]) => { const c = r.candidates.find(c => String(c.node) === k); return c && !c.placed && !pools.some(p => p.id.split('@')[0] === k); });
+  for (const [k, n] of Object.entries(s.nodes)) {
+    const c = r.candidates.find(c => String(c.node) === k && c.name === n.name);
+    if (!c) { per[k] = 0; missing.push(k); continue; }
+    if (!c.placed) {
+      const p = pools.find(p => p.id.split('@')[0] === k);
+      if (p && p.work !== undefined) { poolOf[k] = p.work; per[k] = 0; }
+      else if (!p && pools.length) per[k] = pools[0].after / after.length;
+      else { per[k] = 0; missing.push(k); }
+      continue;
+    }
+    const v = c.task_us[opt(n.grid)];
+    if (typeof v === 'number') { per[k] = v; continue; }
+    const key = v && Object.keys(v).find(key => { const m = key.match(/#(\d+) (\S+)$/); return m && s.nodes[m[1]] && opt(s.nodes[m[1]].grid) === m[2]; });
+    if (key) per[k] = v[key]; else { per[k] = 0; missing.push(k); }
+  }
+  return { order: false, source: files[durSource].name, per, pools: poolOf, missing };
+}
+
+// Each SM runs its list in order; a task starts when the previous task on its SM has ended and every task in its deps has
+// ended. A pool node's task on an SM starts when the SM joins the pool; the pool ends for all SMs together at
+// max((W + sum of the joins) / P, the latest input + W / P, the latest join), the solver's rule. Tasks that never start wait in a circle.
+function simulate(sched, model) {
+  const tasks = sched.all_tasks, lists = sched.worker_task_queues;
+  const n = tasks.length, start = new Array(n).fill(null), end = new Array(n).fill(null), smOf = new Array(n), idxOn = new Array(n);
+  lists.forEach((l, sm) => l.forEach((t, i) => { smOf[t] = sm; idxOn[t] = i; }));
+  if (model.order) {                                  // the plan itself: the i-th task of an SM's list in slot i, no times
+    lists.forEach(l => l.forEach((t, i) => { start[t] = i; end[t] = i + 1; }));
+    return { start, end, smOf, idxOn, stuck: [], makespan: Math.max(0, ...lists.map(l => l.length)) };
+  }
+  const poolTasks = {};
+  tasks.forEach((t, i) => { if (t.node in model.pools) (poolTasks[t.node] = poolTasks[t.node] || []).push(i); });
+  const join = {}, inputsDone = {};
+  const ptr = lists.map(() => 0), free = lists.map(() => 0);
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (let sm = 0; sm < lists.length; sm++) {
+      while (ptr[sm] < lists[sm].length) {
+        const t = lists[sm][ptr[sm]];
+        if (t in join) break;                         // joined its pool; waits for the pool's end
+        let ready = free[sm], inputs = 0, ok = true;
+        for (const d of tasks[t].deps) { if (end[d] === null) { ok = false; break; } ready = Math.max(ready, end[d]); inputs = Math.max(inputs, end[d]); }
+        if (!ok) break;
+        const k = tasks[t].node;
+        if (k in model.pools) { join[t] = ready; inputsDone[t] = inputs; start[t] = ready; progress = true; break; }
+        start[t] = ready; end[t] = ready + model.per[k]; free[sm] = end[t]; ptr[sm]++; progress = true;
+      }
+    }
+    for (const [k, ts] of Object.entries(poolTasks)) {
+      if (end[ts[0]] !== null || !ts.every(t => t in join)) continue;
+      const W = model.pools[k], P = ts.length;
+      const e = Math.max((W + ts.reduce((a, t) => a + join[t], 0)) / P, Math.max(...ts.map(t => inputsDone[t])) + W / P,
+                         Math.max(...ts.map(t => join[t])));   // and not before the last SM has joined (as the solver)
+      for (const t of ts) { end[t] = e; free[smOf[t]] = e; ptr[smOf[t]]++; }
+      progress = true;
+    }
+  }
+  const stuck = [];
+  for (let t = 0; t < n; t++) if (end[t] === null) stuck.push(t);
+  return { start, end, smOf, idxOn, stuck, makespan: Math.max(0, ...end.filter(v => v !== null)) };
+}
+function axisLabel(model) { return model.order ? "position in the SM's list (the schedule has no times)" : `predicted time (us): the task times of ${model.source}, not a measurement`; }
+function durSelect(id) {
+  const opts = [`<option value="-1" ${durSource === null ? 'selected' : ''}>list order only (the plan as written)</option>`].concat(
+    files.map((f, i) => f.kind === 'result' ? `<option value="${i}" ${durSource === i ? 'selected' : ''}>predicted times, from the task times in ${esc(f.name)}</option>` : '').filter(Boolean));
+  return `<label class="note" for="${id}">show the schedule as: </label><select id="${id}" class="mono">${opts.join('')}</select>`;
+}
+function wireDurSelect(id) { const el = document.getElementById(id); if (el) el.onchange = () => { const v = +el.value; durSource = v < 0 ? null : v; render(); }; }
+function durCell(model, k, name, idPrefix) {
+  if (model.order) return '<span class="muted">—</span>';
+  if (k in model.pools) return `<span class="mono">pool: ${fmt(model.pools[k])} us of work shared by the SMs</span>`;
+  if (model.missing.includes(k)) return `<span class="err mono">no time for this grid (0)</span>`;
+  return `<span class="mono">${fmt(model.per[k])} us</span>`;
+}
+function wireDurInputs(model, keys, idPrefix, redraw) {
+  if (model.order) return;
+  keys.forEach(k => { const el = document.getElementById(idPrefix + k); if (el) el.addEventListener('input', e => { const v = parseFloat(e.target.value); durations[k] = isFinite(v) && v >= 0 ? v : 1; redraw(); }); });
+}
+function taskName(s, t) { const k = s.all_tasks[t].node; return `${esc(s.nodes[k].name)} #${k} (${s.all_tasks[t].pos.join(', ')})`; }
+
+function niceStep(span) {
+  const raw = span / 10, p = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const m of [1, 2, 5, 10]) if (raw <= m * p) return m * p;
+  return 10 * p;
+}
+function axis(span, x, top, bottom, minStep = 0) {
+  let h = '';
+  const step = Math.max(niceStep(span || 1), minStep);
+  for (let t = 0; t <= span + 1e-9; t += step) h += `<line x1="${x(t)}" y1="${top - 4}" x2="${x(t)}" y2="${bottom}" stroke="var(--line)"/><text x="${x(t)}" y="${top - 7}" text-anchor="middle">${fmt(t)}</text>`;
+  return h;
+}
+
+// the timeline of one schedule file: SVG text; `span` = the time axis' end (shared by all compared files)
+function scheduleSvg(f, sim, span, sel, model) {
+  const s = f.data, tasks = s.all_tasks, lists = s.worker_task_queues;
+  const rowH = 7, left = 52, top = 20, W = width(), H = top + lists.length * rowH + 26, x = t => left + (t / (span || 1)) * (W - left - 12);
+  const deps = new Set(sel !== null ? tasks[sel].deps : []), dnts = new Set(sel !== null ? f.dependents[sel] : []);
+  let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" class="tlsvg" aria-label="per-SM timeline">
+    <defs><pattern id="shatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="var(--soft)"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--muted)" stroke-width="1.5"/></pattern></defs>`;
+  svg += axis(span, x, top, top + lists.length * rowH, model.order ? 1 : 0);
+  for (let sm = 0; sm < lists.length; sm++) {
+    const y = top + sm * rowH;
+    if (sm % 10 === 0) svg += `<text x="4" y="${y + rowH - 1}">SM ${sm}</text>`;
+    let prev = 0;
+    for (const t of lists[sm]) {
+      if (sim.start[t] === null) continue;
+      if (sim.start[t] > prev + 1e-9) svg += `<line x1="${x(prev)}" y1="${y + rowH / 2}" x2="${x(sim.start[t])}" y2="${y + rowH / 2}" stroke="var(--muted)" stroke-width="1" stroke-dasharray="1 3" opacity="0.55"/>`;
+      const hl = t === sel ? 'stroke="var(--ink)" stroke-width="1.5"' : deps.has(t) ? 'stroke="var(--dep)" stroke-width="1.5"' : dnts.has(t) ? 'stroke="var(--dependent)" stroke-width="1.5"' : '';
+      const dim = sel !== null && t !== sel && !deps.has(t) && !dnts.has(t) ? ' opacity="0.35"' : '';
+      const k = tasks[t].node;
+      if (sim.end[t] === null) continue;
+      const fill = k in model.pools ? 'url(#shatch)' : colorFor(k, s.nodes[k].name);
+      svg += `<rect x="${x(sim.start[t])}" y="${y}" width="${Math.max(1, x(sim.end[t]) - x(sim.start[t]))}" height="${rowH - 1.5}" fill="${fill}" ${hl}${dim} data-t="${t}"/>`;
+      prev = sim.end[t];
+    }
+  }
+  return svg + `<text x="${W - 12}" y="${H - 6}" text-anchor="end">${esc(axisLabel(model))}</text></svg>`;
+}
+function wireSchedule(box, f, sim, onClick) {
+  const el = box.querySelector('svg.tlsvg'), tasks = f.data.all_tasks;
+  el.addEventListener('mousemove', e => {
+    const t = e.target.dataset && e.target.dataset.t; if (t === undefined) { hideTip(); return; }
+    const ti = +t;
+    showTip(e, `${taskName(f.data, ti)}<br>SM ${sim.smOf[ti]}, #${sim.idxOn[ti] + 1} on its list<br>${durSource === null ? '' : fmt(sim.start[ti]) + ' – ' + fmt(sim.end[ti]) + ' us (predicted)'}<br>waits for ${tasks[ti].deps.length} tasks; ${f.dependents[ti].length} wait for it`);
+  });
+  el.addEventListener('mouseleave', hideTip);
+  if (onClick) el.addEventListener('click', e => { const t = e.target.dataset && e.target.dataset.t; onClick(t === undefined ? null : +t); });
+}
+
+// ---------------- result files: predicted timeline ----------------
+function resultSpan(g) {
+  let m = 0;
+  for (const sm of g.sms) for (const t of sm) m = Math.max(m, t.end);
+  for (const p of g.pools) m = Math.max(m, p.end + p.after);
+  return m;
+}
+function resultSvg(g, span) {
+  const rowH = 7, left = 52, top = 20, W = width(), H = top + g.sms.length * rowH + 26, x = t => left + (t / (span || 1)) * (W - left - 12);
+  let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" class="tlsvg" aria-label="predicted per-SM timeline">
+    <defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="var(--soft)"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--muted)" stroke-width="1.5"/></pattern></defs>`;
+  svg += axis(span, x, top, top + g.sms.length * rowH);
+  g.sms.forEach((list, sm) => {
+    const y = top + sm * rowH;
+    if (sm % 10 === 0) svg += `<text x="4" y="${y + rowH - 1}">SM ${sm}</text>`;
+    for (const p of g.pools) {
+      const j = p.joins[sm];
+      svg += `<rect x="${x(j)}" y="${y}" width="${Math.max(0, x(p.end) - x(j))}" height="${rowH - 1.5}" fill="url(#hatch)" data-p="pool" data-sm="${sm}" data-a="${j}" data-b="${p.end}"/>`;
+      if (p.after > 0) svg += `<rect x="${x(p.end)}" y="${y}" width="${x(p.end + p.after) - x(p.end)}" height="${rowH - 1.5}" fill="var(--line)" data-p="after the pool" data-sm="${sm}" data-a="${p.end}" data-b="${p.end + p.after}"/>`;
+    }
+    list.forEach((t, i) => { svg += `<rect x="${x(t.start)}" y="${y}" width="${Math.max(1, x(t.end) - x(t.start))}" height="${rowH - 1.5}" fill="${colorFor(t.node, t.name)}" data-sm="${sm}" data-i="${i}"/>`; });
+  });
+  return svg + `<text x="${W - 12}" y="${H - 6}" text-anchor="end">predicted time (us), the solver's model, not a measurement</text></svg>`;
+}
+function wireResult(box, g) {
+  const el = box.querySelector('svg.tlsvg');
+  el.addEventListener('mousemove', e => {
+    const d = e.target.dataset || {}; if (d.sm === undefined) { hideTip(); return; }
+    if (d.p) { showTip(e, `SM ${d.sm}: ${d.p}<br>${fmt(+d.a)} – ${fmt(+d.b)} us`); return; }
+    const t = g.sms[+d.sm][+d.i];
+    showTip(e, `${esc(t.name)} #${t.node}, grid ${t.option}, position (${t.pos.join(', ')})<br>SM ${d.sm}, #${+d.i + 1} on its list<br>${fmt(t.start)} – ${fmt(t.end)} us (${fmt(t.end - t.start)})`);
+  });
+  el.addEventListener('mouseleave', hideTip);
+}
+function setButtons(f, onPick) {
+  return Object.keys(f.data.summary.timeline).map(n => `<button data-s="${esc(n)}" class="${n === f.set ? 'on' : ''}">${esc(n)}</button>`).join('');
+}
+// what each color / pattern of a timeline is
+const HATCH_SW = '<svg width="12" height="12" style="vertical-align:-2px;margin-right:6px" aria-hidden="true"><rect width="12" height="12" fill="var(--soft)" stroke="var(--muted)"/><line x1="0" y1="12" x2="12" y2="0" stroke="var(--muted)" stroke-width="1.5"/></svg>';
+function item(sw, text) { return `<span class="lg">${sw}${text}</span>`; }
+function scheduleLegend(s, model) {
+  return '<div class="legend">' + Object.keys(s.nodes).sort((a, b) => +a - +b).map(k => {
+    const n = s.nodes[k], label = `${esc(n.name)} #${k} [${n.params.join(', ')}] grid ${gridStr(n.grid)}`;
+    if (!model.order && k in model.pools) return item(HATCH_SW, `${label}: one task per SM; their work (${fmt(model.pools[k])} us in all) is shared by the SMs, drawn from the SM's join to the end`);
+    return item(`<span class="sw" style="background:${colorFor(k, n.name)}"></span>`, label + (model.order ? '' : ` (${fmt(model.per[k])} us)`));
+  }).join('') + (model.order ? '' : item('<span class="sw" style="background:none;border-top:1px dotted var(--muted);border-radius:0;height:0;width:14px"></span>', 'SM waiting for a dependency')) + '</div>';
+}
+function resultLegend(r, g) {
+  const pools = new Set(g.pools.map(p => p.id.split('@')[0]));
+  return '<div class="legend">' + r.candidates.map(c => {
+    const label = `${esc(c.name)} #${c.node} [${c.params.join(', ')}] grid ${esc(c.chosen || '')}`;
+    if (pools.has(String(c.node))) return item(HATCH_SW, `${label}: shared work of the SMs (${g.pools.map(p => fmt(p.work || 0)).join(', ')} us in all), from each SM's join to the end`);
+    if (!c.placed) return item('<span class="sw" style="background:var(--line)"></span>', `${label}: after the shared work (${g.pools.map(p => fmt(p.after)).join(', ')} us)`);
+    return item(`<span class="sw" style="background:${colorFor(c.node, c.name)}"></span>`, label);
+  }).join('') + '</div>';
+}
+
+// ---------------- "One file" ----------------
+function renderSchedule(f) {
+  const s = f.data, nodes = s.nodes, tasks = s.all_tasks, lists = s.worker_task_queues;
+  const order = Object.keys(nodes).sort((a, b) => +a - +b);
+  const model = durModel(s);
+  const count = {}, sms = {};
+  tasks.forEach(t => { count[t.node] = (count[t.node] || 0) + 1; });
+  lists.forEach((l, sm) => l.forEach(t => { (sms[tasks[t].node] = sms[tasks[t].node] || new Set()).add(sm); }));
+  const view = document.getElementById('view');
+  view.innerHTML = `
+    <section class="panel"><h2>${esc(f.name)}</h2>
+      <div class="stats">
+        <div class="stat"><div class="k">GPU</div><div class="v">${s.info && s.info.gpu !== undefined ? s.info.gpu : '—'}</div></div>
+        <div class="stat"><div class="k">nodes</div><div class="v">${order.length}</div></div>
+        <div class="stat"><div class="k">tasks</div><div class="v">${tasks.length}</div></div>
+        <div class="stat"><div class="k">dependencies</div><div class="v">${tasks.reduce((a, t) => a + t.deps.length, 0)}</div></div>
+        <div class="stat"><div class="k">SM lists</div><div class="v">${lists.length}</div></div>
+        <div class="stat"><div class="k">longest list</div><div class="v">${Math.max(...lists.map(l => l.length))}</div></div>
+        <div class="stat"><div class="k" id="mkk">end</div><div class="v" id="mk">—</div></div>
+      </div></section>
+    <section class="panel"><h2>Nodes</h2>
+      <p class="note">Grid and params as compiled; "inputs' producer grids" is the grid of the node writing each input (— for a graph input). A schedule file has no times. Below it is drawn as written: each SM's list in order. To see predicted times, open a solver result file and pick it below: each node then gets that file's task time for its grid.</p>
+      <div class="controls">${durSelect('dsrc')}</div>
+      <div class="tablewrap"><table>
+        <tr><th>node</th><th>name</th><th>grid</th><th>params</th><th>inputs' producer grids</th><th>tasks</th><th>SMs</th><th>time of one task</th></tr>
+        ${order.map(k => { const n = nodes[k]; return `<tr>
+          <td class="mono"><span class="sw" style="background:${colorFor(k, n.name)}"></span>${k}</td><td>${esc(n.name)}</td>
+          <td class="mono">${gridStr(n.grid)}</td><td class="mono">[${n.params.join(', ')}]</td>
+          <td class="mono">${n.inputs.map(p => p ? gridStr(p.grid) : '—').join(', ')}</td>
+          <td class="num">${count[k] || 0}</td><td class="num">${sms[k] ? sms[k].size : 0}</td>
+          <td>${durCell(model, k, n.name, 'dur-')}</td></tr>`; }).join('')}
+      </table></div></section>
+    <section class="panel"><h2>Timeline</h2>
+      <p class="note">One row per SM, its tasks in list order. With predicted times: a task starts when the task before it on the SM and all the tasks it depends on have ended; a dotted line is the SM waiting; hatched is the SM's share of a pool. Click a task to mark what it waits for (blue outline) and what waits for it (orange outline).</p>
+      <div class="tl" id="tl"></div><div class="sel" id="sel"></div></section>`;
+  wireDurSelect('dsrc');
+  wireDurInputs(model, order, 'dur-', () => draw());
+  function draw() {
+    const m = durModel(s), sim = simulate(s, m);
+    document.getElementById('mkk').textContent = m.order ? 'longest list' : 'predicted end (us)';
+    document.getElementById('mk').textContent = sim.stuck.length ? 'never' : fmt(sim.makespan);
+    const tl = document.getElementById('tl');
+    tl.innerHTML = scheduleLegend(s, m) + scheduleSvg(f, sim, sim.makespan, selected, m);
+    wireSchedule(tl, f, sim, t => { selected = t; draw(); });
+    const sel = document.getElementById('sel');
+    if (sim.stuck.length) sel.innerHTML = `<span class="err">${sim.stuck.length} tasks can never start: they wait for each other in a circle (the lists would hang). First: ${sim.stuck.slice(0, 6).map(t => taskName(s, t)).join('; ')}</span>`;
+    else if (selected !== null) sel.innerHTML = `<b>${taskName(s, selected)}</b> on SM ${sim.smOf[selected]} (#${sim.idxOn[selected] + 1}): waits for <span style="color:var(--dep)">${tasks[selected].deps.length}</span> tasks, <span style="color:var(--dependent)">${f.dependents[selected].length}</span> tasks wait for it. <button id="clear">Clear</button>`;
+    else sel.textContent = '';
+    const clear = document.getElementById('clear'); if (clear) clear.onclick = () => { selected = null; draw(); };
+  }
+  draw();
+}
+
+function renderResult(f) {
+  const r = f.data, s = r.summary;
+  let all = 1, meas = 1; s.candidates.forEach(c => { all *= c.all.length; meas *= c.measured.length; });
+  const view = document.getElementById('view');
+  view.innerHTML = `
+    <section class="panel"><h2>${esc(r.title || f.name)}</h2>
+      <div class="stats">
+        <div class="stat"><div class="k">status</div><div class="v">${esc(s.status)}</div></div>
+        <div class="stat"><div class="k">predicted end (us)</div><div class="v">${s.predicted_us}</div></div>
+        <div class="stat"><div class="k">lower bound (us)</div><div class="v">${s.bound_us}</div></div>
+        <div class="stat"><div class="k">solve time (s)</div><div class="v">${s.solve_s}</div></div>
+        <div class="stat"><div class="k">grid combinations</div><div class="v">${meas} <span class="muted" style="font-size:12px">of ${all}</span></div></div>
+      </div>
+      <p class="note">Times are the solver's predictions from the cost file's measured task times, not GPU measurements.</p></section>
+    <section class="panel"><h2>Candidates</h2>
+      <p class="note">Every candidate grid of each node; dashed = no measured time (left out of the search); filled = chosen.</p>
+      <div class="tablewrap"><table><tr><th>node</th><th>name</th><th>params</th><th>candidate grids</th><th>time of one task (us)</th><th>tasks per GPU set</th></tr>
+      ${s.candidates.map(c => {
+        let us = '';
+        if (!c.placed) us = '<span class="muted">not placed: one task per SM at the end</span>';
+        else for (const [o, v] of Object.entries(c.task_us)) us += typeof v === 'number' ? `<div class="mono">${o}: ${fmt(v)}</div>` : Object.entries(v).map(([k, x]) => `<div class="mono">${esc(k)}: ${fmt(x)}</div>`).join('');
+        return `<tr><td class="mono"><span class="sw" style="background:${colorFor(c.node, c.name)}"></span>${c.node}</td><td>${esc(c.name)}</td><td class="mono">[${c.params.join(', ')}]</td>
+          <td style="white-space:normal">${c.all.map(o => `<span class="opt ${c.measured.includes(o) ? '' : 'nomeas'} ${o === c.chosen ? 'chosen' : ''}">${o}</span>`).join('')}</td>
+          <td>${us}</td><td class="mono">${Object.entries(c.tasks_per_gpu_set).map(([g, n]) => `${esc(g)}: ${n}`).join('<br>')}</td></tr>`; }).join('')}
+      </table></div></section>
+    <section class="panel"><h2>Predicted timeline</h2>
+      <p class="note">One row per SM. Bars: placed tasks. Hatched: the shared work of a one-per-SM node (pool), from the time this SM joins it; grey: the time after the pool (tail).</p>
+      <div class="controls"><span id="sets"></span><span class="note" id="setinfo"></span></div><div class="tl" id="tl"></div></section>`;
+  function draw() {
+    const g = s.timeline[f.set];
+    const sets = document.getElementById('sets');
+    sets.innerHTML = setButtons(f);
+    sets.querySelectorAll('button').forEach(b => b.onclick = () => { f.set = b.dataset.s; draw(); });
+    document.getElementById('setinfo').textContent = `GPUs ${g.gpus.join(', ')} (same placement); ${g.sms.reduce((a, l) => a + l.length, 0)} placed tasks` + g.pools.map(p => `; pool opens ${p.open} us, ends ${p.end} us`).join('');
+    let span = 0; for (const gg of Object.values(s.timeline)) span = Math.max(span, resultSpan(gg));
+    const tl = document.getElementById('tl'); tl.innerHTML = resultLegend(s, g) + resultSvg(g, span); wireResult(tl, g);
+  }
+  draw();
+}
+
+// ---------------- "Compare" ----------------
+function renderCompare() {
+  const view = document.getElementById('view');
+  const sel = [...picked].filter(i => i < files.length).sort((a, b) => a - b);
+  if (sel.length < 2) { view.innerHTML = `<section class="panel"><p class="note">Tick two or more of the files above to compare them (open more with "Open files").</p></section>`; return; }
+  const scheds = sel.filter(i => files[i].kind === 'schedule'), results = sel.filter(i => files[i].kind === 'result');
+  const nodeKeys = {};                         // node idx -> name, over the compared schedule files
+  scheds.forEach(i => Object.entries(files[i].data.nodes).forEach(([k, n]) => { nodeKeys[k] = n.name; }));
+  const keys = Object.keys(nodeKeys).sort((a, b) => +a - +b);
+  const gridsOf = f => f.kind === 'schedule' ? Object.fromEntries(Object.entries(f.data.nodes).map(([k, n]) => [k, n.grid])) :
+    Object.fromEntries(f.data.summary.candidates.map(c => [String(c.node), c.chosen ? c.chosen.split('x').map(Number) : null]));
+  const allKeys = [...new Set(sel.flatMap(i => Object.keys(gridsOf(files[i]))))].sort((a, b) => +a - +b);
+  const nameOf = k => { for (const i of sel) { const f = files[i]; if (f.kind === 'schedule' && f.data.nodes[k]) return f.data.nodes[k].name; if (f.kind === 'result') { const c = f.data.summary.candidates.find(c => String(c.node) === k); if (c) return c.name; } } return '?'; };
+  let h = `<section class="panel"><h2>Compare ${sel.length} files</h2>
+    <p class="note">Grids per node in each file (orange: differs between the files). Schedule files are drawn as written (list order, their own axis), unless predicted times are picked below; result files are the solver's predictions in us.</p>
+    ${scheds.length ? `<div class="controls">${durSelect('cdsrc')}</div>` : ''}
+    <div class="tablewrap"><table><tr><th>node</th><th>name</th>${sel.map(i => `<th>${esc(files[i].name)}</th>`).join('')}</tr>
+    ${allKeys.map(k => {
+      const gs = sel.map(i => gridsOf(files[i])[k]);
+      const differ = new Set(gs.map(gridStr)).size > 1;
+      return `<tr><td class="mono"><span class="sw" style="background:${colorFor(k, nameOf(k))}"></span>${k}</td><td>${esc(nameOf(k))}</td>${sel.map((i, j) => {
+        const f = files[i], g = gs[j];
+        let t = '';
+        if (f.kind === 'schedule' && f.data.nodes[k]) { const m = durModel(f.data); t = m.order ? '' : `<div class="note">${durCell(m, k, nameOf(k), 'x')}</div>`; }
+        return `<td class="mono ${differ ? 'diff' : ''}">${gridStr(g)}${t}</td>`; }).join('')}</tr>`; }).join('')}
+    </table></div></section>`;
+  h += sel.map(i => `<section class="panel"><div class="cmphead"><b>${esc(files[i].name)}</b><span class="note" id="ch-${i}"></span></div>
+    ${files[i].kind === 'result' ? `<div class="controls" id="cs-${i}"></div>` : ''}<div class="tl" id="ct-${i}"></div></section>`).join('');
+  view.innerHTML = h;
+  wireDurSelect('cdsrc');
+  function draw() {
+    const sims = {}, models = {}; let spanS = 0, spanR = 0;
+    scheds.forEach(i => { models[i] = durModel(files[i].data); sims[i] = simulate(files[i].data, models[i]); spanS = Math.max(spanS, sims[i].makespan); });
+    results.forEach(i => { spanR = Math.max(spanR, resultSpan(files[i].data.summary.timeline[files[i].set])); });
+    const order = scheds.some(i => models[i].order);
+    if (!order) { spanS = spanR = Math.max(spanS, spanR); }
+    for (const i of sel) {
+      const f = files[i], box = document.getElementById('ct-' + i), head = document.getElementById('ch-' + i);
+      if (f.kind === 'schedule') {
+        const sim = sims[i];
+        const m = models[i];
+        const gpu = f.data.info && f.data.info.gpu !== undefined ? f.data.info.gpu : '?';
+        const longest = Math.max(...f.data.worker_task_queues.map(l => l.length));
+        let txt = `schedule, GPU ${gpu} · ${f.data.all_tasks.length} tasks · longest list ${longest}`;
+        if (!m.order) txt += ' · predicted end ' + (sim.stuck.length ? 'never (the lists wait for each other in a circle)' : fmt(sim.makespan) + ' us');
+        if (m.missing.length) txt += ` · no time for nodes ${m.missing.join(', ')}`;
+        head.textContent = txt;
+        box.innerHTML = scheduleLegend(f.data, m) + scheduleSvg(f, sim, spanS, null, m); wireSchedule(box, f, sim, null);
+      } else {
+        const s = f.data.summary, g = s.timeline[f.set];
+        head.textContent = `solver result · ${s.status} · predicted end ${s.predicted_us} us · ${g.sms.reduce((a, l) => a + l.length, 0)} placed tasks on ${f.set}`;
+        const cs = document.getElementById('cs-' + i); cs.innerHTML = setButtons(f);
+        cs.querySelectorAll('button').forEach(b => b.onclick = () => { f.set = b.dataset.s; draw(); });
+        box.innerHTML = resultLegend(s, g) + resultSvg(g, spanR); wireResult(box, g);
+      }
+    }
+  }
+  draw();
+}
+
+function render() {
+  chips();
+  if (mode === 'compare') { renderCompare(); return; }
+  if (cur < 0) { document.getElementById('view').innerHTML = ''; return; }
+  const f = files[cur];
+  (f.kind === 'schedule' ? renderSchedule : renderResult)(f);
+}
+
+// files given with the page (plan_viewer.py)
+try {
+  const pre = JSON.parse(document.getElementById('preload').textContent || '[]');
+  for (const p of pre) picked.add(add(p.name, p.data));
+  if (pre.length) cur = 0;
+  if (pre.length >= 2) mode = 'compare';
+} catch (e) { document.getElementById('err').textContent = 'preloaded files: ' + e.message; }
+render();
+})();
+</script>
+</body>
+</html>
