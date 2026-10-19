@@ -81,7 +81,8 @@ public:
                                      std::vector<int> const &params);
   int register_moe_linear_sm90_task(threadblock::Graph const &bgraph,
                                     std::vector<int> const &params,
-                                    bool w13_linear);
+                                    bool w13_linear,
+                                    bool mxfp4_weight = false);
   int register_splitk_linear_swapAB_hopper_task(
       threadblock::Graph const &bgraph,
       std::vector<int> const &params,

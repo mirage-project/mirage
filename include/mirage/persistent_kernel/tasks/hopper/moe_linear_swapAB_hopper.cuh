@@ -47,6 +47,32 @@
 #include "utils.cuh"
 namespace kernel {
 
+// E2M1 values are stored low nibble first; MXFP4 scales use the E8M0
+// exponent-only encoding (2^(encoded_exponent - 127)).
+
+// The BF16 pair 2^(scale - 127) for an E8M0 scale; a scale of 0 decodes to 0.
+CUTE_DEVICE __nv_bfloat162 mxfp4_scale_pair(uint32_t scale) {
+  uint32_t const bits = scale == 0 ? 0u : scale << 7;
+  uint32_t const pair = bits | bits << 16;
+  return *reinterpret_cast<__nv_bfloat162 const *>(&pair);
+}
+
+// Decodes one packed byte, two E2M1 values adjacent along K, to a BF16 pair
+// (low nibble in the low half) times `scale2`. A nibble s.ee.m placed as BF16
+// bits (s << 15) | (ee.m << 6) is its value times 2^-126 (ee = 0 lands on a
+// subnormal), so multiplying by 2^126 and then by the power-of-two scale is
+// exact.
+CUTE_DEVICE uint32_t decode_mxfp4_pair(uint32_t byte, __nv_bfloat162 scale2) {
+  uint32_t const bits = ((byte & 0x08u) << 12) | ((byte & 0x07u) << 6) |
+                        ((byte & 0x80u) << 24) | ((byte & 0x70u) << 18);
+  uint32_t const unbias = 0x7e807e80u; // 2^126 in both halves
+  __nv_bfloat162 const pair =
+      __hmul2(__hmul2(*reinterpret_cast<__nv_bfloat162 const *>(&bits),
+                      *reinterpret_cast<__nv_bfloat162 const *>(&unbias)),
+              scale2);
+  return *reinterpret_cast<uint32_t const *>(&pair);
+}
+
 // MoE Linear task storage. The shared memory buffers for A, B, and C matrices.
 template <class TypeA, // Tensor A data type
           class TypeB, // Tensor B data type
@@ -91,6 +117,7 @@ template <typename T_,
           int EXPERT_STRIDE,
           bool W13_LINEAR,
           bool NOBIAS,
+          bool MXFP4_WEIGHT = false,
           int NUM_AB_STAGE = 8>
 __device__ __forceinline__ void
     moe_linear_sm90_task_impl(const TMA_A &tma_a,
@@ -99,7 +126,8 @@ __device__ __forceinline__ void
                               IndicesTensor mRoutingIndices,
                               MaskTensor mMask,
                               OutputTensor mOutput,
-                              int const expert_offset) {
+                              int const expert_offset,
+                              uint8_t const *weight_scale = nullptr) {
   int warp_idx = cutlass::canonical_warp_idx_sync();
 
   // Construct the MMA grid coordinate from the CTA grid coordinate
@@ -121,6 +149,16 @@ __device__ __forceinline__ void
   // Create TiledMma type and instance
   auto tiled_mma =
       cute::make_tiled_mma(cute::GMMA::ss_op_selector<T_,
+                                                      T_,
+                                                      TypeAcc,
+                                                      TileShape_MNK,
+                                                      cute::GMMA::Major::K,
+                                                      cute::GMMA::Major::K>(),
+                           AtomLayoutMNK{});
+  // MXFP4 decodes the weight tile into registers, so its MMA reads A from
+  // registers (RS); B stays in shared memory.
+  auto tiled_mma_rs =
+      cute::make_tiled_mma(cute::GMMA::rs_op_selector<T_,
                                                       T_,
                                                       TypeAcc,
                                                       TileShape_MNK,
@@ -240,6 +278,22 @@ __device__ __forceinline__ void
       (reinterpret_cast<uintptr_t>(shared_memory) + 127) / 128 * 128;
   SharedStorage &shared_storage =
       *reinterpret_cast<SharedStorage *>(aligned_smem);
+
+  // MXFP4 tiles land packed (two values per byte) in the stages of A, which
+  // hold BF16 tiles on the BF16 path. Past the shared storage, each consumer
+  // warp keeps the E8M0 scales of its 16 rows of the current m tile.
+  constexpr int MXFP4_SCALE_COLS = REDUCTION_SIZE / 32;
+  uint8_t *mxfp4_scale = reinterpret_cast<uint8_t *>(
+      (aligned_smem + sizeof(SharedStorage) + 15) / 16 * 16);
+  static_assert(!MXFP4_WEIGHT ||
+                    sizeof(SharedStorage) + 128 + 16 + 64 * MXFP4_SCALE_COLS <=
+                        mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE,
+                "MXFP4 scales do not fit in shared memory");
+  static_assert(!MXFP4_WEIGHT || (MMA_M == 64 && MMA_K == 64),
+                "MXFP4 decodes 64x64 weight tiles");
+  // 32-value blocks, two per k tile, so a row's scales come in pairs
+  static_assert(!MXFP4_WEIGHT || REDUCTION_SIZE % 64 == 0,
+                "MXFP4 needs whole 64-value k tiles");
 
   // Initialize the barriers in shared memory
   if (warp_idx == 0) {
@@ -397,21 +451,32 @@ __device__ __forceinline__ void
                   tma_wr_ab_empty_phase);
             }
 
-            // TMA for loading A
-            // only one thread will issue the tma instruction
+            // TMA for loading A; only one thread issues the instruction.
             if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
-              int tma_coords_A[2] = {k_tile * TILE_SIZE,
-                                     m_tile * OUTPUT_ATOM_SIZE +
-                                         expert_idx * OUTPUT_STRIDE};
+              int const tma_row =
+                  m_tile * OUTPUT_ATOM_SIZE + expert_idx * OUTPUT_STRIDE;
               weight_smem.set_ptr(shared_weight + smem_wr_buffer *
                                                       OUTPUT_ATOM_SIZE *
                                                       TILE_SIZE);
-              cute::set_barrier_transaction_bytes(
-                  shared_storage.a_full_mbar_ptr[smem_wr_buffer],
-                  tma_transaction_bytes_A);
-              tma_a.tma_cp_async(a_full_mbar_ptr[smem_wr_buffer],
-                                 weight_smem.base_ptr,
-                                 tma_coords_A);
+              if constexpr (MXFP4_WEIGHT) {
+                // packed, two values per byte; the consumer decodes it
+                int tma_coords_A[2] = {k_tile * TILE_SIZE / 2, tma_row};
+                cute::set_barrier_transaction_bytes(
+                    shared_storage.a_full_mbar_ptr[smem_wr_buffer],
+                    OUTPUT_ATOM_SIZE * TILE_SIZE / 2);
+                tma_a.tma_cp_async(
+                    a_full_mbar_ptr[smem_wr_buffer],
+                    reinterpret_cast<uint8_t *>(weight_smem.base_ptr),
+                    tma_coords_A);
+              } else {
+                int tma_coords_A[2] = {k_tile * TILE_SIZE, tma_row};
+                cute::set_barrier_transaction_bytes(
+                    shared_storage.a_full_mbar_ptr[smem_wr_buffer],
+                    tma_transaction_bytes_A);
+                tma_a.tma_cp_async(a_full_mbar_ptr[smem_wr_buffer],
+                                   weight_smem.base_ptr,
+                                   tma_coords_A);
+              }
             }
 
             int32_t token_idx =
@@ -456,6 +521,48 @@ __device__ __forceinline__ void
     }       // end for expert_idx
   } else if (warp_idx < 4) {
     // MMA warp (4)
+    // MXFP4: the RS MMA's operands. Register j of k block s of the A
+    // fragment holds two adjacent K values of row mxfp4_row (j even) or
+    // mxfp4_row + 8 (j odd) at columns 16s + 2q (+ 8 for j >= 2), with
+    // q = lane % 4: exactly one packed byte of the weight tile.
+    auto thread_mma_rs =
+        tiled_mma_rs.get_slice(warp_group_thread_layout(warp_group_idx));
+    cute::Tensor tCrA_rs = thread_mma_rs.partition_fragment_A(
+        shared_storage.tensor_sA()(cute::_, cute::_, 0)); // (MMA,MMA_M,MMA_K)
+    cute::Tensor tCrA_rs_u32 = cute::recast<uint32_t>(tCrA_rs);
+    cute::Tensor tCrB_rs = thread_mma_rs.make_fragment_B(
+        thread_mma_rs.partition_B(shared_storage.tensor_sB()));
+    int const mxfp4_row = ((warp_idx & 3) << 4) + (idx_in_warp >> 2);
+    int const mxfp4_byte_shift = 8 * (idx_in_warp & 3);
+    uint8_t *warp_scale = mxfp4_scale + (warp_idx & 3) * 16 * MXFP4_SCALE_COLS;
+    // This warp's 16 rows of (expert, m_t)'s scales, contiguous in global
+    // memory, loaded 2 bytes at a time with every load issued before any
+    // store so their latencies overlap.
+    constexpr int MXFP4_WARP_SCALE_PAIRS = 16 * MXFP4_SCALE_COLS / 2;
+    constexpr int MXFP4_SCALE_PAIRS_PER_LANE =
+        (MXFP4_WARP_SCALE_PAIRS + 31) / 32;
+    auto load_warp_scales = [&](int expert, int m_t) {
+      int const row0 = m_t * OUTPUT_ATOM_SIZE + ((warp_idx & 3) << 4);
+      int const rows = max(0, min(16, OUTPUT_SIZE - row0));
+      int const pairs = rows * MXFP4_SCALE_COLS / 2;
+      uint16_t const *src = reinterpret_cast<uint16_t const *>(
+          weight_scale + (static_cast<size_t>(expert) * OUTPUT_STRIDE + row0) *
+                             MXFP4_SCALE_COLS);
+      uint16_t vals[MXFP4_SCALE_PAIRS_PER_LANE];
+#pragma unroll
+      for (int i = 0; i < MXFP4_SCALE_PAIRS_PER_LANE; i++) {
+        int const idx = idx_in_warp + i * 32;
+        vals[i] = idx < pairs ? src[idx] : 0;
+      }
+#pragma unroll
+      for (int i = 0; i < MXFP4_SCALE_PAIRS_PER_LANE; i++) {
+        int const idx = idx_in_warp + i * 32;
+        if (idx < pairs) {
+          reinterpret_cast<uint16_t *>(warp_scale)[idx] = vals[i];
+        }
+      }
+    };
+
     int total_k_tile_count = 0;
 #pragma unroll 1
     for (int activated_expert_offset = expert_offset;
@@ -491,6 +598,13 @@ __device__ __forceinline__ void
           cute::clear(accum);
           // Initialize the accumulator to zero
           tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
+          tiled_mma_rs.accumulate_ = cute::GMMA::ScaleOut::Zero;
+          if constexpr (MXFP4_WEIGHT) {
+            // every lane is done with the previous k loop's scales
+            __syncwarp();
+            load_warp_scales(expert_idx, m_tile);
+            __syncwarp();
+          }
 #pragma unroll 1
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
             int mma_rd_k_tile_next = mma_rd_k_tile + 1;
@@ -510,22 +624,84 @@ __device__ __forceinline__ void
                                  mma_rd_ab_full_phase);
             }
 
+            if constexpr (MXFP4_WEIGHT) {
+              // Decode this thread's bytes of the packed tile (64 rows of 32
+              // bytes) into the A fragments; see tCrA_rs above.
+              // the raw stage the producer's TMA wrote, not &sA(0, 0, stage):
+              // sA's swizzle is address-based, and A is not 1024-byte aligned
+              uint8_t const *tile = reinterpret_cast<uint8_t const *>(
+                  shared_weight +
+                  smem_rd_buffer * OUTPUT_ATOM_SIZE * TILE_SIZE);
+              uint32_t words[2][8];
+#pragma unroll
+              for (int h = 0; h < 2; h++) {
+                uint4 const *row = reinterpret_cast<uint4 const *>(
+                    tile + (mxfp4_row + 8 * h) * (TILE_SIZE / 2));
+                uint4 const lo = row[0], hi = row[1];
+                uint32_t const w[8] = {
+                    lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
+#pragma unroll
+                for (int i = 0; i < 8; i++) {
+                  words[h][i] = w[i];
+                }
+              }
+              // scales[h][b]: row mxfp4_row + 8h, 32-value block b of the tile
+              __nv_bfloat162 scales[2][2];
+#pragma unroll
+              for (int h = 0; h < 2; h++) {
+#pragma unroll
+                for (int b = 0; b < 2; b++) {
+                  scales[h][b] = mxfp4_scale_pair(
+                      warp_scale[((mxfp4_row & 15) + 8 * h) * MXFP4_SCALE_COLS +
+                                 2 * k_tile + b]);
+                }
+              }
+#pragma unroll
+              for (int kb = 0; kb < 4; kb++) {
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                  // j: row half (j & 1), columns +8 (j >> 1)
+                  uint32_t const byte =
+                      (words[j & 1][2 * kb + (j >> 1)] >> mxfp4_byte_shift) &
+                      0xffu;
+                  tCrA_rs_u32(j, 0, kb) =
+                      decode_mxfp4_pair(byte, scales[j & 1][kb >> 1]);
+                }
+              }
+              cute::warpgroup_fence_operand(tCrA_rs);
+            }
             cute::warpgroup_fence_operand(accum);
             {
               // Perform MMA operation
               cute::warpgroup_arrive();
+              if constexpr (MXFP4_WEIGHT) {
+#pragma unroll
+                for (int k_block = 0; k_block < cute::size<2>(tCrA_rs);
+                     ++k_block) {
+                  cute::gemm(tiled_mma_rs,
+                             tCrA_rs(cute::_, cute::_, k_block),
+                             tCrB_rs(cute::_, cute::_, k_block, smem_rd_buffer),
+                             accum);
+                  tiled_mma_rs.accumulate_ = cute::GMMA::ScaleOut::One;
+                }
+              } else {
 #pragma unroll 3
-              for (int k_block = 0; k_block < cute::size<2>(tCrA); ++k_block) {
-                cute::gemm(tiled_mma,
-                           tCrA(cute::_, cute::_, k_block, smem_rd_buffer),
-                           tCrB(cute::_, cute::_, k_block, smem_rd_buffer),
-                           accum);
-                tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
+                for (int k_block = 0; k_block < cute::size<2>(tCrA);
+                     ++k_block) {
+                  cute::gemm(tiled_mma,
+                             tCrA(cute::_, cute::_, k_block, smem_rd_buffer),
+                             tCrB(cute::_, cute::_, k_block, smem_rd_buffer),
+                             accum);
+                  tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
+                }
               }
               cute::warpgroup_commit_batch();
               cute::warpgroup_wait<0>();
             }
             cute::warpgroup_fence_operand(accum);
+            if constexpr (MXFP4_WEIGHT) {
+              cute::warpgroup_fence_operand(tCrA_rs);
+            }
 
             // only one thread will issue the arrive instruction
             if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
