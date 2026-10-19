@@ -90,6 +90,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
   constexpr int PRODUCER_WARPGROUP_SYNC_BARRIER_ID = 8;
   constexpr int CONSUMER_WARPGROUP_SYNC_BARRIER_ID = 9;
+  // RoPE syncs only its HEAD_DIM participating threads, so it needs a barrier
+  // of its own: sharing 9 lets the idle threads' 128-count arrivals release it.
+  constexpr int ROTARY_SYNC_BARRIER_ID = 10;
   // NOTE(Yu): we use m64n64k16 mma atom to compute matrix multiplication
   constexpr int MMA_ITERS_M = (MAX_TOKENS * NUM_QO_PER_KV + 63) / 64;
 
@@ -537,7 +540,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                                     1,
                                     HEAD_DIM,
                                     THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                                    ROTARY_SYNC_BARRIER_ID,
                                     ROTARY_DIM>(
                 q_smem,
                 static_cast<T const *>(cos_ptr) +
@@ -557,7 +560,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                                     1,
                                     HEAD_DIM,
                                     THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                                    ROTARY_SYNC_BARRIER_ID,
                                     ROTARY_DIM>(
                 k_smem,
                 static_cast<T const *>(cos_ptr) +
@@ -570,6 +573,11 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           }
         }
       }
+
+      // RoPE runs on HEAD_DIM threads, the copy below and the MMAs on all
+      // of them; wait for the rotated rows.
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+          CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
       // update the KV Cache
       if (kv_tokens_to_process > 0) {
