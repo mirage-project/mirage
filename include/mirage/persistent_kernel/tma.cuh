@@ -1148,9 +1148,31 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
       break;
     }
     case TASK_MOE_W13_MXFP4_SM90:
-    case TASK_MOE_W2_MXFP4_SM90:
-      // Packed MXFP4 weights and scales are decoded by the Hopper kernel.
+    case TASK_MOE_W2_MXFP4_SM90: {
+      if (param_id == 1) {
+        // Packed E2M1 weights, two values per byte: the kernel stages 64-row
+        // by 32-byte boxes (a 64x64 tile) and decodes them; no swizzle.
+        int const num_experts = tensor_desc.dim[0];
+        int const output_size = tensor_desc.dim[1];
+        int const packed_cols = tensor_desc.dim[2];
+        int const orig_output_size =
+            tensor_desc.stride[0] / tensor_desc.stride[1];
+        uint64_t gmem_shape[2] = {
+            static_cast<uint64_t>((num_experts - 1) * orig_output_size +
+                                  output_size),
+            static_cast<uint64_t>(packed_cols)};
+        uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(packed_cols)};
+        uint32_t smem_shape[2] = {64, 32};
+        fill_tma_desc<uint8_t, 0, 0, 0, 2>(tma_desc,
+                                           tensor_desc.base_ptr,
+                                           gmem_shape,
+                                           gmem_stride,
+                                           smem_shape,
+                                           1,
+                                           1);
+      }
       break;
+    }
     case TASK_MLA_DECODE_SM100: {
       // MLA uses 3D TMA descriptors with 128B swizzle.
       // Q tensor: [B*NUM_HEADS, D_K] → 3D TMA (BK=64, B*NUM_HEADS, D_K/BK)
@@ -1546,6 +1568,8 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
     }
     case TASK_MOE_W13_LINEAR_SM90:
     case TASK_MOE_W2_LINEAR_SM90:
+    case TASK_MOE_W13_MXFP4_SM90:
+    case TASK_MOE_W2_MXFP4_SM90:
     case TASK_MOE_W13_LINEAR_SM100:
     case TASK_MOE_W2_LINEAR_SM100: {
       // only weight (param_id=1) have 1 tma_desc
@@ -1557,10 +1581,6 @@ __host__ inline void create_tma_desc_by_task(FullTaskDesc &task_desc) {
       create_tma_desc_for_tensor(task_desc, tensor_desc, param_id, 0);
       break;
     }
-    case TASK_MOE_W13_MXFP4_SM90:
-    case TASK_MOE_W2_MXFP4_SM90:
-      // No TMA descriptors: weights are decoded from packed global memory.
-      break;
     case TASK_MOE_W13_FP8_SM100:
     case TASK_MOE_W2_FP8_SM100: {
       // only weight_fp8 (param_id=2) has 1 tma_desc
