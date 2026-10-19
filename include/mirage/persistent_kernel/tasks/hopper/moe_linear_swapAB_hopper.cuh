@@ -49,25 +49,47 @@ namespace kernel {
 
 // E2M1 values are stored low nibble first; MXFP4 scales use the E8M0
 // exponent-only encoding (2^(encoded_exponent - 127)).
-CUTE_DEVICE float decode_mxfp4_value(uint8_t packed, bool high_nibble) {
-  uint8_t nibble = high_nibble ? (packed >> 4) : (packed & 0x0f);
-  constexpr float values[16] = {0.0f,
-                                0.5f,
-                                1.0f,
-                                1.5f,
-                                2.0f,
-                                3.0f,
-                                4.0f,
-                                6.0f,
-                                0.0f,
-                                -0.5f,
-                                -1.0f,
-                                -1.5f,
-                                -2.0f,
-                                -3.0f,
-                                -4.0f,
-                                -6.0f};
-  return values[nibble];
+
+// E2M1 nibble to fp32 by bit construction: s.ee.m -> +-(1 + m/2) * 2^(e-1),
+// and the subnormal e = 0 gives +-m/2.
+CUTE_DEVICE float e2m1_to_float(uint32_t nibble) {
+  uint32_t const sign = (nibble & 0x8u) << 28;
+  uint32_t const e = (nibble >> 1) & 0x3u;
+  uint32_t const m = nibble & 0x1u;
+  uint32_t const bits =
+      e != 0 ? ((e + 126u) << 23) | (m << 22) : m * (126u << 23);
+  return __uint_as_float(sign | bits);
+}
+
+// One run of 16 MXFP4 values along K: 8 packed bytes, low nibble first, and
+// the E8M0 scale of the 32-value block it lies in.
+struct Mxfp4Run {
+  uint2 packed;
+  uint32_t scale;
+};
+
+// Decodes a run to BF16 and writes it as two 16-byte stores, each holding 8
+// values that stay contiguous under the K-major swizzle.
+template <typename T>
+CUTE_DEVICE void store_mxfp4_run(T *dst_lo, T *dst_hi, Mxfp4Run const &run) {
+  // 2^(scale - 127) is the float with that exponent field; 0 decodes to 0
+  float const scale = run.scale == 0 ? 0.0f : __uint_as_float(run.scale << 23);
+  uint32_t const words[2] = {run.packed.x, run.packed.y};
+  uint32_t out[8];
+#pragma unroll
+  for (int w = 0; w < 2; w++) {
+#pragma unroll
+    for (int b = 0; b < 4; b++) {
+      uint32_t const byte = (words[w] >> (8 * b)) & 0xffu;
+      __nv_bfloat162 const pair = __floats2bfloat162_rn(
+          e2m1_to_float(byte & 0xfu) * scale, e2m1_to_float(byte >> 4) * scale);
+      out[w * 4 + b] = *reinterpret_cast<uint32_t const *>(&pair);
+    }
+  }
+  *reinterpret_cast<uint4 *>(dst_lo) =
+      make_uint4(out[0], out[1], out[2], out[3]);
+  *reinterpret_cast<uint4 *>(dst_hi) =
+      make_uint4(out[4], out[5], out[6], out[7]);
 }
 
 struct NoMoeWeightTMA {};
@@ -385,6 +407,40 @@ __device__ __forceinline__ void
     cute::Tensor tBsB = thr_copy_b.partition_D(
         sB); // (ThrB, ThrTile_N) NOTE(Yu): use cp_sb layout here
 
+    // MXFP4: each producer thread owns MXFP4_RUNS_PER_THREAD runs of 16
+    // values of a 64x64 weight tile. Rows past OUTPUT_SIZE load as zero.
+    constexpr int MXFP4_RUNS_PER_ROW = TILE_SIZE / 16;
+    constexpr int MXFP4_RUNS_PER_THREAD =
+        OUTPUT_ATOM_SIZE * MXFP4_RUNS_PER_ROW / NUM_THREAD_PER_WARPGROUP;
+    static_assert(
+        OUTPUT_ATOM_SIZE * MXFP4_RUNS_PER_ROW % NUM_THREAD_PER_WARPGROUP == 0,
+        "MXFP4 runs must split evenly over the producer");
+    static_assert(!MXFP4_WEIGHT || REDUCTION_SIZE % 32 == 0,
+                  "MXFP4 blocks are 32 values");
+    int const mxfp4_tid = threadIdx.x % NUM_THREAD_PER_WARPGROUP;
+    Mxfp4Run mxfp4_next[MXFP4_RUNS_PER_THREAD];
+    auto load_mxfp4_tile = [&](Mxfp4Run *runs, int expert, int m_t, int k_t) {
+#pragma unroll
+      for (int r = 0; r < MXFP4_RUNS_PER_THREAD; r++) {
+        int const run_idx = mxfp4_tid + r * NUM_THREAD_PER_WARPGROUP;
+        int const global_row =
+            m_t * OUTPUT_ATOM_SIZE + run_idx / MXFP4_RUNS_PER_ROW;
+        int const global_col =
+            k_t * TILE_SIZE + (run_idx % MXFP4_RUNS_PER_ROW) * 16;
+        if (global_row < OUTPUT_SIZE && global_col < REDUCTION_SIZE) {
+          size_t const row_idx =
+              static_cast<size_t>(expert) * OUTPUT_STRIDE + global_row;
+          runs[r].packed = *reinterpret_cast<uint2 const *>(
+              packed_weight + row_idx * (REDUCTION_SIZE / 2) + global_col / 2);
+          runs[r].scale =
+              weight_scale[row_idx * (REDUCTION_SIZE / 32) + global_col / 32];
+        } else {
+          runs[r].packed = make_uint2(0, 0);
+          runs[r].scale = 0;
+        }
+      }
+    };
+
     int total_k_tile_count = 0;
 #pragma unroll 1
     for (int activated_expert_offset = expert_offset;
@@ -408,6 +464,9 @@ __device__ __forceinline__ void
               try_wait_barrier(shared_storage.ab_empty_mbar_ptr[smem_wr_buffer],
                                tma_wr_ab_empty_phase);
 
+          if constexpr (MXFP4_WEIGHT) {
+            load_mxfp4_tile(mxfp4_next, expert_idx, m_tile, 0);
+          }
 #pragma unroll 3
           for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
 
@@ -426,37 +485,27 @@ __device__ __forceinline__ void
             }
 
             if constexpr (MXFP4_WEIGHT) {
-              // Decode this expert's packed 64x64 weight tile directly into
-              // the existing BF16 WGMMA shared-memory layout.
-              int const tid = threadIdx.x % NUM_THREAD_PER_WARPGROUP;
-              int const tile_elems = OUTPUT_ATOM_SIZE * TILE_SIZE;
-              for (int elem = tid; elem < tile_elems;
-                   elem += NUM_THREAD_PER_WARPGROUP) {
-                int const row = elem / TILE_SIZE;
-                int const col = elem % TILE_SIZE;
-                int const global_row = m_tile * OUTPUT_ATOM_SIZE + row;
-                int const global_col = k_tile * TILE_SIZE + col;
-                if (global_row < OUTPUT_SIZE) {
-                  size_t const packed_offset =
-                      (static_cast<size_t>(expert_idx) * OUTPUT_STRIDE +
-                       global_row) *
-                          (REDUCTION_SIZE / 2) +
-                      global_col / 2;
-                  size_t const scale_offset =
-                      (static_cast<size_t>(expert_idx) * OUTPUT_STRIDE +
-                       global_row) *
-                          (REDUCTION_SIZE / 32) +
-                      global_col / 32;
-                  float const value = decode_mxfp4_value(
-                      packed_weight[packed_offset], (global_col & 1) != 0);
-                  int const exponent =
-                      static_cast<int>(weight_scale[scale_offset]);
-                  float const scale =
-                      exponent == 0 ? 0.0f : ldexpf(1.0f, exponent - 127);
-                  sA(row, col, smem_wr_buffer) = static_cast<T_>(value * scale);
-                } else {
-                  sA(row, col, smem_wr_buffer) = static_cast<T_>(0.0f);
-                }
+              // Decode this expert's packed 64x64 weight tile into the BF16
+              // WGMMA shared-memory layout. The tile's runs were loaded into
+              // registers one k tile ahead; fetch the next tile's first so
+              // its global latency overlaps this decode.
+              int const tid = mxfp4_tid;
+              Mxfp4Run cur[MXFP4_RUNS_PER_THREAD];
+#pragma unroll
+              for (int r = 0; r < MXFP4_RUNS_PER_THREAD; r++) {
+                cur[r] = mxfp4_next[r];
+              }
+              if (k_tile + 1 < k_tile_count) {
+                load_mxfp4_tile(mxfp4_next, expert_idx, m_tile, k_tile + 1);
+              }
+#pragma unroll
+              for (int r = 0; r < MXFP4_RUNS_PER_THREAD; r++) {
+                int const run_idx = tid + r * NUM_THREAD_PER_WARPGROUP;
+                int const row = run_idx / MXFP4_RUNS_PER_ROW;
+                int const col = (run_idx % MXFP4_RUNS_PER_ROW) * 16;
+                store_mxfp4_run(&sA(row, col, smem_wr_buffer),
+                                &sA(row, col + 8, smem_wr_buffer),
+                                cur[r]);
               }
               wg_sync<NUM_THREAD_PER_WARPGROUP>(7);
               tma::async_proxy_fence();
