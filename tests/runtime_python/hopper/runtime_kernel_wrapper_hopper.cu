@@ -215,22 +215,20 @@ double launch_linear_swapAB(void *input_ptr,
                                            true>;
   // bias is a [OUTPUT_SIZE] vector viewed as a single row; loaded via a
   // swizzle-none TMA descriptor into an unswizzled smem tile
-  using TMA_BIAS =
-      kernel::tma::tma_2d<bfloat16,
-                          0,
-                          0,
-                          0,
-                          1,                  /*GMEM_ROW_*/
-                          OUTPUT_SIZE,        /*GMEM_COL_*/
-                          1,                  /*SMEM_ROW_*/
-                          OUTPUT_TMA_CP_SIZE, /*SMEM_COL_*/
-                          OUTPUT_SIZE,        /*GMEM_STRIDE_ROW_*/
-                          1,                  /*GMEM_STRIDE_COL_*/
-                          1,                  /*SMEM_REPEAT_ROW_*/
-                          OUTPUT_ATOM_SIZE /
-                              OUTPUT_TMA_CP_SIZE, /*SMEM_REPEAT_COL_*/
-                          OUTPUT_TMA_CP_SIZE,     /*SMEM_STRIDE_*/
-                          true>;
+  using TMA_BIAS = kernel::tma::tma_2d<bfloat16,
+                                       0,
+                                       0,
+                                       0,
+                                       1,                  /*GMEM_ROW_*/
+                                       OUTPUT_SIZE,        /*GMEM_COL_*/
+                                       1,                  /*SMEM_ROW_*/
+                                       OUTPUT_TMA_CP_SIZE, /*SMEM_COL_*/
+                                       OUTPUT_SIZE,        /*GMEM_STRIDE_ROW_*/
+                                       1,                  /*GMEM_STRIDE_COL_*/
+                                       1,                  /*SMEM_REPEAT_ROW_*/
+                                       1,                  /*SMEM_REPEAT_COL_*/
+                                       OUTPUT_TMA_CP_SIZE, /*SMEM_STRIDE_*/
+                                       true>;
 
   using TMA_OUT = kernel::tma::tma_2d<bfloat16,
                                       B,

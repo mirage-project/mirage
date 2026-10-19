@@ -9,9 +9,10 @@ BATCH, HIDDEN = 8, 2880
 
 
 # (output columns, tasks): QKV is 64 q + 2 * 8 kv heads of 64; router is 128
-# experts. 64 columns per task is the swapAB kernel's tile.
-@pytest.mark.parametrize("out_dim, tasks", [(5120, 80), (128, 2)],
-                         ids=["qkv", "router"])
+# experts (120B) or 32 (20B). 64 columns per task is the swapAB kernel's tile;
+# the 20B router is one narrower task.
+@pytest.mark.parametrize("out_dim, tasks", [(5120, 80), (128, 2), (32, 1)],
+                         ids=["qkv", "router", "router_20b"])
 def test_linear_bias_hopper(tmp_path, out_dim, tasks):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("requires an SM90/Hopper GPU")

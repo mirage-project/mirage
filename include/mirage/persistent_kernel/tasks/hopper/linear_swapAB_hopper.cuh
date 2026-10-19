@@ -81,10 +81,10 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
   constexpr int TMA_TRANS_BYTES_B = sizeof(T) * BATCH_SIZE * TILE_SIZE;
   constexpr int TMA_TRANS_BYTES_RESIDUAL =
       HAS_RESIDUAL ? sizeof(T) * BATCH_SIZE * OUTPUT_TMA_TILE_SIZE : 0;
+  // One copy of the tile's columns. A repeat would only fetch columns past
+  // OUTPUT_SIZE, into a destination 64 B into the stage, which TMA rejects.
   constexpr int TMA_TRANS_BYTES_BIAS =
-      HAS_BIAS ? sizeof(T) * OUTPUT_TMA_TILE_SIZE *
-                     (OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE)
-               : 0;
+      HAS_BIAS ? sizeof(T) * OUTPUT_TMA_TILE_SIZE : 0;
 
   // using SM90_64x64x16_F32BF16BF16
   constexpr int NUM_ITER_N =
@@ -201,13 +201,7 @@ __device__ __forceinline__ void linear_swapAB_kernel_hopper(
   // bias is viewed as a [1, OUTPUT_SIZE] row-major vector; each stage holds
   // one OUTPUT_ATOM_SIZE-wide tile loaded via a swizzle-none TMA descriptor,
   // so the smem layout below is unswizzled (B = M = S = 0) as well
-  using BiasSmem = smem_tma<T,
-                            0,
-                            0,
-                            0,
-                            1,
-                            OUTPUT_TMA_TILE_SIZE,
-                            OUTPUT_ATOM_SIZE / OUTPUT_TMA_TILE_SIZE>;
+  using BiasSmem = smem_tma<T, 0, 0, 0, 1, OUTPUT_TMA_TILE_SIZE, 1>;
   BiasSmem bias_smem(shared_bias);
 
   using A_DESC = wgmma::mma_descriptor<WeightSmem>;

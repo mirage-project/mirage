@@ -1703,15 +1703,15 @@ int TaskRegister::register_linear_swapAB_hopper_task(
            0,
            0,
            0,
-           1,                                     /*GMEM_ROW_*/
-           output_size,                           /*GMEM_COL_*/
-           1,                                     /*SMEM_ROW_*/
-           output_tma_cp_size,                    /*SMEM_COL_*/
-           output_stride,                         /*GMEM_STRIDE_ROW_*/
-           1,                                     /*GMEM_STRIDE_COL_*/
-           1,                                     /*SMEM_REPEAT_ROW_*/
-           output_atom_size / output_tma_cp_size, /*SMEM_REPEAT_COL_*/
-           output_tma_cp_size                     /*SMEM_STRIDE_*/
+           1,                  /*GMEM_ROW_*/
+           output_size,        /*GMEM_COL_*/
+           1,                  /*SMEM_ROW_*/
+           output_tma_cp_size, /*SMEM_COL_*/
+           output_stride,      /*GMEM_STRIDE_ROW_*/
+           1,                  /*GMEM_STRIDE_COL_*/
+           1,                  /*SMEM_REPEAT_ROW_*/
+           1,                  /*SMEM_REPEAT_COL_*/
+           output_tma_cp_size  /*SMEM_STRIDE_*/
     );
   }
 

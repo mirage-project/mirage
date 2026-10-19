@@ -568,7 +568,8 @@ __host__ inline void fill_tma_desc_by_task(CUtensorMap *tma_desc,
         uint64_t gmem_shape[2] = {1, static_cast<uint64_t>(output_size)};
         uint64_t gmem_stride[2] = {1, static_cast<uint64_t>(output_stride)};
         uint32_t smem_shape[2] = {1, static_cast<uint32_t>(output_tma_cp_size)};
-        size_t smem_repeat_col = output_atom_size / output_tma_cp_size;
+        // one copy: a repeat would land 64 B into the stage (see the kernel)
+        size_t smem_repeat_col = 1;
         fill_tma_desc<bfloat16, 0, 0, 0, 2>(tma_desc,
                                             tensor_desc.base_ptr,
                                             gmem_shape,
