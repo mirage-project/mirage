@@ -256,7 +256,10 @@ class StaticMegakernel(PersistentKernel):
         activation's; polled: the weight's 128-row box only), the output through the node's buffer slot. params = [mode, K, N,
         polled (0 / 1)]; map_slots = [weight map slot, activation map slot (-1: polled)]."""
         assert input.num_dims == 2 and weight.num_dims == 2 and weight.dim(1) == input.dim(1)
-        assert output.num_dims == 2 and output.dim(1) == weight.dim(0) and weight.dim(0) % 128 == 0 and weight.dim(1) % 128 == 0
+        # K in 64-column blocks: a K that is not a multiple of 128 ends with a half tile, whose other half the tensor maps
+        # zero-fill (gemm_tile.cuh run_gemm_tile)
+        # rows in 64-row blocks: N not a multiple of 128 takes 64-row tasks (MMA M = 64)
+        assert output.num_dims == 2 and output.dim(1) == weight.dim(0) and weight.dim(0) % 64 == 0 and weight.dim(1) % 64 == 0
         mode, N, K, T, GPUS = COMBINE[combine], weight.dim(0), weight.dim(1), self._tokens(input.dim(0)), self.num_gpus
         self._dtypes("gemm_tile_layer", input=(input, bfloat16), weight=(weight, bfloat16),
                      output=(output, int64 if combine == "add" else float32))
@@ -277,7 +280,7 @@ class StaticMegakernel(PersistentKernel):
         else:                      # [T][N] fp32, every value written each launch
             out_buffer = lambda n: (T * N * 4, -1, False)
         assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
-        tiles = K // 128
+        tiles = (K + 127) // 128
         if input_polled:
             parts = next(y for y in range(1, tiles + 1) if tiles % y == 0 and tiles // y <= RING_STAGES)
             params, map_slots = [mode, K, N, 1], [self._gemm_map(weight, (128,)), -1]
@@ -285,13 +288,18 @@ class StaticMegakernel(PersistentKernel):
         else:
             parts = 1
             params, map_slots = [mode, K, N, 0], [self._gemm_map(weight, (128, 64)), self._gemm_map(input, (T,))]
-            changeable = {0: (64, 1, 2), 1: (128, 2, None)} if combine != "store" else {}
-        self._add_node("gemm_tile", (N // 128, parts, 1), block_dim, [input, weight, output],
+            # 64- or 128-row tasks ("store" on sm100: 128 rows, no options); K parts in whole 128-column tiles, so only when K is
+            # a multiple of 128 ("store": one K part)
+            changeable = {0: (64, 1, 2)} if combine != "store" or self.target_cc == 90 else {}
+            if combine != "store" and K % 128 == 0:
+                changeable[1] = (128, 2, None)
+        assert combine != "add" or N % 128 == 0, "add: one counter per 128-row block"
+        self._add_node("gemm_tile", (N // 128 if N % 128 == 0 else N // 64, parts, 1), block_dim, [input, weight, output],
                        [(-1, 1, -1), (0, 1, -1), (1, -1, -1)], params,
                        # K: at least 2 tiles of 128 per task (the two MMA issuers take the stages in turn, runtime.cuh issue_job;
                        # with one stage issuer 1 has no MMA and its stale accumulator would be added)
                        changeable_grid_dims=changeable, rows_split_over_gpus=rows_split_over_gpus, out_buffer=out_buffer,
-                       counters={"slots": 0, "add": N // 128, "store": 1}[combine], map_slots=map_slots)
+                       counters={"slots": 0, "add": N // 128 if N % 128 == 0 else 0, "store": 1}[combine], map_slots=map_slots)
 
     def topk_route_layer(
         self,

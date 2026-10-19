@@ -393,7 +393,7 @@ __device__ __forceinline__ void cta_prologue(char *sm) {
     rt.qempty7_0 = take(W2QD);
     for (int s = 0; s < SMAX; s++) {
       mbar_init(rt.full0 + 8 * s, 1);
-      mbar_init(rt.empty0 + 8 * s, 2);
+      mbar_init(rt.empty0 + 8 * s, RING_EMPTY_ARRIVALS);
     }
     for (int s = 0; s < 4; s++) {
       mbar_init(rt.acc_full0 + 8 * s, 2);
@@ -414,6 +414,10 @@ __device__ __forceinline__ void cta_prologue(char *sm) {
 // warp 1 allocates 512 TMEM columns; every thread reads the base after the
 // __syncthreads
 __device__ __forceinline__ uint32_t tmem_alloc_512() {
+#ifdef STATIC_SM90
+  __syncthreads(); // no TMEM on Hopper; still publishes rt
+  return 0;
+#endif
   if ((threadIdx.x >> 5) == 1) {
     asm volatile(
         "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;" ::
@@ -425,6 +429,9 @@ __device__ __forceinline__ uint32_t tmem_alloc_512() {
   return tmem_slot;
 }
 __device__ __forceinline__ void tmem_dealloc_512(uint32_t tb) {
+#ifdef STATIC_SM90
+  return;
+#endif
   if ((threadIdx.x >> 5) == 1) {
     asm volatile(
         "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" ::"r"(tb),
@@ -437,7 +444,7 @@ __device__ __forceinline__ void tmem_dealloc_512(uint32_t tb) {
 __device__ __forceinline__ void ring_reinit(bool acc_too) {
   for (int st = 0; st < SMAX; st++) {
     mbar_init(rt.full0 + 8 * st, 1);
-    mbar_init(rt.empty0 + 8 * st, 2);
+    mbar_init(rt.empty0 + 8 * st, RING_EMPTY_ARRIVALS);
   }
   if (acc_too) {
     for (int s_ = 0; s_ < 4; s_++) {
@@ -728,5 +735,70 @@ __device__ int drain_acc(uint32_t tb, int a, int parity, float *v) {
   mbar_arrive(rt.acc_empty0 + 8 * a); // 128 arrivals
   return row;
 }
+
+#ifdef STATIC_SM90
+// ---------------- Hopper: WGMMA consumes the ring ----------------
+// Shared-memory matrix descriptor (sm90 GMMA format) of a 128-B swizzled
+// K-major tile, 8-row groups 1024 B apart: the same stage layout the tcgen05
+// path reads (mkdesc). Advancing K by 16 bf16 (32 B) adds 2.
+__device__ __forceinline__ uint64_t gmma_desc(uint32_t a) {
+  return denc(a) | (1ULL << 16) | (denc(1024) << 32) | (1ULL << 62);
+}
+__device__ __forceinline__ void wgmma_fence() {
+  asm volatile("wgmma.fence.sync.aligned;" ::: "memory");
+}
+__device__ __forceinline__ void wgmma_commit() {
+  asm volatile("wgmma.commit_group.sync.aligned;" ::: "memory");
+}
+__device__ __forceinline__ void wgmma_wait_all() {
+  asm volatile("wgmma.wait_group.sync.aligned 0;" ::: "memory");
+}
+// d (64 weight rows x 8 tokens, fp32) += A (64 x K16, smem) * B (8 x K16,
+// smem); scale_d = 0 overwrites d
+__device__ __forceinline__ void
+    wgmma_m64n8k16(float *d, uint64_t a, uint64_t b, uint32_t scale_d) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, %6, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n8k16.f32.bf16.bf16 "
+               "{%0, %1, %2, %3}, %4, %5, p, 1, 1, 0, 0;\n}"
+               : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+               : "l"(a), "l"(b), "r"(scale_d));
+}
+
+// The MMA warpgroup (128 threads) consumes a kind 0 job's stages in order
+// into acc[ROWS / 64][4]: m64 block h, thread t holds rows
+// 64h + 16 (t / 32) + (t % 32) / 4 (+8 for acc[h][2..3]) and tokens 2 (t % 4)
+// (+1 for odd entries) -- the wgmma accumulator layout. Each stage is freed
+// once its MMAs are done (one arrival on `empty`).
+template <int ROWS = 128>
+__device__ __forceinline__ void
+    mma_job_sm90(TileJob const &j, uint32_t base, int &g, float (*acc)[4]) {
+  constexpr int MH = ROWS / 64;
+  for (int s = 0; s < j.nst; s++, g++) {
+    int const st = g % SMAX;
+    mbar_wait(rt.full0 + 8 * st, (g / SMAX) & 1);
+    uint32_t const wst = base + st * FSTAGE, ast = wst + W_STAGE;
+    wgmma_fence();
+    for (int at = 0; at < 2; at++) { // two 64-column halves of K 128
+      uint64_t const dx = gmma_desc(ast + at * 1024);
+#pragma unroll
+      for (int h = 0; h < MH; h++) {
+        uint64_t const dw = gmma_desc(wst + at * ROWS * 128 + h * 64 * 128);
+#pragma unroll
+        for (int k = 0; k < 4; k++) {
+          wgmma_m64n8k16(acc[h],
+                         dw + 2 * k,
+                         dx + 2 * k,
+                         (s == 0 && at == 0 && k == 0) ? 0u : 1u);
+        }
+      }
+    }
+    wgmma_commit();
+    wgmma_wait_all();
+    if ((threadIdx.x & 127) == 0) {
+      mbar_arrive(rt.empty0 + 8 * st);
+    }
+  }
+}
+#endif // STATIC_SM90
 
 } // namespace static_mk
