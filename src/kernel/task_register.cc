@@ -3932,7 +3932,12 @@ int TaskRegister::register_moe_linear_sm90_task(
   // int const output_atom_size = 128;
   // TMA_B for expert weights
   if (mxfp4_weight) {
-    code.e("using TMA_A = kernel::NoMoeWeightTMA;");
+    // packed weights: 64-row by 32-byte boxes, decoded in shared memory
+    code.e("using TMA_A = kernel::tma::tma_2d<uint8_t, 0, 0, 0, $, $, 64, 32, "
+           "$, 1, 1, 1, 64 * 32, true>;",
+           num_experts * orig_output_size,
+           reduction_size / 2,
+           reduction_size / 2);
   } else {
     code.e("using TMA_A = kernel::tma::tma_2d<cute::bfloat16_t, $, $, $, $, $, "
            "$, $, $, "
@@ -3952,12 +3957,9 @@ int TaskRegister::register_moe_linear_sm90_task(
   }
 
   code.inc_indent();
-  if (!mxfp4_weight) {
-    code.e(
-        "TMA_A "
-        "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0])"
-        ");");
-  }
+  code.e("TMA_A "
+         "tma_a(static_cast<CUtensorMap*>(task_desc->input_tma_desc_ptrs[1][0])"
+         ");");
   // Bias Tensor setup: indexed (token, row, expert); every token of an
   // expert shares one row of this task's column slice.
   code.e(
@@ -4044,16 +4046,13 @@ int TaskRegister::register_moe_linear_sm90_task(
          /*no_bias*/ has_bias ? "false" : "true",
          mxfp4_weight ? "true" : "false",
          num_ab_stages);
-  code.e("    $ ,", mxfp4_weight ? "TMA_A{}" : "tma_a");
+  code.e("    tma_a,");
   code.e("    mInput,");
   code.e("    mBias,");
   code.e("    mRoutingIndices,");
   code.e("    mMask,");
   code.e("    mOutput,");
   code.e("    task_desc->task_metadata.expert_offset,");
-  code.e("    $ ,",
-         mxfp4_weight ? "static_cast<uint8_t const*>(task_desc->input_ptrs[1])"
-                      : "nullptr");
   code.e("    $);",
          mxfp4_weight ? "static_cast<uint8_t const*>(task_desc->input_ptrs[2])"
                       : "nullptr");

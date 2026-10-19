@@ -112,6 +112,7 @@ __global__ __launch_bounds__(256, 1) void moe_linear_sm90_wrapper(
                                     EXPERT_STRIDE,
                                     W13_LINEAR,
                                     NoBias,
+                                    false, // MXFP4_WEIGHT
                                     NUM_AB_STAGE>(
       tma_a, mInput, mBias, mRoutingIndices, mMask, mOutput, expert_offset);
 }
