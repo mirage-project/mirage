@@ -263,6 +263,10 @@ class GptOssBuilder(GraphBuilder):
         mbt = self.mpk.max_num_batched_tokens
         h, ii = self.hidden_size, self.intermediate_size
         topk = self.num_experts_per_tok
+        # grid.x of the MoE GEMMs is the stride between the activated experts
+        # a task walks. The sm90 kernels hard-code it to 5 and 4, so a wider
+        # grid would only repeat tasks.
+        w13_tasks, w2_tasks = (5, 4) if self.mpk.target_cc == 90 else (10, 8)
 
         for i in range(self.num_layers):
             prefix = f"model.layers.{i}."
@@ -350,7 +354,7 @@ class GptOssBuilder(GraphBuilder):
                 input=self.rmsnorm_out, weight=w13, bias=b13,
                 moe_routing_indices=self.routing_indices, moe_mask=self.moe_mask,
                 output=self.mlp_mid,
-                grid_dim=(10, _grid_x(2 * ii, 128), 1), block_dim=(256, 1, 1))
+                grid_dim=(w13_tasks, _grid_x(2 * ii, 128), 1), block_dim=(256, 1, 1))
             self.mpk.moe_clamped_swiglu_layer(
                 input=self.mlp_mid, output=self.swiglu_out,
                 grid_dim=(mbt, topk, 1), block_dim=(256, 1, 1),
@@ -359,7 +363,7 @@ class GptOssBuilder(GraphBuilder):
                 input=self.swiglu_out, weight=w2, bias=b2,
                 moe_routing_indices=self.routing_indices, moe_mask=self.moe_mask,
                 output=self.mlp_out,
-                grid_dim=(8, _grid_x(h, 64), 1), block_dim=(256, 1, 1))
+                grid_dim=(w2_tasks, _grid_x(h, 64), 1), block_dim=(256, 1, 1))
             self.mpk.moe_mul_sum_add_layer(
                 input=self.mlp_out, weight=self.topk_weight, residual=self.x,
                 output=self.mlp_sum_out,
