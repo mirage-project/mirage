@@ -1056,8 +1056,13 @@ void Graph::register_task_for_op(KNOperator const *op,
   } else if (name == "residual_add") {
     int variant_id = task_register->register_residual_add_sm100_task(
         customized->bgraph, params);
+    // the inputs: addend, input (none with one sum), residual; the last
+    // operator is the output
     task_config[op] =
-        std::make_tuple(3, 1, TASK_RESIDUAL_ADD_SM100, variant_id);
+        std::make_tuple((int)customized->bgraph.operators.size() - 1,
+                        1,
+                        TASK_RESIDUAL_ADD_SM100,
+                        variant_id);
   } else if (name == "group_quant") {
     int variant_id = task_register->register_group_quant_sm100_task(
         customized->bgraph, params);
@@ -1072,6 +1077,50 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_SILU_AND_MUL_SM100, variant_id);
+  } else if (name == "dsa_q_norm_quant") {
+    int variant_id = task_register->register_dsa_q_norm_quant_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_DSA_Q_NORM_QUANT_SM100, variant_id);
+  } else if (name == "dsa_kv_write") {
+    int variant_id = task_register->register_dsa_kv_write_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_DSA_KV_WRITE_SM100, variant_id);
+  } else if (name == "dsa_index_k_write") {
+    int variant_id = task_register->register_dsa_index_k_write_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_DSA_INDEX_K_WRITE_SM100, variant_id);
+  } else if (name == "dsa_q_absorb") {
+    int variant_id = task_register->register_dsa_q_absorb_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_DSA_Q_ABSORB_SM100, variant_id);
+  } else if (name == "dsa_index_score") {
+    int variant_id = task_register->register_dsa_index_score_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_DSA_INDEX_SCORE_SM100, variant_id);
+  } else if (name == "dsa_index_topk") {
+    int variant_id = task_register->register_dsa_index_topk_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_DSA_INDEX_TOPK_SM100, variant_id);
+  } else if (name == "sparse_mla") {
+    int variant_id = task_register->register_sparse_mla_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_SPARSE_MLA_SM100, variant_id);
+  } else if (name == "dsa_mla_merge") {
+    int variant_id = task_register->register_dsa_mla_merge_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_DSA_MLA_MERGE_SM100, variant_id);
+  } else if (name == "dsa_o_absorb") {
+    int variant_id = task_register->register_dsa_o_absorb_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_DSA_O_ABSORB_SM100, variant_id);
   } else if (name == "scaled_moe_experts") {
     int variant_id = task_register->register_scaled_moe_experts_sm100_task(
         customized->bgraph, params);
