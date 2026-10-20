@@ -80,7 +80,7 @@ constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ull,
 // ---- the generated layer's task table, its slots ----
 constexpr int MAX_TASKS_PER_SM =
     64;                      // entries per SM (the list, then an end entry)
-constexpr int MAX_BUFS = 24; // buffer slots (G::buf): node outputs, scratch
+constexpr int MAX_BUFS = 64; // buffer slots (G::buf): node outputs, scratch
                              // buffers, graph tensors read by pointer
 constexpr int MAX_MAPS = 32; // tensor map slots (Maps::m)
 

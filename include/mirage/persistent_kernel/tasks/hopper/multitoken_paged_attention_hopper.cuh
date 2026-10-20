@@ -828,7 +828,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
         CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
-    async_proxy_fence();
+    tma::async_proxy_fence();
 
     // store the output
 #pragma unroll

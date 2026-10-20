@@ -67,6 +67,25 @@ __device__ __forceinline__ void sm90_task_end(G const &g) {
   }
 }
 
+// 8 bf16 <-> fp32 (one 16-B vector)
+__device__ __forceinline__ void bf16x8_to_f32(uint4 v, float (&f)[8]) {
+  __nv_bfloat162 const *h = reinterpret_cast<__nv_bfloat162 const *>(&v);
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    float2 const t = __bfloat1622float2(h[i]);
+    f[2 * i] = t.x, f[2 * i + 1] = t.y;
+  }
+}
+__device__ __forceinline__ uint4 f32_to_bf16x8(float const (&f)[8]) {
+  uint4 v;
+  __nv_bfloat162 *h = reinterpret_cast<__nv_bfloat162 *>(&v);
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    h[i] = __floats2bfloat162_rn(f[2 * i], f[2 * i + 1]);
+  }
+  return v;
+}
+
 // the dynamic shared memory an MPK Hopper body may take
 constexpr int SM90_BODY_SMEM = 200 * 1024;
 

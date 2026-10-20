@@ -13,6 +13,7 @@
  * limitations under the License.
  */
 #pragma once
+#include "../common/copy_sm80.cuh"
 #include "../common/utils.cuh"
 namespace kernel {
 

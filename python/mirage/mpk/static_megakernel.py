@@ -13,7 +13,9 @@ to the plan. The sizes come from the graph: each layer reads them from its tenso
 the node's params; the kernel-wide ones (tokens per step, GPUs) are the StaticMegakernel's (tokens, num_gpus), which the
 generated layer defines (config.cuh).
 """
+import os
 import struct
+from typing import List
 
 import torch
 
@@ -22,7 +24,7 @@ from ..kernel import TBGraph
 from .persistent_kernel import PersistentKernel
 
 # the kernel's limits (config.cuh MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, SMAX = the ring's stages; core.cuh Combine)
-MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 24, 32, 16, 5
+MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 64, 32, 16, 5
 COMBINE = {"slots": 0, "add": 1, "store": 2}
 SF_CHUNK = 512   # one MX scale chunk (config.cuh): 128 rows x 4 B
 MAX_SUM_PARTS = 14   # the most K parts sum_send adds (tasks/sum_send.cuh)
@@ -31,6 +33,15 @@ MAX_SUM_PARTS = 14   # the most K parts sum_send adds (tasks/sum_send.cuh)
 def zq_bytes(tokens: int, width: int) -> int:
     """tasks/sum_quant_send.cuh zq_bytes: z_q [tokens][width] e4m3, then its scale chunks (one per 128 columns)."""
     return tokens * width + width // 128 * SF_CHUNK
+
+
+def sm90_flags() -> List[str]:
+    """The nvcc flags of a layer with sm90_* tasks: the MPK Hopper task bodies' headers and switches (persistent_kernel.py
+    get_compile_command)."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    return ["-std=c++20", "--expt-relaxed-constexpr", "-DMPK_TARGET_CC=90", "-DMIRAGE_GRACE_HOPPER", "-DMPK_ENABLE_TMA",
+            "-DMIRAGE_BACKEND_USE_CUDA", "-lineinfo", f"-I{root}/include/mirage/persistent_kernel",
+            f"-I{root}/deps/cutlass/include", f"-I{root}/deps/cutlass/tools/util/include"]
 
 
 def sm90_moe_ring_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu: bool) -> torch.Tensor:
@@ -641,12 +652,40 @@ class StaticMegakernel(PersistentKernel):
         self._sm90_node("sm90_swiglu", (T, 1, 1), [input, output], [I, TOPK, float_bits(limit), float_bits(alpha)],
                         block_dim)
 
+    def sm90_attention_layer(self, qkv: DTensor, k_cache: DTensor, v_cache: DTensor, cos: DTensor, sin: DTensor,
+                             qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
+                             output: DTensor, num_q_heads: int, window: int = 0, sinks: DTensor = None,
+                             block_dim: tuple = (256, 1, 1)):
+        """Paged attention with RoPE, the new tokens' K / V appended to the cache, GPT-OSS's per-head sinks and sliding
+        window (MPK's Hopper kernel, tasks/sm90_attention.cuh): task (x, y) = request x, KV head y; R = qo_indptr.dim(0) - 1
+        requests. qkv [T, KVH x (Q / KVH + 2) x D] (each KV head's q heads, then k, v), caches [pages, page, KVH, D], cos /
+        sin [max seq, D], the page tables as MPK's runtime keeps them (the host fills them before each step), sinks
+        [KVH, Q / KVH]. params = [Q, KVH, D, max seq, page, window, has_sink]."""
+        pages, page, KVH, D = (k_cache.dim(i) for i in range(4))
+        R = qo_indptr.dim(0) - 1
+        self._tokens(qkv.dim(0))
+        assert qkv.dim(1) == KVH * (num_q_heads // KVH + 2) * D and output.dim(1) == num_q_heads * D
+        self._dtypes("sm90_attention_layer", qkv=(qkv, bfloat16), k_cache=(k_cache, bfloat16), output=(output, bfloat16))
+        self._sm90_node("sm90_attention", (R, KVH, 1),
+                        [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, sinks, output],
+                        [num_q_heads, KVH, D, cos.dim(0), page, window, int(sinks is not None)], block_dim)
+
     def sm90_mul_sum_add_layer(self, input: DTensor, weights: DTensor, residual: DTensor, output: DTensor,
                                block_dim: tuple = (256, 1, 1)):
         """The MoE combine: output = residual + sum over the top-k of weight x expert output (MPK's mul_sum_add): task x
         = token x. params = [H, TOPK]."""
         T, TOPK, H = self._tokens(input.dim(0)), input.dim(1), input.dim(2)
         self._sm90_node("sm90_mul_sum_add", (T, 1, 1), [input, weights, residual, output], [H, TOPK], block_dim)
+
+    def sm90_router_layer(self, input: DTensor, weight: DTensor, bias: DTensor, output: DTensor, experts_per_task: int = 4,
+                          block_dim: tuple = (256, 1, 1)):
+        """A small router: output [T, E] bf16 = input [T, K] . weight [E, K]^T + bias [E] (tasks/sm90_router.cuh): task x =
+        experts [x EPT, x EPT + EPT), EPT = experts_per_task. params = [K, E, EPT]."""
+        T, K, E = self._tokens(input.dim(0)), input.dim(1), weight.dim(0)
+        assert weight.dim(1) == K and output.dim(1) == E and E % experts_per_task == 0 and K % 8 == 0
+        self._dtypes("sm90_router_layer", input=(input, bfloat16), weight=(weight, bfloat16), output=(output, bfloat16))
+        self._sm90_node("sm90_router", (E // experts_per_task, 1, 1), [input, weight, bias, output],
+                        [K, E, experts_per_task], block_dim)
 
     def sm90_bias_layer(self, input: DTensor, bias: DTensor, output: DTensor, residual: DTensor = None,
                         block_dim: tuple = (256, 1, 1)):

@@ -23,19 +23,55 @@ __device__ __forceinline__ void run_sm90_bias(Maps const &,
   constexpr bool RESIDUAL = PARAMS::v[2] == 1;
   static_assert(N_OUT <= N_IN, "sm90_bias: keeps a prefix of the columns");
   sm90_task_begin<IN...>(g);
+  // 8 columns a thread at a time, every load of the row issued before the
+  // first use (a strided loop waits out the memory latency per element)
+  static_assert(N_OUT % 8 == 0 && N_IN % 4 == 0, "sm90_bias: 16-B vectors");
+  constexpr int VEC = N_OUT / 8, PER = (VEC + 255) / 256;
   float const *in =
       buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()) + (size_t)tk.x * N_IN;
-  __nv_bfloat16 const *bias =
-      buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 1>());
-  __nv_bfloat16 *out =
-      buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 3>()) + (size_t)tk.x * N_OUT;
-  for (int i = threadIdx.x; i < N_OUT; i += blockDim.x) {
-    float v = in[i] + __bfloat162float(bias[i]);
-    if constexpr (RESIDUAL) {
-      v += __bfloat162float(buf_at<__nv_bfloat16 const>(
-          g, slot_at<BUF_SLOTS, 2>())[(size_t)tk.x * N_OUT + i]);
+  uint4 const *bias = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 1>());
+  uint4 const *res =
+      RESIDUAL
+          ? buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 2>()) + (size_t)tk.x * VEC
+          : nullptr;
+  uint4 *out = buf_at<uint4>(g, slot_at<BUF_SLOTS, 3>()) + (size_t)tk.x * VEC;
+  float4 a[PER][2];
+  uint4 bv[PER], rv[PER];
+#pragma unroll
+  for (int j = 0; j < PER; j++) {
+    int const v = threadIdx.x + 256 * j;
+    if (v < VEC) {
+      a[j][0] = reinterpret_cast<float4 const *>(in)[2 * v];
+      a[j][1] = reinterpret_cast<float4 const *>(in)[2 * v + 1];
+      bv[j] = bias[v];
+      if constexpr (RESIDUAL) {
+        rv[j] = res[v];
+      }
     }
-    out[i] = __float2bfloat16(v);
+  }
+#pragma unroll
+  for (int j = 0; j < PER; j++) {
+    int const v = threadIdx.x + 256 * j;
+    if (v < VEC) {
+      float f[8], b[8], r[8] = {};
+      bf16x8_to_f32(bv[j], b);
+      if constexpr (RESIDUAL) {
+        bf16x8_to_f32(rv[j], r);
+      }
+      float const x[8] = {a[j][0].x,
+                          a[j][0].y,
+                          a[j][0].z,
+                          a[j][0].w,
+                          a[j][1].x,
+                          a[j][1].y,
+                          a[j][1].z,
+                          a[j][1].w};
+#pragma unroll
+      for (int i = 0; i < 8; i++) {
+        f[i] = x[i] + b[i] + r[i];
+      }
+      out[v] = f32_to_bf16x8(f);
+    }
   }
   sm90_task_end<SELF>(g);
 }
