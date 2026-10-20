@@ -5,6 +5,7 @@
 // from its start, over the ring.
 #pragma once
 #include "../core.cuh"
+#include <cuda_fp16.h>
 #include <cute/numeric/numeric_types.hpp> // cute::bfloat16_t, the bodies' bf16
 
 namespace static_mk {
@@ -67,7 +68,7 @@ __device__ __forceinline__ void sm90_task_end(G const &g) {
   }
 }
 
-// 8 bf16 <-> fp32 (one 16-B vector)
+// 8 bf16 or f16 <-> fp32 (one 16-B vector)
 __device__ __forceinline__ void bf16x8_to_f32(uint4 v, float (&f)[8]) {
   __nv_bfloat162 const *h = reinterpret_cast<__nv_bfloat162 const *>(&v);
 #pragma unroll
@@ -75,6 +76,23 @@ __device__ __forceinline__ void bf16x8_to_f32(uint4 v, float (&f)[8]) {
     float2 const t = __bfloat1622float2(h[i]);
     f[2 * i] = t.x, f[2 * i + 1] = t.y;
   }
+}
+__device__ __forceinline__ void f16x8_to_f32(uint4 v, float (&f)[8]) {
+  __half2 const *h = reinterpret_cast<__half2 const *>(&v);
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    float2 const t = __half22float2(h[i]);
+    f[2 * i] = t.x, f[2 * i + 1] = t.y;
+  }
+}
+__device__ __forceinline__ uint4 f32_to_f16x8(float const (&f)[8]) {
+  uint4 v;
+  __half2 *h = reinterpret_cast<__half2 *>(&v);
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    h[i] = __floats2half2_rn(f[2 * i], f[2 * i + 1]);
+  }
+  return v;
 }
 __device__ __forceinline__ uint4 f32_to_bf16x8(float const (&f)[8]) {
   uint4 v;

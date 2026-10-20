@@ -1,10 +1,11 @@
 // tasks/sm90_moe_ring.cuh -- the sm90_moe_ring task type: one routed expert's
 // MXFP4 projection streamed through the ring (runtime.cuh) on Hopper, decoded
-// into the A registers of RS WGMMAs. Task (a, y) of grid (A, N / ROWS, 1): the
+// into the A registers of mma.sync. Task (a, y) of grid (A, N / ROWS, 1): the
 // expert in slot a of the active-expert list (nothing when fewer are active)
 // times weight rows [y ROWS, y ROWS + ROWS). Two kinds:
 //   GLU  W13 with GPT-OSS's clamped SwiGLU fused: a task's 128 rows are the 64
 //        gate rows and the 64 up rows of the same 64 outputs; output [A][T][I]
+//        f16 (W2's input)
 //   W2   output [T, TOPK, N], the routed tokens' rows only
 //
 // The weights come repacked (static_megakernel.py sm90_moe_ring_pack) as
@@ -17,10 +18,24 @@
 // A ring stage holds NB K tiles: their blocks (one bulk copy) and the 8
 // activation rows (NB boxes {64, 8, 2}, 128-B swizzled, as gemm_tile's), as
 // many tiles as fit in the stage.
+//
+// All 8 warps decode and multiply, each on its own (mma.sync m16n8k16: the
+// decode latency of one warp hides behind another's): warp w takes the m16
+// row tiles w % 4 (and w % 4 + 4 of 128 rows: for GLU the gate tile and the
+// up tile of the same outputs) of the K tiles of parity w / 4. Warps 4..7
+// hand their sums to warps 0..3 for the epilogue through the ring's
+// scale-factor area (OFF_WSF, unused on Hopper). The last warp done with a
+// stage frees it and refills it with the stage SMAX later; thread 0 loads the
+// first stages (the weights before it waits for the activation's producer).
 #pragma once
 #include "sm90_common.cuh"
 
 namespace static_mk {
+
+template <class A, class...>
+struct first_of {
+  using type = A;
+};
 
 // a ring stage of the ROWS-row task: NB K tiles, the most that fit
 template <int ROWS>
@@ -36,54 +51,53 @@ struct MoeRingStage {
 };
 
 #ifdef STATIC_SM90
-__device__ __forceinline__ uint32_t prmt(uint32_t a, uint32_t b, uint32_t s) {
-  uint32_t d;
-  asm("prmt.b32 %0, %1, %2, %3;" : "=r"(d) : "r"(a), "r"(b), "r"(s));
-  return d;
-}
-// The BF16 pair 2^(scale - 127) of an E8M0 scale (0 decodes to 0).
-__device__ __forceinline__ uint32_t moe_scale_bits2(uint32_t scale) {
-  uint32_t const bits = scale == 0 ? 0u : scale << 7;
+// The f16 pair 2^(scale - 121) of an E8M0 scale: the factor that takes an
+// E4M3 value v 2^-6 (moe_decode_word) to v 2^(scale - 127). sm90_moe_ring_pack
+// checks the scales are in [107, 136], where it is a normal f16 and every
+// product is exact (0 decodes to 0).
+__device__ __forceinline__ uint32_t moe_scale_f16x2(uint32_t scale) {
+  uint32_t const bits = scale == 0 ? 0u : (scale - 106u) << 10;
   return bits | bits << 16;
 }
-// Four packed bytes (eight E2M1 values, low nibble first) to four BF16 pairs
-// times the scale pair: each nibble's magnitude looked up (prmt) as the low
-// and the high byte of its BF16, the bytes interleaved into pairs, the sign
-// (the nibble's top bit, replicated by prmt) merged into bit 15 / 31. Exact.
+// Eight packed E2M1 values to four f16 pairs times the scale pair. The packing
+// (sm90_moe_ring_pack) puts register c's two values in the low nibbles of
+// bytes 2c, 2c + 1 (c = 0, 1) or the high nibbles of bytes 2c - 4, 2c - 3
+// (c = 2, 3); a nibble s.ee.m as the E4M3 byte s.0ee.m00 is its value times
+// 2^-6 (exact, the zero exponent included), so two shift-and-masks give eight
+// E4M3 bytes in register order, the hardware converts them to f16 pairs, one
+// multiply scales them.
 __device__ __forceinline__ void
     moe_decode_word(uint32_t w, uint32_t scale2, uint32_t (&out)[4]) {
-  // BF16 of the magnitudes 0, .5, 1, 1.5 | 2, 3, 4, 6: low bytes, high bytes
-  constexpr uint32_t LO0 = 0xc0800000u, LO1 = 0xc0804000u;
-  constexpr uint32_t HI0 = 0x3f3f3f00u, HI1 = 0x40404040u;
-  uint32_t const m = w & 0x77777777u, lo_signs = w << 4;
+  uint32_t const lo = ((w << 2) & 0x1c1c1c1cu) | ((w << 4) & 0x80808080u);
+  uint32_t const hi = ((w >> 2) & 0x1c1c1c1cu) | (w & 0x80808080u);
+  uint32_t f[4];
+  asm("{\n.reg .b16 a, b, c, d;\n"
+      "mov.b32 {a, b}, %4;\n"
+      "mov.b32 {c, d}, %5;\n"
+      "cvt.rn.f16x2.e4m3x2 %0, a;\n"
+      "cvt.rn.f16x2.e4m3x2 %1, b;\n"
+      "cvt.rn.f16x2.e4m3x2 %2, c;\n"
+      "cvt.rn.f16x2.e4m3x2 %3, d;\n}"
+      : "=r"(f[0]), "=r"(f[1]), "=r"(f[2]), "=r"(f[3])
+      : "r"(lo), "r"(hi));
 #pragma unroll
-  for (int half = 0; half < 2; half++) { // nibbles 0-3, 4-7
-    uint32_t const sel = half ? m >> 16 : m;
-    uint32_t const lo = prmt(LO0, LO1, sel), hi = prmt(HI0, HI1, sel);
-#pragma unroll
-    for (int p = 0; p < 2; p++) {
-      int const k = 2 * half + p; // the byte: nibbles 2k, 2k + 1
-      uint32_t const v = prmt(lo, hi, p ? 0x7362u : 0x5140u);
-      uint32_t const sign = prmt(lo_signs, w, 0xc080u + 0x1010u * k);
-      uint32_t const vs = v | (sign & 0x80008000u);
-      __nv_bfloat162 const r =
-          __hmul2(*reinterpret_cast<__nv_bfloat162 const *>(&vs),
-                  *reinterpret_cast<__nv_bfloat162 const *>(&scale2));
-      out[k] = *reinterpret_cast<uint32_t const *>(&r);
-    }
+  for (int c = 0; c < 4; c++) {
+    __half2 const r = __hmul2(*reinterpret_cast<__half2 const *>(&f[c]),
+                              *reinterpret_cast<__half2 const *>(&scale2));
+    out[c] = *reinterpret_cast<uint32_t const *>(&r);
   }
 }
-// d (64 weight rows x 8 tokens) += A (registers, 64 x K16) * B (smem, 8 x K16)
-__device__ __forceinline__ void
-    wgmma_rs_m64n8k16(float *d, uint32_t const (&a)[4], uint64_t b) {
-  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\n"
-               "wgmma.mma_async.sync.aligned.m64n8k16.f32.bf16.bf16 "
-               "{%0, %1, %2, %3}, {%4, %5, %6, %7}, %8, p, 1, 1, 0;\n}"
+// d (16 weight rows x 8 tokens, fp32) += A (16 x K16) * B (K16 x 8 tokens),
+// f16
+__device__ __forceinline__ void mma_m16n8k16(float (&d)[4],
+                                             uint32_t const (&a)[4],
+                                             uint32_t b0,
+                                             uint32_t b1) {
+  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+               "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
+               "{%0, %1, %2, %3};"
                : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-               : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
-}
-__device__ __forceinline__ void wgmma_wait_1() {
-  asm volatile("wgmma.wait_group.sync.aligned 1;" ::: "memory");
+               : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 // a contiguous copy global -> shared, completing on mbarrier mb
 __device__ __forceinline__ void
@@ -99,10 +113,12 @@ __device__ __forceinline__ void
 
 // PARAMS {GLU (1: W13 + SwiGLU, 0: W2), ROWS (64 or 128; GLU 128), N (weight
 // rows per expert), K, E, TOPK, HAS_BIAS, limit (fp32 bits), alpha (fp32
-// bits)}; BUF_SLOTS {the active-expert list [E + 1] i32 (count last), routing
-// indices [E, T] i32 (1 + top-k slot, else 0), the weight blocks, bias [E, N]
-// bf16 in the checkpoint's row order (-1: none), output}; MAP_SLOTS {the
-// activation (bf16; GLU [T, K], W2 [A T, K] grouped by slot; box T rows)}
+// bits), SLOT_DEPS (W2: the input's producer is a GLU node, which counts its
+// tasks per slot too: counter 1 + a, after the total in counter 0)}; BUF_SLOTS
+// {the active-expert list [E + 1] i32 (count last), routing indices [E, T] i32
+// (1 + top-k slot, else 0), the weight blocks, bias [E, N] bf16 in the
+// checkpoint's row order (-1: none), output}; MAP_SLOTS {the activation (f16;
+// GLU [T, K], W2 [A T, K] grouped by slot; box T rows)}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -115,154 +131,206 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
 #ifndef STATIC_SM90
   static_assert(sizeof(SELF) == 0, "sm90_moe_ring: Hopper only");
 #else
-  constexpr bool GLU = PARAMS::v[0] == 1, HAS_BIAS = PARAMS::v[6] == 1;
+  constexpr bool GLU = PARAMS::v[0] == 1, HAS_BIAS = PARAMS::v[6] == 1,
+                 SLOT_DEPS = PARAMS::v[9] == 1;
   constexpr int ROWS = PARAMS::v[1], N = PARAMS::v[2], K = PARAMS::v[3],
                 E = PARAMS::v[4], TOPK = PARAMS::v[5];
   using S = MoeRingStage<ROWS>;
-  constexpr int MH = ROWS / 64, NB = S::NB; // m64 blocks, K tiles per stage
+  constexpr int MT = ROWS / 64,
+                NB = S::NB; // a warp's m16 tiles, K tiles a stage
+  constexpr int XCH_BYTES = 128 * MT * 16; // warps 4..7's sums
   constexpr int KT = (K + 127) / 128, NS = (KT + NB - 1) / NB; // tiles, stages
   static_assert((ROWS == 64 || ROWS == 128) && N % ROWS == 0 && K % 64 == 0,
                 "sm90_moe_ring: 64- or 128-row tiles, K in 64-value blocks");
+  static_assert(OFF_WSF + XCH_BYTES + 4 * (SMAX + 1) <= RING_BYTES,
+                "sm90_moe_ring: the exchange area and the stage counters");
   static_assert(!GLU || ROWS == 128,
                 "sm90_moe_ring: GLU's tasks are 64 gate rows and the 64 up "
                 "rows");
   // the producers of everything but the activation (IN's first): the expert
-  // list, the routing. The activation's the loader waits for after it has
+  // list, the routing. The activation's thread 0 waits for after it has
   // started the weights, which depend on nothing (as PDL does between
   // kernels): a task's weight stream starts while its producer finishes.
   __syncthreads(); // this SM's earlier tasks are done with the ring
+  int *const done = reinterpret_cast<int *>(L.sm + OFF_WSF + XCH_BYTES);
   if (threadIdx.x == 0) {
     sm90_wait_inputs<~1u, IN...>(g);
+    for (int i = 0; i < SMAX; i++) {
+      done[i] = 0;
+    }
+    done[SMAX] = L.gl; // the stages so far (the loader's count, the same as
+                       // the MMAs' between tasks)
   }
   __syncthreads();
   int const *active = buf_at<int const>(g, slot_at<BUF_SLOTS, 0>());
   int const a = tk.x, row0 = tk.y * ROWS;
+  int const c0 = done[SMAX];
   if (a < active[E]) {
     int const e = active[a];
     int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    if (warp == 0) {
-      if (lane == 0) { // the loader: stage s = K tiles [s NB, s NB + NB)
-        void const *amap = &maps.m[slot_at<MAP_SLOTS, 0>()];
-        uint8_t const *blocks =
-            buf_at<uint8_t const>(g, slot_at<BUF_SLOTS, 2>()) +
-            (size_t)(e * (N / ROWS) + tk.y) * KT * S::BLOCK;
-        int const c0 = L.gl;
-        // stage s (ring count c0 + s): its weight blocks, then its
-        // activation boxes (the full barrier expects both)
-        auto weights = [&](int s) {
-          int const c = c0 + s, st = c % SMAX;
-          if (c >= SMAX) {
-            mbar_wait(rt.empty0 + 8 * st, ((c / SMAX) - 1) & 1);
-          }
-          int const nt = min(NB, KT - s * NB);
-          mbar_expect(rt.full0 + 8 * st, nt * (S::BLOCK + A_STAGE));
-          bulk_g2s(blocks + (size_t)s * NB * S::BLOCK,
-                   rt.full0 + 8 * st,
-                   L.base + st * FSTAGE,
-                   nt * S::BLOCK);
-        };
-        auto activation = [&](int s) {
-          int const st = (c0 + s) % SMAX;
-          for (int b = 0; b < min(NB, KT - s * NB); b++) {
-            tma3(amap,
-                 rt.full0 + 8 * st,
-                 L.base + st * FSTAGE + S::ACT_OFF + b * A_STAGE,
-                 0,
-                 GLU ? 0 : a * T,
-                 (s * NB + b) * 2,
-                 EVICT_LAST);
-          }
-        };
-        // the first stage's weights, then more while the activation's
-        // producer is still running (each queues ahead of the activation)
-        int pre = 0;
-        do {
-          weights(pre++);
-        } while (pre < min(SMAX, NS) && !sm90_inputs_ready<1u, IN...>(g));
-        sm90_wait_inputs<1u, IN...>(g);
-        asm volatile("fence.proxy.async.global;" ::: "memory"); // TMA reads it
-        for (int s = 0; s < NS; s++) {
-          if (s >= pre) {
-            weights(s);
-          }
-          activation(s);
-        }
-        L.gl = c0 + NS;
+    void const *amap = &maps.m[slot_at<MAP_SLOTS, 0>()];
+    uint8_t const *blocks = buf_at<uint8_t const>(g, slot_at<BUF_SLOTS, 2>()) +
+                            (size_t)(e * (N / ROWS) + tk.y) * KT * S::BLOCK;
+    // stage s (ring count c0 + s): its weight blocks, its activation boxes
+    // (the full barrier expects both)
+    auto weights = [&](int s) {
+      int const c = c0 + s, st = c % SMAX;
+      if (c >= SMAX) {
+        mbar_wait(rt.empty0 + 8 * st, ((c / SMAX) - 1) & 1);
       }
-    } else if (warp >= 4) { // the MMA warpgroup: decode, WGMMA, epilogue
-      int const t = threadIdx.x & 127, q = t & 3;
-      int const rbase = 16 * (t >> 5) + ((t & 31) >> 2); // + 64 h (+ 8)
-      float acc[MH][4] = {};
-      // the A fragments of two K tiles: one decoding while the other's
-      // WGMMAs run
-      uint32_t regs[2][MH][8][4];
-      for (int s = 0; s < NS; s++, L.gi0++) {
-        int const st = L.gi0 % SMAX;
-        mbar_wait(rt.full0 + 8 * st, (L.gi0 / SMAX) & 1);
-        char const *stage = L.sm + st * FSTAGE;
+      int const nt = min(NB, KT - s * NB);
+      mbar_expect(rt.full0 + 8 * st, nt * (S::BLOCK + A_STAGE));
+      bulk_g2s(blocks + (size_t)s * NB * S::BLOCK,
+               rt.full0 + 8 * st,
+               L.base + st * FSTAGE,
+               nt * S::BLOCK);
+    };
+    auto activation = [&](int s) {
+      int const st = (c0 + s) % SMAX;
+      for (int b = 0; b < min(NB, KT - s * NB); b++) {
+        tma3(amap,
+             rt.full0 + 8 * st,
+             L.base + st * FSTAGE + S::ACT_OFF + b * A_STAGE,
+             0,
+             GLU ? 0 : a * T,
+             (s * NB + b) * 2,
+             EVICT_LAST);
+      }
+    };
+    constexpr int PRE = NS < SMAX ? NS : SMAX;
+    // the activation is there: its producer has counted all its tasks (W2
+    // after a GLU node: those of slot a)
+    auto act_ready = [&] {
+      if constexpr (SLOT_DEPS) {
+        using ACT = typename first_of<IN...>::type;
+        return cnt_ld(g.cnt + ACT::counter + 1 + a) >= (uint32_t)ACT::y;
+      } else {
+        return sm90_inputs_ready<1u, IN...>(g);
+      }
+    };
+    if (threadIdx.x == 0) {
+      // the first stage's weights, then more while the activation's producer
+      // is still running (each queues ahead of the activation)
+      int pre = 0;
+      do {
+        weights(pre++);
+      } while (pre < PRE && !act_ready());
+      while (!act_ready()) {
+        __nanosleep(200);
+      }
+      asm volatile("fence.proxy.async.global;" ::: "memory"); // TMA reads it
+      for (int s = 0; s < PRE; s++) {
+        if (s >= pre) {
+          weights(s);
+        }
+        activation(s);
+      }
+    }
+    int const g8 = lane >> 2, q = lane & 3, kpar = warp >> 2;
+    int const rbase = 16 * (warp & 3) + g8; // rows rbase (+ 8) of m16 tile 0,
+                                            // + 64 of tile 1
+    float acc[MT][4] = {};
+    for (int s = 0; s < NS; s++) {
+      int const c = c0 + s, st = c % SMAX;
+      mbar_wait(rt.full0 + 8 * st, (c / SMAX) & 1);
+      char const *stage = L.sm + st * FSTAGE;
 #pragma unroll
-        for (int b = 0; b < NB; b++) {
-          if (s * NB + b < KT) {
-            uint32_t(&r)[MH][8][4] = regs[b & 1];
+      for (int b = 0; b < NB; b++) {
+        int const kt = s * NB + b;
+        if ((kt & 1) != kpar || kt >= KT) {
+          continue;
+        }
+        // B: token g8's K pairs 2q (b0) and 2q + 8 (b1) of each k16 block,
+        // from the 128-B swizzled box (16-B chunk index ^ row)
+        char const *act = stage + S::ACT_OFF + b * A_STAGE + g8 * 128 + 4 * q;
+        uint32_t bf[8][2];
 #pragma unroll
-            for (int h = 0; h < MH; h++) {
+        for (int kb = 0; kb < 8; kb++) {
+          char const *half = act + (kb >> 2) * 1024;
+          int const ch = 2 * (kb & 3);
+          bf[kb][0] =
+              *reinterpret_cast<uint32_t const *>(half + ((ch ^ g8) << 4));
+          bf[kb][1] = *reinterpret_cast<uint32_t const *>(
+              half + (((ch + 1) ^ g8) << 4));
+        }
 #pragma unroll
-              for (int rr = 0; rr < 2; rr++) { // rows rbase + 64 h (+ 8)
-                int const row = 64 * h + rbase + 8 * rr;
-                uint4 const v = *reinterpret_cast<uint4 const *>(
-                    stage + b * S::BLOCK + row * 64 + q * 16);
-                uint32_t const sw = *reinterpret_cast<uint32_t const *>(
-                    stage + b * S::BLOCK + ROWS * 64 + row * 4);
-                uint32_t const words[4] = {v.x, v.y, v.z, v.w};
-                // word i: k blocks 2i, 2i + 1 (32 values, one scale); its
-                // byte c is register rr + 2 (c & 1) of k block 2i + c / 2
+        for (int mt = 0; mt < MT; mt++) {
+          uint32_t r[8][4];
 #pragma unroll
-                for (int i = 0; i < 4; i++) {
-                  uint32_t p[4];
-                  moe_decode_word(
-                      words[i], moe_scale_bits2((sw >> (8 * i)) & 0xffu), p);
+          for (int rr = 0; rr < 2; rr++) { // rows rbase + 64 mt (+ 8)
+            int const row = 64 * mt + rbase + 8 * rr;
+            uint4 const v = *reinterpret_cast<uint4 const *>(
+                stage + b * S::BLOCK + row * 64 + q * 16);
+            uint32_t const sw = *reinterpret_cast<uint32_t const *>(
+                stage + b * S::BLOCK + ROWS * 64 + row * 4);
+            uint32_t const words[4] = {v.x, v.y, v.z, v.w};
+            // word i: k blocks 2i, 2i + 1 (32 values, one scale); its
+            // register cc is register rr + 2 (cc & 1) of k block 2i + cc / 2
 #pragma unroll
-                  for (int c = 0; c < 4; c++) {
-                    r[h][2 * i + (c >> 1)][rr + 2 * (c & 1)] = p[c];
-                  }
-                }
+            for (int i = 0; i < 4; i++) {
+              uint32_t p[4];
+              moe_decode_word(
+                  words[i], moe_scale_f16x2((sw >> (8 * i)) & 0xffu), p);
+#pragma unroll
+              for (int cc = 0; cc < 4; cc++) {
+                r[2 * i + (cc >> 1)][rr + 2 * (cc & 1)] = p[cc];
               }
             }
-            uint32_t const ast =
-                L.base + st * FSTAGE + S::ACT_OFF + b * A_STAGE;
-            wgmma_fence();
+          }
 #pragma unroll
-            for (int kb = 0; kb < 8; kb++) {
-              uint64_t const dx =
-                  gmma_desc(ast + (kb >> 2) * 1024) + 2 * (kb & 3);
-#pragma unroll
-              for (int h = 0; h < MH; h++) {
-                wgmma_rs_m64n8k16(acc[h], r[h][kb], dx);
-              }
-            }
-            wgmma_commit();
-            wgmma_wait_1(); // the other K tile's registers are free again
+          for (int kb = 0; kb < 8; kb++) {
+            mma_m16n8k16(acc[mt], r[kb], bf[kb][0], bf[kb][1]);
           }
         }
-        wgmma_wait_all();
-        if (t == 0) {
+      }
+      // the last warp done with the stage frees it and refills it
+      __syncwarp();
+      if (lane == 0) {
+        __threadfence_block(); // this warp's reads of the stage, before
+        if (atomicAdd(done + st, 1) == 7) {
+          done[st] = 0;
           mbar_arrive(rt.empty0 + 8 * st);
+          if (s + SMAX < NS) {
+            weights(s + SMAX); // its empty wait passes: the arrive above
+            activation(s + SMAX);
+          }
         }
       }
-      // epilogue: acc[h][i] = row 64 h + rbase (+ 8 for i >= 2), token
-      // 2q + (i & 1)
+    }
+    L.gl = L.gi0 = c0 + NS;
+    // epilogue: acc[mt][i] = row 64 mt + rbase (+ 8 for i >= 2), token 2q +
+    // (i & 1); warps 4..7 add theirs (the other K tiles) to warps 0..3's
+    float4 *xacc = reinterpret_cast<float4 *>(L.sm + OFF_WSF);
+    int const xi = (warp & 3) * 32 + lane;
+    if (kpar == 1) {
+#pragma unroll
+      for (int mt = 0; mt < MT; mt++) {
+        xacc[xi * MT + mt] =
+            make_float4(acc[mt][0], acc[mt][1], acc[mt][2], acc[mt][3]);
+      }
+    }
+    __syncthreads();
+    if (kpar == 0) {
+#pragma unroll
+      for (int mt = 0; mt < MT; mt++) {
+        float4 const o = xacc[xi * MT + mt];
+        acc[mt][0] += o.x, acc[mt][1] += o.y, acc[mt][2] += o.z,
+            acc[mt][3] += o.w;
+      }
       __nv_bfloat16 const *bias =
           HAS_BIAS ? buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 3>()) +
                          (size_t)e * N
                    : nullptr;
-      __nv_bfloat16 *out = buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 4>());
-      if constexpr (GLU) { // out[a][tok][o] = SwiGLU(gate o, up o)
-        constexpr int I = N / 2;
-        float const limit = __int_as_float(PARAMS::v[7]),
-                    alpha = __int_as_float(PARAMS::v[8]);
+      void *out = buf_at<void>(g, slot_at<BUF_SLOTS, 4>());
+      int const *routing = buf_at<int const>(g, slot_at<BUF_SLOTS, 1>());
 #pragma unroll
-        for (int i = 0; i < 4; i++) {
-          int const o = tk.y * 64 + rbase + 8 * (i >> 1), tok = 2 * q + (i & 1);
+      for (int i = 0; i < 4; i++) {
+        int const tok = 2 * q + (i & 1);
+        if constexpr (GLU) { // out[a][tok][o] = SwiGLU(gate o, up o)
+          constexpr int I = N / 2;
+          float const limit = __int_as_float(PARAMS::v[7]),
+                      alpha = __int_as_float(PARAMS::v[8]);
+          int const o = tk.y * 64 + rbase + 8 * (i >> 1);
           float gate = acc[0][i], up = acc[1][i];
           if constexpr (HAS_BIAS) {
             gate += __bfloat162float(bias[o]);
@@ -270,31 +338,35 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
           }
           gate = fminf(gate, limit);
           up = fminf(fmaxf(up, -limit), limit);
-          out[((size_t)a * T + tok) * I + o] = __float2bfloat16(
-              (up + 1.0f) * gate / (1.0f + __expf(-gate * alpha)));
-        }
-      } else {
-        int const *routing = buf_at<int const>(g, slot_at<BUF_SLOTS, 1>());
+          static_cast<__half *>(out)[((size_t)a * T + tok) * I + o] =
+              __float2half((up + 1.0f) * gate / (1.0f + __expf(-gate * alpha)));
+        } else {
+          int const slot = routing[e * T + tok] - 1;
+          if (slot >= 0) {
 #pragma unroll
-        for (int h = 0; h < MH; h++) {
-#pragma unroll
-          for (int i = 0; i < 4; i++) {
-            int const row = row0 + 64 * h + rbase + 8 * (i >> 1),
-                      tok = 2 * q + (i & 1);
-            int const slot = routing[e * T + tok] - 1;
-            if (slot >= 0) {
-              float v = acc[h][i];
+            for (int mt = 0; mt < MT; mt++) {
+              int const row = row0 + 64 * mt + rbase + 8 * (i >> 1);
+              float v = acc[mt][i];
               if constexpr (HAS_BIAS) {
                 v += __bfloat162float(bias[row]);
               }
-              out[((size_t)tok * TOPK + slot) * N + row] = __float2bfloat16(v);
+              static_cast<__nv_bfloat16 *>(
+                  out)[((size_t)tok * TOPK + slot) * N + row] =
+                  __float2bfloat16(v);
             }
           }
         }
       }
     }
+  } else {
+    L.gl = L.gi0 = c0;
   }
   sm90_task_end<SELF>(g);
+  if constexpr (GLU) { // and per slot (after the barrier in sm90_task_end)
+    if (threadIdx.x == 0) {
+      cnt_add(g.cnt + SELF::counter + 1 + tk.x, 1);
+    }
+  }
 #endif
 }
 

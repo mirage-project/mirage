@@ -10,8 +10,8 @@
 
 namespace static_mk {
 
-// PARAMS {K, E, EPT (experts a task)}; BUF_SLOTS {h [T, K] bf16, weight [E, K]
-// bf16, bias [E] bf16, logits [T, E] bf16}
+// PARAMS {K, E, EPT (experts a task), F16 (1: h is f16)}; BUF_SLOTS {h [T, K]
+// bf16 or f16, weight [E, K] bf16, bias [E] bf16, logits [T, E] bf16}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -22,6 +22,7 @@ __device__ __forceinline__ void run_sm90_router(Maps const &,
                                                 KernelLocals &,
                                                 StaticTask const &tk) {
   constexpr int K = PARAMS::v[0], E = PARAMS::v[1], EPT = PARAMS::v[2];
+  constexpr bool F16 = PARAMS::v[3] == 1;
   constexpr int VEC = K / 8, PER = (VEC + 255) / 256, NS = EPT * T;
   static_assert(K % 8 == 0 && E % EPT == 0, "sm90_router: 16-B vectors");
   __shared__ float part[8][NS]; // per warp: its (expert, token) sums
@@ -50,7 +51,11 @@ __device__ __forceinline__ void run_sm90_router(Maps const &,
 #pragma unroll
         for (int t = 0; t < T; t++) {
           float ht[8];
-          bf16x8_to_f32(hv[t], ht);
+          if constexpr (F16) {
+            f16x8_to_f32(hv[t], ht);
+          } else {
+            bf16x8_to_f32(hv[t], ht);
+          }
 #pragma unroll
           for (int i = 0; i < 8; i++) {
             acc[e][t] += we[i] * ht[i];

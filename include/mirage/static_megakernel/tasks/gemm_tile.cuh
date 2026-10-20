@@ -298,11 +298,20 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                                L.sm STAGE_STAMP_ARG(L.stage_stamps));
     L.wt++;
   } else {
-    TileJob const j = make_bf16_tile(&maps.m[ROWS == 64 ? WMAP + 1 : WMAP],
-                                     &maps.m[AMAP],
-                                     tk.x * ROWS,
-                                     tk.y * pieces,
-                                     pieces);
+    TileJob j = make_bf16_tile(&maps.m[ROWS == 64 ? WMAP + 1 : WMAP],
+                               &maps.m[AMAP],
+                               tk.x * ROWS,
+                               tk.y * pieces,
+                               pieces);
+#ifdef STATIC_SM90
+    if constexpr (ACT::x > 0) { // the loader waits for the activation's
+                                // producer, after arming the first weights
+      static_assert(ACT::counter >= 0,
+                    "the activation's producer counts its tasks");
+      j.wait_cnt = g.cnt + ACT::counter;
+      j.wait_target = ACT::x * ACT::y * ACT::z;
+    }
+#else
     if constexpr (ACT::x > 0) { // the activation is a node's output: wait until
                                 // all its tasks are counted
       static_assert(ACT::counter >= 0,
@@ -329,6 +338,7 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
       L.wt = 0;
       __syncthreads();
     }
+#endif
     gemm_tile_task<ROWS>(j,
                          L.base,
                          L.tb,

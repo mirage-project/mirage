@@ -24,7 +24,7 @@ def main():
     routed = int(os.environ.get("ROUTED", 1))
     A = min(E, TOPK * routed)
     torch.manual_seed(0)
-    x = (torch.randn(T, H, device="cuda") * 0.1).bfloat16()
+    x = (torch.randn(T, H, device="cuda") * 0.1).half()   # the MoE's input is f16 (sm90_rmsnorm's f16 output)
     w13p, w13s, w13 = mxfp4(2 * I, H)
     w2p, w2s, w2 = mxfp4(H, I)
     b13 = torch.randn(E, 2 * I, device="cuda").bfloat16()
@@ -39,7 +39,7 @@ def main():
     mask[E] = len(active)
     bufs = {"x": x, "w13": sm90_moe_ring_pack(w13p, w13s, 128, glu=True), "b13": b13,
             "w2": sm90_moe_ring_pack(w2p, w2s, 64, glu=False), "b2": b2, "routing": routing,
-            "mask": mask, "act": torch.zeros(A, T, I, dtype=torch.bfloat16, device="cuda"),
+            "mask": mask, "act": torch.zeros(A, T, I, dtype=torch.float16, device="cuda"),
             "out": torch.zeros(T, TOPK, H, dtype=torch.bfloat16, device="cuda")}
     mpk = StaticMegakernel(num_gpus=1)
     D = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in bufs.items()}
@@ -47,13 +47,14 @@ def main():
                             limit=LIMIT, alpha=ALPHA, rows_per_task=128)
     mpk.sm90_moe_ring_layer(D["act"], D["w2"], D["routing"], D["mask"], D["out"], bias=D["b2"], glu=False,
                             rows_per_task=64)
-    # the plan: default grids, tasks round-robin over the SMs in graph order
+    # the plan: default grids, tasks round-robin over the SMs in graph order, an expert slot's tasks together (W2's slot a
+    # waits for W13's slot a only)
     nsm = mpk._num_sms()
     lists, k = [[] for _ in range(nsm)], 0
     grids = {n.graph_idx: tuple(n.grid) for n in compiler.graph_nodes(mpk)}
     for node, grid in grids.items():
-        for y in range(grid[1]):
-            for xx in range(grid[0]):
+        for xx in range(grid[0]):
+            for y in range(grid[1]):
                 lists[k % nsm].append((node, (xx, y, 0)))
                 k += 1
     out_dir = os.environ.get("OUT", "build_static") + "/sm90_moe_ring"
