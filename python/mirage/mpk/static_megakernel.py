@@ -33,6 +33,29 @@ def zq_bytes(tokens: int, width: int) -> int:
     return tokens * width + width // 128 * SF_CHUNK
 
 
+def sm90_moe_ring_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu: bool) -> torch.Tensor:
+    """An expert projection's MXFP4 weights [E, N, K / 2] u8 (two E2M1 values a byte, low nibble first) and E8M0 scales
+    [E, N, K / 32] u8 to sm90_moe_ring's blocks [E, N / rows, K tiles, rows x 68] u8, in the order a task streams them: per
+    K tile of 128 values (zero-padded; zero decodes to 0) its rows' 64 bytes, then their 4 scales. A row's 64 bytes are
+    permuted so that WGMMA thread q's A fragment (K columns 16 kb + 2q + {0, 1, 8, 9}, kb = 0..7: packed bytes 8 kb + q
+    (+ 4)) is its bytes 16 q .. 16 q + 15, in the order (kb, + 4). glu (W13, gate rows then up rows): the rows reordered so
+    that each 128 are 64 gate rows and the up rows of the same outputs (the task's SwiGLU, rows 128)."""
+    E, N, KH = packed.shape
+    kt = (KH + 63) // 64
+    w = torch.zeros(E, N, kt * 64, dtype=torch.uint8, device=packed.device)
+    w[:, :, :KH] = packed
+    sc = torch.zeros(E, N, kt * 4, dtype=torch.uint8, device=scales.device)
+    sc[:, :, :scales.shape[2]] = scales
+    if glu:
+        assert rows == 128 and N % 128 == 0
+        w = w.view(E, 2, N // 128, 64, -1).transpose(1, 2).reshape(E, N, -1)
+        sc = sc.view(E, 2, N // 128, 64, -1).transpose(1, 2).reshape(E, N, -1)
+    # byte 8 kb + 4 h + q of a row's tile -> 16 q + 2 kb + h; then [E, N / rows, K tiles, rows, 64]
+    w = w.view(E, N // rows, rows, kt, 8, 2, 4).permute(0, 1, 3, 2, 6, 4, 5).reshape(E, N // rows, kt, rows * 64)
+    sc = sc.view(E, N // rows, rows, kt, 4).permute(0, 1, 3, 2, 4).reshape(E, N // rows, kt, rows * 4)
+    return torch.cat([w, sc], dim=3).contiguous()
+
+
 def float_bits(v: float) -> int:
     """An fp32 value as the int of its bits (a param; the kernel template reads it with __int_as_float)."""
     return struct.unpack("<i", struct.pack("<f", v))[0]
@@ -556,6 +579,41 @@ class StaticMegakernel(PersistentKernel):
         present = [t for t in tensors if t is not None]
         self._add_node(name, grid, block_dim, present, [(-1, -1, -1)] * len(present), params, counters=1,
                        buf_slots=[self._tensor_slot(t) if t is not None else -1 for t in tensors])
+
+    def sm90_moe_ring_layer(
+        self,
+        input: DTensor,           # GLU: [T, K] bf16; W2: [A, T, K] bf16, each active-expert slot's tokens
+        weights: DTensor,         # sm90_moe_ring_pack's blocks [E, N / R, K tiles, R x 68] u8 (R = rows_per_task)
+        routing_indices: DTensor, # [E, T] i32: 1 + the top-k slot of each token routed to the expert, else 0
+        active_experts: DTensor,  # [E + 1] i32: the routed experts, their count last
+        output: DTensor,          # GLU: [A, T, N / 2] bf16 (every token's row of slot a's expert); W2: [T, TOPK, N] bf16
+        bias: DTensor = None,     # [E, N] bf16, the checkpoint's row order (GLU: gate then up)
+        glu: bool = True,
+        limit: float = 7.0,       # GLU: GPT-OSS's SwiGLU clamp and alpha
+        alpha: float = 1.702,
+        rows_per_task: int = 128,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """One routed expert projection streamed through the ring (tasks/sm90_moe_ring.cuh), its MXFP4 weights decoded into
+        WGMMA registers: task (a, y) = the expert in slot a of the active list (none past their count) times weight rows
+        [y R, y R + R), R = rows_per_task (64 or 128), its weight blocks one bulk copy a ring stage. glu: W13 with the
+        clamped SwiGLU fused (R 128: 64 outputs a task). A = the slots (GLU: output.dim(0); W2: input.dim(0)), the most experts a step routes to.
+        params = [glu, R, N, K, E, TOPK, has_bias, limit bits, alpha bits]."""
+        R = rows_per_task
+        E, N, K = weights.dim(0), weights.dim(1) * R, input.dim(input.num_dims - 1)
+        T = self._tokens(routing_indices.dim(1))
+        A = output.dim(0) if glu else input.dim(0)
+        TOPK = 0 if glu else output.dim(1)
+        assert R in (64, 128) and K % 64 == 0 and (weights.dim(2), weights.dim(3)) == ((K + 127) // 128, R * 68)
+        assert not glu or (R == 128 and output.dim(2) * 2 == N)
+        self._dtypes("sm90_moe_ring_layer", input=(input, bfloat16), weights=(weights, uint8), output=(output, bfloat16))
+        tensors = [input, weights, routing_indices, active_experts] + ([bias] if bias is not None else [])
+        self._add_node("sm90_moe_ring", (A, N // R, 1), block_dim, tensors + [output], [(-1, -1, -1)] * (len(tensors) + 1),
+                       [int(glu), R, N, K, E, TOPK, int(bias is not None), float_bits(limit), float_bits(alpha)],
+                       counters=1, map_slots=[self._map("bf16", ("t", input), (T if glu else A * T, K, T))],
+                       buf_slots=[self._tensor_slot(active_experts), self._tensor_slot(routing_indices),
+                                  self._tensor_slot(weights), self._tensor_slot(bias) if bias is not None else -1,
+                                  self._tensor_slot(output)])
 
     def sm90_rmsnorm_layer(self, input: DTensor, weight: DTensor, output: DTensor, eps: float,
                            block_dim: tuple = (256, 1, 1)):

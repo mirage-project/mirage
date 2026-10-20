@@ -5,6 +5,7 @@
 // from its start, over the ring.
 #pragma once
 #include "../core.cuh"
+#include <cute/numeric/numeric_types.hpp> // cute::bfloat16_t, the bodies' bf16
 
 namespace static_mk {
 
@@ -25,6 +26,33 @@ __device__ __forceinline__ void sm90_task_begin(G const &g) {
         ...);
   }
   __syncthreads();
+}
+
+// Whether the producers of the inputs in MASK (bit i: IN's i-th) have counted
+// all their tasks; sm90_wait_inputs: wait until they have (thread 0 spins,
+// nothing synchronizes)
+template <uint32_t MASK, class... IN>
+__device__ __forceinline__ bool sm90_inputs_ready(G const &g) {
+  bool ready = true;
+  int i = 0;
+  (
+      [&] {
+        if constexpr (IN::x > 0 && IN::counter >= 0) {
+          if ((MASK >> i) & 1u) {
+            ready =
+                ready && cnt_ld(g.cnt + IN::counter) >= IN::x * IN::y * IN::z;
+          }
+        }
+        i++;
+      }(),
+      ...);
+  return ready;
+}
+template <uint32_t MASK, class... IN>
+__device__ __forceinline__ void sm90_wait_inputs(G const &g) {
+  while (!sm90_inputs_ready<MASK, IN...>(g)) {
+    __nanosleep(200);
+  }
 }
 
 // After the body: its outputs are written; count the task in its node's
