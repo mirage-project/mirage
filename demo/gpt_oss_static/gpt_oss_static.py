@@ -1,8 +1,8 @@
 """GPT-OSS (MXFP4 checkpoint) decoding on Hopper through the static megakernel (PR 786's compiler), one request, greedy:
 
-  layer kernels  one per attention kind (sliding window / full; the window is a template argument): the decoder layer as 9
-                 nodes, 10 with full attention (static_megakernel.py: sm90_rmsnorm, gemm_tile + sm90_bias for qkv,
-                 sm90_attention (full: sm90_attention_split + _merge), gemm_tile for o_proj, sm90_gate (o_proj's bias, the
+  layer kernels  one per attention kind (sliding window / full; the window is a template argument): the decoder layer as 8
+                 nodes, 9 with full attention (static_megakernel.py: sm90_rmsnorm, gemm_tile for qkv, sm90_attention
+                 (adding qkv's bias; full: sm90_attention_split + _merge), gemm_tile for o_proj, sm90_gate (o_proj's bias, the
                  residual, the MoE's norm, the router and the top-k), sm90_moe_ring W13 (+ SwiGLU) and W2,
                  sm90_mul_sum_add); each kernel runs as one
                  instance per layer of its kind (its own weights, KV cache, buffers), the layers' kernels in order on one stream,
@@ -111,15 +111,15 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
     A = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
     mpk.sm90_rmsnorm_layer(A["x_in"], A["ln1"], A["h"], m.eps)
     mpk.gemm_tile_layer(input=A["h"], weight=A["w_qkv"], output=A["qkv32"], combine="store")
-    mpk.sm90_bias_layer(A["qkv32"], A["b_qkv"], A["qkv"])
+    qkv_bias = dict(qkv_bias=A["b_qkv"], qkv_staged=A["qkv"])   # the attention tasks add the bias (no bias node)
     if window:   # a sliding window: its two tiles in one task per KV head
-        mpk.sm90_attention_layer(A["qkv"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"], A["kv_indptr"],
-                                 A["kv_indices"], A["last_page_len"], A["attn"], num_q_heads=m.QH, window=window,
-                                 sinks=A["sinks"])
+        mpk.sm90_attention_layer(A["qkv32"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"],
+                                 A["kv_indptr"], A["kv_indices"], A["last_page_len"], A["attn"], num_q_heads=m.QH,
+                                 window=window, sinks=A["sinks"], **qkv_bias)
     else:        # full attention: the KV in chunks over many tasks, then their merge (with the sinks)
-        mpk.sm90_attention_split_layer(A["qkv"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"],
+        mpk.sm90_attention_split_layer(A["qkv32"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"],
                                        A["kv_indptr"], A["kv_indices"], A["last_page_len"], A["attn_parts"],
-                                       num_q_heads=m.QH, chunk=KV_CHUNK)
+                                       num_q_heads=m.QH, chunk=KV_CHUNK, **qkv_bias)
         mpk.sm90_attention_merge_layer(A["attn_parts"], A["qo_indptr"], A["kv_indptr"], A["last_page_len"], A["attn"],
                                        num_q_heads=m.QH, chunk=KV_CHUNK, chunks=m.max_seq // KV_CHUNK, page=PAGE,
                                        sinks=A["sinks"])

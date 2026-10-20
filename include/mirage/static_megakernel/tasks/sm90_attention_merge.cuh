@@ -73,13 +73,6 @@ __device__ __forceinline__ void run_sm90_attention_merge(Maps const &,
   sm90_task_end<SELF>(g);
 }
 
-template <class SELF,
-          class PARAMS,
-          class BUF_SLOTS,
-          class MAP_SLOTS,
-          class... IN>
-constexpr int smem_sm90_attention_merge() {
-  return 0;
-}
+SM90_TASK_SMEM(sm90_attention_merge, 0)
 
 } // namespace static_mk

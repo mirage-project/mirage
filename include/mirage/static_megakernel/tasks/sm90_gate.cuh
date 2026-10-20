@@ -28,25 +28,25 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
                                               KernelLocals &,
                                               StaticTask const &tk) {
   constexpr int H = PARAMS::v[0], E = PARAMS::v[1], TOPK = PARAMS::v[2];
-  static_assert(H % 8 == 0 && E == 32 && TOPK <= E,
-                "sm90_gate: 16-B vectors; 32 experts (a lane each)");
-  constexpr int VEC = H / 8, PER = (VEC + 255) / 256;
+  static_assert(E == 32 && TOPK <= E, "sm90_gate: 32 experts (a lane each)");
+  using Row = Sm90Row<H>;
+  constexpr int VEC = Row::VEC;
   constexpr int DONE = SELF::counter + 1, MASK = SELF::counter + 2;
-  __shared__ float part[8][E];
+  __shared__ float part[SM90_WARPS], logit[E];
   __shared__ uint4 hs[VEC]; // h as rounded (f16), for the router's warps
   __shared__ int last;
   {
     // the router (no producer) into L2 while o_proj finishes
     char const *rp = reinterpret_cast<char const *>(
         buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 4>()));
-    for (int i = threadIdx.x; i < E * H * 2 / 128; i += blockDim.x) {
+    for (int i = threadIdx.x; i < E * H * 2 / 128; i += SM90_THREADS) {
       asm volatile("prefetch.global.L2 [%0];" ::"l"(rp + 128 * i));
     }
   }
   sm90_task_begin<IN...>(g);
   int const t = tk.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  float const *o = buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()) +
-                   (size_t)t * H;
+  float const *o =
+      buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()) + (size_t)t * H;
   uint4 const *ob = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 1>());
   uint4 const *res =
       buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 2>()) + (size_t)t * VEC;
@@ -54,22 +54,20 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   uint4 const *rw = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 4>());
   uint4 *x1 = buf_at<uint4>(g, slot_at<BUF_SLOTS, 7>()) + (size_t)t * VEC;
   uint4 *hout = buf_at<uint4>(g, slot_at<BUF_SLOTS, 8>()) + (size_t)t * VEC;
-  // 1. x1 = bf16(o + bias + x), and the row as rounded (8 columns a thread)
-  float xr[PER][8];
+  // 1. x1 = bf16(o + bias + x), and the row as rounded
+  float xr[Row::PER][8];
   float ss = 0.f;
 #pragma unroll
-  for (int j = 0; j < PER; j++) {
-    int const v = threadIdx.x + 256 * j;
+  for (int j = 0; j < Row::PER; j++) {
+    int const v = Row::vec(j);
     if (v < VEC) {
-      float4 const a0 = reinterpret_cast<float4 const *>(o)[2 * v],
-                   a1 = reinterpret_cast<float4 const *>(o)[2 * v + 1];
-      float b[8], r[8], f[8];
+      float f[8], b[8], r[8];
+      f32x8_load(o, v, f);
       bf16x8_to_f32(ob[v], b);
       bf16x8_to_f32(res[v], r);
-      float const a[8] = {a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w};
 #pragma unroll
       for (int i = 0; i < 8; i++) {
-        f[i] = a[i] + b[i] + r[i];
+        f[i] = f[i] + b[i] + r[i];
       }
       uint4 const q = f32_to_bf16x8(f);
       x1[v] = q;
@@ -80,40 +78,28 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
       }
     }
   }
-  // 2. h = f16(x1 / rms(x1) * w), kept as rounded for the router
+  // 2. h = f16(x1 / rms(x1) * w), kept as rounded for the router (in hs)
+  float const rs =
+      rsqrtf(sm90_block_sum(ss, part) / H + __int_as_float(PARAMS::v[3]));
 #pragma unroll
-  for (int s = 16; s > 0; s >>= 1) {
-    ss += __shfl_xor_sync(0xffffffffu, ss, s);
-  }
-  if (lane == 0) {
-    part[warp][0] = ss;
-  }
-  __syncthreads();
-  float tot = 0.f;
-#pragma unroll
-  for (int k = 0; k < 8; k++) {
-    tot += part[k][0];
-  }
-  float const rs = rsqrtf(tot / H + __int_as_float(PARAMS::v[3]));
-#pragma unroll
-  for (int j = 0; j < PER; j++) {
-    int const v = threadIdx.x + 256 * j;
+  for (int j = 0; j < Row::PER; j++) {
+    int const v = Row::vec(j);
     if (v < VEC) {
-      float w[8], f[8];
+      float w[8];
       bf16x8_to_f32(nw[v], w);
 #pragma unroll
       for (int i = 0; i < 8; i++) {
-        f[i] = xr[j][i] * rs * w[i];
+        xr[j][i] = xr[j][i] * rs * w[i];
       }
-      uint4 const q = f32_to_f16x8(f);
+      uint4 const q = f32_to_f16x8(xr[j]);
       hout[v] = q;
       hs[v] = q;
     }
   }
-  __syncthreads(); // part[][0] read by all, hs written
+  __syncthreads(); // hs written
   // 3. the logits: warp w experts [w EPW, w EPW + EPW), its lanes over K
   // (each step its EPW rows' vectors in flight), reduced over the warp
-  constexpr int EPW = E / 8;
+  constexpr int EPW = E / SM90_WARPS;
   {
     uint4 const *rwr = rw + (size_t)warp * EPW * VEC;
     float acc[EPW] = {};
@@ -138,10 +124,7 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
     }
 #pragma unroll
     for (int e = 0; e < EPW; e++) {
-#pragma unroll
-      for (int s = 16; s > 0; s >>= 1) {
-        acc[e] += __shfl_xor_sync(0xffffffffu, acc[e], s);
-      }
+      acc[e] = sm90_warp_sum(acc[e]);
     }
     if (lane < EPW) {
       float a = 0.f;
@@ -149,7 +132,7 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
       for (int e = 0; e < EPW; e++) {
         a = e == lane ? acc[e] : a;
       }
-      part[0][warp * EPW + lane] = a;
+      logit[warp * EPW + lane] = a;
     }
   }
   __syncthreads();
@@ -157,10 +140,10 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   // tokens: none)
   if (warp == 0) {
     int const ntok = *buf_at<int const>(g, slot_at<BUF_SLOTS, 6>());
-    float l = part[0][lane];
-    l = __bfloat162float(__float2bfloat16(
-        l + __bfloat162float(
-                buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 5>())[lane])));
+    float l = logit[lane];
+    l = __bfloat162float(
+        __float2bfloat16(l + __bfloat162float(buf_at<__nv_bfloat16 const>(
+                                 g, slot_at<BUF_SLOTS, 5>())[lane])));
     float m = l;
 #pragma unroll
     for (int s = 16; s > 0; s >>= 1) {
@@ -230,13 +213,6 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   sm90_task_end<SELF>(g);
 }
 
-template <class SELF,
-          class PARAMS,
-          class BUF_SLOTS,
-          class MAP_SLOTS,
-          class... IN>
-constexpr int smem_sm90_gate() {
-  return 0;
-}
+SM90_TASK_SMEM(sm90_gate, 0)
 
 } // namespace static_mk

@@ -370,13 +370,6 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
 #endif
 }
 
-template <class SELF,
-          class PARAMS,
-          class BUF_SLOTS,
-          class MAP_SLOTS,
-          class... IN>
-constexpr int smem_sm90_moe_ring() {
-  return RING_BYTES;
-}
+SM90_TASK_SMEM(sm90_moe_ring, RING_BYTES)
 
 } // namespace static_mk

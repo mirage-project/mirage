@@ -18,38 +18,37 @@ __device__ __forceinline__ void run_sm90_mul_sum_add(Maps const &,
                                                      KernelLocals &,
                                                      StaticTask const &tk) {
   constexpr int H = PARAMS::v[0], TOPK = PARAMS::v[1];
+  using Row = Sm90Row<H>;
   sm90_task_begin<IN...>(g);
-  // 8 columns a thread at a time, every load issued before the first use
-  static_assert(H % 8 == 0, "sm90_mul_sum_add: 16-B vectors");
-  constexpr int VEC = H / 8, PER = (VEC + 255) / 256;
   uint4 const *eo = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 0>()) +
-                    (size_t)tk.x * TOPK * VEC;
+                    (size_t)tk.x * TOPK * Row::VEC;
   float const *w =
       buf_at<float const>(g, slot_at<BUF_SLOTS, 1>()) + (size_t)tk.x * TOPK;
   uint4 const *res =
-      buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 2>()) + (size_t)tk.x * VEC;
-  uint4 *out = buf_at<uint4>(g, slot_at<BUF_SLOTS, 3>()) + (size_t)tk.x * VEC;
+      buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 2>()) + (size_t)tk.x * Row::VEC;
+  uint4 *out =
+      buf_at<uint4>(g, slot_at<BUF_SLOTS, 3>()) + (size_t)tk.x * Row::VEC;
   float wk[TOPK];
 #pragma unroll
   for (int k = 0; k < TOPK; k++) {
     wk[k] = w[k];
   }
-  uint4 ev[PER][TOPK], rv[PER];
+  uint4 ev[Row::PER][TOPK], rv[Row::PER];
 #pragma unroll
-  for (int j = 0; j < PER; j++) {
-    int const v = threadIdx.x + 256 * j;
-    if (v < VEC) {
+  for (int j = 0; j < Row::PER; j++) {
+    int const v = Row::vec(j);
+    if (v < Row::VEC) {
 #pragma unroll
       for (int k = 0; k < TOPK; k++) {
-        ev[j][k] = eo[k * VEC + v];
+        ev[j][k] = eo[k * Row::VEC + v];
       }
       rv[j] = res[v];
     }
   }
 #pragma unroll
-  for (int j = 0; j < PER; j++) {
-    int const v = threadIdx.x + 256 * j;
-    if (v < VEC) {
+  for (int j = 0; j < Row::PER; j++) {
+    int const v = Row::vec(j);
+    if (v < Row::VEC) {
       float acc[8], e[8];
       bf16x8_to_f32(rv[j], acc);
 #pragma unroll
@@ -66,13 +65,6 @@ __device__ __forceinline__ void run_sm90_mul_sum_add(Maps const &,
   sm90_task_end<SELF>(g);
 }
 
-template <class SELF,
-          class PARAMS,
-          class BUF_SLOTS,
-          class MAP_SLOTS,
-          class... IN>
-constexpr int smem_sm90_mul_sum_add() {
-  return 0;
-}
+SM90_TASK_SMEM(sm90_mul_sum_add, 0)
 
 } // namespace static_mk

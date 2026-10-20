@@ -6,16 +6,16 @@
 // (with the sinks). Full attention only (no window); a chunk past the sequence
 // does nothing. The chunk with the new tokens appends their K / V.
 #pragma once
-#include "sm90_common.cuh"
-#include "tasks/hopper/multitoken_paged_attention_hopper.cuh"
+#include "sm90_attention.cuh"
 
 namespace static_mk {
 
 // PARAMS {NUM_Q_HEADS, NUM_KV_HEADS, HEAD_DIM, MAX_SEQ_LEN, PAGE_SIZE, CHUNK,
-// C (chunks)}; BUF_SLOTS {qkv, k cache, v cache, cos, sin, qo_indptr,
-// kv_indptr, kv_indices, last_page_len (sm90_attention's), parts: the chunks'
-// outputs [C, T, Q x D] bf16, then their log2-sum-exps [T, C, Q] fp32 (one
-// buffer: the node's one output)}
+// C (chunks), QKV_BIAS}; BUF_SLOTS {qkv, k cache, v cache, cos, sin,
+// qo_indptr, kv_indptr, kv_indices, last_page_len (sm90_attention's), the qkv
+// bias and qkv's bf16 rows (QKV_BIAS, as sm90_attention's; else -1, -1),
+// parts: the chunks' outputs [C, T, Q x D] bf16, then their log2-sum-exps
+// [T, C, Q] fp32 (one buffer: the node's one output)}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -26,61 +26,38 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
                                                          KernelLocals &,
                                                          StaticTask const &tk) {
   constexpr int QH = PARAMS::v[0], KVH = PARAMS::v[1], D = PARAMS::v[2],
-                MAX_SEQ = PARAMS::v[3], PAGE = PARAMS::v[4],
-                CHUNK = PARAMS::v[5], C = PARAMS::v[6];
-  constexpr int QPK = QH / KVH, QKV_STRIDE = KVH * (QPK + 2) * D;
+                C = PARAMS::v[6];
+  constexpr bool QKV_BIAS = PARAMS::v[7] == 1;
+  constexpr int QPK = QH / KVH;
   sm90_task_begin<IN...>(g);
-  using bf16 = kernel::bfloat16;
   int const head = tk.y, chunk = tk.z;
-  kernel::multitoken_paged_attention_hopper_impl<bf16,
-                                                 QPK,
-                                                 1,
-                                                 KVH,
-                                                 KVH * D, // KV_CACHE_STRIDE
-                                                 QKV_STRIDE,
-                                                 QH * D, // O_STRIDE
-                                                 D,
-                                                 CHUNK, // SEQ_LEN: a chunk
-                                                 MAX_SEQ,
-                                                 PAGE,
-                                                 T,
-                                                 true, // PARTITION_KV
-                                                 C,
-                                                 D,  // ROTARY_DIM
-                                                 0,  // packed pages
-                                                 0>( // no window
-      buf_at<bf16>(g, slot_at<BUF_SLOTS, 1>()) + head * D,
-      buf_at<bf16>(g, slot_at<BUF_SLOTS, 2>()) + head * D,
-      buf_at<int const>(g, slot_at<BUF_SLOTS, 5>()),
-      buf_at<int const>(g, slot_at<BUF_SLOTS, 6>()),
-      buf_at<int const>(g, slot_at<BUF_SLOTS, 7>()),
-      buf_at<int const>(g, slot_at<BUF_SLOTS, 8>()),
-      (int16_t)tk.x,
-      false, // qk_norm
-      true,  // RoPE
-      nullptr,
-      nullptr,
-      buf_at<bf16 const>(g, slot_at<BUF_SLOTS, 3>()),
-      buf_at<bf16 const>(g, slot_at<BUF_SLOTS, 4>()),
-      1e-6f,
-      1e-6f,
-      buf_at<bf16>(g, slot_at<BUF_SLOTS, 0>()) + head * (QPK + 2) * D,
-      buf_at<bf16>(g, slot_at<BUF_SLOTS, 9>()) + (size_t)chunk * T * QH * D +
-          head * QPK * D,
-      reinterpret_cast<float *>(buf_at<bf16>(g, slot_at<BUF_SLOTS, 9>()) +
-                                (size_t)C * T * QH * D) +
+  kernel::bfloat16 *qkv =
+      QKV_BIAS ? sm90_qkv_stage<BUF_SLOTS, 9, QH, KVH, D>(g, head)
+               : buf_at<kernel::bfloat16>(g, slot_at<BUF_SLOTS, 0>());
+  kernel::bfloat16 *parts =
+      buf_at<kernel::bfloat16>(g, slot_at<BUF_SLOTS, 11>());
+  sm90_paged_attention<BUF_SLOTS,
+                       QH,
+                       KVH,
+                       D,
+                       PARAMS::v[3],
+                       PARAMS::v[4],
+                       PARAMS::v[5], // SEQ_LEN: a chunk
+                       true,
+                       C,
+                       0>( // no window
+      g,
+      qkv,
+      tk.x,
+      head,
+      parts + (size_t)chunk * T * QH * D + head * QPK * D,
+      reinterpret_cast<float *>(parts + (size_t)C * T * QH * D) +
           (size_t)chunk * QH + head * QPK,
-      chunk);
+      chunk,
+      nullptr);
   sm90_task_end<SELF>(g);
 }
 
-template <class SELF,
-          class PARAMS,
-          class BUF_SLOTS,
-          class MAP_SLOTS,
-          class... IN>
-constexpr int smem_sm90_attention_split() {
-  return SM90_BODY_SMEM;
-}
+SM90_TASK_SMEM(sm90_attention_split, SM90_BODY_SMEM)
 
 } // namespace static_mk

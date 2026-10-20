@@ -2,6 +2,7 @@
 8 KV heads, head dim 64, sinks): one decode token of one request at position POS (default 300) after a cache of POS tokens, a
 sliding-window node (128), a full-attention node, and a full attention split in KV chunks (sm90_attention_split + _merge,
 CHUNK) in one kernel, each with its own cache, checked against torch (the output, and the new K / V appended to the cache).
+The sliding-window and split nodes take the QKV GEMM's fp32 rows and add the bias themselves (qkv_bias), the full one bf16.
 usage: [POS=<history>] [PROFILE=1 (each node's span over 20 launches)] test_sm90_attention.py"""
 import os
 import torch
@@ -45,7 +46,9 @@ def main():
     torch.manual_seed(0)
     cos, sin = rope_tables()
     pages = MAX_SEQ // PAGE
-    qkv = (torch.randn(T, KVH * (QPK + 2) * D, device="cuda") * 0.5).bfloat16()
+    qkv32 = torch.randn(T, KVH * (QPK + 2) * D, device="cuda") * 0.5
+    qkv_bias = (torch.randn(KVH * (QPK + 2) * D, device="cuda") * 0.1).bfloat16()
+    qkv = (qkv32 + qkv_bias.float()).bfloat16()
     sinks = torch.randn(KVH, QPK, device="cuda").bfloat16()
     caches = {}
     for w in ("s", "f", "p"):
@@ -54,7 +57,7 @@ def main():
             c.view(-1, KVH, D)[:pos] = torch.randn(pos, KVH, D, device="cuda").bfloat16()
             caches[f"{kv}_{w}"] = c
     npages = pos // PAGE + 1
-    bufs = dict(qkv=qkv, cos=cos, sin=sin, sinks=sinks, **caches,
+    bufs = dict(qkv=qkv, qkv32=qkv32, qkv_bias=qkv_bias, staged_s=torch.zeros_like(qkv), staged_p=torch.zeros_like(qkv), cos=cos, sin=sin, sinks=sinks, **caches,
                 qo=torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
                 kv_indptr=torch.tensor([0, npages], dtype=torch.int32, device="cuda"),
                 kv_indices=torch.arange(pages, dtype=torch.int32, device="cuda"),
@@ -69,11 +72,13 @@ def main():
     mpk = StaticMegakernel(num_gpus=1)
     A = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in bufs.items()}
     for w, window in (("s", WINDOW), ("f", 0)):
-        mpk.sm90_attention_layer(A["qkv"], A[f"k_{w}"], A[f"v_{w}"], A["cos"], A["sin"], A["qo"], A["kv_indptr"],
-                                 A["kv_indices"], A["last_len"], A[f"out_{w}"], num_q_heads=QH, window=window,
-                                 sinks=A["sinks"])
-    mpk.sm90_attention_split_layer(A["qkv"], A["k_p"], A["v_p"], A["cos"], A["sin"], A["qo"], A["kv_indptr"],
-                                   A["kv_indices"], A["last_len"], A["parts"], num_q_heads=QH, chunk=CHUNK)
+        fused = dict(qkv_bias=A["qkv_bias"], qkv_staged=A["staged_s"]) if w == "s" else {}
+        mpk.sm90_attention_layer(A["qkv32" if w == "s" else "qkv"], A[f"k_{w}"], A[f"v_{w}"], A["cos"], A["sin"], A["qo"],
+                                 A["kv_indptr"], A["kv_indices"], A["last_len"], A[f"out_{w}"], num_q_heads=QH,
+                                 window=window, sinks=A["sinks"], **fused)
+    mpk.sm90_attention_split_layer(A["qkv32"], A["k_p"], A["v_p"], A["cos"], A["sin"], A["qo"], A["kv_indptr"],
+                                   A["kv_indices"], A["last_len"], A["parts"], num_q_heads=QH, chunk=CHUNK,
+                                   qkv_bias=A["qkv_bias"], qkv_staged=A["staged_p"])
     mpk.sm90_attention_merge_layer(A["parts"], A["qo"], A["kv_indptr"], A["last_len"], A["out_p"], num_q_heads=QH,
                                    chunk=CHUNK, chunks=MAX_SEQ // CHUNK, page=PAGE, sinks=A["sinks"])
     nsm = mpk._num_sms()

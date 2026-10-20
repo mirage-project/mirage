@@ -1,6 +1,7 @@
 // tasks/sm90_topk.cuh -- the sm90_topk task type: MPK's top-k softmax router
 // (topk_softmax_sm100.cuh, architecture-neutral) over the step's tokens. One
-// task.
+// task. It zeroes the logits as it reads them (MPK's split-K router adds into
+// them) and lists the active experts in no particular order.
 #pragma once
 #include "sm90_common.cuh"
 #include "tasks/blackwell/topk_softmax_sm100.cuh"
@@ -39,13 +40,6 @@ __device__ __forceinline__ void run_sm90_topk(Maps const &,
   sm90_task_end<SELF>(g);
 }
 
-template <class SELF,
-          class PARAMS,
-          class BUF_SLOTS,
-          class MAP_SLOTS,
-          class... IN>
-constexpr int smem_sm90_topk() {
-  return 0;
-}
+SM90_TASK_SMEM(sm90_topk, 0)
 
 } // namespace static_mk

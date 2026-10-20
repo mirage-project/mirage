@@ -566,39 +566,6 @@ class StaticMegakernel(PersistentKernel):
                        [(-1, -1, -1)] * 4, [H], buf_slots=[self._tensor_slot(residual), self._tensor_slot(output)])
 
     # ---- MPK Hopper task bodies run by the static megakernel (tasks/sm90_*.cuh) ----
-    def sm90_moe_layer(
-        self,
-        input: DTensor,           # W13: [T, K] bf16; W2: [T, TOPK, K] bf16
-        weight_mxfp4: DTensor,    # [E, N, K / 2] u8, two E2M1 values per byte (low nibble first)
-        weight_scale: DTensor,    # [E, N, K / 32] u8, E8M0
-        routing_indices: DTensor, # [E, T] i32: 1 + the top-k slot of each token routed to the expert, else 0
-        active_experts: DTensor,  # [E + 1] i32: the routed experts, their count last
-        output: DTensor,          # [T, TOPK, N] bf16
-        bias: DTensor = None,     # [E, N] bf16
-        w13: bool = True,
-        rows_per_task: int = 64,
-        block_dim: tuple = (256, 1, 1),
-    ):
-        """One routed expert projection of MPK's Hopper MoE kernel (MXFP4 weights decoded into the WGMMA registers). Task
-        (x, y): the active experts x, x + 5 (W13; W2: + 4), ... times weight rows [y R, y R + R), R = rows_per_task.
-        params = [w13, R, N, K, E, TOPK, has_bias]."""
-        E, N, K = weight_mxfp4.dim(0), weight_mxfp4.dim(1), weight_mxfp4.dim(2) * 2
-        T = self._tokens(input.dim(0))
-        TOPK = output.dim(1)
-        assert N % rows_per_task == 0 and rows_per_task % 64 == 0 and K % 64 == 0
-        assert (weight_scale.dim(0), weight_scale.dim(1), weight_scale.dim(2)) == (E, N, K // 32)
-        assert (output.dim(0), output.dim(2)) == (T, N) and (routing_indices.dim(0), routing_indices.dim(1)) == (E, T)
-        self._dtypes("sm90_moe_layer", input=(input, bfloat16), weight_mxfp4=(weight_mxfp4, uint8),
-                     weight_scale=(weight_scale, uint8), output=(output, bfloat16))
-        tensors = [input, weight_mxfp4, weight_scale, routing_indices, active_experts] + ([bias] if bias is not None else [])
-        slots = [self._tensor_slot(t) for t in (input, weight_scale, routing_indices, active_experts)]
-        slots += [self._tensor_slot(bias) if bias is not None else -1, self._tensor_slot(output)]
-        self._add_node("sm90_moe", (5 if w13 else 4, N // rows_per_task, 1), block_dim, tensors + [output],
-                       [(-1, -1, -1), (-1, 1, -1), (-1, 1, -1), (-1, -1, -1), (-1, -1, -1)]
-                       + ([(-1, 1, -1)] if bias is not None else []) + [(-1, 2, -1)],
-                       [int(w13), rows_per_task, N, K, E, TOPK, int(bias is not None)], counters=1, buf_slots=slots,
-                       map_slots=[self._map("u8", ("t", weight_mxfp4), (E * N, K // 2, 64, 32))])
-
     def _sm90_node(self, name: str, grid: tuple, tensors: list, params: list, block_dim: tuple):
         """An sm90_* node whose task body reads and writes every tensor by pointer: tensors = its inputs, then its outputs (one;
         sm90_topk three: graph.cc), None for an optional input left out (buffer slot -1), each in its buffer slots in that order;
@@ -667,6 +634,7 @@ class StaticMegakernel(PersistentKernel):
     def sm90_topk_layer(self, logits: DTensor, num_tokens: DTensor, weights: DTensor, routing_indices: DTensor,
                         active_experts: DTensor, block_dim: tuple = (256, 1, 1)):
         """Top-k softmax routing of the step's tokens (MPK's router; rows past num_tokens[0] are left unrouted). One task.
+        The logits are zeroed as they are read (MPK's split-K router accumulates into them); the active list is unordered.
         Outputs: weights [T, TOPK] fp32, routing_indices [E, T] i32, active_experts [E + 1] i32 (the node's buffer slots).
         params = [E, TOPK]."""
         T, E, TOPK = self._tokens(logits.dim(0)), logits.dim(1), weights.dim(1)
@@ -674,48 +642,57 @@ class StaticMegakernel(PersistentKernel):
         self._sm90_node("sm90_topk", (1, 1, 1), [logits, num_tokens, weights, routing_indices, active_experts], [E, TOPK],
                         block_dim)
 
-    def sm90_swiglu_layer(self, input: DTensor, output: DTensor, limit: float, alpha: float,
-                          block_dim: tuple = (256, 1, 1)):
-        """GPT-OSS's clamped SwiGLU of each token's top-k slots (gate the first half of input's rows, up the second): task x
-        = token x. params = [I, TOPK, limit bits, alpha bits]."""
-        T, TOPK, I = self._tokens(input.dim(0)), input.dim(1), output.dim(2)
-        assert input.dim(2) == 2 * I and output.dim(1) == TOPK
-        self._sm90_node("sm90_swiglu", (T, 1, 1), [input, output], [I, TOPK, float_bits(limit), float_bits(alpha)],
-                        block_dim)
-
     def sm90_attention_layer(self, qkv: DTensor, k_cache: DTensor, v_cache: DTensor, cos: DTensor, sin: DTensor,
                              qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
                              output: DTensor, num_q_heads: int, window: int = 0, sinks: DTensor = None,
-                             block_dim: tuple = (256, 1, 1)):
+                             qkv_bias: DTensor = None, qkv_staged: DTensor = None, block_dim: tuple = (256, 1, 1)):
         """Paged attention with RoPE, the new tokens' K / V appended to the cache, GPT-OSS's per-head sinks and sliding
         window (MPK's Hopper kernel, tasks/sm90_attention.cuh): task (x, y) = request x, KV head y; R = qo_indptr.dim(0) - 1
         requests. qkv [T, KVH x (Q / KVH + 2) x D] (each KV head's q heads, then k, v), caches [pages, page, KVH, D], cos /
         sin [max seq, D], the page tables as MPK's runtime keeps them (the host fills them before each step), sinks
-        [KVH, Q / KVH]. params = [Q, KVH, D, max seq, page, window, has_sink]."""
+        [KVH, Q / KVH]. qkv_bias [KVH x (Q / KVH + 2) x D] bf16: qkv is the QKV GEMM's fp32 output, each task adds its
+        head's bias into qkv_staged (bf16, qkv's shape; no bias node). params = [Q, KVH, D, max seq, page, window, has_sink,
+        has qkv bias]."""
         pages, page, KVH, D = (k_cache.dim(i) for i in range(4))
         R = qo_indptr.dim(0) - 1
         self._tokens(qkv.dim(0))
         assert qkv.dim(1) == KVH * (num_q_heads // KVH + 2) * D and output.dim(1) == num_q_heads * D
-        self._dtypes("sm90_attention_layer", qkv=(qkv, bfloat16), k_cache=(k_cache, bfloat16), output=(output, bfloat16))
+        self._qkv_bias_dtypes("sm90_attention_layer", qkv, qkv_bias, qkv_staged)
+        self._dtypes("sm90_attention_layer", k_cache=(k_cache, bfloat16), output=(output, bfloat16))
         self._sm90_node("sm90_attention", (R, KVH, 1),
-                        [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, sinks, output],
-                        [num_q_heads, KVH, D, cos.dim(0), page, window, int(sinks is not None)], block_dim)
+                        [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, sinks, qkv_bias,
+                         qkv_staged, output],
+                        [num_q_heads, KVH, D, cos.dim(0), page, window, int(sinks is not None), int(qkv_bias is not None)],
+                        block_dim)
+
+    def _qkv_bias_dtypes(self, layer: str, qkv: DTensor, qkv_bias: DTensor, qkv_staged: DTensor):
+        """The attention layers' qkv: bf16, or (qkv_bias) the GEMM's fp32 with a bf16 bias and staging buffer."""
+        assert (qkv_bias is None) == (qkv_staged is None), "qkv_bias and qkv_staged go together"
+        if qkv_bias is None:
+            self._dtypes(layer, qkv=(qkv, bfloat16))
+        else:
+            assert qkv_bias.dim(0) == qkv.dim(1) and (qkv_staged.dim(0), qkv_staged.dim(1)) == (qkv.dim(0), qkv.dim(1))
+            self._dtypes(layer, qkv=(qkv, float32), qkv_bias=(qkv_bias, bfloat16), qkv_staged=(qkv_staged, bfloat16))
 
     def sm90_attention_split_layer(self, qkv: DTensor, k_cache: DTensor, v_cache: DTensor, cos: DTensor, sin: DTensor,
                                    qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
-                                   parts: DTensor, num_q_heads: int, chunk: int, block_dim: tuple = (256, 1, 1)):
+                                   parts: DTensor, num_q_heads: int, chunk: int, qkv_bias: DTensor = None,
+                                   qkv_staged: DTensor = None, block_dim: tuple = (256, 1, 1)):
         """sm90_attention_layer's full attention with the KV split in chunks of `chunk` positions (tasks/
         sm90_attention_split.cuh): task (x, y, z) = request x, KV head y, chunk z, its normalized output and log2-sum-exp
         into parts, a flat bf16 tensor sm90_attention_parts_size long; sm90_attention_merge_layer combines them (and the
-        sinks). C = the chunks = max seq / chunk. params = [Q, KVH, D, max seq, page, chunk, C]."""
+        sinks). C = the chunks = max seq / chunk; qkv_bias, qkv_staged as sm90_attention_layer's. params = [Q, KVH, D,
+        max seq, page, chunk, C, has qkv bias]."""
         pages, page, KVH, D = (k_cache.dim(i) for i in range(4))
         R, T, C = qo_indptr.dim(0) - 1, self._tokens(qkv.dim(0)), cos.dim(0) // chunk
         assert cos.dim(0) % chunk == 0 and chunk % 64 == 0 and parts.num_dims == 1
         assert parts.dim(0) == sm90_attention_parts_size(T, num_q_heads, D, C)
-        self._dtypes("sm90_attention_split_layer", qkv=(qkv, bfloat16), parts=(parts, bfloat16))
+        self._qkv_bias_dtypes("sm90_attention_split_layer", qkv, qkv_bias, qkv_staged)
+        self._dtypes("sm90_attention_split_layer", parts=(parts, bfloat16))
         self._sm90_node("sm90_attention_split", (R, KVH, C),
-                        [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, parts],
-                        [num_q_heads, KVH, D, cos.dim(0), page, chunk, C], block_dim)
+                        [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, qkv_bias,
+                         qkv_staged, parts],
+                        [num_q_heads, KVH, D, cos.dim(0), page, chunk, C, int(qkv_bias is not None)], block_dim)
 
     def sm90_attention_merge_layer(self, parts: DTensor, qo_indptr: DTensor, kv_indptr: DTensor, last_page_len: DTensor,
                                    output: DTensor, num_q_heads: int, chunk: int, chunks: int, page: int,

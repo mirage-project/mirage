@@ -23,17 +23,18 @@ __device__ __forceinline__ void run_sm90_router(Maps const &,
                                                 StaticTask const &tk) {
   constexpr int K = PARAMS::v[0], E = PARAMS::v[1], EPT = PARAMS::v[2];
   constexpr bool F16 = PARAMS::v[3] == 1;
-  constexpr int VEC = K / 8, PER = (VEC + 255) / 256, NS = EPT * T;
-  static_assert(K % 8 == 0 && E % EPT == 0, "sm90_router: 16-B vectors");
-  __shared__ float part[8][NS]; // per warp: its (expert, token) sums
+  using Row = Sm90Row<K>;
+  constexpr int VEC = Row::VEC, NS = EPT * T;
+  static_assert(E % EPT == 0, "sm90_router: whole tasks of experts");
+  __shared__ float part[SM90_WARPS][NS]; // per warp: its (expert, token) sums
   sm90_task_begin<IN...>(g);
   uint4 const *h = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 0>());
   uint4 const *w = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 1>()) +
                    (size_t)tk.x * EPT * VEC;
   float acc[EPT][T] = {};
 #pragma unroll
-  for (int j = 0; j < PER; j++) {
-    int const v = threadIdx.x + 256 * j;
+  for (int j = 0; j < Row::PER; j++) {
+    int const v = Row::vec(j);
     if (v < VEC) {
       uint4 hv[T], wv[EPT];
 #pragma unroll
@@ -69,11 +70,7 @@ __device__ __forceinline__ void run_sm90_router(Maps const &,
   for (int e = 0; e < EPT; e++) {
 #pragma unroll
     for (int t = 0; t < T; t++) {
-      float s = acc[e][t];
-#pragma unroll
-      for (int o = 16; o > 0; o >>= 1) {
-        s += __shfl_xor_sync(0xffffffffu, s, o);
-      }
+      float const s = sm90_warp_sum(acc[e][t]);
       if (lane == 0) {
         part[warp][e * T + t] = s;
       }
@@ -84,7 +81,7 @@ __device__ __forceinline__ void run_sm90_router(Maps const &,
     int const e = threadIdx.x / T, t = threadIdx.x % T;
     float s = 0.f;
 #pragma unroll
-    for (int k = 0; k < 8; k++) {
+    for (int k = 0; k < SM90_WARPS; k++) {
       s += part[k][threadIdx.x];
     }
     int const ex = tk.x * EPT + e;
@@ -96,13 +93,6 @@ __device__ __forceinline__ void run_sm90_router(Maps const &,
   sm90_task_end<SELF>(g);
 }
 
-template <class SELF,
-          class PARAMS,
-          class BUF_SLOTS,
-          class MAP_SLOTS,
-          class... IN>
-constexpr int smem_sm90_router() {
-  return 0;
-}
+SM90_TASK_SMEM(sm90_router, 0)
 
 } // namespace static_mk

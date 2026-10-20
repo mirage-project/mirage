@@ -68,6 +68,56 @@ __device__ __forceinline__ void sm90_task_end(G const &g) {
   }
 }
 
+// The block every sm90_* task runs with (static_megakernel.py's block_dim)
+constexpr int SM90_THREADS = 256, SM90_WARPS = SM90_THREADS / 32;
+
+// A row of N 16-bit values as 16-B vectors (8 values) over the block: thread
+// i takes vectors i, i + SM90_THREADS, ... (PER of them at most), each load of
+// the row issued before the first use (a strided loop waits out the memory
+// latency per element)
+template <int N>
+struct Sm90Row {
+  static_assert(N % 8 == 0, "sm90: rows of 16-B vectors");
+  static constexpr int VEC = N / 8,
+                       PER = (VEC + SM90_THREADS - 1) / SM90_THREADS;
+  // thread's j-th vector, VEC or past: none
+  __device__ __forceinline__ static int vec(int j) {
+    return threadIdx.x + SM90_THREADS * j;
+  }
+};
+
+__device__ __forceinline__ float sm90_warp_sum(float s) {
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) {
+    s += __shfl_xor_sync(0xffffffffu, s, o);
+  }
+  return s;
+}
+// The block's sum of s, in every thread (part: SM90_WARPS floats of shared
+// memory, free again after the next barrier)
+__device__ __forceinline__ float sm90_block_sum(float s, float *part) {
+  s = sm90_warp_sum(s);
+  if ((threadIdx.x & 31) == 0) {
+    part[threadIdx.x >> 5] = s;
+  }
+  __syncthreads();
+  float tot = 0.f;
+#pragma unroll
+  for (int k = 0; k < SM90_WARPS; k++) {
+    tot += part[k];
+  }
+  return tot;
+}
+
+// 8 fp32 (two 16-B vectors): vector v of p
+__device__ __forceinline__ void
+    f32x8_load(float const *p, int v, float (&f)[8]) {
+  float4 const a = reinterpret_cast<float4 const *>(p)[2 * v],
+               b = reinterpret_cast<float4 const *>(p)[2 * v + 1];
+  f[0] = a.x, f[1] = a.y, f[2] = a.z, f[3] = a.w;
+  f[4] = b.x, f[5] = b.y, f[6] = b.z, f[7] = b.w;
+}
+
 // 8 bf16 or f16 <-> fp32 (one 16-B vector)
 __device__ __forceinline__ void bf16x8_to_f32(uint4 v, float (&f)[8]) {
   __nv_bfloat162 const *h = reinterpret_cast<__nv_bfloat162 const *>(&v);
@@ -106,5 +156,17 @@ __device__ __forceinline__ uint4 f32_to_bf16x8(float const (&f)[8]) {
 
 // the dynamic shared memory an MPK Hopper body may take
 constexpr int SM90_BODY_SMEM = 200 * 1024;
+
+// smem_<name>, the dynamic shared memory task type <name> needs
+// (static_schedule.py smem_code): BYTES whatever its template arguments
+#define SM90_TASK_SMEM(NAME, BYTES)                                            \
+  template <class SELF,                                                        \
+            class PARAMS,                                                      \
+            class BUF_SLOTS,                                                   \
+            class MAP_SLOTS,                                                   \
+            class... IN>                                                       \
+  constexpr int smem_##NAME() {                                                \
+    return BYTES;                                                              \
+  }
 
 } // namespace static_mk
