@@ -259,6 +259,29 @@ enum TaskType {
   // Process routed expert work on one SM, with e4m3 weights and fp32 scales
   // (tasks/scaled_moe_experts.cuh).
   TASK_SCALED_MOE_EXPERTS_SM100 = 514,
+  // 515..518 are reserved for the KDA attention tasks.
+  // Apply the MLA q_a_layernorm, q_c = RMSNorm(q_a) * gamma, and quantize
+  // q_c to e4m3 with fp32 scales (tasks/dsa_q_norm_quant.cuh).
+  TASK_DSA_Q_NORM_QUANT_SM100 = 519,
+  // Write the MLA latent cache row of this step (tasks/dsa_kv_write.cuh).
+  TASK_DSA_KV_WRITE_SM100 = 520,
+  // Write the DSA indexer key of this step in FP8 with a UE8M0 scale
+  // (tasks/dsa_index_k_write.cuh).
+  TASK_DSA_INDEX_K_WRITE_SM100 = 521,
+  // Compute the absorbed MLA query: q_nope W_UK and the rotated q_pe
+  // (tasks/dsa_q_absorb.cuh).
+  TASK_DSA_Q_ABSORB_SM100 = 522,
+  // Compute the DSA indexer scores, FP8 MQA logits (tasks/dsa_index_score.cuh).
+  TASK_DSA_INDEX_SCORE_SM100 = 523,
+  // Select the DSA indexer top-k positions (tasks/dsa_index_topk.cuh).
+  TASK_DSA_INDEX_TOPK_SM100 = 524,
+  // Compute one split of sparse MLA decode over a paged bf16 latent cache
+  // (tasks/sparse_mla.cuh).
+  TASK_SPARSE_MLA_SM100 = 525,
+  // Merge the sparse MLA splits (tasks/dsa_mla_merge.cuh).
+  TASK_DSA_MLA_MERGE_SM100 = 526,
+  // Compute the MLA value up-projection o_lat W_UV (tasks/dsa_o_absorb.cuh).
+  TASK_DSA_O_ABSORB_SM100 = 527,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 

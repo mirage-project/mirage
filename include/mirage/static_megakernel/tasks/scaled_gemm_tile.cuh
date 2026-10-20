@@ -4,8 +4,9 @@
 // scale_promotion.cuh defines the terms used below.
 //   weight      e4m3 pieces, [N / 128][K / 128] (the piece layout of
 //               mirage.mpk.fp8_fp32scale_weights)
-//   activation  z_q, the output of a group_quant node: e4m3 [T][K], then the
-//               fp32 scales [K / 128][T] (one for each token and K tile)
+//   activation  z_q, the output of a group_quant node (or of a node with the
+//               same output, dsa_q_norm_quant): e4m3 [T][K], then the fp32
+//               scales [K / 128][T] (one for each token and K tile)
 // out[t][row0 + r] = the sum over the pieces kt of the task of
 // sw(r, kt) sx(t, kt) partial(r, t, kt), for r < 128. The MMA uses scale 1 for
 // both operands. Each piece has its own TMEM accumulator. The epilogue
@@ -177,7 +178,8 @@ __device__ __forceinline__ void run_scaled_gemm_tile(Maps const &maps,
   static_assert(
       ACT::x > 0 && ACT::counter >= 0 && ACT::buf >= 0 &&
           exchange_bytes[ACT::buf] == zq32_bytes(K),
-      "scaled_gemm_tile: the activation is a group_quant node's output");
+      "scaled_gemm_tile: the activation is the output of a group_quant node "
+      "(or of a node with the same output)");
   // the activation is in set rg_set() of the exchange region
   TileJob const j = make_scaled_tile<NATOMS>(
       &maps.m[WMAP], &maps.m[AMAP + dbuf_par], tk.x, tk.y * NATOMS, KT);

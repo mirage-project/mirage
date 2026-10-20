@@ -23,10 +23,16 @@ from ..kernel import TBGraph
 from .persistent_kernel import PersistentKernel
 
 # the kernel's limits (config.cuh MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, SMAX = the ring's stages; core.cuh Combine)
-MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 24, 32, 16, 5
+MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 40, 32, 32, 5
 COMBINE = {"slots": 0, "add": 1, "store": 2}
 SF_CHUNK = 512   # one MX scale chunk (config.cuh): 128 rows x 4 B
 MAX_SUM_PARTS = 14   # the most K parts sum_send adds (tasks/sum_send.cuh)
+# DSA constants (dsa_common.cuh, tasks/dsa_index_topk.cuh):
+#   DSA_TOPK_BINS        the bins of a token histogram of the index scores (TOPK_BINS)
+#   DSA_TOPK_REC         the ints of a chunk record of the top-k count node (TOPK_REC)
+#   DSA_TOPK_CH          the positions of a top-k chunk (TOPK_CH)
+#   DSA_INDEX_KEY_BYTES  the bytes of one key in the index cache: 128 e4m3 values and 4 scale bytes (index_page_bytes)
+DSA_TOPK_BINS, DSA_TOPK_REC, DSA_TOPK_CH, DSA_INDEX_KEY_BYTES = 4096, 19, 1024, 132
 
 
 def zq_bytes(tokens: int, width: int) -> int:
@@ -89,7 +95,9 @@ class StaticMegakernel(PersistentKernel):
         """Add one node, as MPK's layers do (customized + register_task), and keep for compiler.py what the graph does not hold:
           input_maps              input_maps[i] = which dimension of tensors[i] each grid axis cuts (MPK's input_map,
                                   TBGraph.new_input: (1, -1, -1) = grid x cuts dim 1); a task's slices follow from the input
-                                  maps and the grid, for any grid
+                                  maps and the grid, for any grid. The compiler gets the dependencies from these slices. A
+                                  task must not wait at run time for a task outside them. If it does, a plan that
+                                  passes check_deadlock_free can hang
           changeable_grid_dims    {grid axis: unit or (unit, min units, max units)}: the grid axes the compiler may change;
                                   one task gets a whole number of units of each dimension that axis cuts (gemm_tile: {1: 128},
                                   K in whole 128-column pieces), optionally between min and max units; the other axes keep
@@ -329,8 +337,11 @@ class StaticMegakernel(PersistentKernel):
                      output=(output, int64 if combine == "add" else float32))
         assert output.num_dims == 2 and output.dim(0) == input.dim(0) and output.dim(1) == N and N % 128 == 0 and K % 128 == 0
         q = producer_of(input, graph_nodes(self))
-        if q is None or q.name != "group_quant":
-            raise ValueError("scaled_gemm_tile_layer: the input must be a group_quant node's output")
+        # The task reads the zq32 layout in the exchange region and waits for the counter of the producer. The producer is
+        # a group_quant node, or a node with the same output (dsa_q_norm_quant).
+        if q is None or not q.info["exchange"] or q.info["counter"] < 0 or q.info["out_buffer"](q)[0] != zq32_bytes(T, K):
+            raise ValueError("scaled_gemm_tile_layer: the input must be the z_q output of a group_quant node (or of a node "
+                             "with the same output: the zq32 layout in the exchange region, a counter of its tasks)")
         if any(n.name == "allreduce_send" and n.info["buf_slots"][0] == q.info["buf"] for n in graph_nodes(self)):
             raise ValueError("scaled_gemm_tile_layer: an allreduce_send node already re-arms this input after moe_experts; add the "
                              "scaled_gemm_tile node before it (allreduce_send_layer re-arms z_q only when moe_experts is its only reader)")
@@ -683,24 +694,292 @@ class StaticMegakernel(PersistentKernel):
     def residual_add_layer(
         self,
         addend: DTensor,        # S [T, H] bf16, sum_gpus's output buffer
-        input: DTensor,         # o [T, H] bf16: this GPU's part, sent by sum_send (every GPU's part arrives through the exchange region),
-                                # or a second sum_gpus node's output (GLM-5.3: the routed sum)
+        *,                      # the other arguments by keyword
+        input: DTensor = None,  # o [T, H] bf16: this GPU's part, sent by sum_send (every GPU's part arrives through the exchange region),
+                                # or a second sum_gpus node's output (GLM-5.3: the routed sum). None: one sum, as in an attention layer
         residual: DTensor,      # [T, H] bf16 (a graph input)
         output: DTensor,        # y [T, H] bf16
         block_dim: tuple = (256, 1, 1),
     ):
-        """Task x of the SMs: slice x of y = bf16(bf16(input + addend) + residual). params = [H]."""
+        """Task x of the SMs: slice x of y = bf16(bf16(input + addend) + residual), or y = bf16(addend + residual) with no
+        input. The residual is a graph input. params = [H]. buf_slots: [residual, output]."""
         T, H = self._tokens(output.dim(0)), output.dim(1)
-        self._dtypes("residual_add_layer", addend=(addend, bfloat16), input=(input, bfloat16), residual=(residual, bfloat16),
-                     output=(output, bfloat16))
+        self._dtypes("residual_add_layer", addend=(addend, bfloat16), residual=(residual, bfloat16), output=(output, bfloat16),
+                     **({"input": (input, bfloat16)} if input is not None else {}))
         assert (residual.dim(0), residual.dim(1)) == (T, H) and H % (8 * self.num_gpus) == 0
         from .compiler import graph_nodes, producer_of
         nodes = graph_nodes(self)
-        a, o = producer_of(addend, nodes), producer_of(input, nodes)
-        if a is None or a.name != "sum_gpus" or o is None or o.name not in ("sum_send", "sum_gpus"):
-            raise ValueError("residual_add_layer: the addend from sum_gpus, the input from sum_send or sum_gpus")
-        self._add_node("residual_add", (self._num_sms(), 1, 1), block_dim, [addend, input, residual, output],
-                       [(-1, -1, -1)] * 4, [H], buf_slots=[self._tensor_slot(residual), self._tensor_slot(output)])
+        a = producer_of(addend, nodes)
+        if a is None or a.name != "sum_gpus":
+            raise ValueError("residual_add_layer: the addend from sum_gpus")
+        if input is not None:
+            o = producer_of(input, nodes)
+            if o is None or o.name not in ("sum_send", "sum_gpus"):
+                raise ValueError("residual_add_layer: the input from sum_send or sum_gpus")
+        if producer_of(residual, nodes) is not None:
+            raise ValueError("residual_add_layer: the residual must be a graph input")
+        tensors = [addend, residual, output] if input is None else [addend, input, residual, output]
+        self._add_node("residual_add", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors), [H],
+                       buf_slots=[self._tensor_slot(residual), self._tensor_slot(output)])
+
+    # ---- DeepSeek Sparse Attention: GLM-5.3 / 5.2 MLA with the lightning indexer (tasks/dsa_*.cuh, sparse_mla.cuh) ----
+    # The tasks use the GLM-5 shapes: qk_nope 192, v 256, and 32 indexer heads of 128. The caches and the index tensor are
+    # graph inputs. The nodes write them in place through their tensor slots. Thus the data stays after the launch.
+    # A "shared" layer reads the indices of the last "full" layer (GLM IndexShare).
+    def _producer(self, layer: str, tensor: DTensor, names: tuple, allow_none: bool = False):
+        """Return the node that writes `tensor`. Raise ValueError if the name of that node is not in `names`. With
+        allow_none, a graph input (no node writes it) gives None instead of an error."""
+        from .compiler import graph_nodes, producer_of
+        p = producer_of(tensor, graph_nodes(self))
+        if (p is None and not allow_none) or (p is not None and p.name not in names):
+            raise ValueError(f"{layer}: the input must be the output of a {' or '.join(names)} node"
+                             + (", or a graph input" if allow_none else ""))
+        return p
+
+    def _fx_producer(self, layer: str, tensor: DTensor):
+        """Return the COMBINE_ADD GEMM node (gemm_tile or scaled_gemm_tile) that writes `tensor` (int64 fixed point [T, N])."""
+        p = self._producer(layer, tensor, ("gemm_tile", "scaled_gemm_tile"))
+        if p.params[0] != COMBINE["add"]:
+            raise ValueError(f"{layer}: the input must be the output of a GEMM node with combine='add'")
+        return p
+
+    def _scratch_slot(self, node, name: str) -> int:
+        """Return the buffer slot of the scratch buffer `name` of `node` (_scratch)."""
+        for i, b in enumerate(self._bufs):
+            if b["kind"] == "scratch" and b["name"] == name and b.get("node") == node.graph_idx:
+                return i
+        raise ValueError(f"node {node.graph_idx} ({node.name}) has no scratch buffer {name}")
+
+    def dsa_q_norm_quant_layer(
+        self,
+        qkva: DTensor,      # the fused A projection [T, N] int64 fixed point: q_a in columns [0, QL), then kv_a
+        gamma: DTensor,     # q_a_layernorm weight [QL] fp32
+        output: DTensor,    # z_q [T, QL] e4m3 bytes (uint8): q_c quantized, as a group_quant node writes it
+        eps: float = 1e-5,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare the MLA q_a_layernorm with the quantization of its output (tasks/dsa_q_norm_quant.cuh). Task t is token t:
+        q_c = bf16(RMSNorm(bf16(q_a)) * gamma), computed in fp32. Then z_q = e4m3(q_c / s) with one scale for each 128
+        columns (s = max(amax, 1e-10) / 448, as group_quant). The output is in the exchange region in the zq32 layout
+        (z_q, then the scales [QL / 128][T]). scaled_gemm_tile reads it after the counter. A reader that polls 16-byte
+        units (scaled_moe_experts) must not read it. Thus the host does not fill the buffer with 0xFF before a launch.
+        params = [QL, eps bits]. buf_slots: [gamma]. One counter: the count of the tasks."""
+        self._fx_producer("dsa_q_norm_quant_layer", qkva)
+        T, QL = self._tokens(output.dim(0)), output.dim(1)
+        self._dtypes("dsa_q_norm_quant_layer", qkva=(qkva, int64), gamma=(gamma, float32), output=(output, uint8))
+        assert QL == 2048 and QL <= qkva.dim(1) and gamma.dim(0) == QL
+        self._add_node("dsa_q_norm_quant", (T, 1, 1), block_dim, [qkva, output], [(-1, -1, -1), (0, -1, -1)], [QL, float_bits(eps)],
+                       out_buffer=lambda n: (zq32_bytes(T, QL), -1, False), exchange=True, counters=1,
+                       buf_slots=[self._tensor_slot(gamma)],
+                       cost_inputs=[0])   # waits for the GEMM's K parts
+
+    def dsa_kv_write_layer(
+        self,
+        qkva: DTensor,          # the fused A projection [T, N] int64 fixed point: kv_c in columns [kv0, kv0 + 512), k_pe after
+        gamma: DTensor,         # kv_a_layernorm weight [512] fp32
+        cos_sin: DTensor,       # the RoPE table [positions, 64] bf16 (cos 32, then sin 32)
+        seq_lens: DTensor,      # [T] int32: the token of this step is at position seq_lens - 1 (<= 0: an idle slot)
+        block_table: DTensor,   # [T, MAXP] int32
+        cache: DTensor,         # the latent cache [pages x page, 576] bf16 (a graph input that the node writes in place)
+        kv0: int,               # the first kv_c column of qkva (q_lora_rank)
+        page: int = 64,
+        eps: float = 1e-5,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare the latent cache write (tasks/dsa_kv_write.cuh). Task t writes the cache row of position seq_lens[t] - 1:
+        [bf16(RMSNorm(kv_c) * gamma) | bf16(RoPE(k_pe))]. params = [kv0, page, MAXP, eps bits]. buf_slots: [gamma, cos_sin,
+        seq_lens, block_table, cache]. One counter: the count of the tasks."""
+        self._fx_producer("dsa_kv_write_layer", qkva)
+        T = self._tokens(qkva.dim(0))
+        self._dtypes("dsa_kv_write_layer", qkva=(qkva, int64), gamma=(gamma, float32), cos_sin=(cos_sin, bfloat16),
+                     seq_lens=(seq_lens, int32), block_table=(block_table, int32), cache=(cache, bfloat16))
+        assert kv0 + 576 <= qkva.dim(1) and gamma.dim(0) == 512 and cache.dim(1) == 576 and cache.dim(0) % page == 0
+        assert cos_sin.dim(1) == 64 and seq_lens.dim(0) == T and block_table.dim(0) == T
+        self._add_node("dsa_kv_write", (T, 1, 1), block_dim, [qkva, cache], [(-1, -1, -1), (-1, -1, -1)],
+                       [kv0, page, block_table.dim(1), float_bits(eps)], counters=1,
+                       buf_slots=[self._tensor_slot(gamma), self._tensor_slot(cos_sin), self._tensor_slot(seq_lens),
+                                  self._tensor_slot(block_table), self._tensor_slot(cache)],
+                       cost_inputs=[0])   # waits for the GEMM's K parts
+
+    def dsa_index_k_write_layer(
+        self,
+        kw: DTensor,            # the indexer projection x [wk | weights_proj]^T [T, N] int64 fixed point (k: columns [0, 128))
+        k_norm_weight: DTensor,  # [128] fp32
+        k_norm_bias: DTensor,    # [128] fp32
+        cos_sin: DTensor, seq_lens: DTensor, block_table: DTensor,
+        index_cache: DTensor,   # [pages, page x 132] uint8 (a graph input that the node writes in place)
+        page: int = 64,
+        eps: float = 1e-6,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare the indexer key write (tasks/dsa_index_k_write.cuh). Task t writes the key of position seq_lens[t] - 1.
+        The task applies LayerNorm to the 128 dims and RoPE to dims [0, 64). Then it quantizes the key to e4m3 with a UE8M0
+        scale and writes it in the index-cache page layout. params = [page, MAXP, eps bits]. buf_slots: [k_norm_weight,
+        k_norm_bias, cos_sin, seq_lens, block_table, index_cache]. One counter: the count of the tasks."""
+        self._fx_producer("dsa_index_k_write_layer", kw)
+        T = self._tokens(kw.dim(0))
+        self._dtypes("dsa_index_k_write_layer", kw=(kw, int64), k_norm_weight=(k_norm_weight, float32),
+                     k_norm_bias=(k_norm_bias, float32), cos_sin=(cos_sin, bfloat16), seq_lens=(seq_lens, int32),
+                     block_table=(block_table, int32), index_cache=(index_cache, uint8))
+        assert page == 64 and index_cache.dim(1) == page * DSA_INDEX_KEY_BYTES and kw.dim(1) >= 128
+        self._add_node("dsa_index_k_write", (T, 1, 1), block_dim, [kw, index_cache], [(-1, -1, -1), (-1, -1, -1)],
+                       [page, block_table.dim(1), float_bits(eps)], counters=1,
+                       buf_slots=[self._tensor_slot(k_norm_weight), self._tensor_slot(k_norm_bias), self._tensor_slot(cos_sin),
+                                  self._tensor_slot(seq_lens), self._tensor_slot(block_table), self._tensor_slot(index_cache)],
+                       cost_inputs=[0])   # waits for the GEMM's K parts
+
+    def dsa_q_absorb_layer(
+        self,
+        qb: DTensor,            # q_b [T, NH x 256] int64 fixed point (for each head: 192 nope, then 64 rope)
+        w_uk: DTensor,          # W_UK [NH, 192, 512] bf16 (from kv_b_proj, dequantized)
+        cos_sin: DTensor, seq_lens: DTensor,
+        output: DTensor,        # q [T, NH, 576] bf16 (the sparse_mla query)
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare the absorbed query (tasks/dsa_q_absorb.cuh). Task h * 4 + cb computes latent columns [128 cb, 128 cb + 128)
+        of head h for all tokens. The task with cb = 0 also writes the rotated q_pe at position seq_lens[t] - 1: cos_sin
+        must have at least max(seq_lens) rows. params = [NH]. buf_slots: [w_uk, cos_sin, seq_lens]. One counter: the count
+        of the tasks."""
+        self._fx_producer("dsa_q_absorb_layer", qb)
+        T, NH = self._tokens(qb.dim(0)), w_uk.dim(0)
+        self._dtypes("dsa_q_absorb_layer", qb=(qb, int64), w_uk=(w_uk, bfloat16), cos_sin=(cos_sin, bfloat16),
+                     seq_lens=(seq_lens, int32), output=(output, bfloat16))
+        assert qb.dim(1) == NH * 256 and (w_uk.dim(1), w_uk.dim(2)) == (192, 512)
+        assert (output.dim(0), output.dim(1), output.dim(2)) == (T, NH, 576)
+        self._add_node("dsa_q_absorb", (NH * 4, 1, 1), block_dim, [qb, output], [(-1, -1, -1), (-1, -1, -1)], [NH],
+                       out_buffer=lambda n: (T * NH * 576 * 2, -1, False), counters=1,
+                       buf_slots=[self._tensor_slot(w_uk), self._tensor_slot(cos_sin), self._tensor_slot(seq_lens)],
+                       cost_inputs=[0])   # waits for the GEMM's K parts
+
+    def dsa_index_score_layer(
+        self,
+        iq: DTensor,            # wq_b(q_c) [T, 32 x 128] int64 fixed point
+        kw: DTensor,            # the indexer projection (w: columns 128 + h)
+        index_cache: DTensor,   # written by dsa_index_k_write
+        cos_sin: DTensor, seq_lens: DTensor,
+        block_table: DTensor,   # [T, MAXP] int32 with MAXP x page = MAXCTX (seq_lens <= MAXCTX)
+        output: DTensor,        # scores [T, MAXCTX] fp32 (bf16 values)
+        chunks: int = 16,       # tasks per token, MAXCTX / chunks positions each (whole pages of 64, at most 16)
+        page: int = 64,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare the index scores (tasks/dsa_index_score.cuh). Task (c, t) computes the scores of chunk c of the context of
+        token t. The compiler can change the chunk count (grid x). Each chunk holds a whole number of 64-position pages, from 1
+        to 16. Each slot t must be a different request. params = [32, MAXCTX, page, MAXP]. buf_slots: [cos_sin, seq_lens,
+        block_table, index_cache, the token histograms (a scratch buffer, zero before each launch)]. Counters: one for each
+        token (its chunks)."""
+        self._fx_producer("dsa_index_score_layer", iq)
+        self._fx_producer("dsa_index_score_layer", kw)
+        self._producer("dsa_index_score_layer", index_cache, ("dsa_index_k_write",))
+        T, MAXCTX = self._tokens(output.dim(0)), output.dim(1)
+        self._dtypes("dsa_index_score_layer", iq=(iq, int64), kw=(kw, int64), index_cache=(index_cache, uint8),
+                     cos_sin=(cos_sin, bfloat16), seq_lens=(seq_lens, int32), block_table=(block_table, int32),
+                     output=(output, float32))
+        assert iq.dim(1) == 32 * 128 and MAXCTX % (chunks * page) == 0 and page == 64
+        assert MAXCTX // chunks <= 16 * page, "at most 1024 positions in a chunk (the page slots in shared memory)"
+        assert block_table.dim(1) * page == MAXCTX, "the block table must cover exactly MAXCTX positions"
+        # the token histograms of the high 12 bits of the score keys (dsa_index_topk reads them), zero before each launch
+        hist = self._scratch("dsa_index_score.hist", T * DSA_TOPK_BINS * 4, 0)
+        self._add_node("dsa_index_score", (chunks, T, 1), block_dim, [iq, kw, index_cache, output],
+                       [(-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (1, 0, -1)], [32, MAXCTX, page, block_table.dim(1)],
+                       changeable_grid_dims={0: (page, 1, 16)}, out_buffer=lambda n: (T * MAXCTX * 4, -1, False), counters=T,
+                       buf_slots=[self._tensor_slot(cos_sin), self._tensor_slot(seq_lens), self._tensor_slot(block_table),
+                                  self._tensor_slot(index_cache), hist])
+
+    def dsa_index_topk_layer(
+        self,
+        scores: DTensor,        # the dsa_index_score output [T, MAXCTX]
+        seq_lens: DTensor,
+        output: DTensor,        # indices [T, TOPK] int32: a graph input that the node writes in place (the next "shared"
+                                # layers read it)
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare the indexer top-k (tasks/dsa_index_topk.cuh) as two nodes. Both nodes have the grid (MAXCTX / 1024, T).
+        The count node: task (c, t) writes the record of chunk c of token t. It reads the token histograms of the score node
+        and waits for all the chunks of token t (its input map of the scores is the whole row). buf_slots: [seq_lens, the
+        token histograms].
+        The write node: task (c, t) writes the selected positions of chunk c. buf_slots: [seq_lens, output, the scores].
+        The output holds the positions of the TOPK largest scores of token t in ascending order. For a shorter context, it
+        holds all positions, then -1. MAXCTX is at most 32 x 1024 (one lane of a warp for each chunk record). params = [TOPK,
+        MAXCTX, mode (0 count, 1 write)]. Counters of each node: one for each token."""
+        p = self._producer("dsa_index_topk_layer", scores, ("dsa_index_score",))
+        T, TOPK, MAXCTX = self._tokens(output.dim(0)), output.dim(1), scores.dim(1)
+        self._dtypes("dsa_index_topk_layer", scores=(scores, float32), seq_lens=(seq_lens, int32), output=(output, int32))
+        assert 0 < TOPK <= MAXCTX and MAXCTX % DSA_TOPK_CH == 0
+        assert MAXCTX <= 32 * DSA_TOPK_CH, "dsa_index_topk_layer: MAXCTX <= 32768 (the write node: a lane for each chunk)"
+        CHK, REC = MAXCTX // DSA_TOPK_CH, DSA_TOPK_REC   # tasks per token; ints per chunk record
+        records = self.new_tensor(dims=(T, CHK * REC), dtype=int32, name=f"dsa_index_topk.records.{len(self._static_nodes)}")
+        self._add_node("dsa_index_topk", (CHK, T, 1), block_dim, [scores, records], [(-1, 0, -1), (-1, 0, -1)],
+                       [TOPK, MAXCTX, 0], out_buffer=lambda n: (T * CHK * REC * 4, -1, False), counters=T,
+                       buf_slots=[self._tensor_slot(seq_lens), self._scratch_slot(p, "dsa_index_score.hist")])
+        self._add_node("dsa_index_topk", (CHK, T, 1), block_dim, [records, output], [(-1, 0, -1), (-1, 0, -1)],
+                       [TOPK, MAXCTX, 1], counters=T,
+                       buf_slots=[self._tensor_slot(seq_lens), self._tensor_slot(output), p.info["buf"]])   # [2]: the scores
+
+    def sparse_mla_layer(
+        self,
+        q: DTensor,             # [T, NH, 576] bf16 (the dsa_q_absorb output)
+        cache: DTensor,         # the latent cache [pages x page, 576] bf16 (written by dsa_kv_write first)
+        indices: DTensor,       # [T, TOPK] int32: a dsa_index_topk node's output, or a graph input (a "shared" layer)
+        block_table: DTensor, seq_lens: DTensor,
+        output: DTensor,        # [T, NH, 512] fp32. NOTE: this shape is not the shape of the node buffer. The tensor gives
+                                # the name of the buffer. The buffer holds o [T, S, NH, 512], then lse [T, S, NH]
+                                # (S = the split count after compilation). Only dsa_mla_merge reads it.
+        softmax_scale: float,   # 1 / sqrt(qk_nope_head_dim + qk_rope_head_dim)
+        splits: int = 16,       # tasks per token, TOPK / splits index slots each (whole tiles of 64)
+        page: int = 64,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare sparse MLA decode (tasks/sparse_mla.cuh). Task (s, t) computes split s of token t for the NH heads on this
+        GPU. The compiler can change the split count (grid x). Each split holds a whole number of 64-slot tiles. The output
+        tensor names the node buffer: o [T, S, NH, 512], then lse [T, S, NH] (see `output`). params = [NH, TOPK, page, MAXP,
+        pages, softmax scale bits]. buf_slots: [cache, block_table, seq_lens, indices]. Counters: one for each token (its
+        splits)."""
+        self._producer("sparse_mla_layer", q, ("dsa_q_absorb",))
+        self._producer("sparse_mla_layer", cache, ("dsa_kv_write",))
+        self._producer("sparse_mla_layer", indices, ("dsa_index_topk",), allow_none=True)
+        T, NH, TOPK = self._tokens(q.dim(0)), q.dim(1), indices.dim(1)
+        self._dtypes("sparse_mla_layer", q=(q, bfloat16), cache=(cache, bfloat16), indices=(indices, int32),
+                     block_table=(block_table, int32), seq_lens=(seq_lens, int32), output=(output, float32))
+        assert q.dim(2) == 576 and NH <= 16 and TOPK % (64 * splits) == 0 and cache.dim(0) % page == 0
+        self._add_node("sparse_mla", (splits, T, 1), block_dim, [q, cache, indices, output],
+                       [(-1, -1, -1), (-1, -1, -1), (1, 0, -1), (-1, 0, -1)],
+                       [NH, TOPK, page, block_table.dim(1), cache.dim(0) // page, float_bits(softmax_scale)],
+                       changeable_grid_dims={0: (64, 1, None)},
+                       out_buffer=lambda n: (T * n.grid[0] * NH * 513 * 4, -1, False), counters=T,
+                       buf_slots=[self._tensor_slot(cache), self._tensor_slot(block_table), self._tensor_slot(seq_lens),
+                                  self._tensor_slot(indices)])
+
+    def dsa_mla_merge_layer(
+        self,
+        input: DTensor,         # the sparse_mla output
+        output: DTensor,        # o_lat [T, NH, 512] bf16
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare the split merge (tasks/dsa_mla_merge.cuh). Task (h, t) merges the sparse_mla splits of head h of token t.
+        params = [NH]. Counters: one for each head (dsa_o_absorb waits for the T tasks of its head)."""
+        self._producer("dsa_mla_merge_layer", input, ("sparse_mla",))
+        T, NH = self._tokens(output.dim(0)), output.dim(1)
+        self._dtypes("dsa_mla_merge_layer", input=(input, float32), output=(output, bfloat16))
+        assert output.dim(2) == 512
+        self._add_node("dsa_mla_merge", (NH, T, 1), block_dim, [input, output], [(-1, 0, -1), (1, 0, -1)], [NH],
+                       out_buffer=lambda n: (T * NH * 512 * 2, -1, False), counters=NH)
+
+    def dsa_o_absorb_layer(
+        self,
+        input: DTensor,         # o_lat [T, NH, 512] bf16 (the dsa_mla_merge output)
+        w_uv: DTensor,          # W_UV [NH, 512, 256] bf16 (from kv_b_proj, dequantized)
+        output: DTensor,        # v [T, NH x 256] bf16 (the o_proj input, through group_quant)
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare the value up-projection (tasks/dsa_o_absorb.cuh). Task h * 4 + cb computes value columns [64 cb, 64 cb + 64)
+        of head h for all tokens. params = [NH]. buf_slots: [w_uv]. One counter: the count of the tasks."""
+        self._producer("dsa_o_absorb_layer", input, ("dsa_mla_merge",))
+        T, NH = self._tokens(input.dim(0)), input.dim(1)
+        self._dtypes("dsa_o_absorb_layer", input=(input, bfloat16), w_uv=(w_uv, bfloat16), output=(output, bfloat16))
+        assert (w_uv.dim(0), w_uv.dim(1), w_uv.dim(2)) == (NH, 512, 256) and output.dim(1) == NH * 256
+        self._add_node("dsa_o_absorb", (NH * 4, 1, 1), block_dim, [input, output], [(-1, -1, -1), (-1, -1, -1)], [NH],
+                       out_buffer=lambda n: (T * NH * 256 * 2, -1, False), counters=1, buf_slots=[self._tensor_slot(w_uv)])
 
     # ---- the generated layer (static_schedule.py) ----
     def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False):
