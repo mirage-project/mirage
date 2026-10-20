@@ -5804,14 +5804,18 @@ static std::string static_build_only_task(char const *name,
 }
 
 // a static megakernel task type that runs an MPK Hopper task body
-// (static_megakernel/tasks/<name>.cuh, name = sm90_*): its inputs, then one
-// output
+// (static_megakernel/tasks/<name>.cuh, name = sm90_*): its inputs, then its
+// num_outputs outputs
 int TaskRegister::register_static_sm90_task(threadblock::Graph const &bgraph,
                                             std::vector<int> const &params,
-                                            std::string const &name) {
+                                            std::string const &name,
+                                            int num_outputs) {
   std::vector<tb::TBInputOp *> input_ops, output_ops;
-  static_split_ops(
-      bgraph, (int)bgraph.operators.size() - 1, 1, input_ops, output_ops);
+  static_split_ops(bgraph,
+                   (int)bgraph.operators.size() - num_outputs,
+                   num_outputs,
+                   input_ops,
+                   output_ops);
   return register_task_variant(TASK_STATIC_SM90,
                                static_build_only_task(name.c_str(), params));
 }

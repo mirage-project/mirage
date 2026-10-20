@@ -548,6 +548,57 @@ class StaticMegakernel(PersistentKernel):
                        [int(w13), rows_per_task, N, K, E, TOPK, int(bias is not None)], counters=1, buf_slots=slots,
                        map_slots=[self._map("u8", ("t", weight_mxfp4), (E * N, K // 2, 64, 32))])
 
+    def _sm90_node(self, name: str, grid: tuple, tensors: list, params: list, block_dim: tuple):
+        """An sm90_* node whose task body reads and writes every tensor by pointer: tensors = its inputs, then its outputs (one;
+        sm90_topk three: graph.cc), None for an optional input left out (buffer slot -1), each in its buffer slots in that order;
+        one counter its consumers wait on.
+        The tasks' slices of the tensors are the body's to compute (the input maps cut nothing)."""
+        present = [t for t in tensors if t is not None]
+        self._add_node(name, grid, block_dim, present, [(-1, -1, -1)] * len(present), params, counters=1,
+                       buf_slots=[self._tensor_slot(t) if t is not None else -1 for t in tensors])
+
+    def sm90_rmsnorm_layer(self, input: DTensor, weight: DTensor, output: DTensor, eps: float,
+                           block_dim: tuple = (256, 1, 1)):
+        """RMSNorm of each token (MPK's Hopper RMSNorm): task x = row x. params = [H, eps bits]."""
+        T, H = self._tokens(input.dim(0)), input.dim(1)
+        self._dtypes("sm90_rmsnorm_layer", input=(input, bfloat16), weight=(weight, bfloat16), output=(output, bfloat16))
+        self._sm90_node("sm90_rmsnorm", (T, 1, 1), [input, weight, output], [H, float_bits(eps)], block_dim)
+
+    def sm90_topk_layer(self, logits: DTensor, num_tokens: DTensor, weights: DTensor, routing_indices: DTensor,
+                        active_experts: DTensor, block_dim: tuple = (256, 1, 1)):
+        """Top-k softmax routing of the step's tokens (MPK's router; rows past num_tokens[0] are left unrouted). One task.
+        Outputs: weights [T, TOPK] fp32, routing_indices [E, T] i32, active_experts [E + 1] i32 (the node's buffer slots).
+        params = [E, TOPK]."""
+        T, E, TOPK = self._tokens(logits.dim(0)), logits.dim(1), weights.dim(1)
+        self._dtypes("sm90_topk_layer", logits=(logits, bfloat16), weights=(weights, float32))
+        self._sm90_node("sm90_topk", (1, 1, 1), [logits, num_tokens, weights, routing_indices, active_experts], [E, TOPK],
+                        block_dim)
+
+    def sm90_swiglu_layer(self, input: DTensor, output: DTensor, limit: float, alpha: float,
+                          block_dim: tuple = (256, 1, 1)):
+        """GPT-OSS's clamped SwiGLU of each token's top-k slots (gate the first half of input's rows, up the second): task x
+        = token x. params = [I, TOPK, limit bits, alpha bits]."""
+        T, TOPK, I = self._tokens(input.dim(0)), input.dim(1), output.dim(2)
+        assert input.dim(2) == 2 * I and output.dim(1) == TOPK
+        self._sm90_node("sm90_swiglu", (T, 1, 1), [input, output], [I, TOPK, float_bits(limit), float_bits(alpha)],
+                        block_dim)
+
+    def sm90_mul_sum_add_layer(self, input: DTensor, weights: DTensor, residual: DTensor, output: DTensor,
+                               block_dim: tuple = (256, 1, 1)):
+        """The MoE combine: output = residual + sum over the top-k of weight x expert output (MPK's mul_sum_add): task x
+        = token x. params = [H, TOPK]."""
+        T, TOPK, H = self._tokens(input.dim(0)), input.dim(1), input.dim(2)
+        self._sm90_node("sm90_mul_sum_add", (T, 1, 1), [input, weights, residual, output], [H, TOPK], block_dim)
+
+    def sm90_bias_layer(self, input: DTensor, bias: DTensor, output: DTensor, residual: DTensor = None,
+                        block_dim: tuple = (256, 1, 1)):
+        """A GEMM tile node's fp32 output to bf16 plus a bias row (plus a residual), keeping the first output.dim(1)
+        columns (a GEMM padded to whole 64-row tiles): task x = token x. params = [N_IN, N_OUT, has_residual]."""
+        T, N_IN, N_OUT = self._tokens(input.dim(0)), input.dim(1), output.dim(1)
+        self._dtypes("sm90_bias_layer", input=(input, float32), output=(output, bfloat16))
+        self._sm90_node("sm90_bias", (T, 1, 1), [input, bias, residual, output], [N_IN, N_OUT, int(residual is not None)],
+                        block_dim)
+
     # ---- the generated layer (static_schedule.py) ----
     def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False):
         """Build the graph as it is now, one schedule.json per GPU (static_schedule.compile_static); profile: the timing build
