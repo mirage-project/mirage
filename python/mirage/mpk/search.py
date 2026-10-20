@@ -21,9 +21,10 @@ search_plan does, with the MoE layer's numbers:
                 static_schedule.MAX_TASKS_PER_SM minus the end entry and the pool's task), the layer's end as early as possible
   6. plan       "grids": the chosen grid of each node with changeable grid dims; "lists": for every GPU, the solver's per-SM
                 lists of its GPU set, each task moved from the set's first GPU's positions to this GPU's own positions
-cost: task_us(node, grid, producer_grids) -> us or None (not measured); optional first_us(node, grid, producer_grids) -> its time
-when it is the first task on its SM, or None (the same as task_us; solver rule 6); pool_us(node) -> a pool's total work (us, summed over
-the SMs) or None if the node is not a pool: Costs below.
+cost: task_us(node, grid, producer_grids) -> us or None (not measured); optional prefetch_us(node, grid) -> the part of its time
+that needs no input (solver rule 7); optional first_us(node, grid, producer_grids) -> its time when it is the first task on its
+SM, or None (the same as task_us; solver rule 6); pool_us(node) -> a pool's total work (us, summed over the SMs) or None if the
+node is not a pool: Costs below.
 """
 import itertools
 import json
@@ -106,9 +107,13 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     own: Dict[Tuple[int, str], float] = {}
     first_extra: Dict[Tuple[int, str], float] = {}              # (node, option) -> its first-on-SM time minus own (solver rule 6)
     by_producer: Dict[int, Dict[str, Dict[Tuple[int, str], float]]] = {}
+    prefetch: Dict[Tuple[int, str], float] = {}                 # (node, option) -> cost.prefetch_us (solver rule 7)
     for n in nodes:
         if is_pool(n):
             continue                                            # not placed: a pool, e.g. moe_experts (see step 4)
+        if hasattr(cost, "prefetch_us"):
+            for opt in options[n.graph_idx]:
+                prefetch[(n.graph_idx, opt)] = cost.prefetch_us(n, as_grid(opt)) or 0.0
         p = choosing_producer(n, nodes, options)
         if p is None:
             for opt in options[n.graph_idx]:
@@ -168,10 +173,12 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
                         continue
                     if n.graph_idx in by_producer:      # topk_route: one duration per router option that is still kept
                         d = {k: us for k, us in by_producer[n.graph_idx][opt].items() if k[1] in options[k[0]]}
-                        tasks.append(SolverTask(tid, n.graph_idx, opt, gpu_set, max(d.values()), duration_by=d))
+                        tasks.append(SolverTask(tid, n.graph_idx, opt, gpu_set, max(d.values()), duration_by=d,
+                                                prefetch_us=prefetch.get((n.graph_idx, opt), 0.0)))
                     else:
                         tasks.append(SolverTask(tid, n.graph_idx, opt, gpu_set, own[(n.graph_idx, opt)],
-                                                first_extra_us=first_extra.get((n.graph_idx, opt), 0.0)))
+                                                first_extra_us=first_extra.get((n.graph_idx, opt), 0.0),
+                                                prefetch_us=prefetch.get((n.graph_idx, opt), 0.0)))
         placed = {t.id for t in tasks if t.gpu_set == gpu_set}
         pool_inputs, pool_readers = {}, {}              # pool node -> the placed tasks it waits for / that read its output
         set_deps = []
@@ -325,19 +332,52 @@ def cost_key(node: Node, grid: tuple, producer_grids: Optional[list] = None) -> 
     return key
 
 
-class Costs:
-    """The durations search_plan needs, from cost record files (the median of the records of a task type and key, cost_key), of
-    one kernel version (code: static_schedule.code_tag; None: any) on one GPU type (gpu: the device name, e.g. "NVIDIA B300 SXM6
-    PC"; None: any). A record (cost_records.py): {"task_type", "key", "context": {"first_on_sm"}, "median_us", "machine": {"gpu"},
-    "code", ...}. A key with no record: None (search_plan leaves that choice out)."""
+def gemm_prefetch_bytes(params: list, grid) -> int:
+    """The weight bytes a gemm_tile task (params [mode, K, N, polled], grid (row tiles, K parts)) loads before its activation:
+    min(its K tiles, the ring's stages) stages of rows x 256 B."""
+    from .static_megakernel import RING_STAGES
+    K, N = params[1], params[2]
+    return min(K // 128 // grid[1], RING_STAGES) * (N // grid[0]) * 256
 
-    def __init__(self, paths, code: Optional[str] = None, gpu: Optional[str] = None):
+
+class Costs:
+    """The durations search_plan needs, from cost record files, of one kernel version (code: static_schedule.code_tag; None:
+    any) on one GPU type (gpu: the device name, e.g. "NVIDIA B300 SXM6 PC"; None: any). A record (cost_records.py):
+    {"task_type", "key", "context": {"first_on_sm"}, "median_us", "samples", "machine": {"gpu"}, "code", ...}. A key with no
+    record: None (search_plan leaves that choice out).
+    model "prefetch" (the default): a task's time is the post of the prefetch model fitted to the samples of every record of its
+    task type and key (cost_records.fit_prefetch: end = max(enter + pre, ready) + post), and prefetch_us gives its pre (fitted
+    over the records of its type and grid, whatever their producers' grids). A key whose samples cannot place the knee: pre
+    falls back to a GEMM's up-front weight bytes / the fitted GEMMs' bytes per us (0 for other task types), clipped to what the
+    samples allow. model "pr": a task's time is the median over its records of median_us (end = max(enter, ready) + d; rule 6
+    from the first-on-SM records), no prefetch."""
+
+    def __init__(self, paths, code: Optional[str] = None, gpu: Optional[str] = None, model: str = "prefetch"):
+        assert model in ("pr", "prefetch")
+        self.model = model
         self.records = []
+        self._fits: Dict[str, Optional[tuple]] = {}
         for path in ([paths] if isinstance(paths, str) else list(paths or [])):
             if path and os.path.exists(path):
                 with open(path) as f:
                     self.records += [r for r in json.load(f)["records"] if (code is None or r.get("code") == code)
                                      and (gpu is None or (r.get("machine") or {}).get("gpu") == gpu)]
+
+    def fit(self, task_type: str, key: dict, any_inputs: bool = False) -> Optional[tuple]:
+        """The prefetch model of a task type and key, fitted to the samples of its records (any_inputs: of the records of that
+        type and grid, whatever their "inputs"): (pre, post, w_min, w_max, placed) as cost_records.fit_prefetch; None: no
+        samples."""
+        from .cost_records import fit_prefetch
+        strip = lambda k: {a: b for a, b in k.items() if a != "inputs"}
+        want = strip(key) if any_inputs else key
+        k = json.dumps([task_type, want, any_inputs], sort_keys=True)
+        if k not in self._fits:
+            recs = [r for r in self.records if r["task_type"] == task_type and r.get("samples")
+                    and (strip(r["key"]) if any_inputs else r["key"]) == want]
+            samples = [s for r in recs for s in r["samples"]]
+            weights = [r["n"] / len(r["samples"]) for r in recs for _ in r["samples"]]
+            self._fits[k] = fit_prefetch(samples, weights) if samples else None
+        return self._fits[k]
 
     def median(self, task_type: str, key: dict, first: Optional[bool] = None) -> Optional[float]:
         """The median of the records of this task type and key; first True / False: only the records of tasks first / not first
@@ -352,18 +392,52 @@ class Costs:
         launch compile_plan picks when the pairs fit). A median below 0 (the task ended before a task the graph says it waits
         for, as when its input maps cover more than it reads): 0."""
         key = cost_key(node, grid, producer_grids)
+        keys = [key] + ([dict(key, params=list(node.info["cluster_pair_params"]))] if can_pair(node, grid) else [])
+        if self.model == "prefetch":
+            fit = next((f for f in (self.fit(node.name, k) for k in keys) if f is not None), None)
+            return None if fit is None else max(fit[1], 0.0)
         us = self.median(node.name, key, first=False)
         if us is None:
             us = self.median(node.name, key)
-        if us is None and can_pair(node, grid):
-            us = self.median(node.name, dict(key, params=list(node.info["cluster_pair_params"])))
+        if us is None and len(keys) > 1:
+            us = self.median(node.name, keys[1])
         return None if us is None else max(us, 0.0)
 
     def first_us(self, node: Node, grid: tuple, producer_grids: list) -> Optional[float]:
-        """A task's time when it is the first on its SM (nothing before it hides its first loads); None: no such record."""
+        """Model "pr": a task's time when it is the first on its SM (nothing before it hides its first loads); None: no such
+        record, or model "prefetch" (the first task's window is its ready time, as for any other task)."""
+        if self.model == "prefetch":
+            return None
         return self.median(node.name, cost_key(node, grid, producer_grids), first=True)
 
+    def prefetch_us(self, node: Node, grid: tuple) -> float:
+        """Model "prefetch": the part of a task's time it does before its inputs land (the class docstring); model "pr": 0."""
+        if self.model != "prefetch":
+            return 0.0
+        fit = self.fit(node.name, cost_key(node, grid), any_inputs=True)
+        if fit is None:
+            return 0.0
+        pre, _, lo, hi, placed = fit
+        if placed:
+            return max(pre, 0.0)
+        rate = self._gemm_rate()
+        fallback = gemm_prefetch_bytes(node.params, grid) / rate if node.name == "gemm_tile" and rate else 0.0
+        return min(fallback, lo) if pre <= lo else max(fallback, hi)   # before every sample: at most w_min; after: at least w_max
+
+    def _gemm_rate(self) -> Optional[float]:
+        """Bytes per us per SM of a GEMM task's up-front weight loads: the median over the gemm_tile grids whose fitted pre
+        (knee placed, over 0.05 us) the samples place."""
+        grids = {json.dumps(r["key"]["grid"]) for r in self.records if r["task_type"] == "gemm_tile" and "params" in r["key"]}
+        rates = []
+        for g in grids:
+            r = next(r for r in self.records if r["task_type"] == "gemm_tile" and json.dumps(r["key"]["grid"]) == g)
+            fit = self.fit("gemm_tile", r["key"], any_inputs=True)
+            if fit is not None and fit[4] and fit[0] > 0.05:
+                rates.append(gemm_prefetch_bytes(r["key"]["params"], r["key"]["grid"]) / fit[0])
+        return statistics.median(rates) if rates else None
+
     def pool_us(self, node: Node) -> Optional[float]:
-        """A one-task-per-SM node's total work (its records' key: cost_key without the producers' grids); None for other nodes."""
+        """A one-task-per-SM node's total work (its records' key: cost_key without the producers' grids; its records hold its
+        work, not a prefetch model); None for other nodes."""
         return self.median(node.name, cost_key(node, node.grid)) if node.info["one_task_per_sm"] else None
 

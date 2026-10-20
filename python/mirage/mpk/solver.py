@@ -40,6 +40,8 @@ The rules (numbered as in the code), then the goal:
      more when it starts before first_extra_us: first[task] = 1 adds it to the length; first[task] = 0 needs start >=
      first_extra_us. A task can start that early only as the first task of its SM, as long as the first tasks of the SMs are
      such tasks themselves (MoE: only the GEMM tiles have no inputs from other tasks); starting late on purpose gains nothing
+  7. a task with prefetch_us holds its SM from its start: it ends at least prefetch_us + its duration after its start, and
+     (rule 3) at least its duration after its inputs: what it loads while it waits is off its time once the inputs are there
 The goal: C >= the end of every used task and of every pool; minimise C.
 """
 import time
@@ -63,6 +65,8 @@ class SolverTask:
     # (30, "7x14x1"): ...} = topk_route's time when the router uses 4 ... 14 K parts (it adds that many partial sums).
     duration_by: Optional[Dict[OptionKey, float]] = None
     first_extra_us: float = 0.0  # its time first on its SM minus duration_us (rule 6); 0: the same wherever it is
+    prefetch_us: float = 0.0     # its loads that need no input (a GEMM's first weight stages), done from when it starts on its
+                                 # SM, also while its inputs are on their way (rule 7); 0: none
 
 
 @dataclass
@@ -102,7 +106,7 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
     model = cp_model.CpModel()
     fixed_options = fixed_options or {}
     # the latest time any variable may take: all durations one after another + the queue's work spread over the SMs + 3 us
-    horizon = ticks(sum(t.duration_us + t.first_extra_us for t in tasks) + sum(p.work_us for p in pools) / num_sms + 300)
+    horizon = ticks(sum(t.duration_us + t.first_extra_us + t.prefetch_us for t in tasks) + sum(p.work_us for p in pools) / num_sms + 300)
 
     # ---- rule 1: exactly one choice per entry; use[node, option] = 1 when the chosen choice contains that option.
     # Entry "30" with 4 choices: x[("30", 0..3)], exactly one of them is 1; use[(30, "7x14x1")] = x[("30", 3)], and so on.
@@ -133,6 +137,7 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
     # Per task and SM a yes/no on[...] and an interval [start, end) that exists only when on[...] = 1; AddNoOverlap over the
     # intervals of one SM = no two tasks on that SM at the same time.
     start, end, length = {}, {}, {}
+    span = {}                                        # task id -> its time on its SM: length, or (rule 7) more
     on: Dict[Tuple[str, str, int], cp_model.IntVar] = {}             # (task id, GPU set, SM) -> yes/no
     intervals: Dict[Tuple[str, int], list] = {(g, sm): [] for g in gpu_sets for sm in range(num_sms)}
     for t in tasks:
@@ -154,13 +159,18 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
             model.Add(start[t.id] >= extra).OnlyEnforceIf([used[t.id], first.Not()])
         else:
             length[t.id] = ticks(t.duration_us)
-        model.Add(end[t.id] == start[t.id] + length[t.id])
+        if t.prefetch_us > 0:   # rule 7
+            span[t.id] = model.NewIntVar(0, horizon, f"span_{t.id}")
+            model.Add(span[t.id] >= length[t.id] + ticks(t.prefetch_us))
+        else:
+            span[t.id] = length[t.id]
+        model.Add(end[t.id] == start[t.id] + span[t.id])
         sms = [fixed_sm[t.id]] if t.id in fixed_sm else range(num_sms)
         for sm in sms:
             b = model.NewBoolVar(f"on_{t.id}_{sm}")
             on[(t.id, t.gpu_set, sm)] = b
             intervals[(t.gpu_set, sm)].append(
-                model.NewOptionalIntervalVar(start[t.id], length[t.id], end[t.id], b, f"iv_{t.id}_{sm}"))
+                model.NewOptionalIntervalVar(start[t.id], span[t.id], end[t.id], b, f"iv_{t.id}_{sm}"))
         model.Add(sum(on[(t.id, t.gpu_set, sm)] for sm in sms) == used[t.id])   # used: exactly one SM; unused: none
         model.Add(start[t.id] == 0).OnlyEnforceIf(used[t.id].Not())             # unused tasks: start 0, out of the way
     on_sm: Dict[Tuple[str, int], list] = {}          # (GPU set, SM) -> [(task id, on[...])]
