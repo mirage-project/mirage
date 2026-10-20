@@ -78,6 +78,12 @@ def sm90_moe_ring_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, gl
     return torch.cat([w, sc], dim=3).contiguous()
 
 
+def sm90_attention_parts_size(tokens: int, num_q_heads: int, head_dim: int, chunks: int) -> int:
+    """bf16 elements of a split attention's parts buffer: the chunks' outputs [C, T, Q x D], then their log2-sum-exps
+    [T, C, Q] fp32."""
+    return chunks * tokens * num_q_heads * head_dim + 2 * tokens * chunks * num_q_heads
+
+
 def float_bits(v: float) -> int:
     """An fp32 value as the int of its bits (a param; the kernel template reads it with __int_as_float)."""
     return struct.unpack("<i", struct.pack("<f", v))[0]
@@ -694,6 +700,49 @@ class StaticMegakernel(PersistentKernel):
         self._sm90_node("sm90_attention", (R, KVH, 1),
                         [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, sinks, output],
                         [num_q_heads, KVH, D, cos.dim(0), page, window, int(sinks is not None)], block_dim)
+
+    def sm90_attention_split_layer(self, qkv: DTensor, k_cache: DTensor, v_cache: DTensor, cos: DTensor, sin: DTensor,
+                                   qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
+                                   parts: DTensor, num_q_heads: int, chunk: int, block_dim: tuple = (256, 1, 1)):
+        """sm90_attention_layer's full attention with the KV split in chunks of `chunk` positions (tasks/
+        sm90_attention_split.cuh): task (x, y, z) = request x, KV head y, chunk z, its normalized output and log2-sum-exp
+        into parts, a flat bf16 tensor sm90_attention_parts_size long; sm90_attention_merge_layer combines them (and the
+        sinks). C = the chunks = max seq / chunk. params = [Q, KVH, D, max seq, page, chunk, C]."""
+        pages, page, KVH, D = (k_cache.dim(i) for i in range(4))
+        R, T, C = qo_indptr.dim(0) - 1, self._tokens(qkv.dim(0)), cos.dim(0) // chunk
+        assert cos.dim(0) % chunk == 0 and chunk % 64 == 0 and parts.num_dims == 1
+        assert parts.dim(0) == sm90_attention_parts_size(T, num_q_heads, D, C)
+        self._dtypes("sm90_attention_split_layer", qkv=(qkv, bfloat16), parts=(parts, bfloat16))
+        self._sm90_node("sm90_attention_split", (R, KVH, C),
+                        [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, parts],
+                        [num_q_heads, KVH, D, cos.dim(0), page, chunk, C], block_dim)
+
+    def sm90_attention_merge_layer(self, parts: DTensor, qo_indptr: DTensor, kv_indptr: DTensor, last_page_len: DTensor,
+                                   output: DTensor, num_q_heads: int, chunk: int, chunks: int, page: int,
+                                   sinks: DTensor = None, block_dim: tuple = (256, 1, 1)):
+        """The output of a split attention from its chunks (tasks/sm90_attention_merge.cuh), with the per-head sinks: task
+        (x, y) = token x, query heads [8 y, 8 y + 8). params = [Q, D, chunk, C, has_sink, page]."""
+        T, D = self._tokens(output.dim(0)), output.dim(1) // num_q_heads
+        self._sm90_node("sm90_attention_merge", (T, num_q_heads // 8, 1),
+                        [parts, qo_indptr, kv_indptr, last_page_len, sinks, output],
+                        [num_q_heads, D, chunk, chunks, int(sinks is not None), page], block_dim)
+
+    def sm90_gate_layer(self, o: DTensor, o_bias: DTensor, residual: DTensor, norm_weight: DTensor, router: DTensor,
+                        router_bias: DTensor, num_tokens: DTensor, x1: DTensor, h: DTensor, weights: DTensor,
+                        routing_indices: DTensor, active_experts: DTensor, eps: float, block_dim: tuple = (256, 1, 1)):
+        """What sits between o_proj and the routed experts, for one token a task (tasks/sm90_gate.cuh): x1 = bf16(o +
+        o_bias + residual), h = f16(RMSNorm(x1)), the router logits, the token's top-k (softmax, renormalized): its weights
+        [T, TOPK] fp32 and routing column [E, T] i32; the active-expert list [E + 1] i32 from the last task. Outputs: x1, h,
+        weights, routing_indices, active_experts (graph.cc: sm90_gate's five). params = [H, E, TOPK, eps bits]."""
+        T, H, E, TOPK = self._tokens(o.dim(0)), o.dim(1), router.dim(0), weights.dim(1)
+        assert E == 32, "sm90_gate: 32 experts"
+        self._dtypes("sm90_gate_layer", o=(o, float32), residual=(residual, bfloat16), router=(router, bfloat16),
+                     x1=(x1, bfloat16), h=(h, float16), weights=(weights, float32))
+        present = [o, o_bias, residual, norm_weight, router, router_bias, num_tokens, x1, h, weights, routing_indices,
+                   active_experts]
+        self._add_node("sm90_gate", (T, 1, 1), block_dim, present, [(-1, -1, -1)] * len(present),
+                       [H, E, TOPK, float_bits(eps)], counters=2 + E // 32,
+                       buf_slots=[self._tensor_slot(t) for t in present])
 
     def sm90_mul_sum_add_layer(self, input: DTensor, weights: DTensor, residual: DTensor, output: DTensor,
                                block_dim: tuple = (256, 1, 1)):

@@ -353,8 +353,10 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       if (dst_row >= curr_iter_len) {
         // P @ V still reads the entire tile after masking P. Zero the tail:
         // a masked probability of zero does not suppress a stale NaN in V.
-        load_smem_with_predict(k_buffer_smem(dst_row, col), k_dmem(0, 0), false);
-        load_smem_with_predict(v_buffer_smem(dst_row, col), v_dmem(0, 0), false);
+        load_smem_with_predict(
+            k_buffer_smem(dst_row, col), k_dmem(0, 0), false);
+        load_smem_with_predict(
+            v_buffer_smem(dst_row, col), v_dmem(0, 0), false);
       } else if (dst_row + first_tile_offset < global_seq_len - num_tokens) {
         // load from KV Cache
         // int page_idx = page_indices[(dst_row + cp_finished_seq_len) /
@@ -396,7 +398,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           min(seq_len - (iter + 1) * KV_TILE_SIZE, KV_TILE_SIZE);
 
       if (next_iter_len > 0) {
-        int page_idx = page_indices[(iter + 1) * KV_TILE_SIZE / PAGE_SIZE];
+        int page_idx =
+            page_indices[((iter + 1) * KV_TILE_SIZE + kv_cache_offset) /
+                         PAGE_SIZE];
 #pragma unroll
         for (int chunk_idx = threadIdx.x - NUM_THREADS * CONSUMER_WARPGROUPS;
              chunk_idx < KV_TILE_SIZE * HEAD_DIM / CP_CHUNK_SIZE;
@@ -407,7 +411,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
             load_smem_with_predict(k_smem(dst_row, col), k_dmem(0, 0), false);
             load_smem_with_predict(v_smem(dst_row, col), v_dmem(0, 0), false);
           } else if (dst_row + (iter + 1) * KV_TILE_SIZE + kv_cache_offset <
-              global_seq_len - num_tokens) {
+                     global_seq_len - num_tokens) {
             // load from KV Cache
             // int page_idx =
             //    page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
@@ -603,7 +607,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
       // update the KV Cache
       if (kv_tokens_to_process > 0) {
-        int page_idx = page_indices[first_kv_token_to_process / PAGE_SIZE];
+        int page_idx =
+            page_indices[(first_kv_token_to_process + kv_cache_offset) /
+                         PAGE_SIZE];
         for (int elem_idx = threadIdx.x;
              elem_idx < kv_tokens_to_process * HEAD_DIM;
              elem_idx += NUM_THREADS) {

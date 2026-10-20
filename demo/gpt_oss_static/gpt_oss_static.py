@@ -1,8 +1,10 @@
 """GPT-OSS (MXFP4 checkpoint) decoding on Hopper through the static megakernel (PR 786's compiler), one request, greedy:
 
-  layer kernels  one per attention kind (sliding window / full; the window is a template argument): the decoder layer as 12
-                 nodes (static_megakernel.py: sm90_rmsnorm, gemm_tile + sm90_bias for qkv and o_proj, sm90_router,
-                 sm90_attention, sm90_topk, sm90_moe_ring W13 (+ SwiGLU) and W2, sm90_mul_sum_add); each kernel runs as one
+  layer kernels  one per attention kind (sliding window / full; the window is a template argument): the decoder layer as 9
+                 nodes, 10 with full attention (static_megakernel.py: sm90_rmsnorm, gemm_tile + sm90_bias for qkv,
+                 sm90_attention (full: sm90_attention_split + _merge), gemm_tile for o_proj, sm90_gate (o_proj's bias, the
+                 residual, the MoE's norm, the router and the top-k), sm90_moe_ring W13 (+ SwiGLU) and W2,
+                 sm90_mul_sum_add); each kernel runs as one
                  instance per layer of its kind (its own weights, KV cache, buffers), the layers' kernels in order on one stream,
                  each a programmatic dependent launch (PDL) of the one before
   head kernel    the final RMSNorm and lm_head (gemm_tile)
@@ -21,12 +23,13 @@ python gpt_oss_static.py <mxfp4 checkpoint> [--ref ref.json] [--new 200] [--plan
 import argparse, json, os, statistics, subprocess, sys, time
 import torch
 from mirage.mpk import compiler
-from mirage.mpk.static_megakernel import StaticMegakernel, sm90_flags, sm90_moe_ring_pack
+from mirage.mpk.static_megakernel import StaticMegakernel, sm90_attention_parts_size, sm90_flags, sm90_moe_ring_pack
 from mirage.mpk.static_harness import Harness
 from mirage.mpk.models.utils import shuffle_tensors
 from mirage.mpk.models.gpt_oss.mxfp4 import Mxfp4Checkpoint, convert_expert_weight
 
 T, PAGE = 8, 64                       # token rows of a step, KV page size
+KV_CHUNK = 128                        # full attention: the KV split in chunks of this many positions (sm90_attention_split)
 FLAGS = sm90_flags() + ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]   # serving build: launches back to back
 FLUSH = 128 << 20   # read before each recorded launch: L2 (50 MB) emptied
 
@@ -57,9 +60,10 @@ class Model:
             "kv_indices": torch.arange(max_seq // PAGE, dtype=torch.int32, device="cuda"),
             "last_page_len": torch.ones(1, dtype=torch.int32, device="cuda"),
             "num_tokens": torch.ones(1, dtype=torch.int32, device="cuda"),
+            "attn_parts": zeros(sm90_attention_parts_size(T, QH, D, max_seq // KV_CHUNK)),   # the split attention's chunks
             "h": zeros(T, H), "qkv32": zeros(T, (QH + 2 * KVH) * D, dtype=torch.float32),
             "qkv": zeros(T, (QH + 2 * KVH) * D), "attn": zeros(T, QH * D), "o32": zeros(T, H, dtype=torch.float32),
-            "x1": zeros(T, H), "h2": zeros(T, H, dtype=torch.float16), "logits": zeros(T, E),   # h2: the MoE's f16 input
+            "x1": zeros(T, H), "h2": zeros(T, H, dtype=torch.float16),   # h2: the MoE's f16 input
             "topk_w": zeros(T, TOPK, dtype=torch.float32), "routing": zeros(E, T, dtype=torch.int32),
             "active": zeros(E + 1, dtype=torch.int32), "act": zeros(A, T, I, dtype=torch.float16), "eo": zeros(T, TOPK, H),
         }
@@ -108,14 +112,20 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
     mpk.sm90_rmsnorm_layer(A["x_in"], A["ln1"], A["h"], m.eps)
     mpk.gemm_tile_layer(input=A["h"], weight=A["w_qkv"], output=A["qkv32"], combine="store")
     mpk.sm90_bias_layer(A["qkv32"], A["b_qkv"], A["qkv"])
-    mpk.sm90_attention_layer(A["qkv"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"], A["kv_indptr"],
-                             A["kv_indices"], A["last_page_len"], A["attn"], num_q_heads=m.QH, window=window,
-                             sinks=A["sinks"])
+    if window:   # a sliding window: its two tiles in one task per KV head
+        mpk.sm90_attention_layer(A["qkv"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"], A["kv_indptr"],
+                                 A["kv_indices"], A["last_page_len"], A["attn"], num_q_heads=m.QH, window=window,
+                                 sinks=A["sinks"])
+    else:        # full attention: the KV in chunks over many tasks, then their merge (with the sinks)
+        mpk.sm90_attention_split_layer(A["qkv"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"],
+                                       A["kv_indptr"], A["kv_indices"], A["last_page_len"], A["attn_parts"],
+                                       num_q_heads=m.QH, chunk=KV_CHUNK)
+        mpk.sm90_attention_merge_layer(A["attn_parts"], A["qo_indptr"], A["kv_indptr"], A["last_page_len"], A["attn"],
+                                       num_q_heads=m.QH, chunk=KV_CHUNK, chunks=m.max_seq // KV_CHUNK, page=PAGE,
+                                       sinks=A["sinks"])
     mpk.gemm_tile_layer(input=A["attn"], weight=A["w_o"], output=A["o32"], combine="store")
-    mpk.sm90_bias_layer(A["o32"], A["b_o"], A["x1"], residual=A["x_in"])
-    mpk.sm90_rmsnorm_layer(A["x1"], A["ln2"], A["h2"], m.eps)
-    mpk.sm90_router_layer(A["h2"], A["w_router"], A["b_router"], A["logits"])
-    mpk.sm90_topk_layer(A["logits"], A["num_tokens"], A["topk_w"], A["routing"], A["active"])
+    mpk.sm90_gate_layer(A["o32"], A["b_o"], A["x_in"], A["ln2"], A["w_router"], A["b_router"], A["num_tokens"], A["x1"],
+                        A["h2"], A["topk_w"], A["routing"], A["active"], eps=m.eps)
     mpk.sm90_moe_ring_layer(A["h2"], A["w13"], A["routing"], A["active"], A["act"], bias=A["b13"], glu=True,
                             limit=m.limit, alpha=1.702, rows_per_task=128)
     mpk.sm90_moe_ring_layer(A["act"], A["w2"], A["routing"], A["active"], A["eo"], bias=A["b2"], glu=False,

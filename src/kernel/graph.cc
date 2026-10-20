@@ -1107,8 +1107,11 @@ void Graph::register_task_for_op(KNOperator const *op,
     task_config[op] = std::make_tuple(1, 1, TASK_SUM_SEND_SM100, variant_id);
   } else if (name.rfind("sm90_", 0) == 0) {
     // an MPK Hopper task body run by the static megakernel: its inputs, then
-    // its outputs (one; sm90_topk: weights, routing indices, active experts)
-    int const num_outputs = (name == "sm90_topk") ? 3 : 1;
+    // its outputs (one; sm90_topk: weights, routing indices, active experts;
+    // sm90_gate: x1 and h, then those three)
+    int const num_outputs = (name == "sm90_topk")   ? 3
+                            : (name == "sm90_gate") ? 5
+                                                    : 1;
     int variant_id = task_register->register_static_sm90_task(
         customized->bgraph, params, name, num_outputs);
     task_config[op] =
