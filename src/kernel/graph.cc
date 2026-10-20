@@ -1105,6 +1105,16 @@ void Graph::register_task_for_op(KNOperator const *op,
     int variant_id =
         task_register->register_sum_send_sm100_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(1, 1, TASK_SUM_SEND_SM100, variant_id);
+  } else if (name.rfind("sm90_", 0) == 0) {
+    // an MPK Hopper task body run by the static megakernel: its inputs, then
+    // one output
+    int variant_id = task_register->register_static_sm90_task(
+        customized->bgraph, params, name);
+    task_config[op] =
+        std::make_tuple((int)customized->bgraph.operators.size() - 1,
+                        1,
+                        TASK_STATIC_SM90,
+                        variant_id);
   } else if (name == "residual_add") {
     int variant_id = task_register->register_residual_add_sm100_task(
         customized->bgraph, params);

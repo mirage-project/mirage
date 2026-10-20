@@ -254,6 +254,10 @@ enum TaskType {
   TASK_SUM_SEND_SM100 = 509,
   // y = (input + addend) + residual (tasks/residual_add.cuh)
   TASK_RESIDUAL_ADD_SM100 = 510,
+  // an MPK Hopper task body run by the static megakernel (a task type named
+  // sm90_<name>: static_megakernel/tasks/sm90_<name>.cuh); one variant per
+  // name and params
+  TASK_STATIC_SM90 = 511,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 

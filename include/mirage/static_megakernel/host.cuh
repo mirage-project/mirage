@@ -16,7 +16,8 @@
 //       tensor name) or b:<buffer slot>+<byte offset>.
 //     kind and dims: bf16 <rows> <K> <box rows> | wblk <pieces> <box pieces> |
 //       sf <chunks> <box chunks> | act8 <K bytes> <rows> |
-//       act8kt <K bytes> <rows> <K tiles>
+//       act8kt <K bytes> <rows> <K tiles> |
+//       u8 <rows> <row bytes> <box rows> <box bytes>
 // The node output buffers are allocated first, then the scratch buffers, then
 // the counters and the time stamps. Keep this order: the buffers' addresses
 // decide where they fall in L2, and a different order makes the layer slower.
@@ -94,6 +95,33 @@ static void map_bf16(
                                 es,
                                 CU_TENSOR_MAP_INTERLEAVE_NONE,
                                 CU_TENSOR_MAP_SWIZZLE_128B,
+                                CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
+}
+// bytes [rows, row_bytes] -> box {box_bytes, box_rows}, no swizzle (the
+// Hopper MoE task's packed MXFP4 weight: all experts' rows, two values per
+// byte). Five dimensions, the last three 1: MPK's Hopper TMA wrapper
+// (tasks/hopper/tma_2d.cuh) issues the 5-D copy for every map.
+static void map_u8(CUtensorMap *m,
+                   void *base,
+                   uint64_t rows,
+                   uint64_t row_bytes,
+                   uint32_t box_rows,
+                   uint32_t box_bytes) {
+  cuuint64_t gd[5] = {row_bytes, rows, 1, 1, 1};
+  cuuint64_t gs[4] = {
+      row_bytes, row_bytes * rows, row_bytes * rows, row_bytes * rows};
+  cuuint32_t bd[5] = {box_bytes, box_rows, 1, 1, 1}, es[5] = {1, 1, 1, 1, 1};
+  MKS_CU(cuTensorMapEncodeTiled(m,
+                                CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                5,
+                                base,
+                                gd,
+                                gs,
+                                bd,
+                                es,
+                                CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                CU_TENSOR_MAP_SWIZZLE_NONE,
                                 CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
@@ -398,6 +426,8 @@ static void build_maps(Maps &maps,
       map_act8(&maps.m[i], p, u(2), u(3));
     } else if (kind == "act8kt" && m.size() == 5) {
       map_act8_kt(&maps.m[i], p, u(2), u(3), (uint32_t)u(4));
+    } else if (kind == "u8" && m.size() == 6) {
+      map_u8(&maps.m[i], p, u(2), u(3), (uint32_t)u(4), (uint32_t)u(5));
     } else {
       fprintf(stderr,
               "static_host: map.%d: bad declaration (%s, %zu fields)\n",

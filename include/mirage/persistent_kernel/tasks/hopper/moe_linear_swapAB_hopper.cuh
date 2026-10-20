@@ -127,7 +127,12 @@ __device__ __forceinline__ void
                               MaskTensor mMask,
                               OutputTensor mOutput,
                               int const expert_offset,
-                              uint8_t const *weight_scale = nullptr) {
+                              uint8_t const *weight_scale = nullptr,
+                              // the task's first weight row in tma_a's map:
+                              // 0 when the map starts at the task's rows (MPK),
+                              // its row offset in a whole-tensor map (the
+                              // static megakernel)
+                              int const weight_row0 = 0) {
   int warp_idx = cutlass::canonical_warp_idx_sync();
 
   // Construct the MMA grid coordinate from the CTA grid coordinate
@@ -453,8 +458,8 @@ __device__ __forceinline__ void
 
             // TMA for loading A; only one thread issues the instruction.
             if (threadIdx.x % NUM_THREAD_PER_WARPGROUP == 0) {
-              int const tma_row =
-                  m_tile * OUTPUT_ATOM_SIZE + expert_idx * OUTPUT_STRIDE;
+              int const tma_row = weight_row0 + m_tile * OUTPUT_ATOM_SIZE +
+                                  expert_idx * OUTPUT_STRIDE;
               weight_smem.set_ptr(shared_weight + smem_wr_buffer *
                                                       OUTPUT_ATOM_SIZE *
                                                       TILE_SIZE);

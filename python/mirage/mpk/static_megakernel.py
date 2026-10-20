@@ -514,6 +514,40 @@ class StaticMegakernel(PersistentKernel):
         self._add_node("residual_add", (self._num_sms(), 1, 1), block_dim, [addend, input, residual, output],
                        [(-1, -1, -1)] * 4, [H], buf_slots=[self._tensor_slot(residual), self._tensor_slot(output)])
 
+    # ---- MPK Hopper task bodies run by the static megakernel (tasks/sm90_*.cuh) ----
+    def sm90_moe_layer(
+        self,
+        input: DTensor,           # W13: [T, K] bf16; W2: [T, TOPK, K] bf16
+        weight_mxfp4: DTensor,    # [E, N, K / 2] u8, two E2M1 values per byte (low nibble first)
+        weight_scale: DTensor,    # [E, N, K / 32] u8, E8M0
+        routing_indices: DTensor, # [E, T] i32: 1 + the top-k slot of each token routed to the expert, else 0
+        active_experts: DTensor,  # [E + 1] i32: the routed experts, their count last
+        output: DTensor,          # [T, TOPK, N] bf16
+        bias: DTensor = None,     # [E, N] bf16
+        w13: bool = True,
+        rows_per_task: int = 64,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """One routed expert projection of MPK's Hopper MoE kernel (MXFP4 weights decoded into the WGMMA registers). Task
+        (x, y): the active experts x, x + 5 (W13; W2: + 4), ... times weight rows [y R, y R + R), R = rows_per_task.
+        params = [w13, R, N, K, E, TOPK, has_bias]."""
+        E, N, K = weight_mxfp4.dim(0), weight_mxfp4.dim(1), weight_mxfp4.dim(2) * 2
+        T = self._tokens(input.dim(0))
+        TOPK = output.dim(1)
+        assert N % rows_per_task == 0 and rows_per_task % 64 == 0 and K % 64 == 0
+        assert (weight_scale.dim(0), weight_scale.dim(1), weight_scale.dim(2)) == (E, N, K // 32)
+        assert (output.dim(0), output.dim(2)) == (T, N) and (routing_indices.dim(0), routing_indices.dim(1)) == (E, T)
+        self._dtypes("sm90_moe_layer", input=(input, bfloat16), weight_mxfp4=(weight_mxfp4, uint8),
+                     weight_scale=(weight_scale, uint8), output=(output, bfloat16))
+        tensors = [input, weight_mxfp4, weight_scale, routing_indices, active_experts] + ([bias] if bias is not None else [])
+        slots = [self._tensor_slot(t) for t in (input, weight_scale, routing_indices, active_experts)]
+        slots += [self._tensor_slot(bias) if bias is not None else -1, self._tensor_slot(output)]
+        self._add_node("sm90_moe", (5 if w13 else 4, N // rows_per_task, 1), block_dim, tensors + [output],
+                       [(-1, -1, -1), (-1, 1, -1), (-1, 1, -1), (-1, -1, -1), (-1, -1, -1)]
+                       + ([(-1, 1, -1)] if bias is not None else []) + [(-1, 2, -1)],
+                       [int(w13), rows_per_task, N, K, E, TOPK, int(bias is not None)], counters=1, buf_slots=slots,
+                       map_slots=[self._map("u8", ("t", weight_mxfp4), (E * N, K // 2, 64, 32))])
+
     # ---- the generated layer (static_schedule.py) ----
     def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False):
         """Build the graph as it is now, one schedule.json per GPU (static_schedule.compile_static); profile: the timing build
