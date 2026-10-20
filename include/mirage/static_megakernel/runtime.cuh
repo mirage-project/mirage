@@ -533,11 +533,6 @@ struct TileJob {
   int natoms;        // kind 1: weight pieces of the job
   CUtensorMap const *wmap2;  // kind 1: the weight, two pieces per box
   CUtensorMap const *sfmap2; // kind 1: the scales, two chunks per box
-  // kind 0 (Hopper): the activation producer's counter and the count it
-  // reaches; the loader arms the first stages' weights before waiting for it
-  // (nullptr: the caller waited)
-  uint32_t const *wait_cnt = nullptr;
-  uint32_t wait_target = 0;
 };
 
 // loader: arm stages [s0, min(nst, s1)) of the job. par >= 0: two loaders split
@@ -556,44 +551,6 @@ __device__ __forceinline__ void load_job(TileJob const &j,
   uint32_t ph = ((g / SMAX) - 1) &
                 1; // stage slot and its `empty` parity, advanced as g advances
   int const send = j.nst < s1 ? j.nst : s1;
-  if (j.wait_cnt && j.kind == 0 && j.amap && par < 0) {
-    // the weights of the first stages, which depend on nothing, then the
-    // activation's producer, then those stages' activation tiles (the full
-    // barriers expect both): the weight stream starts while the producer
-    // finishes
-    int const pre = (send - s0 < SMAX) ? send - s0 : SMAX;
-    for (int i = 0; i < pre; i++) {
-      int const c = g + i, sti = c % SMAX;
-      if (c >= SMAX) {
-        mbar_wait(rt.empty0 + 8 * sti, ((c / SMAX) - 1) & 1);
-      }
-      STAGE_STAMP(i == 0)
-      mbar_expect(rt.full0 + 8 * sti, ROWS * 256 + A_STAGE);
-      tma3(j.wmap,
-           rt.full0 + 8 * sti,
-           base + sti * FSTAGE,
-           0,
-           j.row0,
-           (j.k0 + s0 + i) * 2,
-           EVICT_FIRST);
-    }
-    cnt_wait(j.wait_cnt, j.wait_target);
-    asm volatile("fence.proxy.async.global;" ::: "memory"); // TMA reads it
-    for (int i = 0; i < pre; i++) {
-      int const sti = (g + i) % SMAX;
-      tma3(j.amap,
-           rt.full0 + 8 * sti,
-           base + sti * FSTAGE + W_STAGE,
-           0,
-           0,
-           (j.k0 + s0 + i) * 2,
-           EVICT_LAST);
-    }
-    s0 += pre;
-    g += pre;
-    st = g % SMAX;
-    ph = ((g / SMAX) - 1) & 1;
-  }
   for (int s = s0; s < send; s++, g++) {
     bool const mine = par < 0 || (s & 1) == par;
     if (!mine) {

@@ -27,7 +27,6 @@ from mirage.mpk.models.utils import shuffle_tensors
 from mirage.mpk.models.gpt_oss.mxfp4 import Mxfp4Checkpoint, convert_expert_weight
 
 T, PAGE = 8, 64                       # token rows of a step, KV page size
-W13_ROWS = 128   # W13 rows per task; the MoE block measured 40 us, 64 rows (360 tasks) 52 us, 192 (one wave of 120) 49 us
 FLAGS = sm90_flags() + ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]   # serving build: launches back to back
 FLUSH = 128 << 20   # read before each recorded launch: L2 (50 MB) emptied
 
@@ -35,7 +34,7 @@ FLUSH = 128 << 20   # read before each recorded launch: L2 (50 MB) emptied
 class Model:
     """The checkpoint's config and weights, converted for the static kernels (on the GPU), and the step's shared buffers."""
 
-    def __init__(self, ckpt: str, max_seq: int, layers_per_kernel: int = 1):
+    def __init__(self, ckpt: str, max_seq: int):
         from transformers import AutoConfig
         from transformers.models.gpt_oss.modeling_gpt_oss import GptOssRotaryEmbedding
         cfg = self.cfg = AutoConfig.from_pretrained(ckpt)
@@ -43,33 +42,28 @@ class Model:
         self.QH, self.KVH, self.D = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
         self.L, self.types, self.window, self.V = cfg.num_hidden_layers, list(cfg.layer_types), cfg.sliding_window, cfg.vocab_size
         self.eps, self.limit = cfg.rms_norm_eps, getattr(cfg, "swiglu_limit", 7.0)
-        self.max_seq, self.lpk = max_seq, layers_per_kernel
-        assert max_seq % PAGE == 0 and self.L % self.lpk == 0
+        self.max_seq = max_seq
+        assert max_seq % PAGE == 0
         sd = Mxfp4Checkpoint(ckpt)
         cos, sin = GptOssRotaryEmbedding(cfg)(torch.empty(0, dtype=torch.bfloat16), torch.arange(max_seq)[None])
         bf = lambda t: t.to(torch.bfloat16).contiguous().cuda()
         zeros = lambda *shape, dtype=torch.bfloat16: torch.zeros(*shape, dtype=dtype, device="cuda")
         H, I, E, TOPK, QH, KVH, D = self.H, self.I, self.E, self.TOPK, self.QH, self.KVH, self.D
         A = TOPK                                                     # expert slots: one routed token
-        self.shared = {                                              # every layer's (the step's)
+        self.shared = {                                              # every layer's (the step's buffers)
             "cos": bf(torch.cat([cos[0], cos[0]], -1)), "sin": bf(torch.cat([sin[0], sin[0]], -1)),
             "qo_indptr": torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
             "kv_indptr": torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
             "kv_indices": torch.arange(max_seq // PAGE, dtype=torch.int32, device="cuda"),
             "last_page_len": torch.ones(1, dtype=torch.int32, device="cuda"),
             "num_tokens": torch.ones(1, dtype=torch.int32, device="cuda"),
-        }
-        # the intermediates of layer j of a kernel (every kernel instance's: they run one after another; the layers within
-        # a kernel each their own, as they overlap)
-        self.inter = [{
             "h": zeros(T, H), "qkv32": zeros(T, (QH + 2 * KVH) * D, dtype=torch.float32),
             "qkv": zeros(T, (QH + 2 * KVH) * D), "attn": zeros(T, QH * D), "o32": zeros(T, H, dtype=torch.float32),
             "x1": zeros(T, H), "h2": zeros(T, H, dtype=torch.float16), "logits": zeros(T, E),   # h2: the MoE's f16 input
             "topk_w": zeros(T, TOPK, dtype=torch.float32), "routing": zeros(E, T, dtype=torch.int32),
             "active": zeros(E + 1, dtype=torch.int32), "act": zeros(A, T, I, dtype=torch.float16), "eo": zeros(T, TOPK, H),
-        } for _ in range(self.lpk)]
-        self.x = [zeros(T, H), zeros(T, H)]                          # the residual stream, ping-pong between kernels
-        self.x_mid = [zeros(T, H) for _ in range(self.lpk - 1)]      # and between the layers of a kernel
+        }
+        self.x = [zeros(T, H), zeros(T, H)]                          # the residual stream, ping-pong between layers
         self.layers = []
         for i in range(self.L):
             p = f"model.layers.{i}."
@@ -86,7 +80,7 @@ class Model:
                 "w_o": bf(at("self_attn.o_proj.weight")), "b_o": bf(at("self_attn.o_proj.bias")),
                 "sinks": bf(at("self_attn.sinks").view(KVH, QH // KVH)),
                 "w_router": bf(at("mlp.router.weight")), "b_router": bf(at("mlp.router.bias")),
-                "w13": sm90_moe_ring_pack(w13.cuda(), s13.cuda(), W13_ROWS, glu=True), "b13": bf(b13),
+                "w13": sm90_moe_ring_pack(w13.cuda(), s13.cuda(), 128, glu=True), "b13": bf(b13),
                 "w2": sm90_moe_ring_pack(w2.cuda(), s2.cuda(), 64, glu=False), "b2": bf(b2),
                 "k_cache": zeros(max_seq // PAGE, PAGE, KVH, D), "v_cache": zeros(max_seq // PAGE, PAGE, KVH, D),
             })
@@ -94,22 +88,12 @@ class Model:
         self.head = {"norm": bf(sd["model.norm.weight"]), "lm_head": bf(sd["lm_head.weight"]),
                      "h": zeros(T, H), "logits": zeros(T, self.V, dtype=torch.float32)}
 
-    def group_tensors(self, gi: int) -> dict:
-        """Kernel instance gi's tensors by graph name (layers gi lpk .. gi lpk + lpk - 1; layer j of the kernel: name_j): their
-        weights and caches, the intermediates, the shared buffers, the residual x_0 (in) .. x_lpk (out)."""
-        t = dict(self.shared)
-        for j in range(self.lpk):
-            t.update({f"{k}_{j}": v for k, v in {**self.layers[gi * self.lpk + j], **self.inter[j]}.items()})
-        xs = [self.x[gi % 2]] + self.x_mid + [self.x[(gi + 1) % 2]]
-        t.update({f"x_{j}": v for j, v in enumerate(xs)})
-        return t
-
-    def group_windows(self, gi: int) -> tuple:
-        """The attention windows of instance gi's layers (0: full): which kernel it is."""
-        return tuple(self.window if self.types[gi * self.lpk + j] == "sliding_attention" else 0 for j in range(self.lpk))
+    def layer_tensors(self, i: int) -> dict:
+        """Layer i's tensors by graph name: its weights and cache, the shared buffers, its residual in and out."""
+        return {**self.shared, **self.layers[i], "x_in": self.x[i % 2], "x_out": self.x[(i + 1) % 2]}
 
     def head_tensors(self) -> dict:
-        return {"x": self.x[(self.L // self.lpk) % 2], **self.head}
+        return {"x": self.x[self.L % 2], **self.head}
 
     def set_position(self, pos: int):
         """The page table for a step at position pos (the token's K / V go to slot pos; pages in order)."""
@@ -118,18 +102,9 @@ class Model:
         self.shared["last_page_len"].fill_(pos + 1 - (n - 1) * PAGE)
 
 
-def build_group(m: Model, mpk: StaticMegakernel, t: dict, windows: tuple):
-    """Consecutive decoder layers, layer j with attention window windows[j] (group_tensors' names)."""
+def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
+    """The decoder layer: x_out = x_in + attn(norm(x_in)) + moe(norm(...))."""
     A = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
-    for j, window in enumerate(windows):
-        build_layer(m, mpk, A, window, j)
-
-
-def build_layer(m: Model, mpk: StaticMegakernel, G: dict, window: int, j: int):
-    """Decoder layer j of a kernel: x_{j+1} = x_j + attn(norm(x_j)) + moe(norm(...)); its own tensors are G[name_j]."""
-    A = {k: G[f"{k}_{j}"] for k in list(m.layers[0]) + list(m.inter[0])}
-    A.update({k: G[k] for k in m.shared})
-    A["x_in"], A["x_out"] = G[f"x_{j}"], G[f"x_{j + 1}"]
     mpk.sm90_rmsnorm_layer(A["x_in"], A["ln1"], A["h"], m.eps)
     mpk.gemm_tile_layer(input=A["h"], weight=A["w_qkv"], output=A["qkv32"], combine="store")
     mpk.sm90_bias_layer(A["qkv32"], A["b_qkv"], A["qkv"])
@@ -142,7 +117,7 @@ def build_layer(m: Model, mpk: StaticMegakernel, G: dict, window: int, j: int):
     mpk.sm90_router_layer(A["h2"], A["w_router"], A["b_router"], A["logits"])
     mpk.sm90_topk_layer(A["logits"], A["num_tokens"], A["topk_w"], A["routing"], A["active"])
     mpk.sm90_moe_ring_layer(A["h2"], A["w13"], A["routing"], A["active"], A["act"], bias=A["b13"], glu=True,
-                            limit=m.limit, alpha=1.702, rows_per_task=W13_ROWS)
+                            limit=m.limit, alpha=1.702, rows_per_task=128)
     mpk.sm90_moe_ring_layer(A["act"], A["w2"], A["routing"], A["active"], A["eo"], bias=A["b2"], glu=False,
                             rows_per_task=64)
     mpk.sm90_mul_sum_add_layer(A["eo"], A["topk_w"], A["x1"], A["x_out"])
@@ -214,11 +189,10 @@ def record_costs(args, m: Model):
     nvcc = subprocess.run(["nvcc", "--version"], capture_output=True, text=True).stdout.strip().splitlines()[-1]
     machine = {"gpu": torch.cuda.get_device_name(0), "cuda": nvcc}
     m.set_position(m.max_seq // 2)
-    for inter in m.inter:
-        inter["active"][m.E] = m.TOPK
-    kinds = [(kernel_name(w), lambda mpk, t, w=w: build_group(m, mpk, t, w), m.group_tensors(gi))
-             for w, gi in first_instances(m).items()]
-    kinds.append(("head", lambda mpk, t: build_head(m, mpk, t), m.head_tensors()))
+    m.shared["active"][m.E] = m.TOPK
+    kinds = [("sliding", lambda mpk, t: build_layer(m, mpk, t, m.window), m.layer_tensors(0)),
+             ("full", lambda mpk, t: build_layer(m, mpk, t, 0), m.layer_tensors(1)),
+             ("head", lambda mpk, t: build_head(m, mpk, t), m.head_tensors())]
     for (name, build, t), most in [(k, most) for k in kinds for most in (False, True)]:
         mpk, paths, sk, plan = compile_kernel(name, m, build, t, args, profile=True, most_tasks=most)
         h, launches, spans = Harness(sk), [], []
@@ -235,26 +209,12 @@ def record_costs(args, m: Model):
         sk.finalize()
 
 
-def kernel_name(windows: tuple) -> str:
-    """A layer kernel's name: its layers' kinds (s: sliding window, f: full)."""
-    return "layers_" + "".join("s" if w else "f" for w in windows)
-
-
-def first_instances(m: Model) -> dict:
-    """Each layer kernel (by its windows) and its first instance."""
-    out = {}
-    for gi in range(m.L // m.lpk):
-        out.setdefault(m.group_windows(gi), gi)
-    return out
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("ckpt")
     p.add_argument("--ref", default=None)
     p.add_argument("--new", type=int, default=200)
     p.add_argument("--max-seq", type=int, default=1024)
-    p.add_argument("--layers-per-kernel", type=int, default=1)
     p.add_argument("--plan", default="rr", choices=["rr"])
     p.add_argument("--record", default=None)
     p.add_argument("--search", nargs="+", default=None)
@@ -277,21 +237,23 @@ def main():
         prompt = tok(text).input_ids
     P, NEW = len(prompt), args.new
     t0 = time.time()
-    m = Model(args.ckpt, args.max_seq, args.layers_per_kernel)
+    m = Model(args.ckpt, args.max_seq)
     assert P + NEW <= m.max_seq
     print(f"weights loaded and converted in {time.time() - t0:.0f} s", flush=True)
     if args.record:
         record_costs(args, m)
         return
 
-    # the layer kernels (one per pattern of attention kinds), and one instance per group of layers_per_kernel layers
-    # (group gi: instance inst[gi] of kernel kernel_of[gi])
-    kernels = {w: compile_kernel(kernel_name(w), m, lambda mpk, t, w=w: build_group(m, mpk, t, w), m.group_tensors(gi),
-                                 args)[2] for w, gi in first_instances(m).items()}
+    # the kernels, and one instance per layer (layer i: instance inst[i] of kernel kind[i])
+    sliding = [i for i in range(m.L) if m.types[i] == "sliding_attention"]
+    full = [i for i in range(m.L) if m.types[i] != "sliding_attention"]
+    *_, k_sl, _ = compile_kernel("sliding", m, lambda mpk, t: build_layer(m, mpk, t, m.window), m.layer_tensors(sliding[0]), args)
+    *_, k_fu, _ = compile_kernel("full", m, lambda mpk, t: build_layer(m, mpk, t, 0), m.layer_tensors(full[0]), args)
     *_, k_hd, _ = compile_kernel("head", m, lambda mpk, t: build_head(m, mpk, t), m.head_tensors(), args)
-    groups = m.L // m.lpk
-    kernel_of = {gi: kernels[m.group_windows(gi)] for gi in range(groups)}
-    inst = {gi: kernel_of[gi].add_instance(m.group_tensors(gi)) for gi in range(groups)}
+    kernel_of, inst = {}, {}
+    for i in range(m.L):
+        kernel_of[i] = k_sl if i in sliding else k_fu
+        inst[i] = kernel_of[i].add_instance(m.layer_tensors(i))
     k_hd.add_instance(m.head_tensors())
 
     cur = torch.zeros(1, dtype=torch.long, device="cuda")
@@ -305,8 +267,8 @@ def main():
             cur.copy_(prompt_t[pos:pos + 1])
         x0[0:1].copy_(m.embed.index_select(0, cur))
         m.set_position(pos)
-        for gi in range(groups):
-            kernel_of[gi].launch_instances(inst[gi], 1)
+        for i in range(m.L):
+            kernel_of[i].launch_instances(inst[i], 1)
         k_hd.launch_instances(0, 1)
         nxt = m.head["logits"][0].argmax().view(1)
         if pos >= P - 1:
@@ -339,7 +301,7 @@ def main():
     if args.json:
         json.dump({"prompt_ids": prompt, "prompt_len": P, "gen": out, "text": text, "total_ms": total,
                    "step_us_median": statistics.median(per) * 1e3}, open(args.json, "w"))
-    for k in list(kernels.values()) + [k_hd]:
+    for k in (k_sl, k_fu, k_hd):
         k.finalize()
 
 

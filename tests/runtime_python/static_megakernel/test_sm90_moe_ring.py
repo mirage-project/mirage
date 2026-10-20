@@ -1,7 +1,7 @@
 """The sm90_moe_ring task type (routed MXFP4 experts streamed through the static megakernel's ring on Hopper): W13 with
 the clamped SwiGLU fused, then W2, checked against torch at GPT-OSS-20B shapes (32 experts, top-4, 2880) and
 timed. A decode step routes ROUTED (default 1) of the 8 tokens, to at most A = 4 ROUTED experts.
-usage: [ROUTED=<tokens>] [W13_ROWS=128] [W2_ROWS=64] [PROFILE=1 (per-node task times)] test_sm90_moe_ring.py [reps]"""
+usage: [ROUTED=<tokens>] [PROFILE=1 (per-node task times)] test_sm90_moe_ring.py [reps]"""
 import os, statistics, sys
 import torch
 from mirage.mpk import compiler
@@ -37,18 +37,16 @@ def main():
     mask = torch.zeros(E + 1, dtype=torch.int32, device="cuda")
     mask[:len(active)] = torch.tensor(active, dtype=torch.int32)
     mask[E] = len(active)
-    w13_rows = int(os.environ.get("W13_ROWS", 128))   # W13 rows per task (half gate, half up): a multiple of 32
-    w2_rows = int(os.environ.get("W2_ROWS", 64))      # W2 rows per task: a multiple of 16
-    bufs = {"x": x, "w13": sm90_moe_ring_pack(w13p, w13s, w13_rows, glu=True), "b13": b13,
-            "w2": sm90_moe_ring_pack(w2p, w2s, w2_rows, glu=False), "b2": b2, "routing": routing,
+    bufs = {"x": x, "w13": sm90_moe_ring_pack(w13p, w13s, 128, glu=True), "b13": b13,
+            "w2": sm90_moe_ring_pack(w2p, w2s, 64, glu=False), "b2": b2, "routing": routing,
             "mask": mask, "act": torch.zeros(A, T, I, dtype=torch.float16, device="cuda"),
             "out": torch.zeros(T, TOPK, H, dtype=torch.bfloat16, device="cuda")}
     mpk = StaticMegakernel(num_gpus=1)
     D = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in bufs.items()}
     mpk.sm90_moe_ring_layer(D["x"], D["w13"], D["routing"], D["mask"], D["act"], bias=D["b13"], glu=True,
-                            limit=LIMIT, alpha=ALPHA, rows_per_task=w13_rows)
+                            limit=LIMIT, alpha=ALPHA, rows_per_task=128)
     mpk.sm90_moe_ring_layer(D["act"], D["w2"], D["routing"], D["mask"], D["out"], bias=D["b2"], glu=False,
-                            rows_per_task=w2_rows)
+                            rows_per_task=64)
     # the plan: default grids, tasks round-robin over the SMs in graph order, an expert slot's tasks together (W2's slot a
     # waits for W13's slot a only)
     nsm = mpk._num_sms()

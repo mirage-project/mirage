@@ -24,7 +24,7 @@ from ..kernel import TBGraph
 from .persistent_kernel import PersistentKernel
 
 # the kernel's limits (config.cuh MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, SMAX = the ring's stages; core.cuh Combine)
-MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 256, 128, 128, 5
+MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 64, 32, 16, 5
 COMBINE = {"slots": 0, "add": 1, "store": 2}
 SF_CHUNK = 512   # one MX scale chunk (config.cuh): 128 rows x 4 B
 MAX_SUM_PARTS = 14   # the most K parts sum_send adds (tasks/sum_send.cuh)
@@ -51,7 +51,7 @@ def sm90_moe_ring_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, gl
     permuted so that MMA thread q's A fragment (K columns 16 kb + 2q + {0, 1, 8, 9}, kb = 0..7: packed bytes 8 kb + q
     (+ 4)) is its bytes 16 q .. 16 q + 15, in the order (kb, + 4), and the nibbles within each 4-byte word ordered for the
     kernel's E4M3 decode. glu (W13, gate rows then up rows): the rows reordered so
-    that each `rows` are rows / 2 gate rows and the up rows of the same outputs (the task's SwiGLU; rows a multiple of 32)."""
+    that each 128 are 64 gate rows and the up rows of the same outputs (the task's SwiGLU, rows 128)."""
     E, N, KH = packed.shape
     kt = (KH + 63) // 64
     used = scales[scales != 0]
@@ -62,9 +62,9 @@ def sm90_moe_ring_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, gl
     sc = torch.zeros(E, N, kt * 4, dtype=torch.uint8, device=scales.device)
     sc[:, :, :scales.shape[2]] = scales
     if glu:
-        assert rows % 32 == 0 and N % rows == 0
-        w = w.view(E, 2, N // rows, rows // 2, -1).transpose(1, 2).reshape(E, N, -1)
-        sc = sc.view(E, 2, N // rows, rows // 2, -1).transpose(1, 2).reshape(E, N, -1)
+        assert rows == 128 and N % 128 == 0
+        w = w.view(E, 2, N // 128, 64, -1).transpose(1, 2).reshape(E, N, -1)
+        sc = sc.view(E, 2, N // 128, 64, -1).transpose(1, 2).reshape(E, N, -1)
     # byte 8 kb + 4 h + q of a row's tile -> 16 q + 2 kb + h; then [E, N / rows, K tiles, rows, 64]
     w = w.view(E, N // rows, rows, kt, 8, 2, 4).permute(0, 1, 3, 2, 6, 4, 5).reshape(E, N // rows, kt, rows * 64)
     # within each 4-byte word (its registers c = 0..3 a byte each, low nibble the even K): register c's two nibbles to
@@ -617,19 +617,17 @@ class StaticMegakernel(PersistentKernel):
         block_dim: tuple = (256, 1, 1),
     ):
         """One routed expert projection streamed through the ring (tasks/sm90_moe_ring.cuh), its MXFP4 weights decoded into
-        mma.sync registers: task (a, y) = the expert in slot a of the active list (none past their count) times weight rows
-        [y R, y R + R), R = rows_per_task (a multiple of 16; GLU 32), its weight blocks one bulk copy a ring stage. glu: W13 with the
-        clamped SwiGLU fused (R / 2 outputs a task). A = the slots (GLU: output.dim(0); W2: input.dim(0)), the most experts
-        a step routes to.
+        WGMMA registers: task (a, y) = the expert in slot a of the active list (none past their count) times weight rows
+        [y R, y R + R), R = rows_per_task (64 or 128), its weight blocks one bulk copy a ring stage. glu: W13 with the
+        clamped SwiGLU fused (R 128: 64 outputs a task). A = the slots (GLU: output.dim(0); W2: input.dim(0)), the most experts a step routes to.
         params = [glu, R, N, K, E, TOPK, has_bias, limit bits, alpha bits, slot deps]."""
         R = rows_per_task
         E, N, K = weights.dim(0), weights.dim(1) * R, input.dim(input.num_dims - 1)
         T = self._tokens(routing_indices.dim(1))
         A = output.dim(0) if glu else input.dim(0)
         TOPK = 0 if glu else output.dim(1)
-        assert R % (32 if glu else 16) == 0 and N % R == 0 and K % 64 == 0
-        assert (weights.dim(2), weights.dim(3)) == ((K + 127) // 128, R * 68)
-        assert not glu or output.dim(2) * 2 == N
+        assert R in (64, 128) and K % 64 == 0 and (weights.dim(2), weights.dim(3)) == ((K + 127) // 128, R * 68)
+        assert not glu or (R == 128 and output.dim(2) * 2 == N)
         self._dtypes("sm90_moe_ring_layer", input=(input, float16), weights=(weights, uint8),
                      output=(output, float16 if glu else bfloat16))
         tensors = [input, weights, routing_indices, active_experts] + ([bias] if bias is not None else [])
