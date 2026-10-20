@@ -27,8 +27,9 @@ from mirage.mpk.models.utils import shuffle_tensors
 from mirage.mpk.models.gpt_oss.mxfp4 import Mxfp4Checkpoint, convert_expert_weight
 
 T, PAGE = 8, 64                       # token rows of a step, KV page size
+W13_ROWS = 128   # W13 rows per task; the MoE block measured 40 us, 64 rows (360 tasks) 52 us, 192 (one wave of 120) 49 us
 FLAGS = sm90_flags() + ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]   # serving build: launches back to back
-FLUSH = 512 << 20
+FLUSH = 128 << 20   # read before each recorded launch: L2 (50 MB) emptied
 
 
 class Model:
@@ -85,7 +86,7 @@ class Model:
                 "w_o": bf(at("self_attn.o_proj.weight")), "b_o": bf(at("self_attn.o_proj.bias")),
                 "sinks": bf(at("self_attn.sinks").view(KVH, QH // KVH)),
                 "w_router": bf(at("mlp.router.weight")), "b_router": bf(at("mlp.router.bias")),
-                "w13": sm90_moe_ring_pack(w13.cuda(), s13.cuda(), 128, glu=True), "b13": bf(b13),
+                "w13": sm90_moe_ring_pack(w13.cuda(), s13.cuda(), W13_ROWS, glu=True), "b13": bf(b13),
                 "w2": sm90_moe_ring_pack(w2.cuda(), s2.cuda(), 64, glu=False), "b2": bf(b2),
                 "k_cache": zeros(max_seq // PAGE, PAGE, KVH, D), "v_cache": zeros(max_seq // PAGE, PAGE, KVH, D),
             })
@@ -141,7 +142,7 @@ def build_layer(m: Model, mpk: StaticMegakernel, G: dict, window: int, j: int):
     mpk.sm90_router_layer(A["h2"], A["w_router"], A["b_router"], A["logits"])
     mpk.sm90_topk_layer(A["logits"], A["num_tokens"], A["topk_w"], A["routing"], A["active"])
     mpk.sm90_moe_ring_layer(A["h2"], A["w13"], A["routing"], A["active"], A["act"], bias=A["b13"], glu=True,
-                            limit=m.limit, alpha=1.702, rows_per_task=128)
+                            limit=m.limit, alpha=1.702, rows_per_task=W13_ROWS)
     mpk.sm90_moe_ring_layer(A["act"], A["w2"], A["routing"], A["active"], A["eo"], bias=A["b2"], glu=False,
                             rows_per_task=64)
     mpk.sm90_mul_sum_add_layer(A["eo"], A["topk_w"], A["x1"], A["x_out"])
@@ -213,7 +214,8 @@ def record_costs(args, m: Model):
     nvcc = subprocess.run(["nvcc", "--version"], capture_output=True, text=True).stdout.strip().splitlines()[-1]
     machine = {"gpu": torch.cuda.get_device_name(0), "cuda": nvcc}
     m.set_position(m.max_seq // 2)
-    m.shared["active"][m.E] = m.TOPK
+    for inter in m.inter:
+        inter["active"][m.E] = m.TOPK
     kinds = [(kernel_name(w), lambda mpk, t, w=w: build_group(m, mpk, t, w), m.group_tensors(gi))
              for w, gi in first_instances(m).items()]
     kinds.append(("head", lambda mpk, t: build_head(m, mpk, t), m.head_tensors()))

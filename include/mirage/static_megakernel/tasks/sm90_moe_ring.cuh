@@ -3,9 +3,9 @@
 // into the A registers of mma.sync. Task (a, y) of grid (A, N / ROWS, 1): the
 // expert in slot a of the active-expert list (nothing when fewer are active)
 // times weight rows [y ROWS, y ROWS + ROWS). Two kinds:
-//   GLU  W13 with GPT-OSS's clamped SwiGLU fused: a task's 128 rows are the 64
-//        gate rows and the 64 up rows of the same 64 outputs; output [A][T][I]
-//        f16 (W2's input)
+//   GLU  W13 with GPT-OSS's clamped SwiGLU fused: a task's ROWS rows are the
+//        ROWS / 2 gate rows and the up rows of the same outputs; output
+//        [A][T][I] f16 (W2's input)
 //   W2   output [T, TOPK, N], the routed tokens' rows only
 //
 // The weights come repacked (static_megakernel.py sm90_moe_ring_pack) as
@@ -20,13 +20,16 @@
 // many tiles as fit in the stage.
 //
 // All 8 warps decode and multiply, each on its own (mma.sync m16n8k16: the
-// decode latency of one warp hides behind another's): warp w takes the m16
-// row tiles w % 4 (and w % 4 + 4 of 128 rows: for GLU the gate tile and the
-// up tile of the same outputs) of the K tiles of parity w / 4. Warps 4..7
-// hand their sums to warps 0..3 for the epilogue through the ring's
-// scale-factor area (OFF_WSF, unused on Hopper). The last warp done with a
-// stage frees it and refills it with the stage SMAX later; thread 0 loads the
-// first stages (the weights before it waits for the activation's producer).
+// decode latency of one warp hides behind another's). A task's rows are NU
+// units -- GLU: pairs of the gate m16 tile p (rows 16 p) and the up tile p
+// (rows ROWS / 2 + 16 p); W2: m16 tiles p (rows 16 p) -- dealt to RG row
+// groups (unit p to group p % RG); warp w takes group w % RG's units (MT m16
+// tiles) for the K tiles kt with kt % KG == w / RG (RG x KG = 8 warps). The
+// other K groups' sums reach group 0 for the epilogue through the task's ring
+// stages (consumed by then).
+// The last warp done with a stage frees it and refills it with the stage SMAX
+// later; thread 0 loads the first stages (the weights before it waits for the
+// activation's producer).
 #pragma once
 #include "sm90_common.cuh"
 
@@ -136,23 +139,26 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
   constexpr int ROWS = PARAMS::v[1], N = PARAMS::v[2], K = PARAMS::v[3],
                 E = PARAMS::v[4], TOPK = PARAMS::v[5];
   using S = MoeRingStage<ROWS>;
-  constexpr int MT = ROWS / 64,
-                NB = S::NB; // a warp's m16 tiles, K tiles a stage
-  constexpr int XCH_BYTES = 128 * MT * 16; // warps 4..7's sums
+  constexpr int NB = S::NB; // K tiles a stage
+  // units, row groups, K groups, a warp's units and m16 tiles
+  constexpr int NU = GLU ? ROWS / 32 : ROWS / 16;
+  constexpr int RG = NU % 8 == 0 ? 8 : NU % 4 == 0 ? 4 : NU % 2 == 0 ? 2 : 1;
+  constexpr int KG = 8 / RG, UPG = NU / RG, MT = GLU ? 2 * UPG : UPG;
+  constexpr int XCH_BYTES = (KG - 1) * RG * 32 * MT * 16; // groups 1..'s sums
   constexpr int KT = (K + 127) / 128, NS = (KT + NB - 1) / NB; // tiles, stages
-  static_assert((ROWS == 64 || ROWS == 128) && N % ROWS == 0 && K % 64 == 0,
-                "sm90_moe_ring: 64- or 128-row tiles, K in 64-value blocks");
-  static_assert(OFF_WSF + XCH_BYTES + 4 * (SMAX + 1) <= RING_BYTES,
+  static_assert(ROWS % (GLU ? 32 : 16) == 0 && N % ROWS == 0 && K % 64 == 0,
+                "sm90_moe_ring: whole m16 tiles (GLU: tile pairs), K in "
+                "64-value blocks");
+  static_assert(XCH_BYTES <= SMAX * FSTAGE &&
+                    OFF_WSF + 4 * (SMAX + 1) <= RING_BYTES,
                 "sm90_moe_ring: the exchange area and the stage counters");
-  static_assert(!GLU || ROWS == 128,
-                "sm90_moe_ring: GLU's tasks are 64 gate rows and the 64 up "
-                "rows");
+  static_assert(RG * KG == 8, "sm90_moe_ring: 8 warps");
   // the producers of everything but the activation (IN's first): the expert
   // list, the routing. The activation's thread 0 waits for after it has
   // started the weights, which depend on nothing (as PDL does between
   // kernels): a task's weight stream starts while its producer finishes.
   __syncthreads(); // this SM's earlier tasks are done with the ring
-  int *const done = reinterpret_cast<int *>(L.sm + OFF_WSF + XCH_BYTES);
+  int *const done = reinterpret_cast<int *>(L.sm + OFF_WSF);
   if (threadIdx.x == 0) {
     sm90_wait_inputs<~1u, IN...>(g);
     for (int i = 0; i < SMAX; i++) {
@@ -226,9 +232,13 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
         activation(s);
       }
     }
-    int const g8 = lane >> 2, q = lane & 3, kpar = warp >> 2;
-    int const rbase = 16 * (warp & 3) + g8; // rows rbase (+ 8) of m16 tile 0,
-                                            // + 64 of tile 1
+    int const g8 = lane >> 2, q = lane & 3, rg = warp % RG, kg = warp / RG;
+    // the first row of the warp's m16 tile mt (its unit mt / 2 (GLU) or mt;
+    // GLU: the gate tile, then the up tile); a thread's rows: + g8 (+ 8)
+    auto tile_row = [&](int mt) {
+      int const p = rg + RG * (GLU ? mt / 2 : mt);
+      return 16 * p + ((GLU && (mt & 1)) ? ROWS / 2 : 0);
+    };
     float acc[MT][4] = {};
     for (int s = 0; s < NS; s++) {
       int const c = c0 + s, st = c % SMAX;
@@ -237,7 +247,7 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
 #pragma unroll
       for (int b = 0; b < NB; b++) {
         int const kt = s * NB + b;
-        if ((kt & 1) != kpar || kt >= KT) {
+        if (kt % KG != kg || kt >= KT) {
           continue;
         }
         // B: token g8's K pairs 2q (b0) and 2q + 8 (b1) of each k16 block,
@@ -257,8 +267,8 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
         for (int mt = 0; mt < MT; mt++) {
           uint32_t r[8][4];
 #pragma unroll
-          for (int rr = 0; rr < 2; rr++) { // rows rbase + 64 mt (+ 8)
-            int const row = 64 * mt + rbase + 8 * rr;
+          for (int rr = 0; rr < 2; rr++) { // rows tile_row(mt) + g8 (+ 8)
+            int const row = tile_row(mt) + g8 + 8 * rr;
             uint4 const v = *reinterpret_cast<uint4 const *>(
                 stage + b * S::BLOCK + row * 64 + q * 16);
             uint32_t const sw = *reinterpret_cast<uint32_t const *>(
@@ -298,24 +308,28 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
       }
     }
     L.gl = L.gi0 = c0 + NS;
-    // epilogue: acc[mt][i] = row 64 mt + rbase (+ 8 for i >= 2), token 2q +
-    // (i & 1); warps 4..7 add theirs (the other K tiles) to warps 0..3's
-    float4 *xacc = reinterpret_cast<float4 *>(L.sm + OFF_WSF);
-    int const xi = (warp & 3) * 32 + lane;
-    if (kpar == 1) {
+    // epilogue: acc[mt][i] = row tile_row(mt) + g8 (+ 8 for i >= 2), token
+    // 2q + (i & 1); K groups 1.. add theirs to group 0's, through the ring
+    // stages (every warp done reading them: the barrier)
+    float4 *xacc = reinterpret_cast<float4 *>(L.sm);
+    __syncthreads();
+    if (kg > 0) {
 #pragma unroll
       for (int mt = 0; mt < MT; mt++) {
-        xacc[xi * MT + mt] =
+        xacc[(((kg - 1) * RG + rg) * 32 + lane) * MT + mt] =
             make_float4(acc[mt][0], acc[mt][1], acc[mt][2], acc[mt][3]);
       }
     }
     __syncthreads();
-    if (kpar == 0) {
+    if (kg == 0) {
 #pragma unroll
-      for (int mt = 0; mt < MT; mt++) {
-        float4 const o = xacc[xi * MT + mt];
-        acc[mt][0] += o.x, acc[mt][1] += o.y, acc[mt][2] += o.z,
-            acc[mt][3] += o.w;
+      for (int k = 1; k < KG; k++) {
+#pragma unroll
+        for (int mt = 0; mt < MT; mt++) {
+          float4 const o = xacc[(((k - 1) * RG + rg) * 32 + lane) * MT + mt];
+          acc[mt][0] += o.x, acc[mt][1] += o.y, acc[mt][2] += o.z,
+              acc[mt][3] += o.w;
+        }
       }
       __nv_bfloat16 const *bias =
           HAS_BIAS ? buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 3>()) +
@@ -330,22 +344,27 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
           constexpr int I = N / 2;
           float const limit = __int_as_float(PARAMS::v[7]),
                       alpha = __int_as_float(PARAMS::v[8]);
-          int const o = tk.y * 64 + rbase + 8 * (i >> 1);
-          float gate = acc[0][i], up = acc[1][i];
-          if constexpr (HAS_BIAS) {
-            gate += __bfloat162float(bias[o]);
-            up += __bfloat162float(bias[I + o]);
+#pragma unroll
+          for (int u = 0; u < UPG; u++) { // unit u: tiles 2u (gate), 2u + 1
+            int const o =
+                tk.y * (ROWS / 2) + tile_row(2 * u) + g8 + 8 * (i >> 1);
+            float gate = acc[2 * u][i], up = acc[2 * u + 1][i];
+            if constexpr (HAS_BIAS) {
+              gate += __bfloat162float(bias[o]);
+              up += __bfloat162float(bias[I + o]);
+            }
+            gate = fminf(gate, limit);
+            up = fminf(fmaxf(up, -limit), limit);
+            static_cast<__half *>(out)[((size_t)a * T + tok) * I + o] =
+                __float2half((up + 1.0f) * gate /
+                             (1.0f + __expf(-gate * alpha)));
           }
-          gate = fminf(gate, limit);
-          up = fminf(fmaxf(up, -limit), limit);
-          static_cast<__half *>(out)[((size_t)a * T + tok) * I + o] =
-              __float2half((up + 1.0f) * gate / (1.0f + __expf(-gate * alpha)));
         } else {
           int const slot = routing[e * T + tok] - 1;
           if (slot >= 0) {
 #pragma unroll
             for (int mt = 0; mt < MT; mt++) {
-              int const row = row0 + 64 * mt + rbase + 8 * (i >> 1);
+              int const row = row0 + tile_row(mt) + g8 + 8 * (i >> 1);
               float v = acc[mt][i];
               if constexpr (HAS_BIAS) {
                 v += __bfloat162float(bias[row]);
