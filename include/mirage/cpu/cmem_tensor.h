@@ -42,19 +42,30 @@ struct CTensor {
     size_t num_elements = 1;
     using namespace mirage::type;
     size_t data_type_size = 1;
-    switch (data_type) {
-      case DT_INT8: {
+    switch (data_type) { // the sizes of type.h get_datatype_size
+      case DT_INT8:
+      case DT_UINT8:
+      case DT_FLOAT8: {
         data_type_size = 1;
         break;
       }
       case DT_BFLOAT16:
-      case DT_FLOAT16: {
+      case DT_FLOAT16:
+      case DT_INT16:
+      case DT_UINT16: {
         data_type_size = 2;
         break;
       }
       case DT_FLOAT32:
-      case DT_INT32: {
+      case DT_INT32:
+      case DT_UINT32: {
         data_type_size = 4;
+        break;
+      }
+      case DT_INT64:
+      case DT_UINT64:
+      case DT_DOUBLE: {
+        data_type_size = 8;
         break;
       }
       case DT_UNKNOWN:

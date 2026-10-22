@@ -183,6 +183,29 @@ public:
                            int num_groups,
                            char const *name);
   void register_task(char const *task_type, std::vector<int> params);
+  // register the task of operator `op` (register_task uses the last operator)
+  void register_task_for_op(KNOperator const *op,
+                            char const *task_type,
+                            std::vector<int> params);
+  // rebuild operator `op_idx` (a customized op whose threadblock graph holds
+  // only input ops) with a new grid: same tensors and per-tensor partition
+  // maps, then register its task again with its stored name and `params`
+  void regrid(int op_idx, dim3 grid_dim, std::vector<int> params);
+  int get_num_operators() const;
+  // task of operator `op_idx`: name (into `name`, at most name_len bytes),
+  // params (at most max_params), grid (3 ints), io (3 ints) = {num_inputs,
+  // num_outputs, num_params}, and pointers to the operator's tensors in
+  // registration order (at most max_tensors). Returns the number of tensors, -1
+  // if no task is registered.
+  int get_task_info(int op_idx,
+                    char *name,
+                    int name_len,
+                    int *params,
+                    int max_params,
+                    int *grid,
+                    int *io,
+                    DTensor **tensors,
+                    int max_tensors);
   runtime::TaskGraphResult generate_task_graph(int num_gpus, int my_gpu_id);
 
   // helper functions
@@ -231,6 +254,10 @@ public:
   std::unordered_map<mirage::kernel::KNOperator const *,
                      std::tuple<int, int, runtime::TaskType, int>>
       task_config;
+  // task name and params each operator was registered with (for regrid)
+  std::unordered_map<mirage::kernel::KNOperator const *,
+                     std::pair<std::string, std::vector<int>>>
+      task_name_params;
 
   using OpType = KNOperator;
   using TensorType = DTensor;
