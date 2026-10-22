@@ -5,7 +5,8 @@
 #
 #   make                      # build for SM 100a (B200)
 #   make run                  # build and print the tables
-#   make run JSON=b200        # also record b200_sync.json and b200_tma.json
+#   make run JSON=b200        # also record b200_sync.json, b200_tma.json and
+#                            #             b200_profiler_overhead.json
 #
 # Override SM for a different target, e.g. `make SM=90a` for Hopper.
 
@@ -16,7 +17,7 @@ JSON ?=
 NVCCFLAGS := -O3 -std=c++17 -gencode=arch=compute_$(SM),code=sm_$(SM)
 LIBS      := -lnvidia-ml
 
-BINS := sync_primitives tma_bandwidth
+BINS := sync_primitives tma_bandwidth profiler_overhead
 
 all: $(BINS)
 
@@ -31,9 +32,13 @@ sync_primitives: sync_primitives.cu microbench_common.cuh .build_flags
 tma_bandwidth: tma_bandwidth.cu microbench_common.cuh .build_flags
 	$(NVCC) $(NVCCFLAGS) $< -o $@ $(LIBS) -lcuda
 
+profiler_overhead: profiler_overhead.cu microbench_common.cuh .build_flags
+	$(NVCC) $(NVCCFLAGS) $< -o $@ $(LIBS)
+
 run: $(BINS)
 	./sync_primitives $(if $(JSON),$(JSON)_sync.json)
 	./tma_bandwidth $(if $(JSON),$(JSON)_tma.json)
+	./profiler_overhead $(if $(JSON),$(JSON)_profiler_overhead.json)
 
 clean:
 	rm -f $(BINS) .build_flags
