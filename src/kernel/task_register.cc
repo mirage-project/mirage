@@ -1508,7 +1508,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   }
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
          "$, $, $, $, $, "
-         "$, $, $, $, $>(",
+         "$, $, $, $, $, $>(",
          num_q_heads_per_kv, /* NUM_QO_HEADS               */
          1,                  /* NUM_KV_HEADS               */
          num_kv_heads,       /* NUM_QO_GROUPS              */
@@ -4559,7 +4559,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
   code.inc_indent();
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, "
          "$, $, $, $, $, "
-         "$, $, $, $, $, $, $, $>(",
+         "$, $, $, $, $, $, $, $, $>(",
          num_q_heads / num_kv_heads, /* NUM_QO_HEADS */
          1,                          /* NUM_KV_HEADS */
          num_kv_heads,               /* NUM_QO_GROUPS */
@@ -4574,6 +4574,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
          max_tokens,        /* MAX_TOKENS */
          "true",            /* PARTITION_KV */
          num_kv_chunks,     /* NUM_KV_CHUNKS */
+         head_dim,          /* ROTARY_DIM */
          page_stride_rows /* PAGE_STRIDE_ROWS */);
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
