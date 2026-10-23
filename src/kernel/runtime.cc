@@ -335,7 +335,7 @@ void register_mugraph(
                 (task_type == TASK_PAGED_ATTENTION_2) ||
                 (task_type == TASK_PAGED_ATTENTION_HOPPER) ||
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_SM100) ||
-                (TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
+                (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_MERGE_SM100) ||
                 (task_type == TASK_PAGED_ATTENTION_SPLIT_KV_HOPPER) ||
                 (task_type == TASK_ATTN_SM100)) {
               // Note that we assume grid_dim.x corresponds to
