@@ -44,19 +44,29 @@ def sm90_flags() -> List[str]:
             f"-I{root}/deps/cutlass/include", f"-I{root}/deps/cutlass/tools/util/include"]
 
 
-def sm90_moe_ring_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu: bool) -> torch.Tensor:
+def sm90_moe_ring_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu: bool,
+                       experts_per_chunk: int = 8) -> torch.Tensor:
     """An expert projection's MXFP4 weights [E, N, K / 2] u8 (two E2M1 values a byte, low nibble first) and E8M0 scales
     [E, N, K / 32] u8 to sm90_moe_ring's blocks [E, N / rows, K tiles, rows x 68] u8, in the order a task streams them: per
     K tile of 128 values (zero-padded; zero decodes to 0) its rows' 64 bytes, then their 4 scales. A row's 64 bytes are
     permuted so that MMA thread q's A fragment (K columns 16 kb + 2q + {0, 1, 8, 9}, kb = 0..7: packed bytes 8 kb + q
     (+ 4)) is its bytes 16 q .. 16 q + 15, in the order (kb, + 4), and the nibbles within each 4-byte word ordered for the
     kernel's E4M3 decode. glu (W13, gate rows then up rows): the rows reordered so
-    that each 128 are 64 gate rows and the up rows of the same outputs (the task's SwiGLU, rows 128)."""
+    that each 128 are 64 gate rows and the up rows of the same outputs (the task's SwiGLU, rows 128). The experts go through
+    in chunks of `experts_per_chunk` into the output (a large checkpoint's temporaries stay small)."""
     E, N, KH = packed.shape
     kt = (KH + 63) // 64
-    used = scales[scales != 0]
-    assert used.numel() == 0 or (int(used.min()) >= 107 and int(used.max()) <= 136), (
-        "sm90_moe_ring decodes into f16: E8M0 scales in [107, 136] (2^-20 .. 2^9), where every value is exact")
+    assert scales.numel() == 0 or int(scales.max()) <= 248, "sm90_moe_ring: E8M0 scales up to 248 (fp32 2^(s - 121))"
+    out = torch.empty(E, N // rows, kt, rows * 68, dtype=torch.uint8, device=packed.device)
+    for e0 in range(0, E, experts_per_chunk):
+        out[e0:e0 + experts_per_chunk] = _ring_pack_experts(packed[e0:e0 + experts_per_chunk],
+                                                            scales[e0:e0 + experts_per_chunk], rows, glu, kt)
+    return out
+
+
+def _ring_pack_experts(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu: bool, kt: int) -> torch.Tensor:
+    """sm90_moe_ring_pack of a slice of the experts."""
+    E, N, KH = packed.shape
     w = torch.zeros(E, N, kt * 64, dtype=torch.uint8, device=packed.device)
     w[:, :, :KH] = packed
     sc = torch.zeros(E, N, kt * 4, dtype=torch.uint8, device=scales.device)
@@ -76,6 +86,13 @@ def sm90_moe_ring_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, gl
     w = (new[..., 0] | (new[..., 1] << 4)).reshape(w.shape)
     sc = sc.view(E, N // rows, rows, kt, 4).permute(0, 1, 3, 2, 4).reshape(E, N // rows, kt, rows * 4)
     return torch.cat([w, sc], dim=3).contiguous()
+
+
+def sm90_moe_ring_f16_scales(scales: torch.Tensor) -> bool:
+    """Whether every (nonzero) E8M0 scale is in [107, 136], where sm90_moe_ring can apply it in f16 on the decoded weights
+    (GPT-OSS-20B's are); else the layer needs fp32_scales (GPT-OSS-120B's reach 138)."""
+    used = scales[scales != 0]
+    return used.numel() == 0 or (int(used.min()) >= 107 and int(used.max()) <= 136)
 
 
 def sm90_attention_parts_size(tokens: int, num_q_heads: int, head_dim: int, chunks: int) -> int:
@@ -587,13 +604,14 @@ class StaticMegakernel(PersistentKernel):
         limit: float = 7.0,       # GLU: GPT-OSS's SwiGLU clamp and alpha
         alpha: float = 1.702,
         rows_per_task: int = 128,
+        fp32_scales: bool = False,  # the scales in fp32 (any up to 248; else [107, 136]: sm90_moe_ring_f16_scales)
         block_dim: tuple = (256, 1, 1),
     ):
         """One routed expert projection streamed through the ring (tasks/sm90_moe_ring.cuh), its MXFP4 weights decoded into
         WGMMA registers: task (a, y) = the expert in slot a of the active list (none past their count) times weight rows
         [y R, y R + R), R = rows_per_task (64 or 128), its weight blocks one bulk copy a ring stage. glu: W13 with the
         clamped SwiGLU fused (R 128: 64 outputs a task). A = the slots (GLU: output.dim(0); W2: input.dim(0)), the most experts a step routes to.
-        params = [glu, R, N, K, E, TOPK, has_bias, limit bits, alpha bits, slot deps]."""
+        params = [glu, R, N, K, E, TOPK, has_bias, limit bits, alpha bits, slot deps, fp32 scales]."""
         R = rows_per_task
         E, N, K = weights.dim(0), weights.dim(1) * R, input.dim(input.num_dims - 1)
         T = self._tokens(routing_indices.dim(1))
@@ -614,7 +632,8 @@ class StaticMegakernel(PersistentKernel):
         maps = [(0, -1, -1) if (not glu and slot_deps) else (-1, -1, -1)] + [(-1, -1, -1)] * (len(tensors) - 1)
         maps.append((0, 2, -1) if glu else (-1, 2, -1))
         self._add_node("sm90_moe_ring", (A, N // R, 1), block_dim, tensors + [output], maps,
-                       [int(glu), R, N, K, E, TOPK, int(bias is not None), float_bits(limit), float_bits(alpha), slot_deps],
+                       [int(glu), R, N, K, E, TOPK, int(bias is not None), float_bits(limit), float_bits(alpha), slot_deps,
+                        int(fp32_scales)],
                        counters=A + 1 if glu else 1,
                        map_slots=[self._map("bf16", ("t", input), (T if glu else A * T, K, T))],
                        buf_slots=[self._tensor_slot(active_experts), self._tensor_slot(routing_indices),
@@ -712,7 +731,7 @@ class StaticMegakernel(PersistentKernel):
         [T, TOPK] fp32 and routing column [E, T] i32; the active-expert list [E + 1] i32 from the last task. Outputs: x1, h,
         weights, routing_indices, active_experts (graph.cc: sm90_gate's five). params = [H, E, TOPK, eps bits]."""
         T, H, E, TOPK = self._tokens(o.dim(0)), o.dim(1), router.dim(0), weights.dim(1)
-        assert E == 32, "sm90_gate: 32 experts"
+        assert E % 32 == 0 and E <= 256, "sm90_gate: experts a multiple of 32, at most 256 (32 a router warp)"
         self._dtypes("sm90_gate_layer", o=(o, float32), residual=(residual, bfloat16), router=(router, bfloat16),
                      x1=(x1, bfloat16), h=(h, float16), weights=(weights, float32))
         present = [o, o_bias, residual, norm_weight, router, router_bias, num_tokens, x1, h, weights, routing_indices,

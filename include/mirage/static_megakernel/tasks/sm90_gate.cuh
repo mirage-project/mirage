@@ -4,9 +4,10 @@
 // RMSNorm(x1)) (sm90_rmsnorm), the router logits bf16(h . W^T + b)
 // (sm90_router), and the token's top-k of their softmax, renormalized
 // (sm90_topk: ties to the lower expert): its weights and its column of the
-// routing indices. The tokens' experts meet in a bit mask (the node's counter
-// line), and the last task done writes the active-expert list. Task x of
-// grid (T, 1, 1): token x.
+// routing indices. The top-k runs in one warp, lane l the experts l, l + 32,
+// ... (E a multiple of 32: GPT-OSS-20B 32, 120B 128). The tokens' experts meet
+// in a bit mask (E / 32 words of the node's counter line), and the last task
+// done writes the active-expert list. Task x of grid (T, 1, 1): token x.
 #pragma once
 #include "sm90_common.cuh"
 
@@ -28,7 +29,10 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
                                               KernelLocals &,
                                               StaticTask const &tk) {
   constexpr int H = PARAMS::v[0], E = PARAMS::v[1], TOPK = PARAMS::v[2];
-  static_assert(E == 32 && TOPK <= E, "sm90_gate: 32 experts (a lane each)");
+  static_assert(E % 32 == 0 && E <= 32 * SM90_WARPS && TOPK <= E,
+                "sm90_gate: experts a multiple of 32 (E / 32 a lane), at "
+                "most 32 a router warp");
+  constexpr int EPL = E / 32; // experts a lane in the top-k
   using Row = Sm90Row<H>;
   constexpr int VEC = Row::VEC;
   constexpr int DONE = SELF::counter + 1, MASK = SELF::counter + 2;
@@ -100,10 +104,11 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   // 3. the logits: warp w experts [w EPW, w EPW + EPW), its lanes over K
   // (each step its EPW rows' vectors in flight), reduced over the warp
   constexpr int EPW = E / SM90_WARPS;
+  constexpr int UNROLL = EPW <= 4 ? 4 : 1; // the EPW rows' loads in registers
   {
     uint4 const *rwr = rw + (size_t)warp * EPW * VEC;
     float acc[EPW] = {};
-#pragma unroll 4
+#pragma unroll UNROLL
     for (int v = lane; v < VEC; v += 32) {
       float hf[8];
       f16x8_to_f32(hs[v], hf);
@@ -136,31 +141,53 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
     }
   }
   __syncthreads();
-  // 4. warp 0, a lane an expert: the token's top-k (rows past the step's
-  // tokens: none)
+  // 4. warp 0, lane l the experts j 32 + l: the token's top-k (rows past
+  // the step's tokens: none)
   if (warp == 0) {
     int const ntok = *buf_at<int const>(g, slot_at<BUF_SLOTS, 6>());
-    float l = logit[lane];
-    l = __bfloat162float(
-        __float2bfloat16(l + __bfloat162float(buf_at<__nv_bfloat16 const>(
-                                 g, slot_at<BUF_SLOTS, 5>())[lane])));
-    float m = l;
+    __nv_bfloat16 const *rb =
+        buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 5>());
+    float l[EPL], m = -INFINITY;
+#pragma unroll
+    for (int j = 0; j < EPL; j++) {
+      int const e = 32 * j + lane;
+      l[j] = __bfloat162float(
+          __float2bfloat16(logit[e] + __bfloat162float(rb[e])));
+      m = fmaxf(m, l[j]);
+    }
 #pragma unroll
     for (int s = 16; s > 0; s >>= 1) {
       m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, s));
     }
-    float p = expf(l - m), sum = p;
+    float p[EPL], sum = 0.f;
+#pragma unroll
+    for (int j = 0; j < EPL; j++) {
+      p[j] = expf(l[j] - m);
+      sum += p[j];
+    }
 #pragma unroll
     for (int s = 16; s > 0; s >>= 1) {
       sum += __shfl_xor_sync(0xffffffffu, sum, s);
     }
-    p /= sum;
-    int rank = 0; // 1 + this expert's top-k slot, 0: not chosen
-    float cand = p, wsum = 0.f, wk[TOPK];
+    int rank[EPL]; // 1 + the expert's top-k slot, 0: not chosen
+#pragma unroll
+    for (int j = 0; j < EPL; j++) {
+      p[j] /= sum;
+      rank[j] = 0;
+    }
+    float wsum = 0.f, wk[TOPK];
 #pragma unroll
     for (int k = 0; k < TOPK; k++) {
-      float best = cand;
-      int who = lane;
+      // this lane's best candidate (its lower expert on a tie), then the
+      // warp's
+      float best = -1.f;
+      int who = 0;
+#pragma unroll
+      for (int j = EPL - 1; j >= 0; j--) {
+        if (rank[j] == 0 && p[j] >= best) {
+          best = p[j], who = 32 * j + lane;
+        }
+      }
 #pragma unroll
       for (int s = 16; s > 0; s >>= 1) {
         float const ob_ = __shfl_xor_sync(0xffffffffu, best, s);
@@ -171,14 +198,17 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
       }
       wk[k] = best;
       wsum += best;
-      if (lane == who) {
-        rank = k + 1;
-        cand = -1.f;
+#pragma unroll
+      for (int j = 0; j < EPL; j++) {
+        rank[j] = who == 32 * j + lane ? k + 1 : rank[j];
       }
     }
     bool const active_tok = t < ntok;
-    buf_at<int>(g, slot_at<BUF_SLOTS, 10>())[lane * T + t] =
-        active_tok ? rank : 0;
+    int *routing = buf_at<int>(g, slot_at<BUF_SLOTS, 10>());
+#pragma unroll
+    for (int j = 0; j < EPL; j++) {
+      routing[(32 * j + lane) * T + t] = active_tok ? rank[j] : 0;
+    }
     if (lane < TOPK) {
       float w = 0.f;
 #pragma unroll
@@ -188,11 +218,14 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
       buf_at<float>(g, slot_at<BUF_SLOTS, 9>())[t * TOPK + lane] =
           active_tok ? w / wsum : 0.f;
     }
-    uint32_t const bits = __ballot_sync(0xffffffffu, rank > 0);
-    if (lane == 0) {
-      if (active_tok) {
-        atomicOr(g.cnt + MASK, bits);
+#pragma unroll
+    for (int j = 0; j < EPL; j++) {
+      uint32_t const bits = __ballot_sync(0xffffffffu, rank[j] > 0);
+      if (lane == 0 && active_tok) {
+        atomicOr(g.cnt + MASK + j, bits);
       }
+    }
+    if (lane == 0) {
       __threadfence(); // the mask (and the routing column) before the count
       last = atomicAdd(g.cnt + DONE, 1u) == T - 1;
     }
@@ -200,13 +233,18 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
     // 5. the last task: the active-expert list, ascending
     if (__shfl_sync(0xffffffffu, last, 0)) {
       __threadfence();
-      uint32_t const mask = *(uint32_t volatile *)(g.cnt + MASK);
       int *list = buf_at<int>(g, slot_at<BUF_SLOTS, 11>());
-      if ((mask >> lane) & 1u) {
-        list[__popc(mask & ((1u << lane) - 1u))] = lane;
+      int before = 0; // the active experts below word j
+#pragma unroll
+      for (int j = 0; j < EPL; j++) {
+        uint32_t const mask = *(uint32_t volatile *)(g.cnt + MASK + j);
+        if ((mask >> lane) & 1u) {
+          list[before + __popc(mask & ((1u << lane) - 1u))] = 32 * j + lane;
+        }
+        before += __popc(mask);
       }
       if (lane == 0) {
-        list[E] = __popc(mask);
+        list[E] = before;
       }
     }
   }

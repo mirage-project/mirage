@@ -1,6 +1,6 @@
 """The sm90_gate task type (o_proj's bias and residual, the MoE's input norm, the router and the top-k in one task a token)
-against torch at GPT-OSS-20B shapes: x1, h, the top-k weights, the routing indices and the active-expert list, NTOK (default 3)
-of the 8 tokens routed."""
+against torch at GPT-OSS shapes: x1, h, the top-k weights, the routing indices and the active-expert list, NTOK (default 3)
+of the 8 tokens routed, E experts (env E: 32, GPT-OSS-120B's 128)."""
 import os
 import torch
 from mirage.mpk import compiler
@@ -8,7 +8,8 @@ from mirage.mpk.static_megakernel import StaticMegakernel
 from mirage.mpk.static_harness import Harness
 from sm90_util import SM90_FLAGS
 
-T, H, E, TOPK, EPS = 8, 2880, 32, 4, 1e-5
+T, H, TOPK, EPS = 8, 2880, 4, 1e-5
+E = int(os.environ.get("E", 32))
 
 
 def main():

@@ -1,6 +1,7 @@
 """The small sm90 task types against torch at GPT-OSS-20B shapes: sm90_router (logits = h . W^T + b; h bf16 and f16),
 sm90_bias (fp32 + bias + residual -> bf16), sm90_mul_sum_add (residual + the top-k weighted expert outputs), sm90_rmsnorm
-(bf16 in, f16 out), sm90_topk (top-4 softmax of logits of its own, NTOK = 5 of the 8 tokens routed)."""
+(bf16 in, f16 out), sm90_topk (top-4 softmax of logits of its own, NTOK = 5 of the 8 tokens routed); E experts (env E:
+32, GPT-OSS-120B's 128)."""
 import os
 import torch
 from mirage.mpk import compiler
@@ -8,7 +9,8 @@ from mirage.mpk.static_megakernel import StaticMegakernel
 from mirage.mpk.static_harness import Harness
 from sm90_util import SM90_FLAGS
 
-T, H, E, TOPK, N, NTOK = 8, 2880, 32, 4, 5120, 5
+T, H, TOPK, N, NTOK = 8, 2880, 4, 5120, 5
+E = int(os.environ.get("E", 32))   # experts (GPT-OSS-20B 32, 120B 128)
 
 
 def main():

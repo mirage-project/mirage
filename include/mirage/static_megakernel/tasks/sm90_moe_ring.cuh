@@ -52,12 +52,18 @@ struct MoeRingStage {
 
 #ifdef STATIC_SM90
 // The f16 pair 2^(scale - 121) of an E8M0 scale: the factor that takes an
-// E4M3 value v 2^-6 (moe_decode_word) to v 2^(scale - 127). sm90_moe_ring_pack
-// checks the scales are in [107, 136], where it is a normal f16 and every
-// product is exact (0 decodes to 0).
+// E4M3 value v 2^-6 (moe_decode_word) to v 2^(scale - 127). For scales in
+// [107, 136] (sm90_moe_ring_f16_scales: GPT-OSS-20B's) it is a normal f16 and
+// every product is exact (0 decodes to 0).
 __device__ __forceinline__ uint32_t moe_scale_f16x2(uint32_t scale) {
   uint32_t const bits = scale == 0 ? 0u : (scale - 106u) << 10;
   return bits | bits << 16;
+}
+// The same factor in fp32, for any scale up to 248 (GPT-OSS-120B's reach
+// 138), applied to the fp32 sum of the scale's 32-value block (exact: a power
+// of two). A zero scale gives 2^-121 for 0 (the K padding's weights are 0).
+__device__ __forceinline__ float moe_scale_f32(uint32_t scale) {
+  return __uint_as_float((scale + 6u) << 23);
 }
 // Eight packed E2M1 values to four f16 pairs times the scale pair. The packing
 // (sm90_moe_ring_pack) puts register c's two values in the low nibbles of
@@ -65,7 +71,8 @@ __device__ __forceinline__ uint32_t moe_scale_f16x2(uint32_t scale) {
 // (c = 2, 3); a nibble s.ee.m as the E4M3 byte s.0ee.m00 is its value times
 // 2^-6 (exact, the zero exponent included), so two shift-and-masks give eight
 // E4M3 bytes in register order, the hardware converts them to f16 pairs, one
-// multiply scales them.
+// multiply scales them (SCALED; else unscaled: fp32 scales, moe_scale_f32).
+template <bool SCALED>
 __device__ __forceinline__ void
     moe_decode_word(uint32_t w, uint32_t scale2, uint32_t (&out)[4]) {
   uint32_t const lo = ((w << 2) & 0x1c1c1c1cu) | ((w << 4) & 0x80808080u);
@@ -82,9 +89,13 @@ __device__ __forceinline__ void
       : "r"(lo), "r"(hi));
 #pragma unroll
   for (int c = 0; c < 4; c++) {
-    __half2 const r = __hmul2(*reinterpret_cast<__half2 const *>(&f[c]),
-                              *reinterpret_cast<__half2 const *>(&scale2));
-    out[c] = *reinterpret_cast<uint32_t const *>(&r);
+    if constexpr (SCALED) {
+      __half2 const r = __hmul2(*reinterpret_cast<__half2 const *>(&f[c]),
+                                *reinterpret_cast<__half2 const *>(&scale2));
+      out[c] = *reinterpret_cast<uint32_t const *>(&r);
+    } else {
+      out[c] = f[c];
+    }
   }
 }
 // d (16 weight rows x 8 tokens, fp32) += A (16 x K16) * B (K16 x 8 tokens),
@@ -114,7 +125,9 @@ __device__ __forceinline__ void
 // PARAMS {GLU (1: W13 + SwiGLU, 0: W2), ROWS (64 or 128; GLU 128), N (weight
 // rows per expert), K, E, TOPK, HAS_BIAS, limit (fp32 bits), alpha (fp32
 // bits), SLOT_DEPS (W2: the input's producer is a GLU node, which counts its
-// tasks per slot too: counter 1 + a, after the total in counter 0)}; BUF_SLOTS
+// tasks per slot too: counter 1 + a, after the total in counter 0), F32_SCALES
+// (1: the scales applied in fp32 after each block's MMAs, any scale; 0: in f16
+// on the decoded weights, scales in [107, 136])}; BUF_SLOTS
 // {the active-expert list [E + 1] i32 (count last), routing indices [E, T] i32
 // (1 + top-k slot, else 0), the weight blocks, bias [E, N] bf16 in the
 // checkpoint's row order (-1: none), output}; MAP_SLOTS {the activation (f16;
@@ -132,7 +145,7 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
   static_assert(sizeof(SELF) == 0, "sm90_moe_ring: Hopper only");
 #else
   constexpr bool GLU = PARAMS::v[0] == 1, HAS_BIAS = PARAMS::v[6] == 1,
-                 SLOT_DEPS = PARAMS::v[9] == 1;
+                 SLOT_DEPS = PARAMS::v[9] == 1, F32_SCALES = PARAMS::v[10] == 1;
   constexpr int ROWS = PARAMS::v[1], N = PARAMS::v[2], K = PARAMS::v[3],
                 E = PARAMS::v[4], TOPK = PARAMS::v[5];
   using S = MoeRingStage<ROWS>;
@@ -256,6 +269,8 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
 #pragma unroll
         for (int mt = 0; mt < MT; mt++) {
           uint32_t r[8][4];
+          float sc[2]
+                  [4]; // F32_SCALES: row rbase (+ 8)'s of k blocks 2i, 2i + 1
 #pragma unroll
           for (int rr = 0; rr < 2; rr++) { // rows rbase + 64 mt (+ 8)
             int const row = 64 * mt + rbase + 8 * rr;
@@ -269,17 +284,34 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
 #pragma unroll
             for (int i = 0; i < 4; i++) {
               uint32_t p[4];
-              moe_decode_word(
-                  words[i], moe_scale_f16x2((sw >> (8 * i)) & 0xffu), p);
+              uint32_t const s8 = (sw >> (8 * i)) & 0xffu;
+              if constexpr (F32_SCALES) {
+                moe_decode_word<false>(words[i], 0u, p);
+                sc[rr][i] = moe_scale_f32(s8);
+              } else {
+                moe_decode_word<true>(words[i], moe_scale_f16x2(s8), p);
+              }
 #pragma unroll
               for (int cc = 0; cc < 4; cc++) {
                 r[2 * i + (cc >> 1)][rr + 2 * (cc & 1)] = p[cc];
               }
             }
           }
+          if constexpr (F32_SCALES) { // a scale block (2 k16 blocks) unscaled,
+                                      // then scaled into acc
 #pragma unroll
-          for (int kb = 0; kb < 8; kb++) {
-            mma_m16n8k16(acc[mt], r[kb], bf[kb][0], bf[kb][1]);
+            for (int i = 0; i < 4; i++) {
+              float d[4] = {};
+              mma_m16n8k16(d, r[2 * i], bf[2 * i][0], bf[2 * i][1]);
+              mma_m16n8k16(d, r[2 * i + 1], bf[2 * i + 1][0], bf[2 * i + 1][1]);
+              acc[mt][0] += sc[0][i] * d[0], acc[mt][1] += sc[0][i] * d[1];
+              acc[mt][2] += sc[1][i] * d[2], acc[mt][3] += sc[1][i] * d[3];
+            }
+          } else {
+#pragma unroll
+            for (int kb = 0; kb < 8; kb++) {
+              mma_m16n8k16(acc[mt], r[kb], bf[kb][0], bf[kb][1]);
+            }
           }
         }
       }
