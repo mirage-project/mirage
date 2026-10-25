@@ -1,9 +1,10 @@
 """The sliding window's leading-tile skip, on a request with a cached prefix.
 
 Decoding a window layer starts the KV loop past the leading tiles. Three
-things move with that loop start and fail silently if wrong: the prologue's
-page index, the double-buffer phase (counted from the first tile visited, not
-tile 0), and the "apply Q RoPE once" guard.
+things depend on that loop start: the prologue's page index, the double-buffer
+phase (counted from the first tile visited, not tile 0), and the "apply Q RoPE
+once" guard. This fixture checks addressing and buffer parity with identity
+RoPE. Detecting missing or repeated rotation requires a nonidentity fixture.
 
 This needs num_tokens < seq_len, which the megakernel's test mode cannot
 produce -- it resets request_ids to -1 at init, so every request prefills
@@ -18,7 +19,6 @@ import sys
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import runtime_kernel_paged_attention as rk
 
 NUM_KV_HEADS = 1
 NUM_QO_PER_KV = 8
@@ -71,7 +71,50 @@ def reference(qkv, k_cache, v_cache, window_size):
     return out.reshape(NUM_TOKENS, NUM_Q_HEADS * HEAD_DIM).to(qkv.dtype)
 
 
+def suffix_write_mask(device):
+    """Physical cache rows the eight suffix tokens are allowed to overwrite."""
+    mask = torch.zeros(MAX_NUM_PAGES, PAGE_SIZE, dtype=torch.bool, device=device)
+    for pos in range(SEQ_LEN - NUM_TOKENS, SEQ_LEN):
+        mask[PAGE_TABLE[pos // PAGE_SIZE], pos % PAGE_SIZE] = True
+    return mask
+
+
+def check_cache(cache, before, expected_suffix, write_mask):
+    if not torch.isfinite(cache).all().item():
+        raise AssertionError("cache contains nonfinite values or unwritten poison")
+    if not torch.equal(cache[~write_mask], before[~write_mask]):
+        raise AssertionError("cache changed outside the physical suffix rows")
+    if not torch.equal(gather(cache, SEQ_LEN)[-NUM_TOKENS:], expected_suffix):
+        raise AssertionError("new suffix rows disagree with the input")
+
+
+def test_cache_validation_cpu():
+    """The guard accepts exact writes and rejects unused-page or NaN damage."""
+    mask = suffix_write_mask("cpu")
+    assert mask.sum().item() == NUM_TOKENS
+    assert mask[1, :8].all().item() and not mask[1, 8:].any().item()
+    before = torch.zeros(MAX_NUM_PAGES, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM)
+    suffix = torch.ones(NUM_TOKENS, HEAD_DIM)
+    valid = before.clone()
+    valid[mask] = 1
+    check_cache(valid, before, suffix, mask)
+    for damage in ("unused_page", "unwritten_suffix", "wrong_suffix"):
+        broken = valid.clone()
+        if damage == "unused_page":
+            broken[0, 0] = 2
+        elif damage == "unwritten_suffix":
+            broken[1, 0] = float("nan")
+        else:
+            broken[1, 0] = 2
+        try:
+            check_cache(broken, before, suffix, mask)
+        except AssertionError:
+            continue
+        raise AssertionError(f"guard missed {damage}")
+
+
 def main():
+    import runtime_kernel_paged_attention as rk
     torch.manual_seed(0)
     device = "cuda"
     dtype = torch.bfloat16
@@ -94,53 +137,57 @@ def main():
     k_new = qkv[:, NUM_Q_HEADS * HEAD_DIM : (NUM_Q_HEADS + 1) * HEAD_DIM]
     v_new = qkv[:, (NUM_Q_HEADS + 1) * HEAD_DIM :]
 
-    ok = True
-    causal_ref = None
+    write_mask = suffix_write_mask(device)
+    readonly = [qkv, qo_indptr, kv_indptr, kv_indices, kv_last, norm_w, cos, sin]
+    readonly_before = [value.clone() for value in readonly]
     for window_size in WINDOWS:
         k_cache = torch.randn(MAX_NUM_PAGES, PAGE_SIZE, NUM_KV_HEADS, HEAD_DIM,
                               dtype=dtype, device=device)
         v_cache = torch.randn_like(k_cache)
         k_before, v_before = k_cache.clone(), v_cache.clone()
-        out = torch.zeros(NUM_TOKENS, NUM_Q_HEADS * HEAD_DIM,
-                          dtype=dtype, device=device)
-
-        rk.paged_attention_sm100(qkv, k_cache, v_cache, out, qo_indptr,
-                                 kv_indptr, kv_indices, kv_last, norm_w,
-                                 norm_w, cos, sin, window_size)
-        torch.cuda.synchronize()
-
-        n = skipped_tiles(window_size)
         ref = reference(qkv, k_before, v_before, window_size)
-        diff = (out.float() - ref.float()).abs().max().item()
-        print(f"[w={window_size}] skips {n} tile(s) "
-              f"({'even' if n % 2 == 0 else 'odd'}), "
-              f"max |kernel - reference| = {diff:.4f}")
-        if diff >= 0.05:
-            print(f"[w={window_size}] FAILED: disagrees with the reference")
-            ok = False
+        # Use the SAME cache as this window, rather than another random case.
+        causal_ref = reference(qkv, k_before, v_before, 0)
+        out = torch.empty(NUM_TOKENS, NUM_Q_HEADS * HEAD_DIM,
+                          dtype=dtype, device=device)
+        first_output = None
+        for invocation in range(2):
+            # Keep the actual prefix and unused pages across invocations. Force
+            # the task to write every output and new KV row again.
+            out.fill_(float("nan"))
+            k_cache[write_mask] = float("nan")
+            v_cache[write_mask] = float("nan")
+            rk.paged_attention_sm100(qkv, k_cache, v_cache, out, qo_indptr,
+                                     kv_indptr, kv_indices, kv_last, norm_w,
+                                     norm_w, cos, sin, window_size)
+            torch.cuda.synchronize()
 
-        if window_size == 0:
-            causal_ref = ref
-        else:
-            gap = (out.float() - causal_ref.float()).abs().max().item()
-            print(f"[w={window_size}] max |kernel - causal reference| = {gap:.4f}")
-            if gap <= 0.05:
-                print(f"[w={window_size}] FAILED: matches full causal, so the "
-                      f"window is being ignored")
-                ok = False
+            if not torch.isfinite(out).all().item():
+                raise AssertionError(f"w={window_size}: nonfinite output")
+            if not torch.isfinite(ref).all().item():
+                raise AssertionError("nonfinite reference")
+            diff = (out.float() - ref.float()).abs().max().item()
+            n = skipped_tiles(window_size)
+            print(f"[w={window_size}, call={invocation}] skips {n} tile(s), "
+                  f"max |kernel - reference| = {diff:.4f}")
+            if diff >= 0.05:
+                raise AssertionError("output disagrees with the reference")
+            if window_size:
+                gap = (out.float() - causal_ref.float()).abs().max().item()
+                if gap <= 0.05:
+                    raise AssertionError("window output matches full causal")
+            check_cache(k_cache, k_before, k_new, write_mask)
+            check_cache(v_cache, v_before, v_new, write_mask)
+            for value, before in zip(readonly, readonly_before):
+                if not torch.equal(value, before):
+                    raise AssertionError("read-only input or metadata changed")
+            if first_output is None:
+                first_output = out.clone()
+            elif not torch.equal(out, first_output):
+                raise AssertionError("identical repeated invocation changed output")
 
-        # The skip must never run past the tiles carrying the new tokens.
-        if not torch.equal(gather(k_cache, SEQ_LEN)[prefix:], k_new):
-            print(f"[w={window_size}] FAILED: new K rows never reached the cache")
-            ok = False
-        if not torch.equal(gather(v_cache, SEQ_LEN)[prefix:], v_new):
-            print(f"[w={window_size}] FAILED: new V rows never reached the cache")
-            ok = False
-
-    if not ok:
-        sys.exit(1)
-    print("\nPASSED: the leading-tile skip agrees with the reference at both "
-          "parities and still fills the KV cache")
+    print("\nPASSED: leading-tile skip outputs and physical cache writes "
+          "remain correct across repeated calls at both skip parities")
 
 
 if __name__ == "__main__":

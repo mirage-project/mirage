@@ -17,7 +17,15 @@ cuda_library_dirs = [
     os.path.join(cuda_home, "lib64", "stubs"),
 ]
 
-macros = [("MIRAGE_BACKEND_USE_CUDA", None), ("MIRAGE_FINGERPRINT_USE_CUDA", None)]
+# task_header.cuh also includes sampling helpers, which require these runtime
+# bounds even though this direct attention launcher does not invoke sampling.
+# Match its one request and MAX_TOKENS=8 in runtime_kernel_wrapper_sm100.cu.
+macros = [
+    ("MIRAGE_BACKEND_USE_CUDA", None),
+    ("MIRAGE_FINGERPRINT_USE_CUDA", None),
+    ("MPK_MAX_NUM_BATCHED_REQUESTS", "1"),
+    ("MPK_MAX_NUM_BATCHED_TOKENS", "8"),
+]
 
 setup(
     name='runtime_kernel_paged_attention',
