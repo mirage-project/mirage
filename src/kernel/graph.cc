@@ -1092,6 +1092,15 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_DSA_INDEX_K_WRITE_SM100, variant_id);
+  } else if (name == "dsa_kpool_update") {
+    int variant_id = task_register->register_dsa_kpool_update_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_DSA_KPOOL_UPDATE_SM100, variant_id);
+  } else if (name == "fx_bf16") {
+    int variant_id =
+        task_register->register_fx_bf16_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_FX_BF16_SM100, variant_id);
   } else if (name == "dsa_q_absorb") {
     int variant_id = task_register->register_dsa_q_absorb_sm100_task(
         customized->bgraph, params);
