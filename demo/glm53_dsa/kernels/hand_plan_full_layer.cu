@@ -19,11 +19,15 @@
 #define STATIC_EXCHANGE_SET 196608
 #define STATIC_EXCHANGE_HELLO 192512
 #define STATIC_EXCHANGE_OFFSETS                                                \
-  {0, 40960, 0, 0, 0, 0, 0, 0, 0, 0,     0, 0, 0,     0, 0, 0, 0, 0, 0, 0,     \
-   0, 0,     0, 0, 0, 0, 0, 0, 0, 20480, 0, 0, 94208, 0, 0, 0, 0, 0, 0, 0}
+  {                                                                            \
+    0, 40960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,   \
+        0, 0, 0, 0, 0, 0, 20480, 0, 0, 94208, 0, 0, 0, 0, 0, 0, 0              \
+  }
 #define STATIC_EXCHANGE_BYTES                                                  \
-  {0, 50688, 0, 0, 0, 0, 16896, 0, 0, 0,     0, 0, 0,     0, 0, 0, 0, 0, 0, 0, \
-   0, 0,     0, 0, 0, 0, 0,     0, 0, 16896, 0, 0, 98304, 0, 0, 0, 0, 0, 0, 0}
+  {                                                                            \
+    0, 50688, 0, 0, 0, 0, 16896, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  \
+        0, 0, 0, 0, 0, 0, 0, 16896, 0, 0, 98304, 0, 0, 0, 0, 0, 0, 0           \
+  }
 
 struct StaticTask {
   int node, x, y, z;
@@ -111,13 +115,13 @@ constexpr int STATIC_SMEM_BYTES = static_mk::smem_launch_bytes(static_smem_need(
                                StaticNode<0, 0, 0>>(),
      static_mk::smem_dsa_q_norm_quant<
          StaticNode<8, 1, 1, 96, 6>,
-         StaticParams<2048, 925353388>,
+         StaticParams<2048, 925353388, 0>,
          StaticBufSlots<5>,
          StaticMapSlots<>,
          StaticNode<21, 12, 1, 32, 3, 1, 6144, 2688, 0>>(),
      static_mk::smem_dsa_kv_write<
          StaticNode<8, 1, 1, 128, -1>,
-         StaticParams<2048, 64, 256, 925353388>,
+         StaticParams<2048, 64, 256, 925353388, 64>,
          StaticBufSlots<7, 8, 9, 10, 11>,
          StaticMapSlots<>,
          StaticNode<21, 12, 1, 32, 3, 1, 6144, 2688, 0>>(),
@@ -132,7 +136,7 @@ constexpr int STATIC_SMEM_BYTES = static_mk::smem_launch_bytes(static_smem_need(
          StaticParams<1, 2048, 2048, 0>,
          StaticBufSlots<15>,
          StaticMapSlots<9, 11>,
-         StaticNode<8, 1, 1, 96, 6, 2048, 925353388>,
+         StaticNode<8, 1, 1, 96, 6, 2048, 925353388, 0>,
          StaticNode<0, 0, 0>,
          StaticNode<0, 0, 0>>(),
      static_mk::smem_scaled_gemm_tile<
@@ -140,18 +144,18 @@ constexpr int STATIC_SMEM_BYTES = static_mk::smem_launch_bytes(static_smem_need(
          StaticParams<1, 2048, 4096, 0>,
          StaticBufSlots<17>,
          StaticMapSlots<15, 11>,
-         StaticNode<8, 1, 1, 96, 6, 2048, 925353388>,
+         StaticNode<8, 1, 1, 96, 6, 2048, 925353388, 0>,
          StaticNode<0, 0, 0>,
          StaticNode<0, 0, 0>>(),
      static_mk::smem_dsa_q_absorb<
          StaticNode<32, 1, 1, 256, 20>,
-         StaticParams<8>,
+         StaticParams<8, 192, 64>,
          StaticBufSlots<19, 8, 9>,
          StaticMapSlots<>,
          StaticNode<16, 4, 1, 192, 16, 1, 2048, 2048, 0>>(),
      static_mk::smem_dsa_index_score<
          StaticNode<16, 8, 1, 288, 22>,
-         StaticParams<32, 16384, 64, 256>,
+         StaticParams<32, 16384, 64, 256, 0>,
          StaticBufSlots<8, 9, 10, 14, 21>,
          StaticMapSlots<>,
          StaticNode<32, 4, 1, 224, 18, 1, 2048, 4096, 0>,
@@ -159,30 +163,42 @@ constexpr int STATIC_SMEM_BYTES = static_mk::smem_launch_bytes(static_smem_need(
          StaticNode<8, 1, 1, 160, -1, 64, 256, 897988541>>(),
      static_mk::smem_dsa_index_topk<
          StaticNode<16, 8, 1, 320, 23>,
-         StaticParams<2048, 16384, 0>,
+         StaticParams<2048, 16384, 0, 1>,
          StaticBufSlots<9, 21>,
          StaticMapSlots<>,
-         StaticNode<16, 8, 1, 288, 22, 32, 16384, 64, 256>>(),
+         StaticNode<16, 8, 1, 288, 22, 32, 16384, 64, 256, 0>>(),
      static_mk::smem_dsa_index_topk<
          StaticNode<16, 8, 1, 352, -1>,
-         StaticParams<2048, 16384, 1>,
+         StaticParams<2048, 16384, 1, 1>,
          StaticBufSlots<9, 24, 22>,
          StaticMapSlots<>,
-         StaticNode<16, 8, 1, 320, 23, 2048, 16384, 0>>(),
+         StaticNode<16, 8, 1, 320, 23, 2048, 16384, 0, 1>>(),
      static_mk::smem_sparse_mla<
          StaticNode<16, 8, 1, 384, 25>,
-         StaticParams<8, 2048, 64, 256, 2048, 1031798784>,
+         StaticParams<8, 2048, 64, 256, 2048, 1031798784, 64, 1, 2048>,
          StaticBufSlots<11, 10, 9, 24>,
          StaticMapSlots<>,
-         StaticNode<32, 1, 1, 256, 20, 8>,
-         StaticNode<8, 1, 1, 128, -1, 2048, 64, 256, 925353388>,
-         StaticNode<16, 8, 1, 352, -1, 2048, 16384, 1>>(),
-     static_mk::smem_dsa_mla_merge<
-         StaticNode<8, 8, 1, 416, 26>,
-         StaticParams<8>,
-         StaticBufSlots<>,
-         StaticMapSlots<>,
-         StaticNode<16, 8, 1, 384, 25, 8, 2048, 64, 256, 2048, 1031798784>>(),
+         StaticNode<32, 1, 1, 256, 20, 8, 192, 64>,
+         StaticNode<8, 1, 1, 128, -1, 2048, 64, 256, 925353388, 64>,
+         StaticNode<16, 8, 1, 352, -1, 2048, 16384, 1, 1>>(),
+     static_mk::smem_dsa_mla_merge<StaticNode<8, 8, 1, 416, 26>,
+                                   StaticParams<8>,
+                                   StaticBufSlots<>,
+                                   StaticMapSlots<>,
+                                   StaticNode<16,
+                                              8,
+                                              1,
+                                              384,
+                                              25,
+                                              8,
+                                              2048,
+                                              64,
+                                              256,
+                                              2048,
+                                              1031798784,
+                                              64,
+                                              1,
+                                              2048>>(),
      static_mk::smem_dsa_o_absorb<StaticNode<32, 1, 1, 448, 28>,
                                   StaticParams<8>,
                                   StaticBufSlots<27>,
@@ -220,7 +236,7 @@ constexpr int STATIC_SMEM_BYTES = static_mk::smem_launch_bytes(static_smem_need(
 static_assert(STATIC_SMEM_BYTES <= 227 * 1024,
               "the dynamic shared memory of one SM");
 
-static StaticTask const static_tasks_gpu0[] = {
+static const StaticTask static_tasks_gpu0[] = {
     {26, 0, 0, 0},   {27, 8, 4, 0},   {27, 20, 8, 0},  {37, 8, 0, 0},
     {41, 2, 4, 0},   {43, 5, 0, 0},   {44, 7, 4, 0},   {46, 10, 0, 0},
     {52, 4, 0, 0},   {58, 5, 0, 0},   {59, 124, 0, 0}, {26, 1, 0, 0},
@@ -614,7 +630,7 @@ static int const static_list_begin_gpu0[] = {
 
 // ---- the kernel ----
 __global__ void __launch_bounds__(256, 1)
-    layer_kernel(__grid_constant__ const static_mk::Maps maps,
+    layer_kernel(const __grid_constant__ static_mk::Maps maps,
                  static_mk::G g,
                  StaticTask const *static_tasks) {
   static_mk::KernelLocals L;
@@ -654,7 +670,7 @@ __global__ void __launch_bounds__(256, 1)
       case 31:
         static_mk::run_dsa_q_norm_quant<
             StaticNode<8, 1, 1, 96, 6>,
-            StaticParams<2048, 925353388>,
+            StaticParams<2048, 925353388, 0>,
             StaticBufSlots<5>,
             StaticMapSlots<>,
             StaticNode<21, 12, 1, 32, 3, 1, 6144, 2688, 0>>(maps, g, L, tk);
@@ -662,7 +678,7 @@ __global__ void __launch_bounds__(256, 1)
       case 32:
         static_mk::run_dsa_kv_write<
             StaticNode<8, 1, 1, 128, -1>,
-            StaticParams<2048, 64, 256, 925353388>,
+            StaticParams<2048, 64, 256, 925353388, 64>,
             StaticBufSlots<7, 8, 9, 10, 11>,
             StaticMapSlots<>,
             StaticNode<21, 12, 1, 32, 3, 1, 6144, 2688, 0>>(maps, g, L, tk);
@@ -681,7 +697,7 @@ __global__ void __launch_bounds__(256, 1)
             StaticParams<1, 2048, 2048, 0>,
             StaticBufSlots<15>,
             StaticMapSlots<9, 11>,
-            StaticNode<8, 1, 1, 96, 6, 2048, 925353388>,
+            StaticNode<8, 1, 1, 96, 6, 2048, 925353388, 0>,
             StaticNode<0, 0, 0>,
             StaticNode<0, 0, 0>>(maps, g, L, tk);
         break;
@@ -691,14 +707,14 @@ __global__ void __launch_bounds__(256, 1)
             StaticParams<1, 2048, 4096, 0>,
             StaticBufSlots<17>,
             StaticMapSlots<15, 11>,
-            StaticNode<8, 1, 1, 96, 6, 2048, 925353388>,
+            StaticNode<8, 1, 1, 96, 6, 2048, 925353388, 0>,
             StaticNode<0, 0, 0>,
             StaticNode<0, 0, 0>>(maps, g, L, tk);
         break;
       case 39:
         static_mk::run_dsa_q_absorb<
             StaticNode<32, 1, 1, 256, 20>,
-            StaticParams<8>,
+            StaticParams<8, 192, 64>,
             StaticBufSlots<19, 8, 9>,
             StaticMapSlots<>,
             StaticNode<16, 4, 1, 192, 16, 1, 2048, 2048, 0>>(maps, g, L, tk);
@@ -706,7 +722,7 @@ __global__ void __launch_bounds__(256, 1)
       case 41:
         static_mk::run_dsa_index_score<
             StaticNode<16, 8, 1, 288, 22>,
-            StaticParams<32, 16384, 64, 256>,
+            StaticParams<32, 16384, 64, 256, 0>,
             StaticBufSlots<8, 9, 10, 14, 21>,
             StaticMapSlots<>,
             StaticNode<32, 4, 1, 224, 18, 1, 2048, 4096, 0>,
@@ -716,37 +732,49 @@ __global__ void __launch_bounds__(256, 1)
       case 43:
         static_mk::run_dsa_index_topk<
             StaticNode<16, 8, 1, 320, 23>,
-            StaticParams<2048, 16384, 0>,
+            StaticParams<2048, 16384, 0, 1>,
             StaticBufSlots<9, 21>,
             StaticMapSlots<>,
-            StaticNode<16, 8, 1, 288, 22, 32, 16384, 64, 256>>(maps, g, L, tk);
+            StaticNode<16, 8, 1, 288, 22, 32, 16384, 64, 256, 0>>(
+            maps, g, L, tk);
         break;
       case 44:
         static_mk::run_dsa_index_topk<
             StaticNode<16, 8, 1, 352, -1>,
-            StaticParams<2048, 16384, 1>,
+            StaticParams<2048, 16384, 1, 1>,
             StaticBufSlots<9, 24, 22>,
             StaticMapSlots<>,
-            StaticNode<16, 8, 1, 320, 23, 2048, 16384, 0>>(maps, g, L, tk);
+            StaticNode<16, 8, 1, 320, 23, 2048, 16384, 0, 1>>(maps, g, L, tk);
         break;
       case 46:
         static_mk::run_sparse_mla<
             StaticNode<16, 8, 1, 384, 25>,
-            StaticParams<8, 2048, 64, 256, 2048, 1031798784>,
+            StaticParams<8, 2048, 64, 256, 2048, 1031798784, 64, 1, 2048>,
             StaticBufSlots<11, 10, 9, 24>,
             StaticMapSlots<>,
-            StaticNode<32, 1, 1, 256, 20, 8>,
-            StaticNode<8, 1, 1, 128, -1, 2048, 64, 256, 925353388>,
-            StaticNode<16, 8, 1, 352, -1, 2048, 16384, 1>>(maps, g, L, tk);
+            StaticNode<32, 1, 1, 256, 20, 8, 192, 64>,
+            StaticNode<8, 1, 1, 128, -1, 2048, 64, 256, 925353388, 64>,
+            StaticNode<16, 8, 1, 352, -1, 2048, 16384, 1, 1>>(maps, g, L, tk);
         break;
       case 50:
-        static_mk::run_dsa_mla_merge<
-            StaticNode<8, 8, 1, 416, 26>,
-            StaticParams<8>,
-            StaticBufSlots<>,
-            StaticMapSlots<>,
-            StaticNode<16, 8, 1, 384, 25, 8, 2048, 64, 256, 2048, 1031798784>>(
-            maps, g, L, tk);
+        static_mk::run_dsa_mla_merge<StaticNode<8, 8, 1, 416, 26>,
+                                     StaticParams<8>,
+                                     StaticBufSlots<>,
+                                     StaticMapSlots<>,
+                                     StaticNode<16,
+                                                8,
+                                                1,
+                                                384,
+                                                25,
+                                                8,
+                                                2048,
+                                                64,
+                                                256,
+                                                2048,
+                                                1031798784,
+                                                64,
+                                                1,
+                                                2048>>(maps, g, L, tk);
         break;
       case 51:
         static_mk::run_dsa_o_absorb<StaticNode<32, 1, 1, 448, 28>,
@@ -837,8 +865,8 @@ struct StaticGpu {
 #define STATIC_TIMES_ARG
 #endif
 static size_t const static_times_count =
-    (size_t)static_mk::NSM * (static_mk::MAX_TASKS_PER_SM) *
-    11; // timing build: per SM, per list entry
+    (size_t)static_mk::NSM *
+    (static_mk::MAX_TASKS_PER_SM)*11; // timing build: per SM, per list entry
 static std::vector<StaticGpu> g_st;
 static StaticContext g_ctx;
 static unsigned long long g_launches = 0;

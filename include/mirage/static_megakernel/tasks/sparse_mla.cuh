@@ -1,14 +1,15 @@
 // tasks/sparse_mla.cuh -- Sparse MLA decode for DeepSeek Sparse Attention
-// (GLM-5.3 / 5.2). The task reads a paged bf16 latent cache and uses the
-// absorbed query. Task (s, t) is split s of token (request) t, for the NH heads
-// on this GPU. The attention body does these steps:
-//   1. Gather the selected cache rows into shared memory with a double-buffered
-//      cp.async pipeline (64 rows for each tile).
+// (GLM-5.3 / 5.2, and GLM-5.3-Flash with ROPE = 0). The task reads a paged
+// bf16 latent cache and uses the absorbed query. Task (s, t) is split s of
+// token (request) t, for the NH heads on this GPU. The attention body does
+// these steps:
+//   1. Gather the selected cache rows into shared memory with a
+//      double-buffered cp.async pipeline (64 rows for each tile).
 //   2. Compute QK and PV with mma.sync m16n8k16. A tile holds 16 heads. With
 //      NH = 8, rows 8..15 are empty.
 //   3. Compute the online softmax in fp32.
 // The terms:
-//   q       [T][NH][D_QK] bf16 (D_QK = 512 latent + 64 rope), the dsa_q_absorb
+//   q       [T][NH][D_QK] bf16 (D_QK = 512 latent + ROPE), the dsa_q_absorb
 //           output (q_nope W_UK, then the rotated q_pe). Its counter counts its
 //           tasks.
 //   cache   [pages x PAGE][D_QK] bf16. Row (page, o) holds the normalized
@@ -34,9 +35,11 @@ namespace static_mk {
 namespace smla {
 
 using bf16 = __nv_bfloat16;
-constexpr int LATENT = dsa::MLA_LATENT, ROPE = 64, D_QK = LATENT + ROPE;
+constexpr int LATENT = dsa::MLA_LATENT;
 constexpr int HEAD_TILE = 16, KV_TILE = 64, NSTAGE = 2;
 
+// D_QK: the row of q and of the cache (512 latent + ROPE, ROPE = 64 or 0)
+template <int D_QK>
 struct alignas(128) Smem {
   bf16 q[HEAD_TILE * D_QK];
   bf16 kv[NSTAGE][KV_TILE * D_QK];
@@ -51,16 +54,35 @@ struct alignas(128) Smem {
 
 using namespace dsa; // the shared-memory and MMA helpers (dsa_common.cuh)
 
-// Return idx[tile * KV_TILE + tid]. tile is the tile index in the token, not
-// in the split. Return -1 if tid >= KV_TILE or tile >= last_tile.
+// Return the position of index slot e = tile * KV_TILE + tid. tile is the
+// tile index in the token, not in the split. Return -1 if tid >= KV_TILE or
+// tile >= last_tile. KPOOL = 1: idx[e]. KPOOL > 1 (GLM-5.3-Flash: idx holds
+// NIDX pool ids, dsa_index_topk UNIT = KPOOL): slot e < KPOOL NIDX is
+// position idx[e / KPOOL] KPOOL + e % KPOOL; the next KPOOL - 1 slots are the
+// tail, the positions after the complete pools: (seq_len / KPOOL) KPOOL + i
+// (the mask drops the ones at seq_len or later); the rest are -1.
+template <int KPOOL, int NIDX>
 __device__ __forceinline__ int
-    load_index(int const *idx, int tile, int last_tile) {
-  int const tid = threadIdx.x;
-  return tid < KV_TILE && tile < last_tile ? __ldcg(idx + tile * KV_TILE + tid)
-                                           : -1;
+    load_index(int const *idx, int tile, int last_tile, int seq_len) {
+  int const tid = threadIdx.x, e = tile * KV_TILE + tid;
+  if (tid >= KV_TILE || tile >= last_tile) {
+    return -1;
+  }
+  if constexpr (KPOOL == 1) {
+    return __ldcg(idx + e);
+  } else {
+    if (e < KPOOL * NIDX) {
+      int const p = __ldcg(idx + e / KPOOL);
+      return p >= 0 ? p * KPOOL + e % KPOOL : -1;
+    }
+    int const i = e - KPOOL * NIDX;
+    return i < KPOOL - 1 ? seq_len / KPOOL * KPOOL + i : -1;
+  }
 }
 
-__device__ __forceinline__ int tile_valid_count(Smem const &sm, int stage) {
+template <int D_QK>
+__device__ __forceinline__ int tile_valid_count(Smem<D_QK> const &sm,
+                                                int stage) {
   return __popc(sm.valid_masks[stage][0]) + __popc(sm.valid_masks[stage][1]);
 }
 
@@ -68,8 +90,8 @@ __device__ __forceinline__ int tile_valid_count(Smem const &sm, int stage) {
 // table one time for each different page. Move the valid rows to the front of
 // the list. Then start the cp.async copies of these rows into stage `stage`.
 // An empty tile starts no copy.
-template <int PAGE>
-__device__ __forceinline__ void prefetch_tile(Smem &sm,
+template <int PAGE, int D_QK>
+__device__ __forceinline__ void prefetch_tile(Smem<D_QK> &sm,
                                               bf16 const *cache,
                                               int const *pages,
                                               int num_pages,
@@ -128,8 +150,8 @@ __device__ __forceinline__ void prefetch_tile(Smem &sm,
 
 // Compute split `split` of S over the TOPK index slots of one token. Write
 // o_part [NH][512] fp32 and lse [NH].
-template <int NH, int TOPK, int S, int PAGE>
-__device__ __forceinline__ void sparse_mla_split(Smem &sm,
+template <int NH, int TOPK, int S, int PAGE, int D_QK, int KPOOL, int NIDX>
+__device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
                                                  bf16 const *q,
                                                  bf16 const *cache,
                                                  int const *idx,
@@ -161,22 +183,25 @@ __device__ __forceinline__ void sparse_mla_split(Smem &sm,
   }
   // Each warp computes 64 latent columns. Each lane keeps 32 fp32 outputs.
   float acc[4][8] = {};
-  int next_pos = load_index(idx, first_tile + 1, last_tile);
-  prefetch_tile<PAGE>(sm,
-                      cache,
-                      pages,
-                      num_pages,
-                      seq_len,
-                      0,
-                      load_index(idx, first_tile, last_tile));
+  int next_pos =
+      load_index<KPOOL, NIDX>(idx, first_tile + 1, last_tile, seq_len);
+  prefetch_tile<PAGE, D_QK>(
+      sm,
+      cache,
+      pages,
+      num_pages,
+      seq_len,
+      0,
+      load_index<KPOOL, NIDX>(idx, first_tile, last_tile, seq_len));
   copy_wait();
   __syncthreads();
 
   for (int tile = first_tile; tile < last_tile; tile++) {
     int const stage = (tile - first_tile) & 1;
     if (tile + 1 < last_tile) {
-      int const following = load_index(idx, tile + 2, last_tile);
-      prefetch_tile<PAGE>(
+      int const following =
+          load_index<KPOOL, NIDX>(idx, tile + 2, last_tile, seq_len);
+      prefetch_tile<PAGE, D_QK>(
           sm, cache, pages, num_pages, seq_len, stage ^ 1, next_pos);
       next_pos = following;
     }
@@ -307,13 +332,14 @@ __device__ __forceinline__ void sparse_mla_split(Smem &sm,
 
 } // namespace smla
 
-// Task (s, t) is split s of token t. PARAMS {NH, TOPK, PAGE, MAXP, num_pages,
-// softmax scale (fp32 bits)}. BUF_SLOTS {cache, block_table, seq_lens, idx}.
-// The node buffer holds o [T][S][NH][512] fp32, then lse [T][S][NH] fp32. Q:
-// the dsa_q_absorb node. KV: the dsa_kv_write node. The task waits for all KV
-// tasks, so the cache rows of this step are present. IX: the dsa_index_topk
-// node, or none. With none, idx is a graph input: the indices of a "shared"
-// layer.
+// Task (s, t) is split s of token t. PARAMS {NH, TOPK (index slots), PAGE,
+// MAXP, num_pages, softmax scale (fp32 bits), ROPE (64 or 0), KPOOL (1: idx
+// holds positions; 4: pool ids, load_index), NIDX (idx columns)}. BUF_SLOTS
+// {cache, block_table, seq_lens, idx}. The node buffer holds o
+// [T][S][NH][512] fp32, then lse [T][S][NH] fp32. Q: the dsa_q_absorb node.
+// KV: the dsa_kv_write node. The task waits for all KV tasks, so the cache
+// rows of this step are present. IX: the dsa_index_topk node, or none. With
+// none, idx is a graph input: the indices of a "shared" layer.
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -328,14 +354,21 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
                                                StaticTask const &tk) {
   constexpr int NH = PARAMS::v[0], TOPK = PARAMS::v[1], PAGE = PARAMS::v[2],
                 MAXP = PARAMS::v[3], NUM_PAGES = PARAMS::v[4];
+  constexpr int ROPE = PARAMS::v[6], D_QK = smla::LATENT + ROPE,
+                KPOOL = PARAMS::v[7], NIDX = PARAMS::v[8];
   constexpr int S = SELF::x;
+  using Smem = smla::Smem<D_QK>;
+  static_assert(ROPE == 64 || ROPE == 0, "sparse_mla: k_pe of 64 or none");
+  static_assert(KPOOL == 1 ? NIDX == TOPK : KPOOL * NIDX + KPOOL - 1 <= TOPK,
+                "sparse_mla: the index slots hold the positions (KPOOL 1) or "
+                "the pools and the tail");
   constexpr int CACHE = slot_at<BUF_SLOTS, 0>(), BT = slot_at<BUF_SLOTS, 1>(),
                 SEQ = slot_at<BUF_SLOTS, 2>(), IDX = slot_at<BUF_SLOTS, 3>();
   static_assert(SELF::y == T && SELF::buf >= 0 && SELF::counter >= 0,
                 "sparse_mla: grid (splits, tokens), its output and counters");
   static_assert(Q::buf >= 0 && Q::counter >= 0 && KV::counter >= 0,
                 "sparse_mla: q from dsa_q_absorb, the cache from dsa_kv_write");
-  static_assert(sizeof(smla::Smem) <= RING_BYTES,
+  static_assert(sizeof(Smem) <= RING_BYTES,
                 "sparse_mla: its shared memory is the ring's");
   static_assert(IX::x == 0 || IX::counter >= 0,
                 "sparse_mla: the indices' producer counts per token");
@@ -344,7 +377,8 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
                    // reads
   if (threadIdx.x == 0) {
     cnt_wait(g.cnt + KV::counter, KV::x * KV::y * KV::z);
-    cnt_wait(g.cnt + Q::counter, Q::x * Q::y * Q::z); // wait for all q tasks
+    // wait for all q tasks
+    cnt_wait(g.cnt + Q::counter, Q::x * Q::y * Q::z);
     if constexpr (IX::x > 0) {
       // wait for the IX::x write tasks of token t
       cnt_wait(g.cnt + IX::counter + t, IX::x);
@@ -353,11 +387,11 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
   __syncthreads();
   dsa::stamp_ready(L);
   float *const o = buf_at<float>(g, SELF::buf);
-  smla::sparse_mla_split<NH, TOPK, S, PAGE>(
-      *reinterpret_cast<smla::Smem *>(L.sm),
-      buf_at<__nv_bfloat16 const>(g, Q::buf) + (size_t)t * NH * smla::D_QK,
+  smla::sparse_mla_split<NH, TOPK, S, PAGE, D_QK, KPOOL, NIDX>(
+      *reinterpret_cast<Smem *>(L.sm),
+      buf_at<__nv_bfloat16 const>(g, Q::buf) + (size_t)t * NH * D_QK,
       buf_at<__nv_bfloat16 const>(g, CACHE),
-      buf_at<int const>(g, IDX) + (size_t)t * TOPK,
+      buf_at<int const>(g, IDX) + (size_t)t * NIDX,
       buf_at<int const>(g, BT) + (size_t)t * MAXP,
       NUM_PAGES,
       buf_at<int const>(g, SEQ)[t],
@@ -377,7 +411,7 @@ template <class SELF,
           class MAP_SLOTS,
           class... IN>
 constexpr int smem_sparse_mla() {
-  return sizeof(smla::Smem);
+  return sizeof(smla::Smem<smla::LATENT + PARAMS::v[6]>);
 }
 
 } // namespace static_mk

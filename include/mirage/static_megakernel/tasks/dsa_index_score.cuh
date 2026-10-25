@@ -1,6 +1,7 @@
 // tasks/dsa_index_score.cuh -- Compute the index scores of the DSA lightning
-// indexer (GLM-5.3 / 5.2 "full" layers). Task (c, t) is chunk c of the context
-// of token t: positions [c CH, c CH + CH) below n = min(seq_lens[t], MAXCTX).
+// indexer (GLM-5.3 / 5.2 "full" layers; GLM-5.3-Flash with FLASH = 1, see
+// below). Task (c, t) is chunk c of the context of token t: positions
+// [c CH, c CH + CH) below n = min(seq_lens[t], MAXCTX).
 // The caller must keep seq_lens[t] <= MAXCTX = MAXP x PAGE. Each slot t must be
 // a different request (see step 1).
 //   score[t][j] = bf16( sum_h w_h relu(q8_h . k8_j) s_j )
@@ -16,6 +17,13 @@
 //         layout). s_j is its UE8M0 scale.
 // s_j and qs_h are powers of two. Thus a multiplication by them is exact, and
 // the order of these multiplications does not change the fp32 result.
+// FLASH = 1 (GLM-5.3-Flash, SGLang's IndexerKPool): j counts the pooled keys
+// (dsa_kpool_update), n = min(seq_lens[t] / 4, MAXCTX) complete pools. q_h is
+// Hadamard-128 of the bf16 wq_b output (a bf16 gemm_tile), rounded to bf16,
+// before the e4m3 quantization (no RoPE). w_h = ((wp_h 32^-1/2) qs_h)
+// 128^-1/2 in fp32, wp_h = column 256 + h of the indexer projection
+// [wk | gate | weights_proj], not rounded. s_j is the fp32 scale of the pooled
+// key (a power of two).
 // The steps:
 //   1. Before the wait, start the cp.async copies of the pages of the chunk to
 //      shared memory. Each page has 8 KB of keys and 256 B of scales. Warp w
@@ -174,8 +182,8 @@ __device__ __forceinline__ void isc_copy_pages(unsigned char *sm,
 // Step 2. Write q8 and w of the heads 4 warp .. 4 warp + 3 of token t to
 // ISC_Q and ISC_W. Lane l takes dims 4 l .. 4 l + 3. iq: the wq_b output
 // [T][NQ]; kw: the indexer projection [T][NKW]. (c0, s0, c1, s1): the RoPE
-// values of the lane (rope_cs2).
-template <int NQ, int NKW>
+// values of the lane (rope_cs2; FLASH: not used).
+template <int NQ, int NKW, bool FLASH>
 __device__ __forceinline__ void isc_q8_w(unsigned char *sm,
                                          unsigned long long const *iq,
                                          unsigned long long const *kw,
@@ -194,29 +202,44 @@ __device__ __forceinline__ void isc_q8_w(unsigned char *sm,
 #pragma unroll
   for (int j = 0; j < 4; j++) {
     unsigned long long x[4];
-    asm volatile(
-        "ld.global.cg.v4.u64 {%0, %1, %2, %3}, [%4];"
-        : "=l"(x[0]), "=l"(x[1]), "=l"(x[2]), "=l"(x[3])
-        : "l"(iq + (size_t)t * NQ + (4 * warp + j) * ISC_D + 4 * lane)
-        : "memory");
+    asm volatile("ld.global.cg.v4.u64 {%0, %1, %2, %3}, [%4];"
+                 : "=l"(x[0]), "=l"(x[1]), "=l"(x[2]), "=l"(x[3])
+                 : "l"(iq + (size_t)t * NQ + (4 * warp + j) * ISC_D + 4 * lane)
+                 : "memory");
 #pragma unroll
     for (int i = 0; i < 4; i++) {
       q[j][i] = bf16r(fx_to_float(x[i]));
     }
     if (lane == 0) {
-      wv[j] = fx_bf16(kw, NKW, t, 128 + 4 * warp + j);
+      wv[j] =
+          FLASH ? fx_to_float(__ldcg(kw + (size_t)t * NKW + 256 + 4 * warp + j))
+                : fx_bf16(kw, NKW, t, 128 + 4 * warp + j);
     }
   }
   uint32_t q8[4];
   int e[4];
-  rope_quant128<4>(q, lane, c0, s0, c1, s1, q8, e);
+  if constexpr (FLASH) {
+    hadamard128<4>(q, lane);
+#pragma unroll
+    for (int j = 0; j < 4; j++) {
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        q[j][i] = bf16r(q[j][i]);
+      }
+    }
+    quant128<4>(q, q8, e);
+  } else {
+    rope_quant128<4>(q, lane, c0, s0, c1, s1, q8, e);
+  }
 #pragma unroll
   for (int j = 0; j < 4; j++) {
     int const h = 4 * warp + j;
     // q8 rows use the page swizzle (kswz), as the MMA B operand needs
     *reinterpret_cast<uint32_t *>(sm + ISC_Q + kswz(h, 4 * lane)) = q8[j];
     if (lane == 0) {
-      wsm[h] = bf16r(wv[j] * exp2_int(e[j]) * (1.0f / 64.0f));
+      wsm[h] = FLASH ? wv[j] * 0.17677669529663687f * exp2_int(e[j]) *
+                           0.08838834764831845f
+                     : bf16r(wv[j] * exp2_int(e[j]) * (1.0f / 64.0f));
     }
   }
 }
@@ -247,6 +270,8 @@ __device__ __forceinline__ void
 // groups w / 4, w / 4 + 2, and so on. Warp 0 issues the MMAs. Thus, for TMEM
 // lanes 0..31, warp 4 reads the groups 0..5, and warp 0 reads the groups 6
 // and 7 after the issue. out: the scores of token t; positions [c0, c1).
+// FLASH: the key scales are fp32 (else UE8M0 bytes).
+template <bool FLASH>
 __device__ __forceinline__ void isc_epilogue(unsigned char *sm,
                                              uint32_t tb,
                                              uint32_t bar,
@@ -280,7 +305,10 @@ __device__ __forceinline__ void isc_epilogue(unsigned char *sm,
       s += wr[h] * fmaxf(v[h], 0.f);
     }
     if (c0 + o < c1) {
-      float const sc = bf16r(s * exp2_int(sm[ISC_SC + 4 * o]));
+      float const ks =
+          FLASH ? *reinterpret_cast<float const *>(sm + ISC_SC + 4 * o)
+                : exp2_int(sm[ISC_SC + 4 * o]);
+      float const sc = bf16r(s * ks);
       out[c0 + o] = sc;
       int const bin = (int)(score_key16(sc) >> 4);
       if (atomicAdd(shist + bin, 1) == 0) { // the first key of the bin
@@ -306,12 +334,14 @@ __device__ __forceinline__ void isc_flush_hist(unsigned char const *sm,
 
 } // namespace dsa
 
-// Task (c, t). PARAMS {32 (heads), MAXCTX, PAGE (64), MAXP}. BUF_SLOTS
-// {cos_sin, seq_lens, block_table, index cache, hist (int [T][TOPK_BINS], zero
-// before the launch: the counts of the high 12 bits of the score keys)}. IQ:
-// wq_b (COMBINE_ADD, 4096 columns). KW: the indexer projection (COMBINE_ADD;
-// column 128 + h is w_h). IKW: the dsa_index_k_write node. The task waits for
-// all IKW tasks, so the keys of this step are in the cache.
+// Task (c, t). PARAMS {32 (heads), MAXCTX, PAGE (64), MAXP, FLASH (0 / 1)}.
+// BUF_SLOTS {cos_sin (FLASH: not read), seq_lens, block_table (FLASH: of the
+// pooled cache), index cache (FLASH: the pooled cache), hist (int
+// [T][TOPK_BINS], zero before the launch: the counts of the high 12 bits of
+// the score keys)}. IQ: wq_b (COMBINE_ADD, 4096 columns). KW: the indexer
+// projection (COMBINE_ADD; column 128 + h is w_h, FLASH 256 + h). IKW: the
+// dsa_index_k_write node (FLASH: dsa_kpool_update). The task waits for all IKW
+// tasks, so the keys of this step are in the cache.
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -327,11 +357,13 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   using namespace dsa;
   constexpr int NIH = PARAMS::v[0], MAXCTX = PARAMS::v[1], PAGE = PARAMS::v[2],
                 MAXP = PARAMS::v[3];
+  constexpr bool FLASH = PARAMS::v[4] != 0;
+  constexpr int W0 = FLASH ? 256 : 128; // the column of w_0 in KW
   constexpr int NQ = IQ::v[2], NKW = KW::v[2], CH = MAXCTX / SELF::x;
   constexpr int CS = slot_at<BUF_SLOTS, 0>(), SEQ = slot_at<BUF_SLOTS, 1>(),
                 BT = slot_at<BUF_SLOTS, 2>(), ICACHE = slot_at<BUF_SLOTS, 3>(),
                 HIST = slot_at<BUF_SLOTS, 4>();
-  static_assert(NIH == ISC_HEADS && NQ == NIH * ISC_D && NKW >= 128 + NIH,
+  static_assert(NIH == ISC_HEADS && NQ == NIH * ISC_D && NKW >= W0 + NIH,
                 "dsa_index_score: 32 heads of 128 dims");
   static_assert(PAGE == 64 && CH * SELF::x == MAXCTX && CH % PAGE == 0,
                 "dsa_index_score: chunks of whole 64-position pages");
@@ -339,8 +371,10 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   static_assert(ISC_END <= RING_BYTES && CH <= ISC_MAX_POS,
                 "dsa_index_score: its shared memory is the ring's (at most "
                 "1024 positions in a chunk)");
-  static_assert(MAXP * PAGE == MAXCTX,
-                "dsa_index_score: the block table covers MAXCTX positions");
+  static_assert(
+      MAXP * PAGE >= MAXCTX,
+      "dsa_index_score: the block table covers MAXCTX positions (MAXP "
+      "is its row stride: SGLang's may be wider)");
   static_assert(
       IKW::counter >= 0 && IKW::x * IKW::y * IKW::z == T,
       "dsa_index_score: the keys of all T tokens (dsa_index_k_write)");
@@ -351,7 +385,7 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
             lane = tid & 31;
   unsigned char *const sm = reinterpret_cast<unsigned char *>(L.sm);
   int const seq = buf_at<int const>(g, SEQ)[t];
-  int const n = min(MAXCTX, seq);
+  int const n = min(MAXCTX, FLASH ? seq / 4 : seq); // FLASH: complete pools
   int const c0 = cx * CH, c1 = min(c0 + CH, n);
   int const *bt = buf_at<int const>(g, BT) + (size_t)t * MAXP;
   unsigned char const *icache = buf_at<unsigned char const>(g, ICACHE);
@@ -371,13 +405,15 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   // slot, seq_lens[t] <= 0, uses position 0). Find the page of the key of
   // position n - 1 if this warp copied it.
   float rc0 = 1.f, rs0 = 0.f, rc1 = 1.f, rs1 = 0.f;
-  rope_cs2(buf_at<__nv_bfloat16 const>(g, CS),
-           max(n - 1, 0),
-           lane,
-           rc0,
-           rs0,
-           rc1,
-           rs1);
+  if constexpr (!FLASH) {
+    rope_cs2(buf_at<__nv_bfloat16 const>(g, CS),
+             max(n - 1, 0),
+             lane,
+             rc0,
+             rs0,
+             rc1,
+             rs1);
+  }
   int const lpn = (n - 1) / PAGE, on = (n - 1) % PAGE, cpn = lpn - c0 / PAGE;
   bool const own_n = n >= 1 && c0 <= n - 1 && n - 1 < c1 && cpn % 8 == warp;
   unsigned char const *const pgn =
@@ -391,7 +427,7 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   }
   if (warp == 0) {
     fx_wait_cols<IQ>(g, 0, NQ);
-    fx_wait_cols<KW>(g, 128, 128 + NIH);
+    fx_wait_cols<KW>(g, W0, W0 + NIH);
     if (lane == 0) {
       cnt_wait(g.cnt + IKW::counter, IKW::x * IKW::y * IKW::z);
     }
@@ -411,16 +447,16 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
     }
   }
   // Step 2.
-  isc_q8_w<NQ, NKW>(sm,
-                    buf_at<unsigned long long const>(g, IQ::buf),
-                    buf_at<unsigned long long const>(g, KW::buf),
-                    t,
-                    warp,
-                    lane,
-                    rc0,
-                    rs0,
-                    rc1,
-                    rs1);
+  isc_q8_w<NQ, NKW, FLASH>(sm,
+                           buf_at<unsigned long long const>(g, IQ::buf),
+                           buf_at<unsigned long long const>(g, KW::buf),
+                           t,
+                           warp,
+                           lane,
+                           rc0,
+                           rs0,
+                           rc1,
+                           rs1);
   copy_wait();
   __syncwarp(); // the copies of all lanes of the warp are complete
   if (own_n) {
@@ -441,15 +477,15 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
     if (warp == 0) {
       isc_issue(L.base, L.tb, L.base + ISC_BAR, ng);
     }
-    isc_epilogue(sm,
-                 L.tb,
-                 L.base + ISC_BAR,
-                 ng,
-                 c0,
-                 c1,
-                 buf_at<float>(g, SELF::buf) + (size_t)t * MAXCTX,
-                 warp,
-                 lane);
+    isc_epilogue<FLASH>(sm,
+                        L.tb,
+                        L.base + ISC_BAR,
+                        ng,
+                        c0,
+                        c1,
+                        buf_at<float>(g, SELF::buf) + (size_t)t * MAXCTX,
+                        warp,
+                        lane);
   }
   __syncthreads();
   if (tid < 8) { // all waits are done: invalidate the mbarriers

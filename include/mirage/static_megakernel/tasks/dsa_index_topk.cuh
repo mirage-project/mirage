@@ -1,6 +1,9 @@
 // tasks/dsa_index_topk.cuh -- Select the indexer top-k of DeepSeek Sparse
-// Attention (GLM-5.3 / 5.2). Two nodes of this task type do the selection.
-// Token t has n = min(seq_lens[t], MAXCTX) context positions. Each position
+// Attention (GLM-5.3 / 5.2; GLM-5.3-Flash with UNIT = 4). Two nodes of this
+// task type do the selection. Token t has n = min(seq_lens[t] / UNIT, MAXCTX)
+// scored entries (UNIT 1: the positions; UNIT 4: the complete pools of 4
+// positions, dsa_index_score FLASH). Below, a position is an entry. Each
+// position
 // has an index score (the dsa_index_score output, fp32 [T][MAXCTX], each a
 // bf16 value). The output idx[t][0, TOPK) holds the positions of the TOPK
 // largest scores in ascending order. When n <= TOPK, the output holds all n
@@ -298,7 +301,7 @@ __device__ __forceinline__ void
 
 } // namespace dsa
 
-// Task (c, t). PARAMS {TOPK, MAXCTX, MODE}.
+// Task (c, t). PARAMS {TOPK, MAXCTX, MODE, UNIT (positions per entry)}.
 //   MODE 0 (count): BUF_SLOTS {seq_lens (int32 [T]), hist (the token
 //   histograms of the score node, int [T][TOPK_BINS])}. P: the
 //   dsa_index_score node (grid (chunks, T); its counter + t counts the chunks
@@ -319,14 +322,15 @@ __device__ __forceinline__ void run_dsa_index_topk(Maps const &,
   using dsa::TOPK_CH;
   using dsa::TOPK_REC;
   constexpr int TOPK = PARAMS::v[0], MAXCTX = PARAMS::v[1], MODE = PARAMS::v[2],
-                CHK = MAXCTX / TOPK_CH;
+                UNIT = PARAMS::v[3], CHK = MAXCTX / TOPK_CH;
   constexpr int SEQ = slot_at<BUF_SLOTS, 0>();
   static_assert(MAXCTX % TOPK_CH == 0 && SELF::x == CHK && SELF::y == T &&
                     SELF::counter >= 0,
                 "dsa_index_topk: grid (MAXCTX / 1024, T), a counter per token");
-  static_assert(TOPK > 0 && MAXCTX >= TOPK, "dsa_index_topk: sizes");
+  static_assert(TOPK > 0 && MAXCTX >= TOPK && UNIT >= 1,
+                "dsa_index_topk: sizes");
   int const c = tk.x, t = tk.y;
-  int const n = min(MAXCTX, buf_at<int const>(g, SEQ)[t]);
+  int const n = min(MAXCTX, buf_at<int const>(g, SEQ)[t] / UNIT);
   __syncthreads(); // wait until the previous task completes its shared-memory
                    // reads
   if constexpr (MODE == 0) {

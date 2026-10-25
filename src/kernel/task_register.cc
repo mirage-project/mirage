@@ -5622,24 +5622,26 @@ int TaskRegister::register_scaled_moe_experts_sm100_task(
 
 int TaskRegister::register_dsa_q_norm_quant_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {QL, eps (fp32 bits)}. inputs: the fused A projection [T, N] int64
-  // fixed point; output: z_q [T, QL] e4m3 bytes (its buffer: then the fp32
-  // scales, as group_quant). Grid x = token.
+  // params: {QL (2048 or 1536), eps (fp32 bits), OUT (0: z_q, 1: bf16 q_c)}.
+  // inputs: the fused A projection [T, N] int64 fixed point; output: z_q
+  // [T, QL] e4m3 bytes (its buffer: then the fp32 scales, as group_quant), or
+  // q_c [T, QL] bf16. Grid x = token.
   return register_static_task(this,
                               TASK_DSA_Q_NORM_QUANT_SM100,
                               "dsa_q_norm_quant",
                               bgraph,
                               params,
                               1,
-                              2);
+                              3);
 }
 
 int TaskRegister::register_dsa_kv_write_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {KV0, PAGE, MAXP, eps (fp32 bits)}. inputs: the fused A
-  // projection; output: the latent cache [rows, 576] bf16. Grid x = token.
+  // params: {KV0, PAGE, MAXP, eps (fp32 bits), ROPE (64 or 0)}. inputs: the
+  // fused A projection; output: the latent cache [rows, 512 + ROPE] bf16. Grid
+  // x = token.
   return register_static_task(
-      this, TASK_DSA_KV_WRITE_SM100, "dsa_kv_write", bgraph, params, 1, 4);
+      this, TASK_DSA_KV_WRITE_SM100, "dsa_kv_write", bgraph, params, 1, 5);
 }
 
 int TaskRegister::register_dsa_index_k_write_sm100_task(
@@ -5656,44 +5658,69 @@ int TaskRegister::register_dsa_index_k_write_sm100_task(
                               3);
 }
 
+int TaskRegister::register_dsa_kpool_update_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {PAGE (pools in a page), MAXPP, RING (tail slots), eps (fp32
+  // bits)}. inputs: the indexer projection [T, N] int64 fixed point; output:
+  // the pooled cache (uint8 pages). Grid x = token.
+  return register_static_task(this,
+                              TASK_DSA_KPOOL_UPDATE_SM100,
+                              "dsa_kpool_update",
+                              bgraph,
+                              params,
+                              1,
+                              4);
+}
+
+int TaskRegister::register_fx_bf16_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params) {
+  // No params. inputs: a COMBINE_ADD GEMM output [T, N] int64 fixed point;
+  // output: [T, N] bf16. Grid x = N / 128 (a column block each).
+  return register_static_task(
+      this, TASK_FX_BF16_SM100, "fx_bf16", bgraph, params, 1, 0);
+}
+
 int TaskRegister::register_dsa_q_absorb_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {NH}. inputs: q_b [T, NH * 256] int64 fixed point; output: q
-  // [T, NH, 576] bf16. Grid x = NH * 4 (4 latent column blocks per head).
+  // params: {NH, NOPE, ROPE (64 or 0)}. inputs: q_b [T, NH * (NOPE + ROPE)]
+  // int64 fixed point; output: q [T, NH, 512 + ROPE] bf16. Grid x = NH * 4 (4
+  // latent column blocks per head).
   return register_static_task(
-      this, TASK_DSA_Q_ABSORB_SM100, "dsa_q_absorb", bgraph, params, 1, 1);
+      this, TASK_DSA_Q_ABSORB_SM100, "dsa_q_absorb", bgraph, params, 1, 3);
 }
 
 int TaskRegister::register_dsa_index_score_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {heads, MAXCTX, PAGE, MAXP}. inputs: the wq_b output, the indexer
-  // projection, the index cache; output: scores [T, MAXCTX] fp32. Grid
-  // (chunks, tokens).
+  // params: {heads, MAXCTX, PAGE, MAXP, FLASH (0 / 1)}. inputs: the wq_b
+  // output, the indexer projection, the index cache; output: scores
+  // [T, MAXCTX] fp32. Grid (chunks, tokens).
   return register_static_task(this,
                               TASK_DSA_INDEX_SCORE_SM100,
                               "dsa_index_score",
                               bgraph,
                               params,
                               3,
-                              4);
+                              5);
 }
 
 int TaskRegister::register_dsa_index_topk_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {TOPK, MAXCTX, mode (0 count, 1 write)}. inputs: scores [T, MAXCTX]
-  // fp32 (count) or the records (write); output: the records (count) or
-  // indices [T, TOPK] int32 (write). Grid (MAXCTX / 1024, tokens).
+  // params: {TOPK, MAXCTX, mode (0 count, 1 write), UNIT (positions per
+  // entry)}. inputs: scores [T, MAXCTX] fp32 (count) or the records (write);
+  // output: the records (count) or indices [T, TOPK] int32 (write). Grid
+  // (MAXCTX / 1024, tokens).
   return register_static_task(
-      this, TASK_DSA_INDEX_TOPK_SM100, "dsa_index_topk", bgraph, params, 1, 3);
+      this, TASK_DSA_INDEX_TOPK_SM100, "dsa_index_topk", bgraph, params, 1, 4);
 }
 
 int TaskRegister::register_sparse_mla_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {NH, TOPK, PAGE, MAXP, pages, softmax scale (fp32 bits)}. inputs:
-  // q, the latent cache, the indices; output: o and lse of each split. Grid
-  // (splits, tokens).
+  // params: {NH, TOPK, PAGE, MAXP, pages, softmax scale (fp32 bits), ROPE (64
+  // or 0), KPOOL (1: positions, 4: pool ids), NIDX}. inputs: q, the latent
+  // cache, the indices; output: o and lse of each split. Grid (splits,
+  // tokens).
   return register_static_task(
-      this, TASK_SPARSE_MLA_SM100, "sparse_mla", bgraph, params, 3, 6);
+      this, TASK_SPARSE_MLA_SM100, "sparse_mla", bgraph, params, 3, 9);
 }
 
 int TaskRegister::register_dsa_mla_merge_sm100_task(

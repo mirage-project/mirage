@@ -1,11 +1,14 @@
 // tasks/dsa_kv_write.cuh -- Write the MLA latent cache row of this step
-// (GLM-5.3 / 5.2). Task t is token t at position p = seq_lens[t] - 1:
-//   cache[row(p)] = [bf16(RMSNorm(kv_c) * gamma) (512) | bf16(RoPE(k_pe)) (64)]
-// kv_c is columns [KV0, KV0 + 512) and k_pe is columns [KV0 + 512, KV0 + 576)
-// of the fused A projection (a COMBINE_ADD GEMM node; the demo uses a
-// scaled_gemm_tile). The task rounds kv_c and k_pe to bf16, as a linear layer
-// does. The RMSNorm and RoPE math is fp32. The task rounds each result to bf16
-// one time, in the cache write. RoPE is interleaved (dsa_common.cuh).
+// (GLM-5.3 / 5.2, and GLM-5.3-Flash with ROPE = 0). Task t is token t at
+// position p = seq_lens[t] - 1:
+//   cache[row(p)] = [bf16(RMSNorm(kv_c) * gamma) (512) | bf16(RoPE(k_pe))
+//                   (ROPE)]
+// kv_c is columns [KV0, KV0 + 512) and k_pe is columns [KV0 + 512,
+// KV0 + 512 + ROPE) of the fused A projection (a COMBINE_ADD GEMM node; the
+// demo uses a scaled_gemm_tile). The task rounds kv_c and k_pe to bf16, as a
+// linear layer does. The RMSNorm and RoPE math is fp32. The task rounds each
+// result to bf16 one time, in the cache write. RoPE is interleaved
+// (dsa_common.cuh).
 //   row(p) = block_table[t][p / PAGE] * PAGE + p % PAGE
 // A token with seq_lens[t] <= 0 (an idle slot) writes no row. A token with
 // seq_lens[t] > MAXP x PAGE writes no row (its page is not in the block
@@ -15,9 +18,10 @@
 
 namespace static_mk {
 
-// Task x is token x. PARAMS {KV0, PAGE, MAXP, eps (fp32 bits)}. BUF_SLOTS
-// {gamma (fp32 [512]), cos_sin, seq_lens, block_table, cache ([rows][576]
-// bf16)}. QKVA: the fused A projection.
+// Task x is token x. PARAMS {KV0, PAGE, MAXP, eps (fp32 bits), ROPE (64 or
+// 0)}. BUF_SLOTS {gamma (fp32 [512]), cos_sin (not read with ROPE = 0),
+// seq_lens, block_table, cache ([rows][512 + ROPE] bf16)}. QKVA: the fused A
+// projection.
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -29,10 +33,11 @@ __device__ __forceinline__ void run_dsa_kv_write(Maps const &,
                                                  KernelLocals &L,
                                                  StaticTask const &tk) {
   constexpr int KV0 = PARAMS::v[0], PAGE = PARAMS::v[1], MAXP = PARAMS::v[2];
-  constexpr int N = QKVA::v[2], KVL = 512, ROPE = 64, D = KVL + ROPE;
+  constexpr int N = QKVA::v[2], KVL = 512, ROPE = PARAMS::v[4], D = KVL + ROPE;
   constexpr int GAMMA = slot_at<BUF_SLOTS, 0>(), CS = slot_at<BUF_SLOTS, 1>(),
                 SEQ = slot_at<BUF_SLOTS, 2>(), BT = slot_at<BUF_SLOTS, 3>(),
                 CACHE = slot_at<BUF_SLOTS, 4>();
+  static_assert(ROPE == 64 || ROPE == 0, "dsa_kv_write: k_pe of 64 or none");
   static_assert(KV0 + D <= N && KV0 % 2 == 0 && N % 2 == 0,
                 "dsa_kv_write: kv_c and k_pe in the A projection (aligned "
                 "vector loads)");
@@ -60,7 +65,7 @@ __device__ __forceinline__ void run_dsa_kv_write(Maps const &,
                          __int_as_float(PARAMS::v[3]),
                          row);
     // k_pe: thread i (i < 32) takes pair i
-    if (threadIdx.x < ROPE / 2) {
+    if (ROPE > 0 && threadIdx.x < ROPE / 2) {
       int const i = threadIdx.x;
       dsa::fx_rope_store(qa,
                          N,

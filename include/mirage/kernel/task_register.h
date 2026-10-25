@@ -248,6 +248,10 @@ public:
                                        std::vector<int> const &params);
   int register_dsa_index_k_write_sm100_task(threadblock::Graph const &bgraph,
                                             std::vector<int> const &params);
+  int register_dsa_kpool_update_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  int register_fx_bf16_sm100_task(threadblock::Graph const &bgraph,
+                                  std::vector<int> const &params);
   int register_dsa_q_absorb_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params);
   int register_dsa_index_score_sm100_task(threadblock::Graph const &bgraph,

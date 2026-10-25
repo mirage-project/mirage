@@ -64,8 +64,8 @@ def producer_of(tensor, nodes: List[Node]) -> Optional[Node]:
 
 def candidate_grids(node: Node) -> List[Tuple[int, int, int]]:
     """The grids the compiler may give the node: on each changeable grid dim a (unit u, optionally between min and max units per
-    task), every size s such that every tensor dimension that axis cuts splits into s blocks of a whole number of units; the other
-    axes as they are.
+    task, optionally the length it splits when no tensor map uses it), every size s such that every tensor dimension that axis
+    cuts splits into s blocks of a whole number of units; the other axes as they are.
     GEMM, K = 7168, changeable grid dim y with unit 128: 7168 / 128 = 56 units -> y in 1, 2, 4, 7, 8, 14, 28, 56.
     latent_up, K = 3584 = 28 units of 128, 2 to 5 units per task -> y in 7 (4 units), 14 (2 units)."""
     tensors = node.inputs + node.outputs
@@ -75,8 +75,8 @@ def candidate_grids(node: Node) -> List[Tuple[int, int, int]]:
             per_axis.append([node.grid[axis]])
             continue
         spec = node.info["changeable_grid_dims"][axis]
-        unit, lo, hi = (spec, 1, None) if isinstance(spec, int) else tuple(spec)
-        cut = [dims(t)[m[axis]] for t, m in zip(tensors, node.info["input_maps"]) if m[axis] >= 0]
+        unit, lo, hi, length = (spec, 1, None, None) if isinstance(spec, int) else (tuple(spec) + (None,))[:4]
+        cut = [dims(t)[m[axis]] for t, m in zip(tensors, node.info["input_maps"]) if m[axis] >= 0] or ([length] if length else [])
         if not cut:
             raise ValueError(f"node {node.graph_idx} ({node.name}): grid axis {axis} is changeable but no tensor map uses it")
         units = min(d // unit for d in cut)

@@ -118,29 +118,17 @@ __device__ __forceinline__ float exp2_int(int e) {
   return __uint_as_float((uint32_t)e << 23);
 }
 
-// One warp quantizes N indexer vectors of 128 values. Lane l holds dims
-// 4 l .. 4 l + 3 of vector j in v[j]. For each vector, the function does these
-// steps. It runs the steps of the N vectors in parallel.
-//   1. Lanes l < 16 rotate the RoPE pairs 2 l and 2 l + 1 (dims [0, 64)) with
-//      (c0, s0) and (c1, s1).
-//   2. All lanes find the UE8M0 exponent e[j] of the 128 values.
-//   3. Each lane packs its 4 e4m3 bytes into the u32 q[j].
+// One warp quantizes N indexer vectors of 128 values to e4m3 with a UE8M0
+// scale each. Lane l holds dims 4 l .. 4 l + 3 of vector j in v[j]. All lanes
+// find the UE8M0 exponent e[j] of the 128 values (the scale is 2^(e - 127)).
+// Each lane packs its 4 e4m3 bytes into the u32 q[j]. The steps of the N
+// vectors run in parallel.
 template <int N>
-__device__ __forceinline__ void rope_quant128(float (&v)[N][4],
-                                              int lane,
-                                              float c0,
-                                              float s0,
-                                              float c1,
-                                              float s1,
-                                              uint32_t (&q)[N],
-                                              int (&e)[N]) {
+__device__ __forceinline__ void
+    quant128(float const (&v)[N][4], uint32_t (&q)[N], int (&e)[N]) {
   float amax[N];
 #pragma unroll
   for (int j = 0; j < N; j++) {
-    if (lane < 16) {
-      rope_pair(v[j][0], v[j][1], c0, s0);
-      rope_pair(v[j][2], v[j][3], c1, s1);
-    }
     amax[j] = fmaxf(fmaxf(fabsf(v[j][0]), fabsf(v[j][1])),
                     fmaxf(fabsf(v[j][2]), fabsf(v[j][3])));
   }
@@ -159,6 +147,70 @@ __device__ __forceinline__ void rope_quant128(float (&v)[N][4],
            ((uint32_t)cvt_e4m3_nv(v[j][1] * inv) << 8) |
            ((uint32_t)cvt_e4m3_nv(v[j][2] * inv) << 16) |
            ((uint32_t)cvt_e4m3_nv(v[j][3] * inv) << 24);
+  }
+}
+// The same after RoPE (GLM-5.3 / 5.2): lanes l < 16 first rotate the RoPE
+// pairs 2 l and 2 l + 1 (dims [0, 64)) with (c0, s0) and (c1, s1).
+template <int N>
+__device__ __forceinline__ void rope_quant128(float (&v)[N][4],
+                                              int lane,
+                                              float c0,
+                                              float s0,
+                                              float c1,
+                                              float s1,
+                                              uint32_t (&q)[N],
+                                              int (&e)[N]) {
+  if (lane < 16) {
+#pragma unroll
+    for (int j = 0; j < N; j++) {
+      rope_pair(v[j][0], v[j][1], c0, s0);
+      rope_pair(v[j][2], v[j][3], c1, s1);
+    }
+  }
+  quant128<N>(v, q, e);
+}
+// The normalized Hadamard transform of N vectors of 128 values in one warp
+// (GLM-5.3-Flash: the indexer query and the pooled key). Lane l holds dims
+// 4 l .. 4 l + 3 of vector j in v[j]. The butterfly stages run in SGLang's
+// order (kpool_fp8_index.py _hadamard128): strides 1 and 2 in the lane, then
+// strides 4 .. 64 across lanes (lane xor 1 .. 16), then the scale
+// 128^-1/2 (fp32). Each stage maps the pair (a, b) = (x[i], x[i + stride])
+// to (a + b, a - b), so the fp32 sums are the same as SGLang's.
+template <int N>
+__device__ __forceinline__ void hadamard128(float (&v)[N][4], int lane) {
+#pragma unroll
+  for (int j = 0; j < N; j++) {
+    float a = v[j][0], b = v[j][1];
+    v[j][0] = a + b;
+    v[j][1] = a - b;
+    a = v[j][2], b = v[j][3];
+    v[j][2] = a + b;
+    v[j][3] = a - b;
+    a = v[j][0], b = v[j][2];
+    v[j][0] = a + b;
+    v[j][2] = a - b;
+    a = v[j][1], b = v[j][3];
+    v[j][1] = a + b;
+    v[j][3] = a - b;
+  }
+#pragma unroll
+  for (int m = 1; m < 32; m <<= 1) {
+    bool const hi = (lane & m) != 0; // this lane holds b of each pair
+#pragma unroll
+    for (int j = 0; j < N; j++) {
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        float const o = __shfl_xor_sync(0xffffffffu, v[j][i], m);
+        v[j][i] = hi ? o - v[j][i] : v[j][i] + o;
+      }
+    }
+  }
+#pragma unroll
+  for (int j = 0; j < N; j++) {
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      v[j][i] *= 0.08838834764831845f;
+    }
   }
 }
 // Lanes l < 16 load the cos and sin of the RoPE pairs 2 l and 2 l + 1 at
@@ -286,25 +338,31 @@ __device__ __forceinline__ float block_sum(float v) {
 // The 256 threads compute v[c] = x[c] * rrms * gamma[c] for c < LEN, with
 // rrms = rsqrt(mean(x^2) + eps). x[c] is column c0 + c of token t of a
 // COMBINE_ADD GEMM output (fx [T][N]), rounded to bf16. The math is fp32.
-// Thread i takes the PER = LEN / 256 columns PER i .. PER i + PER - 1 and
-// returns them in v[0 .. PER). PER is 2, 4 or 8. The thread loads its columns
-// with one or two vector loads. Thus its loads go to L2 at the same time. N
-// and c0 must be multiples of PER (aligned vector loads).
-template <int LEN>
+// Thread i takes the PER columns PER i .. PER i + PER - 1 and returns them in
+// v[0 .. PER). PER is 2, 4 or 8 (default LEN / 256). With LEN / PER < 256
+// (GLM-5.3-Flash q_c: LEN 1536, PER 8), threads LEN / PER .. 255 take no
+// column and return zeros. The thread loads its columns with one or two
+// vector loads. Thus its loads go to L2 at the same time. N and c0 must be
+// multiples of PER (aligned vector loads).
+template <int LEN, int PER = LEN / 256>
 __device__ __forceinline__ void fx_rmsnorm_vals(unsigned long long const *fx,
                                                 int N,
                                                 int t,
                                                 int c0,
                                                 float const *gamma,
                                                 float eps,
-                                                float (&v)[LEN / 256]) {
-  constexpr int PER = LEN / 256;
-  static_assert(LEN % 256 == 0 && (PER == 2 || PER == 4 || PER == 8),
-                "fx_rmsnorm: LEN = 512, 1024 or 2048");
+                                                float (&v)[PER]) {
+  static_assert((PER == 2 || PER == 4 || PER == 8) && LEN % PER == 0 &&
+                    LEN / PER <= 256,
+                "fx_rmsnorm: 2, 4 or 8 columns for each thread, at most 256 "
+                "threads");
+  bool const active = LEN / PER == 256 || threadIdx.x < LEN / PER;
   int const cb = PER * threadIdx.x; // the first column of the thread
   unsigned long long const *src = fx + (size_t)t * N + c0 + cb;
-  unsigned long long raw[PER];
-  if constexpr (PER == 2) {
+  unsigned long long raw[PER] = {};
+  if (!active) {
+    // no column: zeros (raw = 0 is fixed point 0)
+  } else if constexpr (PER == 2) {
     asm volatile("ld.global.cg.v2.u64 {%0, %1}, [%2];"
                  : "=l"(raw[0]), "=l"(raw[1])
                  : "l"(src)
@@ -312,13 +370,11 @@ __device__ __forceinline__ void fx_rmsnorm_vals(unsigned long long const *fx,
   } else {
 #pragma unroll
     for (int i = 0; i < PER; i += 4) {
-      asm volatile("ld.global.cg.v4.u64 {%0, %1, %2, %3}, [%4];"
-                   : "=l"(raw[i]),
-                     "=l"(raw[i + 1]),
-                     "=l"(raw[i + 2]),
-                     "=l"(raw[i + 3])
-                   : "l"(src + i)
-                   : "memory");
+      asm volatile(
+          "ld.global.cg.v4.u64 {%0, %1, %2, %3}, [%4];"
+          : "=l"(raw[i]), "=l"(raw[i + 1]), "=l"(raw[i + 2]), "=l"(raw[i + 3])
+          : "l"(src + i)
+          : "memory");
     }
   }
   float ss = 0.f;
@@ -328,6 +384,9 @@ __device__ __forceinline__ void fx_rmsnorm_vals(unsigned long long const *fx,
     ss += v[i] * v[i];
   }
   float const rrms = rsqrtf(block_sum(ss) / LEN + eps);
+  if (!active) {
+    return;
+  }
 #pragma unroll
   for (int i = 0; i < PER; i += 2) {
     float2 const gm = *reinterpret_cast<float2 const *>(gamma + cb + i);

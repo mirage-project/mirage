@@ -282,6 +282,12 @@ enum TaskType {
   TASK_DSA_MLA_MERGE_SM100 = 526,
   // Compute the MLA value up-projection o_lat W_UV (tasks/dsa_o_absorb.cuh).
   TASK_DSA_O_ABSORB_SM100 = 527,
+  // Update the pooled DSA indexer keys of GLM-5.3-Flash: the tail ring, and
+  // the pool of 4 keys it closes (tasks/dsa_kpool_update.cuh).
+  TASK_DSA_KPOOL_UPDATE_SM100 = 528,
+  // Turn a COMBINE_ADD GEMM output (int64 fixed point) into bf16, per column
+  // block (tasks/fx_bf16.cuh).
+  TASK_FX_BF16_SM100 = 529,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 
