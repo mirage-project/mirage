@@ -29,12 +29,7 @@ namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
 
-// Use PIPE_MAX=2 for sm89 (Ada Lovelace) to avoid out of shared memory
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 890)
-constexpr int DEFAULT_PIPE_MAX = 2;
-#else
 constexpr int DEFAULT_PIPE_MAX = 3;
-#endif
 
 // Modified from
 // https://github.com/reed-lau/cute-gemm/blob/main/gemm-multi-stage.cu
@@ -66,6 +61,24 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
   constexpr int kSmemLayoutCBatch = 1;
   // TODO: Verify this is efficient
   // constexpr int PIPE_DEPTH = OUTPUT_SIZE < 256 ? 5 : PIPE_MAX;
+  // Drop to two stages when PIPE_MAX stages (plus 128 bytes of alignment
+  // padding) do not fit in the worker's dynamic shared memory, e.g. the
+  // 99 KB budget on sm86/sm89 with a 128-wide output tile.
+  constexpr int PIPE_DEPTH =
+      config::GemmConfig<T,
+                         BATCH_SIZE,
+                         OUTPUT_SIZE,
+                         REDUCTION_SIZE,
+                         16,
+                         128,
+                         TILE_SIZE,
+                         PIPE_MAX,
+                         kSmemLayoutCBatch,
+                         float>::kShmSize +
+                  128 <=
+              mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE
+          ? PIPE_MAX
+          : 2;
   using Config = config::GemmConfig<T,
                                     BATCH_SIZE,
                                     OUTPUT_SIZE,
@@ -73,9 +86,12 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
                                     16,
                                     128,
                                     TILE_SIZE,
-                                    PIPE_MAX,
+                                    PIPE_DEPTH,
                                     kSmemLayoutCBatch,
                                     float>;
+  static_assert(Config::kShmSize + 128 <=
+                    mirage::runtime::MAX_DYNAMIC_SHARED_MEMORY_SIZE,
+                "linear_kernel shared memory exceeds the dynamic budget");
   using namespace cute;
   // if (threadIdx.x == 0) {
   //   printf("SmemLayoutAtom: \n"); print(typename Config::SmemLayoutAtom{});
