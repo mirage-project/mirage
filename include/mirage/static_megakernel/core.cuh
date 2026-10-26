@@ -17,6 +17,23 @@
 // layer's order, then per input the node that writes it (StaticNode with that
 // node's params as v[]; StaticNode<0, 0, 0>: a graph input).
 #pragma once
+// The generated KDA layer (mpk-kernels tools/gen_kernels.py) defines
+// STATIC_RESET_IN_KERNEL, STATIC_RESET_PARITY, STATIC_PDL_PREFILL,
+// STATIC_PDL_TRIGGER 1 and STATIC_NOWAIT_NODE (kernel_begin below); the MoE
+// layer STATIC_RESET_IN_KERNEL only.
+#ifndef STATIC_NOWAIT_NODE
+#define STATIC_NOWAIT_NODE -1
+#endif
+#if defined(STATIC_PDL_PREFILL) && !defined(STATIC_RESET_PARITY)
+#error                                                                         \
+    "STATIC_PDL_PREFILL: a STATIC_RESET_PARITY build (kernel_begin issues the prefill at entry)"
+#endif
+// MPK_TASK_TIMES (a timing build, G::tt): also the tasks' stage stamps
+// (STATIC_TIMING_BUILD's KernelLocals::stage_stamps)
+#if defined(MPK_TASK_TIMES) && !defined(STATIC_TIMING_BUILD)
+#define STATIC_TIMING_BUILD
+#endif
+#define MPK_TT_WORDS 32
 #include "config.cuh"
 #include "runtime.cuh"
 #include <cstdint>
@@ -67,8 +84,14 @@ struct G {
   unsigned *gen_ptr; // the launch number in device memory (gen unused): every
                      // SM reads it + 1 at the start, SM 0 stores it back once
                      // all SMs have (a CUDA graph replay gets a new one)
-  unsigned *arrive;  // SMs done with the resets, over all launches (only grows)
+  unsigned *arrive;  // [0] SMs done with the resets, over all launches (only
+                     // grows); [1] (STATIC_RESET_PARITY) CTAs that read the
+                     // launch number, over all launches
   ResetList resets;  // the buffers kernel_begin resets (the host's list)
+#ifdef STATIC_RESET_PARITY
+  ResetList resets1; // STATIC_RESET_PARITY: the same buffers' second copies
+                     // (the parity-1 launches' set)
+#endif
 #endif
   unsigned char *mc, *rv; // the exchange region: multicast address (GPUS > 1),
                           // this GPU's copy (2 sets)
@@ -76,6 +99,17 @@ struct G {
                      // host (config.cuh STAMP_*)
   long long *start_barrier; // [1] written by every SM once the start barrier is
                             // passed: the last SM's time remains
+#ifdef MPK_TASK_TIMES
+  // a timing build (STATIC_RESET_IN_KERNEL): per launch, record gen % tt_n,
+  // per SM MPK_TT_WORDS globaltimer words: [0] entry, [1] start barrier
+  // passed, [2] griddepcontrol.wait returned, [3] end, then per list entry e
+  // < 4: [4 + 5e] node | gen << 8, [5 + 5e] start, [6 + 5e] thread 0 left it,
+  // [7 + 5e], [8 + 5e] the task's 2 stage stamps (KernelLocals::stage_stamps:
+  // e.g. a GEMM's first loads issued / first stage landed, *_DIAG_STAMPS);
+  // [24], [25] clock64 at [1] and [3] (the SM clock)
+  unsigned long long *tt;
+  int tt_n;
+#endif
 };
 
 // the exchange region's set of this launch: its launch number's parity, set at
@@ -102,6 +136,12 @@ __host__ __device__ constexpr int param_at() {
                 "the node has fewer params");
   return PARAMS::v[I];
 }
+// params[I] when the node has it, else `dflt` (an optional param, e.g. a
+// variant only some nodes of a task type declare)
+template <class PARAMS, int I, int dflt = 0>
+__host__ __device__ constexpr int param_or() {
+  return sizeof(PARAMS::v) / sizeof(int) > I + 1 ? PARAMS::v[I] : dflt;
+}
 
 // entry I of a node's buffer slots or map slots (StaticBufSlots<S...>::v,
 // StaticMapSlots<S...>::v hold S..., -1)
@@ -126,6 +166,9 @@ enum Combine {
   COMBINE_STORE =
       2, // fp32 out[t][N] = v[t], plain stores (one K part), then the node's
          // counter [0] += 1 per task; the reader waits for all tasks
+  COMBINE_PUSH = 3, // bf16 [GPUS][T][N] in the exchange region (the node's
+                    // buffer): each tile pushes its columns of every token into
+                    // slot `rank` of every GPU (multicast), no separate send
 };
 
 // 8 fp32 values -> one 16-B bf16 vector
@@ -211,18 +254,116 @@ struct KernelLocals {
       nullptr; // this list entry's 2 GEMM stage stamps (set by the generated
                // loop)
 #endif
+#if defined(STATIC_RESET_PARITY)
+  unsigned gen = 0; // this launch's number (kernel_end: SM 0 stores it once
+                    // every CTA has read it)
+#endif
+#ifdef STATIC_PDL_PREFILL
+  int pre_n = 0, pre_node = -1, pre_x = 0,
+      pre_y = 0; // kernel_begin's PDL prefill (gemm_tile.cuh prefill_gemm_tile)
+#endif
+  int first_node = -1; // the SM's first list entry's node (the generated kernel
+                       // sets it; STATIC_NOWAIT_NODE)
+#ifdef MPK_TASK_TIMES
+  unsigned long long *tt = nullptr; // this SM's record row (thread 0; G::tt)
+  unsigned long long tt_gen = 0;
+#endif
 };
 
 // before the task loop: shared memory, barriers, the resets
 // (STATIC_RESET_IN_KERNEL) or the start barrier over the GPUs, TMEM
-__device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
+// PRE (STATIC_RESET_PARITY): called by every thread right after the barriers
+// are made, before the resets and griddepcontrol.wait (STATIC_PDL_PREFILL: the
+// generated kernel's prefill of the SM's first GEMM tile)
+template <class PRE>
+__device__ __forceinline__ void
+    kernel_begin(G const &g, KernelLocals &L, PRE const &pre) {
   extern __shared__ __align__(1024) char smem_raw[];
   L.base = (su32(smem_raw) + 1023u) & ~1023u;
   L.sm = smem_raw + (L.base - su32(smem_raw));
   L.sm_id = blockIdx.x;
   int const sm_id = L.sm_id;
   cta_prologue(L.sm);
-#ifdef STATIC_RESET_IN_KERNEL
+#if defined(STATIC_RESET_PARITY)
+  // no start barrier: the prefill's TMAs right after the ring's barriers are
+  // made, before anything else (the launch number's load, the resets), as
+  // SGLang's projection GEMM issues its weight loads at its start (10-10). The
+  // barrier first: cta_prologue's ring barriers (rt, thread 0) visible to the
+  // issuing thread (gemm_tile.cuh PREFILL_THREAD)
+  __syncthreads();
+  pre();
+  // STATIC_RESET_PARITY (10-10, a STATIC_RESET_IN_KERNEL build): no start
+  // barrier and nothing at the end. The buffers of the host's reset list have
+  // two copies; a launch of parity p (its number's lowest bit) uses copy p (the
+  // generated kernel picks its G: g or g_par1) and resets copy 1 - p for the
+  // next launch, spread over its CTAs, while it runs (nothing of this launch
+  // touches copy 1 - p; the launch before, which used it, has ended). The
+  // launch number: SM 0 stores it at its end once every CTA has read it
+  // (G::arrive[1])
+  __shared__ unsigned gen_s;
+  if (threadIdx.x == 0) {
+    if constexpr (PDL_TRIGGER == 1) {
+      asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    }
+    g.stamps[sm_id * NSTAMP + STAMP_START] = gtime();
+    gen_s = *(unsigned const volatile *)g.gen_ptr + 1;
+    dbuf_par = gen_s & 1u;
+    atomicAdd(g.arrive + 1, 1u); // this CTA has the launch number (kernel_end:
+                                 // SM 0 stores the next one after all did)
+  }
+  __syncthreads();
+  unsigned const gen = gen_s;
+  L.gen = gen;
+#ifdef MPK_TASK_TIMES
+  if (g.tt) {
+    L.tt = g.tt + ((size_t)(gen % (unsigned)g.tt_n) * gridDim.x + sm_id) *
+                      MPK_TT_WORDS;
+    L.tt_gen = gen;
+    if (threadIdx.x == 0) {
+      L.tt[0] = (unsigned long long)g.stamps[sm_id * NSTAMP + STAMP_START];
+    }
+  }
+#endif
+  {
+    ResetList const &rl =
+        (gen & 1u) ? g.resets
+                   : g.resets1; // the next launch's copy (parity 1 - p)
+    for (int i = 0; i < rl.cnt; i++) {
+      unsigned const w = rl.v[i] * 0x01010101u;
+      uint4 const val = make_uint4(w, w, w, w);
+      uint4 *const q = reinterpret_cast<uint4 *>(rl.p[i]);
+      size_t const n16 = rl.n[i] / 16;
+      for (size_t k = (size_t)sm_id * blockDim.x + threadIdx.x; k < n16;
+           k += (size_t)gridDim.x * blockDim.x) {
+        q[k] = val;
+      }
+    }
+  }
+  L.tb = tmem_alloc_512(); // its __syncthreads also publishes rt
+  if (threadIdx.x == 0) {
+    // STATIC_NOWAIT_NODE = n (10-10): a CTA whose first task is node n (the
+    // recurrence: it reads nothing the kernel before writes, only this kernel's
+    // projection by polling, and pools / weights as SGLang's kda_decode_mtp
+    // does before its wait) skips the wait, so its state load and dry pass
+    // start at its entry, ~3.5 us before the kernel before ends
+    if (STATIC_NOWAIT_NODE < 0 || L.first_node != STATIC_NOWAIT_NODE) {
+      asm volatile("griddepcontrol.wait;" ::
+                       : "memory"); // PDL: from here on the previous kernel's
+                                    // output is read
+    }
+    long long const now = gtime();
+    *g.start_barrier = now;
+#ifdef MPK_TASK_TIMES
+    if (L.tt) {
+      L.tt[1] =
+          now; // the reference of tt_summary: here this SM's wait returned
+      L.tt[2] = now;
+      L.tt[24] = clock64();
+    }
+#endif
+  }
+  __syncthreads();
+#elif defined(STATIC_RESET_IN_KERNEL)
   // the resets left to the start (the host's list: buffers only this GPU
   // writes; the others are re-armed by their readers, REARM), 16-B stores
   // spread over all SMs, each SM its own stamp row. Every SM waits until every
@@ -248,6 +389,13 @@ __device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
   }
   __syncthreads();
   unsigned const gen = gen_s;
+#ifdef MPK_TASK_TIMES
+  if (g.tt) { // every thread: the stage stamps are written by various threads
+    L.tt = g.tt + ((size_t)(gen % (unsigned)g.tt_n) * gridDim.x + sm_id) *
+                      MPK_TT_WORDS;
+    L.tt_gen = gen;
+  }
+#endif
   for (int i = 0; i < g.resets.cnt; i++) {
     unsigned const w = g.resets.v[i] * 0x01010101u;
     uint4 const val = make_uint4(w, w, w, w);
@@ -264,13 +412,20 @@ __device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
   __syncthreads();
   if (threadIdx.x == 0) {
     g.stamps[sm_id * NSTAMP + STAMP_START] = t_start;
-    cnt_add(g.arrive, 1u); // release: this SM's resets (all its threads': the
-                           // barrier above) before its arrival
+    cnt_add(g.arrive, 1u); // release: this SM's resets (all its threads':
+                           // the barrier above) before its arrival
     while ((int)(cnt_ld(g.arrive) - gen * gridDim.x) < 0) {
     } // acquire: every SM of this launch has arrived (wrap-safe)
     if (sm_id == 0) {
       *g.gen_ptr = gen; // read by the next launch (after this one ends)
     }
+#ifdef MPK_TASK_TIMES
+    if (L.tt) {
+      L.tt[0] = (unsigned long long)t_start;
+      L.tt[1] = gtime();
+      L.tt[24] = clock64(); // with [25] at the end: the SM clock (cycles / ns)
+    }
+#endif
 #else
   // without STATIC_RESET_IN_KERNEL: the host resets the buffers and starts all
   // GPUs together; the start barrier lines the GPUs up (the layer's measured
@@ -298,29 +453,74 @@ __device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
       }
     }
 #endif
-    *g.start_barrier = gtime();
-  }
-  L.tb = tmem_alloc_512(); // its __syncthreads also publishes rt
-#ifdef STATIC_RESET_IN_KERNEL
-  if (threadIdx.x == 0) {
-    asm volatile("griddepcontrol.wait;" ::
-                     : "memory"); // PDL: from here on the previous kernel's
-                                  // output is read
-  }
-  __syncthreads();
+#if !defined(STATIC_RESET_PARITY)
+  *g.start_barrier = gtime();
+}
+L.tb = tmem_alloc_512(); // its __syncthreads also publishes rt
 #endif
-  L.gl = 0;
-  L.gi0 = 0;
-  L.gi1 = 0;
-  L.wt = 0;
-  L.ring_relaid = false;
+#if defined(STATIC_RESET_IN_KERNEL) && !defined(STATIC_RESET_PARITY)
+if (threadIdx.x == 0) {
+  asm volatile("griddepcontrol.wait;" ::
+                   : "memory"); // PDL: from here on the previous kernel's
+                                // output is read
+#ifdef MPK_TASK_TIMES
+  if (L.tt) {
+    L.tt[2] = gtime();
+  }
+#endif
+}
+__syncthreads();
+#endif
+L.gl = 0;
+L.gi0 = 0;
+L.gi1 = 0;
+L.wt = 0;
+L.ring_relaid = false;
+}
+
+#ifdef MPK_TASK_TIMES
+// the generated task loop's hooks (gen_kernels.py inserts them): list entry ti
+// of node `node` starts / thread 0 left it
+#define MPK_TT0(ti, node)                                                      \
+  L.stage_stamps = (L.tt && (ti) < 4) ? L.tt + 7 + 5 * (ti) : nullptr;         \
+  if (threadIdx.x == 0 && L.tt && (ti) < 4) {                                  \
+    L.tt[4 + 5 * (ti)] = (unsigned long long)(node) | (L.tt_gen << 8);         \
+    L.tt[5 + 5 * (ti)] = static_mk::gtime();                                   \
+  }
+#define MPK_TT1(ti)                                                            \
+  if (threadIdx.x == 0 && L.tt && (ti) < 4) {                                  \
+    L.tt[6 + 5 * (ti)] = static_mk::gtime();                                   \
+  }
+#else
+#define MPK_TT0(ti, node)
+#define MPK_TT1(ti)
+#endif
+
+__device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
+  kernel_begin(g, L, [] {});
 }
 
 // after the task loop
 __device__ __forceinline__ void kernel_end(G const &g, KernelLocals &L) {
   __syncthreads();
+#if defined(STATIC_RESET_PARITY)
+  if (L.sm_id == 0 &&
+      threadIdx.x ==
+          0) { // the next launch's number, once every CTA of this one read it
+    while ((int)(*(unsigned const volatile *)(g.arrive + 1) -
+                 L.gen * gridDim.x) < 0) {
+    }
+    *(unsigned volatile *)g.gen_ptr = L.gen;
+  }
+#endif
   if (threadIdx.x == 0) {
     g.stamps[L.sm_id * NSTAMP + STAMP_END] = gtime();
+#ifdef MPK_TASK_TIMES
+    if (L.tt) {
+      L.tt[3] = gtime();
+      L.tt[25] = clock64();
+    }
+#endif
   }
   tmem_dealloc_512(L.tb);
 }

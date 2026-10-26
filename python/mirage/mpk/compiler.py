@@ -1,7 +1,9 @@
 """Plan -> one schedule file per GPU (schedule_gpu<g>.json), which static_schedule.py turns into layer.cu.
 
 A plan:  {"grids": {graph_idx: grid},                     e.g. {26: (7, 14, 1), 28: (28, 8, 1), 30: (12, 8, 1)}
-          "lists": per GPU, per SM, the ordered (graph_idx, grid position) of the SM's tasks}
+          "lists": per GPU, per SM, the ordered (graph_idx, grid position) of the SM's tasks,
+          optional: "cluster_launch": false (the plain launch), "dry": {graph_idx: false} (no dry pass for the node),
+          "variants": {graph_idx: {name: value}} (the node's template variant, candidate_variants)}
 Nodes not in "grids" keep the grid their layer method gave them. A one_task_per_sm node's task x must be in SM x's list.
 
 compile_plan:
@@ -94,6 +96,40 @@ def apply_grids(pk, grids: Dict[int, tuple]) -> List[Node]:
         if grid not in candidate_grids(n):
             raise ValueError(f"node {n.graph_idx} ({n.name}): grid {grid} is not one of {candidate_grids(n)}")
         pk.kn_graph.regrid(n.graph_idx, grid, n.params)
+    return graph_nodes(pk)
+
+
+def candidate_variants(node: Node) -> List[Dict[str, int]]:
+    """The template variants the compiler may give the node: every combination of the values its layer declared (info
+    "variants": {name: (params index, [values])}); [{}] when it declared none. gemm_tile with {"stages": (4, [3, 5])} ->
+    [{"stages": 3}, {"stages": 5}]."""
+    declared = node.info.get("variants") or {}
+    names = sorted(declared)
+    return [dict(zip(names, combo)) for combo in itertools.product(*(declared[k][1] for k in names))] or [{}]
+
+
+def params_with(node: Node, variant: Optional[Dict[str, int]]) -> List[int]:
+    """The node's params with a variant's values at their params index; the declared variants a variant does not name get their
+    default (the layer's value, info "variant_defaults")."""
+    params = list(node.params)
+    declared = node.info.get("variants") or {}
+    for name, (index, values) in declared.items():
+        v = (variant or {}).get(name, node.info["variant_defaults"][name])
+        if v not in values and v != node.info["variant_defaults"][name]:
+            raise ValueError(f"node {node.graph_idx} ({node.name}): variant {name} = {v} is not one of {values}")
+        params[index] = v
+    unknown = set(variant or {}) - set(declared)
+    if unknown:
+        raise ValueError(f"node {node.graph_idx} ({node.name}): no variants {sorted(unknown)} (declared {sorted(declared)})")
+    return params
+
+
+def apply_variants(pk, variants: Dict[int, Dict[str, int]]) -> List[Node]:
+    """Every node that declared variants gets the plan's variant (or its defaults): its params changed in the graph
+    (kn_graph.regrid, grid unchanged). Returns the nodes as they are then."""
+    for n in graph_nodes(pk):
+        if n.info.get("variants"):
+            pk.kn_graph.regrid(n.graph_idx, n.grid, params_with(n, variants.get(n.graph_idx)))
     return graph_nodes(pk)
 
 
@@ -300,9 +336,38 @@ def pair_clusters(nodes: List[Node], paired: set, plan_lists: List[list], num_sm
     return lists
 
 
-def node_table(nodes: List[Node]) -> Dict[str, dict]:
+def producer_grids(n: Node, nodes: List[Node], override: Optional[Tuple[int, tuple]] = None) -> List[Optional[tuple]]:
+    """Per input of n, the grid of the node that writes it (None: a graph input); override = (graph_idx, grid) replaces one
+    producer's grid. Route with override (26, (7, 14, 1)): [(7, 14, 1), None]."""
+    grids = []
+    for t in n.inputs:
+        p = producer_of(t, nodes)
+        if p is None:
+            grids.append(None)
+        elif override and p.graph_idx == override[0]:
+            grids.append(override[1])
+        else:
+            grids.append(p.grid)
+    return grids
+
+
+def cost_key(node: Node, grid: tuple, producer_grids: Optional[list] = None) -> dict:
+    """The key of a task's cost record: what decides its time, read from the node as its layer declared it: its params, its tensors'
+    shapes, its grid, and the grids of the nodes that write the inputs its layer lists in cost_inputs (the inputs whose split
+    changes its time; none: no "inputs" field; producer_grids None: none either, as for a pool). The record's task type is the
+    node's name. topk_route after the router in 14 K parts: {"params": [896, 16], "shapes": [[8, 896], [896], [8, 16]],
+    "grid": [8, 1, 1], "inputs": {"0": [7, 14, 1]}}."""
+    key = {"params": list(node.params), "shapes": [list(dims(t)) for t in node.inputs + node.outputs], "grid": list(grid)}
+    which = node.info["cost_inputs"]
+    if producer_grids is not None and which:
+        key["inputs"] = {str(i): list(producer_grids[i]) if producer_grids[i] is not None else None for i in which}
+    return key
+
+
+def node_table(nodes: List[Node], dry_off: frozenset = frozenset()) -> Dict[str, dict]:
     """What the kernel's case for each node needs: its name, grid, params, its first counter and its output buffer slot (-1:
-    none; static_megakernel._add_node), its own buffer and map slots and whether it has a dry pass, and per input the node that writes it (grid,
+    none; static_megakernel._add_node), its own buffer and map slots and whether it runs a dry pass (its layer's `dry`, unless the
+    node is in dry_off: the plan turned it off), and per input the node that writes it (grid,
     counter, buffer slot, params; None for a graph input). topk_route after the router in 14 K parts: {"name": "topk_route",
     "grid": [8, 1, 1], "params": [896, 16], "counter": -1, "buf": 2, "inputs": [{"grid": [7, 14, 1], "counter": -1, "buf": 0,
     "params": [0, 7168, 896, 0]}, None], "buf_slots": [1], "map_slots": [], "dry": True}."""
@@ -315,8 +380,28 @@ def node_table(nodes: List[Node]) -> Dict[str, dict]:
                                                "buf": p.info["buf"], "params": list(p.params)} if p else None
                                               for p in producers],
                                    "buf_slots": list(n.info["buf_slots"]), "map_slots": list(n.info["map_slots"]),
-                                   "dry": n.info["dry"]}
+                                   "dry": n.info["dry"] and n.graph_idx not in dry_off}
     return table
+
+
+def node_view(pk, nodes: List[Node]) -> Dict[str, dict]:
+    """What the schedule file adds for readers other than the code generator (plan_viewer.html, cost lookups): per node its tensors
+    (name, dtype, dims, input map: which dimension each grid axis cuts; io "in" / "out"), per input the node that writes it (its
+    graph index; None: a graph input), its cost key (cost_key with the producers'
+    grids: the key of its cost records; a one_task_per_sm node also its pool key, without them) and how its tasks are placed."""
+    view = {}
+    for n in nodes:
+        tensors = [{"name": tname(pk, t), "dtype": str(t.dtype).replace("mirage.", ""), "dims": dims(t), "map": list(m),
+                    "io": "in" if i < len(n.inputs) else "out"}
+                   for i, (t, m) in enumerate(zip(n.inputs + n.outputs, n.info["input_maps"]))]
+        v = {"tensors": tensors, "producers": [p.graph_idx if p else None for p in (producer_of(t, nodes) for t in n.inputs)],
+             "cost_key": cost_key(n, n.grid, producer_grids(n, nodes)),
+             "one_task_per_sm": n.info["one_task_per_sm"], "rows_split_over_gpus": n.info["rows_split_over_gpus"],
+             "concurrent_along_axis": n.info["concurrent_along_axis"]}
+        if n.info["one_task_per_sm"]:
+            v["pool_key"] = cost_key(n, n.grid)
+        view[str(n.graph_idx)] = v
+    return view
 
 
 def compile_plan(pk, plan: dict, out_dir: str) -> Tuple[List[str], dict]:
@@ -327,22 +412,29 @@ def compile_plan(pk, plan: dict, out_dir: str) -> Tuple[List[str], dict]:
     if len(plan["lists"]) != num_gpus:
         raise ValueError(f"the plan has lists for {len(plan['lists'])} GPUs, compiling for {num_gpus}")
     os.makedirs(out_dir, exist_ok=True)
-    nodes = apply_grids(pk, {int(k): v for k, v in plan["grids"].items()})
+    apply_grids(pk, {int(k): v for k, v in plan["grids"].items()})
+    nodes = apply_variants(pk, {int(k): v for k, v in (plan.get("variants") or {}).items()})
     # the launch mode: clusters of 2 when every pair of a node that can pair (can_pair: sum_rmsnorm with 2 tasks per token) fits on
     # one cluster after renumbering the lists (pair_clusters); those nodes then take their cluster_pair_params. Otherwise (or
     # plan "cluster_launch": false) the plain launch, and the nodes keep their params (sum_rmsnorm: the swap through G).
     paired = {n.graph_idx for n in nodes if can_pair(n)}
     plan_lists, cluster_size = plan["lists"], 1
     if paired and plan.get("cluster_launch", True):
-        try:
-            plan_lists = [pair_clusters(nodes, paired, plan["lists"][gpu], num_sms, gpu) for gpu in range(num_gpus)]
-            cluster_size = 2
+        try:   # nothing changes unless every GPU's pairs fit
+            paired_lists = [pair_clusters(nodes, paired, plan["lists"][gpu], num_sms, gpu) for gpu in range(num_gpus)]
+            plan_lists, cluster_size = paired_lists, 2
             for n in nodes:
-                if n.graph_idx in paired:
-                    n.params = list(n.info["cluster_pair_params"])
+                if n.graph_idx in paired:   # the pair params, with the node's template variant choices kept
+                    pp = list(n.info["cluster_pair_params"])
+                    for idx, _ in (n.info.get("variants") or {}).values():
+                        pp[idx] = n.params[idx]
+                    n.params = pp
         except ValueError as e:
             print(f"plain launch: the cluster pairs do not fit ({e})", flush=True)
-    table = node_table(nodes)
+    # plan "dry": {graph_idx: false} turns a node's dry pass off (the post-processing pass that chooses it: loop/passes.py)
+    table = node_table(nodes, frozenset(int(k) for k, v in (plan.get("dry") or {}).items() if not v))
+    for k, v in node_view(pk, nodes).items():   # tensors, cost key, placement: for plan_viewer.html and cost lookups
+        table[k].update(v)
     info = {"grids": {f"{n.name}#{n.graph_idx}": list(n.grid) for n in nodes}, "cluster_size": cluster_size}
     paths = []
     for gpu in range(num_gpus):
@@ -365,6 +457,10 @@ def write_plan_file(path: str, plan: dict) -> None:
            "lists": [[[[node, list(pos)] for node, pos in sm_list] for sm_list in gpu_lists] for gpu_lists in plan["lists"]]}
     if "cluster_launch" in plan:   # optional: false = the plain launch even when the cluster pairs fit (compile_plan)
         doc["cluster_launch"] = bool(plan["cluster_launch"])
+    if plan.get("dry"):            # optional: {graph_idx: false} = no dry pass for that node (compile_plan)
+        doc["dry"] = {str(k): bool(v) for k, v in plan["dry"].items()}
+    if plan.get("variants"):       # optional: {graph_idx: {name: value}} = the node's template variant (compile_plan)
+        doc["variants"] = {str(k): dict(v) for k, v in plan["variants"].items()}
     with open(path, "w") as f:
         json.dump(doc, f)
 
@@ -376,4 +472,8 @@ def plan_from_file(path: str) -> dict:
             "lists": [[[(node, tuple(pos)) for node, pos in sm_list] for sm_list in gpu_lists] for gpu_lists in doc["lists"]]}
     if "cluster_launch" in doc:
         plan["cluster_launch"] = bool(doc["cluster_launch"])
+    if doc.get("dry"):
+        plan["dry"] = {int(k): bool(v) for k, v in doc["dry"].items()}
+    if doc.get("variants"):
+        plan["variants"] = {int(k): dict(v) for k, v in doc["variants"].items()}
     return plan

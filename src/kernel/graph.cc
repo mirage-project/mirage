@@ -499,7 +499,11 @@ int Graph::get_task_info(int op_idx,
   if (np == task_name_params.end() || tc == task_config.end()) {
     return -1;
   }
-  snprintf(name, name_len, "%s", np->second.first.c_str());
+  std::string const &stored = np->second.first; // "static:<name>": the name
+  snprintf(name,
+           name_len,
+           "%s",
+           stored.c_str() + (stored.rfind("static:", 0) == 0 ? 7 : 0));
   int nparams = std::min((int)np->second.second.size(), max_params);
   for (int i = 0; i < nparams; i++) {
     params[i] = np->second.second[i];
@@ -1058,6 +1062,17 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(3, 1, TASK_RESIDUAL_ADD_SM100, variant_id);
+  } else if (name.rfind("static:", 0) == 0) {
+    // a static-schedule task type without a registration of its own
+    // (StaticMegakernel._add_node gives it the prefix; get_task_info returns
+    // the name without it)
+    int variant_id = task_register->register_static_sm100_task(
+        customized->bgraph, params, name.c_str() + 7);
+    task_config[op] =
+        std::make_tuple((int)customized->bgraph.operators.size() - 1,
+                        1,
+                        TASK_STATIC_SM100,
+                        variant_id);
   }
 
   else {

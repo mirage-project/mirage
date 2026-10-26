@@ -234,6 +234,9 @@ public:
                                    std::vector<int> const &params);
   int register_residual_add_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params);
+  int register_static_sm100_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params,
+                                 char const *name);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(

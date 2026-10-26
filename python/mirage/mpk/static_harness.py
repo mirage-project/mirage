@@ -3,13 +3,17 @@ wait) and hands out its instrumentation buffers (StaticKernel.read, layout); eve
 
   Harness(sk)
     flush_l2(nbytes)                 read nbytes on every GPU: L2 emptied and left clean, as before a layer in a real model
-    launch(flush_bytes, timeout_s)   flush_l2, one launch, wait; timeout_s > 0: report() and TimeoutError after that long
+    launch(flush_bytes, timeout_s)   the resets, flush_l2, one launch, wait; timeout_s > 0: report() and TimeoutError after that long
                                      (serving mode, -DSTATIC_RESET_IN_KERNEL: the flush on each GPU's stream, no host wait)
     elapsed_us()                     serving mode: per GPU the event time of the last launch's kernel (as a server sees it)
     timing() / span_us()             per GPU (last SM past the start barrier, latest SM end) of the last launch
+    e2e_us() / e2e_gpus_us()         the last launch's time from the event right before each GPU's kernel to the event after it: max
+                                     over GPUs / per GPU. One host thread launches the GPUs in turn, so a GPU launched early also
+                                     waits for the later launches; the last-launched GPU's time leaves that out
     report()                         per GPU the counters per line and how many SMs passed each stamp (also while a launch hangs)
     task_times()                     timing build: per GPU, SM and list entry (start, last warp's end, stage stamps 0 and 1)
-    repeat(reps, watch, ...)         reps launches: the span of each, and per watched tensor the values whose bits changed
+    repeat(reps, watch, ...)         reps launches: the span of each (per GPU e2e times in self.e2e_gpus), and per watched tensor the
+                                     values whose bits changed
 """
 import time
 from typing import Callable, Dict, List, Optional, Tuple
@@ -35,16 +39,18 @@ class Harness:
             torch.cuda.synchronize(g)
 
     def launch(self, flush_bytes: int = 0, timeout_s: float = 0.0) -> None:
-        """flush_bytes > 0: flush_l2 first. One launch on every GPU, then wait for it. timeout_s > 0: a launch not finished after
-        that long: report(), then TimeoutError (the kernel is still running). A failed kernel: report(), then RuntimeError.
-        Serving mode (a build with -DSTATIC_RESET_IN_KERNEL): the kernel resets its own buffers; the flush runs on each GPU's
-        stream and the launch is queued behind it with no host wait (StaticKernel.launch), so elapsed_us() is the kernel's time
-        as a server sees it."""
+        """flush_bytes > 0: the resets, then flush_l2, then the kernel (nothing the layer touches is in L2 at the start). One
+        launch on every GPU, then wait for it. timeout_s > 0: a launch not finished after that long: report(), then TimeoutError
+        (the kernel is still running). A failed kernel: report(), then RuntimeError. Serving mode (a build with
+        -DSTATIC_RESET_IN_KERNEL): the kernel resets its own buffers; the flush runs on each GPU's stream and the launch is queued
+        behind it with no host wait (StaticKernel.launch), so elapsed_us() is the kernel's time as a server sees it."""
         if self.layout.get("serving"):
             self.sk.launch(flush_bytes)
+        elif flush_bytes > 0:   # resets first, then the flush: the reset buffers are not in L2 at the start either
+            self.sk.reset()
+            self.flush_l2(flush_bytes)
+            self.sk.launch(reset=False)
         else:
-            if flush_bytes > 0:
-                self.flush_l2(flush_bytes)
             self.sk.launch()
         try:
             if timeout_s <= 0:
@@ -76,6 +82,15 @@ class Harness:
             stamps = self._array(g, "stamps", np.int64).reshape(lay["num_sms"], lay["num_stamps"])
             out.append((int(self._array(g, "start_barrier", np.int64)[0]), int(stamps[:, lay["stamp_end"]].max())))
         return out
+
+    def e2e_gpus_us(self) -> List[float]:
+        """Per GPU, the last launch's time from the event recorded right before its kernel to the event after it, in microseconds:
+        launch, start barrier and the kernel (span_us starts after the start barrier)."""
+        return self.sk.elapsed_us()
+
+    def e2e_us(self) -> float:
+        """Max over GPUs of e2e_gpus_us."""
+        return max(self.e2e_gpus_us())
 
     def span_us(self) -> float:
         """Max over GPUs of (latest SM end - last SM past the start barrier) of the last launch, in microseconds."""
@@ -122,9 +137,11 @@ class Harness:
         watch = watch or {}
         before = {name: bits(t) for name, t in watch.items()}
         spans, changed = [], []
+        self.e2e_gpus = []
         for i in range(reps):
             self.launch(flush_bytes, timeout_s)
             spans.append(self.span_us())
+            self.e2e_gpus.append(self.e2e_gpus_us())
             if after_launch:
                 after_launch(i)
             changed.append({name: bits(t) != before[name] for name, t in watch.items()})

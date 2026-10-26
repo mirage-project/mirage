@@ -5,8 +5,8 @@
   3. compile_plan    the plan (a plan file; default solver_plan.json) -> the graph regridded to the plan's grids,
                      schedules/schedule_gpu<g>.json                          (python/mirage/mpk/compiler.py)
                      --search COSTS: the plan is the solver's instead, starting from the plan file (search.search_plan with
-                     the cost record files COSTS; needs OR-Tools) -> <out>/plan.json, and <out>/plan_view.json with the solver's
-                     predicted timeline (python plan_viewer.py <out>/plan_view.json)
+                     the cost record files COSTS; needs OR-Tools) -> <out>/plan.json (its timeline:
+                     python plan_viewer.py <out>/schedules COSTS)
   4. compile_static  build/layer.cu from the schedules, built and loaded     (python/mirage/mpk/static_schedule.py)
   5. check_launch    one launch; y vs SGLang's y, y the same on all GPUs, each GPU's partial sums vs their fp32 references
   6. timed_launches  --reps launches, 512 MB read on every GPU before each (empties L2); span per launch
@@ -248,12 +248,11 @@ def main():
     print_nodes(mpk, "graph nodes as written (default grids):")
     plan = compiler.plan_from_file(args.plan)
     if args.search:
-        from mirage.mpk import plan_viewer, search, static_schedule
+        from mirage.mpk import search, static_schedule
         code = {"current": static_schedule.code_tag(), "any": None}.get(args.costs_code, args.costs_code)
         costs = search.Costs(args.search, code=code, gpu=torch.cuda.get_device_name(0))
         plan, summary = search.search_plan(mpk, costs, time_limit_s=args.time, start_from=plan)
         compiler.write_plan_file(os.path.join(args.out, "plan.json"), plan)
-        plan_viewer.save(os.path.join(args.out, "plan_view.json"), plan, summary, f"searched from {args.plan}")
     paths, info = compiler.compile_plan(mpk, plan, os.path.join(args.out, "schedules"))
     print_nodes(mpk, "graph nodes after compiling:")
     sk = mpk.compile_static(paths, gpu_tensors=ws, out_dir=os.path.join(args.out, "build"), extra_flags=args.nvcc_flag,
