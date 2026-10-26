@@ -23,7 +23,7 @@ layer.cu = five parts, each written by one function below:
                   static_megakernel/host.cuh's, from the layers' slot args (host_slot_args)
 
   write_schedule(path, nodes, all_tasks, queues, info)      checks the lists cannot deadlock, writes the file
-  generate_code(pk, schedules) -> str                       layer.cu
+  generate_code(pk, schedules, profile, build) -> str      layer.cu (build: Build, the defines / switches / host)
   compile_static(pk, schedule_paths, gpu_tensors, out_dir, extra_flags) -> StaticKernel
 """
 import glob
@@ -34,7 +34,8 @@ import os
 import shutil
 import subprocess
 import sysconfig
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 
 # ---------------- schedule file ----------------
@@ -89,17 +90,95 @@ def write_schedule(path: str, nodes: Dict[str, dict], all_tasks: List[dict], que
         json.dump(doc, f, indent=1)
 
 
-def code_tag() -> str:
-    """The version of the kernel templates a cost record measured: the md5 of include/mirage/static_megakernel/*.cuh and tasks/*.cuh (first 12
-    hex digits). the cost records carry it ("code"); search.Costs(code=code_tag()) uses only the records of these templates,
-    so times measured with other kernel code are not mixed in."""
-    from ..kernel import get_key_paths
-    _, include_path, _ = get_key_paths()
+def _code_tokens(text: str) -> str:
+    """The template source as the compiler reads it, without formatting: line splices (backslash-newline) joined, // and /* */
+    comments removed (not inside string or character literals), adjacent string literals joined ("ab " "c" -> "ab c"), every
+    whitespace run removed except one space between two word characters. `int *p = a + b; // sum` and `int* p=a+b;` both give
+    `int*p=a+b;`, so clang-format and comment edits leave it unchanged."""
+    import re
+    text = text.replace("\\\n", "")
+    out, i, n = [], 0, len(text)          # out: code pieces and ("str", literal) pieces
+    code_start = 0
+    while i < n:
+        c = text[i]
+        if c == "/" and text.startswith("//", i):
+            out.append(text[code_start:i])
+            j = text.find("\n", i)
+            i = code_start = n if j < 0 else j
+        elif c == "/" and text.startswith("/*", i):
+            out.append(text[code_start:i] + " ")
+            j = text.find("*/", i + 2)
+            i = code_start = n if j < 0 else j + 2
+        elif c in "\"'":
+            out.append(text[code_start:i])
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == "\\" else 1
+            out.append(("str", text[i:j + 1]))
+            i = code_start = j + 1
+        else:
+            i += 1
+    out.append(text[code_start:])
+    pieces = []                               # whitespace-only code between two string literals dropped: they are joined
+    for k, p in enumerate(out):
+        if isinstance(p, tuple):
+            if pieces and isinstance(pieces[-1], tuple) and p[1][0] == '"' and pieces[-1][1][0] == '"':
+                pieces[-1] = ("str", pieces[-1][1][:-1] + p[1][1:])
+            else:
+                pieces.append(p)
+        elif p.strip() or not (pieces and isinstance(pieces[-1], tuple) and k + 1 < len(out) and isinstance(out[k + 1], tuple)):
+            pieces.append(p)
+    # literals kept as they are (a \0 mark in the code while the spaces go); in the code a space stays only between two word
+    # characters (int x); elsewhere (a + b, int *p) it goes
+    literals = [p[1] for p in pieces if isinstance(p, tuple)]
+    code = "".join("\0" if isinstance(p, tuple) else re.sub(r"\s+", " ", p) for p in pieces)
+    code = re.sub(r"(?<=\W) | (?=\W)", "", " " + code + " ").strip()
+    parts = code.split("\0")
+    return "".join(a + b for a, b in zip(parts, literals + [""]))
+
+
+def code_tag(root: Optional[str] = None) -> str:
+    """The version of the kernel templates a cost record measured: the md5 of include/mirage/static_megakernel/*.cuh and
+    tasks/*.cuh (root: that directory; default the installed include path), each file as its path below root and its source
+    without formatting (_code_tokens: no comments, no whitespace that does not separate two words), first 12 hex digits. A
+    clang-format run or a comment edit keeps the tag; any code change gives a new one. The cost records carry it ("code");
+    search.Costs(code=code_tag()) uses only the records of these templates, so times measured with other kernel code are not
+    mixed in. Not a hash of the compiled SASS: a task body is inlined into layer_kernel with the plan's template arguments, so
+    its SASS differs per plan, not per template version (loop/lints.py lint_sass keeps each build's SASS summary instead)."""
+    if root is None:
+        from ..kernel import get_key_paths
+        _, include_path, _ = get_key_paths()
+        root = os.path.join(include_path, "mirage", "static_megakernel")
     h = hashlib.md5()
-    root = os.path.join(include_path, "mirage", "static_megakernel")
     for path in sorted(glob.glob(os.path.join(root, "*.cuh")) + glob.glob(os.path.join(root, "tasks", "*.cuh"))):
-        with open(path, "rb") as f:
-            h.update(f.read())
+        with open(path, encoding="utf-8") as f:
+            h.update(os.path.relpath(path, root).encode() + b"\0" + _code_tokens(f.read()).encode() + b"\0")
+    return h.hexdigest()[:12]
+
+
+def task_code_tag(name: str, root: Optional[str] = None) -> str:
+    """The version of one task type's code (12 hex digits, formatting ignored as in code_tag): the shared templates (the
+    static_megakernel/*.cuh files: core, runtime, config, host) and tasks/<name>.cuh with the task files it includes. A cost
+    record keeps it as "task_code" (cost_records.py), so the loop's model (loop/model.py, code "current") keeps a task type's
+    records across edits of other task types and drops them when its own code changes."""
+    import re
+    if root is None:
+        from ..kernel import get_key_paths
+        _, include_path, _ = get_key_paths()
+        root = os.path.join(include_path, "mirage", "static_megakernel")
+    files, todo = set(), [os.path.join(root, "tasks", f"{name}.cuh")]
+    while todo:
+        path = todo.pop()
+        if path in files or not os.path.exists(path):
+            continue
+        files.add(path)
+        with open(path, encoding="utf-8") as f:
+            todo += [os.path.join(os.path.dirname(path), inc) for inc in re.findall(r'#include\s+"([\w./]+\.cuh)"', f.read())]
+    files |= set(glob.glob(os.path.join(root, "*.cuh")))
+    h = hashlib.md5()
+    for path in sorted(os.path.normpath(p) for p in files):
+        with open(path, encoding="utf-8") as f:
+            h.update(os.path.relpath(path, root).encode() + b"\0" + _code_tokens(f.read()).encode() + b"\0")
     return h.hexdigest()[:12]
 
 
@@ -110,11 +189,55 @@ STAGE_SLOT = 1 + THREADS // 32   # timing build, per list entry: start, each war
 TIME_SLOTS = STAGE_SLOT + 2
 
 
-def config_checks(used: List[str]) -> List[str]:
+@dataclass(frozen=True)
+class NodeRef:
+    """A Build define's value: the index of the graph node of this name (one node of that name)."""
+    name: str
+
+
+@dataclass(frozen=True)
+class Build:
+    """What layer.cu has beyond the graph and the schedules; the defaults are compile_static's kernel. The STATIC_* macros are
+    core.cuh's / config.cuh's.
+      defines   (name, value) pairs, written in order as the file's first lines (#define name value); a NodeRef value becomes
+                that node's index, e.g. ("STATIC_NOWAIT_NODE", NodeRef("mla_absorb"))
+                three of them also change the kernel's code:
+                  STATIC_RESET_PARITY  the kernel's second G (g_par1, the reset buffers' second copies) and gp, the launch's copy,
+                                       given to the tasks
+                  STATIC_PDL_PREFILL   kernel_begin prefills the SM's first list entry when it is a gemm_tile
+                  STATIC_NOWAIT_NODE   KernelLocals::first_node = the SM's first list entry's node
+      switches  code a build flag turns on:
+                  task_times    MPK_TT0 / MPK_TT1 around each task (empty unless built with -DMPK_TASK_TIMES)
+      host      HOST_CODE (compile_static's per-process host); False: the file ends after the kernel (the caller adds a host)"""
+    defines: Tuple[Tuple[str, object], ...] = ()
+    switches: FrozenSet[str] = frozenset()
+    host: bool = True
+
+    SWITCHES = ("task_times",)
+
+    def defined(self, name: str) -> bool:
+        return any(n == name for n, _ in self.defines)
+
+    def define_lines(self, nodes: Dict[str, dict]) -> List[str]:
+        unknown = set(self.switches) - set(self.SWITCHES)
+        if unknown:
+            raise ValueError(f"Build: unknown switches {sorted(unknown)} (known: {', '.join(self.SWITCHES)})")
+        lines = []
+        for name, value in self.defines:
+            if isinstance(value, NodeRef):
+                idx = [k for k, nd in nodes.items() if nd["name"] == value.name]
+                if len(idx) != 1:
+                    raise ValueError(f"Build: {name} names node {value.name!r}: {len(idx)} nodes of that name")
+                value = idx[0]
+            lines.append(f"#define {name} {value}")
+        return lines
+
+
+def config_checks(used: List[str], max_bufs: Optional[int] = None) -> List[str]:
     """static_asserts that the Python copies of the kernel's sizes (here and in static_megakernel.py) are config.cuh's and the
     used task types'."""
     from .static_megakernel import MAX_BUFS, MAX_MAPS, MAX_SUM_PARTS, NODE_COUNTER_LINES, RING_STAGES, SF_CHUNK
-    checks = [f"static_mk::MAX_TASKS_PER_SM == {MAX_TASKS_PER_SM}", f"static_mk::MAX_BUFS == {MAX_BUFS}",
+    checks = [f"static_mk::MAX_TASKS_PER_SM == {MAX_TASKS_PER_SM}", f"static_mk::MAX_BUFS == {max_bufs or MAX_BUFS}",
               f"static_mk::MAX_MAPS == {MAX_MAPS}", f"static_mk::NODE_COUNTER_LINES == {NODE_COUNTER_LINES}",
               f"static_mk::SMAX == {RING_STAGES}", f"static_mk::SF_CHUNK == {SF_CHUNK}"]
     if "sum_send" in used:
@@ -132,7 +255,9 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
             "#include <string>", "#include <vector>", "",
             "// the kernel-wide sizes (config.cuh): tokens per step and GPUs (the graph's: StaticMegakernel.tokens, num_gpus), SMs (the",
             "// schedules' task lists per GPU)",
-            f"#define STATIC_TOKENS {pk.tokens}", f"#define STATIC_GPUS {num_gpus}", f"#define STATIC_SMS {num_lists}", "",
+            f"#define STATIC_TOKENS {pk.tokens}", f"#define STATIC_GPUS {num_gpus}", f"#define STATIC_SMS {num_lists}", ""] + (
+            [f"#define STATIC_MAX_BUFS {pk.max_bufs}   // buffer slots (config.cuh MAX_BUFS; StaticMegakernel.max_bufs)", ""]
+            if getattr(pk, "max_bufs", None) else []) + [
             "// the exchange region's layout (static_megakernel.py exchange_layout): one set's bytes, the start barrier's slots, per",
             "// buffer slot its offset and bytes (an exchange buffer; else 0)",
             f"#define STATIC_EXCHANGE_SET {set_bytes}", f"#define STATIC_EXCHANGE_HELLO {hello}",
@@ -156,7 +281,7 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
             "};",
             "struct StaticContext { int num_gpus = 0, num_lists = 0; std::vector<StaticGpuView> gpus; };",
             '#include "mirage/static_megakernel/core.cuh"'] + \
-        [f'#include "mirage/static_megakernel/tasks/{name}.cuh"' for name in used] + config_checks(used) + [""]
+        [f'#include "mirage/static_megakernel/tasks/{name}.cuh"' for name in used] + config_checks(used, getattr(pk, "max_bufs", None)) + [""]
 
 
 def task_tables(schedules: List[dict]) -> List[str]:
@@ -190,10 +315,10 @@ def task_args(node: dict) -> str:
     return ", ".join(args)
 
 
-def task_call(node: dict) -> str:
-    """One node's call in the kernel loop: static_mk::run_<name> with its template arguments (task_args).
+def task_call(node: dict, g: str = "g") -> str:
+    """One node's call in the kernel loop: static_mk::run_<name> with its template arguments (task_args); g: the G the task gets.
     static_mk::run_topk_route<StaticNode<8, 1, 1, -1, 2>, StaticParams<896, 16>, StaticBufSlots<1>, StaticMapSlots<>, StaticNode<7, 14, 1, -1, 0, 0, 7168, 896, 0>, StaticNode<0, 0, 0>>(maps, g, L, tk)"""
-    return f"static_mk::run_{node['name']}<{task_args(node)}>(maps, g, L, tk)"
+    return f"static_mk::run_{node['name']}<{task_args(node)}>(maps, {g}, L, tk)"
 
 
 def smem_code(nodes: Dict[str, dict]) -> List[str]:
@@ -206,20 +331,20 @@ def smem_code(nodes: Dict[str, dict]) -> List[str]:
             'static_assert(STATIC_SMEM_BYTES <= 227 * 1024, "the dynamic shared memory of one SM");', ""]
 
 
-def case_code(idx: str, node: dict) -> str:
+def case_code(idx: str, node: dict, g: str = "g") -> str:
     """One node's case in the kernel loop. A node whose task type has a dry pass (its layer's `dry`): the task function gets
     `warm` last: false for the node's first task on this SM (its code is not in the instruction cache yet: the task first runs
     its own code on stand-in inputs, no global stores, while its inputs are on their way; the same instructions as the real pass),
     true for the later ones (kernel_code keeps one flag per such node). The flag is a register of the kernel loop, so deciding
     costs almost nothing (checking whether the inputs have already landed would cost loads and a CTA barrier per task).
       case 29: static_mk::run_topk_route<...>(maps, g, L, tk, warm_29); warm_29 = true; break;"""
-    run = task_call(node)
+    run = task_call(node, g)
     if not node["dry"]:
         return f"      case {idx}: {run}; break;"
     return f"      case {idx}: {run[:-1]}, warm_{idx}); warm_{idx} = true; break;"
 
 
-def kernel_code(nodes: Dict[str, dict], profile: bool = False) -> List[str]:
+def kernel_code(nodes: Dict[str, dict], profile: bool = False, build: Build = Build()) -> List[str]:
     """layer_kernel:
         __global__ void __launch_bounds__(256, 1) layer_kernel(const __grid_constant__ static_mk::Maps maps, static_mk::G g, StaticTask const *static_tasks) {
           static_mk::KernelLocals L; static_mk::kernel_begin(g, L);
@@ -235,33 +360,60 @@ def kernel_code(nodes: Dict[str, dict], profile: bool = False) -> List[str]:
           static_mk::kernel_end(g, L);
         }
     profile: the timing build: one more kernel parameter, static_times, and per list entry ti thread 0 writes the task's start and
-    lane 0 of every warp writes when its warp left the task (globaltimer ns; plain stores). Without profile the kernel is unchanged."""
+    lane 0 of every warp writes when its warp left the task (globaltimer ns; plain stores). Without profile the kernel is unchanged.
+    build: the defines that change the code (STATIC_RESET_PARITY, STATIC_PDL_PREFILL, STATIC_NOWAIT_NODE) and the switches (Build)."""
+    parity, prefill, first = (build.defined(d) for d in ("STATIC_RESET_PARITY", "STATIC_PDL_PREFILL", "STATIC_NOWAIT_NODE"))
+    if parity and profile:
+        raise ValueError("kernel_code: reset_parity and the timing build (profile) together are not written")
+    gname = "gp" if parity else "g"
+    by_idx = sorted(nodes.items(), key=lambda kv: int(kv[0]))
+    gemm_cases = [case_code(idx, node).strip().replace("static_mk::run_gemm_tile<", "static_mk::prefill_gemm_tile<")
+                  for idx, node in by_idx if node["name"] == "gemm_tile"] if prefill else []
     lines = ["", "// ---- the kernel ----"]
     if profile:
         lines += ["__device__ __forceinline__ unsigned long long static_now() { unsigned long long t; "
                   "asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(t)); return t; }",
                   f"#define STATIC_TIME(ti) (static_times + ((size_t)blockIdx.x * (static_mk::MAX_TASKS_PER_SM) + (ti)) * {TIME_SLOTS})"]
     extra = ", unsigned long long *static_times" if profile else ""
+    par1 = "static_mk::G g_par1, " if parity else ""   # the reset buffers' second copies
     lines += [f"__global__ void __launch_bounds__({THREADS}, 1) layer_kernel(const __grid_constant__ static_mk::Maps maps, static_mk::G g, "
-              f"StaticTask const *static_tasks{extra}) {{",
-              "  static_mk::KernelLocals L; static_mk::kernel_begin(g, L);",
-              "  StaticTask const *my = static_tasks + blockIdx.x * (static_mk::MAX_TASKS_PER_SM);"]
+              f"{par1}StaticTask const *static_tasks{extra}) {{"]
+    if gemm_cases or first:
+        lines.append("  static_mk::KernelLocals L;")
+        if first:
+            lines.append("  L.first_node = static_tasks[blockIdx.x * (static_mk::MAX_TASKS_PER_SM)].node; // (core.cuh STATIC_NOWAIT_NODE)")
+        if gemm_cases:   # the SM's first entry, when a gemm_tile: its first stages' weights before griddepcontrol.wait
+            lines += ["  static_mk::kernel_begin(g, L, [&] {",
+                      "    StaticTask const tk = static_tasks[blockIdx.x * (static_mk::MAX_TASKS_PER_SM)];",
+                      "    switch (tk.node) {"] + ["      " + c for c in gemm_cases] + [
+                      "    }", "  });"]
+        else:
+            lines.append("  static_mk::kernel_begin(g, L);")
+    else:
+        lines.append("  static_mk::KernelLocals L; static_mk::kernel_begin(g, L);")
+    if parity:
+        lines.append("  static_mk::G const &gp = static_mk::dbuf_par ? g_par1 : g; // this launch's copy (core.cuh)")
+    lines += ["  StaticTask const *my = static_tasks + blockIdx.x * (static_mk::MAX_TASKS_PER_SM);"]
     lines += [f"  bool warm_{idx} = false;   // a task of node {idx} ran on this SM: its code is in the instruction cache"
               for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])) if node["dry"]]
-    lines += [
-             "  for (int ti = 0; ti < static_mk::MAX_TASKS_PER_SM; ti++) {",
-             "    StaticTask const tk = my[ti];",
-             "    if (tk.node < 0) break;"]
+    lines += ["  for (int ti = 0; ti < static_mk::MAX_TASKS_PER_SM; ti++) {",
+              "    StaticTask const tk = my[ti];",
+              "    if (tk.node < 0) break;"]
     if profile:
         lines.append("    if (threadIdx.x == 0) STATIC_TIME(ti)[0] = static_now();")
         lines.append(f"    L.stage_stamps = STATIC_TIME(ti) + {STAGE_SLOT};   // e.g. GEMM tasks: [0] first load issued, [1] first stage landed")
+    if "task_times" in build.switches:
+        lines.append("    MPK_TT0(ti, tk.node);")
     lines.append("    switch (tk.node) {")
-    for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])):
-        lines.append(case_code(idx, node))
+    for idx, node in by_idx:
+        lines.append(case_code(idx, node, gname))
     lines.append("    }")
+    if "task_times" in build.switches:
+        lines.append("    MPK_TT1(ti);")
     if profile:
         lines.append("    if ((threadIdx.x & 31) == 0) STATIC_TIME(ti)[1 + threadIdx.x / 32] = static_now();   // this warp left the task")
-    lines += ["  }", "  static_mk::kernel_end(g, L);", "}", ""]
+    lines.append("  }")
+    lines += ["  static_mk::kernel_end(g, L);", "}", ""]
     return lines
 
 
@@ -319,9 +471,10 @@ def host_code(pk, schedules: List[dict], profile: bool = False) -> List[str]:
     return [code]
 
 
-def generate_code(pk, schedules: List[dict], profile: bool = False) -> str:
+def generate_code(pk, schedules: List[dict], profile: bool = False, build: Build = Build()) -> str:
     """layer.cu for pk's graph and one schedule per GPU. All GPUs run the same kernel, so their nodes (grids, params) and number
-    of SM lists must be the same; only their task tables differ. profile: the timing build (kernel_code)."""
+    of SM lists must be the same; only their task tables differ. profile: the timing build (kernel_code); build: the defines,
+    switches and host (Build)."""
     nodes = schedules[0]["nodes"]
     if len(schedules) != pk.num_gpus:
         raise ValueError(f"{len(schedules)} schedules, the graph is divided over {pk.num_gpus} GPUs (StaticMegakernel.num_gpus)")
@@ -330,10 +483,13 @@ def generate_code(pk, schedules: List[dict], profile: bool = False) -> str:
             raise ValueError(f"schedule of GPU {g}: nodes differ from GPU 0's (one kernel for every GPU)")
         if len(schedule["worker_task_queues"]) != len(schedules[0]["worker_task_queues"]):
             raise ValueError("every GPU needs the same number of task lists")
-    lines = header_code(pk, nodes, len(schedules), len(schedules[0]["worker_task_queues"]), profile)
+    lines = build.define_lines(nodes)
+    lines += header_code(pk, nodes, len(schedules), len(schedules[0]["worker_task_queues"]), profile)
     lines += smem_code(nodes)
     lines += task_tables(schedules)
-    lines += kernel_code(nodes, profile)
+    lines += kernel_code(nodes, profile, build)
+    if not build.host:
+        return "\n".join(lines) + "\n"
     lines += host_code(pk, schedules, profile)
     return "\n".join(lines)
 
@@ -414,11 +570,9 @@ static void static_init(std::vector<std::map<std::string, void *>> const &tensor
     }
 }
 
-// one launch on every GPU: per GPU the resets on its stream; wait for every GPU (so all GPUs start together); then per
-// GPU: event, kernel, event. Serving mode (STATIC_RESET_IN_KERNEL: the kernel resets its own buffers): no host step and no
-// host wait; per GPU on its stream the flush of flush_bytes (> 0; L2 emptied) and the GPUs' line-up (host.cuh
-// static_host_prelude), then event, kernel, event (the events time the launch as a server sees it: static_elapsed)
-static void static_launch(size_t flush_bytes) {
+// per GPU the resets of the next launch on its stream; then wait for every GPU (serving mode, STATIC_RESET_IN_KERNEL: the
+// kernel resets its own buffers, no wait)
+static void static_reset() {
   int const n = (int)g_st.size();
   for (int g = 0; g < n; g++) {
     StaticGpu &s = g_st[g];
@@ -427,11 +581,23 @@ static void static_launch(size_t flush_bytes) {
     if (STATIC_PROFILE) ST_CK(cudaMemsetAsync(s.times, 0, static_times_count * sizeof(unsigned long long), s.stream));
   }
 #ifndef STATIC_RESET_IN_KERNEL
-  (void)flush_bytes;
   for (int g = 0; g < n; g++) {
     ST_CK(cudaSetDevice(g));
     ST_CK(cudaStreamSynchronize(g_st[g].stream));
   }
+#endif
+}
+
+// one launch on every GPU: reset = true: static_reset first (every GPU's resets done, so all GPUs start together); false:
+// the caller ran static_reset (e.g. then emptied L2, so the reset buffers are not in L2 at the start); then per GPU: event,
+// kernel, event. Serving mode (STATIC_RESET_IN_KERNEL): no host wait; per GPU on its stream the flush of flush_bytes (> 0; L2
+// emptied) and the GPUs' line-up (host.cuh static_host_prelude), then event, kernel, event (the events time the launch as a
+// server sees it: static_elapsed)
+static void static_launch(size_t flush_bytes, bool reset) {
+  int const n = (int)g_st.size();
+  if (reset) static_reset();
+#ifndef STATIC_RESET_IN_KERNEL
+  (void)flush_bytes;
 #endif
   for (int gpu = 0; gpu < n; gpu++) {
     StaticGpu &s = g_st[gpu];
@@ -549,8 +715,13 @@ static PyObject *py_init(PyObject *self, PyObject *args) {
 }
 static PyObject *py_launch(PyObject *self, PyObject *args) {
   unsigned long long flush_bytes = 0;
-  if (!PyArg_ParseTuple(args, "|K", &flush_bytes)) return NULL;
-  static_launch((size_t)flush_bytes);
+  int reset = 1;
+  if (!PyArg_ParseTuple(args, "|Ki", &flush_bytes, &reset)) return NULL;
+  static_launch((size_t)flush_bytes, reset != 0);
+  Py_RETURN_NONE;
+}
+static PyObject *py_reset(PyObject *self, PyObject *args) {
+  static_reset();
   Py_RETURN_NONE;
 }
 static PyObject *py_elapsed(PyObject *self, PyObject *args) {
@@ -604,7 +775,10 @@ static PyObject *py_layout(PyObject *self, PyObject *args) {
 static PyObject *py_finalize(PyObject *self, PyObject *args) { static_finalize(); Py_RETURN_NONE; }
 static PyMethodDef StaticMethods[] = {
   {"init_func", py_init, METH_VARARGS, "the graph's tensors of every GPU (names, pointers): the buffers and maps"},
-  {"launch_func", py_launch, METH_VARARGS, "one launch on every GPU ([flush bytes]: serving mode, L2 emptied on the stream first)"},
+  {"launch_func", py_launch, METH_VARARGS,
+   "([flush bytes, reset = 1]) one launch on every GPU; flush bytes: serving mode, L2 emptied on the stream first; reset 0: "
+   "static_reset ran before"},
+  {"reset_func", py_reset, METH_NOARGS, "the next launch's resets on every GPU, then wait for them"},
   {"elapsed_func", py_elapsed, METH_NOARGS, "per GPU the microseconds between the events around the last launch's kernel"},
   {"wait_func", py_wait, METH_NOARGS, "wait for every GPU"},
   {"done_func", py_done, METH_NOARGS, "whether every GPU has finished the last launch (no wait)"},
@@ -628,16 +802,21 @@ class StaticKernel:
         self.so_path = so_path
         self._finalized = False
 
-    def launch(self, flush_bytes: int = 0):
-        """One launch on every GPU: per GPU the resets, then (every GPU's resets done) the kernel. Serving mode (layout()
-        "serving": built with -DSTATIC_RESET_IN_KERNEL): the kernel resets its own buffers, no host step or wait; flush_bytes > 0:
-        L2 emptied on each GPU's stream first, then the GPUs lined up (more than one), then the kernel."""
-        self.module.launch_func(int(flush_bytes))
+    def launch(self, flush_bytes: int = 0, reset: bool = True):
+        """One launch on every GPU: per GPU the resets (reset = False: reset() ran before), then (every GPU's resets done) the
+        kernel. Serving mode (layout() "serving": built with -DSTATIC_RESET_IN_KERNEL): the kernel resets its own buffers, no
+        host step or wait; flush_bytes > 0: L2 emptied on each GPU's stream first, then the GPUs lined up (more than one), then
+        the kernel."""
+        self.module.launch_func(int(flush_bytes), 1 if reset else 0)
 
     def elapsed_us(self) -> List[float]:
         """Per GPU the microseconds between the events right before and after the last launch's kernel (after wait). In serving
         mode with flush_bytes > 0 the launch is queued while the flush runs, so this is the kernel as a server sees it."""
         return self.module.elapsed_func()
+
+    def reset(self):
+        """The next launch's resets on every GPU, then wait for them (launch(reset=False) then launches)."""
+        self.module.reset_func()
 
     def wait(self):
         """Wait for every GPU; RuntimeError if a kernel failed."""
@@ -684,6 +863,26 @@ def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]]
             + list(extra_flags or []))
 
 
+def _build_cache_path(cu_path: str, command: List[str]) -> Optional[str]:
+    """MIRAGE_STATIC_BUILD_CACHE=DIR: DIR/<md5>.so, the md5 over the layer source, every header under the include path (the source
+    includes them) and the command with the paths taken out; unset: None (always build)."""
+    root = os.environ.get("MIRAGE_STATIC_BUILD_CACHE")
+    if not root:
+        return None
+    h = hashlib.md5()
+    with open(cu_path, "rb") as f:
+        h.update(f.read())
+    for arg in command:
+        if arg.startswith("-I"):
+            for path in sorted(glob.glob(os.path.join(arg[2:], "mirage", "static_megakernel", "**", "*"), recursive=True)):
+                if os.path.isfile(path):
+                    h.update(path.encode())
+                    with open(path, "rb") as f:
+                        h.update(f.read())
+    h.update(" ".join(a for a in command if a not in (cu_path,) and not a.endswith((".so", ".cu"))).encode())
+    return os.path.join(root, h.hexdigest() + sysconfig.get_config_var("EXT_SUFFIX"))
+
+
 def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dict]] = None, out_dir: Optional[str] = None,
                    extra_flags: Optional[List[str]] = None, profile: bool = False) -> StaticKernel:
     """  1. read the schedule files; write <out_dir>/layer.cu = generate_code
@@ -706,8 +905,17 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
         f.write(generate_code(pk, schedules, profile))
 
     command = compile_command(cu_path, so_path, extra_flags)
-    print("building the layer:", " ".join(command), flush=True)
-    subprocess.check_call(command)
+    cached = _build_cache_path(cu_path, command)
+    if cached and os.path.exists(cached):   # the same source, headers and command built before: its library
+        shutil.copyfile(cached, so_path)
+        print(f"building the layer: cached ({cached})", flush=True)
+    else:
+        print("building the layer:", " ".join(command), flush=True)
+        subprocess.check_call(command)
+        if cached:
+            os.makedirs(os.path.dirname(cached), exist_ok=True)
+            shutil.copyfile(so_path, cached + ".tmp")
+            os.replace(cached + ".tmp", cached)
 
     spec = importlib.util.spec_from_file_location("__mirage_static_launcher", so_path)
     module = importlib.util.module_from_spec(spec)

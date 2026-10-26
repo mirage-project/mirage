@@ -1,0 +1,41 @@
+# The K3 MLA layer as a loop part (python/mirage/mpk/loop/part.py): part.py's graph (fused q_a / kv_a projection, the 2 RMSNorms
+# with the KV write, q_b, the absorbed attention over the paged KV cache in head groups x KV splits and its combine, w_vc and the
+# output gate, o_proj with push, attn_residual on cluster pairs); SGLang's serving contract. The KV context is synthetic (rows
+# graph option), the weights and inputs from an SGLang MLA dump (sglang_k3_mla dump mode).
+name: kimi_k3_mla
+model: Kimi K3
+layers: "the MLA layers (3, 7, .., 91, 92: 24 layers)"
+module: part.py
+tp: 8
+machine: {gpu: NVIDIA B300 SXM6 PC, cuda: "13.0"}
+buckets:
+  8:
+    inputs:
+      dump_l47: ~/mk/mla_dump           # SGLang MLA dumps of layers 3 / 47 / 91 (L<layer>_c0_r<g>.pt), 10-11
+    bound_us: null
+    sglang_us: 52.5                     # SGLang's MLA attention part per layer in the server at 37-1000 rows (10-13, rank 0)
+phases:
+  projection: [latent]
+  norm: [q_a]
+  qb: [q]
+  gate: [gate_parts]
+  absorb: [q_full]
+  attention: [attn, o_in]
+  oproj: [oproj_sent]
+  residual: [hidden]
+error_limits:
+  hidden_rel: 2.0e-2
+  prefix_rel: 1.0e-2
+  kv_rel: 1.0e-2
+  derivation: >-
+    the serving package's check limits (hidden 2 %, new prefix and the written KV rows 1 % relRMS vs reference.py in
+    float64); the kernel measures 0.7-1.8e-3 / 0.4-0.8e-3 there (10-13).
+flush_bytes: 536870912
+graph_options:
+  num_sms: 0                          # the graph's SMs per GPU (0: the current device's; code generation without a GPU: 148)
+  eps: 0                              # the RMSNorm eps (0: 1e-5, K3's rms_norm_eps)
+  thr: 0                              # contexts over thr rows: mla_attn_part (part.py THR)
+  layer: 47                           # the dumped layer whose weights and inputs the run uses (3, 47 or 91)
+  rows: 1000                          # the synthetic KV context's rows before the step's 8
+  bank_rows: 2                        # shapes only: the bank's allocated rows in the graph (16: the harness's cost keys)
+promote_on: harness

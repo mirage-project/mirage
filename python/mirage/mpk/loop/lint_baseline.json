@@ -1,0 +1,28 @@
+{
+"findings": [
+"C11|gemm_tile.cuh|ring_reinit_behind_queue is __noinline__ (out of line on purpose? no CALL in a hot path: lint_sass)",
+"C11|runtime.cuh|drain_acc is not __forceinline__",
+"C6|core.cuh|static shared memory: __shared__ long long t_start",
+"C6|core.cuh|static shared memory: __shared__ unsigned dbuf_par",
+"C6|core.cuh|static shared memory: __shared__ unsigned gen_s",
+"C6|moe_experts.cuh|static shared memory: __shared__ float a[NPAIR]",
+"C6|moe_experts.cuh|static shared memory: __shared__ float a[NSLOT * T]",
+"C6|moe_experts.cuh|static shared memory: __shared__ int a[NE]",
+"C6|moe_experts.cuh|static shared memory: __shared__ int a[NPAIR]",
+"C6|moe_experts.cuh|static shared memory: __shared__ int a[NSLOT * T]",
+"C6|moe_experts.cuh|static shared memory: __shared__ int a[NSLOT]",
+"C6|moe_experts.cuh|static shared memory: __shared__ unsigned char a[NSLOT * T]",
+"C6|runtime.cuh|static shared memory: __shared__ Rt rt",
+"C6|runtime.cuh|static shared memory: __shared__ __align__(8) uint64_t bars[2 * SMAX + 8 + 4 + 4 * W2QD]",
+"C6|runtime.cuh|static shared memory: __shared__ int s_ints[64]",
+"C6|runtime.cuh|static shared memory: __shared__ int w2q7[W2QD][3]",
+"C6|runtime.cuh|static shared memory: __shared__ int w2q[W2QD][3]",
+"C6|runtime.cuh|static shared memory: __shared__ uint32_t tmem_slot",
+"C6|sum_rmsnorm.cuh|static shared memory: __shared__ float peer_ss",
+"C6|sum_rmsnorm.cuh|static shared memory: __shared__ float red_c[8]",
+"C6|sum_rmsnorm.cuh|static shared memory: __shared__ float red_q[8]",
+"C6|sum_rmsnorm.cuh|static shared memory: __shared__ float red_r[8]",
+"H7|runtime.cuh|globaltimer read without a \"memory\" clobber",
+"H7|static_schedule.py|generated globaltimer read without a \"memory\" clobber"
+]
+}

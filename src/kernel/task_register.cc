@@ -5529,8 +5529,9 @@ int TaskRegister::register_gemm_tile_sm100_task(
   // (static_megakernel/core.cuh Combine); the K split is the grid's y; its
   // tensor maps are the node's slots. inputs: activation [T, K], weight [N, K];
   // output: [T, N] fp32.
-  assert(params.size() == 4);
-  assert(params[0] >= 0 && params[0] <= 2 &&
+  assert(params.size() == 4 || (params.size() == 5 && params[4] >= 0 &&
+                                params[4] <= 1)); // [4]: the w_early variant
+  assert(params[0] >= 0 && params[0] <= 3 &&
          (params[3] == 0 || params[3] == 1) &&
          (params[3] == 0 || params[0] == 0));
   std::vector<tb::TBInputOp *> input_ops, output_ops;
@@ -5655,6 +5656,22 @@ int TaskRegister::register_sum_send_sm100_task(threadblock::Graph const &bgraph,
   // output: o [T, H] bf16. Grid (H / 128, Q), each GPU its own row blocks.
   return register_static_task(
       this, TASK_SUM_SEND_SM100, "sum_send", bgraph, params, 1, 0);
+}
+
+// a static-schedule task type with no registration of its own (its name in the
+// graph: "static:<name>"; static_megakernel/tasks/<name>.cuh): every input op
+// but the last is an input, the last is its one output; any params
+int TaskRegister::register_static_sm100_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params,
+                                             char const *name) {
+  assert(bgraph.operators.size() >= 2);
+  return register_static_task(this,
+                              TASK_STATIC_SM100,
+                              name,
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              params.size());
 }
 
 int TaskRegister::register_residual_add_sm100_task(

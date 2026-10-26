@@ -97,6 +97,26 @@ static void map_bf16(
                                 CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
+// bf16 [rows, K] stored K-block-major, [K / 64][rows][64] (gemm_tile_layer
+// weight_kblocked): the same dims and box as map_bf16, a box's rows contiguous.
+static void map_bf16kb(
+    CUtensorMap *m, void *base, uint64_t rows, uint32_t box_rows, uint64_t K) {
+  cuuint64_t gd[3] = {64, rows, K / 64};
+  cuuint64_t gs[2] = {128, rows * 128};
+  cuuint32_t bd[3] = {64, box_rows, 2}, es[3] = {1, 1, 1};
+  MKS_CU(cuTensorMapEncodeTiled(m,
+                                CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+                                3,
+                                base,
+                                gd,
+                                gs,
+                                bd,
+                                es,
+                                CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                CU_TENSOR_MAP_SWIZZLE_128B,
+                                CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
+}
 // MXFP4 weight stored piece by piece: [piece][128 rows][64 B]; box = bt pieces
 static void
     map_wblk(CUtensorMap *m, void *base, uint64_t ntiles, uint32_t bt = 1) {
@@ -390,6 +410,8 @@ static void build_maps(Maps &maps,
     std::string const &kind = m[0];
     if (kind == "bf16" && m.size() == 5) {
       map_bf16(&maps.m[i], p, u(2), (uint32_t)u(4), u(3));
+    } else if (kind == "bf16kb" && m.size() == 5) {
+      map_bf16kb(&maps.m[i], p, u(2), (uint32_t)u(4), u(3));
     } else if (kind == "wblk" && m.size() == 4) {
       map_wblk(&maps.m[i], p, u(2), (uint32_t)u(3));
     } else if (kind == "sf" && m.size() == 4) {

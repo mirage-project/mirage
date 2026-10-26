@@ -61,12 +61,18 @@ __host__ __device__ constexpr uint32_t idesc_bf16(uint32_t m) {
 constexpr uint32_t IDESC_MX =
     0x08820280u; // kind::mxf8f6f4: e2m1 x e4m3 -> fp32, ue8m0 scales, M128 N8
 constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ull,
-                   EVICT_LAST = 0x14F0000000000000ull; // L2 cache hints
+                   EVICT_LAST = 0x14F0000000000000ull, // L2 cache hints
+    EVICT_NORMAL = 0x1000000000000000ull;
 
 // ---- the generated layer's task table, its slots ----
 constexpr int MAX_TASKS_PER_SM =
-    64;                      // entries per SM (the list, then an end entry)
-constexpr int MAX_BUFS = 24; // buffer slots (G::buf): node outputs, scratch
+    64;                 // entries per SM (the list, then an end entry)
+#ifndef STATIC_MAX_BUFS // the generated layer defines it when its graph needs
+                        // more (StaticMegakernel.max_bufs)
+#define STATIC_MAX_BUFS 24
+#endif
+constexpr int MAX_BUFS =
+    STATIC_MAX_BUFS;         // buffer slots (G::buf): node outputs, scratch
                              // buffers, graph tensors read by pointer
 constexpr int MAX_MAPS = 32; // tensor map slots (Maps::m)
 
@@ -95,15 +101,15 @@ constexpr bool REARM = false;
 
 #ifdef STATIC_RESET_IN_KERNEL
 // STATIC_PDL_TRIGGER: when the kernel lets the next kernel launch (PDL,
-// griddepcontrol.launch_dependents; a no-op without a programmatic launch): 0
-// at its end (implicit), 1 at its start, 2 (default) when a CTA starts a
+// griddepcontrol.launch_dependents; a no-op without a programmatic launch): 1
+// at its start (the KDA layer), 2 (default, the MoE layer) when a CTA starts a
 // residual_add task (CTAs without one: at their end)
 #ifndef STATIC_PDL_TRIGGER
 #define STATIC_PDL_TRIGGER 2
 #endif
 constexpr int PDL_TRIGGER = STATIC_PDL_TRIGGER;
-static_assert(PDL_TRIGGER >= 0 && PDL_TRIGGER <= 2,
-              "STATIC_PDL_TRIGGER: 0 (end), 1 (start), 2 (residual_add)");
+static_assert(PDL_TRIGGER == 1 || PDL_TRIGGER == 2,
+              "STATIC_PDL_TRIGGER: 1 (start) or 2 (residual_add)");
 #endif
 
 } // namespace static_mk

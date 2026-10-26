@@ -248,6 +248,9 @@ enum TaskType {
   TASK_SUM_SEND_SM100 = 509,
   // y = (input + addend) + residual (tasks/residual_add.cuh)
   TASK_RESIDUAL_ADD_SM100 = 510,
+  TASK_STATIC_SM100 =
+      511, // any other static-schedule task type ("static:<name>": build-only,
+           // Graph::register_task_for_op)
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 

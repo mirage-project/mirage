@@ -25,6 +25,7 @@ cost: task_us(node, grid, producer_grids) -> us or None (not measured); optional
 when it is the first task on its SM, or None (the same as task_us; solver rule 6); pool_us(node) -> a pool's total work (us, summed over
 the SMs) or None if the node is not a pool: Costs below.
 """
+import dataclasses
 import itertools
 import json
 import os
@@ -32,18 +33,48 @@ import statistics
 from typing import Dict, List, Optional, Tuple
 
 from . import static_schedule
-from .compiler import (Node, box, can_pair, candidate_grids, dims, graph_nodes, overlaps, owned_positions, producer_of, tname)
+from .compiler import (Node, box, can_pair, candidate_grids, candidate_variants, dims, graph_nodes, overlaps, owned_positions,
+                       params_with, producer_of, tname)
+from .compiler import cost_key, producer_grids  # noqa: F401  (moved to compiler.py; kept importable here)
 from .solver import Pool, SolverTask, solve
 
 
-def option_id(grid: tuple) -> str:
-    """The name of an option in the solver: the grid written with x. (7, 14, 1) -> "7x14x1"."""
-    return "x".join(str(v) for v in grid)
+def option_id(grid: tuple, variant: Optional[dict] = None) -> str:
+    """The name of an option in the solver: the grid written with x, then the template variant if any. (7, 14, 1) -> "7x14x1";
+    with variant {"stages": 3} -> "7x14x1@stages=3"."""
+    name = "x".join(str(v) for v in grid)
+    return name + "@" + ",".join(f"{k}={variant[k]}" for k in sorted(variant)) if variant else name
 
 
 def as_grid(option: str) -> tuple:
-    """"7x14x1" -> (7, 14, 1)."""
-    return tuple(int(v) for v in option.split("x"))
+    """"7x14x1" (or "7x14x1@stages=3") -> (7, 14, 1)."""
+    return tuple(int(v) for v in option.split("@")[0].split("x"))
+
+
+def as_variant(option: str) -> dict:
+    """"7x14x1@stages=3" -> {"stages": 3}; "7x14x1" -> {}."""
+    if "@" not in option:
+        return {}
+    return {k: int(v) for k, v in (kv.split("=") for kv in option.split("@", 1)[1].split(","))}
+
+
+def full_variant(n: Node, variant: Optional[dict]) -> dict:
+    """Every variant the node declared, with `variant`'s values and the defaults for the rest ({} for a node without variants):
+    the variant part of its option name."""
+    return {k: (variant or {}).get(k, n.info["variant_defaults"][k]) for k in (n.info.get("variants") or {})}
+
+
+def node_options(n: Node) -> List[str]:
+    """Every (grid, template variant) the node may take, as option names (compiler.candidate_grids x candidate_variants)."""
+    return [option_id(g, v) for g in candidate_grids(n) for v in candidate_variants(n)]
+
+
+def with_variant(n: Node, option: str) -> Node:
+    """The node with the option's variant in its params (the node itself when the option has none): its cost key then names the
+    variant's params."""
+    if not n.info.get("variants"):
+        return n
+    return dataclasses.replace(n, params=params_with(n, as_variant(option)))
 
 
 def choosing_producer(n: Node, nodes: List[Node], options: Dict[int, List[str]]) -> Optional[Node]:
@@ -53,21 +84,6 @@ def choosing_producer(n: Node, nodes: List[Node], options: Dict[int, List[str]])
     if len(found) > 1:
         raise NotImplementedError(f"node {n.graph_idx} ({n.name}) reads {len(found)} nodes that have several options")
     return next(iter(found.values()), None)
-
-
-def producer_grids(n: Node, nodes: List[Node], override: Optional[Tuple[int, tuple]] = None) -> List[Optional[tuple]]:
-    """Per input of n, the grid of the node that writes it (None: a graph input); override = (graph_idx, grid) replaces one
-    producer's grid. Route with override (26, (7, 14, 1)): [(7, 14, 1), None]."""
-    grids = []
-    for t in n.inputs:
-        p = producer_of(t, nodes)
-        if p is None:
-            grids.append(None)
-        elif override and p.graph_idx == override[0]:
-            grids.append(override[1])
-        else:
-            grids.append(p.grid)
-    return grids
 
 
 def tasks_of(pk, n: Node, grid: tuple, gpu: int, num_gpus: int):
@@ -83,12 +99,18 @@ def tasks_of(pk, n: Node, grid: tuple, gpu: int, num_gpus: int):
 
 
 def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: Optional[dict] = None,
-                start_from: Optional[dict] = None) -> Tuple[dict, dict]:
-    """Returns (plan, summary): plan = {"grids", "lists"} for compiler.compile_plan; summary = the solver's status, predicted
-    time, lower bound, solve time, chosen grids. given: a plan (e.g. the K3 demo's hand plan) whose grids and lists are fixed, so
-    the solver only computes its time with the same durations (to compare with the searched plan). start_from: a plan the
-    free search starts from (its times computed as for `given`, then handed to the solver as a hint): the search returns it or
-    a plan the model predicts faster."""
+                start_from: Optional[dict] = None, fixed_nodes: Optional[List[int]] = None,
+                keep_grids: bool = False) -> Tuple[dict, dict]:
+    """Returns (plan, summary): plan = {"grids", "lists"} (and "variants" when a node has template variants) for
+    compiler.compile_plan; summary = the solver's status, predicted time, lower bound, solve time, chosen grids. given: a plan
+    (e.g. the K3 demo's hand plan) whose grids and lists are fixed, so the solver only computes its time with the same durations
+    (to compare with the searched plan). start_from: a plan the free search starts from (its times computed as for `given`,
+    then handed to the solver as a hint): the search returns it or a plan the model predicts faster. fixed_nodes (with
+    start_from): nodes whose option, SMs and order on each SM the free search keeps from start_from (the loop fixes the nodes of
+    the phases its model is not trusted on: loop/model.py); the other nodes' tasks may go anywhere, also between them.
+    keep_grids (with start_from): every node keeps start_from's grid; only the placement and order are searched."""
+    if (fixed_nodes or keep_grids) and not start_from:
+        raise ValueError("fixed_nodes / keep_grids need start_from (the plan they are kept from)")
     num_gpus, num_sms = pk.num_gpus, pk._num_sms()             # StaticMegakernel.num_gpus, num_sms
     nodes = graph_nodes(pk)
     by_idx = {n.graph_idx: n for n in nodes}                    # graph_idx -> Node, e.g. by_idx[29] = the topk_route node
@@ -97,7 +119,7 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     is_pool = lambda n: n.info["one_task_per_sm"] and cost.pool_us(n) is not None
 
     # step 1: every node's options (its possible grids, as names)
-    options = {n.graph_idx: [option_id(g) for g in candidate_grids(n)] for n in nodes}
+    options = {n.graph_idx: node_options(n) for n in nodes}
     all_options = {k: list(v) for k, v in options.items()}     # before the options without measured times are left out
 
     # step 2: durations. own[(node, option)] = us for a node whose time depends only on its own grid; by_producer[node] =
@@ -112,17 +134,18 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
         p = choosing_producer(n, nodes, options)
         if p is None:
             for opt in options[n.graph_idx]:
-                us = cost.task_us(n, as_grid(opt), producer_grids(n, nodes))
+                nv = with_variant(n, opt)
+                us = cost.task_us(nv, as_grid(opt), producer_grids(n, nodes))
                 if us is not None:
                     own[(n.graph_idx, opt)] = us
-                    first = cost.first_us(n, as_grid(opt), producer_grids(n, nodes)) if hasattr(cost, "first_us") else None
+                    first = cost.first_us(nv, as_grid(opt), producer_grids(n, nodes)) if hasattr(cost, "first_us") else None
                     if first is not None and first > us:
                         first_extra[(n.graph_idx, opt)] = first - us
         else:
             by_producer[n.graph_idx] = {}
             for opt in options[n.graph_idx]:
                 for popt in options[p.graph_idx]:
-                    us = cost.task_us(n, as_grid(opt), producer_grids(n, nodes, (p.graph_idx, as_grid(popt))))
+                    us = cost.task_us(with_variant(n, opt), as_grid(opt), producer_grids(n, nodes, (p.graph_idx, as_grid(popt))))
                     if us is not None:
                         by_producer[n.graph_idx].setdefault(opt, {})[(p.graph_idx, popt)] = us
     # keep an option only if it has a time and every node reading its output has a time for it
@@ -219,7 +242,9 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     given = given or start_from                         # start_from: fixed first (its times), then the free search from it
     if given:
         fixed_post = set()                              # the tasks listed after the pool entry on their SM
-        fixed_options = {n.graph_idx: option_id(tuple(given["grids"].get(n.graph_idx, n.grid))) for n in nodes}
+        given_variants = given.get("variants") or {}
+        fixed_options = {n.graph_idx: option_id(tuple(given["grids"].get(n.graph_idx, n.grid)), full_variant(n, given_variants.get(n.graph_idx)))
+                         for n in nodes}
         fixed_lists = {}
         for gpu_set, gpus in gpu_sets.items():
             g0 = gpus[0]
@@ -246,9 +271,14 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
                    min(time_limit_s, 300) if start_from else time_limit_s, workers,
                    fixed_options=fixed_options, fixed_lists=fixed_lists, concurrent=together, fixed_post=fixed_post)
     if start_from and result.status in ("OPTIMAL", "FEASIBLE"):
-        print(f"search: start plan predicted {result.predicted_us} us; free search from it", flush=True)
+        print(f"search: start plan predicted {result.predicted_us} us; free search from it"
+              + (f", nodes {sorted(fixed_nodes)} kept as they are" if fixed_nodes else ""), flush=True)
+        keep = set(fixed_nodes or ())
+        part_options = dict(fixed_options) if keep_grids else ({k: v for k, v in fixed_options.items() if k in keep} or None)
+        part_lists = {g: [[t for t in sm_list if where[t][0] in keep] for sm_list in per_sm] for g, per_sm in fixed_lists.items()} \
+            if keep else None
         free = solve(groups, tasks, deps, pools, list(gpu_sets), num_sms, max_placed_per_sm, time_limit_s, workers,
-                     concurrent=together, hint=result)
+                     fixed_options=part_options, fixed_lists=part_lists, concurrent=together, hint=result)
         if free.status in ("OPTIMAL", "FEASIBLE") and free.predicted_us <= result.predicted_us:
             result = free
         else:
@@ -261,6 +291,7 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     # owned row block; the SM's pool task (task x = SM x) goes between the tasks before the pool and the tasks after it (the
     # solver's post: the tasks reading its output, and the tasks it chose to run after it).
     grids = {n.graph_idx: as_grid(result.chosen[n.graph_idx]) for n in nodes if n.info["changeable_grid_dims"]}
+    variants = {n.graph_idx: as_variant(result.chosen[n.graph_idx]) for n in nodes if n.info.get("variants")}
     pool_nodes = [n.graph_idx for n in nodes if is_pool(n)]
     after_pool = result.post
     lists = [None] * num_gpus
@@ -281,7 +312,10 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     print(f"search: {summary}", flush=True)
     summary["candidates"], summary["timeline"] = prediction(nodes, all_options, options, own, by_producer, is_pool, result, where,
                                                             gpu_sets, pools)
-    return {"grids": grids, "lists": lists}, summary
+    plan = {"grids": grids, "lists": lists}
+    if variants:
+        plan["variants"] = variants
+    return plan, summary
 
 
 def prediction(nodes, all_options, options, own, by_producer, is_pool, result, where, gpu_sets, pools) -> Tuple[list, dict]:
@@ -312,19 +346,6 @@ def prediction(nodes, all_options, options, own, by_producer, is_pool, result, w
 
 
 # ---------------- durations from cost records ----------------
-def cost_key(node: Node, grid: tuple, producer_grids: Optional[list] = None) -> dict:
-    """The key of a task's cost record: what decides its time, read from the node as its layer declared it: its params, its tensors'
-    shapes, its grid, and the grids of the nodes that write the inputs its layer lists in cost_inputs (the inputs whose split
-    changes its time; none: no "inputs" field; producer_grids None: none either, as for a pool). The record's task type is the
-    node's name. topk_route after the router in 14 K parts: {"params": [896, 16], "shapes": [[8, 896], [896], [8, 16]],
-    "grid": [8, 1, 1], "inputs": {"0": [7, 14, 1]}}."""
-    key = {"params": list(node.params), "shapes": [list(dims(t)) for t in node.inputs + node.outputs], "grid": list(grid)}
-    which = node.info["cost_inputs"]
-    if producer_grids is not None and which:
-        key["inputs"] = {str(i): list(producer_grids[i]) if producer_grids[i] is not None else None for i in which}
-    return key
-
-
 class Costs:
     """The durations search_plan needs, from cost record files (the median of the records of a task type and key, cost_key), of
     one kernel version (code: static_schedule.code_tag; None: any) on one GPU type (gpu: the device name, e.g. "NVIDIA B300 SXM6
