@@ -42,6 +42,12 @@ __device__ __forceinline__ float ld_relaxed_f32(float const *p) {
   return v;
 }
 
+// Write a value that another SM polls (data as the flag): a GPU-scope store.
+__device__ __forceinline__ void st_relaxed_f32(float *p, float v) {
+  asm volatile("st.relaxed.gpu.global.f32 [%0], %1;" ::"l"(p), "f"(v)
+               : "memory");
+}
+
 // Fill the scale chunk at shared-memory address dst with UE8M0 1.0.
 // Each byte is 127 (exponent zero). Each of the 128 threads writes one word.
 // The fence orders each thread's stores before the later tcgen05.cp.

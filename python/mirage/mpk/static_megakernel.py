@@ -561,7 +561,8 @@ class StaticMegakernel(PersistentKernel):
         if route is None or route.name != "topk_route" or list(route.params[:2]) != [E, K]:
             raise ValueError(f"scaled_moe_experts_layer: the pairs must be a topk_route node's over the {E} experts of w13")
         hq = self._scratch("scaled_moe_experts.h_q", NSLOT * T * IR)          # every row written before its counter lets W2 read it
-        hsf = self._scratch("scaled_moe_experts.h_q_scales", NSLOT * T * KT2 * 4)   # written before its counter lets W2 read it
+        # the h_q scales, 0xFF (NaN) before each launch: the W2 epilogue polls the values themselves (data as the flag)
+        hsf = self._scratch("scaled_moe_experts.h_q_scales", NSLOT * T * KT2 * 4, 0xFF)
         w13_pieces, w2_pieces = E * 2 * IR * L // 16384, E * L * IR // 16384   # one 128 x 128 e4m3 piece: 16 KB
         bufs = [hq, hsf, self._tensor_slot(w13_scales),
                 self._scratch("scaled_moe_experts.h32", NSLOT * T * IR * 4 + NSLOT * (IR // 64) * T * 4),   # h (fp32), its amax

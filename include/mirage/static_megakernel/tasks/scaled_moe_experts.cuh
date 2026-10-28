@@ -177,7 +177,9 @@ __device__ __forceinline__ void
 // node). Counter pairc[slot][mt / 2] (zero before each launch) counts the
 // items of the group of 128 features. The item that finishes second writes
 // the h_q of the group ([NSLOT x T][IR] e4m3) and its scales (hs
-// [NSLOT][T][KT2]). Then it adds 2 to CHQ[slot] (release; W2 waits for MT13).
+// [NSLOT][T][KT2], 0xFF before each launch: the W2 epilogue polls them). Then
+// it adds 2 to CHQ[slot] (release; the W2 loaders wait for MT13 before the h_q
+// TMA).
 // Memory order: all threads store, then bar.sync, then thread 64 does the
 // acq_rel add (a cumulative release; for the second item also the acquire).
 // After the next bar.sync, the second item reads with gpu-scope relaxed loads.
@@ -242,7 +244,8 @@ __device__ __forceinline__ void h_quant_pair(float *h32,
     if (row == 0) {
 #pragma unroll
       for (int t = 0; t < T; t++) {
-        hs[((size_t)slot * T + t) * KT2 + kt2] = s[t];
+        // the W2 epilogue polls these values (0xFF before the launch)
+        st_relaxed_f32(hs + ((size_t)slot * T + t) * KT2 + kt2, s[t]);
       }
     }
     asm volatile("bar.sync 1, 128;" ::: "memory");
@@ -317,7 +320,7 @@ struct Smem {
   static_assert(OFF_W2BAR % 1024 == 0, "128-B swizzled tiles are 1024-aligned");
   // ---- W2 ring: one tile per stage (KT2 x 16 KB weight pieces | h_q KT2 KB)
   // at the offsets of moe_experts.cuh's W2 ring ----
-  static constexpr int W2_ST = 3;
+  static constexpr int W2_ST = 3; // W2 ring stages (a 4th: no faster)
   static constexpr int W2_HQ =
       (RES::KT2 * 16384 + RES::KT2 * SF_CHUNK + 1023) / 1024 * 1024;
   static constexpr int W2_STB =
@@ -331,16 +334,24 @@ struct Smem {
   static_assert(RES::KT2 <= 2 && CONST_SF + 4 <= PROMO_COL1,
                 "scaled_moe_experts: W2 K <= 256 (two accumulator halves)");
 };
-// mbarriers and one word in the (otherwise unused) OFF_W2BAR area: full [3],
-// empty [3], ready (warp 0 has re-laid the ring), then warp 7's ring stage
-// counter (W13 stages it has armed)
+// mbarriers and one word in the (otherwise unused) OFF_W2BAR area: full
+// [W2_ST], empty [W2_ST], ready (warp 0 has re-laid the ring), then warp 7's
+// ring stage counter (W13 stages it has armed)
 template <class RES>
 __device__ __forceinline__ uint32_t w2_bar(uint32_t base, int i) {
   return base + Smem<RES>::OFF_W2BAR + 8 * i;
 }
 template <class RES>
+__device__ __forceinline__ uint32_t w2_empty(uint32_t base, int s) {
+  return w2_bar<RES>(base, Smem<RES>::W2_ST + s);
+}
+template <class RES>
+__device__ __forceinline__ uint32_t w2_ready(uint32_t base) {
+  return w2_bar<RES>(base, 2 * Smem<RES>::W2_ST);
+}
+template <class RES>
 __device__ __forceinline__ uint32_t w2_w7gl(uint32_t base) {
-  return base + Smem<RES>::OFF_W2BAR + 64;
+  return base + Smem<RES>::OFF_W2BAR + 8 * (2 * Smem<RES>::W2_ST + 2);
 }
 
 // Arm W2 tile k of this SM:
@@ -364,7 +375,7 @@ __device__ __forceinline__ void w2_arm(Maps const &maps,
   constexpr int OT2 = RES::OT2, KT2 = RES::KT2;
   int const s = k % W2_ST;
   if (k >= W2_ST) {
-    mbar_wait(w2_bar<RES>(base, 3 + s), ((k / W2_ST) - 1) & 1);
+    mbar_wait(w2_empty<RES>(base, s), ((k / W2_ST) - 1) & 1);
   }
   uint32_t const st = base + s * W2_STB, f = w2_bar<RES>(base, s);
   int const p0 = ex * (OT2 * KT2) + ot * KT2;
@@ -390,6 +401,48 @@ __device__ __forceinline__ void w2_arm(Maps const &maps,
     chk_slot = slot;
   }
   tma3(&maps.m[RES::HQ_KT], f, st + W2_HQ, 0, slot * T, 0, EVICT_LAST);
+}
+
+// the epilogue's scales of a W2 entry (slot, tiles ot0 .. ot0 + nt - 1): the
+// weight scales sw[tile][kt] (a graph input) and the h_q scales sh[kt][t] of
+// the slot. The h_q scales are 0xFF (NaN) until the slot's W13 items write them
+// (h_quant_pair, before the CHQ release), so a loaded value that is not NaN is
+// the value: one round trip, no acquire of CHQ. w2_scales_load issues the
+// loads; w2_scales_ready tells whether every h_q scale has arrived.
+template <class RES>
+struct W2EntryScales {
+  float sw[2][2], sh[2][T];
+};
+template <class RES>
+__device__ __forceinline__ void w2_scales_load(
+    G const &g, int ex, int slot, int ot0, int nt, W2EntryScales<RES> &s) {
+  constexpr int OT2 = RES::OT2, KT2 = RES::KT2;
+  float const *w2s =
+      buf_at<float const>(g, RES::W2SF) + ((size_t)ex * OT2 + ot0) * KT2;
+  float const *hs = buf_at<float const>(g, RES::HSF) + (size_t)slot * T * KT2;
+#pragma unroll
+  for (int i = 0; i < 2; i++)
+#pragma unroll
+    for (int kt = 0; kt < 2; kt++) {
+      s.sw[i][kt] = (i < nt && kt < KT2) ? w2s[i * KT2 + kt] : 0.0f;
+    }
+#pragma unroll
+  for (int kt = 0; kt < 2; kt++)
+#pragma unroll
+    for (int t = 0; t < T; t++) {
+      s.sh[kt][t] = kt < KT2 ? ld_relaxed_f32(hs + t * KT2 + kt) : 0.0f;
+    }
+}
+template <class RES>
+__device__ __forceinline__ bool w2_scales_ready(W2EntryScales<RES> const &s) {
+  bool ok = true;
+#pragma unroll
+  for (int kt = 0; kt < 2; kt++)
+#pragma unroll
+    for (int t = 0; t < T; t++) {
+      ok = ok && !isnan(s.sh[kt][t]);
+    }
+  return ok;
 }
 
 // all 8 warps of the SM, until the queue is empty. gl / gi0 / gi1: ring stage
@@ -419,9 +472,9 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
   if (threadIdx.x == 0) {
     for (int i = 0; i < W2_ST; i++) {
       mbar_init(w2_bar<RES>(base, i), 1);
-      mbar_init(w2_bar<RES>(base, 3 + i), 1);
+      mbar_init(w2_empty<RES>(base, i), 1);
     }
-    mbar_init(w2_bar<RES>(base, 6), 1);
+    mbar_init(w2_ready<RES>(base), 1);
     asm volatile("st.shared.u32 [%0], %1;" ::"r"(w2_w7gl<RES>(base)), "r"(gl)
                  : "memory");
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
@@ -549,7 +602,7 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
                 mbar_wait(rt.empty0 + 8 * st0, (gq / SMAX) & 1);
               }
             }
-            mbar_arrive(w2_bar<RES>(base, 6)); // warp 7 may load its W2 tiles
+            mbar_arrive(w2_ready<RES>(base)); // warp 7 may load its W2 tiles
             switched = true;
           }
           int const slot = e.a / OT2, ex = eid_s[slot], ot0 = e.a - slot * OT2;
@@ -624,7 +677,7 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
           if (issuer_lane<true>()) { // one K tile in each accumulator half
             issue_w2_promoted<IDESC_MX_E4M3, KT2, W2_HQ>(
                 baseu + s * W2_STB, tbu + 8 * a, tbu + SM_::CONST_SF);
-            tc_commit(w2_bar<RES>(baseu, 3 + s));
+            tc_commit(w2_empty<RES>(baseu, s));
             tc_commit(rt.acc_full0 + 8 * a);
           }
         }
@@ -658,7 +711,7 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
       }
       if (e.kind == QE_W2) {
         if (!ready) {
-          mbar_wait(w2_bar<RES>(base, 6), 0);
+          mbar_wait(w2_ready<RES>(base), 0);
           ready = true;
         } // warp 0 has re-laid the ring
         if (lane == 0) {
@@ -690,6 +743,9 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
              warp <=
                  5) { // the epilogue, 128 threads (TMEM lane quadrant warp & 3)
     int wtt0 = wt;
+    // the scales of the next W2 entry, loaded while this one drains
+    W2EntryScales<RES> sc, nx;
+    int nx_qn = -1;
     for (int qn = 0;; qn++) {
       int const qpos = qn % W2QD;
       mbar_wait(rt.qfull0 + 8 * qpos, (qn / W2QD) & 1);
@@ -699,33 +755,37 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
       }
       if (e.kind == QE_W2) { // racc row (t, k) = weight(t) * result, for
                              // the slot's tokens (plain stores)
+        int const slot = e.a / OT2, ot0 = e.a - slot * OT2;
+        if (nx_qn == qn) {
+          sc = nx;
+        } else {
+          w2_scales_load<RES>(g, eid_s[slot], slot, ot0, e.b, sc);
+        }
+        // the next entry: warp 0 publishes W2 entries ahead without waiting
+        // for this one, so the wait returns; its loads fly during this entry
+        {
+          int const qn1 = qn + 1, qpos1 = qn1 % W2QD;
+          mbar_wait(rt.qfull0 + 8 * qpos1, (qn1 / W2QD) & 1);
+          QueueEntry const e1{w2q[qpos1][0], w2q[qpos1][1], w2q[qpos1][2]};
+          nx_qn = -1;
+          if (e1.kind == QE_W2) {
+            int const s1 = e1.a / OT2;
+            w2_scales_load<RES>(g, eid_s[s1], s1, e1.a - s1 * OT2, e1.b, nx);
+            nx_qn = qn1;
+          }
+        }
+        while (!w2_scales_ready<RES>(sc)) { // the slot's W13 items not done
+          __nanosleep(32);
+          w2_scales_load<RES>(g, eid_s[slot], slot, ot0, e.b, sc);
+        }
         for (int item = 0; item < e.b; item++) {
           int const wtt = wtt0 + item, a = wtt & 3, par = (wtt >> 2) & 1,
-                    w = e.a + item, slot = w / OT2, ot = w - slot * OT2,
-                    nt = ntok_s[slot];
+                    ot = ot0 + item, nt = ntok_s[slot];
           int const lg = warp & 3, row = lg * 32 + lane;
           float v[8];
-          // the weight and h_q scales of the tile, read before the wait
-          float sw[2], sh[2][T];
-          float const *w2s = buf_at<float const>(g, RES::W2SF) +
-                             ((size_t)eid_s[slot] * OT2 + ot) * KT2;
-          float const *hs = buf_at<float const>(g, RES::HSF);
-          cnt_wait(g.cnt + RES::CHQ + slot,
-                   MT13); // acquire: the h_q scales of the slot are ready
-#pragma unroll
-          for (int kt = 0; kt < 2; kt++) {
-            sw[kt] = kt < KT2 ? w2s[kt] : 0.0f;
-#pragma unroll
-            for (int t = 0; t < T; t++) {
-              sh[kt][t] =
-                  kt < KT2
-                      ? ld_relaxed_f32(hs + ((size_t)slot * T + t) * KT2 + kt)
-                      : 0.0f;
-            }
-          }
           mbar_wait(rt.acc_full0 + 8 * a, par);
           fence_after();
-          drain_w2_promoted<KT2>(tb, a, sw, sh, v);
+          drain_w2_promoted<KT2>(tb, a, sc.sw[item], sc.sh, v);
           fence_before();
           mbar_arrive(rt.acc_empty0 + 8 * a);
           for (int i = 0; i < nt; i++) {
