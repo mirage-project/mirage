@@ -2531,9 +2531,11 @@ static int const *const static_list_begin[static_mk::GPUS] = {
     static_list_begin_gpu7};
 struct StaticGpu {
   cudaStream_t stream = nullptr;
-  cudaEvent_t end =
-      nullptr; // recorded after the kernel (static_wait, static_done)
-  StaticTask *tasks = nullptr;         // the per-SM task table on the GPU
+  cudaEvent_t start =
+      nullptr; // recorded right before the kernel (static_elapsed)
+  cudaEvent_t end = nullptr;   // recorded after the kernel (static_wait,
+                               // static_done, static_elapsed)
+  StaticTask *tasks = nullptr; // the per-SM task table on the GPU
   unsigned long long *times = nullptr; // timing build: the per-task times
 };
 #define STATIC_PROFILE 0
@@ -2569,6 +2571,7 @@ static void
   for (int g = 0; g < n; g++) {
     ST_CK(cudaSetDevice(g));
     ST_CK(cudaStreamCreate(&g_st[g].stream));
+    ST_CK(cudaEventCreate(&g_st[g].start));
     ST_CK(cudaEventCreate(&g_st[g].end));
     ST_CK(cudaFuncSetAttribute(layer_kernel,
                                cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -2617,7 +2620,7 @@ static void
                        {"buf.11", "out routed_sum_partial 1835008 -1 0"},
                        {"buf.12", "exchange r_sent 458752 255 1"},
                        {"buf.13", "tensor routed_expert_norm_weight 3584 -1 0"},
-                       {"buf.14", "scratch sum_rmsnorm.ss_part 0 255 0"},
+                       {"buf.14", "scratch sum_rmsnorm.ss_part 128 255 0"},
                        {"buf.15", "out routed_normed 57344 255 0"},
                        {"buf.16", "out shared_summed 114688 255 1"},
                        {"buf.17", "out latent_up_partial 200704 255 1"},
@@ -2663,9 +2666,10 @@ static void
   }
 }
 
-// one launch on every GPU: per GPU the resets on its stream; wait for every GPU
-// (so all GPUs start together); then per GPU: kernel, event
-static void static_launch() {
+// per GPU the resets of the next launch on its stream; then wait for every GPU
+// (serving mode, STATIC_RESET_IN_KERNEL: the kernel resets its own buffers, no
+// wait)
+static void static_reset() {
   int const n = (int)g_st.size();
   for (int g = 0; g < n; g++) {
     StaticGpu &s = g_st[g];
@@ -2678,13 +2682,36 @@ static void static_launch() {
                             s.stream));
     }
   }
+#ifndef STATIC_RESET_IN_KERNEL
   for (int g = 0; g < n; g++) {
     ST_CK(cudaSetDevice(g));
     ST_CK(cudaStreamSynchronize(g_st[g].stream));
   }
+#endif
+}
+
+// one launch on every GPU: reset = true: static_reset first (every GPU's resets
+// done, so all GPUs start together); false: the caller ran static_reset (e.g.
+// then emptied L2, so the reset buffers are not in L2 at the start); then per
+// GPU: event, kernel, event. Serving mode (STATIC_RESET_IN_KERNEL): no host
+// wait; per GPU on its stream the flush of flush_bytes (> 0; L2 emptied) and
+// the GPUs' line-up (host.cuh static_host_prelude), then event, kernel, event
+// (the events time the launch as a server sees it: static_elapsed)
+static void static_launch(size_t flush_bytes, bool reset) {
+  int const n = (int)g_st.size();
+  if (reset) {
+    static_reset();
+  }
+#ifndef STATIC_RESET_IN_KERNEL
+  (void)flush_bytes;
+#endif
   for (int gpu = 0; gpu < n; gpu++) {
     StaticGpu &s = g_st[gpu];
     ST_CK(cudaSetDevice(gpu));
+#ifdef STATIC_RESET_IN_KERNEL
+    static_host_prelude(gpu, s.stream, flush_bytes, (unsigned)(g_launches + 1));
+#endif
+    ST_CK(cudaEventRecord(s.start, s.stream));
     {
       cudaLaunchConfig_t cfg = {};
       cfg.gridDim = dim3(static_mk::NSM);
@@ -2708,6 +2735,22 @@ static void static_launch() {
     ST_CK(cudaEventRecord(s.end, s.stream));
   }
   g_launches++;
+}
+
+// per GPU the time between the last launch's two events, in microseconds (after
+// static_wait)
+static cudaError_t static_elapsed(std::vector<float> &us) {
+  us.assign(g_st.size(), 0.f);
+  for (size_t g = 0; g < g_st.size(); g++) {
+    ST_CK(cudaSetDevice((int)g));
+    float ms = 0.f;
+    cudaError_t const e = cudaEventElapsedTime(&ms, g_st[g].start, g_st[g].end);
+    if (e != cudaSuccess) {
+      return e;
+    }
+    us[g] = ms * 1000.f;
+  }
+  return cudaSuccess;
 }
 
 // wait for every GPU's end event
@@ -2779,6 +2822,7 @@ static void static_finalize() {
     if (s.times) {
       cudaFree(s.times);
     }
+    cudaEventDestroy(s.start);
     cudaEventDestroy(s.end);
     cudaStreamDestroy(s.stream);
   }
@@ -2820,8 +2864,32 @@ static PyObject *py_init(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 static PyObject *py_launch(PyObject *self, PyObject *args) {
-  static_launch();
+  unsigned long long flush_bytes = 0;
+  int reset = 1;
+  if (!PyArg_ParseTuple(args, "|Ki", &flush_bytes, &reset)) {
+    return NULL;
+  }
+  static_launch((size_t)flush_bytes, reset != 0);
   Py_RETURN_NONE;
+}
+static PyObject *py_reset(PyObject *self, PyObject *args) {
+  static_reset();
+  Py_RETURN_NONE;
+}
+static PyObject *py_elapsed(PyObject *self, PyObject *args) {
+  std::vector<float> us;
+  cudaError_t const err = static_elapsed(us);
+  if (err != cudaSuccess) {
+    PyErr_Format(PyExc_RuntimeError,
+                 "event times not readable: %s",
+                 cudaGetErrorString(err));
+    return NULL;
+  }
+  PyObject *out = PyList_New((Py_ssize_t)us.size());
+  for (size_t g = 0; g < us.size(); g++) {
+    PyList_SetItem(out, (Py_ssize_t)g, PyFloat_FromDouble(us[g]));
+  }
+  return out;
 }
 static PyObject *py_wait(PyObject *self, PyObject *args) {
   cudaError_t err;
@@ -2874,33 +2942,41 @@ static PyObject *py_read(PyObject *self, PyObject *args) {
 // (config.cuh, and the timing build's per-entry slots)
 static PyObject *py_layout(PyObject *self, PyObject *args) {
   using namespace static_mk;
-  return Py_BuildValue("{s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:O,s:i,s:i,s:i}",
-                       "num_gpus",
-                       static_mk::GPUS,
-                       "num_sms",
-                       static_mk::NSM,
-                       "counter_lines",
-                       NODE_COUNTER_LINES,
-                       "counters_per_line",
-                       NCNT / NODE_COUNTER_LINES,
-                       "num_stamps",
-                       NSTAMP,
-                       "stamp_start",
-                       STAMP_START,
-                       "stamp_task0",
-                       STAMP_TASK0,
-                       "stamp_task1",
-                       STAMP_TASK1,
-                       "stamp_end",
-                       STAMP_END,
-                       "profile",
-                       STATIC_PROFILE ? Py_True : Py_False,
-                       "max_tasks",
-                       (int)(static_mk::MAX_TASKS_PER_SM),
-                       "time_slots",
-                       11,
-                       "warps",
-                       8);
+#ifdef STATIC_RESET_IN_KERNEL
+  PyObject *const serving = Py_True;
+#else
+  PyObject *const serving = Py_False;
+#endif
+  return Py_BuildValue(
+      "{s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:i,s:O,s:i,s:i,s:i,s:O}",
+      "num_gpus",
+      static_mk::GPUS,
+      "num_sms",
+      static_mk::NSM,
+      "counter_lines",
+      NODE_COUNTER_LINES,
+      "counters_per_line",
+      NCNT / NODE_COUNTER_LINES,
+      "num_stamps",
+      NSTAMP,
+      "stamp_start",
+      STAMP_START,
+      "stamp_task0",
+      STAMP_TASK0,
+      "stamp_task1",
+      STAMP_TASK1,
+      "stamp_end",
+      STAMP_END,
+      "profile",
+      STATIC_PROFILE ? Py_True : Py_False,
+      "max_tasks",
+      (int)(static_mk::MAX_TASKS_PER_SM),
+      "time_slots",
+      11,
+      "warps",
+      8,
+      "serving",
+      serving);
 }
 static PyObject *py_finalize(PyObject *self, PyObject *args) {
   static_finalize();
@@ -2912,7 +2988,21 @@ static PyMethodDef StaticMethods[] = {
      METH_VARARGS,
      "the graph's tensors of every GPU (names, pointers): the buffers and "
      "maps"},
-    {"launch_func", py_launch, METH_NOARGS, "one launch on every GPU"},
+    {"launch_func",
+     py_launch,
+     METH_VARARGS,
+     "([flush bytes, reset = 1]) one launch on every GPU; flush bytes: serving "
+     "mode, L2 emptied on the stream first; reset 0: "
+     "static_reset ran before"},
+    {"reset_func",
+     py_reset,
+     METH_NOARGS,
+     "the next launch's resets on every GPU, then wait for them"},
+    {"elapsed_func",
+     py_elapsed,
+     METH_NOARGS,
+     "per GPU the microseconds between the events around the last launch's "
+     "kernel"},
     {"wait_func", py_wait, METH_NOARGS, "wait for every GPU"},
     {"done_func",
      py_done,
