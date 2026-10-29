@@ -1080,7 +1080,7 @@ void Graph::register_task_for_op(KNOperator const *op,
   }
 
   else {
-    printf("Unsupported task name: %s\n", name);
+    printf("Unsupported task name: %s\n", name.c_str());
     assert(false && "Unsupported task type");
   }
 }
