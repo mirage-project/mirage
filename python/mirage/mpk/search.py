@@ -21,18 +21,21 @@ search_plan does, with the MoE layer's numbers:
                 static_schedule.MAX_TASKS_PER_SM minus the end entry and the pool's task), the layer's end as early as possible
   6. plan       "grids": the chosen grid of each node with changeable grid dims; "lists": for every GPU, the solver's per-SM
                 lists of its GPU set, each task moved from the set's first GPU's positions to this GPU's own positions
-cost: task_us(node, grid, producer_grids) -> us or None (not measured); optional first_us(node, grid, producer_grids) -> its time
-when it is the first task on its SM, or None (the same as task_us; solver rule 6); pool_us(node) -> a pool's total work (us, summed over
-the SMs) or None if the node is not a pool: Costs below.
+cost: task_us(node, grid, producer_grids) -> us or None (not measured); optional prefetch_us(node, grid) -> the part of its time
+that needs no input (solver rule 7); optional first_us(node, grid, producer_grids) -> its time when it is the first task on its
+SM, or None (the same as task_us; solver rule 6); pool_us(node) -> a pool's total work (us, summed over the SMs) or None if the
+node is not a pool: Costs below.
 """
 import itertools
 import json
 import os
 import statistics
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from . import static_schedule
-from .compiler import (Node, box, can_pair, candidate_grids, dims, graph_nodes, overlaps, owned_positions, producer_of, tname)
+from .compiler import (Node, box, can_pair, candidate_grids, dims, graph_nodes, overlaps, owned_positions, pair_clusters,
+                       producer_of, tname)
+from . import solver_cumulative
 from .solver import Pool, SolverTask, solve
 
 
@@ -47,11 +50,23 @@ def as_grid(option: str) -> tuple:
 
 
 def choosing_producer(n: Node, nodes: List[Node], options: Dict[int, List[str]]) -> Optional[Node]:
-    """The node with several options that writes one of n's inputs, or None. Route: the router. The router: None (its inputs
-    are graph inputs). A node reading the outputs of two such nodes is not handled (raises)."""
-    found = {p.graph_idx: p for p in (producer_of(t, nodes) for t in n.inputs) if p is not None and len(options[p.graph_idx]) > 1}
+    """Return the node with more than one option that the solver must choose together with n, or None.
+    1. If a cost input of n (an input whose producer grid changes the time of n, cost_key) comes from such a node, return
+       it. For topk_route, the result is the router. If two cost inputs come from two such nodes, raise
+       NotImplementedError.
+    2. Else, if exactly one input of n comes from such a node, return it. Its options give the same time of n.
+    3. Else return None. For the router, all inputs are graph inputs. dsa_index_score reads two GEMMs that have several
+       options, but its time does not depend on their grids."""
+    def multi(indices):
+        found = (producer_of(n.inputs[i], nodes) for i in indices)
+        return {p.graph_idx: p for p in found if p is not None and len(options[p.graph_idx]) > 1}
+    found = multi(n.info["cost_inputs"])
     if len(found) > 1:
         raise NotImplementedError(f"node {n.graph_idx} ({n.name}) reads {len(found)} nodes that have several options")
+    if not found:
+        found = multi(range(len(n.inputs)))
+        if len(found) > 1:
+            return None
     return next(iter(found.values()), None)
 
 
@@ -83,12 +98,16 @@ def tasks_of(pk, n: Node, grid: tuple, gpu: int, num_gpus: int):
 
 
 def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: Optional[dict] = None,
-                start_from: Optional[dict] = None) -> Tuple[dict, dict]:
+                start_from: Optional[dict] = None,
+                placement: Optional[Callable[[List[SolverTask]], dict]] = None) -> Tuple[dict, dict]:
     """Returns (plan, summary): plan = {"grids", "lists"} for compiler.compile_plan; summary = the solver's status, predicted
     time, lower bound, solve time, chosen grids. given: a plan (e.g. the K3 demo's hand plan) whose grids and lists are fixed, so
     the solver only computes its time with the same durations (to compare with the searched plan). start_from: a plan the
     free search starts from (its times computed as for `given`, then handed to the solver as a hint): the search returns it or
-    a plan the model predicts faster."""
+    a plan the model predicts faster. placement: the tasks -> solver.solve's placement rules {same_sm, cluster_pairs,
+    same_group, near, sm_group}; the cluster pairs of the nodes that can pair (can_pair) are added to them. The free search:
+    solver_cumulative.solve with the rules (no SM variables: fast with many options); when it cannot keep them
+    (NeedsPerSM: a cluster pair finds no SM pair, a task in two same_sm pairs), solver.solve (per-SM variables)."""
     num_gpus, num_sms = pk.num_gpus, pk._num_sms()             # StaticMegakernel.num_gpus, num_sms
     nodes = graph_nodes(pk)
     by_idx = {n.graph_idx: n for n in nodes}                    # graph_idx -> Node, e.g. by_idx[29] = the topk_route node
@@ -106,9 +125,13 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     own: Dict[Tuple[int, str], float] = {}
     first_extra: Dict[Tuple[int, str], float] = {}              # (node, option) -> its first-on-SM time minus own (solver rule 6)
     by_producer: Dict[int, Dict[str, Dict[Tuple[int, str], float]]] = {}
+    prefetch: Dict[Tuple[int, str], float] = {}                 # (node, option) -> cost.prefetch_us (solver rule 7)
     for n in nodes:
         if is_pool(n):
             continue                                            # not placed: a pool, e.g. moe_experts (see step 4)
+        if hasattr(cost, "prefetch_us"):
+            for opt in options[n.graph_idx]:
+                prefetch[(n.graph_idx, opt)] = cost.prefetch_us(n, as_grid(opt)) or 0.0
         p = choosing_producer(n, nodes, options)
         if p is None:
             for opt in options[n.graph_idx]:
@@ -152,8 +175,9 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     gpu_sets = {"gpus_" + "_".join(map(str, gpus)): gpus for gpus in gpu_sets.values()}     # e.g. "gpus_0_2_4_6": [0, 2, 4, 6]
 
     # step 4: per GPU set, the tasks of every option of every node (on the set's first GPU), their dependencies, the pool (the
-    # tasks it waits for, and the tasks that run after it), the concurrent groups
+    # tasks it waits for, and the tasks that run after it), the concurrent groups and the cluster pairs among them
     tasks, deps, pools, where, together = [], [], [], {}, []   # where[task id] = (node, option, relative position)
+    cluster_pairs = []                                          # (task id, task id): solver rule 9
     for gpu_set, gpus in gpu_sets.items():
         writers, readers = {}, []                       # tensor name -> [(slice, task id, node)]; [(task id, node, its reads)]
         for n in nodes:
@@ -168,10 +192,12 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
                         continue
                     if n.graph_idx in by_producer:      # topk_route: one duration per router option that is still kept
                         d = {k: us for k, us in by_producer[n.graph_idx][opt].items() if k[1] in options[k[0]]}
-                        tasks.append(SolverTask(tid, n.graph_idx, opt, gpu_set, max(d.values()), duration_by=d))
+                        tasks.append(SolverTask(tid, n.graph_idx, opt, gpu_set, max(d.values()), duration_by=d,
+                                                prefetch_us=prefetch.get((n.graph_idx, opt), 0.0)))
                     else:
                         tasks.append(SolverTask(tid, n.graph_idx, opt, gpu_set, own[(n.graph_idx, opt)],
-                                                first_extra_us=first_extra.get((n.graph_idx, opt), 0.0)))
+                                                first_extra_us=first_extra.get((n.graph_idx, opt), 0.0),
+                                                prefetch_us=prefetch.get((n.graph_idx, opt), 0.0)))
         placed = {t.id for t in tasks if t.gpu_set == gpu_set}
         pool_inputs, pool_readers = {}, {}              # pool node -> the placed tasks it waits for / that read its output
         set_deps = []
@@ -212,6 +238,10 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
                     by_key.setdefault(tuple(v for i, v in enumerate(rel) if i != a), []).append(
                         f"{gpu_set}:{n.graph_idx}:{opt}:{'.'.join(map(str, rel))}")
                 together += list(by_key.values())
+                # a group of 2 of a node that can pair (sum_rmsnorm, 2 tasks per token): compile_plan runs it on the 2 CTAs of
+                # a cluster (its cost is the cluster variant's) only when the plan has them there
+                if can_pair(n, as_grid(opt)):
+                    cluster_pairs += [tuple(ids) for ids in by_key.values()]
 
     # a given plan: fix every node's option (its grid in the plan, or its own grid) and every task's SM and order (its
     # positions moved to the GPU set's first GPU's relative positions)
@@ -220,11 +250,23 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     if given:
         fixed_post = set()                              # the tasks listed after the pool entry on their SM
         fixed_options = {n.graph_idx: option_id(tuple(given["grids"].get(n.graph_idx, n.grid))) for n in nodes}
+        # its lists as compile_plan runs them: the cluster pairs renumbered onto clusters (pair_clusters), so that as a hint
+        # the plan keeps rule 9; lists whose pairs do not fit stay as they are
+        paired = {n.graph_idx for n in nodes if can_pair(n, as_grid(fixed_options[n.graph_idx]))}
+
+        def given_lists(gpu):
+            if paired and given.get("cluster_launch", True):
+                try:
+                    return pair_clusters(nodes, paired, given["lists"][gpu], num_sms, gpu)
+                except ValueError:
+                    pass
+            return given["lists"][gpu]
+
         fixed_lists = {}
         for gpu_set, gpus in gpu_sets.items():
             g0 = gpus[0]
             fixed_lists[gpu_set] = []
-            for sm_list in given["lists"][g0]:
+            for sm_list in given_lists(g0):
                 ids, past_pool = [], False
                 for node, pos in sm_list:
                     n = by_idx[node]
@@ -242,13 +284,29 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     max_placed_per_sm = static_schedule.MAX_TASKS_PER_SM - 1 - sum(is_pool(n) for n in nodes)
     print(f"search: {len(nodes)} nodes, options per node {{{', '.join(f'{k}: {len(v)}' for k, v in options.items())}}}, "
           f"gpu_sets {list(gpu_sets.values())}, {len(tasks)} tasks over all options ({num_sms} SMs each)", flush=True)
-    result = solve(groups, tasks, deps, pools, list(gpu_sets), num_sms, max_placed_per_sm,
-                   min(time_limit_s, 300) if start_from else time_limit_s, workers,
-                   fixed_options=fixed_options, fixed_lists=fixed_lists, concurrent=together, fixed_post=fixed_post)
+    rules = placement(tasks) if placement else {}
+    if cluster_pairs:
+        rules = dict(rules, cluster_pairs=list(rules.get("cluster_pairs", ())) + cluster_pairs)
+    named = [k for k in ("same_sm", "cluster_pairs", "same_group", "near") if rules.get(k)]
+    print(f"search: free search by solver_cumulative.solve{' with ' + ', '.join(named) if named else ''}", flush=True)
+
+    def free_search(hint):
+        args = (groups, tasks, deps, pools, list(gpu_sets), num_sms, max_placed_per_sm, time_limit_s, workers)
+        try:
+            return solver_cumulative.solve(*args, concurrent=together, hint=hint, **rules)
+        except solver_cumulative.NeedsPerSM as e:
+            print(f"search: {e}; solver.solve instead", flush=True)
+        return solve(*args, concurrent=together, hint=hint, **rules)
+
+    if given:
+        result = solve(groups, tasks, deps, pools, list(gpu_sets), num_sms, max_placed_per_sm,
+                       min(time_limit_s, 300) if start_from else time_limit_s, workers,
+                       fixed_options=fixed_options, fixed_lists=fixed_lists, concurrent=together, fixed_post=fixed_post)
+    else:
+        result = free_search(None)
     if start_from and result.status in ("OPTIMAL", "FEASIBLE"):
         print(f"search: start plan predicted {result.predicted_us} us; free search from it", flush=True)
-        free = solve(groups, tasks, deps, pools, list(gpu_sets), num_sms, max_placed_per_sm, time_limit_s, workers,
-                     concurrent=together, hint=result)
+        free = free_search(result)
         if free.status in ("OPTIMAL", "FEASIBLE") and free.predicted_us <= result.predicted_us:
             result = free
         else:
@@ -325,19 +383,52 @@ def cost_key(node: Node, grid: tuple, producer_grids: Optional[list] = None) -> 
     return key
 
 
-class Costs:
-    """The durations search_plan needs, from cost record files (the median of the records of a task type and key, cost_key), of
-    one kernel version (code: static_schedule.code_tag; None: any) on one GPU type (gpu: the device name, e.g. "NVIDIA B300 SXM6
-    PC"; None: any). A record (cost_records.py): {"task_type", "key", "context": {"first_on_sm"}, "median_us", "machine": {"gpu"},
-    "code", ...}. A key with no record: None (search_plan leaves that choice out)."""
+def gemm_prefetch_bytes(params: list, grid) -> int:
+    """The weight bytes a gemm_tile task (params [mode, K, N, polled], grid (row tiles, K parts)) loads before its activation:
+    min(its K tiles, the ring's stages) stages of rows x 256 B."""
+    from .static_megakernel import RING_STAGES   # T <= 16's (the cost records' layers)
+    K, N = params[1], params[2]
+    return min(K // 128 // grid[1], RING_STAGES) * (N // grid[0]) * 256
 
-    def __init__(self, paths, code: Optional[str] = None, gpu: Optional[str] = None):
+
+class Costs:
+    """The durations search_plan needs, from cost record files, of one kernel version (code: static_schedule.code_tag; None:
+    any) on one GPU type (gpu: the device name, e.g. "NVIDIA B300 SXM6 PC"; None: any). A record (cost_records.py):
+    {"task_type", "key", "context": {"first_on_sm"}, "median_us", "samples", "machine": {"gpu"}, "code", ...}. A key with no
+    record: None (search_plan leaves that choice out).
+    model "prefetch" (the default): a task's time is the post of the prefetch model fitted to the samples of every record of its
+    task type and key (cost_records.fit_prefetch: end = max(enter + pre, ready) + post), and prefetch_us gives its pre (fitted
+    over the records of its type and grid, whatever their producers' grids). A key whose samples cannot place the knee: pre
+    falls back to a GEMM's up-front weight bytes / the fitted GEMMs' bytes per us (0 for other task types), clipped to what the
+    samples allow. model "pr": a task's time is the median over its records of median_us (end = max(enter, ready) + d; rule 6
+    from the first-on-SM records), no prefetch."""
+
+    def __init__(self, paths, code: Optional[str] = None, gpu: Optional[str] = None, model: str = "prefetch"):
+        assert model in ("pr", "prefetch")
+        self.model = model
         self.records = []
+        self._fits: Dict[str, Optional[tuple]] = {}
         for path in ([paths] if isinstance(paths, str) else list(paths or [])):
             if path and os.path.exists(path):
                 with open(path) as f:
                     self.records += [r for r in json.load(f)["records"] if (code is None or r.get("code") == code)
                                      and (gpu is None or (r.get("machine") or {}).get("gpu") == gpu)]
+
+    def fit(self, task_type: str, key: dict, any_inputs: bool = False) -> Optional[tuple]:
+        """The prefetch model of a task type and key, fitted to the samples of its records (any_inputs: of the records of that
+        type and grid, whatever their "inputs"): (pre, post, w_min, w_max, placed) as cost_records.fit_prefetch; None: no
+        samples."""
+        from .cost_records import fit_prefetch
+        strip = lambda k: {a: b for a, b in k.items() if a != "inputs"}
+        want = strip(key) if any_inputs else key
+        k = json.dumps([task_type, want, any_inputs], sort_keys=True)
+        if k not in self._fits:
+            recs = [r for r in self.records if r["task_type"] == task_type and r.get("samples")
+                    and (strip(r["key"]) if any_inputs else r["key"]) == want]
+            samples = [s for r in recs for s in r["samples"]]
+            weights = [r["n"] / len(r["samples"]) for r in recs for _ in r["samples"]]
+            self._fits[k] = fit_prefetch(samples, weights) if samples else None
+        return self._fits[k]
 
     def median(self, task_type: str, key: dict, first: Optional[bool] = None) -> Optional[float]:
         """The median of the records of this task type and key; first True / False: only the records of tasks first / not first
@@ -352,18 +443,52 @@ class Costs:
         launch compile_plan picks when the pairs fit). A median below 0 (the task ended before a task the graph says it waits
         for, as when its input maps cover more than it reads): 0."""
         key = cost_key(node, grid, producer_grids)
+        keys = [key] + ([dict(key, params=list(node.info["cluster_pair_params"]))] if can_pair(node, grid) else [])
+        if self.model == "prefetch":
+            fit = next((f for f in (self.fit(node.name, k) for k in keys) if f is not None), None)
+            return None if fit is None else max(fit[1], 0.0)
         us = self.median(node.name, key, first=False)
         if us is None:
             us = self.median(node.name, key)
-        if us is None and can_pair(node, grid):
-            us = self.median(node.name, dict(key, params=list(node.info["cluster_pair_params"])))
+        if us is None and len(keys) > 1:
+            us = self.median(node.name, keys[1])
         return None if us is None else max(us, 0.0)
 
     def first_us(self, node: Node, grid: tuple, producer_grids: list) -> Optional[float]:
-        """A task's time when it is the first on its SM (nothing before it hides its first loads); None: no such record."""
+        """Model "pr": a task's time when it is the first on its SM (nothing before it hides its first loads); None: no such
+        record, or model "prefetch" (the first task's window is its ready time, as for any other task)."""
+        if self.model == "prefetch":
+            return None
         return self.median(node.name, cost_key(node, grid, producer_grids), first=True)
 
+    def prefetch_us(self, node: Node, grid: tuple) -> float:
+        """Model "prefetch": the part of a task's time it does before its inputs land (the class docstring); model "pr": 0."""
+        if self.model != "prefetch":
+            return 0.0
+        fit = self.fit(node.name, cost_key(node, grid), any_inputs=True)
+        if fit is None:
+            return 0.0
+        pre, _, lo, hi, placed = fit
+        if placed:
+            return max(pre, 0.0)
+        rate = self._gemm_rate()
+        fallback = gemm_prefetch_bytes(node.params, grid) / rate if node.name == "gemm_tile" and rate else 0.0
+        return min(fallback, lo) if pre <= lo else max(fallback, hi)   # before every sample: at most w_min; after: at least w_max
+
+    def _gemm_rate(self) -> Optional[float]:
+        """Bytes per us per SM of a GEMM task's up-front weight loads: the median over the gemm_tile grids whose fitted pre
+        (knee placed, over 0.05 us) the samples place."""
+        grids = {json.dumps(r["key"]["grid"]) for r in self.records if r["task_type"] == "gemm_tile" and "params" in r["key"]}
+        rates = []
+        for g in grids:
+            r = next(r for r in self.records if r["task_type"] == "gemm_tile" and json.dumps(r["key"]["grid"]) == g)
+            fit = self.fit("gemm_tile", r["key"], any_inputs=True)
+            if fit is not None and fit[4] and fit[0] > 0.05:
+                rates.append(gemm_prefetch_bytes(r["key"]["params"], r["key"]["grid"]) / fit[0])
+        return statistics.median(rates) if rates else None
+
     def pool_us(self, node: Node) -> Optional[float]:
-        """A one-task-per-SM node's total work (its records' key: cost_key without the producers' grids); None for other nodes."""
+        """A one-task-per-SM node's total work (its records' key: cost_key without the producers' grids; its records hold its
+        work, not a prefetch model); None for other nodes."""
         return self.median(node.name, cost_key(node, node.grid)) if node.info["one_task_per_sm"] else None
 
