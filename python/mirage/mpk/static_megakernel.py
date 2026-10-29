@@ -359,6 +359,70 @@ class StaticMegakernel(PersistentKernel):
                        changeable_grid_dims=changeable, rows_split_over_gpus=rows_split_over_gpus, out_buffer=out_buffer,
                        counters={"slots": 0, "add": N // 128, "store": 1, "store_bf16": 1}[combine], map_slots=map_slots)
 
+    def scaled_gemm_tile_layer(
+        self,
+        input: DTensor,     # [T, K] e4m3 bytes (uint8): a group_quant node's output (then its fp32 scales [K / 128][T])
+        weight: DTensor,    # [N, K] e4m3 bytes (uint8), in 128 x 128 pieces [N / 128][K / 128] (fp8_fp32scale_weights)
+        weight_scales: DTensor,   # the checkpoint's fp32 block scales: [N / 128, K / 128], or [N / 256, K / 128, 2] (gate_up)
+        output: DTensor,    # [T, N] fp32 ("add": int64 fixed point; "store_bf16": bf16; its buffer holds what `combine` says)
+        combine: str = "add",   # as gemm_tile_layer: "slots", "add", "store" or "store_bf16" (a layer's final output)
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare an FP8 GEMM with fp32 scales (tasks/scaled_gemm_tile.cuh).
+
+        Task (x, y) computes 128 weight rows and K part y.
+        Each piece has its own accumulator. The epilogue applies weight and activation scales before it adds the partial sums.
+        Grid y divides K into parts of whole 128-column tiles. The "store" and "store_bf16" modes require one K part.
+        The scale values come from the checkpoint. Their layout selects the scale for each weight row:
+          BlockScales: [N / 128, K / 128], one scale per piece (pack_w2).
+          GateUpScales: [N / 256, K / 128, 2], separate gate and up scales (pack_w13).
+        A GateUpScales piece holds 64 gate rows, then 64 up rows.
+        Tensor maps load weights and activations. Pointers load fp32 weight scales.
+        Weight maps cover one or two pieces. Activation maps cover one or two K tiles, in both exchange sets.
+        params = [mode, K, N, scale layout (0 BlockScales, 1 GateUpScales)].
+        buf_slots = [weight scale buffer slot]. map_slots = [weight map slot, activation map slot].
+        """
+        from .compiler import graph_nodes, producer_of
+        assert input.num_dims == 2 and weight.num_dims == 2 and weight.dim(1) == input.dim(1)
+        mode, N, K, T = COMBINE[combine], weight.dim(0), weight.dim(1), self._tokens(input.dim(0))
+        self._dtypes("scaled_gemm_tile_layer", input=(input, uint8), weight=(weight, uint8), weight_scales=(weight_scales, float32),
+                     output=(output, {"add": int64, "store_bf16": bfloat16}.get(combine, float32)))
+        assert output.num_dims == 2 and output.dim(0) == input.dim(0) and output.dim(1) == N and N % 128 == 0 and K % 128 == 0
+        q = producer_of(input, graph_nodes(self))
+        # The task reads the zq32 layout in the exchange region and waits for the counter of the producer. The producer is
+        # a group_quant node, or a node with the same output (dsa_q_norm_quant).
+        if q is None or not q.info["exchange"] or q.info["counter"] < 0 or q.info["out_buffer"](q)[0] != zq32_bytes(T, K):
+            raise ValueError("scaled_gemm_tile_layer: the input must be the z_q output of a group_quant node (or of a node "
+                             "with the same output: the zq32 layout in the exchange region, a counter of its tasks)")
+        if any(n.name == "allreduce_send" and n.info["buf_slots"][0] == q.info["buf"] for n in graph_nodes(self)):
+            raise ValueError("scaled_gemm_tile_layer: an allreduce_send node already re-arms this input after moe_experts; add the "
+                             "scaled_gemm_tile node before it (allreduce_send_layer re-arms z_q only when moe_experts is its only reader)")
+        dims = tuple(weight_scales.dim(i) for i in range(weight_scales.num_dims))
+        layouts = {(N // 128, K // 128): 0, (N // 256, K // 128, 2): 1}
+        if dims not in layouts:
+            raise ValueError(f"scaled_gemm_tile_layer: weight scales {dims}, expected one of {list(layouts)}")
+        layout = layouts[dims]
+        assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
+        out_buffer = {"slots": lambda n: (n.grid[1] * T * N * 4, 0xFF, True),   # as gemm_tile_layer (not polled)
+                      "add": lambda n: (T * N * 8, 0, False),
+                      "store": lambda n: (T * N * 4, -1, False),
+                      "store_bf16": lambda n: (T * N * 2, -1, False)}[combine]
+        pieces = N // 128 * (K // 128)
+        wmap = self._map("wblk8", ("t", weight), (pieces, 1))
+        assert self._map("wblk8", ("t", weight), (pieces, 2)) == wmap + 1
+        amap = None
+        for kind, dims in (("act8", (K, T)), ("act8kt", (K, T, 2))):   # set 0, then set 1; the same maps as moe_experts' z_q
+            for s in (0, 1):
+                m = self._map(kind, ("x", q.info["buf"], 0, s), dims)
+                amap = m if amap is None else amap
+                assert m == amap + (2 if kind == "act8kt" else 0) + s, "scaled_gemm_tile: the four activation maps in consecutive slots"
+        self._add_node("scaled_gemm_tile", (N // 128, 1, 1), block_dim, [input, weight, weight_scales, output],
+                       # the input whole: each task waits until all group_quant tasks are counted
+                       [(-1, -1, -1), (0, 1, -1), (-1, -1, -1), (1, -1, -1)], [mode, K, N, layout],
+                       changeable_grid_dims={1: (128, 1, None)} if combine in ("slots", "add") else {},
+                       out_buffer=out_buffer, counters={"slots": 0, "add": N // 128, "store": 1, "store_bf16": 1}[combine],
+                       buf_slots=[self._tensor_slot(weight_scales)], map_slots=[wmap, amap])
+
     def topk_route_layer(
         self,
         input: DTensor,     # router logits [T, E] fp32
@@ -391,6 +455,35 @@ class StaticMegakernel(PersistentKernel):
         self._add_node("sum_quant_send", (output.dim(1) // 128, 1, 1), block_dim, [input, output],
                        [(1, -1, -1), (1, -1, -1)], [L], rows_split_over_gpus=True,
                        out_buffer=lambda n: (zq_bytes(T, L), 0xFF, True), exchange=True, cost_inputs=[0])   # adds latent_down's K parts
+
+    def group_quant_layer(
+        self,
+        input: DTensor,     # x [T, L] bf16: a graph input (each GPU has all of x), or a node's output (h_s of silu_and_mul)
+        output: DTensor,    # z_q [T, L] e4m3 bytes (uint8)
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Quantize one 128-column group per task, with a separate scale for each token.
+
+        Use s = max(amax, 1e-10) / 448 and q = e4m3(x / s).
+        Store z_q in this GPU's exchange region, followed by fp32 scales [L / 128][T].
+        Before each launch, fill the output with 0xFF for scaled_moe_experts to poll.
+        Each task increments the completion counter after all its stores.
+        scaled_gemm_tile waits for all these tasks before its TMA loads.
+        params = [L]. buf_slots = [x's buffer slot], or [-1] if a node produces x.
+        """
+        from .compiler import graph_nodes, producer_of
+        T, L = self._tokens(input.dim(0)), input.dim(1)
+        self._dtypes("group_quant_layer", input=(input, bfloat16), output=(output, uint8))
+        assert input.num_dims == 2 and (output.dim(0), output.dim(1)) == (T, L) and L % 128 == 0
+        p = producer_of(input, graph_nodes(self))
+        if p is not None and (p.info["buf"] < 0 or p.info["counter"] < 0 or p.info["exchange"]):
+            raise ValueError(f"group_quant_layer: x from {p.name}: it must be a node's output buffer on this GPU (not in the "
+                             f"exchange region) whose node counts its tasks")
+        self._add_node("group_quant", (L // 128, 1, 1), block_dim, [input, output],
+                       # x from a node: each task waits until all its tasks are counted
+                       [(1, -1, -1) if p is None else (-1, -1, -1), (1, -1, -1)], [L],
+                       out_buffer=lambda n: (zq32_bytes(T, L), 0xFF, False), exchange=True,
+                       counters=1, buf_slots=[-1 if p is not None else self._tensor_slot(input)])
 
     def situ_and_mul_layer(
         self,
