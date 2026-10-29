@@ -2,13 +2,24 @@
 // partial sums of row t (lpart = the router node's output, K parts in slots
 // (gemm_tile.cuh COMBINE_SLOTS), in a fixed order so that every GPU routes the
 // same way), sigmoid, + score correction bias, top K of the NE experts,
-// renormalise the K sigmoid scores -> K (expert, weight) pairs, written to
-// `pairs` (the node's buffer, [T][K]) as expert << 32 | weight bits
-// (0xFF-prefilled: moe_experts polls them). warm = false (this node's first
-// task on the SM: its code is cold; static_schedule.case_code): first a dry
-// pass, the same code on bias-only scores without loading or storing anything
-// (it loads the instructions while the router's sums are on their way), then
-// the real pass. 256 threads.
+// renormalise the K sigmoid scores (and multiply them by the routed scaling
+// factor, if there is one) -> K (expert, weight) pairs, written to `pairs`
+// (the node's buffer, [T][K]) as expert << 32 | weight bits
+// (0xFF-prefilled: moe_experts polls them). Sub-experts (DUP > 1): each expert
+// is DUP experts of the expert bank (its intermediate in DUP parts, e.g. one
+// GPU's 512 features of GLM-5.3-Flash as 2 x 256), so expert e gives DUP pairs
+// (e DUP + j, weight), j < DUP: [T][K DUP] pairs. Shared experts (SHARED > 0,
+// GLM-5.3-Flash's shared expert as 2 sub-experts, run in the experts node's
+// queue): every token also gets the SHARED bank experts after the routed ones,
+// (NE DUP + s, 1.0), s < SHARED: [T][K DUP + SHARED] pairs. warm = false (this
+// node's first task on the SM: its code is cold; static_schedule.case_code):
+// first a dry pass, the same code on bias-only scores without loading or
+// storing anything (it loads the instructions while the router's sums are on
+// their way), then the real pass. 256 threads. ROWS < T (params[5]; a serving
+// framework's speculative verify step of ROWS live rows, the rest idle): a row
+// t >= ROWS is not routed: its K DUP routed pairs are the shared bank experts
+// (expert 0 without shared experts) at weight 0, so it streams no expert of its
+// own (its logits are not read, not re-armed).
 #pragma once
 #include "../core.cuh"
 
@@ -21,7 +32,18 @@ constexpr int topk_scratch_bytes() {
   return 2 * NE * 4 + 2 * (NE + 8 * K) * 4 + 2 * K * 4;
 }
 
-template <int NSPLIT, int NE, int K>
+// N: the router's rows (the logits' row stride, >= NE: rows past NE are
+// padding, not read); SCALE_BITS: the fp32 bits of the routed scaling factor
+// (0: none); DUP: sub-experts per expert; SHARED: the shared bank experts
+// (above)
+template <int NSPLIT,
+          int NE,
+          int N,
+          int K,
+          int SCALE_BITS = 0,
+          int DUP = 1,
+          int SHARED = 0,
+          int ROWS = T>
 __device__ __forceinline__ void topk_route_task(float const *bias,
                                                 float *lpart,
                                                 unsigned long long *pairs,
@@ -31,6 +53,22 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   __syncthreads(); // the scratch below is in the ring area: the previous tile's
                    // epilogue must have read every landed stage
+  static_assert(ROWS >= 1 && ROWS <= T, "topk_route: 1 .. T live rows");
+  if constexpr (ROWS < T) {
+    if (t >= ROWS) { // an idle row (the header comment): no expert of its own
+      if (threadIdx.x < K * DUP + SHARED) {
+        int const i = threadIdx.x;
+        unsigned const e =
+            i < K * DUP
+                ? (SHARED > 0 ? NE * DUP + i % (SHARED > 0 ? SHARED : 1) : 0u)
+                : NE * DUP + (i - K * DUP);
+        pairs[t * (K * DUP + SHARED) + i] =
+            ((unsigned long long)e << 32) |
+            (unsigned long long)__float_as_uint(i < K * DUP ? 0.f : 1.0f);
+      }
+      return;
+    }
+  }
   // stage 1: each warp ranks PER_WARP of the keys and keeps its top K; stage 2
   // ranks those NCAND candidates
   constexpr int PER_WARP = NE / 8, NCAND = 8 * K;
@@ -66,7 +104,7 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
         do {
 #pragma unroll
           for (int p_ = 0; p_ < NSPLIT; p_++) {
-            lp[p_] = ldf4_relaxed(lpart + ((size_t)p_ * T + t) * NE +
+            lp[p_] = ldf4_relaxed(lpart + ((size_t)p_ * T + t) * N +
                                   threadIdx.x * 4);
           }
           all = true;
@@ -162,18 +200,34 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
         sum += wsel_s[k];
       }
       if (real) {
-        float const w = wsel_s[threadIdx.x] / sum;
-        pairs[t * K + threadIdx.x] =
-            ((unsigned long long)(unsigned)sel_s[threadIdx.x] << 32) |
-            (unsigned long long)__float_as_uint(w);
+        float w = wsel_s[threadIdx.x] / sum;
+        if constexpr (SCALE_BITS != 0) {
+          w *= __int_as_float(SCALE_BITS);
+        }
+#pragma unroll
+        for (int j = 0; j < DUP; j++) {
+          pairs[t * (K * DUP + SHARED) + threadIdx.x * DUP + j] =
+              ((unsigned long long)(unsigned)(sel_s[threadIdx.x] * DUP + j)
+               << 32) |
+              (unsigned long long)__float_as_uint(w);
+        }
+      }
+    }
+    if constexpr (SHARED > 0) { // the shared bank experts, weight 1
+      if (real && threadIdx.x >= K && threadIdx.x < K + SHARED) {
+        int const s_ = threadIdx.x - K;
+        pairs[t * (K * DUP + SHARED) + K * DUP + s_] =
+            ((unsigned long long)(unsigned)(NE * DUP + s_) << 32) |
+            (unsigned long long)__float_as_uint(1.0f);
       }
     }
     if constexpr (REARM) { // the one reader of these parts; after the pairs are
-                           // written (off the path to moe_experts)
+                           // written (off the path to moe_experts); not the
+                           // padding rows (never read)
       if (real && threadIdx.x < NE / 4)
 #pragma unroll
         for (int p_ = 0; p_ < NSPLIT; p_++) {
-          rearm16(lpart + ((size_t)p_ * T + t) * NE + threadIdx.x * 4);
+          rearm16(lpart + ((size_t)p_ * T + t) * N + threadIdx.x * 4);
         }
     }
     __syncthreads();
@@ -188,9 +242,33 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
 #endif
 }
 
+// the sub-experts per expert of a topk_route node P (its params[3]; 1 without)
+template <class P>
+__host__ __device__ constexpr int topk_dup() {
+  return param_or<P, 3, 1>() > 1 ? param_or<P, 3, 1>() : 1;
+}
+// its shared bank experts (params[4]; 0 without)
+template <class P>
+__host__ __device__ constexpr int topk_shared() {
+  return param_or<P, 4, 0>();
+}
+// the experts of the bank it routes over (routed sub-experts, then the shared
+// ones) and its pairs per token
+template <class P>
+__host__ __device__ constexpr int topk_bank_experts() {
+  return P::v[0] * topk_dup<P>() + topk_shared<P>();
+}
+template <class P>
+__host__ __device__ constexpr int topk_pairs_per_token() {
+  return P::v[1] * topk_dup<P>() + topk_shared<P>();
+}
+
 // topk_route task x = token x; adds the router's LOGITS::y partial sums (K
-// parts in slots); PARAMS {NE (experts), K (experts per token)}; BUF_SLOTS {the
-// score correction bias (a graph tensor, [NE] fp32)}; warm: above
+// parts in slots; its N rows: NE experts, then padding); PARAMS {NE (experts),
+// K (experts per token)[, the routed scaling factor as fp32 bits (0: none)[,
+// DUP (sub-experts per expert)[, SHARED (shared bank experts)[, ROWS (live
+// rows, the header comment; T)]]]]}; BUF_SLOTS {the score correction bias (a
+// graph tensor, [NE] fp32)}; warm: above
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -203,16 +281,30 @@ __device__ __forceinline__ void run_topk_route(Maps const &,
                                                StaticTask const &tk,
                                                bool warm) {
   constexpr int NE = PARAMS::v[0], K = PARAMS::v[1];
-  static_assert(LOGITS::v[0] == COMBINE_SLOTS && LOGITS::v[2] == NE,
-                "topk_route: the router's NE logits, its K parts in slots");
+  // v[2]: the scaling factor's bits, or v's closing 0 when there are 2 params
+  // (param_at requires the param)
+  constexpr int SCALE_BITS = PARAMS::v[2], N = LOGITS::v[2];
+  static_assert(
+      LOGITS::v[0] == COMBINE_SLOTS && N >= NE && N % 4 == 0,
+      "topk_route: the router's N >= NE logits, its K parts in slots");
   static_assert(SELF::buf >= 0, "topk_route: its output pairs");
-  topk_route_task<LOGITS::y, NE, K>(
-      buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()),
-      buf_at<float>(g, LOGITS::buf),
-      buf_at<unsigned long long>(g, SELF::buf),
-      tk.x,
-      L.sm,
-      warm STAGE_STAMP_ARG(L.stage_stamps));
+  static_assert(K + topk_shared<PARAMS>() <= 256,
+                "topk_route: a thread for each routed and shared pair");
+  constexpr int ROWS =
+      param_or<PARAMS, 5, 0>() > 0 ? param_or<PARAMS, 5, 0>() : T;
+  topk_route_task<LOGITS::y,
+                  NE,
+                  N,
+                  K,
+                  SCALE_BITS,
+                  topk_dup<PARAMS>(),
+                  topk_shared<PARAMS>(),
+                  ROWS>(buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()),
+                        buf_at<float>(g, LOGITS::buf),
+                        buf_at<unsigned long long>(g, SELF::buf),
+                        tk.x,
+                        L.sm,
+                        warm STAGE_STAMP_ARG(L.stage_stamps));
 }
 // dynamic shared memory: the scratch, inside the ring area
 template <class SELF,

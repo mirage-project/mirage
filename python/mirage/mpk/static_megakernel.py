@@ -425,18 +425,44 @@ class StaticMegakernel(PersistentKernel):
 
     def topk_route_layer(
         self,
-        input: DTensor,     # router logits [T, E] fp32
+        input: DTensor,     # router logits [T, N] fp32: the E experts' rows, then padding (N >= E, e.g. a router padded to whole
+                            # 128-row tiles)
         bias: DTensor,      # score correction bias [E] fp32
-        output: DTensor,    # routing pairs [T, K] int64
+        output: DTensor,    # routing pairs [T, K x sub_experts + shared_experts] int64
+        routed_scaling_factor: float = None,   # multiplies the routed weights (None: no scaling)
+        sub_experts: int = 1,   # each expert is this many experts of the expert bank (its intermediate in parts): expert e gives
+                                # the pairs (e sub_experts + j, weight), j < sub_experts
+        shared_experts: int = 0,   # bank experts every token also gets, after its routed pairs: (E sub_experts + s, 1.0), s <
+                                   # shared_experts (a shared expert run in the experts node's queue, e.g. GLM-5.3-Flash's as 2)
+        valid_rows: int = None,    # the live rows (default all T): a serving framework's speculative verify step of fewer rows
+                                   # than T; a row past them is not routed (its routed pairs: the shared experts, or expert 0,
+                                   # at weight 0: no expert of its own is streamed)
         block_dim: tuple = (256, 1, 1),
     ):
-        """Task t = token t: adds the router's partial sums of row t, top K (output.dim(1)) of the E experts. params = [E, K]."""
-        T, E, K = self._tokens(input.dim(0)), input.dim(1), output.dim(1)
+        """Task t = token t: adds the router's partial sums of row t, top K ((output.dim(1) - shared_experts) / sub_experts)
+        of the E experts (bias.dim(0)). params = [E, K], [E, K, the routed scaling factor as fp32 bits], with sub-experts [E, K,
+        the scaling factor's bits (0: none), sub_experts], with shared experts [E, K, bits, sub_experts, shared_experts],
+        with valid_rows < T [E, K, bits, sub_experts, shared_experts, valid_rows]."""
+        T, E, DUP, SH = self._tokens(input.dim(0)), bias.dim(0), sub_experts, shared_experts
         self._dtypes("topk_route_layer", input=(input, float32), bias=(bias, float32), output=(output, int64))
-        assert input.num_dims == 2 and bias.num_dims == 1 and bias.dim(0) == E and output.num_dims == 2 and output.dim(0) == T
+        assert input.num_dims == 2 and input.dim(1) >= E and input.dim(1) % 4 == 0 and bias.num_dims == 1
+        assert output.num_dims == 2 and output.dim(0) == T and DUP >= 1 and SH >= 0 and (output.dim(1) - SH) % DUP == 0
+        K = (output.dim(1) - SH) // DUP
+        if routed_scaling_factor is not None and not (math.isfinite(routed_scaling_factor) and routed_scaling_factor > 0):
+            # the kernel reads the fp32 bits 0 as "no scaling": 0.0 would not scale
+            raise ValueError(f"topk_route_layer: routed_scaling_factor must be finite and > 0 (or None), not {routed_scaling_factor}")
+        params = [E, K] if routed_scaling_factor is None else [E, K, float_bits(routed_scaling_factor)]
+        if DUP > 1 or SH > 0:
+            params = params + [0] * (3 - len(params)) + [DUP]
+        if SH > 0:
+            params.append(SH)
+        if valid_rows is not None and valid_rows != T:
+            if not 0 < valid_rows < T:
+                raise ValueError(f"topk_route_layer: valid_rows {valid_rows} must be in 1 .. {T}")
+            params = params + [0] * (5 - len(params)) + [valid_rows]
         self._add_node("topk_route", (output.dim(0), 1, 1), block_dim, [input, bias, output],
-                       [(0, -1, -1), (-1, -1, -1), (0, -1, -1)], [E, K],
-                       out_buffer=lambda n: (T * K * 8, 0xFF, False),   # the pairs, u64, polled by every moe_experts task
+                       [(0, -1, -1), (-1, -1, -1), (0, -1, -1)], params,
+                       out_buffer=lambda n: (T * (K * DUP + SH) * 8, 0xFF, False),   # the pairs, u64, polled by every moe_experts task
                        buf_slots=[self._tensor_slot(bias)], dry=True, cost_inputs=[0])   # adds the router's K parts
 
     def sum_quant_send_layer(
@@ -502,6 +528,31 @@ class StaticMegakernel(PersistentKernel):
                        out_buffer=lambda n: (T * SHR * 2, -1, False), counters=1,   # h_s bf16; a count of tasks
                        cost_inputs=[0])   # waits for shared gate_up's K parts
 
+    def silu_and_mul_layer(
+        self,
+        input: DTensor,     # shared gate_up [T, 2 * SHR] int64 fixed point (a gemm_tile or scaled_gemm_tile node, combine "add")
+        output: DTensor,    # h_s [T, SHR] bf16
+        swiglu_limit: float = None,   # gate clamped to at most this, up to [-limit, limit] first (GLM-5.3-Flash: 10); None: none
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Compute h_s = bf16(SiLU(gate) * up) for the shared expert. params = [] or [the swiglu limit as fp32 bits].
+
+        Task x writes features [F x, F x + F). Each input block holds 64 gate values, then 64 up values.
+        The default F is 64. The compiler can select F = 32, 64, 96, or 128 when SHR is divisible by F.
+        The grid uses units of 32 input columns, with at most 8 units per task.
+        F = 128 reads 256 input columns. tasks/silu_and_mul.cuh implements this task.
+        situ_and_mul_layer implements K3's different activation, SiTU.
+        """
+        T, SHR = self._tokens(input.dim(0)), output.dim(1)
+        self._dtypes("silu_and_mul_layer", input=(input, int64), output=(output, bfloat16))
+        assert input.num_dims == 2 and output.num_dims == 2 and input.dim(1) == 2 * SHR and output.dim(0) == T and SHR % 64 == 0
+        assert swiglu_limit is None or (math.isfinite(swiglu_limit) and swiglu_limit > 0)
+        self._add_node("silu_and_mul", (output.dim(1) // 64, 1, 1), block_dim, [input, output],
+                       [(1, -1, -1), (1, -1, -1)], [] if swiglu_limit is None else [float_bits(swiglu_limit)],
+                       changeable_grid_dims={0: (32, 1, 8)},
+                       out_buffer=lambda n: (T * SHR * 2, -1, False), counters=1,   # h_s bf16; a count of tasks
+                       cost_inputs=[0])   # waits for shared gate_up's K parts
+
     def moe_experts_layer(
         self,
         z_q: DTensor, pairs: DTensor,        # z_q uint8 (sum_quant_send's output), the routing pairs int64 (topk_route's)
@@ -552,6 +603,85 @@ class StaticMegakernel(PersistentKernel):
                        [IR], one_task_per_sm=True, out_buffer=lambda n: (T * K * L * 4, -1, False), counters=32 * 2 + NSLOT,
                        buf_slots=[hq, hsf], map_slots=maps)
 
+    def scaled_moe_experts_layer(
+        self,
+        z_q: DTensor, pairs: DTensor,        # z_q uint8 (group_quant's output), the routing pairs int64 (topk_route's)
+        w13: DTensor, w13_scales: DTensor,   # e4m3 weights (uint8) and their fp32 block scales (read by pointer)
+        w2: DTensor, w2_scales: DTensor,
+        output: DTensor,    # R [T x K, L] fp32: this GPU's routed rows, one per (token, routed expert k); allreduce_send adds a
+                            # token's K in order
+        swiglu_limit: float = None,   # gate clamped to at most this, up to [-limit, limit] first (GLM-5.3-Flash: 10); None: none
+        prof: DTensor = None,   # int64 [SMs, 256], a graph input: per-SM stamps of the node's phases (scaled_moe::moe_prof_event:
+                                # W13 items, W2 tiles, the ring switch, the W2 loaders' waits); None: none compiled in
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare the routed FP8 experts in tasks/scaled_moe_experts.cuh.
+
+        Weights retain the checkpoint's e4m3 bytes and fp32 scales for 128 x 128 blocks.
+        Activations x and h use e4m3, with an fp32 scale per token and 128 values. The expert activation is SiLU.
+        One task runs on each SM. The SMs take expert work from a shared queue and write routed output rows.
+        buf_slots: the scratch buffers for h_q, its scales, h in fp32 and group maxima, and the fp32 weight scales (by pointer).
+        map_slots: the tensor maps of the weights, of z_q in both exchange sets, and of h_q (scaled_moe::Slots).
+        Counters track completed SMs, the next queue entry, completed W13 items per expert slot, and completed items per h group.
+        The first two counters each reserve 32 words. The other counters reserve NSLOT and NSLOT * IR / 128 words.
+        E is the expert count. K is the experts per token. L is the hidden width.
+        IR is this GPU's expert intermediate width: 128 or 256. GLM-5.3 therefore needs TP8 or TP16. A wider intermediate (GLM-5.3-
+        Flash at TP4: 512) is sub-experts: topk_route_layer(sub_experts=) and a bank of E x sub_experts experts; then E and K here
+        are the bank's (topk_route's times sub_experts). A shared expert can be in the bank too (topk_route_layer(shared_experts=),
+        its sub-experts after the routed ones, every token's, weight 1): its rows are then the last of each token's in R.
+        Weight layouts from fp8_fp32scale_weights:
+          w13: [E, 2 IR, L] e4m3 bytes; scales: [E, IR / 128, L / 128, 2] fp32 (gate, up).
+          w2: [E, L, IR] e4m3 bytes; scales: [E, L / 128, IR / 128] fp32.
+        z_q must come from group_quant_layer. params = [IR] or [IR, the swiglu limit as fp32 bits].
+        """
+        from .compiler import graph_nodes, producer_of
+        T, K, L = self._tokens(pairs.dim(0)), pairs.dim(1), z_q.dim(1)
+        E, IR = w13.dim(0), w13.dim(1) // 2
+        NSLOT, KT_L, KT2 = T * K, L // 128, IR // 128
+        self._dtypes("scaled_moe_experts_layer", z_q=(z_q, uint8), pairs=(pairs, int64), w13=(w13, uint8),
+                     w13_scales=(w13_scales, float32), w2=(w2, uint8), w2_scales=(w2_scales, float32), output=(output, float32))
+        dims = lambda t: tuple(t.dim(i) for i in range(t.num_dims))
+        assert dims(w13) == (E, 2 * IR, L) and dims(w2) == (E, L, IR) and IR % 128 == 0 and L % 128 == 0 and KT2 <= 2
+        assert dims(w13_scales) == (E, IR // 128, KT_L, 2) and dims(w2_scales) == (E, KT_L, KT2)
+        assert (output.dim(0), output.dim(1)) == (T * K, L)
+        if any(n.name in ("moe_experts", "scaled_moe_experts") for n in graph_nodes(self)):
+            # the expert phase switch runs once per kernel (KernelLocals::ring_relaid): a second expert node would skip it
+            raise ValueError("scaled_moe_experts_layer: the graph already has an expert node; one expert node per graph")
+        zq = producer_of(z_q, graph_nodes(self))
+        if zq is None or zq.name != "group_quant":
+            raise ValueError("scaled_moe_experts_layer: z_q must be a group_quant node's output")
+        route = producer_of(pairs, graph_nodes(self))
+        dup = route.params[3] if route is not None and len(route.params) >= 4 and route.params[3] > 1 else 1
+        shared = route.params[4] if route is not None and len(route.params) >= 5 else 0   # (params[5]: its live rows)
+        if route is None or route.name != "topk_route" or [p * dup + shared for p in route.params[:2]] != [E, K]:
+            raise ValueError(f"scaled_moe_experts_layer: the pairs must be a topk_route node's over the {E} experts of w13")
+        assert swiglu_limit is None or (math.isfinite(swiglu_limit) and swiglu_limit > 0)
+        hq = self._scratch("scaled_moe_experts.h_q", NSLOT * T * IR)          # every row written before its counter lets W2 read it
+        hsf = self._scratch("scaled_moe_experts.h_q_scales", NSLOT * T * KT2 * 4)   # written before its counter lets W2 read it
+        w13_pieces, w2_pieces = E * 2 * IR * L // 16384, E * L * IR // 16384   # one 128 x 128 e4m3 piece: 16 KB
+        bufs = [hq, hsf, self._tensor_slot(w13_scales),
+                self._scratch("scaled_moe_experts.h32", NSLOT * T * IR * 4 + NSLOT * (IR // 64) * T * 4),   # h (fp32), its amax
+                self._tensor_slot(w2_scales)]
+        if prof is not None:   # buffer slot 5 (scaled_moe::Slots PROF)
+            self._dtypes("scaled_moe_experts_layer", prof=(prof, int64))
+            assert (prof.dim(0), prof.dim(1)) == (self._num_sms(), 256), "prof: [SMs, scaled_moe::MOE_PROF_WORDS] int64"
+            bufs.append(self._tensor_slot(prof))
+        maps = [self._map("wblk8", ("t", w13), (w13_pieces, 1)), self._map("wblk8", ("t", w13), (w13_pieces, 2)),
+                self._map("wblk8", ("t", w2), (w2_pieces, 1)), self._map("wblk8", ("t", w2), (w2_pieces, 2))]
+        for kind, dims_ in (("act8", (L, T)), ("act8kt", (L, T, 2))):
+            first = self._map(kind, ("x", zq.info["buf"], 0, 0), dims_)       # z_q in set 0, then set 1 (the next slot)
+            assert self._map(kind, ("x", zq.info["buf"], 0, 1), dims_) == first + 1
+            maps.append(first)
+        maps.append(self._map("act8kt", ("b", hq, 0), (IR, NSLOT * T, KT2)))
+        tensors = [z_q, pairs, w13, w2, output]
+        self._add_node("scaled_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
+                       [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)], one_task_per_sm=True,
+                       out_buffer=lambda n: (T * K * L * 4, -1, False),
+                       counters=32 * 2 + NSLOT + NSLOT * KT2, buf_slots=bufs, map_slots=maps)
+
+    # ---- after moe_experts (tasks/allreduce_send.cuh, sum_rmsnorm.cuh, sum_gpus.cuh, sum_send.cuh, residual_add.cuh). The
+    # graph tensors between them (the sent partial sums, sum_rmsnorm's Rn, sum_gpus's Ssum, latent_up's K parts, sum_send's o)
+    # stand for the buffers the bodies use; their input maps give the dependencies.
     def allreduce_send_layer(
         self,
         input: DTensor,         # fp32 [T x G, W], a node's output buffer: G rows per token (added in order), e.g. this GPU's routed
