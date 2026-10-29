@@ -112,6 +112,7 @@ void from_json(json const &j, KNChunkOp &op) {
 #ifdef MIRAGE_FINGERPRINT_USE_CPU
 bool KNChunkOp::fingerprint(void) {
   assert(false && "To be implemented");
+  return false;
 }
 #endif
 
