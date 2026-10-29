@@ -13,6 +13,7 @@ to the plan. The sizes come from the graph: each layer reads them from its tenso
 the node's params; the kernel-wide ones (tokens per step, GPUs) are the StaticMegakernel's (tokens, num_gpus), which the
 generated layer defines (config.cuh).
 """
+import math
 import struct
 
 import torch
@@ -31,6 +32,11 @@ MAX_SUM_PARTS = 14   # the most K parts sum_send adds (tasks/sum_send.cuh)
 def zq_bytes(tokens: int, width: int) -> int:
     """tasks/sum_quant_send.cuh zq_bytes: z_q [tokens][width] e4m3, then its scale chunks (one per 128 columns)."""
     return tokens * width + width // 128 * SF_CHUNK
+
+
+def zq32_bytes(tokens: int, width: int) -> int:
+    """tasks/group_quant.cuh zq32_bytes: z_q [tokens][width] e4m3, then its fp32 scales [width / 128][tokens]."""
+    return tokens * width + (width // 128) * tokens * 4
 
 
 def float_bits(v: float) -> int:
@@ -165,8 +171,8 @@ class StaticMegakernel(PersistentKernel):
     def _map(self, kind: str, source: tuple, dims: tuple) -> int:
         """A tensor map slot (Maps::m; the same map again: the same slot). source: ("t", tensor) a graph tensor or a node's output
         by its tensor; ("b", buffer slot, byte offset); ("x", exchange buffer slot, byte offset, set) in the exchange region's set.
-        kind and dims as host.cuh reads them: bf16 (rows, K, box rows), wblk (pieces, box pieces), sf (chunks, box chunks), act8
-        (K bytes, rows), act8kt (K bytes, rows, K tiles). Returns the slot."""
+        kind and dims as host.cuh reads them: bf16 (rows, K, box rows), wblk (MXFP4 pieces, box pieces), wblk8 (e4m3 pieces, box
+        pieces), sf (chunks, box chunks), act8 (K bytes, rows), act8kt (K bytes, rows, K tiles). Returns the slot."""
         key = (kind, (source[0], source[1].guid) + tuple(source[2:]) if source[0] == "t" else tuple(source), tuple(dims))
         for i, m in enumerate(self._maps):
             if m[3] == key:
@@ -293,19 +299,85 @@ class StaticMegakernel(PersistentKernel):
                        changeable_grid_dims=changeable, rows_split_over_gpus=rows_split_over_gpus, out_buffer=out_buffer,
                        counters={"slots": 0, "add": N // 128, "store": 1}[combine], map_slots=map_slots)
 
+    def scaled_gemm_tile_layer(
+        self,
+        input: DTensor,     # [T, K] e4m3 bytes (uint8): a group_quant node's output (then its fp32 scales [K / 128][T])
+        weight: DTensor,    # [N, K] e4m3 bytes (uint8), in 128 x 128 pieces [N / 128][K / 128] (fp8_fp32scale_weights)
+        weight_scales: DTensor,   # the checkpoint's fp32 block scales: [N / 128, K / 128], or [N / 256, K / 128, 2] (gate_up)
+        output: DTensor,    # [T, N] fp32 ("add": int64 fixed point; its buffer holds what `combine` says)
+        combine: str = "add",   # as gemm_tile_layer: "slots", "add" or "store"
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare an FP8 GEMM with fp32 scales (tasks/scaled_gemm_tile.cuh).
+
+        Task (x, y) computes 128 weight rows and K part y.
+        Each piece has its own accumulator. The epilogue applies weight and activation scales before it adds the partial sums.
+        Grid y divides K into parts of whole 128-column tiles. The "store" mode requires one K part.
+        The scale values come from the checkpoint. Their layout selects the scale for each weight row:
+          BlockScales: [N / 128, K / 128], one scale per piece (pack_w2).
+          GateUpScales: [N / 256, K / 128, 2], separate gate and up scales (pack_w13).
+        A GateUpScales piece holds 64 gate rows, then 64 up rows.
+        Tensor maps load weights and activations. Pointers load fp32 weight scales.
+        Weight maps cover one or two pieces. Activation maps cover one or two K tiles, in both exchange sets.
+        params = [mode, K, N, scale layout (0 BlockScales, 1 GateUpScales)].
+        buf_slots = [weight scale buffer slot]. map_slots = [weight map slot, activation map slot].
+        """
+        from .compiler import graph_nodes, producer_of
+        assert input.num_dims == 2 and weight.num_dims == 2 and weight.dim(1) == input.dim(1)
+        mode, N, K, T = COMBINE[combine], weight.dim(0), weight.dim(1), self._tokens(input.dim(0))
+        self._dtypes("scaled_gemm_tile_layer", input=(input, uint8), weight=(weight, uint8), weight_scales=(weight_scales, float32),
+                     output=(output, int64 if combine == "add" else float32))
+        assert output.num_dims == 2 and output.dim(0) == input.dim(0) and output.dim(1) == N and N % 128 == 0 and K % 128 == 0
+        q = producer_of(input, graph_nodes(self))
+        if q is None or q.name != "group_quant":
+            raise ValueError("scaled_gemm_tile_layer: the input must be a group_quant node's output")
+        if any(n.name == "allreduce_send" and n.info["buf_slots"][0] == q.info["buf"] for n in graph_nodes(self)):
+            raise ValueError("scaled_gemm_tile_layer: an allreduce_send node already re-arms this input after moe_experts; add the "
+                             "scaled_gemm_tile node before it (allreduce_send_layer re-arms z_q only when moe_experts is its only reader)")
+        dims = tuple(weight_scales.dim(i) for i in range(weight_scales.num_dims))
+        layouts = {(N // 128, K // 128): 0, (N // 256, K // 128, 2): 1}
+        if dims not in layouts:
+            raise ValueError(f"scaled_gemm_tile_layer: weight scales {dims}, expected one of {list(layouts)}")
+        layout = layouts[dims]
+        assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
+        out_buffer = {"slots": lambda n: (n.grid[1] * T * N * 4, 0xFF, True),   # as gemm_tile_layer (not polled)
+                      "add": lambda n: (T * N * 8, 0, False),
+                      "store": lambda n: (T * N * 4, -1, False)}[combine]
+        pieces = N // 128 * (K // 128)
+        wmap = self._map("wblk8", ("t", weight), (pieces, 1))
+        assert self._map("wblk8", ("t", weight), (pieces, 2)) == wmap + 1
+        amap = None
+        for kind, dims in (("act8", (K, T)), ("act8kt", (K, T, 2))):   # set 0, then set 1; the same maps as moe_experts' z_q
+            for s in (0, 1):
+                m = self._map(kind, ("x", q.info["buf"], 0, s), dims)
+                amap = m if amap is None else amap
+                assert m == amap + (2 if kind == "act8kt" else 0) + s, "scaled_gemm_tile: the four activation maps in consecutive slots"
+        self._add_node("scaled_gemm_tile", (N // 128, 1, 1), block_dim, [input, weight, weight_scales, output],
+                       # the input whole: each task waits until all group_quant tasks are counted
+                       [(-1, -1, -1), (0, 1, -1), (-1, -1, -1), (1, -1, -1)], [mode, K, N, layout],
+                       changeable_grid_dims={1: (128, 1, None)} if combine != "store" else {}, out_buffer=out_buffer,
+                       counters={"slots": 0, "add": N // 128, "store": 1}[combine],
+                       buf_slots=[self._tensor_slot(weight_scales)], map_slots=[wmap, amap])
+
     def topk_route_layer(
         self,
         input: DTensor,     # router logits [T, E] fp32
         bias: DTensor,      # score correction bias [E] fp32
         output: DTensor,    # routing pairs [T, K] int64
+        routed_scaling_factor: float = None,   # multiplies the routed weights (None: no scaling)
         block_dim: tuple = (256, 1, 1),
     ):
-        """Task t = token t: adds the router's partial sums of row t, top K (output.dim(1)) of the E experts. params = [E, K]."""
+        """Task t = token t: adds the router's partial sums of row t, top K (output.dim(1)) of the E experts. params = [E, K], or
+        [E, K, the routed scaling factor as fp32 bits]."""
         T, E, K = self._tokens(input.dim(0)), input.dim(1), output.dim(1)
         self._dtypes("topk_route_layer", input=(input, float32), bias=(bias, float32), output=(output, int64))
         assert input.num_dims == 2 and bias.num_dims == 1 and bias.dim(0) == E and output.num_dims == 2 and output.dim(0) == T
+        if routed_scaling_factor is not None and not (math.isfinite(routed_scaling_factor) and routed_scaling_factor > 0):
+            # the kernel reads the fp32 bits 0 as "no scaling": 0.0 would not scale
+            raise ValueError(f"topk_route_layer: routed_scaling_factor must be finite and > 0 (or None), not {routed_scaling_factor}")
+        params = [E, K] if routed_scaling_factor is None else [E, K, float_bits(routed_scaling_factor)]
         self._add_node("topk_route", (output.dim(0), 1, 1), block_dim, [input, bias, output],
-                       [(0, -1, -1), (-1, -1, -1), (0, -1, -1)], [E, K],
+                       [(0, -1, -1), (-1, -1, -1), (0, -1, -1)], params,
                        out_buffer=lambda n: (T * K * 8, 0xFF, False),   # the pairs, u64, polled by every moe_experts task
                        buf_slots=[self._tensor_slot(bias)], dry=True, cost_inputs=[0])   # adds the router's K parts
 
@@ -326,6 +398,35 @@ class StaticMegakernel(PersistentKernel):
                        [(1, -1, -1), (1, -1, -1)], [L], rows_split_over_gpus=True,
                        out_buffer=lambda n: (zq_bytes(T, L), 0xFF, True), exchange=True, cost_inputs=[0])   # adds latent_down's K parts
 
+    def group_quant_layer(
+        self,
+        input: DTensor,     # x [T, L] bf16: a graph input (each GPU has all of x), or a node's output (h_s of silu_and_mul)
+        output: DTensor,    # z_q [T, L] e4m3 bytes (uint8)
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Quantize one 128-column group per task, with a separate scale for each token.
+
+        Use s = max(amax, 1e-10) / 448 and q = e4m3(x / s).
+        Store z_q in this GPU's exchange region, followed by fp32 scales [L / 128][T].
+        Before each launch, fill the output with 0xFF for scaled_moe_experts to poll.
+        Each task increments the completion counter after all its stores.
+        scaled_gemm_tile waits for all these tasks before its TMA loads.
+        params = [L]. buf_slots = [x's buffer slot], or [-1] if a node produces x.
+        """
+        from .compiler import graph_nodes, producer_of
+        T, L = self._tokens(input.dim(0)), input.dim(1)
+        self._dtypes("group_quant_layer", input=(input, bfloat16), output=(output, uint8))
+        assert input.num_dims == 2 and (output.dim(0), output.dim(1)) == (T, L) and L % 128 == 0
+        p = producer_of(input, graph_nodes(self))
+        if p is not None and (p.info["buf"] < 0 or p.info["counter"] < 0 or p.info["exchange"]):
+            raise ValueError(f"group_quant_layer: x from {p.name}: it must be a node's output buffer on this GPU (not in the "
+                             f"exchange region) whose node counts its tasks")
+        self._add_node("group_quant", (L // 128, 1, 1), block_dim, [input, output],
+                       # x from a node: each task waits until all its tasks are counted
+                       [(1, -1, -1) if p is None else (-1, -1, -1), (1, -1, -1)], [L],
+                       out_buffer=lambda n: (zq32_bytes(T, L), 0xFF, False), exchange=True,
+                       counters=1, buf_slots=[-1 if p is not None else self._tensor_slot(input)])
+
     def situ_and_mul_layer(
         self,
         input: DTensor,     # shared gate_up [T, 2 * SHR] int64 fixed point (a gemm_tile node's output, combine "add")
@@ -339,6 +440,28 @@ class StaticMegakernel(PersistentKernel):
         self._dtypes("situ_and_mul_layer", input=(input, int64), output=(output, bfloat16))
         assert input.num_dims == 2 and output.num_dims == 2 and input.dim(1) == 2 * SHR and output.dim(0) == T and SHR % 64 == 0
         self._add_node("situ_and_mul", (output.dim(1) // 64, 1, 1), block_dim, [input, output],
+                       [(1, -1, -1), (1, -1, -1)], [], changeable_grid_dims={0: (32, 1, 8)},
+                       out_buffer=lambda n: (T * SHR * 2, -1, False), counters=1,   # h_s bf16; a count of tasks
+                       cost_inputs=[0])   # waits for shared gate_up's K parts
+
+    def silu_and_mul_layer(
+        self,
+        input: DTensor,     # shared gate_up [T, 2 * SHR] int64 fixed point (a gemm_tile or scaled_gemm_tile node, combine "add")
+        output: DTensor,    # h_s [T, SHR] bf16
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Compute h_s = bf16(SiLU(gate) * up) for the shared expert.
+
+        Task x writes features [F x, F x + F). Each input block holds 64 gate values, then 64 up values.
+        The default F is 64. The compiler can select F = 32, 64, 96, or 128 when SHR is divisible by F.
+        The grid uses units of 32 input columns, with at most 8 units per task.
+        F = 128 reads 256 input columns. tasks/silu_and_mul.cuh implements this task.
+        situ_and_mul_layer implements K3's different activation, SiTU.
+        """
+        T, SHR = self._tokens(input.dim(0)), output.dim(1)
+        self._dtypes("silu_and_mul_layer", input=(input, int64), output=(output, bfloat16))
+        assert input.num_dims == 2 and output.num_dims == 2 and input.dim(1) == 2 * SHR and output.dim(0) == T and SHR % 64 == 0
+        self._add_node("silu_and_mul", (output.dim(1) // 64, 1, 1), block_dim, [input, output],
                        [(1, -1, -1), (1, -1, -1)], [], changeable_grid_dims={0: (32, 1, 8)},
                        out_buffer=lambda n: (T * SHR * 2, -1, False), counters=1,   # h_s bf16; a count of tasks
                        cost_inputs=[0])   # waits for shared gate_up's K parts
@@ -393,20 +516,85 @@ class StaticMegakernel(PersistentKernel):
                        [IR], one_task_per_sm=True, out_buffer=lambda n: (T * K * L * 4, -1, False), counters=32 * 2 + NSLOT,
                        buf_slots=[hq, hsf], map_slots=maps)
 
+    def scaled_moe_experts_layer(
+        self,
+        z_q: DTensor, pairs: DTensor,        # z_q uint8 (group_quant's output), the routing pairs int64 (topk_route's)
+        w13: DTensor, w13_scales: DTensor,   # e4m3 weights (uint8) and their fp32 block scales (read by pointer)
+        w2: DTensor, w2_scales: DTensor,
+        output: DTensor,    # R [T x K, L] fp32: this GPU's routed rows, one per (token, routed expert k); allreduce_send adds a
+                            # token's K in order
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare the routed FP8 experts in tasks/scaled_moe_experts.cuh.
+
+        Weights retain the checkpoint's e4m3 bytes and fp32 scales for 128 x 128 blocks.
+        Activations x and h use e4m3, with an fp32 scale per token and 128 values. The expert activation is SiLU.
+        One task runs on each SM. The SMs take expert work from a shared queue and write routed output rows.
+        buf_slots: the scratch buffers for h_q, its scales, h in fp32 and group maxima, and the fp32 weight scales (by pointer).
+        map_slots: the tensor maps of the weights, of z_q in both exchange sets, and of h_q (scaled_moe::Slots).
+        Counters track completed SMs, the next queue entry, completed W13 items per expert slot, and completed items per h group.
+        The first two counters each reserve 32 words. The other counters reserve NSLOT and NSLOT * IR / 128 words.
+        E is the expert count. K is the experts per token. L is the hidden width.
+        IR is this GPU's expert intermediate width: 128 or 256. GLM-5.3 therefore needs TP8 or TP16.
+        Weight layouts from fp8_fp32scale_weights:
+          w13: [E, 2 IR, L] e4m3 bytes; scales: [E, IR / 128, L / 128, 2] fp32 (gate, up).
+          w2: [E, L, IR] e4m3 bytes; scales: [E, L / 128, IR / 128] fp32.
+        z_q must come from group_quant_layer. params = [IR].
+        """
+        from .compiler import graph_nodes, producer_of
+        T, K, L = self._tokens(pairs.dim(0)), pairs.dim(1), z_q.dim(1)
+        E, IR = w13.dim(0), w13.dim(1) // 2
+        NSLOT, KT_L, KT2 = T * K, L // 128, IR // 128
+        self._dtypes("scaled_moe_experts_layer", z_q=(z_q, uint8), pairs=(pairs, int64), w13=(w13, uint8),
+                     w13_scales=(w13_scales, float32), w2=(w2, uint8), w2_scales=(w2_scales, float32), output=(output, float32))
+        dims = lambda t: tuple(t.dim(i) for i in range(t.num_dims))
+        assert dims(w13) == (E, 2 * IR, L) and dims(w2) == (E, L, IR) and IR % 128 == 0 and L % 128 == 0 and KT2 <= 2
+        assert dims(w13_scales) == (E, IR // 128, KT_L, 2) and dims(w2_scales) == (E, KT_L, KT2)
+        assert (output.dim(0), output.dim(1)) == (T * K, L)
+        if any(n.name in ("moe_experts", "scaled_moe_experts") for n in graph_nodes(self)):
+            # the expert phase switch runs once per kernel (KernelLocals::ring_relaid): a second expert node would skip it
+            raise ValueError("scaled_moe_experts_layer: the graph already has an expert node; one expert node per graph")
+        zq = producer_of(z_q, graph_nodes(self))
+        if zq is None or zq.name != "group_quant":
+            raise ValueError("scaled_moe_experts_layer: z_q must be a group_quant node's output")
+        route = producer_of(pairs, graph_nodes(self))
+        if route is None or route.name != "topk_route" or list(route.params[:2]) != [E, K]:
+            raise ValueError(f"scaled_moe_experts_layer: the pairs must be a topk_route node's over the {E} experts of w13")
+        hq = self._scratch("scaled_moe_experts.h_q", NSLOT * T * IR)          # every row written before its counter lets W2 read it
+        # the h_q scales, 0xFF (NaN) before each launch: the W2 epilogue polls the values themselves (data as the flag)
+        hsf = self._scratch("scaled_moe_experts.h_q_scales", NSLOT * T * KT2 * 4, 0xFF)
+        w13_pieces, w2_pieces = E * 2 * IR * L // 16384, E * L * IR // 16384   # one 128 x 128 e4m3 piece: 16 KB
+        bufs = [hq, hsf, self._tensor_slot(w13_scales),
+                self._scratch("scaled_moe_experts.h32", NSLOT * T * IR * 4 + NSLOT * (IR // 64) * T * 4),   # h (fp32), its amax
+                self._tensor_slot(w2_scales)]
+        maps = [self._map("wblk8", ("t", w13), (w13_pieces, 1)), self._map("wblk8", ("t", w13), (w13_pieces, 2)),
+                self._map("wblk8", ("t", w2), (w2_pieces, 1)), self._map("wblk8", ("t", w2), (w2_pieces, 2))]
+        for kind, dims_ in (("act8", (L, T)), ("act8kt", (L, T, 2))):
+            first = self._map(kind, ("x", zq.info["buf"], 0, 0), dims_)       # z_q in set 0, then set 1 (the next slot)
+            assert self._map(kind, ("x", zq.info["buf"], 0, 1), dims_) == first + 1
+            maps.append(first)
+        maps.append(self._map("act8kt", ("b", hq, 0), (IR, NSLOT * T, KT2)))
+        tensors = [z_q, pairs, w13, w2, output]
+        self._add_node("scaled_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
+                       [IR], one_task_per_sm=True, out_buffer=lambda n: (T * K * L * 4, -1, False),
+                       counters=32 * 2 + NSLOT + NSLOT * KT2, buf_slots=bufs, map_slots=maps)
+
     # ---- after moe_experts (tasks/allreduce_send.cuh, sum_rmsnorm.cuh, sum_gpus.cuh, sum_send.cuh, residual_add.cuh). The
     # graph tensors between them (the sent partial sums, sum_rmsnorm's Rn, sum_gpus's Ssum, latent_up's K parts, sum_send's o)
     # stand for the buffers the bodies use; their input maps give the dependencies.
     def allreduce_send_layer(
         self,
         input: DTensor,         # fp32 [T x G, W], a node's output buffer: G rows per token (added in order), e.g. this GPU's routed
-                                # rows R [T x 16, LAT] (moe_experts) or S [T, H] (the shared down node)
+                                # rows R [T x 16, LAT] (moe_experts, scaled_moe_experts) or S [T, H] (the shared down node)
         output: DTensor,        # what is sent: [T, W] bf16 (its buffer: [num_gpus][T][W] bf16 in the exchange region)
         num_tasks: int = None,  # slices of the partial sum; default: one per task of the producer (as its grid is now)
         block_dim: tuple = (256, 1, 1),
     ):
         """Task x: slice x of this GPU's partial sum (bf16) to every GPU, into this GPU's slot of the node's output (in the exchange
         region), once the input's producer is done (all its tasks, counted in its counter). params = [W, G]. When the producer is
-        moe_experts, after which no SM reads z_q, the tasks also re-arm z_q (buf_slots: [z_q's buffer slot], else [-1])."""
+        moe_experts or scaled_moe_experts, re-arm z_q here only if that producer is its sole reader.
+        buf_slots = [z_q's buffer slot] enables re-arm; [-1] disables it. With other readers, reset z_q before each launch instead.
+        Declare all other z_q readers before this call so the reader check sees them."""
         from .compiler import graph_nodes, producer_of
         p = producer_of(input, graph_nodes(self))
         if p is None or p.info["buf"] < 0 or p.info["counter"] < 0:
@@ -416,8 +604,11 @@ class StaticMegakernel(PersistentKernel):
         self._dtypes("allreduce_send_layer", input=(input, float32), output=(output, bfloat16))
         assert input.dim(0) % T == 0 and input.dim(1) == W and W % 8 == 0
         rearm = -1
-        if p.name == "moe_experts":   # z_q: moe_experts' first input
-            rearm = producer_of(p.inputs[0], graph_nodes(self)).info["buf"]
+        if p.name in ("moe_experts", "scaled_moe_experts"):   # z_q: its first input; another reader (scaled_gemm_tile) can still read it
+            zq = p.inputs[0]
+            readers = [n for n in graph_nodes(self) if any(t.guid == zq.guid for t in n.inputs)]
+            if len(readers) == 1:
+                rearm = producer_of(zq, graph_nodes(self)).info["buf"]
         self._add_node("allreduce_send", (num_tasks or p.grid[0] * p.grid[1] * p.grid[2], 1, 1), block_dim, [input, output],
                        [(-1, -1, -1)] * 2, [W, input.dim(0) // T],
                        out_buffer=lambda n: (GPUS * T * W * 2, 0xFF, True), exchange=True, buf_slots=[rearm])
@@ -493,7 +684,8 @@ class StaticMegakernel(PersistentKernel):
     def residual_add_layer(
         self,
         addend: DTensor,        # S [T, H] bf16, sum_gpus's output buffer
-        input: DTensor,         # o [T, H] bf16: this GPU's part, sent by sum_send (every GPU's part arrives through the exchange region)
+        input: DTensor,         # o [T, H] bf16: this GPU's part, sent by sum_send (every GPU's part arrives through the exchange region),
+                                # or a second sum_gpus node's output (GLM-5.3: the routed sum)
         residual: DTensor,      # [T, H] bf16 (a graph input)
         output: DTensor,        # y [T, H] bf16
         block_dim: tuple = (256, 1, 1),
@@ -503,6 +695,11 @@ class StaticMegakernel(PersistentKernel):
         self._dtypes("residual_add_layer", addend=(addend, bfloat16), input=(input, bfloat16), residual=(residual, bfloat16),
                      output=(output, bfloat16))
         assert (residual.dim(0), residual.dim(1)) == (T, H) and H % (8 * self.num_gpus) == 0
+        from .compiler import graph_nodes, producer_of
+        nodes = graph_nodes(self)
+        a, o = producer_of(addend, nodes), producer_of(input, nodes)
+        if a is None or a.name != "sum_gpus" or o is None or o.name not in ("sum_send", "sum_gpus"):
+            raise ValueError("residual_add_layer: the addend from sum_gpus, the input from sum_send or sum_gpus")
         self._add_node("residual_add", (self._num_sms(), 1, 1), block_dim, [addend, input, residual, output],
                        [(-1, -1, -1)] * 4, [H], buf_slots=[self._tensor_slot(residual), self._tensor_slot(output)])
 

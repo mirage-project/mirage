@@ -15,7 +15,8 @@
 //     source: t:<tensor name> (a graph tensor or a node's output buffer by its
 //       tensor name) or b:<buffer slot>+<byte offset>.
 //     kind and dims: bf16 <rows> <K> <box rows> | wblk <pieces> <box pieces> |
-//       sf <chunks> <box chunks> | act8 <K bytes> <rows> |
+//       wblk8 <pieces> <box pieces> | sf <chunks> <box chunks> |
+//       act8 <K bytes> <rows> |
 //       act8kt <K bytes> <rows> <K tiles>
 // The node output buffers are allocated first, then the scratch buffers, then
 // the counters and the time stamps. Keep this order: the buffers' addresses
@@ -97,14 +98,20 @@ static void map_bf16(
                                 CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
-// MXFP4 weight stored piece by piece: [piece][128 rows][64 B]; box = bt pieces
-static void
-    map_wblk(CUtensorMap *m, void *base, uint64_t ntiles, uint32_t bt = 1) {
+// Map packed weights, with bt pieces per tensor-map box.
+// fp8 false: MXFP4 [piece][128 rows][64 bytes].
+// fp8 true: e4m3 [piece][128 rows][128 bytes].
+static void map_wblk(CUtensorMap *m,
+                     void *base,
+                     uint64_t ntiles,
+                     uint32_t bt = 1,
+                     bool fp8 = false) {
   cuuint64_t gd[3] = {128, 128, ntiles};
-  cuuint64_t gs[2] = {64, 8192};
+  cuuint64_t gs[2] = {fp8 ? 128u : 64u, fp8 ? 16384u : 8192u};
   cuuint32_t bd[3] = {128, 128, bt}, es[3] = {1, 1, 1};
   MKS_CU(cuTensorMapEncodeTiled(m,
-                                CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B,
+                                fp8 ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+                                    : CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B,
                                 3,
                                 base,
                                 gd,
@@ -392,6 +399,8 @@ static void build_maps(Maps &maps,
       map_bf16(&maps.m[i], p, u(2), (uint32_t)u(4), u(3));
     } else if (kind == "wblk" && m.size() == 4) {
       map_wblk(&maps.m[i], p, u(2), (uint32_t)u(3));
+    } else if (kind == "wblk8" && m.size() == 4) {
+      map_wblk(&maps.m[i], p, u(2), (uint32_t)u(3), true);
     } else if (kind == "sf" && m.size() == 4) {
       map_sf(&maps.m[i], p, u(2), (uint32_t)u(3));
     } else if (kind == "act8" && m.size() == 4) {

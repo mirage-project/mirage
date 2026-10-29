@@ -90,9 +90,12 @@ __device__ __forceinline__ uint64_t
 __device__ __forceinline__ uint64_t mkdesc_sf(uint32_t a) {
   return denc(a) | (denc(128) << 32ULL) | (1ULL << 46ULL);
 } // scale chunk
+__device__ __forceinline__ uint32_t idesc_mx(uint32_t base, uint32_t sf) {
+  return base | (sf << 4) | (sf << 29);
+} // scale id sf of 0..3 (base: IDESC_MX, IDESC_MX_E4M3)
 __device__ __forceinline__ uint32_t idesc_mx(uint32_t sf) {
-  return IDESC_MX | (sf << 4) | (sf << 29);
-} // scale id sf of 0..3
+  return idesc_mx(IDESC_MX, sf);
+}
 __device__ __forceinline__ void
     cp_sf(uint32_t tcol,
           uint32_t smem) { // one 512-B scale chunk shared memory -> TMEM
@@ -178,6 +181,11 @@ __device__ __forceinline__ float
           float u) { // situ with the fast tanh and divide (moe_experts)
   return 4.0f * tanh_fast(g * 0.25f) * __fdividef(1.0f, 1.0f + __expf(-g)) *
          (25.0f * tanh_fast(u * 0.04f));
+}
+// Compute SiLU(gate) * up with fast exp and division.
+// scaled_moe_experts and silu_and_mul use this function.
+__device__ __forceinline__ float silu2(float g, float u) {
+  return g * __fdividef(1.0f, 1.0f + __expf(-g)) * u;
 }
 __device__ __forceinline__ uint8_t cvt_e4m3_nv(
     float
@@ -507,15 +515,16 @@ __device__ __forceinline__ int
 //           issue_job / drain_acc) = 128, or 64: a 64-row tile (MMA M = 64)
 //           fills half of the stage's weight part, [0, 16 KB); the activation
 //           stays at W_STAGE
-//   kind 1  W13 item: stage = two MXFP4 K 128 pieces + their scale chunks + two
-//   e4m3 z_q K tiles; each issuer takes one piece
+//   kind 1  W13 item (and scaled_gemm_tile): stage = two K 128 weight pieces
+//           (MXFP4 + their scale chunks, or e4m3: load_job's PIECE_BYTES,
+//           WSF) + two e4m3 z_q K tiles; up to two pieces per stage
 // Stage counters `g` count stages since the last ring_reinit: stage slot g %
 // SMAX, phase g / SMAX.
 struct TileJob {
   int kind;
   int nst;                 // ring stages of this job
-  CUtensorMap const *wmap; // kind 0: the weight; kind 1: the MXFP4 weight, one
-                           // 128 x 128 piece per box
+  CUtensorMap const *wmap; // kind 0: the weight; kind 1: the MXFP4 or e4m3
+                           // weight, one 128 x 128 piece per box
   int row0, k0; // kind 0: first weight row, first K 128 tile; kind 1: first z_q
                 // K tile
   CUtensorMap const *amap; // kind 0: the activation (nullptr: the activation is
@@ -533,7 +542,11 @@ struct TileJob {
 // + one expect + 2..3 TMA issues per stage (it runs once per stage, on the
 // critical path: keep it short). timing build: *stamp = when the job's first
 // stage is issued (after its ring slot is free)
-template <int ROWS = 128>
+// PIECE_BYTES: the bytes of a kind 1 weight piece in global memory (MXFP4 8 KB,
+// e4m3 16 KB; both use 16 KB in shared memory). WSF: kind 1 loads the scale
+// chunk of each piece (false: the epilogue applies the weight scales,
+// scale_promotion.cuh)
+template <int ROWS = 128, int PIECE_BYTES = 8192, bool WSF = true>
 __device__ __forceinline__ void load_job(TileJob const &j,
                                          uint32_t base,
                                          int &g,
@@ -572,14 +585,18 @@ __device__ __forceinline__ void load_job(TileJob const &j,
     } else {
       int const na = (j.natoms - 2 * s < 2) ? j.natoms - 2 * s
                                             : 2; // weight pieces in this stage
-      mbar_expect(full, na * (8192 + SF_CHUNK + T * 128));
+      mbar_expect(full, na * (PIECE_BYTES + (WSF ? SF_CHUNK : 0) + T * 128));
       uint32_t const sf_dst = base + OFF_WSF + st * 2 * SF_CHUNK;
       if (na == 2) {
         tma3(j.wmap2, full, dst, 0, 0, j.tile0 + 2 * s, EVICT_FIRST);
-        tma3(j.sfmap2, full, sf_dst, 0, 0, j.chunk0 + 2 * s, EVICT_FIRST);
+        if constexpr (WSF) {
+          tma3(j.sfmap2, full, sf_dst, 0, 0, j.chunk0 + 2 * s, EVICT_FIRST);
+        }
       } else {
         tma3(j.wmap, full, dst, 0, 0, j.tile0 + 2 * s, EVICT_FIRST);
-        tma3(j.sfmap, full, sf_dst, 0, 0, j.chunk0 + 2 * s, EVICT_FIRST);
+        if constexpr (WSF) {
+          tma3(j.sfmap, full, sf_dst, 0, 0, j.chunk0 + 2 * s, EVICT_FIRST);
+        }
       }
       if (na == 2) {
         tma3(j.amap2, full, dst + W_STAGE, 0, 0, j.k0 + 2 * s, EVICT_LAST);

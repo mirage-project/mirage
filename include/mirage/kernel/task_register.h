@@ -234,6 +234,14 @@ public:
                                    std::vector<int> const &params);
   int register_residual_add_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params);
+  int register_group_quant_sm100_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_scaled_gemm_tile_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  int register_silu_and_mul_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_scaled_moe_experts_sm100_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(
