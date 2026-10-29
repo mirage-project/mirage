@@ -26,13 +26,32 @@ constexpr int T = STATIC_TOKENS; // tokens per step; also the MMA N
 constexpr int GPUS =
     STATIC_GPUS; // GPUs (an exchange buffer has one slot per GPU)
 constexpr int NSM = STATIC_SMS; // CTAs of the launch, one per SM
-static_assert(T == 8,
-              "the GEMM ring (runtime.cuh) is written for 8 tokens: MMA N = 8, "
-              "8 accumulator columns per issuer");
+// The GEMM ring (runtime.cuh) uses MMA N = T: T accumulator columns per
+// (tick, issuer), ACC_STAGES ticks: columns T a + ACC_STAGES T iss, 2
+// ACC_STAGES T in all, and the pieces' second accumulator set
+// (scale_promotion.cuh PROMO_COL1) at 512 - 2 ACC_STAGES T. T = 32 keeps 3
+// ticks (columns 0 .. 191 and 320 .. 511: 4 would be 256 and run into the
+// scale chunks at 232 .. 263).
+static_assert(T == 8 || T == 16 || T == 32,
+              "the GEMM ring (runtime.cuh) is written for 8, 16 or 32 tokens: "
+              "MMA N = T, T accumulator columns per issuer");
+constexpr int ACC_STAGES = T <= 16 ? 4 : 3; // TMEM accumulator ticks
+static_assert(ACC_STAGES >= 2 && 2 * ACC_STAGES * T <= 512 - 264 &&
+                  ACC_STAGES <= 4,
+              "the accumulator ticks: both sets clear of the scale chunks "
+              "(columns 232 .. 263), at most 4 barriers each");
+// tick -> its columns' index and its round (the barriers' parity: round & 1)
+__host__ __device__ constexpr int acc_slot(int tick) {
+  return (int)((unsigned)tick % (unsigned)ACC_STAGES);
+}
+__host__ __device__ constexpr int acc_round(int tick) {
+  return (int)((unsigned)tick / (unsigned)ACC_STAGES);
+}
 
 // ---- pipeline depths ----
-constexpr int SMAX = 5; // stages of the weight ring (6 do not fit in shared
-                        // memory next to moe_experts' shared tables)
+// stages of the weight ring (6 do not fit in shared memory next to
+// moe_experts' shared tables; T = 32: 4, the activation's T x 256 B a stage)
+constexpr int SMAX = T <= 16 ? 5 : 4; // static_megakernel.ring_stages
 constexpr int W2QD = 4; // entries in moe_experts' shared-memory copy (loader ->
                         // issuers / epilogue; runtime.cuh Rt)
 
@@ -58,15 +77,19 @@ __host__ __device__ constexpr uint32_t idesc_bf16(uint32_t m) {
   return (1u << 4) | (1u << 7) | (1u << 10) | ((T / 8u) << 17) |
          ((m / 16u) << 24);
 }
-constexpr uint32_t IDESC_MX =
-    0x08820280u; // kind::mxf8f6f4: e2m1 x e4m3 -> fp32, ue8m0 scales, M128 N8
+constexpr uint32_t IDESC_MX = (0x08820280u & ~(0x3Fu << 17)) |
+                              ((T / 8u) << 17); // kind::mxf8f6f4: e2m1 x e4m3
+                                                // -> fp32, ue8m0 scales, M128
+                                                // N = T (bits 17..22: N / 8)
+// Select e4m3 weights: change the A type in bits 7..9 from 5 (e2m1) to 0.
+constexpr uint32_t IDESC_MX_E4M3 = IDESC_MX & ~(7u << 7);
 constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ull,
                    EVICT_LAST = 0x14F0000000000000ull; // L2 cache hints
 
 // ---- the generated layer's task table, its slots ----
 constexpr int MAX_TASKS_PER_SM =
     64;                      // entries per SM (the list, then an end entry)
-constexpr int MAX_BUFS = 24; // buffer slots (G::buf): node outputs, scratch
+constexpr int MAX_BUFS = 64; // buffer slots (G::buf): node outputs, scratch
                              // buffers, graph tensors read by pointer
 constexpr int MAX_MAPS = 32; // tensor map slots (Maps::m)
 
@@ -74,7 +97,7 @@ constexpr int MAX_MAPS = 32; // tensor map slots (Maps::m)
 // slow each other down, so each node has its own lines:
 //      static_megakernel.py gives each node its lines, the node's first counter
 //      is StaticNode::counter ----
-constexpr int NODE_COUNTER_LINES = 16;
+constexpr int NODE_COUNTER_LINES = 64;
 constexpr int NCNT = 32 * NODE_COUNTER_LINES;
 
 // ---- per-SM time stamps read by the host (host.cuh), g.stamps[sm * NSTAMP +

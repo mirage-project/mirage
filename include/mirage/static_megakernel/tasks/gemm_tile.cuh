@@ -35,6 +35,11 @@ __device__ __forceinline__ void tile_epilogue(
     for (int t = 0; t < T; t++) {
       reinterpret_cast<float *>(out)[t * N + row0 + row] = v[t];
     }
+  } else if (MODE == COMBINE_STORE_BF16) {
+    for (int t = 0; t < T; t++) {
+      reinterpret_cast<__nv_bfloat16 *>(out)[t * N + row0 + row] =
+          __float2bfloat16(v[t]);
+    }
   } else if (MODE == COMBINE_SLOTS) {
     for (int t = 0; t < T; t++) {
       reinterpret_cast<float *>(out)[((size_t)split * T + t) * N + row0 + row] =
@@ -80,9 +85,10 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
                                                int split,
                                                __nv_bfloat16 const *polled,
                                                int act_k,
-                                               char *sm STAGE_STAMP_PARAM) {
+                                               char *sm,
+                                               int s0 STAGE_STAMP_PARAM) {
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  int const a = wt & 3, par = (wt >> 2) & 1;
+  int const a = acc_slot(wt), par = acc_round(wt) & 1;
   if constexpr (POLLED) {
     if (warp == 0 && lane == 0) {
       load_job<ROWS>(j,
@@ -107,7 +113,7 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
             polled + (size_t)t * act_k + c));
       } while (!valid16(x));
       int const s_ = cg >> 4, a_ = (cg >> 3) & 1, k_ = cg & 7;
-      *reinterpret_cast<uint4 *>(sm + s_ * FSTAGE + W_STAGE + a_ * 1024 +
+      *reinterpret_cast<uint4 *>(sm + s_ * FSTAGE + W_STAGE + a_ * (T * 128) +
                                  t * 128 + ((k_ ^ (t & 7)) << 4)) = x;
     }
     asm volatile("fence.proxy.async.shared::cta;" ::
@@ -116,22 +122,27 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
   }
   if (warp == 0) {
     if constexpr (!POLLED) {
-      if (lane == 0) {
-        load_job<ROWS>(j,
-                       base,
-                       gl,
-                       -1,
-                       0,
-                       1 << 20 STAGE_STAMP_ARG(
-                           stamp)); // timing build: stamp[0] first load issued
+      if (lane == 0) { // from stage s0 (the activation-wait prefill issued the
+                       // ones before: run_gemm_tile); its stamp then marks
+                       // the activation's readiness, not a load
+        load_job<ROWS>(
+            j,
+            base,
+            gl,
+            -1,
+            s0,
+            1 << 20 STAGE_STAMP_ARG(
+                s0 ? nullptr
+                   : stamp)); // timing build: stamp[0] first load issued
       }
     }
   } else if (warp == 1 || warp == 6) {
     if (lane == 0) {
       int &gi = (warp == 1) ? gi0 : gi1;
-      if (wt >= 4) {
+      if (wt >= ACC_STAGES) {
         mbar_wait(rt.acc_empty0 + 8 * a,
-                  ((wt >> 2) - 1) & 1); // the stage's previous tile is drained
+                  (acc_round(wt) - 1) &
+                      1); // the stage's previous tile is drained
       }
       issue_job<ROWS>(j,
                       base,
@@ -143,7 +154,7 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
                                             : nullptr)); // stamp[1] landed
     }
   } else if (warp >= 2 && warp <= 5) {
-    float v[8];
+    float v[T];
     int const row = drain_acc<ROWS>(tb, a, par, v);
     if (ROWS == 128 || row >= 0) {
       switch (mode) { // 128 rows: every thread has one
@@ -152,6 +163,9 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
           break;
         case COMBINE_ADD:
           tile_epilogue<COMBINE_ADD>(out, N, row0, split, row, v);
+          break;
+        case COMBINE_STORE_BF16:
+          tile_epilogue<COMBINE_STORE_BF16>(out, N, row0, split, row, v);
           break;
         default:
           tile_epilogue<COMBINE_STORE>(out, N, row0, split, row, v);
@@ -208,9 +222,10 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
   static_assert(ROWS * SELF::x == N && (ROWS == 128 || ROWS == 64),
                 "128 or 64 weight rows per task");
   static_assert(mode == COMBINE_SLOTS || mode == COMBINE_ADD ||
-                    mode == COMBINE_STORE,
+                    mode == COMBINE_STORE || mode == COMBINE_STORE_BF16,
                 "mode: Combine");
-  static_assert(mode != COMBINE_STORE || SELF::y == 1,
+  static_assert((mode != COMBINE_STORE && mode != COMBINE_STORE_BF16) ||
+                    SELF::y == 1,
                 "plain stores: one K part");
   static_assert(SELF::buf >= 0 && (mode == COMBINE_SLOTS || SELF::counter >= 0),
                 "the node's output buffer and counters");
@@ -245,14 +260,16 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                                L.gi1,
                                L.wt,
                                mode,
-                               g.buf[SELF::buf],
+                               buf_at<void>(g, SELF::buf),
                                N / GPUS,
-                               g.cnt + (SELF::counter < 0 ? 0 : SELF::counter),
+                               cnt_now(g) +
+                                   (SELF::counter < 0 ? 0 : SELF::counter),
                                tk.x * ROWS - g.rank * (N / GPUS),
                                tk.y,
                                buf_at<__nv_bfloat16 const>(g, ACT::buf),
                                K,
-                               L.sm STAGE_STAMP_ARG(L.stage_stamps));
+                               L.sm,
+                               0 STAGE_STAMP_ARG(L.stage_stamps));
     L.wt++;
   } else {
     TileJob const j = make_bf16_tile(&maps.m[ROWS == 64 ? WMAP + 1 : WMAP],
@@ -260,21 +277,38 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                                      tk.x * ROWS,
                                      tk.y * pieces,
                                      pieces);
+    int npre = 0; // stages the activation-wait prefill issued (runtime.cuh)
     if constexpr (ACT::x > 0) { // the activation is a node's output: wait until
                                 // all its tasks are counted
       static_assert(ACT::counter >= 0,
                     "the activation's producer counts its tasks");
       __syncthreads();
+      // the weights first (not after moe_experts re-laid the ring: its
+      // barriers are made fresh after the wait)
+      npre = L.ring_relaid ? 0 : prefill_stages(j.nst);
       if (threadIdx.x == 0) {
-        cnt_wait(g.cnt + ACT::counter, ACT::x * ACT::y * ACT::z);
+        if (npre) {
+          prefill_weights<ROWS>(j, L.base, L.gl, npre);
+        }
+        cnt_wait(cnt_now(g) + ACT::counter, ACT::x * ACT::y * ACT::z);
+#ifdef STATIC_TIMING_BUILD
+        if (npre && L.stage_stamps) {
+          L.stage_stamps[0] = gtime(); // the activation ready (no load stamp)
+        }
+#endif
         if (L.ring_relaid) {
           ring_reinit(true);
+        }
+        if (npre) {
+          prefill_acts(j, L.base, L.gl, npre);
         }
       }
       if (L.ring_relaid) {
         L.gl = L.gi0 = L.gi1 = 0;
         L.wt = 0;
       }
+      L.gl += npre; // the loader continues at stage npre (lane 0 of warp 0's
+                    // copy is the one used; every thread keeps the same)
       __syncthreads();
     } else if (L.ring_relaid) { // after moe_experts on this SM: fresh ring and
                                 // accumulator barriers
@@ -294,14 +328,15 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                          L.gi1,
                          L.wt,
                          mode,
-                         g.buf[SELF::buf],
+                         buf_at<void>(g, SELF::buf),
                          N,
-                         g.cnt + (SELF::counter < 0 ? 0 : SELF::counter),
+                         cnt_now(g) + (SELF::counter < 0 ? 0 : SELF::counter),
                          tk.x * ROWS,
                          tk.y,
                          nullptr,
                          0,
-                         L.sm STAGE_STAMP_ARG(L.stage_stamps));
+                         L.sm,
+                         npre STAGE_STAMP_ARG(L.stage_stamps));
     L.wt++;
   }
 }

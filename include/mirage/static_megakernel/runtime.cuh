@@ -46,6 +46,18 @@ __device__ __forceinline__ void mbar_wait(uint32_t a, int ph) {
                : "memory");
 }
 
+// a contiguous global range (16-B aligned, bytes a multiple of 16) into shared
+// memory, completing on mbarrier mb
+__device__ __forceinline__ void
+    bulk_g2s(uint32_t sm, void const *src, uint32_t bytes, uint32_t mb) {
+  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::"
+               "bytes [%0], [%1], %2, [%3];" ::"r"(sm),
+               "l"((uint64_t)src),
+               "r"(bytes),
+               "r"(mb)
+               : "memory");
+}
+
 // TMA: a 3-D / 2-D box from global memory into shared memory, completing on
 // mbarrier mb
 __device__ __forceinline__ void tma3(void const *d,
@@ -90,9 +102,12 @@ __device__ __forceinline__ uint64_t
 __device__ __forceinline__ uint64_t mkdesc_sf(uint32_t a) {
   return denc(a) | (denc(128) << 32ULL) | (1ULL << 46ULL);
 } // scale chunk
+__device__ __forceinline__ uint32_t idesc_mx(uint32_t base, uint32_t sf) {
+  return base | (sf << 4) | (sf << 29);
+} // scale id sf of 0..3 (base: IDESC_MX, IDESC_MX_E4M3)
 __device__ __forceinline__ uint32_t idesc_mx(uint32_t sf) {
-  return IDESC_MX | (sf << 4) | (sf << 29);
-} // scale id sf of 0..3
+  return idesc_mx(IDESC_MX, sf);
+}
 __device__ __forceinline__ void
     cp_sf(uint32_t tcol,
           uint32_t smem) { // one 512-B scale chunk shared memory -> TMEM
@@ -144,6 +159,33 @@ __device__ __forceinline__ void fence_after() {
 __device__ __forceinline__ void fence_before() {
   asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
 }
+// T fp32 columns of this thread's TMEM lane (the accumulator columns of one
+// (tick, issuer): runtime.cuh issue_job)
+template <int N>
+__device__ __forceinline__ void tmem_ld_cols(uint32_t addr, float *v);
+template <>
+__device__ __forceinline__ void tmem_ld_cols<16>(uint32_t addr, float *v) {
+  asm volatile("tcgen05.ld.sync.aligned.32x32b.x16.b32 "
+               "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
+               : "=f"(v[0]),
+                 "=f"(v[1]),
+                 "=f"(v[2]),
+                 "=f"(v[3]),
+                 "=f"(v[4]),
+                 "=f"(v[5]),
+                 "=f"(v[6]),
+                 "=f"(v[7]),
+                 "=f"(v[8]),
+                 "=f"(v[9]),
+                 "=f"(v[10]),
+                 "=f"(v[11]),
+                 "=f"(v[12]),
+                 "=f"(v[13]),
+                 "=f"(v[14]),
+                 "=f"(v[15])
+               : "r"(addr));
+  asm volatile("tcgen05.wait::ld.sync.aligned;" ::: "memory");
+}
 __device__ __forceinline__ void
     tmem_ld8(uint32_t addr,
              float *v) { // 8 fp32 columns of this thread's TMEM lane
@@ -159,6 +201,96 @@ __device__ __forceinline__ void
         "=f"(v[7])
       : "r"(addr));
   asm volatile("tcgen05.wait::ld.sync.aligned;" ::: "memory");
+}
+template <>
+__device__ __forceinline__ void tmem_ld_cols<8>(uint32_t addr, float *v) {
+  tmem_ld8(addr, v);
+}
+// one fp32 column of this thread's TMEM lane, without the wait: a batch of
+// these, then tmem_wait_keep8 on each 8 of the values (the wait takes them as
+// operands, so no use of a value moves above it)
+__device__ __forceinline__ float tmem_ld1(uint32_t addr) {
+  float v;
+  asm volatile("tcgen05.ld.sync.aligned.32x32b.x1.b32 {%0}, [%1];"
+               : "=f"(v)
+               : "r"(addr));
+  return v;
+}
+__device__ __forceinline__ void tmem_keep8(float *v) {
+  asm volatile("tcgen05.wait::ld.sync.aligned;"
+               : "+f"(v[0]),
+                 "+f"(v[1]),
+                 "+f"(v[2]),
+                 "+f"(v[3]),
+                 "+f"(v[4]),
+                 "+f"(v[5]),
+                 "+f"(v[6]),
+                 "+f"(v[7])
+               :
+               : "memory");
+}
+__device__ __forceinline__ void tmem_wait_keep8(float (&v)[8]) {
+  tmem_keep8(v);
+}
+// N fp32 columns (N = 8, 16, 32) of this thread's TMEM lane without the wait
+// (x8 / x16 loads): a batch of these (several accumulators), then
+// tmem_keep_cols on each: one wait for the whole batch instead of one per
+// x16 load (the later keeps only pin their values below it)
+template <int N>
+__device__ __forceinline__ void tmem_ld_cols_nw(uint32_t addr, float *v);
+template <>
+__device__ __forceinline__ void tmem_ld_cols_nw<8>(uint32_t addr, float *v) {
+  asm volatile(
+      "tcgen05.ld.sync.aligned.32x32b.x8.b32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
+      : "=f"(v[0]),
+        "=f"(v[1]),
+        "=f"(v[2]),
+        "=f"(v[3]),
+        "=f"(v[4]),
+        "=f"(v[5]),
+        "=f"(v[6]),
+        "=f"(v[7])
+      : "r"(addr));
+}
+template <>
+__device__ __forceinline__ void tmem_ld_cols_nw<16>(uint32_t addr, float *v) {
+  asm volatile("tcgen05.ld.sync.aligned.32x32b.x16.b32 "
+               "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, [%16];"
+               : "=f"(v[0]),
+                 "=f"(v[1]),
+                 "=f"(v[2]),
+                 "=f"(v[3]),
+                 "=f"(v[4]),
+                 "=f"(v[5]),
+                 "=f"(v[6]),
+                 "=f"(v[7]),
+                 "=f"(v[8]),
+                 "=f"(v[9]),
+                 "=f"(v[10]),
+                 "=f"(v[11]),
+                 "=f"(v[12]),
+                 "=f"(v[13]),
+                 "=f"(v[14]),
+                 "=f"(v[15])
+               : "r"(addr));
+}
+template <>
+__device__ __forceinline__ void tmem_ld_cols_nw<32>(uint32_t addr, float *v) {
+  tmem_ld_cols_nw<16>(addr, v);
+  tmem_ld_cols_nw<16>(addr + 16, v + 16);
+}
+template <int N>
+__device__ __forceinline__ void tmem_keep_cols(float *v) {
+#pragma unroll
+  for (int i = 0; i < N; i += 8) {
+    tmem_keep8(v + i);
+  }
+}
+// both x16 loads before one wait
+template <>
+__device__ __forceinline__ void tmem_ld_cols<32>(uint32_t addr, float *v) {
+  tmem_ld_cols_nw<32>(addr, v);
+  tmem_keep_cols<32>(v);
 }
 
 // math
@@ -178,6 +310,22 @@ __device__ __forceinline__ float
           float u) { // situ with the fast tanh and divide (moe_experts)
   return 4.0f * tanh_fast(g * 0.25f) * __fdividef(1.0f, 1.0f + __expf(-g)) *
          (25.0f * tanh_fast(u * 0.04f));
+}
+// Compute SiLU(gate) * up with fast exp and division.
+// scaled_moe_experts and silu_and_mul use this function.
+__device__ __forceinline__ float silu2(float g, float u) {
+  return g * __fdividef(1.0f, 1.0f + __expf(-g)) * u;
+}
+// silu2 with GLM-5.3-Flash's swiglu_limit: gate clamped to at most the limit,
+// up to [-limit, limit] first. LIMIT_BITS: the limit's fp32 bits (0: none)
+template <int LIMIT_BITS>
+__device__ __forceinline__ float silu2_limit(float g, float u) {
+  if constexpr (LIMIT_BITS != 0) {
+    float const lim = __int_as_float(LIMIT_BITS);
+    g = fminf(g, lim);
+    u = fminf(fmaxf(u, -lim), lim);
+  }
+  return silu2(g, u);
 }
 __device__ __forceinline__ uint8_t cvt_e4m3_nv(
     float
@@ -491,31 +639,44 @@ __device__ __forceinline__ int
   if (stamp)                                                                   \
     stamp[i] = gtime();
 #define STAGE_STAMP_ARG(p) , (p)
+// thread 0 stamps, then its warp re-converges: without the __syncwarp the
+// compiler may branch thread 0 past the next check and leave warp 0 split, and
+// the warp's shuffles after it take the slow path (a WARPSYNC.COLLECTIVE each:
+// hc_post_mix's 125, +17 us in the timing build only)
+#define STAGE_STAMP_T0(i)                                                      \
+  if (threadIdx.x == 0) {                                                      \
+    STAGE_STAMP_AT(i)                                                          \
+  }                                                                            \
+  __syncwarp();
 #else
 #define STAGE_STAMP_PARAM
 #define STAGE_STAMP(cond)
 #define STAGE_STAMP_AT(i)
 #define STAGE_STAMP_ARG(p)
+#define STAGE_STAMP_T0(i)
 #endif
 // A job = one output tile of 128 rows x T tokens, streamed through the ring:
 // `nst` stages, each holding weights (+ activations), consumed by the two
 // issuer warps into TMEM accumulator stage `a`, drained by the 128 epilogue
-// threads (one row each).
+// threads (one row each). An activation tile in a stage is [2 halves of K
+// 64][T rows][128 B] (128-B swizzle; a half is T x 128 B = A_STAGE / 2), the
+// MMA's N = T rows of it, its accumulator T fp32 columns.
 //   kind 0  bf16 tile: stage = K 128 of the weight (box {64, ROWS rows, 2}) +
-//   of the activation (box {64, 8, 2}); the issuers take
+//   of the activation (box {64, T, 2}); the issuers take
 //           whole stages in turn. ROWS (template argument of load_job /
 //           issue_job / drain_acc) = 128, or 64: a 64-row tile (MMA M = 64)
 //           fills half of the stage's weight part, [0, 16 KB); the activation
 //           stays at W_STAGE
-//   kind 1  W13 item: stage = two MXFP4 K 128 pieces + their scale chunks + two
-//   e4m3 z_q K tiles; each issuer takes one piece
+//   kind 1  W13 item (and scaled_gemm_tile): stage = two K 128 weight pieces
+//           (MXFP4 + their scale chunks, or e4m3: load_job's PIECE_BYTES,
+//           WSF) + two e4m3 z_q K tiles; up to two pieces per stage
 // Stage counters `g` count stages since the last ring_reinit: stage slot g %
 // SMAX, phase g / SMAX.
 struct TileJob {
   int kind;
   int nst;                 // ring stages of this job
-  CUtensorMap const *wmap; // kind 0: the weight; kind 1: the MXFP4 weight, one
-                           // 128 x 128 piece per box
+  CUtensorMap const *wmap; // kind 0: the weight; kind 1: the MXFP4 or e4m3
+                           // weight, one 128 x 128 piece per box
   int row0, k0; // kind 0: first weight row, first K 128 tile; kind 1: first z_q
                 // K tile
   CUtensorMap const *amap; // kind 0: the activation (nullptr: the activation is
@@ -533,7 +694,11 @@ struct TileJob {
 // + one expect + 2..3 TMA issues per stage (it runs once per stage, on the
 // critical path: keep it short). timing build: *stamp = when the job's first
 // stage is issued (after its ring slot is free)
-template <int ROWS = 128>
+// PIECE_BYTES: the bytes of a kind 1 weight piece in global memory (MXFP4 8 KB,
+// e4m3 16 KB; both use 16 KB in shared memory). WSF: kind 1 loads the scale
+// chunk of each piece (false: the epilogue applies the weight scales,
+// scale_promotion.cuh)
+template <int ROWS = 128, int PIECE_BYTES = 8192, bool WSF = true>
 __device__ __forceinline__ void load_job(TileJob const &j,
                                          uint32_t base,
                                          int &g,
@@ -572,14 +737,18 @@ __device__ __forceinline__ void load_job(TileJob const &j,
     } else {
       int const na = (j.natoms - 2 * s < 2) ? j.natoms - 2 * s
                                             : 2; // weight pieces in this stage
-      mbar_expect(full, na * (8192 + SF_CHUNK + T * 128));
+      mbar_expect(full, na * (PIECE_BYTES + (WSF ? SF_CHUNK : 0) + T * 128));
       uint32_t const sf_dst = base + OFF_WSF + st * 2 * SF_CHUNK;
       if (na == 2) {
         tma3(j.wmap2, full, dst, 0, 0, j.tile0 + 2 * s, EVICT_FIRST);
-        tma3(j.sfmap2, full, sf_dst, 0, 0, j.chunk0 + 2 * s, EVICT_FIRST);
+        if constexpr (WSF) {
+          tma3(j.sfmap2, full, sf_dst, 0, 0, j.chunk0 + 2 * s, EVICT_FIRST);
+        }
       } else {
         tma3(j.wmap, full, dst, 0, 0, j.tile0 + 2 * s, EVICT_FIRST);
-        tma3(j.sfmap, full, sf_dst, 0, 0, j.chunk0 + 2 * s, EVICT_FIRST);
+        if constexpr (WSF) {
+          tma3(j.sfmap, full, sf_dst, 0, 0, j.chunk0 + 2 * s, EVICT_FIRST);
+        }
       }
       if (na == 2) {
         tma3(j.amap2, full, dst + W_STAGE, 0, 0, j.k0 + 2 * s, EVICT_LAST);
@@ -594,14 +763,89 @@ __device__ __forceinline__ void load_job(TileJob const &j,
   }
 }
 
+// The activation-wait prefill (gemm_tile / scaled_gemm_tile whose activation is
+// a node of this kernel; after the Kimi K3 PR's PDL prefill, #811): the job's
+// first n stages' weights are issued before the wait for the activation's
+// producer (weights are graph inputs: they do not depend on it), so a task that
+// waits for a latency-bound producer (kda_decode, sparse_mla, ...) has its
+// weight tiles in shared memory when the activation is ready. prefill_weights
+// claims stage slots g .. g + n - 1 (waiting on `empty` as load_job does),
+// expects each stage's weight AND activation bytes and issues only the weight;
+// prefill_acts, after the wait, issues the activations into the same stages.
+// The issuers wait on `full` as usual: a stage completes when both have landed.
+// The loader then continues with load_job from stage n (its s0). Both kinds as
+// load_job lays them out (kind 1: PIECE_BYTES, WSF as its template arguments).
+template <int ROWS = 128, int PIECE_BYTES = 8192, bool WSF = true>
+__device__ __forceinline__ void
+    prefill_weights(TileJob const &j, uint32_t base, int g, int n) {
+  int st = g % SMAX;
+  uint32_t ph = ((g / SMAX) - 1) & 1;
+  for (int s = 0; s < n; s++, g++) {
+    if (g >= SMAX) {
+      mbar_wait(rt.empty0 + 8 * st, ph);
+    }
+    uint32_t const full = rt.full0 + 8 * st, dst = base + st * FSTAGE;
+    if (j.kind == 0) {
+      mbar_expect(full, ROWS * 256 + A_STAGE);
+      tma3(j.wmap, full, dst, 0, j.row0, (j.k0 + s) * 2, EVICT_FIRST);
+    } else {
+      int const na = (j.natoms - 2 * s < 2) ? j.natoms - 2 * s : 2;
+      mbar_expect(full, na * (PIECE_BYTES + (WSF ? SF_CHUNK : 0) + T * 128));
+      uint32_t const sf_dst = base + OFF_WSF + st * 2 * SF_CHUNK;
+      if (na == 2) {
+        tma3(j.wmap2, full, dst, 0, 0, j.tile0 + 2 * s, EVICT_FIRST);
+        if constexpr (WSF) {
+          tma3(j.sfmap2, full, sf_dst, 0, 0, j.chunk0 + 2 * s, EVICT_FIRST);
+        }
+      } else {
+        tma3(j.wmap, full, dst, 0, 0, j.tile0 + 2 * s, EVICT_FIRST);
+        if constexpr (WSF) {
+          tma3(j.sfmap, full, sf_dst, 0, 0, j.chunk0 + 2 * s, EVICT_FIRST);
+        }
+      }
+    }
+    if (++st == SMAX) {
+      st = 0;
+      ph ^= 1u;
+    }
+  }
+}
+__device__ __forceinline__ void
+    prefill_acts(TileJob const &j, uint32_t base, int g, int n) {
+  int st = g % SMAX;
+  for (int s = 0; s < n; s++) {
+    uint32_t const full = rt.full0 + 8 * st, dst = base + st * FSTAGE + W_STAGE;
+    if (j.kind == 0) {
+      tma3(j.amap, full, dst, 0, 0, (j.k0 + s) * 2, EVICT_LAST);
+    } else if (j.natoms - 2 * s >= 2) {
+      tma3(j.amap2, full, dst, 0, 0, j.k0 + 2 * s, EVICT_LAST);
+    } else {
+      tma2(j.amap, full, dst, (j.k0 + 2 * s) * 128, 0, EVICT_LAST);
+    }
+    if (++st == SMAX) {
+      st = 0;
+    }
+  }
+}
+// how many stages the activation-wait prefill issues for a job of nst stages:
+// all, up to the ring's SMAX (0: -DSTATIC_NO_GEMM_PREFILL, the A/B control)
+__device__ __forceinline__ int prefill_stages(int nst) {
+#ifdef STATIC_NO_GEMM_PREFILL
+  return 0;
+#else
+  return nst < SMAX ? nst : SMAX;
+#endif
+}
+
 // one TMA descriptor into the descriptor cache ahead of its first use
 __device__ __forceinline__ void prefetch_tmap(void const *m) {
   asm volatile("prefetch.tensormap [%0];" ::"l"(m) : "memory");
 }
 // issuer iss (0 or 1): consume the job's stages into accumulator stage a (a
 // kind 0 job: gemm_tile; the stages with s % 2 == iss). Both issuers wait on
-// EVERY stage in order (parity rule). TMEM columns: acc = tb + 8 a + 32 iss (8
-// fp32 each). timing build: *stamp = when the job's first stage has landed
+// EVERY stage in order (parity rule). TMEM columns: acc = tb + T a + 4 T iss
+// (T fp32 each: ticks 0..3 of issuer 0, then of issuer 1, 8 T columns in all).
+// timing build: *stamp = when the job's first stage has landed
 template <int ROWS = 128>
 __device__ __forceinline__ void issue_job(TileJob const &j,
                                           uint32_t base,
@@ -609,7 +853,7 @@ __device__ __forceinline__ void issue_job(TileJob const &j,
                                           int iss,
                                           int &g,
                                           int a STAGE_STAMP_PARAM) {
-  uint32_t const acc = tb + 8 * a + 32 * iss;
+  uint32_t const acc = tb + T * a + ACC_STAGES * T * iss;
   bool first = true;
   for (int s = 0; s < j.nst; s++, g++) {
     bool const mine = (s & 1) == iss;
@@ -627,9 +871,10 @@ __device__ __forceinline__ void issue_job(TileJob const &j,
     }
     uint32_t const wst = base + st * FSTAGE, ast = base + st * FSTAGE + W_STAGE;
     for (int at = 0; at < 2; at++) { // two 64-column halves of K 128 (ROWS x
-                                     // 128 B each), 4 MMAs of K 16 each
+                                     // 128 B each; T x 128 B of the
+                                     // activation), 4 MMAs of K 16 each
       uint64_t const dw = mkdesc(wst + at * ROWS * 128),
-                     dx = mkdesc(ast + at * 1024);
+                     dx = mkdesc(ast + at * (T * 128));
       for (int k = 0; k < 4; k++) {
         mma_bf16<ROWS>(
             acc, dw + 2 * k, dx + 2 * k, (first && k == 0) ? 0u : 1u);
@@ -657,7 +902,7 @@ __device__ __forceinline__ void
                    int &g,
                    int a,
                    uint32_t sfb_base STAGE_STAMP_PARAM) {
-  uint32_t const acc = tb + 8 * a + 32 * iss;
+  uint32_t const acc = tb + T * a + ACC_STAGES * T * iss;
   bool first = true;
   for (int s = 0; s < j.nst; s++, g++) {
     bool const mine = (s & 1) == iss;
@@ -684,7 +929,7 @@ __device__ __forceinline__ void
         cp_sf(sfp, base + OFF_WSF + (st * 2 + at) * SF_CHUNK);
       }
       uint64_t const dw = mkdesc(base + st * FSTAGE + at * 16384);
-      uint64_t const db = mkdesc(base + st * FSTAGE + W_STAGE + at * 1024);
+      uint64_t const db = mkdesc(base + st * FSTAGE + W_STAGE + at * (T * 128));
       uint32_t const sfb = sfb_base + 4 * (j.k0 + atom);
       if (one) {
         mma_mx(acc, dw, db, idesc_mx(0), first ? 0u : 1u, sfp, sfb);
@@ -706,7 +951,7 @@ __device__ __forceinline__ void
 }
 
 // epilogue (warps 2..5, 128 threads): wait for accumulator stage a, add the two
-// issuers' accumulators -> v[8] (one per token) of this thread's row; returns
+// issuers' accumulators -> v[T] (one per token) of this thread's row; returns
 // the row (0..ROWS-1), or -1 for a thread without a row. ROWS = 128: row = TMEM
 // lane. ROWS = 64 (MMA M = 64): each warp's 32-lane TMEM slice holds 16 rows in
 // lanes 0..15 (16 data paths per slice), so row = 16 x slice + lane for lanes
@@ -718,10 +963,15 @@ __device__ int drain_acc(uint32_t tb, int a, int parity, float *v) {
       (ROWS == 128) ? lgrp * 32 + lane : (lane < 16 ? lgrp * 16 + lane : -1);
   mbar_wait(rt.acc_full0 + 8 * a, parity);
   fence_after();
-  float v2[8];
-  tmem_ld8(tb + 8 * a + ((uint32_t)(lgrp * 32) << 16), v);
-  tmem_ld8(tb + 8 * a + 32 + ((uint32_t)(lgrp * 32) << 16), v2);
-  for (int t = 0; t < 8; t++) {
+  float v2[T];
+  // both issuers' loads before one wait
+  tmem_ld_cols_nw<T>(tb + T * a + ((uint32_t)(lgrp * 32) << 16), v);
+  tmem_ld_cols_nw<T>(
+      tb + T * a + ACC_STAGES * T + ((uint32_t)(lgrp * 32) << 16), v2);
+  tmem_keep_cols<T>(v);
+  tmem_keep_cols<T>(v2);
+#pragma unroll
+  for (int t = 0; t < T; t++) {
     v[t] += v2[t];
   }
   fence_before();

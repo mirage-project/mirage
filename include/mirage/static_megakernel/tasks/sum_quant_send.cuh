@@ -25,6 +25,9 @@ template <int NSPLIT, size_t ZOFF, int LAT> // ZOFF: the output's offset in the
 __device__ __forceinline__ void
     sum_quant_send_task(G const &g, float *zpart, int kt) {
   constexpr size_t ZQ_SF = zq_scales_at(LAT);
+  static_assert(T == 8,
+                "sum_quant_send: written for 8 tokens (warps 0..3, 2 "
+                "tokens each; 64 threads send the z_q bytes)");
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   __syncthreads();
   if (warp < 4) { // warp w: tokens 2w and 2w + 1; lane: columns 4 lane .. 4

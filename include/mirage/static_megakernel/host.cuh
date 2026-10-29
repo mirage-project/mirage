@@ -15,7 +15,8 @@
 //     source: t:<tensor name> (a graph tensor or a node's output buffer by its
 //       tensor name) or b:<buffer slot>+<byte offset>.
 //     kind and dims: bf16 <rows> <K> <box rows> | wblk <pieces> <box pieces> |
-//       sf <chunks> <box chunks> | act8 <K bytes> <rows> |
+//       wblk8 <pieces> <box pieces> | sf <chunks> <box chunks> |
+//       act8 <K bytes> <rows> |
 //       act8kt <K bytes> <rows> <K tiles>
 // The node output buffers are allocated first, then the scratch buffers, then
 // the counters and the time stamps. Keep this order: the buffers' addresses
@@ -63,6 +64,7 @@ struct BufReset {
   size_t bytes;
   int value;
   bool by_reader;
+  size_t stride = 0; // STATIC_NO_START_BARRIER: the second set's offset
 };
 struct GpuState {
   G g;       // the kernel's parameter g (by value)
@@ -71,6 +73,10 @@ struct GpuState {
       resets; // every buffer filled before each launch (static_host_reset)
   std::map<std::string, void *> bufs; // the node output buffers by tensor name
   std::vector<void *> owned;          // cudaMalloc'd here
+  void *flush = nullptr; // serving mode: the buffer static_host_prelude reads
+  size_t flush_bytes = 0;
+  std::map<std::string, std::string> args; // the slot args (static_host_rebind)
+  std::map<std::string, void *> tensors;   // the graph tensors by name
 };
 static std::vector<GpuState> g_gpus;
 
@@ -95,14 +101,20 @@ static void map_bf16(
                                 CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
-// MXFP4 weight stored piece by piece: [piece][128 rows][64 B]; box = bt pieces
-static void
-    map_wblk(CUtensorMap *m, void *base, uint64_t ntiles, uint32_t bt = 1) {
+// Map packed weights, with bt pieces per tensor-map box.
+// fp8 false: MXFP4 [piece][128 rows][64 bytes].
+// fp8 true: e4m3 [piece][128 rows][128 bytes].
+static void map_wblk(CUtensorMap *m,
+                     void *base,
+                     uint64_t ntiles,
+                     uint32_t bt = 1,
+                     bool fp8 = false) {
   cuuint64_t gd[3] = {128, 128, ntiles};
-  cuuint64_t gs[2] = {64, 8192};
+  cuuint64_t gs[2] = {fp8 ? 128u : 64u, fp8 ? 16384u : 8192u};
   cuuint32_t bd[3] = {128, 128, bt}, es[3] = {1, 1, 1};
   MKS_CU(cuTensorMapEncodeTiled(m,
-                                CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B,
+                                fp8 ? CU_TENSOR_MAP_DATA_TYPE_UINT8
+                                    : CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B,
                                 3,
                                 base,
                                 gd,
@@ -133,13 +145,13 @@ static void
                                 CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
-// e4m3 [rows, Kb] as {128, rows, Kb / 128}; box {128, 8, nkt}: nkt K tiles of 8
-// rows
+// e4m3 [rows, Kb] as {128, rows, Kb / 128}; box {128, T, nkt}: nkt K tiles of
+// T rows (the tokens of a step: the MMA's N)
 static void map_act8_kt(
     CUtensorMap *m, void *base, uint64_t Kb, uint64_t rows, uint32_t nkt) {
   cuuint64_t gd[3] = {128, rows, Kb / 128};
   cuuint64_t gs[2] = {Kb, 128};
-  cuuint32_t bd[3] = {128, 8, nkt}, es[3] = {1, 1, 1};
+  cuuint32_t bd[3] = {128, (cuuint32_t)T, nkt}, es[3] = {1, 1, 1};
   MKS_CU(cuTensorMapEncodeTiled(m,
                                 CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                 3,
@@ -153,11 +165,11 @@ static void map_act8_kt(
                                 CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
-// e4m3 [rows, Kb]; box {128, 8}
+// e4m3 [rows, Kb]; box {128, T} (T rows: the tokens of a step)
 static void map_act8(CUtensorMap *m, void *base, uint64_t Kb, uint64_t rows) {
   cuuint64_t gd[2] = {Kb, rows};
   cuuint64_t gs[1] = {Kb};
-  cuuint32_t bd[2] = {128, 8}, es[2] = {1, 1};
+  cuuint32_t bd[2] = {128, (cuuint32_t)T}, es[2] = {1, 1};
   MKS_CU(cuTensorMapEncodeTiled(m,
                                 CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                 2,
@@ -311,6 +323,17 @@ static void build_bufs(GpuState &s,
                   exchange_bytes[i]);
           exit(1);
         }
+#ifdef STATIC_NO_START_BARRIER
+        if (reset >= 0 && !by_reader) {
+          fprintf(stderr,
+                  "static_host: buf.%d (%s): an exchange buffer reset at each "
+                  "launch; STATIC_NO_START_BARRIER needs its reader to re-arm "
+                  "it\n",
+                  i,
+                  name.c_str());
+          exit(1);
+        }
+#endif
         if (reset >= 0) {
           for (int set = 0; set < 2; set++) {
             s.resets.push_back(BufReset{(unsigned char *)p + set * EXCHANGE_SET,
@@ -330,6 +353,27 @@ static void build_bufs(GpuState &s,
       if (bytes == 0) { // a scratch buffer this build's node does not read
         continue;
       }
+#ifdef STATIC_NO_START_BARRIER
+      if (reset >= 0 && !by_reader) { // two sets, both filled now (kernel_end
+                                      // refills the one the next launch uses)
+        if (p) {
+          fprintf(stderr,
+                  "static_host: buf.%d (%s): reset at each launch, so "
+                  "STATIC_NO_START_BARRIER gives it two sets; it must be the "
+                  "kernel's own buffer, not a given tensor\n",
+                  i,
+                  name.c_str());
+          exit(1);
+        }
+        p = dmalloc<unsigned char>(s, 2 * bytes);
+        MKS_CK(cudaMemset(p, reset, 2 * bytes));
+        s.g.buf[i] = p;
+        s.bufs[name] = p;
+        s.g.par_bytes[i] = bytes;
+        s.resets.push_back(BufReset{p, bytes, reset, false, bytes});
+        continue;
+      }
+#endif
       if (!p) {
         p = dmalloc<unsigned char>(s, bytes);
         MKS_CK(cudaMemset(p, 0, bytes));
@@ -345,67 +389,233 @@ static void build_bufs(GpuState &s,
 // the kernel's own buffers: the counters, the time stamps
 static void build_shell_buffers(GpuState &s) {
   G &g = s.g;
+#ifdef STATIC_NO_START_BARRIER
+  g.cnt = dmalloc<uint32_t>(s, 2 * NCNT * 4); // two sets (kernel_begin)
+  MKS_CK(cudaMemset(g.cnt, 0, 2 * NCNT * 4));
+  s.resets.push_back(BufReset{g.cnt, NCNT * 4, 0, false, NCNT * 4});
+#else
   g.cnt = dmalloc<uint32_t>(s, NCNT * 4);
+  s.resets.push_back(BufReset{g.cnt, NCNT * 4, 0, false});
+#endif
   g.stamps = dmalloc<long long>(s, NSM * NSTAMP * 8);
   MKS_CK(cudaMemset(g.stamps, 0, NSM * NSTAMP * 8));
   g.start_barrier = dmalloc<long long>(s, 8);
   MKS_CK(cudaMemset(g.start_barrier, 0, 8));
-  s.resets.push_back(BufReset{g.cnt, NCNT * 4, 0, false});
 }
-// the tensor maps (Maps::m) from the slot args; a t: source by name from
+// tensor map Maps::m[i] from its declaration m; a t: source by name from
 // `tensors`, else a node output buffer of s
+static void build_map(Maps &maps,
+                      GpuState const &s,
+                      std::map<std::string, void *> const &tensors,
+                      std::vector<std::string> const &m,
+                      int i) {
+  std::string const &src = m[1];
+  unsigned char *p = nullptr;
+  if (src.compare(0, 2, "t:") == 0) {
+    auto it = tensors.find(src.substr(2));
+    if (it != tensors.end()) {
+      p = (unsigned char *)it->second;
+    }
+    if (!p) {
+      auto b = s.bufs.find(src.substr(2));
+      p = (b != s.bufs.end()) ? (unsigned char *)b->second : nullptr;
+    }
+  } else if (src.compare(0, 2, "b:") == 0) {
+    size_t const plus = src.find('+');
+    p = (unsigned char *)s.g.buf[std::stoi(src.substr(2, plus - 2))] +
+        (plus == std::string::npos ? 0 : std::stoull(src.substr(plus + 1)));
+  }
+  if (!p) {
+    fprintf(stderr, "static_host: map.%d: no tensor %s\n", i, src.c_str());
+    exit(1);
+  }
+  auto u = [&](int k) { return std::stoull(m[k]); };
+  std::string const &kind = m[0];
+  if (kind == "bf16" && m.size() == 5) {
+    map_bf16(&maps.m[i], p, u(2), (uint32_t)u(4), u(3));
+  } else if (kind == "wblk" && m.size() == 4) {
+    map_wblk(&maps.m[i], p, u(2), (uint32_t)u(3));
+  } else if (kind == "wblk8" && m.size() == 4) {
+    map_wblk(&maps.m[i], p, u(2), (uint32_t)u(3), true);
+  } else if (kind == "sf" && m.size() == 4) {
+    map_sf(&maps.m[i], p, u(2), (uint32_t)u(3));
+  } else if (kind == "act8" && m.size() == 4) {
+    map_act8(&maps.m[i], p, u(2), u(3));
+  } else if (kind == "act8kt" && m.size() == 5) {
+    map_act8_kt(&maps.m[i], p, u(2), u(3), (uint32_t)u(4));
+  } else {
+    fprintf(stderr,
+            "static_host: map.%d: bad declaration (%s, %zu fields)\n",
+            i,
+            kind.c_str(),
+            m.size());
+    exit(1);
+  }
+}
+// the tensor maps (Maps::m) from the slot args
 static void build_maps(Maps &maps,
                        GpuState const &s,
                        std::map<std::string, void *> const &tensors,
                        std::map<std::string, std::string> const &args) {
   auto const ms = slot_args(args, "map.", MAX_MAPS);
   for (int i = 0; i < MAX_MAPS; i++) {
-    if (ms[i].empty()) {
-      continue;
-    }
-    std::vector<std::string> const &m = ms[i];
-    std::string const &src = m[1];
-    unsigned char *p = nullptr;
-    if (src.compare(0, 2, "t:") == 0) {
-      auto it = tensors.find(src.substr(2));
-      if (it != tensors.end()) {
-        p = (unsigned char *)it->second;
-      }
-      if (!p) {
-        auto b = s.bufs.find(src.substr(2));
-        p = (b != s.bufs.end()) ? (unsigned char *)b->second : nullptr;
-      }
-    } else if (src.compare(0, 2, "b:") == 0) {
-      size_t const plus = src.find('+');
-      p = (unsigned char *)s.g.buf[std::stoi(src.substr(2, plus - 2))] +
-          (plus == std::string::npos ? 0 : std::stoull(src.substr(plus + 1)));
-    }
-    if (!p) {
-      fprintf(stderr, "static_host: map.%d: no tensor %s\n", i, src.c_str());
-      exit(1);
-    }
-    auto u = [&](int k) { return std::stoull(m[k]); };
-    std::string const &kind = m[0];
-    if (kind == "bf16" && m.size() == 5) {
-      map_bf16(&maps.m[i], p, u(2), (uint32_t)u(4), u(3));
-    } else if (kind == "wblk" && m.size() == 4) {
-      map_wblk(&maps.m[i], p, u(2), (uint32_t)u(3));
-    } else if (kind == "sf" && m.size() == 4) {
-      map_sf(&maps.m[i], p, u(2), (uint32_t)u(3));
-    } else if (kind == "act8" && m.size() == 4) {
-      map_act8(&maps.m[i], p, u(2), u(3));
-    } else if (kind == "act8kt" && m.size() == 5) {
-      map_act8_kt(&maps.m[i], p, u(2), u(3), (uint32_t)u(4));
-    } else {
-      fprintf(stderr,
-              "static_host: map.%d: bad declaration (%s, %zu fields)\n",
-              i,
-              kind.c_str(),
-              m.size());
-      exit(1);
+    if (!ms[i].empty()) {
+      build_map(maps, s, tensors, ms[i], i);
     }
   }
 }
+
+#ifdef STATIC_RESET_IN_KERNEL
+// serving mode (STATIC_RESET_IN_KERNEL: one launch is a whole run, as a CUDA
+// graph replays it): kernel_begin reads the launch number at g.gen_ptr, counts
+// the SMs done with their resets in g.arrive and fills the buffers of g.resets
+// itself, so no host step runs between launches. Once here: those two words,
+// the reset list (s.resets without the buffers their reader re-arms, REARM),
+// and the re-armed buffers filled for the first launch
+static void build_serving(GpuState &s) {
+  G &g = s.g;
+  g.gen_ptr = dmalloc<unsigned>(s, 4);
+  g.arrive = dmalloc<unsigned>(s, 4);
+  MKS_CK(cudaMemset(g.gen_ptr, 0, 4));
+  MKS_CK(cudaMemset(g.arrive, 0, 4));
+  ResetList &rl = g.resets;
+  rl.cnt = 0;
+  for (BufReset const &b : s.resets) {
+    if (b.by_reader) {
+      MKS_CK(cudaMemset(b.p, b.value, b.bytes));
+      continue;
+    }
+    if (rl.cnt == MAX_RESETS || b.bytes % 16 != 0 || (uintptr_t)b.p % 16 != 0) {
+      fprintf(stderr,
+              "static_host: reset %d (%zu bytes): at most %d resets, each "
+              "whole 16-B words\n",
+              rl.cnt,
+              b.bytes,
+              MAX_RESETS);
+      exit(1);
+    }
+#ifdef STATIC_NO_START_BARRIER
+    if (b.stride == 0) {
+      fprintf(stderr,
+              "static_host: reset %d (%zu bytes): STATIC_NO_START_BARRIER "
+              "needs two sets of it\n",
+              rl.cnt,
+              b.bytes);
+      exit(1);
+    }
+#endif
+    rl.p[rl.cnt] = (unsigned char *)b.p;
+    rl.n[rl.cnt] = b.bytes;
+    rl.stride[rl.cnt] = b.stride;
+    rl.v[rl.cnt] = (unsigned)b.value;
+    rl.cnt++;
+  }
+#ifdef STATIC_L2_PREFETCH
+  // the weights kernel_begin prefetches into L2: "pf.<i>" -> "t:<name> <bytes>"
+  // (given graph tensors), and the two claim counters
+  {
+    PrefetchList &pl = g.pf;
+    auto const pfs = slot_args(s.args, "pf.", MAX_PF);
+    unsigned long long total = 0;
+    pl.cnt = 0;
+    for (int i = 0; i < MAX_PF; i++) {
+      if (pfs[i].empty()) {
+        continue;
+      }
+      auto const it = s.tensors.find(pfs[i][0].substr(2));
+      if (pfs[i].size() != 2 || pfs[i][0].compare(0, 2, "t:") != 0 ||
+          it == s.tensors.end() || std::stoull(pfs[i][1]) % 16 != 0) {
+        fprintf(stderr,
+                "static_host: pf.%d: expected t:<a given tensor> <bytes, a "
+                "multiple of 16>\n",
+                i);
+        exit(1);
+      }
+      pl.p[pl.cnt] = (unsigned char const *)it->second;
+      pl.n[pl.cnt] = std::stoull(pfs[i][1]);
+      total += pl.n[pl.cnt];
+      pl.cnt++;
+    }
+    pl.nb = (unsigned)((total + PF_BATCH - 1) / PF_BATCH);
+    pl.ctr = dmalloc<unsigned long long>(s, 16);
+    MKS_CK(cudaMemset(pl.ctr, 0, 16));
+  }
+#endif
+#ifdef STATIC_NO_START_BARRIER
+  g.gen_sm = dmalloc<unsigned>(s, NSM * 4);
+  MKS_CK(cudaMemset(g.gen_sm, 0, NSM * 4));
+  // a buffer with two sets is read by pointer only (buf_at): a tensor map over
+  // it would read set 0 in every launch
+  auto const ms = slot_args(s.args, "map.", MAX_MAPS);
+  for (int i = 0; i < MAX_MAPS; i++) {
+    if (ms[i].empty()) {
+      continue;
+    }
+    std::string const &src = ms[i][1];
+    int slot = -1;
+    if (src.compare(0, 2, "b:") == 0) {
+      slot = std::stoi(src.substr(2, src.find('+') - 2));
+    } else if (src.compare(0, 2, "t:") == 0 &&
+               !s.tensors.count(src.substr(2))) {
+      auto const bufs = slot_args(s.args, "buf.", MAX_BUFS);
+      for (int j = 0; j < MAX_BUFS; j++) {
+        if (!bufs[j].empty() && bufs[j][1] == src.substr(2)) {
+          slot = j;
+        }
+      }
+    }
+    if (slot >= 0 && g.par_bytes[slot] != 0) {
+      fprintf(stderr,
+              "static_host: map.%d over buf.%d, which has two sets "
+              "(STATIC_NO_START_BARRIER): read it by pointer\n",
+              i,
+              slot);
+      exit(1);
+    }
+  }
+#endif
+}
+
+// a test harness in serving mode: n16 16-B words read at p, so L2 holds none of
+// the layer's data (read, not written: no dirty lines); *sink is written only
+// for a sum the zero-filled buffer never gives
+__global__ void
+    static_flush_kernel(uint4 const *p, size_t n16, unsigned *sink) {
+  unsigned acc = 0;
+  for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n16;
+       i += (size_t)gridDim.x * blockDim.x) {
+    uint4 const v = p[i];
+    acc ^= v.x ^ v.y ^ v.z ^ v.w;
+  }
+  if (acc == 0x9E3779B9u) {
+    *sink = acc;
+  }
+}
+
+// a test harness in serving mode: the GPUs line up on the GPU before a timed
+// launch, as the layer before lines them up in a server. Round n: GPU rank
+// writes n into its slot on every GPU and waits until its own slots all hold
+// n. The slots: the start barrier's area of set 0 (EXCHANGE_HELLO, one 16-B
+// slot per GPU; a serving-mode kernel has no start barrier)
+struct AlignSlots {
+  unsigned *p[GPUS];
+};
+__global__ void static_align_kernel(AlignSlots s, int rank, unsigned n) {
+  int const q = threadIdx.x;
+  if (q < GPUS) {
+    asm volatile("st.relaxed.sys.global.u32 [%0], %1;" ::"l"(s.p[q] + rank),
+                 "r"(n)
+                 : "memory");
+    unsigned v;
+    do {
+      asm volatile("ld.relaxed.sys.global.u32 %0, [%1];"
+                   : "=r"(v)
+                   : "l"(s.p[rank] + q)
+                   : "memory");
+    } while (v < n);
+  }
+}
+#endif
 
 } // namespace static_host
 
@@ -480,17 +690,120 @@ static void static_host_init(StaticContext &ctx,
       MKS_CK(cudaMemset(g.rv, 0, 2 * EXCHANGE_SET));
       g.mc = nullptr;
     }
+    s.args = args;
+    s.tensors = v.tensors;
     build_bufs(s, v.tensors, args);
     build_shell_buffers(s);
     build_maps(s.maps, s, v.tensors, args);
+#ifdef STATIC_RESET_IN_KERNEL
+    build_serving(s);
+#endif
   }
 }
 
+// one GPU of a layer built for GPUS, in a process of its own (a serving
+// framework's TP rank, e.g. SGLang's): this GPU's state only (local index 0,
+// g.rank = rank). The exchange region (both sets: 2 EXCHANGE_SET bytes,
+// zero-filled) is the caller's: mc its multicast address (a multimem store
+// lands in every rank's copy), rv this GPU's copy, e.g. torch symmetric memory
+// over the TP group (SGLang's custom all-reduce allocates its push buffers that
+// way). No peer access: the kernel stores through mc and reads its own copy.
+static void
+    static_host_init_rank(StaticContext &ctx,
+                          std::map<std::string, std::string> const &args,
+                          int rank,
+                          unsigned char *mc,
+                          unsigned char *rv) {
+  using namespace static_host;
+  if (ctx.num_gpus != 1 || rank < 0 || rank >= GPUS || rv == nullptr ||
+      (GPUS > 1 && mc == nullptr)) {
+    fprintf(stderr,
+            "static_host: init_rank: one GPU view (got %d), rank %d of %d, the "
+            "exchange region (multicast %p, local %p)\n",
+            ctx.num_gpus,
+            rank,
+            GPUS,
+            (void *)mc,
+            (void *)rv);
+    exit(1);
+  }
+  if (ctx.num_lists != NSM) {
+    fprintf(
+        stderr,
+        "static_host: %d task lists per GPU, the bodies are built for %d SMs\n",
+        ctx.num_lists,
+        NSM);
+    exit(1);
+  }
+  MKS_CU(cuInit(0));
+  g_gpus.assign(1, GpuState());
+  StaticGpuView const &v = ctx.gpus[0];
+  GpuState &s = g_gpus[0];
+  MKS_CK(cudaSetDevice(v.gpu));
+  G &g = s.g;
+  g = G{};
+  g.rank = rank;
+  g.mc = GPUS > 1 ? mc : nullptr;
+  g.rv = rv;
+  s.args = args;
+  s.tensors = v.tensors;
+  build_bufs(s, v.tensors, args);
+  build_shell_buffers(s);
+  build_maps(s.maps, s, v.tensors, args);
+#ifdef STATIC_RESET_IN_KERNEL
+  build_serving(s);
+#endif
+}
+
+// point graph tensor `name` of GPU r at p for the launches from now on (a
+// layer inside another framework's step reads that framework's buffers, whose
+// address it learns at each call): the buffer slots that read it by pointer
+// ("tensor") and the tensor maps over it. G and Maps are kernel arguments, so a
+// launch (or a CUDA graph capturing it) takes the addresses of that moment.
+// Returns false for a name nothing reads that way (a node's output keeps the
+// address it was built with).
+static bool static_host_rebind(int r, std::string const &name, void *p) {
+  using namespace static_host;
+  GpuState &s = g_gpus[r];
+  bool found = false;
+  auto const bufs = slot_args(s.args, "buf.", MAX_BUFS);
+  for (int i = 0; i < MAX_BUFS; i++) {
+    if (!bufs[i].empty() && bufs[i][0] == "tensor" && bufs[i][1] == name) {
+      s.g.buf[i] = p;
+      found = true;
+    }
+  }
+  s.tensors[name] = p;
+#if defined(STATIC_RESET_IN_KERNEL) && defined(STATIC_L2_PREFETCH)
+  auto const pfs = slot_args(s.args, "pf.", MAX_PF);
+  for (int i = 0, k = 0; i < MAX_PF; i++) {
+    if (pfs[i].empty()) {
+      continue;
+    }
+    if (pfs[i][0] == "t:" + name) {
+      s.g.pf.p[k] = (unsigned char const *)p;
+      found = true;
+    }
+    k++;
+  }
+#endif
+  auto const ms = slot_args(s.args, "map.", MAX_MAPS);
+  for (int i = 0; i < MAX_MAPS; i++) {
+    if (!ms[i].empty() && ms[i][1] == "t:" + name) {
+      build_map(s.maps, s, s.tensors, ms[i], i);
+      found = true;
+    }
+  }
+  return found;
+}
+
 // before each launch, on the GPU's stream: every buffer of s.resets, the
-// stamps; then the launch number g.gen
+// stamps; then the launch number g.gen. Serving mode: nothing (the kernel
+// resets its buffers and keeps its launch number)
 static void static_host_reset(int r,
                               cudaStream_t st,
                               unsigned long long launch_number) {
+#ifndef STATIC_RESET_IN_KERNEL
   using namespace static_host;
   GpuState &s = g_gpus[r];
   G &g = s.g;
@@ -499,7 +812,45 @@ static void static_host_reset(int r,
   }
   MKS_CK(cudaMemsetAsync(g.stamps, 0, NSM * NSTAMP * 8, st));
   g.gen = (unsigned)(launch_number + 1);
+#endif
 }
+
+#ifdef STATIC_RESET_IN_KERNEL
+// serving mode, a test harness, before a timed launch on GPU r's stream (no
+// host wait: the GPU runs the flush while the host queues the launch): read
+// flush_bytes (> 0) to empty L2, then (several GPUs) line the GPUs up, round
+// `round` (static_align_kernel)
+static void static_host_prelude(int r,
+                                cudaStream_t st,
+                                size_t flush_bytes,
+                                unsigned round) {
+  using namespace static_host;
+  GpuState &s = g_gpus[r];
+  if (flush_bytes > 0) {
+    if (s.flush_bytes < flush_bytes + 4) {
+      if (s.flush) {
+        MKS_CK(cudaFree(s.flush));
+      }
+      MKS_CK(cudaMalloc(&s.flush, flush_bytes + 4));
+      MKS_CK(cudaMemset(s.flush, 0, flush_bytes + 4));
+      s.flush_bytes = flush_bytes + 4;
+    }
+    static_flush_kernel<<<NSM * 4, 256, 0, st>>>(
+        (uint4 const *)s.flush,
+        flush_bytes / 16,
+        (unsigned *)((unsigned char *)s.flush + flush_bytes));
+    MKS_CK(cudaGetLastError());
+  }
+  if (GPUS > 1) {
+    AlignSlots a{};
+    for (int q = 0; q < GPUS; q++) {
+      a.p[q] = (unsigned *)(g_gpus[q].g.rv + EXCHANGE_HELLO);
+    }
+    static_align_kernel<<<1, 32, 0, st>>>(a, r, round);
+    MKS_CK(cudaGetLastError());
+  }
+}
+#endif
 
 // GPU r's instrumentation buffer `name`, for a test harness to read (p =
 // nullptr: no such buffer): "counters" [NCNT] uint32 (the nodes' lines,
@@ -532,6 +883,9 @@ static void static_host_finalize(StaticContext &ctx) {
     cudaSetDevice(ctx.gpus[r].gpu);
     for (void *p : g_gpus[r].owned) {
       cudaFree(p);
+    }
+    if (g_gpus[r].flush) {
+      cudaFree(g_gpus[r].flush);
     }
   }
   g_gpus.clear();

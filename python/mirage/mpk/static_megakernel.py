@@ -13,6 +13,7 @@ to the plan. The sizes come from the graph: each layer reads them from its tenso
 the node's params; the kernel-wide ones (tokens per step, GPUs) are the StaticMegakernel's (tokens, num_gpus), which the
 generated layer defines (config.cuh).
 """
+import math
 import struct
 
 import torch
@@ -22,16 +23,32 @@ from ..kernel import TBGraph
 from .persistent_kernel import PersistentKernel
 
 # the kernel's limits (config.cuh MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, SMAX = the ring's stages; core.cuh Combine)
-MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 24, 32, 16, 5
-COMBINE = {"slots": 0, "add": 1, "store": 2}
+MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 64, 32, 64, 5   # RING_STAGES: T <= 16's (ring_stages)
+
+
+def ring_stages(tokens: int) -> int:
+    """The GEMM weight ring's stages (config.cuh SMAX) at T tokens: 5, or 4 at T = 32 (the activation's T x 256 B a stage)."""
+    return 5 if tokens <= 16 else 4
+COMBINE = {"slots": 0, "add": 1, "store": 2, "store_bf16": 3}
 SF_CHUNK = 512   # one MX scale chunk (config.cuh): 128 rows x 4 B
 MAX_SUM_PARTS = 14   # the most K parts sum_send adds (tasks/sum_send.cuh)
-HC_MIX_STRIDE, HC_COEF = 32, 32   # floats per (part, token) of hc_mix's output / per token of hc_pre's coefficients
+HC_MIX_STRIDE = 32   # floats per (part, token) of hc_post_mix's mixes
+# DSA constants (dsa_common.cuh, tasks/dsa_index_topk.cuh):
+#   DSA_TOPK_BINS        the bins of a token histogram of the index scores (TOPK_BINS)
+#   DSA_TOPK_REC         the ints of a chunk record of the top-k count node (TOPK_REC)
+#   DSA_TOPK_CH          the positions of a top-k chunk (TOPK_CH)
+#   DSA_INDEX_KEY_BYTES  the bytes of one key in the index cache: 128 e4m3 values and 4 scale bytes (index_page_bytes)
+DSA_TOPK_BINS, DSA_TOPK_REC, DSA_TOPK_CH, DSA_INDEX_KEY_BYTES = 4096, 19, 1024, 132
 
 
 def zq_bytes(tokens: int, width: int) -> int:
     """tasks/sum_quant_send.cuh zq_bytes: z_q [tokens][width] e4m3, then its scale chunks (one per 128 columns)."""
     return tokens * width + width // 128 * SF_CHUNK
+
+
+def zq32_bytes(tokens: int, width: int) -> int:
+    """tasks/group_quant.cuh zq32_bytes: z_q [tokens][width] e4m3, then its fp32 scales [width / 128][tokens]."""
+    return tokens * width + (width // 128) * tokens * 4
 
 
 def float_bits(v: float) -> int:
@@ -54,6 +71,7 @@ class StaticMegakernel(PersistentKernel):
         self._static_nodes = {}   # graph index -> what compiler.py needs about a node (_add_node)
         self._bufs = []           # G::buf slot -> {"kind": out | exchange | scratch | tensor, ...} (_add_node, _scratch, _tensor_slot)
         self._maps = []           # Maps::m slot -> (kind, source, dims) (_map)
+        self._prefetch = []       # the weights kernel_begin prefetches into L2 (l2_prefetch_weights): (tensor, bytes)
         self._counter_lines = 0   # counter lines given out (_add_node)
 
     def _num_sms(self):
@@ -84,11 +102,14 @@ class StaticMegakernel(PersistentKernel):
         """Add one node, as MPK's layers do (customized + register_task), and keep for compiler.py what the graph does not hold:
           input_maps              input_maps[i] = which dimension of tensors[i] each grid axis cuts (MPK's input_map,
                                   TBGraph.new_input: (1, -1, -1) = grid x cuts dim 1); a task's slices follow from the input
-                                  maps and the grid, for any grid
-          changeable_grid_dims    {grid axis: unit or (unit, min units, max units)}: the grid axes the compiler may change;
-                                  one task gets a whole number of units of each dimension that axis cuts (gemm_tile: {1: 128},
-                                  K in whole 128-column pieces), optionally between min and max units; the other axes keep
-                                  grid_dim
+                                  maps and the grid, for any grid. The compiler gets the dependencies from these slices. A
+                                  task must not wait at run time for a task outside them. If it does, a plan that
+                                  passes check_deadlock_free can hang
+          changeable_grid_dims    {grid axis: unit or (unit, min units, max units[, length])}: the grid axes the compiler may
+                                  change; one task gets a whole number of units of each dimension that axis cuts (gemm_tile:
+                                  {1: 128}, K in whole 128-column pieces), optionally between min and max units; length: what
+                                  the axis splits when no input map uses it (sparse_mla over pool ids: its index slots); the
+                                  other axes keep grid_dim
           rows_split_over_gpus    grid axis x is divided among the GPUs: each GPU computes its part, in blocks of grid_dim's x
                                   whatever the grid becomes (compiler.owned_positions)
           one_task_per_sm         grid x = the number of SMs; task x runs on SM x (the plan puts it in SM x's list)
@@ -166,8 +187,8 @@ class StaticMegakernel(PersistentKernel):
     def _map(self, kind: str, source: tuple, dims: tuple) -> int:
         """A tensor map slot (Maps::m; the same map again: the same slot). source: ("t", tensor) a graph tensor or a node's output
         by its tensor; ("b", buffer slot, byte offset); ("x", exchange buffer slot, byte offset, set) in the exchange region's set.
-        kind and dims as host.cuh reads them: bf16 (rows, K, box rows), wblk (pieces, box pieces), sf (chunks, box chunks), act8
-        (K bytes, rows), act8kt (K bytes, rows, K tiles). Returns the slot."""
+        kind and dims as host.cuh reads them: bf16 (rows, K, box rows), wblk (MXFP4 pieces, box pieces), wblk8 (e4m3 pieces, box
+        pieces), sf (chunks, box chunks), act8 (K bytes, rows), act8kt (K bytes, rows, K tiles). Returns the slot."""
         key = (kind, (source[0], source[1].guid) + tuple(source[2:]) if source[0] == "t" else tuple(source), tuple(dims))
         for i, m in enumerate(self._maps):
             if m[3] == key:
@@ -212,6 +233,43 @@ class StaticMegakernel(PersistentKernel):
             hello, end = end, align(end + self.num_gpus * 16)
         return end, hello, offsets, sizes
 
+    def l2_prefetch_weights(self, budget_mb: float = 64.0,
+                            stop_at: tuple = ("kda_decode", "sparse_mla", "scaled_moe_experts")) -> int:
+        """STATIC_L2_PREFETCH (core.cuh kernel_begin): the layer's first GEMMs' weights (gemm_tile's weight, scaled_gemm_tile's
+        weight and its scales; graph inputs) in graph order, those before the first node of a kind in stop_at (the
+        attention or expert core: the GEMMs after it run long after the start, and their weights in flight at the start
+        would take bandwidth from the first GEMMs) and within budget_mb (the tensor that crosses it: its first bytes up to
+        it, whole MB), prefetched into L2 by the CTAs that start before the previous kernel ends (PDL): they claim 1 MB
+        batches while they wait at the start barrier, so the first GEMMs read L2 (in flight during the previous kernel's
+        tail, they also slow it: a smaller budget trades the one for the other). Call once the graph is built. Returns the
+        bytes listed."""
+        from .compiler import graph_nodes, producer_of
+        nodes = graph_nodes(self)
+        size = {bfloat16: 2, float16: 2, float32: 4, int32: 4, int64: 8, uint8: 1}
+        seen, total, self._prefetch = set(), 0, []
+        for n in nodes:
+            if n.name in stop_at:
+                break
+            ws = {"gemm_tile": n.inputs[1:2], "scaled_gemm_tile": n.inputs[1:3]}.get(n.name, [])
+            for t in ws:
+                if t.guid in seen or producer_of(t, nodes) is not None:
+                    continue
+                seen.add(t.guid)
+                b = size[t.dtype]
+                for d in range(t.num_dims):
+                    b *= t.dim(d)
+                if len(self._prefetch) == 8:   # core.cuh MAX_PF ranges
+                    return total
+                left = int(budget_mb * 2 ** 20) - total
+                if b > left:   # the first whole MB of it that fit
+                    if left >= 2 ** 20:
+                        self._prefetch.append((t, left // 2 ** 20 * 2 ** 20))
+                        total += left // 2 ** 20 * 2 ** 20
+                    return total
+                self._prefetch.append((t, b))
+                total += b
+        return total
+
     def host_slot_args(self) -> dict:
         """The host code's slot args (host.cuh): "buf.<slot>" -> "<kind> <name> <bytes> <reset> <by reader>" (the node outputs with
         their nodes' grids now), "map.<slot>" -> "<kind> <source> <dims...>"."""
@@ -234,16 +292,19 @@ class StaticMegakernel(PersistentKernel):
             else:   # an exchange buffer: its set 0 copy is buffer slot source[1]; set k at + k sets
                 src = f"b:{source[1]}+{source[2] + source[3] * set_bytes}"
             args[f"map.{slot}"] = " ".join([kind, src] + [str(d) for d in dims])
+        for i, (t, b) in enumerate(self._prefetch):   # STATIC_L2_PREFETCH: "pf.<i>" -> "t:<name> <bytes>"
+            args[f"pf.{i}"] = f"t:{names[t.guid]} {b}"
         return args
 
     def gemm_tile_layer(
         self,
         input: DTensor,     # [T, K] bf16
         weight: DTensor,    # [N, K] bf16
-        output: DTensor,    # [T, N] fp32 ("add": int64 fixed point; its buffer holds what `combine` says)
+        output: DTensor,    # [T, N] fp32 ("add": int64 fixed point; "store_bf16": bf16; its buffer holds what `combine` says)
         combine: str = "slots",   # how the K parts are combined (gemm_tile.cuh Combine): "slots" (one 0xFF-prefilled slot per
                                   # K part, the reader adds them), "add" (fixed-point atomic add, a counter per 128-row block),
-                                  # "store" (plain stores, one K part, a counter of tasks)
+                                  # "store" (plain stores, one K part, a counter of tasks), "store_bf16" (the same in bf16: a
+                                  # layer's final output; the compiler may use 64-row tiles)
         rows_split_over_gpus: bool = False,   # each GPU computes its part of the weight's rows (latent_down, latent_up)
         input_polled: bool = False,   # the input is a node's 0xFF-prefilled bf16 buffer, polled per 16 B straight into the ring's
                                       # stages (each task starts on its columns as soon as they are written, without a counter)
@@ -262,7 +323,7 @@ class StaticMegakernel(PersistentKernel):
         assert output.num_dims == 2 and output.dim(1) == weight.dim(0) and weight.dim(0) % 128 == 0 and weight.dim(1) % 128 == 0
         mode, N, K, T, GPUS = COMBINE[combine], weight.dim(0), weight.dim(1), self._tokens(input.dim(0)), self.num_gpus
         self._dtypes("gemm_tile_layer", input=(input, bfloat16), weight=(weight, bfloat16),
-                     output=(output, int64 if combine == "add" else float32))
+                     output=(output, {"add": int64, "store_bf16": bfloat16}.get(combine, float32)))
         if input_polled:
             from .compiler import graph_nodes, producer_of
             p = producer_of(input, graph_nodes(self))
@@ -277,24 +338,26 @@ class StaticMegakernel(PersistentKernel):
             out_buffer = lambda n: (n.grid[1] * T * N * 4, 0xFF, reader_rearms)
         elif combine == "add":     # [T][N] int64 fixed point, 0 before each launch
             out_buffer = lambda n: (T * N * 8, 0, False)
+        elif combine == "store_bf16":   # [T][N] bf16, every value written each launch
+            out_buffer = lambda n: (T * N * 2, -1, False)
         else:                      # [T][N] fp32, every value written each launch
             out_buffer = lambda n: (T * N * 4, -1, False)
         assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
         tiles = K // 128
         if input_polled:
-            parts = next(y for y in range(1, tiles + 1) if tiles % y == 0 and tiles // y <= RING_STAGES)
+            parts = next(y for y in range(1, tiles + 1) if tiles % y == 0 and tiles // y <= ring_stages(T))
             params, map_slots = [mode, K, N, 1], [self._gemm_map(weight, (128,)), -1]
-            changeable = {1: (128, 2, RING_STAGES)}
+            changeable = {1: (128, 2, ring_stages(T))}
         else:
             parts = 1
             params, map_slots = [mode, K, N, 0], [self._gemm_map(weight, (128, 64)), self._gemm_map(input, (T,))]
-            changeable = {0: (64, 1, 2), 1: (128, 2, None)} if combine != "store" else {}
+            changeable = {"store": {}, "store_bf16": {0: (64, 1, 2)}}.get(combine, {0: (64, 1, 2), 1: (128, 2, None)})
         self._add_node("gemm_tile", (N // 128, parts, 1), block_dim, [input, weight, output],
                        [(-1, 1, -1), (0, 1, -1), (1, -1, -1)], params,
                        # K: at least 2 tiles of 128 per task (the two MMA issuers take the stages in turn, runtime.cuh issue_job;
                        # with one stage issuer 1 has no MMA and its stale accumulator would be added)
                        changeable_grid_dims=changeable, rows_split_over_gpus=rows_split_over_gpus, out_buffer=out_buffer,
-                       counters={"slots": 0, "add": N // 128, "store": 1}[combine], map_slots=map_slots)
+                       counters={"slots": 0, "add": N // 128, "store": 1, "store_bf16": 1}[combine], map_slots=map_slots)
 
     def topk_route_layer(
         self,
@@ -396,9 +459,6 @@ class StaticMegakernel(PersistentKernel):
                        [IR], one_task_per_sm=True, out_buffer=lambda n: (T * K * L * 4, -1, False), counters=32 * 2 + NSLOT,
                        buf_slots=[hq, hsf], map_slots=maps)
 
-    # ---- after moe_experts (tasks/allreduce_send.cuh, sum_rmsnorm.cuh, sum_gpus.cuh, sum_send.cuh, residual_add.cuh). The
-    # graph tensors between them (the sent partial sums, sum_rmsnorm's Rn, sum_gpus's Ssum, latent_up's K parts, sum_send's o)
-    # stand for the buffers the bodies use; their input maps give the dependencies.
     def allreduce_send_layer(
         self,
         input: DTensor,         # fp32 [T x G, W], a node's output buffer: G rows per token (added in order), e.g. this GPU's routed
@@ -500,22 +560,34 @@ class StaticMegakernel(PersistentKernel):
     def residual_add_layer(
         self,
         addend: DTensor,        # S [T, H] bf16, sum_gpus's output buffer
-        input: DTensor,         # o [T, H] bf16: this GPU's part, sent by sum_send (every GPU's part arrives through the exchange region)
+        *,                      # the other arguments by keyword
+        input: DTensor = None,  # o [T, H] bf16: this GPU's part, sent by sum_send (every GPU's part arrives through the exchange region),
+                                # or a second sum_gpus node's output (GLM-5.3: the routed sum). None: one sum, as in an attention layer
         residual: DTensor,      # [T, H] bf16 (a graph input)
         output: DTensor,        # y [T, H] bf16
         block_dim: tuple = (256, 1, 1),
     ):
-        """Task x of the SMs: slice x of y = bf16(bf16(input + addend) + residual). params = [H]."""
+        """Task x of the SMs: slice x of y = bf16(bf16(input + addend) + residual), or y = bf16(addend + residual) with no
+        input. The residual is a graph input. params = [H]. buf_slots: [residual, output]."""
         T, H = self._tokens(output.dim(0)), output.dim(1)
-        self._dtypes("residual_add_layer", addend=(addend, bfloat16), input=(input, bfloat16), residual=(residual, bfloat16),
-                     output=(output, bfloat16))
+        self._dtypes("residual_add_layer", addend=(addend, bfloat16), residual=(residual, bfloat16), output=(output, bfloat16),
+                     **({"input": (input, bfloat16)} if input is not None else {}))
         assert (residual.dim(0), residual.dim(1)) == (T, H) and H % (8 * self.num_gpus) == 0
-        self._add_node("residual_add", (self._num_sms(), 1, 1), block_dim, [addend, input, residual, output],
-                       [(-1, -1, -1)] * 4, [H], buf_slots=[self._tensor_slot(residual), self._tensor_slot(output)])
+        from .compiler import graph_nodes, producer_of
+        nodes = graph_nodes(self)
+        a = producer_of(addend, nodes)
+        if a is None or a.name != "sum_gpus":
+            raise ValueError("residual_add_layer: the addend from sum_gpus")
+        if input is not None:
+            o = producer_of(input, nodes)
+            if o is None or o.name not in ("sum_send", "sum_gpus"):
+                raise ValueError("residual_add_layer: the input from sum_send or sum_gpus")
+        if producer_of(residual, nodes) is not None:
+            raise ValueError("residual_add_layer: the residual must be a graph input")
+        tensors = [addend, residual, output] if input is None else [addend, input, residual, output]
+        self._add_node("residual_add", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors), [H],
+                       buf_slots=[self._tensor_slot(residual), self._tensor_slot(output)])
 
-    # ---- GLM-5.3-Flash: mHC (tasks/hc_mix.cuh, hc_pre.cuh, hc_post.cuh) and KDA (tasks/kda_decode.cuh). The residual is HC
-    # streams [T, HC H] (bf16, stream i = columns [i H, i H + H)); a sublayer is hc_mix -> hc_pre -> its body -> a gemm_tile in
-    # slots -> allreduce_send -> hc_post.
     def hc_mix_layer(
         self,
         residual: DTensor,      # [T, HC H] bf16, the HC residual streams (a graph input)
@@ -535,6 +607,30 @@ class StaticMegakernel(PersistentKernel):
                        changeable_grid_dims={0: 128},
                        out_buffer=lambda n: (n.grid[0] * T * HC_MIX_STRIDE * 4, 0xFF, False),   # polled by the T hc_pre tasks
                        buf_slots=[self._tensor_slot(residual), self._tensor_slot(fn)])
+
+    def _producer(self, layer: str, tensor: DTensor, names: tuple, allow_none: bool = False):
+        """Return the node that writes `tensor`. Raise ValueError if the name of that node is not in `names`. With
+        allow_none, a graph input (no node writes it) gives None instead of an error."""
+        from .compiler import graph_nodes, producer_of
+        p = producer_of(tensor, graph_nodes(self))
+        if (p is None and not allow_none) or (p is not None and p.name not in names):
+            raise ValueError(f"{layer}: the input must be the output of a {' or '.join(names)} node"
+                             + (", or a graph input" if allow_none else ""))
+        return p
+
+    def _fx_producer(self, layer: str, tensor: DTensor):
+        """Return the COMBINE_ADD GEMM node (gemm_tile or scaled_gemm_tile) that writes `tensor` (int64 fixed point [T, N])."""
+        p = self._producer(layer, tensor, ("gemm_tile", "scaled_gemm_tile"))
+        if p.params[0] != COMBINE["add"]:
+            raise ValueError(f"{layer}: the input must be the output of a GEMM node with combine='add'")
+        return p
+
+    def _scratch_slot(self, node, name: str) -> int:
+        """Return the buffer slot of the scratch buffer `name` of `node` (_scratch)."""
+        for i, b in enumerate(self._bufs):
+            if b["kind"] == "scratch" and b["name"] == name and b.get("node") == node.graph_idx:
+                return i
+        raise ValueError(f"node {node.graph_idx} ({node.name}) has no scratch buffer {name}")
 
     def hc_pre_layer(
         self,
@@ -565,6 +661,30 @@ class StaticMegakernel(PersistentKernel):
                        cost_inputs=[0],   # adds hc_mix's K parts
                        buf_slots=[self._tensor_slot(residual), self._tensor_slot(hc_small), self._tensor_slot(gamma)])
 
+    def hc_post_layer(
+        self,
+        sent: DTensor,          # [T, H] bf16: an allreduce_send node's output (the sublayer output's partial sums)
+        residual: DTensor,      # [T, HC H] bf16: the sublayer's input streams
+        x: DTensor,             # the sublayer's hc_pre output (its buffer holds post and comb)
+        output: DTensor,        # [T, HC H] bf16: the new streams
+        parts: int = 4,         # tasks per token, each H / parts columns
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Task (q, t): columns [q C, q C + C) of token t: out = sum over the GPUs, R'_j = sum_i comb[i][j] R_i + post_j out."""
+        from .compiler import graph_nodes, producer_of
+        nodes = graph_nodes(self)
+        s, hp = producer_of(sent, nodes), producer_of(x, nodes)
+        if s is None or s.name != "allreduce_send" or hp is None or hp.name != "hc_pre":
+            raise ValueError("hc_post_layer: sent from an allreduce_send node, x from an hc_pre node")
+        T, H = self._tokens(sent.dim(0)), sent.dim(1)
+        HC = residual.dim(1) // H
+        self._dtypes("hc_post_layer", sent=(sent, bfloat16), residual=(residual, bfloat16), x=(x, bfloat16),
+                     output=(output, bfloat16))
+        self._add_node("hc_post", (parts, T, 1), block_dim, [sent, residual, x, output],
+                       [(1, 0, -1), (-1, 0, -1), (-1, 0, -1), (-1, 0, -1)], [H, HC],
+                       buf_slots=[self._tensor_slot(residual), self._tensor_slot(output)])
+
+    # ---- the generated layer (static_schedule.py) ----
     def kda_decode_layer(
         self,
         proj: DTensor,          # [T, NPROJ] fp32: the merged projection, a gemm_tile node's output in slots; columns
@@ -602,32 +722,16 @@ class StaticMegakernel(PersistentKernel):
                        cost_inputs=[0],   # adds the projection's K parts
                        buf_slots=[self._tensor_slot(t) for t in (conv_weight, f_b, g_b, small, conv_state, rec_state, rows)])
 
-    def hc_post_layer(
-        self,
-        sent: DTensor,          # [T, H] bf16: an allreduce_send node's output (the sublayer output's partial sums)
-        residual: DTensor,      # [T, HC H] bf16: the sublayer's input streams
-        x: DTensor,             # the sublayer's hc_pre output (its buffer holds post and comb)
-        output: DTensor,        # [T, HC H] bf16: the new streams
-        parts: int = 4,         # tasks per token, each H / parts columns
-        block_dim: tuple = (256, 1, 1),
-    ):
-        """Task (q, t): columns [q C, q C + C) of token t: out = sum over the GPUs, R'_j = sum_i comb[i][j] R_i + post_j out."""
-        from .compiler import graph_nodes, producer_of
-        nodes = graph_nodes(self)
-        s, hp = producer_of(sent, nodes), producer_of(x, nodes)
-        if s is None or s.name != "allreduce_send" or hp is None or hp.name != "hc_pre":
-            raise ValueError("hc_post_layer: sent from an allreduce_send node, x from an hc_pre node")
-        T, H = self._tokens(sent.dim(0)), sent.dim(1)
-        HC = residual.dim(1) // H
-        self._dtypes("hc_post_layer", sent=(sent, bfloat16), residual=(residual, bfloat16), x=(x, bfloat16),
-                     output=(output, bfloat16))
-        self._add_node("hc_post", (parts, T, 1), block_dim, [sent, residual, x, output],
-                       [(1, 0, -1), (-1, 0, -1), (-1, 0, -1), (-1, 0, -1)], [H, HC],
-                       buf_slots=[self._tensor_slot(residual), self._tensor_slot(output)])
-
-    # ---- the generated layer (static_schedule.py) ----
-    def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False):
+    def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False, device=0,
+                       rank=None, exchange=None):
         """Build the graph as it is now, one schedule.json per GPU (static_schedule.compile_static); profile: the timing build
-        (per-task start / end stamps, static_harness.Harness.task_times)."""
+        (per-task start / end stamps, static_harness.Harness.task_times); device: the CUDA device of GPU 0. rank / exchange:
+        GPU `rank` alone in this process with the caller's exchange region (multicast address, local address), e.g. one
+        TP rank of a serving framework (exchange_region_bytes)."""
         from .static_schedule import compile_static
-        return compile_static(self, schedule_paths, gpu_tensors, out_dir, extra_flags=extra_flags, profile=profile)
+        return compile_static(self, schedule_paths, gpu_tensors, out_dir, extra_flags=extra_flags, profile=profile,
+                              device=device, rank=rank, exchange=exchange)
+
+    def exchange_region_bytes(self) -> int:
+        """The exchange region a rank-alone build needs from its caller (compile_static rank / exchange): both sets."""
+        return 2 * self.exchange_layout()[0]
