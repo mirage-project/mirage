@@ -234,14 +234,42 @@ public:
                                    std::vector<int> const &params);
   int register_residual_add_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params);
-  int register_hc_mix_sm100_task(threadblock::Graph const &bgraph,
-                                 std::vector<int> const &params);
+  int register_group_quant_sm100_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_scaled_gemm_tile_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  int register_silu_and_mul_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_scaled_moe_experts_sm100_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params);
+  int register_dsa_q_norm_quant_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  int register_dsa_kv_write_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_dsa_index_k_write_sm100_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params);
+  int register_dsa_kpool_update_sm100_task(threadblock::Graph const &bgraph,
+                                           std::vector<int> const &params);
+  int register_dsa_q_absorb_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_dsa_index_score_sm100_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params);
+  int register_dsa_index_topk_sm100_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_sparse_mla_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
+  int register_dsa_mla_merge_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params);
+  int register_dsa_o_absorb_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
   int register_hc_pre_sm100_task(threadblock::Graph const &bgraph,
                                  std::vector<int> const &params);
   int register_kda_decode_sm100_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params);
   int register_hc_post_sm100_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
+  int register_hc_post_mix_sm100_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(

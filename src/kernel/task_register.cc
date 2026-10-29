@@ -5412,13 +5412,13 @@ static std::string static_build_only_task(char const *name,
 int TaskRegister::register_gemm_tile_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {mode (how the K parts are combined: 0 one slot per part, 1
-  // fixed-point add, 2 plain store), K, N, polled (1: the activation is its
-  // producer's 0xFF-prefilled bf16 buffer, polled into the ring's stages)}
-  // (static_megakernel/core.cuh Combine); the K split is the grid's y; its
-  // tensor maps are the node's slots. inputs: activation [T, K], weight [N, K];
-  // output: [T, N] fp32.
+  // fixed-point add, 2 plain store, 3 plain store in bf16), K, N, polled (1:
+  // the activation is its producer's 0xFF-prefilled bf16 buffer, polled into
+  // the ring's stages)} (static_megakernel/core.cuh Combine); the K split is
+  // the grid's y; its tensor maps are the node's slots. inputs: activation [T,
+  // K], weight [N, K]; output: [T, N] fp32 (mode 3: bf16).
   assert(params.size() == 4);
-  assert(params[0] >= 0 && params[0] <= 2 &&
+  assert(params[0] >= 0 && params[0] <= 3 &&
          (params[3] == 0 || params[3] == 1) &&
          (params[3] == 0 || params[0] == 0));
   std::vector<tb::TBInputOp *> input_ops, output_ops;
@@ -5434,15 +5434,21 @@ int TaskRegister::register_gemm_tile_sm100_task(
 
 int TaskRegister::register_topk_route_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {E (experts), K (experts per token)}. inputs: router logits [T, E]
-  // fp32, bias [E] fp32; output: routing pairs [T, K]. Grid x = token.
-  assert(params.size() == 2);
+  // params: {E (experts), K (experts per token)[, the routed scaling factor
+  // (fp32 bits, 0: none)[, DUP (sub-experts per expert)[, SHARED (shared bank
+  // experts, every token's)]]]}. inputs: router logits [T, N >= E] fp32 (rows
+  // past E: padding), bias [E] fp32; output: routing pairs [T, K DUP +
+  // SHARED]. Grid x = token.
+  assert(params.size() >= 2 && params.size() <= 5);
+  int const dup = params.size() >= 4 && params[3] > 1 ? params[3] : 1;
+  int const shared = params.size() == 5 ? params[4] : 0;
+  assert(shared >= 0 && params[1] + shared <= 256);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(bgraph, 2, 1, input_ops, output_ops);
   assert(input_ops[0]->dtensor.num_dims == 2);
   assert(output_ops[0]->dtensor.num_dims == 2);
-  assert(input_ops[0]->dtensor.dim[1] == params[0]);
-  assert(output_ops[0]->dtensor.dim[1] == params[1]);
+  assert(input_ops[0]->dtensor.dim[1] >= params[0]);
+  assert(output_ops[0]->dtensor.dim[1] == params[1] * dup + shared);
   return register_task_variant(TASK_TOPK_ROUTE_SM100,
                                static_build_only_task("topk_route", params));
 }
@@ -5504,11 +5510,14 @@ static int register_static_task(TaskRegister *r,
 
 int TaskRegister::register_allreduce_send_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {W (the row width), rows per token in the input (added in order)}.
-  // inputs: a node's output [T x rows, W] fp32; output: what is sent (its
-  // buffer in the exchange region: [GPUs][T][W] bf16)
-  assert(params.size() == 2 && params[0] > 0 && params[0] % 8 == 0 &&
-         params[1] >= 1);
+  // params: {W (the row width), rows per token in the input (added in order),
+  // FX (1: the input is a COMBINE_ADD GEMM's int64 fixed-point output)
+  // [, local: 1 = one GPU, the sum into the node's own [T][W] bf16 buffer]}.
+  // inputs: a node's output [T x rows, W] fp32 (FX: [T, W] int64); output:
+  // what is sent (its buffer in the exchange region: [GPUs][T][W] bf16)
+  assert((params.size() == 3 || params.size() == 4) && params[0] > 0 &&
+         params[0] % 8 == 0 && params[1] >= 1 &&
+         (params[2] == 0 || params[2] == 1));
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(bgraph, 1, 1, input_ops, output_ops);
   return register_task_variant(
@@ -5547,47 +5556,243 @@ int TaskRegister::register_sum_send_sm100_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_residual_add_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {H}. inputs: addend (Ssum), input (o), residual; output: y [T, H]
-  // bf16.
-  return register_static_task(
-      this, TASK_RESIDUAL_ADD_SM100, "residual_add", bgraph, params, 3, 1);
+  // params: {H}. inputs: addend (Ssum), input (o) and residual; with one sum,
+  // addend and residual only. output: y [T, H] bf16.
+  return register_static_task(this,
+                              TASK_RESIDUAL_ADD_SM100,
+                              "residual_add",
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              1);
 }
 
-int TaskRegister::register_hc_mix_sm100_task(threadblock::Graph const &bgraph,
-                                             std::vector<int> const &params) {
-  // params: {HC (streams), H, NMIX = HC (HC + 2)}. inputs: the residual streams
-  // [T, HC H] bf16, fn [NMIX, HC H] fp32; output: the partial mixes (its
-  // buffer [K parts][T][32] fp32). Grid x = K part.
+int TaskRegister::register_group_quant_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {L}. inputs: x [T, L] bf16; output: z_q [T, L] e4m3 bytes (its
+  // buffer: then the fp32 scales). Grid x = 128-column block.
   return register_static_task(
-      this, TASK_HC_MIX_SM100, "hc_mix", bgraph, params, 2, 3);
+      this, TASK_GROUP_QUANT_SM100, "group_quant", bgraph, params, 1, 1);
+}
+
+int TaskRegister::register_scaled_gemm_tile_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {mode (as gemm_tile), K, N, the layout of the weight scales (0 one
+  // for each 128 x 128 block, 1 gate / up pairs)}; the K split is the grid's y.
+  // inputs: activation [T, K] e4m3 bytes (a group_quant node's output), weight
+  // [N, K] e4m3 bytes, weight scales fp32 ([N / 128, K / 128] for layout 0,
+  // [N / 256, K / 128, 2] for layout 1); output: [T, N] fp32 (int64 fixed
+  // point for mode 1, bf16 for mode 3).
+  assert(params.size() == 4);
+  assert(params[0] >= 0 && params[0] <= 3 &&
+         (params[3] == 0 || params[3] == 1));
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 3, 1, input_ops, output_ops);
+  assert(input_ops[1]->dtensor.num_dims == 2);
+  assert(input_ops[1]->dtensor.dim[1] == params[1]);
+  assert(input_ops[1]->dtensor.dim[0] == params[2]);
+  return register_task_variant(
+      TASK_SCALED_GEMM_TILE_SM100,
+      static_build_only_task("scaled_gemm_tile", params));
+}
+
+int TaskRegister::register_silu_and_mul_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // SiLU (tasks/silu_and_mul.cuh). params: {} or {the swiglu limit (fp32
+  // bits)} (shared gate_up's K split is its grid y). inputs: shared gate_up
+  // [T, 2 * SHR] int64 fixed point; output: h_s [T, SHR] bf16. Grid x = a block
+  // of F features (default 64; F = 32, 64, 96 or 128).
+  assert(params.size() <= 1);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 1, 1, input_ops, output_ops);
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  assert(output_ops[0]->dtensor.num_dims == 2);
+  assert(input_ops[0]->dtensor.dim[1] == 2 * output_ops[0]->dtensor.dim[1]);
+  return register_task_variant(TASK_SILU_AND_MUL_SM100,
+                               static_build_only_task("silu_and_mul", params));
+}
+
+int TaskRegister::register_scaled_moe_experts_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {IR (the expert intermediate on this GPU)[, the swiglu limit (fp32
+  // bits)]}. inputs: z_q (a group_quant node's output), routing pairs, W13
+  // bank, W2 bank (e4m3, in pieces; their fp32 scales are buffer slots);
+  // output: the routed rows R [T x K, L] fp32 (L = the hidden size H). One task
+  // per SM (static_megakernel/tasks/scaled_moe_experts.cuh).
+  assert((params.size() == 1 || params.size() == 2) && params[0] > 0 &&
+         params[0] % 128 == 0 && params[0] <= 256);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 4, 1, input_ops, output_ops);
+  return register_task_variant(
+      TASK_SCALED_MOE_EXPERTS_SM100,
+      static_build_only_task("scaled_moe_experts", params));
+}
+
+int TaskRegister::register_dsa_q_norm_quant_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {QL (2048 or 1536), eps (fp32 bits), OUT (0: z_q, 1: bf16 q_c)}.
+  // inputs: the fused A projection [T, N] int64 fixed point; output: z_q
+  // [T, QL] e4m3 bytes (its buffer: then the fp32 scales, as group_quant), or
+  // q_c [T, QL] bf16. Grid x = token.
+  return register_static_task(this,
+                              TASK_DSA_Q_NORM_QUANT_SM100,
+                              "dsa_q_norm_quant",
+                              bgraph,
+                              params,
+                              1,
+                              3);
+}
+
+int TaskRegister::register_dsa_kv_write_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {KV0, PAGE, MAXP, eps (fp32 bits), ROPE (64 or 0)}. inputs: the
+  // fused A projection; output: the latent cache [rows, 512 + ROPE] bf16. Grid
+  // x = token.
+  return register_static_task(
+      this, TASK_DSA_KV_WRITE_SM100, "dsa_kv_write", bgraph, params, 1, 5);
+}
+
+int TaskRegister::register_dsa_index_k_write_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {PAGE, MAXP, eps (fp32 bits)}. inputs: the indexer projection
+  // [T, N] int64 fixed point; output: the index cache (uint8 pages). Grid x =
+  // token.
+  return register_static_task(this,
+                              TASK_DSA_INDEX_K_WRITE_SM100,
+                              "dsa_index_k_write",
+                              bgraph,
+                              params,
+                              1,
+                              3);
+}
+
+int TaskRegister::register_dsa_kpool_update_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {PAGE (pools in a page), MAXPP, RING (tail slots), eps (fp32
+  // bits)[, NT (tokens of one request per task, in order; default 1)]}.
+  // inputs: the indexer projection [T, N] int64 fixed point; output: the
+  // pooled cache (uint8 pages). Grid x = token (NT = 1) or request.
+  assert(params.size() == 4 || params.size() == 5);
+  return register_static_task(this,
+                              TASK_DSA_KPOOL_UPDATE_SM100,
+                              "dsa_kpool_update",
+                              bgraph,
+                              params,
+                              1,
+                              params.size());
+}
+
+int TaskRegister::register_dsa_q_absorb_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {NH, NOPE, ROPE (64 or 0)}. inputs: q_b [T, NH * (NOPE + ROPE)]
+  // int64 fixed point; output: q [T, NH, 512 + ROPE] bf16. Grid x = NH * 4 (4
+  // latent column blocks per head).
+  return register_static_task(
+      this, TASK_DSA_Q_ABSORB_SM100, "dsa_q_absorb", bgraph, params, 1, 3);
+}
+
+int TaskRegister::register_dsa_index_score_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {heads, MAXCTX, PAGE, MAXP, FLASH (0 / 1)}. inputs: the wq_b
+  // output, the indexer projection, the index cache; output: scores
+  // [T, MAXCTX] fp32. Grid (chunks, tokens).
+  return register_static_task(this,
+                              TASK_DSA_INDEX_SCORE_SM100,
+                              "dsa_index_score",
+                              bgraph,
+                              params,
+                              3,
+                              5);
+}
+
+int TaskRegister::register_dsa_index_topk_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {TOPK, MAXCTX, mode (0 count, 1 write), UNIT (positions per
+  // entry)}. inputs: scores [T, MAXCTX] fp32 (count) or the records (write);
+  // output: the records (count) or indices [T, TOPK] int32 (write). Grid
+  // (MAXCTX / 1024, tokens).
+  return register_static_task(
+      this, TASK_DSA_INDEX_TOPK_SM100, "dsa_index_topk", bgraph, params, 1, 4);
+}
+
+int TaskRegister::register_sparse_mla_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {NH, TOPK, PAGE, MAXP, pages, softmax scale (fp32 bits), ROPE (64
+  // or 0), KPOOL (1: positions, 4: pool ids), NIDX}. inputs: q, the latent
+  // cache, the indices; output: o and lse of each split. Grid (splits,
+  // tokens).
+  return register_static_task(
+      this, TASK_SPARSE_MLA_SM100, "sparse_mla", bgraph, params, 3, 9);
+}
+
+int TaskRegister::register_dsa_mla_merge_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {NH}. inputs: the splits of sparse_mla; output: o_lat
+  // [T, NH, 512] bf16. Grid (heads, tokens).
+  return register_static_task(
+      this, TASK_DSA_MLA_MERGE_SM100, "dsa_mla_merge", bgraph, params, 1, 1);
+}
+
+int TaskRegister::register_dsa_o_absorb_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {NH}. inputs: o_lat [T, NH, 512] bf16; output: v [T, NH * 256]
+  // bf16. Grid x = NH * 4 (4 value column blocks per head).
+  return register_static_task(
+      this, TASK_DSA_O_ABSORB_SM100, "dsa_o_absorb", bgraph, params, 1, 1);
 }
 
 int TaskRegister::register_hc_pre_sm100_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params) {
   // params: {H, rms eps, hc eps, norm eps, post multiplier (fp32 bits),
-  // Sinkhorn iterations}. inputs: hc_mix's output, the residual streams;
-  // output: x [T, H] bf16 (its buffer also holds the coefficients). Grid x =
-  // token.
+  // Sinkhorn iterations, export (1: post and comb finished into graph
+  // tensors)}. inputs: hc_post_mix's output, the residual streams; output: x
+  // [T, H] bf16 (its buffer also holds the coefficients unless export). Grid x
+  // = token.
   return register_static_task(
-      this, TASK_HC_PRE_SM100, "hc_pre", bgraph, params, 2, 6);
+      this, TASK_HC_PRE_SM100, "hc_pre", bgraph, params, 2, 7);
+}
+
+int TaskRegister::register_hc_post_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params) {
+  // params: {H, HC, mode (0: the coefficients from hc_pre's output, 1:
+  // finished, graph tensors)}. inputs: the sent partial sums (an
+  // allreduce_send node's output), the residual streams, hc_pre's output (mode
+  // 1: h_res); output: the new residual streams [T, HC H] bf16. Grid (column
+  // part, token).
+  return register_static_task(
+      this, TASK_HC_POST_SM100, "hc_post", bgraph, params, 3, 3);
+}
+
+int TaskRegister::register_hc_post_mix_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {HC, H, NMIX = HC (HC + 2)}. inputs: the sent partial
+  // sums (an allreduce_send node's output), the residual streams, h_res, the
+  // next sublayer's fn; outputs: the partial mixes (its buffer [H / 32][T][32]
+  // fp32), the new residual streams [T, HC H] bf16. Grid x = 32-column part.
+  assert(params.size() == 3 && params[2] == params[0] * (params[0] + 2));
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 4, 2, input_ops, output_ops);
+  return register_task_variant(TASK_HC_POST_MIX_SM100,
+                               static_build_only_task("hc_post_mix", params));
 }
 
 int TaskRegister::register_kda_decode_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {local heads, head dim, gate lower bound, o_norm eps (fp32
-  // bits)}. inputs: the merged projection (a gemm_tile node's K parts);
-  // output: o [T, heads x head dim] bf16. Grid (token, head).
-  return register_static_task(
-      this, TASK_KDA_DECODE_SM100, "kda_decode", bgraph, params, 1, 4);
-}
-
-int TaskRegister::register_hc_post_sm100_task(threadblock::Graph const &bgraph,
-                                              std::vector<int> const &params) {
-  // params: {H, HC}. inputs: the sent partial sums (an allreduce_send node's
-  // output), the residual streams, hc_pre's output; output: the new residual
-  // streams [T, HC H] bf16. Grid (column part, token).
-  return register_static_task(
-      this, TASK_HC_POST_SM100, "hc_post", bgraph, params, 3, 2);
+  // bits), conv state layout (0 channels first, 1 entries first) [, serve (1:
+  // a framework's speculative verify step: the pools read only, the ring and
+  // the per-token conv windows written), draft tokens, ring length]}. inputs:
+  // the merged projection (a gemm_tile node's K parts); output: o [T, heads x
+  // head dim] bf16. Grid (request, head): T / grid x tokens per request, run
+  // in order.
+  assert(params.size() == 5 || params.size() == 8);
+  return register_static_task(this,
+                              TASK_KDA_DECODE_SM100,
+                              "kda_decode",
+                              bgraph,
+                              params,
+                              1,
+                              params.size());
 }
 
 } // namespace runtime
