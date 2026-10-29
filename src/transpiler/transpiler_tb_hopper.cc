@@ -1486,7 +1486,11 @@ CustomOPTranspileResult
     if ((last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
          last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
          last_op->op_type == type::TB_FORLOOP_ACCUM_MAX_OP) &&
-        !last_op_meta.is_accum_in_reg) {
+        last_op_meta.is_accum_in_reg) {
+      // Only register-backed accumulators (a matmul followed by a forloop
+      // accum, see refine_opmeta_on_chain) have a Matmul<guid>Kernel and a
+      // matmul_<guid>_accum fragment to write back; the others are accumulated
+      // in shared memory inside the loop
       tb::TBForloopAccumOp const *accum_op =
           dynamic_cast<tb::TBForloopAccumOp const *>(last_op);
       tb::STensor const &accum = accum_op->output_tensors.at(0);
