@@ -224,10 +224,13 @@ static string append_epilogue_scalars(
   if (chain.size() == 1) {
     return res.append("0.0f};");
   }
+  bool store_last = true;
   for (size_t i = 1; i < chain.size(); i++) {
-    if (i == chain.size() - 1) {
-      // last one is EpilogueStore
+    if (i == chain.size() - 1 &&
+        chain.at(i).first->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP) {
+      // last one is EpilogueStoreAccum
       res.append("0.0f};");
+      store_last = false;
     } else if (is_threadblock_element_unary(chain.at(i).first->op_type)) {
       tb::TBElementUnaryOp const *tb_unary_op =
           dynamic_cast<tb::TBElementUnaryOp const *>(chain.at(i).first);
@@ -235,6 +238,9 @@ static string append_epilogue_scalars(
     } else {
       res.append("0.0f, ");
     }
+  }
+  if (store_last) {
+    res.append("0.0f};");
   }
   return res;
 }
@@ -1486,7 +1492,11 @@ CustomOPTranspileResult
     if ((last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_OP ||
          last_op->op_type == type::TB_FORLOOP_ACCUM_NO_RED_RESCALE_OP ||
          last_op->op_type == type::TB_FORLOOP_ACCUM_MAX_OP) &&
-        !last_op_meta.is_accum_in_reg) {
+        last_op_meta.is_accum_in_reg) {
+      // Only register-backed accumulators (a matmul followed by a forloop
+      // accum, see refine_opmeta_on_chain) have a Matmul<guid>Kernel and a
+      // matmul_<guid>_accum fragment to write back; the others are accumulated
+      // in shared memory inside the loop
       tb::TBForloopAccumOp const *accum_op =
           dynamic_cast<tb::TBForloopAccumOp const *>(last_op);
       tb::STensor const &accum = accum_op->output_tensors.at(0);
