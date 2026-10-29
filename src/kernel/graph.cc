@@ -741,6 +741,9 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(2, 1, TASK_ARGMAX_REDUCE_SM100, variant_id);
+  } else if (name == "serving_sampling") {
+    int variant_id = task_register->register_serving_sampling_task(customized->bgraph);
+    task_config[op] = std::make_tuple(2, 1, TASK_SERVING_SAMPLING, variant_id);
   } else if (name == "sampling_sm100") {
     int variant_id =
         task_register->register_sampling_sm100_task(customized->bgraph, params);
