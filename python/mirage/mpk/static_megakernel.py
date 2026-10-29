@@ -1131,35 +1131,84 @@ class StaticMegakernel(PersistentKernel):
         f_b: DTensor,           # [HL D, D] bf16
         g_b: DTensor,           # [HL D, D] bf16
         small: DTensor,         # fp32 [>= HL D + HL + D]: dt_bias [HL D], A_log [HL], o_norm weight [D]
-        conv_state: DTensor,    # [NR, 3 HL D 3] bf16: per state row, per channel the last 3 inputs (oldest first)
-        rec_state: DTensor,     # [NR, HL D D] fp32: per state row the [HL][V][K] recurrent state
-        rows: DTensor,          # [T] int32: the state row of each token's request
+        conv_state: DTensor,    # [NR, 3 x 3 HL D] bf16: per state row the last 3 inputs [3][3 HL D] (oldest first; SGLang's
+                                # KDA pool)
+        rec_state: DTensor,     # [NS, HL D D] fp32: per state slot the [HL][V][K] recurrent state
+        rows: DTensor,          # [T] int32: the state slot of each request (a decode step); serve: [R], of each request
         output: DTensor,        # o [T, HL D] bf16 (after the gated o_norm)
+        accepted: DTensor = None,   # [T / NT] int32 with serve: a graph tensor of the verify build (buffer slot 7: it
+                                    # marks a task's tokens as one request's; not read)
+        tokens_per_request: int = 1,   # NT: 1 = one decode step of T requests; NT > 1 (with serve) = a speculative verify
+                                       # step of T / NT requests
+        requests_per_task: int = 1,   # RP: 2 / 4 = a decode step's requests 2 / 4 per task (NT 1): T / RP tasks per head,
+                                      # one wave of the SMs at T = 16 / 32 (tasks/kda_decode.cuh RP); the default grid, a
+                                      # plan may take RP 1, 2 or 4 (grid x)
         lower_bound: float = -5.0, norm_eps: float = 1e-5,
+        serve: dict = None,     # NT > 1: a serving framework's speculative verify step (SGLang's KDA
+                                # target-verify contract with ReplaySSM, tasks/kda_decode.cuh SERVE): {"nvalid" [R] int32 (the
+                                # request's draft tokens, the other rows idle), "icw_row" [R] int32, "icw" [rows, DRAFT, 3,
+                                # 3 HL D] bf16 (the per-token conv windows: after token t, (t, j) = x_{t - 2 + j}; SGLang's
+                                # intermediate_conv_window), "ring_v", "ring_k" [slots, HL, L, D] bf16,
+                                # "ring_g" [slots, HL, L, D] fp32, "ring_beta" [slots, HL, L] fp32, "draft" DRAFT}; the conv
+                                # state is then [NR, 3, 3 HL D] (read only) and rec_state is read only
         block_dim: tuple = (256, 1, 1),
     ):
-        """Task (t, h): token t, local head h: short conv, gates, one delta-rule step on the state, gated RMSNorm
-        (tasks/kda_decode.cuh). The states are updated in place. params = [HL, D, lower bound, o_norm eps]."""
+        """Task (r, h): request r, local head h (RP > 1: requests RP r .. RP r + RP - 1): short conv, gates, the delta rule
+        on the state, gated RMSNorm (tasks/kda_decode.cuh); a decode step updates the conv window and the state in place.
+        params = [HL, D, lower bound, o_norm eps, 1 (the conv layout)]; NT = T / grid x. serve: its NT tokens in order, the
+        pools read only, the ring and the per-token windows written for the framework's commit; params + [1, DRAFT, L]."""
         from .compiler import graph_nodes, producer_of
         p = producer_of(proj, graph_nodes(self))
         if p is None or p.name != "gemm_tile" or p.params[0] != COMBINE["slots"] or p.params[3] != 0:
             raise ValueError("kda_decode_layer: proj must be a gemm_tile node's output in slots")
-        T, HLD, D = self._tokens(output.dim(0)), output.dim(1), f_b.dim(1)
+        T, HLD, D, NT = self._tokens(output.dim(0)), output.dim(1), f_b.dim(1), tokens_per_request
         HL = HLD // D
+        if NT < 1 or NT > 8 or T % NT != 0:
+            raise ValueError(f"kda_decode_layer: tokens_per_request {NT} must divide the {T} tokens (at most 8)")
+        if (NT > 1) != (serve is not None) or (NT > 1) != (accepted is not None):
+            raise ValueError("kda_decode_layer: serve and accepted exactly when tokens_per_request > 1")
         # the kernel indexes these by the head count and head dim: other shapes would be read silently wrong
         assert (conv_weight.dim(0), conv_weight.dim(1)) == (3 * HLD, 4)
         assert (f_b.dim(0), g_b.dim(0), g_b.dim(1)) == (HLD, HLD, D)
         assert small.dim(0) >= HLD + HL + D
         assert conv_state.dim(1) == 3 * HLD * 3 and rec_state.dim(1) == HLD * D
+        slots = [conv_weight, f_b, g_b, small, conv_state, rec_state, rows]
+        if NT > 1:
+            assert accepted.dim(0) == T // NT
+            self._dtypes("kda_decode_layer", accepted=(accepted, int32))
+            slots.append(accepted)
         self._dtypes("kda_decode_layer", proj=(proj, float32), conv_weight=(conv_weight, float32), f_b=(f_b, bfloat16),
                      g_b=(g_b, bfloat16), small=(small, float32), conv_state=(conv_state, bfloat16),
                      rec_state=(rec_state, float32), rows=(rows, int32), output=(output, bfloat16))
-        self._add_node("kda_decode", (T, HL, 1), block_dim, [proj, output], [(0, -1, -1), (0, 1, -1)],
-                       [HL, D, float_bits(lower_bound), float_bits(norm_eps)],
-                       out_buffer=lambda n: (T * HLD * 2, -1, False), counters=1,   # o; the o_proj GEMM waits for all tasks
+        params = [HL, D, float_bits(lower_bound), float_bits(norm_eps), 1]   # 1: the conv layout [3][3 HL D]
+        if serve is not None:
+            sv = serve
+            draft, L = int(sv["draft"]), sv["ring_v"].dim(2)
+            assert 1 <= draft <= NT <= L, f"kda_decode_layer: serve draft {draft} <= NT {NT} <= ring {L}"
+            assert (sv["icw"].dim(1), sv["icw"].dim(2), sv["icw"].dim(3)) == (draft, 3, 3 * HLD), \
+                "serve: icw [rows, DRAFT, 3, 3 HL D]"
+            for k in ("ring_v", "ring_k", "ring_g"):
+                assert (sv[k].dim(1), sv[k].dim(2), sv[k].dim(3)) == (HL, L, D), f"serve: {k} [slots, HL, L, D]"
+            assert (sv["ring_beta"].dim(1), sv["ring_beta"].dim(2)) == (HL, L), "serve: ring_beta [slots, HL, L]"
+            assert sv["nvalid"].dim(0) == T // NT and sv["icw_row"].dim(0) == T // NT
+            self._dtypes("kda_decode_layer", nvalid=(sv["nvalid"], int32), icw_row=(sv["icw_row"], int32),
+                         icw=(sv["icw"], bfloat16), ring_v=(sv["ring_v"], bfloat16), ring_k=(sv["ring_k"], bfloat16),
+                         ring_g=(sv["ring_g"], float32), ring_beta=(sv["ring_beta"], float32))
+            slots += [sv[k] for k in ("nvalid", "icw_row", "icw", "ring_v", "ring_k", "ring_g", "ring_beta")]
+            params += [1, draft, L]
+        RP = requests_per_task
+        if RP not in (1, 2, 4) or (RP > 1 and NT != 1) or T % (NT * RP):
+            raise ValueError(f"kda_decode_layer: requests_per_task {RP}: 1, or 2 / 4 in a decode step (one token per "
+                             f"request)")
+        self._add_node("kda_decode", (T // (NT * RP), HL, 1), block_dim, [proj, output], [(0, -1, -1), (0, 1, -1)], params,
+                       # o, 0xFF before each launch, written in whole 16-B stores: the o_proj GEMM waits for all tasks (its
+                       # counter) or polls o (input_polled)
+                       out_buffer=lambda n: (T * HLD * 2, 0xFF, False), counters=1,
+                       changeable_grid_dims={} if NT > 1 else {0: (1, 1, 4)},   # a decode step: 1 .. 4 requests per task
                        cost_inputs=[0],   # adds the projection's K parts
-                       buf_slots=[self._tensor_slot(t) for t in (conv_weight, f_b, g_b, small, conv_state, rec_state, rows)])
+                       buf_slots=[self._tensor_slot(t) for t in slots])
 
+    # ---- the generated layer (static_schedule.py) ----
     def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False, device=0,
                        rank=None, exchange=None):
         """Build the graph as it is now, one schedule.json per GPU (static_schedule.compile_static); profile: the timing build

@@ -1,12 +1,11 @@
-"""GLM-5.3-Flash KDA attention sublayer: checkpoint reading, TP sharding and a PyTorch reference.
+"""GLM-5.3-Flash KDA attention: checkpoint reading, TP sharding and a PyTorch reference.
 
 The reference follows vLLM's glm5next implementation step by step, including where it rounds to bf16 (GEMM outputs, the conv
-output, core_attn_out, mHC's layer input), so the static layer can be compared value by value:
-  mHC pre   mixes = R fn^T / rms(R); pre / post / comb (Sinkhorn); x = RMSNorm(sum_i pre_i R_i) gamma   (mhc_pre_torch)
+output, core_attn_out), so the static layer can be compared value by value:
   KDA       merged projection q | k | v | b | f_a | g_a (bf16) -> short conv + SiLU (fp32 weights, bf16 out) -> q, k L2 norm,
             q D^-1/2 -> gate lb sigmoid(e^A (f_b f_a + dt_bias)), beta sigmoid(b) -> delta rule on S [V][K] fp32 ->
             o (bf16) -> RMSNorm(o) w sigmoid(g_b g_a) -> o_proj                                    (kda.py, fused_recurrent)
-  mHC post  R'_j = sum_i comb[i][j] R_i + post_j out                                                (mhc_post_torch)
+(the mHC pre / post around it: dsa_fused_demo.hc_pre_ref / hc_post_ref, SGLang's formulas)
 """
 import json
 import os
@@ -122,17 +121,6 @@ def shard_kda(w: dict, rank: int, tp: int, device) -> dict:
     }
 
 
-def shard_states(conv_state: torch.Tensor, rec: torch.Tensor, rank: int, tp: int):
-    """GPU `rank`'s part of the full states: conv [R, 3 NH D, 3] -> [R, 3 HL D 3]; rec [R, NH, D, D] -> [R, HL D D]."""
-    NR, C, _ = conv_state.shape
-    NH = rec.shape[1]
-    HL = NH // tp
-    seg = C // 3
-    cs = slice(rank * HL * D, (rank + 1) * HL * D)
-    conv = torch.cat([conv_state[:, i * seg:(i + 1) * seg][:, cs] for i in range(3)], 1)
-    return conv.reshape(NR, -1).contiguous(), rec[:, rank * HL:(rank + 1) * HL].reshape(NR, -1).contiguous()
-
-
 # ---------------- the reference (all heads, one device) ----------------
 def bf(x):
     return x.to(torch.bfloat16)
@@ -141,28 +129,6 @@ def bf(x):
 def mm_bf16(a, w):
     """a [T, K] bf16 @ w [N, K]^T -> bf16 (fp32 accumulation, one rounding: a bf16 GEMM)."""
     return bf(a.float() @ w.float().t())
-
-
-def ref_hc_pre(R, w, rms_eps=1e-5, hc_eps=1e-6, norm_eps=1e-5, post_mult=2.0, iters=20):
-    T, HC, H = R.shape
-    x = R.reshape(T, HC * H).float()
-    fn, base, scale = w["hc_fn"].to(R.device), w["hc_base"].to(R.device), w["hc_scale"].to(R.device)
-    mixes = (x @ fn.t()) * torch.rsqrt(x.square().sum(-1, keepdim=True) / (HC * H) + rms_eps)
-    pre = torch.sigmoid(mixes[:, :HC] * scale[0] + base[:HC]) + hc_eps
-    post = torch.sigmoid(mixes[:, HC:2 * HC] * scale[1] + base[HC:2 * HC]) * post_mult
-    comb = (mixes[:, 2 * HC:].view(T, HC, HC) * scale[2] + base[2 * HC:].view(1, HC, HC)).softmax(-1) + hc_eps
-    comb = comb / (comb.sum(-2, keepdim=True) + hc_eps)
-    for _ in range(iters - 1):
-        comb = comb / (comb.sum(-1, keepdim=True) + hc_eps)
-        comb = comb / (comb.sum(-2, keepdim=True) + hc_eps)
-    li = bf((pre.unsqueeze(-1) * R.float()).sum(1)).float()
-    y = bf(li * torch.rsqrt(li.square().mean(-1, keepdim=True) + norm_eps)).float()
-    return bf(y * w["gamma"].to(R.device).float()), pre, post, comb
-
-
-def ref_hc_post(out, R, post, comb):
-    mixed = torch.einsum("tij,tih->tjh", comb, R.float())
-    return bf(mixed + post.unsqueeze(-1) * out.float().unsqueeze(1))
 
 
 def tp_o_proj(y, w_o, tp: int):
@@ -175,20 +141,32 @@ def tp_o_proj(y, w_o, tp: int):
     return bf(acc)
 
 
-def ref_kda(x, w, conv_state, rec, lower_bound=-5.0, norm_eps=1e-5, tp: int = 1):
-    """One decode step of every token's request (its own state row). Returns (o_proj output, o after the gated norm,
-    new conv state, new recurrent state); o_proj summed as TP `tp` does."""
+def ref_kda(x, w, conv_state, rec, lower_bound=-5.0, norm_eps=1e-5, tp: int = 1, ntok: int = 1, accepted=None):
+    """One step of T / ntok requests: request r's tokens r ntok .. r ntok + ntok - 1, in order (ntok > 1: a
+    speculative-decoding verify step, vLLM's spec path). Token t's state slot is t; request r's conv state row is r ntok
+    ([R', 3 NH D, ntok + 2], oldest first). accepted [T / ntok] (ntok > 1): the previous step's accepted tokens a: the
+    initial state is slot r ntok + a - 1, the conv window starts at entry a - 1; the state after token i goes to slot
+    r ntok + i. Returns (o_proj output, o after the gated norm, new conv state, new recurrent state); o_proj summed as TP
+    `tp` does."""
     dev = x.device
     NH = w["num_heads"]
     T = x.shape[0]
+    R = T // ntok
+    acc = [1] * R if ntok == 1 else [int(a) for a in accepted]
+    assert conv_state.shape[2] == ntok + 2 and all(1 <= a <= ntok for a in acc)
     q, k, v = mm_bf16(x, w["q"].to(dev)), mm_bf16(x, w["k"].to(dev)), mm_bf16(x, w["v"].to(dev))
     b, fa, ga = mm_bf16(x, w["b"].to(dev)), mm_bf16(x, w["f_a"].to(dev)), mm_bf16(x, w["g_a"].to(dev))
     qkv = torch.cat([q, k, v], 1)                                            # [T, 3 NH D] bf16
     conv_w = torch.cat([w["q_conv"], w["k_conv"], w["v_conv"]], 0).to(dev)   # [3 NH D, 4]
-    xs = torch.cat([conv_state.float(), qkv.float().unsqueeze(-1)], -1)      # oldest first, then this step
-    co = (xs * conv_w.unsqueeze(0)).sum(-1)
+    co = torch.empty(T, qkv.shape[1], dtype=torch.float32, device=dev)
+    new_conv = conv_state.clone()
+    for r in range(R):   # causal_conv1d_update with num_accepted_tokens (its spec rolling)
+        t0, off = r * ntok, acc[r] - 1
+        xs = torch.cat([conv_state[t0, :, off:off + 3].float(), qkv[t0:t0 + ntok].float().t()], 1)   # [C, 3 + ntok]
+        for i in range(ntok):
+            co[t0 + i] = (xs[:, i:i + 4] * conv_w).sum(-1)
+        new_conv[t0] = torch.cat([conv_state[t0, :, off + 1:off + 3], qkv[t0:t0 + ntok].t()], 1)
     co = bf(co * torch.sigmoid(co)).float()
-    new_conv = torch.cat([conv_state[:, :, 1:], qkv.unsqueeze(-1)], -1)
     cq, ck, cv = co.split(NH * D, 1)
     g1 = mm_bf16(fa, w["f_b"].to(dev)).float().view(T, NH, D)
     gate = lower_bound * torch.sigmoid(torch.exp(w["A_log"].to(dev)).view(1, NH, 1) *
@@ -199,18 +177,20 @@ def ref_kda(x, w, conv_state, rec, lower_bound=-5.0, norm_eps=1e-5, tp: int = 1)
     qn = qn / torch.sqrt(qn.square().sum(-1, keepdim=True) + 1e-6) * (D ** -0.5)
     kn = ck.view(T, NH, D)
     kn = kn / torch.sqrt(kn.square().sum(-1, keepdim=True) + 1e-6)
-    S = rec.float() * torch.exp(gate).unsqueeze(2)                            # [T, NH, V, K]
-    kv = (S * kn.unsqueeze(2)).sum(-1)
-    delta = (cv.view(T, NH, D) - kv) * beta.unsqueeze(-1)
-    S = S + delta.unsqueeze(-1) * kn.unsqueeze(2)
-    o = bf((S * qn.unsqueeze(2)).sum(-1)).float()                            # [T, NH, V]
+    cv = cv.view(T, NH, D)
+    o = torch.empty(T, NH, D, dtype=torch.float32, device=dev)
+    new_rec = rec.clone()
+    for r in range(R):   # fused_recurrent_kda with num_accepted_tokens: one state slot per token
+        t0 = r * ntok
+        S = rec[t0 + acc[r] - 1].float()                                     # [NH, V, K]
+        for t in range(t0, t0 + ntok):
+            S = S * torch.exp(gate[t]).unsqueeze(1)
+            kv = (S * kn[t].unsqueeze(1)).sum(-1)
+            delta = (cv[t] - kv) * beta[t].unsqueeze(-1)
+            S = S + delta.unsqueeze(-1) * kn[t].unsqueeze(1)
+            o[t] = bf((S * qn[t].unsqueeze(1)).sum(-1)).float()
+            new_rec[t] = S
     y = o * torch.rsqrt(o.square().mean(-1, keepdim=True) + norm_eps) * w["o_norm"].to(dev) * torch.sigmoid(og)
     y = bf(y).reshape(T, NH * D)
-    return tp_o_proj(y, w["o_proj"].to(dev), tp), y, new_conv, S
+    return tp_o_proj(y, w["o_proj"].to(dev), tp), y, new_conv, new_rec
 
-
-def ref_sublayer(R, w, conv_state, rec, tp: int = 1):
-    """The whole KDA sublayer: returns (R', out, o, x, new conv state, new recurrent state)."""
-    x, pre, post, comb = ref_hc_pre(R, w)
-    out, o, new_conv, new_rec = ref_kda(x, w, conv_state, rec, tp=tp)
-    return ref_hc_post(out, R, post, comb), out, o, x, new_conv, new_rec
