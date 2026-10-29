@@ -7,9 +7,13 @@
 // allreduce_land_bf16): bf16 partials, one multicast store each, the sums in a
 // fixed order (the same result every launch). The exchange region has two sets,
 // launch n uses set n % 2 (rg_set), so no GPU writes into a set another GPU may
-// still read.
+// still read. FX (params[2] = 1): the input is a COMBINE_ADD GEMM's output
+// (int64 fixed point [T][W], a counter per 128-column block counting its K
+// parts): task x sends column block x of every token once that block's parts
+// are added (dsa::fx_wait_cols), so the GEMM can split K.
 #pragma once
 #include "../core.cuh"
+#include "../dsa_common.cuh"
 
 namespace static_mk {
 
@@ -79,9 +83,49 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
   __syncthreads();
 }
 
+// FX: task x = columns [128 x, 128 x + 128) of all T tokens of the fixed-point
+// sums (SRC: a COMBINE_ADD GEMM node), after their K parts: thread i converts
+// the 8 columns 8 (i % 16) .. of token i / 16 (T = 32: and of token i / 16 +
+// 16) and multicasts them as bf16
+template <int W, size_t OFF, class SRC>
+__device__ __forceinline__ void
+    allreduce_send_fx_task(G const &g, int x STAGE_STAMP_PARAM) {
+  static_assert(T * 16 <= 256 || T * 16 % 256 == 0,
+                "allreduce_send FX: a thread per 8 columns of a token, whole "
+                "rounds of 256");
+  int const c0 = 128 * x;
+  if (threadIdx.x < 32) {
+    dsa::fx_wait_cols<SRC>(g, c0, c0 + 128);
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    STAGE_STAMP_AT(0)
+  }
+#pragma unroll
+  for (int v8 = threadIdx.x; v8 < T * 16; v8 += 256) {
+    int const t = v8 / 16, c = c0 + 8 * (v8 % 16);
+    unsigned long long const *fx =
+        buf_at<unsigned long long const>(g, SRC::buf) + (size_t)t * W + c;
+    float v[8];
+#pragma unroll
+    for (int k = 0; k < 8; k += 2) {
+      ulonglong2 const a = __ldcg(reinterpret_cast<ulonglong2 const *>(fx + k));
+      v[k] = fx_to_float(a.x);
+      v[k + 1] = fx_to_float(a.y);
+    }
+    push16(g,
+           OFF + (size_t)g.rank * ((size_t)T * W * 2) + ((size_t)t * W + c) * 2,
+           pack_bf16x8(make_float4(v[0], v[1], v[2], v[3]),
+                       make_float4(v[4], v[5], v[6], v[7])));
+  }
+  __syncthreads();
+}
+
 // the same from a gemm_tile node's output in slots (COMBINE_SLOTS, src fp32
 // [NSPLIT][T][W], 0xFF-prefilled, no counter): each 8-column vector's NSPLIT
-// parts are polled until they have landed and added in order
+// parts are polled until they have landed (all 2 NSPLIT loads in flight at
+// once, the parts still missing loaded again) and added in order, then re-armed
+// (this task is their one reader: REARM, after the send)
 template <int NSLICE, int NSPLIT, int W, size_t OFF>
 __device__ __forceinline__ void
     allreduce_send_slots_task(G const &g, float const *src, int x) {
@@ -91,14 +135,34 @@ __device__ __forceinline__ void
   for (int i = blo + threadIdx.x; i < bhi; i += 256) {
     int const t = i / C8, c = i - t * C8;
     float4 p0 = make_float4(0.f, 0.f, 0.f, 0.f), p1 = p0;
-#pragma unroll 1
+    float4 xa[NSPLIT], xb[NSPLIT];
+    bool ok[NSPLIT];
+    bool all;
+#pragma unroll
     for (int p = 0; p < NSPLIT; p++) {
-      float const *s = src + ((size_t)p * T + t) * W + 8 * c;
-      float4 a, b;
-      do {
-        a = ldf4_poll(s);
-        b = ldf4_poll(s + 4);
-      } while (!(validf4(a) && validf4(b)));
+      ok[p] = false;
+    }
+    do {
+      all = true;
+#pragma unroll
+      for (int p = 0; p < NSPLIT; p++) {
+        if (!ok[p]) {
+          float const *s = src + ((size_t)p * T + t) * W + 8 * c;
+          xa[p] = ldf4_poll(s);
+          xb[p] = ldf4_poll(s + 4);
+        }
+      }
+#pragma unroll
+      for (int p = 0; p < NSPLIT; p++) {
+        if (!ok[p]) {
+          ok[p] = validf4(xa[p]) && validf4(xb[p]);
+        }
+        all = all && ok[p];
+      }
+    } while (!all);
+#pragma unroll
+    for (int p = 0; p < NSPLIT; p++) { // in order
+      float4 const a = xa[p], b = xb[p];
       p0.x += a.x;
       p0.y += a.y;
       p0.z += a.z;
@@ -111,6 +175,12 @@ __device__ __forceinline__ void
     size_t const dst =
         OFF + (size_t)g.rank * ((size_t)T * W * 2) + ((size_t)t * C8 + c) * 16;
     push16(g, dst, pack_bf16x8(p0, p1));
+#pragma unroll 1
+    for (int p = 0; p < NSPLIT; p++) {
+      float const *s = src + ((size_t)p * T + t) * W + 8 * c;
+      rearm16(s);
+      rearm16(s + 4);
+    }
   }
   __syncthreads();
 }
@@ -119,8 +189,8 @@ __device__ __forceinline__ void
 // SRC, complete once all SRC's tasks are counted; or a gemm_tile node's K
 // parts in slots, polled) to every GPU, into the node's output (an exchange
 // buffer, [GPUS][T][W] bf16). PARAMS {W (the row width), rows per token in the
-// input (GROUP: added in order)}; BUF_SLOTS {an exchange buffer to re-arm once
-// SRC is done, or -1}
+// input (GROUP: added in order), FX}; BUF_SLOTS {an exchange buffer to re-arm
+// once SRC is done, or -1}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -131,32 +201,45 @@ __device__ __forceinline__ void run_allreduce_send(Maps const &,
                                                    G const &g,
                                                    KernelLocals &L,
                                                    StaticTask const &tk) {
-  constexpr int W = PARAMS::v[0], GROUP = PARAMS::v[1];
+  constexpr int W = PARAMS::v[0], GROUP = PARAMS::v[1], FX = PARAMS::v[2];
   static_assert(W % 8 == 0 && GROUP >= 1,
-                "allreduce_send: params {row width, rows per token}");
-  static_assert(
-      SELF::buf >= 0 && exchange_bytes[SELF::buf] == (size_t)GPUS * T * W * 2,
-      "allreduce_send: its output, [GPUS][T][W] bf16 in the exchange region");
-  if constexpr (SRC::counter < 0) {
-    static_assert(SRC::buf >= 0 && SRC::v[0] == COMBINE_SLOTS &&
-                      SRC::v[3] == 0 && SRC::v[2] == W && GROUP == 1,
-                  "allreduce_send: an input without a counter must be a "
-                  "gemm_tile node's output in slots, rows of W");
-    allreduce_send_slots_task<SELF::x, SRC::y, W, exchange_offset[SELF::buf]>(
-        g, buf_at<float const>(g, SRC::buf), tk.x);
+                "allreduce_send: params {row width, rows per token, FX}");
+  if constexpr (FX) {
+    static_assert(SELF::x * 128 == W && GROUP == 1 && SELF::buf >= 0 &&
+                      exchange_bytes[SELF::buf] == (size_t)GPUS * T * W * 2,
+                  "allreduce_send FX: a task per 128-column block of a "
+                  "COMBINE_ADD GEMM's output");
+    allreduce_send_fx_task<W, exchange_offset[SELF::buf], SRC>(
+        g, tk.x STAGE_STAMP_ARG(L.stage_stamps));
+    return;
   } else {
-    static_assert(SRC::buf >= 0,
-                  "allreduce_send: its input is a node's output buffer");
-    allreduce_send_task<SELF::x,
-                        SRC::x * SRC::y * SRC::z,
-                        GROUP,
-                        W,
-                        exchange_offset[SELF::buf],
-                        slot_at<BUF_SLOTS, 0>()>(
-        g,
-        buf_at<float const>(g, SRC::buf),
-        g.cnt + SRC::counter,
-        tk.x STAGE_STAMP_ARG(L.stage_stamps));
+    static_assert(SELF::buf >= 0 &&
+                      exchange_bytes[SELF::buf] == (size_t)GPUS * T * W * 2,
+                  "allreduce_send: its output, [GPUS][T][W] bf16 in the "
+                  "exchange region");
+    if constexpr (SRC::counter < 0) {
+      static_assert(SRC::buf >= 0 && SRC::v[0] == COMBINE_SLOTS &&
+                        (SRC::v[3] == 0 || GPUS == 1) && SRC::v[2] == W &&
+                        GROUP == 1,
+                    "allreduce_send: an input without a counter must be a "
+                    "gemm_tile node's output in slots, rows of W (polled: "
+                    "one GPU, whose rows are all rows)");
+      allreduce_send_slots_task<SELF::x, SRC::y, W, exchange_offset[SELF::buf]>(
+          g, buf_at<float const>(g, SRC::buf), tk.x);
+    } else {
+      static_assert(SRC::buf >= 0,
+                    "allreduce_send: its input is a node's output buffer");
+      allreduce_send_task<SELF::x,
+                          SRC::x * SRC::y * SRC::z,
+                          GROUP,
+                          W,
+                          exchange_offset[SELF::buf],
+                          slot_at<BUF_SLOTS, 0>()>(
+          g,
+          buf_at<float const>(g, SRC::buf),
+          cnt_now(g) + SRC::counter,
+          tk.x STAGE_STAMP_ARG(L.stage_stamps));
+    }
   }
 }
 
