@@ -18,6 +18,8 @@ The input (built by search.search_plan), with the MoE numbers:
   num_sms    148;  max_tasks_per_sm  62 (static_schedule.MAX_TASKS_PER_SM = 64 entries, minus the end entry and the pool's task)
   fixed_options, fixed_lists   a given plan (e.g. the hand plan): its options and its per-SM lists; the solver then only
              computes its start times and its end (to compare it with a searched plan)
+  same_sm, cluster_pairs, same_group, near, sm_group   where some tasks must run relative to others (rules 8-11); every other
+             task may go on any SM, and the SMs nothing tells apart are interchangeable (aid B)
 
 The variables (time in units of TICK = 10 ns, so all times are integers):
   x[entry, i]              yes/no: the entry uses its i-th choice
@@ -40,7 +42,25 @@ The rules (numbered as in the code), then the goal:
      more when it starts before first_extra_us: first[task] = 1 adds it to the length; first[task] = 0 needs start >=
      first_extra_us. A task can start that early only as the first task of its SM, as long as the first tasks of the SMs are
      such tasks themselves (MoE: only the GEMM tiles have no inputs from other tasks); starting late on purpose gains nothing
+  7. a task with prefetch_us holds its SM from its start: it ends at least prefetch_us + its duration after its start, and
+     (rule 3) at least its duration after its inputs: what it loads while it waits is off its time once the inputs are there
+  8. same_sm (a, b): b runs right after a on a's SM (b reads what a leaves in the SM, e.g. its shared memory): no task, and
+     not the pool, runs on that SM between a's end and b's start
+  9. cluster_pairs (a, b): a on SM 2k, b on SM 2k + 1: the 2 CTAs of one cluster (a cluster launch keeps them in one GPC);
+     an SM holds at most one task of all the pairs (compile_plan.pair_clusters: a CTA holds one task of one pair)
+ 10. same_group (a, b): a and b on SMs of the same group, sm_group[SM] (e.g. its die; default: the two dies, SMs
+     0 .. num_sms / 2 - 1 and the rest, default_groups)
+ 11. near (a, b, us): b reads a; when they are on SMs of different groups, b ends us later (the hand-off's extra time)
 The goal: C >= the end of every used task and of every pool; minimise C.
+Two aids that change no plan's end, only how fast the solver finds and proves the best one:
+  A. at no time more than num_sms tasks (and pool shares) of a GPU set hold an SM: implied by the SMs' AddNoOverlap, stated
+     once more as one AddCumulative, which gives the solver a much better lower bound
+  B. the SMs nothing tells apart are interchangeable: any plan stays a plan with its SMs renumbered. Units (an SM, or an SM pair
+     when there are cluster pairs) of the same groups form a class; in each class the units are numbered in the order the
+     tasks (in the input's order) first use them: task i's unit index is at most 1 + the largest among tasks 0 .. i - 1. One
+     plan per renumbering class is left, instead of up to 148! copies. With cluster pairs and no groups, each pair takes an SM
+     pair of its own (rule 9) and the SM pairs are interchangeable, so the pairs go in the first SM pairs (as many as the
+     most pairs a plan can use) and the other SMs are units one by one. A hint is renumbered the same way first
 """
 import time
 from dataclasses import dataclass
@@ -63,6 +83,8 @@ class SolverTask:
     # (30, "7x14x1"): ...} = topk_route's time when the router uses 4 ... 14 K parts (it adds that many partial sums).
     duration_by: Optional[Dict[OptionKey, float]] = None
     first_extra_us: float = 0.0  # its time first on its SM minus duration_us (rule 6); 0: the same wherever it is
+    prefetch_us: float = 0.0     # its loads that need no input (a GEMM's first weight stages), done from when it starts on its
+                                 # SM, also while its inputs are on their way (rule 7); 0: none
 
 
 @dataclass
@@ -93,16 +115,54 @@ def ticks(us: float) -> int:
     return int(round(us / TICK))
 
 
+def renumber(per_sm: List[List[str]], order: List[str], units: List[tuple], classes: Dict[tuple, List[int]]) -> List[List[str]]:
+    """One GPU set's per-SM lists with the units of each class renumbered as aid B wants them: in the order the tasks (`order`)
+    first use them, the units no task uses after those. An SM keeps its place in its unit. The same plan, other SM numbers."""
+    unit_of = {sm: (u, i) for u, sms in enumerate(units) for i, sm in enumerate(sms)}
+    sm_of = {tid: sm for sm, sm_list in enumerate(per_sm) for tid in sm_list}
+    new_unit = {}
+    for cls in classes.values():
+        first = []
+        for tid in order:
+            if tid in sm_of and sm_of[tid] in unit_of:
+                u = unit_of[sm_of[tid]][0]
+                if u in cls and u not in first:
+                    first.append(u)
+        for old, new in zip(first + [u for u in cls if u not in first], cls):
+            new_unit[old] = new
+    out = [[] for _ in per_sm]
+    for sm, sm_list in enumerate(per_sm):
+        if sm in unit_of and unit_of[sm][0] in new_unit:
+            u, i = unit_of[sm]
+            out[units[new_unit[u]][i]] = list(sm_list)
+        else:
+            out[sm] = list(sm_list)
+    return out
+
+
+def default_groups(num_sms: int) -> List[int]:
+    """The SM groups when none are given: the two dies of a B200, the first half of the SMs and the second. The plan's SM k is CTA
+    k: these groups are dies only when the runtime gives CTA k the task list of physical SM k (its %smid)."""
+    return [sm * 2 // num_sms for sm in range(num_sms)]
+
+
 def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps: List[Tuple[str, str]], pools: List[Pool],
           gpu_sets: List[str], num_sms: int, max_tasks_per_sm: int, time_limit_s: float = 60.0, workers: int = 16,
           fixed_options: Optional[Dict[int, str]] = None, fixed_lists: Optional[Dict[str, List[List[str]]]] = None,
-          concurrent: List[List[str]] = (), fixed_post: Optional[set] = None, hint: Optional["Result"] = None) -> Result:
-    """Build the model (rules 1-6 and the goal above), solve it for at most time_limit_s seconds with `workers` threads, read the plan.
-    hint: a solved plan (e.g. a given plan's Result) the solver starts from: its options, SMs, start times and end."""
+          concurrent: List[List[str]] = (), fixed_post: Optional[set] = None, hint: Optional["Result"] = None,
+          same_sm: List[Tuple[str, str]] = (), cluster_pairs: List[Tuple[str, str]] = (),
+          same_group: List[Tuple[str, str]] = (), near: List[Tuple[str, str, float]] = (),
+          sm_group: Optional[List[int]] = None, capacity: bool = True, break_symmetry: bool = True) -> Result:
+    """Build the model (rules 1-11, the goal and the aids above), solve it for at most time_limit_s seconds with `workers` threads,
+    read the plan. hint: a solved plan (e.g. a given plan's Result) the solver starts from: its options, SMs, start times and end.
+    capacity / break_symmetry: aids A / B (off: the same plans, for comparing)."""
     model = cp_model.CpModel()
     fixed_options = fixed_options or {}
+    if (same_group or near) and sm_group is None:
+        sm_group = default_groups(num_sms)
     # the latest time any variable may take: all durations one after another + the queue's work spread over the SMs + 3 us
-    horizon = ticks(sum(t.duration_us + t.first_extra_us for t in tasks) + sum(p.work_us for p in pools) / num_sms + 300)
+    horizon = ticks(sum(t.duration_us + t.first_extra_us + t.prefetch_us for t in tasks) + sum(p.work_us for p in pools) / num_sms
+                    + sum(us for _, _, us in near) + 300)
 
     # ---- rule 1: exactly one choice per entry; use[node, option] = 1 when the chosen choice contains that option.
     # Entry "30" with 4 choices: x[("30", 0..3)], exactly one of them is 1; use[(30, "7x14x1")] = x[("30", 3)], and so on.
@@ -133,6 +193,7 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
     # Per task and SM a yes/no on[...] and an interval [start, end) that exists only when on[...] = 1; AddNoOverlap over the
     # intervals of one SM = no two tasks on that SM at the same time.
     start, end, length = {}, {}, {}
+    span = {}                                        # task id -> its time on its SM: length, or (rule 7) more
     on: Dict[Tuple[str, str, int], cp_model.IntVar] = {}             # (task id, GPU set, SM) -> yes/no
     intervals: Dict[Tuple[str, int], list] = {(g, sm): [] for g in gpu_sets for sm in range(num_sms)}
     for t in tasks:
@@ -154,21 +215,24 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
             model.Add(start[t.id] >= extra).OnlyEnforceIf([used[t.id], first.Not()])
         else:
             length[t.id] = ticks(t.duration_us)
-        model.Add(end[t.id] == start[t.id] + length[t.id])
+        if t.prefetch_us > 0:   # rule 7
+            span[t.id] = model.NewIntVar(0, horizon, f"span_{t.id}")
+            model.Add(span[t.id] >= length[t.id] + ticks(t.prefetch_us))
+        else:
+            span[t.id] = length[t.id]
+        model.Add(end[t.id] == start[t.id] + span[t.id])
         sms = [fixed_sm[t.id]] if t.id in fixed_sm else range(num_sms)
         for sm in sms:
             b = model.NewBoolVar(f"on_{t.id}_{sm}")
             on[(t.id, t.gpu_set, sm)] = b
             intervals[(t.gpu_set, sm)].append(
-                model.NewOptionalIntervalVar(start[t.id], length[t.id], end[t.id], b, f"iv_{t.id}_{sm}"))
+                model.NewOptionalIntervalVar(start[t.id], span[t.id], end[t.id], b, f"iv_{t.id}_{sm}"))
         model.Add(sum(on[(t.id, t.gpu_set, sm)] for sm in sms) == used[t.id])   # used: exactly one SM; unused: none
         model.Add(start[t.id] == 0).OnlyEnforceIf(used[t.id].Not())             # unused tasks: start 0, out of the way
     on_sm: Dict[Tuple[str, int], list] = {}          # (GPU set, SM) -> [(task id, on[...])]
     for (tid, g, sm), b in on.items():
         on_sm.setdefault((g, sm), []).append((tid, b))
-    for key, ivs in intervals.items():
-        if ivs:
-            model.AddNoOverlap(ivs)
+    for key in intervals:
         if len(on_sm.get(key, [])) > max_tasks_per_sm:
             model.Add(sum(b for _, b in on_sm[key]) <= max_tasks_per_sm)
     for per_sm in (fixed_lists or {}).values():      # a given plan: each SM runs its tasks in the given order
@@ -248,13 +312,145 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
                 bs = [on[(tid, g, sm)] for tid in members if (tid, g, sm) in on]
                 if len(bs) > 1:
                     model.Add(sum(bs) <= 1)
+
+    # ---- rules 8-11: where some tasks run relative to others
+    def sm_var(tid, sm):   # on[...] of the task on this SM of its GPU set; 0 when it cannot be there (a given plan's other SMs)
+        return on.get((tid, by_id[tid].gpu_set, sm), 0)
+
+    def both(a, b):
+        if by_id[a].gpu_set != by_id[b].gpu_set:
+            raise ValueError(f"solve: {a} and {b} are in different GPU sets")
+        return [used[a], used[b]]
+
+    def same(x, y, cond):  # x == y when cond; two constants (a given plan's other SMs: both 0) need no rule
+        if not (isinstance(x, int) and isinstance(y, int)):
+            model.Add(x == y).OnlyEnforceIf(cond)
+
+    for a, b in same_sm:                             # rule 8: the same SM, and on it the gap [end a, start b] holds the SM
+        if a in by_id and b in by_id:
+            g = by_id[a].gpu_set
+            for sm in range(num_sms):
+                same(sm_var(a, sm), sm_var(b, sm), both(a, b))
+            gap = model.NewIntVar(0, horizon, f"gap_{a}_{b}")
+            for sm in range(num_sms):
+                if (a, g, sm) in on:
+                    held = model.NewBoolVar(f"held_{a}_{b}_{sm}")   # on[a, sm] and b used
+                    model.AddBoolAnd([on[(a, g, sm)], used[b]]).OnlyEnforceIf(held)
+                    model.AddBoolOr([on[(a, g, sm)].Not(), used[b].Not()]).OnlyEnforceIf(held.Not())
+                    intervals[(g, sm)].append(model.NewOptionalIntervalVar(end[a], gap, start[b], held, f"gap_{a}_{b}_{sm}"))
+            pa, pb = post.get(a), post.get(b)        # the pool is not between them either
+            if pa is not None and pb is not None:
+                if not (isinstance(pa, int) and isinstance(pb, int)):
+                    model.Add(pa == pb).OnlyEnforceIf(both(a, b))
+                elif pa != pb:
+                    model.AddBoolOr([used[a].Not(), used[b].Not()])
+    for a, b in cluster_pairs:                       # rule 9
+        if a in by_id and b in by_id:
+            for k in range(num_sms // 2):
+                same(sm_var(a, 2 * k), sm_var(b, 2 * k + 1), both(a, b))
+            wrong = [v for v in [sm_var(a, sm) for sm in range(1, num_sms, 2)] + [sm_var(b, sm) for sm in range(0, num_sms, 2)]
+                     if not isinstance(v, int)]
+            if wrong:
+                model.Add(sum(wrong) == 0)
+    paired = sorted({t for ab in cluster_pairs for t in ab if t in by_id})
+    for g in gpu_sets:
+        for sm in range(num_sms):
+            bs = [v for v in (sm_var(t, sm) for t in paired if by_id[t].gpu_set == g) if not isinstance(v, int)]
+            if len(bs) > 1:
+                model.Add(sum(bs) <= 1)
+    for key, ivs in intervals.items():               # rule 2 (with rule 8's gaps): no two on one SM at a time
+        if ivs:
+            model.AddNoOverlap(ivs)
+    group = {}                                       # task id -> the group of its SM (rules 10, 11)
+
+    def group_of(tid):
+        if tid not in group:
+            group[tid] = model.NewIntVar(0, max(sm_group), f"grp_{tid}")
+            model.Add(group[tid] == sum(sm_group[sm] * sm_var(tid, sm) for sm in range(num_sms)))
+        return group[tid]
+
+    for a, b in same_group:                          # rule 10
+        if a in by_id and b in by_id:
+            model.Add(group_of(a) == group_of(b)).OnlyEnforceIf(both(a, b))
+    for a, b, us in near:                            # rule 11: far = 0 only when they share a group
+        if a in by_id and b in by_id:
+            far = model.NewBoolVar(f"far_{a}_{b}")
+            model.Add(group_of(a) == group_of(b)).OnlyEnforceIf(both(a, b) + [far.Not()])
+            model.Add(end[b] >= end[a] + length[b] + ticks(us)).OnlyEnforceIf(both(a, b) + [far])
+
+    # ---- aid A: at most num_sms tasks and pool shares of a GPU set at a time (one AddCumulative per GPU set)
+    if capacity:
+        held = {g: [] for g in gpu_sets}
+        for t in tasks:
+            held[t.gpu_set].append(model.NewOptionalIntervalVar(start[t.id], span[t.id], end[t.id], used[t.id], f"cap_{t.id}"))
+        for p in pools:                              # SM k's share of the pool: from its join to the pool's end
+            _, joins, ends = pool_vars[p.id]
+            for k, j in enumerate(joins):
+                share = model.NewIntVar(0, horizon, f"share_{p.id}_{k}")
+                model.Add(share == ends - j)
+                held[p.gpu_set].append(model.NewIntervalVar(j, share, ends, f"cap_{p.id}_{k}"))
+        for g, ivs in held.items():
+            if len(ivs) > num_sms:
+                model.AddCumulative(ivs, [1] * len(ivs), num_sms)
+
+    # ---- aid B: the units of a class numbered in the order the tasks first use them
+    sm_pairs = [(2 * k, 2 * k + 1) for k in range(num_sms // 2)]
+    pairs_first = bool(cluster_pairs) and not sm_group and break_symmetry and not fixed_sm
+    units: Dict[str, List[tuple]] = {}               # GPU set -> its units
+    classes: Dict[str, Dict[tuple, List[int]]] = {}  # GPU set -> (unit size, the groups of its SMs) -> its units (indices)
+    for g in gpu_sets:
+        if pairs_first:
+            most: Dict[int, int] = {}                # node -> the most pairs one of its options has
+            per_option: Dict[Tuple[int, str], int] = {}
+            for a, _ in cluster_pairs:
+                if a in by_id and by_id[a].gpu_set == g:
+                    k = (by_id[a].node, by_id[a].option)
+                    per_option[k] = per_option.get(k, 0) + 1
+                    most[k[0]] = max(most.get(k[0], 0), per_option[k])
+            n = min(len(sm_pairs), sum(most.values()))
+            units[g] = sm_pairs[:n] + [(sm,) for sm in range(2 * n, num_sms)]
+            for t in paired:                         # the pairs in the first n SM pairs
+                if by_id[t].gpu_set == g:
+                    rest = [v for v in (sm_var(t, sm) for sm in range(2 * n, num_sms)) if not isinstance(v, int)]
+                    if rest:
+                        model.Add(sum(rest) == 0)
+        else:
+            units[g] = sm_pairs if cluster_pairs else [(sm,) for sm in range(num_sms)]
+        classes[g] = {}
+        for u, sms in enumerate(units[g]):
+            classes[g].setdefault((len(sms),) + (tuple(sm_group[sm] for sm in sms) if sm_group else ()), []).append(u)
+    order = {g: [t.id for t in tasks if t.gpu_set == g] for g in gpu_sets}   # the input's order
+    if break_symmetry and not fixed_sm:
+        for g in gpu_sets:
+            for key, cls in classes[g].items():
+                if len(cls) < 2:
+                    continue
+                prev = model.NewConstant(0)
+                for tid in order[g]:
+                    # its unit's index in the class, from 1; 0: not in this class (or not used)
+                    idx = model.NewIntVar(0, len(cls), f"unit_{tid}_{key}")
+                    model.Add(idx == sum((i + 1) * on[(tid, g, sm)] for i, u in enumerate(cls) for sm in units[g][u]))
+                    model.Add(idx <= prev + 1)
+                    top = model.NewIntVar(0, len(cls), f"top_{tid}_{key}")
+                    model.AddMaxEquality(top, [prev, idx])
+                    prev = top
     model.Minimize(C)
 
     # ---- a start: the hinted plan's choices, SMs, start times and end (CP-SAT completes the variables not hinted)
     if hint is not None:
         for (name, i), v in x.items():
             model.AddHint(v, int(all(hint.chosen.get(node) == opt for node, opt in groups[name][i].items())))
-        where = {tid: (g, sm) for g, per_sm in hint.lists.items() for sm, sm_list in enumerate(per_sm) for tid in sm_list}
+        lists = hint.lists
+        if break_symmetry and not fixed_sm:          # aid B: the hint's units renumbered in the order its tasks first use them
+            def renumbered(g, per_sm):
+                if pairs_first:                      # first the SM pairs holding pairs to the front
+                    first = [t for t in paired if by_id[t].gpu_set == g]
+                    seen = set(first)
+                    per_sm = renumber(per_sm, first + [t for t in order[g] if t not in seen], sm_pairs,
+                                      {(): list(range(len(sm_pairs)))})
+                return renumber(per_sm, order[g], units[g], classes[g])
+            lists = {g: renumbered(g, per_sm) for g, per_sm in hint.lists.items() if g in units}
+        where = {tid: (g, sm) for g, per_sm in lists.items() for sm, sm_list in enumerate(per_sm) for tid in sm_list}
         for (tid, g, sm), b in on.items():
             model.AddHint(b, int(where.get(tid) == (g, sm)))
         for t in tasks:
