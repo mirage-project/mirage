@@ -21,13 +21,23 @@
 #define STATIC_EXCHANGE_OFFSETS                                                \
   {                                                                            \
     0, 0, 0, 0, 4096, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 57344, 155648, 0, 0, \
-        0, 0, 0                                                                \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0             \
   }
 #define STATIC_EXCHANGE_BYTES                                                  \
   {                                                                            \
     0, 0, 0, 0, 50688, 0, 0, 0, 2112, 0, 0, 0, 0, 0, 0, 0, 0, 98304, 98304, 0, \
-        0, 0, 0, 0                                                             \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,   \
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0          \
   }
+
+// one GPU: the SMs whose first task waits for other tasks (or that have none),
+// a bit each (reset_sms)
+#define STATIC_RESET_SMS_N 52
+#define STATIC_RESET_SMS_MASK0 71776119061217280ull
+#define STATIC_RESET_SMS_MASK1 18446742974197923840ull
+#define STATIC_RESET_SMS_MASK2 1048575ull
+#define STATIC_RESET_SMS_MASK3 0ull
 
 struct StaticTask {
   int node, x, y, z;
@@ -72,9 +82,9 @@ struct StaticContext {
 #include "mirage/static_megakernel/tasks/silu_and_mul.cuh"
 #include "mirage/static_megakernel/tasks/sum_gpus.cuh"
 #include "mirage/static_megakernel/tasks/topk_route.cuh"
-static_assert(static_mk::MAX_TASKS_PER_SM == 64 && static_mk::MAX_BUFS == 24 &&
+static_assert(static_mk::MAX_TASKS_PER_SM == 64 && static_mk::MAX_BUFS == 64 &&
                   static_mk::MAX_MAPS == 32 &&
-                  static_mk::NODE_COUNTER_LINES == 16 && static_mk::SMAX == 5 &&
+                  static_mk::NODE_COUNTER_LINES == 64 && static_mk::SMAX == 5 &&
                   static_mk::SF_CHUNK == 512,
               "the Python copies of the kernel's sizes (static_schedule.py, "
               "static_megakernel.py)");
@@ -142,12 +152,12 @@ constexpr int STATIC_SMEM_BYTES = static_mk::smem_launch_bytes(static_smem_need(
          StaticNode<0, 0, 0>>(),
      static_mk::smem_allreduce_send<
          StaticNode<148, 1, 1, -1, 17>,
-         StaticParams<6144, 1>,
+         StaticParams<6144, 1, 0>,
          StaticBufSlots<-1>,
          StaticMapSlots<>,
          StaticNode<48, 1, 1, 128, 10, 2, 256, 6144, 0>>(),
      static_mk::smem_allreduce_send<StaticNode<148, 1, 1, -1, 18>,
-                                    StaticParams<6144, 8>,
+                                    StaticParams<6144, 8, 0>,
                                     StaticBufSlots<-1>,
                                     StaticMapSlots<>,
                                     StaticNode<148, 1, 1, 160, 16, 256>>(),
@@ -155,12 +165,12 @@ constexpr int STATIC_SMEM_BYTES = static_mk::smem_launch_bytes(static_smem_need(
                               StaticParams<>,
                               StaticBufSlots<>,
                               StaticMapSlots<>,
-                              StaticNode<148, 1, 1, -1, 18, 6144, 8>>(),
+                              StaticNode<148, 1, 1, -1, 18, 6144, 8, 0>>(),
      static_mk::smem_sum_gpus<StaticNode<8, 8, 1, -1, 20>,
                               StaticParams<>,
                               StaticBufSlots<>,
                               StaticMapSlots<>,
-                              StaticNode<148, 1, 1, -1, 17, 6144, 1>>(),
+                              StaticNode<148, 1, 1, -1, 17, 6144, 1, 0>>(),
      static_mk::smem_residual_add<StaticNode<148, 1, 1, -1, -1>,
                                   StaticParams<6144>,
                                   StaticBufSlots<21, 22>,
@@ -508,14 +518,14 @@ __global__ void __launch_bounds__(256, 1)
       case 30:
         static_mk::run_allreduce_send<
             StaticNode<148, 1, 1, -1, 17>,
-            StaticParams<6144, 1>,
+            StaticParams<6144, 1, 0>,
             StaticBufSlots<-1>,
             StaticMapSlots<>,
             StaticNode<48, 1, 1, 128, 10, 2, 256, 6144, 0>>(maps, g, L, tk);
         break;
       case 32:
         static_mk::run_allreduce_send<StaticNode<148, 1, 1, -1, 18>,
-                                      StaticParams<6144, 8>,
+                                      StaticParams<6144, 8, 0>,
                                       StaticBufSlots<-1>,
                                       StaticMapSlots<>,
                                       StaticNode<148, 1, 1, 160, 16, 256>>(
@@ -526,7 +536,7 @@ __global__ void __launch_bounds__(256, 1)
                                 StaticParams<>,
                                 StaticBufSlots<>,
                                 StaticMapSlots<>,
-                                StaticNode<148, 1, 1, -1, 18, 6144, 8>>(
+                                StaticNode<148, 1, 1, -1, 18, 6144, 8, 0>>(
             maps, g, L, tk);
         break;
       case 36:
@@ -534,7 +544,7 @@ __global__ void __launch_bounds__(256, 1)
                                 StaticParams<>,
                                 StaticBufSlots<>,
                                 StaticMapSlots<>,
-                                StaticNode<148, 1, 1, -1, 17, 6144, 1>>(
+                                StaticNode<148, 1, 1, -1, 17, 6144, 1, 0>>(
             maps, g, L, tk);
         break;
       case 37:
@@ -591,10 +601,67 @@ static size_t const static_times_count =
 static std::vector<StaticGpu> g_st;
 static StaticContext g_ctx;
 static unsigned long long g_launches = 0;
+static int g_dev0 =
+    0; // the CUDA device of GPU 0 (set_device_func; GPU g = device g_dev0 + g)
 
-// per GPU: a stream, two events, the kernel's shared memory size, the per-SM
-// task table on the GPU (max_tasks entries per SM: the SM's list, then node =
-// -1); the view the host code gets (its tensors); then static_host_init
+// local GPU g (device g_dev0 + g) running GPU `lists`' task lists: a stream,
+// two events, the kernel's shared memory size, the per-SM task table on the GPU
+// (max_tasks entries per SM: the SM's list, then node = -1); the view the host
+// code gets (its tensors)
+static void static_setup_gpu(int g,
+                             int lists,
+                             std::map<std::string, void *> const &tensors) {
+  ST_CK(cudaSetDevice(g_dev0 + g));
+  ST_CK(cudaStreamCreate(&g_st[g].stream));
+  ST_CK(cudaEventCreate(&g_st[g].start));
+  ST_CK(cudaEventCreate(&g_st[g].end));
+  ST_CK(cudaFuncSetAttribute(layer_kernel,
+                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             (int)(STATIC_SMEM_BYTES)));
+  int const max_tasks = (int)(static_mk::MAX_TASKS_PER_SM);
+  std::vector<StaticTask> table((size_t)static_mk::NSM * max_tasks,
+                                StaticTask{-1, 0, 0, 0});
+  for (int sm = 0; sm < static_mk::NSM; sm++) {
+    int const b = static_list_begin[lists][sm],
+              n = static_list_begin[lists][sm + 1] - b;
+    if (n > max_tasks - 1) {
+      fprintf(stderr,
+              "layer: GPU %d SM %d: %d tasks, at most %d\n",
+              lists,
+              sm,
+              n,
+              max_tasks - 1);
+      exit(1);
+    }
+    for (int i = 0; i < n; i++) {
+      table[(size_t)sm * max_tasks + i] = static_tasks_of[lists][b + i];
+    }
+  }
+  ST_CK(cudaMalloc(&g_st[g].tasks, table.size() * sizeof(StaticTask)));
+  ST_CK(cudaMemcpy(g_st[g].tasks,
+                   table.data(),
+                   table.size() * sizeof(StaticTask),
+                   cudaMemcpyHostToDevice));
+  StaticGpuView &v = g_ctx.gpus[g];
+  v.gpu = g_dev0 + g;
+  v.tensors = tensors;
+}
+
+// timing build: the times buffer is allocated after the layer's buffers, so
+// those keep the addresses of the normal build (the buffers' addresses change
+// the layer's time)
+static void static_alloc_times() {
+  if (STATIC_PROFILE) {
+    for (size_t g = 0; g < g_st.size(); g++) {
+      ST_CK(cudaSetDevice(g_dev0 + (int)g));
+      ST_CK(cudaMalloc(&g_st[g].times,
+                       static_times_count * sizeof(unsigned long long)));
+    }
+  }
+}
+
+// every GPU of the layer in this process: per GPU static_setup_gpu; then
+// static_host_init (peer access, the multicast exchange region)
 static void
     static_init(std::vector<std::map<std::string, void *>> const &tensors) {
   int const n = static_mk::GPUS;
@@ -610,40 +677,7 @@ static void
   g_ctx.num_lists = static_mk::NSM;
   g_ctx.gpus.assign(n, StaticGpuView());
   for (int g = 0; g < n; g++) {
-    ST_CK(cudaSetDevice(g));
-    ST_CK(cudaStreamCreate(&g_st[g].stream));
-    ST_CK(cudaEventCreate(&g_st[g].start));
-    ST_CK(cudaEventCreate(&g_st[g].end));
-    ST_CK(cudaFuncSetAttribute(layer_kernel,
-                               cudaFuncAttributeMaxDynamicSharedMemorySize,
-                               (int)(STATIC_SMEM_BYTES)));
-    int const max_tasks = (int)(static_mk::MAX_TASKS_PER_SM);
-    std::vector<StaticTask> table((size_t)static_mk::NSM * max_tasks,
-                                  StaticTask{-1, 0, 0, 0});
-    for (int sm = 0; sm < static_mk::NSM; sm++) {
-      int const b = static_list_begin[g][sm],
-                n = static_list_begin[g][sm + 1] - b;
-      if (n > max_tasks - 1) {
-        fprintf(stderr,
-                "layer: GPU %d SM %d: %d tasks, at most %d\n",
-                g,
-                sm,
-                n,
-                max_tasks - 1);
-        exit(1);
-      }
-      for (int i = 0; i < n; i++) {
-        table[(size_t)sm * max_tasks + i] = static_tasks_of[g][b + i];
-      }
-    }
-    ST_CK(cudaMalloc(&g_st[g].tasks, table.size() * sizeof(StaticTask)));
-    ST_CK(cudaMemcpy(g_st[g].tasks,
-                     table.data(),
-                     table.size() * sizeof(StaticTask),
-                     cudaMemcpyHostToDevice));
-    StaticGpuView &v = g_ctx.gpus[g];
-    v.gpu = g;
-    v.tensors = tensors[g];
+    static_setup_gpu(g, g, tensors[g]);
   }
   static_host_init(
       g_ctx,
@@ -691,16 +725,76 @@ static void
           {"map.17", "wblk8 t:w2 24576 1"},
           {"map.18", "wblk8 t:w2 24576 2"},
           {"map.19", "act8kt b:11+0 256 512 2"}});
-  // timing build: the times buffer is allocated after the layer's buffers, so
-  // those keep the addresses of the normal build (the buffers' addresses change
-  // the layer's time)
-  if (STATIC_PROFILE) {
-    for (int g = 0; g < n; g++) {
-      ST_CK(cudaSetDevice(g));
-      ST_CK(cudaMalloc(&g_st[g].times,
-                       static_times_count * sizeof(unsigned long long)));
-    }
+  static_alloc_times();
+}
+
+// GPU `rank` of the layer in a process of its own (a serving framework's TP
+// rank): this GPU only (device g_dev0), its rank's task lists,
+// static_host_init_rank with the caller's exchange region (mc: its multicast
+// address, rv: this GPU's copy)
+static void static_init_rank(int rank,
+                             std::map<std::string, void *> const &tensors,
+                             unsigned char *mc,
+                             unsigned char *rv) {
+  if (rank < 0 || rank >= static_mk::GPUS) {
+    fprintf(stderr, "layer: rank %d of %d GPUs\n", rank, static_mk::GPUS);
+    exit(1);
   }
+  g_st.assign(1, StaticGpu());
+  g_ctx.num_gpus = 1;
+  g_ctx.num_lists = static_mk::NSM;
+  g_ctx.gpus.assign(1, StaticGpuView());
+  static_setup_gpu(0, rank, tensors);
+  static_host_init_rank(
+      g_ctx,
+      std::map<std::string, std::string>{
+          {"buf.0", "out router_logits 98304 255 1"},
+          {"buf.1", "tensor bias 256 -1 0"},
+          {"buf.2", "out routing_pairs 512 255 0"},
+          {"buf.3", "tensor x 49152 -1 0"},
+          {"buf.4", "exchange x_fp8 50688 255 0"},
+          {"buf.5", "tensor sgu_sf 192 -1 0"},
+          {"buf.6", "out shared_gate_up 32768 0 0"},
+          {"buf.7", "out shared_act 4096 -1 0"},
+          {"buf.8", "exchange shared_act_fp8 2112 255 0"},
+          {"buf.9", "tensor sd_sf 96 -1 0"},
+          {"buf.10", "out shared_down 196608 -1 0"},
+          {"buf.11", "scratch scaled_moe_experts.h_q 131072 -1 0"},
+          {"buf.12", "scratch scaled_moe_experts.h_q_scales 4096 -1 0"},
+          {"buf.13", "tensor w13_sf 49152 -1 0"},
+          {"buf.14", "scratch scaled_moe_experts.h32 532480 -1 0"},
+          {"buf.15", "tensor w2_sf 24576 -1 0"},
+          {"buf.16", "out routed_rows 1572864 -1 0"},
+          {"buf.17", "exchange s_sent 98304 255 1"},
+          {"buf.18", "exchange r_sent 98304 255 1"},
+          {"buf.19", "out routed_summed 98304 255 1"},
+          {"buf.20", "out shared_summed 98304 255 1"},
+          {"buf.21", "tensor residual 49152 -1 0"},
+          {"buf.22", "tensor moe_out 49152 -1 0"},
+          {"map.0", "bf16 t:router 256 6144 128"},
+          {"map.1", "bf16 t:router 256 6144 64"},
+          {"map.2", "bf16 t:x 8 6144 8"},
+          {"map.3", "wblk8 t:sgu 192 1"},
+          {"map.4", "wblk8 t:sgu 192 2"},
+          {"map.5", "act8 b:4+0 6144 8"},
+          {"map.6", "act8 b:4+258048 6144 8"},
+          {"map.7", "act8kt b:4+0 6144 8 2"},
+          {"map.8", "act8kt b:4+258048 6144 8 2"},
+          {"map.9", "wblk8 t:sd 96 1"},
+          {"map.10", "wblk8 t:sd 96 2"},
+          {"map.11", "act8 b:8+0 256 8"},
+          {"map.12", "act8 b:8+258048 256 8"},
+          {"map.13", "act8kt b:8+0 256 8 2"},
+          {"map.14", "act8kt b:8+258048 256 8 2"},
+          {"map.15", "wblk8 t:w13 49152 1"},
+          {"map.16", "wblk8 t:w13 49152 2"},
+          {"map.17", "wblk8 t:w2 24576 1"},
+          {"map.18", "wblk8 t:w2 24576 2"},
+          {"map.19", "act8kt b:11+0 256 512 2"}},
+      rank,
+      mc,
+      rv);
+  static_alloc_times();
 }
 
 // one launch on every GPU: per GPU the resets on its stream; wait for every GPU
@@ -714,7 +808,7 @@ static void static_launch(size_t flush_bytes) {
   int const n = (int)g_st.size();
   for (int g = 0; g < n; g++) {
     StaticGpu &s = g_st[g];
-    ST_CK(cudaSetDevice(g));
+    ST_CK(cudaSetDevice(g_dev0 + g));
     static_host_reset(g, s.stream, g_launches);
     if (STATIC_PROFILE) {
       ST_CK(cudaMemsetAsync(s.times,
@@ -726,13 +820,13 @@ static void static_launch(size_t flush_bytes) {
 #ifndef STATIC_RESET_IN_KERNEL
   (void)flush_bytes;
   for (int g = 0; g < n; g++) {
-    ST_CK(cudaSetDevice(g));
+    ST_CK(cudaSetDevice(g_dev0 + g));
     ST_CK(cudaStreamSynchronize(g_st[g].stream));
   }
 #endif
   for (int gpu = 0; gpu < n; gpu++) {
     StaticGpu &s = g_st[gpu];
-    ST_CK(cudaSetDevice(gpu));
+    ST_CK(cudaSetDevice(g_dev0 + gpu));
 #ifdef STATIC_RESET_IN_KERNEL
     static_host_prelude(gpu, s.stream, flush_bytes, (unsigned)(g_launches + 1));
 #endif
@@ -747,12 +841,61 @@ static void static_launch(size_t flush_bytes) {
   g_launches++;
 }
 
+// one launch on the caller's stream, for a layer inside another framework's
+// step (one GPU, the serving build -DSTATIC_RESET_IN_KERNEL: the kernel resets
+// its own buffers): no host resets, no sync, no event, so a CUDA graph can
+// capture it between the framework's kernels. pdl: a programmatic launch (PDL):
+// the kernel's start (its resets, the barrier over the SMs) overlaps the
+// previous kernel; it waits for that kernel before reading its output (core.cuh
+// kernel_begin).
+static char const *static_launch_stream(cudaStream_t stream, bool pdl) {
+#ifndef STATIC_RESET_IN_KERNEL
+  return "launch_stream needs the serving build (-DSTATIC_RESET_IN_KERNEL)";
+#else
+  if (g_st.size() != 1) {
+    return "launch_stream: one GPU in this process (a layer built for one GPU, "
+           "or init_rank_func)";
+  }
+  int const gpu = 0;
+  StaticGpu &s = g_st[0];
+  ST_CK(cudaSetDevice(g_dev0));
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(static_mk::NSM);
+  cfg.blockDim = dim3(256);
+  cfg.dynamicSmemBytes = (size_t)(STATIC_SMEM_BYTES);
+  cfg.stream = stream;
+  cudaLaunchAttribute at[2];
+  int na = 0;
+  if (1 > 1) {
+    at[na].id = cudaLaunchAttributeClusterDimension;
+    at[na].val.clusterDim.x = 1;
+    at[na].val.clusterDim.y = 1;
+    at[na].val.clusterDim.z = 1;
+    na++;
+  }
+  if (pdl) {
+    at[na].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[na].val.programmaticStreamSerializationAllowed = 1;
+    na++;
+  }
+  cfg.attrs = at;
+  cfg.numAttrs = na;
+  ST_CK(cudaLaunchKernelEx(&cfg,
+                           layer_kernel,
+                           static_host::g_gpus[gpu].maps,
+                           static_host::g_gpus[gpu].g,
+                           (StaticTask const *)s.tasks STATIC_TIMES_ARG));
+  g_launches++;
+  return nullptr;
+#endif
+}
+
 // per GPU the time between the last launch's two events, in microseconds (after
 // static_wait)
 static cudaError_t static_elapsed(std::vector<float> &us) {
   us.assign(g_st.size(), 0.f);
   for (size_t g = 0; g < g_st.size(); g++) {
-    ST_CK(cudaSetDevice((int)g));
+    ST_CK(cudaSetDevice(g_dev0 + (int)g));
     float ms = 0.f;
     cudaError_t const e = cudaEventElapsedTime(&ms, g_st[g].start, g_st[g].end);
     if (e != cudaSuccess) {
@@ -766,7 +909,7 @@ static cudaError_t static_elapsed(std::vector<float> &us) {
 // wait for every GPU's end event
 static cudaError_t static_wait() {
   for (size_t g = 0; g < g_st.size(); g++) {
-    ST_CK(cudaSetDevice((int)g));
+    ST_CK(cudaSetDevice(g_dev0 + (int)g));
     cudaError_t const e = cudaEventSynchronize(g_st[g].end);
     if (e != cudaSuccess) {
       return e;
@@ -779,7 +922,7 @@ static cudaError_t static_wait() {
 static cudaError_t static_done(bool *done) {
   *done = true;
   for (size_t g = 0; g < g_st.size(); g++) {
-    ST_CK(cudaSetDevice((int)g));
+    ST_CK(cudaSetDevice(g_dev0 + (int)g));
     cudaError_t const e = cudaEventQuery(g_st[g].end);
     if (e == cudaErrorNotReady) {
       *done = false;
@@ -807,7 +950,7 @@ static cudaError_t
     return cudaErrorInvalidValue;
   }
   out.resize(bytes);
-  ST_CK(cudaSetDevice(g));
+  ST_CK(cudaSetDevice(g_dev0 + g));
   cudaStream_t nb;
   cudaError_t e = cudaStreamCreateWithFlags(&nb, cudaStreamNonBlocking);
   if (e != cudaSuccess) {
@@ -825,7 +968,7 @@ static void static_finalize() {
   static_host_finalize(g_ctx);
   for (size_t g = 0; g < g_st.size(); g++) {
     StaticGpu &s = g_st[g];
-    cudaSetDevice((int)g);
+    cudaSetDevice(g_dev0 + (int)g);
     if (s.tasks) {
       cudaFree(s.tasks);
     }
@@ -873,6 +1016,35 @@ static PyObject *py_init(PyObject *self, PyObject *args) {
   static_init(tensors);
   Py_RETURN_NONE;
 }
+static PyObject *py_init_rank(PyObject *self, PyObject *args) {
+  int rank;
+  PyObject *nl, *pl;
+  unsigned long long mc, rv;
+  if (!PyArg_ParseTuple(args, "iOOKK", &rank, &nl, &pl, &mc, &rv)) {
+    return NULL;
+  }
+  if (!PyList_Check(nl) || !PyList_Check(pl) ||
+      PyList_Size(nl) != PyList_Size(pl)) {
+    PyErr_SetString(PyExc_TypeError, "names / pointers: this GPU's lists");
+    return NULL;
+  }
+  std::map<std::string, void *> tensors;
+  for (Py_ssize_t i = 0; i < PyList_Size(nl); i++) {
+    char const *s = PyUnicode_AsUTF8(PyList_GetItem(nl, i));
+    if (!s) {
+      return NULL;
+    }
+    tensors[s] = PyLong_AsVoidPtr(PyList_GetItem(pl, i));
+  }
+  if (PyErr_Occurred()) {
+    return NULL;
+  }
+  static_init_rank(rank,
+                   tensors,
+                   reinterpret_cast<unsigned char *>(mc),
+                   reinterpret_cast<unsigned char *>(rv));
+  Py_RETURN_NONE;
+}
 static PyObject *py_launch(PyObject *self, PyObject *args) {
   unsigned long long flush_bytes = 0;
   if (!PyArg_ParseTuple(args, "|K", &flush_bytes)) {
@@ -895,6 +1067,51 @@ static PyObject *py_elapsed(PyObject *self, PyObject *args) {
     PyList_SetItem(out, (Py_ssize_t)g, PyFloat_FromDouble(us[g]));
   }
   return out;
+}
+static PyObject *py_set_device(PyObject *self, PyObject *args) {
+  int d;
+  if (!PyArg_ParseTuple(args, "i", &d)) {
+    return NULL;
+  }
+  if (!g_st.empty()) {
+    PyErr_SetString(PyExc_RuntimeError, "set_device before init");
+    return NULL;
+  }
+  g_dev0 = d;
+  Py_RETURN_NONE;
+}
+static PyObject *py_rebind(PyObject *self, PyObject *args) {
+  char const *name;
+  unsigned long long ptr;
+  if (!PyArg_ParseTuple(args, "sK", &name, &ptr)) {
+    return NULL;
+  }
+  if (g_st.size() != 1) {
+    PyErr_SetString(PyExc_RuntimeError, "rebind: a layer built for one GPU");
+    return NULL;
+  }
+  ST_CK(cudaSetDevice(g_dev0));
+  if (!static_host_rebind(0, name, reinterpret_cast<void *>(ptr))) {
+    PyErr_Format(PyExc_KeyError,
+                 "rebind: no buffer slot or tensor map reads graph tensor %s",
+                 name);
+    return NULL;
+  }
+  Py_RETURN_NONE;
+}
+static PyObject *py_launch_stream(PyObject *self, PyObject *args) {
+  unsigned long long stream;
+  int pdl;
+  if (!PyArg_ParseTuple(args, "Kp", &stream, &pdl)) {
+    return NULL;
+  }
+  char const *err =
+      static_launch_stream(reinterpret_cast<cudaStream_t>(stream), pdl != 0);
+  if (err) {
+    PyErr_SetString(PyExc_RuntimeError, err);
+    return NULL;
+  }
+  Py_RETURN_NONE;
 }
 static PyObject *py_wait(PyObject *self, PyObject *args) {
   cudaError_t err;
@@ -993,6 +1210,11 @@ static PyMethodDef StaticMethods[] = {
      METH_VARARGS,
      "the graph's tensors of every GPU (names, pointers): the buffers and "
      "maps"},
+    {"init_rank_func",
+     py_init_rank,
+     METH_VARARGS,
+     "(rank, names, pointers, multicast address, local address): one GPU of "
+     "the layer in a process of its own, the exchange region the caller's"},
     {"launch_func",
      py_launch,
      METH_VARARGS,
@@ -1003,6 +1225,20 @@ static PyMethodDef StaticMethods[] = {
      METH_NOARGS,
      "per GPU the microseconds between the events around the last launch's "
      "kernel"},
+    {"set_device_func",
+     py_set_device,
+     METH_VARARGS,
+     "(device): the CUDA device of GPU 0, before init_func"},
+    {"launch_stream_func",
+     py_launch_stream,
+     METH_VARARGS,
+     "(stream, pdl): one launch on the caller's stream (one GPU, serving "
+     "build)"},
+    {"rebind_func",
+     py_rebind,
+     METH_VARARGS,
+     "(name, pointer): graph tensor name read at that address from the next "
+     "launch on (one GPU)"},
     {"wait_func", py_wait, METH_NOARGS, "wait for every GPU"},
     {"done_func",
      py_done,
