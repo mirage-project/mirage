@@ -655,18 +655,31 @@ class StaticMegakernel(PersistentKernel):
         block_dim: tuple = (256, 1, 1),
     ):
         """Task x: slice x of this GPU's partial sum (bf16) to every GPU, into this GPU's slot of the node's output (in the exchange
-        region), once the input's producer is done (all its tasks, counted in its counter). params = [W, G]. When the producer is
+        region), once the input's producer is done (all its tasks, counted in its counter). params = [W, G, FX]. When the producer is
         moe_experts or scaled_moe_experts, re-arm z_q here only if that producer is its sole reader.
         buf_slots = [z_q's buffer slot] enables re-arm; [-1] disables it. With other readers, reset z_q before each launch instead.
         Declare all other z_q readers before this call so the reader check sees them."""
         from .compiler import graph_nodes, producer_of
         p = producer_of(input, graph_nodes(self))
-        if p is None or p.info["buf"] < 0 or p.info["counter"] < 0:
-            raise ValueError(f"allreduce_send_layer: the input must be a node's output buffer whose node counts its tasks; it comes from "
-                             f"{p.name if p else 'the graph inputs'}")
+        # a gemm_tile node's K parts in slots (no counter: each part is polled, tasks/allreduce_send.cuh)
+        # (polled: rows of this GPU only, the same layout with one GPU)
+        slots_src = (p is not None and p.name == "gemm_tile" and p.params[0] == COMBINE["slots"] and
+                     (p.params[3] == 0 or self.num_gpus == 1))
+        if p is None or p.info["buf"] < 0 or (p.info["counter"] < 0 and not slots_src):
+            raise ValueError(f"allreduce_send_layer: the input must be a node's output buffer whose node counts its tasks, or a "
+                             f"gemm_tile node's output in slots; it comes from {p.name if p else 'the graph inputs'}")
         T, W, GPUS = self._tokens(output.dim(0)), output.dim(1), self.num_gpus
-        self._dtypes("allreduce_send_layer", input=(input, float32), output=(output, bfloat16))
+        fx = input.dtype == int64   # a COMBINE_ADD GEMM's sums (its K parts): a task per 128-column block, after its parts
+        if fx:
+            if p.name not in ("gemm_tile", "scaled_gemm_tile") or p.params[0] != 1:
+                raise ValueError("allreduce_send_layer: an int64 input is a COMBINE_ADD GEMM's output")
+            assert W % 128 == 0 and input.dim(0) == T
+            self._dtypes("allreduce_send_layer", output=(output, bfloat16))
+            num_tasks = W // 128
+        else:
+            self._dtypes("allreduce_send_layer", input=(input, float32), output=(output, bfloat16))
         assert input.dim(0) % T == 0 and input.dim(1) == W and W % 8 == 0
+        assert not slots_src or input.dim(0) == T, "allreduce_send_layer: a gemm_tile input has one row per token"
         rearm = -1
         if p.name in ("moe_experts", "scaled_moe_experts"):   # z_q: its first input; another reader (scaled_gemm_tile) can still read it
             zq = p.inputs[0]
@@ -674,8 +687,9 @@ class StaticMegakernel(PersistentKernel):
             if len(readers) == 1:
                 rearm = producer_of(zq, graph_nodes(self)).info["buf"]
         self._add_node("allreduce_send", (num_tasks or p.grid[0] * p.grid[1] * p.grid[2], 1, 1), block_dim, [input, output],
-                       [(-1, -1, -1)] * 2, [W, input.dim(0) // T],
-                       out_buffer=lambda n: (GPUS * T * W * 2, 0xFF, True), exchange=True, buf_slots=[rearm])
+                       [(-1, -1, -1)] * 2, [W, input.dim(0) // T, int(fx)],
+                       out_buffer=lambda n: (GPUS * T * W * 2, 0xFF, True), exchange=True, buf_slots=[rearm],
+                       cost_inputs=[0] if slots_src else [])   # slots: adds the GEMM's K parts
 
     def sum_rmsnorm_layer(
         self,
@@ -792,6 +806,103 @@ class StaticMegakernel(PersistentKernel):
                 return i
         raise ValueError(f"node {node.graph_idx} ({node.name}) has no scratch buffer {name}")
 
+    def hc_pre_layer(
+        self,
+        mix: DTensor,           # an hc_post_mix node's mixes
+        residual: DTensor,      # [T, HC H] bf16, the same streams
+        hc_small: DTensor,      # fp32 [>= NMIX + 3]: hc_*_base [NMIX], then hc_*_scale [3]
+        gamma: DTensor,         # [H] bf16: the sublayer's input RMSNorm weight
+        output: DTensor,        # x [T, H] bf16: the sublayer's input
+        export: tuple,          # (h_post [T, HC], h_res [T, HC HC]) fp32 graph tensors: post and comb finished into them
+        rms_eps: float = 1e-5, hc_eps: float = 1e-6, norm_eps: float = 1e-5, post_mult: float = 2.0,
+        sinkhorn_iters: int = 20,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Tasks (t, 0) and (t, 1) of token t: pre / post / comb from the mixes, x = RMSNorm(sum_i pre_i R_i) gamma (SGLang's
+        fused norm) by task (t, 0) into its buffer (a graph tensor output binds it), post and comb (Sinkhorn) finished by
+        task (t, 1) into export's two graph tensors (SGLang's MHCState h_post, h_res: the sublayer's post runs after the
+        layer, in a serving framework); its counter counts its 2 T tasks. Streams from hc_post_mix in this layer: the tasks
+        wait for all of its tasks."""
+        from .compiler import graph_nodes, producer_of
+        p = producer_of(mix, graph_nodes(self))
+        if p is None or p.name != "hc_post_mix":
+            raise ValueError("hc_pre_layer: mix must be an hc_post_mix node's mixes")
+        HC, H, NMIX = p.params
+        T = self._tokens(output.dim(0))
+        assert hc_small.dim(0) >= NMIX + 3
+        self._dtypes("hc_pre_layer", mix=(mix, float32), residual=(residual, bfloat16), hc_small=(hc_small, float32),
+                     gamma=(gamma, bfloat16), output=(output, bfloat16))
+        h_post, h_res = export
+        self._dtypes("hc_pre_layer", h_post=(h_post, float32), h_res=(h_res, float32))
+        assert (h_post.dim(0), h_post.dim(1), h_res.dim(0), h_res.dim(1)) == (T, HC, T, HC * HC)
+        slots = [self._tensor_slot(t) for t in (residual, hc_small, gamma, h_post, h_res)]
+        params = [H, float_bits(rms_eps), float_bits(hc_eps), float_bits(norm_eps), float_bits(post_mult), sinkhorn_iters]
+        self._add_node("hc_pre", (T, 2, 1), block_dim, [mix, residual, output], [(0, -1, -1), (0, -1, -1), (0, -1, -1)],
+                       params, out_buffer=lambda n: (T * H * 2, -1, False), counters=1,
+                       cost_inputs=[0],   # adds the mixes' K parts
+                       buf_slots=slots)
+
+    def hc_post_layer(
+        self,
+        sent: DTensor,          # [T, H] bf16: an allreduce_send node's output (the sublayer output's partial sums)
+        residual: DTensor,      # [T, HC H] bf16: the sublayer's input streams
+        output: DTensor,        # [T, HC H] bf16: the new streams
+        coef: tuple,            # (h_post [T, HC], h_res [T, HC HC]) fp32 graph tensors, post and comb finished (the sublayer's
+                                # pre ran before the layer: SGLang's MHCState)
+        parts: int = 4,         # tasks per token, each H / parts columns
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Task (q, t): columns [q C, q C + C) of token t: out = sum over the GPUs, R'_j = sum_i comb[i][j] R_i + post_j out.
+        Counters: one per token, its Q tasks (an hc_pre of the next sublayer in this layer waits on them)."""
+        from .compiler import graph_nodes, producer_of
+        nodes = graph_nodes(self)
+        s = producer_of(sent, nodes)
+        if s is None or s.name != "allreduce_send":
+            raise ValueError("hc_post_layer: sent from an allreduce_send node")
+        T, H = self._tokens(sent.dim(0)), sent.dim(1)
+        HC = residual.dim(1) // H
+        self._dtypes("hc_post_layer", sent=(sent, bfloat16), residual=(residual, bfloat16), output=(output, bfloat16))
+        h_post, h_res = coef
+        self._dtypes("hc_post_layer", h_post=(h_post, float32), h_res=(h_res, float32))
+        assert (h_post.dim(0), h_post.dim(1), h_res.dim(0), h_res.dim(1)) == (T, HC, T, HC * HC)
+        slots = [self._tensor_slot(t) for t in (residual, output, h_post, h_res)]
+        self._add_node("hc_post", (parts, T, 1), block_dim, [sent, residual, h_res, output],
+                       [(1, 0, -1), (-1, 0, -1), (-1, 0, -1), (-1, 0, -1)], [H, HC], counters=T, buf_slots=slots)
+
+    def hc_post_mix_layer(
+        self,
+        sent: DTensor,          # [T, H] bf16: an allreduce_send node's output (the sublayer output's partial sums)
+        residual: DTensor,      # [T, HC H] bf16: the sublayer's input streams
+        coef: tuple,            # (h_post [T, HC], h_res [T, HC HC]) fp32 graph tensors: the sublayer's, finished
+        fn: DTensor,            # [NMIX, HC H] fp32: the next sublayer's hc_*_fn
+        output: DTensor,        # [T, HC H] bf16: the new streams R'
+        mix: DTensor,           # [T, HC_MIX_STRIDE] fp32 (a stand-in: the buffer holds [H / 32][T][HC_MIX_STRIDE]): the
+                                # partial mixes for hc_pre
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """hc_post (MODE 1) and the next sublayer's partial mixes in one task type (tasks/hc_post_mix.cuh): task s = columns
+        [32 s, 32 s + 32) of every stream and token: the sum over the GPUs, R' of those columns, their partial mixes with fn
+        (hc_pre adds them). params = [HC, H, NMIX]. Counter: one, every task counts
+        there."""
+        from .compiler import graph_nodes, producer_of
+        s = producer_of(sent, graph_nodes(self))
+        if s is None or s.name != "allreduce_send":
+            raise ValueError("hc_post_mix_layer: sent from an allreduce_send node")
+        T, H, NMIX = self._tokens(sent.dim(0)), sent.dim(1), fn.dim(0)
+        HC = residual.dim(1) // H
+        h_post, h_res = coef
+        assert NMIX == HC * (HC + 2) and fn.dim(1) == HC * H and H % 32 == 0
+        assert (h_post.dim(0), h_post.dim(1), h_res.dim(0), h_res.dim(1)) == (T, HC, T, HC * HC)
+        self._dtypes("hc_post_mix_layer", sent=(sent, bfloat16), residual=(residual, bfloat16), h_post=(h_post, float32),
+                     h_res=(h_res, float32), fn=(fn, float32), output=(output, bfloat16), mix=(mix, float32))
+        self._add_node("hc_post_mix", (H // 32, 1, 1), block_dim, [sent, residual, h_res, fn, mix, output],
+                       [(1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1)], [HC, H, NMIX],
+                       out_buffer=lambda n: (n.grid[0] * T * HC_MIX_STRIDE * 4, 0xFF, False), counters=1,
+                       buf_slots=[self._tensor_slot(residual), self._tensor_slot(output), self._tensor_slot(h_post),
+                                  self._tensor_slot(h_res), self._tensor_slot(fn)])
+
+    # ---- GLM-5.3-Flash KDA (tasks/kda_decode.cuh): a KDA sublayer is in_proj (a gemm_tile in slots) -> kda_decode ->
+    # o_proj -> allreduce_send -> hc_post_mix -> hc_pre (the next sublayer's input).
     def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False, device=0,
                        rank=None, exchange=None):
         """Build the graph as it is now, one schedule.json per GPU (static_schedule.compile_static); profile: the timing build
