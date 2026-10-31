@@ -32,42 +32,49 @@ __device__ __forceinline__ void group_quant_task(G const &g,
                                                  uint32_t *done_cnt,
                                                  int kt) {
   __shared__ __align__(16) float scale_s[T];
+  constexpr int TPW = T / 8; // tokens per warp (all 8 warps)
+  static_assert(T % 8 == 0 && T * 4 / 16 <= 256,
+                "group_quant: the 8 warps take T / 8 tokens each");
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   // The previous task finished its scale_s reads before its final barrier.
-  if (warp < 4) { // warp w: tokens 2w and 2w + 1. A lane: 4 columns.
+  // warp w: tokens TPW w .. TPW w + TPW - 1, a lane 4 columns of each; the
+  // warp's loads first, all in flight at once (one round trip, not one per
+  // token)
+  uint2 raw[TPW];
 #pragma unroll
-    for (int i = 0; i < 2; i++) {
-      int const t = 2 * warp + i;
-      uint2 raw; // Bypass L1 because another SM can produce x.
-      asm volatile("ld.relaxed.gpu.global.v2.u32 {%0, %1}, [%2];"
-                   : "=r"(raw.x), "=r"(raw.y)
-                   : "l"(x + (size_t)t * L + kt * 128 + 4 * lane)
-                   : "memory");
-      float2 const a = __bfloat1622float2(
-                       *reinterpret_cast<__nv_bfloat162 const *>(&raw.x)),
-                   b = __bfloat1622float2(
-                       *reinterpret_cast<__nv_bfloat162 const *>(&raw.y));
-      float amax =
-          fmaxf(fmaxf(fabsf(a.x), fabsf(a.y)), fmaxf(fabsf(b.x), fabsf(b.y)));
-      for (int d = 16; d > 0; d >>= 1) { // amax of the 32 lanes
-        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, d));
-      }
-      float const s = fmaxf(amax, 1.0e-10f) * (1.0f / 448.0f);
-      uint32_t const q = (uint32_t)cvt_e4m3(__fdiv_rn(a.x, s)) |
-                         ((uint32_t)cvt_e4m3(__fdiv_rn(a.y, s)) << 8) |
-                         ((uint32_t)cvt_e4m3(__fdiv_rn(b.x, s)) << 16) |
-                         ((uint32_t)cvt_e4m3(__fdiv_rn(b.y, s)) << 24);
-      if (lane == 0) {
-        scale_s[t] = s;
-      }
-      uint32_t const q1 = __shfl_down_sync(0xffffffffu, q, 1),
-                     q2 = __shfl_down_sync(0xffffffffu, q, 2),
-                     q3 = __shfl_down_sync(0xffffffffu, q, 3);
-      if ((lane & 3) == 0) {
-        *reinterpret_cast<uint4 *>(g.rv + ZOFF + (size_t)t * L + kt * 128 +
-                                   4 * lane + rg_set()) =
-            make_uint4(q, q1, q2, q3);
-      }
+  for (int i = 0; i < TPW; i++) { // Bypass L1 because another SM can produce x.
+    asm volatile("ld.relaxed.gpu.global.v2.u32 {%0, %1}, [%2];"
+                 : "=r"(raw[i].x), "=r"(raw[i].y)
+                 : "l"(x + (size_t)(TPW * warp + i) * L + kt * 128 + 4 * lane)
+                 : "memory");
+  }
+#pragma unroll
+  for (int i = 0; i < TPW; i++) {
+    int const t = TPW * warp + i;
+    float2 const a = __bfloat1622float2(
+                     *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].x)),
+                 b = __bfloat1622float2(
+                     *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].y));
+    float amax =
+        fmaxf(fmaxf(fabsf(a.x), fabsf(a.y)), fmaxf(fabsf(b.x), fabsf(b.y)));
+    for (int d = 16; d > 0; d >>= 1) { // amax of the 32 lanes
+      amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, d));
+    }
+    float const s = fmaxf(amax, 1.0e-10f) * (1.0f / 448.0f);
+    uint32_t const q = (uint32_t)cvt_e4m3(__fdiv_rn(a.x, s)) |
+                       ((uint32_t)cvt_e4m3(__fdiv_rn(a.y, s)) << 8) |
+                       ((uint32_t)cvt_e4m3(__fdiv_rn(b.x, s)) << 16) |
+                       ((uint32_t)cvt_e4m3(__fdiv_rn(b.y, s)) << 24);
+    if (lane == 0) {
+      scale_s[t] = s;
+    }
+    uint32_t const q1 = __shfl_down_sync(0xffffffffu, q, 1),
+                   q2 = __shfl_down_sync(0xffffffffu, q, 2),
+                   q3 = __shfl_down_sync(0xffffffffu, q, 3);
+    if ((lane & 3) == 0) {
+      *reinterpret_cast<uint4 *>(g.rv + ZOFF + (size_t)t * L + kt * 128 +
+                                 4 * lane + rg_set()) =
+          make_uint4(q, q1, q2, q3);
     }
   }
   __syncthreads();
@@ -109,14 +116,14 @@ __device__ __forceinline__ void run_group_quant(Maps const &,
     static_assert(X::buf >= 0 && X::counter >= 0,
                   "group_quant: x's producer counts its tasks");
     if (threadIdx.x == 0) {
-      cnt_wait(g.cnt + X::counter, X::x * X::y * X::z);
+      cnt_wait(cnt_now(g) + X::counter, X::x * X::y * X::z);
     }
     __syncthreads();
   }
   group_quant_task<exchange_offset[SELF::buf], L>(
       g,
       buf_at<__nv_bfloat16 const>(g, X::x > 0 ? X::buf : XS),
-      g.cnt + SELF::counter,
+      cnt_now(g) + SELF::counter,
       tk.x);
 }
 

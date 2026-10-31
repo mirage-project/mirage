@@ -4,8 +4,9 @@
 // scale_promotion.cuh defines the terms used below.
 //   weight      e4m3 pieces, [N / 128][K / 128] (the piece layout of
 //               mirage.mpk.fp8_fp32scale_weights)
-//   activation  z_q, the output of a group_quant node: e4m3 [T][K], then the
-//               fp32 scales [K / 128][T] (one for each token and K tile)
+//   activation  z_q, the output of a group_quant node (or of a node with the
+//               same output, dsa_q_norm_quant): e4m3 [T][K], then the fp32
+//               scales [K / 128][T] (one for each token and K tile)
 // out[t][row0 + r] = the sum over the pieces kt of the task of
 // sw(r, kt) sx(t, kt) partial(r, t, kt), for r < 128. The MMA uses scale 1 for
 // both operands. Each piece has its own TMEM accumulator. The epilogue
@@ -78,15 +79,17 @@ __device__ __forceinline__ void scaled_gemm_tile_task(TileJob const &j,
                                                       int row0,
                                                       int split,
                                                       float const *wsf,
-                                                      float const *xsf) {
+                                                      float const *xsf,
+                                                      int s0 = 0) {
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   if (threadIdx.x < SF_CHUNK / 4) { // the constant scale chunk (UE8M0 1)
     const_sf_fill(base + SGT_OFF_CSF, threadIdx.x);
   }
   __syncthreads();
   if (warp == 0) {
-    if (lane == 0) {
-      load_job<128, 16384, false>(j, base, gl);
+    if (lane == 0) { // from stage s0 (the activation-wait prefill issued the
+                     // ones before: run_scaled_gemm_tile)
+      load_job<128, 16384, false>(j, base, gl, -1, s0);
     }
   } else if (warp == 1 || warp == 6) {
     int const iss = warp == 1 ? 0 : 1;
@@ -111,7 +114,7 @@ __device__ __forceinline__ void scaled_gemm_tile_task(TileJob const &j,
       xs[i] = ld_relaxed_f32(xsf + i);
     }
     asm volatile("bar.sync 1, 128;" ::: "memory");
-    float v[8];
+    float v[T];
     int const row = drain_promoted<NATOMS, WS>(tb, wt, bs, xs, v);
     switch (mode) {
       case COMBINE_SLOTS:
@@ -119,6 +122,9 @@ __device__ __forceinline__ void scaled_gemm_tile_task(TileJob const &j,
         break;
       case COMBINE_ADD:
         tile_epilogue<COMBINE_ADD>(out, N, row0, split, row, v);
+        break;
+      case COMBINE_STORE_BF16:
+        tile_epilogue<COMBINE_STORE_BF16>(out, N, row0, split, row, v);
         break;
       default:
         tile_epilogue<COMBINE_STORE>(out, N, row0, split, row, v);
@@ -162,9 +168,10 @@ __device__ __forceinline__ void run_scaled_gemm_tile(Maps const &maps,
   static_assert(N == 128 * SELF::x,
                 "scaled_gemm_tile: 128 weight rows per task");
   static_assert(mode == COMBINE_SLOTS || mode == COMBINE_ADD ||
-                    mode == COMBINE_STORE,
+                    mode == COMBINE_STORE || mode == COMBINE_STORE_BF16,
                 "mode: Combine");
-  static_assert(mode != COMBINE_STORE || SELF::y == 1,
+  static_assert((mode != COMBINE_STORE && mode != COMBINE_STORE_BF16) ||
+                    SELF::y == 1,
                 "plain stores: one K part");
   static_assert(SL == 0 || (SL == 1 && N % 256 == 0),
                 "the weight scales: BlockScales, or GateUpScales (pieces in "
@@ -177,22 +184,38 @@ __device__ __forceinline__ void run_scaled_gemm_tile(Maps const &maps,
   static_assert(
       ACT::x > 0 && ACT::counter >= 0 && ACT::buf >= 0 &&
           exchange_bytes[ACT::buf] == zq32_bytes(K),
-      "scaled_gemm_tile: the activation is a group_quant node's output");
+      "scaled_gemm_tile: the activation is the output of a group_quant node "
+      "(or of a node with the same output)");
   // the activation is in set rg_set() of the exchange region
   TileJob const j = make_scaled_tile<NATOMS>(
       &maps.m[WMAP], &maps.m[AMAP + dbuf_par], tk.x, tk.y * NATOMS, KT);
   __syncthreads();
+  // the activation-wait prefill (runtime.cuh): the weights' first stages before
+  // the wait (not after moe_experts re-laid the ring)
+  int const npre = L.ring_relaid ? 0 : prefill_stages(j.nst);
   if (threadIdx.x == 0) {
-    cnt_wait(g.cnt + ACT::counter, ACT::x * ACT::y * ACT::z);
+    if (npre) {
+      prefill_weights<128, 16384, false>(j, L.base, L.gl, npre);
+    }
+    cnt_wait(cnt_now(g) + ACT::counter, ACT::x * ACT::y * ACT::z);
     asm volatile("fence.proxy.async.global;" ::: "memory"); // then TMA reads
+#ifdef STATIC_TIMING_BUILD
+    if (npre && L.stage_stamps) {
+      L.stage_stamps[0] = gtime(); // the activation ready
+    }
+#endif
     if (L.ring_relaid) {
       ring_reinit(true);
+    }
+    if (npre) {
+      prefill_acts(j, L.base, L.gl, npre);
     }
   }
   if (L.ring_relaid) {
     L.gl = L.gi0 = L.gi1 = 0;
     L.wt = 0;
   }
+  L.gl += npre; // the loader continues at stage npre
   __syncthreads();
   int const k0 = tk.y * NATOMS;
   float const *const wsf =
@@ -209,14 +232,15 @@ __device__ __forceinline__ void run_scaled_gemm_tile(Maps const &maps,
                                     L.gi1,
                                     L.wt,
                                     mode,
-                                    g.buf[SELF::buf],
+                                    buf_at<void>(g, SELF::buf),
                                     N,
-                                    g.cnt +
+                                    cnt_now(g) +
                                         (SELF::counter < 0 ? 0 : SELF::counter),
                                     tk.x * 128,
                                     tk.y,
                                     wsf,
-                                    xsf);
+                                    xsf,
+                                    npre);
   L.wt += PromoRounds<NATOMS>::ROUNDS;
 }
 

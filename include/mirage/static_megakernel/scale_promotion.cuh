@@ -15,15 +15,16 @@
 // A round is two ring stages (one for each issuer, two pieces each). A round
 // uses one accumulator tick (acc_full / acc_empty, as a whole-K job does). A
 // job uses PromoRounds<NATOMS>::ROUNDS ticks. The columns of tick a (0..3):
-// piece 0 of issuer i at 8 a + 32 i (the columns of runtime.cuh issue_job),
-// piece 1 at PROMO_COL1 + 8 a + 32 i.
+// piece 0 of issuer i at T a + 4 T i (the columns of runtime.cuh issue_job),
+// piece 1 at PROMO_COL1 + T a + 4 T i.
 #pragma once
 #include "core.cuh"
 
 namespace static_mk {
 
-constexpr int PROMO_COL1 = 448; // TMEM columns 448..511: piece 1 of each
-                                // (tick, issuer)
+constexpr int PROMO_COL1 =
+    512 - 2 * ACC_STAGES * T; // TMEM columns PROMO_COL1..511: piece
+                              // 1 of each (tick, issuer)
 
 // the ring stages and the accumulator ticks of a job of NATOMS pieces (a W13
 // item of scaled_moe_experts, a scaled_gemm_tile tile)
@@ -40,12 +41,6 @@ __device__ __forceinline__ float ld_relaxed_f32(float const *p) {
                : "l"(p)
                : "memory");
   return v;
-}
-
-// Write a value that another SM polls (data as the flag): a GPU-scope store.
-__device__ __forceinline__ void st_relaxed_f32(float *p, float v) {
-  asm volatile("st.relaxed.gpu.global.f32 [%0], %1;" ::"l"(p), "f"(v)
-               : "memory");
 }
 
 // Fill the scale chunk at shared-memory address dst with UE8M0 1.0.
@@ -77,9 +72,10 @@ __device__ __forceinline__ void issue_promoted(uint32_t base,
                                                uint32_t sfc STAGE_STAMP_PARAM) {
   constexpr int NST = PromoRounds<NATOMS>::NST;
   for (int s = 0; s < NST; s++, g++) {
-    int const tick = wtt + (s >> 1), a = tick & 3;
-    if ((s & 1) == 0 && tick >= 4) { // the epilogue drained the columns
-      mbar_wait(rt.acc_empty0 + 8 * a, ((tick >> 2) - 1) & 1);
+    int const tick = wtt + (s >> 1), a = acc_slot(tick);
+    if ((s & 1) == 0 &&
+        tick >= ACC_STAGES) { // the epilogue drained the columns
+      mbar_wait(rt.acc_empty0 + 8 * a, (acc_round(tick) - 1) & 1);
     }
     int const st = g % SMAX;
     mbar_wait(rt.full0 + 8 * st, (g / SMAX) & 1);
@@ -94,10 +90,11 @@ __device__ __forceinline__ void issue_promoted(uint32_t base,
     } else {
       int const na = (NATOMS - 2 * s < 2) ? NATOMS - 2 * s : 2;
       for (int at = 0; at < na; at++) {
-        uint32_t const acc =
-            tb + (at == 0 ? 0u : (uint32_t)PROMO_COL1) + 8 * a + 32 * iss;
+        uint32_t const acc = tb + (at == 0 ? 0u : (uint32_t)PROMO_COL1) +
+                             T * a + ACC_STAGES * T * iss;
         uint64_t const dw = mkdesc(base + st * FSTAGE + at * 16384);
-        uint64_t const db = mkdesc(base + st * FSTAGE + W_STAGE + at * 1024);
+        uint64_t const db =
+            mkdesc(base + st * FSTAGE + W_STAGE + at * (T * 128));
         if (one) {
           mma_mx(acc, dw, db, idesc_mx(IDESC, 0), 0u, sfc, sfc);
           mma_mx(acc, dw + 2, db + 2, idesc_mx(IDESC, 1), 1u, sfc, sfc);
@@ -154,7 +151,7 @@ struct GateUpScales {
 };
 
 // the 128 epilogue threads: drain the PromoRounds ticks of a job, from tick
-// wtt. Each thread has one row. v[t] (t < T = 8) = the sum over the pieces of
+// wtt. Each thread has one row. v[t] (t < T) = the sum over the pieces of
 // sw(piece, row) sx(t, piece) partial(piece). The function returns the row.
 //   bs  the weight scales of the job in shared memory, [NATOMS][WS::PER_PIECE]
 //       (WS: their layout, BlockScales or GateUpScales)
@@ -168,28 +165,117 @@ __device__ __forceinline__ int drain_promoted(
             row = lg * 32 + lane;
   uint32_t const lanes = (uint32_t)(lg * 32) << 16;
 #pragma unroll
-  for (int t = 0; t < 8; t++) {
+  for (int t = 0; t < T; t++) {
+    v[t] = 0.0f;
+  }
+  // the pieces of a round (q = 2 issuer + piece) in batches of QB: their
+  // loads before one wait (T = 32: 2 at a time, for the registers)
+  constexpr int QB = T <= 16 ? 4 : 2;
+  for (int r = 0; r < ROUNDS; r++) {
+    int const tick = wtt + r, a = acc_slot(tick);
+    mbar_wait(rt.acc_full0 + 8 * a, acc_round(tick) & 1);
+    fence_after();
+#pragma unroll
+    for (int q0 = 0; q0 < 4; q0 += QB) {
+      float p[QB][T];
+#pragma unroll
+      for (int qq = 0; qq < QB; qq++) {
+        int const iss = (q0 + qq) >> 1, at = (q0 + qq) & 1, s = 2 * r + iss,
+                  atom = 2 * s + at;
+        if (s < NST && atom < NATOMS) {
+          tmem_ld_cols_nw<T>(tb + (at == 0 ? 0u : (uint32_t)PROMO_COL1) +
+                                 T * a + ACC_STAGES * T * iss + lanes,
+                             p[qq]);
+        }
+      }
+#pragma unroll
+      for (int qq = 0; qq < QB; qq++) {
+        int const iss = (q0 + qq) >> 1, at = (q0 + qq) & 1, s = 2 * r + iss,
+                  atom = 2 * s + at;
+        if (s < NST && atom < NATOMS) {
+          tmem_keep_cols<T>(p[qq]);
+        }
+      }
+#pragma unroll
+      for (int qq = 0; qq < QB; qq++) {
+        int const iss = (q0 + qq) >> 1, at = (q0 + qq) & 1, s = 2 * r + iss,
+                  atom = 2 * s + at;
+        if (s < NST && atom < NATOMS) {
+          float const sw = WS::of(bs, atom, row);
+#pragma unroll
+          for (int t = 0; t < T; t++) {
+            v[t] = fmaf(sw * xs[atom * T + t], p[qq][t], v[t]);
+          }
+        }
+      }
+    }
+    fence_before();
+    mbar_arrive(rt.acc_empty0 + 8 * a); // 128 arrivals
+  }
+  return row;
+}
+
+// drain_promoted for the tokens of one routed expert only (scaled_moe_experts,
+// MOE_TOK): v[j] (j < nt) = token tok[j]'s sum, bit-equal to drain_promoted's
+// v[tok[j]] (the same pieces in the same order); the other tokens' columns are
+// not read. A round: per 8 of the tokens, the 4 pieces' columns (tcgen05.ld x1
+// each) before one wait.
+template <int NATOMS, class WS>
+__device__ __forceinline__ int drain_promoted_tok(uint32_t tb,
+                                                  int wtt,
+                                                  float const *bs,
+                                                  float const *xs,
+                                                  int const *tok,
+                                                  int nt,
+                                                  float *v) {
+  constexpr int NST = PromoRounds<NATOMS>::NST,
+                ROUNDS = PromoRounds<NATOMS>::ROUNDS;
+  int const lg = (threadIdx.x >> 5) & 3, lane = threadIdx.x & 31,
+            row = lg * 32 + lane;
+  uint32_t const lanes = (uint32_t)(lg * 32) << 16;
+#pragma unroll
+  for (int t = 0; t < T; t++) {
     v[t] = 0.0f;
   }
   for (int r = 0; r < ROUNDS; r++) {
-    int const tick = wtt + r, a = tick & 3;
-    mbar_wait(rt.acc_full0 + 8 * a, (tick >> 2) & 1);
+    int const tick = wtt + r, a = acc_slot(tick);
+    mbar_wait(rt.acc_full0 + 8 * a, acc_round(tick) & 1);
     fence_after();
 #pragma unroll
-    for (int iss = 0; iss < 2; iss++) {
-      int const s = 2 * r + iss;
+    for (int c = 0; c < T / 8; c++) {
+      if (8 * c < nt) {
+        float p[4][8];
 #pragma unroll
-      for (int at = 0; at < 2; at++) {
-        int const atom = 2 * s + at;
-        if (s < NST && atom < NATOMS) {
-          float p[8];
-          tmem_ld8(tb + (at == 0 ? 0u : (uint32_t)PROMO_COL1) + 8 * a +
-                       32 * iss + lanes,
-                   p);
-          float const sw = WS::of(bs, atom, row);
+        for (int q = 0; q < 4; q++) { // (issuer, piece) as drain_promoted's
+          int const iss = q >> 1, at = q & 1, s = 2 * r + iss,
+                    atom = 2 * s + at;
+          uint32_t const col = tb + (at == 0 ? 0u : (uint32_t)PROMO_COL1) +
+                               T * a + ACC_STAGES * T * iss + lanes;
 #pragma unroll
-          for (int t = 0; t < 8; t++) {
-            v[t] = fmaf(sw * xs[atom * T + t], p[t], v[t]);
+          for (int jj = 0; jj < 8; jj++) {
+            p[q][jj] = 0.0f;
+            if (s < NST && atom < NATOMS && 8 * c + jj < nt) {
+              p[q][jj] = tmem_ld1(col + tok[8 * c + jj]);
+            }
+          }
+        }
+#pragma unroll
+        for (int q = 0; q < 4; q++) {
+          tmem_wait_keep8(p[q]);
+        }
+#pragma unroll
+        for (int q = 0; q < 4; q++) {
+          int const iss = q >> 1, at = q & 1, s = 2 * r + iss,
+                    atom = 2 * s + at;
+          if (s < NST && atom < NATOMS) {
+            float const sw = WS::of(bs, atom, row);
+#pragma unroll
+            for (int jj = 0; jj < 8; jj++) {
+              int const j = 8 * c + jj;
+              if (j < nt) {
+                v[j] = fmaf(sw * xs[atom * T + tok[j]], p[q][jj], v[j]);
+              }
+            }
           }
         }
       }
