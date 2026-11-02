@@ -47,11 +47,23 @@ def as_grid(option: str) -> tuple:
 
 
 def choosing_producer(n: Node, nodes: List[Node], options: Dict[int, List[str]]) -> Optional[Node]:
-    """The node with several options that writes one of n's inputs, or None. Route: the router. The router: None (its inputs
-    are graph inputs). A node reading the outputs of two such nodes is not handled (raises)."""
-    found = {p.graph_idx: p for p in (producer_of(t, nodes) for t in n.inputs) if p is not None and len(options[p.graph_idx]) > 1}
+    """Return the node with more than one option that the solver must choose together with n, or None.
+    1. If a cost input of n (an input whose producer grid changes the time of n, cost_key) comes from such a node, return
+       it. For topk_route, the result is the router. If two cost inputs come from two such nodes, raise
+       NotImplementedError.
+    2. Else, if exactly one input of n comes from such a node, return it. Its options give the same time of n.
+    3. Else return None. For the router, all inputs are graph inputs. dsa_index_score reads two GEMMs that have several
+       options, but its time does not depend on their grids."""
+    def multi(indices):
+        found = (producer_of(n.inputs[i], nodes) for i in indices)
+        return {p.graph_idx: p for p in found if p is not None and len(options[p.graph_idx]) > 1}
+    found = multi(n.info["cost_inputs"])
     if len(found) > 1:
         raise NotImplementedError(f"node {n.graph_idx} ({n.name}) reads {len(found)} nodes that have several options")
+    if not found:
+        found = multi(range(len(n.inputs)))
+        if len(found) > 1:
+            return None
     return next(iter(found.values()), None)
 
 
