@@ -260,7 +260,7 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     # solver's task ids of the GPU's set turned back into (node, position on this GPU): relative position + this GPU's first
     # owned row block; the SM's pool task (task x = SM x) goes between the tasks before the pool and the tasks after it (the
     # solver's post: the tasks reading its output, and the tasks it chose to run after it).
-    grids = {n.graph_idx: as_grid(result.chosen[n.graph_idx]) for n in nodes if n.info["changeable_grid_dims"]}
+    grids = {n.graph_idx: as_grid(result.chosen[n.graph_idx]) for n in nodes if n.info["changeable_grid_dims"] or n.info.get("grid_choices")}
     pool_nodes = [n.graph_idx for n in nodes if is_pool(n)]
     after_pool = result.post
     lists = [None] * num_gpus

@@ -511,4 +511,18 @@ void Graph::generate_triton_program(char const *file_path) {
 } // namespace kernel
 } // namespace mirage
 
+#else
+// a host-only core (USE_NKI, USE_HIP): the Triton generator needs the CUDA
+// threadblock serializers; the method exists so the Python binding links
+#include "mirage/kernel/graph.h"
+#include <stdexcept>
+
+namespace mirage {
+namespace kernel {
+void Graph::generate_triton_program(char const *) {
+  throw std::runtime_error(
+      "generate_triton_program: needs the CUDA build (USE_CUDA ON)");
+}
+} // namespace kernel
+} // namespace mirage
 #endif // MIRAGE_BACKEND_USE_CUDA

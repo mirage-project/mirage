@@ -232,6 +232,9 @@ public:
                                    std::vector<int> const &params);
   int register_sum_send_sm100_task(threadblock::Graph const &bgraph,
                                    std::vector<int> const &params);
+  int register_static_sm100_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params,
+                                 char const *name);
   int register_residual_add_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params);
   int register_group_quant_sm100_task(threadblock::Graph const &bgraph,
