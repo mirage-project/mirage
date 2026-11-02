@@ -21,7 +21,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from . import static_schedule
+from . import gpu_backend, static_schedule
 
 Box = Tuple[Tuple[int, int], ...]        # per tensor dimension, [lo, hi)
 
@@ -64,10 +64,12 @@ def producer_of(tensor, nodes: List[Node]) -> Optional[Node]:
 
 def candidate_grids(node: Node) -> List[Tuple[int, int, int]]:
     """The grids the compiler may give the node: on each changeable grid dim a (unit u, optionally between min and max units per
-    task), every size s such that every tensor dimension that axis cuts splits into s blocks of a whole number of units; the other
-    axes as they are.
+    task, optionally only the units per task in a given tuple), every size s such that every tensor dimension that axis cuts splits
+    into s blocks of a whole number of units; the other axes as they are.
     GEMM, K = 7168, changeable grid dim y with unit 128: 7168 / 128 = 56 units -> y in 1, 2, 4, 7, 8, 14, 28, 56.
     latent_up, K = 3584 = 28 units of 128, 2 to 5 units per task -> y in 7 (4 units), 14 (2 units)."""
+    if node.info.get("grid_choices"):   # a node whose grid splits no tensor (allreduce_send: slices it reads by pointer)
+        return list(node.info["grid_choices"])
     tensors = node.inputs + node.outputs
     per_axis = []
     for axis in range(3):
@@ -75,13 +77,14 @@ def candidate_grids(node: Node) -> List[Tuple[int, int, int]]:
             per_axis.append([node.grid[axis]])
             continue
         spec = node.info["changeable_grid_dims"][axis]
-        unit, lo, hi = (spec, 1, None) if isinstance(spec, int) else tuple(spec)
+        unit, lo, hi, allowed = (spec, 1, None, None) if isinstance(spec, int) else (tuple(spec) + (None,))[:4]
         cut = [dims(t)[m[axis]] for t, m in zip(tensors, node.info["input_maps"]) if m[axis] >= 0]
         if not cut:
             raise ValueError(f"node {node.graph_idx} ({node.name}): grid axis {axis} is changeable but no tensor map uses it")
         units = min(d // unit for d in cut)
         per_axis.append([s for s in range(1, units + 1) if all(d % (s * unit) == 0 for d in cut)
-                         and all(lo <= d // (s * unit) and (hi is None or d // (s * unit) <= hi) for d in cut)])
+                         and all(lo <= d // (s * unit) and (hi is None or d // (s * unit) <= hi)
+                                 and (allowed is None or d // (s * unit) in allowed) for d in cut)])
     return list(itertools.product(*per_axis))
 
 
@@ -309,6 +312,10 @@ def node_table(nodes: List[Node]) -> Dict[str, dict]:
     table = {}
     for n in nodes:
         producers = [producer_of(t, nodes) for t in n.inputs]
+        if n.name == "moe_experts" and len(n.params) > 3 and n.params[3] == 1:
+            # (a local route, tasks/moe_experts.cuh RSPLIT: the router's node after the pairs, its K parts read by every task;
+            # not a graph input of the node: the C++ graph's moe_experts has 4)
+            producers.insert(2, producer_of(producers[1].inputs[0], nodes))
         table[str(n.graph_idx)] = {"name": n.name, "grid": list(n.grid), "params": list(n.params),
                                    "counter": n.info["counter"], "buf": n.info["buf"],
                                    "inputs": [{"grid": list(p.grid), "counter": p.info["counter"],
@@ -330,10 +337,11 @@ def compile_plan(pk, plan: dict, out_dir: str) -> Tuple[List[str], dict]:
     nodes = apply_grids(pk, {int(k): v for k, v in plan["grids"].items()})
     # the launch mode: clusters of 2 when every pair of a node that can pair (can_pair: sum_rmsnorm with 2 tasks per token) fits on
     # one cluster after renumbering the lists (pair_clusters); those nodes then take their cluster_pair_params. Otherwise (or
-    # plan "cluster_launch": false) the plain launch, and the nodes keep their params (sum_rmsnorm: the swap through G).
+    # plan "cluster_launch": false, or a backend without clusters: HIP) the plain launch, and the nodes keep their params
+    # (sum_rmsnorm: the swap through G).
     paired = {n.graph_idx for n in nodes if can_pair(n)}
     plan_lists, cluster_size = plan["lists"], 1
-    if paired and plan.get("cluster_launch", True):
+    if paired and plan.get("cluster_launch", True) and gpu_backend.has_clusters():
         try:
             plan_lists = [pair_clusters(nodes, paired, plan["lists"][gpu], num_sms, gpu) for gpu in range(num_gpus)]
             cluster_size = 2

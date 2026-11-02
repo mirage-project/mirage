@@ -46,3 +46,10 @@ Ferret frozen-gate trio (`ferret-kernel-agent` incl. V2 MODE, `ferret-test-write
 `kda-kernel-agent` (verdict-grade kernel work); the optimization-loop roster (`mpk-profiler`,
 `mpk-correctness-gate`, `mpk-optimization-planner`, `mpk-iterator`, `mpk-commit-reviewer`,
 `mpk-memory-keeper`); Runtime-V2 pair (`v2-kernel-engineer`, `v2-model-support-orchestrator`).
+
+## AMD MI355X (gfx950) suites (2026-10-13, K3 MoE port)
+- `amd-kernel-development` — gfx950 facts that change the design (8 non-coherent L2s, scopes, vmcnt counting stores, LDS DMA,
+  xGMI hops), toolchain and code-identity checks, the shared box's lease workflow, measuring, what worked / lost.
+- `amd-megakernel-development` — a model part as one static megakernel on AMD: graph / plan / schedule / generated kernel,
+  writing a HIP task, hand-off / reset / start protocols, the one-layer harness and checks, tuning loop, reporting vs B300
+  and vs SGLang ROCm.

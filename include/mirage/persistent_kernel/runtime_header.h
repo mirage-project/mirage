@@ -16,7 +16,14 @@
 #pragma once
 
 #include "mirage/config.h"
+#ifdef MIRAGE_BACKEND_USE_CUDA
 #include <cuda_runtime.h>
+#else
+// a host-only core (USE_NKI, USE_HIP): the structs below hold CUDA stream and
+// event handles, never used outside the CUDA runtime; opaque here
+typedef struct CUstream_st *cudaStream_t;
+typedef struct CUevent_st *cudaEvent_t;
+#endif
 
 #ifdef USE_NVSHMEM
 #include <nvshmem.h>
@@ -259,6 +266,9 @@ enum TaskType {
   // Process routed expert work on one SM, with e4m3 weights and fp32 scales
   // (tasks/scaled_moe_experts.cuh).
   TASK_SCALED_MOE_EXPERTS_SM100 = 514,
+  TASK_STATIC_SM100 =
+      515, // any other static-schedule task type ("static:<name>": build-only,
+           // Graph::register_task_for_op)
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 
