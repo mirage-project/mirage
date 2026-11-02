@@ -13,6 +13,13 @@
 #define STATIC_GPUS 1
 #define STATIC_SMS 148
 
+#define STATIC_MAX_BUFS                                                        \
+  40 // buffer slots (config.cuh MAX_BUFS; StaticMegakernel.max_bufs)
+
+#define STATIC_NODE_COUNTER_LINES                                              \
+  32 // counter lines (config.cuh NODE_COUNTER_LINES;
+     // StaticMegakernel.max_counter_lines)
+
 // the exchange region's layout (static_megakernel.py exchange_layout): one
 // set's bytes, the start barrier's slots, per buffer slot its offset and bytes
 // (an exchange buffer; else 0)

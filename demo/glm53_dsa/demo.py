@@ -106,6 +106,8 @@ def kernel_tensors(w, st, bufs) -> dict:
 
 def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5):
     """Declare the nodes of the layer. bufs: the graph tensors (x, the caches, indices, residual, attn_out) by name."""
+    mpk.max_bufs = 40            # the full layer uses 36 buffer slots, more than config.cuh's default 24 (STATIC_MAX_BUFS)
+    mpk.max_counter_lines = 32   # and more than the default 16 counter lines (STATIC_NODE_COUNTER_LINES)
     t = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in kernel_tensors(w, st, bufs).items()}
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
     NH = w["w_uk"].shape[0]
