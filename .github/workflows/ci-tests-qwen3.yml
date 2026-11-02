@@ -44,6 +44,20 @@ jobs:
           CUDA_VISIBLE_DEVICES=$(bash scripts/find_idle_gpus.sh --num-gpus 1)
           echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" >> $GITHUB_ENV
 
+      - name: Run sequential online-serving functional test
+        timeout-minutes: 40
+        run: |
+          conda activate mirage-ci-${{ github.run_id }}
+          python tests/ci-tests/run_online_serving_test.py \
+            --scenario sequential
+
+      - name: Run concurrent online-serving overlap test
+        timeout-minutes: 40
+        run: |
+          conda activate mirage-ci-${{ github.run_id }}
+          python tests/ci-tests/run_online_serving_test.py \
+            --scenario concurrent
+
       - name: Run Qwen3 Torch vs MPK comparison
         timeout-minutes: 10
         env:
