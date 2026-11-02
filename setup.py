@@ -54,13 +54,15 @@ version_file = os.path.join(os.path.dirname(__file__), "python/mirage/version.py
 with open(version_file, "r") as f:
     exec(f.read())  # This will define __version__
 
-def get_backend_macros(config_file):
+def get_backend_flags(config_file):
+    """USE_CUDA, USE_NKI, USE_HIP from config.cmake (exactly one ON)."""
     flags = {
         "USE_CUDA":   None,
         "USE_NKI":    None,
+        "USE_HIP":    None,
     }
 
-    pattern = re.compile(r'^\s*set\s*\(\s*(USE_CUDA|USE_NKI)\s+(ON|OFF)\s*\)', re.IGNORECASE)
+    pattern = re.compile(r'^\s*set\s*\(\s*(USE_CUDA|USE_NKI|USE_HIP)\s+(ON|OFF)\s*\)', re.IGNORECASE)
     
     with open(config_file, 'r') as f:
         for line in f:
@@ -68,7 +70,13 @@ def get_backend_macros(config_file):
             if match:
                 var, val = match.groups()
                 flags[var] = (val.upper() == "ON")
-    
+    if sum(bool(v) for v in flags.values()) != 1:
+        raise KeyError(f"config.cmake: exactly one of USE_CUDA, USE_NKI, USE_HIP must be ON ({flags})")
+    return flags
+
+
+def get_backend_macros(config_file):
+    flags = get_backend_flags(config_file)
     macros = []
     if flags.get("USE_CUDA"):
         macros.append(("MIRAGE_BACKEND_USE_CUDA", None))
@@ -76,8 +84,9 @@ def get_backend_macros(config_file):
     elif flags.get("USE_NKI"):
         macros.append(("MIRAGE_BACKEND_USE_NKI", None))
         macros.append(("MIRAGE_FINGERPRINT_USE_CPU", None))
-    else:
-        raise KeyError("Please select either USE_CUDA or USE_NKI in config.cmake file")
+    else:  # USE_HIP: the core as host-only C++
+        macros.append(("MIRAGE_BACKEND_USE_HIP", None))
+        macros.append(("MIRAGE_FINGERPRINT_USE_CPU", None))
     return macros
 
 def config_cython():
@@ -89,6 +98,9 @@ def config_cython():
         mirage_path = ''
         config_path = path.join(mirage_path, "config.cmake")
         macros = get_backend_macros(config_path)
+        # the CUDA headers and libraries only in the CUDA mode (USE_NKI / USE_HIP: a host-only core)
+        use_cuda = bool(get_backend_flags(config_path)["USE_CUDA"])
+        cuda_libraries = ["cudadevrt", "cudart_static", "cudart", "cuda"] if use_cuda else []
         cython_path = path.join(mirage_path, "python/mirage/_cython")
         for fn in os.listdir(cython_path):
             if not fn.endswith(".pyx"):
@@ -105,14 +117,13 @@ def config_cython():
                         path.join(mirage_path, "build", "abstract_subexpr", "release"),
                         path.join(mirage_path, "build", "formal_verifier", "release"),
                         path.join(z3_path, "include"),
-                        cuda_include_dir,
-                    ],
+                    ]
+                    + ([cuda_include_dir] if use_cuda else []),
                     libraries=[
                         "mirage_runtime",
-                        "cudadevrt",
-                        "cudart_static",
-                        "cudart",
-                        "cuda",
+                    ]
+                    + cuda_libraries
+                    + [
                         "z3",
                         "gomp",
                         "rt",
@@ -125,7 +136,7 @@ def config_cython():
                         path.join(mirage_path, "build", "abstract_subexpr", "release"),
                         path.join(mirage_path, "build", "formal_verifier", "release"),
                     ]
-                    + cuda_library_dirs,
+                    + (cuda_library_dirs if use_cuda else []),
                     define_macros=macros,
                     extra_compile_args=["-std=c++17", "-fopenmp"],
                     extra_link_args=[

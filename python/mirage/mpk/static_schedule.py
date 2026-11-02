@@ -36,6 +36,8 @@ import subprocess
 import sysconfig
 from typing import Dict, List, Optional
 
+from . import gpu_backend
+
 
 # ---------------- schedule file ----------------
 def check_deadlock_free(all_tasks: List[dict], queues: List[List[int]], groups: List[List[int]] = ()) -> None:
@@ -78,7 +80,32 @@ def check_deadlock_free(all_tasks: List[dict], queues: List[List[int]], groups: 
                 ready.append(s)
     if done != len(vertices):
         stuck = [t for t in range(num_tasks) if waiting_for[rep_of[t]] > 0]
-        raise ValueError(f"the task lists can deadlock: {len(stuck)} of {num_tasks} tasks wait for each other in a circle")
+        per_node: Dict[int, int] = {}
+        for t in stuck:
+            per_node[all_tasks[t]["node"]] = per_node.get(all_tasks[t]["node"], 0) + 1
+        first = sorted(per_node)[:6]
+        # one circle among the stuck tasks (a walk backwards along "waits for" edges until a task repeats): each entry
+        # (node, position, its SM list) and how it waits for the next (dep: a dependency, list: the task before it on its SM)
+        sm_of = {t: i for i, sm_list in enumerate(queues) for t in sm_list}
+        preds: Dict[int, List[tuple]] = {}
+        for d_, t_ in [(d, t) for t in range(num_tasks) for d in all_tasks[t]["deps"]]:
+            preds.setdefault(rep_of[t_], []).append((rep_of[d_], "dep"))
+        for sm_list in queues:
+            for i in range(1, len(sm_list)):
+                preds.setdefault(rep_of[sm_list[i]], []).append((rep_of[sm_list[i - 1]], "list"))
+        v, path, seen_at = rep_of[stuck[0]], [], {}
+        while v not in seen_at:
+            seen_at[v] = len(path)
+            nxt = next(((p, how) for p, how in preds.get(v, []) if waiting_for[p] > 0 and p != v), None)
+            if nxt is None:
+                break
+            path.append((v, nxt[1]))
+            v = nxt[0]
+        circle = path[seen_at.get(v, 0):][:12]
+        desc = [(all_tasks[t]["node"], tuple(all_tasks[t]["pos"]), sm_of.get(t), how) for t, how in circle]
+        raise ValueError(f"the task lists can deadlock: {len(stuck)} of {num_tasks} tasks wait for each other in a circle "
+                         f"(stuck tasks per node, the lowest nodes: {[(n, per_node[n]) for n in first]}; a circle "
+                         f"(node, pos, SM, waits for the next by): {desc})")
 
 
 def write_schedule(path: str, nodes: Dict[str, dict], all_tasks: List[dict], queues: List[List[int]], info: dict,
@@ -90,13 +117,13 @@ def write_schedule(path: str, nodes: Dict[str, dict], all_tasks: List[dict], que
 
 
 def code_tag() -> str:
-    """The version of the kernel templates a cost record measured: the md5 of include/mirage/static_megakernel/*.cuh and tasks/*.cuh (first 12
-    hex digits). the cost records carry it ("code"); search.Costs(code=code_tag()) uses only the records of these templates,
+    """The version of the kernel templates a cost record measured: the md5 of the backend's include/mirage/<template_dir>/*.cuh and
+    tasks/*.cuh (gpu_backend; first 12 hex digits). the cost records carry it ("code"); search.Costs(code=code_tag()) uses only the records of these templates,
     so times measured with other kernel code are not mixed in."""
     from ..kernel import get_key_paths
     _, include_path, _ = get_key_paths()
     h = hashlib.md5()
-    root = os.path.join(include_path, "mirage", "static_megakernel")
+    root = os.path.join(include_path, "mirage", gpu_backend.template_dir())
     for path in sorted(glob.glob(os.path.join(root, "*.cuh")) + glob.glob(os.path.join(root, "tasks", "*.cuh"))):
         with open(path, "rb") as f:
             h.update(f.read())
@@ -106,19 +133,43 @@ def code_tag() -> str:
 # ---------------- code generation ----------------
 THREADS = 256   # one CTA of 256 threads per SM (runtime.cuh: the warp roles)
 MAX_TASKS_PER_SM = 64   # entries of an SM's task table (config.cuh): its list, then an end entry
-STAGE_SLOT = 1 + THREADS // 32   # timing build, per list entry: start, each warp's end, then 2 stage stamps (KernelLocals::stage_stamps)
-TIME_SLOTS = STAGE_SLOT + 2
+# the device's includes per backend (gpu_backend): the HIP templates map the CUDA runtime names the host code uses (cuda_names.h)
+BACKEND_INCLUDES = {"cuda": ["#include <cuda.h>", "#include <cuda_runtime.h>"],
+                    "hip": ["#include <hip/hip_runtime.h>", '#include "mirage/static_megakernel_hip/cuda_names.h"']}
+# the timing build's clock per backend: ns (globaltimer; s_memrealtime ticks x gpu_backend.ns_per_tick)
+STATIC_NOW = {"cuda": "asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(t));",
+              "hip": "t = wall_clock64() * STATIC_NS_PER_TICK;"}
 
 
-def config_checks(used: List[str], tokens: int = 8, max_bufs: Optional[int] = None,
-                  max_counter_lines: Optional[int] = None) -> List[str]:
+def waves() -> int:
+    """Warps (CUDA) or wavefronts (HIP) of a CTA."""
+    return THREADS // gpu_backend.wave()
+
+
+def stage_slot() -> int:
+    """Timing build, per list entry: start, each warp's end, then 2 stage stamps (KernelLocals::stage_stamps)."""
+    return 1 + waves()
+
+
+def time_slots() -> int:
+    return stage_slot() + 2
+
+
+def config_checks(pk, used: List[str]) -> List[str]:
     """static_asserts that the Python copies of the kernel's sizes (here and in static_megakernel.py) are config.cuh's and the
-    used task types'."""
-    from .static_megakernel import (HC_MIX_STRIDE, MAX_BUFS, MAX_MAPS, MAX_SUM_PARTS, NODE_COUNTER_LINES, ring_stages,
-                                    SF_CHUNK)
-    checks = [f"static_mk::MAX_TASKS_PER_SM == {MAX_TASKS_PER_SM}", f"static_mk::MAX_BUFS == {max_bufs or MAX_BUFS}",
-              f"static_mk::MAX_MAPS == {MAX_MAPS}", f"static_mk::NODE_COUNTER_LINES == {max_counter_lines or NODE_COUNTER_LINES}",
-              f"static_mk::SMAX == {ring_stages(tokens)}", f"static_mk::SF_CHUNK == {SF_CHUNK}"]
+    used task types'. CUDA: a graph may raise MAX_BUFS / NODE_COUNTER_LINES (StaticMegakernel.max_bufs / max_counter_lines);
+    the ring's stages depend on the tokens (ring_stages). HIP: the build's STATIC_MAX_BUFS / MAPS / COUNTER_LINES, 5 stages."""
+    from .static_megakernel import (HC_MIX_STRIDE, MAX_BUFS, MAX_MAPS, MAX_SUM_PARTS, NODE_COUNTER_LINES, RING_STAGES,
+                                    SF_CHUNK, ring_stages)
+    if gpu_backend.backend() == "hip":
+        checks = [f"static_mk::MAX_TASKS_PER_SM == {MAX_TASKS_PER_SM}", f"static_mk::MAX_BUFS == {pk.buf_slots()}",
+                  f"static_mk::MAX_MAPS == {pk.map_slots()}", f"static_mk::NODE_COUNTER_LINES == {pk.counter_lines()}",
+                  f"static_mk::SMAX == {RING_STAGES}", f"static_mk::SF_CHUNK == {SF_CHUNK}"]
+    else:
+        mb, ml = getattr(pk, "max_bufs", None), getattr(pk, "max_counter_lines", None)
+        checks = [f"static_mk::MAX_TASKS_PER_SM == {MAX_TASKS_PER_SM}", f"static_mk::MAX_BUFS == {mb or MAX_BUFS}",
+                  f"static_mk::MAX_MAPS == {MAX_MAPS}", f"static_mk::NODE_COUNTER_LINES == {ml or NODE_COUNTER_LINES}",
+                  f"static_mk::SMAX == {ring_stages(pk.tokens)}", f"static_mk::SF_CHUNK == {SF_CHUNK}"]
     if "sum_send" in used:
         checks.append(f"static_mk::MAX_SUM_PARTS == {MAX_SUM_PARTS}")
     if "hc_pre" in used:
@@ -138,30 +189,37 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
                 schedules: List[dict] = ()) -> List[str]:
     set_bytes, hello, offsets, sizes = pk.exchange_layout()
     used = sorted({n["name"] for n in nodes.values()})
-    rs = reset_sms(schedules[0]) if len(schedules) == 1 else []
-    mask = [sum(1 << (sm - 64 * w) for sm in rs if sm // 64 == w) for w in range(4)]
+    tdir = gpu_backend.template_dir()
+    if gpu_backend.backend() == "hip":   # the build's sizes (config.cuh STATIC_MAX_BUFS / MAPS / COUNTER_LINES)
+        sizes_code = [f"#define STATIC_MAX_BUFS {pk.buf_slots()}", f"#define STATIC_MAX_MAPS {pk.map_slots()}",
+                      f"#define STATIC_COUNTER_LINES {pk.counter_lines()}"]
+        cuda_code = []
+    else:   # a graph may raise MAX_BUFS / NODE_COUNTER_LINES; one GPU: the reset SMs (reset_sms); the L2 prefetch
+        rs = reset_sms(schedules[0]) if len(schedules) == 1 else []
+        mask = [sum(1 << (sm - 64 * w) for sm in rs if sm // 64 == w) for w in range(4)]
+        sizes_code = ([f"#define STATIC_MAX_BUFS {pk.max_bufs}   // buffer slots (config.cuh MAX_BUFS; StaticMegakernel.max_bufs)"]
+                      if getattr(pk, "max_bufs", None) else []) + (
+                     [f"#define STATIC_NODE_COUNTER_LINES {pk.max_counter_lines}   // counter lines (config.cuh NODE_COUNTER_LINES; "
+                      "StaticMegakernel.max_counter_lines)"] if getattr(pk, "max_counter_lines", None) else [])
+        cuda_code = ["// one GPU: the SMs whose first task waits for other tasks (or that have none), a bit each (reset_sms)",
+                     f"#define STATIC_RESET_SMS_N {len(rs)}",
+                     *[f"#define STATIC_RESET_SMS_MASK{w} {m}ull" for w, m in enumerate(mask)], "",
+                     *([f"#define STATIC_L2_PREFETCH {len(pk._prefetch)}   // the weights kernel_begin prefetches into L2 "
+                        "(StaticMegakernel.l2_prefetch_weights)", ""] if getattr(pk, "_prefetch", None) else [])]
     return [f"// layer.cu -- generated by mirage.mpk.static_schedule.compile_static from the graph and {num_gpus} "
             f"schedule.json files"] + (["#define STATIC_TIMING_BUILD 1   // timing hooks (e.g. GEMM stage stamps)"] if profile else []) + [
-            "#include <cuda.h>", "#include <cuda_runtime.h>", "#include <initializer_list>", "#include <map>",
+            *BACKEND_INCLUDES[gpu_backend.backend()], "#include <initializer_list>", "#include <map>",
             "#include <string>", "#include <vector>", "",
             "// the kernel-wide sizes (config.cuh): tokens per step and GPUs (the graph's: StaticMegakernel.tokens, num_gpus), SMs (the",
             "// schedules' task lists per GPU)",
-            f"#define STATIC_TOKENS {pk.tokens}", f"#define STATIC_GPUS {num_gpus}", f"#define STATIC_SMS {num_lists}", ""] + (
-            [f"#define STATIC_MAX_BUFS {pk.max_bufs}   // buffer slots (config.cuh MAX_BUFS; StaticMegakernel.max_bufs)", ""]
-            if getattr(pk, "max_bufs", None) else []) + (
-            [f"#define STATIC_NODE_COUNTER_LINES {pk.max_counter_lines}   // counter lines (config.cuh NODE_COUNTER_LINES; "
-             "StaticMegakernel.max_counter_lines)", ""]
-            if getattr(pk, "max_counter_lines", None) else []) + [
+            f"#define STATIC_TOKENS {pk.tokens}", f"#define STATIC_GPUS {num_gpus}", f"#define STATIC_SMS {num_lists}", "",
             "// the exchange region's layout (static_megakernel.py exchange_layout): one set's bytes, the start barrier's slots, per",
             "// buffer slot its offset and bytes (an exchange buffer; else 0)",
+            *sizes_code,
             f"#define STATIC_EXCHANGE_SET {set_bytes}", f"#define STATIC_EXCHANGE_HELLO {hello}",
             f"#define STATIC_EXCHANGE_OFFSETS {{{', '.join(map(str, offsets))}}}",
             f"#define STATIC_EXCHANGE_BYTES {{{', '.join(map(str, sizes))}}}", "",
-            "// one GPU: the SMs whose first task waits for other tasks (or that have none), a bit each (reset_sms)",
-            f"#define STATIC_RESET_SMS_N {len(rs)}",
-            *[f"#define STATIC_RESET_SMS_MASK{w} {m}ull" for w, m in enumerate(mask)], "",
-            *([f"#define STATIC_L2_PREFETCH {len(pk._prefetch)}   // the weights kernel_begin prefetches into L2 "
-               "(StaticMegakernel.l2_prefetch_weights)", ""] if getattr(pk, "_prefetch", None) else []),
+            *cuda_code,
             "struct StaticTask { int node, x, y, z; };   // one entry of an SM's list: the graph node and the task's grid position",
             "// a node: its grid, its first counter (-1: none) and its output buffer slot (-1: none); as an input's producer also its",
             "// params (v, then a 0)",
@@ -179,9 +237,8 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
             "  std::map<std::string, void *> tensors;    // the graph's tensors on this GPU, by name",
             "};",
             "struct StaticContext { int num_gpus = 0, num_lists = 0; std::vector<StaticGpuView> gpus; };",
-            '#include "mirage/static_megakernel/core.cuh"'] + \
-        [f'#include "mirage/static_megakernel/tasks/{name}.cuh"' for name in used] + \
-        config_checks(used, pk.tokens, getattr(pk, "max_bufs", None), getattr(pk, "max_counter_lines", None)) + [""]
+            f'#include "mirage/{tdir}/core.cuh"'] + \
+        [f'#include "mirage/{tdir}/tasks/{name}.cuh"' for name in used] + config_checks(pk, used) + [""]
 
 
 def task_tables(schedules: List[dict]) -> List[str]:
@@ -189,16 +246,34 @@ def task_tables(schedules: List[dict]) -> List[str]:
       static_tasks_gpu<g>       the entries of SM 0's list, then SM 1's, ...: {node, x, y, z}
       static_list_begin_gpu<g>  SM k's entries are [begin[k], begin[k + 1])
     Example: SM 0 = [topk_route task 0, moe_experts task 0, allreduce_send task 0] -> {31, 0, 0, 0}, {36, 0, 0, 0}, {37, 0, 0, 0}; begin = {0, 3, ..}.
-    static_init copies them into a per-SM table on each GPU (max_tasks entries per SM, the rest node = -1)."""
+    static_init copies them into a per-SM table on each GPU (max_tasks entries per SM, the rest node = -1).
+    Each list ends with an end entry node = -2 - (rank + 1024 E) (the loop stops at any node < 0): the SM's rank among the E SMs
+    that hold no task of the graph's last node (1023: it holds one), for core.cuh kernel_end (the arena's resets)."""
     lines = []
     for g, schedule in enumerate(schedules):
         entries, begin = [], [0]
-        for sm_list in schedule["worker_task_queues"]:
+        last = max(int(k) for k in schedule["nodes"])
+        holds = [any(schedule["all_tasks"][t]["node"] == last for t in sm_list) for sm_list in schedule["worker_task_queues"]]
+        n_free = sum(1 for h in holds if not h)
+        if n_free == 0:   # (every SM holds the last node, e.g. MoE's residual_add: all take slices)
+            holds = [False] * len(holds)
+            n_free = len(holds)
+        rank = 0
+        for sm_list, h in zip(schedule["worker_task_queues"], holds):
             for t in sm_list:
                 task = schedule["all_tasks"][t]
                 entries.append("{%d, %d, %d, %d}" % (task["node"], *task["pos"]))
+            entries.append("{%d, 0, 0, 0}" % (-2 - ((1023 if h else rank) + 1024 * n_free)))
+            rank += 0 if h else 1
             begin.append(len(entries))
         lines.append(f"static const StaticTask static_tasks_gpu{g}[] = {{{', '.join(entries)}}};")
+        # (core.cuh STATIC_RESET_FIRST_NODE N: the next launch's exchange resets on the CUs whose list starts with node N; with
+        # none on a GPU nobody would reset them)
+        firsts = [schedule["all_tasks"][sm_list[0]]["node"] if sm_list else -1 for sm_list in schedule["worker_task_queues"]]
+        lines += ["#ifdef STATIC_RESET_FIRST_NODE",
+                  f"static_assert(static_mk::count_of(STATIC_RESET_FIRST_NODE, {{{', '.join(map(str, firsts))}}}) > 0, "
+                  f"\"STATIC_RESET_FIRST_NODE: no CU of GPU {g} starts with that node\");",
+                  "#endif"]
         lines.append(f"static const int static_list_begin_gpu{g}[] = {{{', '.join(map(str, begin))}}};")
     return lines
 
@@ -227,8 +302,42 @@ def smem_code(nodes: Dict[str, dict]) -> List[str]:
     needs = [f"static_mk::smem_{node['name']}<{task_args(node)}>()" for _, node in sorted(nodes.items(), key=lambda kv: int(kv[0]))]
     return ["// the launch's dynamic shared memory: the most any node's task type needs (smem_<name>)",
             "constexpr int static_smem_need(std::initializer_list<int> v) { int m = 0; for (int x : v) m = x > m ? x : m; return m; }",
+            "#ifdef STATIC_DRD_HOLD",   # (core.cuh STATIC_DRD_HOLD: the held recurrence state, 64 KB at STATIC_DRD_HOLD_OFF)
+            "constexpr int STATIC_SMEM_BYTES = static_mk::smem_launch_bytes(static_smem_need({%s, STATIC_DRD_HOLD_OFF + 65536}));" % ", ".join(needs),
+            "#else",
             "constexpr int STATIC_SMEM_BYTES = static_mk::smem_launch_bytes(static_smem_need({%s}));" % ", ".join(needs),
-            'static_assert(STATIC_SMEM_BYTES <= 227 * 1024, "the dynamic shared memory of one SM");', ""]
+            "#endif",
+            f'static_assert(STATIC_SMEM_BYTES <= {gpu_backend.smem_limit_kb()} * 1024, "the dynamic shared memory of one SM");', ""]
+
+
+def noinline_tasks() -> set:
+    """MPK_NOINLINE_TASKS (comma-separated task type names, e.g. moe_experts): those nodes' tasks as functions of their own
+    (__noinline__), so the kernel's register allocation does not span them (a fused attention + MoE kernel: one function
+    holding every task type spilled; MI355X 10-13)."""
+    return {x for x in os.environ.get("MPK_NOINLINE_TASKS", "").split(",") if x}
+
+
+def noinline_code(nodes: Dict[str, dict]) -> List[str]:
+    """the wrappers of the noinline tasks: static_task_<idx>(maps, g, sm, sm_id[, stage_stamps], tk[, warm])"""
+    out = []
+    for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])):
+        if node["name"] not in noinline_tasks():
+            continue
+        warm = ", bool warm" if node["dry"] else ""
+        call = task_call(node)[:-1] + (", warm)" if node["dry"] else ")")
+        out += [f"__device__ __noinline__ void static_task_{idx}(static_mk::Maps const &maps, static_mk::G const &g, char *sm, int sm_id,",
+                f"                                                  unsigned long long *stage_stamps, StaticTask const tk{warm}) {{",
+                "  static_mk::KernelLocals L;",
+                "  L.sm = sm;",
+                "  L.sm_id = sm_id;",
+                "#ifdef STATIC_TIMING_BUILD",
+                "  L.stage_stamps = stage_stamps;",
+                "#else",
+                "  (void)stage_stamps;",
+                "#endif",
+                f"  {call};",
+                "}"]
+    return out
 
 
 def case_code(idx: str, node: dict) -> str:
@@ -239,6 +348,8 @@ def case_code(idx: str, node: dict) -> str:
     costs almost nothing (checking whether the inputs have already landed would cost loads and a CTA barrier per task).
       case 29: static_mk::run_topk_route<...>(maps, g, L, tk, warm_29); warm_29 = true; break;"""
     run = task_call(node)
+    if node["name"] in noinline_tasks():
+        run = f"static_task_{idx}(maps, g, L.sm, L.sm_id, STATIC_STAGE_STAMPS_OF(L), tk)"
     if not node["dry"]:
         return f"      case {idx}: {run}; break;"
     return f"      case {idx}: {run[:-1]}, warm_{idx}); warm_{idx} = true; break;"
@@ -261,32 +372,159 @@ def kernel_code(nodes: Dict[str, dict], profile: bool = False) -> List[str]:
         }
     profile: the timing build: one more kernel parameter, static_times, and per list entry ti thread 0 writes the task's start and
     lane 0 of every warp writes when its warp left the task (globaltimer ns; plain stores). Without profile the kernel is unchanged."""
-    lines = ["", "// ---- the kernel ----"]
+    lines = ["", "// ---- the kernel ----",
+             "#ifdef STATIC_TIMING_BUILD",
+             "#define STATIC_STAGE_STAMPS_OF(L) (L).stage_stamps",
+             "#else",
+             "#define STATIC_STAGE_STAMPS_OF(L) nullptr",
+             "#endif"] + noinline_code(nodes)
     if profile:
-        lines += ["__device__ __forceinline__ unsigned long long static_now() { unsigned long long t; "
-                  "asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(t)); return t; }",
-                  f"#define STATIC_TIME(ti) (static_times + ((size_t)blockIdx.x * (static_mk::MAX_TASKS_PER_SM) + (ti)) * {TIME_SLOTS})"]
+        b = gpu_backend.backend()
+        lines += ([f"#define STATIC_NS_PER_TICK {gpu_backend.ns_per_tick(b)}"] if b == "hip" else []) + [
+                  f"__device__ __forceinline__ unsigned long long static_now() {{ unsigned long long t; {STATIC_NOW[b]} return t; }}",
+                  f"#define STATIC_TIME(ti) (static_times + ((size_t)blockIdx.x * (static_mk::MAX_TASKS_PER_SM) + (ti)) * {time_slots()})"]
+    # STATIC_EARLY_L2 (core.cuh early_l2): a listed node's task -> its weight lines (gemm_tile nodes; others none)
+    lines += ["#ifdef STATIC_EARLY_L2",
+              "__device__ __forceinline__ static_mk::L2Span static_l2_span(static_mk::Maps const &maps, int node, int x, int y) {",
+              "  switch (node) {"]
+    lines += [f"    case {idx}: return static_mk::gemm_tile_l2span<{task_args(node)}>(maps, x, y);"
+              for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])) if node["name"] == "gemm_tile"]
+    lines += ["  }", "  return static_mk::L2Span{nullptr, 0, 0, 0u};", "}", "#endif"]
     extra = ", unsigned long long *static_times" if profile else ""
     lines += [f"__global__ void __launch_bounds__({THREADS}, 1) layer_kernel(const __grid_constant__ static_mk::Maps maps, static_mk::G g, "
               f"StaticTask const *static_tasks{extra}) {{",
-              "  static_mk::KernelLocals L; static_mk::kernel_begin(g, L);",
-              "  StaticTask const *my = static_tasks + blockIdx.x * (static_mk::MAX_TASKS_PER_SM);"]
+              "#ifdef STATIC_TASK_PREFETCH",
+              "  // STATIC_TASK_PREFETCH: this SM's first list entry loaded before kernel_begin (its wait for the previous kernel / the go), the",
+              "  // list's other lines touched by the first lanes (into the L2): not the previous kernel's data; the first task then starts",
+              "  // without a memory round trip after the go (MI355X 10-13, TP8 timing build: go -> first task start 2.2-4.4 us)",
+              "  StaticTask const tk0 = static_tasks[blockIdx.x * (static_mk::MAX_TASKS_PER_SM)];",
+              "  int const tl_touch = (int)threadIdx.x * 4 < static_mk::MAX_TASKS_PER_SM",
+              "                       ? static_tasks[blockIdx.x * (static_mk::MAX_TASKS_PER_SM) + threadIdx.x * 4].node : 0;",
+              "#endif",
+              "  static_mk::KernelLocals L;",
+              "#ifdef STATIC_RESET_FIRST_NODE",   # (core.cuh kernel_begin: the next launch's exchange resets on the CUs starting with that node)
+              "  L.first_node = tk0.node; L.tasks = reinterpret_cast<int const *>(static_tasks);",
+              "#endif",
+              "  static_mk::kernel_begin(g, L);",
+              "#ifdef STATIC_EARLY_L2",   # (core.cuh early_l2: the listed nodes' weight lines into the L2 by the CUs starting with that node)
+              "  if (L.first_node == STATIC_RESET_FIRST_NODE) {",
+              "    static_mk::early_l2(L, [&](int n_, int x_, int y_) { return static_l2_span(maps, n_, x_, y_); });",
+              "  }",
+              "#endif",
+              "  StaticTask const *my = static_tasks + blockIdx.x * (static_mk::MAX_TASKS_PER_SM);",
+              "#ifdef STATIC_TASK_PREFETCH",
+              "  if (tl_touch == -12345) g.stamps[0] = 0;   // (the touch loads stay: never true, a list holds nodes >= -1)",
+              "#endif"]
     lines += [f"  bool warm_{idx} = false;   // a task of node {idx} ran on this SM: its code is in the instruction cache"
               for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])) if node["dry"]]
+    # MPK_SPLIT_LOOP=S (a one-kernel layer of two parts, e.g. attention + MoE, every CU's tasks of nodes < S before its
+    # others): two task loops, the first over the nodes < S, the second over the rest, so the first part's tasks are not
+    # register-allocated together with the second part's (MI355X 10-16: in the fused KDA + MoE kernel moe_experts' ~500
+    # VGPRs made the loop-carried values spill to scratch; the KDA part ran 67 vs 45 us)
+    split = os.environ.get("MPK_SPLIT_LOOP")
+    # (several split points "S1,S2,..": one loop per range of nodes, e.g. two MoE + attention layer pairs in one kernel)
+    splits = sorted(int(x) for x in split.split(",")) if split else []
+    split = splits[0] if len(splits) == 1 else None
+    loop_start = len(lines)
+    hip = gpu_backend.backend() == "hip"
     lines += [
              "  for (int ti = 0; ti < static_mk::MAX_TASKS_PER_SM; ti++) {",
+             "#if defined(STATIC_TASK_SLOAD) && defined(STATIC_TASK_PREFETCH)",
+             "    // STATIC_TASK_SLOAD: the entry by scalar loads (s_load, lgkmcnt) through a constant-space pointer - the host writes the",
+             "    // list before the launch only. The vector loads (3 x global_load_dword, each waited with vmcnt(0)) waited for every store",
+             "    // the previous task issued, its pushes to the other GPUs too (MI355X dec399, T 64: 4-7 us from R send's end to",
+             "    // sum_rmsnorm's start on the same CU, 2.5-4 us after latent_up / moe_agg1)",
+             "    StaticTask tk = tk0;",
+             "    if (ti != 0) {   // (one 16-B vector: a struct cannot be assigned from another address space)",
+             "      typedef int st4_ __attribute__((ext_vector_type(4)));",
+             "      st4_ const v_ = ((__attribute__((address_space(4))) st4_ const *)my)[ti];",
+             "      tk = StaticTask{v_.x, v_.y, v_.z, v_.w};",
+             "    }",
+             "#elif defined(STATIC_TASK_PREFETCH)",
+             "    StaticTask const tk = ti == 0 ? tk0 : my[ti];",
+             "#else",
              "    StaticTask const tk = my[ti];",
-             "    if (tk.node < 0) break;"]
+             "#endif",
+             "    if (tk.node < 0) {"] + (
+             ["      L.end_code = tk.node;   // (core.cuh kernel_end: the CU's share of the arena's resets)"] if hip else []) + [
+             "      break;",
+             "    }",
+             "#ifdef STATIC_SKIP_TASKS",   # (a probe: every task skipped - the kernel's fixed cost: launch, kernel_begin, kernel_end)
+             "    continue;",
+             "#endif"]
     if profile:
         lines.append("    if (threadIdx.x == 0) STATIC_TIME(ti)[0] = static_now();")
-        lines.append(f"    L.stage_stamps = STATIC_TIME(ti) + {STAGE_SLOT};   // e.g. GEMM tasks: [0] first load issued, [1] first stage landed")
-    lines.append("    switch (tk.node) {")
-    for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])):
-        lines.append(case_code(idx, node))
-    lines.append("    }")
+        lines.append(f"    L.stage_stamps = STATIC_TIME(ti) + {stage_slot()};   // e.g. GEMM tasks: [0] first load issued, [1] first stage landed")
+    lines += [
+        "#if defined(STATIC_GEMM_L2WARM) || defined(STATIC_DRD_L2NEXT) || defined(STATIC_DRD_HOLD)",   # (gemm_tile.cuh / delta_rule_decode.cuh: the next task's data / node)
+        "    L.nxt = ti + 1 < static_mk::MAX_TASKS_PER_SM ? reinterpret_cast<int const *>(my + ti + 1) : nullptr;",
+        "#endif",
+        "#ifdef STATIC_ARG_RELOAD",
+        "    // STATIC_ARG_RELOAD: g and maps through constant-space pointers the compiler cannot prove the same each round: a task",
+        "    // loads the few buffer pointers / map fields it uses (s_load, K$) instead of every one staying in registers for the",
+        "    // whole kernel (MI355X 10-15: the fused KDA + MoE build had 584 SGPR / 99 VGPR spills, none in the KDA-only build)",
+        "    // (the kernel argument segment itself: maps at 0, g after it; &g of a by-value argument is a stack copy)",
+        "    { __attribute__((address_space(4))) char const *ka_ = (__attribute__((address_space(4))) char const *)__builtin_amdgcn_kernarg_segment_ptr();",
+        "      constexpr size_t goff_ = (sizeof(static_mk::Maps) + alignof(static_mk::G) - 1) / alignof(static_mk::G) * alignof(static_mk::G);",
+        "      __attribute__((address_space(4))) static_mk::G const *gp_ = (__attribute__((address_space(4))) static_mk::G const *)(ka_ + goff_);",
+        "      __attribute__((address_space(4))) static_mk::Maps const *mp_ = (__attribute__((address_space(4))) static_mk::Maps const *)ka_;",
+        "      asm volatile(\"\" : \"+s\"(gp_), \"+s\"(mp_));",
+        "      static_mk::G const &g_ = *(static_mk::G const *)gp_; static_mk::Maps const &maps_ = *(static_mk::Maps const *)mp_;",
+        "#define STATIC_G_ g_",
+        "#define STATIC_MAPS_ maps_",
+        "#else",
+        "    {",
+        "#define STATIC_G_ g",
+        "#define STATIC_MAPS_ maps",
+        "#endif",
+        "    switch (tk.node) {"]
+    head = lines[loop_start:]
+    del lines[loop_start:]
+    tail = ["    }", "    }", "#undef STATIC_G_", "#undef STATIC_MAPS_",
+            "#ifdef STATIC_GEMM_L2WARM", "    L.prev_node = tk.node;", "#endif",
+            "#ifdef STATIC_GEMM_ACT_KEEP", "    L.keep_node = tk.node;", "    L.keep_y = tk.y;", "#endif",
+            "#ifdef STATIC_NODE_END_STAMPS",
+            "    if (threadIdx.x == 0) {",
+            "#pragma unroll",
+            "      for (int ne_ = 0; ne_ < static_mk::NODE_END_N; ne_++)",
+            "        if (static_mk::NODE_END_LIST[ne_] == tk.node) g.stamps[L.sm_id * static_mk::NSTAMP + 8 + ne_] = static_mk::gtime();",
+            "    }",
+            "#endif"]
     if profile:
-        lines.append("    if ((threadIdx.x & 31) == 0) STATIC_TIME(ti)[1 + threadIdx.x / 32] = static_now();   // this warp left the task")
-    lines += ["  }", "  static_mk::kernel_end(g, L);", "}", ""]
+        w = gpu_backend.wave()
+        tail.append(f"    if ((threadIdx.x & {w - 1}) == 0) STATIC_TIME(ti)[1 + threadIdx.x / {w}] = static_now();   // this warp left the task")
+    tail.append("  }")
+    def cases(keep):
+        return [case_code(idx, node).replace("(maps, g, L", "(STATIC_MAPS_, STATIC_G_, L")
+                for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])) if keep(int(idx))]
+    if len(splits) > 1:
+        loop_line = "  for (int ti = 0; ti < static_mk::MAX_TASKS_PER_SM; ti++) {"
+        assert head.count(loop_line) == 1 and head.count("    if (tk.node < 0) {") == 1
+        pre = [("  int ti = 0;   // (MPK_SPLIT_LOOP: one task loop per node range %s)" % splits if x == loop_line else x)
+               for x in head[:head.index(loop_line) + 1]]
+        rest = head[head.index(loop_line) + 1:]
+        brk = rest.index("    if (tk.node < 0) {")
+        bounds = [None] + splits + [None]
+        lines += pre
+        for lo, hi in zip(bounds, bounds[1:]):
+            body = rest if hi is None else rest[:brk] + [f"    if (tk.node >= {hi}) break;   // (the CU's first task of the next range)"] + rest[brk:]
+            keep = (lambda i, lo=lo, hi=hi: (lo is None or i >= lo) and (hi is None or i < hi))
+            lines += ["  for (; ti < static_mk::MAX_TASKS_PER_SM; ti++) {"] + body + cases(keep) + tail
+    elif split is None:
+        lines += head + cases(lambda i: True) + tail
+    else:
+        loop_line = "  for (int ti = 0; ti < static_mk::MAX_TASKS_PER_SM; ti++) {"
+        assert head.count(loop_line) == 1 and head.count("    if (tk.node < 0) {") == 1
+        at = head.index("    if (tk.node < 0) {")
+        first = [("  int ti = 0;   // (MPK_SPLIT_LOOP: two task loops, nodes < %d first)" % split if x == loop_line else x)
+                 for x in head[:head.index(loop_line) + 1]]
+        first += ["  for (; ti < static_mk::MAX_TASKS_PER_SM; ti++) {"]
+        rest = head[head.index(loop_line) + 1:]
+        brk = rest.index("    if (tk.node < 0) {")
+        loop1 = rest[:brk] + [f"    if (tk.node >= {split}) break;   // (the CU's first task of the second part: the second loop)"] + rest[brk:]
+        lines += first + loop1 + cases(lambda i: i < split) + tail
+        lines += ["  for (; ti < static_mk::MAX_TASKS_PER_SM; ti++) {"] + rest + cases(lambda i: i >= split) + tail
+    lines += ["  static_mk::kernel_end(g, L);", "}", ""]
     return lines
 
 
@@ -294,6 +532,8 @@ def launch_code(cs: int) -> str:
     """The kernel launch in static_launch. cs = the schedules' info "cluster_size" (compiler.compile_plan decides; 1: the plain
     launch; 2: pairs of CTAs 2k, 2k + 1 that share their shared memory (DSMEM), for sum_rmsnorm's on-chip swap; all 148 CTAs stay
     resident)."""
+    if cs != 1 and not gpu_backend.has_clusters():
+        raise ValueError(f"cluster size {cs}: the {gpu_backend.backend()} backend has no CTA clusters (compile with the plain launch)")
     if cs == 1:
         return "layer_kernel<<<static_mk::NSM, @THREADS@, (int)(@SMEM@), s.stream>>>(@LAUNCH_ARGS@, s.tasks STATIC_TIMES_ARG);"
     return "\n    ".join([
@@ -338,7 +578,8 @@ def host_code(pk, schedules: List[dict], profile: bool = False) -> List[str]:
         "@TASKS@": ", ".join(f"static_tasks_gpu{g}" for g in range(num_gpus)),
         "@MAX_TASKS@": "static_mk::MAX_TASKS_PER_SM",
         "@BEGINS@": ", ".join(f"static_list_begin_gpu{g}" for g in range(num_gpus)),
-        "@PROFILE@": "1" if profile else "0", "@SLOTS@": str(TIME_SLOTS), "@WARPS@": str(THREADS // 32),
+        "@PROFILE@": "1" if profile else "0", "@SLOTS@": str(time_slots()), "@WARPS@": str(waves()),
+        "@TEMPLATES@": gpu_backend.template_dir(),
     }
     code = HOST_CODE
     for placeholder, value in fill.items():
@@ -368,7 +609,9 @@ def generate_code(pk, schedules: List[dict], profile: bool = False) -> str:
 HOST_CODE = r"""
 // ---- host: all GPUs of this process ----
 #include <Python.h>
-#include "mirage/static_megakernel/host.cuh"
+#include <atomic>
+#include <thread>
+#include "mirage/@TEMPLATES@/host.cuh"
 #define ST_CK(x)                                                                                    \
   do {                                                                                              \
     cudaError_t e_ = (x);                                                                           \
@@ -377,10 +620,17 @@ HOST_CODE = r"""
       exit(1);                                                                                      \
     }                                                                                               \
   } while (0)
+// STATIC_SOLO (HIP host.cuh): built for GPUS GPUs, run on one (GPU 0's lists)
+#ifdef STATIC_SOLO
+#define STATIC_RUN_GPUS 1
+#else
+#define STATIC_RUN_GPUS static_mk::GPUS
+#endif
 static StaticTask const *const static_tasks_of[static_mk::GPUS] = {@TASKS@};
 static int const *const static_list_begin[static_mk::GPUS] = {@BEGINS@};
 struct StaticGpu {
   cudaStream_t stream = nullptr;
+  cudaStream_t stream2 = nullptr;             // STATIC_EARLY: the layer kernel's stream
   cudaEvent_t start = nullptr;                // recorded right before the kernel (static_elapsed)
   cudaEvent_t end = nullptr;                  // recorded after the kernel (static_wait, static_done, static_elapsed)
   StaticTask *tasks = nullptr;                // the per-SM task table on the GPU
@@ -396,48 +646,59 @@ static size_t const static_times_count = (size_t)static_mk::NSM * (@MAX_TASKS@) 
 static std::vector<StaticGpu> g_st;
 static StaticContext g_ctx;
 static unsigned long long g_launches = 0;
-static int g_dev0 = 0;   // the CUDA device of GPU 0 (set_device_func; GPU g = device g_dev0 + g)
-
-// local GPU g (device g_dev0 + g) running GPU `lists`' task lists: a stream, two events, the kernel's shared memory size, the
-// per-SM task table on the GPU (max_tasks entries per SM: the SM's list, then node = -1); the view the host code gets (its
-// tensors)
-static void static_setup_gpu(int g, int lists, std::map<std::string, void *> const &tensors) {
-  ST_CK(cudaSetDevice(g_dev0 + g));
-  ST_CK(cudaStreamCreate(&g_st[g].stream));
-  ST_CK(cudaEventCreate(&g_st[g].start));
-  ST_CK(cudaEventCreate(&g_st[g].end));
-  ST_CK(cudaFuncSetAttribute(layer_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)(@SMEM@)));
-  int const max_tasks = (int)(@MAX_TASKS@);
-  std::vector<StaticTask> table((size_t)static_mk::NSM * max_tasks, StaticTask{-1, 0, 0, 0});
-  for (int sm = 0; sm < static_mk::NSM; sm++) {
-    int const b = static_list_begin[lists][sm], n = static_list_begin[lists][sm + 1] - b;
-    if (n > max_tasks - 1) {
-      fprintf(stderr, "layer: GPU %d SM %d: %d tasks, at most %d\n", lists, sm, n, max_tasks - 1);
-      exit(1);
-    }
-    for (int i = 0; i < n; i++) table[(size_t)sm * max_tasks + i] = static_tasks_of[lists][b + i];
+static int g_dev0 = 0;   // the device of GPU 0 (set_device_func; GPU g = device g_dev0 + g)
+#ifdef STATIC_LAUNCH_GATE
+// STATIC_LAUNCH_GATE (HIP): every GPU's start event and kernel wait on its stream for one host-written word (a stream wait on
+// pinned host memory), released by one store after all are queued: the GPUs start within the command processors' poll of that
+// word, not ~5-8 us apart as host threads launching them (MI355X 10-11); in a server the previous layer's exchanges line the
+// GPUs up the same way. The start event is recorded after the wait: e2e counts from the release.
+static unsigned *g_gate = nullptr;
+#endif
+#if defined(STATIC_LINEUP) && defined(__HIP_PLATFORM_AMD__)
+// STATIC_LINEUP (HIP, several GPUs): before each launch a one-wave kernel per GPU lines the GPUs up
+// (it writes the launch number into this GPU's hello slot on every GPU, then waits until every slot has it), and the layer
+// kernel follows it on the stream; the start event is recorded between the two, so e2e counts from the line-up's end, as the
+// B300 harness's GPU line-up kernel before the layer (test_plugin --prev-us)
+__global__ void static_lineup_kernel(static_mk::G g) {
+  if (threadIdx.x != 0) return;
+  using namespace static_mk;
+  unsigned const gen = g.gen;
+  size_t const set = (size_t)(gen & 1u) * EXCHANGE_SET;
+  for (int r = 0; r < GPUS; r++) {
+    st16_sys(g.peer[r] + EXCHANGE_HELLO + set + (size_t)g.rank * 16, make_uint4(gen, gen, gen, gen));
   }
-  ST_CK(cudaMalloc(&g_st[g].tasks, table.size() * sizeof(StaticTask)));
-  ST_CK(cudaMemcpy(g_st[g].tasks, table.data(), table.size() * sizeof(StaticTask), cudaMemcpyHostToDevice));
-  StaticGpuView &v = g_ctx.gpus[g];
-  v.gpu = g_dev0 + g;
-  v.tensors = tensors;
-}
-
-// timing build: the times buffer is allocated after the layer's buffers, so those keep the addresses of the normal build (the
-// buffers' addresses change the layer's time)
-static void static_alloc_times() {
-  if (STATIC_PROFILE)
-    for (size_t g = 0; g < g_st.size(); g++) {
-      ST_CK(cudaSetDevice(g_dev0 + (int)g));
-      ST_CK(cudaMalloc(&g_st[g].times, static_times_count * sizeof(unsigned long long)));
+  for (int r = 0; r < GPUS; r++) {
+    while (ld16_sys(g.rv + EXCHANGE_HELLO + set + (size_t)r * 16).x < gen) {
+      __builtin_amdgcn_s_sleep(1);
     }
+  }
+#ifdef STATIC_EARLY_RES
+  // STATIC_EARLY_RES (core.cuh): wait until every GPU's layer kernel is resident (its CU 0's slot; at most ~200 us, so a
+  // dispatch that cannot place it never hangs here), 2 us more for its other workgroups, then let this GPU's layer go
+  long long const t0 = gtime();
+  for (int r = 0; r < GPUS; r++) {
+    while (ld16_sys(g.rv + EXCHANGE_HELLO + 1024 + set + (size_t)r * 16).x < gen && gtime() - t0 < 200000) {
+      __builtin_amdgcn_s_sleep(1);
+    }
+  }
+  // STATIC_EARLY_PREV_US (us, default 2): how long after every layer kernel is resident the go comes (with
+  // STATIC_EARLY_PREWAIT: the stand-in previous kernel's length its pre-wait resets may overlap, B300's --prev-us 5)
+#ifndef STATIC_EARLY_PREV_US
+#define STATIC_EARLY_PREV_US 2
+#endif
+  long long const t1 = gtime();
+  while (gtime() - t1 < STATIC_EARLY_PREV_US * 1000) {
+    __builtin_amdgcn_s_sleep(8);
+  }
+  st16_sys(g.rv + EXCHANGE_HELLO + 2048 + set, make_uint4(gen, gen, gen, gen));
+#endif
 }
+#endif
 
-// every GPU of the layer in this process: per GPU static_setup_gpu; then static_host_init (peer access, the multicast exchange
-// region)
+// per GPU: a stream, two events, the kernel's shared memory size, the per-SM task table on the GPU (max_tasks entries per SM:
+// the SM's list, then node = -1); the view the host code gets (its tensors); then static_host_init
 static void static_init(std::vector<std::map<std::string, void *>> const &tensors) {
-  int const n = static_mk::GPUS;
+  int const n = STATIC_RUN_GPUS;
   if ((int)tensors.size() != n) {
     fprintf(stderr, "layer: built for %d GPUs, got tensors for %zu\n", n, tensors.size());
     exit(1);
@@ -446,38 +707,122 @@ static void static_init(std::vector<std::map<std::string, void *>> const &tensor
   g_ctx.num_gpus = n;
   g_ctx.num_lists = static_mk::NSM;
   g_ctx.gpus.assign(n, StaticGpuView());
-  for (int g = 0; g < n; g++) static_setup_gpu(g, g, tensors[g]);
+  for (int g = 0; g < n; g++) {
+    ST_CK(cudaSetDevice(g_dev0 + g));
+    ST_CK(cudaStreamCreate(&g_st[g].stream));
+    ST_CK(cudaStreamCreate(&g_st[g].stream2));
+    ST_CK(cudaEventCreate(&g_st[g].start));
+    ST_CK(cudaEventCreate(&g_st[g].end));
+    ST_CK(cudaFuncSetAttribute(layer_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)(@SMEM@)));
+    int const max_tasks = (int)(@MAX_TASKS@);
+    std::vector<StaticTask> table((size_t)static_mk::NSM * max_tasks, StaticTask{-1, 0, 0, 0});
+    for (int sm = 0; sm < static_mk::NSM; sm++) {
+      int const b = static_list_begin[g][sm], n = static_list_begin[g][sm + 1] - b;
+      if (n > max_tasks - 1) {
+        fprintf(stderr, "layer: GPU %d SM %d: %d tasks, at most %d\n", g, sm, n, max_tasks - 1);
+        exit(1);
+      }
+      for (int i = 0; i < n; i++) table[(size_t)sm * max_tasks + i] = static_tasks_of[g][b + i];
+    }
+    ST_CK(cudaMalloc(&g_st[g].tasks, table.size() * sizeof(StaticTask)));
+    ST_CK(cudaMemcpy(g_st[g].tasks, table.data(), table.size() * sizeof(StaticTask), cudaMemcpyHostToDevice));
+    StaticGpuView &v = g_ctx.gpus[g];
+    v.gpu = g_dev0 + g;
+    v.tensors = tensors[g];
+  }
   @INIT@
-  static_alloc_times();
+#ifdef STATIC_LAUNCH_GATE
+  ST_CK(hipHostMalloc((void **)&g_gate, 64, hipHostMallocMapped | hipHostMallocPortable));
+  *(volatile unsigned *)g_gate = 0;
+#endif
+  // timing build: the times buffer is allocated after the layer's buffers, so those keep the addresses of the normal build (the
+  // buffers' addresses change the layer's time)
+  if (STATIC_PROFILE)
+    for (int g = 0; g < n; g++) {
+      ST_CK(cudaSetDevice(g_dev0 + g));
+      ST_CK(cudaMalloc(&g_st[g].times, static_times_count * sizeof(unsigned long long)));
+    }
 }
 
-// GPU `rank` of the layer in a process of its own (a serving framework's TP rank): this GPU only (device g_dev0), its rank's
-// task lists, static_host_init_rank with the caller's exchange region (mc: its multicast address, rv: this GPU's copy)
-static void static_init_rank(int rank, std::map<std::string, void *> const &tensors, unsigned char *mc, unsigned char *rv) {
-  if (rank < 0 || rank >= static_mk::GPUS) {
-    fprintf(stderr, "layer: rank %d of %d GPUs\n", rank, static_mk::GPUS);
-    exit(1);
+// GPU gpu's launch: (serving mode: the flush and line-up, static_host_prelude) its start event, the kernel, its end event (on
+// its stream)
+static size_t g_flush_bytes = 0;   // (static_launch's flush_bytes, for the launching threads)
+static void static_launch_one(int gpu) {
+  StaticGpu &s = g_st[gpu];
+  ST_CK(cudaSetDevice(g_dev0 + gpu));
+#ifdef STATIC_RESET_IN_KERNEL
+  static_host_prelude(gpu, s.stream, g_flush_bytes, (unsigned)(g_launches + 1));
+#endif
+  ST_CK(cudaEventRecord(s.start, s.stream));
+  @LAUNCH@
+  ST_CK(cudaGetLastError());
+  ST_CK(cudaEventRecord(s.end, s.stream));
+}
+
+// STATIC_EARLY (HIP, with STATIC_LINEUP): the layer kernel on the GPU's second stream, launched before the line-up kernel on
+// the first stream ends, so its workgroups are resident when the line-up ends (as PDL on B300: the next kernel launched
+// before the previous one ends; with STATIC_EARLY_PREWAIT + STATIC_EARLY_RES it posts resident and waits for the line-up's
+// go, core.cuh kernel_begin); its end event on the second stream: e2e counts from the line-up's end to the layer's end
+static void static_launch_early(int gpu) {
+  StaticGpu &s0 = g_st[gpu];
+  StaticGpu s = s0;
+  s.stream = s0.stream2;
+  ST_CK(cudaSetDevice(g_dev0 + gpu));
+  @LAUNCH@
+  ST_CK(cudaGetLastError());
+  ST_CK(cudaEventRecord(s0.end, s0.stream2));
+}
+
+// more than one GPU: one host thread per GPU launches it, all released at once (one thread launching the GPUs one after the
+// other starts them ~8 us apart on MI355X 10-11, and the first ones wait for the last at the kernel's start barrier). The
+// threads wait for a launch number (yielding), launch, count themselves done; static_finalize ends them.
+static std::vector<std::thread> g_pool;
+static std::atomic<unsigned long long> g_go{0};
+static std::atomic<int> g_pool_done{0};
+static std::atomic<bool> g_pool_quit{false};
+static void static_pool_start() {
+  int const n = (int)g_st.size();
+  g_pool_quit = false;
+  unsigned long long const go0 = g_go.load(std::memory_order_acquire);   // read before the threads exist: a thread that
+                                                                         // starts after the first go still sees it
+  for (int gpu = 0; gpu < n; gpu++) {
+    g_pool.emplace_back([gpu, go0]() {
+      unsigned long long seen = go0;
+      for (;;) {
+        unsigned long long v;
+        while ((v = g_go.load(std::memory_order_acquire)) == seen) {
+          if (g_pool_quit.load(std::memory_order_acquire)) return;
+          std::this_thread::yield();
+        }
+        seen = v;
+        static_launch_one(gpu);
+        g_pool_done.fetch_add(1, std::memory_order_acq_rel);
+      }
+    });
   }
-  g_st.assign(1, StaticGpu());
-  g_ctx.num_gpus = 1;
-  g_ctx.num_lists = static_mk::NSM;
-  g_ctx.gpus.assign(1, StaticGpuView());
-  static_setup_gpu(0, rank, tensors);
-  static_host_init_rank(g_ctx, @ARGS@, rank, mc, rv);
-  static_alloc_times();
 }
 
 // one launch on every GPU: per GPU the resets on its stream; wait for every GPU (so all GPUs start together); then per
-// GPU: event, kernel, event. Serving mode (STATIC_RESET_IN_KERNEL: the kernel resets its own buffers): no host step and no
-// host wait; per GPU on its stream the flush of flush_bytes (> 0; L2 emptied) and the GPUs' line-up (host.cuh
-// static_host_prelude), then event, kernel, event (the events time the launch as a server sees it: static_elapsed)
+// GPU: event, kernel, event (one host thread per GPU when there are several). Serving mode (STATIC_RESET_IN_KERNEL: the kernel
+// resets its own buffers): no host step and no host wait; per GPU on its stream the flush of flush_bytes (> 0; L2 emptied) and
+// the GPUs' line-up (host.cuh static_host_prelude), then event, kernel, event (the events time the launch as a server sees it:
+// static_elapsed)
 static void static_launch(size_t flush_bytes) {
+  g_flush_bytes = flush_bytes;
   int const n = (int)g_st.size();
+  // a probe (environment STATIC_COLD_RESETS_MB = N): N MB of scratch written after the host's resets, so the reset buffers are
+  // cold when the layer starts, as the rest of its data after the harness's flush
+  static size_t const cold = getenv("STATIC_COLD_RESETS_MB") ? (size_t)atoi(getenv("STATIC_COLD_RESETS_MB")) << 20 : 0;
+  static std::vector<void *> cold_buf(n, nullptr);
   for (int g = 0; g < n; g++) {
     StaticGpu &s = g_st[g];
     ST_CK(cudaSetDevice(g_dev0 + g));
     static_host_reset(g, s.stream, g_launches);
     if (STATIC_PROFILE) ST_CK(cudaMemsetAsync(s.times, 0, static_times_count * sizeof(unsigned long long), s.stream));
+    if (cold) {
+      if (!cold_buf[g]) ST_CK(cudaMalloc(&cold_buf[g], cold));
+      ST_CK(cudaMemsetAsync(cold_buf[g], (int)(g_launches & 0x7F), cold, s.stream));
+    }
   }
 #ifndef STATIC_RESET_IN_KERNEL
   (void)flush_bytes;
@@ -486,27 +831,106 @@ static void static_launch(size_t flush_bytes) {
     ST_CK(cudaStreamSynchronize(g_st[g].stream));
   }
 #endif
-  for (int gpu = 0; gpu < n; gpu++) {
-    StaticGpu &s = g_st[gpu];
-    ST_CK(cudaSetDevice(g_dev0 + gpu));
-#ifdef STATIC_RESET_IN_KERNEL
-    static_host_prelude(gpu, s.stream, flush_bytes, (unsigned)(g_launches + 1));
+#if defined(STATIC_LINEUP) && defined(STATIC_EARLY) && defined(__HIP_PLATFORM_AMD__)
+  if (n > 1) {
+    for (int g = 0; g < n; g++) {
+      ST_CK(cudaSetDevice(g_dev0 + g));
+      static_lineup_kernel<<<1, 64, 0, g_st[g].stream>>>(static_host::g_gpus[g].g);
+      ST_CK(cudaEventRecord(g_st[g].start, g_st[g].stream));
+      static_launch_early(g);
+    }
+    g_launches++;
+    return;
+  }
 #endif
-    ST_CK(cudaEventRecord(s.start, s.stream));
-    @LAUNCH@
-    ST_CK(cudaGetLastError());
-    ST_CK(cudaEventRecord(s.end, s.stream));
+#if defined(STATIC_LINEUP) && defined(__HIP_PLATFORM_AMD__)
+  if (n > 1) {
+    for (int g = 0; g < n; g++) {
+      ST_CK(cudaSetDevice(g_dev0 + g));
+      static_lineup_kernel<<<1, 64, 0, g_st[g].stream>>>(static_host::g_gpus[g].g);
+      static_launch_one(g);
+    }
+    g_launches++;
+    return;
+  }
+#endif
+#ifdef STATIC_LAUNCH_GATE
+  if (n > 1) {
+    unsigned const go = (unsigned)(g_launches + 1);
+    for (int g = 0; g < n; g++) {
+      ST_CK(cudaSetDevice(g_dev0 + g));
+      ST_CK(hipStreamWaitValue32(g_st[g].stream, g_gate, go, hipStreamWaitValueGte, 0xFFFFFFFFu));
+      static_launch_one(g);
+    }
+    __atomic_store_n(g_gate, go, __ATOMIC_RELEASE);
+    g_launches++;
+    return;
+  }
+#endif
+  if (n == 1) {
+    static_launch_one(0);
+  } else {
+    if (g_pool.empty()) static_pool_start();
+    g_pool_done.store(0, std::memory_order_release);
+    g_go.fetch_add(1, std::memory_order_acq_rel);
+    while (g_pool_done.load(std::memory_order_acquire) < n) std::this_thread::yield();
   }
   g_launches++;
+}
+
+// GPU `rank` of the layer in a process of its own (a serving framework's TP rank): this GPU only (device g_dev0), its rank's
+// task lists, static_host_init_rank with the caller's exchange region (mc: its multicast address, rv: this GPU's copy). CUDA
+// host.cuh only (HIP: amd/tools/gen_rank_lib.py builds the per-rank server libraries)
+static const char *static_init_rank(int rank, std::map<std::string, void *> const &tensors, unsigned char *mc,
+                                    unsigned char *rv) {
+#ifdef __HIP_PLATFORM_AMD__
+  (void)rank; (void)tensors; (void)mc; (void)rv;
+  return "init_rank: CUDA only (HIP: amd/tools/gen_rank_lib.py)";
+#else
+  if (rank < 0 || rank >= static_mk::GPUS) {
+    fprintf(stderr, "layer: rank %d of %d GPUs\n", rank, static_mk::GPUS);
+    exit(1);
+  }
+  g_st.assign(1, StaticGpu());
+  g_ctx.num_gpus = 1;
+  g_ctx.num_lists = static_mk::NSM;
+  g_ctx.gpus.assign(1, StaticGpuView());
+  ST_CK(cudaSetDevice(g_dev0));
+  ST_CK(cudaStreamCreate(&g_st[0].stream));
+  ST_CK(cudaEventCreate(&g_st[0].start));
+  ST_CK(cudaEventCreate(&g_st[0].end));
+  ST_CK(cudaFuncSetAttribute(layer_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)(@SMEM@)));
+  int const max_tasks = (int)(@MAX_TASKS@);
+  std::vector<StaticTask> table((size_t)static_mk::NSM * max_tasks, StaticTask{-1, 0, 0, 0});
+  for (int sm = 0; sm < static_mk::NSM; sm++) {
+    int const b = static_list_begin[rank][sm], n = static_list_begin[rank][sm + 1] - b;
+    if (n > max_tasks - 1) {
+      fprintf(stderr, "layer: GPU %d SM %d: %d tasks, at most %d\n", rank, sm, n, max_tasks - 1);
+      exit(1);
+    }
+    for (int i = 0; i < n; i++) table[(size_t)sm * max_tasks + i] = static_tasks_of[rank][b + i];
+  }
+  ST_CK(cudaMalloc(&g_st[0].tasks, table.size() * sizeof(StaticTask)));
+  ST_CK(cudaMemcpy(g_st[0].tasks, table.data(), table.size() * sizeof(StaticTask), cudaMemcpyHostToDevice));
+  g_ctx.gpus[0].gpu = g_dev0;
+  g_ctx.gpus[0].tensors = tensors;
+  static_host_init_rank(g_ctx, @ARGS@, rank, mc, rv);
+  if (STATIC_PROFILE) ST_CK(cudaMalloc(&g_st[0].times, static_times_count * sizeof(unsigned long long)));
+  return nullptr;
+#endif
 }
 
 // one launch on the caller's stream, for a layer inside another framework's step (one GPU, the serving build
 // -DSTATIC_RESET_IN_KERNEL: the kernel resets its own buffers): no host resets, no sync, no event, so a CUDA graph can capture
 // it between the framework's kernels. pdl: a programmatic launch (PDL): the kernel's start (its resets, the barrier over the
-// SMs) overlaps the previous kernel; it waits for that kernel before reading its output (core.cuh kernel_begin).
+// SMs) overlaps the previous kernel; it waits for that kernel before reading its output (core.cuh kernel_begin). CUDA only.
 static const char *static_launch_stream(cudaStream_t stream, bool pdl) {
-#ifndef STATIC_RESET_IN_KERNEL
+#if !defined(STATIC_RESET_IN_KERNEL)
+  (void)stream; (void)pdl;
   return "launch_stream needs the serving build (-DSTATIC_RESET_IN_KERNEL)";
+#elif defined(__HIP_PLATFORM_AMD__)
+  (void)stream; (void)pdl;
+  return "launch_stream: CUDA only (HIP: amd/tools/gen_rank_lib.py)";
 #else
   if (g_st.size() != 1) return "launch_stream: one GPU in this process (a layer built for one GPU, or init_rank_func)";
   int const gpu = 0;
@@ -558,6 +982,9 @@ static cudaError_t static_wait() {
     ST_CK(cudaSetDevice(g_dev0 + (int)g));
     cudaError_t const e = cudaEventSynchronize(g_st[g].end);
     if (e != cudaSuccess) return e;
+#ifdef __HIP_PLATFORM_AMD__
+    static_host_par_mirror((int)g, g_launches - 1);   // (after the end event: not in the timed window)
+#endif
   }
   return cudaSuccess;
 }
@@ -574,6 +1001,14 @@ static cudaError_t static_done(bool *done) {
       return e;
     }
   }
+#ifdef __HIP_PLATFORM_AMD__
+  if (*done) { // (static_wait's copy, for the polled wait)
+    for (size_t g = 0; g < g_st.size(); g++) {
+      ST_CK(cudaSetDevice(g_dev0 + (int)g));
+      static_host_par_mirror((int)g, g_launches - 1);
+    }
+  }
+#endif
   return cudaSuccess;
 }
 
@@ -601,6 +1036,9 @@ static cudaError_t static_read(int g, std::string const &name, std::vector<char>
 }
 
 static void static_finalize() {
+  g_pool_quit = true;
+  for (std::thread &t : g_pool) t.join();
+  g_pool.clear();
   static_host_finalize(g_ctx);
   for (size_t g = 0; g < g_st.size(); g++) {
     StaticGpu &s = g_st[g];
@@ -655,7 +1093,8 @@ static PyObject *py_init_rank(PyObject *self, PyObject *args) {
     tensors[s] = PyLong_AsVoidPtr(PyList_GetItem(pl, i));
   }
   if (PyErr_Occurred()) return NULL;
-  static_init_rank(rank, tensors, reinterpret_cast<unsigned char *>(mc), reinterpret_cast<unsigned char *>(rv));
+  const char *err = static_init_rank(rank, tensors, reinterpret_cast<unsigned char *>(mc), reinterpret_cast<unsigned char *>(rv));
+  if (err) { PyErr_SetString(PyExc_RuntimeError, err); return NULL; }
   Py_RETURN_NONE;
 }
 static PyObject *py_launch(PyObject *self, PyObject *args) {
@@ -683,6 +1122,11 @@ static PyObject *py_rebind(PyObject *self, PyObject *args) {
   const char *name;
   unsigned long long ptr;
   if (!PyArg_ParseTuple(args, "sK", &name, &ptr)) return NULL;
+#ifdef __HIP_PLATFORM_AMD__
+  (void)name; (void)ptr;
+  PyErr_SetString(PyExc_RuntimeError, "rebind: CUDA only");
+  return NULL;
+#else
   if (g_st.size() != 1) { PyErr_SetString(PyExc_RuntimeError, "rebind: a layer built for one GPU"); return NULL; }
   ST_CK(cudaSetDevice(g_dev0));
   if (!static_host_rebind(0, name, reinterpret_cast<void *>(ptr))) {
@@ -690,6 +1134,7 @@ static PyObject *py_rebind(PyObject *self, PyObject *args) {
     return NULL;
   }
   Py_RETURN_NONE;
+#endif
 }
 static PyObject *py_launch_stream(PyObject *self, PyObject *args) {
   unsigned long long stream;
@@ -820,18 +1265,23 @@ class StaticKernel:
             self._finalized = True
 
 
-def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]] = None) -> List[str]:
-    """-O3 -std=c++17, the GPU's own arch, -lcuda, plus what a Python extension
-    needs (-shared, -fPIC, the Python headers)."""
-    import torch
+def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]] = None, arch: Optional[str] = None) -> List[str]:
+    """-O3 -std=c++17, the GPU's own arch, plus what a Python extension needs (-shared, -fPIC, the Python headers). CUDA: nvcc,
+    -lcuda; HIP (gpu_backend): hipcc --offload-arch (arch: e.g. gfx950; default the GPU's)."""
     from ..kernel import get_key_paths
     _, include_path, _ = get_key_paths()
-    major, minor = torch.cuda.get_device_capability(0)
-    arch = f"{major}{minor}a" if major >= 9 else f"{major}{minor}"
     scheme = sysconfig.get_default_scheme() if hasattr(sysconfig, "get_default_scheme") else sysconfig._get_default_scheme()
     if scheme == "posix_local":
         scheme = "posix_prefix"
     python_include = sysconfig.get_paths(scheme=scheme)["include"]
+    if gpu_backend.backend() == "hip":
+        return ([shutil.which("hipcc") or "hipcc", "-O3", "-std=c++17", f"--offload-arch={arch or gpu_backend.offload_arch()}",
+                 f"-I{include_path}", f"-I{python_include}", "-shared", "-fPIC", cu_path, "-o", so_path]
+                + list(extra_flags or []))
+    if arch is None:
+        import torch
+        major, minor = torch.cuda.get_device_capability(0)
+        arch = f"{major}{minor}a" if major >= 9 else f"{major}{minor}"
     return ([shutil.which("nvcc"), "-O3", "-std=c++17", "-gencode", f"arch=compute_{arch},code=sm_{arch}",
              f"-I{include_path}", f"-I{python_include}",
              "-shared", "-Xcompiler=-fPIC", "-lcuda", cu_path, "-o", so_path]
@@ -840,22 +1290,27 @@ def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]]
 
 def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dict]] = None, out_dir: Optional[str] = None,
                    extra_flags: Optional[List[str]] = None, profile: bool = False, device: int = 0, rank: Optional[int] = None,
-                   exchange: Optional[tuple] = None) -> StaticKernel:
+                   exchange: Optional[tuple] = None, solo: bool = False) -> StaticKernel:
     """  1. read the schedule files; write <out_dir>/layer.cu = generate_code
-       2. nvcc it into a Python extension (compile_command) and load it
+       2. nvcc / hipcc it into a Python extension (compile_command) and load it
        3. init_func: every GPU's tensors (gpu_tensors[g] = {name: torch tensor on GPU g}) -> static_init -> static_host_init
-    rank: one GPU of a layer built for len(schedule_paths) GPUs, in a process of its own (a serving framework's TP rank):
+    rank (CUDA): one GPU of a layer built for len(schedule_paths) GPUs, in a process of its own (a serving framework's TP rank):
     gpu_tensors = [this GPU's tensors], exchange = (multicast address, this GPU's address) of the exchange region the caller
     allocated over the ranks (2 x the layout's set bytes, zero-filled: exchange_region_bytes), e.g. torch symmetric memory ->
     init_rank_func -> static_init_rank -> static_host_init_rank
-    profile: the timing build (static_harness.Harness.task_times). device: the CUDA device of GPU 0 (GPU g = device + g; a layer
-    built for one GPU inside another framework's process: that process's device). MIRAGE_STATIC_BUILD_CACHE (a directory): the
-    builds by the md5 of layer.cu, the flags and the kernel templates (code_tag); the same layer.cu (e.g. every KDA layer of a
-    model, every rank) is compiled once and copied, and each copy is loaded on its own (its own host state)."""
-    num_gpus = len(schedule_paths)
+    profile: the timing build (static_harness.Harness.task_times). device: the device of GPU 0 (GPU g = device + g; a layer
+    built for one GPU inside another framework's process: that process's device). solo (HIP): built for every GPU's schedule,
+    run on one (GPU 0's lists; gpu_tensors: GPU 0's dict only); the kernel skips its waits for other GPUs' data (STATIC_SOLO).
+    MIRAGE_STATIC_BUILD_CACHE (a directory): the builds by the md5 of layer.cu, the flags and the kernel templates (code_tag);
+    the same layer.cu (e.g. every KDA layer of a model, every rank) is compiled once and copied, and each copy is loaded on its
+    own (its own host state). Without it: out_dir's build is reused when the code, the command and the headers are unchanged."""
+    num_gpus = 1 if solo else len(schedule_paths)
+    if solo:
+        assert gpu_backend.backend() == "hip", "solo: the HIP templates only"
+        extra_flags = list(extra_flags or []) + ["-DSTATIC_SOLO"]
     gpu_tensors = gpu_tensors or [dict(pk._model_tensors)]
     assert len(gpu_tensors) == (1 if rank is not None else num_gpus), "one tensor dict per GPU of this process"
-    assert rank is None or (0 <= rank < num_gpus and exchange is not None), "rank: of the layer's GPUs, with the exchange region"
+    assert rank is None or (0 <= rank < len(schedule_paths) and exchange is not None), "rank: of the layer's GPUs, with the exchange region"
     out_dir = out_dir or os.path.dirname(os.path.abspath(schedule_paths[0]))
     os.makedirs(out_dir, exist_ok=True)
 
@@ -865,8 +1320,9 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
             schedules.append(json.load(f))
     cu_path = os.path.join(out_dir, "layer.cu")
     so_path = os.path.join(out_dir, "layer" + sysconfig.get_config_var("EXT_SUFFIX"))
+    code = generate_code(pk, schedules, profile)
     with open(cu_path, "w") as f:
-        f.write(generate_code(pk, schedules, profile))
+        f.write(code)
 
     command = compile_command(cu_path, so_path, extra_flags)
     cache = os.environ.get("MIRAGE_STATIC_BUILD_CACHE")
@@ -889,8 +1345,7 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
                 print(f"the layer from the build cache: {cached}", flush=True)
                 shutil.copy(cached, so_path)
     else:
-        print("building the layer:", " ".join(command), flush=True)
-        subprocess.check_call(command)
+        _build_or_reuse(code, command, out_dir, so_path)
 
     spec = importlib.util.spec_from_file_location("__mirage_static_launcher", so_path)
     module = importlib.util.module_from_spec(spec)
@@ -903,3 +1358,24 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
         return StaticKernel(module, num_gpus, cu_path, so_path)
     module.init_rank_func(int(rank), names[0], pointers[0], int(exchange[0]), int(exchange[1]))
     return StaticKernel(module, 1, cu_path, so_path)
+
+
+def _build_or_reuse(code: str, command: List[str], out_dir: str, so_path: str):
+    """Compile, or reuse out_dir's build when the code, the command and every header under include/mirage are the same."""
+    # (a GPU run then skips the ~6-10 s compile)
+    h = hashlib.sha256((code + "\0" + " ".join(command)).encode())
+    inc = os.path.join(os.environ.get("MIRAGE_ROOT", os.path.join(os.path.dirname(__file__), "..", "..", "..")), "include",
+                       "mirage")
+    for root, _, files in sorted(os.walk(inc)):
+        for name in sorted(files):
+            if name.endswith((".cuh", ".h")):
+                with open(os.path.join(root, name), "rb") as f:
+                    h.update(name.encode() + f.read())
+    key, key_path = h.hexdigest(), os.path.join(out_dir, "build.key")
+    if os.path.exists(so_path) and os.path.exists(key_path) and open(key_path).read() == key:
+        print("building the layer: unchanged, reusing", so_path, flush=True)
+    else:
+        print("building the layer:", " ".join(command), flush=True)
+        subprocess.check_call(command)
+        with open(key_path, "w") as f:
+            f.write(key)
