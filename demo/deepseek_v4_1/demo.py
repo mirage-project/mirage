@@ -3,7 +3,10 @@
 The layer is the official Attention.forward of a decode step (inference/model.py L766-792): x [8, 5120] bf16 and one position per
 token -> y [8, 5120] bf16. Each of the 8 tokens is its own sequence with its own caches. --tp 4 is SGLang's B200 recipe (TP4 +
 EP4): the GPU holds 16 of the 64 heads, its y is a partial sum, and the all-reduce that adds the 4 GPUs' parts is not part of
-the layer. --tp 1 is the DP-attention shape (all 64 heads on the GPU).
+the layer. --tp 1 is the DP-attention shape (all 64 heads on the GPU). --gpus 4 (with --tp 4): this process runs the layer on 4
+GPUs, shard r on GPU r, and the all-reduce is in the layer (sum_store_layer with num_gpus 4: each sum_store task sends its
+columns of this GPU's y to every GPU in bf16, then adds the 4 GPUs' parts in GPU order in fp32): every GPU's y is the layer's
+output, and the demo checks that it is bit-identical on the 4 GPUs.
 
 The variant follows from --layer (weights.variant_of; the nodes at TP4, one more at TP2 / TP1: act_quant before wo_b):
   swa      L0, 1             the window: sparse_attn over 128 keys                                           11 nodes
@@ -33,7 +36,9 @@ KV, the index K and the compressor state) are graph tensors kept across launches
                      shared.safetensors (the state before the first step), step<k>.safetensors (inputs, y, intermediates,
                      the state after the step; the caches also in the kernel's quantized layout). Per case and step, the --tp
                      shards run one after another on this GPU, each from the step's state: o_q byte for byte against the
-                     golden's heads, and y = bf16(the shards' wo_b K parts added in fp32) against the golden y
+                     golden's heads, y = bf16(the shards' wo_b K parts added in fp32) against the golden y, and the state
+                     each shard leaves (the window cache; the compressed KV, the index K and the compressor state; the
+                     caches a Reuse or Reindex layer reads, unchanged) against the golden's state after the step
 Steps 5-6 run the layer through the test harness (python/mirage/mpk/static_harness.py).
 
 The plan files are for one TP4 GPU at --pos 4096 on a B200 (148 SMs), per variant (--layer 0, 3, 24, 2, 20):
@@ -48,8 +53,12 @@ python demo.py --layer 3 [--checkpoint DIR|REPO] [--tp 4] [--rank 0] [--pos 4096
 python demo.py --layer 3 --tp 4 --plan hand --record costs.json             (cost records of this GPU)
 python demo.py --layer 3 --tp 4 --plan hand --search costs.json             (the solver's plan from these records)
 python demo.py --layer 2 --tp 4 --golden /path/to/dsv4_1_golden [--cases L2_p2047 L2_mixed]
+python demo.py --layer 3 --tp 4 --gpus 4 [--golden DIR]                   (4 GPUs, the all-reduce in the layer)
+python demo.py --layer 3 --tp 4 --gpus 4 --cupti --nvcc-flag=-DSTATIC_RESET_IN_KERNEL
+                                                          (kernel time: the serving build lines the 4 GPUs up before each launch)
 """
 import argparse
+import copy
 import glob
 import json
 import os
@@ -61,7 +70,7 @@ from safetensors import safe_open
 from mirage.core import bfloat16, float32, uint8
 from mirage.mpk import compiler
 from mirage.mpk.static_harness import Harness
-from mirage.mpk.static_megakernel import RING_STAGES, StaticMegakernel, zq_bytes
+from mirage.mpk.static_megakernel import MAX_BUFS, RING_STAGES, StaticMegakernel, zq_bytes
 
 try:
     from .weights import checkpoint_reader, download_layer, layer_tensors, model_config, variant_of   # as a package
@@ -93,11 +102,13 @@ def state_tensors(variant: str, ratio: int, csrc: bool, cap: int, dev) -> dict:
 
 
 def build_graph(mpk: StaticMegakernel, w: dict, variant: str, ratio: int, csrc: bool, heads: int):
-    """Declare the variant's layer calls on the tensors of w (load_weights and state_tensors)."""
+    """Declare the variant's layer calls on the tensors of w (load_weights and state_tensors). num_gpus > 1: sum_store does the
+    all-reduce."""
     compressed, full, reindex = variant != "swa", variant.startswith("full"), variant == "reindex"
     mpk.poll_ns = 0   # the waits spin (no sleep between polls)
+    xb = int(mpk.num_gpus > 1)   # sum_store's exchange buffer
     if full or reindex:   # the indexer's tensors need more than config.cuh's default 24 slots (the layer defines STATIC_MAX_BUFS):
-        mpk.max_bufs = 32 if full else 27   # exactly the slots the graph uses (each one more costs every launch)
+        mpk.max_bufs = (32 if full else 27) + xb   # exactly the slots the graph uses (each one more costs every launch)
     NQ, G = heads * D, heads // 8
     t = {}
     a = lambda k: t.setdefault(k, mpk.attach_input(torch_tensor=w[k], name=k))   # one tensor per name: writers and readers
@@ -157,7 +168,11 @@ def build_graph(mpk: StaticMegakernel, w: dict, variant: str, ratio: int, csrc: 
     wo_b_part = nt((T, HID), float32, "wo_b_part")
     mpk.gemm_fp8_tile_layer(input=oa_q, weight=a("wo_b_weight"), weight_scales=a("wo_b_scales"), output=wo_b_part,
                             tap=a("oa_q") if fused else None)
-    mpk.sum_store_layer(input=wo_b_part, output=a("y"))                                            # this GPU's y
+    if mpk.num_gpus > 1:   # y = the GPUs' parts added (sum_store's tasks send theirs to every GPU, then add)
+        sent = nt((mpk.num_gpus * T, HID), bfloat16, "y_sent")
+        mpk.sum_store_layer(input=wo_b_part, output=a("y"), sent=sent)                             # y on every GPU
+    else:
+        mpk.sum_store_layer(input=wo_b_part, output=a("y"))                                        # this GPU's y
 
 
 def score_chunks(heads: int, cap: int, sms: int) -> int:
@@ -174,7 +189,7 @@ def hand_grids(heads: int, cap: int, cmp_rows: int = 0) -> dict:
     return {"x_q": (T, 2, 1), "wq_a_part": (QL // 128, 4, 1), "qr_q": (T, 1, 1), "wq_b_part": (heads * D // 128, 1, 1),
             "wkv_part": (D // 128, 2, 1), "window_cache": (T, 1, 1), "o_q": (T, heads // 16, 1),
             "wo_a_part": (G * OL // 128, max(2, 64 // (G * OL // 128)), 1), "oa_q": (T, G * OL // 2048, 1),
-            "wo_b_part": (HID // 128, 4, 1), "y": (HID // 128, 1, 1), "cmp_part": (max(cmp_rows, 128) // 128, 4, 1), "latent": (T, 1, 1),
+            "wo_b_part": (HID // 128, 4, 1), "y": (HID // 128, 1, 1), "y_sent": (HID // 128, 1, 1), "cmp_part": (max(cmp_rows, 128) // 128, 4, 1), "latent": (T, 1, 1),
             "compress_cache": (T, 1, 1), "wk_part": (1, 1, 1), "index_k": (T, 1, 1), "iq_part": (4096 // 128, 1, 1),
             "q_idx": (T, 1, 1), "wp_part": (1, 4, 1), "compress_idx": (T, 1, 1)}
 
@@ -189,7 +204,8 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     """sparse_attn's tasks first, one on each of SMs 0..; the nodes before it dealt round robin over the other SMs in the order
     BEFORE; the nodes after it round robin over all SMs from the first SM without a sparse_attn task (wo_a's tasks not behind
     sparse_attn's: their weights load while it runs). The grids: hand_grids (wo_a in about 64 tasks, at least 2 K parts: TP4 4,
-    so that a task's 1024 K of weights fit its ring before o_q is there; x's act_quant in 2 column slices per token)."""
+    so that a task's 1024 K of weights fit its ring before o_q is there; x's act_quant in 2 column slices per token). The same
+    lists on every GPU (sum_store_layer with num_gpus > 1 needs that)."""
     nodes = compiler.graph_nodes(mpk)
     names = {n.graph_idx: compiler.tname(mpk, n.outputs[0]) for n in nodes}
     grid = hand_grids(heads, cap, cmp_rows)
@@ -212,20 +228,28 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     lists = [[own[sm]] if sm < n else [first[sm - n]] if sm < m else before[sm - m::sms - m] for sm in range(sms)]
     for i, tk in enumerate(after):
         lists[(n + i) % sms].append(tk)
-    return {"grids": grids, "lists": [lists]}
+    return {"grids": grids, "lists": [copy.deepcopy(lists) for _ in range(mpk.num_gpus)]}
 
 
-def build(w: dict, variant: str, ratio: int, csrc: bool, heads: int, out: str, plan: str = "hand", search: list = None,
+def build(ws: list, variant: str, ratio: int, csrc: bool, heads: int, out: str, plan: str = "hand", search: list = None,
           costs_code: str = "current", time_limit_s: float = 300, profile: bool = False, extra_flags: list = None):
-    """Build the graph, compile its plan and load the kernel. Return the kernel, the node buffers (by output tensor name) and
-    the information from compile_plan, with "paths" and "mpk"."""
-    mpk = StaticMegakernel(num_gpus=1)
+    """Build the graph on len(ws) GPUs (ws: each GPU's tensors), compile its plan and load the kernel. Return the kernel, each
+    GPU's node buffers (by output tensor name) and the information from compile_plan, with "paths" and "mpk"."""
+    gpus, w = len(ws), ws[0]
+    mpk = StaticMegakernel(num_gpus=gpus)
     build_graph(mpk, w, variant, ratio, csrc, heads)
+    for wg in ws[1:]:   # the fused act_quant's tap (build_graph made it on GPU 0)
+        if "oa_q" in w:
+            wg.setdefault("oa_q", torch.zeros_like(w["oa_q"], device=wg["x"].device))
     sms = torch.cuda.get_device_properties(0).multi_processor_count
     cap = w["compress_cache"].shape[1] if "compress_cache" in w else 256
     p = hand_plan(mpk, heads, cap, w["cmp_weight"].shape[0] if "cmp_weight" in w else 0, sms) if plan == "hand" \
         else compiler.plan_from_file(plan)
+    if len(p["lists"]) == 1 and gpus > 1:   # a plan file of one GPU: the same lists on every GPU
+        p = dict(p, lists=[copy.deepcopy(p["lists"][0]) for _ in range(gpus)])
     if search:
+        if gpus > 1:
+            raise ValueError("--search: one GPU only")
         from mirage.mpk import plan_viewer, search as solver, static_schedule
         code = {"current": static_schedule.code_tag(), "any": None}.get(costs_code, costs_code)
         costs = solver.Costs(search, code=code, gpu=torch.cuda.get_device_name(0))
@@ -235,12 +259,13 @@ def build(w: dict, variant: str, ratio: int, csrc: bool, heads: int, out: str, p
         plan_viewer.save(os.path.join(out, "plan_view.json"), p, summary, f"searched from {plan}")
     paths, info = compiler.compile_plan(mpk, p, os.path.join(out, "schedules"))
     nodes = compiler.graph_nodes(mpk)
-    bufs = {compiler.tname(mpk, n.outputs[0]): torch.zeros(n.info["out_buffer"](n)[0], dtype=torch.uint8, device="cuda")
-            for n in nodes if n.info["out_buffer"] is not None}
-    if "oa_q" in w and "oa_q" not in bufs:   # fused act_quant: wo_b's x_q tap (build_graph), with the node buffers
-        bufs["oa_q"] = w["oa_q"]
-    sk = mpk.compile_static(paths, gpu_tensors=[{**w, **bufs}], out_dir=os.path.join(out, "build"), extra_flags=extra_flags,
-                            profile=profile)
+    bufs = [{compiler.tname(mpk, n.outputs[0]): torch.zeros(n.info["out_buffer"](n)[0], dtype=torch.uint8, device=wg["x"].device)
+             for n in nodes if n.info["out_buffer"] is not None and not n.info["exchange"]} for wg in ws]
+    for wg, bg in zip(ws, bufs):
+        if "oa_q" in wg and "oa_q" not in bg:   # fused act_quant: wo_b's x_q tap (build_graph), with the node buffers
+            bg["oa_q"] = wg["oa_q"]
+    sk = mpk.compile_static(paths, gpu_tensors=[{**wg, **bg} for wg, bg in zip(ws, bufs)], out_dir=os.path.join(out, "build"),
+                            extra_flags=extra_flags, profile=profile)
     return sk, bufs, dict(info, paths=paths, mpk=mpk, plan=p)
 
 
@@ -324,43 +349,101 @@ def golden_state(w: dict, g, src, pre: str, variant: str, ratio: int, csrc: bool
         w["candidates"].fill_(0xAB)
 
 
-def check_golden(args, w: dict, shards: list, variant: str, ratio: int, csrc: bool, heads: int):
-    """--golden: per case and step, the shards one after another from the step's state; o_q and y against the golden."""
+# the quantized caches the state check compares: per row its value bytes (then its scale bytes), e2m1 values (else e4m3)
+CACHES = {"window_cache": (D, False), "compress_cache": (D // 2, True), "index_k": (64, True)}
+
+
+def cache_diff(got: torch.Tensor, exp: torch.Tensor, nv: int, fp4: bool) -> tuple:
+    """A quantized cache (per row nv value bytes, then the scale bytes) against the golden's: (rows, rows equal, values one
+    code step off, values further off, rows whose scale bytes differ). A value's code: its e4m3 byte (fp4: e2m1, two a byte)
+    as a signed integer in value order; the values are compared in the rows whose scale bytes are equal."""
+    got, exp = got.reshape(-1, got.shape[-1]), exp.reshape(-1, exp.shape[-1])
+    ne = (got != exp).any(-1)
+    g, e = got[ne], exp[ne]
+    sdiff = (g[:, nv:] != e[:, nv:]).any(-1)
+
+    def code(b):
+        if fp4:
+            b = torch.stack([b & 15, b >> 4], -1).flatten(-2)
+        sign, mag = (b >> 3, b & 7) if fp4 else (b >> 7, b & 127)
+        return torch.where(sign.bool(), -mag.int(), mag.int())
+
+    d = (code(g[~sdiff, :nv]) - code(e[~sdiff, :nv])).abs()
+    return got.shape[0], int((~ne).sum()), int((d == 1).sum()), int((d > 1).sum()), int(sdiff.sum())
+
+
+def check_golden(args, ws: list, shards: list, variant: str, ratio: int, csrc: bool, heads: int):
+    """--golden: per case and step, o_q and y against the golden, and the state each shard leaves against the golden's state after
+    the step (golden_state with its state_after tensors). One GPU (ws: one): the shards one after another on it, each from the
+    step's state; y = bf16(the shards' wo_b K parts added in fp32). --gpus = --tp: one launch per step, shard r on GPU r (the
+    all-reduce in the layer): y of GPU 0 (y of every GPU must be equal), also against y_ref = bf16(the shards' wo_b K parts
+    added in fp32), which is the one-GPU check's y."""
+    multi, w = len(ws) > 1, ws[0]
     cases = args.cases or sorted(os.path.basename(d.rstrip("/")) for d in glob.glob(os.path.join(args.golden, f"L{args.layer}_*/")))
     state = [k for k in ("window_cache", "compress_cache", "index_k", "cmp_state", "candidates", "compress_idx") if k in w]
     stats = {"steps": 0, "o_q heads equal": 0, "o_q heads": 0, "y values within 2^-7 relative": 0, "y values": 0,
              "y relRMS max": 0.0}
+    if multi:
+        stats.update({"steps with y equal on every GPU": 0, "y values equal to y_ref": 0, "y vs y_ref relRMS max": 0.0})
+    cst = {n: [0] * 5 for n in CACHES if n in w}   # cache_diff's counts, added over the steps and shards
+    sst = {"values equal": 0, "values": 0, "relRMS max": 0.0}   # the compressor state
     for case in cases:
         src, pre = safe_open(os.path.join(args.golden, case, "shared.safetensors"), "pt"), ""
         nsteps = json.load(open(os.path.join(args.golden, case, "case.json")))["steps"]
         for k in range(nsteps):
             g = safe_open(os.path.join(args.golden, case, f"step{k}.safetensors"), "pt")
-            golden_state(w, g, src, pre, variant, ratio, csrc)
+            for wg in ws:
+                golden_state(wg, g, src, pre, variant, ratio, csrc)
             snapshot = {n: w[n].clone() for n in state}
-            ysum = torch.zeros(T, HID, dtype=torch.float32, device="cuda")
+            exp = {n: w[n].clone() for n in ("x", "positions", *state)}   # the state the step should leave
+            golden_state(exp, g, g, "state_after.", variant, ratio, csrc)
+            ysum = torch.zeros(T, HID, dtype=torch.float32, device=w["x"].device)   # GPU 0 (a launch leaves another current)
             g_oq = g.get_tensor("o_q").view(torch.uint8).view(T, 64, D)
             g_os = g.get_tensor("o_s").view(torch.uint8).view(T, 64, D // 32)
-            for r, sw in enumerate(shards):
-                for n in state:
-                    w[n].copy_(snapshot[n])
-                for n, v in sw.items():
-                    w[n].copy_(v)
+            if multi:
                 args.h.launch(0, timeout_s=60)
-                oq, os_ = from_buffer(args.bufs["o_q"], heads * D)
+            for r in range(len(shards)):
+                wg, bg = (ws[r], args.bufs[r]) if multi else (w, args.bufs[0])
+                if not multi:
+                    for n in state:
+                        w[n].copy_(snapshot[n])
+                    for n, v in shards[r].items():
+                        w[n].copy_(v)
+                    args.h.launch(0, timeout_s=60)
+                oq, os_ = from_buffer(bg["o_q"], heads * D)
                 hs = slice(heads * r, heads * (r + 1))
                 eq = (oq.view(T, heads, D) == g_oq[:, hs]).all(-1) & (os_.view(T, heads, D // 32) == g_os[:, hs]).all(-1)
                 stats["o_q heads equal"] += int(eq.sum())
                 stats["o_q heads"] += eq.numel()
-                ysum += added(args.bufs["wo_b_part"], HID)
-            y, gold = ysum.bfloat16().float(), g.get_tensor("y").cuda().float()
+                ysum += added(bg["wo_b_part"], HID).to(ysum.device)
+                for n, acc in cst.items():
+                    for i, v in enumerate(cache_diff(wg[n].to(exp[n].device), exp[n], *CACHES[n])):
+                        acc[i] += v
+                if "cmp_state" in w:
+                    got, ref = wg["cmp_state"].to(exp["cmp_state"].device), exp["cmp_state"]
+                    sst["values equal"] += int((got == ref).sum())
+                    sst["values"] += got.numel()
+                    sst["relRMS max"] = max(sst["relRMS max"], ((got - ref).norm() / ref.norm().clamp(min=1e-30)).item())
+            y, gold = ysum.bfloat16().float(), g.get_tensor("y").to(ysum.device).float()
+            if multi:   # the layer's own all-reduce
+                y_ref, y = y, w["y"].float()
+                stats["steps with y equal on every GPU"] += int(all(torch.equal(wg["y"].cpu(), w["y"].cpu()) for wg in ws))
+                stats["y values equal to y_ref"] += int((y == y_ref).sum())
+                stats["y vs y_ref relRMS max"] = max(stats["y vs y_ref relRMS max"], ((y - y_ref).norm() / y_ref.norm()).item())
             near = (gold.abs() * 2.0 ** -7).clamp(min=2.0 ** -133)   # 1 to 2 bf16 steps at the golden's magnitude
             stats["y values within 2^-7 relative"] += int(((y - gold).abs() <= near).sum())
             stats["y values"] += y.numel()
             stats["y relRMS max"] = max(stats["y relRMS max"], ((y - gold).norm() / gold.norm()).item())
             stats["steps"] += 1
             src, pre = g, "state_after."
-    print(f"{variant} L{args.layer} tp {args.tp}, {len(cases)} cases: " + ", ".join(
+    gp = f", {len(ws)} GPUs" if multi else ""
+    print(f"{variant} L{args.layer} tp {args.tp}{gp}, {len(cases)} cases: " + ", ".join(
         f"{k}: {v:.2e}" if isinstance(v, float) else f"{k}: {v}" for k, v in stats.items()))
+    print(f"{variant} L{args.layer} tp {args.tp}{gp}, the state each shard left vs the golden's state after the step: " + "; ".join(
+        [f"{n}: rows equal {a[1]} / {a[0]}, values 1 step off {a[2]}, further off {a[3]}, rows with other scales {a[4]}"
+         for n, a in cst.items()]
+        + ([f"cmp_state: values equal {sst['values equal']} / {sst['values']}, relRMS max {sst['relRMS max']:.2e}"]
+           if "cmp_state" in w else [])))
 
 
 def main():
@@ -371,6 +454,8 @@ def main():
     ap.add_argument("--layer", type=int, default=3, help="a layer of the backbone (0..39); its variant follows from the config")
     ap.add_argument("--tp", type=int, default=4, help="attention TP size: 4 (16 heads per GPU), 2 (32) or 1 (64 heads: DP attention)")
     ap.add_argument("--rank", type=int, default=0, help="the GPU's rank in attention TP (its heads)")
+    ap.add_argument("--gpus", type=int, default=1, help="1 (one shard: --rank), or 4 with --tp 4: shard r on GPU r, the "
+                    "all-reduce in the layer")
     ap.add_argument("--pos", type=int, default=4096, help="the position of the 8 tokens (random inputs)")
     ap.add_argument("--out", default="build/dsv41_attn")
     ap.add_argument("--reps", type=int, default=20)
@@ -391,6 +476,10 @@ def main():
     args = ap.parse_args()
     if args.tp not in (1, 2, 4) or not 0 <= args.rank < args.tp:
         raise ValueError(f"--tp {args.tp} --rank {args.rank}: tp 1, 2 or 4 (sparse_attn takes 16 heads a task)")
+    if not (args.gpus == 1 or (args.gpus == 4 and args.tp == 4)) or args.gpus > torch.cuda.device_count():
+        raise ValueError(f"--gpus {args.gpus} --tp {args.tp}: --gpus 1, or --gpus 4 with --tp 4 (the GPUs visible: "
+                         f"{torch.cuda.device_count()})")
+    multi = args.gpus > 1
     snapshot = download_layer(args.checkpoint, args.layer, revision=args.revision)
     cfg = model_config(snapshot)
     variant, ratio = variant_of(cfg, args.layer), cfg["compress_ratios"][args.layer]
@@ -404,23 +493,36 @@ def main():
     rows = (top + 2 + 255) // 256 * 256                      # the RoPE table's positions
     # compressed positions (indexer_score: whole 256-position chunks; at least the top-k's NC)
     cap = max(((top + 1) // max(ratio, 1) + 255) // 256 * 256, NC)
-    ranks = range(args.tp) if args.golden else [args.rank]
-    shards = [layer_tensors(read, cfg, args.layer, args.tp, r, rows, dev) for r in ranks]
+    ranks = range(args.tp) if args.golden or multi else [args.rank]
+    devs = [torch.device("cuda", r) for r in ranks] if multi else [dev] * len(ranks)
+    shards = [layer_tensors(read, cfg, args.layer, args.tp, r, rows, d) for r, d in zip(ranks, devs)]
     split = ("wq_b_weight", "wq_b_scales", "attn_sink", "wo_a_weight", "wo_a_scales", "wo_b_weight", "wo_b_scales")
-    w = {**{k: v.clone() for k, v in shards[0].items()}, **state_tensors(variant, ratio, csrc, cap, dev)}
-    sk, bufs, info = build(w, variant, ratio, csrc, heads, args.out, args.plan, search=args.search, costs_code=args.costs_code,
+    if multi:   # GPU r: shard r, its own state
+        ws = [{**s, **state_tensors(variant, ratio, csrc, cap, d)} for s, d in zip(shards, devs)]
+    else:
+        ws = [{**{k: v.clone() for k, v in shards[0].items()}, **state_tensors(variant, ratio, csrc, cap, dev)}]
+    w = ws[0]
+    sk, bufs, info = build(ws, variant, ratio, csrc, heads, args.out, args.plan, search=args.search, costs_code=args.costs_code,
                            time_limit_s=args.time, profile=args.record is not None, extra_flags=args.nvcc_flag)
     h = Harness(sk)
-    print(f"{variant} L{args.layer}, tp {args.tp} ({heads} heads), grids {info['grids']}")
+    gp = f", {args.gpus} GPUs" if multi else ""
+    print(f"{variant} L{args.layer}, tp {args.tp} ({heads} heads){gp}, grids {info['grids']}")
     if args.save_plan:
         compiler.write_plan_file(args.save_plan, info["plan"])
     if args.golden:
         args.h, args.bufs = h, bufs
-        check_golden(args, w, [{k: s[k] for k in split} for s in shards], variant, ratio, csrc, heads)
+        check_golden(args, ws, [{k: s[k] for k in split} for s in shards], variant, ratio, csrc, heads)
         sk.finalize()
         return
-    random_inputs(w, variant, ratio, args.pos)
+    for wg in ws:   # the same inputs on every GPU (seed 1)
+        random_inputs(wg, variant, ratio, args.pos)
     h.launch(timeout_s=60)   # the same inputs each launch: every later launch writes the same cache rows again
+    y0 = w["y"].cpu()
+    if multi:   # the all-reduce's result: the same bits on every GPU
+        diff = [g for g, wg in enumerate(ws) if not torch.equal(wg["y"].cpu().view(torch.int16), y0.view(torch.int16))]
+        if diff:
+            raise RuntimeError(f"y differs from GPU 0's on GPUs {diff}")
+        print(f"y bit-identical on the {len(ws)} GPUs", flush=True)
     spans, events, launches = [], [], []
     serving = bool(h.layout.get("serving"))
     for _ in range(args.reps):
@@ -430,6 +532,11 @@ def main():
             events.append(max(h.elapsed_us()))
         if args.record:
             launches.append((h.task_times(), h.timing()))
+    if multi:   # the timed launches (the exchange region's two sets in turn) give the first launch's y again, on every GPU
+        diff = [g for g, wg in enumerate(ws) if not torch.equal(wg["y"].cpu().view(torch.int16), y0.view(torch.int16))]
+        if diff:
+            raise RuntimeError(f"after {args.reps} launches, y differs from the first launch's on GPUs {diff}")
+        print(f"y after {args.reps} launches: bit-identical to the first launch's on the {len(ws)} GPUs", flush=True)
     print(f"position {args.pos}: median span {statistics.median(spans):.1f} us over {args.reps} launches"
           + (f"; serving mode, events: median {statistics.median(events):.1f} us" if serving else ""))
     if args.cupti:   # the same launches timed by CUPTI: the kernel's duration as a profiler trace reports it
@@ -440,9 +547,16 @@ def main():
                 h.launch(512 << 20, timeout_s=60)
         path = os.path.join(tempfile.mkdtemp(), "trace.json")
         prof.export_chrome_trace(path)
-        durs = sorted(e["dur"] for e in json.load(open(path))["traceEvents"]
-                      if e.get("cat") == "kernel" and "layer_kernel" in e.get("name", ""))
-        print(f"CUPTI layer_kernel duration, {len(durs)} launches: median {statistics.median(durs):.1f} us")
+        ks = [e for e in json.load(open(path))["traceEvents"] if e.get("cat") == "kernel" and "layer_kernel" in e.get("name", "")]
+        per = {}   # per GPU, in launch order
+        for e in sorted(ks, key=lambda e: e["ts"]):
+            per.setdefault(e.get("args", {}).get("device", 0), []).append(e["dur"])
+        n = min(len(v) for v in per.values())
+        durs = [max(v[i] for v in per.values()) for i in range(n)]   # a launch: its slowest GPU
+        print(f"CUPTI layer_kernel duration, {n} launches: median {statistics.median(durs):.1f} us" + (
+            f" (the slowest of {len(per)} GPUs: the first launched waits for the others at the start barrier); the fastest GPU "
+            f"(the last launched): median {statistics.median(min(v[i] for v in per.values()) for i in range(n)):.1f} us"
+            if len(per) > 1 else ""))
     if args.record:
         from mirage.mpk import cost_records
         nvcc = subprocess.run(["nvcc", "--version"], capture_output=True, text=True).stdout.strip().splitlines()[-1]

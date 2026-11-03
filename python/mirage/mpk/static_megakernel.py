@@ -748,24 +748,38 @@ class StaticMegakernel(PersistentKernel):
         self,
         input: DTensor,     # wo_b's output [T, N] fp32: a gemm_fp8_tile node's K parts in slots
         output: DTensor,    # y [T, N] bf16: the layer's output (a graph tensor)
+        sent: DTensor = None,     # num_gpus > 1: [num_gpus x T, N] bf16, the exchange buffer the GPUs' sums go through
         block_dim: tuple = (256, 1, 1),
     ):
         """Task x: columns [128 x, 128 x + 128) (default; the compiler may give a task 1..8 such blocks): DeepSeek-V4.1's
         attention output (model.py L790, x = wo_b(o)): wo_b's K parts added in part order (polled) -> bf16 -> y, written by
-        pointer. The node's counter counts the tasks. params = [N]."""
+        pointer. The node's counter counts the tasks. params = [N].
+        num_gpus > 1 (attention TP, each GPU's y a partial sum): the all-reduce is in the task. It first sends this GPU's sums of
+        its columns (bf16) to every GPU, into the node's buffer in the exchange region, then adds the GPUs' sums in GPU order
+        (fp32) -> bf16 -> y: the official RowParallelLinear's rounding points (fp8_gemm's bf16 output, the parts added in fp32).
+        Every GPU must run the same plan."""
         from .compiler import graph_nodes, producer_of
         p = producer_of(input, graph_nodes(self))
         if p is None or p.name != "gemm_fp8_tile" or p.params[0] != COMBINE["slots"]:
             raise ValueError(f"sum_store_layer: the input must be a gemm_fp8_tile node's output in slots; it comes from "
                              f"{p.name if p else 'the graph inputs'}")
         at_most_parts(p, 16)   # tasks/sum_store.cuh: at most 16 K parts
-        T, N = self._tokens(input.dim(0)), input.dim(1)
+        T, N, GPUS = self._tokens(input.dim(0)), input.dim(1), self.num_gpus
         self._dtypes("sum_store_layer", input=(input, float32), output=(output, bfloat16))
         assert input.num_dims == 2 and output.num_dims == 2 and (output.dim(0), output.dim(1)) == (T, N) and N % 128 == 0
-        self._add_node("sum_store", (N // 128, 1, 1), block_dim, [input, output], [(1, -1, -1), (1, -1, -1)], [N],
+        tp = {}
+        if GPUS > 1:
+            if sent is None:
+                raise ValueError("sum_store_layer: with num_gpus > 1, `sent` (the exchange buffer's tensor, [num_gpus x T, N])")
+            self._dtypes("sum_store_layer", sent=(sent, bfloat16))
+            assert sent.num_dims == 2 and (sent.dim(0), sent.dim(1)) == (GPUS * T, N)
+            tp = dict(out_buffer=lambda n: (GPUS * T * N * 2, 0xFF, True), exchange=True)   # re-armed by its reader (the task)
+        self._add_node("sum_store", (N // 128, 1, 1), block_dim, [input, sent if GPUS > 1 else output],
+                       [(1, -1, -1), (1, -1, -1)], [N],
                        changeable_grid_dims={0: (128, 1, 8)}, counters=1, buf_slots=[self._tensor_slot(output)],
                        cost_inputs=[0],   # adds wo_b's K parts
-                       dry=True)          # its first task on an SM runs once dry while wo_b's parts are on their way
+                       dry=True,          # its first task on an SM runs once dry while wo_b's parts are on their way
+                       **tp)
 
     def indexer_q_layer(
         self,
