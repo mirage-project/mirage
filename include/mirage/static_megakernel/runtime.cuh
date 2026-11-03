@@ -378,9 +378,23 @@ __device__ __forceinline__ uint32_t cnt_ld(uint32_t const *c) {
                : "memory");
   return v;
 }
+// the pause between a poll's rounds (0: spin): STATIC_CNT_POLL_NS a counter's
+// (cnt_wait), STATIC_POLL_NS a polled buffer's (data-as-flag); a layer may
+// set them (StaticMegakernel.poll_ns)
+#ifndef STATIC_CNT_POLL_NS
+#define STATIC_CNT_POLL_NS 200
+#endif
+#ifndef STATIC_POLL_NS
+#define STATIC_POLL_NS 64
+#endif
+__device__ __forceinline__ void poll_pause(int ns) {
+  if (ns > 0) {
+    __nanosleep(ns);
+  }
+}
 __device__ __forceinline__ void cnt_wait(uint32_t const *c, uint32_t target) {
   while (cnt_ld(c) < target) {
-    __nanosleep(200);
+    poll_pause(STATIC_CNT_POLL_NS);
   }
 }
 // sums several SMs add into (shared gate_up's K parts, gemm_tile.cuh): int64
@@ -449,7 +463,7 @@ __device__ __forceinline__ uint4 poll16(
     if ((v.x & v.y & v.z & v.w) != 0xFFFFFFFFu) {
       return v;
     }
-    __nanosleep(64);
+    poll_pause(STATIC_POLL_NS);
   }
 }
 __device__ __forceinline__ bool validf(float v) {

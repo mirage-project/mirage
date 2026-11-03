@@ -151,7 +151,10 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
             if getattr(pk, "max_bufs", None) else []) + (
             [f"#define STATIC_NODE_COUNTER_LINES {pk.max_counter_lines}   // counter lines (config.cuh NODE_COUNTER_LINES; "
              "StaticMegakernel.max_counter_lines)", ""]
-            if getattr(pk, "max_counter_lines", None) else []) + [
+            if getattr(pk, "max_counter_lines", None) else []) + \
+        ([f"// the waits' sleep between polls (StaticMegakernel.poll_ns; a -D flag wins)",
+          f"#ifndef STATIC_CNT_POLL_NS", f"#define STATIC_CNT_POLL_NS {pk.poll_ns}", "#endif",
+          f"#ifndef STATIC_POLL_NS", f"#define STATIC_POLL_NS {pk.poll_ns}", "#endif", ""] if pk.poll_ns is not None else []) + [
             "// the exchange region's layout (static_megakernel.py exchange_layout): one set's bytes, the start barrier's slots, per",
             "// buffer slot its offset and bytes (an exchange buffer; else 0)",
             f"#define STATIC_EXCHANGE_SET {set_bytes}", f"#define STATIC_EXCHANGE_HELLO {hello}",

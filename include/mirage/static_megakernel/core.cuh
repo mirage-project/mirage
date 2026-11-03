@@ -197,6 +197,16 @@ __host__ __device__ constexpr int param_or() {
   }
 }
 
+// params[I] of a node, 0 when it has fewer
+template <class PARAMS, int I>
+__host__ __device__ constexpr int param_or0() {
+  if constexpr (sizeof(PARAMS::v) / sizeof(int) > I + 1) {
+    return PARAMS::v[I];
+  } else {
+    return 0;
+  }
+}
+
 // entry I of a node's buffer slots or map slots (StaticBufSlots<S...>::v,
 // StaticMapSlots<S...>::v hold S..., -1)
 template <class SLOTS, int I>
