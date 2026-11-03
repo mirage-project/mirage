@@ -282,6 +282,44 @@ enum TaskType {
   TASK_DSA_MLA_MERGE_SM100 = 526,
   // Compute the MLA value up-projection o_lat W_UV (tasks/dsa_o_absorb.cuh).
   TASK_DSA_O_ABSORB_SM100 = 527,
+  // DeepSeek-V4.1 attention: one token's FP8 act_quant, 32-column groups with
+  // power-of-2 scales (tasks/act_quant.cuh)
+  TASK_ACT_QUANT_SM100 = 531,
+  // DeepSeek-V4.1 block-FP8 GEMM tile: e4m3 weights with a scale per 32 x 32
+  // block, act_quant's, q_norm's or sparse_attn's output; grouped for wo_a
+  // (tasks/gemm_fp8_tile.cuh)
+  TASK_GEMM_FP8_TILE_SM100 = 532,
+  // DeepSeek-V4.1 q_norm: wq_a's K parts added, RMSNorm, act_quant
+  // (tasks/q_norm.cuh)
+  TASK_Q_NORM_SM100 = 533,
+  // DeepSeek-V4.1 window K: wkv's K parts added, RMSNorm, RoPE, act_quant into
+  // the window cache (tasks/kv_post.cuh)
+  TASK_KV_POST_SM100 = 534,
+  // DeepSeek-V4.1 sparse attention: the window and the compressed list (a task
+  // per 128 keys at TP2 / TP4), the inverse RoPE, act_quant
+  // (tasks/sparse_attn.cuh)
+  TASK_SPARSE_ATTN_SM100 = 535,
+  // DeepSeek-V4.1 attention output: wo_b's K parts added -> bf16 -> y
+  // (tasks/sum_store.cuh)
+  TASK_SUM_STORE_SM100 = 536,
+  // DeepSeek-V4.1 indexer query: wq_b's K parts, RoPE, fp4
+  // (tasks/indexer_q.cuh)
+  TASK_INDEXER_Q_SM100 = 537,
+  // DeepSeek-V4.1 index keys: wk's K parts, k_norm, RoPE, fp4 into the index K
+  // cache (tasks/index_k_post.cuh)
+  TASK_INDEX_K_POST_SM100 = 538,
+  // DeepSeek-V4.1 indexer scores per compressed position
+  // (tasks/indexer_score.cuh)
+  TASK_INDEXER_SCORE_SM100 = 539,
+  // DeepSeek-V4.1 indexer top-k (and L20's candidate blocks)
+  // (tasks/indexer_topk.cuh)
+  TASK_INDEXER_TOPK_SM100 = 540,
+  // DeepSeek-V4.1 compressor: wkv (and wgate) K parts, the pooling state,
+  // RMSNorm -> the latent (tasks/compressor.cuh)
+  TASK_COMPRESSOR_SM100 = 541,
+  // DeepSeek-V4.1 compressed KV write: the latent's RoPE, fp4 with E4M3
+  // scales into the compressed KV cache (tasks/ckv_post.cuh)
+  TASK_CKV_POST_SM100 = 542,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 

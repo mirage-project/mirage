@@ -5824,5 +5824,166 @@ int TaskRegister::register_dsa_o_absorb_sm100_task(
       this, TASK_DSA_O_ABSORB_SM100, "dsa_o_absorb", bgraph, params, 1, 1);
 }
 
+int TaskRegister::register_act_quant_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {K}. inputs: x [T, K] (bf16, a graph input; or fp32, a
+  // gemm_fp8_tile node's K parts in slots); output: x_q [T, K] e4m3 (its
+  // buffer: x_q, then the scale chunks). Grid (T).
+  assert(params.size() == 1 && params[0] > 0 && params[0] % 512 == 0);
+  return register_static_task(
+      this, TASK_ACT_QUANT_SM100, "act_quant", bgraph, params, 1, 1);
+}
+
+int TaskRegister::register_gemm_fp8_tile_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {mode (static_megakernel/core.cuh Combine), K, N, G (groups)}, and
+  // optionally W (weights_after's counter + 1), then F = 1 (act_quant fused)
+  // (tasks/gemm_fp8_tile.cuh);
+  // the K split is the grid's y; its tensor maps are the node's slots. inputs:
+  // x_q [T, G K] (act_quant's, q_norm's or sparse_attn's output), weight
+  // [N, K] e4m3 (G > 1: group g's N / G rows times x_q's columns of group g),
+  // weight scales [N / 128, K / 128, 512]; output: [T, N] fp32.
+  assert(params.size() >= 4 && params.size() <= 6);
+  assert(params[0] >= 0 && params[0] <= 2 && params[3] >= 1);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 3, 1, input_ops, output_ops);
+  assert(input_ops[0]->dtensor.num_dims == 2);
+  assert(input_ops[1]->dtensor.num_dims == 2);
+  assert(input_ops[1]->dtensor.dim[1] * params[3] ==
+         input_ops[0]->dtensor.dim[1]);
+  assert(input_ops[1]->dtensor.dim[1] == params[1]);
+  assert(input_ops[1]->dtensor.dim[0] == params[2]);
+  return register_task_variant(TASK_GEMM_FP8_TILE_SM100,
+                               static_build_only_task("gemm_fp8_tile", params));
+}
+
+int TaskRegister::register_q_norm_sm100_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params) {
+  // params: {K, eps (fp32 bits)}. inputs: wq_a's K parts [T, K] fp32 (a
+  // gemm_fp8_tile node's output in slots), gamma [K] bf16; output: qr_q [T, K]
+  // e4m3 (its buffer as act_quant's: qr_q, then the scale chunks). Grid (T).
+  assert(params.size() == 2 && params[0] % 256 == 0 && params[0] <= 2048);
+  return register_static_task(
+      this, TASK_Q_NORM_SM100, "q_norm", bgraph, params, 2, 2);
+}
+
+int TaskRegister::register_kv_post_sm100_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params) {
+  // params: {D (head_dim), W (window), RD (rope_dim), eps (fp32 bits)}. inputs:
+  // wkv's K parts [T, D] fp32 (a gemm_fp8_tile node's output in slots), gamma
+  // [D] bf16, positions [T] int32, freqs [rows, RD / 2, 2] fp32; output: the
+  // window cache [T, W, D + D / 32] uint8 (a graph tensor). Grid (T).
+  assert(params.size() == 4 && params[0] == 512 && params[2] == 64);
+  return register_static_task(
+      this, TASK_KV_POST_SM100, "kv_post", bgraph, params, 4, 4);
+}
+
+int TaskRegister::register_sparse_attn_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {H (heads), D (head_dim), W (window), RD (rope_dim), softmax scale
+  // (fp32 bits)}. inputs: q [T, H * D] fp32 (wq_b's K parts in slots), the
+  // window cache [T, W, D + D / 32] uint8 (a kv_post node's), positions [T]
+  // int32, freqs [rows, RD / 2, 2] fp32, attn_sink [H] fp32; output: o_q
+  // [T, H * D] uint8 (its buffer: o_q, then the scale chunks). Grid (T, H /
+  // 16). With compressed KV also {NC, CAP}, and inputs the compressed cache [T,
+  // CAP, 288] uint8 and compress_idx [T, NC] int32 (read by pointer).
+  assert((params.size() == 5 || params.size() == 7) && params[0] % 16 == 0 &&
+         params[1] == 512 && params[2] == 128 && params[3] == 64);
+  return register_static_task(this,
+                              TASK_SPARSE_ATTN_SM100,
+                              "sparse_attn",
+                              bgraph,
+                              params,
+                              params.size() == 7 ? 7 : 5,
+                              params.size());
+}
+
+int TaskRegister::register_sum_store_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {N}. inputs: wo_b's output [T, N] fp32 (a gemm_fp8_tile node's K
+  // parts in slots); output: y [T, N] bf16 (a graph tensor). Grid (column
+  // blocks).
+  assert(params.size() == 1 && params[0] > 0 && params[0] % 128 == 0);
+  return register_static_task(
+      this, TASK_SUM_STORE_SM100, "sum_store", bgraph, params, 1, 1);
+}
+
+int TaskRegister::register_indexer_q_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {H (heads), HD (head_dim), RD (rope_dim)}. inputs: the indexer
+  // wq_b's K parts [T, H * HD] fp32 (a gemm_fp8_tile node's output in slots),
+  // positions [T] int32, freqs [rows, RD / 2, 2] fp32; output: q_idx [T, H *
+  // HD] bf16 (its buffer). Grid (T).
+  assert(params.size() == 3 && params[0] == 32 && params[1] == 128 &&
+         params[2] == 64);
+  return register_static_task(
+      this, TASK_INDEXER_Q_SM100, "indexer_q", bgraph, params, 3, 3);
+}
+
+int TaskRegister::register_index_k_post_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {HD, RD, R (compress ratio), CAP (cache positions), eps (fp32
+  // bits)}. inputs: wk's K parts [T, HD] fp32 (a gemm_tile node's output in
+  // slots), gamma [HD] bf16, positions [T] int32, freqs [rows, RD / 2, 2]
+  // fp32; output: the index K cache [T, CAP, HD / 2 + HD / 32] uint8 (a graph
+  // tensor). Grid (T).
+  assert(params.size() == 5 && params[0] == 128 && params[1] == 64);
+  return register_static_task(
+      this, TASK_INDEX_K_POST_SM100, "index_k_post", bgraph, params, 4, 5);
+}
+
+int TaskRegister::register_indexer_score_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {H, HD, CAP, R, CAND}. inputs: q_idx [T, H * HD] bf16 (an
+  // indexer_q node's output), weights_proj's K parts [T, 128] fp32 (a
+  // gemm_tile node's output in slots), the index K cache [T, CAP, HD / 2 + HD
+  // / 32] uint8, positions [T] int32, with CAND the candidate blocks [T, CAP /
+  // 8] uint8; output: scores [T, CAP] bf16 (its buffer). Grid (T, CAP / 256).
+  assert(params.size() == 5 && params[0] == 32 && params[1] == 128 &&
+         params[2] % 256 == 0);
+  return register_static_task(this,
+                              TASK_INDEXER_SCORE_SM100,
+                              "indexer_score",
+                              bgraph,
+                              params,
+                              params[4] ? 5 : 4,
+                              5);
+}
+
+int TaskRegister::register_indexer_topk_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {CAP, KTOP, R, CSRC, TOPB}. inputs: scores [T, CAP] bf16 (an
+  // indexer_score node's output), positions [T] int32; output: compress_idx
+  // [T, KTOP] int32 (a graph tensor). Grid (T).
+  assert(params.size() == 5 && params[0] % 8 == 0);
+  return register_static_task(
+      this, TASK_INDEXER_TOPK_SM100, "indexer_topk", bgraph, params, 2, 5);
+}
+
+int TaskRegister::register_compressor_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {D (head_dim), R (compress ratio, 1 or 2), eps (fp32 bits)}.
+  // inputs: the compressor's GEMM K parts [T, R == 1 ? D : 2 D] fp32 (a
+  // gemm_tile node's output in slots: wkv, then wgate), gamma [D] bf16,
+  // positions [T] int32; output: the latent [T, D] bf16 (its buffer). With R =
+  // 2 the pooling state [T, 2, R, D] fp32 is read and written by pointer.
+  // Grid (T).
+  assert(params.size() == 3 && params[0] == 512 &&
+         (params[1] == 1 || params[1] == 2));
+  return register_static_task(
+      this, TASK_COMPRESSOR_SM100, "compressor", bgraph, params, 3, 3);
+}
+
+int TaskRegister::register_ckv_post_sm100_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params) {
+  // params: {D, RD, R, CAP}. inputs: the latent [T, D] bf16 (a compressor
+  // node's output), positions [T] int32, freqs [rows, RD / 2, 2] fp32; output:
+  // the compressed KV cache [T, CAP, D / 2 + D / 16] uint8 (a graph tensor).
+  // Grid (T).
+  assert(params.size() == 4 && params[0] == 512 && params[1] == 64);
+  return register_static_task(
+      this, TASK_CKV_POST_SM100, "ckv_post", bgraph, params, 3, 4);
+}
+
 } // namespace runtime
 } // namespace mirage
