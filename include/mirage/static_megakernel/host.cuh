@@ -16,8 +16,8 @@
 //       tensor name) or b:<buffer slot>+<byte offset>.
 //     kind and dims: bf16 <rows> <K> <box rows> | wblk <pieces> <box pieces> |
 //       wblk8 <pieces> <box pieces> | sf <chunks> <box chunks> |
-//       act8 <K bytes> <rows> |
-//       act8kt <K bytes> <rows> <K tiles>
+//       act8 <K bytes> <rows> | act8kt <K bytes> <rows> <K tiles> |
+//       w8kt <K bytes> <rows> <K tiles>
 // The node output buffers are allocated first, then the scratch buffers, then
 // the counters and the time stamps. Keep this order: the buffers' addresses
 // decide where they fall in L2, and a different order makes the layer slower.
@@ -142,13 +142,18 @@ static void
                                 CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
-// e4m3 [rows, Kb] as {128, rows, Kb / 128}; box {128, 8, nkt}: nkt K tiles of 8
-// rows
-static void map_act8_kt(
-    CUtensorMap *m, void *base, uint64_t Kb, uint64_t rows, uint32_t nkt) {
+// e4m3 [rows, Kb] as {128, rows, Kb / 128}; box {128, box_rows, nkt}: nkt K
+// tiles of box_rows rows (act8kt: 8 rows of an activation; w8kt: 128 rows of
+// an e4m3 weight)
+static void map_act8_kt(CUtensorMap *m,
+                        void *base,
+                        uint64_t Kb,
+                        uint64_t rows,
+                        uint32_t nkt,
+                        uint32_t box_rows = 8) {
   cuuint64_t gd[3] = {128, rows, Kb / 128};
   cuuint64_t gs[2] = {Kb, 128};
-  cuuint32_t bd[3] = {128, 8, nkt}, es[3] = {1, 1, 1};
+  cuuint32_t bd[3] = {128, box_rows, nkt}, es[3] = {1, 1, 1};
   MKS_CU(cuTensorMapEncodeTiled(m,
                                 CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                 3,
@@ -407,6 +412,8 @@ static void build_maps(Maps &maps,
       map_act8(&maps.m[i], p, u(2), u(3));
     } else if (kind == "act8kt" && m.size() == 5) {
       map_act8_kt(&maps.m[i], p, u(2), u(3), (uint32_t)u(4));
+    } else if (kind == "w8kt" && m.size() == 5) {
+      map_act8_kt(&maps.m[i], p, u(2), u(3), (uint32_t)u(4), 128);
     } else {
       fprintf(stderr,
               "static_host: map.%d: bad declaration (%s, %zu fields)\n",

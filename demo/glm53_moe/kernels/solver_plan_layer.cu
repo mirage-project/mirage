@@ -660,7 +660,7 @@ static void
           {"buf.9", "tensor sd_sf 96 -1 0"},
           {"buf.10", "out shared_down 196608 -1 0"},
           {"buf.11", "scratch scaled_moe_experts.h_q 131072 -1 0"},
-          {"buf.12", "scratch scaled_moe_experts.h_q_scales 4096 -1 0"},
+          {"buf.12", "scratch scaled_moe_experts.h_q_scales 4096 255 0"},
           {"buf.13", "tensor w13_sf 49152 -1 0"},
           {"buf.14", "scratch scaled_moe_experts.h32 532480 -1 0"},
           {"buf.15", "tensor w2_sf 24576 -1 0"},

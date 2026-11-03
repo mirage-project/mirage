@@ -1126,6 +1126,59 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_SCALED_MOE_EXPERTS_SM100, variant_id);
+  } else if (name == "act_quant") {
+    int variant_id = task_register->register_act_quant_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_ACT_QUANT_SM100, variant_id);
+  } else if (name == "gemm_fp8_tile") {
+    int variant_id = task_register->register_gemm_fp8_tile_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_GEMM_FP8_TILE_SM100, variant_id);
+  } else if (name == "q_norm") {
+    int variant_id =
+        task_register->register_q_norm_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_Q_NORM_SM100, variant_id);
+  } else if (name == "kv_post") {
+    int variant_id =
+        task_register->register_kv_post_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(4, 1, TASK_KV_POST_SM100, variant_id);
+  } else if (name == "sparse_attn") {
+    int variant_id = task_register->register_sparse_attn_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        params.size() == 7 ? 7 : 5, 1, TASK_SPARSE_ATTN_SM100, variant_id);
+  } else if (name == "sum_store") {
+    int variant_id = task_register->register_sum_store_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_SUM_STORE_SM100, variant_id);
+  } else if (name == "indexer_q") {
+    int variant_id = task_register->register_indexer_q_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_INDEXER_Q_SM100, variant_id);
+  } else if (name == "index_k_post") {
+    int variant_id = task_register->register_index_k_post_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_INDEX_K_POST_SM100, variant_id);
+  } else if (name == "indexer_score") {
+    int variant_id = task_register->register_indexer_score_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(
+        params[4] ? 5 : 4, 1, TASK_INDEXER_SCORE_SM100, variant_id);
+  } else if (name == "indexer_topk") {
+    int variant_id = task_register->register_indexer_topk_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(2, 1, TASK_INDEXER_TOPK_SM100, variant_id);
+  } else if (name == "compressor") {
+    int variant_id = task_register->register_compressor_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_COMPRESSOR_SM100, variant_id);
+  } else if (name == "ckv_post") {
+    int variant_id =
+        task_register->register_ckv_post_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_CKV_POST_SM100, variant_id);
   }
 
   else {
