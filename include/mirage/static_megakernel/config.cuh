@@ -88,8 +88,13 @@ constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ull,
 
 // ---- the generated layer's task table, its slots ----
 constexpr int MAX_TASKS_PER_SM =
-    64;                      // entries per SM (the list, then an end entry)
-constexpr int MAX_BUFS = 64; // buffer slots (G::buf): node outputs, scratch
+    64;                 // entries per SM (the list, then an end entry)
+#ifndef STATIC_MAX_BUFS // the generated layer defines it when its graph needs
+                        // more (StaticMegakernel.max_bufs)
+#define STATIC_MAX_BUFS 24
+#endif
+constexpr int MAX_BUFS =
+    STATIC_MAX_BUFS;         // buffer slots (G::buf): node outputs, scratch
                              // buffers, graph tensors read by pointer
 constexpr int MAX_MAPS = 32; // tensor map slots (Maps::m)
 
@@ -97,7 +102,12 @@ constexpr int MAX_MAPS = 32; // tensor map slots (Maps::m)
 // slow each other down, so each node has its own lines:
 //      static_megakernel.py gives each node its lines, the node's first counter
 //      is StaticNode::counter ----
-constexpr int NODE_COUNTER_LINES = 64;
+#ifndef STATIC_NODE_COUNTER_LINES // the generated layer defines it when its
+                                  // graph needs more
+                                  // (StaticMegakernel.max_counter_lines)
+#define STATIC_NODE_COUNTER_LINES 16
+#endif
+constexpr int NODE_COUNTER_LINES = STATIC_NODE_COUNTER_LINES;
 constexpr int NCNT = 32 * NODE_COUNTER_LINES;
 
 // ---- per-SM time stamps read by the host (host.cuh), g.stamps[sm * NSTAMP +

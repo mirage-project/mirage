@@ -191,6 +191,8 @@ def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float,
     t["h_post_in"] / t["h_res_in"] on the streams t["R_in"] -> t["R_out"]; the FFN's mHC mixes with t["hc_ffn_fn"]) and
     hc_pre (the FFN's mHC pre with t["hc_ffn_small"]: its input t["x_ffn"] = RMSNorm(sum_i pre_i R'_i) t["ffn_norm"], its
     h_post / h_res into t["h_post_out"] / t["h_res_out"])."""
+    mpk.max_bufs = 56            # the layer uses 48 buffer slots, more than config.cuh's default 24 (STATIC_MAX_BUFS)
+    mpk.max_counter_lines = 24   # and 20 counter lines, more than the default 16 (STATIC_NODE_COUNTER_LINES)
     a = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
     NH, T = t["w_uk"].shape[0], t["x"].shape[0]

@@ -180,6 +180,8 @@ def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None) ->
                           layer's x_attn = RMSNorm(sum_i pre_i R'_i) input_layernorm, its h_post / h_res exported) -> x_attn,
                           h_post_next, h_res_next
     valid_rows: the live rows of a speculative verify step (the rows past them are not routed)."""
+    mpk.max_counter_lines = 64   # 19 / 32 / 59 counter lines at T = 8 / 16 / 32 (scaled_moe_experts' per-slot and per-group
+                                 # counters), more than config.cuh's default 16 (STATIC_NODE_COUNTER_LINES)
     a = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
     T = t["x"].shape[0]

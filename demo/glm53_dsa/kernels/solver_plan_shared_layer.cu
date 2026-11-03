@@ -13,6 +13,13 @@
 #define STATIC_GPUS 1
 #define STATIC_SMS 148
 
+#define STATIC_MAX_BUFS                                                        \
+  40 // buffer slots (config.cuh MAX_BUFS; StaticMegakernel.max_bufs)
+
+#define STATIC_NODE_COUNTER_LINES                                              \
+  32 // counter lines (config.cuh NODE_COUNTER_LINES;
+     // StaticMegakernel.max_counter_lines)
+
 // the exchange region's layout (static_megakernel.py exchange_layout): one
 // set's bytes, the start barrier's slots, per buffer slot its offset and bytes
 // (an exchange buffer; else 0)
@@ -21,14 +28,12 @@
 #define STATIC_EXCHANGE_OFFSETS                                                \
   {                                                                            \
     0, 40960, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 20480, 0,  \
-        0, 94208, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  \
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0             \
+        0, 94208, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0               \
   }
 #define STATIC_EXCHANGE_BYTES                                                  \
   {                                                                            \
     0, 50688, 0, 0, 0, 16896, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16896, \
-        0, 0, 98304, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  \
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0          \
+        0, 0, 98304, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0            \
   }
 
 // one GPU: the SMs whose first task waits for other tasks (or that have none),
@@ -84,9 +89,9 @@ struct StaticContext {
 #include "mirage/static_megakernel/tasks/scaled_gemm_tile.cuh"
 #include "mirage/static_megakernel/tasks/sparse_mla.cuh"
 #include "mirage/static_megakernel/tasks/sum_gpus.cuh"
-static_assert(static_mk::MAX_TASKS_PER_SM == 64 && static_mk::MAX_BUFS == 64 &&
+static_assert(static_mk::MAX_TASKS_PER_SM == 64 && static_mk::MAX_BUFS == 40 &&
                   static_mk::MAX_MAPS == 32 &&
-                  static_mk::NODE_COUNTER_LINES == 64 && static_mk::SMAX == 5 &&
+                  static_mk::NODE_COUNTER_LINES == 32 && static_mk::SMAX == 5 &&
                   static_mk::SF_CHUNK == 512,
               "the Python copies of the kernel's sizes (static_schedule.py, "
               "static_megakernel.py)");

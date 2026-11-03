@@ -23,7 +23,7 @@ from ..kernel import TBGraph
 from .persistent_kernel import PersistentKernel
 
 # the kernel's limits (config.cuh MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, SMAX = the ring's stages; core.cuh Combine)
-MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 64, 32, 64, 5   # RING_STAGES: T <= 16's (ring_stages)
+MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 24, 32, 16, 5   # RING_STAGES: T <= 16's (ring_stages)
 
 
 def ring_stages(tokens: int) -> int:
@@ -151,7 +151,8 @@ class StaticMegakernel(PersistentKernel):
         counter = -1
         if counters:
             lines = (counters + 31) // 32
-            assert self._counter_lines + lines <= NODE_COUNTER_LINES, f"more than {NODE_COUNTER_LINES} counter lines (config.cuh)"
+            ml = getattr(self, "max_counter_lines", NODE_COUNTER_LINES)   # a graph may raise it (the generated layer then defines STATIC_NODE_COUNTER_LINES)
+            assert self._counter_lines + lines <= ml, f"more than {ml} counter lines (StaticMegakernel.max_counter_lines, config.cuh NODE_COUNTER_LINES)"
             counter = 32 * self._counter_lines; self._counter_lines += lines
         self._static_nodes[idx] = dict(
             name=name, input_maps=list(input_maps), changeable_grid_dims=dict(changeable_grid_dims or {}),
@@ -163,7 +164,8 @@ class StaticMegakernel(PersistentKernel):
 
     # ---- buffer slots (G::buf) and map slots (Maps::m) ----
     def _new_buf(self, entry: dict) -> int:
-        assert len(self._bufs) < MAX_BUFS, f"more than {MAX_BUFS} buffer slots (config.cuh MAX_BUFS)"
+        mb = getattr(self, "max_bufs", MAX_BUFS)   # a graph may raise it (the generated layer then defines STATIC_MAX_BUFS)
+        assert len(self._bufs) < mb, f"more than {mb} buffer slots (StaticMegakernel.max_bufs, config.cuh MAX_BUFS)"
         self._bufs.append(entry)
         return len(self._bufs) - 1
 
@@ -217,7 +219,8 @@ class StaticMegakernel(PersistentKernel):
         (laid out in slot order instead, the same kernel is slower)."""
         from .compiler import graph_nodes
         nodes = {n.graph_idx: n for n in graph_nodes(self)}
-        offsets, sizes, end = [0] * MAX_BUFS, [0] * MAX_BUFS, 0
+        mb = getattr(self, "max_bufs", MAX_BUFS)
+        offsets, sizes, end = [0] * mb, [0] * mb, 0
         align = lambda v: (v + 4095) // 4096 * 4096
         for i, b in enumerate(self._bufs):
             if b["kind"] == "exchange":

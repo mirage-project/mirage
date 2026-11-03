@@ -110,13 +110,14 @@ STAGE_SLOT = 1 + THREADS // 32   # timing build, per list entry: start, each war
 TIME_SLOTS = STAGE_SLOT + 2
 
 
-def config_checks(used: List[str], tokens: int = 8) -> List[str]:
+def config_checks(used: List[str], tokens: int = 8, max_bufs: Optional[int] = None,
+                  max_counter_lines: Optional[int] = None) -> List[str]:
     """static_asserts that the Python copies of the kernel's sizes (here and in static_megakernel.py) are config.cuh's and the
     used task types'."""
     from .static_megakernel import (HC_MIX_STRIDE, MAX_BUFS, MAX_MAPS, MAX_SUM_PARTS, NODE_COUNTER_LINES, ring_stages,
                                     SF_CHUNK)
-    checks = [f"static_mk::MAX_TASKS_PER_SM == {MAX_TASKS_PER_SM}", f"static_mk::MAX_BUFS == {MAX_BUFS}",
-              f"static_mk::MAX_MAPS == {MAX_MAPS}", f"static_mk::NODE_COUNTER_LINES == {NODE_COUNTER_LINES}",
+    checks = [f"static_mk::MAX_TASKS_PER_SM == {MAX_TASKS_PER_SM}", f"static_mk::MAX_BUFS == {max_bufs or MAX_BUFS}",
+              f"static_mk::MAX_MAPS == {MAX_MAPS}", f"static_mk::NODE_COUNTER_LINES == {max_counter_lines or NODE_COUNTER_LINES}",
               f"static_mk::SMAX == {ring_stages(tokens)}", f"static_mk::SF_CHUNK == {SF_CHUNK}"]
     if "sum_send" in used:
         checks.append(f"static_mk::MAX_SUM_PARTS == {MAX_SUM_PARTS}")
@@ -145,7 +146,12 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
             "#include <string>", "#include <vector>", "",
             "// the kernel-wide sizes (config.cuh): tokens per step and GPUs (the graph's: StaticMegakernel.tokens, num_gpus), SMs (the",
             "// schedules' task lists per GPU)",
-            f"#define STATIC_TOKENS {pk.tokens}", f"#define STATIC_GPUS {num_gpus}", f"#define STATIC_SMS {num_lists}", "",
+            f"#define STATIC_TOKENS {pk.tokens}", f"#define STATIC_GPUS {num_gpus}", f"#define STATIC_SMS {num_lists}", ""] + (
+            [f"#define STATIC_MAX_BUFS {pk.max_bufs}   // buffer slots (config.cuh MAX_BUFS; StaticMegakernel.max_bufs)", ""]
+            if getattr(pk, "max_bufs", None) else []) + (
+            [f"#define STATIC_NODE_COUNTER_LINES {pk.max_counter_lines}   // counter lines (config.cuh NODE_COUNTER_LINES; "
+             "StaticMegakernel.max_counter_lines)", ""]
+            if getattr(pk, "max_counter_lines", None) else []) + [
             "// the exchange region's layout (static_megakernel.py exchange_layout): one set's bytes, the start barrier's slots, per",
             "// buffer slot its offset and bytes (an exchange buffer; else 0)",
             f"#define STATIC_EXCHANGE_SET {set_bytes}", f"#define STATIC_EXCHANGE_HELLO {hello}",
@@ -174,7 +180,8 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
             "};",
             "struct StaticContext { int num_gpus = 0, num_lists = 0; std::vector<StaticGpuView> gpus; };",
             '#include "mirage/static_megakernel/core.cuh"'] + \
-        [f'#include "mirage/static_megakernel/tasks/{name}.cuh"' for name in used] + config_checks(used, pk.tokens) + [""]
+        [f'#include "mirage/static_megakernel/tasks/{name}.cuh"' for name in used] + \
+        config_checks(used, pk.tokens, getattr(pk, "max_bufs", None), getattr(pk, "max_counter_lines", None)) + [""]
 
 
 def task_tables(schedules: List[dict]) -> List[str]:

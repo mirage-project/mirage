@@ -21,14 +21,12 @@
 #define STATIC_EXCHANGE_OFFSETS                                                \
   {                                                                            \
     0, 0, 0, 0, 0, 0, 0, 0, 622592, 0, 0, 0, 163840, 0, 0, 0, 0, 0, 45056, 0,  \
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,   \
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0          \
+        0, 0, 0, 0                                                             \
   }
 #define STATIC_EXCHANGE_BYTES                                                  \
   {                                                                            \
     0, 0, 0, 0, 43008, 0, 0, 0, 917504, 0, 0, 0, 458752, 0, 0, 0, 0, 0,        \
-        114688, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 \
+        114688, 0, 0, 0, 0, 0                                                  \
   }
 
 // one GPU: the SMs whose first task waits for other tasks (or that have none),
@@ -83,9 +81,9 @@ struct StaticContext {
 #include "mirage/static_megakernel/tasks/sum_rmsnorm.cuh"
 #include "mirage/static_megakernel/tasks/sum_send.cuh"
 #include "mirage/static_megakernel/tasks/topk_route.cuh"
-static_assert(static_mk::MAX_TASKS_PER_SM == 64 && static_mk::MAX_BUFS == 64 &&
+static_assert(static_mk::MAX_TASKS_PER_SM == 64 && static_mk::MAX_BUFS == 24 &&
                   static_mk::MAX_MAPS == 32 &&
-                  static_mk::NODE_COUNTER_LINES == 64 && static_mk::SMAX == 5 &&
+                  static_mk::NODE_COUNTER_LINES == 16 && static_mk::SMAX == 5 &&
                   static_mk::SF_CHUNK == 512 && static_mk::MAX_SUM_PARTS == 14,
               "the Python copies of the kernel's sizes (static_schedule.py, "
               "static_megakernel.py)");

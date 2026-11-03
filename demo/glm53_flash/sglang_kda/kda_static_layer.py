@@ -122,6 +122,7 @@ def build_graph(mpk, t: dict, fused: dict, verify: dict = None) -> dict:
     from mirage.core import bfloat16, float32
     from mirage.mpk import compiler
     from mirage.mpk.static_megakernel import HC_MIX_STRIDE
+    mpk.max_bufs = 40   # the layer uses 30 buffer slots, more than config.cuh's default 24 (STATIC_MAX_BUFS)
     H, T = t["w_o"].shape[0], t["x"].shape[0]
     attached = {}   # name -> its graph tensor, attached once (a second attach would be another tensor: no dependency)
     a = lambda k: attached.get(k) or attached.setdefault(k, mpk.attach_input(torch_tensor=t[k], name=k))
