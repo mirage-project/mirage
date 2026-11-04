@@ -20,12 +20,12 @@
 #define STATIC_EXCHANGE_HELLO 253952
 #define STATIC_EXCHANGE_OFFSETS                                                \
   {                                                                            \
-    0, 0, 0, 0, 4096, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 57344, 155648, 0, 0, \
+    0, 0, 0, 0, 4096, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 57344, 155648, 0, 0, 0, \
         0, 0, 0                                                                \
   }
 #define STATIC_EXCHANGE_BYTES                                                  \
   {                                                                            \
-    0, 0, 0, 0, 50688, 0, 0, 0, 2112, 0, 0, 0, 0, 0, 0, 0, 0, 98304, 98304, 0, \
+    0, 0, 0, 0, 50688, 0, 0, 0, 2112, 0, 0, 0, 0, 0, 0, 0, 98304, 98304, 0, 0, \
         0, 0, 0, 0                                                             \
   }
 
@@ -140,41 +140,41 @@ constexpr int STATIC_SMEM_BYTES = static_mk::smem_launch_bytes(static_smem_need(
                                       StaticNode<0, 0, 0>,
                                       StaticNode<0, 0, 0>>(),
      static_mk::smem_scaled_moe_experts<
-         StaticNode<148, 1, 1, 160, 16>,
+         StaticNode<148, 1, 1, 160, 15>,
          StaticParams<256>,
-         StaticBufSlots<11, 12, 13, 14, 15>,
+         StaticBufSlots<11, 12, 13, 14>,
          StaticMapSlots<15, 16, 17, 18, 5, 7, 19>,
          StaticNode<48, 1, 1, 0, 4, 6144>,
          StaticNode<8, 1, 1, -1, 2, 256, 8, 1075838976>,
          StaticNode<0, 0, 0>,
          StaticNode<0, 0, 0>>(),
      static_mk::smem_allreduce_send<
-         StaticNode<148, 1, 1, -1, 17>,
+         StaticNode<148, 1, 1, -1, 16>,
          StaticParams<6144, 1, 0>,
          StaticBufSlots<-1>,
          StaticMapSlots<>,
          StaticNode<48, 1, 1, 128, 10, 2, 256, 6144, 0>>(),
-     static_mk::smem_allreduce_send<StaticNode<148, 1, 1, -1, 18>,
+     static_mk::smem_allreduce_send<StaticNode<148, 1, 1, -1, 17>,
                                     StaticParams<6144, 8, 0>,
                                     StaticBufSlots<-1>,
                                     StaticMapSlots<>,
-                                    StaticNode<148, 1, 1, 160, 16, 256>>(),
+                                    StaticNode<148, 1, 1, 160, 15, 256>>(),
+     static_mk::smem_sum_gpus<StaticNode<8, 8, 1, -1, 18>,
+                              StaticParams<>,
+                              StaticBufSlots<>,
+                              StaticMapSlots<>,
+                              StaticNode<148, 1, 1, -1, 17, 6144, 8, 0>>(),
      static_mk::smem_sum_gpus<StaticNode<8, 8, 1, -1, 19>,
                               StaticParams<>,
                               StaticBufSlots<>,
                               StaticMapSlots<>,
-                              StaticNode<148, 1, 1, -1, 18, 6144, 8, 0>>(),
-     static_mk::smem_sum_gpus<StaticNode<8, 8, 1, -1, 20>,
-                              StaticParams<>,
-                              StaticBufSlots<>,
-                              StaticMapSlots<>,
-                              StaticNode<148, 1, 1, -1, 17, 6144, 1, 0>>(),
+                              StaticNode<148, 1, 1, -1, 16, 6144, 1, 0>>(),
      static_mk::smem_residual_add<StaticNode<148, 1, 1, -1, -1>,
                                   StaticParams<6144>,
-                                  StaticBufSlots<21, 22>,
+                                  StaticBufSlots<20, 21>,
                                   StaticMapSlots<>,
-                                  StaticNode<8, 8, 1, -1, 20>,
                                   StaticNode<8, 8, 1, -1, 19>,
+                                  StaticNode<8, 8, 1, -1, 18>,
                                   StaticNode<0, 0, 0>>()}));
 static_assert(STATIC_SMEM_BYTES <= 227 * 1024,
               "the dynamic shared memory of one SM");
@@ -504,9 +504,9 @@ __global__ void __launch_bounds__(256, 1)
         break;
       case 28:
         static_mk::run_scaled_moe_experts<
-            StaticNode<148, 1, 1, 160, 16>,
+            StaticNode<148, 1, 1, 160, 15>,
             StaticParams<256>,
-            StaticBufSlots<11, 12, 13, 14, 15>,
+            StaticBufSlots<11, 12, 13, 14>,
             StaticMapSlots<15, 16, 17, 18, 5, 7, 19>,
             StaticNode<48, 1, 1, 0, 4, 6144>,
             StaticNode<8, 1, 1, -1, 2, 256, 8, 1075838976>,
@@ -515,43 +515,43 @@ __global__ void __launch_bounds__(256, 1)
         break;
       case 30:
         static_mk::run_allreduce_send<
-            StaticNode<148, 1, 1, -1, 17>,
+            StaticNode<148, 1, 1, -1, 16>,
             StaticParams<6144, 1, 0>,
             StaticBufSlots<-1>,
             StaticMapSlots<>,
             StaticNode<48, 1, 1, 128, 10, 2, 256, 6144, 0>>(maps, g, L, tk);
         break;
       case 32:
-        static_mk::run_allreduce_send<StaticNode<148, 1, 1, -1, 18>,
+        static_mk::run_allreduce_send<StaticNode<148, 1, 1, -1, 17>,
                                       StaticParams<6144, 8, 0>,
                                       StaticBufSlots<-1>,
                                       StaticMapSlots<>,
-                                      StaticNode<148, 1, 1, 160, 16, 256>>(
+                                      StaticNode<148, 1, 1, 160, 15, 256>>(
             maps, g, L, tk);
         break;
       case 35:
+        static_mk::run_sum_gpus<StaticNode<8, 8, 1, -1, 18>,
+                                StaticParams<>,
+                                StaticBufSlots<>,
+                                StaticMapSlots<>,
+                                StaticNode<148, 1, 1, -1, 17, 6144, 8, 0>>(
+            maps, g, L, tk);
+        break;
+      case 36:
         static_mk::run_sum_gpus<StaticNode<8, 8, 1, -1, 19>,
                                 StaticParams<>,
                                 StaticBufSlots<>,
                                 StaticMapSlots<>,
-                                StaticNode<148, 1, 1, -1, 18, 6144, 8, 0>>(
-            maps, g, L, tk);
-        break;
-      case 36:
-        static_mk::run_sum_gpus<StaticNode<8, 8, 1, -1, 20>,
-                                StaticParams<>,
-                                StaticBufSlots<>,
-                                StaticMapSlots<>,
-                                StaticNode<148, 1, 1, -1, 17, 6144, 1, 0>>(
+                                StaticNode<148, 1, 1, -1, 16, 6144, 1, 0>>(
             maps, g, L, tk);
         break;
       case 37:
         static_mk::run_residual_add<StaticNode<148, 1, 1, -1, -1>,
                                     StaticParams<6144>,
-                                    StaticBufSlots<21, 22>,
+                                    StaticBufSlots<20, 21>,
                                     StaticMapSlots<>,
-                                    StaticNode<8, 8, 1, -1, 20>,
                                     StaticNode<8, 8, 1, -1, 19>,
+                                    StaticNode<8, 8, 1, -1, 18>,
                                     StaticNode<0, 0, 0>>(maps, g, L, tk);
         break;
     }
@@ -694,15 +694,14 @@ static void
           {"buf.11", "scratch scaled_moe_experts.h_q 131072 -1 0"},
           {"buf.12", "scratch scaled_moe_experts.h_q_scales 4096 -1 0"},
           {"buf.13", "tensor w13_sf 49152 -1 0"},
-          {"buf.14", "scratch scaled_moe_experts.h32 532480 -1 0"},
-          {"buf.15", "tensor w2_sf 24576 -1 0"},
-          {"buf.16", "out routed_rows 1572864 -1 0"},
-          {"buf.17", "exchange s_sent 98304 255 1"},
-          {"buf.18", "exchange r_sent 98304 255 1"},
-          {"buf.19", "out routed_summed 98304 255 1"},
-          {"buf.20", "out shared_summed 98304 255 1"},
-          {"buf.21", "tensor residual 49152 -1 0"},
-          {"buf.22", "tensor moe_out 49152 -1 0"},
+          {"buf.14", "tensor w2_sf 24576 -1 0"},
+          {"buf.15", "out routed_rows 1572864 -1 0"},
+          {"buf.16", "exchange s_sent 98304 255 1"},
+          {"buf.17", "exchange r_sent 98304 255 1"},
+          {"buf.18", "out routed_summed 98304 255 1"},
+          {"buf.19", "out shared_summed 98304 255 1"},
+          {"buf.20", "tensor residual 49152 -1 0"},
+          {"buf.21", "tensor moe_out 49152 -1 0"},
           {"map.0", "bf16 t:router 256 6144 128"},
           {"map.1", "bf16 t:router 256 6144 64"},
           {"map.2", "bf16 t:x 8 6144 8"},
@@ -760,15 +759,14 @@ static void static_init_rank(int rank,
           {"buf.11", "scratch scaled_moe_experts.h_q 131072 -1 0"},
           {"buf.12", "scratch scaled_moe_experts.h_q_scales 4096 -1 0"},
           {"buf.13", "tensor w13_sf 49152 -1 0"},
-          {"buf.14", "scratch scaled_moe_experts.h32 532480 -1 0"},
-          {"buf.15", "tensor w2_sf 24576 -1 0"},
-          {"buf.16", "out routed_rows 1572864 -1 0"},
-          {"buf.17", "exchange s_sent 98304 255 1"},
-          {"buf.18", "exchange r_sent 98304 255 1"},
-          {"buf.19", "out routed_summed 98304 255 1"},
-          {"buf.20", "out shared_summed 98304 255 1"},
-          {"buf.21", "tensor residual 49152 -1 0"},
-          {"buf.22", "tensor moe_out 49152 -1 0"},
+          {"buf.14", "tensor w2_sf 24576 -1 0"},
+          {"buf.15", "out routed_rows 1572864 -1 0"},
+          {"buf.16", "exchange s_sent 98304 255 1"},
+          {"buf.17", "exchange r_sent 98304 255 1"},
+          {"buf.18", "out routed_summed 98304 255 1"},
+          {"buf.19", "out shared_summed 98304 255 1"},
+          {"buf.20", "tensor residual 49152 -1 0"},
+          {"buf.21", "tensor moe_out 49152 -1 0"},
           {"map.0", "bf16 t:router 256 6144 128"},
           {"map.1", "bf16 t:router 256 6144 64"},
           {"map.2", "bf16 t:x 8 6144 8"},
