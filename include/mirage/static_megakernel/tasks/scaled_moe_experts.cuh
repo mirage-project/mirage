@@ -17,9 +17,9 @@
 //      expert x z_q (K = LAT).
 //      a. Each piece has its own accumulator. The epilogue applies sw sx.
 //      b. h = SiLU(gate) up.
-//      c. h -> h_q. A group of 128 features is two items, maybe on two SMs.
-//         The item that finishes second quantizes the group and adds 2 to
-//         CHQ[slot] (h_quant_pair).
+//      c. h -> h_q. A group of 128 features is two items, one queue entry on
+//         one SM: the second quantizes the group and adds 2 to CHQ[slot]
+//         (h_quant_group_tok). The shared experts' slots come first.
 //   2. W2 entries contain two tiles. The last NSM tiles are in one-tile
 //      entries.
 //      A tile is (slot, 128-row output tile):
@@ -55,22 +55,19 @@ namespace scaled_moe {
 
 // what the bodies below use of the layer state, as slots and offsets
 // (compile-time; run_scaled_moe_experts fills it from the node's slots):
-// buffers HQ (h_q), HSF (its fp32 scales [NSLOT][T][KT2]), H32 (the scratch of
-// h, fp32, and its amax: h_quant_pair), W13SF / W2SF (the fp32 weight scales,
-// graph tensors); counters CNT (the node's first: SMs done), W2NEXT = CNT + 32
-// (the queue's next entry), CHQ = CNT + 64 .. (per expert slot the W13 items
-// that wrote their h_q), PAIRC = CHQ + NSLOT .. (per slot and 128 h features
-// the items done); tensor maps (Maps::m) of the expert weights (one and two
-// pieces per box), of z_q (ZQ, ZQ_KT: set 0, set 1 at + 1) and of h_q (HQ_KT);
-// ZOFF: z_q's offset in the exchange region; the sizes NE, K, LAT, IR and the
-// tile counts from them
+// buffers HQ (h_q), HSF (its fp32 scales [NSLOT][T][KT2]), W13SF / W2SF (the
+// fp32 weight scales, graph tensors); counters CNT (the node's first: SMs
+// done), W2NEXT = CNT + 32 (the queue's next entry), CHQ = CNT + 64 .. (per
+// expert slot the W13 items that wrote their h_q); tensor maps (Maps::m) of the
+// expert weights (one and two pieces per box), of z_q (ZQ, ZQ_KT: set 0, set 1
+// at + 1) and of h_q (HQ_KT); ZOFF: z_q's offset in the exchange region; the
+// sizes NE, K, LAT, IR and the tile counts from them
 template <int HQ_,
           int HSF_,
           int CNT_,
           int W13_,
           int W13X2_,
           int W13SF_,
-          int H32_,
           int W2_,
           int W2X2_,
           int W2SF_,
@@ -83,20 +80,22 @@ template <int HQ_,
           int LAT_,
           int IR_,
           int LIMIT_ = 0,
-          int PROF_ = -1>
+          int PROF_ = -1,
+          int SHARED_ = 0>
 struct Slots {
-  static constexpr int HQ = HQ_, HSF = HSF_, H32 = H32_, CNT = CNT_,
-                       W2NEXT = CNT_ + 32, CHQ = CNT_ + 64;
+  static constexpr int HQ = HQ_, HSF = HSF_, CNT = CNT_, W2NEXT = CNT_ + 32,
+                       CHQ = CNT_ + 64;
   static constexpr int W13 = W13_, W13X2 = W13X2_, W13SF = W13SF_, W2 = W2_,
                        W2X2 = W2X2_, W2SF = W2SF_;
   static constexpr int ZQ = ZQ_, ZQ_KT = ZQ_KT_, HQ_KT = HQ_KT_;
   static constexpr size_t ZOFF = ZOFF_;
   static constexpr int NE = NE_, K = K_, LAT = LAT_, IR = IR_, LIMIT = LIMIT_,
-                       PROF = PROF_;
+                       PROF = PROF_, SHARED = SHARED_; // SHARED: the shared
+                                                       // bank experts (the
+                                                       // last slots)
   static constexpr int NPAIR = T * K; // routing pairs of a step
   static constexpr int NSLOT =
       T * K; // expert slots: at most every pair its own expert
-  static constexpr int PAIRC = CHQ + NSLOT;
   static constexpr int KT_LAT = LAT / 128; // K tiles of z_q (W13's K)
   static constexpr int MT13 =
       IR /
@@ -154,15 +153,6 @@ struct Slots {
   } // per entry: k
 };
 
-__device__ __forceinline__ uint32_t atom_add_acq_rel(uint32_t *c, uint32_t v) {
-  uint32_t old;
-  asm volatile("atom.acq_rel.gpu.global.add.u32 %0, [%1], %2;"
-               : "=r"(old)
-               : "l"(c), "r"(v)
-               : "memory");
-  return old;
-}
-
 // the 128 epilogue threads: copies the weight scales of item (ex, m),
 // [NATOMS][2], from the W13 scale tensor [E][IR / 128][NATOMS][2] (expert ex:
 // GateUpScales) into bs. Then bar.sync 1, 128.
@@ -178,165 +168,92 @@ __device__ __forceinline__ void
   asm volatile("bar.sync 1, 128;" ::: "memory");
 }
 
-// the 128 epilogue threads, after W13 item (slot, mt). The threads of rows <
-// 64 hold h[t] of feature 64 mt + row. The item writes its part of h32
-// [NSLOT][T][IR] and of amax [NSLOT][MT13][T] (fp32, the scratch of the
-// node). Counter pairc[slot][mt / 2] (zero before each launch) counts the
-// items of the group of 128 features. The item that finishes second writes
-// the h_q of the group ([NSLOT x T][IR] e4m3) and its scales (hs
-// [NSLOT][T][KT2]). Then it adds 2 to CHQ[slot] (release; W2 waits for MT13).
-// Memory order: all threads store, then bar.sync, then thread 64 does the
-// acq_rel add (a cumulative release; for the second item also the acquire).
-// After the next bar.sync, the second item reads with gpu-scope relaxed loads.
-template <int IR>
-__device__ __forceinline__ void h_quant_pair(float *h32,
-                                             float *amax,
-                                             uint8_t *hq,
-                                             float *hs,
-                                             uint32_t *pairc,
-                                             uint32_t *chq,
-                                             int slot,
-                                             int mt,
-                                             int row,
-                                             float const *h) {
-  constexpr int MT13 = IR / 64, KT2 = IR / 128;
-  __shared__ float red_s[2 * T];
-  __shared__ int second_s;
-  int const lane = threadIdx.x & 31;
-  if (row < 64) {
-    int const f = mt * 64 + row;
-    float am[T];
-#pragma unroll
-    for (int t = 0; t < T; t++) {
-      h32[((size_t)slot * T + t) * IR + f] = h[t];
-      am[t] = fabsf(h[t]);
-    }
-#pragma unroll
-    for (int d = 16; d > 0; d >>= 1)
-#pragma unroll
-      for (int t = 0; t < T; t++) {
-        am[t] = fmaxf(am[t], __shfl_xor_sync(0xffffffffu, am[t], d));
-      }
-    if (lane == 0) {
-#pragma unroll
-      for (int t = 0; t < T; t++) {
-        red_s[(row >> 5) * T + t] = am[t];
-      }
-    }
-  }
-  asm volatile("bar.sync 1, 128;" ::: "memory");
-  if (threadIdx.x == 64) {
-#pragma unroll
-    for (int t = 0; t < T; t++) {
-      amax[((size_t)slot * MT13 + mt) * T + t] = fmaxf(red_s[t], red_s[T + t]);
-    }
-    second_s = atom_add_acq_rel(pairc + slot * KT2 + (mt >> 1), 1u) == 1u;
-  }
-  asm volatile("bar.sync 1, 128;" ::: "memory");
-  if (second_s) { // the 128 features of the group, one for each thread
-    int const kt2 = mt >> 1, f = kt2 * 128 + row;
-    float s[T];
-#pragma unroll
-    for (int t = 0; t < T; t++) {
-      float const a0 = ld_relaxed_f32(amax +
-                                      ((size_t)slot * MT13 + 2 * kt2) * T + t),
-                  a1 = ld_relaxed_f32(
-                      amax + ((size_t)slot * MT13 + 2 * kt2 + 1) * T + t);
-      s[t] = fmaxf(fmaxf(a0, a1), 1.0e-10f) * (1.0f / 448.0f);
-      float const v = ld_relaxed_f32(h32 + ((size_t)slot * T + t) * IR + f);
-      hq[((size_t)slot * T + t) * IR + f] = cvt_e4m3(__fdiv_rn(v, s[t]));
-    }
-    if (row == 0) {
-#pragma unroll
-      for (int t = 0; t < T; t++) {
-        hs[((size_t)slot * T + t) * KT2 + kt2] = s[t];
-      }
-    }
-    asm volatile("bar.sync 1, 128;" ::: "memory");
-    if (threadIdx.x == 64) {
-      cnt_add(chq + slot, 2); // release; the W2 loaders acquire MT13 for each
-                              // slot
-    }
+// The two W13 items of a group of 128 features run on one SM, one after the
+// other (one queue entry: W13_PAIR items), and the group is quantized there:
+// exchanging h between two SMs (h and amax stores, an acq_rel add, the second
+// item's loads) cost ~7 us an item at T = 32, where the epilogue's global
+// accesses queue behind the weight stream and the issuers stall on the
+// accumulator ticks meanwhile. The epilogues read and write only the columns
+// of a slot's own tokens (the MMAs still run all T columns).
+constexpr int W13_PAIR = 2;
+
+// the 128 epilogue threads, after the drain of item mt of a slot
+// into acc (128 rows x T fp32): column j of acc is token tok[j]'s (j < nt), or
+// after a T-wide drain (wide) token j's (j < T: all tokens; the shared experts'
+// slots have every token, a verify step's idle rows several times, nt > T; for
+// another slot the tokens not its own get h_q rows W2 never reads). h of
+// feature 64 mt + f is silu(acc[f][j], acc[64 + f][j]). Thread `row` takes
+// feature f = row & 63 and the columns j = row >> 6, + 2, ... (all 128
+// threads, half of the columns each). The loops run over the slot's tokens, not
+// unrolled over T: this code runs once per item and misses the instruction
+// cache each time (an unrolled T = 32 body is ~20 KB, fetched from L2 behind
+// the weight stream: ~2 us a loop).
+template <int LIMIT>
+__device__ __forceinline__ float h_of(float const *acc, int f, int c) {
+  return silu2_limit<LIMIT>(acc[f * T + c], acc[(64 + f) * T + c]);
+}
+
+// the group's first item: its h into ha ([64][T] fp32 in shared memory, column
+// j); the next item's stage_w13_scales barrier orders it before the reads
+template <int LIMIT>
+__device__ __forceinline__ void h_first_tok(
+    float *ha, float const *acc, int row, int const *tok, int nt, bool wide) {
+  int const f = row & 63, n = wide ? T : nt;
+#pragma unroll 1
+  for (int j = row >> 6; j < n; j += 2) {
+    ha[f * T + j] = h_of<LIMIT>(acc, f, j);
   }
 }
 
-// MOE_TOK: the epilogues read and write only the columns of a slot's own
-// tokens (its tok_s entries; the MMAs still run all T columns, whose other
-// columns are never read): at T = 32 an expert has 1 or 2 of the 32 tokens, and
-// the full-width drains bound the node (W13 23.7 vs 12.8 us an item at T = 16).
-// The W2 tiles drain every column (their tokens only measured slower at T = 32)
-constexpr bool MOE_TOK = T >= 32;
-
-// h_quant_pair for the slot's tokens only (MOE_TOK): h[j] (j < nt) is token
-// tok[j]'s; the entries of h32, amax, h_q and its scales of the other tokens
-// are not written (W2 reads none of them)
-template <int IR>
-__device__ __forceinline__ void h_quant_pair_tok(float *h32,
-                                                 float *amax,
-                                                 uint8_t *hq,
-                                                 float *hs,
-                                                 uint32_t *pairc,
-                                                 uint32_t *chq,
-                                                 int slot,
-                                                 int mt,
-                                                 int row,
-                                                 float const *h,
-                                                 int const *tok,
-                                                 int nt) {
-  constexpr int MT13 = IR / 64, KT2 = IR / 128;
-  __shared__ float red_s[2 * T];
-  __shared__ int second_s;
-  int const lane = threadIdx.x & 31;
-  if (row < 64) {
-    int const f = mt * 64 + row;
-    float am[T];
+// after the second item of the group kt2 (features 128 kt2 + 64 ..): per
+// token the amax over the group's 128 features (ha and this item's h), the
+// scale, the e4m3 values (h_q [NSLOT x T][IR], its scales hs [NSLOT][T][KT2]);
+// then thread 64 adds 2 to CHQ[slot] (release; W2 waits for MT13). The other
+// tokens' entries are not written (W2 reads none of them).
+template <int IR, int LIMIT>
+__device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
+                                                  float *hs,
+                                                  uint32_t *chq,
+                                                  int slot,
+                                                  int kt2,
+                                                  int row,
+                                                  float const *acc,
+                                                  float const *ha,
+                                                  int const *tok,
+                                                  int nt,
+                                                  bool wide) {
+  constexpr int KT2 = IR / 128;
+  __shared__ float red_s[4 * T]; // [warp of the epilogue][token]
+  int const lane = threadIdx.x & 31, f = row & 63, n = wide ? T : nt;
+#pragma unroll 1
+  for (int j = row >> 6; j < n; j += 2) { // warp-uniform: row >> 6
+    float am = fmaxf(fabsf(ha[f * T + j]), fabsf(h_of<LIMIT>(acc, f, j)));
 #pragma unroll
-    for (int j = 0; j < T; j++) {
-      if (j < nt) {
-        h32[((size_t)slot * T + tok[j]) * IR + f] = h[j];
-        am[j] = fabsf(h[j]);
-#pragma unroll
-        for (int d = 16; d > 0; d >>= 1) {
-          am[j] = fmaxf(am[j], __shfl_xor_sync(0xffffffffu, am[j], d));
-        }
-        if (lane == 0) {
-          red_s[(row >> 5) * T + j] = am[j];
-        }
-      }
+    for (int d = 16; d > 0; d >>= 1) {
+      am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, d));
+    }
+    if (lane == 0) {
+      red_s[(row >> 5) * T + j] = am;
+    }
+  }
+  asm volatile("bar.sync 1, 128;" ::: "memory");
+#pragma unroll 1
+  for (int j = row >> 6; j < n; j += 2) {
+    int const t = wide ? j : tok[j], w0 = (row >> 6) * 2; // its two warps
+    float const sc =
+        fmaxf(fmaxf(red_s[w0 * T + j], red_s[(w0 + 1) * T + j]), 1.0e-10f) *
+        (1.0f / 448.0f);
+    uint8_t *const q = hq + ((size_t)slot * T + t) * IR + kt2 * 128 + f;
+    q[0] = cvt_e4m3(__fdiv_rn(ha[f * T + j], sc));
+    q[64] = cvt_e4m3(__fdiv_rn(h_of<LIMIT>(acc, f, j), sc));
+    if (f == 0) {
+      hs[((size_t)slot * T + t) * KT2 + kt2] = sc;
     }
   }
   asm volatile("bar.sync 1, 128;" ::: "memory");
   if (threadIdx.x == 64) {
-    for (int j = 0; j < nt; j++) {
-      amax[((size_t)slot * MT13 + mt) * T + tok[j]] =
-          fmaxf(red_s[j], red_s[T + j]);
-    }
-    second_s = atom_add_acq_rel(pairc + slot * KT2 + (mt >> 1), 1u) == 1u;
-  }
-  asm volatile("bar.sync 1, 128;" ::: "memory");
-  if (second_s) { // the 128 features of the group, one for each thread
-    int const kt2 = mt >> 1, f = kt2 * 128 + row;
-#pragma unroll
-    for (int j = 0; j < T; j++) {
-      if (j < nt) {
-        int const t = tok[j];
-        float const a0 = ld_relaxed_f32(
-                        amax + ((size_t)slot * MT13 + 2 * kt2) * T + t),
-                    a1 = ld_relaxed_f32(
-                        amax + ((size_t)slot * MT13 + 2 * kt2 + 1) * T + t);
-        float const sc = fmaxf(fmaxf(a0, a1), 1.0e-10f) * (1.0f / 448.0f);
-        float const v = ld_relaxed_f32(h32 + ((size_t)slot * T + t) * IR + f);
-        hq[((size_t)slot * T + t) * IR + f] = cvt_e4m3(__fdiv_rn(v, sc));
-        if (row == 0) {
-          hs[((size_t)slot * T + t) * KT2 + kt2] = sc;
-        }
-      }
-    }
-    asm volatile("bar.sync 1, 128;" ::: "memory");
-    if (threadIdx.x == 64) {
-      cnt_add(chq + slot, 2); // release; the W2 loaders acquire MT13 for each
-                              // slot
-    }
+    cnt_add(chq + slot, 2); // release; the W2 loaders acquire MT13 for each
+                            // slot
   }
 }
 
@@ -401,6 +318,8 @@ __device__ __forceinline__ void drain_w2_promoted(
 //            rows)
 //   OFF_BS   the weight scales of a W13 item ([KT_LAT][2])
 //   OFF_XS   the scales of z_q ([KT_LAT][T])
+//   OFF_HA   the first item's h of the group ([64][T] fp32,
+//            h_quant_group_tok)
 //   OFF_CSF  the phase switch stages the constant scale chunk here (the ring
 //            area is idle at that time)
 template <class RES>
@@ -410,8 +329,9 @@ struct Smem {
                            OFF_W2BAR + RES::KT2 * 1024 + RES::KT2 * SF_CHUNK;
   static constexpr int OFF_BS = OFF_ACC + 128 * T * 4,
                        OFF_XS = OFF_BS + RES::KT_LAT * 2 * 4;
-  static constexpr int BYTES =
-      OFF_XS + RES::KT_LAT * T * 4; // the node's need from the base
+  static constexpr int OFF_HA = OFF_XS + RES::KT_LAT * T * 4;
+  static constexpr int BYTES = OFF_HA + 64 * T * 4; // the node's need from the
+                                                    // base
   static_assert(OFF_W2BAR % 1024 == 0, "128-B swizzled tiles are 1024-aligned");
   // ---- W2 ring: one tile per stage (KT2 x 16 KB weight pieces | h_q KT2 KB)
   // at the offsets of moe_experts.cuh's W2 ring ----
@@ -481,7 +401,7 @@ __device__ __forceinline__ void w2_stage_scales(
            f);
 }
 
-// ---- optional per-SM stamps: PROF >= 0 (the node's buffer slot 5, a graph
+// ---- optional per-SM stamps: PROF >= 0 (the node's buffer slot 4, a graph
 // tensor int64 [NSM][MOE_PROF_WORDS], scaled_moe_experts_layer(prof=)), in
 // globaltimer ns; none of this is compiled without it. Per SM:
 //   [0] run_expert_dynamic entered (the routing table is built)
@@ -504,7 +424,7 @@ __device__ __forceinline__ void w2_stage_scales(
 // The recording threads keep their counts, sums and [0] in registers and only
 // store (no global load on the pipeline's path); the sums and the count at the
 // queue's end.
-constexpr int MOE_PROF_WORDS = 256, MOE_PROF_EV0 = 16;
+constexpr int MOE_PROF_WORDS = 384, MOE_PROF_EV0 = 16;
 __device__ __forceinline__ void
     moe_prof_event(long long *prof, int &n, long long t0, int kind) {
   if (MOE_PROF_EV0 + n < MOE_PROF_WORDS) {
@@ -615,7 +535,10 @@ __device__ __forceinline__ void
   // W2 tiles n2 = slots x OT2: 2-tile entries, the last t1 = min(the tiles
   // after the first ~4/5 of the slots, NSM) in 1-tile entries, so the SMs
   // finish within about a tile of each other
-  int const n_live = s_ints[1], n13 = n_live * MT13, n2 = n_live * OT2;
+  // W13 entries: W13_PAIR items each (a group of 128 features)
+  static_assert(MT13 % W13_PAIR == 0, "scaled_moe_experts: whole groups");
+  int const n_live = s_ints[1], n13 = n_live * (MT13 / W13_PAIR),
+            n2 = n_live * OT2;
   int const n4 = ((n2 * 4 / 5) / OT2) * OT2,
             t1 = (n2 - n4 < NSM) ? n2 - n4 : NSM, off1 = n2 - t1,
             n2e = (off1 + 1) / 2;
@@ -623,10 +546,13 @@ __device__ __forceinline__ void
   float *acc_s = reinterpret_cast<float *>(rt_sm() + SM_::OFF_ACC);
   auto entry_of =
       [&](int idx, QueueEntry &e) { // entry number idx of the queue order above
-        if (idx < n13) {
+        if (idx < n13) { // a: the slot, b: the entry's first item. The shared
+                         // experts' slots (the last SHARED: all T tokens, the
+                         // slowest items) first, then the others in order (as
+                         // the W2 tiles that wait for them)
           e.kind = QE_W13;
-          e.a = idx / MT13;
-          e.b = idx % MT13;
+          e.a = (idx / (MT13 / W13_PAIR) + n_live - RES::SHARED) % n_live;
+          e.b = idx % (MT13 / W13_PAIR) * W13_PAIR;
         } else if (idx < n13 + n2e) {
           int const i0 = 2 * (idx - n13);
           e.kind = QE_W2;
@@ -642,7 +568,8 @@ __device__ __forceinline__ void
         }
       };
   auto w13_job = [&](QueueEntry const &e,
-                     TileJob &j) { // the ring job of a W13 entry
+                     int i,
+                     TileJob &j) { // the ring job of item i of a W13 entry
     int const ex = eid_s[e.a];
     j = TileJob{};
     j.kind = 1;
@@ -653,7 +580,7 @@ __device__ __forceinline__ void
     j.wmap2 = &maps.m[RES::W13X2]; // no scale maps: the epilogue applies them
     j.amap = &maps.m[RES::ZQ + dbuf_par];
     j.amap2 = &maps.m[RES::ZQ_KT + dbuf_par];
-    j.tile0 = ex * (MT13 * KT_LAT) + e.b * KT_LAT;
+    j.tile0 = ex * (MT13 * KT_LAT) + (e.b + i) * KT_LAT;
   };
   if (warp == 0) {
     if (lane == 0) {
@@ -771,7 +698,11 @@ __device__ __forceinline__ void
           w2k += e.b;
         } else {
           TileJob j;
-          w13_job(e, j);
+          for (int i = 0; i + 1 < W13_PAIR; i++) {
+            w13_job(e, i, j);
+            load_job<128, 16384, false>(j, base, gl, 0);
+          }
+          w13_job(e, W13_PAIR - 1, j); // the next entry taken in the last item
           load_job<128, 16384, false>(j, base, gl, 0, 0, W13_TAKE_AT);
           n13_mine++;
           int const idx1 = (int)atom_inc_lane0(cnt_now(g) + RES::W2NEXT);
@@ -838,16 +769,18 @@ __device__ __forceinline__ void
         }
         wtt0 += e.b;
       } else { // W13: 8 columns for each piece, PromoRounds ticks
-               // (scale_promotion.cuh)
-        issue_promoted<IDESC_MX_E4M3, KT_LAT>(
-            baseu,
-            tbu,
-            iss,
-            gi,
-            wtt0,
-            tbu + SM_::CONST_SF STAGE_STAMP_ARG(
-                      (iss == 0 && qn == 0) ? stamp : nullptr));
-        wtt0 += PromoRounds<KT_LAT>::ROUNDS;
+               // (scale_promotion.cuh), for each item of the entry
+        for (int i = 0; i < W13_PAIR; i++) {
+          issue_promoted<IDESC_MX_E4M3, KT_LAT>(
+              baseu,
+              tbu,
+              iss,
+              gi,
+              wtt0,
+              tbu + SM_::CONST_SF STAGE_STAMP_ARG(
+                        (iss == 0 && qn == 0 && i == 0) ? stamp : nullptr));
+          wtt0 += PromoRounds<KT_LAT>::ROUNDS;
+        }
       }
     }
   } else if (warp == 7) { // second loader: the odd W13 stages, the odd W2 tiles
@@ -899,16 +832,18 @@ __device__ __forceinline__ void
         w2k7 += e.b;
         __syncwarp();
       } else {
-        TileJob j;
-        w13_job(e, j);
-        if (lane == 0) {
-          load_job<128, 16384, false>(j, base, gl, 1);
-          asm volatile(
-              "st.volatile.shared.u32 [%0], %1;" ::"r"(w2_w7gl<RES>(base)),
-              "r"(gl)
-              : "memory"); // for warp 0's switch
-        } else {
-          gl += j.nst;
+        for (int i = 0; i < W13_PAIR; i++) {
+          TileJob j;
+          w13_job(e, i, j);
+          if (lane == 0) {
+            load_job<128, 16384, false>(j, base, gl, 1);
+            asm volatile(
+                "st.volatile.shared.u32 [%0], %1;" ::"r"(w2_w7gl<RES>(base)),
+                "r"(gl)
+                : "memory"); // for warp 0's switch
+          } else {
+            gl += j.nst;
+          }
         }
       }
     }
@@ -1020,99 +955,88 @@ __device__ __forceinline__ void
           }
         }
         wtt0 += e.b;
-      } else { // W13: rows 0..63 gate, 64..127 up of features [64 m, 64 m + 64)
-               // -> h_q of the slot
-        int const slot = e.a, mt = e.b;
-        float v[T];
-        if constexpr (RES::PROF >= 0) {
-          if (pev) {
-            moe_prof_event(prof, pn, pt0, 1);
+      } else { // W13, each item of the entry: rows 0..63 gate, 64..127 up
+               // of features [64 m, 64 m + 64) -> h_q of the slot
+        int const slot = e.a;
+        for (int i = 0; i < W13_PAIR; i++) {
+          int const mt = e.b + i;
+          float v[T];
+          if constexpr (RES::PROF >= 0) {
+            if (pev) {
+              moe_prof_event(prof, pn, pt0, 1);
+            }
           }
-        }
-        // the weight scales, then the rounds
-        float *const bs = reinterpret_cast<float *>(rt_sm() + SM_::OFF_BS);
-        stage_w13_scales<KT_LAT, IR>(
-            buf_at<float const>(g, RES::W13SF), eid_s[slot], mt, bs);
-        float h[T];
-        float *const h32 = buf_at<float>(g, RES::H32);
-        if constexpr (MOE_TOK) { // the slot's tokens only: column j of v,
-                                 // acc_s and h is token tok[j]'s
+          // the weight scales, then the rounds (the barrier in
+          // stage_w13_scales also orders the previous item's acc_s reads
+          // before this item's writes)
+          float *const bs = reinterpret_cast<float *>(rt_sm() + SM_::OFF_BS);
+          stage_w13_scales<KT_LAT, IR>(
+              buf_at<float const>(g, RES::W13SF), eid_s[slot], mt, bs);
+          if constexpr (RES::PROF >= 0) {
+            if (pev) {
+              moe_prof_event(prof, pn, pt0, 7);
+            }
+          }
+          // the slot's tokens only
           int const nt = ntok_s[slot];
           int const *const tk = tok_s + start_s[slot];
-          int const row = drain_promoted_tok<KT_LAT, GateUpScales>(
-              tb,
-              wtt0,
-              bs,
-              reinterpret_cast<float const *>(rt_sm() + SM_::OFF_XS),
-              tk,
-              nt,
-              v);
+          // more than 8 tokens (the shared experts' slots: all T): the T-wide
+          // drain (the per-token one took ~60 us an item at nt = 32);
+          // acc_s column t is token t's. Else column j is token tk[j]'s
+          bool const wide = nt > 8;
+          int row;
+          if (wide) {
+            row = drain_promoted<KT_LAT, GateUpScales>(
+                tb,
+                wtt0,
+                bs,
+                reinterpret_cast<float const *>(rt_sm() + SM_::OFF_XS),
+                v);
+          } else {
+            row = drain_promoted_tok<KT_LAT, GateUpScales>(
+                tb,
+                wtt0,
+                bs,
+                reinterpret_cast<float const *>(rt_sm() + SM_::OFF_XS),
+                tk,
+                nt,
+                v);
+          }
+          if constexpr (RES::PROF >= 0) {
+            if (pev) {
+              moe_prof_event(prof, pn, pt0, 8);
+            }
+          }
 #pragma unroll
           for (int j = 0; j < T; j++) {
-            if (j < nt) {
+            if (wide || j < nt) {
               acc_s[row * T + j] = v[j];
             }
           }
           asm volatile("bar.sync 1, 128;" ::: "memory");
-          if (row < 64) {
-#pragma unroll
-            for (int j = 0; j < T; j++) {
-              if (j < nt) {
-                h[j] = silu2_limit<RES::LIMIT>(acc_s[row * T + j],
-                                               acc_s[(64 + row) * T + j]);
-              }
+          float *const ha = reinterpret_cast<float *>(rt_sm() + SM_::OFF_HA);
+          if (i == 0) { // the group's first item: its h for the second
+            h_first_tok<RES::LIMIT>(ha, acc_s, row, tk, nt, wide);
+          } else {
+            h_quant_group_tok<IR, RES::LIMIT>(buf_at<uint8_t>(g, RES::HQ),
+                                              buf_at<float>(g, RES::HSF),
+                                              cnt_now(g) + RES::CHQ,
+                                              slot,
+                                              mt >> 1,
+                                              row,
+                                              acc_s,
+                                              ha,
+                                              tk,
+                                              nt,
+                                              wide);
+          }
+          if constexpr (RES::PROF >= 0) {
+            if (pev) {
+              moe_prof_event(prof, pn, pt0, 2);
             }
           }
-          h_quant_pair_tok<IR>(h32,
-                               h32 + (size_t)RES::NSLOT * T * IR,
-                               buf_at<uint8_t>(g, RES::HQ),
-                               buf_at<float>(g, RES::HSF),
-                               cnt_now(g) + RES::PAIRC,
-                               cnt_now(g) + RES::CHQ,
-                               slot,
-                               mt,
-                               row,
-                               h,
-                               tk,
-                               nt);
-        } else {
-          int const row = drain_promoted<KT_LAT, GateUpScales>(
-              tb,
-              wtt0,
-              bs,
-              reinterpret_cast<float const *>(rt_sm() + SM_::OFF_XS),
-              v);
-#pragma unroll
-          for (int t = 0; t < T; t++) {
-            acc_s[row * T + t] = v[t];
-          }
-          asm volatile("bar.sync 1, 128;" ::: "memory");
-          // h (fp32) = SiLU(gate) up -> h_q, one fp32 scale for each (token,
-          // 128 features)
-          if (row < 64) {
-#pragma unroll
-            for (int t = 0; t < T; t++) {
-              h[t] = silu2_limit<RES::LIMIT>(acc_s[row * T + t],
-                                             acc_s[(64 + row) * T + t]);
-            }
-          }
-          h_quant_pair<IR>(h32,
-                           h32 + (size_t)RES::NSLOT * T * IR,
-                           buf_at<uint8_t>(g, RES::HQ),
-                           buf_at<float>(g, RES::HSF),
-                           cnt_now(g) + RES::PAIRC,
-                           cnt_now(g) + RES::CHQ,
-                           slot,
-                           mt,
-                           row,
-                           h);
+          wtt0 += PromoRounds<KT_LAT>::ROUNDS;
         }
-        if constexpr (RES::PROF >= 0) {
-          if (pev) {
-            moe_prof_event(prof, pn, pt0, 2);
-          }
-        }
-        wtt0 += PromoRounds<KT_LAT>::ROUNDS;
       }
       mbar_arrive(rt.qempty0 + 8 * qpos); // 128 arrivals: entry retired
     }
@@ -1150,44 +1074,50 @@ __device__ __forceinline__ void phase_switch_end() {
 }
 
 // wait until z_q (all K tiles) and its fp32 scales have landed (group_quant,
-// this GPU's copy: 0xFF-prefilled 16-B pieces, each written by one 16-B
-// store): all 256 threads poll their pieces, and stage the scale pieces into
-// xs ([KT_LAT][T] fp32 in shared memory) as they land. In the same rounds the
-// 128 epilogue threads poll the NPAIR routing pairs (topk_route's buffer,
-// 0xFF-prefilled) into the routing table's inputs (table_poll's steps: sel,
-// wsel, cnt_e += 1): one round of loads for the three, not one after another.
-// Before it: cnt_e zeroed, then a __syncthreads; after it: a __syncthreads
-// before xs or the table are read.
+// this GPU's copy): thread 0 waits for zq_cnt (group_quant's counter: each of
+// its zq_tasks tasks adds 1 after its stores), then the scales are staged into
+// xs ([KT_LAT][T] fp32 in shared memory). Polling z_q's bytes instead (every SM
+// its 128 KB at T = 32) spilled registers of the whole kernel and landed later.
+// Then the 128 epilogue threads poll the NPAIR routing pairs (topk_route's
+// buffer, 0xFF-prefilled) into the routing table's inputs (table_poll's steps:
+// sel, wsel, cnt_e += 1), all of their pairs' loads per round. Before it:
+// cnt_e zeroed, then a __syncthreads; after it: a __syncthreads before xs or
+// the table are read.
 template <class RES>
 __device__ __forceinline__ void
-    wait_z_and_pairs(G const &g, unsigned long long const *pairs, float *xs) {
-  constexpr int NZV = (int)(zq32_bytes(RES::LAT) / 16), PER = (NZV + 255) / 256,
-                ZV = T * RES::LAT / 16, PP = (RES::NPAIR + 127) / 128;
+    wait_z_and_pairs(G const &g,
+                     unsigned long long const *pairs,
+                     float *xs,
+                     uint32_t const *zq_cnt,
+                     uint32_t zq_tasks) {
+  constexpr int NZV = (int)(zq32_bytes(RES::LAT) / 16), ZV = T * RES::LAT / 16,
+                PP = (RES::NPAIR + 127) / 128;
   static_assert((NZV - ZV) * 4 == RES::KT_LAT * T,
                 "z_q's fp32 scales [KT_LAT][T] follow its bytes (zq32_bytes)");
+  if (threadIdx.x == 0) {
+    cnt_wait(zq_cnt, zq_tasks);
+  }
+  __syncthreads();
+  for (int piece = ZV + (int)threadIdx.x; piece < NZV; piece += 256) {
+    uint4 const u =
+        ld16_relaxed(g.rv + RES::ZOFF + (size_t)piece * 16 + rg_set());
+    float *const d = xs + 4 * (piece - ZV);
+    d[0] = __uint_as_float(u.x);
+    d[1] = __uint_as_float(u.y);
+    d[2] = __uint_as_float(u.z);
+    d[3] = __uint_as_float(u.w);
+  }
   int *const cntE_s = RES::cnt_e(), *const sel_ss = RES::sel();
   float *const wsel_ss = RES::wsel();
   int const pt = (int)threadIdx.x - 64; // an epilogue thread: pairs pt + 128 i
-  bool ok[PER], pok[PP];
-#pragma unroll
-  for (int q = 0; q < PER; q++) {
-    ok[q] = (threadIdx.x + 256 * q) >= NZV;
-  }
+  bool pok[PP];
 #pragma unroll
   for (int i = 0; i < PP; i++) {
     pok[i] = !(pt >= 0 && pt < 128 && pt + 128 * i < RES::NPAIR);
   }
   bool all;
   do {
-    uint4 u[PER];
     unsigned long long pv[PP];
-#pragma unroll
-    for (int q = 0; q < PER; q++) {
-      if (!ok[q]) {
-        u[q] = ld16_relaxed(g.rv + RES::ZOFF +
-                            (size_t)(threadIdx.x + 256 * q) * 16 + rg_set());
-      }
-    }
 #pragma unroll
     for (int i = 0; i < PP; i++) {
       if (!pok[i]) {
@@ -1198,21 +1128,6 @@ __device__ __forceinline__ void
       }
     }
     all = true;
-#pragma unroll
-    for (int q = 0; q < PER; q++) {
-      if (!ok[q]) {
-        ok[q] = valid16(u[q]);
-        int const piece = threadIdx.x + 256 * q;
-        if (ok[q] && piece >= ZV) { // 4 of the scales
-          float *const d = xs + 4 * (piece - ZV);
-          d[0] = __uint_as_float(u[q].x);
-          d[1] = __uint_as_float(u[q].y);
-          d[2] = __uint_as_float(u[q].z);
-          d[3] = __uint_as_float(u[q].w);
-        }
-      }
-      all = all && ok[q];
-    }
 #pragma unroll
     for (int i = 0; i < PP; i++) {
       if (!pok[i]) {
@@ -1232,8 +1147,8 @@ __device__ __forceinline__ void
 } // namespace scaled_moe
 
 // the node's scaled_moe::Slots: its buffer slots (scaled_moe_experts_layer:
-// h_q, its fp32 scales, the w13 scales (a tensor), the scratch of h, the w2
-// scales (a tensor)), its map slots (w13, w13 x2, w2, w2 x2, z_q, z_q x2 K
+// h_q, its fp32 scales, the w13 scales (a tensor), the w2 scales (a tensor)),
+// its map slots (w13, w13 x2, w2, w2 x2, z_q, z_q x2 K
 // tiles (each 2 slots: the exchange region's sets), h_q), its counter, z_q's
 // offset, the sizes: NE and K from topk_route's params (PAIRS; its bank:
 // sub-experts and shared experts), LAT from group_quant's (ZQ), IR its own
@@ -1251,10 +1166,9 @@ using ScaledMoeSlotsOf =
                       slot_at<MAP_SLOTS, 0>(),
                       slot_at<MAP_SLOTS, 1>(),
                       slot_at<BUF_SLOTS, 2>(),
-                      slot_at<BUF_SLOTS, 3>(),
                       slot_at<MAP_SLOTS, 2>(),
                       slot_at<MAP_SLOTS, 3>(),
-                      slot_at<BUF_SLOTS, 4>(),
+                      slot_at<BUF_SLOTS, 3>(),
                       slot_at<MAP_SLOTS, 4>(),
                       slot_at<MAP_SLOTS, 5>(),
                       slot_at<MAP_SLOTS, 6>(),
@@ -1264,7 +1178,8 @@ using ScaledMoeSlotsOf =
                       ZQ::v[0],
                       PARAMS::v[0],
                       param_or<PARAMS, 1, 0>(),
-                      slot_or<BUF_SLOTS, 5, -1>()>;
+                      slot_or<BUF_SLOTS, 4, -1>(),
+                      topk_shared<PAIRS>()>;
 
 // scaled_moe_experts task (one per SM, task x on SM x): wait for z_q, phase
 // switch, routing table, then the queue (above) -> the routed rows [T][K][LAT]
@@ -1287,8 +1202,10 @@ __device__ __forceinline__ void run_scaled_moe_experts(Maps const &maps,
       "scaled_moe_experts: its output rows, its counter, topk_route's pairs");
   using RES = ScaledMoeSlotsOf<SELF, PARAMS, BUF_SLOTS, MAP_SLOTS, ZQ, PAIRS>;
   static_assert(
-      ZQ::buf >= 0 && exchange_bytes[ZQ::buf] == zq32_bytes(RES::LAT),
-      "scaled_moe_experts: z_q in the exchange region (group_quant's)");
+      ZQ::buf >= 0 && exchange_bytes[ZQ::buf] == zq32_bytes(RES::LAT) &&
+          ZQ::counter >= 0,
+      "scaled_moe_experts: z_q in the exchange region (group_quant's, with "
+      "its counter)");
   int const sm_id = L.sm_id;
   // PROF: each thread's own times of the task's start, the first barrier, z_q
   // landed, the pairs read (thread 0's and thread 64's are written below)
@@ -1321,7 +1238,9 @@ __device__ __forceinline__ void run_scaled_moe_experts(Maps const &maps,
   scaled_moe::wait_z_and_pairs<RES>(
       g,
       buf_at<unsigned long long const>(g, PAIRS::buf),
-      reinterpret_cast<float *>(rt_sm() + scaled_moe::Smem<RES>::OFF_XS));
+      reinterpret_cast<float *>(rt_sm() + scaled_moe::Smem<RES>::OFF_XS),
+      cnt_now(g) + ZQ::counter,
+      (uint32_t)(ZQ::x * ZQ::y));
   __syncthreads(); // every thread's pieces have landed and are staged
   // z_q came from generic stores (group_quant); the TMA loads read it next
   asm volatile("fence.proxy.async.global;" ::: "memory");

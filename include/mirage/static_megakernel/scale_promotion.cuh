@@ -215,11 +215,11 @@ __device__ __forceinline__ int drain_promoted(
   return row;
 }
 
-// drain_promoted for the tokens of one routed expert only (scaled_moe_experts,
-// MOE_TOK): v[j] (j < nt) = token tok[j]'s sum, bit-equal to drain_promoted's
-// v[tok[j]] (the same pieces in the same order); the other tokens' columns are
-// not read. A round: per 8 of the tokens, the 4 pieces' columns (tcgen05.ld x1
-// each) before one wait.
+// drain_promoted for the tokens of one routed expert only (scaled_moe_experts
+// W13 items of up to 8 tokens): v[j] (j < nt) = token tok[j]'s sum, bit-equal
+// to drain_promoted's v[tok[j]] (the same pieces in the same order); the other
+// tokens' columns are not read. A round: per 8 of the tokens, the 4 pieces'
+// columns (tcgen05.ld x1 each) before one wait.
 template <int NATOMS, class WS>
 __device__ __forceinline__ int drain_promoted_tok(uint32_t tb,
                                                   int wtt,

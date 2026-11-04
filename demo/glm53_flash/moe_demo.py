@@ -374,7 +374,8 @@ def prof_report(prof: torch.Tensor, bar: int, t: dict):
     w13_bytes, w2_bytes = 128 * H, 128 * t["w2"].shape[2] + T * t["w2"].shape[2]
     per = {k: [] for k in ("task started", "first barrier", "z_q + pairs landed", "switch done (t0)", "switch done (t64)",
                            "table: 1st barrier", "table: slots numbered", "start",
-                           "end", "W13 items", "W13 item (seen-done)", "W13 done-done", "last W13 done",
+                           "end", "W13 items", "W13 item (seen-done)", "W13: seen -> scales", "W13: scales -> drained",
+                           "W13: drained -> h_q", "W13: h_q -> next seen", "W13 done-done", "last W13 done",
                            "switch", "last W13 -> 1st W2 done", "W2 tiles", "W2: scales (+ CHQ, new slot)", "W2: wait acc full",
                            "W2: drain + store", "W2 done-done", "W2 loaders: wait stage (sum)", "W2 loaders: wait CHQ (sum)")}
     for sm in range(p.shape[0]):
@@ -391,6 +392,12 @@ def prof_report(prof: torch.Tensor, bar: int, t: dict):
         done13 = [x for k, x in ev if k == 2]
         per["W13 items"].append(len(done13))
         per["W13 item (seen-done)"] += [b - a for a, b in zip(seen13, done13)]
+        sc13 = [x for k, x in ev if k == 7]
+        dr13 = [x for k, x in ev if k == 8]
+        per["W13: seen -> scales"] += [b - a for a, b in zip(seen13, sc13)]
+        per["W13: scales -> drained"] += [b - a for a, b in zip(sc13, dr13)]
+        per["W13: drained -> h_q"] += [b - a for a, b in zip(dr13, done13)]
+        per["W13: h_q -> next seen"] += [b - a for a, b in zip(done13, seen13[1:])]
         per["W13 done-done"] += [b - a for a, b in zip(done13, done13[1:])]
         if done13:
             per["last W13 done"].append(done13[-1] + (r[0] - bar) / 1e3)
@@ -596,7 +603,7 @@ def main():
     t["h_post"].copy_(h_post)
     t["h_res"].copy_(h_res)
     if args.prof_experts:
-        t["moe_prof"] = torch.zeros(torch.cuda.get_device_properties(0).multi_processor_count, 256, dtype=torch.int64,
+        t["moe_prof"] = torch.zeros(torch.cuda.get_device_properties(0).multi_processor_count, 384, dtype=torch.int64,
                                     device=dev)
     mpk = StaticMegakernel(num_gpus=1)
     grids = build_graph(mpk, t, attn_next=None if attn_next is None else {k: attn_next[k] for k in ("rms_eps", "hc_eps",

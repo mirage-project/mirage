@@ -620,10 +620,10 @@ class StaticMegakernel(PersistentKernel):
         Weights retain the checkpoint's e4m3 bytes and fp32 scales for 128 x 128 blocks.
         Activations x and h use e4m3, with an fp32 scale per token and 128 values. The expert activation is SiLU.
         One task runs on each SM. The SMs take expert work from a shared queue and write routed output rows.
-        buf_slots: the scratch buffers for h_q, its scales, h in fp32 and group maxima, and the fp32 weight scales (by pointer).
+        buf_slots: the scratch buffers for h_q and its scales, and the fp32 weight scales (by pointer).
         map_slots: the tensor maps of the weights, of z_q in both exchange sets, and of h_q (scaled_moe::Slots).
-        Counters track completed SMs, the next queue entry, completed W13 items per expert slot, and completed items per h group.
-        The first two counters each reserve 32 words. The other counters reserve NSLOT and NSLOT * IR / 128 words.
+        Counters track completed SMs, the next queue entry and completed W13 items per expert slot.
+        The first two counters each reserve 32 words. The last counter reserves NSLOT words.
         E is the expert count. K is the experts per token. L is the hidden width.
         IR is this GPU's expert intermediate width: 128 or 256. GLM-5.3 therefore needs TP8 or TP16. A wider intermediate (GLM-5.3-
         Flash at TP4: 512) is sub-experts: topk_route_layer(sub_experts=) and a bank of E x sub_experts experts; then E and K here
@@ -659,12 +659,10 @@ class StaticMegakernel(PersistentKernel):
         hq = self._scratch("scaled_moe_experts.h_q", NSLOT * T * IR)          # every row written before its counter lets W2 read it
         hsf = self._scratch("scaled_moe_experts.h_q_scales", NSLOT * T * KT2 * 4)   # written before its counter lets W2 read it
         w13_pieces, w2_pieces = E * 2 * IR * L // 16384, E * L * IR // 16384   # one 128 x 128 e4m3 piece: 16 KB
-        bufs = [hq, hsf, self._tensor_slot(w13_scales),
-                self._scratch("scaled_moe_experts.h32", NSLOT * T * IR * 4 + NSLOT * (IR // 64) * T * 4),   # h (fp32), its amax
-                self._tensor_slot(w2_scales)]
-        if prof is not None:   # buffer slot 5 (scaled_moe::Slots PROF)
+        bufs = [hq, hsf, self._tensor_slot(w13_scales), self._tensor_slot(w2_scales)]
+        if prof is not None:   # buffer slot 4 (scaled_moe::Slots PROF)
             self._dtypes("scaled_moe_experts_layer", prof=(prof, int64))
-            assert (prof.dim(0), prof.dim(1)) == (self._num_sms(), 256), "prof: [SMs, scaled_moe::MOE_PROF_WORDS] int64"
+            assert (prof.dim(0), prof.dim(1)) == (self._num_sms(), 384), "prof: [SMs, scaled_moe::MOE_PROF_WORDS] int64"
             bufs.append(self._tensor_slot(prof))
         maps = [self._map("wblk8", ("t", w13), (w13_pieces, 1)), self._map("wblk8", ("t", w13), (w13_pieces, 2)),
                 self._map("wblk8", ("t", w2), (w2_pieces, 1)), self._map("wblk8", ("t", w2), (w2_pieces, 2))]
@@ -677,7 +675,7 @@ class StaticMegakernel(PersistentKernel):
         self._add_node("scaled_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
                        [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)], one_task_per_sm=True,
                        out_buffer=lambda n: (T * K * L * 4, -1, False),
-                       counters=32 * 2 + NSLOT + NSLOT * KT2, buf_slots=bufs, map_slots=maps)
+                       counters=32 * 2 + NSLOT, buf_slots=bufs, map_slots=maps)
 
     # ---- after moe_experts (tasks/allreduce_send.cuh, sum_rmsnorm.cuh, sum_gpus.cuh, sum_send.cuh, residual_add.cuh). The
     # graph tensors between them (the sent partial sums, sum_rmsnorm's Rn, sum_gpus's Ssum, latent_up's K parts, sum_send's o)
