@@ -97,7 +97,7 @@ __device__ __forceinline__ void run_dsa_index_k_write(Maps const &,
   }
   __syncthreads();
   if (threadIdx.x == 0) {
-    cnt_add(g.cnt + SELF::counter, 1);
+    cnt_add(cnt_now(g) + SELF::counter, 1);
   }
 }
 

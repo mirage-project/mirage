@@ -12,9 +12,13 @@
   6. timed_launches  --reps launches, 512 MB read on every GPU before each (empties L2); span per launch
                      --record FILE: the timing build; the per-task times become cost records (cost_records.py) appended to FILE
 Steps 5-6 run the layer through the test harness (python/mirage/mpk/static_harness.py).
+--collect FILE: a cost collection instead of one plan: the plans of plan_gen.collection_plans (round robin with every grid, balanced
+random placements), each run as above with --record FILE in its own process (<out>/<plan>/); a plan with a result.json there is
+skipped, so a stopped collection continues where it was.
 
 python demo.py --layer-dir ~/mk/moe_layer [--plan PLAN_FILE] [--search COSTS ...] [--record FILE] [--out DIR] [--reps 20]
                [--compare-y y_rank0.bin]
+python demo.py --layer-dir ~/mk/moe_layer --collect COSTS_FILE [--rounds 3] [--out DIR]
 Weight files: <layer_dir>/ holds the tensors every GPU has (router, latent_down, latent_up, gamma, bias, the 8-token input x and the
 residual prefix, SGLang's y), <layer_dir>_r<g>/ GPU g's shard (shared gate_up / down, expert banks).
 """
@@ -222,6 +226,35 @@ def timed_launches(h: Harness, ws, reps: int, wait_s: float, after_launch=None) 
     return spans
 
 
+def collect(args, mpk) -> None:
+    """--collect: every plan of plan_gen.collection_plans written to <out>/plans/<name>.json and run by this script in its own
+    process with --record (the timing build, cost records appended to args.collect), output in <out>/<name>/. A plan whose run
+    left a result.json is skipped."""
+    from mirage.mpk import plan_gen
+    plans = plan_gen.collection_plans(mpk, rounds=args.rounds, seed=args.seed)
+    plan_dir = os.path.join(args.out, "plans")
+    os.makedirs(plan_dir, exist_ok=True)
+    print(f"collect: {len(plans)} plans -> {plan_dir}, records -> {args.collect}", flush=True)
+    failed = []
+    for i, (name, plan) in enumerate(plans):
+        path = os.path.join(plan_dir, name + ".json")
+        compiler.write_plan_file(path, plan)
+        run_out = os.path.join(args.out, name)
+        if os.path.exists(os.path.join(run_out, "result.json")):
+            print(f"collect {i + 1}/{len(plans)} {name}: done before, skipped", flush=True)
+            continue
+        cmd = [sys.executable, os.path.abspath(__file__), "--layer-dir", args.layer_dir, "--gpus", str(args.gpus), "--plan", path,
+               "--record", args.collect, "--out", run_out, "--reps", str(args.reps), "--wait", str(args.wait)]
+        cmd += [a for flag in args.nvcc_flag for a in ("--nvcc-flag", flag)] + (["--rmsnorm-recompute"] if args.rmsnorm_recompute else [])
+        print(f"collect {i + 1}/{len(plans)} {name}: {' '.join(cmd)}", flush=True)
+        with open(os.path.join(plan_dir, name + ".log"), "w") as log:
+            code = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT).returncode
+        if code:
+            failed.append(name)
+        print(f"collect {i + 1}/{len(plans)} {name}: {'FAILED (exit %d)' % code if code else 'ok'}, log {plan_dir}/{name}.log", flush=True)
+    print(f"collect: {len(plans) - len(failed)} of {len(plans)} plans measured" + (f", failed: {failed}" if failed else ""), flush=True)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--layer-dir", required=True)
@@ -241,11 +274,20 @@ def main():
                    "(static_schedule.code_tag), any, or a tag")
     p.add_argument("--time", type=float, default=300, help="with --search: the solver's time limit (s)")
     p.add_argument("--record", default=None, metavar="FILE", help="the timing build; this run's cost records appended to FILE")
+    p.add_argument("--collect", default=None, metavar="FILE", help="a cost collection (plan_gen.collection_plans), each plan run "
+                   "with --record FILE in its own process; see the module comment")
+    p.add_argument("--rounds", type=int, default=3, help="with --collect: how many random plans hold each candidate grid")
+    p.add_argument("--seed", type=int, default=0, help="with --collect: the random plans' seed")
     args = p.parse_args()
     os.makedirs(args.out, exist_ok=True)
     ngpu = args.gpus
     ws, mpk = build(args.layer_dir, ngpu, args.rmsnorm_recompute)
     print_nodes(mpk, "graph nodes as written (default grids):")
+    if args.collect:
+        del ws   # the runs load their own
+        torch.cuda.empty_cache()
+        collect(args, mpk)
+        return
     plan = compiler.plan_from_file(args.plan)
     if args.search:
         from mirage.mpk import plan_viewer, search, static_schedule

@@ -1092,6 +1092,11 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_DSA_INDEX_K_WRITE_SM100, variant_id);
+  } else if (name == "dsa_kpool_update") {
+    int variant_id = task_register->register_dsa_kpool_update_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_DSA_KPOOL_UPDATE_SM100, variant_id);
   } else if (name == "dsa_q_absorb") {
     int variant_id = task_register->register_dsa_q_absorb_sm100_task(
         customized->bgraph, params);
@@ -1126,6 +1131,22 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(4, 1, TASK_SCALED_MOE_EXPERTS_SM100, variant_id);
+  } else if (name == "hc_pre") {
+    int variant_id =
+        task_register->register_hc_pre_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_HC_PRE_SM100, variant_id);
+  } else if (name == "kda_decode") {
+    int variant_id = task_register->register_kda_decode_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_KDA_DECODE_SM100, variant_id);
+  } else if (name == "hc_post") {
+    int variant_id =
+        task_register->register_hc_post_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_HC_POST_SM100, variant_id);
+  } else if (name == "hc_post_mix") {
+    int variant_id = task_register->register_hc_post_mix_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(4, 2, TASK_HC_POST_MIX_SM100, variant_id);
   }
 
   else {

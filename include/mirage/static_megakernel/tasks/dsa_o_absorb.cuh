@@ -51,7 +51,7 @@ __device__ __forceinline__ void run_dsa_o_absorb(Maps const &,
                                         (size_t)h * LAT * VD + cb * OAB_COLS,
                                     VD);
   if (tid == 0) {
-    cnt_wait(g.cnt + OL::counter + h, T);
+    cnt_wait(cnt_now(g) + OL::counter + h, T);
   }
   __syncthreads();
   dsa::stamp_ready(L);
@@ -73,7 +73,7 @@ __device__ __forceinline__ void run_dsa_o_absorb(Maps const &,
                                  (size_t)NH * VD);
   dsa::ring_release();
   if (tid == 0) {
-    cnt_add(g.cnt + SELF::counter, 1);
+    cnt_add(cnt_now(g) + SELF::counter, 1);
   }
 }
 

@@ -34,7 +34,7 @@ __device__ __forceinline__ void run_dsa_mla_merge(Maps const &,
   int const h = tk.x, t = tk.y;
   // The task uses no shared memory, so it starts with no barrier.
   if (threadIdx.x == 0) {
-    cnt_wait(g.cnt + SM::counter + t, S);
+    cnt_wait(cnt_now(g) + SM::counter + t, S);
   }
   __syncthreads();
   dsa::stamp_ready(L);
@@ -79,7 +79,7 @@ __device__ __forceinline__ void run_dsa_mla_merge(Maps const &,
       __floats2bfloat162_rn(acc.x * inv, acc.y * inv);
   __syncthreads();
   if (threadIdx.x == 0) {
-    cnt_add(g.cnt + SELF::counter + h, 1);
+    cnt_add(cnt_now(g) + SELF::counter + h, 1);
   }
 }
 

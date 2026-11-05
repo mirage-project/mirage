@@ -49,7 +49,7 @@ __device__ __forceinline__ void fx_wait_cols(G const &g, int c0, int c1) {
                 "a COMBINE_ADD GEMM node (its counter per 128-column block)");
   int const lane = threadIdx.x & 31;
   for (int b = c0 / 128 + lane; b <= (c1 - 1) / 128; b += 32) {
-    cnt_wait(g.cnt + P::counter + b, fx_block_adds<P>());
+    cnt_wait(cnt_now(g) + P::counter + b, fx_block_adds<P>());
   }
   __syncwarp();
 }
@@ -118,29 +118,17 @@ __device__ __forceinline__ float exp2_int(int e) {
   return __uint_as_float((uint32_t)e << 23);
 }
 
-// One warp quantizes N indexer vectors of 128 values. Lane l holds dims
-// 4 l .. 4 l + 3 of vector j in v[j]. For each vector, the function does these
-// steps. It runs the steps of the N vectors in parallel.
-//   1. Lanes l < 16 rotate the RoPE pairs 2 l and 2 l + 1 (dims [0, 64)) with
-//      (c0, s0) and (c1, s1).
-//   2. All lanes find the UE8M0 exponent e[j] of the 128 values.
-//   3. Each lane packs its 4 e4m3 bytes into the u32 q[j].
+// One warp quantizes N indexer vectors of 128 values to e4m3 with a UE8M0
+// scale each. Lane l holds dims 4 l .. 4 l + 3 of vector j in v[j]. All lanes
+// find the UE8M0 exponent e[j] of the 128 values (the scale is 2^(e - 127)).
+// Each lane packs its 4 e4m3 bytes into the u32 q[j]. The steps of the N
+// vectors run in parallel.
 template <int N>
-__device__ __forceinline__ void rope_quant128(float (&v)[N][4],
-                                              int lane,
-                                              float c0,
-                                              float s0,
-                                              float c1,
-                                              float s1,
-                                              uint32_t (&q)[N],
-                                              int (&e)[N]) {
+__device__ __forceinline__ void
+    quant128(float const (&v)[N][4], uint32_t (&q)[N], int (&e)[N]) {
   float amax[N];
 #pragma unroll
   for (int j = 0; j < N; j++) {
-    if (lane < 16) {
-      rope_pair(v[j][0], v[j][1], c0, s0);
-      rope_pair(v[j][2], v[j][3], c1, s1);
-    }
     amax[j] = fmaxf(fmaxf(fabsf(v[j][0]), fabsf(v[j][1])),
                     fmaxf(fabsf(v[j][2]), fabsf(v[j][3])));
   }
@@ -159,6 +147,70 @@ __device__ __forceinline__ void rope_quant128(float (&v)[N][4],
            ((uint32_t)cvt_e4m3_nv(v[j][1] * inv) << 8) |
            ((uint32_t)cvt_e4m3_nv(v[j][2] * inv) << 16) |
            ((uint32_t)cvt_e4m3_nv(v[j][3] * inv) << 24);
+  }
+}
+// The same after RoPE (GLM-5.3 / 5.2): lanes l < 16 first rotate the RoPE
+// pairs 2 l and 2 l + 1 (dims [0, 64)) with (c0, s0) and (c1, s1).
+template <int N>
+__device__ __forceinline__ void rope_quant128(float (&v)[N][4],
+                                              int lane,
+                                              float c0,
+                                              float s0,
+                                              float c1,
+                                              float s1,
+                                              uint32_t (&q)[N],
+                                              int (&e)[N]) {
+  if (lane < 16) {
+#pragma unroll
+    for (int j = 0; j < N; j++) {
+      rope_pair(v[j][0], v[j][1], c0, s0);
+      rope_pair(v[j][2], v[j][3], c1, s1);
+    }
+  }
+  quant128<N>(v, q, e);
+}
+// The normalized Hadamard transform of N vectors of 128 values in one warp
+// (GLM-5.3-Flash: the indexer query and the pooled key). Lane l holds dims
+// 4 l .. 4 l + 3 of vector j in v[j]. The butterfly stages run in SGLang's
+// order (kpool_fp8_index.py _hadamard128): strides 1 and 2 in the lane, then
+// strides 4 .. 64 across lanes (lane xor 1 .. 16), then the scale
+// 128^-1/2 (fp32). Each stage maps the pair (a, b) = (x[i], x[i + stride])
+// to (a + b, a - b), so the fp32 sums are the same as SGLang's.
+template <int N>
+__device__ __forceinline__ void hadamard128(float (&v)[N][4], int lane) {
+#pragma unroll
+  for (int j = 0; j < N; j++) {
+    float a = v[j][0], b = v[j][1];
+    v[j][0] = a + b;
+    v[j][1] = a - b;
+    a = v[j][2], b = v[j][3];
+    v[j][2] = a + b;
+    v[j][3] = a - b;
+    a = v[j][0], b = v[j][2];
+    v[j][0] = a + b;
+    v[j][2] = a - b;
+    a = v[j][1], b = v[j][3];
+    v[j][1] = a + b;
+    v[j][3] = a - b;
+  }
+#pragma unroll
+  for (int m = 1; m < 32; m <<= 1) {
+    bool const hi = (lane & m) != 0; // this lane holds b of each pair
+#pragma unroll
+    for (int j = 0; j < N; j++) {
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        float const o = __shfl_xor_sync(0xffffffffu, v[j][i], m);
+        v[j][i] = hi ? o - v[j][i] : v[j][i] + o;
+      }
+    }
+  }
+#pragma unroll
+  for (int j = 0; j < N; j++) {
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      v[j][i] *= 0.08838834764831845f;
+    }
   }
 }
 // Lanes l < 16 load the cos and sin of the RoPE pairs 2 l and 2 l + 1 at
@@ -286,25 +338,31 @@ __device__ __forceinline__ float block_sum(float v) {
 // The 256 threads compute v[c] = x[c] * rrms * gamma[c] for c < LEN, with
 // rrms = rsqrt(mean(x^2) + eps). x[c] is column c0 + c of token t of a
 // COMBINE_ADD GEMM output (fx [T][N]), rounded to bf16. The math is fp32.
-// Thread i takes the PER = LEN / 256 columns PER i .. PER i + PER - 1 and
-// returns them in v[0 .. PER). PER is 2, 4 or 8. The thread loads its columns
-// with one or two vector loads. Thus its loads go to L2 at the same time. N
-// and c0 must be multiples of PER (aligned vector loads).
-template <int LEN>
+// Thread i takes the PER columns PER i .. PER i + PER - 1 and returns them in
+// v[0 .. PER). PER is 2, 4 or 8 (default LEN / 256). With LEN / PER < 256
+// (GLM-5.3-Flash q_c: LEN 1536, PER 8), threads LEN / PER .. 255 take no
+// column and return zeros. The thread loads its columns with one or two
+// vector loads. Thus its loads go to L2 at the same time. N and c0 must be
+// multiples of PER (aligned vector loads).
+template <int LEN, int PER = LEN / 256>
 __device__ __forceinline__ void fx_rmsnorm_vals(unsigned long long const *fx,
                                                 int N,
                                                 int t,
                                                 int c0,
                                                 float const *gamma,
                                                 float eps,
-                                                float (&v)[LEN / 256]) {
-  constexpr int PER = LEN / 256;
-  static_assert(LEN % 256 == 0 && (PER == 2 || PER == 4 || PER == 8),
-                "fx_rmsnorm: LEN = 512, 1024 or 2048");
+                                                float (&v)[PER]) {
+  static_assert((PER == 2 || PER == 4 || PER == 8) && LEN % PER == 0 &&
+                    LEN / PER <= 256,
+                "fx_rmsnorm: 2, 4 or 8 columns for each thread, at most 256 "
+                "threads");
+  bool const active = LEN / PER == 256 || threadIdx.x < LEN / PER;
   int const cb = PER * threadIdx.x; // the first column of the thread
   unsigned long long const *src = fx + (size_t)t * N + c0 + cb;
-  unsigned long long raw[PER];
-  if constexpr (PER == 2) {
+  unsigned long long raw[PER] = {};
+  if (!active) {
+    // no column: zeros (raw = 0 is fixed point 0)
+  } else if constexpr (PER == 2) {
     asm volatile("ld.global.cg.v2.u64 {%0, %1}, [%2];"
                  : "=l"(raw[0]), "=l"(raw[1])
                  : "l"(src)
@@ -312,13 +370,11 @@ __device__ __forceinline__ void fx_rmsnorm_vals(unsigned long long const *fx,
   } else {
 #pragma unroll
     for (int i = 0; i < PER; i += 4) {
-      asm volatile("ld.global.cg.v4.u64 {%0, %1, %2, %3}, [%4];"
-                   : "=l"(raw[i]),
-                     "=l"(raw[i + 1]),
-                     "=l"(raw[i + 2]),
-                     "=l"(raw[i + 3])
-                   : "l"(src + i)
-                   : "memory");
+      asm volatile(
+          "ld.global.cg.v4.u64 {%0, %1, %2, %3}, [%4];"
+          : "=l"(raw[i]), "=l"(raw[i + 1]), "=l"(raw[i + 2]), "=l"(raw[i + 3])
+          : "l"(src + i)
+          : "memory");
     }
   }
   float ss = 0.f;
@@ -328,6 +384,9 @@ __device__ __forceinline__ void fx_rmsnorm_vals(unsigned long long const *fx,
     ss += v[i] * v[i];
   }
   float const rrms = rsqrtf(block_sum(ss) / LEN + eps);
+  if (!active) {
+    return;
+  }
 #pragma unroll
   for (int i = 0; i < PER; i += 2) {
     float2 const gm = *reinterpret_cast<float2 const *>(gamma + cb + i);
@@ -357,12 +416,13 @@ __device__ __forceinline__ void fx_rmsnorm(unsigned long long const *fx,
 
 // Compute one head of an absorb GEMM for all T = 8 tokens on tensor cores
 // (dsa_q_absorb, dsa_o_absorb):
-//   out[t][c] = bf16( sum_k x[t][k] w[k][c] ),  c < M, t < 8, k < K
+//   out[t][c] = bf16( sum_k x[t][k] w[k][c] ),  c < M, t < T, k < K
 // The MMA is mma.sync m16n8k16. A is w^T (16 columns x 16 k). B is x^T (16 k x
-// 8 tokens). The accumulators are fp32.
+// 8 tokens): T / 8 token tiles, each warp does all of them. The accumulators
+// are fp32.
 // Shared memory:
 //   ws   w [K][M] bf16 (swizzle<M>)
-//   xs   x [8][K] bf16 (swizzle<K>)
+//   xs   x [T][K] bf16 (swizzle<K>)
 //   red  the partial sums of the K parts (absorb_red_bytes)
 // Warp w computes column tile w % (M / 16) and K part w / (M / 16). There are
 // 8 / (M / 16) K parts. Warp kp = 0 adds the parts from red. Row t of out is
@@ -370,7 +430,7 @@ __device__ __forceinline__ void fx_rmsnorm(unsigned long long const *fx,
 // call, make ws and xs ready (cp.async wait, then __syncthreads).
 template <int M>
 __host__ __device__ constexpr int absorb_red_bytes() {
-  return (8 / (M / 16) - 1) * (M / 16) * 32 * 4 * 4;
+  return (8 / (M / 16) - 1) * (M / 16) * (T / 8) * 32 * 4 * 4;
 }
 template <int K, int M>
 __device__ __forceinline__ void absorb_mma(__nv_bfloat16 const *ws,
@@ -378,49 +438,68 @@ __device__ __forceinline__ void absorb_mma(__nv_bfloat16 const *ws,
                                            float *red,
                                            __nv_bfloat16 *out,
                                            size_t ld_out) {
-  constexpr int MT = M / 16, KP = 8 / MT, KK = K / KP;
-  static_assert(T == 8 && M % 16 == 0 && 8 % MT == 0 && KK % 16 == 0,
-                "absorb_mma: 8 tokens, whole 16 x 16 tiles");
+  constexpr int MT = M / 16, KP = 8 / MT, KK = K / KP, NTT = T / 8;
+  static_assert(T % 8 == 0 && M % 16 == 0 && 8 % MT == 0 && KK % 16 == 0,
+                "absorb_mma: whole 16 x 16 tiles, 8-token tiles");
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   int const mt = warp % MT, kp = warp / MT;
-  float d[4] = {0.f, 0.f, 0.f, 0.f};
+  float d[NTT][4];
+#pragma unroll
+  for (int nt = 0; nt < NTT; nt++) {
+    d[nt][0] = d[nt][1] = d[nt][2] = d[nt][3] = 0.f;
+  }
 #pragma unroll 4
   for (int k = kp * KK; k < kp * KK + KK; k += 16) {
-    uint32_t a[4], b[2];
+    uint32_t a[4];
     load_v(a,
            ws + swizzle<M>(k + (lane & 7) + (lane >> 4) * 8,
                            mt * 16 + ((lane >> 3) & 1) * 8));
-    load_k(b, xs + swizzle<K>(lane & 7, k + ((lane >> 3) & 1) * 8));
-    mma16816(a, b, d);
+#pragma unroll
+    for (int nt = 0; nt < NTT; nt++) {
+      uint32_t b[2];
+      load_k(b,
+             xs + swizzle<K>(nt * 8 + (lane & 7), k + ((lane >> 3) & 1) * 8));
+      mma16816(a, b, d[nt]);
+    }
   }
   if constexpr (KP > 1) {
     if (kp > 0) {
-      *reinterpret_cast<float4 *>(red +
-                                  (((kp - 1) * MT + mt) * 32 + lane) * 4) =
-          make_float4(d[0], d[1], d[2], d[3]);
+#pragma unroll
+      for (int nt = 0; nt < NTT; nt++) {
+        *reinterpret_cast<float4 *>(
+            red + ((((kp - 1) * MT + mt) * NTT + nt) * 32 + lane) * 4) =
+            make_float4(d[nt][0], d[nt][1], d[nt][2], d[nt][3]);
+      }
     }
     __syncthreads();
     if (kp == 0) {
 #pragma unroll
       for (int p = 1; p < KP; p++) {
-        float4 const r = *reinterpret_cast<float4 const *>(
-            red + (((p - 1) * MT + mt) * 32 + lane) * 4);
-        d[0] += r.x;
-        d[1] += r.y;
-        d[2] += r.z;
-        d[3] += r.w;
+#pragma unroll
+        for (int nt = 0; nt < NTT; nt++) {
+          float4 const r = *reinterpret_cast<float4 const *>(
+              red + ((((p - 1) * MT + mt) * NTT + nt) * 32 + lane) * 4);
+          d[nt][0] += r.x;
+          d[nt][1] += r.y;
+          d[nt][2] += r.z;
+          d[nt][3] += r.w;
+        }
       }
     }
   }
   if (kp == 0) {
-    // d[0] and d[1] hold column mt 16 + lane / 4 of the tokens 2 (lane % 4)
-    // and 2 (lane % 4) + 1. d[2] and d[3] hold the column + 8 of the same
-    // tokens.
-    int const c = mt * 16 + (lane >> 2), t = 2 * (lane & 3);
-    out[(size_t)t * ld_out + c] = __float2bfloat16(d[0]);
-    out[(size_t)(t + 1) * ld_out + c] = __float2bfloat16(d[1]);
-    out[(size_t)t * ld_out + c + 8] = __float2bfloat16(d[2]);
-    out[(size_t)(t + 1) * ld_out + c + 8] = __float2bfloat16(d[3]);
+    // of token tile nt: d[0] and d[1] hold column mt 16 + lane / 4 of the
+    // tokens 2 (lane % 4) and 2 (lane % 4) + 1. d[2] and d[3] hold the column
+    // + 8 of the same tokens.
+    int const c = mt * 16 + (lane >> 2);
+#pragma unroll
+    for (int nt = 0; nt < NTT; nt++) {
+      int const t = nt * 8 + 2 * (lane & 3);
+      out[(size_t)t * ld_out + c] = __float2bfloat16(d[nt][0]);
+      out[(size_t)(t + 1) * ld_out + c] = __float2bfloat16(d[nt][1]);
+      out[(size_t)t * ld_out + c + 8] = __float2bfloat16(d[nt][2]);
+      out[(size_t)(t + 1) * ld_out + c + 8] = __float2bfloat16(d[nt][3]);
+    }
   }
 }
 // Copy the weight block w[k][c] (k < K, c < M, row stride ldw) to ws

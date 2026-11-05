@@ -117,8 +117,8 @@ __device__ __forceinline__ void run_situ_and_mul(Maps const &,
                 "situ_and_mul: its output h_s and its counter");
   situ_and_mul_task<SGU::y *(SGU::x * 128 / (2 * SHR)), SHR / SELF::x, SHR>(
       buf_at<unsigned long long const>(g, SGU::buf),
-      g.cnt + SGU::counter,
-      g.cnt + SELF::counter,
+      cnt_now(g) + SGU::counter,
+      cnt_now(g) + SELF::counter,
       buf_at<__nv_bfloat16>(g, SELF::buf),
       tk.x);
 }

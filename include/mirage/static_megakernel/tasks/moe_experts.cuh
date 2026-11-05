@@ -94,9 +94,8 @@ struct ExpertSlots {
   static constexpr int KT2 = IR / 128;  // W2 K tiles
   static_assert(LAT % 128 == 0 && IR % 128 == 0,
                 "moe_experts: whole 128-wide tiles");
-  static_assert(
-      NE % 32 == 0 && NE <= 1024 && NPAIR <= 256,
-      "moe_experts: build_table's 8 warps x 128 experts, a thread per pair");
+  static_assert(NE % 32 == 0 && NE <= 1024,
+                "moe_experts: build_table's 8 warps x 128 experts");
   // the routing table of this step, built on every SM by build_table (shared
   // memory, one per node)
   static __device__ __forceinline__ int *cnt_e() {
@@ -119,19 +118,29 @@ struct ExpertSlots {
     __shared__ int a[NSLOT];
     return a;
   } // per slot: token count
+  // the pairs grouped by slot (build_table): slot s's are entries start()[s]
+  // .. + ntok()[s] - 1 of tok() (token), wt() (weight) and kk() (k: the
+  // expert's place in the token's K)
+  static __device__ __forceinline__ int *start() {
+    __shared__ int a[NSLOT];
+    return a;
+  } // per slot: its first entry
+  static __device__ __forceinline__ int *fill() {
+    __shared__ int a[NSLOT];
+    return a;
+  } // per slot: entries placed so far (build_table)
   static __device__ __forceinline__ int *tok() {
-    __shared__ int a[NSLOT * T];
+    __shared__ int a[NPAIR];
     return a;
-  } // per slot: tokens
+  } // per entry: token
   static __device__ __forceinline__ float *wt() {
-    __shared__ float a[NSLOT * T];
+    __shared__ float a[NPAIR];
     return a;
-  } // per slot and token: weight
-  // k: the expert's place in the token's K
+  } // per entry: weight
   static __device__ __forceinline__ unsigned char *kk() {
-    __shared__ unsigned char a[NSLOT * T];
+    __shared__ unsigned char a[NPAIR];
     return a;
-  }
+  } // per entry: k
 };
 
 constexpr int W13_TAKE_AT =
@@ -160,18 +169,26 @@ __device__ __forceinline__ void table_poll(unsigned long long const *pairs,
 }
 
 // after table_poll of all NPAIR pairs, 256 threads: slots = the experts with
-// tokens, in ascending id (parallel prefix count); per slot its tokens and
-// weights; s_ints[1] = number of slots
+// tokens, in ascending id (parallel prefix count); the pairs grouped by slot
+// (start / tok / wt / kk: slot s's entries start[s] .. + ntok[s] - 1, in no
+// particular order); s_ints[1] = number of slots. st (optional,
+// scaled_moe_experts' stamps): thread 0's times past each of its first three
+// barriers
 template <class RES>
-__device__ __forceinline__ void build_table() {
-  constexpr int NE = RES::NE, K = RES::K, NPAIR = RES::NPAIR;
+__device__ __forceinline__ void build_table(long long *st = nullptr) {
+  constexpr int NE = RES::NE, K = RES::K, NPAIR = RES::NPAIR,
+                NSLOT = RES::NSLOT;
   int *const cntE_s = RES::cnt_e(), *const sel_ss = RES::sel(),
              *const eid_s = RES::eid(), *const ntok_s = RES::ntok(),
-             *const tok_s = RES::tok();
+             *const tok_s = RES::tok(), *const start_s = RES::start(),
+             *const fill_s = RES::fill();
   float *const wsel_ss = RES::wsel(), *const w_s = RES::wt();
   unsigned char *const kk_s = RES::kk();
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   __syncthreads();
+  if (st && threadIdx.x == 0) {
+    st[0] = gtime();
+  }
   // warp w looks at experts [128 w, 128 w + 128): four 32-expert blocks b, one
   // bit per lane
   int cnt_q[4];
@@ -187,6 +204,9 @@ __device__ __forceinline__ void build_table() {
     s_ints[16 + warp] = cnt_q[0] + cnt_q[1] + cnt_q[2] + cnt_q[3];
   }
   __syncthreads();
+  if (st && threadIdx.x == 0) {
+    st[1] = gtime();
+  }
   int wbase = 0;
   for (int w_ = 0; w_ < warp; w_++) {
     wbase += s_ints[16 + w_];
@@ -214,9 +234,13 @@ __device__ __forceinline__ void build_table() {
     s_ints[1] = n_live;
   }
   __syncthreads();
-  if (threadIdx.x < NPAIR) { // one pair per thread: its slot by binary search
-                             // over eid_s, its position by a shared atomic
-    int const t = threadIdx.x / K, e = sel_ss[threadIdx.x];
+  if (st && threadIdx.x == 0) {
+    st[2] = gtime();
+  }
+  // 1. each pair's slot, by binary search over eid_s (kept in sel_ss: the
+  // expert id is not needed any more), and the slots' token counts
+  for (int i = threadIdx.x; i < NPAIR; i += 256) {
+    int const e = sel_ss[i];
     int lo = 0, hi = n_live - 1;
     while (lo < hi) {
       int const mid = (lo + hi) >> 1;
@@ -226,11 +250,57 @@ __device__ __forceinline__ void build_table() {
         hi = mid;
       }
     }
-    int const pos_ = atomicAdd(&ntok_s[lo], 1);
-    tok_s[lo * T + pos_] = t;
-    w_s[lo * T + pos_] = wsel_ss[threadIdx.x];
-    kk_s[lo * T + pos_] =
-        (unsigned char)(threadIdx.x %
+    sel_ss[i] = lo;
+    atomicAdd(&ntok_s[lo], 1);
+  }
+  __syncthreads();
+  // 2. start_s = the exclusive prefix sum of the counts (a block scan: PER
+  // slots per thread, a warp scan of the thread sums, the warp sums in s_ints
+  // [24, 32))
+  {
+    constexpr int PER = (NSLOT + 255) / 256;
+    int mine[PER], tot = 0;
+#pragma unroll
+    for (int q = 0; q < PER; q++) {
+      int const i = threadIdx.x * PER + q;
+      mine[q] = i < n_live ? ntok_s[i] : 0;
+      tot += mine[q];
+    }
+    int inc = tot;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+      int const u = __shfl_up_sync(0xffffffffu, inc, o);
+      if (lane >= o) {
+        inc += u;
+      }
+    }
+    if (lane == 31) {
+      s_ints[24 + warp] = inc;
+    }
+    __syncthreads();
+    int run = inc - tot;
+    for (int w_ = 0; w_ < warp; w_++) {
+      run += s_ints[24 + w_];
+    }
+#pragma unroll
+    for (int q = 0; q < PER; q++) {
+      int const i = threadIdx.x * PER + q;
+      if (i < n_live) {
+        start_s[i] = run;
+        fill_s[i] = 0;
+      }
+      run += mine[q];
+    }
+  }
+  __syncthreads();
+  // 3. the pairs into their slots' entries (a position by a shared atomic)
+  for (int i = threadIdx.x; i < NPAIR; i += 256) {
+    int const slot = sel_ss[i],
+              pos_ = start_s[slot] + atomicAdd(&fill_s[slot], 1);
+    tok_s[pos_] = i / K;
+    w_s[pos_] = wsel_ss[i];
+    kk_s[pos_] =
+        (unsigned char)(i %
                         K); // k: the pair's place in the token's K (its R row)
   }
   __syncthreads();
@@ -342,7 +412,7 @@ __device__ __forceinline__ void w2_arm(Maps const &maps,
          EVICT_FIRST);
   }
   if (slot != chk_slot) {
-    cnt_wait(g.cnt + RES::CHQ + slot, RES::MT13);
+    cnt_wait(cnt_now(g) + RES::CHQ + slot, RES::MT13);
     asm volatile("fence.proxy.async.global;" ::: "memory");
     chk_slot = slot;
   }
@@ -371,9 +441,12 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
   constexpr int KT_LAT = RES::KT_LAT, MT13 = RES::MT13, OT2 = RES::OT2,
                 KT2 = RES::KT2, K = RES::K, LAT = RES::LAT, IR = RES::IR;
   int *const eid_s = RES::eid(), *const ntok_s = RES::ntok(),
-             *const tok_s = RES::tok();
+             *const tok_s = RES::tok(), *const start_s = RES::start();
   float *const w_s = RES::wt();
   unsigned char *const kk_s = RES::kk();
+  static_assert(T == 8,
+                "moe_experts (MXFP4): written for 8 tokens (TMEM: the "
+                "z_q scales from column 72; the epilogues' 8 columns)");
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   if (threadIdx.x == 0) {
     for (int i = 0; i < W2_ST; i++) {
@@ -484,8 +557,8 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
         QueueEntry en;
         if (e.kind == QE_W2) {
           int const idx1 =
-              pend >= 0 ? pend : (int)atom_inc_lane0(g.cnt + RES::W2NEXT);
-          pend = (int)atom_inc_lane0(g.cnt + RES::W2NEXT);
+              pend >= 0 ? pend : (int)atom_inc_lane0(cnt_now(g) + RES::W2NEXT);
+          pend = (int)atom_inc_lane0(cnt_now(g) + RES::W2NEXT);
           if (!switched) {
             // the W13 ring's stages are all consumed before the W2 ring
             // overwrites their area. Stage st0's last use u (global stage gq)
@@ -533,7 +606,7 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
           w13_job(e, j);
           load_job(j, base, gl, 0, 0, W13_TAKE_AT);
           n13_mine++;
-          int const idx1 = (int)atom_inc_lane0(g.cnt + RES::W2NEXT);
+          int const idx1 = (int)atom_inc_lane0(cnt_now(g) + RES::W2NEXT);
           load_job(j, base, gl, 0, W13_TAKE_AT);
           entry_of(idx1, en);
           publish(en, qn + 1);
@@ -592,8 +665,10 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
                              sfb = tbu + SM_::SFB_W2 + 4 * KT2 * s + 4 * kt;
               cp_sf(sfa, st + W2_WSF + kt * SF_CHUNK);
               cp_sf(sfb, st + W2_HSF + kt * SF_CHUNK);
-              uint64_t const dw = mkdesc(st + kt * 16384),
-                             dh = mkdesc(st + W2_HQ) + 64 * kt;
+              uint64_t const
+                  dw = mkdesc(st + kt * 16384),
+                  dh = mkdesc(st + W2_HQ) +
+                       8 * T * kt; // h_q's K tile kt: T x 128 B after tile 0
               mma_mx(acc, dw, dh, idesc_mx(0), kt == 0 ? 0u : 1u, sfa, sfb);
               mma_mx(acc, dw + 2, dh + 2, idesc_mx(1), 1u, sfa, sfb);
               mma_mx(acc, dw + 4, dh + 4, idesc_mx(2), 1u, sfa, sfb);
@@ -690,16 +765,16 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
                    v); // issuer 0's half: it wrote the whole tile
           fence_before();
           mbar_arrive(rt.acc_empty0 + 8 * a);
-          for (int i = 0; i < nt; i++) {
-            int const t = tok_s[slot * T + i];
+          for (int i = start_s[slot]; i < start_s[slot] + nt; i++) {
+            int const t = tok_s[i];
             float vt = v[0]; // v[t] by an unrolled select: indexing v with the
                              // run-time t put v in local memory (STL / LDL)
 #pragma unroll
             for (int k = 1; k < 8; k++) {
               vt = (t == k) ? v[k] : vt;
             }
-            racc[((size_t)t * K + kk_s[slot * T + i]) * LAT + ot * 128 + row] =
-                w_s[slot * T + i] * vt; // row (t, k), plain store
+            racc[((size_t)t * K + kk_s[i]) * LAT + ot * 128 + row] =
+                w_s[i] * vt; // row (t, k), plain store
           }
         }
         wtt0 += e.b;
@@ -752,7 +827,7 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
         // access for microseconds.
         asm volatile("bar.sync 1, 128;" ::: "memory");
         if (threadIdx.x == 64) {
-          cnt_add(g.cnt + RES::CHQ + slot,
+          cnt_add(cnt_now(g) + RES::CHQ + slot,
                   1); // release; the W2 loaders acquire MT13 of these per slot
         }
         wtt0++;
@@ -907,7 +982,7 @@ __device__ __forceinline__ void run_moe_experts(Maps const &maps,
                    // ahead of the landings)
   uint32_t pre_idx = 0;
   if (threadIdx.x == 0) {
-    pre_idx = atom_inc_lane0(g.cnt + RES::W2NEXT);
+    pre_idx = atom_inc_lane0(cnt_now(g) + RES::W2NEXT);
   }
   for (int i = threadIdx.x; i < RES::NE; i += 256) {
     RES::cnt_e()[i] = 0;
@@ -945,8 +1020,8 @@ __device__ __forceinline__ void run_moe_experts(Maps const &maps,
   }
   __syncthreads();
   if (threadIdx.x == 0) {
-    cnt_add(g.cnt + SELF::counter, 1); // this SM's routed rows are written (its
-                                       // consumer waits for all SMs)
+    cnt_add(cnt_now(g) + SELF::counter, 1); // this SM's routed rows are written
+                                            // (its consumer waits for all SMs)
   }
 }
 

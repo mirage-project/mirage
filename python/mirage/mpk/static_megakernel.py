@@ -23,10 +23,16 @@ from ..kernel import TBGraph
 from .persistent_kernel import PersistentKernel
 
 # the kernel's limits (config.cuh MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, SMAX = the ring's stages; core.cuh Combine)
-MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 24, 32, 16, 5
-COMBINE = {"slots": 0, "add": 1, "store": 2}
+MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 24, 32, 16, 5   # RING_STAGES: T <= 16's (ring_stages)
+
+
+def ring_stages(tokens: int) -> int:
+    """The GEMM weight ring's stages (config.cuh SMAX) at T tokens: 5, or 4 at T = 32 (the activation's T x 256 B a stage)."""
+    return 5 if tokens <= 16 else 4
+COMBINE = {"slots": 0, "add": 1, "store": 2, "store_bf16": 3}
 SF_CHUNK = 512   # one MX scale chunk (config.cuh): 128 rows x 4 B
 MAX_SUM_PARTS = 14   # the most K parts sum_send adds (tasks/sum_send.cuh)
+HC_MIX_STRIDE = 32   # floats per (part, token) of hc_post_mix's mixes
 # DSA constants (dsa_common.cuh, tasks/dsa_index_topk.cuh):
 #   DSA_TOPK_BINS        the bins of a token histogram of the index scores (TOPK_BINS)
 #   DSA_TOPK_REC         the ints of a chunk record of the top-k count node (TOPK_REC)
@@ -65,6 +71,7 @@ class StaticMegakernel(PersistentKernel):
         self._static_nodes = {}   # graph index -> what compiler.py needs about a node (_add_node)
         self._bufs = []           # G::buf slot -> {"kind": out | exchange | scratch | tensor, ...} (_add_node, _scratch, _tensor_slot)
         self._maps = []           # Maps::m slot -> (kind, source, dims) (_map)
+        self._prefetch = []       # the weights kernel_begin prefetches into L2 (l2_prefetch_weights): (tensor, bytes)
         self._counter_lines = 0   # counter lines given out (_add_node)
 
     def _num_sms(self):
@@ -98,10 +105,11 @@ class StaticMegakernel(PersistentKernel):
                                   maps and the grid, for any grid. The compiler gets the dependencies from these slices. A
                                   task must not wait at run time for a task outside them. If it does, a plan that
                                   passes check_deadlock_free can hang
-          changeable_grid_dims    {grid axis: unit or (unit, min units, max units)}: the grid axes the compiler may change;
-                                  one task gets a whole number of units of each dimension that axis cuts (gemm_tile: {1: 128},
-                                  K in whole 128-column pieces), optionally between min and max units; the other axes keep
-                                  grid_dim
+          changeable_grid_dims    {grid axis: unit or (unit, min units, max units[, length])}: the grid axes the compiler may
+                                  change; one task gets a whole number of units of each dimension that axis cuts (gemm_tile:
+                                  {1: 128}, K in whole 128-column pieces), optionally between min and max units; length: what
+                                  the axis splits when no input map uses it (sparse_mla over pool ids: its index slots); the
+                                  other axes keep grid_dim
           rows_split_over_gpus    grid axis x is divided among the GPUs: each GPU computes its part, in blocks of grid_dim's x
                                   whatever the grid becomes (compiler.owned_positions)
           one_task_per_sm         grid x = the number of SMs; task x runs on SM x (the plan puts it in SM x's list)
@@ -228,6 +236,43 @@ class StaticMegakernel(PersistentKernel):
             hello, end = end, align(end + self.num_gpus * 16)
         return end, hello, offsets, sizes
 
+    def l2_prefetch_weights(self, budget_mb: float = 64.0,
+                            stop_at: tuple = ("kda_decode", "sparse_mla", "scaled_moe_experts")) -> int:
+        """STATIC_L2_PREFETCH (core.cuh kernel_begin): the layer's first GEMMs' weights (gemm_tile's weight, scaled_gemm_tile's
+        weight and its scales; graph inputs) in graph order, those before the first node of a kind in stop_at (the
+        attention or expert core: the GEMMs after it run long after the start, and their weights in flight at the start
+        would take bandwidth from the first GEMMs) and within budget_mb (the tensor that crosses it: its first bytes up to
+        it, whole MB), prefetched into L2 by the CTAs that start before the previous kernel ends (PDL): they claim 1 MB
+        batches while they wait at the start barrier, so the first GEMMs read L2 (in flight during the previous kernel's
+        tail, they also slow it: a smaller budget trades the one for the other). Call once the graph is built. Returns the
+        bytes listed."""
+        from .compiler import graph_nodes, producer_of
+        nodes = graph_nodes(self)
+        size = {bfloat16: 2, float16: 2, float32: 4, int32: 4, int64: 8, uint8: 1}
+        seen, total, self._prefetch = set(), 0, []
+        for n in nodes:
+            if n.name in stop_at:
+                break
+            ws = {"gemm_tile": n.inputs[1:2], "scaled_gemm_tile": n.inputs[1:3]}.get(n.name, [])
+            for t in ws:
+                if t.guid in seen or producer_of(t, nodes) is not None:
+                    continue
+                seen.add(t.guid)
+                b = size[t.dtype]
+                for d in range(t.num_dims):
+                    b *= t.dim(d)
+                if len(self._prefetch) == 8:   # core.cuh MAX_PF ranges
+                    return total
+                left = int(budget_mb * 2 ** 20) - total
+                if b > left:   # the first whole MB of it that fit
+                    if left >= 2 ** 20:
+                        self._prefetch.append((t, left // 2 ** 20 * 2 ** 20))
+                        total += left // 2 ** 20 * 2 ** 20
+                    return total
+                self._prefetch.append((t, b))
+                total += b
+        return total
+
     def host_slot_args(self) -> dict:
         """The host code's slot args (host.cuh): "buf.<slot>" -> "<kind> <name> <bytes> <reset> <by reader>" (the node outputs with
         their nodes' grids now), "map.<slot>" -> "<kind> <source> <dims...>"."""
@@ -250,19 +295,24 @@ class StaticMegakernel(PersistentKernel):
             else:   # an exchange buffer: its set 0 copy is buffer slot source[1]; set k at + k sets
                 src = f"b:{source[1]}+{source[2] + source[3] * set_bytes}"
             args[f"map.{slot}"] = " ".join([kind, src] + [str(d) for d in dims])
+        for i, (t, b) in enumerate(self._prefetch):   # STATIC_L2_PREFETCH: "pf.<i>" -> "t:<name> <bytes>"
+            args[f"pf.{i}"] = f"t:{names[t.guid]} {b}"
         return args
 
     def gemm_tile_layer(
         self,
         input: DTensor,     # [T, K] bf16
         weight: DTensor,    # [N, K] bf16
-        output: DTensor,    # [T, N] fp32 ("add": int64 fixed point; its buffer holds what `combine` says)
+        output: DTensor,    # [T, N] fp32 ("add": int64 fixed point; "store_bf16": bf16; its buffer holds what `combine` says)
         combine: str = "slots",   # how the K parts are combined (gemm_tile.cuh Combine): "slots" (one 0xFF-prefilled slot per
                                   # K part, the reader adds them), "add" (fixed-point atomic add, a counter per 128-row block),
-                                  # "store" (plain stores, one K part, a counter of tasks)
+                                  # "store" (plain stores, one K part, a counter of tasks), "store_bf16" (the same in bf16: a
+                                  # layer's final output; the compiler may use 64-row tiles)
         rows_split_over_gpus: bool = False,   # each GPU computes its part of the weight's rows (latent_down, latent_up)
         input_polled: bool = False,   # the input is a node's 0xFF-prefilled bf16 buffer, polled per 16 B straight into the ring's
                                       # stages (each task starts on its columns as soon as they are written, without a counter)
+        reader_rearms: bool = True,   # "slots": the one reader of each value re-arms it (REARM); False when several tasks read
+                                      # the same values (kda_decode's f_a / g_a): the kernel or the host then refills the buffer
         block_dim: tuple = (256, 1, 1),
     ):
         """Task (x, y) = weight rows [R x, R x + R) times K part y. Default grid: R = 128 rows, K in 1 part (polled: the fewest K
@@ -276,7 +326,7 @@ class StaticMegakernel(PersistentKernel):
         assert output.num_dims == 2 and output.dim(1) == weight.dim(0) and weight.dim(0) % 128 == 0 and weight.dim(1) % 128 == 0
         mode, N, K, T, GPUS = COMBINE[combine], weight.dim(0), weight.dim(1), self._tokens(input.dim(0)), self.num_gpus
         self._dtypes("gemm_tile_layer", input=(input, bfloat16), weight=(weight, bfloat16),
-                     output=(output, int64 if combine == "add" else float32))
+                     output=(output, {"add": int64, "store_bf16": bfloat16}.get(combine, float32)))
         if input_polled:
             from .compiler import graph_nodes, producer_of
             p = producer_of(input, graph_nodes(self))
@@ -288,42 +338,44 @@ class StaticMegakernel(PersistentKernel):
             assert rows_split_over_gpus and N % (128 * GPUS) == 0, "polled: the rows split over the GPUs, whole 128-row blocks"
             out_buffer = lambda n: (n.grid[1] * T * (N // GPUS) * 4, 0xFF, True)
         elif combine == "slots":   # [K parts][T][N] fp32, 0xFF (the reader polls the slots and re-arms them)
-            out_buffer = lambda n: (n.grid[1] * T * N * 4, 0xFF, True)
+            out_buffer = lambda n: (n.grid[1] * T * N * 4, 0xFF, reader_rearms)
         elif combine == "add":     # [T][N] int64 fixed point, 0 before each launch
             out_buffer = lambda n: (T * N * 8, 0, False)
+        elif combine == "store_bf16":   # [T][N] bf16, every value written each launch
+            out_buffer = lambda n: (T * N * 2, -1, False)
         else:                      # [T][N] fp32, every value written each launch
             out_buffer = lambda n: (T * N * 4, -1, False)
         assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
         tiles = K // 128
         if input_polled:
-            parts = next(y for y in range(1, tiles + 1) if tiles % y == 0 and tiles // y <= RING_STAGES)
+            parts = next(y for y in range(1, tiles + 1) if tiles % y == 0 and tiles // y <= ring_stages(T))
             params, map_slots = [mode, K, N, 1], [self._gemm_map(weight, (128,)), -1]
-            changeable = {1: (128, 2, RING_STAGES)}
+            changeable = {1: (128, 2, ring_stages(T))}
         else:
             parts = 1
             params, map_slots = [mode, K, N, 0], [self._gemm_map(weight, (128, 64)), self._gemm_map(input, (T,))]
-            changeable = {0: (64, 1, 2), 1: (128, 2, None)} if combine != "store" else {}
+            changeable = {"store": {}, "store_bf16": {0: (64, 1, 2)}}.get(combine, {0: (64, 1, 2), 1: (128, 2, None)})
         self._add_node("gemm_tile", (N // 128, parts, 1), block_dim, [input, weight, output],
                        [(-1, 1, -1), (0, 1, -1), (1, -1, -1)], params,
                        # K: at least 2 tiles of 128 per task (the two MMA issuers take the stages in turn, runtime.cuh issue_job;
                        # with one stage issuer 1 has no MMA and its stale accumulator would be added)
                        changeable_grid_dims=changeable, rows_split_over_gpus=rows_split_over_gpus, out_buffer=out_buffer,
-                       counters={"slots": 0, "add": N // 128, "store": 1}[combine], map_slots=map_slots)
+                       counters={"slots": 0, "add": N // 128, "store": 1, "store_bf16": 1}[combine], map_slots=map_slots)
 
     def scaled_gemm_tile_layer(
         self,
         input: DTensor,     # [T, K] e4m3 bytes (uint8): a group_quant node's output (then its fp32 scales [K / 128][T])
         weight: DTensor,    # [N, K] e4m3 bytes (uint8), in 128 x 128 pieces [N / 128][K / 128] (fp8_fp32scale_weights)
         weight_scales: DTensor,   # the checkpoint's fp32 block scales: [N / 128, K / 128], or [N / 256, K / 128, 2] (gate_up)
-        output: DTensor,    # [T, N] fp32 ("add": int64 fixed point; its buffer holds what `combine` says)
-        combine: str = "add",   # as gemm_tile_layer: "slots", "add" or "store"
+        output: DTensor,    # [T, N] fp32 ("add": int64 fixed point; "store_bf16": bf16; its buffer holds what `combine` says)
+        combine: str = "add",   # as gemm_tile_layer: "slots", "add", "store" or "store_bf16" (a layer's final output)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare an FP8 GEMM with fp32 scales (tasks/scaled_gemm_tile.cuh).
 
         Task (x, y) computes 128 weight rows and K part y.
         Each piece has its own accumulator. The epilogue applies weight and activation scales before it adds the partial sums.
-        Grid y divides K into parts of whole 128-column tiles. The "store" mode requires one K part.
+        Grid y divides K into parts of whole 128-column tiles. The "store" and "store_bf16" modes require one K part.
         The scale values come from the checkpoint. Their layout selects the scale for each weight row:
           BlockScales: [N / 128, K / 128], one scale per piece (pack_w2).
           GateUpScales: [N / 256, K / 128, 2], separate gate and up scales (pack_w13).
@@ -337,7 +389,7 @@ class StaticMegakernel(PersistentKernel):
         assert input.num_dims == 2 and weight.num_dims == 2 and weight.dim(1) == input.dim(1)
         mode, N, K, T = COMBINE[combine], weight.dim(0), weight.dim(1), self._tokens(input.dim(0))
         self._dtypes("scaled_gemm_tile_layer", input=(input, uint8), weight=(weight, uint8), weight_scales=(weight_scales, float32),
-                     output=(output, int64 if combine == "add" else float32))
+                     output=(output, {"add": int64, "store_bf16": bfloat16}.get(combine, float32)))
         assert output.num_dims == 2 and output.dim(0) == input.dim(0) and output.dim(1) == N and N % 128 == 0 and K % 128 == 0
         q = producer_of(input, graph_nodes(self))
         # The task reads the zq32 layout in the exchange region and waits for the counter of the producer. The producer is
@@ -356,7 +408,8 @@ class StaticMegakernel(PersistentKernel):
         assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
         out_buffer = {"slots": lambda n: (n.grid[1] * T * N * 4, 0xFF, True),   # as gemm_tile_layer (not polled)
                       "add": lambda n: (T * N * 8, 0, False),
-                      "store": lambda n: (T * N * 4, -1, False)}[combine]
+                      "store": lambda n: (T * N * 4, -1, False),
+                      "store_bf16": lambda n: (T * N * 2, -1, False)}[combine]
         pieces = N // 128 * (K // 128)
         wmap = self._map("wblk8", ("t", weight), (pieces, 1))
         assert self._map("wblk8", ("t", weight), (pieces, 2)) == wmap + 1
@@ -369,30 +422,50 @@ class StaticMegakernel(PersistentKernel):
         self._add_node("scaled_gemm_tile", (N // 128, 1, 1), block_dim, [input, weight, weight_scales, output],
                        # the input whole: each task waits until all group_quant tasks are counted
                        [(-1, -1, -1), (0, 1, -1), (-1, -1, -1), (1, -1, -1)], [mode, K, N, layout],
-                       changeable_grid_dims={1: (128, 1, None)} if combine != "store" else {}, out_buffer=out_buffer,
-                       counters={"slots": 0, "add": N // 128, "store": 1}[combine],
+                       changeable_grid_dims={1: (128, 1, None)} if combine in ("slots", "add") else {},
+                       out_buffer=out_buffer, counters={"slots": 0, "add": N // 128, "store": 1, "store_bf16": 1}[combine],
                        buf_slots=[self._tensor_slot(weight_scales)], map_slots=[wmap, amap])
 
     def topk_route_layer(
         self,
-        input: DTensor,     # router logits [T, E] fp32
+        input: DTensor,     # router logits [T, N] fp32: the E experts' rows, then padding (N >= E, e.g. a router padded to whole
+                            # 128-row tiles)
         bias: DTensor,      # score correction bias [E] fp32
-        output: DTensor,    # routing pairs [T, K] int64
+        output: DTensor,    # routing pairs [T, K x sub_experts + shared_experts] int64
         routed_scaling_factor: float = None,   # multiplies the routed weights (None: no scaling)
+        sub_experts: int = 1,   # each expert is this many experts of the expert bank (its intermediate in parts): expert e gives
+                                # the pairs (e sub_experts + j, weight), j < sub_experts
+        shared_experts: int = 0,   # bank experts every token also gets, after its routed pairs: (E sub_experts + s, 1.0), s <
+                                   # shared_experts (a shared expert run in the experts node's queue, e.g. GLM-5.3-Flash's as 2)
+        valid_rows: int = None,    # the live rows (default all T): a serving framework's speculative verify step of fewer rows
+                                   # than T; a row past them is not routed (its routed pairs: the shared experts, or expert 0,
+                                   # at weight 0: no expert of its own is streamed)
         block_dim: tuple = (256, 1, 1),
     ):
-        """Task t = token t: adds the router's partial sums of row t, top K (output.dim(1)) of the E experts. params = [E, K], or
-        [E, K, the routed scaling factor as fp32 bits]."""
-        T, E, K = self._tokens(input.dim(0)), input.dim(1), output.dim(1)
+        """Task t = token t: adds the router's partial sums of row t, top K ((output.dim(1) - shared_experts) / sub_experts)
+        of the E experts (bias.dim(0)). params = [E, K], [E, K, the routed scaling factor as fp32 bits], with sub-experts [E, K,
+        the scaling factor's bits (0: none), sub_experts], with shared experts [E, K, bits, sub_experts, shared_experts],
+        with valid_rows < T [E, K, bits, sub_experts, shared_experts, valid_rows]."""
+        T, E, DUP, SH = self._tokens(input.dim(0)), bias.dim(0), sub_experts, shared_experts
         self._dtypes("topk_route_layer", input=(input, float32), bias=(bias, float32), output=(output, int64))
-        assert input.num_dims == 2 and bias.num_dims == 1 and bias.dim(0) == E and output.num_dims == 2 and output.dim(0) == T
+        assert input.num_dims == 2 and input.dim(1) >= E and input.dim(1) % 4 == 0 and bias.num_dims == 1
+        assert output.num_dims == 2 and output.dim(0) == T and DUP >= 1 and SH >= 0 and (output.dim(1) - SH) % DUP == 0
+        K = (output.dim(1) - SH) // DUP
         if routed_scaling_factor is not None and not (math.isfinite(routed_scaling_factor) and routed_scaling_factor > 0):
             # the kernel reads the fp32 bits 0 as "no scaling": 0.0 would not scale
             raise ValueError(f"topk_route_layer: routed_scaling_factor must be finite and > 0 (or None), not {routed_scaling_factor}")
         params = [E, K] if routed_scaling_factor is None else [E, K, float_bits(routed_scaling_factor)]
+        if DUP > 1 or SH > 0:
+            params = params + [0] * (3 - len(params)) + [DUP]
+        if SH > 0:
+            params.append(SH)
+        if valid_rows is not None and valid_rows != T:
+            if not 0 < valid_rows < T:
+                raise ValueError(f"topk_route_layer: valid_rows {valid_rows} must be in 1 .. {T}")
+            params = params + [0] * (5 - len(params)) + [valid_rows]
         self._add_node("topk_route", (output.dim(0), 1, 1), block_dim, [input, bias, output],
                        [(0, -1, -1), (-1, -1, -1), (0, -1, -1)], params,
-                       out_buffer=lambda n: (T * K * 8, 0xFF, False),   # the pairs, u64, polled by every moe_experts task
+                       out_buffer=lambda n: (T * (K * DUP + SH) * 8, 0xFF, False),   # the pairs, u64, polled by every moe_experts task
                        buf_slots=[self._tensor_slot(bias)], dry=True, cost_inputs=[0])   # adds the router's K parts
 
     def sum_quant_send_layer(
@@ -462,9 +535,10 @@ class StaticMegakernel(PersistentKernel):
         self,
         input: DTensor,     # shared gate_up [T, 2 * SHR] int64 fixed point (a gemm_tile or scaled_gemm_tile node, combine "add")
         output: DTensor,    # h_s [T, SHR] bf16
+        swiglu_limit: float = None,   # gate clamped to at most this, up to [-limit, limit] first (GLM-5.3-Flash: 10); None: none
         block_dim: tuple = (256, 1, 1),
     ):
-        """Compute h_s = bf16(SiLU(gate) * up) for the shared expert.
+        """Compute h_s = bf16(SiLU(gate) * up) for the shared expert. params = [] or [the swiglu limit as fp32 bits].
 
         Task x writes features [F x, F x + F). Each input block holds 64 gate values, then 64 up values.
         The default F is 64. The compiler can select F = 32, 64, 96, or 128 when SHR is divisible by F.
@@ -475,8 +549,10 @@ class StaticMegakernel(PersistentKernel):
         T, SHR = self._tokens(input.dim(0)), output.dim(1)
         self._dtypes("silu_and_mul_layer", input=(input, int64), output=(output, bfloat16))
         assert input.num_dims == 2 and output.num_dims == 2 and input.dim(1) == 2 * SHR and output.dim(0) == T and SHR % 64 == 0
+        assert swiglu_limit is None or (math.isfinite(swiglu_limit) and swiglu_limit > 0)
         self._add_node("silu_and_mul", (output.dim(1) // 64, 1, 1), block_dim, [input, output],
-                       [(1, -1, -1), (1, -1, -1)], [], changeable_grid_dims={0: (32, 1, 8)},
+                       [(1, -1, -1), (1, -1, -1)], [] if swiglu_limit is None else [float_bits(swiglu_limit)],
+                       changeable_grid_dims={0: (32, 1, 8)},
                        out_buffer=lambda n: (T * SHR * 2, -1, False), counters=1,   # h_s bf16; a count of tasks
                        cost_inputs=[0])   # waits for shared gate_up's K parts
 
@@ -537,6 +613,9 @@ class StaticMegakernel(PersistentKernel):
         w2: DTensor, w2_scales: DTensor,
         output: DTensor,    # R [T x K, L] fp32: this GPU's routed rows, one per (token, routed expert k); allreduce_send adds a
                             # token's K in order
+        swiglu_limit: float = None,   # gate clamped to at most this, up to [-limit, limit] first (GLM-5.3-Flash: 10); None: none
+        prof: DTensor = None,   # int64 [SMs, 256], a graph input: per-SM stamps of the node's phases (scaled_moe::moe_prof_event:
+                                # W13 items, W2 tiles, the ring switch, the W2 loaders' waits); None: none compiled in
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the routed FP8 experts in tasks/scaled_moe_experts.cuh.
@@ -544,16 +623,19 @@ class StaticMegakernel(PersistentKernel):
         Weights retain the checkpoint's e4m3 bytes and fp32 scales for 128 x 128 blocks.
         Activations x and h use e4m3, with an fp32 scale per token and 128 values. The expert activation is SiLU.
         One task runs on each SM. The SMs take expert work from a shared queue and write routed output rows.
-        buf_slots: the scratch buffers for h_q, its scales, h in fp32 and group maxima, and the fp32 weight scales (by pointer).
+        buf_slots: the scratch buffers for h_q and its scales, and the fp32 weight scales (by pointer).
         map_slots: the tensor maps of the weights, of z_q in both exchange sets, and of h_q (scaled_moe::Slots).
-        Counters track completed SMs, the next queue entry, completed W13 items per expert slot, and completed items per h group.
-        The first two counters each reserve 32 words. The other counters reserve NSLOT and NSLOT * IR / 128 words.
+        Counters track completed SMs, the next queue entry and completed W13 items per expert slot.
+        The first two counters each reserve 32 words. The last counter reserves NSLOT words.
         E is the expert count. K is the experts per token. L is the hidden width.
-        IR is this GPU's expert intermediate width: 128 or 256. GLM-5.3 therefore needs TP8 or TP16.
+        IR is this GPU's expert intermediate width: 128 or 256. GLM-5.3 therefore needs TP8 or TP16. A wider intermediate (GLM-5.3-
+        Flash at TP4: 512) is sub-experts: topk_route_layer(sub_experts=) and a bank of E x sub_experts experts; then E and K here
+        are the bank's (topk_route's times sub_experts). A shared expert can be in the bank too (topk_route_layer(shared_experts=),
+        its sub-experts after the routed ones, every token's, weight 1): its rows are then the last of each token's in R.
         Weight layouts from fp8_fp32scale_weights:
           w13: [E, 2 IR, L] e4m3 bytes; scales: [E, IR / 128, L / 128, 2] fp32 (gate, up).
           w2: [E, L, IR] e4m3 bytes; scales: [E, L / 128, IR / 128] fp32.
-        z_q must come from group_quant_layer. params = [IR].
+        z_q must come from group_quant_layer. params = [IR] or [IR, the swiglu limit as fp32 bits].
         """
         from .compiler import graph_nodes, producer_of
         T, K, L = self._tokens(pairs.dim(0)), pairs.dim(1), z_q.dim(1)
@@ -572,15 +654,19 @@ class StaticMegakernel(PersistentKernel):
         if zq is None or zq.name != "group_quant":
             raise ValueError("scaled_moe_experts_layer: z_q must be a group_quant node's output")
         route = producer_of(pairs, graph_nodes(self))
-        if route is None or route.name != "topk_route" or list(route.params[:2]) != [E, K]:
+        dup = route.params[3] if route is not None and len(route.params) >= 4 and route.params[3] > 1 else 1
+        shared = route.params[4] if route is not None and len(route.params) >= 5 else 0   # (params[5]: its live rows)
+        if route is None or route.name != "topk_route" or [p * dup + shared for p in route.params[:2]] != [E, K]:
             raise ValueError(f"scaled_moe_experts_layer: the pairs must be a topk_route node's over the {E} experts of w13")
+        assert swiglu_limit is None or (math.isfinite(swiglu_limit) and swiglu_limit > 0)
         hq = self._scratch("scaled_moe_experts.h_q", NSLOT * T * IR)          # every row written before its counter lets W2 read it
-        # the h_q scales, 0xFF (NaN) before each launch: the W2 epilogue polls the values themselves (data as the flag)
-        hsf = self._scratch("scaled_moe_experts.h_q_scales", NSLOT * T * KT2 * 4, 0xFF)
+        hsf = self._scratch("scaled_moe_experts.h_q_scales", NSLOT * T * KT2 * 4)   # written before its counter lets W2 read it
         w13_pieces, w2_pieces = E * 2 * IR * L // 16384, E * L * IR // 16384   # one 128 x 128 e4m3 piece: 16 KB
-        bufs = [hq, hsf, self._tensor_slot(w13_scales),
-                self._scratch("scaled_moe_experts.h32", NSLOT * T * IR * 4 + NSLOT * (IR // 64) * T * 4),   # h (fp32), its amax
-                self._tensor_slot(w2_scales)]
+        bufs = [hq, hsf, self._tensor_slot(w13_scales), self._tensor_slot(w2_scales)]
+        if prof is not None:   # buffer slot 4 (scaled_moe::Slots PROF)
+            self._dtypes("scaled_moe_experts_layer", prof=(prof, int64))
+            assert (prof.dim(0), prof.dim(1)) == (self._num_sms(), 384), "prof: [SMs, scaled_moe::MOE_PROF_WORDS] int64"
+            bufs.append(self._tensor_slot(prof))
         maps = [self._map("wblk8", ("t", w13), (w13_pieces, 1)), self._map("wblk8", ("t", w13), (w13_pieces, 2)),
                 self._map("wblk8", ("t", w2), (w2_pieces, 1)), self._map("wblk8", ("t", w2), (w2_pieces, 2))]
         for kind, dims_ in (("act8", (L, T)), ("act8kt", (L, T, 2))):
@@ -590,8 +676,9 @@ class StaticMegakernel(PersistentKernel):
         maps.append(self._map("act8kt", ("b", hq, 0), (IR, NSLOT * T, KT2)))
         tensors = [z_q, pairs, w13, w2, output]
         self._add_node("scaled_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
-                       [IR], one_task_per_sm=True, out_buffer=lambda n: (T * K * L * 4, -1, False),
-                       counters=32 * 2 + NSLOT + NSLOT * KT2, buf_slots=bufs, map_slots=maps)
+                       [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)], one_task_per_sm=True,
+                       out_buffer=lambda n: (T * K * L * 4, -1, False),
+                       counters=32 * 2 + NSLOT, buf_slots=bufs, map_slots=maps)
 
     # ---- after moe_experts (tasks/allreduce_send.cuh, sum_rmsnorm.cuh, sum_gpus.cuh, sum_send.cuh, residual_add.cuh). The
     # graph tensors between them (the sent partial sums, sum_rmsnorm's Rn, sum_gpus's Ssum, latent_up's K parts, sum_send's o)
@@ -605,18 +692,31 @@ class StaticMegakernel(PersistentKernel):
         block_dim: tuple = (256, 1, 1),
     ):
         """Task x: slice x of this GPU's partial sum (bf16) to every GPU, into this GPU's slot of the node's output (in the exchange
-        region), once the input's producer is done (all its tasks, counted in its counter). params = [W, G]. When the producer is
+        region), once the input's producer is done (all its tasks, counted in its counter). params = [W, G, FX]. When the producer is
         moe_experts or scaled_moe_experts, re-arm z_q here only if that producer is its sole reader.
         buf_slots = [z_q's buffer slot] enables re-arm; [-1] disables it. With other readers, reset z_q before each launch instead.
         Declare all other z_q readers before this call so the reader check sees them."""
         from .compiler import graph_nodes, producer_of
         p = producer_of(input, graph_nodes(self))
-        if p is None or p.info["buf"] < 0 or p.info["counter"] < 0:
-            raise ValueError(f"allreduce_send_layer: the input must be a node's output buffer whose node counts its tasks; it comes from "
-                             f"{p.name if p else 'the graph inputs'}")
+        # a gemm_tile node's K parts in slots (no counter: each part is polled, tasks/allreduce_send.cuh)
+        # (polled: rows of this GPU only, the same layout with one GPU)
+        slots_src = (p is not None and p.name == "gemm_tile" and p.params[0] == COMBINE["slots"] and
+                     (p.params[3] == 0 or self.num_gpus == 1))
+        if p is None or p.info["buf"] < 0 or (p.info["counter"] < 0 and not slots_src):
+            raise ValueError(f"allreduce_send_layer: the input must be a node's output buffer whose node counts its tasks, or a "
+                             f"gemm_tile node's output in slots; it comes from {p.name if p else 'the graph inputs'}")
         T, W, GPUS = self._tokens(output.dim(0)), output.dim(1), self.num_gpus
-        self._dtypes("allreduce_send_layer", input=(input, float32), output=(output, bfloat16))
+        fx = input.dtype == int64   # a COMBINE_ADD GEMM's sums (its K parts): a task per 128-column block, after its parts
+        if fx:
+            if p.name not in ("gemm_tile", "scaled_gemm_tile") or p.params[0] != 1:
+                raise ValueError("allreduce_send_layer: an int64 input is a COMBINE_ADD GEMM's output")
+            assert W % 128 == 0 and input.dim(0) == T
+            self._dtypes("allreduce_send_layer", output=(output, bfloat16))
+            num_tasks = W // 128
+        else:
+            self._dtypes("allreduce_send_layer", input=(input, float32), output=(output, bfloat16))
         assert input.dim(0) % T == 0 and input.dim(1) == W and W % 8 == 0
+        assert not slots_src or input.dim(0) == T, "allreduce_send_layer: a gemm_tile input has one row per token"
         rearm = -1
         if p.name in ("moe_experts", "scaled_moe_experts"):   # z_q: its first input; another reader (scaled_gemm_tile) can still read it
             zq = p.inputs[0]
@@ -624,8 +724,9 @@ class StaticMegakernel(PersistentKernel):
             if len(readers) == 1:
                 rearm = producer_of(zq, graph_nodes(self)).info["buf"]
         self._add_node("allreduce_send", (num_tasks or p.grid[0] * p.grid[1] * p.grid[2], 1, 1), block_dim, [input, output],
-                       [(-1, -1, -1)] * 2, [W, input.dim(0) // T],
-                       out_buffer=lambda n: (GPUS * T * W * 2, 0xFF, True), exchange=True, buf_slots=[rearm])
+                       [(-1, -1, -1)] * 2, [W, input.dim(0) // T, int(fx)],
+                       out_buffer=lambda n: (GPUS * T * W * 2, 0xFF, True), exchange=True, buf_slots=[rearm],
+                       cost_inputs=[0] if slots_src else [])   # slots: adds the GEMM's K parts
 
     def sum_rmsnorm_layer(
         self,
@@ -726,10 +827,6 @@ class StaticMegakernel(PersistentKernel):
         self._add_node("residual_add", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors), [H],
                        buf_slots=[self._tensor_slot(residual), self._tensor_slot(output)])
 
-    # ---- DeepSeek Sparse Attention: GLM-5.3 / 5.2 MLA with the lightning indexer (tasks/dsa_*.cuh, sparse_mla.cuh) ----
-    # The tasks use the GLM-5 shapes: qk_nope 192, v 256, and 32 indexer heads of 128. The caches and the index tensor are
-    # graph inputs. The nodes write them in place through their tensor slots. Thus the data stays after the launch.
-    # A "shared" layer reads the indices of the last "full" layer (GLM IndexShare).
     def _producer(self, layer: str, tensor: DTensor, names: tuple, allow_none: bool = False):
         """Return the node that writes `tensor`. Raise ValueError if the name of that node is not in `names`. With
         allow_none, a graph input (no node writes it) gives None instead of an error."""
@@ -757,8 +854,9 @@ class StaticMegakernel(PersistentKernel):
     def dsa_q_norm_quant_layer(
         self,
         qkva: DTensor,      # the fused A projection [T, N] int64 fixed point: q_a in columns [0, QL), then kv_a
-        gamma: DTensor,     # q_a_layernorm weight [QL] fp32
-        output: DTensor,    # z_q [T, QL] e4m3 bytes (uint8): q_c quantized, as a group_quant node writes it
+        gamma: DTensor,     # q_a_layernorm weight [QL] fp32 (QL = q_lora_rank: 2048, or 1536 in GLM-5.3-Flash)
+        output: DTensor,    # z_q [T, QL] e4m3 bytes (uint8): q_c quantized, as a group_quant node writes it; or q_c [T, QL]
+                            # bf16 itself (GLM-5.3-Flash: the input of its bf16 indexer wq_b, a gemm_tile)
         eps: float = 1e-5,
         block_dim: tuple = (256, 1, 1),
     ):
@@ -767,13 +865,18 @@ class StaticMegakernel(PersistentKernel):
         columns (s = max(amax, 1e-10) / 448, as group_quant). The output is in the exchange region in the zq32 layout
         (z_q, then the scales [QL / 128][T]). scaled_gemm_tile reads it after the counter. A reader that polls 16-byte
         units (scaled_moe_experts) must not read it. Thus the host does not fill the buffer with 0xFF before a launch.
-        params = [QL, eps bits]. buf_slots: [gamma]. One counter: the count of the tasks."""
+        A bf16 output: the node writes q_c [T, QL] bf16 to its own buffer instead (a gemm_tile reads it after the counter).
+        params = [QL, eps bits, 1 if the output is bf16 else 0]. buf_slots: [gamma]. One counter: the count of the tasks."""
         self._fx_producer("dsa_q_norm_quant_layer", qkva)
         T, QL = self._tokens(output.dim(0)), output.dim(1)
-        self._dtypes("dsa_q_norm_quant_layer", qkva=(qkva, int64), gamma=(gamma, float32), output=(output, uint8))
-        assert QL == 2048 and QL <= qkva.dim(1) and gamma.dim(0) == QL
-        self._add_node("dsa_q_norm_quant", (T, 1, 1), block_dim, [qkva, output], [(-1, -1, -1), (0, -1, -1)], [QL, float_bits(eps)],
-                       out_buffer=lambda n: (zq32_bytes(T, QL), -1, False), exchange=True, counters=1,
+        bf = output.dtype == bfloat16
+        self._dtypes("dsa_q_norm_quant_layer", qkva=(qkva, int64), gamma=(gamma, float32),
+                     output=(output, bfloat16 if bf else uint8))
+        assert QL in (1536, 2048) and QL <= qkva.dim(1) and gamma.dim(0) == QL
+        self._add_node("dsa_q_norm_quant", (T, 1, 1), block_dim, [qkva, output], [(-1, -1, -1), (0, -1, -1)],
+                       [QL, float_bits(eps), int(bf)],
+                       out_buffer=lambda n: (T * QL * 2, -1, False) if bf else (zq32_bytes(T, QL), -1, False),
+                       exchange=not bf, counters=1,
                        buf_slots=[self._tensor_slot(gamma)],
                        cost_inputs=[0])   # waits for the GEMM's K parts
 
@@ -781,28 +884,32 @@ class StaticMegakernel(PersistentKernel):
         self,
         qkva: DTensor,          # the fused A projection [T, N] int64 fixed point: kv_c in columns [kv0, kv0 + 512), k_pe after
         gamma: DTensor,         # kv_a_layernorm weight [512] fp32
-        cos_sin: DTensor,       # the RoPE table [positions, 64] bf16 (cos 32, then sin 32)
+        cos_sin: DTensor,       # the RoPE table [positions, 64] bf16 (cos 32, then sin 32); None with rope = 0
         seq_lens: DTensor,      # [T] int32: the token of this step is at position seq_lens - 1 (<= 0: an idle slot)
         block_table: DTensor,   # [T, MAXP] int32
-        cache: DTensor,         # the latent cache [pages x page, 576] bf16 (a graph input that the node writes in place)
+        cache: DTensor,         # the latent cache [pages x page, 512 + rope] bf16 (a graph input that the node writes in place)
         kv0: int,               # the first kv_c column of qkva (q_lora_rank)
         page: int = 64,
         eps: float = 1e-5,
+        rope: int = 64,         # qk_rope_head_dim: 64, or 0 (GLM-5.3-Flash: no k_pe, rows of 512)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the latent cache write (tasks/dsa_kv_write.cuh). Task t writes the cache row of position seq_lens[t] - 1:
-        [bf16(RMSNorm(kv_c) * gamma) | bf16(RoPE(k_pe))]. params = [kv0, page, MAXP, eps bits]. buf_slots: [gamma, cos_sin,
-        seq_lens, block_table, cache]. One counter: the count of the tasks."""
+        [bf16(RMSNorm(kv_c) * gamma) | bf16(RoPE(k_pe))]. params = [kv0, page, MAXP, eps bits, rope]. buf_slots: [gamma, cos_sin
+        (seq_lens in its place with rope = 0: not read), seq_lens, block_table, cache]. One counter: the count of the tasks."""
         self._fx_producer("dsa_kv_write_layer", qkva)
         T = self._tokens(qkva.dim(0))
-        self._dtypes("dsa_kv_write_layer", qkva=(qkva, int64), gamma=(gamma, float32), cos_sin=(cos_sin, bfloat16),
-                     seq_lens=(seq_lens, int32), block_table=(block_table, int32), cache=(cache, bfloat16))
-        assert kv0 + 576 <= qkva.dim(1) and gamma.dim(0) == 512 and cache.dim(1) == 576 and cache.dim(0) % page == 0
-        assert cos_sin.dim(1) == 64 and seq_lens.dim(0) == T and block_table.dim(0) == T
+        assert rope in (0, 64) and (cos_sin is None) == (rope == 0)
+        self._dtypes("dsa_kv_write_layer", qkva=(qkva, int64), gamma=(gamma, float32), seq_lens=(seq_lens, int32),
+                     block_table=(block_table, int32), cache=(cache, bfloat16),
+                     **({"cos_sin": (cos_sin, bfloat16)} if rope else {}))
+        assert kv0 + 512 + rope <= qkva.dim(1) and gamma.dim(0) == 512 and cache.dim(1) == 512 + rope
+        assert cache.dim(0) % page == 0 and seq_lens.dim(0) == T and block_table.dim(0) == T
+        assert rope == 0 or cos_sin.dim(1) == 64
         self._add_node("dsa_kv_write", (T, 1, 1), block_dim, [qkva, cache], [(-1, -1, -1), (-1, -1, -1)],
-                       [kv0, page, block_table.dim(1), float_bits(eps)], counters=1,
-                       buf_slots=[self._tensor_slot(gamma), self._tensor_slot(cos_sin), self._tensor_slot(seq_lens),
-                                  self._tensor_slot(block_table), self._tensor_slot(cache)],
+                       [kv0, page, block_table.dim(1), float_bits(eps), rope], counters=1,
+                       buf_slots=[self._tensor_slot(gamma), self._tensor_slot(cos_sin if rope else seq_lens),
+                                  self._tensor_slot(seq_lens), self._tensor_slot(block_table), self._tensor_slot(cache)],
                        cost_inputs=[0])   # waits for the GEMM's K parts
 
     def dsa_index_k_write_layer(
@@ -832,63 +939,117 @@ class StaticMegakernel(PersistentKernel):
                                   self._tensor_slot(seq_lens), self._tensor_slot(block_table), self._tensor_slot(index_cache)],
                        cost_inputs=[0])   # waits for the GEMM's K parts
 
+    def dsa_kpool_update_layer(
+        self,
+        kw: DTensor,            # the indexer projection x [wk | gate | weights_proj]^T [T, N] int64 fixed point (k: columns
+                                # [0, 128), the compress gate: [128, 256))
+        k_norm_weight: DTensor,  # [128] fp32
+        k_norm_bias: DTensor,   # [128] fp32
+        ape: DTensor,           # index_kpool_compress_ape [4, 128] fp32
+        seq_lens: DTensor,
+        req_slots: DTensor,     # [T] int64: the tail row of each token's request (SGLang: req_pool_indices; < 0: idle)
+        pooled_block_table: DTensor,   # [T, MAXPP] int32: page of each 64 pools (SGLang: pooled_real_page_table)
+        tail_k: DTensor,        # [R, RING, 128] bf16: each request's last keys (slot = position % RING), written in place
+        tail_score: DTensor,    # [R, RING, 128] bf16: their compress gates
+        pooled_cache: DTensor,  # [pages, page x 132] uint8: the pooled keys, e4m3 then fp32 scales (written in place)
+        page: int = 64,
+        eps: float = 1e-6,
+        tokens_per_request: int = 1,   # NT > 1: task x = tokens x NT .. x NT + NT - 1 of one request, in order (a
+                                       # speculative verify step: its draft tokens; idle rows have seq_lens 0)
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare the pooled indexer key update of GLM-5.3-Flash (tasks/dsa_kpool_update.cuh, SGLang's
+        kpool_decode_update_and_maybe_write_cache). Task t: k = LayerNorm(k) (bf16); at position p = seq_lens[t] - 1 with
+        p % 4 = 3, the pool p / 4 (the tail's 3 earlier keys and this one) -> the pooled cache; then (k, gate) -> tail slot
+        p % RING. params = [page, MAXPP, RING, eps bits[, NT]]. buf_slots: [k_norm_weight, k_norm_bias, ape, seq_lens,
+        req_slots, pooled_block_table, tail_k, tail_score, pooled_cache]. One counter: the count of the tasks."""
+        self._fx_producer("dsa_kpool_update_layer", kw)
+        T = self._tokens(kw.dim(0))
+        self._dtypes("dsa_kpool_update_layer", kw=(kw, int64), k_norm_weight=(k_norm_weight, float32),
+                     k_norm_bias=(k_norm_bias, float32), ape=(ape, float32), seq_lens=(seq_lens, int32),
+                     req_slots=(req_slots, int64), pooled_block_table=(pooled_block_table, int32),
+                     tail_k=(tail_k, bfloat16), tail_score=(tail_score, bfloat16), pooled_cache=(pooled_cache, uint8))
+        RING = tail_k.dim(1)
+        assert page == 64 and pooled_cache.dim(1) == page * DSA_INDEX_KEY_BYTES and kw.dim(1) >= 256
+        assert (ape.dim(0), ape.dim(1)) == (4, 128) and RING >= 4 and tail_k.dim(2) == 128
+        assert tuple(tail_score.dim(i) for i in range(3)) == tuple(tail_k.dim(i) for i in range(3))
+        assert seq_lens.dim(0) == T and req_slots.dim(0) == T and pooled_block_table.dim(0) == T
+        NT = tokens_per_request
+        assert 1 <= NT <= T and T % NT == 0, f"dsa_kpool_update_layer: tokens_per_request {NT} divides {T}"
+        self._add_node("dsa_kpool_update", (T // NT, 1, 1), block_dim, [kw, pooled_cache], [(-1, -1, -1), (-1, -1, -1)],
+                       [page, pooled_block_table.dim(1), RING, float_bits(eps)] + ([NT] if NT > 1 else []), counters=1,
+                       buf_slots=[self._tensor_slot(k_norm_weight), self._tensor_slot(k_norm_bias), self._tensor_slot(ape),
+                                  self._tensor_slot(seq_lens), self._tensor_slot(req_slots),
+                                  self._tensor_slot(pooled_block_table), self._tensor_slot(tail_k),
+                                  self._tensor_slot(tail_score), self._tensor_slot(pooled_cache)],
+                       cost_inputs=[0])   # waits for the GEMM's K parts
+
     def dsa_q_absorb_layer(
         self,
-        qb: DTensor,            # q_b [T, NH x 256] int64 fixed point (for each head: 192 nope, then 64 rope)
-        w_uk: DTensor,          # W_UK [NH, 192, 512] bf16 (from kv_b_proj, dequantized)
-        cos_sin: DTensor, seq_lens: DTensor,
-        output: DTensor,        # q [T, NH, 576] bf16 (the sparse_mla query)
+        qb: DTensor,            # q_b [T, NH x (NOPE + ROPE)] int64 fixed point (for each head: NOPE nope, then ROPE rope;
+                                # GLM-5.3: 192 + 64, GLM-5.3-Flash: 256 + 0)
+        w_uk: DTensor,          # W_UK [NH, NOPE, 512] bf16 (from kv_b_proj, dequantized)
+        cos_sin: DTensor,       # the RoPE table (None with ROPE = 0)
+        seq_lens: DTensor,
+        output: DTensor,        # q [T, NH, 512 + ROPE] bf16 (the sparse_mla query)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the absorbed query (tasks/dsa_q_absorb.cuh). Task h * 4 + cb computes latent columns [128 cb, 128 cb + 128)
-        of head h for all tokens. The task with cb = 0 also writes the rotated q_pe at position seq_lens[t] - 1: cos_sin
-        must have at least max(seq_lens) rows. params = [NH]. buf_slots: [w_uk, cos_sin, seq_lens]. One counter: the count
-        of the tasks."""
+        of head h for all tokens. With ROPE = 64, the task with cb = 0 also writes the rotated q_pe at position
+        seq_lens[t] - 1: cos_sin must have at least max(seq_lens) rows. params = [NH, NOPE, ROPE]. buf_slots: [w_uk, cos_sin
+        (seq_lens in its place with ROPE = 0: not read), seq_lens]. One counter: the count of the tasks."""
         self._fx_producer("dsa_q_absorb_layer", qb)
-        T, NH = self._tokens(qb.dim(0)), w_uk.dim(0)
-        self._dtypes("dsa_q_absorb_layer", qb=(qb, int64), w_uk=(w_uk, bfloat16), cos_sin=(cos_sin, bfloat16),
-                     seq_lens=(seq_lens, int32), output=(output, bfloat16))
-        assert qb.dim(1) == NH * 256 and (w_uk.dim(1), w_uk.dim(2)) == (192, 512)
-        assert (output.dim(0), output.dim(1), output.dim(2)) == (T, NH, 576)
-        self._add_node("dsa_q_absorb", (NH * 4, 1, 1), block_dim, [qb, output], [(-1, -1, -1), (-1, -1, -1)], [NH],
-                       out_buffer=lambda n: (T * NH * 576 * 2, -1, False), counters=1,
-                       buf_slots=[self._tensor_slot(w_uk), self._tensor_slot(cos_sin), self._tensor_slot(seq_lens)],
+        T, NH, NOPE = self._tokens(qb.dim(0)), w_uk.dim(0), w_uk.dim(1)
+        ROPE = qb.dim(1) // NH - NOPE
+        assert qb.dim(1) % NH == 0 and ROPE in (0, 64) and NOPE % 64 == 0 and (cos_sin is None) == (ROPE == 0)
+        self._dtypes("dsa_q_absorb_layer", qb=(qb, int64), w_uk=(w_uk, bfloat16), seq_lens=(seq_lens, int32),
+                     output=(output, bfloat16), **({"cos_sin": (cos_sin, bfloat16)} if ROPE else {}))
+        assert w_uk.dim(2) == 512 and (output.dim(0), output.dim(1), output.dim(2)) == (T, NH, 512 + ROPE)
+        self._add_node("dsa_q_absorb", (NH * 4, 1, 1), block_dim, [qb, output], [(-1, -1, -1), (-1, -1, -1)],
+                       [NH, NOPE, ROPE], out_buffer=lambda n: (T * NH * (512 + ROPE) * 2, -1, False), counters=1,
+                       buf_slots=[self._tensor_slot(w_uk), self._tensor_slot(cos_sin if ROPE else seq_lens),
+                                  self._tensor_slot(seq_lens)],
                        cost_inputs=[0])   # waits for the GEMM's K parts
 
     def dsa_index_score_layer(
         self,
         iq: DTensor,            # wq_b(q_c) [T, 32 x 128] int64 fixed point
-        kw: DTensor,            # the indexer projection (w: columns 128 + h)
-        index_cache: DTensor,   # written by dsa_index_k_write
-        cos_sin: DTensor, seq_lens: DTensor,
-        block_table: DTensor,   # [T, MAXP] int32 with MAXP x page = MAXCTX (seq_lens <= MAXCTX)
-        output: DTensor,        # scores [T, MAXCTX] fp32 (bf16 values)
+        kw: DTensor,            # the indexer projection (w: columns 128 + h; flash: 256 + h)
+        index_cache: DTensor,   # written by dsa_index_k_write (flash: the pooled cache, by dsa_kpool_update)
+        cos_sin: DTensor,       # the RoPE table (flash: None)
+        seq_lens: DTensor,
+        block_table: DTensor,   # [T, MAXP] int32 with MAXP x page >= MAXCTX (seq_lens <= MAXCTX; flash: of the pools)
+        output: DTensor,        # scores [T, MAXCTX] fp32 (bf16 values; flash: of the pools, MAXCTX pools)
         chunks: int = 16,       # tasks per token, MAXCTX / chunks positions each (whole pages of 64, at most 16)
         page: int = 64,
+        flash: bool = False,    # GLM-5.3-Flash: Hadamard q, fp32 head weights, the pooled keys (seq_lens / 4 pools)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the index scores (tasks/dsa_index_score.cuh). Task (c, t) computes the scores of chunk c of the context of
         token t. The compiler can change the chunk count (grid x). Each chunk holds a whole number of 64-position pages, from 1
-        to 16. Each slot t must be a different request. params = [32, MAXCTX, page, MAXP]. buf_slots: [cos_sin, seq_lens,
+        to 16. Each slot t must be a different request. params = [32, MAXCTX, page, MAXP, flash]. buf_slots: [cos_sin, seq_lens,
         block_table, index_cache, the token histograms (a scratch buffer, zero before each launch)]. Counters: one for each
         token (its chunks)."""
         self._fx_producer("dsa_index_score_layer", iq)
         self._fx_producer("dsa_index_score_layer", kw)
-        self._producer("dsa_index_score_layer", index_cache, ("dsa_index_k_write",))
+        self._producer("dsa_index_score_layer", index_cache, ("dsa_kpool_update" if flash else "dsa_index_k_write",))
         T, MAXCTX = self._tokens(output.dim(0)), output.dim(1)
+        assert (cos_sin is None) == flash
         self._dtypes("dsa_index_score_layer", iq=(iq, int64), kw=(kw, int64), index_cache=(index_cache, uint8),
-                     cos_sin=(cos_sin, bfloat16), seq_lens=(seq_lens, int32), block_table=(block_table, int32),
-                     output=(output, float32))
+                     seq_lens=(seq_lens, int32), block_table=(block_table, int32), output=(output, float32),
+                     **({} if flash else {"cos_sin": (cos_sin, bfloat16)}))
         assert iq.dim(1) == 32 * 128 and MAXCTX % (chunks * page) == 0 and page == 64
+        assert kw.dim(1) >= (256 if flash else 128) + 32
         assert MAXCTX // chunks <= 16 * page, "at most 1024 positions in a chunk (the page slots in shared memory)"
-        assert block_table.dim(1) * page == MAXCTX, "the block table must cover exactly MAXCTX positions"
+        assert block_table.dim(1) * page >= MAXCTX, "the block table must cover MAXCTX positions (its row stride may be more)"
         # the token histograms of the high 12 bits of the score keys (dsa_index_topk reads them), zero before each launch
         hist = self._scratch("dsa_index_score.hist", T * DSA_TOPK_BINS * 4, 0)
         self._add_node("dsa_index_score", (chunks, T, 1), block_dim, [iq, kw, index_cache, output],
-                       [(-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (1, 0, -1)], [32, MAXCTX, page, block_table.dim(1)],
+                       [(-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (1, 0, -1)],
+                       [32, MAXCTX, page, block_table.dim(1), int(flash)],
                        changeable_grid_dims={0: (page, 1, 16)}, out_buffer=lambda n: (T * MAXCTX * 4, -1, False), counters=T,
-                       buf_slots=[self._tensor_slot(cos_sin), self._tensor_slot(seq_lens), self._tensor_slot(block_table),
-                                  self._tensor_slot(index_cache), hist])
+                       buf_slots=[self._tensor_slot(seq_lens if flash else cos_sin), self._tensor_slot(seq_lens),
+                                  self._tensor_slot(block_table), self._tensor_slot(index_cache), hist])
 
     def dsa_index_topk_layer(
         self,
@@ -896,6 +1057,7 @@ class StaticMegakernel(PersistentKernel):
         seq_lens: DTensor,
         output: DTensor,        # indices [T, TOPK] int32: a graph input that the node writes in place (the next "shared"
                                 # layers read it)
+        unit: int = 1,          # positions per scored entry: 1, or 4 (GLM-5.3-Flash: the pools; n = seq_lens / 4)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the indexer top-k (tasks/dsa_index_topk.cuh) as two nodes. Both nodes have the grid (MAXCTX / 1024, T).
@@ -905,7 +1067,7 @@ class StaticMegakernel(PersistentKernel):
         The write node: task (c, t) writes the selected positions of chunk c. buf_slots: [seq_lens, output, the scores].
         The output holds the positions of the TOPK largest scores of token t in ascending order. For a shorter context, it
         holds all positions, then -1. MAXCTX is at most 32 x 1024 (one lane of a warp for each chunk record). params = [TOPK,
-        MAXCTX, mode (0 count, 1 write)]. Counters of each node: one for each token."""
+        MAXCTX, mode (0 count, 1 write), unit]. Counters of each node: one for each token."""
         p = self._producer("dsa_index_topk_layer", scores, ("dsa_index_score",))
         T, TOPK, MAXCTX = self._tokens(output.dim(0)), output.dim(1), scores.dim(1)
         self._dtypes("dsa_index_topk_layer", scores=(scores, float32), seq_lens=(seq_lens, int32), output=(output, int32))
@@ -914,16 +1076,16 @@ class StaticMegakernel(PersistentKernel):
         CHK, REC = MAXCTX // DSA_TOPK_CH, DSA_TOPK_REC   # tasks per token; ints per chunk record
         records = self.new_tensor(dims=(T, CHK * REC), dtype=int32, name=f"dsa_index_topk.records.{len(self._static_nodes)}")
         self._add_node("dsa_index_topk", (CHK, T, 1), block_dim, [scores, records], [(-1, 0, -1), (-1, 0, -1)],
-                       [TOPK, MAXCTX, 0], out_buffer=lambda n: (T * CHK * REC * 4, -1, False), counters=T,
+                       [TOPK, MAXCTX, 0, unit], out_buffer=lambda n: (T * CHK * REC * 4, -1, False), counters=T,
                        buf_slots=[self._tensor_slot(seq_lens), self._scratch_slot(p, "dsa_index_score.hist")])
         self._add_node("dsa_index_topk", (CHK, T, 1), block_dim, [records, output], [(-1, 0, -1), (-1, 0, -1)],
-                       [TOPK, MAXCTX, 1], counters=T,
+                       [TOPK, MAXCTX, 1, unit], counters=T,
                        buf_slots=[self._tensor_slot(seq_lens), self._tensor_slot(output), p.info["buf"]])   # [2]: the scores
 
     def sparse_mla_layer(
         self,
-        q: DTensor,             # [T, NH, 576] bf16 (the dsa_q_absorb output)
-        cache: DTensor,         # the latent cache [pages x page, 576] bf16 (written by dsa_kv_write first)
+        q: DTensor,             # [T, NH, 512 + ROPE] bf16 (the dsa_q_absorb output; ROPE = 64, or 0 in GLM-5.3-Flash)
+        cache: DTensor,         # the latent cache [pages x page, 512 + ROPE] bf16 (written by dsa_kv_write first)
         indices: DTensor,       # [T, TOPK] int32: a dsa_index_topk node's output, or a graph input (a "shared" layer)
         block_table: DTensor, seq_lens: DTensor,
         output: DTensor,        # [T, NH, 512] fp32. NOTE: this shape is not the shape of the node buffer. The tensor gives
@@ -932,24 +1094,31 @@ class StaticMegakernel(PersistentKernel):
         softmax_scale: float,   # 1 / sqrt(qk_nope_head_dim + qk_rope_head_dim)
         splits: int = 16,       # tasks per token, TOPK / splits index slots each (whole tiles of 64)
         page: int = 64,
+        kpool: int = 1,         # 1: indices holds positions; 4 (GLM-5.3-Flash): pool ids (dsa_index_topk unit 4), expanded
+                                # in place to their 4 positions, then the tail (the up to 3 positions after the pools)
+        slots: int = None,      # kpool 4: the index slots (TOPK: >= 4 x pools + 3, whole tiles of 64 per split)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare sparse MLA decode (tasks/sparse_mla.cuh). Task (s, t) computes split s of token t for the NH heads on this
         GPU. The compiler can change the split count (grid x). Each split holds a whole number of 64-slot tiles. The output
         tensor names the node buffer: o [T, S, NH, 512], then lse [T, S, NH] (see `output`). params = [NH, TOPK, page, MAXP,
-        pages, softmax scale bits]. buf_slots: [cache, block_table, seq_lens, indices]. Counters: one for each token (its
-        splits)."""
+        pages, softmax scale bits, ROPE, kpool, indices columns]. buf_slots: [cache, block_table, seq_lens, indices].
+        Counters: one for each token (its splits)."""
         self._producer("sparse_mla_layer", q, ("dsa_q_absorb",))
         self._producer("sparse_mla_layer", cache, ("dsa_kv_write",))
         self._producer("sparse_mla_layer", indices, ("dsa_index_topk",), allow_none=True)
-        T, NH, TOPK = self._tokens(q.dim(0)), q.dim(1), indices.dim(1)
+        T, NH, NIDX = self._tokens(q.dim(0)), q.dim(1), indices.dim(1)
+        TOPK = NIDX if kpool == 1 else slots
+        assert kpool == 1 or (kpool == 4 and TOPK >= kpool * NIDX + kpool - 1)
         self._dtypes("sparse_mla_layer", q=(q, bfloat16), cache=(cache, bfloat16), indices=(indices, int32),
                      block_table=(block_table, int32), seq_lens=(seq_lens, int32), output=(output, float32))
-        assert q.dim(2) == 576 and NH <= 16 and TOPK % (64 * splits) == 0 and cache.dim(0) % page == 0
+        assert q.dim(2) in (512, 576) and cache.dim(1) == q.dim(2)
+        assert NH <= 16 and TOPK % (64 * splits) == 0 and cache.dim(0) % page == 0
         self._add_node("sparse_mla", (splits, T, 1), block_dim, [q, cache, indices, output],
-                       [(-1, -1, -1), (-1, -1, -1), (1, 0, -1), (-1, 0, -1)],
-                       [NH, TOPK, page, block_table.dim(1), cache.dim(0) // page, float_bits(softmax_scale)],
-                       changeable_grid_dims={0: (64, 1, None)},
+                       [(-1, -1, -1), (-1, -1, -1), (1, 0, -1) if kpool == 1 else (-1, 0, -1), (-1, 0, -1)],
+                       [NH, TOPK, page, block_table.dim(1), cache.dim(0) // page, float_bits(softmax_scale), q.dim(2) - 512,
+                        kpool, NIDX],
+                       changeable_grid_dims={0: (64, 1, None, TOPK)},   # TOPK: kpool 4 splits the slots, not indices
                        out_buffer=lambda n: (T * n.grid[0] * NH * 513 * 4, -1, False), counters=T,
                        buf_slots=[self._tensor_slot(cache), self._tensor_slot(block_table), self._tensor_slot(seq_lens),
                                   self._tensor_slot(indices)])
@@ -985,9 +1154,202 @@ class StaticMegakernel(PersistentKernel):
         self._add_node("dsa_o_absorb", (NH * 4, 1, 1), block_dim, [input, output], [(-1, -1, -1), (-1, -1, -1)], [NH],
                        out_buffer=lambda n: (T * NH * 256 * 2, -1, False), counters=1, buf_slots=[self._tensor_slot(w_uv)])
 
+    # ---- GLM-5.3-Flash: mHC (tasks/hc_post_mix.cuh, hc_pre.cuh, hc_post.cuh) and KDA (tasks/kda_decode.cuh). The residual is
+    # HC streams [T, HC H] (bf16, stream i = columns [i H, i H + H)); a sublayer's body -> a gemm_tile -> allreduce_send ->
+    # hc_post_mix (its mHC post and the next sublayer's mixes) -> hc_pre (the next sublayer's pre), or -> hc_post.
+    def hc_pre_layer(
+        self,
+        mix: DTensor,           # an hc_post_mix node's mixes
+        residual: DTensor,      # [T, HC H] bf16, the same streams
+        hc_small: DTensor,      # fp32 [>= NMIX + 3]: hc_*_base [NMIX], then hc_*_scale [3]
+        gamma: DTensor,         # [H] bf16: the sublayer's input RMSNorm weight
+        output: DTensor,        # x [T, H] bf16: the sublayer's input
+        export: tuple,          # (h_post [T, HC], h_res [T, HC HC]) fp32 graph tensors: post and comb finished into them
+        rms_eps: float = 1e-5, hc_eps: float = 1e-6, norm_eps: float = 1e-5, post_mult: float = 2.0,
+        sinkhorn_iters: int = 20,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Tasks (t, 0) and (t, 1) of token t: pre / post / comb from the mixes, x = RMSNorm(sum_i pre_i R_i) gamma (SGLang's
+        fused norm) by task (t, 0) into its buffer (a graph tensor output binds it), post and comb (Sinkhorn) finished by
+        task (t, 1) into export's two graph tensors (SGLang's MHCState h_post, h_res: the sublayer's post runs after the
+        layer, in a serving framework); its counter counts its 2 T tasks. Streams from hc_post_mix in this layer: the tasks
+        wait for all of its tasks."""
+        from .compiler import graph_nodes, producer_of
+        p = producer_of(mix, graph_nodes(self))
+        if p is None or p.name != "hc_post_mix":
+            raise ValueError("hc_pre_layer: mix must be an hc_post_mix node's mixes")
+        HC, H, NMIX = p.params
+        T = self._tokens(output.dim(0))
+        assert hc_small.dim(0) >= NMIX + 3
+        self._dtypes("hc_pre_layer", mix=(mix, float32), residual=(residual, bfloat16), hc_small=(hc_small, float32),
+                     gamma=(gamma, bfloat16), output=(output, bfloat16))
+        h_post, h_res = export
+        self._dtypes("hc_pre_layer", h_post=(h_post, float32), h_res=(h_res, float32))
+        assert (h_post.dim(0), h_post.dim(1), h_res.dim(0), h_res.dim(1)) == (T, HC, T, HC * HC)
+        slots = [self._tensor_slot(t) for t in (residual, hc_small, gamma, h_post, h_res)]
+        params = [H, float_bits(rms_eps), float_bits(hc_eps), float_bits(norm_eps), float_bits(post_mult), sinkhorn_iters]
+        self._add_node("hc_pre", (T, 2, 1), block_dim, [mix, residual, output], [(0, -1, -1), (0, -1, -1), (0, -1, -1)],
+                       params, out_buffer=lambda n: (T * H * 2, -1, False), counters=1,
+                       cost_inputs=[0],   # adds the mixes' K parts
+                       buf_slots=slots)
+
+    def hc_post_layer(
+        self,
+        sent: DTensor,          # [T, H] bf16: an allreduce_send node's output (the sublayer output's partial sums)
+        residual: DTensor,      # [T, HC H] bf16: the sublayer's input streams
+        output: DTensor,        # [T, HC H] bf16: the new streams
+        coef: tuple,            # (h_post [T, HC], h_res [T, HC HC]) fp32 graph tensors, post and comb finished (the sublayer's
+                                # pre ran before the layer: SGLang's MHCState)
+        parts: int = 4,         # tasks per token, each H / parts columns
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Task (q, t): columns [q C, q C + C) of token t: out = sum over the GPUs, R'_j = sum_i comb[i][j] R_i + post_j out.
+        Counters: one per token, its Q tasks (an hc_pre of the next sublayer in this layer waits on them)."""
+        from .compiler import graph_nodes, producer_of
+        nodes = graph_nodes(self)
+        s = producer_of(sent, nodes)
+        if s is None or s.name != "allreduce_send":
+            raise ValueError("hc_post_layer: sent from an allreduce_send node")
+        T, H = self._tokens(sent.dim(0)), sent.dim(1)
+        HC = residual.dim(1) // H
+        self._dtypes("hc_post_layer", sent=(sent, bfloat16), residual=(residual, bfloat16), output=(output, bfloat16))
+        h_post, h_res = coef
+        self._dtypes("hc_post_layer", h_post=(h_post, float32), h_res=(h_res, float32))
+        assert (h_post.dim(0), h_post.dim(1), h_res.dim(0), h_res.dim(1)) == (T, HC, T, HC * HC)
+        slots = [self._tensor_slot(t) for t in (residual, output, h_post, h_res)]
+        self._add_node("hc_post", (parts, T, 1), block_dim, [sent, residual, h_res, output],
+                       [(1, 0, -1), (-1, 0, -1), (-1, 0, -1), (-1, 0, -1)], [H, HC], counters=T, buf_slots=slots)
+
+    def hc_post_mix_layer(
+        self,
+        sent: DTensor,          # [T, H] bf16: an allreduce_send node's output (the sublayer output's partial sums)
+        residual: DTensor,      # [T, HC H] bf16: the sublayer's input streams
+        coef: tuple,            # (h_post [T, HC], h_res [T, HC HC]) fp32 graph tensors: the sublayer's, finished
+        fn: DTensor,            # [NMIX, HC H] fp32: the next sublayer's hc_*_fn
+        output: DTensor,        # [T, HC H] bf16: the new streams R'
+        mix: DTensor,           # [T, HC_MIX_STRIDE] fp32 (a stand-in: the buffer holds [H / 32][T][HC_MIX_STRIDE]): the
+                                # partial mixes for hc_pre
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """hc_post (MODE 1) and the next sublayer's partial mixes in one task type (tasks/hc_post_mix.cuh): task s = columns
+        [32 s, 32 s + 32) of every stream and token: the sum over the GPUs, R' of those columns, their partial mixes with fn
+        (hc_pre adds them). params = [HC, H, NMIX]. Counter: one, every task counts
+        there."""
+        from .compiler import graph_nodes, producer_of
+        s = producer_of(sent, graph_nodes(self))
+        if s is None or s.name != "allreduce_send":
+            raise ValueError("hc_post_mix_layer: sent from an allreduce_send node")
+        T, H, NMIX = self._tokens(sent.dim(0)), sent.dim(1), fn.dim(0)
+        HC = residual.dim(1) // H
+        h_post, h_res = coef
+        assert NMIX == HC * (HC + 2) and fn.dim(1) == HC * H and H % 32 == 0
+        assert (h_post.dim(0), h_post.dim(1), h_res.dim(0), h_res.dim(1)) == (T, HC, T, HC * HC)
+        self._dtypes("hc_post_mix_layer", sent=(sent, bfloat16), residual=(residual, bfloat16), h_post=(h_post, float32),
+                     h_res=(h_res, float32), fn=(fn, float32), output=(output, bfloat16), mix=(mix, float32))
+        self._add_node("hc_post_mix", (H // 32, 1, 1), block_dim, [sent, residual, h_res, fn, mix, output],
+                       [(1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1)], [HC, H, NMIX],
+                       out_buffer=lambda n: (n.grid[0] * T * HC_MIX_STRIDE * 4, 0xFF, False), counters=1,
+                       buf_slots=[self._tensor_slot(residual), self._tensor_slot(output), self._tensor_slot(h_post),
+                                  self._tensor_slot(h_res), self._tensor_slot(fn)])
+
+    # ---- GLM-5.3-Flash KDA (tasks/kda_decode.cuh): a KDA sublayer is in_proj (a gemm_tile in slots) -> kda_decode ->
+    # o_proj -> allreduce_send -> hc_post_mix -> hc_pre (the next sublayer's input).
+    def kda_decode_layer(
+        self,
+        proj: DTensor,          # [T, NPROJ] fp32: the merged projection, a gemm_tile node's output in slots; columns
+                                # [q HL D | k HL D | v HL D | b HL | f_a D | g_a D | pad]
+        conv_weight: DTensor,   # [3 HL D, 4] fp32: the q | k | v short-conv weights of this GPU's heads
+        f_b: DTensor,           # [HL D, D] bf16
+        g_b: DTensor,           # [HL D, D] bf16
+        small: DTensor,         # fp32 [>= HL D + HL + D]: dt_bias [HL D], A_log [HL], o_norm weight [D]
+        conv_state: DTensor,    # [NR, 3 x 3 HL D] bf16: per state row the last 3 inputs [3][3 HL D] (oldest first; SGLang's
+                                # KDA pool)
+        rec_state: DTensor,     # [NS, HL D D] fp32: per state slot the [HL][V][K] recurrent state
+        rows: DTensor,          # [T] int32: the state slot of each request (a decode step); serve: [R], of each request
+        output: DTensor,        # o [T, HL D] bf16 (after the gated o_norm)
+        accepted: DTensor = None,   # [T / NT] int32 with serve: a graph tensor of the verify build (buffer slot 7: it
+                                    # marks a task's tokens as one request's; not read)
+        tokens_per_request: int = 1,   # NT: 1 = one decode step of T requests; NT > 1 (with serve) = a speculative verify
+                                       # step of T / NT requests
+        requests_per_task: int = 1,   # RP: 2 / 4 = a decode step's requests 2 / 4 per task (NT 1): T / RP tasks per head,
+                                      # one wave of the SMs at T = 16 / 32 (tasks/kda_decode.cuh RP); the default grid, a
+                                      # plan may take RP 1, 2 or 4 (grid x)
+        lower_bound: float = -5.0, norm_eps: float = 1e-5,
+        serve: dict = None,     # NT > 1: a serving framework's speculative verify step (SGLang's KDA
+                                # target-verify contract with ReplaySSM, tasks/kda_decode.cuh SERVE): {"nvalid" [R] int32 (the
+                                # request's draft tokens, the other rows idle), "icw_row" [R] int32, "icw" [rows, DRAFT, 3,
+                                # 3 HL D] bf16 (the per-token conv windows: after token t, (t, j) = x_{t - 2 + j}; SGLang's
+                                # intermediate_conv_window), "ring_v", "ring_k" [slots, HL, L, D] bf16,
+                                # "ring_g" [slots, HL, L, D] fp32, "ring_beta" [slots, HL, L] fp32, "draft" DRAFT}; the conv
+                                # state is then [NR, 3, 3 HL D] (read only) and rec_state is read only
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Task (r, h): request r, local head h (RP > 1: requests RP r .. RP r + RP - 1): short conv, gates, the delta rule
+        on the state, gated RMSNorm (tasks/kda_decode.cuh); a decode step updates the conv window and the state in place.
+        params = [HL, D, lower bound, o_norm eps, 1 (the conv layout)]; NT = T / grid x. serve: its NT tokens in order, the
+        pools read only, the ring and the per-token windows written for the framework's commit; params + [1, DRAFT, L]."""
+        from .compiler import graph_nodes, producer_of
+        p = producer_of(proj, graph_nodes(self))
+        if p is None or p.name != "gemm_tile" or p.params[0] != COMBINE["slots"] or p.params[3] != 0:
+            raise ValueError("kda_decode_layer: proj must be a gemm_tile node's output in slots")
+        T, HLD, D, NT = self._tokens(output.dim(0)), output.dim(1), f_b.dim(1), tokens_per_request
+        HL = HLD // D
+        if NT < 1 or NT > 8 or T % NT != 0:
+            raise ValueError(f"kda_decode_layer: tokens_per_request {NT} must divide the {T} tokens (at most 8)")
+        if (NT > 1) != (serve is not None) or (NT > 1) != (accepted is not None):
+            raise ValueError("kda_decode_layer: serve and accepted exactly when tokens_per_request > 1")
+        # the kernel indexes these by the head count and head dim: other shapes would be read silently wrong
+        assert (conv_weight.dim(0), conv_weight.dim(1)) == (3 * HLD, 4)
+        assert (f_b.dim(0), g_b.dim(0), g_b.dim(1)) == (HLD, HLD, D)
+        assert small.dim(0) >= HLD + HL + D
+        assert conv_state.dim(1) == 3 * HLD * 3 and rec_state.dim(1) == HLD * D
+        slots = [conv_weight, f_b, g_b, small, conv_state, rec_state, rows]
+        if NT > 1:
+            assert accepted.dim(0) == T // NT
+            self._dtypes("kda_decode_layer", accepted=(accepted, int32))
+            slots.append(accepted)
+        self._dtypes("kda_decode_layer", proj=(proj, float32), conv_weight=(conv_weight, float32), f_b=(f_b, bfloat16),
+                     g_b=(g_b, bfloat16), small=(small, float32), conv_state=(conv_state, bfloat16),
+                     rec_state=(rec_state, float32), rows=(rows, int32), output=(output, bfloat16))
+        params = [HL, D, float_bits(lower_bound), float_bits(norm_eps), 1]   # 1: the conv layout [3][3 HL D]
+        if serve is not None:
+            sv = serve
+            draft, L = int(sv["draft"]), sv["ring_v"].dim(2)
+            assert 1 <= draft <= NT <= L, f"kda_decode_layer: serve draft {draft} <= NT {NT} <= ring {L}"
+            assert (sv["icw"].dim(1), sv["icw"].dim(2), sv["icw"].dim(3)) == (draft, 3, 3 * HLD), \
+                "serve: icw [rows, DRAFT, 3, 3 HL D]"
+            for k in ("ring_v", "ring_k", "ring_g"):
+                assert (sv[k].dim(1), sv[k].dim(2), sv[k].dim(3)) == (HL, L, D), f"serve: {k} [slots, HL, L, D]"
+            assert (sv["ring_beta"].dim(1), sv["ring_beta"].dim(2)) == (HL, L), "serve: ring_beta [slots, HL, L]"
+            assert sv["nvalid"].dim(0) == T // NT and sv["icw_row"].dim(0) == T // NT
+            self._dtypes("kda_decode_layer", nvalid=(sv["nvalid"], int32), icw_row=(sv["icw_row"], int32),
+                         icw=(sv["icw"], bfloat16), ring_v=(sv["ring_v"], bfloat16), ring_k=(sv["ring_k"], bfloat16),
+                         ring_g=(sv["ring_g"], float32), ring_beta=(sv["ring_beta"], float32))
+            slots += [sv[k] for k in ("nvalid", "icw_row", "icw", "ring_v", "ring_k", "ring_g", "ring_beta")]
+            params += [1, draft, L]
+        RP = requests_per_task
+        if RP not in (1, 2, 4) or (RP > 1 and NT != 1) or T % (NT * RP):
+            raise ValueError(f"kda_decode_layer: requests_per_task {RP}: 1, or 2 / 4 in a decode step (one token per "
+                             f"request)")
+        self._add_node("kda_decode", (T // (NT * RP), HL, 1), block_dim, [proj, output], [(0, -1, -1), (0, 1, -1)], params,
+                       # o, 0xFF before each launch, written in whole 16-B stores: the o_proj GEMM waits for all tasks (its
+                       # counter) or polls o (input_polled)
+                       out_buffer=lambda n: (T * HLD * 2, 0xFF, False), counters=1,
+                       changeable_grid_dims={} if NT > 1 else {0: (1, 1, 4)},   # a decode step: 1 .. 4 requests per task
+                       cost_inputs=[0],   # adds the projection's K parts
+                       buf_slots=[self._tensor_slot(t) for t in slots])
+
     # ---- the generated layer (static_schedule.py) ----
-    def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False):
+    def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False, device=0,
+                       rank=None, exchange=None):
         """Build the graph as it is now, one schedule.json per GPU (static_schedule.compile_static); profile: the timing build
-        (per-task start / end stamps, static_harness.Harness.task_times)."""
+        (per-task start / end stamps, static_harness.Harness.task_times); device: the CUDA device of GPU 0. rank / exchange:
+        GPU `rank` alone in this process with the caller's exchange region (multicast address, local address), e.g. one
+        TP rank of a serving framework (exchange_region_bytes)."""
         from .static_schedule import compile_static
-        return compile_static(self, schedule_paths, gpu_tensors, out_dir, extra_flags=extra_flags, profile=profile)
+        return compile_static(self, schedule_paths, gpu_tensors, out_dir, extra_flags=extra_flags, profile=profile,
+                              device=device, rank=rank, exchange=exchange)
+
+    def exchange_region_bytes(self) -> int:
+        """The exchange region a rank-alone build needs from its caller (compile_static rank / exchange): both sets."""
+        return 2 * self.exchange_layout()[0]

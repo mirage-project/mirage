@@ -1,7 +1,9 @@
 // tasks/silu_and_mul.cuh -- the shared-expert activation of h_s features
 // [F x, F x + F), F = 32, 64, 96 or 128:
 //   hs[t][f] = bf16(SiLU(gate) up), SiLU(g) = g / (1 + exp(-g))
-// (GLM-5.3, DeepSeek-V3 and other SwiGLU experts). The layout and the counters
+// (GLM-5.3, DeepSeek-V3 and other SwiGLU experts); with a swiglu limit
+// (GLM-5.3-Flash), gate clamped to at most the limit and up to [-limit, limit]
+// first. The layout and the counters
 // are the same as in situ_and_mul.cuh (K3's SiTU).
 //   spart  shared gate_up's output, [T][2 SHR], int64 fixed point (COMBINE_ADD
 //          of gemm_tile.cuh or scaled_gemm_tile.cuh). It is 2 SHR / 128 blocks
@@ -20,8 +22,9 @@
 
 namespace static_mk {
 
-// 64 features per task (the default grid): exactly one block, two warps
-template <int NSPLIT, int SHR>
+// 64 features per task (the default grid): exactly one block, two warps.
+// LIMIT: the swiglu limit's fp32 bits (0: none)
+template <int NSPLIT, int SHR, int LIMIT>
 __device__ __forceinline__ void
     silu_and_mul_task_64(unsigned long long const *spart,
                          uint32_t *sgu_cnt,
@@ -44,7 +47,8 @@ __device__ __forceinline__ void
     }
 #pragma unroll
     for (int t = 0; t < T; t++) {
-      hs[t * SHR + tile * 64 + f] = __float2bfloat16(silu2(gv[t], uv[t]));
+      hs[t * SHR + tile * 64 + f] =
+          __float2bfloat16(silu2_limit<LIMIT>(gv[t], uv[t]));
     }
     __syncwarp();
     asm volatile("bar.sync 2, 64;" ::: "memory");
@@ -55,7 +59,7 @@ __device__ __forceinline__ void
   __syncthreads();
 }
 
-template <int NSPLIT, int F, int SHR>
+template <int NSPLIT, int F, int SHR, int LIMIT>
 __device__ __forceinline__ void
     silu_and_mul_task(unsigned long long const *spart,
                       uint32_t *sgu_cnt,
@@ -63,7 +67,7 @@ __device__ __forceinline__ void
                       __nv_bfloat16 *hs,
                       int x) {
   if constexpr (F == 64) {
-    silu_and_mul_task_64<NSPLIT, SHR>(spart, sgu_cnt, done_cnt, hs, x);
+    silu_and_mul_task_64<NSPLIT, SHR, LIMIT>(spart, sgu_cnt, done_cnt, hs, x);
     return;
   }
   static_assert(
@@ -87,7 +91,7 @@ __device__ __forceinline__ void
     }
 #pragma unroll
     for (int t = 0; t < T; t++) {
-      hs[t * SHR + f] = __float2bfloat16(silu2(gv[t], uv[t]));
+      hs[t * SHR + f] = __float2bfloat16(silu2_limit<LIMIT>(gv[t], uv[t]));
     }
     __syncwarp();
     asm volatile("bar.sync 2, %0;" ::"n"(F) : "memory");
@@ -103,7 +107,7 @@ __device__ __forceinline__ void
 //        N, ...}). The task adds its SGU::y partial sums.
 // Each task of shared gate_up adds 1 to the counter of its 128-row block. Thus
 // a block gets SGU::y adds with 128-row tasks, and 2 SGU::y adds with 64-row
-// tasks (SGU::x = 2 SHR / 64).
+// tasks (SGU::x = 2 SHR / 64). PARAMS {} or {the swiglu limit as fp32 bits}.
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -124,10 +128,13 @@ __device__ __forceinline__ void run_silu_and_mul(Maps const &,
   static_assert(SHR % SELF::x == 0, "silu_and_mul tasks of equal size");
   static_assert(SELF::buf >= 0 && SELF::counter >= 0,
                 "silu_and_mul: its output h_s and its counter");
-  silu_and_mul_task<SGU::y *(SGU::x * 128 / (2 * SHR)), SHR / SELF::x, SHR>(
+  silu_and_mul_task<SGU::y *(SGU::x * 128 / (2 * SHR)),
+                    SHR / SELF::x,
+                    SHR,
+                    param_or<PARAMS, 0, 0>()>(
       buf_at<unsigned long long const>(g, SGU::buf),
-      g.cnt + SGU::counter,
-      g.cnt + SELF::counter,
+      cnt_now(g) + SGU::counter,
+      cnt_now(g) + SELF::counter,
       buf_at<__nv_bfloat16>(g, SELF::buf),
       tk.x);
 }
