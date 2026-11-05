@@ -91,6 +91,7 @@ KNAllReduceOp::operator json() const {
 #ifdef MIRAGE_FINGERPRINT_USE_CPU
 bool KNAllReduceOp::fingerprint(void) {
   assert(false && "To be implemented");
+  return false;
 }
 #endif
 

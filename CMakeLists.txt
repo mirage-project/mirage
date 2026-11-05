@@ -110,8 +110,10 @@ list(APPEND MIRAGE_LINK_LIBS ${Z3_LIBRARIES})
 add_subdirectory(deps/json)
 list(APPEND MIRAGE_LINK_LIBS nlohmann_json::nlohmann_json)
 
-link_directories(${CMAKE_SOURCE_DIR}/build/release)
-list(APPEND MIRAGE_LINK_LIBS abstract_subexpr)
+if(NOT APPLE)
+  link_directories(${CMAKE_SOURCE_DIR}/build/release)
+  list(APPEND MIRAGE_LINK_LIBS abstract_subexpr)
+endif()
 
 #add_subdirectory(deps/z3 z3 EXCLUDE_FROM_ALL)
 #include_directories(deps/z3/src/api/c++)
@@ -154,9 +156,11 @@ if(NOT CARGO_RESULT EQUAL 0)
     "and follow the instructions on the screen.")
 endif()
 
-set(ABSTRACT_SUBEXPR_LIBRARIES ${PROJECT_SOURCE_DIR}/build/abstract_subexpr/release/libabstract_subexpr.so)
-set(FORMAL_VERIFIER_LIBRARIES ${PROJECT_SOURCE_DIR}/build/formal_verifier/release/libformal_verifier.so)
-list(APPEND MIRAGE_LINK_LIBS "-lstdc++fs")
+set(ABSTRACT_SUBEXPR_LIBRARIES ${PROJECT_SOURCE_DIR}/build/abstract_subexpr/release/libabstract_subexpr${CMAKE_SHARED_LIBRARY_SUFFIX})
+set(FORMAL_VERIFIER_LIBRARIES ${PROJECT_SOURCE_DIR}/build/formal_verifier/release/libformal_verifier${CMAKE_SHARED_LIBRARY_SUFFIX})
+if(NOT APPLE)
+  list(APPEND MIRAGE_LINK_LIBS "-lstdc++fs")
+endif()
 
 #set RUST
 if(ABSTRACT_SUBEXPR_LIB AND ABSTRACT_SUBEXPR_LIBRARIES)
