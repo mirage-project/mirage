@@ -29,9 +29,10 @@ hc_attn_pre on its own streams.
 Env: MOE_STATIC_LAYERS; MOE_STATIC_CHECK (1 / 0); MOE_STATIC_PDL (1 / 0); MOE_STATIC_END (mhc / mhc_pre); MOE_STATIC_TOKENS
 (8, 16, 32: the T of the layers); MOE_STATIC_PLAN, MOE_STATIC_PLAN16, MOE_STATIC_PLAN32 (the layers' plan files by T, moe_demo
 --search of the same --end, one GPU's lists, e.g. moe_plan_mhc_pre.json here; default: round robin of moe_demo's grids);
-MOE_STATIC_OUT (build directory, default <checkout>/build/sgl_static_moe); MOE_STATIC_BUILD_CACHE (the build cache: every
-layer and rank has the same layer.cu, compiled once; default <checkout>/build/static_build_cache_moe); MOE_STATIC_ROOT (the
-mirage checkout, default this one).
+MOE_STATIC_VERIFY_PLAN, MOE_STATIC_VERIFY_PLAN16, MOE_STATIC_VERIFY_PLAN32 (the verify layers'); MOE_STATIC_OUT (build
+directory, default <checkout>/build/sgl_static_moe); MOE_STATIC_BUILD_CACHE (the build cache: every layer and rank has the
+same layer.cu, compiled once; default <checkout>/build/static_build_cache_moe); MOE_STATIC_ROOT (the mirage checkout, default
+this one).
 """
 import functools
 import os
@@ -53,6 +54,10 @@ END = os.environ.get("MOE_STATIC_END", "mhc")
 PLAN_FILE = {8: os.environ.get("MOE_STATIC_PLAN") or None,      # the layers' plan files by T (a plan file is of one T's
              16: os.environ.get("MOE_STATIC_PLAN16") or None,   # graph: the grids differ)
              32: os.environ.get("MOE_STATIC_PLAN32") or None}
+VERIFY_PLAN_FILE = {8: os.environ.get("MOE_STATIC_VERIFY_PLAN") or None,      # the verify layers' (moe_demo --valid-rows;
+                                                                              # T = 8 without one: the decode plan)
+                    16: os.environ.get("MOE_STATIC_VERIFY_PLAN16") or None,
+                    32: os.environ.get("MOE_STATIC_VERIFY_PLAN32") or None}
 TOKENS = sorted({int(x) for x in os.environ.get("MOE_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8, 16, 32):
                                                                                                       # a step of n rows runs
                                                                                                       # the smallest T >= n
@@ -145,7 +150,8 @@ def _init_cuda_graphs(self, *args, **kwargs):
                     rows = (tok // 8) * draft
                     sv = StaticMoE(m.layer_id, self.server_args.model_path, rank, tp, dev, OUT, group, pdl=PDL,
                                    keep_weights=CHECK, pool=pool, attn_next=attn_next,
-                                   plan=PLAN_FILE[8] if (END != "mhc_pre" or nxt is not None) and tok == 8 else None,
+                                   plan=(VERIFY_PLAN_FILE[tok] or (PLAN_FILE[8] if tok == 8 else None))
+                                   if END != "mhc_pre" or nxt is not None else None,
                                    tokens=tok, bank=first.bank, weights=first.w, rows=rows)
                     sv.next_layer = nxt
                     svs[rows] = sv

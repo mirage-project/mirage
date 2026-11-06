@@ -167,8 +167,13 @@ B200 (148 SMs); a missing file means round robin:
 Check runs such as `*_moe4l` end with `mhc`; at T=16 they use `moe_plan16_mhc.json`.
 
 - **DSA short/long**: prompts of at most 1000 tokens use short, all others long.
-- **Verify layers**: DSA's verify layers always run round robin; KDA's and MoE's verify layers use the T=8 plan at T=8 and
-  round robin at T≥16. The chain sets no T=8 plan for KDA, so KDA's verify layer is in fact round robin too.
+- **Verify layers**: a verify layer's graph differs from the decode graph of the same T, so it takes its own plan file
+  when one exists (`sglang_dsa/dsa_verify_plan{,16,32}_{long,short}.json`, `sglang_kda/kda_verify_plan{,16,32}.json`,
+  `sglang_moe/moe_verify_plan{,16,32}_{end}.json`; `*_STATIC_VERIFY_PLAN{,16,32}` set by hand win).
+  - Only `dsa_verify_plan_long.json` exists (bs 1, long context: 62.6 µs against round robin's 63.8 µs on one GPU). On the
+    other 11 verify graphs the searched plans did not beat round robin.
+  - Without a verify plan: DSA runs round robin; KDA and MoE use the T=8 decode plan at T=8 and round robin at T≥16 (the
+    chain sets no T=8 plan for KDA, so its verify layer runs round robin).
 - **A plan file belongs to one graph**: it is valid only for the graph it was made for (its nodes and grid candidates), its T
   and its SM count.
   - When the number of SM lists differs from the GPU's SM count, compilation fails with

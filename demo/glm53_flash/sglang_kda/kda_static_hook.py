@@ -24,7 +24,8 @@ after), then the static layer; printed: x_ffn, R' - R, h_post, h_res relRMS stat
 kept); a verify step also the ring (v, k, the decay, beta) and the windows against SGLang's.
 Env: KDA_STATIC_LAYERS; KDA_STATIC_CHECK (0 / 1); KDA_STATIC_PDL (1 / 0); KDA_STATIC_TOKENS (8, 16, 32: the T of the layers);
 KDA_STATIC_PLAN, KDA_STATIC_PLAN16, KDA_STATIC_PLAN32 (the decode layers' plan files by T, compiler.write_plan_file; default
-their round robin); KDA_STATIC_OUT (build directory, default <checkout>/build/sgl_static_kda); KDA_STATIC_BUILD_CACHE (the
+their round robin); KDA_STATIC_VERIFY_PLAN, KDA_STATIC_VERIFY_PLAN16, KDA_STATIC_VERIFY_PLAN32 (the verify layers');
+KDA_STATIC_OUT (build directory, default <checkout>/build/sgl_static_kda); KDA_STATIC_BUILD_CACHE (the
 layers' build cache, static_schedule.compile_static: every KDA layer and rank has the same layer.cu, compiled once; default
 <checkout>/build/static_build_cache_kda); KDA_STATIC_ROOT (the mirage checkout, needed by kda_static_boot).
 """
@@ -45,6 +46,9 @@ CHECK = os.environ.get("KDA_STATIC_CHECK", "0") == "1"
 PLAN = {8: os.environ.get("KDA_STATIC_PLAN") or None,      # the layers' plan files by T (a plan file is of one T's graph)
         16: os.environ.get("KDA_STATIC_PLAN16") or None,
         32: os.environ.get("KDA_STATIC_PLAN32") or None}
+VERIFY_PLAN = {8: os.environ.get("KDA_STATIC_VERIFY_PLAN") or None,      # the verify layers' (another graph: kda_decode
+               16: os.environ.get("KDA_STATIC_VERIFY_PLAN16") or None,   # [R, HL] of one request's tokens)
+               32: os.environ.get("KDA_STATIC_VERIFY_PLAN32") or None}
 TOKENS = sorted({int(x) for x in os.environ.get("KDA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8, 16, 32):
                                                                                                       # a step of T rows runs
                                                                                                       # the T layer
@@ -142,9 +146,8 @@ def _init_cuda_graphs(self, *args, **kwargs):
                         sv = {**_verify_buffers(cache, draft, m.layer_idx), "requests": tok // 8}
                         svs[tok] = StaticKDA(m.layer_idx, self.server_args.model_path, rank, tp, cache.conv[0],
                                              cache.temporal, OUT, _fused_args(lay, group), pdl=PDL,
-                                             plan=PLAN[8] if tok == 8 else None,
-                                             # (the T >= 16 plans are the decode graph's: kda_decode [16] vs the verify's [2, 16])
-                                             verify=sv, weights=first.t, tokens=tok)
+                                             plan=VERIFY_PLAN[tok] or (PLAN[8] if tok == 8 else None), verify=sv,
+                                             weights=first.t, tokens=tok)
                         svs[tok].cache = cache
                         _log(f"static KDA layer {m.layer_idx}: the verify build of {tok} rows ({tok // 8} requests x "
                              f"{draft} draft tokens, ring {sv['ring_v'].shape[2]}, windows {tuple(sv['icw'].shape)})")

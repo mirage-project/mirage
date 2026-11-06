@@ -15,8 +15,9 @@ fused layers, #811: o_proj, the TP all-reduce, the residual and the norm in one 
            on the same inputs, o_proj from the kernel's o; end to end: the reference's partial sums, then the boundary
   time     --reps launches, 512 MB read before each (L2 emptied), the states put back: the span over the GPUs
   --verify N  the layer of a speculative verify step (kda_static_layer verify; SGLang's KDA target-verify contract with
-           ReplaySSM): one request's N draft tokens as rows (the other 8 - N idle), its state and conv window read from the
-           pools at slot 3, not written; the kernel writes the ring (v, pre-norm k, the log decay, beta per token) and the
+           ReplaySSM): T / 8 requests' N draft tokens each as rows (packed, the last rows idle), their states and conv
+           windows read from the pools at their slots, not written; the kernel writes the ring (v, pre-norm k, the log
+           decay, beta per token) and the
            per-token conv windows [rows, N, 3, 3 HL D] (SGLang's intermediate_conv_window). Checks: o and the boundary as above against the reference run over the N tokens (vLLM's
            spec path with 1 accepted token: the pool's window); the pools unchanged; the idle rows' o = 0; the ring
            replayed as SGLang's commit fold (kda_replayssm_spec_decode.py's exact fold, in torch) gives the reference's
@@ -126,7 +127,7 @@ def main():
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--out", default="/tmp/flash_kda_fused")
     ap.add_argument("--nvcc-flag", action="append", default=[])
-    ap.add_argument("--verify", type=int, default=0, help="the verify layer: one request's N draft tokens (1 .. 8)")
+    ap.add_argument("--verify", type=int, default=0, help="the verify layer: each request's N draft tokens (1 .. 8)")
     ap.add_argument("--ring", type=int, default=16, help="--verify: the ring length (SGLang's linear_replayssm_cache_len)")
     ap.add_argument("--plan", help="a plan file (compiler.write_plan_file) instead of the round-robin plan")
     ap.add_argument("--idle", type=int, default=0, help="a decode step whose last N rows are idle (slot -1, a padded batch): "
@@ -142,7 +143,8 @@ def main():
     ap.add_argument("--rounds", type=int, default=3, help="with --collect: random plans per candidate grid of each node")
     ap.add_argument("--gpu-lock", help="a lock file held around this run's GPU work (--collect gives it to its runs)")
     args = ap.parse_args()
-    NV = args.verify
+    NV, RQ = args.verify, T // 8   # --verify: RQ requests of NV live rows each
+    NL = RQ * NV if NV else T - args.idle   # the live rows
     assert 0 <= NV <= T
     tp, n = args.tp, args.gpus or args.tp
     assert n <= tp and torch.cuda.device_count() >= n, f"{torch.cuda.device_count()} GPUs visible, --gpus {n} of --tp {tp}"
@@ -172,29 +174,33 @@ def main():
         conv = (torch.randn(SLOTS, 3, 3 * HLD, generator=gr, device=dev) * 0.5).to(torch.bfloat16)
         temporal = torch.randn(SLOTS, wr["num_heads"], ref.D, ref.D, generator=gr, device=dev) * 0.05
         verify = None
-        if NV:   # the rings and the per-token windows (SGLang's layouts), zero; T / 8 requests of N rows each: the demo's
-            # request in rows 0 .. N - 1, the other requests idle (slot -1; rows R N .. T - 1 idle)
+        if NV:   # the rings and the per-token windows (SGLang's layouts), zero; request q's N rows from q N, at slot ROWS[q]
+            # (rows RQ N .. T - 1 idle)
             HL = wr["num_heads"]
             z = lambda shape, dtype=torch.float32: torch.zeros(shape, dtype=dtype, device=dev)
-            verify = {"draft": NV, "requests": T // 8, "ring_v": z((SLOTS, HL, args.ring, ref.D), torch.bfloat16),
+            verify = {"draft": NV, "requests": RQ, "ring_v": z((SLOTS, HL, args.ring, ref.D), torch.bfloat16),
                       "ring_k": z((SLOTS, HL, args.ring, ref.D), torch.bfloat16), "ring_g": z((SLOTS, HL, args.ring, ref.D)),
                       "ring_beta": z((SLOTS, HL, args.ring)), "icw": z((SLOTS + 1, NV, 3, 3 * HLD), torch.bfloat16)}
         t = ksl.layer_tensors(args.layer, args.model_dir, r, tp, conv, temporal, dev, fused, verify)
         rows = torch.tensor(ROWS, dtype=torch.int32, device=dev)
         t["x"].copy_(x_attn)
         t["rows"].copy_(rows)
-        if NV and T > 8:
-            t["rows"][1:T // 8].fill_(-1)   # the other requests idle (their slot; every request has NV draft tokens)
         t["R_in"].copy_(R.reshape(T, HC * H))
         t["h_post_in"].copy_(post_a)
         t["h_res_in"].copy_(comb_a)
-        if NV:   # one request at slot ROWS[0], its N tokens the first rows
-            live = rows[:1].long()
-            win = torch.zeros(1, 3 * HLD, NV + 2, dtype=torch.bfloat16, device=dev)
-            win[0, :, :3] = conv[live[0]].t()
-            rec0 = temporal[live[0]].unsqueeze(0).repeat(NV, 1, 1, 1)
-            out_ref, y_ref, conv_new, rec_new = ref.ref_kda(x_attn[:NV].to(dev), wr, win, rec0, ntok=NV, accepted=[1])
-            refs.append({"out": out_ref.cpu(), "y": y_ref.cpu(), "rec": rec_new[NV - 1], "w_o": wr["o_proj"]})
+        if NV:   # each request by itself
+            t["icw_row"].copy_(torch.arange(RQ, dtype=torch.int32, device=dev))
+            os_, ys, recs = [], [], []
+            for q in range(RQ):
+                win = torch.zeros(1, 3 * HLD, NV + 2, dtype=torch.bfloat16, device=dev)
+                win[0, :, :3] = conv[ROWS[q]].t()
+                rec0 = temporal[ROWS[q]].unsqueeze(0).repeat(NV, 1, 1, 1)
+                out_ref, y_ref, _, rec_new = ref.ref_kda(x_attn[q * NV:(q + 1) * NV].to(dev), wr, win, rec0, ntok=NV,
+                                                         accepted=[1])
+                os_.append(out_ref.cpu())
+                ys.append(y_ref.cpu())
+                recs.append(rec_new[NV - 1])
+            refs.append({"out": torch.cat(os_), "y": torch.cat(ys), "rec": recs, "w_o": wr["o_proj"]})
         else:
             live = rows.long()
             out_ref, y_ref, conv_new, rec_new = ref.ref_kda(x_attn.to(dev), wr, conv[live].transpose(1, 2).contiguous(),
@@ -209,7 +215,7 @@ def main():
 
     mpk = StaticMegakernel(num_gpus=n)
     grids = ksl.build_graph(mpk, ts[0], {"rms_eps": eps, "hc_eps": hc_eps, "norm_eps": eps, "iters": iters,
-                                         "o_parts": args.o_parts}, {"draft": NV, "requests": T // 8} if NV else None)
+                                         "o_parts": args.o_parts}, {"draft": NV, "requests": RQ} if NV else None)
     if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the layer's GEMM weights into L2 at its start (core.cuh kernel_begin)
         mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
     os.makedirs(args.out, exist_ok=True)
@@ -246,7 +252,7 @@ def main():
     for r in range(n):
         torch.cuda.synchronize(r)
     print(f"layer {args.layer}, {n} GPUs with TP{tp} shards 0..{n - 1} ({w['num_heads'] // tp} heads per GPU), slots {ROWS}"
-          + (f", verify: {NV} draft tokens of the request at slot {ROWS[0]}, ring {args.ring}" if NV else ""))
+          + (f", verify: {NV} draft tokens of the requests at slots {ROWS[:RQ]}, ring {args.ring}" if NV else ""))
 
     # per GPU: KDA against the reference, o_proj from the kernel's o
     o = [dfd.fx_float(ts[r]["o_fx"].cpu()) for r in range(n)]
@@ -254,37 +260,41 @@ def main():
     for r in range(n):
         conv, temporal, conv0, tmp0 = saved[r]
         if NV:
-            slot = ROWS[0]
             t = ts[r]
-            e_y = relrms(t["o"][:NV].cpu(), refs[r]["y"].reshape(NV, -1))
-            idle = t["o"][NV:].float().abs().max().item() if NV < T else 0.0
+            e_y = relrms(t["o"][:NL].cpu(), refs[r]["y"].reshape(NL, -1))
+            idle = t["o"][NL:].float().abs().max().item() if NL < T else 0.0
             untouched = torch.equal(conv, conv0) and torch.equal(temporal, tmp0)
-            # the ring replayed as SGLang's commit fold (kda_replayssm_spec_decode.py): per head H [V][K]
-            Hs = temporal[slot].float().clone()   # [HL][V][K]
-            for i in range(NV):
-                k = t["ring_k"][slot, :, i].float()                               # [HL][K]
-                v = t["ring_v"][slot, :, i].float()                               # [HL][V]
-                gk, beta = t["ring_g"][slot, :, i], t["ring_beta"][slot, :, i]     # [HL][K], [HL]
-                k = k / torch.sqrt((k * k).sum(-1, keepdim=True) + 1e-6)
-                Hs = Hs * torch.exp(gk)[:, None, :]
-                v = v - torch.einsum("hvk,hk->hv", Hs, k)
-                v = v * beta[:, None]
-                Hs = Hs + v[:, :, None] * k[:, None, :]
-            e_fold = relrms(Hs, refs[r]["rec"])
-            ring_rest = max(t["ring_v"][slot, :, NV:].float().abs().max().item(), t["ring_k"][slot, :, NV:].float().abs().max().item())
-            # the per-token conv windows (t, j) = x_{t-2+j}: the pool's 2 newest inputs below 0, else the tokens' raw inputs
-            # (bf16(x W_in^T) of the q | k | v columns; the kernel adds the GEMM's K parts in fp32 before the rounding: a few
-            # ulps may differ)
-            icw = t["icw"][0]   # row icw_row 0: [NV, 3, 3 HL D]
-            w_in = t["w_in"]
-            raw = (x_attn[:NV].to(conv.device).float() @ w_in[:3 * HLD].float().t()).to(torch.bfloat16)
-            dedup = torch.cat([conv0[slot, 1:3].to(raw.device), raw], 0)   # entry e = x_{e-2}
-            idx = torch.arange(NV, device=raw.device)[:, None] + torch.arange(3, device=raw.device)[None, :]   # (t, j) -> e
-            want, pool_part = dedup[idx], idx < 2
-            icw = icw.to(raw.device)
-            eq_old = torch.equal(icw[pool_part], want[pool_part])
-            eq_raw = (icw[~pool_part].view(torch.int16) == want[~pool_part].view(torch.int16)).float().mean().item()
-            e_raw = relrms(icw[~pool_part], want[~pool_part])
+            e_fold, ring_rest, eq_old, eq_raw, e_raw = 0.0, 0.0, True, 1.0, 0.0
+            for q in range(RQ):
+                slot = ROWS[q]
+                # the ring replayed as SGLang's commit fold (kda_replayssm_spec_decode.py): per head H [V][K]
+                Hs = temporal[slot].float().clone()   # [HL][V][K]
+                for i in range(NV):
+                    k = t["ring_k"][slot, :, i].float()                               # [HL][K]
+                    v = t["ring_v"][slot, :, i].float()                               # [HL][V]
+                    gk, beta = t["ring_g"][slot, :, i], t["ring_beta"][slot, :, i]     # [HL][K], [HL]
+                    k = k / torch.sqrt((k * k).sum(-1, keepdim=True) + 1e-6)
+                    Hs = Hs * torch.exp(gk)[:, None, :]
+                    v = v - torch.einsum("hvk,hk->hv", Hs, k)
+                    v = v * beta[:, None]
+                    Hs = Hs + v[:, :, None] * k[:, None, :]
+                e_fold = max(e_fold, relrms(Hs, refs[r]["rec"][q]))
+                ring_rest = max(ring_rest, t["ring_v"][slot, :, NV:].float().abs().max().item(),
+                                t["ring_k"][slot, :, NV:].float().abs().max().item())
+                # the per-token conv windows (t, j) = x_{t-2+j}: the pool's 2 newest inputs below 0, else the tokens' raw
+                # inputs (bf16(x W_in^T) of the q | k | v columns; the kernel adds the GEMM's K parts in fp32 before the
+                # rounding: a few ulps may differ)
+                icw = t["icw"][q]   # row icw_row q: [NV, 3, 3 HL D]
+                w_in = t["w_in"]
+                raw = (x_attn[q * NV:(q + 1) * NV].to(conv.device).float() @ w_in[:3 * HLD].float().t()).to(torch.bfloat16)
+                dedup = torch.cat([conv0[slot, 1:3].to(raw.device), raw], 0)   # entry e = x_{e-2}
+                idx = torch.arange(NV, device=raw.device)[:, None] + torch.arange(3, device=raw.device)[None, :]   # (t, j) -> e
+                want, pool_part = dedup[idx], idx < 2
+                icw = icw.to(raw.device)
+                eq_old = eq_old and torch.equal(icw[pool_part], want[pool_part])
+                eq_raw = min(eq_raw, (icw[~pool_part].view(torch.int16) ==
+                                      want[~pool_part].view(torch.int16)).float().mean().item())
+                e_raw = max(e_raw, relrms(icw[~pool_part], want[~pool_part]))
             print(f"  GPU {r}: kda o relRMS {e_y:.2e} (idle rows max |o| {idle:.1e}) | pools unchanged {untouched} | folded "
                   f"ring vs the reference's state relRMS {e_fold:.2e} (ring beyond {NV} max {ring_rest:.1e}) | conv windows: "
                   f"the pool's entries {eq_old}, raw inputs relRMS {e_raw:.2e} (bit-equal {100 * eq_raw:.2f}%)")
@@ -292,8 +302,7 @@ def main():
             ok = ok and e_y < 5e-3 and idle == 0.0 and untouched and e_fold < 1e-4 and ring_rest == 0.0 and eq_old and \
                 e_raw < 1e-3 and o_node < 1e-3
             continue
-        NL = T - args.idle   # the live rows (--idle: the last rows idle, their slots untouched)
-        live = torch.tensor(ROWS[:NL], device=conv.device).long()
+        live = torch.tensor(ROWS[:NL], device=conv.device).long()   # (--idle: the last rows idle, their slots untouched)
         idle_s = torch.tensor(ROWS[NL:], device=conv.device).long()
         same = (conv[live].transpose(1, 2).contiguous().view(torch.int16) ==
                 refs[r]["conv"][:NL].view(torch.int16)).float().mean().item()
@@ -330,7 +339,7 @@ def main():
           f"every GPU's outputs equal: {same_gpus}")
     outs_ref = [x["out"].float() for x in refs]
     if NV:   # the idle rows: o_proj of o = 0
-        outs_ref = [torch.cat([v, torch.zeros(T - NV, H)]) for v in outs_ref]
+        outs_ref = [torch.cat([v, torch.zeros(T - NL, H)]) for v in outs_ref]
     R_e2e = dfd.hc_post_ref(dfd.tp_sum(outs_ref), R, post_a, comb_a)
     x_e2e, post_e2e, _ = ffn(R_e2e)
     ee = {"R' - R": relrms(R_k.float() - R.float(), R_e2e.float() - R.float()), "x_ffn": relrms(outs[0]["x_ffn"], x_e2e),

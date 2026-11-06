@@ -25,7 +25,7 @@ attention with the sublayer boundary inside (as Kimi K3's fused layers, #811), b
                in torch symmetric memory over the TP group (multicast: SGLang's custom all-reduce allocates its push buffers
                so); every rank's layers must be built before any rank's first launch (the hook's barrier)
   plan         a plan file of the fused graph of this T (dsa_fused_demo --search, one GPU's lists) or "rr": the round-robin
-               plan of build_graph's grids; the verify layer: round robin
+               plan of build_graph's grids; the verify layer has its own (dsa_fused_demo --verify --search)
 """
 import os
 import sys
@@ -150,8 +150,7 @@ class StaticDSA:
             "verify": bool(verify), "requests": self.requests})
         if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the layer's GEMM weights into L2 at its start (core.cuh kernel_begin)
             mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
-        # the searched plans are of the decode graphs (kpool_update per request): a verify layer runs round robin
-        self.plan = "rr" if verify or not fused_plan else fused_plan
+        self.plan = fused_plan or "rr"
         plan = demo.round_robin_plan(mpk, grids) if self.plan == "rr" else compiler.plan_from_file(self.plan)
         out_dir = os.path.join(out_root, f"rank{rank}", f"layer{layer}{f'_t{T}' if T != 8 else ''}{'_verify' if verify else ''}")
         flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"]
