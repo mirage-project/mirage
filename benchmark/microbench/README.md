@@ -1,7 +1,7 @@
 # Primitive cost microbenchmarks
 
-What the megakernel runtime's synchronization primitives actually cost, measured
-rather than assumed.
+What the megakernel runtime's synchronization primitives and profiler
+overhead actually cost, measured rather than assumed.
 
 Every dependency edge in the task graph is one of these operations: a worker
 finishing a task bumps an event counter with `atom.add.release.gpu.u64`, the
@@ -10,13 +10,16 @@ polling with `ld.acquire.gpu.u64`, and stages hand off through fences and
 barriers. The
 kernels under test are copied verbatim from
 `include/mirage/persistent_kernel/mpk_atoms.cuh`, so these are the instructions
-the megakernel issues, not approximations of them.
+the megakernel issues, not approximations of them. The profiler overhead
+benchmark does the same for the event-recording primitives in
+`include/mirage/persistent_kernel/profiler.h`.
 
 ## Running
 
 ```bash
-make run                      # print both benchmarks' tables
-make run JSON=b200            # also record b200_sync.json and b200_tma.json
+make run                      # print all three benchmarks' tables
+make run JSON=b200            # also record b200_sync.json, b200_tma.json and
+                              #             b200_profiler_overhead.json
 make run SM=90a               # build for a different target (default 100a)
 ```
 
@@ -340,7 +343,83 @@ per tile, independent of tile size. The tensor map's location (global memory,
 as MPK passes it, vs. a `__grid_constant__` parameter or a prefetched
 descriptor) was checked separately and makes no difference.
 
+## Profiler overhead (`profiler_overhead`)
+
+What the on-device profiler's event-recording stamp costs, so the stamp
+itself is never mistaken for kernel work in the trace. The runtime's profiler
+(`include/mirage/persistent_kernel/profiler.h`) writes one 64-bit entry per
+event: a tag (event id, block/group, begin/end) and a timestamp read from
+`%globaltimer_lo`. `PROFILER_EVENT_START` is
+
+`if (write_thread) { entry.tag = ...; entry.delta = get_timestamp(); *write_ptr = entry.raw; write_ptr += stride; } __threadfence_block();`
+and `PROFILER_EVENT_END` is the same with the fence before the body. Every
+task pays a START+END pair; with stage profiling on, every stage of every
+task pays another pair. The PTX is copied verbatim from `profiler.h`, and the
+store hits the same global-memory ring the runtime uses, so the
+memory-system cost is included.
+
+### What it measures
+
+- `PROFILER_EVENT_START` (full) — tag build + `%globaltimer_lo` read + 64-bit
+  store to the ring + pointer advance + `__threadfence_block()`.
+- `PROFILER_EVENT_END` (full) — `__threadfence_block()` + the same body.
+- `START+END` pair — the cost one task (or one stage) event adds to the kernel.
+- `mov.u32 %globaltimer_lo` — the timestamp read alone.
+- `st.b64` to the ring (relaxed), and `__threadfence_block()` marginal over
+  that store, so the fence's contribution to the stamp is isolated.
+
+Each is measured on every SM in turn (see microbench_common.cuh), one write
+thread per block, matching `PROFILER_INIT`'s `profiler_write_thread_predicate`.
+The globaltimer read and the block fence are on-SM, but the store's latency
+depends on where the ring lands, so a single-SM sample would not stand for
+all of them.
+
+### Results: NVIDIA H100 80GB HBM3, 132 SMs, driver 13020
+
+SM clock measured at runtime: 1.98 GHz. The shared-GPU guard reported one
+other process (a container PID-namespace false positive the README notes
+elsewhere), but the ALU sentinel spread was 1.0000 and the SM clock was
+unchanged, so the run is clean. Every row pools 132 SMs; p10–p90 within
+0.01 ns of the median except where noted.
+
+| primitive | median | p10 | p90 |
+|---|---|---|---|
+| `PROFILER_EVENT_START` (full) | 31.33 ns | 31.33 | 31.33 |
+| `PROFILER_EVENT_END` (full) | 29.56 ns | 29.56 | 29.56 |
+| `START+END` pair (one task event) | 58.48 ns | 58.48 | 58.48 |
+| `mov.u32 %globaltimer_lo` (read only) | 15.72 ns | 15.71 | 15.72 |
+| `st.b64` to profiler ring (relaxed) | 0.94 ns | 0.94 | 0.94 |
+| `__threadfence_block()` marginal | 11.27 ns | 11.27 | 11.27 |
+
+The full START is the sum of its parts: the `%globaltimer_lo` read (15.72 ns)
+plus the relaxed store (0.94 ns) plus `__threadfence_block()` (11.27 ns) plus
+the tag build and pointer advance (~3 ns), totalling ~31 ns. The pair
+(58.48 ns) is the cost one task — or, with stage profiling on, one stage —
+adds to the kernel wall time. The relaxed store (0.94 ns) matches
+`sync_primitives`' fire-and-forget store (0.99 ns); `__threadfence_block()`
+(11.27 ns) is an intra-CTA fence, an order of magnitude below the
+device-scope `__threadfence()` (~217 ns near in `sync_primitives`), which is
+why the profiler uses the block fence and not the device fence.
+
+A B200 run is still wanted: the absolute numbers will differ (SM clock,
+globaltimer increment period, store/fence latency), and the stage-profiler
+PRs target B200. Run `make run JSON=b200` on a B200 to populate the
+`b200_profiler_overhead.json` keys (`profiler_event_start_ns`, ...,
+`threadfence_block_marginal_ns`, each as `_med`, `_p10`, `_p90`, `_min`,
+`_max`).
+
+### What this says
+
+The stamp cost is the floor below which a stage event cannot resolve: the
+profiler timestamps with `%globaltimer_lo`, which on B200 advances only every
+32 ns (see the TMA section's clock note), so a stage shorter than that is not
+resolved by the trace regardless of how cheap the stamp is. The `START+END`
+pair number is what every task (and, with stage profiling on, every stage)
+adds to the kernel wall time; it is the cost the stage-profiler PRs must
+justify against the work they measure.
+
 ## Scope
 
-Synchronization primitives and TMA loads (issue #771). MMA issue rate is not
-covered here.
+Synchronization primitives, TMA loads and the profiler overhead (issue #771).
+MMA issue rate is not covered here; it needs `tcgen05` (Blackwell) and is
+deferred to a follow-up developed on a B200.
