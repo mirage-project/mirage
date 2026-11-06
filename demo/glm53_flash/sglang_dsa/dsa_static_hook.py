@@ -23,7 +23,8 @@ layer on the same inputs; printed: x_ffn, R' - R, h_post, h_res relRMS static vs
 formulas the static layer follows (the static layer's outputs are kept).
 Env: DSA_STATIC_LAYERS; DSA_STATIC_CHECK (1 / 0); DSA_STATIC_PDL (1 / 0); DSA_STATIC_TOKENS (8, 16, 32: the T of the layers);
 DSA_STATIC_FUSED_PLAN, DSA_STATIC_FUSED_PLAN16, DSA_STATIC_FUSED_PLAN32 (the decode layers' plan files by T: dsa_fused_demo
---search, e.g. dsa_fused_plan_long.json here, or rr, the default; the verify layers run round robin); DSA_STATIC_OUT (build
+--search, e.g. dsa_fused_plan_long.json here, or rr, the default); DSA_STATIC_VERIFY_PLAN, DSA_STATIC_VERIFY_PLAN16,
+DSA_STATIC_VERIFY_PLAN32 (the verify layers', dsa_fused_demo --verify --search, or rr); DSA_STATIC_OUT (build
 directory, default <checkout>/build/sgl_static_dsa); DSA_STATIC_BUILD_CACHE (the build cache, static_schedule.compile_static:
 every layer and rank has the same layer.cu, compiled once; default <checkout>/build/static_build_cache_dsa); DSA_STATIC_ROOT
 (the mirage checkout, default this one).
@@ -43,6 +44,9 @@ PDL = os.environ.get("DSA_STATIC_PDL", "1") != "0"
 FUSED_PLAN = {8: os.environ.get("DSA_STATIC_FUSED_PLAN", "rr"),      # the layers' plans by T (a plan file is of one T's
               16: os.environ.get("DSA_STATIC_FUSED_PLAN16", "rr"),   # graph: the grids differ)
               32: os.environ.get("DSA_STATIC_FUSED_PLAN32", "rr")}
+VERIFY_PLAN = {8: os.environ.get("DSA_STATIC_VERIFY_PLAN", "rr"),      # the verify layers' (another graph: kpool_update per
+               16: os.environ.get("DSA_STATIC_VERIFY_PLAN16", "rr"),   # token)
+               32: os.environ.get("DSA_STATIC_VERIFY_PLAN32", "rr")}
 TOKENS = sorted({int(x) for x in os.environ.get("DSA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8, 16, 32):
                                                                                                       # a step of T rows runs
                                                                                                       # the T layer
@@ -106,7 +110,8 @@ def _init_cuda_graphs(self, *args, **kwargs):
                     sts[tok] = st
                     if draft:   # MTP: the verify layer of tok / 8 requests' draft tokens (bs = tok / 8)
                         svs[tok] = StaticDSA(m.layer_id, self.server_args.model_path, rank, tp, kv, r2t, OUT, idx,
-                                             _fused_args(lay, group), pdl=PDL, verify=int(draft), tokens=tok,
+                                             _fused_args(lay, group), pdl=PDL, fused_plan=VERIFY_PLAN[tok],
+                                             verify=int(draft), tokens=tok,
                                              requests=tok // 8, weights=first.w)
                         _log(f"static DSA layer {m.layer_id}: the verify build of {tok} rows ({tok // 8} requests x {draft} "
                              f"draft tokens)")
