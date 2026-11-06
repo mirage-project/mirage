@@ -18,10 +18,11 @@ multicast exchange region), one kernel per GPU.
            RMSNorm.forward_native); every GPU's outputs equal; o_proj per GPU from the kernel's v; end to end: every GPU's
            DSA reference (dsa_mla.reference) on the kernel's own selection, then the boundary
   time     --reps launches, 512 MB read before each (L2 emptied): the span over the GPUs
-  --verify N  the layer of a speculative verify step (SGLang's DSA target-verify: one request's N draft tokens as rows t <
-           N at positions seq_lens[0] - 1 + t, sharing its page tables and request slot; the other rows idle, seq_lens 0):
-           dsa_kpool_update runs the request's tokens in order (the pools they close, their tail entries). The checks as
-           above on the N rows (the reference per token over the kernel's selection, the rows this step wrote included).
+  --verify N  the layer of a speculative verify step (SGLang's DSA target-verify: T / 8 requests of 8 rows, request q's N
+           draft tokens as its rows t < N at positions seq_lens[q] - 1 + t, sharing its page tables and request slot; the
+           other rows idle, seq_lens 0): dsa_kpool_update runs a request's tokens in order (the pools they close, their tail
+           entries). The checks as above on the live rows (the reference per token over the kernel's selection, the rows
+           this step wrote included).
 
   plans    the round-robin plan of build_graph's grids (OUT/plan.json), or --plan FILE (one GPU's lists, repeated for the
            GPUs); --search COSTS: the plan search.search_plan finds from it with the prefetch cost model
@@ -175,25 +176,31 @@ def layer_inputs(args, cfg: dict):
     hc_small = torch.zeros(32, dtype=torch.float32)
     hc_small[:HC * (HC + 2)], hc_small[HC * (HC + 2):HC * (HC + 2) + 3] = m["hc_ffn_base"], m["hc_ffn_scale"]
     fused = {"rms_eps": eps, "hc_eps": hc_eps, "norm_eps": eps, "iters": iters, "verify": bool(getattr(args, "verify", 0)),
-             "requests": T // 8}   # --verify: T / 8 requests of 8 rows (the demo's request in rows 0 .. N - 1, the rest idle)
+             "requests": T // 8}   # --verify: T / 8 requests of 8 rows (live_rows: N tokens each, the rest idle)
     return {"m": m, "R": R, "x_attn": x_attn, "post_a": post_a, "comb_a": comb_a, "hc_small": hc_small, "fused": fused}
+
+
+def live_rows(args) -> list:
+    """The rows with a token: all of them, or --verify's N rows of each of the T / 8 requests (8 rows each, as run_verify)."""
+    NV = getattr(args, "verify", 0)
+    return [q * 8 + i for q in range(T // 8) for i in range(NV)] if NV else list(range(T))
 
 
 def rank_tensors(args, inp: dict, r: int, tp: int, dev):
     """GPU r's layer: its TP shard's weights, the replicated indexer and history (the same seeds on every GPU), the graph
     tensors (the DSA layer's, then the boundary's). Returns (w, st, the history to restore before each launch, the tensors)."""
     m, L = inp["m"], args.seq_lens
-    NV = getattr(args, "verify", 0)
-    if NV:   # one request: its N draft tokens at positions seq_lens[0] - 1 + t, the other rows idle
-        L = [args.seq_lens[0] + t for t in range(NV)] + [0] * (T - NV)
+    NV, RQ = getattr(args, "verify", 0), T // 8
+    if NV:   # each request q: its N draft tokens at positions seq_lens[q] - 1 + t, the other rows idle
+        L = [args.seq_lens[q] + t if t < NV else 0 for q in range(RQ) for t in range(8)]
     w = mla.load_layer(args.model_dir, args.layer, tp, r, dev)
     wi = dd.load_indexer(args.model_dir, args.layer, dev)
     st = mla.make_state(w, L, args.maxctx, args.page, dd.SLOTS, args.seed, dev)
     st.update(dd.make_indexer_state(L, args.maxctx, max(16, len(L)), 4, args.seed + 1, dev))   # request slots >= T
-    if NV:   # every row: the request's page tables and slot
-        for k in ("block_table", "pooled_bt"):
-            st[k][1:] = st[k][0]
-        st["req_slots"][1:] = st["req_slots"][0]
+    if NV:   # every row of a request: its page tables and slot
+        for k in ("block_table", "pooled_bt", "req_slots"):
+            rows = st[k].view(RQ, 8, -1)
+            rows[:] = rows[:, :1].clone()
     st["x"] = inp["x_attn"].to(dev)
     st["indices"] = st.pop("pool_idx")
     hist = {k: st[k].clone() for k in ("cache", "pcache", "tail_k", "tail_score")}
@@ -217,9 +224,9 @@ def rank_refs(args, cfg: dict, w: dict, st: dict, hist: dict, pool_idx, o, v):
     """GPU r's part of the checks, on its device: o_proj from the kernel's v (relRMS against the kernel's o) and its DSA
     reference on the kernel's selection (the o_proj partial sum, fp32, CPU)."""
     dev = st["x"].device
-    L = st["seq_lens"].tolist()   # (--verify: the request's positions, the idle rows' 0)
-    NV = getattr(args, "verify", 0) or T
-    o_node = relrms(o[:NV], mla.o_proj(v.to(dev), w).cpu()[:NV])
+    L = st["seq_lens"].tolist()   # (--verify: the requests' positions, the idle rows' 0)
+    live = live_rows(args)
+    o_node = relrms(o[live], mla.o_proj(v.to(dev), w).cpu()[live])
     sel = dict(st, indices=dd.expand(pool_idx.to(dev), L))
     o_e2e = mla.reference(w, sel, hist["cache"].clone(), L, args.page, cfg["rms_norm_eps"])["o"].cpu()
     return o_node, o_e2e
@@ -277,12 +284,14 @@ def node_checks(args, cfg: dict, w: dict, st: dict, hist: dict, t: dict, r: int)
 def check_boundary(args, cfg: dict, inp: dict, outs, o, o_node, o_e2e) -> bool:
     """The checks of the module docstring. outs[r] = GPU r's {R_out, x_ffn, h_post_out, h_res_out, pool_idx} (CPU); o[r]: its
     o_proj partial sum (fp32, CPU); o_node[r], o_e2e[r]: rank_refs. Prints them; returns whether they pass. --verify: the
-    end-to-end comparison on the request's rows (the idle rows' o is not defined)."""
+    end-to-end comparison on the requests' rows (the idle rows' o is not defined)."""
     eps, hc_eps, iters, tp = cfg["rms_norm_eps"], cfg["hc_eps"], args.iters or cfg["hc_sinkhorn_iters"], len(o)
-    NV = getattr(args, "verify", 0) or T
-    if NV < T:   # the idle rows: the kernel's own o (the boundary check), 0 for the reference's end to end
-        o_e2e = [torch.cat([v[:NV], torch.zeros(T - NV, H, dtype=v.dtype)]) for v in o_e2e]
-        o_cmp = [torch.cat([v[:NV], torch.zeros(T - NV, H, dtype=v.dtype)]) for v in o]
+    live = live_rows(args)
+    if len(live) < T:   # the idle rows: the kernel's own o (the boundary check), 0 for the reference's end to end
+        idle = torch.ones(T, 1, dtype=torch.bool)
+        idle[live] = False
+        o_e2e = [v.masked_fill(idle, 0) for v in o_e2e]
+        o_cmp = [v.masked_fill(idle, 0) for v in o]
     else:
         o_cmp = o
     m, R, post_a, comb_a = inp["m"], inp["R"], inp["post_a"], inp["comb_a"]
@@ -301,9 +310,9 @@ def check_boundary(args, cfg: dict, inp: dict, outs, o, o_node, o_e2e) -> bool:
           f"every GPU's outputs equal: {same_gpus}")
     R_e2e = hc_post_ref(tp_sum(o_e2e), R, post_a, comb_a)
     x_e2e, post_e2e, _ = ffn(R_e2e)
-    ee = {"o": max(relrms(o_cmp[r], o_e2e[r]) for r in range(tp)), "R'": relrms(R_k[:NV], R_e2e[:NV]),
-          "R' - R": relrms(R_k[:NV].float() - R[:NV].float(), R_e2e[:NV].float() - R[:NV].float()),
-          "x_ffn": relrms(outs[0]["x_ffn"][:NV], x_e2e[:NV]), "h_post": relrms(outs[0]["h_post_out"][:NV], post_e2e[:NV])}
+    ee = {"o": max(relrms(o_cmp[r], o_e2e[r]) for r in range(tp)), "R'": relrms(R_k[live], R_e2e[live]),
+          "R' - R": relrms(R_k[live].float() - R[live].float(), R_e2e[live].float() - R[live].float()),
+          "x_ffn": relrms(outs[0]["x_ffn"][live], x_e2e[live]), "h_post": relrms(outs[0]["h_post_out"][live], post_e2e[live])}
     print("  o_proj per GPU (from the kernel's v): relRMS " + " ".join(f"{x:.2e}" for x in o_node))
     print("  end to end (each GPU's DSA reference on the kernel's selection, then the boundary): " +
           " | ".join(f"{k} {x:.2e}" for k, x in ee.items()))
@@ -327,7 +336,7 @@ def add_args(ap):
                     "a timing experiment)")
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--nvcc-flag", action="append", default=[])
-    ap.add_argument("--verify", type=int, default=0, help="the verify layer: one request's N draft tokens (1 .. 8) at "
+    ap.add_argument("--verify", type=int, default=0, help="the verify layer: each request's N draft tokens (1 .. 8) at "
                     "positions --seq-lens[0] - 1 + t")
     ap.add_argument("--plan", help="a plan file (compiler.write_plan_file) instead of the round-robin plan")
     ap.add_argument("--search", nargs="+", metavar="COSTS", help="cost record files: the plan search.search_plan finds from "
@@ -403,7 +412,7 @@ def main():
     for r in range(n):
         torch.cuda.synchronize(r)
     print(f"layer {args.layer}, {n} GPUs with TP{tp} shards 0..{n - 1} ({ws[0]['w_uk'].shape[0]} heads per GPU), page "
-          f"{args.page}, seq_lens {sts[0]['seq_lens'].tolist()}" + (f" (verify: {args.verify} draft tokens of one request)"
+          f"{args.page}, seq_lens {sts[0]['seq_lens'].tolist()}" + (f" (verify: {args.verify} draft tokens of each request)"
                                                                       if args.verify else ""))
     keys = ("R_out", "x_ffn", "h_post_out", "h_res_out", "pool_idx")
     outs = [{k: ts[r][k].cpu() for k in keys} for r in range(n)]

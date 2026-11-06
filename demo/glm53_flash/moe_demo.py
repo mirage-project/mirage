@@ -437,7 +437,8 @@ def prof_report(prof: torch.Tensor, bar: int, t: dict):
 def run_args(args) -> list:
     """The arguments that decide the graph and the state, for this script in another process (--collect)."""
     return (["--model-dir", args.model_dir, "--layer", str(args.layer), "--tp", str(args.tp), "--rank", str(args.rank), "--seed",
-             str(args.seed), "--x-scale", str(args.x_scale), "--reps", str(args.reps), "--end", args.end]
+             str(args.seed), "--x-scale", str(args.x_scale), "--reps", str(args.reps), "--end", args.end, "--valid-rows",
+             str(args.valid_rows)]
             + [f"--nvcc-flag={f}" for f in args.nvcc_flag])
 
 

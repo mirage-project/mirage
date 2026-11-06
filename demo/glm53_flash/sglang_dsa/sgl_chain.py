@@ -92,6 +92,14 @@ MOE_PLAN = {(t, end): os.path.join(os.path.dirname(HERE), "sglang_moe", f"moe_pl
             for t in (8, 16, 32) for end in ("mhc", "mhc_pre")}
 
 
+def _verify_plan(kind, t, short, end):
+    """The verify layer's plan file: its graph (T / 8 requests x 6 draft tokens) has its own plans."""
+    key = "" if t == 8 else t
+    return {"DSA": os.path.join(HERE, f"dsa_verify_plan{key}_{'short' if short else 'long'}.json"),
+            "KDA": os.path.join(os.path.dirname(HERE), "sglang_kda", f"kda_verify_plan{key}.json"),
+            "MOE": os.path.join(os.path.dirname(HERE), "sglang_moe", f"moe_verify_plan{key}_{end}.json")}[kind]
+
+
 def _best_plans(name, env, args):
     env = dict(env)
     # the short-context DSA plans (searched at contexts 20-275): sgl_spec_bench.py at --prompt-tokens <= 1000
@@ -113,6 +121,11 @@ def _best_plans(name, env, args):
         if moe and env.get("MOE_STATIC_LAYERS") and has("MOE", t) and f"MOE_STATIC_PLAN{key}" not in env and \
                 os.path.exists(moe):
             env[f"MOE_STATIC_PLAN{key}"] = moe
+        for kind in ("DSA", "KDA", "MOE"):
+            file = _verify_plan(kind, t, short, env.get("MOE_STATIC_END"))
+            if env.get(f"{kind}_STATIC_LAYERS") and has(kind, t) and f"{kind}_STATIC_VERIFY_PLAN{key}" not in env and \
+                    os.path.exists(file):
+                env[f"{kind}_STATIC_VERIFY_PLAN{key}"] = file
     return name, env, args
 
 
