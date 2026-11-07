@@ -334,6 +334,9 @@ enum TaskType {
   // DeepSeek-V4.1 compressed KV write: the latent's RoPE, fp4 with E4M3
   // scales into the compressed KV cache (tasks/ckv_post.cuh)
   TASK_CKV_POST_SM100 = 542,
+  // DeepSeek-V4.1 routed experts: MXFP4 weights, SwiGLU with clamps, W2
+  // through the weight ring (tasks/swiglu_moe_experts.cuh)
+  TASK_SWIGLU_MOE_EXPERTS_SM100 = 543,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 

@@ -262,11 +262,91 @@ __device__ __forceinline__ void
   }
 }
 
+// act_quant of h = SwiGLU(gate, up) of token t (model.py Expert.forward with
+// weights None: the shared expert), from a gemm_fp8_tile node's P K parts
+// [P][T][2 I] (gate in columns [0, I), up in [I, 2 I)): gate and up added in
+// part order and rounded to bf16 (the GEMM's bf16 outputs), up clamped to
+// [-L, L] and gate to <= L (L: LIMIT_BITS as fp32), h = bf16(silu(gate) * up)
+// (silu as torch: g / (1 + expf(-g))), then act_quant_task's formula into
+// act_quant's layout of width K: columns [I, K) zero (the next GEMM's K
+// padding). Thread i columns 8 i .. 8 i + 7 of each pass of 2048 (as
+// act_quant_parts_task); warm: its dry pass
+template <int K, int I, int P, int LIMIT_BITS>
+__device__ __forceinline__ void act_quant_swiglu_task(float const *part,
+                                                      unsigned char *out,
+                                                      uint32_t *done_cnt,
+                                                      int t,
+                                                      bool warm
+                                                          STAGE_STAMP_PARAM) {
+  // timing build: stamp [0] the dry pass done, [1] thread 0's parts landed
+  static_assert(K % 256 == 0 && I % 32 == 0 && I <= K,
+                "act_quant (SwiGLU): whole warps of 8 columns per thread, "
+                "whole 32-column groups of h");
+  float const lim = __int_as_float(LIMIT_BITS);
+  int const l = threadIdx.x & 31;
+#pragma unroll 1
+  for (int pass = warm ? 1 : 0; pass < 2; pass++) {
+    bool const real = pass == 1;
+    if (real && threadIdx.x == 0) {
+      STAGE_STAMP_AT(0)
+    }
+    for (int c = 8 * threadIdx.x; c < K; c += 8 * 256) {
+      float y[8];
+      if (c < I) { // a group is all h or all padding (I % 32 == 0)
+        float gt[8], up[8];
+        add_parts8<2 * I, P>(part, t, c, gt, !real);
+        add_parts8<2 * I, P>(part, t, I + c, up, !real);
+        if (real && threadIdx.x == 0) {
+          STAGE_STAMP_AT(1)
+        }
+#pragma unroll
+        for (int k = 0; k < 8; k++) {
+          float const g = fminf(bf16r(gt[k]), lim);
+          float const u = fminf(fmaxf(bf16r(up[k]), -lim), lim);
+          y[k] = bf16r(g / (1.0f + expf(-g)) * u);
+        }
+      } else {
+#pragma unroll
+        for (int k = 0; k < 8; k++) {
+          y[k] = 0.f;
+        }
+      }
+      float amax = 0.f;
+#pragma unroll
+      for (int k = 0; k < 8; k++) {
+        amax = fmaxf(amax, fabsf(y[k]));
+      }
+      for (int d = 1; d < 4; d <<= 1) { // over the 4 threads of the group
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, d));
+      }
+      int const ex = xq_exponent(amax);
+      uint2 const q = make_uint2(xq_pack4(y, ex), xq_pack4(y + 4, ex));
+      uint32_t const s4 = xq_scale_word<16>(ex); // 16 threads: a 128-col block
+      if (real) {
+        *reinterpret_cast<uint2 *>(out + (size_t)t * K + c) = q;
+        if ((l & 15) < 4) {
+          xq_scale_line(out, K, c / 128, t, l & 15, s4);
+        }
+      }
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    cnt_add(done_cnt, 1); // release: the CTA's stores before (the barrier)
+  }
+  for (int c = 8 * threadIdx.x; c < I; c += 8 * 256) { // after the count
+    rearm_parts8<2 * I, P>(part, t, c);
+    rearm_parts8<2 * I, P>(part, t, I + c);
+  }
+}
+
 // act_quant task (t, y) of grid (T, C, 1): token t, columns [y K / C,
 // (y + 1) K / C); x a graph input (BUF_SLOTS {x, a graph tensor [T][K] bf16})
 // or a gemm_fp8_tile's output in slots (X::y K parts, X::v[2] = K; BUF_SLOTS
 // {}); warm: below (the dry pass; true for a
-// graph input's node, which has none). PARAMS {K}
+// graph input's node, which has none). PARAMS {K}, or {K, I, L as fp32 bits}:
+// h = SwiGLU of a gemm_fp8_tile's gate | up K parts (X::v[2] = 2 I; grid (T,
+// 1, 1); act_quant_swiglu_task)
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -279,7 +359,8 @@ __device__ __forceinline__ void run_act_quant(Maps const &,
                                               StaticTask const &tk,
                                               bool warm = true) {
   constexpr int K = PARAMS::v[0];
-  static_assert(K % 512 == 0,
+  constexpr int I = param_or0<PARAMS, 1>(); // SwiGLU: gate's width; 0: none
+  static_assert(I > 0 || K % 512 == 0,
                 "act_quant: whole warps of 128-column blocks "
                 "(16 columns per thread, 8 threads per block)");
   static_assert(SELF::x == T && SELF::z == 1 && K % SELF::y == 0,
@@ -288,7 +369,19 @@ __device__ __forceinline__ void run_act_quant(Maps const &,
                     SELF::counter >= 0,
                 "act_quant: its output in this GPU's memory, a counter of its "
                 "tasks");
-  if constexpr (X::buf < 0) { // x: a graph input
+  if constexpr (I > 0) { // h = SwiGLU of the gate | up K parts
+    static_assert(X::buf >= 0 && X::v[0] == COMBINE_SLOTS &&
+                      X::v[2] == 2 * I && X::y >= 1 && X::y <= 10 &&
+                      SELF::y == 1,
+                  "act_quant (SwiGLU): a GEMM's 2 I columns in at most 10 K "
+                  "parts in slots, one task per token");
+    act_quant_swiglu_task<K, I, X::y, param_at<PARAMS, 2>()>(
+        buf_at<float const>(g, X::buf),
+        buf_at<unsigned char>(g, SELF::buf),
+        g.cnt + SELF::counter,
+        tk.x,
+        warm STAGE_STAMP_ARG(L.stage_stamps));
+  } else if constexpr (X::buf < 0) { // x: a graph input
     act_quant_task<K, K / SELF::y>(
         buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 0>()),
         buf_at<unsigned char>(g, SELF::buf),

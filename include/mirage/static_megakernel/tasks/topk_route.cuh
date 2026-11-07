@@ -20,6 +20,12 @@
 // t >= ROWS is not routed: its K DUP routed pairs are the shared bank experts
 // (expert 0 without shared experts) at weight 0, so it streams no expert of its
 // own (its logits are not read, not re-armed).
+// SCORE selects the gate: 0 the sigmoid one above (K3, GLM); 1 DeepSeek-V4's
+// Gate.forward (inference/model.py), as torch computes it: scores =
+// sqrt(softplus(logit)) (softplus's threshold 20; IEEE expf, log1pf, sqrtf),
+// weights = scores / (sum + 1e-20) with the K = 6 scores summed in torch's
+// order, and the K pairs sorted by expert id (MoE.forward adds the experts'
+// outputs in that order).
 #pragma once
 #include "../core.cuh"
 
@@ -35,7 +41,7 @@ constexpr int topk_scratch_bytes() {
 // N: the router's rows (the logits' row stride, >= NE: rows past NE are
 // padding, not read); SCALE_BITS: the fp32 bits of the routed scaling factor
 // (0: none); DUP: sub-experts per expert; SHARED: the shared bank experts
-// (above)
+// (above); SCORE: the gate (above)
 template <int NSPLIT,
           int NE,
           int N,
@@ -43,7 +49,8 @@ template <int NSPLIT,
           int SCALE_BITS = 0,
           int DUP = 1,
           int SHARED = 0,
-          int ROWS = T>
+          int ROWS = T,
+          int SCORE = 0>
 __device__ __forceinline__ void topk_route_task(float const *bias,
                                                 float *lpart,
                                                 unsigned long long *pairs,
@@ -75,6 +82,9 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
   static_assert(NE % 32 == 0 && PER_WARP <= 128 && PER_WARP >= K &&
                     NCAND <= 256,
                 "topk_route: 8 warps of up to 128 experts, top K of each");
+  static_assert(SCORE == 0 || (SCORE == 1 && K == 6),
+                "topk_route: gate 0 (sigmoid) or 1 (DeepSeek-V4: torch's sum "
+                "order is fitted for K = 6)");
   // scratch: sc_s [NE] sigmoid scores, [NE] not used, key_s [NE] + cand_s
   // [NCAND] 64-bit keys, sel_s [K], wsel_s [K]
   float *sc_s = reinterpret_cast<float *>(sm);
@@ -128,7 +138,12 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
 #pragma unroll
       for (int k = 0; k < 4; k++) {
         int const e = threadIdx.x * 4 + k;
-        float const sg = 1.0f / (1.0f + __expf(-lg4[k]));
+        float sg;
+        if constexpr (SCORE == 0) {
+          sg = 1.0f / (1.0f + __expf(-lg4[k]));
+        } else { // torch: softplus (x > 20 ? x : log1p(exp(x))), then sqrt
+          sg = sqrtf(lg4[k] > 20.0f ? lg4[k] : log1pf(expf(lg4[k])));
+        }
         sc_s[e] = sg;
         uint32_t u = __float_as_uint(sg + bs4[k]);
         u = (u & 0x80000000u)
@@ -196,17 +211,32 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
     __syncthreads();
     if (threadIdx.x < K) {
       float sum = 0.f;
-      for (int k = 0; k < K; k++) {
-        sum += wsel_s[k];
+      if constexpr (SCORE == 0) {
+        for (int k = 0; k < K; k++) {
+          sum += wsel_s[k];
+        }
+      } else { // torch's sum of a [T, 6] row (fitted on the golden cases)
+        sum = ((wsel_s[0] + wsel_s[4]) + wsel_s[2]) +
+              ((wsel_s[1] + wsel_s[5]) + wsel_s[3]);
       }
       if (real) {
-        float w = wsel_s[threadIdx.x] / sum;
+        float w;
+        unsigned at = threadIdx.x; // the pair's place in the token's K
+        if constexpr (SCORE == 0) {
+          w = wsel_s[threadIdx.x] / sum;
+        } else {
+          w = wsel_s[threadIdx.x] / (sum + 1e-20f);
+          at = 0; // sorted by expert id (the ids are distinct)
+          for (int k = 0; k < K; k++) {
+            at += sel_s[k] < sel_s[threadIdx.x];
+          }
+        }
         if constexpr (SCALE_BITS != 0) {
           w *= __int_as_float(SCALE_BITS);
         }
 #pragma unroll
         for (int j = 0; j < DUP; j++) {
-          pairs[t * (K * DUP + SHARED) + threadIdx.x * DUP + j] =
+          pairs[t * (K * DUP + SHARED) + at * DUP + j] =
               ((unsigned long long)(unsigned)(sel_s[threadIdx.x] * DUP + j)
                << 32) |
               (unsigned long long)__float_as_uint(w);
@@ -267,7 +297,7 @@ __host__ __device__ constexpr int topk_pairs_per_token() {
 // parts in slots; its N rows: NE experts, then padding); PARAMS {NE (experts),
 // K (experts per token)[, the routed scaling factor as fp32 bits (0: none)[,
 // DUP (sub-experts per expert)[, SHARED (shared bank experts)[, ROWS (live
-// rows, the header comment; T)]]]]}; BUF_SLOTS {the score correction bias (a
+// rows, the header comment; T)[, the gate (SCORE; 0)]]]]]}; BUF_SLOTS {the score correction bias (a
 // graph tensor, [NE] fp32)}; warm: above
 template <class SELF,
           class PARAMS,
@@ -292,6 +322,7 @@ __device__ __forceinline__ void run_topk_route(Maps const &,
                 "topk_route: a thread for each routed and shared pair");
   constexpr int ROWS =
       param_or<PARAMS, 5, 0>() > 0 ? param_or<PARAMS, 5, 0>() : T;
+  constexpr int SCORE = param_or0<PARAMS, 6>();
   topk_route_task<LOGITS::y,
                   NE,
                   N,
@@ -299,7 +330,8 @@ __device__ __forceinline__ void run_topk_route(Maps const &,
                   SCALE_BITS,
                   topk_dup<PARAMS>(),
                   topk_shared<PARAMS>(),
-                  ROWS>(buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()),
+                  ROWS,
+                  SCORE>(buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()),
                         buf_at<float>(g, LOGITS::buf),
                         buf_at<unsigned long long>(g, SELF::buf),
                         tk.x,

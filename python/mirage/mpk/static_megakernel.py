@@ -466,12 +466,16 @@ class StaticMegakernel(PersistentKernel):
         valid_rows: int = None,    # the live rows (default all T): a serving framework's speculative verify step of fewer rows
                                    # than T; a row past them is not routed (its routed pairs: the shared experts, or expert 0,
                                    # at weight 0: no expert of its own is streamed)
+        score_func: str = "sigmoid",   # "sigmoid" (K3, GLM) or "sqrtsoftplus" (DeepSeek-V4's gate, below)
         block_dim: tuple = (256, 1, 1),
     ):
         """Task t = token t: adds the router's partial sums of row t, top K ((output.dim(1) - shared_experts) / sub_experts)
         of the E experts (bias.dim(0)). params = [E, K], [E, K, the routed scaling factor as fp32 bits], with sub-experts [E, K,
         the scaling factor's bits (0: none), sub_experts], with shared experts [E, K, bits, sub_experts, shared_experts],
-        with valid_rows < T [E, K, bits, sub_experts, shared_experts, valid_rows]."""
+        with valid_rows < T [E, K, bits, sub_experts, shared_experts, valid_rows]; "sqrtsoftplus" adds a 7th param, 1 (0s in
+        the unused places). "sqrtsoftplus" is DeepSeek-V4's Gate.forward as torch computes it (tasks/topk_route.cuh SCORE 1):
+        scores sqrt(softplus(logit)), weights = scores / (sum + 1e-20) with the 6 scores summed in torch's order, and the pairs
+        of a token sorted by expert id (the order MoE.forward adds the experts in); K must be 6."""
         T, E, DUP, SH = self._tokens(input.dim(0)), bias.dim(0), sub_experts, shared_experts
         self._dtypes("topk_route_layer", input=(input, float32), bias=(bias, float32), output=(output, int64))
         assert input.num_dims == 2 and input.dim(1) >= E and input.dim(1) % 4 == 0 and bias.num_dims == 1
@@ -489,6 +493,12 @@ class StaticMegakernel(PersistentKernel):
             if not 0 < valid_rows < T:
                 raise ValueError(f"topk_route_layer: valid_rows {valid_rows} must be in 1 .. {T}")
             params = params + [0] * (5 - len(params)) + [valid_rows]
+        if score_func == "sqrtsoftplus":
+            if K != 6:
+                raise ValueError(f"topk_route_layer: sqrtsoftplus takes K = 6 (torch's sum order is fitted for 6), not {K}")
+            params = params + [0] * (6 - len(params)) + [1]
+        elif score_func != "sigmoid":
+            raise ValueError(f"topk_route_layer: score_func 'sigmoid' or 'sqrtsoftplus', not {score_func!r}")
         self._add_node("topk_route", (output.dim(0), 1, 1), block_dim, [input, bias, output],
                        [(0, -1, -1), (-1, -1, -1), (0, -1, -1)], params,
                        out_buffer=lambda n: (T * (K * DUP + SH) * 8, 0xFF, False),   # the pairs, u64, polled by every moe_experts task
@@ -545,15 +555,33 @@ class StaticMegakernel(PersistentKernel):
         input: DTensor,     # x [T, K]: bf16, a graph input; or fp32, a gemm_fp8_tile node's output in slots (its K parts)
         output: DTensor,    # x_q [T, K] e4m3 bytes (uint8)
         block_dim: tuple = (256, 1, 1),
+        swiglu_limit: float = None,   # x = SwiGLU of a gemm_fp8_tile's gate | up K parts, clamped at this limit (below)
     ):
         """Task (t, y) = token t, columns [y K / C, (y + 1) K / C) (default C = 1 for x a graph input, K / 2048 for a GEMM's K
         parts): DeepSeek-V4.1's act_quant of row t (per 32 columns a power-of-2 scale, e8m0), into the node's buffer
         (x_q, then its scale chunks: per 128 columns 4 scale bytes per row, the layout gemm_fp8_tile's MMA reads; every byte
         written each launch); the node's counter counts the tasks. x a graph input (read by pointer), or a GEMM's K parts
-        (wo_a's output before wo_b), added in part order (polled) and rounded to bf16 first. params = [K]."""
+        (wo_a's output before wo_b), added in part order (polled) and rounded to bf16 first. params = [K].
+        swiglu_limit L: input = a gemm_fp8_tile's K parts [T, 2 I] of gate (columns [0, I)) and up ([I, 2 I)); x = bf16(silu(
+        min(gate, L)) * clamp(up, -L, L)) with gate and up rounded to bf16 first (model.py Expert.forward, the shared expert);
+        output [T, K], K >= I a multiple of 256 (the next GEMM's K), columns [I, K) zero. One task per token. params = [K, I, L's
+        fp32 bits]."""
         T, K = self._tokens(input.dim(0)), input.dim(1)
         from .compiler import graph_nodes, producer_of
         p = producer_of(input, graph_nodes(self))
+        if swiglu_limit is not None:   # tasks/act_quant.cuh act_quant_swiglu_task
+            I, KO = K // 2, output.dim(1)
+            if p is None or p.name != "gemm_fp8_tile" or p.params[0] != COMBINE["slots"]:
+                raise ValueError("act_quant_layer: with swiglu_limit, x must be a gemm_fp8_tile node's output in slots")
+            self._dtypes("act_quant_layer", input=(input, float32), output=(output, uint8))
+            assert input.num_dims == 2 and output.num_dims == 2 and output.dim(0) == T and K == 2 * I
+            assert I % 32 == 0 and KO % 256 == 0 and I <= KO, "whole 32-column groups of h; K: whole warps of 8 columns"
+            assert math.isfinite(swiglu_limit) and swiglu_limit > 0
+            at_most_parts(p, 10)   # tasks/act_quant.cuh: at most 10 K parts
+            self._add_node("act_quant", (T, 1, 1), block_dim, [input, output], [(0, -1, -1), (0, -1, -1)],
+                           [KO, I, float_bits(swiglu_limit)], out_buffer=lambda n: (zq_bytes(T, KO), -1, False), counters=1,
+                           cost_inputs=[0], dry=True)
+            return
         if p is None:       # tasks/act_quant.cuh reads x by pointer and waits for no node
             self._dtypes("act_quant_layer", input=(input, bfloat16), output=(output, uint8))
             buf_slots = [self._tensor_slot(input)]
@@ -823,6 +851,7 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,    # y [T, N] bf16: the layer's output (a graph tensor)
         sent: DTensor = None,     # num_gpus > 1: [num_gpus x T, N] bf16, the exchange buffer the GPUs' sums go through
         block_dim: tuple = (256, 1, 1),
+        routed: DTensor = None,   # DeepSeek-V4.1's MoE: an expert node's routed rows [T x RK, N] fp32, added first
     ):
         """Task x: columns [128 x, 128 x + 128) (default; the compiler may give a task 1..8 such blocks): DeepSeek-V4.1's
         attention output (model.py L790, x = wo_b(o)): wo_b's K parts added in part order (polled) -> bf16 -> y, written by
@@ -830,7 +859,12 @@ class StaticMegakernel(PersistentKernel):
         num_gpus > 1 (attention TP, each GPU's y a partial sum): the all-reduce is in the task. It first sends this GPU's sums of
         its columns (bf16) to every GPU, into the node's buffer in the exchange region, then adds the GPUs' sums in GPU order
         (fp32) -> bf16 -> y: the official RowParallelLinear's rounding points (fp8_gemm's bf16 output, the parts added in fp32).
-        Every GPU must run the same plan."""
+        The node's outputs are then that buffer's tensor and y (still written by pointer): a node that reads y waits for the
+        all-reduce. Every GPU must run the same plan.
+        routed (the MoE: model.py MoE.forward): the routed rows of an expert node (moe_experts, swiglu_moe_experts: its buffer
+        written by plain stores, its counter counting its tasks), row t RK + k the token's k-th expert in ascending id. A task
+        waits for all the expert node's tasks, then adds a token's RK rows in order, then the input's K parts (the shared
+        expert's). params = [N, RK]."""
         from .compiler import graph_nodes, producer_of
         p = producer_of(input, graph_nodes(self))
         if p is None or p.name != "gemm_fp8_tile" or p.params[0] != COMBINE["slots"]:
@@ -840,6 +874,14 @@ class StaticMegakernel(PersistentKernel):
         T, N, GPUS = self._tokens(input.dim(0)), input.dim(1), self.num_gpus
         self._dtypes("sum_store_layer", input=(input, float32), output=(output, bfloat16))
         assert input.num_dims == 2 and output.num_dims == 2 and (output.dim(0), output.dim(1)) == (T, N) and N % 128 == 0
+        rk = 0
+        if routed is not None:
+            q = producer_of(routed, graph_nodes(self))
+            if q is None or q.name not in ("moe_experts", "swiglu_moe_experts"):
+                raise ValueError("sum_store_layer: routed must be an expert node's output (moe_experts, swiglu_moe_experts)")
+            self._dtypes("sum_store_layer", routed=(routed, float32))
+            assert routed.num_dims == 2 and routed.dim(1) == N and routed.dim(0) % T == 0
+            rk = routed.dim(0) // T
         tp = {}
         if GPUS > 1:
             if sent is None:
@@ -847,8 +889,10 @@ class StaticMegakernel(PersistentKernel):
             self._dtypes("sum_store_layer", sent=(sent, bfloat16))
             assert sent.num_dims == 2 and (sent.dim(0), sent.dim(1)) == (GPUS * T, N)
             tp = dict(out_buffer=lambda n: (GPUS * T * N * 2, 0xFF, True), exchange=True)   # re-armed by its reader (the task)
-        self._add_node("sum_store", (N // 128, 1, 1), block_dim, [input, sent if GPUS > 1 else output],
-                       [(1, -1, -1), (1, -1, -1)], [N],
+        outputs = [sent, output] if GPUS > 1 else [output]   # y an output either way: its readers wait for the tasks
+        tensors = [input] + ([routed] if rk else []) + outputs
+        self._add_node("sum_store", (N // 128, 1, 1), block_dim, tensors,
+                       [(1, -1, -1)] * len(tensors), [N] + ([rk] if rk else []),
                        changeable_grid_dims={0: (128, 1, 8)}, counters=1, buf_slots=[self._tensor_slot(output)],
                        cost_inputs=[0],   # adds wo_b's K parts
                        dry=True,          # its first task on an SM runs once dry while wo_b's parts are on their way
@@ -1234,6 +1278,70 @@ class StaticMegakernel(PersistentKernel):
                        [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)], one_task_per_sm=True,
                        out_buffer=lambda n: (T * K * L * 4, -1, False),
                        counters=32 * 2 + NSLOT, buf_slots=bufs, map_slots=maps)
+
+    def swiglu_moe_experts_layer(
+        self,
+        x_q: DTensor, pairs: DTensor,        # x_q uint8 (act_quant's output of x), the routing pairs int64 (topk_route's)
+        w13: DTensor, w13_scales: DTensor,   # MXFP4 weights and their scales, uint8, in pieces (below)
+        w2: DTensor, w2_scales: DTensor,
+        output: DTensor,    # R [T x K, L] fp32: this GPU's routed rows, one per (token, routed expert k)
+        swiglu_limit: float,   # the SwiGLU clamp (model.py Expert: up to [-L, L], gate to <= L)
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Declare DeepSeek-V4.1's routed experts (tasks/swiglu_moe_experts.cuh): moe_experts' queue, table and roles, with
+        h = bf16(silu(gate) up) after gate and up are rounded to bf16 and clamped, act_quant's formula for h_q, W2 through the
+        weight ring, and R's row = the routing weight x W2's result (SGLang's and vLLM's order; the official model.py applies the
+        weight to h before W2). One task per SM.
+        Sizes: E experts and K per token (pairs; topk_route's DeepSeek-V4 gate, which sorts a token's pairs by expert id: R's row
+        (t, k) is the token's k-th expert in ascending id), L = x_q's width, I = this GPU's expert intermediate (a multiple of
+        64), IRP = I padded to whole 128 tiles (W2's K; h_q's columns [I, IRP) stay 0: zeroed scratch no task writes).
+        Weights (uint8), 128 x 128 MXFP4 pieces (8 KB: [128 rows][64 B]) with a 512-B scale chunk each, in piece order:
+          w13 [E, 2 I, L / 2]: per expert I / 64 items of 64 gate rows then the same 64 up rows, each in L / 128 K pieces;
+          w13_scales [E, 2 I, L / 32] the chunks in the same order;
+          w2 [E, L, IRP / 2]: per expert L / 128 output tiles, each in IRP / 128 K pieces (columns [I, IRP) zero);
+          w2_scales [E, L, IRP / 32].
+        params = [I, L's fp32 bits]."""
+        from .compiler import graph_nodes, producer_of
+        T, K, L = self._tokens(pairs.dim(0)), pairs.dim(1), x_q.dim(1)
+        E, I = w13.dim(0), w13.dim(1) // 2
+        IRP = -(-I // 128) * 128
+        NSLOT, KT_L, KT2 = T * K, L // 128, IRP // 128
+        self._dtypes("swiglu_moe_experts_layer", x_q=(x_q, uint8), pairs=(pairs, int64), w13=(w13, uint8),
+                     w13_scales=(w13_scales, uint8), w2=(w2, uint8), w2_scales=(w2_scales, uint8), output=(output, float32))
+        dims = lambda t: tuple(t.dim(i) for i in range(t.num_dims))
+        assert I % 64 == 0 and L % 128 == 0 and KT2 >= 3, "whole 64-feature items; W2 in at least 2 ring stages"
+        assert dims(w13) == (E, 2 * I, L // 2) and dims(w13_scales) == (E, 2 * I, L // 32)
+        assert dims(w2) == (E, L, IRP // 2) and dims(w2_scales) == (E, L, IRP // 32)
+        assert dims(output) == (T * K, L)
+        assert math.isfinite(swiglu_limit) and swiglu_limit > 0
+        nodes = graph_nodes(self)
+        if any(n.name in ("moe_experts", "scaled_moe_experts", "swiglu_moe_experts") for n in nodes):
+            # the expert phase switch runs once per kernel (KernelLocals::ring_relaid): a second expert node would skip it
+            raise ValueError("swiglu_moe_experts_layer: the graph already has an expert node; one expert node per graph")
+        xq = producer_of(x_q, nodes)
+        if xq is None or xq.name != "act_quant" or list(xq.params) != [L]:
+            raise ValueError("swiglu_moe_experts_layer: x_q must be an act_quant node's output of x (a graph input)")
+        route = producer_of(pairs, nodes)
+        if route is None or route.name != "topk_route" or len(route.params) != 7 or list(route.params[:2]) != [E, K] \
+                or route.params[6] != 1:
+            raise ValueError(f"swiglu_moe_experts_layer: the pairs must be a topk_route node's with the DeepSeek-V4 gate "
+                             f"(score_func 'sqrtsoftplus') over the {E} experts of w13")
+        hq = self._scratch("swiglu_moe_experts.h_q", NSLOT * T * IRP)              # zeroed once: columns [I, IRP) stay 0
+        hsf = self._scratch("swiglu_moe_experts.h_q_scales", NSLOT * KT2 * SF_CHUNK)   # the chunks' unused bytes stay 0
+        maps = []
+        for weight, scales in ((w13, w13_scales), (w2, w2_scales)):
+            pieces = weight.dim(0) * weight.dim(1) * weight.dim(2) // 8192
+            maps += [self._map("wblk", ("t", weight), (pieces, 1)), self._map("wblk", ("t", weight), (pieces, 2)),
+                     self._map("sf", ("t", scales), (pieces, 1)), self._map("sf", ("t", scales), (pieces, 2))]
+        maps += [self._map("act8", ("t", x_q), (L, T)), self._map("act8kt", ("t", x_q), (L, T, 2)),
+                 self._map("sf", ("b", xq.info["buf"], T * L), (KT_L, KT_L)),
+                 self._map("act8kt", ("b", hq, 0), (IRP, NSLOT * T, 2)), self._map("sf", ("b", hsf, 0), (NSLOT * KT2, 1)),
+                 self._map("act8", ("b", hq, 0), (IRP, NSLOT * T)), self._map("sf", ("b", hsf, 0), (NSLOT * KT2, 2))]
+        tensors = [x_q, pairs, w13, w2, output]
+        self._add_node("swiglu_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
+                       [I, float_bits(swiglu_limit)], one_task_per_sm=True,
+                       out_buffer=lambda n: (T * K * L * 4, -1, False), counters=32 * 2 + NSLOT, buf_slots=[hq, hsf],
+                       map_slots=maps)
 
     # ---- after moe_experts (tasks/allreduce_send.cuh, sum_rmsnorm.cuh, sum_gpus.cuh, sum_send.cuh, residual_add.cuh). The
     # graph tensors between them (the sent partial sums, sum_rmsnorm's Rn, sum_gpus's Ssum, latent_up's K parts, sum_send's o)
