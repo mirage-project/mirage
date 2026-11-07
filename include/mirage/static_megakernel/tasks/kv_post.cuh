@@ -6,12 +6,14 @@
 // RMSNorm (rms_norm_parts8, q_norm.cuh): bf16(x * rsqrt(mean(x^2) + eps) *
 // gamma) -> RoPE of the last RD = 64 columns at the token's position p
 // (threads 56..63, 4 pairs each: re = fma(a, c, -bd), im = fma(b, c, ad)) ->
-// bf16 -> act_quant's formula per 32 columns -> row p % W of token t's window
-// cache [T][W][D + D / 32] (a graph tensor, kept across launches): D e4m3
-// bytes, then D / 32 e8m0 scale bytes (byte j: columns 32 j .. 32 j + 31). The
+// bf16 -> act_quant's formula per 32 columns -> row loc[t] of the window cache
+// (rows of D + D / 32 bytes, a graph tensor kept across launches; the
+// framework's pool in a serving layer, loc its write location): D e4m3 bytes, then D / 32
+// e8m0 scale bytes (byte j: columns 32 j .. 32 j + 31). The
 // official keeps the bf16 dequantization of the same bytes (act_quant inplace:
 // e4m3 x 2^ex, exact in bf16). Only that row is written; the row it replaces is
-// position p - W, outside token t's window. Then the node's counter t += 1 (a
+// position p - W, outside token t's window (loc picks it). Then the node's
+// counter t += 1 (a
 // reader of token t waits for 1).
 #pragma once
 #include "../core.cuh"
@@ -26,6 +28,7 @@ __device__ __forceinline__ void kv_post_task(float const *part,
                                              int const *pos,
                                              float const *freqs,
                                              unsigned char *cache,
+                                             int const *loc,
                                              uint32_t *done_cnt,
                                              int t) {
   static_assert(D == 512 && RD == 64,
@@ -64,7 +67,7 @@ __device__ __forceinline__ void kv_post_task(float const *part,
       amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, d));
     }
     int const ex = xq_exponent(amax);
-    unsigned char *row = cache + ((size_t)t * W + p % W) * (D + D / 32);
+    unsigned char *row = cache + (size_t)loc[t] * (D + D / 32);
     *reinterpret_cast<uint2 *>(row + c) =
         make_uint2(xq_pack4(y, ex), xq_pack4(y + 4, ex));
     uint32_t const s4 = xq_scale_word<16>(ex); // 16 threads = 4 groups
@@ -82,8 +85,9 @@ __device__ __forceinline__ void kv_post_task(float const *part,
 // kv_post task t = token t, grid (T, 1, 1); KV: wkv's node (a gemm_fp8_tile in
 // slots: KV::y K parts, KV::v[2] = D rows). PARAMS {D, W, RD, eps (fp32
 // bits)}; BUF_SLOTS {gamma ([D] bf16), positions ([T] int32), freqs ([rows][RD
-// / 2][2] fp32: cos, sin), the window cache ([T][W][D + D / 32] uint8)}, graph
-// tensors; the node's counters: one per token
+// / 2][2] fp32: cos, sin), the window cache (rows of D + D / 32 uint8), the
+// write locations ([T] int32: rows of the cache)}, graph tensors; the node's
+// counters: one per token
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -110,6 +114,7 @@ __device__ __forceinline__ void run_kv_post(Maps const &,
       buf_at<int const>(g, slot_at<BUF_SLOTS, 1>()),
       buf_at<float const>(g, slot_at<BUF_SLOTS, 2>()),
       buf_at<unsigned char>(g, slot_at<BUF_SLOTS, 3>()),
+      buf_at<int const>(g, slot_at<BUF_SLOTS, 4>()),
       g.cnt + SELF::counter,
       tk.x);
 }

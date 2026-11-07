@@ -23,14 +23,6 @@
 #define STATIC_EXCHANGE_BYTES                                                  \
   { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
-// one GPU: the SMs whose first task waits for other tasks (or that have none),
-// a bit each (reset_sms)
-#define STATIC_RESET_SMS_N 116
-#define STATIC_RESET_SMS_MASK0 11238609805906083326ull
-#define STATIC_RESET_SMS_MASK1 18446744039349223423ull
-#define STATIC_RESET_SMS_MASK2 1048575ull
-#define STATIC_RESET_SMS_MASK3 0ull
-
 struct StaticTask {
   int node, x, y, z;
 }; // one entry of an SM's list: the graph node and the task's grid position
@@ -253,9 +245,16 @@ static int const static_list_begin_gpu0[] = {
 __global__ void __launch_bounds__(256, 1)
     layer_kernel(const __grid_constant__ static_mk::Maps maps,
                  static_mk::G g,
-                 StaticTask const *static_tasks) {
+                 STATIC_G1_PARAM StaticTask const *static_tasks) {
   static_mk::KernelLocals L;
   static_mk::kernel_begin(g, L);
+#ifdef STATIC_NO_START_BARRIER
+  static_mk::G const &gp =
+      static_mk::dbuf_par ? g_par1 : g; // this launch's buffer set
+#define STATIC_KG gp
+#else
+#define STATIC_KG g
+#endif
   StaticTask const *my =
       static_tasks + blockIdx.x * (static_mk::MAX_TASKS_PER_SM);
   bool warm_6 = false;  // a task of node 6 ran on this SM: its code is in the
@@ -276,7 +275,7 @@ __global__ void __launch_bounds__(256, 1)
                                  StaticBufSlots<>,
                                  StaticMapSlots<0, 2>,
                                  StaticNode<0, 0, 0>,
-                                 StaticNode<0, 0, 0>>(maps, g, L, tk);
+                                 StaticNode<0, 0, 0>>(maps, STATIC_KG, L, tk);
         break;
       case 6:
         static_mk::run_topk_route<StaticNode<8, 1, 1, -1, 2>,
@@ -284,7 +283,8 @@ __global__ void __launch_bounds__(256, 1)
                                   StaticBufSlots<1>,
                                   StaticMapSlots<>,
                                   StaticNode<3, 8, 1, -1, 0, 0, 5120, 384, 0>,
-                                  StaticNode<0, 0, 0>>(maps, g, L, tk, warm_6);
+                                  StaticNode<0, 0, 0>>(
+            maps, STATIC_KG, L, tk, warm_6);
         warm_6 = true;
         break;
       case 9:
@@ -292,7 +292,7 @@ __global__ void __launch_bounds__(256, 1)
                                  StaticParams<5120>,
                                  StaticBufSlots<3>,
                                  StaticMapSlots<>,
-                                 StaticNode<0, 0, 0>>(maps, g, L, tk);
+                                 StaticNode<0, 0, 0>>(maps, STATIC_KG, L, tk);
         break;
       case 13:
         static_mk::run_gemm_fp8_tile<StaticNode<9, 4, 1, -1, 5>,
@@ -301,7 +301,8 @@ __global__ void __launch_bounds__(256, 1)
                                      StaticMapSlots<3, 4, 5, 6>,
                                      StaticNode<8, 1, 1, 0, 4, 5120>,
                                      StaticNode<0, 0, 0>,
-                                     StaticNode<0, 0, 0>>(maps, g, L, tk);
+                                     StaticNode<0, 0, 0>>(
+            maps, STATIC_KG, L, tk);
         break;
       case 15:
         static_mk::run_act_quant<StaticNode<8, 1, 1, 32, 6>,
@@ -309,7 +310,7 @@ __global__ void __launch_bounds__(256, 1)
                                  StaticBufSlots<>,
                                  StaticMapSlots<>,
                                  StaticNode<9, 4, 1, -1, 5, 0, 5120, 1152, 1>>(
-            maps, g, L, tk, warm_15);
+            maps, STATIC_KG, L, tk, warm_15);
         warm_15 = true;
         break;
       case 19:
@@ -320,7 +321,7 @@ __global__ void __launch_bounds__(256, 1)
             StaticMapSlots<7, 8, 9, 10>,
             StaticNode<8, 1, 1, 32, 6, 768, 576, 1092616192>,
             StaticNode<0, 0, 0>,
-            StaticNode<0, 0, 0>>(maps, g, L, tk);
+            StaticNode<0, 0, 0>>(maps, STATIC_KG, L, tk);
         break;
       case 25:
         static_mk::run_swiglu_moe_experts<
@@ -345,7 +346,7 @@ __global__ void __launch_bounds__(256, 1)
             StaticNode<8, 1, 1, 0, 4, 5120>,
             StaticNode<8, 1, 1, -1, 2, 384, 6, 1069547520, 0, 0, 0, 1>,
             StaticNode<0, 0, 0>,
-            StaticNode<0, 0, 0>>(maps, g, L, tk);
+            StaticNode<0, 0, 0>>(maps, STATIC_KG, L, tk);
         break;
       case 27:
         static_mk::run_sum_store<
@@ -355,7 +356,7 @@ __global__ void __launch_bounds__(256, 1)
             StaticMapSlots<>,
             StaticNode<40, 1, 1, -1, 7, 0, 768, 5120, 1>,
             StaticNode<148, 1, 1, 64, 10, 576, 1092616192>>(
-            maps, g, L, tk, warm_27);
+            maps, STATIC_KG, L, tk, warm_27);
         warm_27 = true;
         break;
     }
@@ -623,7 +624,7 @@ static void static_launch(size_t flush_bytes) {
     ST_CK(cudaEventRecord(s.start, s.stream));
     layer_kernel<<<static_mk::NSM, 256, (int)(STATIC_SMEM_BYTES), s.stream>>>(
         static_host::g_gpus[gpu].maps,
-        static_host::g_gpus[gpu].g,
+        static_host::g_gpus[gpu].g STATIC_G1_ARG(static_host::g_gpus[gpu]),
         s.tasks STATIC_TIMES_ARG);
     ST_CK(cudaGetLastError());
     ST_CK(cudaEventRecord(s.end, s.stream));
@@ -670,11 +671,12 @@ static char const *static_launch_stream(cudaStream_t stream, bool pdl) {
   }
   cfg.attrs = at;
   cfg.numAttrs = na;
-  ST_CK(cudaLaunchKernelEx(&cfg,
-                           layer_kernel,
-                           static_host::g_gpus[gpu].maps,
-                           static_host::g_gpus[gpu].g,
-                           (StaticTask const *)s.tasks STATIC_TIMES_ARG));
+  ST_CK(cudaLaunchKernelEx(
+      &cfg,
+      layer_kernel,
+      static_host::g_gpus[gpu].maps,
+      static_host::g_gpus[gpu].g STATIC_G1_ARG(static_host::g_gpus[gpu]),
+      (StaticTask const *)s.tasks STATIC_TIMES_ARG));
   g_launches++;
   return nullptr;
 #endif

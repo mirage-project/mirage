@@ -5,9 +5,10 @@
 // group's first token; torch's contraction) -> bf16 -> fp4_act_quant per 16
 // columns with an E4M3 scale (kernel.py fp4_quant_kernel, scale_dtype FP8: amax
 // floored at 6 * 2^-9, s = e4m3(amax / 6), clamp(x / s, +-6) -> e2m1, to
-// nearest even; plain IEEE divisions, as the generated kernel's) -> row p / R
-// of token t's compressed KV cache [T][CAP][D / 2 + D / 16] (a graph tensor,
-// kept across launches): D e2m1 (element 2 i in the low nibble), then D / 16
+// nearest even; plain IEEE divisions, as the generated kernel's) -> compressed
+// position j = p / R of the compressed KV cache (rows of D / 2 + D / 16 bytes, a
+// graph tensor kept across launches; the framework's pool in a serving layer),
+// row pages[t][j / 128] * 128 + j % 128: D e2m1 (element 2 i in the low nibble), then D / 16
 // e4m3 scales. The official keeps the bf16 dequantization of the same bytes.
 // Warp 0: lane l columns 16 l .. 16 l + 15 (one group; the RoPE columns:
 // lanes 28..31). Then the node's counter t += 1 (also when nothing is written:
@@ -23,6 +24,7 @@ __device__ __forceinline__ void ckv_post_task(__nv_bfloat16 const *latent,
                                               int const *pos,
                                               float const *freqs,
                                               unsigned char *cache,
+                                              int const *pages,
                                               uint32_t const *l_cnt,
                                               uint32_t l_target,
                                               uint32_t *done_cnt,
@@ -93,7 +95,10 @@ __device__ __forceinline__ void ckv_post_task(__nv_bfloat16 const *latent,
           : "f"(__fdiv_rn(x[2 * k + 1], s)), "f"(__fdiv_rn(x[2 * k], s)));
       q[k / 4] |= (uint32_t)(b & 0xFFu) << (8 * (k & 3));
     }
-    unsigned char *row = cache + ((size_t)t * CAP + p / R) * (D / 2 + D / 16);
+    int const j = p / R;
+    unsigned char *row =
+        cache + ((size_t)pages[(size_t)t * (CAP / 128) + j / 128] * 128 + j % 128) *
+                    (D / 2 + D / 16);
     *reinterpret_cast<uint2 *>(row + 8 * l) = make_uint2(q[0], q[1]);
     row[D / 2 + l] = (unsigned char)(sb2 & 0xFFu);
   }
@@ -106,7 +111,8 @@ __device__ __forceinline__ void ckv_post_task(__nv_bfloat16 const *latent,
 // ckv_post task t = token t, grid (T, 1, 1); LT: the compressor's node (its
 // buffer: the latent [T][D] bf16; one counter of its LT::x tasks). PARAMS {D,
 // RD, R, CAP}; BUF_SLOTS {positions ([T] int32), freqs ([rows][RD / 2][2]
-// fp32), the compressed KV cache ([T][CAP][D / 2 + D / 16] uint8)}, graph
+// fp32), the compressed KV cache (rows of D / 2 + D / 16 uint8), its page table
+// ([T][CAP / 128] int32)}, graph
 // tensors; the node's counters: one per token
 template <class SELF,
           class PARAMS,
@@ -134,6 +140,7 @@ __device__ __forceinline__ void run_ckv_post(Maps const &,
       buf_at<int const>(g, slot_at<BUF_SLOTS, 0>()),
       buf_at<float const>(g, slot_at<BUF_SLOTS, 1>()),
       buf_at<unsigned char>(g, slot_at<BUF_SLOTS, 2>()),
+      buf_at<int const>(g, slot_at<BUF_SLOTS, 3>()),
       g.cnt + LT::counter,
       LT::x * LT::y * LT::z,
       g.cnt + SELF::counter,

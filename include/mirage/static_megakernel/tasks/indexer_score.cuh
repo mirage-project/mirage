@@ -27,7 +27,7 @@ namespace static_mk {
 
 constexpr int IS_QLD = IX_HD + 8; // q's row stride in shared memory (bf16)
 constexpr int IS_OFF_Q = 0,       // q [32][IS_QLD] bf16
-    IS_OFF_K = IS_OFF_Q + 32 * IS_QLD * 2; // the chunk's index K rows (raw)
+    IS_OFF_K = IS_OFF_Q + 32 * IS_QLD * 2; // the chunk's index K pages (raw)
 // then w [32] fp32
 __host__ __device__ constexpr int is_off_w(int ch) {
   return IS_OFF_K + ch * IX_ROW;
@@ -63,6 +63,7 @@ template <int H,
 __device__ __forceinline__ void indexer_score_task(__nv_bfloat16 const *q,
                                                    float const *wpart,
                                                    unsigned char const *kc,
+                                                   int const *pages,
                                                    unsigned char const *cand,
                                                    int const *pos,
                                                    __nv_bfloat16 *out,
@@ -92,17 +93,20 @@ __device__ __forceinline__ void indexer_score_task(__nv_bfloat16 const *q,
       }
       __syncthreads();
     }
-    // the chunk's halves below n (inside CAP): their rows, contiguous bytes
-    // (cp.async.cg: L2)
+    // the chunk's halves below n (inside CAP): their 2 pages each, whole, as
+    // the framework lays them out (cp.async.cg: L2)
     int const nh =
         CH == 256 ? 1 : min(CH, min((n + 255) / 256 * 256, CAP) - k0) / 256;
     {
       uint32_t const dst = su32(sm + IS_OFF_K);
-      unsigned char const *src = kc + ((size_t)t * CAP + k0) * IX_ROW;
-      for (int i = tid; i < nh * 256 * IX_ROW / 16; i += 256) {
+      constexpr int PG16 = IX_PAGE * IX_ROW / 16; // a page's 16-B chunks
+      int const *const pt = pages + (size_t)t * (CAP / IX_PAGE) + k0 / IX_PAGE;
+      for (int i = tid; i < nh * 2 * PG16; i += 256) {
+        unsigned char const *src =
+            kc + (size_t)pt[i / PG16] * IX_PAGE * IX_ROW + (i % PG16) * 16;
         asm volatile(
             "cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(dst + 16 * i),
-            "l"(src + 16 * i)
+            "l"(src)
             : "memory");
       }
       asm volatile("cp.async.commit_group;" ::: "memory");
@@ -172,8 +176,11 @@ __device__ __forceinline__ void indexer_score_task(__nv_bfloat16 const *q,
         is_ldsm_x4(qa + 16 * IS_QLD * 2 + ks * 32, a1);
 #pragma unroll
         for (int nt = 0; nt < 4; nt++) {
-          unsigned char const *row = kh + (32 * w + 8 * nt + g8) * IX_ROW;
-          float const s = __uint_as_float((uint32_t)row[HD / 2 + ks / 2] << 23);
+          int const pp = 32 * w + 8 * nt + g8, o = pp % IX_PAGE;
+          unsigned char const *const pg = kh + (pp / IX_PAGE) * IX_PAGE * IX_ROW;
+          unsigned char const *row = pg + o * (HD / 2);
+          float const s = __uint_as_float(
+              (uint32_t)pg[IX_PAGE * (HD / 2) + o * (HD / 32) + ks / 2] << 23);
           uint32_t const b0 = fp4_bf16x2(row[8 * ks + qd], s),
                          b1 = fp4_bf16x2(row[8 * ks + 4 + qd], s);
           is_mma(acc[0][nt], a0, b0, b1);
@@ -264,7 +271,8 @@ __device__ __forceinline__ void indexer_score_task(__nv_bfloat16 const *q,
 // used); KC: the index K cache's producer (index_k_post, a counter per token;
 // or a graph input: none to wait for). PARAMS {H, HD, CAP, R, CAND}; BUF_SLOTS
 // {the index K cache
-// ([T][CAP][IX_ROW] uint8), positions ([T] int32), with CAND the candidate
+// (pages, indexer_common.cuh), positions ([T] int32), its page table ([T][CAP /
+// IX_PAGE] int32), with CAND the candidate
 // blocks ([T][CAP / 8] uint8)}, graph tensors; the node's buffer: scores
 // [T][CAP] bf16, a counter per token
 template <class SELF,
@@ -297,12 +305,13 @@ __device__ __forceinline__ void run_indexer_score(Maps const &,
                 "counter per token) or a graph input");
   unsigned char const *cand = nullptr;
   if constexpr (CAND) {
-    cand = buf_at<unsigned char const>(g, slot_at<BUF_SLOTS, 2>());
+    cand = buf_at<unsigned char const>(g, slot_at<BUF_SLOTS, 3>());
   }
   indexer_score_task<H, HD, CAP, R, CAND, WP::y, WP::v[2], KNODE, SELF::y>(
       buf_at<__nv_bfloat16 const>(g, QI::buf),
       buf_at<float const>(g, WP::buf),
       buf_at<unsigned char const>(g, slot_at<BUF_SLOTS, 0>()),
+      buf_at<int const>(g, slot_at<BUF_SLOTS, 2>()),
       cand,
       buf_at<int const>(g, slot_at<BUF_SLOTS, 1>()),
       buf_at<__nv_bfloat16>(g, SELF::buf),

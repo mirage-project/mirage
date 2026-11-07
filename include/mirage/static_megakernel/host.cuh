@@ -68,6 +68,9 @@ struct BufReset {
 };
 struct GpuState {
   G g;       // the kernel's parameter g (by value)
+#ifdef STATIC_NO_START_BARRIER
+  G g1; // the kernel's second G (g1_of)
+#endif
   Maps maps; // the kernel's parameter maps (__grid_constant__)
   std::vector<BufReset>
       resets; // every buffer filled before each launch (static_host_reset)
@@ -293,6 +296,21 @@ static std::vector<std::vector<std::string>>
 // zero-filled, unless `given` has the tensor), graph tensors (from `given`; a
 // host that sets them later may leave them out: nullptr), exchange buffers;
 // their resets into s.resets
+#ifdef STATIC_NO_START_BARRIER
+// g with every two-set buffer and the counters at their second set, from the
+// current g (a rebound buffer has one set)
+static G const &g1_of(GpuState &s) {
+  s.g1 = s.g;
+  for (int i = 0; i < MAX_BUFS; i++) {
+    if (s.g.par_bytes[i] != 0) {
+      s.g1.buf[i] = (char *)s.g.buf[i] + s.g.par_bytes[i];
+    }
+  }
+  s.g1.cnt = s.g.cnt + NCNT;
+  return s.g1;
+}
+#endif
+
 static void build_bufs(GpuState &s,
                        std::map<std::string, void *> const &given,
                        std::map<std::string, std::string> const &args) {

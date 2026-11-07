@@ -77,7 +77,6 @@ struct PrefetchList {
 #error                                                                         \
     "STATIC_NO_START_BARRIER is a serving mode: it needs STATIC_RESET_IN_KERNEL"
 #endif
-static_assert(GPUS == 1, "STATIC_NO_START_BARRIER: one GPU");
 #endif
 
 // ---- the layer state (the kernel's parameter g) ----
@@ -114,65 +113,31 @@ struct G {
                             // passed: the last SM's time remains
 };
 
+// STATIC_NO_START_BARRIER: the kernel's second G (the host's copy of g with
+// every two-set buffer and the counters at their second set); the generated
+// kernel picks one, gp, once, so the tasks' addresses stay kernel parameters
+#ifdef STATIC_NO_START_BARRIER
+#define STATIC_G1_PARAM static_mk::G g_par1,
+#define STATIC_G1_ARG(x) , static_host::g1_of(x)
+#else
+#define STATIC_G1_PARAM
+#define STATIC_G1_ARG(x)
+#endif
+
 // the exchange region's set of this launch: its launch number's parity, set at
 // the kernel's start
 __shared__ unsigned dbuf_par;
 __device__ __forceinline__ size_t rg_set() {
   return (size_t)dbuf_par * EXCHANGE_SET;
 }
-#ifdef STATIC_NO_START_BARRIER
-// this launch's set: per buffer slot its offset, and the counters it uses (set
-// at the kernel's start from the launch number's parity)
-__shared__ unsigned long long par_off[MAX_BUFS];
-__shared__ uint32_t *cnt_cur;
-#ifndef STATIC_RESET_SMS_N
-#define STATIC_RESET_SMS_N 0
-#define STATIC_RESET_SMS_MASK0 0ull
-#define STATIC_RESET_SMS_MASK1 0ull
-#define STATIC_RESET_SMS_MASK2 0ull
-#define STATIC_RESET_SMS_MASK3 0ull
-#endif
-// the SMs that reset the next launch's set right after the start (their first
-// task waits for other tasks anyway: static_schedule.reset_sms); none: every SM
-// at its end
-constexpr int RESET_SMS_N = STATIC_RESET_SMS_N;
-// sm's index among the reset SMs, or -1 (the mask's 64-bit words as
-// immediates: no memory access)
-__device__ __forceinline__ int reset_sm_rank(int sm) {
-  constexpr unsigned long long M0 = STATIC_RESET_SMS_MASK0,
-                               M1 = STATIC_RESET_SMS_MASK1,
-                               M2 = STATIC_RESET_SMS_MASK2,
-                               M3 = STATIC_RESET_SMS_MASK3;
-  int const w = sm >> 6, b = sm & 63;
-  unsigned long long const word = w == 0 ? M0 : w == 1 ? M1 : w == 2 ? M2 : M3;
-  if (!((word >> b) & 1ull)) {
-    return -1;
-  }
-  int r = __popcll(word & ((1ull << b) - 1ull));
-  r += w > 0 ? __popcll(M0) : 0;
-  r += w > 1 ? __popcll(M1) : 0;
-  r += w > 2 ? __popcll(M2) : 0;
-  return r;
-}
-#endif
-// buffer `slot` (G::buf) as a P pointer (STATIC_NO_START_BARRIER: in this
-// launch's set)
+// buffer `slot` (G::buf) as a P pointer
 template <class P>
 __device__ __forceinline__ P *buf_at(G const &g, int slot) {
-#ifdef STATIC_NO_START_BARRIER
-  return reinterpret_cast<P *>(reinterpret_cast<char *>(g.buf[slot]) +
-                               par_off[slot]);
-#else
   return reinterpret_cast<P *>(g.buf[slot]);
-#endif
 }
-// the nodes' counters (STATIC_NO_START_BARRIER: this launch's set)
+// the nodes' counters
 __device__ __forceinline__ uint32_t *cnt_now(G const &g) {
-#ifdef STATIC_NO_START_BARRIER
-  return cnt_cur;
-#else
   return g.cnt;
-#endif
 }
 // a multicast store into this launch's set of every GPU's exchange region (off:
 // an offset in the set)
@@ -361,9 +326,10 @@ __device__ __forceinline__ bool pf_batch(PrefetchList const &pl,
 
 #ifdef STATIC_NO_START_BARRIER
 // share idx of n of the resets of the set the next launch uses: no task of this
-// launch touches it, the previous launch (which used it) is over
-// (griddepcontrol.wait), and the next launch's tasks start after this grid's
-// end. 16-B stores, not waited for
+// launch touches it, the previous launch (which used it) is over because the
+// layer runs once per step (not by griddepcontrol.wait: this runs before it, so
+// a PDL chain must not launch one layer twice in a row), and the next launch's
+// tasks start after this grid's end. 16-B stores, not waited for
 __device__ __forceinline__ void reset_next_set(G const &g, int idx, int n) {
   unsigned const other = dbuf_par ^ 1u;
   for (int i = 0; i < g.resets.cnt; i++) {
@@ -390,11 +356,11 @@ __device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
   int const sm_id = L.sm_id;
   cta_prologue(L.sm);
 #ifdef STATIC_NO_START_BARRIER
-  // serving with no start barrier (one GPU): every buffer the start would reset
-  // has two sets (and so do the counters); launch n uses set n % 2, the other
-  // was reset at the end of launch n - 1 (kernel_end), which this launch's
-  // tasks follow (griddepcontrol.wait below), and no task of launch n touches
-  // it. The launch number: this SM's own word. PDL as below
+  // serving with no start barrier: every buffer the start would reset has two
+  // sets (and so do the counters); launch n uses set n % 2, the other was reset
+  // at the start of launch n - 1, which this launch's tasks follow
+  // (griddepcontrol.wait below), and no task of launch n touches it. The launch
+  // number: this SM's own word. PDL as below
   __shared__ unsigned gen_s;
   long long t_start = 0;
   if (threadIdx.x == 0) {
@@ -407,17 +373,16 @@ __device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
     *gw = gen;
     gen_s = gen;
     dbuf_par = gen & 1u;
-    cnt_cur = g.cnt + (size_t)(gen & 1u) * NCNT;
   }
   if (threadIdx.x < NSTAMP) {
     g.stamps[sm_id * NSTAMP + threadIdx.x] = 0;
   }
   __syncthreads();
-  for (int i = threadIdx.x; i < MAX_BUFS; i += blockDim.x) {
-    par_off[i] = (gen_s & 1u) ? g.par_bytes[i] : 0ull; // read by the tasks
-                                                       // after tmem_alloc_512's
-                                                       // __syncthreads
-  }
+  // the next launch's buffer set, spread over the CTAs, before the wait for the
+  // previous kernel (#811 STATIC_RESET_PARITY): this layer's launch before used
+  // that set and has ended (one launch per step); the tasks read this launch's
+  // set through the generated kernel's gp (the second G, a kernel parameter)
+  reset_next_set(g, sm_id, gridDim.x);
   if (threadIdx.x == 0) {
     g.stamps[sm_id * NSTAMP + STAMP_START] = t_start;
     *g.start_barrier = gtime();
@@ -537,15 +502,6 @@ __device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
   }
   __syncthreads();
 #endif
-#ifdef STATIC_NO_START_BARRIER
-  if constexpr (RESET_SMS_N > 0) { // the next launch's resets on the SMs whose
-                                   // first task waits anyway
-    int const rank = reset_sm_rank(sm_id);
-    if (rank >= 0) {
-      reset_next_set(g, rank, RESET_SMS_N);
-    }
-  }
-#endif
   L.gl = 0;
   L.gi0 = 0;
   L.gi1 = 0;
@@ -553,16 +509,9 @@ __device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
   L.ring_relaid = false;
 }
 
-// after the task loop (STATIC_NO_START_BARRIER with no reset SMs: first this
-// SM's share of the next launch's resets, reset_next_set)
+// after the task loop
 __device__ __forceinline__ void kernel_end(G const &g, KernelLocals &L) {
   __syncthreads();
-#ifdef STATIC_NO_START_BARRIER
-  if constexpr (RESET_SMS_N == 0) {
-    reset_next_set(g, L.sm_id, gridDim.x);
-    __syncthreads();
-  }
-#endif
   if (threadIdx.x == 0) {
     g.stamps[L.sm_id * NSTAMP + STAMP_END] = gtime();
   }

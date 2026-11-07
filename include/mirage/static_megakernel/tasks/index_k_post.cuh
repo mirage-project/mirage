@@ -24,6 +24,7 @@ __device__ __forceinline__ void index_k_post_task(float const *part,
                                                   int const *pos,
                                                   float const *freqs,
                                                   unsigned char *cache,
+                                                  int const *pages,
                                                   uint32_t *done_cnt,
                                                   int t) {
   static_assert(HD == IX_HD && RD == 64,
@@ -118,10 +119,14 @@ __device__ __forceinline__ void index_k_post_task(float const *part,
       int const e = fp4_exponent(amax);
       float deq[4];
       uint32_t const b2 = fp4_quant4(x, e, deq);
-      unsigned char *row = cache + ((size_t)t * CAP + p / R) * IX_ROW;
-      *reinterpret_cast<uint16_t *>(row + 2 * l) = (uint16_t)b2;
+      int const j = p / R, o = j % IX_PAGE;
+      unsigned char *pg =
+          cache + (size_t)pages[(size_t)t * (CAP / IX_PAGE) + j / IX_PAGE] *
+                      IX_PAGE * IX_ROW;
+      *reinterpret_cast<uint16_t *>(pg + o * (HD / 2) + 2 * l) = (uint16_t)b2;
       if ((l & 7) == 0) {
-        row[HD / 2 + l / 8] = (unsigned char)(e + 127);
+        pg[IX_PAGE * (HD / 2) + o * (HD / 32) + l / 8] =
+            (unsigned char)(e + 127);
       }
     }
   }
@@ -135,7 +140,8 @@ __device__ __forceinline__ void index_k_post_task(float const *part,
 // slots: WK::y K parts, WK::v[2] = HD rows). PARAMS {HD, RD, R (compress
 // ratio), CAP (the cache's positions), eps (fp32 bits)}; BUF_SLOTS {gamma
 // (k_norm's weight, [HD] bf16), positions ([T] int32), freqs ([rows][RD /
-// 2][2] fp32), the index K cache ([T][CAP][IX_ROW] uint8)}, graph tensors; the
+// 2][2] fp32), the index K cache (pages, indexer_common.cuh), its page table
+// ([T][CAP / IX_PAGE] int32)}, graph tensors; the
 // node's counters: one per token
 template <class SELF,
           class PARAMS,
@@ -163,6 +169,7 @@ __device__ __forceinline__ void run_index_k_post(Maps const &,
       buf_at<int const>(g, slot_at<BUF_SLOTS, 1>()),
       buf_at<float const>(g, slot_at<BUF_SLOTS, 2>()),
       buf_at<unsigned char>(g, slot_at<BUF_SLOTS, 3>()),
+      buf_at<int const>(g, slot_at<BUF_SLOTS, 4>()),
       g.cnt + SELF::counter,
       tk.x);
 }
