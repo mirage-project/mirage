@@ -710,16 +710,19 @@ __device__ __forceinline__ void multitoken_paged_attention_sm100_task_impl(
           float other_m = s_m_buffer[md_smem_offset],
                 other_d = s_d_buffer[md_smem_offset];
           m_global = max(m_prev, other_m);
-          d_global = d_prev * expf(m_prev - m_global) +
-                     other_d * expf(other_m - m_global);
+          // Convert the max-subtracted difference to base 2 and reuse it for
+          // both the denominator and output accumulation.
+          constexpr float log2e = 1.4426950408889634f;
+          float prev_weight = exp2f((m_prev - m_global) * log2e);
+          float other_weight = exp2f((other_m - m_global) * log2e);
+          d_global = d_prev * prev_weight + other_d * other_weight;
           // accumulate o (buffer holds only the current m-tile)
           float other_o =
               s_o_buffer[local_idx * 32 * 64 // 32 threads per local value
                          + t_idx * 64        // corresponding thread
                          + mma_iter_n * 8    // mma iter n
                          + frag_idx];
-          o_global = o_global * expf(m_prev - m_global) +
-                     other_o * expf(other_m - m_global);
+          o_global = o_global * prev_weight + other_o * other_weight;
         }
         // An attention sink is an extra softmax logit that carries no value,
         // so it enters only the denominator. It is stored in sm_scale units,
