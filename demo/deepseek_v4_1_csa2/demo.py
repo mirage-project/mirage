@@ -38,7 +38,8 @@ KV, the index K and the compressor state) are graph tensors kept across launches
                      shards run one after another on this GPU, each from the step's state: o_q byte for byte against the
                      golden's heads, y = bf16(the shards' wo_b K parts added in fp32) against the golden y, and the state
                      each shard leaves (the window cache; the compressed KV, the index K and the compressor state; the
-                     caches a Reuse or Reindex layer reads, unchanged) against the golden's state after the step
+                     caches a Reuse or Reindex layer reads, unchanged) against the golden's state after the step. A host-reset
+                     build only (a serving build's readers re-arm the node buffers the checks read)
 Steps 5-6 run the layer through the test harness (python/mirage/mpk/static_harness.py).
 
 The plan files are for one TP4 GPU at --pos 4096 on a B200 (148 SMs), per variant (--layer 0, 3, 24, 2, 20):
@@ -474,6 +475,9 @@ def main():
                     "of --layer instead")
     ap.add_argument("--cases", nargs="*", default=None, help="with --golden: these cases only")
     args = ap.parse_args()
+    if args.golden and any("STATIC_RESET_IN_KERNEL" in f for f in args.nvcc_flag):
+        raise ValueError("--golden reads node buffers that a serving build's readers re-arm to 0xFF (sum_store re-arms wo_b's "
+                         "K parts): use a host-reset build (no -DSTATIC_RESET_IN_KERNEL)")
     if args.tp not in (1, 2, 4) or not 0 <= args.rank < args.tp:
         raise ValueError(f"--tp {args.tp} --rank {args.rank}: tp 1, 2 or 4 (sparse_attn takes 16 heads a task)")
     if not (args.gpus == 1 or (args.gpus == 4 and args.tp == 4)) or args.gpus > torch.cuda.device_count():
