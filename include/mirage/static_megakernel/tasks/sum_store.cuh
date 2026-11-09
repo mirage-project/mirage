@@ -17,14 +17,23 @@
 // RowParallelLinear (fp8_gemm's bf16 output, the GPUs' parts added in fp32).
 // Every GPU runs the same plan, and a task sends before it waits: the task on
 // each other GPU that sends these columns waits for nothing this one holds.
+// RK > 0 (DeepSeek-V4.1's MoE, model.py MoE.forward): a second input, the
+// routed rows [T x RK][N] fp32 of an expert node (row t RK + k: token t's k-th
+// expert in ascending id; plain stores, complete when the node's counter
+// counts all its tasks): added first, row t RK .. t RK + RK - 1 in order (the
+// official loop over the experts), then the K parts (the shared expert's) in
+// part order.
 #pragma once
 #include "../core.cuh"
 
 namespace static_mk {
 
-template <int N, int NC, int P, size_t XOFF>
+template <int N, int NC, int P, size_t XOFF, int RK = 0>
 __device__ __forceinline__ void sum_store_task(G const &g,
                                                float const *part,
+                                               float const *rows,
+                                               uint32_t const *rows_cnt,
+                                               uint32_t rows_target,
                                                __nv_bfloat16 *y,
                                                uint32_t *done_cnt,
                                                int x,
@@ -36,6 +45,14 @@ __device__ __forceinline__ void sum_store_task(G const &g,
 #pragma unroll 1
   for (int pass = warm ? 1 : 0; pass < 2; pass++) {
     bool const real = pass == 1;
+    if constexpr (RK > 0) {
+      if (real) { // the routed rows: all the expert node's tasks (acquire)
+        if (threadIdx.x == 0) {
+          cnt_wait(rows_cnt, rows_target);
+        }
+        __syncthreads();
+      }
+    }
     for (int c = x * NC + 4 * l; c < (x + 1) * NC; c += 128) {
       float4 v[P];
       bool ok[P];
@@ -63,13 +80,34 @@ __device__ __forceinline__ void sum_store_task(G const &g,
           poll_pause(STATIC_POLL_NS);
         }
       } while (!all && real);
-      float4 s = v[0];
+      float4 s;
+      if constexpr (RK > 0) { // the routed rows first, then every K part
+        s = *reinterpret_cast<float4 const *>(rows + (size_t)t * RK * N + c);
 #pragma unroll
-      for (int p = 1; p < P; p++) { // in part order
-        s.x += v[p].x;
-        s.y += v[p].y;
-        s.z += v[p].z;
-        s.w += v[p].w;
+        for (int k = 1; k < RK; k++) {
+          float4 const r = *reinterpret_cast<float4 const *>(
+              rows + ((size_t)t * RK + k) * N + c);
+          s.x += r.x;
+          s.y += r.y;
+          s.z += r.z;
+          s.w += r.w;
+        }
+#pragma unroll
+        for (int p = 0; p < P; p++) {
+          s.x += v[p].x;
+          s.y += v[p].y;
+          s.z += v[p].z;
+          s.w += v[p].w;
+        }
+      } else {
+        s = v[0];
+#pragma unroll
+        for (int p = 1; p < P; p++) { // in part order
+          s.x += v[p].x;
+          s.y += v[p].y;
+          s.z += v[p].z;
+          s.w += v[p].w;
+        }
       }
       __nv_bfloat162 const h0 = __floats2bfloat162_rn(s.x, s.y),
                            h1 = __floats2bfloat162_rn(s.z, s.w);
@@ -160,10 +198,22 @@ __device__ __forceinline__ void sum_store_task(G const &g,
   }
 }
 
+// the first node of a pack (sum_store's second input: the routed rows' node)
+template <class... R>
+struct sum_store_rows {
+  using type = void;
+};
+template <class A, class... R>
+struct sum_store_rows<A, R...> {
+  using type = A;
+};
+
 // sum_store task x, grid (N / NC, 1, 1); OB: wo_b's node (a gemm_fp8_tile in
-// slots: OB::y K parts, OB::v[2] = N rows). PARAMS {N}; BUF_SLOTS {y (a graph
-// tensor, [T][N] bf16)}; GPUS > 1: the node's buffer, [GPUS][T][N] bf16 in the
-// exchange region; the node's counter: one, of its tasks; warm: above
+// slots: OB::y K parts, OB::v[2] = N rows). PARAMS {N}, or {N, RK}: then
+// REST's first is the routed rows' node (its buffer [T x RK][N] fp32, its
+// counter of its tasks); BUF_SLOTS {y (a graph tensor, [T][N] bf16)}; GPUS >
+// 1: the node's buffer, [GPUS][T][N] bf16 in the exchange region; the node's
+// counter: one, of its tasks; warm: above
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -189,13 +239,30 @@ __device__ __forceinline__ void run_sum_store(Maps const &,
                     OB::y >= 1 && OB::y <= 16,
                 "sum_store: wo_b's K parts in slots, at most 16 (in "
                 "registers)");
+  constexpr int RK = param_or0<PARAMS, 1>(); // routed rows per token; 0: none
+  float const *rows = nullptr;
+  uint32_t const *rows_cnt = nullptr;
+  uint32_t rows_target = 0;
+  if constexpr (RK > 0) {
+    using RR = typename sum_store_rows<REST...>::type;
+    static_assert(RR::buf >= 0 && RR::counter >= 0,
+                  "sum_store: the routed rows, an expert node's buffer and "
+                  "the counter of its tasks");
+    rows = buf_at<float const>(g, RR::buf);
+    rows_cnt = g.cnt + RR::counter;
+    rows_target = RR::x * RR::y * RR::z;
+  }
   sum_store_task<N,
                  N / SELF::x,
                  OB::y,
                  (GPUS > 1 ? exchange_offset[SELF::buf < 0 ? 0 : SELF::buf]
-                           : 0)>(
+                           : 0),
+                 RK>(
       g,
       buf_at<float const>(g, OB::buf),
+      rows,
+      rows_cnt,
+      rows_target,
       buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 0>()),
       g.cnt + SELF::counter,
       tk.x,

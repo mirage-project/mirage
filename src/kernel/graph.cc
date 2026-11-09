@@ -1172,7 +1172,14 @@ void Graph::register_task_for_op(KNOperator const *op,
   } else if (name == "sum_store") {
     int variant_id = task_register->register_sum_store_sm100_task(
         customized->bgraph, params);
-    task_config[op] = std::make_tuple(1, 1, TASK_SUM_STORE_SM100, variant_id);
+    // inputs: params.size() (2: the routed rows); outputs: y, or with num_gpus
+    // > 1 the exchange buffer, then y
+    int const num_inputs = (int)params.size();
+    task_config[op] =
+        std::make_tuple(num_inputs,
+                        (int)customized->bgraph.operators.size() - num_inputs,
+                        TASK_SUM_STORE_SM100,
+                        variant_id);
   } else if (name == "indexer_q") {
     int variant_id = task_register->register_indexer_q_sm100_task(
         customized->bgraph, params);
@@ -1200,6 +1207,11 @@ void Graph::register_task_for_op(KNOperator const *op,
     int variant_id =
         task_register->register_ckv_post_sm100_task(customized->bgraph, params);
     task_config[op] = std::make_tuple(3, 1, TASK_CKV_POST_SM100, variant_id);
+  } else if (name == "swiglu_moe_experts") {
+    int variant_id = task_register->register_swiglu_moe_experts_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(4, 1, TASK_SWIGLU_MOE_EXPERTS_SM100, variant_id);
   }
 
   else {
