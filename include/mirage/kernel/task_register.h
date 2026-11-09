@@ -234,6 +234,10 @@ public:
                                    std::vector<int> const &params);
   int register_residual_add_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params);
+  int register_static_sm90_task(threadblock::Graph const &bgraph,
+                                std::vector<int> const &params,
+                                std::string const &name,
+                                int num_outputs);
   int register_group_quant_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
   int register_scaled_gemm_tile_sm100_task(threadblock::Graph const &bgraph,

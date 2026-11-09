@@ -19,6 +19,13 @@
     "config.cuh: the generated layer defines STATIC_TOKENS, STATIC_GPUS, STATIC_SMS"
 #endif
 
+// Hopper (sm90): the GEMM ring is consumed by WGMMA from one warpgroup that
+// holds the accumulators in registers, instead of tcgen05 into TMEM. Only the
+// task types written for it (gemm_tile) build there.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 1000
+#define STATIC_SM90 1
+#endif
+
 namespace static_mk {
 
 // ---- kernel-wide sizes (the generated layer's) ----
@@ -54,6 +61,11 @@ __host__ __device__ constexpr int acc_round(int tick) {
 constexpr int SMAX = T <= 16 ? 5 : 4; // static_megakernel.ring_stages
 constexpr int W2QD = 4; // entries in moe_experts' shared-memory copy (loader ->
                         // issuers / epilogue; runtime.cuh Rt)
+#ifdef STATIC_SM90
+constexpr int RING_EMPTY_ARRIVALS = 1;
+#else
+constexpr int RING_EMPTY_ARRIVALS = 2;
+#endif
 
 // ---- the ring's shared memory (offsets from the 1024-aligned dynamic base); a
 // task type that needs more declares its own after

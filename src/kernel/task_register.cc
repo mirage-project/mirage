@@ -5521,6 +5521,20 @@ static std::string static_build_only_task(char const *name,
   return code.to_string();
 }
 
+int TaskRegister::register_static_sm90_task(threadblock::Graph const &bgraph,
+                                            std::vector<int> const &params,
+                                            std::string const &name,
+                                            int num_outputs) {
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph,
+                   (int)bgraph.operators.size() - num_outputs,
+                   num_outputs,
+                   input_ops,
+                   output_ops);
+  return register_task_variant(TASK_STATIC_SM90,
+                               static_build_only_task(name.c_str(), params));
+}
+
 int TaskRegister::register_gemm_tile_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {mode (how the K parts are combined: 0 one slot per part, 1

@@ -1063,6 +1063,18 @@ void Graph::register_task_for_op(KNOperator const *op,
                         1,
                         TASK_RESIDUAL_ADD_SM100,
                         variant_id);
+  } else if (name == "sm90_rmsnorm" || name == "sm90_attention" ||
+             name == "sm90_attention_split" || name == "sm90_attention_merge" ||
+             name == "sm90_gate" || name == "sm90_moe_ring" ||
+             name == "sm90_mul_sum_add") {
+    int const num_outputs = name == "sm90_gate" ? 5 : 1;
+    int variant_id = task_register->register_static_sm90_task(
+        customized->bgraph, params, name, num_outputs);
+    task_config[op] =
+        std::make_tuple((int)customized->bgraph.operators.size() - num_outputs,
+                        num_outputs,
+                        TASK_STATIC_SM90,
+                        variant_id);
   } else if (name == "group_quant") {
     int variant_id = task_register->register_group_quant_sm100_task(
         customized->bgraph, params);
