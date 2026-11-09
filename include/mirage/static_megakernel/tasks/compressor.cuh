@@ -6,8 +6,9 @@
 //   R = 1: wkv's K parts added in part order -> bf16 (the bf16 linear's
 //          output) -> RMSNorm(gamma) -> latent.
 //   R = 2: the K parts added (fp32: the official promotes x and the weights to
-//          fp32) -> kv, score into slot p % 2 of token t's state (a graph
-//          tensor [T][2][R][D] fp32: kv_state, score_state; kept across
+//          fp32) -> kv, score into row p % 2 of the token's request slot in
+//          the state (a graph tensor [slots][R][2][D] fp32, kv | score: the
+//          framework's ring in a serving layer; kept across
 //          launches) -> when the group completes ((p + 1) % 2 == 0), per
 //          column softmax over the 2 slots (max, expf, the sum, a division:
 //          torch's) and kv0 w0 + kv1 w1 (each product rounded) -> bf16 ->
@@ -73,6 +74,7 @@ __device__ __forceinline__ void compressor_task(float const *part,
                                                 __nv_bfloat16 const *gamma,
                                                 int const *pos,
                                                 float *state,
+                                                long long const *req,
                                                 __nv_bfloat16 *out,
                                                 uint32_t *done_cnt,
                                                 int t) {
@@ -100,14 +102,14 @@ __device__ __forceinline__ void compressor_task(float const *part,
       rearm_parts8<NW, P>(part, t, c);
       rearm_parts8<NW, P>(part, t, D + c);
       int const slot = p % R;
-      float *const kvs = state + (size_t)t * 2 * R * D; // [R][D] kv_state
-      float *const scs = kvs + R * D;                   // [R][D] score_state
+      // the framework's ring: row (request slot) R + p % R holds kv | score
+      float *const st0 = state + (size_t)req[t] * R * 2 * D;
       float kv_o[8], sc_o[8]; // the other slot (an earlier launch wrote it)
       if (fires) {
         float4 const *a =
-            reinterpret_cast<float4 const *>(kvs + (1 - slot) * D + c);
+            reinterpret_cast<float4 const *>(st0 + (1 - slot) * 2 * D + c);
         float4 const *b =
-            reinterpret_cast<float4 const *>(scs + (1 - slot) * D + c);
+            reinterpret_cast<float4 const *>(st0 + (1 - slot) * 2 * D + D + c);
 #pragma unroll
         for (int h = 0; h < 2; h++) {
           float4 const u = a[h], v = b[h];
@@ -121,8 +123,8 @@ __device__ __forceinline__ void compressor_task(float const *part,
           sc_o[4 * h + 3] = v.w;
         }
       }
-      float4 *const ka = reinterpret_cast<float4 *>(kvs + slot * D + c);
-      float4 *const sa = reinterpret_cast<float4 *>(scs + slot * D + c);
+      float4 *const ka = reinterpret_cast<float4 *>(st0 + slot * 2 * D + c);
+      float4 *const sa = reinterpret_cast<float4 *>(st0 + slot * 2 * D + D + c);
       ka[0] = make_float4(kv[0], kv[1], kv[2], kv[3]);
       ka[1] = make_float4(kv[4], kv[5], kv[6], kv[7]);
       sa[0] = make_float4(sc[0], sc[1], sc[2], sc[3]);
@@ -158,7 +160,8 @@ __device__ __forceinline__ void compressor_task(float const *part,
 // compressor task t = token t, grid (T, 1, 1); CW: the compressor's GEMM (a
 // gemm_tile in slots: CW::y K parts, CW::v[2] = NW rows). PARAMS {D, R, eps
 // (fp32 bits)}; BUF_SLOTS {gamma (the compressor's norm, [D] bf16), positions
-// ([T] int32), with R = 2 the state ([T][2][R][D] fp32)}, graph tensors; the
+// ([T] int32), with R = 2 the state ([slots][R][2][D] fp32) and the request
+// slots ([T] int64)}, graph tensors; the
 // node's buffer: the latent [T][D] bf16; one counter of its tasks
 template <class SELF,
           class PARAMS,
@@ -180,14 +183,17 @@ __device__ __forceinline__ void run_compressor(Maps const &,
                     CW::y <= 8,
                 "compressor: its GEMM's K parts in slots (at most 8)");
   float *state = nullptr;
+  long long const *req = nullptr;
   if constexpr (R > 1) {
     state = buf_at<float>(g, slot_at<BUF_SLOTS, 2>());
+    req = buf_at<long long const>(g, slot_at<BUF_SLOTS, 3>());
   }
   compressor_task<D, R, CW::v[2], CW::y, PARAMS::v[2]>(
       buf_at<float const>(g, CW::buf),
       buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 0>()),
       buf_at<int const>(g, slot_at<BUF_SLOTS, 1>()),
       state,
+      req,
       buf_at<__nv_bfloat16>(g, SELF::buf),
       g.cnt + SELF::counter,
       tk.x);

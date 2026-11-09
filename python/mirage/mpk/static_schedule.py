@@ -218,10 +218,10 @@ def task_args(node: dict) -> str:
     return ", ".join(args)
 
 
-def task_call(node: dict) -> str:
+def task_call(node: dict, g: str = "g") -> str:
     """One node's call in the kernel loop: static_mk::run_<name> with its template arguments (task_args).
     static_mk::run_topk_route<StaticNode<8, 1, 1, -1, 2>, StaticParams<896, 16>, StaticBufSlots<1>, StaticMapSlots<>, StaticNode<7, 14, 1, -1, 0, 0, 7168, 896, 0>, StaticNode<0, 0, 0>>(maps, g, L, tk)"""
-    return f"static_mk::run_{node['name']}<{task_args(node)}>(maps, g, L, tk)"
+    return f"static_mk::run_{node['name']}<{task_args(node)}>(maps, {g}, L, tk)"
 
 
 def smem_code(nodes: Dict[str, dict]) -> List[str]:
@@ -234,20 +234,20 @@ def smem_code(nodes: Dict[str, dict]) -> List[str]:
             'static_assert(STATIC_SMEM_BYTES <= 227 * 1024, "the dynamic shared memory of one SM");', ""]
 
 
-def case_code(idx: str, node: dict) -> str:
+def case_code(idx: str, node: dict, g: str = "g") -> str:
     """One node's case in the kernel loop. A node whose task type has a dry pass (its layer's `dry`): the task function gets
     `warm` last: false for the node's first task on this SM (its code is not in the instruction cache yet: the task first runs
     its own code on stand-in inputs, no global stores, while its inputs are on their way; the same instructions as the real pass),
     true for the later ones (kernel_code keeps one flag per such node). The flag is a register of the kernel loop, so deciding
     costs almost nothing (checking whether the inputs have already landed would cost loads and a CTA barrier per task).
       case 29: static_mk::run_topk_route<...>(maps, g, L, tk, warm_29); warm_29 = true; break;"""
-    run = task_call(node)
+    run = task_call(node, g)
     if not node["dry"]:
         return f"      case {idx}: {run}; break;"
     return f"      case {idx}: {run[:-1]}, warm_{idx}); warm_{idx} = true; break;"
 
 
-def kernel_code(nodes: Dict[str, dict], profile: bool = False) -> List[str]:
+def kernel_code(nodes: Dict[str, dict], profile: bool = False, parity: bool = False) -> List[str]:
     """layer_kernel:
         __global__ void __launch_bounds__(256, 1) layer_kernel(const __grid_constant__ static_mk::Maps maps, static_mk::G g, StaticTask const *static_tasks) {
           static_mk::KernelLocals L; static_mk::kernel_begin(g, L);
@@ -263,17 +263,21 @@ def kernel_code(nodes: Dict[str, dict], profile: bool = False) -> List[str]:
           static_mk::kernel_end(g, L);
         }
     profile: the timing build: one more kernel parameter, static_times, and per list entry ti thread 0 writes the task's start and
-    lane 0 of every warp writes when its warp left the task (globaltimer ns; plain stores). Without profile the kernel is unchanged."""
+    lane 0 of every warp writes when its warp left the task (globaltimer ns; plain stores). Without profile the kernel is unchanged.
+    parity (StaticMegakernel.reset_parity): one more kernel parameter, g_par1, and the tasks get gp, this launch's G (core.cuh)."""
     lines = ["", "// ---- the kernel ----"]
     if profile:
         lines += ["__device__ __forceinline__ unsigned long long static_now() { unsigned long long t; "
                   "asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(t)); return t; }",
                   f"#define STATIC_TIME(ti) (static_times + ((size_t)blockIdx.x * (static_mk::MAX_TASKS_PER_SM) + (ti)) * {TIME_SLOTS})"]
     extra = ", unsigned long long *static_times" if profile else ""
-    lines += [f"__global__ void __launch_bounds__({THREADS}, 1) layer_kernel(const __grid_constant__ static_mk::Maps maps, static_mk::G g, "
+    par1 = "static_mk::G g_par1, " if parity else ""
+    lines += [f"__global__ void __launch_bounds__({THREADS}, 1) layer_kernel(const __grid_constant__ static_mk::Maps maps, static_mk::G g, {par1}"
               f"StaticTask const *static_tasks{extra}) {{",
-              "  static_mk::KernelLocals L; static_mk::kernel_begin(g, L);",
-              "  StaticTask const *my = static_tasks + blockIdx.x * (static_mk::MAX_TASKS_PER_SM);"]
+              "  static_mk::KernelLocals L; static_mk::kernel_begin(g, L);"]
+    if parity:
+        lines.append("  static_mk::G const &gp = static_mk::dbuf_par ? g_par1 : g;   // this launch's buffer set")
+    lines += ["  StaticTask const *my = static_tasks + blockIdx.x * (static_mk::MAX_TASKS_PER_SM);"]
     lines += [f"  bool warm_{idx} = false;   // a task of node {idx} ran on this SM: its code is in the instruction cache"
               for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])) if node["dry"]]
     lines += [
@@ -285,7 +289,7 @@ def kernel_code(nodes: Dict[str, dict], profile: bool = False) -> List[str]:
         lines.append(f"    L.stage_stamps = STATIC_TIME(ti) + {STAGE_SLOT};   // e.g. GEMM tasks: [0] first load issued, [1] first stage landed")
     lines.append("    switch (tk.node) {")
     for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])):
-        lines.append(case_code(idx, node))
+        lines.append(case_code(idx, node, "gp" if parity else "g"))
     lines.append("    }")
     if profile:
         lines.append("    if ((threadIdx.x & 31) == 0) STATIC_TIME(ti)[1 + threadIdx.x / 32] = static_now();   // this warp left the task")
@@ -336,7 +340,8 @@ def host_code(pk, schedules: List[dict], profile: bool = False) -> List[str]:
         "@CLUSTER@": str(cluster_size(schedules)),
         "@INIT@": f"static_host_init(g_ctx, std::map<std::string, std::string>{{{args_code}}});",
         "@ARGS@": f"std::map<std::string, std::string>{{{args_code}}}",
-        "@LAUNCH_ARGS@": "static_host::g_gpus[gpu].maps, static_host::g_gpus[gpu].g",
+        "@LAUNCH_ARGS@": "static_host::g_gpus[gpu].maps, static_host::g_gpus[gpu].g" +
+                         (", static_host::g1_of(static_host::g_gpus[gpu])" if pk.reset_parity else ""),
         "@THREADS@": str(THREADS), "@SMEM@": "STATIC_SMEM_BYTES",
         "@TASKS@": ", ".join(f"static_tasks_gpu{g}" for g in range(num_gpus)),
         "@MAX_TASKS@": "static_mk::MAX_TASKS_PER_SM",
@@ -363,7 +368,7 @@ def generate_code(pk, schedules: List[dict], profile: bool = False) -> str:
     lines = header_code(pk, nodes, len(schedules), len(schedules[0]["worker_task_queues"]), profile, schedules)
     lines += smem_code(nodes)
     lines += task_tables(schedules)
-    lines += kernel_code(nodes, profile)
+    lines += kernel_code(nodes, profile, pk.reset_parity)
     lines += host_code(pk, schedules, profile)
     return "\n".join(lines)
 

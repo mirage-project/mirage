@@ -125,15 +125,17 @@ def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
 
 
 def build(ws: list, out: str, profile: bool = False, extra_flags: list = None, plan: str = "hand", search: list = None,
-          costs_code: str = "current", time_limit_s: float = 300):
+          costs_code: str = "current", time_limit_s: float = 300, device: int = 0, free_sms: int = 0):
     """Build the graph on len(ws) GPUs (ws: each GPU's tensors), compile its plan (plan "hand": hand_plan; else a plan file;
     search: the solver's plan from these cost record files, starting from that plan -> <out>/plan.json) and load the kernel.
     Return the kernel, each GPU's node buffers (by output tensor name) and the information from compile_plan, with "paths",
-    "mpk" and "plan"."""
+    "mpk" and "plan". free_sms: SMs left out of the launch (no CTA there): a framework's side stream runs on them meanwhile."""
     gpus, w = len(ws), ws[0]
-    mpk = StaticMegakernel(num_gpus=gpus)
+    sms = torch.cuda.get_device_properties(device).multi_processor_count - free_sms
+    mpk = StaticMegakernel(num_gpus=gpus, num_sms=sms)
+    mpk.reset_parity = any("STATIC_RESET_PARITY" in f for f in (extra_flags or []))
     build_graph(mpk, w)
-    p = hand_plan(mpk, torch.cuda.get_device_properties(0).multi_processor_count) if plan == "hand" \
+    p = hand_plan(mpk, sms) if plan == "hand" \
         else compiler.plan_from_file(plan)
     if len(p["lists"]) == 1 and gpus > 1:   # a plan file of one GPU: the same lists on every GPU
         p = dict(p, lists=[copy.deepcopy(p["lists"][0]) for _ in range(gpus)])
@@ -153,13 +155,16 @@ def build(ws: list, out: str, profile: bool = False, extra_flags: list = None, p
     bufs = []
     for wg in ws:   # each GPU's node buffers (not the exchange region's) and the expert node's scratch, on that GPU
         d = wg["x"].device
+        # STATIC_NO_START_BARRIER: the host allocates the buffers reset at each launch (two sets)
+        nb = any("STATIC_NO_START_BARRIER" in f for f in (extra_flags or []))
         bg = {compiler.tname(mpk, n.outputs[0]): torch.zeros(n.info["out_buffer"](n)[0], dtype=torch.uint8, device=d)
-              for n in nodes if n.info["out_buffer"] is not None and not n.info["exchange"]}
+              for n in nodes if n.info["out_buffer"] is not None and not n.info["exchange"] and
+              not (nb and n.info["out_buffer"](n)[1] >= 0 and not n.info["out_buffer"](n)[2])}
         for slot, name in zip(ex.info["buf_slots"], (HQ, HQ_SF)):   # zeros, as the host allocates them (h_q's padding stays 0)
             bg[name] = torch.zeros(mpk._bufs[slot]["fill"](ex)[0], dtype=torch.uint8, device=d)
         bufs.append(bg)
     sk = mpk.compile_static(paths, gpu_tensors=[{**wg, **bg} for wg, bg in zip(ws, bufs)], out_dir=os.path.join(out, "build"),
-                            extra_flags=extra_flags, profile=profile)
+                            extra_flags=extra_flags, profile=profile, device=device)
     print(f"grids {info['grids']}")
     return sk, bufs, dict(info, paths=paths, mpk=mpk, plan=p)
 
@@ -227,7 +232,7 @@ def node_table(info: dict, launches: list) -> None:
     gating = {q.graph_idx for q in (producer_of(t, list(nodes.values())) for t in nodes[pool].inputs) if q}
     per, work = {}, []
     for times, timing in launches:
-        placed, w, _ = launch_durations(schedules, times, [b for b, _ in timing], pool, gating)
+        placed, w, *_ = launch_durations(schedules, times, [b for b, _ in timing], pool, gating)
         work.append(w[0])
         for t, us in placed[0].items():
             per.setdefault(schedules[0]["all_tasks"][t]["node"], []).append(us)

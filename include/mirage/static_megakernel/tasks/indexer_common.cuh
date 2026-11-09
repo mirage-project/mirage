@@ -7,10 +7,14 @@
 
 namespace static_mk {
 
-// the index K cache [T][CAP][IX_ROW] uint8: per compressed position 128 e2m1
-// values (64 bytes, element 2i in the low nibble), then 4 e8m0 scale bytes
-// (byte j: columns 32 j .. 32 j + 31)
+// the index K cache: per compressed position 128 e2m1 values (64 bytes, element
+// 2i in the low nibble) and 4 e8m0 scale bytes (byte j: columns 32 j .. 32 j +
+// 31), IX_ROW bytes a position
 constexpr int IX_HD = 128, IX_ROW = IX_HD / 2 + IX_HD / 32;
+// the cache is in pages of IX_PAGE positions (the framework's layout): a page
+// holds its positions' e2m1 bytes, then their scale bytes, and position j of
+// token t is in page pages[t][j / IX_PAGE] at j % IX_PAGE
+constexpr int IX_PAGE = 128;
 
 // fp4_quant_kernel's scale of a group of 32: amax floored at 6 * 2^-126, times
 // fp32(1 / 6), ceil(log2) from the bits (fast_round_scale) -> e, the scale
