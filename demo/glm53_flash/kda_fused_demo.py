@@ -68,7 +68,8 @@ def run_args(args) -> list:
     """The arguments that decide the graph and the state, for this script in another process (--collect)."""
     return (["--model-dir", args.model_dir, "--layer", str(args.layer), "--tp", str(args.tp), "--gpus", str(args.gpus),
              "--o-parts", str(args.o_parts), "--seed", str(args.seed), "--iters", str(args.iters), "--reps", str(args.reps),
-             "--verify", str(args.verify), "--ring", str(args.ring)] + [f"--nvcc-flag={f}" for f in args.nvcc_flag])
+             "--verify", str(args.verify), "--ring", str(args.ring), "--idle", str(args.idle)] +
+            [f"--nvcc-flag={f}" for f in args.nvcc_flag])
 
 
 def collect(args, mpk, current: dict) -> None:

@@ -13,8 +13,9 @@ with post_attention_layernorm). It patches:
                                     ReplaySSM: the pools read only, the rings and the per-token conv windows written; the
                                     server needs --enable-linear-replayssm-spec)
   Glm5NextDecoderLayer.forward      wrapped when the layers are built (so it wraps whatever forward is in place then, e.g. the
-                                    DSA hook's): a layer with a static KDA layer, in a step of exactly T rows (a decode step,
-                                    or a target-verify step of T / 8 requests), runs SGLang's attn_boundary.prepare, then one
+                                    DSA hook's): a layer with a static KDA layer, in a decode step of n rows (the layer of
+                                    the smallest T >= n; n < T: its first n rows, the others idle: e.g. bs 1 / 2 / 4 on
+                                    T = 8) or a target-verify step of T / 8 requests, runs SGLang's attn_boundary.prepare, then one
                                     launch replaces self_attn + attn_boundary.finish + ffn_boundary.prepare (the stream gets
                                     R', MHCState the FFN's h_post / h_res, the MLP x_ffn; PDL unless KDA_STATIC_PDL=0; a CUDA
                                     graph captures it); other layers and steps: the forward wrapped
@@ -29,6 +30,7 @@ KDA_STATIC_OUT (build directory, default <checkout>/build/sgl_static_kda); KDA_S
 layers' build cache, static_schedule.compile_static: every KDA layer and rank has the same layer.cu, compiled once; default
 <checkout>/build/static_build_cache_kda); KDA_STATIC_ROOT (the mirage checkout, needed by kda_static_boot).
 """
+import itertools
 import os
 
 import torch
@@ -50,14 +52,26 @@ VERIFY_PLAN = {8: os.environ.get("KDA_STATIC_VERIFY_PLAN") or None,      # the v
                16: os.environ.get("KDA_STATIC_VERIFY_PLAN16") or None,   # [R, HL] of one request's tokens)
                32: os.environ.get("KDA_STATIC_VERIFY_PLAN32") or None}
 TOKENS = sorted({int(x) for x in os.environ.get("KDA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8, 16, 32):
-                                                                                                      # a step of T rows runs
-                                                                                                      # the T layer
+                                                                                                      # a decode step of n rows
+                                                                                                      # runs the smallest T >= n
 assert TOKENS and all(t in (8, 16, 32) for t in TOKENS), f"KDA_STATIC_TOKENS {TOKENS}: of 8, 16, 32"
+_STEP_KEYS = itertools.count(1)
 
 
 def _pick(layers: dict, rows: int):
-    """The layer of exactly `rows` tokens, or None."""
-    return layers.get(rows) if isinstance(layers, dict) else None
+    """The layer of the smallest T >= rows (fewer rows: its first rows, the others idle), or None."""
+    if not isinstance(layers, dict) or rows <= 0:
+        return None
+    return next((layers[t] for t in sorted(layers) if rows <= t), None)
+
+
+def _step_key(fb) -> int:
+    """A key of this forward (ForwardBatch): the decode layers of a forward share their own slot list by it (fewer rows
+    than T)."""
+    key = getattr(fb, "_kda_step_key", None)
+    if key is None:
+        key = fb._kda_step_key = next(_STEP_KEYS)
+    return key
 
 
 def _plan_names(plans: dict) -> str:
@@ -196,11 +210,11 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
     mhc, fb = self._kda_mhc, forward_batch
     capturing = torch.cuda.is_current_stream_capturing()
     rows = hidden_states.shape[0] if isinstance(hidden_states, torch.Tensor) else -1
-    st = _pick(self._kda_fused, rows)   # the layer of exactly these rows (a decode step of T requests)
+    st = _pick(self._kda_fused, rows)   # a decode step: the layer of the smallest T >= rows
     fused = st is not None and fb.forward_mode.is_decode() and not (CHECK and capturing)
     # a speculative verify step of bs requests: their draft tokens as rows (the verify build of 8 bs rows)
     bs = int(fb.batch_size) if fb.forward_mode.is_target_verify() else 0
-    stv = _pick(getattr(self, "_kda_verify", None), 8 * bs) if bs else None
+    stv = (getattr(self, "_kda_verify", None) or {}).get(8 * bs) if bs else None
     verify = stv is not None and rows % bs == 0 and 0 < rows // bs <= stv.draft and not (CHECK and capturing)
     if verify:
         st = stv
@@ -234,7 +248,7 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
         if verify:
             x_ffn, R2, hp2, hr2 = stv.run_verify(hidden_states, R, hp, hr, idx, backend.verify_intermediate_state_indices)
         else:
-            x_ffn, R2, hp2, hr2 = st.run_fused(hidden_states, R, hp, hr, idx)
+            x_ffn, R2, hp2, hr2 = st.run_fused(hidden_states, R, hp, hr, idx, step_key=_step_key(fb))
         stream_of(fb).write(R2)
         mhc.h_post, mhc.h_res = hp2, hr2
         if CHECK:

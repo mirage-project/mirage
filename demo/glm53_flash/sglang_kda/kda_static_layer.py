@@ -54,6 +54,8 @@ def exchange_region(nbytes: int, dev, group):
 # kda_decode's requests per task by T: T = 16 / 32 2 / 4 per task (128 tasks: one wave of the 148 SMs; 256 / 512 tasks of one
 # took two / four); T = 8 one each (128 tasks already)
 PAIRS = {16: 2, 32: 4}
+_SLOTS = {}   # T -> {"key": a forward's key, "owner": the StaticKDA whose own slot list that forward's other layers of this T
+              # read, "n": its rows} (run_fused step_key: a decode step of fewer rows than T)
 
 
 def plan_of(mpk, grids: dict) -> dict:
@@ -203,7 +205,7 @@ class StaticKDA:
         self.layer, self.pdl = layer, pdl
         self.inputs = None   # the last run's: "bound" or how they were copied
         self._bound = {}   # graph tensor name -> the address bound now
-        self.binds = {}   # run_verify: per input, bound (True) or copied (False)
+        self.binds = {}   # the last run's: per input, bound (True) or copied (False)
         self._nvalid = None   # run_verify: the draft tokens the layer's nvalid holds
 
     def _bind(self, name: str, ptr: int):
@@ -211,14 +213,45 @@ class StaticKDA:
             self.sk.rebind(name, ptr)
             self._bound[name] = ptr
 
-    def run_fused(self, hidden_states, residual, h_post, h_res, indices):
+    def run_fused(self, hidden_states, residual, h_post, h_res, indices, step_key=None):
         """The fused layer (the module docstring): one launch on the current stream from the attention's input hidden_states
-        [8, H] bf16, the streams residual [8, 4 H] bf16 and the attention's h_post [8, 4] / h_res [8, 16] fp32 (bound when
-        contiguous, else copied) to (x_ffn [8, H] bf16, R' [8, 4 H] bf16, the FFN's h_post [8, 4], h_res [8, 16] fp32): the
-        layer's own buffers (fewer rows than T: those rows of them). indices: the T state slots (-1: idle)."""
+        [n, H] bf16, the streams residual [n, 4 H] bf16 and the attention's h_post [n, 4] / h_res [n, 16] fp32, n <= T rows
+        (bound when they are the first rows of a buffer of at least T rows: backed; else copied into the layer's first
+        rows) to (x_ffn [n, H] bf16, R' [n, 4 H] bf16, the FFN's h_post [n, 4], h_res [n, 16] fp32): the first n rows of the
+        layer's own buffers. indices: the rows' state slots (-1: idle), bound when T of them in int32; else the layer's own
+        slot list (rows n .. T - 1 idle; SGLang's buffer holds other graphs' rows past n), the same for every layer of this
+        T in a forward: with step_key (the forward's key, the hook's) the first layer run in a forward fills it and the
+        others bind to it (_SLOTS; a CUDA graph captures the first layer's fill once)."""
         assert not self.verify
-        n = self._mhc_inputs(hidden_states, residual, h_post, h_res)
-        self._launch(hidden_states, indices)
+        n, T = hidden_states.shape[0], self.T
+        binds = {}
+        for name, src in (("x", hidden_states), ("R_in", residual), ("h_post_in", h_post), ("h_res_in", h_res)):
+            own = self.t[name]
+            src = src.reshape(n, -1)
+            ok = src.dtype == own.dtype and src.shape[1] == own.shape[1] and backed(src, T)
+            self._bind(name, (src if ok else own).data_ptr())
+            if not ok:
+                own[:n].copy_(src)
+            binds[name] = ok
+        shared = _SLOTS.get(T)
+        if n == T and indices.dtype == torch.int32 and indices.is_contiguous():
+            self._bind("rows", indices.data_ptr())
+            binds["rows"] = True
+        elif step_key is not None and shared is not None and shared["key"] == step_key and shared["n"] == n and \
+                shared["owner"] is not self:   # this forward's slot list, in another layer's tensor
+            self._bind("rows", shared["owner"].t["rows"].data_ptr())
+            binds["rows"] = True
+        else:
+            self._bind("rows", self.t["rows"].data_ptr())
+            self.t["rows"][:n].copy_(indices[:n])
+            self.t["rows"][n:].fill_(-1)   # idle rows
+            if step_key is not None:
+                _SLOTS[T] = {"key": step_key, "owner": self, "n": n}
+            binds["rows"] = False
+        self.binds = binds
+        self.inputs = (f"{n} rows; bound: {', '.join(k for k, v in binds.items() if v) or 'none'}; "
+                       f"copied: {', '.join(k for k, v in binds.items() if not v) or 'none'}")
+        self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
         return self.t["x_ffn"][:n], self.t["R_out"][:n], self.t["h_post_out"][:n], self.t["h_res_out"][:n]
 
     def run_verify(self, hidden_states, residual, h_post, h_res, slot: torch.Tensor, icw_row: torch.Tensor):
@@ -264,34 +297,3 @@ class StaticKDA:
                        f"copied: {', '.join(k for k, v in binds.items() if not v) or 'none'}")
         self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
         return self.t["x_ffn"][:rows], self.t["R_out"][:rows], self.t["h_post_out"][:rows], self.t["h_res_out"][:rows]
-
-    def _mhc_inputs(self, hidden_states, residual, h_post, h_res) -> int:
-        """The boundary's inputs bound or copied (their first rows when fewer than T); returns the rows."""
-        n, T = hidden_states.shape[0], self.T
-        assert 0 < n <= T
-        for name, src in (("R_in", residual), ("h_post_in", h_post), ("h_res_in", h_res)):
-            src = src.reshape(src.shape[0], -1)
-            if n == T and src.is_contiguous() and src.dtype == self.t[name].dtype and src.shape[1] == self.t[name].shape[1]:
-                self._bind(name, src.data_ptr())
-            else:
-                self._bind(name, self.t[name].data_ptr())
-                self.t[name][:n].copy_(src[:n])
-        return n
-
-    def _launch(self, hidden_states: torch.Tensor, indices: torch.Tensor):
-        n, T = hidden_states.shape[0], self.T
-        if n == T and hidden_states.dtype == torch.bfloat16 and hidden_states.is_contiguous() and \
-                tuple(hidden_states.shape) == tuple(self.t["x"].shape) and indices.dtype == torch.int32 and \
-                indices.is_contiguous():
-            self._bind("x", hidden_states.data_ptr())
-            self._bind("rows", indices.data_ptr())
-            self.inputs = "bound"
-        else:
-            self._bind("x", self.t["x"].data_ptr())
-            self._bind("rows", self.t["rows"].data_ptr())
-            self.t["x"][:n].copy_(hidden_states)
-            self.t["rows"][:n].copy_(indices[:n])
-            if n < T:
-                self.t["rows"][n:].fill_(-1)   # idle rows
-            self.inputs = f"copied (x {hidden_states.dtype} {tuple(hidden_states.shape)}, slots {indices.dtype})"
-        self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)

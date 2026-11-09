@@ -10,13 +10,14 @@ with post_attention_layernorm). It patches:
                                     buffer of the pooled keys and the tail buffers; its weights: this rank's heads and the
                                     indexer, from the checkpoint); with MTP (the server's speculative_num_draft_tokens) also
                                     the verify layer of T / 8 requests' draft tokens
-  Glm5NextDecoderLayer.forward      a step of exactly T rows (a decode step, or a target-verify step of T / 8 requests): after
+  Glm5NextDecoderLayer.forward      a decode step of n rows on the layer of the smallest T >= n (n < T: its first n rows, the
+                                    others idle: e.g. bs 1 / 2 / 4 on T = 8), or a target-verify step of T / 8 requests: after
                                     attn_boundary.prepare (SGLang's attention mHC pre: x, the streams in the forward's
                                     residual stream, h_post / h_res in the layer's MHCState), one launch replaces self_attn +
                                     attn_boundary.finish + ffn_boundary.prepare: the stream gets R', MHCState the FFN's
                                     h_post / h_res, the MLP x_ffn (PDL unless DSA_STATIC_PDL=0; a CUDA graph captures it).
-                                    Other steps (prefill, other batch sizes): SGLang's layer; the static layer reads and
-                                    writes SGLang's own state, so the two take turns on it
+                                    Other steps (prefill, more rows than the largest T): SGLang's layer; the static layer
+                                    reads and writes SGLang's own state, so the two take turns on it
   MHCState.__init__                 lets each decoder layer find its own
 check (DSA_STATIC_CHECK=1, the default; eager runs): SGLang's path first (attention, all-reduce, post, pre), then the static
 layer on the same inputs; printed: x_ffn, R' - R, h_post, h_res relRMS static vs SGLang, and SGLang's boundary against the
@@ -48,8 +49,8 @@ VERIFY_PLAN = {8: os.environ.get("DSA_STATIC_VERIFY_PLAN", "rr"),      # the ver
                16: os.environ.get("DSA_STATIC_VERIFY_PLAN16", "rr"),   # token)
                32: os.environ.get("DSA_STATIC_VERIFY_PLAN32", "rr")}
 TOKENS = sorted({int(x) for x in os.environ.get("DSA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8, 16, 32):
-                                                                                                      # a step of T rows runs
-                                                                                                      # the T layer
+                                                                                                      # a decode step of n rows
+                                                                                                      # runs the smallest T >= n
 assert TOKENS and all(t in (8, 16, 32) for t in TOKENS), f"DSA_STATIC_TOKENS {TOKENS}: of 8, 16, 32"
 os.environ.setdefault("MIRAGE_STATIC_BUILD_CACHE",
                       os.environ.get("DSA_STATIC_BUILD_CACHE", os.path.join(ROOT, "build", "static_build_cache_dsa")))
@@ -58,8 +59,10 @@ _orig_init_cuda_graphs = _mr.ModelRunner.init_cuda_graphs
 
 
 def _pick(layers: dict, rows: int):
-    """The layer of exactly `rows` tokens, or None."""
-    return layers.get(rows) if isinstance(layers, dict) else None
+    """The layer of the smallest T >= rows (fewer rows: its first rows, the others idle), or None."""
+    if not isinstance(layers, dict) or rows <= 0:
+        return None
+    return next((layers[t] for t in sorted(layers) if rows <= t), None)
 
 
 def _log(msg):
@@ -145,7 +148,8 @@ _STEP_KEYS = itertools.count(1)
 
 
 def _step_key(fb) -> int:
-    """A key of this forward (ForwardBatch): the verify layers of a forward share their per-token metadata by it."""
+    """A key of this forward (ForwardBatch): the layers of a forward share their own per-step metadata by it (a verify
+    step, a decode step of fewer rows than T)."""
     key = getattr(fb, "_mk_step_key", None)
     if key is None:
         key = fb._mk_step_key = next(_STEP_KEYS)
@@ -166,11 +170,11 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
     capturing = torch.cuda.is_current_stream_capturing()
     mhc = getattr(self, "_dsa_mhc", None)
     rows = hidden_states.shape[0] if isinstance(hidden_states, torch.Tensor) else -1
-    st = _pick(getattr(self, "_dsa_fused", None), rows)   # the layer of exactly these rows (a decode step of T requests)
+    st = _pick(getattr(self, "_dsa_fused", None), rows)   # a decode step: the layer of the smallest T >= rows
     fused = st is not None and mhc is not None and fb.forward_mode.is_decode() and not (CHECK and capturing)
     # a speculative verify step of bs requests: their draft tokens as rows (the verify build of 8 bs rows)
     bs = int(fb.batch_size) if fb.forward_mode.is_target_verify() else 0
-    stv = _pick(getattr(self, "_dsa_verify", None), 8 * bs) if bs else None
+    stv = (getattr(self, "_dsa_verify", None) or {}).get(8 * bs) if bs else None
     verify = stv is not None and mhc is not None and rows % bs == 0 and 0 < rows // bs <= stv.verify and \
         not (CHECK and capturing)
     if verify:
@@ -180,7 +184,7 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
         T = st.T
         stream = stream_of(fb)
         R, hp, hr = stream.residual, mhc.h_post, mhc.h_res
-        seq_lens, rpi = fb.seq_lens[:T], fb.req_pool_indices[:T]
+        seq_lens, rpi = fb.seq_lens[:rows], fb.req_pool_indices[:rows]
         if CHECK:   # SGLang's path first, on copies of its inputs
             R, hp, hr, x_in = R.clone(), hp.clone(), hr.clone(), hidden_states.clone()
             y = self.self_attn(positions=positions, hidden_states=hidden_states, forward_batch=fb,
@@ -198,7 +202,7 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
             x_ffn, R2, hp2, hr2 = stv.run_verify(hidden_states, R, hp, hr, fb.seq_lens[:bs], fb.req_pool_indices[:bs],
                                                  step_key=_step_key(fb))
         else:
-            x_ffn, R2, hp2, hr2 = st.run_fused(hidden_states, R, hp, hr, seq_lens, rpi, _dsa_meta())
+            x_ffn, R2, hp2, hr2 = st.run_fused(hidden_states, R, hp, hr, seq_lens, rpi, _dsa_meta(), step_key=_step_key(fb))
         stream_of(fb).write(R2)
         mhc.h_post, mhc.h_res = hp2, hr2
         if CHECK:

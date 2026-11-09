@@ -84,8 +84,9 @@ class StaticMoE:
         "iters"}: run_mhc also returns its x_attn, h_post, h_res (moe_demo.build_graph attn_next). tokens: the rows T of
         this layer (default TOKENS; a process may hold several). bank: another StaticMoE's expert bank of this layer
         (self.bank: the weights shared; then its checkpoint tensors as `weights`, for keep_weights). rows: the live rows
-        (default T): the layer of a speculative verify step of `rows` < T rows (bs x the draft tokens): the rows past them
-        are idle: not routed (moe_demo.build_graph valid_rows: no expert of their own), their outputs unused."""
+        (default T): the layer of a step of `rows` < T live rows (a speculative verify step: bs x the draft tokens; a
+        decode step of bs < T requests): the rows past them are idle: not routed (moe_demo.build_graph valid_rows: no expert
+        of their own), their outputs unused."""
         import moe_demo
         from mirage.mpk import compiler
         from mirage.mpk.static_megakernel import StaticMegakernel

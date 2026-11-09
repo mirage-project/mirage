@@ -18,7 +18,8 @@ attention with the sublayer boundary inside (as Kimi K3's fused layers, #811), b
                CUDA graph buffers: no copy), else copied into the layer's tensors (an eager step's freshly made metadata)
   padding      a CUDA graph of T rows replays with fewer requests: SGLang pads req_pool_indices with 0 and seq_lens with 1;
                request slot 0 is SGLang's dummy (its req_to_token row: the dummy token slot 0), so the padded rows read and
-               write only dummy rows
+               write only dummy rows. A decode step of n < T rows (a CUDA graph of bs 1 / 2 / 4 on the T = 8 layer):
+               run_fused pads rows n .. T - 1 the same way in the layer's own per-step tensors
   launch       launch_stream on the current stream (a CUDA graph captures it); pdl: a programmatic launch, the kernel lets
                the next one launch at its start (-DSTATIC_PDL_TRIGGER=1)
   ranks        built for the tp ranks, each process its own rank alone (compile_static rank / exchange), the exchange region
@@ -60,8 +61,8 @@ def _backed(v: torch.Tensor, rows: int) -> bool:
     return v.untyped_storage().nbytes() - v.storage_offset() * v.element_size() >= rows * rowb
 
 
-_VERIFY_META = {}   # T -> {"key": a forward's key, "owner": the StaticDSA whose own per-token metadata that forward's other
-                    # verify layers of this T read, "n": its rows per request} (run_verify step_key)
+_STEP_META = {}   # T -> {"key": a forward's key, "owner": the StaticDSA whose own per-step metadata that forward's other
+                  # layers of this T read, "n": its rows per request (verify) or requests (decode)} (_step_meta)
 
 
 def _exchange_region(nbytes: int, dev, group):
@@ -207,25 +208,14 @@ class StaticDSA:
                 lambda own: own.copy_(self.req_to_token[rpi.long()][:, ::KV_PAGE][:, :self.maxpp] // KV_PAGE))}
         self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
 
-    def run_verify(self, hidden_states, residual, h_post, h_res, seq_lens, req_pool_indices, step_key=None):
-        """The verify layer (StaticDSA verify): R = self.requests requests' n <= verify draft tokens each as rows (request
-        r's at rows r n .. r n + n - 1 of the inputs, as run_fused's; rows r NT .. of the layer, NT = T / R, the rest
-        idle), the requests' context lengths seq_lens (int32 [>= R]: the tokens are at positions seq_len + t) and request
-        slots req_pool_indices (int64 [>= R]); returns run_fused's outputs' R n rows (contiguous). With R = 1 an input is
-        bound (no copy) when it is the first rows of a buffer of at least T rows (_backed: a CUDA graph's static buffer, a
-        static layer's output; the kernel reads its idle rows too), else copied into the layer's own (self.binds). The
-        per-token metadata (seq_lens, the page tables, the slot; the idle rows' seq_lens 0) is the same for every verify
-        layer of a forward: with step_key (the forward's key, the hook's), the first layer run in a forward fills its own
-        tensors and the others bind theirs to them (_VERIFY_META; a CUDA graph captures the first layer's fills once)."""
-        assert self.verify
-        R, NT = self.requests, self.T // self.requests
-        rows = hidden_states.shape[0]
-        assert rows % R == 0 and 0 < rows // R <= self.verify, \
-            f"run_verify: {rows} rows of {R} requests, the layer's draft tokens {self.verify}"
-        n = rows // R
-        own = self.t
+    def _inputs(self, srcs, rows: int, R: int = 1) -> dict:
+        """x and the boundary's inputs ((graph tensor, source) of `rows` rows: R requests' n = rows / R each): with R = 1 a
+        source is bound (no copy) when it is the first rows of a buffer of at least T rows (_backed: a CUDA graph's static
+        buffer, a static layer's output; the kernel reads its idle rows too), else copied into the layer's own (request r's
+        rows to the layer's rows r T / R ..). Returns name -> bound."""
+        own, n, NT = self.t, rows // R, self.T // R
         binds = {}
-        for name, src in (("x", hidden_states), ("R_in", residual), ("h_post_in", h_post), ("h_res_in", h_res)):
+        for name, src in srcs:
             src = src.reshape(rows, -1)
             ok = R == 1 and src.dtype == own[name].dtype and src.shape[1] == own[name].shape[1] and _backed(src, self.T)
             if ok:
@@ -237,16 +227,44 @@ class StaticDSA:
                 else:
                     own[name].view(R, NT, -1)[:, :n].copy_(src.reshape(R, n, -1))
             binds[name] = ok
+        return binds
+
+    def _step_meta(self, step_key, n: int, fill) -> bool:
+        """The per-step metadata (seq_lens, the page tables, the request slots) of a step that does not read SGLang's: the
+        same for every layer of this T in a forward, so with step_key (the forward's key, the hook's) the first layer run in
+        a forward fills its own tensors (fill(own)) and the others bind theirs to them (_STEP_META; a CUDA graph captures
+        the first layer's fills once). Returns True when bound to another layer's."""
         META = ("seq_lens", "block_table", "req_slots", "pooled_bt")
-        shared = _VERIFY_META.get(self.T)
+        shared = _STEP_META.get(self.T)
         if step_key is not None and shared is not None and shared["key"] == step_key and shared["n"] == n and \
                 shared["owner"] is not self:
             for name in META:   # this forward's metadata, in another layer's tensors
                 self._bind(name, shared["owner"].t[name])
-            binds["meta"] = True
-        else:
-            for name in META:
-                self._bind(name, own[name])
+            return True
+        for name in META:
+            self._bind(name, self.t[name])
+        fill(self.t)
+        if step_key is not None:
+            _STEP_META[self.T] = {"key": step_key, "owner": self, "n": n}
+        return False
+
+    def run_verify(self, hidden_states, residual, h_post, h_res, seq_lens, req_pool_indices, step_key=None):
+        """The verify layer (StaticDSA verify): R = self.requests requests' n <= verify draft tokens each as rows (request
+        r's at rows r n .. r n + n - 1 of the inputs, as run_fused's; rows r NT .. of the layer, NT = T / R, the rest
+        idle), the requests' context lengths seq_lens (int32 [>= R]: the tokens are at positions seq_len + t) and request
+        slots req_pool_indices (int64 [>= R]); returns run_fused's outputs' R n rows (contiguous). The inputs as _inputs
+        (self.binds); the per-token metadata (seq_lens, the page tables, the slot; the idle rows' seq_lens 0) as
+        _step_meta."""
+        assert self.verify
+        R, NT = self.requests, self.T // self.requests
+        rows = hidden_states.shape[0]
+        assert rows % R == 0 and 0 < rows // R <= self.verify, \
+            f"run_verify: {rows} rows of {R} requests, the layer's draft tokens {self.verify}"
+        n = rows // R
+        own = self.t
+        binds = self._inputs((("x", hidden_states), ("R_in", residual), ("h_post_in", h_post), ("h_res_in", h_res)), rows, R)
+
+        def fill(own):
             own["seq_lens"].zero_()
             ar = torch.arange(1, n + 1, dtype=torch.int32, device=own["seq_lens"].device)
             own["seq_lens"].view(R, NT)[:, :n].copy_(seq_lens[:R].to(torch.int32)[:, None] + ar[None, :])
@@ -256,9 +274,7 @@ class StaticDSA:
             own["req_slots"].view(R, NT)[:, :n].copy_(rpi[:, None].expand(R, n))
             own["pooled_bt"].view(R, NT, -1)[:, :n].copy_(
                 (row[:, ::KV_PAGE][:, :self.maxpp] // KV_PAGE)[:, None, :].expand(R, n, -1))
-            if step_key is not None:
-                _VERIFY_META[self.T] = {"key": step_key, "owner": self, "n": n}
-            binds["meta"] = False
+        binds["meta"] = self._step_meta(step_key, n, fill)
         self.binds = binds
         self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
         if R == 1:
@@ -272,17 +288,35 @@ class StaticDSA:
             outs.append(g[:rows])
         return tuple(outs)
 
-    def run_fused(self, hidden_states, residual, h_post, h_res, seq_lens, req_pool_indices, meta=None):
+    def run_fused(self, hidden_states, residual, h_post, h_res, seq_lens, req_pool_indices, meta=None, step_key=None):
         """The decode layer (the module docstring): one launch on the current stream from the attention's input
-        hidden_states [T, H] bf16, the streams residual [T, 4 H] bf16 and the attention's h_post [T, 4] / h_res [T, 16] fp32
-        (bound when contiguous, else copied) to (x_ffn [T, H] bf16, R' [T, 4 H] bf16, the FFN's h_post [T, 4], h_res
-        [T, 16] fp32): the layer's own buffers. The other inputs as _launch."""
-        for name, src in (("R_in", residual), ("h_post_in", h_post), ("h_res_in", h_res)):
-            src = src.reshape(src.shape[0], -1)
-            if src.is_contiguous() and src.dtype == self.t[name].dtype and src.shape[1] == self.t[name].shape[1]:
-                self._bind(name, src)
-            else:
-                self._bind(name, self.t[name])
-                self.t[name].copy_(src[:self.T])
-        self._launch(hidden_states, seq_lens, req_pool_indices, meta)
-        return self.t["x_ffn"], self.t["R_out"], self.t["h_post_out"], self.t["h_res_out"]
+        hidden_states [n, H] bf16, the streams residual [n, 4 H] bf16 and the attention's h_post [n, 4] / h_res [n, 16]
+        fp32, n <= T rows, to (x_ffn [n, H] bf16, R' [n, 4 H] bf16, the FFN's h_post [n, 4], h_res [n, 16] fp32): the
+        first n rows of the layer's own buffers. n = T: the inputs bound when contiguous, else copied; the other inputs as
+        _launch. n < T requests (a CUDA graph of fewer rows): the inputs as _inputs; the per-step metadata from seq_lens /
+        req_pool_indices' first n entries, rows n .. T - 1 padded as SGLang pads a CUDA graph (request slot 0, seq_len 1),
+        as _step_meta (SGLang's metadata buffers hold other graphs' rows past n)."""
+        n, T = hidden_states.shape[0], self.T
+        if n < T:
+            binds = self._inputs((("x", hidden_states), ("R_in", residual), ("h_post_in", h_post), ("h_res_in", h_res)), n)
+
+            def fill(own):
+                own["seq_lens"][:n].copy_(seq_lens[:n])
+                own["seq_lens"][n:].fill_(1)
+                own["req_slots"][:n].copy_(req_pool_indices[:n])
+                own["req_slots"][n:].zero_()
+                own["block_table"].copy_(self.req_to_token.index_select(0, own["req_slots"]))
+                own["pooled_bt"].copy_(own["block_table"][:, ::KV_PAGE][:, :self.maxpp] // KV_PAGE)
+            binds["meta"] = self._step_meta(step_key, n, fill)
+            self.binds = binds
+            self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
+        else:
+            for name, src in (("R_in", residual), ("h_post_in", h_post), ("h_res_in", h_res)):
+                src = src.reshape(src.shape[0], -1)
+                if src.is_contiguous() and src.dtype == self.t[name].dtype and src.shape[1] == self.t[name].shape[1]:
+                    self._bind(name, src)
+                else:
+                    self._bind(name, self.t[name])
+                    self.t[name].copy_(src[:T])
+            self._launch(hidden_states, seq_lens, req_pool_indices, meta)
+        return self.t["x_ffn"][:n], self.t["R_out"][:n], self.t["h_post_out"][:n], self.t["h_res_out"][:n]
