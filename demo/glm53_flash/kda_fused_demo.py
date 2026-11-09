@@ -56,9 +56,10 @@ from mirage.mpk.static_harness import Harness  # noqa: E402
 from mirage.mpk.static_megakernel import StaticMegakernel  # noqa: E402
 
 T, HC, H = ksl.T, ksl.HC, dfd.H
-SLOTS = max(16, T)   # the state slots of the T tokens (T = 32: slots 16 .. 31 after the 16, in a fixed shuffle)
+SLOTS = max(16, T)   # the state slots of the T tokens (T = 32 / 64: slots 16 .. T - 1 after the 16, in a fixed shuffle)
 ROWS = ([3, 5, 0, 7, 9, 11, 2, 14, 1, 4, 6, 8, 10, 12, 13, 15] + [19, 24, 16, 30, 21, 27, 17, 25, 22, 31, 18, 28, 20, 26, 23,
-                                                                     29])[:T]
+                                                                     29]
+        + [32 + (i * 23) % 32 for i in range(32)])[:T]
 FLUSH_BYTES = 512 << 20
 WARM = 2   # timed launches left out of the cost records
 bf, relrms = ref.bf, dfd.relrms

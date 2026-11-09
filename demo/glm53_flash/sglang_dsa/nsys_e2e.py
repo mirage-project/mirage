@@ -17,7 +17,7 @@ import statistics as st
 import sys
 
 LABEL = {"off_bs1": "bs1 解码", "off_bs2": "bs2 解码", "off_bs4": "bs4 解码", "off_bs8": "bs8 解码", "off_bs16": "bs16 解码",
-         "off_bs32": "bs32 解码"}
+         "off_bs32": "bs32 解码", "off_bs64": "bs64 解码"}
 LENS = (256, 4000)
 
 

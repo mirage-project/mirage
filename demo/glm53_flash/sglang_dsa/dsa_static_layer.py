@@ -39,8 +39,8 @@ sys.path.insert(0, os.path.join(ROOT, "demo", "glm53_flash"))
 
 TOKENS = int(os.environ.get("STATIC_TOKENS", "8"))   # the default of StaticDSA(tokens=): a process may build several T
 # sparse_mla's splits per token by T (of dsa_layer.MLA_TILES): T = 8: 18 (two tiles each, 144 tasks); T = 16: 9 (four tiles
-# each, 144 tasks: one wave of the 148 SMs); T = 32: 4 (nine tiles each, 128 tasks)
-SPLITS = {8: 18, 16: 9, 32: 4}
+# each, 144 tasks: one wave of the 148 SMs); T = 32: 4 (nine tiles each, 128 tasks); T = 64: 2 (18 tiles each, 128 tasks)
+SPLITS = {8: 18, 16: 9, 32: 4, 64: 2}
 KV_PAGE = 256                   # SGLang's DSA KV page (tokens): one page of the index-K buffer (64 pools)
 PHYS_PAGE = 64                  # SGLang's DSA real_page_table pages (tokens): pooled_real_page_table takes every 4th
 

@@ -22,10 +22,10 @@ with post_attention_layernorm). It patches:
 check (DSA_STATIC_CHECK=1, the default; eager runs): SGLang's path first (attention, all-reduce, post, pre), then the static
 layer on the same inputs; printed: x_ffn, R' - R, h_post, h_res relRMS static vs SGLang, and SGLang's boundary against the
 formulas the static layer follows (the static layer's outputs are kept).
-Env: DSA_STATIC_LAYERS; DSA_STATIC_CHECK (1 / 0); DSA_STATIC_PDL (1 / 0); DSA_STATIC_TOKENS (8, 16, 32: the T of the layers);
-DSA_STATIC_FUSED_PLAN, DSA_STATIC_FUSED_PLAN16, DSA_STATIC_FUSED_PLAN32 (the decode layers' plan files by T: dsa_fused_demo
---search, e.g. dsa_fused_plan_long.json here, or rr, the default); DSA_STATIC_VERIFY_PLAN, DSA_STATIC_VERIFY_PLAN16,
-DSA_STATIC_VERIFY_PLAN32 (the verify layers', dsa_fused_demo --verify --search, or rr); DSA_STATIC_OUT (build
+Env: DSA_STATIC_LAYERS; DSA_STATIC_CHECK (1 / 0); DSA_STATIC_PDL (1 / 0); DSA_STATIC_TOKENS (8, 16, 32, 64: the T of the layers);
+DSA_STATIC_FUSED_PLAN, DSA_STATIC_FUSED_PLAN16 / 32 / 64 (the decode layers' plan files by T: dsa_fused_demo
+--search, e.g. dsa_fused_plan_long.json here, or rr, the default); DSA_STATIC_VERIFY_PLAN, DSA_STATIC_VERIFY_PLAN16 / 32 /
+64 (the verify layers', dsa_fused_demo --verify --search, or rr); DSA_STATIC_OUT (build
 directory, default <checkout>/build/sgl_static_dsa); DSA_STATIC_BUILD_CACHE (the build cache, static_schedule.compile_static:
 every layer and rank has the same layer.cu, compiled once; default <checkout>/build/static_build_cache_dsa); DSA_STATIC_ROOT
 (the mirage checkout, default this one).
@@ -44,14 +44,16 @@ CHECK = os.environ.get("DSA_STATIC_CHECK", "1") != "0"
 PDL = os.environ.get("DSA_STATIC_PDL", "1") != "0"
 FUSED_PLAN = {8: os.environ.get("DSA_STATIC_FUSED_PLAN", "rr"),      # the layers' plans by T (a plan file is of one T's
               16: os.environ.get("DSA_STATIC_FUSED_PLAN16", "rr"),   # graph: the grids differ)
-              32: os.environ.get("DSA_STATIC_FUSED_PLAN32", "rr")}
+              32: os.environ.get("DSA_STATIC_FUSED_PLAN32", "rr"),
+              64: os.environ.get("DSA_STATIC_FUSED_PLAN64", "rr")}
 VERIFY_PLAN = {8: os.environ.get("DSA_STATIC_VERIFY_PLAN", "rr"),      # the verify layers' (another graph: kpool_update per
                16: os.environ.get("DSA_STATIC_VERIFY_PLAN16", "rr"),   # token)
-               32: os.environ.get("DSA_STATIC_VERIFY_PLAN32", "rr")}
-TOKENS = sorted({int(x) for x in os.environ.get("DSA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8, 16, 32):
+               32: os.environ.get("DSA_STATIC_VERIFY_PLAN32", "rr"),
+               64: os.environ.get("DSA_STATIC_VERIFY_PLAN64", "rr")}
+TOKENS = sorted({int(x) for x in os.environ.get("DSA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8 .. 64):
                                                                                                       # a decode step of n rows
                                                                                                       # runs the smallest T >= n
-assert TOKENS and all(t in (8, 16, 32) for t in TOKENS), f"DSA_STATIC_TOKENS {TOKENS}: of 8, 16, 32"
+assert TOKENS and all(t in (8, 16, 32, 64) for t in TOKENS), f"DSA_STATIC_TOKENS {TOKENS}: of 8, 16, 32, 64"
 os.environ.setdefault("MIRAGE_STATIC_BUILD_CACHE",
                       os.environ.get("DSA_STATIC_BUILD_CACHE", os.path.join(ROOT, "build", "static_build_cache_dsa")))
 OUT = os.environ.get("DSA_STATIC_OUT", os.path.join(ROOT, "build", "sgl_static_dsa"))

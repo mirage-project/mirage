@@ -40,7 +40,7 @@ This document covers:
 | `sglang_kda/kda_static_hook.py` | Same, with KDA as the attention (in_proj, kda_decode, o_proj) |
 | `sglang_moe/moe_static_hook.py` | Router, experts (the shared expert is in the experts queue too), all-reduce, FFN mHC post; in `mhc_pre` mode also the next layer's attention mHC pre |
 
-Prefill is not replaced. Static layers are built per number of rows per step, T ∈ {8, 16, 32}; a decode step uses the
+Prefill is not replaced. Static layers are built per number of rows per step, T ∈ {8, 16, 32, 64}; a decode step uses the
 smallest T not below its row count:
 
 - **DSA/KDA**: with fewer rows than T (bs 1/2/4 on T = 8) the rows past the requests are idle, padded as SGLang pads a
@@ -56,7 +56,7 @@ smallest T not below its row count:
 | Scenario | Configuration | Static layers used |
 |---|---|---|
 | `off_bs1` / `off_bs2` / `off_bs4` | plain decode, bs 1/2/4 | decode layers, T = 8 (rows past bs idle; MoE build of bs live rows) |
-| `off_bs8` / `off_bs16` / `off_bs32` | plain decode, bs 8/16/32 | decode layers, T = 8/16/32 |
+| `off_bs8` / `off_bs16` / `off_bs32` / `off_bs64` | plain decode, bs 8/16/32/64 | decode layers, T = 8/16/32/64 |
 
 ---
 
@@ -98,8 +98,8 @@ C=$MIRAGE/demo/glm53_flash/sglang_dsa/sgl_chain.py
 P() { for s in "$@"; do for p in 256 4000; do echo -n "prof_base_${s}_p$p prof_all3ppf_${s}_p$p "; done; done; }
 
 $SGL_PY $C check_all3p check_bs1_attn check_bs1_moe4l check_bs2_attn check_bs2_moe4l check_bs4_attn check_bs4_moe4l
-$SGL_PY $C check_t16_bs16_attn check_t16_bs16_moe4l check_t32_bs32_attn check_t32_bs32_moe4l
-$SGL_PY $C $(P off_bs1 off_bs2 off_bs4 off_bs8 off_bs16 off_bs32)   # nsys end to end
+$SGL_PY $C check_t16_bs16_attn check_t16_bs16_moe4l check_t32_bs32_attn check_t32_bs32_moe4l check_t64_bs64_attn check_t64_bs64_moe4l
+$SGL_PY $C $(P off_bs1 off_bs2 off_bs4 off_bs8 off_bs16 off_bs32 off_bs64)   # nsys end to end
 python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md        # the table
 ```
 
@@ -120,8 +120,8 @@ python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md     
 | `LD_LIBRARY_PATH=$MIRAGE_Z3_LIB` | Lets mirage's core load z3 4.16 |
 | `DSA/KDA/MOE_STATIC_LAYERS` | `all` or layer ids; unset: nothing replaced |
 | `DSA_STATIC_CHECK`, `MOE_STATIC_CHECK` | **Both default to 1; set them to 0 for performance runs**: in check mode the static layers are not used during CUDA graph capture |
-| `DSA/KDA/MOE_STATIC_TOKENS` | The T values to build, e.g. `8,16,32` |
-| `DSA_STATIC_FUSED_PLAN{,16,32}`, `KDA_STATIC_PLAN{,16,32}`, `MOE_STATIC_PLAN{,16,32}` | Plan file per T; unset: round robin |
+| `DSA/KDA/MOE_STATIC_TOKENS` | The T values to build, e.g. `8,16,32,64` |
+| `DSA_STATIC_FUSED_PLAN{,16,32,64}`, `KDA_STATIC_PLAN{,16,32,64}`, `MOE_STATIC_PLAN{,16,32,64}` | Plan file per T; unset: round robin |
 | `MOE_STATIC_END` | `mhc` or `mhc_pre` (the last layer is always `mhc`) |
 | `MOE_STATIC_ROWS` | Live row counts below their T that get a MoE build of their own, e.g. `1,2,4` (the chain sets bs for bs 1/2/4) |
 | `STATIC_L2_PREFETCH_MB` | L2 prefetch budget (MB) |
@@ -159,11 +159,11 @@ python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md     
 `DSA_PLAN` / `KDA_PLAN` / `MOE_PLAN` in `sgl_chain.py` decide which plan each run uses. They are the best plans measured on
 B200 (148 SMs); a missing file means round robin:
 
-| Layer | T=8 | T=16 | T=32 |
-|---|---|---|---|
-| DSA decode | `sglang_dsa/dsa_fused_plan_{short,long}.json` | `dsa_fused_plan16_{short,long}.json` | round robin |
-| KDA decode | round robin | round robin | round robin |
-| MoE (`mhc_pre`) | `sglang_moe/moe_plan_mhc_pre.json` | `moe_plan16_mhc_pre.json` | round robin |
+| Layer | T=8 | T=16 | T=32 | T=64 |
+|---|---|---|---|---|
+| DSA decode | `sglang_dsa/dsa_fused_plan_{short,long}.json` | `dsa_fused_plan16_{short,long}.json` | round robin | long: `dsa_fused_plan64_long.json`; short: round robin |
+| KDA decode | round robin | round robin | round robin | round robin |
+| MoE (`mhc_pre`) | `sglang_moe/moe_plan_mhc_pre.json` | `moe_plan16_mhc_pre.json` | round robin | round robin |
 
 Check runs such as `*_moe4l` end with `mhc`; at T=16 they use `moe_plan16_mhc.json`.
 

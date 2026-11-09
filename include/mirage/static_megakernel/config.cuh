@@ -31,15 +31,21 @@ constexpr int NSM = STATIC_SMS; // CTAs of the launch, one per SM
 // ACC_STAGES T in all, and the pieces' second accumulator set
 // (scale_promotion.cuh PROMO_COL1) at 512 - 2 ACC_STAGES T. T = 32 keeps 3
 // ticks (columns 0 .. 191 and 320 .. 511: 4 would be 256 and run into the
-// scale chunks at 232 .. 263).
-static_assert(T == 8 || T == 16 || T == 32,
-              "the GEMM ring (runtime.cuh) is written for 8, 16 or 32 tokens: "
-              "MMA N = T, T accumulator columns per issuer");
-constexpr int ACC_STAGES = T <= 16 ? 4 : 3; // TMEM accumulator ticks
-static_assert(ACC_STAGES >= 2 && 2 * ACC_STAGES * T <= 512 - 264 &&
+// scale chunks at 232 .. 263); T = 64 two, all 512 columns (its FP8 MMAs
+// run unscaled: no scale chunk in TMEM, runtime.cuh mma_f8).
+static_assert(T == 8 || T == 16 || T == 32 || T == 64,
+              "the GEMM ring (runtime.cuh) is written for 8, 16, 32 or 64 "
+              "tokens: MMA N = T, T accumulator columns per issuer");
+constexpr int ACC_STAGES = T <= 16   ? 4
+                           : T == 32 ? 3
+                                     : 2; // TMEM accumulator
+                                          // ticks
+static_assert(ACC_STAGES >= 2 &&
+                  (T == 64 ? 4 * ACC_STAGES * T <= 512
+                           : 2 * ACC_STAGES * T <= 512 - 264) &&
                   ACC_STAGES <= 4,
               "the accumulator ticks: both sets clear of the scale chunks "
-              "(columns 232 .. 263), at most 4 barriers each");
+              "(columns 232 .. 263; T = 64: none), at most 4 barriers each");
 // tick -> its columns' index and its round (the barriers' parity: round & 1)
 __host__ __device__ constexpr int acc_slot(int tick) {
   return (int)((unsigned)tick % (unsigned)ACC_STAGES);
@@ -50,8 +56,11 @@ __host__ __device__ constexpr int acc_round(int tick) {
 
 // ---- pipeline depths ----
 // stages of the weight ring (6 do not fit in shared memory next to
-// moe_experts' shared tables; T = 32: 4, the activation's T x 256 B a stage)
-constexpr int SMAX = T <= 16 ? 5 : 4; // static_megakernel.ring_stages
+// moe_experts' shared tables; T = 32: 4, T = 64: 3, the activation's T x 256 B
+// a stage)
+constexpr int SMAX = T <= 16   ? 5
+                     : T == 32 ? 4
+                               : 3; // static_megakernel.ring_stages
 constexpr int W2QD = 4; // entries in moe_experts' shared-memory copy (loader ->
                         // issuers / epilogue; runtime.cuh Rt)
 

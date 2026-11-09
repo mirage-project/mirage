@@ -25,6 +25,14 @@ __host__ __device__ constexpr size_t zq32_bytes(int L) {
   return (size_t)T * L + (size_t)(L / 128) * T * 4;
 }
 
+// x / s from r, the correctly rounded 1 / s: q + r (x - q s), the remainder
+// exact by the FMA, is the correctly rounded quotient (Markstein), in a few
+// instructions: __fdiv_rn per value made the loop below issue-bound (T = 64)
+__device__ __forceinline__ float gq_div(float x, float s, float r) {
+  float const q = __fmul_rn(x, r);
+  return __fmaf_rn(r, __fmaf_rn(-q, s, x), q);
+}
+
 // ZOFF: the output's offset in the exchange region
 template <size_t ZOFF, int L>
 __device__ __forceinline__ void group_quant_task(G const &g,
@@ -48,23 +56,35 @@ __device__ __forceinline__ void group_quant_task(G const &g,
                  : "l"(x + (size_t)(TPW * warp + i) * L + kt * 128 + 4 * lane)
                  : "memory");
   }
+  // the amax of every token of the warp first: TPW independent shuffle chains,
+  // interleaved (one token after the other: a chain of shuffles per token)
+  float2 a[TPW], b[TPW];
+  float amax[TPW];
+#pragma unroll
+  for (int i = 0; i < TPW; i++) {
+    a[i] = __bfloat1622float2(
+        *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].x));
+    b[i] = __bfloat1622float2(
+        *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].y));
+    amax[i] = fmaxf(fmaxf(fabsf(a[i].x), fabsf(a[i].y)),
+                    fmaxf(fabsf(b[i].x), fabsf(b[i].y)));
+  }
+#pragma unroll
+  for (int d = 16; d > 0; d >>= 1) { // amax of the 32 lanes
+#pragma unroll
+    for (int i = 0; i < TPW; i++) {
+      amax[i] = fmaxf(amax[i], __shfl_xor_sync(0xffffffffu, amax[i], d));
+    }
+  }
 #pragma unroll
   for (int i = 0; i < TPW; i++) {
     int const t = TPW * warp + i;
-    float2 const a = __bfloat1622float2(
-                     *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].x)),
-                 b = __bfloat1622float2(
-                     *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].y));
-    float amax =
-        fmaxf(fmaxf(fabsf(a.x), fabsf(a.y)), fmaxf(fabsf(b.x), fabsf(b.y)));
-    for (int d = 16; d > 0; d >>= 1) { // amax of the 32 lanes
-      amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, d));
-    }
-    float const s = fmaxf(amax, 1.0e-10f) * (1.0f / 448.0f);
-    uint32_t const q = (uint32_t)cvt_e4m3(__fdiv_rn(a.x, s)) |
-                       ((uint32_t)cvt_e4m3(__fdiv_rn(a.y, s)) << 8) |
-                       ((uint32_t)cvt_e4m3(__fdiv_rn(b.x, s)) << 16) |
-                       ((uint32_t)cvt_e4m3(__fdiv_rn(b.y, s)) << 24);
+    float const s = fmaxf(amax[i], 1.0e-10f) * (1.0f / 448.0f);
+    float const r = __frcp_rn(s);
+    uint32_t const q = (uint32_t)cvt_e4m3_nv(gq_div(a[i].x, s, r)) |
+                       ((uint32_t)cvt_e4m3_nv(gq_div(a[i].y, s, r)) << 8) |
+                       ((uint32_t)cvt_e4m3_nv(gq_div(b[i].x, s, r)) << 16) |
+                       ((uint32_t)cvt_e4m3_nv(gq_div(b[i].y, s, r)) << 24);
     if (lane == 0) {
       scale_s[t] = s;
     }

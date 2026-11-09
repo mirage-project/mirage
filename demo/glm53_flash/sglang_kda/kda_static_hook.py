@@ -23,9 +23,9 @@ with post_attention_layernorm). It patches:
 check (KDA_STATIC_CHECK=1; eager runs): SGLang's path first (attention, all-reduce, post, pre) on the same states (put back
 after), then the static layer; printed: x_ffn, R' - R, h_post, h_res relRMS static vs SGLang, the states (the static layer's
 kept); a verify step also the ring (v, k, the decay, beta) and the windows against SGLang's.
-Env: KDA_STATIC_LAYERS; KDA_STATIC_CHECK (0 / 1); KDA_STATIC_PDL (1 / 0); KDA_STATIC_TOKENS (8, 16, 32: the T of the layers);
-KDA_STATIC_PLAN, KDA_STATIC_PLAN16, KDA_STATIC_PLAN32 (the decode layers' plan files by T, compiler.write_plan_file; default
-their round robin); KDA_STATIC_VERIFY_PLAN, KDA_STATIC_VERIFY_PLAN16, KDA_STATIC_VERIFY_PLAN32 (the verify layers');
+Env: KDA_STATIC_LAYERS; KDA_STATIC_CHECK (0 / 1); KDA_STATIC_PDL (1 / 0); KDA_STATIC_TOKENS (8, 16, 32, 64: the T of the layers);
+KDA_STATIC_PLAN, KDA_STATIC_PLAN16 / 32 / 64 (the decode layers' plan files by T, compiler.write_plan_file; default
+their round robin); KDA_STATIC_VERIFY_PLAN, KDA_STATIC_VERIFY_PLAN16 / 32 / 64 (the verify layers');
 KDA_STATIC_OUT (build directory, default <checkout>/build/sgl_static_kda); KDA_STATIC_BUILD_CACHE (the
 layers' build cache, static_schedule.compile_static: every KDA layer and rank has the same layer.cu, compiled once; default
 <checkout>/build/static_build_cache_kda); KDA_STATIC_ROOT (the mirage checkout, needed by kda_static_boot).
@@ -47,14 +47,16 @@ PDL = os.environ.get("KDA_STATIC_PDL", "1") != "0"
 CHECK = os.environ.get("KDA_STATIC_CHECK", "0") == "1"
 PLAN = {8: os.environ.get("KDA_STATIC_PLAN") or None,      # the layers' plan files by T (a plan file is of one T's graph)
         16: os.environ.get("KDA_STATIC_PLAN16") or None,
-        32: os.environ.get("KDA_STATIC_PLAN32") or None}
+        32: os.environ.get("KDA_STATIC_PLAN32") or None,
+        64: os.environ.get("KDA_STATIC_PLAN64") or None}
 VERIFY_PLAN = {8: os.environ.get("KDA_STATIC_VERIFY_PLAN") or None,      # the verify layers' (another graph: kda_decode
                16: os.environ.get("KDA_STATIC_VERIFY_PLAN16") or None,   # [R, HL] of one request's tokens)
-               32: os.environ.get("KDA_STATIC_VERIFY_PLAN32") or None}
-TOKENS = sorted({int(x) for x in os.environ.get("KDA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8, 16, 32):
+               32: os.environ.get("KDA_STATIC_VERIFY_PLAN32") or None,
+               64: os.environ.get("KDA_STATIC_VERIFY_PLAN64") or None}
+TOKENS = sorted({int(x) for x in os.environ.get("KDA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8 .. 64):
                                                                                                       # a decode step of n rows
                                                                                                       # runs the smallest T >= n
-assert TOKENS and all(t in (8, 16, 32) for t in TOKENS), f"KDA_STATIC_TOKENS {TOKENS}: of 8, 16, 32"
+assert TOKENS and all(t in (8, 16, 32, 64) for t in TOKENS), f"KDA_STATIC_TOKENS {TOKENS}: of 8, 16, 32, 64"
 _STEP_KEYS = itertools.count(1)
 
 

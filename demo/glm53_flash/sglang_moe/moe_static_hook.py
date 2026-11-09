@@ -29,7 +29,7 @@ h_post to the next layer's MHCState (read_attn_input patched: the carry instead 
 runs between the two layers' kernels; the last layer's MoE ends as mhc. check: also x_attn, h_res, h_post against SGLang's
 hc_attn_pre on its own streams.
 Env: MOE_STATIC_LAYERS; MOE_STATIC_CHECK (1 / 0); MOE_STATIC_PDL (1 / 0); MOE_STATIC_END (mhc / mhc_pre); MOE_STATIC_TOKENS
-(8, 16, 32: the T of the layers); MOE_STATIC_PLAN, MOE_STATIC_PLAN16, MOE_STATIC_PLAN32 (the layers' plan files by T, moe_demo
+(8, 16, 32, 64: the T of the layers); MOE_STATIC_PLAN, MOE_STATIC_PLAN16 / 32 / 64 (the layers' plan files by T, moe_demo
 --search of the same --end, one GPU's lists, e.g. moe_plan_mhc_pre.json here; default: round robin of moe_demo's grids);
 MOE_STATIC_VERIFY_PLAN, MOE_STATIC_VERIFY_PLAN16, MOE_STATIC_VERIFY_PLAN32 (the verify layers'); MOE_STATIC_ROWS (the live
 rows of decode steps that get a build of their own, e.g. 1,2,4: a decode step of n < T rows without one runs the T layer
@@ -57,15 +57,17 @@ PDL = os.environ.get("MOE_STATIC_PDL", "1") != "0"
 END = os.environ.get("MOE_STATIC_END", "mhc")
 PLAN_FILE = {8: os.environ.get("MOE_STATIC_PLAN") or None,      # the layers' plan files by T (a plan file is of one T's
              16: os.environ.get("MOE_STATIC_PLAN16") or None,   # graph: the grids differ)
-             32: os.environ.get("MOE_STATIC_PLAN32") or None}
+             32: os.environ.get("MOE_STATIC_PLAN32") or None,
+             64: os.environ.get("MOE_STATIC_PLAN64") or None}
 VERIFY_PLAN_FILE = {8: os.environ.get("MOE_STATIC_VERIFY_PLAN") or None,      # the verify layers' (moe_demo --valid-rows;
                                                                               # T = 8 without one: the decode plan)
                     16: os.environ.get("MOE_STATIC_VERIFY_PLAN16") or None,
-                    32: os.environ.get("MOE_STATIC_VERIFY_PLAN32") or None}
-TOKENS = sorted({int(x) for x in os.environ.get("MOE_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8, 16, 32):
+                    32: os.environ.get("MOE_STATIC_VERIFY_PLAN32") or None,
+                    64: os.environ.get("MOE_STATIC_VERIFY_PLAN64") or None}
+TOKENS = sorted({int(x) for x in os.environ.get("MOE_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8 .. 64):
                                                                                                       # a step of n rows runs
                                                                                                       # the smallest T >= n
-assert TOKENS and all(t in (8, 16, 32) for t in TOKENS), f"MOE_STATIC_TOKENS {TOKENS}: of 8, 16, 32"
+assert TOKENS and all(t in (8, 16, 32, 64) for t in TOKENS), f"MOE_STATIC_TOKENS {TOKENS}: of 8, 16, 32, 64"
 # decode steps of n live rows below their T: n -> that T (a build of n live rows of the T layer's graph)
 ROWS = {n: next(t for t in TOKENS if n <= t) for n in sorted({int(x) for x in os.environ.get("MOE_STATIC_ROWS", "").split(",")
                                                               if x.strip()}) if 0 < n < TOKENS[-1] and n not in TOKENS}

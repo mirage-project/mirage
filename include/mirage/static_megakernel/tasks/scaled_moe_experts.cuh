@@ -19,7 +19,10 @@
 //      b. h = SiLU(gate) up.
 //      c. h -> h_q. A group of 128 features is two items, one queue entry on
 //         one SM: the second quantizes the group and adds 2 to CHQ[slot]
-//         (h_quant_group_tok). The shared experts' slots come first.
+//         (h_quant_group_tok). The shared experts' slots come first. At most
+//         NSM items (a small batch): item i on SM i instead, before its queue
+//         entries, the two SMs of a group exchanging their amax
+//         (h_quant_half_tok).
 //   2. W2 entries contain two tiles. The last NSM tiles are in one-tile
 //      entries.
 //      A tile is (slot, 128-row output tile):
@@ -81,7 +84,8 @@ template <int HQ_,
           int IR_,
           int LIMIT_ = 0,
           int PROF_ = -1,
-          int SHARED_ = 0>
+          int SHARED_ = 0,
+          int LIVE_ = T>
 struct Slots {
   static constexpr int HQ = HQ_, HSF = HSF_, CNT = CNT_, W2NEXT = CNT_ + 32,
                        CHQ = CNT_ + 64;
@@ -95,7 +99,8 @@ struct Slots {
                                                        // last slots)
   static constexpr int NPAIR = T * K; // routing pairs of a step
   static constexpr int NSLOT =
-      T * K; // expert slots: at most every pair its own expert
+      T * K < NE ? T * K : NE; // expert slots: at most every pair its own
+                               // expert, at most every expert (T = 64)
   static constexpr int KT_LAT = LAT / 128; // K tiles of z_q (W13's K)
   static constexpr int MT13 =
       IR /
@@ -104,6 +109,19 @@ struct Slots {
   static constexpr int KT2 = IR / 128;  // W2 K tiles
   static_assert(LAT % 128 == 0 && IR % 128 == 0,
                 "scaled_moe_experts: whole 128-wide tiles");
+  // single-item W13 entries (run_expert_dynamic): the layer of LIVE live rows
+  // (topk_route's valid rows; the idle rows' pairs on the shared experts) has
+  // at most LIVE (K - SHARED) + SHARED slots; when their W13 items are at most
+  // NSM, each on its own SM (a small batch: bs 1 18 slots, 72 items). They use
+  // the pair counters PAIRC .. (a slot's KT2 groups: NSM / 2) and the items'
+  // amax ([slot][MT13][T] fp32, NSM T floats) at AMX floats into the h_q
+  // scales, past those of the live slots (at most NSM T / 2 floats), so that
+  // buffer must hold both (scaled_moe_experts_layer adds the counters under the
+  // same condition)
+  static constexpr int LIVE = LIVE_;
+  static constexpr bool SINGLE = 2 * NSLOT * KT2 >= 3 * NSM &&
+                                 (LIVE * (K - SHARED) + SHARED) * MT13 <= NSM;
+  static constexpr int PAIRC = CHQ + NSLOT, AMX = NSM * T / 2;
   static_assert(NE % 32 == 0 && NE <= 1024,
                 "scaled_moe_experts: build_table's 8 warps x 128 experts");
   // the routing table of this step, built on every SM by build_table (shared
@@ -111,7 +129,7 @@ struct Slots {
   static __device__ __forceinline__ int *cnt_e() {
     __shared__ int a[NE];
     return a;
-  } // tokens per expert
+  } // per expert: > 0 if it has tokens, then its slot (build_table)
   static __device__ __forceinline__ int *sel() {
     __shared__ int a[NPAIR];
     return a;
@@ -209,8 +227,9 @@ __device__ __forceinline__ void h_first_tok(
 // token the amax over the group's 128 features (ha and this item's h), the
 // scale, the e4m3 values (h_q [NSLOT x T][IR], its scales hs [NSLOT][T][KT2]);
 // then thread 64 adds 2 to CHQ[slot] (release; W2 waits for MT13). The other
-// tokens' entries are not written (W2 reads none of them).
-template <int IR, int LIMIT>
+// tokens' entries are not written (W2 reads none of them). H: acc holds this
+// item's h ([64][T], T = 64's epilogue), not its gate and up rows.
+template <int IR, int LIMIT, bool H = false>
 __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
                                                   float *hs,
                                                   uint32_t *chq,
@@ -225,9 +244,16 @@ __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
   constexpr int KT2 = IR / 128;
   __shared__ float red_s[4 * T]; // [warp of the epilogue][token]
   int const lane = threadIdx.x & 31, f = row & 63, n = wide ? T : nt;
+  auto hb = [&](int j) { // this item's h of feature f, column j
+    if constexpr (H) {
+      return acc[f * T + j];
+    } else {
+      return h_of<LIMIT>(acc, f, j);
+    }
+  };
 #pragma unroll 1
   for (int j = row >> 6; j < n; j += 2) { // warp-uniform: row >> 6
-    float am = fmaxf(fabsf(ha[f * T + j]), fabsf(h_of<LIMIT>(acc, f, j)));
+    float am = fmaxf(fabsf(ha[f * T + j]), fabsf(hb(j)));
 #pragma unroll
     for (int d = 16; d > 0; d >>= 1) {
       am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, d));
@@ -245,7 +271,7 @@ __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
         (1.0f / 448.0f);
     uint8_t *const q = hq + ((size_t)slot * T + t) * IR + kt2 * 128 + f;
     q[0] = cvt_e4m3(__fdiv_rn(ha[f * T + j], sc));
-    q[64] = cvt_e4m3(__fdiv_rn(h_of<LIMIT>(acc, f, j), sc));
+    q[64] = cvt_e4m3(__fdiv_rn(hb(j), sc));
     if (f == 0) {
       hs[((size_t)slot * T + t) * KT2 + kt2] = sc;
     }
@@ -253,6 +279,79 @@ __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
   asm volatile("bar.sync 1, 128;" ::: "memory");
   if (threadIdx.x == 64) {
     cnt_add(chq + slot, 2); // release; the W2 loaders acquire MT13 for each
+                            // slot
+  }
+}
+
+// single-item W13 entries (every W13 item its SM's first entry, the two items
+// of a group on two SMs): item mt quantizes its own 64 features of the group
+// kt2 = mt / 2 with the group's scale. The two items exchange their per-token
+// amax: amx [slot][MT13][T] fp32 stores, bar.sync, thread 64 adds 1 to the
+// pair counter (cumulative release) and waits for 2 (acquire), bar.sync, the
+// other item's amax by relaxed loads. Both items run on their SMs from the
+// start, so the wait ends. The values are h_quant_group_tok's; item 2 kt2
+// writes the scales. red: 4 T floats of shared memory. Then thread 64 adds 1
+// to CHQ[slot].
+template <int IR, int LIMIT>
+__device__ __forceinline__ void h_quant_half_tok(uint8_t *hq,
+                                                 float *hs,
+                                                 float *amx,
+                                                 uint32_t *pairc,
+                                                 uint32_t *chq,
+                                                 int slot,
+                                                 int mt,
+                                                 int row,
+                                                 float const *acc,
+                                                 float *red,
+                                                 int const *tok,
+                                                 int nt,
+                                                 bool wide) {
+  constexpr int KT2 = IR / 128, MT13 = IR / 64;
+  int const lane = threadIdx.x & 31, f = row & 63, n = wide ? T : nt,
+            w0 = (row >> 6) * 2, kt2 = mt >> 1;
+#pragma unroll 1
+  for (int j = row >> 6; j < n; j += 2) { // warp-uniform: row >> 6
+    float am = fabsf(h_of<LIMIT>(acc, f, j));
+#pragma unroll
+    for (int d = 16; d > 0; d >>= 1) {
+      am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, d));
+    }
+    if (lane == 0) {
+      red[(row >> 5) * T + j] = am;
+    }
+  }
+  asm volatile("bar.sync 1, 128;" ::: "memory");
+  float *const own = amx + ((size_t)slot * MT13 + mt) * T;
+  if (f == 0) {
+#pragma unroll 1
+    for (int j = row >> 6; j < n; j += 2) {
+      own[j] = fmaxf(red[w0 * T + j], red[(w0 + 1) * T + j]);
+    }
+  }
+  asm volatile("bar.sync 1, 128;" ::: "memory");
+  if (threadIdx.x == 64) {
+    cnt_add(pairc + slot * KT2 + kt2, 1);
+    while (cnt_ld(pairc + slot * KT2 + kt2) < 2) {
+    }
+  }
+  asm volatile("bar.sync 1, 128;" ::: "memory");
+  float const *const other = amx + ((size_t)slot * MT13 + (mt ^ 1)) * T;
+#pragma unroll 1
+  for (int j = row >> 6; j < n; j += 2) {
+    int const t = wide ? j : tok[j];
+    float const sc = fmaxf(fmaxf(fmaxf(red[w0 * T + j], red[(w0 + 1) * T + j]),
+                                 ld_relaxed_f32(other + j)),
+                           1.0e-10f) *
+                     (1.0f / 448.0f);
+    hq[((size_t)slot * T + t) * IR + mt * 64 + f] =
+        cvt_e4m3(__fdiv_rn(h_of<LIMIT>(acc, f, j), sc));
+    if (f == 0 && (mt & 1) == 0) {
+      hs[((size_t)slot * T + t) * KT2 + kt2] = sc;
+    }
+  }
+  asm volatile("bar.sync 1, 128;" ::: "memory");
+  if (threadIdx.x == 64) {
+    cnt_add(chq + slot, 1); // release; the W2 loaders acquire MT13 for each
                             // slot
   }
 }
@@ -272,10 +371,41 @@ __device__ __forceinline__ void
     // [KT2][T][128 B]), 8 T descriptor units
     uint64_t const dw = mkdesc(st + kt * 16384),
                    dh = mkdesc(st + HQ) + 8 * T * kt;
-    mma_mx(d, dw, dh, idesc_mx(IDESC, 0), 0u, sfc, sfc);
-    mma_mx(d, dw + 2, dh + 2, idesc_mx(IDESC, 1), 1u, sfc, sfc);
-    mma_mx(d, dw + 4, dh + 4, idesc_mx(IDESC, 2), 1u, sfc, sfc);
-    mma_mx(d, dw + 6, dh + 6, idesc_mx(IDESC, 3), 1u, sfc, sfc);
+    if constexpr (F8_UNSCALED) { // T = 64 (runtime.cuh mma_f8)
+      mma_f8(d, dw, dh, 0u);
+      mma_f8(d, dw + 2, dh + 2, 1u);
+      mma_f8(d, dw + 4, dh + 4, 1u);
+      mma_f8(d, dw + 6, dh + 6, 1u);
+    } else {
+      mma_mx(d, dw, dh, idesc_mx(IDESC, 0), 0u, sfc, sfc);
+      mma_mx(d, dw + 2, dh + 2, idesc_mx(IDESC, 1), 1u, sfc, sfc);
+      mma_mx(d, dw + 4, dh + 4, idesc_mx(IDESC, 2), 1u, sfc, sfc);
+      mma_mx(d, dw + 6, dh + 6, idesc_mx(IDESC, 3), 1u, sfc, sfc);
+    }
+  }
+}
+
+// issue_w2_promoted with h_q from a buffer at hq (T = 64: an entry's
+// [KT2][T][128 B], w2_load_hq) instead of the stage
+template <uint32_t IDESC, int KT2>
+__device__ __forceinline__ void
+    issue_w2_promoted_hq(uint32_t st, uint32_t hq, uint32_t acc, uint32_t sfc) {
+  static_assert(KT2 <= 2, "scaled_moe_experts: W2's K tiles in the two halves");
+#pragma unroll
+  for (int kt = 0; kt < KT2; kt++) {
+    uint32_t const d = acc + ACC_STAGES * T * kt;
+    uint64_t const dw = mkdesc(st + kt * 16384), dh = mkdesc(hq) + 8 * T * kt;
+    if constexpr (F8_UNSCALED) {
+      mma_f8(d, dw, dh, 0u);
+      mma_f8(d, dw + 2, dh + 2, 1u);
+      mma_f8(d, dw + 4, dh + 4, 1u);
+      mma_f8(d, dw + 6, dh + 6, 1u);
+    } else {
+      mma_mx(d, dw, dh, idesc_mx(IDESC, 0), 0u, sfc, sfc);
+      mma_mx(d, dw + 2, dh + 2, idesc_mx(IDESC, 1), 1u, sfc, sfc);
+      mma_mx(d, dw + 4, dh + 4, idesc_mx(IDESC, 2), 1u, sfc, sfc);
+      mma_mx(d, dw + 6, dh + 6, idesc_mx(IDESC, 3), 1u, sfc, sfc);
+    }
   }
 }
 
@@ -308,6 +438,34 @@ __device__ __forceinline__ void drain_w2_promoted(
   }
 }
 
+// drain_w2_promoted with the h_q scales read from the staged buffer sbuf
+// ([T][KT2] fp32, w2_stage_scales) instead of registers (T = 64: sh[2][T] in
+// registers pushed the kernel past 255 registers)
+template <int KT2>
+__device__ __forceinline__ void drain_w2_promoted_s(
+    uint32_t tb, int a, float const *sw, float const *sbuf, float *v) {
+  uint32_t const lanes = (uint32_t)(((threadIdx.x >> 5) & 3) * 32) << 16;
+  float p[T];
+  tmem_ld_cols_nw<T>(tb + T * a + lanes, v);
+  if constexpr (KT2 == 2) {
+    tmem_ld_cols_nw<T>(tb + T * a + ACC_STAGES * T + lanes, p);
+  }
+  tmem_keep_cols<T>(v);
+  if constexpr (KT2 == 2) {
+    tmem_keep_cols<T>(p);
+  }
+#pragma unroll
+  for (int t = 0; t < T; t++) {
+    v[t] *= sw[0] * sbuf[t * KT2];
+  }
+  if constexpr (KT2 == 2) {
+#pragma unroll
+    for (int t = 0; t < T; t++) {
+      v[t] = fmaf(sw[1] * sbuf[t * KT2 + 1], p[t], v[t]);
+    }
+  }
+}
+
 // ---- shared memory after the ring (offsets from the dynamic base) ----
 // Keep the offsets from moe_experts.cuh's ExpertSmem layout.
 // The areas for K3 scale chunks stay unused to preserve that layout.
@@ -330,26 +488,37 @@ struct Smem {
   static constexpr int OFF_BS = OFF_ACC + 128 * T * 4,
                        OFF_XS = OFF_BS + RES::KT_LAT * 2 * 4;
   static constexpr int OFF_HA = OFF_XS + RES::KT_LAT * T * 4;
-  static constexpr int BYTES = OFF_HA + 64 * T * 4; // the node's need from the
-                                                    // base
+  // T = 64: no OFF_HA (its 16 KB past the 227 KB with the routing tables):
+  // OFF_ACC holds the two items' h instead ([64][T] each, the epilogue)
+  static constexpr int BYTES =
+      OFF_HA + (T == 64 ? 0 : 64 * T * 4); // the node's need from the
+                                           // base
   static_assert(OFF_W2BAR % 1024 == 0, "128-B swizzled tiles are 1024-aligned");
   // ---- W2 ring: one tile per stage (KT2 x 16 KB weight pieces | h_q KT2 KB)
-  // at the offsets of moe_experts.cuh's W2 ring ----
+  // at the offsets of moe_experts.cuh's W2 ring. T = 64: the weights only (3
+  // of 52 KB pass the 3-stage W13 ring's area, and 2 kept 2 tiles' weights in
+  // flight), and an entry's h_q (its tiles' slot's: the same for both) in one
+  // of two buffers W2_HQ0 + b W2_HQB after the stages (w2_load_hq) ----
   static constexpr int W2_ST = 3;
   static constexpr int W2_HQ =
       (RES::KT2 * 16384 + RES::KT2 * SF_CHUNK + 1023) / 1024 * 1024;
   static constexpr int W2_STB =
-      (W2_HQ + RES::KT2 * T * 128 + RES::KT2 * SF_CHUNK + 4095) / 4096 * 4096;
-  static constexpr uint32_t W2_BYTES = RES::KT2 * 16384 + RES::KT2 * T * 128;
-  static_assert(W2_ST * W2_STB <= OFF_WSF,
+      T == 64 ? W2_HQ
+              : (W2_HQ + RES::KT2 * T * 128 + RES::KT2 * SF_CHUNK + 4095) /
+                    4096 * 4096;
+  static constexpr int W2_HQB = RES::KT2 * T * 128, W2_HQ0 = W2_ST * W2_STB;
+  static constexpr uint32_t W2_BYTES =
+      RES::KT2 * 16384 + (T == 64 ? 0 : RES::KT2 * T * 128);
+  static_assert(W2_ST * W2_STB + (T == 64 ? 2 * W2_HQB : 0) <= OFF_WSF,
                 "the W2 ring lies inside the W13 ring's area");
   // the W2 entries' scales in the OFF_W2BAR area (w2_stage_scales): W2QD
   // buffers from OFF_W2S, one per queue position, each the slot's h_q scales
   // [T][KT2] then the 16-B chunk of the weight scales with the entry's tiles'
   static constexpr int W2S_HS = T * RES::KT2 * 4,
                        W2S_BYTES = (W2S_HS + 16 + 15) / 16 * 16,
-                       OFF_W2S = OFF_W2BAR + 128;
-  static_assert(128 + W2QD * W2S_BYTES <= RES::KT2 * 1024 + RES::KT2 * SF_CHUNK,
+                       OFF_W2S = OFF_W2BAR + (T == 64 ? 192 : 128);
+  static_assert(OFF_W2S - OFF_W2BAR + W2QD * W2S_BYTES <=
+                    RES::KT2 * 1024 + RES::KT2 * SF_CHUNK,
                 "the W2 scale buffers fit the OFF_W2BAR area");
   // TMEM: the constant scale chunk at CONST_SF; the accumulators of piece 1
   // from PROMO_COL1. W2's K tiles go into the two accumulator halves.
@@ -372,6 +541,11 @@ __device__ __forceinline__ uint32_t w2_w7gl(uint32_t base) {
 template <class RES>
 __device__ __forceinline__ uint32_t w2s_bar(uint32_t base, int q) {
   return base + Smem<RES>::OFF_W2BAR + 72 + 8 * q;
+}
+// T = 64: the h_q buffers' mbarriers, full [2] then empty [2]
+template <class RES>
+__device__ __forceinline__ uint32_t w2hq_bar(uint32_t base, int i) {
+  return base + Smem<RES>::OFF_W2BAR + 128 + 8 * i;
 }
 
 // The loader that arms the first tile of W2 entry (slot, ot0: the tile of the
@@ -399,6 +573,18 @@ __device__ __forceinline__ void w2_stage_scales(
                ((size_t)ex * OT2 + (ot0 & ~1)) * KT2,
            16,
            f);
+}
+
+// the box of tensor map d at (c0, c1, c2) into L2 (fire and forget)
+__device__ __forceinline__ void
+    tma3_prefetch_l2(void const *d, int c0, int c1, int c2) {
+  asm volatile(
+      "cp.async.bulk.prefetch.tensor.3d.L2.global.tile [%0, {%1, %2, %3}];" ::
+          "l"((uint64_t)d),
+      "r"(c0),
+      "r"(c1),
+      "r"(c2)
+      : "memory");
 }
 
 // ---- optional per-SM stamps: PROF >= 0 (the node's buffer slot 4, a graph
@@ -489,7 +675,31 @@ __device__ __forceinline__ void w2_arm(Maps const &maps,
       w_chq += gtime() - t0;
     }
   }
-  tma3(&maps.m[RES::HQ_KT], f, st + W2_HQ, 0, slot * T, 0, EVICT_LAST);
+  if constexpr (T != 64) { // T = 64: the entry's h_q buffer (w2_load_hq)
+    tma3(&maps.m[RES::HQ_KT], f, st + W2_HQ, 0, slot * T, 0, EVICT_LAST);
+  }
+}
+
+// T = 64: W2 entry e2's h_q (its slot's [KT2][T][128 B]) into buffer e2 & 1,
+// by the loader of its first tile after that tile's w2_arm (its CHQ acquire
+// and async-proxy fence), once the issuer's MMAs of entry e2 - 2 are done
+template <class RES>
+__device__ __forceinline__ void
+    w2_load_hq(Maps const &maps, uint32_t base, int e2, int slot) {
+  using SM_ = Smem<RES>;
+  int const b = e2 & 1;
+  if (e2 >= 2) {
+    mbar_wait(w2hq_bar<RES>(base, 2 + b), ((e2 >> 1) - 1) & 1);
+  }
+  uint32_t const f = w2hq_bar<RES>(base, b);
+  mbar_expect(f, SM_::W2_HQB);
+  tma3(&maps.m[RES::HQ_KT],
+       f,
+       base + SM_::W2_HQ0 + b * SM_::W2_HQB,
+       0,
+       slot * T,
+       0,
+       EVICT_LAST);
 }
 
 // all 8 warps of the SM, until the queue is empty. gl / gi0 / gi1: ring stage
@@ -508,6 +718,7 @@ __device__ __forceinline__ void
                        int &gi0,
                        int &gi1,
                        int &wt,
+                       int sm_id,
                        long long *prof STAGE_STAMP_PARAM) {
   using SM_ = Smem<RES>;
   constexpr int W2_ST = SM_::W2_ST, W2_STB = SM_::W2_STB, W2_HQ = SM_::W2_HQ;
@@ -524,6 +735,11 @@ __device__ __forceinline__ void
       mbar_init(w2_bar<RES>(base, 3 + i), 1);
     }
     mbar_init(w2_bar<RES>(base, 6), 1);
+    if constexpr (T == 64) {
+      for (int i = 0; i < 4; i++) {
+        mbar_init(w2hq_bar<RES>(base, i), 1);
+      }
+    }
     for (int q = 0; q < W2QD; q++) {
       mbar_init(w2s_bar<RES>(base, q), 1);
     }
@@ -535,14 +751,28 @@ __device__ __forceinline__ void
   // W2 tiles n2 = slots x OT2: 2-tile entries, the last t1 = min(the tiles
   // after the first ~4/5 of the slots, NSM) in 1-tile entries, so the SMs
   // finish within about a tile of each other
-  // W13 entries: W13_PAIR items each (a group of 128 features)
+  // W13 entries: W13_PAIR items each (a group of 128 features). A layer of at
+  // most NSM items (RES::SINGLE, a small batch): one item each, item i SM i's
+  // first entry (all SMs wait for the routing anyway), the queue only the W2
+  // entries, a group quantized by its two SMs (h_quant_half_tok): two items on
+  // one SM in turn took twice as long as the W13 phase needs (bs 1: 44.6 ->
+  // 42.4 us a layer)
   static_assert(MT13 % W13_PAIR == 0, "scaled_moe_experts: whole groups");
-  int const n_live = s_ints[1], n13 = n_live * (MT13 / W13_PAIR),
+  constexpr int npi = RES::SINGLE ? 1 : W13_PAIR;
+  int const n_live = s_ints[1], n13s = RES::SINGLE ? n_live * MT13 : 0,
+            n13 = RES::SINGLE ? 0 : n_live * (MT13 / W13_PAIR),
             n2 = n_live * OT2;
   int const n4 = ((n2 * 4 / 5) / OT2) * OT2,
             t1 = (n2 - n4 < NSM) ? n2 - n4 : NSM, off1 = n2 - t1,
             n2e = (off1 + 1) / 2;
   int const nentries = n13 + n2e + t1;
+  // W2 tile q of the queue order: the shared experts' tiles first, as their
+  // W13 items (all T tokens: the slowest tiles, not the last in the queue)
+  int const w2rot = (n_live - RES::SHARED) * OT2;
+  auto w2_tile = [&](int q) { // q + w2rot mod n2 (a multiple of OT2 apart)
+    int const x = q + w2rot;
+    return x >= n2 ? x - n2 : x;
+  };
   float *acc_s = reinterpret_cast<float *>(rt_sm() + SM_::OFF_ACC);
   auto entry_of =
       [&](int idx, QueueEntry &e) { // entry number idx of the queue order above
@@ -556,17 +786,23 @@ __device__ __forceinline__ void
         } else if (idx < n13 + n2e) {
           int const i0 = 2 * (idx - n13);
           e.kind = QE_W2;
-          e.a = i0;
+          e.a = w2_tile(i0);
           e.b = (off1 - i0 < 2) ? off1 - i0 : 2;
         } else if (idx < nentries) {
           e.kind = QE_W2;
-          e.a = off1 + (idx - n13 - n2e);
+          e.a = w2_tile(off1 + (idx - n13 - n2e));
           e.b = 1;
         } else {
           e.kind = QE_END;
           e.a = e.b = 0;
         }
       };
+  auto w13_single = [&](int i, QueueEntry &e) { // single: item i, in the
+                                                // queue order's slot order
+    e.kind = QE_W13;
+    e.a = (i / MT13 + n_live - RES::SHARED) % n_live;
+    e.b = i % MT13;
+  };
   auto w13_job = [&](QueueEntry const &e,
                      int i,
                      TileJob &j) { // the ring job of item i of a W13 entry
@@ -584,9 +820,9 @@ __device__ __forceinline__ void
   };
   if (warp == 0) {
     if (lane == 0) {
-      int qn = 0, w2k = 0,
-          chk =
-              -1; // w2k: this SM's W2 tiles so far; chk: the slot checked last
+      int qn = 0, w2k = 0, e2 = 0,
+          chk = -1; // w2k: this SM's W2 tiles so far; e2: its W2 entries
+                    // (T = 64's h_q buffers); chk: the slot checked last
       bool switched = false, maps_pf = false;
       int idx = s_ints[2], pend = -1;
       [[maybe_unused]] long long pw_st = 0, pw_chq = 0; // PROF: the waits
@@ -627,6 +863,13 @@ __device__ __forceinline__ void
       // tile); W2 entries two ahead
       QueueEntry e;
       entry_of(idx, e);
+      if constexpr (RES::SINGLE) {
+        if (sm_id < n13s) { // this SM's W13 item, then the queue from the
+                            // entry taken at the start
+          w13_single(sm_id, e);
+          pend = idx;
+        }
+      }
       publish(e, qn);
       int n13_mine = 0;
       while (e.kind != QE_END) {
@@ -693,19 +936,27 @@ __device__ __forceinline__ void
             }
           }
           if ((w2k & 1) == 0) { // this warp armed the entry's first tile
+            if constexpr (T == 64) {
+              scaled_moe::w2_load_hq<RES>(maps, base, e2, slot);
+            }
             scaled_moe::w2_stage_scales<RES>(g, base, qn % W2QD, slot, ex, ot0);
           }
           w2k += e.b;
+          e2++;
         } else {
           TileJob j;
-          for (int i = 0; i + 1 < W13_PAIR; i++) {
+          for (int i = 0; i + 1 < npi; i++) {
             w13_job(e, i, j);
             load_job<128, 16384, false>(j, base, gl, 0);
           }
-          w13_job(e, W13_PAIR - 1, j); // the next entry taken in the last item
+          w13_job(e, npi - 1, j); // the next entry taken in the last item
           load_job<128, 16384, false>(j, base, gl, 0, 0, W13_TAKE_AT);
           n13_mine++;
-          int const idx1 = (int)atom_inc_lane0(cnt_now(g) + RES::W2NEXT);
+          int idx1 = pend; // single: the entry taken at the start
+          if (!RES::SINGLE || idx1 < 0) {
+            idx1 = (int)atom_inc_lane0(cnt_now(g) + RES::W2NEXT);
+          }
+          pend = -1;
           load_job<128, 16384, false>(j, base, gl, 0, W13_TAKE_AT);
           entry_of(idx1, en);
           publish(en, qn + 1);
@@ -725,7 +976,7 @@ __device__ __forceinline__ void
     gi = warp_same<true>(gi);
     uint32_t const tbu = (uint32_t)warp_same<true>((int)tb),
                    baseu = (uint32_t)warp_same<true>((int)base);
-    int wtt0 = warp_same<true>(wt), w2k = 0;
+    int wtt0 = warp_same<true>(wt), w2k = 0, e2 = 0; // e2: W2 entries (T = 64)
 #ifdef STATIC_TIMING_BUILD
     bool w2_seen = false;
 #endif
@@ -745,6 +996,11 @@ __device__ __forceinline__ void
         }
         w2_seen = true;
 #endif
+        if constexpr (T == 64) { // the entry's h_q landed (w2_load_hq)
+          if (iss == 0) {
+            mbar_wait(w2hq_bar<RES>(baseu, e2 & 1), (e2 >> 1) & 1);
+          }
+        }
         for (int i = 0; i < e.b;
              i++, w2k++) { // warp 1: the tile's 4 KT2 MMAs; warp 6: the
                            // second arrival on acc_full
@@ -761,16 +1017,30 @@ __device__ __forceinline__ void
           mbar_wait(w2_bar<RES>(baseu, s), (w2k / W2_ST) & 1);
           fence_after();
           if (issuer_lane<true>()) { // one K tile in each accumulator half
-            issue_w2_promoted<IDESC_MX_E4M3, KT2, W2_HQ>(
-                baseu + s * W2_STB, tbu + T * a, tbu + SM_::CONST_SF);
+            if constexpr (T == 64) {
+              issue_w2_promoted_hq<IDESC_MX_E4M3, KT2>(
+                  baseu + s * W2_STB,
+                  baseu + SM_::W2_HQ0 + (e2 & 1) * SM_::W2_HQB,
+                  tbu + T * a,
+                  tbu + SM_::CONST_SF);
+            } else {
+              issue_w2_promoted<IDESC_MX_E4M3, KT2, W2_HQ>(
+                  baseu + s * W2_STB, tbu + T * a, tbu + SM_::CONST_SF);
+            }
             tc_commit(w2_bar<RES>(baseu, 3 + s));
             tc_commit(rt.acc_full0 + 8 * a);
           }
         }
+        if constexpr (T == 64) { // the h_q buffer free once these MMAs are done
+          if (iss == 0 && issuer_lane<true>()) {
+            tc_commit(w2hq_bar<RES>(baseu, 2 + (e2 & 1)));
+          }
+          e2++;
+        }
         wtt0 += e.b;
       } else { // W13: 8 columns for each piece, PromoRounds ticks
                // (scale_promotion.cuh), for each item of the entry
-        for (int i = 0; i < W13_PAIR; i++) {
+        for (int i = 0; i < npi; i++) {
           issue_promoted<IDESC_MX_E4M3, KT_LAT>(
               baseu,
               tbu,
@@ -784,7 +1054,7 @@ __device__ __forceinline__ void
       }
     }
   } else if (warp == 7) { // second loader: the odd W13 stages, the odd W2 tiles
-    int w2k7 = 0, chk7 = -1;
+    int w2k7 = 0, chk7 = -1, e27 = 0;
     bool ready = false;
     [[maybe_unused]] long long pw_st7 = 0, pw_chq7 = 0; // PROF: the waits
     for (int qn = 0;; qn++) {
@@ -826,13 +1096,17 @@ __device__ __forceinline__ void
             }
           }
           if ((w2k7 & 1) == 1) { // this warp armed the entry's first tile
+            if constexpr (T == 64) {
+              scaled_moe::w2_load_hq<RES>(maps, base, e27, slot);
+            }
             scaled_moe::w2_stage_scales<RES>(g, base, qn % W2QD, slot, ex, ot0);
           }
         }
         w2k7 += e.b;
+        e27++;
         __syncwarp();
       } else {
-        for (int i = 0; i < W13_PAIR; i++) {
+        for (int i = 0; i < npi; i++) {
           TileJob j;
           w13_job(e, i, j);
           if (lane == 0) {
@@ -903,13 +1177,15 @@ __device__ __forceinline__ void
                                : 0.0f;
           }
         }
+        if constexpr (T != 64) {
 #pragma unroll
-        for (int kt = 0; kt < 2; kt++) {
+          for (int kt = 0; kt < 2; kt++) {
 #pragma unroll
-          for (int t = 0; t < T; t++) {
-            sh[kt][t] = 0.0f;
-            if (kt < KT2) {
-              sh[kt][t] = sbuf[t * KT2 + kt];
+            for (int t = 0; t < T; t++) {
+              sh[kt][t] = 0.0f;
+              if (kt < KT2) {
+                sh[kt][t] = sbuf[t * KT2 + kt];
+              }
             }
           }
         }
@@ -934,19 +1210,61 @@ __device__ __forceinline__ void
             }
           }
           fence_after();
-          drain_w2_promoted<KT2>(tb, a, swi, sh, v);
-          fence_before();
-          mbar_arrive(rt.acc_empty0 + 8 * a);
-          for (int i = start_s[slot]; i < start_s[slot] + nt; i++) {
-            int const t = tok_s[i];
-            float vt = v[0]; // v[t] by an unrolled select: indexing v with the
-                             // run-time t put v in local memory (STL / LDL)
+          if (T == 64 && nt <= 8) { // the slot's few tokens: their own
+                                    // columns (one TMEM column of each K
+                                    // half), not the T-wide drain
+            uint32_t const lanes = (uint32_t)(((threadIdx.x >> 5) & 3) * 32)
+                                   << 16,
+                           c0a = tb + T * a + lanes, c1a = c0a + ACC_STAGES * T;
+            int const s0 = start_s[slot];
+            float c0[8], c1[8];
 #pragma unroll
-            for (int k = 1; k < T; k++) {
-              vt = (t == k) ? v[k] : vt;
+            for (int k = 0; k < 8; k++) {
+              c0[k] = c1[k] = 0.f;
+              if (k < nt) { // warp-uniform
+                int const t = tok_s[s0 + k];
+                c0[k] = tmem_ld1(c0a + t);
+                if constexpr (KT2 == 2) {
+                  c1[k] = tmem_ld1(c1a + t);
+                }
+              }
             }
-            racc[((size_t)t * K + kk_s[i]) * LAT + ot * 128 + row] =
-                w_s[i] * vt; // row (t, k), plain store
+            tmem_keep8(c0);
+            tmem_keep8(c1);
+            fence_before();
+            mbar_arrive(rt.acc_empty0 + 8 * a);
+#pragma unroll
+            for (int k = 0; k < 8; k++) {
+              if (k < nt) { // drain_w2_promoted's products, in its order
+                int const i = s0 + k, t = tok_s[i];
+                float vt = c0[k] * (swi[0] * sbuf[t * KT2]);
+                if constexpr (KT2 == 2) {
+                  vt = fmaf(swi[1] * sbuf[t * KT2 + 1], c1[k], vt);
+                }
+                racc[((size_t)t * K + kk_s[i]) * LAT + ot * 128 + row] =
+                    w_s[i] * vt; // row (t, k), plain store
+              }
+            }
+          } else {
+            if constexpr (T == 64) {
+              drain_w2_promoted_s<KT2>(tb, a, swi, sbuf, v);
+            } else {
+              drain_w2_promoted<KT2>(tb, a, swi, sh, v);
+            }
+            fence_before();
+            mbar_arrive(rt.acc_empty0 + 8 * a);
+            for (int i = start_s[slot]; i < start_s[slot] + nt; i++) {
+              int const t = tok_s[i];
+              float vt = v[0]; // v[t] by an unrolled select: indexing v with
+                               // the run-time t put v in local memory (STL /
+                               // LDL)
+#pragma unroll
+              for (int k = 1; k < T; k++) {
+                vt = (t == k) ? v[k] : vt;
+              }
+              racc[((size_t)t * K + kk_s[i]) * LAT + ot * 128 + row] =
+                  w_s[i] * vt; // row (t, k), plain store
+            }
           }
           if constexpr (RES::PROF >= 0) {
             if (pev) {
@@ -958,7 +1276,7 @@ __device__ __forceinline__ void
       } else { // W13, each item of the entry: rows 0..63 gate, 64..127 up
                // of features [64 m, 64 m + 64) -> h_q of the slot
         int const slot = e.a;
-        for (int i = 0; i < W13_PAIR; i++) {
+        for (int i = 0; i < npi; i++) {
           int const mt = e.b + i;
           float v[T];
           if constexpr (RES::PROF >= 0) {
@@ -1007,28 +1325,85 @@ __device__ __forceinline__ void
               moe_prof_event(prof, pn, pt0, 8);
             }
           }
+          if constexpr (T == 64) { // OFF_ACC: the first item's h [64][T], then
+                                   // the up rows / the second item's h
+            float *const h1 = acc_s, *const h2 = acc_s + 64 * T;
+            if (row >= 64) {
 #pragma unroll
-          for (int j = 0; j < T; j++) {
-            if (wide || j < nt) {
-              acc_s[row * T + j] = v[j];
+              for (int j = 0; j < T; j++) {
+                if (wide || j < nt) {
+                  h2[(row - 64) * T + j] = v[j];
+                }
+              }
             }
-          }
-          asm volatile("bar.sync 1, 128;" ::: "memory");
-          float *const ha = reinterpret_cast<float *>(rt_sm() + SM_::OFF_HA);
-          if (i == 0) { // the group's first item: its h for the second
-            h_first_tok<RES::LIMIT>(ha, acc_s, row, tk, nt, wide);
+            asm volatile("bar.sync 1, 128;" ::: "memory");
+            if (row < 64) { // h of feature row: each element read, then
+                            // written by its own thread
+              float *const dst = i == 0 ? h1 : h2;
+#pragma unroll
+              for (int j = 0; j < T; j++) {
+                if (wide || j < nt) {
+                  dst[row * T + j] =
+                      silu2_limit<RES::LIMIT>(v[j], h2[row * T + j]);
+                }
+              }
+            }
+            asm volatile("bar.sync 1, 128;" ::: "memory");
+            if (i == 1) {
+              h_quant_group_tok<IR, RES::LIMIT, true>(
+                  buf_at<uint8_t>(g, RES::HQ),
+                  buf_at<float>(g, RES::HSF),
+                  cnt_now(g) + RES::CHQ,
+                  slot,
+                  mt >> 1,
+                  row,
+                  h2,
+                  h1,
+                  tk,
+                  nt,
+                  wide);
+            }
           } else {
-            h_quant_group_tok<IR, RES::LIMIT>(buf_at<uint8_t>(g, RES::HQ),
-                                              buf_at<float>(g, RES::HSF),
-                                              cnt_now(g) + RES::CHQ,
-                                              slot,
-                                              mt >> 1,
-                                              row,
-                                              acc_s,
-                                              ha,
-                                              tk,
-                                              nt,
-                                              wide);
+#pragma unroll
+            for (int j = 0; j < T; j++) {
+              if (wide || j < nt) {
+                acc_s[row * T + j] = v[j];
+              }
+            }
+            asm volatile("bar.sync 1, 128;" ::: "memory");
+            float *const ha = reinterpret_cast<float *>(rt_sm() + SM_::OFF_HA);
+            if constexpr (RES::SINGLE) { // the group's other item on another
+                                         // SM
+              h_quant_half_tok<IR, RES::LIMIT>(buf_at<uint8_t>(g, RES::HQ),
+                                               buf_at<float>(g, RES::HSF),
+                                               buf_at<float>(g, RES::HSF) +
+                                                   RES::AMX,
+                                               cnt_now(g) + RES::PAIRC,
+                                               cnt_now(g) + RES::CHQ,
+                                               slot,
+                                               mt,
+                                               row,
+                                               acc_s,
+                                               ha,
+                                               tk,
+                                               nt,
+                                               wide);
+            } else if (i == 0) { // the group's first item: its h for the
+                                 // second
+              h_first_tok<RES::LIMIT>(ha, acc_s, row, tk, nt, wide);
+            } else {
+              h_quant_group_tok<IR, RES::LIMIT>(buf_at<uint8_t>(g, RES::HQ),
+                                                buf_at<float>(g, RES::HSF),
+                                                cnt_now(g) + RES::CHQ,
+                                                slot,
+                                                mt >> 1,
+                                                row,
+                                                acc_s,
+                                                ha,
+                                                tk,
+                                                nt,
+                                                wide);
+            }
           }
           if constexpr (RES::PROF >= 0) {
             if (pev) {
@@ -1064,7 +1439,9 @@ template <class RES>
 __device__ __forceinline__ void phase_switch_copy_csf(uint32_t base,
                                                       uint32_t tb) {
   if (threadIdx.x == 32) {
-    cp_sf(tb + Smem<RES>::CONST_SF, base + Smem<RES>::OFF_CSF);
+    if constexpr (!F8_UNSCALED) { // T = 64: no scale chunk (mma_f8)
+      cp_sf(tb + Smem<RES>::CONST_SF, base + Smem<RES>::OFF_CSF);
+    }
     tc_commit(rt.misc0 + 16);
   }
 }
@@ -1080,7 +1457,7 @@ __device__ __forceinline__ void phase_switch_end() {
 // its 128 KB at T = 32) spilled registers of the whole kernel and landed later.
 // Then the 128 epilogue threads poll the NPAIR routing pairs (topk_route's
 // buffer, 0xFF-prefilled) into the routing table's inputs (table_poll's steps:
-// sel, wsel, cnt_e += 1), all of their pairs' loads per round. Before it:
+// sel, wsel, cnt_e = 1), all of their pairs' loads per round. Before it:
 // cnt_e zeroed, then a __syncthreads; after it: a __syncthreads before xs or
 // the table are read.
 template <class RES>
@@ -1136,7 +1513,7 @@ __device__ __forceinline__ void
           int const n = pt + 128 * i, e = (int)(pv[i] >> 32);
           sel_ss[n] = e;
           wsel_ss[n] = __uint_as_float((uint32_t)pv[i]);
-          atomicAdd(&cntE_s[e], 1);
+          cntE_s[e] = 1; // the expert has a token
         }
       }
       all = all && pok[i];
@@ -1179,7 +1556,9 @@ using ScaledMoeSlotsOf =
                       PARAMS::v[0],
                       param_or<PARAMS, 1, 0>(),
                       slot_or<BUF_SLOTS, 4, -1>(),
-                      topk_shared<PAIRS>()>;
+                      topk_shared<PAIRS>(),
+                      (param_or<PAIRS, 5, 0>() > 0 ? param_or<PAIRS, 5, 0>()
+                                                   : T)>;
 
 // scaled_moe_experts task (one per SM, task x on SM x): wait for z_q, phase
 // switch, routing table, then the queue (above) -> the routed rows [T][K][LAT]
@@ -1231,9 +1610,23 @@ __device__ __forceinline__ void run_scaled_moe_experts(Maps const &maps,
   if (relay) {
     scaled_moe::phase_switch_begin<RES>(L.base, L.gl, L.gi0, L.gi1);
   }
-  __syncthreads(); // cnt_e zeroed (the polls add to it), the chunk staged
+  __syncthreads(); // cnt_e zeroed (the polls set it), the chunk staged
   if (relay) {
     scaled_moe::phase_switch_copy_csf<RES>(L.base, L.tb);
+  }
+  if constexpr (T == 64) {
+    // most experts are chosen at T = 64: the first PFE experts' W13 weights
+    // (the queue's first items) into L2 while the routing lands (HBM is idle
+    // that long), each SM its share of their two-piece boxes
+    constexpr int PFE = 40, B = RES::MT13 * RES::KT_LAT / 2;
+    int const pi = sm_id + NSM * (threadIdx.x - 64);
+    if (threadIdx.x >= 64 && threadIdx.x < 192 && pi < PFE * B) {
+      scaled_moe::tma3_prefetch_l2(&maps.m[RES::W13X2],
+                                   0,
+                                   0,
+                                   (pi / B) * (RES::MT13 * RES::KT_LAT) +
+                                       2 * (pi % B));
+    }
   }
   scaled_moe::wait_z_and_pairs<RES>(
       g,
@@ -1295,6 +1688,7 @@ __device__ __forceinline__ void run_scaled_moe_experts(Maps const &maps,
                                       L.gi0,
                                       L.gi1,
                                       L.wt,
+                                      sm_id,
                                       prof STAGE_STAMP_ARG(L.stage_stamps));
   if (threadIdx.x == 0) {
     g.stamps[sm_id * NSTAMP + STAMP_TASK1] = gtime();

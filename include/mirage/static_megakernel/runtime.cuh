@@ -146,6 +146,25 @@ __device__ __forceinline__ void mma_mx(uint32_t d,
                "r"(sfa),
                "r"(sfb));
 }
+// The FP8 x FP8 MMAs (e4m3 operands) of scale_promotion.cuh use the constant
+// UE8M0 1 scales (mma_mx; the fp32 scales go in the epilogue). T = 64 runs
+// them unscaled (mma_f8, kind::f8f6f4: the same products and sums): no scale
+// chunk in TMEM, the accumulator ticks take all 512 columns (config.cuh
+// ACC_STAGES)
+constexpr bool F8_UNSCALED = T == 64;
+constexpr uint32_t IDESC_F8 = (1u << 4) | ((T / 8u) << 17) |
+                              ((128u / 16u) << 24); // kind::f8f6f4: e4m3 x
+                                                    // e4m3 -> fp32, M128 N = T
+__device__ __forceinline__ void
+    mma_f8(uint32_t d, uint64_t a, uint64_t b, uint32_t en) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, %4, 0;\n"
+               "tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], %1, %2, %3, "
+               "p;\n}" ::"r"(d),
+               "l"(a),
+               "l"(b),
+               "r"(IDESC_F8),
+               "r"(en));
+}
 __device__ __forceinline__ void
     tc_commit(uint32_t mb) { // mb gets one arrival when this thread's MMAs so
                              // far are done
@@ -232,8 +251,8 @@ __device__ __forceinline__ void tmem_keep8(float *v) {
 __device__ __forceinline__ void tmem_wait_keep8(float (&v)[8]) {
   tmem_keep8(v);
 }
-// N fp32 columns (N = 8, 16, 32) of this thread's TMEM lane without the wait
-// (x8 / x16 loads): a batch of these (several accumulators), then
+// N fp32 columns (N = 8, 16, 32, 64) of this thread's TMEM lane without the
+// wait (x8 / x16 loads): a batch of these (several accumulators), then
 // tmem_keep_cols on each: one wait for the whole batch instead of one per
 // x16 load (the later keeps only pin their values below it)
 template <int N>
@@ -279,6 +298,11 @@ __device__ __forceinline__ void tmem_ld_cols_nw<32>(uint32_t addr, float *v) {
   tmem_ld_cols_nw<16>(addr, v);
   tmem_ld_cols_nw<16>(addr + 16, v + 16);
 }
+template <>
+__device__ __forceinline__ void tmem_ld_cols_nw<64>(uint32_t addr, float *v) {
+  tmem_ld_cols_nw<32>(addr, v);
+  tmem_ld_cols_nw<32>(addr + 32, v + 32);
+}
 template <int N>
 __device__ __forceinline__ void tmem_keep_cols(float *v) {
 #pragma unroll
@@ -291,6 +315,11 @@ template <>
 __device__ __forceinline__ void tmem_ld_cols<32>(uint32_t addr, float *v) {
   tmem_ld_cols_nw<32>(addr, v);
   tmem_keep_cols<32>(v);
+}
+template <>
+__device__ __forceinline__ void tmem_ld_cols<64>(uint32_t addr, float *v) {
+  tmem_ld_cols_nw<64>(addr, v);
+  tmem_keep_cols<64>(v);
 }
 
 // math

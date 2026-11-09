@@ -27,8 +27,9 @@ MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 24, 32, 16, 5   # RING_STA
 
 
 def ring_stages(tokens: int) -> int:
-    """The GEMM weight ring's stages (config.cuh SMAX) at T tokens: 5, or 4 at T = 32 (the activation's T x 256 B a stage)."""
-    return 5 if tokens <= 16 else 4
+    """The GEMM weight ring's stages (config.cuh SMAX) at T tokens: 5, 4 at T = 32, 3 at T = 64 (the activation's T x 256 B
+    a stage)."""
+    return 5 if tokens <= 16 else 4 if tokens == 32 else 3
 COMBINE = {"slots": 0, "add": 1, "store": 2, "store_bf16": 3}
 SF_CHUNK = 512   # one MX scale chunk (config.cuh): 128 rows x 4 B
 MAX_SUM_PARTS = 14   # the most K parts sum_send adds (tasks/sum_send.cuh)
@@ -626,7 +627,8 @@ class StaticMegakernel(PersistentKernel):
         buf_slots: the scratch buffers for h_q and its scales, and the fp32 weight scales (by pointer).
         map_slots: the tensor maps of the weights, of z_q in both exchange sets, and of h_q (scaled_moe::Slots).
         Counters track completed SMs, the next queue entry and completed W13 items per expert slot.
-        The first two counters each reserve 32 words. The last counter reserves NSLOT words.
+        The first two counters each reserve 32 words. The third reserves NSLOT words, then the pair counters of single-item W13
+        entries (num_sms / 2 words; a layer of few live rows: topk_route's valid_rows, e.g. 1 or 2 of T = 8).
         E is the expert count. K is the experts per token. L is the hidden width.
         IR is this GPU's expert intermediate width: 128 or 256. GLM-5.3 therefore needs TP8 or TP16. A wider intermediate (GLM-5.3-
         Flash at TP4: 512) is sub-experts: topk_route_layer(sub_experts=) and a bank of E x sub_experts experts; then E and K here
@@ -640,7 +642,8 @@ class StaticMegakernel(PersistentKernel):
         from .compiler import graph_nodes, producer_of
         T, K, L = self._tokens(pairs.dim(0)), pairs.dim(1), z_q.dim(1)
         E, IR = w13.dim(0), w13.dim(1) // 2
-        NSLOT, KT_L, KT2 = T * K, L // 128, IR // 128
+        # expert slots (scaled_moe::Slots NSLOT): at most every pair its own expert, at most every expert of the bank (T = 64)
+        NSLOT, KT_L, KT2 = min(T * K, (E + 31) // 32 * 32), L // 128, IR // 128
         self._dtypes("scaled_moe_experts_layer", z_q=(z_q, uint8), pairs=(pairs, int64), w13=(w13, uint8),
                      w13_scales=(w13_scales, float32), w2=(w2, uint8), w2_scales=(w2_scales, float32), output=(output, float32))
         dims = lambda t: tuple(t.dim(i) for i in range(t.num_dims))
@@ -675,10 +678,15 @@ class StaticMegakernel(PersistentKernel):
             maps.append(first)
         maps.append(self._map("act8kt", ("b", hq, 0), (IR, NSLOT * T, KT2)))
         tensors = [z_q, pairs, w13, w2, output]
+        # the pair counters of single-item W13 entries (scaled_moe::Slots SINGLE: the live rows' slots have at most num_sms W13
+        # items, and h_q's scales can hold their amax too)
+        live = route.params[5] if len(route.params) >= 6 and route.params[5] > 0 else T
+        single = (live * (K - shared) + shared) * (IR // 64) <= self._num_sms() and 2 * NSLOT * KT2 >= 3 * self._num_sms()
+        pairc = self._num_sms() // 2 if single else 0
         self._add_node("scaled_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
                        [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)], one_task_per_sm=True,
                        out_buffer=lambda n: (T * K * L * 4, -1, False),
-                       counters=32 * 2 + NSLOT, buf_slots=bufs, map_slots=maps)
+                       counters=32 * 2 + NSLOT + pairc, buf_slots=bufs, map_slots=maps)
 
     # ---- after moe_experts (tasks/allreduce_send.cuh, sum_rmsnorm.cuh, sum_gpus.cuh, sum_send.cuh, residual_add.cuh). The
     # graph tensors between them (the sent partial sums, sum_rmsnorm's Rn, sum_gpus's Ssum, latent_up's K parts, sum_send's o)
@@ -1271,9 +1279,9 @@ class StaticMegakernel(PersistentKernel):
                                     # marks a task's tokens as one request's; not read)
         tokens_per_request: int = 1,   # NT: 1 = one decode step of T requests; NT > 1 (with serve) = a speculative verify
                                        # step of T / NT requests
-        requests_per_task: int = 1,   # RP: 2 / 4 = a decode step's requests 2 / 4 per task (NT 1): T / RP tasks per head,
-                                      # one wave of the SMs at T = 16 / 32 (tasks/kda_decode.cuh RP); the default grid, a
-                                      # plan may take RP 1, 2 or 4 (grid x)
+        requests_per_task: int = 1,   # RP: 2 / 4 / 8 = a decode step's requests 2 / 4 / 8 per task (NT 1): T / RP tasks per
+                                      # head, one wave of the SMs at T = 16 / 32 / 64 (tasks/kda_decode.cuh RP); the default
+                                      # grid, a plan may take RP 1, 2 or 4 (T = 64: also 8; grid x)
         lower_bound: float = -5.0, norm_eps: float = 1e-5,
         serve: dict = None,     # NT > 1: a serving framework's speculative verify step (SGLang's KDA
                                 # target-verify contract with ReplaySSM, tasks/kda_decode.cuh SERVE): {"nvalid" [R] int32 (the
@@ -1328,14 +1336,15 @@ class StaticMegakernel(PersistentKernel):
             slots += [sv[k] for k in ("nvalid", "icw_row", "icw", "ring_v", "ring_k", "ring_g", "ring_beta")]
             params += [1, draft, L]
         RP = requests_per_task
-        if RP not in (1, 2, 4) or (RP > 1 and NT != 1) or T % (NT * RP):
-            raise ValueError(f"kda_decode_layer: requests_per_task {RP}: 1, or 2 / 4 in a decode step (one token per "
+        if RP not in (1, 2, 4, 8) or (RP > 1 and NT != 1) or T % (NT * RP):
+            raise ValueError(f"kda_decode_layer: requests_per_task {RP}: 1, or 2 / 4 / 8 in a decode step (one token per "
                              f"request)")
         self._add_node("kda_decode", (T // (NT * RP), HL, 1), block_dim, [proj, output], [(0, -1, -1), (0, 1, -1)], params,
                        # o, 0xFF before each launch, written in whole 16-B stores: the o_proj GEMM waits for all tasks (its
                        # counter) or polls o (input_polled)
                        out_buffer=lambda n: (T * HLD * 2, 0xFF, False), counters=1,
-                       changeable_grid_dims={} if NT > 1 else {0: (1, 1, 4)},   # a decode step: 1 .. 4 requests per task
+                       # a decode step: 1 .. 4 requests per task (T = 64: .. 8)
+                       changeable_grid_dims={} if NT > 1 else {0: (1, 1, 8 if T == 64 else 4)},
                        cost_inputs=[0],   # adds the projection's K parts
                        buf_slots=[self._tensor_slot(t) for t in slots])
 

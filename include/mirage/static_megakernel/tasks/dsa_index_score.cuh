@@ -368,9 +368,10 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   static_assert(PAGE == 64 && CH * SELF::x == MAXCTX && CH % PAGE == 0,
                 "dsa_index_score: chunks of whole 64-position pages");
   constexpr int PPW = (CH / PAGE + 7) / 8; // pages of each warp
-  static_assert(ISC_END <= RING_BYTES && CH <= ISC_MAX_POS,
-                "dsa_index_score: its shared memory is the ring's (at most "
-                "1024 positions in a chunk)");
+  static_assert(smem_launch_bytes(ISC_END) <= 232448 && CH <= ISC_MAX_POS,
+                "dsa_index_score: its shared memory from the ring area's base "
+                "(T = 64: past its end) in the launch's 227 KB (at most 1024 "
+                "positions in a chunk)");
   static_assert(
       MAXP * PAGE >= MAXCTX,
       "dsa_index_score: the block table covers MAXCTX positions (MAXP "

@@ -51,9 +51,9 @@ def exchange_region(nbytes: int, dev, group):
     return buf, handle, mc
 
 
-# kda_decode's requests per task by T: T = 16 / 32 2 / 4 per task (128 tasks: one wave of the 148 SMs; 256 / 512 tasks of one
-# took two / four); T = 8 one each (128 tasks already)
-PAIRS = {16: 2, 32: 4}
+# kda_decode's requests per task by T: T = 16 / 32 / 64 2 / 4 / 8 per task (128 tasks: one wave of the 148 SMs; 256 / 512
+# tasks of one took two / four); T = 8 one each (128 tasks already)
+PAIRS = {16: 2, 32: 4, 64: 8}
 _SLOTS = {}   # T -> {"key": a forward's key, "owner": the StaticKDA whose own slot list that forward's other layers of this T
               # read, "n": its rows} (run_fused step_key: a decode step of fewer rows than T)
 
