@@ -1,0 +1,25 @@
+# The DeepSeek-V4.1-Flash MoE layer as a loop part (python/mirage/mpk/loop/part.py): demo.py's graph.
+name: deepseek_v4_1_moe
+model: DeepSeek-V4.1-Flash
+layers: the 40 MoE layers (one graph = one layer; every layer has the same shapes)
+module: part.py
+tp: 4
+machine: {gpu: NVIDIA B300 SXM6 PC, cuda: "13.0"}
+buckets:
+  8:
+    inputs:
+      dsv41_moe: ~/mk/dsv41_moe       # a checkpoint directory with the layer's shards and inference/config.json
+    bound_us: null                    # not derived yet
+    sglang_us: null                   # SGLang's in-server time per layer: not measured yet
+phases:                               # by each node's first output tensor (demo.py build_graph)
+  front: [logit_part, pairs, x_q, sgu_part, hs_q, sd_part]
+  experts: [routed_rows]
+  tail: [y, y_sent]
+error_limits:
+  y_relrms: 2.0e-2                    # y vs SGLang's y
+  derivation: >-
+    ours vs SGLang on 16 decode steps of each of L0 to L3 measured at most 1.95e-2 (TP4, 4 GPUs); the golden data, from the official
+    MoE.forward with the routing weight moved after W2, is at most 3.5e-3 from ours.
+flush_bytes: 536870912
+graph_options:
+  layer: 3                            # the layer whose weights the run uses

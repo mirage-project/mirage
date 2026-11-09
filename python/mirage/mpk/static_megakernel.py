@@ -92,6 +92,7 @@ class StaticMegakernel(PersistentKernel):
         self.tokens = None        # tokens per step: the first dimension of the layers' token-major tensors (_tokens; config.cuh T)
         self.poll_ns = None       # the waits' sleep between polls, ns (runtime.cuh STATIC_*POLL_NS: cnt_wait and the tasks
                                   # that pause with poll_pause; the others keep their own sleeps); None: their defaults
+        self.reset_parity = False   # a build with -DSTATIC_RESET_PARITY: the kernel takes the second G (core.cuh)
         self._static_nodes = {}   # graph index -> what compiler.py needs about a node (_add_node)
         self._bufs = []           # G::buf slot -> {"kind": out | exchange | scratch | tensor, ...} (_add_node, _scratch, _tensor_slot)
         self._maps = []           # Maps::m slot -> (kind, source, dims) (_map)
@@ -733,13 +734,15 @@ class StaticMegakernel(PersistentKernel):
         gamma: DTensor,       # kv_norm's weight [D] bf16
         positions: DTensor,   # [T] int32: each token's position
         freqs: DTensor,       # [rows, RD / 2, 2] fp32: this layer's RoPE table (cos, sin per pair), freqs_cis as real
-        output: DTensor,      # the window cache [T, W, D + D / 32] uint8: per row D e4m3 bytes, then D / 32 e8m0 scales
+        output: DTensor,      # the window cache [T, W, D + D / 32] uint8: per row D e4m3 bytes, then D / 32 e8m0 scales. Its
+                              # rows are read as one list, so a serving layer rebinds it to the framework's pool
+        window_loc: DTensor,  # [T] int32: each token's row of that list (a graph tensor, set before the launch)
         eps: float = 1e-20,   # norm_eps
         block_dim: tuple = (256, 1, 1),
     ):
         """Task t = token t: DeepSeek-V4.1's window K (model.py _window_kv): wkv's K parts added (polled), rounded to bf16,
         RMSNorm (gamma, eps) -> bf16, RoPE at the token's position p on the last RD columns -> bf16, act_quant's formula per 32
-        columns into row p % W of token t's window cache (the official keeps the bf16 dequantization of the same bytes). The
+        columns into row window_loc[t] of the window cache (the official keeps the bf16 dequantization of the same bytes). The
         cache is a graph tensor kept across launches, written by pointer (only that row). The node's counter t counts token t's
         task. params = [D, W, RD, eps (fp32 bits)]."""
         from .compiler import graph_nodes, producer_of
@@ -750,16 +753,17 @@ class StaticMegakernel(PersistentKernel):
         at_most_parts(p, 10)   # tasks/kv_post.cuh: at most 10 K parts
         T, D = self._tokens(input.dim(0)), input.dim(1)
         self._dtypes("kv_post_layer", input=(input, float32), gamma=(gamma, bfloat16), positions=(positions, int32),
-                     freqs=(freqs, float32), output=(output, uint8))
+                     freqs=(freqs, float32), output=(output, uint8), window_loc=(window_loc, int32))
         W, RD = output.dim(1), 2 * freqs.dim(1)
         assert D == 512 and RD == 64   # tasks/kv_post.cuh: 8 columns per thread (threads 0..63); RoPE on threads 56..63
         assert gamma.num_dims == 1 and gamma.dim(0) == D
         assert positions.num_dims == 1 and positions.dim(0) == T and freqs.num_dims == 3 and freqs.dim(2) == 2
         assert output.num_dims == 3 and (output.dim(0), output.dim(2)) == (T, D + D // 32) and W >= 1
+        assert window_loc.num_dims == 1 and window_loc.dim(0) == T
         self._add_node("kv_post", (T, 1, 1), block_dim, [input, gamma, positions, freqs, output],
                        [(0, -1, -1), (-1, -1, -1), (0, -1, -1), (-1, -1, -1), (0, -1, -1)], [D, W, RD, float_bits(eps)],
                        counters=T, buf_slots=[self._tensor_slot(gamma), self._tensor_slot(positions), self._tensor_slot(freqs),
-                                              self._tensor_slot(output)], cost_inputs=[0])   # adds wkv's K parts
+                                              self._tensor_slot(output), self._tensor_slot(window_loc)], cost_inputs=[0])   # adds wkv's K parts
 
     def sparse_attn_layer(
         self,
@@ -770,8 +774,11 @@ class StaticMegakernel(PersistentKernel):
         freqs: DTensor,         # [rows, RD / 2, 2] fp32: this layer's RoPE table (cos, sin per pair), freqs_cis as real
         attn_sink: DTensor,     # [H] fp32
         output: DTensor,        # o_q [T, H * D] e4m3 bytes (uint8)
+        window_rows: DTensor,             # [T, W] int32: the rows of window_cache (as one list) of positions p, p - 1, ..: a
+                                          # graph tensor, set before the launch
         compress_cache: DTensor = None,   # [T, CAP, 288] uint8: the group's compressed KV, per row 512 e2m1 (low nibble
                                           # first) then 32 e4m3 scales (one per 16); a graph tensor read by pointer
+        compress_pages: DTensor = None,   # [T, CAP / 128] int32: position j at row pages[t][j / 128] * 128 + j % 128 of compress_cache
         compress_idx: DTensor = None,     # [T, NC] int32: the compressed rows each token attends to after its window, in the
                                           # list's order (the indexer's: ascending), -1 padded; a graph tensor
         block_dim: tuple = (256, 1, 1),
@@ -804,6 +811,8 @@ class StaticMegakernel(PersistentKernel):
         assert q.num_dims == 2 and N == H * D and H % 16 == 0 and attn_sink.num_dims == 1
         assert D == 512 and W == 128 and RD == 64   # tasks/sparse_attn.cuh: 8 warps of 64 columns, of 16 window positions
         assert window_cache.num_dims == 3 and (window_cache.dim(0), window_cache.dim(2)) == (T, D + D // 32)
+        assert window_rows.num_dims == 2 and (window_rows.dim(0), window_rows.dim(1)) == (T, W)
+        self._dtypes("sparse_attn_layer", window_rows=(window_rows, int32))
         assert positions.num_dims == 1 and positions.dim(0) == T and freqs.num_dims == 3 and freqs.dim(2) == 2
         assert output.num_dims == 2 and (output.dim(0), output.dim(1)) == (T, N)
         extra, slots, ctensors = [], [], []
@@ -814,7 +823,10 @@ class StaticMegakernel(PersistentKernel):
             NC, CAP = compress_idx.dim(1), compress_cache.dim(1)
             assert compress_cache.num_dims == 3 and (compress_cache.dim(0), compress_cache.dim(2)) == (T, D // 2 + D // 16)
             assert compress_idx.num_dims == 2 and compress_idx.dim(0) == T and NC % 128 == 0 and 0 < NC <= 512
-            extra, slots = [NC, CAP], [self._tensor_slot(compress_cache), self._tensor_slot(compress_idx)]
+            assert compress_pages is not None and (compress_pages.dim(0), compress_pages.dim(1)) == (T, CAP // 128)
+            self._dtypes("sparse_attn_layer", compress_pages=(compress_pages, int32))
+            extra, slots = [NC, CAP], [self._tensor_slot(compress_cache), self._tensor_slot(compress_idx),
+                                       self._tensor_slot(compress_pages)]
             ctensors = [compress_cache, compress_idx]   # inputs: a node that writes them this launch is waited for
             nodes = graph_nodes(self)
             if producer_of(compress_cache, nodes) is None and producer_of(compress_idx, nodes) is None and H // 16 >= NC // 128:
@@ -842,7 +854,7 @@ class StaticMegakernel(PersistentKernel):
                        out_buffer=lambda n: (zq_bytes(T, N), -1, False), counters=counters,
                        concurrent_along_axis=concurrent,
                        buf_slots=[self._tensor_slot(window_cache), self._tensor_slot(positions), self._tensor_slot(freqs),
-                                  self._tensor_slot(attn_sink)] + slots,
+                                  self._tensor_slot(attn_sink), self._tensor_slot(window_rows)] + slots,
                        dry=True)   # its first task on an SM runs S .. the tail once on stand-ins while its inputs are on their way
 
     def sum_store_layer(
@@ -935,6 +947,7 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,      # the index K cache [T, CAP, HD / 2 + HD / 32] uint8: per position HD e2m1 (low nibble first),
                               # then HD / 32 e8m0 scales
         ratio: int,           # the layer's compress ratio R: a token writes row p / R when (p + 1) % R == 0
+        pages: DTensor,       # [T, CAP / 128] int32: the cache's page table (tasks/indexer_common.cuh)
         eps: float = 1e-20,   # norm_eps
         block_dim: tuple = (256, 1, 1),
     ):
@@ -960,7 +973,7 @@ class StaticMegakernel(PersistentKernel):
                        [(0, -1, -1), (-1, -1, -1), (0, -1, -1), (-1, -1, -1), (0, -1, -1)],
                        [HD, RD, ratio, CAP, float_bits(eps)], counters=T,
                        buf_slots=[self._tensor_slot(gamma), self._tensor_slot(positions), self._tensor_slot(freqs),
-                                  self._tensor_slot(output)], cost_inputs=[0])
+                                  self._tensor_slot(output), self._tensor_slot(pages)], cost_inputs=[0])
 
     def indexer_score_layer(
         self,
@@ -972,6 +985,7 @@ class StaticMegakernel(PersistentKernel):
         positions: DTensor,   # [T] int32: each token's position
         output: DTensor,      # scores [T, CAP] bf16 (the node's buffer): positions < (p + 1) / R written
         ratio: int,           # the layer's compress ratio R: token t scores positions 0 .. (p + 1) / R - 1
+        pages: DTensor,       # [T, CAP / 128] int32: the index K cache's page table (tasks/indexer_common.cuh)
         candidates: DTensor = None,   # [T, CAP / 8] uint8, a byte per block of 8 positions (0 = out): a Reindex layer's
                                       # mask from L20 (a graph input); positions outside score -inf
         chunks: int = None,   # token t's tasks (default CAP / 256): chunk c = positions [CH c, CH c + CH), CH = 256 x
@@ -1008,7 +1022,7 @@ class StaticMegakernel(PersistentKernel):
                        [(0, -1, -1), (0, -1, -1), (0, -1, -1), (0, -1, -1)] + [(0, -1, -1)] * len(cand) + [(0, -1, -1)],
                        [H, HD, CAP, ratio, int(candidates is not None)],
                        out_buffer=lambda n: (T * CAP * 2, -1, False), counters=T,
-                       buf_slots=[self._tensor_slot(index_k), self._tensor_slot(positions)]
+                       buf_slots=[self._tensor_slot(index_k), self._tensor_slot(positions), self._tensor_slot(pages)]
                        + [self._tensor_slot(c) for c in cand])
 
     def indexer_topk_layer(
@@ -1053,7 +1067,8 @@ class StaticMegakernel(PersistentKernel):
         positions: DTensor,   # [T] int32: each token's position
         output: DTensor,      # the latent [T, D] bf16 (the node's buffer): rows of tokens whose group completed
         ratio: int,           # the compress ratio R (1 or 2)
-        state: DTensor = None,   # R = 2: the pooling state [T, 2, R, D] fp32 (kv_state, score_state; a graph tensor kept
+        req_slots: DTensor = None,   # R = 2: [T] int64, each token's row in the state (a graph tensor, set before the launch)
+        state: DTensor = None,   # R = 2: the pooling state [slots, R, 2, D] fp32 (per slot and ring row kv | score; a graph tensor kept
                                  # across launches, read and written by pointer)
         eps: float = 1e-20,   # norm_eps
         block_dim: tuple = (256, 1, 1),
@@ -1077,8 +1092,10 @@ class StaticMegakernel(PersistentKernel):
         if ratio > 1:
             assert state is not None, "compressor_layer: ratio 2 keeps a state"
             self._dtypes("compressor_layer", state=(state, float32))
-            assert state.num_dims == 4 and (state.dim(0), state.dim(1), state.dim(2), state.dim(3)) == (T, 2, ratio, D)
-            slots.append(self._tensor_slot(state))
+            assert state.num_dims == 4 and (state.dim(1), state.dim(2), state.dim(3)) == (ratio, 2, D)
+            assert req_slots is not None and req_slots.num_dims == 1 and req_slots.dim(0) == T
+            self._dtypes("compressor_layer", req_slots=(req_slots, int64))
+            slots += [self._tensor_slot(state), self._tensor_slot(req_slots)]
         self._add_node("compressor", (T, 1, 1), block_dim, [input, gamma, positions, output],
                        [(0, -1, -1), (-1, -1, -1), (0, -1, -1), (0, -1, -1)], [D, ratio, float_bits(eps)],
                        out_buffer=lambda n: (T * D * 2, -1, False), counters=1, buf_slots=slots, cost_inputs=[0])
@@ -1090,7 +1107,8 @@ class StaticMegakernel(PersistentKernel):
         freqs: DTensor,       # [rows, RD / 2, 2] fp32: the layer's RoPE table
         output: DTensor,      # the compressed KV cache [T, CAP, D / 2 + D / 16] uint8 (a graph tensor): per row D e2m1 (low
                               # nibble first), then D / 16 e4m3 scales
-        ratio: int,           # the compress ratio R: a token writes row p / R when (p + 1) % R == 0
+        ratio: int,           # the compress ratio R: a token writes position p / R when (p + 1) % R == 0
+        pages: DTensor,       # [T, CAP / 128] int32: position j at row pages[t][j / 128] * 128 + j % 128 of the cache
         block_dim: tuple = (256, 1, 1),
     ):
         """Task t = token t: DeepSeek-V4.1's compressed KV write (model.py Attention._compress_kv): when token t's group
@@ -1109,9 +1127,12 @@ class StaticMegakernel(PersistentKernel):
         assert D == 512 and RD == 64 and ratio == p.params[1]
         assert output.num_dims == 3 and (output.dim(0), output.dim(2)) == (T, D // 2 + D // 16)
         # the latent whole: a task waits for all of the compressor's tasks (its counter)
+        assert CAP % 128 == 0 and pages.num_dims == 2 and (pages.dim(0), pages.dim(1)) == (T, CAP // 128)
+        self._dtypes("ckv_post_layer", pages=(pages, int32))
         self._add_node("ckv_post", (T, 1, 1), block_dim, [input, positions, freqs, output],
                        [(-1, -1, -1), (0, -1, -1), (-1, -1, -1), (0, -1, -1)], [D, RD, ratio, CAP], counters=T,
-                       buf_slots=[self._tensor_slot(positions), self._tensor_slot(freqs), self._tensor_slot(output)])
+                       buf_slots=[self._tensor_slot(positions), self._tensor_slot(freqs), self._tensor_slot(output),
+                                  self._tensor_slot(pages)])
 
     def situ_and_mul_layer(
         self,

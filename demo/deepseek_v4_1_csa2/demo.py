@@ -89,17 +89,47 @@ def state_tensors(variant: str, ratio: int, csrc: bool, cap: int, dev) -> dict:
     """The layer's inputs, output and state as graph tensors (zeros; set by inputs() or golden_step())."""
     s = {"x": torch.zeros(T, HID, dtype=torch.bfloat16, device=dev), "positions": torch.zeros(T, dtype=torch.int32, device=dev),
          "y": torch.zeros(T, HID, dtype=torch.bfloat16, device=dev),
-         "window_cache": torch.zeros(T, W, ROW, dtype=torch.uint8, device=dev)}
+         "window_cache": torch.zeros(T, W, ROW, dtype=torch.uint8, device=dev),
+         "window_loc": torch.zeros(T, dtype=torch.int32, device=dev), "window_rows": torch.zeros(T, W, dtype=torch.int32, device=dev)}
     if variant != "swa":
         s["compress_cache"] = torch.zeros(T, cap, CROW, dtype=torch.uint8, device=dev)
         s["compress_idx"] = torch.full((T, NC), -1, dtype=torch.int32, device=dev)
+        # the page table of compress_cache [T][cap][CROW] as one list of rows (a serving layer: the framework's, expanded to
+        # pages of 128 rows)
+        s["compress_pages"] = (torch.arange(T, device=dev)[:, None] * (cap // 128) +
+                               torch.arange(cap // 128, device=dev)).to(torch.int32)
     if variant in ("reindex", "full_r2", "full_r1"):
         s["index_k"] = torch.zeros(T, cap, IROW, dtype=torch.uint8, device=dev)
     if variant == "reindex" or csrc:
         s["candidates"] = torch.zeros(T, cap // 8, dtype=torch.uint8, device=dev)
     if variant.startswith("full") and ratio == 2:
-        s["cmp_state"] = torch.zeros(T, 2, ratio, D, dtype=torch.float32, device=dev)
+        s["cmp_state"] = torch.zeros(T, ratio, 2, D, dtype=torch.float32, device=dev)   # per token, ring row: kv | score
+        s["req_slots"] = torch.arange(T, dtype=torch.int64, device=dev)
     return s
+
+
+def index_k_pages(rows: torch.Tensor) -> torch.Tensor:
+    """The index K cache [T][cap][IROW] by rows -> the same bytes in the kernel's layout: pages of 128 positions, a page's value
+    bytes, then their scale bytes (tasks/indexer_common.cuh; SGLang's pool)."""
+    n, cap = rows.shape[:2]
+    pg = rows.view(n, cap // 128, 128, IROW)
+    return torch.cat([pg[..., :64].flatten(2), pg[..., 64:].flatten(2)], -1).view(n, cap, IROW)
+
+
+def index_k_rows(pages: torch.Tensor) -> torch.Tensor:
+    """index_k_pages' inverse."""
+    n, cap = pages.shape[:2]
+    pg = pages.view(n, cap // 128, 128 * IROW)
+    return torch.cat([pg[..., :128 * 64].view(n, cap // 128, 128, 64), pg[..., 128 * 64:].view(n, cap // 128, 128, 4)],
+                     -1).view(n, cap, IROW)
+
+
+def window_tables(w: dict):
+    """The window's rows for the positions in w: window_cache [T][W][ROW] as one list of rows, row t W + p % W of position p of
+    token t (a serving layer rebinds the tensors to the framework's pool and its tables: the kernel reads only these)."""
+    p, t = w["positions"].long(), torch.arange(T, device=w["positions"].device)
+    w["window_loc"].copy_(t * W + p % W)
+    w["window_rows"].copy_(t[:, None] * W + (p[:, None] - torch.arange(W, device=p.device)) % W)
 
 
 def build_graph(mpk: StaticMegakernel, w: dict, variant: str, ratio: int, csrc: bool, heads: int):
@@ -109,7 +139,9 @@ def build_graph(mpk: StaticMegakernel, w: dict, variant: str, ratio: int, csrc: 
     mpk.poll_ns = 0   # the waits spin (no sleep between polls)
     xb = int(mpk.num_gpus > 1)   # sum_store's exchange buffer
     if full or reindex:   # the indexer's tensors need more than config.cuh's default 24 slots (the layer defines STATIC_MAX_BUFS):
-        mpk.max_bufs = (32 if full else 27) + xb   # exactly the slots the graph uses (each one more costs every launch)
+        mpk.max_bufs = (36 if full else 30) + xb   # exactly the slots the graph uses (each one more costs every launch)
+    elif compressed and xb:
+        mpk.max_bufs = 25   # a Reuse layer: config.cuh's default 24 and sum_store's exchange buffer
     NQ, G = heads * D, heads // 8
     t = {}
     a = lambda k: t.setdefault(k, mpk.attach_input(torch_tensor=w[k], name=k))   # one tensor per name: writers and readers
@@ -125,18 +157,20 @@ def build_graph(mpk: StaticMegakernel, w: dict, variant: str, ratio: int, csrc: 
     pos, freqs = a("positions"), a("freqs_cis")
     wkv_part = nt((T, D), float32, "wkv_part")
     mpk.gemm_fp8_tile_layer(input=x_q, weight=a("wkv_weight"), weight_scales=a("wkv_scales"), output=wkv_part)
-    mpk.kv_post_layer(input=wkv_part, gamma=a("kv_norm_weight"), positions=pos, freqs=freqs, output=a("window_cache"))
+    mpk.kv_post_layer(input=wkv_part, gamma=a("kv_norm_weight"), positions=pos, freqs=freqs, output=a("window_cache"),
+                      window_loc=a("window_loc"))
     cx = {}
     if full:   # the compressor -> latent -> the compressed KV row and the index K row
         cmp_part, latent = nt((T, w["cmp_weight"].shape[0]), float32, "cmp_part"), nt((T, D), bfloat16, "latent")
         mpk.gemm_tile_layer(input=a("x"), weight=a("cmp_weight"), output=cmp_part)
         mpk.compressor_layer(input=cmp_part, gamma=a("cmp_norm_weight"), positions=pos, output=latent, ratio=ratio,
-                             state=a("cmp_state") if ratio == 2 else None)
-        mpk.ckv_post_layer(input=latent, positions=pos, freqs=freqs, output=a("compress_cache"), ratio=ratio)
+                             state=a("cmp_state") if ratio == 2 else None, req_slots=a("req_slots") if ratio == 2 else None)
+        mpk.ckv_post_layer(input=latent, positions=pos, freqs=freqs, output=a("compress_cache"), ratio=ratio,
+                           pages=a("compress_pages"))
         wk_part = nt((T, 128), float32, "wk_part")
         mpk.gemm_tile_layer(input=latent, weight=a("wk"), output=wk_part)
         mpk.index_k_post_layer(input=wk_part, gamma=a("k_norm_weight"), positions=pos, freqs=freqs, output=a("index_k"),
-                               ratio=ratio)
+                               ratio=ratio, pages=a("compress_pages"))
     if full or reindex:   # the indexer: q, weights, scores, top-k (every GPU computes all of it: no reduction)
         iq_part, q_idx = nt((T, 4096), float32, "iq_part"), nt((T, 4096), bfloat16, "q_idx")
         mpk.gemm_fp8_tile_layer(input=qr_q, weight=a("iwq_b_weight"), weight_scales=a("iwq_b_scales"), output=iq_part)
@@ -144,17 +178,17 @@ def build_graph(mpk: StaticMegakernel, w: dict, variant: str, ratio: int, csrc: 
         wp_part = nt((T, 128), float32, "wp_part")
         mpk.gemm_tile_layer(input=a("x"), weight=a("wproj"), output=wp_part)
         scores = nt((T, w["index_k"].shape[1]), bfloat16, "scores")
-        sms = torch.cuda.get_device_properties(w["x"].device).multi_processor_count
+        sms = mpk._num_sms()
         mpk.indexer_score_layer(q=q_idx, weights=wp_part, index_k=a("index_k"), positions=pos, output=scores, ratio=ratio,
-                                candidates=a("candidates") if reindex else None,
+                                candidates=a("candidates") if reindex else None, pages=a("compress_pages"),
                                 chunks=score_chunks(heads, w["index_k"].shape[1], sms))
         mpk.indexer_topk_layer(scores=scores, positions=pos, output=a("compress_idx"), ratio=ratio,
                                candidates_out=a("candidates") if csrc else None)
     if compressed:
-        cx = {"compress_cache": a("compress_cache"), "compress_idx": a("compress_idx")}
+        cx = {"compress_cache": a("compress_cache"), "compress_idx": a("compress_idx"), "compress_pages": a("compress_pages")}
     o_q = nt((T, NQ), uint8, "o_q")
     mpk.sparse_attn_layer(q=wq_b_part, window_cache=a("window_cache"), positions=pos, freqs=freqs, attn_sink=a("attn_sink"),
-                          output=o_q, **cx)   # q from wq_b's K parts (its RoPE done there)
+                          output=o_q, window_rows=a("window_rows"), **cx)   # q from wq_b's K parts (its RoPE done there)
     wo_a_part = nt((T, G * OL), float32, "wo_a_part")
     mpk.gemm_fp8_tile_layer(input=o_q, weight=a("wo_a_weight"), weight_scales=a("wo_a_scales"), output=wo_a_part, groups=G)
     # fused only when each of wo_b's 4 K parts (hand_grids) is at most RING_STAGES / 2 stages: TP4 (K 2048), not TP2 / TP1
@@ -233,16 +267,19 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
 
 
 def build(ws: list, variant: str, ratio: int, csrc: bool, heads: int, out: str, plan: str = "hand", search: list = None,
-          costs_code: str = "current", time_limit_s: float = 300, profile: bool = False, extra_flags: list = None):
+          costs_code: str = "current", time_limit_s: float = 300, profile: bool = False, extra_flags: list = None, device: int = 0,
+          free_sms: int = 0):
     """Build the graph on len(ws) GPUs (ws: each GPU's tensors), compile its plan and load the kernel. Return the kernel, each
-    GPU's node buffers (by output tensor name) and the information from compile_plan, with "paths" and "mpk"."""
+    GPU's node buffers (by output tensor name) and the information from compile_plan, with "paths" and "mpk". free_sms: SMs left
+    out of the launch (no CTA there): a framework's side stream runs on them meanwhile."""
     gpus, w = len(ws), ws[0]
-    mpk = StaticMegakernel(num_gpus=gpus)
+    sms = torch.cuda.get_device_properties(device).multi_processor_count - free_sms
+    mpk = StaticMegakernel(num_gpus=gpus, num_sms=sms)
+    mpk.reset_parity = any("STATIC_RESET_PARITY" in f for f in (extra_flags or []))
     build_graph(mpk, w, variant, ratio, csrc, heads)
     for wg in ws[1:]:   # the fused act_quant's tap (build_graph made it on GPU 0)
         if "oa_q" in w:
             wg.setdefault("oa_q", torch.zeros_like(w["oa_q"], device=wg["x"].device))
-    sms = torch.cuda.get_device_properties(0).multi_processor_count
     cap = w["compress_cache"].shape[1] if "compress_cache" in w else 256
     p = hand_plan(mpk, heads, cap, w["cmp_weight"].shape[0] if "cmp_weight" in w else 0, sms) if plan == "hand" \
         else compiler.plan_from_file(plan)
@@ -260,13 +297,17 @@ def build(ws: list, variant: str, ratio: int, csrc: bool, heads: int, out: str, 
         plan_viewer.save(os.path.join(out, "plan_view.json"), p, summary, f"searched from {plan}")
     paths, info = compiler.compile_plan(mpk, p, os.path.join(out, "schedules"))
     nodes = compiler.graph_nodes(mpk)
+    # STATIC_NO_START_BARRIER: the host allocates the buffers reset at each launch (two sets)
+    nb = any("STATIC_NO_START_BARRIER" in f for f in (extra_flags or []))
+    given = lambda n: n.info["out_buffer"] is not None and not n.info["exchange"] and \
+        not (nb and n.info["out_buffer"](n)[1] >= 0 and not n.info["out_buffer"](n)[2])
     bufs = [{compiler.tname(mpk, n.outputs[0]): torch.zeros(n.info["out_buffer"](n)[0], dtype=torch.uint8, device=wg["x"].device)
-             for n in nodes if n.info["out_buffer"] is not None and not n.info["exchange"]} for wg in ws]
+             for n in nodes if given(n)} for wg in ws]
     for wg, bg in zip(ws, bufs):
         if "oa_q" in wg and "oa_q" not in bg:   # fused act_quant: wo_b's x_q tap (build_graph), with the node buffers
             bg["oa_q"] = wg["oa_q"]
-    sk = mpk.compile_static(paths, gpu_tensors=[{**wg, **bg} for wg, bg in zip(ws, bufs)], out_dir=os.path.join(out, "build"),
-                            extra_flags=extra_flags, profile=profile)
+    sk = mpk.compile_static(paths, gpu_tensors=[{**bg, **wg} for wg, bg in zip(ws, bufs)], out_dir=os.path.join(out, "build"),
+                            extra_flags=extra_flags, profile=profile, device=device)
     return sk, bufs, dict(info, paths=paths, mpk=mpk, plan=p)
 
 
@@ -277,6 +318,7 @@ def random_inputs(w: dict, variant: str, ratio: int, pos: int, seed: int = 1):
     rnd = lambda *shape: torch.randint(0, 256, shape, generator=gen, dtype=torch.uint8).to(dev)
     w["x"].copy_(torch.randn(T, HID, generator=gen).bfloat16())
     w["positions"].fill_(pos)
+    window_tables(w)
     e4m3 = rnd(T, W, D) & 0xFE                       # e4m3 bytes, never 0x7F / 0xFF (NaN)
     w["window_cache"].copy_(torch.cat([e4m3, 118 + rnd(T, W, D // 32) % 8], -1))   # scales 2^-9 .. 2^-2
     n = (pos + 1) // max(ratio, 1)
@@ -285,7 +327,7 @@ def random_inputs(w: dict, variant: str, ratio: int, pos: int, seed: int = 1):
         w["compress_cache"].copy_(torch.cat([rnd(T, cap, D // 2), 0x18 + rnd(T, cap, D // 16) % 0x20], -1))   # e4m3 scales
     if "index_k" in w:
         cap = w["index_k"].shape[1]
-        w["index_k"].copy_(torch.cat([rnd(T, cap, 64), 120 + rnd(T, cap, 4) % 8], -1))
+        w["index_k"].copy_(index_k_pages(torch.cat([rnd(T, cap, 64), 120 + rnd(T, cap, 4) % 8], -1)))
     if "candidates" in w:
         w["candidates"].fill_(1)
     if "cmp_state" in w:
@@ -320,12 +362,14 @@ def golden_state(w: dict, g, src, pre: str, variant: str, ratio: int, csrc: bool
                                             .reshape(T, -1, row), src.get_tensor(name + ".scale").view(torch.uint8)], -1)
     w["x"].copy_(g.get_tensor("x"))
     w["positions"].copy_(g.get_tensor("positions"))
+    if "window_loc" in w:   # (not in check_golden's expected state)
+        window_tables(w)
     w["window_cache"].copy_(cat(src, pre + "window_kv_cache", D))
     if variant.startswith("full"):
         new = {"compress_cache": cat(src, pre + "compress_kv_cache", D // 2), "index_k": cat(src, pre + "indexer.k_cache", 64)}
         if ratio == 2:
-            w["cmp_state"][:, 0].copy_(src.get_tensor(pre + "compressor.kv_state"))
-            w["cmp_state"][:, 1].copy_(src.get_tensor(pre + "compressor.score_state"))
+            w["cmp_state"][:, :, 0].copy_(src.get_tensor(pre + "compressor.kv_state"))
+            w["cmp_state"][:, :, 1].copy_(src.get_tensor(pre + "compressor.score_state"))
     elif variant in ("reuse", "reindex"):
         new = {"compress_cache": cat(g, "in.compress_kv", D // 2)}
         if variant == "reindex":
@@ -344,6 +388,8 @@ def golden_state(w: dict, g, src, pre: str, variant: str, ratio: int, csrc: bool
     for name, v in new.items():
         w[name].zero_()
         w[name][:, :v.shape[1]].copy_(v)
+    if "index_k" in new:
+        w["index_k"].copy_(index_k_pages(w["index_k"]))
     if variant != "reuse" and "compress_idx" in w:
         w["compress_idx"].fill_(-7)   # written by indexer_topk: a value it did not write shows
     if csrc:
@@ -418,7 +464,8 @@ def check_golden(args, ws: list, shards: list, variant: str, ratio: int, csrc: b
                 stats["o_q heads"] += eq.numel()
                 ysum += added(bg["wo_b_part"], HID).to(ysum.device)
                 for n, acc in cst.items():
-                    for i, v in enumerate(cache_diff(wg[n].to(exp[n].device), exp[n], *CACHES[n])):
+                    view = index_k_rows if n == "index_k" else (lambda c: c)
+                    for i, v in enumerate(cache_diff(view(wg[n].to(exp[n].device)), view(exp[n]), *CACHES[n])):
                         acc[i] += v
                 if "cmp_state" in w:
                     got, ref = wg["cmp_state"].to(exp["cmp_state"].device), exp["cmp_state"]

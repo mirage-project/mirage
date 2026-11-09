@@ -66,6 +66,7 @@ constexpr int SA_OFF_Q = 0, // q [16][512] bf16; after S, o_q's bytes [16][512]
         SA_OFF_F + 32 * 8;       // O [16][SA_OSLD] fp32 for the tail (its own
                                  // place: the dry pass's tail must not touch K)
 constexpr int SA_OSLD = 512 + 8; // O's row stride (8 banks a row: no conflicts)
+constexpr int SA_CPAGE = 128;    // rows of a compressed page table's entry
 constexpr int SA_CROW = 288;     // a compressed cache row: 512 e2m1 (low nibble
                                  // first), then 32 e4m3 scales (one per 16)
 // the staging area of a pair's 128 compressed rows (raw bytes, cp.async) in
@@ -254,10 +255,8 @@ __device__ __forceinline__ void sa_q_parts(float const *part,
 // cp.async 512 contiguous bytes of 2 or 3 rows. id -1:
 // zeros (src-size 0: a row of 0, the official's, with no masking in the
 // dequant). Dry pass (!real): row 0 for every row
-template <int CAP>
 __device__ __forceinline__ void sa_stage_rows(unsigned char const *ccache,
                                               int const *ids,
-                                              int t,
                                               int pr,
                                               bool real,
                                               char *sm) {
@@ -266,8 +265,7 @@ __device__ __forceinline__ void sa_stage_rows(unsigned char const *ccache,
   for (int k = 0; k < 9; k++) {
     int const c = threadIdx.x + 256 * k, row = c / 18, o = 16 * (c - 18 * row);
     int const id = real ? ids[128 * pr + row] : 0;
-    unsigned char const *src =
-        ccache + ((size_t)t * CAP + (id >= 0 ? id : 0)) * SA_CROW + o;
+    unsigned char const *src = ccache + (size_t)(id >= 0 ? id : 0) * SA_CROW + o;
     asm volatile(
         "cp.async.cg.shared.global [%0], [%1], 16, %2;" ::"r"(x + 16 * c),
         "l"(src),
@@ -399,11 +397,13 @@ template <int H,
           int NS>
 __device__ __forceinline__ void sparse_attn_task(float const *q,
                                                  unsigned char const *cache,
+                                                 int const *wrows,
                                                  int const *pos,
                                                  float const *freqs,
                                                  float const *sink,
                                                  unsigned char const *ccache,
                                                  int const *cidx,
+                                                 int const *cpages,
                                                  __nv_bfloat16 *kbf,
                                                  float *part,
                                                  float *mlb,
@@ -418,7 +418,7 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
                                                  char *sm,
                                                  bool warm STAGE_STAMP_PARAM) {
   static_assert(
-      NC % 128 == 0 && NC <= 512 && (NC == 0 || CAP > 0),
+      NC % 128 == 0 && NC <= 512 && (NC == 0 || (CAP > 0 && CAP % SA_CPAGE == 0)),
       "sparse_attn: compressed top-k in whole pairs of 64-key blocks, "
       "at most 512 (the ids' smem)");
   static_assert(D == 512 && W == 128 && RD == 64 && H % SA_HPT == 0,
@@ -453,9 +453,10 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
   float2 *const fs = reinterpret_cast<float2 *>(sm + SA_OFF_F);
   int *const ids = reinterpret_cast<int *>(sm + SA_OFF_I);
   int const p = pos[t];
-  int const oldest = p % W + 1; // list position i: slot (oldest + i) % W
-  int const lo = p >= W - 1 ? 0 : W - 1 - p; // positions < lo: slots > p
-  unsigned char const *const kc = cache + (size_t)t * W * ROW;
+  // token t's window: wr[j] the cache row of position p - j, j < W (the
+  // framework's list, newest first): list position i is wr[W - 1 - i]
+  int const lo = p >= W - 1 ? 0 : W - 1 - p; // positions < lo: before position 0
+  int const *const wr = wrows + (size_t)t * W;
   bool const win = !SPLIT || s == 0; // this task has the window pair
   // split: the group's block maxima and sums [NS][16][4] (max of block 0, of
   // block 1, their sums; mlb [T][H / 16][NS][16][4], 0xFF before each launch)
@@ -464,8 +465,13 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
   // the token's window (W rows, 66 KB) into L2 first: the 4 rounds below then
   // wait for L2, not HBM (L2 is emptied before each launch; the loop's
   // rounds wait one after another)
-  for (int i = tid; win && i < W * ROW / 128; i += 256) {
-    asm volatile("prefetch.global.L2 [%0];" ::"l"(kc + 128 * i));
+  for (int i = tid; win && i < W * 5; i += 256) {
+    int const j = i % W; // line i / W of the row wr[j]
+    if (j < W - lo) {
+      asm volatile(
+          "prefetch.global.L2 [%0];" ::"l"(cache + (size_t)wr[j] * ROW +
+                                           128 * (i / W)));
+    }
   }
   // what waits for nothing: the RoPE pairs at p (thread i < RD / 2: pair i,
   // into fs after the barrier), the head's sink (softmax thread: head tid /
@@ -497,9 +503,15 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
       } else {
         id = *a;
       }
-      ids[i] = id;
-      if (id >= 0) {
-        unsigned char const *row = ccache + ((size_t)t * CAP + id) * SA_CROW;
+      // the cache row of compressed position id; ids holds rows from here on
+      int const r =
+          id >= 0 ? cpages[(size_t)t * (CAP / SA_CPAGE) + id / SA_CPAGE] *
+                            SA_CPAGE +
+                        id % SA_CPAGE
+                  : -1;
+      ids[i] = r;
+      if (r >= 0) {
+        unsigned char const *row = ccache + (size_t)r * SA_CROW;
 #pragma unroll
         for (int k = 0; k < 3; k++) {
           asm volatile("prefetch.global.L2 [%0];" ::"l"(row + 128 * k));
@@ -520,7 +532,7 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
     }
     __syncthreads(); // ids
     if (g < NP) {
-      sa_stage_rows<CAP>(ccache, ids, t, g, true, sm);
+      sa_stage_rows(ccache, ids, g, true, sm);
     }
   }
   // split, a Reuse layer's compressed pair: its K now, while q is on its way
@@ -529,7 +541,7 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
     if constexpr (!CNODE && !CCNODE) {
       if (s > 0) {
         __syncthreads(); // ids
-        sa_stage_rows<CAP>(ccache, ids, t, s - 1, true, sm);
+        sa_stage_rows(ccache, ids, s - 1, true, sm);
         asm volatile("cp.async.wait_all;" ::: "memory");
         __syncthreads();
         sa_dequant_rows(true, sm);
@@ -549,7 +561,7 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
     for (int i = 0; i < 4; i++) {
       int const li = w + 8 * (4 * h + i);
       if (li < W - 1 && li >= lo) {
-        unsigned char const *row = kc + (size_t)((oldest + li) % W) * ROW;
+        unsigned char const *row = cache + (size_t)wr[W - 1 - li] * ROW;
         v[i] = *reinterpret_cast<uint4 const *>(row + 16 * l);
         s[i] = row[D + l / 2];
       }
@@ -577,7 +589,7 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
 #pragma unroll 1
     for (int c = g; c < NP; c += H / SA_HPT) {
       if (c != g) { // (pair g's: staged before the window's rounds)
-        sa_stage_rows<CAP>(ccache, ids, t, c, true, sm);
+        sa_stage_rows(ccache, ids, c, true, sm);
       }
       asm volatile("cp.async.wait_all;" ::: "memory");
       __syncthreads();
@@ -646,7 +658,7 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
           load_ids(CNODE);
         }
         __syncthreads(); // ids
-        sa_stage_rows<CAP>(ccache, ids, t, s - 1, real, sm);
+        sa_stage_rows(ccache, ids, s - 1, real, sm);
         asm volatile("cp.async.wait_all;" ::: "memory");
         __syncthreads();
         if (real) {
@@ -674,11 +686,11 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
                                                              // of pair 0
         load_ids(CNODE);
       }
-      // K at list position W - 1: slot p % W, this launch's row (warp 0;
+      // K at list position W - 1: wr[0], this launch's row (warp 0;
       // relaxed loads: the row shares 128-B lines with rows read above, maybe
       // in L1)
       if (win && w == 0) {
-        unsigned char const *row = kc + (size_t)(p % W) * ROW;
+        unsigned char const *row = cache + (size_t)wr[0] * ROW;
         uint4 const v = ld16_relaxed(row + 16 * l);
         uint4 const sv = ld16_relaxed(row + D);
         int const b = l / 2; // the scale byte
@@ -707,7 +719,7 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
       if constexpr (!BF16K) {
         if (pr + 1 < npair) { // the next pair's rows: raw bytes into the
                               // staging area (cp.async: no registers held)
-          sa_stage_rows<(CAP > 0 ? CAP : 1)>(ccache, ids, t, pr, real, sm);
+          sa_stage_rows(ccache, ids, pr, real, sm);
         }
       }
       // S = q K^T x scale, warp w pair positions 16 w .. 16 w + 15 (2 n8
@@ -1215,17 +1227,21 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
 // (the window cache, a graph tensor; params {D, W, RD, eps}; a counter per
 // token). PARAMS {H, D, W, RD, softmax scale (fp32 bits)}; BUF_SLOTS {the
 // window cache
-// ([T][W][D + D / 32] uint8), positions ([T] int32), freqs ([rows][RD /
-// 2][2] fp32), attn_sink ([H] fp32)}, graph tensors; warm: this node ran on
+// (rows of D + D / 32 uint8), positions ([T] int32), freqs ([rows][RD /
+// 2][2] fp32), attn_sink ([H] fp32), the window's rows ([T][W] int32: cache
+// rows of positions p, p - 1, ..)}, graph tensors; warm: this node ran on
 // this SM before (no dry pass)
 // the counter of compress_idx's producer (the 5th input after the window
 // cache: positions, freqs, attn_sink, the compressed cache, compress_idx): an
 // indexer_topk's; -1 for a graph input or without compressed KV. The same for
-// the compressed cache's (the 4th: ckv_post's). Both graph inputs (a Reuse
-// layer): BUF_SLOTS' 7th the bf16 K buffer [T][NC][SA_QLD] (a scratch buffer),
+// the compressed cache's (the 4th: ckv_post's). With compressed KV BUF_SLOTS
+// 5, 6, 7: the compressed cache (rows of SA_CROW), compress_idx [T][NC]
+// (compressed positions, -1 none), its page table [T][CAP / SA_CPAGE] int32:
+// position j is at row pages[t][j / SA_CPAGE] * SA_CPAGE + j % SA_CPAGE. Both
+// graph inputs (a Reuse layer): BUF_SLOTS' 9th the bf16 K buffer [T][NC][SA_QLD] (a scratch buffer),
 // and the node's counters 1 + NP t + c the pairs' flags (sa_bf16k). Grid (T, H
-// / 16, NS), NS = 1 + NC / 128 (split): BUF_SLOTS' 7th the partials' O [T][H /
-// 16][NS][16][D] fp32, 8th their block maxima and sums [T][H / 16][NS][16][4]
+// / 16, NS), NS = 1 + NC / 128 (split): BUF_SLOTS' 9th the partials' O [T][H /
+// 16][NS][16][D] fp32, 10th their block maxima and sums [T][H / 16][NS][16][4]
 // fp32 (0xFF before each launch: the maxima polled), scratch buffers; the
 // node's counters 1 + t H / 16 + g the groups' counts
 template <int I, class X0, class... XS>
@@ -1265,21 +1281,22 @@ __device__ __forceinline__ void run_sparse_attn(Maps const &,
                     (NS == 1 || (NC > 0 && NS == 1 + NC / 128)),
                 "sparse_attn: grid (T, H / 16) or (T, H / 16, 1 + NC / 128)");
   unsigned char const *ccache = nullptr;
-  int const *cidx = nullptr;
+  int const *cidx = nullptr, *cpages = nullptr;
   __nv_bfloat16 *kbf = nullptr;
   float *part = nullptr, *mlb = nullptr;
   if constexpr (NC > 0) {
-    ccache = buf_at<unsigned char const>(g, slot_at<BUF_SLOTS, 4>());
-    cidx = buf_at<int const>(g, slot_at<BUF_SLOTS, 5>());
+    ccache = buf_at<unsigned char const>(g, slot_at<BUF_SLOTS, 5>());
+    cidx = buf_at<int const>(g, slot_at<BUF_SLOTS, 6>());
+    cpages = buf_at<int const>(g, slot_at<BUF_SLOTS, 7>());
     if constexpr (sa_bf16k<NC,
                            (sa_rest_counter<4, REST...>() >= 0),
                            (sa_rest_counter<3, REST...>() >= 0),
                            H>()) {
-      kbf = buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 6>());
+      kbf = buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 8>());
     }
     if constexpr (NS > 1) {
-      part = buf_at<float>(g, slot_at<BUF_SLOTS, 6>());
-      mlb = buf_at<float>(g, slot_at<BUF_SLOTS, 7>());
+      part = buf_at<float>(g, slot_at<BUF_SLOTS, 8>());
+      mlb = buf_at<float>(g, slot_at<BUF_SLOTS, 9>());
     }
   }
   static_assert(SELF::buf >= 0 && exchange_bytes[SELF::buf] == 0 &&
@@ -1307,11 +1324,13 @@ __device__ __forceinline__ void run_sparse_attn(Maps const &,
                    (sa_rest_counter<3, REST...>() >= 0),
                    NS>(buf_at<float const>(g, Q::buf),
                        buf_at<unsigned char const>(g, slot_at<BUF_SLOTS, 0>()),
+                       buf_at<int const>(g, slot_at<BUF_SLOTS, 4>()),
                        buf_at<int const>(g, slot_at<BUF_SLOTS, 1>()),
                        buf_at<float const>(g, slot_at<BUF_SLOTS, 2>()),
                        buf_at<float const>(g, slot_at<BUF_SLOTS, 3>()),
                        ccache,
                        cidx,
+                       cpages,
                        kbf,
                        part,
                        mlb,
