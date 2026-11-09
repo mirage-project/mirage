@@ -5613,10 +5613,11 @@ static int register_static_task(TaskRegister *r,
                                 threadblock::Graph const &bgraph,
                                 std::vector<int> const &params,
                                 int num_inputs,
-                                size_t num_params) {
+                                size_t num_params,
+                                int num_outputs = 1) {
   assert(params.size() == num_params);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
-  static_split_ops(bgraph, num_inputs, 1, input_ops, output_ops);
+  static_split_ops(bgraph, num_inputs, num_outputs, input_ops, output_ops);
   return r->register_task_variant(type, static_build_only_task(name, params));
 }
 
@@ -5911,8 +5912,12 @@ int TaskRegister::register_act_quant_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {K}. inputs: x [T, K] (bf16, a graph input; or fp32, a
   // gemm_fp8_tile node's K parts in slots); output: x_q [T, K] e4m3 (its
-  // buffer: x_q, then the scale chunks). Grid (T).
-  assert(params.size() == 1 && params[0] > 0 && params[0] % 512 == 0);
+  // buffer: x_q, then the scale chunks). Grid (T). Or {K, I, L}: x = SwiGLU
+  // of a gemm_fp8_tile node's gate | up K parts [T, 2 I] (L: the clamp's fp32
+  // bits), x_q [T, K] with columns [I, K) zero.
+  assert((params.size() == 1 && params[0] > 0 && params[0] % 512 == 0) ||
+         (params.size() == 3 && params[0] % 256 == 0 && params[1] > 0 &&
+          params[1] % 32 == 0 && params[1] <= params[0]));
   return register_static_task(
       this, TASK_ACT_QUANT_SM100, "act_quant", bgraph, params, 1, 1);
 }
@@ -5984,11 +5989,22 @@ int TaskRegister::register_sparse_attn_sm100_task(
 int TaskRegister::register_sum_store_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {N}. inputs: wo_b's output [T, N] fp32 (a gemm_fp8_tile node's K
-  // parts in slots); output: y [T, N] bf16 (a graph tensor). Grid (column
-  // blocks).
-  assert(params.size() == 1 && params[0] > 0 && params[0] % 128 == 0);
-  return register_static_task(
-      this, TASK_SUM_STORE_SM100, "sum_store", bgraph, params, 1, 1);
+  // parts in slots); output: y [T, N] bf16 (a graph tensor); num_gpus > 1:
+  // the exchange buffer [GPUs x T, N] bf16, then y (written by pointer, an
+  // output so that its readers wait). Grid (column blocks). Or {N, RK}: a
+  // second input, an expert node's routed rows [T x RK, N] fp32, added first.
+  assert((params.size() == 1 || (params.size() == 2 && params[1] >= 1)) &&
+         params[0] > 0 && params[0] % 128 == 0);
+  int const num_outputs = (int)bgraph.operators.size() - (int)params.size();
+  assert(num_outputs == 1 || num_outputs == 2);
+  return register_static_task(this,
+                              TASK_SUM_STORE_SM100,
+                              "sum_store",
+                              bgraph,
+                              params,
+                              (int)params.size(),
+                              params.size(),
+                              num_outputs);
 }
 
 int TaskRegister::register_indexer_q_sm100_task(
@@ -6066,6 +6082,20 @@ int TaskRegister::register_ckv_post_sm100_task(threadblock::Graph const &bgraph,
   assert(params.size() == 4 && params[0] == 512 && params[1] == 64);
   return register_static_task(
       this, TASK_CKV_POST_SM100, "ckv_post", bgraph, params, 3, 4);
+}
+
+int TaskRegister::register_swiglu_moe_experts_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {I (the expert intermediate on this GPU), L (the SwiGLU clamp's
+  // fp32 bits)}. inputs: x_q (an act_quant node's output), routing pairs, W13
+  // bank, W2 bank (MXFP4, in pieces); output: the routed rows R [T x K, H]
+  // fp32. One task per SM (static_megakernel/tasks/swiglu_moe_experts.cuh).
+  assert(params.size() == 2 && params[0] > 0 && params[0] % 64 == 0);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 4, 1, input_ops, output_ops);
+  return register_task_variant(
+      TASK_SWIGLU_MOE_EXPERTS_SM100,
+      static_build_only_task("swiglu_moe_experts", params));
 }
 
 } // namespace runtime
