@@ -15,11 +15,12 @@ in SGLang changes: `boot/sitecustomize.py` patches SGLang when each process star
 
 ## Setup
 
-- SGLang at commit `240f2a0a64`. `SGLANG_DSV4_KV_LAYOUT=v41_new` is necessary for the static layers: they read and write SGLang's KV
-  pools in that layout.
-- Build mirage with the same Python minor version as the SGLang venv. The layers load mirage's z3 library: put its directory on
-  `LD_LIBRARY_PATH`.
-- `DSV41_STATIC_CKPT` is a directory with `inference/config.json` and the checkpoint's shards. The default is SGLang's model path.
+- SGLang at commit `240f2a0a64`, in its own venv (torch 2.14.1+cu130, FlashInfer 0.7.2). `SGLANG_DSV4_KV_LAYOUT=v41_new` is necessary
+  for the static layers: they read and write SGLang's KV pools in that layout.
+- Build mirage with the same Python minor version as the SGLang venv. Install `graphviz` in the SGLang venv. The SGLang venv has z3
+  4.15 and mirage needs 4.16: put the directory of mirage's `libz3.so.4.16` on `LD_LIBRARY_PATH`. Put `nvcc` on `PATH`.
+- `DSV41_STATIC_CKPT` is a directory with `inference/config.json` and the checkpoint's shards. The default is SGLang's model path. If
+  the model path has no `inference/config.json`, make a directory with that file from the official repository and links to the shards.
 - `export MIRAGE=/path/to/mirage M=/path/to/DeepSeek-V4.1-Flash`
 
 The commands below use:
