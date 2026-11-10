@@ -55,6 +55,45 @@ for _a in ("kda", "mla", "kdad"):   # (kdad: the plain-decode KDA part, test_kda
 
 
 
+# GLM-5.3-Flash (hidden 4096, mHC with 4 streams; amd/tests/test_glm_*_layer.py --codegen): a sublayer kernel reads the
+# streams R_in and the sublayer's coefficients (h_post_in, h_res_in), writes R_out and the next sublayer's input (x_ffn /
+# x_attn) and coefficients (h_post_out, h_res_out); the scratch tensors stay inside the kernel (the harnesses' --serving
+# graphs: node buffers the kernel resets every launch)
+_MHC_IO = ["R_in", "h_post_in", "h_res_in", "R_out", "h_post_out", "h_res_out"]
+KINDS["gkda"] = (["wproj", "wfb", "wgb", "prm", "conv_w", "w_o", "hc_ffn_fn", "hc_ffn_small", "ffn_norm"],
+                 ["x_attn", "state_pool", "conv_pool", "slots", "x_ffn"] + _MHC_IO, 4096)
+KINDS["gdsa"] = (["w_qkva", "q_norm", "kv_norm", "w_kgw", "k_norm_w", "k_norm_b", "ape", "w_iqb", "w_qb", "w_kc", "w_vc", "w_o",
+                  "hc_ffn_fn", "hc_ffn_small", "ffn_norm"],
+                 ["x_attn", "cache", "out_loc", "seq_lens", "req_slots", "pooled_bt", "tail_k", "tail_score", "pcache", "r2t",
+                  "req_idx", "x_ffn"] + _MHC_IO, 4096)
+KINDS["gmoe"] = (["router", "bias", "w13", "w13_sf", "w2", "w2_sf", "hc_attn_fn", "hc_attn_small", "attn_norm"],
+                 ["x_ffn", "x_attn"] + _MHC_IO, 4096)
+KINDS["gdense"] = (["w_gu", "w_dn", "hc_attn_fn", "hc_attn_small", "attn_norm"], ["x_ffn", "x_attn"] + _MHC_IO, 4096)
+# one kernel per layer (amd/tests/test_glm_pair_layer.py --codegen --serving): KDA + MoE; x_ffn stays inside (the mid streams
+# R_mid, h_*_mid are graph tensors: run tensors the hook gives),
+# the next layer's input goes to x_attn_next (the hook alternates two x_attn buffers)
+KINDS["gdsamoe"] = (KINDS["gdsa"][0] + KINDS["gmoe"][0],
+                    [k for k in KINDS["gdsa"][1] if k != "x_ffn"] + ["x_attn_next", "R_mid", "h_post_mid", "h_res_mid"], 4096)
+KINDS["gkdadense"] = (KINDS["gkda"][0] + KINDS["gdense"][0],
+                      ["x_attn", "state_pool", "conv_pool", "slots", "x_attn_next", "R_mid", "h_post_mid", "h_res_mid"] + _MHC_IO, 4096)
+# N consecutive KDA + MoE layers as one kernel (amd/tests/test_glm_chain_layer.py --layers N --codegen --serving): per layer j
+# its tensors suffixed _j; the streams between the sublayers are run tensors (R_a_j .. after the KDA part, R_b_j .. after the MoE
+# part of every layer but the last)
+for _n in (2, 3):
+    KINDS[f"gkdamoe{_n}"] = (
+        [f"{w}_{j}" for j in range(_n) for w in KINDS["gkda"][0] + KINDS["gmoe"][0]],
+        ["x_attn", "slots", "x_attn_next"] + [f"{t}_{j}" for j in range(_n) for t in ("state_pool", "conv_pool")]
+        + [f"{t}_{j}" for j in range(_n) for t in ("R_a", "h_post_a", "h_res_a")]
+        + [f"{t}_{j}" for j in range(_n - 1) for t in ("R_b", "h_post_b", "h_res_b")] + _MHC_IO, 4096)
+# the model's last layer as one kernel without its final hc_pre (test_glm_pair_layer.py --last): no next-layer x / coefficients
+KINDS["gkdamoelast"] = ([w for w in KINDS["gkda"][0] + KINDS["gmoe"][0] if w not in ("hc_attn_small", "attn_norm")],
+                        ["x_attn", "state_pool", "conv_pool", "slots", "R_mid", "h_post_mid", "h_res_mid", "R_in", "h_post_in", "h_res_in",
+                         "R_out", "hfin"], 4096)
+KINDS["gkdamoe"] = (KINDS["gkda"][0] + KINDS["gmoe"][0],
+                    ["x_attn", "state_pool", "conv_pool", "slots", "x_attn_next", "R_mid", "h_post_mid", "h_res_mid"] + _MHC_IO,
+                    4096)
+
+
 def slot_args(code: str) -> dict:
     """the slot args of the harness's static_host_init call"""
     m = re.search(r"static_host_init\(g_ctx, std::map<std::string, std::string>\{(.*)\}\);", code)
