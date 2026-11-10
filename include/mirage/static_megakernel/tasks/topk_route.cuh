@@ -19,7 +19,10 @@
 // framework's speculative verify step of ROWS live rows, the rest idle): a row
 // t >= ROWS is not routed: its K DUP routed pairs are the shared bank experts
 // (expert 0 without shared experts) at weight 0, so it streams no expert of its
-// own (its logits are not read, not re-armed).
+// own (its logits are not read, not re-armed). A run-time idle row (idle: the
+// node reads a live-row table, live[t] <= 0, e.g. a padded slot of a serving
+// batch) waits for its logits and re-arms them as a live row does, then writes
+// the same pairs as a row t >= ROWS.
 #pragma once
 #include "../core.cuh"
 
@@ -30,6 +33,18 @@ namespace static_mk {
 template <int NE, int K>
 constexpr int topk_scratch_bytes() {
   return 2 * NE * 4 + 2 * (NE + 8 * K) * 4 + 2 * K * 4;
+}
+
+// pair i of an idle row: a routed pair (i < K DUP) is a shared bank expert
+// (expert 0 without shared experts) at weight 0; a shared pair is its shared
+// bank expert at weight 1
+template <int NE, int K, int DUP, int SHARED>
+__device__ __forceinline__ unsigned long long idle_pair(int i) {
+  unsigned const e =
+      i < K * DUP ? (SHARED > 0 ? NE * DUP + i % (SHARED > 0 ? SHARED : 1) : 0u)
+                  : NE * DUP + (i - K * DUP);
+  return ((unsigned long long)e << 32) |
+         (unsigned long long)__float_as_uint(i < K * DUP ? 0.f : 1.0f);
 }
 
 // N: the router's rows (the logits' row stride, >= NE: rows past NE are
@@ -49,7 +64,8 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
                                                 unsigned long long *pairs,
                                                 int t,
                                                 char *sm,
-                                                bool warm STAGE_STAMP_PARAM) {
+                                                bool warm,
+                                                bool idle STAGE_STAMP_PARAM) {
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   __syncthreads(); // the scratch below is in the ring area: the previous tile's
                    // epilogue must have read every landed stage
@@ -57,14 +73,8 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
   if constexpr (ROWS < T) {
     if (t >= ROWS) { // an idle row (the header comment): no expert of its own
       if (threadIdx.x < K * DUP + SHARED) {
-        int const i = threadIdx.x;
-        unsigned const e =
-            i < K * DUP
-                ? (SHARED > 0 ? NE * DUP + i % (SHARED > 0 ? SHARED : 1) : 0u)
-                : NE * DUP + (i - K * DUP);
-        pairs[t * (K * DUP + SHARED) + i] =
-            ((unsigned long long)e << 32) |
-            (unsigned long long)__float_as_uint(i < K * DUP ? 0.f : 1.0f);
+        pairs[t * (K * DUP + SHARED) + threadIdx.x] =
+            idle_pair<NE, K, DUP, SHARED>(threadIdx.x);
       }
       return;
     }
@@ -199,7 +209,13 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
       for (int k = 0; k < K; k++) {
         sum += wsel_s[k];
       }
-      if (real) {
+      if (real && idle) { // a run-time idle row: no expert of its own
+#pragma unroll
+        for (int j = 0; j < DUP; j++) {
+          int const i = threadIdx.x * DUP + j;
+          pairs[t * (K * DUP + SHARED) + i] = idle_pair<NE, K, DUP, SHARED>(i);
+        }
+      } else if (real) {
         float w = wsel_s[threadIdx.x] / sum;
         if constexpr (SCALE_BITS != 0) {
           w *= __int_as_float(SCALE_BITS);
@@ -268,7 +284,8 @@ __host__ __device__ constexpr int topk_pairs_per_token() {
 // K (experts per token)[, the routed scaling factor as fp32 bits (0: none)[,
 // DUP (sub-experts per expert)[, SHARED (shared bank experts)[, ROWS (live
 // rows, the header comment; T)]]]]}; BUF_SLOTS {the score correction bias (a
-// graph tensor, [NE] fp32)}; warm: above
+// graph tensor, [NE] fp32)[, the live-row table (a graph tensor, [T] int32:
+// row t is idle when live[t] <= 0; topk_route_live_rows)]}; warm: above
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -292,6 +309,11 @@ __device__ __forceinline__ void run_topk_route(Maps const &,
                 "topk_route: a thread for each routed and shared pair");
   constexpr int ROWS =
       param_or<PARAMS, 5, 0>() > 0 ? param_or<PARAMS, 5, 0>() : T;
+  constexpr int LIVE = slot_or<BUF_SLOTS, 1, -1>();
+  bool idle = false;
+  if constexpr (LIVE >= 0) {
+    idle = buf_at<int const>(g, LIVE)[tk.x] <= 0;
+  }
   topk_route_task<LOGITS::y,
                   NE,
                   N,
@@ -304,7 +326,8 @@ __device__ __forceinline__ void run_topk_route(Maps const &,
                         buf_at<unsigned long long>(g, SELF::buf),
                         tk.x,
                         L.sm,
-                        warm STAGE_STAMP_ARG(L.stage_stamps));
+                        warm,
+                        idle STAGE_STAMP_ARG(L.stage_stamps));
 }
 // dynamic shared memory: the scratch, inside the ring area
 template <class SELF,

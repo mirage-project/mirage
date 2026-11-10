@@ -213,6 +213,39 @@ __device__ __forceinline__ void hadamard128(float (&v)[N][4], int lane) {
     }
   }
 }
+// One warp quantizes one indexer key of 128 values with an fp32 scale, as
+// SGLang's fused indexer-K store does. Lane l holds dims 4 l .. 4 l + 3 in v.
+// Lanes l < 16 rotate the RoPE pairs 2 l and 2 l + 1 (dims [0, 64)). Then each
+// value is rounded to bf16, s = max(1e-4, amax) / 448, and each lane packs its
+// 4 bytes e4m3(v x (1 / s)) into q. Returns s.
+__device__ __forceinline__ float rope_quant128_fp32(float (&v)[4],
+                                                    int lane,
+                                                    float c0,
+                                                    float s0,
+                                                    float c1,
+                                                    float s1,
+                                                    uint32_t &q) {
+  if (lane < 16) {
+    rope_pair(v[0], v[1], c0, s0);
+    rope_pair(v[2], v[3], c1, s1);
+  }
+  float amax = 0.f;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    v[i] = __bfloat162float(__float2bfloat16_rn(v[i]));
+    amax = fmaxf(amax, fabsf(v[i]));
+  }
+#pragma unroll
+  for (int d = 16; d > 0; d >>= 1) {
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, d));
+  }
+  float const s = fmaxf(1e-4f, amax) / 448.0f, inv = 1.0f / s;
+  q = (uint32_t)cvt_e4m3_nv(v[0] * inv) |
+      ((uint32_t)cvt_e4m3_nv(v[1] * inv) << 8) |
+      ((uint32_t)cvt_e4m3_nv(v[2] * inv) << 16) |
+      ((uint32_t)cvt_e4m3_nv(v[3] * inv) << 24);
+  return s;
+}
 // Lanes l < 16 load the cos and sin of the RoPE pairs 2 l and 2 l + 1 at
 // position pos (rope_quant128 uses them).
 __device__ __forceinline__ void rope_cs2(__nv_bfloat16 const *cos_sin,

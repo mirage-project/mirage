@@ -14,9 +14,11 @@
 //         weights_proj(x)[h] is column 128 + h of the indexer projection (a
 //         COMBINE_ADD GEMM node; the demo uses a bf16 gemm_tile).
 //   k8_j  The key of position j in the index cache (dsa_index_k_write page
-//         layout). s_j is its UE8M0 scale.
-// s_j and qs_h are powers of two. Thus a multiplication by them is exact, and
-// the order of these multiplications does not change the fp32 result.
+//         layout). s_j is its scale, in the format of the dsa_index_k_write
+//         node (IKW): UE8M0, or fp32 (SGLang's index-K pool, key_scale="fp32").
+// qs_h is a power of two, and so is a UE8M0 s_j. Thus a multiplication by them
+// is exact, and the order of these multiplications does not change the fp32
+// result. An fp32 s_j is applied last, as UE8M0 is.
 // FLASH = 1 (GLM-5.3-Flash, SGLang's IndexerKPool): j counts the pooled keys
 // (dsa_kpool_update), n = min(seq_lens[t] / 4, MAXCTX) complete pools. q_h is
 // Hadamard-128 of the bf16 wq_b output (a bf16 gemm_tile), rounded to bf16,
@@ -270,8 +272,9 @@ __device__ __forceinline__ void
 // groups w / 4, w / 4 + 2, and so on. Warp 0 issues the MMAs. Thus, for TMEM
 // lanes 0..31, warp 4 reads the groups 0..5, and warp 0 reads the groups 6
 // and 7 after the issue. out: the scores of token t; positions [c0, c1).
-// FLASH: the key scales are fp32 (else UE8M0 bytes).
-template <bool FLASH>
+// FP32_SCALE: the key scales are fp32 (FLASH, or a dsa_index_k_write node with
+// key_scale="fp32"; else UE8M0 bytes).
+template <bool FP32_SCALE>
 __device__ __forceinline__ void isc_epilogue(unsigned char *sm,
                                              uint32_t tb,
                                              uint32_t bar,
@@ -306,8 +309,8 @@ __device__ __forceinline__ void isc_epilogue(unsigned char *sm,
     }
     if (c0 + o < c1) {
       float const ks =
-          FLASH ? *reinterpret_cast<float const *>(sm + ISC_SC + 4 * o)
-                : exp2_int(sm[ISC_SC + 4 * o]);
+          FP32_SCALE ? *reinterpret_cast<float const *>(sm + ISC_SC + 4 * o)
+                     : exp2_int(sm[ISC_SC + 4 * o]);
       float const sc = bf16r(s * ks);
       out[c0 + o] = sc;
       int const bin = (int)(score_key16(sc) >> 4);
@@ -358,6 +361,9 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   constexpr int NIH = PARAMS::v[0], MAXCTX = PARAMS::v[1], PAGE = PARAMS::v[2],
                 MAXP = PARAMS::v[3];
   constexpr bool FLASH = PARAMS::v[4] != 0;
+  // the key scales' format: FLASH's pooled keys and a key_scale="fp32" index
+  // cache (IKW params[3]; StaticParams pads with 0) are fp32, else UE8M0
+  constexpr bool FP32_SCALE = FLASH || IKW::v[3] != 0;
   constexpr int W0 = FLASH ? 256 : 128; // the column of w_0 in KW
   constexpr int NQ = IQ::v[2], NKW = KW::v[2], CH = MAXCTX / SELF::x;
   constexpr int CS = slot_at<BUF_SLOTS, 0>(), SEQ = slot_at<BUF_SLOTS, 1>(),
@@ -482,15 +488,15 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
     if (warp == 0) {
       isc_issue(L.base, L.tb, L.base + ISC_BAR, ng);
     }
-    isc_epilogue<FLASH>(sm,
-                        L.tb,
-                        L.base + ISC_BAR,
-                        ng,
-                        c0,
-                        c1,
-                        buf_at<float>(g, SELF::buf) + (size_t)t * MAXCTX,
-                        warp,
-                        lane);
+    isc_epilogue<FP32_SCALE>(sm,
+                             L.tb,
+                             L.base + ISC_BAR,
+                             ng,
+                             c0,
+                             c1,
+                             buf_at<float>(g, SELF::buf) + (size_t)t * MAXCTX,
+                             warp,
+                             lane);
   }
   __syncthreads();
   if (tid < 8) { // all waits are done: invalidate the mbarriers

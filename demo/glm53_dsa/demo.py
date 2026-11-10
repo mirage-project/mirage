@@ -67,7 +67,8 @@ try:
 except ImportError:
     from weights import check_config, checkpoint_reader, download_layers, is_full_layer, layer_tensors
 
-T, H, PAGE, TOPK = 8, 6144, 64, 2048
+T = int(os.environ.get("STATIC_TOKENS", "8"))   # requests (rows) per step: the kernel's T (8, 16 or 32)
+H, PAGE, TOPK = 6144, 64, 2048
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -104,10 +105,16 @@ def kernel_tensors(w, st, bufs) -> dict:
     return {k: v for k, v in {**w, **st, **bufs}.items() if k != "input_norm"}
 
 
-def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5):
-    """Declare the nodes of the layer. bufs: the graph tensors (x, the caches, indices, residual, attn_out) by name."""
+def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, key_scale="ue8m0", next_norm=None):
+    """Declare the nodes of the layer. bufs: the graph tensors (x, the caches, indices, residual, attn_out) by name.
+    key_scale: the scale format of the index cache (dsa_index_k_write_layer; "fp32" for SGLang's index-K pool).
+    next_norm: (gamma, output, eps), torch tensors [H] / [T, H] bf16 attached last (as "norm_w", "x_next": the nodes keep
+    their indices, so the plans still fit): attn_out is the new residual and the kernel also writes the next sublayer's
+    input, RMSNorm(attn_out) gamma (row_rmsnorm_layer), instead of an engine's fused add + RMSNorm after it."""
     mpk.max_bufs = 40            # the full layer uses 36 buffer slots, more than config.cuh's default 24 (STATIC_MAX_BUFS)
     mpk.max_counter_lines = 32   # and more than the default 16 counter lines (STATIC_NODE_COUNTER_LINES)
+    if T == 32:   # sparse_mla's shared memory (576-wide rows: 174 KB) is in the ring: 5 stages, not T = 32's default 4
+        mpk.ring_stages = 5
     t = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in kernel_tensors(w, st, bufs).items()}
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
     NH = w["w_uk"].shape[0]
@@ -123,7 +130,8 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5):
                            block_table=t["block_table"], cache=t["cache"], kv0=cfg["q_lora_rank"], eps=eps)
     if full:
         mpk.dsa_index_k_write_layer(kw=kw, k_norm_weight=t["k_norm_w"], k_norm_bias=t["k_norm_b"], cos_sin=t["cos_sin"],
-                                    seq_lens=t["seq_lens"], block_table=t["block_table"], index_cache=t["index_cache"])
+                                    seq_lens=t["seq_lens"], block_table=t["block_table"], index_cache=t["index_cache"],
+                                    key_scale=key_scale)
     qb = nt((T, NH * 256), int64, "q_b")
     mpk.scaled_gemm_tile_layer(input=qcq, weight=t["w_qb"], weight_scales=t["w_qb_sf"], output=qb, combine="add")
     if full:
@@ -149,7 +157,11 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5):
     mpk.scaled_gemm_tile_layer(input=vq, weight=t["w_o"], weight_scales=t["w_o_sf"], output=o, combine="store")
     mpk.allreduce_send_layer(input=o, output=sent)
     mpk.sum_gpus_layer(input=sent, output=osum)
-    mpk.residual_add_layer(addend=osum, residual=t["residual"], output=t["attn_out"])   # y = attention output + residual
+    mpk.residual_add_layer(addend=osum, residual=t["residual"], output=t["attn_out"],   # y = attention output + residual
+                           counted=next_norm is not None)
+    if next_norm is not None:
+        gamma, out = (mpk.attach_input(torch_tensor=v, name=n) for v, n in zip(next_norm[:2], ("norm_w", "x_next")))
+        mpk.row_rmsnorm_layer(input=t["attn_out"], gamma=gamma, output=out, eps=next_norm[2])
 
 
 def plan_file(plan: str, full: bool) -> str:
@@ -234,7 +246,7 @@ def setup(args, dev):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_common_args(ap)
-    ap.add_argument("--seq-lens", type=int, nargs=8, default=[1, 300, 2048, 2049, 4000, 8192, 12000, 16384],
+    ap.add_argument("--seq-lens", type=int, nargs=T, default=[1, 300, 2048, 2049, 4000, 8192, 12000, 16384] * (T // 8),
                     help="the context length of each request, with the token of this step (0: an idle slot)")
     ap.add_argument("--x", help="the input x (the input_layernorm output), bf16 [8, 6144] raw file (default: random, seed 2)")
     ap.add_argument("--search", nargs="+", default=None, metavar="COSTS",

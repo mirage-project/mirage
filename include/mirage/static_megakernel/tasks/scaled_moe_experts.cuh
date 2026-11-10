@@ -23,7 +23,8 @@
 //   2. W2 entries contain two tiles. The last NSM tiles are in one-tile
 //      entries.
 //      A tile is (slot, 128-row output tile):
-//      a. W2 x h_q (K = IR <= 256: K tile kt goes into accumulator half kt).
+//      a. W2 x h_q (K = IR <= 256: K tile kt goes into accumulator half kt;
+//         IR 512: two units of 2 K tiles, the epilogue adds them).
 //         The epilogue applies sw sh.
 //      b. For each token t of the expert: racc row (t, k) = weight(t, expert)
 //         x result.
@@ -102,6 +103,13 @@ struct Slots {
       64; // W13 items per expert: 64 features each (64 gate rows + 64 up rows)
   static constexpr int OT2 = LAT / 128; // W2 output tiles per expert
   static constexpr int KT2 = IR / 128;  // W2 K tiles
+  // W2 in units of at most 2 K tiles: a unit is one W2 ring stage and one
+  // accumulator tick (its K tiles in the tick's two issuers' columns, the
+  // epilogue applies their fp32 scales: scale promotion). A W2 tile is KH units
+  // (IR 512: 2, on one SM in one queue entry; the epilogue adds them).
+  static constexpr int KTS = KT2 < 2 ? KT2 : 2, KH = KT2 / KTS;
+  static_assert(KT2 <= 2 || KT2 == 4,
+                "scaled_moe_experts: W2 K = IR <= 256, or 512 in two units");
   static_assert(LAT % 128 == 0 && IR % 128 == 0,
                 "scaled_moe_experts: whole 128-wide tiles");
   static_assert(NE % 32 == 0 && NE <= 1024,
@@ -333,14 +341,14 @@ struct Smem {
   static constexpr int BYTES = OFF_HA + 64 * T * 4; // the node's need from the
                                                     // base
   static_assert(OFF_W2BAR % 1024 == 0, "128-B swizzled tiles are 1024-aligned");
-  // ---- W2 ring: one tile per stage (KT2 x 16 KB weight pieces | h_q KT2 KB)
+  // ---- W2 ring: one unit per stage (KTS x 16 KB weight pieces | h_q KTS KB)
   // at the offsets of moe_experts.cuh's W2 ring ----
   static constexpr int W2_ST = 3;
   static constexpr int W2_HQ =
-      (RES::KT2 * 16384 + RES::KT2 * SF_CHUNK + 1023) / 1024 * 1024;
+      (RES::KTS * 16384 + RES::KTS * SF_CHUNK + 1023) / 1024 * 1024;
   static constexpr int W2_STB =
-      (W2_HQ + RES::KT2 * T * 128 + RES::KT2 * SF_CHUNK + 4095) / 4096 * 4096;
-  static constexpr uint32_t W2_BYTES = RES::KT2 * 16384 + RES::KT2 * T * 128;
+      (W2_HQ + RES::KTS * T * 128 + RES::KTS * SF_CHUNK + 4095) / 4096 * 4096;
+  static constexpr uint32_t W2_BYTES = RES::KTS * 16384 + RES::KTS * T * 128;
   static_assert(W2_ST * W2_STB <= OFF_WSF,
                 "the W2 ring lies inside the W13 ring's area");
   // the W2 entries' scales in the OFF_W2BAR area (w2_stage_scales): W2QD
@@ -354,7 +362,7 @@ struct Smem {
   // TMEM: the constant scale chunk at CONST_SF; the accumulators of piece 1
   // from PROMO_COL1. W2's K tiles go into the two accumulator halves.
   static constexpr int CONST_SF = 232;
-  static_assert(RES::KT2 <= 2 && CONST_SF + 4 <= PROMO_COL1,
+  static_assert(RES::KTS <= 2 && CONST_SF + 4 <= PROMO_COL1,
                 "scaled_moe_experts: W2 K <= 256 (two accumulator halves)");
 };
 // mbarriers and one word in the (otherwise unused) OFF_W2BAR area: full [3],
@@ -386,7 +394,9 @@ __device__ __forceinline__ void w2_stage_scales(
     G const &g, uint32_t base, int q, int slot, int ex, int ot0) {
   using SM_ = Smem<RES>;
   constexpr int OT2 = RES::OT2, KT2 = RES::KT2;
-  static_assert(KT2 == 2, "w2_stage_scales: 16 B of weight scales = 2 tiles");
+  static_assert(KT2 == 2 || KT2 == 4,
+                "w2_stage_scales: 16 B of weight scales = the entry's 2 tiles "
+                "(KT2 2) or its tile (KT2 4)");
   uint32_t const f = w2s_bar<RES>(base, q),
                  dst = base + SM_::OFF_W2S + q * SM_::W2S_BYTES;
   mbar_expect(f, SM_::W2S_HS + 16);
@@ -396,7 +406,7 @@ __device__ __forceinline__ void w2_stage_scales(
            f);
   bulk_g2s(dst + SM_::W2S_HS,
            buf_at<float const>(g, RES::W2SF) +
-               ((size_t)ex * OT2 + (ot0 & ~1)) * KT2,
+               ((size_t)ex * OT2 + (KT2 == 2 ? (ot0 & ~1) : ot0)) * KT2,
            16,
            f);
 }
@@ -448,12 +458,13 @@ __device__ __forceinline__ void w2_arm(Maps const &maps,
                                        int slot,
                                        int ex,
                                        int ot,
+                                       int kh,
                                        int &chk_slot,
                                        long long &w_stage, // PROF: the waits
                                        long long &w_chq) {
   using SM_ = Smem<RES>;
   constexpr int W2_ST = SM_::W2_ST, W2_STB = SM_::W2_STB, W2_HQ = SM_::W2_HQ;
-  constexpr int OT2 = RES::OT2, KT2 = RES::KT2;
+  constexpr int OT2 = RES::OT2, KT2 = RES::KT2, KTS = RES::KTS;
   int const s = k % W2_ST;
   if (k >= W2_ST) {
     [[maybe_unused]] long long const t0 = RES::PROF >= 0 ? gtime() : 0;
@@ -463,21 +474,21 @@ __device__ __forceinline__ void w2_arm(Maps const &maps,
     }
   }
   uint32_t const st = base + s * W2_STB, f = w2_bar<RES>(base, s);
-  int const p0 = ex * (OT2 * KT2) + ot * KT2;
+  int const p0 = ex * (OT2 * KT2) + ot * KT2 + kh * KTS;
   mbar_expect(f, SM_::W2_BYTES);
-  // the KT2 weight pieces: two per box, the last one alone when KT2 is odd (the
-  // epilogue applies the fp32 weight scales)
+  // the unit's KTS weight pieces: two per box, the last one alone when KTS is
+  // odd (the epilogue applies the fp32 weight scales)
 #pragma unroll
-  for (int kp = 0; kp + 1 < KT2; kp += 2) {
+  for (int kp = 0; kp + 1 < KTS; kp += 2) {
     tma3(&maps.m[RES::W2X2], f, st + kp * 16384, 0, 0, p0 + kp, EVICT_FIRST);
   }
-  if constexpr (KT2 % 2 == 1) {
+  if constexpr (KTS % 2 == 1) {
     tma3(&maps.m[RES::W2],
          f,
-         st + (KT2 - 1) * 16384,
+         st + (KTS - 1) * 16384,
          0,
          0,
-         p0 + KT2 - 1,
+         p0 + KTS - 1,
          EVICT_FIRST);
   }
   if (slot != chk_slot) {
@@ -489,7 +500,8 @@ __device__ __forceinline__ void w2_arm(Maps const &maps,
       w_chq += gtime() - t0;
     }
   }
-  tma3(&maps.m[RES::HQ_KT], f, st + W2_HQ, 0, slot * T, 0, EVICT_LAST);
+  // the unit's K tiles of h_q (the map's box: KTS K tiles)
+  tma3(&maps.m[RES::HQ_KT], f, st + W2_HQ, 0, slot * T, kh * KTS, EVICT_LAST);
 }
 
 // all 8 warps of the SM, until the queue is empty. gl / gi0 / gi1: ring stage
@@ -512,7 +524,8 @@ __device__ __forceinline__ void
   using SM_ = Smem<RES>;
   constexpr int W2_ST = SM_::W2_ST, W2_STB = SM_::W2_STB, W2_HQ = SM_::W2_HQ;
   constexpr int KT_LAT = RES::KT_LAT, MT13 = RES::MT13, OT2 = RES::OT2,
-                KT2 = RES::KT2, K = RES::K, LAT = RES::LAT, IR = RES::IR;
+                KT2 = RES::KT2, KH = RES::KH, K = RES::K, LAT = RES::LAT,
+                IR = RES::IR;
   int *const eid_s = RES::eid(), *const ntok_s = RES::ntok(),
              *const tok_s = RES::tok(), *const start_s = RES::start();
   float *const w_s = RES::wt();
@@ -539,9 +552,12 @@ __device__ __forceinline__ void
   static_assert(MT13 % W13_PAIR == 0, "scaled_moe_experts: whole groups");
   int const n_live = s_ints[1], n13 = n_live * (MT13 / W13_PAIR),
             n2 = n_live * OT2;
+  // (KH 2: each W2 entry one tile, its two units; no 1-tile entries)
   int const n4 = ((n2 * 4 / 5) / OT2) * OT2,
-            t1 = (n2 - n4 < NSM) ? n2 - n4 : NSM, off1 = n2 - t1,
-            n2e = (off1 + 1) / 2;
+            t1 = KH > 1            ? 0
+                 : (n2 - n4 < NSM) ? n2 - n4
+                                   : NSM,
+            off1 = n2 - t1, n2e = KH > 1 ? n2 : (off1 + 1) / 2;
   int const nentries = n13 + n2e + t1;
   float *acc_s = reinterpret_cast<float *>(rt_sm() + SM_::OFF_ACC);
   auto entry_of =
@@ -553,6 +569,10 @@ __device__ __forceinline__ void
           e.kind = QE_W13;
           e.a = (idx / (MT13 / W13_PAIR) + n_live - RES::SHARED) % n_live;
           e.b = idx % (MT13 / W13_PAIR) * W13_PAIR;
+        } else if (idx < n13 + n2e && KH > 1) { // a = the tile's first unit
+          e.kind = QE_W2;
+          e.a = (idx - n13) * KH;
+          e.b = KH;
         } else if (idx < n13 + n2e) {
           int const i0 = 2 * (idx - n13);
           e.kind = QE_W2;
@@ -671,10 +691,22 @@ __device__ __forceinline__ void
               prof[3] = gtime();
             }
           }
-          int const slot = e.a / OT2, ex = eid_s[slot], ot0 = e.a - slot * OT2;
+          // e.a, e.b: the entry's units (KH per tile; unit u: tile u / KH, its
+          // K tiles from (u % KH) KTS)
+          int const slot = e.a / KH / OT2, ex = eid_s[slot],
+                    ot0 = e.a / KH - slot * OT2;
           if ((w2k & 1) == 0) {
-            scaled_moe::w2_arm<RES>(
-                maps, g, base, w2k, slot, ex, ot0, chk, pw_st, pw_chq);
+            scaled_moe::w2_arm<RES>(maps,
+                                    g,
+                                    base,
+                                    w2k,
+                                    slot,
+                                    ex,
+                                    ot0,
+                                    e.a % KH,
+                                    chk,
+                                    pw_st,
+                                    pw_chq);
           }
           entry_of(idx1, en);
           publish(en, qn + 1);
@@ -686,7 +718,8 @@ __device__ __forceinline__ void
                                       w2k + i,
                                       slot,
                                       ex,
-                                      ot0 + i,
+                                      (e.a + i) / KH - slot * OT2,
+                                      (e.a + i) % KH,
                                       chk,
                                       pw_st,
                                       pw_chq);
@@ -761,7 +794,7 @@ __device__ __forceinline__ void
           mbar_wait(w2_bar<RES>(baseu, s), (w2k / W2_ST) & 1);
           fence_after();
           if (issuer_lane<true>()) { // one K tile in each accumulator half
-            issue_w2_promoted<IDESC_MX_E4M3, KT2, W2_HQ>(
+            issue_w2_promoted<IDESC_MX_E4M3, RES::KTS, W2_HQ>(
                 baseu + s * W2_STB, tbu + T * a, tbu + SM_::CONST_SF);
             tc_commit(w2_bar<RES>(baseu, 3 + s));
             tc_commit(rt.acc_full0 + 8 * a);
@@ -810,7 +843,8 @@ __device__ __forceinline__ void
           ready = true;
         } // warp 0 has re-laid the ring
         if (lane == 0) {
-          int const slot = e.a / OT2, ex = eid_s[slot], ot0 = e.a - slot * OT2;
+          int const slot = e.a / KH / OT2, ex = eid_s[slot],
+                    ot0 = e.a / KH - slot * OT2;
           for (int i = 0; i < e.b; i++) {
             if (((w2k7 + i) & 1) == 1) {
               scaled_moe::w2_arm<RES>(maps,
@@ -819,7 +853,8 @@ __device__ __forceinline__ void
                                       w2k7 + i,
                                       slot,
                                       ex,
-                                      ot0 + i,
+                                      (e.a + i) / KH - slot * OT2,
+                                      (e.a + i) % KH,
                                       chk7,
                                       pw_st7,
                                       pw_chq7);
@@ -853,7 +888,7 @@ __device__ __forceinline__ void
     int wtt0 = wt;
     // the h_q scales of the entry's slot ([kt][t], its tokens' scale of each K
     // tile of W2), the same for all its tiles
-    float sh[2][T];
+    float sh[RES::KT2 > 2 ? RES::KT2 : 2][T];
     // the parities of the scale buffers' mbarriers (bit q: position q)
     uint32_t w2s_par = 0;
     [[maybe_unused]] int pn = 0;        // PROF: events so far (thread 64)
@@ -881,7 +916,7 @@ __device__ __forceinline__ void
                              // the slot's tokens (plain stores)
         // an entry's tiles are one slot's (2-tile entries start at even
         // tiles, OT2 is even)
-        int const slot = e.a / OT2, nt = ntok_s[slot];
+        int const slot = e.a / KH / OT2, nt = ntok_s[slot];
         int const lg = warp & 3, row = lg * 32 + lane;
         // the entry's scales from buffer qpos (w2_stage_scales: the loader of
         // its first tile staged them after its CHQ acquire): the weight scales
@@ -892,19 +927,25 @@ __device__ __forceinline__ void
         float const *const sbuf = reinterpret_cast<float const *>(
             rt_sm() + SM_::OFF_W2S + qpos * SM_::W2S_BYTES);
         float const *const swc = sbuf + SM_::W2S_HS / 4;
-        int const ot0 = e.a - slot * OT2;
+        int const ot0 = e.a / KH - slot * OT2;
+        // per item (unit) its two K tiles' weight scales: KH 1, item i is tile
+        // ot0 + i; KH 2, item i is K tiles 2 i, 2 i + 1 of tile ot0
         float sw[2][2];
 #pragma unroll
         for (int item = 0; item < 2; item++) {
 #pragma unroll
           for (int kt = 0; kt < 2; kt++) {
-            sw[item][kt] = (item < e.b && kt < KT2)
-                               ? swc[((ot0 & 1) + item) * KT2 + kt]
-                               : 0.0f;
+            if constexpr (KH > 1) {
+              sw[item][kt] = swc[item * 2 + kt];
+            } else {
+              sw[item][kt] = (item < e.b && kt < KT2)
+                                 ? swc[((ot0 & 1) + item) * KT2 + kt]
+                                 : 0.0f;
+            }
           }
         }
 #pragma unroll
-        for (int kt = 0; kt < 2; kt++) {
+        for (int kt = 0; kt < (KT2 > 2 ? KT2 : 2); kt++) {
 #pragma unroll
           for (int t = 0; t < T; t++) {
             sh[kt][t] = 0.0f;
@@ -913,13 +954,28 @@ __device__ __forceinline__ void
             }
           }
         }
+        float vsum[T]; // KH 2: the tile's first unit, scaled
         for (int item = 0; item < e.b; item++) {
           int const wtt = wtt0 + item, a = acc_slot(wtt),
-                    par = acc_round(wtt) & 1, ot = e.a + item - slot * OT2;
+                    par = acc_round(wtt) & 1, ot = KH > 1 ? ot0 : ot0 + item;
           // sw[item] by a select (indexing with the run-time item put sw in
           // local memory)
           float const swi[2] = {item == 0 ? sw[0][0] : sw[1][0],
                                 item == 0 ? sw[0][1] : sw[1][1]};
+          // the h_q scales of the item's K tiles (KH 2: tiles 2 item, + 1; by a
+          // select as sw)
+          float shi[2][T];
+#pragma unroll
+          for (int kt = 0; kt < 2; kt++) {
+#pragma unroll
+            for (int t = 0; t < T; t++) {
+              if constexpr (KH > 1) {
+                shi[kt][t] = item == 0 ? sh[kt][t] : sh[2 + kt][t];
+              } else {
+                shi[kt][t] = sh[kt][t];
+              }
+            }
+          }
           float v[T];
           if constexpr (RES::PROF >= 0) {
             if (pev) {
@@ -934,9 +990,23 @@ __device__ __forceinline__ void
             }
           }
           fence_after();
-          drain_w2_promoted<KT2>(tb, a, swi, sh, v);
+          drain_w2_promoted<RES::KTS>(tb, a, swi, shi, v);
           fence_before();
           mbar_arrive(rt.acc_empty0 + 8 * a);
+          if constexpr (KH >
+                        1) { // the tile's first unit: kept; the second: added
+            if (item == 0) {
+#pragma unroll
+              for (int t = 0; t < T; t++) {
+                vsum[t] = v[t];
+              }
+              continue;
+            }
+#pragma unroll
+            for (int t = 0; t < T; t++) {
+              v[t] = vsum[t] + v[t];
+            }
+          }
           for (int i = start_s[slot]; i < start_s[slot] + nt; i++) {
             int const t = tok_s[i];
             float vt = v[0]; // v[t] by an unrolled select: indexing v with the

@@ -47,8 +47,6 @@ __device__ __forceinline__ void run_dsa_q_absorb(Maps const &,
                 "dsa_q_absorb: q_b has NOPE + ROPE columns per head");
   static_assert(SELF::x == NH * 4 && SELF::buf >= 0 && SELF::counter >= 0,
                 "dsa_q_absorb: 4 tasks per head, its output q and counter");
-  static_assert(ROPE == 0 || T * 32 == 256,
-                "dsa_q_absorb: the q_pe step uses token tid / 32");
   auto *const ws = reinterpret_cast<__nv_bfloat16 *>(L.sm);
   auto *const xs = reinterpret_cast<__nv_bfloat16 *>(L.sm + qab_off_x(NOPE));
   int const h = tk.x / 4, cb = tk.x % 4, tid = threadIdx.x;
@@ -76,18 +74,20 @@ __device__ __forceinline__ void run_dsa_q_absorb(Maps const &,
   dsa::absorb_mma<NOPE, QAB_COLS>(
       ws, xs, nullptr, q + (size_t)h * D + cb * QAB_COLS, (size_t)NH * D);
   if (ROPE > 0 && cb == 0) {
-    // q_pe: thread tid takes token tid / 32 and pair tid % 32
-    int const t = tid / 32, i = tid % 32;
-    // an idle slot (seq_lens[t] <= 0) uses position 0
-    int const pos = max(buf_at<int const>(g, SEQ)[t] - 1, 0);
-    dsa::fx_rope_store(qb,
-                       N,
-                       t,
-                       h * QHD + NOPE + 2 * i,
-                       buf_at<__nv_bfloat16 const>(g, CS),
-                       pos,
-                       i,
-                       q + ((size_t)t * NH + h) * D + LAT + 2 * i);
+    // q_pe: thread tid takes pair tid % 32 of tokens tid / 32, + 8, ...
+    int const i = tid % 32;
+    for (int t = tid / 32; t < T; t += 8) {
+      // an idle slot (seq_lens[t] <= 0) uses position 0
+      int const pos = max(buf_at<int const>(g, SEQ)[t] - 1, 0);
+      dsa::fx_rope_store(qb,
+                         N,
+                         t,
+                         h * QHD + NOPE + 2 * i,
+                         buf_at<__nv_bfloat16 const>(g, CS),
+                         pos,
+                         i,
+                         q + ((size_t)t * NH + h) * D + LAT + 2 * i);
+    }
   }
   dsa::ring_release();
   if (tid == 0) {

@@ -5679,6 +5679,14 @@ int TaskRegister::register_residual_add_sm100_task(
                               1);
 }
 
+int TaskRegister::register_row_rmsnorm_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {H, eps (fp32 bits)}. inputs: y (a counted residual_add node's
+  // output); output: the normed rows [T, H] bf16. Grid (Q, T).
+  return register_static_task(
+      this, TASK_ROW_RMSNORM_SM100, "row_rmsnorm", bgraph, params, 1, 2);
+}
+
 int TaskRegister::register_group_quant_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {L}. inputs: x [T, L] bf16; output: z_q [T, L] e4m3 bytes (its

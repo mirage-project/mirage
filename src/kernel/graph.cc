@@ -1063,6 +1063,10 @@ void Graph::register_task_for_op(KNOperator const *op,
                         1,
                         TASK_RESIDUAL_ADD_SM100,
                         variant_id);
+  } else if (name == "row_rmsnorm") {
+    int variant_id = task_register->register_row_rmsnorm_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_ROW_RMSNORM_SM100, variant_id);
   } else if (name == "group_quant") {
     int variant_id = task_register->register_group_quant_sm100_task(
         customized->bgraph, params);

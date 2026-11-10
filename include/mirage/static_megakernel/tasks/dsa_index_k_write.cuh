@@ -7,10 +7,16 @@
 //   kn  LayerNorm(k) * w + b in fp32 (two-pass mean and variance, eps from
 //       PARAMS). Then RoPE (interleaved, dsa_common.cuh) on dims [0, 64) of
 //       kn, in fp32.
-//   q8  e4m3(kn / s). s is the UE8M0 scale of the 128 values.
+//   q8  e4m3(kn / s). s is the scale of the 128 values, in one of two formats
+//       (PARAMS v[3]):
+//       0  UE8M0 (vLLM): s = 2^ceil(log2(max(amax, 1e-4) / 448)). The scale
+//          entry is 4 copies of the exponent byte.
+//       1  fp32 (SGLang): kn rounded to bf16 first, then s = max(1e-4, amax) /
+//          448 and q8 = e4m3(kn x (1 / s)). The scale entry is s in fp32.
+//       dsa_index_score reads the format of its dsa_index_k_write node.
 // A page of the index cache holds PAGE keys. First come the 128 e4m3 bytes of
-// each key. Then come the PAGE scales. Each scale is 4 copies of the UE8M0
-// byte. Position o of the page is at:
+// each key. Then come the PAGE scale entries of 4 bytes. Position o of the
+// page is at:
 //   values  page base + o * 128
 //   scale   page base + PAGE * 128 + o * 4
 // One warp does the work. Lane l takes dims 4 l .. 4 l + 3. A token with
@@ -21,7 +27,8 @@
 
 namespace static_mk {
 
-// Task x is token x. PARAMS {PAGE, MAXP, eps (fp32 bits)}. BUF_SLOTS {w (fp32
+// Task x is token x. PARAMS {PAGE, MAXP, eps (fp32 bits), scale format (absent:
+// 0)}. BUF_SLOTS {w (fp32
 // [128]), b (fp32 [128]), cos_sin, seq_lens, block_table, index cache (uint8,
 // [pages][PAGE x 132])}. KW: the indexer projection (a COMBINE_ADD GEMM).
 template <class SELF,
@@ -35,6 +42,7 @@ __device__ __forceinline__ void run_dsa_index_k_write(Maps const &,
                                                       KernelLocals &L,
                                                       StaticTask const &tk) {
   constexpr int PAGE = PARAMS::v[0], MAXP = PARAMS::v[1], N = KW::v[2];
+  constexpr bool FP32_SCALE = PARAMS::v[3] != 0;
   constexpr int W = slot_at<BUF_SLOTS, 0>(), B = slot_at<BUF_SLOTS, 1>(),
                 CS = slot_at<BUF_SLOTS, 2>(), SEQ = slot_at<BUF_SLOTS, 3>(),
                 BT = slot_at<BUF_SLOTS, 4>(), ICACHE = slot_at<BUF_SLOTS, 5>();
@@ -82,17 +90,22 @@ __device__ __forceinline__ void run_dsa_index_k_write(Maps const &,
     float c0 = 1.f, s0 = 0.f, c1 = 1.f, s1 = 0.f;
     dsa::rope_cs2(
         buf_at<__nv_bfloat16 const>(g, CS), pos, lane, c0, s0, c1, s1);
-    uint32_t q[1];
-    int e[1];
-    dsa::rope_quant128<1>(k, lane, c0, s0, c1, s1, q, e);
+    uint32_t q[1], entry;
+    if constexpr (FP32_SCALE) {
+      entry = __float_as_uint(
+          dsa::rope_quant128_fp32(k[0], lane, c0, s0, c1, s1, q[0]));
+    } else {
+      int e[1];
+      dsa::rope_quant128<1>(k, lane, c0, s0, c1, s1, q, e);
+      entry = (uint32_t)e[0] * 0x01010101u;
+    }
     int const page = buf_at<int const>(g, BT)[(size_t)t * MAXP + pos / PAGE];
     unsigned char *pg = buf_at<unsigned char>(g, ICACHE) +
                         (size_t)page * dsa::index_page_bytes(PAGE);
     int const o = pos % PAGE;
     *reinterpret_cast<uint32_t *>(pg + o * 128 + d0) = q[0];
     if (lane == 0) {
-      *reinterpret_cast<uint32_t *>(pg + PAGE * 128 + o * 4) =
-          (uint32_t)e[0] * 0x01010101u;
+      *reinterpret_cast<uint32_t *>(pg + PAGE * 128 + o * 4) = entry;
     }
   }
   __syncthreads();

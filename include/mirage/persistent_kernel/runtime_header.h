@@ -296,6 +296,9 @@ enum TaskType {
   // mHC's post step of a TP sublayer and the first half of the next
   // sublayer's pre step in one task (tasks/hc_post_mix.cuh).
   TASK_HC_POST_MIX_SM100 = 530,
+  // RMSNorm of the rows a counted residual_add node wrote: the next sublayer's
+  // input in the same kernel (tasks/row_rmsnorm.cuh).
+  TASK_ROW_RMSNORM_SM100 = 531,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 

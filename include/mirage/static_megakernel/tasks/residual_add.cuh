@@ -16,13 +16,17 @@ namespace static_mk {
 // residual_add task x of NSLICE (ssum: sum_gpus's buffer). OSUM false: o is
 // at OOFF in the exchange region (sum_send). OSUM true: o is osum, a sum_gpus
 // buffer. With ONE, there is no o, and osum, OOFF and OSUM are not used.
+// h32 (a counted node's scratch, else nullptr): y before its bf16 rounding,
+// fp32 [T][H] (row_rmsnorm norms it, as SGLang's fused add + RMSNorm norms the
+// sum)
 template <int NSLICE, size_t OOFF, int H, bool OSUM, bool ONE = false>
 __device__ __forceinline__ void residual_add_task(G const &g,
                                                   __nv_bfloat16 *ssum,
                                                   __nv_bfloat16 *osum,
                                                   __nv_bfloat16 const *prefix,
                                                   __nv_bfloat16 *y,
-                                                  int x) {
+                                                  int x,
+                                                  float *h32 = nullptr) {
   constexpr size_t O_RANK = o_rank_bytes(H);
   int const nv = T * H / 8, lo = (int)((long long)nv * x / NSLICE),
             hi = (int)((long long)nv * (x + 1) / NSLICE);
@@ -39,8 +43,8 @@ __device__ __forceinline__ void residual_add_task(G const &g,
     unsigned char const *op = nullptr;
     uint4 ou = make_uint4(0u, 0u, 0u, 0u);
     if constexpr (!ONE) {
-      op = OSUM ? reinterpret_cast<unsigned char const *>(osum +
-                                                          (size_t)t * H + c)
+      op = OSUM ? reinterpret_cast<unsigned char const *>(osum + (size_t)t * H +
+                                                          c)
                 : g.rv + OOFF + (size_t)r * O_RANK +
                       (size_t)t * (H / GPUS) * 2 + cc * 2 + rg_set();
       ou = poll16(op);
@@ -54,14 +58,21 @@ __device__ __forceinline__ void residual_add_task(G const &g,
     __nv_bfloat16 const *pb = reinterpret_cast<__nv_bfloat16 const *>(&pu);
     uint4 yu;
     __nv_bfloat16 *yb = reinterpret_cast<__nv_bfloat16 *>(&yu);
+    float h[8];
     for (int k = 0; k < 8; k++) {
       float a = __bfloat162float(sb[k]);
       if constexpr (!ONE) {
         a = __bfloat162float(__float2bfloat16(__bfloat162float(ob[k]) + a));
       }
-      yb[k] = __float2bfloat16(a + __bfloat162float(pb[k]));
+      h[k] = a + __bfloat162float(pb[k]);
+      yb[k] = __float2bfloat16(h[k]);
     }
     *reinterpret_cast<uint4 *>(y + (size_t)t * H + c) = yu;
+    if (h32 != nullptr) {
+      float4 *const hp = reinterpret_cast<float4 *>(h32 + (size_t)t * H + c);
+      hp[0] = make_float4(h[0], h[1], h[2], h[3]);
+      hp[1] = make_float4(h[4], h[5], h[6], h[7]);
+    }
     if constexpr (REARM) { // the one reader of these 16 B of S (and of o);
                            // after y is written
       rearm16(sp);
@@ -73,7 +84,8 @@ __device__ __forceinline__ void residual_add_task(G const &g,
   __syncthreads();
 }
 
-// residual_add task x: slice x of SELF::x of y; SSUM: the addend's node
+// residual_add task x: slice x of SELF::x of y (counted: also h32, BUF_SLOTS
+// 2, and one counter add per task); SSUM: the addend's node
 // (sum_gpus), O: the input's node (sum_send, its output in the exchange
 // region; or sum_gpus). With one sum, the node has no o. Then O is the
 // producer of the residual, which is a graph input (O::x == 0), and IN is
@@ -99,10 +111,9 @@ __device__ __forceinline__ void run_residual_add(Maps const &,
                 "residual_add: whole 8-column vectors of every GPU's part");
   static_assert(
       SSUM::buf >= 0 &&
-          (ONE || (O::buf >= 0 &&
-                   (OSUM ? exchange_bytes[O::buf] == 0
-                         : exchange_bytes[O::buf] ==
-                               (size_t)GPUS * o_rank_bytes(H)))),
+          (ONE || (O::buf >= 0 && (OSUM ? exchange_bytes[O::buf] == 0
+                                        : exchange_bytes[O::buf] ==
+                                              (size_t)GPUS * o_rank_bytes(H)))),
       "residual_add: S from sum_gpus's buffer, o from sum_send's "
       "(or from a second sum_gpus buffer), or no o");
 #ifdef STATIC_RESET_IN_KERNEL
@@ -117,7 +128,16 @@ __device__ __forceinline__ void run_residual_add(Maps const &,
       ONE ? nullptr : buf_at<__nv_bfloat16>(g, O::buf),
       buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 0>()),
       buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 1>()),
-      tk.x);
+      tk.x,
+      SELF::counter >= 0 ? buf_at<float>(g, slot_or<BUF_SLOTS, 2, 0>())
+                         : nullptr);
+  if constexpr (SELF::counter >= 0) { // counted (a row_rmsnorm reads y): one
+                                      // add per task, after its stores (the
+                                      // task ends with a __syncthreads)
+    if (threadIdx.x == 0) {
+      cnt_add(cnt_now(g) + SELF::counter, 1);
+    }
+  }
 }
 
 template <class SELF,
