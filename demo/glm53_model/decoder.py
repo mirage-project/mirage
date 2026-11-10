@@ -43,19 +43,21 @@ H, PAGE, TOPK, E, TP = 6144, 64, 2048, 256, 8
 assert T in (8, 16, 32) and dsa_demo.T == T and moe_demo.T == T and dense_mlp.T == T, "STATIC_TOKENS: 8, 16 or 32"
 HERE = os.path.dirname(os.path.abspath(__file__))
 # the MoE graph: the shared expert in the experts' bank (moe_demo.shared_bank, as demo/glm53_flash's MoE) or in its own
-# nodes (demo/glm53_moe's). MIRAGE_STATIC_MOE_BANK=1 / 0; default: the bank for T > 8 (one layer, real inputs: T 8 its own
-# nodes 56.9 vs bank 59.3 us; T 32 round robin 112.0 vs 99.5 us)
+# nodes (demo/glm53_moe's). MIRAGE_STATIC_MOE_BANK=1 / 0; default: the bank for T > 8 (the faster one of each T on a
+# layer with real inputs)
 MOE_BANK = os.environ.get("MIRAGE_STATIC_MOE_BANK", "1" if T > 8 else "0") == "1"
 # the plans of the four kernel kinds: the hand plans, or with MIRAGE_STATIC_PLAN=solver the solver plans of the demos
-# (search.search_plan on B200 cost records; the dense layer has only a hand plan). Those are of T = 8 and the MoE with its
-# shared expert's own nodes; else round robin (moe_demo.round_robin_plan)
+# (search.search_plan on B200 cost records; the dense layer has only a hand plan). These plans are of T = 8, with the MoE
+# shared expert in its own nodes. For T = 16 / 32, only the attention has hand plans (dsa_demo.plan_file). The kinds with
+# no plan use round robin (moe_demo.round_robin_plan).
 _PLAN = os.environ.get("MIRAGE_STATIC_PLAN", "hand")
 if _PLAN not in ("hand", "solver"):
     raise ValueError(f"MIRAGE_STATIC_PLAN={_PLAN}: hand or solver")
 PLANS = {"attn_full": dsa_demo.plan_file(_PLAN, True), "attn_shared": dsa_demo.plan_file(_PLAN, False),
          "moe": os.path.join(os.path.dirname(moe_demo.__file__), f"{_PLAN}_plan.json"),
-         "dense": os.path.join(HERE, "hand_plan_dense.json")} if T == 8 else dict.fromkeys(
-             ("attn_full", "attn_shared", "moe", "dense"))
+         "dense": os.path.join(HERE, "hand_plan_dense.json")} if T == 8 else {
+             "attn_full": dsa_demo.plan_file("hand", True) if _PLAN == "hand" else None,
+             "attn_shared": dsa_demo.plan_file("hand", False) if _PLAN == "hand" else None, "moe": None, "dense": None}
 if MOE_BANK:
     PLANS["moe"] = None
 # a plan file per kind instead (of this T and graph, e.g. a searched one): MIRAGE_STATIC_PLAN_ATTN_FULL, _ATTN_SHARED, _MOE,

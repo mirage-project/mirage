@@ -1073,18 +1073,22 @@ class StaticMegakernel(PersistentKernel):
         chunks: int = 16,       # tasks per token, MAXCTX / chunks positions each (whole pages of 64, at most 16)
         page: int = 64,
         flash: bool = False,    # GLM-5.3-Flash: Hadamard q, fp32 head weights, the pooled keys (seq_lens / 4 pools)
+        topk: int = 0,          # the TOPK of the dsa_index_topk node of these scores (0: none). A token with n <= topk
+                                # entries (flash: pools) gets all of them, so its tasks compute no scores
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the index scores (tasks/dsa_index_score.cuh). Task (c, t) computes the scores of chunk c of the context of
         token t. The compiler can change the chunk count (grid x). Each chunk holds a whole number of 64-position pages, from 1
-        to 16. Each slot t must be a different request. params = [32, MAXCTX, page, MAXP, flash]. buf_slots: [cos_sin, seq_lens,
+        to 16. A task whose chunk starts at or after the end of the context computes no scores. With topk > 0, the tasks of
+        a token with at most topk entries also compute no scores (the scores of that token keep their old values). Each slot
+        t must be a different request. params = [32, MAXCTX, page, MAXP, flash, topk]. buf_slots: [cos_sin, seq_lens,
         block_table, index_cache, the token histograms (a scratch buffer, zero before each launch)]. Counters: one for each
         token (its chunks)."""
         self._fx_producer("dsa_index_score_layer", iq)
         self._fx_producer("dsa_index_score_layer", kw)
         self._producer("dsa_index_score_layer", index_cache, ("dsa_kpool_update" if flash else "dsa_index_k_write",))
         T, MAXCTX = self._tokens(output.dim(0)), output.dim(1)
-        assert (cos_sin is None) == flash
+        assert (cos_sin is None) == flash and topk >= 0
         self._dtypes("dsa_index_score_layer", iq=(iq, int64), kw=(kw, int64), index_cache=(index_cache, uint8),
                      seq_lens=(seq_lens, int32), block_table=(block_table, int32), output=(output, float32),
                      **({} if flash else {"cos_sin": (cos_sin, bfloat16)}))
@@ -1096,7 +1100,7 @@ class StaticMegakernel(PersistentKernel):
         hist = self._scratch("dsa_index_score.hist", T * DSA_TOPK_BINS * 4, 0)
         self._add_node("dsa_index_score", (chunks, T, 1), block_dim, [iq, kw, index_cache, output],
                        [(-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (1, 0, -1)],
-                       [32, MAXCTX, page, block_table.dim(1), int(flash)],
+                       [32, MAXCTX, page, block_table.dim(1), int(flash), topk],
                        changeable_grid_dims={0: (page, 1, 16)}, out_buffer=lambda n: (T * MAXCTX * 4, -1, False), counters=T,
                        buf_slots=[self._tensor_slot(seq_lens if flash else cos_sin), self._tensor_slot(seq_lens),
                                   self._tensor_slot(block_table), self._tensor_slot(index_cache), hist])
@@ -1111,15 +1115,18 @@ class StaticMegakernel(PersistentKernel):
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the indexer top-k (tasks/dsa_index_topk.cuh) as two nodes. Both nodes have the grid (MAXCTX / 1024, T).
-        The count node: task (c, t) writes the record of chunk c of token t. It reads the token histograms of the score node
-        and waits for all the chunks of token t (its input map of the scores is the whole row). buf_slots: [seq_lens, the
-        token histograms].
-        The write node: task (c, t) writes the selected positions of chunk c. buf_slots: [seq_lens, output, the scores].
+        The count node: task (c, t) writes the record of chunk c of token t. It reads the token histograms of the score node.
+        If n > TOPK and chunk c has positions, it waits for all the chunks of token t (its input map of the scores is the
+        whole row). buf_slots: [seq_lens, the token histograms].
+        The write node: task (c, t) writes the selected positions of chunk c. If n > TOPK and chunk c has positions, it waits
+        for the count tasks of token t. buf_slots: [seq_lens, output, the scores].
         The output holds the positions of the TOPK largest scores of token t in ascending order. For a shorter context, it
         holds all positions, then -1. MAXCTX is at most 32 x 1024 (one lane of a warp for each chunk record). params = [TOPK,
         MAXCTX, mode (0 count, 1 write), unit]. Counters of each node: one for each token."""
         p = self._producer("dsa_index_topk_layer", scores, ("dsa_index_score",))
         T, TOPK, MAXCTX = self._tokens(output.dim(0)), output.dim(1), scores.dim(1)
+        if p.params[5] not in (0, TOPK):   # the score tasks skip the tokens with n <= their topk
+            raise ValueError(f"dsa_index_topk_layer: the score node has topk {p.params[5]}, this node TOPK {TOPK}")
         self._dtypes("dsa_index_topk_layer", scores=(scores, float32), seq_lens=(seq_lens, int32), output=(output, int32))
         assert 0 < TOPK <= MAXCTX and MAXCTX % DSA_TOPK_CH == 0
         assert MAXCTX <= 32 * DSA_TOPK_CH, "dsa_index_topk_layer: MAXCTX <= 32768 (the write node: a lane for each chunk)"
@@ -1153,7 +1160,13 @@ class StaticMegakernel(PersistentKernel):
         GPU. The compiler can change the split count (grid x). Each split holds a whole number of 64-slot tiles. The output
         tensor names the node buffer: o [T, S, NH, 512], then lse [T, S, NH] (see `output`). params = [NH, TOPK, page, MAXP,
         pages, softmax scale bits, ROPE, kpool, indices columns]. buf_slots: [cache, block_table, seq_lens, indices].
-        Counters: one for each token (its splits)."""
+        Counters: one for each token (its splits).
+        With kpool 1, the tasks use these properties of indices (a dsa_index_topk node gives them; a graph input must have
+        them too): the first min(seq_lens[t], TOPK) slots hold positions in ascending order, the other slots hold -1, and
+        if seq_lens[t] <= TOPK, slot e holds position e. Each slot t is a different request, and the step writes only the
+        cache row of position seq_lens[t] - 1. Then a split with no valid slot does not wait; a token with
+        seq_lens[t] <= TOPK does not read the indices; and the split of a "shared" layer (indices a graph input) can start
+        its first copies before the waits."""
         self._producer("sparse_mla_layer", q, ("dsa_q_absorb",))
         self._producer("sparse_mla_layer", cache, ("dsa_kv_write",))
         self._producer("sparse_mla_layer", indices, ("dsa_index_topk",), allow_none=True)

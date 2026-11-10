@@ -1,7 +1,9 @@
 // tasks/dsa_index_score.cuh -- Compute the index scores of the DSA lightning
 // indexer (GLM-5.3 / 5.2 "full" layers; GLM-5.3-Flash with FLASH = 1, see
 // below). Task (c, t) is chunk c of the context of token t: positions
-// [c CH, c CH + CH) below n = min(seq_lens[t], MAXCTX).
+// [c CH, c CH + CH) below n = min(seq_lens[t], MAXCTX). A task computes no
+// scores if its chunk starts at or after position n, or if n <= TOPK_ALL
+// (see run_dsa_index_score).
 // The caller must keep seq_lens[t] <= MAXCTX = MAXP x PAGE. Each slot t must be
 // a different request (see step 1).
 //   score[t][j] = bf16( sum_h w_h relu(q8_h . k8_j) s_j )
@@ -48,8 +50,8 @@
 //      key to the task histogram. At the end, the task adds the task
 //      histogram to the token histogram.
 //   output  scores fp32 [T][MAXCTX] (bf16 values) in the node buffer. Then
-//           the task adds 1 to counter + t. dsa_index_topk waits for all
-//           chunks.
+//           the task adds 1 to counter + t. If n > TOPK, dsa_index_topk
+//           waits for all chunks.
 #pragma once
 #include "../dsa_common.cuh"
 
@@ -337,7 +339,9 @@ __device__ __forceinline__ void isc_flush_hist(unsigned char const *sm,
 
 } // namespace dsa
 
-// Task (c, t). PARAMS {32 (heads), MAXCTX, PAGE (64), MAXP, FLASH (0 / 1)}.
+// Task (c, t). PARAMS {32 (heads), MAXCTX, PAGE (64), MAXP, FLASH (0 / 1),
+// TOPK_ALL (the TOPK of the dsa_index_topk node that reads the scores; 0:
+// none)}.
 // BUF_SLOTS {cos_sin (FLASH: not read), seq_lens, block_table (FLASH: of the
 // pooled cache), index cache (FLASH: the pooled cache), hist (int
 // [T][TOPK_BINS], zero before the launch: the counts of the high 12 bits of
@@ -402,6 +406,18 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   unsigned char const *icache = buf_at<unsigned char const>(g, ICACHE);
   __syncthreads(); // wait until the previous task completes its shared-memory
                    // reads
+  // The task computes no scores in two cases: the chunk starts at or after
+  // position n, or n <= TOPK_ALL. If n <= TOPK_ALL, the top-k takes all n
+  // positions and does not read the scores. Then the task does not wait for
+  // its inputs. It only adds 1 to counter + t.
+  constexpr int TOPK_ALL = PARAMS::v[5];
+  if (c0 >= n || (TOPK_ALL > 0 && n <= TOPK_ALL)) {
+    stamp_ready(L);
+    if (tid == 0) {
+      cnt_add(cnt_now(g) + SELF::counter + t, 1);
+    }
+    return;
+  }
   // Step 1. The keys before position n - 1 do not change in this step. Thus
   // the copies can run during the wait. After the wait, the task copies the
   // row of position n - 1 again.

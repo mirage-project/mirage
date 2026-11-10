@@ -15,19 +15,21 @@
 //   chunks   Both nodes have grid (CHK, T). Task (c, t) takes positions
 //            [1024 c, 1024 c + 1024) of token t (CHK = MAXCTX / 1024). Each
 //            lane takes 4 positions, each warp 128.
-//   count    (MODE 0) Wait for the score tasks of token t. Find the bin b1 of
+//   count    (MODE 0) If n > TOPK and the chunk has positions, wait for the
+//            score tasks of token t. Find the bin b1 of
 //            hist[t] that holds the TOPK-th largest key. k1 is the number of
 //            keys to take from bin b1. Count the keys of the chunk above bin
 //            b1. Count the keys in bin b1 by their low 4 bits. Write the
 //            record of the chunk.
-//   write    (MODE 1) Wait for the count tasks of token t. Read the CHK
+//   write    (MODE 1) If n > TOPK and the chunk has positions, wait for the
+//            count tasks of token t. Read the CHK
 //            records. Find the threshold key (b1, b2) and the number of keys
 //            to take at it. Find the first output slot of each chunk and the
 //            number of threshold keys that it takes. Lower chunks take
 //            threshold keys first. Then each warp counts its keys, and ballots
 //            give each lane its output slots.
-// Each node adds 1 to its counter + t for each task. sparse_mla waits for the
-// CHK write tasks of token t.
+// Each node adds 1 to its counter + t for each task. If sparse_mla reads idx,
+// it waits for the CHK write tasks of token t.
 #pragma once
 #include "../dsa_common.cuh"
 
@@ -338,12 +340,22 @@ __device__ __forceinline__ void run_dsa_index_topk(Maps const &,
                       P::v[1] == MAXCTX && SELF::buf >= 0,
                   "dsa_index_topk count: the scores of a dsa_index_score "
                   "node over MAXCTX positions, the records");
-    if (threadIdx.x == 0) {
+    // A chunk that starts at or after position n has no keys. Its task does
+    // not read the scores. It writes 0 to the record, except b1 and k1. The
+    // write tasks read b1 and k1 from the record of chunk 0 only.
+    bool const empty = c * TOPK_CH >= n;
+    if (threadIdx.x == 0 && n > TOPK && !empty) { // else no wait
       cnt_wait(cnt_now(g) + P::counter + t, P::x);
     }
     __syncthreads();
     dsa::stamp_ready(L);
-    if (n > TOPK) {
+    if (n > TOPK && empty) {
+      int *const rec =
+          buf_at<int>(g, SELF::buf) + ((size_t)t * CHK + c) * TOPK_REC;
+      if (threadIdx.x >= 2 && threadIdx.x < TOPK_REC) {
+        rec[threadIdx.x] = 0;
+      }
+    } else if (n > TOPK) {
       dsa::topk_count<TOPK>(buf_at<float const>(g, P::buf) + (size_t)t * MAXCTX,
                             buf_at<int const>(g, slot_at<BUF_SLOTS, 1>()) +
                                 (size_t)t * dsa::TOPK_BINS,
@@ -355,7 +367,8 @@ __device__ __forceinline__ void run_dsa_index_topk(Maps const &,
   } else {
     static_assert(P::v[2] == 0 && P::x == CHK && P::buf >= 0 && P::counter >= 0,
                   "dsa_index_topk write: the records of a count node");
-    if (threadIdx.x == 0) {
+    if (threadIdx.x == 0 && n > TOPK &&
+        c * TOPK_CH < n) { // else the task reads no records
       cnt_wait(cnt_now(g) + P::counter + t, CHK);
     }
     __syncthreads();

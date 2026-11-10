@@ -142,7 +142,8 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     if full:
         scores = nt((T, maxctx), float32, "idx_scores")
         mpk.dsa_index_score_layer(iq=iq, kw=kw, index_cache=t["index_cache"], cos_sin=t["cos_sin"], seq_lens=t["seq_lens"],
-                                  block_table=t["block_table"], output=scores, chunks=chunks)
+                                  block_table=t["block_table"], output=scores, chunks=chunks,
+                                  topk=TOPK)   # a token with at most TOPK positions: its tasks compute no scores
         mpk.dsa_index_topk_layer(scores=scores, seq_lens=t["seq_lens"], output=t["indices"])
     # mla_split names the sparse_mla buffer: o [T, S, NH, 512] fp32, then lse [T, S, NH] (not the declared shape)
     split = nt((T, NH, 512), float32, "mla_split")
@@ -165,10 +166,14 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
 
 
 def plan_file(plan: str, full: bool) -> str:
-    """Return the plan file of a layer kind: plan = "hand", "solver" or a path prefix."""
+    """Return the plan file of a layer kind: plan = "hand", "solver" or a path prefix. A hand plan of T = 16 or 32 has
+    the suffix _T16 or _T32. The solver plans are of T = 8 only."""
+    if plan == "solver" and T != 8:
+        raise ValueError(f"plan_file: no solver plan of T = {T} (STATIC_TOKENS)")
     kind = "full" if full else "shared"
     prefix = os.path.join(HERE, f"{plan}_plan") if plan in ("solver", "hand") else plan
-    return f"{prefix}_{kind}.json"
+    suffix = f"_T{T}" if plan == "hand" and T != 8 else ""
+    return f"{prefix}_{kind}{suffix}.json"
 
 
 def check_plan(path: str, sms: int) -> dict:
