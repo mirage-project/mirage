@@ -23,6 +23,8 @@ class Harness:
         self.sk = sk
         self.layout = sk.layout()
         self._flush: List[Optional[torch.Tensor]] = [None] * sk.num_gpus
+        self.warm: Optional[List[List[torch.Tensor]]] = None   # per GPU, tensors read after each flush (an experiment: those
+                                                                # weights in the caches when the launch starts)
 
     def flush_l2(self, nbytes: int) -> None:
         """Read nbytes on every GPU, then wait for every GPU. Read, not written: a write leaves L2 full of dirty lines, and the
@@ -31,6 +33,8 @@ class Harness:
             if self._flush[g] is None or self._flush[g].numel() * 4 < nbytes:
                 self._flush[g] = torch.zeros(nbytes // 4, dtype=torch.int32, device=f"cuda:{g}")
             torch.amax(self._flush[g][: nbytes // 4])
+            for t in (self.warm[g] if self.warm else []):
+                torch.amax(t.view(torch.uint8))
         for g in range(self.sk.num_gpus):
             torch.cuda.synchronize(g)
 
@@ -80,6 +84,11 @@ class Harness:
     def span_us(self) -> float:
         """Max over GPUs of (latest SM end - last SM past the start barrier) of the last launch, in microseconds."""
         return max(end - start for start, end in self.timing()) / 1e3
+
+    def e2e_us(self) -> float:
+        """End to end of the last launch: max over GPUs of the time from the event right before the kernel to the one after it
+        (the launch on the GPU, kernel start, start barrier and the whole run; not the host's launch call), in microseconds."""
+        return max(self.sk.elapsed_us())
 
     def report(self) -> None:
         """Per GPU: the sum of each counter line that is not 0, and how many SMs passed each stamp."""

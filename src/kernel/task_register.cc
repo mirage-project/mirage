@@ -5740,6 +5740,22 @@ int TaskRegister::register_scaled_moe_experts_sm100_task(
       static_build_only_task("scaled_moe_experts", params));
 }
 
+// a static-schedule task type with no registration of its own (its name in the
+// graph: "static:<name>"; static_megakernel*/tasks/<name>.cuh): every input op
+// but the last is an input, the last is its one output; any params
+int TaskRegister::register_static_sm100_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params,
+                                             char const *name) {
+  assert(bgraph.operators.size() >= 2);
+  return register_static_task(this,
+                              TASK_STATIC_SM100,
+                              name,
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              params.size());
+}
+
 int TaskRegister::register_dsa_q_norm_quant_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {QL (2048 or 1536), eps (fp32 bits), OUT (0: z_q, 1: bf16 q_c)}.

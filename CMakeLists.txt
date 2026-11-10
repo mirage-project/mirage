@@ -191,6 +191,12 @@ if (NOT "${USE_NKI}" STREQUAL "OFF")
   target_compile_definitions(mirage_runtime PUBLIC MIRAGE_FINGERPRINT_USE_CPU)
 endif()
 
+# AMD (ROCm): host-only core, CPU fingerprints (with USE_CUDA OFF: no transpiler, no .cu sources)
+if (USE_HIP)
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_BACKEND_USE_HIP)
+  target_compile_definitions(mirage_runtime PUBLIC MIRAGE_FINGERPRINT_USE_CPU)
+endif()
+
 if (NOT "${USE_FORMAL_VERIFIER}" STREQUAL "OFF")
   target_compile_definitions(mirage_runtime PUBLIC MIRAGE_USE_FORMAL_VERIFIER)
 endif()
