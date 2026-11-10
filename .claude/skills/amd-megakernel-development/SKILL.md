@@ -1,6 +1,6 @@
 ---
 name: amd-megakernel-development
-description: How a model part (K3 MoE, KDA, MLA, ...) becomes one static megakernel on AMD MI355X in mirage_amd / mirage_amd_bs - the graph / plan / schedule / generated-kernel pipeline, writing a HIP task (dynamic expert queues, no-steal, die-local hand-offs), the cross-CU and cross-GPU hand-off and reset protocols, the one-layer and one-kernel-per-layer-pair harnesses and their checks, per-rank server libraries and the SGLang hooks, plan tuning and plan options, the flag policy and the end-of-campaign cleanup, the like-for-like timing against B300, the A/B against SGLang ROCm, and the batch-decode (bs 1..64) state, library recipes and time budget. Use when starting or porting a part to AMD, adding or changing a HIP task type, changing the AMD code generator or harness, and before reporting an AMD megakernel result. (NVIDIA/B300 work uses mirage_kda's own skills: megakernel-part-port, server-perf-testing.)
+description: How a model part (K3 MoE, KDA, MLA, GLM-5.3-Flash KDA / DSA / dense / MoE, ...) becomes one static megakernel on AMD MI355X in mirage_amd / mirage_amd_bs / mirage_amd_glm - the graph / plan / schedule / generated-kernel pipeline, writing a HIP task (dynamic expert queues, no-steal, die-local hand-offs), the cross-CU and cross-GPU hand-off and reset protocols, the one-layer and one-kernel-per-layer-pair harnesses and their checks, per-rank server libraries and the SGLang hooks, plan tuning and plan options, the flag policy and the end-of-campaign cleanup, the like-for-like timing against B300, the A/B against SGLang ROCm, and the batch-decode (bs 1..64) state, library recipes and time budget. Use when starting or porting a part to AMD, adding or changing a HIP task type, changing the AMD code generator or harness, and before reporting an AMD megakernel result. (NVIDIA/B300 work uses mirage_kda's own skills: megakernel-part-port, server-perf-testing.)
 ---
 
 # Megakernel development on AMD (MI355X)
@@ -220,3 +220,41 @@ paths are shared, so check them here before trusting a search or a random-plan r
   98) -> ~167 us at 6.46 TB/s, plus ~40 us of dependent steps -> ~207 us vs the 1.88x target ~194 us; bs 32 ~168 vs 155, bs
   16 ~135 vs 132. Changes left on the list each bound at 1-2 % (R send overlapped with W2 by block-ordered items, attn_residual
   with 2 hops, bf16 KDA state - a numerics change vs SGLang, not decided).
+
+## 9. GLM-5.3-Flash on 4x MI355X, TP4, decode bs 1..64 (11-07..09; frozen 11-09)
+
+Worktree `~/megakernel/mirage_amd_glm` (branch `amd-glm53`, local tag `glm53-frozen-2026-11-09`); every job, number and
+verdict in `amd/loop/glm53_loop.md`; the frozen state (set, tree, recipe, numbers, how to rebuild) in
+`amd/notes/glm53_frozen_2026-11-09.md` - read it before touching GLM again.
+- **Result (glmab73, one session, x 2):** speedup vs SGLang alone 2.315 / 2.020 / 1.800 / 1.580 / 1.234 / 1.175 / 1.157 at bs 1 /
+  2 / 4 / 8 / 16 / 32 / 64 (the previous session on the same bs 32 / 64 kernels: 1.203 / 1.160); full GSM8K 0.916 (SGLang 0.908).
+  Set `/mpk-amd/glm/dlib48`, tree `/mpk-amd/glm/mirage_glm194`.
+- **Model per step:** 30 KDA + MoE layers, 11 DSA (sparse MLA + indexer) + MoE, 3 KDA + dense MLP, 1 last; mHC residual (HC 4
+  streams: `hc_post_mix` = all-reduce landing + post + the next sublayer's partial mixes, `hc_pre` = mixes summed + pre + RMSNorm).
+- **Kinds** (`amd/serving/glm/build_glm_libs.sh "T .." "KINDS"` with `TREE= DLIB=`; hook `amd/serving/glm/sglang_glm.py`,
+  `MPK_GLM=run MPK_GLM_TOKENS=1,2,4,8,16,32,64 MPK_GLM_DLIB=...`): `gkdamoe` (one KDA + MoE layer per kernel, T 8 / 32 / 64),
+  `gkdamoe3` (3 layers per kernel, hybrid projections in layers 2 / 3, T 1 / 2 / 4 / 16: `MPK_GLM_CHAIN_TS`), `gdsamoe`,
+  `gkdadense`, `gkdamoelast`; single sublayers `gkda gdsa gmoe gdense` exist but the server does not use them.
+- **Harnesses** (`amd/tests/`): `test_glm_kda_layer.py`, `test_glm_dsa_layer.py` (`--pair-moe`, `--ctx 200` = the server's
+  short contexts), `test_glm_moe_layer.py`, `test_glm_dense_layer.py`, `test_glm_pair_layer.py` (`--mode pair|moe`, `--mlp
+  dense`, `--last`; `MPK_SAVE_XFFN` / `MPK_LOAD_XFFN` run MoE alone on the pair's own routing: compare like for like),
+  `test_glm_chain_layer.py` (`--layers 3`). Checks: the KDA / DSA / MoE / dense harnesses (relRMS per step, relaunches
+  bit-identical); the pair / chain harnesses time only (chain prints a CHECKSUM).
+- **Protocols that carry GLM:** o_proj gemms in K parts (finish_all: the row block's last K part sums and pushes push_all's
+  layout; store + allreduce_send, part-major `params[2] 3`); MoE senders land and add their slices (`STATIC_ARS_LAND`) and hand
+  the sums to `hc_post_mix` on the same CU through LDS (`STATIC_ARS_LDSHAND`, from T 4); `STATIC_HCPM_FEWPOLL=2`; DSA indexer
+  skips (scores at <= 2048 positions, the q gemm at T <= 16); `MPK_DSA_QB_CAP=128` (the two q_c gemms on CU halves).
+- **Where a T 64 KDA + MoE layer goes** (harness, ~391 us; server ~343): attention ~62 (projection 18, decode 27 for 128 MB of
+  state, o_proj 17), attention all-reduce + mHC + router + topk + table ~50, experts ~233 (1.33 GB at the per-CU rate; equal to
+  MoE alone on the same routing), MoE send + mHC tail ~29. The experts are at their rate and the all-reduces within ~5 us of a
+  one-shot burst (`amd/bench/hop_once.hip`); what is left is the ~10 dependent hand-offs per layer (3-7 us each), the DSA
+  attention chain (~27 us longer than KDA's: q_b gemm -> mla_absorb -> sparse attention -> o_absorb -> o_proj, five probes
+  lost), and ~230 us per step outside the layer kernels at bs 64 (logits all-gather at the link rate; a per-GPU argmax before
+  it would only hold for greedy sampling and changes SGLang's sampler - left to the user).
+- **Method lessons of this campaign:** (1) take a fresh profile of the exact config before choosing the next item - the
+  biggest win of the last day (`STATIC_DRD_COAL`) was a K3 flag never tried on GLM; (2) a node whose task time scales with
+  its activation bytes per task wants K parts, not more rows; (3) compare the pair's MoE with MoE alone on the pair's own
+  x_ffn (random routing uses ~10 % fewer experts); (4) the harness gain of a server library change can be 3x off either way
+  (STATE_WT 2: -4 us per pair in the harness, -17 per kernel in the bs 32 server run): build the set and A/B it in the server
+  when the harness says "small but positive"; (5) state the K3 targets the user's sheet uses (2.018 1.992 1.939 1.974 1.772
+  1.319 1.179) - they differ from the directive's older ones.

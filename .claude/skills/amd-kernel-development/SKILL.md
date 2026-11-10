@@ -6,7 +6,9 @@ description: Writing, building, checking and timing HIP kernels for AMD MI355X (
 # AMD kernel development (MI355X, gfx950)
 
 Everything here was measured or read during the K3 port (MoE 2026-10-09..13, KDA / MLA / one-kernel layers / server
-10-13..16) and the batch-decode campaign (bs 1..64, 10-22..27). Sources with page numbers and labels (ISA / LLVM / asm /
+10-13..16), the batch-decode campaign (bs 1..64, 10-22..27) and the GLM-5.3-Flash TP4 decode campaign (11-07..09,
+worktree `~/megakernel/mirage_amd_glm`, every job in `amd/loop/glm53_loop.md`, frozen state
+`amd/notes/glm53_frozen_2026-11-09.md`; skill `amd-megakernel-development` section 9). Sources with page numbers and labels (ISA / LLVM / asm /
 inferred) are in `amd/notes/cdna4_isa_facts.md`; the MoE numbers in `amd/notes/layer_math_mi355x.md`, KDA / MLA /
 one-kernel / server in `amd/notes/kda_mi355x.md` (append results there, don't start new notes files); the batch-decode
 campaign's log (every job, number and verdict) in `~/megakernel/amd_runs/2026-10-22/STATUS_decode.md`. Repos:
@@ -33,6 +35,9 @@ campaign's log (every job, number and verdict) in `~/megakernel/amd_runs/2026-10
 | launch | two dependent full-grid kernels 3.6 us apart (`launch_gap.hip`); in a HIP graph ~2.5 us; one host thread launching 8 GPUs one after the other: ~5-8 us apart |
 | cross-GPU signal | one-way 0.50-0.70 us (sc0 sc1 or sc1 polls; `ping_pong.hip`) |
 | xGMI hop (data as flag, 8 GPUs) | 2.3-2.6 us from 1 KB to 115 KB per peer **with the 8 slots' loads in flight together** (the old "3.7-4 us per hop" was a bench polling the slots one after the other); in-kernel 115 KB per peer ~1.8 us at ~64 GB/s per link plus latency |
+| one all-reduce burst (TP4) | every GPU pushes [T][4096] bf16 to the 3 others once, after a cross-GPU barrier (`amd/bench/hop_once.hip`, 11-09): 512 / 256 / 128 KB per peer **~14 / 8 / 5 us** from the first push to the last landed word, whatever the quiet time before. Back-to-back rounds (`hop_big.hip`) read 10 / 4.7 / 2.7 us because consecutive rounds overlap: never use them as one all-reduce's cost |
+| pushes from one XCD | 32 senders all on one XCD (blocks 8 w): 512 KB per peer 17.1 vs 10.4 us spread over the 8 XCDs (`hop_big SENDER_XCD`, 11-09): an XCD's own path to the fabric limits; keep a burst's pushing tasks on many XCDs |
+| reading landed data | 128 WGs x 256 threads x 4 16-B loads (2 MB) take ~1.5 us per pass, the same for sc0 sc1 / sc1 / plain and for data written locally or by another GPU (`amd/bench/sysload.hip`, 11-09) |
 | remote store instructions | a wave's system-scope stores to other GPUs go out ~0.6 us apart (the next load waits in issue order for each store's ack): one instruction with a lane per GPU beats one instruction per GPU (1.57 vs 5.0-6.3 us round trip); spreading a task's pushes over its 4 waves did not bring the data earlier (kda184, kda188) |
 | two kernels on two streams | B's WGs start on the CUs A freed once A's WGs are all resident; in a HIP graph only with `DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING=1`; capturable form: `hipStreamWaitValue32` on A's resident count (`overlap.hip`). Measured for KDA -> MoE: no gain (overlap mode removed 10-16) |
 
@@ -69,6 +74,26 @@ campaign's log (every job, number and verdict) in `~/megakernel/amd_runs/2026-10
   steals): -6.5..-10 us per kernel at bs 32 / 64 in the server, the expert phase's per-die ends within ~6 us without it.
   Rule: no many-wave polling or probing of a few lines while other waves still need atomics on them; when identical work
   ends at different times on different GPUs, look at per-item traces of **every** GPU (`MPK_TRACE_ALL=1`, section 6).
+- **Remote pushes are acknowledged before they land (11-09).** A sender's `s_waitcnt vmcnt(0)` after its system-scope pushes
+  returns long before the receiver can see the data: GLM T 64 o_proj finishers' pushes acknowledged at ~73 us, an arrival
+  count added after that complete at ~75, the data seen at ~87; T 32 the same ~12 us gap with half the bytes. The gap is the
+  transfer (the burst's ~8-14 us, row above), not a visibility bug: a sender-side `buffer_wbl2 sc0 sc1` (`STATIC_FIN_WBL2`)
+  did not shorten it and made the finishers +10..25 us slower (it writes back every dirty line of the XCD).
+- **Polling floods delay the data they wait for.** 128 CUs x 256 threads polling system-scope slots of an exchange slowed the
+  other GPUs' writes landing there (`STATIC_HCPM_FEWPOLL`: thread 0 polls one vector first, -12..-15 us per KDA T 32 / 64
+  kernel). The more slots every thread polls, the later the same data lands (own slot only +8 us, + one peer +11..14, all four
+  +23: `STATIC_HCPM_NOLAND` probes). Batching a thread's polled loads (all at once, re-poll the invalid ones) made every
+  consumer later (`STATIC_ABS_BATCH`: DSA T 64 +10..23 us); per-vector poll loops act as a throttle and consume data as it
+  lands - a counter that makes the reader wait for the whole input (`STATIC_DSA_OUTCNT`) lost the same way (+25 us).
+  Batched loads are fine where a counter already says the data is complete (no polling rounds).
+- **Dirty lines left for the next phase.** 64 MB of KDA state written with plain stores (write-back) at T 64 made the
+  following MoE experts phase ~12-15 us slower in the same kernel (the experts' weight stream evicts and writes them back).
+  `buffer_wbl2 sc1` by one CU per XCD at the experts' start (`STATIC_GME_WBL2`) recovers part; nt sc1 state stores
+  (`STATIC_DRD_STATE_WT=2`) recover the rest **once each store instruction writes whole lines** (`STATIC_DRD_COAL`, section
+  3): with quarter-line stores write-through had lost (+26..+75 us), with whole lines it won in the server (bs 32 -647 us).
+- A reset of an exchange buffer by plain stores leaves dirty 0xFF lines in the resetting XCD's L2: sc1 polls on that XCD then
+  read the stale 0xFF and never see the other GPUs' data (`hop_big RESET_FF=3`: every poll gave up). Clean lines (plain loads
+  of landed data) cost ~0.5 us, nothing more.
 
 ## 3. Instruction-level traps
 
@@ -87,7 +112,12 @@ campaign's log (every job, number and verdict) in `~/megakernel/amd_runs/2026-10
     first MFMA: issue them first (`STATIC_CSR_W2_HQ_FIRST`, -2 us at T 64).
 - **Per-thread layouts and lines:** the KDA state (128 x 128 fp32 per head) with a thread owning 16 consecutive columns made
   each wave load / store touch 32 lines a quarter each; columns `4 kq + 32 c'` give 8 whole 128-B lines per instruction
-  (`STATIC_DRD_COAL`, -4.2 us per T 64 KDA kernel). Check line efficiency of every per-thread layout of a big stream.
+  (`STATIC_DRD_COAL`, -4.2 us per T 64 K3 KDA kernel; GLM 11-09: KDA layer T 64 106.9 -> 97.5 us, decode end 58.1 -> 45.5,
+  server bs 64 -414 us per step, and it is what made write-through state stores pay). Check line efficiency of every
+  per-thread layout of a big stream.
+- **A stamp after a divergent poll loop waits for all 64 lanes**: thread 0's "my vector landed" stamp placed after its lane's
+  loop recorded when the slowest lane of its wave got its data (GLM glmprof22 read a 14 us late landing that was not). Stamp
+  inside `if (tid == 0)` with thread 0 polling alone, or record per-thread times into LDS max / min (`STATIC_HCPM_LAND_STAMP=2`).
 - **Inline-asm stores wider than 8 B need `s_nop 1` inside the asm** (`runtime.cuh` `st16_dev` / `st16_sys`): the compiler
   inserts hazard wait states only after its own stores; a VALU writing the store's data VGPRs right after stored the NEW
   values (10-14: `u_out` non-finite only in the normal build). When an output is wrong but values computed from the same
@@ -175,6 +205,15 @@ campaign's log (every job, number and verdict) in `~/megakernel/amd_runs/2026-10
     the harness splits on (`MPK_MOE_REGRID` accepts `;`). A variable passed through `XFKENV` / `XFKG` **replaces** the
     recipe's value of that variable (the whole grid JSON; the recipe's `MPK_MOE_FOLLOW_LATE="38:36:37 39:36:38"`): pass the
     recipe's value plus yours, or the A/B is not like for like.
+  - **Start a lease runner detached** (GLM 11-09): `cd ~/mpk-amd/logs && (setsid nohup bash ./lease_runner.sh NAME 4 >
+    runner_NAME.log 2>&1 < /dev/null &)` in the ssh command. A plain `nohup ... &` inside `ssh` died with the session (no log,
+    no job), `./lease_runner.sh` without `bash` failed (not executable), and the waiter reads `runner_NAME.log`.
+  - **A job name is used once**: `step.sh` skips every step already in `NAME.done`, so a reused name measures nothing and
+    reports old results (GLM glmchain3). Check `ls ~/mpk-amd/logs | grep -c '^NAME\.'` is 0 before writing the job.
+  - The job's container has no `docker`: removing root-owned folders (our old library sets, trees) is a separate
+    `docker run --rm -v ... IMAGE bash -c 'rm -rf ...'` from the box host, not a job step.
+  - Two 4-GPU jobs can run at once (GPUs 0-3 and 4-7): their timings differ by ~10 us per 430-us kernel between the halves and
+    with the other job's load - compare only variants inside one job.
   - Library sets `/mpk-amd/dlibNN` are symlink farms into older sets (`readlink -f` inside the container: the targets are
     container paths). A new set = `mkdir` + links + **real folders** for the changed kinds; never `cp -a` into a linked
     entry (it writes through into the production set). Check that a new tree / set name is free before creating it.
@@ -231,7 +270,17 @@ campaign's log (every job, number and verdict) in `~/megakernel/amd_runs/2026-10
   (slow items by time, slot, die), `dieend.py` (per-die ends), `expvar.py` (per-GPU node start / end distribution),
   `table_an.py` (experts table build), the read curve in the timing log (`read curve GPU g`: TB/s per 2 us).
 - Kernel time vs everything else in a server step: `kfwd.py TRACE` (time per kernel name). At bs 64 the fused kernels are
-  ~99 % of the step; consecutive kernels in the HIP graph run back to back (no gaps).
+  ~99 % of the step; consecutive kernels in the HIP graph run back to back (no gaps). GLM TP4 (`amd/serving/glm/glm_steps.py
+  TRACE --top N`): outside the layer kernels ~230 us per step at bs 64 (logits all-gather 92.5 us at the link rate, lm_head 51).
+- **Session spread decides how small a status change can be read**: two GLM STATUS sessions of the same bs 32 / 64 kernels
+  differed by ~2 % (bs 32 1.203 vs 1.175); a paired A/B in one session moved by -647 us at bs 32 for a change worth
+  ~-2..-14 us per kernel in the harness. Report a target "met" only when it holds in more than one session.
+- **Find which side of a hand-off is slow with stamps on both sides, in steps** (GLM 11-09, the attention all-reduce): the
+  sender's "pushes complete" (`STATIC_GEMM_FIN_STAMP`: vmcnt 0 after its pushes), the receiver's per-source landing of one
+  vector (`STATIC_HCPM_SLOT_STAMP` 1 / 2 / 3: own slot vs remote slots, first vs last token, the thread's own vector), the
+  per-thread landing spread (`LAND_STAMP=2`), the arrival of a counter posted after the pushes (`FIN_CNT` + `LAND_STAMP=3`).
+  Each step ruled out one cause; three earlier days of single guesses (reset protocol, polling rate, TLB, pull) had not.
+  Then reproduce the mechanism in a bench with the kernel's real pattern (synchronized one-shot burst: `hop_once.hip`).
 
 ## 7. Against SGLang on ROCm
 
@@ -282,6 +331,17 @@ Batch decode, bs 16..64 (10-22..27; every verdict a paired in-server A/B unless 
   shared gate_up apart from router / latent_down (+2.5..5), after the experts (`MPK_LATE_SET`, +40..70: S lands too late) or on
   the router's CUs; two layer pairs in one kernel at T 64 (57 VGPR + 478 SGPR spills); the hybrid projection at T 32 / 64
   (does not compile with today's grids).
+
+GLM-5.3-Flash TP4 decode (11-07..09; details and every number in `mirage_amd_glm/amd/loop/glm53_loop.md`):
+- Kept: `STATIC_DRD_COAL` (GLM default), `STATIC_DRD_STATE_WT=2` + `STATIC_GME_WBL2` in the T >= 32 KDA + MoE kernels;
+  activation-bound gemms in K parts - a gemm whose task time follows its activation bytes per task (every task loading the
+  whole [T][K] slice) runs as finish_all / store in 4 K parts (KDA o_proj T >= 32, DSA o_proj T >= 16 store + send, dense MLP
+  down projection T >= 16: -9 us per KDA + dense kernel at T 64); MoE senders land + LDS hand-off from T 4; FEWPOLL.
+- Lost (flags, off): reset / pull / wbl2 / one-poller-counter variants of the all-reduce landing (FIN_PULL, FIN_CNT,
+  FIN_WBL2, HCPRE_FEWPOLL, FIN_REV); every state request up front in registers (`STATIC_DRD_PFALL`: the prologue's vmcnt(0)
+  waits for all of them, +25 us); more decode tasks (rpt 2 at T 64); batched polls (ABS_BATCH) and counter-gated whole inputs
+  (DSA_OUTCNT); q_b in K parts for mla_absorb (`MPK_DSA_QB_KP`: mla_absorb starts late behind the gemms anyway); count posted
+  right after a W13 unit (`STATIC_GME_POSTNOW`); fewer sparse-attention splits at short contexts.
 
 ## 9. Method lessons from the B300 kernels (10-13/14; measured there)
 
