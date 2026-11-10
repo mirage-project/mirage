@@ -51,7 +51,8 @@ COMBINE = {"slots": 0, "add": 1, "store": 2, "push": 3, "finish": 4, "finish_qua
            "local": 7,      # HIP: (below)
            "push_rs": 8,    # HIP: as push_all (every GPU all rows, a partial), each row block only to the GPU owning its rows
                             # ([GPUS][N / GPUS / R][T][R] bf16 there; attn_residual_layer(rs=True) adds the GPUs')
-           "finish_rs": 9}  # HIP: K parts in a scratch, a row block's last part adds them and sends it as push_rs does
+           "finish_rs": 9,  # HIP: K parts in a scratch, a row block's last part adds them and sends it as push_rs does
+           "finish_all": 10}   # HIP: K parts in a scratch (polled input, all rows), a row block's last part pushes the sums as push_all
            # HIP: a polled input, one K part, bf16 [T][N] into this GPU's 0xFF-prefilled buffer (MLA's q_b)   # HIP: every row's partial (one K part) to every GPU ([GPUS][T][N] bf16; the reader adds the GPUs')
 SF_CHUNK = 512   # one MX scale chunk (config.cuh): 128 rows x 4 B
 MAX_SUM_PARTS = 14   # the most K parts sum_send adds (tasks/sum_send.cuh)
@@ -387,6 +388,9 @@ class StaticMegakernel(PersistentKernel):
         hybrid: bool = False,         # HIP, a waited input, 128-row tasks: each wave's first row tile's weights copied into LDS, its
                                       # second's held in registers, all issued before the wait (gemm_tile.cuh gemm_wave HYB);
                                       # params[7] = 1
+        skip_seq: tuple = None,       # HIP, "local": (seq_lens int32 [T], K): every task returns at once when every token has
+                                      # seq_lens / 4 <= K pools (DSA's indexer query wq_b: no token then needs scores); params[8] = K,
+                                      # buf_slots[0] = seq_lens
     ):
         """Task (x, y) = weight rows [R x, R x + R) times K part y. Default grid: R = 128 rows, K in 1 part (polled: the fewest K
         parts with at most RING_STAGES K tiles per task); the compiler may change grid x to R = 64 rows (the kernel template has a
@@ -399,7 +403,7 @@ class StaticMegakernel(PersistentKernel):
         assert output.num_dims == 2 and output.dim(1) == weight.dim(0) and weight.dim(0) % 128 == 0 and weight.dim(1) % 128 == 0
         mode, N, K, T, GPUS = COMBINE[combine], weight.dim(0), weight.dim(1), self._tokens(input.dim(0)), self.num_gpus
         self._dtypes("gemm_tile_layer", input=(input, bfloat16), weight=(weight, bfloat16),
-                     output=(output, int64 if combine == "add" else bfloat16 if combine in ("push", "push_all", "local", "finish", "push_rs", "finish_rs", "store_bf16")
+                     output=(output, int64 if combine == "add" else bfloat16 if combine in ("push", "push_all", "local", "finish", "push_rs", "finish_rs", "store_bf16", "finish_all")
                              else uint8 if combine == "finish_quant" else float32))
         if input_polled:
             from .compiler import graph_nodes, producer_of
@@ -407,7 +411,7 @@ class StaticMegakernel(PersistentKernel):
             if p is None or p.info["buf"] < 0 or p.info["out_buffer"](p)[1] != 0xFF:
                 raise ValueError(f"gemm_tile_layer: a polled input must be a node's 0xFF-prefilled output buffer; it comes from "
                                  f"{p.name if p else 'the graph inputs'}")
-            assert combine in ("slots", "push", "push_all", "local", "finish", "push_rs"), "polled: the K parts in slots (or pushed, HIP)"
+            assert combine in ("slots", "push", "push_all", "local", "finish", "push_rs", "store", "finish_all"), "polled: the K parts in slots (or pushed, HIP)"
         exchange, buf_slots = False, ()
         if combine == "finish_quant":   # K parts in a scratch; per 128-row block the last part makes MXFP8 z_q and pushes it
             # (sum_quant_send's work, gemm_tile.cuh COMBINE_FINISH_Q); the output: z_q then its scale chunks, every GPU's
@@ -437,8 +441,15 @@ class StaticMegakernel(PersistentKernel):
         elif combine == "push_all":   # one K part, bf16 [GPUS][T][N] in the exchange region: this GPU's partial of every row
             # to every GPU (KDA's o_proj: each GPU's heads give a partial sum of all N rows; attn_residual adds the GPUs')
             assert not rows_split_over_gpus, "push_all: every GPU all rows (input polled, or counted: T > 16 decode)"
+            # (K parts, grid y > 1: each part's partial in its own slot [GPUS][parts][T][N], hc_post_mix adds them - MPK_PA_KSPLIT)
+            out_buffer = lambda n: (GPUS * n.grid[1] * T * N * 2, 0xFF, True)
+            exchange = True
+        elif combine == "finish_all":   # K parts [P][T][N] fp32 in a scratch (polled input, every GPU all rows); a row block's last
+            # part adds them and pushes the bf16 block to every GPU: push_all's output with one part, [GPUS][T][N] (gemm_tile.cuh)
+            assert input_polled and not rows_split_over_gpus, "finish_all: a polled input, every GPU all rows"
             out_buffer = lambda n: (GPUS * T * N * 2, 0xFF, True)
             exchange = True
+            buf_slots = (self._scratch("gemm_tile.finish_all_parts", lambda n: n.grid[1] * T * N * 4),)
         elif combine == "push_rs":   # one K part, every GPU all rows; row block r to the GPU owning it: [GPUS][T][N / GPUS] bf16
             assert not rows_split_over_gpus and N % (128 * GPUS) == 0, "push_rs: every GPU all rows, whole 128-row tiles per GPU"
             out_buffer = lambda n: (GPUS * T * (N // GPUS) * 2, 0xFF, True)
@@ -461,8 +472,8 @@ class StaticMegakernel(PersistentKernel):
             out_buffer = lambda n: (T * N * 8, 0, False)
         elif combine == "store_bf16":   # [T][N] bf16, every value written each launch
             out_buffer = lambda n: (T * N * 2, -1, False)
-        else:                      # [T][N] fp32, every value written each launch
-            out_buffer = lambda n: (T * N * 4, -1, False)
+        else:                      # [T][N] fp32, every value written each launch ("store" in K parts: [parts][T][N])
+            out_buffer = lambda n: (n.grid[1] * T * N * 4, -1, False)
         assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
         tiles = K // 128
         # HIP (gfx950): a task of 128, 64, 32 or 16 weight rows (a wave's MFMA tile is 16 rows; with 32 / 16 the 4 waves split
@@ -476,9 +487,14 @@ class StaticMegakernel(PersistentKernel):
             changeable = {0: rows_hip, 1: (128, 1, None)} if hip else {1: (128, 2, ring_stages(T))}
             if combine == "finish":
                 assert hip, "finish: HIP only"
-            if combine in ("push", "push_all", "local"):
+            if combine in ("push", "push_all", "local", "store", "finish_all"):   # ("store" polled: the o_proj store gemm + allreduce_send, HIP)
                 assert hip, "push: HIP only"
                 parts, changeable = 1, {0: rows_hip}
+                if combine in ("store", "finish_all"):   # (MPK_STORE_KP P: P K parts at [part][T][N], allreduce_send adds them - params[2] 3)
+                    parts = int(os.environ.get("MPK_STORE_KP", "1"))
+                    assert tiles % parts == 0, "store: whole 128-column tiles per K part"
+                if combine == "push_all" and int(os.environ.get("MPK_PA_KSPLIT", "0")) > 1:   # (K parts: each its own slot)
+                    changeable = {0: rows_hip, 1: (128, 1, None)}
         else:
             parts = 1
             params, map_slots = [mode, K, N, 0], [self._gemm_map(weight, (128, 64)), self._gemm_map(input, (T,))]
@@ -499,6 +515,10 @@ class StaticMegakernel(PersistentKernel):
             if hybrid:   # params[7] (5, 6: no RMSNorm): 1, or 4 (gemm_wave HYB4: 256-row tasks, 3 of a wave's 4 tiles in registers)
                 assert norm_gamma is None and not input_polled and combine == "slots", "hybrid: a plain waited GEMM"
                 params = params + [0, 0, 4 if hybrid == 4 else 1]
+            if skip_seq is not None and skip_seq[1] > 0:   # params[8]: K; buf_slots[0]: seq_lens
+                assert combine == "local" and input_polled and norm_gamma is None and not hybrid, "skip_seq: a polled local gemm"
+                params = params + [0] * (8 - len(params)) + [int(skip_seq[1])]
+                buf_slots = (self._tensor_slot(skip_seq[0]),) + tuple(buf_slots)
         else:
             assert not hybrid, "hybrid: HIP only"
         self._add_node("gemm_tile", (N // 128, parts, 1), block_dim, [input, weight, output],
@@ -506,9 +526,11 @@ class StaticMegakernel(PersistentKernel):
                        # K: at least 2 tiles of 128 per task (the two MMA issuers take the stages in turn, runtime.cuh issue_job;
                        # with one stage issuer 1 has no MMA and its stale accumulator would be added)
                        changeable_grid_dims=changeable, rows_split_over_gpus=rows_split_over_gpus, out_buffer=out_buffer,
-                       counters={"slots": 0, "add": N // 128, "store": 1, "store_bf16": 1, "push": 0, "push_all": 0, "push_rs": 0,
+                       counters={"slots": 0, "add": N // 128, "store": 1, "store_bf16": 1, "push": 0, "push_all": 0,
+                                 "push_rs": 0,
                                  "local": 0,
                                  "finish_rs": N // 64,   # finish_rs: one per row block of 64 rows or more
+                                 "finish_all": N // 16,  # finish_all: one per row block of 16 rows or more
                                  "finish": N // GPUS // 16,   # finish: one per row block of 16 rows or more
                                  "finish_quant": N // 128}[combine],
                        map_slots=map_slots, buf_slots=buf_slots,
@@ -889,6 +911,8 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,        # what is sent: [T, W] bf16 (its buffer: [num_gpus][T][W] bf16 in the exchange region)
         num_tasks: int = None,  # slices of the partial sum; default: one per task of the producer (as its grid is now)
         block_dim: tuple = (256, 1, 1),
+        prefetch: tuple = None,  # (HIP, H / 32 slices with the LDS hand-off) (residual, fn) of the hc_post_mix after it: task x
+                                 # touches its 32 columns' lines into the L2 while it waits (params[3] 1, slots 2 / 3)
     ):
         """Task x: slice x of this GPU's partial sum (bf16) to every GPU, into this GPU's slot of the node's output (in the exchange
         region), once the input's producer is done (all its tasks, counted in its counter). params = [W, G, FX]. When the producer is
@@ -934,10 +958,20 @@ class StaticMegakernel(PersistentKernel):
         assert not fx, "allreduce_send_layer: an int64 input: CUDA only"
         if p.name == "moe_experts":   # params[2] 1, buf_slots[1] moe's misc scratch (R in blocks)
             params, slots = params + [1], [p.info["buf_slots"][2]]
+        elif p.name == "glm_moe_experts":   # params[2] 2, its blocks' counters (R in blocks)
+            params, slots = params + [2], [p.info["buf_slots"][9]]
+        elif p.name == "gemm_tile" and p.params[0] == COMBINE["store"] and p.grid[1] > 1:   # params [W, K parts, 3]: part-major
+            params, slots = [W, p.grid[1], 3], [-1]
         tasks = num_tasks or p.grid[0] * p.grid[1] * p.grid[2]
+        if prefetch is not None:   # (params [W, G, p2, 1]; slots [rearm, p2's slot or -1, residual, fn])
+            params = params + ([0] if len(params) == 2 else []) + [1]
+            slots = (slots + [-1])[:1] + [self._tensor_slot(prefetch[0]), self._tensor_slot(prefetch[1])]
+        # (the senders land the sums from T MPK_ARS_LAND_MIN_T: a counter; the kernel's STATIC_ARS_LAND_MIN_T must match, core.cuh)
+        ars_land = T >= int(os.environ.get("MPK_ARS_LAND_MIN_T", "4"))
         self._add_node("allreduce_send", (tasks, 1, 1), block_dim, [input, output],
                        [(-1, -1, -1)] * 2, params,
-                       out_buffer=lambda n: (GPUS * T * W * 2, 0xFF, True), exchange=True, buf_slots=[rearm] + slots,
+                       out_buffer=lambda n: (GPUS * T * W * 2, 0xFF, True), exchange=True,
+                       buf_slots=[rearm] + slots, **({"counters": 1} if ars_land else {}),
                        grid_choices=sorted({(s, 1, 1) for s in (8, 16, 32, 64, 128, tasks) if s <= T * W // 8}))
 
     def sum_rmsnorm_layer(
@@ -1202,6 +1236,151 @@ class StaticMegakernel(PersistentKernel):
                        out_buffer=lambda n: (T * HD * 2, 0xFF, False), counters=1,
                        buf_slots=[self._tensor_slot(t) for t in (wfb, prm, state_pool, slots)])
 
+    def glm_topk_route_layer(
+        self,
+        input: DTensor,     # router logits [T, NL] fp32: a gemm_tile node's K parts in slots (NL: the router padded to 128 rows)
+        bias: DTensor,      # score correction bias [NE] fp32, NE = the experts padded to a multiple of 64 (-inf past the real)
+        output: DTensor,    # pairs [T, K + SH] int64 (expert << 32 | weight bits)
+        k: int = 8,
+        shared_experts: int = 1,      # SH: bank experts every token also gets after its routed pairs (weight 1)
+        shared_first: int = None,     # SH0: the first shared expert's bank index (default: the real experts' count)
+        routed_scaling_factor: float = None,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """HIP (tasks/glm_topk_route.cuh): task t = token t: the router's K parts added, sigmoid, + bias, top k by a radix
+        select, renormalised, x the routed scaling factor; then the SH shared pairs. params = [NE, k, scale bits, SH, SH0]."""
+        from .compiler import graph_nodes, producer_of
+        assert _hip(), "glm_topk_route_layer: HIP"
+        p = producer_of(input, graph_nodes(self))
+        if p is None or p.name != "gemm_tile" or p.params[0] != COMBINE["slots"]:
+            raise ValueError("glm_topk_route_layer: the logits must be a gemm_tile node's K parts in slots")
+        T, NL, NE = self._tokens(input.dim(0)), input.dim(1), bias.dim(0)
+        SH = shared_experts
+        SH0 = shared_first if shared_first is not None else NE
+        self._dtypes("glm_topk_route_layer", input=(input, float32), bias=(bias, float32), output=(output, int64))
+        assert NE % 64 == 0 and NE <= NL and 1 <= k <= 16 and output.dim(1) == k + SH and 0 <= SH <= 16
+        self._add_node("glm_topk_route", (T, 1, 1), block_dim, [input, bias, output], [(0, -1, -1), (-1, -1, -1), (0, -1, -1)],
+                       [NE, k, float_bits(routed_scaling_factor) if routed_scaling_factor else 0, SH, SH0],
+                       # (0xFF before each launch, in whole 16-B pieces as the in-kernel resets take them)
+                       out_buffer=lambda n: (-(-T * (k + SH) * 8 // 16) * 16, 0xFF, False), buf_slots=[self._tensor_slot(bias)])
+
+    def glm_moe_experts_layer(
+        self,
+        x: DTensor,         # [T, H] bf16 (hc_pre's output, or a graph input)
+        pairs: DTensor,     # [T, KP] int64: a glm_topk_route node's output
+        w13: DTensor,       # [NB 2 IR, H] uint8: e4m3 [NB][IR / 16][32 rows][H] (16 gate rows, then their 16 up rows)
+        w13_sf: DTensor,    # [NB IR / 128 H / 128 2] fp32 (gate, up)
+        w2: DTensor,        # [NB H, IR] uint8: e4m3 [NB][H / 128][128][IR]
+        w2_sf: DTensor,     # [NB H / 128 IR / 128] fp32
+        output: DTensor,    # R [T KP, H] fp32: per pair its expert's output x its weight (this GPU's IR features)
+        swiglu_limit: float = None,
+        dbg: DTensor = None,    # (debug, with -DSTATIC_GME_DBG=1: int32 [CUs], a pinned host tensor: each CU's phase)
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """HIP (tasks/glm_moe_experts.cuh): one task per CU, a queue of W13 units (expert, 16 features) then W2 units (expert,
+        128 rows); e4m3 weights turned into bf16 exactly, the fp32 block scales per 128-K block; h = swiglu (clamped) in bf16
+        (scratch). params = [NB, KP, H, IR, limit bits, KQ]; buf_slots = w13, w13_sf, w2, w2_sf, h, x, dbg, the K pieces' sums,
+        the units' piece counts. Counters: 0 the tasks,
+        32 the queue, 64 the W13 units done."""
+        from .compiler import graph_nodes, producer_of
+        assert _hip(), "glm_moe_experts_layer: HIP"
+        p = producer_of(pairs, graph_nodes(self))
+        if p is None or p.name != "glm_topk_route":
+            raise ValueError("glm_moe_experts_layer: pairs from a glm_topk_route node")
+        T, H, KP, IR = self._tokens(x.dim(0)), x.dim(1), pairs.dim(1), w2.dim(1)
+        NB = w13.dim(0) // (2 * IR)
+        self._dtypes("glm_moe_experts_layer", x=(x, bfloat16), pairs=(pairs, int64), w13=(w13, uint8), w13_sf=(w13_sf, float32),
+                     w2=(w2, uint8), w2_sf=(w2_sf, float32), output=(output, float32))
+        assert w13.dim(0) == NB * 2 * IR and w13.dim(1) == H and w2.dim(0) == NB * H and IR % 128 == 0 and H % 512 == 0
+        assert w13_sf.dim(0) == NB * (IR // 128) * (H // 128) * 2 and w2_sf.dim(0) == NB * (H // 128) * (IR // 128)
+        assert (output.dim(0), output.dim(1)) == (T * KP, H)
+        nslot = min(NB, T * KP) + T * KP // 16   # (tasks/glm_moe_experts.cuh Cfg::NSLOT)
+        hs = self._scratch("glm_moe_experts.h", lambda n: T * KP * IR * 2, reset=-1)
+        # K pieces per W13 unit (each a wave's): at small T the units alone leave most waves idle (tasks/glm_moe_experts.cuh)
+        kq = int(os.environ.get("MPK_GME_KQ", "0")) or (1 if T <= 8 else 2 if T <= 16 else 1)   # (T <= 8: K split over a CU's waves in the task, tasks/glm_moe_experts.cuh CUW; KQ 1)   # (MI355X 11-07 glmmoe26: e2e T 1 KQ 1 / 2 / 4 96.2 / 90.4 / 92.6, T 4 137.8 / 134.7 / 128.2, T 8 181.3 / 160.7 / 163.4 us)
+        U13 = IR // 16
+        ps = self._scratch("glm_moe_experts.part", kq * T * KP * 2 * IR * 4) if kq > 1 else -1
+        # the units' piece counts (KQ > 1) / per slot its units done (CU-unit W13, T <= 8: a 128-B line per slot), 0 each launch
+        # (SLOTW, the generic path: per slot its units done after the piece counts, tasks/glm_moe_experts.cuh SC0)
+        sc0 = (nslot * U13 + 31) // 32 * 32 if kq > 1 else 0
+        uc = self._scratch("glm_moe_experts.ucnt", sc0 * 4 + nslot * 128, reset=0)
+        # (R in blocks: the blocks' counters [1 + H / 128] x RBLK_STRIDE (1024) words, 0 each launch; allreduce_send reads it,
+        # params[2] 2)
+        rbk = self._scratch("glm_moe_experts.rblk", (1 + H // 128) * 1024 * 4, reset=0)
+        # (MPK_GME_NCU < the CUs: the experts on CUs 0 .. NCU - 1 only; the others free for the sends, the MoE harness's plan)
+        ncu_e = int(os.environ.get("MPK_GME_NCU", "0")) or self._num_sms()
+        self._add_node("glm_moe_experts", (ncu_e, 1, 1), block_dim, [x, pairs, output], [(-1, -1, -1)] * 3,
+                       [NB, KP, H, IR, float_bits(swiglu_limit) if swiglu_limit else 0, kq], one_task_per_sm=ncu_e == self._num_sms(),
+                       out_buffer=lambda n: (T * KP * H * 4, -1, False), counters=128,   # 0 the tasks, 32 the queue (T >= 32), 64 the W13 units done
+                       buf_slots=[self._tensor_slot(w13), self._tensor_slot(w13_sf), self._tensor_slot(w2),
+                                  self._tensor_slot(w2_sf), hs, self._tensor_slot(x),
+                                  self._tensor_slot(dbg) if dbg is not None else -1, ps, uc, rbk])
+
+    def glm_swiglu_mul_layer(
+        self,
+        gate_up: DTensor,       # [T, 2 F] fp32: a gemm_tile node's K parts in slots (gate rows [0, F), up rows [F, 2 F))
+        output: DTensor,        # h [T, F] bf16 (0xFF before each launch: the down projection polls it)
+        swiglu_limit: float = None,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """HIP (tasks/glm_swiglu_mul.cuh): the dense MLP's h = SiLU(min(gate, L)) clamp(up, -L, L) (SGLang swiglu_clamped).
+        Task x = features [64 x, 64 x + 64). params = [F, limit bits]. One count per task."""
+        from .compiler import graph_nodes, producer_of
+        assert _hip(), "glm_swiglu_mul_layer: HIP"
+        p = producer_of(gate_up, graph_nodes(self))
+        assert p is not None and p.name == "gemm_tile" and p.params[0] == COMBINE["slots"], "glm_swiglu_mul_layer: K parts in slots"
+        T, F = self._tokens(gate_up.dim(0)), output.dim(1)
+        self._dtypes("glm_swiglu_mul_layer", gate_up=(gate_up, float32), output=(output, bfloat16))
+        assert gate_up.dim(1) == 2 * F and F % 64 == 0
+        self._add_node("glm_swiglu_mul", (F // 64, 1, 1), block_dim, [gate_up, output], [(-1, -1, -1), (-1, -1, -1)],
+                       [F, float_bits(swiglu_limit) if swiglu_limit else 0], out_buffer=lambda n: (T * F * 2, 0xFF, False),
+                       counters=1, cost_inputs=[0])
+
+    def glm_kda_decode_layer(
+        self,
+        proj: DTensor,          # [T, PROJ_N] fp32: the projection's K parts in slots (a gemm_tile node): columns [q HD | k HD |
+                                # v HD | .. | g_a 128 at col_ga | f_a 128 at col_fa | b (heads) at col_beta | pad]
+        wfb: DTensor,           # [HD, 128] bf16: f_b of this GPU's heads
+        wgb: DTensor,           # [HD, 128] bf16: g_b (the output gate's second projection, GLM-5.3-Flash's low-rank gate)
+        prm: DTensor,           # [heads + HD + 128] fp32: A_log per head, dt_bias per head and k, the o_norm weight
+        state_pool: DTensor,    # [slots x heads x 128 v, 128 k] fp32: the states, read and written at slot[t]
+        output: DTensor,        # y [T, HD] bf16 (0xFF before each launch: o_proj polls it)
+        slots: DTensor,         # int32 [T]: request t's state slot (< 0: a padded row)
+        conv_weight: DTensor,   # [3 HD, 4] fp32: the q / k / v short-conv taps (tap 3 = the newest input)
+        conv_pool: DTensor,     # [slots x 3, 3 HD] bf16: the windows (oldest first), read and written at slot[t]
+        col_ga: int, col_fa: int, col_beta: int,
+        requests_per_task: int = 1,
+        onorm_eps: float = 1e-5,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """HIP (tasks/glm_kda_decode.cuh): task (x, y) = head x, requests R y .. + R - 1 (R = T / grid y, 1 .. 16): q / k / v
+        from the projection's K parts with the 4-tap conv (the windows moved on in place), f_b and g = g_b g_a by MFMA, the
+        gate, beta; one gated delta-rule step per request on its 128 x 128 state (written back); o_norm x weight x
+        sigmoid(g) -> y. params = [PROJ_N, col_ga, col_fa, col_beta, eps bits, HD]; buf_slots = wfb, prm, state_pool, slots,
+        conv_weight, conv_pool, wgb; one count per task."""
+        from .compiler import graph_nodes, producer_of
+        assert _hip(), "glm_kda_decode_layer: HIP (tasks/glm_kda_decode.cuh)"
+        pp = producer_of(proj, graph_nodes(self))
+        if pp is None or pp.name != "gemm_tile" or pp.params[0] != COMBINE["slots"]:
+            raise ValueError("glm_kda_decode_layer: proj must be a gemm_tile node's K parts in slots")
+        T, PROJ_N, HD = self._tokens(proj.dim(0)), proj.dim(1), wfb.dim(0)
+        heads = HD // 128
+        self._dtypes("glm_kda_decode_layer", proj=(proj, float32), wfb=(wfb, bfloat16), wgb=(wgb, bfloat16),
+                     prm=(prm, float32), state_pool=(state_pool, float32), output=(output, bfloat16), slots=(slots, int32),
+                     conv_weight=(conv_weight, float32), conv_pool=(conv_pool, bfloat16))
+        assert HD % 128 == 0 and wfb.dim(1) == 128 and (wgb.dim(0), wgb.dim(1)) == (HD, 128) and prm.dim(0) >= heads + HD + 128
+        assert conv_weight.dim(0) == 3 * HD and conv_weight.dim(1) == 4 and conv_pool.dim(1) == 3 * HD and pp.params[2] == PROJ_N
+        assert (output.dim(0), output.dim(1)) == (T, HD) and state_pool.dim(1) == 128 and state_pool.dim(0) % (heads * 128) == 0
+        assert col_ga % 8 == 0 and col_fa % 8 == 0 and col_ga + 128 <= PROJ_N and col_fa + 128 <= PROJ_N and \
+            col_beta + heads <= PROJ_N and 3 * HD <= min(col_ga, col_fa, col_beta)
+        assert 1 <= requests_per_task <= 16 and T % requests_per_task == 0, "glm_kda_decode_layer: R divides T, at most 16"
+        self._add_node("glm_kda_decode", (heads, T // requests_per_task, 1), block_dim, [proj, wfb, output],
+                       [(-1, -1, -1), (0, -1, -1), (1, 0, -1)],
+                       [PROJ_N, col_ga, col_fa, col_beta, float_bits(onorm_eps), HD],
+                       changeable_grid_dims={1: (1, 1, 16)},
+                       out_buffer=lambda n: (T * HD * 2, 0xFF, False), counters=1,
+                       buf_slots=[self._tensor_slot(t) for t in (wfb, prm, state_pool, slots, conv_weight, conv_pool, wgb)])
+
     def attn_residual_layer(
         self,
         input: DTensor,         # the GPUs' partial sums: a push_all gemm_tile's output ([GPUS][T][H] bf16, exchange)
@@ -1295,6 +1474,81 @@ class StaticMegakernel(PersistentKernel):
                        out_buffer=lambda n: (T * ql * 2, 0xFF, False), counters=1,
                        concurrent_along_axis=1 if groups > 1 else None,
                        buf_slots=slots, cost_inputs=[0])
+
+    def dsa_norm_layer(
+        self,
+        latent: DTensor,        # [T, NA] fp32: the fused q_a / kv_a projection, a gemm_tile node's K parts in slots
+        w_q: DTensor,           # [QL] bf16: q_a_layernorm
+        w_kv: DTensor,          # [KV] bf16: kv_a_layernorm
+        kv_cache: DTensor,      # [rows, KV] uint8: SGLang ROCm's fp8 (e4m3) latent cache, this step's rows at out_loc[t]
+        out_loc: DTensor,       # int64 [>= T]: the rows of this step's tokens (SGLang's out_cache_loc; 0: not written)
+        q_c: DTensor,           # [T, QL] bf16 (0xFF before each launch: q_b and the indexer's wq_b poll it)
+        ql: int = 1536, kv: int = 512,
+        eps_q: float = 1e-5, eps_kv: float = 1e-5,
+        groups: int = 1,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """HIP (tasks/dsa_norm.cuh, from mla_norm): task (x, y) = token x, column range y of groups: q_c = rmsnorm(latent[:QL])
+        w_q -> q_c; e4m3(bf16(rmsnorm(latent[QL:QL + KV]) w_kv)) -> the cache row out_loc[x]. params = [QL, KV, 0, eps_q,
+        eps_kv bits]; buf_slots = w_q, w_kv, kv_cache, out_loc (, groups > 1: the partial sums, 0xFF before each launch)."""
+        from .compiler import graph_nodes, producer_of
+        assert _hip(), "dsa_norm_layer: HIP"
+        p = producer_of(latent, graph_nodes(self))
+        assert p is not None and p.name == "gemm_tile" and p.params[0] == COMBINE["slots"], "dsa_norm_layer: K parts in slots"
+        T = self._tokens(latent.dim(0))
+        self._dtypes("dsa_norm_layer", latent=(latent, float32), w_q=(w_q, bfloat16), w_kv=(w_kv, bfloat16),
+                     kv_cache=(kv_cache, uint8), out_loc=(out_loc, int64), q_c=(q_c, bfloat16))
+        assert latent.dim(1) >= ql + kv and kv_cache.dim(1) == kv and q_c.dim(1) == ql
+        slots = [self._tensor_slot(t) for t in (w_q, w_kv, kv_cache, out_loc)]
+        if groups > 1:
+            slots.append(self._scratch("dsa_norm.psum", T * groups * 2 * 4, reset=0xFF))
+        self._add_node("dsa_norm", (T, groups, 1), block_dim, [latent, q_c], [(-1, -1, -1), (0, -1, -1)],
+                       [ql, kv, 0, float_bits(eps_q), float_bits(eps_kv)],
+                       out_buffer=lambda n: (T * ql * 2, 0xFF, False), counters=1,
+                       concurrent_along_axis=1 if groups > 1 else None,
+                       buf_slots=slots, cost_inputs=[0])
+
+    def dsa_sparse_attn_layer(
+        self,
+        q: DTensor,             # [T, heads x 512] bf16: mla_absorb's output (the absorbed query, NoPE)
+        cache: DTensor,         # [rows, 512] uint8: SGLang ROCm's fp8 latent cache (this step's rows by dsa_norm)
+        req_to_token: DTensor,  # [reqs, W] int32: SGLang's req_to_token (position -> cache row)
+        seq_lens: DTensor,      # [T] int32 (with this step's token)
+        req_idx: DTensor,       # [T] int64: SGLang's req_pool_indices
+        out_loc: DTensor,       # [T] int64: this step's rows (dsa_norm writes them)
+        norm_out: DTensor,      # dsa_norm's output q_c (its counter: this step's cache rows written)
+        indices: DTensor,       # [T, K] int32: dsa_index_topk's pool ids
+        output: DTensor,        # [T, heads x 512] bf16 (0xFF before each launch: o absorb polls it)
+        heads: int = 16, scale: float = 1.0 / 16, splits: int = 1,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """HIP (tasks/dsa_sparse_attn.cuh, from mla_attn_decode): task (x, y) = request x, split y: the top-K pools' positions
+        and the tail -> req_to_token rows of the fp8 cache; softmax(scale q . row) . row -> output. params = [heads, 512, 0, 1,
+        scale bits, K, W]; buf_slots = cache, req_to_token, seq_lens, req_idx, out_loc, indices (, splits > 1: the partials).
+        Counters (splits > 1): one per request."""
+        from .compiler import graph_nodes, producer_of
+        assert _hip(), "dsa_sparse_attn_layer: HIP"
+        nodes = graph_nodes(self)
+        pq = producer_of(q, nodes)
+        assert pq is not None and pq.name == "mla_absorb", "dsa_sparse_attn_layer: q from mla_absorb"
+        T, K, W = self._tokens(q.dim(0)), indices.dim(1), req_to_token.dim(1)
+        self._dtypes("dsa_sparse_attn_layer", q=(q, bfloat16), cache=(cache, uint8), req_to_token=(req_to_token, int32),
+                     seq_lens=(seq_lens, int32), req_idx=(req_idx, int64), out_loc=(out_loc, int64), indices=(indices, int32),
+                     output=(output, bfloat16))
+        assert q.dim(1) == heads * 512 and cache.dim(1) == 512 and output.dim(1) == heads * 512
+        # the inputs whose producers' counts the task waits for: q (polled), the cache (dsa_norm), the indices (topk)
+        assert producer_of(norm_out, nodes) is not None and producer_of(norm_out, nodes).name == "dsa_norm"
+        assert producer_of(indices, nodes) is not None and producer_of(indices, nodes).name == "dsa_index_topk"
+        # (slot 5 unused: the pool ids come from dsa_index_topk's buffer; seq_lens again in its place)
+        slots = [self._tensor_slot(t) for t in (cache, req_to_token, seq_lens, req_idx, out_loc, seq_lens)]
+        if splits > 1:
+            slots.append(self._scratch("dsa_sparse_attn.part", T * splits * (heads * 512 + 2 * heads) * 4))
+        self._add_node("dsa_sparse_attn", (T, splits, 1), block_dim, [q, norm_out, indices, output],
+                       [(0, -1, -1), (-1, -1, -1), (0, -1, -1), (0, -1, -1)],
+                       [heads, 512, 0, 1, float_bits(scale), K, W],
+                       out_buffer=lambda n: (T * heads * 512 * 2, 0xFF, False),
+                       counters=T if splits > 1 else 1,
+                       concurrent_along_axis=1 if splits > 1 else None, buf_slots=slots)
 
     def mla_absorb_layer(
         self,
@@ -1605,9 +1859,16 @@ class StaticMegakernel(PersistentKernel):
         p % 4 = 3, the pool p / 4 (the tail's 3 earlier keys and this one) -> the pooled cache; then (k, gate) -> tail slot
         p % RING. params = [page, MAXPP, RING, eps bits[, NT]]. buf_slots: [k_norm_weight, k_norm_bias, ape, seq_lens,
         req_slots, pooled_block_table, tail_k, tail_score, pooled_cache]. One counter: the count of the tasks."""
-        self._fx_producer("dsa_kpool_update_layer", kw)
+        if _hip():   # (HIP: kw = a gemm_tile node's K parts in slots, fp32; SGLang ROCm's preshuffled pooled pages)
+            from .compiler import graph_nodes, producer_of
+            pk = producer_of(kw, graph_nodes(self))
+            assert pk is not None and pk.name == "gemm_tile" and pk.params[0] == COMBINE["slots"], \
+                "dsa_kpool_update_layer (HIP): kw = a gemm_tile node's K parts in slots"
+            assert tokens_per_request == 1, "dsa_kpool_update_layer (HIP): plain decode"
+        else:
+            self._fx_producer("dsa_kpool_update_layer", kw)
         T = self._tokens(kw.dim(0))
-        self._dtypes("dsa_kpool_update_layer", kw=(kw, int64), k_norm_weight=(k_norm_weight, float32),
+        self._dtypes("dsa_kpool_update_layer", kw=(kw, float32 if _hip() else int64), k_norm_weight=(k_norm_weight, float32),
                      k_norm_bias=(k_norm_bias, float32), ape=(ape, float32), seq_lens=(seq_lens, int32),
                      req_slots=(req_slots, int64), pooled_block_table=(pooled_block_table, int32),
                      tail_k=(tail_k, bfloat16), tail_score=(tail_score, bfloat16), pooled_cache=(pooled_cache, uint8))
@@ -1665,6 +1926,7 @@ class StaticMegakernel(PersistentKernel):
         chunks: int = 16,       # tasks per token, MAXCTX / chunks positions each (whole pages of 64, at most 16)
         page: int = 64,
         flash: bool = False,    # GLM-5.3-Flash: Hadamard q, fp32 head weights, the pooled keys (seq_lens / 4 pools)
+        skip_k: int = 0,        # (HIP) the top-k K: a token with <= skip_k pools computes no scores (topk takes every pool, params[4])
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the index scores (tasks/dsa_index_score.cuh). Task (c, t) computes the scores of chunk c of the context of
@@ -1672,6 +1934,29 @@ class StaticMegakernel(PersistentKernel):
         to 16. Each slot t must be a different request. params = [32, MAXCTX, page, MAXP, flash]. buf_slots: [cos_sin, seq_lens,
         block_table, index_cache, the token histograms (a scratch buffer, zero before each launch)]. Counters: one for each
         token (its chunks)."""
+        if _hip():   # (tasks/dsa_index_score.cuh of the HIP backend: Flash only; iq / kw as gemm_tile K parts in slots)
+            from .compiler import graph_nodes, producer_of
+            for nm, tns in (("iq", iq), ("kw", kw)):
+                pp = producer_of(tns, graph_nodes(self))
+                assert pp is not None and pp.name == "gemm_tile" and (pp.params[0] == COMBINE["slots"] or
+                                                                      (nm == "iq" and pp.params[0] == COMBINE["local"])), \
+                    f"dsa_index_score_layer (HIP): {nm} = a gemm_tile node's K parts in slots (iq: or a local bf16 output)"
+            self._producer("dsa_index_score_layer", index_cache, ("dsa_kpool_update",))
+            assert flash and cos_sin is None, "dsa_index_score_layer (HIP): GLM-5.3-Flash"
+            T, MAXP = self._tokens(output.dim(0)), output.dim(1)
+            self._dtypes("dsa_index_score_layer", iq=(iq, bfloat16 if producer_of(iq, graph_nodes(self)).params[0] ==
+                                                           COMBINE["local"] else float32),
+                         kw=(kw, float32), index_cache=(index_cache, uint8),
+                         seq_lens=(seq_lens, int32), block_table=(block_table, int32), output=(output, float32))
+            assert iq.dim(1) >= 32 * 128 and kw.dim(1) >= 256 + 32 and page == 64 and MAXP % (chunks * page) == 0
+            assert block_table.dim(1) * page >= MAXP and index_cache.dim(1) == page * DSA_INDEX_KEY_BYTES
+            self._add_node("dsa_index_score", (chunks, T, 1), block_dim, [iq, kw, index_cache, output],
+                           [(-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (1, 0, -1)],
+                           [32, MAXP, page, block_table.dim(1)] + ([int(skip_k)] if skip_k else []),
+                           out_buffer=lambda n: (T * MAXP * 4, -1, False), counters=T,
+                           buf_slots=[self._tensor_slot(seq_lens), self._tensor_slot(block_table),
+                                      self._tensor_slot(index_cache)])
+            return
         self._fx_producer("dsa_index_score_layer", iq)
         self._fx_producer("dsa_index_score_layer", kw)
         self._producer("dsa_index_score_layer", index_cache, ("dsa_kpool_update" if flash else "dsa_index_k_write",))
@@ -1712,6 +1997,13 @@ class StaticMegakernel(PersistentKernel):
         MAXCTX, mode (0 count, 1 write), unit]. Counters of each node: one for each token."""
         p = self._producer("dsa_index_topk_layer", scores, ("dsa_index_score",))
         T, TOPK, MAXCTX = self._tokens(output.dim(0)), output.dim(1), scores.dim(1)
+        if _hip():   # (tasks/dsa_index_topk.cuh of the HIP backend: one node, a task per token, pools of 4)
+            self._dtypes("dsa_index_topk_layer", scores=(scores, float32), seq_lens=(seq_lens, int32), output=(output, int32))
+            assert unit == 4 and TOPK % 256 == 0 and TOPK <= MAXCTX
+            self._add_node("dsa_index_topk", (T, 1, 1), block_dim, [scores, output], [(0, -1, -1), (0, -1, -1)],
+                           [TOPK, MAXCTX], counters=1, out_buffer=lambda n: (T * TOPK * 4, -1, False),
+                           buf_slots=[self._tensor_slot(seq_lens)])
+            return
         self._dtypes("dsa_index_topk_layer", scores=(scores, float32), seq_lens=(seq_lens, int32), output=(output, int32))
         assert 0 < TOPK <= MAXCTX and MAXCTX % DSA_TOPK_CH == 0
         assert MAXCTX <= 32 * DSA_TOPK_CH, "dsa_index_topk_layer: MAXCTX <= 32768 (the write node: a lane for each chunk)"
@@ -1789,6 +2081,16 @@ class StaticMegakernel(PersistentKernel):
     ):
         """Declare the value up-projection (tasks/dsa_o_absorb.cuh). Task h * 4 + cb computes value columns [64 cb, 64 cb + 64)
         of head h for all tokens. params = [NH]. buf_slots: [w_uv]. One counter: the count of the tasks."""
+        if _hip():   # (tasks/dsa_o_absorb.cuh of the HIP backend: input = dsa_sparse_attn's [T, NH x 512]; w_uv given as
+                     # [NH x 256, 512] (per head [d][l], kv_b_proj's v rows as the checkpoint's); 0xFF-prefilled output)
+            self._producer("dsa_o_absorb_layer", input, ("dsa_sparse_attn",))
+            T, NH = self._tokens(input.dim(0)), input.dim(1) // 512
+            self._dtypes("dsa_o_absorb_layer", input=(input, bfloat16), w_uv=(w_uv, bfloat16), output=(output, bfloat16))
+            assert input.dim(1) == NH * 512 and (w_uv.dim(0), w_uv.dim(1)) == (NH * 256, 512) and output.dim(1) == NH * 256
+            self._add_node("dsa_o_absorb", (NH, 2, 1), block_dim, [input, output], [(-1, -1, -1), (-1, -1, -1)],
+                           [NH, 512, 0, 256], out_buffer=lambda n: (T * NH * 256 * 2, 0xFF, False),
+                           buf_slots=[self._tensor_slot(w_uv)], counters=1)   # (the count: o_proj counted, MPK_OPROJ_COUNTED)
+            return
         self._producer("dsa_o_absorb_layer", input, ("dsa_mla_merge",))
         T, NH = self._tokens(input.dim(0)), input.dim(1)
         self._dtypes("dsa_o_absorb_layer", input=(input, bfloat16), w_uv=(w_uv, bfloat16), output=(output, bfloat16))
@@ -1820,7 +2122,7 @@ class StaticMegakernel(PersistentKernel):
         p = producer_of(mix, graph_nodes(self))
         if p is None or p.name != "hc_post_mix":
             raise ValueError("hc_pre_layer: mix must be an hc_post_mix node's mixes")
-        HC, H, NMIX = p.params
+        HC, H, NMIX = p.params[:3]   # (HIP: params[3] the push_all flag)
         T = self._tokens(output.dim(0))
         assert hc_small.dim(0) >= NMIX + 3
         self._dtypes("hc_pre_layer", mix=(mix, float32), residual=(residual, bfloat16), hc_small=(hc_small, float32),
@@ -1829,8 +2131,12 @@ class StaticMegakernel(PersistentKernel):
         self._dtypes("hc_pre_layer", h_post=(h_post, float32), h_res=(h_res, float32))
         assert (h_post.dim(0), h_post.dim(1), h_res.dim(0), h_res.dim(1)) == (T, HC, T, HC * HC)
         slots = [self._tensor_slot(t) for t in (residual, hc_small, gamma, h_post, h_res)]
+        # (slot 5 from T MPK_HCPM_RPOLL_MIN_T: hc_post_mix's R' copy, polled; the kernel's STATIC_HCPM_RPOLL_MIN_T must match)
+        if T >= int(os.environ.get("MPK_HCPM_RPOLL_MIN_T", "16")):
+            slots.append(self._scratch_slot(p, "hc_post_mix.rpoll"))
         params = [H, float_bits(rms_eps), float_bits(hc_eps), float_bits(norm_eps), float_bits(post_mult), sinkhorn_iters]
-        self._add_node("hc_pre", (T, 2, 1), block_dim, [mix, residual, output], [(0, -1, -1), (0, -1, -1), (0, -1, -1)],
+        self._add_node("hc_pre", (T, 2, 1), block_dim, [mix, residual, output],
+                       [(0, -1, -1), (0, -1, -1), (0, -1, -1)],
                        params, out_buffer=lambda n: (T * H * 2, -1, False), counters=1,
                        cost_inputs=[0],   # adds the mixes' K parts
                        buf_slots=slots)
@@ -1872,6 +2178,8 @@ class StaticMegakernel(PersistentKernel):
         mix: DTensor,           # [T, HC_MIX_STRIDE] fp32 (a stand-in: the buffer holds [H / 32][T][HC_MIX_STRIDE]): the
                                 # partial mixes for hc_pre
         block_dim: tuple = (256, 1, 1),
+        contract: DTensor = None,   # [T, H] bf16 graph tensor (HIP, buffer slot 6): also the mean of R' over the streams (SGLang's
+                                    # hc_contract before the final norm: the model's last sublayer)
     ):
         """hc_post (MODE 1) and the next sublayer's partial mixes in one task type (tasks/hc_post_mix.cuh): task s = columns
         [32 s, 32 s + 32) of every stream and token: the sum over the GPUs, R' of those columns, their partial mixes with fn
@@ -1879,8 +2187,9 @@ class StaticMegakernel(PersistentKernel):
         there."""
         from .compiler import graph_nodes, producer_of
         s = producer_of(sent, graph_nodes(self))
-        if s is None or s.name != "allreduce_send":
-            raise ValueError("hc_post_mix_layer: sent from an allreduce_send node")
+        push = _hip() and s is not None and s.name == "gemm_tile" and s.params[0] in (COMBINE["push_all"], COMBINE["finish_all"])
+        if s is None or (s.name != "allreduce_send" and not push):
+            raise ValueError("hc_post_mix_layer: sent from an allreduce_send node (HIP: or a push_all gemm_tile)")
         T, H, NMIX = self._tokens(sent.dim(0)), sent.dim(1), fn.dim(0)
         HC = residual.dim(1) // H
         h_post, h_res = coef
@@ -1888,11 +2197,18 @@ class StaticMegakernel(PersistentKernel):
         assert (h_post.dim(0), h_post.dim(1), h_res.dim(0), h_res.dim(1)) == (T, HC, T, HC * HC)
         self._dtypes("hc_post_mix_layer", sent=(sent, bfloat16), residual=(residual, bfloat16), h_post=(h_post, float32),
                      h_res=(h_res, float32), fn=(fn, float32), output=(output, bfloat16), mix=(mix, float32))
-        self._add_node("hc_post_mix", (H // 32, 1, 1), block_dim, [sent, residual, h_res, fn, mix, output],
-                       [(1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1)], [HC, H, NMIX],
+        # (MPK_HCPM_TG: token groups at T >= 32 - grid y; tasks/hc_post_mix.cuh TG: 128 tasks left half the CUs idle in the tail)
+        tg = int(os.environ.get("MPK_HCPM_TG", "1")) if T >= 32 else 1
+        self._add_node("hc_post_mix", (H // 32, tg, 1), block_dim, [sent, residual, h_res, fn, mix, output],
+                       [(1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1)],
+                       [HC, H, NMIX] + ([1] if push else []),   # HIP: params[3] 1, the push_all GEMM's partials
                        out_buffer=lambda n: (n.grid[0] * T * HC_MIX_STRIDE * 4, 0xFF, False), counters=1,
                        buf_slots=[self._tensor_slot(residual), self._tensor_slot(output), self._tensor_slot(h_post),
-                                  self._tensor_slot(h_res), self._tensor_slot(fn)])
+                                  self._tensor_slot(h_res), self._tensor_slot(fn)]
+                       + ([self._scratch("hc_post_mix.rpoll", T * HC * H * 2, reset=0xFF)]   # (R' again, polled by hc_pre)
+                          if T >= int(os.environ.get("MPK_HCPM_RPOLL_MIN_T", "16"))
+                          else ([-1] if contract is not None else []))
+                       + ([self._tensor_slot(contract)] if contract is not None else []))
 
     # ---- GLM-5.3-Flash KDA (tasks/kda_decode.cuh): a KDA sublayer is in_proj (a gemm_tile in slots) -> kda_decode ->
     # o_proj -> allreduce_send -> hc_post_mix -> hc_pre (the next sublayer's input).

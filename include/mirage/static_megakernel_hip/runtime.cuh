@@ -47,6 +47,11 @@ __device__ __forceinline__ void st16_dev(void *p, uint4 v) {
   asm volatile("global_store_dwordx4 %0, %1, off sc1\n s_nop 1" ::"v"(p), "v"(w)
                : "memory");
 }
+// st16_dev with nt (not kept in the L2): the KDA states' stores (tasks/glm_kda_decode.cuh STATIC_DRD_STATE_WT 2)
+__device__ __forceinline__ void st16_dev_nt(void *p, uint4 v) {
+  v4u const w = {v.x, v.y, v.z, v.w};
+  asm volatile("global_store_dwordx4 %0, %1, off nt sc1\n s_nop 1" ::"v"(p), "v"(w) : "memory");
+}
 // st16_dev of registers an MFMA wrote (its accumulators, no VALU op in between): the compiler puts no wait states before
 // an inline asm that reads an MFMA's result, so the store could read it before the MFMA wrote it (MI355X dec26 - dec28:
 // gemm_tile's K parts / S rows of 4 - 8 tokens of a 16-token tile off, only in some builds and launches, the activation

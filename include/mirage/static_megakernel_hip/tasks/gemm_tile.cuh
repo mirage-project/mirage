@@ -179,6 +179,9 @@ template <int S>
 constexpr int gemm_hyb_lds_steps(int w_at) {
   return (158 * 1024 - w_at) / 4096 < S ? (158 * 1024 - w_at) / 4096 : S;
 }
+// GEMM_RPER: the activation's 16-B pieces per thread per round (registers) - polled: a round trip per round (KDA o_proj at
+// T 64: 32 pieces per thread, 4 rounds)
+constexpr int GEMM_RPER = 8;
 template <int ROWS, int KP, bool POLLED = false>
 constexpr bool gemm_ldsw() {
   return STATIC_GEMM_LDSW == 3 && POLLED && gemm_w_lds_at<ROWS, KP>() + ROWS * KP * 2 <= GEMM_LDS_MAX;
@@ -711,6 +714,71 @@ __device__ __forceinline__ void gemm_finish_rs(G const &g, float const *parts, i
   __syncthreads();
 }
 
+// COMBINE_FINISH_ALL: as gemm_finish_rs, but the row block's last K part pushes the bf16 sums to every GPU (PUSH_ALL's layout,
+// one part: OOFF + (rank T N + orow0 T) 2 + 16 v): the K parts keep each task's activation slice small (DSA o_proj T 64: 128 KB
+// instead of 512 KB) and the all-reduce starts per row block, without an allreduce_send step
+template <int ROWS, int NPART, size_t OOFF>
+__device__ __forceinline__ void gemm_finish_all(G const &g, float const *parts, int N, uint32_t *bcnt, int orow0
+#if defined(STATIC_TIMING_BUILD) && defined(STATIC_GEMM_FIN_STAMP)
+                                                , unsigned long long *fstamp = nullptr
+#endif
+                                                ) {
+  static_assert(NPART <= 14, "finish_all: at most 14 K parts");
+  __shared__ int fin_last;
+  wait_mem();
+  __syncthreads();
+  if (STATIC_TIDX == 0) {
+    uint32_t const old = __hip_atomic_fetch_add(bcnt, 1u, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+    fin_last = (old + 1) % NPART == 0;
+  }
+  __syncthreads();
+  asm volatile("" ::: "memory"); // the parts' loads after the count
+  if (!fin_last) {
+    return;
+  }
+#if defined(STATIC_TIMING_BUILD) && defined(STATIC_GEMM_FIN_STAMP)
+  // (STATIC_GEMM_FIN_STAMP, the timing build, probe 11-09: stage stamp 0 = this task is the row block's finisher, 1 = its pushes
+  // complete - every thread waited for its stores (vmcnt 0), thread 0 stamps after the barrier)
+  if (fstamp && STATIC_TIDX == 0) {
+    fstamp[0] = gtime();
+  }
+#endif
+  constexpr int NV = T * ROWS / 8;
+  for (int v = STATIC_TIDX; v < NV; v += 256) { // item v: token v / (ROWS / 8), rows orow0 + 8 (v % (ROWS / 8)) .. + 7
+    int const t = v / (ROWS / 8), r = orow0 + 8 * (v % (ROWS / 8));
+    float4 x0[NPART], x1[NPART];
+#pragma unroll
+    for (int p_ = 0; p_ < NPART; p_++) {
+      uint32_t const off = (uint32_t)((((size_t)p_ * T + t) * N + r) * 4);
+      x0[p_] = as_float4(ld16_at<AUX_DEV>(parts, off));
+      x1[p_] = as_float4(ld16_at<AUX_DEV>(parts, off + 16));
+    }
+    float o8[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+#pragma unroll
+    for (int p_ = 0; p_ < NPART; p_++) { // fixed order
+      o8[0] += x0[p_].x;
+      o8[1] += x0[p_].y;
+      o8[2] += x0[p_].z;
+      o8[3] += x0[p_].w;
+      o8[4] += x1[p_].x;
+      o8[5] += x1[p_].y;
+      o8[6] += x1[p_].z;
+      o8[7] += x1[p_].w;
+    }
+    uint4 const sv = make_uint4(pack_bf16x2(o8[0], o8[1]), pack_bf16x2(o8[2], o8[3]), pack_bf16x2(o8[4], o8[5]),
+                                pack_bf16x2(o8[6], o8[7]));
+    push16(g, OOFF + (size_t)g.rank * T * N * 2 + (size_t)orow0 * T * 2 + (size_t)v * 16, sv);
+  }
+#if defined(STATIC_TIMING_BUILD) && defined(STATIC_GEMM_FIN_STAMP)
+  wait_mem();
+  __syncthreads();
+  if (fstamp && STATIC_TIDX == 0) {
+    fstamp[1] = gtime();
+  }
+#endif
+  __syncthreads();
+}
+
 // COMBINE_FINISH, after a task stored its K part (st16_dev) of rows orow0 ..
 // + ROWS of parts [NPART][T][N] fp32: the task counts itself on its row
 // block's counter (bypass protocol: its stores complete first), and the one
@@ -1021,7 +1089,7 @@ __device__ __forceinline__ void gemm_tile_task(G const &g,
     }
     // this thread's 16-B pieces (v = STATIC_TIDX + 256 q), in rounds of at most RPER pieces (registers), all loads of
     // a round in flight together (tracked); polled: re-loaded until all landed
-    constexpr int NV = T * KPC / 8, PER = (NV + 255) / 256, RPER = PER < 8 ? PER : 8;
+    constexpr int NV = T * KPC / 8, PER = (NV + 255) / 256, RPER = PER < GEMM_RPER ? PER : GEMM_RPER;
     int kcc = k0c; // this chunk's first K column
     if constexpr (ACH > 1) {
       kcc += cc * KPC;
@@ -1214,7 +1282,7 @@ __device__ __forceinline__ void gemm_tile_task(G const &g,
                                   __float_as_uint(ac[2]),
                                   __float_as_uint(ac[3]));
       if (mode == COMBINE_SLOTS || mode == COMBINE_FINISH ||
-          mode == COMBINE_FINISH_Q || mode == COMBINE_FINISH_RS) {
+          mode == COMBINE_FINISH_Q || mode == COMBINE_FINISH_RS || mode == COMBINE_FINISH_ALL) {
         st16_dev_acc(reinterpret_cast<float *>(out) +
                      ((size_t)split * T + tok) * N + row,
                  v4);
@@ -1237,8 +1305,8 @@ __device__ __forceinline__ void gemm_tile_task(G const &g,
                          (size_t)tok * N + row + r,
                      ac[r]);
         }
-      } else {
-        st16_dev_acc(reinterpret_cast<float *>(out) + (size_t)tok * N + row, v4); // (st16_out: MFMA results)
+      } else { // (store: K part `split` at [split][T][N], one part: [T][N])
+        st16_dev_acc(reinterpret_cast<float *>(out) + ((size_t)split * T + tok) * N + row, v4); // (st16_out: MFMA results)
       }
     }
   }
@@ -1265,7 +1333,7 @@ __device__ __forceinline__ void gemm_tile_task(G const &g,
   if (mode == COMBINE_PUSH_ALL) { // the T x ROWS block: 16 B per thread to every GPU
     __syncthreads();
     for (int v = STATIC_TIDX; v < T * ROWS / 8; v += 256) {
-      push16(g, OOFF + (size_t)g.rank * T * N * 2 + (size_t)orow0 * T * 2 + (size_t)v * 16,
+      push16(g, OOFF + ((size_t)g.rank * NPART + split) * T * N * 2 + (size_t)orow0 * T * 2 + (size_t)v * 16,
              *reinterpret_cast<uint4 const *>(ptile + 8 * v));
     }
   }
@@ -1283,6 +1351,12 @@ __device__ __forceinline__ void gemm_tile_task(G const &g,
         g, reinterpret_cast<float const *>(out), N, cnt + orow0 / ROWS, orow0, sm, split);
   } else if (mode == COMBINE_FINISH_RS) {
     gemm_finish_rs<ROWS, NPART, OOFF>(g, reinterpret_cast<float const *>(out), N, cnt + orow0 / ROWS, orow0, split);
+  } else if (mode == COMBINE_FINISH_ALL) {
+    gemm_finish_all<ROWS, NPART, OOFF>(g, reinterpret_cast<float const *>(out), N, cnt + orow0 / ROWS, orow0
+#if defined(STATIC_TIMING_BUILD) && defined(STATIC_GEMM_FIN_STAMP)
+        , stamp
+#endif
+        );
   } else {
     __syncthreads();
   }
@@ -1291,7 +1365,7 @@ __device__ __forceinline__ void gemm_tile_task(G const &g,
 // COMBINE_FINISH: the buffer slot of the K parts (BUF_SLOTS[0]); other modes -1
 template <int MODE, class SLOTS>
 constexpr int gemm_parts_slot() {
-  if constexpr (MODE == COMBINE_FINISH || MODE == COMBINE_FINISH_Q || MODE == COMBINE_FINISH_RS) {
+  if constexpr (MODE == COMBINE_FINISH || MODE == COMBINE_FINISH_Q || MODE == COMBINE_FINISH_RS || MODE == COMBINE_FINISH_ALL) {
     return slot_at<SLOTS, 0>();
   } else {
     return -1;
@@ -1389,7 +1463,7 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                     mode == COMBINE_STORE || mode == COMBINE_PUSH ||
                     mode == COMBINE_FINISH || mode == COMBINE_FINISH_Q ||
                     mode == COMBINE_PUSH_ALL || mode == COMBINE_LOCAL || mode == COMBINE_PUSH_RS ||
-                    mode == COMBINE_FINISH_RS,
+                    mode == COMBINE_FINISH_RS || mode == COMBINE_FINISH_ALL,
                 "mode: Combine");
   static_assert(mode != COMBINE_FINISH_RS ||
                     (!POLLED && gemm_parts_slot<mode, BUF_SLOTS>() >= 0 && SELF::counter >= 0 && ROWS >= 64 &&
@@ -1402,15 +1476,20 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                      exchange_bytes[SELF::buf] == zq_bytes(N)),
                 "finish_quant: K parts in buffer slot 0, a counter per 128-row "
                 "block, z_q (and its scale chunks) in the exchange region");
-  static_assert((mode != COMBINE_STORE && mode != COMBINE_PUSH && mode != COMBINE_PUSH_ALL &&
+  static_assert((mode != COMBINE_PUSH && mode != COMBINE_PUSH_ALL &&
                  mode != COMBINE_LOCAL && mode != COMBINE_PUSH_RS) ||
-                    SELF::y == 1,
-                "plain stores / push: one K part");
+                    SELF::y == 1 || mode == COMBINE_PUSH_ALL,
+                "push: one K part (push_all: K parts each pushed to its own slot, the readers add them; store: K parts at "
+                "[part][T][N], allreduce_send params[2] 3 adds them)");
   static_assert(mode != COMBINE_PUSH_RS || (exchange_bytes[SELF::buf] == (size_t)GPUS * T * (N / GPUS) * 2 &&
                                             (N / GPUS) % ROWS == 0),
                 "push_rs: the output [GPUS][N / GPUS / ROWS][T][ROWS] bf16 in the exchange region, whole row tiles per GPU");
-  static_assert(mode != COMBINE_PUSH_ALL || exchange_bytes[SELF::buf] == (size_t)GPUS * T * N * 2,
-                "push_all: the output [GPUS][T][N] bf16 in the exchange region (its input polled or counted)");
+  static_assert(mode != COMBINE_FINISH_ALL || (POLLED && gemm_parts_slot<mode, BUF_SLOTS>() >= 0 && SELF::counter >= 0 &&
+                                               exchange_bytes[SELF::buf] == (size_t)GPUS * T * N * 2),
+                "finish_all: a polled input, the K parts in buffer slot 0, a counter per row block, the output [GPUS][T][N] bf16 "
+                "in the exchange region");
+  static_assert(mode != COMBINE_PUSH_ALL || exchange_bytes[SELF::buf] == (size_t)GPUS * SELF::y * T * N * 2,
+                "push_all: the output [GPUS][K parts][T][N] bf16 in the exchange region (its input polled or counted)");
   static_assert(mode != COMBINE_PUSH ||
                     (POLLED && exchange_bytes[SELF::buf] ==
                                    (size_t)GPUS * T * (N / GPUS) * 2),
@@ -1433,14 +1512,24 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
   __hip_bfloat16 const *weight =
       reinterpret_cast<__hip_bfloat16 const *>(maps.m[WMAP].p);
   uint32_t *const cnt = cnt_of(g) + (SELF::counter < 0 ? 0 : SELF::counter);
+  if constexpr (POLLED && gemm_param_or0<PARAMS, 8>() > 0) { // (gemm_tile_layer skip_seq: every token <= K pools - no task works)
+    constexpr int SK = gemm_param_or0<PARAMS, 8>();
+    static_assert(mode == COMBINE_LOCAL, "skip_seq: a local gemm");
+    int const *const sl = buf_at<int const>(g, slot_at<BUF_SLOTS, 0>());
+    bool const need = (int)STATIC_TIDX < T && sl[STATIC_TIDX] / 4 > SK;
+    if (!__syncthreads_or(need)) {
+      return;
+    }
+  }
   if constexpr (POLLED) {
     static_assert(AMAP < 0 && ACT::buf >= 0,
                   "polled: no activation map, ACT's buffer");
     // the output: this GPU's rows only, [K parts][T][N / GPUS] (PUSH_ALL: all
     // rows, [GPUS][T][N])
     constexpr bool ALL = mode == COMBINE_PUSH_ALL || mode == COMBINE_LOCAL || mode == COMBINE_PUSH_RS;
+    constexpr bool ALLR = ALL || mode == COMBINE_STORE || mode == COMBINE_FINISH_ALL; // (all rows: a polled store gemm writes [T][N] fp32, its OOFF stays 0)
     gemm_tile_task<ROWS, KP, K, true, LAYOUT,
-                   mode == COMBINE_PUSH || mode == COMBINE_FINISH || ALL
+                   mode == COMBINE_PUSH || mode == COMBINE_FINISH || mode == COMBINE_FINISH_ALL || ALL
                        ? exchange_offset[SELF::buf]
                        : 0,
                    SELF::y, NORM, NORM ? exchange_offset[ACT::buf] : 0,
@@ -1450,13 +1539,13 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                                       nullptr,
                                       0,
                                       mode,
-                                      buf_at<void>(g, mode == COMBINE_FINISH
+                                      buf_at<void>(g, mode == COMBINE_FINISH || mode == COMBINE_FINISH_ALL
                                                           ? gemm_parts_slot<mode, BUF_SLOTS>()
                                                           : SELF::buf),
-                                      ALL ? N : N / GPUS,
+                                      ALLR ? N : N / GPUS,
                                       cnt,
                                       tk.x * ROWS,
-                                      ALL ? tk.x * ROWS : tk.x * ROWS - g.rank * (N / GPUS),
+                                      ALLR ? tk.x * ROWS : tk.x * ROWS - g.rank * (N / GPUS),
                                       tk.y,
                                       tk.y * KP,
                                       NORM ? buf_at<__hip_bfloat16 const>(

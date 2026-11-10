@@ -402,8 +402,13 @@ def kernel_code(nodes: Dict[str, dict], profile: bool = False) -> List[str]:
               "                       ? static_tasks[blockIdx.x * (static_mk::MAX_TASKS_PER_SM) + threadIdx.x * 4].node : 0;",
               "#endif",
               "  static_mk::KernelLocals L;",
-              "#ifdef STATIC_RESET_FIRST_NODE",   # (core.cuh kernel_begin: the next launch's exchange resets on the CUs starting with that node)
-              "  L.first_node = tk0.node; L.tasks = reinterpret_cast<int const *>(static_tasks);",
+              "#ifdef STATIC_RESET_FIRST_NODE",   # (core.cuh kernel_begin: which CUs reset the next launch's exchange set)
+              "#ifdef STATIC_TASK_PREFETCH",
+              "  L.first_node = tk0.node;",
+              "#else",
+              "  L.first_node = static_tasks[blockIdx.x * (static_mk::MAX_TASKS_PER_SM)].node;",
+              "#endif",
+              "  L.tasks = reinterpret_cast<int const *>(static_tasks);",
               "#endif",
               "  static_mk::kernel_begin(g, L);",
               "#ifdef STATIC_EARLY_L2",   # (core.cuh early_l2: the listed nodes' weight lines into the L2 by the CUs starting with that node)

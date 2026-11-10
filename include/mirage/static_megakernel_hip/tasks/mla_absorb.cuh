@@ -23,7 +23,9 @@ __device__ __forceinline__ void mla_absorb_task(KernelLocals &L,
                                                 __hip_bfloat16 *query,       // [T][HEADS][KV + RP]
                                                 int h,
                                                 int y) {
-  static_assert(NOPE == 128 && KV % 128 == 0 && T <= 64 && RP % 8 == 0, "mla_absorb: K3's shapes (thread maps below)");
+  // (NOPE 128: K3; 256: GLM-5.3-Flash's DSA, RP 0)
+  static_assert(NOPE % 32 == 0 && NOPE >= 128 && NOPE <= 512 && KV % 128 == 0 && T <= 64 && RP % 8 == 0,
+                "mla_absorb: the shapes (thread maps below)");
   constexpr int NC = (T + 15) / 16; // the tokens as the MFMA's columns: tiles of 16
   constexpr int QW = HEADS * (NOPE + RP), D = KV + RP, S = NOPE / 32;
   int const tid = task_tid_all(), lane = tid & 63, wave = tid >> 6, tok = lane % 16, grp = lane / 16;
@@ -76,7 +78,7 @@ __device__ __forceinline__ void mla_absorb_task(KernelLocals &L,
       }
     }
   }
-  __syncthreads(); // every wave's reads of qn done: the task's [T][128] outputs staged there (bf16, NOPE == 128)
+  __syncthreads(); // every wave's reads of qn done: the task's [T][128] outputs staged there (bf16, rows of NOPE >= 128)
 #pragma unroll
   for (int c = 0; c < NC; c++) {
     int const t = 16 * c + tok;

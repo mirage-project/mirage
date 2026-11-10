@@ -213,6 +213,8 @@ enum Combine {
                         // the reduce-scatter half (attn_residual's RS form adds the GPUs' partials of its columns)
   , COMBINE_FINISH_RS = 9 // HIP: K parts in a scratch (as FINISH, every GPU all rows); a row block's last part adds them and
                         // sends the bf16 block to the GPU owning its rows only, in PUSH_RS's layout
+  , COMBINE_FINISH_ALL = 10 // HIP: K parts in a scratch (every GPU all rows, a polled input); a row block's last part adds them and
+                        // pushes the bf16 block to every GPU, in PUSH_ALL's layout with one part ([GPUS][T][N], tile-major)
 };
 
 // 8 fp32 values -> one 16-B bf16 vector (round to nearest even)
@@ -234,6 +236,39 @@ __device__ __forceinline__ uint4 pack_bf16x8(float4 const &p0,
 // vectors per thread); this loop, that loop unrolled once, or -O1 did not.
 // SOLO: this GPU's slot only (the others are zeros; adding zeros changes no
 // bit: the sum starts at +0).
+// All-reduce landing (T >= STATIC_ARS_LAND_MIN_T; the host gives the send node its counter, static_megakernel.py): the
+// senders land and add their slices, hc_post_mix reads the sums locally (tasks/allreduce_send.cuh). MI355X 11-08 glmmoe79:
+// MoE T 64 277.1 / 276.7 vs 291.6 us, T 32 205.2 vs 217.0; T 8 127.6 vs 121.3 (worse: T < 32 keeps hc_post_mix's polls)
+// With the landing, the sender keeps its own bf16 partial in registers (no store into its
+// own slot), adds it in GPU order with the landed ones, and writes the sum there - the own slot stays 0xFF until the sum, so
+// hc_post_mix polls its vectors instead of waiting for every send's count (one round trip less; same buffers, no host flag).
+// MI355X 11-08 glmmoe112 (MoE, A B A B): T 16 156.1 / 157.8 vs 152.8 / 150.8 us, T 32 194.2 / 193.4 vs 184.6 / 184.3, T 64
+// 261.7 / 266.0 vs 257.7 / 256.2
+// The LDS hand-off (T >= STATIC_ARS_LDSHAND_MIN_T, with the landing): when glm_moe_experts' send
+// node has H / 32 slices (column-major, 32 columns each: the MoE harness's default at T >= 16, MPK_ARS_HAND) and the plan puts
+// hc_post_mix task x right after send task x on the same CU (the MoE harness's plan, same knob), the send task leaves its landed
+// bf16 sums [T][32 columns] in LDS at ARS_HAND_OFF and hc_post_mix reads them there (no own-slot store, no poll of it). The
+// kernel cannot see the placement: a plan with H / 32 MoE send slices must pair the CUs. MI355X 11-08 glmmoe117 (x 2, checks
+// pass): T 64 252.4 / 250.5 vs 260.5 / 260.2 us, T 32 183.0 / 185.2 vs 187.0 / 186.1, T 16 148.0 / 149.4 vs 149.5 / 151.2
+#ifndef STATIC_ARS_LDSHAND_MIN_T // (the host's MPK_ARS_HAND_MIN_T must match; 4: MI355X 11-09 glmmoe135, with LAND from 4: MoE T 8
+// 100.3 / 101.4 vs 107.6 / 107.6 us, T 4 79.9 / 80.8 vs 82.8 / 82.3, KDA + MoE pair T 8 160.0 / 159.8 vs 164.2 / 167.5)
+#define STATIC_ARS_LDSHAND_MIN_T 4
+#endif
+constexpr int ARS_HAND_OFF = 96 * 1024;
+// (the hand-off applies: P2 the send node's params[2] (2: glm_moe_experts' blocks), NS its slices, W the row width)
+#define ARS_HAND_ON(P2, NS, W)                                                                                                 \
+  ((P2) == 2 && (NS) * 32 == (W) && T >= STATIC_ARS_LDSHAND_MIN_T && T >= STATIC_ARS_LAND_MIN_T && !SOLO)
+template <class PARAMS, int I>
+constexpr int param_or0() { // (PARAMS::v[I], or 0 if the node has fewer params)
+  if constexpr (sizeof(PARAMS::v) / sizeof(int) > I + 1) {
+    return PARAMS::v[I];
+  } else {
+    return 0;
+  }
+}
+#ifndef STATIC_ARS_LAND_MIN_T // (the smallest T it applies at; the host's MPK_ARS_LAND_MIN_T must match)
+#define STATIC_ARS_LAND_MIN_T 4 // (11-09 glmmoe135: from 4 with the LDS hand-off) // (MI355X 11-08 glmmoe95: T 16 164.6 / 165.4 vs 168.0 / 169.1 us; T 8 121.9 / 121.0 vs 117.8 / 116.9)
+#endif
 template <size_t RANK>
 __device__ __forceinline__ void
     allreduce_land_bf16(G const &g, unsigned char const *row, int v, float *s) {
@@ -247,10 +282,45 @@ __device__ __forceinline__ void
       u[r] = ld16_at<AUX_SYS>(row, (uint32_t)(slot * RANK + (size_t)v * 16));
       all = all && valid16w(u[r]);
     }
+    // (MI355X 11-07 glmmoe77: all loads first then a bitwise check: the timing build's landing 11 us earlier, the normal build's
+    // e2e not (T 64 301.1 / 290.6 vs 291.4 us, KDA T 64 140.3 vs 133.9) - kept as it was)
     if (all) {
       break;
     }
-    tail_pause();
+    __builtin_amdgcn_s_sleep(1); // (tail_pause)
+    asm volatile("" ::: "memory");
+  }
+#pragma unroll
+  for (int k = 0; k < 8; k++) {
+    s[k] = 0.f;
+  }
+#pragma unroll
+  for (int r = 0; r < NR; r++) {
+    uint32_t const wd[4] = {u[r].x, u[r].y, u[r].z, u[r].w};
+#pragma unroll
+    for (int k = 0; k < 4; k++) {
+      s[2 * k] += bf16_lo(wd[k]);
+      s[2 * k + 1] += bf16_hi(wd[k]);
+    }
+  }
+}
+// allreduce_land_bf16 over NR slots (GPUS x the push_all gemm's K parts, STATIC_GEMM_PA_KSPLIT): slot q at q RANK, added in slot
+// order (GPU-major, then K part: the same sums every launch)
+template <size_t RANK, int NR>
+__device__ __forceinline__ void allreduce_land_bf16_nr(unsigned char const *row, float *s) {
+  uint4 u[NR];
+  for (;;) {
+    bool all = true;
+#pragma unroll
+    for (int r = 0; r < NR; r++) {
+      u[r] = ld16_at<AUX_SYS>(row, (uint32_t)(r * RANK));
+      all = all && valid16w(u[r]);
+    }
+    if (all) {
+      break;
+    }
+    __builtin_amdgcn_s_sleep(1);
+    asm volatile("" ::: "memory");
   }
 #pragma unroll
   for (int k = 0; k < 8; k++) {

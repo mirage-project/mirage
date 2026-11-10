@@ -20,6 +20,8 @@ namespace static_mk {
 #ifndef STATIC_MOE_R_RS
 #define STATIC_MOE_R_RS 0
 #endif
+// CM (the LDS hand-off, core.cuh ARS_HAND_ON): slice x = columns [x W / NSLICE, ..) of every token instead of a run of the
+// token-major vectors, so a slice reads one 128-column block of glm_moe_experts' R and goes once that block is counted
 
 // src = the producer's output, fp32 [T x GROUP][W], complete once its NDONE
 // tasks are counted in done_cnt (the layer's hand-off protocol: cnt_wait_in,
@@ -33,12 +35,27 @@ namespace static_mk {
 // tasks, the slice waits for the 128-column blocks it reads (rblk: moe's block
 // counters, core.cuh MOE_MISC_RBLK), each complete at n_live x 8 tiles.
 template <int NSLICE, int NDONE, int GROUP, int W, size_t OFF, int RS,
-          bool RBLK = false>
+          bool RBLK = false, bool CM = false, bool HAND = false, bool PM = false>
 __device__ __forceinline__ void allreduce_send_task(G const &g,
                                                     float const *src,
                                                     uint32_t *done_cnt,
                                                     uint32_t const *rblk,
-                                                    int x STAGE_STAMP_PARAM) {
+                                                    uint32_t *self_cnt, // (the landing: this node's counter)
+                                                    int x,
+                                                    char *lds_hand, // (the LDS hand-off: the CU's LDS)
+                                                    __hip_bfloat16 const *pf_res, // (prefetch, or null: hc_post_mix's residual [T][4][W])
+                                                    float const *pf_fn STAGE_STAMP_PARAM) { // (and its fn [24][4][W])
+  if (pf_res != nullptr) { // (ARS prefetch: hc_post_mix task x's lines into this XCD's L2 while the experts run; it runs next here)
+    constexpr int HCn = 4, NM = 24;
+    int const c0 = 32 * x, tid = (int)STATIC_TIDX;
+    unsigned acc = 0;
+    for (int q = tid; q < T * HCn + NM * HCn; q += 256) {
+      unsigned const *a = q < T * HCn ? reinterpret_cast<unsigned const *>(pf_res + ((size_t)q * W + c0))
+                                      : reinterpret_cast<unsigned const *>(pf_fn + ((size_t)(q - T * HCn) * W + c0));
+      acc ^= *a; // (a plain load: the line kept in the L2)
+    }
+    asm volatile("" ::"v"(acc));
+  }
 #if STATIC_RBLK_PAR
   // (STATIC_RBLK_PAR: wave 0, lane j polls block j's counter if the slice reads it, all blocks' loads in flight together;
   // the default: thread 0 polls the blocks one after another, ~1 us per device-scope load, up to 14 per slice at T = 64)
@@ -84,7 +101,8 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
         __builtin_amdgcn_s_sleep(1);
       }
       int prev = -1;
-      for (int i = lo_; i < hi_; i++) {
+      constexpr int VPS_ = C8_ / NSLICE; // (CM: vectors per token per slice)
+      for (int i = CM ? x * VPS_ : lo_; i < (CM ? (x + 1) * VPS_ : hi_); i++) {
         int const b = (i % C8_) / 16;
         if (b != prev) {
           while (cnt_ld(rblk + RBLK_STRIDE * (1 + b)) < nl * 8) {
@@ -105,19 +123,30 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
     STAGE_STAMP_AT(1)
   }
   constexpr int C8 = W / 8; // 16-B bf16 vectors per token
+  constexpr int VPS = C8 / NSLICE; // (CM: vectors per token per slice)
+  static_assert(!CM || VPS * NSLICE == C8, "allreduce_send CM: whole column slices");
   int const nb = T * C8, blo = (int)((long long)nb * x / NSLICE),
             bhi = (int)((long long)nb * (x + 1) / NSLICE);
-  for (int i = blo + STATIC_TIDX; i < bhi; i += 256) {
+  auto vec_of = [&](int li) { // (the slice's li-th vector: token-major run, or CM: token li / VPS, columns x VPS + li % VPS)
+    return CM ? (li / VPS) * C8 + x * VPS + li % VPS : blo + li;
+  };
+  int const nsl = CM ? T * VPS : bhi - blo;
+  uint4 own_v = make_uint4(0u, 0u, 0u, 0u); // (this thread's own partial, kept for the landing: at most one vector a thread)
+  static_assert((T * (W / 8) + NSLICE - 1) / NSLICE <= 256, "allreduce_send: one own vector a thread");
+  for (int li = STATIC_TIDX; li < nsl; li += 256) {
+    int const i = vec_of(li);
     int const t = i / C8, c = i - t * C8;
     size_t const dst =
         OFF + (size_t)g.rank * ((size_t)T * W * 2) + ((size_t)t * C8 + c) * 16;
-    uint32_t const rows = (uint32_t)(((size_t)t * GROUP * W + 8 * c) * 4);
+    // (PM: a store gemm's K parts, part-major [GROUP][T][W]; else GROUP rows per token, [T][GROUP][W])
+    uint32_t const rows = (uint32_t)(((size_t)t * (PM ? 1 : GROUP) * W + 8 * c) * 4);
+    constexpr uint32_t KSTR = (uint32_t)((PM ? (size_t)T * W : (size_t)W) * 4);
     float4 p0 = make_float4(0.f, 0.f, 0.f, 0.f), p1 = p0;
 #pragma unroll
     for (int k = 0; k < GROUP; k++) { // the rows of token t in order k = 0 ..
-      float4 const a = as_float4(ld16_in_at(src, rows + (uint32_t)k * W * 4)),
+      float4 const a = as_float4(ld16_in_at(src, rows + (uint32_t)k * KSTR)),
                    b = as_float4(
-                       ld16_in_at(src, rows + (uint32_t)k * W * 4 + 16));
+                       ld16_in_at(src, rows + (uint32_t)k * KSTR + 16));
       p0.x += a.x;
       p0.y += a.y;
       p0.z += a.z;
@@ -140,7 +169,71 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
       continue;
     }
 #endif
+    if constexpr (!SOLO) {
+      if (T >= STATIC_ARS_LAND_MIN_T) { // (the other GPUs only; the own partial kept for the landing below)
+        uint4 const pv = pack_bf16x8(p0, p1);
+        own_v = pv;
+#pragma unroll
+        for (int r = 0; r < GPUS; r++) {
+          if (r != g.rank) {
+            st16_sys(g.peer[r] + dst + rg_set(), pv);
+          }
+        }
+        continue;
+      }
+    }
     push16(g, dst, pack_bf16x8(p0, p1));
+  }
+  // (the landing, T >= STATIC_ARS_LAND_MIN_T: the same threads poll this slice's GPUS slots (as amd/bench/hop_big.hip's senders do), add them in GPU
+  // order (fp32), round to bf16 and write the sum into this GPU's own slot (only this GPU reads it); then the task counts
+  // itself: hc_post_mix loads the sums from the local slot after the count. MI355X 11-08 glmmoe78: hc_post_mix's own wait for
+  // the pushed sums cost ~27 / 24 us of the T 64 / 32 MoE kernel (normal build), the bare hop 10 / 4.6 us)
+  if constexpr (!SOLO && T >= STATIC_ARS_LAND_MIN_T) {
+    for (int li = STATIC_TIDX; li < nsl; li += 256) {
+      int const i = vec_of(li);
+      float sm8[8];
+      // (the others' slots polled, the own partial from registers, added in GPU order)
+      constexpr size_t RK = (size_t)T * W * 2;
+      unsigned char const *const row = g.rv + OFF + rg_set();
+      uint4 u[GPUS];
+      for (;;) {
+        bool all = true;
+#pragma unroll
+        for (int r = 0; r < GPUS; r++) {
+          u[r] = r == g.rank ? own_v : ld16_at<AUX_SYS>(row, (uint32_t)(r * RK + (size_t)i * 16));
+          all = all && valid16w(u[r]);
+        }
+        if (all) {
+          break;
+        }
+        __builtin_amdgcn_s_sleep(1);
+        asm volatile("" ::: "memory");
+      }
+#pragma unroll
+      for (int k = 0; k < 8; k++) {
+        sm8[k] = 0.f;
+      }
+#pragma unroll
+      for (int r = 0; r < GPUS; r++) {
+        uint32_t const wd[4] = {u[r].x, u[r].y, u[r].z, u[r].w};
+#pragma unroll
+        for (int k = 0; k < 4; k++) {
+          sm8[2 * k] += bf16_lo(wd[k]);
+          sm8[2 * k + 1] += bf16_hi(wd[k]);
+        }
+      }
+      uint4 const sv = make_uint4(pack_bf16x2(sm8[0], sm8[1]), pack_bf16x2(sm8[2], sm8[3]), pack_bf16x2(sm8[4], sm8[5]),
+                                  pack_bf16x2(sm8[6], sm8[7]));
+      if constexpr (HAND) { // (for hc_post_mix task x, next on this CU: [T][VPS] vectors in LDS)
+        *reinterpret_cast<uint4 *>(lds_hand + ARS_HAND_OFF + (size_t)li * 16) = sv;
+      } else {
+        st16_dev(g.rv + OFF + (size_t)g.rank * ((size_t)T * W * 2) + (size_t)i * 16 + rg_set(), sv);
+      }
+    }
+    if constexpr (HAND) {
+      __syncthreads();
+    }
+    task_post(self_cnt, 1);
   }
 #if defined(STATIC_TIMING_BUILD) && defined(STATIC_ARS_ACK_STAMP)
   // (STATIC_ARS_ACK_STAMP, the timing build: stage stamp 1 = this task's pushes acknowledged by every GPU, each thread's stores
@@ -162,16 +255,25 @@ constexpr int ars_param_or0() {
     return 0;
   }
 }
-template <bool RBLK, class SLOTS>
+template <bool RBLK, class SLOTS, size_t ROFF = MOE_MISC_RBLK>
 __device__ __forceinline__ uint32_t const *ars_rblk(G const &g) {
-  if constexpr (RBLK) {
+  if constexpr (RBLK) { // (ROFF 0: glm_moe_experts' own blocks buffer)
     return reinterpret_cast<uint32_t const *>(
-        buf_at<unsigned char>(g, slot_at<SLOTS, 1>()) + MOE_MISC_RBLK);
+        buf_at<unsigned char>(g, slot_at<SLOTS, 1>()) + ROFF);
   } else {
     return nullptr;
   }
 }
 
+// (params[3] 1: the prefetch tensors in slots 2 / 3, else null - if constexpr: no buf_at of a missing slot)
+template <class PARAMS, class BUF_SLOTS, int I, class P>
+__device__ __forceinline__ P *ars_pf_ptr(G const &g) {
+  if constexpr (ars_param_or0<PARAMS, 3>() == 1) {
+    return buf_at<P>(g, slot_at<BUF_SLOTS, I>());
+  } else {
+    return nullptr;
+  }
+}
 // allreduce_send task x: slice x of SELF::x of its input (the output of node
 // SRC, complete once all SRC's tasks are counted) to every GPU. PARAMS {W (the
 // row width), rows per token in the input (GROUP: added in order)}; BUF_SLOTS
@@ -187,10 +289,11 @@ __device__ __forceinline__ void run_allreduce_send(Maps const &,
                                                    KernelLocals &L,
                                                    StaticTask const &tk) {
   constexpr int W = PARAMS::v[0], GROUP = PARAMS::v[1];
-  // params[2] 1: the producer is moe_experts, BUF_SLOTS[1] its misc scratch
+  // params[2] 3: a store gemm's K parts (params[1] of them, part-major); params[2] 1: the producer is moe_experts, BUF_SLOTS[1] its misc scratch
   // (R in blocks: wait for the slice's blocks)
-  constexpr bool RBLK = ars_param_or0<PARAMS, 2>() == 1;
+  constexpr bool RBLK = ars_param_or0<PARAMS, 2>() == 1 || ars_param_or0<PARAMS, 2>() == 2; // (2: glm_moe_experts' blocks)
   static_assert(!RBLK || W % 128 == 0, "R_BLOCKS: whole 128-column blocks");
+  constexpr bool HAND = ARS_HAND_ON((ars_param_or0<PARAMS, 2>()), SELF::x, W); // (the LDS hand-off: column-major slices)
   static_assert(W % 8 == 0 && GROUP >= 1,
                 "allreduce_send: params {row width, rows per token}");
   static_assert(SRC::buf >= 0 && SRC::counter >= 0,
@@ -205,12 +308,18 @@ __device__ __forceinline__ void run_allreduce_send(Maps const &,
                       W,
                       exchange_offset[SELF::buf],
                       slot_at<BUF_SLOTS, 0>(),
-                      RBLK>(
+                      RBLK,
+                      HAND,
+                      HAND, ars_param_or0<PARAMS, 2>() == 3>(
       g,
       buf_at<float const>(g, SRC::buf),
       cnt_of(g) + SRC::counter,
-      ars_rblk<RBLK, BUF_SLOTS>(g),
-      tk.x STAGE_STAMP_ARG(L.stage_stamps));
+      ars_rblk<RBLK, BUF_SLOTS, ars_param_or0<PARAMS, 2>() == 2 ? 0 : MOE_MISC_RBLK>(g),
+      SELF::counter >= 0 ? cnt_of(g) + SELF::counter : nullptr,
+      tk.x,
+      L.sm,
+      ars_pf_ptr<PARAMS, BUF_SLOTS, 2, __hip_bfloat16 const>(g),
+      ars_pf_ptr<PARAMS, BUF_SLOTS, 3, float const>(g) STAGE_STAMP_ARG(L.stage_stamps));
 }
 
 template <class SELF,
@@ -219,7 +328,8 @@ template <class SELF,
           class MAP_SLOTS,
           class... IN>
 constexpr int smem_allreduce_send() {
-  return 0;
+  return ARS_HAND_ON((ars_param_or0<PARAMS, 2>()), SELF::x, PARAMS::v[0]) ? ARS_HAND_OFF + T * PARAMS::v[0] / SELF::x * 2
+                                                                           : 0; // (the LDS hand-off region)
 }
 
 } // namespace static_mk
