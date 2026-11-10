@@ -23,14 +23,14 @@ and the coefficients put back), then the static layer; printed: the MoE output's
 comb[i][j] R_i = post_j out) static vs SGLang and each vs the exact reference (moe_demo.reference with exact activations,
 every rank's shard, fp64, summed over the group: two FP8 MoEs with different activation rounding differ by a few % on their
 own, so the exact reference is the yardstick), and R' static vs SGLang.
-MOE_STATIC_END=mhc_pre (beyond #811): the kernel also runs the NEXT layer's attention mHC pre (hc_post_mix + hc_pre with the
-next decoder layer's hc_attn_* and input_layernorm: moe_demo.build_graph attn_next) and the hook carries its x_attn, h_res,
-h_post to the next layer's MHCState (read_attn_input patched: the carry instead of SGLang's hc_attn_pre), so no SGLang kernel
-runs between the two layers' kernels; the last layer's MoE ends as mhc. check: also x_attn, h_res, h_post against SGLang's
-hc_attn_pre on its own streams.
-Env: MOE_STATIC_LAYERS; MOE_STATIC_CHECK (1 / 0); MOE_STATIC_PDL (1 / 0); MOE_STATIC_END (mhc / mhc_pre); MOE_STATIC_TOKENS
+The layers of a T in END_PRE_TOKENS (beyond #811) also run the NEXT layer's attention mHC pre (hc_post_mix + hc_pre with the
+next decoder layer's hc_attn_* and input_layernorm: moe_demo.build_graph attn_next; end mhc_pre) and the hook carries its
+x_attn, h_res, h_post to the next layer's MHCState (read_attn_input patched: the carry instead of SGLang's hc_attn_pre), so no
+SGLang kernel runs between the two layers' kernels; the layers of the other T and the last layer end at the FFN's mHC post
+(mhc). check: also x_attn, h_res, h_post against SGLang's hc_attn_pre on its own streams.
+Env: MOE_STATIC_LAYERS; MOE_STATIC_CHECK (1 / 0); MOE_STATIC_PDL (1 / 0); MOE_STATIC_TOKENS
 (8, 16, 32, 64: the T of the layers); MOE_STATIC_PLAN, MOE_STATIC_PLAN16 / 32 / 64 (the layers' plan files by T, moe_demo
---search of the same --end, one GPU's lists, e.g. moe_plan_mhc_pre.json here; default: round robin of moe_demo's grids);
+--search of that T's --end, one GPU's lists, e.g. moe_plan16_mhc_pre.json here; default: round robin of moe_demo's grids);
 MOE_STATIC_VERIFY_PLAN, MOE_STATIC_VERIFY_PLAN16, MOE_STATIC_VERIFY_PLAN32 (the verify layers'); MOE_STATIC_ROWS (the live
 rows of decode steps that get a build of their own, e.g. 1,2,4: a decode step of n < T rows without one runs the T layer
 with its idle rows routed; the plan of their T's layer); MOE_STATIC_OUT (build
@@ -54,7 +54,9 @@ LAYERS = None if os.environ["MOE_STATIC_LAYERS"].strip() == "all" else \
     {int(x) for x in os.environ["MOE_STATIC_LAYERS"].split(",") if x.strip()}   # None: every MoE layer
 CHECK = os.environ.get("MOE_STATIC_CHECK", "1") != "0"
 PDL = os.environ.get("MOE_STATIC_PDL", "1") != "0"
-END = os.environ.get("MOE_STATIC_END", "mhc")
+# the T whose layers end with the next layer's attention mHC pre (mhc_pre), the others at the FFN's mHC post (mhc): each T's
+# faster end end to end (nsys step periods, bs 8 / 16 / 32 / 64, prompt 256)
+END_PRE_TOKENS = (16, 32)
 PLAN_FILE = {8: os.environ.get("MOE_STATIC_PLAN") or None,      # the layers' plan files by T (a plan file is of one T's
              16: os.environ.get("MOE_STATIC_PLAN16") or None,   # graph: the grids differ)
              32: os.environ.get("MOE_STATIC_PLAN32") or None,
@@ -80,10 +82,14 @@ def _pick(layers: dict, rows: int):
     return next((layers[t] for t in sorted(layers) if rows <= t), None)
 
 
+def _fused_at(tok: int) -> bool:
+    """Does the layer of tok rows also run the next layer's attention mHC pre (END_PRE_TOKENS)?"""
+    return tok in END_PRE_TOKENS
+
+
 def _plan_names(plans: dict) -> str:
     """'8: a.json, 16: round robin' of the plan files by T."""
     return ", ".join(f"{t}: {os.path.basename(p) if p else 'round robin'}" for t, p in plans.items() if t in TOKENS)
-assert END in ("mhc", "mhc_pre"), f"MOE_STATIC_END {END}: mhc or mhc_pre"
 os.environ.setdefault("MIRAGE_STATIC_BUILD_CACHE",
                       os.environ.get("MOE_STATIC_BUILD_CACHE", os.path.join(ROOT, "build", "static_build_cache_moe")))
 OUT = os.environ.get("MOE_STATIC_OUT", os.path.join(ROOT, "build", "sgl_static_moe"))
@@ -133,7 +139,7 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 raise RuntimeError(f"layer {m.layer_id}: no Glm5NextDecoderLayer holds the MoE (its FFN exit)")
             m.__dict__["_moe_boundary"] = lay.ffn_boundary   # not a submodule
             free0 = torch.cuda.mem_get_info()[0]
-            nxt = after.get(id(lay)) if END == "mhc_pre" else None
+            nxt = after.get(id(lay)) if any(_fused_at(t) for t in TOKENS) else None
             attn_next = None
             if nxt is not None:   # the next layer's attention mHC pre in this kernel
                 cfg = nxt.config
@@ -144,34 +150,36 @@ def _init_cuda_graphs(self, *args, **kwargs):
             sts, svs, first = {}, {}, None
             for tok in sorted(TOKENS, reverse=True):   # one layer per T (the largest first: the pool's slot size), the
                                                        # expert bank shared
+                nxt_t, attn_t = (nxt, attn_next) if _fused_at(tok) else (None, None)
                 st = StaticMoE(m.layer_id, self.server_args.model_path, rank, tp, dev, OUT, group, pdl=PDL,
-                               keep_weights=CHECK, pool=pool, attn_next=attn_next,
-                               # a plan file is of one graph: with END=mhc_pre the last layer's graph ends as mhc
-                               # (no next layer), another node numbering -> round robin there
-                               plan=PLAN_FILE[tok] if END != "mhc_pre" or nxt is not None else None, tokens=tok,
+                               keep_weights=CHECK, pool=pool, attn_next=attn_t,
+                               # a plan file is of one graph: a fused T's last layer ends as mhc (no next layer),
+                               # another node numbering -> round robin there
+                               plan=PLAN_FILE[tok] if not _fused_at(tok) or nxt_t is not None else None, tokens=tok,
                                bank=None if first is None else first.bank, weights=None if first is None else first.w)
                 first = first or st
-                st.next_layer = nxt
+                st.next_layer = nxt_t
                 sts[tok] = st
                 _OUTS.add(st.t["streams_out"].data_ptr())
                 if draft and (tok // 8) * draft < tok:   # MTP: the verify build of tok / 8 requests x draft live rows (the
                                                          # rest idle: not routed, so no expert of their own is streamed)
                     rows = (tok // 8) * draft
                     sv = StaticMoE(m.layer_id, self.server_args.model_path, rank, tp, dev, OUT, group, pdl=PDL,
-                                   keep_weights=CHECK, pool=pool, attn_next=attn_next,
+                                   keep_weights=CHECK, pool=pool, attn_next=attn_t,
                                    plan=(VERIFY_PLAN_FILE[tok] or (PLAN_FILE[8] if tok == 8 else None))
-                                   if END != "mhc_pre" or nxt is not None else None,
+                                   if not _fused_at(tok) or nxt_t is not None else None,
                                    tokens=tok, bank=first.bank, weights=first.w, rows=rows)
-                    sv.next_layer = nxt
+                    sv.next_layer = nxt_t
                     svs[rows] = sv
                     _OUTS.add(sv.t["streams_out"].data_ptr())
             sds = {}
             for n, tok in ROWS.items():   # decode steps of n live rows below T: their own build (the rest idle: not routed)
+                nxt_t, attn_t = (nxt, attn_next) if _fused_at(tok) else (None, None)
                 sd = StaticMoE(m.layer_id, self.server_args.model_path, rank, tp, dev, OUT, group, pdl=PDL,
-                               keep_weights=CHECK, pool=pool, attn_next=attn_next,
-                               plan=PLAN_FILE[tok] if END != "mhc_pre" or nxt is not None else None,
+                               keep_weights=CHECK, pool=pool, attn_next=attn_t,
+                               plan=PLAN_FILE[tok] if not _fused_at(tok) or nxt_t is not None else None,
                                tokens=tok, bank=first.bank, weights=first.w, rows=n)
-                sd.next_layer = nxt
+                sd.next_layer = nxt_t
                 sds[n] = sd
                 _OUTS.add(sd.t["streams_out"].data_ptr())
             m._moe_static = sts
@@ -181,7 +189,8 @@ def _init_cuda_graphs(self, *args, **kwargs):
             _log(f"static MoE layer {m.layer_id} ready ({', '.join(f'{t} rows' for t in sorted(sts))}"
                  f"{''.join(f', verify {r} of {sv.T} rows' for r, sv in sorted(svs.items()))}"
                  f"{''.join(f', decode {r} of {sd.T} rows' for r, sd in sorted(sds.items()))}; TP {rank}/{tp}, end "
-                 f"{END}, SGLang's fused shared experts "
+                 f"{', '.join(f'{t}: ' + ('mhc_pre' if sts[t].next_layer is not None else 'mhc') for t in sorted(sts))}, "
+                 f"SGLang's fused shared experts "
                  f"{getattr(m, 'num_fused_shared_experts', '?')}): {(free0 - torch.cuda.mem_get_info()[0]) / 2**30:.2f} GB, "
                  f"{torch.cuda.mem_get_info()[0] / 2**30:.1f} GB free")
         # every rank's layers built (each fills its copy of the exchange regions) before any launch
@@ -314,7 +323,7 @@ def _forward(self, hidden_states, forward_batch=None, *args, **kwargs):
 
 
 def _read_attn_input(self, hidden_states, out_norm=None):
-    """MHCState.read_attn_input: the carry from the previous layer's static MoE (MOE_STATIC_END=mhc_pre: this layer's x_attn,
+    """MHCState.read_attn_input: the carry from the previous layer's static MoE (END_PRE_TOKENS: this layer's x_attn,
     h_res, h_post computed in that kernel), else SGLang's hc_attn_pre."""
     carry = self.__dict__.pop("_mk_carry", None)
     if carry is None:
@@ -326,7 +335,8 @@ def _read_attn_input(self, hidden_states, out_norm=None):
 _mr.ModelRunner.init_cuda_graphs = _init_cuda_graphs
 _dv2.DeepseekV2MoE.forward = _forward
 _stage.StageBoundary.finish = _finish
-if END == "mhc_pre":   # each decoder layer finds its MHCState (its hc_attn_pre's owner); its read takes the carry
+if any(_fused_at(t) for t in TOKENS):   # each decoder layer finds its MHCState (its hc_attn_pre's owner); its read takes
+                                        # the carry
     _orig_mhc_init = _mhc.MHCState.__init__
 
     def _mhc_init(self, *a, **k):
@@ -338,4 +348,5 @@ if END == "mhc_pre":   # each decoder layer finds its MHCState (its hc_attn_pre'
     _orig_read_attn_input = _mhc.MHCState.read_attn_input
     _mhc.MHCState.read_attn_input = _read_attn_input
 print(f"[moe_static] patched SGLang: static MoE layers {'all' if LAYERS is None else sorted(LAYERS)} "
-      f"({'check' if CHECK else 'replace'}, PDL {PDL}, end {END}, plans {_plan_names(PLAN_FILE)})", flush=True)
+      f"({'check' if CHECK else 'replace'}, PDL {PDL}, end mhc_pre at T {[t for t in TOKENS if _fused_at(t)] or 'none'}, "
+      f"plans {_plan_names(PLAN_FILE)})", flush=True)

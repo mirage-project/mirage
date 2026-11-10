@@ -124,6 +124,7 @@ def main():
     ap.add_argument("--gpus", type=int, default=0, help="GPUs of the layer (default --tp): GPU r holds TP shard r of --tp, the "
                     "all-reduce adds these GPUs' partial sums (fewer than --tp: a test of the mechanism on fewer GPUs)")
     ap.add_argument("--o-parts", type=int, default=ksl.O_PARTS, help="o_proj's K parts")
+    ap.add_argument("--post-only", action="store_true", help="the layer ends at the attention's mHC post (R' alone)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--iters", type=int, default=0, help="Sinkhorn iterations (default: the config's)")
     ap.add_argument("--reps", type=int, default=20)
@@ -217,7 +218,8 @@ def main():
 
     mpk = StaticMegakernel(num_gpus=n)
     grids = ksl.build_graph(mpk, ts[0], {"rms_eps": eps, "hc_eps": hc_eps, "norm_eps": eps, "iters": iters,
-                                         "o_parts": args.o_parts}, {"draft": NV, "requests": RQ} if NV else None)
+                                         "o_parts": args.o_parts, "post_only": args.post_only},
+                            {"draft": NV, "requests": RQ} if NV else None)
     if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the layer's GEMM weights into L2 at its start (core.cuh kernel_begin)
         mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
     os.makedirs(args.out, exist_ok=True)
@@ -328,28 +330,33 @@ def main():
     outs = [{k: ts[r][k].cpu() for k in keys} for r in range(n)]
     R_ref = dfd.hc_post_ref(dfd.tp_sum(o), R, post_a, comb_a)
     R_k = outs[0]["R_out"].view(T, HC, H)
-    x_ref, post_f, comb_f = ffn(R_k)
-    torch.save({"outs": outs[0], "x_ref": x_ref, "ffn_norm": ts[0]["ffn_norm"].cpu(), "R_ref": R_ref},
-               os.path.join(args.out, "outputs.pt"))
     same_gpus = all(torch.equal(outs[r][k], outs[0][k]) for r in range(1, n) for k in keys)
     eqR = (R_k.view(torch.int16) == R_ref.view(torch.int16)).float().mean().item()
-    eqx = (outs[0]["x_ffn"].view(torch.int16) == x_ref.view(torch.int16)).float().mean().item()
-    e = {"R": relrms(R_k, R_ref), "x_ffn": relrms(outs[0]["x_ffn"], x_ref),
-         "h_post": relrms(outs[0]["h_post_out"], post_f), "h_res": relrms(outs[0]["h_res_out"], comb_f)}
-    print(f"  boundary (from the kernel's partial sums): R' relRMS {e['R']:.2e} (bit-equal {100 * eqR:.3f}%) | "
-          f"x_ffn relRMS {e['x_ffn']:.2e} (bit-equal {100 * eqx:.3f}%) | h_post {e['h_post']:.2e} | h_res {e['h_res']:.2e} | "
-          f"every GPU's outputs equal: {same_gpus}")
     outs_ref = [x["out"].float() for x in refs]
     if NV:   # the idle rows: o_proj of o = 0
         outs_ref = [torch.cat([v, torch.zeros(T - NL, H)]) for v in outs_ref]
     R_e2e = dfd.hc_post_ref(dfd.tp_sum(outs_ref), R, post_a, comb_a)
-    x_e2e, post_e2e, _ = ffn(R_e2e)
-    ee = {"R' - R": relrms(R_k.float() - R.float(), R_e2e.float() - R.float()), "x_ffn": relrms(outs[0]["x_ffn"], x_e2e),
-          "h_post": relrms(outs[0]["h_post_out"], post_e2e)}
-    print("  end to end (the reference's partial sums, then the boundary): " +
-          " | ".join(f"{k} {x:.2e}" for k, x in ee.items()))
-    ok = ok and same_gpus and e["R"] < 1e-3 and e["x_ffn"] < 1e-2 and e["h_post"] < 1e-4 and e["h_res"] < 1e-4 and \
-        ee["x_ffn"] < 3e-2
+    if args.post_only:
+        eR, eR2 = relrms(R_k, R_ref), relrms(R_k.float() - R.float(), R_e2e.float() - R.float())
+        print(f"  boundary (post only): R' relRMS {eR:.2e} (bit-equal {100 * eqR:.3f}%) | end to end R' - R {eR2:.2e}")
+        ok = ok and same_gpus and eR < 1e-3 and eR2 < 3e-2
+    else:
+        x_ref, post_f, comb_f = ffn(R_k)
+        torch.save({"outs": outs[0], "x_ref": x_ref, "ffn_norm": ts[0]["ffn_norm"].cpu(), "R_ref": R_ref},
+                   os.path.join(args.out, "outputs.pt"))
+        eqx = (outs[0]["x_ffn"].view(torch.int16) == x_ref.view(torch.int16)).float().mean().item()
+        e = {"R": relrms(R_k, R_ref), "x_ffn": relrms(outs[0]["x_ffn"], x_ref),
+             "h_post": relrms(outs[0]["h_post_out"], post_f), "h_res": relrms(outs[0]["h_res_out"], comb_f)}
+        print(f"  boundary (from the kernel's partial sums): R' relRMS {e['R']:.2e} (bit-equal {100 * eqR:.3f}%) | "
+              f"x_ffn relRMS {e['x_ffn']:.2e} (bit-equal {100 * eqx:.3f}%) | h_post {e['h_post']:.2e} | h_res {e['h_res']:.2e} | "
+              f"every GPU's outputs equal: {same_gpus}")
+        x_e2e, post_e2e, _ = ffn(R_e2e)
+        ee = {"R' - R": relrms(R_k.float() - R.float(), R_e2e.float() - R.float()), "x_ffn": relrms(outs[0]["x_ffn"], x_e2e),
+              "h_post": relrms(outs[0]["h_post_out"], post_e2e)}
+        print("  end to end (the reference's partial sums, then the boundary): " +
+              " | ".join(f"{k} {x:.2e}" for k, x in ee.items()))
+        ok = ok and same_gpus and e["R"] < 1e-3 and e["x_ffn"] < 1e-2 and e["h_post"] < 1e-4 and e["h_res"] < 1e-4 and \
+            ee["x_ffn"] < 3e-2
     if not ok:
         print("CHECK FAILED: no timing")
         sk.finalize()

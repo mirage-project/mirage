@@ -57,6 +57,8 @@ TOKENS = sorted({int(x) for x in os.environ.get("KDA_STATIC_TOKENS", "8").split(
                                                                                                       # a decode step of n rows
                                                                                                       # runs the smallest T >= n
 assert TOKENS and all(t in (8, 16, 32, 64) for t in TOKENS), f"KDA_STATIC_TOKENS {TOKENS}: of 8, 16, 32, 64"
+POST_ONLY = (64,)   # the T whose layers end at the attention's mHC post (R' alone; SGLang runs the FFN's mHC pre): the faster
+                    # end there end to end (nsys step periods, bs 64, prompt 256)
 _STEP_KEYS = itertools.count(1)
 
 
@@ -153,7 +155,8 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 sts, svs, first = {}, {}, None
                 for tok in TOKENS:   # one layer per T, the weights shared
                     st = StaticKDA(m.layer_idx, self.server_args.model_path, rank, tp, cache.conv[0], cache.temporal, OUT,
-                                   _fused_args(lay, group), pdl=PDL, plan=PLAN[tok], tokens=tok,
+                                   dict(_fused_args(lay, group), post_only=tok in POST_ONLY), pdl=PDL,
+                                   plan=None if tok in POST_ONLY else PLAN[tok], tokens=tok,
                                    weights=None if first is None else first.t)
                     first = first or st
                     st.cache = cache
@@ -252,6 +255,11 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
         else:
             x_ffn, R2, hp2, hr2 = st.run_fused(hidden_states, R, hp, hr, idx, step_key=_step_key(fb))
         stream_of(fb).write(R2)
+        if x_ffn is None:   # the layer ended at the mHC post: SGLang's FFN mHC pre and norm on R'
+            nm = self.post_attention_layernorm
+            x_ffn, hr2, hp2, norm_fused = mhc.hc_ffn_pre(R2, nm.weight.data, nm.variance_epsilon)
+            if not norm_fused and x_ffn.shape[0] != 0:
+                x_ffn = nm(x_ffn)
         mhc.h_post, mhc.h_res = hp2, hr2
         if CHECK:
             torch.cuda.synchronize()

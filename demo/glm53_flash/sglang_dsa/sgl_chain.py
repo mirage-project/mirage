@@ -24,12 +24,12 @@ GSM = os.environ.get("GSM8K_TEST_JSONL", "gsm8k_test.jsonl")   # GSM8K's test.js
 BOOT = {"DSA_STATIC_ROOT": ROOT, "MIRAGE_ROOT": ROOT, "PYTHONPATH": os.path.join(HERE, "boot"),
         **({"LD_LIBRARY_PATH": Z3} if Z3 else {})}
 # the static layers: every DSA and KDA layer to the FFN's input (dsa_static_hook, kda_static_hook); every MoE layer
-# (moe_static_hook) with its end in the kernel (the all-reduce and the FFN's mHC post: mhc) and the next layer's attention mHC
-# pre (mhc_pre); the MoE layers' own expert copies need the small KV pool (MTT)
+# (moe_static_hook) with its end in the kernel (the all-reduce and the FFN's mHC post: mhc; at T = 16 / 32 also the next
+# layer's attention mHC pre: mhc_pre); the MoE layers' own expert copies need the small KV pool (MTT)
 ATTN = {**BOOT, "DSA_STATIC_LAYERS": "all", "DSA_STATIC_CHECK": "0", "KDA_STATIC_LAYERS": "all", "KDA_STATIC_ROOT": ROOT}
-MOE = {"MOE_STATIC_LAYERS": "all", "MOE_STATIC_ROOT": ROOT, "MOE_STATIC_END": "mhc", "MOE_STATIC_CHECK": "0"}
+MOE = {"MOE_STATIC_LAYERS": "all", "MOE_STATIC_ROOT": ROOT, "MOE_STATIC_CHECK": "0"}
 MOE_ONLY = {**BOOT, **MOE}
-ALL3P = {**ATTN, **MOE, "MOE_STATIC_END": "mhc_pre"}
+ALL3P = {**ATTN, **MOE}
 PF = {"STATIC_L2_PREFETCH_MB": "16"}   # each layer's first 16 MB of GEMM weights into L2 at its start (core.cuh kernel_begin)
 CHECK = {"DSA_STATIC_CHECK": "1", "KDA_STATIC_CHECK": "1"}
 # the layers of each T next to the T = 8 ones: a decode step of T rows (bs T) runs them
@@ -94,8 +94,8 @@ KEYS = ("decode step", "output ", "Error", "error:", "Traceback", "replaces SGLa
         "PASS", "FAIL")
 
 # every layer kind on the best plan measured (one GPU): the DSA layers on the searched plans of their graph by context
-# (dsa_fused_plan_long.json: contexts 3346-3600, 64.1 vs round robin 71.8 us; _short: 20-275, 60.8 vs 62.9), the MoE with
-# the next layer's attention pre on its searched plan (moe_plan_mhc_pre.json: 78.9 vs 80.2); the KDA layers' round robin
+# (dsa_fused_plan_long.json: contexts 3346-3600, 64.1 vs round robin 71.8 us; _short: 20-275, 60.8 vs 62.9), the MoE on
+# the searched plan of its T's end (MOE_END) where one exists (T = 8 ends at mhc: round robin); the KDA layers' round robin
 # (30.3; the searched 31.9). The T = 16 / 32 layers: their own graphs' plan files where they exist (a graph whose searched plan
 # did not beat round robin has none). A run that names a plan keeps it.
 DSA_PLAN = {8: ("dsa_fused_plan_long.json", "dsa_fused_plan_short.json"),
@@ -107,6 +107,7 @@ KDA_PLAN = {16: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan16.js
             64: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan64.json")}
 MOE_PLAN = {(t, end): os.path.join(os.path.dirname(HERE), "sglang_moe", f"moe_plan{'' if t == 8 else t}_{end}.json")
             for t in (8, 16, 32, 64) for end in ("mhc", "mhc_pre")}
+MOE_END = {8: "mhc", 16: "mhc_pre", 32: "mhc_pre", 64: "mhc"}   # the MoE layers' end by T (moe_static_hook.END_PRE_TOKENS)
 
 
 def _best_plans(name, env, args):
@@ -126,7 +127,7 @@ def _best_plans(name, env, args):
         if env.get("KDA_STATIC_LAYERS") and has("KDA", t) and t != 8 and f"KDA_STATIC_PLAN{key}" not in env and \
                 os.path.exists(kda):
             env[f"KDA_STATIC_PLAN{key}"] = kda
-        moe = MOE_PLAN.get((t, env.get("MOE_STATIC_END")))
+        moe = MOE_PLAN.get((t, MOE_END[t]))
         if moe and env.get("MOE_STATIC_LAYERS") and has("MOE", t) and f"MOE_STATIC_PLAN{key}" not in env and \
                 os.path.exists(moe):
             env[f"MOE_STATIC_PLAN{key}"] = moe

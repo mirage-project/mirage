@@ -54,6 +54,8 @@ TOKENS = sorted({int(x) for x in os.environ.get("DSA_STATIC_TOKENS", "8").split(
                                                                                                       # a decode step of n rows
                                                                                                       # runs the smallest T >= n
 assert TOKENS and all(t in (8, 16, 32, 64) for t in TOKENS), f"DSA_STATIC_TOKENS {TOKENS}: of 8, 16, 32, 64"
+POST_ONLY = (64,)   # the T whose layers end at the attention's mHC post (R' alone; SGLang runs the FFN's mHC pre): the faster
+                    # end there end to end (nsys step periods, bs 64, prompt 256)
 os.environ.setdefault("MIRAGE_STATIC_BUILD_CACHE",
                       os.environ.get("DSA_STATIC_BUILD_CACHE", os.path.join(ROOT, "build", "static_build_cache_dsa")))
 OUT = os.environ.get("DSA_STATIC_OUT", os.path.join(ROOT, "build", "sgl_static_dsa"))
@@ -109,8 +111,10 @@ def _init_cuda_graphs(self, *args, **kwargs):
                     raise RuntimeError(f"layer {m.layer_id}: no Glm5NextDecoderLayer holds it")
                 sts, svs, first = {}, {}, None
                 for tok in TOKENS:   # one layer per T, the checkpoint tensors shared
-                    st = StaticDSA(m.layer_id, self.server_args.model_path, rank, tp, kv, r2t, OUT, idx, _fused_args(lay, group),
-                                   pdl=PDL, fused_plan=FUSED_PLAN[tok], tokens=tok, weights=None if first is None else first.w)
+                    st = StaticDSA(m.layer_id, self.server_args.model_path, rank, tp, kv, r2t, OUT, idx,
+                                   dict(_fused_args(lay, group), post_only=tok in POST_ONLY), pdl=PDL,
+                                   fused_plan="rr" if tok in POST_ONLY else FUSED_PLAN[tok], tokens=tok,
+                                   weights=None if first is None else first.w)
                     first = first or st
                     sts[tok] = st
                     if draft:   # MTP: the verify layer of tok / 8 requests' draft tokens (bs = tok / 8)
@@ -206,6 +210,11 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
         else:
             x_ffn, R2, hp2, hr2 = st.run_fused(hidden_states, R, hp, hr, seq_lens, rpi, _dsa_meta(), step_key=_step_key(fb))
         stream_of(fb).write(R2)
+        if x_ffn is None:   # the layer ended at the mHC post: SGLang's FFN mHC pre and norm on R'
+            nm = self.post_attention_layernorm
+            x_ffn, hr2, hp2, norm_fused = mhc.hc_ffn_pre(R2, nm.weight.data, nm.variance_epsilon)
+            if not norm_fused and x_ffn.shape[0] != 0:
+                x_ffn = nm(x_ffn)
         mhc.h_post, mhc.h_res = hp2, hr2
         if CHECK:
             torch.cuda.synchronize()

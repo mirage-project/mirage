@@ -149,12 +149,15 @@ def build_graph(mpk, t: dict, fused: dict, verify: dict = None) -> dict:
     mpk.gemm_tile_layer(input=o, weight=w_o, output=o_fx, combine="add")
     sent = nt((T, H), bfloat16, "o_sent")
     mpk.allreduce_send_layer(input=o_fx, output=sent)
-    mix = nt((T, HC_MIX_STRIDE), float32, "ffn_hc_mix")
-    mpk.hc_post_mix_layer(sent=sent, residual=a("R_in"), coef=(a("h_post_in"), a("h_res_in")), fn=a("hc_ffn_fn"),
-                          output=a("R_out"), mix=mix)
-    mpk.hc_pre_layer(mix=mix, residual=a("R_out"), hc_small=a("hc_ffn_small"), gamma=a("ffn_norm"), output=a("x_ffn"),
-                     rms_eps=fused["rms_eps"], hc_eps=fused["hc_eps"], norm_eps=fused["norm_eps"],
-                     sinkhorn_iters=fused["iters"], export=(a("h_post_out"), a("h_res_out")))
+    if fused.get("post_only"):   # the layer ends at the attention's mHC post (R'); SGLang runs the FFN's mHC pre
+        mpk.hc_post_layer(sent=sent, residual=a("R_in"), output=a("R_out"), coef=(a("h_post_in"), a("h_res_in")))
+    else:
+        mix = nt((T, HC_MIX_STRIDE), float32, "ffn_hc_mix")
+        mpk.hc_post_mix_layer(sent=sent, residual=a("R_in"), coef=(a("h_post_in"), a("h_res_in")), fn=a("hc_ffn_fn"),
+                              output=a("R_out"), mix=mix)
+        mpk.hc_pre_layer(mix=mix, residual=a("R_out"), hc_small=a("hc_ffn_small"), gamma=a("ffn_norm"), output=a("x_ffn"),
+                         rms_eps=fused["rms_eps"], hc_eps=fused["hc_eps"], norm_eps=fused["norm_eps"],
+                         sinkhorn_iters=fused["iters"], export=(a("h_post_out"), a("h_res_out")))
     gemms = [n for n in compiler.graph_nodes(mpk) if n.name == "gemm_tile"]
     return {gemms[0].graph_idx: (gemms[0].grid[0], 2, 1), gemms[1].graph_idx: (gemms[1].grid[0], fused["o_parts"], 1)}
 
@@ -180,9 +183,11 @@ class StaticKDA:
         self.T = tokens if tokens is not None else TOKENS
         self.requests = int(verify.get("requests", 1)) if verify is not None else 1
         self.t = layer_tensors(layer, model_path, rank, tp, conv, temporal, dev, fused, verify, weights, tokens=self.T)
+        self.post_only = bool(fused.get("post_only")) and verify is None   # fused["post_only"]: run_fused returns R' alone
         mpk = StaticMegakernel(num_gpus=tp)
         grids = build_graph(mpk, self.t, {"rms_eps": fused["rms_eps"], "hc_eps": fused["hc_eps"],
-                                          "norm_eps": fused["norm_eps"], "iters": fused["iters"], "o_parts": O_PARTS}, verify)
+                                          "norm_eps": fused["norm_eps"], "iters": fused["iters"], "o_parts": O_PARTS,
+                                          "post_only": self.post_only}, verify)
         if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the layer's GEMM weights into L2 at its start (core.cuh kernel_begin)
             mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
         if plan is None:
@@ -191,7 +196,8 @@ class StaticKDA:
             plan = compiler.plan_from_file(plan)
         plan = dict(plan, lists=plan["lists"] * tp)   # every rank: the same lists (no node splits its rows over the GPUs)
         out_dir = os.path.join(out_root, f"rank{rank}",
-                               f"layer{layer}{f'_t{self.T}' if self.T != 8 else ''}{'_verify' if verify is not None else ''}")
+                               f"layer{layer}{f'_t{self.T}' if self.T != 8 else ''}{'_verify' if verify is not None else ''}"
+                               f"{'_post' if self.post_only else ''}")
         self.paths, self.info = compiler.compile_plan(mpk, plan, os.path.join(out_dir, "schedules"))
         self.mpk = mpk   # the graph (cost_records.records_of_run)
         flags = ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]
@@ -252,6 +258,8 @@ class StaticKDA:
         self.inputs = (f"{n} rows; bound: {', '.join(k for k, v in binds.items() if v) or 'none'}; "
                        f"copied: {', '.join(k for k, v in binds.items() if not v) or 'none'}")
         self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
+        if self.post_only:
+            return None, self.t["R_out"][:n], None, None
         return self.t["x_ffn"][:n], self.t["R_out"][:n], self.t["h_post_out"][:n], self.t["h_res_out"][:n]
 
     def run_verify(self, hidden_states, residual, h_post, h_res, slot: torch.Tensor, icw_row: torch.Tensor):

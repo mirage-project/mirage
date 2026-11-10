@@ -176,7 +176,8 @@ def layer_inputs(args, cfg: dict):
     hc_small = torch.zeros(32, dtype=torch.float32)
     hc_small[:HC * (HC + 2)], hc_small[HC * (HC + 2):HC * (HC + 2) + 3] = m["hc_ffn_base"], m["hc_ffn_scale"]
     fused = {"rms_eps": eps, "hc_eps": hc_eps, "norm_eps": eps, "iters": iters, "verify": bool(getattr(args, "verify", 0)),
-             "requests": T // 8}   # --verify: T / 8 requests of 8 rows (live_rows: N tokens each, the rest idle)
+             "requests": T // 8,   # --verify: T / 8 requests of 8 rows (live_rows: N tokens each, the rest idle)
+             "post_only": bool(getattr(args, "post_only", False))}
     return {"m": m, "R": R, "x_attn": x_attn, "post_a": post_a, "comb_a": comb_a, "hc_small": hc_small, "fused": fused}
 
 
@@ -299,9 +300,14 @@ def check_boundary(args, cfg: dict, inp: dict, outs, o, o_node, o_e2e) -> bool:
                                 eps, hc_eps, eps, iters)
     R_ref = hc_post_ref(tp_sum(o), R, post_a, comb_a)
     R_k = outs[0]["R_out"].view(T, HC, H)
-    x_ref, post_f, comb_f = ffn(R_k)
     same_gpus = all(torch.equal(outs[r][k], outs[0][k]) for r in range(1, tp) for k in outs[0])
     eqR = (R_k.view(torch.int16) == R_ref.view(torch.int16)).float().mean().item()
+    if inp["fused"]["post_only"]:
+        R_e2e = hc_post_ref(tp_sum(o_e2e), R, post_a, comb_a)
+        eR, eR2 = relrms(R_k, R_ref), relrms(R_k[live].float() - R[live].float(), R_e2e[live].float() - R[live].float())
+        print(f"  boundary (post only): R' relRMS {eR:.2e} (bit-equal {100 * eqR:.3f}%) | end to end R' - R {eR2:.2e}")
+        return same_gpus and eR < 1e-3 and max(o_node) < 1e-3
+    x_ref, post_f, comb_f = ffn(R_k)
     eqx = (outs[0]["x_ffn"].view(torch.int16) == x_ref.view(torch.int16)).float().mean().item()
     e = {"R": relrms(R_k, R_ref), "x_ffn": relrms(outs[0]["x_ffn"], x_ref),
          "h_post": relrms(outs[0]["h_post_out"], post_f), "h_res": relrms(outs[0]["h_res_out"], comb_f)}
@@ -331,6 +337,7 @@ def add_args(ap):
     ap.add_argument("--seq-lens", type=int, nargs="+", default=[20, 60, 300, 2051, 2052, 4100, 6001, 8192],
                     help="the T requests' context lengths (fewer: repeated with + 1 up to T)")
     ap.add_argument("--splits", type=int, default=18)
+    ap.add_argument("--post-only", action="store_true", help="the layer ends at the attention's mHC post (R' alone)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--iters", type=int, default=0, help="Sinkhorn iterations of the mHC pre steps (default: the config's; "
                     "a timing experiment)")

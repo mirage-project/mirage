@@ -145,15 +145,17 @@ class StaticDSA:
                        "x_ffn": torch.zeros(T, demo.H, dtype=torch.bfloat16, device=dev),
                        "h_post_out": torch.zeros(T, 4, dtype=torch.float32, device=dev),
                        "h_res_out": torch.zeros(T, 16, dtype=torch.float32, device=dev)})
+        self.post_only = bool(fused.get("post_only")) and not verify   # fused["post_only"]: run_fused returns R' alone
         mpk = StaticMegakernel(num_gpus=tp)
         grids = dsa_layer.build_graph(mpk, self.t, 1, SPLITS.get(T, 18), eps, 1e-6, {
             "rms_eps": fused["rms_eps"], "hc_eps": fused["hc_eps"], "norm_eps": fused["norm_eps"], "iters": fused["iters"],
-            "verify": bool(verify), "requests": self.requests})
+            "verify": bool(verify), "requests": self.requests, "post_only": self.post_only})
         if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the layer's GEMM weights into L2 at its start (core.cuh kernel_begin)
             mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
         self.plan = fused_plan or "rr"
         plan = demo.round_robin_plan(mpk, grids) if self.plan == "rr" else compiler.plan_from_file(self.plan)
-        out_dir = os.path.join(out_root, f"rank{rank}", f"layer{layer}{f'_t{T}' if T != 8 else ''}{'_verify' if verify else ''}")
+        out_dir = os.path.join(out_root, f"rank{rank}", f"layer{layer}{f'_t{T}' if T != 8 else ''}{'_verify' if verify else ''}"
+                               f"{'_post' if self.post_only else ''}")
         flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"]
         self.verify = int(verify)
         self.group = fused["group"]
@@ -319,4 +321,6 @@ class StaticDSA:
                     self._bind(name, self.t[name])
                     self.t[name].copy_(src[:T])
             self._launch(hidden_states, seq_lens, req_pool_indices, meta)
+        if self.post_only:
+            return None, self.t["R_out"][:n], None, None
         return self.t["x_ffn"][:n], self.t["R_out"][:n], self.t["h_post_out"][:n], self.t["h_res_out"][:n]

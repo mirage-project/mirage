@@ -237,12 +237,15 @@ def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float,
     mpk.scaled_gemm_tile_layer(input=vq, weight=a["w_o"], weight_scales=a["w_o_sf"], output=a["o"], combine="add")
     sent = nt((T, H), bfloat16, "o_sent")
     mpk.allreduce_send_layer(input=a["o"], output=sent)
-    mix = nt((T, HC_MIX_STRIDE), float32, "ffn_hc_mix")
-    mpk.hc_post_mix_layer(sent=sent, residual=a["R_in"], coef=(a["h_post_in"], a["h_res_in"]), fn=a["hc_ffn_fn"],
-                          output=a["R_out"], mix=mix)
-    mpk.hc_pre_layer(mix=mix, residual=a["R_out"], hc_small=a["hc_ffn_small"], gamma=a["ffn_norm"], output=a["x_ffn"],
-                     rms_eps=fused["rms_eps"], hc_eps=fused["hc_eps"], norm_eps=fused["norm_eps"],
-                     sinkhorn_iters=fused["iters"], export=(a["h_post_out"], a["h_res_out"]))
+    if fused.get("post_only"):   # the layer ends at the attention's mHC post (R'); SGLang runs the FFN's mHC pre
+        mpk.hc_post_layer(sent=sent, residual=a["R_in"], output=a["R_out"], coef=(a["h_post_in"], a["h_res_in"]))
+    else:
+        mix = nt((T, HC_MIX_STRIDE), float32, "ffn_hc_mix")
+        mpk.hc_post_mix_layer(sent=sent, residual=a["R_in"], coef=(a["h_post_in"], a["h_res_in"]), fn=a["hc_ffn_fn"],
+                              output=a["R_out"], mix=mix)
+        mpk.hc_pre_layer(mix=mix, residual=a["R_out"], hc_small=a["hc_ffn_small"], gamma=a["ffn_norm"], output=a["x_ffn"],
+                         rms_eps=fused["rms_eps"], hc_eps=fused["hc_eps"], norm_eps=fused["norm_eps"],
+                         sinkhorn_iters=fused["iters"], export=(a["h_post_out"], a["h_res_out"]))
     nodes = compiler.graph_nodes(mpk)
     sg = [n for n in nodes if n.name == "scaled_gemm_tile"]
     gt = [n for n in nodes if n.name == "gemm_tile"]

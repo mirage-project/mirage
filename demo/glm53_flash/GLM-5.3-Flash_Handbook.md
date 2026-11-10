@@ -21,7 +21,10 @@ This document covers:
   layer kinds are:
   - every DSA layer;
   - every KDA layer;
-  - every MoE layer, including the next layer's attention mHC pre at its end (`MOE_STATIC_END=mhc_pre`).
+  - every MoE layer; at T = 16 / 32 it also runs the next layer's attention mHC pre at its end (`END_PRE_TOKENS` in
+    `moe_static_hook.py`).
+  - At T = 64 the KDA and DSA layers end at the attention's mHC post and SGLang runs the FFN's mHC pre (`POST_ONLY` in
+    `kda_static_hook.py` / `dsa_static_hook.py`). These per-T ends are each T's faster one end to end.
 - **Metric**: the interval between consecutive replays of the forward CUDA graph (the period), median; every scenario is
   plain decode, so time per token = period.
   - Speedup = base ÷ all3ppf − 1.
@@ -122,7 +125,6 @@ python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md     
 | `DSA_STATIC_CHECK`, `MOE_STATIC_CHECK` | **Both default to 1; set them to 0 for performance runs**: in check mode the static layers are not used during CUDA graph capture |
 | `DSA/KDA/MOE_STATIC_TOKENS` | The T values to build, e.g. `8,16,32,64` |
 | `DSA_STATIC_FUSED_PLAN{,16,32,64}`, `KDA_STATIC_PLAN{,16,32,64}`, `MOE_STATIC_PLAN{,16,32,64}` | Plan file per T; unset: round robin |
-| `MOE_STATIC_END` | `mhc` or `mhc_pre` (the last layer is always `mhc`) |
 | `MOE_STATIC_ROWS` | Live row counts below their T that get a MoE build of their own, e.g. `1,2,4` (the chain sets bs for bs 1/2/4) |
 | `STATIC_L2_PREFETCH_MB` | L2 prefetch budget (MB) |
 | `KDA_STATIC_ROOT` | Required whenever `KDA_STATIC_LAYERS` is set |
