@@ -369,6 +369,14 @@ __device__ __forceinline__ int ceil_log2_bits(float x) {
   uint32_t const b = __float_as_uint(x);
   return (int)((b >> 23) & 0xFF) - 127 + ((b & 0x7FFFFF) != 0);
 }
+// x / s from r, the correctly rounded 1 / s: q + r (x - q s), the remainder
+// exact by the FMA, is the correctly rounded quotient (Markstein), in a few
+// instructions (__fdiv_rn per value made the T = 64 quantization loops
+// issue-bound)
+__device__ __forceinline__ float gq_div(float x, float s, float r) {
+  float const q = __fmul_rn(x, r);
+  return __fmaf_rn(r, __fmaf_rn(-q, s, x), q);
+}
 __device__ __forceinline__ uint8_t cvt_e4m3(float v) {
   uint16_t p;
   asm volatile("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;"

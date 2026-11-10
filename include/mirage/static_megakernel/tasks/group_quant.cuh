@@ -25,14 +25,6 @@ __host__ __device__ constexpr size_t zq32_bytes(int L) {
   return (size_t)T * L + (size_t)(L / 128) * T * 4;
 }
 
-// x / s from r, the correctly rounded 1 / s: q + r (x - q s), the remainder
-// exact by the FMA, is the correctly rounded quotient (Markstein), in a few
-// instructions: __fdiv_rn per value made the loop below issue-bound (T = 64)
-__device__ __forceinline__ float gq_div(float x, float s, float r) {
-  float const q = __fmul_rn(x, r);
-  return __fmaf_rn(r, __fmaf_rn(-q, s, x), q);
-}
-
 // ZOFF: the output's offset in the exchange region
 template <size_t ZOFF, int L>
 __device__ __forceinline__ void group_quant_task(G const &g,

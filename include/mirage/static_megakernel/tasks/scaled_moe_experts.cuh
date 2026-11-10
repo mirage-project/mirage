@@ -122,6 +122,8 @@ struct Slots {
   static constexpr bool SINGLE = 2 * NSLOT * KT2 >= 3 * NSM &&
                                  (LIVE * (K - SHARED) + SHARED) * MT13 <= NSM;
   static constexpr int PAIRC = CHQ + NSLOT, AMX = NSM * T / 2;
+  // the queue's order of the slots: many tokens first (order_slots)
+  static constexpr bool ORDER = T >= 32 && !SINGLE;
   static_assert(NE % 32 == 0 && NE <= 1024,
                 "scaled_moe_experts: build_table's 8 warps x 128 experts");
   // the routing table of this step, built on every SM by build_table (shared
@@ -223,12 +225,131 @@ __device__ __forceinline__ void h_first_tok(
   }
 }
 
+// T >= 32's h buffers ([64][T] fp32): column c of feature f, rotated by the
+// feature. Row-major, the 32 rows of a warp would hit few banks of shared
+// memory for each column (a row is 128 or 256 B); rotated they hit 32 different
+// ones.
+__device__ __forceinline__ int h_at(int f, int c) {
+  return f * T + ((c + f) & (T - 1));
+}
+
+// the T >= 32 epilogue's work on W tokens at once (W = 1: the loops' tails).
+// The loads come first and the stores last, so that the W chains of shuffles
+// and FP operations interleave: token after token, the warp stalled on each
+// chain. tok[j0 + 2 i] (i < W): the tokens; after a T-wide drain (wide) their
+// columns of h, else column j. amax of feature f's lane group into
+// red[rw][column]
+template <int W>
+__device__ __forceinline__ void hq_amax(float const *ha,
+                                        float const *acc,
+                                        float *red,
+                                        int const *tok,
+                                        bool wide,
+                                        int f,
+                                        int lane,
+                                        int rw,
+                                        int j0) {
+  float am[W];
+  int c[W];
+#pragma unroll
+  for (int i = 0; i < W; i++) {
+    c[i] = wide ? tok[j0 + 2 * i] : j0 + 2 * i;
+    am[i] = fmaxf(fabsf(ha[h_at(f, c[i])]), fabsf(acc[h_at(f, c[i])]));
+  }
+#pragma unroll
+  for (int d = 16; d > 0; d >>= 1) {
+#pragma unroll
+    for (int i = 0; i < W; i++) {
+      am[i] = fmaxf(am[i], __shfl_xor_sync(0xffffffffu, am[i], d));
+    }
+  }
+  if (lane == 0) {
+#pragma unroll
+    for (int i = 0; i < W; i++) {
+      red[rw * T + c[i]] = am[i];
+    }
+  }
+}
+
+// the scale from the two warps' amax, the e4m3 values of the two items, the
+// scale of the token (feature 0's thread)
+template <int W, int IR>
+__device__ __forceinline__ void hq_out(uint8_t *hq,
+                                       float *hs,
+                                       float const *ha,
+                                       float const *acc,
+                                       float const *red,
+                                       int const *tok,
+                                       bool wide,
+                                       int slot,
+                                       int kt2,
+                                       int f,
+                                       int w0,
+                                       int j0) {
+  constexpr int KT2 = IR / 128;
+  float a[W], b[W], r0[W], r1[W], sc[W];
+  int t[W];
+  uint8_t q0[W], q1[W];
+#pragma unroll
+  for (int i = 0; i < W; i++) {
+    t[i] = tok[j0 + 2 * i];
+    int const c = wide ? t[i] : j0 + 2 * i;
+    a[i] = ha[h_at(f, c)];
+    b[i] = acc[h_at(f, c)];
+    r0[i] = red[w0 * T + c];
+    r1[i] = red[(w0 + 1) * T + c];
+  }
+#pragma unroll
+  for (int i = 0; i < W; i++) {
+    sc[i] = fmaxf(fmaxf(r0[i], r1[i]), 1.0e-10f) * (1.0f / 448.0f);
+    float const rc = __frcp_rn(sc[i]);
+    q0[i] = cvt_e4m3_nv(gq_div(a[i], sc[i], rc));
+    q1[i] = cvt_e4m3_nv(gq_div(b[i], sc[i], rc));
+  }
+#pragma unroll
+  for (int i = 0; i < W; i++) {
+    uint8_t *const q = hq + ((size_t)slot * T + t[i]) * IR + kt2 * 128 + f;
+    q[0] = q0[i];
+    q[64] = q1[i];
+    if (f == 0) {
+      hs[((size_t)slot * T + t[i]) * KT2 + kt2] = sc[i];
+    }
+  }
+}
+
+// SiLU of W tokens of the row's gate (vl: local memory) and up rows
+template <int W, int LIMIT>
+__device__ __forceinline__ void h_silu_tok(float *dst,
+                                           float const *up,
+                                           float const *vl,
+                                           int const *tok,
+                                           int row,
+                                           int k) {
+  float g[W], u[W], h[W];
+  int at[W];
+#pragma unroll
+  for (int i = 0; i < W; i++) {
+    int const t = tok[k + i];
+    at[i] = h_at(row, t);
+    g[i] = vl[t];
+    u[i] = up[at[i]];
+  }
+#pragma unroll
+  for (int i = 0; i < W; i++) {
+    h[i] = silu2_limit<LIMIT>(g[i], u[i]);
+  }
+#pragma unroll
+  for (int i = 0; i < W; i++) {
+    dst[at[i]] = h[i];
+  }
+}
+
 // after the second item of the group kt2 (features 128 kt2 + 64 ..): per
 // token the amax over the group's 128 features (ha and this item's h), the
 // scale, the e4m3 values (h_q [NSLOT x T][IR], its scales hs [NSLOT][T][KT2]);
 // then thread 64 adds 2 to CHQ[slot] (release; W2 waits for MT13). The other
 // tokens' entries are not written (W2 reads none of them). H: acc holds this
-// item's h ([64][T], T = 64's epilogue), not its gate and up rows.
+// item's h ([64][T], T >= 32's epilogue), not its gate and up rows.
 template <int IR, int LIMIT, bool H = false>
 __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
                                                   float *hs,
@@ -243,37 +364,51 @@ __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
                                                   bool wide) {
   constexpr int KT2 = IR / 128;
   __shared__ float red_s[4 * T]; // [warp of the epilogue][token]
-  int const lane = threadIdx.x & 31, f = row & 63, n = wide ? T : nt;
-  auto hb = [&](int j) { // this item's h of feature f, column j
-    if constexpr (H) {
-      return acc[f * T + j];
-    } else {
-      return h_of<LIMIT>(acc, f, j);
+  int const lane = threadIdx.x & 31, f = row & 63;
+  if constexpr (H) { // the slot's tokens, also after a T-wide drain
+    int j = row >> 6;
+    for (; j + 6 < nt; j += 8) {
+      hq_amax<4>(ha, acc, red_s, tok, wide, f, lane, row >> 5, j);
     }
-  };
+    for (; j < nt; j += 2) {
+      hq_amax<1>(ha, acc, red_s, tok, wide, f, lane, row >> 5, j);
+    }
+    asm volatile("bar.sync 1, 128;" ::: "memory");
+    int const w0 = (row >> 6) * 2; // its two warps
+    j = row >> 6;
+    for (; j + 6 < nt; j += 8) {
+      hq_out<4, IR>(hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j);
+    }
+    for (; j < nt; j += 2) {
+      hq_out<1, IR>(hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j);
+    }
+  } else {
+    int const n = wide ? T : nt;
 #pragma unroll 1
-  for (int j = row >> 6; j < n; j += 2) { // warp-uniform: row >> 6
-    float am = fmaxf(fabsf(ha[f * T + j]), fabsf(hb(j)));
+    for (int j = row >> 6; j < n; j += 2) { // warp-uniform: row >> 6
+      float am = fmaxf(fabsf(ha[f * T + j]), fabsf(h_of<LIMIT>(acc, f, j)));
 #pragma unroll
-    for (int d = 16; d > 0; d >>= 1) {
-      am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, d));
+      for (int d = 16; d > 0; d >>= 1) {
+        am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, d));
+      }
+      if (lane == 0) {
+        red_s[(row >> 5) * T + j] = am;
+      }
     }
-    if (lane == 0) {
-      red_s[(row >> 5) * T + j] = am;
-    }
-  }
-  asm volatile("bar.sync 1, 128;" ::: "memory");
+    asm volatile("bar.sync 1, 128;" ::: "memory");
 #pragma unroll 1
-  for (int j = row >> 6; j < n; j += 2) {
-    int const t = wide ? j : tok[j], w0 = (row >> 6) * 2; // its two warps
-    float const sc =
-        fmaxf(fmaxf(red_s[w0 * T + j], red_s[(w0 + 1) * T + j]), 1.0e-10f) *
-        (1.0f / 448.0f);
-    uint8_t *const q = hq + ((size_t)slot * T + t) * IR + kt2 * 128 + f;
-    q[0] = cvt_e4m3(__fdiv_rn(ha[f * T + j], sc));
-    q[64] = cvt_e4m3(__fdiv_rn(hb(j), sc));
-    if (f == 0) {
-      hs[((size_t)slot * T + t) * KT2 + kt2] = sc;
+    for (int j = row >> 6; j < n; j += 2) {
+      int const t = wide ? j : tok[j], w0 = (row >> 6) * 2; // its two warps
+      float const sc =
+          fmaxf(fmaxf(red_s[w0 * T + j], red_s[(w0 + 1) * T + j]), 1.0e-10f) *
+          (1.0f / 448.0f);
+      float const rc = __frcp_rn(sc);
+      uint8_t *const q = hq + ((size_t)slot * T + t) * IR + kt2 * 128 + f;
+      q[0] = cvt_e4m3(gq_div(ha[f * T + j], sc, rc));
+      q[64] = cvt_e4m3(gq_div(h_of<LIMIT>(acc, f, j), sc, rc));
+      if (f == 0) {
+        hs[((size_t)slot * T + t) * KT2 + kt2] = sc;
+      }
     }
   }
   asm volatile("bar.sync 1, 128;" ::: "memory");
@@ -438,34 +573,6 @@ __device__ __forceinline__ void drain_w2_promoted(
   }
 }
 
-// drain_w2_promoted with the h_q scales read from the staged buffer sbuf
-// ([T][KT2] fp32, w2_stage_scales) instead of registers (T = 64: sh[2][T] in
-// registers pushed the kernel past 255 registers)
-template <int KT2>
-__device__ __forceinline__ void drain_w2_promoted_s(
-    uint32_t tb, int a, float const *sw, float const *sbuf, float *v) {
-  uint32_t const lanes = (uint32_t)(((threadIdx.x >> 5) & 3) * 32) << 16;
-  float p[T];
-  tmem_ld_cols_nw<T>(tb + T * a + lanes, v);
-  if constexpr (KT2 == 2) {
-    tmem_ld_cols_nw<T>(tb + T * a + ACC_STAGES * T + lanes, p);
-  }
-  tmem_keep_cols<T>(v);
-  if constexpr (KT2 == 2) {
-    tmem_keep_cols<T>(p);
-  }
-#pragma unroll
-  for (int t = 0; t < T; t++) {
-    v[t] *= sw[0] * sbuf[t * KT2];
-  }
-  if constexpr (KT2 == 2) {
-#pragma unroll
-    for (int t = 0; t < T; t++) {
-      v[t] = fmaf(sw[1] * sbuf[t * KT2 + 1], p[t], v[t]);
-    }
-  }
-}
-
 // ---- shared memory after the ring (offsets from the dynamic base) ----
 // Keep the offsets from moe_experts.cuh's ExpertSmem layout.
 // The areas for K3 scale chunks stay unused to preserve that layout.
@@ -573,6 +680,58 @@ __device__ __forceinline__ void w2_stage_scales(
                ((size_t)ex * OT2 + (ot0 & ~1)) * KT2,
            16,
            f);
+}
+
+// the slots' order in the queue (RES::ORDER, after build_table: fill() is free
+// again): the shared experts, then the slots of more than 8 tokens, then the
+// others, each group in slot order: fill()[place] = slot. The slots of many
+// tokens are the slowest W13 items and W2 tiles; left in slot order they end
+// the SMs far apart.
+template <class RES>
+__device__ __forceinline__ void order_slots() {
+  constexpr int PER = (RES::NSLOT + 255) / 256, SH = RES::SHARED;
+  int const *const ntok_s = RES::ntok();
+  int *const ord_s = RES::fill();
+  int const tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  int const n_live = s_ints[1], n0 = n_live - SH;
+  int cnt = 0;
+  bool many[PER];
+#pragma unroll
+  for (int q = 0; q < PER; q++) {
+    int const i = tid * PER + q;
+    many[q] = i < n0 && ntok_s[i] > 8;
+    cnt += many[q] ? 1 : 0;
+  }
+  int inc = cnt; // the warp's scan of the threads' counts
+#pragma unroll
+  for (int o = 1; o < 32; o <<= 1) {
+    int const u = __shfl_up_sync(0xffffffffu, inc, o);
+    if (lane >= o) {
+      inc += u;
+    }
+  }
+  if (lane == 31) {
+    s_ints[24 + warp] = inc;
+  }
+  __syncthreads();
+  int before = inc - cnt, tot = 0; // before this thread's slots; all
+#pragma unroll
+  for (int w_ = 0; w_ < 8; w_++) {
+    before += w_ < warp ? s_ints[24 + w_] : 0;
+    tot += s_ints[24 + w_];
+  }
+  int seen = 0;
+#pragma unroll
+  for (int q = 0; q < PER; q++) {
+    int const i = tid * PER + q;
+    if (i < n_live) {
+      ord_s[i >= n0   ? i - n0
+            : many[q] ? SH + before + seen
+                      : SH + tot + i - before - seen] = i;
+      seen += many[q] ? 1 : 0;
+    }
+  }
+  __syncthreads();
 }
 
 // the box of tensor map d at (c0, c1, c2) into L2 (fire and forget)
@@ -766,12 +925,18 @@ __device__ __forceinline__ void
             t1 = (n2 - n4 < NSM) ? n2 - n4 : NSM, off1 = n2 - t1,
             n2e = (off1 + 1) / 2;
   int const nentries = n13 + n2e + t1;
-  // W2 tile q of the queue order: the shared experts' tiles first, as their
-  // W13 items (all T tokens: the slowest tiles, not the last in the queue)
-  int const w2rot = (n_live - RES::SHARED) * OT2;
-  auto w2_tile = [&](int q) { // q + w2rot mod n2 (a multiple of OT2 apart)
-    int const x = q + w2rot;
-    return x >= n2 ? x - n2 : x;
+  // the slot at place p of the queue: order_slots', else the shared experts
+  // first (all T tokens: the slowest), the others in order
+  auto slot_at = [&](int p) {
+    if constexpr (RES::ORDER) {
+      return RES::fill()[p];
+    } else {
+      int const x = p + n_live - RES::SHARED;
+      return x >= n_live ? x - n_live : x;
+    }
+  };
+  auto w2_tile = [&](int q) { // W2 tile q of the queue order
+    return slot_at(q / OT2) * OT2 + q % OT2;
   };
   float *acc_s = reinterpret_cast<float *>(rt_sm() + SM_::OFF_ACC);
   auto entry_of =
@@ -781,7 +946,7 @@ __device__ __forceinline__ void
                          // slowest items) first, then the others in order (as
                          // the W2 tiles that wait for them)
           e.kind = QE_W13;
-          e.a = (idx / (MT13 / W13_PAIR) + n_live - RES::SHARED) % n_live;
+          e.a = slot_at(idx / (MT13 / W13_PAIR));
           e.b = idx % (MT13 / W13_PAIR) * W13_PAIR;
         } else if (idx < n13 + n2e) {
           int const i0 = 2 * (idx - n13);
@@ -1177,7 +1342,7 @@ __device__ __forceinline__ void
                                : 0.0f;
           }
         }
-        if constexpr (T != 64) {
+        if constexpr (T < 32) {
 #pragma unroll
           for (int kt = 0; kt < 2; kt++) {
 #pragma unroll
@@ -1210,47 +1375,79 @@ __device__ __forceinline__ void
             }
           }
           fence_after();
-          if (T == 64 && nt <= 8) { // the slot's few tokens: their own
-                                    // columns (one TMEM column of each K
-                                    // half), not the T-wide drain
+          if constexpr (T >= 32) { // the slot's tokens' own columns (one TMEM
+                                   // column of each K half), 8 tokens at a
+                                   // time, not the T-wide drain
             uint32_t const lanes = (uint32_t)(((threadIdx.x >> 5) & 3) * 32)
                                    << 16,
                            c0a = tb + T * a + lanes, c1a = c0a + ACC_STAGES * T;
-            int const s0 = start_s[slot];
-            float c0[8], c1[8];
+            int i0 = start_s[slot];
+            int const end = i0 + nt;
+            for (; i0 + 8 <= end; i0 += 8) {
+              float c0[8], c1[8], r[8];
+              int t[8];
 #pragma unroll
-            for (int k = 0; k < 8; k++) {
-              c0[k] = c1[k] = 0.f;
-              if (k < nt) { // warp-uniform
-                int const t = tok_s[s0 + k];
-                c0[k] = tmem_ld1(c0a + t);
+              for (int k = 0; k < 8; k++) {
+                t[k] = tok_s[i0 + k];
+                c0[k] = tmem_ld1(c0a + t[k]);
+                c1[k] = 0.f;
                 if constexpr (KT2 == 2) {
-                  c1[k] = tmem_ld1(c1a + t);
+                  c1[k] = tmem_ld1(c1a + t[k]);
                 }
               }
-            }
-            tmem_keep8(c0);
-            tmem_keep8(c1);
-            fence_before();
-            mbar_arrive(rt.acc_empty0 + 8 * a);
+              tmem_keep8(c0);
+              tmem_keep8(c1);
+              if (i0 + 8 == end) { // the item's last columns are read
+                fence_before();
+                mbar_arrive(rt.acc_empty0 + 8 * a);
+              }
 #pragma unroll
-            for (int k = 0; k < 8; k++) {
-              if (k < nt) { // drain_w2_promoted's products, in its order
-                int const i = s0 + k, t = tok_s[i];
-                float vt = c0[k] * (swi[0] * sbuf[t * KT2]);
+              for (int k = 0; k < 8; k++) { // drain_w2_promoted's products
+                float vt = c0[k] * (swi[0] * sbuf[t[k] * KT2]);
                 if constexpr (KT2 == 2) {
-                  vt = fmaf(swi[1] * sbuf[t * KT2 + 1], c1[k], vt);
+                  vt = fmaf(swi[1] * sbuf[t[k] * KT2 + 1], c1[k], vt);
                 }
-                racc[((size_t)t * K + kk_s[i]) * LAT + ot * 128 + row] =
-                    w_s[i] * vt; // row (t, k), plain store
+                r[k] = w_s[i0 + k] * vt;
+              }
+#pragma unroll
+              for (int k = 0; k < 8; k++) {
+                racc[((size_t)t[k] * K + kk_s[i0 + k]) * LAT + ot * 128 + row] =
+                    r[k]; // row (t, k), plain store
+              }
+            }
+            if (i0 < end) { // fewer than 8 tokens left
+              int const left = end - i0;
+              float c0[8], c1[8];
+#pragma unroll
+              for (int k = 0; k < 8; k++) {
+                c0[k] = c1[k] = 0.f;
+                if (k < left) { // warp-uniform
+                  int const t = tok_s[i0 + k];
+                  c0[k] = tmem_ld1(c0a + t);
+                  if constexpr (KT2 == 2) {
+                    c1[k] = tmem_ld1(c1a + t);
+                  }
+                }
+              }
+              tmem_keep8(c0);
+              tmem_keep8(c1);
+              fence_before();
+              mbar_arrive(rt.acc_empty0 + 8 * a);
+#pragma unroll
+              for (int k = 0; k < 8; k++) {
+                if (k < left) {
+                  int const i = i0 + k, t = tok_s[i];
+                  float vt = c0[k] * (swi[0] * sbuf[t * KT2]);
+                  if constexpr (KT2 == 2) {
+                    vt = fmaf(swi[1] * sbuf[t * KT2 + 1], c1[k], vt);
+                  }
+                  racc[((size_t)t * K + kk_s[i]) * LAT + ot * 128 + row] =
+                      w_s[i] * vt; // row (t, k), plain store
+                }
               }
             }
           } else {
-            if constexpr (T == 64) {
-              drain_w2_promoted_s<KT2>(tb, a, swi, sbuf, v);
-            } else {
-              drain_w2_promoted<KT2>(tb, a, swi, sh, v);
-            }
+            drain_w2_promoted<KT2>(tb, a, swi, sh, v);
             fence_before();
             mbar_arrive(rt.acc_empty0 + 8 * a);
             for (int i = start_s[slot]; i < start_s[slot] + nt; i++) {
@@ -1325,26 +1522,48 @@ __device__ __forceinline__ void
               moe_prof_event(prof, pn, pt0, 8);
             }
           }
-          if constexpr (T == 64) { // OFF_ACC: the first item's h [64][T], then
-                                   // the up rows / the second item's h
+          if constexpr (T >= 32 && !RES::SINGLE &&
+                        RES::LIVE ==
+                            T) { // OFF_ACC: the first item's h [64][T], then
+                                 // the up rows / the second item's h
             float *const h1 = acc_s, *const h2 = acc_s + 64 * T;
             if (row >= 64) {
 #pragma unroll
               for (int j = 0; j < T; j++) {
                 if (wide || j < nt) {
-                  h2[(row - 64) * T + j] = v[j];
+                  h2[h_at(row - 64, j)] = v[j];
                 }
               }
             }
             asm volatile("bar.sync 1, 128;" ::: "memory");
             if (row < 64) { // h of feature row: each element read, then
-                            // written by its own thread
+                            // written by its own thread; after a T-wide drain
+                            // only the slot's tokens' columns (the mask)
               float *const dst = i == 0 ? h1 : h2;
+              if (wide) { // a loop over the tokens: 64 unrolled SiLUs were
+                          // ~18 KB of code, fetched cold for each item.
+                          // The gate row by the run-time column from local
+                          // memory (LIVE == T: a token occurs once, no idle
+                          // rows on the shared experts)
+                float vl[T];
 #pragma unroll
-              for (int j = 0; j < T; j++) {
-                if (wide || j < nt) {
-                  dst[row * T + j] =
-                      silu2_limit<RES::LIMIT>(v[j], h2[row * T + j]);
+                for (int j = 0; j < T; j++) {
+                  vl[j] = v[j];
+                }
+                int k = 0;
+                for (; k + 4 <= nt; k += 4) {
+                  h_silu_tok<4, RES::LIMIT>(dst, h2, vl, tk, row, k);
+                }
+                for (; k < nt; k++) {
+                  h_silu_tok<1, RES::LIMIT>(dst, h2, vl, tk, row, k);
+                }
+              } else {
+#pragma unroll
+                for (int j = 0; j < 8; j++) {
+                  if (j < nt) {
+                    dst[h_at(row, j)] =
+                        silu2_limit<RES::LIMIT>(v[j], h2[h_at(row, j)]);
+                  }
                 }
               }
             }
@@ -1652,6 +1871,9 @@ __device__ __forceinline__ void run_scaled_moe_experts(Maps const &maps,
   }
   [[maybe_unused]] long long pt_bt[3] = {0, 0, 0}; // PROF: build_table's steps
   build_table<RES>(RES::PROF >= 0 ? pt_bt : nullptr);
+  if constexpr (RES::ORDER) {
+    scaled_moe::order_slots<RES>();
+  }
   [[maybe_unused]] long long const pt_table = RES::PROF >= 0 ? gtime() : 0;
   long long *prof = nullptr;
   if constexpr (RES::PROF >= 0) {
