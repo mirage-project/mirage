@@ -5805,16 +5805,18 @@ int TaskRegister::register_dsa_q_absorb_sm100_task(
 
 int TaskRegister::register_dsa_index_score_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {heads, MAXCTX, PAGE, MAXP, FLASH (0 / 1)}. inputs: the wq_b
-  // output, the indexer projection, the index cache; output: scores
-  // [T, MAXCTX] fp32. Grid (chunks, tokens).
+  // params: {heads, MAXCTX, PAGE, MAXP, FLASH (0 / 1)[, SKIPK (a token of at
+  // most SKIPK entries has no scores)]}. inputs: the wq_b output, the indexer
+  // projection, the index cache; output: scores [T, MAXCTX] fp32. Grid
+  // (chunks, tokens).
+  assert(params.size() == 5 || params.size() == 6);
   return register_static_task(this,
                               TASK_DSA_INDEX_SCORE_SM100,
                               "dsa_index_score",
                               bgraph,
                               params,
                               3,
-                              5);
+                              params.size());
 }
 
 int TaskRegister::register_dsa_index_topk_sm100_task(

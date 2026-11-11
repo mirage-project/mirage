@@ -1031,13 +1031,15 @@ class StaticMegakernel(PersistentKernel):
         chunks: int = 16,       # tasks per token, MAXCTX / chunks positions each (whole pages of 64, at most 16)
         page: int = 64,
         flash: bool = False,    # GLM-5.3-Flash: Hadamard q, fp32 head weights, the pooled keys (seq_lens / 4 pools)
+        skip_k: int = 0,        # the TOPK of the dsa_index_topk that reads the scores: a token of at most skip_k entries
+                                # computes none (the top-k takes all its entries); 0: every token scores
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the index scores (tasks/dsa_index_score.cuh). Task (c, t) computes the scores of chunk c of the context of
         token t. The compiler can change the chunk count (grid x). Each chunk holds a whole number of 64-position pages, from 1
-        to 16. Each slot t must be a different request. params = [32, MAXCTX, page, MAXP, flash]. buf_slots: [cos_sin, seq_lens,
-        block_table, index_cache, the token histograms (a scratch buffer, zero before each launch)]. Counters: one for each
-        token (its chunks)."""
+        to 16. Each slot t must be a different request. params = [32, MAXCTX, page, MAXP, flash[, skip_k]]. buf_slots: [cos_sin,
+        seq_lens, block_table, index_cache, the token histograms (a scratch buffer, zero before each launch)]. Counters: one for
+        each token (its chunks)."""
         self._fx_producer("dsa_index_score_layer", iq)
         self._fx_producer("dsa_index_score_layer", kw)
         self._producer("dsa_index_score_layer", index_cache, ("dsa_kpool_update" if flash else "dsa_index_k_write",))
@@ -1054,7 +1056,7 @@ class StaticMegakernel(PersistentKernel):
         hist = self._scratch("dsa_index_score.hist", T * DSA_TOPK_BINS * 4, 0)
         self._add_node("dsa_index_score", (chunks, T, 1), block_dim, [iq, kw, index_cache, output],
                        [(-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (1, 0, -1)],
-                       [32, MAXCTX, page, block_table.dim(1), int(flash)],
+                       [32, MAXCTX, page, block_table.dim(1), int(flash)] + ([skip_k] if skip_k else []),
                        changeable_grid_dims={0: (page, 1, 16)}, out_buffer=lambda n: (T * MAXCTX * 4, -1, False), counters=T,
                        buf_slots=[self._tensor_slot(seq_lens if flash else cos_sin), self._tensor_slot(seq_lens),
                                   self._tensor_slot(block_table), self._tensor_slot(index_cache), hist])

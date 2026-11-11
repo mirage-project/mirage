@@ -15,11 +15,12 @@
 //   chunks   Both nodes have grid (CHK, T). Task (c, t) takes positions
 //            [1024 c, 1024 c + 1024) of token t (CHK = MAXCTX / 1024). Each
 //            lane takes 4 positions, each warp 128.
-//   count    (MODE 0) Wait for the score tasks of token t. Find the bin b1 of
-//            hist[t] that holds the TOPK-th largest key. k1 is the number of
-//            keys to take from bin b1. Count the keys of the chunk above bin
-//            b1. Count the keys in bin b1 by their low 4 bits. Write the
-//            record of the chunk.
+//   count    (MODE 0) n <= TOPK: nothing (no wait: dsa_index_score may skip
+//            the scores of such a token). Else wait for the score tasks of
+//            token t. Find the bin b1 of hist[t] that holds the TOPK-th
+//            largest key. k1 is the number of keys to take from bin b1. Count
+//            the keys of the chunk above bin b1. Count the keys in bin b1 by
+//            their low 4 bits. Write the record of the chunk.
 //   write    (MODE 1) Wait for the count tasks of token t. Read the CHK
 //            records. Find the threshold key (b1, b2) and the number of keys
 //            to take at it. Find the first output slot of each chunk and the
@@ -338,7 +339,7 @@ __device__ __forceinline__ void run_dsa_index_topk(Maps const &,
                       P::v[1] == MAXCTX && SELF::buf >= 0,
                   "dsa_index_topk count: the scores of a dsa_index_score "
                   "node over MAXCTX positions, the records");
-    if (threadIdx.x == 0) {
+    if (threadIdx.x == 0 && n > TOPK) { // n <= TOPK: no score is read
       cnt_wait(cnt_now(g) + P::counter + t, P::x);
     }
     __syncthreads();

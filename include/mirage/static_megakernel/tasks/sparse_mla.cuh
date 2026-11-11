@@ -17,7 +17,9 @@
 //           writes the row of this step.
 //   idx     [T][TOPK] int32 positions (-1: no position). A dsa_index_topk node
 //           (its counter + t) or a graph input supplies idx. A "shared" layer
-//           uses the indices of the last "full" layer (GLM IndexShare).
+//           uses the indices of the last "full" layer (GLM IndexShare). KPOOL
+//           > 1: a token of at most NIDX complete pools has all of them, in
+//           order; its task reads no idx and does not wait for the node.
 //   pages   block_table [T][MAXP] int32. Position p of request t is in page
 //           block_table[t][p / PAGE], row p % PAGE. seq_lens [T] int32: the
 //           query is at position seq_lens[t] - 1. The task masks the
@@ -69,10 +71,16 @@ using namespace dsa; // the shared-memory and MMA helpers (dsa_common.cuh)
 // pools of the token): slot e < KPOOL pools is position idx[e / KPOOL] KPOOL +
 // e % KPOOL; the next KPOOL - 1 slots are the tail, the positions after the
 // complete pools: (seq_len / KPOOL) KPOOL + i (the mask drops the ones at
-// seq_len or later); the rest are -1.
+// seq_len or later); the rest are -1. in_order (a token of at most NIDX
+// complete pools: dsa_index_topk takes them all, in order): slot e is
+// position e, and idx is not read.
 template <int KPOOL>
-__device__ __forceinline__ int load_index(
-    int const *idx, int tile, int last_tile, int seq_len, int pools) {
+__device__ __forceinline__ int load_index(int const *idx,
+                                          int tile,
+                                          int last_tile,
+                                          int seq_len,
+                                          int pools,
+                                          bool in_order) {
   int const tid = threadIdx.x, e = tile * KV_TILE + tid;
   if (tid >= KV_TILE || tile >= last_tile) {
     return -1;
@@ -80,6 +88,9 @@ __device__ __forceinline__ int load_index(
   if constexpr (KPOOL == 1) {
     return __ldcg(idx + e);
   } else {
+    if (in_order) {
+      return e;
+    }
     if (e < KPOOL * pools) {
       int const p = __ldcg(idx + e / KPOOL);
       return p >= 0 ? p * KPOOL + e % KPOOL : -1;
@@ -200,6 +211,7 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
       pools = slots / KPOOL;
     }
   }
+  bool const in_order = KPOOL > 1 && seq_len / KPOOL <= NIDX;
   // tiles of each split (slots = TOPK: TOPK / KV_TILE / S)
   int const per = (slots + KV_TILE * S - 1) / (KV_TILE * S);
   int const tid = threadIdx.x, warp = tid / 32, lane = tid % 32;
@@ -222,14 +234,15 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
   // at tile: the pages of tile + 1 (in flight while tile is computed), the
   // positions of tile + 2. Tile first_tile - 1: only the first tile's copies.
   int const pos0 =
-      load_index<KPOOL>(idx, first_tile, last_tile, seq_len, pools);
-  int pos2 = load_index<KPOOL>(idx, first_tile + 1, last_tile, seq_len, pools);
+      load_index<KPOOL>(idx, first_tile, last_tile, seq_len, pools, in_order);
+  int pos2 = load_index<KPOOL>(
+      idx, first_tile + 1, last_tile, seq_len, pools, in_order);
   PageAhead ahead = page_ahead<PAGE>(pages, seq_len, pos0);
   for (int tile = first_tile - 1; tile < last_tile; tile++) {
     int const stage = (tile - first_tile) & 1;
     if (tile + 1 < last_tile) {
       int const following =
-          load_index<KPOOL>(idx, tile + 3, last_tile, seq_len, pools);
+          load_index<KPOOL>(idx, tile + 3, last_tile, seq_len, pools, in_order);
       prefetch_tile<PAGE, D_QK>(
           sm, cache, num_pages, seq_len, stage ^ 1, ahead);
       ahead = page_ahead<PAGE>(pages, seq_len, pos2);
@@ -404,6 +417,7 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
   static_assert(IX::x == 0 || IX::counter >= 0,
                 "sparse_mla: the indices' producer counts per token");
   int const t = tk.y, s = tk.x;
+  int const seq_len = buf_at<int const>(g, SEQ)[t];
   __syncthreads(); // wait until the previous task completes its shared-memory
                    // reads
   if (threadIdx.x == 0) {
@@ -411,8 +425,11 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
     // wait for all q tasks
     cnt_wait(cnt_now(g) + Q::counter, Q::x * Q::y * Q::z);
     if constexpr (IX::x > 0) {
-      // wait for the IX::x write tasks of token t
-      cnt_wait(cnt_now(g) + IX::counter + t, IX::x);
+      // wait for the IX::x write tasks of token t (a token of at most NIDX
+      // pools reads no idx: load_index's in_order)
+      if (KPOOL == 1 || seq_len / KPOOL > NIDX) {
+        cnt_wait(cnt_now(g) + IX::counter + t, IX::x);
+      }
     }
   }
   __syncthreads();
@@ -425,7 +442,7 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
       buf_at<int const>(g, IDX) + (size_t)t * NIDX,
       buf_at<int const>(g, BT) + (size_t)t * MAXP,
       NUM_PAGES,
-      buf_at<int const>(g, SEQ)[t],
+      seq_len,
       __int_as_float(PARAMS::v[5]),
       o + ((size_t)t * S + s) * NH * smla::LATENT,
       o + (size_t)T * S * NH * smla::LATENT + ((size_t)t * S + s) * NH,

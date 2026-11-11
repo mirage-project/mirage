@@ -5,7 +5,8 @@ step) of T rows on a TP shard.
   indexer   gemm_tile x [wk | gate | weights_proj] (bf16, 384 rows) -> dsa_kpool_update (LayerNorm k, the tail ring, the
             pool of 4 it closes -> the pooled cache);  dsa_q_norm_quant (bf16 q_c) -> gemm_tile wq_b (bf16) ->
             dsa_index_score (Hadamard q, e4m3, the pooled keys: one score per complete pool) -> dsa_index_topk (512 pools)
-            -> sparse_mla expands the pools to their positions and adds the tail (the up to 3 positions after the pools)
+            -> sparse_mla expands the pools to their positions and adds the tail (the up to 3 positions after the pools);
+            a token of at most 512 pools has no scores, and sparse_mla takes its positions in order without the top-k
   boundary  o_proj's K parts (this GPU's partial sum) -> allreduce_send -> hc_post_mix (the sum over the GPUs, the
             attention's mHC post, the FFN's mHC mixes) -> hc_pre (the FFN's mHC pre with post_attention_layernorm)
   layouts   SGLang's (DSATokenToKVPool): the pooled cache [pages, 64 x 132] (e4m3 keys, then fp32 scales), its page table
@@ -221,7 +222,8 @@ def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float,
     qb = nt((T, NH * NOPE), int64, "q_b")
     mpk.scaled_gemm_tile_layer(input=qcq, weight=a["w_qb"], weight_scales=a["w_qb_sf"], output=qb, combine="add")
     mpk.dsa_index_score_layer(iq=iq, kw=kw, index_cache=a["pcache"], cos_sin=None, seq_lens=a["seq_lens"],
-                              block_table=a["pooled_bt"], output=a["idx_scores"], chunks=maxpools // 1024, flash=True)
+                              block_table=a["pooled_bt"], output=a["idx_scores"], chunks=maxpools // 1024, flash=True,
+                              skip_k=POOLS)
     mpk.dsa_index_topk_layer(scores=a["idx_scores"], seq_lens=a["seq_lens"], output=a["pool_idx"], unit=KPOOL)
     mpk.dsa_q_absorb_layer(qb=qb, w_uk=a["w_uk"], cos_sin=None, seq_lens=a["seq_lens"], output=a["q_mla"])
     split = nt((T, NH, KVL), float32, "mla_split")

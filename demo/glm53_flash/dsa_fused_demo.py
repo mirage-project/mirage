@@ -50,7 +50,7 @@ from safetensors import safe_open
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dsa_layer as dd  # noqa: E402
 import dsa_mla as mla  # noqa: E402
-from dsa_mla import H, KPOOL, QL, T, bf, relrms  # noqa: E402
+from dsa_mla import H, KPOOL, POOLS, QL, T, bf, relrms  # noqa: E402
 
 from mirage.mpk import compiler  # noqa: E402
 from mirage.mpk.static_harness import Harness  # noqa: E402
@@ -254,9 +254,10 @@ def node_checks(args, cfg: dict, w: dict, st: dict, hist: dict, t: dict, r: int)
                (t["tail_score"].view(torch.int16) == ts_.view(torch.int16)).float().mean().item())
     scores, picks = dd.score_reference(t, t["q_c"], kw, st, L, t["pcache"])
     valid = torch.zeros_like(scores, dtype=torch.bool)
-    for i, n in enumerate(L):
-        valid[i, :max(n, 0) // KPOOL] = True
-    s_err = relrms(t["idx_scores"][valid], scores[valid])
+    for i, n in enumerate(L):   # (a token of at most 512 pools has no scores: the top-k takes all its pools)
+        if max(n, 0) // KPOOL > POOLS:
+            valid[i, :n // KPOOL] = True
+    s_err = relrms(t["idx_scores"][valid], scores[valid]) if valid.any() else 0.0
     topk_ok = bool((dd.topk_of(t["idx_scores"], L) == t["pool_idx"]).all())
     overlap = []
     for i in live:   # the share of the reference's pools the kernel selected (1 with no pools)
