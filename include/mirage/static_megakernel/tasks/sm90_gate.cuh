@@ -16,13 +16,13 @@
 
 namespace static_mk {
 
-// PARAMS {H, E, TOPK, eps (fp32 bits), S}; BUF_SLOTS {o [T, H] fp32, o's bias [H]
-// bf16, x (the residual) [T, H] bf16, the norm's weight [H] bf16, the router
-// [E, H] bf16, its bias [E] bf16, the step's token count [1] i32, x1 [T, H]
-// bf16, h [T, H] f16, weights [T, TOPK] fp32, routing indices [E, T] i32, the
-// active-expert list [E + 1] i32}; counters {the tasks (for the consumers),
-// the tasks done (for the last), the expert mask (E / 32 words), S > 1: the
-// tokens' router tasks done (T)}
+// PARAMS {H, E, TOPK, eps (fp32 bits), S}; BUF_SLOTS {o [T, H] fp32,
+// o's bias [H] bf16, x (the residual) [T, H] bf16, the norm's weight [H] bf16,
+// the router [E, H] bf16, its bias [E] bf16, the step's token count [1] i32,
+// x1 [T, H] bf16, h [T, H] f16, weights [T, TOPK] fp32, routing indices
+// [E, T] i32, the active-expert list [E + 1] i32}; counters {the tasks (for
+// the consumers), the tasks done (for the last), the expert mask (E / 32
+// words), S > 1: the tokens' router tasks done (T)}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -142,7 +142,7 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   // 3. the logits: warp w experts [w EPW, w EPW + EPW), its lanes over K
   // (each step its EPW rows' vectors in flight), reduced over the warp
   constexpr int EPW = EPS_ / SM90_WARPS;
-  constexpr int UNROLL = EPW <= 4 ? 4 : 1; // the EPW rows' loads in registers
+  constexpr int UNROLL = EPW <= 4 ? 4 : 1;  // the EPW rows' loads in registers
   int const e0 = split * EPS_ + warp * EPW; // the warp's first expert
   int *routing = buf_at<int>(g, slot_at<BUF_SLOTS, 10>());
   if (t < ntok) {
