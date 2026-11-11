@@ -4,7 +4,7 @@ import argparse, itertools, json, os, statistics, time
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 from mirage.mpk import compiler
-from mirage.mpk.static_megakernel import (StaticMegakernel, sm90_attention_parts_size, sm90_flags, sm90_moe_ring_f16_scales,
+from mirage.mpk.static_megakernel import (StaticMegakernel, sm90_attention_parts_size, sm90_flags,
                                          sm90_moe_ring_pack)
 from mirage.mpk.models.utils import shuffle_tensors
 from mxfp4 import Mxfp4Checkpoint, convert_expert_weight
@@ -52,7 +52,6 @@ class Model:
         }
         self.x = [zeros(T, H), zeros(T, H)]                          # the residual stream, ping-pong between layers
         self.layers = []
-        self.f16_scales = True   # every layer's MXFP4 scales fit the ring's f16 path (20B's do; 120B's need fp32)
         for i in range(self.L):
             p = f"model.layers.{i}."
             at = lambda k: sd[p + k]
@@ -60,7 +59,6 @@ class Model:
                                                   at("mlp.experts.gate_up_proj_bias"), deinterleave=True)
             w2, s2, b2 = convert_expert_weight(at("mlp.experts.down_proj_blocks"), at("mlp.experts.down_proj_scales"),
                                                at("mlp.experts.down_proj_bias"), deinterleave=False)
-            self.f16_scales = self.f16_scales and sm90_moe_ring_f16_scales(s13) and sm90_moe_ring_f16_scales(s2)
             q = [at(f"self_attn.{n}_proj.weight") for n in "qkv"]
             qb = [at(f"self_attn.{n}_proj.bias") for n in "qkv"]
             self.layers.append({
@@ -112,10 +110,12 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
     mpk.sm90_gate_layer(A["o32"], A["b_o"], A["x_in"], A["ln2"], A["w_router"], A["b_router"], A["num_tokens"], A["x1"],
                         A["h2"], A["topk_w"], A["routing"], A["active"], eps=m.eps,
                         router_splits=ROUTER_SPLITS.get(m.E, 1))
+    # the MXFP4 scales in fp32 after the MMAs, both models: the f16 path's scaled decode costs more than it saves (20B, H100:
+    # 2957 -> 2829 us/step)
     mpk.sm90_moe_ring_layer(A["h2"], A["w13"], A["routing"], A["active"], A["act"], bias=A["b13"], glu=True,
-                            limit=m.limit, alpha=1.702, rows_per_task=128, fp32_scales=not m.f16_scales)
+                            limit=m.limit, alpha=1.702, rows_per_task=128, fp32_scales=True)
     mpk.sm90_moe_ring_layer(A["act"], A["w2"], A["routing"], A["active"], A["eo"], bias=A["b2"], glu=False,
-                            rows_per_task=64, fp32_scales=not m.f16_scales)
+                            rows_per_task=64, fp32_scales=True)
     mpk.sm90_mul_sum_add_layer(A["eo"], A["topk_w"], A["x1"], A["x_out"])
 
 
