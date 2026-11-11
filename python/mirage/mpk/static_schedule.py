@@ -919,13 +919,14 @@ class StaticKernel:
             self._finalized = True
 
 
-def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]] = None) -> List[str]:
-    """-O3 -std=c++17, the GPU's own arch, -lcuda, plus what a Python extension
-    needs (-shared, -fPIC, the Python headers)."""
+def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]] = None,
+                    target_cc: Optional[int] = None) -> List[str]:
+    """-O3 -std=c++17, the arch (target_cc; None: the GPU's own), -lcuda, plus
+    what a Python extension needs (-shared, -fPIC, the Python headers)."""
     import torch
     from ..kernel import get_key_paths
     _, include_path, _ = get_key_paths()
-    major, minor = torch.cuda.get_device_capability(0)
+    major, minor = divmod(target_cc, 10) if target_cc else torch.cuda.get_device_capability(0)
     arch = f"{major}{minor}a" if major >= 9 else f"{major}{minor}"
     scheme = sysconfig.get_default_scheme() if hasattr(sysconfig, "get_default_scheme") else sysconfig._get_default_scheme()
     if scheme == "posix_local":
@@ -939,7 +940,7 @@ def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]]
 
 def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dict]] = None, out_dir: Optional[str] = None,
                    extra_flags: Optional[List[str]] = None, profile: bool = False, device: int = 0, rank: Optional[int] = None,
-                   exchange: Optional[tuple] = None) -> StaticKernel:
+                   exchange: Optional[tuple] = None, build_only: bool = False) -> Optional[StaticKernel]:
     """  1. read the schedule files; write <out_dir>/layer.cu = generate_code
        2. nvcc it into a Python extension (compile_command) and load it
        3. init_func: every GPU's tensors (gpu_tensors[g] = {name: torch tensor on GPU g}) -> static_init -> static_host_init
@@ -950,7 +951,8 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
     profile: the timing build (static_harness.Harness.task_times). device: the CUDA device of GPU 0 (GPU g = device + g; a layer
     built for one GPU inside another framework's process: that process's device). MIRAGE_STATIC_BUILD_CACHE (a directory): the
     builds by the md5 of layer.cu, the flags and the kernel templates (code_tag); the same layer.cu (e.g. every KDA layer of a
-    model, every rank) is compiled once and copied, and each copy is loaded on its own (its own host state)."""
+    model, every rank) is compiled once and copied, and each copy is loaded on its own (its own host state).
+    build_only: stop after nvcc (nothing loaded; returns None): a build for pk.target_cc on a GPU of another architecture."""
     num_gpus = len(schedule_paths)
     gpu_tensors = gpu_tensors or [dict(pk._model_tensors)]
     assert len(gpu_tensors) == (1 if rank is not None else num_gpus), "one tensor dict per GPU of this process"
@@ -967,7 +969,7 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
     with open(cu_path, "w") as f:
         f.write(generate_code(pk, schedules, profile))
 
-    command = compile_command(cu_path, so_path, extra_flags)
+    command = compile_command(cu_path, so_path, extra_flags, getattr(pk, "target_cc", None))
     cache = os.environ.get("MIRAGE_STATIC_BUILD_CACHE")
     if cache:
         import fcntl
@@ -990,6 +992,8 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
     else:
         print("building the layer:", " ".join(command), flush=True)
         subprocess.check_call(command)
+    if build_only:
+        return None
 
     spec = importlib.util.spec_from_file_location("__mirage_static_launcher", so_path)
     module = importlib.util.module_from_spec(spec)

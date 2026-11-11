@@ -123,15 +123,19 @@ def float_bits(v: float) -> int:
 
 class StaticMegakernel(PersistentKernel):
 
-    def __init__(self, num_gpus: int = 1, num_sms: int = None):
+    def __init__(self, num_gpus: int = 1, num_sms: int = None, target_cc: int = None):
         """num_gpus: the GPUs the layer is divided over (a rows-split node's GPUs, an exchange buffer's slots; config.cuh GPUS).
         num_sms: the SMs of one GPU, one task list each (config.cuh NSM); None: the current device's.
+        target_cc: the architecture to build for (90, 100); None: the current device's (another one: compile_static
+        build_only, e.g. a CI build of the Hopper tasks on a Blackwell runner).
         PersistentKernel.__init__ takes MPK's serving configuration (mode, workers, schedulers, batch limits, paging, meta
         tensors); the static path reads none of it (no runtime scheduler: every SM runs its own task list), so it gets MPK's
         defaults, with test_mode allocating the meta tensors it checks."""
         super().__init__(**PersistentKernel.get_default_init_parameters(), test_mode=True)
         self.num_gpus = num_gpus
         self.num_sms = num_sms
+        if target_cc is not None:
+            self.target_cc = target_cc
         if self.target_cc == 90:
             self.max_bufs = 64
         self.tokens = None        # tokens per step: the first dimension of the layers' token-major tensors (_tokens; config.cuh T)
@@ -1573,14 +1577,14 @@ class StaticMegakernel(PersistentKernel):
 
     # ---- the generated layer (static_schedule.py) ----
     def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False, device=0,
-                       rank=None, exchange=None):
+                       rank=None, exchange=None, build_only=False):
         """Build the graph as it is now, one schedule.json per GPU (static_schedule.compile_static); profile: the timing build
         (per-task start / end stamps, static_harness.Harness.task_times); device: the CUDA device of GPU 0. rank / exchange:
         GPU `rank` alone in this process with the caller's exchange region (multicast address, local address), e.g. one
         TP rank of a serving framework (exchange_region_bytes)."""
         from .static_schedule import compile_static
         return compile_static(self, schedule_paths, gpu_tensors, out_dir, extra_flags=extra_flags, profile=profile,
-                              device=device, rank=rank, exchange=exchange)
+                              device=device, rank=rank, exchange=exchange, build_only=build_only)
 
     def exchange_region_bytes(self) -> int:
         """The exchange region a rank-alone build needs from its caller (compile_static rank / exchange): both sets."""
