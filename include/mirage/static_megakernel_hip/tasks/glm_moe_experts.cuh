@@ -36,12 +36,40 @@
 namespace static_mk {
 namespace gme {
 constexpr int GME_SS = 4;    // counters between two slots' W13 counts (16 B)
-// output rows of a wave's W2 unit (whole MFMA tile pairs): small at small T, so every wave has one
-constexpr int W2_ROWS = T <= 4 ? 32 : T <= 16 ? 64 : 128;
+// output rows of a wave's W2 unit (whole MFMA tile pairs): small at small T, so every wave has one.
+// STATIC_GME_W2R (11-11, 0 default = this rule): the rows given (32 / 64 / 128). MI355X g53gmt2 MoE T 4: W2 ~50 MB in ~10 us
+// (5 TB/s) with 8-KB items, one in flight per wave (~8 MB over the GPU)
+#ifndef STATIC_GME_W2R
+#define STATIC_GME_W2R 0
+#endif
+constexpr int W2_ROWS = STATIC_GME_W2R ? STATIC_GME_W2R : T <= 4 ? 32 : T <= 16 ? 64 : 128;
 // STATIC_GME_TIMES (diagnosis): per wave gw (= wave NCU + cu) 4 times (gtime ns) into dbg as long long [4 NCU][4]: the
 // table built, its first W13 item's loads issued, that item's sums done, its W13 items' end counted (dbg: a device tensor)
 #ifndef STATIC_GME_TIMES
 #define STATIC_GME_TIMES 0
+#endif
+// STATIC_GME_W13DB (11-11, 0 default): the generic path (T > 8), items of one token tile: the chunk's K blocks in two halves
+// with their own registers, the next half's weights / scales / x issued before this half's MFMAs (the same registers as one
+// 8-block chunk). MI355X g53gmt1 MoE T 16: W13 ~324 MB in ~58 us (5.6 TB/s) - each wave waited for its whole chunk, then ran
+// its MFMAs with no load in flight
+#ifndef STATIC_GME_W13DB
+#define STATIC_GME_W13DB 0
+#endif
+// STATIC_GME_W2XQ (11-11, 0 default): the generic path's W2 items from 8 pools, one per XCD (CU cu: pool cu % 8, a counter
+// line each at cnt + 128 + 32 p - glm_moe_experts_layer counters 384): pool p = W2 items j = p + 8 k in slot-major order (slot
+// j / (H / W2_ROWS)), taken in turn by its XCD's waves once their W13 items are done - no round robin over the slots (MI355X
+// g53db1 T 16: ~320 of 1024 waves waited at 60 us for a slot not done), no one hot line (DYP: +7 us per pooled round at T 16).
+// g53xq1 MoE T 16 124.3 123.8 -> 115.6 116.5, T 32 164.9 163.8 -> 148.4 148.2, T 64 191.3 191.0 -> 176.8 179.1; pair T 16 160.0
+// 160.2 -> 148.6 150.7, T 64 267.9 267.2 -> 255.8 254.7 us (GLM-5.3: 1 in G53_FLAGS)
+#ifndef STATIC_GME_W2XQ
+#define STATIC_GME_W2XQ 0
+#endif
+// STATIC_GME_CUPOST (11-12, 0 default): the CU-unit path (T <= 8) counts each W13 unit on its slot right after the unit's h
+// stores (wave 0: their completion, then the count) instead of all the CU's units after its last one: a slot's W2 items no
+// longer wait for the CUs holding its units to finish every round (MI355X g53gmt3 T 8: W13 end median 38.9 us, the first W2
+// item past its wait 44.2; 3.6 unit rounds per CU)
+#ifndef STATIC_GME_CUPOST
+#define STATIC_GME_CUPOST 0
 #endif
 // Slots: an expert with c tokens takes ceil(c / 16) slots of at most 16 tokens (slot j: its pairs
 // 16 j ..): every item one token tile (NT 1, x of the whole chunk with its weights), the shared expert's units spread over
@@ -55,6 +83,8 @@ struct Cfg {
   static constexpr int NT = 1; // token tiles of a slot (at most 16 tokens)
   // ucnt: KQ > 1 the units' piece counts [NSLOT][U13] first; then per slot its units done (a 128-B line each) at SC0 + 32 s
   static constexpr int SC0 = KQ > 1 ? (NSLOT * U13 + 31) / 32 * 32 : 0;
+  // (CUW, the routed units on two CUs each, glm_moe_experts_task XS2: per unit its halves' count at PC0 + 8 r, after the slots' lines)
+  static constexpr int PC0 = SC0 + 32 * NSLOT;
   static_assert(H % 512 == 0 && IR % 128 == 0 && KB1 % 4 == 0 && KB2 <= 4 && T <= 64 && KB1 % (KQ * 2) == 0,
                 "glm_moe_experts: the shapes");
 };
@@ -200,10 +230,12 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
   if constexpr (CUW<C>) { // (the shared expert's unit cu, tokens 0 .. T - 1, pairs t KP + KP - 1)
     static_assert(C::KQ == 1 && T <= 16, "glm_moe_experts CUW: x in LDS first, the shared expert in slot 0 (one slot), whole units");
     __syncthreads(); // (x in LDS)
-    if (cu < C::U13) {
+    // (on the last U13 CUs: the routed units start at CU 0, unit SHOFF + r on CU r mod ncu - MI355X 11-10 g53prof13, T 1: on CUs
+    // 0 .. 15 the shared unit then a routed one, the W13 tail (20.9 / 21.8 us vs 19.0 for one unit))
+    if (cu >= ncu - C::U13) {
       __hip_bfloat16 const *const xs = reinterpret_cast<__hip_bfloat16 const *>(sm + L::XS);
       constexpr int KBW = C::KB1 / 4, XR = H + 8;
-      int const e = NB - 1, u = cu, c0 = wave * KBW;
+      int const e = NB - 1, u = cu - (ncu - C::U13), c0 = wave * KBW;
       uint8_t const *wbp = w13 + ((size_t)e * C::U13 + u) * 32 * H;
       uint4 w[2][KBW][2];
       float sg[KBW], su[KBW];
@@ -530,26 +562,30 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
     __hip_bfloat16 *const xs = reinterpret_cast<__hip_bfloat16 *>(sm + L::XS);
     constexpr int XR = H + 8;
     __syncthreads();
-    constexpr int KBW = C::KB1 / 4; // K blocks of a wave (H 4096: 8, one 32-KB chunk)
+    constexpr int KBW = C::KB1 / 4; // K blocks of a wave (H 4096: 8, one 32-KB chunk; H 6144: 12)
+    // HV pipeline items per unit (its K blocks in HV pieces of KBH): H 6144's 12 blocks a wave in one register set, twice for
+    // the pipeline, spilled (MI355X 11-10 g53cg3: T 1 scratch 868 B, glm53prof2 W13 at ~0.85 TB/s) - 2 pieces of 6
+    constexpr int HV = KBW > 8 ? 2 : 1, KBH = KBW / HV;
+    static_assert(KBH * HV == KBW, "glm_moe_experts CUW: whole K pieces");
     struct WSet {
-      uint4 w[2][KBW][2];
-      float sg[KBW], su[KBW];
+      uint4 w[2][KBH][2];
+      float sg[KBH], su[KBH];
     };
     float *const prs = reinterpret_cast<float *>(sm + L::PR);
     WSet wa, wb2;
-    auto issue = [&](WSet &ws, int un) {
-      int const s = un / C::U13, u = un % C::U13, e = __builtin_amdgcn_readfirstlane(se[s]), c0 = wave * KBW;
+    auto issue = [&](WSet &ws, int un, int hf) {
+      int const s = un / C::U13, u = un % C::U13, e = __builtin_amdgcn_readfirstlane(se[s]), c0 = wave * KBW + hf * KBH;
       uint8_t const *wbp = w13 + ((size_t)e * C::U13 + u) * 32 * H;
 #pragma unroll
       for (int i = 0; i < 2; i++)
 #pragma unroll
-        for (int kb = 0; kb < KBW; kb++) {
+        for (int kb = 0; kb < KBH; kb++) {
           uint8_t const *rp = wbp + ((size_t)((c0 + kb) * 2 + i) * 2) * 1024 + 16 * lane;
           ws.w[i][kb][0] = *reinterpret_cast<uint4 const *>(rp);
           ws.w[i][kb][1] = *reinterpret_cast<uint4 const *>(rp + 1024);
         }
 #pragma unroll
-      for (int kb = 0; kb < KBW; kb++) {
+      for (int kb = 0; kb < KBH; kb++) {
         size_t const so = (((size_t)e * C::IRB + u / 8) * C::KB1 + c0 + kb) * 2;
         ws.sg[kb] = w13sf[so];
         ws.su[kb] = w13sf[so + 1];
@@ -557,13 +593,13 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
     };
     // one round: this wave's quarter of unit un, its sums to LDS (buffer r & 1), the barrier, wave 0 adds the 4 in wave
     // order and writes h (the next round's buffer is the other one: no second barrier)
-    auto round = [&](WSet const &ws, int un, int r) {
-      int const s = un / C::U13, u = un % C::U13;
+    // piece hf of unit un: this wave's K blocks of it into tt2
+    auto mma = [&](WSet const &ws, int un, int hf, v4f (&tt2)[2]) {
+      int const s = un / C::U13;
       int const p0 = __builtin_amdgcn_readfirstlane(start[s]), n = __builtin_amdgcn_readfirstlane(start[s + 1]) - p0;
-      int const tok = pl[p0 + (r16 < n ? r16 : n - 1)] / KP, c0 = wave * KBW;
-      v4f tt2[2] = {v4f{0.f, 0.f, 0.f, 0.f}, v4f{0.f, 0.f, 0.f, 0.f}};
+      int const tok = pl[p0 + (r16 < n ? r16 : n - 1)] / KP, c0 = wave * KBW + hf * KBH;
 #pragma unroll
-      for (int kb = 0; kb < KBW; kb++) {
+      for (int kb = 0; kb < KBH; kb++) {
         v4f acc[2] = {v4f{0.f, 0.f, 0.f, 0.f}, v4f{0.f, 0.f, 0.f, 0.f}};
 #pragma unroll
         for (int st = 0; st < 4; st++) {
@@ -578,6 +614,11 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
         tt2[0] += acc[0] * ws.sg[kb];
         tt2[1] += acc[1] * ws.su[kb];
       }
+    };
+    // the unit's sums of this wave to LDS (buffer r & 1), the barrier, wave 0 adds the 4 in wave order and writes h
+    auto round = [&](v4f const (&tt2)[2], int un, int r) {
+      int const s = un / C::U13, u = un % C::U13;
+      int const p0 = __builtin_amdgcn_readfirstlane(start[s]), n = __builtin_amdgcn_readfirstlane(start[s + 1]) - p0;
       float *const pb = prs + (size_t)(r & 1) * (4 * 2 * 64 * 4);
 #pragma unroll
       for (int i = 0; i < 2; i++) {
@@ -610,6 +651,79 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
           __hip_atomic_store(reinterpret_cast<unsigned long long *>(hbuf + (size_t)p * IR + 16 * u + 4 * grp),
                              ((unsigned long long)hw.y << 32) | hw.x, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
         }
+        if constexpr (STATIC_GME_CUPOST) { // (this unit's h stores done, then its slot counted)
+          wait_mem();
+          if (lane == 0) {
+            __hip_atomic_fetch_add(ucnt + 32 * s, 1u, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+          }
+        }
+      }
+    };
+    // XS2 (few routed units: 2 nr <= ncu, T 1): each routed unit's two K halves on two CUs (CU c: unit SHOFF + c % nr, half
+    // c / nr); a CU's 4 waves add their sums in LDS as round does, wave 0 stores them (xpart, `part`: [unit][half][2][64 lanes]
+    // fp32) and counts the unit (pcnt); the second to count adds half 0 + half 1, writes h and counts the slot. MI355X 11-10
+    // g53prof13, T 1: one unit (196 KB) per CU took 8 us (~24 GB/s a CU), on 128 of the 256 CUs
+    auto xs2_finish = [&](v4f const (&tt2)[2], int un, int hf, int r) {
+      int const s = un / C::U13, u = un % C::U13;
+      int const p0 = __builtin_amdgcn_readfirstlane(start[s]), n = __builtin_amdgcn_readfirstlane(start[s + 1]) - p0;
+      float *const pb = prs;
+#pragma unroll
+      for (int i = 0; i < 2; i++) {
+        *reinterpret_cast<v4f *>(pb + ((wave * 2 + i) * 64 + lane) * 4) = tt2[i];
+      }
+      __syncthreads();
+      if (wave == 0) {
+        v4f tot2[2];
+#pragma unroll
+        for (int i = 0; i < 2; i++) {
+          tot2[i] = *reinterpret_cast<v4f const *>(pb + ((0 * 2 + i) * 64 + lane) * 4);
+#pragma unroll
+          for (int w = 1; w < 4; w++) {
+            tot2[i] += *reinterpret_cast<v4f const *>(pb + ((w * 2 + i) * 64 + lane) * 4);
+          }
+        }
+        float *const xp = part + ((size_t)r * 2 + hf) * (2 * 64 * 4);
+#pragma unroll
+        for (int i = 0; i < 2; i++) {
+          st16_dev(xp + (i * 64 + lane) * 4, make_uint4(__float_as_uint(tot2[i][0]), __float_as_uint(tot2[i][1]),
+                                                        __float_as_uint(tot2[i][2]), __float_as_uint(tot2[i][3])));
+        }
+        wait_mem();
+        uint32_t old = 0;
+        if (lane == 0) {
+          old = __hip_atomic_fetch_add(ucnt + C::PC0 + 8 * r, 1u, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+        }
+        old = __builtin_amdgcn_readfirstlane(old);
+        if (old == 1) { // (the second: the other half's sums, then half 0 + half 1)
+          float const *const xo = part + ((size_t)r * 2 + (1 - hf)) * (2 * 64 * 4);
+          v4f g2[2];
+#pragma unroll
+          for (int i = 0; i < 2; i++) {
+            uint4 const o = ld16_dev(xo + (i * 64 + lane) * 4);
+            v4f const ov = {__uint_as_float(o.x), __uint_as_float(o.y), __uint_as_float(o.z), __uint_as_float(o.w)};
+            g2[i] = hf == 0 ? tot2[i] + ov : ov + tot2[i];
+          }
+          if (r16 < n) {
+            float hv[4];
+#pragma unroll
+            for (int q = 0; q < 4; q++) {
+              float gv = g2[0][q], uv = g2[1][q];
+              if (limit > 0.f) {
+                gv = fminf(gv, limit);
+                uv = fminf(fmaxf(uv, -limit), limit);
+              }
+              hv[q] = gv / (1.0f + __expf(-gv)) * uv;
+            }
+            int const p = pl[p0 + r16];
+            uint2 const hw = make_uint2(pack_bf16x2(hv[0], hv[1]), pack_bf16x2(hv[2], hv[3]));
+            __hip_atomic_store(reinterpret_cast<unsigned long long *>(hbuf + (size_t)p * IR + 16 * u + 4 * grp),
+                               ((unsigned long long)hw.y << 32) | hw.x, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+          }
+          wait_mem();
+          if (lane == 0) {
+            __hip_atomic_fetch_add(ucnt + 32 * s, 1u, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+          }
+        }
       }
     };
     if (STATIC_GME_TIMES && lane == 0) {
@@ -617,29 +731,47 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
     }
     int const nmain = n13u;
     constexpr int SHOFF = C::U13; // (slot 0's units done before the table)
-    int un = cu + SHOFF, r = 0;
-    if (un < nmain) {
-      issue(wa, un);
+    int const nr = nmain - SHOFF; // (the routed units)
+    bool const xs2 = HV == 2 && part != nullptr && nr > 0 && 2 * nr <= ncu;
+    // the pipeline items j = (unit u0 + (j / HV) ncu, piece j % HV), two register sets in turn
+    int const u0 = cu + SHOFF;
+    int const nit = xs2 ? 0 : u0 < nmain ? (nmain - u0 + ncu - 1) / ncu * HV : 0;
+    if (xs2 && cu < 2 * nr) { // (XS2: this CU's half of one unit)
+      int const r = cu % nr, hf = cu / nr;
+      issue(wa, SHOFF + r, hf);
+      v4f t2[2] = {v4f{0.f, 0.f, 0.f, 0.f}, v4f{0.f, 0.f, 0.f, 0.f}};
+      mma(wa, SHOFF + r, hf, t2);
+      xs2_finish(t2, SHOFF + r, hf, r);
+    }
+    auto unit_of = [&](int j) { return u0 + (j / HV) * ncu; };
+    v4f tt2[2] = {v4f{0.f, 0.f, 0.f, 0.f}, v4f{0.f, 0.f, 0.f, 0.f}};
+    auto step = [&](WSet const &ws, int j) {
+      if (j % HV == 0) {
+        tt2[0] = tt2[1] = v4f{0.f, 0.f, 0.f, 0.f};
+      }
+      mma(ws, unit_of(j), j % HV, tt2);
+      if (j % HV == HV - 1) {
+        round(tt2, unit_of(j), j / HV);
+      }
+    };
+    if (nit > 0) {
+      issue(wa, unit_of(0), 0);
     }
 #pragma unroll 1
-    while (un < nmain) {
-      if (un + ncu < nmain) {
-        issue(wb2, un + ncu);
+    for (int j = 0; j < nit; j += 2) {
+      if (j + 1 < nit) {
+        issue(wb2, unit_of(j + 1), (j + 1) % HV);
       }
       __builtin_amdgcn_sched_barrier(0);
-      round(wa, un, r);
-      un += ncu;
-      r++;
-      if (un >= nmain) {
+      step(wa, j);
+      if (j + 1 >= nit) {
         break;
       }
-      if (un + ncu < nmain) {
-        issue(wa, un + ncu);
+      if (j + 2 < nit) {
+        issue(wa, unit_of(j + 2), (j + 2) % HV);
       }
       __builtin_amdgcn_sched_barrier(0);
-      round(wb2, un, r);
-      un += ncu;
-      r++;
+      step(wb2, j + 1);
     }
     if (STATIC_GME_TIMES && lane == 0) {
       tms[2] = gtime();
@@ -647,7 +779,7 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
     // per slot its units done (slot s's count at ucnt[32 s]: its own 128-B line), counted by wave 0 once its h stores
     // completed: a W2 unit waits for its slot only (MI355X 11-07 glmmoe29, T 1: W2 started after every W13 unit, ~33 us,
     // the slots of the CUs with one round done at ~19)
-    if (wave == 0) {
+    if (wave == 0 && !xs2 && !STATIC_GME_CUPOST) { // (XS2: the second CU of each unit counted its slot; CUPOST: round counted)
       wait_mem();
       if (lane == 0) {
         for (int v = cu + SHOFF; v < nmain; v += ncu) {
@@ -785,8 +917,10 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
     return j < n2 ? n13 + j : ntot;
   };
   // (KQ 1 only: MI355X 11-07 glmmoe60, random T 64 291.6 / 283.4 vs 294.9 us, T 32 211.3 vs 213.2; T 16 (KQ 2) 189.8 vs 167.4)
-  constexpr int DYP = T >= 32 ? 2 : 0; // (the pooled W2 rounds; T 16: 0 = BAL, MI355X 11-08 glmmoe122 144.9 / 141.6 vs 148.8 / 149.8 us at 1)
-  constexpr bool BAL = SLOTW<C> && DYP == 0 && KQ == 1;
+  // (2: also the CU-unit path, T <= 8 - its W2 items after the CU's W13 units, waiting per slot as SLOTW)
+  constexpr bool XQ = (STATIC_GME_W2XQ >= 1 && SLOTW<C>) || (STATIC_GME_W2XQ >= 2 && CUW<C>);
+  constexpr int DYP = XQ ? 0 : T >= 32 ? 2 : 0; // (the pooled W2 rounds; T 16: 0 = BAL, MI355X 11-08 glmmoe122 144.9 / 141.6 vs 148.8 / 149.8 us at 1)
+  constexpr bool BAL = SLOTW<C> && DYP == 0 && KQ == 1 && !XQ;
   constexpr int W2P = W2_ROWS / 32;
   // (the loop's end without BAL: n13 + n2, as the whole rounds r2 plus the rest - this form keeps the compiled code of the
   // libraries measured with the W2 variants)
@@ -807,8 +941,18 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
     int const ii = __builtin_amdgcn_readfirstlane(__shfl((int)idx, 0));
     return n13 + n2s + ii < ntot ? n13 + n2s + ii : ntot;
   };
+  auto xfetch = [&]() -> int { // (XQ: the next item of this XCD's pool)
+    uint32_t idx = 0;
+    if (lane == 0) {
+      idx = __hip_atomic_fetch_add(cnt + 128 + 32 * (cu % 8), 1u, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+    }
+    int const j = (cu % 8) + 8 * __builtin_amdgcn_readfirstlane(__shfl((int)idx, 0));
+    return j < n2 ? n13 + j : ntot;
+  };
   auto next_it = [&](int it) -> int {
-    if constexpr (BAL) {
+    if constexpr (XQ) {
+      return it + nw < n13 ? it + nw : xfetch();
+    } else if constexpr (BAL) {
       return it + nw < n13 ? it + nw : w2item(k2++);
     } else if constexpr (DYP > 0) {
       if (it + nw < n13 + n2s) {
@@ -822,6 +966,11 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
   if constexpr (DYP > 0) {
     if (it0 >= n13 + n2s) {
       it0 = fetch();
+    }
+  }
+  if constexpr (XQ) {
+    if (it0 >= n13) {
+      it0 = xfetch();
     }
   }
 #pragma unroll 1
@@ -855,7 +1004,8 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
     bool const is13 = it < n13;
     int const jv = is13 ? 0 : it - n13; // (W2 item jv)
     // W13 item: (slot, unit, K piece kq) with the pieces of a unit adjacent
-    int const s = is13 ? it / (C::U13 * KQ) : jv % ns, u = is13 ? (it / KQ) % C::U13 : jv / ns,
+    constexpr int U2N = H / W2_ROWS; // (XQ: W2 items slot-major)
+    int const s = is13 ? it / (C::U13 * KQ) : XQ ? jv / U2N : jv % ns, u = is13 ? (it / KQ) % C::U13 : XQ ? jv % U2N : jv / ns,
               kq = is13 ? it % KQ : 0;
     int const e = __builtin_amdgcn_readfirstlane(se[s]), p0 = __builtin_amdgcn_readfirstlane(start[s]),
               n = __builtin_amdgcn_readfirstlane(start[s + 1]) - p0;
@@ -967,9 +1117,88 @@ __device__ __forceinline__ void glm_moe_experts_task(G const &g,
           }
         }
       };
+      // (STATIC_GME_W13DB: one tile, the halves of the chunks double-buffered)
+      auto body_db = [&]() {
+        constexpr int HC = CH / 2;
+        static_assert(CH % 2 == 0 && KBP % (2 * HC) == 0, "glm_moe_experts W13DB: whole chunk halves");
+        struct Half {
+          uint4 w[2][HC][2];
+          uint4 xr[HC][4];
+          float sg[HC], su[HC];
+        };
+        Half hb[2];
+        auto issue = [&](Half &hf, int c0) {
+#pragma unroll
+          for (int i = 0; i < 2; i++)
+#pragma unroll
+            for (int kb = 0; kb < HC; kb++) {
+              uint8_t const *rp = wb + ((size_t)((c0 + kb) * 2 + i) * 2) * 1024 + 16 * lane;
+              hf.w[i][kb][0] = *reinterpret_cast<uint4 const *>(rp);
+              hf.w[i][kb][1] = *reinterpret_cast<uint4 const *>(rp + 1024);
+            }
+#pragma unroll
+          for (int kb = 0; kb < HC; kb++) {
+            size_t const so = (((size_t)e * C::IRB + u / 8) * C::KB1 + c0 + kb) * 2;
+            hf.sg[kb] = w13sf[so];
+            hf.su[kb] = w13sf[so + 1];
+          }
+#pragma unroll
+          for (int kb = 0; kb < HC; kb++)
+#pragma unroll
+            for (int q = 0; q < 4; q++) {
+              uint32_t const off = (uint32_t)(((size_t)tok[0] * H + (c0 + kb) * 128 + 32 * grp + 8 * q) * 2);
+              hf.xr[kb][q] = ld16_in_at(x, off);
+            }
+        };
+        auto comp = [&](Half const &hf) {
+#pragma unroll
+          for (int kb = 0; kb < HC; kb++) {
+            v8bf af[4][2];
+#pragma unroll
+            for (int st = 0; st < 4; st++)
+#pragma unroll
+              for (int i = 0; i < 2; i++) {
+                uint4 const &w = hf.w[i][kb][st >> 1];
+                af[st][i] = (st & 1) ? e4m3x8_bf16(w.z, w.w) : e4m3x8_bf16(w.x, w.y);
+              }
+            v4f acc[2] = {v4f{0.f, 0.f, 0.f, 0.f}, v4f{0.f, 0.f, 0.f, 0.f}};
+#pragma unroll
+            for (int st = 0; st < 4; st++) {
+              v8bf const b = u4_bf16(hf.xr[kb][st]);
+#pragma unroll
+              for (int i = 0; i < 2; i++) {
+                acc[i] = __builtin_amdgcn_mfma_f32_16x16x32_bf16(af[st][i], b, acc[i], 0, 0, 0);
+              }
+            }
+            tot[0][0] += acc[0] * hf.sg[kb];
+            tot[1][0] += acc[1] * hf.su[kb];
+          }
+        };
+        int const cb = kq * KBP, ce = (kq + 1) * KBP;
+        issue(hb[0], cb);
+        __builtin_amdgcn_sched_barrier(0);
+        if (STATIC_GME_TIMES && lane == 0 && it == gw) {
+          tms[1] = gtime();
+        }
+#pragma unroll 1
+        for (int c0 = cb; c0 < ce; c0 += 2 * HC) {
+          issue(hb[1], c0 + HC);
+          __builtin_amdgcn_sched_barrier(0); // (the next half's loads issued before this half's MFMAs)
+          comp(hb[0]);
+          __builtin_amdgcn_sched_barrier(0);
+          if (c0 + 2 * HC < ce) {
+            issue(hb[0], c0 + 2 * HC);
+          }
+          __builtin_amdgcn_sched_barrier(0);
+          comp(hb[1]);
+          __builtin_amdgcn_sched_barrier(0);
+        }
+      };
       // (the item's real tiles: n <= 16 NT tokens, wave-uniform; NR > 3 runs as NT)
       int const nr = (n + 15) >> 4;
-      if (nr <= 1) {
+      if (STATIC_GME_W13DB && nr <= 1) {
+        body_db();
+      } else if (nr <= 1) {
         body(std::integral_constant<int, 1>{});
       } else if constexpr (NT >= 2) {
         if (nr == 2 || NT == 2) {
@@ -1146,7 +1375,8 @@ __device__ __forceinline__ void run_glm_moe_experts(Maps const &, G const &g, Ke
                           buf_at<uint8_t const>(g, slot_at<BUF_SLOTS, 2>()),
                           buf_at<float const>(g, slot_at<BUF_SLOTS, 3>()),
                           buf_at<__hip_bfloat16>(g, slot_at<BUF_SLOTS, 4>()),
-                          C::KQ > 1 ? buf_at<float>(g, slot_at<BUF_SLOTS, 7>()) : nullptr,
+                          C::KQ > 1 || (gme::CUW<C> && slot_at<BUF_SLOTS, 7>() >= 0) ? buf_at<float>(g, slot_at<BUF_SLOTS, 7>()) : nullptr,
+                          // (CUW: XS2's halves when the slot is given)
                           C::KQ > 1 || gme::CUW<C> || gme::SLOTW<C> ? buf_at<uint32_t>(g, slot_at<BUF_SLOTS, 8>()) : nullptr,
                           buf_at<float>(g, SELF::buf),
                           cnt_of(g) + SELF::counter,

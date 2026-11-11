@@ -20,7 +20,8 @@ __device__ __forceinline__ void glm_topk_route_task(float const *bias,
   (void)pair;
   __syncthreads(); // the scratch below is LDS a previous task may still read
   constexpr int NCAND = 8 * K; // cand_s's size (the layout of topk_scratch_bytes)
-  static_assert(NE >= 300, "topk_route: the pick's scratch in [NE] floats");
+  // (the pick's 300 words: in the [NE] floats after the scores when NE >= 300, else its own region after the rest -
+  // topk_pick_own_region, counted in smem_glm_topk_route; GLM-5.3: NE 256)
   static_assert(NE % 64 == 0 && NE / 4 <= 256 && K <= NE && NCAND <= 256 && NL >= NE && NL % 4 == 0,
                 "topk_route: NE / 64 experts per lane of wave 0");
   // scratch: sc_s [NE] sigmoid scores, [NE] the pick's (topk_pick_radix, 300

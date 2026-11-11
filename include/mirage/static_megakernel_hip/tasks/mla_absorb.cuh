@@ -16,20 +16,24 @@
 
 namespace static_mk {
 
-template <int HEADS, int NOPE, int RP, int KV>
+// TT: the task's tokens [TT z, TT z + TT) (default all T; GLM-5.3's o absorb from T 32: grid z = T / 16)
+template <int HEADS, int NOPE, int RP, int KV, int TT = T>
 __device__ __forceinline__ void mla_absorb_task(KernelLocals &L,
                                                 __hip_bfloat16 const *q,     // [T][HEADS x (NOPE + RP)]
                                                 __hip_bfloat16 const *w_kc,  // [HEADS][KV][NOPE]
                                                 __hip_bfloat16 *query,       // [T][HEADS][KV + RP]
                                                 int h,
-                                                int y) {
+                                                int y,
+                                                int z = 0) {
   // (NOPE 128: K3; 256: GLM-5.3-Flash's DSA, RP 0)
   static_assert(NOPE % 32 == 0 && NOPE >= 128 && NOPE <= 512 && KV % 128 == 0 && T <= 64 && RP % 8 == 0,
                 "mla_absorb: the shapes (thread maps below)");
-  constexpr int NC = (T + 15) / 16; // the tokens as the MFMA's columns: tiles of 16
+  static_assert(T % TT == 0, "mla_absorb: whole token tiles");
+  constexpr int NC = (TT + 15) / 16; // the tokens as the MFMA's columns: tiles of 16
   constexpr int QW = HEADS * (NOPE + RP), D = KV + RP, S = NOPE / 32;
   int const tid = task_tid_all(), lane = tid & 63, wave = tid >> 6, tok = lane % 16, grp = lane / 16;
-  __hip_bfloat16 *const qn = reinterpret_cast<__hip_bfloat16 *>(L.sm); // [T][NOPE]
+  int const t0 = TT * z;
+  __hip_bfloat16 *const qn = reinterpret_cast<__hip_bfloat16 *>(L.sm); // [TT][NOPE]
   // 1. this wave's w_kc^T fragments: rows l = 128 y + 32 wave + 16 i + l % 16,
   // n = 32 s + 8 (l / 16) .. + 7
   v4f a[2][S];
@@ -44,12 +48,12 @@ __device__ __forceinline__ void mla_absorb_task(KernelLocals &L,
   __syncthreads(); // the LDS may still be read by the previous task
   // 2. q_nope of this head (polled; T x NOPE / 8 vectors), and (y = 0) q_pe
   // copied to the query (polled the same way)
-  for (int v = tid; v < T * (NOPE + RP) / 8; v += 256) {
-    if (v < T * NOPE / 8) {
-      int const t = v / (NOPE / 8), c = 8 * (v % (NOPE / 8));
-      *reinterpret_cast<uint4 *>(qn + t * NOPE + c) = poll16(q + (size_t)t * QW + h * (NOPE + RP) + c);
+  for (int v = tid; v < TT * (NOPE + RP) / 8; v += 256) {
+    if (v < TT * NOPE / 8) {
+      int const tl = v / (NOPE / 8), t = t0 + tl, c = 8 * (v % (NOPE / 8));
+      *reinterpret_cast<uint4 *>(qn + tl * NOPE + c) = poll16(q + (size_t)t * QW + h * (NOPE + RP) + c);
     } else if (y == 0) {
-      int const i = v - T * NOPE / 8, t = i / (RP / 8), c = 8 * (i % (RP / 8));
+      int const i = v - TT * NOPE / 8, t = t0 + i / (RP / 8), c = 8 * (i % (RP / 8));
       uint4 const v4 = poll16(q + (size_t)t * QW + h * (NOPE + RP) + NOPE + c);
       __hip_bfloat16 *const dst = query + ((size_t)t * HEADS + h) * D + KV + c;
       st16_dev(dst, v4);
@@ -68,7 +72,7 @@ __device__ __forceinline__ void mla_absorb_task(KernelLocals &L,
 #pragma unroll
     for (int c = 0; c < NC; c++) {
       v4f b = {0.f, 0.f, 0.f, 0.f};
-      if (16 * c + tok < T) {
+      if (16 * c + tok < TT) {
         b = *reinterpret_cast<v4f const *>(qn + (16 * c + tok) * NOPE + 32 * s + 8 * grp);
       }
 #pragma unroll
@@ -81,8 +85,8 @@ __device__ __forceinline__ void mla_absorb_task(KernelLocals &L,
   __syncthreads(); // every wave's reads of qn done: the task's [T][128] outputs staged there (bf16, rows of NOPE >= 128)
 #pragma unroll
   for (int c = 0; c < NC; c++) {
-    int const t = 16 * c + tok;
-    if (t < T) {
+    int const t = 16 * c + tok; // (local)
+    if (t < TT) {
 #pragma unroll
       for (int i = 0; i < 2; i++) {
         int const r0 = 32 * wave + 16 * i + 4 * grp;
@@ -92,9 +96,9 @@ __device__ __forceinline__ void mla_absorb_task(KernelLocals &L,
     }
   }
   __syncthreads();
-  for (int v = tid; v < T * 128 / 8; v += 256) { // each token's 256 B of these latent rows in 16-B stores
-    int const t = v / 16, c = 8 * (v % 16);
-    st16_dev(query + ((size_t)t * HEADS + h) * D + 128 * y + c, *reinterpret_cast<uint4 const *>(qn + t * NOPE + c));
+  for (int v = tid; v < TT * 128 / 8; v += 256) { // each token's 256 B of these latent rows in 16-B stores
+    int const tl = v / 16, c = 8 * (v % 16);
+    st16_dev(query + ((size_t)(t0 + tl) * HEADS + h) * D + 128 * y + c, *reinterpret_cast<uint4 const *>(qn + tl * NOPE + c));
   }
   __syncthreads();
 }

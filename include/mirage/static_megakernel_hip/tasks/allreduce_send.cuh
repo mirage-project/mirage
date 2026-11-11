@@ -34,8 +34,21 @@ namespace static_mk {
 // RBLK (R in blocks, the producer moe_experts): instead of all NDONE
 // tasks, the slice waits for the 128-column blocks it reads (rblk: moe's block
 // counters, core.cuh MOE_MISC_RBLK), each complete at n_live x 8 tiles.
+// NQ > 0 (GLM-5.3, the layer's last all-reduce + residual add + RMSNorm folded in, SGLang's fused add + RMSNorm): NSLICE = T NQ,
+// slice x = token x / NQ, column part x % NQ (a token-major run of W / 8 / NQ vectors); after landing its sums (kept in registers,
+// not stored) v = bf16(sum) + residual -> residual_out = bf16(v); the token's NQ sums of squares swapped through psum (0xFF before
+// each launch); out = bf16(v rstd gamma). (MI355X: a separate add + RMSNorm task saw the landed sums ~6 us after the senders'
+// last task ended, T 2 and 8.)
+struct ArsNorm {
+  __hip_bfloat16 const *res_in;
+  __hip_bfloat16 *res_out;
+  __hip_bfloat16 const *gamma;
+  __hip_bfloat16 *out;
+  float *psum;
+  float eps;
+};
 template <int NSLICE, int NDONE, int GROUP, int W, size_t OFF, int RS,
-          bool RBLK = false, bool CM = false, bool HAND = false, bool PM = false>
+          bool RBLK = false, bool CM = false, bool HAND = false, bool PM = false, int NG = 0, int NQ = 0, bool RSN = false>
 __device__ __forceinline__ void allreduce_send_task(G const &g,
                                                     float const *src,
                                                     uint32_t *done_cnt,
@@ -44,7 +57,8 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
                                                     int x,
                                                     char *lds_hand, // (the LDS hand-off: the CU's LDS)
                                                     __hip_bfloat16 const *pf_res, // (prefetch, or null: hc_post_mix's residual [T][4][W])
-                                                    float const *pf_fn STAGE_STAMP_PARAM) { // (and its fn [24][4][W])
+                                                    float const *pf_fn, // (and its fn [24][4][W])
+                                                    ArsNorm const nrm STAGE_STAMP_PARAM) {
   if (pf_res != nullptr) { // (ARS prefetch: hc_post_mix task x's lines into this XCD's L2 while the experts run; it runs next here)
     constexpr int HCn = 4, NM = 24;
     int const c0 = 32 * x, tid = (int)STATIC_TIDX;
@@ -85,7 +99,19 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
       asm volatile("" ::: "memory");
     }
   } else if (STATIC_TIDX == 0) {
-    cnt_wait_in(done_cnt, NDONE);
+    if constexpr (NG > 0) { // (a store gemm counting per column group, as below: the groups this slice reads)
+      constexpr int C8_ = W / 8, NB_ = T * C8_, GV = C8_ / NG;
+      int const lo_ = (int)((long long)NB_ * x / NSLICE), hi_ = (int)((long long)NB_ * (x + 1) / NSLICE);
+      int const t0_ = lo_ / C8_, t1_ = (hi_ - 1) / C8_;
+      for (int q = 0; q < NG && hi_ > lo_; q++) {
+        auto in_row = [&](int t) { return t * C8_ + GV * q < hi_ && t * C8_ + GV * (q + 1) > lo_; };
+        if (t1_ - t0_ >= 2 || in_row(t0_) || in_row(t1_)) {
+          cnt_wait_in(done_cnt + 32 * q, NDONE / NG);
+        }
+      }
+    } else {
+      cnt_wait_in(done_cnt, NDONE);
+    }
   }
   if (STATIC_TIDX == 0) {
     STAGE_STAMP(true)
@@ -110,6 +136,17 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
           }                              // take every W2 unit's add)
           asm volatile("" ::: "memory");
           prev = b;
+        }
+      }
+    } else if constexpr (NG > 0) { // (a store gemm counting per column group: the groups this slice reads, one after another)
+      static_assert(!CM && W % (8 * NG) == 0 && NDONE % NG == 0, "allreduce_send NG: whole column groups, equal tasks per group");
+      constexpr int C8_ = W / 8, NB_ = T * C8_, GV = C8_ / NG;
+      int const lo_ = (int)((long long)NB_ * x / NSLICE), hi_ = (int)((long long)NB_ * (x + 1) / NSLICE);
+      int const t0_ = lo_ / C8_, t1_ = (hi_ - 1) / C8_;
+      for (int q = 0; q < NG && hi_ > lo_; q++) {
+        auto in_row = [&](int t) { return t * C8_ + GV * q < hi_ && t * C8_ + GV * (q + 1) > lo_; };
+        if (t1_ - t0_ >= 2 || in_row(t0_) || in_row(t1_)) {
+          cnt_wait_in(done_cnt + 32 * q, NDONE / NG);
         }
       }
     } else {
@@ -173,6 +210,14 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
       if (T >= STATIC_ARS_LAND_MIN_T) { // (the other GPUs only; the own partial kept for the landing below)
         uint4 const pv = pack_bf16x8(p0, p1);
         own_v = pv;
+        if constexpr (RSN) { // (reduce-scatter: to token t's owner only, its RS area [GPUS][T / GPUS][W])
+          constexpr int TPG = T / GPUS;
+          int const ow = t / TPG;
+          if (ow != g.rank) {
+            st16_sys(g.peer[ow] + OFF + rg_set() + ((size_t)g.rank * TPG + t % TPG) * ((size_t)W * 2) + (size_t)c * 16, pv);
+          }
+          continue;
+        }
 #pragma unroll
         for (int r = 0; r < GPUS; r++) {
           if (r != g.rank) {
@@ -188,7 +233,147 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
   // order (fp32), round to bf16 and write the sum into this GPU's own slot (only this GPU reads it); then the task counts
   // itself: hc_post_mix loads the sums from the local slot after the count. MI355X 11-08 glmmoe78: hc_post_mix's own wait for
   // the pushed sums cost ~27 / 24 us of the T 64 / 32 MoE kernel (normal build), the bare hop 10 / 4.6 us)
-  if constexpr (!SOLO && T >= STATIC_ARS_LAND_MIN_T) {
+  static_assert(NQ == 0 || (!SOLO && T >= STATIC_ARS_LAND_MIN_T && !HAND && !CM && NSLICE == T * NQ && (W / 8) % NQ == 0 &&
+                             W / 8 / NQ <= 256 && NQ <= 16),
+                "allreduce_send NQ: landing senders, a slice per (token, column part), one vector a thread");
+  [[maybe_unused]] float nv[8]; // (NQ: this thread's v = bf16(sum) + residual, fp32)
+  [[maybe_unused]] uint4 ngw = make_uint4(0u, 0u, 0u, 0u), nrr = ngw;
+  if constexpr (NQ > 0) { // (gamma and the residual of this thread's vector, before the sums)
+    if ((int)STATIC_TIDX < nsl) {
+      int const i = vec_of(STATIC_TIDX);
+      ngw = *reinterpret_cast<uint4 const *>(nrm.gamma + 8 * (i % (W / 8)));
+      nrr = ld16_in_at(nrm.res_in, (uint32_t)((size_t)i * 16));
+    }
+  }
+  // RSN (with NQ, T a multiple of GPUS >= 16; params[7] 1): token t's owner (GPU t / (T / GPUS)) adds the GPUs' partials of its
+  // slice, the residual and the RMSNorm (as NQ), keeps residual_out (only the owner's rows are written) and pushes x to the other
+  // GPUs' AG area [T][W] (after the RS area); a task of a token this GPU does not own polls its x there and copies it to out.
+  // Per link 2 T W / GPUS bytes instead of T W 2 (MI355X 11-10 g53prof14, T 64: each push-all all-reduce + norm ~35 us)
+  if constexpr (RSN) {
+#pragma clang fp contract(off)
+    static_assert(NQ > 0 && T % GPUS == 0 && !CM && !HAND, "allreduce_send RSN: NQ slices, whole tokens per GPU");
+    constexpr int TPG = T / GPUS;
+    int const tid = (int)STATIC_TIDX, t = x / NQ, y = x % NQ, ow = t / TPG;
+    unsigned char *const ex = g.rv + OFF + rg_set();
+    size_t const AG = (size_t)T * W * 2;
+    if (ow == g.rank) { // (the owner)
+      float ss = 0.f;
+      if (tid < nsl) {
+        int const i = vec_of(tid), c = i % (W / 8);
+        uint4 u[GPUS];
+        for (;;) {
+          bool all = true;
+#pragma unroll
+          for (int r = 0; r < GPUS; r++) {
+            u[r] = r == g.rank ? own_v
+                               : ld16_at<AUX_SYS>(ex, (uint32_t)(((size_t)r * TPG + t % TPG) * ((size_t)W * 2) + (size_t)c * 16));
+            all = all && valid16w(u[r]);
+          }
+          if (all) {
+            break;
+          }
+          __builtin_amdgcn_s_sleep(1);
+          asm volatile("" ::: "memory");
+        }
+        if (tid == 0) { // (timing build, RSN owner: stage stamp 0 = thread 0's GPUS partials landed)
+          STAGE_STAMP_AT(0)
+        }
+        float sm8[8];
+#pragma unroll
+        for (int k = 0; k < 8; k++) {
+          sm8[k] = 0.f;
+        }
+#pragma unroll
+        for (int r = 0; r < GPUS; r++) {
+          uint32_t const wd[4] = {u[r].x, u[r].y, u[r].z, u[r].w};
+#pragma unroll
+          for (int k = 0; k < 4; k++) {
+            sm8[2 * k] += bf16_lo(wd[k]);
+            sm8[2 * k + 1] += bf16_hi(wd[k]);
+          }
+        }
+        uint32_t const sw[4] = {pack_bf16x2(sm8[0], sm8[1]), pack_bf16x2(sm8[2], sm8[3]), pack_bf16x2(sm8[4], sm8[5]),
+                                pack_bf16x2(sm8[6], sm8[7])};
+        uint32_t const rw[4] = {nrr.x, nrr.y, nrr.z, nrr.w};
+        uint32_t ro[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+          nv[2 * j] = bf16_lo(sw[j]) + bf16_lo(rw[j]);
+          nv[2 * j + 1] = bf16_hi(sw[j]) + bf16_hi(rw[j]);
+          ro[j] = pack_bf16x2(nv[2 * j], nv[2 * j + 1]);
+        }
+        st16_out(nrm.res_out + (size_t)i * 8, make_uint4(ro[0], ro[1], ro[2], ro[3]));
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+          ss += nv[j] * nv[j];
+        }
+      }
+      wait_mem();
+      __shared__ float rred[4], rq[16];
+      for (int d = 32; d > 0; d >>= 1) {
+        ss += __shfl_xor(ss, d);
+      }
+      if ((tid & 63) == 0) {
+        rred[tid >> 6] = ss;
+      }
+      __syncthreads();
+      float tot = rred[0] + rred[1] + rred[2] + rred[3];
+      if constexpr (NQ > 1) {
+        float *const pt = nrm.psum + (size_t)t * NQ;
+        if (tid == 0) {
+          __hip_atomic_store(pt + y, tot, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+        }
+        if (tid < NQ) {
+          float v = __hip_atomic_load(pt + tid, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+          while (__float_as_uint(v) == 0xFFFFFFFFu) {
+            tail_pause();
+            v = __hip_atomic_load(pt + tid, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+          }
+          rq[tid] = v;
+        }
+        __syncthreads();
+        tot = 0.f;
+#pragma unroll
+        for (int q = 0; q < NQ; q++) {
+          tot += rq[q];
+        }
+      }
+      if (tid == 0) { // (stage 1: the token's sums of squares in)
+        STAGE_STAMP_AT(1)
+      }
+      float const rstd = rsqrtf(tot / (float)W + nrm.eps);
+      if (tid < nsl) {
+        int const i = vec_of(tid);
+        uint32_t const gq[4] = {ngw.x, ngw.y, ngw.z, ngw.w};
+        uint32_t o[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+          o[j] = pack_bf16x2(nv[2 * j] * rstd * bf16_lo(gq[j]), nv[2 * j + 1] * rstd * bf16_hi(gq[j]));
+        }
+        uint4 const ov = make_uint4(o[0], o[1], o[2], o[3]);
+        st16_out(nrm.out + (size_t)i * 8, ov);
+#pragma unroll
+        for (int r = 0; r < GPUS; r++) { // (the all-gather: x to the others' AG area)
+          if (r != g.rank) {
+            st16_sys(g.peer[r] + OFF + rg_set() + AG + (size_t)i * 16, ov);
+          }
+        }
+      }
+    } else if (tid < nsl) { // (another GPU's token: its x from the AG area)
+      int const i = vec_of(tid);
+      uint4 v = ld16_at<AUX_SYS>(ex, (uint32_t)(AG + (size_t)i * 16));
+      while (!valid16w(v)) {
+        __builtin_amdgcn_s_sleep(1);
+        v = ld16_at<AUX_SYS>(ex, (uint32_t)(AG + (size_t)i * 16));
+      }
+      if (tid == 0) { // (timing build, RSN non-owner: stage stamp 0 = thread 0's x landed)
+        STAGE_STAMP_AT(0)
+      }
+      st16_out(nrm.out + (size_t)i * 8, v);
+    }
+    __syncthreads();
+    task_post(self_cnt, 1);
+  } else if constexpr (!SOLO && T >= STATIC_ARS_LAND_MIN_T) {
     for (int li = STATIC_TIDX; li < nsl; li += 256) {
       int const i = vec_of(li);
       float sm8[8];
@@ -224,13 +409,77 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
       }
       uint4 const sv = make_uint4(pack_bf16x2(sm8[0], sm8[1]), pack_bf16x2(sm8[2], sm8[3]), pack_bf16x2(sm8[4], sm8[5]),
                                   pack_bf16x2(sm8[6], sm8[7]));
-      if constexpr (HAND) { // (for hc_post_mix task x, next on this CU: [T][VPS] vectors in LDS)
+      if constexpr (NQ > 0) { // (v = bf16(sum) + residual; residual_out = bf16(v))
+#pragma clang fp contract(off)
+        uint32_t const sw[4] = {sv.x, sv.y, sv.z, sv.w}, rw[4] = {nrr.x, nrr.y, nrr.z, nrr.w};
+        uint32_t ro[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+          nv[2 * j] = bf16_lo(sw[j]) + bf16_lo(rw[j]);
+          nv[2 * j + 1] = bf16_hi(sw[j]) + bf16_hi(rw[j]);
+          ro[j] = pack_bf16x2(nv[2 * j], nv[2 * j + 1]);
+        }
+        st16_out(nrm.res_out + (size_t)i * 8, make_uint4(ro[0], ro[1], ro[2], ro[3]));
+      } else if constexpr (HAND) { // (for hc_post_mix task x, next on this CU: [T][VPS] vectors in LDS)
         *reinterpret_cast<uint4 *>(lds_hand + ARS_HAND_OFF + (size_t)li * 16) = sv;
       } else {
         st16_dev(g.rv + OFF + (size_t)g.rank * ((size_t)T * W * 2) + (size_t)i * 16 + rg_set(), sv);
       }
     }
     if constexpr (HAND) {
+      __syncthreads();
+    }
+    if constexpr (NQ > 0) { // (the RMSNorm of the token's v: this part's sum of squares, then the token's NQ sums in part order)
+#pragma clang fp contract(off)
+      int const tid = (int)STATIC_TIDX, t = x / NQ, y = x % NQ;
+      float ss = 0.f;
+      if (tid < nsl) {
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+          ss += nv[j] * nv[j];
+        }
+      }
+      wait_mem(); // (residual_out stored before out)
+      __shared__ float nred[4], nq[16];
+      for (int d = 32; d > 0; d >>= 1) {
+        ss += __shfl_xor(ss, d);
+      }
+      if ((tid & 63) == 0) {
+        nred[tid >> 6] = ss;
+      }
+      __syncthreads();
+      float tot = nred[0] + nred[1] + nred[2] + nred[3];
+      if constexpr (NQ > 1) {
+        float *const pt = nrm.psum + (size_t)t * NQ;
+        if (tid == 0) {
+          __hip_atomic_store(pt + y, tot, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+        }
+        if (tid < NQ) {
+          float v = __hip_atomic_load(pt + tid, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+          while (__float_as_uint(v) == 0xFFFFFFFFu) {
+            tail_pause();
+            v = __hip_atomic_load(pt + tid, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT);
+          }
+          nq[tid] = v;
+        }
+        __syncthreads();
+        tot = 0.f;
+#pragma unroll
+        for (int q = 0; q < NQ; q++) {
+          tot += nq[q];
+        }
+      }
+      float const rstd = rsqrtf(tot / (float)W + nrm.eps);
+      if (tid < nsl) {
+        int const i = vec_of(tid);
+        uint32_t const gq[4] = {ngw.x, ngw.y, ngw.z, ngw.w};
+        uint32_t o[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+          o[j] = pack_bf16x2(nv[2 * j] * rstd * bf16_lo(gq[j]), nv[2 * j + 1] * rstd * bf16_hi(gq[j]));
+        }
+        st16_out(nrm.out + (size_t)i * 8, make_uint4(o[0], o[1], o[2], o[3]));
+      }
       __syncthreads();
     }
     task_post(self_cnt, 1);
@@ -253,6 +502,30 @@ constexpr int ars_param_or0() {
     return PARAMS::v[I];
   } else {
     return 0;
+  }
+}
+// (params[5] NQ > 0: residual in, residual out, gamma, out, the parts' sums in BUF_SLOTS[4 .. 8], eps bits in params[6])
+template <class SLOTS>
+constexpr int ars_slot_or(int i) { // (BUF_SLOTS[i], or -1 past its end)
+  return i < (int)(sizeof(SLOTS::v) / sizeof(int)) ? SLOTS::v[i] : -1;
+}
+template <class PARAMS, class SLOTS>
+constexpr int ars_xb(int own) { // (the exchange buffer of the GPUs' partials: BUF_SLOTS[9] with NQ when given, else the own buffer)
+  return ars_param_or0<PARAMS, 5>() > 0 && ars_slot_or<SLOTS>(9) >= 0 ? ars_slot_or<SLOTS>(9) : own;
+}
+template <class PARAMS, class SLOTS, class SELF>
+__device__ __forceinline__ ArsNorm ars_norm_of(G const &g) {
+  if constexpr (ars_param_or0<PARAMS, 5>() > 0) {
+    float *ps = nullptr;
+    if constexpr (ars_param_or0<PARAMS, 5>() > 1) {
+      ps = buf_at<float>(g, slot_at<SLOTS, 8>());
+    }
+    constexpr int OS = ars_slot_or<SLOTS>(7) >= 0 ? ars_slot_or<SLOTS>(7) : SELF::buf; // (the output: slot 7, or the own buffer)
+    return ArsNorm{buf_at<__hip_bfloat16 const>(g, slot_at<SLOTS, 4>()), buf_at<__hip_bfloat16>(g, slot_at<SLOTS, 5>()),
+                   buf_at<__hip_bfloat16 const>(g, slot_at<SLOTS, 6>()), buf_at<__hip_bfloat16>(g, OS), ps,
+                   __int_as_float(ars_param_or0<PARAMS, 6>())};
+  } else {
+    return ArsNorm{nullptr, nullptr, nullptr, nullptr, nullptr, 0.f};
   }
 }
 template <bool RBLK, class SLOTS, size_t ROFF = MOE_MISC_RBLK>
@@ -299,18 +572,23 @@ __device__ __forceinline__ void run_allreduce_send(Maps const &,
   static_assert(SRC::buf >= 0 && SRC::counter >= 0,
                 "allreduce_send: its input is a node's output buffer, the node "
                 "counts its tasks");
+  // (NQ with the norm's output read in this kernel: the node's buffer is that output, the GPUs' partials in BUF_SLOTS[9])
+  constexpr int XB = ars_xb<PARAMS, BUF_SLOTS>(SELF::buf);
   static_assert(
-      SELF::buf >= 0 && exchange_bytes[SELF::buf] == (size_t)GPUS * T * W * 2,
+      XB >= 0 && exchange_bytes[XB] == (size_t)(ars_param_or0<PARAMS, 7>() == 1 ? 2 : GPUS) * T * W * 2, // (RSN: RS + AG areas)
       "allreduce_send: its output, [GPUS][T][W] bf16 in the exchange region");
   allreduce_send_task<SELF::x,
                       SRC::x * SRC::y * SRC::z,
                       GROUP,
                       W,
-                      exchange_offset[SELF::buf],
+                      exchange_offset[XB],
                       slot_at<BUF_SLOTS, 0>(),
                       RBLK,
                       HAND,
-                      HAND, ars_param_or0<PARAMS, 2>() == 3>(
+                      HAND, ars_param_or0<PARAMS, 2>() == 3,
+                      ars_param_or0<PARAMS, 4>(), // (params[4] NG: the store gemm's column groups, each its own counter line)
+                      ars_param_or0<PARAMS, 5>(), // (params[5] NQ, [6] eps bits: the add + RMSNorm folded in, BUF_SLOTS[4 .. 8])
+                      ars_param_or0<PARAMS, 7>() == 1>( // (params[7] 1: RSN, by token owner)
       g,
       buf_at<float const>(g, SRC::buf),
       cnt_of(g) + SRC::counter,
@@ -319,7 +597,7 @@ __device__ __forceinline__ void run_allreduce_send(Maps const &,
       tk.x,
       L.sm,
       ars_pf_ptr<PARAMS, BUF_SLOTS, 2, __hip_bfloat16 const>(g),
-      ars_pf_ptr<PARAMS, BUF_SLOTS, 3, float const>(g) STAGE_STAMP_ARG(L.stage_stamps));
+      ars_pf_ptr<PARAMS, BUF_SLOTS, 3, float const>(g), ars_norm_of<PARAMS, BUF_SLOTS, SELF>(g) STAGE_STAMP_ARG(L.stage_stamps));
 }
 
 template <class SELF,

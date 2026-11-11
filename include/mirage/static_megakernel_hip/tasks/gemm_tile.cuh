@@ -100,17 +100,18 @@ constexpr int GEMM_NC = (T + 15) / 16;
 constexpr int GEMM_RED_BYTES = 3 * 64 * 16 * GEMM_NC;
 // the activation chunk of a task (KPC columns): a task's KP columns are filled into LDS and multiplied in KP / KPC chunks,
 // one after another, when [T][KP] does not fit beside the K parts' sums (T > 16: 64 tokens x 7168 x 2 B); one chunk
-// (KPC = KP) whenever it fits
-template <int ROWS, int KP>
+// (KPC = KP) whenever it fits. Q: a wave's K columns in whole Q (GEMM_FP8: 128, one scale block)
+template <int ROWS, int KP, int Q = 32>
 constexpr int gemm_act_kpc() {
   constexpr int TT = ROWS / 16, KSPLIT = TT >= 4 ? 1 : 4 / TT;
+  static_assert(KP % (Q * KSPLIT) == 0, "gemm_tile: a task's K columns in whole Q per wave (GEMM_FP8: 128-column scale blocks)");
   for (int d = 1; d <= KP / 32; d++) {
-    if (KP % d == 0 && (KP / d) % (32 * KSPLIT) == 0 &&
+    if (KP % d == 0 && (KP / d) % (Q * KSPLIT) == 0 &&
         T * (KP / d + (STATIC_GEMM_ACT_PAD ? 8 : 0)) * 2 + 16 + GEMM_RED_BYTES <= 160 * 1024 - 1024) {
       return KP / d;
     }
   }
-  return 32 * KSPLIT;
+  return Q * KSPLIT;
 }
 
 // the weight's layout (params[4], HIP): 0 the model's [N][K] (a wave's load: 16
@@ -119,7 +120,7 @@ constexpr int gemm_act_kpc() {
 // (l / 16) .. + 7) at ((r K / 32 + k) 64 + l) 16 bytes, a wave's load 1 KB
 // contiguous (static_megakernel.shuffle_gemm_weight; MI355X 10-11
 // amd/bench/gemm_load.hip: 10-25% faster, with nt loads)
-enum GemmLayout { GEMM_ROWMAJOR = 0, GEMM_SHUFFLED = 1 };
+enum GemmLayout { GEMM_ROWMAJOR = 0, GEMM_SHUFFLED = 1, GEMM_FP8 = 2 }; // (GEMM_FP8: gemm_wave8)
 // the shuffled weight loads' cache bits: 2 (nt)
 constexpr int GEMM_SHUF_AUX = 2;
 // STATIC_GEMM_LANE_ASM (default 0, A/B kda51): the activation fragment's lane
@@ -421,6 +422,114 @@ __device__ __forceinline__ void gemm_wave(__hip_bfloat16 const *weight,
 #pragma unroll
   for (int s = 0; s < STG; s++) {
     step(S - STG + s, frag[s]);
+  }
+}
+
+// GEMM_FP8 (GLM-5.3): the weight as e4m3 bytes [N][KW] (the checkpoint's, row-major) with fp32 scales [N / 128][KW / 128] (its
+// weight_scale_inv): as gemm_wave's register path, a lane's 8 bytes of a K step (one 8-B load), turned into bf16 exactly
+// (v_cvt_pk_f32_fp8), bf16 MFMAs; each 128-column block's sums into their own accumulators, then x the block's scale into acc
+// (the same products as the dequantized weight's; half the bytes of the bf16 weight). Row tile i (16 rows) lies in one
+// 128-row scale block.
+__device__ __forceinline__ v8bf g8_e4m3x8_bf16(uint32_t lo, uint32_t hi) {
+  v8bf r;
+  uint32_t const w[2] = {lo, hi};
+#pragma unroll
+  for (int i = 0; i < 2; i++) {
+    auto const a = __builtin_amdgcn_cvt_pk_f32_fp8((int)w[i], false);
+    auto const b = __builtin_amdgcn_cvt_pk_f32_fp8((int)w[i], true);
+    r[4 * i + 0] = (__bf16)a[0];
+    r[4 * i + 1] = (__bf16)a[1];
+    r[4 * i + 2] = (__bf16)b[0];
+    r[4 * i + 3] = (__bf16)b[1];
+  }
+  return r;
+}
+template <int NT, int KS, int KA, int KW, class FILL>
+__device__ __forceinline__ void gemm_wave8(uint8_t const *w8, float const *wsc, int tile0, int ks0, char const *act, v4f *acc,
+                                           FILL &&fill_act) {
+  constexpr int S = KS / 32, KB = S / 4, STG = S % 8 == 0 ? 8 : 4;
+  static_assert(S % 4 == 0 && S >= STG, "gemm_wave8: whole 128-column blocks per wave");
+  int const lane = STATIC_TIDX & 63, tok = lane % 16, g = lane / 16;
+  __amdgpu_buffer_rsrc_t const rs = buf_rsrc(w8);
+  auto wfrag = [&](int i, int s) {
+    uint32_t const off = (uint32_t)(((size_t)16 * (tile0 + i) + lane % 16) * KW + 32 * (ks0 + s) + 8 * g);
+    return __builtin_bit_cast(uint2, __builtin_amdgcn_raw_buffer_load_b64(rs, off, 0, 0));
+  };
+  auto tok_of = [](int x, int c) {
+    if constexpr (T <= 16 && (T & (T - 1)) == 0) {
+      return x & (T - 1);
+    } else {
+      return 16 * c + x < T ? 16 * c + x : T - 1;
+    }
+  };
+  auto bfrag = [&](int s, int c) { return gemm_lds_b(act + ((size_t)tok_of(tok, c) * KA + 32 * s + 8 * g) * 2); };
+  // the current K block's scales (row tile i's), the next block's loaded at each flush (4 K steps before they are used)
+  auto scale = [&](int i, int kb) { return wsc[((size_t)16 * (tile0 + i) / 128) * (KW / 128) + (32 * ks0) / 128 + kb]; };
+  float sc[NT];
+#pragma unroll
+  for (int i = 0; i < NT; i++) {
+    sc[i] = scale(i, 0);
+  }
+  v4f bacc[NT * GEMM_NC];
+#pragma unroll
+  for (int i = 0; i < NT * GEMM_NC; i++) {
+    bacc[i] = v4f{0.f, 0.f, 0.f, 0.f};
+  }
+  auto step = [&](int s, uint2 const *f) {
+#pragma unroll
+    for (int c = 0; c < GEMM_NC; c++) {
+      v8bf const b = __builtin_bit_cast(v8bf, bfrag(s, c));
+#pragma unroll
+      for (int i = 0; i < NT; i++) {
+        bacc[i * GEMM_NC + c] =
+            __builtin_amdgcn_mfma_f32_16x16x32_bf16(g8_e4m3x8_bf16(f[i].x, f[i].y), b, bacc[i * GEMM_NC + c], 0, 0, 0);
+      }
+    }
+  };
+  auto flush = [&](int kb) { // (block kb's sums x its scale into acc)
+#pragma unroll
+    for (int i = 0; i < NT; i++)
+#pragma unroll
+      for (int c = 0; c < GEMM_NC; c++) {
+        acc[i * GEMM_NC + c] += bacc[i * GEMM_NC + c] * sc[i];
+        bacc[i * GEMM_NC + c] = v4f{0.f, 0.f, 0.f, 0.f};
+      }
+    if (kb + 1 < KB) {
+#pragma unroll
+      for (int i = 0; i < NT; i++) {
+        sc[i] = scale(i, kb + 1);
+      }
+    }
+  };
+  uint2 frag[STG][NT];
+#pragma unroll
+  for (int s = 0; s < STG; s++)
+#pragma unroll
+    for (int i = 0; i < NT; i++) {
+      frag[s][i] = wfrag(i, s);
+    }
+  fill_act();
+#pragma unroll 1
+  for (int k0 = 0; k0 < S - STG; k0 += STG) {
+#pragma unroll
+    for (int s = 0; s < STG; s++) {
+      step(k0 + s, frag[s]);
+#pragma unroll
+      for (int i = 0; i < NT; i++) {
+        frag[s][i] = wfrag(i, k0 + s + STG);
+      }
+      if ((s + 1) % 4 == 0) {
+        flush((k0 + s) / 4);
+      }
+      __builtin_amdgcn_sched_barrier(0);
+    }
+  }
+#pragma unroll
+  for (int s = 0; s < STG; s++) {
+    step(S - STG + s, frag[s]);
+    if ((s + 1) % 4 == 0) {
+      flush((S - STG + s) / 4);
+    }
   }
 }
 
@@ -1004,7 +1113,7 @@ __device__ __forceinline__ void gemm_tile_task(G const &g,
                 "128, 64, 32 or 16 weight rows per task (HYB4: 256)");
   // TT row tiles of 16; NT per wave; KSPLIT waves per tile, each KS columns
   constexpr int TT = ROWS / 16, NT = TT >= 4 ? TT / 4 : 1,
-                KSPLIT = TT >= 4 ? 1 : 4 / TT, KPC = gemm_act_kpc<ROWS, KP>(), ACH = KP / KPC, KS = KPC / KSPLIT;
+                KSPLIT = TT >= 4 ? 1 : 4 / TT, KPC = gemm_act_kpc<ROWS, KP, LAYOUT == GEMM_FP8 ? 128 : 32>(), ACH = KP / KPC, KS = KPC / KSPLIT;
   static_assert(KS % 32 == 0, "a wave's K columns: whole steps of 32");
   __syncthreads(); // the LDS below may still be read by the previous task
   // 1. the activation slice -> LDS ([T][KP] bf16; chunk cc of ACH: [T][KPC]): in gemm_wave, once every wave's first
@@ -1201,7 +1310,15 @@ __device__ __forceinline__ void gemm_tile_task(G const &g,
   static_assert(!HYB || (!POLLED && !NORM && NT == 2 && KSPLIT == 1),
                 "gemm_tile HYB: a 128-row task (not polled), one K part per wave");
   static_assert(ACH == 1 || (!HYB && !NORM && !WLDS), "gemm_tile: activation chunks without HYB, NORM, weights in LDS");
-  if constexpr (ACH == 1) {
+  static_assert(LAYOUT != GEMM_FP8 || (!HYB && !HYB4 && !WLDS && !NORM),
+                "gemm_tile GEMM_FP8: the register path (gemm_wave8)");
+  if constexpr (LAYOUT == GEMM_FP8) { // (gamma: the weight's scales, NORM is off; chunk cc of ACH: columns k0c + cc KPC ..)
+    for (cc = 0; cc < ACH; cc++) {
+      gemm_wave8<NT, KS, gemm_act_pitch<KPC>(), KW>(reinterpret_cast<uint8_t const *>(weight), reinterpret_cast<float const *>(gamma),
+                                                    wrow0 / 16 + tile0, (k0c + cc * KPC + kp * KS) / 32, sm + (size_t)kp * KS * 2, acc,
+                                                    fill_act);
+    }
+  } else if constexpr (ACH == 1) {
     gemm_wave<NT, KS, gemm_act_pitch<KP>(), KW, LAYOUT, WLDS, HYB, HYB4>(
         weight,
         wrow0 / 16 + tile0,
@@ -1449,8 +1566,10 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                           exchange_bytes[ACT::buf] == (size_t)GPUS * T * K * 2),
                 "norm: finish, polled from the [GPUS][T][K] bf16 rows of an "
                 "allreduce_send, gamma in buffer slot 1, no in-kernel re-arm");
-  static_assert(LAYOUT == GEMM_ROWMAJOR || LAYOUT == GEMM_SHUFFLED,
+  static_assert(LAYOUT == GEMM_ROWMAJOR || LAYOUT == GEMM_SHUFFLED || LAYOUT == GEMM_FP8,
                 "params[4]: the weight's layout (GemmLayout)");
+  // GEMM_FP8: params[9] / [10] = the buffer slots (positions in BUF_SLOTS) of the e4m3 weight and its fp32 scales (no weight map)
+  constexpr int W8S = gemm_param_or0<PARAMS, 9>(), W8C = gemm_param_or0<PARAMS, 10>();
   static_assert(K > 0 && K % (128 * SELF::y) == 0,
                 "params = {mode, K, N, polled}; each K part whole 128-column "
                 "tiles");
@@ -1507,11 +1626,21 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                                    mode == COMBINE_PUSH_ALL || mode == COMBINE_LOCAL || mode == COMBINE_PUSH_RS ||
                                    SELF::counter >= 0),
                 "the node's output buffer and counters");
-  static_assert(gemm_act_bytes<gemm_act_kpc<ROWS, KP>()>() + 16 + GEMM_RED_BYTES <= 160 * 1024 - 1024,
+  static_assert(gemm_act_bytes<gemm_act_kpc<ROWS, KP, LAYOUT == GEMM_FP8 ? 128 : 32>()>() + 16 + GEMM_RED_BYTES <= 160 * 1024 - 1024,
                 "the activation slice (chunk) and the K parts' sums in LDS");
-  __hip_bfloat16 const *weight =
-      reinterpret_cast<__hip_bfloat16 const *>(maps.m[WMAP].p);
-  uint32_t *const cnt = cnt_of(g) + (SELF::counter < 0 ? 0 : SELF::counter);
+  __hip_bfloat16 const *weight;
+  float const *wscale = nullptr;
+  if constexpr (LAYOUT == GEMM_FP8) {
+    weight = reinterpret_cast<__hip_bfloat16 const *>(buf_at<uint8_t const>(g, slot_at<BUF_SLOTS, W8S>()));
+    wscale = buf_at<float const>(g, slot_at<BUF_SLOTS, W8C>());
+  } else {
+    weight = reinterpret_cast<__hip_bfloat16 const *>(maps.m[WMAP].p);
+  }
+  // params[11] NG (store): the rows in NG groups, group q counted at counter 32 q (its own 128-B line; MI355X 11-10 g53prof5: o_proj's
+  // 192 tasks on one counter, the all-reduce saw it complete 7 us after the last task ended)
+  constexpr int SNG = gemm_param_or0<PARAMS, 11>();
+  static_assert(SNG == 0 || (mode == COMBINE_STORE && N % SNG == 0 && (N / SNG) % ROWS == 0), "params[11]: a store gemm's row groups");
+  uint32_t *const cnt = cnt_of(g) + (SELF::counter < 0 ? 0 : SELF::counter) + (SNG > 0 ? 32 * ((int)tk.x * ROWS / (N / SNG)) : 0);
   if constexpr (POLLED && gemm_param_or0<PARAMS, 8>() > 0) { // (gemm_tile_layer skip_seq: every token <= K pools - no task works)
     constexpr int SK = gemm_param_or0<PARAMS, 8>();
     static_assert(mode == COMBINE_LOCAL, "skip_seq: a local gemm");
@@ -1550,7 +1679,7 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                                       tk.y * KP,
                                       NORM ? buf_at<__hip_bfloat16 const>(
                                                  g, gemm_gamma_slot<NORM, BUF_SLOTS>())
-                                           : nullptr,
+                                           : reinterpret_cast<__hip_bfloat16 const *>(wscale),
                                       L.sm STAGE_STAMP_ARG(L.stage_stamps));
   } else {
     uint32_t const *act_cnt = nullptr;
@@ -1584,7 +1713,7 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
         tk.x * ROWS,
         tk.y,
         tk.y * KP,
-        nullptr,
+        reinterpret_cast<__hip_bfloat16 const *>(wscale), // (GEMM_FP8: the scales; else null)
         L.sm STAGE_STAMP_ARG(L.stage_stamps)
 #ifdef STATIC_GEMM_L2WARM
         , gemm_l2warm_next(L, tk.node)
@@ -1627,7 +1756,7 @@ constexpr int smem_gemm_tile() {
   }
   return gemm_ldsw<ROWS, KP, param_at<PARAMS, 3>() == 1>()
              ? gemm_w_lds_at<ROWS, KP>() + ROWS * KP * 2
-             : ((gemm_act_bytes<gemm_act_kpc<ROWS, KP>()>() + 15) & ~15) + GEMM_RED_BYTES;
+             : ((gemm_act_bytes<gemm_act_kpc<ROWS, KP, param_at<PARAMS, 4>() == GEMM_FP8 ? 128 : 32>()>() + 15) & ~15) + GEMM_RED_BYTES;
 }
 
 } // namespace static_mk

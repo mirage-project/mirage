@@ -16,13 +16,15 @@ __device__ __forceinline__ void run_dsa_o_absorb(Maps const &, G const &g, Kerne
   static_assert(A::buf >= 0, "dsa_o_absorb: dsa_sparse_attn's output");
   static_assert(SELF::buf >= 0 && SELF::x == PARAMS::v[0] && SELF::y * 128 == PARAMS::v[3],
                 "dsa_o_absorb: one task per head and 128 output rows, its output");
-  mla_absorb_task<PARAMS::v[0], PARAMS::v[1], PARAMS::v[2], PARAMS::v[3]>(
+  static_assert(T % SELF::z == 0, "dsa_o_absorb: grid z = token tiles");
+  mla_absorb_task<PARAMS::v[0], PARAMS::v[1], PARAMS::v[2], PARAMS::v[3], T / SELF::z>(
       L,
       buf_at<__hip_bfloat16 const>(g, A::buf),
       buf_at<__hip_bfloat16 const>(g, slot_at<BUF_SLOTS, 0>()),
       buf_at<__hip_bfloat16>(g, SELF::buf),
       tk.x,
-      tk.y);
+      tk.y,
+      tk.z);
   if constexpr (SELF::counter >= 0) { // (its consumer counted, not polled: o_proj loads the whole activation in one DMA pass)
     task_post(cnt_of(g) + SELF::counter, 1);
   }
