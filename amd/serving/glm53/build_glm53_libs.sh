@@ -1,3 +1,4 @@
+#!/bin/bash
 # build_glm53_libs.sh "T ..." [KINDS]: GLM-5.3 plain-decode server libraries (8 GPUs, TP 8) per batch size T from a GLM-5.3 tree
 # (CPU work: amd/tests/test_glm53_pair_layer.py --codegen --serving, then amd/tools/gen_rank_lib.py): $DLIB/<kind>_t<T>/lib.so for
 # the kinds g53full (layer 6: full indexer + MoE), g53shared (layer 7: shared + MoE), g53dense (layer 0: full indexer + dense MLP).
