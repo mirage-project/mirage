@@ -17,3 +17,10 @@ The plans place the gate's `(t, 0, 0)` tasks. When the gate's router is split (`
 | --- | ---: | ---: | ---: |
 | GPT-OSS-20B | 3.053 ms/token | 2.964 ms/token | 2.950 ms/token |
 | GPT-OSS-120B | 4.387 ms/token | 4.152 ms/token | 4.122 ms/token |
+
+Each layer kernel also prefetches the first `L2_PREFETCH_MB` (12) MB of its QKV weight into L2 at its start (`StaticMegakernel.l2_prefetch_weights`), on the SMs that start while the previous kernel finishes. Same H100, same runs (200/200 tokens identical to the reference):
+
+| Model | No prefetch | 8 MB | 12 MB | 16 MB |
+| --- | ---: | ---: | ---: | ---: |
+| GPT-OSS-20B | 2.834 ms/token | 2.792 ms/token | 2.791 ms/token | 2.797–2.800 ms/token |
+| GPT-OSS-120B | 4.132–4.135 ms/token | 4.061–4.064 ms/token | 4.060–4.061 ms/token | 4.072 ms/token |

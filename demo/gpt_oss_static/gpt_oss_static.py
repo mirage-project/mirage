@@ -14,6 +14,7 @@ KV_CHUNK = 128                        # full attention: the KV split in chunks o
 # the gate's router over this many tasks a token (sm90_gate_layer), by expert count: measured on H100 (20B: 2 and 4; 120B: 4,
 # 8 and 16)
 ROUTER_SPLITS = {32: 4, 128: 8}
+L2_PREFETCH_MB = 12   # each layer's first QKV weight bytes into L2 at its start (StaticMegakernel.l2_prefetch_weights)
 FLAGS = sm90_flags() + ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]   # serving build: launches back to back
 
 
@@ -117,6 +118,10 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
     mpk.sm90_moe_ring_layer(A["act"], A["w2"], A["routing"], A["active"], A["eo"], bias=A["b2"], glu=False,
                             rows_per_task=64, fp32_scales=True)
     mpk.sm90_mul_sum_add_layer(A["eo"], A["topk_w"], A["x1"], A["x_out"])
+    # the QKV weight's first 12 MB into L2 by the SMs that start while the previous layer's kernel finishes (PDL): its
+    # tail leaves HBM idle (H100, same runs: 20B 2834 -> 2791, 120B 4133 -> 4060 us/step; 16 MB and up gain less: the
+    # prefetch then slows that tail)
+    mpk.l2_prefetch_weights(L2_PREFETCH_MB, stop_at=("sm90_attention", "sm90_attention_split"))
 
 
 def build_head(m: Model, mpk: StaticMegakernel, t: dict):
