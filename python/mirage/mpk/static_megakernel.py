@@ -1543,19 +1543,25 @@ class StaticMegakernel(PersistentKernel):
 
     def sm90_gate_layer(self, o: DTensor, o_bias: DTensor, residual: DTensor, norm_weight: DTensor, router: DTensor,
                         router_bias: DTensor, num_tokens: DTensor, x1: DTensor, h: DTensor, weights: DTensor,
-                        routing_indices: DTensor, active_experts: DTensor, eps: float, block_dim: tuple = (256, 1, 1)):
+                        routing_indices: DTensor, active_experts: DTensor, eps: float, router_splits: int = 1,
+                        block_dim: tuple = (256, 1, 1)):
         """What sits between o_proj and the routed experts, for one token a task (tasks/sm90_gate.cuh): x1 = bf16(o +
         o_bias + residual), h = f16(RMSNorm(x1)), the router logits, the token's top-k (softmax, renormalized): its weights
         [T, TOPK] fp32 and routing column [E, T] i32; the active-expert list [E + 1] i32 from the last task. Outputs: x1, h,
-        weights, routing_indices, active_experts (graph.cc: sm90_gate's five). params = [H, E, TOPK, eps bits]."""
+        weights, routing_indices, active_experts (graph.cc: sm90_gate's five). router_splits S: a token's router over S
+        tasks (grid (T, S, 1)), E / S experts each, their logits through the routing column; the token's last task takes the
+        top-k. params = [H, E, TOPK, eps bits, S]."""
         T, H, E, TOPK = self._tokens(o.dim(0)), o.dim(1), router.dim(0), weights.dim(1)
         assert E % 32 == 0 and E <= 256, "sm90_gate: experts a multiple of 32, at most 256 (32 a router warp)"
+        S = router_splits
+        if S < 1 or E % (S * block_dim[0] // 32):
+            raise ValueError(f"sm90_gate_layer: router_splits {S}: E ({E}) / S experts a multiple of the task's warps")
         self._dtypes("sm90_gate_layer", o=(o, float32), residual=(residual, bfloat16), router=(router, bfloat16),
                      x1=(x1, bfloat16), h=(h, float16), weights=(weights, float32))
         present = [o, o_bias, residual, norm_weight, router, router_bias, num_tokens, x1, h, weights, routing_indices,
                    active_experts]
-        self._add_node("sm90_gate", (T, 1, 1), block_dim, present, [(-1, -1, -1)] * len(present),
-                       [H, E, TOPK, float_bits(eps)], counters=2 + E // 32,
+        self._add_node("sm90_gate", (T, S, 1), block_dim, present, [(-1, -1, -1)] * len(present),
+                       [H, E, TOPK, float_bits(eps), S], counters=2 + E // 32 + (T if S > 1 else 0),
                        buf_slots=[self._tensor_slot(t) for t in present])
 
     def sm90_mul_sum_add_layer(self, input: DTensor, weights: DTensor, residual: DTensor, output: DTensor,

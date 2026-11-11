@@ -10,3 +10,10 @@ Batch-one decode on the same login-node H100s, with a 77-token prompt and 200 ge
 The plans are selected only for the tested H100 device name and SM count. Other devices use round robin.
 
 With the 80-task QKV grid but round-robin placement, the same runs measured 3.099 ms/token (20B) and 4.478 ms/token (120B). The remaining gain comes from task placement and cross-layer PDL overlap.
+
+The plans place the gate's `(t, 0, 0)` tasks. When the gate's router is split (`ROUTER_SPLITS`: 4 tasks a token on 20B, 8 on 120B), `place_router_splits` puts the other splits on SMs with no task from o_proj onward before their first W13 task. Same H100, same runs (200/200 tokens identical to the reference):
+
+| Model | Unsplit gate | Split router | + weights preloaded before the wait |
+| --- | ---: | ---: | ---: |
+| GPT-OSS-20B | 3.053 ms/token | 2.964 ms/token | 2.950 ms/token |
+| GPT-OSS-120B | 4.387 ms/token | 4.152 ms/token | 4.122 ms/token |

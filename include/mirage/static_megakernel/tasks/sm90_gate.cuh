@@ -6,18 +6,23 @@
 // routing indices. The top-k runs in one warp, lane l the experts l, l + 32,
 // ... (E a multiple of 32: GPT-OSS-20B 32, 120B 128). The tokens' experts meet
 // in a bit mask (E / 32 words of the node's counter line), and the last task
-// done writes the active-expert list. Task x of grid (T, 1, 1): token x.
+// done writes the active-expert list. Task (x, y) of grid (T, S, 1): token x,
+// the router's experts [y E / S, (y + 1) E / S) (S > 1: the logits through the
+// token's column of the routing indices, as fp32 bits; the token's last task
+// to count (its counter) takes its top-k). Every expert's logit is one warp's,
+// its lanes over K, whatever S: the same sums.
 #pragma once
 #include "sm90_common.cuh"
 
 namespace static_mk {
 
-// PARAMS {H, E, TOPK, eps (fp32 bits)}; BUF_SLOTS {o [T, H] fp32, o's bias [H]
+// PARAMS {H, E, TOPK, eps (fp32 bits), S}; BUF_SLOTS {o [T, H] fp32, o's bias [H]
 // bf16, x (the residual) [T, H] bf16, the norm's weight [H] bf16, the router
 // [E, H] bf16, its bias [E] bf16, the step's token count [1] i32, x1 [T, H]
 // bf16, h [T, H] f16, weights [T, TOPK] fp32, routing indices [E, T] i32, the
 // active-expert list [E + 1] i32}; counters {the tasks (for the consumers),
-// the tasks done (for the last), the expert mask (E / 32 words)}
+// the tasks done (for the last), the expert mask (E / 32 words), S > 1: the
+// tokens' router tasks done (T)}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -27,34 +32,63 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
                                               G const &g,
                                               KernelLocals &,
                                               StaticTask const &tk) {
-  constexpr int H = PARAMS::v[0], E = PARAMS::v[1], TOPK = PARAMS::v[2];
+  constexpr int H = PARAMS::v[0], E = PARAMS::v[1], TOPK = PARAMS::v[2],
+                S = PARAMS::v[4];
   static_assert(E % 32 == 0 && E <= 32 * SM90_WARPS && TOPK <= E,
                 "sm90_gate: experts a multiple of 32 (E / 32 a lane), at "
                 "most 32 a router warp");
+  static_assert(S >= 1 && E % (S * SM90_WARPS) == 0,
+                "sm90_gate: a task's experts a multiple of its warps");
+  constexpr int EPS_ = E / S; // a task's experts
   constexpr int EPL = E / 32; // experts a lane in the top-k
   using Row = Sm90Row<H>;
   constexpr int VEC = Row::VEC;
-  constexpr int DONE = SELF::counter + 1, MASK = SELF::counter + 2;
-  __shared__ float part[SM90_WARPS], logit[E];
+  constexpr int DONE = SELF::counter + 1, MASK = SELF::counter + 2,
+                TOK = MASK + E / 32;
+  __shared__ float part[SM90_WARPS], logit[S == 1 ? E : 1];
   __shared__ uint4 hs[VEC]; // h as rounded (f16), for the router's warps
-  __shared__ int last;
+  __shared__ int last, last_split;
   int const ntok = *buf_at<int const>(g, slot_at<BUF_SLOTS, 6>());
+  int const split = tk.y;
   if (tk.x < ntok) {
-    // the router (no producer) into L2 while o_proj finishes
+    // the task's router rows (no producer) into L2 while o_proj finishes
     char const *rp = reinterpret_cast<char const *>(
-        buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 4>()));
-    for (int i = threadIdx.x; i < E * H * 2 / 128; i += SM90_THREADS) {
+                         buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 4>())) +
+                     (size_t)split * EPS_ * H * 2;
+    for (int i = threadIdx.x; i < EPS_ * H * 2 / 128; i += SM90_THREADS) {
       asm volatile("prefetch.global.L2 [%0];" ::"l"(rp + 128 * i));
     }
   }
-  sm90_task_begin<IN...>(g);
+  // the weights (no producer: o_proj's bias, the norm's, the router's bias)
+  // in registers before the wait, out of the path after it
   int const t = tk.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  uint4 obv[Row::PER], nwv[Row::PER];
+  {
+    uint4 const *ob = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 1>());
+    uint4 const *nw = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 3>());
+#pragma unroll
+    for (int j = 0; j < Row::PER; j++) {
+      int const v = Row::vec(j);
+      if (v < VEC) {
+        obv[j] = ob[v];
+        nwv[j] = nw[v];
+      }
+    }
+  }
+  float rbv[EPL];
+  {
+    __nv_bfloat16 const *rb =
+        buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 5>());
+#pragma unroll
+    for (int j = 0; j < EPL; j++) {
+      rbv[j] = __bfloat162float(rb[32 * j + lane]);
+    }
+  }
+  sm90_task_begin<IN...>(g);
   float const *o =
       buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()) + (size_t)t * H;
-  uint4 const *ob = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 1>());
   uint4 const *res =
       buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 2>()) + (size_t)t * VEC;
-  uint4 const *nw = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 3>());
   uint4 const *rw = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 4>());
   uint4 *x1 = buf_at<uint4>(g, slot_at<BUF_SLOTS, 7>()) + (size_t)t * VEC;
   uint4 *hout = buf_at<uint4>(g, slot_at<BUF_SLOTS, 8>()) + (size_t)t * VEC;
@@ -67,14 +101,16 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
     if (v < VEC) {
       float f[8], b[8], r[8];
       f32x8_load(o, v, f);
-      bf16x8_to_f32(ob[v], b);
+      bf16x8_to_f32(obv[j], b);
       bf16x8_to_f32(res[v], r);
 #pragma unroll
       for (int i = 0; i < 8; i++) {
         f[i] = f[i] + b[i] + r[i];
       }
       uint4 const q = f32_to_bf16x8(f);
-      x1[v] = q;
+      if (split == 0) {
+        x1[v] = q;
+      }
       bf16x8_to_f32(q, xr[j]);
 #pragma unroll
       for (int i = 0; i < 8; i++) {
@@ -90,23 +126,27 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
     int const v = Row::vec(j);
     if (v < VEC) {
       float w[8];
-      bf16x8_to_f32(nw[v], w);
+      bf16x8_to_f32(nwv[j], w);
 #pragma unroll
       for (int i = 0; i < 8; i++) {
         xr[j][i] = xr[j][i] * rs * w[i];
       }
       uint4 const q = f32_to_f16x8(xr[j]);
-      hout[v] = q;
+      if (split == 0) {
+        hout[v] = q;
+      }
       hs[v] = q;
     }
   }
   __syncthreads(); // hs written
   // 3. the logits: warp w experts [w EPW, w EPW + EPW), its lanes over K
   // (each step its EPW rows' vectors in flight), reduced over the warp
-  constexpr int EPW = E / SM90_WARPS;
+  constexpr int EPW = EPS_ / SM90_WARPS;
   constexpr int UNROLL = EPW <= 4 ? 4 : 1; // the EPW rows' loads in registers
+  int const e0 = split * EPS_ + warp * EPW; // the warp's first expert
+  int *routing = buf_at<int>(g, slot_at<BUF_SLOTS, 10>());
   if (t < ntok) {
-    uint4 const *rwr = rw + (size_t)warp * EPW * VEC;
+    uint4 const *rwr = rw + (size_t)e0 * VEC;
     float acc[EPW] = {};
 #pragma unroll UNROLL
     for (int v = lane; v < VEC; v += 32) {
@@ -137,24 +177,51 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
       for (int e = 0; e < EPW; e++) {
         a = e == lane ? acc[e] : a;
       }
-      logit[warp * EPW + lane] = a;
+      if constexpr (S == 1) {
+        logit[e0 + lane] = a;
+      } else {
+        routing[(e0 + lane) * T + t] = __float_as_int(a);
+      }
     }
   } else if (lane < EPW) {
-    logit[warp * EPW + lane] = 0.f;
+    if constexpr (S == 1) {
+      logit[e0 + lane] = 0.f;
+    } else {
+      routing[(e0 + lane) * T + t] = 0;
+    }
+  }
+  if constexpr (S > 1) {
+    __threadfence(); // the logits before the count below
   }
   __syncthreads();
+  if constexpr (S > 1) {
+    // the token's last task to count takes its top-k (the others' logits in
+    // L2 before their counts)
+    if (threadIdx.x == 0) {
+      __threadfence();
+      last_split = atomicAdd(g.cnt + TOK + t, 1u) == S - 1;
+      __threadfence();
+    }
+    __syncthreads();
+    if (!last_split) {
+      sm90_task_end<SELF>(g);
+      return;
+    }
+  }
   // 4. warp 0, lane l the experts j 32 + l: the token's top-k (rows past
   // the step's tokens: none)
   if (warp == 0) {
-    int const ntok = *buf_at<int const>(g, slot_at<BUF_SLOTS, 6>());
-    __nv_bfloat16 const *rb =
-        buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 5>());
     float l[EPL], m = -INFINITY;
 #pragma unroll
     for (int j = 0; j < EPL; j++) {
       int const e = 32 * j + lane;
-      l[j] = __bfloat162float(
-          __float2bfloat16(logit[e] + __bfloat162float(rb[e])));
+      float lg;
+      if constexpr (S == 1) {
+        lg = logit[e];
+      } else {
+        lg = __int_as_float(__ldcg(routing + e * T + t));
+      }
+      l[j] = __bfloat162float(__float2bfloat16(lg + rbv[j]));
       m = fmaxf(m, l[j]);
     }
 #pragma unroll
@@ -206,7 +273,6 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
       }
     }
     bool const active_tok = t < ntok;
-    int *routing = buf_at<int>(g, slot_at<BUF_SLOTS, 10>());
 #pragma unroll
     for (int j = 0; j < EPL; j++) {
       routing[(32 * j + lane) * T + t] = active_tok ? rank[j] : 0;

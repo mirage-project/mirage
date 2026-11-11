@@ -1,5 +1,5 @@
 """Greedy GPT-OSS-20B/120B decode on Hopper with one static megakernel per layer."""
-import argparse, json, os, statistics, time
+import argparse, itertools, json, os, statistics, time
 # 120B's weights fill most of an H100: the expert repacking's freed temporaries must be reusable for the next layer's
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
@@ -11,6 +11,9 @@ from mxfp4 import Mxfp4Checkpoint, convert_expert_weight
 
 T, PAGE = 8, 64                       # token rows of a step, KV page size
 KV_CHUNK = 128                        # full attention: the KV split in chunks of this many positions (sm90_attention_split)
+# the gate's router over this many tasks a token (sm90_gate_layer), by expert count: measured on H100 (20B: 2 and 4; 120B: 4,
+# 8 and 16)
+ROUTER_SPLITS = {32: 4, 128: 8}
 FLAGS = sm90_flags() + ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]   # serving build: launches back to back
 
 
@@ -107,7 +110,8 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
                                        sinks=A["sinks"])
     mpk.gemm_tile_layer(input=A["attn"], weight=A["w_o"], output=A["o32"], combine="store")
     mpk.sm90_gate_layer(A["o32"], A["b_o"], A["x_in"], A["ln2"], A["w_router"], A["b_router"], A["num_tokens"], A["x1"],
-                        A["h2"], A["topk_w"], A["routing"], A["active"], eps=m.eps)
+                        A["h2"], A["topk_w"], A["routing"], A["active"], eps=m.eps,
+                        router_splits=ROUTER_SPLITS.get(m.E, 1))
     mpk.sm90_moe_ring_layer(A["h2"], A["w13"], A["routing"], A["active"], A["act"], bias=A["b13"], glu=True,
                             limit=m.limit, alpha=1.702, rows_per_task=128, fp32_scales=not m.f16_scales)
     mpk.sm90_moe_ring_layer(A["act"], A["w2"], A["routing"], A["active"], A["eo"], bias=A["b2"], glu=False,
@@ -135,12 +139,33 @@ def round_robin_plan(mpk) -> dict:
     return {"grids": grids, "lists": [lists]}
 
 
+def place_router_splits(mpk, plan: dict) -> dict:
+    """The plans place the gate's (t, 0, 0) tasks; its router splits (t, s > 0) go to the SMs that have no task from o_proj on
+    before their first W13 task (each just before it), the active token's (t = 0) first, the earliest-free SMs first."""
+    nodes = {n.graph_idx: n for n in compiler.graph_nodes(mpk)}
+    gate = next(i for i, n in nodes.items() if n.name == "sm90_gate")
+    T, S = nodes[gate].grid[0], nodes[gate].grid[1]
+    if S == 1:
+        return plan
+    lists = [[list(sm) for sm in gpu] for gpu in plan["lists"]]
+    for gpu in lists:
+        def before_w13(sm):   # the nodes the SM runs before its first W13 task (the gate's next node)
+            return [n for n, _ in itertools.takewhile(lambda e: e[0] != gate + 1, gpu[sm])]
+        hosts = sorted((sm for sm in range(len(gpu)) if all(n < gate - 1 for n in before_w13(sm))),
+                       key=lambda sm: (max(before_w13(sm), default=-1), len(before_w13(sm)), sm))
+        for i, (x, y) in enumerate((x, y) for x in range(T) for y in range(1, S)):
+            sm = hosts[i % len(hosts)]
+            gpu[sm].insert(len(before_w13(sm)), (gate, (x, y, 0)))
+    return {**plan, "lists": lists}
+
+
 def compile_kernel(name, build, t, out_dir):
     """Build one static kernel for a layer kind or the model head."""
     mpk = StaticMegakernel(num_gpus=1)
     build(mpk, t)
     if name != "head" and torch.cuda.get_device_name() == "NVIDIA H100 80GB HBM3" and mpk._num_sms() == 132:
-        plan = compiler.plan_from_file(os.path.join(os.path.dirname(__file__), "plans", "h100", f"{name}_plan.json"))
+        plan = place_router_splits(mpk, compiler.plan_from_file(
+            os.path.join(os.path.dirname(__file__), "plans", "h100", f"{name}_plan.json")))
     else:
         plan = round_robin_plan(mpk)
     paths, _ = compiler.compile_plan(mpk, plan, os.path.join(out_dir, name, "schedules"))

@@ -10,6 +10,7 @@ from sm90_util import SM90_FLAGS
 
 T, H, TOPK, EPS = 8, 2880, 4, 1e-5
 E = int(os.environ.get("E", 32))
+S = int(os.environ.get("S", 1))   # router_splits
 
 
 def main():
@@ -26,12 +27,12 @@ def main():
     mpk = StaticMegakernel(num_gpus=1)
     A = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in bufs.items()}
     mpk.sm90_gate_layer(A["o"], A["ob"], A["x"], A["nw"], A["rw"], A["rb"], A["ntok"], A["x1"], A["h"], A["tw"],
-                        A["routing"], A["active"], eps=EPS)
+                        A["routing"], A["active"], eps=EPS, router_splits=S)
     nsm = mpk._num_sms()
     (node, grid), = [(n.graph_idx, tuple(n.grid)) for n in compiler.graph_nodes(mpk)]
     lists = [[] for _ in range(nsm)]
-    for x in range(grid[0]):
-        lists[x % nsm].append((node, (x, 0, 0)))
+    for i, (x, y) in enumerate((x, y) for x in range(grid[0]) for y in range(grid[1])):
+        lists[i % nsm].append((node, (x, y, 0)))
     out_dir = os.environ.get("OUT", "build_static") + "/sm90_gate"
     paths, _ = compiler.compile_plan(mpk, {"grids": {node: grid}, "lists": [lists]}, os.path.join(out_dir, "schedules"))
     sk = mpk.compile_static(paths, gpu_tensors=[bufs], out_dir=os.path.join(out_dir, "build"), extra_flags=SM90_FLAGS,
@@ -40,12 +41,14 @@ def main():
     hh.launch(timeout_s=20)
     if os.environ.get("PROFILE") == "1":   # the slowest task, L2 emptied, over 20 launches
         import statistics
-        d = []
+        d, sp = [], []
         for _ in range(20):
             hh.launch(flush_bytes=128 << 20, timeout_s=20)
             tt = hh.task_times()[0]
-            d.append(max((e[1] - e[0]) / 1e3 for sm in range(nsm) for e in tt[sm][:len(lists[sm])] if e[0]))
-        print(f"TIME slowest task {statistics.median(d):.2f} us")
+            ev = [e for sm in range(nsm) for e in tt[sm][:len(lists[sm])] if e[0]]
+            d.append(max((e[1] - e[0]) / 1e3 for e in ev))
+            sp.append((max(e[1] for e in ev) - min(e[0] for e in ev)) / 1e3)
+        print(f"TIME slowest task {statistics.median(d):.2f} us | span {statistics.median(sp):.2f} us")
 
     x1 = (bufs["o"] + bufs["ob"].float() + bufs["x"].float()).bfloat16()
     xf = x1.float()
