@@ -314,6 +314,8 @@ class StaticMegakernel(PersistentKernel):
                                       # stages (each task starts on its columns as soon as they are written, without a counter)
         reader_rearms: bool = True,   # "slots": the one reader of each value re-arms it (REARM); False when several tasks read
                                       # the same values (kda_decode's f_a / g_a): the kernel or the host then refills the buffer
+        skip_seq: tuple = None,   # (seq_lens [T] int32, L): in a launch where every token has seq_lens <= L, each task only
+                                  # counts itself (its readers read nothing then, e.g. the indexer q of dsa_index_score skip_k)
         block_dim: tuple = (256, 1, 1),
     ):
         """Task (x, y) = weight rows [R x, R x + R) times K part y. Default grid: R = 128 rows, K in 1 part (polled: the fewest K
@@ -322,7 +324,8 @@ class StaticMegakernel(PersistentKernel):
         no options; polled: 128 rows, at most RING_STAGES pieces per task, as the whole K part is written into the stages up front).
         The weight and the activation reach the task through tensor maps (map slots in Maps::m: the weight's 128- and 64-row boxes, the
         activation's; polled: the weight's 128-row box only), the output through the node's buffer slot. params = [mode, K, N,
-        polled (0 / 1)]; map_slots = [weight map slot, activation map slot (-1: polled)]."""
+        polled (0 / 1)[, L of skip_seq]]; map_slots = [weight map slot, activation map slot (-1: polled)]; buf_slots = [seq_lens of
+        skip_seq] or none."""
         assert input.num_dims == 2 and weight.num_dims == 2 and weight.dim(1) == input.dim(1)
         assert output.num_dims == 2 and output.dim(1) == weight.dim(0) and weight.dim(0) % 128 == 0 and weight.dim(1) % 128 == 0
         mode, N, K, T, GPUS = COMBINE[combine], weight.dim(0), weight.dim(1), self._tokens(input.dim(0)), self.num_gpus
@@ -335,6 +338,7 @@ class StaticMegakernel(PersistentKernel):
                 raise ValueError(f"gemm_tile_layer: a polled input must be a node's 0xFF-prefilled output buffer; it comes from "
                                  f"{p.name if p else 'the graph inputs'}")
             assert combine == "slots", "polled: the K parts in slots"
+        assert skip_seq is None or (combine == "add" and not input_polled), "skip_seq: an \"add\" GEMM, not polled"
         if combine == "slots" and input_polled:   # this GPU's rows only: [K parts][T][N / GPUS] fp32 (gemm_tile.cuh, run_gemm_tile)
             assert rows_split_over_gpus and N % (128 * GPUS) == 0, "polled: the rows split over the GPUs, whole 128-row blocks"
             out_buffer = lambda n: (n.grid[1] * T * (N // GPUS) * 4, 0xFF, True)
@@ -356,12 +360,16 @@ class StaticMegakernel(PersistentKernel):
             parts = 1
             params, map_slots = [mode, K, N, 0], [self._gemm_map(weight, (128, 64)), self._gemm_map(input, (T,))]
             changeable = {"store": {}, "store_bf16": {0: (64, 1, 2)}}.get(combine, {0: (64, 1, 2), 1: (128, 2, None)})
+        if skip_seq is not None:
+            self._dtypes("gemm_tile_layer", seq_lens=(skip_seq[0], int32))
+            params = params + [skip_seq[1]]
         self._add_node("gemm_tile", (N // 128, parts, 1), block_dim, [input, weight, output],
                        [(-1, 1, -1), (0, 1, -1), (1, -1, -1)], params,
                        # K: at least 2 tiles of 128 per task (the two MMA issuers take the stages in turn, runtime.cuh issue_job;
                        # with one stage issuer 1 has no MMA and its stale accumulator would be added)
                        changeable_grid_dims=changeable, rows_split_over_gpus=rows_split_over_gpus, out_buffer=out_buffer,
-                       counters={"slots": 0, "add": N // 128, "store": 1, "store_bf16": 1}[combine], map_slots=map_slots)
+                       counters={"slots": 0, "add": N // 128, "store": 1, "store_bf16": 1}[combine], map_slots=map_slots,
+                       buf_slots=[] if skip_seq is None else [self._tensor_slot(skip_seq[0])])
 
     def scaled_gemm_tile_layer(
         self,

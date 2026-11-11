@@ -33,6 +33,7 @@ IH, ID, PPAGE, KGW = 32, 128, 64, 384   # indexer heads x dims; pools per pooled
 TILES = 33                             # sparse_mla: 512 x 4 + 3 tail = 2051 index slots, 33 tiles of 64
 SLOTS = TILES * 64
 MLA_TILES = 36                         # sparse_mla's slots in tiles (the last 3 empty): every divisor of 36 a split count
+IQ_SKIP_T = (8, 16, 32, 64)            # the T whose indexer q GEMM skips a step of short tokens only (gemm_tile skip_seq)
 FLUSH_BYTES = mla.FLUSH_BYTES
 
 
@@ -218,7 +219,9 @@ def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float,
                                # close and their tail entries, token by token)
                                tokens_per_request=T // int(fused.get("requests", 1)) if fused.get("verify") else 1)
     iq = nt((T, IH * ID), int64, "idx_q")
-    mpk.gemm_tile_layer(input=a["q_c"], weight=a["w_iqb"], output=iq, combine="add")
+    # (a step whose tokens all have at most POOLS pools reads no indexer q: dsa_index_score skip_k)
+    mpk.gemm_tile_layer(input=a["q_c"], weight=a["w_iqb"], output=iq, combine="add",
+                        skip_seq=(a["seq_lens"], KPOOL * POOLS + KPOOL - 1) if T in IQ_SKIP_T else None)
     qb = nt((T, NH * NOPE), int64, "q_b")
     mpk.scaled_gemm_tile_layer(input=qcq, weight=a["w_qb"], weight_scales=a["w_qb_sf"], output=qb, combine="add")
     mpk.dsa_index_score_layer(iq=iq, kw=kw, index_cache=a["pcache"], cos_sin=None, seq_lens=a["seq_lens"],

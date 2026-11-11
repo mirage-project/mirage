@@ -5526,10 +5526,11 @@ int TaskRegister::register_gemm_tile_sm100_task(
   // params: {mode (how the K parts are combined: 0 one slot per part, 1
   // fixed-point add, 2 plain store, 3 plain store in bf16), K, N, polled (1:
   // the activation is its producer's 0xFF-prefilled bf16 buffer, polled into
-  // the ring's stages)} (static_megakernel/core.cuh Combine); the K split is
+  // the ring's stages)[, L (mode 1: a launch with every seq_lens <= L only
+  // counts the tasks)]} (static_megakernel/core.cuh Combine); the K split is
   // the grid's y; its tensor maps are the node's slots. inputs: activation [T,
   // K], weight [N, K]; output: [T, N] fp32 (mode 3: bf16).
-  assert(params.size() == 4);
+  assert(params.size() == 4 || params.size() == 5);
   assert(params[0] >= 0 && params[0] <= 3 &&
          (params[3] == 0 || params[3] == 1) &&
          (params[3] == 0 || params[0] == 0));
