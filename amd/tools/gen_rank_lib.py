@@ -93,6 +93,19 @@ KINDS["gkdamoe"] = (KINDS["gkda"][0] + KINDS["gmoe"][0],
                     ["x_attn", "state_pool", "conv_pool", "slots", "x_attn_next", "R_mid", "h_post_mid", "h_res_mid"] + _MHC_IO,
                     4096)
 
+# GLM-5.3 (hidden 6144, TP 8, plain residual; amd/serving/glm53/glm53_layers.py build_layer, amd/tests/test_glm53_pair_layer.py
+# --codegen --serving): one layer = the attention sublayer + its MLP. "full": the layer's indexer writes the row list (and its
+# graph copy rows_g); "shared": the list from rows (the last full layer's); "dense": layers 0 .. 2 (full indexer, dense MLP)
+_G53_ATTN = ["w_qkva", "q_norm", "kv_norm", "w_qb", "w_kc", "w_vc", "w_o", "post_norm"]
+_G53_RUN = ["x_attn", "res_in", "res_mid", "cache", "out_loc", "positions", "seq_lens", "cos", "sin", "res_out", "x_next"]
+_G53_FULL_W, _G53_FULL_R = ["w_k", "k_nw", "k_nb"], ["icache", "r2t", "req_idx", "rows_g"]
+_G53_MOE = ["router", "bias", "w13", "w13_sf", "w2", "w2_sf", "next_norm"]
+_G53_ATTN, _G53_FULL_W = _G53_ATTN + ["w_qkva_s", "w_qb_s", "w_o_s"], _G53_FULL_W + ["w_k_s"]   # (the gemms' e4m3 weights' scales)
+_G53_DENSE = ["w_gu", "w_dn", "next_norm", "w_gu_s", "w_dn_s"]
+KINDS["g53full"] = (_G53_ATTN + _G53_FULL_W + _G53_MOE, _G53_RUN + _G53_FULL_R, 6144)
+KINDS["g53shared"] = (_G53_ATTN + _G53_MOE, _G53_RUN + ["rows"], 6144)
+KINDS["g53dense"] = (_G53_ATTN + _G53_FULL_W + _G53_DENSE, _G53_RUN + _G53_FULL_R, 6144)
+
 
 def slot_args(code: str) -> dict:
     """the slot args of the harness's static_host_init call"""

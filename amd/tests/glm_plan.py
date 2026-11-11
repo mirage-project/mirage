@@ -8,7 +8,7 @@ weights_proj] 3 tasks, 33 us at T 1).
 from mirage.mpk import compiler
 
 
-def wide_gemm_grids(pk, cap: int = 256, only=None, act_aware=None) -> dict:
+def wide_gemm_grids(pk, cap: int = 256, only=None, act_aware=None, max_kparts: int = 14) -> dict:
     """act_aware (default on; MPK_GLM_ACTGRID=0 off): the grid with the fewest bytes per CU - a task of R rows and K part KP reads R KP
     2 B of weights plus T KP 2 B of activation (every task loads its whole activation slice into LDS), ceil(tasks / 256) tasks per
     CU; ties: more tasks, then fewer K parts. K parts > 1 only for "slots" GEMMs (mode 0: the reader adds the parts). MI355X 11-07
@@ -22,7 +22,11 @@ def wide_gemm_grids(pk, cap: int = 256, only=None, act_aware=None) -> dict:
         if n.name != "gemm_tile" or (only is not None and n.graph_idx not in only):
             continue
         cands = [tuple(g) for g in compiler.candidate_grids(n)]
-        fit = [g for g in cands if g[0] * g[1] * g[2] <= cap]
+        # (at most max_kparts K parts: gemm_tile's finish paths take at most 14 - GLM-5.3's H 6144 offers up to 48)
+        fit = [g for g in cands if g[0] * g[1] * g[2] <= cap and g[1] <= max_kparts]
+        if len(n.params) > 4 and n.params[4] == 2:   # (GEMM_FP8: each wave's K columns whole 128-column scale blocks)
+            ksplit = lambda g: 1 if n.params[2] // g[0] >= 64 else 4 // (n.params[2] // g[0] // 16)
+            fit = [g for g in fit if (n.params[1] // g[1]) % (128 * ksplit(g)) == 0]
         if not fit:
             continue
         T = compiler.dims(n.inputs[0])[0]
@@ -36,7 +40,8 @@ def wide_gemm_grids(pk, cap: int = 256, only=None, act_aware=None) -> dict:
             mode, K, N = n.params[0], n.params[1], n.params[2]
             # (at most 8 K parts: gemm_tile's finish paths take at most 14 - glmgrid2: DSA's [q_a | kv_a] at 16 / 32 parts)
             fit = [g for g in fit if (g[1] == 1 or mode == 0) and g[1] <= 8] or fit
-            cost = lambda g: -(-(g[0] * g[1] * g[2]) // 256) * ((N // g[0]) * (K // g[1]) * 2 + T * (K // g[1]) * 2)
+            wb = 1 if len(n.params) > 4 and n.params[4] == 2 else 2   # (the weight's bytes per element: GEMM_FP8 1)
+            cost = lambda g: -(-(g[0] * g[1] * g[2]) // 256) * ((N // g[0]) * (K // g[1]) * wb + T * (K // g[1]) * 2)
             out[n.graph_idx] = min(fit, key=lambda g: (cost(g), -(g[0] * g[1] * g[2]), g[1]))
         else:
             out[n.graph_idx] = max(fit, key=lambda g: (g[0] * g[1] * g[2], -g[1]))
