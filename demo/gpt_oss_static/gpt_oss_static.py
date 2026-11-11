@@ -139,7 +139,10 @@ def compile_kernel(name, build, t, out_dir):
     """Build one static kernel for a layer kind or the model head."""
     mpk = StaticMegakernel(num_gpus=1)
     build(mpk, t)
-    plan = round_robin_plan(mpk)
+    if name != "head" and torch.cuda.get_device_name() == "NVIDIA H100 80GB HBM3" and mpk._num_sms() == 132:
+        plan = compiler.plan_from_file(os.path.join(os.path.dirname(__file__), "plans", "h100", f"{name}_plan.json"))
+    else:
+        plan = round_robin_plan(mpk)
     paths, _ = compiler.compile_plan(mpk, plan, os.path.join(out_dir, name, "schedules"))
     return mpk.compile_static(paths, gpu_tensors=[t], out_dir=os.path.join(out_dir, name, "build"), extra_flags=FLAGS)
 

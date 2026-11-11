@@ -38,7 +38,8 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   __shared__ float part[SM90_WARPS], logit[E];
   __shared__ uint4 hs[VEC]; // h as rounded (f16), for the router's warps
   __shared__ int last;
-  {
+  int const ntok = *buf_at<int const>(g, slot_at<BUF_SLOTS, 6>());
+  if (tk.x < ntok) {
     // the router (no producer) into L2 while o_proj finishes
     char const *rp = reinterpret_cast<char const *>(
         buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 4>()));
@@ -104,7 +105,7 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   // (each step its EPW rows' vectors in flight), reduced over the warp
   constexpr int EPW = E / SM90_WARPS;
   constexpr int UNROLL = EPW <= 4 ? 4 : 1; // the EPW rows' loads in registers
-  {
+  if (t < ntok) {
     uint4 const *rwr = rw + (size_t)warp * EPW * VEC;
     float acc[EPW] = {};
 #pragma unroll UNROLL
@@ -138,6 +139,8 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
       }
       logit[warp * EPW + lane] = a;
     }
+  } else if (lane < EPW) {
+    logit[warp * EPW + lane] = 0.f;
   }
   __syncthreads();
   // 4. warp 0, lane l the experts j 32 + l: the token's top-k (rows past
