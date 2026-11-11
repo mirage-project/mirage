@@ -261,6 +261,10 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
   static_assert(K > 0 && K % 64 == 0 && k_tiles % SELF::y == 0,
                 "params = {mode, K, N, polled}; K in 64-column blocks, each K "
                 "part whole 128-column tiles");
+#ifndef STATIC_SM90
+  static_assert(K % 128 == 0,
+                "a K ending in a half tile (K % 128 == 64) is Hopper only");
+#endif
   constexpr int pieces = k_tiles / SELF::y; // K tiles of 128 per task
   constexpr int ROWS = N / SELF::x;
   static_assert(ROWS * SELF::x == N && (ROWS == 128 || ROWS == 64),

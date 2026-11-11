@@ -296,7 +296,14 @@ enum TaskType {
   // mHC's post step of a TP sublayer and the first half of the next
   // sublayer's pre step in one task (tasks/hc_post_mix.cuh).
   TASK_HC_POST_MIX_SM100 = 530,
-  TASK_STATIC_SM90 = 531,
+  // Hopper static-megakernel tasks (tasks/sm90_*.cuh)
+  TASK_SM90_RMSNORM = 531,
+  TASK_SM90_ATTENTION = 532,
+  TASK_SM90_ATTENTION_SPLIT = 533,
+  TASK_SM90_ATTENTION_MERGE = 534,
+  TASK_SM90_GATE = 535,
+  TASK_SM90_MOE_RING = 536,
+  TASK_SM90_MUL_SUM_ADD = 537,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 

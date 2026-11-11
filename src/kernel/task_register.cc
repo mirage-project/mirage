@@ -5522,20 +5522,6 @@ static std::string static_build_only_task(char const *name,
   return code.to_string();
 }
 
-int TaskRegister::register_static_sm90_task(threadblock::Graph const &bgraph,
-                                            std::vector<int> const &params,
-                                            std::string const &name,
-                                            int num_outputs) {
-  std::vector<tb::TBInputOp *> input_ops, output_ops;
-  static_split_ops(bgraph,
-                   (int)bgraph.operators.size() - num_outputs,
-                   num_outputs,
-                   input_ops,
-                   output_ops);
-  return register_task_variant(TASK_STATIC_SM90,
-                               static_build_only_task(name.c_str(), params));
-}
-
 int TaskRegister::register_gemm_tile_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {mode (how the K parts are combined: 0 one slot per part, 1
@@ -5692,6 +5678,86 @@ int TaskRegister::register_residual_add_sm100_task(
                               params,
                               (int)bgraph.operators.size() - 1,
                               1);
+}
+
+int TaskRegister::register_sm90_rmsnorm_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params) {
+  // params: {H, eps bits, f16 out}. inputs: x, weight; output: y
+  // (tasks/sm90_rmsnorm.cuh)
+  return register_static_task(
+      this, TASK_SM90_RMSNORM, "sm90_rmsnorm", bgraph, params, 2, 3);
+}
+
+int TaskRegister::register_sm90_attention_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params) {
+  // params: {Q, KVH, D, max seq, page, window, has sink, has qkv bias}; the
+  // optional inputs left out (tasks/sm90_attention.cuh)
+  return register_static_task(this,
+                              TASK_SM90_ATTENTION,
+                              "sm90_attention",
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              8);
+}
+
+int TaskRegister::register_sm90_attention_split_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {Q, KVH, D, max seq, page, chunk, chunks, has qkv bias}; the
+  // optional inputs left out (tasks/sm90_attention_split.cuh)
+  return register_static_task(this,
+                              TASK_SM90_ATTENTION_SPLIT,
+                              "sm90_attention_split",
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              8);
+}
+
+int TaskRegister::register_sm90_attention_merge_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {Q, D, chunk, chunks, has sink, page}; the optional sinks left out
+  // (tasks/sm90_attention_merge.cuh)
+  return register_static_task(this,
+                              TASK_SM90_ATTENTION_MERGE,
+                              "sm90_attention_merge",
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              6);
+}
+
+int TaskRegister::register_sm90_gate_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params) {
+  // params: {H, E, TOPK, eps bits, router splits}; five outputs
+  // (tasks/sm90_gate.cuh)
+  assert(params.size() == 5);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(
+      bgraph, (int)bgraph.operators.size() - 5, 5, input_ops, output_ops);
+  return register_task_variant(TASK_SM90_GATE,
+                               static_build_only_task("sm90_gate", params));
+}
+
+int TaskRegister::register_sm90_moe_ring_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params) {
+  // params: {glu, rows, N, K, E, TOPK, has bias, limit, alpha, slot deps, fp32
+  // scales}; the optional bias left out (tasks/sm90_moe_ring.cuh)
+  return register_static_task(this,
+                              TASK_SM90_MOE_RING,
+                              "sm90_moe_ring",
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              11);
+}
+
+int TaskRegister::register_sm90_mul_sum_add_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {H, TOPK}. inputs: expert outputs, weights, residual; output: y
+  // (tasks/sm90_mul_sum_add.cuh)
+  return register_static_task(
+      this, TASK_SM90_MUL_SUM_ADD, "sm90_mul_sum_add", bgraph, params, 3, 2);
 }
 
 int TaskRegister::register_group_quant_sm100_task(
