@@ -31,7 +31,7 @@ from mirage.mpk import compiler
 from mirage.mpk.static_harness import Harness
 from mirage.core import bfloat16, float32, int64, uint8
 
-T, H, L, E, TOPK = 8, 7168, 3584, 896, 16       # tokens, hidden, latent, experts, routed experts per token
+T, H, L, E, TOPK = int(os.environ.get("MPK_TOKENS", "8")), 7168, 3584, 896, 16   # tokens (MPK_TOKENS: the batch size), hidden, latent, experts, routed experts per token
 IR_LOCAL, SHR_LOCAL = 384, 768                   # routed / shared intermediate per GPU at TP8
 
 
@@ -50,8 +50,12 @@ WEIGHT_FILES = [
     ("w13_blocks", "w13_blk.bin", (E, 2 * IR_LOCAL, L // 2), np.uint8, True),
     ("w13_scales", "w13_sf.bin", (E, 2 * IR_LOCAL, L // 32), np.uint8, True),
     ("w2_blocks", "w2_blk.bin", (E, L, IR_LOCAL // 2), np.uint8, True),
-    ("w2_scales", "w2_sf.bin", (E, L, IR_LOCAL // 32), np.uint8, True),
-]
+    ("w2_scales", "w2_sf.bin", (E, L, 16 if os.environ.get("MPK_MOE_AITER") == "1" else IR_LOCAL // 32), np.uint8, True),
+]   # (MPK_MOE_AITER: AITER's layout, W2 scales padded to 16 per row)
+# on AMD (gpu_backend "hip") the expert banks are in the gfx950 tile layout instead, files written next to the B300 ones by
+# amd/tools/prep_gfx950_from_b300.py (the same byte counts, so the same shapes)
+HIP_EXPERT_FILES = {"w13_blk.bin": "w13_gfx950.bin", "w13_sf.bin": "w13_sf_gfx950.bin", "w2_blk.bin": "w2_gfx950.bin",
+                    "w2_sf.bin": "w2_sf_gfx950.bin"}
 
 
 def read_file(path: str, shape: tuple, dtype) -> torch.Tensor:
@@ -64,10 +68,13 @@ def read_file(path: str, shape: tuple, dtype) -> torch.Tensor:
 def load_weights(layer_dir: str, gpu: int) -> dict:
     """GPU `gpu`'s tensors on device `gpu`: WEIGHT_FILES (the shared ones from layer_dir, GPU g's shard from layer_dir_r<g>, GPU 0's
     from layer_dir), and the layer's outputs the checks read back."""
+    from mirage.mpk import gpu_backend
     shard_dir = f"{layer_dir}_r{gpu}" if gpu else layer_dir
     dev = torch.device("cuda", gpu)
+    hip = gpu_backend.backend() == "hip"
     w = {}
     for name, file, shape, dtype, sharded in WEIGHT_FILES:
+        file = HIP_EXPERT_FILES.get(file, file) if hip else file
         w[name] = read_file(os.path.join(shard_dir if sharded else layer_dir, file), shape, dtype).contiguous().to(dev)
     # the outputs: y; this GPU's routed rows (one per token and routed expert: [T x TOPK][L], moe_experts' output; routed_partial adds
     # a token's TOPK); this GPU's shared-down sums before the all-reduce
@@ -87,14 +94,17 @@ def build_kernel(num_gpus: int = 8) -> StaticMegakernel:
     return StaticMegakernel(num_gpus=num_gpus)
 
 
-def build_graph(mpk: StaticMegakernel, w: dict, rmsnorm_recompute: bool = False):
+def build_graph(mpk: StaticMegakernel, w: dict, rmsnorm_recompute: bool = False, x_in=None, prefix_in=None, agg_posted=False):
     """The K3 MoE layer as 15 layer calls. No grid_dim, no K split: the plan decides them. Shared down is its own GEMM node and S is
     sent on its own (as soon as shared down is done), R after moe_experts. sum_rmsnorm: 1, 2 or 4 tasks per token (the plan),
     swapping their sums of squares (in a cluster of 2 CTAs when compile_plan can pair them), or each adding the whole row's
     (rmsnorm_recompute)."""
     a = lambda k: mpk.attach_input(torch_tensor=w[k], name=k)
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
-    x, prefix = a("moe_in"), a("moe_prefix")
+    # x_in / prefix_in: graph tensors of the layer before in the same kernel (a fused attention + MoE layer: its hidden and new
+    # prefix), else the inputs moe_in / moe_prefix
+    x = x_in if x_in is not None else a("moe_in")
+    prefix = prefix_in if prefix_in is not None else a("moe_prefix")
     w_router, bias = a("router_weight"), a("score_correction_bias")
     w_down, w_up, gamma = a("latent_down_weight"), a("latent_up_weight"), a("routed_expert_norm_weight")
     w_sgu, w_sd = a("shared_gate_up_weight"), a("shared_down_weight")
@@ -105,24 +115,69 @@ def build_graph(mpk: StaticMegakernel, w: dict, rmsnorm_recompute: bool = False)
     Rn = nt((T, L), bfloat16, "routed_normed"); Ssum = nt((T, H), bfloat16, "shared_summed")
     up_part = nt((T, H), float32, "latent_up_partial"); o = nt((T, H), bfloat16, "latent_up_out")   # each GPU: its own rows
     R, S, y = a("routed_sum_partial"), a("shared_down_partial"), a("moe_out")
+    if os.environ.get("MPK_MOE_INPUT_WAIT") in ("1", "2"):   # HIP: x and prefix polled and copied first (tasks/input_wait.cuh; after every graph input
+        # is attached, so they are nodes 26, 27), for a MoE kernel that runs while the attention kernel before it still does (2: re-arm them for the next launch)
+        rearm = os.environ.get("MPK_MOE_INPUT_WAIT") == "2"
+        xw = mpk.new_tensor(dims=(T, H), dtype=bfloat16, name="moe_in_w")
+        pw = mpk.new_tensor(dims=(T, H), dtype=bfloat16, name="moe_prefix_w")
+        mpk.input_wait_layer(input=x, output=xw, rearm=rearm)
+        mpk.input_wait_layer(input=prefix, output=pw, rearm=rearm)
+        x, prefix = xw, pw
     mpk.gemm_tile_layer(input=x, weight=w_router, output=logits)                               # router: logits = x . Wg^T (fp32)
     mpk.topk_route_layer(input=logits, bias=bias, output=pairs)                                # sigmoid + bias, top-16, renorm
-    mpk.gemm_tile_layer(input=x, weight=w_down, output=z, rows_split_over_gpus=True)           # latent_down: z = x . Wdown^T
-    mpk.sum_quant_send_layer(input=z, output=z_q)                                              # MXFP8 quantize + all-gather
+    if os.environ.get("MPK_ZQ_FINISH") == "1":   # HIP: latent_down's last K part per 128 rows quantizes and sends z_q itself
+        mpk.gemm_tile_layer(input=x, weight=w_down, output=z_q, rows_split_over_gpus=True, combine="finish_quant")
+    elif os.environ.get("MPK_ZQ_FINISH") == "2":   # HIP, T >= 32: the same with every K part's task making its share of tokens
+        # (kernel flag STATIC_GEMM_QUANT_COOP), and a placeholder sum_quant_send node keeping the node numbers plans name
+        mpk.gemm_tile_layer(input=x, weight=w_down, output=z_q, rows_split_over_gpus=True, combine="finish_quant")
+        mpk.sum_quant_send_layer(input=x, output=z, skip=True)   # (z unused here: no new tensor, the numbering unchanged)
+    else:
+        mpk.gemm_tile_layer(input=x, weight=w_down, output=z, rows_split_over_gpus=True)       # latent_down: z = x . Wdown^T
+        mpk.sum_quant_send_layer(input=z, output=z_q)                                          # MXFP8 quantize + all-gather
     mpk.gemm_tile_layer(input=x, weight=w_sgu, output=sgu, combine="add")                      # shared gate_up
     mpk.situ_and_mul_layer(input=sgu, output=h_s)                                              # SiTU
     r_sent, s_sent = nt((T, L), bfloat16, "r_sent"), nt((T, H), bfloat16, "s_sent")
     mpk.gemm_tile_layer(input=h_s, weight=w_sd, output=S, combine="store")                     # shared down: S = h_s . Wsd^T
     mpk.allreduce_send_layer(input=S, output=s_sent)                                           # S to every GPU, early
+    local = os.environ.get("MPK_MOE_LOCAL_ROUTE") == "1"   # (HIP, T = 1: each CU makes the pairs itself)
     mpk.moe_experts_layer(z_q=z_q, pairs=pairs, w13=w13, w13_scales=w13_sf, w2=w2, w2_scales=w2_sf,
-                          output=R)                                                            # W13 + SiTU + requant, W2
+                          output=R, w13_cu=os.environ.get("MPK_MOE_W13_CU") == "1",   # (few W13 items: a CU per item)
+                          router_logits=logits if local else None, bias=bias if local else None)                                                            # W13 + SiTU + requant, W2
     mpk.allreduce_send_layer(input=R, output=r_sent)                                           # R to every GPU
-    mpk.sum_rmsnorm_layer(input=r_sent, gamma=gamma, output=Rn, recompute=rmsnorm_recompute)   # R over the GPUs, RMSNorm
+    fold = os.environ.get("MPK_RMSNORM_FOLD") == "1"   # HIP: RMSNorm in latent_up (no sum_rmsnorm, no sum_send)
+    if not fold:
+        mpk.sum_rmsnorm_layer(input=r_sent, gamma=gamma, output=Rn, recompute=rmsnorm_recompute)   # R over the GPUs, RMSNorm
     mpk.sum_gpus_layer(input=s_sent, output=Ssum)                                              # S over the GPUs
-    mpk.gemm_tile_layer(input=Rn, weight=w_up, output=up_part, rows_split_over_gpus=True,
-                        input_polled=True)                                                     # latent_up (K parts)
-    mpk.sum_send_layer(input=up_part, output=o)                                                # add the K parts, to every GPU
-    mpk.residual_add_layer(input=o, addend=Ssum, residual=prefix, output=y)                    # y = o + S + prefix
+    if fold:   # each K part adds the GPUs' rows x gamma; per row block the last part scales by rstd, pushes (bf16)
+        mpk.gemm_tile_layer(input=r_sent, weight=w_up, output=o, rows_split_over_gpus=True, input_polled=True,
+                            combine="finish", norm_gamma=gamma)
+    elif os.environ.get("MPK_LATENT_UP_PUSH") == "1":   # HIP: one K part, each GPU's rows pushed (bf16) to every GPU
+        mpk.gemm_tile_layer(input=Rn, weight=w_up, output=o, rows_split_over_gpus=True, input_polled=True, combine="push")
+    elif os.environ.get("MPK_LATENT_UP_FINISH") == "1":   # HIP: K parts; per row block the last part adds them, pushes (bf16)
+        mpk.gemm_tile_layer(input=Rn, weight=w_up, output=o, rows_split_over_gpus=True, input_polled=True, combine="finish")
+    else:
+        mpk.gemm_tile_layer(input=Rn, weight=w_up, output=up_part, rows_split_over_gpus=True,
+                            input_polled=True)                                                 # latent_up (K parts)
+        mpk.sum_send_layer(input=up_part, output=o)                                            # add the K parts, to every GPU
+    if os.environ.get("MPK_MOE_AGG") == "2":   # HIP: the same, one task per token (tasks/moe_agg1.cuh)
+        # (agg_posted: the next layer's attention follows in this kernel and reads hidden and its prefix agg_prefix (y, or
+        # zero after a bank row write): returns (agg_prefix, hidden); the inputs attached in the same order either way)
+        bk, aq, ag, aw = a("agg_bank"), a("agg_q"), a("agg_gain"), a("agg_ow")
+        hid = a("agg_out")
+        info = a("agg_info")
+        pfx = a("agg_prefix") if agg_posted else None
+        bare = a("agg_bare") if agg_posted else None   # (bf16(o + S): SGLang's addend where it adds the residual itself)
+        # (MPK_AGG_MIX=1: the pre-norm mixture, for SGLang's dspark capture of the stream at its capture layers)
+        mix = a("agg_mix") if agg_posted and os.environ.get("MPK_AGG_MIX") == "1" else None
+        mpk.moe_agg1_layer(input=o, addend=Ssum, residual=prefix, output=y, bank=bk, q=aq,
+                           gain=ag, ow=aw, hidden=hid, info=info, posted=agg_posted, attn_prefix=pfx, bare=bare, mix=mix)
+        if agg_posted:
+            return pfx, hid
+    elif os.environ.get("MPK_MOE_AGG") == "1":   # HIP: y and the next layer's aggregation 1 (tasks/moe_attn_residual.cuh)
+        mpk.moe_attn_residual_layer(input=o, addend=Ssum, residual=prefix, output=y, bank=a("agg_bank"), q=a("agg_q"),
+                                    gain=a("agg_gain"), ow=a("agg_ow"), hidden=a("agg_out"), info=a("agg_info"))
+    else:
+        mpk.residual_add_layer(input=o, addend=Ssum, residual=prefix, output=y)                # y = o + S + prefix
     return y
 
 
