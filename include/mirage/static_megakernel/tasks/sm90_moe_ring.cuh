@@ -29,6 +29,7 @@
 // first stages (the weights before it waits for the activation's producer).
 #pragma once
 #include "sm90_common.cuh"
+#include "sm90_frag.cuh"
 
 namespace static_mk {
 
@@ -179,15 +180,16 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
   int const a = tk.x, row0 = tk.y * ROWS;
   int const c0 = done[SMAX];
   // slot a's expert: the a-th set bit of the gate's routed-expert mask (its
-  // counter lines 2.., set before its tasks' counts): the experts ascending
-  using GATE = typename sm90_nth<3, IN...>::type; // the active list's producer
-  static_assert(GATE::counter >= 0, "sm90_moe_ring: the gate's mask lines");
+  // counter lines 2.., set before its tasks' counts): the experts ascending.
+  // A list that is a graph input (no producer's lines, e.g. a microbenchmark):
+  // read the list.
+  using LIST = typename sm90_nth<3, IN...>::type; // the active list's producer
   int e = -1;
-  {
+  if constexpr (LIST::x > 0 && LIST::counter >= 0) {
     uint32_t mw[E / 32];
 #pragma unroll
     for (int j = 0; j < E / 32; j++) {
-      mw[j] = __ldcg(g.cnt + GATE::counter + 2 + j);
+      mw[j] = __ldcg(g.cnt + LIST::counter + 2 + j);
     }
     int before = 0;
 #pragma unroll
@@ -202,6 +204,9 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
       }
       before += n;
     }
+  } else {
+    int const *active = buf_at<int const>(g, slot_at<BUF_SLOTS, 0>());
+    e = a < active[E] ? active[a] : -1;
   }
   if (e >= 0) {
     int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
@@ -278,18 +283,9 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
           continue;
         }
         // B: token g8's K pairs 2q (b0) and 2q + 8 (b1) of each k16 block,
-        // from the 128-B swizzled box (16-B chunk index ^ row)
-        char const *act = stage + S::ACT_OFF + b * A_STAGE + g8 * 128 + 4 * q;
+        // from the 128-B swizzled box, in 4 ldmatrix
         uint32_t bf[8][2];
-#pragma unroll
-        for (int kb = 0; kb < 8; kb++) {
-          char const *half = act + (kb >> 2) * 1024;
-          int const ch = 2 * (kb & 3);
-          bf[kb][0] =
-              *reinterpret_cast<uint32_t const *>(half + ((ch ^ g8) << 4));
-          bf[kb][1] = *reinterpret_cast<uint32_t const *>(
-              half + (((ch + 1) ^ g8) << 4));
-        }
+        sm90_b_frags_k128_sw128(stage + S::ACT_OFF + b * A_STAGE, bf);
 #pragma unroll
         for (int mt = 0; mt < MT; mt++) {
           uint32_t r[8][4];
