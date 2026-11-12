@@ -5740,6 +5740,20 @@ int TaskRegister::register_sm90_gate_task(threadblock::Graph const &bgraph,
                                static_build_only_task("sm90_gate", params));
 }
 
+int TaskRegister::register_sm90_moe_pool_task(threadblock::Graph const &bgraph,
+                                              std::vector<int> const &params) {
+  // params: {N13, H, I, E, TOPK, A, has bias, limit, alpha, fp32 scales, the
+  // big units' blocks (W13, W2)};
+  // inputs: W13's activation, W13, routing, active list, W2[, the biases];
+  // outputs: act, the expert outputs (tasks/sm90_moe_pool.cuh)
+  assert(params.size() == 12);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(
+      bgraph, (int)bgraph.operators.size() - 2, 2, input_ops, output_ops);
+  return register_task_variant(TASK_SM90_MOE_POOL,
+                               static_build_only_task("sm90_moe_pool", params));
+}
+
 int TaskRegister::register_sm90_moe_ring_task(threadblock::Graph const &bgraph,
                                               std::vector<int> const &params) {
   // params: {glu, rows, N, K, E, TOPK, has bias, limit, alpha, slot deps, fp32

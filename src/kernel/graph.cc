@@ -1107,6 +1107,14 @@ void Graph::register_task_for_op(KNOperator const *op,
                         1,
                         TASK_SM90_MOE_RING,
                         variant_id);
+  } else if (name == "sm90_moe_pool") {
+    int variant_id =
+        task_register->register_sm90_moe_pool_task(customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple((int)customized->bgraph.operators.size() - 2,
+                        2,
+                        TASK_SM90_MOE_POOL,
+                        variant_id);
   } else if (name == "sm90_mul_sum_add") {
     int variant_id = task_register->register_sm90_mul_sum_add_task(
         customized->bgraph, params);

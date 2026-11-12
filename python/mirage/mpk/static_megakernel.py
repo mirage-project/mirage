@@ -1474,6 +1474,49 @@ class StaticMegakernel(PersistentKernel):
                                   self._tensor_slot(weights), self._tensor_slot(bias) if bias is not None else -1,
                                   self._tensor_slot(output)])
 
+    def sm90_moe_pool_layer(
+        self,
+        input: DTensor,           # [T, H] f16: W13's activation
+        w13: DTensor,             # sm90_moe_ring_pack(..., 128, glu=True)'s blocks [E, 2 I / 128, H tiles, 128 x 68] u8
+        w2: DTensor,              # sm90_moe_ring_pack(..., 64, glu=False)'s blocks [E, H / 64, I tiles, 64 x 68] u8
+        routing_indices: DTensor, # [E, T] i32: 1 + the top-k slot of each token routed to the expert, else 0
+        active_experts: DTensor,  # [E + 1] i32 (sm90_gate's: its expert mask gives the slots)
+        act: DTensor,             # [A, T, I] f16: W13's output by slot (A: the most experts a step routes to)
+        output: DTensor,          # [T, TOPK, H] bf16: each token's expert rows
+        b13: DTensor = None,      # [E, 2 I] bf16, the checkpoint's row order (gate then up)
+        b2: DTensor = None,       # [E, H] bf16
+        limit: float = 7.0,       # GPT-OSS's SwiGLU clamp and alpha
+        alpha: float = 1.702,
+        fp32_scales: bool = False,
+        big_units: tuple = (1, 1),   # (W13, W2): the blocks of a big unit, taken when a step has at least an SM's worth
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """The routed MXFP4 experts as a pool (tasks/sm90_moe_pool.cuh), the MoE node of scaled_moe_experts's kind: one task
+        per SM; the SMs claim the units of the step's active slots from a queue, W13 (128 rows, the clamped SwiGLU fused)
+        then W2 (64 rows); a unit is one block or, when the step has at least an SM's worth of them, big_units blocks; each row
+        the math of sm90_moe_ring's task, so the same results. The solver models it by its total work
+        (search: a pool). params = [2 I, H, I, E, TOPK, A, has bias, limit bits, alpha bits, fp32 scales, UB13, UB2]."""
+        E, N13, H = w13.dim(0), w13.dim(1) * 128, input.dim(1)
+        I, T, A, TOPK = N13 // 2, self._tokens(routing_indices.dim(1)), act.dim(0), output.dim(1)
+        assert (w13.dim(2), w13.dim(3)) == ((H + 127) // 128, 128 * 68) and H % 64 == 0
+        assert tuple(w2.dim(i) for i in range(4)) == (E, H // 64, (I + 127) // 128, 64 * 68)
+        ub13, ub2 = big_units
+        assert (N13 // 128) % ub13 == 0 and (H // 64) % ub2 == 0, "sm90_moe_pool_layer: big units of whole blocks"
+        assert (act.dim(1), act.dim(2)) == (T, I) and (output.dim(0), output.dim(2)) == (T, H) and A <= E
+        assert (b13 is None) == (b2 is None), "sm90_moe_pool_layer: both biases or neither"
+        self._dtypes("sm90_moe_pool_layer", input=(input, float16), w13=(w13, uint8), w2=(w2, uint8), act=(act, float16),
+                     output=(output, bfloat16))
+        tensors = [input, w13, routing_indices, active_experts, w2] + ([b13, b2] if b13 is not None else []) + [act, output]
+        self._add_node("sm90_moe_pool", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
+                       [N13, H, I, E, TOPK, A, int(b13 is not None), float_bits(limit), float_bits(alpha), int(fp32_scales),
+                        ub13, ub2],
+                       one_task_per_sm=True, counters=64 + A,
+                       map_slots=[self._map("bf16", ("t", input), (T, H, T)), self._map("bf16", ("t", act), (A * T, I, T))],
+                       buf_slots=[self._tensor_slot(active_experts), self._tensor_slot(routing_indices), self._tensor_slot(w13),
+                                  self._tensor_slot(b13) if b13 is not None else -1, self._tensor_slot(w2),
+                                  self._tensor_slot(b2) if b2 is not None else -1, self._tensor_slot(act),
+                                  self._tensor_slot(output)])
+
     def sm90_rmsnorm_layer(self, input: DTensor, weight: DTensor, output: DTensor, eps: float,
                            block_dim: tuple = (256, 1, 1)):
         """RMSNorm of each token, bf16 in, bf16 or f16 out (output's dtype; f16: an MXFP4 MoE's input, sm90_moe_ring): task x
@@ -1549,27 +1592,32 @@ class StaticMegakernel(PersistentKernel):
 
     def sm90_gate_layer(self, o: DTensor, o_bias: DTensor, residual: DTensor, norm_weight: DTensor, router: DTensor,
                         router_bias: DTensor, num_tokens: DTensor, x1: DTensor, h: DTensor, weights: DTensor,
-                        routing_indices: DTensor, active_experts: DTensor, eps: float, router_splits: int = 1,
+                        routing_indices: DTensor, active_experts: DTensor, eps: float, router_splits: int = None,
                         block_dim: tuple = (256, 1, 1)):
         """What sits between o_proj and the routed experts, for one token a task (tasks/sm90_gate.cuh): x1 = bf16(o +
         o_bias + residual), h = f16(RMSNorm(x1)), the router logits, the token's top-k (softmax, renormalized): its weights
         [T, TOPK] fp32 and routing column [E, T] i32; the active-expert list [E + 1] i32 from the last task. Outputs: x1, h,
         weights, routing_indices, active_experts (graph.cc: sm90_gate's five). Grid (T, S, 1): a token's router over S
         tasks, E / S experts each (S > 1: their logits through the routing column; the token's last task takes the top-k).
-        S is a changeable grid dim (E / S a multiple of the task's warps): the plan picks it; router_splits is the default
-        grid's. params = [H, E, TOPK, eps bits]."""
+        S is a changeable grid dim (E / S a multiple of the task's warps, their router rows in one SM's shared memory): the
+        plan picks it; router_splits is the default grid's (None: the smallest that fits). params = [H, E, TOPK, eps bits]."""
         T, H, E, TOPK = self._tokens(o.dim(0)), o.dim(1), router.dim(0), weights.dim(1)
         assert E % 32 == 0 and E <= 256, "sm90_gate: experts a multiple of 32, at most 256 (32 a router warp)"
-        S, warps = router_splits, block_dim[0] // 32
-        if S < 1 or E % (S * warps):
-            raise ValueError(f"sm90_gate_layer: router_splits {S}: E ({E}) / S experts a multiple of the task's warps")
+        warps = block_dim[0] // 32
+        # a task's E / S router rows in shared memory (H x 2 B each): at most what one SM has, in whole warps' worth
+        max_units = (227 * 1024 - 1024) // (2 * H) // warps
+        fits = [s for s in range(1, E // warps + 1) if E % (s * warps) == 0 and E // (s * warps) <= max_units]
+        S = router_splits or (fits[0] if fits else 0)
+        if S not in fits:
+            raise ValueError(f"sm90_gate_layer: router_splits {S}: E ({E}) / S experts a multiple of the task's warps, "
+                             f"their rows in one SM's shared memory (S in {fits})")
         self._dtypes("sm90_gate_layer", o=(o, float32), residual=(residual, bfloat16), router=(router, bfloat16),
                      x1=(x1, bfloat16), h=(h, float16), weights=(weights, float32))
         present = [o, o_bias, residual, norm_weight, router, router_bias, num_tokens, x1, h, weights, routing_indices,
                    active_experts]
         self._add_node("sm90_gate", (T, S, 1), block_dim, present, [(-1, -1, -1)] * len(present),
                        [H, E, TOPK, float_bits(eps)], counters=2 + E // 32 + T,
-                       changeable_grid_dims={1: (warps, 1, None, E)},   # S: E / S experts, whole warps' worth
+                       changeable_grid_dims={1: (warps, 1, max_units, E)},   # S: E / S experts, whole warps' worth
                        buf_slots=[self._tensor_slot(t) for t in present])
 
     def sm90_mul_sum_add_layer(self, input: DTensor, weights: DTensor, residual: DTensor, output: DTensor,

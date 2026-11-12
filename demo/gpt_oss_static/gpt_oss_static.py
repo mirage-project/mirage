@@ -120,10 +120,10 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
                         A["h2"], A["topk_w"], A["routing"], A["active"], eps=m.eps)   # router splits: the plan's
     # the MXFP4 scales in fp32 after the MMAs, both models: the f16 path's scaled decode costs more than it saves (20B, H100:
     # 2957 -> 2829 us/step)
-    mpk.sm90_moe_ring_layer(A["h2"], A["w13"], A["routing"], A["active"], A["act"], bias=A["b13"], glu=True,
-                            limit=m.limit, alpha=1.702, rows_per_task=128, fp32_scales=True)
-    mpk.sm90_moe_ring_layer(A["act"], A["w2"], A["routing"], A["active"], A["eo"], bias=A["b2"], glu=False,
-                            rows_per_task=64, fp32_scales=True)
+    # the routed experts as a pool (the other static models' MoE kind): the SMs share the step's units at run time, three
+    # blocks a unit when a step has at least an SM's worth of them (sm90_moe_pool_layer big_units)
+    mpk.sm90_moe_pool_layer(A["h2"], A["w13"], A["w2"], A["routing"], A["active"], A["act"], A["eo"], b13=A["b13"],
+                            b2=A["b2"], limit=m.limit, alpha=1.702, fp32_scales=True, big_units=(3, 3))
     mpk.sm90_mul_sum_add_layer(A["eo"], A["topk_w"], A["x1"], A["x_out"])
     if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the QKV weight's first MB into L2 at the start (as the GLM demos)
         mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
@@ -165,15 +165,21 @@ def compile_kernel(name, build, t, out_dir, plan=None, profile=False):
                               profile=profile)
 
 
-def tune(m: Model, kinds: dict, out: str, plans: str, costs: str, rounds: int, time_limit_s: float, reps: int = 10):
+def tune(m: Model, kinds: dict, out: str, plans: str, costs: str, rounds: int, time_limit_s: float, tokens: torch.Tensor,
+         reps: int = 10):
     """--tune: per kernel kind, the cost collection (plan_gen.collection_plans and the current plan, each a timing build run
-    reps times with L2 emptied, the page table at mid-sequence: cost_records appended to costs), then search.search_plan from
-    the current plan -> plan_path; last, the span of both plans (serving build). Builds run 8 at a time (the build cache)."""
+    reps times with L2 emptied, the page table at mid-sequence, every layer input the embedding rows of tokens, one a request,
+    so that the requests route as real ones: cost_records appended to costs), then search.search_plan from the current plan
+    -> plan_path; last, the span of both plans (serving build). Builds run 8 at a time (the build cache)."""
     from concurrent.futures import ThreadPoolExecutor
     os.environ.setdefault("MIRAGE_STATIC_BUILD_CACHE", os.path.join(out, "build_cache"))
     nvcc = subprocess.run(["nvcc", "--version"], capture_output=True, text=True).stdout.strip().splitlines()[-1]
     machine = {"gpu": torch.cuda.get_device_name(0), "cuda": nvcc}
     os.makedirs(plans, exist_ok=True)
+    rows = m.embed[tokens]
+    for x in (m.x_embed, *m.x):
+        x.zero_()
+        x[:len(tokens)].copy_(rows)
 
     def graph(build, t):
         mpk = StaticMegakernel(num_gpus=1)
@@ -211,15 +217,19 @@ def tune(m: Model, kinds: dict, out: str, plans: str, costs: str, rounds: int, t
         cost = search.Costs(costs, code=static_schedule.code_tag(), gpu=machine["gpu"])
         plan, summary = search.search_plan(mpk, cost, time_limit_s=time_limit_s, start_from=cur)
         print(f"tune {kind}: solver {({k: summary.get(k) for k in ('status', 'predicted_us', 'grids')})}", flush=True)
-        compiler.write_plan_file(plan_path(m, plans, kind), plan)
-        for tag, p in (("cur", cur), ("solved", plan), ("cur", cur), ("solved", plan)):
-            _, _, sk = compiled(build, t, p, f"{kind}/span_{tag}", False)
-            h, sp = Harness(sk), []
+        spans = {"cur": [], "solved": []}
+        for i, (tag, p) in enumerate((("cur", cur), ("solved", plan), ("cur", cur), ("solved", plan))):
+            # a build directory each: a loaded layer's .so must not be overwritten
+            _, _, sk = compiled(build, t, p, f"{kind}/span_{tag}{i}", False)
+            h = Harness(sk)
             for _ in range(30):
                 launch(h)
-                sp.append(h.span_us())
-            print(f"tune {kind}: span {tag} median {statistics.median(sp):.1f} us", flush=True)
+                spans[tag].append(h.span_us())
+            print(f"tune {kind}: span {tag} median {statistics.median(spans[tag][-30:]):.1f} us", flush=True)
             sk.finalize()
+        best = "solved" if statistics.median(spans["solved"]) < statistics.median(spans["cur"]) else "cur"
+        compiler.write_plan_file(plan_path(m, plans, kind), plan if best == "solved" else cur)   # the faster, as measured
+        print(f"tune {kind}: kept the {best} plan", flush=True)
 
 
 def main():
@@ -273,7 +283,8 @@ def main():
              "full": (lambda mpk, t: build_layer(m, mpk, t, 0), m.layer_tensors(full[0])),
              "head": (lambda mpk, t: build_head(m, mpk, t), m.head_tensors(prompt_t, gen))}
     if args.tune:
-        tune(m, kinds, os.path.join(args.out, "tune"), args.plans, args.tune, args.rounds, args.time)
+        tune(m, kinds, os.path.join(args.out, "tune"), args.plans, args.tune, args.rounds, args.time,
+             prompt_t[torch.arange(R), (P // 2 + torch.arange(R)) % P])   # a distinct token a request
         return
     k_sl, k_fu, k_hd = (compile_kernel(k, b, t, args.out, plan_path(m, args.plans, k)) for k, (b, t) in kinds.items())
     kernel_of, inst = {}, {}
