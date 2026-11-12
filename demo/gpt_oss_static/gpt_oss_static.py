@@ -214,24 +214,19 @@ def main():
         inst[i] = kernel_of[i].add_instance(m.layer_tensors(i))
     k_hd.add_instance(m.head_tensors())
 
-    cur = torch.zeros(1, dtype=torch.long, device="cuda")
     gen = torch.zeros(NEW, dtype=torch.long, device="cuda")
     prompt_t = torch.tensor(prompt, dtype=torch.long, device="cuda")
-    x0 = m.x[0]
+    from fused_glue import FusedGlue   # (Triton: the run only, not the layer builds)
+    # before step pos: the last step's argmax, the step's token, its embedding row, the page table (one launch)
+    glue = FusedGlue(m.head["logits"][0], m.embed, m.x[0][0], m.shared["kv_indptr"], m.shared["last_page_len"], prompt_t,
+                     gen, PAGE)
 
     def step(pos: int):
-        """Position pos: the token there (the prompt's, else the last generated) through the model; the argmax into gen."""
-        if pos < P:
-            cur.copy_(prompt_t[pos:pos + 1])
-        x0[0:1].copy_(m.embed.index_select(0, cur))
-        m.set_position(pos)
+        """Position pos: the token there (the prompt's, else the last step's argmax) through the model."""
+        glue(pos, pos > 0)
         for i in range(m.L):
             kernel_of[i].launch_instances(inst[i], 1)
         k_hd.launch_instances(0, 1)
-        nxt = m.head["logits"][0].argmax().view(1)
-        if pos >= P - 1:
-            gen[pos - P + 1:pos - P + 2].copy_(nxt)
-        cur.copy_(nxt)
 
     for run in range(2):   # the first run warms up (and checks); the second is timed
         for layer in m.layers:
@@ -244,6 +239,7 @@ def main():
         for pos in range(P + NEW - 1):
             step(pos)
             marks[pos].record()
+        glue(P + NEW - 1, True)   # the last token's argmax
         e.record()
         torch.cuda.synchronize()
         total = s.elapsed_time(e)
