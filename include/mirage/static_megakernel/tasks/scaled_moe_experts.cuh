@@ -124,6 +124,12 @@ struct Slots {
   static constexpr int PAIRC = CHQ + NSLOT, AMX = NSM * T / 2;
   // the queue's order of the slots: many tokens first (order_slots)
   static constexpr bool ORDER = T >= 32 && !SINGLE;
+  // the W2 tiles in the order their slots' W13 items end (run_expert_dynamic
+  // w2_place; a step with idle rows keeps the W13 order: their pairs make the
+  // shared experts' W2 tiles the slowest by far); W13_ROUND: the slots whose
+  // W13 entries (two items each) one round of the SMs takes
+  static constexpr bool W2_ROUNDS = ORDER && T == 32 && LIVE == T;
+  static constexpr int W13_ROUND = 2 * NSM / MT13;
   static_assert(NE % 32 == 0 && NE <= 1024,
                 "scaled_moe_experts: build_table's 8 warps x 128 experts");
   // the routing table of this step, built on every SM by build_table (shared
@@ -731,6 +737,9 @@ __device__ __forceinline__ void order_slots() {
       seen += many[q] ? 1 : 0;
     }
   }
+  if (tid == 0) {
+    s_ints[3] = SH + tot; // the slots of many tokens: the queue's first places
+  }
   __syncthreads();
 }
 
@@ -935,8 +944,26 @@ __device__ __forceinline__ void
       return x >= n_live ? x - n_live : x;
     }
   };
+  // the W2 tiles' slots in the order their W13 items end (RES::W2_ROUNDS): the
+  // SMs take the W13 entries in rounds of NSM (W13_ROUND slots), and in a round
+  // the slots of many tokens (the queue's first s_ints[3] places) end last
+  // (their T-wide epilogue). So of each round the other slots come first, then
+  // its slots of many tokens: an SM that ends its W13 items finds W2 tiles
+  // whose h_q is written (in the W13 order the first W2 tiles waited for the
+  // slowest W13 items of the first round while the other SMs were done)
+  auto w2_place = [&](int p) {
+    if constexpr (RES::W2_ROUNDS) {
+      constexpr int R = RES::W13_ROUND;
+      int const a = p / R * R, b = a + R < n_live ? a + R : n_live,
+                nw = s_ints[3];
+      int const w = nw <= a ? 0 : (nw < b ? nw - a : b - a), nn = b - a - w;
+      return p - a < nn ? p + w : p - nn;
+    } else {
+      return p;
+    }
+  };
   auto w2_tile = [&](int q) { // W2 tile q of the queue order
-    return slot_at(q / OT2) * OT2 + q % OT2;
+    return slot_at(w2_place(q / OT2)) * OT2 + q % OT2;
   };
   float *acc_s = reinterpret_cast<float *>(rt_sm() + SM_::OFF_ACC);
   auto entry_of =
