@@ -1575,6 +1575,27 @@ class StaticMegakernel(PersistentKernel):
         T, TOPK, H = self._tokens(input.dim(0)), input.dim(1), input.dim(2)
         self._sm90_node("sm90_mul_sum_add", (T, 1, 1), [input, weights, residual, output], [H, TOPK], block_dim)
 
+    def sm90_next_token_layer(self, logits: DTensor, embed: DTensor, prompt: DTensor, x_next: DTensor, tokens: DTensor,
+                              kv_indptr: DTensor, last_page_len: DTensor, page_size: int, num_tasks: int = None,
+                              block_dim: tuple = (256, 1, 1)):
+        """Greedy decoding's step from the head to the next step's layers, one request (tasks/sm90_next_token.cuh): with p
+        the position of the step that made the logits (from the page table), the token at p + 1 is prompt[p + 1] while
+        p + 1 < P, else the argmax of logits row 0 (torch's: the first maximum), stored to tokens[p + 1 - P]; its embedding
+        row goes to x_next row 0 and the page table (kv_indptr, last_page_len) advances to p + 1. Outputs: x_next, tokens,
+        kv_indptr, last_page_len (graph.cc: sm90_next_token's four). num_tasks: about that many tasks share the argmax (the
+        last one to finish the rest), each 256 PER logits; default one an SM (H100 GPT-OSS head: its tail after lm_head 3.8
+        us at 132 tasks, 4.3 at 50). params = [V, H, P, G, page, PER]."""
+        V, H, P, G = logits.dim(1), embed.dim(1), prompt.dim(0), tokens.dim(0)
+        assert embed.dim(0) == V and x_next.dim(1) == H and kv_indptr.dim(0) == 2 and last_page_len.dim(0) == 1, \
+            "sm90_next_token_layer: one request, the embedding [V, H]"
+        self._dtypes("sm90_next_token_layer", logits=(logits, float32), embed=(embed, bfloat16),
+                     x_next=(x_next, bfloat16))
+        present = [logits, embed, prompt, x_next, tokens, kv_indptr, last_page_len]
+        per = -(-V // (block_dim[0] * (num_tasks or self._num_sms())))
+        self._add_node("sm90_next_token", (-(-V // (block_dim[0] * per)), 1, 1), block_dim, present,
+                       [(-1, -1, -1)] * len(present), [V, H, P, G, page_size, per], counters=4,
+                       buf_slots=[self._tensor_slot(t) for t in present])
+
     # ---- the generated layer (static_schedule.py) ----
     def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False, device=0,
                        rank=None, exchange=None, build_only=False):

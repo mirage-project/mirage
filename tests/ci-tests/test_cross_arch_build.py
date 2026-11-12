@@ -185,6 +185,37 @@ def _build_gpt_oss_static(kind):
                        extra_flags=g.FLAGS, build_only=True)
 
 
+def _build_gpt_oss_static_head():
+    """The GPT-OSS static head (final norm, lm_head, the next step's token) at
+    a small vocabulary, round-robin over 132 SMs, built for sm_90a."""
+    from mirage.mpk import compiler
+    from mirage.mpk.static_megakernel import StaticMegakernel
+
+    g, _ = _gpt_oss_demo()
+    H, V, T, MAX_SEQ = 2880, 8192, g.T, 1024
+
+    def z(*shape, dtype=torch.bfloat16):
+        return torch.zeros(*shape, dtype=dtype, device="cuda")
+
+    t = {
+        "x": z(T, H), "norm": z(H), "lm_head": z(V, H), "h": z(T, H),
+        "logits": z(T, V, dtype=torch.float32), "embed": z(V, H),
+        "prompt": z(16, dtype=torch.long), "gen": z(64, dtype=torch.long),
+        "x_embed": z(T, H),
+        "kv_indptr": torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
+        "last_page_len": torch.ones(1, dtype=torch.int32, device="cuda"),
+    }
+    m = type("Cfg", (), dict(eps=1e-5, max_seq=MAX_SEQ))
+    mpk = StaticMegakernel(num_gpus=1, num_sms=132, target_cc=90)
+    g.build_head(m, mpk, t)
+    out = os.path.join(os.environ.get("TMPDIR", "/tmp"),
+                       f"mpk_cross_arch_gpt_oss_head_{os.getpid()}")
+    paths, _ = compiler.compile_plan(mpk, g.round_robin_plan(mpk),
+                                     os.path.join(out, "schedules"))
+    mpk.compile_static(paths, gpu_tensors=[t], out_dir=os.path.join(out, "build"),
+                       extra_flags=g.FLAGS, build_only=True)
+
+
 BUILDS = {
     "paged_attention": _build_paged_attention,
     "paged_attention_split_kv": _build_paged_attention_split_kv,
@@ -192,6 +223,7 @@ BUILDS = {
 STATIC_BUILDS = {
     "gpt_oss_static_sliding": lambda: _build_gpt_oss_static("sliding"),
     "gpt_oss_static_full": lambda: _build_gpt_oss_static("full"),
+    "gpt_oss_static_head": _build_gpt_oss_static_head,
 }
 
 

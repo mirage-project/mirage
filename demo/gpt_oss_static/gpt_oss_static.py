@@ -8,7 +8,6 @@ from mirage.mpk.static_megakernel import (StaticMegakernel, sm90_attention_parts
                                          sm90_moe_ring_pack)
 from mirage.mpk.models.utils import shuffle_tensors
 from mxfp4 import Mxfp4Checkpoint, convert_expert_weight
-from step_glue import StepGlue
 
 T, PAGE = 8, 64                       # token rows of a step, KV page size
 KV_CHUNK = 128                        # full attention: the KV split in chunks of this many positions (sm90_attention_split)
@@ -53,6 +52,7 @@ class Model:
             "active": zeros(E + 1, dtype=torch.int32), "act": zeros(A, T, I, dtype=torch.float16), "eo": zeros(T, TOPK, H),
         }
         self.x = [zeros(T, H), zeros(T, H)]                          # the residual stream, ping-pong between layers
+        self.x_embed = zeros(T, H)                                   # layer 0's input: the head writes the next token's row
         self.layers = []
         for i in range(self.L):
             p = f"model.layers.{i}."
@@ -79,10 +79,14 @@ class Model:
 
     def layer_tensors(self, i: int) -> dict:
         """Layer i's tensors by graph name: its weights and cache, the shared buffers, its residual in and out."""
-        return {**self.shared, **self.layers[i], "x_in": self.x[i % 2], "x_out": self.x[(i + 1) % 2]}
+        return {**self.shared, **self.layers[i], "x_in": self.x_embed if i == 0 else self.x[i % 2],
+                "x_out": self.x[(i + 1) % 2]}
 
-    def head_tensors(self) -> dict:
-        return {"x": self.x[self.L % 2], **self.head}
+    def head_tensors(self, prompt: torch.Tensor, gen: torch.Tensor) -> dict:
+        """The final norm and lm_head, then the next step's token (prompt [P] i64; gen [NEW] i64: the generated tokens)."""
+        return {"x": self.x[self.L % 2], **self.head, "embed": self.embed, "prompt": prompt, "gen": gen,
+                "x_embed": self.x_embed, "kv_indptr": self.shared["kv_indptr"],
+                "last_page_len": self.shared["last_page_len"]}
 
     def set_position(self, pos: int):
         """The page table for a step at position pos (the token's K / V go to slot pos; pages in order)."""
@@ -129,6 +133,9 @@ def build_head(m: Model, mpk: StaticMegakernel, t: dict):
     A = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
     mpk.sm90_rmsnorm_layer(A["x"], A["norm"], A["h"], m.eps)
     mpk.gemm_tile_layer(input=A["h"], weight=A["lm_head"], output=A["logits"], combine="store")
+    # the next step's token (the prompt's, else the argmax), its embedding row and page table: no launch between the steps
+    mpk.sm90_next_token_layer(A["logits"], A["embed"], A["prompt"], A["x_embed"], A["gen"], A["kv_indptr"],
+                              A["last_page_len"], PAGE)
 
 
 def round_robin_plan(mpk) -> dict:
@@ -208,22 +215,17 @@ def main():
     full = [i for i in range(m.L) if m.types[i] != "sliding_attention"]
     k_sl = compile_kernel("sliding", lambda mpk, t: build_layer(m, mpk, t, m.window), m.layer_tensors(sliding[0]), args.out)
     k_fu = compile_kernel("full", lambda mpk, t: build_layer(m, mpk, t, 0), m.layer_tensors(full[0]), args.out)
-    k_hd = compile_kernel("head", lambda mpk, t: build_head(m, mpk, t), m.head_tensors(), args.out)
+    gen = torch.zeros(NEW, dtype=torch.long, device="cuda")
+    prompt_t = torch.tensor(prompt, dtype=torch.long, device="cuda")
+    k_hd = compile_kernel("head", lambda mpk, t: build_head(m, mpk, t), m.head_tensors(prompt_t, gen), args.out)
     kernel_of, inst = {}, {}
     for i in range(m.L):
         kernel_of[i] = k_sl if i in sliding else k_fu
         inst[i] = kernel_of[i].add_instance(m.layer_tensors(i))
-    k_hd.add_instance(m.head_tensors())
+    k_hd.add_instance(m.head_tensors(prompt_t, gen))
 
-    gen = torch.zeros(NEW, dtype=torch.long, device="cuda")
-    prompt_t = torch.tensor(prompt, dtype=torch.long, device="cuda")
-    # before step pos: the last step's argmax, the step's token, its embedding row, the page table (one launch)
-    glue = StepGlue(m.head["logits"][0], m.embed, m.x[0][0], m.shared["kv_indptr"], m.shared["last_page_len"], prompt_t,
-                    gen, PAGE, args.out)
-
-    def step(pos: int):
-        """Position pos: the token there (the prompt's, else the last step's argmax) through the model."""
-        glue(pos, pos > 0)
+    def step():
+        """One position through the model; the head leaves the next position's token, embedding row and page table."""
         for i in range(m.L):
             kernel_of[i].launch_instances(inst[i], 1)
         k_hd.launch_instances(0, 1)
@@ -232,14 +234,15 @@ def main():
         for layer in m.layers:
             layer["k_cache"].zero_()
             layer["v_cache"].zero_()
+        m.set_position(0)   # position 0: the prompt's first token
+        m.x_embed[0].copy_(m.embed[prompt[0]])
         torch.cuda.synchronize()
         s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         marks = [torch.cuda.Event(enable_timing=True) for _ in range(P + NEW)]
         s.record()
         for pos in range(P + NEW - 1):
-            step(pos)
+            step()
             marks[pos].record()
-        glue(P + NEW - 1, True)   # the last token's argmax
         e.record()
         torch.cuda.synchronize()
         total = s.elapsed_time(e)

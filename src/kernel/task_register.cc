@@ -5760,6 +5760,18 @@ int TaskRegister::register_sm90_mul_sum_add_task(
       this, TASK_SM90_MUL_SUM_ADD, "sm90_mul_sum_add", bgraph, params, 3, 2);
 }
 
+int TaskRegister::register_sm90_next_token_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {V, H, P, G, page, PER}. inputs: logits, embedding, prompt;
+  // outputs: x_next, tokens, kv_indptr, last_page_len
+  // (tasks/sm90_next_token.cuh)
+  assert(params.size() == 6);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 3, 4, input_ops, output_ops);
+  return register_task_variant(
+      TASK_SM90_NEXT_TOKEN, static_build_only_task("sm90_next_token", params));
+}
+
 int TaskRegister::register_group_quant_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {L}. inputs: x [T, L] bf16; output: z_q [T, L] e4m3 bytes (its

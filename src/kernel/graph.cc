@@ -1111,6 +1111,10 @@ void Graph::register_task_for_op(KNOperator const *op,
     int variant_id = task_register->register_sm90_mul_sum_add_task(
         customized->bgraph, params);
     task_config[op] = std::make_tuple(3, 1, TASK_SM90_MUL_SUM_ADD, variant_id);
+  } else if (name == "sm90_next_token") {
+    int variant_id = task_register->register_sm90_next_token_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 4, TASK_SM90_NEXT_TOKEN, variant_id);
   } else if (name == "group_quant") {
     int variant_id = task_register->register_group_quant_sm100_task(
         customized->bgraph, params);

@@ -304,6 +304,7 @@ enum TaskType {
   TASK_SM90_GATE = 535,
   TASK_SM90_MOE_RING = 536,
   TASK_SM90_MUL_SUM_ADD = 537,
+  TASK_SM90_NEXT_TOKEN = 538,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 
