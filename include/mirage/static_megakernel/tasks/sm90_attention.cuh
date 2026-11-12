@@ -55,15 +55,18 @@ template <class BUF_SLOTS,
           int SEQ_LEN,
           bool PARTITION_KV,
           int C,
-          int WINDOW>
-__device__ __forceinline__ void sm90_paged_attention(G const &g,
-                                                     kernel::bfloat16 *qkv,
-                                                     int request,
-                                                     int head,
-                                                     void *output,
-                                                     float *lse,
-                                                     int kv_idx,
-                                                     void const *sinks) {
+          int WINDOW,
+          class PreQ = kernel::AttnNoHook>
+__device__ __forceinline__ void
+    sm90_paged_attention(G const &g,
+                         kernel::bfloat16 *qkv,
+                         int request,
+                         int head,
+                         void *output,
+                         float *lse,
+                         int kv_idx,
+                         void const *sinks,
+                         PreQ const &pre_q = PreQ{}) {
   constexpr int QPK = QH / KVH;
   using bf16 = kernel::bfloat16; // the body's own type (MPK's codegen's)
   kernel::multitoken_paged_attention_hopper_impl<bf16,
@@ -82,7 +85,8 @@ __device__ __forceinline__ void sm90_paged_attention(G const &g,
                                                  C,
                                                  D, // ROTARY_DIM
                                                  0, // packed pages
-                                                 WINDOW>(
+                                                 WINDOW,
+                                                 PreQ>(
       buf_at<bf16>(g, slot_at<BUF_SLOTS, 1>()) + head * D,
       buf_at<bf16>(g, slot_at<BUF_SLOTS, 2>()) + head * D,
       buf_at<int const>(g, slot_at<BUF_SLOTS, 5>()),
@@ -102,7 +106,8 @@ __device__ __forceinline__ void sm90_paged_attention(G const &g,
       output,
       lse,
       kv_idx,
-      sinks);
+      sinks,
+      pre_q);
 }
 
 // PARAMS {NUM_Q_HEADS, NUM_KV_HEADS, HEAD_DIM, MAX_SEQ_LEN, PAGE_SIZE,
@@ -125,11 +130,23 @@ __device__ __forceinline__ void run_sm90_attention(Maps const &,
   constexpr int QH = PARAMS::v[0], KVH = PARAMS::v[1], D = PARAMS::v[2];
   constexpr bool HAS_SINK = PARAMS::v[6] == 1, QKV_BIAS = PARAMS::v[7] == 1;
   constexpr int QPK = QH / KVH;
-  sm90_task_begin<IN...>(g);
   int const head = tk.y;
+  // the work that needs no producer first (the body's page table, its first
+  // tile's earlier positions, the sinks); the wait for the QKV GEMM and the
+  // bias staging inside it, just before q is read
+  __syncthreads(); // this SM's earlier tasks are done with shared memory
   kernel::bfloat16 *qkv =
-      QKV_BIAS ? sm90_qkv_stage<BUF_SLOTS, 10, QH, KVH, D>(g, head)
+      QKV_BIAS ? buf_at<kernel::bfloat16>(g, slot_at<BUF_SLOTS, 11>())
                : buf_at<kernel::bfloat16>(g, slot_at<BUF_SLOTS, 0>());
+  auto pre_q = [&]() {
+    if (threadIdx.x == 0) {
+      sm90_wait_inputs<~0u, IN...>(g);
+    }
+    __syncthreads();
+    if constexpr (QKV_BIAS) {
+      sm90_qkv_stage<BUF_SLOTS, 10, QH, KVH, D>(g, head);
+    }
+  };
   sm90_paged_attention<BUF_SLOTS,
                        QH,
                        KVH,
@@ -149,7 +166,8 @@ __device__ __forceinline__ void run_sm90_attention(Maps const &,
       0,
       HAS_SINK ? buf_at<kernel::bfloat16 const>(g, slot_at<BUF_SLOTS, 9>()) +
                      head * QPK
-               : nullptr);
+               : nullptr,
+      pre_q);
   sm90_task_end<SELF>(g);
 }
 

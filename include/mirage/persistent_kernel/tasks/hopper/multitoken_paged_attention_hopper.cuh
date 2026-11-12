@@ -28,8 +28,15 @@
 #include "tma.cuh"
 #include "utils.cuh"
 #include "wgmma.cuh"
+#include <type_traits>
 #define USE_TMA_Q 0
 namespace kernel {
+
+// what runs between the work that needs no producer and the first read of the
+// QKV rows (the caller's wait for them and any staging); all threads call it
+struct AttnNoHook {
+  __device__ __forceinline__ void operator()() const {}
+};
 
 template <typename T,
           int NUM_QO_HEADS,
@@ -53,7 +60,8 @@ template <typename T,
           int PAGE_STRIDE_ROWS = 0,
           // Sliding-window attention. A query at absolute position p attends
           // to keys in (p - WINDOW_SIZE, p]. 0 = no window.
-          int WINDOW_SIZE = 0>
+          int WINDOW_SIZE = 0,
+          class PreQ = AttnNoHook>
 __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     void *paged_k_cache_ptr,
     void *paged_v_cache_ptr,
@@ -76,7 +84,11 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     int kv_idx = 0,
     // Attention sinks: NUM_QO_PER_KV learned logits, one per query head of
     // this task's KV head. nullptr = no sinks.
-    void const *sink_ptr = nullptr) {
+    void const *sink_ptr = nullptr,
+    // PreQ != AttnNoHook: the page table, the barriers and the first tile's
+    // rows of earlier positions are issued before pre_q() (they need no
+    // producer); q and the new tokens' rows after it
+    PreQ const &pre_q = PreQ{}) {
   // Catches a template argument landing in the wrong slot at codegen time.
   static_assert(ROTARY_DIM > 0 && ROTARY_DIM <= HEAD_DIM && ROTARY_DIM % 2 == 0,
                 "ROTARY_DIM must be even and in (0, HEAD_DIM]");
@@ -317,6 +329,39 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   }
   __syncthreads();
 
+  constexpr bool EARLY = !std::is_same_v<PreQ, AttnNoHook>;
+  __shared__ float s_sinks_early[EARLY ? NUM_QO_PER_KV : 1];
+  if constexpr (EARLY) {
+    // the first tile's rows of earlier positions (the KV cache: no producer),
+    // and the sinks
+    int const first_tile_offset_ =
+        kv_cache_offset + first_kv_iter * KV_TILE_SIZE;
+    if (warpgroup_id == NUM_WARPGROUPS - 1) {
+      int const page_idx_0 = page_indices[first_tile_offset_ / PAGE_SIZE];
+#pragma unroll
+      for (int chunk_idx = threadIdx.x - NUM_THREADS * CONSUMER_WARPGROUPS;
+           chunk_idx < KV_TILE_SIZE * HEAD_DIM / CP_CHUNK_SIZE;
+           chunk_idx += NUM_THREADS) {
+        int dst_row = chunk_idx / (HEAD_DIM / CP_CHUNK_SIZE);
+        int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
+        if (dst_row < curr_iter_len &&
+            dst_row + first_tile_offset_ < global_seq_len - num_tokens) {
+          int page_offset = (dst_row + first_tile_offset_) % PAGE_SIZE;
+          int src_row = page_idx_0 * PAGE_STRIDE + page_offset;
+          load_smem(k_buffer_smem(dst_row, col),
+                    paged_k_cache_dmem(src_row, col));
+          load_smem(v_buffer_smem(dst_row, col),
+                    paged_v_cache_dmem(src_row, col));
+        }
+      }
+    }
+    if (!PARTITION_KV && sink_ptr != nullptr && threadIdx.x < NUM_QO_PER_KV) {
+      s_sinks_early[threadIdx.x] =
+          float(static_cast<T const *>(sink_ptr)[threadIdx.x]);
+    }
+    pre_q(); // (synchronizes the block)
+  }
+
   if (warpgroup_id == NUM_WARPGROUPS - 1) {
     // prefetch
     // load q
@@ -358,6 +403,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         load_smem_with_predict(
             v_buffer_smem(dst_row, col), v_dmem(0, 0), false);
       } else if (dst_row + first_tile_offset < global_seq_len - num_tokens) {
+        if constexpr (EARLY) {
+          continue; // issued before pre_q()
+        }
         // load from KV Cache
         // int page_idx = page_indices[(dst_row + cp_finished_seq_len) /
         // PAGE_SIZE];
@@ -559,6 +607,23 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         if (iter == first_kv_iter) {
 #pragma unroll
           for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
+            if constexpr (EARLY) {
+              rotary_embedding_hopper_heads<T,
+                                            QOSmem,
+                                            NUM_QO_PER_KV,
+                                            HEAD_DIM,
+                                            THREADS_PER_WARPGROUP *
+                                                CONSUMER_WARPGROUPS,
+                                            ROTARY_SYNC_BARRIER_ID,
+                                            ROTARY_DIM>(
+                  q_smem,
+                  static_cast<T const *>(cos_ptr) +
+                      (token_idx + global_seq_len - num_tokens) * ROTARY_DIM,
+                  static_cast<T const *>(sin_ptr) +
+                      (token_idx + global_seq_len - num_tokens) * ROTARY_DIM,
+                  token_idx);
+              continue;
+            }
             // q rope
             rotary_embedding_hopper<T,
                                     QOSmem,
@@ -579,6 +644,27 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         if (kv_tokens_to_process > 0) {
           for (int token_idx = 0; token_idx < kv_tokens_to_process;
                token_idx++) {
+            if constexpr (EARLY) {
+              rotary_embedding_hopper_heads<T,
+                                            KVSmem,
+                                            1,
+                                            HEAD_DIM,
+                                            THREADS_PER_WARPGROUP *
+                                                CONSUMER_WARPGROUPS,
+                                            ROTARY_SYNC_BARRIER_ID,
+                                            ROTARY_DIM>(
+                  k_smem,
+                  static_cast<T const *>(cos_ptr) +
+                      (token_idx + first_kv_token_to_process +
+                       kv_cache_offset) *
+                          ROTARY_DIM,
+                  static_cast<T const *>(sin_ptr) +
+                      (token_idx + first_kv_token_to_process +
+                       kv_cache_offset) *
+                          ROTARY_DIM,
+                  token_idx + curr_iter_len - kv_tokens_to_process);
+              continue;
+            }
             // k rope
             rotary_embedding_hopper<T,
                                     KVSmem,
@@ -824,8 +910,12 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       // sm_scale), the sink in natural ones.
       if constexpr (!PARTITION_KV) {
         if (sink_ptr != nullptr) {
-          float sink =
-              float(static_cast<T const *>(sink_ptr)[row % NUM_QO_PER_KV]);
+          float sink;
+          if constexpr (EARLY) {
+            sink = s_sinks_early[row % NUM_QO_PER_KV];
+          } else {
+            sink = float(static_cast<T const *>(sink_ptr)[row % NUM_QO_PER_KV]);
+          }
           d_global += ptx_exp2(sink * log2e - m_global);
         }
       }

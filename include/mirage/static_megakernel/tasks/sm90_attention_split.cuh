@@ -29,11 +29,25 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
                 C = PARAMS::v[6];
   constexpr bool QKV_BIAS = PARAMS::v[7] == 1;
   constexpr int QPK = QH / KVH;
-  sm90_task_begin<IN...>(g);
   int const head = tk.y, chunk = tk.z;
+  // as sm90_attention's: the page table and the first tile's earlier
+  // positions before the wait for the QKV GEMM (a chunk past the sequence
+  // returns before the hook and waits below)
+  __syncthreads();
   kernel::bfloat16 *qkv =
-      QKV_BIAS ? sm90_qkv_stage<BUF_SLOTS, 9, QH, KVH, D>(g, head)
+      QKV_BIAS ? buf_at<kernel::bfloat16>(g, slot_at<BUF_SLOTS, 10>())
                : buf_at<kernel::bfloat16>(g, slot_at<BUF_SLOTS, 0>());
+  bool waited = false;
+  auto pre_q = [&]() {
+    if (threadIdx.x == 0) {
+      sm90_wait_inputs<~0u, IN...>(g);
+    }
+    __syncthreads();
+    waited = true;
+    if constexpr (QKV_BIAS) {
+      sm90_qkv_stage<BUF_SLOTS, 9, QH, KVH, D>(g, head);
+    }
+  };
   kernel::bfloat16 *parts =
       buf_at<kernel::bfloat16>(g, slot_at<BUF_SLOTS, 11>());
   sm90_paged_attention<BUF_SLOTS,
@@ -54,7 +68,14 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
       reinterpret_cast<float *>(parts + (size_t)C * T * QH * D) +
           (size_t)chunk * QH + head * QPK,
       chunk,
-      nullptr);
+      nullptr,
+      pre_q);
+  if (!waited) {
+    if (threadIdx.x == 0) {
+      sm90_wait_inputs<~0u, IN...>(g);
+    }
+    __syncthreads();
+  }
   sm90_task_end<SELF>(g);
 }
 
