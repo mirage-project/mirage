@@ -8,6 +8,7 @@ from mirage.mpk.static_megakernel import (StaticMegakernel, sm90_attention_parts
                                          sm90_moe_ring_pack)
 from mirage.mpk.models.utils import shuffle_tensors
 from mxfp4 import Mxfp4Checkpoint, convert_expert_weight
+from step_glue import StepGlue
 
 T, PAGE = 8, 64                       # token rows of a step, KV page size
 KV_CHUNK = 128                        # full attention: the KV split in chunks of this many positions (sm90_attention_split)
@@ -216,10 +217,9 @@ def main():
 
     gen = torch.zeros(NEW, dtype=torch.long, device="cuda")
     prompt_t = torch.tensor(prompt, dtype=torch.long, device="cuda")
-    from fused_glue import FusedGlue   # (Triton: the run only, not the layer builds)
     # before step pos: the last step's argmax, the step's token, its embedding row, the page table (one launch)
-    glue = FusedGlue(m.head["logits"][0], m.embed, m.x[0][0], m.shared["kv_indptr"], m.shared["last_page_len"], prompt_t,
-                     gen, PAGE)
+    glue = StepGlue(m.head["logits"][0], m.embed, m.x[0][0], m.shared["kv_indptr"], m.shared["last_page_len"], prompt_t,
+                    gen, PAGE, args.out)
 
     def step(pos: int):
         """Position pos: the token there (the prompt's, else the last step's argmax) through the model."""
