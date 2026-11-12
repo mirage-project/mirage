@@ -66,7 +66,10 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
       head,
       parts + (size_t)chunk * T * QH * D + head * QPK * D,
       reinterpret_cast<float *>(parts + (size_t)C * T * QH * D) +
-          (size_t)chunk * QH + head * QPK,
+          ((size_t)buf_at<int const>(g, slot_at<BUF_SLOTS, 5>())[tk.x] * C +
+           chunk) * QH +
+          head * QPK, // the body offsets the output to the request's first
+                      // token, not the log2-sum-exps
       chunk,
       nullptr,
       pre_q);

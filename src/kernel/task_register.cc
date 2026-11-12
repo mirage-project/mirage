@@ -5716,7 +5716,8 @@ int TaskRegister::register_sm90_attention_split_task(
 
 int TaskRegister::register_sm90_attention_merge_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {Q, D, chunk, chunks, has sink, page}; the optional sinks left out
+  // params: {Q, D, chunk, chunks, has sink, page, R}; the optional sinks left
+  // out
   // (tasks/sm90_attention_merge.cuh)
   return register_static_task(this,
                               TASK_SM90_ATTENTION_MERGE,
@@ -5762,12 +5763,12 @@ int TaskRegister::register_sm90_mul_sum_add_task(
 
 int TaskRegister::register_sm90_next_token_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {V, H, P, G, page, PER}. inputs: logits, embedding, prompt;
-  // outputs: x_next, tokens, kv_indptr, last_page_len
+  // params: {V, H, P, G, page, PER, R, MP}. inputs: logits, embedding,
+  // prompt; outputs: x_next, tokens, kv_indptr, last_page_len, kv_indices
   // (tasks/sm90_next_token.cuh)
-  assert(params.size() == 6);
+  assert(params.size() == 8);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
-  static_split_ops(bgraph, 3, 4, input_ops, output_ops);
+  static_split_ops(bgraph, 3, 5, input_ops, output_ops);
   return register_task_variant(
       TASK_SM90_NEXT_TOKEN, static_build_only_task("sm90_next_token", params));
 }

@@ -21,7 +21,7 @@ FLAGS = sm90_flags() + ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]   
 class Model:
     """The checkpoint's config and weights, converted for the static kernels (on the GPU), and the step's shared buffers."""
 
-    def __init__(self, ckpt: str, max_seq: int):
+    def __init__(self, ckpt: str, max_seq: int, requests: int = 1):
         from transformers import AutoConfig
         from transformers.models.gpt_oss.modeling_gpt_oss import GptOssRotaryEmbedding
         cfg = self.cfg = AutoConfig.from_pretrained(ckpt)
@@ -29,21 +29,22 @@ class Model:
         self.QH, self.KVH, self.D = cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim
         self.L, self.types, self.window, self.V = cfg.num_hidden_layers, list(cfg.layer_types), cfg.sliding_window, cfg.vocab_size
         self.eps, self.limit = cfg.rms_norm_eps, getattr(cfg, "swiglu_limit", 7.0)
-        self.max_seq = max_seq
-        assert max_seq % PAGE == 0
+        self.max_seq, self.R = max_seq, requests
+        R, MP = requests, max_seq // PAGE                            # requests (a token each), pages a request
+        assert max_seq % PAGE == 0 and 1 <= R <= T
         sd = Mxfp4Checkpoint(ckpt)
         cos, sin = GptOssRotaryEmbedding(cfg)(torch.empty(0, dtype=torch.bfloat16), torch.arange(max_seq)[None])
         bf = lambda t: t.to(torch.bfloat16).contiguous().cuda()
         zeros = lambda *shape, dtype=torch.bfloat16: torch.zeros(*shape, dtype=dtype, device="cuda")
         H, I, E, TOPK, QH, KVH, D = self.H, self.I, self.E, self.TOPK, self.QH, self.KVH, self.D
-        A = TOPK                                                     # expert slots: one routed token
+        A = min(E, R * TOPK)                                         # expert slots: R routed tokens
         self.shared = {                                              # every layer's (the step's buffers)
             "cos": bf(torch.cat([cos[0], cos[0]], -1)), "sin": bf(torch.cat([sin[0], sin[0]], -1)),
-            "qo_indptr": torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
-            "kv_indptr": torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
-            "kv_indices": torch.arange(max_seq // PAGE, dtype=torch.int32, device="cuda"),
-            "last_page_len": torch.ones(1, dtype=torch.int32, device="cuda"),
-            "num_tokens": torch.ones(1, dtype=torch.int32, device="cuda"),
+            "qo_indptr": torch.arange(R + 1, dtype=torch.int32, device="cuda"),
+            "kv_indptr": torch.arange(R + 1, dtype=torch.int32, device="cuda"),
+            "kv_indices": torch.zeros(R * MP, dtype=torch.int32, device="cuda"),   # request r's pages r MP .., packed
+            "last_page_len": torch.ones(R, dtype=torch.int32, device="cuda"),
+            "num_tokens": torch.full((1,), R, dtype=torch.int32, device="cuda"),
             "attn_parts": zeros(sm90_attention_parts_size(T, QH, D, max_seq // KV_CHUNK)),   # the split attention's chunks
             "h": zeros(T, H), "qkv32": zeros(T, (QH + 2 * KVH) * D, dtype=torch.float32),
             "qkv": zeros(T, (QH + 2 * KVH) * D), "attn": zeros(T, QH * D), "o32": zeros(T, H, dtype=torch.float32),
@@ -71,7 +72,7 @@ class Model:
                 "w_router": bf(at("mlp.router.weight")), "b_router": bf(at("mlp.router.bias")),
                 "w13": sm90_moe_ring_pack(w13.cuda(), s13.cuda(), 128, glu=True), "b13": bf(b13),
                 "w2": sm90_moe_ring_pack(w2.cuda(), s2.cuda(), 64, glu=False), "b2": bf(b2),
-                "k_cache": zeros(max_seq // PAGE, PAGE, KVH, D), "v_cache": zeros(max_seq // PAGE, PAGE, KVH, D),
+                "k_cache": zeros(R * MP, PAGE, KVH, D), "v_cache": zeros(R * MP, PAGE, KVH, D),
             })
         self.embed = bf(sd["model.embed_tokens.weight"])
         self.head = {"norm": bf(sd["model.norm.weight"]), "lm_head": bf(sd["lm_head.weight"]),
@@ -83,15 +84,19 @@ class Model:
                 "x_out": self.x[(i + 1) % 2]}
 
     def head_tensors(self, prompt: torch.Tensor, gen: torch.Tensor) -> dict:
-        """The final norm and lm_head, then the next step's token (prompt [P] i64; gen [NEW] i64: the generated tokens)."""
+        """The final norm and lm_head, then the next step's tokens (prompt [R, P] i64; gen [R, NEW] i64: the generated
+        tokens)."""
         return {"x": self.x[self.L % 2], **self.head, "embed": self.embed, "prompt": prompt, "gen": gen,
                 "x_embed": self.x_embed, "kv_indptr": self.shared["kv_indptr"],
-                "last_page_len": self.shared["last_page_len"]}
+                "last_page_len": self.shared["last_page_len"], "kv_indices": self.shared["kv_indices"]}
 
     def set_position(self, pos: int):
-        """The page table for a step at position pos (the token's K / V go to slot pos; pages in order)."""
-        n = pos // PAGE + 1
-        self.shared["kv_indptr"][1:].fill_(n)
+        """The page table for a step of every request at position pos (its K / V go to slot pos; request r's pages
+        r MP .., in order)."""
+        n, MP = pos // PAGE + 1, self.max_seq // PAGE
+        self.shared["kv_indptr"].copy_(torch.arange(self.R + 1, dtype=torch.int32, device="cuda") * n)
+        self.shared["kv_indices"][:self.R * n].copy_(
+            (torch.arange(self.R, device="cuda")[:, None] * MP + torch.arange(n, device="cuda")).flatten())
         self.shared["last_page_len"].fill_(pos + 1 - (n - 1) * PAGE)
 
 
@@ -135,7 +140,7 @@ def build_head(m: Model, mpk: StaticMegakernel, t: dict):
     mpk.gemm_tile_layer(input=A["h"], weight=A["lm_head"], output=A["logits"], combine="store")
     # the next step's token (the prompt's, else the argmax), its embedding row and page table: no launch between the steps
     mpk.sm90_next_token_layer(A["logits"], A["embed"], A["prompt"], A["x_embed"], A["gen"], A["kv_indptr"],
-                              A["last_page_len"], PAGE)
+                              A["last_page_len"], A["kv_indices"], PAGE)
 
 
 def round_robin_plan(mpk) -> dict:
@@ -176,7 +181,8 @@ def compile_kernel(name, build, t, out_dir):
     """Build one static kernel for a layer kind or the model head."""
     mpk = StaticMegakernel(num_gpus=1)
     build(mpk, t)
-    if name != "head" and torch.cuda.get_device_name() == "NVIDIA H100 80GB HBM3" and mpk._num_sms() == 132:
+    if (name != "head" and torch.cuda.get_device_name() == "NVIDIA H100 80GB HBM3" and mpk._num_sms() == 132
+            and os.environ.get("PLAN", "file") == "file"):
         plan = place_router_splits(mpk, compiler.plan_from_file(
             os.path.join(os.path.dirname(__file__), "plans", "h100", f"{name}_plan.json")))
     else:
@@ -193,21 +199,34 @@ def main():
     p.add_argument("--max-seq", type=int, default=1024)
     p.add_argument("--out", default="gpt_oss_static")
     p.add_argument("--json", default=None, help="write {prompt_ids, gen, text, timing} here")
+    p.add_argument("--batch", type=int, default=1, help="requests a step (at most T)")
+    p.add_argument("--prompts", default=None, help="a json list of user messages: request r's is r % len (all cut to the "
+                   "shortest's tokens); default the one message")
+    p.add_argument("--only", type=int, default=None, help="with --prompts: one request, message ONLY")
     args = p.parse_args()
     os.makedirs(args.out, exist_ok=True)
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.ckpt)
-    if args.ref:
-        ref = json.load(open(args.ref))
-        prompt = ref["prompt_ids"]
+    R = args.batch
+    if R > 1:   # the H100 plans place one request's grids (TOPK expert slots)
+        os.environ.setdefault("PLAN", "rr")
+    ref = json.load(open(args.ref)) if args.ref else None
+    if args.prompts:
+        msgs = json.load(open(args.prompts))
+        ids = [tok(tok.apply_chat_template([{"role": "user", "content": c}], tokenize=False,
+                                           add_generation_prompt=True)).input_ids for c in msgs]
+        P = min(len(i) for i in ids)
+        ids = [i[:P] for i in ids]
+        prompts = [ids[args.only]] * R if args.only is not None else [ids[r % len(ids)] for r in range(R)]
+    elif ref:
+        prompts = [ref["prompt_ids"]] * R
     else:
-        ref = None
         text = tok.apply_chat_template([{"role": "user", "content": "Give me a short introduction to large language models."}],
                                        tokenize=False, add_generation_prompt=True)
-        prompt = tok(text).input_ids
-    P, NEW = len(prompt), args.new
+        prompts = [tok(text).input_ids] * R
+    P, NEW = len(prompts[0]), args.new
     t0 = time.time()
-    m = Model(args.ckpt, args.max_seq)
+    m = Model(args.ckpt, args.max_seq, R)
     assert P + NEW <= m.max_seq
     print(f"weights loaded and converted in {time.time() - t0:.0f} s", flush=True)
     # the kernels, and one instance per layer (layer i: instance inst[i] of kernel kind[i])
@@ -215,8 +234,8 @@ def main():
     full = [i for i in range(m.L) if m.types[i] != "sliding_attention"]
     k_sl = compile_kernel("sliding", lambda mpk, t: build_layer(m, mpk, t, m.window), m.layer_tensors(sliding[0]), args.out)
     k_fu = compile_kernel("full", lambda mpk, t: build_layer(m, mpk, t, 0), m.layer_tensors(full[0]), args.out)
-    gen = torch.zeros(NEW, dtype=torch.long, device="cuda")
-    prompt_t = torch.tensor(prompt, dtype=torch.long, device="cuda")
+    gen = torch.zeros(R, NEW, dtype=torch.long, device="cuda")
+    prompt_t = torch.tensor(prompts, dtype=torch.long, device="cuda")
     k_hd = compile_kernel("head", lambda mpk, t: build_head(m, mpk, t), m.head_tensors(prompt_t, gen), args.out)
     kernel_of, inst = {}, {}
     for i in range(m.L):
@@ -234,8 +253,8 @@ def main():
         for layer in m.layers:
             layer["k_cache"].zero_()
             layer["v_cache"].zero_()
-        m.set_position(0)   # position 0: the prompt's first token
-        m.x_embed[0].copy_(m.embed[prompt[0]])
+        m.set_position(0)   # position 0: the prompts' first tokens
+        m.x_embed[:R].copy_(m.embed[prompt_t[:, 0]])
         torch.cuda.synchronize()
         s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         marks = [torch.cuda.Event(enable_timing=True) for _ in range(P + NEW)]
@@ -247,17 +266,24 @@ def main():
         torch.cuda.synchronize()
         total = s.elapsed_time(e)
         per = [marks[i - 1].elapsed_time(marks[i]) for i in range(1, P + NEW - 1)]
+        # as the vLLM / SGLang sweep's (T(NEW tokens) - T(NEW / 2 tokens)) / (NEW / 2): the steps of the later half's tokens
+        dec = marks[P + NEW // 2 - 2].elapsed_time(marks[P + NEW - 2]) / (NEW - NEW // 2)
         print(f"run {run}: {P + NEW - 1} positions in {total:.1f} ms; per step median {statistics.median(per) * 1e3:.0f} us "
-              f"(min {min(per) * 1e3:.0f}, max {max(per) * 1e3:.0f})", flush=True)
+              f"(min {min(per) * 1e3:.0f}, max {max(per) * 1e3:.0f}); decode {dec * 1e3:.0f} us/step, batch {R}: "
+              f"{R / dec * 1e3:.0f} tok/s", flush=True)
     out = gen.tolist()
-    text = tok.decode(out)
+    text = tok.decode(out[0])
     print("text:", repr(text[:400]))
     if ref:
-        same = next((i for i, (a, b) in enumerate(zip(out, ref["gen"])) if a != b), min(len(out), len(ref["gen"])))
-        print(f"tokens equal to the reference's for the first {same} of {min(len(out), len(ref['gen']))}")
+        refs = ref["gen"] if isinstance(ref["gen"][0], list) else [ref["gen"]]
+        for r in range(R):
+            want = refs[r % len(refs)]
+            same = next((i for i, (a, b) in enumerate(zip(out[r], want)) if a != b), min(len(out[r]), len(want)))
+            print(f"request {r}: tokens equal to the reference's for the first {same} of {min(len(out[r]), len(want))}")
     if args.json:
-        json.dump({"prompt_ids": prompt, "prompt_len": P, "gen": out, "text": text, "total_ms": total,
-                   "step_us_median": statistics.median(per) * 1e3}, open(args.json, "w"))
+        json.dump({"prompt_ids": prompts if R > 1 else prompts[0], "prompt_len": P, "gen": out if R > 1 else out[0],
+                   "text": text, "total_ms": total, "step_us_median": statistics.median(per) * 1e3,
+                   "decode_us": dec * 1e3}, open(args.json, "w"))
     for k in (k_sl, k_fu, k_hd):
         k.finalize()
 

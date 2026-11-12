@@ -1539,11 +1539,12 @@ class StaticMegakernel(PersistentKernel):
                                    output: DTensor, num_q_heads: int, chunk: int, chunks: int, page: int,
                                    sinks: DTensor = None, block_dim: tuple = (256, 1, 1)):
         """The output of a split attention from its chunks (tasks/sm90_attention_merge.cuh), with the per-head sinks: task
-        (x, y) = token x, query heads [8 y, 8 y + 8). params = [Q, D, chunk, C, has_sink, page]."""
+        (x, y) = token x, query heads [8 y, 8 y + 8). params = [Q, D, chunk, C, has_sink, page, R (requests)]."""
         T, D = self._tokens(output.dim(0)), output.dim(1) // num_q_heads
         self._sm90_node("sm90_attention_merge", (T, num_q_heads // 8, 1),
                         [parts, qo_indptr, kv_indptr, last_page_len, sinks, output],
-                        [num_q_heads, D, chunk, chunks, int(sinks is not None), page], block_dim)
+                        [num_q_heads, D, chunk, chunks, int(sinks is not None), page, qo_indptr.dim(0) - 1],
+                        block_dim)
 
     def sm90_gate_layer(self, o: DTensor, o_bias: DTensor, residual: DTensor, norm_weight: DTensor, router: DTensor,
                         router_bias: DTensor, num_tokens: DTensor, x1: DTensor, h: DTensor, weights: DTensor,
@@ -1576,25 +1577,28 @@ class StaticMegakernel(PersistentKernel):
         self._sm90_node("sm90_mul_sum_add", (T, 1, 1), [input, weights, residual, output], [H, TOPK], block_dim)
 
     def sm90_next_token_layer(self, logits: DTensor, embed: DTensor, prompt: DTensor, x_next: DTensor, tokens: DTensor,
-                              kv_indptr: DTensor, last_page_len: DTensor, page_size: int, num_tasks: int = None,
-                              block_dim: tuple = (256, 1, 1)):
-        """Greedy decoding's step from the head to the next step's layers, one request (tasks/sm90_next_token.cuh): with p
-        the position of the step that made the logits (from the page table), the token at p + 1 is prompt[p + 1] while
-        p + 1 < P, else the argmax of logits row 0 (torch's: the first maximum), stored to tokens[p + 1 - P]; its embedding
-        row goes to x_next row 0 and the page table (kv_indptr, last_page_len) advances to p + 1. Outputs: x_next, tokens,
-        kv_indptr, last_page_len (graph.cc: sm90_next_token's four). num_tasks: about that many tasks share the argmax (the
-        last one to finish the rest), each 256 PER logits; default one an SM (H100 GPT-OSS head: its tail after lm_head 3.8
-        us at 132 tasks, 4.3 at 50). params = [V, H, P, G, page, PER]."""
-        V, H, P, G = logits.dim(1), embed.dim(1), prompt.dim(0), tokens.dim(0)
-        assert embed.dim(0) == V and x_next.dim(1) == H and kv_indptr.dim(0) == 2 and last_page_len.dim(0) == 1, \
-            "sm90_next_token_layer: one request, the embedding [V, H]"
+                              kv_indptr: DTensor, last_page_len: DTensor, kv_indices: DTensor, page_size: int,
+                              num_tasks: int = None, block_dim: tuple = (256, 1, 1)):
+        """Greedy decoding's step from the head to the next step's layers, R requests (tasks/sm90_next_token.cuh): with p
+        the position of request r's step that made its logits (row r; from the page table), its token at p + 1 is
+        prompt[r][p + 1] while p + 1 < P, else the argmax of logits row r (torch's: the first maximum), stored to
+        tokens[r][p + 1 - P]; its embedding row goes to x_next row r and the page table (kv_indptr [R + 1], last_page_len
+        [R], kv_indices: request r's pages r MP .. in order, MP = kv_indices.dim(0) / R) advances to p + 1. prompt [R, P],
+        tokens [R, G] i64. Outputs: x_next, tokens, kv_indptr, last_page_len, kv_indices (graph.cc: sm90_next_token's
+        five). num_tasks: about that many tasks share the argmax (the last one to finish the rest), each 256 PER logits a
+        row; default one an SM (H100 GPT-OSS head, one request: its tail after lm_head 3.8 us at 132 tasks, 4.3 at 50).
+        params = [V, H, P, G, page, PER, R, MP]."""
+        V, H, R, P, G = logits.dim(1), embed.dim(1), prompt.dim(0), prompt.dim(1), tokens.dim(1)
+        assert embed.dim(0) == V and x_next.dim(1) == H and tokens.dim(0) == R and R <= logits.dim(0) and \
+            R <= x_next.dim(0) and kv_indptr.dim(0) == R + 1 and last_page_len.dim(0) == R and \
+            kv_indices.dim(0) % R == 0, "sm90_next_token_layer: R requests' prompts, tokens and page table"
         self._dtypes("sm90_next_token_layer", logits=(logits, float32), embed=(embed, bfloat16),
                      x_next=(x_next, bfloat16))
-        present = [logits, embed, prompt, x_next, tokens, kv_indptr, last_page_len]
+        present = [logits, embed, prompt, x_next, tokens, kv_indptr, last_page_len, kv_indices]
         per = -(-V // (block_dim[0] * (num_tasks or self._num_sms())))
         self._add_node("sm90_next_token", (-(-V // (block_dim[0] * per)), 1, 1), block_dim, present,
-                       [(-1, -1, -1)] * len(present), [V, H, P, G, page_size, per], counters=4,
-                       buf_slots=[self._tensor_slot(t) for t in present])
+                       [(-1, -1, -1)] * len(present), [V, H, P, G, page_size, per, R, kv_indices.dim(0) // R],
+                       counters=2 + 2 * R, buf_slots=[self._tensor_slot(t) for t in present])
 
     # ---- the generated layer (static_schedule.py) ----
     def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False, device=0,

@@ -1114,7 +1114,7 @@ void Graph::register_task_for_op(KNOperator const *op,
   } else if (name == "sm90_next_token") {
     int variant_id = task_register->register_sm90_next_token_task(
         customized->bgraph, params);
-    task_config[op] = std::make_tuple(3, 4, TASK_SM90_NEXT_TOKEN, variant_id);
+    task_config[op] = std::make_tuple(3, 5, TASK_SM90_NEXT_TOKEN, variant_id);
   } else if (name == "group_quant") {
     int variant_id = task_register->register_group_quant_sm100_task(
         customized->bgraph, params);

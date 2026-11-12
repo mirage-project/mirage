@@ -186,13 +186,14 @@ def _build_gpt_oss_static(kind):
 
 
 def _build_gpt_oss_static_head():
-    """The GPT-OSS static head (final norm, lm_head, the next step's token) at
-    a small vocabulary, round-robin over 132 SMs, built for sm_90a."""
+    """The GPT-OSS static head (final norm, lm_head, the next step's tokens)
+    at a small vocabulary, two requests, round-robin over 132 SMs, built for
+    sm_90a."""
     from mirage.mpk import compiler
     from mirage.mpk.static_megakernel import StaticMegakernel
 
     g, _ = _gpt_oss_demo()
-    H, V, T, MAX_SEQ = 2880, 8192, g.T, 1024
+    H, V, T, MAX_SEQ, R = 2880, 8192, g.T, 1024, 2   # two requests
 
     def z(*shape, dtype=torch.bfloat16):
         return torch.zeros(*shape, dtype=dtype, device="cuda")
@@ -200,10 +201,11 @@ def _build_gpt_oss_static_head():
     t = {
         "x": z(T, H), "norm": z(H), "lm_head": z(V, H), "h": z(T, H),
         "logits": z(T, V, dtype=torch.float32), "embed": z(V, H),
-        "prompt": z(16, dtype=torch.long), "gen": z(64, dtype=torch.long),
+        "prompt": z(R, 16, dtype=torch.long), "gen": z(R, 64, dtype=torch.long),
         "x_embed": z(T, H),
-        "kv_indptr": torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
-        "last_page_len": torch.ones(1, dtype=torch.int32, device="cuda"),
+        "kv_indptr": torch.arange(R + 1, dtype=torch.int32, device="cuda"),
+        "last_page_len": torch.ones(R, dtype=torch.int32, device="cuda"),
+        "kv_indices": torch.zeros(R * MAX_SEQ // 64, dtype=torch.int32, device="cuda"),
     }
     m = type("Cfg", (), dict(eps=1e-5, max_seq=MAX_SEQ))
     mpk = StaticMegakernel(num_gpus=1, num_sms=132, target_cc=90)

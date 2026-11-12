@@ -149,10 +149,15 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   int const finished_seq_len = global_seq_len - num_tokens;
   int kv_cache_offset = PARTITION_KV ? kv_idx * SEQ_LEN : 0;
 
-  // Load the paged KV indices into shared memory
+  // Load the paged KV indices into shared memory (16-B vectors when the
+  // request's first index is 16-B aligned: a later request of a packed table
+  // need not be)
   __shared__ __align__(16) int page_indices[MAX_PAGES_PER_REQUEST];
+  int const vec_end = first_page_pos % (16 / sizeof(int)) == 0
+                          ? num_pages - num_pages % (16 / sizeof(int))
+                          : 0; // the pages loaded as vectors
 #pragma unroll
-  for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
+  for (int i = threadIdx.x; i < vec_end * sizeof(int) / 16;
        i += NUM_THREADS) {
     __uint128_t const *src_ptr =
         reinterpret_cast<__uint128_t const *>(paged_kv_indices_buffer_ptr +
@@ -161,13 +166,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     __uint128_t *dst_ptr = reinterpret_cast<__uint128_t *>(page_indices) + i;
     *dst_ptr = *src_ptr;
   }
-  if (num_pages % (16 / sizeof(int)) != 0) {
-    int tail_pages = num_pages % (16 / sizeof(int));
-    int tail_offset = num_pages - tail_pages;
-    for (int i = threadIdx.x; i < tail_pages; i += NUM_THREADS) {
-      page_indices[tail_offset + i] =
-          paged_kv_indices_buffer_ptr[first_page_pos + tail_offset + i];
-    }
+  for (int i = vec_end + threadIdx.x; i < num_pages; i += NUM_THREADS) {
+    page_indices[i] = paged_kv_indices_buffer_ptr[first_page_pos + i];
   }
 
   __syncthreads();

@@ -10,10 +10,10 @@
 
 namespace static_mk {
 
-// PARAMS {NUM_Q_HEADS, HEAD_DIM, CHUNK, C, HAS_SINK, PAGE_SIZE}; BUF_SLOTS
-// {parts (sm90_attention_split's: the chunks' outputs, then their
-// log2-sum-exps), qo_indptr, kv_indptr, last_page_len (the page tables:
-// request 0's), sinks [Q] bf16 (-1: none), output [T, Q x D] bf16}
+// PARAMS {NUM_Q_HEADS, HEAD_DIM, CHUNK, C, HAS_SINK, PAGE_SIZE, R (requests)};
+// BUF_SLOTS {parts (sm90_attention_split's: the chunks' outputs, then their
+// log2-sum-exps), qo_indptr, kv_indptr, last_page_len (the page tables), sinks
+// [Q] bf16 (-1: none), output [T, Q x D] bf16}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -24,17 +24,21 @@ __device__ __forceinline__ void run_sm90_attention_merge(Maps const &,
                                                          KernelLocals &,
                                                          StaticTask const &tk) {
   constexpr int QH = PARAMS::v[0], D = PARAMS::v[1], CHUNK = PARAMS::v[2],
-                C = PARAMS::v[3], PAGE = PARAMS::v[5];
+                C = PARAMS::v[3], PAGE = PARAMS::v[5], R = PARAMS::v[6];
   constexpr bool HAS_SINK = PARAMS::v[4] == 1;
   static_assert(D == 64, "sm90_attention_merge: a lane two of 64 values");
   sm90_task_begin<IN...>(g);
   int const t = tk.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   int const h = tk.y * 8 + warp;
   int const *qo = buf_at<int const>(g, slot_at<BUF_SLOTS, 1>());
-  if (t < qo[1]) { // the step's tokens (request 0)
+  int r = 0; // token t's request
+  while (r < R - 1 && t >= qo[r + 1]) {
+    r++;
+  }
+  if (t < qo[R]) { // the step's tokens
     int const *kv = buf_at<int const>(g, slot_at<BUF_SLOTS, 2>());
-    int const seq = (kv[1] - kv[0] - 1) * PAGE +
-                    buf_at<int const>(g, slot_at<BUF_SLOTS, 3>())[0];
+    int const seq = (kv[r + 1] - kv[r] - 1) * PAGE +
+                    buf_at<int const>(g, slot_at<BUF_SLOTS, 3>())[r];
     int const nc = (seq + CHUNK - 1) / CHUNK;
     __nv_bfloat162 const *parts =
         buf_at<__nv_bfloat162 const>(g, slot_at<BUF_SLOTS, 0>());
