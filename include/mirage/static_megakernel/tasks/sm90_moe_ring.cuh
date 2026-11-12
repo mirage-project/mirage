@@ -128,8 +128,9 @@ __device__ __forceinline__ void
 // tasks per slot too: counter 1 + a, after the total in counter 0), F32_SCALES
 // (1: the scales applied in fp32 after each block's MMAs, any scale; 0: in f16
 // on the decoded weights, scales in [107, 136])}; BUF_SLOTS
-// {the active-expert list [E + 1] i32 (count last), routing indices [E, T] i32
-// (1 + top-k slot, else 0), the weight blocks, bias [E, N] bf16 in the
+// {the active-expert list [E + 1] i32 (its producer, the gate: its
+// routed-expert mask's counter lines give a task's expert), routing indices [E,
+// T] i32 (1 + top-k slot, else 0), the weight blocks, bias [E, N] bf16 in the
 // checkpoint's row order (-1: none), output}; MAP_SLOTS {the activation (f16;
 // GLU [T, K], W2 [A T, K] grouped by slot; box T rows)}
 template <class SELF,
@@ -175,11 +176,34 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
                        // the MMAs' between tasks)
   }
   __syncthreads();
-  int const *active = buf_at<int const>(g, slot_at<BUF_SLOTS, 0>());
   int const a = tk.x, row0 = tk.y * ROWS;
   int const c0 = done[SMAX];
-  if (a < active[E]) {
-    int const e = active[a];
+  // slot a's expert: the a-th set bit of the gate's routed-expert mask (its
+  // counter lines 2.., set before its tasks' counts): the experts ascending
+  using GATE = typename sm90_nth<3, IN...>::type; // the active list's producer
+  static_assert(GATE::counter >= 0, "sm90_moe_ring: the gate's mask lines");
+  int e = -1;
+  {
+    uint32_t mw[E / 32];
+#pragma unroll
+    for (int j = 0; j < E / 32; j++) {
+      mw[j] = __ldcg(g.cnt + GATE::counter + 2 + j);
+    }
+    int before = 0;
+#pragma unroll
+    for (int j = 0; j < E / 32; j++) {
+      int const n = __popc(mw[j]);
+      if (e < 0 && a < before + n) {
+        uint32_t m = mw[j];
+        for (int k = a - before; k > 0; k--) {
+          m &= m - 1;
+        }
+        e = 32 * j + __ffs(m) - 1;
+      }
+      before += n;
+    }
+  }
+  if (e >= 0) {
     int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     void const *amap = &maps.m[slot_at<MAP_SLOTS, 0>()];
     uint8_t const *blocks = buf_at<uint8_t const>(g, slot_at<BUF_SLOTS, 2>()) +

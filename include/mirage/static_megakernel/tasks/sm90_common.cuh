@@ -65,6 +65,16 @@ __device__ __forceinline__ void sm90_task_end(G const &g) {
   }
 }
 
+// the I-th type of a pack
+template <int I, class H, class... R>
+struct sm90_nth {
+  using type = typename sm90_nth<I - 1, R...>::type;
+};
+template <class H, class... R>
+struct sm90_nth<0, H, R...> {
+  using type = H;
+};
+
 // The block every sm90_* task runs with (static_megakernel.py's block_dim)
 constexpr int SM90_THREADS = 256, SM90_WARPS = SM90_THREADS / 32;
 

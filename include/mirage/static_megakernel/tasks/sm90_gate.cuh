@@ -5,24 +5,25 @@
 // its weights and its column of the
 // routing indices. The top-k runs in one warp, lane l the experts l, l + 32,
 // ... (E a multiple of 32: GPT-OSS-20B 32, 120B 128). The tokens' experts meet
-// in a bit mask (E / 32 words of the node's counter line), and the last task
-// done writes the active-expert list. Task (x, y) of grid (T, S, 1): token x,
-// the router's experts [y E / S, (y + 1) E / S) (S > 1: the logits through the
-// token's column of the routing indices, as fp32 bits; the token's last task
-// to count (its counter) takes its top-k). Every expert's logit is one warp's,
-// its lanes over K, whatever S: the same sums.
+// in a bit mask (E / 32 words of the node's counter line), which the MoE
+// (sm90_moe_ring) reads for its active-expert slots. Task (x, y) of grid (T, S,
+// 1): token x, the router's experts [y E / S, (y + 1) E / S) (S > 1: the logits
+// through the token's column of the routing indices, as fp32 bits; the token's
+// last task to count (its counter) takes its top-k). Every expert's logit is
+// one warp's, its lanes over K, whatever S: the same sums.
 #pragma once
 #include "sm90_common.cuh"
 
 namespace static_mk {
 
-// PARAMS {H, E, TOPK, eps (fp32 bits), S}; BUF_SLOTS {o [T, H] fp32,
-// o's bias [H] bf16, x (the residual) [T, H] bf16, the norm's weight [H] bf16,
-// the router [E, H] bf16, its bias [E] bf16, the step's token count [1] i32,
-// x1 [T, H] bf16, h [T, H] f16, weights [T, TOPK] fp32, routing indices
-// [E, T] i32, the active-expert list [E + 1] i32}; counters {the tasks (for
-// the consumers), the tasks done (for the last), the expert mask (E / 32
-// words), S > 1: the tokens' router tasks done (T)}
+// PARAMS {H, E, TOPK, eps (fp32 bits), S}; BUF_SLOTS {o [T, H] fp32, o's bias
+// [H] bf16, x (the residual) [T, H] bf16, the norm's weight [H] bf16, the
+// router [E, H] bf16, its bias [E] bf16, the step's token count [1] i32, x1 [T,
+// H] bf16, h [T, H] f16, weights [T, TOPK] fp32, routing indices [E, T] i32,
+// the active-expert list [E + 1] i32 (not written: the MoE orders on it and
+// reads the mask)}; counters {the tasks (for the consumers), unused, the expert
+// mask (E / 32 words), S > 1: the tokens' router tasks done (T)}; dynamic
+// shared memory: the task's E / S router rows
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -30,7 +31,7 @@ template <class SELF,
           class... IN>
 __device__ __forceinline__ void run_sm90_gate(Maps const &,
                                               G const &g,
-                                              KernelLocals &,
+                                              KernelLocals &L,
                                               StaticTask const &tk) {
   constexpr int H = PARAMS::v[0], E = PARAMS::v[1], TOPK = PARAMS::v[2],
                 S = PARAMS::v[4];
@@ -43,22 +44,12 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   constexpr int EPL = E / 32; // experts a lane in the top-k
   using Row = Sm90Row<H>;
   constexpr int VEC = Row::VEC;
-  constexpr int DONE = SELF::counter + 1, MASK = SELF::counter + 2,
-                TOK = MASK + E / 32;
+  constexpr int MASK = SELF::counter + 2, TOK = MASK + E / 32;
   __shared__ float part[SM90_WARPS], logit[S == 1 ? E : 1];
   __shared__ uint4 hs[VEC]; // h as rounded (f16), for the router's warps
-  __shared__ int last, last_split;
+  __shared__ int last_split;
   int const ntok = *buf_at<int const>(g, slot_at<BUF_SLOTS, 6>());
   int const split = tk.y;
-  if (tk.x < ntok) {
-    // the task's router rows (no producer) into L2 while o_proj finishes
-    char const *rp = reinterpret_cast<char const *>(
-                         buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 4>())) +
-                     (size_t)split * EPS_ * H * 2;
-    for (int i = threadIdx.x; i < EPS_ * H * 2 / 128; i += SM90_THREADS) {
-      asm volatile("prefetch.global.L2 [%0];" ::"l"(rp + 128 * i));
-    }
-  }
   // the weights (no producer: o_proj's bias, the norm's, the router's bias)
   // in registers before the wait, out of the path after it
   int const t = tk.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
@@ -84,12 +75,27 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
       rbv[j] = __bfloat162float(rb[32 * j + lane]);
     }
   }
+  // the task's router rows (no producer) into shared memory before the wait,
+  // after the barrier that ends the SM's earlier tasks (cp.async: issued here
+  // whatever the compiler schedules; landed by the sync after hs)
+  uint4 *wsm = reinterpret_cast<uint4 *>(L.sm);
+  __syncthreads(); // this SM's earlier tasks are done with shared memory
+  if (t < ntok) {
+    uint4 const *src = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 4>()) +
+                       (size_t)split * EPS_ * VEC;
+    for (int i = threadIdx.x; i < EPS_ * VEC; i += SM90_THREADS) {
+      uint32_t const d = (uint32_t)__cvta_generic_to_shared(wsm + i);
+      asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(d),
+                   "l"(src + i)
+                   : "memory");
+    }
+    asm volatile("cp.async.commit_group;" ::: "memory");
+  }
   sm90_task_begin<IN...>(g);
   float const *o =
       buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()) + (size_t)t * H;
   uint4 const *res =
       buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 2>()) + (size_t)t * VEC;
-  uint4 const *rw = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 4>());
   uint4 *x1 = buf_at<uint4>(g, slot_at<BUF_SLOTS, 7>()) + (size_t)t * VEC;
   uint4 *hout = buf_at<uint4>(g, slot_at<BUF_SLOTS, 8>()) + (size_t)t * VEC;
   // 1. x1 = bf16(o + bias + x), and the row as rounded
@@ -138,15 +144,16 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
       hs[v] = q;
     }
   }
+  asm volatile("cp.async.wait_all;" ::: "memory");
   __syncthreads(); // hs written
-  // 3. the logits: warp w experts [w EPW, w EPW + EPW), its lanes over K
-  // (each step its EPW rows' vectors in flight), reduced over the warp
+  // 3. the logits: warp w experts [w EPW, w EPW + EPW) (rows in shared
+  // memory), its lanes over K, reduced over the warp
   constexpr int EPW = EPS_ / SM90_WARPS;
   constexpr int UNROLL = EPW <= 4 ? 4 : 1;  // the EPW rows' loads in registers
   int const e0 = split * EPS_ + warp * EPW; // the warp's first expert
   int *routing = buf_at<int>(g, slot_at<BUF_SLOTS, 10>());
   if (t < ntok) {
-    uint4 const *rwr = rw + (size_t)e0 * VEC;
+    uint4 const *rwr = wsm + (size_t)warp * EPW * VEC;
     float acc[EPW] = {};
 #pragma unroll UNROLL
     for (int v = lane; v < VEC; v += 32) {
@@ -293,32 +300,10 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
         atomicOr(g.cnt + MASK + j, bits);
       }
     }
-    if (lane == 0) {
-      __threadfence(); // the mask (and the routing column) before the count
-      last = atomicAdd(g.cnt + DONE, 1u) == T - 1;
-    }
-    __syncwarp();
-    // 5. the last task: the active-expert list, ascending
-    if (__shfl_sync(0xffffffffu, last, 0)) {
-      __threadfence();
-      int *list = buf_at<int>(g, slot_at<BUF_SLOTS, 11>());
-      int before = 0; // the active experts below word j
-#pragma unroll
-      for (int j = 0; j < EPL; j++) {
-        uint32_t const mask = *(uint32_t volatile *)(g.cnt + MASK + j);
-        if ((mask >> lane) & 1u) {
-          list[before + __popc(mask & ((1u << lane) - 1u))] = 32 * j + lane;
-        }
-        before += __popc(mask);
-      }
-      if (lane == 0) {
-        list[E] = before;
-      }
-    }
   }
   sm90_task_end<SELF>(g);
 }
 
-SM90_TASK_SMEM(sm90_gate, 0)
+SM90_TASK_SMEM(sm90_gate, PARAMS::v[1] / PARAMS::v[4] * PARAMS::v[0] * 2)
 
 } // namespace static_mk
