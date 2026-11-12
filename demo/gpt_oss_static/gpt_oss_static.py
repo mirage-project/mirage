@@ -1,9 +1,10 @@
 """Greedy GPT-OSS-20B/120B decode on Hopper with one static megakernel per layer."""
-import argparse, itertools, json, os, statistics, time
+import argparse, json, os, statistics, subprocess, time
 # 120B's weights fill most of an H100: the expert repacking's freed temporaries must be reusable for the next layer's
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
-from mirage.mpk import compiler
+from mirage.mpk import compiler, cost_records, plan_gen, search, static_schedule
+from mirage.mpk.static_harness import Harness
 from mirage.mpk.static_megakernel import (StaticMegakernel, sm90_attention_parts_size, sm90_flags,
                                          sm90_moe_ring_pack)
 from mirage.mpk.models.utils import shuffle_tensors
@@ -11,10 +12,7 @@ from mxfp4 import Mxfp4Checkpoint, convert_expert_weight
 
 T, PAGE = 8, 64                       # token rows of a step, KV page size
 KV_CHUNK = 128                        # full attention: the KV split in chunks of this many positions (sm90_attention_split)
-# the gate's router over this many tasks a token (sm90_gate_layer), by expert count: measured on H100 (20B: 2 and 4; 120B: 4,
-# 8 and 16)
-ROUTER_SPLITS = {32: 4, 128: 8}
-L2_PREFETCH_MB = 12   # each layer's first QKV weight bytes into L2 at its start (StaticMegakernel.l2_prefetch_weights)
+PLANS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plans")
 FLAGS = sm90_flags() + ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]   # serving build: launches back to back
 
 
@@ -119,8 +117,7 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
                                        sinks=A["sinks"])
     mpk.gemm_tile_layer(input=A["attn"], weight=A["w_o"], output=A["o32"], combine="store")
     mpk.sm90_gate_layer(A["o32"], A["b_o"], A["x_in"], A["ln2"], A["w_router"], A["b_router"], A["num_tokens"], A["x1"],
-                        A["h2"], A["topk_w"], A["routing"], A["active"], eps=m.eps,
-                        router_splits=ROUTER_SPLITS.get(m.E, 1))
+                        A["h2"], A["topk_w"], A["routing"], A["active"], eps=m.eps)   # router splits: the plan's
     # the MXFP4 scales in fp32 after the MMAs, both models: the f16 path's scaled decode costs more than it saves (20B, H100:
     # 2957 -> 2829 us/step)
     mpk.sm90_moe_ring_layer(A["h2"], A["w13"], A["routing"], A["active"], A["act"], bias=A["b13"], glu=True,
@@ -128,10 +125,8 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
     mpk.sm90_moe_ring_layer(A["act"], A["w2"], A["routing"], A["active"], A["eo"], bias=A["b2"], glu=False,
                             rows_per_task=64, fp32_scales=True)
     mpk.sm90_mul_sum_add_layer(A["eo"], A["topk_w"], A["x1"], A["x_out"])
-    # the QKV weight's first 12 MB into L2 by the SMs that start while the previous layer's kernel finishes (PDL): its
-    # tail leaves HBM idle (H100, same runs: 20B 2834 -> 2791, 120B 4133 -> 4060 us/step; 16 MB and up gain less: the
-    # prefetch then slows that tail)
-    mpk.l2_prefetch_weights(L2_PREFETCH_MB, stop_at=("sm90_attention", "sm90_attention_split"))
+    if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the QKV weight's first MB into L2 at the start (as the GLM demos)
+        mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
 
 
 def build_head(m: Model, mpk: StaticMegakernel, t: dict):
@@ -143,52 +138,88 @@ def build_head(m: Model, mpk: StaticMegakernel, t: dict):
                               A["last_page_len"], A["kv_indices"], PAGE)
 
 
-def round_robin_plan(mpk) -> dict:
-    """Assign each node's default-grid tasks round-robin over the SMs."""
-    nsm = mpk._num_sms()
-    lists, k = [[] for _ in range(nsm)], 0
-    grids = {n.graph_idx: tuple(n.grid) for n in compiler.graph_nodes(mpk)}
-    for node, grid in grids.items():   # grid x outermost: an MoE expert slot's tasks together
-        for x in range(grid[0]):
-            for y in range(grid[1]):
-                for z in range(grid[2]):
-                    lists[k % nsm].append((node, (x, y, z)))
-                    k += 1
-    return {"grids": grids, "lists": [lists]}
+def plan_path(m: Model, plans: str, kind: str) -> str:
+    """The plan file of a kernel: one per graph (layer kind, expert count, requests)."""
+    return os.path.join(plans, f"{kind}_e{m.E}_r{m.R}.json")
 
 
-def place_router_splits(mpk, plan: dict) -> dict:
-    """The plans place the gate's (t, 0, 0) tasks; its router splits (t, s > 0) go to the SMs that have no task from o_proj on
-    before their first W13 task (each just before it), the active token's (t = 0) first, the earliest-free SMs first."""
-    nodes = {n.graph_idx: n for n in compiler.graph_nodes(mpk)}
-    gate = next(i for i, n in nodes.items() if n.name == "sm90_gate")
-    T, S = nodes[gate].grid[0], nodes[gate].grid[1]
-    if S == 1:
-        return plan
-    lists = [[list(sm) for sm in gpu] for gpu in plan["lists"]]
-    for gpu in lists:
-        def before_w13(sm):   # the nodes the SM runs before its first W13 task (the gate's next node)
-            return [n for n, _ in itertools.takewhile(lambda e: e[0] != gate + 1, gpu[sm])]
-        hosts = sorted((sm for sm in range(len(gpu)) if all(n < gate - 1 for n in before_w13(sm))),
-                       key=lambda sm: (max(before_w13(sm), default=-1), len(before_w13(sm)), sm))
-        for i, (x, y) in enumerate((x, y) for x in range(T) for y in range(1, S)):
-            sm = hosts[i % len(hosts)]
-            gpu[sm].insert(len(before_w13(sm)), (gate, (x, y, 0)))
-    return {**plan, "lists": lists}
+def load_plan(mpk, path: str):
+    """The plan file at path if it exists and has lists for this GPU's SMs, else None (round robin)."""
+    if not path or not os.path.exists(path):
+        return None
+    p = compiler.plan_from_file(path)
+    if len(p["lists"]) != 1 or len(p["lists"][0]) != mpk._num_sms():
+        print(f"{path}: lists for another GPU ({len(p['lists'][0])} SMs, this one {mpk._num_sms()}): round robin")
+        return None
+    return p
 
 
-def compile_kernel(name, build, t, out_dir):
-    """Build one static kernel for a layer kind or the model head."""
+def compile_kernel(name, build, t, out_dir, plan=None, profile=False):
+    """Build one static kernel for a layer kind or the model head: plan a plan file (load_plan), else round robin."""
     mpk = StaticMegakernel(num_gpus=1)
     build(mpk, t)
-    if (name != "head" and torch.cuda.get_device_name() == "NVIDIA H100 80GB HBM3" and mpk._num_sms() == 132
-            and os.environ.get("PLAN", "file") == "file"):
-        plan = place_router_splits(mpk, compiler.plan_from_file(
-            os.path.join(os.path.dirname(__file__), "plans", "h100", f"{name}_plan.json")))
-    else:
-        plan = round_robin_plan(mpk)
-    paths, _ = compiler.compile_plan(mpk, plan, os.path.join(out_dir, name, "schedules"))
-    return mpk.compile_static(paths, gpu_tensors=[t], out_dir=os.path.join(out_dir, name, "build"), extra_flags=FLAGS)
+    p = load_plan(mpk, plan)
+    print(f"{name}: plan {plan if p else 'round robin'}", flush=True)
+    paths, _ = compiler.compile_plan(mpk, p or plan_gen.round_robin_plan(mpk), os.path.join(out_dir, name, "schedules"))
+    return mpk.compile_static(paths, gpu_tensors=[t], out_dir=os.path.join(out_dir, name, "build"), extra_flags=FLAGS,
+                              profile=profile)
+
+
+def tune(m: Model, kinds: dict, out: str, plans: str, costs: str, rounds: int, time_limit_s: float, reps: int = 10):
+    """--tune: per kernel kind, the cost collection (plan_gen.collection_plans and the current plan, each a timing build run
+    reps times with L2 emptied, the page table at mid-sequence: cost_records appended to costs), then search.search_plan from
+    the current plan -> plan_path; last, the span of both plans (serving build). Builds run 8 at a time (the build cache)."""
+    from concurrent.futures import ThreadPoolExecutor
+    os.environ.setdefault("MIRAGE_STATIC_BUILD_CACHE", os.path.join(out, "build_cache"))
+    nvcc = subprocess.run(["nvcc", "--version"], capture_output=True, text=True).stdout.strip().splitlines()[-1]
+    machine = {"gpu": torch.cuda.get_device_name(0), "cuda": nvcc}
+    os.makedirs(plans, exist_ok=True)
+
+    def graph(build, t):
+        mpk = StaticMegakernel(num_gpus=1)
+        build(mpk, t)
+        return mpk
+
+    def compiled(build, t, plan, tag, profile, build_only=False):
+        mpk = graph(build, t)
+        paths, _ = compiler.compile_plan(mpk, plan, os.path.join(out, tag, "schedules"))
+        sk = mpk.compile_static(paths, gpu_tensors=[t], out_dir=os.path.join(out, tag, "build"), extra_flags=FLAGS,
+                                profile=profile, build_only=build_only)
+        return mpk, paths, sk
+
+    def launch(h):
+        m.set_position(m.max_seq // 2)
+        h.launch(256 << 20, timeout_s=30)
+
+    for kind, (build, t) in kinds.items():
+        mpk = graph(build, t)
+        cur = load_plan(mpk, plan_path(m, plans, kind)) or plan_gen.round_robin_plan(mpk)
+        todo = [("cur", cur)] + plan_gen.collection_plans(mpk, rounds=rounds)
+        print(f"tune {kind}: {len(todo)} plans", flush=True)
+        with ThreadPoolExecutor(8) as ex:   # nvcc in parallel; the runs below load from the cache
+            list(ex.map(lambda np_: compiled(build, t, np_[1], f"{kind}/c_{np_[0]}", True, True), todo))
+        for name, plan in todo:
+            mpk, paths, sk = compiled(build, t, plan, f"{kind}/c_{name}", True)
+            h, launches = Harness(sk), []
+            for _ in range(reps):
+                launch(h)
+                launches.append((h.task_times(), h.timing()))
+            cost_records.append_records(costs, cost_records.records_of_run(mpk, paths, launches, f"{kind}_{name}", machine))
+            print(f"  {name}: span {h.span_us():.1f} us (the last launch)", flush=True)
+            sk.finalize()
+        mpk = graph(build, t)
+        cost = search.Costs(costs, code=static_schedule.code_tag(), gpu=machine["gpu"])
+        plan, summary = search.search_plan(mpk, cost, time_limit_s=time_limit_s, start_from=cur)
+        print(f"tune {kind}: solver {({k: summary.get(k) for k in ('status', 'predicted_us', 'grids')})}", flush=True)
+        compiler.write_plan_file(plan_path(m, plans, kind), plan)
+        for tag, p in (("cur", cur), ("solved", plan), ("cur", cur), ("solved", plan)):
+            _, _, sk = compiled(build, t, p, f"{kind}/span_{tag}", False)
+            h, sp = Harness(sk), []
+            for _ in range(30):
+                launch(h)
+                sp.append(h.span_us())
+            print(f"tune {kind}: span {tag} median {statistics.median(sp):.1f} us", flush=True)
+            sk.finalize()
 
 
 def main():
@@ -203,13 +234,17 @@ def main():
     p.add_argument("--prompts", default=None, help="a json list of user messages: request r's is r % len (all cut to the "
                    "shortest's tokens); default the one message")
     p.add_argument("--only", type=int, default=None, help="with --prompts: one request, message ONLY")
+    p.add_argument("--plans", default=os.path.join(PLANS, "h100"), help="the plan files' directory (plan_path; a missing "
+                   "file: round robin)")
+    p.add_argument("--tune", metavar="COSTS", default=None, help="collect cost records into COSTS, solve each kernel's "
+                   "plan into --plans (tune), and exit")
+    p.add_argument("--rounds", type=int, default=2, help="with --tune: random plans per candidate grid of each node")
+    p.add_argument("--time", type=float, default=300, help="with --tune: the solver's time limit (s)")
     args = p.parse_args()
     os.makedirs(args.out, exist_ok=True)
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.ckpt)
     R = args.batch
-    if R > 1:   # the H100 plans place one request's grids (TOPK expert slots)
-        os.environ.setdefault("PLAN", "rr")
     ref = json.load(open(args.ref)) if args.ref else None
     if args.prompts:
         msgs = json.load(open(args.prompts))
@@ -232,11 +267,15 @@ def main():
     # the kernels, and one instance per layer (layer i: instance inst[i] of kernel kind[i])
     sliding = [i for i in range(m.L) if m.types[i] == "sliding_attention"]
     full = [i for i in range(m.L) if m.types[i] != "sliding_attention"]
-    k_sl = compile_kernel("sliding", lambda mpk, t: build_layer(m, mpk, t, m.window), m.layer_tensors(sliding[0]), args.out)
-    k_fu = compile_kernel("full", lambda mpk, t: build_layer(m, mpk, t, 0), m.layer_tensors(full[0]), args.out)
     gen = torch.zeros(R, NEW, dtype=torch.long, device="cuda")
     prompt_t = torch.tensor(prompts, dtype=torch.long, device="cuda")
-    k_hd = compile_kernel("head", lambda mpk, t: build_head(m, mpk, t), m.head_tensors(prompt_t, gen), args.out)
+    kinds = {"sliding": (lambda mpk, t: build_layer(m, mpk, t, m.window), m.layer_tensors(sliding[0])),
+             "full": (lambda mpk, t: build_layer(m, mpk, t, 0), m.layer_tensors(full[0])),
+             "head": (lambda mpk, t: build_head(m, mpk, t), m.head_tensors(prompt_t, gen))}
+    if args.tune:
+        tune(m, kinds, os.path.join(args.out, "tune"), args.plans, args.tune, args.rounds, args.time)
+        return
+    k_sl, k_fu, k_hd = (compile_kernel(k, b, t, args.out, plan_path(m, args.plans, k)) for k, (b, t) in kinds.items())
     kernel_of, inst = {}, {}
     for i in range(m.L):
         kernel_of[i] = k_sl if i in sliding else k_fu

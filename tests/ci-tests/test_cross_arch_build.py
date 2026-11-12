@@ -130,9 +130,9 @@ def _gpt_oss_demo():
 
 def _build_gpt_oss_static(kind):
     """One GPT-OSS-20B layer (kind: sliding or full attention) of the Hopper
-    static megakernel, its tensors zeros, on the shipped H100 schedule (132
-    SMs), built for sm_90a with the demo's serving flags."""
-    from mirage.mpk import compiler
+    static megakernel, its tensors zeros, on the shipped H100 plan (132 SMs) or
+    round robin, built for sm_90a with the demo's serving flags."""
+    from mirage.mpk import compiler, plan_gen
     from mirage.mpk.static_megakernel import (StaticMegakernel,
                                               sm90_attention_parts_size)
 
@@ -173,11 +173,16 @@ def _build_gpt_oss_static(kind):
         "x_in": z(T, H), "x_out": z(T, H),
     }
     m = type("Cfg", (), dict(eps=1e-5, QH=QH, E=E, limit=7.0,
-                             max_seq=MAX_SEQ))
+                             max_seq=MAX_SEQ, R=1))
     mpk = StaticMegakernel(num_gpus=1, num_sms=132, target_cc=90)
     g.build_layer(m, mpk, t, 128 if kind == "sliding" else 0)
-    plan = g.place_router_splits(mpk, compiler.plan_from_file(
-        os.path.join(demo, "plans", "h100", f"{kind}_plan.json")))
+    # the shipped H100 plan, else round robin with the router over 4 tasks a
+    # token (the gate's changeable grid dim)
+    gate = next(n.graph_idx for n in compiler.graph_nodes(mpk)
+                if n.name == "sm90_gate")
+    plan = g.load_plan(mpk, g.plan_path(m, os.path.join(demo, "plans", "h100"),
+                                        kind)) or \
+        plan_gen.round_robin_plan(mpk, {gate: (T, 4, 1)})
     out = os.path.join(os.environ.get("TMPDIR", "/tmp"),
                        f"mpk_cross_arch_gpt_oss_{kind}_{os.getpid()}")
     paths, _ = compiler.compile_plan(mpk, plan, os.path.join(out, "schedules"))
@@ -189,7 +194,7 @@ def _build_gpt_oss_static_head():
     """The GPT-OSS static head (final norm, lm_head, the next step's tokens)
     at a small vocabulary, two requests, round-robin over 132 SMs, built for
     sm_90a."""
-    from mirage.mpk import compiler
+    from mirage.mpk import compiler, plan_gen
     from mirage.mpk.static_megakernel import StaticMegakernel
 
     g, _ = _gpt_oss_demo()
@@ -212,7 +217,7 @@ def _build_gpt_oss_static_head():
     g.build_head(m, mpk, t)
     out = os.path.join(os.environ.get("TMPDIR", "/tmp"),
                        f"mpk_cross_arch_gpt_oss_head_{os.getpid()}")
-    paths, _ = compiler.compile_plan(mpk, g.round_robin_plan(mpk),
+    paths, _ = compiler.compile_plan(mpk, plan_gen.round_robin_plan(mpk),
                                      os.path.join(out, "schedules"))
     mpk.compile_static(paths, gpu_tensors=[t], out_dir=os.path.join(out, "build"),
                        extra_flags=g.FLAGS, build_only=True)

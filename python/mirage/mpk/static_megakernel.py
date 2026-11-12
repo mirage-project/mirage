@@ -308,7 +308,8 @@ class StaticMegakernel(PersistentKernel):
         return end, hello, offsets, sizes
 
     def l2_prefetch_weights(self, budget_mb: float = 64.0,
-                            stop_at: tuple = ("kda_decode", "sparse_mla", "scaled_moe_experts")) -> int:
+                            stop_at: tuple = ("kda_decode", "sparse_mla", "scaled_moe_experts", "sm90_attention",
+                                              "sm90_attention_split")) -> int:
         """STATIC_L2_PREFETCH (core.cuh kernel_begin): the layer's first GEMMs' weights (gemm_tile's weight, scaled_gemm_tile's
         weight and its scales; graph inputs) in graph order, those before the first node of a kind in stop_at (the
         attention or expert core: the GEMMs after it run long after the start, and their weights in flight at the start
@@ -1553,20 +1554,22 @@ class StaticMegakernel(PersistentKernel):
         """What sits between o_proj and the routed experts, for one token a task (tasks/sm90_gate.cuh): x1 = bf16(o +
         o_bias + residual), h = f16(RMSNorm(x1)), the router logits, the token's top-k (softmax, renormalized): its weights
         [T, TOPK] fp32 and routing column [E, T] i32; the active-expert list [E + 1] i32 from the last task. Outputs: x1, h,
-        weights, routing_indices, active_experts (graph.cc: sm90_gate's five). router_splits S: a token's router over S
-        tasks (grid (T, S, 1)), E / S experts each, their logits through the routing column; the token's last task takes the
-        top-k. params = [H, E, TOPK, eps bits, S]."""
+        weights, routing_indices, active_experts (graph.cc: sm90_gate's five). Grid (T, S, 1): a token's router over S
+        tasks, E / S experts each (S > 1: their logits through the routing column; the token's last task takes the top-k).
+        S is a changeable grid dim (E / S a multiple of the task's warps): the plan picks it; router_splits is the default
+        grid's. params = [H, E, TOPK, eps bits]."""
         T, H, E, TOPK = self._tokens(o.dim(0)), o.dim(1), router.dim(0), weights.dim(1)
         assert E % 32 == 0 and E <= 256, "sm90_gate: experts a multiple of 32, at most 256 (32 a router warp)"
-        S = router_splits
-        if S < 1 or E % (S * block_dim[0] // 32):
+        S, warps = router_splits, block_dim[0] // 32
+        if S < 1 or E % (S * warps):
             raise ValueError(f"sm90_gate_layer: router_splits {S}: E ({E}) / S experts a multiple of the task's warps")
         self._dtypes("sm90_gate_layer", o=(o, float32), residual=(residual, bfloat16), router=(router, bfloat16),
                      x1=(x1, bfloat16), h=(h, float16), weights=(weights, float32))
         present = [o, o_bias, residual, norm_weight, router, router_bias, num_tokens, x1, h, weights, routing_indices,
                    active_experts]
         self._add_node("sm90_gate", (T, S, 1), block_dim, present, [(-1, -1, -1)] * len(present),
-                       [H, E, TOPK, float_bits(eps), S], counters=2 + E // 32 + (T if S > 1 else 0),
+                       [H, E, TOPK, float_bits(eps)], counters=2 + E // 32 + T,
+                       changeable_grid_dims={1: (warps, 1, None, E)},   # S: E / S experts, whole warps' worth
                        buf_slots=[self._tensor_slot(t) for t in present])
 
     def sm90_mul_sum_add_layer(self, input: DTensor, weights: DTensor, residual: DTensor, output: DTensor,

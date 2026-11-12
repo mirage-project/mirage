@@ -5730,9 +5730,9 @@ int TaskRegister::register_sm90_attention_merge_task(
 
 int TaskRegister::register_sm90_gate_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params) {
-  // params: {H, E, TOPK, eps bits, router splits}; five outputs
-  // (tasks/sm90_gate.cuh)
-  assert(params.size() == 5);
+  // params: {H, E, TOPK, eps bits} (router splits: the grid's y); five
+  // outputs (tasks/sm90_gate.cuh)
+  assert(params.size() == 4);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(
       bgraph, (int)bgraph.operators.size() - 5, 5, input_ops, output_ops);

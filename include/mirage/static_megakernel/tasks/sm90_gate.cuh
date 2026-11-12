@@ -16,13 +16,14 @@
 
 namespace static_mk {
 
-// PARAMS {H, E, TOPK, eps (fp32 bits), S}; BUF_SLOTS {o [T, H] fp32, o's bias
+// PARAMS {H, E, TOPK, eps (fp32 bits)} (S: the grid's y, the compiler's
+// choice); BUF_SLOTS {o [T, H] fp32, o's bias
 // [H] bf16, x (the residual) [T, H] bf16, the norm's weight [H] bf16, the
 // router [E, H] bf16, its bias [E] bf16, the step's token count [1] i32, x1 [T,
 // H] bf16, h [T, H] f16, weights [T, TOPK] fp32, routing indices [E, T] i32,
 // the active-expert list [E + 1] i32 (not written: the MoE orders on it and
 // reads the mask)}; counters {the tasks (for the consumers), unused, the expert
-// mask (E / 32 words), S > 1: the tokens' router tasks done (T)}; dynamic
+// mask (E / 32 words), the tokens' router tasks done (T; S > 1)}; dynamic
 // shared memory: the task's E / S router rows
 template <class SELF,
           class PARAMS,
@@ -34,7 +35,7 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
                                               KernelLocals &L,
                                               StaticTask const &tk) {
   constexpr int H = PARAMS::v[0], E = PARAMS::v[1], TOPK = PARAMS::v[2],
-                S = PARAMS::v[4];
+                S = SELF::y;
   static_assert(E % 32 == 0 && E <= 32 * SM90_WARPS && TOPK <= E,
                 "sm90_gate: experts a multiple of 32 (E / 32 a lane), at "
                 "most 32 a router warp");
@@ -304,6 +305,6 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   sm90_task_end<SELF>(g);
 }
 
-SM90_TASK_SMEM(sm90_gate, PARAMS::v[1] / PARAMS::v[4] * PARAMS::v[0] * 2)
+SM90_TASK_SMEM(sm90_gate, PARAMS::v[1] / SELF::y * PARAMS::v[0] * 2)
 
 } // namespace static_mk
