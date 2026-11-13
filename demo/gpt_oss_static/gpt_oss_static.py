@@ -268,9 +268,11 @@ def main():
         msgs = json.load(open(args.prompts))
         ids = [tok(tok.apply_chat_template([{"role": "user", "content": c}], tokenize=False,
                                            add_generation_prompt=True)).input_ids for c in msgs]
+        if ref and len(ref["prompt_ids"]) == len(ids) and isinstance(ref["prompt_ids"][0], list):
+            ids = ref["prompt_ids"]   # the reference's own (the chat template stamps the date into the system prompt)
         P = min(len(i) for i in ids)
         ids = [i[:P] for i in ids]
-        only = [int(k) for k in args.only.split(",")] if args.only is not None else None
+        only =[int(k) for k in args.only.split(",")] if args.only is not None else None
         assert only is None or R == 1, "--only: one request"
         prompts = [ids[only[0]]] if only else [ids[r % len(ids)] for r in range(R)]
     elif ref:

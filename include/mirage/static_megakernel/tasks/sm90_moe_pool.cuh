@@ -58,6 +58,20 @@ struct IC { // a compile-time int through a generic lambda
   static constexpr int value = V;
 };
 
+// f(IC<min(ng, MAXG)>): a unit compiled for exactly its slot's token groups
+// (with a run-time count, the groups past it kept their accumulators in local
+// memory: 20B at 32 requests 8.46 -> 7.90 ms a step, 16: 6.04 -> 5.59)
+template <int MAXG, class F>
+__device__ __forceinline__ void moe_by_groups(int ng, F &&f) {
+  if constexpr (MAXG > 1) {
+    if (ng < MAXG) {
+      moe_by_groups<MAXG - 1>(ng, f);
+      return;
+    }
+  }
+  f(IC<MAXG>{});
+}
+
 #ifdef STATIC_SM90
 // One unit through the SM's ring: expert e's blocks [y UB, y UB + UB) of the
 // projection (N rows, K columns) times the activation (amap; GLU the tokens'
@@ -65,7 +79,7 @@ struct IC { // a compile-time int through a generic lambda
 // W2 [T][TOPK][N] bf16 at the tokens' top-k slots). READY: whether the
 // activation is there (thread 0 polls it after the first weights). Thread 0
 // also claims the SM's next unit (queue -> *next; claim) once this one's first
-// stages are on their way. NG: the token groups (n8 MMAs) it holds at most.
+// stages are on their way. NG: the slot's token groups (n8 MMAs), exactly.
 template <bool GLU,
           int PR,
           int UB,
@@ -175,10 +189,11 @@ __device__ __forceinline__ void sm90_moe_unit(G const &g,
   int const rbase = 16 * (warp & 3) + g8; // rows rbase (+ 8) of each m64 tile
   // past 8 tokens the MMAs' columns are compact: column j is the j-th token
   // routed to e (routed: bit t; GLU gathers their rows, W2's act rows are
-  // already compact), ng groups of them. At 8 tokens (one group, nothing to
+  // already compact), NG groups of them. At 8 tokens (one group, nothing to
   // save) column j is token j.
   constexpr bool COMPACT = T > 8;
-  int const cnt = COMPACT ? __popc(routed) : T, ng = (cnt + 7) >> 3;
+  // NG: the slot's groups (moe_by_groups), every one with a token
+  int const cnt = COMPACT ? __popc(routed) : T;
   auto token = [&](int j) {
     return j < cnt ? (int)__fns(routed, 0, j + 1) : 0;
   };
@@ -198,16 +213,14 @@ __device__ __forceinline__ void sm90_moe_unit(G const &g,
       if ((kt & 1) != kpar || kt >= KT) {
         continue;
       }
+      char const *box = stage + S::ACT_OFF + b * A_STAGE;
       uint32_t bf[NG][8][2];
 #pragma unroll
       for (int n = 0; n < NG; n++) {
-        if (n == 0 || n < ng) { // (a slot has a token)
-          char const *box = stage + S::ACT_OFF + b * A_STAGE;
-          if constexpr (GLU && COMPACT) {
-            sm90_b_frags_k128_sw128_rows(box, gtok[n], bf[n]);
-          } else {
-            sm90_b_frags_k128_sw128(box + n * 1024, bf[n]);
-          }
+        if constexpr (GLU && COMPACT) {
+          sm90_b_frags_k128_sw128_rows(box, gtok[n], bf[n]);
+        } else {
+          sm90_b_frags_k128_sw128(box + n * 1024, bf[n]);
         }
       }
 #pragma unroll
@@ -242,9 +255,6 @@ __device__ __forceinline__ void sm90_moe_unit(G const &g,
         }
 #pragma unroll
         for (int n = 0; n < NG; n++) {
-          if (n > 0 && n >= ng) {
-            continue;
-          }
           if constexpr (F32_SCALES) {
 #pragma unroll
             for (int i = 0; i < 4; i++) {
@@ -507,13 +517,16 @@ __device__ __forceinline__ void run_sm90_moe_pool(Maps const &maps,
                                   cl);
       };
       if (!big) {
-        unit(IC<1>{}, IC<NG>{}, y, true);
+        moe_by_groups<NG>(ng, [&](auto c) { unit(IC<1>{}, c, y, true); });
       } else if (ng <= NG13) {
-        unit(IC<UB13>{}, IC<NG13>{}, y, true);
+        moe_by_groups<NG13>(ng,
+                            [&](auto c) { unit(IC<UB13>{}, c, y, true); });
       } else {
-        for (int j = 0; j < UB13; j++) {
-          unit(IC<1>{}, IC<NG>{}, y * UB13 + j, j == 0);
-        }
+        moe_by_groups<NG>(ng, [&](auto c) {
+          for (int j = 0; j < UB13; j++) {
+            unit(IC<1>{}, c, y * UB13 + j, j == 0);
+          }
+        });
       }
       __syncthreads(); // its act rows written
       if (threadIdx.x == 0) {
@@ -549,13 +562,16 @@ __device__ __forceinline__ void run_sm90_moe_pool(Maps const &maps,
                                   cl);
       };
       if (!big) {
-        unit(IC<1>{}, IC<NG>{}, y, true);
+        moe_by_groups<NG>(ng, [&](auto c) { unit(IC<1>{}, c, y, true); });
       } else if (ng <= NG2) {
-        unit(IC<UB2>{}, IC<NG2>{}, y, true);
+        moe_by_groups<NG2>(ng,
+                            [&](auto c) { unit(IC<UB2>{}, c, y, true); });
       } else {
-        for (int j = 0; j < UB2; j++) {
-          unit(IC<1>{}, IC<NG>{}, y * UB2 + j, j == 0);
-        }
+        moe_by_groups<NG>(ng, [&](auto c) {
+          for (int j = 0; j < UB2; j++) {
+            unit(IC<1>{}, c, y * UB2 + j, j == 0);
+          }
+        });
       }
       __syncthreads(); // claim[] written before its next read
     }
