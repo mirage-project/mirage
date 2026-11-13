@@ -355,6 +355,15 @@ __device__ __forceinline__ void
   asm volatile("red.release.gpu.global.add.u32 [%0], %1;" ::"l"(c), "r"(v)
                : "memory");
 }
+// Add v to counter c with no release (no fence). Use it only when no thread
+// of the task wrote data that a waiter on c reads in this kernel. The release
+// adds on the same counter still publish their writes: each later atomic add
+// is in their release sequence. The fence of a release add is most of the
+// time of a task that does no other work.
+__device__ __forceinline__ void cnt_add_relaxed(uint32_t *c, uint32_t v) {
+  asm volatile("red.relaxed.gpu.global.add.u32 [%0], %1;" ::"l"(c), "r"(v)
+               : "memory");
+}
 // relaxed +1 returning the old value, as one ATOMG; LANE 0 ONLY. An add on an
 // address the compiler can prove warp-uniform (atomicAdd, atom.add or atom.inc
 // in inline PTX) is compiled warp-aggregated (VOTEU / FLO / POPC / ATOMG /

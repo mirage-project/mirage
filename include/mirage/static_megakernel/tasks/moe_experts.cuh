@@ -444,7 +444,9 @@ __device__ __forceinline__ void run_expert_dynamic(G const &g,
              *const tok_s = RES::tok(), *const start_s = RES::start();
   float *const w_s = RES::wt();
   unsigned char *const kk_s = RES::kk();
-  static_assert(T == 8,
+  // The condition depends on a template parameter, so the compiler checks it
+  // only where a graph uses the task.
+  static_assert(T == 8 && sizeof(RES) > 0,
                 "moe_experts (MXFP4): written for 8 tokens (TMEM: the "
                 "z_q scales from column 72; the epilogues' 8 columns)");
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;

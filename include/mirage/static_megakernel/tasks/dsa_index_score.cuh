@@ -1,7 +1,9 @@
 // tasks/dsa_index_score.cuh -- Compute the index scores of the DSA lightning
 // indexer (GLM-5.3 / 5.2 "full" layers; GLM-5.3-Flash with FLASH = 1, see
 // below). Task (c, t) is chunk c of the context of token t: positions
-// [c CH, c CH + CH) below n = min(seq_lens[t], MAXCTX).
+// [c CH, c CH + CH) below n = min(seq_lens[t], MAXCTX). A task computes no
+// scores if its chunk starts at or after position n, or if n <= TOPK_ALL
+// (see run_dsa_index_score).
 // The caller must keep seq_lens[t] <= MAXCTX = MAXP x PAGE. Each slot t must be
 // a different request (see step 1).
 //   score[t][j] = bf16( sum_h w_h relu(q8_h . k8_j) s_j )
@@ -14,9 +16,11 @@
 //         weights_proj(x)[h] is column 128 + h of the indexer projection (a
 //         COMBINE_ADD GEMM node; the demo uses a bf16 gemm_tile).
 //   k8_j  The key of position j in the index cache (dsa_index_k_write page
-//         layout). s_j is its UE8M0 scale.
-// s_j and qs_h are powers of two. Thus a multiplication by them is exact, and
-// the order of these multiplications does not change the fp32 result.
+//         layout). s_j is its scale, in the format of the dsa_index_k_write
+//         node (IKW): UE8M0, or fp32 (SGLang's index-K pool, key_scale="fp32").
+// qs_h is a power of two, and so is a UE8M0 s_j. Thus a multiplication by them
+// is exact, and the order of these multiplications does not change the fp32
+// result. The task applies an fp32 s_j last, as it applies a UE8M0 s_j.
 // FLASH = 1 (GLM-5.3-Flash, SGLang's IndexerKPool): j counts the pooled keys
 // (dsa_kpool_update), n = min(seq_lens[t] / 4, MAXCTX) complete pools. q_h is
 // Hadamard-128 of the bf16 wq_b output (a bf16 gemm_tile), rounded to bf16,
@@ -46,8 +50,8 @@
 //      key to the task histogram. At the end, the task adds the task
 //      histogram to the token histogram.
 //   output  scores fp32 [T][MAXCTX] (bf16 values) in the node buffer. Then
-//           the task adds 1 to counter + t. dsa_index_topk waits for all
-//           chunks.
+//           the task adds 1 to counter + t. If n > TOPK_ALL, dsa_index_topk
+//           waits for all chunks.
 #pragma once
 #include "../dsa_common.cuh"
 
@@ -270,8 +274,9 @@ __device__ __forceinline__ void
 // groups w / 4, w / 4 + 2, and so on. Warp 0 issues the MMAs. Thus, for TMEM
 // lanes 0..31, warp 4 reads the groups 0..5, and warp 0 reads the groups 6
 // and 7 after the issue. out: the scores of token t; positions [c0, c1).
-// FLASH: the key scales are fp32 (else UE8M0 bytes).
-template <bool FLASH>
+// FP32_SCALE: the key scales are fp32 (FLASH, or a dsa_index_k_write node with
+// key_scale="fp32"; else UE8M0 bytes).
+template <bool FP32_SCALE>
 __device__ __forceinline__ void isc_epilogue(unsigned char *sm,
                                              uint32_t tb,
                                              uint32_t bar,
@@ -306,8 +311,8 @@ __device__ __forceinline__ void isc_epilogue(unsigned char *sm,
     }
     if (c0 + o < c1) {
       float const ks =
-          FLASH ? *reinterpret_cast<float const *>(sm + ISC_SC + 4 * o)
-                : exp2_int(sm[ISC_SC + 4 * o]);
+          FP32_SCALE ? *reinterpret_cast<float const *>(sm + ISC_SC + 4 * o)
+                     : exp2_int(sm[ISC_SC + 4 * o]);
       float const sc = bf16r(s * ks);
       out[c0 + o] = sc;
       int const bin = (int)(score_key16(sc) >> 4);
@@ -334,7 +339,9 @@ __device__ __forceinline__ void isc_flush_hist(unsigned char const *sm,
 
 } // namespace dsa
 
-// Task (c, t). PARAMS {32 (heads), MAXCTX, PAGE (64), MAXP, FLASH (0 / 1)}.
+// Task (c, t). PARAMS {32 (heads), MAXCTX, PAGE (64), MAXP, FLASH (0 / 1),
+// TOPK_ALL (the TOPK of the dsa_index_topk node that reads the scores; 0:
+// none)}.
 // BUF_SLOTS {cos_sin (FLASH: not read), seq_lens, block_table (FLASH: of the
 // pooled cache), index cache (FLASH: the pooled cache), hist (int
 // [T][TOPK_BINS], zero before the launch: the counts of the high 12 bits of
@@ -358,6 +365,9 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   constexpr int NIH = PARAMS::v[0], MAXCTX = PARAMS::v[1], PAGE = PARAMS::v[2],
                 MAXP = PARAMS::v[3];
   constexpr bool FLASH = PARAMS::v[4] != 0;
+  // the key scales' format: FLASH's pooled keys and a key_scale="fp32" index
+  // cache (IKW params[3]; StaticParams pads with 0) are fp32, else UE8M0
+  constexpr bool FP32_SCALE = FLASH || IKW::v[3] != 0;
   constexpr int W0 = FLASH ? 256 : 128; // the column of w_0 in KW
   constexpr int NQ = IQ::v[2], NKW = KW::v[2], CH = MAXCTX / SELF::x;
   constexpr int CS = slot_at<BUF_SLOTS, 0>(), SEQ = slot_at<BUF_SLOTS, 1>(),
@@ -396,6 +406,18 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   unsigned char const *icache = buf_at<unsigned char const>(g, ICACHE);
   __syncthreads(); // wait until the previous task completes its shared-memory
                    // reads
+  // The task computes no scores in two cases: the chunk starts at or after
+  // position n, or n <= TOPK_ALL. If n <= TOPK_ALL, the top-k takes all n
+  // positions and does not read the scores. Then the task does not wait for
+  // its inputs. It only adds 1 to counter + t.
+  constexpr int TOPK_ALL = PARAMS::v[5];
+  if (c0 >= n || (TOPK_ALL > 0 && n <= TOPK_ALL)) {
+    stamp_ready(L);
+    if (tid == 0) { // nothing written: no release
+      cnt_add_relaxed(cnt_now(g) + SELF::counter + t, 1);
+    }
+    return;
+  }
   // Step 1. The keys before position n - 1 do not change in this step. Thus
   // the copies can run during the wait. After the wait, the task copies the
   // row of position n - 1 again.
@@ -482,15 +504,15 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
     if (warp == 0) {
       isc_issue(L.base, L.tb, L.base + ISC_BAR, ng);
     }
-    isc_epilogue<FLASH>(sm,
-                        L.tb,
-                        L.base + ISC_BAR,
-                        ng,
-                        c0,
-                        c1,
-                        buf_at<float>(g, SELF::buf) + (size_t)t * MAXCTX,
-                        warp,
-                        lane);
+    isc_epilogue<FP32_SCALE>(sm,
+                             L.tb,
+                             L.base + ISC_BAR,
+                             ng,
+                             c0,
+                             c1,
+                             buf_at<float>(g, SELF::buf) + (size_t)t * MAXCTX,
+                             warp,
+                             lane);
   }
   __syncthreads();
   if (tid < 8) { // all waits are done: invalidate the mbarriers

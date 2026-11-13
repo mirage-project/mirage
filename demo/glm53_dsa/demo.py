@@ -1,9 +1,10 @@
 """Run GLM-5.3 / 5.2 DSA attention decode layers (MLA, the lightning indexer and IndexShare) with the static-schedule compiler.
 
-The demo runs one decode step of T = 8 requests on one TP shard, with one kernel for each layer. With --tp 8, the shard has 8
-of the 64 heads. The A projections and the indexer are replicated, as in vLLM. A "full" layer (HF config indexer_types) runs
-its indexer. It writes its top-2048 positions for each request to a graph tensor. A "shared" layer reads that tensor (GLM
-IndexShare). For example, --layers 6 7 runs layer 6, then runs layer 7 with the indices of layer 6.
+The demo runs one decode step of T requests (STATIC_TOKENS: 8, 16 or 32; default 8) on one TP shard, with one kernel
+for each layer. With --tp 8, the shard has 8 of the 64 heads. The A projections and the indexer are replicated, as in
+vLLM. A "full" layer (HF config indexer_types) runs its indexer. It writes its top-2048 positions for each request to a
+graph tensor. A "shared" layer reads that tensor (GLM IndexShare). For example, --layers 6 7 runs layer 6, then runs
+layer 7 with the indices of layer 6.
 
   graph (full layer; a shared layer has no indexer nodes and reads the indices):
     group_quant(x) -> scaled_gemm_tile [q_a | kv_a]          -> dsa_q_norm_quant (RMSNorm + quant) -> scaled_gemm_tile q_b
@@ -15,7 +16,7 @@ IndexShare). For example, --layers 6 7 runs layer 6, then runs layer 7 with the 
 
   0. weights        Download the attention tensors of --layers (weights.py) and run check_config.
   1. state          seq_lens (--seq-lens; 0: an idle slot), a shuffled block table (pages of 64) and the RoPE table. x: --x
-                    (bf16 [8, 6144] raw file) or random. The residual is zero, so y is the attention output. For each
+                    (bf16 [T, 6144] raw file) or random. The residual is zero, so y is the attention output. For each
                     layer, random history in the latent cache (and the index cache): bf16 rows, e4m3 keys with UE8M0 scales
                     (seed 1).
   2. compile_plan   Select the plan of the layer kind (full or shared) with --plan: hand (default), solver, or PREFIX (the
@@ -38,7 +39,8 @@ IndexShare). For example, --layers 6 7 runs layer 6, then runs layer 7 with the 
                     record files COSTS; needs OR-Tools) -> <out>/layer<L>/plan.json, and plan_view.json with the solver's
                     predicted timeline (python plan_viewer.py <out>/layer<L>/plan_view.json)
   3. compile_static <out>/layer<L>/build/layer.cu, built and loaded
-  4. y              The first launch (not timed) gives the output y of layer L (the graph tensor attn_out, bf16 [8, 6144]).
+  4. y              The first launch (not timed) gives the output y of layer L (the graph tensor attn_out,
+                    bf16 [T, 6144]).
                     --save-y DIR writes it to DIR/y_layer<L>.bin. --compare-y DIR compares it with DIR/y_layer<L>.bin
                     (relRMS).
   5. timed launches --reps launches, 512 MB read before each (empties L2); span per launch
@@ -67,7 +69,8 @@ try:
 except ImportError:
     from weights import check_config, checkpoint_reader, download_layers, is_full_layer, layer_tensors
 
-T, H, PAGE, TOPK = 8, 6144, 64, 2048
+T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each request): the kernel's T (8, 16 or 32)
+H, PAGE, TOPK = 6144, 64, 2048
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -104,10 +107,21 @@ def kernel_tensors(w, st, bufs) -> dict:
     return {k: v for k, v in {**w, **st, **bufs}.items() if k != "input_norm"}
 
 
-def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5):
-    """Declare the nodes of the layer. bufs: the graph tensors (x, the caches, indices, residual, attn_out) by name."""
+def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, key_scale="ue8m0", next_norm=None,
+                tail=True):
+    """Declare the nodes of the layer. bufs: the graph tensors (x, the caches, indices, residual, attn_out) by name.
+    key_scale: the scale format of the index cache (dsa_index_k_write_layer; "fp32" for SGLang's index-K pool).
+    next_norm: (gamma, output, eps), torch tensors [H] / [T, H] bf16 attached last (as "norm_w", "x_next": the nodes keep
+    their indices, so the plans still fit): attn_out is the new residual and the kernel also writes the next sublayer's
+    input, RMSNorm(attn_out) gamma (row_rmsnorm_layer), instead of an engine's fused add + RMSNorm after it.
+    tail=False (one GPU, no next_norm, a zero residual: the engine does the all-reduce and the add): o_proj writes
+    attn_out in bf16 itself, with no allreduce_send, sum_gpus and residual_add (on one GPU they only copy o_proj's output,
+    so attn_out is the same). The last three nodes of the graph are then not there; a plan of the full graph drops their
+    tasks (drop_missing_nodes)."""
     mpk.max_bufs = 40            # the full layer uses 36 buffer slots, more than config.cuh's default 24 (STATIC_MAX_BUFS)
     mpk.max_counter_lines = 32   # and more than the default 16 counter lines (STATIC_NODE_COUNTER_LINES)
+    if T == 32:   # sparse_mla's shared memory (576-wide rows) is in the ring and needs 5 stages, not the 4 of T = 32
+        mpk.ring_stages = 5
     t = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in kernel_tensors(w, st, bufs).items()}
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
     NH = w["w_uk"].shape[0]
@@ -123,7 +137,8 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5):
                            block_table=t["block_table"], cache=t["cache"], kv0=cfg["q_lora_rank"], eps=eps)
     if full:
         mpk.dsa_index_k_write_layer(kw=kw, k_norm_weight=t["k_norm_w"], k_norm_bias=t["k_norm_b"], cos_sin=t["cos_sin"],
-                                    seq_lens=t["seq_lens"], block_table=t["block_table"], index_cache=t["index_cache"])
+                                    seq_lens=t["seq_lens"], block_table=t["block_table"], index_cache=t["index_cache"],
+                                    key_scale=key_scale)
     qb = nt((T, NH * 256), int64, "q_b")
     mpk.scaled_gemm_tile_layer(input=qcq, weight=t["w_qb"], weight_scales=t["w_qb_sf"], output=qb, combine="add")
     if full:
@@ -134,7 +149,8 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5):
     if full:
         scores = nt((T, maxctx), float32, "idx_scores")
         mpk.dsa_index_score_layer(iq=iq, kw=kw, index_cache=t["index_cache"], cos_sin=t["cos_sin"], seq_lens=t["seq_lens"],
-                                  block_table=t["block_table"], output=scores, chunks=chunks)
+                                  block_table=t["block_table"], output=scores, chunks=chunks,
+                                  topk=TOPK)   # a token with at most TOPK positions: its tasks compute no scores
         mpk.dsa_index_topk_layer(scores=scores, seq_lens=t["seq_lens"], output=t["indices"])
     # mla_split names the sparse_mla buffer: o [T, S, NH, 512] fp32, then lse [T, S, NH] (not the declared shape)
     split = nt((T, NH, 512), float32, "mla_split")
@@ -146,17 +162,38 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5):
     mpk.dsa_o_absorb_layer(input=o_lat, w_uv=t["w_uv"], output=v)
     mpk.group_quant_layer(input=v, output=vq)
     o, sent, osum = nt((T, H), float32, "o_proj"), nt((T, H), bfloat16, "o_sent"), nt((T, H), bfloat16, "o_sum")
+    if not tail:   # attn_out = bf16(o_proj): what the three nodes below give on one GPU with a zero residual
+        assert mpk.num_gpus == 1 and next_norm is None
+        mpk.scaled_gemm_tile_layer(input=vq, weight=t["w_o"], weight_scales=t["w_o_sf"], output=t["attn_out"],
+                                   combine="store_bf16")
+        return
     mpk.scaled_gemm_tile_layer(input=vq, weight=t["w_o"], weight_scales=t["w_o_sf"], output=o, combine="store")
     mpk.allreduce_send_layer(input=o, output=sent)
     mpk.sum_gpus_layer(input=sent, output=osum)
-    mpk.residual_add_layer(addend=osum, residual=t["residual"], output=t["attn_out"])   # y = attention output + residual
+    mpk.residual_add_layer(addend=osum, residual=t["residual"], output=t["attn_out"],   # y = attention output + residual
+                           counted=next_norm is not None)
+    if next_norm is not None:
+        gamma, out = (mpk.attach_input(torch_tensor=v, name=n) for v, n in zip(next_norm[:2], ("norm_w", "x_next")))
+        mpk.row_rmsnorm_layer(input=t["attn_out"], gamma=gamma, output=out, eps=next_norm[2])
+
+
+def drop_missing_nodes(mpk, plan: dict) -> dict:
+    """Return the plan without the tasks of the nodes that the graph of mpk does not have (build_graph tail=False:
+    the last three)."""
+    have = {n.graph_idx for n in compiler.graph_nodes(mpk)}
+    lists = [[[e for e in sm if e[0] in have] for sm in gpu] for gpu in plan["lists"]]
+    return dict(plan, grids={k: v for k, v in plan["grids"].items() if int(k) in have}, lists=lists)
 
 
 def plan_file(plan: str, full: bool) -> str:
-    """Return the plan file of a layer kind: plan = "hand", "solver" or a path prefix."""
+    """Return the plan file of a layer kind: plan = "hand", "solver" or a path prefix. A hand plan of T = 16 or 32 has
+    the suffix _T16 or _T32. The solver plans are of T = 8 only."""
+    if plan == "solver" and T != 8:
+        raise ValueError(f"plan_file: no solver plan of T = {T} (STATIC_TOKENS)")
     kind = "full" if full else "shared"
     prefix = os.path.join(HERE, f"{plan}_plan") if plan in ("solver", "hand") else plan
-    return f"{prefix}_{kind}.json"
+    suffix = f"_T{T}" if plan == "hand" and T != 8 else ""
+    return f"{prefix}_{kind}{suffix}.json"
 
 
 def check_plan(path: str, sms: int) -> dict:
@@ -234,9 +271,10 @@ def setup(args, dev):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_common_args(ap)
-    ap.add_argument("--seq-lens", type=int, nargs=8, default=[1, 300, 2048, 2049, 4000, 8192, 12000, 16384],
+    ap.add_argument("--seq-lens", type=int, nargs=T, default=[1, 300, 2048, 2049, 4000, 8192, 12000, 16384] * (T // 8),
                     help="the context length of each request, with the token of this step (0: an idle slot)")
-    ap.add_argument("--x", help="the input x (the input_layernorm output), bf16 [8, 6144] raw file (default: random, seed 2)")
+    ap.add_argument("--x", help="the input x (the input_layernorm output), bf16 [T, 6144] raw file "
+                                "(default: random, seed 2)")
     ap.add_argument("--search", nargs="+", default=None, metavar="COSTS",
                     help="cost record files. Use the solver plan, started from --plan")
     ap.add_argument("--costs-code", default="current", help="with --search: the records of these kernel templates: current "

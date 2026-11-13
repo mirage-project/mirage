@@ -19,6 +19,7 @@ fp32 scales):
   w_kw [256, 6144] bf16                            rows 0..127 dequantized wk, 128..159 weights_proj, then zero rows
   k_norm_w, k_norm_b [128] fp32                    the indexer LayerNorm
 """
+import contextlib
 import json
 import os
 
@@ -71,15 +72,44 @@ def is_full_layer(cfg: dict, layer: int) -> bool:
 
 
 def checkpoint_reader(snapshot: str):
-    """Return read(name) -> the tensor `name` of the snapshot. read.has(name) is True if the snapshot has the tensor."""
+    """Return read(name) -> the tensor `name` of the snapshot. read.has(name) is True if the snapshot has the tensor.
+    read.part(name, rows, cols) reads only those rows or columns of a 2-D tensor. Inside `with read.keep_open():`, read
+    and read.part open each file once and keep it open until the block ends (as demo/glm53_flash's load_layer)."""
     from safetensors import safe_open
     with open(os.path.join(snapshot, "model.safetensors.index.json")) as f:
         where = json.load(f)["weight_map"]
+    opened, stacks = {}, []   # inside keep_open: file name -> its open handle; the ExitStack that closes them
+
+    def handle(name):
+        fn = where[name]
+        if fn not in opened:
+            f = safe_open(os.path.join(snapshot, fn), framework="pt")
+            if not stacks:
+                return f   # not inside keep_open: closed after this read
+            opened[fn] = stacks[-1].enter_context(f)
+        return contextlib.nullcontext(opened[fn])
+
+    @contextlib.contextmanager
+    def keep_open():
+        with contextlib.ExitStack() as stack:
+            stacks.append(stack)
+            try:
+                yield
+            finally:
+                stacks.pop()
+                opened.clear()
 
     def read(name):
-        with safe_open(os.path.join(snapshot, where[name]), framework="pt") as f:
+        with handle(name) as f:
             return f.get_tensor(name)
+
+    def part(name, rows: slice = None, cols: slice = None):
+        with handle(name) as f:
+            t = f.get_slice(name)
+            return t[rows] if cols is None else t[:, cols]
     read.has = lambda name: name in where
+    read.part = part
+    read.keep_open = keep_open
     return read
 
 

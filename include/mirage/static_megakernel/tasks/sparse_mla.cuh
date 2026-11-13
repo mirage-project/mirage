@@ -17,16 +17,25 @@
 //           writes the row of this step.
 //   idx     [T][TOPK] int32 positions (-1: no position). A dsa_index_topk node
 //           (its counter + t) or a graph input supplies idx. A "shared" layer
-//           uses the indices of the last "full" layer (GLM IndexShare).
+//           uses the indices of the last "full" layer (GLM IndexShare). The
+//           task uses these properties of idx (dsa_index_topk gives them):
+//           the first min(seq_lens[t], TOPK) slots hold positions in
+//           ascending order and the other slots hold -1. If
+//           seq_lens[t] <= TOPK, slot e holds position e. Each token t is a
+//           different request, and this step writes only the cache row of
+//           position seq_lens[t] - 1. If seq_lens[t] <= TOPK (KPOOL 1), the
+//           task does not read idx.
 //   pages   block_table [T][MAXP] int32. Position p of request t is in page
 //           block_table[t][p / PAGE], row p % PAGE. seq_lens [T] int32: the
 //           query is at position seq_lens[t] - 1. The task masks the
 //           positions after it.
 //   output  For each (t, s), o [NH][512] fp32 and lse [NH]. o is the softmax
 //           average over the positions of the split. lse = max + log(sum).
-//           lse is -inf if the split has no valid position. The node buffer
-//           holds o [T][S][NH][512], then lse [T][S][NH]. Then the task adds
-//           1 to counter + t. dsa_mla_merge merges the S splits.
+//           With KPOOL > 1, lse is -inf if the split has no valid slot.
+//           The node buffer holds o [T][S][NH][512], then lse [T][S][NH].
+//           Then the task adds 1 to counter + t. dsa_mla_merge merges the S
+//           splits. With KPOOL 1, a split with no valid slot writes nothing
+//           and does not wait for its inputs. dsa_mla_merge does not read it.
 #pragma once
 #include "../dsa_common.cuh"
 #include <cmath>
@@ -38,14 +47,20 @@ using bf16 = __nv_bfloat16;
 constexpr int LATENT = dsa::MLA_LATENT;
 constexpr int HEAD_TILE = 16, KV_TILE = 64, NSTAGE = 2;
 
-// D_QK: the row of q and of the cache (512 latent + ROPE, ROPE = 64 or 0)
+// QK splits K (D_QK) into KQ parts. Warp w computes part w % KQ of the scores
+// of ROWS = KV_TILE KQ / 8 rows of a tile, from row (w / KQ) ROWS.
+constexpr int KQ = 4;
+
+// D_QK: the row width of q and of the cache (512 latent + ROPE, ROPE = 64 or
+// 0). q holds the query until each warp has its q fragments in registers.
+// After that, the space of q holds the KQ partial scores
+// [KQ][HEAD_TILE][KV_TILE] fp32 of a tile (partial_scores).
 template <int D_QK>
 struct alignas(128) Smem {
   bf16 q[HEAD_TILE * D_QK];
   bf16 kv[NSTAGE][KV_TILE * D_QK];
-  float scores[HEAD_TILE * KV_TILE];
   bf16 probabilities[HEAD_TILE * KV_TILE];
-  float row_max[HEAD_TILE];
+  float row_max[HEAD_TILE]; // log2 units (sparse_mla_split)
   float row_sum[HEAD_TILE];
   float alpha[HEAD_TILE];
   int64_t cache_rows[NSTAGE][KV_TILE];
@@ -56,11 +71,12 @@ using namespace dsa; // the shared-memory and MMA helpers (dsa_common.cuh)
 
 // Return the position of index slot e = tile * KV_TILE + tid. tile is the
 // tile index in the token, not in the split. Return -1 if tid >= KV_TILE or
-// tile >= last_tile. KPOOL = 1: idx[e]. KPOOL > 1 (GLM-5.3-Flash: idx holds
-// NIDX pool ids, dsa_index_topk UNIT = KPOOL): slot e < KPOOL NIDX is
-// position idx[e / KPOOL] KPOOL + e % KPOOL; the next KPOOL - 1 slots are the
-// tail, the positions after the complete pools: (seq_len / KPOOL) KPOOL + i
-// (the mask drops the ones at seq_len or later); the rest are -1.
+// tile >= last_tile. KPOOL = 1: idx[e], or e if idx is nullptr (e < seq_len;
+// else -1). KPOOL > 1 (GLM-5.3-Flash: idx holds NIDX pool ids, dsa_index_topk
+// UNIT = KPOOL): slot e < KPOOL NIDX is position
+// idx[e / KPOOL] KPOOL + e % KPOOL; the next KPOOL - 1 slots are the tail, the
+// positions after the complete pools: (seq_len / KPOOL) KPOOL + i (the mask
+// drops the ones at seq_len or later); the rest are -1.
 template <int KPOOL, int NIDX>
 __device__ __forceinline__ int
     load_index(int const *idx, int tile, int last_tile, int seq_len) {
@@ -69,7 +85,7 @@ __device__ __forceinline__ int
     return -1;
   }
   if constexpr (KPOOL == 1) {
-    return __ldcg(idx + e);
+    return idx == nullptr ? (e < seq_len ? e : -1) : __ldcg(idx + e);
   } else {
     if (e < KPOOL * NIDX) {
       int const p = __ldcg(idx + e / KPOOL);
@@ -80,38 +96,54 @@ __device__ __forceinline__ int
   }
 }
 
+// Return the partial scores [KQ][HEAD_TILE][KV_TILE] fp32 of a tile. They use
+// the space of sm.q. Call it only after every warp holds its q fragments.
+template <int D_QK>
+__device__ __forceinline__ float *partial_scores(Smem<D_QK> &sm) {
+  static_assert(KQ * HEAD_TILE * KV_TILE * sizeof(float) <= sizeof(sm.q),
+                "sparse_mla: the partial scores fit in q's space");
+  return reinterpret_cast<float *>(sm.q);
+}
+
+// 2^x (ex2.approx, subnormal results flushed to 0)
+__device__ __forceinline__ float exp2_ftz(float x) {
+  float y;
+  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+  return y;
+}
+
 template <int D_QK>
 __device__ __forceinline__ int tile_valid_count(Smem<D_QK> const &sm,
                                                 int stage) {
   return __popc(sm.valid_masks[stage][0]) + __popc(sm.valid_masks[stage][1]);
 }
 
-// Translate the positions of one tile to cache rows. Each warp reads the page
-// table one time for each different page. Move the valid rows to the front of
-// the list. Then start the cp.async copies of these rows into stage `stage`.
-// An empty tile starts no copy.
+// Return the cache page of position pos (block_table[pos / PAGE]), or -1 if
+// pos is not in [0, seq_len). sparse_mla_split reads the pages of a tile one
+// tile before it starts the copies of that tile (prefetch_tile).
+template <int PAGE>
+__device__ __forceinline__ int page_of(int const *pages, int pos, int seq_len) {
+  return pos >= 0 && pos < seq_len ? __ldg(pages + pos / PAGE) : -1;
+}
+
+// Translate the positions of one tile to cache rows. Thread tid < KV_TILE
+// gives the position pos of slot tid and its cache page (page_of; -1: no
+// position). A page outside [0, num_pages) gives no row. Move the valid rows
+// to the front of the list. Then start the cp.async copies of these rows into
+// stage `stage`. An empty tile starts no copy. All 256 threads must call this
+// function.
 template <int PAGE, int D_QK>
 __device__ __forceinline__ void prefetch_tile(Smem<D_QK> &sm,
                                               bf16 const *cache,
-                                              int const *pages,
                                               int num_pages,
-                                              int seq_len,
                                               int stage,
-                                              int pos) {
+                                              int pos,
+                                              int page) {
   int const tid = threadIdx.x, lane = tid % 32;
   int64_t cache_row = -1;
   unsigned valid_mask = 0;
   if (tid < KV_TILE) {
-    bool const valid = pos >= 0 && pos < seq_len;
-    int const logical_page = valid ? pos / PAGE : -1;
-    unsigned const peers = __match_any_sync(0xffffffffu, logical_page);
-    int const leader = __ffs(peers) - 1;
-    int page = -1;
-    if (valid && lane == leader) {
-      page = __ldg(pages + logical_page);
-    }
-    page = __shfl_sync(0xffffffffu, page, leader);
-    if (valid && page >= 0 && page < num_pages) {
+    if (page >= 0 && page < num_pages) {
       cache_row = int64_t(page) * PAGE + pos % PAGE;
     }
     sm.cache_rows[stage][tid] = cache_row;
@@ -149,7 +181,9 @@ __device__ __forceinline__ void prefetch_tile(Smem<D_QK> &sm,
 }
 
 // Compute split `split` of S over the TOPK index slots of one token. Write
-// o_part [NH][512] fp32 and lse [NH].
+// o_part [NH][512] fp32 and lse [NH]. Before the call, the caller starts the
+// copies of the first tile of the split into stage 0 (prefetch_tile). idx can
+// be nullptr (load_index).
 template <int NH, int TOPK, int S, int PAGE, int D_QK, int KPOOL, int NIDX>
 __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
                                                  bf16 const *q,
@@ -166,7 +200,12 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
   static_assert(TOPK % (KV_TILE * S) == 0,
                 "sparse_mla: each split has the same number of whole tiles");
   constexpr int PER = TOPK / KV_TILE / S;
+  // the k-steps (16 columns each) of a K part, and the rows of a warp
+  constexpr int KSTEPS = D_QK / 16 / KQ, ROWS = KV_TILE * KQ / 8;
+  static_assert(D_QK % (16 * KQ) == 0 && ROWS % 16 == 0,
+                "QK: whole k-steps in each K part, 16-row steps");
   int const tid = threadIdx.x, warp = tid / 32, lane = tid % 32;
+  int const kq = warp % KQ, row0 = warp / KQ * ROWS;
   int const first_tile = split * PER, last_tile = first_tile + PER;
   for (int i = tid; i < HEAD_TILE * D_QK / 8; i += 256) {
     int const row = i / (D_QK / 8), col = i % (D_QK / 8) * 8;
@@ -183,18 +222,28 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
   }
   // Each warp computes 64 latent columns. Each lane keeps 32 fp32 outputs.
   float acc[4][8] = {};
+  // The online softmax state of head tid / 16: the running max of the scores
+  // in log2 units (score x softmax_scale x log2(e)) and the running sum. The
+  // 16 lanes of the head hold the same values. Lane 0 also writes them to sm.
+  float run_max = -INFINITY, run_sum = 0.0f;
+  float const scale_log2 = softmax_scale * 1.4426950408889634f;
   int next_pos =
       load_index<KPOOL, NIDX>(idx, first_tile + 1, last_tile, seq_len);
-  prefetch_tile<PAGE, D_QK>(
-      sm,
-      cache,
-      pages,
-      num_pages,
-      seq_len,
-      0,
-      load_index<KPOOL, NIDX>(idx, first_tile, last_tile, seq_len));
+  int next_page = page_of<PAGE>(pages, next_pos, seq_len);
   copy_wait();
   __syncthreads();
+  // q fragments of K part kq: the same for every tile of the split
+  uint32_t qa[KSTEPS][4];
+#pragma unroll
+  for (int j = 0; j < KSTEPS; j++) {
+    load_a(qa[j],
+           sm.q + swizzle<D_QK>(lane % 16,
+                                (kq * KSTEPS + j) * 16 + lane / 16 * 8));
+  }
+  // Wait until all warps hold their q fragments. From here, the space of q
+  // holds the partial scores.
+  __syncthreads();
+  float *const part = partial_scores(sm);
 
   for (int tile = first_tile; tile < last_tile; tile++) {
     int const stage = (tile - first_tile) & 1;
@@ -202,8 +251,9 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
       int const following =
           load_index<KPOOL, NIDX>(idx, tile + 2, last_tile, seq_len);
       prefetch_tile<PAGE, D_QK>(
-          sm, cache, pages, num_pages, seq_len, stage ^ 1, next_pos);
+          sm, cache, num_pages, stage ^ 1, next_pos, next_page);
       next_pos = following;
+      next_page = page_of<PAGE>(pages, following, seq_len);
     }
     int const live_rows = tile_valid_count(sm, stage);
     if (live_rows == 0) {
@@ -212,48 +262,64 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
       continue;
     }
     bf16 const *kv = sm.kv[stage];
-    // QK: each of the 8 warps computes 16 heads x 8 selected rows
-    if (warp * 8 < live_rows) {
-      float sc[4] = {};
+    // QK: warp (row0, kq) computes the partial scores of K part kq for 16
+    // heads x ROWS selected rows. Each ldmatrix x4 gives the B fragments of
+    // 16 rows (two n8 tiles).
+    if (row0 < live_rows) {
+      float sc[ROWS / 8][4] = {};
 #pragma unroll
-      for (int k = 0; k < D_QK; k += 16) {
-        uint32_t a[4], b[2];
-        load_a(a, sm.q + swizzle<D_QK>(lane % 16, k + lane / 16 * 8));
-        load_k(b,
-               kv + swizzle<D_QK>(warp * 8 + lane % 8, k + (lane / 8 % 2) * 8));
-        mma16816(a, b, sc);
+      for (int j = 0; j < KSTEPS; j++) {
+        int const k = (kq * KSTEPS + j) * 16;
+#pragma unroll
+        for (int n = 0; n < ROWS / 16; n++) {
+          uint32_t b[4];
+          load_a(b,
+                 kv + swizzle<D_QK>(row0 + n * 16 + lane / 16 * 8 + lane % 8,
+                                    k + (lane / 8 % 2) * 8));
+          mma16816(qa[j], b, sc[2 * n]);
+          mma16816(qa[j], b + 2, sc[2 * n + 1]);
+        }
       }
+      float *const pk = part + kq * HEAD_TILE * KV_TILE;
 #pragma unroll
-      for (int r = 0; r < 2; r++) {
-        int const row = lane / 4 + r * 8, col = warp * 8 + (lane % 4) * 2;
-        *reinterpret_cast<float2 *>(sm.scores + row * KV_TILE + col) =
-            make_float2(sc[r * 2], sc[r * 2 + 1]);
+      for (int n = 0; n < ROWS / 8; n++) {
+#pragma unroll
+        for (int r = 0; r < 2; r++) {
+          int const row = lane / 4 + r * 8, col = row0 + n * 8 + (lane % 4) * 2;
+          *reinterpret_cast<float2 *>(pk + row * KV_TILE + col) =
+              make_float2(sc[n][r * 2], sc[n][r * 2 + 1]);
+        }
       }
     }
     __syncthreads();
-    // online softmax: 16 lanes for each head, 4 scores for each lane
+    // online softmax: 16 lanes for each head, 4 scores for each lane. Each
+    // lane adds the KQ partial scores of its columns. The select then drops
+    // the columns at or after live_rows (no cache row) and the rows at or
+    // after NH (no head). Their partial scores are not valid.
     int const row = tid / 16, row_lane = tid % 16;
     float p[4];
-    float tile_max = -INFINITY;
 #pragma unroll
     for (int i = 0; i < 4; i++) {
       int const col = row_lane * 2 + (i / 2) * 32 + i % 2;
-      p[i] = col < live_rows && row < NH
-                 ? sm.scores[row * KV_TILE + col] * softmax_scale
-                 : -INFINITY;
-      tile_max = fmaxf(tile_max, p[i]);
+      float s = 0.0f;
+#pragma unroll
+      for (int kp = 0; kp < KQ; kp++) {
+        s += part[(kp * HEAD_TILE + row) * KV_TILE + col];
+      }
+      p[i] = col < live_rows && row < NH ? s * scale_log2 : -INFINITY;
     }
+    float tile_max = fmaxf(fmaxf(p[0], p[1]), fmaxf(p[2], p[3]));
 #pragma unroll
     for (int m = 8; m > 0; m /= 2) {
       tile_max = fmaxf(tile_max, __shfl_xor_sync(0xffffffffu, tile_max, m, 16));
     }
-    float const old_max = sm.row_max[row];
-    float const new_max = fmaxf(old_max, tile_max);
-    float const alpha = old_max == -INFINITY ? 0.0f : __expf(old_max - new_max);
+    float const new_max = fmaxf(run_max, tile_max);
+    float const alpha =
+        run_max == -INFINITY ? 0.0f : exp2_ftz(run_max - new_max);
     float sum = 0.0f;
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-      p[i] = p[i] == -INFINITY ? 0.0f : __expf(p[i] - new_max);
+      p[i] = p[i] == -INFINITY ? 0.0f : exp2_ftz(p[i] - new_max);
       sum += p[i];
     }
 #pragma unroll
@@ -267,11 +333,12 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
                                           swizzle<KV_TILE>(row, col)) =
           __float22bfloat162_rn(make_float2(p[i * 2], p[i * 2 + 1]));
     }
-    __syncwarp(); // all lanes read the old row_max before the leader writes it
+    run_sum = alpha * run_sum + sum;
+    run_max = new_max;
     if (row_lane == 0) {
       sm.alpha[row] = alpha;
-      sm.row_sum[row] = alpha * sm.row_sum[row] + sum;
-      sm.row_max[row] = new_max;
+      sm.row_sum[row] = run_sum;
+      sm.row_max[row] = run_max;
     }
     __syncthreads();
     // PV. In the m16n8k16 accumulator, registers 0, 1, 4, 5 are row lane / 4
@@ -324,7 +391,9 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
         }
       }
       if (warp == 0 && lane % 4 == 0) {
-        lse[h] = sum > 0.0f ? sm.row_max[h] + logf(sum) : -INFINITY;
+        // row_max is in log2 units
+        lse[h] = sum > 0.0f ? sm.row_max[h] * 0.6931471805599453f + logf(sum)
+                            : -INFINITY;
       }
     }
   }
@@ -337,9 +406,9 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
 // holds positions; 4: pool ids, load_index), NIDX (idx columns)}. BUF_SLOTS
 // {cache, block_table, seq_lens, idx}. The node buffer holds o
 // [T][S][NH][512] fp32, then lse [T][S][NH] fp32. Q: the dsa_q_absorb node.
-// KV: the dsa_kv_write node. The task waits for all KV tasks, so the cache
-// rows of this step are present. IX: the dsa_index_topk node, or none. With
-// none, idx is a graph input: the indices of a "shared" layer.
+// KV: the dsa_kv_write node. The task waits for all KV tasks before it reads
+// the cache row of position seq_lens[t] - 1. IX: the dsa_index_topk node, or
+// none. With none, idx is a graph input: the indices of a "shared" layer.
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -372,32 +441,78 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
                 "sparse_mla: its shared memory is the ring's");
   static_assert(IX::x == 0 || IX::counter >= 0,
                 "sparse_mla: the indices' producer counts per token");
+  constexpr int PER = TOPK / smla::KV_TILE / S; // the tiles of a split
   int const t = tk.y, s = tk.x;
+  int const sl = buf_at<int const>(g, SEQ)[t];
+  int const live = min(max(sl, 0), TOPK); // the valid slots (KPOOL 1)
+  float *const o = buf_at<float>(g, SELF::buf);
+  float *const o_part = o + ((size_t)t * S + s) * NH * smla::LATENT;
+  float *const lse =
+      o + (size_t)T * S * NH * smla::LATENT + ((size_t)t * S + s) * NH;
   __syncthreads(); // wait until the previous task completes its shared-memory
                    // reads
+  if (KPOOL == 1 && s * PER * smla::KV_TILE >= live) {
+    // The split has no valid slot. The task does not wait for its inputs and
+    // writes nothing. dsa_mla_merge finds from seq_lens that the split is
+    // empty and does not read it. The task only adds 1 to counter + t.
+    dsa::stamp_ready(L);
+    if (threadIdx.x == 0) { // nothing written: no release
+      cnt_add_relaxed(cnt_now(g) + SELF::counter + t, 1);
+    }
+    return;
+  }
+  // If seq_lens[t] <= TOPK (KPOOL 1), slot e holds position e. Then the task
+  // does not read idx (idx_t nullptr, load_index) and does not wait for IX.
+  int const *const idx_t = KPOOL == 1 && sl <= TOPK
+                               ? nullptr
+                               : buf_at<int const>(g, IDX) + (size_t)t * NIDX;
+  int const *const pages = buf_at<int const>(g, BT) + (size_t)t * MAXP;
+  auto const first_tile = [&]() { // start the copies of tile 0 of the split
+    int const pos0 =
+        smla::load_index<KPOOL, NIDX>(idx_t, s * PER, s * PER + PER, sl);
+    smla::prefetch_tile<PAGE, D_QK>(*reinterpret_cast<Smem *>(L.sm),
+                                    buf_at<__nv_bfloat16 const>(g, CACHE),
+                                    NUM_PAGES,
+                                    0,
+                                    pos0,
+                                    smla::page_of<PAGE>(pages, pos0, sl));
+  };
+  // A shared layer (IX::x == 0) gets idx as a graph input. In this step,
+  // dsa_kv_write changes only the cache row of position seq_lens[t] - 1. The
+  // slots are in ascending order, so only the last valid slot can hold this
+  // position. If tile 0 of the split ends before that slot, the task starts
+  // the copies of tile 0 before its waits.
+  bool const early =
+      KPOOL == 1 && IX::x == 0 && (s * PER + 1) * smla::KV_TILE < live;
+  if (early) {
+    first_tile();
+  }
   if (threadIdx.x == 0) {
     cnt_wait(cnt_now(g) + KV::counter, KV::x * KV::y * KV::z);
     // wait for all q tasks
     cnt_wait(cnt_now(g) + Q::counter, Q::x * Q::y * Q::z);
     if constexpr (IX::x > 0) {
-      // wait for the IX::x write tasks of token t
-      cnt_wait(cnt_now(g) + IX::counter + t, IX::x);
+      if (idx_t != nullptr) { // the IX::x write tasks of token t
+        cnt_wait(cnt_now(g) + IX::counter + t, IX::x);
+      }
     }
   }
   __syncthreads();
   dsa::stamp_ready(L);
-  float *const o = buf_at<float>(g, SELF::buf);
+  if (!early) {
+    first_tile();
+  }
   smla::sparse_mla_split<NH, TOPK, S, PAGE, D_QK, KPOOL, NIDX>(
       *reinterpret_cast<Smem *>(L.sm),
       buf_at<__nv_bfloat16 const>(g, Q::buf) + (size_t)t * NH * D_QK,
       buf_at<__nv_bfloat16 const>(g, CACHE),
-      buf_at<int const>(g, IDX) + (size_t)t * NIDX,
-      buf_at<int const>(g, BT) + (size_t)t * MAXP,
+      idx_t,
+      pages,
       NUM_PAGES,
-      buf_at<int const>(g, SEQ)[t],
+      sl,
       __int_as_float(PARAMS::v[5]),
-      o + ((size_t)t * S + s) * NH * smla::LATENT,
-      o + (size_t)T * S * NH * smla::LATENT + ((size_t)t * S + s) * NH,
+      o_part,
+      lse,
       s);
   dsa::ring_release();
   if (threadIdx.x == 0) {
