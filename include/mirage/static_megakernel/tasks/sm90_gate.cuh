@@ -6,7 +6,7 @@
 // routing indices. The top-k runs in one warp, lane l the experts l, l + 32,
 // ... (E a multiple of 32: GPT-OSS-20B 32, 120B 128). The tokens' experts meet
 // in a bit mask (E / 32 words of the node's counter line), which the MoE
-// (sm90_moe_ring) reads for its active-expert slots. Task (x, y) of grid (T, S,
+// (sm90_moe_pool) reads for its active-expert slots. Task (x, y) of grid (T, S,
 // 1): token x, the router's experts [y E / S, (y + 1) E / S) (S > 1: the logits
 // through the token's column of the routing indices, as fp32 bits; the token's
 // last task to count (its counter) takes its top-k). Every expert's logit is

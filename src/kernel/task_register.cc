@@ -5754,19 +5754,6 @@ int TaskRegister::register_sm90_moe_pool_task(threadblock::Graph const &bgraph,
                                static_build_only_task("sm90_moe_pool", params));
 }
 
-int TaskRegister::register_sm90_moe_ring_task(threadblock::Graph const &bgraph,
-                                              std::vector<int> const &params) {
-  // params: {glu, rows, N, K, E, TOPK, has bias, limit, alpha, slot deps, fp32
-  // scales}; the optional bias left out (tasks/sm90_moe_ring.cuh)
-  return register_static_task(this,
-                              TASK_SM90_MOE_RING,
-                              "sm90_moe_ring",
-                              bgraph,
-                              params,
-                              (int)bgraph.operators.size() - 1,
-                              11);
-}
-
 int TaskRegister::register_sm90_mul_sum_add_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {H, TOPK}. inputs: expert outputs, weights, residual; output: y

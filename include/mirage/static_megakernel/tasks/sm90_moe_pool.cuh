@@ -3,13 +3,15 @@
 // other static models' kind (scaled_moe_experts): one task per SM, the SMs
 // share the step's work at run time.
 //
-// The weights are sm90_moe_ring_pack's blocks: [E][N / PR][K tiles][PR x 68]
-// (W13: PR = 128, 64 gate rows and the up rows of the same outputs; W2: PR =
-// 64). A unit is UB consecutive blocks of one expert (rows [y UB PR, (y + 1) UB
-// PR)): its ring stage holds NB K tiles of each of its blocks (block j's at
-// [j][b]), one bulk copy per block, and every row goes through the same
-// decode, MMAs (its K tiles in order, split by parity over the warp halves) and
-// epilogue as an sm90_moe_ring task's, so the results do not depend on UB. The
+// The weights are sm90_moe_pack's blocks (sm90_mxfp4.cuh): [E][N / PR][K
+// tiles][PR x 68] (W13: PR = 128, 64 gate rows and the up rows of the same
+// outputs; W2: PR = 64). A unit is UB consecutive blocks of one expert (rows [y
+// UB PR, (y + 1) UB PR)): its ring stage holds NB K tiles of each of its blocks
+// (block j's at [j][b]), one bulk copy per block, and every row goes through
+// the same decode, MMAs (its K tiles in order, split by parity over the warp
+// halves: warp w takes the m16 rows w % 4 of each m64 tile, of the K tiles of
+// parity w / 4, and warps 4..7 hand their sums to warps 0..3) and epilogue
+// whatever the unit, so the results do not depend on UB. The
 // step picks UB per projection at run time: the big units (UB13, UB2: the
 // node's params) when there are at least as many of them as SMs, else one
 // block a unit (few experts: more, shorter units); with big W2 units the last
@@ -28,7 +30,7 @@
 // an SM waiting in a W2 unit holds no W13 unit, as every W13 unit comes before
 // every W2 unit in the queue.
 #pragma once
-#include "sm90_moe_ring.cuh"
+#include "sm90_mxfp4.cuh"
 
 namespace static_mk {
 

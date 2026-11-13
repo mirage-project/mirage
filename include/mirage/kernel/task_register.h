@@ -246,8 +246,6 @@ public:
                               std::vector<int> const &params);
   int register_sm90_moe_pool_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
-  int register_sm90_moe_ring_task(threadblock::Graph const &bgraph,
-                                  std::vector<int> const &params);
   int register_sm90_mul_sum_add_task(threadblock::Graph const &bgraph,
                                      std::vector<int> const &params);
   int register_sm90_next_token_task(threadblock::Graph const &bgraph,

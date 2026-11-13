@@ -1,6 +1,6 @@
 // tasks/sm90_rmsnorm.cuh -- the sm90_rmsnorm task type: RMSNorm of one token,
 // y = bf16 or f16(x / rms(x) * weight) in fp32 (as GPT-OSS's RMSNorm), x bf16;
-// an f16 y feeds the f16 MoE (sm90_moe_ring). Task x of grid (T, 1, 1): row x.
+// an f16 y feeds the f16 MoE (sm90_moe_pool). Task x of grid (T, 1, 1): row x.
 #pragma once
 #include "sm90_common.cuh"
 

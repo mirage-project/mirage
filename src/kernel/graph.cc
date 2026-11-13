@@ -1099,14 +1099,6 @@ void Graph::register_task_for_op(KNOperator const *op,
                         5,
                         TASK_SM90_GATE,
                         variant_id);
-  } else if (name == "sm90_moe_ring") {
-    int variant_id =
-        task_register->register_sm90_moe_ring_task(customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple((int)customized->bgraph.operators.size() - 1,
-                        1,
-                        TASK_SM90_MOE_RING,
-                        variant_id);
   } else if (name == "sm90_moe_pool") {
     int variant_id =
         task_register->register_sm90_moe_pool_task(customized->bgraph, params);

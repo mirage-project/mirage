@@ -59,10 +59,11 @@ def sm90_flags() -> list[str]:
             f"-I{root}/deps/cutlass/include", f"-I{root}/deps/cutlass/tools/util/include"]
 
 
-def sm90_moe_ring_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu: bool,
-                       experts_per_chunk: int = 8) -> torch.Tensor:
+def sm90_moe_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu: bool,
+                  experts_per_chunk: int = 8) -> torch.Tensor:
     """An expert projection's MXFP4 weights [E, N, K / 2] u8 (two E2M1 values a byte, low nibble first) and E8M0 scales
-    [E, N, K / 32] u8 to sm90_moe_ring's blocks [E, N / rows, K tiles, rows x 68] u8, in the order a task streams them: per
+    [E, N, K / 32] u8 to sm90_moe_pool's blocks [E, N / rows, K tiles, rows x 68] u8 (tasks/sm90_mxfp4.cuh), in the order a
+    unit streams them: per
     K tile of 128 values (zero-padded; zero decodes to 0) its rows' 64 bytes, then their 4 scales. A row's 64 bytes are
     permuted so that MMA thread q's A fragment (K columns 16 kb + 2q + {0, 1, 8, 9}, kb = 0..7: packed bytes 8 kb + q
     (+ 4)) is its bytes 16 q .. 16 q + 15, in the order (kb, + 4), and the nibbles within each 4-byte word ordered for the
@@ -71,16 +72,16 @@ def sm90_moe_ring_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, gl
     in chunks of `experts_per_chunk` into the output (a large checkpoint's temporaries stay small)."""
     E, N, KH = packed.shape
     kt = (KH + 63) // 64
-    assert scales.numel() == 0 or int(scales.max()) <= 248, "sm90_moe_ring: E8M0 scales up to 248 (fp32 2^(s - 121))"
+    assert scales.numel() == 0 or int(scales.max()) <= 248, "sm90_moe_pack: E8M0 scales up to 248 (fp32 2^(s - 121))"
     out = torch.empty(E, N // rows, kt, rows * 68, dtype=torch.uint8, device=packed.device)
     for e0 in range(0, E, experts_per_chunk):
-        out[e0:e0 + experts_per_chunk] = _ring_pack_experts(packed[e0:e0 + experts_per_chunk],
+        out[e0:e0 + experts_per_chunk] = _moe_pack_experts(packed[e0:e0 + experts_per_chunk],
                                                             scales[e0:e0 + experts_per_chunk], rows, glu, kt)
     return out
 
 
-def _ring_pack_experts(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu: bool, kt: int) -> torch.Tensor:
-    """sm90_moe_ring_pack of a slice of the experts."""
+def _moe_pack_experts(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu: bool, kt: int) -> torch.Tensor:
+    """sm90_moe_pack of a slice of the experts."""
     E, N, KH = packed.shape
     w = torch.zeros(E, N, kt * 64, dtype=torch.uint8, device=packed.device)
     w[:, :, :KH] = packed
@@ -103,8 +104,8 @@ def _ring_pack_experts(packed: torch.Tensor, scales: torch.Tensor, rows: int, gl
     return torch.cat([w, sc], dim=3).contiguous()
 
 
-def sm90_moe_ring_f16_scales(scales: torch.Tensor) -> bool:
-    """Whether every (nonzero) E8M0 scale is in [107, 136], where sm90_moe_ring can apply it in f16 on the decoded weights
+def sm90_moe_f16_scales(scales: torch.Tensor) -> bool:
+    """Whether every (nonzero) E8M0 scale is in [107, 136], where sm90_moe_pool can apply it in f16 on the decoded weights
     (GPT-OSS-20B's are); else the layer needs fp32_scales (GPT-OSS-120B's reach 138)."""
     used = scales[scales != 0]
     return used.numel() == 0 or (int(used.min()) >= 107 and int(used.max()) <= 136)
@@ -1426,59 +1427,11 @@ class StaticMegakernel(PersistentKernel):
         self._add_node(name, grid, block_dim, present, [(-1, -1, -1)] * len(present), params, counters=1,
                        buf_slots=[self._tensor_slot(t) if t is not None else -1 for t in tensors])
 
-    def sm90_moe_ring_layer(
-        self,
-        input: DTensor,           # GLU: [T, K] f16; W2: [A, T, K] f16, each active-expert slot's tokens
-        weights: DTensor,         # sm90_moe_ring_pack's blocks [E, N / R, K tiles, R x 68] u8 (R = rows_per_task)
-        routing_indices: DTensor, # [E, T] i32: 1 + the top-k slot of each token routed to the expert, else 0
-        active_experts: DTensor,  # [E + 1] i32: the routed experts, their count last
-        output: DTensor,          # GLU: [A, T, N / 2] f16 (every token's row of slot a's expert); W2: [T, TOPK, N] bf16
-        bias: DTensor = None,     # [E, N] bf16, the checkpoint's row order (GLU: gate then up)
-        glu: bool = True,
-        limit: float = 7.0,       # GLU: GPT-OSS's SwiGLU clamp and alpha
-        alpha: float = 1.702,
-        rows_per_task: int = 128,
-        fp32_scales: bool = False,  # the scales in fp32 (any up to 248; else [107, 136]: sm90_moe_ring_f16_scales)
-        block_dim: tuple = (256, 1, 1),
-    ):
-        """One routed expert projection streamed through the ring (tasks/sm90_moe_ring.cuh), its MXFP4 weights decoded into
-        MMA registers: task (a, y) = the expert in slot a of the active list (none past their count) times weight rows
-        [y R, y R + R), R = rows_per_task (64 or 128), its weight blocks one bulk copy a ring stage. glu: W13 with the
-        clamped SwiGLU fused (R 128: 64 outputs a task). A = the slots (GLU: output.dim(0); W2: input.dim(0)), the most experts a step routes to.
-        params = [glu, R, N, K, E, TOPK, has_bias, limit bits, alpha bits, slot deps, fp32 scales]."""
-        R = rows_per_task
-        E, N, K = weights.dim(0), weights.dim(1) * R, input.dim(input.num_dims - 1)
-        T = self._tokens(routing_indices.dim(1))
-        A = output.dim(0) if glu else input.dim(0)
-        TOPK = 0 if glu else output.dim(1)
-        assert R in (64, 128) and K % 64 == 0 and (weights.dim(2), weights.dim(3)) == ((K + 127) // 128, R * 68)
-        assert not glu or (R == 128 and output.dim(2) * 2 == N)
-        self._dtypes("sm90_moe_ring_layer", input=(input, float16), weights=(weights, uint8),
-                     output=(output, float16 if glu else bfloat16))
-        tensors = [input, weights, routing_indices, active_experts] + ([bias] if bias is not None else [])
-        # what each task touches (compiler.box: the dependencies the plan and the solver see): GLU task (a, y) writes slot a's
-        # outputs [64 y, 64 y + 64); W2 task (a, y) reads slot a's activation, so it depends on GLU's slot-a tasks only. GLU
-        # counts its tasks in counter 0 and per slot in counter 1 + a; a W2 reading a GLU node's output waits for its slot's
-        # (params[9] = 1)
-        from .compiler import graph_nodes, producer_of
-        p = producer_of(input, graph_nodes(self))
-        slot_deps = int(not glu and p is not None and p.name == "sm90_moe_ring" and p.params[0] == 1)
-        maps = [(0, -1, -1) if (not glu and slot_deps) else (-1, -1, -1)] + [(-1, -1, -1)] * (len(tensors) - 1)
-        maps.append((0, 2, -1) if glu else (-1, 2, -1))
-        self._add_node("sm90_moe_ring", (A, N // R, 1), block_dim, tensors + [output], maps,
-                       [int(glu), R, N, K, E, TOPK, int(bias is not None), float_bits(limit), float_bits(alpha), slot_deps,
-                        int(fp32_scales)],
-                       counters=A + 1 if glu else 1,
-                       map_slots=[self._map("bf16", ("t", input), (T if glu else A * T, K, T))],
-                       buf_slots=[self._tensor_slot(active_experts), self._tensor_slot(routing_indices),
-                                  self._tensor_slot(weights), self._tensor_slot(bias) if bias is not None else -1,
-                                  self._tensor_slot(output)])
-
     def sm90_moe_pool_layer(
         self,
         input: DTensor,           # [T, H] f16: W13's activation
-        w13: DTensor,             # sm90_moe_ring_pack(..., 128, glu=True)'s blocks [E, 2 I / 128, H tiles, 128 x 68] u8
-        w2: DTensor,              # sm90_moe_ring_pack(..., 64, glu=False)'s blocks [E, H / 64, I tiles, 64 x 68] u8
+        w13: DTensor,             # sm90_moe_pack(..., 128, glu=True)'s blocks [E, 2 I / 128, H tiles, 128 x 68] u8
+        w2: DTensor,              # sm90_moe_pack(..., 64, glu=False)'s blocks [E, H / 64, I tiles, 64 x 68] u8
         routing_indices: DTensor, # [E, T] i32: 1 + the top-k slot of each token routed to the expert, else 0
         active_experts: DTensor,  # [E + 1] i32 (sm90_gate's: its expert mask gives the slots)
         act: DTensor,             # [A, T, I] f16: W13's output by slot (A: the most experts a step routes to)
@@ -1494,7 +1447,7 @@ class StaticMegakernel(PersistentKernel):
         """The routed MXFP4 experts as a pool (tasks/sm90_moe_pool.cuh), the MoE node of scaled_moe_experts's kind: one task
         per SM; the SMs claim the units of the step's active slots from a queue, W13 (128 rows, the clamped SwiGLU fused)
         then W2 (64 rows); a unit is one block or, when the step has at least an SM's worth of them, big_units blocks; each row
-        the math of sm90_moe_ring's task, so the same results. The solver models it by its total work
+        the same math whatever its unit, so the same results. The solver models it by its total work
         (search: a pool). params = [2 I, H, I, E, TOPK, A, has bias, limit bits, alpha bits, fp32 scales, UB13, UB2]."""
         E, N13, H = w13.dim(0), w13.dim(1) * 128, input.dim(1)
         I, T, A, TOPK = N13 // 2, self._tokens(routing_indices.dim(1)), act.dim(0), output.dim(1)
@@ -1519,7 +1472,7 @@ class StaticMegakernel(PersistentKernel):
 
     def sm90_rmsnorm_layer(self, input: DTensor, weight: DTensor, output: DTensor, eps: float,
                            block_dim: tuple = (256, 1, 1)):
-        """RMSNorm of each token, bf16 in, bf16 or f16 out (output's dtype; f16: an MXFP4 MoE's input, sm90_moe_ring): task x
+        """RMSNorm of each token, bf16 in, bf16 or f16 out (output's dtype; f16: an MXFP4 MoE's input, sm90_moe_pool): task x
         = row x. params = [H, eps bits, f16 out]."""
         T, H = self._tokens(input.dim(0)), input.dim(1)
         self._dtypes("sm90_rmsnorm_layer", input=(input, bfloat16), weight=(weight, bfloat16))

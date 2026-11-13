@@ -6,7 +6,7 @@ import torch
 from mirage.mpk import compiler, cost_records, plan_gen, search, static_schedule
 from mirage.mpk.static_harness import Harness
 from mirage.mpk.static_megakernel import (StaticMegakernel, sm90_attention_parts_size, sm90_flags,
-                                         sm90_moe_ring_pack)
+                                         sm90_moe_pack)
 from mirage.mpk.models.utils import shuffle_tensors
 from mxfp4 import Mxfp4Checkpoint, convert_expert_weight
 
@@ -70,8 +70,8 @@ class Model:
                 "w_o": bf(at("self_attn.o_proj.weight")), "b_o": bf(at("self_attn.o_proj.bias")),
                 "sinks": bf(at("self_attn.sinks").view(KVH, QH // KVH)),
                 "w_router": bf(at("mlp.router.weight")), "b_router": bf(at("mlp.router.bias")),
-                "w13": sm90_moe_ring_pack(w13.cuda(), s13.cuda(), 128, glu=True), "b13": bf(b13),
-                "w2": sm90_moe_ring_pack(w2.cuda(), s2.cuda(), 64, glu=False), "b2": bf(b2),
+                "w13": sm90_moe_pack(w13.cuda(), s13.cuda(), 128, glu=True), "b13": bf(b13),
+                "w2": sm90_moe_pack(w2.cuda(), s2.cuda(), 64, glu=False), "b2": bf(b2),
                 "k_cache": zeros(R * MP, PAGE, KVH, D), "v_cache": zeros(R * MP, PAGE, KVH, D),
             })
         self.embed = bf(sd["model.embed_tokens.weight"])
@@ -247,7 +247,8 @@ def main():
                    "--batch)")
     p.add_argument("--prompts", default=None, help="a json list of user messages: request r's is r % len (all cut to the "
                    "shortest's tokens); default the one message")
-    p.add_argument("--only", type=int, default=None, help="with --prompts: one request, message ONLY")
+    p.add_argument("--only", default=None, help="with --prompts: one request, message ONLY; ONLY a list (K,K,...: one "
+                   "request, each message in turn in one process; --json: the references of all of them)")
     p.add_argument("--plans", default=os.path.join(PLANS, "h100"), help="the plan files' directory (plan_path; a missing "
                    "file: round robin)")
     p.add_argument("--tune", metavar="COSTS", default=None, help="collect cost records into COSTS, solve each kernel's "
@@ -269,7 +270,9 @@ def main():
                                            add_generation_prompt=True)).input_ids for c in msgs]
         P = min(len(i) for i in ids)
         ids = [i[:P] for i in ids]
-        prompts = [ids[args.only]] * R if args.only is not None else [ids[r % len(ids)] for r in range(R)]
+        only = [int(k) for k in args.only.split(",")] if args.only is not None else None
+        assert only is None or R == 1, "--only: one request"
+        prompts = [ids[only[0]]] if only else [ids[r % len(ids)] for r in range(R)]
     elif ref:
         prompts = [ref["prompt_ids"]] * R
     else:
@@ -306,28 +309,45 @@ def main():
             kernel_of[i].launch_instances(inst[i], 1)
         k_hd.launch_instances(0, 1)
 
-    for run in range(2):   # the first run warms up (and checks); the second is timed
-        for layer in m.layers:
-            layer["k_cache"].zero_()
-            layer["v_cache"].zero_()
-        m.set_position(0)   # position 0: the prompts' first tokens
-        m.x_embed[:R].copy_(m.embed[prompt_t[:, 0]])
-        torch.cuda.synchronize()
-        s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        marks = [torch.cuda.Event(enable_timing=True) for _ in range(P + NEW)]
-        s.record()
-        for pos in range(P + NEW - 1):
-            step()
-            marks[pos].record()
-        e.record()
-        torch.cuda.synchronize()
-        total = s.elapsed_time(e)
-        per = [marks[i - 1].elapsed_time(marks[i]) for i in range(1, P + NEW - 1)]
-        # as the vLLM / SGLang sweep's (T(NEW tokens) - T(NEW / 2 tokens)) / (NEW / 2): the steps of the later half's tokens
-        dec = marks[P + NEW // 2 - 2].elapsed_time(marks[P + NEW - 2]) / (NEW - NEW // 2)
-        print(f"run {run}: {P + NEW - 1} positions in {total:.1f} ms; per step median {statistics.median(per) * 1e3:.0f} us "
-              f"(min {min(per) * 1e3:.0f}, max {max(per) * 1e3:.0f}); decode {dec * 1e3:.0f} us/step, batch {R}: "
-              f"{R / dec * 1e3:.0f} tok/s", flush=True)
+    def generate(runs):
+        """The prompts then NEW tokens, `runs` times (the last timed); gen holds the tokens."""
+        for run in range(runs):   # the first run warms up (and checks); the second is timed
+            for layer in m.layers:
+                layer["k_cache"].zero_()
+                layer["v_cache"].zero_()
+            m.set_position(0)   # position 0: the prompts' first tokens
+            m.x_embed[:R].copy_(m.embed[prompt_t[:, 0]])
+            torch.cuda.synchronize()
+            s, e = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            marks = [torch.cuda.Event(enable_timing=True) for _ in range(P + NEW)]
+            s.record()
+            for pos in range(P + NEW - 1):
+                step()
+                marks[pos].record()
+            e.record()
+            torch.cuda.synchronize()
+            total = s.elapsed_time(e)
+            per = [marks[i - 1].elapsed_time(marks[i]) for i in range(1, P + NEW - 1)]
+            # as the vLLM / SGLang sweep's (T(NEW tokens) - T(NEW / 2 tokens)) / (NEW / 2): the later half's steps
+            dec = marks[P + NEW // 2 - 2].elapsed_time(marks[P + NEW - 2]) / (NEW - NEW // 2)
+            print(f"run {run}: {P + NEW - 1} positions in {total:.1f} ms; per step median {statistics.median(per) * 1e3:.0f} "
+                  f"us (min {min(per) * 1e3:.0f}, max {max(per) * 1e3:.0f}); decode {dec * 1e3:.0f} us/step, batch {R}: "
+                  f"{R / dec * 1e3:.0f} tok/s", flush=True)
+        return total, per, dec
+
+    if only and len(only) > 1:   # one request a message in turn: their references
+        gens = []
+        for k in only:
+            prompt_t[0].copy_(torch.tensor(ids[k], device="cuda"))
+            generate(1)
+            gens.append(gen[0].tolist())
+            print(f"message {k}: {tok.decode(gens[-1])[:80]!r}", flush=True)
+        if args.json:
+            json.dump({"prompt_ids": [ids[k] for k in only], "gen": gens}, open(args.json, "w"))
+        for k in (k_sl, k_fu, k_hd):
+            k.finalize()
+        return
+    total, per, dec = generate(2)
     out = gen.tolist()
     text = tok.decode(out[0])
     print("text:", repr(text[:400]))
