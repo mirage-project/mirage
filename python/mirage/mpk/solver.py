@@ -95,6 +95,8 @@ class Pool:
     work_us: float               # its total work, summed over all SMs (measured: about 7500 us)
     inputs: List[str]            # tasks that must end before any SM can start on it (topk_route, sum_quant_send, situ_and_mul tasks)
     after: List[str] = None      # placed tasks that run after it (allreduce_send reads its output, and everything after allreduce_send)
+    before: List[str] = None     # the pools (ids) of its GPU set that end before it opens (a split attention's chunk pool before
+                                 # the MoE pool): every SM's list holds them in that order
 
 
 @dataclass
@@ -106,8 +108,66 @@ class Result:
     chosen: Dict[int, str]       # node graph_idx -> its chosen option
     lists: Dict[str, List[List[str]]]      # GPU set -> per SM, the task ids in start order
     times: Dict[str, Tuple[float, float]] = None    # used task id -> (start, end) in us (a hint for a later solve)
-    post: set = None                                 # used task ids that run after the pool on their SM
+    post: Dict[str, set] = None                      # pool id -> used task ids that run after the pool on their SM
     pools: Dict[str, dict] = None                    # pool id -> {"open", "joins" (per SM), "end"} in us
+
+
+def pools_in_order(pools: List[Pool]) -> List[Pool]:
+    """The pools with every pool after the ones in its before (each GPU set's pools in its SMs' list order)."""
+    done, order, by_id = set(), [], {p.id: p for p in pools}
+
+    def visit(p):
+        if p.id not in done:
+            done.add(p.id)
+            for q in p.before or ():
+                visit(by_id[q])
+            order.append(p)
+    for p in pools:
+        visit(p)
+    return order
+
+
+def pool_posts(model, pools: List[Pool], tasks, fixed_post: Optional[Dict[str, set]]) -> Dict[str, dict]:
+    """Per pool, post[task id]: the task runs after the pool on its SM. 1 for the tasks in its after (they read its output); 0
+    for its inputs; a given plan: 1 for the tasks listed after the pool's entry; otherwise a yes/no the solver chooses. A task
+    after a pool is after its earlier pools too (its post implies theirs)."""
+    posts = {}
+    for p in pools_in_order(pools):
+        after, inputs, post = set(p.after or ()), set(p.inputs), {}
+        for t in tasks:
+            if t.gpu_set != p.gpu_set:
+                continue
+            if t.id in after:
+                post[t.id] = 1
+            elif t.id in inputs:
+                post[t.id] = 0
+            elif fixed_post is not None:
+                post[t.id] = 1 if t.id in fixed_post.get(p.id, ()) else 0
+            else:
+                post[t.id] = model.NewBoolVar(f"post_{p.id}_{t.id}")
+        for q in p.before or ():
+            for tid, v in post.items():
+                w = posts[q].get(tid)
+                if w is None or (isinstance(w, int) and w == 1) or (isinstance(v, int) and v == 0):
+                    continue
+                if isinstance(v, int):                   # after this pool: after the earlier one
+                    if isinstance(w, int):
+                        if w == 0:
+                            raise ValueError(f"solve: task {tid} after pool {p.id} but before its earlier pool {q}")
+                    else:
+                        model.Add(w == 1)
+                elif isinstance(w, int):
+                    model.Add(v == 0)
+                else:
+                    model.AddImplication(v, w)
+        posts[p.id] = post
+    return posts
+
+
+def post_sets(solver, posts: Dict[str, dict], used) -> Dict[str, set]:
+    """pool id -> the used task ids after it on their SM, from a solved model."""
+    return {pid: {tid for tid, v in post.items() if solver.Value(used[tid]) and (v == 1 if isinstance(v, int) else solver.Value(v))}
+            for pid, post in posts.items()}
 
 
 def ticks(us: float) -> int:
@@ -149,7 +209,7 @@ def default_groups(num_sms: int) -> List[int]:
 def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps: List[Tuple[str, str]], pools: List[Pool],
           gpu_sets: List[str], num_sms: int, max_tasks_per_sm: int, time_limit_s: float = 60.0, workers: int = 16,
           fixed_options: Optional[Dict[int, str]] = None, fixed_lists: Optional[Dict[str, List[List[str]]]] = None,
-          concurrent: List[List[str]] = (), fixed_post: Optional[set] = None, hint: Optional["Result"] = None,
+          concurrent: List[List[str]] = (), fixed_post: Optional[Dict[str, set]] = None, hint: Optional["Result"] = None,
           same_sm: List[Tuple[str, str]] = (), cluster_pairs: List[Tuple[str, str]] = (),
           same_group: List[Tuple[str, str]] = (), near: List[Tuple[str, str, float]] = (),
           sm_group: Optional[List[int]] = None, capacity: bool = True, break_symmetry: bool = True) -> Result:
@@ -249,28 +309,16 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
 
     # ---- rule 4: a pool (its work is shared by the SMs at run time; MoE: moe_experts); the goal: the layer's end C
     C = model.NewIntVar(0, horizon, "C")
-    post = {}                                        # task id -> 1, 0 or a yes/no: runs after the pool on its SM
+    posts = pool_posts(model, pools, tasks, fixed_post)   # pool id -> {task id: 1, 0 or a yes/no: runs after the pool on its SM}
     pool_vars = {}                                   # pool id -> (opens, joins, ends)
-    for p in pools:
+    for p in pools_in_order(pools):
+        post = posts[p.id]
         opens = model.NewIntVar(0, horizon, f"open_{p.id}")           # the pool can start once its inputs have ended
         for tid in p.inputs:
             if tid in by_id:
                 model.Add(opens >= end[tid]).OnlyEnforceIf(used[tid])
-        after = set(p.after or ())
-        # post[tid]: the task runs after the pool on its SM. 1 for the tasks in after (they read its output); 0 for its inputs;
-        # a given plan: 1 for the tasks listed after the pool entry; otherwise the solver chooses
-        inputs = set(p.inputs)
-        for t in tasks:
-            if t.gpu_set != p.gpu_set:
-                continue
-            if t.id in after:
-                post[t.id] = 1
-            elif t.id in inputs:
-                post[t.id] = 0
-            elif fixed_post is not None:
-                post[t.id] = 1 if t.id in fixed_post else 0
-            else:
-                post[t.id] = model.NewBoolVar(f"post_{t.id}")
+        for q in p.before or ():                                       # and its earlier pools (pools_in_order) have ended
+            model.Add(opens >= pool_vars[q][2])
         joins = []
         for sm in range(num_sms):                    # SM k joins once the pool can start and SM k's own earlier tasks have ended
             join = model.NewIntVar(0, horizon, f"join_{p.id}_{sm}")
@@ -338,12 +386,13 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
                     model.AddBoolAnd([on[(a, g, sm)], used[b]]).OnlyEnforceIf(held)
                     model.AddBoolOr([on[(a, g, sm)].Not(), used[b].Not()]).OnlyEnforceIf(held.Not())
                     intervals[(g, sm)].append(model.NewOptionalIntervalVar(end[a], gap, start[b], held, f"gap_{a}_{b}_{sm}"))
-            pa, pb = post.get(a), post.get(b)        # the pool is not between them either
-            if pa is not None and pb is not None:
-                if not (isinstance(pa, int) and isinstance(pb, int)):
-                    model.Add(pa == pb).OnlyEnforceIf(both(a, b))
-                elif pa != pb:
-                    model.AddBoolOr([used[a].Not(), used[b].Not()])
+            for post in posts.values():              # no pool is between them either
+                pa, pb = post.get(a), post.get(b)
+                if pa is not None and pb is not None:
+                    if not (isinstance(pa, int) and isinstance(pb, int)):
+                        model.Add(pa == pb).OnlyEnforceIf(both(a, b))
+                    elif pa != pb:
+                        model.AddBoolOr([used[a].Not(), used[b].Not()])
     for a, b in cluster_pairs:                       # rule 9
         if a in by_id and b in by_id:
             for k in range(num_sms // 2):
@@ -455,9 +504,10 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
             model.AddHint(b, int(where.get(tid) == (g, sm)))
         for t in tasks:
             model.AddHint(start[t.id], ticks(hint.times[t.id][0]) if t.id in hint.times else 0)
-        for tid, v in post.items():
-            if not isinstance(v, int):
-                model.AddHint(v, int(tid in hint.post))
+        for pid, post in posts.items():
+            for tid, v in post.items():
+                if not isinstance(v, int):
+                    model.AddHint(v, int(tid in (hint.post or {}).get(pid, ())))
         model.AddHint(C, ticks(hint.predicted_us))
 
     # ---- solve, then read the plan: the used options, and per SM the tasks placed on it in start order
@@ -479,7 +529,7 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
             sm_list.sort(key=lambda tid: solver.Value(start[tid]))
     times = {t.id: (round(solver.Value(start[t.id]) * TICK, 3), round(solver.Value(end[t.id]) * TICK, 3))
              for t in tasks if solver.Value(used[t.id])}
-    post_ids = {tid for tid, v in post.items() if solver.Value(used[tid]) and (v == 1 if isinstance(v, int) else solver.Value(v))}
+    post_ids = post_sets(solver, posts, used)
     us = lambda v: round(solver.Value(v) * TICK, 3)
     pool_times = {pid: {"open": us(o), "joins": [us(j) for j in js], "end": us(e)} for pid, (o, js, e) in pool_vars.items()}
     return Result(solver.StatusName(status), round(solver.Value(C) * TICK, 3), round(solver.BestObjectiveBound() * TICK, 3),

@@ -130,7 +130,7 @@ template <class SELF,
           class... IN>
 __device__ __forceinline__ void run_sm90_attention(Maps const &,
                                                    G const &g,
-                                                   KernelLocals &,
+                                                   KernelLocals &L,
                                                    StaticTask const &tk) {
   constexpr int QH = PARAMS::v[0], KVH = PARAMS::v[1], D = PARAMS::v[2];
   constexpr bool HAS_SINK = PARAMS::v[6] == 1, QKV_BIAS = PARAMS::v[7] == 1;
@@ -148,9 +148,19 @@ __device__ __forceinline__ void run_sm90_attention(Maps const &,
       sm90_wait_inputs<~0u, IN...>(g);
     }
     __syncthreads();
+#ifdef STATIC_TIMING_BUILD
+    if (threadIdx.x == 0 && L.stage_stamps) {
+      L.stage_stamps[0] = gtime(); // the QKV GEMM's rows ready
+    }
+#endif
     if constexpr (QKV_BIAS) {
       sm90_qkv_stage<BUF_SLOTS, 10, QH, KVH, D>(g, tk.x, head);
     }
+#ifdef STATIC_TIMING_BUILD
+    if (threadIdx.x == 0 && L.stage_stamps) {
+      L.stage_stamps[1] = gtime(); // q staged: the body's attention next
+    }
+#endif
   };
   sm90_paged_attention<BUF_SLOTS,
                        QH,

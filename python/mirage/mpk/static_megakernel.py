@@ -1516,21 +1516,25 @@ class StaticMegakernel(PersistentKernel):
                                    qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
                                    parts: DTensor, num_q_heads: int, chunk: int, qkv_bias: DTensor = None,
                                    qkv_staged: DTensor = None, block_dim: tuple = (256, 1, 1)):
-        """sm90_attention_layer's full attention with the KV split in chunks of `chunk` positions (tasks/
-        sm90_attention_split.cuh): task (x, y, z) = request x, KV head y, chunk z, its normalized output and log2-sum-exp
-        into parts, a flat bf16 tensor sm90_attention_parts_size long; sm90_attention_merge_layer combines them (and the
-        sinks). C = the chunks = max seq / chunk; qkv_bias, qkv_staged as sm90_attention_layer's. params = [Q, KVH, D,
-        max seq, page, chunk, C, has qkv bias]."""
+        """sm90_attention_layer's full attention with the KV split in chunks of `chunk` positions, as a pool (tasks/
+        sm90_attention_split.cuh): one task per SM; the SMs claim the step's units (request, KV head, chunk), only the chunks
+        the requests' sequences reach, from a queue; each its normalized output and log2-sum-exp into parts, a flat bf16
+        tensor sm90_attention_parts_size long; sm90_attention_merge_layer combines them (and the sinks). C = the chunks =
+        max seq / chunk; qkv_bias, qkv_staged as sm90_attention_layer's. The solver models it by its total work (search: a
+        pool). params = [Q, KVH, D, max seq, page, chunk, C, has qkv bias, R]."""
         pages, page, KVH, D = (k_cache.dim(i) for i in range(4))
         R, T, C = qo_indptr.dim(0) - 1, self._tokens(qkv.dim(0)), cos.dim(0) // chunk
         assert cos.dim(0) % chunk == 0 and chunk % 64 == 0 and parts.num_dims == 1
         assert parts.dim(0) == sm90_attention_parts_size(T, num_q_heads, D, C)
         self._qkv_bias_dtypes("sm90_attention_split_layer", qkv, qkv_bias, qkv_staged)
         self._dtypes("sm90_attention_split_layer", parts=(parts, bfloat16))
-        self._sm90_node("sm90_attention_split", (R, KVH, C),
-                        [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, qkv_bias,
-                         qkv_staged, parts],
-                        [num_q_heads, KVH, D, cos.dim(0), page, chunk, C, int(qkv_bias is not None)], block_dim)
+        tensors = [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, qkv_bias, qkv_staged,
+                   parts]
+        present = [t for t in tensors if t is not None]
+        self._add_node("sm90_attention_split", (self._num_sms(), 1, 1), block_dim, present, [(-1, -1, -1)] * len(present),
+                       [num_q_heads, KVH, D, cos.dim(0), page, chunk, C, int(qkv_bias is not None), R],
+                       one_task_per_sm=True, counters=64,
+                       buf_slots=[self._tensor_slot(t) if t is not None else -1 for t in tensors])
 
     def sm90_attention_merge_layer(self, parts: DTensor, qo_indptr: DTensor, kv_indptr: DTensor, last_page_len: DTensor,
                                    output: DTensor, num_q_heads: int, chunk: int, chunks: int, page: int,

@@ -5703,15 +5703,16 @@ int TaskRegister::register_sm90_attention_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_sm90_attention_split_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {Q, KVH, D, max seq, page, chunk, chunks, has qkv bias}; the
-  // optional inputs left out (tasks/sm90_attention_split.cuh)
+  // params: {Q, KVH, D, max seq, page, chunk, chunks, has qkv bias, R}; the
+  // optional inputs left out (tasks/sm90_attention_split.cuh: a pool, one
+  // task per SM)
   return register_static_task(this,
                               TASK_SM90_ATTENTION_SPLIT,
                               "sm90_attention_split",
                               bgraph,
                               params,
                               (int)bgraph.operators.size() - 1,
-                              8);
+                              9);
 }
 
 int TaskRegister::register_sm90_attention_merge_task(

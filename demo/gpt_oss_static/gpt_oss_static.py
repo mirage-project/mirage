@@ -264,6 +264,7 @@ def main():
     T = args.tokens or next(b for b in BUCKETS if b >= R)
     assert T % 8 == 0 and R <= T, f"--batch {R}, --tokens {T}: R <= T, T a multiple of 8"
     ref = json.load(open(args.ref)) if args.ref else None
+    only = None
     if args.prompts:
         msgs = json.load(open(args.prompts))
         ids = [tok(tok.apply_chat_template([{"role": "user", "content": c}], tokenize=False,
@@ -272,7 +273,7 @@ def main():
             ids = ref["prompt_ids"]   # the reference's own (the chat template stamps the date into the system prompt)
         P = min(len(i) for i in ids)
         ids = [i[:P] for i in ids]
-        only =[int(k) for k in args.only.split(",")] if args.only is not None else None
+        only = [int(k) for k in args.only.split(",")] if args.only is not None else None
         assert only is None or R == 1, "--only: one request"
         prompts = [ids[only[0]]] if only else [ids[r % len(ids)] for r in range(R)]
     elif ref:

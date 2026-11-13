@@ -5,10 +5,12 @@ Duration of a placed task i on its SM, in one launch:
 (the first task on an SM: its own start instead of the previous end). This is the solver's rule read backwards (start = max(previous
 end, inputs ready), end = start + d), so the durations and the waits add up to each SM's measured time.
 
-The pool (the MoE expert queue, one task per SM): its work in one launch on one GPU = the sum over SMs of
+A pool (a node with one task per SM whose work the SMs share at run time: the MoE expert queue, a split attention's chunk queue):
+its work in one launch on one GPU = the sum over SMs of
   end - max(end of the task before it on the SM, the pool's opening)
-where the opening = the latest end, over ALL GPUs (times after each GPU's start barrier), of the tasks of its gating nodes (MoE:
-topk_route and sum_quant_send; the expert queue needs z_q from every GPU). One record per launch and GPU; the solver's pool rule uses the total.
+where the opening = the latest end, over ALL GPUs (times after each GPU's start barrier), of the tasks of its gating nodes (the
+nodes writing its inputs; MoE: topk_route and sum_quant_send, the expert queue needs z_q from every GPU). One record per pool,
+launch and GPU; the solver's pool rule uses the total.
 
 Records (one per task type, cost key and context, over all tasks, GPUs and launches of a run):
   {"task_type", "key", "context": {"first_on_sm", "prev"}, "median_us", "p90_us", "n", "samples", "run", "build": "profile",
@@ -51,18 +53,20 @@ def stamps_of_gpu(schedule: dict, gpu_times: List[List[Tuple[int, int]]]) -> Dic
     return out
 
 
-def launch_durations(schedules: List[dict], times: list, bars: List[int], pool_node: int, gating_nodes: set):
-    """One launch: (per GPU {task id: duration us} of the placed tasks, per GPU the pool's work in us, the stamps, per GPU {task
-    id: (w, d) us} of the placed tasks: the prefetch model's window and duration, the module docstring)."""
+def launch_durations(schedules: List[dict], times: list, bars: List[int], pools: Dict[int, set]):
+    """One launch: (per GPU {task id: duration us} of the placed tasks, per GPU {pool node: its work in us}, the stamps, per GPU
+    {task id: (w, d) us} of the placed tasks: the prefetch model's window and duration, the module docstring). pools = {pool
+    node: its gating nodes}."""
     stamps = [stamps_of_gpu(s, times[g]) for g, s in enumerate(schedules)]
-    opening = max([st["end"] - bars[g] for g, s in enumerate(schedules) for t, st in stamps[g].items()
-                   if s["all_tasks"][t]["node"] in gating_nodes] + [0])
+    opening = {p: max([st["end"] - bars[g] for g, s in enumerate(schedules) for t, st in stamps[g].items()
+                       if s["all_tasks"][t]["node"] in gating] + [0]) for p, gating in pools.items()}
     placed, pool_work, windows = [], [], []
     for g, s in enumerate(schedules):
-        tasks, d, work, wd = s["all_tasks"], {}, 0.0, {}
+        tasks, d, work, wd = s["all_tasks"], {}, {p: 0.0 for p in pools}, {}
         for t, st in stamps[g].items():
-            if tasks[t]["node"] == pool_node:
-                work += (st["end"] - max(st["prev_end"], bars[g] + opening)) / 1e3
+            p = tasks[t]["node"]
+            if p in pools:
+                work[p] += (st["end"] - max(st["prev_end"], bars[g] + opening[p])) / 1e3
             else:
                 ready = max([stamps[g][p]["end"] for p in tasks[t]["deps"] if p in stamps[g]] + [st["prev_end"]])
                 d[t] = (st["end"] - max(st["prev_end"], ready)) / 1e3
@@ -112,17 +116,19 @@ from .search import cost_key   # noqa: E402  the key of a record (the pool's: wi
 
 
 def records_from_run(schedules: List[dict], launches: List[Tuple[list, list]], nodes: Dict[int, object],
-                     key_of: Callable[[object], Optional[dict]], pool_node: int, gating_nodes: set, run: str,
+                     key_of: Callable[[object], Optional[dict]], pools: Dict[int, set], run: str,
                      machine: dict) -> List[dict]:
     """launches = [(times[g][sm][i], timing[g] = (start barrier passed, end))]; key_of(node) = the node's cost key (None: no
-    record); nodes = {graph_idx: Node} as compiled."""
+    record); nodes = {graph_idx: Node} as compiled; pools = {pool node: its gating nodes}."""
     groups: Dict[str, List[float]] = {}
     windows: Dict[str, List[Tuple[float, float]]] = {}
-    pool = []
+    pool: Dict[int, List[float]] = {p: [] for p in pools}
     for times, timing in launches:
         bars = [b for b, _ in timing]
-        placed, work, stamps, wd = launch_durations(schedules, times, bars, pool_node, gating_nodes)
-        pool += work
+        placed, work, stamps, wd = launch_durations(schedules, times, bars, pools)
+        for w in work:
+            for p, us in w.items():
+                pool[p].append(us)
         for g, s in enumerate(schedules):
             tasks = s["all_tasks"]
             for t, us in placed[g].items():
@@ -145,10 +151,12 @@ def records_from_run(schedules: List[dict], launches: List[Tuple[list, list]], n
                         "p90_us": round(values[int(0.9 * (len(values) - 1))], 4), "n": len(values),
                         "samples": [[round(w, 3), round(d, 3)] for w, d in kept], "run": run, "build": "profile",
                         "machine": machine})
-    if pool_node is not None and pool:
-        records.append({"task_type": nodes[pool_node].name, "key": cost_key(nodes[pool_node], nodes[pool_node].grid), "context": {},
-                        "median_us": round(statistics.median(pool), 2), "p90_us": round(sorted(pool)[int(0.9 * (len(pool) - 1))], 2),
-                        "n": len(pool), "run": run, "build": "profile", "machine": machine})
+    for p, work in sorted(pool.items()):
+        if work:
+            records.append({"task_type": nodes[p].name, "key": cost_key(nodes[p], nodes[p].grid), "context": {},
+                            "median_us": round(statistics.median(work), 2),
+                            "p90_us": round(sorted(work)[int(0.9 * (len(work) - 1))], 2), "n": len(work), "run": run,
+                            "build": "profile", "machine": machine})
     return records
 
 
@@ -165,8 +173,9 @@ def append_records(path: str, records: List[dict]) -> None:
 
 def records_of_run(pk, schedule_paths: List[str], launches: List[Tuple[list, list]], run: str, machine: dict) -> List[dict]:
     """The cost records of a run of pk's layer in the timing build: launches = per timed launch (static_harness.Harness.task_times(),
-    Harness.timing()). The pool: the node with one task per SM (moe_experts), opened by the nodes that write its inputs (topk_route,
-    sum_quant_send); every record gets the current kernel templates' code tag (static_schedule.code_tag)."""
+    Harness.timing()). The pools: the nodes with one task per SM (moe_experts, sm90_moe_pool, sm90_attention_split), each opened by
+    the nodes that write its inputs (moe_experts: topk_route, sum_quant_send); every record gets the current kernel templates'
+    code tag (static_schedule.code_tag)."""
     from .compiler import graph_nodes, producer_of
     from .search import producer_grids
     from .static_schedule import code_tag
@@ -177,13 +186,10 @@ def records_of_run(pk, schedule_paths: List[str], launches: List[Tuple[list, lis
     nodes = {n.graph_idx: n for n in graph_nodes(pk)}
     for k, n in nodes.items():   # the params compile_plan gave (sum_rmsnorm on cluster pairs: [2, eps])
         n.params = schedules[0]["nodes"][str(k)]["params"]
-    pools = [k for k, n in nodes.items() if n.info["one_task_per_sm"]]
-    if len(pools) > 1:
-        raise ValueError(f"cost records: one pool node supported, the graph has {pools}")
-    pool = pools[0] if pools else None
-    gating = set() if pool is None else {p.graph_idx for p in (producer_of(t, list(nodes.values())) for t in nodes[pool].inputs) if p}
+    pools = {k: {p.graph_idx for p in (producer_of(t, list(nodes.values())) for t in n.inputs) if p}
+             for k, n in nodes.items() if n.info["one_task_per_sm"]}
     key_of = lambda n: cost_key(n, n.grid, producer_grids(n, list(nodes.values())))
-    records = records_from_run(schedules, launches, nodes, key_of, pool, gating, run, machine)
+    records = records_from_run(schedules, launches, nodes, key_of, pools, run, machine)
     tag = code_tag()
     for r in records:
         r["code"] = tag   # the kernel templates these times were measured with
