@@ -45,7 +45,7 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
     __syncthreads();
     waited = true;
     if constexpr (QKV_BIAS) {
-      sm90_qkv_stage<BUF_SLOTS, 9, QH, KVH, D>(g, head);
+      sm90_qkv_stage<BUF_SLOTS, 9, QH, KVH, D>(g, tk.x, head);
     }
   };
   kernel::bfloat16 *parts =
@@ -59,7 +59,8 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
                        PARAMS::v[5], // SEQ_LEN: a chunk
                        true,
                        C,
-                       0>( // no window
+                       0,        // no window
+                       SELF::x>( // the requests
       g,
       qkv,
       tk.x,
@@ -67,7 +68,8 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
       parts + (size_t)chunk * T * QH * D + head * QPK * D,
       reinterpret_cast<float *>(parts + (size_t)C * T * QH * D) +
           ((size_t)buf_at<int const>(g, slot_at<BUF_SLOTS, 5>())[tk.x] * C +
-           chunk) * QH +
+           chunk) *
+              QH +
           head * QPK, // the body offsets the output to the request's first
                       // token, not the log2-sum-exps
       chunk,

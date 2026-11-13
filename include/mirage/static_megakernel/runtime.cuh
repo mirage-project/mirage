@@ -1014,31 +1014,82 @@ __device__ __forceinline__ void
                : "l"(a), "l"(b), "r"(scale_d));
 }
 
-// The MMA warpgroup (128 threads) consumes a kind 0 job's stages in order
-// into acc[ROWS / 64][4]: m64 block h, thread t holds rows
-// 64h + 16 (t / 32) + (t % 32) / 4 (+8 for acc[h][2..3]) and tokens 2 (t % 4)
-// (+1 for odd entries) -- the wgmma accumulator layout. Each stage is freed
-// once its MMAs are done (one arrival on `empty`).
-template <int ROWS = 128>
+// d (64 rows x 16 / 32 tokens: d[4 n ..] token group n, as m64n8k16's) += A *
+// B (16 / 32 x K16, 8-row groups 1024 B apart)
 __device__ __forceinline__ void
-    mma_job_sm90(TileJob const &j, uint32_t base, int &g, float (*acc)[4]) {
-  constexpr int MH = ROWS / 64;
+    wgmma_m64n16k16(float *d, uint64_t a, uint64_t b, uint32_t scale_d) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, %10, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n16k16.f32.bf16.bf16 "
+               "{%0, %1, %2, %3, %4, %5, %6, %7}, %8, %9, p, 1, 1, 0, 0;\n}"
+               : "+f"(d[0]),
+                 "+f"(d[1]),
+                 "+f"(d[2]),
+                 "+f"(d[3]),
+                 "+f"(d[4]),
+                 "+f"(d[5]),
+                 "+f"(d[6]),
+                 "+f"(d[7])
+               : "l"(a), "l"(b), "r"(scale_d));
+}
+__device__ __forceinline__ void
+    wgmma_m64n32k16(float *d, uint64_t a, uint64_t b, uint32_t scale_d) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, %18, 0;\n"
+               "wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 "
+               "{%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, "
+               "%14, %15}, %16, %17, p, 1, 1, 0, 0;\n}"
+               : "+f"(d[0]),
+                 "+f"(d[1]),
+                 "+f"(d[2]),
+                 "+f"(d[3]),
+                 "+f"(d[4]),
+                 "+f"(d[5]),
+                 "+f"(d[6]),
+                 "+f"(d[7]),
+                 "+f"(d[8]),
+                 "+f"(d[9]),
+                 "+f"(d[10]),
+                 "+f"(d[11]),
+                 "+f"(d[12]),
+                 "+f"(d[13]),
+                 "+f"(d[14]),
+                 "+f"(d[15])
+               : "l"(a), "l"(b), "r"(scale_d));
+}
+
+// The MMA warpgroup (128 threads) consumes a kind 0 job's stages in order
+// into acc[ROWS / 64][T / 8][4]: m64 block h, token group n, thread t holds
+// rows 64h + 16 (t / 32) + (t % 32) / 4 (+8 for acc[h][n][2..3]) and tokens 8n
+// + 2 (t % 4) (+1 for odd entries) -- the wgmma accumulator layout, one
+// m64nTk16 (the box's 8-row groups 1024 B apart). Each stage is freed once its
+// MMAs are done (one arrival on `empty`).
+template <int ROWS = 128>
+__device__ __forceinline__ void mma_job_sm90(TileJob const &j,
+                                             uint32_t base,
+                                             int &g,
+                                             float (*acc)[T / 8][4]) {
+  constexpr int MH = ROWS / 64, NG = T / 8;
+  static_assert(T == 8 || T == 16 || T == 32,
+                "Hopper WGMMA: 8, 16 or 32 tokens");
   for (int s = 0; s < j.nst; s++, g++) {
     int const st = g % SMAX;
     mbar_wait(rt.full0 + 8 * st, (g / SMAX) & 1);
     uint32_t const wst = base + st * FSTAGE, ast = wst + W_STAGE;
     wgmma_fence();
     for (int at = 0; at < 2; at++) { // two 64-column halves of K 128
-      uint64_t const dx = gmma_desc(ast + at * 1024);
 #pragma unroll
       for (int h = 0; h < MH; h++) {
         uint64_t const dw = gmma_desc(wst + at * ROWS * 128 + h * 64 * 128);
+        uint64_t const dx = gmma_desc(ast + at * T * 128);
 #pragma unroll
         for (int k = 0; k < 4; k++) {
-          wgmma_m64n8k16(acc[h],
-                         dw + 2 * k,
-                         dx + 2 * k,
-                         (s == 0 && at == 0 && k == 0) ? 0u : 1u);
+          uint32_t const sd = (s == 0 && at == 0 && k == 0) ? 0u : 1u;
+          if constexpr (NG == 1) {
+            wgmma_m64n8k16(acc[h][0], dw + 2 * k, dx + 2 * k, sd);
+          } else if constexpr (NG == 2) {
+            wgmma_m64n16k16(acc[h][0], dw + 2 * k, dx + 2 * k, sd);
+          } else {
+            wgmma_m64n32k16(acc[h][0], dw + 2 * k, dx + 2 * k, sd);
+          }
         }
       }
     }

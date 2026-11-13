@@ -11,8 +11,9 @@ L2 emptied before each launch, page table at mid-sequence), appends the per-task
 `search.search_plan` from the current plan. The solver picks the grids (e.g. S of the gate) and the placement. The result
 is written here, and the spans of both plans are printed.
 
-The plans here are `--tune` results for the MoE pool graph (20B at one and eight requests, 120B at one; the head's is the
-same graph for both models). `--tune` keeps whichever of the current and the solver's plan measures faster.
+The plans here are `--tune` results for the MoE pool graph (20B at one, two, four and eight requests, 120B at one and
+eight; the head's is the same graph for both models). `--tune` keeps whichever of the current and the solver's plan
+measures faster. The 16- and 32-row buckets (`_t16`, `_t32`) have none yet: they run round robin.
 
 The weights the layer streams first can be prefetched into L2 at its start, with the shared `STATIC_L2_PREFETCH_MB`
 (`StaticMegakernel.l2_prefetch_weights`, as the GLM demos). On these H100s, 12 MB measured best at batch one (20B

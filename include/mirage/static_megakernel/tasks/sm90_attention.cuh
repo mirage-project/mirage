@@ -10,13 +10,14 @@
 
 namespace static_mk {
 
-// KV head `head`'s columns of the QKV GEMM's fp32 rows (BUF_SLOTS 0) plus
-// their bias (BUF_SLOTS B) to bf16 in BUF_SLOTS B + 1, the body's qkv: the
-// bias node this saves was a dependency hop. Every task of the head writes the
-// same values (the split's chunks).
+// KV head `head`'s columns of request `request`'s rows (qo_indptr, BUF_SLOTS
+// 5) of the QKV GEMM's fp32 output (BUF_SLOTS 0) plus their bias (BUF_SLOTS B)
+// to bf16 in BUF_SLOTS B + 1, the body's qkv: the bias node this saves was a
+// dependency hop. Every task of the request and head writes the same values
+// (the split's chunks).
 template <class BUF_SLOTS, int B, int QH, int KVH, int D>
-__device__ __forceinline__ kernel::bfloat16 *sm90_qkv_stage(G const &g,
-                                                            int head) {
+__device__ __forceinline__ kernel::bfloat16 *
+    sm90_qkv_stage(G const &g, int request, int head) {
   constexpr int W = (QH / KVH + 2) * D, STRIDE = KVH * W, WV = W / 8;
   static_assert(W % 8 == 0, "sm90_attention: 16-B vectors");
   float const *in =
@@ -26,8 +27,10 @@ __device__ __forceinline__ kernel::bfloat16 *sm90_qkv_stage(G const &g,
   kernel::bfloat16 *qkv =
       buf_at<kernel::bfloat16>(g, slot_at<BUF_SLOTS, B + 1>());
   uint4 *out = reinterpret_cast<uint4 *>(qkv) + (size_t)head * WV;
-  for (int i = threadIdx.x; i < T * WV; i += SM90_THREADS) {
-    int const t = i / WV, v = i % WV;
+  int const *qo = buf_at<int const>(g, slot_at<BUF_SLOTS, 5>());
+  int const t0 = qo[request], rows = qo[request + 1] - t0;
+  for (int i = threadIdx.x; i < rows * WV; i += SM90_THREADS) {
+    int const t = t0 + i / WV, v = i % WV;
     float f[8], b[8];
     f32x8_load(in + (size_t)t * STRIDE, v, f);
     bf16x8_to_f32(bias[v], b);
@@ -45,7 +48,8 @@ __device__ __forceinline__ kernel::bfloat16 *sm90_qkv_stage(G const &g,
 // MPK's body for KV head `head` of request `request`: qkv bf16 (every head's),
 // BUF_SLOTS 1..8 as sm90_attention's (the caches, cos, sin, the page tables);
 // PARTITION_KV: KV chunk kv_idx of C (SEQ_LEN positions), its log2-sum-exps to
-// lse
+// lse. R requests: none has more than T - R + 1 of the T rows (the body's
+// MAX_TOKENS, its q tile; decode: R = T, one)
 template <class BUF_SLOTS,
           int QH,
           int KVH,
@@ -56,6 +60,7 @@ template <class BUF_SLOTS,
           bool PARTITION_KV,
           int C,
           int WINDOW,
+          int R,
           class PreQ = kernel::AttnNoHook>
 __device__ __forceinline__ void
     sm90_paged_attention(G const &g,
@@ -80,7 +85,7 @@ __device__ __forceinline__ void
                                                  SEQ_LEN,
                                                  MAX_SEQ,
                                                  PAGE,
-                                                 T,
+                                                 T - R + 1,
                                                  PARTITION_KV,
                                                  C,
                                                  D, // ROTARY_DIM
@@ -144,7 +149,7 @@ __device__ __forceinline__ void run_sm90_attention(Maps const &,
     }
     __syncthreads();
     if constexpr (QKV_BIAS) {
-      sm90_qkv_stage<BUF_SLOTS, 10, QH, KVH, D>(g, head);
+      sm90_qkv_stage<BUF_SLOTS, 10, QH, KVH, D>(g, tk.x, head);
     }
   };
   sm90_paged_attention<BUF_SLOTS,
@@ -156,7 +161,8 @@ __device__ __forceinline__ void run_sm90_attention(Maps const &,
                        -1, // SEQ_LEN (split KV only)
                        false,
                        1,
-                       PARAMS::v[5]>(
+                       PARAMS::v[5],
+                       SELF::x>( // the requests
       g,
       qkv,
       tk.x,

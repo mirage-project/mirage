@@ -159,6 +159,8 @@ __device__ __forceinline__ void run_sm90_moe_ring(Maps const &maps,
                 "sm90_moe_ring: 64- or 128-row tiles, K in 64-value blocks");
   static_assert(OFF_WSF + XCH_BYTES + 4 * (SMAX + 1) <= RING_BYTES,
                 "sm90_moe_ring: the exchange area and the stage counters");
+  static_assert(T == 8,
+                "sm90_moe_ring: 8 tokens (sm90_moe_pool: any multiple)");
   static_assert(!GLU || ROWS == 128,
                 "sm90_moe_ring: GLU's tasks are 64 gate rows and the 64 up "
                 "rows");

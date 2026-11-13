@@ -10,7 +10,9 @@ from mirage.mpk.static_megakernel import (StaticMegakernel, sm90_attention_parts
 from mirage.mpk.models.utils import shuffle_tensors
 from mxfp4 import Mxfp4Checkpoint, convert_expert_weight
 
-T, PAGE = 8, 64                       # token rows of a step, KV page size
+T, PAGE = 8, 64                       # token rows of a step (main: the bucket of the batch), KV page size
+BUCKETS = (8, 16, 32)                 # the kernels' token rows, as the other static models' (a step of R requests: the
+                                      # smallest >= R; rows past R idle)
 KV_CHUNK = 128                        # full attention: the KV split in chunks of this many positions (sm90_attention_split)
 PLANS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plans")
 FLAGS = sm90_flags() + ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]   # serving build: launches back to back
@@ -139,8 +141,8 @@ def build_head(m: Model, mpk: StaticMegakernel, t: dict):
 
 
 def plan_path(m: Model, plans: str, kind: str) -> str:
-    """The plan file of a kernel: one per graph (layer kind, expert count, requests)."""
-    return os.path.join(plans, f"{kind}_e{m.E}_r{m.R}.json")
+    """The plan file of a kernel: one per graph (layer kind, expert count, requests, token rows past 8)."""
+    return os.path.join(plans, f"{kind}_e{m.E}_r{m.R}" + (f"_t{T}" if T != 8 else "") + ".json")
 
 
 def load_plan(mpk, path: str):
@@ -240,7 +242,9 @@ def main():
     p.add_argument("--max-seq", type=int, default=1024)
     p.add_argument("--out", default="gpt_oss_static")
     p.add_argument("--json", default=None, help="write {prompt_ids, gen, text, timing} here")
-    p.add_argument("--batch", type=int, default=1, help="requests a step (at most T)")
+    p.add_argument("--batch", type=int, default=1, help="requests a step (at most the largest bucket)")
+    p.add_argument("--tokens", type=int, default=None, help="the kernels' token rows T (default: the smallest bucket >= "
+                   "--batch)")
     p.add_argument("--prompts", default=None, help="a json list of user messages: request r's is r % len (all cut to the "
                    "shortest's tokens); default the one message")
     p.add_argument("--only", type=int, default=None, help="with --prompts: one request, message ONLY")
@@ -255,6 +259,9 @@ def main():
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.ckpt)
     R = args.batch
+    global T
+    T = args.tokens or next(b for b in BUCKETS if b >= R)
+    assert T % 8 == 0 and R <= T, f"--batch {R}, --tokens {T}: R <= T, T a multiple of 8"
     ref = json.load(open(args.ref)) if args.ref else None
     if args.prompts:
         msgs = json.load(open(args.prompts))

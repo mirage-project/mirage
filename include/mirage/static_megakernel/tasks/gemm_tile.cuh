@@ -90,35 +90,38 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
 #ifdef STATIC_SM90
   static_assert(!POLLED, "Hopper: a polled activation is not supported yet");
-  static_assert(T == 8, "Hopper WGMMA tile supports eight tokens");
   if (warp == 0) {
     if (lane == 0) {
       load_job<ROWS>(
           j, base, gl, -1, s0, 1 << 20 STAGE_STAMP_ARG(s0 ? nullptr : stamp));
     }
   } else if (warp >= 4) {
-    float acc[ROWS / 64][4];
+    float acc[ROWS / 64][T / 8][4];
     mma_job_sm90<ROWS>(j, base, gi0, acc);
     int const t = threadIdx.x & 127;
 #pragma unroll
     for (int h = 0; h < ROWS / 64; h++) {
 #pragma unroll
-      for (int i = 0; i < 4; i++) {
-        int const row = 64 * h + 16 * (t >> 5) + ((t & 31) >> 2) + 8 * (i >> 1);
-        int const tok = 2 * (t & 3) + (i & 1);
-        float const v = acc[h][i];
-        if (mode == COMBINE_SLOTS) {
-          reinterpret_cast<float *>(
-              out)[((size_t)split * T + tok) * N + row0 + row] = v;
-        } else if (mode == COMBINE_ADD) {
-          red_add_fx(reinterpret_cast<unsigned long long *>(out) + tok * N +
-                         row0 + row,
-                     v);
-        } else if (mode == COMBINE_STORE_BF16) {
-          reinterpret_cast<__nv_bfloat16 *>(out)[tok * N + row0 + row] =
-              __float2bfloat16(v);
-        } else {
-          reinterpret_cast<float *>(out)[tok * N + row0 + row] = v;
+      for (int n = 0; n < T / 8; n++) {
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+          int const row =
+              64 * h + 16 * (t >> 5) + ((t & 31) >> 2) + 8 * (i >> 1);
+          int const tok = 8 * n + 2 * (t & 3) + (i & 1);
+          float const v = acc[h][n][i];
+          if (mode == COMBINE_SLOTS) {
+            reinterpret_cast<float *>(
+                out)[((size_t)split * T + tok) * N + row0 + row] = v;
+          } else if (mode == COMBINE_ADD) {
+            red_add_fx(reinterpret_cast<unsigned long long *>(out) + tok * N +
+                           row0 + row,
+                       v);
+          } else if (mode == COMBINE_STORE_BF16) {
+            reinterpret_cast<__nv_bfloat16 *>(out)[tok * N + row0 + row] =
+                __float2bfloat16(v);
+          } else {
+            reinterpret_cast<float *>(out)[tok * N + row0 + row] = v;
+          }
         }
       }
     }
