@@ -1590,7 +1590,8 @@ class StaticMegakernel(PersistentKernel):
         """Greedy decoding's step from the head to the next step's layers, R requests (tasks/sm90_next_token.cuh): with p
         the position of request r's step that made its logits (row r; from the page table), its token at p + 1 is
         prompt[r][p + 1] while p + 1 < P, else the argmax of logits row r (torch's: the first maximum), stored to
-        tokens[r][p + 1 - P]; its embedding row goes to x_next row r and the page table (kv_indptr [R + 1], last_page_len
+        tokens[r][p + 1 - P]; a negative prompt token is the argmax too, stored over it (prompts of different lengths: -1
+        past each one's length); its embedding row goes to x_next row r and the page table (kv_indptr [R + 1], last_page_len
         [R], kv_indices: request r's pages r MP .. in order, MP = kv_indices.dim(0) / R) advances to p + 1. prompt [R, P],
         tokens [R, G] i64. Outputs: x_next, tokens, kv_indptr, last_page_len, kv_indices (graph.cc: sm90_next_token's
         five). num_tasks: about that many tasks share the argmax (the last one to finish the rest), each 256 PER logits a

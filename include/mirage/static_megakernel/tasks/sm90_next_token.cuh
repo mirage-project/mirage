@@ -4,9 +4,12 @@
 // that no launch sits between the steps. With p the position of request r's
 // step that made its logits (row r; from the page table), its token at p + 1
 // is its prompt's while p + 1 < P, else the argmax of the row (torch's: the
-// first index of the maximum), written to tokens[r][p + 1 - P]; its embedding
-// row goes to x_next row r and the page table advances to p + 1. Task x of
-// grid (ceil(V / BLOCK), 1, 1), BLOCK = 256 PER: the argmax of each row's
+// first index of the maximum), written to tokens[r][p + 1 - P]. A negative
+// prompt token is the argmax too, written over it (prompts of different
+// lengths: each one's tail past its length -1, so that request generates from
+// its own length; its tokens are prompt[r][len ..] then tokens[r]); its
+// embedding row goes to x_next row r and the page table advances to p + 1. Task
+// x of grid (ceil(V / BLOCK), 1, 1), BLOCK = 256 PER: the argmax of each row's
 // logits [x BLOCK, x BLOCK + BLOCK) into the request's 64-bit key (value, then
 // the lower index); the last task to count takes the rest.
 #pragma once
@@ -53,6 +56,7 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
   int *kv_indptr = buf_at<int>(g, slot_at<BUF_SLOTS, 5>());
   int *last_page_len = buf_at<int>(g, slot_at<BUF_SLOTS, 6>());
   float const *logits = buf_at<float const>(g, slot_at<BUF_SLOTS, 0>());
+  long long *prompt = buf_at<long long>(g, slot_at<BUF_SLOTS, 2>());
   // each request's step position (every task reads them before it counts
   // below; the last task writes them after)
   int pos[R];
@@ -65,7 +69,7 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
   int const base = tk.x * BLOCK + threadIdx.x;
 #pragma unroll 1
   for (int r = 0; r < R; r++) {
-    if (pos[r] + 1 < P) {
+    if (pos[r] + 1 < P && prompt[(size_t)r * P + pos[r] + 1] >= 0) {
       continue; // the prompt's next token (the same for every thread)
     }
     float const *lr = logits + (size_t)r * V;
@@ -116,17 +120,16 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
   if (last) {
     if (threadIdx.x < R) {
       int const r = threadIdx.x, q = pos[r] + 1;
-      long long tok;
-      if (q >= P) {
+      long long tok = q < P ? prompt[(size_t)r * P + q] : -1;
+      if (tok < 0) {
         unsigned long long const k = atomicAdd(key + r, 0ull);
         tok = (long long)(0xFFFFFFFFu - (uint32_t)k);
-        if (q - P < NG) {
+        if (q < P) {
+          prompt[(size_t)r * P + q] = tok;
+        } else if (q - P < NG) {
           buf_at<long long>(
               g, slot_at<BUF_SLOTS, 4>())[(size_t)r * NG + q - P] = tok;
         }
-      } else {
-        tok = buf_at<long long const>(
-            g, slot_at<BUF_SLOTS, 2>())[(size_t)r * P + q];
       }
       tok_s[r] = (int)tok;
       int const n = q / PAGE + 1;
