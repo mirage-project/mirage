@@ -58,7 +58,8 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
   int pos[R];
 #pragma unroll
   for (int r = 0; r < R; r++) {
-    pos[r] = (kv_indptr[r + 1] - kv_indptr[r] - 1) * PAGE + last_page_len[r] - 1;
+    pos[r] =
+        (kv_indptr[r + 1] - kv_indptr[r] - 1) * PAGE + last_page_len[r] - 1;
   }
   sm90_task_begin<IN...>(g);
   int const base = tk.x * BLOCK + threadIdx.x;
@@ -120,11 +121,12 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
         unsigned long long const k = atomicAdd(key + r, 0ull);
         tok = (long long)(0xFFFFFFFFu - (uint32_t)k);
         if (q - P < NG) {
-          buf_at<long long>(g, slot_at<BUF_SLOTS, 4>())[(size_t)r * NG + q - P] =
-              tok;
+          buf_at<long long>(
+              g, slot_at<BUF_SLOTS, 4>())[(size_t)r * NG + q - P] = tok;
         }
       } else {
-        tok = buf_at<long long const>(g, slot_at<BUF_SLOTS, 2>())[(size_t)r * P + q];
+        tok = buf_at<long long const>(
+            g, slot_at<BUF_SLOTS, 2>())[(size_t)r * P + q];
       }
       tok_s[r] = (int)tok;
       int const n = q / PAGE + 1;

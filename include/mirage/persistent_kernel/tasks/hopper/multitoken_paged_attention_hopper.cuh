@@ -157,8 +157,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                           ? num_pages - num_pages % (16 / sizeof(int))
                           : 0; // the pages loaded as vectors
 #pragma unroll
-  for (int i = threadIdx.x; i < vec_end * sizeof(int) / 16;
-       i += NUM_THREADS) {
+  for (int i = threadIdx.x; i < vec_end * sizeof(int) / 16; i += NUM_THREADS) {
     __uint128_t const *src_ptr =
         reinterpret_cast<__uint128_t const *>(paged_kv_indices_buffer_ptr +
                                               first_page_pos) +

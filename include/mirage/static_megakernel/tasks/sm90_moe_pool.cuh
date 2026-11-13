@@ -519,8 +519,7 @@ __device__ __forceinline__ void run_sm90_moe_pool(Maps const &maps,
       if (!big) {
         moe_by_groups<NG>(ng, [&](auto c) { unit(IC<1>{}, c, y, true); });
       } else if (ng <= NG13) {
-        moe_by_groups<NG13>(ng,
-                            [&](auto c) { unit(IC<UB13>{}, c, y, true); });
+        moe_by_groups<NG13>(ng, [&](auto c) { unit(IC<UB13>{}, c, y, true); });
       } else {
         moe_by_groups<NG>(ng, [&](auto c) {
           for (int j = 0; j < UB13; j++) {
@@ -564,8 +563,7 @@ __device__ __forceinline__ void run_sm90_moe_pool(Maps const &maps,
       if (!big) {
         moe_by_groups<NG>(ng, [&](auto c) { unit(IC<1>{}, c, y, true); });
       } else if (ng <= NG2) {
-        moe_by_groups<NG2>(ng,
-                            [&](auto c) { unit(IC<UB2>{}, c, y, true); });
+        moe_by_groups<NG2>(ng, [&](auto c) { unit(IC<UB2>{}, c, y, true); });
       } else {
         moe_by_groups<NG>(ng, [&](auto c) {
           for (int j = 0; j < UB2; j++) {
