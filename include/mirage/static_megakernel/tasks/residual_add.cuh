@@ -131,9 +131,9 @@ __device__ __forceinline__ void run_residual_add(Maps const &,
       tk.x,
       SELF::counter >= 0 ? buf_at<float>(g, slot_or<BUF_SLOTS, 2, 0>())
                          : nullptr);
-  if constexpr (SELF::counter >= 0) { // counted (a row_rmsnorm reads y): one
-                                      // add per task, after its stores (the
-                                      // task ends with a __syncthreads)
+  // counted (a row_rmsnorm node waits for all tasks, then reads h32): one add
+  // per task, after its stores (the task ends with a __syncthreads)
+  if constexpr (SELF::counter >= 0) {
     if (threadIdx.x == 0) {
       cnt_add(cnt_now(g) + SELF::counter, 1);
     }

@@ -16,18 +16,18 @@
 //            [1024 c, 1024 c + 1024) of token t (CHK = MAXCTX / 1024). Each
 //            lane takes 4 positions, each warp 128.
 //   count    (MODE 0) If n > TOPK and the chunk has positions, wait for the
-//            score tasks of token t. Find the bin b1 of
-//            hist[t] that holds the TOPK-th largest key. k1 is the number of
-//            keys to take from bin b1. Count the keys of the chunk above bin
-//            b1. Count the keys in bin b1 by their low 4 bits. Write the
-//            record of the chunk.
+//            score tasks of token t. Find the bin b1 of hist[t] that holds
+//            the TOPK-th largest key. k1 is the number of keys to take from
+//            bin b1. Count the keys of the chunk above bin b1. Count the keys
+//            in bin b1 by their low 4 bits. Write the record of the chunk.
+//            If n <= TOPK, the task writes no record.
 //   write    (MODE 1) If n > TOPK and the chunk has positions, wait for the
-//            count tasks of token t. Read the CHK
-//            records. Find the threshold key (b1, b2) and the number of keys
-//            to take at it. Find the first output slot of each chunk and the
-//            number of threshold keys that it takes. Lower chunks take
-//            threshold keys first. Then each warp counts its keys, and ballots
-//            give each lane its output slots.
+//            count tasks of token t. Read the CHK records. Find the threshold
+//            key (b1, b2) and the number of keys to take at it. Find the
+//            first output slot of each chunk and the number of threshold keys
+//            that it takes. Lower chunks take threshold keys first. Then each
+//            warp counts its keys, and ballots give each lane its output
+//            slots. If n <= TOPK, the task reads no record.
 // Each node adds 1 to its counter + t for each task. If sparse_mla reads idx,
 // it waits for the CHK write tasks of token t.
 #pragma once
@@ -391,7 +391,17 @@ __device__ __forceinline__ void run_dsa_index_topk(Maps const &,
   }
   __syncthreads();
   if (threadIdx.x == 0) {
-    cnt_add(cnt_now(g) + SELF::counter + t, 1);
+    // If n <= TOPK, no task that waits on this counter in this kernel reads
+    // what the task wrote, so the add needs no release. A count task wrote no
+    // record, and the write tasks read none. A write task with UNIT 1 wrote
+    // idx, but a sparse_mla task of KPOOL 1 reads idx only if n > TOPK. A
+    // shared layer reads idx in a later kernel. With UNIT 4, sparse_mla reads
+    // idx at any n, so the add has release.
+    if (n <= TOPK && (MODE == 0 || UNIT == 1)) {
+      cnt_add_relaxed(cnt_now(g) + SELF::counter + t, 1);
+    } else {
+      cnt_add(cnt_now(g) + SELF::counter + t, 1);
+    }
   }
 }
 

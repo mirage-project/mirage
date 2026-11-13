@@ -28,9 +28,9 @@
 namespace static_mk {
 
 // Task x is token x. PARAMS {PAGE, MAXP, eps (fp32 bits), scale format (absent:
-// 0)}. BUF_SLOTS {w (fp32
-// [128]), b (fp32 [128]), cos_sin, seq_lens, block_table, index cache (uint8,
-// [pages][PAGE x 132])}. KW: the indexer projection (a COMBINE_ADD GEMM).
+// 0)}. BUF_SLOTS {w (fp32 [128]), b (fp32 [128]), cos_sin, seq_lens,
+// block_table, index cache (uint8, [pages][PAGE x 132])}. KW: the indexer
+// projection (a COMBINE_ADD GEMM).
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,

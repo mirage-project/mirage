@@ -19,10 +19,10 @@
 // framework's speculative verify step of ROWS live rows, the rest idle): a row
 // t >= ROWS is not routed: its K DUP routed pairs are the shared bank experts
 // (expert 0 without shared experts) at weight 0, so it streams no expert of its
-// own (its logits are not read, not re-armed). A run-time idle row (idle: the
-// node reads a live-row table, live[t] <= 0, e.g. a padded slot of a serving
-// batch) waits for its logits and re-arms them as a live row does, then writes
-// the same pairs as a row t >= ROWS.
+// own (its logits are not read, not re-armed). A run-time idle row waits for
+// its logits and re-arms them as a live row does. Then it writes the same
+// pairs as a row t >= ROWS. A row is idle if the node reads a live-row table
+// and live[t] <= 0 (for example a padded row of a serving batch).
 #pragma once
 #include "../core.cuh"
 

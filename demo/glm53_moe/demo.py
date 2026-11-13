@@ -6,11 +6,14 @@ Expert activations use e4m3 values and fp32 scales for 128-value groups.
 The router uses bf16 operands. This process controls all GPUs.
 TP divides the expert intermediate dimension across GPUs.
 With --gpus 1 --tp 8, one GPU computes one TP8 shard, not the full layer.
+STATIC_TOKENS sets T, the rows of the step (8, 16 or 32; default 8). --shared-in-bank puts the shared expert in the
+bank of the experts node (shared_bank: 7 layer calls).
 
   0. download_layer  the checkpoint (--checkpoint: a local snapshot, or a Hugging Face repo id such as zai-org/GLM-5.3: then
                      download_layer downloads only the shards of --layer) and check_config (weights.py)
   1. load_weights    the tensors of each GPU: layer --layer of the checkpoint; the expert banks in the piece layout of
-                     scaled_moe_experts (weights.py, mirage.mpk.fp8_fp32scale_weights). x: --x (bf16 [8, 6144] raw file) or random
+                     scaled_moe_experts (weights.py, mirage.mpk.fp8_fp32scale_weights). x: --x (bf16 [T, 6144] raw file)
+                     or random
   2. build_graph     the layer as 13 layer calls, as the K3 demo: router (gemm_tile), topk_route (x 2.5), group_quant (x); the
                      shared expert: scaled_gemm_tile (gate_up), silu_and_mul, group_quant (h), scaled_gemm_tile (down);
                      scaled_moe_experts; allreduce_send (shared), allreduce_send (routed); sum_gpus (routed), sum_gpus (shared), residual_add
@@ -28,7 +31,7 @@ With --gpus 1 --tp 8, one GPU computes one TP8 shard, not the full layer.
   4. compile_static  build/layer.cu, built and loaded
   5. timed launches  --reps launches, 512 MB read on every GPU before each (empties L2); span per launch
                      --record FILE: the timing build; the per-task times become cost records (cost_records.py) appended to FILE
-  6. --compare-y     y vs a reference y file (bf16 [8, 6144], e.g. SGLang's), relRMS
+  6. --compare-y     y vs a reference y file (bf16 [T, 6144], e.g. SGLang's), relRMS
 Steps 5-6 run the layer through the test harness (python/mirage/mpk/static_harness.py).
 
 y = the MoE output (+ the residual: zero in this demo, so y is comparable with the MoE output of SGLang).
@@ -57,7 +60,7 @@ try:
 except ImportError:
     from weights import check_config, checkpoint_reader, download_layer, layer_tensors    # run as a script
 
-T = int(os.environ.get("STATIC_TOKENS", "8"))   # tokens (rows) per step: the kernel's T (8, 16 or 32)
+T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each request): the kernel's T (8, 16 or 32)
 H, I, E, TOPK, SCALE = 6144, 2048, 256, 8, 2.5   # hidden, expert intermediate, experts, top k, routed scaling
 
 
@@ -86,9 +89,10 @@ def load_weights(read, layer: int, gpus: int, x: torch.Tensor, num_experts: int 
 def shared_bank(w: dict) -> dict:
     """w with the shared expert in the expert bank, as demo/glm53_flash's MoE (topk_route_layer(shared_experts=1); the
     experts node runs it in its queue): w13 / w13_sf / w2 / w2_sf of E + 1 experts, the shared one last (at the TP shard's
-    intermediate it has the routed experts' shapes); no sgu / sgu_sf / sd / sd_sf. The pairs and routed rows (if w has
-    them) get one more pair per token. build_graph then declares the layer without the shared expert's own nodes, and an
-    idle row (topk_route_live_rows) routes to the shared expert at weight 0: no expert of its own."""
+    intermediate it has the routed experts' shapes); no sgu / sgu_sf / sd / sd_sf. The pairs and the routed rows (if w
+    has them) get one more pair or row per token. build_graph then declares the layer without the shared expert's own
+    nodes. An idle row (topk_route_live_rows) has no expert of its own: its routed pairs name the shared expert of the
+    bank at weight 0, and its shared pair has weight 1."""
     w = dict(w)
     for k, s in (("w13", "sgu"), ("w13_sf", "sgu_sf"), ("w2", "sd"), ("w2_sf", "sd_sf")):
         assert w[s].numel() == w[k][0].numel(), f"shared_bank: {s} is not one expert of {k}"
@@ -101,8 +105,9 @@ def shared_bank(w: dict) -> dict:
 
 
 def round_robin_plan(mpk: StaticMegakernel, grids: dict) -> dict:
-    """grids {graph_idx: grid} for the nodes they name (the others: their layer's grid); the tasks dealt to the SMs in turn,
-    in graph order; a one_task_per_sm node's task x on SM x; the same lists on every GPU (as demo/glm53_flash's)."""
+    """Return a round-robin plan. grids: {graph_idx: grid} for the nodes that it names; each other node keeps the grid
+    of its layer call. The plan deals the tasks to the SMs in turn, in graph order. Task x of a one_task_per_sm node
+    goes to SM x. Every GPU gets the same lists (as in demo/glm53_flash)."""
     per_sm, cursor = [[] for _ in range(mpk._num_sms())], 0
     for n in compiler.graph_nodes(mpk):
         for pos in itertools.product(*(range(d) for d in grids.get(n.graph_idx, n.grid))):
@@ -119,8 +124,8 @@ def build_kernel(gpus: int) -> StaticMegakernel:
 
 
 def build_graph(mpk: StaticMegakernel, w: dict, next_norm=None, live=None) -> dict:
-    """Declare the layer's calls: 13, or 8 with the shared expert in the bank (w from shared_bank: no sgu; the experts node
-    runs it). The plan selects the grids and task placement. Returns the router's grid for a round-robin plan
+    """Declare the layer's calls: 13, or 7 with the shared expert in the bank (w from shared_bank: no sgu; the experts
+    node runs it). The plan selects the grids and task placement. Returns the router's grid for a round-robin plan
     (round_robin_plan), {graph_idx: grid}. next_norm: (gamma, output, eps), torch tensors attached last ("norm_w",
     "x_next"): moe_out is the new residual and the kernel also writes RMSNorm(moe_out) gamma (row_rmsnorm_layer), the next
     sublayer's input. live: a torch tensor [T] int32 attached last ("live"): topk_route routes only the rows with live > 0
@@ -238,15 +243,15 @@ def main():
     ap.add_argument("--rank", type=int, default=0, help="with --gpus 1 --tp N: the shard on the GPU")
     ap.add_argument("--revision", help="with a Hugging Face repo id: a branch, tag or commit (default: main). The demo "
                                        "resolves it to a commit and downloads all files at that commit")
-    ap.add_argument("--x", help="the input x, bf16 [8, 6144] raw file (default: random, seed 1)")
+    ap.add_argument("--x", help="the input x, bf16 [T, 6144] raw file (default: random, seed 1)")
     ap.add_argument("--out", default="build/glm53_moe")
     ap.add_argument("--reps", type=int, default=20)
-    ap.add_argument("--compare-y", help="a reference y, bf16 [8, 6144] raw file")
+    ap.add_argument("--compare-y", help="a reference y, bf16 [T, 6144] raw file")
     ap.add_argument("--plan", help="a plan file: solver_plan.json (default; found by search.search_plan) or hand_plan.json "
                          "(both for one GPU of 148 SMs, T = 8, of the layer with the shared expert's own nodes); with "
                          "--shared-in-bank or another T (STATIC_TOKENS) the default is round robin (round_robin_plan)")
     ap.add_argument("--shared-in-bank", action="store_true", help="the shared expert in the experts node's bank "
-                    "(shared_bank), as demo/glm53_flash's MoE: 8 layer calls")
+                    "(shared_bank), as demo/glm53_flash's MoE: 7 layer calls")
     ap.add_argument("--search", nargs="+", default=None, metavar="COSTS", help="cost record files: the solver's plan, from --plan")
     ap.add_argument("--costs-code", default="current", help="with --search: the records of these kernel templates: current "
                     "(static_schedule.code_tag), any, or a tag")

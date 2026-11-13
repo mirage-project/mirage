@@ -107,7 +107,7 @@ def layer_tensors(read, layer: int, tp: int = 1, rank: int = 0, num_experts: int
                 full = lambda name, cut: read(name)[cut[0]] if cut[1] is None else read(name)[:, cut[1]]
             else:
                 full = lambda name, cut: part(name, rows=cut[0]) if cut[1] is None else part(name, cols=cut[1])
-            s_gate = read(q + "gate_proj.weight_scale_inv")   # [I / 128, H / 128]: small, whole
+            s_gate = read(q + "gate_proj.weight_scale_inv")   # [I / 128, H / 128]: small, read whole
             I = s_gate.shape[0] * 128
             assert I % (128 * tp) == 0, f"intermediate {I}: not whole 128-row blocks for each of {tp} GPUs"
             IR = I // tp

@@ -1,14 +1,15 @@
 // tasks/row_rmsnorm.cuh -- RMSNorm of the rows a residual_add node wrote: task
 // (q, t) of grid (Q, T, 1) = token t, part q of Q of the row's H columns:
 //   out[t][c] = bf16(r[t][c] rstd_t gamma[c]), rstd_t = rsqrt(mean_c r^2 + eps)
-// r is the residual_add node's sum before its bf16 rounding (its h32 scratch,
-// fp32 [T][H]); the task waits until every task of that node is counted
-// (residual_add_layer counted), then reads the whole row itself (each of a
-// token's Q tasks adds the same squares in the same order: no swap between
-// them) and writes its own columns. This is the norm of SGLang's fused add +
-// RMSNorm after a sublayer (FlashInfer: fp32 h = x + residual, its squares and
-// h rstd w; only the residual it stores is rounded), with the add done by
-// residual_add: the next sublayer's input from the same kernel.
+// r is the sum of the residual_add node before its bf16 rounding (the h32
+// scratch of the node, fp32 [T][H]). The task waits until every task of that
+// node is counted (residual_add_layer counted). Then it reads the whole row
+// and writes its own columns. The Q tasks of a token add the same squares in
+// the same order, so they get the same rstd without an exchange. The result
+// is the norm of SGLang's fused add + RMSNorm after a sublayer (FlashInfer
+// computes fp32 h = x + residual, its squares and h rstd w, and rounds only
+// the residual that it stores). residual_add does the add. The output is the
+// input of the next sublayer, from the same kernel.
 #pragma once
 #include "../core.cuh"
 
@@ -81,10 +82,10 @@ __device__ __forceinline__ void row_rmsnorm_task(float const *r,
   __syncthreads();
 }
 
-// row_rmsnorm task (x, y) = (part x of SELF::x, token y). RA: the residual_add
+// row_rmsnorm task (q, t) = (part q of SELF::x, token t). RA: the residual_add
 // node (counted: its counter gets one add per task, after the task's stores).
-// PARAMS {H, eps (fp32 bits)}; BUF_SLOTS {the residual_add node's h32 scratch
-// (fp32 [T][H]), gamma ([H] bf16), out ([T][H] bf16)}
+// PARAMS {H, eps (fp32 bits)}. BUF_SLOTS {the residual_add node's h32 scratch
+// (fp32 [T][H]), gamma ([H] bf16), out ([T][H] bf16)}.
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,

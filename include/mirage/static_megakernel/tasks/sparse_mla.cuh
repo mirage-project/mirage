@@ -21,7 +21,7 @@
 //           task uses these properties of idx (dsa_index_topk gives them):
 //           the first min(seq_lens[t], TOPK) slots hold positions in
 //           ascending order and the other slots hold -1. If
-//           seq_lens[t] <= TOPK, slot e holds position e. Each slot t is a
+//           seq_lens[t] <= TOPK, slot e holds position e. Each token t is a
 //           different request, and this step writes only the cache row of
 //           position seq_lens[t] - 1. If seq_lens[t] <= TOPK (KPOOL 1), the
 //           task does not read idx.
@@ -31,11 +31,11 @@
 //           positions after it.
 //   output  For each (t, s), o [NH][512] fp32 and lse [NH]. o is the softmax
 //           average over the positions of the split. lse = max + log(sum).
-//           lse is -inf if the split has no valid position. The node buffer
-//           holds o [T][S][NH][512], then lse [T][S][NH]. Then the task adds
-//           1 to counter + t. dsa_mla_merge merges the S splits. A split with
-//           no valid slot (KPOOL 1) writes o 0 and lse -inf and does not wait
-//           for its inputs.
+//           With KPOOL > 1, lse is -inf if the split has no valid slot.
+//           The node buffer holds o [T][S][NH][512], then lse [T][S][NH].
+//           Then the task adds 1 to counter + t. dsa_mla_merge merges the S
+//           splits. With KPOOL 1, a split with no valid slot writes nothing
+//           and does not wait for its inputs. dsa_mla_merge does not read it.
 #pragma once
 #include "../dsa_common.cuh"
 #include <cmath>
@@ -47,14 +47,20 @@ using bf16 = __nv_bfloat16;
 constexpr int LATENT = dsa::MLA_LATENT;
 constexpr int HEAD_TILE = 16, KV_TILE = 64, NSTAGE = 2;
 
-// D_QK: the row of q and of the cache (512 latent + ROPE, ROPE = 64 or 0)
+// QK splits K (D_QK) into KQ parts. Warp w computes part w % KQ of the scores
+// of ROWS = KV_TILE KQ / 8 rows of a tile, from row (w / KQ) ROWS.
+constexpr int KQ = 4;
+
+// D_QK: the row width of q and of the cache (512 latent + ROPE, ROPE = 64 or
+// 0). q holds the query until each warp has its q fragments in registers.
+// After that, the space of q holds the KQ partial scores
+// [KQ][HEAD_TILE][KV_TILE] fp32 of a tile (partial_scores).
 template <int D_QK>
 struct alignas(128) Smem {
   bf16 q[HEAD_TILE * D_QK];
   bf16 kv[NSTAGE][KV_TILE * D_QK];
-  float scores[HEAD_TILE * KV_TILE];
   bf16 probabilities[HEAD_TILE * KV_TILE];
-  float row_max[HEAD_TILE];
+  float row_max[HEAD_TILE]; // log2 units (sparse_mla_split)
   float row_sum[HEAD_TILE];
   float alpha[HEAD_TILE];
   int64_t cache_rows[NSTAGE][KV_TILE];
@@ -66,11 +72,11 @@ using namespace dsa; // the shared-memory and MMA helpers (dsa_common.cuh)
 // Return the position of index slot e = tile * KV_TILE + tid. tile is the
 // tile index in the token, not in the split. Return -1 if tid >= KV_TILE or
 // tile >= last_tile. KPOOL = 1: idx[e], or e if idx is nullptr (e < seq_len;
-// else -1). KPOOL > 1 (GLM-5.3-Flash: idx holds
-// NIDX pool ids, dsa_index_topk UNIT = KPOOL): slot e < KPOOL NIDX is
-// position idx[e / KPOOL] KPOOL + e % KPOOL; the next KPOOL - 1 slots are the
-// tail, the positions after the complete pools: (seq_len / KPOOL) KPOOL + i
-// (the mask drops the ones at seq_len or later); the rest are -1.
+// else -1). KPOOL > 1 (GLM-5.3-Flash: idx holds NIDX pool ids, dsa_index_topk
+// UNIT = KPOOL): slot e < KPOOL NIDX is position
+// idx[e / KPOOL] KPOOL + e % KPOOL; the next KPOOL - 1 slots are the tail, the
+// positions after the complete pools: (seq_len / KPOOL) KPOOL + i (the mask
+// drops the ones at seq_len or later); the rest are -1.
 template <int KPOOL, int NIDX>
 __device__ __forceinline__ int
     load_index(int const *idx, int tile, int last_tile, int seq_len) {
@@ -88,6 +94,22 @@ __device__ __forceinline__ int
     int const i = e - KPOOL * NIDX;
     return i < KPOOL - 1 ? seq_len / KPOOL * KPOOL + i : -1;
   }
+}
+
+// Return the partial scores [KQ][HEAD_TILE][KV_TILE] fp32 of a tile. They use
+// the space of sm.q. Call it only after every warp holds its q fragments.
+template <int D_QK>
+__device__ __forceinline__ float *partial_scores(Smem<D_QK> &sm) {
+  static_assert(KQ * HEAD_TILE * KV_TILE * sizeof(float) <= sizeof(sm.q),
+                "sparse_mla: the partial scores fit in q's space");
+  return reinterpret_cast<float *>(sm.q);
+}
+
+// 2^x (ex2.approx, subnormal results flushed to 0)
+__device__ __forceinline__ float exp2_ftz(float x) {
+  float y;
+  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+  return y;
 }
 
 template <int D_QK>
@@ -178,7 +200,12 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
   static_assert(TOPK % (KV_TILE * S) == 0,
                 "sparse_mla: each split has the same number of whole tiles");
   constexpr int PER = TOPK / KV_TILE / S;
+  // the k-steps (16 columns each) of a K part, and the rows of a warp
+  constexpr int KSTEPS = D_QK / 16 / KQ, ROWS = KV_TILE * KQ / 8;
+  static_assert(D_QK % (16 * KQ) == 0 && ROWS % 16 == 0,
+                "QK: whole k-steps in each K part, 16-row steps");
   int const tid = threadIdx.x, warp = tid / 32, lane = tid % 32;
+  int const kq = warp % KQ, row0 = warp / KQ * ROWS;
   int const first_tile = split * PER, last_tile = first_tile + PER;
   for (int i = tid; i < HEAD_TILE * D_QK / 8; i += 256) {
     int const row = i / (D_QK / 8), col = i % (D_QK / 8) * 8;
@@ -195,11 +222,28 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
   }
   // Each warp computes 64 latent columns. Each lane keeps 32 fp32 outputs.
   float acc[4][8] = {};
+  // The online softmax state of head tid / 16: the running max of the scores
+  // in log2 units (score x softmax_scale x log2(e)) and the running sum. The
+  // 16 lanes of the head hold the same values. Lane 0 also writes them to sm.
+  float run_max = -INFINITY, run_sum = 0.0f;
+  float const scale_log2 = softmax_scale * 1.4426950408889634f;
   int next_pos =
       load_index<KPOOL, NIDX>(idx, first_tile + 1, last_tile, seq_len);
   int next_page = page_of<PAGE>(pages, next_pos, seq_len);
   copy_wait();
   __syncthreads();
+  // q fragments of K part kq: the same for every tile of the split
+  uint32_t qa[KSTEPS][4];
+#pragma unroll
+  for (int j = 0; j < KSTEPS; j++) {
+    load_a(qa[j],
+           sm.q + swizzle<D_QK>(lane % 16,
+                                (kq * KSTEPS + j) * 16 + lane / 16 * 8));
+  }
+  // Wait until all warps hold their q fragments. From here, the space of q
+  // holds the partial scores.
+  __syncthreads();
+  float *const part = partial_scores(sm);
 
   for (int tile = first_tile; tile < last_tile; tile++) {
     int const stage = (tile - first_tile) & 1;
@@ -218,48 +262,64 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
       continue;
     }
     bf16 const *kv = sm.kv[stage];
-    // QK: each of the 8 warps computes 16 heads x 8 selected rows
-    if (warp * 8 < live_rows) {
-      float sc[4] = {};
+    // QK: warp (row0, kq) computes the partial scores of K part kq for 16
+    // heads x ROWS selected rows. Each ldmatrix x4 gives the B fragments of
+    // 16 rows (two n8 tiles).
+    if (row0 < live_rows) {
+      float sc[ROWS / 8][4] = {};
 #pragma unroll
-      for (int k = 0; k < D_QK; k += 16) {
-        uint32_t a[4], b[2];
-        load_a(a, sm.q + swizzle<D_QK>(lane % 16, k + lane / 16 * 8));
-        load_k(b,
-               kv + swizzle<D_QK>(warp * 8 + lane % 8, k + (lane / 8 % 2) * 8));
-        mma16816(a, b, sc);
+      for (int j = 0; j < KSTEPS; j++) {
+        int const k = (kq * KSTEPS + j) * 16;
+#pragma unroll
+        for (int n = 0; n < ROWS / 16; n++) {
+          uint32_t b[4];
+          load_a(b,
+                 kv + swizzle<D_QK>(row0 + n * 16 + lane / 16 * 8 + lane % 8,
+                                    k + (lane / 8 % 2) * 8));
+          mma16816(qa[j], b, sc[2 * n]);
+          mma16816(qa[j], b + 2, sc[2 * n + 1]);
+        }
       }
+      float *const pk = part + kq * HEAD_TILE * KV_TILE;
 #pragma unroll
-      for (int r = 0; r < 2; r++) {
-        int const row = lane / 4 + r * 8, col = warp * 8 + (lane % 4) * 2;
-        *reinterpret_cast<float2 *>(sm.scores + row * KV_TILE + col) =
-            make_float2(sc[r * 2], sc[r * 2 + 1]);
+      for (int n = 0; n < ROWS / 8; n++) {
+#pragma unroll
+        for (int r = 0; r < 2; r++) {
+          int const row = lane / 4 + r * 8, col = row0 + n * 8 + (lane % 4) * 2;
+          *reinterpret_cast<float2 *>(pk + row * KV_TILE + col) =
+              make_float2(sc[n][r * 2], sc[n][r * 2 + 1]);
+        }
       }
     }
     __syncthreads();
-    // online softmax: 16 lanes for each head, 4 scores for each lane
+    // online softmax: 16 lanes for each head, 4 scores for each lane. Each
+    // lane adds the KQ partial scores of its columns. The select then drops
+    // the columns at or after live_rows (no cache row) and the rows at or
+    // after NH (no head). Their partial scores are not valid.
     int const row = tid / 16, row_lane = tid % 16;
     float p[4];
-    float tile_max = -INFINITY;
 #pragma unroll
     for (int i = 0; i < 4; i++) {
       int const col = row_lane * 2 + (i / 2) * 32 + i % 2;
-      p[i] = col < live_rows && row < NH
-                 ? sm.scores[row * KV_TILE + col] * softmax_scale
-                 : -INFINITY;
-      tile_max = fmaxf(tile_max, p[i]);
+      float s = 0.0f;
+#pragma unroll
+      for (int kp = 0; kp < KQ; kp++) {
+        s += part[(kp * HEAD_TILE + row) * KV_TILE + col];
+      }
+      p[i] = col < live_rows && row < NH ? s * scale_log2 : -INFINITY;
     }
+    float tile_max = fmaxf(fmaxf(p[0], p[1]), fmaxf(p[2], p[3]));
 #pragma unroll
     for (int m = 8; m > 0; m /= 2) {
       tile_max = fmaxf(tile_max, __shfl_xor_sync(0xffffffffu, tile_max, m, 16));
     }
-    float const old_max = sm.row_max[row];
-    float const new_max = fmaxf(old_max, tile_max);
-    float const alpha = old_max == -INFINITY ? 0.0f : __expf(old_max - new_max);
+    float const new_max = fmaxf(run_max, tile_max);
+    float const alpha =
+        run_max == -INFINITY ? 0.0f : exp2_ftz(run_max - new_max);
     float sum = 0.0f;
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-      p[i] = p[i] == -INFINITY ? 0.0f : __expf(p[i] - new_max);
+      p[i] = p[i] == -INFINITY ? 0.0f : exp2_ftz(p[i] - new_max);
       sum += p[i];
     }
 #pragma unroll
@@ -273,11 +333,12 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
                                           swizzle<KV_TILE>(row, col)) =
           __float22bfloat162_rn(make_float2(p[i * 2], p[i * 2 + 1]));
     }
-    __syncwarp(); // all lanes read the old row_max before the leader writes it
+    run_sum = alpha * run_sum + sum;
+    run_max = new_max;
     if (row_lane == 0) {
       sm.alpha[row] = alpha;
-      sm.row_sum[row] = alpha * sm.row_sum[row] + sum;
-      sm.row_max[row] = new_max;
+      sm.row_sum[row] = run_sum;
+      sm.row_max[row] = run_max;
     }
     __syncthreads();
     // PV. In the m16n8k16 accumulator, registers 0, 1, 4, 5 are row lane / 4
@@ -330,7 +391,9 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
         }
       }
       if (warp == 0 && lane % 4 == 0) {
-        lse[h] = sum > 0.0f ? sm.row_max[h] + logf(sum) : -INFINITY;
+        // row_max is in log2 units
+        lse[h] = sum > 0.0f ? sm.row_max[h] * 0.6931471805599453f + logf(sum)
+                            : -INFINITY;
       }
     }
   }
@@ -389,19 +452,12 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
   __syncthreads(); // wait until the previous task completes its shared-memory
                    // reads
   if (KPOOL == 1 && s * PER * smla::KV_TILE >= live) {
-    // The split has no valid slot. The task does not wait for its inputs. It
-    // writes the result of an empty split: o 0, lse -inf.
+    // The split has no valid slot. The task does not wait for its inputs and
+    // writes nothing. dsa_mla_merge finds from seq_lens that the split is
+    // empty and does not read it. The task only adds 1 to counter + t.
     dsa::stamp_ready(L);
-    float4 *const op = reinterpret_cast<float4 *>(o_part);
-    for (int i = threadIdx.x; i < NH * smla::LATENT / 4; i += 256) {
-      op[i] = make_float4(0.f, 0.f, 0.f, 0.f);
-    }
-    if (threadIdx.x < NH) {
-      lse[threadIdx.x] = -INFINITY;
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      cnt_add(cnt_now(g) + SELF::counter + t, 1);
+    if (threadIdx.x == 0) { // nothing written: no release
+      cnt_add_relaxed(cnt_now(g) + SELF::counter + t, 1);
     }
     return;
   }

@@ -17,7 +17,7 @@ import torch
 from mirage.core import bfloat16, float32, int64, uint8
 from mirage.mpk.fp8_fp32scale_weights import pack_w13, pack_w2
 
-T = int(os.environ.get("STATIC_TOKENS", "8"))   # tokens (rows) per step: the kernel's T (8, 16 or 32)
+T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each request): the kernel's T (8, 16 or 32)
 
 
 def dense_tensors(read, layer: int, tp: int = 8, rank: int = 0, device="cpu") -> dict:

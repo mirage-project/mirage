@@ -114,8 +114,8 @@ def config_checks(used: List[str], tokens: int = 8, max_bufs: Optional[int] = No
                   max_counter_lines: Optional[int] = None, stages: Optional[int] = None) -> List[str]:
     """static_asserts that the Python copies of the kernel's sizes (here and in static_megakernel.py) are config.cuh's and the
     used task types'."""
-    from .static_megakernel import (HC_MIX_STRIDE, MAX_BUFS, MAX_MAPS, MAX_SUM_PARTS, NODE_COUNTER_LINES, ring_stages,
-                                    SF_CHUNK)
+    from .static_megakernel import (HC_MIX_STRIDE, MAX_BUFS, MAX_MAPS, MAX_SUM_PARTS, MOE_PROF_WORDS, MOE_SPLIT_SLOTS,
+                                    NODE_COUNTER_LINES, ring_stages, SF_CHUNK)
     checks = [f"static_mk::MAX_TASKS_PER_SM == {MAX_TASKS_PER_SM}", f"static_mk::MAX_BUFS == {max_bufs or MAX_BUFS}",
               f"static_mk::MAX_MAPS == {MAX_MAPS}", f"static_mk::NODE_COUNTER_LINES == {max_counter_lines or NODE_COUNTER_LINES}",
               f"static_mk::SMAX == {ring_stages(tokens, stages)}", f"static_mk::SF_CHUNK == {SF_CHUNK}"]
@@ -123,6 +123,9 @@ def config_checks(used: List[str], tokens: int = 8, max_bufs: Optional[int] = No
         checks.append(f"static_mk::MAX_SUM_PARTS == {MAX_SUM_PARTS}")
     if "hc_pre" in used:
         checks.append(f"static_mk::HC_MIX_STRIDE == {HC_MIX_STRIDE}")
+    if "scaled_moe_experts" in used:
+        checks += [f"static_mk::scaled_moe::MOE_SPLIT_SLOTS == {MOE_SPLIT_SLOTS}",
+                   f"static_mk::scaled_moe::MOE_PROF_WORDS == {MOE_PROF_WORDS}"]
     return [f"static_assert({' && '.join(checks)}, \"the Python copies of the kernel's sizes (static_schedule.py, "
             'static_megakernel.py)");']
 

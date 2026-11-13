@@ -1,11 +1,13 @@
 """GLM-5.3 in SGLang with its decode on the mirage static megakernel (demo/glm53_model/decoder.py).
 
 SGLang keeps the scheduler, the tokenizer, the sampling, the prefill and the KV pool. A decode step runs this model's
-forward: the embedding, then per layer the attention kernel, the TP all-reduce and fused add + RMSNorm (SGLang's), the
-FFN kernel, the all-reduce and the next norm, then the final norm and SGLang's logits. CUDA graphs capture it per batch
-size as SGLang's own decode. The prefill runs SGLang's own layers. The kernels have their own copy of this rank's weights
-(read from the checkpoint before SGLang sizes its KV pool; the MoE layers about 1.2 GB each), so SGLang's tensors stay
-as SGLang loaded them.
+forward: the embedding and layer 0's input norm (SGLang's), then per layer the attention kernel and the FFN kernel, then
+SGLang's logits. Each kernel ends its sublayer itself: the all-reduce over the TP group (symmetric memory, multicast), the
+residual add and the next RMSNorm (the last kernel: the final norm). MIRAGE_STATIC_ALLREDUCE_IN_KERNEL=0: the kernels end
+with this rank's partial sum and SGLang's TP all-reduce and fused add + RMSNorm run between them. CUDA graphs capture the
+step per batch size as SGLang's own decode. The prefill runs SGLang's own layers. The kernels have their own copy of this
+rank's weights (read from the checkpoint before SGLang sizes its KV pool; the MoE layers about 1.2 GB each), so SGLang's
+tensors stay as SGLang loaded them.
 
 The class has the name of SGLang's (GlmMoeDsaForCausalLM), so SGLang picks it for the checkpoint's architecture:
 
@@ -15,13 +17,17 @@ The class has the name of SGLang's (GlmMoeDsaForCausalLM), so SGLang picks it fo
       --moe-runner-backend flashinfer_trtllm --max-running-requests 8 --cuda-graph-max-bs-decode 8 \\
       --context-length 16384 --disable-radix-cache
 
-Requirements (checked at startup): TP 8 on GPUs of 148 SMs (the plans), a bf16 latent cache in pages of 64, at most 8
-running requests (T = 8 slots per kernel), a context of at most 16384 (the plans), memory for a second copy of the MoE
-weights (about 90 GB per GPU at TP 8: e.g. B300).
-The server log says "mirage static megakernel decode: on" on every rank once the kernels are ready. SGLang skips a model
-package that fails to import (a warning) and then serves its own model: check that line.
+Requirements: TP 8 on GPUs of 148 SMs (the plans) with NVLink multicast (NVLS: the kernels' all-reduce; not with
+MIRAGE_STATIC_ALLREDUCE_IN_KERNEL=0), a bf16 latent cache in pages of 64, a context of at most 16384 (the plans), memory
+for a second copy of the MoE weights (about 90 GB per GPU at TP 8: for example B300). The startup checks the TP size, the
+context length, the NVLink multicast and the cache layout.
+The kernels decode steps of at most T requests (T = STATIC_TOKENS, default 8: the rows of a kernel). A larger decode step
+runs SGLang's own layers, as the prefill does (as demo/glm53_flash's hooks do for a batch size with no static layer): the
+kernels and SGLang's layers read and write the same caches, so they take turns on them. Set --max-running-requests and
+--cuda-graph-max-bs-decode to T to decode every step on the kernels.
+Every rank prints "mirage static megakernel decode: on" once the kernels are ready. SGLang skips a model package that
+fails to import (a warning) and then serves its own model: check that line.
 """
-import logging
 import os
 
 import torch
@@ -32,9 +38,7 @@ from sglang.srt.model_executor import model_runner as _model_runner
 from sglang.srt.models.glm4_moe import GlmMoeDsaForCausalLM as _SGLangGlmMoeDsa
 
 from demo.glm53_dsa import weights as dsa_weights
-from demo.glm53_model.decoder import MAXCTX, TP, StaticDecoder
-
-logger = logging.getLogger(__name__)
+from demo.glm53_model.decoder import MAXCTX, TP, T, StaticDecoder
 
 
 def _snapshot(model_path: str, revision: str = None) -> str:
@@ -70,14 +74,15 @@ class GlmMoeDsaForCausalLM(_SGLangGlmMoeDsa):
             raise ValueError(f"mirage static megakernel: context {ctx} > {MAXCTX} (the kernels' plans); pass "
                              f"--context-length {MAXCTX} or less")
         dev = torch.device("cuda", torch.cuda.current_device())
-        # the TP group's device (NCCL) group: the symmetric memory of the kernels' exchange regions (decoder
-        # ALLREDUCE_IN_KERNEL); otherwise unused
+        # the device (NCCL) group of the TP group: the decoder allocates the symmetric memory of the kernels' exchange
+        # regions over it (the kernels' all-reduce). Not used with MIRAGE_STATIC_ALLREDUCE_IN_KERNEL=0
         self.mirage = StaticDecoder(cfg, dsa_weights.checkpoint_reader(snapshot), get_tensor_model_parallel_rank(), dev,
                                     group=get_tp_group().device_group)
         self.mirage.load_weights()
 
     def mirage_setup(self, runner):
-        """After the KV pool, before CUDA graph capture: the kernel builds and instances on the pool's tensors."""
+        """Build the kernels and load the instances on the pool's tensors. Call it after the KV pool and before CUDA graph
+        capture."""
         m = getattr(self, "mirage", None)
         if m is None or m.ready:
             return
@@ -87,12 +92,14 @@ class GlmMoeDsaForCausalLM(_SGLangGlmMoeDsa):
         m.setup(runner.token_to_kv_pool, runner.req_to_token_pool.req_to_token,
                 barrier=lambda: torch.distributed.barrier(group=group))
         torch.cuda.synchronize()
-        logger.info(f"mirage static megakernel decode: on (rank {m.rank}, {len(m.instances)} layer kernels, "
-                    f"context {m.maxctx})")
+        # print, not the logger: the line must not depend on SGLang's log level (sgl_chain.sh counts it)
+        print(f"mirage static megakernel decode: on (rank {m.rank}, {len(m.instances)} layer kernels, context {m.maxctx})",
+              flush=True)
 
     def forward(self, input_ids, positions, forward_batch, input_embeds=None, pp_proxy_tensors=None):
         m = getattr(self, "mirage", None)
-        if m is not None and m.ready and input_embeds is None and forward_batch.forward_mode.is_decode():
+        if m is not None and m.ready and input_embeds is None and forward_batch.forward_mode.is_decode() and \
+                input_ids.shape[0] <= T:   # a larger decode step: SGLang's layers (module docstring)
             h = m.decode(self, input_ids, forward_batch, tensor_model_parallel_all_reduce)
             return self.logits_processor(input_ids, h, self.lm_head, forward_batch)
         return super().forward(input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors)

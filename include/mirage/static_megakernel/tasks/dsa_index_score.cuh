@@ -20,7 +20,7 @@
 //         node (IKW): UE8M0, or fp32 (SGLang's index-K pool, key_scale="fp32").
 // qs_h is a power of two, and so is a UE8M0 s_j. Thus a multiplication by them
 // is exact, and the order of these multiplications does not change the fp32
-// result. An fp32 s_j is applied last, as UE8M0 is.
+// result. The task applies an fp32 s_j last, as it applies a UE8M0 s_j.
 // FLASH = 1 (GLM-5.3-Flash, SGLang's IndexerKPool): j counts the pooled keys
 // (dsa_kpool_update), n = min(seq_lens[t] / 4, MAXCTX) complete pools. q_h is
 // Hadamard-128 of the bf16 wq_b output (a bf16 gemm_tile), rounded to bf16,
@@ -50,7 +50,7 @@
 //      key to the task histogram. At the end, the task adds the task
 //      histogram to the token histogram.
 //   output  scores fp32 [T][MAXCTX] (bf16 values) in the node buffer. Then
-//           the task adds 1 to counter + t. If n > TOPK, dsa_index_topk
+//           the task adds 1 to counter + t. If n > TOPK_ALL, dsa_index_topk
 //           waits for all chunks.
 #pragma once
 #include "../dsa_common.cuh"
@@ -413,8 +413,8 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   constexpr int TOPK_ALL = PARAMS::v[5];
   if (c0 >= n || (TOPK_ALL > 0 && n <= TOPK_ALL)) {
     stamp_ready(L);
-    if (tid == 0) {
-      cnt_add(cnt_now(g) + SELF::counter + t, 1);
+    if (tid == 0) { // nothing written: no release
+      cnt_add_relaxed(cnt_now(g) + SELF::counter + t, 1);
     }
     return;
   }
