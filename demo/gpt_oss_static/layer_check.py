@@ -48,7 +48,13 @@ def main():
     import gpt_oss_static as g
     from gsm8k import one_example
     from transformers import AutoTokenizer
-    from transformers.integrations.mxfp4 import convert_moe_packed_tensors
+    from transformers.integrations.mxfp4 import FP4_VALUES
+
+    def mxfp4_cpu(blocks, scales):   # transformers' convert_moe_packed_tensors for one expert, on the CPU: [K, N] bf16
+        lut = torch.tensor(FP4_VALUES, dtype=torch.bfloat16)
+        out = torch.stack((lut[(blocks & 15).long()], lut[(blocks >> 4).long()]), -1).flatten(-2)   # [N, G, 32]
+        out = torch.ldexp(out, scales.to(torch.int32)[..., None] - 127)
+        return out.flatten(-2).t().contiguous()
     from transformers.models.gpt_oss.modeling_gpt_oss import (GptOssAttention, GptOssRMSNorm, GptOssRotaryEmbedding,
                                                               GptOssTopKRouter)
     from mxfp4 import Mxfp4Checkpoint
@@ -105,7 +111,6 @@ def main():
         w13b, w13s = sd[p + "mlp.experts.gate_up_proj_blocks"], sd[p + "mlp.experts.gate_up_proj_scales"]
         w2b, w2s = sd[p + "mlp.experts.down_proj_blocks"], sd[p + "mlp.experts.down_proj_scales"]
         b13, b2 = sd[p + "mlp.experts.gate_up_proj_bias"].cuda(), sd[p + "mlp.experts.down_proj_bias"].cuda()
-        experts = {}
         kc = m.layers[i]["k_cache"].view(R, MP * g.PAGE, m.KVH, m.D)[:, :S].permute(0, 2, 1, 3)
         vc = m.layers[i]["v_cache"].view(R, MP * g.PAGE, m.KVH, m.D)[:, :S].permute(0, 2, 1, 3)
         res = {}
@@ -123,14 +128,16 @@ def main():
             scores, idx = md["router"](h)
             moe = torch.zeros_like(h)
             for e in idx.unique().tolist():
-                if e not in experts:   # [H, 2I] and [I, H], gate / up interleaved (GptOssExperts')
-                    experts[e] = (convert_moe_packed_tensors(w13b[e:e + 1], w13s[e:e + 1], dtype=torch.float32)[0],
-                                  convert_moe_packed_tensors(w2b[e:e + 1], w2s[e:e + 1], dtype=torch.float32)[0])
+                # [H, 2I] and [I, H], gate / up interleaved (GptOssExperts'); MXFP4 values are exact in bf16.
+                # Converted on the CPU, and fp64 (exact anywhere) computed there: 120B's experts in fp64 and the
+                # conversion's temporaries do not fit beside its static model at 32 requests
+                dev = "cpu" if dt == torch.float64 else "cuda"
+                w13, w2e = (mxfp4_cpu(b[e].cpu(), sc[e].cpu()).to(dev, dt) for b, sc in ((w13b, w13s), (w2b, w2s)))
                 rows = (idx == e).any(-1).nonzero()[:, 0]
-                gate_up = h[rows] @ experts[e][0].to(dt) + b13[e].to(dt)
+                gate_up = h[rows].to(dev) @ w13 + b13[e].to(dev, dt)
                 gate = gate_up[..., ::2].clamp(max=m.limit)
                 up = gate_up[..., 1::2].clamp(min=-m.limit, max=m.limit)
-                o = ((up + 1) * (gate * torch.sigmoid(gate * 1.702))) @ experts[e][1].to(dt) + b2[e].to(dt)
+                o = (((up + 1) * (gate * torch.sigmoid(gate * 1.702))) @ w2e + b2[e].to(dev, dt)).to("cuda")
                 moe.index_add_(0, rows, o * scores[rows, e, None])
             res[dt] = (x1[:, 0], x1[:, 0] + moe, idx.sort(-1).values)
         ex, hf = res[torch.float64], res[torch.bfloat16]
@@ -141,7 +148,6 @@ def main():
         fmt = lambda r: f"{r[0]:.2e} / {r[1]:.2e}"
         print(f"{i:>3} {'slide' if i in sliding else 'full':>5} | {fmt(a_s):>19} {fmt(a_h):>19} | {fmt(m_s):>19} "
               f"{fmt(m_h):>19} | hf {same}/{R}", flush=True)
-        del experts
     for k in (k_sl, k_fu, k_hd):
         k.finalize()
 
