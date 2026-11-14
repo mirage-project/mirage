@@ -18,7 +18,7 @@
 // (num_tokens < seq_len). That is what the sliding window's leading-tile skip
 // depends on, and under test mode the scheduler always admits a fresh request
 // and schedules a whole prefill, giving num_tokens == seq_len.
-#include "blackwell/task_header.cuh"
+#include "blackwell/attention_sm100.cuh"
 #include "common/bfloat16.h"
 #include "runtime_header.h"
 #include <cuda_runtime.h>
