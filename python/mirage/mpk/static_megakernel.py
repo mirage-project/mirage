@@ -691,6 +691,8 @@ class StaticMegakernel(PersistentKernel):
         live = route.params[5] if len(route.params) >= 6 and route.params[5] > 0 else T
         single = (live * (K - shared) + shared) * (IR // 64) <= self._num_sms() and 2 * NSLOT * KT2 >= 3 * self._num_sms()
         pairc = self._num_sms() // 2 if single else 0
+        if T == 64 and (live != T or single):   # scaled_moe::Smem: T = 64 has no OFF_HA (the W13 epilogue's ha)
+            raise ValueError(f"scaled_moe_experts_layer: T = 64 needs every row live (got {live}) and no single-item entries")
         self._add_node("scaled_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
                        [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)], one_task_per_sm=True,
                        out_buffer=lambda n: (T * K * L * 4, -1, False),
