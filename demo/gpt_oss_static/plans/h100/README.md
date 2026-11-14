@@ -1,6 +1,6 @@
-Plan files for the 132-SM H100, one per kernel graph: `<kind>_e<experts>_r<requests>.json` (`plan_path` in
-`gpt_oss_static.py`; kind `sliding`, `full` or `head`). A plan holds the grids the compiler may change (the QKV GEMM's
-task count, the gate's router split S) and the per-SM task lists. A kernel with no plan file here runs round robin.
+Selected plan files for the 132-SM H100: `<kind>_e<experts>_r<requests>.json` (`plan_path` in `gpt_oss_static.py`; kind
+`sliding`, `full` or `head`). A plan holds the grids the compiler may change (the QKV GEMM's task count, the gate's
+router split S) and the per-SM task lists. Configurations without a checked-in plan run round robin.
 
 The demo makes them with MPK's standard pipeline, as the GLM-5.3 demos do:
 
@@ -11,13 +11,12 @@ L2 emptied before each launch, page table at mid-sequence), appends the per-task
 `search.search_plan` from the current plan. The solver picks the grids (e.g. S of the gate) and the placement. The result
 is written here, and the spans of both plans are printed.
 
-The plans here are `--tune` results for the layer graphs then ending at an in-kernel MoE pool (since removed: its
+The checked-in plans are `--tune` results for the layer graphs then ending at an in-kernel MoE pool (since removed: its
 tasks are dropped from the files, the other nodes' ids and tasks unchanged) and, in the full-attention layers, the split
-attention pool (20B at one, two, four and eight requests, 120B at one and eight; the head's is the same graph for both
-models; both models at 16 and 32 requests in the 16- and 32-row buckets, `_t16`, `_t32`). `--tune` keeps whichever of
-the current and the solver's plan measures faster. 20B on 32 distinct prompts, the full layer tuned vs round robin: 8
-requests 177 -> 170, 16 requests 230 -> 223, 32 requests 374 -> 345 us; 120B at 32 requests: sliding 465 -> 425, full
-528 -> 482 us.
+attention pool. They cover the configurations with documented per-layer gains: 20B full attention at 8, 16 and 32
+requests, and full and sliding attention at 32 requests for both models. `--tune` keeps whichever of the current and the
+solver's plan measures faster. On 20B with 32 distinct prompts, the full layer tuned vs round robin: 8 requests 177 ->
+170, 16 requests 230 -> 223, 32 requests 374 -> 345 us; at 32 requests on 120B: sliding 465 -> 425, full 528 -> 482 us.
 
 The layer graph ends at the gate: the routed experts run as two kernels after the layer kernel (`sm90_moe_split`).
 
