@@ -53,11 +53,6 @@ struct MoePoolStage {
   static constexpr int ACT_OFF = act_off(NB);
 };
 
-template <int V>
-struct IC { // a compile-time int through a generic lambda
-  static constexpr int value = V;
-};
-
 // f(IC<min(ng, MAXG)>): a unit compiled for exactly its slot's token groups
 // (with a run-time count, the groups past it kept their accumulators in local
 // memory: 20B at 32 requests 8.46 -> 7.90 ms a step, 16: 6.04 -> 5.59)
@@ -88,7 +83,6 @@ template <bool GLU,
           int K,
           int TOPK,
           bool HAS_BIAS,
-          bool F32_SCALES,
           class READY>
 __device__ __forceinline__ void sm90_moe_unit(G const &g,
                                               KernelLocals &L,
@@ -240,13 +234,8 @@ __device__ __forceinline__ void sm90_moe_unit(G const &g,
 #pragma unroll
           for (int i = 0; i < 4; i++) {
             uint32_t p[4];
-            uint32_t const s8 = (sw >> (8 * i)) & 0xffu;
-            if constexpr (F32_SCALES) {
-              moe_decode_word<false>(words[i], 0u, p);
-              sc[rr][i] = moe_scale_f32(s8);
-            } else {
-              moe_decode_word<true>(words[i], moe_scale_f16x2(s8), p);
-            }
+            moe_decode_word(words[i], p);
+            sc[rr][i] = moe_scale_f32((sw >> (8 * i)) & 0xffu);
 #pragma unroll
             for (int cc = 0; cc < 4; cc++) {
               r[2 * i + (cc >> 1)][rr + 2 * (cc & 1)] = p[cc];
@@ -255,23 +244,14 @@ __device__ __forceinline__ void sm90_moe_unit(G const &g,
         }
 #pragma unroll
         for (int n = 0; n < NG; n++) {
-          if constexpr (F32_SCALES) {
 #pragma unroll
-            for (int i = 0; i < 4; i++) {
-              float d[4] = {};
-              mma_m16n8k16(d, r[2 * i], bf[n][2 * i][0], bf[n][2 * i][1]);
-              mma_m16n8k16(
-                  d, r[2 * i + 1], bf[n][2 * i + 1][0], bf[n][2 * i + 1][1]);
-              acc[mt][n][0] += sc[0][i] * d[0],
-                  acc[mt][n][1] += sc[0][i] * d[1];
-              acc[mt][n][2] += sc[1][i] * d[2],
-                  acc[mt][n][3] += sc[1][i] * d[3];
-            }
-          } else {
-#pragma unroll
-            for (int kb = 0; kb < 8; kb++) {
-              mma_m16n8k16(acc[mt][n], r[kb], bf[n][kb][0], bf[n][kb][1]);
-            }
+          for (int i = 0; i < 4; i++) {
+            float d[4] = {};
+            mma_m16n8k16(d, r[2 * i], bf[n][2 * i][0], bf[n][2 * i][1]);
+            mma_m16n8k16(
+                d, r[2 * i + 1], bf[n][2 * i + 1][0], bf[n][2 * i + 1][1]);
+            acc[mt][n][0] += sc[0][i] * d[0], acc[mt][n][1] += sc[0][i] * d[1];
+            acc[mt][n][2] += sc[1][i] * d[2], acc[mt][n][3] += sc[1][i] * d[3];
           }
         }
       }
@@ -366,7 +346,7 @@ __device__ __forceinline__ void sm90_moe_unit(G const &g,
 
 // PARAMS {N13 (W13's rows: gate and up of I outputs, 2 I), H (W13's K, W2's
 // rows), I (W2's K), E, TOPK, A (slots), HAS_BIAS, limit (fp32 bits), alpha
-// (fp32 bits), F32_SCALES, UB13, UB2 (the big units' blocks: W13 128-row
+// (fp32 bits), UB13, UB2 (the big units' blocks: W13 128-row
 // blocks, W2 64-row blocks; 1: always one)}; BUF_SLOTS {the active-expert list
 // [E + 1] i32 (its producer, the gate: its routed-expert mask's counter lines
 // give the experts), routing indices [E, T] i32, W13 blocks, W13 bias [E, N13]
@@ -389,12 +369,12 @@ __device__ __forceinline__ void run_sm90_moe_pool(Maps const &maps,
 #else
   constexpr int N13 = PARAMS::v[0], H = PARAMS::v[1], I = PARAMS::v[2],
                 E = PARAMS::v[3], TOPK = PARAMS::v[4], A = PARAMS::v[5];
-  constexpr bool HAS_BIAS = PARAMS::v[6] == 1, F32_SCALES = PARAMS::v[9] == 1;
+  constexpr bool HAS_BIAS = PARAMS::v[6] == 1;
   // a unit holds at most 16 accumulator tiles (m64 tiles x token groups: 64
   // floats a thread; 8: 20B at 32 requests 7.42 -> 7.98 ms a step, 24 or 32:
   // 7.71): a big unit's slot with more token groups (tokens routed to the
   // expert / 8) than fit runs it a block at a time
-  constexpr int NG = T / 8, UB13 = PARAMS::v[10], UB2 = PARAMS::v[11];
+  constexpr int NG = T / 8, UB13 = PARAMS::v[9], UB2 = PARAMS::v[10];
   constexpr int TL = 16;
   constexpr int NG13 = TL / (2 * UB13) < NG ? TL / (2 * UB13) : NG,
                 NG2 = TL / UB2 < NG ? TL / UB2 : NG;
@@ -403,7 +383,7 @@ __device__ __forceinline__ void run_sm90_moe_pool(Maps const &maps,
   constexpr int B13 = N13 / 128, B2 = H / 64; // blocks a slot
   constexpr int QUEUE = SELF::counter + 32, SLOT = SELF::counter + 64;
   static_assert(N13 == 2 * I && N13 % 128 == 0 && H % 64 == 0 && A <= E &&
-                    B13 % PARAMS::v[10] == 0 && B2 % PARAMS::v[11] == 0,
+                    B13 % UB13 == 0 && B2 % UB2 == 0,
                 "sm90_moe_pool: W13 128-row blocks of gate and up, W2 64-row "
                 "blocks, whole big units");
   float const limit = __int_as_float(PARAMS::v[7]),
@@ -490,31 +470,24 @@ __device__ __forceinline__ void run_sm90_moe_pool(Maps const &maps,
     if (w13) {
       auto ready = [] { return true; };
       auto unit = [&](auto ub, auto ngc, int yy, bool cl) {
-        sm90_moe_unit<true,
-                      128,
-                      ub.value,
-                      ngc.value,
-                      N13,
-                      H,
-                      TOPK,
-                      HAS_BIAS,
-                      F32_SCALES>(g,
-                                  L,
-                                  map13,
-                                  w13p,
-                                  b13,
-                                  act,
-                                  routing,
-                                  T > 8 ? routed[a] : 0u,
-                                  a,
-                                  yy,
-                                  e,
-                                  limit,
-                                  alpha,
-                                  ready,
-                                  g.cnt + QUEUE,
-                                  next,
-                                  cl);
+        sm90_moe_unit<true, 128, ub.value, ngc.value, N13, H, TOPK, HAS_BIAS>(
+            g,
+            L,
+            map13,
+            w13p,
+            b13,
+            act,
+            routing,
+            T > 8 ? routed[a] : 0u,
+            a,
+            yy,
+            e,
+            limit,
+            alpha,
+            ready,
+            g.cnt + QUEUE,
+            next,
+            cl);
       };
       if (!big) {
         moe_by_groups<NG>(ng, [&](auto c) { unit(IC<1>{}, c, y, true); });
@@ -534,31 +507,24 @@ __device__ __forceinline__ void run_sm90_moe_pool(Maps const &maps,
     } else {
       auto ready = [&] { return cnt_ld(g.cnt + SLOT + a) >= (uint32_t)y13; };
       auto unit = [&](auto ub, auto ngc, int yy, bool cl) {
-        sm90_moe_unit<false,
-                      64,
-                      ub.value,
-                      ngc.value,
-                      H,
-                      I,
-                      TOPK,
-                      HAS_BIAS,
-                      F32_SCALES>(g,
-                                  L,
-                                  map2,
-                                  w2,
-                                  b2,
-                                  out,
-                                  routing,
-                                  T > 8 ? routed[a] : 0u,
-                                  a,
-                                  yy,
-                                  e,
-                                  limit,
-                                  alpha,
-                                  ready,
-                                  g.cnt + QUEUE,
-                                  next,
-                                  cl);
+        sm90_moe_unit<false, 64, ub.value, ngc.value, H, I, TOPK, HAS_BIAS>(
+            g,
+            L,
+            map2,
+            w2,
+            b2,
+            out,
+            routing,
+            T > 8 ? routed[a] : 0u,
+            a,
+            yy,
+            e,
+            limit,
+            alpha,
+            ready,
+            g.cnt + QUEUE,
+            next,
+            cl);
       };
       if (!big) {
         moe_by_groups<NG>(ng, [&](auto c) { unit(IC<1>{}, c, y, true); });

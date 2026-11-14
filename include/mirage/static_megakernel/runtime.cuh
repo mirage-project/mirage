@@ -22,6 +22,11 @@
 
 namespace static_mk {
 
+template <int V>
+struct IC { // a compile-time int through a generic lambda
+  static constexpr int value = V;
+};
+
 // ---------------- 1. PTX helpers ----------------
 __device__ __forceinline__ uint32_t su32(void const *p) {
   return (uint32_t)__cvta_generic_to_shared(p);

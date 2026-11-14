@@ -141,13 +141,11 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
     mpk.gemm_tile_layer(input=A["attn"], weight=A["w_o"], output=A["o32"], combine="store")
     mpk.sm90_gate_layer(A["o32"], A["b_o"], A["x_in"], A["ln2"], A["w_router"], A["b_router"], A["num_tokens"], A["x1"],
                         A["h2"], A["topk_w"], A["routing"], A["active"], eps=m.eps)   # router splits: the plan's
-    # the MXFP4 scales in fp32 after the MMAs, both models: the f16 path's scaled decode costs more than it saves (20B, H100:
-    # 2957 -> 2829 us/step)
     # the routed experts as a pool (the other static models' MoE kind): the SMs share the step's units at run time, three
     # blocks a unit when a step has at least an SM's worth of them (sm90_moe_pool_layer big_units)
     if not m.split:   # (split: launch_layer runs the experts and the combine after this kernel)
         mpk.sm90_moe_pool_layer(A["h2"], A["w13"], A["w2"], A["routing"], A["active"], A["act"], A["eo"], b13=A["b13"],
-                                b2=A["b2"], limit=m.limit, alpha=1.702, fp32_scales=True, big_units=(3, 3))
+                                b2=A["b2"], limit=m.limit, alpha=1.702, big_units=(3, 3))
         mpk.sm90_mul_sum_add_layer(A["eo"], A["topk_w"], A["x1"], A["x_out"])
     if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the QKV weight's first MB into L2 at the start (as the GLM demos)
         mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))

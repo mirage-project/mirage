@@ -16,33 +16,23 @@
 namespace static_mk {
 
 #ifdef STATIC_SM90
-// The f16 pair 2^(scale - 121) of an E8M0 scale: the factor that takes an
-// E4M3 value v 2^-6 (moe_decode_word) to v 2^(scale - 127). For scales in
-// [107, 136] (sm90_moe_f16_scales: GPT-OSS-20B's) it is a normal f16 and
-// every product is exact (0 decodes to 0).
-__device__ __forceinline__ uint32_t moe_scale_f16x2(uint32_t scale) {
-  uint32_t const bits = scale == 0 ? 0u : (scale - 106u) << 10;
-  return bits | bits << 16;
-}
-// The same factor in fp32, for any scale up to 248 (GPT-OSS-120B's reach
-// 138), applied to the fp32 sum of the scale's 32-value block (exact: a power
-// of two). A zero scale gives 2^-121 for 0 (the K padding's weights are 0).
+// The f32 factor 2^(scale - 121) of an E8M0 scale (any up to 248): it takes
+// the fp32 sum of the scale's 32-value block of E4M3 values v 2^-6
+// (moe_decode_word) to the sum of v 2^(scale - 127) (exact: a power of two). A
+// zero scale gives 2^-121 for 0 (the K padding's weights are 0).
 __device__ __forceinline__ float moe_scale_f32(uint32_t scale) {
   return __uint_as_float((scale + 6u) << 23);
 }
-// Eight packed E2M1 values to four f16 pairs times the scale pair. The packing
-// (sm90_moe_pack) puts register c's two values in the low nibbles of
+// Eight packed E2M1 values to four f16 pairs (unscaled: moe_scale_f32). The
+// packing (sm90_moe_pack) puts register c's two values in the low nibbles of
 // bytes 2c, 2c + 1 (c = 0, 1) or the high nibbles of bytes 2c - 4, 2c - 3
 // (c = 2, 3); a nibble s.ee.m as the E4M3 byte s.0ee.m00 is its value times
 // 2^-6 (exact, the zero exponent included), so two shift-and-masks give eight
-// E4M3 bytes in register order, the hardware converts them to f16 pairs, one
-// multiply scales them (SCALED; else unscaled: fp32 scales, moe_scale_f32).
-template <bool SCALED>
-__device__ __forceinline__ void
-    moe_decode_word(uint32_t w, uint32_t scale2, uint32_t (&out)[4]) {
+// E4M3 bytes in register order and the hardware converts them to f16 pairs.
+__device__ __forceinline__ void moe_decode_word(uint32_t w,
+                                                uint32_t (&out)[4]) {
   uint32_t const lo = ((w << 2) & 0x1c1c1c1cu) | ((w << 4) & 0x80808080u);
   uint32_t const hi = ((w >> 2) & 0x1c1c1c1cu) | (w & 0x80808080u);
-  uint32_t f[4];
   asm("{\n.reg .b16 a, b, c, d;\n"
       "mov.b32 {a, b}, %4;\n"
       "mov.b32 {c, d}, %5;\n"
@@ -50,18 +40,8 @@ __device__ __forceinline__ void
       "cvt.rn.f16x2.e4m3x2 %1, b;\n"
       "cvt.rn.f16x2.e4m3x2 %2, c;\n"
       "cvt.rn.f16x2.e4m3x2 %3, d;\n}"
-      : "=r"(f[0]), "=r"(f[1]), "=r"(f[2]), "=r"(f[3])
+      : "=r"(out[0]), "=r"(out[1]), "=r"(out[2]), "=r"(out[3])
       : "r"(lo), "r"(hi));
-#pragma unroll
-  for (int c = 0; c < 4; c++) {
-    if constexpr (SCALED) {
-      __half2 const r = __hmul2(*reinterpret_cast<__half2 const *>(&f[c]),
-                                *reinterpret_cast<__half2 const *>(&scale2));
-      out[c] = *reinterpret_cast<uint32_t const *>(&r);
-    } else {
-      out[c] = f[c];
-    }
-  }
 }
 // d (16 weight rows x 8 tokens, fp32) += A (16 x K16) * B (K16 x 8 tokens),
 // f16

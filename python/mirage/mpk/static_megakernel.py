@@ -104,13 +104,6 @@ def _moe_pack_experts(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu
     return torch.cat([w, sc], dim=3).contiguous()
 
 
-def sm90_moe_f16_scales(scales: torch.Tensor) -> bool:
-    """Whether every (nonzero) E8M0 scale is in [107, 136], where sm90_moe_pool can apply it in f16 on the decoded weights
-    (GPT-OSS-20B's are); else the layer needs fp32_scales (GPT-OSS-120B's reach 138)."""
-    used = scales[scales != 0]
-    return used.numel() == 0 or (int(used.min()) >= 107 and int(used.max()) <= 136)
-
-
 def sm90_attention_parts_size(tokens: int, num_q_heads: int, head_dim: int, chunks: int) -> int:
     """bf16 elements of a split attention's parts buffer: the chunks' outputs [C, T, Q x D], then their log2-sum-exps
     [T, C, Q] fp32."""
@@ -1440,7 +1433,6 @@ class StaticMegakernel(PersistentKernel):
         b2: DTensor = None,       # [E, H] bf16
         limit: float = 7.0,       # GPT-OSS's SwiGLU clamp and alpha
         alpha: float = 1.702,
-        fp32_scales: bool = False,
         big_units: tuple = (1, 1),   # (W13, W2): the blocks of a big unit, taken when a step has at least an SM's worth
         block_dim: tuple = (256, 1, 1),
     ):
@@ -1448,7 +1440,7 @@ class StaticMegakernel(PersistentKernel):
         per SM; the SMs claim the units of the step's active slots from a queue, W13 (128 rows, the clamped SwiGLU fused)
         then W2 (64 rows); a unit is one block or, when the step has at least an SM's worth of them, big_units blocks; each row
         the same math whatever its unit, so the same results. The solver models it by its total work
-        (search: a pool). params = [2 I, H, I, E, TOPK, A, has bias, limit bits, alpha bits, fp32 scales, UB13, UB2]."""
+        (search: a pool). params = [2 I, H, I, E, TOPK, A, has bias, limit bits, alpha bits, UB13, UB2]."""
         E, N13, H = w13.dim(0), w13.dim(1) * 128, input.dim(1)
         I, T, A, TOPK = N13 // 2, self._tokens(routing_indices.dim(1)), act.dim(0), output.dim(1)
         assert (w13.dim(2), w13.dim(3)) == ((H + 127) // 128, 128 * 68) and H % 64 == 0
@@ -1461,8 +1453,7 @@ class StaticMegakernel(PersistentKernel):
                      output=(output, bfloat16))
         tensors = [input, w13, routing_indices, active_experts, w2] + ([b13, b2] if b13 is not None else []) + [act, output]
         self._add_node("sm90_moe_pool", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
-                       [N13, H, I, E, TOPK, A, int(b13 is not None), float_bits(limit), float_bits(alpha), int(fp32_scales),
-                        ub13, ub2],
+                       [N13, H, I, E, TOPK, A, int(b13 is not None), float_bits(limit), float_bits(alpha), ub13, ub2],
                        one_task_per_sm=True, counters=64 + A,
                        map_slots=[self._map("bf16", ("t", input), (T, H, T)), self._map("bf16", ("t", act), (A * T, I, T))],
                        buf_slots=[self._tensor_slot(active_experts), self._tensor_slot(routing_indices), self._tensor_slot(w13),

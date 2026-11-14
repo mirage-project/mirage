@@ -8,7 +8,8 @@ dequantized as transformers' convert_moe_packed_tensors: exact in bf16 and fp64)
   exact   all of it in fp64 (RoPE's angles fp32, as GptOssRotaryEmbedding's)
   hf      all of it in bf16, as Hugging Face's eager model (its softmax in bf16 too: vLLM / SGLang keep it in fp32)
 Printed per layer: the attention's share of the residual (x1 - x) and the MoE's (out - x1), static and hf, each as relRMS
-against exact (and the worst token's), and how many tokens hf routes to exact's experts.
+against exact (and the worst token's), and how many tokens static and hf route to exact's experts (a token routed
+otherwise: exact's fp64 gap between its 4th and 5th logits, a near-tie when small).
 
 python layer_check.py CKPT --data-path test.jsonl [--batch 32] [--pos 700] [--plans DIR]
 """
@@ -96,7 +97,7 @@ def main():
     pos = torch.full((R, 1), S, device="cuda")
     MP = args.max_seq // g.PAGE
     print(f"position {S}, {R} requests; relRMS vs exact fp64 (all rows / worst row)", flush=True)
-    print(f"{'layer':>9} | {'attn static':>19} {'attn hf bf16':>19} | {'moe static':>19} {'moe hf bf16':>19} | hf experts = exact")
+    print(f"{'layer':>9} | {'attn static':>19} {'attn hf bf16':>19} | {'moe static':>19} {'moe hf bf16':>19} | experts = exact")
     for i in range(m.L):
         x_in = (m.x_embed if i == 0 else m.x[i % 2])[:R].clone()
         g.launch_layer(m, kernel_of[i], inst[i], i)
@@ -126,6 +127,9 @@ def main():
             x1 = x + a
             h = md["ln2"](x1)[:, 0]
             scores, idx = md["router"](h)
+            if dt == torch.float64:
+                top = torch.nn.functional.linear(h, md["router"].weight, md["router"].bias).topk(m.TOPK + 1).values
+                gap = top[:, m.TOPK - 1] - top[:, m.TOPK]
             moe = torch.zeros_like(h)
             for e in idx.unique().tolist():
                 # [H, 2I] and [I, H], gate / up interleaved (GptOssExperts'); MXFP4 values are exact in bf16.
@@ -145,9 +149,12 @@ def main():
         a_s, a_h = rel(x1_s.double() - x, ex[0] - x), rel(hf[0].double() - x, ex[0] - x)
         m_s, m_h = rel(out_s.double() - x1_s.double(), ex[1] - ex[0]), rel(hf[1].double() - hf[0].double(), ex[1] - ex[0])
         same = (hf[2] == ex[2]).all(-1).sum().item()
+        st = (m.shared["routing"][:, :R] > 0).t().nonzero()[:, 1].view(R, -1)   # static's experts, ascending
+        flips = (st != ex[2]).any(-1)
         fmt = lambda r: f"{r[0]:.2e} / {r[1]:.2e}"
         print(f"{i:>3} {'slide' if i in sliding else 'full':>5} | {fmt(a_s):>19} {fmt(a_h):>19} | {fmt(m_s):>19} "
-              f"{fmt(m_h):>19} | hf {same}/{R}", flush=True)
+              f"{fmt(m_h):>19} | static {R - flips.sum().item()}/{R} hf {same}/{R}"
+              + "".join(f" (token {t}: gap {gap[t].item():.1e})" for t in flips.nonzero()[:, 0].tolist()), flush=True)
     for k in (k_sl, k_fu, k_hd):
         k.finalize()
 
