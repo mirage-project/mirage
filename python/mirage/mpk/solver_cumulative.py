@@ -14,7 +14,8 @@ their lengths adding up to its work (sum_k (end - join_k) >= work: solver.py's n
 join_k >= its opening. A task before the pool ends by the pool's end, a task after it starts then. The assignment puts the
 participations with a length on different SMs (they all overlap just before the end) and the empty ones on the other SMs, so
 every SM gets exactly one, after its own earlier tasks and before its later ones: solver.py's per-SM rule. The joins are
-sorted (join_0 <= join_1 <= ...): any order of them is the same plan. One pool per GPU set.
+sorted (join_0 <= join_1 <= ...): any order of them is the same plan. Several pools of a GPU set (a split attention's chunk
+pool, then the MoE pool) open one after the other (Pool.before); every SM gets one participation of each, in that order.
 
 The placement rules of solver.py (8-11):
   8 same_sm (a, b), b right after a on a's SM: when both are used one interval [start a, end b] holds an SM instead of theirs
@@ -36,7 +37,7 @@ from typing import Dict, List, Optional, Tuple
 
 from ortools.sat.python import cp_model
 
-from .solver import TICK, OptionKey, Pool, Result, SolverTask, default_groups, ticks
+from .solver import TICK, OptionKey, Pool, Result, SolverTask, default_groups, pool_posts, pools_in_order, post_sets, ticks
 
 
 class NeedsPerSM(RuntimeError):
@@ -45,26 +46,27 @@ class NeedsPerSM(RuntimeError):
 
 
 def assign_sms(intervals: List[Tuple[tuple, int, int]], num_sms: int, max_tasks_per_sm: int,
-               joins: Optional[List[int]] = None, paired: frozenset = frozenset()) -> Tuple[List[List[str]], List[int]]:
+               joins: Optional[List[List[int]]] = None,
+               paired: frozenset = frozenset()) -> Tuple[List[List[str]], Optional[List[List[int]]]]:
     """intervals = [(task ids, start, end)] (ticks; several ids: tasks that run one right after the other on one SM), at most
-    num_sms overlapping at any time (with the pool's participations) -> (per SM its task ids in start order, per SM its join
-    time). Greedy by start time onto a free SM, the free SM with the
-    fewest tasks first. joins: a pool's participations [join, pool end] (all ending at the same time); the ones with a length
-    take part in the greedy assignment (not counted in max_tasks_per_sm, not in the lists), the empty ones go to the SMs left
-    without one. paired: the cluster pairs' tasks, each onto a free SM that has held none of them (else NeedsPerSM); the
-    other items first onto the free SMs that have."""
+    num_sms overlapping at any time (with the pools' participations) -> (per SM its task ids in start order, per pool per SM
+    its join time). Greedy by start time onto a free SM, the free SM with the
+    fewest tasks first. joins: per pool (in their order), its participations [join, pool end] (all ending at the same time);
+    the ones with a length take part in the greedy assignment (not counted in max_tasks_per_sm, not in the lists), the empty
+    ones go to the SMs left without one. paired: the cluster pairs' tasks, each onto a free SM that has held none of them
+    (else NeedsPerSM); the other items first onto the free SMs that have."""
     lists = [[] for _ in range(num_sms)]
-    sm_join = [None] * num_sms
+    sm_join = [[None] * num_sms for _ in (joins or ())]
     busy = []                                        # heap of (end, sm) of the SMs running a task
     held = [False] * num_sms                         # the SM has held a pair task
     free = {False: [(0, sm) for sm in range(num_sms)], True: []}   # held -> heap of (tasks so far, sm) of the free SMs
-    pool_end = max(joins) if joins else None
+    pool_end = [max(js) for js in (joins or ())]
     items = [(s, e, 0, tid) for tid, s, e in intervals]
-    if joins:
-        items += [(j, 0, 1, k) for k, j in enumerate(joins) if j < pool_end]   # kind 1: a participation [j, pool_end]
-    for s, e, kind, item in sorted(items, key=lambda x: (x[0], x[1] if x[2] == 0 else pool_end, x[2])):
+    for q, js in enumerate(joins or ()):            # kind 1: a participation [j, pool end] of pool q
+        items += [(j, 0, 1, (q, k)) for k, j in enumerate(js) if j < pool_end[q]]
+    for s, e, kind, item in sorted(items, key=lambda x: (x[0], x[1] if x[2] == 0 else pool_end[x[3][0]], x[2])):
         if kind == 1:
-            e = pool_end
+            e = pool_end[item[0]]
         while busy and busy[0][0] <= s:
             _, sm = heapq.heappop(busy)
             heapq.heappush(free[held[sm]], (len(lists[sm]), sm))
@@ -77,24 +79,24 @@ def assign_sms(intervals: List[Tuple[tuple, int, int]], num_sms: int, max_tasks_
         n, sm = heapq.heappop(heap)
         held[sm] = held[sm] or pair
         if kind == 1:
-            if sm_join[sm] is not None:
-                raise RuntimeError(f"solver_cumulative: SM {sm} would join the pool twice")
-            sm_join[sm] = s
+            if sm_join[item[0]][sm] is not None:
+                raise RuntimeError(f"solver_cumulative: SM {sm} would join pool {item[0]} twice")
+            sm_join[item[0]][sm] = s
         else:
             if n + len(item) > max_tasks_per_sm:
                 raise RuntimeError(f"solver_cumulative: SM {sm} would get more than {max_tasks_per_sm} tasks")
             lists[sm].extend(item)
         heapq.heappush(busy, (e, sm))
-    if joins:   # the empty participations: the SMs without one join at the pool's end
-        sm_join = [pool_end if j is None else j for j in sm_join]
-    return lists, sm_join
+    # the empty participations: the SMs without one join at the pool's end
+    sm_join = [[pool_end[q] if j is None else j for j in js] for q, js in enumerate(sm_join)]
+    return lists, (sm_join if joins else None)
 
 
 def pair_sms(lists: List[List[str]], sm_join: Optional[List[int]], cluster_pairs: List[Tuple[str, str]],
              slots: List[Tuple[int, int]]):
-    """The SM lists (and joins) renumbered so that the k-th cluster pair (a, b) placed in them is on slots[k] (the k-th SM pair
-    2j, 2j + 1 among them: a on the first), the other lists after them in their order. Every SM holds at most one pair task
-    (assign_sms)."""
+    """The SM lists (and per pool the joins) renumbered so that the k-th cluster pair (a, b) placed in them is on slots[k] (the
+    k-th SM pair 2j, 2j + 1 among them: a on the first), the other lists after them in their order. Every SM holds at most one
+    pair task (assign_sms)."""
     sm_of = {tid: sm for sm, sm_list in enumerate(lists) for tid in sm_list}
     new_of = {}
     for a, b in cluster_pairs:
@@ -109,26 +111,24 @@ def pair_sms(lists: List[List[str]], sm_join: Optional[List[int]], cluster_pairs
         if sm not in new_of:
             new_of[sm] = next(rest)
     out = [None] * len(lists)
-    joins = None if sm_join is None else [None] * len(lists)
+    joins = None if sm_join is None else [[None] * len(lists) for _ in sm_join]
     for sm, new in new_of.items():
         out[new] = lists[sm]
-        if joins is not None:
-            joins[new] = sm_join[sm]
+        for q, js in enumerate(sm_join or ()):
+            joins[q][new] = js[sm]
     return out, joins
 
 
 def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps: List[Tuple[str, str]], pools: List[Pool],
           gpu_sets: List[str], num_sms: int, max_tasks_per_sm: int, time_limit_s: float = 60.0, workers: int = 16,
           fixed_options: Optional[Dict[int, str]] = None, fixed_lists: Optional[Dict[str, List[List[str]]]] = None,
-          concurrent: List[List[str]] = (), fixed_post: Optional[set] = None, hint: Optional[Result] = None,
+          concurrent: List[List[str]] = (), fixed_post: Optional[Dict[str, set]] = None, hint: Optional[Result] = None,
           same_sm: List[Tuple[str, str]] = (), cluster_pairs: List[Tuple[str, str]] = (),
           same_group: List[Tuple[str, str]] = (), near: List[Tuple[str, str, float]] = (),
           sm_group: Optional[List[int]] = None) -> Result:
     """solver.solve's interface and result. Rules 1, 3, 5, 6, 7 as there; rule 2 is one cumulative resource of num_sms per
     GPU set (plus, for a given plan, its SM order); rule 4: a pool's participations in that resource; rules 8-11 as in the
     module docstring (NeedsPerSM when the plan needs solver.py)."""
-    if len({p.gpu_set for p in pools}) < len(pools):
-        raise NotImplementedError("solver_cumulative: more than one pool in a GPU set")
     model = cp_model.CpModel()
     fixed_options = fixed_options or {}
     horizon = ticks(sum(t.duration_us + t.first_extra_us + t.prefetch_us for t in tasks) + sum(p.work_us for p in pools)
@@ -250,25 +250,16 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
                 same_group_if(a, b, [used[a], used[b], far.Not()])
                 model.Add(end[b] >= end[a] + length[b] + ticks(us)).OnlyEnforceIf([used[a], used[b], far])
     # ---- rule 4: a pool = num_sms participations [join_k, end] in its GPU set's resource
-    post = {}                                        # task id -> 1, 0 or a yes/no: runs after the pool on its SM
+    posts = pool_posts(model, pools, tasks, fixed_post)   # pool id -> {task id: 1, 0 or a yes/no: runs after the pool on its SM}
     pool_vars = {}                                   # pool id -> (opens, joins, ends)
-    for p in pools:
+    for p in pools_in_order(pools):
+        post = posts[p.id]
         opens = model.NewIntVar(0, horizon, f"open_{p.id}")
         for tid in p.inputs:
             if tid in by_id:
                 model.Add(opens >= end[tid]).OnlyEnforceIf(used[tid])
-        after, inputs = set(p.after or ()), set(p.inputs)
-        for t in tasks:
-            if t.gpu_set != p.gpu_set:
-                continue
-            if t.id in after:
-                post[t.id] = 1
-            elif t.id in inputs:
-                post[t.id] = 0
-            elif fixed_post is not None:
-                post[t.id] = 1 if t.id in fixed_post else 0
-            else:
-                post[t.id] = model.NewBoolVar(f"post_{t.id}")
+        for q in p.before or ():                     # and its earlier pools have ended
+            model.Add(opens >= pool_vars[q][2])
         ends = model.NewIntVar(0, horizon, f"end_{p.id}")
         joins, lens = [], []
         for k in range(num_sms):
@@ -309,13 +300,14 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
     for (g, gr), iv in givs.items():
         if len(iv) > len(sms_of[gr]):
             model.AddCumulative(iv, [1] * len(iv), len(sms_of[gr]))
-    for a, b in nxt.items():                         # rule 8: the pool is not between a and b
-        pa, pb = post.get(a), post.get(b)
-        if pa is not None and pb is not None:
-            if not (isinstance(pa, int) and isinstance(pb, int)):
-                model.Add(pa == pb).OnlyEnforceIf(both_of[a])
-            elif pa != pb:
-                model.Add(both_of[a] == 0)
+    for a, b in nxt.items():                         # rule 8: no pool is between a and b
+        for post in posts.values():
+            pa, pb = post.get(a), post.get(b)
+            if pa is not None and pb is not None:
+                if not (isinstance(pa, int) and isinstance(pb, int)):
+                    model.Add(pa == pb).OnlyEnforceIf(both_of[a])
+                elif pa != pb:
+                    model.Add(both_of[a] == 0)
     for per_sm in (fixed_lists or {}).values():      # a given plan: each SM runs its tasks in the given order
         for sm_list in per_sm:
             for a, b in zip(sm_list, sm_list[1:]):
@@ -362,11 +354,10 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
     chosen = {node: opt for (node, opt), v in use.items() if solver.Value(v)}
     live = [t for t in tasks if solver.Value(used[t.id])]
     us = lambda v: round(v * TICK, 3)
-    pool_of = {p.gpu_set: p.id for p in pools}
     lists, pool_times = {}, {}
     for g in gpu_sets:
-        pid = pool_of.get(g)
-        joins = [solver.Value(j) for j in pool_vars[pid][1]] if pid else None
+        pids = [p.id for p in pools_in_order(pools) if p.gpu_set == g]   # its pools, in their order
+        joins = [[solver.Value(j) for j in pool_vars[pid][1]] for pid in pids] or None
         if fixed_lists:
             lists[g] = [[tid for tid in sm_list if tid in by_id] for sm_list in fixed_lists.get(g, [])]
             sm_join = joins
@@ -374,22 +365,22 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
             items = [(ids, solver.Value(s), solver.Value(e)) for ids, s, _, e, present, hg in holders
                      if hg == g and solver.Value(present)]
             paired = frozenset(t for ab in cluster_pairs for t in ab if t in by_id and by_id[t].gpu_set == g)
-            lists[g], sm_join = [None] * num_sms, ([None] * num_sms if joins else None)
+            lists[g], sm_join = [None] * num_sms, ([[None] * num_sms for _ in joins] if joins else None)
             for gr, sms in (sms_of.items() if grouped else [(None, list(range(num_sms)))]):
                 mine = [it for it in items if gr is None or solver.Value(ing[it[0][0]][gr])]
-                local, local_join = assign_sms(mine, len(sms), max_tasks_per_sm, [joins[k] for k in sms] if joins else None,
-                                               paired)
+                local, local_join = assign_sms(mine, len(sms), max_tasks_per_sm,
+                                               [[js[k] for k in sms] for js in joins] if joins else None, paired)
                 if paired:
                     slots = [(i, i + 1) for i in range(len(sms) - 1) if sms[i] % 2 == 0 and sms[i + 1] == sms[i] + 1]
                     local, local_join = pair_sms(local, local_join, [ab for ab in cluster_pairs if ab[0] in paired], slots)
                 for i, sm in enumerate(sms):
                     lists[g][sm] = local[i]
-                    if joins:
-                        sm_join[sm] = local_join[i]
-        if pid:
+                    for q in range(len(joins or ())):
+                        sm_join[q][sm] = local_join[q][i]
+        for q, pid in enumerate(pids):
             o, _, e = pool_vars[pid]
-            pool_times[pid] = {"open": us(solver.Value(o)), "joins": [us(j) for j in sm_join], "end": us(solver.Value(e))}
+            pool_times[pid] = {"open": us(solver.Value(o)), "joins": [us(j) for j in sm_join[q]], "end": us(solver.Value(e))}
     times = {t.id: (us(solver.Value(start[t.id])), us(solver.Value(end[t.id]))) for t in live}
-    post_ids = {tid for tid, v in post.items() if solver.Value(used[tid]) and (v == 1 if isinstance(v, int) else solver.Value(v))}
+    post_ids = post_sets(solver, posts, used)
     return Result(solver.StatusName(status), us(solver.Value(C)), us(solver.BestObjectiveBound()), solve_s, chosen, lists, times,
                   post_ids, pool_times)

@@ -331,7 +331,7 @@ def host_code(pk, schedules: List[dict], profile: bool = False) -> List[str]:
     fill = {
         "@LAUNCH@": launch_code(cluster_size(schedules)),     # first: its text has the other @NAME@s in it
         "@CLUSTER@": str(cluster_size(schedules)),
-        "@INIT@": f"static_host_init(g_ctx, std::map<std::string, std::string>{{{args_code}}});",
+        "@INIT@": f"g_args = std::map<std::string, std::string>{{{args_code}}};\n  static_host_init(g_ctx, g_args);",
         "@ARGS@": f"std::map<std::string, std::string>{{{args_code}}}",
         "@LAUNCH_ARGS@": "static_host::g_gpus[gpu].maps, static_host::g_gpus[gpu].g",
         "@THREADS@": str(THREADS), "@SMEM@": "STATIC_SMEM_BYTES",
@@ -395,6 +395,7 @@ struct StaticGpu {
 static size_t const static_times_count = (size_t)static_mk::NSM * (@MAX_TASKS@) * @SLOTS@;   // timing build: per SM, per list entry
 static std::vector<StaticGpu> g_st;
 static StaticContext g_ctx;
+static std::map<std::string, std::string> g_args;
 static unsigned long long g_launches = 0;
 static int g_dev0 = 0;   // the CUDA device of GPU 0 (set_device_func; GPU g = device g_dev0 + g)
 
@@ -600,7 +601,71 @@ static cudaError_t static_read(int g, std::string const &name, std::vector<char>
   return e;
 }
 
+// ---- instances (one GPU, serving mode): the same kernel and schedule over more sets of tensors (a model's layers: each
+// its own weights, buffers, counters and launch number), launched in order on a stream the caller gives, each a programmatic
+// dependent launch of the kernel before it (PDL: its CTAs start, and reset their own buffers, as the previous kernel's CTAs
+// leave their SMs; kernel_begin's griddepcontrol.wait holds them before they read its output) ----
+static std::vector<static_host::GpuState> g_inst;
+
+static void static_add_instance(std::map<std::string, void *> const &tensors) {
+#ifndef STATIC_RESET_IN_KERNEL
+  (void)tensors;
+  fprintf(stderr, "layer: instances need the serving build (-DSTATIC_RESET_IN_KERNEL)\n");
+  exit(1);
+#else
+  using namespace static_host;
+  if (static_mk::GPUS != 1 || g_st.empty()) {
+    fprintf(stderr, "layer: instances are for a one-GPU layer, after init\n");
+    exit(1);
+  }
+  ST_CK(cudaSetDevice(g_dev0));
+  g_inst.emplace_back();
+  GpuState &s = g_inst.back();
+  s.g = G{};
+  s.g.rank = 0;
+  s.g.rv = dmalloc<unsigned char>(s, 2 * EXCHANGE_SET);
+  ST_CK(cudaMemset(s.g.rv, 0, 2 * EXCHANGE_SET));
+  s.args = g_args;
+  s.tensors = tensors;
+  build_bufs(s, tensors, g_args);
+  build_shell_buffers(s);
+  build_maps(s.maps, s, tensors, g_args);
+  build_serving(s);
+#endif
+}
+
+// instances [first, first + count) on stream st, each programmatically dependent on the work before it on st
+static void static_launch_instances(int first, int count, cudaStream_t st) {
+  if (first < 0 || first + count > (int)g_inst.size()) {
+    fprintf(stderr, "layer: instances %d..%d, %zu added\n", first, first + count - 1, g_inst.size());
+    exit(1);
+  }
+  ST_CK(cudaSetDevice(g_dev0));
+  for (int i = first; i < first + count; i++) {
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(static_mk::NSM);
+    cfg.blockDim = dim3(@THREADS@);
+    cfg.dynamicSmemBytes = (size_t)(@SMEM@);
+    cfg.stream = st;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[0].val.programmaticStreamSerializationAllowed = 1;
+    cfg.attrs = at;
+    cfg.numAttrs = 1;
+#if STATIC_PROFILE
+    ST_CK(cudaLaunchKernelEx(&cfg, layer_kernel, g_inst[i].maps, g_inst[i].g, (StaticTask const *)g_st[0].tasks, g_st[0].times));
+#else
+    ST_CK(cudaLaunchKernelEx(&cfg, layer_kernel, g_inst[i].maps, g_inst[i].g, (StaticTask const *)g_st[0].tasks));
+#endif
+  }
+}
+
 static void static_finalize() {
+  for (static_host::GpuState &s : g_inst) {
+    cudaSetDevice(g_dev0);
+    for (void *p : s.owned) cudaFree(p);
+  }
+  g_inst.clear();
   static_host_finalize(g_ctx);
   for (size_t g = 0; g < g_st.size(); g++) {
     StaticGpu &s = g_st[g];
@@ -740,6 +805,26 @@ static PyObject *py_layout(PyObject *self, PyObject *args) {
                        "max_tasks", (int)(@MAX_TASKS@), "time_slots", @SLOTS@, "warps", @WARPS@, "serving", serving);
 }
 static PyObject *py_finalize(PyObject *self, PyObject *args) { static_finalize(); Py_RETURN_NONE; }
+static PyObject *py_add_instance(PyObject *self, PyObject *args) {
+  PyObject *nl, *pl;
+  if (!PyArg_ParseTuple(args, "OO", &nl, &pl)) return NULL;
+  if (!PyList_Check(nl) || !PyList_Check(pl) || PyList_Size(nl) != PyList_Size(pl)) {
+    PyErr_SetString(PyExc_TypeError, "names / pointers: two lists of one length");
+    return NULL;
+  }
+  std::map<std::string, void *> tensors;
+  for (Py_ssize_t i = 0; i < PyList_Size(nl); i++)
+    tensors[PyUnicode_AsUTF8(PyList_GetItem(nl, i))] = PyLong_AsVoidPtr(PyList_GetItem(pl, i));
+  static_add_instance(tensors);
+  return PyLong_FromSize_t(g_inst.size() - 1);
+}
+static PyObject *py_launch_instances(PyObject *self, PyObject *args) {
+  int first, count;
+  unsigned long long stream;
+  if (!PyArg_ParseTuple(args, "iiK", &first, &count, &stream)) return NULL;
+  static_launch_instances(first, count, (cudaStream_t)stream);
+  Py_RETURN_NONE;
+}
 static PyMethodDef StaticMethods[] = {
   {"init_func", py_init, METH_VARARGS, "the graph's tensors of every GPU (names, pointers): the buffers and maps"},
   {"init_rank_func", py_init_rank, METH_VARARGS,
@@ -754,6 +839,8 @@ static PyMethodDef StaticMethods[] = {
   {"read_func", py_read, METH_VARARGS, "(gpu, name): an instrumentation buffer's bytes (also while a launch has not finished)"},
   {"layout_func", py_layout, METH_NOARGS, "the sizes of the instrumentation buffers"},
   {"finalize_func", py_finalize, METH_NOARGS, "free everything"},
+  {"add_instance_func", py_add_instance, METH_VARARGS, "(names, pointers): one more set of tensors (one GPU, serving); its index"},
+  {"launch_instances_func", py_launch_instances, METH_VARARGS, "(first, count, stream): those instances in order on the stream, PDL"},
   {NULL, NULL, 0, NULL}};
 static struct PyModuleDef StaticModuleDef = {PyModuleDef_HEAD_INIT, "__mirage_static_launcher", NULL, -1, StaticMethods, NULL, NULL, NULL, NULL};
 PyMODINIT_FUNC PyInit___mirage_static_launcher(void) { return PyModule_Create(&StaticModuleDef); }
@@ -814,19 +901,32 @@ class StaticKernel:
         """The sizes of the instrumentation buffers (read)."""
         return self.module.layout_func()
 
+    def add_instance(self, tensors: dict) -> int:
+        """One more set of the graph's tensors ({name: torch tensor}; one GPU, the serving build): its own buffers, maps and
+        counters, run by launch_instances. Returns its index."""
+        return self.module.add_instance_func(list(tensors.keys()), [t.data_ptr() for t in tensors.values()])
+
+    def launch_instances(self, first: int, count: int, stream=None):
+        """Instances [first, first + count) in order on `stream` (a torch.cuda.Stream; default: the current one), each a
+        programmatic dependent launch (PDL) of the work before it there."""
+        import torch
+        stream = stream or torch.cuda.current_stream()
+        self.module.launch_instances_func(int(first), int(count), int(stream.cuda_stream))
+
     def finalize(self):
         if not self._finalized:
             self.module.finalize_func()
             self._finalized = True
 
 
-def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]] = None) -> List[str]:
-    """-O3 -std=c++17, the GPU's own arch, -lcuda, plus what a Python extension
-    needs (-shared, -fPIC, the Python headers)."""
+def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]] = None,
+                    target_cc: Optional[int] = None) -> List[str]:
+    """-O3 -std=c++17, the arch (target_cc; None: the GPU's own), -lcuda, plus
+    what a Python extension needs (-shared, -fPIC, the Python headers)."""
     import torch
     from ..kernel import get_key_paths
     _, include_path, _ = get_key_paths()
-    major, minor = torch.cuda.get_device_capability(0)
+    major, minor = divmod(target_cc, 10) if target_cc else torch.cuda.get_device_capability(0)
     arch = f"{major}{minor}a" if major >= 9 else f"{major}{minor}"
     scheme = sysconfig.get_default_scheme() if hasattr(sysconfig, "get_default_scheme") else sysconfig._get_default_scheme()
     if scheme == "posix_local":
@@ -840,7 +940,7 @@ def compile_command(cu_path: str, so_path: str, extra_flags: Optional[List[str]]
 
 def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dict]] = None, out_dir: Optional[str] = None,
                    extra_flags: Optional[List[str]] = None, profile: bool = False, device: int = 0, rank: Optional[int] = None,
-                   exchange: Optional[tuple] = None) -> StaticKernel:
+                   exchange: Optional[tuple] = None, build_only: bool = False) -> Optional[StaticKernel]:
     """  1. read the schedule files; write <out_dir>/layer.cu = generate_code
        2. nvcc it into a Python extension (compile_command) and load it
        3. init_func: every GPU's tensors (gpu_tensors[g] = {name: torch tensor on GPU g}) -> static_init -> static_host_init
@@ -851,7 +951,8 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
     profile: the timing build (static_harness.Harness.task_times). device: the CUDA device of GPU 0 (GPU g = device + g; a layer
     built for one GPU inside another framework's process: that process's device). MIRAGE_STATIC_BUILD_CACHE (a directory): the
     builds by the md5 of layer.cu, the flags and the kernel templates (code_tag); the same layer.cu (e.g. every KDA layer of a
-    model, every rank) is compiled once and copied, and each copy is loaded on its own (its own host state)."""
+    model, every rank) is compiled once and copied, and each copy is loaded on its own (its own host state).
+    build_only: stop after nvcc (nothing loaded; returns None): a build for pk.target_cc on a GPU of another architecture."""
     num_gpus = len(schedule_paths)
     gpu_tensors = gpu_tensors or [dict(pk._model_tensors)]
     assert len(gpu_tensors) == (1 if rank is not None else num_gpus), "one tensor dict per GPU of this process"
@@ -868,7 +969,7 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
     with open(cu_path, "w") as f:
         f.write(generate_code(pk, schedules, profile))
 
-    command = compile_command(cu_path, so_path, extra_flags)
+    command = compile_command(cu_path, so_path, extra_flags, getattr(pk, "target_cc", None))
     cache = os.environ.get("MIRAGE_STATIC_BUILD_CACHE")
     if cache:
         import fcntl
@@ -891,6 +992,8 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
     else:
         print("building the layer:", " ".join(command), flush=True)
         subprocess.check_call(command)
+    if build_only:
+        return None
 
     spec = importlib.util.spec_from_file_location("__mirage_static_launcher", so_path)
     module = importlib.util.module_from_spec(spec)

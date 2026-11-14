@@ -36,7 +36,7 @@ from . import static_schedule
 from .compiler import (Node, box, can_pair, candidate_grids, dims, graph_nodes, overlaps, owned_positions, pair_clusters,
                        producer_of, tname)
 from . import solver_cumulative
-from .solver import Pool, SolverTask, solve
+from .solver import Pool, SolverTask, pools_in_order, solve
 
 
 def option_id(grid: tuple) -> str:
@@ -224,6 +224,7 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
         succ = {}
         for a, b in set_deps:
             succ.setdefault(a, []).append(b)
+        set_pools = []
         for n in nodes:
             if is_pool(n):
                 after, stack = set(), list(pool_readers.get(n.graph_idx, ()))   # the pool's readers and everything after them
@@ -232,8 +233,12 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
                     if t not in after:
                         after.add(t)
                         stack += succ.get(t, [])
-                pools.append(Pool(f"{n.graph_idx}@{gpu_set}", gpu_set, cost.pool_us(n), sorted(pool_inputs.get(n.graph_idx, ())),
-                                  sorted(after)))
+                set_pools.append(Pool(f"{n.graph_idx}@{gpu_set}", gpu_set, cost.pool_us(n),
+                                      sorted(pool_inputs.get(n.graph_idx, ())), sorted(after)))
+        for p in set_pools:   # a pool waits for an earlier one when it reads what runs after it (the MoE pool after a
+            # split attention's chunk pool: its inputs are after the chunks' merge)
+            p.before = sorted(q.id for q in set_pools if q is not p and set(p.inputs) & set(q.after))
+        pools += set_pools
         # concurrent groups: the tasks of one option of a node with concurrent_along_axis that differ only in that axis
         for n in nodes:
             a = n.info["concurrent_along_axis"]
@@ -255,7 +260,7 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     fixed_options = fixed_lists = fixed_post = None
     given = given or start_from                         # start_from: fixed first (its times), then the free search from it
     if given:
-        fixed_post = set()                              # the tasks listed after the pool entry on their SM
+        fixed_post = {}                                 # pool id -> the tasks listed after its entry on their SM
         fixed_options = {n.graph_idx: option_id(tuple(given["grids"].get(n.graph_idx, n.grid))) for n in nodes}
         # its lists as compile_plan runs them: the cluster pairs renumbered onto clusters (pair_clusters), so that as a hint
         # the plan keeps rule 9; lists whose pairs do not fit stay as they are
@@ -274,17 +279,17 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
             g0 = gpus[0]
             fixed_lists[gpu_set] = []
             for sm_list in given_lists(g0):
-                ids, past_pool = [], False
+                ids, past = [], []
                 for node, pos in sm_list:
                     n = by_idx[node]
                     if is_pool(n):
-                        past_pool = True
-                        continue                        # the pool is not a placed task
+                        past.append(f"{node}@{gpu_set}")
+                        continue                        # a pool is not a placed task
                     lo = owned_positions(n, as_grid(fixed_options[node])[0], g0, num_gpus)[0]
                     rel = (pos[0] - lo,) + tuple(pos[1:])
                     ids.append(f"{gpu_set}:{node}:{fixed_options[node]}:{'.'.join(map(str, rel))}")
-                    if past_pool:
-                        fixed_post.add(ids[-1])
+                    for pid in past:
+                        fixed_post.setdefault(pid, set()).add(ids[-1])
                 fixed_lists[gpu_set].append(ids)
 
     # step 5. An SM's list holds at most MAX_TASKS_PER_SM - 1 tasks (then the end entry), one of them each pool's task
@@ -323,23 +328,23 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
 
     # step 6: the plan. grids: each node with changeable grid dims: its chosen option as a grid. lists: per GPU, per SM, the
     # solver's task ids of the GPU's set turned back into (node, position on this GPU): relative position + this GPU's first
-    # owned row block; the SM's pool task (task x = SM x) goes between the tasks before the pool and the tasks after it (the
-    # solver's post: the tasks reading its output, and the tasks it chose to run after it).
+    # owned row block; each pool's task on the SM (task x = SM x) goes between the tasks before the pool and the tasks after it
+    # (the solver's post: the tasks reading its output, and the tasks it chose to run after it), the pools in their order.
     grids = {n.graph_idx: as_grid(result.chosen[n.graph_idx]) for n in nodes if n.info["changeable_grid_dims"]}
-    pool_nodes = [n.graph_idx for n in nodes if is_pool(n)]
-    after_pool = result.post
     lists = [None] * num_gpus
     for gpu_set, gpus in gpu_sets.items():
+        order = [int(p.id.split("@")[0]) for p in pools_in_order([p for p in pools if p.gpu_set == gpu_set])]
         for gpu in gpus:
             per_sm = []
             for sm, sm_list in enumerate(result.lists[gpu_set]):
-                before, after = [], []
+                segs = [[] for _ in range(len(order) + 1)]   # segment i: after the first i pools
                 for tid in sm_list:
                     node, opt, rel = where[tid]
                     n = by_idx[node]
                     lo = owned_positions(n, as_grid(opt)[0], gpu, num_gpus)[0]
-                    (after if tid in after_pool else before).append((node, (rel[0] + lo,) + tuple(rel[1:])))
-                per_sm.append(before + [(k, (sm, 0, 0)) for k in pool_nodes] + after)
+                    i = sum(tid in result.post.get(f"{k}@{gpu_set}", ()) for k in order)
+                    segs[i].append((node, (rel[0] + lo,) + tuple(rel[1:])))
+                per_sm.append(segs[0] + [x for i, k in enumerate(order) for x in [(k, (sm, 0, 0))] + segs[i + 1]])
             lists[gpu] = per_sm
     summary = {"status": result.status, "predicted_us": result.predicted_us, "bound_us": result.bound_us,
                "solve_s": result.solve_s, "grids": {f"{by_idx[k].name}#{k}": list(v) for k, v in grids.items()}}

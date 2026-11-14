@@ -101,6 +101,29 @@ static void map_bf16(
                                 CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
+static void map_u8(CUtensorMap *m,
+                   void *base,
+                   uint64_t rows,
+                   uint64_t row_bytes,
+                   uint32_t box_rows,
+                   uint32_t box_bytes) {
+  cuuint64_t gd[5] = {row_bytes, rows, 1, 1, 1};
+  cuuint64_t gs[4] = {
+      row_bytes, row_bytes * rows, row_bytes * rows, row_bytes * rows};
+  cuuint32_t bd[5] = {box_bytes, box_rows, 1, 1, 1}, es[5] = {1, 1, 1, 1, 1};
+  MKS_CU(cuTensorMapEncodeTiled(m,
+                                CU_TENSOR_MAP_DATA_TYPE_UINT8,
+                                5,
+                                base,
+                                gd,
+                                gs,
+                                bd,
+                                es,
+                                CU_TENSOR_MAP_INTERLEAVE_NONE,
+                                CU_TENSOR_MAP_SWIZZLE_NONE,
+                                CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
+}
 // Map packed weights, with bt pieces per tensor-map box.
 // fp8 false: MXFP4 [piece][128 rows][64 bytes].
 // fp8 true: e4m3 [piece][128 rows][128 bytes].
@@ -443,6 +466,8 @@ static void build_map(Maps &maps,
     map_act8(&maps.m[i], p, u(2), u(3));
   } else if (kind == "act8kt" && m.size() == 5) {
     map_act8_kt(&maps.m[i], p, u(2), u(3), (uint32_t)u(4));
+  } else if (kind == "u8" && m.size() == 6) {
+    map_u8(&maps.m[i], p, u(2), u(3), (uint32_t)u(4), (uint32_t)u(5));
   } else {
     fprintf(stderr,
             "static_host: map.%d: bad declaration (%s, %zu fields)\n",

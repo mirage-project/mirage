@@ -1508,7 +1508,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   }
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
          "$, $, $, $, $, "
-         "$, $, $, $, $>(",
+         "$, $, $, $, $, $>(",
          num_q_heads_per_kv, /* NUM_QO_HEADS               */
          1,                  /* NUM_KV_HEADS               */
          num_kv_heads,       /* NUM_QO_GROUPS              */
@@ -4559,7 +4559,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
   code.inc_indent();
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, "
          "$, $, $, $, $, "
-         "$, $, $, $, $, $, $, $>(",
+         "$, $, $, $, $, $, $, $, $>(",
          num_q_heads / num_kv_heads, /* NUM_QO_HEADS */
          1,                          /* NUM_KV_HEADS */
          num_kv_heads,               /* NUM_QO_GROUPS */
@@ -4574,6 +4574,7 @@ int TaskRegister::register_paged_attention_split_kv_hopper_task(
          max_tokens,        /* MAX_TOKENS */
          "true",            /* PARTITION_KV */
          num_kv_chunks,     /* NUM_KV_CHUNKS */
+         head_dim,          /* ROTARY_DIM */
          page_stride_rows /* PAGE_STRIDE_ROWS */);
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
@@ -5678,6 +5679,79 @@ int TaskRegister::register_residual_add_sm100_task(
                               params,
                               (int)bgraph.operators.size() - 1,
                               1);
+}
+
+int TaskRegister::register_sm90_rmsnorm_task(threadblock::Graph const &bgraph,
+                                             std::vector<int> const &params) {
+  // params: {H, eps bits}. inputs: x, weight; output: y
+  // (tasks/sm90_rmsnorm.cuh)
+  return register_static_task(
+      this, TASK_SM90_RMSNORM, "sm90_rmsnorm", bgraph, params, 2, 2);
+}
+
+int TaskRegister::register_sm90_attention_task(threadblock::Graph const &bgraph,
+                                               std::vector<int> const &params) {
+  // params: {Q, KVH, D, max seq, page, window, has sink, has qkv bias}; the
+  // optional inputs left out (tasks/sm90_attention.cuh)
+  return register_static_task(this,
+                              TASK_SM90_ATTENTION,
+                              "sm90_attention",
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              8);
+}
+
+int TaskRegister::register_sm90_attention_split_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {Q, KVH, D, max seq, page, chunk, chunks, has qkv bias, R}; the
+  // optional inputs left out (tasks/sm90_attention_split.cuh: a pool, one
+  // task per SM)
+  return register_static_task(this,
+                              TASK_SM90_ATTENTION_SPLIT,
+                              "sm90_attention_split",
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              9);
+}
+
+int TaskRegister::register_sm90_attention_merge_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {Q, D, chunk, chunks, has sink, page, R}; the optional sinks left
+  // out
+  // (tasks/sm90_attention_merge.cuh)
+  return register_static_task(this,
+                              TASK_SM90_ATTENTION_MERGE,
+                              "sm90_attention_merge",
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              6);
+}
+
+int TaskRegister::register_sm90_gate_task(threadblock::Graph const &bgraph,
+                                          std::vector<int> const &params) {
+  // params: {H, E, TOPK, eps bits} (router splits: the grid's y); four
+  // outputs (tasks/sm90_gate.cuh)
+  assert(params.size() == 4);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(
+      bgraph, (int)bgraph.operators.size() - 4, 4, input_ops, output_ops);
+  return register_task_variant(TASK_SM90_GATE,
+                               static_build_only_task("sm90_gate", params));
+}
+
+int TaskRegister::register_sm90_next_token_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {V, H, P, G, page, PER, R, MP}. inputs: logits, embedding,
+  // prompt; outputs: x_next, tokens, kv_indptr, last_page_len, kv_indices
+  // (tasks/sm90_next_token.cuh)
+  assert(params.size() == 8);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 3, 5, input_ops, output_ops);
+  return register_task_variant(
+      TASK_SM90_NEXT_TOKEN, static_build_only_task("sm90_next_token", params));
 }
 
 int TaskRegister::register_group_quant_sm100_task(

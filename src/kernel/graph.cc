@@ -1063,6 +1063,46 @@ void Graph::register_task_for_op(KNOperator const *op,
                         1,
                         TASK_RESIDUAL_ADD_SM100,
                         variant_id);
+  } else if (name == "sm90_rmsnorm") {
+    int variant_id =
+        task_register->register_sm90_rmsnorm_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_SM90_RMSNORM, variant_id);
+  } else if (name == "sm90_attention") {
+    int variant_id =
+        task_register->register_sm90_attention_task(customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple((int)customized->bgraph.operators.size() - 1,
+                        1,
+                        TASK_SM90_ATTENTION,
+                        variant_id);
+  } else if (name == "sm90_attention_split") {
+    int variant_id = task_register->register_sm90_attention_split_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple((int)customized->bgraph.operators.size() - 1,
+                        1,
+                        TASK_SM90_ATTENTION_SPLIT,
+                        variant_id);
+  } else if (name == "sm90_attention_merge") {
+    int variant_id = task_register->register_sm90_attention_merge_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple((int)customized->bgraph.operators.size() - 1,
+                        1,
+                        TASK_SM90_ATTENTION_MERGE,
+                        variant_id);
+  } else if (name == "sm90_gate") {
+    int variant_id =
+        task_register->register_sm90_gate_task(customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple((int)customized->bgraph.operators.size() - 4,
+                        4,
+                        TASK_SM90_GATE,
+                        variant_id);
+  } else if (name == "sm90_next_token") {
+    int variant_id = task_register->register_sm90_next_token_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 5, TASK_SM90_NEXT_TOKEN, variant_id);
   } else if (name == "group_quant") {
     int variant_id = task_register->register_group_quant_sm100_task(
         customized->bgraph, params);

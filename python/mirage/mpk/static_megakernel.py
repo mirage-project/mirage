@@ -14,6 +14,7 @@ the node's params; the kernel-wide ones (tokens per step, GPUs) are the StaticMe
 generated layer defines (config.cuh).
 """
 import math
+import os
 import struct
 
 import torch
@@ -51,6 +52,63 @@ def zq32_bytes(tokens: int, width: int) -> int:
     """tasks/group_quant.cuh zq32_bytes: z_q [tokens][width] e4m3, then its fp32 scales [width / 128][tokens]."""
     return tokens * width + (width // 128) * tokens * 4
 
+def sm90_flags() -> list[str]:
+    """nvcc flags and include paths for Hopper static tasks."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    return ["-std=c++20", "--expt-relaxed-constexpr", "-DMPK_TARGET_CC=90", "-DMIRAGE_GRACE_HOPPER", "-DMPK_ENABLE_TMA",
+            "-DMIRAGE_BACKEND_USE_CUDA", "-lineinfo", f"-I{root}/include/mirage/persistent_kernel",
+            f"-I{root}/deps/cutlass/include", f"-I{root}/deps/cutlass/tools/util/include"]
+
+
+def sm90_moe_pack(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu: bool,
+                  experts_per_chunk: int = 8) -> torch.Tensor:
+    """An expert projection's MXFP4 weights [E, N, K / 2] u8 (two E2M1 values a byte, low nibble first) and E8M0 scales
+    [E, N, K / 32] u8 to blocks [E, N / rows, K tiles, rows x 68] u8 (sm90_moe_split_weights then permutes each value byte's
+    bits for sm90_moe_split.cu), in the order a block streams: per K tile of 128 values (zero-padded; zero decodes to 0) its rows' 64 bytes, then their 4 scales. A row's 64 bytes are
+    permuted so that MMA thread q's A fragment (K columns 16 kb + 2q + {0, 1, 8, 9}, kb = 0..7: packed bytes 8 kb + q
+    (+ 4)) is its bytes 16 q .. 16 q + 15, in the order (kb, + 4), and the nibbles within each 4-byte word ordered for the
+    kernel's E4M3 decode. glu (W13, gate rows then up rows): the rows reordered so
+    that each 128 are 64 gate rows and the up rows of the same outputs (the task's SwiGLU, rows 128). The experts go through
+    in chunks of `experts_per_chunk` into the output (a large checkpoint's temporaries stay small)."""
+    E, N, KH = packed.shape
+    kt = (KH + 63) // 64
+    assert scales.numel() == 0 or int(scales.max()) <= 248, "sm90_moe_pack: E8M0 scales up to 248 (fp32 2^(s - 121))"
+    out = torch.empty(E, N // rows, kt, rows * 68, dtype=torch.uint8, device=packed.device)
+    for e0 in range(0, E, experts_per_chunk):
+        out[e0:e0 + experts_per_chunk] = _moe_pack_experts(packed[e0:e0 + experts_per_chunk],
+                                                            scales[e0:e0 + experts_per_chunk], rows, glu, kt)
+    return out
+
+
+def _moe_pack_experts(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu: bool, kt: int) -> torch.Tensor:
+    """sm90_moe_pack of a slice of the experts."""
+    E, N, KH = packed.shape
+    w = torch.zeros(E, N, kt * 64, dtype=torch.uint8, device=packed.device)
+    w[:, :, :KH] = packed
+    sc = torch.zeros(E, N, kt * 4, dtype=torch.uint8, device=scales.device)
+    sc[:, :, :scales.shape[2]] = scales
+    if glu:
+        assert rows == 128 and N % 128 == 0
+        w = w.view(E, 2, N // 128, 64, -1).transpose(1, 2).reshape(E, N, -1)
+        sc = sc.view(E, 2, N // 128, 64, -1).transpose(1, 2).reshape(E, N, -1)
+    # byte 8 kb + 4 h + q of a row's tile -> 16 q + 2 kb + h; then [E, N / rows, K tiles, rows, 64]
+    w = w.view(E, N // rows, rows, kt, 8, 2, 4).permute(0, 1, 3, 2, 6, 4, 5).reshape(E, N // rows, kt, rows * 64)
+    # within each 4-byte word (its registers c = 0..3 a byte each, low nibble the even K): register c's two nibbles to
+    # the low nibbles of bytes 2c, 2c + 1 (c < 2) or the high nibbles of bytes 2c - 4, 2c - 3 (the kernel's E4M3 decode)
+    nib = torch.stack((w & 15, w >> 4), dim=-1).view(*w.shape[:-1], -1, 8)    # [..., words, old nibble 2c + odd]
+    new = torch.empty_like(nib)
+    new[..., [0, 2, 4, 6, 1, 3, 5, 7]] = nib
+    new = new.view(*w.shape[:-1], -1, 4, 2)
+    w = (new[..., 0] | (new[..., 1] << 4)).reshape(w.shape)
+    sc = sc.view(E, N // rows, rows, kt, 4).permute(0, 1, 3, 2, 4).reshape(E, N // rows, kt, rows * 4)
+    return torch.cat([w, sc], dim=3).contiguous()
+
+
+def sm90_attention_parts_size(tokens: int, num_q_heads: int, head_dim: int, chunks: int) -> int:
+    """bf16 elements of a split attention's parts buffer: the chunks' outputs [C, T, Q x D], then their log2-sum-exps
+    [T, C, Q] fp32."""
+    return chunks * tokens * num_q_heads * head_dim + 2 * tokens * chunks * num_q_heads
+
 
 def float_bits(v: float) -> int:
     """An fp32 value as the int of its bits (a param; the kernel template reads it with __int_as_float)."""
@@ -59,15 +117,21 @@ def float_bits(v: float) -> int:
 
 class StaticMegakernel(PersistentKernel):
 
-    def __init__(self, num_gpus: int = 1, num_sms: int = None):
+    def __init__(self, num_gpus: int = 1, num_sms: int = None, target_cc: int = None):
         """num_gpus: the GPUs the layer is divided over (a rows-split node's GPUs, an exchange buffer's slots; config.cuh GPUS).
         num_sms: the SMs of one GPU, one task list each (config.cuh NSM); None: the current device's.
+        target_cc: the architecture to build for (90, 100); None: the current device's (another one: compile_static
+        build_only, e.g. a CI build of the Hopper tasks on a Blackwell runner).
         PersistentKernel.__init__ takes MPK's serving configuration (mode, workers, schedulers, batch limits, paging, meta
         tensors); the static path reads none of it (no runtime scheduler: every SM runs its own task list), so it gets MPK's
         defaults, with test_mode allocating the meta tensors it checks."""
         super().__init__(**PersistentKernel.get_default_init_parameters(), test_mode=True)
         self.num_gpus = num_gpus
         self.num_sms = num_sms
+        if target_cc is not None:
+            self.target_cc = target_cc
+        if self.target_cc == 90:
+            self.max_bufs = 64
         self.tokens = None        # tokens per step: the first dimension of the layers' token-major tensors (_tokens; config.cuh T)
         self._static_nodes = {}   # graph index -> what compiler.py needs about a node (_add_node)
         self._bufs = []           # G::buf slot -> {"kind": out | exchange | scratch | tensor, ...} (_add_node, _scratch, _tensor_slot)
@@ -238,7 +302,8 @@ class StaticMegakernel(PersistentKernel):
         return end, hello, offsets, sizes
 
     def l2_prefetch_weights(self, budget_mb: float = 64.0,
-                            stop_at: tuple = ("kda_decode", "sparse_mla", "scaled_moe_experts")) -> int:
+                            stop_at: tuple = ("kda_decode", "sparse_mla", "scaled_moe_experts", "sm90_attention",
+                                              "sm90_attention_split")) -> int:
         """STATIC_L2_PREFETCH (core.cuh kernel_begin): the layer's first GEMMs' weights (gemm_tile's weight, scaled_gemm_tile's
         weight and its scales; graph inputs) in graph order, those before the first node of a kind in stop_at (the
         attention or expert core: the GEMMs after it run long after the start, and their weights in flight at the start
@@ -327,7 +392,8 @@ class StaticMegakernel(PersistentKernel):
         polled (0 / 1)[, L of skip_seq]]; map_slots = [weight map slot, activation map slot (-1: polled)]; buf_slots = [seq_lens of
         skip_seq] or none."""
         assert input.num_dims == 2 and weight.num_dims == 2 and weight.dim(1) == input.dim(1)
-        assert output.num_dims == 2 and output.dim(1) == weight.dim(0) and weight.dim(0) % 128 == 0 and weight.dim(1) % 128 == 0
+        multiple = 64 if self.target_cc == 90 else 128
+        assert output.num_dims == 2 and output.dim(1) == weight.dim(0) and weight.dim(0) % multiple == 0 and weight.dim(1) % multiple == 0
         mode, N, K, T, GPUS = COMBINE[combine], weight.dim(0), weight.dim(1), self._tokens(input.dim(0)), self.num_gpus
         self._dtypes("gemm_tile_layer", input=(input, bfloat16), weight=(weight, bfloat16),
                      output=(output, {"add": int64, "store_bf16": bfloat16}.get(combine, float32)))
@@ -351,7 +417,7 @@ class StaticMegakernel(PersistentKernel):
         else:                      # [T][N] fp32, every value written each launch
             out_buffer = lambda n: (T * N * 4, -1, False)
         assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
-        tiles = K // 128
+        tiles = (K + 127) // 128
         if input_polled:
             parts = next(y for y in range(1, tiles + 1) if tiles % y == 0 and tiles // y <= ring_stages(T))
             params, map_slots = [mode, K, N, 1], [self._gemm_map(weight, (128,)), -1]
@@ -359,11 +425,15 @@ class StaticMegakernel(PersistentKernel):
         else:
             parts = 1
             params, map_slots = [mode, K, N, 0], [self._gemm_map(weight, (128, 64)), self._gemm_map(input, (T,))]
-            changeable = {"store": {}, "store_bf16": {0: (64, 1, 2)}}.get(combine, {0: (64, 1, 2), 1: (128, 2, None)})
+            changeable = {"store": ({0: (64, 1, 2)} if self.target_cc == 90 else {}),
+                          "store_bf16": {0: (64, 1, 2)}}.get(combine, {0: (64, 1, 2), 1: (128, 2, None)})
+            if K % 128:
+                changeable.pop(1, None)
+        assert combine != "add" or N % 128 == 0
         if skip_seq is not None:
             self._dtypes("gemm_tile_layer", seq_lens=(skip_seq[0], int32))
             params = params + [skip_seq[1]]
-        self._add_node("gemm_tile", (N // 128, parts, 1), block_dim, [input, weight, output],
+        self._add_node("gemm_tile", (N // 128 if N % 128 == 0 else N // 64, parts, 1), block_dim, [input, weight, output],
                        [(-1, 1, -1), (0, 1, -1), (1, -1, -1)], params,
                        # K: at least 2 tiles of 128 per task (the two MMA issuers take the stages in turn, runtime.cuh issue_job;
                        # with one stage issuer 1 has no MMA and its stale accumulator would be added)
@@ -1358,16 +1428,154 @@ class StaticMegakernel(PersistentKernel):
                        cost_inputs=[0],   # adds the projection's K parts
                        buf_slots=[self._tensor_slot(t) for t in slots])
 
+    # ---- MPK Hopper task bodies run by the static megakernel ----
+    def _sm90_node(self, name: str, grid: tuple, tensors: list, params: list, block_dim: tuple):
+        """An sm90_* node whose task body reads and writes every tensor by pointer: tensors = its inputs, then its outputs (one;
+        sm90_gate four: graph.cc), None for an optional input left out (buffer slot -1), each in its buffer slots in that order;
+        one counter its consumers wait on.
+        The tasks' slices of the tensors are the body's to compute (the input maps cut nothing)."""
+        present = [t for t in tensors if t is not None]
+        self._add_node(name, grid, block_dim, present, [(-1, -1, -1)] * len(present), params, counters=1,
+                       buf_slots=[self._tensor_slot(t) if t is not None else -1 for t in tensors])
+
+    def sm90_rmsnorm_layer(self, input: DTensor, weight: DTensor, output: DTensor, eps: float,
+                           block_dim: tuple = (256, 1, 1)):
+        """RMSNorm of each token, bf16 in and out: task x = row x. params = [H, eps bits]."""
+        T, H = self._tokens(input.dim(0)), input.dim(1)
+        self._dtypes("sm90_rmsnorm_layer", input=(input, bfloat16), weight=(weight, bfloat16), output=(output, bfloat16))
+        self._sm90_node("sm90_rmsnorm", (T, 1, 1), [input, weight, output], [H, float_bits(eps)], block_dim)
+
+    def sm90_attention_layer(self, qkv: DTensor, k_cache: DTensor, v_cache: DTensor, cos: DTensor, sin: DTensor,
+                             qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
+                             output: DTensor, num_q_heads: int, window: int = 0, sinks: DTensor = None,
+                             qkv_bias: DTensor = None, qkv_staged: DTensor = None, block_dim: tuple = (256, 1, 1)):
+        """Paged attention with RoPE, the new tokens' K / V appended to the cache, GPT-OSS's per-head sinks and sliding
+        window (MPK's Hopper kernel, tasks/sm90_attention.cuh): task (x, y) = request x, KV head y; R = qo_indptr.dim(0) - 1
+        requests. qkv [T, KVH x (Q / KVH + 2) x D] (each KV head's q heads, then k, v), caches [pages, page, KVH, D], cos /
+        sin [max seq, D], the page tables as MPK's runtime keeps them (the host fills them before each step), sinks
+        [KVH, Q / KVH]. qkv_bias [KVH x (Q / KVH + 2) x D] bf16: qkv is the QKV GEMM's fp32 output, each task adds its
+        head's bias into qkv_staged (bf16, qkv's shape; no bias node). params = [Q, KVH, D, max seq, page, window, has_sink,
+        has qkv bias]."""
+        pages, page, KVH, D = (k_cache.dim(i) for i in range(4))
+        R = qo_indptr.dim(0) - 1
+        self._tokens(qkv.dim(0))
+        assert qkv.dim(1) == KVH * (num_q_heads // KVH + 2) * D and output.dim(1) == num_q_heads * D
+        self._qkv_bias_dtypes("sm90_attention_layer", qkv, qkv_bias, qkv_staged)
+        self._dtypes("sm90_attention_layer", k_cache=(k_cache, bfloat16), output=(output, bfloat16))
+        self._sm90_node("sm90_attention", (R, KVH, 1),
+                        [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, sinks, qkv_bias,
+                         qkv_staged, output],
+                        [num_q_heads, KVH, D, cos.dim(0), page, window, int(sinks is not None), int(qkv_bias is not None)],
+                        block_dim)
+
+    def _qkv_bias_dtypes(self, layer: str, qkv: DTensor, qkv_bias: DTensor, qkv_staged: DTensor):
+        """The attention layers' qkv: bf16, or (qkv_bias) the GEMM's fp32 with a bf16 bias and staging buffer."""
+        assert (qkv_bias is None) == (qkv_staged is None), "qkv_bias and qkv_staged go together"
+        if qkv_bias is None:
+            self._dtypes(layer, qkv=(qkv, bfloat16))
+        else:
+            assert qkv_bias.dim(0) == qkv.dim(1) and (qkv_staged.dim(0), qkv_staged.dim(1)) == (qkv.dim(0), qkv.dim(1))
+            self._dtypes(layer, qkv=(qkv, float32), qkv_bias=(qkv_bias, bfloat16), qkv_staged=(qkv_staged, bfloat16))
+
+    def sm90_attention_split_layer(self, qkv: DTensor, k_cache: DTensor, v_cache: DTensor, cos: DTensor, sin: DTensor,
+                                   qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
+                                   parts: DTensor, num_q_heads: int, chunk: int, qkv_bias: DTensor = None,
+                                   qkv_staged: DTensor = None, block_dim: tuple = (256, 1, 1)):
+        """sm90_attention_layer's full attention with the KV split in chunks of `chunk` positions, as a pool (tasks/
+        sm90_attention_split.cuh): one task per SM; the SMs claim the step's units (request, KV head, chunk), only the chunks
+        the requests' sequences reach, from a queue; each its normalized output and log2-sum-exp into parts, a flat bf16
+        tensor sm90_attention_parts_size long; sm90_attention_merge_layer combines them (and the sinks). C = the chunks =
+        max seq / chunk; qkv_bias, qkv_staged as sm90_attention_layer's. The solver models it by its total work (search: a
+        pool). params = [Q, KVH, D, max seq, page, chunk, C, has qkv bias, R]."""
+        pages, page, KVH, D = (k_cache.dim(i) for i in range(4))
+        R, T, C = qo_indptr.dim(0) - 1, self._tokens(qkv.dim(0)), cos.dim(0) // chunk
+        assert cos.dim(0) % chunk == 0 and chunk % 64 == 0 and parts.num_dims == 1
+        assert parts.dim(0) == sm90_attention_parts_size(T, num_q_heads, D, C)
+        self._qkv_bias_dtypes("sm90_attention_split_layer", qkv, qkv_bias, qkv_staged)
+        self._dtypes("sm90_attention_split_layer", parts=(parts, bfloat16))
+        tensors = [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, qkv_bias, qkv_staged,
+                   parts]
+        present = [t for t in tensors if t is not None]
+        self._add_node("sm90_attention_split", (self._num_sms(), 1, 1), block_dim, present, [(-1, -1, -1)] * len(present),
+                       [num_q_heads, KVH, D, cos.dim(0), page, chunk, C, int(qkv_bias is not None), R],
+                       one_task_per_sm=True, counters=64,
+                       buf_slots=[self._tensor_slot(t) if t is not None else -1 for t in tensors])
+
+    def sm90_attention_merge_layer(self, parts: DTensor, qo_indptr: DTensor, kv_indptr: DTensor, last_page_len: DTensor,
+                                   output: DTensor, num_q_heads: int, chunk: int, chunks: int, page: int,
+                                   sinks: DTensor = None, block_dim: tuple = (256, 1, 1)):
+        """The output of a split attention from its chunks (tasks/sm90_attention_merge.cuh), with the per-head sinks: task
+        (x, y) = token x, query heads [8 y, 8 y + 8). params = [Q, D, chunk, C, has_sink, page, R (requests)]."""
+        T, D = self._tokens(output.dim(0)), output.dim(1) // num_q_heads
+        self._sm90_node("sm90_attention_merge", (T, num_q_heads // 8, 1),
+                        [parts, qo_indptr, kv_indptr, last_page_len, sinks, output],
+                        [num_q_heads, D, chunk, chunks, int(sinks is not None), page, qo_indptr.dim(0) - 1],
+                        block_dim)
+
+    def sm90_gate_layer(self, o: DTensor, o_bias: DTensor, residual: DTensor, norm_weight: DTensor, router: DTensor,
+                        router_bias: DTensor, num_tokens: DTensor, x1: DTensor, h: DTensor, weights: DTensor,
+                        routing_indices: DTensor, eps: float, router_splits: int = None,
+                        block_dim: tuple = (256, 1, 1)):
+        """What sits between o_proj and the routed experts, for one token a task (tasks/sm90_gate.cuh): x1 = bf16(o +
+        o_bias + residual), h = f16(RMSNorm(x1)), the router logits, the token's top-k (softmax, renormalized): its weights
+        [T, TOPK] fp32 and routing column [E, T] i32. Outputs: x1, h, weights, routing_indices (graph.cc: sm90_gate's
+        four). Grid (T, S, 1): a token's router over S
+        tasks, E / S experts each (S > 1: their logits through the routing column; the token's last task takes the top-k).
+        S is a changeable grid dim (E / S a multiple of the task's warps, their router rows in one SM's shared memory): the
+        plan picks it; router_splits is the default grid's (None: the smallest that fits). params = [H, E, TOPK, eps bits]."""
+        T, H, E, TOPK = self._tokens(o.dim(0)), o.dim(1), router.dim(0), weights.dim(1)
+        assert E % 32 == 0 and E <= 256, "sm90_gate: experts a multiple of 32, at most 256 (32 a router warp)"
+        warps = block_dim[0] // 32
+        # a task's E / S router rows in shared memory (H x 2 B each): at most what one SM has, in whole warps' worth
+        max_units = (227 * 1024 - 1024) // (2 * H) // warps
+        fits = [s for s in range(1, E // warps + 1) if E % (s * warps) == 0 and E // (s * warps) <= max_units]
+        S = router_splits or (fits[0] if fits else 0)
+        if S not in fits:
+            raise ValueError(f"sm90_gate_layer: router_splits {S}: E ({E}) / S experts a multiple of the task's warps, "
+                             f"their rows in one SM's shared memory (S in {fits})")
+        self._dtypes("sm90_gate_layer", o=(o, float32), residual=(residual, bfloat16), router=(router, bfloat16),
+                     x1=(x1, bfloat16), h=(h, float16), weights=(weights, float32))
+        present = [o, o_bias, residual, norm_weight, router, router_bias, num_tokens, x1, h, weights, routing_indices]
+        self._add_node("sm90_gate", (T, S, 1), block_dim, present, [(-1, -1, -1)] * len(present),
+                       [H, E, TOPK, float_bits(eps)], counters=1 + T,
+                       changeable_grid_dims={1: (warps, 1, max_units, E)},   # S: E / S experts, whole warps' worth
+                       buf_slots=[self._tensor_slot(t) for t in present])
+
+    def sm90_next_token_layer(self, logits: DTensor, embed: DTensor, prompt: DTensor, x_next: DTensor, tokens: DTensor,
+                              kv_indptr: DTensor, last_page_len: DTensor, kv_indices: DTensor, page_size: int,
+                              num_tasks: int = None, block_dim: tuple = (256, 1, 1)):
+        """Greedy decoding's step from the head to the next step's layers, R requests (tasks/sm90_next_token.cuh): with p
+        the position of request r's step that made its logits (row r; from the page table), its token at p + 1 is
+        prompt[r][p + 1] while p + 1 < P, else the argmax of logits row r (torch's: the first maximum), stored to
+        tokens[r][p + 1 - P]; a negative prompt token is the argmax too, stored over it (prompts of different lengths: -1
+        past each one's length); its embedding row goes to x_next row r and the page table (kv_indptr [R + 1], last_page_len
+        [R], kv_indices: request r's pages r MP .. in order, MP = kv_indices.dim(0) / R) advances to p + 1. prompt [R, P],
+        tokens [R, G] i64. Outputs: x_next, tokens, kv_indptr, last_page_len, kv_indices (graph.cc: sm90_next_token's
+        five). num_tasks: about that many tasks share the argmax (the last one to finish the rest), each 256 PER logits a
+        row; default one an SM (H100 GPT-OSS head, one request: its tail after lm_head 3.8 us at 132 tasks, 4.3 at 50).
+        params = [V, H, P, G, page, PER, R, MP]."""
+        V, H, R, P, G = logits.dim(1), embed.dim(1), prompt.dim(0), prompt.dim(1), tokens.dim(1)
+        assert embed.dim(0) == V and x_next.dim(1) == H and tokens.dim(0) == R and R <= logits.dim(0) and \
+            R <= x_next.dim(0) and kv_indptr.dim(0) == R + 1 and last_page_len.dim(0) == R and \
+            kv_indices.dim(0) % R == 0, "sm90_next_token_layer: R requests' prompts, tokens and page table"
+        self._dtypes("sm90_next_token_layer", logits=(logits, float32), embed=(embed, bfloat16),
+                     x_next=(x_next, bfloat16))
+        present = [logits, embed, prompt, x_next, tokens, kv_indptr, last_page_len, kv_indices]
+        per = -(-V // (block_dim[0] * (num_tasks or self._num_sms())))
+        self._add_node("sm90_next_token", (-(-V // (block_dim[0] * per)), 1, 1), block_dim, present,
+                       [(-1, -1, -1)] * len(present), [V, H, P, G, page_size, per, R, kv_indices.dim(0) // R],
+                       counters=2 + 2 * R, buf_slots=[self._tensor_slot(t) for t in present])
+
     # ---- the generated layer (static_schedule.py) ----
     def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False, device=0,
-                       rank=None, exchange=None):
+                       rank=None, exchange=None, build_only=False):
         """Build the graph as it is now, one schedule.json per GPU (static_schedule.compile_static); profile: the timing build
         (per-task start / end stamps, static_harness.Harness.task_times); device: the CUDA device of GPU 0. rank / exchange:
         GPU `rank` alone in this process with the caller's exchange region (multicast address, local address), e.g. one
         TP rank of a serving framework (exchange_region_bytes)."""
         from .static_schedule import compile_static
         return compile_static(self, schedule_paths, gpu_tensors, out_dir, extra_flags=extra_flags, profile=profile,
-                              device=device, rank=rank, exchange=exchange)
+                              device=device, rank=rank, exchange=exchange, build_only=build_only)
 
     def exchange_region_bytes(self) -> int:
         """The exchange region a rank-alone build needs from its caller (compile_static rank / exchange): both sets."""

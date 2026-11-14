@@ -88,6 +88,49 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
                                                char *sm,
                                                int s0 STAGE_STAMP_PARAM) {
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+#ifdef STATIC_SM90
+  static_assert(!POLLED, "Hopper: a polled activation is not supported yet");
+  if (warp == 0) {
+    if (lane == 0) {
+      load_job<ROWS>(
+          j, base, gl, -1, s0, 1 << 20 STAGE_STAMP_ARG(s0 ? nullptr : stamp));
+    }
+  } else if (warp >= 4) {
+    float acc[ROWS / 64][T / 8][4];
+    mma_job_sm90<ROWS>(j, base, gi0, acc);
+    int const t = threadIdx.x & 127;
+#pragma unroll
+    for (int h = 0; h < ROWS / 64; h++) {
+#pragma unroll
+      for (int n = 0; n < T / 8; n++) {
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+          int const row =
+              64 * h + 16 * (t >> 5) + ((t & 31) >> 2) + 8 * (i >> 1);
+          int const tok = 8 * n + 2 * (t & 3) + (i & 1);
+          float const v = acc[h][n][i];
+          if (mode == COMBINE_SLOTS) {
+            reinterpret_cast<float *>(
+                out)[((size_t)split * T + tok) * N + row0 + row] = v;
+          } else if (mode == COMBINE_ADD) {
+            red_add_fx(reinterpret_cast<unsigned long long *>(out) + tok * N +
+                           row0 + row,
+                       v);
+          } else if (mode == COMBINE_STORE_BF16) {
+            reinterpret_cast<__nv_bfloat16 *>(out)[tok * N + row0 + row] =
+                __float2bfloat16(v);
+          } else {
+            reinterpret_cast<float *>(out)[tok * N + row0 + row] = v;
+          }
+        }
+      }
+    }
+    asm volatile("bar.sync 1, 128;" ::: "memory");
+    if (threadIdx.x == 128 && mode != COMBINE_SLOTS) {
+      cnt_add(cnt + (mode == COMBINE_ADD ? row0 / 128 : 0), 1);
+    }
+  }
+#else
   int const a = acc_slot(wt), par = acc_round(wt) & 1;
   if constexpr (POLLED) {
     if (warp == 0 && lane == 0) {
@@ -181,6 +224,7 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
       cnt_add(cnt + (mode == COMBINE_ADD ? row0 / 128 : 0), 1);
     }
   }
+#endif // STATIC_SM90
 }
 
 // the ring's barriers made fresh for a GEMM task behind moe_experts on its SM
@@ -216,10 +260,19 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
                 WMAP = slot_at<MAP_SLOTS, 0>(), AMAP = slot_at<MAP_SLOTS, 1>();
   constexpr bool POLLED = param_at<PARAMS, 3>() == 1;
   constexpr int SKIP_LEN = param_or<PARAMS, 4, 0>();
-  static_assert(
-      K > 0 && K % (128 * SELF::y) == 0,
-      "params = {mode, K, N, polled}; each K part is whole 128-column tiles");
+  // K tiles of 128; a K that is not a multiple of 128 (whole 64-column
+  // blocks) ends with a half tile, whose other half TMA fills with zeros
+  constexpr int k_tiles = (K + 127) / 128;
+  static_assert(K > 0 && K % 64 == 0 && k_tiles % SELF::y == 0,
+                "params = {mode, K, N, polled}; K in 64-column blocks, each K "
+                "part whole 128-column tiles");
+#ifndef STATIC_SM90
+  static_assert(K % 128 == 0,
+                "a K ending in a half tile (K % 128 == 64) is Hopper only");
+#endif
   if constexpr (SKIP_LEN > 0) {
+    static_assert(K % (128 * SELF::y) == 0,
+                  "skip_seq requires whole 128-column K parts");
     static_assert(mode == COMBINE_ADD && !POLLED && SELF::counter >= 0,
                   "skip_seq: an add GEMM, not polled");
     // every token's seq_lens <= SKIP_LEN: the readers read nothing this launch,
@@ -232,7 +285,7 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
       return;
     }
   }
-  constexpr int pieces = K / 128 / SELF::y; // K tiles of 128 per task
+  constexpr int pieces = k_tiles / SELF::y; // K tiles of 128 per task
   constexpr int ROWS = N / SELF::x;
   static_assert(ROWS * SELF::x == N && (ROWS == 128 || ROWS == 64),
                 "128 or 64 weight rows per task");
