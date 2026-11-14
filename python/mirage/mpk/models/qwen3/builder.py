@@ -161,7 +161,7 @@ class Qwen3Builder(GraphBuilder):
             if self.mpk.mode != "online_notoken":
                 self.argmax_in_tensor = torch.zeros(self.max_num_batched_tokens, self.padded_vocab_size, dtype=torch.bfloat16, device="cuda")
                 self.argmax_in = self.mpk.attach_input(torch_tensor=self.argmax_in_tensor, name="argmax_in")
-                if self.do_sample:
+                if self.do_sample and self.mpk.mode != "online_pinned":
                     self.sampling_part_value_tensor = torch.zeros(
                         self.max_num_batched_tokens,
                         self.mpk.num_workers * (self.sampling_topk_max + 2),
@@ -176,7 +176,7 @@ class Qwen3Builder(GraphBuilder):
                     self.sampling_part_index = self.mpk.attach_input(
                         torch_tensor=self.sampling_part_index_tensor,
                         name="sampling_part_index")
-                else:
+                elif self.mpk.mode != "online_pinned":
                     self.argmax_part_value_tensor = torch.zeros(self.max_num_batched_tokens, self.mpk.num_workers, dtype=torch.bfloat16, device="cuda")
                     self.argmax_part_value = self.mpk.attach_input(torch_tensor=self.argmax_part_value_tensor, name="argmax_part_value")
                     self.argmax_part_index_tensor = torch.zeros(self.max_num_batched_tokens, self.mpk.num_workers, dtype=torch.int64, device="cuda")
@@ -256,7 +256,7 @@ class Qwen3Builder(GraphBuilder):
                     name="argmax_in",
                     io_category="cuda_tensor",
                 )
-                if self.do_sample:
+                if self.do_sample and self.mpk.mode != "online_pinned":
                     self.sampling_part_value = self.mpk.new_tensor(
                         dims=(self.max_num_batched_tokens,
                               self.mpk.num_workers * (self.sampling_topk_max + 2)),
@@ -271,7 +271,7 @@ class Qwen3Builder(GraphBuilder):
                         name="sampling_part_index",
                         io_category="cuda_tensor",
                     )
-                else:
+                elif self.mpk.mode != "online_pinned":
                     self.argmax_part_value = self.mpk.new_tensor(
                         dims=(self.max_num_batched_tokens, self.mpk.num_workers),
                         dtype=bfloat16,
@@ -643,9 +643,11 @@ class Qwen3Builder(GraphBuilder):
                 block_dim=(128, 1, 1),
             )
 
-            # Decode: greedy argmax, or temperature/top-k/top-p sampling when
-            # PersistentKernel was constructed with do_sample=True.
-            if self.do_sample:
+            # Online requests carry their own sampling settings and history.
+            # Other modes retain the SM100 sampler's compiled graph settings.
+            if self.mpk.mode == "online_pinned":
+                self.mpk.serving_sampling_layer(self.argmax_in, argmax_out)
+            elif self.do_sample:
                 self.mpk.sampling_partial_layer(
                     input=self.argmax_in,
                     output=(self.sampling_part_value, self.sampling_part_index),
