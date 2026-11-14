@@ -15,6 +15,10 @@ BUCKETS = (8, 16, 32)                 # the kernels' token rows, as the other st
                                       # smallest >= R; rows past R idle)
 KV_CHUNK = 128                        # full attention: the KV split in chunks of this many positions (sm90_attention_split)
 PLANS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plans")
+# the routed experts as two kernels after the layer kernel (sm90_moe_split) from this many requests (MOE_SPLIT=0 / 1:
+# never / always); fewer: the layer kernel's pool (sm90_moe_pool), whose shared queue suits a few experts' units (20B,
+# H100, us/step pool / split: 2 requests 3112 / 3153, 4: 3748 / 3637, 32: 6928 / 6120)
+SPLIT_FROM = 4
 FLAGS = sm90_flags() + ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]   # serving build: launches back to back
 
 
@@ -30,6 +34,8 @@ class Model:
         self.L, self.types, self.window, self.V = cfg.num_hidden_layers, list(cfg.layer_types), cfg.sliding_window, cfg.vocab_size
         self.eps, self.limit = cfg.rms_norm_eps, getattr(cfg, "swiglu_limit", 7.0)
         self.max_seq, self.R = max_seq, requests
+        env = os.environ.get("MOE_SPLIT")
+        self.split = requests >= SPLIT_FROM if env is None else env == "1"
         R, MP = requests, max_seq // PAGE                            # requests (a token each), pages a request
         assert max_seq % PAGE == 0 and 1 <= R <= T
         sd = Mxfp4Checkpoint(ckpt)
@@ -50,11 +56,17 @@ class Model:
             "qkv": zeros(T, (QH + 2 * KVH) * D), "attn": zeros(T, QH * D), "o32": zeros(T, H, dtype=torch.float32),
             "x1": zeros(T, H), "h2": zeros(T, H, dtype=torch.float16),   # h2: the MoE's f16 input
             "topk_w": zeros(T, TOPK, dtype=torch.float32), "routing": zeros(E, T, dtype=torch.int32),
-            "active": zeros(E + 1, dtype=torch.int32), "act": zeros(A, T, I, dtype=torch.float16), "eo": zeros(T, TOPK, H),
+            "active": zeros(E + 1, dtype=torch.int32), "eo": zeros(T, TOPK, H),
+            "act": zeros(E if self.split else A, T, I, dtype=torch.float16),   # split: by expert
         }
         self.x = [zeros(T, H), zeros(T, H)]                          # the residual stream, ping-pong between layers
         self.x_embed = zeros(T, H)                                   # layer 0's input: the head writes the next token's row
         self.layers = []
+        if self.split:
+            from mirage.mpk.sm90_moe_split import Sm90MoeSplit, sm90_moe_split_weights
+            self.done = zeros(T, H // 64, dtype=torch.int32)   # the split combine's counters
+        pack = lambda w, s, rows, glu: (sm90_moe_split_weights if self.split else lambda b, r: b)(
+            sm90_moe_pack(w.cuda(), s.cuda(), rows, glu=glu), rows)
         for i in range(self.L):
             p = f"model.layers.{i}."
             at = lambda k: sd[p + k]
@@ -70,13 +82,13 @@ class Model:
                 "w_o": bf(at("self_attn.o_proj.weight")), "b_o": bf(at("self_attn.o_proj.bias")),
                 "sinks": bf(at("self_attn.sinks").view(KVH, QH // KVH)),
                 "w_router": bf(at("mlp.router.weight")), "b_router": bf(at("mlp.router.bias")),
-                "w13": sm90_moe_pack(w13.cuda(), s13.cuda(), 128, glu=True), "b13": bf(b13),
-                "w2": sm90_moe_pack(w2.cuda(), s2.cuda(), 64, glu=False), "b2": bf(b2),
+                "w13": pack(w13, s13, 128, True), "b13": bf(b13), "w2": pack(w2, s2, 64, False), "b2": bf(b2),
                 "k_cache": zeros(R * MP, PAGE, KVH, D), "v_cache": zeros(R * MP, PAGE, KVH, D),
             })
         self.embed = bf(sd["model.embed_tokens.weight"])
         self.head = {"norm": bf(sd["model.norm.weight"]), "lm_head": bf(sd["lm_head.weight"]),
                      "h": zeros(T, H), "logits": zeros(T, self.V, dtype=torch.float32)}
+        self.moe = (Sm90MoeSplit(T, H, I, E, TOPK, self.shared["h2"], self.shared["act"]) if self.split else None)
 
     def layer_tensors(self, i: int) -> dict:
         """Layer i's tensors by graph name: its weights and cache, the shared buffers, its residual in and out."""
@@ -98,6 +110,15 @@ class Model:
         self.shared["kv_indices"][:self.R * n].copy_(
             (torch.arange(self.R, device="cuda")[:, None] * MP + torch.arange(n, device="cuda")).flatten())
         self.shared["last_page_len"].fill_(pos + 1 - (n - 1) * PAGE)
+
+
+def launch_layer(m: Model, kernel, inst: int, i: int):
+    """Layer i: its kernel (instance inst), then (split) its routed experts and combine: x_out = x1 + the experts' sum."""
+    kernel.launch_instances(inst, 1)
+    if m.moe:
+        t, L = m.shared, m.layers[i]
+        m.moe.launch(t["routing"], L["w13"], L["b13"], t["act"], L["w2"], L["b2"], t["eo"], t["topk_w"], t["x1"],
+                     m.x[(i + 1) % 2], m.done, m.limit, 1.702)
 
 
 def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
@@ -124,9 +145,10 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
     # 2957 -> 2829 us/step)
     # the routed experts as a pool (the other static models' MoE kind): the SMs share the step's units at run time, three
     # blocks a unit when a step has at least an SM's worth of them (sm90_moe_pool_layer big_units)
-    mpk.sm90_moe_pool_layer(A["h2"], A["w13"], A["w2"], A["routing"], A["active"], A["act"], A["eo"], b13=A["b13"],
-                            b2=A["b2"], limit=m.limit, alpha=1.702, fp32_scales=True, big_units=(3, 3))
-    mpk.sm90_mul_sum_add_layer(A["eo"], A["topk_w"], A["x1"], A["x_out"])
+    if not m.split:   # (split: launch_layer runs the experts and the combine after this kernel)
+        mpk.sm90_moe_pool_layer(A["h2"], A["w13"], A["w2"], A["routing"], A["active"], A["act"], A["eo"], b13=A["b13"],
+                                b2=A["b2"], limit=m.limit, alpha=1.702, fp32_scales=True, big_units=(3, 3))
+        mpk.sm90_mul_sum_add_layer(A["eo"], A["topk_w"], A["x1"], A["x_out"])
     if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the QKV weight's first MB into L2 at the start (as the GLM demos)
         mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
 
@@ -150,6 +172,11 @@ def load_plan(mpk, path: str):
     if not path or not os.path.exists(path):
         return None
     p = compiler.plan_from_file(path)
+    # a plan of the layer with the MoE nodes for the split layer: their tasks dropped (they come last: the other nodes'
+    # ids are the same)
+    keep = set(mpk._static_nodes)
+    p["lists"] = [[[x for x in sm if x[0] in keep] for sm in gpu] for gpu in p["lists"]]
+    p["grids"] = {k: v for k, v in p["grids"].items() if k in keep}
     if len(p["lists"]) != 1 or len(p["lists"][0]) != mpk._num_sms():
         print(f"{path}: lists for another GPU ({len(p['lists'][0])} SMs, this one {mpk._num_sms()}): round robin")
         return None
@@ -309,7 +336,7 @@ def main():
     def step():
         """One position through the model; the head leaves the next position's token, embedding row and page table."""
         for i in range(m.L):
-            kernel_of[i].launch_instances(inst[i], 1)
+            launch_layer(m, kernel_of[i], inst[i], i)
         k_hd.launch_instances(0, 1)
 
     def generate(runs):

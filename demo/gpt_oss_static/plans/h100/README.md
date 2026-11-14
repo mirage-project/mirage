@@ -18,6 +18,10 @@ the current and the solver's plan measures faster. 20B on 32 distinct prompts, t
 requests 177 -> 170, 16 requests 230 -> 223, 32 requests 374 -> 345 us; 120B at 32 requests: sliding 465 -> 425, full
 528 -> 482 us.
 
+From four requests the routed experts run as two kernels after the layer kernel (`sm90_moe_split`; `MOE_SPLIT=0 / 1`
+forces either path), and the layer graph ends at the gate. `load_plan` drops the MoE pool's and the combine's tasks
+from these plans: the other nodes keep their ids and tasks, so the same files serve both graphs.
+
 The weights the layer streams first can be prefetched into L2 at its start, with the shared `STATIC_L2_PREFETCH_MB`
 (`StaticMegakernel.l2_prefetch_weights`, as the GLM demos). On these H100s, 12 MB measured best at batch one (20B
 2834 -> 2791, 120B 4133 -> 4060 us/step).

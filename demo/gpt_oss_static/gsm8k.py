@@ -95,7 +95,7 @@ def run_static(args, prompts, new):
         t0 = time.perf_counter()
         for _ in range(steps):
             for i in range(m.L):
-                kernel_of[i].launch_instances(inst[i], 1)
+                g.launch_layer(m, kernel_of[i], inst[i], i)
             k_hd.launch_instances(0, 1)
         torch.cuda.synchronize()
         toks = torch.cat([prompt_t, gen], 1).tolist()

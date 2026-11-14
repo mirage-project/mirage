@@ -85,7 +85,7 @@ def main():
     m.x_embed[:R].copy_(m.embed[prompt_t[:, 0]])
     for _ in range(S):          # positions 0 .. S - 1; the head leaves position S's token row and page table
         for i in range(m.L):
-            kernel_of[i].launch_instances(inst[i], 1)
+            g.launch_layer(m, kernel_of[i], inst[i], i)
         k_hd.launch_instances(0, 1)
     torch.cuda.synchronize()
 
@@ -99,7 +99,7 @@ def main():
     print(f"{'layer':>9} | {'attn static':>19} {'attn hf bf16':>19} | {'moe static':>19} {'moe hf bf16':>19} | hf experts = exact")
     for i in range(m.L):
         x_in = (m.x_embed if i == 0 else m.x[i % 2])[:R].clone()
-        kernel_of[i].launch_instances(inst[i], 1)
+        g.launch_layer(m, kernel_of[i], inst[i], i)
         torch.cuda.synchronize()
         x1_s, out_s = m.shared["x1"][:R].clone(), m.x[(i + 1) % 2][:R].clone()
         p = f"model.layers.{i}."
