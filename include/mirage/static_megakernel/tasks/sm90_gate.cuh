@@ -4,9 +4,7 @@
 // the token's top-k of their softmax, renormalized (ties to the lower expert):
 // its weights and its column of the
 // routing indices. The top-k runs in one warp, lane l the experts l, l + 32,
-// ... (E a multiple of 32: GPT-OSS-20B 32, 120B 128). The tokens' experts meet
-// in a bit mask (E / 32 words of the node's counter line), which the MoE
-// (sm90_moe_pool) reads for its active-expert slots. Task (x, y) of grid (T, S,
+// ... (E a multiple of 32: GPT-OSS-20B 32, 120B 128). Task (x, y) of grid (T, S,
 // 1): token x, the router's experts [y E / S, (y + 1) E / S) (S > 1: the logits
 // through the token's column of the routing indices, as fp32 bits; the token's
 // last task to count (its counter) takes its top-k). Every expert's logit is
@@ -20,10 +18,9 @@ namespace static_mk {
 // choice); BUF_SLOTS {o [T, H] fp32, o's bias
 // [H] bf16, x (the residual) [T, H] bf16, the norm's weight [H] bf16, the
 // router [E, H] bf16, its bias [E] bf16, the step's token count [1] i32, x1 [T,
-// H] bf16, h [T, H] f16, weights [T, TOPK] fp32, routing indices [E, T] i32,
-// the active-expert list [E + 1] i32 (not written: the MoE orders on it and
-// reads the mask)}; counters {the tasks (for the consumers), unused, the expert
-// mask (E / 32 words), the tokens' router tasks done (T; S > 1)}; dynamic
+// H] bf16, h [T, H] f16, weights [T, TOPK] fp32, routing indices [E, T] i32};
+// counters {the tasks (for the consumers), the tokens' router tasks done (T;
+// S > 1)}; dynamic
 // shared memory: the task's E / S router rows
 template <class SELF,
           class PARAMS,
@@ -45,7 +42,7 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   constexpr int EPL = E / 32; // experts a lane in the top-k
   using Row = Sm90Row<H>;
   constexpr int VEC = Row::VEC;
-  constexpr int MASK = SELF::counter + 2, TOK = MASK + E / 32;
+  constexpr int TOK = SELF::counter + 1;
   __shared__ float part[SM90_WARPS], logit[S == 1 ? E : 1];
   __shared__ uint4 hs[VEC]; // h as rounded (f16), for the router's warps
   __shared__ int last_split;
@@ -293,13 +290,6 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
       }
       buf_at<float>(g, slot_at<BUF_SLOTS, 9>())[t * TOPK + lane] =
           active_tok ? w / wsum : 0.f;
-    }
-#pragma unroll
-    for (int j = 0; j < EPL; j++) {
-      uint32_t const bits = __ballot_sync(0xffffffffu, rank[j] > 0);
-      if (lane == 0 && active_tok) {
-        atomicOr(g.cnt + MASK + j, bits);
-      }
     }
   }
   sm90_task_end<SELF>(g);

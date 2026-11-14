@@ -5682,10 +5682,10 @@ int TaskRegister::register_residual_add_sm100_task(
 
 int TaskRegister::register_sm90_rmsnorm_task(threadblock::Graph const &bgraph,
                                              std::vector<int> const &params) {
-  // params: {H, eps bits, f16 out}. inputs: x, weight; output: y
+  // params: {H, eps bits}. inputs: x, weight; output: y
   // (tasks/sm90_rmsnorm.cuh)
   return register_static_task(
-      this, TASK_SM90_RMSNORM, "sm90_rmsnorm", bgraph, params, 2, 3);
+      this, TASK_SM90_RMSNORM, "sm90_rmsnorm", bgraph, params, 2, 2);
 }
 
 int TaskRegister::register_sm90_attention_task(threadblock::Graph const &bgraph,
@@ -5731,36 +5731,14 @@ int TaskRegister::register_sm90_attention_merge_task(
 
 int TaskRegister::register_sm90_gate_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params) {
-  // params: {H, E, TOPK, eps bits} (router splits: the grid's y); five
+  // params: {H, E, TOPK, eps bits} (router splits: the grid's y); four
   // outputs (tasks/sm90_gate.cuh)
   assert(params.size() == 4);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(
-      bgraph, (int)bgraph.operators.size() - 5, 5, input_ops, output_ops);
+      bgraph, (int)bgraph.operators.size() - 4, 4, input_ops, output_ops);
   return register_task_variant(TASK_SM90_GATE,
                                static_build_only_task("sm90_gate", params));
-}
-
-int TaskRegister::register_sm90_moe_pool_task(threadblock::Graph const &bgraph,
-                                              std::vector<int> const &params) {
-  // params: {N13, H, I, E, TOPK, A, has bias, limit, alpha, fp32 scales, the
-  // big units' blocks (W13, W2)};
-  // inputs: W13's activation, W13, routing, active list, W2[, the biases];
-  // outputs: act, the expert outputs (tasks/sm90_moe_pool.cuh)
-  assert(params.size() == 12);
-  std::vector<tb::TBInputOp *> input_ops, output_ops;
-  static_split_ops(
-      bgraph, (int)bgraph.operators.size() - 2, 2, input_ops, output_ops);
-  return register_task_variant(TASK_SM90_MOE_POOL,
-                               static_build_only_task("sm90_moe_pool", params));
-}
-
-int TaskRegister::register_sm90_mul_sum_add_task(
-    threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {H, TOPK}. inputs: expert outputs, weights, residual; output: y
-  // (tasks/sm90_mul_sum_add.cuh)
-  return register_static_task(
-      this, TASK_SM90_MUL_SUM_ADD, "sm90_mul_sum_add", bgraph, params, 3, 2);
 }
 
 int TaskRegister::register_sm90_next_token_task(

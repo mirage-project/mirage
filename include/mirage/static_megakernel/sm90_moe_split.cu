@@ -9,9 +9,8 @@
 // (compact, 8-token groups), each row TMA'd into the 128-B swizzled K tile
 // next to the weight tile, in a 4-stage ring a producer warp fills. A CTA is
 // one item, (64 outputs, expert): several CTAs an SM, the grid's experts with
-// no routed token exit at once. In the layer kernel's pool (sm90_moe_pool)
-// ptxas serializes every wgmma (one function at the register cap), hence the
-// separate kernels.
+// no routed token exit at once. Inside the layer kernel ptxas serializes every
+// wgmma (one function at the register cap), hence the separate kernels.
 //
 // Compile: -DSTATIC_TOKENS= (token rows) -DMOE_H= -DMOE_I= -DMOE_E= -DMOE_TOPK=
 #define STATIC_GPUS 1
@@ -311,7 +310,7 @@ __device__ __forceinline__ void item(CUtensorMap const *amap,
   }
   if constexpr (!GLU) {
     // per token: the last of its TOPK experts to finish this 64-row block
-    // sums them (x1 + w_k eo_k in k order, as sm90_mul_sum_add) into x_out
+    // sums them (x1 + w_k eo_k in k order) into x_out
     __shared__ int last[T];
     __threadfence();
     asm volatile("bar.sync 1, 128;" ::: "memory");

@@ -173,7 +173,7 @@ def append_records(path: str, records: List[dict]) -> None:
 
 def records_of_run(pk, schedule_paths: List[str], launches: List[Tuple[list, list]], run: str, machine: dict) -> List[dict]:
     """The cost records of a run of pk's layer in the timing build: launches = per timed launch (static_harness.Harness.task_times(),
-    Harness.timing()). The pools: the nodes with one task per SM (moe_experts, sm90_moe_pool, sm90_attention_split), each opened by
+    Harness.timing()). The pools: the nodes with one task per SM (moe_experts, sm90_attention_split), each opened by
     the nodes that write its inputs (moe_experts: topk_route, sum_quant_send); every record gets the current kernel templates'
     code tag (static_schedule.code_tag)."""
     from .compiler import graph_nodes, producer_of

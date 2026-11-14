@@ -1095,22 +1095,10 @@ void Graph::register_task_for_op(KNOperator const *op,
     int variant_id =
         task_register->register_sm90_gate_task(customized->bgraph, params);
     task_config[op] =
-        std::make_tuple((int)customized->bgraph.operators.size() - 5,
-                        5,
+        std::make_tuple((int)customized->bgraph.operators.size() - 4,
+                        4,
                         TASK_SM90_GATE,
                         variant_id);
-  } else if (name == "sm90_moe_pool") {
-    int variant_id =
-        task_register->register_sm90_moe_pool_task(customized->bgraph, params);
-    task_config[op] =
-        std::make_tuple((int)customized->bgraph.operators.size() - 2,
-                        2,
-                        TASK_SM90_MOE_POOL,
-                        variant_id);
-  } else if (name == "sm90_mul_sum_add") {
-    int variant_id = task_register->register_sm90_mul_sum_add_task(
-        customized->bgraph, params);
-    task_config[op] = std::make_tuple(3, 1, TASK_SM90_MUL_SUM_ADD, variant_id);
   } else if (name == "sm90_next_token") {
     int variant_id = task_register->register_sm90_next_token_task(
         customized->bgraph, params);

@@ -1,13 +1,13 @@
 // tasks/sm90_rmsnorm.cuh -- the sm90_rmsnorm task type: RMSNorm of one token,
-// y = bf16 or f16(x / rms(x) * weight) in fp32 (as GPT-OSS's RMSNorm), x bf16;
-// an f16 y feeds the f16 MoE (sm90_moe_pool). Task x of grid (T, 1, 1): row x.
+// y = bf16(x / rms(x) * weight) in fp32 (as GPT-OSS's RMSNorm), x bf16. Task x
+// of grid (T, 1, 1): row x.
 #pragma once
 #include "sm90_common.cuh"
 
 namespace static_mk {
 
-// PARAMS {H, eps (fp32 bits), F16 (1: the output f16)}; BUF_SLOTS {input
-// [T, H] bf16, weight [H] bf16, output [T, H]}
+// PARAMS {H, eps (fp32 bits)}; BUF_SLOTS {input [T, H] bf16, weight [H] bf16,
+// output [T, H] bf16}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -18,7 +18,6 @@ __device__ __forceinline__ void run_sm90_rmsnorm(Maps const &,
                                                  KernelLocals &,
                                                  StaticTask const &tk) {
   constexpr int H = PARAMS::v[0];
-  constexpr bool F16 = PARAMS::v[2] == 1;
   using Row = Sm90Row<H>;
   __shared__ float part[SM90_WARPS];
   sm90_task_begin<IN...>(g);
@@ -54,7 +53,7 @@ __device__ __forceinline__ void run_sm90_rmsnorm(Maps const &,
       for (int i = 0; i < 8; i++) {
         xf[j][i] = xf[j][i] * rs * gw[i];
       }
-      out[v] = F16 ? f32_to_f16x8(xf[j]) : f32_to_bf16x8(xf[j]);
+      out[v] = f32_to_bf16x8(xf[j]);
     }
   }
   sm90_task_end<SELF>(g);
