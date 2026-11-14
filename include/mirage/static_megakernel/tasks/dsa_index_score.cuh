@@ -334,7 +334,8 @@ __device__ __forceinline__ void isc_flush_hist(unsigned char const *sm,
 
 } // namespace dsa
 
-// Task (c, t). PARAMS {32 (heads), MAXCTX, PAGE (64), MAXP, FLASH (0 / 1)}.
+// Task (c, t). PARAMS {32 (heads), MAXCTX, PAGE (64), MAXP, FLASH (0 / 1)[,
+// SKIPK (the top-k's TOPK: a token of at most SKIPK entries has no scores)]}.
 // BUF_SLOTS {cos_sin (FLASH: not read), seq_lens, block_table (FLASH: of the
 // pooled cache), index cache (FLASH: the pooled cache), hist (int
 // [T][TOPK_BINS], zero before the launch: the counts of the high 12 bits of
@@ -358,6 +359,7 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   constexpr int NIH = PARAMS::v[0], MAXCTX = PARAMS::v[1], PAGE = PARAMS::v[2],
                 MAXP = PARAMS::v[3];
   constexpr bool FLASH = PARAMS::v[4] != 0;
+  constexpr int SKIPK = param_or<PARAMS, 5, 0>();
   constexpr int W0 = FLASH ? 256 : 128; // the column of w_0 in KW
   constexpr int NQ = IQ::v[2], NKW = KW::v[2], CH = MAXCTX / SELF::x;
   constexpr int CS = slot_at<BUF_SLOTS, 0>(), SEQ = slot_at<BUF_SLOTS, 1>(),
@@ -368,9 +370,10 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   static_assert(PAGE == 64 && CH * SELF::x == MAXCTX && CH % PAGE == 0,
                 "dsa_index_score: chunks of whole 64-position pages");
   constexpr int PPW = (CH / PAGE + 7) / 8; // pages of each warp
-  static_assert(ISC_END <= RING_BYTES && CH <= ISC_MAX_POS,
-                "dsa_index_score: its shared memory is the ring's (at most "
-                "1024 positions in a chunk)");
+  static_assert(smem_launch_bytes(ISC_END) <= 232448 && CH <= ISC_MAX_POS,
+                "dsa_index_score: its shared memory from the ring area's base "
+                "(T = 64: past its end) in the launch's 227 KB (at most 1024 "
+                "positions in a chunk)");
   static_assert(
       MAXP * PAGE >= MAXCTX,
       "dsa_index_score: the block table covers MAXCTX positions (MAXP "
@@ -391,6 +394,14 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   unsigned char *const sm = reinterpret_cast<unsigned char *>(L.sm);
   int const seq = buf_at<int const>(g, SEQ)[t];
   int const n = min(MAXCTX, FLASH ? seq / 4 : seq); // FLASH: complete pools
+  // A token with n <= SKIPK entries computes no scores: dsa_index_topk takes
+  // all its entries without them
+  if (SKIPK > 0 && n <= SKIPK) {
+    if (tid == 0) {
+      cnt_add(cnt_now(g) + SELF::counter + t, 1);
+    }
+    return;
+  }
   int const c0 = cx * CH, c1 = min(c0 + CH, n);
   int const *bt = buf_at<int const>(g, BT) + (size_t)t * MAXP;
   unsigned char const *icache = buf_at<unsigned char const>(g, ICACHE);

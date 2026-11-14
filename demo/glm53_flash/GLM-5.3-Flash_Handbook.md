@@ -21,10 +21,12 @@ This document covers:
   layer kinds are:
   - every DSA layer;
   - every KDA layer;
-  - every MoE layer, including the next layer's attention mHC pre at its end (`MOE_STATIC_END=mhc_pre`).
-- **Metric**: the interval between consecutive replays of the forward CUDA graph (the period), median.
-  - Decode: time per token = period.
-  - MTP: time per token = period ÷ accept length.
+  - every MoE layer; at T = 16 / 32 it also runs the next layer's attention mHC pre at its end (`END_PRE_TOKENS` in
+    `moe_static_hook.py`).
+  - At T = 64 the KDA and DSA layers end at the attention's mHC post and SGLang runs the FFN's mHC pre (`POST_ONLY` in
+    `kda_static_hook.py` / `dsa_static_hook.py`). These per-T ends are each T's faster one end to end.
+- **Metric**: the interval between consecutive replays of the forward CUDA graph (the period), median; every scenario is
+  plain decode, so time per token = period.
   - Speedup = base ÷ all3ppf − 1.
 
 **Settings shared by both sides**:
@@ -41,21 +43,23 @@ This document covers:
 | `sglang_kda/kda_static_hook.py` | Same, with KDA as the attention (in_proj, kda_decode, o_proj) |
 | `sglang_moe/moe_static_hook.py` | Router, experts (the shared expert is in the experts queue too), all-reduce, FFN mHC post; in `mhc_pre` mode also the next layer's attention mHC pre |
 
-Prefill and the MTP draft model are not replaced. Static layers are built per number of rows per step, T ∈ {8, 16, 32}:
+Prefill is not replaced. Static layers are built per number of rows per step, T ∈ {8, 16, 32, 64}; a decode step uses the
+smallest T not below its row count:
 
-- **DSA/KDA**:
-  - a decode step whose row count equals T exactly uses the decode layer;
-  - an MTP verify step of bs requests uses the verify layer of T = 8·bs (each request's 6 draft tokens take 8 rows);
-  - any other row count falls back to SGLang.
-- **MoE**: a decode step uses the smallest T not below its row count; an MTP verify step uses the verify layer of its
-  bs × 6 live rows.
+- **DSA/KDA**: with fewer rows than T (bs 1/2/4 on T = 8) the rows past the requests are idle, padded as SGLang pads a
+  CUDA graph (DSA: request slot 0, seq_len 1; KDA: state slot −1). The first layer of a forward fills these per-step tensors
+  once, the other layers read them.
+- **MoE**: with fewer rows than T, a build of exactly those live rows (`MOE_STATIC_ROWS`) does not route the idle rows;
+  without one the T layer routes them too (correct, but it streams their experts).
+- More rows than the largest T, and prefill, fall back to SGLang.
+- The hooks still build MTP verify layers when the server runs speculative decoding; the chain no longer runs MTP.
 
 ### 1.2 Scenarios
 
 | Scenario | Configuration | Static layers used |
 |---|---|---|
-| `spec516_bs1` / `spec516_bs2` / `spec516_bs4` | MTP 5/1/6, bs 1/2/4 | verify layers, T = 8/16/32 |
-| `off_bs8` / `off_bs16` / `off_bs32` | plain decode, bs 8/16/32 | decode layers, T = 8/16/32 |
+| `off_bs1` / `off_bs2` / `off_bs4` | plain decode, bs 1/2/4 | decode layers, T = 8 (rows past bs idle; MoE build of bs live rows) |
+| `off_bs8` / `off_bs16` / `off_bs32` / `off_bs64` | plain decode, bs 8/16/32/64 | decode layers, T = 8/16/32/64 |
 
 ---
 
@@ -96,10 +100,9 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0,1,2,3 PATH=/usr/local
 C=$MIRAGE/demo/glm53_flash/sglang_dsa/sgl_chain.py
 P() { for s in "$@"; do for p in 256 4000; do echo -n "prof_base_${s}_p$p prof_all3ppf_${s}_p$p "; done; done; }
 
-$SGL_PY $C check_all3p check_all3p_spec_4l                        # correctness (T=8 decode + verify)
-$SGL_PY $C check_t16_bs16_attn check_t16_bs16_moe4l check_t16_bs2_attn check_t16_bs2_moe4l \
-           check_t32_bs32_attn check_t32_bs32_moe4l check_t32_bs4_attn check_t32_bs4_moe4l
-$SGL_PY $C $(P spec516_bs1 spec516_bs2 spec516_bs4 off_bs8 off_bs16 off_bs32)   # nsys end to end
+$SGL_PY $C check_all3p check_bs1_attn check_bs1_moe4l check_bs2_attn check_bs2_moe4l check_bs4_attn check_bs4_moe4l
+$SGL_PY $C check_t16_bs16_attn check_t16_bs16_moe4l check_t32_bs32_attn check_t32_bs32_moe4l check_t64_bs64_attn check_t64_bs64_moe4l
+$SGL_PY $C $(P off_bs1 off_bs2 off_bs4 off_bs8 off_bs16 off_bs32 off_bs64)   # nsys end to end
 python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md        # the table
 ```
 
@@ -108,9 +111,9 @@ python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md     
 | Run name | What it does |
 |---|---|
 | `check_*` | `sgl_check.py`, eager mode: each step runs SGLang first, then the static layer on the same inputs, and prints the relRMS. `*_attn` checks DSA + KDA, `*_moe4l` the MoE layers 3–6 |
-| `prof_{base,all3ppf}_<scenario>_p{256,4000}` | `sgl_spec_bench.py --profile`: one timed round first (the accept length is read from it), then 64 forward steps under nsys (`--cuda-graph-trace=graph`); the `.sqlite` is exported automatically |
+| `prof_{base,all3ppf}_<scenario>_p{256,4000}` | `sgl_spec_bench.py --profile`: one timed round first, then 64 forward steps under nsys (`--cuda-graph-trace=graph`); the `.sqlite` is exported automatically |
 | `base_<scenario>_mtt` / `all3ppf_<scenario>` | wall clock, 4000-token prompts, median of 3 rounds: a cross-check of the nsys result |
-| `gsm8k_off` / `gsm8k_516` / `all3ppf_gsm8k_off` / `all3ppf_gsm8k_516` | GSM8K, 5-shot, 200 questions; needs `GSM8K_TEST_JSONL` |
+| `gsm8k_off` / `all3ppf_gsm8k_off` / `all3ppf_gsm8k_off_bs4` | GSM8K, 5-shot, 200 questions (SGLang 4 at a time; static 8 and 4 at a time); needs `GSM8K_TEST_JSONL` |
 
 ### 3.2 Variables for manual runs (without the chain)
 
@@ -120,9 +123,9 @@ python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md     
 | `LD_LIBRARY_PATH=$MIRAGE_Z3_LIB` | Lets mirage's core load z3 4.16 |
 | `DSA/KDA/MOE_STATIC_LAYERS` | `all` or layer ids; unset: nothing replaced |
 | `DSA_STATIC_CHECK`, `MOE_STATIC_CHECK` | **Both default to 1; set them to 0 for performance runs**: in check mode the static layers are not used during CUDA graph capture |
-| `DSA/KDA/MOE_STATIC_TOKENS` | The T values to build, e.g. `8,16,32` |
-| `DSA_STATIC_FUSED_PLAN{,16,32}`, `KDA_STATIC_PLAN{,16,32}`, `MOE_STATIC_PLAN{,16,32}` | Plan file per T; unset: round robin |
-| `MOE_STATIC_END` | `mhc` or `mhc_pre` (the last layer is always `mhc`) |
+| `DSA/KDA/MOE_STATIC_TOKENS` | The T values to build, e.g. `8,16,32,64` |
+| `DSA_STATIC_FUSED_PLAN{,16,32,64}`, `KDA_STATIC_PLAN{,16,32,64}`, `MOE_STATIC_PLAN{,16,32,64}` | Plan file per T; unset: round robin |
+| `MOE_STATIC_ROWS` | Live row counts below their T that get a MoE build of their own, e.g. `1,2,4` (the chain sets bs for bs 1/2/4) |
 | `STATIC_L2_PREFETCH_MB` | L2 prefetch budget (MB) |
 | `KDA_STATIC_ROOT` | Required whenever `KDA_STATIC_LAYERS` is set |
 | `MIRAGE_STATIC_BUILD_CACHE` | A shared build cache. Default: under `<checkout>/build/` |
@@ -158,17 +161,20 @@ python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md     
 `DSA_PLAN` / `KDA_PLAN` / `MOE_PLAN` in `sgl_chain.py` decide which plan each run uses. They are the best plans measured on
 B200 (148 SMs); a missing file means round robin:
 
-| Layer | T=8 | T=16 | T=32 |
-|---|---|---|---|
-| DSA decode | `sglang_dsa/dsa_fused_plan_{short,long}.json` | `dsa_fused_plan16_{short,long}.json` | round robin |
-| KDA decode | round robin | round robin | round robin |
-| MoE (`mhc_pre`) | `sglang_moe/moe_plan_mhc_pre.json` | `moe_plan16_mhc_pre.json` | round robin |
+| Layer | T=8 | T=16 | T=32 | T=64 |
+|---|---|---|---|---|
+| DSA decode | `sglang_dsa/dsa_fused_plan_{short,long}.json` | `dsa_fused_plan16_{short,long}.json` | round robin | long: `dsa_fused_plan64_long.json`; short: round robin |
+| KDA decode | round robin | round robin | round robin | round robin |
+| MoE (`mhc_pre`) | `sglang_moe/moe_plan_mhc_pre.json` | `moe_plan16_mhc_pre.json` | round robin | round robin |
 
 Check runs such as `*_moe4l` end with `mhc`; at T=16 they use `moe_plan16_mhc.json`.
 
 - **DSA short/long**: prompts of at most 1000 tokens use short, all others long.
-- **Verify layers**: DSA's verify layers always run round robin; KDA's and MoE's verify layers use the T=8 plan at T=8 and
-  round robin at T≥16. The chain sets no T=8 plan for KDA, so KDA's verify layer is in fact round robin too.
+- **bs 1/2/4** run the T=8 decode plans above (the same graph; the MoE builds of bs live rows take the T=8 MoE plan).
+- **MTP verify layers** (manual runs only; the chain runs no MTP): a verify layer's graph differs from the decode graph of
+  the same T, so it takes its own plan file from `*_STATIC_VERIFY_PLAN{,16,32}`. Only `dsa_verify_plan_long.json` exists
+  (bs 1, long context: 62.6 µs against round robin's 63.8 µs on one GPU). Without one: DSA runs round robin; KDA and MoE
+  use the T=8 decode plan at T=8 and round robin at T≥16.
 - **A plan file belongs to one graph**: it is valid only for the graph it was made for (its nodes and grid candidates), its T
   and its SM count.
   - When the number of SM lists differs from the GPU's SM count, compilation fails with

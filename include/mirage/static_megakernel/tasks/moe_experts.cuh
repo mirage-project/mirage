@@ -101,7 +101,7 @@ struct ExpertSlots {
   static __device__ __forceinline__ int *cnt_e() {
     __shared__ int a[NE];
     return a;
-  } // tokens per expert
+  } // per expert: > 0 if it has tokens, then its slot (build_table)
   static __device__ __forceinline__ int *sel() {
     __shared__ int a[NPAIR];
     return a;
@@ -165,11 +165,12 @@ __device__ __forceinline__ void table_poll(unsigned long long const *pairs,
   int const e = (int)(v >> 32);
   sel_ss[i] = e;
   wsel_ss[i] = __uint_as_float((uint32_t)v);
-  atomicAdd(&cntE_s[e], 1);
+  cntE_s[e] = 1; // the expert has a token (build_table only asks > 0)
 }
 
 // after table_poll of all NPAIR pairs, 256 threads: slots = the experts with
-// tokens, in ascending id (parallel prefix count); the pairs grouped by slot
+// tokens, in ascending id (parallel prefix count; cnt_e then holds each
+// expert's slot); the pairs grouped by slot
 // (start / tok / wt / kk: slot s's entries start[s] .. + ntok[s] - 1, in no
 // particular order); s_ints[1] = number of slots. st (optional,
 // scaled_moe_experts' stamps): thread 0's times past each of its first three
@@ -225,6 +226,7 @@ __device__ __forceinline__ void build_table(long long *st = nullptr) {
           int const slot = run + __popc(m_q[q] & ((1u << lane) - 1u));
           eid_s[slot] = b * 32 + lane;
           ntok_s[slot] = 0;
+          cntE_s[b * 32 + lane] = slot; // from here on: the expert's slot
         }
         run += cnt_q[q];
       }
@@ -237,21 +239,12 @@ __device__ __forceinline__ void build_table(long long *st = nullptr) {
   if (st && threadIdx.x == 0) {
     st[2] = gtime();
   }
-  // 1. each pair's slot, by binary search over eid_s (kept in sel_ss: the
-  // expert id is not needed any more), and the slots' token counts
+  // 1. each pair's slot (kept in sel_ss: the expert id is not needed any
+  // more), and the slots' token counts
   for (int i = threadIdx.x; i < NPAIR; i += 256) {
-    int const e = sel_ss[i];
-    int lo = 0, hi = n_live - 1;
-    while (lo < hi) {
-      int const mid = (lo + hi) >> 1;
-      if (eid_s[mid] < e) {
-        lo = mid + 1;
-      } else {
-        hi = mid;
-      }
-    }
-    sel_ss[i] = lo;
-    atomicAdd(&ntok_s[lo], 1);
+    int const slot = cntE_s[sel_ss[i]];
+    sel_ss[i] = slot;
+    atomicAdd(&ntok_s[slot], 1);
   }
   __syncthreads();
   // 2. start_s = the exclusive prefix sum of the counts (a block scan: PER

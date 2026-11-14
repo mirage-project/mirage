@@ -96,9 +96,12 @@ __device__ __forceinline__ void scaled_gemm_tile_task(TileJob const &j,
     int &gi = iss == 0 ? gi0 : gi1;
     gi = __shfl_sync(0xffffffffu, gi, 0); // gemm_tile advances lane 0 only
     uint32_t const sfc = tb + SGT_CONST_SF + 4 * iss;
-    if (issuer_lane<true>()) { // the lane that issues the MMAs: the copy is
-                               // before them in its tcgen05 order
-      cp_sf(sfc, base + SGT_OFF_CSF);
+    if constexpr (!F8_UNSCALED) { // T = 64: no scale chunk (runtime.cuh
+                                  // mma_f8)
+      if (issuer_lane<true>()) {  // the lane that issues the MMAs: the copy is
+                                  // before them in its tcgen05 order
+        cp_sf(sfc, base + SGT_OFF_CSF);
+      }
     }
     fence_before();
     __syncwarp();

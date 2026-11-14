@@ -21,10 +21,10 @@ search_plan does, with the MoE layer's numbers:
                 static_schedule.MAX_TASKS_PER_SM minus the end entry and the pool's task), the layer's end as early as possible
   6. plan       "grids": the chosen grid of each node with changeable grid dims; "lists": for every GPU, the solver's per-SM
                 lists of its GPU set, each task moved from the set's first GPU's positions to this GPU's own positions
-cost: task_us(node, grid, producer_grids) -> us or None (not measured); optional prefetch_us(node, grid) -> the part of its time
-that needs no input (solver rule 7); optional first_us(node, grid, producer_grids) -> its time when it is the first task on its
-SM, or None (the same as task_us; solver rule 6); pool_us(node) -> a pool's total work (us, summed over the SMs) or None if the
-node is not a pool: Costs below.
+cost: task_us(node, grid, producer_grids) -> us or None (not measured); optional prefetch_us(node, grid[, producer_grids]) ->
+the part of its time that needs no input (solver rule 7); optional first_us(node, grid, producer_grids) -> its time when it is
+the first task on its SM, or None (the same as task_us; solver rule 6); pool_us(node) -> a pool's total work (us, summed over
+the SMs) or None if the node is not a pool: Costs below.
 """
 import itertools
 import json
@@ -126,6 +126,7 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
     first_extra: Dict[Tuple[int, str], float] = {}              # (node, option) -> its first-on-SM time minus own (solver rule 6)
     by_producer: Dict[int, Dict[str, Dict[Tuple[int, str], float]]] = {}
     prefetch: Dict[Tuple[int, str], float] = {}                 # (node, option) -> cost.prefetch_us (solver rule 7)
+    prefetch_by: Dict[int, Dict[str, Dict[Tuple[int, str], float]]] = {}   # as by_producer: per option of the producer
     for n in nodes:
         if is_pool(n):
             continue                                            # not placed: a pool, e.g. moe_experts (see step 4)
@@ -145,9 +146,13 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
             by_producer[n.graph_idx] = {}
             for opt in options[n.graph_idx]:
                 for popt in options[p.graph_idx]:
-                    us = cost.task_us(n, as_grid(opt), producer_grids(n, nodes, (p.graph_idx, as_grid(popt))))
+                    grids = producer_grids(n, nodes, (p.graph_idx, as_grid(popt)))
+                    us = cost.task_us(n, as_grid(opt), grids)
                     if us is not None:
                         by_producer[n.graph_idx].setdefault(opt, {})[(p.graph_idx, popt)] = us
+                        if hasattr(cost, "prefetch_us"):
+                            prefetch_by.setdefault(n.graph_idx, {}).setdefault(opt, {})[(p.graph_idx, popt)] = \
+                                cost.prefetch_us(n, as_grid(opt), grids) or 0.0
     # keep an option only if it has a time and every node reading its output has a time for it
     for n in nodes:
         if is_pool(n):
@@ -192,8 +197,10 @@ def search_plan(pk, cost, time_limit_s: float = 60.0, workers: int = 16, given: 
                         continue
                     if n.graph_idx in by_producer:      # topk_route: one duration per router option that is still kept
                         d = {k: us for k, us in by_producer[n.graph_idx][opt].items() if k[1] in options[k[0]]}
+                        pre = {k: prefetch_by[n.graph_idx][opt][k] for k in d} if n.graph_idx in prefetch_by else None
                         tasks.append(SolverTask(tid, n.graph_idx, opt, gpu_set, max(d.values()), duration_by=d,
-                                                prefetch_us=prefetch.get((n.graph_idx, opt), 0.0)))
+                                                prefetch_us=max(pre.values()) if pre else prefetch.get((n.graph_idx, opt), 0.0),
+                                                prefetch_by=pre))
                     else:
                         tasks.append(SolverTask(tid, n.graph_idx, opt, gpu_set, own[(n.graph_idx, opt)],
                                                 first_extra_us=first_extra.get((n.graph_idx, opt), 0.0),
@@ -403,7 +410,8 @@ class Costs:
     record: None (search_plan leaves that choice out).
     model "prefetch" (the default): a task's time is the post of the prefetch model fitted to the samples of every record of its
     task type and key (cost_records.fit_prefetch: end = max(enter + pre, ready) + post), and prefetch_us gives its pre (fitted
-    over the records of its type and grid, whatever their producers' grids). A key whose samples cannot place the knee: pre
+    over the records of its type and grid; with the producers' grids given, over the records of its key, as its time: a task
+    whose time changes with its producer's grid has its knee there too). A key whose samples cannot place the knee: pre
     falls back to a GEMM's up-front weight bytes / the fitted GEMMs' bytes per us (0 for other task types), clipped to what the
     samples allow. model "pr": a task's time is the median over its records of median_us (end = max(enter, ready) + d; rule 6
     from the first-on-SM records), no prefetch."""
@@ -466,11 +474,15 @@ class Costs:
             return None
         return self.median(node.name, cost_key(node, grid, producer_grids), first=True)
 
-    def prefetch_us(self, node: Node, grid: tuple) -> float:
-        """Model "prefetch": the part of a task's time it does before its inputs land (the class docstring); model "pr": 0."""
+    def prefetch_us(self, node: Node, grid: tuple, producer_grids: Optional[list] = None) -> float:
+        """Model "prefetch": the part of a task's time it does before its inputs land (the class docstring); model "pr": 0.
+        producer_grids (as task_us; search_plan gives them for a node whose time depends on its producer's option): the fit
+        over the records of that key. kda_decode after a GEMM in 2 and in 16 K parts takes 12 and 45 us: one knee fitted over
+        both lands at 14 us, where neither has one (each: 3 us)."""
         if self.model != "prefetch":
             return 0.0
-        fit = self.fit(node.name, cost_key(node, grid), any_inputs=True)
+        key = cost_key(node, grid, producer_grids)
+        fit = self.fit(node.name, key, any_inputs="inputs" not in key)
         if fit is None:
             return 0.0
         pre, _, lo, hi, placed = fit

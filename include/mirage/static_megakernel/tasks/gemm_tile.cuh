@@ -240,11 +240,12 @@ __device__ __noinline__ void ring_reinit_behind_queue() {
 // SELF::y -> the node's output buffer (SELF::buf). PARAMS: {mode (Combine), K,
 // N (the weight's rows), polled (1: the activation is ACT's 0xFF-prefilled bf16
 // buffer, polled into the stages; the node's rows are split over the GPUs and
-// its output holds this GPU's rows only)}. MAP_SLOTS: {the weight's map
-// (Maps::m; its 64-row box at the next slot), the activation's map (-1:
-// polled)}. ROWS = N / SELF::x: 128, or 64 (e.g. N = 896 rows in 14 tasks).
-// ACT: the node that writes the activation (none: a graph input); without
-// polling its tasks are counted in its counter.
+// its output holds this GPU's rows only)[, L (skip_seq: a launch with every
+// seq_lens <= L only counts the tasks; BUF_SLOTS {seq_lens})]}. MAP_SLOTS:
+// {the weight's map (Maps::m; its 64-row box at the next slot), the
+// activation's map (-1: polled)}. ROWS = N / SELF::x: 128, or 64 (e.g. N = 896
+// rows in 14 tasks). ACT: the node that writes the activation (none: a graph
+// input); without polling its tasks are counted in its counter.
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -258,6 +259,7 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
   constexpr int mode = PARAMS::v[0], K = PARAMS::v[1], N = PARAMS::v[2],
                 WMAP = slot_at<MAP_SLOTS, 0>(), AMAP = slot_at<MAP_SLOTS, 1>();
   constexpr bool POLLED = param_at<PARAMS, 3>() == 1;
+  constexpr int SKIP_LEN = param_or<PARAMS, 4, 0>();
   // K tiles of 128; a K that is not a multiple of 128 (whole 64-column
   // blocks) ends with a half tile, whose other half TMA fills with zeros
   constexpr int k_tiles = (K + 127) / 128;
@@ -268,6 +270,21 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
   static_assert(K % 128 == 0,
                 "a K ending in a half tile (K % 128 == 64) is Hopper only");
 #endif
+  if constexpr (SKIP_LEN > 0) {
+    static_assert(K % (128 * SELF::y) == 0,
+                  "skip_seq requires whole 128-column K parts");
+    static_assert(mode == COMBINE_ADD && !POLLED && SELF::counter >= 0,
+                  "skip_seq: an add GEMM, not polled");
+    // every token's seq_lens <= SKIP_LEN: the readers read nothing this launch,
+    // so the task only counts itself (the buffer stays 0)
+    int const *seq = buf_at<int const>(g, slot_at<BUF_SLOTS, 0>());
+    if (__syncthreads_and(threadIdx.x >= T || seq[threadIdx.x] <= SKIP_LEN)) {
+      if (threadIdx.x == 0) {
+        cnt_add(cnt_now(g) + SELF::counter + tk.x * (N / SELF::x) / 128, 1);
+      }
+      return;
+    }
+  }
   constexpr int pieces = k_tiles / SELF::y; // K tiles of 128 per task
   constexpr int ROWS = N / SELF::x;
   static_assert(ROWS * SELF::x == N && (ROWS == 128 || ROWS == 64),

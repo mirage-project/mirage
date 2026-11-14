@@ -12,7 +12,7 @@ The experts are #799's GLM-5.3 MoE tasks (demo/glm53_moe) with Flash's shapes:
               group_quant(x); scaled_moe_experts -> allreduce_send (a token's 18 rows added, bf16 to every GPU) -> the end
               (--end): mhc: hc_post with the finished mHC coefficients (SGLang's MHCState): R'_j = sum_i comb[i][j] R_i +
               post_j (sum over the GPUs); mhc_pre: hc_post_mix + hc_pre: that and the next layer's attention mHC pre (its
-              x_attn, h_post, h_res), as SGLang runs it (MOE_STATIC_END)
+              x_attn, h_post, h_res), as SGLang runs it at the T of moe_static_hook.END_PRE_TOKENS
   check       a PyTorch reference with the kernel's rounding points: fp64 routing; group_quant e4m3 (s = amax / 448); the
               checkpoint's FP8 blocks; h in fp32 -> e4m3 per 128 features; R in fp32, y = bf16(sum R). Checked: the experts
               chosen and their weights, the routed rows of each chosen expert and the shared expert's (this node alone: from
@@ -437,7 +437,8 @@ def prof_report(prof: torch.Tensor, bar: int, t: dict):
 def run_args(args) -> list:
     """The arguments that decide the graph and the state, for this script in another process (--collect)."""
     return (["--model-dir", args.model_dir, "--layer", str(args.layer), "--tp", str(args.tp), "--rank", str(args.rank), "--seed",
-             str(args.seed), "--x-scale", str(args.x_scale), "--reps", str(args.reps), "--end", args.end]
+             str(args.seed), "--x-scale", str(args.x_scale), "--reps", str(args.reps), "--end", args.end, "--valid-rows",
+             str(args.valid_rows)]
             + [f"--nvcc-flag={f}" for f in args.nvcc_flag])
 
 
@@ -551,7 +552,7 @@ def main():
     ap.add_argument("--plan", help="a plan file of this graph (default: the round-robin plan)")
     ap.add_argument("--end", choices=("mhc", "mhc_pre"), default="mhc",
                     help="the graph's end: the mHC post with random streams and coefficients, or that and the next layer's "
-                    "attention mHC pre (what SGLang runs with MOE_STATIC_END=mhc_pre)")
+                    "attention mHC pre (what SGLang runs at the T of moe_static_hook.END_PRE_TOKENS)")
     ap.add_argument("--collect", metavar="FILE", help="a cost collection: every plan of plan_gen.collection_plans and the "
                     "round-robin plan run by this script with --record FILE (--jobs at a time; a run with a result.json is skipped)")
     ap.add_argument("--jobs", type=int, default=4, help="with --collect: plans run at once")
