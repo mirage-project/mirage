@@ -84,7 +84,8 @@ class SolverTask:
     duration_by: Optional[Dict[OptionKey, float]] = None
     first_extra_us: float = 0.0  # its time first on its SM minus duration_us (rule 6); 0: the same wherever it is
     prefetch_us: float = 0.0     # its loads that need no input (a GEMM's first weight stages), done from when it starts on its
-                                 # SM, also while its inputs are on their way (rule 7); 0: none
+                                 # SM, also while its inputs are on their way (rule 7); 0: none (with prefetch_by: the longest)
+    prefetch_by: Optional[Dict[OptionKey, float]] = None   # as duration_by, when its prefetch depends on that node's option too
 
 
 @dataclass
@@ -217,7 +218,9 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
             length[t.id] = ticks(t.duration_us)
         if t.prefetch_us > 0:   # rule 7
             span[t.id] = model.NewIntVar(0, horizon, f"span_{t.id}")
-            model.Add(span[t.id] >= length[t.id] + ticks(t.prefetch_us))
+            # prefetch_by: the prefetch for the option the other node uses (as duration_by's length)
+            pre = sum(ticks(us) * use[key] for key, us in t.prefetch_by.items()) if t.prefetch_by else ticks(t.prefetch_us)
+            model.Add(span[t.id] >= length[t.id] + pre)
         else:
             span[t.id] = length[t.id]
         model.Add(end[t.id] == start[t.id] + span[t.id])

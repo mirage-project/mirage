@@ -4,8 +4,8 @@
 // first, and the state [HL][V][K] fp32). Task (r, h) of grid (T / (NT RP), HL,
 // 1): head h of
 //   a decode step (NT = 1): requests RP r .. RP r + RP - 1, one token each
-//   (RP = 1, or 2 / 4: T = 16 / 32 in 128 tasks), request q's state row
-//   rows[RP r + q]; the window and the state are updated in place
+//   (RP = 1, or 2 / 4 / 8: T = 16 / 32 / 64 in 128 tasks), request q's state
+//   row rows[RP r + q]; the window and the state are updated in place
 //   SERVE (NT > 1): a speculative verify step, request r's NT tokens in order
 //   (below)
 // Per token:
@@ -347,15 +347,16 @@ __device__ __forceinline__ void
       HL % 4 == 0 && NPROJ % 4 == 0 && NPROJ >= GAO + D,
       "kda_decode: the merged projection [q | k | v | b | f_a | g_a]");
   static_assert(NT >= 1 && NT <= 8, "kda_decode: 1 .. 8 tokens per request");
-  // RP: requests per task (2 / 4: a decode step of T = 16 / 32 in 128 tasks,
-  // one wave of the SMs; the head's f_b / g_b rows and steps 1 .. 3 shared,
-  // each request's conv window and state its own, the delta rules one after
-  // the other: request q + 1's state copied to shared memory while request q's
-  // rule runs; requests 1 .. RP - 1's conv windows in shared memory from step
-  // 0). NTK: the task's tokens (rows t0 .. t0 + NTK - 1)
+  // RP: requests per task (2 / 4 / 8: a decode step of T = 16 / 32 / 64 in 128
+  // tasks, one wave of the SMs; the head's f_b / g_b rows and steps 1 .. 3
+  // shared, each request's conv window and state its own, the delta rules one
+  // after the other: request q + 1's state copied to shared memory while
+  // request q's rule runs; requests 1 .. RP - 1's conv windows in shared memory
+  // from step 0). NTK: the task's tokens (rows t0 .. t0 + NTK - 1)
   constexpr int NTK = NT * RP;
-  static_assert(RP == 1 || ((RP == 2 || RP == 4) && !SERVE),
-                "kda_decode: 2 or 4 requests per task only in a decode step");
+  static_assert(RP == 1 || ((RP == 2 || RP == 4 || RP == 8) && !SERVE),
+                "kda_decode: 2, 4 or 8 requests per task only in a decode step "
+                "(the gates' MMA: 8 token columns)");
   int const tid = threadIdx.x;
   constexpr int R = T / NT; // requests per launch
   // SERVE: the requests' draft tokens nv (all alike), request r's rows from
@@ -1028,8 +1029,8 @@ __device__ __forceinline__ void run_kda_decode(Maps const &,
       sv,
       L.sm STAGE_STAMP_ARG(L.stage_stamps));
 }
-// dynamic shared memory: the f_b / g_b rows and the scratch, inside the ring
-// area
+// dynamic shared memory: the f_b / g_b rows and the scratch, from the ring
+// area's base (T = 64, RP 8: past the ring area's end)
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -1042,9 +1043,10 @@ constexpr int smem_kda_decode() {
   constexpr int RP =
       NTASK > 1 && (int)(sizeof(BUF_SLOTS::v) / sizeof(int)) - 1 == 7 ? NTASK
                                                                       : 1;
-  static_assert(kda_smem_bytes<NTASK, RP>() <= RING_BYTES,
-                "kda_decode: its shared memory in the ring area");
-  return RING_BYTES;
+  constexpr int need = kda_smem_bytes<NTASK, RP>();
+  static_assert(smem_launch_bytes(need) <= 232448,
+                "kda_decode: its shared memory in the launch's 227 KB");
+  return need > RING_BYTES ? need : RING_BYTES;
 }
 
 } // namespace static_mk

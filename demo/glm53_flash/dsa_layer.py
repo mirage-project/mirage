@@ -5,7 +5,8 @@ step) of T rows on a TP shard.
   indexer   gemm_tile x [wk | gate | weights_proj] (bf16, 384 rows) -> dsa_kpool_update (LayerNorm k, the tail ring, the
             pool of 4 it closes -> the pooled cache);  dsa_q_norm_quant (bf16 q_c) -> gemm_tile wq_b (bf16) ->
             dsa_index_score (Hadamard q, e4m3, the pooled keys: one score per complete pool) -> dsa_index_topk (512 pools)
-            -> sparse_mla expands the pools to their positions and adds the tail (the up to 3 positions after the pools)
+            -> sparse_mla expands the pools to their positions and adds the tail (the up to 3 positions after the pools);
+            a token of at most 512 pools has no scores, and sparse_mla takes its positions in order without the top-k
   boundary  o_proj's K parts (this GPU's partial sum) -> allreduce_send -> hc_post_mix (the sum over the GPUs, the
             attention's mHC post, the FFN's mHC mixes) -> hc_pre (the FFN's mHC pre with post_attention_layernorm)
   layouts   SGLang's (DSATokenToKVPool): the pooled cache [pages, 64 x 132] (e4m3 keys, then fp32 scales), its page table
@@ -32,6 +33,7 @@ IH, ID, PPAGE, KGW = 32, 128, 64, 384   # indexer heads x dims; pools per pooled
 TILES = 33                             # sparse_mla: 512 x 4 + 3 tail = 2051 index slots, 33 tiles of 64
 SLOTS = TILES * 64
 MLA_TILES = 36                         # sparse_mla's slots in tiles (the last 3 empty): every divisor of 36 a split count
+IQ_SKIP_T = (8, 16, 32, 64)            # the T whose indexer q GEMM skips a step of short tokens only (gemm_tile skip_seq)
 FLUSH_BYTES = mla.FLUSH_BYTES
 
 
@@ -217,11 +219,14 @@ def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float,
                                # close and their tail entries, token by token)
                                tokens_per_request=T // int(fused.get("requests", 1)) if fused.get("verify") else 1)
     iq = nt((T, IH * ID), int64, "idx_q")
-    mpk.gemm_tile_layer(input=a["q_c"], weight=a["w_iqb"], output=iq, combine="add")
+    # (a step whose tokens all have at most POOLS pools reads no indexer q: dsa_index_score skip_k)
+    mpk.gemm_tile_layer(input=a["q_c"], weight=a["w_iqb"], output=iq, combine="add",
+                        skip_seq=(a["seq_lens"], KPOOL * POOLS + KPOOL - 1) if T in IQ_SKIP_T else None)
     qb = nt((T, NH * NOPE), int64, "q_b")
     mpk.scaled_gemm_tile_layer(input=qcq, weight=a["w_qb"], weight_scales=a["w_qb_sf"], output=qb, combine="add")
     mpk.dsa_index_score_layer(iq=iq, kw=kw, index_cache=a["pcache"], cos_sin=None, seq_lens=a["seq_lens"],
-                              block_table=a["pooled_bt"], output=a["idx_scores"], chunks=maxpools // 1024, flash=True)
+                              block_table=a["pooled_bt"], output=a["idx_scores"], chunks=maxpools // 1024, flash=True,
+                              skip_k=POOLS)
     mpk.dsa_index_topk_layer(scores=a["idx_scores"], seq_lens=a["seq_lens"], output=a["pool_idx"], unit=KPOOL)
     mpk.dsa_q_absorb_layer(qb=qb, w_uk=a["w_uk"], cos_sin=None, seq_lens=a["seq_lens"], output=a["q_mla"])
     split = nt((T, NH, KVL), float32, "mla_split")
@@ -237,12 +242,15 @@ def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float,
     mpk.scaled_gemm_tile_layer(input=vq, weight=a["w_o"], weight_scales=a["w_o_sf"], output=a["o"], combine="add")
     sent = nt((T, H), bfloat16, "o_sent")
     mpk.allreduce_send_layer(input=a["o"], output=sent)
-    mix = nt((T, HC_MIX_STRIDE), float32, "ffn_hc_mix")
-    mpk.hc_post_mix_layer(sent=sent, residual=a["R_in"], coef=(a["h_post_in"], a["h_res_in"]), fn=a["hc_ffn_fn"],
-                          output=a["R_out"], mix=mix)
-    mpk.hc_pre_layer(mix=mix, residual=a["R_out"], hc_small=a["hc_ffn_small"], gamma=a["ffn_norm"], output=a["x_ffn"],
-                     rms_eps=fused["rms_eps"], hc_eps=fused["hc_eps"], norm_eps=fused["norm_eps"],
-                     sinkhorn_iters=fused["iters"], export=(a["h_post_out"], a["h_res_out"]))
+    if fused.get("post_only"):   # the layer ends at the attention's mHC post (R'); SGLang runs the FFN's mHC pre
+        mpk.hc_post_layer(sent=sent, residual=a["R_in"], output=a["R_out"], coef=(a["h_post_in"], a["h_res_in"]))
+    else:
+        mix = nt((T, HC_MIX_STRIDE), float32, "ffn_hc_mix")
+        mpk.hc_post_mix_layer(sent=sent, residual=a["R_in"], coef=(a["h_post_in"], a["h_res_in"]), fn=a["hc_ffn_fn"],
+                              output=a["R_out"], mix=mix)
+        mpk.hc_pre_layer(mix=mix, residual=a["R_out"], hc_small=a["hc_ffn_small"], gamma=a["ffn_norm"], output=a["x_ffn"],
+                         rms_eps=fused["rms_eps"], hc_eps=fused["hc_eps"], norm_eps=fused["norm_eps"],
+                         sinkhorn_iters=fused["iters"], export=(a["h_post_out"], a["h_res_out"]))
     nodes = compiler.graph_nodes(mpk)
     sg = [n for n in nodes if n.name == "scaled_gemm_tile"]
     gt = [n for n in nodes if n.name == "gemm_tile"]

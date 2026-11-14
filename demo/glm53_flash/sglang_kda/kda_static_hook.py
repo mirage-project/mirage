@@ -13,8 +13,9 @@ with post_attention_layernorm). It patches:
                                     ReplaySSM: the pools read only, the rings and the per-token conv windows written; the
                                     server needs --enable-linear-replayssm-spec)
   Glm5NextDecoderLayer.forward      wrapped when the layers are built (so it wraps whatever forward is in place then, e.g. the
-                                    DSA hook's): a layer with a static KDA layer, in a step of exactly T rows (a decode step,
-                                    or a target-verify step of T / 8 requests), runs SGLang's attn_boundary.prepare, then one
+                                    DSA hook's): a layer with a static KDA layer, in a decode step of n rows (the layer of
+                                    the smallest T >= n; n < T: its first n rows, the others idle: e.g. bs 1 / 2 / 4 on
+                                    T = 8) or a target-verify step of T / 8 requests, runs SGLang's attn_boundary.prepare, then one
                                     launch replaces self_attn + attn_boundary.finish + ffn_boundary.prepare (the stream gets
                                     R', MHCState the FFN's h_post / h_res, the MLP x_ffn; PDL unless KDA_STATIC_PDL=0; a CUDA
                                     graph captures it); other layers and steps: the forward wrapped
@@ -22,12 +23,14 @@ with post_attention_layernorm). It patches:
 check (KDA_STATIC_CHECK=1; eager runs): SGLang's path first (attention, all-reduce, post, pre) on the same states (put back
 after), then the static layer; printed: x_ffn, R' - R, h_post, h_res relRMS static vs SGLang, the states (the static layer's
 kept); a verify step also the ring (v, k, the decay, beta) and the windows against SGLang's.
-Env: KDA_STATIC_LAYERS; KDA_STATIC_CHECK (0 / 1); KDA_STATIC_PDL (1 / 0); KDA_STATIC_TOKENS (8, 16, 32: the T of the layers);
-KDA_STATIC_PLAN, KDA_STATIC_PLAN16, KDA_STATIC_PLAN32 (the decode layers' plan files by T, compiler.write_plan_file; default
-their round robin); KDA_STATIC_OUT (build directory, default <checkout>/build/sgl_static_kda); KDA_STATIC_BUILD_CACHE (the
+Env: KDA_STATIC_LAYERS; KDA_STATIC_CHECK (0 / 1); KDA_STATIC_PDL (1 / 0); KDA_STATIC_TOKENS (8, 16, 32, 64: the T of the layers);
+KDA_STATIC_PLAN, KDA_STATIC_PLAN16 / 32 / 64 (the decode layers' plan files by T, compiler.write_plan_file; default
+their round robin); KDA_STATIC_VERIFY_PLAN, KDA_STATIC_VERIFY_PLAN16 / 32 / 64 (the verify layers');
+KDA_STATIC_OUT (build directory, default <checkout>/build/sgl_static_kda); KDA_STATIC_BUILD_CACHE (the
 layers' build cache, static_schedule.compile_static: every KDA layer and rank has the same layer.cu, compiled once; default
 <checkout>/build/static_build_cache_kda); KDA_STATIC_ROOT (the mirage checkout, needed by kda_static_boot).
 """
+import itertools
 import os
 
 import torch
@@ -44,16 +47,35 @@ PDL = os.environ.get("KDA_STATIC_PDL", "1") != "0"
 CHECK = os.environ.get("KDA_STATIC_CHECK", "0") == "1"
 PLAN = {8: os.environ.get("KDA_STATIC_PLAN") or None,      # the layers' plan files by T (a plan file is of one T's graph)
         16: os.environ.get("KDA_STATIC_PLAN16") or None,
-        32: os.environ.get("KDA_STATIC_PLAN32") or None}
-TOKENS = sorted({int(x) for x in os.environ.get("KDA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8, 16, 32):
-                                                                                                      # a step of T rows runs
-                                                                                                      # the T layer
-assert TOKENS and all(t in (8, 16, 32) for t in TOKENS), f"KDA_STATIC_TOKENS {TOKENS}: of 8, 16, 32"
+        32: os.environ.get("KDA_STATIC_PLAN32") or None,
+        64: os.environ.get("KDA_STATIC_PLAN64") or None}
+VERIFY_PLAN = {8: os.environ.get("KDA_STATIC_VERIFY_PLAN") or None,      # the verify layers' (another graph: kda_decode
+               16: os.environ.get("KDA_STATIC_VERIFY_PLAN16") or None,   # [R, HL] of one request's tokens)
+               32: os.environ.get("KDA_STATIC_VERIFY_PLAN32") or None,
+               64: os.environ.get("KDA_STATIC_VERIFY_PLAN64") or None}
+TOKENS = sorted({int(x) for x in os.environ.get("KDA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8 .. 64):
+                                                                                                      # a decode step of n rows
+                                                                                                      # runs the smallest T >= n
+assert TOKENS and all(t in (8, 16, 32, 64) for t in TOKENS), f"KDA_STATIC_TOKENS {TOKENS}: of 8, 16, 32, 64"
+POST_ONLY = (64,)   # the T whose layers end at the attention's mHC post (R' alone; SGLang runs the FFN's mHC pre): the faster
+                    # end there end to end (nsys step periods, bs 64, prompt 256)
+_STEP_KEYS = itertools.count(1)
 
 
 def _pick(layers: dict, rows: int):
-    """The layer of exactly `rows` tokens, or None."""
-    return layers.get(rows) if isinstance(layers, dict) else None
+    """The layer of the smallest T >= rows (fewer rows: its first rows, the others idle), or None."""
+    if not isinstance(layers, dict) or rows <= 0:
+        return None
+    return next((layers[t] for t in sorted(layers) if rows <= t), None)
+
+
+def _step_key(fb) -> int:
+    """A key of this forward (ForwardBatch): the decode layers of a forward share their own slot list by it (fewer rows
+    than T)."""
+    key = getattr(fb, "_kda_step_key", None)
+    if key is None:
+        key = fb._kda_step_key = next(_STEP_KEYS)
+    return key
 
 
 def _plan_names(plans: dict) -> str:
@@ -133,7 +155,8 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 sts, svs, first = {}, {}, None
                 for tok in TOKENS:   # one layer per T, the weights shared
                     st = StaticKDA(m.layer_idx, self.server_args.model_path, rank, tp, cache.conv[0], cache.temporal, OUT,
-                                   _fused_args(lay, group), pdl=PDL, plan=PLAN[tok], tokens=tok,
+                                   dict(_fused_args(lay, group), post_only=tok in POST_ONLY), pdl=PDL,
+                                   plan=None if tok in POST_ONLY else PLAN[tok], tokens=tok,
                                    weights=None if first is None else first.t)
                     first = first or st
                     st.cache = cache
@@ -142,9 +165,8 @@ def _init_cuda_graphs(self, *args, **kwargs):
                         sv = {**_verify_buffers(cache, draft, m.layer_idx), "requests": tok // 8}
                         svs[tok] = StaticKDA(m.layer_idx, self.server_args.model_path, rank, tp, cache.conv[0],
                                              cache.temporal, OUT, _fused_args(lay, group), pdl=PDL,
-                                             plan=PLAN[8] if tok == 8 else None,
-                                             # (the T >= 16 plans are the decode graph's: kda_decode [16] vs the verify's [2, 16])
-                                             verify=sv, weights=first.t, tokens=tok)
+                                             plan=VERIFY_PLAN[tok] or (PLAN[8] if tok == 8 else None), verify=sv,
+                                             weights=first.t, tokens=tok)
                         svs[tok].cache = cache
                         _log(f"static KDA layer {m.layer_idx}: the verify build of {tok} rows ({tok // 8} requests x "
                              f"{draft} draft tokens, ring {sv['ring_v'].shape[2]}, windows {tuple(sv['icw'].shape)})")
@@ -193,11 +215,11 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
     mhc, fb = self._kda_mhc, forward_batch
     capturing = torch.cuda.is_current_stream_capturing()
     rows = hidden_states.shape[0] if isinstance(hidden_states, torch.Tensor) else -1
-    st = _pick(self._kda_fused, rows)   # the layer of exactly these rows (a decode step of T requests)
+    st = _pick(self._kda_fused, rows)   # a decode step: the layer of the smallest T >= rows
     fused = st is not None and fb.forward_mode.is_decode() and not (CHECK and capturing)
     # a speculative verify step of bs requests: their draft tokens as rows (the verify build of 8 bs rows)
     bs = int(fb.batch_size) if fb.forward_mode.is_target_verify() else 0
-    stv = _pick(getattr(self, "_kda_verify", None), 8 * bs) if bs else None
+    stv = (getattr(self, "_kda_verify", None) or {}).get(8 * bs) if bs else None
     verify = stv is not None and rows % bs == 0 and 0 < rows // bs <= stv.draft and not (CHECK and capturing)
     if verify:
         st = stv
@@ -231,8 +253,13 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
         if verify:
             x_ffn, R2, hp2, hr2 = stv.run_verify(hidden_states, R, hp, hr, idx, backend.verify_intermediate_state_indices)
         else:
-            x_ffn, R2, hp2, hr2 = st.run_fused(hidden_states, R, hp, hr, idx)
+            x_ffn, R2, hp2, hr2 = st.run_fused(hidden_states, R, hp, hr, idx, step_key=_step_key(fb))
         stream_of(fb).write(R2)
+        if x_ffn is None:   # the layer ended at the mHC post: SGLang's FFN mHC pre and norm on R'
+            nm = self.post_attention_layernorm
+            x_ffn, hr2, hp2, norm_fused = mhc.hc_ffn_pre(R2, nm.weight.data, nm.variance_epsilon)
+            if not norm_fused and x_ffn.shape[0] != 0:
+                x_ffn = nm(x_ffn)
         mhc.h_post, mhc.h_res = hp2, hr2
         if CHECK:
             torch.cuda.synchronize()

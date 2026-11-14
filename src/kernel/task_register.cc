@@ -5526,10 +5526,11 @@ int TaskRegister::register_gemm_tile_sm100_task(
   // params: {mode (how the K parts are combined: 0 one slot per part, 1
   // fixed-point add, 2 plain store, 3 plain store in bf16), K, N, polled (1:
   // the activation is its producer's 0xFF-prefilled bf16 buffer, polled into
-  // the ring's stages)} (static_megakernel/core.cuh Combine); the K split is
+  // the ring's stages)[, L (mode 1: a launch with every seq_lens <= L only
+  // counts the tasks)]} (static_megakernel/core.cuh Combine); the K split is
   // the grid's y; its tensor maps are the node's slots. inputs: activation [T,
   // K], weight [N, K]; output: [T, N] fp32 (mode 3: bf16).
-  assert(params.size() == 4);
+  assert(params.size() == 4 || params.size() == 5);
   assert(params[0] >= 0 && params[0] <= 3 &&
          (params[3] == 0 || params[3] == 1) &&
          (params[3] == 0 || params[0] == 0));
@@ -5805,16 +5806,18 @@ int TaskRegister::register_dsa_q_absorb_sm100_task(
 
 int TaskRegister::register_dsa_index_score_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {heads, MAXCTX, PAGE, MAXP, FLASH (0 / 1)}. inputs: the wq_b
-  // output, the indexer projection, the index cache; output: scores
-  // [T, MAXCTX] fp32. Grid (chunks, tokens).
+  // params: {heads, MAXCTX, PAGE, MAXP, FLASH (0 / 1)[, SKIPK (a token of at
+  // most SKIPK entries has no scores)]}. inputs: the wq_b output, the indexer
+  // projection, the index cache; output: scores [T, MAXCTX] fp32. Grid
+  // (chunks, tokens).
+  assert(params.size() == 5 || params.size() == 6);
   return register_static_task(this,
                               TASK_DSA_INDEX_SCORE_SM100,
                               "dsa_index_score",
                               bgraph,
                               params,
                               3,
-                              5);
+                              params.size());
 }
 
 int TaskRegister::register_dsa_index_topk_sm100_task(

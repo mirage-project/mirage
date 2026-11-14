@@ -10,20 +10,22 @@ with post_attention_layernorm). It patches:
                                     buffer of the pooled keys and the tail buffers; its weights: this rank's heads and the
                                     indexer, from the checkpoint); with MTP (the server's speculative_num_draft_tokens) also
                                     the verify layer of T / 8 requests' draft tokens
-  Glm5NextDecoderLayer.forward      a step of exactly T rows (a decode step, or a target-verify step of T / 8 requests): after
+  Glm5NextDecoderLayer.forward      a decode step of n rows on the layer of the smallest T >= n (n < T: its first n rows, the
+                                    others idle: e.g. bs 1 / 2 / 4 on T = 8), or a target-verify step of T / 8 requests: after
                                     attn_boundary.prepare (SGLang's attention mHC pre: x, the streams in the forward's
                                     residual stream, h_post / h_res in the layer's MHCState), one launch replaces self_attn +
                                     attn_boundary.finish + ffn_boundary.prepare: the stream gets R', MHCState the FFN's
                                     h_post / h_res, the MLP x_ffn (PDL unless DSA_STATIC_PDL=0; a CUDA graph captures it).
-                                    Other steps (prefill, other batch sizes): SGLang's layer; the static layer reads and
-                                    writes SGLang's own state, so the two take turns on it
+                                    Other steps (prefill, more rows than the largest T): SGLang's layer; the static layer
+                                    reads and writes SGLang's own state, so the two take turns on it
   MHCState.__init__                 lets each decoder layer find its own
 check (DSA_STATIC_CHECK=1, the default; eager runs): SGLang's path first (attention, all-reduce, post, pre), then the static
 layer on the same inputs; printed: x_ffn, R' - R, h_post, h_res relRMS static vs SGLang, and SGLang's boundary against the
 formulas the static layer follows (the static layer's outputs are kept).
-Env: DSA_STATIC_LAYERS; DSA_STATIC_CHECK (1 / 0); DSA_STATIC_PDL (1 / 0); DSA_STATIC_TOKENS (8, 16, 32: the T of the layers);
-DSA_STATIC_FUSED_PLAN, DSA_STATIC_FUSED_PLAN16, DSA_STATIC_FUSED_PLAN32 (the decode layers' plan files by T: dsa_fused_demo
---search, e.g. dsa_fused_plan_long.json here, or rr, the default; the verify layers run round robin); DSA_STATIC_OUT (build
+Env: DSA_STATIC_LAYERS; DSA_STATIC_CHECK (1 / 0); DSA_STATIC_PDL (1 / 0); DSA_STATIC_TOKENS (8, 16, 32, 64: the T of the layers);
+DSA_STATIC_FUSED_PLAN, DSA_STATIC_FUSED_PLAN16 / 32 / 64 (the decode layers' plan files by T: dsa_fused_demo
+--search, e.g. dsa_fused_plan_long.json here, or rr, the default); DSA_STATIC_VERIFY_PLAN, DSA_STATIC_VERIFY_PLAN16 / 32 /
+64 (the verify layers', dsa_fused_demo --verify --search, or rr); DSA_STATIC_OUT (build
 directory, default <checkout>/build/sgl_static_dsa); DSA_STATIC_BUILD_CACHE (the build cache, static_schedule.compile_static:
 every layer and rank has the same layer.cu, compiled once; default <checkout>/build/static_build_cache_dsa); DSA_STATIC_ROOT
 (the mirage checkout, default this one).
@@ -42,11 +44,18 @@ CHECK = os.environ.get("DSA_STATIC_CHECK", "1") != "0"
 PDL = os.environ.get("DSA_STATIC_PDL", "1") != "0"
 FUSED_PLAN = {8: os.environ.get("DSA_STATIC_FUSED_PLAN", "rr"),      # the layers' plans by T (a plan file is of one T's
               16: os.environ.get("DSA_STATIC_FUSED_PLAN16", "rr"),   # graph: the grids differ)
-              32: os.environ.get("DSA_STATIC_FUSED_PLAN32", "rr")}
-TOKENS = sorted({int(x) for x in os.environ.get("DSA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8, 16, 32):
-                                                                                                      # a step of T rows runs
-                                                                                                      # the T layer
-assert TOKENS and all(t in (8, 16, 32) for t in TOKENS), f"DSA_STATIC_TOKENS {TOKENS}: of 8, 16, 32"
+              32: os.environ.get("DSA_STATIC_FUSED_PLAN32", "rr"),
+              64: os.environ.get("DSA_STATIC_FUSED_PLAN64", "rr")}
+VERIFY_PLAN = {8: os.environ.get("DSA_STATIC_VERIFY_PLAN", "rr"),      # the verify layers' (another graph: kpool_update per
+               16: os.environ.get("DSA_STATIC_VERIFY_PLAN16", "rr"),   # token)
+               32: os.environ.get("DSA_STATIC_VERIFY_PLAN32", "rr"),
+               64: os.environ.get("DSA_STATIC_VERIFY_PLAN64", "rr")}
+TOKENS = sorted({int(x) for x in os.environ.get("DSA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8 .. 64):
+                                                                                                      # a decode step of n rows
+                                                                                                      # runs the smallest T >= n
+assert TOKENS and all(t in (8, 16, 32, 64) for t in TOKENS), f"DSA_STATIC_TOKENS {TOKENS}: of 8, 16, 32, 64"
+POST_ONLY = (64,)   # the T whose layers end at the attention's mHC post (R' alone; SGLang runs the FFN's mHC pre): the faster
+                    # end there end to end (nsys step periods, bs 64, prompt 256)
 os.environ.setdefault("MIRAGE_STATIC_BUILD_CACHE",
                       os.environ.get("DSA_STATIC_BUILD_CACHE", os.path.join(ROOT, "build", "static_build_cache_dsa")))
 OUT = os.environ.get("DSA_STATIC_OUT", os.path.join(ROOT, "build", "sgl_static_dsa"))
@@ -54,8 +63,10 @@ _orig_init_cuda_graphs = _mr.ModelRunner.init_cuda_graphs
 
 
 def _pick(layers: dict, rows: int):
-    """The layer of exactly `rows` tokens, or None."""
-    return layers.get(rows) if isinstance(layers, dict) else None
+    """The layer of the smallest T >= rows (fewer rows: its first rows, the others idle), or None."""
+    if not isinstance(layers, dict) or rows <= 0:
+        return None
+    return next((layers[t] for t in sorted(layers) if rows <= t), None)
 
 
 def _log(msg):
@@ -100,13 +111,16 @@ def _init_cuda_graphs(self, *args, **kwargs):
                     raise RuntimeError(f"layer {m.layer_id}: no Glm5NextDecoderLayer holds it")
                 sts, svs, first = {}, {}, None
                 for tok in TOKENS:   # one layer per T, the checkpoint tensors shared
-                    st = StaticDSA(m.layer_id, self.server_args.model_path, rank, tp, kv, r2t, OUT, idx, _fused_args(lay, group),
-                                   pdl=PDL, fused_plan=FUSED_PLAN[tok], tokens=tok, weights=None if first is None else first.w)
+                    st = StaticDSA(m.layer_id, self.server_args.model_path, rank, tp, kv, r2t, OUT, idx,
+                                   dict(_fused_args(lay, group), post_only=tok in POST_ONLY), pdl=PDL,
+                                   fused_plan="rr" if tok in POST_ONLY else FUSED_PLAN[tok], tokens=tok,
+                                   weights=None if first is None else first.w)
                     first = first or st
                     sts[tok] = st
                     if draft:   # MTP: the verify layer of tok / 8 requests' draft tokens (bs = tok / 8)
                         svs[tok] = StaticDSA(m.layer_id, self.server_args.model_path, rank, tp, kv, r2t, OUT, idx,
-                                             _fused_args(lay, group), pdl=PDL, verify=int(draft), tokens=tok,
+                                             _fused_args(lay, group), pdl=PDL, fused_plan=VERIFY_PLAN[tok],
+                                             verify=int(draft), tokens=tok,
                                              requests=tok // 8, weights=first.w)
                         _log(f"static DSA layer {m.layer_id}: the verify build of {tok} rows ({tok // 8} requests x {draft} "
                              f"draft tokens)")
@@ -140,7 +154,8 @@ _STEP_KEYS = itertools.count(1)
 
 
 def _step_key(fb) -> int:
-    """A key of this forward (ForwardBatch): the verify layers of a forward share their per-token metadata by it."""
+    """A key of this forward (ForwardBatch): the layers of a forward share their own per-step metadata by it (a verify
+    step, a decode step of fewer rows than T)."""
     key = getattr(fb, "_mk_step_key", None)
     if key is None:
         key = fb._mk_step_key = next(_STEP_KEYS)
@@ -161,11 +176,11 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
     capturing = torch.cuda.is_current_stream_capturing()
     mhc = getattr(self, "_dsa_mhc", None)
     rows = hidden_states.shape[0] if isinstance(hidden_states, torch.Tensor) else -1
-    st = _pick(getattr(self, "_dsa_fused", None), rows)   # the layer of exactly these rows (a decode step of T requests)
+    st = _pick(getattr(self, "_dsa_fused", None), rows)   # a decode step: the layer of the smallest T >= rows
     fused = st is not None and mhc is not None and fb.forward_mode.is_decode() and not (CHECK and capturing)
     # a speculative verify step of bs requests: their draft tokens as rows (the verify build of 8 bs rows)
     bs = int(fb.batch_size) if fb.forward_mode.is_target_verify() else 0
-    stv = _pick(getattr(self, "_dsa_verify", None), 8 * bs) if bs else None
+    stv = (getattr(self, "_dsa_verify", None) or {}).get(8 * bs) if bs else None
     verify = stv is not None and mhc is not None and rows % bs == 0 and 0 < rows // bs <= stv.verify and \
         not (CHECK and capturing)
     if verify:
@@ -175,7 +190,7 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
         T = st.T
         stream = stream_of(fb)
         R, hp, hr = stream.residual, mhc.h_post, mhc.h_res
-        seq_lens, rpi = fb.seq_lens[:T], fb.req_pool_indices[:T]
+        seq_lens, rpi = fb.seq_lens[:rows], fb.req_pool_indices[:rows]
         if CHECK:   # SGLang's path first, on copies of its inputs
             R, hp, hr, x_in = R.clone(), hp.clone(), hr.clone(), hidden_states.clone()
             y = self.self_attn(positions=positions, hidden_states=hidden_states, forward_batch=fb,
@@ -193,8 +208,13 @@ def _layer_forward(self, positions, hidden_states, forward_batch, zero_allocator
             x_ffn, R2, hp2, hr2 = stv.run_verify(hidden_states, R, hp, hr, fb.seq_lens[:bs], fb.req_pool_indices[:bs],
                                                  step_key=_step_key(fb))
         else:
-            x_ffn, R2, hp2, hr2 = st.run_fused(hidden_states, R, hp, hr, seq_lens, rpi, _dsa_meta())
+            x_ffn, R2, hp2, hr2 = st.run_fused(hidden_states, R, hp, hr, seq_lens, rpi, _dsa_meta(), step_key=_step_key(fb))
         stream_of(fb).write(R2)
+        if x_ffn is None:   # the layer ended at the mHC post: SGLang's FFN mHC pre and norm on R'
+            nm = self.post_attention_layernorm
+            x_ffn, hr2, hp2, norm_fused = mhc.hc_ffn_pre(R2, nm.weight.data, nm.variance_epsilon)
+            if not norm_fused and x_ffn.shape[0] != 0:
+                x_ffn = nm(x_ffn)
         mhc.h_post, mhc.h_res = hp2, hr2
         if CHECK:
             torch.cuda.synchronize()
