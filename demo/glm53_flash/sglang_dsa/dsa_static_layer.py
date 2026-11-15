@@ -18,7 +18,7 @@ attention with the sublayer boundary inside (as Kimi K3's fused layers, #811), b
                CUDA graph buffers: no copy), else copied into the layer's tensors (an eager step's freshly made metadata)
   padding      a CUDA graph of T rows replays with fewer requests: SGLang pads req_pool_indices with 0 and seq_lens with 1;
                request slot 0 is SGLang's dummy (its req_to_token row: the dummy token slot 0), so the padded rows read and
-               write only dummy rows. A decode step of n < T rows (a CUDA graph of bs 1 / 2 / 4 on the T = 8 layer):
+               write only dummy rows. A decode step of n < T rows (a CUDA graph of bs 3 on the T = 4 layer):
                run_fused pads rows n .. T - 1 the same way in the layer's own per-step tensors
   launch       launch_stream on the current stream (a CUDA graph captures it); pdl: a programmatic launch, the kernel lets
                the next one launch at its start (-DSTATIC_PDL_TRIGGER=1)
@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.join(ROOT, "demo", "glm53_flash"))
 TOKENS = int(os.environ.get("STATIC_TOKENS", "8"))   # the default of StaticDSA(tokens=): a process may build several T
 # sparse_mla's splits per token by T (of dsa_layer.MLA_TILES): T = 8: 18 (two tiles each, 144 tasks); T = 16: 9 (four tiles
 # each, 144 tasks: one wave of the 148 SMs); T = 32: 4 (nine tiles each, 128 tasks); T = 64: 2 (18 tiles each, 128 tasks)
-SPLITS = {8: 18, 16: 9, 32: 4, 64: 2}
+SPLITS = {1: 18, 2: 18, 4: 18, 8: 18, 16: 9, 32: 4, 64: 2}
 KV_PAGE = 256                   # SGLang's DSA KV page (tokens): one page of the index-K buffer (64 pools)
 PHYS_PAGE = 64                  # SGLang's DSA real_page_table pages (tokens): pooled_real_page_table takes every 4th
 
@@ -149,7 +149,7 @@ class StaticDSA:
                        "h_res_out": zb(16, torch.float32)})
         self.post_only = bool(fused.get("post_only")) and not verify   # fused["post_only"]: run_fused returns R' alone
         mpk = StaticMegakernel(num_gpus=tp)
-        grids = dsa_layer.build_graph(mpk, self.t, 1, SPLITS.get(T, 18), eps, 1e-6, {
+        grids = dsa_layer.build_graph(mpk, self.t, 1, SPLITS[T], eps, 1e-6, {
             "rms_eps": fused["rms_eps"], "hc_eps": fused["hc_eps"], "norm_eps": fused["norm_eps"], "iters": fused["iters"],
             "verify": bool(verify), "requests": self.requests, "post_only": self.post_only})
         if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the layer's GEMM weights into L2 at its start (core.cuh kernel_begin)

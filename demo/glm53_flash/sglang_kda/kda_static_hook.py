@@ -14,8 +14,8 @@ with post_attention_layernorm). It patches:
                                     server needs --enable-linear-replayssm-spec)
   Glm5NextDecoderLayer.forward      wrapped when the layers are built (so it wraps whatever forward is in place then, e.g. the
                                     DSA hook's): a layer with a static KDA layer, in a decode step of n rows (the layer of
-                                    the smallest T >= n; n < T: its first n rows, the others idle: e.g. bs 1 / 2 / 4 on
-                                    T = 8) or a target-verify step of T / 8 requests, runs SGLang's attn_boundary.prepare, then one
+                                    the smallest T >= n; n < T: its first n rows, the others idle: e.g. bs 3 on T = 4)
+                                    or a target-verify step of T / 8 requests, runs SGLang's attn_boundary.prepare, then one
                                     launch replaces self_attn + attn_boundary.finish + ffn_boundary.prepare (the stream gets
                                     R', MHCState the FFN's h_post / h_res, the MLP x_ffn; PDL unless KDA_STATIC_PDL=0; a CUDA
                                     graph captures it); other layers and steps: the forward wrapped
@@ -23,7 +23,8 @@ with post_attention_layernorm). It patches:
 check (KDA_STATIC_CHECK=1; eager runs): SGLang's path first (attention, all-reduce, post, pre) on the same states (put back
 after), then the static layer; printed: x_ffn, R' - R, h_post, h_res relRMS static vs SGLang, the states (the static layer's
 kept); a verify step also the ring (v, k, the decay, beta) and the windows against SGLang's.
-Env: KDA_STATIC_LAYERS; KDA_STATIC_CHECK (0 / 1); KDA_STATIC_PDL (1 / 0); KDA_STATIC_TOKENS (8, 16, 32, 64: the T of the layers);
+Env: KDA_STATIC_LAYERS; KDA_STATIC_CHECK (0 / 1); KDA_STATIC_PDL (1 / 0); KDA_STATIC_TOKENS (the T a layer may have, of 1, 2, 4, 8, 16, 32, 64; default all: each server builds those its
+max_running_requests can run, _tokens_used);
 KDA_STATIC_PLAN, KDA_STATIC_PLAN16 / 32 / 64 (the decode layers' plan files by T, compiler.write_plan_file; default
 their round robin); KDA_STATIC_VERIFY_PLAN, KDA_STATIC_VERIFY_PLAN16 / 32 / 64 (the verify layers');
 KDA_STATIC_OUT (build directory, default <checkout>/build/sgl_static_kda); KDA_STATIC_BUILD_CACHE (the
@@ -57,11 +58,21 @@ VERIFY_PLAN = {1: None, 2: None, 4: None,
                16: os.environ.get("KDA_STATIC_VERIFY_PLAN16") or None,   # [R, HL] of one request's tokens)
                32: os.environ.get("KDA_STATIC_VERIFY_PLAN32") or None,
                64: os.environ.get("KDA_STATIC_VERIFY_PLAN64") or None}
-TOKENS = sorted({int(x) for x in os.environ.get("KDA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8 .. 64):
-                                                                                                      # a decode step of n rows
-                                                                                                      # runs the smallest T >= n
-# (1, 2, 4: a batch size's own layer, no idle rows; without them bs 1 / 2 / 4 run the T = 8 layer)
+# the layers' T (a decode step of n rows runs the smallest T >= n; default: all of them)
+TOKENS = sorted({int(x) for x in os.environ.get("KDA_STATIC_TOKENS", "1,2,4,8,16,32,64").split(",") if x.strip()})
 assert TOKENS and all(t in (1, 2, 4, 8, 16, 32, 64) for t in TOKENS), f"KDA_STATIC_TOKENS {TOKENS}: of 1, 2, 4, 8, 16, 32, 64"
+
+
+def _tokens_used(runner, draft) -> list:
+    """The T of TOKENS this server runs: a decode step of n <= R rows (R: its max_running_requests) the smallest T >= n;
+    with MTP (draft) a verify step of b <= R requests T = 8 b. All of TOKENS when R is unknown."""
+    R = getattr(runner, "max_running_requests", None)
+    if not R:
+        return TOKENS
+    use = {next(t for t in TOKENS if t >= n) for n in range(1, min(R, TOKENS[-1]) + 1)}
+    if draft:
+        use |= {t for t in TOKENS if t >= 8 and t // 8 <= R}
+    return sorted(use)
 POST_ONLY = (64,)   # the T whose layers end at the attention's mHC post (R' alone; SGLang runs the FFN's mHC pre): the faster
                     # end there end to end (nsys step periods, bs 64, prompt 256)
 _STEP_KEYS = itertools.count(1)
@@ -158,7 +169,7 @@ def _init_cuda_graphs(self, *args, **kwargs):
                     raise RuntimeError(f"layer {m.layer_idx}: no Glm5NextDecoderLayer holds it")
                 _log(f"building the static KDA layer {m.layer_idx} (TP {rank}/{tp}, plans {_plan_names(PLAN)})")
                 sts, svs, first = {}, {}, None
-                for tok in TOKENS:   # one layer per T, the weights shared
+                for tok in _tokens_used(self, draft):   # one layer per T, the weights shared
                     st = StaticKDA(m.layer_idx, self.server_args.model_path, rank, tp, cache.conv[0], cache.temporal, OUT,
                                    dict(_fused_args(lay, group), post_only=tok in POST_ONLY), pdl=PDL,
                                    plan=None if tok in POST_ONLY else PLAN[tok], tokens=tok,
@@ -166,7 +177,7 @@ def _init_cuda_graphs(self, *args, **kwargs):
                     first = first or st
                     st.cache = cache
                     sts[tok] = st
-                    if draft:   # MTP: the verify layer of tok / 8 requests' draft tokens (bs = tok / 8)
+                    if draft and tok >= 8:   # MTP: the verify layer of tok / 8 requests' draft tokens (bs = tok / 8)
                         sv = {**_verify_buffers(cache, draft, m.layer_idx), "requests": tok // 8}
                         svs[tok] = StaticKDA(m.layer_idx, self.server_args.model_path, rank, tp, cache.conv[0],
                                              cache.temporal, OUT, _fused_args(lay, group), pdl=PDL,

@@ -9,7 +9,7 @@ sglang_dsa/boot/sitecustomize.py (on PYTHONPATH in the SGLang runs) imports this
   ModelRunner.init_cuda_graphs   first, for each chosen layer of this rank and each T of MOE_STATIC_TOKENS, builds its GPU of
                                  the TP layer (the layers' exchange regions in one allocation, ExchangePool); with MTP also
                                  the verify build of T / 8 requests x the draft tokens live rows; for each n of
-                                 MOE_STATIC_ROWS below its T the decode build of n live rows (bs 1 / 2 / 4 on T = 8: the
+                                 MOE_STATIC_ROWS below its T the decode build of n live rows (e.g. bs 3 on T = 4: the
                                  idle rows are not routed, so no expert of their own is streamed)
   DeepseekV2MoE.forward          a step of at most T rows (a decode step, or a target-verify step): one launch on (x, the
                                  residual stream, h_post, h_res) returns the new streams (a CUDA graph captures it; PDL
@@ -29,11 +29,12 @@ x_attn, h_res, h_post to the next layer's MHCState (read_attn_input patched: the
 SGLang kernel runs between the two layers' kernels; the layers of the other T and the last layer end at the FFN's mHC post
 (mhc). check: also x_attn, h_res, h_post against SGLang's hc_attn_pre on its own streams.
 Env: MOE_STATIC_LAYERS; MOE_STATIC_CHECK (1 / 0); MOE_STATIC_PDL (1 / 0); MOE_STATIC_TOKENS
-(1, 2, 4, 8, 16, 32, 64: the T of the layers; 1, 2, 4: a batch size's own layer, no idle rows); MOE_STATIC_PLAN,
+(the T a layer may have, of 1, 2, 4, 8, 16, 32, 64; default all: each server builds those its max_running_requests
+can run, _tokens_used); MOE_STATIC_PLAN,
 MOE_STATIC_PLAN1 / 2 / 4 / 16 / 32 / 64 (the layers' plan files by T, moe_demo
 --search of that T's --end, one GPU's lists, e.g. moe_plan16_mhc_pre.json here; default: round robin of moe_demo's grids);
 MOE_STATIC_VERIFY_PLAN, MOE_STATIC_VERIFY_PLAN16, MOE_STATIC_VERIFY_PLAN32 (the verify layers'); MOE_STATIC_ROWS (the live
-rows of decode steps that get a build of their own, e.g. 1,2,4: a decode step of n < T rows without one runs the T layer
+rows of decode steps that get a build of their own, e.g. 3: a decode step of n < T rows without one runs the T layer
 with its idle rows routed; the plan of their T's layer); MOE_STATIC_OUT (build
 directory, default <checkout>/build/sgl_static_moe); MOE_STATIC_BUILD_CACHE (the build cache: every layer and rank has the
 same layer.cu, compiled once; default <checkout>/build/static_build_cache_moe); MOE_STATIC_ROOT (the mirage checkout, default
@@ -71,11 +72,21 @@ VERIFY_PLAN_FILE = {1: None, 2: None, 4: None,
                     16: os.environ.get("MOE_STATIC_VERIFY_PLAN16") or None,
                     32: os.environ.get("MOE_STATIC_VERIFY_PLAN32") or None,
                     64: os.environ.get("MOE_STATIC_VERIFY_PLAN64") or None}
-TOKENS = sorted({int(x) for x in os.environ.get("MOE_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8 .. 64):
-                                                                                                      # a step of n rows runs
-                                                                                                      # the smallest T >= n
-# (1, 2, 4: a batch size's own layer, no idle rows; without them bs 1 / 2 / 4 run the T = 8 layer, MOE_STATIC_ROWS)
+# the layers' T (a step of n rows runs the smallest T >= n; default: all of them)
+TOKENS = sorted({int(x) for x in os.environ.get("MOE_STATIC_TOKENS", "1,2,4,8,16,32,64").split(",") if x.strip()})
 assert TOKENS and all(t in (1, 2, 4, 8, 16, 32, 64) for t in TOKENS), f"MOE_STATIC_TOKENS {TOKENS}: of 1, 2, 4, 8, 16, 32, 64"
+
+
+def _tokens_used(runner, draft) -> list:
+    """The T of TOKENS this server runs: a decode step of n <= R rows (R: its max_running_requests) the smallest T >= n;
+    with MTP (draft) a verify step of b <= R requests T = 8 b. All of TOKENS when R is unknown."""
+    R = getattr(runner, "max_running_requests", None)
+    if not R:
+        return TOKENS
+    use = {next(t for t in TOKENS if t >= n) for n in range(1, min(R, TOKENS[-1]) + 1)}
+    if draft:
+        use |= {t for t in TOKENS if t >= 8 and t // 8 <= R}
+    return sorted(use)
 # decode steps of n live rows below their T: n -> that T (a build of n live rows of the T layer's graph)
 ROWS = {n: next(t for t in TOKENS if n <= t) for n in sorted({int(x) for x in os.environ.get("MOE_STATIC_ROWS", "").split(",")
                                                               if x.strip()}) if 0 < n < TOKENS[-1] and n not in TOKENS}
@@ -129,9 +140,11 @@ def _init_cuda_graphs(self, *args, **kwargs):
         layer_of = {id(lay.mlp): lay for lay in decoder}
         after = {id(a): b for a, b in zip(decoder, decoder[1:])}   # the decoder layer after each
         draft = getattr(self.server_args, "speculative_num_draft_tokens", None)   # MTP: verify builds too (below)
+        use = _tokens_used(self, draft)
+        rows = {n: t for n, t in ROWS.items() if n <= (getattr(self, "max_running_requests", None) or n)}
         # the layers' exchange regions in one allocation of symmetric memory over the TP group (the first take, the largest
         # T, sizes the slots)
-        pool = ExchangePool(group, dev, len(mods) * (len(TOKENS) * (2 if draft else 1) + len(ROWS)))
+        pool = ExchangePool(group, dev, len(mods) * (len(use) * (2 if draft else 1) + len(rows)))
         self._moe_exchange_pool = pool   # kept alive with the model runner: the layers' exchange regions are its memory
         for m in mods:
             ex = m.experts
@@ -145,7 +158,7 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 raise RuntimeError(f"layer {m.layer_id}: no Glm5NextDecoderLayer holds the MoE (its FFN exit)")
             m.__dict__["_moe_boundary"] = lay.ffn_boundary   # not a submodule
             free0 = torch.cuda.mem_get_info()[0]
-            nxt = after.get(id(lay)) if any(_fused_at(t) for t in TOKENS) else None
+            nxt = after.get(id(lay)) if any(_fused_at(t) for t in use) else None
             attn_next = None
             if nxt is not None:   # the next layer's attention mHC pre in this kernel
                 cfg = nxt.config
@@ -154,7 +167,7 @@ def _init_cuda_graphs(self, *args, **kwargs):
                              "norm_eps": float(nxt.input_layernorm.variance_epsilon), "rms_eps": float(cfg.rms_norm_eps),
                              "hc_eps": float(cfg.hc_eps), "iters": int(cfg.hc_sinkhorn_iters)}
             sts, svs, first = {}, {}, None
-            for tok in sorted(TOKENS, reverse=True):   # one layer per T (the largest first: the pool's slot size), the
+            for tok in sorted(use, reverse=True):   # one layer per T (the largest first: the pool's slot size), the
                                                        # expert bank shared
                 nxt_t, attn_t = (nxt, attn_next) if _fused_at(tok) else (None, None)
                 st = StaticMoE(m.layer_id, self.server_args.model_path, rank, tp, dev, OUT, group, pdl=PDL,
@@ -180,7 +193,7 @@ def _init_cuda_graphs(self, *args, **kwargs):
                     svs[rows] = sv
                     _OUTS.add(sv.t["streams_out"].data_ptr())
             sds = {}
-            for n, tok in ROWS.items():   # decode steps of n live rows below T: their own build (the rest idle: not routed)
+            for n, tok in rows.items():   # decode steps of n live rows below T: their own build (the rest idle: not routed)
                 nxt_t, attn_t = (nxt, attn_next) if _fused_at(tok) else (None, None)
                 sd = StaticMoE(m.layer_id, self.server_args.model_path, rank, tp, dev, OUT, group, pdl=PDL,
                                keep_weights=CHECK, pool=pool, attn_next=attn_t,

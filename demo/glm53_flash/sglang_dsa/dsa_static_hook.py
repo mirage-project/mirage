@@ -11,7 +11,7 @@ with post_attention_layernorm). It patches:
                                     indexer, from the checkpoint); with MTP (the server's speculative_num_draft_tokens) also
                                     the verify layer of T / 8 requests' draft tokens
   Glm5NextDecoderLayer.forward      a decode step of n rows on the layer of the smallest T >= n (n < T: its first n rows, the
-                                    others idle: e.g. bs 1 / 2 / 4 on T = 8), or a target-verify step of T / 8 requests: after
+                                    others idle: e.g. bs 3 on T = 4), or a target-verify step of T / 8 requests: after
                                     attn_boundary.prepare (SGLang's attention mHC pre: x, the streams in the forward's
                                     residual stream, h_post / h_res in the layer's MHCState), one launch replaces self_attn +
                                     attn_boundary.finish + ffn_boundary.prepare: the stream gets R', MHCState the FFN's
@@ -22,7 +22,8 @@ with post_attention_layernorm). It patches:
 check (DSA_STATIC_CHECK=1, the default; eager runs): SGLang's path first (attention, all-reduce, post, pre), then the static
 layer on the same inputs; printed: x_ffn, R' - R, h_post, h_res relRMS static vs SGLang, and SGLang's boundary against the
 formulas the static layer follows (the static layer's outputs are kept).
-Env: DSA_STATIC_LAYERS; DSA_STATIC_CHECK (1 / 0); DSA_STATIC_PDL (1 / 0); DSA_STATIC_TOKENS (8, 16, 32, 64: the T of the layers);
+Env: DSA_STATIC_LAYERS; DSA_STATIC_CHECK (1 / 0); DSA_STATIC_PDL (1 / 0); DSA_STATIC_TOKENS (the T a layer may have, of 1, 2, 4, 8, 16, 32, 64; default all: each server builds those its
+max_running_requests can run, _tokens_used);
 DSA_STATIC_FUSED_PLAN, DSA_STATIC_FUSED_PLAN16 / 32 / 64 (the decode layers' plan files by T: dsa_fused_demo
 --search, e.g. dsa_fused_plan_long.json here, or rr, the default); DSA_STATIC_VERIFY_PLAN, DSA_STATIC_VERIFY_PLAN16 / 32 /
 64 (the verify layers', dsa_fused_demo --verify --search, or rr); DSA_STATIC_OUT (build
@@ -54,11 +55,21 @@ VERIFY_PLAN = {1: "rr", 2: "rr", 4: "rr",
                16: os.environ.get("DSA_STATIC_VERIFY_PLAN16", "rr"),   # token)
                32: os.environ.get("DSA_STATIC_VERIFY_PLAN32", "rr"),
                64: os.environ.get("DSA_STATIC_VERIFY_PLAN64", "rr")}
-TOKENS = sorted({int(x) for x in os.environ.get("DSA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8 .. 64):
-                                                                                                      # a decode step of n rows
-                                                                                                      # runs the smallest T >= n
-# (1, 2, 4: a batch size's own layer, no padded rows; without them bs 1 / 2 / 4 run the T = 8 layer)
+# the layers' T (a decode step of n rows runs the smallest T >= n; default: all of them)
+TOKENS = sorted({int(x) for x in os.environ.get("DSA_STATIC_TOKENS", "1,2,4,8,16,32,64").split(",") if x.strip()})
 assert TOKENS and all(t in (1, 2, 4, 8, 16, 32, 64) for t in TOKENS), f"DSA_STATIC_TOKENS {TOKENS}: of 1, 2, 4, 8, 16, 32, 64"
+
+
+def _tokens_used(runner, draft) -> list:
+    """The T of TOKENS this server runs: a decode step of n <= R rows (R: its max_running_requests) the smallest T >= n;
+    with MTP (draft) a verify step of b <= R requests T = 8 b. All of TOKENS when R is unknown."""
+    R = getattr(runner, "max_running_requests", None)
+    if not R:
+        return TOKENS
+    use = {next(t for t in TOKENS if t >= n) for n in range(1, min(R, TOKENS[-1]) + 1)}
+    if draft:
+        use |= {t for t in TOKENS if t >= 8 and t // 8 <= R}
+    return sorted(use)
 POST_ONLY = (64,)   # the T whose layers end at the attention's mHC post (R' alone; SGLang runs the FFN's mHC pre): the faster
                     # end there end to end (nsys step periods, bs 64, prompt 256)
 os.environ.setdefault("MIRAGE_STATIC_BUILD_CACHE",
@@ -115,14 +126,14 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 if lay is None:
                     raise RuntimeError(f"layer {m.layer_id}: no Glm5NextDecoderLayer holds it")
                 sts, svs, first = {}, {}, None
-                for tok in TOKENS:   # one layer per T, the checkpoint tensors shared
+                for tok in _tokens_used(self, draft):   # one layer per T, the checkpoint tensors shared
                     st = StaticDSA(m.layer_id, self.server_args.model_path, rank, tp, kv, r2t, OUT, idx,
                                    dict(_fused_args(lay, group), post_only=tok in POST_ONLY), pdl=PDL,
                                    fused_plan="rr" if tok in POST_ONLY else FUSED_PLAN[tok], tokens=tok,
                                    weights=None if first is None else first.w)
                     first = first or st
                     sts[tok] = st
-                    if draft:   # MTP: the verify layer of tok / 8 requests' draft tokens (bs = tok / 8)
+                    if draft and tok >= 8:   # MTP: the verify layer of tok / 8 requests' draft tokens (bs = tok / 8)
                         svs[tok] = StaticDSA(m.layer_id, self.server_args.model_path, rank, tp, kv, r2t, OUT, idx,
                                              _fused_args(lay, group), pdl=PDL, fused_plan=VERIFY_PLAN[tok],
                                              verify=int(draft), tokens=tok,

@@ -32,13 +32,8 @@ MOE_ONLY = {**BOOT, **MOE}
 ALL3P = {**ATTN, **MOE}
 PF = {"STATIC_L2_PREFETCH_MB": "16"}   # each layer's first 16 MB of GEMM weights into L2 at its start (core.cuh kernel_begin)
 CHECK = {"DSA_STATIC_CHECK": "1", "KDA_STATIC_CHECK": "1"}
-# the layers of each T next to the T = 8 ones: a decode step of T rows (bs T) runs them
-T16 = {"DSA_STATIC_TOKENS": "8,16", "KDA_STATIC_TOKENS": "8,16", "MOE_STATIC_TOKENS": "8,16"}
-T32 = {"DSA_STATIC_TOKENS": "8,16,32", "KDA_STATIC_TOKENS": "8,16,32", "MOE_STATIC_TOKENS": "8,16,32"}
-T64 = {"DSA_STATIC_TOKENS": "8,16,32,64", "KDA_STATIC_TOKENS": "8,16,32,64", "MOE_STATIC_TOKENS": "8,16,32,64"}
-# bs 1 / 2 / 4: the T = 8 layers with the rows past the requests idle; the MoE a build of exactly bs live rows (the idle rows
-# not routed)
-LIVE = lambda bs: {"MOE_STATIC_ROWS": str(bs)}
+# the layers' T: the hooks' default, every T (1, 2, 4, 8, 16, 32, 64); a decode step of n rows runs the smallest T >= n
+TOKENS = (1, 2, 4, 8, 16, 32, 64)
 # the KV pool with the static MoE layers (their expert banks take the memory SGLang would give the pool): 8 requests of
 # 8000 + 256 tokens need 66048; bs 16 x (8000 + 256) = 132096 in one wave (~13 KB a token); bs 64 x (4000 + 256) = 272384
 MTT, MTT16, MTT64 = ["--max-total-tokens", "81920"], ["--max-total-tokens", "163840"], ["--max-total-tokens", "294912"]
@@ -47,46 +42,45 @@ RUNS = [("check_all3p", {**ALL3P, **CHECK, "MOE_STATIC_CHECK": "1"}, ["sgl_check
 # bs 1 / 2 / 4 decode in check mode: the attention layers, then 4 MoE layers (the MoE in check mode keeps its weights)
 for bs in (1, 2, 4):
     RUNS += [(f"check_bs{bs}_attn", {**ATTN, **CHECK}, ["sgl_check.py", "24", "1500", "0", "off", str(bs)]),
-             (f"check_bs{bs}_moe4l", {**MOE_ONLY, **LIVE(bs), "MOE_STATIC_CHECK": "1", "MOE_STATIC_LAYERS": "3,4,5,6"},
+             (f"check_bs{bs}_moe4l", {**MOE_ONLY, "MOE_STATIC_CHECK": "1", "MOE_STATIC_LAYERS": "3,4,5,6"},
               ["sgl_check.py", "24", "1500", "81920", "off", str(bs)])]
 # the T = 16 / 32 layers in check mode (enough decode steps that every request has joined the batch before they end): the
 # attention layers, then 4 MoE layers; a decode step of T rows
-for t, tk in ((16, T16), (32, T32)):
-    RUNS += [(f"check_t{t}_bs{t}_attn", {**ATTN, **tk, **CHECK}, ["sgl_check.py", "40", "300", "0", "off", str(t)]),
-             (f"check_t{t}_bs{t}_moe4l", {**MOE_ONLY, **tk, "MOE_STATIC_CHECK": "1", "MOE_STATIC_LAYERS": "3,4,5,6"},
+for t in (16, 32):
+    RUNS += [(f"check_t{t}_bs{t}_attn", {**ATTN, **CHECK}, ["sgl_check.py", "40", "300", "0", "off", str(t)]),
+             (f"check_t{t}_bs{t}_moe4l", {**MOE_ONLY, "MOE_STATIC_CHECK": "1", "MOE_STATIC_LAYERS": "3,4,5,6"},
               ["sgl_check.py", "40", "300", "81920", "off", str(t)])]
 # T = 64: the decode layers (bs 64)
-RUNS += [("check_t64_bs64_attn", {**ATTN, **T64, **CHECK}, ["sgl_check.py", "72", "300", "0", "off", "64"]),
-         ("check_t64_bs64_moe4l", {**MOE_ONLY, **T64, "MOE_STATIC_CHECK": "1", "MOE_STATIC_LAYERS": "3,4,5,6"},
+RUNS += [("check_t64_bs64_attn", {**ATTN, **CHECK}, ["sgl_check.py", "72", "300", "0", "off", "64"]),
+         ("check_t64_bs64_moe4l", {**MOE_ONLY, "MOE_STATIC_CHECK": "1", "MOE_STATIC_LAYERS": "3,4,5,6"},
           ["sgl_check.py", "72", "300", "81920", "off", "64"])]
 # the scenarios: plain decode at every batch size
-E2E_SCEN = {"off_bs1": (1, "off", MTT, LIVE(1)), "off_bs2": (2, "off", MTT, LIVE(2)), "off_bs4": (4, "off", MTT, LIVE(4)),
-            "off_bs8": (8, "off", MTT, {}), "off_bs16": (16, "off", MTT16, T16), "off_bs32": (32, "off", MTT16, T32),
-            "off_bs64": (64, "off", MTT64, T64)}
+E2E_SCEN = {"off_bs1": (1, "off", MTT), "off_bs2": (2, "off", MTT), "off_bs4": (4, "off", MTT), "off_bs8": (8, "off", MTT),
+            "off_bs16": (16, "off", MTT16), "off_bs32": (32, "off", MTT16), "off_bs64": (64, "off", MTT64)}
 # nsys: 64 profiled steps of up to 256 new tokens (the steps after the prefill chunks), whole graphs traced
 # (--cuda-graph-trace=graph: per-node records perturb the timeline, MTP bs 1 SGLang's cycle 8087.6 vs its bench's 9765.7 us,
 # the static layers' 7170.0 vs 5548.3 us: they cost the static kernels' PDL overlap)
 GRAPH_TRACE = set()
-for scen, (bs, spec, mtt, tk) in E2E_SCEN.items():
+for scen, (bs, spec, mtt) in E2E_SCEN.items():
     for p in (256, 4000):
         a = ["sgl_spec_bench.py", "--bs", str(bs), "--spec", spec, "--prompt-tokens", str(p), *mtt, "--reps", "1",
              "--profile", "--profile-steps", "64", "--profile-tokens", "256"]
-        RUNS += [(f"prof_base_{scen}_p{p}", {}, a), (f"prof_all3ppf_{scen}_p{p}", {**ALL3P, **tk, **PF}, a)]
+        RUNS += [(f"prof_base_{scen}_p{p}", {}, a), (f"prof_all3ppf_{scen}_p{p}", {**ALL3P, **PF}, a)]
         GRAPH_TRACE |= {f"prof_base_{scen}_p{p}", f"prof_all3ppf_{scen}_p{p}"}
     a = ["sgl_spec_bench.py", "--bs", str(bs), "--spec", spec, *mtt]
-    RUNS += [(f"base_{scen}_mtt", {}, a), (f"all3ppf_{scen}", {**ALL3P, **tk, **PF}, a)]
+    RUNS += [(f"base_{scen}_mtt", {}, a), (f"all3ppf_{scen}", {**ALL3P, **PF}, a)]
 # node-traced variants at 4000 tokens (every kernel its own record: decode_compare.py's sublayer spans; they perturb the
 # period, so not for the end-to-end table)
 for scen in ("off_bs32", "off_bs64"):
-    bs, spec, mtt, tk = E2E_SCEN[scen]
+    bs, spec, mtt = E2E_SCEN[scen]
     a = ["sgl_spec_bench.py", "--bs", str(bs), "--spec", spec, "--prompt-tokens", "4000", *mtt, "--reps", "1", "--profile",
          "--profile-steps", "64", "--profile-tokens", "256"]
-    RUNS += [(f"prof_base_{scen}_p4000_node", {}, a), (f"prof_all3ppf_{scen}_p4000_node", {**ALL3P, **tk, **PF}, a)]
+    RUNS += [(f"prof_base_{scen}_p4000_node", {}, a), (f"prof_all3ppf_{scen}_p4000_node", {**ALL3P, **PF}, a)]
 # GSM8K (5 shots, 200 questions, greedy, plain decode): SGLang alone 4 at a time; the static layers 8 and 4 at a time (4: the
-# batch shrinks to 2 and 1 as questions end, the MoE builds of those live rows too)
+# batch shrinks to 2 and 1 as questions end, the layers of those T too)
 RUNS += [("gsm8k_off", {}, ["sgl_gsm8k.py", "--data-path", GSM, "--spec", "off", "--bs", "4"])]
 RUNS += [("all3ppf_gsm8k_off", {**ALL3P, **PF}, ["sgl_gsm8k.py", "--data-path", GSM, "--spec", "off", "--bs", "8", *MTT]),
-         ("all3ppf_gsm8k_off_bs4", {**ALL3P, **PF, "MOE_STATIC_ROWS": "1,2,4"},
+         ("all3ppf_gsm8k_off_bs4", {**ALL3P, **PF},
           ["sgl_gsm8k.py", "--data-path", GSM, "--spec", "off", "--bs", "4", *MTT])]
 NSYS = ["nsys", "profile", "--force-overwrite", "true", "--capture-range=cudaProfilerApi", "--capture-range-end=stop",
         "--trace=cuda,nvtx", "--cuda-graph-trace=node", "--trace-fork-before-exec=true"]
@@ -96,8 +90,8 @@ KEYS = ("decode step", "output ", "Error", "error:", "Traceback", "replaces SGLa
 # every layer kind on the best plan measured (one GPU): the DSA layers on the searched plans of their graph by context
 # (dsa_fused_plan_long.json: contexts 3346-3600, 64.1 vs round robin 71.8 us; _short: 20-275, 60.8 vs 62.9), the MoE on
 # the searched plan of its T's end (MOE_END) where one exists (T = 8 ends at mhc: round robin); the KDA layers' round robin
-# (30.3; the searched 31.9). The T = 16 / 32 layers: their own graphs' plan files where they exist (a graph whose searched plan
-# did not beat round robin has none). A run that names a plan keeps it.
+# (30.3; the searched 31.9). Every T alike: its own graph's plan file where one exists (a graph whose searched plan did not
+# beat round robin, and the T = 1 / 2 / 4 graphs, not searched: none, round robin). A run that names a plan keeps it.
 DSA_PLAN = {8: ("dsa_fused_plan_long.json", "dsa_fused_plan_short.json"),
             16: ("dsa_fused_plan16_long.json", "dsa_fused_plan16_short.json"),
             32: ("dsa_fused_plan32_long.json", "dsa_fused_plan32_short.json"),
@@ -106,8 +100,9 @@ KDA_PLAN = {16: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan16.js
             32: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan32.json"),
             64: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan64.json")}
 MOE_PLAN = {(t, end): os.path.join(os.path.dirname(HERE), "sglang_moe", f"moe_plan{'' if t == 8 else t}_{end}.json")
-            for t in (8, 16, 32, 64) for end in ("mhc", "mhc_pre")}
-MOE_END = {8: "mhc", 16: "mhc_pre", 32: "mhc_pre", 64: "mhc"}   # the MoE layers' end by T (moe_static_hook.END_PRE_TOKENS)
+            for t in TOKENS for end in ("mhc", "mhc_pre")}
+MOE_END = {t: "mhc_pre" if t in (16, 32) else "mhc" for t in TOKENS}   # the MoE layers' end by T (moe_static_hook
+                                                                         # END_PRE_TOKENS)
 
 
 def _best_plans(name, env, args):
@@ -116,21 +111,14 @@ def _best_plans(name, env, args):
     pt = args[args.index("--prompt-tokens") + 1:] if "--prompt-tokens" in args else []
     pt = [int(x) for x in pt[:next((i for i, x in enumerate(pt) if x.startswith("--")), len(pt))]]
     short = bool(pt) and max(pt) <= 1000
-    has = lambda kind, t: str(t) in env.get(f"{kind}_STATIC_TOKENS", "8").split(",")
-    for t in (8, 16, 32, 64):
+    has = lambda kind, t: str(t) in env.get(f"{kind}_STATIC_TOKENS", ",".join(map(str, TOKENS))).split(",")
+    for t in TOKENS:
         key = "" if t == 8 else str(t)
-        dsa = os.path.join(HERE, DSA_PLAN[t][short])
-        if env.get("DSA_STATIC_LAYERS") and has("DSA", t) and f"DSA_STATIC_FUSED_PLAN{key}" not in env and \
-                os.path.exists(dsa):
-            env[f"DSA_STATIC_FUSED_PLAN{key}"] = dsa
-        kda = KDA_PLAN.get(t)
-        if env.get("KDA_STATIC_LAYERS") and has("KDA", t) and t != 8 and f"KDA_STATIC_PLAN{key}" not in env and \
-                os.path.exists(kda):
-            env[f"KDA_STATIC_PLAN{key}"] = kda
-        moe = MOE_PLAN.get((t, MOE_END[t]))
-        if moe and env.get("MOE_STATIC_LAYERS") and has("MOE", t) and f"MOE_STATIC_PLAN{key}" not in env and \
-                os.path.exists(moe):
-            env[f"MOE_STATIC_PLAN{key}"] = moe
+        dsa = DSA_PLAN.get(t) and os.path.join(HERE, DSA_PLAN[t][short])
+        for kind, var, plan in (("DSA", "DSA_STATIC_FUSED_PLAN", dsa), ("KDA", "KDA_STATIC_PLAN", KDA_PLAN.get(t)),
+                                ("MOE", "MOE_STATIC_PLAN", MOE_PLAN[t, MOE_END[t]])):
+            if plan and env.get(f"{kind}_STATIC_LAYERS") and has(kind, t) and var + key not in env and os.path.exists(plan):
+                env[var + key] = plan
     return name, env, args
 
 
