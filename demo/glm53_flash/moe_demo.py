@@ -179,7 +179,7 @@ def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None) ->
                           sum over the GPUs, the mHC post, the next attention's mixes with hc_attn_fn) -> hc_pre (the next
                           layer's x_attn = RMSNorm(sum_i pre_i R'_i) input_layernorm, its h_post / h_res exported) -> x_attn,
                           h_post_next, h_res_next
-    valid_rows: the live rows of a speculative verify step (the rows past them are not routed)."""
+    valid_rows: the live rows of a decode step of fewer requests than T (the rows past them are not routed)."""
     mpk.max_counter_lines = 24   # 10 / 14 / 23 counter lines at T = 8 / 16 / 32 (scaled_moe_experts' per-slot counters), more
                                  # than config.cuh's default 16 (STATIC_NODE_COUNTER_LINES)
     a = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
@@ -573,8 +573,8 @@ def main():
                     "bit (a kernel change that keeps the rounding, same --layer --rank --seed)")
     ap.add_argument("--prof-experts", action="store_true", help="the experts node's per-SM stamps (scaled_moe_experts_layer "
                     "prof=): where its time goes, for the last timed launch")
-    ap.add_argument("--valid-rows", type=int, default=0, help="the live rows (a speculative verify step): the rows past "
-                    "them are not routed (topk_route valid_rows); the checks on the live rows")
+    ap.add_argument("--valid-rows", type=int, default=0, help="the live rows (a decode step of fewer requests than T): the "
+                    "rows past them are not routed (topk_route valid_rows); the checks on the live rows")
     args = ap.parse_args()
     torch.backends.cuda.matmul.allow_tf32 = False
     dev = torch.device("cuda", 0)

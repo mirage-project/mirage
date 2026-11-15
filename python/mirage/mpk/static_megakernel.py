@@ -975,14 +975,12 @@ class StaticMegakernel(PersistentKernel):
         pooled_cache: DTensor,  # [pages, page x 132] uint8: the pooled keys, e4m3 then fp32 scales (written in place)
         page: int = 64,
         eps: float = 1e-6,
-        tokens_per_request: int = 1,   # NT > 1: task x = tokens x NT .. x NT + NT - 1 of one request, in order (a
-                                       # speculative verify step: its draft tokens; idle rows have seq_lens 0)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the pooled indexer key update of GLM-5.3-Flash (tasks/dsa_kpool_update.cuh, SGLang's
         kpool_decode_update_and_maybe_write_cache). Task t: k = LayerNorm(k) (bf16); at position p = seq_lens[t] - 1 with
         p % 4 = 3, the pool p / 4 (the tail's 3 earlier keys and this one) -> the pooled cache; then (k, gate) -> tail slot
-        p % RING. params = [page, MAXPP, RING, eps bits[, NT]]. buf_slots: [k_norm_weight, k_norm_bias, ape, seq_lens,
+        p % RING. params = [page, MAXPP, RING, eps bits]. buf_slots: [k_norm_weight, k_norm_bias, ape, seq_lens,
         req_slots, pooled_block_table, tail_k, tail_score, pooled_cache]. One counter: the count of the tasks."""
         self._fx_producer("dsa_kpool_update_layer", kw)
         T = self._tokens(kw.dim(0))
@@ -995,10 +993,8 @@ class StaticMegakernel(PersistentKernel):
         assert (ape.dim(0), ape.dim(1)) == (4, 128) and RING >= 4 and tail_k.dim(2) == 128
         assert tuple(tail_score.dim(i) for i in range(3)) == tuple(tail_k.dim(i) for i in range(3))
         assert seq_lens.dim(0) == T and req_slots.dim(0) == T and pooled_block_table.dim(0) == T
-        NT = tokens_per_request
-        assert 1 <= NT <= T and T % NT == 0, f"dsa_kpool_update_layer: tokens_per_request {NT} divides {T}"
-        self._add_node("dsa_kpool_update", (T // NT, 1, 1), block_dim, [kw, pooled_cache], [(-1, -1, -1), (-1, -1, -1)],
-                       [page, pooled_block_table.dim(1), RING, float_bits(eps)] + ([NT] if NT > 1 else []), counters=1,
+        self._add_node("dsa_kpool_update", (T, 1, 1), block_dim, [kw, pooled_cache], [(-1, -1, -1), (-1, -1, -1)],
+                       [page, pooled_block_table.dim(1), RING, float_bits(eps)], counters=1,
                        buf_slots=[self._tensor_slot(k_norm_weight), self._tensor_slot(k_norm_bias), self._tensor_slot(ape),
                                   self._tensor_slot(seq_lens), self._tensor_slot(req_slots),
                                   self._tensor_slot(pooled_block_table), self._tensor_slot(tail_k),
@@ -1298,78 +1294,42 @@ class StaticMegakernel(PersistentKernel):
         conv_state: DTensor,    # [NR, 3 x 3 HL D] bf16: per state row the last 3 inputs [3][3 HL D] (oldest first; SGLang's
                                 # KDA pool)
         rec_state: DTensor,     # [NS, HL D D] fp32: per state slot the [HL][V][K] recurrent state
-        rows: DTensor,          # [T] int32: the state slot of each request (a decode step); serve: [R], of each request
+        rows: DTensor,          # [T] int32: the state slot of each request
         output: DTensor,        # o [T, HL D] bf16 (after the gated o_norm)
-        accepted: DTensor = None,   # [T / NT] int32 with serve: a graph tensor of the verify build (buffer slot 7: it
-                                    # marks a task's tokens as one request's; not read)
-        tokens_per_request: int = 1,   # NT: 1 = one decode step of T requests; NT > 1 (with serve) = a speculative verify
-                                       # step of T / NT requests
-        requests_per_task: int = 1,   # RP: 2 / 4 / 8 = a decode step's requests 2 / 4 / 8 per task (NT 1): T / RP tasks per
-                                      # head, one wave of the SMs at T = 16 / 32 / 64 (tasks/kda_decode.cuh RP); the default
+        requests_per_task: int = 1,   # RP: 2 / 4 / 8 = a decode step's requests 2 / 4 / 8 per task: T / RP tasks per head,
+                                      # one wave of the SMs at T = 16 / 32 / 64 (tasks/kda_decode.cuh RP); the default
                                       # grid, a plan may take RP 1, 2 or 4 (T = 64: also 8; grid x)
         lower_bound: float = -5.0, norm_eps: float = 1e-5,
-        serve: dict = None,     # NT > 1: a serving framework's speculative verify step (SGLang's KDA
-                                # target-verify contract with ReplaySSM, tasks/kda_decode.cuh SERVE): {"nvalid" [R] int32 (the
-                                # request's draft tokens, the other rows idle), "icw_row" [R] int32, "icw" [rows, DRAFT, 3,
-                                # 3 HL D] bf16 (the per-token conv windows: after token t, (t, j) = x_{t - 2 + j}; SGLang's
-                                # intermediate_conv_window), "ring_v", "ring_k" [slots, HL, L, D] bf16,
-                                # "ring_g" [slots, HL, L, D] fp32, "ring_beta" [slots, HL, L] fp32, "draft" DRAFT}; the conv
-                                # state is then [NR, 3, 3 HL D] (read only) and rec_state is read only
         block_dim: tuple = (256, 1, 1),
     ):
         """Task (r, h): request r, local head h (RP > 1: requests RP r .. RP r + RP - 1): short conv, gates, the delta rule
-        on the state, gated RMSNorm (tasks/kda_decode.cuh); a decode step updates the conv window and the state in place.
-        params = [HL, D, lower bound, o_norm eps, 1 (the conv layout)]; NT = T / grid x. serve: its NT tokens in order, the
-        pools read only, the ring and the per-token windows written for the framework's commit; params + [1, DRAFT, L]."""
+        on the state, gated RMSNorm (tasks/kda_decode.cuh); the conv window and the state are updated in place.
+        params = [HL, D, lower bound, o_norm eps, 1 (the conv layout)]; RP = T / grid x."""
         from .compiler import graph_nodes, producer_of
         p = producer_of(proj, graph_nodes(self))
         if p is None or p.name != "gemm_tile" or p.params[0] != COMBINE["slots"] or p.params[3] != 0:
             raise ValueError("kda_decode_layer: proj must be a gemm_tile node's output in slots")
-        T, HLD, D, NT = self._tokens(output.dim(0)), output.dim(1), f_b.dim(1), tokens_per_request
+        T, HLD, D = self._tokens(output.dim(0)), output.dim(1), f_b.dim(1)
         HL = HLD // D
-        if NT < 1 or NT > 8 or T % NT != 0:
-            raise ValueError(f"kda_decode_layer: tokens_per_request {NT} must divide the {T} tokens (at most 8)")
-        if (NT > 1) != (serve is not None) or (NT > 1) != (accepted is not None):
-            raise ValueError("kda_decode_layer: serve and accepted exactly when tokens_per_request > 1")
         # the kernel indexes these by the head count and head dim: other shapes would be read silently wrong
         assert (conv_weight.dim(0), conv_weight.dim(1)) == (3 * HLD, 4)
         assert (f_b.dim(0), g_b.dim(0), g_b.dim(1)) == (HLD, HLD, D)
         assert small.dim(0) >= HLD + HL + D
         assert conv_state.dim(1) == 3 * HLD * 3 and rec_state.dim(1) == HLD * D
         slots = [conv_weight, f_b, g_b, small, conv_state, rec_state, rows]
-        if NT > 1:
-            assert accepted.dim(0) == T // NT
-            self._dtypes("kda_decode_layer", accepted=(accepted, int32))
-            slots.append(accepted)
         self._dtypes("kda_decode_layer", proj=(proj, float32), conv_weight=(conv_weight, float32), f_b=(f_b, bfloat16),
                      g_b=(g_b, bfloat16), small=(small, float32), conv_state=(conv_state, bfloat16),
                      rec_state=(rec_state, float32), rows=(rows, int32), output=(output, bfloat16))
         params = [HL, D, float_bits(lower_bound), float_bits(norm_eps), 1]   # 1: the conv layout [3][3 HL D]
-        if serve is not None:
-            sv = serve
-            draft, L = int(sv["draft"]), sv["ring_v"].dim(2)
-            assert 1 <= draft <= NT <= L, f"kda_decode_layer: serve draft {draft} <= NT {NT} <= ring {L}"
-            assert (sv["icw"].dim(1), sv["icw"].dim(2), sv["icw"].dim(3)) == (draft, 3, 3 * HLD), \
-                "serve: icw [rows, DRAFT, 3, 3 HL D]"
-            for k in ("ring_v", "ring_k", "ring_g"):
-                assert (sv[k].dim(1), sv[k].dim(2), sv[k].dim(3)) == (HL, L, D), f"serve: {k} [slots, HL, L, D]"
-            assert (sv["ring_beta"].dim(1), sv["ring_beta"].dim(2)) == (HL, L), "serve: ring_beta [slots, HL, L]"
-            assert sv["nvalid"].dim(0) == T // NT and sv["icw_row"].dim(0) == T // NT
-            self._dtypes("kda_decode_layer", nvalid=(sv["nvalid"], int32), icw_row=(sv["icw_row"], int32),
-                         icw=(sv["icw"], bfloat16), ring_v=(sv["ring_v"], bfloat16), ring_k=(sv["ring_k"], bfloat16),
-                         ring_g=(sv["ring_g"], float32), ring_beta=(sv["ring_beta"], float32))
-            slots += [sv[k] for k in ("nvalid", "icw_row", "icw", "ring_v", "ring_k", "ring_g", "ring_beta")]
-            params += [1, draft, L]
         RP = requests_per_task
-        if RP not in (1, 2, 4, 8) or (RP > 1 and NT != 1) or T % (NT * RP):
-            raise ValueError(f"kda_decode_layer: requests_per_task {RP}: 1, or 2 / 4 / 8 in a decode step (one token per "
-                             f"request)")
-        self._add_node("kda_decode", (T // (NT * RP), HL, 1), block_dim, [proj, output], [(0, -1, -1), (0, 1, -1)], params,
+        if RP not in (1, 2, 4, 8) or T % RP:
+            raise ValueError(f"kda_decode_layer: requests_per_task {RP}: 1, 2, 4 or 8 (one token per request)")
+        self._add_node("kda_decode", (T // RP, HL, 1), block_dim, [proj, output], [(0, -1, -1), (0, 1, -1)], params,
                        # o, 0xFF before each launch, written in whole 16-B stores: the o_proj GEMM waits for all tasks (its
                        # counter) or polls o (input_polled)
                        out_buffer=lambda n: (T * HLD * 2, 0xFF, False), counters=1,
                        # a decode step: 1 .. 4 requests per task (T = 64: .. 8)
-                       changeable_grid_dims={} if NT > 1 else {0: (1, 1, 8 if T == 64 else 4)},
+                       changeable_grid_dims={0: (1, 1, 8 if T == 64 else 4)},
                        cost_inputs=[0],   # adds the projection's K parts
                        buf_slots=[self._tensor_slot(t) for t in slots])
 

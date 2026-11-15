@@ -1,6 +1,5 @@
 """GLM-5.3-Flash DSA attention, the whole layer with the sublayer boundary inside (as Kimi K3's fused layers, #811): the
-lightning indexer with its pooled keys, MLA (dsa_mla) and the boundary, for one decode step (or one speculative verify
-step) of T rows on a TP shard.
+lightning indexer with its pooled keys, MLA (dsa_mla) and the boundary, for one decode step of T rows on a TP shard.
 
   indexer   gemm_tile x [wk | gate | weights_proj] (bf16, 384 rows) -> dsa_kpool_update (LayerNorm k, the tail ring, the
             pool of 4 it closes -> the pooled cache);  dsa_q_norm_quant (bf16 q_c) -> gemm_tile wq_b (bf16) ->
@@ -189,13 +188,11 @@ def topk_of(scores: torch.Tensor, seq_lens) -> torch.Tensor:
 def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float, fused: dict, o_parts: int = 4) -> dict:
     """The layer's nodes; returns the plan's grids {graph_idx: grid} for the GEMMs. splits: sparse_mla tasks per token
     (a divisor of MLA_TILES: 36 = one tile each, 18 = two, 12 = three, ...). fused: {"rms_eps", "hc_eps", "norm_eps",
-    "iters"[, "verify": True: the T rows are "requests" (default 1) requests' consecutive tokens, T / requests each (a
-    speculative verify step: dsa_kpool_update runs them in order; per-token seq_lens, the other rows idle)]}. o_proj adds
-    its o_parts K parts into t["o"] (int64 fixed point: this GPU's partial sum), then allreduce_send (each 128-column block
-    once its parts are added, bf16 to every GPU), hc_post_mix (the sum over the GPUs; the attention's mHC post with
-    t["h_post_in"] / t["h_res_in"] on the streams t["R_in"] -> t["R_out"]; the FFN's mHC mixes with t["hc_ffn_fn"]) and
-    hc_pre (the FFN's mHC pre with t["hc_ffn_small"]: its input t["x_ffn"] = RMSNorm(sum_i pre_i R'_i) t["ffn_norm"], its
-    h_post / h_res into t["h_post_out"] / t["h_res_out"])."""
+    "iters"}. o_proj adds its o_parts K parts into t["o"] (int64 fixed point: this GPU's partial sum), then allreduce_send
+    (each 128-column block once its parts are added, bf16 to every GPU), hc_post_mix (the sum over the GPUs; the
+    attention's mHC post with t["h_post_in"] / t["h_res_in"] on the streams t["R_in"] -> t["R_out"]; the FFN's mHC mixes
+    with t["hc_ffn_fn"]) and hc_pre (the FFN's mHC pre with t["hc_ffn_small"]: its input t["x_ffn"] = RMSNorm(sum_i pre_i
+    R'_i) t["ffn_norm"], its h_post / h_res into t["h_post_out"] / t["h_res_out"])."""
     mpk.max_bufs = 56            # the layer uses 48 buffer slots, more than config.cuh's default 24 (STATIC_MAX_BUFS)
     mpk.max_counter_lines = 24   # and 20 counter lines, more than the default 16 (STATIC_NODE_COUNTER_LINES)
     a = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
@@ -217,10 +214,7 @@ def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float,
                            block_table=a["block_table"], cache=a["cache"], kv0=QL, page=page, eps=eps, rope=0)
     mpk.dsa_kpool_update_layer(kw=kw, k_norm_weight=a["k_norm_w"], k_norm_bias=a["k_norm_b"], ape=a["ape"],
                                seq_lens=a["seq_lens"], req_slots=a["req_slots"], pooled_block_table=a["pooled_bt"],
-                               tail_k=a["tail_k"], tail_score=a["tail_score"], pooled_cache=a["pcache"], eps=ln_eps,
-                               # a verify step: the T rows are one request's draft tokens in order (the pooled keys they
-                               # close and their tail entries, token by token)
-                               tokens_per_request=T // int(fused.get("requests", 1)) if fused.get("verify") else 1)
+                               tail_k=a["tail_k"], tail_score=a["tail_score"], pooled_cache=a["pcache"], eps=ln_eps)
     iq = nt((T, IH * ID), int64, "idx_q")
     # (a step whose tokens all have at most POOLS pools reads no indexer q: dsa_index_score skip_k)
     mpk.gemm_tile_layer(input=a["q_c"], weight=a["w_iqb"], output=iq, combine="add",

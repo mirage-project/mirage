@@ -41,47 +41,45 @@ MTT, MTT16, MTT64 = ["--max-total-tokens", "81920"], ["--max-total-tokens", "163
 RUNS = [("check_all3p", {**ALL3P, **CHECK, "MOE_STATIC_CHECK": "1"}, ["sgl_check.py", "8", "1500", "65536"])]
 # bs 1 / 2 / 4 decode in check mode: the attention layers, then 4 MoE layers (the MoE in check mode keeps its weights)
 for bs in (1, 2, 4):
-    RUNS += [(f"check_bs{bs}_attn", {**ATTN, **CHECK}, ["sgl_check.py", "24", "1500", "0", "off", str(bs)]),
+    RUNS += [(f"check_bs{bs}_attn", {**ATTN, **CHECK}, ["sgl_check.py", "24", "1500", "0", str(bs)]),
              (f"check_bs{bs}_moe4l", {**MOE_ONLY, "MOE_STATIC_CHECK": "1", "MOE_STATIC_LAYERS": "3,4,5,6"},
-              ["sgl_check.py", "24", "1500", "81920", "off", str(bs)])]
+              ["sgl_check.py", "24", "1500", "81920", str(bs)])]
 # the T = 16 / 32 layers in check mode (enough decode steps that every request has joined the batch before they end): the
 # attention layers, then 4 MoE layers; a decode step of T rows
 for t in (16, 32):
-    RUNS += [(f"check_t{t}_bs{t}_attn", {**ATTN, **CHECK}, ["sgl_check.py", "40", "300", "0", "off", str(t)]),
+    RUNS += [(f"check_t{t}_bs{t}_attn", {**ATTN, **CHECK}, ["sgl_check.py", "40", "300", "0", str(t)]),
              (f"check_t{t}_bs{t}_moe4l", {**MOE_ONLY, "MOE_STATIC_CHECK": "1", "MOE_STATIC_LAYERS": "3,4,5,6"},
-              ["sgl_check.py", "40", "300", "81920", "off", str(t)])]
+              ["sgl_check.py", "40", "300", "81920", str(t)])]
 # T = 64: the decode layers (bs 64)
-RUNS += [("check_t64_bs64_attn", {**ATTN, **CHECK}, ["sgl_check.py", "72", "300", "0", "off", "64"]),
+RUNS += [("check_t64_bs64_attn", {**ATTN, **CHECK}, ["sgl_check.py", "72", "300", "0", "64"]),
          ("check_t64_bs64_moe4l", {**MOE_ONLY, "MOE_STATIC_CHECK": "1", "MOE_STATIC_LAYERS": "3,4,5,6"},
-          ["sgl_check.py", "72", "300", "81920", "off", "64"])]
+          ["sgl_check.py", "72", "300", "81920", "64"])]
 # the scenarios: plain decode at every batch size
-E2E_SCEN = {"off_bs1": (1, "off", MTT), "off_bs2": (2, "off", MTT), "off_bs4": (4, "off", MTT), "off_bs8": (8, "off", MTT),
-            "off_bs16": (16, "off", MTT16), "off_bs32": (32, "off", MTT16), "off_bs64": (64, "off", MTT64)}
+E2E_SCEN = {"off_bs1": (1, MTT), "off_bs2": (2, MTT), "off_bs4": (4, MTT), "off_bs8": (8, MTT), "off_bs16": (16, MTT16),
+            "off_bs32": (32, MTT16), "off_bs64": (64, MTT64)}
 # nsys: 64 profiled steps of up to 256 new tokens (the steps after the prefill chunks), whole graphs traced
-# (--cuda-graph-trace=graph: per-node records perturb the timeline, MTP bs 1 SGLang's cycle 8087.6 vs its bench's 9765.7 us,
-# the static layers' 7170.0 vs 5548.3 us: they cost the static kernels' PDL overlap)
+# (--cuda-graph-trace=graph: per-node records perturb the timeline: they cost the static kernels' PDL overlap)
 GRAPH_TRACE = set()
-for scen, (bs, spec, mtt) in E2E_SCEN.items():
+for scen, (bs, mtt) in E2E_SCEN.items():
     for p in (256, 4000):
-        a = ["sgl_spec_bench.py", "--bs", str(bs), "--spec", spec, "--prompt-tokens", str(p), *mtt, "--reps", "1",
+        a = ["sgl_spec_bench.py", "--bs", str(bs), "--prompt-tokens", str(p), *mtt, "--reps", "1",
              "--profile", "--profile-steps", "64", "--profile-tokens", "256"]
         RUNS += [(f"prof_base_{scen}_p{p}", {}, a), (f"prof_all3ppf_{scen}_p{p}", {**ALL3P, **PF}, a)]
         GRAPH_TRACE |= {f"prof_base_{scen}_p{p}", f"prof_all3ppf_{scen}_p{p}"}
-    a = ["sgl_spec_bench.py", "--bs", str(bs), "--spec", spec, *mtt]
+    a = ["sgl_spec_bench.py", "--bs", str(bs), *mtt]
     RUNS += [(f"base_{scen}_mtt", {}, a), (f"all3ppf_{scen}", {**ALL3P, **PF}, a)]
 # node-traced variants at 4000 tokens (every kernel its own record: decode_compare.py's sublayer spans; they perturb the
 # period, so not for the end-to-end table)
 for scen in ("off_bs32", "off_bs64"):
-    bs, spec, mtt = E2E_SCEN[scen]
-    a = ["sgl_spec_bench.py", "--bs", str(bs), "--spec", spec, "--prompt-tokens", "4000", *mtt, "--reps", "1", "--profile",
+    bs, mtt = E2E_SCEN[scen]
+    a = ["sgl_spec_bench.py", "--bs", str(bs), "--prompt-tokens", "4000", *mtt, "--reps", "1", "--profile",
          "--profile-steps", "64", "--profile-tokens", "256"]
     RUNS += [(f"prof_base_{scen}_p4000_node", {}, a), (f"prof_all3ppf_{scen}_p4000_node", {**ALL3P, **PF}, a)]
 # GSM8K (5 shots, 200 questions, greedy, plain decode): SGLang alone 4 at a time; the static layers 8 and 4 at a time (4: the
 # batch shrinks to 2 and 1 as questions end, the layers of those T too)
-RUNS += [("gsm8k_off", {}, ["sgl_gsm8k.py", "--data-path", GSM, "--spec", "off", "--bs", "4"])]
-RUNS += [("all3ppf_gsm8k_off", {**ALL3P, **PF}, ["sgl_gsm8k.py", "--data-path", GSM, "--spec", "off", "--bs", "8", *MTT]),
-         ("all3ppf_gsm8k_off_bs4", {**ALL3P, **PF},
-          ["sgl_gsm8k.py", "--data-path", GSM, "--spec", "off", "--bs", "4", *MTT])]
+RUNS += [("gsm8k_off", {}, ["sgl_gsm8k.py", "--data-path", GSM, "--bs", "4"])]
+RUNS += [("all3ppf_gsm8k_off", {**ALL3P, **PF}, ["sgl_gsm8k.py", "--data-path", GSM, "--bs", "8", *MTT]),
+         ("all3ppf_gsm8k_off_bs4", {**ALL3P, **PF}, ["sgl_gsm8k.py", "--data-path", GSM, "--bs", "4", *MTT])]
 NSYS = ["nsys", "profile", "--force-overwrite", "true", "--capture-range=cudaProfilerApi", "--capture-range-end=stop",
         "--trace=cuda,nvtx", "--cuda-graph-trace=node", "--trace-fork-before-exec=true"]
 KEYS = ("decode step", "output ", "Error", "error:", "Traceback", "replaces SGLang", "KERNEL", "launch ", "graph replay",
