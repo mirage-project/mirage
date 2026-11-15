@@ -1113,7 +1113,7 @@ class StaticMegakernel(PersistentKernel):
         block_table: DTensor, seq_lens: DTensor,
         output: DTensor,        # [T, NH, 512] fp32. NOTE: this shape is not the shape of the node buffer. The tensor gives
                                 # the name of the buffer. The buffer holds o [T, S, NH, 512], then lse [T, S, NH]
-                                # (S = the split count after compilation). Only dsa_mla_merge reads it.
+                                # (S = the split count after compilation). Only dsa_mla_merge (or dsa_o_absorb) reads it.
         softmax_scale: float,   # 1 / sqrt(qk_nope_head_dim + qk_rope_head_dim)
         splits: int = 16,       # tasks per token, TOPK / splits index slots each (whole tiles of 64)
         page: int = 64,
@@ -1163,19 +1163,29 @@ class StaticMegakernel(PersistentKernel):
 
     def dsa_o_absorb_layer(
         self,
-        input: DTensor,         # o_lat [T, NH, 512] bf16 (the dsa_mla_merge output)
+        input: DTensor,         # o_lat [T, NH, 512] bf16 (the dsa_mla_merge output), or the sparse_mla output (no merge node)
         w_uv: DTensor,          # W_UV [NH, 512, 256] bf16 (from kv_b_proj, dequantized)
         output: DTensor,        # v [T, NH x 256] bf16 (the o_proj input, through group_quant)
+        o_lat: DTensor = None,  # with the sparse_mla output: o_lat [T, NH, 512] bf16, the merged splits as a graph tensor
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the value up-projection (tasks/dsa_o_absorb.cuh). Task h * 4 + cb computes value columns [64 cb, 64 cb + 64)
-        of head h for all tokens. params = [NH]. buf_slots: [w_uv]. One counter: the count of the tasks."""
-        self._producer("dsa_o_absorb_layer", input, ("dsa_mla_merge",))
+        of head h for all tokens. params = [NH]. buf_slots: [w_uv]. One counter: the count of the tasks. With the sparse_mla
+        output as input, each task merges its head's splits itself (dsa_mla_merge's math; task cb 0 also writes o_lat):
+        params = [NH, 1], buf_slots: [w_uv, o_lat]."""
+        merge = self._producer("dsa_o_absorb_layer", input, ("dsa_mla_merge", "sparse_mla")).name == "sparse_mla"
         T, NH = self._tokens(input.dim(0)), input.dim(1)
-        self._dtypes("dsa_o_absorb_layer", input=(input, bfloat16), w_uv=(w_uv, bfloat16), output=(output, bfloat16))
+        self._dtypes("dsa_o_absorb_layer", input=(input, float32 if merge else bfloat16), w_uv=(w_uv, bfloat16),
+                     output=(output, bfloat16))
         assert (w_uv.dim(0), w_uv.dim(1), w_uv.dim(2)) == (NH, 512, 256) and output.dim(1) == NH * 256
-        self._add_node("dsa_o_absorb", (NH * 4, 1, 1), block_dim, [input, output], [(-1, -1, -1), (-1, -1, -1)], [NH],
-                       out_buffer=lambda n: (T * NH * 256 * 2, -1, False), counters=1, buf_slots=[self._tensor_slot(w_uv)])
+        assert merge == (o_lat is not None), "dsa_o_absorb_layer: o_lat with (and only with) the sparse_mla output"
+        bufs = [self._tensor_slot(w_uv)]
+        if merge:
+            self._dtypes("dsa_o_absorb_layer", o_lat=(o_lat, bfloat16))
+            bufs.append(self._tensor_slot(o_lat))
+        self._add_node("dsa_o_absorb", (NH * 4, 1, 1), block_dim, [input, output], [(-1, -1, -1), (-1, -1, -1)],
+                       [NH, 1] if merge else [NH], out_buffer=lambda n: (T * NH * 256 * 2, -1, False), counters=1,
+                       buf_slots=bufs)
 
     # ---- GLM-5.3-Flash: mHC (tasks/hc_post_mix.cuh, hc_pre.cuh, hc_post.cuh) and KDA (tasks/kda_decode.cuh). The residual is
     # HC streams [T, HC H] (bf16, stream i = columns [i H, i H + H)); a sublayer's body -> a gemm_tile -> allreduce_send ->

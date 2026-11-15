@@ -34,6 +34,9 @@ TILES = 33                             # sparse_mla: 512 x 4 + 3 tail = 2051 ind
 SLOTS = TILES * 64
 MLA_TILES = 36                         # sparse_mla's slots in tiles (the last 3 empty): every divisor of 36 a split count
 IQ_SKIP_T = (1, 2, 4, 8, 16, 32, 64)   # the T whose indexer q GEMM skips a step of short tokens only (gemm_tile skip_seq)
+# the T whose dsa_o_absorb merges the sparse_mla splits itself (no merge node; each thread holds the S lse values and
+# column pairs of all T tokens in registers, 3 S T floats): 1 GPU, 18 splits, T 1 -1.4 us a layer, T 2 +1.4 (slower)
+ABSORB_MERGE_T = (1,)
 FLUSH_BYTES = mla.FLUSH_BYTES
 
 
@@ -233,8 +236,11 @@ def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float,
     mpk.sparse_mla_layer(q=a["q_mla"], cache=a["cache"], indices=a["pool_idx"], block_table=a["block_table"],
                          seq_lens=a["seq_lens"], output=split, softmax_scale=NOPE ** -0.5, splits=splits, page=page,
                          kpool=KPOOL, slots=MLA_TILES * 64)
-    mpk.dsa_mla_merge_layer(input=split, output=a["o_lat"])
-    mpk.dsa_o_absorb_layer(input=a["o_lat"], w_uv=a["w_uv"], output=a["v"])
+    if T in ABSORB_MERGE_T:   # o_absorb merges its head's splits (no merge node: one handover less on the critical path)
+        mpk.dsa_o_absorb_layer(input=split, w_uv=a["w_uv"], output=a["v"], o_lat=a["o_lat"])
+    else:
+        mpk.dsa_mla_merge_layer(input=split, output=a["o_lat"])
+        mpk.dsa_o_absorb_layer(input=a["o_lat"], w_uv=a["w_uv"], output=a["v"])
     vq = nt((T, NH * DV), uint8, "v_fp8")
     mpk.group_quant_layer(input=a["v"], output=vq)
     # the boundary: all-reduce, the attention's mHC post, the FFN's mHC pre
