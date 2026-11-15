@@ -26,7 +26,7 @@ class Sm90MoeSplit:
     """The two kernels for T token rows; launch() after a layer's kernel, on its stream: programmatic dependent launches
     (W13 waits for the layer kernel, W2 for W13, the next layer's kernel for W2)."""
 
-    def __init__(self, T, H, I, E, TOPK, h2: torch.Tensor, act: torch.Tensor):
+    def __init__(self, T, H, I, E, TOPK, h2: torch.Tensor, act: torch.Tensor, requests: int):
         """h2 [T, H] f16: the gate's MoE input; act [E, T, I] f16: W13's output (both every layer's). The build goes to
         MIRAGE_STATIC_BUILD_CACHE (else ~/.cache/mirage), by the source's and the flags' hash."""
         flags = [f"-DSTATIC_TOKENS={T}", f"-DMOE_H={H}", f"-DMOE_I={I}", f"-DMOE_E={E}", f"-DMOE_TOPK={TOPK}"]
@@ -38,6 +38,7 @@ class Sm90MoeSplit:
             subprocess.check_call([shutil.which("nvcc"), "-O3", "-std=c++17", "-gencode", "arch=compute_90a,code=sm_90a",
                                    "-shared", "-Xcompiler=-fPIC", "-lcuda", _SRC, "-o", so + ".tmp"] + flags)
             os.replace(so + ".tmp", so)
+        self.requests = requests
         self.lib = ctypes.CDLL(so)
         self.lib.moe_ctx.restype = ctypes.c_void_p
         self.ctx = ctypes.c_void_p(self.lib.moe_ctx(ctypes.c_void_p(h2.data_ptr()), ctypes.c_void_p(act.data_ptr())))
@@ -48,6 +49,6 @@ class Sm90MoeSplit:
         [T, H] bf16 = x1 + sum_k topk_w[t, k] eo[t, k] (the routed tokens' rows), done [T, H / 64] i32 zeros (left zero)."""
         P = lambda t: ctypes.c_void_p(t.data_ptr())
         rc = self.lib.moe_launch(self.ctx, P(routing), P(w13), P(b13), P(act), P(w2), P(b2), P(eo), P(topk_w), P(x1),
-                                 P(x_out), P(done), ctypes.c_float(limit), ctypes.c_float(alpha),
+                                 P(x_out), P(done), ctypes.c_float(limit), ctypes.c_float(alpha), ctypes.c_int(self.requests),
                                  ctypes.c_void_p(torch.cuda.current_stream().cuda_stream))
         assert rc == 0, "sm90_moe_split: launch failed"

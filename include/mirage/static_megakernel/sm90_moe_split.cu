@@ -339,18 +339,18 @@ __device__ __forceinline__ void item(CUtensorMap const *amap,
   }
 }
 
-template <bool GLU>
+template <bool GLU, bool SINGLE>
 __global__ void __launch_bounds__(160, 3)
     moe_kernel(const __grid_constant__ CUtensorMap amap, const Args p) {
   using C = Cfg<GLU>;
-  int const y = blockIdx.x, e = blockIdx.y;
+  int const y = blockIdx.x;
   extern __shared__ __align__(1024) char smem_raw[];
   char *sm = reinterpret_cast<char *>(
       (reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint32_t const full0 = su32(sm + STAGES * C::STAGE),
                  empty0 = full0 + 8 * STAGES;
-  __shared__ int tokl[T], slotl[T], s_cnt;
-  int const lane = threadIdx.x & 31;
+  __shared__ int tokl[T], slotl[T], s_cnt, e_warp[4];
+  int const lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   if (threadIdx.x == 0) {
     for (int s = 0; s < STAGES; s++) {
       mbar_init(full0 + 8 * s, 1);
@@ -365,19 +365,38 @@ __global__ void __launch_bounds__(160, 3)
   if constexpr (GLU) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   }
-  if (threadIdx.x < 32) { // expert e's routed tokens, ascending
+  int e = blockIdx.y;
+  if constexpr (SINGLE) {
+    if (warp < 4) {
+      int const rt = threadIdx.x < E ? p.routing[threadIdx.x * T] : 0;
+      uint32_t const m = __ballot_sync(~0u, rt == blockIdx.y + 1);
+      if (lane == 0) {
+        e_warp[warp] = m ? 32 * warp + __ffs(m) - 1 : E;
+      }
+    }
+    __syncthreads();
+    e = min(min(e_warp[0], e_warp[1]), min(e_warp[2], e_warp[3]));
+    if (e == E) {
+      return;
+    }
+    if (threadIdx.x == 0) {
+      tokl[0] = 0;
+      slotl[0] = blockIdx.y;
+    }
+  } else if (threadIdx.x < 32) { // expert e's routed tokens, ascending
     int const rt = lane < T ? p.routing[e * T + lane] : 0;
     uint32_t const m = __ballot_sync(~0u, rt > 0);
     if (rt > 0) {
       int const j = __popc(m & ((1u << lane) - 1));
-      tokl[j] = lane, slotl[j] = rt - 1;
+      tokl[j] = lane;
+      slotl[j] = rt - 1;
     }
     if (lane == 0) {
       s_cnt = __popc(m);
     }
   }
   __syncthreads();
-  int const cnt = s_cnt;
+  int const cnt = SINGLE ? 1 : s_cnt;
   auto go = [&](auto ng) {
     item<GLU, decltype(ng)::value>(
         &amap, p, y, e, cnt, tokl, slotl, sm, full0, empty0);
@@ -423,12 +442,12 @@ static void map_rows(CUtensorMap *m, void *base, uint64_t rows, uint64_t K) {
   }
 }
 
-template <bool GLU>
+template <bool GLU, bool SINGLE>
 static void
     launch(CUtensorMap const &m, static_mk::Args const &a, cudaStream_t s) {
   using C = static_mk::Cfg<GLU>;
   static bool const smem_set =
-      cudaFuncSetAttribute(static_mk::moe_kernel<GLU>,
+      cudaFuncSetAttribute(static_mk::moe_kernel<GLU, SINGLE>,
                            cudaFuncAttributeMaxDynamicSharedMemorySize,
                            C::SMEM) == cudaSuccess;
   (void)smem_set;
@@ -436,13 +455,13 @@ static void
   at.id = cudaLaunchAttributeProgrammaticStreamSerialization;
   at.val.programmaticStreamSerializationAllowed = 1;
   cudaLaunchConfig_t cfg = {};
-  cfg.gridDim = dim3(C::N / C::PR, static_mk::E);
+  cfg.gridDim = dim3(C::N / C::PR, SINGLE ? static_mk::TOPK : static_mk::E);
   cfg.blockDim = dim3(160);
   cfg.dynamicSmemBytes = C::SMEM;
   cfg.stream = s;
   cfg.attrs = &at;
   cfg.numAttrs = 1;
-  cudaLaunchKernelEx(&cfg, static_mk::moe_kernel<GLU>, m, a);
+  cudaLaunchKernelEx(&cfg, static_mk::moe_kernel<GLU, SINGLE>, m, a);
 }
 
 struct Ctx {
@@ -472,6 +491,7 @@ extern "C" int moe_launch(void *ctx,
                           void *done,
                           float limit,
                           float alpha,
+                          int requests,
                           void *stream) {
   Ctx const *c = static_cast<Ctx const *>(ctx);
   cudaStream_t s = static_cast<cudaStream_t>(stream);
@@ -486,10 +506,19 @@ extern "C" int moe_launch(void *ctx,
                     (unsigned *)done,
                     limit,
                     alpha};
-  launch<true>(c->m13, a, s);
+  bool const compact = requests == 1 && static_mk::E <= 128;
+  if (compact) {
+    launch<true, true>(c->m13, a, s);
+  } else {
+    launch<true, false>(c->m13, a, s);
+  }
   a.w = (uint8_t const *)w2;
   a.bias = (__nv_bfloat16 const *)b2;
-  launch<false>(c->m2, a, s);
+  if (compact) {
+    launch<false, true>(c->m2, a, s);
+  } else {
+    launch<false, false>(c->m2, a, s);
+  }
   cudaError_t const e = cudaGetLastError();
   if (e != cudaSuccess) {
     printf("sm90_moe_split: %s\n", cudaGetErrorString(e));

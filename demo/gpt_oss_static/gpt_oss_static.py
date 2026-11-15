@@ -78,7 +78,7 @@ class Model:
         self.embed = bf(sd["model.embed_tokens.weight"])
         self.head = {"norm": bf(sd["model.norm.weight"]), "lm_head": bf(sd["lm_head.weight"]),
                      "h": zeros(T, H), "logits": zeros(T, self.V, dtype=torch.float32)}
-        self.moe = Sm90MoeSplit(T, H, I, E, TOPK, self.shared["h2"], self.shared["act"])
+        self.moe = Sm90MoeSplit(T, H, I, E, TOPK, self.shared["h2"], self.shared["act"], R)
 
     def layer_tensors(self, i: int) -> dict:
         """Layer i's tensors by graph name: its weights and cache, the shared buffers, its residual in and out."""
