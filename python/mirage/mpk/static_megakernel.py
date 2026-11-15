@@ -358,7 +358,8 @@ class StaticMegakernel(PersistentKernel):
             changeable = {1: (128, 2, ring_stages(T))}
         else:
             parts = 1
-            params, map_slots = [mode, K, N, 0], [self._gemm_map(weight, (128, 64)), self._gemm_map(input, (T,))]
+            # (the activation's box: the MMA's N rows = config.cuh TW; T < 8: 8, the rows past the tensor read as 0)
+            params, map_slots = [mode, K, N, 0], [self._gemm_map(weight, (128, 64)), self._gemm_map(input, (max(T, 8),))]
             changeable = {"store": {}, "store_bf16": {0: (64, 1, 2)}}.get(combine, {0: (64, 1, 2), 1: (128, 2, None)})
         if skip_seq is not None:
             self._dtypes("gemm_tile_layer", seq_lens=(skip_seq[0], int32))
@@ -671,7 +672,15 @@ class StaticMegakernel(PersistentKernel):
             raise ValueError(f"scaled_moe_experts_layer: the pairs must be a topk_route node's over the {E} experts of w13")
         assert swiglu_limit is None or (math.isfinite(swiglu_limit) and swiglu_limit > 0)
         hq = self._scratch("scaled_moe_experts.h_q", NSLOT * T * IR)          # every row written before its counter lets W2 read it
-        hsf = self._scratch("scaled_moe_experts.h_q_scales", NSLOT * T * KT2 * 4)   # written before its counter lets W2 read it
+        # the single-item W13 entries (scaled_moe::Slots SINGLE: the live rows' slots have at most num_sms W13 items, and h_q's
+        # scales can hold their amax too: T >= 8 as the buffer is; a layer of fewer tokens has it sized for both)
+        live = route.params[5] if len(route.params) >= 6 and route.params[5] > 0 else T
+        nsm = self._num_sms()
+        single = (live * (K - shared) + shared) * (IR // 64) <= nsm and (T < 8 or 2 * NSLOT * KT2 >= 3 * nsm)
+        hsf_floats = NSLOT * T * KT2
+        if T < 8:   # whole 16-B words: W2 copies a slot's scales as such (T = 1: 8 bytes a slot)
+            hsf_floats = -(-max(hsf_floats, nsm * T // 2 + nsm * T if single else 0) // 4) * 4
+        hsf = self._scratch("scaled_moe_experts.h_q_scales", hsf_floats * 4)   # written before its counter lets W2 read it
         w13_pieces, w2_pieces = E * 2 * IR * L // 16384, E * L * IR // 16384   # one 128 x 128 e4m3 piece: 16 KB
         bufs = [hq, hsf, self._tensor_slot(w13_scales), self._tensor_slot(w2_scales)]
         if prof is not None:   # buffer slot 4 (scaled_moe::Slots PROF)
@@ -686,11 +695,7 @@ class StaticMegakernel(PersistentKernel):
             maps.append(first)
         maps.append(self._map("act8kt", ("b", hq, 0), (IR, NSLOT * T, KT2)))
         tensors = [z_q, pairs, w13, w2, output]
-        # the pair counters of single-item W13 entries (scaled_moe::Slots SINGLE: the live rows' slots have at most num_sms W13
-        # items, and h_q's scales can hold their amax too)
-        live = route.params[5] if len(route.params) >= 6 and route.params[5] > 0 else T
-        single = (live * (K - shared) + shared) * (IR // 64) <= self._num_sms() and 2 * NSLOT * KT2 >= 3 * self._num_sms()
-        pairc = self._num_sms() // 2 if single else 0
+        pairc = nsm // 2 if single else 0   # the pair counters of the single-item W13 entries
         self._add_node("scaled_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
                        [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)], one_task_per_sm=True,
                        out_buffer=lambda n: (T * K * L * 4, -1, False),

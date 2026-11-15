@@ -45,18 +45,23 @@ os.environ.setdefault("MIRAGE_STATIC_BUILD_CACHE",
 OUT = os.environ.get("KDA_STATIC_OUT", os.path.join(ROOT, "build", "sgl_static_kda"))
 PDL = os.environ.get("KDA_STATIC_PDL", "1") != "0"
 CHECK = os.environ.get("KDA_STATIC_CHECK", "0") == "1"
-PLAN = {8: os.environ.get("KDA_STATIC_PLAN") or None,      # the layers' plan files by T (a plan file is of one T's graph)
+PLAN = {1: os.environ.get("KDA_STATIC_PLAN1") or None,     # the layers' plan files by T (a plan file is of one T's graph)
+        2: os.environ.get("KDA_STATIC_PLAN2") or None,
+        4: os.environ.get("KDA_STATIC_PLAN4") or None,
+        8: os.environ.get("KDA_STATIC_PLAN") or None,
         16: os.environ.get("KDA_STATIC_PLAN16") or None,
         32: os.environ.get("KDA_STATIC_PLAN32") or None,
         64: os.environ.get("KDA_STATIC_PLAN64") or None}
-VERIFY_PLAN = {8: os.environ.get("KDA_STATIC_VERIFY_PLAN") or None,      # the verify layers' (another graph: kda_decode
+VERIFY_PLAN = {1: None, 2: None, 4: None,
+               8: os.environ.get("KDA_STATIC_VERIFY_PLAN") or None,      # the verify layers' (another graph: kda_decode
                16: os.environ.get("KDA_STATIC_VERIFY_PLAN16") or None,   # [R, HL] of one request's tokens)
                32: os.environ.get("KDA_STATIC_VERIFY_PLAN32") or None,
                64: os.environ.get("KDA_STATIC_VERIFY_PLAN64") or None}
 TOKENS = sorted({int(x) for x in os.environ.get("KDA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8 .. 64):
                                                                                                       # a decode step of n rows
                                                                                                       # runs the smallest T >= n
-assert TOKENS and all(t in (8, 16, 32, 64) for t in TOKENS), f"KDA_STATIC_TOKENS {TOKENS}: of 8, 16, 32, 64"
+# (1, 2, 4: a batch size's own layer, no idle rows; without them bs 1 / 2 / 4 run the T = 8 layer)
+assert TOKENS and all(t in (1, 2, 4, 8, 16, 32, 64) for t in TOKENS), f"KDA_STATIC_TOKENS {TOKENS}: of 1, 2, 4, 8, 16, 32, 64"
 POST_ONLY = (64,)   # the T whose layers end at the attention's mHC post (R' alone; SGLang runs the FFN's mHC pre): the faster
                     # end there end to end (nsys step periods, bs 64, prompt 256)
 _STEP_KEYS = itertools.count(1)

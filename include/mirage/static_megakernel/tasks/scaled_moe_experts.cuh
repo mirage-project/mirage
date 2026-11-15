@@ -119,7 +119,8 @@ struct Slots {
   // buffer must hold both (scaled_moe_experts_layer adds the counters under the
   // same condition)
   static constexpr int LIVE = LIVE_;
-  static constexpr bool SINGLE = 2 * NSLOT * KT2 >= 3 * NSM &&
+  // (T < 8: scaled_moe_experts_layer sizes the h_q scales' buffer for both)
+  static constexpr bool SINGLE = (T < 8 || 2 * NSLOT * KT2 >= 3 * NSM) &&
                                  (LIVE * (K - SHARED) + SHARED) * MT13 <= NSM;
   static constexpr int PAIRC = CHQ + NSLOT, AMX = NSM * T / 2;
   // the queue's order of the slots: many tokens first (order_slots)
@@ -498,7 +499,8 @@ __device__ __forceinline__ void h_quant_half_tok(uint8_t *hq,
 }
 
 // issuer 0 (the elected lane) of a W2 tile: K tile kt goes into columns acc +
-// 4 T kt (the tick's columns of issuer kt); its first MMA does not accumulate.
+// 4 TW kt (the tick's columns of issuer kt; TW: the ring's width, config.cuh);
+// its first MMA does not accumulate.
 // sfc: the constant scale chunk. st: the W2 ring stage. HQ: the offset of h_q
 // in the stage.
 template <uint32_t IDESC, int KT2, int HQ>
@@ -507,11 +509,11 @@ __device__ __forceinline__ void
   static_assert(KT2 <= 2, "scaled_moe_experts: W2's K tiles in the two halves");
 #pragma unroll
   for (int kt = 0; kt < KT2; kt++) {
-    uint32_t const d = acc + ACC_STAGES * T * kt;
-    // h_q's K tile kt: T x 128 B after tile 0 (the TMA box {128, T, KT2}:
-    // [KT2][T][128 B]), 8 T descriptor units
+    uint32_t const d = acc + ACC_STAGES * TW * kt;
+    // h_q's K tile kt: TW x 128 B after tile 0 (the TMA box {128, TW, KT2}:
+    // [KT2][TW][128 B]), 8 TW descriptor units
     uint64_t const dw = mkdesc(st + kt * 16384),
-                   dh = mkdesc(st + HQ) + 8 * T * kt;
+                   dh = mkdesc(st + HQ) + 8 * TW * kt;
     if constexpr (F8_UNSCALED) { // T = 64 (runtime.cuh mma_f8)
       mma_f8(d, dw, dh, 0u);
       mma_f8(d, dw + 2, dh + 2, 1u);
@@ -534,8 +536,8 @@ __device__ __forceinline__ void
   static_assert(KT2 <= 2, "scaled_moe_experts: W2's K tiles in the two halves");
 #pragma unroll
   for (int kt = 0; kt < KT2; kt++) {
-    uint32_t const d = acc + ACC_STAGES * T * kt;
-    uint64_t const dw = mkdesc(st + kt * 16384), dh = mkdesc(hq) + 8 * T * kt;
+    uint32_t const d = acc + ACC_STAGES * TW * kt;
+    uint64_t const dw = mkdesc(st + kt * 16384), dh = mkdesc(hq) + 8 * TW * kt;
     if constexpr (F8_UNSCALED) {
       mma_f8(d, dw, dh, 0u);
       mma_f8(d, dw + 2, dh + 2, 1u);
@@ -557,15 +559,15 @@ template <int KT2>
 __device__ __forceinline__ void drain_w2_promoted(
     uint32_t tb, int a, float const *sw, float const (*sh)[T], float *v) {
   uint32_t const lanes = (uint32_t)(((threadIdx.x >> 5) & 3) * 32) << 16;
-  float p[T];
-  // both halves' loads before one wait
-  tmem_ld_cols_nw<T>(tb + T * a + lanes, v);
+  float p[TW];
+  // both halves' loads before one wait (v: TW values, the first T the tokens')
+  tmem_ld_cols_nw<TW>(tb + TW * a + lanes, v);
   if constexpr (KT2 == 2) {
-    tmem_ld_cols_nw<T>(tb + T * a + ACC_STAGES * T + lanes, p);
+    tmem_ld_cols_nw<TW>(tb + TW * a + ACC_STAGES * TW + lanes, p);
   }
-  tmem_keep_cols<T>(v);
+  tmem_keep_cols<TW>(v);
   if constexpr (KT2 == 2) {
-    tmem_keep_cols<T>(p);
+    tmem_keep_cols<TW>(p);
   }
 #pragma unroll
   for (int t = 0; t < T; t++) {
@@ -617,17 +619,21 @@ struct Smem {
       (RES::KT2 * 16384 + RES::KT2 * SF_CHUNK + 1023) / 1024 * 1024;
   static constexpr int W2_STB =
       T == 64 ? W2_HQ
-              : (W2_HQ + RES::KT2 * T * 128 + RES::KT2 * SF_CHUNK + 4095) /
+              : (W2_HQ + RES::KT2 * TW * 128 + RES::KT2 * SF_CHUNK + 4095) /
                     4096 * 4096;
-  static constexpr int W2_HQB = RES::KT2 * T * 128, W2_HQ0 = W2_ST * W2_STB;
+  static constexpr int W2_HQB = RES::KT2 * TW * 128, W2_HQ0 = W2_ST * W2_STB;
   static constexpr uint32_t W2_BYTES =
-      RES::KT2 * 16384 + (T == 64 ? 0 : RES::KT2 * T * 128);
+      RES::KT2 * 16384 + (T == 64 ? 0 : RES::KT2 * TW * 128);
   static_assert(W2_ST * W2_STB + (T == 64 ? 2 * W2_HQB : 0) <= OFF_WSF,
                 "the W2 ring lies inside the W13 ring's area");
   // the W2 entries' scales in the OFF_W2BAR area (w2_stage_scales): W2QD
   // buffers from OFF_W2S, one per queue position, each the slot's h_q scales
   // [T][KT2] then the 16-B chunk of the weight scales with the entry's tiles'
-  static constexpr int W2S_HS = T * RES::KT2 * 4,
+  // (a bulk copy takes whole, aligned 16-B words: at T = 1 a word holds the
+  // scales of W2S_PER = 2 slots, and the buffer has both)
+  static constexpr int W2S_PER =
+      T * RES::KT2 * 4 < 16 ? 16 / (T * RES::KT2 * 4) : 1;
+  static constexpr int W2S_HS = W2S_PER * T * RES::KT2 * 4,
                        W2S_BYTES = (W2S_HS + 16 + 15) / 16 * 16,
                        OFF_W2S = OFF_W2BAR + (T == 64 ? 192 : 128);
   static_assert(OFF_W2S - OFF_W2BAR + W2QD * W2S_BYTES <=
@@ -678,7 +684,8 @@ __device__ __forceinline__ void w2_stage_scales(
                  dst = base + SM_::OFF_W2S + q * SM_::W2S_BYTES;
   mbar_expect(f, SM_::W2S_HS + 16);
   bulk_g2s(dst,
-           buf_at<float const>(g, RES::HSF) + (size_t)slot * T * KT2,
+           buf_at<float const>(g, RES::HSF) +
+               (size_t)(slot - slot % SM_::W2S_PER) * T * KT2,
            SM_::W2S_HS,
            f);
   bulk_g2s(dst + SM_::W2S_HS,
@@ -1213,11 +1220,11 @@ __device__ __forceinline__ void
               issue_w2_promoted_hq<IDESC_MX_E4M3, KT2>(
                   baseu + s * W2_STB,
                   baseu + SM_::W2_HQ0 + (e2 & 1) * SM_::W2_HQB,
-                  tbu + T * a,
+                  tbu + TW * a,
                   tbu + SM_::CONST_SF);
             } else {
               issue_w2_promoted<IDESC_MX_E4M3, KT2, W2_HQ>(
-                  baseu + s * W2_STB, tbu + T * a, tbu + SM_::CONST_SF);
+                  baseu + s * W2_STB, tbu + TW * a, tbu + SM_::CONST_SF);
             }
             tc_commit(w2_bar<RES>(baseu, 3 + s));
             tc_commit(rt.acc_full0 + 8 * a);
@@ -1355,9 +1362,10 @@ __device__ __forceinline__ void
         // h_q scales
         mbar_wait(w2s_bar<RES>(base, qpos), (w2s_par >> qpos) & 1);
         w2s_par ^= 1u << qpos;
-        float const *const sbuf = reinterpret_cast<float const *>(
+        float const *const sbuf0 = reinterpret_cast<float const *>(
             rt_sm() + SM_::OFF_W2S + qpos * SM_::W2S_BYTES);
-        float const *const swc = sbuf + SM_::W2S_HS / 4;
+        float const *const sbuf = sbuf0 + slot % SM_::W2S_PER * T * KT2,
+                           *const swc = sbuf0 + SM_::W2S_HS / 4;
         int const ot0 = e.a - slot * OT2;
         float sw[2][2];
 #pragma unroll
@@ -1388,7 +1396,7 @@ __device__ __forceinline__ void
           // local memory)
           float const swi[2] = {item == 0 ? sw[0][0] : sw[1][0],
                                 item == 0 ? sw[0][1] : sw[1][1]};
-          float v[T];
+          float v[TW];
           if constexpr (RES::PROF >= 0) {
             if (pev) {
               moe_prof_event(prof, pn, pt0, 3);
@@ -1407,7 +1415,8 @@ __device__ __forceinline__ void
                                    // time, not the T-wide drain
             uint32_t const lanes = (uint32_t)(((threadIdx.x >> 5) & 3) * 32)
                                    << 16,
-                           c0a = tb + T * a + lanes, c1a = c0a + ACC_STAGES * T;
+                           c0a = tb + TW * a + lanes,
+                           c1a = c0a + ACC_STAGES * TW;
             int i0 = start_s[slot];
             int const end = i0 + nt;
             for (; i0 + 8 <= end; i0 += 8) {
@@ -1502,7 +1511,7 @@ __device__ __forceinline__ void
         int const slot = e.a;
         for (int i = 0; i < npi; i++) {
           int const mt = e.b + i;
-          float v[T];
+          float v[TW];
           if constexpr (RES::PROF >= 0) {
             if (pev) {
               moe_prof_event(prof, pn, pt0, 1);

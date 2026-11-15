@@ -42,18 +42,23 @@ LAYERS = None if os.environ["DSA_STATIC_LAYERS"].strip() == "all" else \
     {int(x) for x in os.environ["DSA_STATIC_LAYERS"].split(",") if x.strip()}   # None: every DSA layer
 CHECK = os.environ.get("DSA_STATIC_CHECK", "1") != "0"
 PDL = os.environ.get("DSA_STATIC_PDL", "1") != "0"
-FUSED_PLAN = {8: os.environ.get("DSA_STATIC_FUSED_PLAN", "rr"),      # the layers' plans by T (a plan file is of one T's
+FUSED_PLAN = {1: os.environ.get("DSA_STATIC_FUSED_PLAN1", "rr"),     # the layers' plans by T (a plan file is of one T's
+              2: os.environ.get("DSA_STATIC_FUSED_PLAN2", "rr"),
+              4: os.environ.get("DSA_STATIC_FUSED_PLAN4", "rr"),
+              8: os.environ.get("DSA_STATIC_FUSED_PLAN", "rr"),
               16: os.environ.get("DSA_STATIC_FUSED_PLAN16", "rr"),   # graph: the grids differ)
               32: os.environ.get("DSA_STATIC_FUSED_PLAN32", "rr"),
               64: os.environ.get("DSA_STATIC_FUSED_PLAN64", "rr")}
-VERIFY_PLAN = {8: os.environ.get("DSA_STATIC_VERIFY_PLAN", "rr"),      # the verify layers' (another graph: kpool_update per
+VERIFY_PLAN = {1: "rr", 2: "rr", 4: "rr",
+               8: os.environ.get("DSA_STATIC_VERIFY_PLAN", "rr"),      # the verify layers' (another graph: kpool_update per
                16: os.environ.get("DSA_STATIC_VERIFY_PLAN16", "rr"),   # token)
                32: os.environ.get("DSA_STATIC_VERIFY_PLAN32", "rr"),
                64: os.environ.get("DSA_STATIC_VERIFY_PLAN64", "rr")}
 TOKENS = sorted({int(x) for x in os.environ.get("DSA_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8 .. 64):
                                                                                                       # a decode step of n rows
                                                                                                       # runs the smallest T >= n
-assert TOKENS and all(t in (8, 16, 32, 64) for t in TOKENS), f"DSA_STATIC_TOKENS {TOKENS}: of 8, 16, 32, 64"
+# (1, 2, 4: a batch size's own layer, no padded rows; without them bs 1 / 2 / 4 run the T = 8 layer)
+assert TOKENS and all(t in (1, 2, 4, 8, 16, 32, 64) for t in TOKENS), f"DSA_STATIC_TOKENS {TOKENS}: of 1, 2, 4, 8, 16, 32, 64"
 POST_ONLY = (64,)   # the T whose layers end at the attention's mHC post (R' alone; SGLang runs the FFN's mHC pre): the faster
                     # end there end to end (nsys step periods, bs 64, prompt 256)
 os.environ.setdefault("MIRAGE_STATIC_BUILD_CACHE",

@@ -72,11 +72,16 @@ __device__ __forceinline__ void
                      char *scratch STAGE_STAMP_PARAM) {
   constexpr size_t S_RANK = (size_t)T * H * 2; // one GPU's slot
   constexpr int C = 32, CB = HC * HC;
-  constexpr int TB = T / 8; // token blocks: warp w takes tokens w + 8 b
+  // TM: the tokens of the thread mapping below (a warp per token of a block
+  // of 8, 256 / TM threads per token): T, or 8 in a layer of fewer tokens,
+  // where warp w has token w for w < T and the other warps none (their R, sums
+  // and mixes are neither read nor written)
+  constexpr int TM = T < 8 ? 8 : T;
+  constexpr int TB = TM / 8; // token blocks: warp w takes tokens w + 8 b
   // the token blocks whose R values and coefficients are in registers at a
   // time (T = 64: 2 halves of 4 blocks)
   constexpr int TBH = TB > 4 ? 4 : TB, NHALF = TB / TBH;
-  static_assert(T % 8 == 0 && 256 % T == 0 && TB % TBH == 0 && H % C == 0 &&
+  static_assert(TM % 8 == 0 && 256 % TM == 0 && TB % TBH == 0 && H % C == 0 &&
                     C == HC_MIX_STRIDE && NMIX + 1 <= HC_MIX_STRIDE,
                 "hc_post_mix: a warp per 8 tokens, a lane per column");
   // scratch, from T HC C floats on (the area below is not used): the sums
@@ -105,13 +110,15 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int b = 0; b < TBH; b++) {
       int const t = warp + 8 * b;
+      bool const live = T >= 8 || t < T; // (T < 8: this warp's token)
 #pragma unroll
       for (int i = 0; i < HC; i++) {
-        rv[b][i] = __bfloat162float(res[((size_t)t * HC + i) * H + c]);
-        post[b][i] = h_post[(size_t)t * HC + i];
+        rv[b][i] =
+            live ? __bfloat162float(res[((size_t)t * HC + i) * H + c]) : 0.f;
+        post[b][i] = live ? h_post[(size_t)t * HC + i] : 0.f;
 #pragma unroll
         for (int j = 0; j < HC; j++) {
-          comb[b][i][j] = h_res[(size_t)t * CB + i * HC + j];
+          comb[b][i][j] = live ? h_res[(size_t)t * CB + i * HC + j] : 0.f;
         }
       }
     }
@@ -153,7 +160,7 @@ __device__ __forceinline__ void
   // 2. the sums: lane l of warp w lands 8 columns (vector l % 4) of its token
   // block l / 4, all of the warp's tokens at once
   static_assert(TB * (C / 8) <= 32, "hc_post_mix: a lane per landed vector");
-  if (lane < TB * (C / 8)) {
+  if (lane < TB * (C / 8) && (T >= 8 || warp < T)) {
     int const t = warp + 8 * (lane / (C / 8)), v = lane % (C / 8);
     unsigned char const *row =
         g.rv + SOFF + rg_set() + (size_t)t * H * 2 + (size_t)s * C * 2;
@@ -194,6 +201,9 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int b = 0; b < TBH; b++) {
       int const t = warp + 8 * (TBH * hf + b);
+      if (T < 8 && t >= T) { // no token on this warp
+        continue;
+      }
       float const o = out_s[t * C + lane];
 #pragma unroll
       for (int j = 0; j < HC; j++) {
@@ -214,7 +224,7 @@ __device__ __forceinline__ void
     // 4. the mixes: tile w < MT NT8 (warp w % 8) has tokens [16 mt, 16 mt +
     // 16) (T = 8: its rows 8 .. 15 repeat 0 .. 7, dropped) x rows [8 nt, 8 nt
     // + 8)
-    constexpr int MT = (T + 15) / 16, NT8 = NMIX / 8, NW = (MT * NT8 + 7) / 8;
+    constexpr int MT = (TM + 15) / 16, NT8 = NMIX / 8, NW = (MT * NT8 + 7) / 8;
 #pragma unroll
     for (int k = 0; k < NW; k++) { // a warp's tiles
       int const w = warp + 8 * k;
@@ -223,7 +233,9 @@ __device__ __forceinline__ void
       }
       int const m0 = (w / NT8) * 16, n0 = (w % NT8) * 8, g = lane >> 2,
                 tq = lane & 3;
-      int const t0 = m0 + g, t1 = m0 + g + 8 < T ? m0 + g + 8 : m0 + g;
+      // (T < 8: the rows from T on repeat token 0, dropped)
+      int const t0 = (T >= 8 || m0 + g < T) ? m0 + g : 0,
+                t1 = m0 + g + 8 < T ? m0 + g + 8 : t0;
       float acc[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll
       for (int k0 = 0; k0 < HC * C; k0 += 16) {
@@ -238,8 +250,10 @@ __device__ __forceinline__ void
         hcpm_mma(a, bh, acc);
         hcpm_mma(a, bl, acc);
       }
-      *reinterpret_cast<float2 *>(mix + ((size_t)s * T + t0) * HC_MIX_STRIDE +
-                                  n0 + 2 * tq) = make_float2(acc[0], acc[1]);
+      if (T >= 8 || m0 + g < T) {
+        *reinterpret_cast<float2 *>(mix + ((size_t)s * T + t0) * HC_MIX_STRIDE +
+                                    n0 + 2 * tq) = make_float2(acc[0], acc[1]);
+      }
       if (m0 + g + 8 < T) {
         *reinterpret_cast<float2 *>(
             mix + ((size_t)s * T + m0 + g + 8) * HC_MIX_STRIDE + n0 + 2 * tq) =
@@ -247,12 +261,14 @@ __device__ __forceinline__ void
       }
     }
     // entry NMIX: the sum of squares of the token's HC 32 values, then 0s
-    constexpr int TPT = 256 / T, PER = HC * C / TPT;
+    constexpr int TPT = 256 / TM, PER = HC * C / TPT;
     int const t = threadIdx.x / TPT, part = threadIdx.x % TPT;
+    bool const live = T >= 8 || t < T; // (T < 8: this warp's token)
     float q = 0.f;
 #pragma unroll
     for (int k = 0; k < PER; k++) {
-      float const x = __bfloat162float(rb[t * KP + part * PER + k]);
+      float const x =
+          live ? __bfloat162float(rb[t * KP + part * PER + k]) : 0.f;
       q = fmaf(x, x, q);
     }
 #pragma unroll
@@ -263,7 +279,7 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int k = 0; k < NE; k++) { // the thread's entries
       int const e = part + TPT * k;
-      if (e < HC_MIX_STRIDE - NMIX) {
+      if (e < HC_MIX_STRIDE - NMIX && live) {
         mix[((size_t)s * T + t) * HC_MIX_STRIDE + NMIX + e] = e == 0 ? q : 0.f;
       }
     }

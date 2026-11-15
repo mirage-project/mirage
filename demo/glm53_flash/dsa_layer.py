@@ -33,7 +33,7 @@ IH, ID, PPAGE, KGW = 32, 128, 64, 384   # indexer heads x dims; pools per pooled
 TILES = 33                             # sparse_mla: 512 x 4 + 3 tail = 2051 index slots, 33 tiles of 64
 SLOTS = TILES * 64
 MLA_TILES = 36                         # sparse_mla's slots in tiles (the last 3 empty): every divisor of 36 a split count
-IQ_SKIP_T = (8, 16, 32, 64)            # the T whose indexer q GEMM skips a step of short tokens only (gemm_tile skip_seq)
+IQ_SKIP_T = (1, 2, 4, 8, 16, 32, 64)   # the T whose indexer q GEMM skips a step of short tokens only (gemm_tile skip_seq)
 FLUSH_BYTES = mla.FLUSH_BYTES
 
 

@@ -135,16 +135,18 @@ class StaticDSA:
         hc_small = torch.zeros(32, dtype=torch.float32)
         hc_small[:24], hc_small[24:27] = fused["hc_base"].float().cpu(), fused["hc_scale"].float().cpu()
         HCH = fused["hc_fn"].shape[1]
+        # the boundary's outputs: the first T rows of a buffer of at least 8 rows, so the T = 8 MoE layer after a layer of
+        # fewer tokens (T = 1, 2, 4) reads them in place (moe_static_layer._bind: backed; its rows from T on idle, 0)
+        zb = lambda cols, dtype: torch.zeros(max(T, 8), cols, dtype=dtype, device=dev)[:T]
         self.t.update({"o": torch.zeros(T, demo.H, dtype=torch.int64, device=dev),
                        "R_in": torch.zeros(T, HCH, dtype=torch.bfloat16, device=dev),
                        "h_post_in": torch.zeros(T, 4, dtype=torch.float32, device=dev),
                        "h_res_in": torch.zeros(T, 16, dtype=torch.float32, device=dev),
-                       "R_out": torch.zeros(T, HCH, dtype=torch.bfloat16, device=dev),
+                       "R_out": zb(HCH, torch.bfloat16),
                        "hc_ffn_fn": fused["hc_fn"].float().contiguous().to(dev), "hc_ffn_small": hc_small.to(dev),
                        "ffn_norm": fused["norm"].to(torch.bfloat16).contiguous().to(dev),
-                       "x_ffn": torch.zeros(T, demo.H, dtype=torch.bfloat16, device=dev),
-                       "h_post_out": torch.zeros(T, 4, dtype=torch.float32, device=dev),
-                       "h_res_out": torch.zeros(T, 16, dtype=torch.float32, device=dev)})
+                       "x_ffn": zb(demo.H, torch.bfloat16), "h_post_out": zb(4, torch.float32),
+                       "h_res_out": zb(16, torch.float32)})
         self.post_only = bool(fused.get("post_only")) and not verify   # fused["post_only"]: run_fused returns R' alone
         mpk = StaticMegakernel(num_gpus=tp)
         grids = dsa_layer.build_graph(mpk, self.t, 1, SPLITS.get(T, 18), eps, 1e-6, {

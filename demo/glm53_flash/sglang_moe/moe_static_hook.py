@@ -29,7 +29,8 @@ x_attn, h_res, h_post to the next layer's MHCState (read_attn_input patched: the
 SGLang kernel runs between the two layers' kernels; the layers of the other T and the last layer end at the FFN's mHC post
 (mhc). check: also x_attn, h_res, h_post against SGLang's hc_attn_pre on its own streams.
 Env: MOE_STATIC_LAYERS; MOE_STATIC_CHECK (1 / 0); MOE_STATIC_PDL (1 / 0); MOE_STATIC_TOKENS
-(8, 16, 32, 64: the T of the layers); MOE_STATIC_PLAN, MOE_STATIC_PLAN16 / 32 / 64 (the layers' plan files by T, moe_demo
+(1, 2, 4, 8, 16, 32, 64: the T of the layers; 1, 2, 4: a batch size's own layer, no idle rows); MOE_STATIC_PLAN,
+MOE_STATIC_PLAN1 / 2 / 4 / 16 / 32 / 64 (the layers' plan files by T, moe_demo
 --search of that T's --end, one GPU's lists, e.g. moe_plan16_mhc_pre.json here; default: round robin of moe_demo's grids);
 MOE_STATIC_VERIFY_PLAN, MOE_STATIC_VERIFY_PLAN16, MOE_STATIC_VERIFY_PLAN32 (the verify layers'); MOE_STATIC_ROWS (the live
 rows of decode steps that get a build of their own, e.g. 1,2,4: a decode step of n < T rows without one runs the T layer
@@ -57,11 +58,15 @@ PDL = os.environ.get("MOE_STATIC_PDL", "1") != "0"
 # the T whose layers end with the next layer's attention mHC pre (mhc_pre), the others at the FFN's mHC post (mhc): each T's
 # faster end end to end (nsys step periods, bs 8 / 16 / 32 / 64, prompt 256)
 END_PRE_TOKENS = (16, 32)
-PLAN_FILE = {8: os.environ.get("MOE_STATIC_PLAN") or None,      # the layers' plan files by T (a plan file is of one T's
-             16: os.environ.get("MOE_STATIC_PLAN16") or None,   # graph: the grids differ)
+PLAN_FILE = {1: os.environ.get("MOE_STATIC_PLAN1") or None,     # the layers' plan files by T (a plan file is of one T's
+             2: os.environ.get("MOE_STATIC_PLAN2") or None,     # graph: the grids differ)
+             4: os.environ.get("MOE_STATIC_PLAN4") or None,
+             8: os.environ.get("MOE_STATIC_PLAN") or None,
+             16: os.environ.get("MOE_STATIC_PLAN16") or None,
              32: os.environ.get("MOE_STATIC_PLAN32") or None,
              64: os.environ.get("MOE_STATIC_PLAN64") or None}
-VERIFY_PLAN_FILE = {8: os.environ.get("MOE_STATIC_VERIFY_PLAN") or None,      # the verify layers' (moe_demo --valid-rows;
+VERIFY_PLAN_FILE = {1: None, 2: None, 4: None,
+                    8: os.environ.get("MOE_STATIC_VERIFY_PLAN") or None,      # the verify layers' (moe_demo --valid-rows;
                                                                               # T = 8 without one: the decode plan)
                     16: os.environ.get("MOE_STATIC_VERIFY_PLAN16") or None,
                     32: os.environ.get("MOE_STATIC_VERIFY_PLAN32") or None,
@@ -69,7 +74,8 @@ VERIFY_PLAN_FILE = {8: os.environ.get("MOE_STATIC_VERIFY_PLAN") or None,      # 
 TOKENS = sorted({int(x) for x in os.environ.get("MOE_STATIC_TOKENS", "8").split(",") if x.strip()})   # the layers' T (8 .. 64):
                                                                                                       # a step of n rows runs
                                                                                                       # the smallest T >= n
-assert TOKENS and all(t in (8, 16, 32, 64) for t in TOKENS), f"MOE_STATIC_TOKENS {TOKENS}: of 8, 16, 32, 64"
+# (1, 2, 4: a batch size's own layer, no idle rows; without them bs 1 / 2 / 4 run the T = 8 layer, MOE_STATIC_ROWS)
+assert TOKENS and all(t in (1, 2, 4, 8, 16, 32, 64) for t in TOKENS), f"MOE_STATIC_TOKENS {TOKENS}: of 1, 2, 4, 8, 16, 32, 64"
 # decode steps of n live rows below their T: n -> that T (a build of n live rows of the T layer's graph)
 ROWS = {n: next(t for t in TOKENS if n <= t) for n in sorted({int(x) for x in os.environ.get("MOE_STATIC_ROWS", "").split(",")
                                                               if x.strip()}) if 0 < n < TOKENS[-1] and n not in TOKENS}
@@ -161,8 +167,9 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 st.next_layer = nxt_t
                 sts[tok] = st
                 _OUTS.add(st.t["streams_out"].data_ptr())
-                if draft and (tok // 8) * draft < tok:   # MTP: the verify build of tok / 8 requests x draft live rows (the
-                                                         # rest idle: not routed, so no expert of their own is streamed)
+                if draft and 0 < (tok // 8) * draft < tok:   # MTP: the verify build of tok / 8 requests x draft live rows
+                                                             # (the rest idle: not routed, so no expert of their own is
+                                                             # streamed)
                     rows = (tok // 8) * draft
                     sv = StaticMoE(m.layer_id, self.server_args.model_path, rank, tp, dev, OUT, group, pdl=PDL,
                                    keep_weights=CHECK, pool=pool, attn_next=attn_t,

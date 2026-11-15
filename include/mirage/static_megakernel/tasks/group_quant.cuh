@@ -32,8 +32,12 @@ __device__ __forceinline__ void group_quant_task(G const &g,
                                                  uint32_t *done_cnt,
                                                  int kt) {
   __shared__ __align__(16) float scale_s[T];
-  constexpr int TPW = T / 8; // tokens per warp (all 8 warps)
-  static_assert(T % 8 == 0 && T * 4 / 16 <= 256,
+  // TM: the tokens of the thread mapping (the 8 warps take TM / 8 tokens
+  // each): T, or 8 in a layer of fewer tokens, where warp w has token w for
+  // w < T and the other warps none
+  constexpr int TM = T < 8 ? 8 : T;
+  constexpr int TPW = TM / 8; // tokens per warp (all 8 warps)
+  static_assert(TM % 8 == 0 && T * 4 / 16 <= 256,
                 "group_quant: the 8 warps take T / 8 tokens each");
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   // The previous task finished its scale_s reads before its final barrier.
@@ -43,6 +47,10 @@ __device__ __forceinline__ void group_quant_task(G const &g,
   uint2 raw[TPW];
 #pragma unroll
   for (int i = 0; i < TPW; i++) { // Bypass L1 because another SM can produce x.
+    if (T < 8 && TPW * warp + i >= T) { // no token on this warp
+      raw[i] = make_uint2(0u, 0u);
+      continue;
+    }
     asm volatile("ld.relaxed.gpu.global.v2.u32 {%0, %1}, [%2];"
                  : "=r"(raw[i].x), "=r"(raw[i].y)
                  : "l"(x + (size_t)(TPW * warp + i) * L + kt * 128 + 4 * lane)
@@ -77,23 +85,30 @@ __device__ __forceinline__ void group_quant_task(G const &g,
                        ((uint32_t)cvt_e4m3_nv(gq_div(a[i].y, s, r)) << 8) |
                        ((uint32_t)cvt_e4m3_nv(gq_div(b[i].x, s, r)) << 16) |
                        ((uint32_t)cvt_e4m3_nv(gq_div(b[i].y, s, r)) << 24);
-    if (lane == 0) {
+    bool const live = T >= 8 || t < T; // (T < 8: this warp's token)
+    if (lane == 0 && live) {
       scale_s[t] = s;
     }
     uint32_t const q1 = __shfl_down_sync(0xffffffffu, q, 1),
                    q2 = __shfl_down_sync(0xffffffffu, q, 2),
                    q3 = __shfl_down_sync(0xffffffffu, q, 3);
-    if ((lane & 3) == 0) {
+    if ((lane & 3) == 0 && live) {
       *reinterpret_cast<uint4 *>(g.rv + ZOFF + (size_t)t * L + kt * 128 +
                                  4 * lane + rg_set()) =
           make_uint4(q, q1, q2, q3);
     }
   }
   __syncthreads();
-  if (threadIdx.x < T * 4 / 16) { // the T scales of this K tile: two stores
-    *reinterpret_cast<uint4 *>(
-        g.rv + ZOFF + (size_t)T * L + (size_t)kt * T * 4 + threadIdx.x * 16 +
-        rg_set()) = reinterpret_cast<uint4 const *>(scale_s)[threadIdx.x];
+  if constexpr (T >= 4) {
+    if (threadIdx.x < T * 4 / 16) { // the T scales of this K tile: two stores
+      *reinterpret_cast<uint4 *>(
+          g.rv + ZOFF + (size_t)T * L + (size_t)kt * T * 4 + threadIdx.x * 16 +
+          rg_set()) = reinterpret_cast<uint4 const *>(scale_s)[threadIdx.x];
+    }
+  } else if (threadIdx.x < T) { // T = 1, 2: 4 T bytes, a store per token
+    *reinterpret_cast<float *>(g.rv + ZOFF + (size_t)T * L +
+                               (size_t)kt * T * 4 + threadIdx.x * 4 +
+                               rg_set()) = scale_s[threadIdx.x];
   }
   __syncthreads();
   if (threadIdx.x == 0) {

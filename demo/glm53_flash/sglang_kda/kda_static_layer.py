@@ -93,6 +93,9 @@ def layer_tensors(layer: int, model_path: str, rank: int, tp: int, conv: torch.T
         tuple(temporal.shape[1:]) == (HLD // 128, 128, 128), \
         f"layer {layer}: temporal state {tuple(temporal.shape)} {temporal.dtype}, expected [slots, {HLD // 128}, 128, 128] fp32"
     z = lambda shape, dtype: torch.zeros(shape, dtype=dtype, device=dev)
+    # the boundary's outputs: the first T rows of a buffer of at least 8 rows, so the T = 8 MoE layer after a layer of fewer
+    # tokens (T = 1, 2, 4) reads them in place (moe_static_layer._bind: backed; its rows from T on idle, 0)
+    zb = lambda cols, dtype: torch.zeros((max(T, 8), cols), dtype=dtype, device=dev)[:T]
     t = {"x": z((T, H), torch.bfloat16), "w_in": s["w_in"], "conv_w": s["conv_w"], "f_b": s["f_b"], "g_b": s["g_b"],
          "small": s["small"], "conv": conv.view(conv.shape[0], -1), "rec": temporal.view(temporal.shape[0], -1),
          "rows": z((T,), torch.int32), "w_o": s["w_o"], "o": z((T, HLD), torch.bfloat16)}
@@ -100,10 +103,10 @@ def layer_tensors(layer: int, model_path: str, rank: int, tp: int, conv: torch.T
     hc_small[:HC * (HC + 2)], hc_small[HC * (HC + 2):HC * (HC + 2) + 3] = \
         fused["hc_base"].float().cpu(), fused["hc_scale"].float().cpu()
     t.update({"o_fx": z((T, H), torch.int64), "R_in": z((T, HC * H), torch.bfloat16), "h_post_in": z((T, HC), torch.float32),
-              "h_res_in": z((T, HC * HC), torch.float32), "R_out": z((T, HC * H), torch.bfloat16),
+              "h_res_in": z((T, HC * HC), torch.float32), "R_out": zb(HC * H, torch.bfloat16),
               "hc_ffn_fn": fused["hc_fn"].float().contiguous().to(dev), "hc_ffn_small": hc_small.to(dev),
-              "ffn_norm": fused["norm"].to(torch.bfloat16).contiguous().to(dev), "x_ffn": z((T, H), torch.bfloat16),
-              "h_post_out": z((T, HC), torch.float32), "h_res_out": z((T, HC * HC), torch.float32)})
+              "ffn_norm": fused["norm"].to(torch.bfloat16).contiguous().to(dev), "x_ffn": zb(H, torch.bfloat16),
+              "h_post_out": zb(HC, torch.float32), "h_res_out": zb(HC * HC, torch.float32)})
     if verify is not None:   # R = verify["requests"] (default 1) requests' draft tokens per launch (grid x = R; request r's
         # n = draft rows start at row r n, its slot in rows[r]; nvalid[0] = n)
         R = int(verify.get("requests", 1))
