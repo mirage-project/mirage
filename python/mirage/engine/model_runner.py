@@ -47,9 +47,7 @@ class RunnerConfig:
     output_dir: Optional[str] = None
     """Directory for compiled kernel artefacts; ``None`` uses a temp dir."""
 
-    # Use Mirage's PTX kernels by default; the Ampere CUTLASS serving tiles
-    # exceed the shared-memory budget on GPUs such as the RTX A5000.
-    use_cutlass_kernel: bool = False
+    use_cutlass_kernel: bool = True
 
     # Startup defaults for per-request sampling in online_pinned mode.
     do_sample: bool = False

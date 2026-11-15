@@ -20,13 +20,17 @@ LOGITS = np.array([-1, -1.4, -1.8, -2.2] + [-30] * 4 + [0] * 8,
                   dtype=np.float32)
 
 
-@pytest.fixture(scope="module")
-def sample():
+@pytest.fixture(scope="module", params=[(16, None), (153600, None), (153600, 2)],
+                ids=["small-vocab-multi-cta", "large-vocab-multi-cta", "more-partitions-than-workers"])
+def sample(request):
     if not torch.cuda.is_available() or not shutil.which("nvcc"):
         pytest.skip("CUDA and nvcc are required")
 
     device = torch.cuda.current_device()
     workers, schedulers = mirage.get_configurations_from_gpu(device)
+    padded_vocab, worker_limit = request.param
+    if worker_limit is not None:
+        workers, schedulers = worker_limit, 4
     capacity = 32
     config = SimpleNamespace(max_num_batched_requests=capacity,
                              max_num_batched_tokens=capacity,
@@ -43,7 +47,8 @@ def sample():
                   pinned_ring_capacity=config.pinned_ring_capacity,
                   meta_tensors=meta)
     pk = PersistentKernel(**params)
-    logits = torch.tensor(LOGITS, dtype=torch.bfloat16, device=device).repeat(capacity, 1)
+    logits = torch.zeros(capacity, padded_vocab, dtype=torch.bfloat16, device=device)
+    logits[:, :len(LOGITS)] = torch.tensor(LOGITS, dtype=torch.bfloat16, device=device)
     output = meta["output_tokens"]
     pk.serving_sampling_layer(pk.attach_input(logits, name="logits"),
                               pk.attach_input(output, name="output"))
@@ -103,9 +108,13 @@ def test_greedy_and_seed(sample):
     {"temperature": 1, "top_k": 3},
     {"temperature": 1, "top_p": .75},
     {"temperature": 1, "top_k": 3, "top_p": .75},
+    {"temperature": .8, "top_k": 3, "top_p": .9,
+     "logit_bias": {1: 2.}},
 ])
 def test_sampling_distribution(sample, settings):
     scores = torch.tensor(LOGITS[:REAL_VOCAB], dtype=torch.bfloat16).float()
+    for token, bias in settings.get("logit_bias", {}).items():
+        scores[token] += bias
     scores /= settings["temperature"]
     order = torch.argsort(scores, descending=True)[:settings.get("top_k", REAL_VOCAB)]
     probabilities = torch.softmax(scores[order], 0)
@@ -131,3 +140,13 @@ def test_prompt_penalties(sample):
                    "presence_penalty": 2}, [1], [0], 1) == [0]
     assert sample({"temperature": 0, "frequency_penalty": 2}, [1], [0], 1,
                   max_new_tokens=2) == [1]
+    assert sample({"temperature": 0, "repetition_penalty": 2,
+                   "logit_bias": {1: 3}}, [1], [0], 1) == [1]
+
+
+def test_extreme_top_p_and_seed_reproducibility(sample):
+    assert sample({"temperature": .8, "top_k": 3, "top_p": 1e-100},
+                  range(8)) == [0] * 8
+    settings = {"temperature": .8, "top_k": 3, "top_p": .9}
+    seeds = range(64)
+    assert sample(settings, seeds) == sample(settings, seeds)

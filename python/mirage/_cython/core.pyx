@@ -23,6 +23,7 @@ import torch
 from libcpp.string cimport string
 from libcpp.vector cimport vector
 from libc.stdint cimport int64_t
+from libc.stddef cimport size_t
 from libc.string cimport memcpy
 
 cdef extern from "mirage/persistent_kernel/serving_config.h" namespace "mirage::serving":
@@ -35,6 +36,7 @@ cdef extern from "mirage/persistent_kernel/serving_config.h" namespace "mirage::
     cdef int FINISH_STOP
     cdef int FINISH_LENGTH
     int sampling_scratch_words(int vocab)
+    size_t sampling_buffer_bytes(int vocab)
     void pack_config(ServingConfig *out, int64_t budget, int64_t seed, int64_t vocab,
                      double temperature, double top_p, int64_t top_k,
                      double frequency, double presence, double repetition,
@@ -53,6 +55,9 @@ def serving_max_biases():
 
 def serving_scratch_words(int vocab):
     return sampling_scratch_words(vocab)
+
+def serving_sampling_buffer_bytes(int vocab):
+    return sampling_buffer_bytes(vocab)
 
 def serving_finish_reason_name(int reason):
     if reason == FINISH_NONE:
