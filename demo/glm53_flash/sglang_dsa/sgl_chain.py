@@ -88,6 +88,11 @@ for scen in ("off_bs32", "off_bs64"):
 RUNS += [("gsm8k_off", {}, ["sgl_gsm8k.py", "--data-path", GSM, "--bs", "4"])]
 RUNS += [("all3ppf_gsm8k_off", {**ALL3P, **PF}, ["sgl_gsm8k.py", "--data-path", GSM, "--bs", "8", *MTT]),
          ("all3ppf_gsm8k_off_bs4", {**ALL3P, **PF}, ["sgl_gsm8k.py", "--data-path", GSM, "--bs", "4", *MTT])]
+# the same batch size on both sides: SGLang alone 8 and 64 at a time; the static layers 64 at a time (KV cap of bs 64; the
+# batch shrinks 64 -> 1 as questions end, so the decode steps run every T's layers: 64 / 32 / 16 / 8 / 4 / 2 / 1)
+RUNS += [("gsm8k_off_bs8", {}, ["sgl_gsm8k.py", "--data-path", GSM, "--bs", "8"]),
+         ("gsm8k_off_bs64", {}, ["sgl_gsm8k.py", "--data-path", GSM, "--bs", "64"]),
+         ("all3ppf_gsm8k_off_bs64", {**ALL3P, **PF}, ["sgl_gsm8k.py", "--data-path", GSM, "--bs", "64", *MTT64])]
 NSYS = ["nsys", "profile", "--force-overwrite", "true", "--capture-range=cudaProfilerApi", "--capture-range-end=stop",
         "--trace=cuda,nvtx", "--cuda-graph-trace=node", "--trace-fork-before-exec=true"]
 KEYS = ("decode step", "output ", "Error", "error:", "Traceback", "replaces SGLang", "KERNEL", "launch ", "graph replay",

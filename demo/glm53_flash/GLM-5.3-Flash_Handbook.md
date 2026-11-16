@@ -119,6 +119,7 @@ python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md     
 | `prof_{base,all3ppf}_<scenario>_p{256,4000}` | `sgl_spec_bench.py --profile`: one timed round first, then 64 forward steps under nsys (`--cuda-graph-trace=graph`); the `.sqlite` is exported automatically |
 | `base_<scenario>_mtt` / `all3ppf_<scenario>` | wall clock, 4000-token prompts, median of 3 rounds: a cross-check of the nsys result |
 | `gsm8k_off` / `all3ppf_gsm8k_off` / `all3ppf_gsm8k_off_bs4` | GSM8K, 5-shot, 200 questions (SGLang 4 at a time; static 8 and 4 at a time); needs `GSM8K_TEST_JSONL` |
+| `gsm8k_off_bs8` / `gsm8k_off_bs64` / `all3ppf_gsm8k_off_bs64` | the same, SGLang 8 and 64 at a time, static 64 at a time (KV cap of bs 64): the batch shrinks 64 -> 1 as questions end, so every T's layers run |
 
 ### 3.2 Variables for manual runs (without the chain)
 
