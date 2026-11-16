@@ -10,16 +10,24 @@ run's result lines. A run whose name starts with prof_ runs under nsys (<name>.n
   gsm8k_*    the accuracy of SGLang alone and with the static layers (sgl_gsm8k.py)
 
 python sgl_chain.py [name ...]   (in the given order, a name again: <name>_2, ...; default: every run, in this order)
-Env: MIRAGE_Z3_LIB (mirage's libz3 directory for the static runs, when SGLang's venv has another z3), GSM8K_TEST_JSONL.
+Env: MIRAGE_Z3_LIB (mirage's libz3 directory for the static runs, when SGLang's venv has another z3), GSM8K_TEST_JSONL,
+GLM53F_MODEL (the checkpoint directory, default /raid/catalyst/models/GLM-5.3-Flash), GLM53F_NCCL_PORT (SGLang's
+torch.distributed port for every run; default: per run a free port of 1000 by the first visible GPU, 22000 + 1000 x GPU
+index, e.g. 22000-22999 for CUDA_VISIBLE_DEVICES=0,1,2,3 and 26000-26999 for 4,5,6,7). Two chains at once on two halves
+of a box: each in its own directory (logs, nsys reports, build directories are under the current directory); their ports
+come from disjoint ranges (SGLang's own default draws from 22000-29999 for both and binds later); the build cache is
+shared (one lock file per layer.cu).
 """
 import os
+import random
+import socket
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.environ.get("DSA_STATIC_ROOT", os.path.dirname(os.path.dirname(os.path.dirname(HERE))))   # this checkout
 Z3 = os.environ.get("MIRAGE_Z3_LIB", "")   # the z3/lib of mirage's venv (z3 4.16; SGLang ships 4.15), if not the SGLang one
-MODEL = "/raid/catalyst/models/GLM-5.3-Flash"
+MODEL = os.environ.setdefault("GLM53F_MODEL", "/raid/catalyst/models/GLM-5.3-Flash")   # every run reads GLM53F_MODEL
 GSM = os.environ.get("GSM8K_TEST_JSONL", "gsm8k_test.jsonl")   # GSM8K's test.jsonl (sgl_gsm8k.py --data-path)
 BOOT = {"DSA_STATIC_ROOT": ROOT, "MIRAGE_ROOT": ROOT, "PYTHONPATH": os.path.join(HERE, "boot"),
         **({"LD_LIBRARY_PATH": Z3} if Z3 else {})}
@@ -155,11 +163,32 @@ def _wait_free(gpus: str, name: str, limit_s: float = 3 * 3600) -> bool:
         time.sleep(20)
 
 
+def _nccl_port(gpus):
+    """A free port (bind test, IPv4 as SGLang's TCPStore) in 22000 + 1000 x the first visible GPU's index .. + 999: two
+    chains on disjoint GPUs draw from disjoint ranges, and each run a new port (a port of the previous engine may still be
+    held while its processes exit)."""
+    head = (gpus or "0").split(",")[0].strip()
+    low = 22000 + 1000 * (min(int(head), 7) if head.isdigit() else 0)   # (GPU UUIDs: 22000)
+    for port in random.sample(range(low, low + 1000), 200):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("0.0.0.0", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(f"no free port in {low}-{low + 999}")
+
+
 LOAD_FAIL = ("memory capacity is unbalanced", "CUDA out of memory",   # a run that died at load (retried once)
              "leave no GPU memory for the KV cache")
 
 if __name__ == "__main__":
     runs = {r[0]: r for r in map(lambda r: _best_plans(*r), RUNS)}
+    unknown = [w for w in sys.argv[1:] if w not in runs]
+    if unknown:   # before the first run, not after hours of the earlier ones
+        sys.exit(f"unknown run names: {' '.join(unknown)}")
+    if not os.path.isdir(MODEL):
+        sys.exit(f"no model directory {MODEL} (GLM53F_MODEL)")
     seen = {}
     for want in sys.argv[1:] or list(runs):   # in the given order; a name given again runs again as <name>_2, ...
         _, extra, cmd = runs[want]
@@ -177,6 +206,8 @@ if __name__ == "__main__":
             run = nsys + ["-o", os.path.join(os.getcwd(), name)] + run
         gpus = os.environ.get("CUDA_VISIBLE_DEVICES")   # (nvidia-smi indices, PCI bus order)
         for attempt in (1, 2):   # a run that died at load because of another user's job: once more after the GPUs clear
+            if not os.environ.get("GLM53F_NCCL_PORT"):   # the run's scripts read it (nccl_port): a new free port per try
+                env["GLM53F_NCCL_PORT"] = str(_nccl_port(gpus))
             limit = float(os.environ.get("SGL_FREE_WAIT_S", 3 * 3600))
             if gpus and os.environ.get("SGL_WAIT_FREE", "1") != "0" and not _wait_free(gpus, name, limit):
                 print(f"=== {name}: GPUs {gpus} never cleared, skipped", flush=True)

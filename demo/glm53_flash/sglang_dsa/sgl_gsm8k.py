@@ -7,13 +7,17 @@ few_shot_gsm8k downloads; no download here).
 python sgl_gsm8k.py --data-path gsm8k_test.jsonl [--bs 4] [--num-questions 200] [--max-total-tokens N]
 """
 import argparse
+import os
 import time
 
 import sglang as sgl
 from sglang.test.few_shot_gsm8k import get_answer_value, get_few_shot_examples, get_one_example
 from sglang.utils import read_jsonl
 
-MODEL = "/raid/catalyst/models/GLM-5.3-Flash"
+MODEL = os.environ.get("GLM53F_MODEL", "/raid/catalyst/models/GLM-5.3-Flash")   # the checkpoint directory
+# GLM53F_NCCL_PORT: SGLang's torch.distributed port (nccl_port; default: a random free one), one per chain when two chains
+# start engines at the same time on two halves of a box
+NCCL = {"nccl_port": int(os.environ["GLM53F_NCCL_PORT"])} if os.environ.get("GLM53F_NCCL_PORT") else {}
 INVALID = -9999999
 
 
@@ -37,7 +41,7 @@ def main():
     llm = sgl.Engine(model_path=MODEL, tp_size=4, max_running_requests=args.bs, cuda_graph_max_bs_decode=args.bs,
                      context_length=args.ctx, mem_fraction_static=0.6, dsa_prefill_backend="trtllm",
                      dsa_decode_backend="trtllm", kv_cache_dtype=args.kv, moe_runner_backend="flashinfer_trtllm",
-                     disable_radix_cache=True, log_level="warning", **extra)
+                     disable_radix_cache=True, log_level="warning", **NCCL, **extra)
     sp = {"max_new_tokens": args.max_new_tokens, "temperature": 0.0, "stop": ["Question", "Assistant:", "<|separator|>"]}
     t0 = time.perf_counter()
     outs = llm.generate(questions, sp)

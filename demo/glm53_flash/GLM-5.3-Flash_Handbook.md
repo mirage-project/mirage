@@ -78,8 +78,9 @@ smallest T not below its row count:
   cp $MIRAGE/demo/glm53_flash/sglang_kda/kda_static_boot.py $SITE/ && echo "import kda_static_boot" > $SITE/kda_static_boot.pth
   ```
   The file in site-packages is a copy: copy it again after changing the code.
-- **Model path**: hard-coded as `MODEL` in `sglang_dsa/sgl_spec_bench.py`, `sgl_check.py` and `sgl_gsm8k.py`. The static
-  layers read their weights from SGLang's `model_path`.
+- **Model path**: `GLM53F_MODEL` (default `/raid/catalyst/models/GLM-5.3-Flash`), read as `MODEL` by
+  `sglang_dsa/sgl_spec_bench.py`, `sgl_check.py` and `sgl_gsm8k.py`; `sgl_chain.py` stops before the first run if the
+  directory does not exist. The static layers read their weights from SGLang's `model_path`.
 
 ---
 
@@ -92,6 +93,11 @@ directory, one process per run, each logging to `<run name>.log`.
   are ignored. Exception: `DSA_STATIC_ROOT` is read once when the chain starts and names the mirage checkout (default: the
   checkout the chain is in).
 - Before each run it waits until no other process is on `CUDA_VISIBLE_DEVICES`; `SGL_WAIT_FREE=0` turns the wait off.
+- Two chains at once on one 8-GPU box (`CUDA_VISIBLE_DEVICES=0,1,2,3` and `4,5,6,7`): start each in its own directory (logs,
+  nsys reports and the static layers' build directories are under the current directory). Each run gets SGLang's
+  `nccl_port` from `GLM53F_NCCL_PORT`, or, unset, a free port in 22000 + 1000 x the first visible GPU's index .. + 999, so
+  the two chains draw from disjoint ranges. The build cache under `<checkout>/build/` is shared; one lock file per
+  `layer.cu` serializes equal builds.
 
 ```bash
 export MIRAGE=/path/to/mirage SGL_PY=/path/to/sglang-venv/bin/python MIRAGE_Z3_LIB=/path/to/mirage-venv/lib/python3.12/site-packages/z3/lib
@@ -102,7 +108,7 @@ P() { for s in "$@"; do for p in 256 4000; do echo -n "prof_base_${s}_p$p prof_a
 $SGL_PY $C check_all3p check_bs1_attn check_bs1_moe4l check_bs2_attn check_bs2_moe4l check_bs4_attn check_bs4_moe4l
 $SGL_PY $C check_t16_bs16_attn check_t16_bs16_moe4l check_t32_bs32_attn check_t32_bs32_moe4l check_t64_bs64_attn check_t64_bs64_moe4l
 $SGL_PY $C $(P off_bs1 off_bs2 off_bs4 off_bs8 off_bs16 off_bs32 off_bs64)   # nsys end to end
-python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md        # the table
+python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md        # the table (or: nsys_e2e.py ours_dir base_dir)
 ```
 
 ### 3.1 Run names

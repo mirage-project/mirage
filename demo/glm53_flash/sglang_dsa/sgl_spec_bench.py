@@ -11,12 +11,16 @@ python sgl_spec_bench.py --bs 1 [--prompt-tokens 4000] [--tokens 256] [--reps 3]
 prompt length, 256 and 4000 tokens)
 """
 import argparse
+import os
 import statistics
 import time
 
 import sglang as sgl
 
-MODEL = "/raid/catalyst/models/GLM-5.3-Flash"
+MODEL = os.environ.get("GLM53F_MODEL", "/raid/catalyst/models/GLM-5.3-Flash")   # the checkpoint directory
+# GLM53F_NCCL_PORT: SGLang's torch.distributed port (nccl_port; default: a random free one), one per chain when two chains
+# start engines at the same time on two halves of a box
+NCCL = {"nccl_port": int(os.environ["GLM53F_NCCL_PORT"])} if os.environ.get("GLM53F_NCCL_PORT") else {}
 TASK = " Write a long story about the history of computing, chapter {i}."
 
 
@@ -56,7 +60,7 @@ def main():
     llm = sgl.Engine(model_path=MODEL, tp_size=4, max_running_requests=args.bs, cuda_graph_max_bs_decode=args.bs,
                      context_length=args.ctx, mem_fraction_static=0.6, dsa_prefill_backend="trtllm",
                      dsa_decode_backend="trtllm", kv_cache_dtype=args.kv, moe_runner_backend="flashinfer_trtllm",
-                     disable_radix_cache=True, log_level="warning", **extra)
+                     disable_radix_cache=True, log_level="warning", **NCCL, **extra)
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     sp = {"max_new_tokens": args.tokens, "ignore_eos": True, "temperature": 0.0}

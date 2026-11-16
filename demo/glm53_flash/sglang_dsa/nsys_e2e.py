@@ -1,5 +1,8 @@
-"""nsys_e2e.py RUN_DIR [scen ...] [--dev=N] | nsys_e2e.py --one DB [--dev=N]: the end-to-end table of sgl_chain.py's nsys runs
-prof_{base,all3ppf}_{scen}_p{256,4000} (sgl_spec_bench.py --profile under nsys: <name>.sqlite, <name>.log). Per run the
+"""nsys_e2e.py RUN_DIR [RUN_DIR ...] [scen ...] [--dev=N] | nsys_e2e.py --one DB [--dev=N]: the end-to-end table of
+sgl_chain.py's nsys runs prof_{base,all3ppf}_{scen}_p{256,4000} (sgl_spec_bench.py --profile under nsys: <name>.sqlite,
+<name>.log), each run from the first RUN_DIR that has it (e.g. the two halves' directories of one box: ours/ and base/).
+--dev: the trace's deviceId of the GPU measured; default the lowest deviceId in each trace (a run on CUDA_VISIBLE_DEVICES
+4,5,6,7 need not record device 0). Per run the
 period of the forward's CUDA graph on one GPU: start to start of consecutive replays (a decode step), median and mean over
 the replays in the trace (the prefill is eager).
 The forward: with --cuda-graph-trace=graph (CUPTI_ACTIVITY_KIND_GRAPH_TRACE, one record per replay: sgl_chain's runs)
@@ -21,8 +24,15 @@ LENS = (256, 4000)
 
 def graphs(db, dev):
     """graph id -> [(start us, size)] per replay; size: the replay's duration (us, whole-graph records) or its kernel count
-    (node records: the kernels of one replay share its launch's correlation id)."""
+    (node records: the kernels of one replay share its launch's correlation id). dev None: the lowest deviceId recorded."""
     c = sqlite3.connect(db)
+    if dev is None:
+        devs = [r[0] for t in ("CUPTI_ACTIVITY_KIND_GRAPH_TRACE", "CUPTI_ACTIVITY_KIND_KERNEL")
+                if c.execute("select count(*) from sqlite_master where name = ?", (t,)).fetchone()[0]
+                for r in c.execute(f"select min(deviceId) from {t}") if r[0] is not None]
+        if not devs:
+            raise ValueError(f"{db}: no kernel or graph records")
+        dev = min(devs)
     if c.execute("select count(*) from sqlite_master where name = 'CUPTI_ACTIVITY_KIND_GRAPH_TRACE'").fetchone()[0]:
         by = collections.defaultdict(list)
         for s, e, g in c.execute("select start, end, graphId from CUPTI_ACTIVITY_KIND_GRAPH_TRACE where deviceId = ? order by "
@@ -51,7 +61,7 @@ def period(db, dev):
 
 
 def main():
-    dev = int(next((a.split("=")[1] for a in sys.argv[1:] if a.startswith("--dev=")), 0))
+    dev = next((int(a.split("=")[1]) for a in sys.argv[1:] if a.startswith("--dev=")), None)
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if "--one" in sys.argv:
         by = graphs(args[0], dev)
@@ -64,16 +74,17 @@ def main():
         print(f"forward graph {tg} (size {nk:.1f}): period median {st.median(per):.1f} mean {st.mean(per):.1f} min "
               f"{min(per):.1f} max {max(per):.1f} us over {len(per)}")
         return
-    d = args[0]
-    scens = args[1:] or list(LABEL)
+    dirs = [a for a in args if os.path.isdir(a)]
+    scens = [a for a in args if not os.path.isdir(a)] or list(LABEL)
     res = {}
     for scen in scens:
         for p in LENS:
             for cfg in ("base", "all3ppf"):
                 name = f"prof_{cfg}_{scen}_p{p}"
-                db = os.path.join(d, f"{name}.sqlite")
-                if not os.path.exists(db):
+                d = next((d for d in dirs if os.path.exists(os.path.join(d, f"{name}.sqlite"))), None)
+                if d is None:
                     continue
+                db = os.path.join(d, f"{name}.sqlite")
                 try:
                     per, tg, nk = period(db, dev)
                 except Exception as e:
