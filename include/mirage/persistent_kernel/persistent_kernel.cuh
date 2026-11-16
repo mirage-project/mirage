@@ -589,258 +589,257 @@ __device__ __forceinline__ bool
       "Lower the KV budget, raise the page size (fewer, larger pages), "
       "or use the offline scheduler.");
   __shared__ int smem_kv_indices[MPK_NUM_KV_GROUPS][MPK_MAX_NUM_PAGES];
-  int page_queue_head = *config.page_queue_head;
-  int page_queue_tail = *config.page_queue_tail;
-  int gpu_req_head = *config.gpu_req_head;
-  int gpu_comp_tail = *config.gpu_comp_tail;
-  int free_row_top = *config.free_row_top;
-  int const ring_mask = MPK_PINNED_RING_CAPACITY - 1;
+  while (true) {
+    int page_queue_head = *config.page_queue_head;
+    int page_queue_tail = *config.page_queue_tail;
+    int gpu_req_head = *config.gpu_req_head;
+    int gpu_comp_tail = *config.gpu_comp_tail;
+    int free_row_top = *config.free_row_top;
+    int const ring_mask = MPK_PINNED_RING_CAPACITY - 1;
 
-  // Reclaim rows only after the CPU has copied their completed output and
-  // release-stored -1 to pinned_step. The owner mapping stays stable for the
-  // full CPU read, so a completion can never refer to a reused row.
-  for (int row = 0; row < MPK_MAX_NUM_BATCHED_REQUESTS; row++) {
-    int32_t owner = ld_acquire_sys_i32(&config.pinned_rid_at_row[row]);
-    int32_t progress = ld_acquire_sys_i32(&config.pinned_step[row]);
-    if (owner >= 0 && progress == -1) {
-      st_release_sys_i32(&config.pinned_rid_at_row[row], -1);
-      config.free_rows[free_row_top++] = row;
-    }
-  }
-
-  // ── Step 1: finalize previous batch ────────────────────────────────────────
-  for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int16_t row = config.request_ids[i];
-    if (row == -1) {
-      continue;
-    }
-
-    int step = config.step[row];
-    int qo_indptr = config.qo_indptr_buffer[i];
-    int num_tokens = config.qo_indptr_buffer[i + 1] - qo_indptr;
-    int prompt_len = config.prompt_length[row];
-
-    // Move output tokens into the token buffer.
-    for (int j = 0; j < num_tokens; j++) {
-      if (step + j + 1 >= prompt_len && step + j + 1 < config.max_seq_length) {
-        config.tokens[row * MPK_MAX_SEQ_LENGTH + step + j + 1] =
-            config.output_tokens[qo_indptr + j];
+    // Reclaim rows only after the CPU has copied their completed output and
+    // release-stored -1 to pinned_step. The owner mapping stays stable for the
+    // full CPU read, so a completion can never refer to a reused row.
+    for (int row = 0; row < MPK_MAX_NUM_BATCHED_REQUESTS; row++) {
+      int32_t owner = ld_acquire_sys_i32(&config.pinned_rid_at_row[row]);
+      int32_t progress = ld_acquire_sys_i32(&config.pinned_step[row]);
+      if (owner >= 0 && progress == -1) {
+        st_release_sys_i32(&config.pinned_rid_at_row[row], -1);
+        config.free_rows[free_row_top++] = row;
       }
     }
-    config.step[row] = step + num_tokens;
 
-    // Per-step notification: release store so that all token buffer
-    // writes happen-before, guaranteeing CPU sees complete token data
-    // when it observes the updated step.
-    st_release_sys_i32(&config.pinned_step[row], (int32_t)(step + num_tokens));
+    // ── Step 1: finalize previous batch ────────────────────────────────────────
+    for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+      int16_t row = config.request_ids[i];
+      if (row == -1) {
+        continue;
+      }
+
+      int step = config.step[row];
+      int qo_indptr = config.qo_indptr_buffer[i];
+      int num_tokens = config.qo_indptr_buffer[i + 1] - qo_indptr;
+      int prompt_len = config.prompt_length[row];
+
+      // Move output tokens into the token buffer.
+      for (int j = 0; j < num_tokens; j++) {
+        if (step + j + 1 >= prompt_len && step + j + 1 < config.max_seq_length) {
+          config.tokens[row * MPK_MAX_SEQ_LENGTH + step + j + 1] =
+              config.output_tokens[qo_indptr + j];
+        }
+      }
+      config.step[row] = step + num_tokens;
+
+      // Per-step notification: release store so that all token buffer
+      // writes happen-before, guaranteeing CPU sees complete token data
+      // when it observes the updated step.
+      st_release_sys_i32(&config.pinned_step[row], (int32_t)(step + num_tokens));
 
 #ifdef MPK_ENABLE_PROFILING
-    bool done = true;
+      bool done = true;
 #else
-    bool done = (step + num_tokens + 1 >= config.max_seq_length) ||
-                ((config.tokens[row * MPK_MAX_SEQ_LENGTH + step + num_tokens] ==
-                  config.eos_token_id) &&
-                 (step + num_tokens >= prompt_len));
+      bool done = (step + num_tokens + 1 >= config.max_seq_length) ||
+                  ((config.tokens[row * MPK_MAX_SEQ_LENGTH + step + num_tokens] ==
+                    config.eos_token_id) &&
+                   (step + num_tokens >= prompt_len));
 #endif
 
-    if (done) {
-      int rid = config.request_rids[i];
+      if (done) {
+        int rid = config.request_rids[i];
 
-      // Write completion entry so CPU background thread can collect the
-      // output. Reports the original rid (not the buffer row).
-      int comp_slot = gpu_comp_tail & ring_mask;
-      while (ld_acquire_sys_i32(&config.pinned_comp_ready[comp_slot]) != 0) {
-        __nanosleep(100);
-      }
-      config.pinned_comp_request_id[comp_slot] = (int32_t)rid;
-      config.pinned_comp_buffer_row[comp_slot] = (int32_t)row;
-      config.pinned_comp_final_step[comp_slot] = (int32_t)(step + num_tokens);
-      st_release_sys_i32(&config.pinned_comp_ready[comp_slot], 1);
-      gpu_comp_tail++;
+        // Write completion entry so CPU background thread can collect the
+        // output. Reports the original rid (not the buffer row).
+        int comp_slot = gpu_comp_tail & ring_mask;
+        while (ld_acquire_sys_i32(&config.pinned_comp_ready[comp_slot]) != 0) {
+          __nanosleep(100);
+        }
+        config.pinned_comp_request_id[comp_slot] = (int32_t)rid;
+        config.pinned_comp_buffer_row[comp_slot] = (int32_t)row;
+        config.pinned_comp_final_step[comp_slot] = (int32_t)(step + num_tokens);
+        st_release_sys_i32(&config.pinned_comp_ready[comp_slot], 1);
+        gpu_comp_tail++;
 
-      // Retain the row and owner until the CPU acknowledges its completed
-      // read through pinned_step[row] = -1.
-      // Mark batch slot as empty.
-      config.request_ids[i] = -1;
-      config.request_rids[i] = -1;
+        // Retain the row and owner until the CPU acknowledges its completed
+        // read through pinned_step[row] = -1.
+        // Mark batch slot as empty.
+        config.request_ids[i] = -1;
+        config.request_rids[i] = -1;
 
-      // Free pages back to the page queue (all groups share the same queue).
-      for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
-        int kv_indptr_g = config.paged_kv_indptr_buffer[g][i];
-        int num_pg = config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
-        for (int j = 0; j < num_pg; j++) {
-          config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] =
-              config.paged_kv_indices_buffer[g][kv_indptr_g + j];
-          page_queue_tail++;
+        // Free pages back to the page queue (all groups share the same queue).
+        for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
+          int kv_indptr_g = config.paged_kv_indptr_buffer[g][i];
+          int num_pg = config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
+          for (int j = 0; j < num_pg; j++) {
+            config.page_queue[page_queue_tail % MPK_MAX_NUM_PAGES] =
+                config.paged_kv_indices_buffer[g][kv_indptr_g + j];
+            page_queue_tail++;
+          }
         }
       }
     }
-  }
 
-  // ── Step 2: snapshot current kv_indices per group to shared memory ─────────
-  for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
-    int snap_count =
-        config.paged_kv_indptr_buffer[g][MPK_MAX_NUM_BATCHED_REQUESTS];
-    for (int i = 0; i < snap_count; i++) {
-      smem_kv_indices[g][i] = config.paged_kv_indices_buffer[g][i];
-    }
-  }
-
-  // ── Step 3: compact active requests ────────────────────────────────────────
-  int num_reqs = 0, num_tokens = 0;
-  int num_pages_g[MPK_NUM_KV_GROUPS];
-  for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
-    num_pages_g[g] = 0;
-  }
-
-  for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    int16_t row = config.request_ids[i];
-    if (row == -1) {
-      continue;
-    }
-
-    config.request_ids[num_reqs] = row;
-    config.request_rids[num_reqs] = config.request_rids[i];
-    config.qo_indptr_buffer[num_reqs] = num_tokens;
-
-    int step = config.step[row];
-    int remaining = config.prompt_length[row] - step;
-    int num_new_tokens;
-    if (remaining > 0) {
-      num_new_tokens = min(remaining, MPK_TOKEN_ROOM(num_tokens));
-    } else {
-      num_new_tokens = min(1, MPK_TOKEN_ROOM(num_tokens));
-    }
-
-    for (int j = 0; j < num_new_tokens; j++) {
-      config.input_tokens[num_tokens + j] =
-          config.tokens[row * MPK_MAX_SEQ_LENGTH + step + j];
-    }
-
+    // ── Step 2: snapshot current kv_indices per group to shared memory ─────────
     for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
-      int bs = config.kv_group_block_sizes[g];
-      int kv_indptr_g = config.paged_kv_indptr_buffer[g][i];
-      int num_old_pages_g =
-          config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
-      config.paged_kv_indptr_buffer[g][num_reqs] = num_pages_g[g];
-      int num_new_pages_g = (step + num_new_tokens + bs - 1) / bs;
-      config.paged_kv_last_page_len_buffer[g][num_reqs] =
-          (step + num_new_tokens) % bs;
-      for (int j = 0; j < num_old_pages_g; j++) {
-        config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
-            smem_kv_indices[g][kv_indptr_g + j];
+      int snap_count =
+          config.paged_kv_indptr_buffer[g][MPK_MAX_NUM_BATCHED_REQUESTS];
+      for (int i = 0; i < snap_count; i++) {
+        smem_kv_indices[g][i] = config.paged_kv_indices_buffer[g][i];
       }
-      // NOTE: the online path does not recycle sliding-window pages yet
-      for (int j = num_old_pages_g; j < num_new_pages_g; j++) {
-        MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
-        config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
-            config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
-        page_queue_head++;
-      }
-      num_pages_g[g] += num_new_pages_g;
     }
 
-    num_tokens += num_new_tokens;
-    num_reqs++;
-  }
-
-  // ── Step 4: drain request ring → directly admit to running batch ──────────
-  // Each ring slot has its own independent inbox; entries that cannot be
-  // admitted yet stay in the ring (ready=1) and will be retried next iteration.
-  while (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
-         num_tokens < MPK_MAX_NUM_BATCHED_TOKENS && free_row_top > 0) {
-    int req_slot = gpu_req_head & ring_mask;
-    int32_t rdy = ld_acquire_sys_i32(&config.pinned_req_ready[req_slot]);
-    if (rdy == 0) {
-      break; // ring empty
-    }
-
-    int32_t new_rid = config.pinned_req_request_id[req_slot];
-    int32_t prompt_len = config.pinned_req_prompt_len[req_slot];
-    int32_t initial_step = config.pinned_req_initial_step[req_slot];
-
-    // Pop a free buffer row and copy inbox tokens from this ring slot.
-    int row = config.free_rows[--free_row_top];
-    int inbox_base = req_slot * MPK_MAX_SEQ_LENGTH;
-    for (int j = 0; j < prompt_len; j++) {
-      config.tokens[row * MPK_MAX_SEQ_LENGTH + j] =
-          config.pinned_inbox_tokens[inbox_base + j];
-    }
-    config.prompt_length[row] = prompt_len;
-    config.step[row] = initial_step;
-    // Reset progress before release-publishing the owner. An observer that
-    // finds new_rid must not see progress or tokens from the prior lease.
-    st_release_sys_i32(&config.pinned_step[row], initial_step);
-    st_release_sys_i32(&config.pinned_rid_at_row[row], new_rid);
-
-    // Clear the ring slot so CPU can reuse it.
-    st_release_sys_i32(&config.pinned_req_ready[req_slot], 0);
-    gpu_req_head++;
-
-    // Fill batch slot.
-    config.request_ids[num_reqs] = (int16_t)row;
-    config.request_rids[num_reqs] = new_rid;
-    config.qo_indptr_buffer[num_reqs] = num_tokens;
-
-    int remaining = prompt_len - initial_step;
-    int num_new_tokens =
-        min(remaining > 0 ? remaining : 1, MPK_TOKEN_ROOM(num_tokens));
-
-    for (int j = 0; j < num_new_tokens; j++) {
-      config.input_tokens[num_tokens + j] =
-          config.tokens[row * MPK_MAX_SEQ_LENGTH + initial_step + j];
-    }
-
+    // ── Step 3: compact active requests ────────────────────────────────────────
+    int num_reqs = 0, num_tokens = 0;
+    int num_pages_g[MPK_NUM_KV_GROUPS];
     for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
-      int bs = config.kv_group_block_sizes[g];
-      config.paged_kv_indptr_buffer[g][num_reqs] = num_pages_g[g];
-      int num_new_pages_g = (initial_step + num_new_tokens + bs - 1) / bs;
-      config.paged_kv_last_page_len_buffer[g][num_reqs] =
-          (initial_step + num_new_tokens) % bs;
-      for (int j = 0; j < num_new_pages_g; j++) {
-        MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
-        config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
-            config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
-        page_queue_head++;
+      num_pages_g[g] = 0;
+    }
+
+    for (int i = 0; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+      int16_t row = config.request_ids[i];
+      if (row == -1) {
+        continue;
       }
-      num_pages_g[g] += num_new_pages_g;
+
+      config.request_ids[num_reqs] = row;
+      config.request_rids[num_reqs] = config.request_rids[i];
+      config.qo_indptr_buffer[num_reqs] = num_tokens;
+
+      int step = config.step[row];
+      int remaining = config.prompt_length[row] - step;
+      int num_new_tokens;
+      if (remaining > 0) {
+        num_new_tokens = min(remaining, MPK_TOKEN_ROOM(num_tokens));
+      } else {
+        num_new_tokens = min(1, MPK_TOKEN_ROOM(num_tokens));
+      }
+
+      for (int j = 0; j < num_new_tokens; j++) {
+        config.input_tokens[num_tokens + j] =
+            config.tokens[row * MPK_MAX_SEQ_LENGTH + step + j];
+      }
+
+      for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
+        int bs = config.kv_group_block_sizes[g];
+        int kv_indptr_g = config.paged_kv_indptr_buffer[g][i];
+        int num_old_pages_g =
+            config.paged_kv_indptr_buffer[g][i + 1] - kv_indptr_g;
+        config.paged_kv_indptr_buffer[g][num_reqs] = num_pages_g[g];
+        int num_new_pages_g = (step + num_new_tokens + bs - 1) / bs;
+        config.paged_kv_last_page_len_buffer[g][num_reqs] =
+            (step + num_new_tokens) % bs;
+        for (int j = 0; j < num_old_pages_g; j++) {
+          config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
+              smem_kv_indices[g][kv_indptr_g + j];
+        }
+        // NOTE: the online path does not recycle sliding-window pages yet
+        for (int j = num_old_pages_g; j < num_new_pages_g; j++) {
+          MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
+          config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
+              config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
+          page_queue_head++;
+        }
+        num_pages_g[g] += num_new_pages_g;
+      }
+
+      num_tokens += num_new_tokens;
+      num_reqs++;
     }
 
-    num_tokens += num_new_tokens;
-    num_reqs++;
-  }
+    // ── Step 4: drain request ring → directly admit to running batch ──────────
+    // Each ring slot has its own independent inbox; entries that cannot be
+    // admitted yet stay in the ring (ready=1) and will be retried next iteration.
+    while (num_reqs < MPK_MAX_NUM_BATCHED_REQUESTS &&
+           num_tokens < MPK_MAX_NUM_BATCHED_TOKENS && free_row_top > 0) {
+      int req_slot = gpu_req_head & ring_mask;
+      int32_t rdy = ld_acquire_sys_i32(&config.pinned_req_ready[req_slot]);
+      if (rdy == 0) {
+        break; // ring empty
+      }
 
-  // ── Step 5: clear unused slots ─────────────────────────────────────────────
-  for (int i = num_reqs; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    config.request_ids[i] = -1;
-    config.request_rids[i] = -1;
-  }
-  for (int i = num_reqs; i <= MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
-    config.qo_indptr_buffer[i] = num_tokens;
-    for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
-      config.paged_kv_indptr_buffer[g][i] = num_pages_g[g];
+      int32_t new_rid = config.pinned_req_request_id[req_slot];
+      int32_t prompt_len = config.pinned_req_prompt_len[req_slot];
+      int32_t initial_step = config.pinned_req_initial_step[req_slot];
+
+      // Pop a free buffer row and copy inbox tokens from this ring slot.
+      int row = config.free_rows[--free_row_top];
+      int inbox_base = req_slot * MPK_MAX_SEQ_LENGTH;
+      for (int j = 0; j < prompt_len; j++) {
+        config.tokens[row * MPK_MAX_SEQ_LENGTH + j] =
+            config.pinned_inbox_tokens[inbox_base + j];
+      }
+      config.prompt_length[row] = prompt_len;
+      config.step[row] = initial_step;
+      // Reset progress before release-publishing the owner. An observer that
+      // finds new_rid must not see progress or tokens from the prior lease.
+      st_release_sys_i32(&config.pinned_step[row], initial_step);
+      st_release_sys_i32(&config.pinned_rid_at_row[row], new_rid);
+
+      // Clear the ring slot so CPU can reuse it.
+      st_release_sys_i32(&config.pinned_req_ready[req_slot], 0);
+      gpu_req_head++;
+
+      // Fill batch slot.
+      config.request_ids[num_reqs] = (int16_t)row;
+      config.request_rids[num_reqs] = new_rid;
+      config.qo_indptr_buffer[num_reqs] = num_tokens;
+
+      int remaining = prompt_len - initial_step;
+      int num_new_tokens =
+          min(remaining > 0 ? remaining : 1, MPK_TOKEN_ROOM(num_tokens));
+
+      for (int j = 0; j < num_new_tokens; j++) {
+        config.input_tokens[num_tokens + j] =
+            config.tokens[row * MPK_MAX_SEQ_LENGTH + initial_step + j];
+      }
+
+      for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
+        int bs = config.kv_group_block_sizes[g];
+        config.paged_kv_indptr_buffer[g][num_reqs] = num_pages_g[g];
+        int num_new_pages_g = (initial_step + num_new_tokens + bs - 1) / bs;
+        config.paged_kv_last_page_len_buffer[g][num_reqs] =
+            (initial_step + num_new_tokens) % bs;
+        for (int j = 0; j < num_new_pages_g; j++) {
+          MPK_REQUIRE_FREE_PAGE(page_queue_head, page_queue_tail);
+          config.paged_kv_indices_buffer[g][num_pages_g[g] + j] =
+              config.page_queue[page_queue_head % MPK_MAX_NUM_PAGES];
+          page_queue_head++;
+        }
+        num_pages_g[g] += num_new_pages_g;
+      }
+
+      num_tokens += num_new_tokens;
+      num_reqs++;
     }
-  }
 
-  // ── Step 6: update cursors and spin-wait / shutdown ────────────────────────
-  *config.page_queue_head = page_queue_head;
-  *config.page_queue_tail = page_queue_tail;
-  *config.gpu_req_head = gpu_req_head;
-  *config.gpu_comp_tail = gpu_comp_tail;
-  *config.free_row_top = free_row_top;
+    // ── Step 5: clear unused slots ─────────────────────────────────────────────
+    for (int i = num_reqs; i < MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+      config.request_ids[i] = -1;
+      config.request_rids[i] = -1;
+    }
+    for (int i = num_reqs; i <= MPK_MAX_NUM_BATCHED_REQUESTS; i++) {
+      config.qo_indptr_buffer[i] = num_tokens;
+      for (int g = 0; g < MPK_NUM_KV_GROUPS; g++) {
+        config.paged_kv_indptr_buffer[g][i] = num_pages_g[g];
+      }
+    }
 
-  // If the batch is completely empty (no active requests, ring empty),
-  // spin-wait instead of exiting so the kernel stays alive for future
-  // requests.  Check shutdown signal to terminate.
-  if (num_tokens == 0) {
+    // ── Step 6: update cursors and spin-wait / shutdown ────────────────────────
+    *config.page_queue_head = page_queue_head;
+    *config.page_queue_tail = page_queue_tail;
+    *config.gpu_req_head = gpu_req_head;
+    *config.gpu_comp_tail = gpu_comp_tail;
+    *config.free_row_top = free_row_top;
+
+    if (num_tokens > 0) {
+      return true;
+    }
+
+    // Wait here until work arrives or shutdown is requested.
     if (ld_acquire_sys_i32(config.pinned_shutdown) != 0) {
-      return false; // terminate kernel
+      return false;
     }
     __nanosleep(100);
-    return true; // idle — keep kernel alive, scheduler will re-invoke
   }
-
-  return (num_tokens > 0);
 }
 #endif
 
