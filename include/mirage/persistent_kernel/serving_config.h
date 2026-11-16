@@ -8,6 +8,7 @@ namespace mirage { namespace serving {
 
 constexpr int MAX_EOS = 16;
 constexpr int MAX_BIASES = 256;
+constexpr int SAMPLING_PARTIAL_WORDS = 4 * 128;
 
 struct LogitBias {
   int64_t token;
@@ -70,7 +71,7 @@ constexpr int sampling_scratch_words(int vocab) {
 __host__ __device__
 #endif
 constexpr size_t sampling_buffer_bytes(int vocab) {
-  return size_t(vocab + 256 + 4) * sizeof(uint32_t);
+  return size_t(vocab + SAMPLING_PARTIAL_WORDS + 4) * sizeof(uint32_t);
 }
 
 inline void pack_config(ServingConfig *out, int64_t budget, int64_t seed,

@@ -3,12 +3,12 @@
 #include <cuda/atomic>
 #include <curand_kernel.h>
 #include <limits>
+#include <type_traits>
 
 namespace mirage {
 namespace serving {
 
 constexpr int BITS_PER_WORD = std::numeric_limits<uint32_t>::digits;
-constexpr int HISTOGRAM_SIZE = 256;
 
 // For dividing history_buffer into multiple ranges
 class HistoryBuffer {
@@ -26,7 +26,7 @@ public:
 
 // For dividing buffer into multiple regions
 // 1. scores = vocab * sizeof(float)
-// 2. histogram = 256 * sizeof(uint32_t)
+// 2. CTA partials = SAMPLING_PARTIAL_WORDS * sizeof(uint32_t)
 // 3. meta data = 4 * sizeof(uint32_t)
 class RadixBuffer {
 public:
@@ -34,7 +34,7 @@ public:
     char *base = buffer + size_t(slot) * sampling_buffer_bytes(padded_vocab);
     scores = reinterpret_cast<float *>(base);
     histogram = reinterpret_cast<uint32_t *>(base + size_t(padded_vocab) * sizeof(float));
-    ready = histogram + HISTOGRAM_SIZE;
+    ready = histogram + SAMPLING_PARTIAL_WORDS;
     radix_prefix = ready + 1;
     arrival = ready + 2;
     rank = ready + 3;
@@ -62,11 +62,19 @@ struct PivotMass {
   }
 };
 
-template <int Threads>
+struct JointPivotMass {
+  float first, second, first_mass, second_mass;
+  __device__ JointPivotMass operator+(JointPivotMass other) const {
+    return {first + other.first, second + other.second,
+            first_mass + other.first_mass, second_mass + other.second_mass};
+  }
+};
+
+template <int Threads, typename Mass = PivotMass>
 struct PivotShared {
   union {
     typename cub::BlockReduce<float, Threads>::TempStorage mass;
-    typename cub::BlockReduce<PivotMass, Threads>::TempStorage pivots;
+    typename cub::BlockReduce<Mass, Threads>::TempStorage pivots;
     typename cub::BlockScan<float, Threads>::TempStorage scan;
   };
   float total, offset, tile;
@@ -74,8 +82,14 @@ struct PivotShared {
 };
 
 template <int Threads>
+struct JointPivotShared : PivotShared<Threads, JointPivotMass> {
+  float first_mass, second_mass;
+  double target;
+};
+
+template <int Threads>
 union SamplingShared {
-  PivotShared<Threads> pivot;
+  JointPivotShared<Threads> pivot;
   typename cub::BlockReduce<uint32_t, Threads>::TempStorage maximum;
 };
 
@@ -93,7 +107,7 @@ __device__ inline void prepare_history(
   
   uint32_t *ptr = radix_buf.histogram;
 
-  for (int i = threadIdx.x; i < HISTOGRAM_SIZE + 4; i += blockDim.x) {
+  for (int i = threadIdx.x; i < SAMPLING_PARTIAL_WORDS + 4; i += blockDim.x) {
     ptr[i] = 0;
   }
 
@@ -347,19 +361,21 @@ __device__ inline void sampling_barrier(
   __syncthreads();
 }
 
-template <int Threads>
+template <int Threads, bool Joint>
 __device__ inline void sample_pivot(
     char *buffer, long long *output, int padded_vocab, int slot, int vocab,
     int logit_row, int position, int part_id, int num_cta,
     ServingConfig const *cfg) {
   using Reduce = cub::BlockReduce<float, Threads>;
-  using PivotReduce = cub::BlockReduce<PivotMass, Threads>;
+  using Mass = std::conditional_t<Joint, JointPivotMass, PivotMass>;
+  using Shared = std::conditional_t<Joint, JointPivotShared<Threads>, PivotShared<Threads>>;
+  using PivotReduce = cub::BlockReduce<Mass, Threads>;
   using Scan = cub::BlockScan<float, Threads>;
   extern __shared__ __align__(16) char sampling_shared[];
-  auto &shared = *reinterpret_cast<PivotShared<Threads> *>(sampling_shared);
+  auto &shared = *reinterpret_cast<Shared *>(sampling_shared);
   RadixBuffer buf(buffer, padded_vocab, slot);
   auto *partials = reinterpret_cast<float *>(buf.histogram);
-  bool topk = cfg->top_k > 0;
+  bool topk = Joint || cfg->top_k > 0;
   int tid = threadIdx.x;
   int begin = int(int64_t(vocab) * part_id / num_cta);
   int end = int(int64_t(vocab) * (part_id + 1) / num_cta);
@@ -394,6 +410,10 @@ __device__ inline void sample_pivot(
       for (int part = 0; part < num_cta; ++part)
         total += partials[part];
       shared.total = total;
+      if constexpr (Joint) {
+        if (round == 0)
+          shared.target = cfg->top_p * total;
+      }
       curandStatePhilox4_32_10_t rng;
       curand_init(cfg->seed, position, round, &rng);
       float u = fminf(curand_uniform(&rng), 0x1.fffffep-1f) * total;
@@ -404,9 +424,10 @@ __device__ inline void sample_pivot(
       shared.offset = u;
     }
     __syncthreads();
-    if (round == 0)
+    if (round == 0) {
       target = topk ? static_cast<float>(cfg->top_k)
                     : static_cast<float>(cfg->top_p) * shared.total;
+    }
 
     if (part_id == shared.selected) {
       float offset = shared.offset;
@@ -435,35 +456,53 @@ __device__ inline void sample_pivot(
     int sampled = *buf.rank;
     float pivot = buf.scores[sampled];
     float midpoint = (pivot + high) * .5f;
-    PivotMass sums{0.f, 0.f};
+    Mass sums{};
     for (int i = begin + tid; i < end; i += Threads) {
       float w = buf.scores[i];
-      if (w > pivot || (w == pivot && i < sampled))
+      float weight = 0.f;
+      if constexpr (Joint)
+        weight = expf((w - maximum) / temperature);
+      if (w > pivot || (w == pivot && i < sampled)) {
         sums.first += topk ? 1.f : w;
-      if (w > midpoint)
+        if constexpr (Joint)
+          sums.first_mass += weight;
+      }
+      if (w > midpoint) {
         sums.second += topk ? 1.f : w;
+        if constexpr (Joint)
+          sums.second_mass += weight;
+      }
     }
     sums = PivotReduce(shared.pivots).Sum(sums);
-    if (tid == 0) {
-      partials[2 * part_id] = sums.first;
-      partials[2 * part_id + 1] = sums.second;
-    }
+    auto *pivots = reinterpret_cast<Mass *>(buf.histogram);
+    if (tid == 0)
+      pivots[part_id] = sums;
     __syncthreads();
     sampling_barrier(buf, num_cta, ++phase);
     if (tid == 0) {
-      PivotMass total{0.f, 0.f};
+      Mass total{};
       for (int part = 0; part < num_cta; ++part)
-        total = total + PivotMass{partials[2 * part], partials[2 * part + 1]};
+        total = total + pivots[part];
       shared.total = total.first;
       shared.offset = total.second;
+      if constexpr (Joint) {
+        shared.first_mass = total.first_mass;
+        shared.second_mass = total.second_mass;
+      }
     }
     __syncthreads();
-    if (shared.total < target) {
+    bool accept = shared.total < target;
+    bool accept_midpoint = shared.offset < target;
+    if constexpr (Joint) {
+      accept = accept && shared.first_mass < shared.target;
+      accept_midpoint = accept_midpoint && shared.second_mass < shared.target;
+    }
+    if (accept) {
       if (part_id == 0 && tid == 0)
         output[logit_row] = sampled;
       return;
     }
-    if (shared.offset < target) {
+    if (accept_midpoint) {
       low = pivot;
       low_token = sampled;
       high = midpoint;
@@ -514,8 +553,13 @@ __device__ void sample_request(
       sample_scores_with_max<NUM_THREADS>(logits, history_buffer, buffer, padded_vocab, slot, part_id, num_cta, config);
     } else if constexpr (PHASE == SamplePhase::RADIX) {
       auto const *cfg = config.generation_config + row;
-      sample_pivot<NUM_THREADS>(buffer, output, padded_vocab, slot, vocab,
-          end - 1, current_len - prompt_len, part_id, num_cta, cfg);
+      if (cfg->top_k > 0 && cfg->top_p < 1.) {
+        sample_pivot<NUM_THREADS, true>(buffer, output, padded_vocab, slot, vocab,
+            end - 1, current_len - prompt_len, part_id, num_cta, cfg);
+      } else {
+        sample_pivot<NUM_THREADS, false>(buffer, output, padded_vocab, slot, vocab,
+            end - 1, current_len - prompt_len, part_id, num_cta, cfg);
+      }
     }
   }
   

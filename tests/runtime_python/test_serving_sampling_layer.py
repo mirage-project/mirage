@@ -69,22 +69,23 @@ def sample(request):
         # The online path requires a nonempty prompt.
         prompt = list(history[:prompt_len]) or [REAL_VOCAB - 1]
         seeds = list(seeds)
-        requests = []
-        for seed in seeds:
-            rid = next_rid
-            next_rid += 1
-            sampling = SamplingParams(**settings, seed=seed,
-                                      max_new_tokens=max_new_tokens)
-            payload = sampling.pack(len(prompt), config.max_seq_length, REAL_VOCAB, [])
-            runtime.submit(rid, torch.tensor(prompt, dtype=torch.int64),
-                           generation_config=payload)
-            requests.append(rid)
         result = []
-        for rid in requests:
-            row, step = runtime.wait_for_request(rid, timeout=60)
-            assert runtime.finish_reason(row) == "length"
-            result.append(int(runtime.read_tokens_at_row(row, step)[-1]))
-            assert runtime.release_request(rid)
+        for begin in range(0, len(seeds), capacity):
+            requests = []
+            for seed in seeds[begin:begin + capacity]:
+                rid = next_rid
+                next_rid += 1
+                sampling = SamplingParams(**settings, seed=seed,
+                                          max_new_tokens=max_new_tokens)
+                payload = sampling.pack(len(prompt), config.max_seq_length, REAL_VOCAB, [])
+                runtime.submit(rid, torch.tensor(prompt, dtype=torch.int64),
+                               generation_config=payload)
+                requests.append(rid)
+            for rid in requests:
+                row, step = runtime.wait_for_request(rid, timeout=60)
+                assert runtime.finish_reason(row) == "length"
+                result.append(int(runtime.read_tokens_at_row(row, step)[-1]))
+                assert runtime.release_request(rid)
         return result
 
     try:
@@ -108,6 +109,7 @@ def test_greedy_and_seed(sample):
     {"temperature": 1, "top_k": 3},
     {"temperature": 1, "top_p": .75},
     {"temperature": 1, "top_k": 3, "top_p": .75},
+    {"temperature": 1, "top_k": 2, "top_p": .5},
     {"temperature": .8, "top_k": 3, "top_p": .9,
      "logit_bias": {1: 2.}},
 ])
@@ -116,14 +118,17 @@ def test_sampling_distribution(sample, settings):
     for token, bias in settings.get("logit_bias", {}).items():
         scores[token] += bias
     scores /= settings["temperature"]
-    order = torch.argsort(scores, descending=True)[:settings.get("top_k", REAL_VOCAB)]
-    probabilities = torch.softmax(scores[order], 0)
-    if "top_p" in settings:
-        count = int((probabilities.cumsum(0) >= settings["top_p"]).nonzero()[0]) + 1
-        order, probabilities = order[:count], probabilities[:count]
-        probabilities /= probabilities.sum()
-    expected = torch.zeros(REAL_VOCAB)
-    expected[order] = probabilities
+    probabilities = torch.softmax(scores, 0)
+    keep = torch.ones(REAL_VOCAB, dtype=torch.bool)
+    if settings.get("top_k", 0):
+        boundary = probabilities.topk(settings["top_k"]).values[-1]
+        keep &= probabilities >= boundary
+    if settings.get("top_p", 1) < 1:
+        ordered = probabilities.sort(descending=True).values
+        boundary = ordered[(ordered.cumsum(0) >= settings["top_p"]).nonzero()[0, 0]]
+        keep &= probabilities >= boundary
+    expected = probabilities.masked_fill(~keep, 0)
+    expected /= expected.sum()
 
     draws = sample(settings)
     counts = Counter(draws)
