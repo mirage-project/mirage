@@ -207,7 +207,9 @@ if __name__ == "__main__":
         log = os.path.join(os.getcwd(), f"{name}.log")
         run = [sys.executable, os.path.join(HERE, cmd[0]), *cmd[1:]]
         if name.startswith("prof_"):
-            nsys = [("--cuda-graph-trace=graph" if a == "--cuda-graph-trace=node" and want in GRAPH_TRACE else a) for a in NSYS]
+            # FLASH_NODE_TRACE=1: every prof_ run traced per node (a kernel split; its period is not comparable)
+            graph = want in GRAPH_TRACE and os.environ.get("FLASH_NODE_TRACE") != "1"
+            nsys = [("--cuda-graph-trace=graph" if a == "--cuda-graph-trace=node" and graph else a) for a in NSYS]
             run = nsys + ["-o", os.path.join(os.getcwd(), name)] + run
         gpus = os.environ.get("CUDA_VISIBLE_DEVICES")   # (nvidia-smi indices, PCI bus order)
         for attempt in (1, 2):   # a run that died at load because of another user's job: once more after the GPUs clear
