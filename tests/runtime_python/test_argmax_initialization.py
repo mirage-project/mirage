@@ -55,6 +55,12 @@ def cases():
         ("unique-above-sentinel", -65536, -49664),
         ("zero-padding-control", -2, None),
         ("positive-control", -2, 3),
+        ("all-negative-infinity", -float("inf"), None),
+        ("finite-among-negative-infinity", -float("inf"), -65536),
+        ("positive-infinity", -65536, float("inf")),
+        ("all-nan", float("nan"), None),
+        ("nan-with-finite-maximum", float("nan"), -65536),
+        ("nan-with-single-negative-infinity", float("nan"), -float("inf")),
     ):
         scores = torch.full((BATCH, PADDED), background,
                             device="cuda", dtype=torch.bfloat16)
@@ -87,11 +93,31 @@ def check_case(lib, scores, active, implementation):
     if error:
         raise RuntimeError(f"Argmax launch failed with CUDA error {error}.")
     stream.synchronize()
-    logical = scores[:active, :VOCAB].float().cpu()
-    maxima = logical.max(dim=1).values.tolist()
+    chunk_size = PADDED // PARTIALS
+    chunks = scores[:active].float().cpu().reshape(active, PARTIALS, chunk_size)
+    positions = torch.arange(PADDED).reshape(PARTIALS, chunk_size)
+    eligible = (positions < VOCAB) & ~chunks.isnan()
+    expected = torch.where(eligible, chunks, -float("inf")).amax(dim=2)
+    has_value = eligible.any(dim=2)
+    actual_indices = indices[:active].cpu()
+    safe_indices = actual_indices.clamp(0, chunk_size - 1).unsqueeze(2)
+    selected = chunks.gather(2, safe_indices).squeeze(2)
+    selected_eligible = eligible.gather(2, safe_indices).squeeze(2)
+    partial_ok = torch.where(
+        has_value,
+        (actual_indices >= 0) & (actual_indices < chunk_size)
+        & selected_eligible & (selected == expected),
+        actual_indices == -1,
+    )
+    logical = chunks.reshape(active, PADDED)[:, :VOCAB]
+    maxima = expected.amax(dim=1).tolist()
+    row_has_value = has_value.any(dim=1).tolist()
     winners = output[:active].cpu().tolist()
-    ok = all(0 <= index < VOCAB and logical[row, index].item() == maxima[row]
+    ok = all((0 <= index < VOCAB and logical[row, index].item() == maxima[row])
+             if row_has_value[row] else index == 0
              for row, index in enumerate(winners))
+    ok = ok and bool(partial_ok.all())
+    ok = ok and torch.equal(values[:active].float().cpu(), expected)
     ok = ok and torch.equal(scores.view(torch.int16), saved)
     ok = ok and bool((output[active:] == -17).all())
     ok = ok and bool((values[active:] == 42).all())
