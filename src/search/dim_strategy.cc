@@ -1,16 +1,24 @@
 #include "mirage/search/dim_strategy.h"
 #include "mirage/config.h"
 #include "mirage/utils/containers.h"
+#include <random>
 
 namespace mirage {
 namespace search {
+
+// One default-seeded engine per thread, so the shuffle order is the same on
+// every run.
+static std::mt19937 &shuffle_engine() {
+  static thread_local std::mt19937 engine;
+  return engine;
+}
 
 DimStrategy::DimStrategy(GeneratorConfig const &config) : config(config) {}
 
 std::vector<type::KNOperatorType> DimStrategy::get_knop_cand() {
   std::vector<type::KNOperatorType> cands = config.knop_to_explore;
   if (config.randomized_branches) {
-    std::random_shuffle(cands.begin(), cands.end());
+    std::shuffle(cands.begin(), cands.end(), shuffle_engine());
   }
   return cands;
 }
@@ -22,7 +30,7 @@ std::vector<type::TBOperatorType> DimStrategy::get_tbop_cand() {
     cands = deduplicate(cands);
   }
   if (config.randomized_branches) {
-    std::random_shuffle(cands.begin(), cands.end());
+    std::shuffle(cands.begin(), cands.end(), shuffle_engine());
   }
   return cands;
 }
@@ -39,7 +47,7 @@ std::vector<dim3>
 #endif
       for (int dim : dims) {
         if (dim % x == 0) {
-          cands.push_back({dim / x, 1, 1});
+          cands.emplace_back(dim / x, 1, 1);
         }
       }
     }
@@ -55,7 +63,7 @@ std::vector<dim3>
 #endif
       for (int dim : dims) {
         if (dim % y == 0) {
-          cands.push_back({x, dim / y, 1});
+          cands.emplace_back(x, dim / y, 1);
         }
       }
     }
@@ -75,7 +83,7 @@ std::vector<dim3>
     for (size_t x : dim_to_try) {
       for (size_t y : dim_to_try) {
         if (x >= y) {
-          cands.push_back({x, y, 1});
+          cands.emplace_back(x, y, 1);
         }
       }
     }
@@ -141,7 +149,7 @@ std::vector<dim3>
   cands = deduplicate(cands);
 
   if (config.randomized_branches) {
-    std::random_shuffle(cands.begin(), cands.end());
+    std::shuffle(cands.begin(), cands.end(), shuffle_engine());
   }
   return cands;
 }
@@ -152,7 +160,7 @@ std::vector<dim3>
   std::vector<dim3> cands = config.block_dim_to_explore;
   cands.push_back({128, 1, 1});
   if (config.randomized_branches) {
-    std::random_shuffle(cands.begin(), cands.end());
+    std::shuffle(cands.begin(), cands.end(), shuffle_engine());
   }
   return cands;
 }
@@ -270,7 +278,7 @@ std::vector<std::vector<int3>>
     generate_input_map_cand(tensors, grid_dim, imap_to_explore, {}, results);
   }
   if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
+    std::shuffle(results.begin(), results.end(), shuffle_engine());
   }
   return results;
 }
@@ -321,7 +329,7 @@ std::vector<int3>
     }
   }
   if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
+    std::shuffle(results.begin(), results.end(), shuffle_engine());
   }
   return results;
 }
@@ -355,7 +363,7 @@ std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
   }
   generate_forloop_dim(input_tensors, fmap_to_explore, {}, results);
   if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
+    std::shuffle(results.begin(), results.end(), shuffle_engine());
   }
   return results;
 }
@@ -431,7 +439,7 @@ std::vector<int> DimStrategy::get_forloop_range_cand(
     }
   }
   if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
+    std::shuffle(results.begin(), results.end(), shuffle_engine());
   }
   return results;
 }
@@ -442,7 +450,7 @@ std::vector<std::vector<int>> DimStrategy::get_unary_input(int num_tensors) {
     result.push_back({i});
   }
   if (config.randomized_branches) {
-    std::random_shuffle(result.begin(), result.end());
+    std::shuffle(result.begin(), result.end(), shuffle_engine());
   }
   return result;
 }
@@ -455,7 +463,7 @@ std::vector<std::vector<int>> DimStrategy::get_binary_input(int num_tensors) {
     }
   }
   if (config.randomized_branches) {
-    std::random_shuffle(result.begin(), result.end());
+    std::shuffle(result.begin(), result.end(), shuffle_engine());
   }
   return result;
 }
@@ -483,7 +491,7 @@ std::vector<std::vector<int>> DimStrategy::get_nary_input(int num_tensors,
   std::vector<int> cur;
   mirage::search::get_nary_input(n, num_tensors, cur, result);
   if (config.randomized_branches) {
-    std::random_shuffle(result.begin(), result.end());
+    std::shuffle(result.begin(), result.end(), shuffle_engine());
   }
   return result;
 }
@@ -531,7 +539,7 @@ std::vector<std::vector<int3>> DimStrategy::get_input_map_cand(
   };
   generate_input_map_cand(tensors, imap_to_explore, {}, results);
   if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
+    std::shuffle(results.begin(), results.end(), shuffle_engine());
   }
   return results;
 }
@@ -552,7 +560,7 @@ std::vector<int3>
   }
   omap_to_explore = deduplicate(omap_to_explore);
   if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
+    std::shuffle(results.begin(), results.end(), shuffle_engine());
   }
   return results;
 }
@@ -582,7 +590,7 @@ std::vector<std::vector<int>> DimStrategy::get_forloop_dim_cand(
   }
   generate_forloop_dim(input_tensers, fmap_to_explore, {}, results);
   if (config.randomized_branches) {
-    std::random_shuffle(results.begin(), results.end());
+    std::shuffle(results.begin(), results.end(), shuffle_engine());
   }
   return results;
 }
