@@ -156,7 +156,7 @@ B200 (148 SMs); a missing file means round robin:
 
 | Layer | T=8 | T=16 | T=32 | T=64 |
 |---|---|---|---|---|
-| DSA decode | `sglang_dsa/dsa_fused_plan_{short,long}.json` | `dsa_fused_plan16_{short,long}.json` | round robin | long: `dsa_fused_plan64_long.json`; short: round robin |
+| DSA decode | `sglang_dsa/dsa_fused_plan_{short,long}.json` | `dsa_fused_plan16_{short,long}.json` | round robin | round robin |
 | KDA decode | round robin | round robin | round robin | round robin |
 | MoE (`mhc_pre`) | `sglang_moe/moe_plan_mhc_pre.json` | `moe_plan16_mhc_pre.json` | round robin | round robin |
 

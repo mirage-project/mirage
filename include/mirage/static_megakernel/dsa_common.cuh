@@ -429,19 +429,22 @@ __device__ __forceinline__ void fx_rmsnorm(unsigned long long const *fx,
 // Warp w computes column tile w % (M / 16) and K part w / (M / 16). There are
 // 8 / (M / 16) K parts. Warp kp = 0 adds the parts from red. Row t of out is
 // at out + t * ld_out. All 256 threads must call this function. Before the
-// call, make ws and xs ready (cp.async wait, then __syncthreads).
+// call, make ws and xs ready (cp.async wait, then __syncthreads). TT: the
+// tokens of the call (a multiple of 8; a task of some of the layer's tokens:
+// xs [TT][K], out at its first token).
 template <int M>
 __host__ __device__ constexpr int absorb_red_bytes() {
   return (8 / (M / 16) - 1) * (M / 16) * (TW / 8) * 32 * 4 * 4;
 }
-template <int K, int M>
+template <int K, int M, int TT = TW>
 __device__ __forceinline__ void absorb_mma(__nv_bfloat16 const *ws,
                                            __nv_bfloat16 const *xs,
                                            float *red,
                                            __nv_bfloat16 *out,
                                            size_t ld_out) {
-  constexpr int MT = M / 16, KP = 8 / MT, KK = K / KP, NTT = TW / 8;
-  static_assert(TW % 8 == 0 && M % 16 == 0 && 8 % MT == 0 && KK % 16 == 0,
+  constexpr int MT = M / 16, KP = 8 / MT, KK = K / KP, NTT = TT / 8;
+  static_assert(TT % 8 == 0 && TT <= TW && M % 16 == 0 && 8 % MT == 0 &&
+                    KK % 16 == 0,
                 "absorb_mma: whole 16 x 16 tiles, 8-token tiles");
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   int const mt = warp % MT, kp = warp / MT;

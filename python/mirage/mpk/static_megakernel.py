@@ -499,6 +499,8 @@ class StaticMegakernel(PersistentKernel):
         self,
         input: DTensor,     # x [T, L] bf16: a graph input (each GPU has all of x), or a node's output (h_s of silu_and_mul)
         output: DTensor,    # z_q [T, L] e4m3 bytes (uint8)
+        token_tiles: int = 1,   # each 128-column group in this many tasks of T / token_tiles tokens (grid y; a multiple of
+                                # 8 tokens each): at T = 64 a task of all tokens quantizes 8 tokens a warp, on L / 128 SMs
         block_dim: tuple = (256, 1, 1),
     ):
         """Quantize one 128-column group per task, with a separate scale for each token.
@@ -518,7 +520,8 @@ class StaticMegakernel(PersistentKernel):
         if p is not None and (p.info["buf"] < 0 or p.info["counter"] < 0 or p.info["exchange"]):
             raise ValueError(f"group_quant_layer: x from {p.name}: it must be a node's output buffer on this GPU (not in the "
                              f"exchange region) whose node counts its tasks")
-        self._add_node("group_quant", (L // 128, 1, 1), block_dim, [input, output],
+        assert token_tiles == 1 or (T % token_tiles == 0 and T // token_tiles % 8 == 0)
+        self._add_node("group_quant", (L // 128, token_tiles, 1), block_dim, [input, output],
                        # x from a node: each task waits until all its tasks are counted
                        [(1, -1, -1) if p is None else (-1, -1, -1), (1, -1, -1)], [L],
                        out_buffer=lambda n: (zq32_bytes(T, L), 0xFF, False), exchange=True,
@@ -1029,7 +1032,9 @@ class StaticMegakernel(PersistentKernel):
         self._dtypes("dsa_q_absorb_layer", qb=(qb, int64), w_uk=(w_uk, bfloat16), seq_lens=(seq_lens, int32),
                      output=(output, bfloat16), **({"cos_sin": (cos_sin, bfloat16)} if ROPE else {}))
         assert w_uk.dim(2) == 512 and (output.dim(0), output.dim(1), output.dim(2)) == (T, NH, 512 + ROPE)
-        self._add_node("dsa_q_absorb", (NH * 4, 1, 1), block_dim, [qb, output], [(-1, -1, -1), (-1, -1, -1)],
+        # (T = 64: each task half the tokens, NH x 8 tasks: 64 tasks of all 64 tokens left more than half the SMs idle)
+        self._add_node("dsa_q_absorb", (NH * 4, 2 if T == 64 and ROPE == 0 else 1, 1), block_dim, [qb, output],
+                       [(-1, -1, -1), (-1, -1, -1)],
                        [NH, NOPE, ROPE], out_buffer=lambda n: (T * NH * (512 + ROPE) * 2, -1, False), counters=1,
                        buf_slots=[self._tensor_slot(w_uk), self._tensor_slot(cos_sin if ROPE else seq_lens),
                                   self._tensor_slot(seq_lens)],
@@ -1155,13 +1160,15 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,        # o_lat [T, NH, 512] bf16
         block_dim: tuple = (256, 1, 1),
     ):
-        """Declare the split merge (tasks/dsa_mla_merge.cuh). Task (h, t) merges the sparse_mla splits of head h of token t.
-        params = [NH]. Counters: one for each head (dsa_o_absorb waits for the T tasks of its head)."""
+        """Declare the split merge (tasks/dsa_mla_merge.cuh). Task (h, y) merges the sparse_mla splits of head h of the tokens
+        [G y, G y + G): G = 1, or 8 at T = 64 (NH x 8 tasks, one round of the SMs, instead of NH x 64).
+        params = [NH]. Counters: one for each head (dsa_o_absorb waits for the tasks of its head)."""
         self._producer("dsa_mla_merge_layer", input, ("sparse_mla",))
         T, NH = self._tokens(output.dim(0)), output.dim(1)
         self._dtypes("dsa_mla_merge_layer", input=(input, float32), output=(output, bfloat16))
         assert output.dim(2) == 512
-        self._add_node("dsa_mla_merge", (NH, T, 1), block_dim, [input, output], [(-1, 0, -1), (1, 0, -1)], [NH],
+        G = 8 if T == 64 else 1
+        self._add_node("dsa_mla_merge", (NH, T // G, 1), block_dim, [input, output], [(-1, 0, -1), (1, 0, -1)], [NH],
                        out_buffer=lambda n: (T * NH * 512 * 2, -1, False), counters=NH)
 
     def dsa_o_absorb_layer(
@@ -1186,7 +1193,8 @@ class StaticMegakernel(PersistentKernel):
         if merge:
             self._dtypes("dsa_o_absorb_layer", o_lat=(o_lat, bfloat16))
             bufs.append(self._tensor_slot(o_lat))
-        self._add_node("dsa_o_absorb", (NH * 4, 1, 1), block_dim, [input, output], [(-1, -1, -1), (-1, -1, -1)],
+        self._add_node("dsa_o_absorb", (NH * 4, 2 if T == 64 else 1, 1), block_dim, [input, output],   # (as dsa_q_absorb)
+                       [(-1, -1, -1), (-1, -1, -1)],
                        [NH, 1] if merge else [NH], out_buffer=lambda n: (T * NH * 256 * 2, -1, False), counters=1,
                        buf_slots=bufs)
 

@@ -1,13 +1,14 @@
 // tasks/dsa_o_absorb.cuh -- Compute the MLA value up-projection (GLM-5.3 /
 // 5.2). Task x is (head h, value column block cb) of the NH heads on this GPU.
-// Each task does all T tokens:
+// Each task does all T tokens (grid y 1), or task (x, y) the tokens [TT y,
+// TT y + TT), TT = T / the grid's y (T = 64: 2 tiles, as dsa_q_absorb):
 //   v[t][h 256 + cb 64 + c] = bf16(sum_k o_lat[t][h][k] W_UV[h][k][cb 64 + c])
 // W_UV [NH][512][256] bf16 is the dequantized V part of kv_b_proj. o_lat is the
 // dsa_mla_merge output. o_proj reads v [T][NH 256] bf16 through group_quant.
 // The steps:
 //   1. Start the copy of the W_UV block (512 x 64) to shared memory. The
 //      weights do not depend on this step, so the copy runs during the wait.
-//   2. Wait for the T merge tasks of head h (the merge counts per head). Copy
+//   2. Wait for the merge tasks of head h (the merge counts per head). Copy
 //      o_lat of head h to shared memory.
 //   3. Compute the block on tensor cores (dsa::absorb_mma).
 // PARAMS v[1] = 1 (a small batch: no dsa_mla_merge node): step 2 waits for the
@@ -42,10 +43,15 @@ __device__ __forceinline__ void run_dsa_o_absorb(Maps const &,
   constexpr int NH = PARAMS::v[0], LAT = OAB_LAT, VD = 256;
   constexpr bool MERGE = PARAMS::v[1] == 1; // the splits merged here
   constexpr int WUV = slot_at<BUF_SLOTS, 0>();
+  constexpr int TT = T / SELF::y; // the task's tokens
   static_assert(SELF::x == NH * 4 && SELF::buf >= 0 && SELF::counter >= 0,
                 "dsa_o_absorb: 4 tasks per head, its output v and counter");
-  static_assert(OL::buf >= 0 && OL::counter >= 0 && OL::y == T &&
-                    (MERGE ? OL::v[0] == NH : OL::x == NH),
+  static_assert(SELF::y * TT == T &&
+                    (SELF::y == 1 || (TT % 8 == 0 && !MERGE)),
+                "dsa_o_absorb: token tiles of whole 8-token MMA tiles");
+  static_assert(OL::buf >= 0 && OL::counter >= 0 &&
+                    (MERGE ? OL::y == T && OL::v[0] == NH
+                           : T % OL::y == 0 && OL::x == NH),
                 "dsa_o_absorb: o_lat from dsa_mla_merge (a counter per head) "
                 "or the splits from sparse_mla (a counter per token)");
   int const h = tk.x / 4, cb = tk.x % 4, tid = threadIdx.x;
@@ -122,28 +128,47 @@ __device__ __forceinline__ void run_dsa_o_absorb(Maps const &,
     __syncthreads();
   } else {
     if (tid == 0) {
-      cnt_wait(cnt_now(g) + OL::counter + h, T);
+      cnt_wait(cnt_now(g) + OL::counter + h, OL::y); // head h's merge tasks
     }
     __syncthreads();
     dsa::stamp_ready(L);
     // o_lat of head h: other SMs wrote it, cp.async.cg reads it from L2
     __nv_bfloat16 const *o = buf_at<__nv_bfloat16 const>(g, OL::buf);
-    for (int i = tid; i < T * LAT / 8; i += 256) {
-      int const t = i / (LAT / 8), k = (i % (LAT / 8)) * 8;
-      dsa::copy_async(xs + dsa::swizzle<LAT>(t, k),
-                      o + ((size_t)t * NH + h) * LAT + k,
-                      true);
+    if constexpr (SELF::y == 1) {
+      for (int i = tid; i < T * LAT / 8; i += 256) {
+        int const t = i / (LAT / 8), k = (i % (LAT / 8)) * 8;
+        dsa::copy_async(xs + dsa::swizzle<LAT>(t, k),
+                        o + ((size_t)t * NH + h) * LAT + k,
+                        true);
+      }
+    } else { // the tile's tokens: row tl of xs is token TT y + tl
+      for (int i = tid; i < TT * LAT / 8; i += 256) {
+        int const tl = i / (LAT / 8), k = (i % (LAT / 8)) * 8;
+        dsa::copy_async(xs + dsa::swizzle<LAT>(tl, k),
+                        o + ((size_t)(tk.y * TT + tl) * NH + h) * LAT + k,
+                        true);
+      }
     }
     dsa::copy_commit();
     dsa::copy_wait();
     __syncthreads();
   }
-  dsa::absorb_mma<LAT, OAB_COLS>(ws,
-                                 xs,
-                                 red,
-                                 buf_at<__nv_bfloat16>(g, SELF::buf) + h * VD +
-                                     cb * OAB_COLS,
-                                 (size_t)NH * VD);
+  if constexpr (SELF::y == 1) {
+    dsa::absorb_mma<LAT, OAB_COLS>(ws,
+                                   xs,
+                                   red,
+                                   buf_at<__nv_bfloat16>(g, SELF::buf) +
+                                       h * VD + cb * OAB_COLS,
+                                   (size_t)NH * VD);
+  } else {
+    dsa::absorb_mma<LAT, OAB_COLS, TT>(
+        ws,
+        xs,
+        red,
+        buf_at<__nv_bfloat16>(g, SELF::buf) +
+            ((size_t)tk.y * TT * NH + h) * VD + cb * OAB_COLS,
+        (size_t)NH * VD);
+  }
   dsa::ring_release();
   if (tid == 0) {
     cnt_add(cnt_now(g) + SELF::counter, 1);

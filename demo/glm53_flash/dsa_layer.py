@@ -236,7 +236,7 @@ def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float,
         mpk.dsa_mla_merge_layer(input=split, output=a["o_lat"])
         mpk.dsa_o_absorb_layer(input=a["o_lat"], w_uv=a["w_uv"], output=a["v"])
     vq = nt((T, NH * DV), uint8, "v_fp8")
-    mpk.group_quant_layer(input=a["v"], output=vq)
+    mpk.group_quant_layer(input=a["v"], output=vq, token_tiles=4 if T == 64 else 1)   # (T = 64: 128 tasks, not 32)
     # the boundary: all-reduce, the attention's mHC post, the FFN's mHC pre
     assert t["o"].dtype == torch.int64
     mpk.scaled_gemm_tile_layer(input=vq, weight=a["w_o"], weight_scales=a["w_o_sf"], output=a["o"], combine="add")

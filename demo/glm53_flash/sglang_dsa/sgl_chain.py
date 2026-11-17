@@ -92,8 +92,7 @@ KEYS = ("decode step", "output ", "Error", "error:", "Traceback", "replaces SGLa
 # beat round robin, and the T = 1 / 2 / 4 graphs, not searched: none, round robin). A run that names a plan keeps it.
 DSA_PLAN = {8: ("dsa_fused_plan_long.json", "dsa_fused_plan_short.json"),
             16: ("dsa_fused_plan16_long.json", "dsa_fused_plan16_short.json"),
-            32: ("dsa_fused_plan32_long.json", "dsa_fused_plan32_short.json"),
-            64: ("dsa_fused_plan64_long.json", "dsa_fused_plan64_short.json")}
+            32: ("dsa_fused_plan32_long.json", "dsa_fused_plan32_short.json")}   # (T = 64: post-only layers, round robin)
 KDA_PLAN = {16: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan16.json"),
             32: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan32.json"),
             64: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan64.json")}
