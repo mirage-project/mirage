@@ -1229,7 +1229,9 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,        # [T, HC H] bf16: the new streams
         coef: tuple,            # (h_post [T, HC], h_res [T, HC HC]) fp32 graph tensors, post and comb finished (the sublayer's
                                 # pre ran before the layer: SGLang's MHCState)
-        parts: int = 4,         # tasks per token, each H / parts columns
+        parts: int = 0,         # tasks per token, each H / parts columns (a thread per 8 columns, at most 256); 0: 4, or 2
+                                # when 4 T tasks are more than the SMs (T = 64: 256 tasks ran in two rounds of the SMs,
+                                # the second starting ~4 us after the sums landed)
         block_dim: tuple = (256, 1, 1),
     ):
         """Task (q, t): columns [q C, q C + C) of token t: out = sum over the GPUs, R'_j = sum_i comb[i][j] R_i + post_j out.
@@ -1241,6 +1243,8 @@ class StaticMegakernel(PersistentKernel):
             raise ValueError("hc_post_layer: sent from an allreduce_send node")
         T, H = self._tokens(sent.dim(0)), sent.dim(1)
         HC = residual.dim(1) // H
+        if not parts:
+            parts = 2 if 4 * T > self._num_sms() and H // 16 <= 256 else 4
         self._dtypes("hc_post_layer", sent=(sent, bfloat16), residual=(residual, bfloat16), output=(output, bfloat16))
         h_post, h_res = coef
         self._dtypes("hc_post_layer", h_post=(h_post, float32), h_res=(h_res, float32))
