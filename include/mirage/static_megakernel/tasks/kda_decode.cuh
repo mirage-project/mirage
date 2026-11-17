@@ -341,6 +341,12 @@ __device__ __forceinline__ void kda_decode_task(
   // RP > 1: requests 1 .. RP - 1's windows as loaded (to cwin after the sync
   // below: until then the ring area may still be the previous task's)
   __nv_bfloat16 wq[RP > 1 ? RP - 1 : 1][12];
+  // RP 8 (T = 64): those windows go from global to shared memory without
+  // registers instead (16-B copies after the sync, cwin as [RP - 1][3
+  // entries][96 threads x 4 channels]): the 84 loads a thread waited for
+  // before its stores kept a task that starts after its SM's projection GEMM
+  // ~3 us from polling the projection
+  constexpr bool CWIN_CP = RP == 8;
   if (tid < 96) {
 #pragma unroll
     for (int k = 0; k < 4; k++) {
@@ -354,15 +360,17 @@ __device__ __forceinline__ void kda_decode_task(
             RP == 1 || live0 ? __bfloat162float(st[k * CS + e * ES]) : 0.f;
       }
     }
+    if constexpr (!CWIN_CP) {
 #pragma unroll
-    for (int q = 1; q < RP; q++) { // the other requests' windows
-      __nv_bfloat16 const *sq = stq(q);
+      for (int q = 1; q < RP; q++) { // the other requests' windows
+        __nv_bfloat16 const *sq = stq(q);
 #pragma unroll
-      for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < 4; k++) {
 #pragma unroll
-        for (int e = 0; e < 3; e++) {
-          wq[q - 1][3 * k + e] =
-              liveq[q] ? sq[k * CS + e * ES] : __float2bfloat16(0.f);
+          for (int e = 0; e < 3; e++) {
+            wq[q - 1][3 * k + e] =
+                liveq[q] ? sq[k * CS + e * ES] : __float2bfloat16(0.f);
+          }
         }
       }
     }
@@ -374,7 +382,25 @@ __device__ __forceinline__ void kda_decode_task(
   // GEMM's MMAs read it asynchronously): f_b rows of head h, then g_b's (the
   // A rows of the gates' MMA below)
   __syncthreads();
-  if (RP > 1 && tid < 96) {
+  if constexpr (CWIN_CP) {
+    // an even thread copies its 4 channels and the next thread's (16 B) of
+    // each entry; an idle request's window: 0
+    if (tid < 96 && !(tid & 1)) {
+#pragma unroll
+      for (int q = 1; q < RP; q++) {
+        __nv_bfloat16 const *sq = stq(q);
+#pragma unroll
+        for (int e = 0; e < 3; e++) {
+          __nv_bfloat16 *d = cwin + ((q - 1) * 3 + e) * 384 + tid * 4;
+          if (liveq[q]) {
+            kda_cp16(d, sq + e * ES);
+          } else {
+            *reinterpret_cast<uint4 *>(d) = make_uint4(0u, 0u, 0u, 0u);
+          }
+        }
+      }
+    }
+  } else if (RP > 1 && tid < 96) {
 #pragma unroll
     for (int q = 1; q < RP; q++) {
 #pragma unroll
@@ -440,14 +466,30 @@ __device__ __forceinline__ void kda_decode_task(
   // 2. short conv + SiLU of the thread's 4 channels, token by token, in
   // place (the window keeps the raw inputs in registers); the conv state's
   // new entries
+  if constexpr (CWIN_CP) { // the copied windows landed (a thread reads the
+                           // 16 B its even neighbour copied)
+    kda_cp_wait();
+    __syncthreads();
+  }
   if (tid < 96) {
     float *dst = (seg == 0 ? xq : (seg == 1 ? xk : xv)) + j;
 #pragma unroll 1
     for (int q = 0; q < RP; q++) { // RP > 1: request q, its window and conv row
       if (q > 0) {
+        if constexpr (CWIN_CP) {
 #pragma unroll
-        for (int k = 0; k < 12; k++) {
-          cs[k] = __bfloat162float(cwin[((q - 1) * 96 + tid) * 12 + k]);
+          for (int k = 0; k < 4; k++) {
+#pragma unroll
+            for (int e = 0; e < 3; e++) {
+              cs[3 * k + e] =
+                  __bfloat162float(cwin[((q - 1) * 3 + e) * 384 + tid * 4 + k]);
+            }
+          }
+        } else {
+#pragma unroll
+          for (int k = 0; k < 12; k++) {
+            cs[k] = __bfloat162float(cwin[((q - 1) * 96 + tid) * 12 + k]);
+          }
         }
       }
       bool const wr = RP == 1 || liveq[q]; // its conv row written
