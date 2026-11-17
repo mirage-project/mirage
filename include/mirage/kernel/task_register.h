@@ -270,6 +270,30 @@ public:
                                   std::vector<int> const &params);
   int register_hc_post_mix_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
+  int register_act_quant_sm100_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params);
+  int register_gemm_fp8_tile_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params);
+  int register_q_norm_sm100_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params);
+  int register_kv_post_sm100_task(threadblock::Graph const &bgraph,
+                                  std::vector<int> const &params);
+  int register_sparse_attn_sm100_task(threadblock::Graph const &bgraph,
+                                      std::vector<int> const &params);
+  int register_sum_store_sm100_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params);
+  int register_indexer_q_sm100_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params);
+  int register_index_k_post_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_indexer_score_sm100_task(threadblock::Graph const &bgraph,
+                                        std::vector<int> const &params);
+  int register_indexer_topk_sm100_task(threadblock::Graph const &bgraph,
+                                       std::vector<int> const &params);
+  int register_compressor_sm100_task(threadblock::Graph const &bgraph,
+                                     std::vector<int> const &params);
+  int register_ckv_post_sm100_task(threadblock::Graph const &bgraph,
+                                   std::vector<int> const &params);
   // SM100 tasks end
   // Multi-GPU tasks
   int register_nvshmem_allgather_strided_put_task(
