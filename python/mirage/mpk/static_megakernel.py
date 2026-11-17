@@ -626,6 +626,9 @@ class StaticMegakernel(PersistentKernel):
         swiglu_limit: float = None,   # gate clamped to at most this, up to [-limit, limit] first (GLM-5.3-Flash: 10); None: none
         prof: DTensor = None,   # int64 [SMs, 256], a graph input: per-SM stamps of the node's phases (scaled_moe::moe_prof_event:
                                 # W13 items, W2 tiles, the ring switch, the W2 loaders' waits); None: none compiled in
+        last: DTensor = None,   # T = 64: int32 [1 + 40], a graph tensor the launches share (zeros at first): the node writes the
+                                # experts its queue took first, and the next launch brings their W13 weights into L2 while its
+                                # routing lands (scaled_moe::Slots PFE, LAST); None: the bank's first 40 experts
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the routed FP8 experts in tasks/scaled_moe_experts.cuh.
@@ -687,6 +690,10 @@ class StaticMegakernel(PersistentKernel):
             self._dtypes("scaled_moe_experts_layer", prof=(prof, int64))
             assert (prof.dim(0), prof.dim(1)) == (self._num_sms(), 384), "prof: [SMs, scaled_moe::MOE_PROF_WORDS] int64"
             bufs.append(self._tensor_slot(prof))
+        if last is not None:   # buffer slot 5 (scaled_moe::Slots LAST)
+            self._dtypes("scaled_moe_experts_layer", last=(last, int32))
+            assert T == 64 and last.dim(0) == 1 + 40, "last: int32 [1 + scaled_moe::Slots PFE], a T = 64 layer"
+            bufs += ([-1] if prof is None else []) + [self._tensor_slot(last)]
         maps = [self._map("wblk8", ("t", w13), (w13_pieces, 1)), self._map("wblk8", ("t", w13), (w13_pieces, 2)),
                 self._map("wblk8", ("t", w2), (w2_pieces, 1)), self._map("wblk8", ("t", w2), (w2_pieces, 2))]
         for kind, dims_ in (("act8", (L, T)), ("act8kt", (L, T, 2))):

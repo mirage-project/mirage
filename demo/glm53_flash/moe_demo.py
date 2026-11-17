@@ -157,6 +157,8 @@ def gpu_tensors(b: dict, x: torch.Tensor, attn_next: dict = None) -> dict:
              h_post=torch.zeros(T, HC, dtype=torch.float32, device=dev),
              h_res=torch.zeros(T, HC * HC, dtype=torch.float32, device=dev),
              streams_out=torch.zeros(T, HC * H, dtype=torch.bfloat16, device=dev))
+    if T == 64:   # the experts a launch used first, for the next launch's W13 prefetch (scaled_moe_experts_layer last)
+        t["moe_last"] = torch.zeros(1 + 40, dtype=torch.int32, device=dev)
     if attn_next is not None:   # the next layer's attention mHC pre at the end (build_graph): its parameters, the outputs
         hc_small = torch.zeros(32, dtype=torch.float32)
         hc_small[:HC * (HC + 2)], hc_small[HC * (HC + 2):HC * (HC + 2) + 3] = \
@@ -194,7 +196,8 @@ def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None) ->
     mpk.group_quant_layer(input=a["x"], output=z_q)                                                  # x in FP8, fp32 scales
     mpk.scaled_moe_experts_layer(z_q=z_q, pairs=a["routing_pairs"], w13=a["w13"], w13_scales=a["w13_sf"],
                                  w2=a["w2"], w2_scales=a["w2_sf"], output=a["routed_rows"], swiglu_limit=LIMIT,
-                                 prof=a.get("moe_prof"))                                             # --prof-experts
+                                 prof=a.get("moe_prof"),                                             # --prof-experts
+                                 last=a.get("moe_last"))                                             # T = 64
     r_sent = nt((T, H), bfloat16, "r_sent")
     mpk.allreduce_send_layer(input=a["routed_rows"], output=r_sent)                                  # a token's 18 rows added
     if "x_attn" in t:   # the mHC post and the next layer's attention mHC pre

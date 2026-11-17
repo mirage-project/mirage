@@ -85,7 +85,8 @@ template <int HQ_,
           int LIMIT_ = 0,
           int PROF_ = -1,
           int SHARED_ = 0,
-          int LIVE_ = T>
+          int LIVE_ = T,
+          int LAST_ = -1>
 struct Slots {
   static constexpr int HQ = HQ_, HSF = HSF_, CNT = CNT_, W2NEXT = CNT_ + 32,
                        CHQ = CNT_ + 64;
@@ -131,6 +132,16 @@ struct Slots {
   // W13 entries (two items each) one round of the SMs takes
   static constexpr bool W2_ROUNDS = ORDER && T == 32 && LIVE == T;
   static constexpr int W13_ROUND = 2 * NSM / MT13;
+  // T = 64: the same for the first round, in a step of about two W13 rounds or
+  // fewer (order_slots), with the table itself in the W2 tiles' order: a W2
+  // entry's place is on the tiles' critical path, a W13 entry's is not
+  static constexpr bool W2_TABLE = ORDER && T == 64 && LIVE == T;
+  // T = 64: the W13 weights of PFE experts go into L2 while the routing lands
+  // (run_scaled_moe_experts). LAST (buffer slot 5, a graph tensor int32 [1 +
+  // PFE] that the launches share, scaled_moe_experts_layer(last=)): the
+  // previous launch's experts (their count, then the experts of its queue's
+  // first slots); without it the bank's first PFE experts
+  static constexpr int PFE = 40, LAST = LAST_;
   static_assert(NE % 32 == 0 && NE <= 1024,
                 "scaled_moe_experts: build_table's 8 warps x 128 experts");
   // the routing table of this step, built on every SM by build_table (shared
@@ -700,6 +711,16 @@ __device__ __forceinline__ void w2_stage_scales(
 // others, each group in slot order: fill()[place] = slot. The slots of many
 // tokens are the slowest W13 items and W2 tiles; left in slot order they end
 // the SMs far apart.
+// RES::W2_TABLE: this is the W13 entries' order, and the table is in the W2
+// tiles' (place p of this order at w2_table_pos(p)): of the first W13 round's
+// r0 slots, the rot slots of many tokens after the others, whose W13 items end
+// first (as RES::W2_ROUNDS). In a step of more than about two W13 rounds the
+// other SMs take a third W13 entry and end after the slots of many tokens
+// anyway: r0 = rot = 0, one order (real routing, 3 rounds: their W2 tiles, the
+// slowest, later cost 1 .. 1.5 us a layer). s_ints[4] = r0, [5] = rot.
+__device__ __forceinline__ int w2_table_pos(int p, int r0, int rot) {
+  return p < r0 ? (p < rot ? p + r0 - rot : p - rot) : p;
+}
 template <class RES>
 __device__ __forceinline__ void order_slots() {
   constexpr int PER = (RES::NSLOT + 255) / 256, SH = RES::SHARED;
@@ -733,19 +754,34 @@ __device__ __forceinline__ void order_slots() {
     before += w_ < warp ? s_ints[24 + w_] : 0;
     tot += s_ints[24 + w_];
   }
+  [[maybe_unused]] int r0 = 0, rot = 0;
+  if constexpr (RES::W2_TABLE) {
+    if (n_live * (RES::MT13 / W13_PAIR) <= 2 * NSM + NSM / 10) {
+      r0 = RES::W13_ROUND < n_live ? RES::W13_ROUND : n_live;
+      rot = SH + tot < r0 ? SH + tot : r0;
+    }
+  }
   int seen = 0;
 #pragma unroll
   for (int q = 0; q < PER; q++) {
     int const i = tid * PER + q;
     if (i < n_live) {
-      ord_s[i >= n0   ? i - n0
-            : many[q] ? SH + before + seen
-                      : SH + tot + i - before - seen] = i;
+      int p = i >= n0   ? i - n0
+              : many[q] ? SH + before + seen
+                        : SH + tot + i - before - seen;
+      if constexpr (RES::W2_TABLE) {
+        p = w2_table_pos(p, r0, rot);
+      }
+      ord_s[p] = i;
       seen += many[q] ? 1 : 0;
     }
   }
   if (tid == 0) {
     s_ints[3] = SH + tot; // the slots of many tokens: the queue's first places
+    if constexpr (RES::W2_TABLE) {
+      s_ints[4] = r0;
+      s_ints[5] = rot;
+    }
   }
   __syncthreads();
 }
@@ -980,7 +1016,11 @@ __device__ __forceinline__ void
                          // slowest items) first, then the others in order (as
                          // the W2 tiles that wait for them)
           e.kind = QE_W13;
-          e.a = slot_at(idx / (MT13 / W13_PAIR));
+          int p13 = idx / (MT13 / W13_PAIR);
+          if constexpr (RES::W2_TABLE) { // the table is in the W2 tiles' order
+            p13 = w2_table_pos(p13, s_ints[4], s_ints[5]);
+          }
+          e.a = slot_at(p13);
           e.b = idx % (MT13 / W13_PAIR) * W13_PAIR;
         } else if (idx < n13 + n2e) {
           int const i0 = 2 * (idx - n13);
@@ -1813,7 +1853,8 @@ using ScaledMoeSlotsOf =
                       slot_or<BUF_SLOTS, 4, -1>(),
                       topk_shared<PAIRS>(),
                       (param_or<PAIRS, 5, 0>() > 0 ? param_or<PAIRS, 5, 0>()
-                                                   : T)>;
+                                                   : T),
+                      slot_or<BUF_SLOTS, 5, -1>()>;
 
 // scaled_moe_experts task (one per SM, task x on SM x): wait for z_q, phase
 // switch, routing table, then the queue (above) -> the routed rows [T][K][LAT]
@@ -1870,17 +1911,26 @@ __device__ __forceinline__ void run_scaled_moe_experts(Maps const &maps,
     scaled_moe::phase_switch_copy_csf<RES>(L.base, L.tb);
   }
   if constexpr (T == 64) {
-    // most experts are chosen at T = 64: the first PFE experts' W13 weights
-    // (the queue's first items) into L2 while the routing lands (HBM is idle
-    // that long), each SM its share of their two-piece boxes
-    constexpr int PFE = 40, B = RES::MT13 * RES::KT_LAT / 2;
+    // PFE experts' W13 weights into L2 while the routing lands (HBM is idle
+    // that long), each SM its share of their two-piece boxes: the experts the
+    // previous launch used first (RES::LAST, written at this task's end: a
+    // decode step routes mostly as the step before it; of the bank's first
+    // experts a real step uses about a quarter), else the bank's first
+    constexpr int PFE = RES::PFE, B = RES::MT13 * RES::KT_LAT / 2;
     int const pi = sm_id + NSM * (threadIdx.x - 64);
     if (threadIdx.x >= 64 && threadIdx.x < 192 && pi < PFE * B) {
-      scaled_moe::tma3_prefetch_l2(&maps.m[RES::W13X2],
-                                   0,
-                                   0,
-                                   (pi / B) * (RES::MT13 * RES::KT_LAT) +
-                                       2 * (pi % B));
+      int ex = pi / B;
+      if constexpr (RES::LAST >= 0) {
+        int const *const last = buf_at<int const>(g, RES::LAST);
+        ex = ex < last[0] ? last[1 + ex] : -1;
+      }
+      if (ex >= 0) {
+        scaled_moe::tma3_prefetch_l2(&maps.m[RES::W13X2],
+                                     0,
+                                     0,
+                                     ex * (RES::MT13 * RES::KT_LAT) +
+                                         2 * (pi % B));
+      }
     }
   }
   scaled_moe::wait_z_and_pairs<RES>(
@@ -1950,6 +2000,18 @@ __device__ __forceinline__ void run_scaled_moe_experts(Maps const &maps,
                                       prof STAGE_STAMP_ARG(L.stage_stamps));
   if (threadIdx.x == 0) {
     g.stamps[sm_id * NSTAMP + STAMP_TASK1] = gtime();
+  }
+  if constexpr (RES::LAST >= 0) { // the next launch's prefetch: the experts of
+                                  // this queue's first slots (one SM writes)
+    int const n_live = s_ints[1], n = n_live < RES::PFE ? n_live : RES::PFE;
+    if (sm_id == 0 && (int)threadIdx.x <= n) {
+      int *const last = buf_at<int>(g, RES::LAST);
+      int p = (int)threadIdx.x - 1; // the W13 entries' place of the slot
+      if constexpr (RES::W2_TABLE) {
+        p = scaled_moe::w2_table_pos(p, s_ints[4], s_ints[5]);
+      }
+      last[threadIdx.x] = threadIdx.x == 0 ? n : RES::eid()[RES::fill()[p]];
+    }
   }
   __syncthreads();
   if (threadIdx.x == 0) {
