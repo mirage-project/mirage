@@ -73,6 +73,8 @@ assert TOKENS and all(t in (8, 16, 32, 64) for t in TOKENS), f"MOE_STATIC_TOKENS
 # decode steps of n live rows below their T: n -> that T (a build of n live rows of the T layer's graph)
 ROWS = {n: next(t for t in TOKENS if n <= t) for n in sorted({int(x) for x in os.environ.get("MOE_STATIC_ROWS", "").split(",")
                                                               if x.strip()}) if 0 < n < TOKENS[-1] and n not in TOKENS}
+# (T = 64 has no build of fewer live rows: scaled_moe::Smem; those steps run the T = 64 layer with the idle rows routed)
+ROWS = {n: t for n, t in ROWS.items() if t != 64}
 
 
 def _pick(layers: dict, rows: int):
@@ -161,8 +163,9 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 st.next_layer = nxt_t
                 sts[tok] = st
                 _OUTS.add(st.t["streams_out"].data_ptr())
-                if draft and (tok // 8) * draft < tok:   # MTP: the verify build of tok / 8 requests x draft live rows (the
-                                                         # rest idle: not routed, so no expert of their own is streamed)
+                if draft and (tok // 8) * draft < tok and tok != 64:   # MTP: the verify build of tok / 8 requests x draft
+                    # live rows (the rest idle: not routed, so no expert of their own is streamed). T = 64 has none
+                    # (scaled_moe::Smem: every row live): its verify steps run the T = 64 layer with the idle rows routed
                     rows = (tok // 8) * draft
                     sv = StaticMoE(m.layer_id, self.server_args.model_path, rank, tp, dev, OUT, group, pdl=PDL,
                                    keep_weights=CHECK, pool=pool, attn_next=attn_t,

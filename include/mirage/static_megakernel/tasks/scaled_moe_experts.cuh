@@ -606,6 +606,13 @@ struct Smem {
   static constexpr int BYTES =
       OFF_HA + (T == 64 ? 0 : 64 * T * 4); // the node's need from the
                                            // base
+  // the W13 epilogue keeps h in OFF_ACC only when T >= 32, !SINGLE and
+  // LIVE == T; every other path writes ha at OFF_HA, which T = 64 does not
+  // reserve
+  static_assert(T != 64 || (!RES::SINGLE && RES::LIVE == T),
+                "scaled_moe_experts at T = 64: every row live and no "
+                "single-item entries (the W13 epilogue's ha at OFF_HA is not "
+                "reserved)");
   static_assert(OFF_W2BAR % 1024 == 0, "128-B swizzled tiles are 1024-aligned");
   // ---- W2 ring: one tile per stage (KT2 x 16 KB weight pieces | h_q KT2 KB)
   // at the offsets of moe_experts.cuh's W2 ring. T = 64: the weights only (3
