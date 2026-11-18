@@ -234,6 +234,18 @@ public:
                                    std::vector<int> const &params);
   int register_residual_add_sm100_task(threadblock::Graph const &bgraph,
                                        std::vector<int> const &params);
+  int register_sm90_rmsnorm_task(threadblock::Graph const &bgraph,
+                                 std::vector<int> const &params);
+  int register_sm90_attention_task(threadblock::Graph const &bgraph,
+                                   std::vector<int> const &params);
+  int register_sm90_attention_split_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_sm90_attention_merge_task(threadblock::Graph const &bgraph,
+                                         std::vector<int> const &params);
+  int register_sm90_gate_task(threadblock::Graph const &bgraph,
+                              std::vector<int> const &params);
+  int register_sm90_next_token_task(threadblock::Graph const &bgraph,
+                                    std::vector<int> const &params);
   int register_group_quant_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
   int register_scaled_gemm_tile_sm100_task(threadblock::Graph const &bgraph,
