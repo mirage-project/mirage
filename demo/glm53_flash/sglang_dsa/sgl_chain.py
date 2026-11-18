@@ -113,7 +113,7 @@ KDA_PLAN = {16: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan16.js
             64: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan64.json")}
 MOE_PLAN = {(t, end): os.path.join(os.path.dirname(HERE), "sglang_moe", f"moe_plan{'' if t == 8 else t}_{end}.json")
             for t in TOKENS for end in ("mhc", "mhc_pre")}
-MOE_END = {t: "mhc_pre" if t in (16, 32) else "mhc" for t in TOKENS}   # the MoE layers' end by T (moe_static_hook
+MOE_END = {t: "mhc_pre" if t in tuple(int(x) for x in os.environ.get("MOE_STATIC_END_PRE", "16,32").split(",")) else "mhc" for t in TOKENS}   # the MoE layers' end by T (moe_static_hook
                                                                          # END_PRE_TOKENS)
 
 
