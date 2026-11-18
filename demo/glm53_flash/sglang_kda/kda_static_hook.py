@@ -145,7 +145,7 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 for tok in _tokens_used(self):   # one layer per T, the weights shared
                     st = StaticKDA(m.layer_idx, self.server_args.model_path, rank, tp, cache.conv[0], cache.temporal, OUT,
                                    dict(_fused_args(lay, group), post_only=tok in POST_ONLY), pdl=PDL,
-                                   plan=None if tok in POST_ONLY else PLAN[tok], tokens=tok,
+                                   plan=PLAN[tok], tokens=tok,
                                    weights=None if first is None else first.t)
                     first = first or st
                     st.cache = cache

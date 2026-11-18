@@ -120,7 +120,7 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 for tok in _tokens_used(self):   # one layer per T, the checkpoint tensors shared
                     st = StaticDSA(m.layer_id, self.server_args.model_path, rank, tp, kv, r2t, OUT, idx,
                                    dict(_fused_args(lay, group), post_only=tok in POST_ONLY), pdl=PDL,
-                                   fused_plan="rr" if tok in POST_ONLY else FUSED_PLAN[tok], tokens=tok,
+                                   fused_plan=FUSED_PLAN[tok], tokens=tok,
                                    weights=None if first is None else first.w)
                     first = first or st
                     sts[tok] = st

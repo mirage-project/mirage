@@ -92,7 +92,9 @@ KEYS = ("decode step", "output ", "Error", "error:", "Traceback", "replaces SGLa
 # beat round robin, and the T = 1 / 2 / 4 graphs, not searched: none, round robin). A run that names a plan keeps it.
 DSA_PLAN = {8: ("dsa_fused_plan_long.json", "dsa_fused_plan_short.json"),
             16: ("dsa_fused_plan16_long.json", "dsa_fused_plan16_short.json"),
-            32: ("dsa_fused_plan32_long.json", "dsa_fused_plan32_short.json")}   # (T = 64: post-only layers, round robin)
+            32: ("dsa_fused_plan32_long.json", "dsa_fused_plan32_short.json"),
+            64: (None, "dsa_fused_plan64_short.json")}   # (T = 64, post-only layers: contexts 256-512, 78.4 vs round
+                                                         # robin 79.8 us; long contexts not searched)
 KDA_PLAN = {16: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan16.json"),
             32: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan32.json"),
             64: os.path.join(os.path.dirname(HERE), "sglang_kda", "kda_plan64.json")}
@@ -111,7 +113,8 @@ def _best_plans(name, env, args):
     has = lambda kind, t: str(t) in env.get(f"{kind}_STATIC_TOKENS", ",".join(map(str, TOKENS))).split(",")
     for t in TOKENS:
         key = "" if t == 8 else str(t)
-        dsa = DSA_PLAN.get(t) and os.path.join(HERE, DSA_PLAN[t][short])
+        dsa = DSA_PLAN.get(t, (None, None))[short]
+        dsa = dsa and os.path.join(HERE, dsa)
         for kind, var, plan in (("DSA", "DSA_STATIC_FUSED_PLAN", dsa), ("KDA", "KDA_STATIC_PLAN", KDA_PLAN.get(t)),
                                 ("MOE", "MOE_STATIC_PLAN", MOE_PLAN[t, MOE_END[t]])):
             if plan and env.get(f"{kind}_STATIC_LAYERS") and has(kind, t) and var + key not in env and os.path.exists(plan):
