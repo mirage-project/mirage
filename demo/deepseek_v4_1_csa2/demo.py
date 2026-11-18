@@ -228,7 +228,8 @@ def score_chunks(heads: int, cap: int, sms: int) -> int:
 def hand_grids(heads: int, cap: int, cmp_rows: int = 0) -> dict:
     G = heads // 8
     return {"x_q": (T, 2, 1), "wq_a_part": (QL // 128, 4, 1), "qr_q": (T, 1, 1), "wq_b_part": (heads * D // 128, 1, 1),
-            "wkv_part": (D // 128, 2, 1), "window_cache": (T, 1, 1), "o_q": (T, heads // 16, 1),
+            "wkv_part": (D // 128, int(os.environ.get("WKV_PARTS", 2)), 1),   # (C7a WKV_PARTS=4, measurement 11-18)
+            "window_cache": (T, 1, 1), "o_q": (T, heads // 16, 1),
             "wo_a_part": (G * OL // 128, max(2, 64 // (G * OL // 128)), 1), "oa_q": (T, G * OL // 2048, 1),
             "wo_b_part": (HID // 128, 4, 1), "y": (HID // 128, 1, 1), "y_sent": (HID // 128, 1, 1), "cmp_part": (max(cmp_rows, 128) // 128, 4, 1), "latent": (T, 1, 1),
             "compress_cache": (T, 1, 1), "wk_part": (1, 1, 1), "index_k": (T, 1, 1), "iq_part": (4096 // 128, 1, 1),
