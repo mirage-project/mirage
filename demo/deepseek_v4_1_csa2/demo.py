@@ -340,6 +340,13 @@ def build(ws: list, variant: str, ratio: int, csrc: bool, heads: int, out: str, 
     sk = mpk.compile_static(paths, gpu_tensors=[{**bg, **wg} for wg, bg in zip(ws, bufs)], out_dir=os.path.join(out, "build"),
                             extra_flags=extra_flags, profile=profile, device=device,
                             **({} if rank is None else {"rank": rank, "exchange": exchange_pool.take(mpk.exchange_region_bytes())}))
+    # every GPU's init stores (host.cuh: the exchange region's zero-fill and the buffers' first values, cudaMemset on the
+    # legacy stream, asynchronous) land before any launch: at the first launch the serving-mode harness's align kernel
+    # (static_host_prelude) stores into the other GPUs' hello slots, and a zero-fill still queued on a GPU would wipe the
+    # hello (that GPU's align then waits for ever and its layer never starts; seen 11-18 with and without
+    # -DSTATIC_NO_START_BARRIER)
+    for wg in ws:
+        torch.cuda.synchronize(wg["x"].device)
     return sk, bufs, dict(info, paths=paths, mpk=mpk, plan=p)
 
 
