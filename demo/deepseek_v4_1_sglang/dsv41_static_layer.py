@@ -211,8 +211,23 @@ class StaticAttn(MhcMixin):
             flags.append("-DIS_TCGEN05")
         # the node buffers are torch tensors the kernel writes to: they must stay referenced as long as the layer runs
         rk = dict(num_gpus=tp, rank=rank, exchange_pool=exchange_pool) if exchange_pool is not None else {}
-        self.sk, self.bufs, self.info = attn_demo.build([w], self.variant, ratio, csrc, 64 // tp, out, extra_flags=flags,
-                                                        device=dev.index, profile=TIMING, **rk)
+        # C16 (11-18; default off): DSV41_SA_DRY_IDX=1 turns sparse_attn's dry pass on for the index layers (full_r2,
+        # full_r1, reindex), whatever SA_DRY says. Their inputs (the indexer's top-k) come late, so the dry pass runs before
+        # them and the real pass runs warm. TP4 shards on 2 GPUs with the mHC nodes (local/sa_mhc.sh), the layer's span
+        # without -> with: full_r2 69.3 -> 64.8, full_r1 68.6 -> 67.6, reindex 64.6 -> 61.0 us. A reuse layer's inputs come
+        # early and there the dry pass sits on the path (40.7 -> 44.2); swa gains nothing (39.0 -> 39.2): the arms' SA_DRY=0
+        # stays for those
+        sa_dry = os.environ.get("SA_DRY")
+        if os.environ.get("DSV41_SA_DRY_IDX", "0") != "0" and self.variant in ("full_r2", "full_r1", "reindex"):
+            os.environ["SA_DRY"] = "1"
+        try:
+            self.sk, self.bufs, self.info = attn_demo.build([w], self.variant, ratio, csrc, 64 // tp, out, extra_flags=flags,
+                                                            device=dev.index, profile=TIMING, **rk)
+        finally:
+            if sa_dry is None:
+                os.environ.pop("SA_DRY", None)
+            else:
+                os.environ["SA_DRY"] = sa_dry
         self.w = w
         sources.note(layer, w)
 
