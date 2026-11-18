@@ -646,7 +646,23 @@ __device__ __forceinline__ void run_swiglu_moe_experts(Maps const &maps,
         L.gi1);
     L.ring_relaid = true;
   }
+#if defined(STATIC_TIMING_BUILD) && defined(MOE_FRONT_STAMPS)
+  // (measurement only, 11-18) this task's 2 stage stamps: the phase switch done
+  // (the routing pairs in shared memory) and the table built, instead of the
+  // GEMM pipeline's first load issued / first stage landed
+  if (threadIdx.x == 0 && L.stage_stamps) {
+    L.stage_stamps[0] = gtime();
+  }
+#endif
   build_table<RES>();
+#if defined(STATIC_TIMING_BUILD) && defined(MOE_FRONT_STAMPS)
+  if (threadIdx.x == 0 && L.stage_stamps) {
+    L.stage_stamps[1] = gtime();
+  }
+#define MOE_RD_STAMPS nullptr
+#else
+#define MOE_RD_STAMPS L.stage_stamps
+#endif
   if (threadIdx.x == 0) {
     s_ints[2] = (int)pre_idx;
   }
@@ -659,7 +675,8 @@ __device__ __forceinline__ void run_swiglu_moe_experts(Maps const &maps,
                                L.gl,
                                L.gi0,
                                L.gi1,
-                               L.wt STAGE_STAMP_ARG(L.stage_stamps));
+                               L.wt STAGE_STAMP_ARG(MOE_RD_STAMPS));
+#undef MOE_RD_STAMPS
   if (threadIdx.x == 0) {
     g.stamps[sm_id * NSTAMP + STAMP_TASK1] = gtime();
   }
