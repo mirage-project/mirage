@@ -1149,7 +1149,9 @@ class StaticMegakernel(PersistentKernel):
                        [(-1, -1, -1), (-1, -1, -1), (1, 0, -1) if kpool == 1 else (-1, 0, -1), (-1, 0, -1)],
                        [NH, TOPK, page, block_table.dim(1), cache.dim(0) // page, float_bits(softmax_scale), q.dim(2) - 512,
                         kpool, NIDX],
-                       changeable_grid_dims={0: (64, 1, None, TOPK)},   # TOPK: kpool 4 splits the slots, not indices
+                       # TOPK: kpool 4 splits the slots, not indices; T = 64: 4 splits at most (dsa_mla_merge's 8-token
+                       # tasks have a lane per lse)
+                       changeable_grid_dims={0: (64, -(-TOPK // 256) if T == 64 else 1, None, TOPK)},
                        out_buffer=lambda n: (T * n.grid[0] * NH * 513 * 4, -1, False), counters=T,
                        buf_slots=[self._tensor_slot(cache), self._tensor_slot(block_table), self._tensor_slot(seq_lens),
                                   self._tensor_slot(indices)])
