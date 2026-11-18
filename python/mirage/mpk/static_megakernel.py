@@ -104,10 +104,19 @@ def _moe_pack_experts(packed: torch.Tensor, scales: torch.Tensor, rows: int, glu
     return torch.cat([w, sc], dim=3).contiguous()
 
 
-def sm90_attention_parts_size(tokens: int, num_q_heads: int, head_dim: int, chunks: int) -> int:
-    """bf16 elements of a split attention's parts buffer: the chunks' outputs [C, T, Q x D], then their log2-sum-exps
-    [T, C, Q] fp32."""
-    return chunks * tokens * num_q_heads * head_dim + 2 * tokens * chunks * num_q_heads
+SM90_ATTENTION_UNITS_PER_SM = 1   # sm90_attention_split: about this many units (request, split) an SM
+
+
+def sm90_attention_max_splits(num_sms: int, requests: int) -> int:
+    """The most splits sm90_attention_split gives all requests together (P; tasks/sm90_attention_split.cuh
+    sm90_decode_split: at least one a request)."""
+    return SM90_ATTENTION_UNITS_PER_SM * num_sms + requests
+
+
+def sm90_attention_parts_size(requests: int, num_q_heads: int, head_dim: int, num_sms: int) -> int:
+    """fp32 elements of a split attention's parts buffer: the splits' outputs [P, Q x D], then their log2-sum-exps
+    [P, Q], then the requests' first splits [R + 1] (int)."""
+    return sm90_attention_max_splits(num_sms, requests) * num_q_heads * (head_dim + 1) + requests + 1
 
 
 def float_bits(v: float) -> int:
@@ -1479,38 +1488,46 @@ class StaticMegakernel(PersistentKernel):
 
     def sm90_attention_split_layer(self, qkv: DTensor, k_cache: DTensor, v_cache: DTensor, cos: DTensor, sin: DTensor,
                                    qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
-                                   parts: DTensor, num_q_heads: int, chunk: int, qkv_bias: DTensor = None,
-                                   qkv_staged: DTensor = None, block_dim: tuple = (256, 1, 1)):
-        """sm90_attention_layer's full attention with the KV split in chunks of `chunk` positions, as a pool (tasks/
-        sm90_attention_split.cuh): one task per SM; the SMs claim the step's units (request, KV head, chunk), only the chunks
-        the requests' sequences reach, from a queue; each its normalized output and log2-sum-exp into parts, a flat bf16
-        tensor sm90_attention_parts_size long; sm90_attention_merge_layer combines them (and the sinks). C = the chunks =
-        max seq / chunk; qkv_bias, qkv_staged as sm90_attention_layer's. The solver models it by its total work (search: a
-        pool). params = [Q, KVH, D, max seq, page, chunk, C, has qkv bias, R]."""
+                                   parts: DTensor, num_q_heads: int, qkv_bias: DTensor = None,
+                                   block_dim: tuple = (256, 1, 1)):
+        """sm90_attention_layer's full attention for decode (a token a request), the KV split FlashDecoding-style as a
+        pool (tasks/sm90_attention_split.cuh): one task per SM; the SMs claim the step's units (request, split: a contiguous
+        range of the request's positions, all KV heads, about SM90_ATTENTION_UNITS_PER_SM units an SM over the requests
+        in proportion to their lengths) from a queue; each its normalized output and log2-sum-exp into parts, a flat fp32
+        tensor sm90_attention_parts_size long; sm90_attention_merge_layer combines them (and the sinks). qkv_bias
+        [KVH x (Q / KVH + 2) x D] bf16: qkv is the QKV GEMM's fp32 output, the tasks add the bias. The solver models it by
+        its total work (search: a pool). params = [Q, KVH, D, max seq, page, units an SM, P (splits at most), has qkv bias, R]."""
         pages, page, KVH, D = (k_cache.dim(i) for i in range(4))
-        R, T, C = qo_indptr.dim(0) - 1, self._tokens(qkv.dim(0)), cos.dim(0) // chunk
-        assert cos.dim(0) % chunk == 0 and chunk % 64 == 0 and parts.num_dims == 1
-        assert parts.dim(0) == sm90_attention_parts_size(T, num_q_heads, D, C)
-        self._qkv_bias_dtypes("sm90_attention_split_layer", qkv, qkv_bias, qkv_staged)
-        self._dtypes("sm90_attention_split_layer", parts=(parts, bfloat16))
-        tensors = [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, qkv_bias, qkv_staged,
+        R, nsm = qo_indptr.dim(0) - 1, self._num_sms()
+        self._tokens(qkv.dim(0))
+        assert cos.dim(0) % page == 0 and page % 32 == 0 and parts.num_dims == 1
+        assert parts.dim(0) == sm90_attention_parts_size(R, num_q_heads, D, nsm)
+        if qkv_bias is None:
+            self._dtypes("sm90_attention_split_layer", qkv=(qkv, bfloat16))
+        else:
+            assert qkv_bias.dim(0) == qkv.dim(1)
+            self._dtypes("sm90_attention_split_layer", qkv=(qkv, float32), qkv_bias=(qkv_bias, bfloat16))
+        self._dtypes("sm90_attention_split_layer", parts=(parts, float32))
+        tensors = [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, qkv_bias, None,
                    parts]
         present = [t for t in tensors if t is not None]
-        self._add_node("sm90_attention_split", (self._num_sms(), 1, 1), block_dim, present, [(-1, -1, -1)] * len(present),
-                       [num_q_heads, KVH, D, cos.dim(0), page, chunk, C, int(qkv_bias is not None), R],
+        self._add_node("sm90_attention_split", (nsm, 1, 1), block_dim, present, [(-1, -1, -1)] * len(present),
+                       [num_q_heads, KVH, D, cos.dim(0), page, SM90_ATTENTION_UNITS_PER_SM,
+                        sm90_attention_max_splits(nsm, R), int(qkv_bias is not None), R],
                        one_task_per_sm=True, counters=64,
                        buf_slots=[self._tensor_slot(t) if t is not None else -1 for t in tensors])
 
-    def sm90_attention_merge_layer(self, parts: DTensor, qo_indptr: DTensor, kv_indptr: DTensor, last_page_len: DTensor,
-                                   output: DTensor, num_q_heads: int, chunk: int, chunks: int, page: int,
+    def sm90_attention_merge_layer(self, parts: DTensor, qo_indptr: DTensor, output: DTensor, num_q_heads: int,
                                    sinks: DTensor = None, block_dim: tuple = (256, 1, 1)):
-        """The output of a split attention from its chunks (tasks/sm90_attention_merge.cuh), with the per-head sinks: task
-        (x, y) = token x, query heads [8 y, 8 y + 8). params = [Q, D, chunk, C, has_sink, page, R (requests)]."""
-        T, D = self._tokens(output.dim(0)), output.dim(1) // num_q_heads
-        self._sm90_node("sm90_attention_merge", (T, num_q_heads // 8, 1),
-                        [parts, qo_indptr, kv_indptr, last_page_len, sinks, output],
-                        [num_q_heads, D, chunk, chunks, int(sinks is not None), page, qo_indptr.dim(0) - 1],
-                        block_dim)
+        """The output of sm90_attention_split_layer from its splits (tasks/sm90_attention_merge.cuh), with the per-head
+        sinks: task (x, y) = request x (its one token), query heads [HPT y, HPT y + HPT): HPT = 1 (a CTA a head: a
+        request has many splits) when that grid fits the SMs, else 8. params = [Q, D, P (splits at most), has_sink, HPT, R
+        (requests)]."""
+        D, R, nsm = output.dim(1) // num_q_heads, qo_indptr.dim(0) - 1, self._num_sms()
+        self._tokens(output.dim(0))
+        hpt = 1 if R * num_q_heads <= nsm else 8
+        self._sm90_node("sm90_attention_merge", (R, num_q_heads // hpt, 1), [parts, qo_indptr, sinks, output],
+                        [num_q_heads, D, sm90_attention_max_splits(nsm, R), int(sinks is not None), hpt, R], block_dim)
 
     def sm90_gate_layer(self, o: DTensor, o_bias: DTensor, residual: DTensor, norm_weight: DTensor, router: DTensor,
                         router_bias: DTensor, num_tokens: DTensor, x1: DTensor, h: DTensor, weights: DTensor,
@@ -1543,7 +1560,8 @@ class StaticMegakernel(PersistentKernel):
 
     def sm90_next_token_layer(self, logits: DTensor, embed: DTensor, prompt: DTensor, x_next: DTensor, tokens: DTensor,
                               kv_indptr: DTensor, last_page_len: DTensor, kv_indices: DTensor, page_size: int,
-                              num_tasks: int = None, block_dim: tuple = (256, 1, 1)):
+                              num_tasks: int = None, kv_indices_ring: DTensor = None, ring_pages: int = 0,
+                              block_dim: tuple = (256, 1, 1)):
         """Greedy decoding's step from the head to the next step's layers, R requests (tasks/sm90_next_token.cuh): with p
         the position of request r's step that made its logits (row r; from the page table), its token at p + 1 is
         prompt[r][p + 1] while p + 1 < P, else the argmax of logits row r (torch's: the first maximum), stored to
@@ -1553,7 +1571,9 @@ class StaticMegakernel(PersistentKernel):
         tokens [R, G] i64. Outputs: x_next, tokens, kv_indptr, last_page_len, kv_indices (graph.cc: sm90_next_token's
         five). num_tasks: about that many tasks share the argmax (the last one to finish the rest), each 256 PER logits a
         row; default one an SM (H100 GPT-OSS head, one request: its tail after lm_head 3.8 us at 132 tasks, 4.3 at 50).
-        params = [V, H, P, G, page, PER, R, MP]."""
+        kv_indices_ring (kv_indices' shape) with ring_pages RP: a second page table, request r's page j at r RP + j % RP
+        (sliding-window layers' caches of R RP pages; RP pages must cover the window and the step's page), a sixth output.
+        params = [V, H, P, G, page, PER, R, MP, RP]."""
         V, H, R, P, G = logits.dim(1), embed.dim(1), prompt.dim(0), prompt.dim(1), tokens.dim(1)
         assert embed.dim(0) == V and x_next.dim(1) == H and tokens.dim(0) == R and R <= logits.dim(0) and \
             R <= x_next.dim(0) and kv_indptr.dim(0) == R + 1 and last_page_len.dim(0) == R and \
@@ -1561,9 +1581,13 @@ class StaticMegakernel(PersistentKernel):
         self._dtypes("sm90_next_token_layer", logits=(logits, float32), embed=(embed, bfloat16),
                      x_next=(x_next, bfloat16))
         present = [logits, embed, prompt, x_next, tokens, kv_indptr, last_page_len, kv_indices]
+        assert (kv_indices_ring is None) == (ring_pages == 0), "sm90_next_token_layer: kv_indices_ring with ring_pages"
+        if kv_indices_ring is not None:
+            assert kv_indices_ring.dim(0) == kv_indices.dim(0)
+            present.append(kv_indices_ring)
         per = -(-V // (block_dim[0] * (num_tasks or self._num_sms())))
         self._add_node("sm90_next_token", (-(-V // (block_dim[0] * per)), 1, 1), block_dim, present,
-                       [(-1, -1, -1)] * len(present), [V, H, P, G, page_size, per, R, kv_indices.dim(0) // R],
+                       [(-1, -1, -1)] * len(present), [V, H, P, G, page_size, per, R, kv_indices.dim(0) // R, ring_pages],
                        counters=2 + 2 * R, buf_slots=[self._tensor_slot(t) for t in present])
 
     # ---- the generated layer (static_schedule.py) ----

@@ -152,8 +152,8 @@ def _build_gpt_oss_static(kind):
                                    device="cuda"),
         "last_page_len": torch.ones(1, dtype=torch.int32, device="cuda"),
         "num_tokens": torch.ones(1, dtype=torch.int32, device="cuda"),
-        "attn_parts": z(sm90_attention_parts_size(T, QH, D,
-                                                  MAX_SEQ // g.KV_CHUNK)),
+        "attn_parts": z(sm90_attention_parts_size(1, QH, D, 132),
+                        dtype=torch.float32),
         "h": z(T, H), "qkv32": z(T, (QH + 2 * KVH) * D, dtype=torch.float32),
         "qkv": z(T, (QH + 2 * KVH) * D), "attn": z(T, QH * D),
         "o32": z(T, H, dtype=torch.float32), "x1": z(T, H),
@@ -171,7 +171,7 @@ def _build_gpt_oss_static(kind):
         "v_cache": z(MAX_SEQ // PAGE, PAGE, KVH, D),
         "x_in": z(T, H), "x_out": z(T, H),
     }
-    m = type("Cfg", (), dict(eps=1e-5, QH=QH, E=E, limit=7.0,
+    m = type("Cfg", (), dict(eps=1e-5, QH=QH, KVH=KVH, E=E, limit=7.0,
                              max_seq=MAX_SEQ, R=1))
     mpk = StaticMegakernel(num_gpus=1, num_sms=132, target_cc=90)
     g.build_layer(m, mpk, t, 128 if kind == "sliding" else 0)
@@ -210,8 +210,9 @@ def _build_gpt_oss_static_head():
         "kv_indptr": torch.arange(R + 1, dtype=torch.int32, device="cuda"),
         "last_page_len": torch.ones(R, dtype=torch.int32, device="cuda"),
         "kv_indices": torch.zeros(R * MAX_SEQ // 64, dtype=torch.int32, device="cuda"),
+        "kv_indices_ring": torch.zeros(R * MAX_SEQ // 64, dtype=torch.int32, device="cuda"),
     }
-    m = type("Cfg", (), dict(eps=1e-5, max_seq=MAX_SEQ))
+    m = type("Cfg", (), dict(eps=1e-5, max_seq=MAX_SEQ, RP=4))
     mpk = StaticMegakernel(num_gpus=1, num_sms=132, target_cc=90)
     g.build_head(m, mpk, t)
     out = os.path.join(os.environ.get("TMPDIR", "/tmp"),

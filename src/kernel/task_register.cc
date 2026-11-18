@@ -5704,9 +5704,9 @@ int TaskRegister::register_sm90_attention_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_sm90_attention_split_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {Q, KVH, D, max seq, page, chunk, chunks, has qkv bias, R}; the
-  // optional inputs left out (tasks/sm90_attention_split.cuh: a pool, one
-  // task per SM)
+  // params: {Q, KVH, D, max seq, page, units an SM, P (splits), has qkv bias,
+  // R}; the optional inputs left out (tasks/sm90_attention_split.cuh: a pool,
+  // one task per SM)
   return register_static_task(this,
                               TASK_SM90_ATTENTION_SPLIT,
                               "sm90_attention_split",
@@ -5718,9 +5718,8 @@ int TaskRegister::register_sm90_attention_split_task(
 
 int TaskRegister::register_sm90_attention_merge_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {Q, D, chunk, chunks, has sink, page, R}; the optional sinks left
-  // out
-  // (tasks/sm90_attention_merge.cuh)
+  // params: {Q, D, P (splits), has sink, heads a task, R}; the optional sinks
+  // left out (tasks/sm90_attention_merge.cuh)
   return register_static_task(this,
                               TASK_SM90_ATTENTION_MERGE,
                               "sm90_attention_merge",
@@ -5744,12 +5743,12 @@ int TaskRegister::register_sm90_gate_task(threadblock::Graph const &bgraph,
 
 int TaskRegister::register_sm90_next_token_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
-  // params: {V, H, P, G, page, PER, R, MP}. inputs: logits, embedding,
-  // prompt; outputs: x_next, tokens, kv_indptr, last_page_len, kv_indices
-  // (tasks/sm90_next_token.cuh)
-  assert(params.size() == 8);
+  // params: {V, H, P, G, page, PER, R, MP, RP}. inputs: logits, embedding,
+  // prompt; outputs: x_next, tokens, kv_indptr, last_page_len, kv_indices,
+  // and with RP > 0 kv_indices_ring (tasks/sm90_next_token.cuh)
+  assert(params.size() == 9);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
-  static_split_ops(bgraph, 3, 5, input_ops, output_ops);
+  static_split_ops(bgraph, 3, params[8] > 0 ? 6 : 5, input_ops, output_ops);
   return register_task_variant(
       TASK_SM90_NEXT_TOKEN, static_build_only_task("sm90_next_token", params));
 }

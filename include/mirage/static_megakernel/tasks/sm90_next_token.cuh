@@ -27,10 +27,12 @@ __device__ __forceinline__ unsigned long long sm90_argmax_key(float v, int i) {
 
 // PARAMS {V, H, P (the prompt's tokens), G (tokens' slots a request), page, PER
 // (logits a thread), R (requests), MP (pages a request: request r's pages are
-// r MP ..)}; BUF_SLOTS
+// r MP ..), RP (0, else a second page table, kv_indices_ring: request r's page
+// j at r RP + j % RP, a ring for sliding-window layers' caches)}; BUF_SLOTS
 // {logits [T, V] fp32 (rows 0 .. R), embedding [V, H] bf16, prompt [R, P] i64,
 // x_next [T, H] bf16 (rows 0 .. R), tokens [R, G] i64, kv_indptr [R + 1] i32,
-// last_page_len [R] i32, kv_indices [R MP] i32}; counters {the tasks (for the
+// last_page_len [R] i32, kv_indices [R MP] i32, kv_indices_ring [R MP] i32
+// (RP > 0)}; counters {the tasks (for the
 // consumers), the tasks done with their argmax, a key (u64, 2) a request}
 template <class SELF,
           class PARAMS,
@@ -43,7 +45,7 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
                                                     StaticTask const &tk) {
   constexpr int V = PARAMS::v[0], H = PARAMS::v[1], P = PARAMS::v[2],
                 NG = PARAMS::v[3], PAGE = PARAMS::v[4], PER = PARAMS::v[5],
-                R = PARAMS::v[6], MP = PARAMS::v[7];
+                R = PARAMS::v[6], MP = PARAMS::v[7], RP = PARAMS::v[8];
   constexpr int BLOCK = SM90_THREADS * PER, NB = (V + BLOCK - 1) / BLOCK;
   constexpr int CH = 16; // loads in flight a thread
   constexpr int DONE = SELF::counter + 1, KEY = SELF::counter + 2;
@@ -139,11 +141,15 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
     __syncthreads();
     // the page table: request r's n pages r MP .. r MP + n - 1, packed
     int *kv_indices = buf_at<int>(g, slot_at<BUF_SLOTS, 7>());
+    int *ring = RP > 0 ? buf_at<int>(g, slot_at<BUF_SLOTS, 8>()) : nullptr;
     int off = 0;
 #pragma unroll 1
     for (int r = 0; r < R; r++) {
       for (int j = threadIdx.x; j < n_s[r]; j += SM90_THREADS) {
         kv_indices[off + j] = r * MP + j;
+        if constexpr (RP > 0) {
+          ring[off + j] = r * RP + j % RP;
+        }
       }
       off += n_s[r];
       if (threadIdx.x == 0) {

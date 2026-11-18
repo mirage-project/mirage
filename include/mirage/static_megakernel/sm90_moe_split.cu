@@ -17,12 +17,12 @@
 #define STATIC_SMS 132
 #define STATIC_SM90 1
 #include "runtime.cuh"
+#include <algorithm>
 #include <cstdio>
 
 namespace static_mk {
 
 constexpr int H = MOE_H, I = MOE_I, E = MOE_E, TOPK = MOE_TOPK;
-constexpr int STAGES = 4;
 constexpr float SUM_SCALE = 4.0f; // the decode's values are 1/4 of the weights'
 
 __device__ __forceinline__ void wgmma_wait_1() {
@@ -163,24 +163,26 @@ struct Args {
   __nv_bfloat16 *x_out;    // [T][H]
   unsigned *done;          // [T][H / 64] W2 slots done (the last re-zeroes it)
   float limit, alpha;
+  int requests; // the step's token rows (the rest of T idle)
 };
 
 // GLU: W13 (128-row blocks: 64 gate rows, the 64 up rows of the same outputs;
 // N = 2 I, K = H); else W2 (64-row blocks; N = H, K = I). A K tile is two
 // items, an A buffer each (buffers alternating across tiles, or four items a
 // tile, serialize ptxas' wgmma pipeline: C7513)
-template <bool GLU>
+template <bool GLU, int ST>
 struct Cfg {
   static constexpr int K = GLU ? H : I, N = GLU ? 2 * I : H;
   static constexpr int PR = GLU ? 128 : 64, MT = PR / 64, BLOCK = PR * 68;
   static constexpr int KT = (K + 127) / 128;
   static constexpr int ACT_OFF = (BLOCK + 1023) / 1024 * 1024,
                        STAGE = ACT_OFF + T * 256;
+  static constexpr int STAGES = ST;
   static constexpr int SMEM = STAGES * STAGE + 1024 + 16 * STAGES;
 };
 
 // block y of expert e times its cnt routed tokens' rows (NG groups of 8)
-template <bool GLU, int NG>
+template <bool GLU, int ST, int NG>
 __device__ __forceinline__ void item(CUtensorMap const *amap,
                                      Args const &p,
                                      int y,
@@ -190,18 +192,19 @@ __device__ __forceinline__ void item(CUtensorMap const *amap,
                                      int const *slotl,
                                      char *sm,
                                      uint32_t full0,
-                                     uint32_t empty0) {
-  using C = Cfg<GLU>;
-  constexpr int KT = C::KT, BLOCK = C::BLOCK, MT = C::MT;
+                                     uint32_t empty0,
+                                     int j0 = 0,
+                                     int g0 = 0) {
+  using C = Cfg<GLU, ST>;
+  constexpr int KT = C::KT, BLOCK = C::BLOCK, MT = C::MT, STAGES = C::STAGES;
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   uint8_t const *blocks = p.w + ((size_t)e * (C::N / C::PR) + y) * KT * BLOCK;
-  if (warp == 4) { // producer: lane 0 the weights, lane j < cnt row j (both K
-                   // halves, half h at h * NG * 1024)
-    int const src = lane < cnt ? (GLU ? tokl[lane] : e * T + lane) : 0;
+  if (warp == 4) { // producer: lane 0 the weights, lane j < cnt rows j, j + 32
+                   // (both K halves, half h at h * NG * 1024)
     for (int kt = 0; kt < KT; kt++) {
-      int const st = kt % STAGES;
-      if (kt >= STAGES) {
-        mbar_wait(empty0 + 8 * st, ((kt / STAGES) - 1) & 1);
+      int const g = g0 + kt, st = g % STAGES;
+      if (g >= STAGES) {
+        mbar_wait(empty0 + 8 * st, ((g / STAGES) - 1) & 1);
       }
       uint32_t const fb = full0 + 8 * st, dst = su32(sm + st * C::STAGE);
       if (lane == 0) {
@@ -209,12 +212,13 @@ __device__ __forceinline__ void item(CUtensorMap const *amap,
         bulk_g2s(dst, blocks + (size_t)kt * BLOCK, BLOCK, fb);
       }
       __syncwarp();
-      if (lane < cnt) {
+      for (int j = lane; j < cnt; j += 32) {
+        int const src = GLU ? tokl[j] : e * T + j0 + j;
 #pragma unroll
         for (int h = 0; h < 2; h++) {
           tma3(amap,
                fb,
-               dst + C::ACT_OFF + h * NG * 1024 + lane * 128,
+               dst + C::ACT_OFF + h * NG * 1024 + j * 128,
                0,
                src,
                2 * kt + h,
@@ -253,8 +257,8 @@ __device__ __forceinline__ void item(CUtensorMap const *amap,
   };
 #pragma unroll 1
   for (int kt = 0; kt < KT; kt++) {
-    int const st = kt % STAGES;
-    mbar_wait(full0 + 8 * st, (kt / STAGES) & 1);
+    int const g = g0 + kt, st = g % STAGES;
+    mbar_wait(full0 + 8 * st, (g / STAGES) & 1);
     char const *stage = sm + st * C::STAGE;
     uint32_t const bx = su32(stage + C::ACT_OFF);
 #pragma unroll
@@ -274,12 +278,12 @@ __device__ __forceinline__ void item(CUtensorMap const *amap,
                           kt > 0 || h0 + hh > 0);
       }
       wgmma_commit();
-      wgmma_wait_1(); // all but this item done: the other buffer free,
-                      // stage kt - 1 too
-      if (it == 0 && kt > 0) {
+      wgmma_wait_1();         // all but this item done: the other buffer free,
+                              // stage kt - 1 too
+      if (it == 0 && g > 0) { // (g0 > 0: the last pass's last stage)
         __syncwarp();
         if (lane == 0) {
-          mbar_arrive(empty0 + 8 * ((kt - 1) % STAGES));
+          mbar_arrive(empty0 + 8 * ((g - 1) % STAGES));
         }
       }
     }
@@ -300,7 +304,7 @@ __device__ __forceinline__ void item(CUtensorMap const *amap,
         float up = acc[1][n][i] * SUM_SCALE + __bfloat162float(b[I + row]);
         gate = fminf(gate, p.limit);
         up = fminf(fmaxf(up, -p.limit), p.limit);
-        p.act[((size_t)e * T + j) * I + row] =
+        p.act[((size_t)e * T + j0 + j) * I + row] =
             __float2half((up + 1.0f) * gate / (1.0f + __expf(-gate * p.alpha)));
       } else {
         p.eo[((size_t)tokl[j] * TOPK + slotl[j]) * H + row] = __float2bfloat16(
@@ -339,17 +343,18 @@ __device__ __forceinline__ void item(CUtensorMap const *amap,
   }
 }
 
-template <bool GLU, bool SINGLE>
+template <bool GLU, int ST>
 __global__ void __launch_bounds__(160, 3)
     moe_kernel(const __grid_constant__ CUtensorMap amap, const Args p) {
-  using C = Cfg<GLU>;
+  using C = Cfg<GLU, ST>;
+  constexpr int STAGES = C::STAGES;
   int const y = blockIdx.x;
   extern __shared__ __align__(1024) char smem_raw[];
   char *sm = reinterpret_cast<char *>(
       (reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint32_t const full0 = su32(sm + STAGES * C::STAGE),
                  empty0 = full0 + 8 * STAGES;
-  __shared__ int tokl[T], slotl[T], s_cnt, e_warp[4];
+  __shared__ int tokl[T], slotl[T];
   int const lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   if (threadIdx.x == 0) {
     for (int s = 0; s < STAGES; s++) {
@@ -365,42 +370,117 @@ __global__ void __launch_bounds__(160, 3)
   if constexpr (GLU) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   }
-  int e = blockIdx.y;
-  if constexpr (SINGLE) {
+  static_assert(E <= 128 && T <= 64,
+                "sm90_moe_split: an expert, a token a thread");
+  __shared__ uint32_t routed[4];
+  if (p.requests == 1) { // one token: blockIdx.y = its top-k slot's expert
     if (warp < 4) {
       int const rt = threadIdx.x < E ? p.routing[threadIdx.x * T] : 0;
       uint32_t const m = __ballot_sync(~0u, rt == blockIdx.y + 1);
       if (lane == 0) {
-        e_warp[warp] = m ? 32 * warp + __ffs(m) - 1 : E;
+        routed[warp] = m ? 32 * warp + __ffs(m) - 1 : E;
       }
     }
     __syncthreads();
-    e = min(min(e_warp[0], e_warp[1]), min(e_warp[2], e_warp[3]));
+    int const e = min(min(routed[0], routed[1]), min(routed[2], routed[3]));
     if (e == E) {
       return;
     }
-    if (threadIdx.x == 0) {
-      tokl[0] = 0;
-      slotl[0] = blockIdx.y;
+    tokl[0] = 0, slotl[0] = blockIdx.y;
+    item<GLU, ST, 1>(&amap, p, y, e, 1, tokl, slotl, sm, full0, empty0);
+    return;
+  }
+  // blockIdx.y: the y-th of the experts some token routes to (ascending; the
+  // grid has one for each the step can route to at most)
+  if (warp < 4) {
+    bool any = false;
+    if (threadIdx.x < E) {
+#pragma unroll
+      for (int t = 0; t < T; t++) {
+        any = any || (t < p.requests && p.routing[threadIdx.x * T + t] > 0);
+      }
     }
-  } else if (threadIdx.x < 32) { // expert e's routed tokens, ascending
-    int const rt = lane < T ? p.routing[e * T + lane] : 0;
-    uint32_t const m = __ballot_sync(~0u, rt > 0);
-    if (rt > 0) {
-      int const j = __popc(m & ((1u << lane) - 1));
-      tokl[j] = lane;
-      slotl[j] = rt - 1;
-    }
+    uint32_t const m = __ballot_sync(~0u, any);
     if (lane == 0) {
-      s_cnt = __popc(m);
+      routed[warp] = m;
     }
   }
   __syncthreads();
-  int const cnt = SINGLE ? 1 : s_cnt;
+  int e = E;
+  for (int w = 0, rank = blockIdx.y; w < 4; w++) {
+    int const n = __popc(routed[w]);
+    if (rank < n) {
+      uint32_t m = routed[w];
+      for (int i = 0; i < rank; i++) {
+        m &= m - 1; // drop the lowest set bit
+      }
+      e = 32 * w + __ffs(m) - 1;
+      break;
+    }
+    rank -= n;
+  }
+  if (e == E) {
+    return;
+  }
+  // expert e's routed tokens, ascending (a thread a token, warps 0, 1)
+  constexpr int TW = T > 32 ? 2 : 1;
+  __shared__ uint32_t tok_m[2];
+  int rt = 0;
+  uint32_t m = 0;
+  if (warp < TW) {
+    rt = threadIdx.x < p.requests ? p.routing[e * T + threadIdx.x] : 0;
+    m = __ballot_sync(~0u, rt > 0);
+    if (lane == 0) {
+      tok_m[warp] = m;
+    }
+  }
+  __syncthreads();
+  if (rt > 0) {
+    int const j =
+        (warp ? __popc(tok_m[0]) : 0) + __popc(m & ((1u << lane) - 1));
+    tokl[j] = threadIdx.x;
+    slotl[j] = rt - 1;
+  }
+  __syncthreads();
+  int const cnt = __popc(tok_m[0]) + (TW > 1 ? __popc(tok_m[1]) : 0);
+  // at most 32 tokens a pass (wider wgmma accumulators spill: C7512); more
+  // (T = 64, rare: 64 x top-k over E experts) a second pass over the weights,
+  // its ring stages after the first's
   auto go = [&](auto ng) {
-    item<GLU, decltype(ng)::value>(
+    item<GLU, ST, decltype(ng)::value>(
         &amap, p, y, e, cnt, tokl, slotl, sm, full0, empty0);
   };
+  if constexpr (T > 32) {
+    constexpr int P2 = T > 32 ? 32 : 0; // (T <= 32: never here)
+    if (cnt > 32) {
+      item<GLU, ST, 4>(&amap, p, y, e, 32, tokl, slotl, sm, full0, empty0);
+      int const c2 = cnt - 32;
+      auto go2 = [&](auto ng) {
+        item<GLU, ST, decltype(ng)::value>(&amap,
+                                           p,
+                                           y,
+                                           e,
+                                           c2,
+                                           tokl + P2,
+                                           slotl + P2,
+                                           sm,
+                                           full0,
+                                           empty0,
+                                           32,
+                                           Cfg<GLU, ST>::KT);
+      };
+      if (c2 <= 8) {
+        go2(IC<1>{});
+      } else if (c2 <= 16) {
+        go2(IC<2>{});
+      } else if (c2 <= 24) {
+        go2(IC<3>{});
+      } else {
+        go2(IC<4>{});
+      }
+      return;
+    }
+  }
   if (cnt == 0) {
     return;
   } else if (cnt <= 8) {
@@ -442,12 +522,14 @@ static void map_rows(CUtensorMap *m, void *base, uint64_t rows, uint64_t K) {
   }
 }
 
-template <bool GLU, bool SINGLE>
-static void
-    launch(CUtensorMap const &m, static_mk::Args const &a, cudaStream_t s) {
-  using C = static_mk::Cfg<GLU>;
+template <bool GLU, int ST>
+static void launch(CUtensorMap const &m,
+                   static_mk::Args const &a,
+                   int requests,
+                   cudaStream_t s) {
+  using C = static_mk::Cfg<GLU, ST>;
   static bool const smem_set =
-      cudaFuncSetAttribute(static_mk::moe_kernel<GLU, SINGLE>,
+      cudaFuncSetAttribute(static_mk::moe_kernel<GLU, ST>,
                            cudaFuncAttributeMaxDynamicSharedMemorySize,
                            C::SMEM) == cudaSuccess;
   (void)smem_set;
@@ -455,13 +537,15 @@ static void
   at.id = cudaLaunchAttributeProgrammaticStreamSerialization;
   at.val.programmaticStreamSerializationAllowed = 1;
   cudaLaunchConfig_t cfg = {};
-  cfg.gridDim = dim3(C::N / C::PR, SINGLE ? static_mk::TOPK : static_mk::E);
+  // the experts the step's requests can route to at most
+  cfg.gridDim =
+      dim3(C::N / C::PR, std::min(static_mk::E, requests * static_mk::TOPK));
   cfg.blockDim = dim3(160);
   cfg.dynamicSmemBytes = C::SMEM;
   cfg.stream = s;
   cfg.attrs = &at;
   cfg.numAttrs = 1;
-  cudaLaunchKernelEx(&cfg, static_mk::moe_kernel<GLU, SINGLE>, m, a);
+  cudaLaunchKernelEx(&cfg, static_mk::moe_kernel<GLU, ST>, m, a);
 }
 
 struct Ctx {
@@ -505,19 +589,22 @@ extern "C" int moe_launch(void *ctx,
                     (__nv_bfloat16 *)x_out,
                     (unsigned *)done,
                     limit,
-                    alpha};
-  bool const compact = requests == 1 && static_mk::E <= 128;
-  if (compact) {
-    launch<true, true>(c->m13, a, s);
+                    alpha,
+                    requests};
+  // the ring's stages: deeper at one or two requests (few experts' CTAs,
+  // latency-bound); at more, the 4-stage ring's occupancy measured faster
+  bool const deep = requests <= 2;
+  if (deep) {
+    launch<true, 8>(c->m13, a, requests, s);
   } else {
-    launch<true, false>(c->m13, a, s);
+    launch<true, 4>(c->m13, a, requests, s);
   }
   a.w = (uint8_t const *)w2;
   a.bias = (__nv_bfloat16 const *)b2;
-  if (compact) {
-    launch<false, true>(c->m2, a, s);
+  if (deep) {
+    launch<false, 8>(c->m2, a, requests, s);
   } else {
-    launch<false, false>(c->m2, a, s);
+    launch<false, 4>(c->m2, a, requests, s);
   }
   cudaError_t const e = cudaGetLastError();
   if (e != cudaSuccess) {

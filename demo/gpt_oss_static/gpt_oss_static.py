@@ -12,9 +12,8 @@ from mirage.mpk.models.utils import shuffle_tensors
 from mxfp4 import Mxfp4Checkpoint, convert_expert_weight
 
 T, PAGE = 8, 64                       # token rows of a step (main: the bucket of the batch), KV page size
-BUCKETS = (8, 16, 32)                 # the kernels' token rows, as the other static models' (a step of R requests: the
+BUCKETS = (8, 16, 32, 64)             # the kernels' token rows, as the other static models' (a step of R requests: the
                                       # smallest >= R; rows past R idle)
-KV_CHUNK = 128                        # full attention: the KV split in chunks of this many positions (sm90_attention_split)
 PLANS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plans")
 FLAGS = sm90_flags() + ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]   # serving build: launches back to back
 
@@ -45,7 +44,8 @@ class Model:
             "kv_indices": torch.zeros(R * MP, dtype=torch.int32, device="cuda"),   # request r's pages r MP .., packed
             "last_page_len": torch.ones(R, dtype=torch.int32, device="cuda"),
             "num_tokens": torch.full((1,), R, dtype=torch.int32, device="cuda"),
-            "attn_parts": zeros(sm90_attention_parts_size(T, QH, D, max_seq // KV_CHUNK)),   # the split attention's chunks
+            "attn_parts": zeros(sm90_attention_parts_size(R, QH, D, torch.cuda.get_device_properties(0)
+                                                          .multi_processor_count), dtype=torch.float32),   # its splits
             "h": zeros(T, H), "qkv32": zeros(T, (QH + 2 * KVH) * D, dtype=torch.float32),
             "qkv": zeros(T, (QH + 2 * KVH) * D), "attn": zeros(T, QH * D), "o32": zeros(T, H, dtype=torch.float32),
             "x1": zeros(T, H), "h2": zeros(T, H, dtype=torch.float16),   # h2: the MoE's f16 input
@@ -57,13 +57,37 @@ class Model:
         self.layers = []
         self.done = zeros(T, H // 64, dtype=torch.int32)             # the experts' combine counters
         pack = lambda w, s, rows, glu: sm90_moe_split_weights(sm90_moe_pack(w.cuda(), s.cuda(), rows, glu=glu), rows)
+        # The routed experts: sm90_moe_split up to 16 requests, triton_kernels' matmul_ogs (triton_moe.py) from 32 (120B
+        # graphed decode step: 8 requests 7.34 vs 7.62 ms, 16: 9.72 vs 9.55, 64: 30.7 -> 16.6; plans/h100/README.md);
+        # GPTOSS_MOE=triton|mpk picks one. Without triton_kernels the default falls back to sm90_moe_split.
+        want = {"triton": True, "mpk": False}.get(os.environ.get("GPTOSS_MOE", ""))
+        self.triton_moe = requests >= 32 if want is None else want
+        self.texperts = []
+        if self.triton_moe:
+            try:
+                import triton_moe
+            except ImportError as e:
+                if want:
+                    raise
+                print(f"triton_kernels not importable ({e}): the routed experts as sm90_moe_split", flush=True)
+                self.triton_moe = False
         for i in range(self.L):
             p = f"model.layers.{i}."
             at = lambda k: sd[p + k]
-            w13, s13, b13 = convert_expert_weight(at("mlp.experts.gate_up_proj_blocks"), at("mlp.experts.gate_up_proj_scales"),
-                                                  at("mlp.experts.gate_up_proj_bias"), deinterleave=True)
-            w2, s2, b2 = convert_expert_weight(at("mlp.experts.down_proj_blocks"), at("mlp.experts.down_proj_scales"),
-                                               at("mlp.experts.down_proj_bias"), deinterleave=False)
+            if self.triton_moe:
+                self.texperts.append(triton_moe.expert_weights(*(at(f"mlp.experts.{n}") for n in (
+                    "gate_up_proj_blocks", "gate_up_proj_scales", "gate_up_proj_bias", "down_proj_blocks",
+                    "down_proj_scales", "down_proj_bias"))))
+                # the layer kernels' graphs attach every layer tensor (plans key on its node ids): placeholders
+                ex = {"w13": zeros(1, dtype=torch.uint8), "b13": zeros(1), "w2": zeros(1, dtype=torch.uint8),
+                      "b2": zeros(1)}
+            else:
+                w13, s13, b13 = convert_expert_weight(at("mlp.experts.gate_up_proj_blocks"),
+                                                      at("mlp.experts.gate_up_proj_scales"),
+                                                      at("mlp.experts.gate_up_proj_bias"), deinterleave=True)
+                w2, s2, b2 = convert_expert_weight(at("mlp.experts.down_proj_blocks"), at("mlp.experts.down_proj_scales"),
+                                                   at("mlp.experts.down_proj_bias"), deinterleave=False)
+                ex = {"w13": pack(w13, s13, 128, True), "b13": bf(b13), "w2": pack(w2, s2, 64, False), "b2": bf(b2)}
             q = [at(f"self_attn.{n}_proj.weight") for n in "qkv"]
             qb = [at(f"self_attn.{n}_proj.bias") for n in "qkv"]
             self.layers.append({
@@ -72,17 +96,26 @@ class Model:
                 "w_o": bf(at("self_attn.o_proj.weight")), "b_o": bf(at("self_attn.o_proj.bias")),
                 "sinks": bf(at("self_attn.sinks").view(KVH, QH // KVH)),
                 "w_router": bf(at("mlp.router.weight")), "b_router": bf(at("mlp.router.bias")),
-                "w13": pack(w13, s13, 128, True), "b13": bf(b13), "w2": pack(w2, s2, 64, False), "b2": bf(b2),
-                "k_cache": zeros(R * MP, PAGE, KVH, D), "v_cache": zeros(R * MP, PAGE, KVH, D),
+                **ex,
             })
+        # The KV caches after all the experts' repacking (its temporaries beside long-context caches overflow an H100
+        # with 120B). The sliding-window layers' caches are rings of RP pages a request (the window and the step's page).
+        self.RP = self.window // PAGE + 2
+        self.kv_indices_ring = torch.zeros(R * MP, dtype=torch.int32, device="cuda")   # theirs: r RP + j % RP, packed
+        for i, layer in enumerate(self.layers):
+            pages = R * (self.RP if self.types[i] == "sliding_attention" else MP)
+            layer["k_cache"] = zeros(pages, PAGE, KVH, D)
+            layer["v_cache"] = zeros(pages, PAGE, KVH, D)
         self.embed = bf(sd["model.embed_tokens.weight"])
         self.head = {"norm": bf(sd["model.norm.weight"]), "lm_head": bf(sd["lm_head.weight"]),
                      "h": zeros(T, H), "logits": zeros(T, self.V, dtype=torch.float32)}
-        self.moe = Sm90MoeSplit(T, H, I, E, TOPK, self.shared["h2"], self.shared["act"], R)
+        self.moe = (triton_moe.TritonMoe(R, E, TOPK, self.limit) if self.triton_moe else
+                    Sm90MoeSplit(T, H, I, E, TOPK, self.shared["h2"], self.shared["act"], R))
 
     def layer_tensors(self, i: int) -> dict:
         """Layer i's tensors by graph name: its weights and cache, the shared buffers, its residual in and out."""
-        return {**self.shared, **self.layers[i], "x_in": self.x_embed if i == 0 else self.x[i % 2],
+        ring = {"kv_indices": self.kv_indices_ring} if self.types[i] == "sliding_attention" else {}
+        return {**self.shared, **self.layers[i], **ring, "x_in": self.x_embed if i == 0 else self.x[i % 2],
                 "x_out": self.x[(i + 1) % 2]}
 
     def head_tensors(self, prompt: torch.Tensor, gen: torch.Tensor) -> dict:
@@ -90,15 +123,17 @@ class Model:
         tokens)."""
         return {"x": self.x[self.L % 2], **self.head, "embed": self.embed, "prompt": prompt, "gen": gen,
                 "x_embed": self.x_embed, "kv_indptr": self.shared["kv_indptr"],
-                "last_page_len": self.shared["last_page_len"], "kv_indices": self.shared["kv_indices"]}
+                "last_page_len": self.shared["last_page_len"], "kv_indices": self.shared["kv_indices"],
+                "kv_indices_ring": self.kv_indices_ring}
 
     def set_position(self, pos: int):
         """The page table for a step of every request at position pos (its K / V go to slot pos; request r's pages
         r MP .., in order)."""
         n, MP = pos // PAGE + 1, self.max_seq // PAGE
         self.shared["kv_indptr"].copy_(torch.arange(self.R + 1, dtype=torch.int32, device="cuda") * n)
-        self.shared["kv_indices"][:self.R * n].copy_(
-            (torch.arange(self.R, device="cuda")[:, None] * MP + torch.arange(n, device="cuda")).flatten())
+        r, j = torch.arange(self.R, device="cuda")[:, None], torch.arange(n, device="cuda")
+        self.shared["kv_indices"][:self.R * n].copy_((r * MP + j).flatten())
+        self.kv_indices_ring[:self.R * n].copy_((r * self.RP + j % self.RP).flatten())
         self.shared["last_page_len"].fill_(pos + 1 - (n - 1) * PAGE)
 
 
@@ -107,6 +142,9 @@ def launch_layer(m: Model, kernel, inst: int, i: int):
     experts' sum."""
     kernel.launch_instances(inst, 1)
     t, L = m.shared, m.layers[i]
+    if m.triton_moe:
+        m.moe.launch(t["routing"], t["topk_w"], t["h2"], t["x1"], m.x[(i + 1) % 2], m.texperts[i])
+        return
     m.moe.launch(t["routing"], L["w13"], L["b13"], t["act"], L["w2"], L["b2"], t["eo"], t["topk_w"], t["x1"],
                  m.x[(i + 1) % 2], m.done, m.limit, 1.702)
 
@@ -122,13 +160,11 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
         mpk.sm90_attention_layer(A["qkv32"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"],
                                  A["kv_indptr"], A["kv_indices"], A["last_page_len"], A["attn"], num_q_heads=m.QH,
                                  window=window, sinks=A["sinks"], **qkv_bias)
-    else:        # full attention: the KV in chunks over many tasks, then their merge (with the sinks)
+    else:        # full attention: the KV split over the SMs (a few splits a request and KV head), then their merge (with the sinks)
         mpk.sm90_attention_split_layer(A["qkv32"], A["k_cache"], A["v_cache"], A["cos"], A["sin"], A["qo_indptr"],
                                        A["kv_indptr"], A["kv_indices"], A["last_page_len"], A["attn_parts"],
-                                       num_q_heads=m.QH, chunk=KV_CHUNK, **qkv_bias)
-        mpk.sm90_attention_merge_layer(A["attn_parts"], A["qo_indptr"], A["kv_indptr"], A["last_page_len"], A["attn"],
-                                       num_q_heads=m.QH, chunk=KV_CHUNK, chunks=m.max_seq // KV_CHUNK, page=PAGE,
-                                       sinks=A["sinks"])
+                                       num_q_heads=m.QH, qkv_bias=A["b_qkv"])
+        mpk.sm90_attention_merge_layer(A["attn_parts"], A["qo_indptr"], A["attn"], num_q_heads=m.QH, sinks=A["sinks"])
     mpk.gemm_tile_layer(input=A["attn"], weight=A["w_o"], output=A["o32"], combine="store")
     mpk.sm90_gate_layer(A["o32"], A["b_o"], A["x_in"], A["ln2"], A["w_router"], A["b_router"], A["num_tokens"], A["x1"],
                         A["h2"], A["topk_w"], A["routing"], eps=m.eps)   # router splits: the plan's
@@ -142,7 +178,8 @@ def build_head(m: Model, mpk: StaticMegakernel, t: dict):
     mpk.gemm_tile_layer(input=A["h"], weight=A["lm_head"], output=A["logits"], combine="store")
     # the next step's token (the prompt's, else the argmax), its embedding row and page table: no launch between the steps
     mpk.sm90_next_token_layer(A["logits"], A["embed"], A["prompt"], A["x_embed"], A["gen"], A["kv_indptr"],
-                              A["last_page_len"], A["kv_indices"], PAGE)
+                              A["last_page_len"], A["kv_indices"], PAGE, kv_indices_ring=A["kv_indices_ring"],
+                              ring_pages=m.RP)
 
 
 def plan_path(m: Model, plans: str, kind: str) -> str:
@@ -260,6 +297,7 @@ def main():
                    "plan into --plans (tune), and exit")
     p.add_argument("--rounds", type=int, default=2, help="with --tune: random plans per candidate grid of each node")
     p.add_argument("--time", type=float, default=300, help="with --tune: the solver's time limit (s)")
+    p.add_argument("--eager", action="store_true", help="launch every step from Python (default: a CUDA graph a step)")
     args = p.parse_args()
     os.makedirs(args.out, exist_ok=True)
     from transformers import AutoTokenizer
@@ -317,6 +355,21 @@ def main():
             launch_layer(m, kernel_of[i], inst[i], i)
         k_hd.launch_instances(0, 1)
 
+    step_graph = []
+
+    def run_step(pos):
+        """step(), from the fourth position as one CUDA graph (captured once, replayed: the step's tensors and page
+        table stay put); launched eagerly from Python, many requests' steps are host-bound (triton_moe's launches)."""
+        if args.eager or pos < 3:
+            step()
+            return
+        if not step_graph:
+            torch.cuda.synchronize()
+            step_graph.append(torch.cuda.CUDAGraph())
+            with torch.cuda.graph(step_graph[0]):
+                step()
+        step_graph[0].replay()
+
     def generate(runs):
         """The prompts then NEW tokens, `runs` times (the last timed); gen holds the tokens."""
         for run in range(runs):   # the first run warms up (and checks); the second is timed
@@ -330,7 +383,7 @@ def main():
             marks = [torch.cuda.Event(enable_timing=True) for _ in range(P + NEW)]
             s.record()
             for pos in range(P + NEW - 1):
-                step()
+                run_step(pos)
                 marks[pos].record()
             e.record()
             torch.cuda.synchronize()

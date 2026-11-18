@@ -112,8 +112,16 @@ def main():
         w13b, w13s = sd[p + "mlp.experts.gate_up_proj_blocks"], sd[p + "mlp.experts.gate_up_proj_scales"]
         w2b, w2s = sd[p + "mlp.experts.down_proj_blocks"], sd[p + "mlp.experts.down_proj_scales"]
         b13, b2 = sd[p + "mlp.experts.gate_up_proj_bias"].cuda(), sd[p + "mlp.experts.down_proj_bias"].cuda()
-        kc = m.layers[i]["k_cache"].view(R, MP * g.PAGE, m.KVH, m.D)[:, :S].permute(0, 2, 1, 3)
-        vc = m.layers[i]["v_cache"].view(R, MP * g.PAGE, m.KVH, m.D)[:, :S].permute(0, 2, 1, 3)
+        if i in sliding:   # a ring of m.RP pages a request: its last pages' positions (the window's), earlier ones 0
+            kc, vc = (torch.zeros(R, S, m.KVH, m.D, dtype=torch.bfloat16, device="cuda") for _ in range(2))
+            ring = lambda c: c.view(R, m.RP, g.PAGE, m.KVH, m.D)
+            for q in range(max(0, (S // g.PAGE - m.RP + 1) * g.PAGE), S):
+                kc[:, q] = ring(m.layers[i]["k_cache"])[:, (q // g.PAGE) % m.RP, q % g.PAGE]
+                vc[:, q] = ring(m.layers[i]["v_cache"])[:, (q // g.PAGE) % m.RP, q % g.PAGE]
+            kc, vc = kc.permute(0, 2, 1, 3), vc.permute(0, 2, 1, 3)
+        else:
+            kc = m.layers[i]["k_cache"].view(R, MP * g.PAGE, m.KVH, m.D)[:, :S].permute(0, 2, 1, 3)
+            vc = m.layers[i]["v_cache"].view(R, MP * g.PAGE, m.KVH, m.D)[:, :S].permute(0, 2, 1, 3)
         res = {}
         for dt in (torch.float64, torch.bfloat16):
             md = {k: v.to(device="cuda", dtype=dt) for k, v in mods.items()}
@@ -135,7 +143,7 @@ def main():
                 # [H, 2I] and [I, H], gate / up interleaved (GptOssExperts'); MXFP4 values are exact in bf16.
                 # Converted on the CPU, and fp64 (exact anywhere) computed there: 120B's experts in fp64 and the
                 # conversion's temporaries do not fit beside its static model at 32 requests
-                dev = "cpu" if dt == torch.float64 else "cuda"
+                dev = "cpu" if dt == torch.float64 or os.environ.get("LAYER_CHECK_CPU") else "cuda"   # (64 requests)
                 w13, w2e = (mxfp4_cpu(b[e].cpu(), sc[e].cpu()).to(dev, dt) for b, sc in ((w13b, w13s), (w2b, w2s)))
                 rows = (idx == e).any(-1).nonzero()[:, 0]
                 gate_up = h[rows].to(dev) @ w13 + b13[e].to(dev, dt)

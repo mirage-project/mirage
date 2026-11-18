@@ -1110,8 +1110,8 @@ __device__ __forceinline__ void mma_job_sm90(TileJob const &j,
                                              int &g,
                                              float (*acc)[T / 8][4]) {
   constexpr int MH = ROWS / 64, NG = T / 8;
-  static_assert(T == 8 || T == 16 || T == 32,
-                "Hopper WGMMA: 8, 16 or 32 tokens");
+  static_assert(T == 8 || T == 16 || T == 32 || T == 64,
+                "Hopper WGMMA: 8, 16, 32 or 64 tokens");
   for (int s = 0; s < j.nst; s++, g++) {
     int const st = g % SMAX;
     mbar_wait(rt.full0 + 8 * st, (g / SMAX) & 1);
@@ -1129,8 +1129,11 @@ __device__ __forceinline__ void mma_job_sm90(TileJob const &j,
             wgmma_m64n8k16(acc[h][0], dw + 2 * k, dx + 2 * k, sd);
           } else if constexpr (NG == 2) {
             wgmma_m64n16k16(acc[h][0], dw + 2 * k, dx + 2 * k, sd);
-          } else {
+          } else if constexpr (NG == 4) {
             wgmma_m64n32k16(acc[h][0], dw + 2 * k, dx + 2 * k, sd);
+          } else { // 64 tokens: two n32 halves, rows 32 x 128 B apart
+            wgmma_m64n32k16(acc[h][0], dw + 2 * k, dx + 2 * k, sd);
+            wgmma_m64n32k16(acc[h][4], dw + 2 * k, dx + 256 + 2 * k, sd);
           }
         }
       }

@@ -36,8 +36,8 @@ class Sm90MoeSplit:
         so = os.path.join(out_dir, f"sm90_moe_split_{key}.so")
         if not os.path.exists(so):
             subprocess.check_call([shutil.which("nvcc"), "-O3", "-std=c++17", "-gencode", "arch=compute_90a,code=sm_90a",
-                                   "-shared", "-Xcompiler=-fPIC", "-lcuda", _SRC, "-o", so + ".tmp"] + flags)
-            os.replace(so + ".tmp", so)
+                                   "-shared", "-Xcompiler=-fPIC", "-lcuda", _SRC, "-o", so + f".{os.getpid()}.tmp"] + flags)
+            os.replace(so + f".{os.getpid()}.tmp", so)   # (a temporary a process: concurrent builds)
         self.requests = requests
         self.lib = ctypes.CDLL(so)
         self.lib.moe_ctx.restype = ctypes.c_void_p
