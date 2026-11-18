@@ -13,6 +13,8 @@
  * limitations under the License.
  */
 
+#include <math_constants.h>
+
 // this kernel merges the result of one KV head chunk back to the full KV
 // cache，
 // it taks the output of multitoken_paged_attention_task_impl_32_64_split_kv and
@@ -86,8 +88,8 @@ __device__ __forceinline__ void
 
 #pragma unroll 1
     for (int i = 0; i < VAL_PER_THREAD; ++i) {
-      float m_global = -inf;
-      float d_global = 1.f;
+      float m_global = -CUDART_INF_F;
+      float d_global = 0.f;
       float o_global = 0.f;
 #pragma unroll
       for (int kv_idx = 0; kv_idx < num_chunks; ++kv_idx) {
@@ -107,19 +109,22 @@ __device__ __forceinline__ void
         int o_offset =
             lse_offset * HEAD_DIM + head_partition * VAL_PER_THREAD + i;
 
-        float other_m = lse_ptr[lse_offset], other_d = 1;
+        float other_m = lse_ptr[lse_offset];
         m_global = max(m_prev, other_m);
-        d_global = d_prev * ptx_exp2(m_prev - m_global) +
-                   other_d * ptx_exp2(other_m - m_global);
+        float shift = m_global == -CUDART_INF_F ? 0.f : m_global;
+        float rescale = ptx_exp2(m_prev - shift);
+        float other_scale = ptx_exp2(other_m - shift);
+        d_global = d_prev * rescale + other_scale;
         // accumulate o
         float other_o = (float)o_ptr[o_offset];
+        // Empty chunks must not inject NaNs through a zero-weight product.
+        other_o = other_m == -CUDART_INF_F ? 0.f : other_o;
 
-        o_global = o_global * ptx_exp2(m_prev - m_global) +
-                   other_o * ptx_exp2(other_m - m_global);
+        o_global = o_global * rescale + other_o * other_scale;
       }
       output_ptr[token_idx * NUM_QO_GROUPS * NUM_QO_HEADS_PER_KV * HEAD_DIM +
                  head_idx * HEAD_DIM + head_partition * VAL_PER_THREAD + i] =
-          (T)__fdividef(o_global, d_global);
+          (T)__fdividef(o_global, d_global == 0.f ? 1.f : d_global);
     }
   }
 }
