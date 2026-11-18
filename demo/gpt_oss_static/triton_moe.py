@@ -1,7 +1,23 @@
+# Copyright 2026 CMU
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """GPT-OSS's routed experts at larger batches with triton_kernels' matmul_ogs (what SGLang / vLLM run on Hopper): the
 checkpoint's MXFP4 experts in its layout, the step's routing (the gate layer's [E, T] ranks and [T, TOPK] weights) turned
 into its ragged metadata, then W13 + SwiGLU and W2 with the routing weights and the sum over a token's experts;
-x_out = x1 + that. Rows past the step's R requests are not computed."""
+x_out = x1 + that. Rows past the step's R requests are not computed. triton_kernels is not a Mirage dependency: SGLang's
+and vLLM's installs ship it (or pip install it from the Triton repository's python/triton_kernels); without it
+gpt_oss_static.py falls back to sm90_moe_split."""
 import torch
 import triton
 import triton.language as tl

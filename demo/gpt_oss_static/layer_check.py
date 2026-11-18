@@ -1,3 +1,17 @@
+# Copyright 2026 CMU
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Per-layer check of the GPT-OSS static layers against an exact reference, as the GLM-5.3 / Kimi K3 static layers are
 checked (glm53_flash/sglang_moe/moe_static_hook.py: two quantized implementations differ by a few % on their own, so an
 exact reference is the yardstick): the model runs --batch requests to position --pos (the prompts teacher-forced:
@@ -47,7 +61,10 @@ def main():
     args = ap.parse_args()
     import torch
     import gpt_oss_static as g
-    from gsm8k import one_example
+
+    def one_example(lines, i, include_answer):   # SGLang's few_shot_gsm8k.get_one_example
+        return "Question: " + lines[i]["question"] + "\nAnswer:" + (" " + lines[i]["answer"] if include_answer else "")
+
     from transformers import AutoTokenizer
     from transformers.integrations.mxfp4 import FP4_VALUES
 

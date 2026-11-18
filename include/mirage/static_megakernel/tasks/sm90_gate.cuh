@@ -1,14 +1,29 @@
+/* Copyright 2026 CMU
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 // tasks/sm90_gate.cuh -- the sm90_gate task type: what GPT-OSS does between
 // o_proj and the routed experts, for one token, in one task: x1 = bf16(o +
 // bias + x), h = f16(RMSNorm(x1)), router logits = bf16(h . W^T + b), and
 // the token's top-k of their softmax, renormalized (ties to the lower expert):
 // its weights and its column of the
 // routing indices. The top-k runs in one warp, lane l the experts l, l + 32,
-// ... (E a multiple of 32: GPT-OSS-20B 32, 120B 128). Task (x, y) of grid (T, S,
-// 1): token x, the router's experts [y E / S, (y + 1) E / S) (S > 1: the logits
-// through the token's column of the routing indices, as fp32 bits; the token's
-// last task to count (its counter) takes its top-k). Every expert's logit is
-// one warp's, its lanes over K, whatever S: the same sums.
+// ... (E a multiple of 32: GPT-OSS-20B 32, 120B 128). Task (x, y) of grid (T,
+// S, 1): token x, the router's experts [y E / S, (y + 1) E / S) (S > 1: the
+// logits through the token's column of the routing indices, as fp32 bits; the
+// token's last task to count (its counter) takes its top-k). Every expert's
+// logit is one warp's, its lanes over K, whatever S: the same sums.
 #pragma once
 #include "sm90_common.cuh"
 
