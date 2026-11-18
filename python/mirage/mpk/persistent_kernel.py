@@ -1324,7 +1324,14 @@ class PersistentKernel:
         window_size: int = 0,       # 0 = full causal
         sinks: DTensor = None,      # per-head attention sinks
         group_id: int = 0,          # which KV group's page table this reads
+        finite_causal_mask: bool = False,
     ):
+        if finite_causal_mask and (
+            self.target_cc != 90 or not 0 < self.max_seq_length <= 64
+        ):
+            raise ValueError(
+                "finite_causal_mask requires Hopper and max_seq_length <= 64"
+            )
         # Currently assume that input/output
         assert input.num_dims == 2  # (num_tokens, fused_outdim / world_size)
         assert output.num_dims == 2  # (num_tokens, hidden_size / world_size)
@@ -1396,6 +1403,10 @@ class PersistentKernel:
                 break
         params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
                   self.max_seq_length, block_size] + tail[:n]
+        if finite_causal_mask:
+            # Hopper-only params[14]; keep all preceding optional field indices.
+            params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
+                      self.max_seq_length, block_size] + tail + [1]
         if self.target_cc == 100:
             # params[14]: max_tokens_per_request (rows the CTA buffers hold).
             params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,

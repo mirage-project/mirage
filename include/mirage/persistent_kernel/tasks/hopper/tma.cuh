@@ -23,7 +23,7 @@ namespace kernel {
 namespace tma {
 
 __device__ static inline void async_proxy_fence() {
-  asm volatile("fence.proxy.async.shared::cta;");
+  asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
 }
 
 __device__ static inline void store_commit_group() {

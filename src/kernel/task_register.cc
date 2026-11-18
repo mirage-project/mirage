@@ -1332,11 +1332,12 @@ int TaskRegister::register_paged_attention_hopper_task(
   // params[10]: window_size   (optional; sm100-only, must be 0 here)
   // params[11]: has_sink      (optional; sm100-only, must be 0 here)
   // params[12]: group_id      (optional, default 0)
-  // Positions match the sm100 variant: Python emits one packing for every
-  // target_cc, so a field keeps its index even where it is unsupported.
+  // params[13]: page_stride_rows (optional, 0 = packed pages)
+  // params[14]: finite_causal_mask (optional; Hopper single-tile BF16 only)
+  // Fields 0..13 share their positions with the sm100 variant.
   assert(params.size() == 6 || params.size() == 8 || params.size() == 10 ||
          params.size() == 11 || params.size() == 12 || params.size() == 13 ||
-         params.size() == 14);
+         params.size() == 14 || params.size() == 15);
   if (params.size() >= 8) {
     assert(params[6] == 0 && params[7] == 0 &&
            "q_len_override/tail_offset are not supported on Hopper");
@@ -1352,6 +1353,7 @@ int TaskRegister::register_paged_attention_hopper_task(
           ? params[12]
           : 0; // params[13]: page_stride_rows (optional, 0 = packed pages)
   int page_stride_rows = (params.size() >= 14) ? params[13] : 0;
+  bool finite_causal_mask = params.size() >= 15 && params[14] != 0;
 
   std::vector<tb::TBInputOp *> input_ops;
   std::vector<tb::TBInputOp *> output_ops;
@@ -1508,7 +1510,7 @@ int TaskRegister::register_paged_attention_hopper_task(
   }
   code.e("kernel::multitoken_paged_attention_hopper_impl<bfloat16, $, $, $, $, "
          "$, $, $, $, $, "
-         "$, $, $, $, $>(",
+         "$, $, $, $, $, $, $>(",
          num_q_heads_per_kv, /* NUM_QO_HEADS               */
          1,                  /* NUM_KV_HEADS               */
          num_kv_heads,       /* NUM_QO_GROUPS              */
@@ -1523,7 +1525,8 @@ int TaskRegister::register_paged_attention_hopper_task(
          "false",     /* PARTITION_KV               */
          1,           /* NUM_KV_CHUNKS              */
          rotary_dim,  /* ROTARY_DIM               */
-         page_stride_rows /* PAGE_STRIDE_ROWS         */
+         page_stride_rows,                     /* PAGE_STRIDE_ROWS         */
+         finite_causal_mask ? "true" : "false" /* FINITE_CAUSAL_MASK */
   );
   code.e("    task_desc->input_ptrs[1],");
   code.e("    task_desc->input_ptrs[2],");
