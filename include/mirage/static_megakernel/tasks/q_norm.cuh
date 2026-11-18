@@ -85,8 +85,15 @@ __device__ __forceinline__ bool
 // the same code with one round of loads and no stores, while wq_a's parts are
 // on their way; one copy of the code (unroll 1)
 // timing build: stamp [0] the dry pass done, [1] thread 0's parts landed
+// measurement only (-DQN_NOINLINE): the task's body as a function of its own (its
+// registers are then not shared with the rest of the kernel's one function)
+#ifdef QN_NOINLINE
+#define QN_TASK_INLINE __noinline__
+#else
+#define QN_TASK_INLINE __forceinline__
+#endif
 template <int K, int P, int EPS_BITS>
-__device__ __forceinline__ void q_norm_task(float const *part,
+__device__ QN_TASK_INLINE void q_norm_task(float const *part,
                                             __nv_bfloat16 const *gamma,
                                             unsigned char *out,
                                             uint32_t *done_cnt,

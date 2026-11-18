@@ -337,6 +337,11 @@ enum TaskType {
   // DeepSeek-V4.1 routed experts: MXFP4 weights, SwiGLU with clamps, W2
   // through the weight ring (tasks/swiglu_moe_experts.cuh)
   TASK_SWIGLU_MOE_EXPERTS_SM100 = 543,
+  // DeepSeek-V4.1's mHC, its coefficients computed beside the sublayer and its
+  // end in the kernel (tasks/hc_mix.cuh, hc_coef.cuh, hc_post_combine.cuh).
+  TASK_HC_MIX_SM100 = 544,
+  TASK_HC_COEF_SM100 = 545,
+  TASK_HC_POST_COMBINE_SM100 = 546,
   TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 

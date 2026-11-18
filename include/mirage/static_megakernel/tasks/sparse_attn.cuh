@@ -239,6 +239,19 @@ __device__ __forceinline__ void sa_q_parts(float const *part,
 #ifndef SA_STAMP1
 #define SA_STAMP1 5
 #endif
+// measurement only: SA_EXTRA_DRY more dry passes before the usual one (passes
+// -SA_EXTRA_DRY .. 0); the dry pass's marks (30, 33, 34, 38, 7) are stamped in
+// dry pass SA_DRY_PASS (0 = the last one)
+#ifndef SA_EXTRA_DRY
+#define SA_EXTRA_DRY 0
+#endif
+#ifndef SA_DRY_PASS
+#define SA_DRY_PASS 0
+#endif
+#define SA_DMARK(p)                                                            \
+  if (pass == SA_DRY_PASS) {                                                   \
+    SA_MARK(p)                                                                 \
+  }
 #define SA_MARK(p)                                                             \
   if (threadIdx.x == 0) {                                                      \
     if ((p) == SA_STAMP0) {                                                    \
@@ -264,7 +277,11 @@ __device__ __forceinline__ void sa_stage_rows(unsigned char const *ccache,
 #pragma unroll
   for (int k = 0; k < 9; k++) {
     int const c = threadIdx.x + 256 * k, row = c / 18, o = 16 * (c - 18 * row);
+#ifdef SA_DRY_NOLOAD // the dry pass stages zeros (src-size 0): the same instructions, no global loads
+    int const id = real ? ids[128 * pr + row] : -1;
+#else
     int const id = real ? ids[128 * pr + row] : 0;
+#endif
     unsigned char const *src = ccache + (size_t)(id >= 0 ? id : 0) * SA_CROW + o;
     asm volatile(
         "cp.async.cg.shared.global [%0], [%1], 16, %2;" ::"r"(x + 16 * c),
@@ -384,6 +401,13 @@ __device__ __forceinline__ void sa_copy_half(__nv_bfloat16 const *kbf,
 
 // q: wq_b's QP K parts in slots (fp32 [QP][T][H D], 0xFF before the launch:
 // polled), made into the task's bf16 q here (sa_q_parts)
+// measurement only (-DSA_NOINLINE): the task's body as a function of its own (its
+// registers are then not shared with the rest of the kernel's one function)
+#ifdef SA_NOINLINE
+#define SA_TASK_INLINE __noinline__
+#else
+#define SA_TASK_INLINE __forceinline__
+#endif
 template <int H,
           int D,
           int W,
@@ -395,7 +419,7 @@ template <int H,
           bool CNODE,
           bool CCNODE,
           int NS>
-__device__ __forceinline__ void sparse_attn_task(float const *q,
+__device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
                                                  unsigned char const *cache,
                                                  int const *wrows,
                                                  int const *pos,
@@ -632,13 +656,16 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
   // copy of the code for both passes (unroll 1): pass 0 loads the
   // instructions pass 1 runs while the inputs are on their way
 #pragma unroll 1
-  for (int pass = warm ? 1 : 0; pass < 2; pass++) {
+  for (int pass = warm ? 1 : -SA_EXTRA_DRY; pass < 2; pass++) {
     bool const real = pass == 1;
     // q from wq_b's parts, before the kv wait (a Full layer's compressed
     // pair: before its list's wait too; q usually comes before the top-k)
     sa_q_parts<H, D, RD, QP, !SPLIT>(q, freqs, qs, t, g, p, real);
     if (real) {
       SA_MARK(10)
+    } else {
+      SA_DMARK(30) // (measurement: the dry pass, after its q loads; 33 its S,
+                  // 34 its softmax, 38 its P V)
     }
     // split, a Full layer's compressed pair: its K, once its list and rows
     // are written
@@ -702,6 +729,8 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
     __syncthreads();
     if (real) {
       SA_MARK(2)
+    } else {
+      SA_DMARK(31) // (measurement: the dry pass, its stand-in row and q in shared memory)
     }
     // the list in pairs of 64-position blocks (the official's blocks, in
     // order): pair 0 the window (K in ks since the prologue), pair c > 0 the
@@ -721,6 +750,9 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
                               // staging area (cp.async: no registers held)
           sa_stage_rows(ccache, ids, pr, real, sm);
         }
+      }
+      if (!real && pr == 0) {
+        SA_DMARK(35) // (measurement: the dry pass, the next pair's rows issued)
       }
       // S = q K^T x scale, warp w pair positions 16 w .. 16 w + 15 (2 n8
       // tiles); -inf where the list holds nothing (an unwritten window slot,
@@ -757,6 +789,9 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
             }
           }
         }
+        if (!real && pr == 0) {
+          SA_DMARK(32) // (measurement: the dry pass, thread 0's warp's S tiles done)
+        }
         float const scale = __int_as_float(SCALE_BITS);
 #pragma unroll
         for (int j = 0; j < NT; j++) {
@@ -781,6 +816,9 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
       __syncthreads();
       if (real && pr == 0) {
         SA_MARK(3)
+      }
+      if (!real && pr == 0) {
+        SA_DMARK(33)
       }
       if (real && pr == 1) {
         SA_MARK(11)
@@ -887,6 +925,9 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
       if (real && pr == 0) {
         SA_MARK(4)
       }
+      if (!real && pr == 0) {
+        SA_DMARK(34)
+      }
       if (real && pr == 1) {
         SA_MARK(12)
       }
@@ -965,6 +1006,8 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
     }
     if (real) {
       SA_MARK(8)
+    } else {
+      SA_DMARK(38)
     }
     // O -> fp32 rows os [16][SA_OSLD]
 #pragma unroll
@@ -1062,9 +1105,22 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
       __syncthreads();
       if (real) {
         if ((tid & 15) == 0) {
+#if defined(SA_XFENCE) && SA_XFENCE == 2 // measurement: the sums as one atomic exchange
+          atomicExch(reinterpret_cast<unsigned long long *>(
+                         pml + (s * SA_HPT + (tid >> 4)) * 4 + 2),
+                     (unsigned long long)__float_as_uint(bs0) |
+                         ((unsigned long long)__float_as_uint(bs1) << 32));
+#else
           *reinterpret_cast<float2 *>(pml + (s * SA_HPT + (tid >> 4)) * 4 + 2) =
               make_float2(bs0, bs1);
+#endif
+#if defined(SA_XFENCE) && SA_XFENCE == 3 // measurement: the storing threads' fence
+          __threadfence();
+#endif
         }
+#if defined(SA_XFENCE) && SA_XFENCE == 1 // measurement: every thread's fence
+        __threadfence();
+#endif
       }
       if (real) {
         SA_MARK(16)
@@ -1177,7 +1233,7 @@ __device__ __forceinline__ void sparse_attn_task(float const *q,
         xq_scale_line(out, N, g * (SA_HPT * D / 128) + lc, t, tid & 3, s4);
       }
     } else {
-      SA_MARK(7)
+      SA_DMARK(7)
     }
   }
   if constexpr (BF16K) { // every copy waited for (the last pair's S)
@@ -1272,7 +1328,7 @@ __device__ __forceinline__ void run_sparse_attn(Maps const &,
                                                 G const &g,
                                                 KernelLocals &L,
                                                 StaticTask const &tk,
-                                                bool warm) {
+                                                bool warm = true) { // (default: SA_DRY=0, a measurement build without the dry pass)
   constexpr int H = PARAMS::v[0], D = PARAMS::v[1], W = PARAMS::v[2],
                 RD = PARAMS::v[3], NC = param_or0<PARAMS, 5>(),
                 CAP = param_or0<PARAMS, 6>();

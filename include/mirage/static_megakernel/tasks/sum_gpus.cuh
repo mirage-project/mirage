@@ -47,10 +47,13 @@ __device__ __forceinline__ void run_sum_gpus(Maps const &,
                                              KernelLocals &,
                                              StaticTask const &tk) {
   static_assert(SEND::buf >= 0,
-                "sum_gpus: rows sent by an allreduce_send node");
+                "sum_gpus: rows sent by an allreduce_send or pushing GEMM node");
   static_assert(SELF::y == T && SELF::buf >= 0,
                 "sum_gpus: grid (parts, T tokens), its output Ssum");
-  sum_gpus_task<exchange_offset[SEND::buf], SEND::v[0], SELF::x>(
+  constexpr int H =
+      SEND::v[0] == COMBINE_PUSH ? SEND::v[2] : SEND::v[0]; // (gemm_fp8_tile's
+                                                            // params {mode, K, N})
+  sum_gpus_task<exchange_offset[SEND::buf], H, SELF::x>(
       g, buf_at<__nv_bfloat16>(g, SELF::buf), tk.x, tk.y);
 }
 

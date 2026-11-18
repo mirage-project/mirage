@@ -31,6 +31,7 @@ def main():
     ap.add_argument("--template", default=None, help="a chat_template.jinja (the checkpoint's if it has one)")
     ap.add_argument("--same-length-copies", action="store_true", help="the first prompt 8 times, ignore_eos")
     ap.add_argument("--tokens", type=int, default=96)
+    ap.add_argument("--ignore-eos", action="store_true", help="every request runs all --tokens steps (every decode step has 8 rows)")
     ap.add_argument("--repeat", type=int, default=1, help="the prompt text this many times (a longer context)")
     ap.add_argument("--graph", action="store_true", help="CUDA graphs (default: eager)")
     ap.add_argument("--ctx", type=int, default=2048)
@@ -59,12 +60,12 @@ def main():
         extra["disable_flashinfer_autotune"] = True
     if a.no_bounded_replay:
         extra["enable_decoder_swa_bounded_replay"] = False
-    llm = sgl.Engine(model_path=a.model, tokenizer_path=a.tokenizer or a.model, trust_remote_code=True, tp_size=4,
+    llm = sgl.Engine(model_path=a.model, tokenizer_path=a.tokenizer or a.model, trust_remote_code=True, tp_size=int(os.environ.get("SGL_TP", "4")),
                      max_running_requests=8, cuda_graph_max_bs_decode=8, context_length=a.ctx, max_total_tokens=a.max_total_tokens,
                      mem_fraction_static=a.mem_fraction, disable_radix_cache=True, disable_cuda_graph=not a.graph,
                      log_level="warning", **extra)
     t0 = time.perf_counter()
-    out = llm.generate(input_ids=ids, sampling_params={"max_new_tokens": a.tokens, "ignore_eos": a.same_length_copies,
+    out = llm.generate(input_ids=ids, sampling_params={"max_new_tokens": a.tokens, "ignore_eos": a.same_length_copies or a.ignore_eos,
                                                        "temperature": 0.0})
     dt = time.perf_counter() - t0
     llm.shutdown()
@@ -72,7 +73,7 @@ def main():
     for o in out:
         s = o["text"]
         cut = s.find(tok.eos_token) if tok.eos_token else -1
-        answers.append(s[:cut] if cut >= 0 else s)
+        answers.append(s[:cut] if cut >= 0 and not a.ignore_eos else s)
     print(f"up to {a.tokens} new tokens in {dt:.1f} s; distinct answers among the 8: {len(set(answers))}", flush=True)
     for q, s in zip(prompts, answers):
         print("ANSWER:", repr(q[:40]), "->", repr(s[:200]), flush=True)

@@ -207,7 +207,12 @@ template <class SELF,
           class MAP_SLOTS,
           class ACT,
           class... IN>
-__device__ __forceinline__ void run_gemm_tile(Maps const &maps,
+#ifdef GT_RUN_NOINLINE // measurement only: the task's dispatch as a function of its own
+__device__ __noinline__ void run_gemm_tile(
+#else
+__device__ __forceinline__ void run_gemm_tile(
+#endif
+        Maps const &maps,
                                               G const &g,
                                               KernelLocals &L,
                                               StaticTask const &tk) {

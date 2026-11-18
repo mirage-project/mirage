@@ -268,6 +268,12 @@ public:
                                      std::vector<int> const &params);
   int register_hc_post_sm100_task(threadblock::Graph const &bgraph,
                                   std::vector<int> const &params);
+  int register_hc_mix_sm100_task(threadblock::Graph const &bgraph,
+                                std::vector<int> const &params);
+  int register_hc_coef_sm100_task(threadblock::Graph const &bgraph,
+                                std::vector<int> const &params);
+  int register_hc_post_combine_sm100_task(threadblock::Graph const &bgraph,
+                                std::vector<int> const &params);
   int register_hc_post_mix_sm100_task(threadblock::Graph const &bgraph,
                                       std::vector<int> const &params);
   int register_act_quant_sm100_task(threadblock::Graph const &bgraph,

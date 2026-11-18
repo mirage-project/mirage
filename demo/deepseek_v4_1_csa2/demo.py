@@ -203,11 +203,17 @@ def build_graph(mpk: StaticMegakernel, w: dict, variant: str, ratio: int, csrc: 
     wo_b_part = nt((T, HID), float32, "wo_b_part")
     mpk.gemm_fp8_tile_layer(input=oa_q, weight=a("wo_b_weight"), weight_scales=a("wo_b_scales"), output=wo_b_part,
                             tap=a("oa_q") if fused else None)
-    if mpk.num_gpus > 1:   # y = the GPUs' parts added (sum_store's tasks send theirs to every GPU, then add)
+    if "streams" in w and "h_comb" not in w:     # the sublayer's end in the kernel: the sums land in mHC's post (StaticMegakernel.dsv41_mhc_nodes)
+        sent = nt((mpk.num_gpus * T, HID), bfloat16, "y_sent")
+        mpk.sum_store_layer(input=wo_b_part, output=None, sent=sent)
+        mpk.dsv41_mhc_nodes(a, w, sent)
+    elif mpk.num_gpus > 1:   # y = the GPUs' parts added (sum_store's tasks send theirs to every GPU, then add)
         sent = nt((mpk.num_gpus * T, HID), bfloat16, "y_sent")
         mpk.sum_store_layer(input=wo_b_part, output=a("y"), sent=sent)                             # y on every GPU
     else:
         mpk.sum_store_layer(input=wo_b_part, output=a("y"))                                        # this GPU's y
+    if "h_comb" in w:      # only mHC's coefficients beside the sublayer (the framework runs the all-reduce and the post)
+        mpk.dsv41_mhc_stats_nodes(a, w)
 
 
 def score_chunks(heads: int, cap: int, sms: int) -> int:
@@ -246,13 +252,17 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     grid = hand_grids(heads, cap, cmp_rows)
     grid["o_q"] = next(n.grid for n in nodes if n.name == "sparse_attn")   # (T, heads / 16, 1 or a task per pair: the layer's)
     grid["scores"] = next((n.grid for n in nodes if n.name == "indexer_score"), None)   # (T, score_chunks: the layer's)
+    grid.update({names[n.graph_idx]: n.grid for n in nodes if n.name in ("hc_coef", "hc_post_combine")})
+    grid["hc_mix"] = (1, 32, 1)   # the mixes as a gemm_tile: K 20480 in 32 parts of 5 K tiles
     grids = {idx: grid[name] for idx, name in names.items()}
     tasks = [(idx, (x, y, z)) for idx in sorted(grids) for x in range(grids[idx][0]) for y in range(grids[idx][1])
              for z in range(grids[idx][2])]
     sa = next(idx for idx, name in names.items() if name == "o_q")
     own = [tk for tk in tasks if tk[0] == sa]
     before = sorted((tk for tk in tasks if tk[0] < sa), key=lambda tk: BEFORE.index(names[tk[0]]))
-    after = [tk for tk in tasks if tk[0] > sa]
+    mix = [tk for tk in tasks if names[tk[0]] == "hc_mix"]
+    coef = [tk for tk in tasks if names[tk[0]] == "hc_coef"]
+    after = [tk for tk in tasks if tk[0] > sa and tk not in mix and tk not in coef]
     n = len(own)
     # more than 8 score chunks a token (above 2048 compressed positions): indexer_topk's tasks (one per token) next, each first
     # on an SM of its own, so that its dry pass (the first fetch of its code) runs while the scores are computed
@@ -261,8 +271,26 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     before = [tk for tk in before if tk not in first]
     m = n + len(first)
     lists = [[own[sm]] if sm < n else [first[sm - n]] if sm < m else before[sm - m::sms - m] for sm in range(sms)]
-    for i, tk in enumerate(after):
+    # mHC's coefficients between the nodes before sparse_attn and those after it, on the SMs that wait for o_q anyway
+    # (the SMs after wo_a's tasks: they have nothing to do between the nodes before sparse_attn and wo_b)
+    nwo = sum(1 for tk in after if names[tk[0]] in ("wo_a_part", "oa_q"))
+    # (measurement: HC_SMS = the first SM list of mHC's coefficient tasks instead; 0 = behind sparse_attn's tasks, on their SMs)
+    # (HC_SMS=fit, 2026-11-17: when n + nwo + the mHC tasks pass the last SM, the list wraps onto sparse_attn's SMs and hc_coef
+    # starts only after o_q, delaying the wo_b tasks behind it (TP2 reuse +4, full_r2 +5 to +6 us in SGLang): start so that
+    # the mHC tasks end at the last SM instead, never on sparse_attn's SMs)
+    hc = os.environ.get("HC_SMS", "")
+    off = max(n, min(n + nwo, sms - len(mix) - len(coef))) if hc == "fit" else int(hc) if hc else n + nwo
+    for i, tk in enumerate(mix):
+        lists[(off + i) % sms].append(tk)
+    for i, tk in enumerate(coef):
+        lists[(off + len(mix) + i) % sms].append(tk)
+    # (measurement: HCP_SMS = the first SM list of hc_post_combine's tasks, behind everything else on those SMs, instead of
+    # their place in the round-robin of the nodes after sparse_attn)
+    hcp = [tk for tk in after if names[tk[0]] == "streams_out"] if os.environ.get("HCP_SMS") else []
+    for i, tk in enumerate(tk for tk in after if tk not in hcp):
         lists[(n + i) % sms].append(tk)
+    for i, tk in enumerate(hcp):
+        lists[(int(os.environ["HCP_SMS"]) + i) % sms].append(tk)
     return {"grids": grids, "lists": [copy.deepcopy(lists) for _ in range(mpk.num_gpus)]}
 
 

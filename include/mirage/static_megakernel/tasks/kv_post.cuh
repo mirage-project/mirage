@@ -22,8 +22,15 @@
 
 namespace static_mk {
 
+// measurement only (-DKVP_NOINLINE): the task's body as a function of its own (its
+// registers are then not shared with the rest of the kernel's one function)
+#ifdef KVP_NOINLINE
+#define KVP_TASK_INLINE __noinline__
+#else
+#define KVP_TASK_INLINE __forceinline__
+#endif
 template <int D, int W, int RD, int P, int EPS_BITS>
-__device__ __forceinline__ void kv_post_task(float const *part,
+__device__ KVP_TASK_INLINE void kv_post_task(float const *part,
                                              __nv_bfloat16 const *gamma,
                                              int const *pos,
                                              float const *freqs,

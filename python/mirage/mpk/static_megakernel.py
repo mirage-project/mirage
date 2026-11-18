@@ -13,6 +13,7 @@ to the plan. The sizes come from the graph: each layer reads them from its tenso
 the node's params; the kernel-wide ones (tokens per step, GPUs) are the StaticMegakernel's (tokens, num_gpus), which the
 generated layer defines (config.cuh).
 """
+import os
 import math
 import struct
 
@@ -854,12 +855,13 @@ class StaticMegakernel(PersistentKernel):
                        concurrent_along_axis=concurrent,
                        buf_slots=[self._tensor_slot(window_cache), self._tensor_slot(positions), self._tensor_slot(freqs),
                                   self._tensor_slot(attn_sink), self._tensor_slot(window_rows)] + slots,
-                       dry=True)   # its first task on an SM runs S .. the tail once on stand-ins while its inputs are on their way
+                       dry=os.environ.get("SA_DRY", "1") != "0")   # its first task on an SM runs S .. the tail once on stand-ins while its inputs are on their way (SA_DRY=0, measurement: no dry pass)
 
     def sum_store_layer(
         self,
         input: DTensor,     # wo_b's output [T, N] fp32: a gemm_fp8_tile node's K parts in slots
-        output: DTensor,    # y [T, N] bf16: the layer's output (a graph tensor)
+        output: DTensor,    # y [T, N] bf16: the layer's output (a graph tensor); None with `sent`: only the sending half, the
+                            # buffer's reader (hc_post_combine) adds the GPUs' sums
         sent: DTensor = None,     # num_gpus > 1: [num_gpus x T, N] bf16, the exchange buffer the GPUs' sums go through
         block_dim: tuple = (256, 1, 1),
         routed: DTensor = None,   # DeepSeek-V4.1's MoE: an expert node's routed rows [T x RK, N] fp32, added first
@@ -883,8 +885,13 @@ class StaticMegakernel(PersistentKernel):
                              f"{p.name if p else 'the graph inputs'}")
         at_most_parts(p, 16)   # tasks/sum_store.cuh: at most 16 K parts
         T, N, GPUS = self._tokens(input.dim(0)), input.dim(1), self.num_gpus
-        self._dtypes("sum_store_layer", input=(input, float32), output=(output, bfloat16))
-        assert input.num_dims == 2 and output.num_dims == 2 and (output.dim(0), output.dim(1)) == (T, N) and N % 128 == 0
+        self._dtypes("sum_store_layer", input=(input, float32))
+        assert input.num_dims == 2 and N % 128 == 0
+        if output is not None:
+            self._dtypes("sum_store_layer", output=(output, bfloat16))
+            assert output.num_dims == 2 and (output.dim(0), output.dim(1)) == (T, N)
+        elif GPUS == 1 or sent is None:
+            raise ValueError("sum_store_layer: output None (only the sending half) needs num_gpus > 1 and `sent`")
         rk = 0
         if routed is not None:
             q = producer_of(routed, graph_nodes(self))
@@ -900,11 +907,12 @@ class StaticMegakernel(PersistentKernel):
             self._dtypes("sum_store_layer", sent=(sent, bfloat16))
             assert sent.num_dims == 2 and (sent.dim(0), sent.dim(1)) == (GPUS * T, N)
             tp = dict(out_buffer=lambda n: (GPUS * T * N * 2, 0xFF, True), exchange=True)   # re-armed by its reader (the task)
-        outputs = [sent, output] if GPUS > 1 else [output]   # y an output either way: its readers wait for the tasks
+        outputs = [t for t in ([sent, output] if GPUS > 1 else [output]) if t is not None]   # y an output: its readers wait
         tensors = [input] + ([routed] if rk else []) + outputs
         self._add_node("sum_store", (N // 128, 1, 1), block_dim, tensors,
                        [(1, -1, -1)] * len(tensors), [N] + ([rk] if rk else []),
-                       changeable_grid_dims={0: (128, 1, 8)}, counters=1, buf_slots=[self._tensor_slot(output)],
+                       changeable_grid_dims={0: (128, 1, 8)}, counters=1,
+                       buf_slots=[-1 if output is None else self._tensor_slot(output)],
                        cost_inputs=[0],   # adds wo_b's K parts
                        dry=True,          # its first task on an SM runs once dry while wo_b's parts are on their way
                        **tp)
@@ -1934,6 +1942,120 @@ class StaticMegakernel(PersistentKernel):
                        out_buffer=lambda n: (n.grid[0] * T * HC_MIX_STRIDE * 4, 0xFF, False), counters=1,
                        buf_slots=[self._tensor_slot(residual), self._tensor_slot(output), self._tensor_slot(h_post),
                                   self._tensor_slot(h_res), self._tensor_slot(fn)])
+
+    # ---- DeepSeek-V4.1: mHC with the coefficients of a sublayer computed beside it (model.py Block: its input was collapsed with
+    # the previous sublayer's pre): hc_mix -> hc_coef at the start, the body, the sending half of the all-reduce (sum_store) ->
+    # hc_post_combine at the end (the sums land, the post, the next sublayer's input).
+    def hc_mix_layer(
+        self,
+        residual: DTensor,      # [T, HC H] bf16: the sublayer's input streams (a graph tensor)
+        fn: DTensor,            # [NMIX, HC H] fp32: this sublayer's hc_*_fn
+        mix: DTensor,           # [T, HC_MIX_STRIDE] fp32 (a stand-in: the buffer holds [H / 32][T][HC_MIX_STRIDE])
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Task s = columns [32 s, 32 s + 32) of every stream and token: their partial mixes with fn (hc_coef adds them).
+        params = [HC, H, NMIX]."""
+        T, NMIX = self._tokens(residual.dim(0)), fn.dim(0)
+        HC, H = 4, residual.dim(1) // 4
+        assert NMIX == HC * (HC + 2) and fn.dim(1) == HC * H and H % 32 == 0
+        self._dtypes("hc_mix_layer", residual=(residual, bfloat16), fn=(fn, float32), mix=(mix, float32))
+        self._add_node("hc_mix", (H // 32, 1, 1), block_dim, [residual, fn, mix], [(-1, -1, -1)] * 3, [HC, H, NMIX],
+                       out_buffer=lambda n: (n.grid[0] * T * HC_MIX_STRIDE * 4, 0xFF, False),
+                       buf_slots=[self._tensor_slot(residual), self._tensor_slot(fn)])
+
+    def hc_coef_layer(
+        self,
+        mix: DTensor,           # a gemm_tile node's K parts: [T, 128], rows 0 .. 23 (fn's bf16 part) and 24 .. 47 (the rest)
+        residual: DTensor,      # [T, HC H] bf16: the sublayer's input streams (their sum of squares)
+        hc_small: DTensor,      # fp32 [>= NMIX + 3]: hc_*_base [NMIX], then hc_*_scale [3]
+        h_pre: DTensor,         # [T, HC] fp32: pre, a graph tensor (the framework's state when it runs the next boundary)
+        output: DTensor,        # [T, 32] fp32: the coefficients (its buffer): pre [HC], post [HC], comb [HC HC], 0s
+        rms_eps: float = 1e-20, hc_eps: float = 1e-6, post_mult: float = 2.0, sinkhorn_iters: int = 20,
+        block_dim: tuple = (256, 1, 1),
+        h_post: DTensor = None, # [T, HC] fp32, with h_comb [T, HC HC] fp32: post and comb for a framework that runs the post itself
+        h_comb: DTensor = None,
+    ):
+        """Task t: token t's pre, post and comb from the mixes (model.py hc_mixes, kernel.py hc_split_sinkhorn). Its counter
+        counts its T tasks. params = [rms_eps, hc_eps, post_mult (fp32 bits), Sinkhorn iterations]."""
+        from .compiler import graph_nodes, producer_of
+        p = producer_of(mix, graph_nodes(self))
+        if p is None or p.name != "gemm_tile":
+            raise ValueError("hc_coef_layer: mix must be a gemm_tile node's output")
+        HC, NMIX = 4, 24
+        T = self._tokens(output.dim(0))
+        assert hc_small.dim(0) >= NMIX + 3 and output.dim(1) == 32 and (h_pre.dim(0), h_pre.dim(1)) == (T, HC)
+        self._dtypes("hc_coef_layer", mix=(mix, float32), hc_small=(hc_small, float32), h_pre=(h_pre, float32),
+                     output=(output, float32))
+        self._add_node("hc_coef", (T, 1, 1), block_dim, [mix, output], [(0, -1, -1), (0, -1, -1)],
+                       [float_bits(rms_eps), float_bits(hc_eps), float_bits(post_mult), sinkhorn_iters],
+                       out_buffer=lambda n: (T * 32 * 4, -1, False), counters=1, cost_inputs=[0],
+                       buf_slots=[self._tensor_slot(hc_small), self._tensor_slot(h_pre), self._tensor_slot(residual),
+                                  -1 if h_post is None else self._tensor_slot(h_post),
+                                  -1 if h_comb is None else self._tensor_slot(h_comb)])
+
+    def hc_post_combine_layer(
+        self,
+        sent: DTensor,          # [num_gpus x T, H] bf16: the exchange buffer of the node that sent the partial sums
+        residual: DTensor,      # [T, HC H] bf16: the sublayer's input streams
+        coef: DTensor,          # an hc_coef node's coefficients
+        output: DTensor,        # [T, HC H] bf16: the new streams (a graph tensor)
+        x: DTensor = None,      # [T, H] bf16: the next sublayer's input (a graph tensor); None: the post only (the framework
+                                # collapses the streams: Engram rewrites them first, or the head reads them)
+        gamma: DTensor = None,  # [H] bf16: the next sublayer's RMSNorm weight
+        norm_eps: float = 1e-20,
+        parts: int = 8,         # tasks per token, each H / parts columns
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Task (q, t): columns of token t: the sums over the GPUs, R', and with x the next sublayer's input (tasks of a token
+        exchange their sums of squares, so they run at the same time). Its counter counts its tasks. params = [H, HC, NORM,
+        norm_eps (fp32 bits)]."""
+        from .compiler import graph_nodes, producer_of
+        nodes = graph_nodes(self)
+        s, c = producer_of(sent, nodes), producer_of(coef, nodes)
+        if s is None or s.name != "sum_store" or c is None or c.name != "hc_coef":
+            raise ValueError("hc_post_combine_layer: sent from a sum_store node, coef from an hc_coef node")
+        H, GPUS = sent.dim(1), self.num_gpus
+        T, HC = sent.dim(0) // GPUS, residual.dim(1) // H
+        norm = x is not None
+        assert (gamma is not None) == norm and output.dim(1) == HC * H
+        self._dtypes("hc_post_combine_layer", sent=(sent, bfloat16), residual=(residual, bfloat16), coef=(coef, float32),
+                     output=(output, bfloat16))
+        slots = [self._tensor_slot(residual), self._tensor_slot(output)]
+        if norm:
+            self._dtypes("hc_post_combine_layer", x=(x, bfloat16), gamma=(gamma, bfloat16))
+            slots += [self._tensor_slot(gamma), self._tensor_slot(x), self._scratch("hc_ssq", T * parts * 4, reset=0xFF)]
+        self._add_node("hc_post_combine", (parts, T, 1), block_dim, [sent, residual, coef, output],
+                       [(1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1)], [H, HC, int(norm), float_bits(norm_eps)],
+                       counters=1, concurrent_along_axis=0 if norm else None, buf_slots=slots,
+                       dry=os.environ.get("HC_DRY", "0") != "0")   # its first task on an SM runs once dry (the MoE gains, the attention loses)
+
+    def dsv41_mhc_nodes(self, a, w: dict, sent: DTensor):
+        """The mHC nodes of a DeepSeek-V4.1 sublayer whose tensors w holds them (the sublayer's sum_store only sends): a(name) =
+        the graph tensor. streams, hc_fn, hc_small, h_pre, streams_out; gamma_next and x_out when the next sublayer's input is
+        computed here. The buffer slots are then exactly the graph's."""
+        T = w["streams"].shape[0]
+        self.max_bufs = 64   # (until the slots are known, below)
+        mix = self.new_tensor(dims=(T, 128), dtype=float32, name="hc_mix")
+        self.gemm_tile_layer(input=a("streams"), weight=a("hc_fn_w"), output=mix)     # the mixes, fn as bf16 rows hi | lo
+        coef = self.new_tensor(dims=(T, 32), dtype=float32, name="hc_coef")
+        self.hc_coef_layer(mix=mix, residual=a("streams"), hc_small=a("hc_small"), h_pre=a("h_pre"), output=coef)
+        norm = "gamma_next" in w
+        self.hc_post_combine_layer(sent=sent, residual=a("streams"), coef=coef, output=a("streams_out"),
+                                   x=a("x_out") if norm else None, gamma=a("gamma_next") if norm else None,
+                                   parts=int(os.environ.get("HC_PARTS", 4)))
+        self.max_bufs = len(self._bufs)
+
+    def dsv41_mhc_stats_nodes(self, a, w: dict):
+        """Only mHC's coefficients beside the sublayer (the framework runs the all-reduce and the post): the mixes (a gemm_tile of
+        the streams with hc_fn_w) -> hc_coef -> the graph tensors h_pre, h_post, h_comb."""
+        T = w["streams"].shape[0]
+        self.max_bufs = 64   # (until the slots are known, below)
+        mix = self.new_tensor(dims=(T, 128), dtype=float32, name="hc_mix")
+        self.gemm_tile_layer(input=a("streams"), weight=a("hc_fn_w"), output=mix)
+        coef = self.new_tensor(dims=(T, 32), dtype=float32, name="hc_coef")
+        self.hc_coef_layer(mix=mix, residual=a("streams"), hc_small=a("hc_small"), h_pre=a("h_pre"), output=coef,
+                           h_post=a("h_post"), h_comb=a("h_comb"))
+        self.max_bufs = len(self._bufs)
 
     # ---- GLM-5.3-Flash KDA (tasks/kda_decode.cuh): a KDA sublayer is in_proj (a gemm_tile in slots) -> kda_decode ->
     # o_proj -> allreduce_send -> hc_post_mix -> hc_pre (the next sublayer's input).

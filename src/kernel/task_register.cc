@@ -5876,6 +5876,41 @@ int TaskRegister::register_hc_post_sm100_task(threadblock::Graph const &bgraph,
       this, TASK_HC_POST_SM100, "hc_post", bgraph, params, 3, 3);
 }
 
+int TaskRegister::register_hc_mix_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {HC, H, NMIX = HC (HC + 2)}. inputs: the streams, fn; output: the
+  // partial mixes (its buffer [H / 32][T][32] fp32).
+  assert(params.size() == 3 && params[2] == params[0] * (params[0] + 2));
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 2, 1, input_ops, output_ops);
+  return register_task_variant(TASK_HC_MIX_SM100,
+                               static_build_only_task("hc_mix", params));
+}
+
+int TaskRegister::register_hc_coef_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {rms eps, hc eps, post multiplier (fp32 bits), Sinkhorn
+  // iterations}. input: hc_mix's output; output: the coefficients (its buffer
+  // [T][32] fp32).
+  assert(params.size() == 4);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 1, 1, input_ops, output_ops);
+  return register_task_variant(TASK_HC_COEF_SM100,
+                               static_build_only_task("hc_coef", params));
+}
+
+int TaskRegister::register_hc_post_combine_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {H, HC, NORM, norm eps (fp32 bits)}. inputs: the sent partial sums,
+  // the streams, hc_coef's coefficients; output: the new streams.
+  assert(params.size() == 4);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 3, 1, input_ops, output_ops);
+  return register_task_variant(
+      TASK_HC_POST_COMBINE_SM100,
+      static_build_only_task("hc_post_combine", params));
+}
+
 int TaskRegister::register_hc_post_mix_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {HC, H, NMIX = HC (HC + 2)}. inputs: the sent partial

@@ -94,11 +94,17 @@ def build_graph(mpk: StaticMegakernel, w: dict) -> None:
     routed = nt((T * K, HID), float32, "routed_rows")
     mpk.swiglu_moe_experts_layer(x_q=x_q, pairs=pairs, w13=a("w13"), w13_scales=a("w13_scales"), w2=a("w2"),
                                  w2_scales=a("w2_scales"), output=routed, swiglu_limit=SWIGLU_LIMIT)      # the routed experts
-    if mpk.num_gpus > 1:   # y = the GPUs' parts added (each sum_store task sends its bf16 sums to every GPU, then adds them)
+    if "streams" in w and "h_comb" not in w:     # the sublayer's end in the kernel: the sums land in mHC's post (StaticMegakernel.dsv41_mhc_nodes)
+        sent = nt((mpk.num_gpus * T, HID), bfloat16, "y_sent")
+        mpk.sum_store_layer(input=sd_part, routed=routed, output=None, sent=sent)
+        mpk.dsv41_mhc_nodes(a, w, sent)
+    elif mpk.num_gpus > 1:   # y = the GPUs' parts added (each sum_store task sends its bf16 sums to every GPU, then adds them)
         sent = nt((mpk.num_gpus * T, HID), bfloat16, "y_sent")
         mpk.sum_store_layer(input=sd_part, routed=routed, output=a("y"), sent=sent)                 # y on every GPU
     else:
         mpk.sum_store_layer(input=sd_part, routed=routed, output=a("y"))                            # y = routed + shared
+    if "h_comb" in w:      # only mHC's coefficients beside the sublayer (the framework runs the all-reduce and the post)
+        mpk.dsv41_mhc_stats_nodes(a, w)
 
 
 def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
@@ -113,14 +119,28 @@ def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
     grid = {"logit_part": (E // 128, ROUTER_PARTS, 1), "pairs": (T, 1, 1), "x_q": (T, 1, 1), "sgu_part": (blocks, 36 // blocks, 1),
             "hs_q": (T, 1, 1), "sd_part": (HID // 128, 1, 1), "routed_rows": (sms, 1, 1), "y": (HID // 128, 1, 1),
             "y_sent": (HID // 128, 1, 1)}
+    grid.update({names[n.graph_idx]: n.grid for n in nodes if n.name in ("hc_coef", "hc_post_combine")})
+    grid["hc_mix"] = (1, 32, 1)   # the mixes as a gemm_tile: K 20480 in 32 parts of 5 K tiles
     grids = {idx: grid[name] for idx, name in names.items()}
     tasks = lambda name: [(idx, (x, y, 0)) for idx in grids if names[idx] == name
                           for x in range(grids[idx][0]) for y in range(grids[idx][1])]
     order = [tk for name in ("pairs", "hs_q", "x_q", "logit_part", "sgu_part", "sd_part") for tk in tasks(name)]
-    assert len(order) <= sms, f"{len(order)} tasks, {sms} SMs: one task per SM"
+    # more tasks than SMs (STATIC_FREE_SMS_MOE): the last ones behind the first short tasks that do not wait for them (x_q's, the router's)
+    assert len(order) <= sms + (sms - 16), f"{len(order)} tasks, {sms} SMs"
     ex = next(idx for idx, name in names.items() if name == "routed_rows")
     ys = tasks("y_sent" if mpk.num_gpus > 1 else "y")
-    lists = [([order[sm]] if sm < len(order) else []) + [(ex, (sm, 0, 0))] + ys[sm:sm + 1] for sm in range(sms)]
+    lists = [([order[sm]] if sm < len(order) else []) for sm in range(sms)]
+    for i, tk in enumerate(order[sms:]):
+        lists[16 + i].append(tk)
+    # mHC's coefficients before the experts' queue opens; the sublayer's end after sum_store's tasks
+    idle = max(sms - len(order), 1)   # the SMs with no task before the experts: the mixes run there first (their input is ready)
+    for i, tk in enumerate(tasks("hc_mix")):
+        lists[len(order) % sms + i % idle].append(tk)
+    for i, tk in enumerate(tasks("hc_coef")):
+        lists[sms - 1 - i].append(tk)
+    lists = [lists[sm] + [(ex, (sm, 0, 0))] + ys[sm:sm + 1] for sm in range(sms)]
+    for i, tk in enumerate(tasks("streams_out")):
+        lists[(len(ys) + i) % sms].append(tk)
     return {"grids": grids, "lists": [copy.deepcopy(lists) for _ in range(mpk.num_gpus)]}   # the same plan on every GPU
 
 

@@ -1147,6 +1147,19 @@ void Graph::register_task_for_op(KNOperator const *op,
     int variant_id = task_register->register_hc_post_mix_sm100_task(
         customized->bgraph, params);
     task_config[op] = std::make_tuple(4, 2, TASK_HC_POST_MIX_SM100, variant_id);
+  } else if (name == "hc_mix") {
+    int variant_id =
+        task_register->register_hc_mix_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(2, 1, TASK_HC_MIX_SM100, variant_id);
+  } else if (name == "hc_coef") {
+    int variant_id =
+        task_register->register_hc_coef_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, 1, TASK_HC_COEF_SM100, variant_id);
+  } else if (name == "hc_post_combine") {
+    int variant_id = task_register->register_hc_post_combine_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(3, 1, TASK_HC_POST_COMBINE_SM100, variant_id);
   } else if (name == "act_quant") {
     int variant_id = task_register->register_act_quant_sm100_task(
         customized->bgraph, params);

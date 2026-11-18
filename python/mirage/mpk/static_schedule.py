@@ -280,6 +280,8 @@ def kernel_code(nodes: Dict[str, dict], profile: bool = False) -> List[str]:
     for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])):
         lines.append(case_code(idx, node))
     lines.append("    }")
+    if __import__("os").environ.get("STATIC_TASK_FENCE"):   # measurement only (2026-11-10): are hand-offs late because plain stores stay buffered?
+        lines.append("    __threadfence();   // measurement: this task's stores pushed out before the SM's next task")
     if profile:
         lines.append("    if ((threadIdx.x & 31) == 0) STATIC_TIME(ti)[1 + threadIdx.x / 32] = static_now();   // this warp left the task")
     lines += ["  }", "  static_mk::kernel_end(g, L);", "}", ""]

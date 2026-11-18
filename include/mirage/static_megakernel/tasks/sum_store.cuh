@@ -23,12 +23,14 @@
 // counts all its tasks): added first, row t RK .. t RK + RK - 1 in order (the
 // official loop over the experts), then the K parts (the shared expert's) in
 // part order.
+// SEND_ONLY (buffer slot -1 for y, GPUS > 1): only the sending half; the
+// buffer's reader adds the GPUs' sums (hc_post_combine) and there is no y.
 #pragma once
 #include "../core.cuh"
 
 namespace static_mk {
 
-template <int N, int NC, int P, size_t XOFF, int RK = 0>
+template <int N, int NC, int P, size_t XOFF, int RK = 0, bool SEND_ONLY = false>
 __device__ __forceinline__ void sum_store_task(G const &g,
                                                float const *part,
                                                float const *rows,
@@ -37,7 +39,7 @@ __device__ __forceinline__ void sum_store_task(G const &g,
                                                __nv_bfloat16 *y,
                                                uint32_t *done_cnt,
                                                int x,
-                                               bool warm) {
+                                               bool warm STAGE_STAMP_PARAM) {
   static_assert(T == 8 && NC % 128 == 0 && N % NC == 0,
                 "sum_store: a warp per token, whole 128-column blocks");
   int const t = threadIdx.x >> 5, l = threadIdx.x & 31;
@@ -135,7 +137,8 @@ __device__ __forceinline__ void sum_store_task(G const &g,
       }
     }
   }
-  if constexpr (GPUS > 1) { // every GPU's sums of these columns, in GPU order
+  if constexpr (GPUS > 1 && !SEND_ONLY) { // every GPU's sums of these columns,
+                                          // in GPU order
     for (int c = x * NC + 4 * l; c < (x + 1) * NC; c += 128) {
       // the pair's 16 B (both lanes load them; each takes its half)
       unsigned char const *row =
@@ -252,18 +255,24 @@ __device__ __forceinline__ void run_sum_store(Maps const &,
     rows_cnt = g.cnt + RR::counter;
     rows_target = RR::x * RR::y * RR::z;
   }
+  constexpr bool SEND_ONLY = slot_at<BUF_SLOTS, 0>() < 0;
+  __nv_bfloat16 *y = nullptr;
+  if constexpr (!SEND_ONLY) {
+    y = buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 0>());
+  }
   sum_store_task<N,
                  N / SELF::x,
                  OB::y,
                  (GPUS > 1 ? exchange_offset[SELF::buf < 0 ? 0 : SELF::buf]
                            : 0),
-                 RK>(
+                 RK,
+                 SEND_ONLY>(
       g,
       buf_at<float const>(g, OB::buf),
       rows,
       rows_cnt,
       rows_target,
-      buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 0>()),
+      y,
       g.cnt + SELF::counter,
       tk.x,
       warm);

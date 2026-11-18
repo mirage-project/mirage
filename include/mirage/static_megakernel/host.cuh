@@ -252,9 +252,23 @@ static void mc_alloc(size_t need, unsigned char *&mcVA, unsigned char *recv[]) {
 template <typename P>
 static P *dmalloc(GpuState &s, size_t bytes) {
   void *p;
+#ifdef STATIC_BUF_STAGGER // measurement only: the i-th buffer of a GPU starts
+                          // (STATIC_BUF_BASE + i STATIC_BUF_STAGGER) mod 4096
+                          // bytes into its allocation (multiples of 256), so
+                          // that the buffers' addresses differ modulo 4 KiB
+#ifndef STATIC_BUF_BASE
+#define STATIC_BUF_BASE 0
+#endif
+  MKS_CK(cudaMalloc(&p, bytes + 4096));
+  s.owned.push_back(p);
+  size_t const off =
+      ((size_t)(STATIC_BUF_BASE) + (s.owned.size() - 1) * (size_t)(STATIC_BUF_STAGGER)) % 4096;
+  return static_cast<P *>(static_cast<void *>(static_cast<unsigned char *>(p) + off));
+#else
   MKS_CK(cudaMalloc(&p, bytes));
   s.owned.push_back(p);
   return static_cast<P *>(p);
+#endif
 }
 
 // the args "<prefix><slot>" (slot < n), split at spaces; a missing slot is an

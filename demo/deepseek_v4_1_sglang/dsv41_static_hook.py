@@ -16,7 +16,8 @@ check (DSV41_STATIC_CHECK=1; eager runs): SGLang's layer first, then the static 
 static vs SGLang. DSV41_STATIC_KEEP=sgl (the default in check mode) passes SGLang's output on, static the static layer's.
 Env: DSV41_STATIC_ATTN, DSV41_STATIC_MOE, DSV41_STATIC_CHECK, DSV41_STATIC_KEEP, DSV41_STATIC_PDL (0 / 1),
 DSV41_STATIC_CKPT (a directory with inference/config.json and the shards, default the server's model path),
-DSV41_STATIC_OUT (build directory), DSV41_STATIC_MAX_POS (the largest position, default 2047), DSV41_STATIC_ROOT.
+DSV41_STATIC_OUT (build directory), DSV41_STATIC_MAX_POS (the largest position, default 2047), DSV41_STATIC_ROOT,
+DSV41_STATIC_PROF (a file: the kernels' own stamps of the last step when the driver rewrites it, see dsv41_static_prof.py).
 """
 import os
 import time
@@ -37,12 +38,18 @@ def _ids(name):
 
 ATTN, MOE = _ids("DSV41_STATIC_ATTN"), _ids("DSV41_STATIC_MOE")   # None: every layer
 CHECK = os.environ.get("DSV41_STATIC_CHECK", "0") != "0"
+CHECK_STEPS = int(os.environ.get("DSV41_STATIC_CHECK_STEPS", "3"))   # check mode, mHC in the kernels: steps printed per sublayer
+CHECK_BITS = os.environ.get("DSV41_STATIC_CHECK_BITS", "0") != "0"   # and the static outputs' integer sums with each line
 PROBE = os.environ.get("DSV41_STATIC_PROBE", "0") != "0"
 POOL = os.environ.get("DSV41_STATIC_POOL", "1") != "0"
 AR = os.environ.get("DSV41_STATIC_AR", "0") != "0"   # the all-reduce in the kernels: y is the sum, SGLang's own one is skipped
 assert not (AR and CHECK), "check mode compares this rank's partial y: DSV41_STATIC_AR=0"
 SEAM = os.environ.get("DSV41_STATIC_SEAM", "0") != "0"   # no all-reduce in the kernels; the MoE takes the attention's seam kernel
 assert not (AR and SEAM), "DSV41_STATIC_SEAM: the all-reduce stays in SGLang (DSV41_STATIC_AR=0)"
+MHC = os.environ.get("DSV41_STATIC_MHC", "0") != "0"   # mHC and the all-reduce in the kernels: a sublayer ends in its kernel
+assert not (MHC and (AR or SEAM)), "DSV41_STATIC_MHC: no DSV41_STATIC_AR, no DSV41_STATIC_SEAM"
+STATS = os.environ.get("DSV41_STATIC_STATS", "0") != "0"   # mHC's coefficients in the kernels; the seam stays SGLang's, no SMs left free
+assert not STATS or (SEAM and not MHC), "DSV41_STATIC_STATS needs DSV41_STATIC_SEAM=1 and no DSV41_STATIC_MHC"
 DUMP = os.environ.get("DSV41_STATIC_DUMP")   # a directory: the static MoE layers' x of every step
 KEEP = os.environ.get("DSV41_STATIC_KEEP", "sgl" if CHECK else "static")
 PDL = os.environ.get("DSV41_STATIC_PDL", "0") != "0"
@@ -91,8 +98,10 @@ def _init_cuda_graphs(self, *args, **kwargs):
         layers = sorted((m for m in self.model.modules() if isinstance(m, _v4.DeepseekV4CudaDecoderLayer)),
                         key=lambda m: m.layer_id)
         sources = Sources(cfg)
-        attn_pool = ExchangePool(_STATE["tp_group"], dev, len(layers)) if AR else None
-        moe_pool = ExchangePool(_STATE["tp_group"], dev, len(layers)) if AR else None
+        _STATE["meta"] = {"variants": {lay.layer_id: attn_weights.variant_of(cfg, lay.layer_id) for lay in layers},
+                          "engram": [lay.layer_id for lay in layers if lay.engram is not None], "tp": tp}   # (for dsv41_static_prof)
+        attn_pool = ExchangePool(_STATE["tp_group"], dev, len(layers)) if AR or MHC else None
+        moe_pool = ExchangePool(_STATE["tp_group"], dev, len(layers)) if AR or MHC else None
         self._dsv41_pools = (attn_pool, moe_pool)   # the exchange regions: alive as long as the layers
         steps = None
         if POOL:   # the caps by ratio as StaticAttn's
@@ -103,7 +112,7 @@ def _init_cuda_graphs(self, *args, **kwargs):
         for lay in layers:
             L = lay.layer_id
             if _chosen(ATTN, L):
-                lay.self_attn._dsv41 = StaticAttn(L, ckpt, rank, tp, dev, OUT, MAX_POS, sources, PDL, attn_pool, steps)
+                lay.self_attn._dsv41 = StaticAttn(L, ckpt, rank, tp, dev, OUT, MAX_POS, sources, PDL, attn_pool, steps, mhc=MHC, stats=STATS)
                 _ATTNS.append(lay.self_attn._dsv41)
                 if POOL:
                     lay.self_attn._dsv41.bind_pools(self.token_to_kv_pool)
@@ -112,14 +121,20 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 ex = lay.mlp.experts
                 if int(getattr(ex, "moe_ep_size", 1)) != 1:
                     raise RuntimeError("the static MoE is one TP shard of every expert: run SGLang with ep_size 1")
-                lay.mlp._dsv41 = StaticMoE(L, ckpt, int(ex.moe_tp_rank), int(ex.moe_tp_size), dev, OUT, PDL, moe_pool)
+                # the next sublayer's input in the kernel unless Engram rewrites the streams first or the head reads them
+                # (DSV41_STATIC_NORM_NEXT=0, measurement 2026-11-17: never; the MoE kernel ends at its mHC post and SGLang
+                # computes the next attention's input, as GLM-5.3-Flash does at bs 8 (#821))
+                norm_next = MHC and L + 1 < len(layers) and layers[L + 1].engram is None \
+                    and os.environ.get("DSV41_STATIC_NORM_NEXT", "1") != "0"
+                lay.mlp._dsv41 = StaticMoE(L, ckpt, int(ex.moe_tp_rank), int(ex.moe_tp_size), dev, OUT, PDL, moe_pool, mhc=MHC,
+                                           norm_next=norm_next, stats=STATS)
                 _MOES.append(lay.mlp._dsv41)
-                if AR or SEAM:
+                if AR or SEAM or MHC:
                     _OUTS.add(lay.mlp._dsv41.w["y"].data_ptr())
                 _log(f"MoE L{L} ready, shared expert TP1 {getattr(lay.mlp, '_shared_expert_tp1', '?')}, "
                      f"{torch.cuda.mem_get_info()[0] / 2**30:.1f} GB free")
         torch.cuda.synchronize()
-        if AR:   # every rank's layers built (each fills its copy of the exchange regions) before any first launch
+        if AR or MHC:   # every rank's layers built (each fills its copy of the exchange regions) before any first launch
             torch.distributed.barrier(group=_STATE["tp_group"])
     out = _orig_init(self, *args, **kwargs)
     _STATE["serving"] = True
@@ -231,10 +246,16 @@ def _attn_forward(self, x, positions, forward_batch, x_quant=None, defer_all_red
             _log(f"first static decode step (L{st.layer}): " + ("in a CUDA graph capture" if capturing else
                                                                 f"positions {positions.view(-1).tolist()}"))
         _STATE["started"] = True
+        if MHC:   # the kernel ends the sublayer: run_attn_post (patched) takes its streams and next input
+            out = _orig_attn(self, x, positions, forward_batch, x_quant, defer_all_reduce) if CHECK else None
+            y = st.run(x, positions, st.R)
+            st.R = None
+            _STATE["pending"] = st
+            return out if CHECK else _mhc.AttnOutput(y)
         if CHECK:
             out = _orig_attn(self, x, positions, forward_batch, x_quant, defer_all_reduce)
             ref = out.partial if isinstance(out, _mhc.AttnOutput) else out
-            y = st.run(x, positions)
+            y = _run_stats(st, x, positions)
             torch.cuda.synchronize()
             if _rank() == 0 and st.steps <= 4:
                 _log(f"check attn L{st.layer} ({st.variant}) step {st.steps} p {positions.view(-1)[:2].tolist()}: y relRMS "
@@ -245,7 +266,7 @@ def _attn_forward(self, x, positions, forward_batch, x_quant=None, defer_all_red
                 except Exception as e:   # a probe must not end the run
                     _log(f"probe L{st.layer} failed: {type(e).__name__}: {e}")
             return out if KEEP == "sgl" else _mhc.AttnOutput(y)
-        y = st.run(x, positions)
+        y = _run_stats(st, x, positions)
         return y if AR else _mhc.AttnOutput(y)
     if POOL:
         return _orig_attn(self, x, positions, forward_batch, x_quant, defer_all_reduce)
@@ -264,11 +285,32 @@ def _attn_forward(self, x, positions, forward_batch, x_quant=None, defer_all_red
     return out
 
 
+def _run_stats(st, *args):
+    """st.run; DSV41_STATIC_STATS: with this sublayer's streams, its triplet for the post (patched run_*_post)."""
+    if not STATS:
+        return st.run(*args)
+    y = st.run(*args, st.R)
+    st.R = None
+    _STATE["pending"] = st
+    return y
+
+
 def _moe_forward(self, hidden_states, forward_batch=None, *args, **kwargs):
     st = getattr(self, "_dsv41", None)
     if st is None or not _active() or forward_batch is None or not forward_batch.forward_mode.is_decode() or \
             hidden_states.shape[0] != T:
         return _orig_moe(self, hidden_states, forward_batch, *args, **kwargs)
+    if not _ATTNS and not _STATE.get("moe_started"):   # (no static attention on this rank: the MoE layers report the first step)
+        _STATE["moe_started"] = True
+        _log(f"first static decode step (L{st.layer}): " + ("in a CUDA graph capture" if torch.cuda.is_current_stream_capturing()
+                                                             else "eager") + " [MoE layers only]")
+    if MHC:   # the kernel ends the sublayer: run_moe_post (patched) takes its streams and next input
+        x = hidden_states.clone() if CHECK else hidden_states   # (SGLang's experts may write their output into x)
+        out = _orig_moe(self, hidden_states, forward_batch, *args, **kwargs) if CHECK else None
+        y = st.run(x, st.R)
+        st.R = None
+        _STATE["pending"] = st
+        return out if CHECK else y
     if CHECK:
         out = _orig_moe(self, hidden_states, forward_batch, *args, **kwargs)
         from sglang.srt.layers.layer_boundary.output import DeferredFinalize, UnreducedOutput, complete_owed
@@ -284,7 +326,7 @@ def _moe_forward(self, hidden_states, forward_batch=None, *args, **kwargs):
         if DUMP:
             os.makedirs(DUMP, exist_ok=True)
             torch.save(hidden_states.cpu(), os.path.join(DUMP, f"x_r{_rank()}_L{st.layer}_s{st.steps}.pt"))
-        y = st.run(hidden_states)
+        y = _run_stats(st, hidden_states)
         try:
             torch.cuda.synchronize()
         except Exception as e:
@@ -298,7 +340,7 @@ def _moe_forward(self, hidden_states, forward_batch=None, *args, **kwargs):
         if KEEP == "sgl":
             return out
     else:
-        y = st.run(hidden_states)
+        y = _run_stats(st, hidden_states)
     return y if AR or SEAM else _dv2.MergedMoEOutput(y, None, self.experts, 1.0, False)
 
 
@@ -332,15 +374,76 @@ def _moe_prepare(self, hidden_states):
 
 
 _orig_run_moe_post = _mhc.run_moe_post
+_orig_run_attn_post = _mhc.run_attn_post
+_orig_mix_stats = _mhc.mix_stats
+_orig_read = _bd.HcReadCall.read
+
+
+def _read(self, residual, norm, quant_format="", post_residual_addition=None):
+    """HcReadCall.read: the streams this sublayer starts from, for its static layer: only of a decode step it runs (holding a
+    prefill's streams would keep 1.3 GB per sublayer alive)."""
+    x, state = _orig_read(self, residual, norm, quant_format, post_residual_addition)
+    st = getattr(self.layer.self_attn if self.attention else self.layer.mlp, "_dsv41", None)
+    if st is not None and isinstance(state, _bd.ReadState) and self.batch.forward_mode.is_decode() and state.streams.shape[0] == T:
+        st.R = state.streams
+    return x, state
+
+
+def _mhc_end(st, orig, hc, out, residual, stats_stream, next, world_size, precomputed, tag):
+    """The end of a sublayer whose kernel ran mHC: its state; in check mode SGLang's post too, the two compared, SGLang's kept."""
+    if not CHECK:
+        return st.hc_state(next, _mhc)
+    state = orig(hc, out, residual, stats_stream=stats_stream, next=next, world_size=world_size, precomputed=precomputed)
+    torch.cuda.synchronize()
+    if _rank() == 0 and st.steps <= CHECK_STEPS:
+        w, rows = st.w, getattr(state.input, "rows", None)
+        msg = f"check mHC {tag} L{st.layer} step {st.steps}: R' relRMS {_relrms(w['streams_out'], state.streams.flatten(1)):.2e}, " \
+              f"pre {_relrms(w['h_pre'], state.pre):.2e}"
+        if "gamma_next" in w and rows is not None:
+            msg += f", x {_relrms(w['x_out'], rows):.2e}"
+        if CHECK_BITS:   # the static outputs' bits as integer sums: two builds of the same math print the same numbers
+            msg += " bits " + " ".join(str(int(w[k].contiguous().view(torch.int16).sum(dtype=torch.int64)))
+                                       for k in ("streams_out", "h_pre", "x_out") if k in w)
+        _log(msg + f" (next {'yes' if next is not None else 'no'})")
+    return state if KEEP == "sgl" else st.hc_state(next, _mhc)
+
+
+def _stats_triplet(st, hc, residual, tag):
+    """The kernel's (pre, post, comb) for SGLang's post; in check mode compared with SGLang's own, and SGLang's kept."""
+    tri = st.triplet()
+    if not CHECK:
+        return tri
+    torch.cuda.synchronize()
+    if _rank() == 0 and st.steps <= 3:
+        ref = _orig_mix_stats(hc, residual, None)
+        torch.cuda.synchronize()
+        _log(f"check stats {tag} L{st.layer} step {st.steps}: pre {_relrms(tri[0], ref[0]):.2e}, post {_relrms(tri[1], ref[1]):.2e}, "
+             f"comb {_relrms(tri[2], ref[2].reshape(tri[2].shape)):.2e}")
+    return None if KEEP == "sgl" else tri
+
+
+def _run_attn_post(hc, out, residual, *, stats_stream, next, world_size, precomputed=None):
+    st = _STATE.pop("pending", None) if MHC or STATS else None
+    if st is not None and STATS:
+        precomputed, st = _stats_triplet(st, hc, residual, "attn"), None
+    if st is None:
+        return _orig_run_attn_post(hc, out, residual, stats_stream=stats_stream, next=next, world_size=world_size,
+                                   precomputed=precomputed)
+    return _mhc_end(st, _orig_run_attn_post, hc, out, residual, stats_stream, next, world_size, precomputed, "attn")
 
 
 def _run_moe_post(hc, out, residual, *, stats_stream, next, world_size, precomputed=None):
     """deepseek_v4_mhc.run_moe_post (DSV41_STATIC_SEAM): this rank's part of the static MoE's y takes the attention's seam, one
     SGLang kernel for the all-reduce, the mHC post and the next sublayer's input; where the next sublayer's input is not computed
     there (Engram rewrites the streams first, or the head reads them), the sum, then SGLang's plain post."""
+    st = _STATE.pop("pending", None) if MHC or STATS else None
+    if st is not None and MHC:
+        return _mhc_end(st, _orig_run_moe_post, hc, out, residual, stats_stream, next, world_size, precomputed, "moe")
+    if st is not None:
+        precomputed = _stats_triplet(st, hc, residual, "moe")
     if SEAM and torch.is_tensor(out) and out.data_ptr() in _OUTS:
         if next is not None:
-            return _mhc.run_attn_post(hc, _mhc.AttnOutput(out), residual, stats_stream=stats_stream, next=next,
+            return _orig_run_attn_post(hc, _mhc.AttnOutput(out), residual, stats_stream=stats_stream, next=next,
                                       world_size=world_size, precomputed=precomputed)
         from sglang.srt.layers.layer_boundary.output import UnreducedOutput, complete_owed
         from sglang.srt.runtime_context import get_parallel
@@ -349,7 +452,19 @@ def _run_moe_post(hc, out, residual, *, stats_stream, next, world_size, precompu
                               precomputed=precomputed)
 
 
+if os.environ.get("DSV41_STATIC_PROF"):   # the static kernels' stamps of the last step, on the driver's request (dsv41_static_prof)
+    import dsv41_static_prof as _prof
+    _orig_forward = _mr.ModelRunner.forward
+
+    def _forward(self, *args, **kwargs):
+        _prof.maybe_sample(_ATTNS, _MOES, _rank(), _STATE.get("meta"))
+        return _orig_forward(self, *args, **kwargs)
+
+    _mr.ModelRunner.forward = _forward
 _mhc.run_moe_post = _run_moe_post
+if MHC or STATS:
+    _mhc.run_attn_post = _run_attn_post
+    _bd.HcReadCall.read = _read
 _bd.MoeTransport.prepare_output = _moe_prepare
 _mr.ModelRunner.init_cuda_graphs = _init_cuda_graphs
 _v4.MQALayer.forward = _attn_forward
