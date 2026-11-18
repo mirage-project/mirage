@@ -17,6 +17,7 @@ import numpy as np
 
 FILE = os.environ.get("DSV41_STATIC_PROF", "")
 CTA = os.environ.get("DSV41_STATIC_PROF_CTA", "0") != "0"   # also every CTA's start and end stamp ("cta": per kernel, by blockIdx)
+TASKS = os.environ.get("DSV41_STATIC_PROF_TASKS", "0") != "0"   # timing build: also every task [node, SM, place, start, end]
 _seen = [None]
 _sched = {}   # id(kernel) -> (each SM's task list, task -> node name): a timing build's schedule, read once
 
@@ -45,7 +46,11 @@ def _nodes(st, h, rank):
     for nm, v in per.items():
         ss, ee = sorted(p for p, _ in v), sorted(q for _, q in v)
         out.append([nm, len(v), ss[0], ss[len(ss) // 2], ss[-1], ee[0], ee[len(ee) // 2], ee[-1]])
-    return sorted(out, key=lambda r: r[7])
+    out = sorted(out, key=lambda r: r[7])
+    if TASKS:   # (DSV41_STATIC_PROF_TASKS) every task of the launch, in its SM's order
+        out = (out, [[node_of[t], sm, i, int(tt[sm][i][0]), int(tt[sm][i][1]), int(tt[sm][i][2]), int(tt[sm][i][3])]
+                     for sm, q in enumerate(queues) for i, t in enumerate(q) if tt[sm][i][0] and tt[sm][i][1]])   # + its 2 stage stamps
+    return out
 
 
 def _kernel(st, kind, rank=0):
@@ -62,7 +67,12 @@ def _kernel(st, kind, rank=0):
     row = [int(st.layer), kind, getattr(st, "variant", "moe"), int(start[on].min()), int(start[on].max()),
            int(h._array(0, "start_barrier", np.int64)[0]), int(end[on].min()), int(end[on].max()), int(on.sum()), experts]
     if lay.get("profile"):
-        row.append(_nodes(st, h, rank))
+        nodes = _nodes(st, h, rank)
+        if TASKS:
+            nodes, tasks = nodes
+        row.append(nodes)
+        if TASKS:
+            row.append(tasks)   # row[11]: every task (meas/e2e/prof_tasks.py)
     return (row, [start.tolist(), end.tolist()]) if CTA else row
 
 
