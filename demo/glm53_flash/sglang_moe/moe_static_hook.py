@@ -55,7 +55,7 @@ CHECK = os.environ.get("MOE_STATIC_CHECK", "1") != "0"
 PDL = os.environ.get("MOE_STATIC_PDL", "1") != "0"
 # the T whose layers end with the next layer's attention mHC pre (mhc_pre), the others at the FFN's mHC post (mhc): each T's
 # faster end end to end (nsys step periods, bs 8 / 16 / 32 / 64, prompt 256)
-END_PRE_TOKENS = tuple(int(x) for x in os.environ.get("MOE_STATIC_END_PRE", "16,32,64").split(","))   # A/B: e.g. 16,32,64
+END_PRE_TOKENS = tuple(int(x) for x in os.environ.get("MOE_STATIC_END_PRE", "16,32").split(","))   # A/B: e.g. 16,32,64
 PLAN_FILE = {1: os.environ.get("MOE_STATIC_PLAN1") or None,     # the layers' plan files by T (a plan file is of one T's
              2: os.environ.get("MOE_STATIC_PLAN2") or None,     # graph: the grids differ)
              4: os.environ.get("MOE_STATIC_PLAN4") or None,
