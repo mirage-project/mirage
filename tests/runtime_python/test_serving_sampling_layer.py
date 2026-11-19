@@ -22,9 +22,13 @@ LOGITS = np.array([-1, -1.4, -1.8, -2.2] + [-30] * 4 + [0] * 8,
 
 @pytest.fixture(scope="module", params=[(16, None), (153600, None), (153600, 2)],
                 ids=["small-vocab-multi-cta", "large-vocab-multi-cta", "more-partitions-than-workers"])
-def sample(request):
+def sample(request, tmp_path_factory):
     if not torch.cuda.is_available() or not shutil.which("nvcc"):
         pytest.skip("CUDA and nvcc are required")
+
+    workdir = pytest.MonkeyPatch()
+    workdir.chdir(tmp_path_factory.mktemp("serving_sampling"))
+    request.addfinalizer(workdir.undo)
 
     device = torch.cuda.current_device()
     workers, schedulers = mirage.get_configurations_from_gpu(device)

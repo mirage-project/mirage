@@ -240,7 +240,6 @@ class MPK:
             self.num_schedulers = args.num_schedulers
         print(f"num_workers: {self.num_workers}, num_schedulers: {self.num_schedulers}")
         # init meta tensors
-        # Versioned serving settings: ring payload is copied into private row state.
         meta_tensors = {
             "step": self.step,
             "tokens": self.tokens,

@@ -2519,10 +2519,11 @@ int TaskRegister::register_serving_sampling_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   assert(params.size() == 3);
   int phase = params[0], parts = params[1];
+  bool const final_phase = phase == 2;
   auto *input = static_cast<tb::TBInputOp *>(bgraph.operators[0]);
   auto logits = input->output_tensors[0];
   mirage::transpiler::CodeKeeper code;
-  if (phase == 2) {
+  if (final_phase) {
     code.e("for (int slot = task_desc->task_metadata.request_id; "
            "slot < MPK_MAX_NUM_BATCHED_REQUESTS; slot += $) {", params[2]);
     code.inc_indent();
@@ -2533,13 +2534,10 @@ int TaskRegister::register_serving_sampling_task(
   code.e("    static_cast<uint32_t *>(task_desc->input_ptrs[1]),");
   code.e("    static_cast<char *>(task_desc->input_ptrs[2]),");
   code.e("    static_cast<long long *>(task_desc->output_ptrs[0]),");
-  if (phase == 2) {
-    code.e("    $, $, slot,", logits.dim[1], parts);
-  } else {
-    code.e("    $, $, task_desc->task_metadata.request_id,", logits.dim[1], parts);
-  }
+  code.e("    $, $, $,", logits.dim[1], parts,
+         final_phase ? "slot" : "task_desc->task_metadata.request_id");
   code.e("    task_desc->task_metadata.merge_task_offset, runtime_config);");
-  if (phase == 2) {
+  if (final_phase) {
     code.e("__syncthreads();");
     code.dec_indent();
     code.e("}");

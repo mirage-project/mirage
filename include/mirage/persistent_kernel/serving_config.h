@@ -8,7 +8,7 @@ namespace mirage { namespace serving {
 
 constexpr int MAX_EOS = 16;
 constexpr int MAX_BIASES = 256;
-constexpr int SAMPLING_PARTIAL_WORDS = 4 * 128;
+constexpr int SAMPLING_PARTIAL_WORDS = 4 * 32;
 
 struct LogitBias {
   int64_t token;

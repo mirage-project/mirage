@@ -1401,13 +1401,6 @@ class PersistentKernel:
                 f"q_len_override={q_len_override} exceeds "
                 f"max_tokens_per_request={self.max_tokens_per_request}")
             params.append(self.max_tokens_per_request)
-        elif self.target_cc < 90:
-            # Ampere's native task has a fixed 10-field ABI. It does not
-            # accept the optional SM90/SM100 tail (in particular eps_bits
-            # must not be interpreted as the page stride).
-            params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
-                      self.max_seq_length, block_size, q_len_override,
-                      tail_offset, group_id, stride_field]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests
@@ -2670,10 +2663,11 @@ class PersistentKernel:
         if self.mode != "online_pinned":
             raise ValueError("serving_sampling_layer requires online_pinned mode")
         vocab_size = logits.dim(1)
+        max_ctas = 32
         if num_ctas is None:
-            num_ctas = min(32, max(8, (vocab_size + 4095) // 4096))
-        if not 2 <= num_ctas <= 128:
-            raise ValueError("sampling num_ctas must be between 2 and 128")
+            num_ctas = max_ctas
+        if not 2 <= num_ctas <= max_ctas:
+            raise ValueError(f"sampling num_ctas must be between 2 and {max_ctas}")
         scratch = self.new_tensor(
             (self.max_num_batched_requests, serving_scratch_words(vocab_size)),
             dtype=float32,
@@ -2690,16 +2684,17 @@ class PersistentKernel:
         radix_groups = self.num_workers // radix_ctas
         # Prepare, score, and fused dual-pivot sampling.
         # Sampling groups occupy distinct workers and stride over request slots.
-        for phase in range(3):
-            final = phase == 2
+        prepare, score, sample = range(3)
+        for phase in (prepare, score, sample):
+            final = phase == sample
             result = output if final else self.new_tensor(
                 (self.max_num_batched_requests, 1),
-                dtype=int64,
+                dtype=int32,
                 name=f"serving_sampling_phase_{phase}",
             )
             grid = (self.max_num_batched_requests,
-                    1 if phase == 0 else num_ctas, 1)
-            if phase == 2:
+                    1 if phase == prepare else num_ctas, 1)
+            if final:
                 grid = (radix_groups, radix_ctas, 1)
             graph = TBGraph(CyTBGraph(grid, (128, 1, 1), 1, 64))
             inputs = [logits, scratch, parallel]
@@ -2707,14 +2702,14 @@ class PersistentKernel:
                 graph.new_input(tensor, (-1, -1, -1), -1, True)
             if previous is not None:
                 inputs.append(previous)
-                previous_map = (-1, -1, -1) if phase == 2 else (0, -1, -1)
+                previous_map = (-1, -1, -1) if final else (0, -1, -1)
                 graph.new_input(previous, previous_map, -1, True)
-            output_map = (-1, -1, -1) if phase == 2 else (0, -1, -1)
+            output_map = (-1, -1, -1) if final else (0, -1, -1)
             graph.new_input(result, output_map, -1, True)
             self.kn_graph.customized(inputs + [result], graph)
             self.kn_graph.register_task(
                 graph, "serving_sampling",
-                [phase, radix_ctas if phase == 2 else num_ctas, radix_groups]
+                [phase, radix_ctas if final else num_ctas, radix_groups]
             )
             previous = result
 
@@ -3277,10 +3272,7 @@ class PersistentKernel:
         MIRAGE_ROOT, INCLUDE_PATH, DEPS_PATH = get_key_paths()
         if self.mode == "online_notoken" or self.mode == "online" or self.mode == "multi_turn" or self.mode=="online_pinned":
             # We will init for multiple times so the output directory should be permanent
-            # dlopen caches by pathname. Give each live compiled graph a
-            # distinct library, including single-/multi-CTA benchmark variants.
-            os.makedirs("./permanent_output_dir/", exist_ok=True)
-            tempdir = tempfile.mkdtemp(prefix="compile_", dir="./permanent_output_dir/")
+            tempdir = "./permanent_output_dir/"
         else:
             tempdir_obj = tempfile.TemporaryDirectory()
             tempdir = tempdir_obj.name
