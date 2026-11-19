@@ -1,18 +1,13 @@
-"""GLM-5.3-Flash decode on SGLang 0.5.22, TP4, one engine per run (a batch size and a speculative configuration): bs prompts
-of each --prompt-tokens length, --tokens new tokens each, CUDA graphs:
-  --spec off      plain decode
-  --spec 5/1/6    MTP through SGLang's EAGLE path: --speculative-num-steps 5, --speculative-eagle-topk 1,
-                  --speculative-num-draft-tokens 6 (the cookbook's low-latency configuration); 3/1/4 likewise
+"""DeepSeek-V4.1-Flash decode on SGLang, TP4, one engine per run (a batch size): bs prompts of each --prompt-tokens length,
+--tokens new tokens each, CUDA graphs, plain decode (--spec off; this model has no MTP).
 Per prompt length (median over --reps): the wall time of the bs requests' --tokens new tokens (the time of 1 new token
-subtracted: the prefill), us per output token per request (the decode round: one verify + its draft chain with MTP), tokens/s over
-the batch, and with MTP the mean accept length (meta_info spec_accept_length: tokens per verify step) and the verify steps per
-request (spec_verify_ct). The prompts are cut to the token count with the model's tokenizer (filler words before the task).
-With the static layers (DSA_STATIC_LAYERS, ...: boot/sitecustomize.py) the hooks replace the layers as the chain's other runs.
+subtracted: the prefill), us per output token per request and tokens/s over the batch. The prompts are cut to the token
+count with the model's tokenizer (filler words before the task). With the static layers (DSV41_STATIC_*:
+../boot/sitecustomize.py) the hook replaces SGLang's layers.
 
-python sgl_spec_bench.py --bs 1 --spec 5/1/6 [--prompt-tokens 4000] [--tokens 256] [--reps 3] [--ctx 8448]
-    [--kv bfloat16] [--max-total-tokens N] [--profile [--profile-steps 24] [--profile-tokens 96]]
-(end-to-end comparisons: nsys step periods, --profile under nsys (sgl_chain.py prof_* runs, nsys_e2e.py), one run per
-prompt length, 256 and 4000 tokens)
+python dsv41_spec_bench.py --bs 8 --spec off [--prompt-tokens 4000] [--tokens 256] [--reps 3] [--ctx 8448]
+    [--max-total-tokens N] [--profile [--profile-steps 24] [--profile-tokens 96]]
+(the comparison against SGLang under nsys: README_bs8.md)
 """
 import argparse
 import os
@@ -21,8 +16,8 @@ import time
 
 import sglang as sgl
 
-# (DSv4.1-Flash copy of PR #819's demo/glm53_flash/sglang_dsa/sgl_spec_bench.py, kept beside it as sgl_spec_bench_819.py:
-# the model path, the Engine's GLM backend arguments and the MTP branch are the only changes; `diff` the two files)
+# (PR #819's demo/glm53_flash/sglang_dsa/sgl_spec_bench.py in upstream mpk, for DSv4.1-Flash: the model path, the engine
+# arguments, plain decode only, a hash of every row's output after each generate call, and --span-file)
 MODEL = os.environ["DSV41_MODEL"]   # the 40-layer checkpoint (SGLang's model path)
 TASK = " Write a long story about the history of computing, chapter {i}."
 
@@ -61,7 +56,6 @@ def main():
     ap.add_argument("--tokens", type=int, default=256)
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--ctx", type=int, default=8448, help="context_length (8448: 2048 index pools, as 8192)")
-    ap.add_argument("--kv", default="bfloat16")
     ap.add_argument("--max-total-tokens", type=int, default=None)
     ap.add_argument("--profile", action="store_true", help="then --profile-steps forward steps under the CUDA profiler API "
                     "(nsys), the last prompt length's prompts with --profile-tokens new tokens")

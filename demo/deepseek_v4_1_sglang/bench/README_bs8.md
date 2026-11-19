@@ -7,10 +7,11 @@ the set that is being measured.
 Only decode steps of exactly 8 rows run the static layers (T = 8). SGLang runs the other batch sizes and the prefill
 with its own layers. A run at another batch size therefore compares SGLang with SGLang.
 
-The method is PR #819's. `dsv41_spec_bench.py` is a copy of #819's `sgl_spec_bench.py`; only the model and the engine
-arguments are changed. Each run starts one `sgl.Engine`. It profiles 64 decode steps of 256 tokens under nsys with the
-CUDA graph trace. `period.py` takes the decode step as the period of the forward graph, from the start of one replay
-to the start of the next.
+The method is PR #819's. `dsv41_spec_bench.py` is #819's `sgl_spec_bench.py` (`demo/glm53_flash/sglang_dsa/` in upstream
+mpk) with DSv4.1's model path and engine arguments; it also prints a hash of every row's output. Each run starts one
+`sgl.Engine` and traces, under nsys with the CUDA graph trace, the first 64 forward steps of one generate call of 256 new
+tokens. `period.py` takes the decode step as the period of the forward graph, from the start of one replay to the start
+of the next.
 
 ## Setup
 
@@ -18,18 +19,18 @@ to the start of the next.
   A B200 (179 GiB) is not enough.
 - SGLang at commit `240f2a0a64` in its own venv. Build mirage from this branch with the same Python minor version.
   Put `nvcc` and `nsys` on `PATH`.
-- `M`: the 40-layer DeepSeek-V4.1-Flash checkpoint (SGLang's model path).
-- `CK`: a directory that holds the official repository's `inference/config.json` and links to the shards of `M`.
-  `DSV41_STATIC_CKPT` reads the layers' weights from it.
+- `M`: the official 40-layer DeepSeek-V4.1-Flash checkout. The static layers read its `inference/config.json` and its
+  shards. If your copy has no `inference/` folder, set `DSV41_STATIC_CKPT` to a folder that holds that file and links to
+  the shards.
 
 ```bash
-export MIRAGE=/path/to/this/checkout M=/path/to/DeepSeek-V4.1-Flash CK=/path/to/ck
+export MIRAGE=/path/to/this/checkout M=/path/to/DeepSeek-V4.1-Flash
 D=$MIRAGE/demo/deepseek_v4_1_sglang
 ARGS="--bs 8 --spec off --prompt-tokens 4000 --max-total-tokens 81920 --reps 1 --profile --profile-steps 64 --profile-tokens 256"
 NS="nsys profile --force-overwrite true --capture-range=cudaProfilerApi --capture-range-end=stop --trace=cuda,nvtx \
     --cuda-graph-trace=graph --trace-fork-before-exec=true"
 STATIC="PYTHONPATH=$D/boot DSV41_STATIC_ROOT=$MIRAGE DSV41_STATIC_ATTN=all DSV41_STATIC_MOE=all DSV41_STATIC_MAX_POS=4607 \
-    SGLANG_DSV4_KV_LAYOUT=v41_new DSV41_STATIC_CKPT=$CK"
+    SGLANG_DSV4_KV_LAYOUT=v41_new"
 # the measured set: mHC + all-reduce in the kernels (MHC, PDL, flags), the tcgen05 index scores, S2-1, I1, I1b, I1c,
 # C12 (MOE_ROWS_POLL), H1 stage A (X_FLAG with the attention unbound), S2-2 (S2_DEFER)
 SET="DSV41_STATIC_PDL=1 DSV41_STATIC_MHC=1 SA_DRY=0 HC_DRY_MOE=1 HC_DRY_ATTN=0 \
@@ -62,21 +63,21 @@ minus 1.
   `build/sgl_static_dsv41/cache`.
 - `static_r*.log` must contain `first static decode step (L0): in a CUDA graph capture`. Without that line, the static
   layers did not run.
-- `python $D/bench/pair_ab.py DIR sglang_r1` pairs the runs replay by replay. It needs the runs as `<arm>_r<k>` with
-  their `.sqlite` and `.log` in DIR. It pairs only runs that made the same tokens; SGLang and the static layers make the
-  same tokens only when they agree bit for bit, which they usually do not. So pair the static runs with each other, as a
-  noise floor.
+- For the noise of one side, `python $D/bench/pair_ab.py . static` compares `static_r1` with `static_r2` replay by
+  replay. It pairs only runs that made the same tokens. SGLang and the static layers make different tokens, so it cannot
+  compare the two sides.
 
 ## The switches
 
-| Switch | What it changes | Single-layer result (Modal B200, cold TLB) |
+| Switch | What it changes | Result so far |
 |---|---|---|
-| `DSV41_STATIC_MHC=1` and the HCP flags | mHC and the all-reduce inside the kernels | (11-18 whole model: +3.6 % against SGLang) |
+| `DSV41_STATIC_MHC=1` and the HCP flags | mHC and the all-reduce inside the kernels | 11-18 whole model: +3.6 % against SGLang |
 | `DSV41_S2_ARGMAX=1` | the greedy argmax as a 2-kernel Triton reduction | -23 us a step (whole model) |
-| `-DI1_BF16`, `-DI1B_FQ` | fewer register spills on the reuse layers | -0.9 us each a reuse layer |
-| `DSV41_I1C=2` | fewer spills on the index layers | -2.0 us a full_r2 layer |
-| `-DMOE_ROWS_POLL` | sum_store polls the routed rows instead of a count | MoE y -0.5 us, span ~0 |
+| `-DI1_BF16`, `-DI1B_FQ` | fewer register spills on the reuse layers | -0.9 us each a reuse layer (one layer, Modal B200) |
+| `DSV41_I1C=2` | fewer spills on the index layers | -2.0 us a full_r2 layer (one layer, Modal B200) |
+| `-DMOE_ROWS_POLL` | sum_store polls the routed rows instead of a count | MoE y -0.5 us, span ~0 (one layer, Modal B200) |
 | `DSV41_X_FLAG=1 ..._ATTN_BIND=0` | H1 stage A: the MoE's front waits for the attention's x flag, not the grid | -2.2 us a MoE kernel (local TP2) |
 | `DSV41_S2_DEFER=1` | greedy decode from the vocab shards, without the logits all-gather | correct, not timed |
 
-All of them leave the outputs the same: the golden checks match line for line, and the greedy tokens match.
+None of them changes the outputs: the golden checks match line for line, and the greedy tokens match. The last five rows
+have not been measured on the whole model yet.
