@@ -44,9 +44,16 @@ __device__ __forceinline__ bool
   uint4 xp = {};
 #endif
   if (on) {
+#ifdef I1B_FQ
+    // I1b (11-19): gamma into L1 now (a prefetch holds no registers: these 4
+    // spilled across the wait and the barrier in kv_post), loaded after the
+    // barrier; the same values
+    asm volatile("prefetch.global.L1 [%0];" ::"l"(gamma + c));
+#else
     // gamma first: its load overlaps the wait for the parts (after the barrier
     // below it could not start before the sum of squares)
     gb = *reinterpret_cast<uint4 const *>(gamma + c);
+#endif
     add_parts8<K, P>(part, t, c, x, dry);
     STAGE_STAMP(true)
     float ss = 0.f;
@@ -83,6 +90,9 @@ __device__ __forceinline__ bool
     }
     float const r =
         rsqrtf(__fadd_rn(__fmul_rn(tot, 1.0f / K), __int_as_float(EPS_BITS)));
+#ifdef I1B_FQ
+    gb = *reinterpret_cast<uint4 const *>(gamma + c);
+#endif
     __nv_bfloat162 const *g2 = reinterpret_cast<__nv_bfloat162 const *>(&gb);
 #pragma unroll
     for (int k = 0; k < 4; k++) {

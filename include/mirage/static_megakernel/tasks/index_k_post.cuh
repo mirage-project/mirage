@@ -36,6 +36,15 @@ __device__ __forceinline__ void index_k_post_task(float const *part,
   // once wk wrote them, used or not)
   if (threadIdx.x < 32 && (fires || REARM)) {
     bool const rope = c >= HD - RD;
+#ifdef I1B_FQ
+    // I1b (11-19): prefetches into L1 here (no registers across the wait for
+    // wk's parts), the loads where they are used; the same values
+    if (rope && fires) {
+      asm volatile("prefetch.global.L1 [%0];" ::"l"(
+          freqs + ((size_t)(p + 1 - R) * (RD / 2) + (c - (HD - RD)) / 2) * 2));
+    }
+    asm volatile("prefetch.global.L1 [%0];" ::"l"(gamma + c));
+#else
     float4 fq;
     if (rope &&
         fires) { // the lane's 2 RoPE pairs at the group's first position
@@ -43,6 +52,7 @@ __device__ __forceinline__ void index_k_post_task(float const *part,
           freqs + ((size_t)(p + 1 - R) * (RD / 2) + (c - (HD - RD)) / 2) * 2);
     }
     uint2 const gb = *reinterpret_cast<uint2 const *>(gamma + c);
+#endif
     float4 v[P];
     bool ok[P];
 #pragma unroll
@@ -95,6 +105,14 @@ __device__ __forceinline__ void index_k_post_task(float const *part,
       }
       float const r =
           rsqrtf(__fadd_rn(__fmul_rn(ss, 1.0f / HD), __int_as_float(EPS_BITS)));
+#ifdef I1B_FQ
+      uint2 const gb = *reinterpret_cast<uint2 const *>(gamma + c);
+      float4 fq;
+      if (rope) {
+        fq = *reinterpret_cast<float4 const *>(
+            freqs + ((size_t)(p + 1 - R) * (RD / 2) + (c - (HD - RD)) / 2) * 2);
+      }
+#endif
       __nv_bfloat162 const *g2 = reinterpret_cast<__nv_bfloat162 const *>(&gb);
 #pragma unroll
       for (int k = 0; k < 2; k++) {

@@ -44,6 +44,17 @@ __device__ KVP_TASK_INLINE void kv_post_task(float const *part,
   int const l = threadIdx.x & 31, c = 8 * threadIdx.x, p = pos[t];
   bool const rope = c >= D - RD && c < D;
   // the thread's 4 RoPE pairs first: the load overlaps the wait for wkv
+#ifdef I1B_FQ
+  // I1b (11-19): only prefetches into L1 here (they hold no registers: these 8
+  // floats spilled across the wait for wkv), the loads where the pairs are
+  // used; the same values
+  if (rope) {
+    float4 const *f = reinterpret_cast<float4 const *>(
+        freqs + ((size_t)p * (RD / 2) + (c - (D - RD)) / 2) * 2);
+    asm volatile("prefetch.global.L1 [%0];" ::"l"(f));
+    asm volatile("prefetch.global.L1 [%0];" ::"l"(f + 1));
+  }
+#else
   float4 fq[2];
   if (rope) {
     float4 const *f = reinterpret_cast<float4 const *>(
@@ -51,9 +62,19 @@ __device__ KVP_TASK_INLINE void kv_post_task(float const *part,
     fq[0] = f[0];
     fq[1] = f[1];
   }
+#endif
   float y[8]; // kv
   if (rms_norm_parts8<D, P, EPS_BITS>(part, gamma, t, y)) {
     if (rope) {
+#ifdef I1B_FQ
+      float4 fq[2];
+      {
+        float4 const *f = reinterpret_cast<float4 const *>(
+            freqs + ((size_t)p * (RD / 2) + (c - (D - RD)) / 2) * 2);
+        fq[0] = f[0];
+        fq[1] = f[1];
+      }
+#endif
 #pragma unroll
       for (int k = 0; k < 4; k++) {
         float const a = y[2 * k], b = y[2 * k + 1];

@@ -36,6 +36,18 @@ __device__ __forceinline__ void ckv_post_task(__nv_bfloat16 const *latent,
   // warp 0, a group completed (its row in the cache: none past the cache)
   if (threadIdx.x < 32 && (p + 1) % R == 0 && p / R < CAP) {
     bool const rope = c >= D - RD;
+#ifdef I1B_FQ
+    // I1b (11-19): only prefetches into L1 here (no registers across the
+    // wait: these 16 floats spilled), the loads where the pairs are used
+    if (rope) { // the lane's 8 RoPE pairs at the group's first position
+      float4 const *f = reinterpret_cast<float4 const *>(
+          freqs + ((size_t)(p + 1 - R) * (RD / 2) + (c - (D - RD)) / 2) * 2);
+#pragma unroll
+      for (int k = 0; k < 4; k++) {
+        asm volatile("prefetch.global.L1 [%0];" ::"l"(f + k));
+      }
+    }
+#else
     float4 fq[4];
     if (rope) { // the lane's 8 RoPE pairs at the group's first position
       float4 const *f = reinterpret_cast<float4 const *>(
@@ -45,6 +57,7 @@ __device__ __forceinline__ void ckv_post_task(__nv_bfloat16 const *latent,
         fq[k] = f[k];
       }
     }
+#endif
     if (l == 0) {
       cnt_wait(l_cnt, l_target); // the compressor's tasks (all tokens)
     }
@@ -64,6 +77,17 @@ __device__ __forceinline__ void ckv_post_task(__nv_bfloat16 const *latent,
       }
     }
     if (rope) {
+#ifdef I1B_FQ
+      float4 fq[4];
+      {
+        float4 const *f = reinterpret_cast<float4 const *>(
+            freqs + ((size_t)(p + 1 - R) * (RD / 2) + (c - (D - RD)) / 2) * 2);
+#pragma unroll
+        for (int k = 0; k < 4; k++) {
+          fq[k] = f[k];
+        }
+      }
+#endif
 #pragma unroll
       for (int k = 0; k < 8; k++) {
         float const a = x[2 * k], b = x[2 * k + 1];

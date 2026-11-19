@@ -30,6 +30,17 @@ __device__ __forceinline__ void indexer_q_task(float const *part,
   size_t const col = (size_t)(i >> 3) * HD + c;
   bool const rope = c >= HD - RD;
   // the thread's 8 RoPE pairs first: the load overlaps the wait for wq_b
+#ifdef I1B_FQ
+  // I1b (11-19): only prefetches into L1 here (no registers across the wait:
+  // these 16 floats spilled), the loads where the pairs are used
+  if (rope) {
+    float4 const *f = reinterpret_cast<float4 const *>(
+        freqs + ((size_t)pos[t] * (RD / 2) + (c - (HD - RD)) / 2) * 2);
+#pragma unroll
+    for (int k = 0; k < 4; k++) {
+      asm volatile("prefetch.global.L1 [%0];" ::"l"(f + k));
+    }
+#else
   float4 fq[4];
   if (rope) {
     float4 const *f = reinterpret_cast<float4 const *>(
@@ -38,6 +49,7 @@ __device__ __forceinline__ void indexer_q_task(float const *part,
     for (int k = 0; k < 4; k++) {
       fq[k] = f[k];
     }
+#endif
   }
   float4 v[P][4];
   bool ok[P];
@@ -92,6 +104,17 @@ __device__ __forceinline__ void indexer_q_task(float const *part,
     x[j] = bf16r(x[j]); // wq_b's output
   }
   if (rope) {
+#ifdef I1B_FQ
+    float4 fq[4];
+    {
+      float4 const *f = reinterpret_cast<float4 const *>(
+          freqs + ((size_t)pos[t] * (RD / 2) + (c - (HD - RD)) / 2) * 2);
+#pragma unroll
+      for (int k = 0; k < 4; k++) {
+        fq[k] = f[k];
+      }
+    }
+#endif
 #pragma unroll
     for (int k = 0; k < 8; k++) {
       float const a = x[2 * k], b = x[2 * k + 1];
