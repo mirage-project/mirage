@@ -469,5 +469,14 @@ _bd.MoeTransport.prepare_output = _moe_prepare
 _mr.ModelRunner.init_cuda_graphs = _init_cuda_graphs
 _v4.MQALayer.forward = _attn_forward
 _dv2.DeepseekV2MoE.forward = _moe_forward
+# S2-1 (11-18; default off): DSV41_S2_ARGMAX=1: the greedy sampler's torch.argmax(logits, -1) by fast_argmax (the same index,
+# torch.argmax's rules: the first maximum, a NaN as the maximum; 2 kernels, 4.3 us GPU at [8, 129280] on a B200 against
+# torch.argmax's 25.0 us reduce_kernel). Only sglang.srt.layers.sampler's torch.argmax calls change (its module's `torch`)
+S2_ARGMAX = bool(os.environ.get("DSV41_S2_ARGMAX"))
+if S2_ARGMAX:
+    import fast_argmax as _fa
+    import sglang.srt.layers.sampler as _smp
+    _fa.install(_smp)
 print(f"[dsv41_static] patched SGLang: attention {'all' if ATTN is None else sorted(ATTN)}, MoE "
-      f"{'all' if MOE is None else sorted(MOE)} ({'check, keep ' + KEEP if CHECK else 'replace'}, PDL {PDL})", flush=True)
+      f"{'all' if MOE is None else sorted(MOE)} ({'check, keep ' + KEEP if CHECK else 'replace'}, PDL {PDL}"
+      f"{', S2 argmax' if S2_ARGMAX else ''})", flush=True)

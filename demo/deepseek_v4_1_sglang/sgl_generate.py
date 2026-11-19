@@ -78,8 +78,8 @@ def main():
     for q, s in zip(prompts, answers):
         print("ANSWER:", repr(q[:40]), "->", repr(s[:200]), flush=True)
     if a.out:
-        json.dump({"prompts": prompts, "ids": ids, "answers": answers, "static": {k: v for k, v in os.environ.items()
-                                                                                    if k.startswith("DSV41_STATIC")}},
+        json.dump({"prompts": prompts, "ids": ids, "answers": answers, "output_ids": [o.get("output_ids") for o in out],
+                   "static": {k: v for k, v in os.environ.items() if k.startswith(("DSV41_STATIC", "DSV41_S2"))}},
                   open(a.out, "w"), indent=1, ensure_ascii=False)
 
 
