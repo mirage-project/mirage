@@ -83,7 +83,7 @@ def fit_prefetch(samples: List[Tuple[float, float]], weights: Optional[List[floa
     longer than pre: pre may be anything up to w_min) or after it (no window reaches the plateau: pre may be anything from
     w_max)."""
     w = np.maximum(np.array([s[0] for s in samples], dtype=float), 0.0)
-    d = np.array([s[1] for s in samples], dtype=float)
+    d = np.maximum(np.array([s[1] for s in samples], dtype=float), 0.0)   # a task that skips its inputs can end before them
     wt = np.ones(len(d)) if weights is None else np.array(weights, dtype=float)
     at = quant * wt.sum()
 
