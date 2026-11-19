@@ -172,7 +172,6 @@ __device__ inline void prepare_history(
 
   for (int i = begin + threadIdx.x; i < current_len; i += blockDim.x) {
     long long token = history_tokens[i];
-    // assert token is within the range?
     uint32_t index = static_cast<uint32_t>(token) >> 5;
     uint32_t mask = 1u << (token & 31);
 

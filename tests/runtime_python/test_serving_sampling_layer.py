@@ -15,13 +15,14 @@ from mirage.mpk.online_pinned_runtime import OnlinePinnedRuntime
 from mirage.mpk.persistent_kernel import PersistentKernel
 
 
-REAL_VOCAB = 8
-LOGITS = np.array([-1, -1.4, -1.8, -2.2] + [-30] * 4 + [0] * 8,
-                  dtype=np.float32)
+REAL_VOCAB = 32761
+TOKEN_IDS = [0, 8193, 17001, 32760]
+LOGITS = np.full(REAL_VOCAB, -30, dtype=np.float32)
+LOGITS[TOKEN_IDS] = [-1, -1.4, -1.8, -2.2]
 
 
-@pytest.fixture(scope="module", params=[(16, None), (153600, None), (153600, 2)],
-                ids=["small-vocab-multi-cta", "large-vocab-multi-cta", "more-partitions-than-workers"])
+@pytest.fixture(scope="module", params=[(32768, None), (153600, None), (153600, 2)],
+                ids=["32k-vocab-multi-cta", "large-vocab-multi-cta", "more-partitions-than-workers"])
 def sample(request, tmp_path_factory):
     if not torch.cuda.is_available() or not shutil.which("nvcc"):
         pytest.skip("CUDA and nvcc are required")
@@ -104,7 +105,7 @@ def sample(request, tmp_path_factory):
 @pytest.mark.parametrize("settings", [
     {"temperature": 0},
     {"temperature": 0, "top_k": 3, "top_p": 1e-100,
-     "logit_bias": {1: .3984375}},
+     "logit_bias": {TOKEN_IDS[1]: .3984375}},
 ])
 def test_greedy(sample, settings):
     assert sample(settings, range(8)) == [0] * 8
@@ -123,7 +124,7 @@ def test_topk_one_and_seed(sample):
     {"temperature": 1, "top_k": 3, "top_p": .75},
     {"temperature": 1, "top_k": 2, "top_p": .5},
     {"temperature": .8, "top_k": 3, "top_p": .9,
-     "logit_bias": {1: 2.}},
+     "logit_bias": {TOKEN_IDS[1]: 2.}},
 ])
 def test_sampling_distribution(sample, settings):
     scores = torch.tensor(LOGITS[:REAL_VOCAB], dtype=torch.bfloat16).float()
@@ -152,13 +153,13 @@ def test_sampling_distribution(sample, settings):
 
 
 def test_prompt_penalties(sample):
-    assert sample({"temperature": 0, "repetition_penalty": 2}, [1], [0], 1) == [1]
+    assert sample({"temperature": 0, "repetition_penalty": 2}, [1], [0], 1) == [TOKEN_IDS[1]]
     assert sample({"temperature": 0, "frequency_penalty": 2,
                    "presence_penalty": 2}, [1], [0], 1) == [0]
     assert sample({"temperature": 0, "frequency_penalty": 2}, [1], [0], 1,
-                  max_new_tokens=2) == [1]
+                  max_new_tokens=2) == [TOKEN_IDS[1]]
     assert sample({"temperature": 0, "repetition_penalty": 2,
-                   "logit_bias": {1: 3}}, [1], [0], 1) == [1]
+                   "logit_bias": {TOKEN_IDS[1]: 3}}, [1], [0], 1) == [TOKEN_IDS[1]]
 
 
 def test_extreme_top_p_and_seed_reproducibility(sample):

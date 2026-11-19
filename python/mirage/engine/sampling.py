@@ -20,7 +20,6 @@ class SamplingParams(BaseModel):
     repetition_penalty: float = Field(default=1, gt=0)
     seed: StrictInt = Field(default=42, ge=0, le=2**63 - 1)
     logit_bias: dict[int, float] = Field(default_factory=dict, max_length=core.serving_max_biases())
-    cache_history: bool = True
     
     max_new_tokens: StrictInt | None = Field(default=None, gt=0)
 
@@ -66,5 +65,5 @@ class SamplingParams(BaseModel):
             budget, self.seed, vocab_size, self.temperature, self.top_p,
             min(self.top_k, vocab_size), self.frequency_penalty,
             self.presence_penalty, self.repetition_penalty,
-            self.cache_history, eos_ids, self.logit_bias,
+            eos_ids, self.logit_bias,
         )

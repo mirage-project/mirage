@@ -40,7 +40,7 @@ cdef extern from "mirage/persistent_kernel/serving_config.h" namespace "mirage::
     void pack_config(ServingConfig *out, int64_t budget, int64_t seed, int64_t vocab,
                      double temperature, double top_p, int64_t top_k,
                      double frequency, double presence, double repetition,
-                     bint cache_history, const int64_t *eos, int eos_count,
+                     const int64_t *eos, int eos_count,
                      const int64_t *bias_ids, const double *bias_values,
                      int bias_count)
 
@@ -71,7 +71,7 @@ def serving_finish_reason_name(int reason):
 def pack_serving_config(int64_t budget, int64_t seed, int64_t vocab,
                         double temperature, double top_p, int64_t top_k,
                         double frequency, double presence, double repetition,
-                        bint cache_history, eos_ids, biases):
+                        eos_ids, biases):
     cdef ServingConfig config
     cdef vector[int64_t] out = vector[int64_t](CONFIG_WORDS)
     cdef vector[int64_t] eos
@@ -86,7 +86,7 @@ def pack_serving_config(int64_t budget, int64_t seed, int64_t vocab,
         bias_ids.push_back(token)
         bias_values.push_back(value)
     pack_config(&config, budget, seed, vocab, temperature, top_p, top_k,
-                frequency, presence, repetition, cache_history,
+                frequency, presence, repetition,
                 eos.data(), <int>eos.size(), bias_ids.data(),
                 bias_values.data(), <int>bias_ids.size())
     memcpy(&out[0], &config, sizeof(ServingConfig))

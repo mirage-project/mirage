@@ -29,7 +29,6 @@ struct ServingConfig {
   double repetition_penalty;
   int64_t eos_count;
   int64_t bias_count;
-  int64_t cache_history;
   int64_t eos_ids[MAX_EOS];
   LogitBias biases[MAX_BIASES];
 };
@@ -39,7 +38,7 @@ static_assert(std::is_standard_layout<ServingConfig>::value, "ServingConfig must
 static_assert(std::is_trivially_copyable<ServingConfig>::value, "ServingConfig must be copyable");
 static_assert(alignof(ServingConfig) <= alignof(int64_t),
               "ServingConfig alignment exceeds int64 backing storage");
-static_assert(sizeof(ServingConfig) == 540 * sizeof(int64_t), "ServingConfig size changed");
+static_assert(sizeof(ServingConfig) == 539 * sizeof(int64_t), "ServingConfig size changed");
 static_assert(sizeof(LogitBias) == 2 * sizeof(int64_t), "bias entry size changed");
 static_assert(offsetof(ServingConfig, max_new_tokens) == 0 * sizeof(int64_t), "budget layout changed");
 static_assert(offsetof(ServingConfig, seed) == 1 * sizeof(int64_t), "seed layout changed");
@@ -52,9 +51,8 @@ static_assert(offsetof(ServingConfig, presence_penalty) == 7 * sizeof(int64_t), 
 static_assert(offsetof(ServingConfig, repetition_penalty) == 8 * sizeof(int64_t), "repetition layout changed");
 static_assert(offsetof(ServingConfig, eos_count) == 9 * sizeof(int64_t), "EOS count layout changed");
 static_assert(offsetof(ServingConfig, bias_count) == 10 * sizeof(int64_t), "bias count layout changed");
-static_assert(offsetof(ServingConfig, cache_history) == 11 * sizeof(int64_t), "history layout changed");
-static_assert(offsetof(ServingConfig, eos_ids) == 12 * sizeof(int64_t), "EOS layout changed");
-static_assert(offsetof(ServingConfig, biases) == 28 * sizeof(int64_t), "bias layout changed");
+static_assert(offsetof(ServingConfig, eos_ids) == 11 * sizeof(int64_t), "EOS layout changed");
+static_assert(offsetof(ServingConfig, biases) == 27 * sizeof(int64_t), "bias layout changed");
 
 constexpr int FINISH_NONE = 0;
 constexpr int FINISH_STOP = 1;
@@ -77,7 +75,7 @@ constexpr size_t sampling_buffer_bytes(int vocab) {
 inline void pack_config(ServingConfig *out, int64_t budget, int64_t seed,
                         int64_t vocab, double temperature, double top_p,
                         int64_t top_k, double frequency, double presence,
-                        double repetition, bool cache_history,
+                        double repetition,
                         int64_t const *eos, int eos_count,
                         int64_t const *bias_ids, double const *bias_values,
                         int bias_count) {
@@ -93,7 +91,6 @@ inline void pack_config(ServingConfig *out, int64_t budget, int64_t seed,
   out->repetition_penalty = repetition;
   out->eos_count = eos_count;
   out->bias_count = bias_count;
-  out->cache_history = cache_history;
   for (int i = 0; i < eos_count; ++i) out->eos_ids[i] = eos[i];
   for (int i = 0; i < bias_count; ++i)
     out->biases[i] = {bias_ids[i], bias_values[i]};
