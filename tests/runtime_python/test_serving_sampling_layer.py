@@ -104,6 +104,10 @@ def sample(request, tmp_path_factory):
 
 @pytest.mark.parametrize("settings", [
     {"temperature": 0},
+    {"temperature": 1e-100},
+    {"temperature": 1e-100, "top_k": 3},
+    {"temperature": 1e-100, "top_p": .95},
+    {"temperature": 1e-100, "top_k": 3, "top_p": .95},
     {"temperature": 0, "top_k": 3, "top_p": 1e-100,
      "logit_bias": {TOKEN_IDS[1]: .3984375}},
 ])
@@ -162,8 +166,9 @@ def test_prompt_penalties(sample):
                    "logit_bias": {TOKEN_IDS[1]: 3}}, [1], [0], 1) == [TOKEN_IDS[1]]
 
 
-def test_extreme_top_p_and_seed_reproducibility(sample):
-    assert sample({"temperature": .8, "top_k": 3, "top_p": 1e-100},
+@pytest.mark.parametrize("top_k", [0, 3])
+def test_extreme_top_p_and_seed_reproducibility(sample, top_k):
+    assert sample({"temperature": .8, "top_k": top_k, "top_p": 1e-100},
                   range(8)) == [0] * 8
     settings = {"temperature": .8, "top_k": 3, "top_p": .9}
     seeds = range(64)

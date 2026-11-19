@@ -87,7 +87,7 @@ struct PivotShared {
 template <int Threads>
 struct JointPivotShared : PivotShared<Threads, JointPivotMass> {
   float first_mass, second_mass;
-  double target;
+  float target;
 };
 
 template <int Threads>
@@ -298,9 +298,9 @@ __device__ inline uint64_t sample_scores(
       cfg->repetition_penalty != 1.f,
       cfg->frequency_penalty != 0.f,
       cfg->presence_penalty != 0.f,
-      static_cast<float>(cfg->repetition_penalty),
-      static_cast<float>(cfg->frequency_penalty),
-      static_cast<float>(cfg->presence_penalty)};
+      cfg->repetition_penalty,
+      cfg->frequency_penalty,
+      cfg->presence_penalty};
 
   int vocab = cfg->vocab_size;
 
@@ -335,7 +335,7 @@ __device__ inline void sample_scores_with_max(
   int num_cta,
   mirage::runtime::RuntimeConfig const &config
 ) {
-  if (config.generation_config[config.request_ids[slot]].temperature == 0.) {
+  if (config.generation_config[config.request_ids[slot]].temperature == 0.f) {
     using Reduce = cub::BlockReduce<uint64_t, Threads>;
     extern __shared__ __align__(16) char sampling_shared[];
     auto &storage = *reinterpret_cast<typename Reduce::TempStorage *>(sampling_shared);
@@ -411,7 +411,7 @@ __device__ inline void sample_pivot(
   int begin = int(int64_t(vocab) * part_id / num_cta);
   int end = int(int64_t(vocab) * (part_id + 1) / num_cta);
   float maximum = float_from_bits(*buf.radix_prefix);
-  float temperature = static_cast<float>(cfg->temperature);
+  float temperature = cfg->temperature;
   if (!topk) {
     for (int i = begin + tid; i < end; i += Threads)
       buf.scores[i] = expf((buf.scores[i] - maximum) / temperature);
@@ -457,7 +457,7 @@ __device__ inline void sample_pivot(
     __syncthreads();
     if (round == 0) {
       target = topk ? static_cast<float>(cfg->top_k)
-                    : static_cast<float>(cfg->top_p) * shared.total;
+                    : cfg->top_p * shared.total;
     }
 
     if (part_id == shared.selected) {
@@ -584,9 +584,9 @@ __device__ void sample_request(
       sample_scores_with_max<NUM_THREADS>(logits, history_buffer, buffer, padded_vocab, slot, part_id, num_cta, config);
     } else if constexpr (PHASE == SamplePhase::RADIX) {
       auto const *cfg = config.generation_config + row;
-      if (cfg->temperature == 0.) {
+      if (cfg->temperature == 0.f) {
         sample_greedy(buffer, output, padded_vocab, slot, end - 1, part_id);
-      } else if (cfg->top_k > 0 && cfg->top_p < 1.) {
+      } else if (cfg->top_k > 0 && cfg->top_p < 1.f) {
         sample_pivot<NUM_THREADS, true>(buffer, output, padded_vocab, slot, vocab,
             end - 1, current_len - prompt_len, part_id, num_cta, cfg);
       } else {

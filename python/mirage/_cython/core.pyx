@@ -38,8 +38,8 @@ cdef extern from "mirage/persistent_kernel/serving_config.h" namespace "mirage::
     int sampling_scratch_words(int vocab)
     size_t sampling_buffer_bytes(int vocab)
     void pack_config(ServingConfig *out, int64_t budget, int64_t seed, int64_t vocab,
-                     double temperature, double top_p, int64_t top_k,
-                     double frequency, double presence, double repetition,
+                     float temperature, float top_p, int64_t top_k,
+                     float frequency, float presence, float repetition,
                      const int64_t *eos, int eos_count,
                      const int64_t *bias_ids, const double *bias_values,
                      int bias_count)
@@ -69,8 +69,8 @@ def serving_finish_reason_name(int reason):
     raise ValueError(f"unknown finish reason: {reason}")
 
 def pack_serving_config(int64_t budget, int64_t seed, int64_t vocab,
-                        double temperature, double top_p, int64_t top_k,
-                        double frequency, double presence, double repetition,
+                        float temperature, float top_p, int64_t top_k,
+                        float frequency, float presence, float repetition,
                         eos_ids, biases):
     cdef ServingConfig config
     cdef vector[int64_t] out = vector[int64_t](CONFIG_WORDS)

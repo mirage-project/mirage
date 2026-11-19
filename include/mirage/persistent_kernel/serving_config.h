@@ -16,17 +16,17 @@ struct LogitBias {
 };
 
 // Fixed-size ring record shared by the host packer and persistent CUDA worker.
-// All fields are eight bytes so the record also fits the existing int64 buffers.
+// The record is backed by the existing int64 ring buffers.
 struct ServingConfig {
   int64_t max_new_tokens;
   int64_t seed;
   int64_t vocab_size;
-  double temperature;
-  double top_p;
+  float temperature;
+  float top_p;
   int64_t top_k;
-  double frequency_penalty;
-  double presence_penalty;
-  double repetition_penalty;
+  float frequency_penalty;
+  float presence_penalty;
+  float repetition_penalty;
   int64_t eos_count;
   int64_t bias_count;
   int64_t eos_ids[MAX_EOS];
@@ -38,21 +38,21 @@ static_assert(std::is_standard_layout<ServingConfig>::value, "ServingConfig must
 static_assert(std::is_trivially_copyable<ServingConfig>::value, "ServingConfig must be copyable");
 static_assert(alignof(ServingConfig) <= alignof(int64_t),
               "ServingConfig alignment exceeds int64 backing storage");
-static_assert(sizeof(ServingConfig) == 539 * sizeof(int64_t), "ServingConfig size changed");
+static_assert(sizeof(ServingConfig) == 537 * sizeof(int64_t), "ServingConfig size changed");
 static_assert(sizeof(LogitBias) == 2 * sizeof(int64_t), "bias entry size changed");
 static_assert(offsetof(ServingConfig, max_new_tokens) == 0 * sizeof(int64_t), "budget layout changed");
 static_assert(offsetof(ServingConfig, seed) == 1 * sizeof(int64_t), "seed layout changed");
 static_assert(offsetof(ServingConfig, vocab_size) == 2 * sizeof(int64_t), "vocab layout changed");
 static_assert(offsetof(ServingConfig, temperature) == 3 * sizeof(int64_t), "temperature layout changed");
-static_assert(offsetof(ServingConfig, top_p) == 4 * sizeof(int64_t), "top-p layout changed");
-static_assert(offsetof(ServingConfig, top_k) == 5 * sizeof(int64_t), "top-k layout changed");
-static_assert(offsetof(ServingConfig, frequency_penalty) == 6 * sizeof(int64_t), "frequency layout changed");
-static_assert(offsetof(ServingConfig, presence_penalty) == 7 * sizeof(int64_t), "presence layout changed");
-static_assert(offsetof(ServingConfig, repetition_penalty) == 8 * sizeof(int64_t), "repetition layout changed");
-static_assert(offsetof(ServingConfig, eos_count) == 9 * sizeof(int64_t), "EOS count layout changed");
-static_assert(offsetof(ServingConfig, bias_count) == 10 * sizeof(int64_t), "bias count layout changed");
-static_assert(offsetof(ServingConfig, eos_ids) == 11 * sizeof(int64_t), "EOS layout changed");
-static_assert(offsetof(ServingConfig, biases) == 27 * sizeof(int64_t), "bias layout changed");
+static_assert(offsetof(ServingConfig, top_p) == offsetof(ServingConfig, temperature) + sizeof(float), "top-p layout changed");
+static_assert(offsetof(ServingConfig, top_k) == 4 * sizeof(int64_t), "top-k layout changed");
+static_assert(offsetof(ServingConfig, frequency_penalty) == 5 * sizeof(int64_t), "frequency layout changed");
+static_assert(offsetof(ServingConfig, presence_penalty) == offsetof(ServingConfig, frequency_penalty) + sizeof(float), "presence layout changed");
+static_assert(offsetof(ServingConfig, repetition_penalty) == 6 * sizeof(int64_t), "repetition layout changed");
+static_assert(offsetof(ServingConfig, eos_count) == 7 * sizeof(int64_t), "EOS count layout changed");
+static_assert(offsetof(ServingConfig, bias_count) == 8 * sizeof(int64_t), "bias count layout changed");
+static_assert(offsetof(ServingConfig, eos_ids) == 9 * sizeof(int64_t), "EOS layout changed");
+static_assert(offsetof(ServingConfig, biases) == 25 * sizeof(int64_t), "bias layout changed");
 
 constexpr int FINISH_NONE = 0;
 constexpr int FINISH_STOP = 1;
@@ -73,9 +73,9 @@ constexpr size_t sampling_buffer_bytes(int vocab) {
 }
 
 inline void pack_config(ServingConfig *out, int64_t budget, int64_t seed,
-                        int64_t vocab, double temperature, double top_p,
-                        int64_t top_k, double frequency, double presence,
-                        double repetition,
+                        int64_t vocab, float temperature, float top_p,
+                        int64_t top_k, float frequency, float presence,
+                        float repetition,
                         int64_t const *eos, int eos_count,
                         int64_t const *bias_ids, double const *bias_values,
                         int bias_count) {

@@ -9,6 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from mirage import core
 
 
+_SAMPLING_EPS = 1e-6
+_FLOAT32_TINY = 2.0 ** -126
+
+
 class SamplingParams(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, frozen=True, validate_default=True)
     
@@ -22,6 +26,16 @@ class SamplingParams(BaseModel):
     logit_bias: dict[int, float] = Field(default_factory=dict, max_length=core.serving_max_biases())
     
     max_new_tokens: StrictInt | None = Field(default=None, gt=0)
+
+    @field_validator("temperature")
+    @classmethod
+    def normalize_temperature(cls, value):
+        return 0.0 if value < _SAMPLING_EPS else value
+
+    @field_validator("top_p")
+    @classmethod
+    def normalize_top_p(cls, value):
+        return max(value, _FLOAT32_TINY)
 
     @field_validator("logit_bias")
     @classmethod

@@ -90,6 +90,16 @@ def test_invalid_sampling_params(client, field, value):
     assert client.engine.params is None
 
 
+@pytest.mark.parametrize("temperature,expected", [
+    (0, 0), (1e-100, 0), (1e-8, 0), (1e-6, 1e-6), (.8, .8),
+])
+def test_temperature_normalization(client, temperature, expected):
+    response = client.post("/v1/completions", json={
+        "model": "test", "prompt": "hi", "temperature": temperature})
+    assert response.status_code == 200
+    assert client.engine.params.temperature == expected
+
+
 def test_wrong_model(client):
     response = client.post("/v1/completions", json={"model": "other", "prompt": "hi"})
     assert response.status_code == 404
