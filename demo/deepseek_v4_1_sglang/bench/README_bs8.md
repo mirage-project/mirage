@@ -17,8 +17,11 @@ of the next.
 
 - 4 x B300. The static MoE keeps its own copy of the experts, so each GPU needs about 213 GiB with SGLang's weights.
   A B200 (179 GiB) is not enough.
-- SGLang at commit `240f2a0a64` in its own venv. Build mirage from this branch with the same Python minor version.
-  Put `nvcc` and `nsys` on `PATH`.
+- SGLang at commit `240f2a0a64` in its own venv. Build mirage from this branch (`git clone --recursive`, then
+  `pip install -e .`) with the same Python minor version. Put `nvcc` and `nsys` on `PATH`.
+- If mirage was built in another venv than SGLang's, add that venv's `site-packages/z3/lib` to `LD_LIBRARY_PATH` for the
+  static runs, as `MIRAGE_Z3_LIB` does in #819's `sgl_chain.py`. In our setup SGLang's venv has z3 4.15 (tilelang's) and
+  mirage's has 4.16; without that path `import mirage` fails with `libz3.so.4.16: cannot open shared object file`.
 - `M`: the official 40-layer DeepSeek-V4.1-Flash checkout. The static layers read its `inference/config.json` and its
   shards. If your copy has no `inference/` folder, set `DSV41_STATIC_CKPT` to a folder that holds that file and links to
   the shards.
