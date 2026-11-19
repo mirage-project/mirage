@@ -804,7 +804,7 @@ static void
 static bool static_host_rebind(int r, std::string const &name, void *p) {
   using namespace static_host;
   GpuState &s = g_gpus[r];
-  bool found = false;
+  bool found = false; STATIC_X_FLAG_REBIND(s.g, name, p) // H1 (core.cuh)
   auto const bufs = slot_args(s.args, "buf.", MAX_BUFS);
   for (int i = 0; i < MAX_BUFS; i++) {
     if (!bufs[i].empty() && bufs[i][0] == "tensor" && bufs[i][1] == name) {

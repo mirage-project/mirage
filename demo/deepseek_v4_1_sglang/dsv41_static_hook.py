@@ -47,6 +47,11 @@ assert not (AR and CHECK), "check mode compares this rank's partial y: DSV41_STA
 SEAM = os.environ.get("DSV41_STATIC_SEAM", "0") != "0"   # no all-reduce in the kernels; the MoE takes the attention's seam kernel
 assert not (AR and SEAM), "DSV41_STATIC_SEAM: the all-reduce stays in SGLang (DSV41_STATIC_AR=0)"
 MHC = os.environ.get("DSV41_STATIC_MHC", "0") != "0"   # mHC and the all-reduce in the kernels: a sublayer ends in its kernel
+# H1 (DSV41_X_FLAG, dsv41_static_layer): the flags pair a MoE launch with the attention launch before it, so both must run in
+# the same forwards: they do (decode, T rows, _active(); one launch each, check mode included), except the attention's prefill
+# replay without SGLang's pools (DSV41_STATIC_POOL=0), which launches the attention alone
+assert os.environ.get("DSV41_X_FLAG", "0") == "0" or (MHC and os.environ.get("DSV41_STATIC_POOL", "1") != "0"), \
+    "DSV41_X_FLAG: DSV41_STATIC_MHC=1 and SGLang's pools (DSV41_STATIC_POOL=1)"
 assert not (MHC and (AR or SEAM)), "DSV41_STATIC_MHC: no DSV41_STATIC_AR, no DSV41_STATIC_SEAM"
 STATS = os.environ.get("DSV41_STATIC_STATS", "0") != "0"   # mHC's coefficients in the kernels; the seam stays SGLang's, no SMs left free
 assert not STATS or (SEAM and not MHC), "DSV41_STATIC_STATS needs DSV41_STATIC_SEAM=1 and no DSV41_STATIC_MHC"
@@ -477,6 +482,121 @@ if S2_ARGMAX:
     import fast_argmax as _fa
     import sglang.srt.layers.sampler as _smp
     _fa.install(_smp)
+# S2-2 (11-19; default off): DSV41_S2_DEFER=1: greedy decode without the vocab all-gather and the fp32 copy. DSv4.1 has
+# no final softcap: stock gathers the bf16 lm head shards (the multimem all-gather, about 10 us) and casts them to fp32
+# (6.4 us), then the sampler's argmax. Here decode keeps this rank's shard (cast to fp32: exact), and the decode CUDA graph
+# records the greedy ids from the shards the way SGLang's in-graph greedy helper (UocrGreedyGraph) records an argmax: each
+# rank its row maxima and first indices (fast_argmax: torch.argmax's rules, a NaN the maximum; nan_to_num first when
+# SGLANG_SANITIZE_NAN_LOGITS is on, as the sampler), 2 floats a row all-gathered, then the first rank with the maximum: the
+# lowest index among the maxima, torch.argmax over the full row. The sampler takes those ids when the batch replayed the graph
+# and is all greedy with nothing that changes the logits (that helper's rules); any other batch gathers its shards first
+# (the same fp32 logits as stock). The same tokens by construction
+S2_DEFER = os.environ.get("DSV41_S2_DEFER", "0") != "0"
+if S2_DEFER:
+    import sglang.srt.layers.logits_processor as _lpm
+    from sglang.srt.environ import envs as _envs
+    from sglang.srt.models.unlimited_ocr_v2_support.greedy_graph import UocrGreedyGraph as _UGG
+    import fast_argmax as _fa2
+    _orig_get_logits = _lpm.LogitsProcessor._get_logits
+    _s2_seen = []
+    _s2_on = []   # (set once this runner's recorder is installed: before it, and without it, decode gathers as before)
+
+    def _get_logits(self, hidden_states, lm_head, logits_metadata, embedding_bias=None, use_logits_buffer=True):
+        # decode with the plain TP gather and no softcap (DSv4.1): this rank's lm head shard only, as fp32
+        if (_s2_on and logits_metadata.forward_mode.is_decode() and self.do_tensor_parallel_all_gather and not self.use_attn_tp_group
+                and not self.do_tensor_parallel_all_gather_dp_attn and not self.final_logit_softcapping
+                and not self.use_tp_lm_head_all_to_all and hidden_states.is_cuda):
+            hidden_states, _ = self._gather_dp_attn_hidden_states(hidden_states, logits_metadata)
+            with _lpm.get_forward().scoped(lora_batch_layout=_lpm.LoRABatchLayout.DP_LOCAL):
+                logits = self._compute_lm_head(hidden_states, lm_head, embedding_bias, out=None)
+            if self.logit_scale is not None:
+                logits.mul_(self.logit_scale)
+            logits = logits.float().contiguous()
+            if not _s2_seen:
+                _s2_seen.append(1)
+                print(f"[dsv41_static rank {_rank()}] S2-2: decode keeps the vocab shard {tuple(logits.shape)}", flush=True)
+            return logits
+        return _orig_get_logits(self, hidden_states, lm_head, logits_metadata, embedding_bias, use_logits_buffer)
+    _lpm.LogitsProcessor._get_logits = _get_logits
+
+    def _shard_argmax(lp, lg):
+        """torch.argmax over the full fp32 row, from this rank's shard lg [rows, w] (rank r: columns r w ..)"""
+        group = _lpm.get_parallel().tp_group
+        rows, w = lg.shape
+        off = group.rank_in_group * w
+        x = lg[:, : max(1, min(w, lp.vocab_size - off))]
+        if _envs.SGLANG_SANITIZE_NAN_LOGITS.get():
+            x = torch.nan_to_num(x, nan=-1e30, posinf=1e30, neginf=-1e30)
+        idx = _fa2.fast_argmax(x, -1).long()
+        local = torch.stack([x.gather(1, idx[:, None]).squeeze(1), (idx + off).float()], dim=1).contiguous()
+        g = torch.empty((group.world_size, rows, 2), dtype=torch.float32, device=lg.device)
+        group.all_gather_into_tensor(g.view(-1, 2), local)
+        best = g[..., 0].argmax(dim=0, keepdim=True)   # (torch.argmax: the first rank with the maximum, a NaN the maximum)
+        return g[..., 1].gather(0, best).squeeze(0).long()
+
+    def _shard_gather(lp, lg):
+        """the full fp32 logits [rows, vocab] from the shards: stock's cast(gather(bf16)), the cast exact"""
+        group = _lpm.get_parallel().tp_group
+        rows, w = lg.shape
+        g = torch.empty((group.world_size, rows, w), dtype=torch.float32, device=lg.device)
+        group.all_gather_into_tensor(g.view(-1, w), lg.contiguous())
+        return g.permute(1, 0, 2).reshape(rows, group.world_size * w)[:, : lp.vocab_size].contiguous()
+
+    class _DeferredGreedy(_UGG):
+        """UocrGreedyGraph's recorder and rules, with the greedy ids from the vocab shards; they count only once a decode
+        graph's capture recorded them"""
+        def __init__(self, lp, **kw):
+            super().__init__(**kw)
+            self.lp = lp
+            self.recorded = False
+
+        def capture_tail_hook(self, runner, out, forward_batch, num_tokens):
+            if out is None:
+                return
+            lg = out.next_token_logits
+            if lg is not None and lg.dim() == 2 and lg.shape[-1] < self.lp.vocab_size:
+                self.ids[: lg.shape[0]].copy_(_shard_argmax(self.lp, lg))
+                self.recorded = True
+
+        def before_forward(self, forward_batch, *, replays_graph, decode_graph_runner):
+            self._replayed_batch = forward_batch if replays_graph else None
+
+        def recorded_ids(self, logits_output, forward_batch, *, watermark_state):
+            lg = logits_output.next_token_logits
+            if not self.recorded or lg is None or lg.dim() != 2 or lg.shape[-1] >= self.lp.vocab_size:
+                return None   # (full logits: the sampler's own argmax)
+            return super().recorded_ids(logits_output, forward_batch, watermark_state=watermark_state)
+
+    _orig_init_ugg = _mr.ModelRunner.maybe_init_uocr_greedy_graph
+
+    def _maybe_init_ugg(self):
+        _orig_init_ugg(self)
+        if self.uocr_greedy_graph is None:
+            bs = int(_mr.get_schedule().max_running_requests or 0) or 64
+            self.uocr_greedy_graph = _DeferredGreedy(self.model.logits_processor, max_bs=bs, device=self.device)
+            self.capture_tail_hooks.append(self.uocr_greedy_graph.capture_tail_hook)
+            _s2_on.append(1)
+            print(f"[dsv41_static rank {_rank()}] S2-2: the decode graphs record the deferred greedy ids (max bs {bs})",
+                  flush=True)
+    _mr.ModelRunner.maybe_init_uocr_greedy_graph = _maybe_init_ugg
+
+    _orig_sample = _mr.ModelRunner.sample
+    _s2_used = [0, 0]   # (batches from the recorded ids, batches gathered)
+
+    def _sample(self, logits_output, forward_batch):
+        g = self.uocr_greedy_graph
+        lg = logits_output.next_token_logits
+        if isinstance(g, _DeferredGreedy) and lg is not None and lg.dim() == 2 and lg.shape[-1] < g.lp.vocab_size:
+            if g.recorded_ids(logits_output, forward_batch, watermark_state=self.watermark_state) is None:
+                logits_output.next_token_logits = _shard_gather(g.lp, lg)   # (not the recorded case: full logits)
+                _s2_used[1] += 1
+            else:
+                _s2_used[0] += 1
+            if sum(_s2_used) in (1, 16, 256):
+                print(f"[dsv41_static rank {_rank()}] S2-2: {_s2_used[0]} batches from the recorded ids, {_s2_used[1]} gathered",
+                      flush=True)
+        return _orig_sample(self, logits_output, forward_batch)
+    _mr.ModelRunner.sample = _sample
 print(f"[dsv41_static] patched SGLang: attention {'all' if ATTN is None else sorted(ATTN)}, MoE "
       f"{'all' if MOE is None else sorted(MOE)} ({'check, keep ' + KEEP if CHECK else 'replace'}, PDL {PDL}"
-      f"{', S2 argmax' if S2_ARGMAX else ''})", flush=True)
+      f"{', S2 argmax' if S2_ARGMAX else ''}{', S2 deferred greedy' if S2_DEFER else ''})", flush=True)

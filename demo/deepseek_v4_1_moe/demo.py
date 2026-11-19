@@ -144,9 +144,25 @@ def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
     return {"grids": grids, "lists": [copy.deepcopy(lists) for _ in range(mpk.num_gpus)]}   # the same plan on every GPU
 
 
+def x_flag_modes(mpk: StaticMegakernel, prefill: bool = False) -> dict:
+    """H1 stage A (docs/h1_design.md; build with -DSTATIC_X_FLAG): the kernel loop's mode per node. The front (the readers of x
+    and the nodes that read only weights, x and this kernel's own outputs) polls the attention post's flag ("poll"): it starts
+    when x is stored instead of when the attention's grid has ended (each CTA polls once); every other node waits for the grid
+    first ("wait": the streams' readers, sum_store, the post). prefill (DSV41_X_FLAG=2, a separate switch, the user 11-19):
+    only x's readers poll, the other front nodes start as their CTA enters (their weights load during the attention's end)."""
+    nodes = compiler.graph_nodes(mpk)
+    names = {n.graph_idx: compiler.tname(mpk, n.outputs[0]) for n in nodes}
+    readers = {n.graph_idx for n in nodes if any(compiler.tname(mpk, t) == "x" for t in n.inputs)}
+    if sorted(names[i] for i in readers) != ["logit_part", "x_q"]:
+        raise ValueError(f"x_flag_modes: x's readers are {sorted(names[i] for i in readers)}, not the router and x_q")
+    safe = {"pairs", "sgu_part", "hs_q", "sd_part", "routed_rows"}
+    return {i: "poll" if i in readers or (nm in safe and not prefill) else "wait" for i, nm in names.items()
+            if i in readers or nm not in safe or not prefill}
+
+
 def build(ws: list, out: str, profile: bool = False, extra_flags: list = None, plan: str = "hand", search: list = None,
           costs_code: str = "current", time_limit_s: float = 300, device: int = 0, num_gpus: int = None, rank: int = None,
-          exchange_pool=None):
+          exchange_pool=None, x_flag: bool = False, x_flag_prefill: bool = False):
     """Build the graph on len(ws) GPUs (ws: each GPU's tensors), compile its plan (plan "hand": hand_plan; else a plan file;
     search: the solver's plan from these cost record files, starting from that plan -> <out>/plan.json) and load the kernel.
     Return the kernel, each GPU's node buffers (by output tensor name) and the information from compile_plan, with "paths",
@@ -155,7 +171,10 @@ def build(ws: list, out: str, profile: bool = False, extra_flags: list = None, p
     # STATIC_FREE_SMS_MOE: SMs left out of the launch (no CTA there): a framework's side stream runs on them meanwhile
     sms = torch.cuda.get_device_properties(0).multi_processor_count - int(os.environ.get("STATIC_FREE_SMS_MOE", 0))
     mpk = StaticMegakernel(num_gpus=gpus, num_sms=sms)
+    mpk.moe_rows_poll = "-DMOE_ROWS_POLL" in (extra_flags or [])   # (C12, 11-18: sum_store polls the routed rows; default off)
     build_graph(mpk, w)
+    if x_flag:   # H1 stage A: x's flag and the deferred wait (x_flag_modes)
+        mpk.x_flag_modes = x_flag_modes(mpk, x_flag_prefill)
     p = hand_plan(mpk, sms) if plan == "hand" \
         else compiler.plan_from_file(plan)
     if len(p["lists"]) == 1 and gpus > 1:   # a plan file of one GPU: the same lists on every GPU

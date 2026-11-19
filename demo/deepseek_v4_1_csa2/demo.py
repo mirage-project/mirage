@@ -298,9 +298,28 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     return {"grids": grids, "lists": [copy.deepcopy(lists) for _ in range(mpk.num_gpus)]}
 
 
+# H1 stage B: the nodes that read only weights, x and this kernel's own outputs (docs/h1_design.md 3.3)
+X_FLAG_SAFE = ("wq_a_part", "qr_q", "wq_b_part", "wkv_part", "iq_part", "wk_part", "wo_a_part", "oa_q", "wo_b_part")
+
+
+def x_flag_modes(mpk: StaticMegakernel, prefill: bool = False) -> dict:
+    """H1 stage B (docs/h1_design.md; build with -DSTATIC_X_FLAG): the kernel loop's mode per node, as the MoE's
+    (deepseek_v4_1_moe.demo.x_flag_modes): the front (x's readers and X_FLAG_SAFE) polls the MoE post's flag ("poll"); the
+    nodes that read the step tables, the caches or the streams, sum_store and the post wait for the MoE's grid ("wait").
+    prefill (DSV41_X_FLAG=2): only x's readers poll, X_FLAG_SAFE starts as its CTA enters."""
+    nodes = compiler.graph_nodes(mpk)
+    names = {n.graph_idx: compiler.tname(mpk, n.outputs[0]) for n in nodes}
+    readers = {n.graph_idx for n in nodes if any(compiler.tname(mpk, t) == "x" for t in n.inputs)}
+    rn = {names[i] for i in readers}
+    if "x_q" not in rn or not rn <= {"x_q", "cmp_part", "wp_part"}:
+        raise ValueError(f"x_flag_modes: x's readers are {sorted(rn)}")
+    return {i: "poll" if i in readers or (nm in X_FLAG_SAFE and not prefill) else "wait" for i, nm in names.items()
+            if i in readers or nm not in X_FLAG_SAFE or not prefill}
+
+
 def build(ws: list, variant: str, ratio: int, csrc: bool, heads: int, out: str, plan: str = "hand", search: list = None,
           costs_code: str = "current", time_limit_s: float = 300, profile: bool = False, extra_flags: list = None, device: int = 0,
-          num_gpus: int = None, rank: int = None, exchange_pool=None):
+          num_gpus: int = None, rank: int = None, exchange_pool=None, x_flag: bool = False, x_flag_prefill: bool = False):
     """Build the graph on len(ws) GPUs (ws: each GPU's tensors), compile its plan and load the kernel. Return the kernel, each
     GPU's node buffers (by output tensor name) and the information from compile_plan, with "paths" and "mpk"."""
     gpus, w = num_gpus or len(ws), ws[0]   # (num_gpus, rank, exchange_pool: this process is GPU rank of a layer on num_gpus)
@@ -308,6 +327,8 @@ def build(ws: list, variant: str, ratio: int, csrc: bool, heads: int, out: str, 
     sms = torch.cuda.get_device_properties(0).multi_processor_count - int(os.environ.get("STATIC_FREE_SMS_ATTN", 0))
     mpk = StaticMegakernel(num_gpus=gpus, num_sms=sms)
     build_graph(mpk, w, variant, ratio, csrc, heads)
+    if x_flag:   # H1 stage B: x's flag and the deferred wait (x_flag_modes)
+        mpk.x_flag_modes = x_flag_modes(mpk, x_flag_prefill)
     for wg in ws[1:]:   # the fused act_quant's tap (build_graph made it on GPU 0)
         if "oa_q" in w:
             wg.setdefault("oa_q", torch.zeros_like(w["oa_q"], device=wg["x"].device))

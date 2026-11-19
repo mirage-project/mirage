@@ -221,7 +221,7 @@ def smem_code(nodes: Dict[str, dict]) -> List[str]:
             'static_assert(STATIC_SMEM_BYTES <= 227 * 1024, "the dynamic shared memory of one SM");', ""]
 
 
-def case_code(idx: str, node: dict) -> str:
+def case_code(idx: str, node: dict, xmode: str = None) -> str:
     """One node's case in the kernel loop. A node whose task type has a dry pass (its layer's `dry`): the task function gets
     `warm` last: false for the node's first task on this SM (its code is not in the instruction cache yet: the task first runs
     its own code on stand-in inputs, no global stores, while its inputs are on their way; the same instructions as the real pass),
@@ -229,12 +229,15 @@ def case_code(idx: str, node: dict) -> str:
     costs almost nothing (checking whether the inputs have already landed would cost loads and a CTA barrier per task).
       case 29: static_mk::run_topk_route<...>(maps, g, L, tk, warm_29); warm_29 = true; break;"""
     run = task_call(node)
+    # H1 (pk.x_flag_modes, -DSTATIC_X_FLAG): "poll" x's flag before a task that reads x, "wait" for the kernel before's grid
+    # before a task that is not pre-wait safe; a node without a mode is pre-wait safe (core.cuh x_flag_poll / x_grid_wait)
+    pre = {None: "", "poll": "static_mk::x_flag_poll(STATIC_KG, L); ", "wait": "static_mk::x_grid_wait(L); "}[xmode]
     if not node["dry"]:
-        return f"      case {idx}: {run}; break;"
-    return f"      case {idx}: {run[:-1]}, warm_{idx}); warm_{idx} = true; break;"
+        return f"      case {idx}: {pre}{run}; break;"
+    return f"      case {idx}: {pre}{run[:-1]}, warm_{idx}); warm_{idx} = true; break;"
 
 
-def kernel_code(nodes: Dict[str, dict], profile: bool = False) -> List[str]:
+def kernel_code(nodes: Dict[str, dict], profile: bool = False, x_modes: Dict[int, str] = None) -> List[str]:
     """layer_kernel:
         __global__ void __launch_bounds__(256, 1) layer_kernel(const __grid_constant__ static_mk::Maps maps, static_mk::G g, StaticTask const *static_tasks) {
           static_mk::KernelLocals L; static_mk::kernel_begin(g, L);
@@ -252,6 +255,9 @@ def kernel_code(nodes: Dict[str, dict], profile: bool = False) -> List[str]:
     profile: the timing build: one more kernel parameter, static_times, and per list entry ti thread 0 writes the task's start and
     lane 0 of every warp writes when its warp left the task (globaltimer ns; plain stores). Without profile the kernel is unchanged."""
     lines = ["", "// ---- the kernel ----"]
+    if x_modes is not None:   # H1: the kernel loop calls core.cuh's x_flag_poll / x_grid_wait
+        lines += ["#ifndef STATIC_X_FLAG", '#error "this layer.cu was generated for H1 (x_flag_modes): build it with -DSTATIC_X_FLAG"',
+                  "#endif"]
     if profile:
         lines += ["__device__ __forceinline__ unsigned long long static_now() { unsigned long long t; "
                   "asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(t)); return t; }",
@@ -278,7 +284,7 @@ def kernel_code(nodes: Dict[str, dict], profile: bool = False) -> List[str]:
         lines.append(f"    L.stage_stamps = STATIC_TIME(ti) + {STAGE_SLOT};   // e.g. GEMM tasks: [0] first load issued, [1] first stage landed")
     lines.append("    switch (tk.node) {")
     for idx, node in sorted(nodes.items(), key=lambda kv: int(kv[0])):
-        lines.append(case_code(idx, node))
+        lines.append(case_code(idx, node, None if x_modes is None else x_modes.get(int(idx))))
     lines.append("    }")
     if __import__("os").environ.get("STATIC_TASK_FENCE"):   # measurement only (2026-11-10): are hand-offs late because plain stores stay buffered?
         lines.append("    __threadfence();   // measurement: this task's stores pushed out before the SM's next task")
@@ -358,7 +364,12 @@ def generate_code(pk, schedules: List[dict], profile: bool = False) -> str:
     lines = header_code(pk, nodes, len(schedules), len(schedules[0]["worker_task_queues"]), profile)
     lines += smem_code(nodes)
     lines += task_tables(schedules)
-    lines += kernel_code(nodes, profile)
+    x_modes = getattr(pk, "x_flag_modes", None)   # H1 (default None: the code as before)
+    if x_modes is not None:
+        bad = {i: m for i, m in x_modes.items() if m not in ("poll", "wait") or str(i) not in nodes}
+        if bad:
+            raise ValueError(f"x_flag_modes: unknown nodes or modes {bad}")
+    lines += kernel_code(nodes, profile, x_modes)
     lines += host_code(pk, schedules, profile)
     return "\n".join(lines)
 

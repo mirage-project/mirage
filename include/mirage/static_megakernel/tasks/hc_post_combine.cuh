@@ -385,6 +385,16 @@ __device__ HC_TASK_INLINE void
   }
   if constexpr (REARM) {
     __syncthreads(); // a pair of lanes has read its vector
+#ifdef STATIC_X_FLAG
+    // H1: x and R' of this task are stored (the barrier): the next kernel's
+    // flag now, before the re-arm (the re-arm writes only this kernel's own
+    // exchange region, which the next kernel never reads)
+    if constexpr (NORM) {
+      if (v == 0 && real) {
+        x_flag_store(g, t * Q + q);
+      }
+    }
+#endif
     if (v < NV && real) {
       allreduce_rearm<S_RANK>(g, row, v);
     }
@@ -452,6 +462,20 @@ __device__ __forceinline__ void run_hc_post_combine(
       tk.y,
       __int_as_float(PARAMS::v[3]),
       warm STAGE_STAMP_ARG(L.stage_stamps));
+#ifdef STATIC_X_FLAG
+  // H1: XFLAG_N words, one per task; with the re-arm the task stored its word
+  // before it (hc_post_combine_task), else here (x and the streams of this
+  // task's columns stored: the task's last barrier is before its counter)
+  if constexpr (NORM) {
+    static_assert(SELF::x * SELF::y == XFLAG_N,
+                  "hc_post_combine (H1): XFLAG_N words, one per task");
+    if constexpr (!REARM) {
+      if (threadIdx.x == 0) {
+        x_flag_store(g, tk.y * SELF::x + tk.x);
+      }
+    }
+  }
+#endif
 }
 
 template <class SELF,

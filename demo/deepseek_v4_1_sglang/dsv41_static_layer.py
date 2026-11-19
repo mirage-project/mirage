@@ -113,6 +113,43 @@ class MhcMixin:
                            mhc.HcNormed(w["x_out"]) if "gamma_next" in w and next is not None else None)
 
 
+# H1 stage A (DSV41_X_FLAG=1, docs/h1_design.md; serving builds with -DSTATIC_NO_START_BARRIER, mHC in the kernels): every
+# kernel is built with -DSTATIC_X_FLAG; an attention layer's post stores its launch number into its own 32 words after x
+# (G::xflag_out), and a MoE layer whose x is that attention's x_out polls them instead of waiting for the attention's grid
+# (G::xflag_in). DSV41_X_FLAG_BIND=0: the same builds, the flags left unbound (the classic path: the same-binary arm).
+# DSV41_X_FLAG=1: the MoE's whole front waits for the flag (pure H1); 2: only x's readers do (+ the front's weights early)
+XFLAG = os.environ.get("DSV41_X_FLAG", "0") != "0"
+XFLAG_PREFILL = os.environ.get("DSV41_X_FLAG", "0") == "2"
+# stage B (DSV41_X_FLAG_ATTN=1, with DSV41_X_FLAG): also the attention after a MoE layer: the MoE's post (when it computes the
+# next attention's input) stores its words, the attention whose x is that x_out polls them
+XFLAG_ATTN = XFLAG and os.environ.get("DSV41_X_FLAG_ATTN", "0") != "0"
+# DSV41_X_FLAG_ATTN_BIND=0: stage B's builds (the attention's modes in its kernel), the attention left unbound (it waits
+# for the MoE's grid as before): stage A alone in the binary of stage A + B, for a same-binary arm
+XFLAG_ATTN_BIND = os.environ.get("DSV41_X_FLAG_ATTN_BIND", "1") != "0"
+XFLAG_BIND = os.environ.get("DSV41_X_FLAG_BIND", "1") != "0"
+_XFLAG = {}   # an attention layer's x_out address -> its 32 flag words' address
+
+
+def _bind_xflag_out(layer):
+    """H1: this attention layer's post words (zeroed, owned by the layer) and its x_out's entry in _XFLAG."""
+    w = layer.w
+    w["xflag"] = torch.zeros(32, dtype=torch.int32, device=w["x_out"].device)
+    if XFLAG_BIND:
+        layer.sk.rebind("@xflag_out", w["xflag"].data_ptr())
+        _XFLAG[w["x_out"].data_ptr()] = w["xflag"].data_ptr()
+
+
+def _bind_xflag_in(layer):
+    """H1: a MoE layer reading an attention layer's x_out in place polls that layer's words; else the classic wait (0)."""
+    p = _XFLAG.get(layer.x_ptr, 0)
+    if getattr(layer, "xf_ptr", None) != p:
+        layer.sk.rebind("@xflag_in", p)
+        layer.xf_ptr = p
+        if os.environ.get("DSV41_X_FLAG_LOG"):   # (a check: which layers poll a flag)
+            print(f"[dsv41_static] H1: {type(layer).__name__} L{layer.layer}: "
+                  f"{'polls the flag of the kernel before' if p else 'no flag (the wait for the grid)'}", flush=True)
+
+
 def _bind_x(layer, x: torch.Tensor):
     """Graph tensor x reads SGLang's x when it is contiguous bf16 [T, H] (a CUDA graph captures the address), else a copy."""
     ok = x.is_contiguous() and x.dtype == torch.bfloat16 and x.shape == (T, HID)
@@ -206,6 +243,9 @@ class StaticAttn(MhcMixin):
             os.environ["HC_DRY"] = os.environ.get("HC_DRY_ATTN", "0")
         out = os.path.join(out_root, f"rank{rank}", f"attn{layer}")
         flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"] + os.environ.get("DSV41_STATIC_FLAGS", "").split()
+        if XFLAG:
+            assert mhc and "-DSTATIC_NO_START_BARRIER" in flags, "DSV41_X_FLAG: mHC in the kernels, a serving build"
+            flags.append("-DSTATIC_X_FLAG")
         # the index layers' scores by tcgen05 MMAs (tasks/indexer_score.cuh IS_TCGEN05, from mirage-opt: the same y bits, 1.4 to
         # 4.6 us less a layer); DSV41_STATIC_IS_TCGEN05=1 turns it on here (default off: this tree's measured builds)
         if os.environ.get("DSV41_STATIC_IS_TCGEN05", "0") != "0" and self.variant not in ("swa", "reuse"):
@@ -233,8 +273,9 @@ class StaticAttn(MhcMixin):
         if os.environ.get("DSV41_SA_DRY_IDX", "0") != "0" and self.variant in ("full_r2", "full_r1", "reindex"):
             os.environ["SA_DRY"] = "1"
         try:
+            xk = dict(x_flag=True, x_flag_prefill=XFLAG_PREFILL) if XFLAG_ATTN else {}   # (stage B: the attention reads)
             self.sk, self.bufs, self.info = attn_demo.build([w], self.variant, ratio, csrc, 64 // tp, out, extra_flags=flags,
-                                                            device=dev.index, profile=TIMING, **rk)
+                                                            device=dev.index, profile=TIMING, **rk, **xk)
         finally:
             if sa_dry is None:
                 os.environ.pop("SA_DRY", None)
@@ -242,6 +283,8 @@ class StaticAttn(MhcMixin):
                 os.environ["SA_DRY"] = sa_dry
         self.w = w
         sources.note(layer, w)
+        if XFLAG:
+            _bind_xflag_out(self)
 
     def _launch(self):
         self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
@@ -279,6 +322,8 @@ class StaticAttn(MhcMixin):
         pools bound the step's tables are filled (StepTables) and x is read where SGLang left it: no copy kernel."""
         if self.pool:
             _bind_x(self, x)
+            if XFLAG_ATTN and XFLAG_ATTN_BIND:
+                _bind_xflag_in(self)
         else:
             self.w["x"].copy_(x)
             self.w["positions"].copy_(positions.view(-1))
@@ -304,14 +349,21 @@ class StaticMoE(MhcMixin):
             os.environ["HC_DRY"] = os.environ.get("HC_DRY_MOE", "1")
         out = os.path.join(out_root, f"rank{rank}", f"moe{layer}")
         flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"] + os.environ.get("DSV41_STATIC_FLAGS", "").split()
+        if XFLAG:
+            assert mhc and "-DSTATIC_NO_START_BARRIER" in flags, "DSV41_X_FLAG: mHC in the kernels, a serving build"
+            flags.append("-DSTATIC_X_FLAG")
         rk = dict(num_gpus=tp, rank=rank, exchange_pool=exchange_pool) if exchange_pool is not None else {}
         self.sk, self.bufs, self.info = moe_demo.build([w], out, extra_flags=flags, device=dev.index, profile=TIMING,
-                                                       **rk)   # (bufs: as StaticAttn)
+                                                       x_flag=XFLAG, x_flag_prefill=XFLAG_PREFILL, **rk)   # (bufs: as StaticAttn)
         self.w = w
+        if XFLAG_ATTN and "gamma_next" in w:   # stage B: this post computes the next attention's input
+            _bind_xflag_out(self)
 
     def run(self, x: torch.Tensor, R: torch.Tensor = None) -> torch.Tensor:
         """One decode step of T rows: this rank's part of y [T, H] bf16 (the layer's own buffer), or with the exchange the sum."""
         _bind_x(self, x)
+        if XFLAG:
+            _bind_xflag_in(self)
         if R is not None:
             self.bind_streams(R)
         self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)

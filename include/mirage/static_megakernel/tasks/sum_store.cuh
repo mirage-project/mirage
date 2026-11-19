@@ -25,6 +25,12 @@
 // part order.
 // SEND_ONLY (buffer slot -1 for y, GPUS > 1): only the sending half; the
 // buffer's reader adds the GPUs' sums (hc_post_combine) and there is no y.
+// -DMOE_ROWS_POLL (C12, 11-18, default off): the routed rows are polled as
+// data instead (the expert node's buffer 0xFF before the launch: its out_buffer
+// (bytes, 0xFF, re-armed), StaticMegakernel.moe_rows_poll; every value is
+// written by one 4-B store, so a float4 counts once all 4 words are not
+// 0xFFFFFFFF) and, with REARM, re-armed here after use; no wait on the node's
+// counter. The same adds in the same order: the same y bits.
 #pragma once
 #include "../core.cuh"
 
@@ -47,6 +53,7 @@ __device__ __forceinline__ void sum_store_task(G const &g,
 #pragma unroll 1
   for (int pass = warm ? 1 : 0; pass < 2; pass++) {
     bool const real = pass == 1;
+#ifndef MOE_ROWS_POLL
     if constexpr (RK > 0) {
       if (real) { // the routed rows: all the expert node's tasks (acquire)
         if (threadIdx.x == 0) {
@@ -55,6 +62,7 @@ __device__ __forceinline__ void sum_store_task(G const &g,
         __syncthreads();
       }
     }
+#endif
     for (int c = x * NC + 4 * l; c < (x + 1) * NC; c += 128) {
       float4 v[P];
       bool ok[P];
@@ -62,6 +70,15 @@ __device__ __forceinline__ void sum_store_task(G const &g,
       for (int p = 0; p < P; p++) {
         ok[p] = false;
       }
+#ifdef MOE_ROWS_POLL
+      constexpr int RQ = RK > 0 ? RK : 1; // (RK 0: unused)
+      float4 rv[RQ];
+      bool rok[RQ];
+#pragma unroll
+      for (int k = 0; k < RQ; k++) {
+        rok[k] = RK == 0;
+      }
+#endif
       bool all; // all P loads in flight at once
       do {
         all = true;
@@ -71,6 +88,23 @@ __device__ __forceinline__ void sum_store_task(G const &g,
             v[p] = ldf4_poll(part + ((size_t)p * T + t) * N + c);
           }
         }
+#ifdef MOE_ROWS_POLL
+        if constexpr (RK > 0) { // the token's RK routed rows, also in flight
+#pragma unroll
+          for (int k = 0; k < RK; k++) {
+            if (!rok[k]) {
+              rv[k] = ldf4_poll(rows + ((size_t)t * RK + k) * N + c);
+            }
+          }
+#pragma unroll
+          for (int k = 0; k < RK; k++) {
+            if (!rok[k]) {
+              rok[k] = validf4(rv[k]);
+            }
+            all = all && rok[k];
+          }
+        }
+#endif
 #pragma unroll
         for (int p = 0; p < P; p++) {
           if (!ok[p]) {
@@ -84,6 +118,17 @@ __device__ __forceinline__ void sum_store_task(G const &g,
       } while (!all && real);
       float4 s;
       if constexpr (RK > 0) { // the routed rows first, then every K part
+#ifdef MOE_ROWS_POLL
+        s = rv[0];
+#pragma unroll
+        for (int k = 1; k < RK; k++) {
+          float4 const r = rv[k];
+          s.x += r.x;
+          s.y += r.y;
+          s.z += r.z;
+          s.w += r.w;
+        }
+#else
         s = *reinterpret_cast<float4 const *>(rows + (size_t)t * RK * N + c);
 #pragma unroll
         for (int k = 1; k < RK; k++) {
@@ -94,6 +139,7 @@ __device__ __forceinline__ void sum_store_task(G const &g,
           s.z += r.z;
           s.w += r.w;
         }
+#endif
 #pragma unroll
         for (int p = 0; p < P; p++) {
           s.x += v[p].x;
@@ -133,6 +179,14 @@ __device__ __forceinline__ void sum_store_task(G const &g,
           for (int p = 0; p < P; p++) {
             rearm16(part + ((size_t)p * T + t) * N + c);
           }
+#ifdef MOE_ROWS_POLL
+          if constexpr (RK > 0) { // and of these routed rows
+#pragma unroll
+            for (int k = 0; k < RK; k++) {
+              rearm16(rows + ((size_t)t * RK + k) * N + c);
+            }
+          }
+#endif
         }
       }
     }

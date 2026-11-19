@@ -93,6 +93,8 @@ class StaticMegakernel(PersistentKernel):
         self.tokens = None        # tokens per step: the first dimension of the layers' token-major tensors (_tokens; config.cuh T)
         self.poll_ns = None       # the waits' sleep between polls, ns (runtime.cuh STATIC_*POLL_NS: cnt_wait and the tasks
                                   # that pause with poll_pause; the others keep their own sleeps); None: their defaults
+        self.moe_rows_poll = False   # (C12, 11-18) the layer is built with -DMOE_ROWS_POLL: swiglu_moe_experts' rows 0xFF
+                                     # before the launch, polled and re-armed by sum_store (tasks/sum_store.cuh)
         self._static_nodes = {}   # graph index -> what compiler.py needs about a node (_add_node)
         self._bufs = []           # G::buf slot -> {"kind": out | exchange | scratch | tensor, ...} (_add_node, _scratch, _tensor_slot)
         self._maps = []           # Maps::m slot -> (kind, source, dims) (_map)
@@ -1368,7 +1370,8 @@ class StaticMegakernel(PersistentKernel):
         tensors = [x_q, pairs, w13, w2, output]
         self._add_node("swiglu_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
                        [I, float_bits(swiglu_limit)], one_task_per_sm=True,
-                       out_buffer=lambda n: (T * K * L * 4, -1, False), counters=32 * 2 + NSLOT, buf_slots=[hq, hsf],
+                       out_buffer=(lambda n: (T * K * L * 4, 0xFF, True)) if self.moe_rows_poll else   # (C12: polled, re-armed)
+                       (lambda n: (T * K * L * 4, -1, False)), counters=32 * 2 + NSLOT, buf_slots=[hq, hsf],
                        map_slots=maps)
 
     # ---- after moe_experts (tasks/allreduce_send.cuh, sum_rmsnorm.cuh, sum_gpus.cuh, sum_send.cuh, residual_add.cuh). The
