@@ -1133,6 +1133,99 @@ __device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
       int const qq = tid >> 2, act = qq < 4 * nb, gq = 4 * b0 + (act ? qq : 0),
                 r = gq >> 4, gi = gq & 15, rh = tid >> 4;
       bool const sumt = (tid & 15) == 0;
+#ifdef I1C_SA
+      // I1c (11-19): the other splits' values loaded one split at a time and
+      // stored into shared memory once valid, in K's area (free in the real
+      // pass's tail: every copy waited for; the dry pass's tail never touches
+      // it), [NS][2][256] float4, a warp's stores contiguous: 8 floats in
+      // registers at a time, where the default path holds 2 NS float4 across
+      // the factors and the barrier (spilled in the index layers' kernels).
+      // The cost: a round's NS - 1 loads one after the other (NS - 1 round
+      // trips when all are there; the default path's loads are in flight
+      // together). The same values, the same arithmetic
+      static_assert(NS * 2 * 256 * 16 <= 128 * SA_QLD * 2,
+                    "sparse_attn (I1C_SA): the staged shares fit K's area");
+      float4 *const stg = reinterpret_cast<float4 *>(sm + SA_OFF_K) + tid;
+      float4 sv[NS];
+      {
+        float const *const src = po + 32 * gq + 8 * q4; // + s2 16 D
+        bool ok[NS], oks[NS];
+#pragma unroll
+        for (int s2 = 0; s2 < NS; s2++) {
+          ok[s2] = !real || !act || s2 == s;
+          oks[s2] = !real || !sumt;
+          sv[s2] = make_float4(0.f, 0.f, 1.f, 1.f);
+        }
+        bool all;
+        do {
+#pragma unroll
+          for (int s2 = 0; s2 < NS; s2++) {
+            if (!oks[s2]) {
+              sv[s2] = ldf4_poll(pml + (s2 * SA_HPT + rh) * 4);
+            }
+          }
+          all = true;
+#pragma unroll
+          for (int s2 = 0; s2 < NS; s2++) {
+            if (!ok[s2]) {
+              float4 const a0 = ldf4_poll(src + (size_t)s2 * SA_HPT * D),
+                           a1 = ldf4_poll(src + (size_t)s2 * SA_HPT * D + 4);
+              if (validf4(a0) && validf4(a1)) {
+                stg[(2 * s2) * 256] = a0;
+                stg[(2 * s2 + 1) * 256] = a1;
+                ok[s2] = true;
+              }
+            }
+            if (!oks[s2]) {
+              oks[s2] = validf4(sv[s2]);
+            }
+            all = all && ok[s2] && oks[s2];
+          }
+        } while (!all);
+      }
+      if (sumt) {
+        float m = -1.0e30f, sum = 0.f;
+#pragma unroll
+        for (int s2 = 0; s2 < NS; s2++) {
+          float const m1 = fmaxf(m, sv[s2].x), m2 = fmaxf(m1, sv[s2].y);
+          float const sc0 = expf(__fsub_rn(m, m1)),
+                      sc1 = expf(__fsub_rn(m1, m2));
+          sum = __fmaf_rn(__fmaf_rn(sum, sc0, sv[s2].z), sc1, sv[s2].w);
+          *reinterpret_cast<float2 *>(fac + (s2 * SA_HPT + rh) * 2) =
+              make_float2(sc0, sc1);
+          m = m2;
+        }
+        rs[4 * rh + 3] = __fadd_rn(sum, expf(__fsub_rn(snk, m)));
+      }
+      __syncthreads(); // fac, the denominators
+      if (real) {
+        SA_MARK(18)
+      }
+      // O = pair 0's, then O = O sc0 sc1 + pair s2's (pair 0's: the
+      // official's bits)
+      {
+        float x[8];
+        float const *const own = os + r * SA_OSLD + 32 * gi + 8 * q4;
+#pragma unroll
+        for (int s2 = 0; s2 < NS; s2++) {
+          float2 const f =
+              *reinterpret_cast<float2 const *>(fac + (s2 * SA_HPT + r) * 2);
+          bool const staged = real && act && s2 != s;
+          float4 const v0 = staged ? stg[(2 * s2) * 256]
+                                   : *reinterpret_cast<float4 const *>(own),
+                       v1 = staged ? stg[(2 * s2 + 1) * 256]
+                                   : *reinterpret_cast<float4 const *>(own + 4);
+          float const y[8] = {v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w};
+#pragma unroll
+          for (int e = 0; e < 8; e++) {
+            x[e] = s2 == 0
+                       ? y[e]
+                       : __fadd_rn(__fmul_rn(__fmul_rn(x[e], f.x), f.y), y[e]);
+          }
+        }
+        quant8(r, gi, x, rs[4 * r + 3], act);
+      }
+#else
       float4 v[NS][2], sv[NS];
       {
         float const *const src = po + 32 * gq + 8 * q4; // + s2 16 D
@@ -1214,6 +1307,7 @@ __device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
         }
         quant8(r, gi, x, rs[4 * r + 3], act);
       }
+#endif
       lb0 = b0;
       lnb = nb;
     }

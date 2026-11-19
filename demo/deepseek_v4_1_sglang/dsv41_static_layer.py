@@ -33,6 +33,7 @@ _readers = {}
 # DSV41_STATIC_TIMING=1 (measurement, 2026-11-17): the timing build (every task stamps its start and end; dsv41_static_prof
 # then samples per node). Not a serving number: the stamps cost a little in every task.
 TIMING = os.environ.get("DSV41_STATIC_TIMING", "0") != "0"
+I1C_VARIANTS = tuple(os.environ.get("DSV41_I1C_VARIANTS", "full_r2,full_r1,reindex").split(","))   # (DSV41_I1C)
 
 
 def _exchange_region(nbytes: int, dev, group):
@@ -209,6 +210,17 @@ class StaticAttn(MhcMixin):
         # 4.6 us less a layer); DSV41_STATIC_IS_TCGEN05=1 turns it on here (default off: this tree's measured builds)
         if os.environ.get("DSV41_STATIC_IS_TCGEN05", "0") != "0" and self.variant not in ("swa", "reuse"):
             flags.append("-DIS_TCGEN05")
+        # I1c (11-19; default off): DSV41_I1C=1 builds the index layers' attention kernels (DSV41_I1C_VARIANTS) with
+        # -DI1C_HCP: the post's R and gamma prefetched into L1 instead of held in registers across the all-reduce wait
+        # (tasks/hc_post_combine.cuh; the same values). DSV41_I1C=2 adds -DI1C_SA for full_r2 and full_r1: sparse_attn's
+        # split combine staged in shared memory one split at a time (fewer spills; its polled loads one after the other).
+        # Spill stores / loads in B, TP4 full_r2 timing build 668 / 1136 -> HCP 640 / 1092, both 368 / 604; reindex 20 / 24 ->
+        # HCP 4 / 4 (SA would make it 44 / 48); a reuse layer's kernel has none (SA would add 24): not there
+        i1c = os.environ.get("DSV41_I1C", "0")
+        if i1c != "0" and self.variant in I1C_VARIANTS:
+            flags.append("-DI1C_HCP")
+            if i1c == "2" and self.variant in ("full_r2", "full_r1"):
+                flags.append("-DI1C_SA")
         # the node buffers are torch tensors the kernel writes to: they must stay referenced as long as the layer runs
         rk = dict(num_gpus=tp, rank=rank, exchange_pool=exchange_pool) if exchange_pool is not None else {}
         # C16 (11-18; default off): DSV41_SA_DRY_IDX=1 turns sparse_attn's dry pass on for the index layers (full_r2,

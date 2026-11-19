@@ -86,6 +86,23 @@ __device__ HC_TASK_INLINE void
   int const c = q * COLS + 8 * v;
   unsigned char const *row =
       g.rv + SOFF + rg_set() + (size_t)t * H * 2 + (size_t)q * COLS * 2;
+#ifdef I1C_HCP
+  // I1c (11-19; -DI1C_HCP, the index layers' attention kernels only: their
+  // allocation spilled these, the others' did not): R and gamma are only
+  // prefetched into L1 here (a prefetch holds no registers: these 5 uint4
+  // spilled across the waits for the sums), loaded where they are used; the
+  // same values
+  if (v < NV) {
+#pragma unroll
+    for (int i = 0; i < HC; i++) {
+      asm volatile("prefetch.global.L1 [%0];" ::"l"(
+          res + ((size_t)t * HC + i) * H + c));
+    }
+    if constexpr (NORM) {
+      asm volatile("prefetch.global.L1 [%0];" ::"l"(gamma + c));
+    }
+  }
+#else
   uint4 ru[HC], gm = {};
   if (v < NV) {
 #pragma unroll
@@ -97,6 +114,7 @@ __device__ HC_TASK_INLINE void
       gm = __ldg(reinterpret_cast<uint4 const *>(gamma + c));
     }
   }
+#endif
   __shared__ float coef_s[HC_COEF];
   __shared__ float red_s[8];
   __shared__ float rn_s;
@@ -161,6 +179,14 @@ __device__ HC_TASK_INLINE void
       HCP_MARK(20 + 2 * (pass + HCP_EXTRA_DRY))
     }
     float y[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+#ifdef I1C_HCP
+    uint4 ru[HC]; // (I1c: prefetched at the task's start)
+#pragma unroll
+    for (int i = 0; i < HC; i++) {
+      ru[i] =
+          *reinterpret_cast<uint4 const *>(res + ((size_t)t * HC + i) * H + c);
+    }
+#endif
 #ifdef HCP_LOOP
     // the streams as a loop that is not unrolled: an SM runs this code once a
     // launch, and code it has not run before costs about 5 ns an instruction
@@ -332,6 +358,10 @@ __device__ HC_TASK_INLINE void
     __syncthreads();
     if (v < NV) {
       float const rn = rn_s;
+#ifdef I1C_HCP
+      uint4 const gm = __ldg(reinterpret_cast<uint4 const *>(
+          gamma + c)); // (I1c: prefetched at the task's start)
+#endif
       __nv_bfloat16 const *gb = reinterpret_cast<__nv_bfloat16 const *>(&gm);
       uint4 ou;
       __nv_bfloat16 *ob = reinterpret_cast<__nv_bfloat16 *>(&ou);
