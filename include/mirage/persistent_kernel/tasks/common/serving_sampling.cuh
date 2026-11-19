@@ -34,6 +34,8 @@ public:
     char *base = buffer + size_t(slot) * sampling_buffer_bytes(padded_vocab);
     scores = reinterpret_cast<float *>(base);
     histogram = reinterpret_cast<uint32_t *>(base + size_t(padded_vocab) * sizeof(float));
+    greedy_max = reinterpret_cast<unsigned long long *>(
+        (reinterpret_cast<uintptr_t>(histogram) + 7) & ~uintptr_t(7));
     ready = histogram + SAMPLING_PARTIAL_WORDS;
     radix_prefix = ready + 1;
     arrival = ready + 2;
@@ -41,6 +43,7 @@ public:
   }
   float *scores;
   uint32_t *histogram;
+  unsigned long long *greedy_max;
   uint32_t *ready;
   uint32_t *radix_prefix;
   uint32_t *arrival;
@@ -256,8 +259,15 @@ __device__ inline float get_score(
   return isnan(score) ? -std::numeric_limits<float>::infinity() : score;
 }
 
-template <typename T>
-__device__ inline void sample_scores(
+__device__ inline uint32_t float_bits(float f) {
+  uint32_t bits = __float_as_uint(f);
+  bits = (bits == 0x80000000u) ? 0u : bits;
+  uint32_t mask = -int32_t(bits >> 31) | 0x80000000u;
+  return bits ^ mask;
+}
+
+template <bool Greedy = false, typename T>
+__device__ inline uint64_t sample_scores(
   T const* logits,
   uint32_t* history_buffer,
   char *buffer,
@@ -298,16 +308,17 @@ __device__ inline void sample_scores(
   long long begin = static_cast<long long>(vocab) * part_id / num_cta;
   long long token_end = static_cast<long long>(vocab) * (part_id + 1) / num_cta;
 
+  uint64_t maximum = 0;
   for (long long token = begin + threadIdx.x; token < token_end; token += blockDim.x) {
-    scores[token] = get_score(row_logits, token, history, cfg, penalties);
+    float score = get_score(row_logits, token, history, cfg, penalties);
+    scores[token] = score;
+    if constexpr (Greedy) {
+      // Higher score wins; ties prefer the smaller token ID.
+      uint64_t key = uint64_t(float_bits(score)) << 32 | ~static_cast<uint32_t>(token);
+      maximum = cub::Max()(maximum, key);
+    }
   }
-}
-
-__device__ inline uint32_t float_bits(float f) {
-  uint32_t bits = __float_as_uint(f);  
-  bits = (bits == 0x80000000u) ? 0u : bits;
-  uint32_t mask = -int32_t(bits >> 31) | 0x80000000u;
-  return bits ^ mask;
+  return maximum;
 }
 
 __device__ inline float float_from_bits(uint32_t bits) {
@@ -325,6 +336,18 @@ __device__ inline void sample_scores_with_max(
   int num_cta,
   mirage::runtime::RuntimeConfig const &config
 ) {
+  if (config.generation_config[config.request_ids[slot]].temperature == 0.) {
+    using Reduce = cub::BlockReduce<uint64_t, Threads>;
+    extern __shared__ __align__(16) char sampling_shared[];
+    auto &storage = *reinterpret_cast<typename Reduce::TempStorage *>(sampling_shared);
+    auto maximum = sample_scores<true>(logits, history_buffer, buffer, padded_vocab, slot, part_id, num_cta, config);
+    maximum = Reduce(storage).Reduce(maximum, cub::Max());
+    if (threadIdx.x == 0) {
+      RadixBuffer buf(buffer, padded_vocab, slot);
+      atomicMax(buf.greedy_max, static_cast<unsigned long long>(maximum));
+    }
+    return;
+  }
   sample_scores(logits, history_buffer, buffer, padded_vocab, slot, part_id, num_cta, config);
   __syncthreads();
 
@@ -359,6 +382,15 @@ __device__ inline void sampling_barrier(
     while (ready.load(cuda::memory_order_acquire) < phase) {}
   }
   __syncthreads();
+}
+
+__device__ __noinline__ void sample_greedy(
+    char *buffer, long long *output, int padded_vocab, int slot,
+    int logit_row, int part_id) {
+  if (part_id == 0 && threadIdx.x == 0) {
+    RadixBuffer buf(buffer, padded_vocab, slot);
+    output[logit_row] = ~static_cast<uint32_t>(*buf.greedy_max);
+  }
 }
 
 template <int Threads, bool Joint>
@@ -553,7 +585,9 @@ __device__ void sample_request(
       sample_scores_with_max<NUM_THREADS>(logits, history_buffer, buffer, padded_vocab, slot, part_id, num_cta, config);
     } else if constexpr (PHASE == SamplePhase::RADIX) {
       auto const *cfg = config.generation_config + row;
-      if (cfg->top_k > 0 && cfg->top_p < 1.) {
+      if (cfg->temperature == 0.) {
+        sample_greedy(buffer, output, padded_vocab, slot, end - 1, part_id);
+      } else if (cfg->top_k > 0 && cfg->top_p < 1.) {
         sample_pivot<NUM_THREADS, true>(buffer, output, padded_vocab, slot, vocab,
             end - 1, current_len - prompt_len, part_id, num_cta, cfg);
       } else {

@@ -97,8 +97,16 @@ def sample(request):
         pk.finalize()
 
 
-def test_greedy_and_seed(sample):
-    assert sample({"temperature": 0}, range(8)) == [0] * 8
+@pytest.mark.parametrize("settings", [
+    {"temperature": 0},
+    {"temperature": 0, "top_k": 3, "top_p": 1e-100,
+     "logit_bias": {1: .3984375}},
+])
+def test_greedy(sample, settings):
+    assert sample(settings, range(8)) == [0] * 8
+
+
+def test_topk_one_and_seed(sample):
     assert sample({"temperature": 1, "top_k": 1}, range(8)) == [0] * 8
     assert sample({"temperature": 1}, [17]) == sample({"temperature": 1}, [17])
 
