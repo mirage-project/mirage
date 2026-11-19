@@ -114,7 +114,15 @@ __device__ HC_TASK_INLINE void
   }
   __syncthreads();
   float ss = 0.f;
+#ifdef I1_BF16
+  // I1 (11-19): y's bf16 roundings packed (4 registers, not 8 floats): they
+  // stay live across the squares' exchange below, where the 8 floats spilled
+  // to local memory (an L1 miss each when the ring fills shared memory); the
+  // same values (a bf16 converted to float is exact)
+  uint4 ybp = {};
+#else
   float yb[8];
+#endif
   if (v < NV) {
     float pre[HC], post[HC], comb[HC][HC];
 #pragma unroll
@@ -236,7 +244,11 @@ __device__ HC_TASK_INLINE void
 #pragma unroll
       for (int k = 0; k < 8; k++) { // the squares of the fp32 sum
         ss += y[k] * y[k];
+#ifdef I1_BF16
+        reinterpret_cast<__nv_bfloat16 *>(&ybp)[k] = __float2bfloat16(y[k]);
+#else
         yb[k] = __bfloat162float(__float2bfloat16(y[k]));
+#endif
       }
     }
   }
@@ -325,7 +337,13 @@ __device__ HC_TASK_INLINE void
       __nv_bfloat16 *ob = reinterpret_cast<__nv_bfloat16 *>(&ou);
 #pragma unroll
       for (int k = 0; k < 8; k++) { // SGLang's fused norm: one rounding
+#ifdef I1_BF16
+        float const ybk = __bfloat162float(
+            reinterpret_cast<__nv_bfloat16 const *>(&ybp)[k]);
+        ob[k] = __float2bfloat16(ybk * rn * __bfloat162float(gb[k]));
+#else
         ob[k] = __float2bfloat16(yb[k] * rn * __bfloat162float(gb[k]));
+#endif
       }
       if (real) {
         *reinterpret_cast<uint4 *>(x + (size_t)t * H + c) = ou;

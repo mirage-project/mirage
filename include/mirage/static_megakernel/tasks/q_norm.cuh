@@ -40,6 +40,9 @@ __device__ __forceinline__ bool
   __shared__ float red_q[8]; // the warps' sums of squares
   float x[8];
   uint4 gb;
+#ifdef I1_BF16
+  uint4 xp = {};
+#endif
   if (on) {
     // gamma first: its load overlaps the wait for the parts (after the barrier
     // below it could not start before the sum of squares)
@@ -47,11 +50,23 @@ __device__ __forceinline__ bool
     add_parts8<K, P>(part, t, c, x, dry);
     STAGE_STAMP(true)
     float ss = 0.f;
+#ifdef I1_BF16
+    // I1 (11-19): x's bf16 roundings packed across the barrier below (4
+    // registers, not 8 floats: they spilled there); the same values
+#pragma unroll
+    for (int k = 0; k < 8; k++) {
+      __nv_bfloat16 const h = __float2bfloat16_rn(x[k]); // the GEMM's output
+      reinterpret_cast<__nv_bfloat16 *>(&xp)[k] = h;
+      float const xk = __bfloat162float(h);
+      ss = __fadd_rn(ss, __fmul_rn(xk, xk)); // no fma: the squares rounded
+    }
+#else
 #pragma unroll
     for (int k = 0; k < 8; k++) {
       x[k] = __bfloat162float(__float2bfloat16_rn(x[k])); // the GEMM's output
       ss = __fadd_rn(ss, __fmul_rn(x[k], x[k])); // no fma: the squares rounded
     }
+#endif
     for (int d = 16; d > 0; d >>= 1) {
       ss = __fadd_rn(ss, __shfl_xor_sync(0xffffffffu, ss, d));
     }
@@ -72,10 +87,19 @@ __device__ __forceinline__ bool
 #pragma unroll
     for (int k = 0; k < 4; k++) {
       float2 const gm = __bfloat1622float2(g2[k]);
+#ifdef I1_BF16
+      float2 const xk = __bfloat1622float2(
+          reinterpret_cast<__nv_bfloat162 const *>(&xp)[k]);
+      y[2 * k] =
+          __bfloat162float(__float2bfloat16_rn(__fmul_rn(__fmul_rn(xk.x, r), gm.x)));
+      y[2 * k + 1] =
+          __bfloat162float(__float2bfloat16_rn(__fmul_rn(__fmul_rn(xk.y, r), gm.y)));
+#else
       y[2 * k] = __bfloat162float(
           __float2bfloat16_rn(__fmul_rn(__fmul_rn(x[2 * k], r), gm.x)));
       y[2 * k + 1] = __bfloat162float(
           __float2bfloat16_rn(__fmul_rn(__fmul_rn(x[2 * k + 1], r), gm.y)));
+#endif
     }
   }
   return on;
