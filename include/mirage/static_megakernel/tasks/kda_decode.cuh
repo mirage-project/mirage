@@ -375,8 +375,23 @@ __device__ __forceinline__ void kda_decode_task(
       }
     }
   }
+  // RP 8 (T = 64): the conv of requests 4 .. 7 runs on threads 96 .. 191
+  // (thread 96 + i: thread i's channels), of requests 0 .. 3 on threads 0 ..
+  // 95 (one thread did all 8: the conv held the gates 2.3 us)
+  constexpr bool HALVES = RP == 8;
+  int const tid2 = tid - 96, seg2 = tid2 >> 5, j2 = (tid2 & 31) * 4;
+  int const ch2 = seg2 * HLD + h * D + j2;
+  bool const grp2 = HALVES && tid >= 96 && tid < 192;
+  if constexpr (HALVES) {
+    if (grp2) {
+#pragma unroll
+      for (int k = 0; k < 4; k++) {
+        cw[k] = reinterpret_cast<float4 const *>(conv_w + (size_t)ch2 * 4)[k];
+      }
+    }
+  }
   float const alog = small[HLD + h];
-  float const dtb = tid < D ? small[h * D + tid] : 0.f;
+  float const dtb = HALVES || tid < D ? small[h * D + (tid & (D - 1))] : 0.f;
   float const onw = small[HLD + HL + (tid & (D - 1))];
   // the ring area is free once every warp has left the previous task (a
   // GEMM's MMAs read it asynchronously): f_b rows of head h, then g_b's (the
@@ -471,10 +486,14 @@ __device__ __forceinline__ void kda_decode_task(
     kda_cp_wait();
     __syncthreads();
   }
-  if (tid < 96) {
-    float *dst = (seg == 0 ? xq : (seg == 1 ? xk : xv)) + j;
+  if (tid < 96 || grp2) {
+    int const ct = grp2 ? tid2 : tid, cseg = grp2 ? seg2 : seg;
+    int const cch = grp2 ? ch2 : ch;
+    float *dst = (cseg == 0 ? xq : (cseg == 1 ? xk : xv)) + (grp2 ? j2 : j);
+    int const q0 = grp2 ? RP / 2 : 0, q1 = HALVES && !grp2 ? RP / 2 : RP;
 #pragma unroll 1
-    for (int q = 0; q < RP; q++) { // RP > 1: request q, its window and conv row
+    for (int q = q0; q < q1; q++) { // RP > 1: request q, its window and conv
+                                    // row
       if (q > 0) {
         if constexpr (CWIN_CP) {
 #pragma unroll
@@ -482,7 +501,7 @@ __device__ __forceinline__ void kda_decode_task(
 #pragma unroll
             for (int e = 0; e < 3; e++) {
               cs[3 * k + e] =
-                  __bfloat162float(cwin[((q - 1) * 3 + e) * 384 + tid * 4 + k]);
+                  __bfloat162float(cwin[((q - 1) * 3 + e) * 384 + ct * 4 + k]);
             }
           }
         } else {
@@ -495,7 +514,11 @@ __device__ __forceinline__ void kda_decode_task(
       bool const wr = RP == 1 || liveq[q]; // its conv row written
       // the new window (entry e = x_{e - 2}: the pool's 2 newest inputs,
       // then the token's raw input) to the conv state (its 3 entries)
-      __nv_bfloat16 *wd = q == 0 ? st : stq(q);
+      __nv_bfloat16 *wd =
+          q == 0 ? st
+                 : conv_state +
+                       (size_t)(slotq[q] < 0 ? 0 : slotq[q]) * (3 * HLD) * CL +
+                       (size_t)cch * CS;
       auto put = [&](int e, int k, float v) {
         if (wr) {
           wd[k * CS + e * ES] = __float2bfloat16(v);
@@ -586,10 +609,12 @@ __device__ __forceinline__ void kda_decode_task(
   // 3c. token by token: thread r < D the forget gate of key dim r and
   // q_i[r] (L2-normalised, x D^-1/2), thread D + r the output gate of value
   // dim r and k_i[r] (L2-normalised)
+  // (RP 8: the forget gate, two exponentials, alternates: threads r < D take
+  // it for tokens 0 .. 3, threads D + r for tokens 4 .. 7)
 #pragma unroll 1
   for (int i = 0; i < NTK; i++) {
     int const rr = tid & (D - 1);
-    if (tid < D) {
+    if (HALVES ? (tid < D) == (i < NTK / 2) : tid < D) {
       float const g = kda_bf16r(eg[i * D + rr]); // vLLM: a bf16 GEMM output
       float const z = expf(alog) * (g + dtb);
       float const lg = lower_bound / (1.0f + expf(-z)); // the log decay
