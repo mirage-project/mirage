@@ -143,7 +143,9 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     mpk.scaled_gemm_tile_layer(input=qcq, weight=t["w_qb"], weight_scales=t["w_qb_sf"], output=qb, combine="add")
     if full:
         iq = nt((T, 4096), int64, "idx_q")
-        mpk.scaled_gemm_tile_layer(input=qcq, weight=t["w_iqb"], weight_scales=t["w_iqb_sf"], output=iq, combine="add")
+        # skip_seq: a step whose contexts are all at most TOPK reads no index scores (dsa_index_score skip_k)
+        mpk.scaled_gemm_tile_layer(input=qcq, weight=t["w_iqb"], weight_scales=t["w_iqb_sf"], output=iq, combine="add",
+                                   skip_seq=(t["seq_lens"], TOPK))
     q = nt((T, NH, 576), bfloat16, "q_mla")
     mpk.dsa_q_absorb_layer(qb=qb, w_uk=t["w_uk"], cos_sin=t["cos_sin"], seq_lens=t["seq_lens"], output=q)
     if full:

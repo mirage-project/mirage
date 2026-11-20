@@ -145,8 +145,10 @@ __device__ __forceinline__ void scaled_gemm_tile_task(TileJob const &j,
 // GEMM tile (x, y): weight rows [128 x, 128 x + 128) times K part y of
 // SELF::y -> the node's output buffer (SELF::buf).
 //   PARAMS  {mode (Combine), K, N (the weight's rows), the layout of the weight
-//           scales (0 BlockScales, 1 GateUpScales)}
-//   BUF_SLOTS  {the weight scales (a graph tensor, fp32)}
+//           scales (0 BlockScales, 1 GateUpScales)[, L (skip_seq: a launch
+//           with every seq_lens <= L only counts the tasks)]}
+//   BUF_SLOTS  {the weight scales (a graph tensor, fp32)[, seq_lens
+//              (skip_seq)]}
 //   MAP_SLOTS  {the weight's map (one piece for each box; two pieces at the
 //              next slot), the activation's map (one K tile, set 0; set 1 at
 //              the next slot; then two K tiles, set 0 and set 1)}
@@ -165,6 +167,20 @@ __device__ __forceinline__ void run_scaled_gemm_tile(Maps const &maps,
   constexpr int mode = PARAMS::v[0], K = PARAMS::v[1], N = PARAMS::v[2],
                 SL = PARAMS::v[3], KT = K / 128, WMAP = slot_at<MAP_SLOTS, 0>(),
                 AMAP = slot_at<MAP_SLOTS, 1>(), WSF = slot_at<BUF_SLOTS, 0>();
+  constexpr int SKIP_LEN = param_or<PARAMS, 4, 0>();
+  if constexpr (SKIP_LEN > 0) {
+    static_assert(mode == COMBINE_ADD && SELF::counter >= 0,
+                  "skip_seq: an add GEMM");
+    // every token's seq_lens <= SKIP_LEN: the readers read nothing this launch,
+    // so the task only counts itself (the buffer stays 0), as gemm_tile's
+    int const *seq = buf_at<int const>(g, slot_at<BUF_SLOTS, 1>());
+    if (__syncthreads_and(threadIdx.x >= T || seq[threadIdx.x] <= SKIP_LEN)) {
+      if (threadIdx.x == 0) {
+        cnt_add(cnt_now(g) + SELF::counter + tk.x, 1);
+      }
+      return;
+    }
+  }
   static_assert(K > 0 && K % (128 * SELF::y) == 0,
                 "scaled_gemm_tile: each K part is whole 128-column tiles");
   constexpr int NATOMS = KT / SELF::y; // K tiles of the task

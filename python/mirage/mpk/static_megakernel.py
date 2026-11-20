@@ -383,6 +383,8 @@ class StaticMegakernel(PersistentKernel):
         weight_scales: DTensor,   # the checkpoint's fp32 block scales: [N / 128, K / 128], or [N / 256, K / 128, 2] (gate_up)
         output: DTensor,    # [T, N] fp32 ("add": int64 fixed point; "store_bf16": bf16; its buffer holds what `combine` says)
         combine: str = "add",   # as gemm_tile_layer: "slots", "add", "store" or "store_bf16" (a layer's final output)
+        skip_seq: tuple = None,   # as gemm_tile_layer's: (seq_lens [T] int32, L), an "add" GEMM whose readers read nothing in a
+                                  # launch where every token has seq_lens <= L (e.g. GLM-5.3's indexer q, dsa_index_score skip_k)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare an FP8 GEMM with fp32 scales (tasks/scaled_gemm_tile.cuh).
@@ -396,8 +398,8 @@ class StaticMegakernel(PersistentKernel):
         A GateUpScales piece holds 64 gate rows, then 64 up rows.
         Tensor maps load weights and activations. Pointers load fp32 weight scales.
         Weight maps cover one or two pieces. Activation maps cover one or two K tiles, in both exchange sets.
-        params = [mode, K, N, scale layout (0 BlockScales, 1 GateUpScales)].
-        buf_slots = [weight scale buffer slot]. map_slots = [weight map slot, activation map slot].
+        params = [mode, K, N, scale layout (0 BlockScales, 1 GateUpScales)[, L of skip_seq]].
+        buf_slots = [weight scale buffer slot[, seq_lens of skip_seq]]. map_slots = [weight map slot, activation map slot].
         """
         from .compiler import graph_nodes, producer_of
         assert input.num_dims == 2 and weight.num_dims == 2 and weight.dim(1) == input.dim(1)
@@ -420,6 +422,11 @@ class StaticMegakernel(PersistentKernel):
             raise ValueError(f"scaled_gemm_tile_layer: weight scales {dims}, expected one of {list(layouts)}")
         layout = layouts[dims]
         assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
+        assert skip_seq is None or combine == "add", "skip_seq: an \"add\" GEMM"
+        params, bufs = [mode, K, N, layout], [self._tensor_slot(weight_scales)]
+        if skip_seq is not None:
+            self._dtypes("scaled_gemm_tile_layer", seq_lens=(skip_seq[0], int32))
+            params, bufs = params + [skip_seq[1]], bufs + [self._tensor_slot(skip_seq[0])]
         out_buffer = {"slots": lambda n: (n.grid[1] * T * N * 4, 0xFF, True),   # as gemm_tile_layer (not polled)
                       "add": lambda n: (T * N * 8, 0, False),
                       "store": lambda n: (T * N * 4, -1, False),
@@ -435,10 +442,10 @@ class StaticMegakernel(PersistentKernel):
                 assert m == amap + (2 if kind == "act8kt" else 0) + s, "scaled_gemm_tile: the four activation maps in consecutive slots"
         self._add_node("scaled_gemm_tile", (N // 128, 1, 1), block_dim, [input, weight, weight_scales, output],
                        # the input whole: each task waits until all group_quant tasks are counted
-                       [(-1, -1, -1), (0, 1, -1), (-1, -1, -1), (1, -1, -1)], [mode, K, N, layout],
+                       [(-1, -1, -1), (0, 1, -1), (-1, -1, -1), (1, -1, -1)], params,
                        changeable_grid_dims={1: (128, 1, None)} if combine in ("slots", "add") else {},
                        out_buffer=out_buffer, counters={"slots": 0, "add": N // 128, "store": 1, "store_bf16": 1}[combine],
-                       buf_slots=[self._tensor_slot(weight_scales)], map_slots=[wmap, amap])
+                       buf_slots=bufs, map_slots=[wmap, amap])
 
     def topk_route_layer(
         self,
