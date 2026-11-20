@@ -30,6 +30,8 @@ import threading
 import time
 from typing import Deque, Dict, List, Tuple
 
+from mirage.core import serving_config_words, serving_finish_reason_name
+
 import torch
 
 
@@ -59,6 +61,9 @@ class OnlinePinnedRuntime:
         self._inbox_tokens      = mpk.pinned_inbox_tokens     # int64[cap, max_seq_len], pinned
         self._pinned_rid_at_row = mpk.pinned_rid_at_row       # int32[max_batched], pinned
 
+        self._generation_config = mpk.pinned_generation_config
+        self._finish_reason = mpk.pinned_finish_reason
+
         # CPU-private ring cursors.
         self._cpu_req_tail  = 0  # next ring slot to write
         self._cpu_req_ack   = 0  # last slot known to be consumed by GPU
@@ -66,7 +71,7 @@ class OnlinePinnedRuntime:
 
         # CPU-side waiting queue: holds (rid, token_ids, initial_step) tuples
         # that could not be written to the ring because it was full.
-        self._waiting: Deque[Tuple[int, torch.Tensor, int]] = collections.deque()
+        self._waiting: Deque[Tuple[int, torch.Tensor, int, torch.Tensor]] = collections.deque()
         self._waiting_lock = threading.Lock()
 
         # Dedicated stream for HtoD / DtoH copies.
@@ -92,7 +97,7 @@ class OnlinePinnedRuntime:
 
     # ── Public API ────────────────────────────────────────────────────────
 
-    def submit(self, rid: int, token_ids: torch.Tensor, initial_step: int = 0) -> bool:
+    def submit(self, rid: int, token_ids: torch.Tensor, initial_step: int = 0, generation_config=None) -> bool:
         """Stage prompt tokens and write a request into the CPU→GPU ring.
 
         Writes tokens to the slot-specific inbox so concurrent requests never
@@ -111,6 +116,18 @@ class OnlinePinnedRuntime:
         the CPU waiting deque.
         """
         self._raise_drain_error()
+        if not 0 <= rid < 2**31 or initial_step != 0:
+            raise ValueError("rid must fit int32 and prefix caching is not supported")
+        if token_ids.ndim != 1 or token_ids.dtype != torch.int64 or not 0 < len(token_ids) < self._inbox_tokens.shape[1]:
+            raise ValueError("expected nonempty int64 prompt shorter than context capacity")
+        if generation_config is None:
+            from ..engine.sampling import SamplingParams
+            vocab = getattr(self._mpk.model_builder, "vocab_size", len(self._mpk.tokenizer))
+            generation_config = SamplingParams().pack(len(token_ids), self._inbox_tokens.shape[1], vocab,
+                                                     [self._mpk.persistent_kernel.eos_token_id])
+        generation_config = torch.tensor(generation_config, dtype=torch.int64)
+        if generation_config.shape != (serving_config_words(),):
+            raise ValueError("invalid generation configuration ABI")
 
         # Keep the producer lock until ready=1 is published. Otherwise a
         # flusher can reserve a later slot and leave a permanent hole in the
@@ -120,9 +137,9 @@ class OnlinePinnedRuntime:
             if self._load_i32_acquire(self._req_ready, slot) != 0:
                 # Ring full — enqueue to CPU-side waiting.
                 with self._waiting_lock:
-                    self._waiting.append((rid, token_ids.clone(), initial_step))
+                    self._waiting.append((rid, token_ids.clone(), initial_step, generation_config))
                 return False
-            self._publish_request_locked(slot, rid, token_ids, initial_step)
+            self._publish_request_locked(slot, rid, token_ids, initial_step, generation_config)
             self._cpu_req_tail += 1
         return True
 
@@ -142,9 +159,9 @@ class OnlinePinnedRuntime:
                     return 0
                 request = self._waiting.popleft()
 
-            rid, token_ids, initial_step = request
+            rid, token_ids, initial_step, generation_config = request
             try:
-                self._publish_request_locked(slot, rid, token_ids, initial_step)
+                self._publish_request_locked(slot, rid, token_ids, initial_step, generation_config)
             except Exception:
                 with self._waiting_lock:
                     self._waiting.appendleft(request)
@@ -158,6 +175,7 @@ class OnlinePinnedRuntime:
         rid: int,
         token_ids: torch.Tensor,
         initial_step: int,
+        generation_config: torch.Tensor,
     ) -> None:
         """Copy and publish one request while ``_ring_lock`` is held."""
         prompt_len = token_ids.shape[0]
@@ -165,6 +183,7 @@ class OnlinePinnedRuntime:
             self._inbox_tokens[slot, :prompt_len].copy_(
                 token_ids, non_blocking=True)
         self._write_stream.synchronize()
+        self._generation_config[slot].copy_(generation_config)
         self._req_request_id[slot] = rid
         self._req_prompt_len[slot] = prompt_len
         self._req_initial_step[slot] = initial_step
@@ -275,6 +294,9 @@ class OnlinePinnedRuntime:
             del self._completions[rid]
             return True
 
+    def finish_reason(self, row: int) -> str:
+        return serving_finish_reason_name(int(self._finish_reason[row]))
+
     def abandon_request(self, rid: int) -> None:
         """Release *rid* when it completes without retaining its output."""
         with self._lock:
@@ -358,6 +380,7 @@ class OnlinePinnedRuntime:
             self._cpu_comp_head = 0
             self._completions.clear()
             self._abandoned.clear()
+            self._finish_reason.zero_()
             self._drain_error = None
             self._comp_ready.zero_()
 
