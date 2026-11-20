@@ -1245,9 +1245,9 @@ class StaticMegakernel(PersistentKernel):
                        [(-1, -1, -1), (-1, -1, -1), (1, 0, -1) if kpool == 1 else (-1, 0, -1), (-1, 0, -1)],
                        [NH, TOPK, page, block_table.dim(1), cache.dim(0) // page, float_bits(softmax_scale), q.dim(2) - 512,
                         kpool, NIDX],
-                       # TOPK: kpool 4 splits the slots, not indices; T = 64: 4 splits at most (dsa_mla_merge's 8-token
-                       # tasks have a lane per lse)
-                       changeable_grid_dims={0: (64, -(-TOPK // 256) if T == 64 else 1, None, TOPK)},
+                       # TOPK: kpool 4 splits the slots, not indices; a dsa_mla_merge of G tokens a task bounds the splits
+                       # (dsa_mla_merge_layer: G x splits <= 32, a lane per lse)
+                       changeable_grid_dims={0: (64, 1, None, TOPK)},
                        out_buffer=lambda n: (T * n.grid[0] * NH * 513 * 4, -1, False), counters=T,
                        buf_slots=[self._tensor_slot(cache), self._tensor_slot(block_table), self._tensor_slot(seq_lens),
                                   self._tensor_slot(indices)])
@@ -1270,6 +1270,10 @@ class StaticMegakernel(PersistentKernel):
         assert output.dim(2) == 512
         G = tokens_per_task or (8 if T == 64 else 1)
         assert T % G == 0 and (G == 1 or G % 2 == 0), "dsa_mla_merge_layer: whole tiles of an even number of tokens (or 1)"
+        if G > 1:   # G x the splits <= 32 (a lane per lse): the splits' fewest tiles, for the compiler too
+            assert G * p.grid[0] <= 32, f"dsa_mla_merge_layer: {G} tokens a task need at most {32 // G} sparse_mla splits"
+            unit, _, hi, length = p.info["changeable_grid_dims"][0]
+            p.info["changeable_grid_dims"][0] = (unit, -(-length * G // (32 * unit)), hi, length)
         self._add_node("dsa_mla_merge", (NH, T // G, 1), block_dim, [input, output], [(-1, 0, -1), (1, 0, -1)], [NH],
                        out_buffer=lambda n: (T * NH * 512 * 2, -1, False), counters=NH,
                        buf_slots=[p.info["buf_slots"][2]] if p.params[7] == 1 else [])   # sparse_mla's seq_lens

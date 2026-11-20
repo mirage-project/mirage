@@ -1,6 +1,6 @@
 """Run GLM-5.3 / 5.2 DSA attention decode layers (MLA, the lightning indexer and IndexShare) with the static-schedule compiler.
 
-The demo runs one decode step of T requests (STATIC_TOKENS: 8, 16 or 32; default 8) on one TP shard, with one kernel
+The demo runs one decode step of T requests (STATIC_TOKENS: 8, 16, 32 or 64; default 8) on one TP shard, with one kernel
 for each layer. With --tp 8, the shard has 8 of the 64 heads. The A projections and the indexer are replicated, as in
 vLLM. A "full" layer (HF config indexer_types) runs its indexer. It writes its top-2048 positions for each request to a
 graph tensor. A "shared" layer reads that tensor (GLM IndexShare). For example, --layers 6 7 runs layer 6, then runs
@@ -69,7 +69,7 @@ try:
 except ImportError:
     from weights import check_config, checkpoint_reader, download_layers, is_full_layer, layer_tensors
 
-T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each request): the kernel's T (8, 16 or 32)
+T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each request): the kernel's T (8, 16, 32, 64)
 H, PAGE, TOPK = 6144, 64, 2048
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -160,8 +160,9 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
                          output=split, softmax_scale=(cfg["qk_nope_head_dim"] + cfg["qk_rope_head_dim"]) ** -0.5,
                          splits=splits)
     o_lat, v, vq = nt((T, NH, 512), bfloat16, "o_lat"), nt((T, NH * 256), bfloat16, "v"), nt((T, NH * 256), uint8, "v_fp8")
-    # T = 32: two tokens a merge task (NH x 16 tasks, one round of the SMs; NH x 32 queued a second round)
-    mpk.dsa_mla_merge_layer(input=split, output=o_lat, tokens_per_task=2 if T == 32 else None)
+    # two tokens a merge task at T = 32 (NH x 16 tasks, one round of the SMs; NH x 32 queued a second round); at T = 64
+    # the most a lane per lse allows (32 / splits)
+    mpk.dsa_mla_merge_layer(input=split, output=o_lat, tokens_per_task={32: 2, 64: 32 // splits}.get(T))
     mpk.dsa_o_absorb_layer(input=o_lat, w_uv=t["w_uv"], output=v)
     mpk.group_quant_layer(input=v, output=vq)
     o, sent, osum = nt((T, H), float32, "o_proj"), nt((T, H), bfloat16, "o_sent"), nt((T, H), bfloat16, "o_sum")
@@ -190,7 +191,9 @@ def drop_missing_nodes(mpk, plan: dict) -> dict:
 
 def plan_file(plan: str, full: bool) -> str:
     """Return the plan file of a layer kind: plan = "hand", "solver" or a path prefix. A hand plan of T = 16 or 32 has
-    the suffix _T16 or _T32. The solver plans are of T = 8 only."""
+    the suffix _T16 or _T32. The solver plans are of T = 8 only. plan = "rr": "rr" (build's round robin)."""
+    if plan == "rr":
+        return plan
     if plan == "solver" and T != 8:
         raise ValueError(f"plan_file: no solver plan of T = {T} (STATIC_TOKENS)")
     kind = "full" if full else "shared"
@@ -213,13 +216,17 @@ def build(mpk, ws: dict, plan: str, out: str, search: list = None, costs_code: s
           profile: bool = False, extra_flags: list = None):
     """Compile the plan of the graph in mpk and load the kernel. Return the kernel and the compile_plan information, with
     "paths" (the schedule files).
-    plan: a plan file.
+    plan: a plan file, or "rr": the round-robin plan (plan_gen.round_robin_plan; e.g. T = 64, which has no hand plan).
     search: cost record files. If given, the solver searches a plan that starts from `plan` (search.search_plan). It writes
     the plan to out/plan.json and its predicted timeline to out/plan_view.json.
     costs_code: the kernel templates of the records to use: "current" (static_schedule.code_tag), "any", or a tag.
     profile: if True, build the timing build (for cost records). extra_flags: more nvcc flags (e.g. -DSTATIC_RESET_IN_KERNEL).
     The function writes the schedules to out/schedules and the compiled layer to out/build."""
-    p = check_plan(plan, torch.cuda.get_device_properties(0).multi_processor_count)
+    if plan == "rr":
+        from mirage.mpk import plan_gen
+        p = plan_gen.round_robin_plan(mpk)
+    else:
+        p = check_plan(plan, torch.cuda.get_device_properties(0).multi_processor_count)
     os.makedirs(out, exist_ok=True)
     if search:
         from mirage.mpk import plan_viewer, search as solver, static_schedule
@@ -245,10 +252,11 @@ def add_common_args(ap: argparse.ArgumentParser):
     ap.add_argument("--rank", type=int, default=0, help="the TP shard on this GPU")
     ap.add_argument("--maxctx", type=int, default=16384,
                     help="the most positions a request may have (a multiple of 1024 and of 64 x chunks)")
-    ap.add_argument("--splits", type=int, default=16, help="sparse_mla tasks per request")
+    ap.add_argument("--splits", type=int, default=8 if T == 64 else 16,
+                    help="sparse_mla tasks per request (default 16; T = 64: 8, the fastest of 4 / 8 / 16 there)")
     ap.add_argument("--chunks", type=int, default=16, help="dsa_index_score tasks per request")
-    ap.add_argument("--plan", default="hand", help="hand (default), solver, or a path prefix of PREFIX_full.json and "
-                    "PREFIX_shared.json (the hand and solver plans: one GPU of 148 SMs)")
+    ap.add_argument("--plan", default="hand", help="hand (default), solver, rr (round robin), or a path prefix of "
+                    "PREFIX_full.json and PREFIX_shared.json (the hand and solver plans: one GPU of 148 SMs)")
     ap.add_argument("--nvcc-flag", action="append", default=[], help="an nvcc flag for the layer (repeatable), e.g. "
                     "-DSTATIC_RESET_IN_KERNEL. With this flag, the kernel resets its buffers. The host does no memset or "
                     "sync for each launch")
@@ -264,7 +272,7 @@ def setup(args, dev):
     if not fulls[0]:
         raise ValueError(f"layer {args.layers[0]} is a shared layer: list a full layer before it (--layers)")
     sms = torch.cuda.get_device_properties(0).multi_processor_count
-    for full in set(fulls):   # check the plans before the weight load
+    for full in set(fulls) if args.plan != "rr" else ():   # check the plans before the weight load
         check_plan(plan_file(args.plan, full), sms)
     st = {k: v.to(dev) for k, v in make_state(args.seq_lens, args.maxctx, cfg["rope_parameters"]["rope_theta"]).items()}
     indices = torch.full((T, TOPK), -1, dtype=torch.int32, device=dev)
