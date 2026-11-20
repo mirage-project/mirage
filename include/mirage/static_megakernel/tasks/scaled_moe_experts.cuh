@@ -93,7 +93,8 @@ template <int HQ_,
           int SHARED_ = 0,
           int LIVE_ = T,
           int LAST_ = -1,
-          int SPLIT_ = -1>
+          int SPLIT_ = -1,
+          int OPTS_ = 0>
 struct Slots {
   static constexpr int HQ = HQ_, HSF = HSF_, CNT = CNT_, W2NEXT = CNT_ + 32,
                        CHQ = CNT_ + 64;
@@ -138,6 +139,11 @@ struct Slots {
   // the pair counters PAIRC + slot KT2 + kt2. Not at T = 64 (hundreds of live
   // experts a step).
   static constexpr int SPLIT = SPLIT_, SPLIT_SLOTS = MOE_SPLIT_SLOTS;
+  // the layer's options (scaled_moe_experts_layer; params[2] bits): bit 0 off
+  // the many-token W13 epilogue (MANY_EPI, T >= 32), bit 1 the W2 tiles in the
+  // slots' index order (W2_SLOT_ORDER) instead of the queue's slot order
+  static constexpr bool MANY_EPI = (OPTS_ & 1) == 0,
+                        W2_SLOT_ORDER = (OPTS_ & 2) != 0;
   static constexpr bool CAN_SPLIT = SPLIT >= 0 && !SINGLE && T <= 32;
   // the queue's order of the slots: many tokens first (order_slots)
   static constexpr bool ORDER = T >= 32 && !SINGLE;
@@ -1111,7 +1117,11 @@ __device__ __forceinline__ void
     }
   };
   auto w2_tile = [&](int q) { // W2 tile q of the queue order
-    return slot_at(w2_place(q / OT2)) * OT2 + q % OT2;
+    if constexpr (RES::W2_SLOT_ORDER) {
+      return q;
+    } else {
+      return slot_at(w2_place(q / OT2)) * OT2 + q % OT2;
+    }
   };
   float *acc_s = reinterpret_cast<float *>(rt_sm() + SM_::OFF_ACC);
   auto entry_of =
@@ -1705,7 +1715,8 @@ __device__ __forceinline__ void
               moe_prof_event(prof, pn, pt0, 8);
             }
           }
-          constexpr bool HEAVY = T >= 32 && !RES::SINGLE && RES::LIVE == T;
+          constexpr bool HEAVY =
+              T >= 32 && !RES::SINGLE && RES::LIVE == T && RES::MANY_EPI;
           if (HEAVY && items == W13_PAIR) {
             if constexpr (HEAVY) { // OFF_ACC: the first item's h [64][T], then
                                    // the up rows / the second item's h
@@ -1981,13 +1992,15 @@ using ScaledMoeSlotsOf =
                       (param_or<PAIRS, 5, 0>() > 0 ? param_or<PAIRS, 5, 0>()
                                                    : T),
                       slot_or<BUF_SLOTS, 6, -1>(),
-                      slot_or<BUF_SLOTS, 5, -1>()>;
+                      slot_or<BUF_SLOTS, 5, -1>(),
+                      param_or<PARAMS, 2, 0>()>;
 
 // scaled_moe_experts task (one per SM, task x on SM x): wait for z_q, phase
 // switch, routing table, then the queue (above) -> the routed rows [T][K][LAT]
 // in the node's output buffer; its counter counts the SMs done. IN: its
 // inputs' producers, in the layer's order (z_q from group_quant, pairs from
-// topk_route, ...). PARAMS {IR[, the swiglu limit as fp32 bits]}
+// topk_route, ...). PARAMS {IR[, the swiglu limit as fp32 bits (0: none)[, the
+// options (Slots OPTS_)]]}
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,

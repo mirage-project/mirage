@@ -648,6 +648,10 @@ class StaticMegakernel(PersistentKernel):
         swiglu_limit: float = None,   # gate clamped to at most this, up to [-limit, limit] first (GLM-5.3-Flash: 10); None: none
         prof: DTensor = None,   # int64 [SMs, 256], a graph input: per-SM stamps of the node's phases (scaled_moe::moe_prof_event:
                                 # W13 items, W2 tiles, the ring switch, the W2 loaders' waits); None: none compiled in
+        many_token_epilogue: bool = True,   # T >= 32: a two-item W13 entry keeps both items' h in shared memory (the slots of
+                                            # many tokens: their T-wide SiLU in a loop); False: the per-item epilogue of T < 32
+        w2_in_slot_order: bool = False,     # the W2 tiles in the slots' index order instead of the queue's slot order (the
+                                            # shared experts first, order_slots at T >= 32)
         last: DTensor = None,   # T = 64: int32 [1 + 40], a graph tensor the launches share (zeros at first): the node writes the
                                 # experts its queue took first, and the next launch brings their W13 weights into L2 while its
                                 # routing lands (scaled_moe::Slots PFE, LAST); None: the bank's first 40 experts
@@ -673,7 +677,8 @@ class StaticMegakernel(PersistentKernel):
         Weight layouts from fp8_fp32scale_weights:
           w13: [E, 2 IR, L] e4m3 bytes; scales: [E, IR / 128, L / 128, 2] fp32 (gate, up).
           w2: [E, L, IR] e4m3 bytes; scales: [E, L / 128, IR / 128] fp32.
-        z_q must come from group_quant_layer. params = [IR] or [IR, the swiglu limit as fp32 bits].
+        z_q must come from group_quant_layer. params = [IR], [IR, the swiglu limit as fp32 bits] or [IR, the limit's bits or 0,
+        the options (scaled_moe::Slots OPTS_: 1 no many-token epilogue, 2 the W2 tiles in slot order)].
         """
         from .compiler import graph_nodes, producer_of
         T, K, L = self._tokens(pairs.dim(0)), pairs.dim(1), z_q.dim(1)
@@ -733,10 +738,14 @@ class StaticMegakernel(PersistentKernel):
             maps.append(first)
         maps.append(self._map("act8kt", ("b", hq, 0), (IR, NSLOT * T, min(KT2, 2))))   # a W2 unit's K tiles (at most 2)
         tensors = [z_q, pairs, w13, w2, output]
+        opts = (0 if many_token_epilogue else 1) | (2 if w2_in_slot_order else 0)
+        params = [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)]
+        if opts:
+            params = [IR, params[1] if len(params) > 1 else 0, opts]
         # the pair counters of the single-item W13 entries, else of the split mode's groups
         pairc = nsm // 2 if single else MOE_SPLIT_SLOTS * KT2 if can_split else 0
         self._add_node("scaled_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
-                       [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)], one_task_per_sm=True,
+                       params, one_task_per_sm=True,
                        out_buffer=lambda n: (T * K * L * 4, -1, False),
                        counters=32 * 2 + NSLOT + pairc, buf_slots=bufs, map_slots=maps)
 

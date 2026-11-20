@@ -61,6 +61,10 @@ except ImportError:
     from weights import check_config, checkpoint_reader, download_layer, layer_tensors    # run as a script
 
 T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each request): the kernel's T (8, 16 or 32)
+# scaled_moe_experts' options for GLM-5.3's slots, most of 1 or 2 tokens (layer 22, one B200, TP8 rank 0, the shared expert
+# in the bank, 3 rounds): the many-token W13 epilogue off at T = 32 (101.4 -> 98.0 us), the W2 tiles in slot order at
+# T = 16 (64.1 -> 62.5 us)
+MOE_OPTS = {"many_token_epilogue": T != 32, "w2_in_slot_order": T == 16}
 H, I, E, TOPK, SCALE = 6144, 2048, 256, 8, 2.5   # hidden, expert intermediate, experts, top k, routed scaling
 
 
@@ -147,7 +151,8 @@ def build_graph(mpk: StaticMegakernel, w: dict, next_norm=None, live=None) -> di
     mpk.group_quant_layer(input=t["x"], output=z_q)                                                  # x in FP8, fp32 scales
     if bank:
         mpk.scaled_moe_experts_layer(z_q=z_q, pairs=t["routing_pairs"], w13=t["w13"], w13_scales=t["w13_sf"],
-                                     w2=t["w2"], w2_scales=t["w2_sf"], output=t["routed_rows"])      # W13, SiLU, W2
+                                     w2=t["w2"], w2_scales=t["w2_sf"], output=t["routed_rows"],
+                                     **MOE_OPTS)                                                      # W13, SiLU, W2
         r_sent, Rsum = nt((T, H), bfloat16, "r_sent"), nt((T, H), bfloat16, "routed_summed")
         mpk.allreduce_send_layer(input=t["routed_rows"], output=r_sent)                              # a token's 9 rows added
         mpk.sum_gpus_layer(input=r_sent, output=Rsum)                                                # over the GPUs
@@ -177,7 +182,8 @@ def _shared_branch(mpk, t, z_q, nt, next_norm):
     mpk.scaled_gemm_tile_layer(input=h_q, weight=t["sd"], weight_scales=t["sd_sf"], output=S,
                                combine="store")                                                      # shared down: S
     mpk.scaled_moe_experts_layer(z_q=z_q, pairs=t["routing_pairs"], w13=t["w13"], w13_scales=t["w13_sf"],
-                                 w2=t["w2"], w2_scales=t["w2_sf"], output=t["routed_rows"])          # W13, SiLU, W2
+                                 w2=t["w2"], w2_scales=t["w2_sf"], output=t["routed_rows"],
+                                 **MOE_OPTS)                                                          # W13, SiLU, W2
     # The hand plan keeps graph order on each SM.
     # Put the shared send after the experts so its wait does not delay them.
     # One send task per SM, as for R: the saved plans were measured with this grid.
