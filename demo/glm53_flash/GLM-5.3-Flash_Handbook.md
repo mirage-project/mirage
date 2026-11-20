@@ -52,7 +52,6 @@ smallest T not below its row count:
 - **MoE**: with fewer rows than T, a build of exactly those live rows (`MOE_STATIC_ROWS`) does not route the idle rows;
   without one the T layer routes them too (correct, but it streams their experts).
 - More rows than the largest T, and prefill, fall back to SGLang.
-- The hooks still build MTP verify layers when the server runs speculative decoding; the chain no longer runs MTP.
 
 ### 1.2 Scenarios
 
@@ -135,22 +134,16 @@ python3 $MIRAGE/demo/glm53_flash/sglang_dsa/nsys_e2e.py . | tee nsys_e2e.md     
 - **Whether the static layers took effect**: the `.log` has one line per replaced layer,
   `... replaces SGLang's ... (..., CUDA graph capture; ...)`.
 - **The `nsys_e2e.py` table**: one row per scenario and prompt length, with both sides' time per token, the speedup, the
-  period median and mean, the accept length and the number of periods.
+  period median and mean and the number of periods.
   - The forward graph is the one with the longest median replay. `--one <db>` lists every graph of a trace.
-- **Do not measure end to end with `--cuda-graph-trace=node`**: per-node records break the static kernels' PDL overlap. One
-  earlier bs1 MTP measurement:
-  - static layers: period 7170.0 µs under the node trace, while the same configuration's bench gives 5548.3 µs per verify
-    step;
-  - SGLang: period 8087.6 µs under the node trace, bench 9765.7 µs.
-  - The bench numbers include scheduling overhead and should be the larger ones; for the static layers the node trace is
-    much larger instead, so the node trace slows the static layers down.
+- **Do not measure end to end with `--cuda-graph-trace=node`**: per-node records break the static kernels' PDL overlap, so
+  the node trace slows the static layers down.
 - **Typical check values** (earlier runs):
 
 | Layer | Metric | Typical value |
 |---|---|---|
 | KDA decode | `x_ffn` relRMS | about 1e-3 |
-| KDA verify | `x_ffn` relRMS | about 3e-3–6e-3 |
-| KDA | conv and ring | bit-equal about 99.8%–99.9% (lowest seen 99.76%) |
+| KDA | conv state | bit-equal about 99.8%–99.9% (lowest seen 99.76%) |
 | DSA | `x_ffn` relRMS | about 2e-2 (max about 6e-2), the usual level so far; an order of magnitude above KDA, possibly because the indexer's FP8 scores make top-k pick slightly different positions |
 | MoE | static-exact vs SGLang-exact | the first should not exceed the second, e.g. 3.8e-2 vs 5.1e-2 |
 
@@ -163,7 +156,7 @@ B200 (148 SMs); a missing file means round robin:
 
 | Layer | T=8 | T=16 | T=32 | T=64 |
 |---|---|---|---|---|
-| DSA decode | `sglang_dsa/dsa_fused_plan_{short,long}.json` | `dsa_fused_plan16_{short,long}.json` | round robin | long: `dsa_fused_plan64_long.json`; short: round robin |
+| DSA decode | `sglang_dsa/dsa_fused_plan_{short,long}.json` | `dsa_fused_plan16_{short,long}.json` | round robin | short: `dsa_fused_plan64_short.json`; long: round robin |
 | KDA decode | round robin | round robin | round robin | round robin |
 | MoE (`mhc_pre`) | `sglang_moe/moe_plan_mhc_pre.json` | `moe_plan16_mhc_pre.json` | round robin | round robin |
 
@@ -171,10 +164,6 @@ Check runs such as `*_moe4l` end with `mhc`; at T=16 they use `moe_plan16_mhc.js
 
 - **DSA short/long**: prompts of at most 1000 tokens use short, all others long.
 - **bs 1/2/4** run the T=8 decode plans above (the same graph; the MoE builds of bs live rows take the T=8 MoE plan).
-- **MTP verify layers** (manual runs only; the chain runs no MTP): a verify layer's graph differs from the decode graph of
-  the same T, so it takes its own plan file from `*_STATIC_VERIFY_PLAN{,16,32}`. Only `dsa_verify_plan_long.json` exists
-  (bs 1, long context: 62.6 µs against round robin's 63.8 µs on one GPU). Without one: DSA runs round robin; KDA and MoE
-  use the T=8 decode plan at T=8 and round robin at T≥16.
 - **A plan file belongs to one graph**: it is valid only for the graph it was made for (its nodes and grid candidates), its T
   and its SM count.
   - When the number of SM lists differs from the GPU's SM count, compilation fails with
