@@ -126,9 +126,16 @@ __device__ __forceinline__ void
 // parts are polled until they have landed (all 2 NSPLIT loads in flight at
 // once, the parts still missing loaded again) and added in order, then re-armed
 // (this task is their one reader: REARM, after the send)
-template <int NSLICE, int NSPLIT, int W, size_t OFF>
+// TO_T (11-20, DSV41_ENGRAM=2): the rows into a graph tensor instead of the
+// exchange region: tmc its multicast address, trv its local one ([GPUS][T][W]
+// bf16, GPU g.rank's row at its place; one set: the tensor's reader re-arms it)
+template <int NSLICE, int NSPLIT, int W, size_t OFF, bool TO_T = false>
 __device__ __forceinline__ void
-    allreduce_send_slots_task(G const &g, float const *src, int x) {
+    allreduce_send_slots_task(G const &g,
+                              float const *src,
+                              int x,
+                              unsigned char *tmc = nullptr,
+                              unsigned char *trv = nullptr) {
   constexpr int C8 = W / 8;
   int const nb = T * C8, blo = (int)((long long)nb * x / NSLICE),
             bhi = (int)((long long)nb * (x + 1) / NSLICE);
@@ -174,7 +181,11 @@ __device__ __forceinline__ void
     }
     size_t const dst =
         OFF + (size_t)g.rank * ((size_t)T * W * 2) + ((size_t)t * C8 + c) * 16;
-    push16(g, dst, pack_bf16x8(p0, p1));
+    if constexpr (TO_T) {
+      push16_mc(tmc, trv, dst, pack_bf16x8(p0, p1));
+    } else {
+      push16(g, dst, pack_bf16x8(p0, p1));
+    }
 #pragma unroll 1
     for (int p = 0; p < NSPLIT; p++) {
       float const *s = src + ((size_t)p * T + t) * W + 8 * c;
@@ -204,6 +215,20 @@ __device__ __forceinline__ void run_allreduce_send(Maps const &,
   constexpr int W = PARAMS::v[0], GROUP = PARAMS::v[1], FX = PARAMS::v[2];
   static_assert(W % 8 == 0 && GROUP >= 1,
                 "allreduce_send: params {row width, rows per token, FX}");
+  if constexpr (param_or<PARAMS, 4, 0>() == 1) { // (DSV41_ENGRAM=2) into a
+                                                 // graph tensor (TO_T)
+    static_assert(SRC::counter < 0 && SRC::buf >= 0 &&
+                      SRC::v[0] == COMBINE_SLOTS && SRC::v[2] == W &&
+                      GROUP == 1 && !FX,
+                  "allreduce_send into a tensor: a GEMM's K parts in slots");
+    allreduce_send_slots_task<SELF::x, SRC::y, W, 0, true>(
+        g,
+        buf_at<float const>(g, SRC::buf),
+        tk.x,
+        buf_at<unsigned char>(g, slot_at<BUF_SLOTS, 1>()),
+        buf_at<unsigned char>(g, slot_at<BUF_SLOTS, 2>()));
+    return;
+  } else
   if constexpr (FX) {
     static_assert(SELF::x * 128 == W && GROUP == 1 && SELF::buf >= 0 &&
                       exchange_bytes[SELF::buf] == (size_t)GPUS * T * W * 2,
@@ -219,7 +244,9 @@ __device__ __forceinline__ void run_allreduce_send(Maps const &,
                   "exchange region");
     if constexpr (SRC::counter < 0) {
       static_assert(SRC::buf >= 0 && SRC::v[0] == COMBINE_SLOTS &&
-                        (SRC::v[3] == 0 || GPUS == 1) && SRC::v[2] == W &&
+                        (SRC::v[3] == 0 || GPUS == 1 ||
+                         param_or<PARAMS, 3, 0>() == 2) &&
+                        SRC::v[2] == W &&
                         GROUP == 1,
                     "allreduce_send: an input without a counter must be a "
                     "gemm_tile node's output in slots, rows of W (polled: "

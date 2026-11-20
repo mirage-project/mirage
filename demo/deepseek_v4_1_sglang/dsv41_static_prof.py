@@ -57,15 +57,17 @@ def _kernel(st, kind, rank=0):
     from mirage.mpk.static_harness import Harness
     h = Harness(st.sk)
     lay = h.layout
-    t = h._array(0, "stamps", np.int64).reshape(lay["num_sms"], lay["num_stamps"])
+    own = getattr(st, "prof_stamps", None)   # (a shared module: the layer's own stamps, dsv41_static_layer PROF_SHARE)
+    t = (own.cpu().numpy() if own is not None else h._array(0, "stamps", np.int64)).reshape(lay["num_sms"], lay["num_stamps"])
+    sb = int(st.prof_sb[0]) if own is not None else int(h._array(0, "start_barrier", np.int64)[0])
     start, end = t[:, lay["stamp_start"]], t[:, lay["stamp_end"]]
     on = start > 0
     experts = -1
-    if kind == "m" and "pairs" in st.bufs[0]:
+    if kind == "m" and "pairs" in st.bufs[0] and own is None:   # (shared: the pairs are the last MoE layer's)
         from deepseek_v4_1_moe import demo as moe_demo
         experts = len(set(moe_demo.pairs_of(st.bufs[0])[0].flatten().tolist()))
     row = [int(st.layer), kind, getattr(st, "variant", "moe"), int(start[on].min()), int(start[on].max()),
-           int(h._array(0, "start_barrier", np.int64)[0]), int(end[on].min()), int(end[on].max()), int(on.sum()), experts]
+           sb, int(end[on].min()), int(end[on].max()), int(on.sum()), experts]
     if lay.get("profile"):
         nodes = _nodes(st, h, rank)
         if TASKS:

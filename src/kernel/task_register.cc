@@ -5625,10 +5625,12 @@ int TaskRegister::register_allreduce_send_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {W (the row width), rows per token in the input (added in order),
   // FX (1: the input is a COMBINE_ADD GEMM's int64 fixed-point output)
-  // [, local: 1 = one GPU, the sum into the node's own [T][W] bf16 buffer]}.
+  // [, local: 1 = one GPU, the sum into the node's own [T][W] bf16 buffer;
+  // 2 = the input is a gemm_fp8_tile node's K parts in slots[, 1: the rows
+  // into a graph tensor through its multicast address]]}.
   // inputs: a node's output [T x rows, W] fp32 (FX: [T, W] int64); output:
   // what is sent (its buffer in the exchange region: [GPUs][T][W] bf16)
-  assert((params.size() == 3 || params.size() == 4) && params[0] > 0 &&
+  assert((params.size() == 3 || params.size() == 4 || params.size() == 5) && params[0] > 0 &&
          params[0] % 8 == 0 && params[1] >= 1 &&
          (params[2] == 0 || params[2] == 1));
   std::vector<tb::TBInputOp *> input_ops, output_ops;
@@ -5911,6 +5913,44 @@ int TaskRegister::register_hc_post_combine_sm100_task(
       static_build_only_task("hc_post_combine", params));
 }
 
+int TaskRegister::register_engram_gate_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {H, HC, eps, clamp (fp32 bits)}. inputs: kv as gathered (an
+  // allreduce_send node's buffer), the streams R', q_weight x k_weight;
+  // output: R''.
+  // [, 1, W: kv a graph tensor [GPUs T][W] another kernel gathered]
+  // [, 1, norm eps: also the next sublayer's input]
+  assert(params.size() == 4 || params.size() == 6 || params.size() == 8);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 3, 1, input_ops, output_ops);
+  return register_task_variant(TASK_ENGRAM_GATE_SM100,
+                               static_build_only_task("engram_gate", params));
+}
+
+int TaskRegister::register_engram_rows_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {C, DIM, BS, the ids' row stride[, 1: PEER, P]}. inputs: the
+  // hash ids [T, C] int64, the table's fp8 rows, its e8m0 scales (PEER: the
+  // shards' w_bias, s_bias); output: emb [T, C DIM] bf16 (a symmetric graph
+  // tensor, written by multicast; PEER: this GPU's buffer).
+  assert((params.size() == 4 || (params.size() == 6 && params[4] == 1)) &&
+         params[1] % params[2] == 0 && params[2] % 8 == 0);
+  return register_static_task(this, TASK_ENGRAM_ROWS_SM100, "engram_rows",
+                              bgraph, params, 3, params.size());
+}
+
+int TaskRegister::register_gather_f32_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {N: each GPU's columns of the output[, 1: also the greedy next
+  // token]}. inputs: the rows as sent (an allreduce_send node's buffer);
+  // outputs: [T][GPUs N] fp32 (with the ids: the parts [T][Q] (the node's
+  // buffer), the logits, the ids [T] int32).
+  assert(params.size() == 1 || (params.size() == 2 && params[1] == 1));
+  return register_static_task(this, TASK_GATHER_F32_SM100, "gather_f32", bgraph,
+                              params, 1, params.size(),
+                              params.size() == 2 ? 3 : 1);
+}
+
 int TaskRegister::register_hc_post_mix_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {HC, H, NMIX = HC (HC + 2)}. inputs: the sent partial
@@ -5949,12 +5989,15 @@ int TaskRegister::register_act_quant_sm100_task(
   // gemm_fp8_tile node's K parts in slots); output: x_q [T, K] e4m3 (its
   // buffer: x_q, then the scale chunks). Grid (T). Or {K, I, L}: x = SwiGLU
   // of a gemm_fp8_tile node's gate | up K parts [T, 2 I] (L: the clamp's fp32
-  // bits), x_q [T, K] with columns [I, K) zero.
+  // bits), x_q [T, K] with columns [I, K) zero. Or {K, 0, 0, 1}: x a
+  // 0xFF-prefilled bf16 buffer, polled (engram_rows' rows).
   assert((params.size() == 1 && params[0] > 0 && params[0] % 512 == 0) ||
          (params.size() == 3 && params[0] % 256 == 0 && params[1] > 0 &&
-          params[1] % 32 == 0 && params[1] <= params[0]));
-  return register_static_task(
-      this, TASK_ACT_QUANT_SM100, "act_quant", bgraph, params, 1, 1);
+          params[1] % 32 == 0 && params[1] <= params[0]) ||
+         (params.size() == 4 && params[0] % 512 == 0 && params[1] == 0 &&
+          params[2] == 0 && params[3] == 1));
+  return register_static_task(this, TASK_ACT_QUANT_SM100, "act_quant", bgraph,
+                              params, 1, params.size());
 }
 
 int TaskRegister::register_gemm_fp8_tile_sm100_task(

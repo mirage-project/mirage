@@ -53,6 +53,18 @@ _SHARED = {}   # md5 of layer.cu, the flags, device, rank and GPU count -> [sk, 
 # only marks the output (_OUTS in the hook), so every layer of a group returning the first layer's y is the same. x_out: a
 # post that computes no next input (the last layer) reads and writes none
 SHARE_ALIAS = ("oa_q", "y", "x_out")
+# DSV41_STATIC_PROF with sharing (11-20): each layer its own per-SM stamps and start-barrier word, bound like a graph tensor
+# (host.cuh STATIC_STAMP_REBIND: "@stamps" / "@start_barrier"); dsv41_static_prof reads the layer's own (prof_stamps)
+PROF_SHARE = SHARE and bool(os.environ.get("DSV41_STATIC_PROF"))
+
+
+def _head_demo():
+    """head_demo.py beside this file, whatever sys.path the process has (a bench script elsewhere, the forced boot)"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import head_demo
+    return head_demo
 
 
 class _ShareHit(Exception):
@@ -67,8 +79,8 @@ def _build_shared(build, *args, **kw):
     and returns that module and its node buffers (shared: the first layer's w, for _init_binds; else None)."""
     if not SHARE:
         return (*build(*args, **kw), None)
-    if TIMING or os.environ.get("DSV41_STATIC_PROF", "0") != "0":
-        raise RuntimeError("DSV41_SHARE_MODULES: not with DSV41_STATIC_TIMING / DSV41_STATIC_PROF (each reads its module's stamps)")
+    if TIMING:
+        raise RuntimeError("DSV41_SHARE_MODULES: not with DSV41_STATIC_TIMING (each reads its module's task stamps)")
     from mirage.mpk import static_megakernel, static_schedule
     orig = static_megakernel.StaticMegakernel.compile_static
     key = []
@@ -187,6 +199,15 @@ class MhcMixin:
                 w[name] = first[name]
         else:
             next(v for v in _SHARED.values() if v[0] is self.sk)[3] = w
+        if PROF_SHARE:   # this layer's own stamps (the module's G points at the last launch's layer's)
+            from mirage.mpk.static_harness import Harness
+            lay = Harness(self.sk).layout
+            dev = next(v.device for v in w.values() if torch.is_tensor(v))
+            self.prof_stamps = torch.zeros(lay["num_sms"] * lay["num_stamps"], dtype=torch.int64, device=dev)
+            self.prof_sb = torch.zeros(8, dtype=torch.int64, device=dev)
+            for name, buf in (("@stamps", self.prof_stamps), ("@start_barrier", self.prof_sb)):
+                self.sk.rebind(name, buf.data_ptr())
+                self.binds[name] = buf.data_ptr()
         self.sk._owner = self
         if os.environ.get("DSV41_SHARE_LOG"):
             print(f"[dsv41_static] {type(self).__name__} L{self.layer}: {'shares' if first is not None else 'built'} its module "
@@ -211,10 +232,13 @@ class MhcMixin:
         return w["h_pre"], w["h_post"], w["h_comb"].view(T, HC, HC)
 
     def hc_state(self, next, mhc):
-        """deepseek_v4_mhc.HcState of the sublayer's end: R', pre and, when the kernel made it and the next sublayer takes it, its input."""
+        """deepseek_v4_mhc.HcState of the sublayer's end: R' (with the next layer's Engram in the kernel: R''), pre and, when the
+        kernel made it and the next sublayer takes it, its input."""
         w = self.w
-        return mhc.HcState(w["streams_out"].view(T, HC, HID), w["h_pre"],
-                           mhc.HcNormed(w["x_out"]) if "gamma_next" in w and next is not None else None)
+        return mhc.HcState(w["streams_eg" if "streams_eg" in w else "streams_out"].view(T, HC, HID), w["h_pre"],
+                           mhc.HcNormed(w["x_out"]) if ("gamma_next" in w and next is not None) or "eg_gamma" in w else None)
+        # (eg_gamma, DSV41_EG_X: the Engram layer's attention input from R'', whatever next is: SGLang's post before an
+        # Engram layer passes next=None, as it computes no input there)
 
 
 # H1 stage A (DSV41_X_FLAG=1, docs/h1_design.md; serving builds with -DSTATIC_NO_START_BARRIER, mHC in the kernels): every
@@ -324,7 +348,12 @@ class StepTables:
 
 class StaticAttn(MhcMixin):
     def __init__(self, layer: int, ckpt: str, rank: int, tp: int, dev, out_root: str, max_pos: int, sources: Sources, pdl: bool,
-                 exchange_pool: ExchangePool = None, tables: StepTables = None, mhc: bool = False, stats: bool = False):
+                 exchange_pool: ExchangePool = None, tables: StepTables = None, mhc: bool = False, stats: bool = False,
+                 engram_kv: tuple = None):
+        """engram_kv (11-20, DSV41_ENGRAM=2): (kv view, multicast address[, Engram layer, default the next[, rows]]) of
+        engram_kv_buffer: this kernel also computes that layer's Engram kv into it (moe_demo.engram_kv_nodes), for the gate in
+        the MoE kernel before that layer. rows (DSV41_EG_ROWS=1): {emb: engram_emb_buffer's view, emb_mc: its multicast
+        address, and engram_rows_tables' tensors}: the n-gram rows looked up in this kernel too (run's ids each step)."""
         cfg = sources.cfg
         self.layer, self.pdl, self.steps, self.filled, self.pool, self.binds = layer, pdl, 0, 0, False, {}
         self.variant = attn_weights.variant_of(cfg, layer)
@@ -335,6 +364,15 @@ class StaticAttn(MhcMixin):
         cap = max(((max_pos + 1) // max(ratio, 1) + 255) // 256 * 256, attn_demo.NC)
         w = {**attn_weights.layer_tensors(reader(ckpt), cfg, layer, tp, rank, rows, dev),
              **attn_demo.state_tensors(self.variant, ratio, csrc, cap, dev), **sources.shared(layer, self.variant)}
+        self.engram = engram_kv is not None
+        if self.engram:
+            w.update(engram_kv_tensors(reader(ckpt), engram_kv[2] if len(engram_kv) > 2 else layer + 1, tp, rank, dev,
+                                       engram_kv[0]))
+            eg_rows = engram_kv[3] if len(engram_kv) > 3 else None
+            if eg_rows is not None:   # the lookup's tensors (eg_ids, eg_emb_mc: stand-ins, rebound below and in run)
+                w.update(eg_emb=eg_rows["emb"], eg_emb_mc=torch.zeros_like(eg_rows["emb"]),
+                         eg_ids=torch.zeros(T, 24, dtype=torch.int64, device=dev),
+                         **{k: eg_rows[k] for k in ("eg_tw", "eg_ts", "eg_starts")})
         if tables is not None:
             shared = {k: v for k, v in tables.t.items() if k in w}
             w.update(shared)
@@ -345,6 +383,8 @@ class StaticAttn(MhcMixin):
             os.environ["HC_DRY"] = os.environ.get("HC_DRY_ATTN", "0")
         out = os.path.join(out_root, f"rank{rank}", f"attn{layer}")
         flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"] + os.environ.get("DSV41_STATIC_FLAGS", "").split()
+        if PROF_SHARE:
+            flags.append("-DSTATIC_STAMP_REBIND")
         if XFLAG:
             assert mhc and "-DSTATIC_NO_START_BARRIER" in flags, "DSV41_X_FLAG: mHC in the kernels, a serving build"
             flags.append("-DSTATIC_X_FLAG")
@@ -387,6 +427,10 @@ class StaticAttn(MhcMixin):
         self.w = w
         if SHARE:
             self._init_binds(w, self.shared)
+        if self.engram:   # the gathered kv's multicast address (the stand-in's slot)
+            self._rb("eg_kv_mc", engram_kv[1])
+            if "eg_tw" in w:
+                self._rb("eg_emb_mc", engram_kv[3]["emb_mc"])
         sources.note(layer, w)
         if XFLAG:
             _bind_xflag_out(self)
@@ -423,7 +467,8 @@ class StaticAttn(MhcMixin):
             self._launch()
         self.filled += L
 
-    def run(self, x: torch.Tensor, positions: torch.Tensor, R: torch.Tensor = None) -> torch.Tensor:
+    def run(self, x: torch.Tensor, positions: torch.Tensor, R: torch.Tensor = None, emb: torch.Tensor = None,
+            ids: torch.Tensor = None) -> torch.Tensor:
         """One decode step of T rows: this rank's y [T, H] bf16 (the layer's own buffer), or with the exchange the sum. With the
         pools bound the step's tables are filled (StepTables) and x is read where SGLang left it: no copy kernel."""
         if self.pool:
@@ -436,14 +481,99 @@ class StaticAttn(MhcMixin):
             attn_demo.window_tables(self.w)
         if R is not None:
             self.bind_streams(R)
+        if emb is not None:   # (DSV41_ENGRAM=2) the next layer's n-gram rows, [T, 6144] bf16 (SGLang's gather)
+            assert emb.is_contiguous() and emb.dtype == torch.bfloat16 and tuple(emb.shape) == tuple(self.w["eg_emb"].shape)
+            self.eg_emb_ref = emb
+            if self.binds.get("eg_emb") != emb.data_ptr():
+                self._rb("eg_emb", emb.data_ptr())
+        if ids is not None:   # (DSV41_EG_ROWS=1) the Engram layer's hash ids [T, 24] int64, rows moe_demo.EG_ROWS_STRIDE apart
+            from deepseek_v4_1_moe import demo as moe_demo
+            assert ids.dtype == torch.int64 and tuple(ids.shape) == (T, 24) and ids.stride() == (moe_demo.EG_ROWS_STRIDE, 1)
+            self.eg_ids_ref = ids
+            if self.binds.get("eg_ids") != ids.data_ptr():
+                self._rb("eg_ids", ids.data_ptr())
         self._launch()
         self.steps += 1
         return self.w["y"]
 
 
+def engram_kv_buffer(tp: int, dev, group):
+    """(11-20, DSV41_ENGRAM=2) one Engram layer's gathered kv: torch symmetric memory over the TP group, [tp T, W] bf16 (GPU
+    r's W = 25600 / tp columns at rows [r T, r T + T)), 0xFF-filled (the gate polls it and re-arms it): (its local view, its
+    rendezvous handle and buffer (keep them referenced), its multicast address). Collective: every rank in the same order."""
+    W = (HC + 1) * HID // tp
+    buf, handle, mc = _exchange_region(tp * T * W * 2, dev, group)
+    buf.fill_(0xFF)
+    return buf.view(torch.bfloat16).view(tp * T, W), (buf, handle), mc
+
+
+def engram_emb_buffer(tp: int, dev, group):
+    """(11-20, DSV41_EG_ROWS=1) one Engram layer's n-gram rows looked up in the kernel: torch symmetric memory over the TP
+    group, [T, 6144] bf16, 0xFF-filled (engram_rows writes it on every GPU, the act_quant polls and re-arms it): (its local
+    view, its keep-alive, its multicast address). Collective: every rank in the same order."""
+    n = T * 6144 * 2
+    buf, handle, mc = _exchange_region(n, dev, group)
+    buf.fill_(0xFF)
+    return buf.view(torch.bfloat16).view(T, 6144), (buf, handle), mc
+
+
+def engram_rows_tables(module, tp: int, dev, group) -> dict:
+    """(DSV41_EG_ROWS=1) SGLang's table of an Engram layer as engram_rows reads it. SGLang's PEER_READ layout (its default on
+    one NVLink domain): its own mappings of every rank's shard (w_bias, s_bias, starts [P]: engram_gather_peer's), peer=True:
+    every rank reads every row in place. The plain sharded layout: this rank's fp8 rows and e8m0 scales (its
+    EngramEmbedding's parameters) and every rank's first row (all-gathered over the TP group: collective)."""
+    import torch.distributed as dist
+    e = module.embed
+    if e.peer is not None:
+        assert e.peer.ready and e.peer.w_bias.dtype == torch.int64 and e.peer.starts.numel() == e.peer.w_bias.numel()
+        return {"eg_tw": e.peer.w_bias, "eg_ts": e.peer.s_bias, "eg_starts": e.peer.starts, "peer": True}
+    assert e.host_table is None and not getattr(e, "_shared", False), \
+        "DSV41_EG_ROWS: the Engram table in device memory (PEER_READ or sharded)"
+    assert e.weight.dim() == 2 and e.scale.dim() == 2 and e.weight.shape[1] == e.dim and e.scale.shape[1] * 32 == e.dim
+    lohi = torch.tensor([e.row_start, e.row_start + e.rows], dtype=torch.int64, device=dev)
+    parts = [torch.zeros_like(lohi) for _ in range(tp)]
+    dist.all_gather(parts, lohi, group=group)
+    parts = [p.tolist() for p in parts]
+    assert all(parts[r][1] == parts[r + 1][0] for r in range(tp - 1)), f"Engram table shards {parts}"
+    starts = [p[0] for p in parts] + [parts[-1][1]]
+    return {"eg_tw": e.weight.data.view(torch.uint8), "eg_ts": e.scale.data.view(torch.uint8),
+            "eg_starts": torch.tensor(starts, dtype=torch.int64, device=dev), "peer": False}
+
+
+def engram_kv_tensors(read, layer: int, tp: int, rank: int, dev, kv: torch.Tensor) -> dict:
+    """(DSV41_ENGRAM=2) moe_demo.engram_kv_nodes' tensors in the attention kernel before layer `layer`'s Engram: the wkv
+    shard (as engram_tensors), the n-gram rows' buffer, kv (engram_kv_buffer's view) and eg_kv_mc (a stand-in of kv's shape:
+    the layer rebinds it to kv's multicast address)."""
+    w = {k: v for k, v in engram_tensors(read, layer, tp, rank, dev).items() if k in ("eg_wkv", "eg_wkv_scales", "eg_emb")}
+    w.update(eg_kv=kv, eg_kv_mc=torch.zeros_like(kv))
+    return w
+
+
+def engram_tensors(read, layer: int, tp: int, rank: int, dev) -> dict:
+    """(11-20) The tensors of moe_demo.engram_nodes for the Engram of layer `layer` (inference/model.py Engram), GPU rank of tp:
+    the wkv weight's rows [r W, r W + W) of 25600 (W = 25600 / tp; e4m3 bytes, its 32 x 32 block scales as gemm_fp8_tile's
+    chunks), q_weight x k_weight in fp32 ([HC, dim], as the official multiplies them), the gathered n-gram rows' buffer
+    (eg_emb, bound to SGLang's gather output each step) and R'' (streams_eg)."""
+    from mirage.mpk.static_megakernel import w8_scale_chunks
+    p = f"layers.{layer}.engram."
+    wkv, sc = read(p + "wkv.weight"), read(p + "wkv.scale")
+    n = wkv.shape[0] // tp
+    assert wkv.shape[0] == (HC + 1) * HID and n % 128 == 0, f"Engram wkv {tuple(wkv.shape)}"
+    rows = slice(rank * n, rank * n + n)
+    w = {"eg_wkv": wkv[rows].contiguous().view(torch.uint8),
+         "eg_wkv_scales": w8_scale_chunks(sc[rank * n // 32:(rank * n + n) // 32].contiguous()),
+         "eg_qk": read(p + "q_weight").float() * read(p + "k_weight").float(),
+         "eg_emb": torch.zeros(T, wkv.shape[1], dtype=torch.bfloat16),
+         "streams_eg": torch.zeros(T, HC * HID, dtype=torch.bfloat16)}
+    return {k: v.to(dev).contiguous() for k, v in w.items()}
+
+
 class StaticMoE(MhcMixin):
     def __init__(self, layer: int, ckpt: str, rank: int, tp: int, dev, out_root: str, pdl: bool,
-                 exchange_pool: ExchangePool = None, mhc: bool = False, norm_next: bool = False, stats: bool = False):
+                 exchange_pool: ExchangePool = None, mhc: bool = False, norm_next: bool = False, stats: bool = False,
+                 engram: bool = False, gamma_name: str = None, engram_kv: torch.Tensor = None, head: bool = False):
+        """engram (11-20, DSV41_ENGRAM=1, with mHC and no next input): the next layer's Engram in this kernel after the post
+        (moe_demo.engram_nodes); SGLang then takes R'' (hc_state) and skips its own (dsv41_static_hook)."""
         self.layer, self.pdl, self.steps, self.binds = layer, pdl, 0, {}
         read = reader(ckpt)
         w = moe_weights.layer_tensors(read, layer, tp, rank, dev)
@@ -451,10 +581,36 @@ class StaticMoE(MhcMixin):
         w["x"] = torch.zeros(T, HID, dtype=torch.bfloat16, device=dev)
         w["y"] = torch.zeros(T, HID, dtype=torch.bfloat16, device=dev)
         if mhc or stats:
-            w.update(mhc_tensors(read, layer, "ffn", f"layers.{layer + 1}.attn_norm.weight" if norm_next and mhc else None, dev, stats))
+            gn = gamma_name or f"layers.{layer + 1}.attn_norm.weight"   # (the last layer with the head: norm.weight)
+            w.update(mhc_tensors(read, layer, "ffn", gn if norm_next and mhc else None, dev, stats))
             os.environ["HC_DRY"] = os.environ.get("HC_DRY_MOE", "1")
+        self.engram = engram
+        if engram:
+            assert mhc and not norm_next and not stats, "the Engram nodes: mHC's post in the kernel, no next input"
+            eg = engram_tensors(read, layer + 1, tp, rank, dev)
+            if engram_kv is not None:   # (DSV41_ENGRAM=2) kv from the attention kernel before: the gate only
+                eg = {"eg_qk": eg["eg_qk"], "streams_eg": eg["streams_eg"], "eg_kv": engram_kv}
+                if os.environ.get("DSV41_EG_X", "0") != "0":   # (11-20) and the Engram layer's attention input from R''
+                    eg["eg_gamma"] = read(f"layers.{layer + 1}.attn_norm.weight").bfloat16().to(dev).contiguous()
+            w.update(eg)
+        self.head = head
+        if head:   # (11-20, DSV41_HEAD=2) the LM head in this kernel (moe_demo.head_nodes), after the post's next input
+            head_demo = _head_demo()
+            assert mhc and norm_next, "the head in the MoE kernel: mHC's post computes its input (norm.weight)"
+            hw = head_demo.head_tensors(read, tp, rank, dev)
+            w.update({k: hw[k] for k in ("head_w", "logits", "head_ids") if k in hw})
         out = os.path.join(out_root, f"rank{rank}", f"moe{layer}")
         flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"] + os.environ.get("DSV41_STATIC_FLAGS", "").split()
+        if engram or head:   # the gate / the head's GEMM waits on the post's counter: a release (tasks/engram_gate.cuh)
+            fast = "-DHCP_FAST_END" in flags
+            flags = [f for f in flags if f != "-DHCP_FAST_END"]
+            if fast and os.environ.get("DSV41_FAST_REARM", "0") != "0":   # (11-20) its early re-arm only
+                flags.append("-DHCP_FAST_REARM")
+        if head:   # its GEMM tasks behind the experts prefill their weights before the wait; the post's x (generic stores)
+            # before the GEMM's TMA reads (tasks/gemm_tile.cuh)
+            flags += ["-DGEMM_RELAID_PREFILL", "-DGEMM_ACT_PROXY_FENCE"]
+        if PROF_SHARE:
+            flags.append("-DSTATIC_STAMP_REBIND")
         if XFLAG:
             assert mhc and "-DSTATIC_NO_START_BARRIER" in flags, "DSV41_X_FLAG: mHC in the kernels, a serving build"
             flags.append("-DSTATIC_X_FLAG")
@@ -468,14 +624,56 @@ class StaticMoE(MhcMixin):
         if XFLAG_ATTN and "gamma_next" in w:   # stage B: this post computes the next attention's input
             _bind_xflag_out(self)
 
-    def run(self, x: torch.Tensor, R: torch.Tensor = None) -> torch.Tensor:
+    def run(self, x: torch.Tensor, R: torch.Tensor = None, emb: torch.Tensor = None) -> torch.Tensor:
         """One decode step of T rows: this rank's part of y [T, H] bf16 (the layer's own buffer), or with the exchange the sum."""
         _bind_x(self, x)
         if XFLAG:
             _bind_xflag_in(self)
         if R is not None:
             self.bind_streams(R)
+        if emb is not None:   # (Engram) this step's n-gram rows of the next layer, [T, 6144] bf16 (SGLang's gather)
+            assert emb.is_contiguous() and emb.dtype == torch.bfloat16 and tuple(emb.shape) == tuple(self.w["eg_emb"].shape)
+            self.eg_emb_ref = emb   # (kept alive until the next step's)
+            if self.binds.get("eg_emb") != emb.data_ptr():
+                self._rb("eg_emb", emb.data_ptr())
         self._own()
         self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
         self.steps += 1
         return self.w["y"]
+
+
+class StaticHead:
+    """(11-20, DSV41_HEAD=1) the LM head of a decode step as one static kernel (head_demo.py): x (the last MoE kernel's next
+    input: the final norm of the streams' collapse) -> this GPU's vocab rows of head.weight (bf16 GEMM) -> every GPU's row
+    gathered -> the logits [T, 129280] fp32 (SGLang's next_token_logits_buffer when it has one)."""
+
+    def __init__(self, ckpt: str, rank: int, tp: int, dev, out_root: str, pdl: bool, exchange_pool: ExchangePool):
+        head_demo = _head_demo()
+        self.pdl, self.steps, self.binds = pdl, 0, {}
+        self.w = head_demo.head_tensors(reader(ckpt), tp, rank, dev)
+        flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"] + \
+            [f for f in os.environ.get("DSV41_STATIC_FLAGS", "").split() if f.startswith("-DSTATIC_")]
+        if PROF_SHARE:
+            flags.append("-DSTATIC_STAMP_REBIND")
+        out = os.path.join(out_root, f"rank{rank}", "head")
+        self.sk, self.bufs, self.info = head_demo.build([self.w], out, extra_flags=flags, device=dev.index, num_gpus=tp,
+                                                        rank=rank, exchange_pool=exchange_pool)
+        for name in ("x", "logits", "head_w"):
+            self.sk.rebind(name, self.w[name].data_ptr())
+            self.binds[name] = self.w[name].data_ptr()
+
+    def _bind(self, name: str, t: torch.Tensor):
+        if self.binds.get(name) != t.data_ptr():
+            self.sk.rebind(name, t.data_ptr())
+            self.binds[name] = t.data_ptr()
+
+    def run(self, x: torch.Tensor, logits: torch.Tensor = None) -> torch.Tensor:
+        """x [T, 5120] bf16 (read where it is); logits: [T, vocab] fp32 to write (else the head's own buffer)."""
+        assert x.is_contiguous() and x.dtype == torch.bfloat16 and tuple(x.shape) == tuple(self.w["x"].shape)
+        out = self.w["logits"] if logits is None else logits
+        assert out.is_contiguous() and out.dtype == torch.float32 and tuple(out.shape) == tuple(self.w["logits"].shape)
+        self._bind("x", x)
+        self._bind("logits", out)
+        self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
+        self.steps += 1
+        return out

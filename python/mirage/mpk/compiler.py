@@ -57,9 +57,16 @@ def dims(tensor) -> List[int]:
     return [tensor.dim(i) for i in range(tensor.num_dims)]
 
 
+# (11-20) a graph tensor that a node writes through a buffer slot instead of as its output (hc_post_combine's x, the next
+# sublayer's input) -> one of that node's outputs: its readers in the same kernel then wait for that node (the DSv4.1 LM head
+# behind the last MoE post, moe_demo.head_nodes). Empty unless a graph registers such a tensor
+PRODUCER_ALIAS: Dict[int, int] = {}
+
+
 def producer_of(tensor, nodes: List[Node]) -> Optional[Node]:
-    """The node with `tensor` among its outputs (None: a graph input)."""
-    return next((n for n in nodes if any(t.guid == tensor.guid for t in n.outputs)), None)
+    """The node with `tensor` among its outputs (None: a graph input; PRODUCER_ALIAS: the node of the output it stands for)."""
+    g = PRODUCER_ALIAS.get(tensor.guid, tensor.guid)
+    return next((n for n in nodes if any(t.guid == g for t in n.outputs)), None)
 
 
 def candidate_grids(node: Node) -> List[Tuple[int, int, int]]:

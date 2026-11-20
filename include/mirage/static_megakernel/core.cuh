@@ -639,3 +639,21 @@ __device__ __forceinline__ void kernel_end(G const &g, KernelLocals &L) {
 }
 
 } // namespace static_mk
+
+// (11-20, host only, default off: host.cuh static_host_rebind; at the end of
+// this file, so that no line of the default build moves) a module shared by
+// several layers: each layer's own per-SM stamps and start-barrier word, for
+// in-situ samples ("@stamps", "@start_barrier")
+#ifdef STATIC_STAMP_REBIND
+#define STATIC_STAMP_REBIND_(gg, name, p)                                      \
+  if ((name) == "@stamps") {                                                   \
+    (gg).stamps = reinterpret_cast<long long *>(p);                            \
+    return true;                                                               \
+  }                                                                            \
+  if ((name) == "@start_barrier") {                                            \
+    (gg).start_barrier = reinterpret_cast<long long *>(p);                     \
+    return true;                                                               \
+  }
+#else
+#define STATIC_STAMP_REBIND_(gg, name, p)
+#endif

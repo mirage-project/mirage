@@ -342,7 +342,13 @@ enum TaskType {
   TASK_HC_MIX_SM100 = 544,
   TASK_HC_COEF_SM100 = 545,
   TASK_HC_POST_COMBINE_SM100 = 546,
-  TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
+  // DeepSeek-V4.1's Engram gate after the post (tasks/engram_gate.cuh)
+  TASK_ENGRAM_GATE_SM100 = 547,
+  // the LM head's all-gather into fp32 logits (tasks/gather_f32.cuh)
+  TASK_GATHER_F32_SM100 = 548,
+  // DeepSeek-V4.1's Engram table lookup in the kernel (tasks/engram_rows.cuh)
+  TASK_ENGRAM_ROWS_SM100 = 549,
+  TASK_STATIC_TASK_END = 550, // end placeholder, not a real task
 };
 
 enum EventType {

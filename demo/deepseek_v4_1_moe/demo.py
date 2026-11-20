@@ -105,6 +105,82 @@ def build_graph(mpk: StaticMegakernel, w: dict) -> None:
         mpk.sum_store_layer(input=sd_part, routed=routed, output=a("y"))                            # y = routed + shared
     if "h_comb" in w:      # only mHC's coefficients beside the sublayer (the framework runs the all-reduce and the post)
         mpk.dsv41_mhc_stats_nodes(a, w)
+    if "eg_wkv" in w or "eg_kv" in w:   # (11-20) the next layer's Engram on this post's streams (engram_nodes)
+        engram_nodes(mpk, a, w)
+    if "head_w" in w:      # (11-20, DSV41_HEAD=2) the last layer: the LM head on its post's next input (head_nodes)
+        mb = mpk.max_bufs
+        mpk.max_bufs = 64
+        head_nodes(mpk, a, w, "x_out")
+        mpk.max_bufs = max(mb, len(mpk._bufs))
+
+
+EG_KP = int(os.environ.get("DSV41_EG_KP", 3))       # the wkv GEMM's K parts (6144 = 24 pieces of 256)
+EG_SEND = int(os.environ.get("DSV41_EG_SEND", 25))  # the gathering sends' tasks
+
+
+HEAD_KP = int(os.environ.get("DSV41_HEAD_KP", 1))        # (head_nodes) the GEMM's K parts (5120 = 40 pieces of 128)
+HEAD_SEND = int(os.environ.get("DSV41_HEAD_SEND", 148))  # the sends' tasks
+HEAD_GQ = int(os.environ.get("DSV41_HEAD_GQ", 16))       # the gather's tasks a token
+
+
+def head_nodes(mpk: StaticMegakernel, a, w: dict, x: str = "x") -> None:
+    """(11-20) DeepSeek-V4.1's LM head (deepseek_v4_1_sglang/head_demo.py): a(x) [T, 5120] bf16 (the final norm of the streams'
+    collapse) -> gemm_tile x . head_w^T (this GPU's vocab rows, padded to whole 128-row blocks; fp32 K parts in slots) ->
+    allreduce_send (each GPU's row, bf16) -> gather_f32 -> a("logits") [T, vocab] fp32 on every GPU (with head_ids in w, also
+    each token's greedy next token: a("head_ids") [T] int32, as torch.argmax of its logits)."""
+    from mirage.core import bfloat16 as bf16, float32 as f32
+    nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
+    Vp = w["head_w"].shape[0]
+    if x == "x_out":   # the post writes x through a buffer slot: the GEMM waits for the post (its output streams_out)
+        compiler.PRODUCER_ALIAS[a("x_out").guid] = a("streams_out").guid
+    part = nt((T, Vp), f32, "head_part")
+    mpk.gemm_tile_layer(input=a(x), weight=a("head_w"), output=part)
+    sent = nt((T, Vp), bf16, "head_sent")
+    mpk.allreduce_send_layer(input=part, output=sent, num_tasks=HEAD_SEND)
+    mpk.gather_f32_layer(input=sent, output=a("logits"), parts=HEAD_GQ, ids=a("head_ids") if "head_ids" in w else None)
+
+
+EG_ROWS_STRIDE = 48   # (11-20, DSV41_EG_ROWS=1) the hash ids' row stride: [T, Engram layers 2, columns 24] int64
+
+
+def engram_kv_nodes(mpk: StaticMegakernel, a, w: dict):
+    """(11-20) Engram's kv: eg_emb (bf16 [T, 6144]) -> act_quant -> the wkv GEMM on this GPU's W columns (EG_KP K parts) ->
+    allreduce_send: into the exchange region (returns its output, for a gate in this kernel), or with eg_kv in w
+    (DSV41_ENGRAM=2: an attention kernel before the gate's MoE kernel) into the graph tensor eg_kv [GPUs T, W] through
+    its multicast address eg_kv_mc (returns None). With eg_tw in w (DSV41_EG_ROWS=1): eg_emb is looked up in this kernel
+    (engram_rows: eg_ids, the table's rows eg_tw and scales eg_ts, into eg_emb by its multicast address eg_emb_mc), the
+    act_quant polls it."""
+    from mirage.core import bfloat16 as bf16, float32 as f32, uint8 as u8
+    nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
+    W, KE = w["eg_wkv"].shape[0], w["eg_emb"].shape[1]
+    eg_q = nt((T, KE), u8, "eg_q")
+    if "eg_tw" in w:
+        peer = w["eg_tw"].shape[0] if w["eg_tw"].dtype == torch.int64 else 0   # (SGLang's PEER_READ layout: w_bias [P])
+        mpk.engram_rows_layer(ids=a("eg_ids"), weight=a("eg_tw"), scale=a("eg_ts"), output=a("eg_emb"), output_mc=a("eg_emb_mc"),
+                              starts=a("eg_starts"), ids_stride=EG_ROWS_STRIDE, peer=peer)
+    mpk.act_quant_layer(input=a("eg_emb"), output=eg_q, poll="eg_tw" in w)
+    eg_part = nt((T, W), f32, "eg_part")
+    mpk.gemm_fp8_tile_layer(input=eg_q, weight=a("eg_wkv"), weight_scales=a("eg_wkv_scales"), output=eg_part)
+    if "eg_kv" in w:
+        mpk.allreduce_send_layer(input=eg_part, output=a("eg_kv"), num_tasks=EG_SEND, dest_mc=a("eg_kv_mc"))
+        return None
+    eg_sent = nt((T, W), bf16, "eg_sent")   # (its buffer: [GPUs][T][W] in the exchange region)
+    mpk.allreduce_send_layer(input=eg_part, output=eg_sent, num_tasks=EG_SEND)
+    return eg_sent
+
+
+def engram_nodes(mpk: StaticMegakernel, a, w: dict) -> None:
+    """(11-20) DeepSeek-V4.1's Engram of the next layer (inference/model.py Engram.forward), in this MoE kernel after its mHC
+    post: eg_emb (the layer's n-gram rows, bf16 [T, 6144], SGLang's gather) -> act_quant -> the wkv GEMM on this GPU's W
+    columns of the 25600 (TP: W = 25600 / GPUs, the whole K: each column as the official computes it, in EG_KP K parts) ->
+    allreduce_send (each GPU's columns to every GPU: kv gathered) -> engram_gate (token t: R' of the post and kv -> R'' =
+    streams_eg). SGLang then reads R'' instead of running its Engram (wkv replicated: 157 MB a GPU)."""
+    mpk.max_bufs = 64   # (until the slots are known, below)
+    # DSV41_ENGRAM=2: kv gathered by the attention kernel before this one (eg_kv, a graph tensor), only the gate here
+    kv = engram_kv_nodes(mpk, a, w) if "eg_wkv" in w else a("eg_kv")
+    nx = {"pre": a("h_pre"), "gamma": a("eg_gamma"), "x": a("x_out")} if "eg_gamma" in w else {}   # (DSV41_EG_X=1)
+    mpk.engram_gate_layer(kv=kv, streams=a("streams_out"), weight=a("eg_qk"), output=a("streams_eg"), **nx)
+    mpk.max_bufs = len(mpk._bufs)
 
 
 def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
@@ -121,6 +197,17 @@ def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
             "y_sent": (HID // 128, 1, 1)}
     grid.update({names[n.graph_idx]: n.grid for n in nodes if n.name in ("hc_coef", "hc_post_combine")})
     grid["hc_mix"] = (1, 32, 1)   # the mixes as a gemm_tile: K 20480 in 32 parts of 5 K tiles
+    eg = "eg_part" in names.values()   # (11-20) Engram's nodes (engram_nodes)
+    if eg:
+        egw = next(n.inputs[1].dim(0) for n in nodes if compiler.tname(mpk, n.outputs[0]) == "eg_part")
+        grid.update({"eg_q": (T, 1, 1), "eg_part": (egw // 128, EG_KP, 1), "eg_sent": (EG_SEND, 1, 1)})
+    if "streams_eg" in names.values():
+        grid["streams_eg"] = (4, T, 1)
+    hd = "head_part" in names.values()   # (11-20, DSV41_HEAD=2) the LM head's nodes (head_nodes)
+    if hd:
+        vp = next(n.inputs[1].dim(0) for n in nodes if compiler.tname(mpk, n.outputs[0]) == "head_part")
+        grid.update({"head_part": (vp // 128, HEAD_KP, 1), "head_sent": (HEAD_SEND, 1, 1), "logits": (HEAD_GQ, T, 1),
+                     "logits_am": (HEAD_GQ, T, 1)})   # (logits_am: the gather with the argmax)
     grids = {idx: grid[name] for idx, name in names.items()}
     tasks = lambda name: [(idx, (x, y, 0)) for idx in grids if names[idx] == name
                           for x in range(grids[idx][0]) for y in range(grids[idx][1])]
@@ -141,6 +228,34 @@ def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
     lists = [lists[sm] + [(ex, (sm, 0, 0))] + ys[sm:sm + 1] for sm in range(sms)]
     for i, tk in enumerate(tasks("streams_out")):
         lists[(len(ys) + i) % sms].append(tk)
+    if eg or "streams_eg" in names.values():   # (11-20) Engram: eg_emb's act_quant before the experts on SMs with no front task of their own (their experts wait
+        # for the router anyway); the wkv GEMM after the experts, first on the SMs with no sum_store or post task (then the
+        # others, behind theirs); the sends after the GEMM tasks, the gate last (it needs the post and every GPU's kv)
+        busy = len(ys) + len(tasks("streams_out"))
+        for i, tk in enumerate(tasks("eg_q")):
+            sm = (len(order) + i) % sms
+            lists[sm].insert(lists[sm].index((ex, (sm, 0, 0))), tk)
+        free = list(range(busy, sms))   # the SMs with nothing after their expert task
+        for i, tk in enumerate(tasks("eg_part")):
+            lists[free[i % len(free)]].append(tk)
+        for i, tk in enumerate(tasks("eg_sent")):
+            lists[free[i % len(free)]].append(tk)
+        posts = sorted({sm for sm in range(sms) for tk in lists[sm] if tk in set(tasks("streams_out"))})
+        # the gate: with the wkv GEMM here (DSV41_ENGRAM=1) behind a post task (the free SMs run the GEMM, which it waits for);
+        # kv from the attention kernel (DSV41_ENGRAM=2) on free SMs behind their expert task: its dry pass (its code's first
+        # fetch) runs while the post is still on its way
+        gsms = posts if eg else free
+        for i, tk in enumerate(tasks("streams_eg")):
+            lists[gsms[i % len(gsms)]].append(tk)
+    if hd:   # the head behind everything else: its GEMM tasks first on the SMs free after their expert task (their weights
+        # stream while the post computes x: build with -DGEMM_RELAID_PREFILL), then over all SMs in turn; the sends, the gathers
+        busy = len(ys) + len(tasks("streams_out"))
+        turn = list(range(busy, sms)) + list(range(busy))
+        k = 0
+        for name in ("head_part", "head_sent", "logits", "logits_am"):
+            for tk in tasks(name):
+                lists[turn[k % sms]].append(tk)
+                k += 1
     return {"grids": grids, "lists": [copy.deepcopy(lists) for _ in range(mpk.num_gpus)]}   # the same plan on every GPU
 
 
@@ -203,9 +318,12 @@ def build(ws: list, out: str, profile: bool = False, extra_flags: list = None, p
         for slot, name in zip(ex.info["buf_slots"], (HQ, HQ_SF)):   # zeros, as the host allocates them (h_q's padding stays 0)
             bg[name] = torch.zeros(mpk._bufs[slot]["fill"](ex)[0], dtype=torch.uint8, device=d)
         bufs.append(bg)
-    sk = mpk.compile_static(paths, gpu_tensors=[{**wg, **bg} for wg, bg in zip(ws, bufs)], out_dir=os.path.join(out, "build"),
-                            extra_flags=extra_flags, profile=profile, device=device,
-                            **({} if rank is None else {"rank": rank, "exchange": exchange_pool.take(mpk.exchange_region_bytes())}))
+    try:
+        sk = mpk.compile_static(paths, gpu_tensors=[{**wg, **bg} for wg, bg in zip(ws, bufs)], out_dir=os.path.join(out, "build"),
+                                extra_flags=extra_flags, profile=profile, device=device,
+                                **({} if rank is None else {"rank": rank, "exchange": exchange_pool.take(mpk.exchange_region_bytes())}))
+    finally:   # (head_nodes' alias holds for this graph only: guids are per process, other graphs must not see it)
+        compiler.PRODUCER_ALIAS.clear()
     # every GPU's init stores (host.cuh: the exchange region's zero-fill and the buffers' first values, cudaMemset on the
     # legacy stream, asynchronous) land before any launch: at the first launch the serving-mode harness's align kernel
     # (static_host_prelude) stores into the other GPUs' hello slots, and a zero-fill still queued on a GPU would wipe the

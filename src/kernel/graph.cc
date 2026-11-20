@@ -1160,6 +1160,19 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(3, 1, TASK_HC_POST_COMBINE_SM100, variant_id);
+  } else if (name == "engram_gate") {
+    int variant_id = task_register->register_engram_gate_sm100_task(
+        customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_ENGRAM_GATE_SM100, variant_id);
+  } else if (name == "engram_rows") {
+    int variant_id =
+        task_register->register_engram_rows_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(3, 1, TASK_ENGRAM_ROWS_SM100, variant_id);
+  } else if (name == "gather_f32") {
+    int variant_id =
+        task_register->register_gather_f32_sm100_task(customized->bgraph, params);
+    task_config[op] = std::make_tuple(1, params.size() == 2 ? 3 : 1, TASK_GATHER_F32_SM100,
+                                      variant_id);   // (params [N, 1]: the parts, the logits, the ids)
   } else if (name == "act_quant") {
     int variant_id = task_register->register_act_quant_sm100_task(
         customized->bgraph, params);

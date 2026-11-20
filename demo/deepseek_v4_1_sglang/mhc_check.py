@@ -30,7 +30,15 @@ ap.add_argument("--flag", action="append", default=[])
 ap.add_argument("--timeline", action="store_true", help="the timing build: when each node's tasks ran")
 ap.add_argument("--gpus", type=int, default=4, help="the GPUs = the TP size (2: a local run on two GPUs)")
 ap.add_argument("--push", default=None, help="instead of mHC: PUSH or ADD (STATIC_WO_B_<it>), y against the plain layer's")
+ap.add_argument("--engram", action="store_true", help="(MoE, --no-norm) the next layer's Engram after the post (moe_demo."
+                "engram_nodes) on random Engram weights and n-gram rows: R'' against the official formulas")
+ap.add_argument("--engram2", action="store_true", help="(attention) the next layer's Engram kv nodes (DSV41_ENGRAM=2) into a "
+                "stand-in buffer: code generation and the build only (MHC_ONE_GPU=mhc); (MoE, --no-norm) the gate only, on "
+                "random weights and a kv buffer filled before each launch: R'' and (DSV41_EG_X=1) the next input checked")
+ap.add_argument("--head", action="store_true", help="(MoE, the last layer) the LM head in the kernel (DSV41_HEAD=2: "
+                "moe_demo.head_nodes, gamma = norm.weight): the logits against the kernel's x times head.weight")
 a = ap.parse_args()
+assert not (a.engram or (a.engram2 and a.kind == "moe")) or (a.kind == "moe" and a.no_norm), "--engram: --kind moe --no-norm"
 L, attention = a.layer, a.kind == "attn"
 NG = a.gpus
 # MHC_ONE_GPU=1 (code generation only): every rank's tensors on GPU 0; the build writes layer.cu, then the load fails
@@ -131,6 +139,21 @@ def timed(h, info, tag, between=None):
             rows_.sort()
             print(f"  GPU {r}: sum_store ends {min(ss_end):.1f} .. {max(ss_end):.1f}; hc_post_combine stamp0 first {rows_[0][0]:.1f} median {rows_[len(rows_)//2][0]:.1f} last {rows_[-1][0]:.1f}; "
                   f"late tasks (s0, s1, start, end, sm, idx): " + " ".join(f"({a:.1f},{b:.1f},{c:.1f},{d:.1f},{e},{f})" for a, b, c, d, e, f in rows_[-6:]), flush=True)
+    if a.engram:   # per GPU, the last launch: the Engram nodes' first start and last end
+        tt, tm = launches[-1]
+        for r in range(NG):
+            b0 = tm[r][0]
+            sch = json.load(open(info["paths"][r]))
+            tk = sch["all_tasks"]
+            per = {}
+            for sm, q in enumerate(sch["worker_task_queues"]):
+                for i, t in enumerate(q):
+                    nm = compiler.tname(mpk, nodes[tk[t]["node"]].outputs[0])
+                    if nm.startswith("eg_") or nm in ("streams_eg", "streams_out", "routed_rows"):
+                        e = [(x - b0) / 1e3 if x else float("nan") for x in tt[r][sm][i]]
+                        per.setdefault(nm, []).append((e[0], e[1], sm))
+            print(f"  GPU {r}: " + "; ".join(f"{nm} {min(v)[0]:.1f}..{max(x[1] for x in v):.1f} (last on SM "
+                                             f"{max(v, key=lambda x: x[1])[2]})" for nm, v in per.items()), flush=True)
     if False:
         tt, tm = launches[-1]
         b0 = tm[0][0]
@@ -201,7 +224,7 @@ if a.push:   # the same layer and inputs, wo_b pushing
 kind = "attn" if attention else "ffn"
 p = f"layers.{L}."
 fn, base, scale = (read(p + f"hc_{kind}_{n}").float() for n in ("fn", "base", "scale"))
-gamma = read((f"layers.{L}.ffn_norm.weight" if attention else f"layers.{L + 1}.attn_norm.weight")).bfloat16()
+gamma = read("norm.weight" if a.head else (f"layers.{L}.ffn_norm.weight" if attention else f"layers.{L + 1}.attn_norm.weight")).bfloat16()
 R = torch.randn(T, HC * H, generator=torch.Generator().manual_seed(7)).bfloat16()
 for wg, d in zip(ws, devs):
     hi = fn.bfloat16()
@@ -212,6 +235,53 @@ for wg, d in zip(ws, devs):
               h_pre=torch.zeros(T, HC, device=d), x_out=torch.zeros(T, H, dtype=torch.bfloat16, device=d))
     if not a.no_norm:
         wg["gamma_next"] = gamma.to(d).contiguous()
+if a.head and os.environ.get("MHC_HEAD_NODES", "1") != "0":   # the LM head's tensors (MHC_HEAD_NODES=0: norm.weight only)
+    sys.path.insert(0, HERE)
+    import head_demo   # noqa: E402
+    for r, (wg, d) in enumerate(zip(ws, devs)):
+        hw = head_demo.head_tensors(read, NG, r, d)
+        wg.update({k: hw[k] for k in ("head_w", "logits", "head_ids") if k in hw})
+if a.engram2:   # (attention) the kv nodes, random weights, a stand-in kv buffer (no multicast address: build only)
+    sys.path.insert(0, HERE)
+    import dsv41_static_layer as sl   # noqa: E402
+    g = torch.Generator().manual_seed(23)
+    fake = {"wkv.weight": torch.zeros((HC + 1) * H, 6144).to(torch.float8_e4m3fn),
+            "wkv.scale": torch.full(((HC + 1) * H // 32, 6144 // 32), 127, dtype=torch.uint8).view(torch.float8_e8m0fnu),
+            "q_weight": torch.ones(HC, H).bfloat16(), "k_weight": torch.ones(HC, H).bfloat16()}
+    for r, (wg, d) in enumerate(zip(ws, devs)):
+        kvb = torch.zeros(NG * T, (HC + 1) * H // NG, dtype=torch.bfloat16, device=d)
+        if attention:
+            wg.update(sl.engram_kv_tensors(lambda n: fake[n.split(".engram.")[1]], L + 1, NG, r, d, kvb))
+            if os.environ.get("DSV41_EG_ROWS", "0") != "0":   # (build only) the lookup's tensors: a stand-in table
+                emb = torch.full((T, 6144), -1, dtype=torch.int16, device=d).view(torch.bfloat16)
+                wg.update(eg_emb=emb, eg_emb_mc=torch.zeros_like(emb), eg_ids=torch.zeros(T, 24, dtype=torch.int64, device=d),
+                          eg_tw=torch.zeros(1024, 256, dtype=torch.uint8, device=d),
+                          eg_ts=torch.zeros(1024, 8, dtype=torch.uint8, device=d),
+                          eg_starts=torch.tensor([1024 * i for i in range(NG + 1)], dtype=torch.int64, device=d))
+        else:   # the gate only (kv from the attention kernel)
+            eg = sl.engram_tensors(lambda n: fake[n.split(".engram.")[1]], L + 1, NG, r, d)
+            wg.update(eg_qk=eg["eg_qk"], streams_eg=eg["streams_eg"], eg_kv=kvb)
+    if not attention:   # random q x k weight and kv rows (the gathered buffer: GPU r's columns in rows [r T, r T + T))
+        EG2_QK = (1 + 0.1 * torch.randn(HC, H, generator=g)) * (1 + 0.1 * torch.randn(HC, H, generator=g))
+        EG2_KV = torch.randn(NG * T, (HC + 1) * H // NG, generator=g).bfloat16()
+        for wg in ws:
+            wg["eg_qk"].copy_(EG2_QK)
+            wg["eg_kv"].copy_(EG2_KV)
+            if os.environ.get("DSV41_EG_X", "0") != "0":
+                wg["eg_gamma"] = gamma.to(wg["eg_kv"].device).contiguous()
+if a.engram:   # random Engram weights in the checkpoint's formats (e4m3 values of std about 100, e8m0 scales 115-116)
+    sys.path.insert(0, HERE)
+    import dsv41_static_layer as sl   # noqa: E402
+    g = torch.Generator().manual_seed(23)
+    fake = {"wkv.weight": (torch.randn((HC + 1) * H, 6144, generator=g) * 100).clamp(-448, 448).to(torch.float8_e4m3fn),
+            "wkv.scale": (115 + torch.randint(0, 2, ((HC + 1) * H // 32, 6144 // 32), generator=g)).to(torch.uint8).view(
+                torch.float8_e8m0fnu),
+            "q_weight": (1 + 0.1 * torch.randn(HC, H, generator=g)).bfloat16(),
+            "k_weight": (1 + 0.1 * torch.randn(HC, H, generator=g)).bfloat16()}
+    emb = torch.randn(T, 6144, generator=g).bfloat16()
+    for r, (wg, d) in enumerate(zip(ws, devs)):
+        wg.update(sl.engram_tensors(lambda n: fake[n.split(".engram.")[1]], L + 1, NG, r, d))
+        wg["eg_emb"] = emb.to(d).contiguous()
 if os.environ.get("MHC_STATS_ONLY"):   # measurement only: the plain layer + only the coefficient nodes beside it (hc_mix as a
     # gemm_tile, hc_coef; the layer still ends with sum_store's y): its node timeline, then stop
     for wg, d in zip(ws, devs):
@@ -234,7 +304,14 @@ h = Harness(sk)
 print(f"mhc build {time.time() - t0:.0f} s, grids {info['grids']}", flush=True)
 h.launch(timeout_s=60)
 print(f"L{L} {a.kind}: span {h.span_us():.1f} us", flush=True)
-timed(h, info, "mhc")
+
+
+def _eg2_refill():   # (--engram2, MoE) the gate re-arms the kv rows it read: the attention kernel's part, before each launch
+    for wg in ws:
+        wg["eg_kv"].copy_(EG2_KV)
+
+
+timed(h, info, "mhc", between=_eg2_refill if a.engram2 and not attention else None)
 if not GEN_ONLY and os.environ.get("MHC_INTERLEAVE"):   # each kernel again, the other one launched before every timed launch
     ph = plain_keep[3]
     timed(ph, plain_keep[2], "plain after mhc", between=lambda: h.launch(512 << 20, timeout_s=60))
@@ -268,4 +345,88 @@ if not a.no_norm:
           f"{(ws[0]['x_out'].cpu().view(torch.int16) == xn.view(torch.int16)).float().mean().item():.4f}")
 same = [torch.equal(wg["streams_out"].cpu().view(torch.int16), ws[0]["streams_out"].cpu().view(torch.int16)) for wg in ws[1:]]
 print(f"R' the same bits on the other GPUs: {same}", flush=True)
+if a.head and "head_w" in ws[0]:   # the kernel's own x (bf16) times head.weight in fp64, as bf16 (each GPU's row), then fp32
+    W = read("head.weight")
+    ref = (ws[0]["x_out"].cpu().double() @ W.double().T).to(torch.bfloat16).float()
+    got = [wg["logits"].cpu() for wg in ws]
+    print(f"head: logits relRMS {relrms(got[0], ref):.2e}, equal {(got[0] == ref).float().mean().item():.4f}, argmax equal "
+          f"{(got[0].argmax(-1) == ref.argmax(-1)).float().mean().item():.3f}, the same on every GPU "
+          f"{all(torch.equal(g, got[0]) for g in got[1:])}", flush=True)
+if a.engram2 and not attention:   # the gate on the kernel's R' and the kv rows given; x (DSV41_EG_X) as SGLang's hc_combine_norm
+    kv = torch.cat([EG2_KV[r * T:(r + 1) * T] for r in range(NG)], 1)
+    key, value = kv.split([HC * H, H], dim=-1)
+    key = key.float().unflatten(-1, (HC, H))
+    h = ws[0]["streams_out"].cpu().view(T, HC, H).float()
+    rstd = torch.rsqrt(h.square().mean(-1) + EPS) * torch.rsqrt(key.square().mean(-1) + EPS)
+    dot = (h * EG2_QK * key).sum(-1) * rstd * H ** -0.5
+    gate = torch.sigmoid(torch.copysign(dot.abs().clamp_min(1e-6).sqrt(), dot))
+    ref = (h + gate.unsqueeze(-1) * value.float().unsqueeze(-2)).bfloat16()
+    got = [wg["streams_eg"].cpu().view(T, HC, H) for wg in ws]
+    print(f"Engram2 gate: min {gate.min():.3f} max {gate.max():.3f}; R'' relRMS {relrms(got[0].float(), ref.float()):.2e}, "
+          f"equal bits {(got[0].view(torch.int16) == ref.view(torch.int16)).float().mean().item():.5f}; the same bits on every "
+          f"GPU {all(torch.equal(x.view(torch.int16), got[0].view(torch.int16)) for x in got[1:])}", flush=True)
+
+    def x_ref(r2):   # SGLang's hc_combine_norm on the kernel's R'' with the kernel's pre (this sublayer's)
+        pre = ws[0]["h_pre"].cpu().float()
+        y = (pre[:, :, None] * r2.float()).sum(1).bfloat16().float()
+        return (y * torch.rsqrt(y.square().mean(-1, keepdim=True) + 1e-20) * gamma.float()).bfloat16()
+    if "eg_gamma" in ws[0]:
+        xr, xg = x_ref(got[0]), [wg["x_out"].cpu() for wg in ws]
+        print(f"Engram2 x: relRMS {relrms(xg[0].float(), xr.float()):.2e}, equal bits "
+              f"{(xg[0].view(torch.int16) == xr.view(torch.int16)).float().mean().item():.5f}; the same on every GPU "
+              f"{all(torch.equal(x, xg[0]) for x in xg[1:])}", flush=True)
+    for i in range(int(os.environ.get("EG_RELAUNCH", "3"))):   # new R per launch (a missing wait shows as a stale result)
+        R2 = torch.randn(T, HC * H, generator=torch.Generator().manual_seed(100 + i)).bfloat16()
+        for wg in ws:
+            wg["streams"].copy_(R2)
+            wg["eg_kv"].copy_(EG2_KV)
+            wg["streams_eg"].zero_()
+            wg["x_out"].zero_()
+        torch.cuda.synchronize()
+        h_ = Harness(sk)
+        h_.launch(timeout_s=60)
+        torch.cuda.synchronize()
+        g2 = [wg["streams_eg"].cpu().view(T, HC, H) for wg in ws]
+        h2 = ws[0]["streams_out"].cpu().view(T, HC, H).float()
+        rstd = torch.rsqrt(h2.square().mean(-1) + EPS) * torch.rsqrt(key.square().mean(-1) + EPS)
+        dot = (h2 * EG2_QK * key).sum(-1) * rstd * H ** -0.5
+        gt = torch.sigmoid(torch.copysign(dot.abs().clamp_min(1e-6).sqrt(), dot))
+        rf = (h2 + gt.unsqueeze(-1) * value.float().unsqueeze(-2)).bfloat16()
+        msg = f"Engram2 relaunch {i}: R'' relRMS {relrms(g2[0].float(), rf.float()):.2e}, every GPU the same " \
+              f"{all(torch.equal(x.view(torch.int16), g2[0].view(torch.int16)) for x in g2[1:])}"
+        if "eg_gamma" in ws[0]:
+            xr, xg = x_ref(g2[0]), ws[0]["x_out"].cpu()
+            msg += f"; x relRMS {relrms(xg.float(), xr.float()):.2e}, equal bits " \
+                   f"{(xg.view(torch.int16) == xr.view(torch.int16)).float().mean().item():.5f}"
+        print(msg, flush=True)
+if a.engram:   # kv from each GPU's own x_q (its act_quant) and its columns, fp64, bf16 as the official GEMM's output; the gate
+    # in fp32 as model.py Engram.forward, on the kernel's own R'
+    qs = [moe_demo.from_buffer(b["eg_q"], 6144) for b in bufs]
+    print(f"Engram x_q the same on every GPU: {all(torch.equal(q[0], qs[0][0]) and torch.equal(q[1], qs[0][1]) for q in qs)}")
+    kv = []
+    for r, (wg, d) in enumerate(zip(ws, devs)):
+        q, sc = qs[r]
+        xe = (q.view(torch.float8_e4m3fn).double() * torch.exp2(sc.double() - 127).repeat_interleave(32, 1)).to(d)
+        kv.append((xe @ moe_demo.w8_dequant(wg["eg_wkv"], wg["eg_wkv_scales"]).T).bfloat16().cpu())
+    kv = torch.cat(kv, 1)
+    key, value = kv.split([HC * H, H], dim=-1)
+    key = key.float().unflatten(-1, (HC, H))
+    weight = fake["q_weight"].float() * fake["k_weight"].float()
+    h = ws[0]["streams_out"].cpu().view(T, HC, H).float()
+    rstd = torch.rsqrt(h.square().mean(-1) + EPS) * torch.rsqrt(key.square().mean(-1) + EPS)
+    dot = (h * weight * key).sum(-1) * rstd * H ** -0.5
+    gate = torch.sigmoid(torch.copysign(dot.abs().clamp_min(1e-6).sqrt(), dot))
+    ref = (h + gate.unsqueeze(-1) * value.float().unsqueeze(-2)).bfloat16()
+    got = [wg["streams_eg"].cpu().view(T, HC, H) for wg in ws]
+    print(f"Engram gate: min {gate.min():.3f} max {gate.max():.3f}; R'' relRMS {relrms(got[0].float(), ref.float()):.2e}, "
+          f"equal bits {(got[0].view(torch.int16) == ref.view(torch.int16)).float().mean().item():.5f}, max |d| "
+          f"{(got[0].float() - ref.float()).abs().max():.3e}; the same bits on every GPU "
+          f"{all(torch.equal(x.view(torch.int16), got[0].view(torch.int16)) for x in got[1:])}", flush=True)
+    for i in range(int(os.environ.get("EG_RELAUNCH", "3"))):   # the re-armed buffers again: the same R''
+        for wg in ws:
+            wg["streams_eg"].zero_()
+        h_ = Harness(sk)
+        h_.launch(timeout_s=60)
+        again = all(torch.equal(wg["streams_eg"].cpu().view(T, HC, H).view(torch.int16), got[0].view(torch.int16)) for wg in ws)
+        print(f"Engram relaunch {i}: R'' equal on every GPU {again}", flush=True)
 sk.finalize()

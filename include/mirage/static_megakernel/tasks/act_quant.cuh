@@ -141,7 +141,10 @@ __device__ __forceinline__ void add_parts8(
   }
 }
 
-template <int K, int NC>
+// POLL (11-20, DSV41_EG_ROWS): x is a 0xFF-prefilled buffer written 16 B at a
+// time (engram_rows' multicast stores): each 16 B polled until written, then
+// re-armed (REARM: this task is its one reader)
+template <int K, int NC, bool POLL = false>
 __device__ __forceinline__ void act_quant_task(__nv_bfloat16 const *x,
                                                unsigned char *out,
                                                uint32_t *done_cnt,
@@ -156,9 +159,29 @@ __device__ __forceinline__ void act_quant_task(__nv_bfloat16 const *x,
                 "act_quant: whole warps of 128-column blocks");
   int const j = threadIdx.x & 7;
   for (int c = cy * NC + 16 * threadIdx.x; c < (cy + 1) * NC; c += 16 * 256) {
-    uint4 const u[2] = {
-        *reinterpret_cast<uint4 const *>(x + (size_t)t * K + c),
-        *reinterpret_cast<uint4 const *>(x + (size_t)t * K + c + 8)};
+    uint4 u[2];
+    if constexpr (POLL) {
+      unsigned char const *p =
+          reinterpret_cast<unsigned char const *>(x + (size_t)t * K + c);
+      bool ok0 = false, ok1 = false;
+      do { // both loads in flight
+        if (!ok0) {
+          u[0] = ld16_poll(p);
+        }
+        if (!ok1) {
+          u[1] = ld16_poll(p + 16);
+        }
+        ok0 = ok0 || valid16(u[0]);
+        ok1 = ok1 || valid16(u[1]);
+      } while (!(ok0 && ok1));
+      if constexpr (REARM) {
+        rearm16(p);
+        rearm16(p + 16);
+      }
+    } else {
+      u[0] = *reinterpret_cast<uint4 const *>(x + (size_t)t * K + c);
+      u[1] = *reinterpret_cast<uint4 const *>(x + (size_t)t * K + c + 8);
+    }
     float v[16];
 #pragma unroll
     for (int h = 0; h < 2; h++) {
@@ -381,8 +404,8 @@ __device__ __forceinline__ void run_act_quant(Maps const &,
         g.cnt + SELF::counter,
         tk.x,
         warm STAGE_STAMP_ARG(L.stage_stamps));
-  } else if constexpr (X::buf < 0) { // x: a graph input
-    act_quant_task<K, K / SELF::y>(
+  } else if constexpr (X::buf < 0) { // x: a graph input (POLL: params[3] = 1)
+    act_quant_task<K, K / SELF::y, param_or<PARAMS, 3, 0>() == 1>(
         buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 0>()),
         buf_at<unsigned char>(g, SELF::buf),
         g.cnt + SELF::counter,

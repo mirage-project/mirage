@@ -559,6 +559,7 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,    # x_q [T, K] e4m3 bytes (uint8)
         block_dim: tuple = (256, 1, 1),
         swiglu_limit: float = None,   # x = SwiGLU of a gemm_fp8_tile's gate | up K parts, clamped at this limit (below)
+        poll: bool = False,   # (11-20) x a graph tensor 0xFF before the launch, written in it (engram_rows): polled, re-armed
     ):
         """Task (t, y) = token t, columns [y K / C, (y + 1) K / C) (default C = 1 for x a graph input, K / 2048 for a GEMM's K
         parts): DeepSeek-V4.1's act_quant of row t (per 32 columns a power-of-2 scale, e8m0), into the node's buffer
@@ -585,6 +586,9 @@ class StaticMegakernel(PersistentKernel):
                            [KO, I, float_bits(swiglu_limit)], out_buffer=lambda n: (zq_bytes(T, KO), -1, False), counters=1,
                            cost_inputs=[0], dry=True)
             return
+        if poll:   # (x written by engram_rows' multicast stores: polled, no wait on a node)
+            assert p is None or p.name == "engram_rows", "act_quant_layer: poll with x a graph tensor or engram_rows' output"
+            p = None
         if p is None:       # tasks/act_quant.cuh reads x by pointer and waits for no node
             self._dtypes("act_quant_layer", input=(input, bfloat16), output=(output, uint8))
             buf_slots = [self._tensor_slot(input)]
@@ -602,7 +606,8 @@ class StaticMegakernel(PersistentKernel):
             grid, maps, changeable = (T, 1, 1), [(0, 1, -1), (0, 1, -1)], {1: (512, 1, None)}
         else:                 # (token, column slice): a task polls only its columns' K parts; slices of whole passes of 2048
             grid, maps, changeable = (T, K // 2048, 1), [(0, 1, -1), (0, 1, -1)], {1: (2048, 1, None)}
-        self._add_node("act_quant", grid, block_dim, [input, output], maps, [K], changeable_grid_dims=changeable,
+        self._add_node("act_quant", grid, block_dim, [input, output], maps, [K] + ([0, 0, 1] if poll else []),
+                       changeable_grid_dims=changeable,
                        out_buffer=lambda n: (zq_bytes(T, K), -1, False), counters=1, buf_slots=buf_slots,
                        cost_inputs=[0] if p is not None else [],   # adds the GEMM's K parts
                        dry=p is not None)   # K parts: its first task on an SM runs once dry while the parts are on their way
@@ -1384,6 +1389,9 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,        # what is sent: [T, W] bf16 (its buffer: [num_gpus][T][W] bf16 in the exchange region)
         num_tasks: int = None,  # slices of the partial sum; default: one per task of the producer (as its grid is now)
         block_dim: tuple = (256, 1, 1),
+        dest_mc: DTensor = None,  # (11-20, DSV41_ENGRAM=2) with output a graph tensor [num_gpus T, W] bf16 (its local copy):
+                                  # the rows go there instead of into the exchange region, through dest_mc (a graph tensor
+                                  # bound to its multicast address); one set, re-armed by its reader in another kernel
     ):
         """Task x: slice x of this GPU's partial sum (bf16) to every GPU, into this GPU's slot of the node's output (in the exchange
         region), once the input's producer is done (all its tasks, counted in its counter). params = [W, G, FX]. When the producer is
@@ -1396,10 +1404,16 @@ class StaticMegakernel(PersistentKernel):
         # (polled: rows of this GPU only, the same layout with one GPU)
         slots_src = (p is not None and p.name == "gemm_tile" and p.params[0] == COMBINE["slots"] and
                      (p.params[3] == 0 or self.num_gpus == 1))
+        # (11-20, DSv4.1's Engram wkv) a gemm_fp8_tile node's K parts in slots (one group, no fused input, no weights_after):
+        # the same [K parts][T][N] fp32 layout, polled, added in order and re-armed the same way; params[3] = 2 says so
+        fp8_slots = (p is not None and p.name == "gemm_fp8_tile" and p.params[0] == COMBINE["slots"] and len(p.params) == 4
+                     and p.params[3] == 1)
+        slots_src = slots_src or fp8_slots
         if p is None or p.info["buf"] < 0 or (p.info["counter"] < 0 and not slots_src):
             raise ValueError(f"allreduce_send_layer: the input must be a node's output buffer whose node counts its tasks, or a "
                              f"gemm_tile node's output in slots; it comes from {p.name if p else 'the graph inputs'}")
-        T, W, GPUS = self._tokens(output.dim(0)), output.dim(1), self.num_gpus
+        GPUS = self.num_gpus
+        T, W = self._tokens(output.dim(0) // (GPUS if dest_mc is not None else 1)), output.dim(1)
         fx = input.dtype == int64   # a COMBINE_ADD GEMM's sums (its K parts): a task per 128-column block, after its parts
         if fx:
             if p.name not in ("gemm_tile", "scaled_gemm_tile") or p.params[0] != 1:
@@ -1417,8 +1431,15 @@ class StaticMegakernel(PersistentKernel):
             readers = [n for n in graph_nodes(self) if any(t.guid == zq.guid for t in n.inputs)]
             if len(readers) == 1:
                 rearm = producer_of(zq, graph_nodes(self)).info["buf"]
+        if dest_mc is not None:   # into a graph tensor (tasks/allreduce_send.cuh TO_T): params[4] = 1
+            assert slots_src and not fx and output.dim(0) == GPUS * T, "allreduce_send into a tensor: a GEMM's K parts in slots"
+            self._dtypes("allreduce_send_layer", dest_mc=(dest_mc, bfloat16))
+            self._add_node("allreduce_send", (num_tasks or p.grid[0] * p.grid[1] * p.grid[2], 1, 1), block_dim, [input, output],
+                           [(-1, -1, -1)] * 2, [W, 1, 0, 2 if fp8_slots else 0, 1],
+                           buf_slots=[-1, self._tensor_slot(dest_mc), self._tensor_slot(output)], cost_inputs=[0])
+            return
         self._add_node("allreduce_send", (num_tasks or p.grid[0] * p.grid[1] * p.grid[2], 1, 1), block_dim, [input, output],
-                       [(-1, -1, -1)] * 2, [W, input.dim(0) // T, int(fx)],
+                       [(-1, -1, -1)] * 2, [W, input.dim(0) // T, int(fx)] + ([2] if fp8_slots else []),
                        out_buffer=lambda n: (GPUS * T * W * 2, 0xFF, True), exchange=True, buf_slots=[rearm],
                        cost_inputs=[0] if slots_src else [])   # slots: adds the GEMM's K parts
 
@@ -2031,6 +2052,113 @@ class StaticMegakernel(PersistentKernel):
                        [(1, -1, -1), (-1, -1, -1), (-1, -1, -1), (-1, -1, -1)], [H, HC, int(norm), float_bits(norm_eps)],
                        counters=1, concurrent_along_axis=0 if norm else None, buf_slots=slots,
                        dry=os.environ.get("HC_DRY", "0") != "0")   # its first task on an SM runs once dry (the MoE gains, the attention loses)
+
+    def engram_gate_layer(
+        self,
+        kv: DTensor,            # [T, W] bf16: an allreduce_send node's output (its buffer [num_gpus][T][W]: GPU r's W columns)
+        streams: DTensor,       # R' [T, HC H] bf16: a node's output (the mHC post's new streams)
+        weight: DTensor,        # [HC, H] fp32: q_weight x k_weight (a graph tensor)
+        output: DTensor,        # R'' [T, HC H] bf16 (a graph tensor)
+        eps: float = 1e-20,
+        clamp: float = 1e-6,
+        block_dim: tuple = (256, 1, 1),
+        pre: DTensor = None,    # (11-20, kv a graph tensor) with gamma and x: the next sublayer's input from R'' as the post
+        gamma: DTensor = None,  # computes it (pre [T, HC] fp32: the next sublayer's coefficients, gamma [H] bf16, x [T, H]
+        x: DTensor = None,      # bf16; tasks/engram_gate.cuh NX)
+        norm_eps: float = 1e-20,
+    ):
+        """DeepSeek-V4.1's Engram gate (tasks/engram_gate.cuh), task (x, y) = copy x of token y: its stream in R' and the
+        token's gathered row of kv (one key of H per copy, then the value) -> R'' = h + gate value. After all the producer's
+        tasks (its counter) and kv's vectors from every GPU (polled, re-armed). params = [H, HC, eps, clamp (fp32 bits)]."""
+        from .compiler import graph_nodes, producer_of
+        nodes = graph_nodes(self)
+        s, p = producer_of(kv, nodes), producer_of(streams, nodes)
+        ten = s is None   # (11-20, DSV41_ENGRAM=2) kv a graph tensor [GPUs T, W] another kernel gathered (one set)
+        if (s is not None and s.name != "allreduce_send") or p is None or p.info["counter"] < 0:
+            raise ValueError("engram_gate_layer: kv from an allreduce_send node or a graph tensor, R' from a node that counts "
+                             "its tasks")
+        GPUS, W = self.num_gpus, kv.dim(1)
+        T, HC, H = self._tokens(kv.dim(0) // (GPUS if ten else 1)), weight.dim(0), weight.dim(1)
+        assert x is None or (ten and pre is not None and gamma is not None), "the next input: kv a tensor, pre and gamma"
+        assert streams.dim(1) == HC * H and output.dim(1) == HC * H and (HC + 1) * H == GPUS * W and H % 8 == 0
+        self._dtypes("engram_gate_layer", kv=(kv, bfloat16), streams=(streams, bfloat16), weight=(weight, float32),
+                     output=(output, bfloat16))
+        self._add_node("engram_gate", (HC, T, 1), block_dim, [kv, streams, weight, output],
+                       [(-1, -1, -1), (-1, -1, -1), (-1, -1, -1), (1, 0, -1)],
+                       [H, HC, float_bits(eps), float_bits(clamp)] + ([1, W] if ten else []) +
+                       ([1, float_bits(norm_eps)] if x is not None else []),
+                       buf_slots=[self._tensor_slot(streams), self._tensor_slot(weight), self._tensor_slot(output)] +
+                       ([self._tensor_slot(kv)] if ten else []) +
+                       ([self._tensor_slot(pre), self._tensor_slot(gamma), self._tensor_slot(x)] if x is not None else []),
+                       counters=T if ten else 0, concurrent_along_axis=0 if ten else None,   # (ten: a token's HC tasks at once)
+                       dry=True)   # its first task on an SM runs once dry (its code warm by the real pass)
+
+    def engram_rows_layer(
+        self,
+        ids: DTensor,           # [T, C] int64 (a graph tensor): the layer's hash ids; rows ids_stride apart in memory
+        weight: DTensor,        # [rows, DIM] uint8: this GPU's rows of the table (fp8 e4m3), rows [starts[r], starts[r + 1])
+        scale: DTensor,         # [rows, DIM / BS] uint8: their e8m0 scales
+        output: DTensor,        # [T, C DIM] bf16: this GPU's copy of a symmetric buffer (0xFF before; its reader re-arms it)
+        output_mc: DTensor,     # bound to output's multicast address
+        starts: DTensor,        # [GPUS + 1] int64: each GPU's first row, then the table's size
+        ids_stride: int,
+        block: int = 32,
+        block_dim: tuple = (256, 1, 1),
+        peer: int = 0,          # P > 0 (SGLang's PEER_READ layout): weight / scale = w_bias / s_bias [P] int64, starts [P];
+                                # every row read from its owner's shard in place, output this GPU's buffer only
+    ):
+        """(11-20, DSV41_EG_ROWS=1) DeepSeek-V4.1's Engram table lookup (tasks/engram_rows.cuh): task t = token t's C rows;
+        each row this GPU holds dequantized as SGLang's engram_gather into every GPU's copy of output (multicast). Its reader:
+        an act_quant_layer(poll=True). params = [C, DIM, BS, ids_stride]."""
+        T, C = self._tokens(ids.dim(0)), ids.dim(1)
+        DIM = output.dim(1) // C
+        if peer:
+            assert peer & (peer - 1) == 0 and weight.dim(0) == scale.dim(0) == starts.dim(0) == peer
+            self._dtypes("engram_rows_layer", weight=(weight, int64), scale=(scale, int64))
+        else:
+            assert starts.num_dims == 1 and starts.dim(0) == self.num_gpus + 1 and weight.dim(1) == DIM
+            assert scale.dim(1) * block == DIM
+            self._dtypes("engram_rows_layer", weight=(weight, uint8), scale=(scale, uint8))
+        assert output.dim(0) == T and output.dim(1) == C * DIM and ids_stride >= C
+        self._dtypes("engram_rows_layer", ids=(ids, int64), output=(output, bfloat16), starts=(starts, int64))
+        self._add_node("engram_rows", (T, 1, 1), block_dim, [ids, weight, scale, output],
+                       [(0, -1, -1), (-1, -1, -1), (-1, -1, -1), (0, -1, -1)],
+                       [C, DIM, block, ids_stride] + ([1, peer] if peer else []),
+                       buf_slots=[self._tensor_slot(ids), self._tensor_slot(weight), self._tensor_slot(scale),
+                                  self._tensor_slot(output), self._tensor_slot(output_mc), self._tensor_slot(starts)])
+
+    def gather_f32_layer(
+        self,
+        input: DTensor,         # [T, W] bf16: an allreduce_send node's output (its buffer [num_gpus][T][W]: GPU r's row)
+        output: DTensor,        # [T, num_gpus N] fp32 (a graph tensor): GPU r's first N columns at [r N, r N + N)
+        parts: int = 16,        # tasks per token
+        block_dim: tuple = (256, 1, 1),
+        ids: DTensor = None,    # [T] int32 (a graph tensor): also each token's torch.argmax of its row (DSV41_HEAD_ARGMAX)
+    ):
+        """(11-20, the DeepSeek-V4.1 LM head) task (x, y): part x of token y's gathered row: the GPUs' rows as sent (polled per
+        16 B, re-armed), as fp32 into the output. params = [N] (+ [1] with ids: the parts' (value, index) in the node's buffer
+        [T][parts] u64, a counter a token, the last part's task reduces them)."""
+        from .compiler import graph_nodes, producer_of
+        s = producer_of(input, graph_nodes(self))
+        if s is None or s.name != "allreduce_send":
+            raise ValueError("gather_f32_layer: rows sent by an allreduce_send node")
+        T, W, GPUS = self._tokens(input.dim(0)), input.dim(1), self.num_gpus
+        N = output.dim(1) // GPUS
+        assert output.dim(1) == GPUS * N and N <= W and N % 8 == 0 and output.dim(0) == T
+        assert (GPUS * N // 8 + parts - 1) // parts <= 4 * 256, "tasks/gather_f32.cuh: at most 4 vectors a thread"
+        self._dtypes("gather_f32_layer", input=(input, bfloat16), output=(output, float32))
+        if ids is None:
+            self._add_node("gather_f32", (parts, T, 1), block_dim, [input, output], [(-1, -1, -1), (1, 0, -1)], [N],
+                           buf_slots=[self._tensor_slot(output)])
+            return
+        assert ids.num_dims == 1 and ids.dim(0) == T, "gather_f32_layer: ids [T] int32"
+        self._dtypes("gather_f32_layer", ids=(ids, int32))
+        # the node's own output: the parts (its buffer, named logits_am: not a graph tensor's name), then the two graph tensors
+        am = self.new_tensor(dims=(T, parts), dtype=int64, name="logits_am")
+        self._add_node("gather_f32", (parts, T, 1), block_dim, [input, am, output, ids],
+                       [(-1, -1, -1), (1, 0, -1), (1, 0, -1), (-1, 0, -1)], [N, 1],
+                       buf_slots=[self._tensor_slot(output), self._tensor_slot(ids)], counters=T,
+                       out_buffer=lambda n: (T * parts * 8, -1, False))
 
     def dsv41_mhc_nodes(self, a, w: dict, sent: DTensor):
         """The mHC nodes of a DeepSeek-V4.1 sublayer whose tensors w holds them (the sublayer's sum_store only sends): a(name) =

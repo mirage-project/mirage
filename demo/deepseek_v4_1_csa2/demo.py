@@ -214,6 +214,12 @@ def build_graph(mpk: StaticMegakernel, w: dict, variant: str, ratio: int, csrc: 
         mpk.sum_store_layer(input=wo_b_part, output=a("y"))                                        # this GPU's y
     if "h_comb" in w:      # only mHC's coefficients beside the sublayer (the framework runs the all-reduce and the post)
         mpk.dsv41_mhc_stats_nodes(a, w)
+    if "eg_wkv" in w:      # (11-20, DSV41_ENGRAM=2) the next layer's Engram kv, gathered into eg_kv for the MoE kernel's gate
+        from deepseek_v4_1_moe.demo import engram_kv_nodes
+        mb = mpk.max_bufs
+        mpk.max_bufs = 64   # (until the slots are known, below)
+        engram_kv_nodes(mpk, a, w)
+        mpk.max_bufs = max(mb, len(mpk._bufs))
 
 
 def score_chunks(heads: int, cap: int, sms: int) -> int:
@@ -258,6 +264,14 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     grid["scores"] = next((n.grid for n in nodes if n.name == "indexer_score"), None)   # (T, score_chunks: the layer's)
     grid.update({names[n.graph_idx]: n.grid for n in nodes if n.name in ("hc_coef", "hc_post_combine")})
     grid["hc_mix"] = (1, 32, 1)   # the mixes as a gemm_tile: K 20480 in 32 parts of 5 K tiles
+    egn = ("eg_q", "eg_part", "eg_kv")   # (11-20, DSV41_ENGRAM=2) Engram's kv nodes (moe_demo.engram_kv_nodes)
+    if "eg_part" in names.values():
+        from deepseek_v4_1_moe.demo import EG_KP, EG_SEND
+        egw = next(n.inputs[1].dim(0) for n in nodes if names[n.graph_idx] == "eg_part")
+        grid.update({"eg_q": (T, 1, 1), "eg_part": (egw // 128, EG_KP, 1), "eg_kv": (EG_SEND, 1, 1)})
+        if "eg_emb" in names.values():   # (DSV41_EG_ROWS=1) the table lookup (engram_rows: its output eg_emb)
+            grid["eg_emb"] = (T, 1, 1)
+    rows = [(idx, (x, 0, 0)) for idx, name in names.items() if name == "eg_emb" for x in range(T)]
     grids = {idx: grid[name] for idx, name in names.items()}
     tasks = [(idx, (x, y, z)) for idx in sorted(grids) for x in range(grids[idx][0]) for y in range(grids[idx][1])
              for z in range(grids[idx][2])]
@@ -266,7 +280,9 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     before = sorted((tk for tk in tasks if tk[0] < sa), key=lambda tk: BEFORE.index(names[tk[0]]))
     mix = [tk for tk in tasks if names[tk[0]] == "hc_mix"]
     coef = [tk for tk in tasks if names[tk[0]] == "hc_coef"]
-    after = [tk for tk in tasks if tk[0] > sa and tk not in mix and tk not in coef]
+    egt = [tk for name in egn for tk in tasks if names[tk[0]] == name]   # (in the order act_quant, GEMM, sends)
+    tasks = [tk for tk in tasks if tk not in rows]
+    after = [tk for tk in tasks if tk[0] > sa and tk not in mix and tk not in coef and tk not in egt]
     n = len(own)
     # more than 8 score chunks a token (above 2048 compressed positions): indexer_topk's tasks (one per token) next, each first
     # on an SM of its own, so that its dry pass (the first fetch of its code) runs while the scores are computed
@@ -275,6 +291,15 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     before = [tk for tk in before if tk not in first]
     m = n + len(first)
     lists = [[own[sm]] if sm < n else [first[sm - n]] if sm < m else before[sm - m::sms - m] for sm in range(sms)]
+    # (DSV41_ENGRAM=2) Engram's kv tasks behind the nodes before sparse_attn, round robin over the SMs without a sparse_attn
+    # task, ahead of the nodes after it: they run while sparse_attn's inputs and o_q are computed (wo_a / wo_b wait for o_q).
+    # DSV41_EG_PLACE=wob: instead just ahead of each SM's first wo_b task (wo_a's weights load first; wo_b waits for oa_q)
+    eg_wob = os.environ.get("DSV41_EG_PLACE", "front") == "wob"
+    egq = [tk for tk in egt if names[tk[0]] == "eg_q"]   # (act_quant of the n-gram rows: always early)
+    for i, tk in enumerate(egq if eg_wob else egt):
+        lists[m + i % (sms - m)].append(tk)
+    for i, tk in enumerate(rows):   # (DSV41_EG_ROWS=1) the lookup first on its SMs: it waits for nothing, the act_quant polls
+        lists[sms - 1 - i].insert(0, tk)   # its rows from every GPU (the last SMs: no sparse_attn task)
     # mHC's coefficients between the nodes before sparse_attn and those after it, on the SMs that wait for o_q anyway
     # (the SMs after wo_a's tasks: they have nothing to do between the nodes before sparse_attn and wo_b)
     nwo = sum(1 for tk in after if names[tk[0]] in ("wo_a_part", "oa_q"))
@@ -293,6 +318,13 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     hcp = [tk for tk in after if names[tk[0]] == "streams_out"] if os.environ.get("HCP_SMS") else []
     for i, tk in enumerate(tk for tk in after if tk not in hcp):
         lists[(n + i) % sms].append(tk)
+    if egt and eg_wob:
+        wob = next(idx for idx, name in names.items() if name == "wo_b_part")
+        cand = [sm for sm in range(m, sms) if any(t[0] == wob for t in lists[sm])]
+        for i, tk in enumerate(tk for tk in egt if tk not in egq):
+            sm = cand[i % len(cand)]
+            j = next(k for k, t in enumerate(lists[sm]) if t[0] == wob)
+            lists[sm].insert(j, tk)
     for i, tk in enumerate(hcp):
         lists[(int(os.environ["HCP_SMS"]) + i) % sms].append(tk)
     return {"grids": grids, "lists": [copy.deepcopy(lists) for _ in range(mpk.num_gpus)]}

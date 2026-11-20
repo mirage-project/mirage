@@ -68,6 +68,13 @@ namespace static_mk {
 // reads x after this one has ended), so its release fence, which waits for
 // x's stores, leaves the kernel's last task. The same values: outputs
 // identical. Not with H1 (STATIC_X_FLAG releases the x flag at the end).
+// -DHCP_FAST_REARM (11-20, default off): only the first half of HCP_FAST_END
+// (the re-arm right after the read), the counter's release kept: for the
+// kernels whose later nodes wait on this node's counter (the Engram gate, the
+// LM head's GEMM)
+#if defined(HCP_FAST_REARM) && defined(STATIC_X_FLAG)
+#error "HCP_FAST_REARM: not with STATIC_X_FLAG (H1)"
+#endif
 #ifdef HCP_FAST_END
 #ifdef STATIC_X_FLAG
 #error "HCP_FAST_END: not with STATIC_X_FLAG (H1)"
@@ -172,7 +179,7 @@ __device__ HC_TASK_INLINE void
     float s[8];
     if (real) {
       allreduce_land_bf16<S_RANK>(g, row, v, s);
-#ifdef HCP_FAST_END
+#if defined(HCP_FAST_END) || defined(HCP_FAST_REARM)
       if constexpr (REARM) { // this thread's slots, read: 0xFF for launch n + 2
         asm volatile("" ::: "memory"); // (after the polled loads)
         allreduce_rearm<S_RANK>(g, row, v);
@@ -407,7 +414,8 @@ __device__ HC_TASK_INLINE void
     }
   }
   if constexpr (REARM) {
-#ifndef HCP_FAST_END // (HCP_FAST_END: re-armed after the landing)
+#if !defined(HCP_FAST_END) && !defined(HCP_FAST_REARM) // (else re-armed after
+                                                         // the landing)
     __syncthreads(); // a pair of lanes has read its vector
 #ifdef STATIC_X_FLAG
     // H1: x and R' of this task are stored (the barrier): the next kernel's
