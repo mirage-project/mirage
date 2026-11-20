@@ -50,7 +50,53 @@ __device__ __forceinline__ void hc_post_task(G const &g,
     STAGE_STAMP_AT(0)
   }
   __syncthreads();
-  if (v < COLS / 8) {
+  if constexpr (T == 64) {
+    // the stream loop rolled, each stream's coefficients read from shared
+    // memory in its iteration (the same products and sums in the same order):
+    // a quarter of the code, which the last task of every T = 64 layer fetches
+    // cold (4.1 -> 2.9 us a task)
+    if (v < COLS / 8) {
+      unsigned char const *row =
+          g.rv + SOFF + rg_set() + (size_t)t * H * 2 + (size_t)q * COLS * 2;
+      float s[8];
+      allreduce_land_bf16<S_RANK>(g, row, v, s);
+      if (v == 0) {
+        STAGE_STAMP_AT(1)
+      }
+#pragma unroll
+      for (int k = 0; k < 8; k++) {
+        s[k] = __bfloat162float(__float2bfloat16(s[k]));
+      }
+#pragma unroll 1
+      for (int j = 0; j < HC; j++) {
+        float cj[HC];
+#pragma unroll
+        for (int i = 0; i < HC; i++) {
+          cj[i] = coef_s[2 * HC + i * HC + j];
+        }
+        float const pj = coef_s[HC + j];
+        uint4 ou;
+        __nv_bfloat16 *ob = reinterpret_cast<__nv_bfloat16 *>(&ou);
+#pragma unroll
+        for (int k = 0; k < 8; k++) {
+          auto rik = [&](int i) {
+            return __bfloat162float(
+                reinterpret_cast<__nv_bfloat16 const *>(&ru[i])[k]);
+          };
+          float a = __fmul_rn(cj[0], rik(0));
+#pragma unroll
+          for (int i = 1; i < HC; i++) {
+            a = __fadd_rn(a, __fmul_rn(cj[i], rik(i)));
+          }
+          ob[k] = __float2bfloat16(__fadd_rn(__fmul_rn(pj, s[k]), a));
+        }
+        *reinterpret_cast<uint4 *>(rout + ((size_t)t * HC + j) * H + c) = ou;
+      }
+      if constexpr (REARM) {
+        allreduce_rearm<S_RANK>(g, row, v);
+      }
+    }
+  } else if (v < COLS / 8) {
     float post[HC], comb[HC][HC];
 #pragma unroll
     for (int j = 0; j < HC; j++) {
