@@ -116,10 +116,10 @@ def main():
     print(f"position {S}, {R} requests; relRMS vs exact fp64 (all rows / worst row)", flush=True)
     print(f"{'layer':>9} | {'attn static':>19} {'attn hf bf16':>19} | {'moe static':>19} {'moe hf bf16':>19} | experts = exact")
     for i in range(m.L):
-        x_in = (m.x_embed if i == 0 else m.x[i % 2])[:R].clone()
+        x_in = m.residual_in(i)[:R]
         g.launch_layer(m, kernel_of[i], inst[i], i)
         torch.cuda.synchronize()
-        x1_s, out_s = m.shared["x1"][:R].clone(), m.x[(i + 1) % 2][:R].clone()
+        x1_s, out_s = m.x1_of(i)[:R].clone(), m.residual_in(i + 1)[:R]
         p = f"model.layers.{i}."
         mods = {"attn": GptOssAttention(cfg, i), "ln1": GptOssRMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps),
                 "ln2": GptOssRMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps), "router": GptOssTopKRouter(cfg)}
@@ -174,7 +174,7 @@ def main():
         a_s, a_h = rel(x1_s.double() - x, ex[0] - x), rel(hf[0].double() - x, ex[0] - x)
         m_s, m_h = rel(out_s.double() - x1_s.double(), ex[1] - ex[0]), rel(hf[1].double() - hf[0].double(), ex[1] - ex[0])
         same = (hf[2] == ex[2]).all(-1).sum().item()
-        st = (m.shared["routing"][:, :R] > 0).t().nonzero()[:, 1].view(R, -1)   # static's experts, ascending
+        st = m.routed_experts(R)   # static's experts, ascending
         flips = (st != ex[2]).any(-1)
         fmt = lambda r: f"{r[0]:.2e} / {r[1]:.2e}"
         print(f"{i:>3} {'slide' if i in sliding else 'full':>5} | {fmt(a_s):>19} {fmt(a_h):>19} | {fmt(m_s):>19} "

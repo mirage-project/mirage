@@ -1066,7 +1066,11 @@ void Graph::register_task_for_op(KNOperator const *op,
   } else if (name == "sm90_rmsnorm") {
     int variant_id =
         task_register->register_sm90_rmsnorm_task(customized->bgraph, params);
-    task_config[op] = std::make_tuple(2, 1, TASK_SM90_RMSNORM, variant_id);
+    // with add (params[2]): inputs x, add, weight; outputs y, sum
+    task_config[op] = std::make_tuple(params.size() > 2 ? 3 : 2,
+                                      params.size() > 2 ? 2 : 1,
+                                      TASK_SM90_RMSNORM,
+                                      variant_id);
   } else if (name == "sm90_attention") {
     int variant_id =
         task_register->register_sm90_attention_task(customized->bgraph, params);
@@ -1120,6 +1124,24 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_SILU_AND_MUL_SM100, variant_id);
+  } else if (name == "sm100_attention") {
+    int variant_id = task_register->register_sm100_static_attention_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple((int)customized->bgraph.operators.size() - 1,
+                        1,
+                        TASK_SM100_ATTENTION,
+                        variant_id);
+  } else if (name == "gpt_oss_moe_experts") {
+    int variant_id = task_register->register_gpt_oss_moe_experts_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(10, 1, TASK_GPT_OSS_MOE_EXPERTS_SM100, variant_id);
+  } else if (name == "gpt_oss_mxfp8_quant") {
+    int variant_id = task_register->register_gpt_oss_mxfp8_quant_sm100_task(
+        customized->bgraph, params);
+    task_config[op] =
+        std::make_tuple(1, 1, TASK_GPT_OSS_MXFP8_QUANT_SM100, variant_id);
   } else if (name == "dsa_q_norm_quant") {
     int variant_id = task_register->register_dsa_q_norm_quant_sm100_task(
         customized->bgraph, params);

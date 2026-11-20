@@ -119,6 +119,21 @@ def sm90_attention_parts_size(requests: int, num_q_heads: int, head_dim: int, nu
     return sm90_attention_max_splits(num_sms, requests) * num_q_heads * (head_dim + 1) + requests + 1
 
 
+
+def sm100_flags() -> list[str]:
+    """nvcc flags and include paths for Blackwell static tasks."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    return ["-std=c++20", "--expt-relaxed-constexpr", "-DMPK_TARGET_CC=100", "-DMIRAGE_GRACE_BLACKWELL", "-DMPK_ENABLE_TMA",
+            "-DMIRAGE_BACKEND_USE_CUDA", "-lineinfo", f"-I{root}/include/mirage/persistent_kernel",
+            f"-I{root}/deps/cutlass/include", f"-I{root}/deps/cutlass/tools/util/include"]
+
+
+
+
+
+
+
+
 def float_bits(v: float) -> int:
     """An fp32 value as the int of its bits (a param; the kernel template reads it with __int_as_float)."""
     return struct.unpack("<i", struct.pack("<f", v))[0]
@@ -165,7 +180,7 @@ class StaticMegakernel(PersistentKernel):
         """tensors: argument name = (tensor, dtype). Raises unless each tensor has the dtype the task type's kernel reads or writes
         it as."""
         for name, (t, want) in tensors.items():
-            if t.dtype != want:
+            if t.dtype not in (want if isinstance(want, tuple) else (want,)):
                 raise ValueError(f"{layer}: {name} is {t.dtype}, its kernel uses {want}")
 
     def _add_node(self, name: str, grid_dim: tuple, block_dim: tuple, tensors: list, input_maps: list, params: list,
@@ -312,7 +327,7 @@ class StaticMegakernel(PersistentKernel):
 
     def l2_prefetch_weights(self, budget_mb: float = 64.0,
                             stop_at: tuple = ("kda_decode", "sparse_mla", "scaled_moe_experts", "sm90_attention",
-                                              "sm90_attention_split")) -> int:
+                                              "sm90_attention_split", "gpt_oss_moe_experts", "sm100_attention")) -> int:
         """STATIC_L2_PREFETCH (core.cuh kernel_begin): the layer's first GEMMs' weights (gemm_tile's weight, scaled_gemm_tile's
         weight and its scales; graph inputs) in graph order, those before the first node of a kind in stop_at (the
         attention or expert core: the GEMMs after it run long after the start, and their weights in flight at the start
@@ -376,8 +391,8 @@ class StaticMegakernel(PersistentKernel):
 
     def gemm_tile_layer(
         self,
-        input: DTensor,     # [T, K] bf16
-        weight: DTensor,    # [N, K] bf16
+        input: DTensor,     # [T, K] bf16 (K may be the weight's less a zero padding: TMA fills its missing columns with zeros)
+        weight: DTensor,    # [N, K] bf16 (its columns past the input's K: zeros)
         output: DTensor,    # [T, N] fp32 ("add": int64 fixed point; "store_bf16": bf16; its buffer holds what `combine` says)
         combine: str = "slots",   # how the K parts are combined (gemm_tile.cuh Combine): "slots" (one 0xFF-prefilled slot per
                                   # K part, the reader adds them), "add" (fixed-point atomic add, a counter per 128-row block),
@@ -390,6 +405,11 @@ class StaticMegakernel(PersistentKernel):
                                       # the same values (kda_decode's f_a / g_a): the kernel or the host then refills the buffer
         skip_seq: tuple = None,   # (seq_lens [T] int32, L): in a launch where every token has seq_lens <= L, each task only
                                   # counts itself (its readers read nothing then, e.g. the indexer q of dsa_index_score skip_k)
+        store_parts: int = 1,   # "store": the compiler may split K into up to this many parts, part y stored at [y][T][N]
+                                # (output [store_parts x T, N]: room for them all); the reader adds them (sm90_gate's o,
+                                # sm90_attention_split's qkv)
+        min_parts: int = 1,     # "store" with store_parts: at least this many K parts (the default grid's), e.g. where the
+                                # readers wait on the whole GEMM and one part a 128-row block streams from too few SMs
         block_dim: tuple = (256, 1, 1),
     ):
         """Task (x, y) = weight rows [R x, R x + R) times K part y. Default grid: R = 128 rows, K in 1 part (polled: the fewest K
@@ -400,10 +420,17 @@ class StaticMegakernel(PersistentKernel):
         activation's; polled: the weight's 128-row box only), the output through the node's buffer slot. params = [mode, K, N,
         polled (0 / 1)[, L of skip_seq]]; map_slots = [weight map slot, activation map slot (-1: polled)]; buf_slots = [seq_lens of
         skip_seq] or none."""
-        assert input.num_dims == 2 and weight.num_dims == 2 and weight.dim(1) == input.dim(1)
-        multiple = 64 if self.target_cc == 90 else 128
-        assert output.num_dims == 2 and output.dim(1) == weight.dim(0) and weight.dim(0) % multiple == 0 and weight.dim(1) % multiple == 0
-        mode, N, K, T, GPUS = COMBINE[combine], weight.dim(0), weight.dim(1), self._tokens(input.dim(0)), self.num_gpus
+        assert input.num_dims == 2 and weight.num_dims == 2 and weight.dim(1) >= input.dim(1)
+        padded = weight.dim(1) > input.dim(1)   # the weight's K zero-padded (e.g. to whole K parts)
+        assert not padded or (not input_polled and input.dim(1) % 8 == 0), "a padded K: not polled, 16-B input rows"
+        # "store" may take a weight zero-padded past N rows to whole 128-row tiles (rows past N not stored)
+        rows_padded = combine == "store" and weight.dim(0) > output.dim(1)
+        assert output.num_dims == 2 and (output.dim(1) == weight.dim(0) or (rows_padded and weight.dim(0) % 128 == 0)) \
+            and weight.dim(0) % 64 == 0 and weight.dim(1) % 64 == 0
+        mode, N, K, T, GPUS = COMBINE[combine], output.dim(1), weight.dim(1), self._tokens(input.dim(0)), self.num_gpus
+        assert store_parts == 1 or (combine == "store" and output.dim(0) == store_parts * T and K % (128 * store_parts) == 0), \
+            "store_parts: a \"store\" GEMM whose output has room for every K part ([store_parts x T, N]), whole 128-column parts"
+        assert min_parts == 1 or (store_parts >= min_parts and (K // 128) % min_parts == 0), "min_parts: whole K parts"
         self._dtypes("gemm_tile_layer", input=(input, bfloat16), weight=(weight, bfloat16),
                      output=(output, {"add": int64, "store_bf16": bfloat16}.get(combine, float32)))
         if input_polled:
@@ -423,8 +450,8 @@ class StaticMegakernel(PersistentKernel):
             out_buffer = lambda n: (T * N * 8, 0, False)
         elif combine == "store_bf16":   # [T][N] bf16, every value written each launch
             out_buffer = lambda n: (T * N * 2, -1, False)
-        else:                      # [T][N] fp32, every value written each launch
-            out_buffer = lambda n: (T * N * 4, -1, False)
+        else:                      # [K parts][T][N] fp32, every value written each launch
+            out_buffer = lambda n: (n.grid[1] * T * N * 4, -1, False)
         assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
         tiles = (K + 127) // 128
         if input_polled:
@@ -434,16 +461,24 @@ class StaticMegakernel(PersistentKernel):
         else:
             parts = 1
             params, map_slots = [mode, K, N, 0], [self._gemm_map(weight, (128, 64)), self._gemm_map(input, (T,))]
-            changeable = {"store": ({0: (64, 1, 2)} if self.target_cc == 90 else {}),
+            changeable = {"store": ({0: (64, 1, 2)} if self.target_cc in (90, 100) else {}),
                           "store_bf16": {0: (64, 1, 2)}}.get(combine, {0: (64, 1, 2), 1: (128, 2, None)})
+            if store_parts > 1:   # at most store_parts parts: at least K / (128 store_parts) tiles each
+                changeable[1] = (128, max(2, K // (128 * store_parts)), K // (128 * min_parts) if min_parts > 1 else None)
+                parts = min_parts
             if K % 128:
                 changeable.pop(1, None)
         assert combine != "add" or N % 128 == 0
         if skip_seq is not None:
             self._dtypes("gemm_tile_layer", seq_lens=(skip_seq[0], int32))
             params = params + [skip_seq[1]]
-        self._add_node("gemm_tile", (N // 128 if N % 128 == 0 else N // 64, parts, 1), block_dim, [input, weight, output],
-                       [(-1, 1, -1), (0, 1, -1), (1, -1, -1)], params,
+        WN = weight.dim(0)
+        if rows_padded:   # params[5] = the weight's rows (params[4]: skip_seq's length, 0 without)
+            params = params + [0] * (5 - len(params)) + [WN]
+        self._add_node("gemm_tile", (WN // 128 if WN % 128 == 0 else WN // 64, parts, 1), block_dim, [input, weight, output],
+                       # a padded K: a K part reads the whole input (its slice is not a whole number of K tiles); padded
+                       # rows: a task's output rows are not a whole share of N (the output whole)
+                       [(-1, -1 if padded else 1, -1), (0, 1, -1), (-1 if rows_padded else 1, -1, -1)], params,
                        # K: at least 2 tiles of 128 per task (the two MMA issuers take the stages in turn, runtime.cuh issue_job;
                        # with one stage issuer 1 has no MMA and its stale accumulator would be added)
                        changeable_grid_dims=changeable, rows_split_over_gpus=rows_split_over_gpus, out_buffer=out_buffer,
@@ -602,6 +637,61 @@ class StaticMegakernel(PersistentKernel):
                        out_buffer=lambda n: (zq32_bytes(T, L), 0xFF, False), exchange=True,
                        counters=1, buf_slots=[-1 if p is not None else self._tensor_slot(input)])
 
+    def gpt_oss_mxfp8_quant_layer(
+        self,
+        input: DTensor,     # h2 [T, 2880] fp16 (bf16 is also supported)
+        output: DTensor,    # z_q [T, 2944] uint8; its buffer includes 23 MXFP8 scale chunks
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Quantize GPT-OSS-120B h2 for a static MXFP4 expert task.
+
+        One task handles 128 K values. Each group of 32 gets an E4M3 scale
+        exponent `ceil_log2(amax / 448)`, clamped to [-127, 127], and a packed
+        UE8M0 byte. The output buffer is E4M3 [T, 2944] followed by 23 chunks
+        of 512 bytes; each token uses the first four bytes of its 16-byte row
+        for its four K32 exponents and the remaining bytes are zero. The final
+        64 input columns are padded with zero. T must be a static bucket of
+        8, 16, or 32. An input produced earlier in this graph is waited on via
+        its completion counter; an exchange-buffer input is rejected.
+        """
+        from .compiler import graph_nodes, producer_of
+
+        T, L = self._tokens(input.dim(0)), input.dim(1)
+        PAD = 2944
+        if T not in (8, 16, 32):
+            raise ValueError(
+                "gpt_oss_mxfp8_quant_layer: GPT-OSS token bucket must be 8, 16, or 32"
+            )
+        if input.dtype not in (float16, bfloat16):
+            self._dtypes("gpt_oss_mxfp8_quant_layer", input=(input, float16))
+        self._dtypes("gpt_oss_mxfp8_quant_layer", output=(output, uint8))
+        assert input.num_dims == 2 and L == 2880
+        assert (output.dim(0), output.dim(1)) == (T, PAD)
+        p = producer_of(input, graph_nodes(self))
+        if p is not None and p.info["exchange"]:
+            raise ValueError(
+                "gpt_oss_mxfp8_quant_layer: h2 cannot be read from an exchange buffer"
+            )
+        if p is not None and p.info["counter"] < 0:
+            raise ValueError(
+                f"gpt_oss_mxfp8_quant_layer: h2 producer {p.name} has no completion counter"
+            )
+        input_slot = (
+            -1 if p is not None and p.info["buf"] >= 0 else self._tensor_slot(input)
+        )
+        self._add_node(
+            "gpt_oss_mxfp8_quant",
+            (PAD // 128, 1, 1),
+            block_dim,
+            [input, output],
+            [(1, -1, -1) if p is None else (-1, -1, -1), (1, -1, -1)],
+            [L, PAD, int(input.dtype == float16)],
+            out_buffer=lambda n: (zq_bytes(T, PAD), 0xFF, False),
+            exchange=True,
+            counters=1,
+            buf_slots=[input_slot],
+        )
+
     def situ_and_mul_layer(
         self,
         input: DTensor,     # shared gate_up [T, 2 * SHR] int64 fixed point (a gemm_tile node's output, combine "add")
@@ -737,7 +827,7 @@ class StaticMegakernel(PersistentKernel):
         assert dims(w13) == (E, 2 * IR, L) and dims(w2) == (E, L, IR) and IR % 128 == 0 and L % 128 == 0 and KT2 <= 2
         assert dims(w13_scales) == (E, IR // 128, KT_L, 2) and dims(w2_scales) == (E, KT_L, KT2)
         assert (output.dim(0), output.dim(1)) == (T * K, L)
-        if any(n.name in ("moe_experts", "scaled_moe_experts") for n in graph_nodes(self)):
+        if any(n.name in ("moe_experts", "scaled_moe_experts", "gpt_oss_moe_experts") for n in graph_nodes(self)):
             # the expert phase switch runs once per kernel (KernelLocals::ring_relaid): a second expert node would skip it
             raise ValueError("scaled_moe_experts_layer: the graph already has an expert node; one expert node per graph")
         zq = producer_of(z_q, graph_nodes(self))
@@ -775,20 +865,118 @@ class StaticMegakernel(PersistentKernel):
                        out_buffer=lambda n: (T * K * L * 4, -1, False),
                        counters=32 * 2 + NSLOT + pairc, buf_slots=bufs, map_slots=maps)
 
+    def gpt_oss_moe_experts_layer(
+        self,
+        z_q: DTensor, routing: DTensor, topk_w: DTensor, x1: DTensor,
+        w13: DTensor, w13_scales: DTensor, w2: DTensor, w2_scales: DTensor,
+        b13: DTensor, b2: DTensor, output: DTensor,
+        block_dim: tuple = (256, 1, 1),
+    ):
+        """Run GPT-OSS-120B MXFP8 x MXFP4 experts as one static MPK node.
+
+        The task consumes the exchange-buffer output of
+        gpt_oss_mxfp8_quant_layer and rank-coded routing from sm90_gate_layer.
+        The padded MXFP4 banks use 128x128 TMA tiles and 512-byte TCGEN05
+        scale chunks. It writes the final BF16 residual sum directly to output.
+        """
+        from .compiler import graph_nodes, producer_of
+
+        T, K = self._tokens(z_q.dim(0)), topk_w.dim(1)
+        E, L, PAD = routing.dim(0), output.dim(1), 2944
+        self._dtypes(
+            "gpt_oss_moe_experts_layer", z_q=(z_q, uint8), routing=(routing, int32),
+            topk_w=(topk_w, float32), x1=(x1, bfloat16),
+            w13=(w13, uint8), w13_scales=(w13_scales, uint8),
+            w2=(w2, uint8), w2_scales=(w2_scales, uint8),
+            b13=(b13, bfloat16), b2=(b2, bfloat16), output=(output, bfloat16))
+        if T != 8 or (K, E, L, PAD) != (4, 128, 2880, 2944):
+            raise ValueError(
+                "gpt_oss_moe_experts_layer: this static task requires T=8, K=4, "
+                "E=128, hidden=2880, padded width=2944"
+            )
+        dims = lambda t: tuple(t.dim(i) for i in range(t.num_dims))
+        if dims(z_q) != (T, PAD) or dims(routing) != (E, T) or dims(topk_w) != (T, K):
+            raise ValueError("gpt_oss_moe_experts_layer: activation or routing shape mismatch")
+        if dims(x1) != (T, L) or dims(output) != (T, L):
+            raise ValueError("gpt_oss_moe_experts_layer: residual/output must be [T,2880]")
+        w13_tiles, w2_tiles, k_tiles = PAD // 64, PAD // 128, PAD // 128
+        if (dims(w13), dims(w13_scales), dims(w2), dims(w2_scales)) != (
+            (E, w13_tiles, k_tiles, 8192), (E, w13_tiles, k_tiles, 512),
+            (E, w2_tiles, k_tiles, 8192), (E, w2_tiles, k_tiles, 512),
+        ):
+            raise ValueError("gpt_oss_moe_experts_layer: TMA weight bank shape/layout mismatch")
+        if dims(b13) != (E, 2 * PAD) or dims(b2) != (E, PAD):
+            raise ValueError("gpt_oss_moe_experts_layer: expected padded gate/up and down biases")
+
+        nodes = graph_nodes(self)
+        zq_node = producer_of(z_q, nodes)
+        if zq_node is None or zq_node.name != "gpt_oss_mxfp8_quant" or not zq_node.info["exchange"]:
+            raise ValueError("gpt_oss_moe_experts_layer: z_q must come from the GPT-OSS MXFP8 quantizer")
+        route = producer_of(routing, nodes)
+        if route is None or route.name != "sm90_gate":
+            raise ValueError("gpt_oss_moe_experts_layer: routing must come from sm90_gate_layer")
+        if any(producer_of(t, nodes) is not route for t in (topk_w, x1)):
+            raise ValueError("gpt_oss_moe_experts_layer: routing, top-k weights and residual must share sm90_gate")
+        if producer_of(output, nodes) is not None:
+            raise ValueError("gpt_oss_moe_experts_layer: output must be a graph input tensor")
+        if any(n.name in ("moe_experts", "scaled_moe_experts", "gpt_oss_moe_experts") for n in nodes):
+            raise ValueError("gpt_oss_moe_experts_layer: only one expert phase is allowed per static graph")
+
+        NSLOT, KT2 = T * K, PAD // 128
+        hq = self._scratch("gpt_oss_moe_experts.h_q", NSLOT * T * PAD)
+        hsf = self._scratch("gpt_oss_moe_experts.h_q_scales", NSLOT * KT2 * SF_CHUNK, 0)
+        partials = self._scratch("gpt_oss_moe_experts.partials", T * K * L * 4)
+        w13_pieces, w2_pieces = E * w13_tiles * k_tiles, E * w2_tiles * k_tiles
+        maps = [
+            self._map("wblk", ("t", w13), (w13_pieces, 1)),
+            self._map("wblk", ("t", w13), (w13_pieces, 2)),
+            self._map("sf", ("t", w13_scales), (w13_pieces, 1)),
+            self._map("sf", ("t", w13_scales), (w13_pieces, 2)),
+            self._map("wblk", ("t", w2), (w2_pieces, 1)),
+            self._map("wblk", ("t", w2), (w2_pieces, 2)),
+            self._map("sf", ("t", w2_scales), (w2_pieces, 1)),
+            self._map("sf", ("t", w2_scales), (w2_pieces, 2)),
+        ]
+        for kind, offset, map_dims in (
+            ("act8", 0, (PAD, T)),
+            ("act8kt", 0, (PAD, T, 2)),
+            ("sf", T * PAD, (KT2, KT2)),
+        ):
+            first = self._map(kind, ("x", zq_node.info["buf"], offset, 0), map_dims)
+            assert self._map(kind, ("x", zq_node.info["buf"], offset, 1), map_dims) == first + 1
+            maps.append(first)
+        maps.extend([
+            # W2 streams one K tile at a time into a single T*128 activation
+            # stage and one 512-byte scale stage; these map box extents must
+            # therefore stay at one even though the backing buffers span KT2.
+            self._map("act8kt", ("b", hq, 0), (PAD, NSLOT * T, 1)),
+            self._map("sf", ("b", hsf, 0), (NSLOT * KT2, 1)),
+        ])
+        tensors = [z_q, routing, topk_w, x1, w13, w13_scales, w2, w2_scales, b13, b2, output]
+        self._add_node(
+            "gpt_oss_moe_experts", (self._num_sms(), 1, 1), block_dim,
+            tensors, [(-1, -1, -1)] * len(tensors), [L, PAD], one_task_per_sm=True,
+            counters=32 * 2 + NSLOT,
+            buf_slots=[hq, hsf, partials, self._tensor_slot(routing), self._tensor_slot(topk_w),
+                       self._tensor_slot(x1), self._tensor_slot(b13), self._tensor_slot(b2),
+                       self._tensor_slot(output)],
+            map_slots=maps,
+        )
+
     # ---- after moe_experts (tasks/allreduce_send.cuh, sum_rmsnorm.cuh, sum_gpus.cuh, sum_send.cuh, residual_add.cuh). The
     # graph tensors between them (the sent partial sums, sum_rmsnorm's Rn, sum_gpus's Ssum, latent_up's K parts, sum_send's o)
     # stand for the buffers the bodies use; their input maps give the dependencies.
     def allreduce_send_layer(
         self,
         input: DTensor,         # fp32 [T x G, W], a node's output buffer: G rows per token (added in order), e.g. this GPU's routed
-                                # rows R [T x 16, LAT] (moe_experts, scaled_moe_experts) or S [T, H] (the shared down node)
+                                # rows R [T x K, LAT] (expert task) or S [T, H] (the shared down node)
         output: DTensor,        # what is sent: [T, W] bf16 (its buffer: [num_gpus][T][W] bf16 in the exchange region)
         num_tasks: int = None,  # slices of the partial sum; default: one per task of the producer (as its grid is now)
         block_dim: tuple = (256, 1, 1),
     ):
         """Task x: slice x of this GPU's partial sum (bf16) to every GPU, into this GPU's slot of the node's output (in the exchange
-        region), once the input's producer is done (all its tasks, counted in its counter). params = [W, G, FX]. When the producer is
-        moe_experts or scaled_moe_experts, re-arm z_q here only if that producer is its sole reader.
+        region), once the input's producer is done (all its tasks, counted in its counter). params = [W, G, FX]. The legacy
+        MXFP4 and FP8 expert tasks can re-arm their z_q here when they are its sole reader.
         buf_slots = [z_q's buffer slot] enables re-arm; [-1] disables it. With other readers, reset z_q before each launch instead.
         Declare all other z_q readers before this call so the reader check sees them."""
         from .compiler import graph_nodes, producer_of
@@ -1447,12 +1635,20 @@ class StaticMegakernel(PersistentKernel):
         self._add_node(name, grid, block_dim, present, [(-1, -1, -1)] * len(present), params, counters=1,
                        buf_slots=[self._tensor_slot(t) if t is not None else -1 for t in tensors])
 
-    def sm90_rmsnorm_layer(self, input: DTensor, weight: DTensor, output: DTensor, eps: float,
-                           block_dim: tuple = (256, 1, 1)):
-        """RMSNorm of each token, bf16 in and out: task x = row x. params = [H, eps bits]."""
+    def sm90_rmsnorm_layer(self, input: DTensor, weight: DTensor, output: DTensor, eps: float, add: DTensor = None,
+                           sum_out: DTensor = None, block_dim: tuple = (256, 1, 1)):
+        """RMSNorm of each token, bf16 in and out: task x = row x. With add: the row is bf16(input + add) (fp32, rounded
+        once), also written to sum_out (a residual stream: the previous layer's x1 plus its experts' sum, which an outside
+        MoE kernel left in add). params = [H, eps bits[, 1]]."""
         T, H = self._tokens(input.dim(0)), input.dim(1)
         self._dtypes("sm90_rmsnorm_layer", input=(input, bfloat16), weight=(weight, bfloat16), output=(output, bfloat16))
-        self._sm90_node("sm90_rmsnorm", (T, 1, 1), [input, weight, output], [H, float_bits(eps)], block_dim)
+        if add is None:
+            assert sum_out is None
+            self._sm90_node("sm90_rmsnorm", (T, 1, 1), [input, weight, output], [H, float_bits(eps)], block_dim)
+            return
+        self._dtypes("sm90_rmsnorm_layer", add=(add, bfloat16), sum_out=(sum_out, bfloat16))
+        self._sm90_node("sm90_rmsnorm", (T, 1, 1), [input, add, weight, output, sum_out], [H, float_bits(eps), 1],
+                        block_dim)
 
     def sm90_attention_layer(self, qkv: DTensor, k_cache: DTensor, v_cache: DTensor, cos: DTensor, sin: DTensor,
                              qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
@@ -1477,6 +1673,34 @@ class StaticMegakernel(PersistentKernel):
                         [num_q_heads, KVH, D, cos.dim(0), page, window, int(sinks is not None), int(qkv_bias is not None)],
                         block_dim)
 
+    def sm100_attention_layer(self, qkv: DTensor, k_cache: DTensor, v_cache: DTensor, cos: DTensor, sin: DTensor,
+                              qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
+                              output: DTensor, num_q_heads: int, window: int = 0, sinks: DTensor = None,
+                              qkv_bias: DTensor = None, qkv_staged: DTensor = None):
+        """Native SM100 paged attention in the static schedule, with RoPE, GPT-OSS sinks/window and optional QKV bias."""
+        if self.target_cc != 100:
+            raise ValueError(f"sm100_attention_layer requires target_cc=100, got {self.target_cc}")
+        pages, page, KVH, D = (k_cache.dim(i) for i in range(4))
+        T, R = self._tokens(qkv.dim(0)), qo_indptr.dim(0) - 1
+        assert D == 64 and num_q_heads % KVH == 0
+        assert qkv.dim(1) == KVH * (num_q_heads // KVH + 2) * D
+        assert output.dim(0) == T and output.dim(1) == num_q_heads * D
+        assert v_cache.dim(0) == pages and v_cache.dim(1) == page and v_cache.dim(2) == KVH and v_cache.dim(3) == D
+        self._qkv_bias_dtypes("sm100_attention_layer", qkv, qkv_bias, qkv_staged)
+        self._dtypes("sm100_attention_layer", k_cache=(k_cache, bfloat16), v_cache=(v_cache, bfloat16),
+                     cos=(cos, bfloat16), sin=(sin, bfloat16), output=(output, bfloat16))
+        tensors = [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len,
+                   sinks, qkv_bias, qkv_staged, output]
+        present = [t for t in tensors if t is not None]
+        self._add_node("sm100_attention", (R, KVH, 1), (256, 1, 1),
+                       present, [(-1, -1, -1)] * len(present),
+                       [num_q_heads, KVH, D, cos.dim(0), page, window, int(sinks is not None),
+                        int(qkv_bias is not None), T],
+                       counters=1,
+                       buf_slots=[self._tensor_slot(t) if t is not None else -1 for t in
+                                  [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices,
+                                   last_page_len, sinks, qkv_bias, qkv_staged, output]])
+
     def _qkv_bias_dtypes(self, layer: str, qkv: DTensor, qkv_bias: DTensor, qkv_staged: DTensor):
         """The attention layers' qkv: bf16, or (qkv_bias) the GEMM's fp32 with a bf16 bias and staging buffer."""
         assert (qkv_bias is None) == (qkv_staged is None), "qkv_bias and qkv_staged go together"
@@ -1488,18 +1712,23 @@ class StaticMegakernel(PersistentKernel):
 
     def sm90_attention_split_layer(self, qkv: DTensor, k_cache: DTensor, v_cache: DTensor, cos: DTensor, sin: DTensor,
                                    qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
-                                   parts: DTensor, num_q_heads: int, qkv_bias: DTensor = None,
-                                   block_dim: tuple = (256, 1, 1)):
+                                   parts: DTensor, num_q_heads: int, qkv_bias: DTensor = None, window: int = 0,
+                                   output: DTensor = None, sinks: DTensor = None, block_dim: tuple = (256, 1, 1)):
         """sm90_attention_layer's full attention for decode (a token a request), the KV split FlashDecoding-style as a
         pool (tasks/sm90_attention_split.cuh): one task per SM; the SMs claim the step's units (request, split: a contiguous
         range of the request's positions, all KV heads, about SM90_ATTENTION_UNITS_PER_SM units an SM over the requests
         in proportion to their lengths) from a queue; each its normalized output and log2-sum-exp into parts, a flat fp32
         tensor sm90_attention_parts_size long; sm90_attention_merge_layer combines them (and the sinks). qkv_bias
         [KVH x (Q / KVH + 2) x D] bf16: qkv is the QKV GEMM's fp32 output, the tasks add the bias. The solver models it by
-        its total work (search: a pool). params = [Q, KVH, D, max seq, page, units an SM, P (splits at most), has qkv bias, R]."""
+        its total work (search: a pool). window > 0: a sliding window, each request's positions from its length - window + 1
+        (the tiles from there; kv_indices may be a ring: sm90_next_token_layer's kv_indices_ring). params = [Q, KVH, D,
+        max seq, page, units an SM, P (splits at most), has qkv bias, R(, window(, direct))]. output (with window > 0 and
+        sinks): one split a request, which writes the final output [T, Q x D] bf16 itself (sm90_attention_merge's formula
+        for one split, with the sinks [Q] bf16): no merge node after it (a sliding window's few tiles)."""
         pages, page, KVH, D = (k_cache.dim(i) for i in range(4))
         R, nsm = qo_indptr.dim(0) - 1, self._num_sms()
-        self._tokens(qkv.dim(0))
+        # qkv [KP x T, ...]: the QKV GEMM's K parts (store_parts), which the tasks add (T: the graph's earlier layers')
+        assert self.tokens is not None and qkv.dim(0) % self.tokens == 0 and (qkv.dim(0) == self.tokens or qkv_bias is not None)
         assert cos.dim(0) % page == 0 and page % 32 == 0 and parts.num_dims == 1
         assert parts.dim(0) == sm90_attention_parts_size(R, num_q_heads, D, nsm)
         if qkv_bias is None:
@@ -1508,12 +1737,18 @@ class StaticMegakernel(PersistentKernel):
             assert qkv_bias.dim(0) == qkv.dim(1)
             self._dtypes("sm90_attention_split_layer", qkv=(qkv, float32), qkv_bias=(qkv_bias, bfloat16))
         self._dtypes("sm90_attention_split_layer", parts=(parts, float32))
+        direct = output is not None
+        assert not direct or (window > 0 and sinks is not None and qkv_bias is not None), \
+            "direct output: a sliding window, its sinks and the fp32 qkv"
+        if direct:
+            self._dtypes("sm90_attention_split_layer", output=(output, bfloat16), sinks=(sinks, bfloat16))
         tensors = [qkv, k_cache, v_cache, cos, sin, qo_indptr, kv_indptr, kv_indices, last_page_len, qkv_bias, None,
-                   parts]
+                   parts] + ([sinks, output] if direct else [])   # the output last: the node's output (graph.cc)
         present = [t for t in tensors if t is not None]
         self._add_node("sm90_attention_split", (nsm, 1, 1), block_dim, present, [(-1, -1, -1)] * len(present),
                        [num_q_heads, KVH, D, cos.dim(0), page, SM90_ATTENTION_UNITS_PER_SM,
-                        sm90_attention_max_splits(nsm, R), int(qkv_bias is not None), R],
+                        sm90_attention_max_splits(nsm, R), int(qkv_bias is not None), R]
+                       + ([window] if window else []) + ([1] if direct else []),
                        one_task_per_sm=True, counters=64,
                        buf_slots=[self._tensor_slot(t) if t is not None else -1 for t in tensors])
 
@@ -1521,26 +1756,36 @@ class StaticMegakernel(PersistentKernel):
                                    sinks: DTensor = None, block_dim: tuple = (256, 1, 1)):
         """The output of sm90_attention_split_layer from its splits (tasks/sm90_attention_merge.cuh), with the per-head
         sinks: task (x, y) = request x (its one token), query heads [HPT y, HPT y + HPT): HPT = 1 (a CTA a head: a
-        request has many splits) when that grid fits the SMs, else 8. params = [Q, D, P (splits at most), has_sink, HPT, R
+        request has many splits) when that grid fits the SMs, else 8, or more until it does (32 / 64 requests: 16 / 32). params = [Q, D, P (splits at most), has_sink, HPT, R
         (requests)]."""
         D, R, nsm = output.dim(1) // num_q_heads, qo_indptr.dim(0) - 1, self._num_sms()
         self._tokens(output.dim(0))
         hpt = 1 if R * num_q_heads <= nsm else 8
+        while os.environ.get("GPTOSS_MERGE_HPT") == "1" and R * num_q_heads // hpt > nsm and hpt < num_q_heads:   # many requests: more heads a task, the grid on the SMs
+            hpt *= 2
         self._sm90_node("sm90_attention_merge", (R, num_q_heads // hpt, 1), [parts, qo_indptr, sinks, output],
                         [num_q_heads, D, sm90_attention_max_splits(nsm, R), int(sinks is not None), hpt, R], block_dim)
 
     def sm90_gate_layer(self, o: DTensor, o_bias: DTensor, residual: DTensor, norm_weight: DTensor, router: DTensor,
                         router_bias: DTensor, num_tokens: DTensor, x1: DTensor, h: DTensor, weights: DTensor,
-                        routing_indices: DTensor, eps: float, router_splits: int = None,
-                        block_dim: tuple = (256, 1, 1)):
+                        routing_indices: DTensor, eps: float, router_splits: int = None, topk_ids: bool = False,
+                        h_mxfp8: int = 0, logits_only: bool = False, block_dim: tuple = (256, 1, 1)):
         """What sits between o_proj and the routed experts, for one token a task (tasks/sm90_gate.cuh): x1 = bf16(o +
         o_bias + residual), h = f16(RMSNorm(x1)), the router logits, the token's top-k (softmax, renormalized): its weights
         [T, TOPK] fp32 and routing column [E, T] i32. Outputs: x1, h, weights, routing_indices (graph.cc: sm90_gate's
         four). Grid (T, S, 1): a token's router over S
         tasks, E / S experts each (S > 1: their logits through the routing column; the token's last task takes the top-k).
         S is a changeable grid dim (E / S a multiple of the task's warps, their router rows in one SM's shared memory): the
-        plan picks it; router_splits is the default grid's (None: the smallest that fits). params = [H, E, TOPK, eps bits]."""
-        T, H, E, TOPK = self._tokens(o.dim(0)), o.dim(1), router.dim(0), weights.dim(1)
+        plan picks it; router_splits is the default grid's (None: the smallest that fits). h may be bf16 [T, HS >= H] instead
+        of f16 [T, H] (FlashInfer's padded MoE input: its columns past H are not written); topk_ids: also the top-k expert ids
+        [T][TOPK] i32 at routing_indices' rows past E (routing_indices [E + TOPK, T]). h_mxfp8 = HS: h as MXFP8 (FlashInfer's
+        MXFP8-activation MoE input) in a uint8 h of T x HS x 33 / 32 bytes: bf16(h) as e4m3 in rows of HS (columns past H
+        not written), then the UE8M0 scales [T][HS / 32]. o may be o_proj's K parts ("store", store_parts), which the task
+        adds. logits_only: no top-k; routing_indices holds bf16(logit + bias) [T][E] at its start (an outside MoE's routing
+        takes the top-k: FlashInfer's), weights untouched. params = [H, E, TOPK, eps bits, HS (0: f16 h), topk_ids,
+        MXFP8 h, logits only]."""
+        T, H, E, TOPK = self._tokens(residual.dim(0)), o.dim(1), router.dim(0), weights.dim(1)
+        assert o.dim(0) % T == 0, "sm90_gate_layer: o [P x T, H] (o_proj's K parts, store_parts)"
         assert E % 32 == 0 and E <= 256, "sm90_gate: experts a multiple of 32, at most 256 (32 a router warp)"
         warps = block_dim[0] // 32
         # a task's E / S router rows in shared memory (H x 2 B each): at most what one SM has, in whole warps' worth
@@ -1551,11 +1796,21 @@ class StaticMegakernel(PersistentKernel):
             raise ValueError(f"sm90_gate_layer: router_splits {S}: E ({E}) / S experts a multiple of the task's warps, "
                              f"their rows in one SM's shared memory (S in {fits})")
         self._dtypes("sm90_gate_layer", o=(o, float32), residual=(residual, bfloat16), router=(router, bfloat16),
-                     x1=(x1, bfloat16), h=(h, float16), weights=(weights, float32))
+                     x1=(x1, bfloat16), h=(h, (float16, bfloat16, uint8)), weights=(weights, float32))
+        HS = h_mxfp8 or (h.dim(1) if h.dtype == bfloat16 else 0)
+        assert HS == 0 or (HS >= H and HS % 32 == 0), "sm90_gate_layer: padded h rows of at least H, a multiple of 32"
+        if h_mxfp8:
+            assert h.dtype == uint8 and h.dim(0) * h.dim(1) == T * HS * 33 // 32, "h_mxfp8: uint8 h of T HS 33 / 32 bytes"
+        else:
+            assert h.dtype == bfloat16 or h.dim(1) == H
+        assert not topk_ids or routing_indices.dim(0) == E + TOPK, "topk_ids: routing_indices [E + TOPK, T]"
         present = [o, o_bias, residual, norm_weight, router, router_bias, num_tokens, x1, h, weights, routing_indices]
         self._add_node("sm90_gate", (T, S, 1), block_dim, present, [(-1, -1, -1)] * len(present),
-                       [H, E, TOPK, float_bits(eps)], counters=1 + T,
-                       changeable_grid_dims={1: (warps, 1, max_units, E)},   # S: E / S experts, whole warps' worth
+                       [H, E, TOPK, float_bits(eps)] + ([HS, int(topk_ids), int(bool(h_mxfp8)), int(logits_only)]
+                                                        if HS or topk_ids or logits_only else []),
+                       counters=1 + T,
+                       # S: E / S experts, whole warps' worth; the logits only: up to 8 tokens a task (grid x T / tokens)
+                       changeable_grid_dims={1: (warps, 1, max_units, E), **({0: (1, 1, 8, T)} if logits_only else {})},
                        buf_slots=[self._tensor_slot(t) for t in present])
 
     def sm90_next_token_layer(self, logits: DTensor, embed: DTensor, prompt: DTensor, x_next: DTensor, tokens: DTensor,

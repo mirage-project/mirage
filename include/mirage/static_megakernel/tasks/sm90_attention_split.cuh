@@ -47,17 +47,37 @@ __device__ __forceinline__ int
 // to their tiles (total: all requests' tiles; at least one a request, so at
 // most UNITS_PER_SM x sms + R in all); every task computes the same, and
 // writes the requests' first splits (split_base) for the merge.
+// WINDOW > 0 (a sliding window): the new token at position `cached` attends to
+// keys in (cached - WINDOW, cached], so the cached positions from lo = cached -
+// WINDOW + 1 on, tiles from lo / 32 (t0) on; positions below lo in tile t0 are
+// masked
 struct Sm90DecodeSplit {
-  int cached, tiles, n;
+  int cached, lo, t0, tiles, n;
 };
-template <int PAGE, int UNITS_PER_SM>
+// STATIC_ATTN_MIN_TILES: at least this many tiles a split (a short window or
+// context in fewer, longer splits: a unit's fixed costs -- the wait, RoPE, the
+// new K / V, its parts -- and the merge's parts dominate one-tile splits)
+#ifndef STATIC_ATTN_MIN_TILES
+#define STATIC_ATTN_MIN_TILES 1
+#endif
+template <int PAGE, int WINDOW>
+__device__ __forceinline__ int sm90_decode_tiles(int const *kv_indptr,
+                                                 int const *last_page_len,
+                                                 int r) {
+  int const cached = sm90_decode_cached<PAGE>(kv_indptr, last_page_len, r);
+  int const lo = WINDOW > 0 ? max(cached - WINDOW + 1, 0) : 0;
+  return (cached + 31) / 32 - lo / 32;
+}
+template <int PAGE, int UNITS_PER_SM, int WINDOW = 0, bool ONE = false>
 __device__ __forceinline__ Sm90DecodeSplit sm90_decode_split(
     int const *kv_indptr, int const *last_page_len, int r, int sms, int total) {
   Sm90DecodeSplit s;
   s.cached = sm90_decode_cached<PAGE>(kv_indptr, last_page_len, r);
-  int const tiles = (s.cached + 31) / 32;
+  s.lo = WINDOW > 0 ? max(s.cached - WINDOW + 1, 0) : 0;
+  s.t0 = s.lo / 32;
+  int const tiles = (s.cached + 31) / 32 - s.t0;
   int n = total > 0 ? (int)((long long)UNITS_PER_SM * sms * tiles / total) : 1;
-  n = max(n, 1);
+  n = ONE ? 1 : max(min(n, tiles / STATIC_ATTN_MIN_TILES), 1);
   s.tiles = max((tiles + n - 1) / n, 1);
   s.n = max((tiles + s.tiles - 1) / s.tiles, 1);
   return s;
@@ -145,8 +165,18 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
                 MAX_SEQ = PARAMS::v[3], PAGE = PARAMS::v[4], UPS = PARAMS::v[5],
                 P = PARAMS::v[6], R = PARAMS::v[8];
   constexpr bool QKV_BIAS = PARAMS::v[7] == 1;
+  constexpr int WINDOW = param_or<PARAMS, 9, 0>(); // 0: full attention
+  // DIRECT: one split a request (a sliding window's few tiles), which writes
+  // the final output itself with the sinks (sm90_attention_merge's formula
+  // for one split; no merge node): BUF_SLOTS 12 the sinks [Q] bf16, 13 the
+  // output [T, Q x D] bf16 (last: the node's output)
+  constexpr bool DIRECT = param_or<PARAMS, 10, 0>() != 0;
   constexpr int QPK = QH / KVH, QUEUE = SELF::counter + 32, W = (QPK + 2) * D,
                 STRIDE = KVH * W, MAX_PAGES = MAX_SEQ / PAGE;
+  // qkv: the QKV GEMM's K parts [KP][T][STRIDE] fp32 ("store", store_parts:
+  // its grid y), added here
+  constexpr int KP = Sm90First<IN...>::type::y;
+  static_assert(KP == 1 || QKV_BIAS, "qkv in K parts: the fp32 GEMM output");
   static_assert(D == 64 && QPK == 8 && PAGE % 32 == 0 && KVH == SM90_WARPS,
                 "sm90_attention_split: 8 KV heads of 8 query heads of 64");
   constexpr int STAGES = 3, TILE_BYTES = 2 * 32 * D * 2; // K + V, 32 rows
@@ -176,15 +206,24 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
   // request r's; unit u's partial is parts' u-th)
   constexpr int RPL = (R + 31) / 32; // requests a lane: RPL lane + i
   static_assert(R <= 64, "sm90_attention_split: two requests a lane");
-  __shared__ int split_base[R + 1], total_tiles;
+  __shared__ int split_base[R + 1], total_tiles, dir_hg;
   if (warp == 0) {
+    // DIRECT: HG units a request -- head groups of KVH / HG heads, each head's
+    // tiles over HG warps (combined in shared memory) -- the most of 8, 4, 2,
+    // 1 with R HG units on the SMs: a window's few tiles from many SMs
+    int hg = 1;
+    if constexpr (DIRECT) {
+      hg = KVH;
+      while (hg > 1 && R * hg > (int)gridDim.x) {
+        hg >>= 1;
+      }
+    }
     int tiles = 0, n[RPL];
 #pragma unroll
     for (int i = 0; i < RPL; i++) {
       int const r = RPL * lane + i;
       tiles +=
-          r < R ? (sm90_decode_cached<PAGE>(kv_indptr, last_page_len, r) + 31) /
-                      32
+          r < R ? sm90_decode_tiles<PAGE, WINDOW>(kv_indptr, last_page_len, r)
                 : 0;
     }
     int const total = __reduce_add_sync(~0u, tiles);
@@ -193,9 +232,10 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
     for (int i = 0; i < RPL; i++) {
       int const r = RPL * lane + i;
       n[i] = r < R && qo[r + 1] > qo[r]
-                 ? sm90_decode_split<PAGE, UPS>(
-                       kv_indptr, last_page_len, r, gridDim.x, total)
-                       .n
+                 ? (DIRECT ? hg
+                           : sm90_decode_split<PAGE, UPS, WINDOW, DIRECT>(
+                                 kv_indptr, last_page_len, r, gridDim.x, total)
+                                 .n)
                  : 0;
       sum += n[i];
     }
@@ -217,7 +257,7 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
       }
     }
     if (lane == 0) {
-      split_base[0] = 0, total_tiles = total;
+      split_base[0] = 0, total_tiles = total, dir_hg = hg;
       base_out[0] = 0;
     }
   }
@@ -229,16 +269,21 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
     if (u >= units) {
       break;
     }
-    int const head = warp;
     int request = 0;
     while (u >= split_base[request + 1]) {
       request++;
     }
     int const split = u - split_base[request];
-    Sm90DecodeSplit const sp = sm90_decode_split<PAGE, UPS>(
+    Sm90DecodeSplit const sp = sm90_decode_split<PAGE, UPS, WINDOW, DIRECT>(
         kv_indptr, last_page_len, request, gridDim.x, total_tiles);
-    bool const last = split == sp.n - 1;
-    int const tile0 = split * sp.tiles,
+    // DIRECT: split = the head group; warp w its head hpu split + w % hpu,
+    // the head's tiles slice, slice + hg, .. (slice w / hpu); every unit has
+    // the new token (slice 0 appends it and folds it in)
+    int const hg = DIRECT ? dir_hg : 1, hpu = KVH / hg;
+    int const head = DIRECT ? split * hpu + warp % hpu : warp,
+              slice = DIRECT ? warp / hpu : 0;
+    bool const last = DIRECT || split == sp.n - 1;
+    int const tile0 = sp.t0 + (DIRECT ? 0 : split) * sp.tiles,
               tile1 = min(tile0 + sp.tiles, (sp.cached + 31) / 32);
     int const page0 = tile0 * 32 / PAGE,
               page1 = (max(tile1, tile0) * 32 + PAGE - 1) / PAGE;
@@ -251,11 +296,12 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
     // the unit's tiles tile0 + i (i < nt), head `head`'s rows, through the
     // warp's own ring of STAGES 32-position tiles in shared memory (K then V,
     // 4 KB each; 16-B chunk c of row r at chunk c ^ (r & 7)), by cp.async
-    int const nt = max(tile1 - tile0, 0);
+    int const nt = max(tile1 - tile0, 0),
+              ntw = nt > slice ? (nt - slice + hg - 1) / hg : 0; // the warp's
     char *const ring = dyn_smem + warp * STAGES * TILE_BYTES;
     auto issue = [&](int i) { // the warp's tile i into stage i % STAGES
-      if (i < nt) {
-        int const base = (tile0 + i) * 32;
+      if (i < ntw) {
+        int const base = (tile0 + slice + i * hg) * 32;
         int const page = pages[base / PAGE - page0];
         char *const st = ring + (i % STAGES) * TILE_BYTES;
 #pragma unroll
@@ -303,7 +349,12 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
     auto qkv_val = [&](int col) { // column col of the KV head's group, bf16
       size_t const i = (size_t)tok * STRIDE + head * W + col;
       if constexpr (QKV_BIAS) {
-        float const x = buf_at<float const>(g, slot_at<BUF_SLOTS, 0>())[i];
+        float const *q = buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()) + i;
+        float x = q[0];
+#pragma unroll
+        for (int p = 1; p < KP; p++) {
+          x += q[(size_t)p * T * STRIDE];
+        }
         float const b = __bfloat162float(
             buf_at<bf16 const>(g, slot_at<BUF_SLOTS, 9>())[head * W + col]);
         return __bfloat162float(__float2bfloat16_rn(x + b));
@@ -326,7 +377,7 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
       int const d = 8 * p + 2 * qd;
       qa[p] = pack_bf16(rope(gq, d), rope(gq, d + 1));
     }
-    if (last) {
+    if (last && slice == 0) {
       // the new token: its K and V appended to the cache (no other unit reads
       // that position) and kept for the warp's softmax
       int const page = kv_indices[first_page + pos_new / PAGE];
@@ -342,6 +393,11 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
       }
       __syncwarp();
     }
+#ifdef STATIC_TIMING_BUILD
+    if (threadIdx.x == 0 && L.stage_stamps) {
+      L.stage_stamps[1] = gtime(); // warp 0's q (and new K / V) ready
+    }
+#endif
 
     // online softmax over the unit's positions (rows gq: lane (gq, qd) holds
     // dims 8 p + 2 qd, + 1 of n tile p)
@@ -372,7 +428,7 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
 #pragma unroll
         for (int c = 0; c < 2; c++) {
           int const pos = tt * 32 + 8 * i + 2 * qd + c;
-          s[i][c] = pos < sp.cached ? s[i][c] * SCALE : -INFINITY;
+          s[i][c] = pos < sp.cached && pos >= sp.lo ? s[i][c] * SCALE : -INFINITY;
           mx = fmaxf(mx, s[i][c]);
         }
       }
@@ -408,10 +464,10 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
         }
       }
     };
-    for (int i = 0; i < nt; i++) {
+    for (int i = 0; i < ntw; i++) {
       cp_async_wait<STAGES - 1>();
       __syncwarp();
-      compute(tile0 + i, ring + (i % STAGES) * TILE_BYTES);
+      compute(tile0 + slice + i * hg, ring + (i % STAGES) * TILE_BYTES);
       __syncwarp(); // the stage read: refill it
       issue(i + STAGES);
     }
@@ -419,7 +475,8 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
     __syncwarp();
     l += __shfl_xor_sync(0xffffffffu, l, 1);
     l += __shfl_xor_sync(0xffffffffu, l, 2);
-    if (last) { // the new token, query head gq's score over the lane's dims
+    if (last && slice == 0) { // the new token, query head gq's score over the
+                              // lane's dims
       float sc = 0.f;
 #pragma unroll
       for (int p = 0; p < 8; p++) {
@@ -446,14 +503,72 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
       m = mx;
     }
     int const qh = head * QPK + gq;
+    if constexpr (DIRECT) {
+      if (hg > 1) {
+        // the head's slices through the warps' rings (their loads are done):
+        // lane (gq, qd)'s m, l and o, merged into slice 0's (log2 units)
+        float *red = reinterpret_cast<float *>(ring) + lane * 18;
+        red[0] = m, red[1] = l;
 #pragma unroll
-    for (int p = 0; p < 8; p++) {
-      *reinterpret_cast<float2 *>(parts + ((size_t)u * QH + qh) * D + 8 * p +
-                                  2 * qd) =
-          make_float2(o[p][0] / l, o[p][1] / l);
+        for (int p = 0; p < 8; p++) {
+          red[2 + 2 * p] = o[p][0], red[3 + 2 * p] = o[p][1];
+        }
+        __syncthreads();
+        if (slice == 0) {
+          float M = m;
+          for (int sl = 1; sl < hg; sl++) {
+            M = fmaxf(M, reinterpret_cast<float const *>(
+                             dyn_smem + (warp + sl * hpu) * STAGES * TILE_BYTES)
+                             [lane * 18]);
+          }
+          float const a0 = m == -INFINITY ? 0.f : ex2(m - M);
+          l *= a0;
+#pragma unroll
+          for (int p = 0; p < 8; p++) {
+            o[p][0] *= a0, o[p][1] *= a0;
+          }
+          for (int sl = 1; sl < hg; sl++) {
+            float const *r2 =
+                reinterpret_cast<float const *>(
+                    dyn_smem + (warp + sl * hpu) * STAGES * TILE_BYTES) +
+                lane * 18;
+            float const a = r2[0] == -INFINITY ? 0.f : ex2(r2[0] - M);
+            l += a * r2[1];
+#pragma unroll
+            for (int p = 0; p < 8; p++) {
+              o[p][0] += a * r2[2 + 2 * p], o[p][1] += a * r2[3 + 2 * p];
+            }
+          }
+          m = M;
+        }
+      }
     }
-    if (qd == 0) {
-      lse_out[(size_t)u * QH + qh] = m + __log2f(l);
+    if constexpr (DIRECT) {
+      if (slice == 0) { // the one split: out = 2^(L - M) O / (2^(L - M) +
+                        // 2^(sink log2 e - M)), M = max(L, sink log2 e)
+      float const L = m + __log2f(l);
+      float const sink =
+          __bfloat162float(buf_at<bf16 const>(g, slot_at<BUF_SLOTS, 12>())[qh]) *
+          1.4426950408889634f;
+      float const M = fmaxf(L, sink), w = exp2f(L - M),
+                  sc = w / (w + exp2f(sink - M)) / l;
+      __nv_bfloat162 *out = buf_at<__nv_bfloat162>(g, slot_at<BUF_SLOTS, 13>()) +
+                            ((size_t)tok * QH + qh) * (D / 2);
+#pragma unroll
+      for (int p = 0; p < 8; p++) {
+        out[4 * p + qd] = __floats2bfloat162_rn(o[p][0] * sc, o[p][1] * sc);
+      }
+      }
+    } else {
+#pragma unroll
+      for (int p = 0; p < 8; p++) {
+        *reinterpret_cast<float2 *>(parts + ((size_t)u * QH + qh) * D + 8 * p +
+                                    2 * qd) =
+            make_float2(o[p][0] / l, o[p][1] / l);
+      }
+      if (qd == 0) {
+        lse_out[(size_t)u * QH + qh] = m + __log2f(l);
+      }
     }
     __syncthreads(); // shared memory free; claim[] written
   }
