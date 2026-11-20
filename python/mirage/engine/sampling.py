@@ -15,7 +15,7 @@ _FLOAT32_TINY = 2.0 ** -126
 
 class SamplingParams(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, frozen=True, validate_default=True)
-    
+
     temperature: float = Field(default=0.0, ge=0, le=2)
     top_p: float = Field(default=1.0, gt=0, le=1)
     top_k: StrictInt = Field(default=0, ge=0)
@@ -24,7 +24,7 @@ class SamplingParams(BaseModel):
     repetition_penalty: float = Field(default=1, gt=0)
     seed: StrictInt = Field(default=42, ge=0, le=2**63 - 1)
     logit_bias: dict[int, float] = Field(default_factory=dict, max_length=core.serving_max_biases())
-    
+
     max_new_tokens: StrictInt | None = Field(default=None, gt=0)
 
     @field_validator("temperature")
@@ -65,16 +65,16 @@ class SamplingParams(BaseModel):
         """Bind validated options to model limits and serialize the ring payload."""
         remaining = max_seq_length - prompt_len
         budget = self.max_new_tokens if self.max_new_tokens is not None else remaining
-        
+
         if prompt_len < 1 or budget < 1 or budget > remaining:
             raise ValueError("prompt plus requested output exceeds the context capacity")
-        
+
         if len(eos_ids) > core.serving_max_eos() or any(not 0 <= t < vocab_size for t in eos_ids):
             raise ValueError("invalid model EOS token IDs")
-        
+
         if any(not 0 <= t < vocab_size for t in self.logit_bias):
             raise ValueError("logit_bias token ID exceeds model vocabulary")
-        
+
         return core.pack_serving_config(
             budget, self.seed, vocab_size, self.temperature, self.top_p,
             min(self.top_k, vocab_size), self.frequency_penalty,

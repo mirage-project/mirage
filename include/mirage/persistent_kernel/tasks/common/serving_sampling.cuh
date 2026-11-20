@@ -17,11 +17,11 @@ public:
     uint32_t words = (padded_vocab + BITS_PER_WORD - 1) / BITS_PER_WORD;
     frequency_counts = buffer;
     seen_total = buffer + padded_vocab;
-    seen_generated = buffer + padded_vocab + words;    
+    seen_generated = buffer + padded_vocab + words;
   }
   uint32_t *frequency_counts;
   uint32_t *seen_total;
-  uint32_t *seen_generated;  
+  uint32_t *seen_generated;
 };
 
 // For dividing buffer into multiple regions
@@ -98,16 +98,16 @@ union SamplingShared {
 
 // SamplePhase::PREPARE prepare history data
 __device__ inline void prepare_history(
-  uint32_t* history_buffer, 
+  uint32_t* history_buffer,
   char* radix_buffer,
-  int padded_vocab, 
+  int padded_vocab,
   int slot,
   mirage::runtime::RuntimeConfig const &config
 ) {
-  
+
   int row = config.request_ids[slot];
   RadixBuffer radix_buf(radix_buffer, padded_vocab, slot);
-  
+
   uint32_t *ptr = radix_buf.histogram;
 
   for (int i = threadIdx.x; i < SAMPLING_PARTIAL_WORDS + 4; i += blockDim.x) {
@@ -285,7 +285,7 @@ __device__ inline uint64_t sample_scores(
   int logit_row = end - 1;
 
   T const *row_logits = logits + logit_row * padded_vocab;
-  
+
   float *scores = RadixBuffer(buffer, padded_vocab, slot).scores;
 
   auto* cfg = config.generation_config + config.request_ids[slot];
@@ -543,11 +543,11 @@ __device__ inline void sample_pivot(
 
 template <int NUM_THREADS, SamplePhase PHASE, typename T>
 __device__ void sample_request(
-  T const* logits, 
-  uint32_t *history_buffer, 
+  T const* logits,
+  uint32_t *history_buffer,
   char *buffer,
-  long long *output, 
-  int padded_vocab, 
+  long long *output,
+  int padded_vocab,
   int num_cta,
   int slot,
   int part_id,
@@ -591,6 +591,6 @@ __device__ void sample_request(
       }
     }
   }
-  
+
 }
 }
