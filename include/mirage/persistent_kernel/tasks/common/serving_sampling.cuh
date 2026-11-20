@@ -140,7 +140,6 @@ __device__ inline void prepare_history(
       padded_vocab);
 
   int generation_position = current_len - prompt_len;
-  int vocab = int(cfg->vocab_size);
   long long const *history_tokens =
       config.tokens + row * MPK_MAX_SEQ_LENGTH;
   bool cached = generation_position > 0;
@@ -277,10 +276,7 @@ __device__ inline uint64_t sample_scores(
   mirage::runtime::RuntimeConfig const &config
 ) {
   int row = config.request_ids[slot];
-  int start = config.qo_indptr_buffer[slot];
   int end = config.qo_indptr_buffer[slot + 1];
-  int prompt_len = config.prompt_length[row];
-  int current_len = config.step[row] + end - start;
   int bitset_words = (padded_vocab + BITS_PER_WORD - 1) / BITS_PER_WORD;
   int history_words = padded_vocab + 2 * bitset_words;
 

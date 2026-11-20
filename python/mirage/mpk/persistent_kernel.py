@@ -1401,6 +1401,10 @@ class PersistentKernel:
                 f"q_len_override={q_len_override} exceeds "
                 f"max_tokens_per_request={self.max_tokens_per_request}")
             params.append(self.max_tokens_per_request)
+        elif self.target_cc < 90:
+            params = [num_q_heads, num_kv_heads, qk_norm, rotary_embed,
+                      self.max_seq_length, block_size, q_len_override,
+                      tail_offset, group_id, stride_field]
 
         tb_graph = TBGraph(CyTBGraph(grid_dim, block_dim, 1, 64))
         assert grid_dim[0] == self.max_num_batched_requests

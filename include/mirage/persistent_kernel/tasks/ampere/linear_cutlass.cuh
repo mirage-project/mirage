@@ -29,8 +29,8 @@ namespace kernel {
 
 using bfloat16 = type::bfloat16_t;
 
-// Use PIPE_MAX=2 for sm89 (Ada Lovelace) to avoid out of shared memory
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 890)
+// Use two stages on GPUs with a 99KB shared-memory limit.
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 860 || __CUDA_ARCH__ == 890)
 constexpr int DEFAULT_PIPE_MAX = 2;
 #else
 constexpr int DEFAULT_PIPE_MAX = 3;
@@ -418,6 +418,7 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
           cute::gemm(tiled_mma, tCrD, tCrA(_, _, ik), tCrB(_, _, ik), tCrD);
         } // ik
       }   // itile
+      __syncthreads();
 
       // Epilogue: convert float accumulator result back to bfloat16_t and write
       // back use less shared memory as a scratchpad tile to use large wide
@@ -471,6 +472,7 @@ __device__ __noinline__ void linear_kernel(void const *input_ptr,
 
       // cute::copy(s2g_tiled_copy_c, tCsC_s2g(_, _, _, 0), tCgC_s2g);
       cute::copy_if(s2g_tiled_copy_c, tCpC_ep, tCsC_s2g(_, _, _, 0), tCgC_s2g);
+      __syncthreads();
     } // n_iter < kLoopN 2
   }   // m_iter < LoopM 1
 }
