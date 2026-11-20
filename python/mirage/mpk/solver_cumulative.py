@@ -173,7 +173,9 @@ def solve(groups: Dict[str, List[Dict[int, str]]], tasks: List[SolverTask], deps
             length[t.id] = ticks(t.duration_us)
         if t.prefetch_us > 0:
             span[t.id] = model.NewIntVar(0, horizon, f"span_{t.id}")
-            model.Add(span[t.id] >= length[t.id] + ticks(t.prefetch_us))
+            # prefetch_by: the prefetch for the option the other node uses (as duration_by's length)
+            pre = sum(ticks(us) * use[key] for key, us in t.prefetch_by.items()) if t.prefetch_by else ticks(t.prefetch_us)
+            model.Add(span[t.id] >= length[t.id] + pre)
         else:
             span[t.id] = length[t.id]
         model.Add(end[t.id] == start[t.id] + span[t.id])

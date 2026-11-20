@@ -2,7 +2,7 @@
 // indexer (GLM-5.3 / 5.2 "full" layers; GLM-5.3-Flash with FLASH = 1, see
 // below). Task (c, t) is chunk c of the context of token t: positions
 // [c CH, c CH + CH) below n = min(seq_lens[t], MAXCTX). A task computes no
-// scores if its chunk starts at or after position n, or if n <= TOPK_ALL
+// scores if its chunk starts at or after position n, or if n <= SKIPK
 // (see run_dsa_index_score).
 // The caller must keep seq_lens[t] <= MAXCTX = MAXP x PAGE. Each slot t must be
 // a different request (see step 1).
@@ -50,7 +50,7 @@
 //      key to the task histogram. At the end, the task adds the task
 //      histogram to the token histogram.
 //   output  scores fp32 [T][MAXCTX] (bf16 values) in the node buffer. Then
-//           the task adds 1 to counter + t. If n > TOPK_ALL, dsa_index_topk
+//           the task adds 1 to counter + t. If n > SKIPK, dsa_index_topk
 //           waits for all chunks.
 #pragma once
 #include "../dsa_common.cuh"
@@ -339,9 +339,9 @@ __device__ __forceinline__ void isc_flush_hist(unsigned char const *sm,
 
 } // namespace dsa
 
-// Task (c, t). PARAMS {32 (heads), MAXCTX, PAGE (64), MAXP, FLASH (0 / 1),
-// TOPK_ALL (the TOPK of the dsa_index_topk node that reads the scores; 0:
-// none)}.
+// Task (c, t). PARAMS {32 (heads), MAXCTX, PAGE (64), MAXP, FLASH (0 / 1)[,
+// SKIPK (the TOPK of the dsa_index_topk node that reads the scores: a token of
+// at most SKIPK entries has no scores)]}.
 // BUF_SLOTS {cos_sin (FLASH: not read), seq_lens, block_table (FLASH: of the
 // pooled cache), index cache (FLASH: the pooled cache), hist (int
 // [T][TOPK_BINS], zero before the launch: the counts of the high 12 bits of
@@ -368,6 +368,7 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   // the key scales' format: FLASH's pooled keys and a key_scale="fp32" index
   // cache (IKW params[3]; StaticParams pads with 0) are fp32, else UE8M0
   constexpr bool FP32_SCALE = FLASH || IKW::v[3] != 0;
+  constexpr int SKIPK = param_or<PARAMS, 5, 0>();
   constexpr int W0 = FLASH ? 256 : 128; // the column of w_0 in KW
   constexpr int NQ = IQ::v[2], NKW = KW::v[2], CH = MAXCTX / SELF::x;
   constexpr int CS = slot_at<BUF_SLOTS, 0>(), SEQ = slot_at<BUF_SLOTS, 1>(),
@@ -378,9 +379,10 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   static_assert(PAGE == 64 && CH * SELF::x == MAXCTX && CH % PAGE == 0,
                 "dsa_index_score: chunks of whole 64-position pages");
   constexpr int PPW = (CH / PAGE + 7) / 8; // pages of each warp
-  static_assert(ISC_END <= RING_BYTES && CH <= ISC_MAX_POS,
-                "dsa_index_score: its shared memory is the ring's (at most "
-                "1024 positions in a chunk)");
+  static_assert(smem_launch_bytes(ISC_END) <= 232448 && CH <= ISC_MAX_POS,
+                "dsa_index_score: its shared memory from the ring area's base "
+                "(T = 64: past its end) in the launch's 227 KB (at most 1024 "
+                "positions in a chunk)");
   static_assert(
       MAXP * PAGE >= MAXCTX,
       "dsa_index_score: the block table covers MAXCTX positions (MAXP "
@@ -407,11 +409,10 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
   __syncthreads(); // wait until the previous task completes its shared-memory
                    // reads
   // The task computes no scores in two cases: the chunk starts at or after
-  // position n, or n <= TOPK_ALL. If n <= TOPK_ALL, the top-k takes all n
+  // position n, or n <= SKIPK. If n <= SKIPK, the top-k takes all n
   // positions and does not read the scores. Then the task does not wait for
   // its inputs. It only adds 1 to counter + t.
-  constexpr int TOPK_ALL = PARAMS::v[5];
-  if (c0 >= n || (TOPK_ALL > 0 && n <= TOPK_ALL)) {
+  if (c0 >= n || (SKIPK > 0 && n <= SKIPK)) {
     stamp_ready(L);
     if (tid == 0) { // nothing written: no release
       cnt_add_relaxed(cnt_now(g) + SELF::counter + t, 1);

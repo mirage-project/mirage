@@ -145,13 +145,14 @@ static void
                                 CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
-// e4m3 [rows, Kb] as {128, rows, Kb / 128}; box {128, T, nkt}: nkt K tiles of
-// T rows (the tokens of a step: the MMA's N)
+// e4m3 [rows, Kb] as {128, rows, Kb / 128}; box {128, TW, nkt}: nkt K tiles of
+// TW rows (the tokens of a step: the MMA's N; T < 8: the rows past the tensor's
+// T are outside it and read as 0)
 static void map_act8_kt(
     CUtensorMap *m, void *base, uint64_t Kb, uint64_t rows, uint32_t nkt) {
   cuuint64_t gd[3] = {128, rows, Kb / 128};
   cuuint64_t gs[2] = {Kb, 128};
-  cuuint32_t bd[3] = {128, (cuuint32_t)T, nkt}, es[3] = {1, 1, 1};
+  cuuint32_t bd[3] = {128, (cuuint32_t)TW, nkt}, es[3] = {1, 1, 1};
   MKS_CU(cuTensorMapEncodeTiled(m,
                                 CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                 3,
@@ -165,11 +166,11 @@ static void map_act8_kt(
                                 CU_TENSOR_MAP_L2_PROMOTION_NONE,
                                 CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
 }
-// e4m3 [rows, Kb]; box {128, T} (T rows: the tokens of a step)
+// e4m3 [rows, Kb]; box {128, TW} (TW rows: the tokens of a step, as above)
 static void map_act8(CUtensorMap *m, void *base, uint64_t Kb, uint64_t rows) {
   cuuint64_t gd[2] = {Kb, rows};
   cuuint64_t gs[1] = {Kb};
-  cuuint32_t bd[2] = {128, (cuuint32_t)T}, es[2] = {1, 1};
+  cuuint32_t bd[2] = {128, (cuuint32_t)TW}, es[2] = {1, 1};
   MKS_CU(cuTensorMapEncodeTiled(m,
                                 CU_TENSOR_MAP_DATA_TYPE_UINT8,
                                 2,

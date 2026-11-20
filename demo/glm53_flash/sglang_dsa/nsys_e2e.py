@@ -1,23 +1,21 @@
 """nsys_e2e.py RUN_DIR [scen ...] [--dev=N] | nsys_e2e.py --one DB [--dev=N]: the end-to-end table of sgl_chain.py's nsys runs
 prof_{base,all3ppf}_{scen}_p{256,4000} (sgl_spec_bench.py --profile under nsys: <name>.sqlite, <name>.log). Per run the
-period of the forward's CUDA graph on one GPU: start to start of consecutive replays (a decode step, or an MTP cycle = draft +
-verify: each graph of a cycle replays once per cycle), median and mean over the replays in the trace (the prefill is eager).
+period of the forward's CUDA graph on one GPU: start to start of consecutive replays (a decode step), median and mean over
+the replays in the trace (the prefill is eager).
 The forward: with --cuda-graph-trace=graph (CUPTI_ACTIVITY_KIND_GRAPH_TRACE, one record per replay: sgl_chain's runs)
 the graph with the longest median replay, with =node (every kernel of a replay, the kernels share its launch's correlation
-id) the one with the most kernels per replay. Node tracing perturbs the timeline (MTP bs 1, step1_5: SGLang's cycle 8087.6
-vs the bench's 9765.7 us, the static layers' 7170.0 vs 5548.3 us: the per-node records cost the PDL overlap of the static
-kernels), so the e2e runs trace whole graphs. us per output token per request = the period (decode) or the period / the
-run's accept length (MTP: its bench line at the same prompt length). Speedup = SGLang (base) / static (all3ppf) - 1.
+id) the one with the most kernels per replay. Node tracing perturbs the timeline (the per-node records cost the PDL overlap
+of the static kernels), so the e2e runs trace whole graphs. us per output token per request = the period. Speedup = SGLang
+(base) / static (all3ppf) - 1.
 --one DB: every graph of one trace (replays, kernels or duration per replay, period), to check which one is the forward."""
 import collections
 import os
-import re
 import sqlite3
 import statistics as st
 import sys
 
-LABEL = {"spec516_bs1": "bs1 MTP 5/1/6", "spec516_bs2": "bs2 MTP 5/1/6", "off_bs8": "bs8 解码", "off_bs16": "bs16 解码",
-         "spec516_bs4": "bs4 MTP 5/1/6", "off_bs32": "bs32 解码"}
+LABEL = {"off_bs1": "bs1 解码", "off_bs2": "bs2 解码", "off_bs4": "bs4 解码", "off_bs8": "bs8 解码", "off_bs16": "bs16 解码",
+         "off_bs32": "bs32 解码", "off_bs64": "bs64 解码"}
 LENS = (256, 4000)
 
 
@@ -52,14 +50,6 @@ def period(db, dev):
     return per, tg, st.median(n for _, n in by[tg])
 
 
-def accept(log, p):
-    for line in open(log, errors="replace"):
-        m = re.search(r"prompt (\d+) tokens \((\d+) asked\).*accept length mean ([\d.]+)", line)
-        if m and int(m.group(2)) == p:
-            return float(m.group(3))
-    return None
-
-
 def main():
     dev = int(next((a.split("=")[1] for a in sys.argv[1:] if a.startswith("--dev=")), 0))
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -81,7 +71,7 @@ def main():
         for p in LENS:
             for cfg in ("base", "all3ppf"):
                 name = f"prof_{cfg}_{scen}_p{p}"
-                db, log = os.path.join(d, f"{name}.sqlite"), os.path.join(d, f"{name}.log")
+                db = os.path.join(d, f"{name}.sqlite")
                 if not os.path.exists(db):
                     continue
                 try:
@@ -89,27 +79,24 @@ def main():
                 except Exception as e:
                     print(f"{name}: {e}", file=sys.stderr)
                     continue
-                acc = accept(log, p) if scen.startswith("spec") else 1.0
-                med = st.median(per)
-                res[(scen, p, cfg)] = (med, st.mean(per), len(per), acc, med / acc if acc else None, tg, nk)
+                res[(scen, p, cfg)] = (st.median(per), st.mean(per), len(per), tg, nk)
     f1 = lambda v: "—" if v is None else f"{v:.1f}"
     print("| 场景 | 提示 | SGLang µs/token | 静态层 µs/token | 提速 | 周期中位数 SGLang / 静态层 (µs) | 周期均值 SGLang / 静态层 (µs) "
-          "| 接受长度 SGLang / 静态层 | 周期数 |")
-    print("|---|---|---|---|---|---|---|---|---|")
+          "| 周期数 |")
+    print("|---|---|---|---|---|---|---|---|")
     for scen in scens:
         for p in LENS:
             b, s = res.get((scen, p, "base")), res.get((scen, p, "all3ppf"))
             if not b and not s:
                 continue
             g = lambda r, i: r[i] if r else None
-            sp = f"**{(b[4] / s[4] - 1) * 100:+.1f}%**" if b and s and b[4] and s[4] else "—"
-            ac = (f"{g(b, 3):.2f} / {g(s, 3):.2f}" if scen.startswith("spec") and b and s and b[3] and s[3] else "—")
-            print(f"| {LABEL.get(scen, scen)} | {p} | {f1(g(b, 4))} | {f1(g(s, 4))} | {sp} | {f1(g(b, 0))} / {f1(g(s, 0))} | "
-                  f"{f1(g(b, 1))} / {f1(g(s, 1))} | {ac} | {g(b, 2) or '—'} / {g(s, 2) or '—'} |")
+            sp = f"**{(b[0] / s[0] - 1) * 100:+.1f}%**" if b and s else "—"
+            print(f"| {LABEL.get(scen, scen)} | {p} | {f1(g(b, 0))} | {f1(g(s, 0))} | {sp} | {f1(g(b, 0))} / {f1(g(s, 0))} | "
+                  f"{f1(g(b, 1))} / {f1(g(s, 1))} | {g(b, 2) or '—'} / {g(s, 2) or '—'} |")
     print()
-    for (scen, p, cfg), (med, mean, n, acc, tok, tg, nk) in res.items():
-        print(f"prof_{cfg}_{scen}_p{p}: graph {tg} (size {nk:.1f}: us or kernels per replay), {n} periods, median {med:.1f} mean {mean:.1f} us"
-              + (f", accept {acc:.2f}" if scen.startswith("spec") and acc else ""))
+    for (scen, p, cfg), (med, mean, n, tg, nk) in res.items():
+        print(f"prof_{cfg}_{scen}_p{p}: graph {tg} (size {nk:.1f}: us or kernels per replay), {n} periods, median {med:.1f} "
+              f"mean {mean:.1f} us")
 
 
 if __name__ == "__main__":

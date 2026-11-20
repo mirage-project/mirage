@@ -447,32 +447,36 @@ __device__ __forceinline__ void fx_rmsnorm(unsigned long long const *fx,
   }
 }
 
-// Compute one head of an absorb GEMM for NT tokens (default all T) on tensor
-// cores (dsa_q_absorb, dsa_o_absorb):
-//   out[t][c] = bf16( sum_k x[t][k] w[k][c] ),  c < M, t < NT, k < K
+// Compute one head of an absorb GEMM for TT tokens (default all of the layer's)
+// on tensor cores (dsa_q_absorb, dsa_o_absorb):
+//   out[t][c] = bf16( sum_k x[t][k] w[k][c] ),  c < M, t < TT, k < K
 // The MMA is mma.sync m16n8k16. A is w^T (16 columns x 16 k). B is x^T (16 k x
-// 8 tokens): NT / 8 token tiles, each warp does all of them. The accumulators
-// are fp32.
+// 8 tokens): TT / 8 token tiles (config.cuh TW: one tile in a layer of fewer
+// than 8 tokens, its rows from T on repeat token 0 and are dropped), each warp
+// does all of them. The accumulators are fp32.
 // Shared memory:
 //   ws   w [K][M] bf16 (swizzle<M>)
-//   xs   x [NT][K] bf16 (swizzle<K>)
+//   xs   x [TT][K] bf16 (swizzle<K>)
 //   red  the partial sums of the K parts (absorb_red_bytes)
 // Warp w computes column tile w % (M / 16) and K part w / (M / 16). There are
 // 8 / (M / 16) K parts. Warp kp = 0 adds the parts from red. Row t of out is
 // at out + t * ld_out. All 256 threads must call this function. Before the
-// call, make ws and xs ready (cp.async wait, then __syncthreads).
-template <int M, int NT = T>
+// call, make ws and xs ready (cp.async wait, then __syncthreads). TT: the
+// tokens of the call (a multiple of 8; a task of some of the layer's tokens:
+// xs [TT][K], out at its first token).
+template <int M, int TT = TW>
 __host__ __device__ constexpr int absorb_red_bytes() {
-  return (8 / (M / 16) - 1) * (M / 16) * (NT / 8) * 32 * 4 * 4;
+  return (8 / (M / 16) - 1) * (M / 16) * (TT / 8) * 32 * 4 * 4;
 }
-template <int K, int M, int NT = T>
+template <int K, int M, int TT = TW>
 __device__ __forceinline__ void absorb_mma(__nv_bfloat16 const *ws,
                                            __nv_bfloat16 const *xs,
                                            float *red,
                                            __nv_bfloat16 *out,
                                            size_t ld_out) {
-  constexpr int MT = M / 16, KP = 8 / MT, KK = K / KP, NTT = NT / 8;
-  static_assert(NT % 8 == 0 && M % 16 == 0 && 8 % MT == 0 && KK % 16 == 0,
+  constexpr int MT = M / 16, KP = 8 / MT, KK = K / KP, NTT = TT / 8;
+  static_assert(TT % 8 == 0 && TT <= TW && M % 16 == 0 && 8 % MT == 0 &&
+                    KK % 16 == 0,
                 "absorb_mma: whole 16 x 16 tiles, 8-token tiles");
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   int const mt = warp % MT, kp = warp / MT;
@@ -490,8 +494,10 @@ __device__ __forceinline__ void absorb_mma(__nv_bfloat16 const *ws,
 #pragma unroll
     for (int nt = 0; nt < NTT; nt++) {
       uint32_t b[2];
+      int const xr = nt * 8 + (lane & 7); // the token of this lane's B row
       load_k(b,
-             xs + swizzle<K>(nt * 8 + (lane & 7), k + ((lane >> 3) & 1) * 8));
+             xs + swizzle<K>((T >= 8 || xr < T) ? xr : 0,
+                             k + ((lane >> 3) & 1) * 8));
       mma16816(a, b, d[nt]);
     }
   }
@@ -528,10 +534,19 @@ __device__ __forceinline__ void absorb_mma(__nv_bfloat16 const *ws,
 #pragma unroll
     for (int nt = 0; nt < NTT; nt++) {
       int const t = nt * 8 + 2 * (lane & 3);
-      out[(size_t)t * ld_out + c] = __float2bfloat16(d[nt][0]);
-      out[(size_t)(t + 1) * ld_out + c] = __float2bfloat16(d[nt][1]);
-      out[(size_t)t * ld_out + c + 8] = __float2bfloat16(d[nt][2]);
-      out[(size_t)(t + 1) * ld_out + c + 8] = __float2bfloat16(d[nt][3]);
+      bool const l0 = T >= 8 || t < T, l1 = T >= 8 || t + 1 < T; // (T < 8)
+      if (l0) {
+        out[(size_t)t * ld_out + c] = __float2bfloat16(d[nt][0]);
+      }
+      if (l1) {
+        out[(size_t)(t + 1) * ld_out + c] = __float2bfloat16(d[nt][1]);
+      }
+      if (l0) {
+        out[(size_t)t * ld_out + c + 8] = __float2bfloat16(d[nt][2]);
+      }
+      if (l1) {
+        out[(size_t)(t + 1) * ld_out + c + 8] = __float2bfloat16(d[nt][3]);
+      }
     }
   }
 }

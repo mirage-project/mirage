@@ -20,7 +20,8 @@
 //            the TOPK-th largest key. k1 is the number of keys to take from
 //            bin b1. Count the keys of the chunk above bin b1. Count the keys
 //            in bin b1 by their low 4 bits. Write the record of the chunk.
-//            If n <= TOPK, the task writes no record.
+//            If n <= TOPK, the task writes no record (and does not wait:
+//            dsa_index_score may skip the scores of such a token).
 //   write    (MODE 1) If n > TOPK and the chunk has positions, wait for the
 //            count tasks of token t. Read the CHK records. Find the threshold
 //            key (b1, b2) and the number of keys to take at it. Find the

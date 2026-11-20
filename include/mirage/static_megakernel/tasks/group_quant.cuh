@@ -3,7 +3,9 @@
 // A K tile is 128 activation columns. z_q is the quantized activation.
 //   input    bf16 [T][L]: a graph input (x; each GPU has all of x) or the
 //            output buffer of a node (h_s of silu_and_mul)
-//   task kt  one K tile: columns [128 kt, 128 kt + 128)
+//   task kt  one K tile: columns [128 kt, 128 kt + 128), of all tokens; or
+//            (grid y NZ > 1) task (kt, z): of token tile z of NZ
+//            (group_quant_tile_task)
 //   scale    for each token, s = max(amax of the 128 values, 1e-10) / 448.
 //            Each value becomes e4m3(value / s). SGLang and vLLM use the same
 //            method (per_token_group_quant_fp8, group size 128).
@@ -32,8 +34,12 @@ __device__ __forceinline__ void group_quant_task(G const &g,
                                                  uint32_t *done_cnt,
                                                  int kt) {
   __shared__ __align__(16) float scale_s[T];
-  constexpr int TPW = T / 8; // tokens per warp (all 8 warps)
-  static_assert(T % 8 == 0 && T * 4 / 16 <= 256,
+  // TM: the tokens of the thread mapping (the 8 warps take TM / 8 tokens
+  // each): T, or 8 in a layer of fewer tokens, where warp w has token w for
+  // w < T and the other warps none
+  constexpr int TM = T < 8 ? 8 : T;
+  constexpr int TPW = TM / 8; // tokens per warp (all 8 warps)
+  static_assert(TM % 8 == 0 && T * 4 / 16 <= 256,
                 "group_quant: the 8 warps take T / 8 tokens each");
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   // The previous task finished its scale_s reads before its final barrier.
@@ -43,28 +49,132 @@ __device__ __forceinline__ void group_quant_task(G const &g,
   uint2 raw[TPW];
 #pragma unroll
   for (int i = 0; i < TPW; i++) { // Bypass L1 because another SM can produce x.
+    if (T < 8 && TPW * warp + i >= T) { // no token on this warp
+      raw[i] = make_uint2(0u, 0u);
+      continue;
+    }
     asm volatile("ld.relaxed.gpu.global.v2.u32 {%0, %1}, [%2];"
                  : "=r"(raw[i].x), "=r"(raw[i].y)
                  : "l"(x + (size_t)(TPW * warp + i) * L + kt * 128 + 4 * lane)
                  : "memory");
   }
+  // the amax of every token of the warp first: TPW independent shuffle chains,
+  // interleaved (one token after the other: a chain of shuffles per token)
+  float2 a[TPW], b[TPW];
+  float amax[TPW];
+#pragma unroll
+  for (int i = 0; i < TPW; i++) {
+    a[i] = __bfloat1622float2(
+        *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].x));
+    b[i] = __bfloat1622float2(
+        *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].y));
+    amax[i] = fmaxf(fmaxf(fabsf(a[i].x), fabsf(a[i].y)),
+                    fmaxf(fabsf(b[i].x), fabsf(b[i].y)));
+  }
+#pragma unroll
+  for (int d = 16; d > 0; d >>= 1) { // amax of the 32 lanes
+#pragma unroll
+    for (int i = 0; i < TPW; i++) {
+      amax[i] = fmaxf(amax[i], __shfl_xor_sync(0xffffffffu, amax[i], d));
+    }
+  }
 #pragma unroll
   for (int i = 0; i < TPW; i++) {
     int const t = TPW * warp + i;
-    float2 const a = __bfloat1622float2(
-                     *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].x)),
-                 b = __bfloat1622float2(
-                     *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].y));
-    float amax =
-        fmaxf(fmaxf(fabsf(a.x), fabsf(a.y)), fmaxf(fabsf(b.x), fabsf(b.y)));
-    for (int d = 16; d > 0; d >>= 1) { // amax of the 32 lanes
-      amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, d));
+    float const s = fmaxf(amax[i], 1.0e-10f) * (1.0f / 448.0f);
+    float const r = __frcp_rn(s);
+    uint32_t const q = (uint32_t)cvt_e4m3_nv(gq_div(a[i].x, s, r)) |
+                       ((uint32_t)cvt_e4m3_nv(gq_div(a[i].y, s, r)) << 8) |
+                       ((uint32_t)cvt_e4m3_nv(gq_div(b[i].x, s, r)) << 16) |
+                       ((uint32_t)cvt_e4m3_nv(gq_div(b[i].y, s, r)) << 24);
+    bool const live = T >= 8 || t < T; // (T < 8: this warp's token)
+    if (lane == 0 && live) {
+      scale_s[t] = s;
     }
-    float const s = fmaxf(amax, 1.0e-10f) * (1.0f / 448.0f);
-    uint32_t const q = (uint32_t)cvt_e4m3(__fdiv_rn(a.x, s)) |
-                       ((uint32_t)cvt_e4m3(__fdiv_rn(a.y, s)) << 8) |
-                       ((uint32_t)cvt_e4m3(__fdiv_rn(b.x, s)) << 16) |
-                       ((uint32_t)cvt_e4m3(__fdiv_rn(b.y, s)) << 24);
+    uint32_t const q1 = __shfl_down_sync(0xffffffffu, q, 1),
+                   q2 = __shfl_down_sync(0xffffffffu, q, 2),
+                   q3 = __shfl_down_sync(0xffffffffu, q, 3);
+    if ((lane & 3) == 0 && live) {
+      *reinterpret_cast<uint4 *>(g.rv + ZOFF + (size_t)t * L + kt * 128 +
+                                 4 * lane + rg_set()) =
+          make_uint4(q, q1, q2, q3);
+    }
+  }
+  __syncthreads();
+  if constexpr (T >= 4) {
+    if (threadIdx.x < T * 4 / 16) { // the T scales of this K tile: two stores
+      *reinterpret_cast<uint4 *>(
+          g.rv + ZOFF + (size_t)T * L + (size_t)kt * T * 4 + threadIdx.x * 16 +
+          rg_set()) = reinterpret_cast<uint4 const *>(scale_s)[threadIdx.x];
+    }
+  } else if (threadIdx.x < T) { // T = 1, 2: 4 T bytes, a store per token
+    *reinterpret_cast<float *>(g.rv + ZOFF + (size_t)T * L +
+                               (size_t)kt * T * 4 + threadIdx.x * 4 +
+                               rg_set()) = scale_s[threadIdx.x];
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    cnt_add(done_cnt, 1); // Publish all threads' stores after the CTA barrier.
+  }
+}
+
+// The same for token tile z of NZ (grid y; T >= 16): the tokens [TT z, TT z +
+// TT), TT = T / NZ a multiple of 8, the 8 warps TT / 8 tokens each. At T = 64 a
+// task of all tokens quantizes 8 tokens a warp on L / 128 SMs while the others
+// idle (the DSA layer's v, 32 tasks: 6.9 us after its last input; 4 tiles: 2.4)
+template <size_t ZOFF, int L, int NZ>
+__device__ __forceinline__ void group_quant_tile_task(G const &g,
+                                                      __nv_bfloat16 const *x,
+                                                      uint32_t *done_cnt,
+                                                      int kt,
+                                                      int z) {
+  __shared__ __align__(16) float scale_s[T];
+  constexpr int TT = T / NZ, TPW = TT / 8; // tokens per warp (all 8 warps)
+  static_assert(NZ > 1 && NZ * TT == T && TT % 8 == 0,
+                "group_quant: token tiles of whole 8-token groups");
+  int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31, t0 = TT * z;
+  // The previous task finished its scale_s reads before its final barrier.
+  // warp w: tokens TPW w .. TPW w + TPW - 1, a lane 4 columns of each; the
+  // warp's loads first, all in flight at once (one round trip, not one per
+  // token)
+  uint2 raw[TPW];
+#pragma unroll
+  for (int i = 0; i < TPW; i++) { // Bypass L1 because another SM can produce x.
+    asm volatile("ld.relaxed.gpu.global.v2.u32 {%0, %1}, [%2];"
+                 : "=r"(raw[i].x), "=r"(raw[i].y)
+                 : "l"(x + (size_t)(t0 + TPW * warp + i) * L + kt * 128 +
+                       4 * lane)
+                 : "memory");
+  }
+  // the amax of every token of the warp first: TPW independent shuffle chains,
+  // interleaved (one token after the other: a chain of shuffles per token)
+  float2 a[TPW], b[TPW];
+  float amax[TPW];
+#pragma unroll
+  for (int i = 0; i < TPW; i++) {
+    a[i] = __bfloat1622float2(
+        *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].x));
+    b[i] = __bfloat1622float2(
+        *reinterpret_cast<__nv_bfloat162 const *>(&raw[i].y));
+    amax[i] = fmaxf(fmaxf(fabsf(a[i].x), fabsf(a[i].y)),
+                    fmaxf(fabsf(b[i].x), fabsf(b[i].y)));
+  }
+#pragma unroll
+  for (int d = 16; d > 0; d >>= 1) { // amax of the 32 lanes
+#pragma unroll
+    for (int i = 0; i < TPW; i++) {
+      amax[i] = fmaxf(amax[i], __shfl_xor_sync(0xffffffffu, amax[i], d));
+    }
+  }
+#pragma unroll
+  for (int i = 0; i < TPW; i++) {
+    int const t = TPW * warp + i; // (of the tile)
+    float const s = fmaxf(amax[i], 1.0e-10f) * (1.0f / 448.0f);
+    float const r = __frcp_rn(s);
+    uint32_t const q = (uint32_t)cvt_e4m3_nv(gq_div(a[i].x, s, r)) |
+                       ((uint32_t)cvt_e4m3_nv(gq_div(a[i].y, s, r)) << 8) |
+                       ((uint32_t)cvt_e4m3_nv(gq_div(b[i].x, s, r)) << 16) |
+                       ((uint32_t)cvt_e4m3_nv(gq_div(b[i].y, s, r)) << 24);
     if (lane == 0) {
       scale_s[t] = s;
     }
@@ -72,16 +182,17 @@ __device__ __forceinline__ void group_quant_task(G const &g,
                    q2 = __shfl_down_sync(0xffffffffu, q, 2),
                    q3 = __shfl_down_sync(0xffffffffu, q, 3);
     if ((lane & 3) == 0) {
-      *reinterpret_cast<uint4 *>(g.rv + ZOFF + (size_t)t * L + kt * 128 +
-                                 4 * lane + rg_set()) =
+      *reinterpret_cast<uint4 *>(g.rv + ZOFF + (size_t)(t0 + t) * L +
+                                 kt * 128 + 4 * lane + rg_set()) =
           make_uint4(q, q1, q2, q3);
     }
   }
   __syncthreads();
-  if (threadIdx.x < T * 4 / 16) { // the T scales of this K tile: two stores
+  if (threadIdx.x < TT * 4 / 16) { // the tile's scales of this K tile
     *reinterpret_cast<uint4 *>(
-        g.rv + ZOFF + (size_t)T * L + (size_t)kt * T * 4 + threadIdx.x * 16 +
-        rg_set()) = reinterpret_cast<uint4 const *>(scale_s)[threadIdx.x];
+        g.rv + ZOFF + (size_t)T * L + ((size_t)kt * T + t0) * 4 +
+        threadIdx.x * 16 + rg_set()) =
+        reinterpret_cast<uint4 const *>(scale_s)[threadIdx.x];
   }
   __syncthreads();
   if (threadIdx.x == 0) {
@@ -120,11 +231,20 @@ __device__ __forceinline__ void run_group_quant(Maps const &,
     }
     __syncthreads();
   }
-  group_quant_task<exchange_offset[SELF::buf], L>(
-      g,
-      buf_at<__nv_bfloat16 const>(g, X::x > 0 ? X::buf : XS),
-      cnt_now(g) + SELF::counter,
-      tk.x);
+  if constexpr (SELF::y == 1) {
+    group_quant_task<exchange_offset[SELF::buf], L>(
+        g,
+        buf_at<__nv_bfloat16 const>(g, X::x > 0 ? X::buf : XS),
+        cnt_now(g) + SELF::counter,
+        tk.x);
+  } else {
+    group_quant_tile_task<exchange_offset[SELF::buf], L, SELF::y>(
+        g,
+        buf_at<__nv_bfloat16 const>(g, X::x > 0 ? X::buf : XS),
+        cnt_now(g) + SELF::counter,
+        tk.x,
+        tk.y);
+  }
 }
 
 template <class SELF,

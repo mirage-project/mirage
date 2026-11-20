@@ -84,8 +84,8 @@ class StaticMoE:
         "iters"}: run_mhc also returns its x_attn, h_post, h_res (moe_demo.build_graph attn_next). tokens: the rows T of
         this layer (default TOKENS; a process may hold several). bank: another StaticMoE's expert bank of this layer
         (self.bank: the weights shared; then its checkpoint tensors as `weights`, for keep_weights). rows: the live rows
-        (default T): the layer of a speculative verify step of `rows` < T rows (bs x the draft tokens): the rows past them
-        are idle: not routed (moe_demo.build_graph valid_rows: no expert of their own), their outputs unused."""
+        (default T): the layer of a step of `rows` < T live rows (a decode step of bs < T requests): the rows past them are
+        idle: not routed (moe_demo.build_graph valid_rows: no expert of their own), their outputs unused."""
         import moe_demo
         from mirage.mpk import compiler
         from mirage.mpk.static_megakernel import StaticMegakernel
@@ -130,7 +130,7 @@ class StaticMoE:
     def _bind(self, name: str, v: torch.Tensor) -> bool:
         """Graph tensor `name` read at v's address from the next launch on (v contiguous, of its dtype and row width, and
         either of T rows or the first rows of a buffer of at least T rows: a CUDA graph's static buffer or a static layer's
-        output, e.g. a verify step's 6 rows of a fused attention layer's x_ffn; the kernel reads the rows beyond v's as idle
+        output, e.g. bs 3 rows of the T = 4 fused attention layer's x_ffn; the kernel reads the rows beyond v's as idle
         rows), else v copied into the layer's own tensor (bound there; fewer rows than T: into its first rows, the others
         keep what they hold). Returns whether v is bound."""
         own = self.t[name]
@@ -152,7 +152,7 @@ class StaticMoE:
         bf16 (the FFN's input), streams [8, 4 H] bf16 (its residual), h_post [8, 4], h_res [8, 16] fp32 (MHCState's; any
         shape of those elements): bound when contiguous and of the dtype, else copied (self.binds). attn_next: (the new
         streams, the next layer's x_attn [8, H] bf16, its h_post [8, 4], h_res [8, 16] fp32)."""
-        rows, T = x.shape[0], self.T   # a verify step of fewer tokens: its rows of the layer's buffers (the others idle)
+        rows, T = x.shape[0], self.T   # a step of fewer rows: its rows of the layer's buffers (the others idle)
         assert 0 < rows <= T, f"run_mhc: {rows} rows, the layer has {T}"
         self.binds = {k: self._bind(k, v[:T]) for k, v in (("x", x), ("streams", streams), ("h_post", h_post),
                                                              ("h_res", h_res))}

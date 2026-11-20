@@ -2,9 +2,9 @@
 // the generated layer (static_schedule.header_code) defines from the graph and
 // the schedules before it includes core.cuh:
 //   STATIC_TOKENS   tokens per step (StaticMegakernel.tokens: the graph's
-//   tensors' first dimension); also the MMA N STATIC_GPUS     GPUs the layer is
-//   divided over (StaticMegakernel.num_gpus) STATIC_SMS      task lists per GPU
-//   = CTAs of the launch, one per SM (the schedules)
+//   tensors' first dimension); 8 or more: also the MMA N STATIC_GPUS     GPUs
+//   the layer is divided over (StaticMegakernel.num_gpus) STATIC_SMS      task
+//   lists per GPU = CTAs of the launch, one per SM (the schedules)
 // and the ring's shared-memory layout. Every other size (the hidden, the
 // experts, ...) is a node's: its params or its producers' (StaticNode,
 // StaticParams), checked by its task type's file. Where each buffer is, and the
@@ -22,24 +22,38 @@
 namespace static_mk {
 
 // ---- kernel-wide sizes (the generated layer's) ----
-constexpr int T = STATIC_TOKENS; // tokens per step; also the MMA N
+constexpr int T = STATIC_TOKENS; // tokens per step
+// TW: the GEMM ring's width = the MMA N (the tensor core takes N in 8s): T,
+// or 8 in a layer of fewer tokens (T = 1, 2, 4: a batch size's own layer).
+// There the activation boxes are 8 rows (the rows past T read as 0: outside
+// the tensor, host.cuh) and an accumulator has 8 columns, of which a task
+// reads the first T.
+constexpr int TW = T < 8 ? 8 : T;
 constexpr int GPUS =
     STATIC_GPUS; // GPUs (an exchange buffer has one slot per GPU)
 constexpr int NSM = STATIC_SMS; // CTAs of the launch, one per SM
-// The GEMM ring (runtime.cuh) uses MMA N = T: T accumulator columns per
-// (tick, issuer), ACC_STAGES ticks: columns T a + ACC_STAGES T iss, 2
-// ACC_STAGES T in all, and the pieces' second accumulator set
-// (scale_promotion.cuh PROMO_COL1) at 512 - 2 ACC_STAGES T. T = 32 keeps 3
+// The GEMM ring (runtime.cuh) uses MMA N = TW: TW accumulator columns per
+// (tick, issuer), ACC_STAGES ticks: columns TW a + ACC_STAGES TW iss, 2
+// ACC_STAGES TW in all, and the pieces' second accumulator set
+// (scale_promotion.cuh PROMO_COL1) at 512 - 2 ACC_STAGES TW. T = 32 keeps 3
 // ticks (columns 0 .. 191 and 320 .. 511: 4 would be 256 and run into the
-// scale chunks at 232 .. 263).
-static_assert(T == 8 || T == 16 || T == 32,
-              "the GEMM ring (runtime.cuh) is written for 8, 16 or 32 tokens: "
-              "MMA N = T, T accumulator columns per issuer");
-constexpr int ACC_STAGES = T <= 16 ? 4 : 3; // TMEM accumulator ticks
-static_assert(ACC_STAGES >= 2 && 2 * ACC_STAGES * T <= 512 - 264 &&
+// scale chunks at 232 .. 263); T = 64 two, all 512 columns (its FP8 MMAs
+// run unscaled: no scale chunk in TMEM, runtime.cuh mma_f8).
+static_assert(T == 1 || T == 2 || T == 4 || T == 8 || T == 16 || T == 32 ||
+                  T == 64,
+              "the GEMM ring (runtime.cuh) is written for 8, 16, 32 or 64 "
+              "tokens (MMA N = T, T accumulator columns per issuer) and for "
+              "1, 2 or 4 (N = 8)");
+constexpr int ACC_STAGES = T <= 16   ? 4
+                           : T == 32 ? 3
+                                     : 2; // TMEM accumulator
+                                          // ticks
+static_assert(ACC_STAGES >= 2 &&
+                  (T == 64 ? 4 * ACC_STAGES * TW <= 512
+                           : 2 * ACC_STAGES * TW <= 512 - 264) &&
                   ACC_STAGES <= 4,
               "the accumulator ticks: both sets clear of the scale chunks "
-              "(columns 232 .. 263), at most 4 barriers each");
+              "(columns 232 .. 263; T = 64: none), at most 4 barriers each");
 // tick -> its columns' index and its round (the barriers' parity: round & 1)
 __host__ __device__ constexpr int acc_slot(int tick) {
   return (int)((unsigned)tick % (unsigned)ACC_STAGES);
@@ -50,12 +64,14 @@ __host__ __device__ constexpr int acc_round(int tick) {
 
 // ---- pipeline depths ----
 // stages of the weight ring (6 do not fit in shared memory next to
-// moe_experts' shared tables; T = 32: 4, the activation's T x 256 B a stage)
-// defined by the generated layer (StaticMegakernel.ring_stages)
+// moe_experts' shared tables; T = 32: 4, T = 64: 3, the activation's T x 256 B
+// a stage), or defined by the generated layer (StaticMegakernel.ring_stages)
 #ifdef STATIC_RING_STAGES
 constexpr int SMAX = STATIC_RING_STAGES;
 #else
-constexpr int SMAX = T <= 16 ? 5 : 4; // static_megakernel.ring_stages
+constexpr int SMAX = T <= 16   ? 5
+                     : T == 32 ? 4
+                               : 3; // static_megakernel.ring_stages
 #endif
 constexpr int W2QD = 4; // entries in moe_experts' shared-memory copy (loader ->
                         // issuers / epilogue; runtime.cuh Rt)
@@ -63,10 +79,10 @@ constexpr int W2QD = 4; // entries in moe_experts' shared-memory copy (loader ->
 // ---- the ring's shared memory (offsets from the 1024-aligned dynamic base); a
 // task type that needs more declares its own after
 //      RING_BYTES (its smem_<name>) ----
-constexpr int W_STAGE = 32768, A_STAGE = T * 256,
+constexpr int W_STAGE = 32768, A_STAGE = TW * 256,
               SF_CHUNK = 512; // SF_CHUNK: one MX scale chunk (128 rows x 4 B)
 constexpr int FSTAGE = W_STAGE + A_STAGE; // one ring stage: a 32 KB weight tile
-                                          // + the activation tile (T x 256 B)
+                                          // + the activation tile (TW x 256 B)
 constexpr int OFF_W = 0;                  // SMAX ring stages
 constexpr int OFF_WSF = SMAX * FSTAGE;    // SMAX x 2 weight scale chunks
 constexpr int RING_BYTES = OFF_WSF + SMAX * 2 * SF_CHUNK;
@@ -77,15 +93,15 @@ __host__ __device__ constexpr int smem_launch_bytes(int need) {
 }
 
 // ---- MMA instruction descriptors ----
-// kind::f16: bf16 x bf16 -> fp32, M = m, N = T
+// kind::f16: bf16 x bf16 -> fp32, M = m, N = TW
 __host__ __device__ constexpr uint32_t idesc_bf16(uint32_t m) {
-  return (1u << 4) | (1u << 7) | (1u << 10) | ((T / 8u) << 17) |
+  return (1u << 4) | (1u << 7) | (1u << 10) | ((TW / 8u) << 17) |
          ((m / 16u) << 24);
 }
 constexpr uint32_t IDESC_MX = (0x08820280u & ~(0x3Fu << 17)) |
-                              ((T / 8u) << 17); // kind::mxf8f6f4: e2m1 x e4m3
-                                                // -> fp32, ue8m0 scales, M128
-                                                // N = T (bits 17..22: N / 8)
+                              ((TW / 8u) << 17); // kind::mxf8f6f4: e2m1 x e4m3
+                                                 // -> fp32, ue8m0 scales, M128
+                                                 // N = TW (bits 17..22: N / 8)
 // Select e4m3 weights: change the A type in bits 7..9 from 5 (e2m1) to 0.
 constexpr uint32_t IDESC_MX_E4M3 = IDESC_MX & ~(7u << 7);
 constexpr uint64_t EVICT_FIRST = 0x12F0000000000000ull,

@@ -12,7 +12,7 @@ The experts are #799's GLM-5.3 MoE tasks (demo/glm53_moe) with Flash's shapes:
               group_quant(x); scaled_moe_experts -> allreduce_send (a token's 18 rows added, bf16 to every GPU) -> the end
               (--end): mhc: hc_post with the finished mHC coefficients (SGLang's MHCState): R'_j = sum_i comb[i][j] R_i +
               post_j (sum over the GPUs); mhc_pre: hc_post_mix + hc_pre: that and the next layer's attention mHC pre (its
-              x_attn, h_post, h_res), as SGLang runs it (MOE_STATIC_END)
+              x_attn, h_post, h_res), as SGLang runs it at the T of moe_static_hook.END_PRE_TOKENS
   check       a PyTorch reference with the kernel's rounding points: fp64 routing; group_quant e4m3 (s = amax / 448); the
               checkpoint's FP8 blocks; h in fp32 -> e4m3 per 128 features; R in fp32, y = bf16(sum R). Checked: the experts
               chosen and their weights, the routed rows of each chosen expert and the shared expert's (this node alone: from
@@ -157,6 +157,8 @@ def gpu_tensors(b: dict, x: torch.Tensor, attn_next: dict = None) -> dict:
              h_post=torch.zeros(T, HC, dtype=torch.float32, device=dev),
              h_res=torch.zeros(T, HC * HC, dtype=torch.float32, device=dev),
              streams_out=torch.zeros(T, HC * H, dtype=torch.bfloat16, device=dev))
+    if T == 64:   # the experts a launch used first, for the next launch's W13 prefetch (scaled_moe_experts_layer last)
+        t["moe_last"] = torch.zeros(1 + 40, dtype=torch.int32, device=dev)
     if attn_next is not None:   # the next layer's attention mHC pre at the end (build_graph): its parameters, the outputs
         hc_small = torch.zeros(32, dtype=torch.float32)
         hc_small[:HC * (HC + 2)], hc_small[HC * (HC + 2):HC * (HC + 2) + 3] = \
@@ -179,7 +181,7 @@ def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None) ->
                           sum over the GPUs, the mHC post, the next attention's mixes with hc_attn_fn) -> hc_pre (the next
                           layer's x_attn = RMSNorm(sum_i pre_i R'_i) input_layernorm, its h_post / h_res exported) -> x_attn,
                           h_post_next, h_res_next
-    valid_rows: the live rows of a speculative verify step (the rows past them are not routed)."""
+    valid_rows: the live rows of a decode step of fewer requests than T (the rows past them are not routed)."""
     mpk.max_counter_lines = 24   # 10 / 14 / 23 counter lines at T = 8 / 16 / 32 (scaled_moe_experts' per-slot counters), more
                                  # than config.cuh's default 16 (STATIC_NODE_COUNTER_LINES)
     a = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
@@ -194,7 +196,8 @@ def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None) ->
     mpk.group_quant_layer(input=a["x"], output=z_q)                                                  # x in FP8, fp32 scales
     mpk.scaled_moe_experts_layer(z_q=z_q, pairs=a["routing_pairs"], w13=a["w13"], w13_scales=a["w13_sf"],
                                  w2=a["w2"], w2_scales=a["w2_sf"], output=a["routed_rows"], swiglu_limit=LIMIT,
-                                 prof=a.get("moe_prof"))                                             # --prof-experts
+                                 prof=a.get("moe_prof"),                                             # --prof-experts
+                                 last=a.get("moe_last"))                                             # T = 64
     r_sent = nt((T, H), bfloat16, "r_sent")
     mpk.allreduce_send_layer(input=a["routed_rows"], output=r_sent)                                  # a token's 18 rows added
     if "x_attn" in t:   # the mHC post and the next layer's attention mHC pre
@@ -437,7 +440,8 @@ def prof_report(prof: torch.Tensor, bar: int, t: dict):
 def run_args(args) -> list:
     """The arguments that decide the graph and the state, for this script in another process (--collect)."""
     return (["--model-dir", args.model_dir, "--layer", str(args.layer), "--tp", str(args.tp), "--rank", str(args.rank), "--seed",
-             str(args.seed), "--x-scale", str(args.x_scale), "--reps", str(args.reps), "--end", args.end]
+             str(args.seed), "--x-scale", str(args.x_scale), "--reps", str(args.reps), "--end", args.end, "--valid-rows",
+             str(args.valid_rows)]
             + [f"--nvcc-flag={f}" for f in args.nvcc_flag])
 
 
@@ -551,7 +555,7 @@ def main():
     ap.add_argument("--plan", help="a plan file of this graph (default: the round-robin plan)")
     ap.add_argument("--end", choices=("mhc", "mhc_pre"), default="mhc",
                     help="the graph's end: the mHC post with random streams and coefficients, or that and the next layer's "
-                    "attention mHC pre (what SGLang runs with MOE_STATIC_END=mhc_pre)")
+                    "attention mHC pre (what SGLang runs at the T of moe_static_hook.END_PRE_TOKENS)")
     ap.add_argument("--collect", metavar="FILE", help="a cost collection: every plan of plan_gen.collection_plans and the "
                     "round-robin plan run by this script with --record FILE (--jobs at a time; a run with a result.json is skipped)")
     ap.add_argument("--jobs", type=int, default=4, help="with --collect: plans run at once")
@@ -572,8 +576,8 @@ def main():
                     "bit (a kernel change that keeps the rounding, same --layer --rank --seed)")
     ap.add_argument("--prof-experts", action="store_true", help="the experts node's per-SM stamps (scaled_moe_experts_layer "
                     "prof=): where its time goes, for the last timed launch")
-    ap.add_argument("--valid-rows", type=int, default=0, help="the live rows (a speculative verify step): the rows past "
-                    "them are not routed (topk_route valid_rows); the checks on the live rows")
+    ap.add_argument("--valid-rows", type=int, default=0, help="the live rows (a decode step of fewer requests than T): the "
+                    "rows past them are not routed (topk_route valid_rows); the checks on the live rows")
     args = ap.parse_args()
     torch.backends.cuda.matmul.allow_tf32 = False
     dev = torch.device("cuda", 0)

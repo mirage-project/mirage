@@ -150,7 +150,7 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
         scores = nt((T, maxctx), float32, "idx_scores")
         mpk.dsa_index_score_layer(iq=iq, kw=kw, index_cache=t["index_cache"], cos_sin=t["cos_sin"], seq_lens=t["seq_lens"],
                                   block_table=t["block_table"], output=scores, chunks=chunks,
-                                  topk=TOPK)   # a token with at most TOPK positions: its tasks compute no scores
+                                  skip_k=TOPK)   # a token with at most TOPK positions: its tasks compute no scores
         mpk.dsa_index_topk_layer(scores=scores, seq_lens=t["seq_lens"], output=t["indices"])
     # mla_split names the sparse_mla buffer: o [T, S, NH, 512] fp32, then lse [T, S, NH] (not the declared shape)
     split = nt((T, NH, 512), float32, "mla_split")

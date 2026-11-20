@@ -18,14 +18,15 @@ attention with the sublayer boundary inside (as Kimi K3's fused layers, #811), b
                CUDA graph buffers: no copy), else copied into the layer's tensors (an eager step's freshly made metadata)
   padding      a CUDA graph of T rows replays with fewer requests: SGLang pads req_pool_indices with 0 and seq_lens with 1;
                request slot 0 is SGLang's dummy (its req_to_token row: the dummy token slot 0), so the padded rows read and
-               write only dummy rows
+               write only dummy rows. A decode step of n < T rows (a CUDA graph of bs 3 on the T = 4 layer):
+               run_fused pads rows n .. T - 1 the same way in the layer's own per-step tensors
   launch       launch_stream on the current stream (a CUDA graph captures it); pdl: a programmatic launch, the kernel lets
                the next one launch at its start (-DSTATIC_PDL_TRIGGER=1)
   ranks        built for the tp ranks, each process its own rank alone (compile_static rank / exchange), the exchange region
                in torch symmetric memory over the TP group (multicast: SGLang's custom all-reduce allocates its push buffers
                so); every rank's layers must be built before any rank's first launch (the hook's barrier)
   plan         a plan file of the fused graph of this T (dsa_fused_demo --search, one GPU's lists) or "rr": the round-robin
-               plan of build_graph's grids; the verify layer: round robin
+               plan of build_graph's grids
 """
 import os
 import sys
@@ -38,8 +39,8 @@ sys.path.insert(0, os.path.join(ROOT, "demo", "glm53_flash"))
 
 TOKENS = int(os.environ.get("STATIC_TOKENS", "8"))   # the default of StaticDSA(tokens=): a process may build several T
 # sparse_mla's splits per token by T (of dsa_layer.MLA_TILES): T = 8: 18 (two tiles each, 144 tasks); T = 16: 9 (four tiles
-# each, 144 tasks: one wave of the 148 SMs); T = 32: 4 (nine tiles each, 128 tasks)
-SPLITS = {8: 18, 16: 9, 32: 4}
+# each, 144 tasks: one wave of the 148 SMs); T = 32: 4 (nine tiles each, 128 tasks); T = 64: 2 (18 tiles each, 128 tasks)
+SPLITS = {1: 18, 2: 18, 4: 18, 8: 18, 16: 9, 32: 4, 64: 2}
 KV_PAGE = 256                   # SGLang's DSA KV page (tokens): one page of the index-K buffer (64 pools)
 PHYS_PAGE = 64                  # SGLang's DSA real_page_table pages (tokens): pooled_real_page_table takes every 4th
 
@@ -60,8 +61,8 @@ def _backed(v: torch.Tensor, rows: int) -> bool:
     return v.untyped_storage().nbytes() - v.storage_offset() * v.element_size() >= rows * rowb
 
 
-_VERIFY_META = {}   # T -> {"key": a forward's key, "owner": the StaticDSA whose own per-token metadata that forward's other
-                    # verify layers of this T read, "n": its rows per request} (run_verify step_key)
+_STEP_META = {}   # T -> {"key": a forward's key, "owner": the StaticDSA whose own per-step metadata that forward's other
+                  # layers of this T read, "n": its rows} (_step_meta)
 
 
 def _exchange_region(nbytes: int, dev, group):
@@ -81,25 +82,19 @@ class StaticDSA:
     """One chosen DSA layer of this rank: the built static layer and its graph tensors."""
 
     def __init__(self, layer: int, model_path: str, rank: int, tp: int, kv_buffer: torch.Tensor, req_to_token: torch.Tensor,
-                 out_root: str, indexer: dict, fused: dict, pdl: bool = False, eps: float = 1e-5, verify: int = 0,
-                 fused_plan: str = "rr", tokens: int = None, requests: int = 1, weights: dict = None):
+                 out_root: str, indexer: dict, fused: dict, pdl: bool = False, eps: float = 1e-5,
+                 fused_plan: str = "rr", tokens: int = None, weights: dict = None):
         """indexer: SGLang's {"pcache": index-K buffer, "tail_k", "tail_score": tail buffers} of the layer. fused (the module
         docstring): {"group": the TP process group, "hc_fn" [24, 4 H], "hc_base" [24], "hc_scale" [3] fp32 (the layer's
         hc_ffn_*), "norm" [H] bf16 (post_attention_layernorm), "norm_eps", "rms_eps", "hc_eps", "iters"}. fused_plan: a plan
-        file of the fused graph of this T or "rr". verify: the layer of a speculative verify step: `verify` draft tokens of a
-        request as rows t at positions seq_lens - 1 + t (the other rows idle), the pooled indexer keys and tail updated token
-        by token (dsa_kpool_update tokens_per_request): run_verify; requests: R requests of T / R rows each (request r's
-        rows from r T / R). tokens: the rows T of this layer (default TOKENS; a process may hold several). weights: another
-        StaticDSA's checkpoint tensors of this layer (dsa_mla.load_layer's), shared."""
+        file of the fused graph of this T or "rr". tokens: the rows T of this layer (default TOKENS; a process may hold
+        several). weights: another StaticDSA's checkpoint tensors of this layer (dsa_mla.load_layer's), shared."""
         import dsa_layer
         import dsa_mla as demo
         from mirage.mpk import compiler
         from mirage.mpk.static_megakernel import StaticMegakernel
 
         T = self.T = tokens if tokens is not None else TOKENS
-        self.requests = int(requests)
-        assert T % self.requests == 0 and (not verify or 0 < T // self.requests <= 8), \
-            f"StaticDSA: {self.requests} requests of {T // self.requests} rows in {T}"
         dev = kv_buffer.device
         assert kv_buffer.dtype == torch.bfloat16 and kv_buffer.shape[-1] == demo.KVL and kv_buffer.is_contiguous(), \
             f"layer {layer}: latent pool {tuple(kv_buffer.shape)} {kv_buffer.dtype}: expected [rows, 1, 512] bf16 " \
@@ -134,28 +129,30 @@ class StaticDSA:
         hc_small = torch.zeros(32, dtype=torch.float32)
         hc_small[:24], hc_small[24:27] = fused["hc_base"].float().cpu(), fused["hc_scale"].float().cpu()
         HCH = fused["hc_fn"].shape[1]
+        # the boundary's outputs: the first T rows of a buffer of at least 8 rows, so the T = 8 MoE layer after a layer of
+        # fewer tokens (T = 1, 2, 4) reads them in place (moe_static_layer._bind: backed; its rows from T on idle, 0)
+        zb = lambda cols, dtype: torch.zeros(max(T, 8), cols, dtype=dtype, device=dev)[:T]
         self.t.update({"o": torch.zeros(T, demo.H, dtype=torch.int64, device=dev),
                        "R_in": torch.zeros(T, HCH, dtype=torch.bfloat16, device=dev),
                        "h_post_in": torch.zeros(T, 4, dtype=torch.float32, device=dev),
                        "h_res_in": torch.zeros(T, 16, dtype=torch.float32, device=dev),
-                       "R_out": torch.zeros(T, HCH, dtype=torch.bfloat16, device=dev),
+                       "R_out": zb(HCH, torch.bfloat16),
                        "hc_ffn_fn": fused["hc_fn"].float().contiguous().to(dev), "hc_ffn_small": hc_small.to(dev),
                        "ffn_norm": fused["norm"].to(torch.bfloat16).contiguous().to(dev),
-                       "x_ffn": torch.zeros(T, demo.H, dtype=torch.bfloat16, device=dev),
-                       "h_post_out": torch.zeros(T, 4, dtype=torch.float32, device=dev),
-                       "h_res_out": torch.zeros(T, 16, dtype=torch.float32, device=dev)})
+                       "x_ffn": zb(demo.H, torch.bfloat16), "h_post_out": zb(4, torch.float32),
+                       "h_res_out": zb(16, torch.float32)})
+        self.post_only = bool(fused.get("post_only"))   # fused["post_only"]: run_fused returns R' alone
         mpk = StaticMegakernel(num_gpus=tp)
-        grids = dsa_layer.build_graph(mpk, self.t, 1, SPLITS.get(T, 18), eps, 1e-6, {
+        grids = dsa_layer.build_graph(mpk, self.t, 1, SPLITS[T], eps, 1e-6, {
             "rms_eps": fused["rms_eps"], "hc_eps": fused["hc_eps"], "norm_eps": fused["norm_eps"], "iters": fused["iters"],
-            "verify": bool(verify), "requests": self.requests})
+            "post_only": self.post_only})
         if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the layer's GEMM weights into L2 at its start (core.cuh kernel_begin)
             mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
-        # the searched plans are of the decode graphs (kpool_update per request): a verify layer runs round robin
-        self.plan = "rr" if verify or not fused_plan else fused_plan
+        self.plan = fused_plan or "rr"
         plan = demo.round_robin_plan(mpk, grids) if self.plan == "rr" else compiler.plan_from_file(self.plan)
-        out_dir = os.path.join(out_root, f"rank{rank}", f"layer{layer}{f'_t{T}' if T != 8 else ''}{'_verify' if verify else ''}")
+        out_dir = os.path.join(out_root, f"rank{rank}", f"layer{layer}{f'_t{T}' if T != 8 else ''}"
+                               f"{'_post' if self.post_only else ''}")
         flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"]
-        self.verify = int(verify)
         self.group = fused["group"]
         self.fused_args = fused
         # every rank: the same lists; this rank alone, the exchange region in symmetric memory
@@ -169,7 +166,6 @@ class StaticDSA:
         self.w = w   # the checkpoint's tensors of this rank (dsa_mla.load_layer)
         self._bound = {}    # graph tensor name -> the address bound now
         self.binds = None   # the last run's: per per-step input, bound (True) or copied (False)
-        self.gather = {}    # run_verify with R > 1 requests: the outputs' rows gathered, per output
 
     def _bind(self, name: str, tensor: torch.Tensor):
         if self._bound.get(name) != tensor.data_ptr():
@@ -208,82 +204,73 @@ class StaticDSA:
                 lambda own: own.copy_(self.req_to_token[rpi.long()][:, ::KV_PAGE][:, :self.maxpp] // KV_PAGE))}
         self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
 
-    def run_verify(self, hidden_states, residual, h_post, h_res, seq_lens, req_pool_indices, step_key=None):
-        """The verify layer (StaticDSA verify): R = self.requests requests' n <= verify draft tokens each as rows (request
-        r's at rows r n .. r n + n - 1 of the inputs, as run_fused's; rows r NT .. of the layer, NT = T / R, the rest
-        idle), the requests' context lengths seq_lens (int32 [>= R]: the tokens are at positions seq_len + t) and request
-        slots req_pool_indices (int64 [>= R]); returns run_fused's outputs' R n rows (contiguous). With R = 1 an input is
-        bound (no copy) when it is the first rows of a buffer of at least T rows (_backed: a CUDA graph's static buffer, a
-        static layer's output; the kernel reads its idle rows too), else copied into the layer's own (self.binds). The
-        per-token metadata (seq_lens, the page tables, the slot; the idle rows' seq_lens 0) is the same for every verify
-        layer of a forward: with step_key (the forward's key, the hook's), the first layer run in a forward fills its own
-        tensors and the others bind theirs to them (_VERIFY_META; a CUDA graph captures the first layer's fills once)."""
-        assert self.verify
-        R, NT = self.requests, self.T // self.requests
-        rows = hidden_states.shape[0]
-        assert rows % R == 0 and 0 < rows // R <= self.verify, \
-            f"run_verify: {rows} rows of {R} requests, the layer's draft tokens {self.verify}"
-        n = rows // R
+    def _inputs(self, srcs, rows: int) -> dict:
+        """x and the boundary's inputs ((graph tensor, source) of `rows` rows): a source is bound (no copy) when it is
+        the first rows of a buffer of at least T rows (_backed: a CUDA graph's static buffer, a static layer's output; the
+        kernel reads its idle rows too), else copied into the layer's own first rows. Returns name -> bound."""
         own = self.t
         binds = {}
-        for name, src in (("x", hidden_states), ("R_in", residual), ("h_post_in", h_post), ("h_res_in", h_res)):
+        for name, src in srcs:
             src = src.reshape(rows, -1)
-            ok = R == 1 and src.dtype == own[name].dtype and src.shape[1] == own[name].shape[1] and _backed(src, self.T)
+            ok = src.dtype == own[name].dtype and src.shape[1] == own[name].shape[1] and _backed(src, self.T)
             if ok:
                 self._bind(name, src)
             else:
                 self._bind(name, own[name])
-                if R == 1:
-                    own[name][:n].copy_(src)
-                else:
-                    own[name].view(R, NT, -1)[:, :n].copy_(src.reshape(R, n, -1))
+                own[name][:rows].copy_(src)
             binds[name] = ok
+        return binds
+
+    def _step_meta(self, step_key, n: int, fill) -> bool:
+        """The per-step metadata (seq_lens, the page tables, the request slots) of a step that does not read SGLang's: the
+        same for every layer of this T in a forward, so with step_key (the forward's key, the hook's) the first layer run in
+        a forward fills its own tensors (fill(own)) and the others bind theirs to them (_STEP_META; a CUDA graph captures
+        the first layer's fills once). Returns True when bound to another layer's."""
         META = ("seq_lens", "block_table", "req_slots", "pooled_bt")
-        shared = _VERIFY_META.get(self.T)
+        shared = _STEP_META.get(self.T)
         if step_key is not None and shared is not None and shared["key"] == step_key and shared["n"] == n and \
                 shared["owner"] is not self:
             for name in META:   # this forward's metadata, in another layer's tensors
                 self._bind(name, shared["owner"].t[name])
-            binds["meta"] = True
-        else:
-            for name in META:
-                self._bind(name, own[name])
-            own["seq_lens"].zero_()
-            ar = torch.arange(1, n + 1, dtype=torch.int32, device=own["seq_lens"].device)
-            own["seq_lens"].view(R, NT)[:, :n].copy_(seq_lens[:R].to(torch.int32)[:, None] + ar[None, :])
-            rpi = req_pool_indices[:R].long()
-            row = self.req_to_token[rpi]                       # [R, width]
-            own["block_table"].view(R, NT, -1)[:, :n].copy_(row[:, None, :].expand(R, n, -1))
-            own["req_slots"].view(R, NT)[:, :n].copy_(rpi[:, None].expand(R, n))
-            own["pooled_bt"].view(R, NT, -1)[:, :n].copy_(
-                (row[:, ::KV_PAGE][:, :self.maxpp] // KV_PAGE)[:, None, :].expand(R, n, -1))
-            if step_key is not None:
-                _VERIFY_META[self.T] = {"key": step_key, "owner": self, "n": n}
-            binds["meta"] = False
-        self.binds = binds
-        self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
-        if R == 1:
-            return own["x_ffn"][:n], own["R_out"][:n], own["h_post_out"][:n], own["h_res_out"][:n]
-        outs = []
-        for name in ("x_ffn", "R_out", "h_post_out", "h_res_out"):   # the requests' rows gathered (contiguous)
-            g = self.gather.get(name)
-            if g is None:
-                g = self.gather[name] = torch.empty_like(own[name])
-            g[:rows].view(R, n, -1).copy_(own[name].view(R, NT, -1)[:, :n])
-            outs.append(g[:rows])
-        return tuple(outs)
+            return True
+        for name in META:
+            self._bind(name, self.t[name])
+        fill(self.t)
+        if step_key is not None:
+            _STEP_META[self.T] = {"key": step_key, "owner": self, "n": n}
+        return False
 
-    def run_fused(self, hidden_states, residual, h_post, h_res, seq_lens, req_pool_indices, meta=None):
+    def run_fused(self, hidden_states, residual, h_post, h_res, seq_lens, req_pool_indices, meta=None, step_key=None):
         """The decode layer (the module docstring): one launch on the current stream from the attention's input
-        hidden_states [T, H] bf16, the streams residual [T, 4 H] bf16 and the attention's h_post [T, 4] / h_res [T, 16] fp32
-        (bound when contiguous, else copied) to (x_ffn [T, H] bf16, R' [T, 4 H] bf16, the FFN's h_post [T, 4], h_res
-        [T, 16] fp32): the layer's own buffers. The other inputs as _launch."""
-        for name, src in (("R_in", residual), ("h_post_in", h_post), ("h_res_in", h_res)):
-            src = src.reshape(src.shape[0], -1)
-            if src.is_contiguous() and src.dtype == self.t[name].dtype and src.shape[1] == self.t[name].shape[1]:
-                self._bind(name, src)
-            else:
-                self._bind(name, self.t[name])
-                self.t[name].copy_(src[:self.T])
-        self._launch(hidden_states, seq_lens, req_pool_indices, meta)
-        return self.t["x_ffn"], self.t["R_out"], self.t["h_post_out"], self.t["h_res_out"]
+        hidden_states [n, H] bf16, the streams residual [n, 4 H] bf16 and the attention's h_post [n, 4] / h_res [n, 16]
+        fp32, n <= T rows, to (x_ffn [n, H] bf16, R' [n, 4 H] bf16, the FFN's h_post [n, 4], h_res [n, 16] fp32): the
+        first n rows of the layer's own buffers. n = T: the inputs bound when contiguous, else copied; the other inputs as
+        _launch. n < T requests (a CUDA graph of fewer rows): the inputs as _inputs; the per-step metadata from seq_lens /
+        req_pool_indices' first n entries, rows n .. T - 1 padded as SGLang pads a CUDA graph (request slot 0, seq_len 1),
+        as _step_meta (SGLang's metadata buffers hold other graphs' rows past n)."""
+        n, T = hidden_states.shape[0], self.T
+        if n < T:
+            binds = self._inputs((("x", hidden_states), ("R_in", residual), ("h_post_in", h_post), ("h_res_in", h_res)), n)
+
+            def fill(own):
+                own["seq_lens"][:n].copy_(seq_lens[:n])
+                own["seq_lens"][n:].fill_(1)
+                own["req_slots"][:n].copy_(req_pool_indices[:n])
+                own["req_slots"][n:].zero_()
+                own["block_table"].copy_(self.req_to_token.index_select(0, own["req_slots"]))
+                own["pooled_bt"].copy_(own["block_table"][:, ::KV_PAGE][:, :self.maxpp] // KV_PAGE)
+            binds["meta"] = self._step_meta(step_key, n, fill)
+            self.binds = binds
+            self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
+        else:
+            for name, src in (("R_in", residual), ("h_post_in", h_post), ("h_res_in", h_res)):
+                src = src.reshape(src.shape[0], -1)
+                if src.is_contiguous() and src.dtype == self.t[name].dtype and src.shape[1] == self.t[name].shape[1]:
+                    self._bind(name, src)
+                else:
+                    self._bind(name, self.t[name])
+                    self.t[name].copy_(src[:T])
+            self._launch(hidden_states, seq_lens, req_pool_indices, meta)
+        if self.post_only:
+            return None, self.t["R_out"][:n], None, None
+        return self.t["x_ffn"][:n], self.t["R_out"][:n], self.t["h_post_out"][:n], self.t["h_res_out"][:n]
