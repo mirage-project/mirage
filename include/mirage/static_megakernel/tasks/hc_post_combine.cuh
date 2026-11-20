@@ -61,6 +61,23 @@ namespace static_mk {
     STAGE_STAMP_AT(1)                                                          \
   }
 
+// -DHCP_FAST_END (11-19, default off): the task's end without its trailing
+// waits. A thread re-arms its GPUs' slots right after it has read them (each
+// 16-B slot has one reader, this thread), not after x behind two barriers; and
+// the node's counter += 1 is relaxed: no node waits on it (the next kernel
+// reads x after this one has ended), so its release fence, which waits for
+// x's stores, leaves the kernel's last task. The same values: outputs
+// identical. Not with H1 (STATIC_X_FLAG releases the x flag at the end).
+#ifdef HCP_FAST_END
+#ifdef STATIC_X_FLAG
+#error "HCP_FAST_END: not with STATIC_X_FLAG (H1)"
+#endif
+__device__ __forceinline__ void hcp_cnt_add_relaxed(uint32_t *c, uint32_t v) {
+  asm volatile("red.relaxed.gpu.global.add.u32 [%0], %1;" ::"l"(c), "r"(v)
+               : "memory");
+}
+#endif
+
 template <size_t SOFF, int H, int HC, int Q, bool NORM>
 __device__ HC_TASK_INLINE void
     hc_post_combine_task(G const &g,
@@ -155,6 +172,12 @@ __device__ HC_TASK_INLINE void
     float s[8];
     if (real) {
       allreduce_land_bf16<S_RANK>(g, row, v, s);
+#ifdef HCP_FAST_END
+      if constexpr (REARM) { // this thread's slots, read: 0xFF for launch n + 2
+        asm volatile("" ::: "memory"); // (after the polled loads)
+        allreduce_rearm<S_RANK>(g, row, v);
+      }
+#endif
 #ifdef HCP_SYNCWARP // the warp's threads leave the polling loop in groups: one group again
       static_assert(NV % 32 == 0, "HCP_SYNCWARP: whole warps");
       __syncwarp();
@@ -384,6 +407,7 @@ __device__ HC_TASK_INLINE void
     }
   }
   if constexpr (REARM) {
+#ifndef HCP_FAST_END // (HCP_FAST_END: re-armed after the landing)
     __syncthreads(); // a pair of lanes has read its vector
 #ifdef STATIC_X_FLAG
     // H1: x and R' of this task are stored (the barrier): the next kernel's
@@ -398,11 +422,16 @@ __device__ HC_TASK_INLINE void
     if (v < NV && real) {
       allreduce_rearm<S_RANK>(g, row, v);
     }
+#endif
   }
   __syncthreads();
   }
   if (v == 0) {
+#ifdef HCP_FAST_END
+    hcp_cnt_add_relaxed(done_cnt, 1); // (no node waits on it)
+#else
     cnt_add(done_cnt, 1); // release: this task's columns
+#endif
   }
 }
 
