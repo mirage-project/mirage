@@ -16,6 +16,7 @@
 #include "tasks/common/utils.cuh"
 
 #include <cutlass/arch/barrier.h>
+#include <math_constants.h>
 
 namespace kernel {
 template <typename T>
@@ -26,7 +27,8 @@ __device__ __forceinline__ void warp_reduce_max_idx_sm100(T &val,
     float tmp = __shfl_down_sync(0xffffffff, (float)val, offset);
     T other_val = (T)tmp;
     long long other_idx = __shfl_down_sync(0xffffffff, idx, offset);
-    if (other_val > val) {
+    // Empty lanes must lose ties to real negative-infinity candidates.
+    if (other_val > val || (idx < 0 && other_idx >= 0)) {
       val = other_val;
       idx = other_idx;
     }
@@ -58,7 +60,7 @@ __device__ __forceinline__ void block_reduce_max_idx_sm100(T &val,
 
   // Only thread 0 holds the final result
   if (my_warp_id == 0) {
-    T block_max_val = T(-inf);
+    T block_max_val = T(-CUDART_INF_F);
     long long block_max_idx = -1;
 
     int num_warps = (NUM_THREADS + 31) >> log2_constexpr(NUM_THREADS_PER_WARP);
@@ -100,12 +102,12 @@ __device__ __forceinline__ void
 // TODO: try vectorize
 #pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
-      T local_max = T(-inf);
+      T local_max = T(-CUDART_INF_F);
       long long local_idx = -1;
 #pragma unroll
       for (int i = tidx; i < valid_len; i += NUM_THREADS) {
         T val = input[i + batch_idx * CHUNK_SIZE * NUM_PARTIAL_TASKS];
-        if (val > local_max) {
+        if (val > local_max || (local_idx < 0 && val == local_max)) {
           local_max = val;
           local_idx = i;
         }
@@ -140,18 +142,19 @@ __device__ __forceinline__ void
 // TODO: try vectorize
 #pragma unroll
     for (int batch_idx = 0; batch_idx < num_active_tokens; batch_idx++) {
-      T local_max = T(-inf);
+      T local_max = T(-CUDART_INF_F);
       // Pack (chunk_index, relative_index) into a single 64-bit integer
       long long local_packed_idx = -1;
 
 #pragma unroll
       for (int i = tidx; i < NUM_PARTIAL_TASKS; i += NUM_THREADS) {
         T current_val = partial_vals[i + batch_idx * NUM_PARTIAL_TASKS];
-        if (current_val > local_max) {
+        long long current_idx = partial_idxs[i + batch_idx * NUM_PARTIAL_TASKS];
+        if (current_idx >= 0 &&
+            (local_packed_idx < 0 || current_val > local_max)) {
           local_max = current_val;
           // Higher 32 bits for chunk_index (i), lower 32 for relative_index
-          local_packed_idx = ((long long)i << 32) |
-                             partial_idxs[i + batch_idx * NUM_PARTIAL_TASKS];
+          local_packed_idx = ((long long)i << 32) | current_idx;
         }
       }
 
@@ -166,8 +169,9 @@ __device__ __forceinline__ void
           // tokens[step + 1] = winning_chunk_idx * CHUNK_SIZE +
           // winning_relative_idx;
         } else {
-          final_output[batch_idx] = -1;
-          // tokens[step + 1] = -1;
+          // All-NaN rows have no ordered winner; return the first vocabulary
+          // entry.
+          final_output[batch_idx] = 0;
         }
       }
     }

@@ -802,5 +802,16 @@ class KNGraph:
     def register_task(self, bgraph: TBGraph, task_type: str, params: list[int] = None):
         return self.cygraph.register_task(bgraph.cygraph, task_type, params)
 
+    def regrid(self, op_idx: int, grid_dim: tuple, params: list[int]):
+        """Rebuild operator op_idx with a new grid (same tensors and partition maps) and register its task again with params."""
+        return self.cygraph.regrid(op_idx, tuple(grid_dim), list(params))
+
+    def get_num_operators(self) -> int:
+        return self.cygraph.get_num_operators()
+
+    def get_task_info(self, op_idx: int):
+        """(name, params, grid_dim, num_inputs, num_outputs, tensors) of the task registered for operator op_idx, or None."""
+        return self.cygraph.get_task_info(op_idx)
+
     def generate_task_graph(self, num_gpus: int, my_gpu_id: int):
         return self.cygraph.generate_task_graph(num_gpus, my_gpu_id)

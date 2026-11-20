@@ -225,6 +225,80 @@ enum TaskType {
   // Clamped-alpha SwiGLU: (clamp(up) + 1) * clamp(gate) * sigmoid(gate*alpha)
   TASK_CLAMPED_SWIGLU = 451,
   TASK_GPT_OSS_TASK_END = 499, // end placeholder, not a real task
+  // static megakernel tasks (include/mirage/static_megakernel/), SM100 / SM103;
+  // they run only in the generated static-schedule layer
+  TASK_STATIC_TASK_BEGIN = 500, // begin placeholder, not a real task
+  // bf16 [8 x K-range] x [K-range x 128 or 64] tile; params[0] says how the K
+  // parts (grid y) are combined; the activation by tensor map or polled
+  TASK_GEMM_TILE_SM100 = 501,
+  // one token: add the router's K parts, sigmoid + bias, top-k, renorm
+  TASK_TOPK_ROUTE_SM100 = 502,
+  // 128 columns: add the K parts, MXFP8 quantize, send to every GPU
+  TASK_SUM_QUANT_SEND_SM100 = 503,
+  // SiTU(gate) * up of a block of features (SGLang's situ_and_mul)
+  TASK_SITU_AND_MUL_SM100 = 504,
+  // the routed experts on one SM (a dynamic queue of W13 / W2 entries)
+  TASK_MOE_EXPERTS_SM100 = 505,
+  // all-reduce: send this GPU's partial sum to every GPU
+  // (tasks/allreduce_send.cuh)
+  TASK_ALLREDUCE_SEND_SM100 = 506,
+  // add the GPUs' partial sums, then RMSNorm (tasks/sum_rmsnorm.cuh)
+  TASK_SUM_RMSNORM_SM100 = 507,
+  // add the GPUs' partial sums (tasks/sum_gpus.cuh)
+  TASK_SUM_GPUS_SM100 = 508,
+  // add a GEMM's K parts, send to every GPU (tasks/sum_send.cuh)
+  TASK_SUM_SEND_SM100 = 509,
+  // y = (input + addend) + residual (tasks/residual_add.cuh)
+  TASK_RESIDUAL_ADD_SM100 = 510,
+  // Quantize this GPU's bf16 activation to FP8 with fp32 group scales.
+  // scaled_moe_experts and scaled_gemm_tile read it (tasks/group_quant.cuh).
+  TASK_GROUP_QUANT_SM100 = 511,
+  // Compute an e4m3 [8 x K-range] x [K-range x 128] tile.
+  // The epilogue applies fp32 scales per K tile (tasks/scaled_gemm_tile.cuh).
+  TASK_SCALED_GEMM_TILE_SM100 = 512,
+  // Compute SiLU(gate) * up for a feature block (tasks/silu_and_mul.cuh).
+  TASK_SILU_AND_MUL_SM100 = 513,
+  // Process routed expert work on one SM, with e4m3 weights and fp32 scales
+  // (tasks/scaled_moe_experts.cuh).
+  TASK_SCALED_MOE_EXPERTS_SM100 = 514,
+  // mHC pre, second half: Sinkhorn, collapse the streams, RMSNorm
+  // (tasks/hc_pre.cuh)
+  TASK_HC_PRE_SM100 = 516,
+  // KDA of one (request, head), its tokens in order: conv, gates, delta
+  // rule, o_norm (tasks/kda_decode.cuh)
+  TASK_KDA_DECODE_SM100 = 517,
+  // mHC post: add the GPUs' partial sums, mix them into the residual streams
+  // (tasks/hc_post.cuh)
+  TASK_HC_POST_SM100 = 518,
+  // Apply the MLA q_a_layernorm, q_c = RMSNorm(q_a) * gamma, and quantize
+  // q_c to e4m3 with fp32 scales (tasks/dsa_q_norm_quant.cuh).
+  TASK_DSA_Q_NORM_QUANT_SM100 = 519,
+  // Write the MLA latent cache row of this step (tasks/dsa_kv_write.cuh).
+  TASK_DSA_KV_WRITE_SM100 = 520,
+  // Write the DSA indexer key of this step in FP8 with a UE8M0 scale
+  // (tasks/dsa_index_k_write.cuh).
+  TASK_DSA_INDEX_K_WRITE_SM100 = 521,
+  // Compute the absorbed MLA query: q_nope W_UK and the rotated q_pe
+  // (tasks/dsa_q_absorb.cuh).
+  TASK_DSA_Q_ABSORB_SM100 = 522,
+  // Compute the DSA indexer scores, FP8 MQA logits (tasks/dsa_index_score.cuh).
+  TASK_DSA_INDEX_SCORE_SM100 = 523,
+  // Select the DSA indexer top-k positions (tasks/dsa_index_topk.cuh).
+  TASK_DSA_INDEX_TOPK_SM100 = 524,
+  // Compute one split of sparse MLA decode over a paged bf16 latent cache
+  // (tasks/sparse_mla.cuh).
+  TASK_SPARSE_MLA_SM100 = 525,
+  // Merge the sparse MLA splits (tasks/dsa_mla_merge.cuh).
+  TASK_DSA_MLA_MERGE_SM100 = 526,
+  // Compute the MLA value up-projection o_lat W_UV (tasks/dsa_o_absorb.cuh).
+  TASK_DSA_O_ABSORB_SM100 = 527,
+  // Update the pooled DSA indexer keys of GLM-5.3-Flash: the tail ring, and
+  // the pool of 4 keys it closes (tasks/dsa_kpool_update.cuh).
+  TASK_DSA_KPOOL_UPDATE_SM100 = 528,
+  // mHC's post step of a TP sublayer and the first half of the next
+  // sublayer's pre step in one task (tasks/hc_post_mix.cuh).
+  TASK_HC_POST_MIX_SM100 = 530,
+  TASK_STATIC_TASK_END = 549, // end placeholder, not a real task
 };
 
 enum EventType {
