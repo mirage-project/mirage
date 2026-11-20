@@ -160,7 +160,8 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
                          output=split, softmax_scale=(cfg["qk_nope_head_dim"] + cfg["qk_rope_head_dim"]) ** -0.5,
                          splits=splits)
     o_lat, v, vq = nt((T, NH, 512), bfloat16, "o_lat"), nt((T, NH * 256), bfloat16, "v"), nt((T, NH * 256), uint8, "v_fp8")
-    mpk.dsa_mla_merge_layer(input=split, output=o_lat)
+    # T = 32: two tokens a merge task (NH x 16 tasks, one round of the SMs; NH x 32 queued a second round)
+    mpk.dsa_mla_merge_layer(input=split, output=o_lat, tokens_per_task=2 if T == 32 else None)
     mpk.dsa_o_absorb_layer(input=o_lat, w_uv=t["w_uv"], output=v)
     mpk.group_quant_layer(input=v, output=vq)
     o, sent, osum = nt((T, H), float32, "o_proj"), nt((T, H), bfloat16, "o_sent"), nt((T, H), bfloat16, "o_sum")

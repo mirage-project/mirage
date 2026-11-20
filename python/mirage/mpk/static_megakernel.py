@@ -1256,6 +1256,7 @@ class StaticMegakernel(PersistentKernel):
         self,
         input: DTensor,         # the sparse_mla output
         output: DTensor,        # o_lat [T, NH, 512] bf16
+        tokens_per_task: int = None,   # G below; None: 1, or 8 at T = 64. G > 1: even, G x the splits <= 32 (a lane per lse)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the split merge (tasks/dsa_mla_merge.cuh). Task (h, y) merges the sparse_mla splits of head h of the tokens
@@ -1267,7 +1268,8 @@ class StaticMegakernel(PersistentKernel):
         T, NH = self._tokens(output.dim(0)), output.dim(1)
         self._dtypes("dsa_mla_merge_layer", input=(input, float32), output=(output, bfloat16))
         assert output.dim(2) == 512
-        G = 8 if T == 64 else 1
+        G = tokens_per_task or (8 if T == 64 else 1)
+        assert T % G == 0 and (G == 1 or G % 2 == 0), "dsa_mla_merge_layer: whole tiles of an even number of tokens (or 1)"
         self._add_node("dsa_mla_merge", (NH, T // G, 1), block_dim, [input, output], [(-1, 0, -1), (1, 0, -1)], [NH],
                        out_buffer=lambda n: (T * NH * 512 * 2, -1, False), counters=NH,
                        buf_slots=[p.info["buf_slots"][2]] if p.params[7] == 1 else [])   # sparse_mla's seq_lens
