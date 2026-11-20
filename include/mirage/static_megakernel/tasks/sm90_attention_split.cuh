@@ -61,9 +61,8 @@ struct Sm90DecodeSplit {
 #define STATIC_ATTN_MIN_TILES 1
 #endif
 template <int PAGE, int WINDOW>
-__device__ __forceinline__ int sm90_decode_tiles(int const *kv_indptr,
-                                                 int const *last_page_len,
-                                                 int r) {
+__device__ __forceinline__ int
+    sm90_decode_tiles(int const *kv_indptr, int const *last_page_len, int r) {
   int const cached = sm90_decode_cached<PAGE>(kv_indptr, last_page_len, r);
   int const lo = WINDOW > 0 ? max(cached - WINDOW + 1, 0) : 0;
   return (cached + 31) / 32 - lo / 32;
@@ -323,6 +322,41 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
     for (int i = 0; i < STAGES; i++) {
       issue(i); // the cache needs no producer: before the wait
     }
+    // what q and the new K / V need with no producer, before the wait: the
+    // RoPE tables at the new token's position, the bias, the token's page
+    // (QKV_BIAS: lane (gq, qd)'s q dims 8 j + 2 qd, + 1 (j < 8: each one's
+    // RoPE partner, j +- 4, among them); the new K / V's dims lane, lane + 32)
+    int const tok = qo[request], pos_new = sp.cached;
+    bool const app = last && slice == 0;
+    bf16 const *cosp =
+        buf_at<bf16 const>(g, slot_at<BUF_SLOTS, 3>()) + (size_t)pos_new * D;
+    bf16 const *sinp =
+        buf_at<bf16 const>(g, slot_at<BUF_SLOTS, 4>()) + (size_t)pos_new * D;
+    __nv_bfloat162 qcs[8], qsn[8], qbs[8];
+    float kcs[2], ksn[2], kbs[2], vbs[2];
+    int new_page = 0;
+    if constexpr (QKV_BIAS) {
+      bf16 const *bias =
+          buf_at<bf16 const>(g, slot_at<BUF_SLOTS, 9>()) + head * W;
+#pragma unroll
+      for (int j = 0; j < 8; j++) {
+        int const d = 8 * j + 2 * qd;
+        qcs[j] = *reinterpret_cast<__nv_bfloat162 const *>(cosp + d);
+        qsn[j] = *reinterpret_cast<__nv_bfloat162 const *>(sinp + d);
+        qbs[j] = *reinterpret_cast<__nv_bfloat162 const *>(bias + gq * D + d);
+      }
+      if (app) {
+#pragma unroll
+        for (int j = 0; j < 2; j++) {
+          int const d = lane + 32 * j;
+          kcs[j] = __bfloat162float(cosp[d]);
+          ksn[j] = __bfloat162float(sinp[d]);
+          kbs[j] = __bfloat162float(bias[QPK * D + d]);
+          vbs[j] = __bfloat162float(bias[(QPK + 1) * D + d]);
+        }
+        new_page = kv_indices[first_page + pos_new / PAGE];
+      }
+    }
     if (!waited) {
       if (threadIdx.x == 0) {
         sm90_wait_inputs<~0u, IN...>(g);
@@ -341,11 +375,6 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
     // q: query head gq of the KV head, dims [16 qd, 16 qd + 16) (+ the bias,
     // rounded to bf16 as the cache's K; RoPE at the new token's position in
     // fp32, rounded again)
-    int const tok = qo[request], pos_new = sp.cached;
-    bf16 const *cosp =
-        buf_at<bf16 const>(g, slot_at<BUF_SLOTS, 3>()) + (size_t)pos_new * D;
-    bf16 const *sinp =
-        buf_at<bf16 const>(g, slot_at<BUF_SLOTS, 4>()) + (size_t)pos_new * D;
     auto qkv_val = [&](int col) { // column col of the KV head's group, bf16
       size_t const i = (size_t)tok * STRIDE + head * W + col;
       if constexpr (QKV_BIAS) {
@@ -372,12 +401,91 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
     };
     uint32_t
         qa[8]; // k16 step j: dims 16 j + 2 qd, + 1 and 16 j + 8 + 2 qd, + 1
+    if constexpr (QKV_BIAS) {
+      // every load of the lane's q (and new K / V) values in flight at once,
+      // the same sums and roundings as qkv_val / rope
+      float const *qkv = buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()) +
+                         (size_t)tok * STRIDE + head * W;
+      float2 qp[KP][8];
+      float kp[KP][2], vp[KP][2];
 #pragma unroll
-    for (int p = 0; p < 8; p++) {
-      int const d = 8 * p + 2 * qd;
-      qa[p] = pack_bf16(rope(gq, d), rope(gq, d + 1));
+      for (int p = 0; p < KP; p++) {
+#pragma unroll
+        for (int j = 0; j < 8; j++) {
+          qp[p][j] = *reinterpret_cast<float2 const *>(
+              qkv + (size_t)p * T * STRIDE + gq * D + 8 * j + 2 * qd);
+        }
+        if (app) {
+#pragma unroll
+          for (int j = 0; j < 2; j++) {
+            kp[p][j] = qkv[(size_t)p * T * STRIDE + QPK * D + lane + 32 * j];
+            vp[p][j] =
+                qkv[(size_t)p * T * STRIDE + (QPK + 1) * D + lane + 32 * j];
+          }
+        }
+      }
+      float qx[8][2];
+#pragma unroll
+      for (int j = 0; j < 8; j++) {
+        float x = qp[0][j].x, y = qp[0][j].y;
+#pragma unroll
+        for (int p = 1; p < KP; p++) {
+          x += qp[p][j].x, y += qp[p][j].y;
+        }
+        float2 const b = __bfloat1622float2(qbs[j]);
+        qx[j][0] = __bfloat162float(__float2bfloat16_rn(x + b.x));
+        qx[j][1] = __bfloat162float(__float2bfloat16_rn(y + b.y));
+      }
+#pragma unroll
+      for (int j = 0; j < 8; j++) {
+        float2 const c = __bfloat1622float2(qcs[j]),
+                     sn = __bfloat1622float2(qsn[j]);
+        int const jp = (j + 4) & 7; // the partner dims (d +- D / 2)
+        float r[2];
+#pragma unroll
+        for (int e = 0; e < 2; e++) {
+          float const x = qx[j][e], y = qx[jp][e];
+          float const ce = e ? c.y : c.x, se = e ? sn.y : sn.x;
+          r[e] = __bfloat162float(
+              __float2bfloat16_rn(j < 4 ? x * ce - y * se : x * ce + y * se));
+        }
+        qa[j] = pack_bf16(r[0], r[1]);
+      }
+      if (app) {
+        float kx[2], vx[2];
+#pragma unroll
+        for (int j = 0; j < 2; j++) {
+          float x = kp[0][j], v = vp[0][j];
+#pragma unroll
+          for (int p = 1; p < KP; p++) {
+            x += kp[p][j], v += vp[p][j];
+          }
+          kx[j] = __bfloat162float(__float2bfloat16_rn(x + kbs[j]));
+          vx[j] = __bfloat162float(__float2bfloat16_rn(v + vbs[j]));
+        }
+        size_t const off =
+            (((size_t)new_page * PAGE + pos_new % PAGE) * KVH + head) * D;
+#pragma unroll
+        for (int j = 0; j < 2; j++) {
+          int const d = lane + 32 * j;
+          float const y = kx[1 - j];
+          bf16 const kd = __float2bfloat16_rn(__bfloat162float(
+              __float2bfloat16_rn(j == 0 ? kx[0] * kcs[0] - y * ksn[0]
+                                         : kx[1] * kcs[1] + y * ksn[1])));
+          bf16 const vd = __float2bfloat16_rn(vx[j]);
+          k_cache[off + d] = kd, v_cache[off + d] = vd;
+          new_k[head][d] = kd, new_v[head][d] = vd;
+        }
+        __syncwarp();
+      }
+    } else {
+#pragma unroll
+      for (int p = 0; p < 8; p++) {
+        int const d = 8 * p + 2 * qd;
+        qa[p] = pack_bf16(rope(gq, d), rope(gq, d + 1));
+      }
     }
-    if (last && slice == 0) {
+    if (!QKV_BIAS && last && slice == 0) {
       // the new token: its K and V appended to the cache (no other unit reads
       // that position) and kept for the warp's softmax
       int const page = kv_indices[first_page + pos_new / PAGE];
@@ -428,7 +536,8 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
 #pragma unroll
         for (int c = 0; c < 2; c++) {
           int const pos = tt * 32 + 8 * i + 2 * qd + c;
-          s[i][c] = pos < sp.cached && pos >= sp.lo ? s[i][c] * SCALE : -INFINITY;
+          s[i][c] =
+              pos < sp.cached && pos >= sp.lo ? s[i][c] * SCALE : -INFINITY;
           mx = fmaxf(mx, s[i][c]);
         }
       }
@@ -517,9 +626,10 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
         if (slice == 0) {
           float M = m;
           for (int sl = 1; sl < hg; sl++) {
-            M = fmaxf(M, reinterpret_cast<float const *>(
-                             dyn_smem + (warp + sl * hpu) * STAGES * TILE_BYTES)
-                             [lane * 18]);
+            M = fmaxf(M,
+                      reinterpret_cast<float const *>(
+                          dyn_smem +
+                          (warp + sl * hpu) * STAGES * TILE_BYTES)[lane * 18]);
           }
           float const a0 = m == -INFINITY ? 0.f : ex2(m - M);
           l *= a0;
@@ -546,18 +656,19 @@ __device__ __forceinline__ void run_sm90_attention_split(Maps const &,
     if constexpr (DIRECT) {
       if (slice == 0) { // the one split: out = 2^(L - M) O / (2^(L - M) +
                         // 2^(sink log2 e - M)), M = max(L, sink log2 e)
-      float const L = m + __log2f(l);
-      float const sink =
-          __bfloat162float(buf_at<bf16 const>(g, slot_at<BUF_SLOTS, 12>())[qh]) *
-          1.4426950408889634f;
-      float const M = fmaxf(L, sink), w = exp2f(L - M),
-                  sc = w / (w + exp2f(sink - M)) / l;
-      __nv_bfloat162 *out = buf_at<__nv_bfloat162>(g, slot_at<BUF_SLOTS, 13>()) +
-                            ((size_t)tok * QH + qh) * (D / 2);
+        float const L = m + __log2f(l);
+        float const sink = __bfloat162float(buf_at<bf16 const>(
+                               g, slot_at<BUF_SLOTS, 12>())[qh]) *
+                           1.4426950408889634f;
+        float const M = fmaxf(L, sink), w = exp2f(L - M),
+                    sc = w / (w + exp2f(sink - M)) / l;
+        __nv_bfloat162 *out =
+            buf_at<__nv_bfloat162>(g, slot_at<BUF_SLOTS, 13>()) +
+            ((size_t)tok * QH + qh) * (D / 2);
 #pragma unroll
-      for (int p = 0; p < 8; p++) {
-        out[4 * p + qd] = __floats2bfloat162_rn(o[p][0] * sc, o[p][1] * sc);
-      }
+        for (int p = 0; p < 8; p++) {
+          out[4 * p + qd] = __floats2bfloat162_rn(o[p][0] * sc, o[p][1] * sc);
+        }
       }
     } else {
 #pragma unroll
