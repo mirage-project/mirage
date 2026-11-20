@@ -14,6 +14,8 @@ launch_stream on the caller's stream.
            of every step must be those of the prompt, and every step after the prefill must run here
   sources  a Reuse or Reindex layer reads its source layers' tensors (Source): the same memory
 """
+import hashlib
+import json
 import os
 import sys
 
@@ -34,6 +36,66 @@ _readers = {}
 # then samples per node). Not a serving number: the stamps cost a little in every task.
 TIMING = os.environ.get("DSV41_STATIC_TIMING", "0") != "0"
 I1C_VARIANTS = tuple(os.environ.get("DSV41_I1C_VARIANTS", "full_r2,full_r1,reindex").split(","))   # (DSV41_I1C)
+# (11-20, default off) DSV41_SHARE_MODULES=1: same-kind layers share one kernel module. Each layer is otherwise a module of its
+# own (compile_static loads its own copy of the .so even from the build cache), so in situ every kernel's code comes from HBM.
+# With it, the first layer of a kind builds and loads its module as before; a later layer whose generated layer.cu, flags,
+# device and rank are the same loads nothing and takes that module and its node buffers; before a launch of the module after
+# another layer's, the layer rebinds all its graph tensors (static_host_rebind: the buffer slots read by pointer and the tensor
+# maps over them; a CUDA graph captures the arguments of its moment). The code is then fetched from HBM once a step and found in
+# L2 by the next layers of the kind (the weights stream with evict-first loads; docs/draft.md "Code fetch, measured"). The
+# per-SM launch numbers, both buffer sets and the exchange region follow the module's own launches, which the layers make in
+# turn. Not with the timing build or the in-situ samples (each reads its module's stamps).
+SHARE = os.environ.get("DSV41_SHARE_MODULES", "0") != "0"
+_SHARED = {}   # md5 of layer.cu, the flags, device, rank and GPU count -> [sk, bufs, info, w] of the first layer built with it
+# a graph tensor the module cannot rebind is one of its own buffers: a sharing layer reads the first layer's (aliased in its w);
+# only these may be such (anything else, e.g. a state tensor of the layer's own, is an error). y: with the in-kernel
+# all-reduce the sum's own buffer (written at its build address); with mHC SGLang takes the sublayer's end from hc_state, and y
+# only marks the output (_OUTS in the hook), so every layer of a group returning the first layer's y is the same. x_out: a
+# post that computes no next input (the last layer) reads and writes none
+SHARE_ALIAS = ("oa_q", "y", "x_out")
+
+
+class _ShareHit(Exception):
+    def __init__(self, entry):
+        super().__init__("module shared")
+        self.entry = entry
+
+
+def _build_shared(build, *args, **kw):
+    """build(*args, **kw) (attn_demo.build / moe_demo.build): (sk, bufs, info, shared). With DSV41_SHARE_MODULES, compile_static
+    first generates the layer's code; when a module of the same code, flags, device and rank is loaded, the build stops there
+    and returns that module and its node buffers (shared: the first layer's w, for _init_binds; else None)."""
+    if not SHARE:
+        return (*build(*args, **kw), None)
+    if TIMING or os.environ.get("DSV41_STATIC_PROF", "0") != "0":
+        raise RuntimeError("DSV41_SHARE_MODULES: not with DSV41_STATIC_TIMING / DSV41_STATIC_PROF (each reads its module's stamps)")
+    from mirage.mpk import static_megakernel, static_schedule
+    orig = static_megakernel.StaticMegakernel.compile_static
+    key = []
+
+    def compile_static(self, schedule_paths, gpu_tensors=None, out_dir=None, extra_flags=None, profile=False, device=0,
+                       rank=None, exchange=None):
+        schedules = []
+        for path in schedule_paths:
+            with open(path) as f:
+                schedules.append(json.load(f))
+        h = hashlib.md5(static_schedule.generate_code(self, schedules, profile).encode())
+        h.update(repr((list(extra_flags or []), int(device), rank, len(schedule_paths))).encode())
+        key.append(h.hexdigest())
+        if key[-1] in _SHARED:
+            raise _ShareHit(_SHARED[key[-1]])
+        return orig(self, schedule_paths, gpu_tensors, out_dir, extra_flags=extra_flags, profile=profile, device=device,
+                    rank=rank, exchange=exchange)
+
+    static_megakernel.StaticMegakernel.compile_static = compile_static
+    try:
+        sk, bufs, info = build(*args, **kw)
+    except _ShareHit as e:
+        return (*e.entry[:3], e.entry[3])
+    finally:
+        static_megakernel.StaticMegakernel.compile_static = orig
+    _SHARED[key[-1]] = [sk, bufs, info, None]   # (w: set by the layer, _init_binds)
+    return sk, bufs, info, None
 
 
 def _exchange_region(nbytes: int, dev, group):
@@ -92,14 +154,56 @@ def mhc_tensors(read, layer: int, kind: str, gamma_name: str, dev, stats: bool =
 
 
 class MhcMixin:
-    """A static layer whose kernel also runs mHC: the streams it reads, and the state SGLang's next sublayer takes."""
+    """A static layer whose kernel also runs mHC: the streams it reads, and the state SGLang's next sublayer takes. Also the
+    layer's bindings (every rebind goes through _rb; DSV41_SHARE_MODULES: _own before a launch)."""
+
+    def _rb(self, name: str, ptr: int):
+        """sk.rebind, remembered as this layer's binding; with a shared module only while this layer holds it (else _own)."""
+        self.binds[name] = ptr
+        if not SHARE or getattr(self.sk, "_owner", None) is self:
+            self.sk.rebind(name, ptr)
+
+    def _init_binds(self, w: dict, first: dict):
+        """(DSV41_SHARE_MODULES) this layer's bindings: every graph tensor of w that the module reads by pointer or through a
+        tensor map, rebound now (this layer holds the module from here on). first: the w of the layer that built the module
+        (None: this one built it, and whatever it cannot rebind is its own). In a sharing layer a tensor the module cannot
+        rebind is the first layer's (a node's output, kept at its build address, or unused): allowed for SHARE_ALIAS only,
+        and its w takes the first layer's tensor of that name (the one the module writes)."""
+        fixed = []
+        for name, t in w.items():
+            if not torch.is_tensor(t):
+                continue
+            try:
+                self.sk.rebind(name, t.data_ptr())
+                self.binds[name] = t.data_ptr()
+            except KeyError:
+                fixed.append(name)
+        bad = [n for n in fixed if n not in SHARE_ALIAS] if first is not None else []
+        if bad:
+            raise RuntimeError(f"DSV41_SHARE_MODULES: {type(self).__name__} L{self.layer}: graph tensors the module cannot "
+                               f"rebind (a layer's own state or weights would be another layer's): {bad}")
+        if first is not None:
+            for name in fixed:
+                w[name] = first[name]
+        else:
+            next(v for v in _SHARED.values() if v[0] is self.sk)[3] = w
+        self.sk._owner = self
+        if os.environ.get("DSV41_SHARE_LOG"):
+            print(f"[dsv41_static] {type(self).__name__} L{self.layer}: {'shares' if first is not None else 'built'} its module "
+                  f"({len(self.binds)} tensors bound, not rebindable: {fixed})", flush=True)
+
+    def _own(self):
+        """(DSV41_SHARE_MODULES) before a launch: when another layer holds the module, rebind every tensor of this layer."""
+        if SHARE and getattr(self.sk, "_owner", None) is not self:
+            for name, ptr in self.binds.items():
+                self.sk.rebind(name, ptr)
+            self.sk._owner = self
 
     def bind_streams(self, R: torch.Tensor):
         assert R.is_contiguous() and R.dtype == torch.bfloat16 and R.shape == (T, HC, HID), f"streams {R.shape} {R.dtype}"
         ptr = R.data_ptr()
-        if getattr(self, "r_ptr", None) != ptr:
-            self.sk.rebind("streams", ptr)
-            self.r_ptr = ptr
+        if self.binds.get("streams") != ptr:
+            self._rb("streams", ptr)
 
     def triplet(self):
         """(pre [T, HC], post [T, HC], comb [T, HC, HC]) fp32 of this launch, what deepseek_v4_mhc's stats kernels return."""
@@ -135,16 +239,15 @@ def _bind_xflag_out(layer):
     w = layer.w
     w["xflag"] = torch.zeros(32, dtype=torch.int32, device=w["x_out"].device)
     if XFLAG_BIND:
-        layer.sk.rebind("@xflag_out", w["xflag"].data_ptr())
+        layer._rb("@xflag_out", w["xflag"].data_ptr())
         _XFLAG[w["x_out"].data_ptr()] = w["xflag"].data_ptr()
 
 
 def _bind_xflag_in(layer):
     """H1: a MoE layer reading an attention layer's x_out in place polls that layer's words; else the classic wait (0)."""
-    p = _XFLAG.get(layer.x_ptr, 0)
-    if getattr(layer, "xf_ptr", None) != p:
-        layer.sk.rebind("@xflag_in", p)
-        layer.xf_ptr = p
+    p = _XFLAG.get(layer.binds.get("x"), 0)
+    if layer.binds.get("@xflag_in") != p:
+        layer._rb("@xflag_in", p)
         if os.environ.get("DSV41_X_FLAG_LOG"):   # (a check: which layers poll a flag)
             print(f"[dsv41_static] H1: {type(layer).__name__} L{layer.layer}: "
                   f"{'polls the flag of the kernel before' if p else 'no flag (the wait for the grid)'}", flush=True)
@@ -154,9 +257,8 @@ def _bind_x(layer, x: torch.Tensor):
     """Graph tensor x reads SGLang's x when it is contiguous bf16 [T, H] (a CUDA graph captures the address), else a copy."""
     ok = x.is_contiguous() and x.dtype == torch.bfloat16 and x.shape == (T, HID)
     ptr = x.data_ptr() if ok else layer.w["x"].data_ptr()
-    if getattr(layer, "x_ptr", None) != ptr:
-        layer.sk.rebind("x", ptr)
-        layer.x_ptr = ptr
+    if layer.binds.get("x") != ptr:
+        layer._rb("x", ptr)
     if not ok:
         layer.w["x"].copy_(x)
 
@@ -224,7 +326,7 @@ class StaticAttn(MhcMixin):
     def __init__(self, layer: int, ckpt: str, rank: int, tp: int, dev, out_root: str, max_pos: int, sources: Sources, pdl: bool,
                  exchange_pool: ExchangePool = None, tables: StepTables = None, mhc: bool = False, stats: bool = False):
         cfg = sources.cfg
-        self.layer, self.pdl, self.steps, self.filled, self.pool = layer, pdl, 0, 0, False
+        self.layer, self.pdl, self.steps, self.filled, self.pool, self.binds = layer, pdl, 0, 0, False, {}
         self.variant = attn_weights.variant_of(cfg, layer)
         ratio = cfg["compress_ratios"][layer]
         self.ratio = ratio
@@ -274,36 +376,40 @@ class StaticAttn(MhcMixin):
             os.environ["SA_DRY"] = "1"
         try:
             xk = dict(x_flag=True, x_flag_prefill=XFLAG_PREFILL) if XFLAG_ATTN else {}   # (stage B: the attention reads)
-            self.sk, self.bufs, self.info = attn_demo.build([w], self.variant, ratio, csrc, 64 // tp, out, extra_flags=flags,
-                                                            device=dev.index, profile=TIMING, **rk, **xk)
+            self.sk, self.bufs, self.info, self.shared = _build_shared(attn_demo.build, [w], self.variant, ratio, csrc, 64 // tp,
+                                                                       out, extra_flags=flags, device=dev.index, profile=TIMING,
+                                                                       **rk, **xk)
         finally:
             if sa_dry is None:
                 os.environ.pop("SA_DRY", None)
             else:
                 os.environ["SA_DRY"] = sa_dry
         self.w = w
+        if SHARE:
+            self._init_binds(w, self.shared)
         sources.note(layer, w)
         if XFLAG:
             _bind_xflag_out(self)
 
     def _launch(self):
+        self._own()
         self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
 
     def bind_pools(self, pool):
         """The caches are SGLang's: its pools' rows have the kernels' bytes and stride (the module comment)."""
         L, v = self.layer, self.variant
         assert pool.kv_layout.value == "v41_new", f"{pool.kv_layout}: run SGLang with SGLANG_DSV4_KV_LAYOUT=v41_new"
-        self.sk.rebind("window_cache", pool.get_swa_raw_buffer(L).data_ptr())
+        self._rb("window_cache", pool.get_swa_raw_buffer(L).data_ptr())
         if v != "swa":
             assert pool.get_extra_key_layout(L).value == "v41_fp4_new" and pool.get_extra_key_bytes_per_token(L) == 288
-            self.sk.rebind("compress_cache", pool.get_extra_key_buffer(L).data_ptr())
+            self._rb("compress_cache", pool.get_extra_key_buffer(L).data_ptr())
         if v in ("full_r2", "full_r1", "reindex"):
             assert pool.get_index_k_page_size(self.ratio) == 128 and not pool.low_ratio_index_k_is_split(L)
-            self.sk.rebind("index_k", pool.get_index_k_with_scale_buffer(L).data_ptr())
+            self._rb("index_k", pool.get_index_k_with_scale_buffer(L).data_ptr())
         if "cmp_state" in self.w:
             state = pool.get_attention_compress_states(L)
             assert state.ring_size == self.ratio == 2 and state.kv_score_buffer.kv_score.shape[1] == 1024
-            self.sk.rebind("cmp_state", state.kv_score_buffer.kv_score.data_ptr())
+            self._rb("cmp_state", state.kv_score_buffer.kv_score.data_ptr())
         self.pool = True
 
     def replay(self, x: torch.Tensor, positions: torch.Tensor):
@@ -338,7 +444,7 @@ class StaticAttn(MhcMixin):
 class StaticMoE(MhcMixin):
     def __init__(self, layer: int, ckpt: str, rank: int, tp: int, dev, out_root: str, pdl: bool,
                  exchange_pool: ExchangePool = None, mhc: bool = False, norm_next: bool = False, stats: bool = False):
-        self.layer, self.pdl, self.steps = layer, pdl, 0
+        self.layer, self.pdl, self.steps, self.binds = layer, pdl, 0, {}
         read = reader(ckpt)
         w = moe_weights.layer_tensors(read, layer, tp, rank, dev)
         w.update(moe_weights.routed_tensors(read, layer, tp, [rank], dev)[0])
@@ -353,9 +459,12 @@ class StaticMoE(MhcMixin):
             assert mhc and "-DSTATIC_NO_START_BARRIER" in flags, "DSV41_X_FLAG: mHC in the kernels, a serving build"
             flags.append("-DSTATIC_X_FLAG")
         rk = dict(num_gpus=tp, rank=rank, exchange_pool=exchange_pool) if exchange_pool is not None else {}
-        self.sk, self.bufs, self.info = moe_demo.build([w], out, extra_flags=flags, device=dev.index, profile=TIMING,
-                                                       x_flag=XFLAG, x_flag_prefill=XFLAG_PREFILL, **rk)   # (bufs: as StaticAttn)
+        self.sk, self.bufs, self.info, self.shared = _build_shared(moe_demo.build, [w], out, extra_flags=flags, device=dev.index,
+                                                                   profile=TIMING, x_flag=XFLAG, x_flag_prefill=XFLAG_PREFILL,
+                                                                   **rk)   # (bufs: as StaticAttn)
         self.w = w
+        if SHARE:
+            self._init_binds(w, self.shared)
         if XFLAG_ATTN and "gamma_next" in w:   # stage B: this post computes the next attention's input
             _bind_xflag_out(self)
 
@@ -366,6 +475,7 @@ class StaticMoE(MhcMixin):
             _bind_xflag_in(self)
         if R is not None:
             self.bind_streams(R)
+        self._own()
         self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
         self.steps += 1
         return self.w["y"]
