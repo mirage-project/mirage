@@ -34,10 +34,10 @@ NS="nsys profile --force-overwrite true --capture-range=cudaProfilerApi --captur
     --cuda-graph-trace=graph --trace-fork-before-exec=true"
 STATIC="PYTHONPATH=$D/boot DSV41_STATIC_ROOT=$MIRAGE DSV41_STATIC_ATTN=all DSV41_STATIC_MOE=all DSV41_STATIC_MAX_POS=4607 \
     SGLANG_DSV4_KV_LAYOUT=v41_new"
-# the measured set: mHC + all-reduce in the kernels (MHC, PDL, flags), the tcgen05 index scores, S2-1, I1, I1b
+# the measured set: mHC + all-reduce in the kernels (MHC, PDL, flags), the tcgen05 index scores, I1, I1b
 SET="DSV41_STATIC_PDL=1 DSV41_STATIC_MHC=1 SA_DRY=0 HC_DRY_MOE=1 HC_DRY_ATTN=0 \
     DSV41_STATIC_FLAGS='-DHCP_LOOP -DHCP_SSQ=2 -DHCP_VPOLL -DSTATIC_NO_START_BARRIER -DSTATIC_RESET_PARITY -DI1_BF16 -DI1B_FQ' \
-    DSV41_STATIC_IS_TCGEN05=1 DSV41_S2_ARGMAX=1"
+    DSV41_STATIC_IS_TCGEN05=1"
 ```
 
 ## The comparison
@@ -75,10 +75,14 @@ minus 1.
 |---|---|
 | `DSV41_STATIC_MHC=1` and the HCP flags | mHC and the all-reduce inside the kernels |
 | `DSV41_STATIC_IS_TCGEN05=1` | the indexer's scores with tcgen05 |
-| `DSV41_S2_ARGMAX=1` | the greedy argmax as a 2-kernel Triton reduction |
 | `-DI1_BF16`, `-DI1B_FQ` | fewer register spills on the reuse layers |
 
 None of them changes the outputs: the golden checks match line for line, and the greedy tokens match.
 
-The branch also has I1c (`DSV41_I1C`), C12 (`-DMOE_ROWS_POLL`), H1 (`DSV41_X_FLAG`) and S2-2 (`DSV41_S2_DEFER`), all off
-by default. On the whole model the four together cost about 105 us a step, so they are not in the set.
+The branch also has these switches, all off by default and not in the set. Each cost below was measured on the whole
+model, against the set with S2-1 on:
+- H1 (`DSV41_X_FLAG`): +63 us a step.
+- S2-2 (`DSV41_S2_DEFER`): +42 us a step.
+- I1c (`DSV41_I1C`) and C12 (`-DMOE_ROWS_POLL`): no gain.
+- S2-1 (`DSV41_S2_ARGMAX`): a faster greedy argmax in SGLang's sampler, roughly 17-23 us a step between graph replays (not
+  measured on its own). It is left out because it changes SGLang's sampler, not the static layers.
