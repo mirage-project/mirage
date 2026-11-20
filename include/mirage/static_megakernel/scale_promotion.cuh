@@ -175,6 +175,51 @@ __device__ __forceinline__ int drain_promoted(
   for (int t = 0; t < T; t++) {
     v[t] = 0.0f;
   }
+  if constexpr (TW == 64) {
+    // T = 64: a round's 4 pieces as 8 halves of 32 columns; the next half's
+    // load is in flight while this half's FMAs run (one 64-column load waited
+    // before its FMAs left the load latency exposed 32 times an item). The
+    // same FMAs in the same order: bit-equal.
+    for (int r = 0; r < ROUNDS; r++) {
+      int const tick = wtt + r, a = acc_slot(tick);
+      mbar_wait(rt.acc_full0 + 8 * a, acc_round(tick) & 1);
+      fence_after();
+      float pa[32], pb[32];
+#pragma unroll
+      for (int h = 0; h < 8; h++) {
+        int const iss = h >> 2, at = (h >> 1) & 1, s = 2 * r + iss,
+                  atom = 2 * s + at;
+        float *const cur = (h & 1) ? pb : pa, *const nxt = (h & 1) ? pa : pb;
+        if (h == 0 && s < NST && atom < NATOMS) {
+          tmem_ld_cols_nw<32>(tb + TW * a + lanes, pa);
+          tmem_keep_cols<32>(pa);
+        }
+        int const iss1 = (h + 1) >> 2, at1 = ((h + 1) >> 1) & 1,
+                  s1 = 2 * r + iss1, atom1 = 2 * s1 + at1;
+        bool const next = h + 1 < 8 && s1 < NST && atom1 < NATOMS;
+        if (next) {
+          tmem_ld_cols_nw<32>(tb + (at1 == 0 ? 0u : (uint32_t)PROMO_COL1) +
+                                  TW * a + ACC_STAGES * TW * iss1 + lanes +
+                                  32 * ((h + 1) & 1),
+                              nxt);
+        }
+        if (s < NST && atom < NATOMS) {
+          float const sw = WS::of(bs, atom, row);
+#pragma unroll
+          for (int t = 0; t < 32; t++) {
+            int const c = 32 * (h & 1) + t;
+            v[c] = fmaf(sw * xs[atom * T + c], cur[t], v[c]);
+          }
+        }
+        if (next) {
+          tmem_keep_cols<32>(nxt);
+        }
+      }
+      fence_before();
+      mbar_arrive(rt.acc_empty0 + 8 * a); // 128 arrivals
+    }
+    return row;
+  }
   // the pieces of a round (q = 2 issuer + piece) in batches of QB: their
   // loads before one wait (T = 32: 2 at a time, T = 64: 1, for the registers)
   constexpr int QB = T <= 16 ? 4 : T == 32 ? 2 : 1;
