@@ -204,6 +204,8 @@ if __name__ == "__main__":
         env.update(extra, DSA_STATIC_OUT=os.path.join(os.getcwd(), name, "static"),
                    KDA_STATIC_OUT=os.path.join(os.getcwd(), name, "static_kda"),
                    MOE_STATIC_OUT=os.path.join(os.getcwd(), name, "static_moe"))
+        # A/B: these two pass through from the chain's environment (the others of the hooks come from the run table)
+        env.update({k: os.environ[k] for k in ("MOE_STATIC_END_PRE", "MOE_STATIC_PLAN64") if os.environ.get(k)})
         log = os.path.join(os.getcwd(), f"{name}.log")
         run = [sys.executable, os.path.join(HERE, cmd[0]), *cmd[1:]]
         if name.startswith("prof_"):
