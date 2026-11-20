@@ -296,7 +296,8 @@ enum TaskType {
   // mHC's post step of a TP sublayer and the first half of the next
   // sublayer's pre step in one task (tasks/hc_post_mix.cuh).
   TASK_HC_POST_MIX_SM100 = 530,
-  // GPT-OSS static-megakernel tasks (tasks/sm90_*.cuh: CUDA-core, built for sm90 and sm100)
+  // GPT-OSS static-megakernel tasks (tasks/sm90_*.cuh: CUDA-core, built for
+  // sm90 and sm100)
   TASK_SM90_RMSNORM = 531,
   TASK_SM90_ATTENTION = 532,
   TASK_SM90_ATTENTION_SPLIT = 533,

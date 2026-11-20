@@ -32,7 +32,7 @@ template <int MODE>
 __device__ __forceinline__ void tile_epilogue(
     void *out, int N, int row0, int split, int row, float const *v) {
   if (MODE == COMBINE_STORE) { // K part `split` at [split][T][N]; a padded
-                                // weight's rows past N: not stored
+                               // weight's rows past N: not stored
     if (row0 + row >= N) {
       return;
     }

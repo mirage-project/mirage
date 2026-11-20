@@ -130,169 +130,169 @@ __device__ __forceinline__ void run_sm90_gate(Maps const &,
   int *routing = buf_at<int>(g, slot_at<BUF_SLOTS, 10>());
 #pragma unroll 1
   for (int it = 0; it < TPT; it++) {
-  int const t = t0 + it;
-  float const *o =
-      buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()) + (size_t)t * H;
-  uint4 const *res =
-      buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 2>()) + (size_t)t * VEC;
-  uint4 *x1 = buf_at<uint4>(g, slot_at<BUF_SLOTS, 7>()) + (size_t)t * VEC;
-  uint4 *hout = buf_at<uint4>(g, slot_at<BUF_SLOTS, 8>()) +
-                (size_t)t * (HS > 0 ? HS / 8 : VEC);
-  // 1. x1 = bf16(o + bias + x), and the row as rounded
-  float xr[Row::PER][8];
-  float ss = 0.f;
-#pragma unroll
-  for (int j = 0; j < Row::PER; j++) {
-    int const v = Row::vec(j);
-    if (v < VEC) {
-      float f[8], b[8], r[8];
-      f32x8_load(o, v, f);
-#pragma unroll
-      for (int p = 1; p < P; p++) {
-        float q[8];
-        f32x8_load(o + (size_t)p * T * H, v, q);
-#pragma unroll
-        for (int i = 0; i < 8; i++) {
-          f[i] += q[i];
-        }
-      }
-      bf16x8_to_f32(obv[j], b);
-      bf16x8_to_f32(res[v], r);
-#pragma unroll
-      for (int i = 0; i < 8; i++) {
-        f[i] = f[i] + b[i] + r[i];
-      }
-      uint4 const q = f32_to_bf16x8(f);
-      if (split == 0) {
-        x1[v] = q;
-      }
-      bf16x8_to_f32(q, xr[j]);
-#pragma unroll
-      for (int i = 0; i < 8; i++) {
-        ss += xr[j][i] * xr[j][i];
-      }
-    }
-  }
-  // 2. h = f16(x1 / rms(x1) * w), kept as rounded for the router (in hs)
-  float const rs =
-      rsqrtf(sm90_block_sum(ss, part) / H + __int_as_float(PARAMS::v[3]));
-#pragma unroll
-  for (int j = 0; j < Row::PER; j++) {
-    int const v = Row::vec(j);
-    if (v < VEC) {
-      float w[8];
-      bf16x8_to_f32(nwv[j], w);
-#pragma unroll
-      for (int i = 0; i < 8; i++) {
-        xr[j][i] = xr[j][i] * rs * w[i];
-      }
-      uint4 const q = f32_to_f16x8(xr[j]);
-      if (split == 0 && !MX) {
-        hout[v] = HS > 0 ? f32_to_bf16x8(xr[j]) : q;
-      }
-      hs[v] = q;
-    }
-  }
-  if constexpr (MX) { // 4 threads' vectors a scale group (vec(j): threadIdx.x
-                      // + 256 j); every lane in the shuffles
-    uint8_t *hq = buf_at<uint8_t>(g, slot_at<BUF_SLOTS, 8>());
+    int const t = t0 + it;
+    float const *o =
+        buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()) + (size_t)t * H;
+    uint4 const *res =
+        buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 2>()) + (size_t)t * VEC;
+    uint4 *x1 = buf_at<uint4>(g, slot_at<BUF_SLOTS, 7>()) + (size_t)t * VEC;
+    uint4 *hout = buf_at<uint4>(g, slot_at<BUF_SLOTS, 8>()) +
+                  (size_t)t * (HS > 0 ? HS / 8 : VEC);
+    // 1. x1 = bf16(o + bias + x), and the row as rounded
+    float xr[Row::PER][8];
+    float ss = 0.f;
 #pragma unroll
     for (int j = 0; j < Row::PER; j++) {
       int const v = Row::vec(j);
-      float f[8], am = 0.f;
       if (v < VEC) {
-        bf16x8_to_f32(f32_to_bf16x8(xr[j]), f);
+        float f[8], b[8], r[8];
+        f32x8_load(o, v, f);
+#pragma unroll
+        for (int p = 1; p < P; p++) {
+          float q[8];
+          f32x8_load(o + (size_t)p * T * H, v, q);
+#pragma unroll
+          for (int i = 0; i < 8; i++) {
+            f[i] += q[i];
+          }
+        }
+        bf16x8_to_f32(obv[j], b);
+        bf16x8_to_f32(res[v], r);
 #pragma unroll
         for (int i = 0; i < 8; i++) {
-          am = fmaxf(am, fabsf(f[i]));
+          f[i] = f[i] + b[i] + r[i];
         }
-      }
-      am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 1));
-      am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 2));
-      if (v < VEC && split == 0) {
-        int ex = ceil_log2_bits(fmaxf(am, 1.0e-30f) * (1.0f / 448.0f));
-        ex = ex < -127 ? -127 : (ex > 127 ? 127 : ex);
-        float const sc = __uint_as_float((uint32_t)(127 - ex) << 23);
-        uint2 p;
-        p.x = (uint32_t)cvt_e4m3(f[0] * sc) |
-              ((uint32_t)cvt_e4m3(f[1] * sc) << 8) |
-              ((uint32_t)cvt_e4m3(f[2] * sc) << 16) |
-              ((uint32_t)cvt_e4m3(f[3] * sc) << 24);
-        p.y = (uint32_t)cvt_e4m3(f[4] * sc) |
-              ((uint32_t)cvt_e4m3(f[5] * sc) << 8) |
-              ((uint32_t)cvt_e4m3(f[6] * sc) << 16) |
-              ((uint32_t)cvt_e4m3(f[7] * sc) << 24);
-        *reinterpret_cast<uint2 *>(hq + (size_t)t * HS + 8 * v) = p;
-        if ((v & 3) == 0) {
-          hq[(size_t)T * HS + (size_t)t * (HS / 32) + v / 4] =
-              (uint8_t)(ex + 127);
+        uint4 const q = f32_to_bf16x8(f);
+        if (split == 0) {
+          x1[v] = q;
+        }
+        bf16x8_to_f32(q, xr[j]);
+#pragma unroll
+        for (int i = 0; i < 8; i++) {
+          ss += xr[j][i] * xr[j][i];
         }
       }
     }
-  }
-  asm volatile("cp.async.wait_all;" ::: "memory");
-  __syncthreads(); // hs written
-  // 3. the logits: warp w experts [w EPW, w EPW + EPW) (rows in shared
-  // memory), its lanes over K, reduced over the warp
-  constexpr int EPW = EPS_ / SM90_WARPS;
-  constexpr int UNROLL = EPW <= 4 ? 4 : 1;  // the EPW rows' loads in registers
-  int const e0 = split * EPS_ + warp * EPW; // the warp's first expert
-  if (t < ntok) {
-    uint4 const *rwr = wsm + (size_t)warp * EPW * VEC;
-    float acc[EPW] = {};
-#pragma unroll UNROLL
-    for (int v = lane; v < VEC; v += 32) {
-      float hf[8];
-      f16x8_to_f32(hs[v], hf);
-      uint4 wv[EPW];
+    // 2. h = f16(x1 / rms(x1) * w), kept as rounded for the router (in hs)
+    float const rs =
+        rsqrtf(sm90_block_sum(ss, part) / H + __int_as_float(PARAMS::v[3]));
 #pragma unroll
-      for (int e = 0; e < EPW; e++) {
-        wv[e] = rwr[(size_t)e * VEC + v];
-      }
-#pragma unroll
-      for (int e = 0; e < EPW; e++) {
+    for (int j = 0; j < Row::PER; j++) {
+      int const v = Row::vec(j);
+      if (v < VEC) {
         float w[8];
-        bf16x8_to_f32(wv[e], w);
+        bf16x8_to_f32(nwv[j], w);
 #pragma unroll
         for (int i = 0; i < 8; i++) {
-          acc[e] += w[i] * hf[i];
+          xr[j][i] = xr[j][i] * rs * w[i];
+        }
+        uint4 const q = f32_to_f16x8(xr[j]);
+        if (split == 0 && !MX) {
+          hout[v] = HS > 0 ? f32_to_bf16x8(xr[j]) : q;
+        }
+        hs[v] = q;
+      }
+    }
+    if constexpr (MX) { // 4 threads' vectors a scale group (vec(j): threadIdx.x
+                        // + 256 j); every lane in the shuffles
+      uint8_t *hq = buf_at<uint8_t>(g, slot_at<BUF_SLOTS, 8>());
+#pragma unroll
+      for (int j = 0; j < Row::PER; j++) {
+        int const v = Row::vec(j);
+        float f[8], am = 0.f;
+        if (v < VEC) {
+          bf16x8_to_f32(f32_to_bf16x8(xr[j]), f);
+#pragma unroll
+          for (int i = 0; i < 8; i++) {
+            am = fmaxf(am, fabsf(f[i]));
+          }
+        }
+        am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 1));
+        am = fmaxf(am, __shfl_xor_sync(0xffffffffu, am, 2));
+        if (v < VEC && split == 0) {
+          int ex = ceil_log2_bits(fmaxf(am, 1.0e-30f) * (1.0f / 448.0f));
+          ex = ex < -127 ? -127 : (ex > 127 ? 127 : ex);
+          float const sc = __uint_as_float((uint32_t)(127 - ex) << 23);
+          uint2 p;
+          p.x = (uint32_t)cvt_e4m3(f[0] * sc) |
+                ((uint32_t)cvt_e4m3(f[1] * sc) << 8) |
+                ((uint32_t)cvt_e4m3(f[2] * sc) << 16) |
+                ((uint32_t)cvt_e4m3(f[3] * sc) << 24);
+          p.y = (uint32_t)cvt_e4m3(f[4] * sc) |
+                ((uint32_t)cvt_e4m3(f[5] * sc) << 8) |
+                ((uint32_t)cvt_e4m3(f[6] * sc) << 16) |
+                ((uint32_t)cvt_e4m3(f[7] * sc) << 24);
+          *reinterpret_cast<uint2 *>(hq + (size_t)t * HS + 8 * v) = p;
+          if ((v & 3) == 0) {
+            hq[(size_t)T * HS + (size_t)t * (HS / 32) + v / 4] =
+                (uint8_t)(ex + 127);
+          }
         }
       }
     }
+    asm volatile("cp.async.wait_all;" ::: "memory");
+    __syncthreads(); // hs written
+    // 3. the logits: warp w experts [w EPW, w EPW + EPW) (rows in shared
+    // memory), its lanes over K, reduced over the warp
+    constexpr int EPW = EPS_ / SM90_WARPS;
+    constexpr int UNROLL = EPW <= 4 ? 4 : 1; // the EPW rows' loads in registers
+    int const e0 = split * EPS_ + warp * EPW; // the warp's first expert
+    if (t < ntok) {
+      uint4 const *rwr = wsm + (size_t)warp * EPW * VEC;
+      float acc[EPW] = {};
+#pragma unroll UNROLL
+      for (int v = lane; v < VEC; v += 32) {
+        float hf[8];
+        f16x8_to_f32(hs[v], hf);
+        uint4 wv[EPW];
 #pragma unroll
-    for (int e = 0; e < EPW; e++) {
-      acc[e] = sm90_warp_sum(acc[e]);
-    }
-    if (lane < EPW) {
-      float a = 0.f;
+        for (int e = 0; e < EPW; e++) {
+          wv[e] = rwr[(size_t)e * VEC + v];
+        }
+#pragma unroll
+        for (int e = 0; e < EPW; e++) {
+          float w[8];
+          bf16x8_to_f32(wv[e], w);
+#pragma unroll
+          for (int i = 0; i < 8; i++) {
+            acc[e] += w[i] * hf[i];
+          }
+        }
+      }
 #pragma unroll
       for (int e = 0; e < EPW; e++) {
-        a = e == lane ? acc[e] : a;
+        acc[e] = sm90_warp_sum(acc[e]);
       }
+      if (lane < EPW) {
+        float a = 0.f;
+#pragma unroll
+        for (int e = 0; e < EPW; e++) {
+          a = e == lane ? acc[e] : a;
+        }
+        if constexpr (LG) {
+          __nv_bfloat16 const *rb =
+              buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 5>());
+          reinterpret_cast<__nv_bfloat16 *>(routing)[t * E + e0 + lane] =
+              __float2bfloat16(a + __bfloat162float(rb[e0 + lane]));
+        } else if constexpr (S == 1) {
+          logit[e0 + lane] = a;
+        } else {
+          routing[(e0 + lane) * T + t] = __float_as_int(a);
+        }
+      }
+    } else if (lane < EPW) {
       if constexpr (LG) {
-        __nv_bfloat16 const *rb =
-            buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 5>());
         reinterpret_cast<__nv_bfloat16 *>(routing)[t * E + e0 + lane] =
-            __float2bfloat16(a + __bfloat162float(rb[e0 + lane]));
+            __float2bfloat16(0.f);
       } else if constexpr (S == 1) {
-        logit[e0 + lane] = a;
+        logit[e0 + lane] = 0.f;
       } else {
-        routing[(e0 + lane) * T + t] = __float_as_int(a);
+        routing[(e0 + lane) * T + t] = 0;
       }
     }
-  } else if (lane < EPW) {
-    if constexpr (LG) {
-      reinterpret_cast<__nv_bfloat16 *>(routing)[t * E + e0 + lane] =
-          __float2bfloat16(0.f);
-    } else if constexpr (S == 1) {
-      logit[e0 + lane] = 0.f;
-    } else {
-      routing[(e0 + lane) * T + t] = 0;
+    if constexpr (TPT > 1) {
+      __syncthreads(); // hs, part and logit read: the next token's
     }
-  }
-  if constexpr (TPT > 1) {
-    __syncthreads(); // hs, part and logit read: the next token's
-  }
   } // the task's tokens
   int const t = t0;
   if constexpr (LG) { // the top-k is FlashInfer's

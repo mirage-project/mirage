@@ -85,9 +85,10 @@ __device__ __forceinline__ void run_sm90_attention_merge(Maps const &,
           acc.x += w * o.x, acc.y += w * o.y;
           den += w;
         }
-        buf_at<__nv_bfloat162>(g, slot_at<BUF_SLOTS, 3>())
-            [((size_t)qo[r] * QH + h) * (D / 2) + lane] =
-                __floats2bfloat162_rn(acc.x / den, acc.y / den);
+        buf_at<__nv_bfloat162>(
+            g, slot_at<BUF_SLOTS, 3>())[((size_t)qo[r] * QH + h) * (D / 2) +
+                                        lane] =
+            __floats2bfloat162_rn(acc.x / den, acc.y / den);
       }
     }
     sm90_task_end<SELF>(g);

@@ -101,9 +101,8 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
 #pragma unroll
         for (int j = 0; j < CH / 2; j++) {
           int const i = col0 + 4 * (lane + 32 * (c + j));
-          v[j] = c + j < NV && i < V
-                     ? *reinterpret_cast<float4 const *>(lr + i)
-                     : make_float4(0.f, 0.f, 0.f, 0.f);
+          v[j] = c + j < NV && i < V ? *reinterpret_cast<float4 const *>(lr + i)
+                                     : make_float4(0.f, 0.f, 0.f, 0.f);
         }
 #pragma unroll
         for (int j = 0; j < CH / 2; j++) {

@@ -1,8 +1,8 @@
 // Static-megakernel adapter for the native Blackwell paged-attention task.
 #pragma once
 
-#include "sm90_common.cuh"
 #include "mirage/persistent_kernel/tasks/blackwell/attention_sm100.cuh"
+#include "sm90_common.cuh"
 
 namespace static_mk {
 

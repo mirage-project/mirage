@@ -65,9 +65,10 @@ using namespace mirage::runtime;
 #ifndef MPK_MAX_TOKENS_PER_REQUEST
 #define MPK_MAX_TOKENS_PER_REQUEST MPK_MAX_NUM_BATCHED_TOKENS
 #endif
-static_assert(MPK_MAX_TOKENS_PER_REQUEST >= 1 &&
-                  MPK_MAX_TOKENS_PER_REQUEST <= MPK_MAX_NUM_BATCHED_TOKENS,
-              "MPK_MAX_TOKENS_PER_REQUEST must be in [1, MAX_NUM_BATCHED_TOKENS]");
+static_assert(
+    MPK_MAX_TOKENS_PER_REQUEST >= 1 &&
+        MPK_MAX_TOKENS_PER_REQUEST <= MPK_MAX_NUM_BATCHED_TOKENS,
+    "MPK_MAX_TOKENS_PER_REQUEST must be in [1, MAX_NUM_BATCHED_TOKENS]");
 // Room left for one request in a batch that already holds `num_tokens` rows.
 #define MPK_TOKEN_ROOM(num_tokens)                                             \
   min(MPK_MAX_TOKENS_PER_REQUEST, MPK_MAX_NUM_BATCHED_TOKENS - (num_tokens))
@@ -469,8 +470,8 @@ __device__ __forceinline__ bool
     config.request_ids[num_reqs] = next_request_id;
     config.qo_indptr_buffer[num_reqs] = num_tokens;
     // Prefill request
-    int num_new_tokens = min(config.prompt_length[next_request_id],
-                             MPK_TOKEN_ROOM(num_tokens));
+    int num_new_tokens =
+        min(config.prompt_length[next_request_id], MPK_TOKEN_ROOM(num_tokens));
     // Move tokens to input tokens
     for (int j = 0; j < num_new_tokens; j++) {
       config.input_tokens[num_tokens + j] =
