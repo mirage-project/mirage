@@ -39,8 +39,8 @@ __device__ __forceinline__ void residual_add_task(G const &g,
     unsigned char const *op = nullptr;
     uint4 ou = make_uint4(0u, 0u, 0u, 0u);
     if constexpr (!ONE) {
-      op = OSUM ? reinterpret_cast<unsigned char const *>(osum +
-                                                          (size_t)t * H + c)
+      op = OSUM ? reinterpret_cast<unsigned char const *>(osum + (size_t)t * H +
+                                                          c)
                 : g.rv + OOFF + (size_t)r * O_RANK +
                       (size_t)t * (H / GPUS) * 2 + cc * 2 + rg_set();
       ou = poll16(op);
@@ -99,10 +99,9 @@ __device__ __forceinline__ void run_residual_add(Maps const &,
                 "residual_add: whole 8-column vectors of every GPU's part");
   static_assert(
       SSUM::buf >= 0 &&
-          (ONE || (O::buf >= 0 &&
-                   (OSUM ? exchange_bytes[O::buf] == 0
-                         : exchange_bytes[O::buf] ==
-                               (size_t)GPUS * o_rank_bytes(H)))),
+          (ONE || (O::buf >= 0 && (OSUM ? exchange_bytes[O::buf] == 0
+                                        : exchange_bytes[O::buf] ==
+                                              (size_t)GPUS * o_rank_bytes(H)))),
       "residual_add: S from sum_gpus's buffer, o from sum_send's "
       "(or from a second sum_gpus buffer), or no o");
 #ifdef STATIC_RESET_IN_KERNEL

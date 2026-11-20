@@ -14,7 +14,7 @@
 
 """Build kernels for every supported architecture on whatever GPU CI has,
 without running them: MPK's paged attention, and the GPT-OSS layers of the
-Hopper static megakernel.
+static megakernel for Hopper and Blackwell.
 
 Codegen and nvcc do not need the target GPU, so this catches template
 argument mismatches and other build breaks on paths that have no hardware in
@@ -142,16 +142,20 @@ def _gpt_oss_demo():
     return module, demo
 
 
-def _build_gpt_oss_static(kind):
-    """One GPT-OSS-20B layer (kind: sliding or full attention) of the Hopper
-    static megakernel, its tensors zeros, on the shipped H100 plan (132 SMs) or
-    round robin, built for sm_90a with the demo's serving flags."""
+def _build_gpt_oss_static(kind, cc=90, native=False):
+    """One GPT-OSS layer (kind: sliding or full attention) of the static
+    megakernel, its tensors zeros, built with the demo's serving flags: for
+    sm_90a (20B, the shipped H100 plan on 132 SMs, else round robin) or sm_100a
+    (148 SMs, round robin; native: 120B with Blackwell's MXFP8 x MXFP4 experts
+    in the layer kernel)."""
     from mirage.mpk import compiler, plan_gen
     from mirage.mpk.static_megakernel import (StaticMegakernel,
                                               sm90_attention_parts_size)
 
     g, demo = _gpt_oss_demo()
-    H, I, E, TOPK, QH, KVH, D, MAX_SEQ = 2880, 2880, 32, 4, 64, 8, 64, 1024
+    g.CC = cc
+    nsm = 148 if cc == 100 else 132
+    H, I, E, TOPK, QH, KVH, D, MAX_SEQ = 2880, 2880, 128 if native else 32, 4, 64, 8, 64, 1024
     T, PAGE, R13, R2 = g.T, g.PAGE, 128, 64
     kt = (H + 127) // 128
 
@@ -166,16 +170,16 @@ def _build_gpt_oss_static(kind):
                                    device="cuda"),
         "last_page_len": torch.ones(1, dtype=torch.int32, device="cuda"),
         "num_tokens": torch.ones(1, dtype=torch.int32, device="cuda"),
-        "attn_parts": z(sm90_attention_parts_size(1, QH, D, 132),
+        "attn_parts": z(sm90_attention_parts_size(1, QH, D, nsm),
                         dtype=torch.float32),
-        "h": z(T, H), "qkv32": z(T, (QH + 2 * KVH) * D, dtype=torch.float32),
+        "h": z(T, H), "qkv32": z(g.qkv_parts() * T, (QH + 2 * KVH) * D, dtype=torch.float32),
         "qkv": z(T, (QH + 2 * KVH) * D), "attn": z(T, QH * D),
-        "o32": z(T, H, dtype=torch.float32), "x1": z(T, H),
+        "o32": z(g.O_PARTS * T, H, dtype=torch.float32), "x1": z(T, H),
         "h2": z(T, H, dtype=torch.float16),
         "topk_w": z(T, TOPK, dtype=torch.float32),
         "routing": z(E, T, dtype=torch.int32),
         "act": z(E, T, I, dtype=torch.float16), "eo": z(T, TOPK, H),
-        "ln1": z(H), "ln2": z(H), "w_qkv": z((QH + 2 * KVH) * D, H),
+        "ln1": z(H), "ln2": z(H), "w_qkv": g.pad_k(z((QH + 2 * KVH) * D, H)),
         "b_qkv": z((QH + 2 * KVH) * D), "w_o": z(H, QH * D), "b_o": z(H),
         "sinks": z(KVH, QH // KVH), "w_router": z(E, H), "b_router": z(E),
         "w13": z(E, 2 * I // R13, kt, R13 * 68, dtype=torch.uint8),
@@ -185,32 +189,55 @@ def _build_gpt_oss_static(kind):
         "v_cache": z(MAX_SEQ // PAGE, PAGE, KVH, D),
         "x_in": z(T, H), "x_out": z(T, H),
     }
+    if native:
+        P = g.NATIVE_PAD
+        t.update({"z_q": z(T, P, dtype=torch.uint8),
+                  "w13": z(E, P // 64, P // 128, 8192, dtype=torch.uint8),
+                  "w13_scales": z(E, P // 64, P // 128, 512, dtype=torch.uint8),
+                  "w2": z(E, P // 128, P // 128, 8192, dtype=torch.uint8),
+                  "w2_scales": z(E, P // 128, P // 128, 512, dtype=torch.uint8),
+                  "b13": z(E, 2 * P), "b2": z(E, P)})
+    # sm100 without the native experts: FlashInfer's inputs from the gate (bf16
+    # h in padded rows, the top-k ids past routing's E rows)
+    fi = cc == 100 and not native
+    if fi:
+        t.update({"h2": z(T, 3072 * 33 // 32, dtype=torch.uint8),   # MXFP8 h
+                  "routing": z(E + TOPK, T, dtype=torch.int32),
+                  "y_in": z(T, H), "x_res": z(T, H)})
     m = type("Cfg", (), dict(eps=1e-5, QH=QH, KVH=KVH, E=E, limit=7.0,
-                             max_seq=MAX_SEQ, R=1))
-    mpk = StaticMegakernel(num_gpus=1, num_sms=132, target_cc=90)
+                             max_seq=MAX_SEQ, R=1,
+                             moe_kind="flashinfer" if fi else "mpk", fi_logits=fi))
+    mpk = StaticMegakernel(num_gpus=1, num_sms=nsm, target_cc=cc)
     g.build_layer(m, mpk, t, 128 if kind == "sliding" else 0)
     # the shipped H100 plan, else round robin with the router over 4 tasks a
     # token (the gate's changeable grid dim)
     gate = next(n.graph_idx for n in compiler.graph_nodes(mpk)
                 if n.name == "sm90_gate")
-    plan = g.load_plan(mpk, g.plan_path(m, os.path.join(demo, "plans", "h100"),
-                                        kind)) or \
-        plan_gen.round_robin_plan(mpk, {gate: (T, 4, 1)})
+    grids = {gate: (T, 4, 1)}
+    if cc == 100:   # QKV: 64-row tiles in its fewest K parts (the attention adds them); o_proj in 2 (the gate adds them)
+        gemms = [n for n in compiler.graph_nodes(mpk) if n.name == "gemm_tile"]
+        grids[gemms[0].graph_idx] = min((c for c in compiler.candidate_grids(gemms[0])
+                                         if c[0] == gemms[0].grid[0] * 2), key=lambda c: c[1])
+        grids[gemms[1].graph_idx] = (gemms[1].grid[0], 2, 1)
+    plan = (cc == 90 and g.load_plan(mpk, g.plan_path(
+        m, os.path.join(demo, "plans", "h100"), kind))) or \
+        plan_gen.round_robin_plan(mpk, grids)
     out = os.path.join(os.environ.get("TMPDIR", "/tmp"),
-                       f"mpk_cross_arch_gpt_oss_{kind}_{os.getpid()}")
+                       f"mpk_cross_arch_gpt_oss_{kind}_{cc}_{os.getpid()}")
     paths, _ = compiler.compile_plan(mpk, plan, os.path.join(out, "schedules"))
     mpk.compile_static(paths, gpu_tensors=[t], out_dir=os.path.join(out, "build"),
-                       extra_flags=g.FLAGS, build_only=True)
+                       extra_flags=g.flags(), build_only=True)
 
 
-def _build_gpt_oss_static_head():
+def _build_gpt_oss_static_head(cc=90):
     """The GPT-OSS static head (final norm, lm_head, the next step's tokens)
-    at a small vocabulary, two requests, round-robin over 132 SMs, built for
-    sm_90a."""
+    at a small vocabulary, two requests, round-robin over the target's SMs,
+    built for sm_90a or sm_100a."""
     from mirage.mpk import compiler, plan_gen
     from mirage.mpk.static_megakernel import StaticMegakernel
 
     g, _ = _gpt_oss_demo()
+    g.CC = cc
     H, V, T, MAX_SEQ, R = 2880, 8192, g.T, 1024, 2   # two requests
 
     def z(*shape, dtype=torch.bfloat16):
@@ -226,15 +253,18 @@ def _build_gpt_oss_static_head():
         "kv_indices": torch.zeros(R * MAX_SEQ // 64, dtype=torch.int32, device="cuda"),
         "kv_indices_ring": torch.zeros(R * MAX_SEQ // 64, dtype=torch.int32, device="cuda"),
     }
+    if cc == 100:   # FlashInfer's experts: the final norm adds their sum
+        t.update({"y_in": z(T, H), "x_res": z(T, H)})
     m = type("Cfg", (), dict(eps=1e-5, max_seq=MAX_SEQ, RP=4))
-    mpk = StaticMegakernel(num_gpus=1, num_sms=132, target_cc=90)
+    mpk = StaticMegakernel(num_gpus=1, num_sms=148 if cc == 100 else 132,
+                           target_cc=cc)
     g.build_head(m, mpk, t)
     out = os.path.join(os.environ.get("TMPDIR", "/tmp"),
-                       f"mpk_cross_arch_gpt_oss_head_{os.getpid()}")
+                       f"mpk_cross_arch_gpt_oss_head_{cc}_{os.getpid()}")
     paths, _ = compiler.compile_plan(mpk, plan_gen.round_robin_plan(mpk),
                                      os.path.join(out, "schedules"))
     mpk.compile_static(paths, gpu_tensors=[t], out_dir=os.path.join(out, "build"),
-                       extra_flags=g.FLAGS, build_only=True)
+                       extra_flags=g.flags(), build_only=True)
 
 
 BUILDS = {
@@ -245,6 +275,11 @@ STATIC_BUILDS = {
     "gpt_oss_static_sliding": lambda: _build_gpt_oss_static("sliding"),
     "gpt_oss_static_full": lambda: _build_gpt_oss_static("full"),
     "gpt_oss_static_head": _build_gpt_oss_static_head,
+    "gpt_oss_static_sliding_sm100": lambda: _build_gpt_oss_static("sliding", 100),
+    "gpt_oss_static_full_sm100": lambda: _build_gpt_oss_static("full", 100),
+    "gpt_oss_static_head_sm100": lambda: _build_gpt_oss_static_head(100),
+    "gpt_oss_static_native_sm100": lambda: _build_gpt_oss_static(
+        "full", 100, native=True),
 }
 
 
@@ -257,7 +292,6 @@ def test_build(build, target_cc):
                    check=True)
 
 
-# The Hopper static megakernel builds for sm90 only.
 @pytest.mark.parametrize("build", sorted(STATIC_BUILDS))
 def test_static_build(build):
     subprocess.run([sys.executable, __file__, build], check=True)

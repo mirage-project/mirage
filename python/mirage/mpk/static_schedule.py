@@ -995,6 +995,9 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
     if build_only:
         return None
 
+    if build_only:
+        return None
+
     spec = importlib.util.spec_from_file_location("__mirage_static_launcher", so_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

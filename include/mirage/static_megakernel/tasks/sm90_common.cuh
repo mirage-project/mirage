@@ -22,6 +22,12 @@
 
 namespace static_mk {
 
+// the first of a pack of StaticNodes (a task's first input's producer)
+template <class A, class... R>
+struct Sm90First {
+  using type = A;
+};
+
 // Before the body: every producer node of IN... (a graph input's StaticNode<0,
 // 0, 0> has x == 0) has counted all its tasks, and this SM's earlier tasks are
 // done with the shared memory (the ring's jobs end with their last warp, so the

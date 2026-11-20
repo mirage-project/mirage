@@ -31,9 +31,14 @@ __device__ __forceinline__ TileJob make_bf16_tile(CUtensorMap const *wmap,
 template <int MODE>
 __device__ __forceinline__ void tile_epilogue(
     void *out, int N, int row0, int split, int row, float const *v) {
-  if (MODE == COMBINE_STORE) {
+  if (MODE == COMBINE_STORE) { // K part `split` at [split][T][N]; a padded
+                               // weight's rows past N: not stored
+    if (row0 + row >= N) {
+      return;
+    }
     for (int t = 0; t < T; t++) {
-      reinterpret_cast<float *>(out)[t * N + row0 + row] = v[t];
+      reinterpret_cast<float *>(out)[((size_t)split * T + t) * N + row0 + row] =
+          v[t];
     }
   } else if (MODE == COMBINE_STORE_BF16) {
     for (int t = 0; t < T; t++) {
@@ -109,7 +114,7 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
               64 * h + 16 * (t >> 5) + ((t & 31) >> 2) + 8 * (i >> 1);
           int const tok = 8 * n + 2 * (t & 3) + (i & 1);
           float const v = acc[h][n][i];
-          if (mode == COMBINE_SLOTS) {
+          if (mode == COMBINE_SLOTS || mode == COMBINE_STORE) {
             reinterpret_cast<float *>(
                 out)[((size_t)split * T + tok) * N + row0 + row] = v;
           } else if (mode == COMBINE_ADD) {
@@ -119,8 +124,6 @@ __device__ __forceinline__ void gemm_tile_task(TileJob const &j,
           } else if (mode == COMBINE_STORE_BF16) {
             reinterpret_cast<__nv_bfloat16 *>(out)[tok * N + row0 + row] =
                 __float2bfloat16(v);
-          } else {
-            reinterpret_cast<float *>(out)[tok * N + row0 + row] = v;
           }
         }
       }
@@ -266,10 +269,6 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
   static_assert(K > 0 && K % 64 == 0 && k_tiles % SELF::y == 0,
                 "params = {mode, K, N, polled}; K in 64-column blocks, each K "
                 "part whole 128-column tiles");
-#ifndef STATIC_SM90
-  static_assert(K % 128 == 0,
-                "a K ending in a half tile (K % 128 == 64) is Hopper only");
-#endif
   if constexpr (SKIP_LEN > 0) {
     static_assert(K % (128 * SELF::y) == 0,
                   "skip_seq requires whole 128-column K parts");
@@ -286,15 +285,19 @@ __device__ __forceinline__ void run_gemm_tile(Maps const &maps,
     }
   }
   constexpr int pieces = k_tiles / SELF::y; // K tiles of 128 per task
-  constexpr int ROWS = N / SELF::x;
-  static_assert(ROWS * SELF::x == N && (ROWS == 128 || ROWS == 64),
-                "128 or 64 weight rows per task");
+  // WN: the weight's rows ("store" with a weight zero-padded past N to whole
+  // 128-row tiles; the rows past N are not stored)
+  constexpr int WN = param_or<PARAMS, 5, N>();
+  constexpr int ROWS = WN / SELF::x;
+  static_assert(ROWS * SELF::x == WN && (ROWS == 128 || ROWS == 64) &&
+                    (WN == N || (mode == COMBINE_STORE && WN > N)),
+                "128 or 64 weight rows per task (padded rows: \"store\" only)");
   static_assert(mode == COMBINE_SLOTS || mode == COMBINE_ADD ||
                     mode == COMBINE_STORE || mode == COMBINE_STORE_BF16,
                 "mode: Combine");
-  static_assert((mode != COMBINE_STORE && mode != COMBINE_STORE_BF16) ||
-                    SELF::y == 1,
-                "plain stores: one K part");
+  static_assert(mode != COMBINE_STORE_BF16 || SELF::y == 1,
+                "bf16 stores: one K part (fp32 stores: K part y at [y][T][N], "
+                "the reader adds them)");
   static_assert(SELF::buf >= 0 && (mode == COMBINE_SLOTS || SELF::counter >= 0),
                 "the node's output buffer and counters");
   static_assert(WMAP + (POLLED ? 0 : 1) < MAX_MAPS && AMAP < MAX_MAPS,
