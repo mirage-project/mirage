@@ -1756,12 +1756,15 @@ class StaticMegakernel(PersistentKernel):
                                    sinks: DTensor = None, block_dim: tuple = (256, 1, 1)):
         """The output of sm90_attention_split_layer from its splits (tasks/sm90_attention_merge.cuh), with the per-head
         sinks: task (x, y) = request x (its one token), query heads [HPT y, HPT y + HPT): HPT = 1 (a CTA a head: a
-        request has many splits) when that grid fits the SMs, else 8, or more until it does (32 / 64 requests: 16 / 32). params = [Q, D, P (splits at most), has_sink, HPT, R
+        request has many splits) when that grid fits the SMs, else 8, or on Blackwell more until it does (32 / 64 requests: 16 /
+        32). params = [Q, D, P (splits at most), has_sink, HPT, R
         (requests)]."""
         D, R, nsm = output.dim(1) // num_q_heads, qo_indptr.dim(0) - 1, self._num_sms()
         self._tokens(output.dim(0))
         hpt = 1 if R * num_q_heads <= nsm else 8
-        while os.environ.get("GPTOSS_MERGE_HPT") == "1" and R * num_q_heads // hpt > nsm and hpt < num_q_heads:   # many requests: more heads a task, the grid on the SMs
+        # Blackwell, many requests: more heads a task until the grid fits the SMs (one wave; B200 64 requests at 8K, the
+        # full layer 221 -> 214 us). H100 keeps 8 (its plans').
+        while self.target_cc == 100 and R * num_q_heads // hpt > nsm and hpt < num_q_heads:
             hpt *= 2
         self._sm90_node("sm90_attention_merge", (R, num_q_heads // hpt, 1), [parts, qo_indptr, sinks, output],
                         [num_q_heads, D, sm90_attention_max_splits(nsm, R), int(sinks is not None), hpt, R], block_dim)
