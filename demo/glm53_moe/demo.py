@@ -39,6 +39,13 @@ bank of the experts node (shared_bank: 7 layer calls).
                      timed launch, medians over the SMs (prof_report)
      --live-rows N   a live table (rows < N live) as the decoder attaches it: bs N on the T layer (rows >= N idle:
                      topk_route gives them the shared experts' pairs, routed ones at weight 0)
+     --check-ref     the routed rows of the first launch (and y) against a PyTorch reference of the kernel's own pairs
+                     with the kernel's rounding points and the loaded weights (ref_rows), relRMS (with --live-rows: the
+                     live rows)
+     --diff-y FILE   y and the routed rows against a saved pair (--save-y of another build), relRMS: a numerics change
+T = 64: W2_UE8M0 (default; MIRAGE_STATIC_MOE64_W2UE=0: off): the W2 weights requantized to power-of-two scales at load
+(weights.layer_tensors w2_ue8m0, SGLang's DeepGEMM requantization), h_q's scales rounded up to powers of two and the W2
+MMA applying both (scaled_moe_experts_layer w2_ue8m0): a numerics change against the checkpoint's fp32 scales.
 Steps 5-6 run the layer through the test harness (python/mirage/mpk/static_harness.py).
 
 y = the MoE output (+ the residual: zero in this demo, so y is comparable with the MoE output of SGLang).
@@ -71,7 +78,11 @@ T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each
 # scaled_moe_experts' options for GLM-5.3's slots, most of 1 or 2 tokens (layer 22, one B200, TP8 rank 0, the shared expert
 # in the bank, 3 rounds): the many-token W13 epilogue off at T = 32 (101.4 -> 98.0 us), the W2 tiles in slot order at
 # T = 16 (64.1 -> 62.5 us)
-MOE_OPTS = {"many_token_epilogue": T != 32, "w2_in_slot_order": T == 16}
+# T = 64: the W2 weights requantized to power-of-two scales (as SGLang's DeepGEMM MoE on Blackwell), h_q's scales rounded
+# up to powers of two, the W2 MMA applying both (scaled_moe_experts_layer w2_ue8m0); MIRAGE_STATIC_MOE64_W2UE=0: the
+# checkpoint's fp32 scales and the W2 of fp32-scale promotion
+W2_UE8M0 = T == 64 and os.environ.get("MIRAGE_STATIC_MOE64_W2UE", "1") != "0"
+MOE_OPTS = {"many_token_epilogue": T != 32, "w2_in_slot_order": T == 16, "w2_ue8m0": W2_UE8M0}
 H, I, E, TOPK, SCALE = 6144, 2048, 256, 8, 2.5   # hidden, expert intermediate, experts, top k, routed scaling
 
 
@@ -89,7 +100,8 @@ def load_weights(read, layer: int, gpus: int, x: torch.Tensor, num_experts: int 
     ws, h = [], x.shape[1]
     for g in range(gpus):
         dev = torch.device("cuda", g)
-        w = layer_tensors(read, layer, tp=tp, rank=g if tp == gpus else rank, num_experts=num_experts, device=dev)
+        w = layer_tensors(read, layer, tp=tp, rank=g if tp == gpus else rank, num_experts=num_experts, device=dev,
+                          w2_ue8m0=W2_UE8M0)
         w.update(x=x.to(dev), routing_pairs=torch.empty(T, TOPK, dtype=torch.int64, device=dev),
                  routed_rows=torch.empty(T * TOPK, h, device=dev), moe_out=torch.empty(T, h, dtype=torch.bfloat16, device=dev),
                  residual=(torch.zeros(T, h, dtype=torch.bfloat16) if residual is None else residual).to(dev))
@@ -268,6 +280,61 @@ def prof_report(prof: torch.Tensor, bar: int):
             print(f"    {k:30s} {statistics.median(v):8.2f}   ({q(v, 0.1):.2f} / {q(v, 0.9):.2f})")
 
 
+def _e4m3_groups(v: torch.Tensor, ue8m0: bool):
+    """fp32 [n, K] -> (e4m3 [n, K], fp32 scales [n, K / 128]) per 128 values: s = max(amax, 1e-10) x fp32(1 / 448)
+    (group_quant, h_quant_group_tok), or ue8m0: the power of two at or above max(amax, 1e-10) / 448 (group_scale<true>)."""
+    n, K = v.shape
+    g = v.float().view(n, K // 128, 128)
+    am = g.abs().amax(-1).clamp_min(1e-10)
+    if ue8m0:
+        b = (am / 448.0).view(torch.int32)
+        e = (((b >> 23) & 0xFF) + ((b & 0x7FFFFF) != 0).to(torch.int32)).clamp(1, 254)
+        s = (e << 23).view(torch.float32)
+    else:
+        s = am * (torch.tensor(1.0, dtype=torch.float32) / torch.tensor(448.0, dtype=torch.float32)).to(v.device)
+    return (g / s.unsqueeze(-1)).to(torch.float8_e4m3fn).view(n, K), s
+
+
+def _fp8_gemm(q: torch.Tensor, s: torch.Tensor, w: torch.Tensor, ws: torch.Tensor) -> torch.Tensor:
+    """e4m3 [n, K] with scales [n, K / 128] times e4m3 [N, K] (bytes) with block scales [N / 128, K / 128]: fp64 [n, N]."""
+    n, K = q.shape
+    N, KB = w.shape[0], K // 128
+    part = torch.einsum("tbk,nbk->tnb", q.double().view(n, KB, 128),
+                        w.view(torch.float8_e4m3fn).double().view(N, KB, 128))
+    return (part * s.double().unsqueeze(1) * ws.double().repeat_interleave(128, 0)[:N].unsqueeze(0)).sum(-1)
+
+
+def ref_rows(w: dict, x: torch.Tensor, pairs: torch.Tensor, ue8m0: bool) -> torch.Tensor:
+    """The routed rows [T K, H] (fp64) of the kernel's own pairs [T, K] (bank expert << 32 | fp32 weight bits; shared_bank's
+    tensors: the shared expert is the bank's last) from w's loaded pieces (unpacked), with the kernel's rounding points:
+    x in e4m3 per 128 (group_quant), gate / up with their block scales (fp64), h = SiLU(gate) up in fp32, h in e4m3 per 128
+    features (ue8m0: power-of-two scales, as scaled_moe_experts' W2UE), down with its block scales (fp64), times the
+    pair's weight. ue8m0 does not requantize: w holds what the kernel reads."""
+    E1, IR2, H_ = w["w13"].shape
+    IR = IR2 // 2
+    p32 = pairs.contiguous().view(torch.int32).view(*pairs.shape, 2)   # little-endian: the weight bits, then the expert
+    e, wt = p32[..., 1].long(), p32[..., 0].contiguous().view(torch.float32)
+    xq, xs = _e4m3_groups(x.float(), False)
+    out = torch.zeros(pairs.shape[0], pairs.shape[1], H_, dtype=torch.float64, device=x.device)
+    for ex in e.unique().tolist():
+        tt, kk = (e == ex).nonzero(as_tuple=True)
+        gu = w["w13"][ex].reshape(IR2 // 128, H_ // 128, 128, 128).transpose(1, 2).reshape(IR // 64, 2, 64, H_)
+        gate, up = gu[:, 0].reshape(IR, H_), gu[:, 1].reshape(IR, H_)
+        sf = w["w13_sf"][ex]
+        g = _fp8_gemm(xq[tt], xs[tt], gate, sf[..., 0])
+        u = _fp8_gemm(xq[tt], xs[tt], up, sf[..., 1])
+        h = torch.nn.functional.silu(g.float()) * u.float()
+        hq, hs = _e4m3_groups(h, ue8m0)
+        dn = w["w2"][ex].reshape(H_ // 128, IR // 128, 128, 128).transpose(1, 2).reshape(H_, IR)
+        out[tt, kk] = wt[tt, kk].double().unsqueeze(1) * _fp8_gemm(hq, hs, dn, w["w2_sf"][ex])
+    return out.view(-1, H_)
+
+
+def relrms(a: torch.Tensor, b: torch.Tensor) -> float:
+    a, b = a.double(), b.double()
+    return ((a - b).norm() / b.norm().clamp_min(1e-30)).item()
+
+
 def check_plan(plan: str, gpus: int, sms: int) -> dict:
     """Read a plan file and check that it has task lists for `gpus` GPUs of `sms` SMs each. Raise ValueError if not."""
     p = compiler.plan_from_file(plan)
@@ -345,6 +412,10 @@ def main():
                     "(N = T: every row live, with the table, as the decoder at bs T). Default: no live table")
     ap.add_argument("--prof-experts", action="store_true", help="the experts node's per-SM stamps (scaled_moe_experts_layer "
                     "prof=): where its time goes, for the last timed launch")
+    ap.add_argument("--check-ref", action="store_true", help="the routed rows and y of the first launch against the PyTorch "
+                    "reference of the kernel's own pairs (ref_rows; relRMS; FAIL above 5e-3)")
+    ap.add_argument("--diff-y", metavar="FILE", help="y and the routed rows of the first launch against a saved pair "
+                    "(--save-y), relRMS (a numerics change: e.g. W2_UE8M0 against the fp32-scale build)")
     args = ap.parse_args()
     # check the GPU count, the TP size and the plan before the download and the weight load
     tp = args.tp or args.gpus
@@ -404,6 +475,23 @@ def main():
                 eq = bool((bits(base[k][:r]) == bits(first[k][:r])).all())
                 print(f"  {k} of the {n_live} live rows bit-equal to {args.same_y}: {eq}")
             same_ok = same_ok and eq
+    n_live = args.live_rows if args.live_rows is not None else T
+    print(f"W2_UE8M0 (W2 weights requantized, power-of-two h_q scales, the W2 MMA applying them): {W2_UE8M0}")
+    if args.check_ref:   # the live rows (an idle row's values are not used)
+        rr = first["routed_rows"].shape[0] // T * n_live
+        ref = ref_rows(ws[0], ws[0]["x"][:n_live], ws[0]["routing_pairs"][:n_live], W2_UE8M0)
+        e_r = relrms(first["routed_rows"][:rr], ref.cpu())
+        e_y = relrms(first["y"][:n_live].float(), ref.view(n_live, -1, H).sum(1).cpu().to(torch.bfloat16).float())
+        print(f"  reference (the kernel's pairs, the loaded weights, ue8m0 {W2_UE8M0}): routed rows relRMS {e_r:.2e}, "
+              f"y relRMS {e_y:.2e} ({n_live} live rows)")
+        same_ok = same_ok and e_r < 5e-3
+    if args.diff_y:
+        base = torch.load(args.diff_y)
+        for k in ("y", "routed_rows"):
+            if k in base and base[k].shape == first[k].shape:
+                r = first[k].shape[0] // T * n_live
+                print(f"  {k} vs {args.diff_y}: relRMS {relrms(first[k][:r].float(), base[k][:r].float()):.2e} "
+                      f"({n_live} live rows)")
     if args.compare_y:
         ref = torch.from_numpy(np.fromfile(args.compare_y, dtype=np.uint16).reshape(T, H).astype(np.int16)).view(torch.bfloat16).float()
         print(f"y vs {args.compare_y}: relRMS {((y.float() - ref).norm() / ref.norm()).item():.2e}")
@@ -427,7 +515,7 @@ def main():
                                               machine)
         cost_records.append_records(args.record, records)
         print(f"cost records: {len(records)} added to {args.record} (code {records[0]['code'] if records else '-'}, {machine})")
-    if args.same_y:
+    if args.same_y or args.check_ref:
         print("PASS" if same_ok else "FAIL")
     sk.finalize()
     if not same_ok:

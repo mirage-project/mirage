@@ -20,7 +20,11 @@ The experts are #799's GLM-5.3 MoE tasks (demo/glm53_moe) with Flash's shapes:
               (with mhc_pre: the next attention's x_attn, h_post, h_res too), every rank's new streams equal; random streams
               and coefficients
   time        --reps launches, L2 emptied before each (--save-y / --same-y: the new streams saved, or required bit-equal to
-              saved ones)
+              saved ones; --diff-y: their relRMS against saved ones, a numerics change)
+  T = 64      W2_UE8M0 (this script's layer; MIRAGE_STATIC_MOE64_W2UE=0: off): the down weights requantized to power-of-two
+              scales at load (requant_down: SGLang's DeepGEMM requantization), h_q's scales rounded up to powers of two, the
+              W2 MMA applying both (build_graph w2_ue8m0); the reference then uses the requantized weights and power-of-two h
+              scales. The serving layer (sglang_moe: one bank for every T) keeps the checkpoint's scales
               --prof-experts: the experts node with its per-SM stamps (scaled_moe_experts.cuh moe_prof_event): per phase,
               the medians over the SMs (W13 items, the ring switch, W2 tiles and what each waits for)
               --timeline: the timing build; per node of the last launch, its first task start and last task end (from the
@@ -49,7 +53,7 @@ from safetensors import safe_open
 
 from mirage.core import bfloat16, float32, uint8
 from mirage.mpk import compiler
-from mirage.mpk.fp8_fp32scale_weights import pack_w13, pack_w2
+from mirage.mpk.fp8_fp32scale_weights import pack_w13, pack_w2, requant_ue8m0
 from mirage.mpk.static_harness import Harness
 from mirage.mpk.static_megakernel import HC_MIX_STRIDE, StaticMegakernel
 
@@ -62,6 +66,10 @@ HC = 4               # mHC: the residual is 4 streams [T, HC H]
 SUB = 2              # sub-experts per expert shard (TP4: 512 features -> 2 x 256)
 ROUTER_ROWS = 384    # the router padded to whole 128-row tiles
 FLUSH_BYTES = 512 << 20
+# T = 64, this script's layer (main): the down weights requantized to power-of-two scales, h_q's scales rounded up to
+# powers of two, the W2 MMA applying both (scaled_moe_experts_layer w2_ue8m0); MIRAGE_STATIC_MOE64_W2UE=0: off
+W2_UE8M0 = T == 64 and os.environ.get("MIRAGE_STATIC_MOE64_W2UE", "1") != "0"
+REF_H_UE8M0 = False   # the reference's h scales: powers of two (main sets it to W2_UE8M0)
 
 
 def load_layer(model_dir: str, layer: int, tp: int, rank: int, dev) -> dict:
@@ -104,6 +112,19 @@ def load_layer(model_dir: str, layer: int, tp: int, rank: int, dev) -> dict:
         for e in range(E):
             w["gate_up"][e], w["gate_up_s"][e], w["down"][e], w["down_s"][e] = shard(f"experts.{e}.") if e else (gu, gs, d, ds)
     assert w["gate_up"].dtype == torch.float8_e4m3fn and w["gate_up"].shape == (E, 2 * IR, H)
+    return w
+
+
+def requant_down(w: dict) -> dict:
+    """w (load_layer's) with every expert's down shard and the shared one's requantized to power-of-two scales in place
+    (fp8_fp32scale_weights.requant_ue8m0: per 128 x 128 block, as SGLang's DeepGEMM requantization)."""
+    for e in range(w["down"].shape[0]):
+        q, sf = requant_ue8m0(w["down"][e].view(torch.uint8), w["down_s"][e])
+        w["down"][e].view(torch.uint8).copy_(q)
+        w["down_s"][e].copy_(sf)
+    q, sf = requant_ue8m0(w["sd"].view(torch.uint8), w["sd_s"])
+    w["sd"].view(torch.uint8).copy_(q)
+    w["sd_s"].copy_(sf)
     return w
 
 
@@ -171,7 +192,7 @@ def gpu_tensors(b: dict, x: torch.Tensor, attn_next: dict = None) -> dict:
     return t
 
 
-def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None) -> dict:
+def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None, w2_ue8m0: bool = False) -> dict:
     """The layer's nodes (mpk.num_gpus GPUs, one TP shard each); returns the grids of the plan {graph_idx: grid} for the
     GEMMs whose default grid is not used. The end: allreduce_send (R: a token's rows added, bf16 to every GPU) ->
       t without "x_attn"  hc_post with the finished coefficients (MODE 1): R'_j = comb[i][j] R_i over i + post_j sum over
@@ -181,7 +202,8 @@ def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None) ->
                           sum over the GPUs, the mHC post, the next attention's mixes with hc_attn_fn) -> hc_pre (the next
                           layer's x_attn = RMSNorm(sum_i pre_i R'_i) input_layernorm, its h_post / h_res exported) -> x_attn,
                           h_post_next, h_res_next
-    valid_rows: the live rows of a decode step of fewer requests than T (the rows past them are not routed)."""
+    valid_rows: the live rows of a decode step of fewer requests than T (the rows past them are not routed). w2_ue8m0: the
+    bank's down weights requantized (requant_down; scaled_moe_experts_layer w2_ue8m0)."""
     mpk.max_counter_lines = 24   # 10 / 14 / 23 counter lines at T = 8 / 16 / 32 (scaled_moe_experts' per-slot counters), more
                                  # than config.cuh's default 16 (STATIC_NODE_COUNTER_LINES)
     a = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
@@ -197,7 +219,8 @@ def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None) ->
     mpk.scaled_moe_experts_layer(z_q=z_q, pairs=a["routing_pairs"], w13=a["w13"], w13_scales=a["w13_sf"],
                                  w2=a["w2"], w2_scales=a["w2_sf"], output=a["routed_rows"], swiglu_limit=LIMIT,
                                  prof=a.get("moe_prof"),                                             # --prof-experts
-                                 last=a.get("moe_last"))                                             # T = 64
+                                 last=a.get("moe_last"),                                             # T = 64
+                                 w2_ue8m0=w2_ue8m0)                                                  # T = 64 (main)
     r_sent = nt((T, H), bfloat16, "r_sent")
     mpk.allreduce_send_layer(input=a["routed_rows"], output=r_sent)                                  # a token's 18 rows added
     if "x_attn" in t:   # the mHC post and the next layer's attention mHC pre
@@ -256,6 +279,11 @@ def expert(x: torch.Tensor, gu, gu_s, d, d_s, act_fp8: bool = True) -> torch.Ten
     if not act_fp8:
         return gemm(swiglu(g[:, :IR], g[:, IR:]), d, d_s, act_fp8=False)
     h = swiglu(g[:, :IR].float(), g[:, IR:].float())
+    if REF_H_UE8M0:   # the scale rounded up to a power of two (scaled_moe_experts hq_out UE)
+        b = (h.view(h.shape[0], -1, 128).abs().amax(-1).clamp_min(1e-10) / 448.0).view(torch.int32)
+        hs = ((((b >> 23) & 0xFF) + ((b & 0x7FFFFF) != 0).to(torch.int32)).clamp(1, 254) << 23).view(torch.float32)
+        hq = (h.view(h.shape[0], -1, 128) / hs.unsqueeze(-1)).to(torch.float8_e4m3fn).view(h.shape)
+        return fp8_gemm(hq, hs, d, d_s)
     return fp8_gemm(*group_quant(h), d, d_s)
 
 
@@ -503,6 +531,8 @@ def run_tp(args, w0: dict, x: torch.Tensor, attn_next: dict) -> None:
     for r in range(n):
         dev = torch.device("cuda", r)
         w = w0 if r == 0 else load_layer(args.model_dir, args.layer, args.tp, r, dev)
+        if r > 0 and W2_UE8M0:
+            requant_down(w)
         t = gpu_tensors(bank(w), x.to(dev), attn_next=attn_next)
         t["streams"].copy_(streams)
         t["h_post"].copy_(h_post)
@@ -511,7 +541,8 @@ def run_tp(args, w0: dict, x: torch.Tensor, attn_next: dict) -> None:
         ts.append(t)
     mpk = StaticMegakernel(num_gpus=n)
     grids = build_graph(mpk, ts[0], attn_next=None if attn_next is None else {k: attn_next[k] for k in ("rms_eps", "hc_eps",
-                                                                                                        "norm_eps", "iters")})
+                                                                                                        "norm_eps", "iters")},
+                        w2_ue8m0=W2_UE8M0)
     if os.environ.get("STATIC_L2_PREFETCH_MB"):   # the layer's GEMM weights into L2 at its start (core.cuh kernel_begin)
         mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
     plan = compiler.plan_from_file(args.plan) if args.plan else round_robin_plan(mpk, grids)
@@ -584,6 +615,8 @@ def main():
                     "baseline")
     ap.add_argument("--same-y", metavar="FILE", help="the new streams of the first launch must equal these saved ones bit for "
                     "bit (a kernel change that keeps the rounding, same --layer --rank --seed)")
+    ap.add_argument("--diff-y", metavar="FILE", help="the new streams of the first launch against saved ones (--save-y), "
+                    "relRMS (a numerics change, e.g. W2_UE8M0 against the fp32-scale build)")
     ap.add_argument("--prof-experts", action="store_true", help="the experts node's per-SM stamps (scaled_moe_experts_layer "
                     "prof=): where its time goes, for the last timed launch")
     ap.add_argument("--valid-rows", type=int, default=0, help="the live rows (a decode step of fewer requests than T): the "
@@ -601,6 +634,11 @@ def main():
     assert I // args.tp == 256 * SUB, f"TP{args.tp}: {I // args.tp} features per GPU; the bank takes {SUB} sub-experts of 256"
 
     w = load_layer(args.model_dir, args.layer, args.tp, args.rank, dev)
+    global REF_H_UE8M0
+    REF_H_UE8M0 = W2_UE8M0
+    print(f"W2_UE8M0 (down requantized, power-of-two h_q scales, the W2 MMA applying them; the reference alike): {W2_UE8M0}")
+    if W2_UE8M0:
+        requant_down(w)
     g = torch.Generator().manual_seed(args.seed)
     x = bf(torch.randn(T, H, generator=g) * args.x_scale).to(dev)
     attn_next = None
@@ -624,7 +662,7 @@ def main():
     mpk = StaticMegakernel(num_gpus=1)
     grids = build_graph(mpk, t, attn_next=None if attn_next is None else {k: attn_next[k] for k in ("rms_eps", "hc_eps",
                                                                                                         "norm_eps", "iters")},
-                        valid_rows=args.valid_rows or None)
+                        valid_rows=args.valid_rows or None, w2_ue8m0=W2_UE8M0)
     plan = compiler.plan_from_file(args.plan) if args.plan else round_robin_plan(mpk, grids)
     os.makedirs(args.out, exist_ok=True)
     if args.collect:
@@ -708,6 +746,10 @@ def main():
         eq = bool((first.cpu().view(torch.int16) == base.view(torch.int16)).all())
         print(f"  the new streams bit-equal to {args.same_y}: {eq}")
         ok = ok and eq
+    if args.diff_y:
+        base = torch.load(args.diff_y)
+        print(f"  the new streams vs {args.diff_y}: relRMS {relrms(first.cpu()[:n].float(), base[:n].float()):.2e} "
+              f"({n} live rows)")
     print("PASS" if ok else "FAIL")
     sk.finalize()
     sys.exit(0 if ok else 1)
