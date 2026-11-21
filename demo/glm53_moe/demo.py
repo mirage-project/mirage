@@ -478,12 +478,15 @@ def main():
     n_live = args.live_rows if args.live_rows is not None else T
     print(f"W2_UE8M0 (W2 weights requantized, power-of-two h_q scales, the W2 MMA applying them): {W2_UE8M0}")
     if args.check_ref:   # the live rows (an idle row's values are not used)
+        # h_q's scales are powers of two with the W2 MMA path only (-DSTATIC_MOE64_W2UE=0: the requantized weights through
+        # the fp32-scale W2, h_q's scales as before)
+        h_ue = W2_UE8M0 and "-DSTATIC_MOE64_W2UE=0" not in args.nvcc_flag
         rr = first["routed_rows"].shape[0] // T * n_live
-        ref = ref_rows(ws[0], ws[0]["x"][:n_live], ws[0]["routing_pairs"][:n_live], W2_UE8M0)
+        ref = ref_rows(ws[0], ws[0]["x"][:n_live], ws[0]["routing_pairs"][:n_live], h_ue)
         e_r = relrms(first["routed_rows"][:rr], ref.cpu())
         e_y = relrms(first["y"][:n_live].float(), ref.view(n_live, -1, H).sum(1).cpu().to(torch.bfloat16).float())
-        print(f"  reference (the kernel's pairs, the loaded weights, ue8m0 {W2_UE8M0}): routed rows relRMS {e_r:.2e}, "
-              f"y relRMS {e_y:.2e} ({n_live} live rows)")
+        print(f"  reference (the kernel's pairs, the loaded weights, power-of-two h_q scales {h_ue}): routed rows relRMS "
+              f"{e_r:.2e}, y relRMS {e_y:.2e} ({n_live} live rows)")
         same_ok = same_ok and e_r < 5e-3
     if args.diff_y:
         base = torch.load(args.diff_y)
