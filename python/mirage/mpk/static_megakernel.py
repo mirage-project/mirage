@@ -745,6 +745,8 @@ class StaticMegakernel(PersistentKernel):
             maps.append(first)
         maps.append(self._map("act8kt", ("b", hq, 0), (IR, NSLOT * T, min(KT2, 2))))   # a W2 unit's K tiles (at most 2)
         tensors = [z_q, pairs, w13, w2, output]
+        # T = 64's shared-memory layout has only the many-token W13 epilogue (the other: an illegal access)
+        assert many_token_epilogue or T <= 32, "scaled_moe_experts_layer: many_token_epilogue=False needs T <= 32"
         opts = (0 if many_token_epilogue else 1) | (2 if w2_in_slot_order else 0)
         params = [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)]
         if opts:
