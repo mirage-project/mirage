@@ -250,10 +250,10 @@ def rr_plan(mpk, full: bool) -> dict:
     return plan_gen.round_robin_plan(mpk, grids)
 
 
-def build(mpk, ws: dict, plan: str, out: str, search: list = None, costs_code: str = "current", time_limit_s: float = 300,
+def build(mpk, ws, plan: str, out: str, search: list = None, costs_code: str = "current", time_limit_s: float = 300,
           profile: bool = False, extra_flags: list = None):
     """Compile the plan of the graph in mpk and load the kernel. Return the kernel and the compile_plan information, with
-    "paths" (the schedule files).
+    "paths" (the schedule files). ws: the graph tensors by name (one GPU), or a list of them (GPU g's: ws[g]).
     plan: a plan file, or "rr_full" / "rr_shared": the kind's round-robin plan (rr_plan).
     search: cost record files. If given, the solver searches a plan that starts from `plan` (search.search_plan). It writes
     the plan to out/plan.json and its predicted timeline to out/plan_view.json.
@@ -273,7 +273,7 @@ def build(mpk, ws: dict, plan: str, out: str, search: list = None, costs_code: s
         compiler.write_plan_file(os.path.join(out, "plan.json"), p)
         plan_viewer.save(os.path.join(out, "plan_view.json"), p, summary, f"searched from {plan}")
     paths, info = compiler.compile_plan(mpk, p, os.path.join(out, "schedules"))
-    sk = mpk.compile_static(paths, gpu_tensors=[ws], out_dir=os.path.join(out, "build"), extra_flags=extra_flags,
+    sk = mpk.compile_static(paths, gpu_tensors=ws if isinstance(ws, list) else [ws], out_dir=os.path.join(out, "build"), extra_flags=extra_flags,
                             profile=profile)
     return sk, dict(info, paths=paths)
 
@@ -334,51 +334,73 @@ def main():
     ap.add_argument("--compare-y", metavar="DIR", help="compare y of each layer with DIR/y_layer<L>.bin (relRMS)")
     ap.add_argument("--out", default="build/glm53_dsa", help="the directory for the schedules and the builds")
     ap.add_argument("--reps", type=int, default=20, help="the timed launches of each layer")
+    ap.add_argument("--gpus", type=int, default=1, help="GPUs of the layer (> 1: TP = gpus, GPU g runs shard g, the "
+                    "all-reduce over the GPUs in the kernel; --plan rr)")
     args = ap.parse_args()
-    dev = torch.device("cuda", 0)
+    G = args.gpus
+    if G > 1 and args.plan != "rr":
+        raise ValueError("--gpus > 1: the plan files are of one GPU; use --plan rr")
+    if G > 1:
+        args.tp = G
+    devs = [torch.device("cuda", g) for g in range(G)]
+    dev = devs[0]
     cfg, read, st, fulls, indices = setup(args, dev)
+    sts = [st] + [{k: v.to(d) for k, v in st.items()} for d in devs[1:]]
+    indices_of = [indices] + [indices.clone().to(d) for d in devs[1:]]
     if args.x:
         x = torch.from_numpy(np.fromfile(args.x, dtype=np.uint16).reshape(T, H)).view(torch.bfloat16)
     else:
         x = torch.randn(T, H, generator=torch.Generator().manual_seed(2)).to(torch.bfloat16)
-    x = x.to(dev)
+    xs = [x.to(d) for d in devs]
     npages = T * (args.maxctx // PAGE)
-    residual = torch.zeros(T, H, dtype=torch.bfloat16, device=dev)   # y = the attention output
+    residuals = [torch.zeros(T, H, dtype=torch.bfloat16, device=d) for d in devs]   # y = the attention output
     launches_of = {}   # --record: per layer, the per-task times and the span ends of each timed launch
     for layer, full in zip(args.layers, fulls):
-        w = layer_tensors(read, layer, tp=args.tp, rank=args.rank, device=dev, full=full, ue8m0=UE8M0)
-        cache = torch.empty(npages * PAGE, 576, dtype=torch.bfloat16, device=dev)
-        index_cache = torch.empty(npages, PAGE * 132, dtype=torch.uint8, device=dev) if full else None
-        random_history(cache, index_cache)
-        bufs = {"x": x, "cache": cache, "indices": indices, "residual": residual,
-                "attn_out": torch.zeros(T, H, dtype=torch.bfloat16, device=dev)}
-        if full:
-            bufs["index_cache"] = index_cache
-        mpk = StaticMegakernel(num_gpus=1)
+        ws, bufs_of = [], []
+        for g, d in enumerate(devs):   # GPU g: shard g of G (one GPU: shard --rank of --tp); the same history everywhere
+            ws.append(layer_tensors(read, layer, tp=args.tp, rank=g if G > 1 else args.rank, device=d, full=full,
+                                    ue8m0=UE8M0))
+            cache = torch.empty(npages * PAGE, 576, dtype=torch.bfloat16, device=d)
+            index_cache = torch.empty(npages, PAGE * 132, dtype=torch.uint8, device=d) if full else None
+            random_history(cache, index_cache)
+            b = {"x": xs[g], "cache": cache, "indices": indices_of[g], "residual": residuals[g],
+                 "attn_out": torch.zeros(T, H, dtype=torch.bfloat16, device=d)}
+            if full:
+                b["index_cache"] = index_cache
+            bufs_of.append(b)
+        w, bufs = ws[0], bufs_of[0]
+        mpk = StaticMegakernel(num_gpus=G)
         build_graph(mpk, w, st, bufs, full, cfg, args.maxctx, args.splits, args.chunks, cfg["rms_norm_eps"])
         out = os.path.join(args.out, f"layer{layer}")
-        sk, info = build(mpk, kernel_tensors(w, st, bufs), plan_file(args.plan, full), out, search=args.search,
+        kt = [kernel_tensors(ws[g], sts[g], bufs_of[g]) for g in range(G)]
+        sk, info = build(mpk, kt if G > 1 else kt[0], plan_file(args.plan, full), out, search=args.search,
                          costs_code=args.costs_code, time_limit_s=args.time, profile=args.record is not None,
                          extra_flags=args.nvcc_flag)
         h = Harness(sk)
         h.launch(timeout_s=60)
         torch.cuda.synchronize()
         y = bufs["attn_out"].cpu()
+        for g in range(1, G):
+            assert torch.equal(bufs_of[g]["attn_out"].cpu(), y), f"layer {layer}: y differs on GPU {g}"
         if args.save_y:
             os.makedirs(args.save_y, exist_ok=True)
             y.view(torch.int16).numpy().tofile(os.path.join(args.save_y, f"y_layer{layer}.bin"))
         if args.compare_y:
             f = os.path.join(args.compare_y, f"y_layer{layer}.bin")
             ref = torch.from_numpy(np.fromfile(f, dtype=np.uint16).reshape(T, H)).view(torch.bfloat16).float()
-            print(f"layer {layer}: y vs {f}: relRMS {((y.float() - ref).norm() / ref.norm()).item():.2e}")
+            print(f"layer {layer}: y vs {f}: relRMS {((y.float() - ref).norm() / ref.norm()).item():.2e}, bit-equal "
+                  f"{torch.equal(y.view(torch.int16), ref.to(torch.bfloat16).view(torch.int16))}")
         spans, launches = [], []
         for _ in range(args.reps):
             h.launch(512 << 20, timeout_s=60)   # 512 MB read first: L2 emptied
             spans.append(h.span_us())
             if args.record:
                 launches.append((h.task_times(), h.timing()))
-        print(f"layer {layer} ({'full' if full else 'shared'}), grids {info['grids']}: median span "
+        print(f"layer {layer} ({'full' if full else 'shared'}), {G} GPU(s), grids {info['grids']}: median span "
               f"{statistics.median(spans):.1f} us over {args.reps} launches")
+        if args.compare_y or args.save_y:   # the timed launches gave the same y as the first
+            y_last = bufs["attn_out"].cpu()
+            print(f"layer {layer}: y of the last timed launch bit-equal to the first: {torch.equal(y_last, y)}")
         if args.record:
             launches_of[layer] = (mpk, info["paths"], launches)
         sk.finalize()
