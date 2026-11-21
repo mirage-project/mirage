@@ -460,8 +460,10 @@ static void static_init(std::vector<std::map<std::string, void *>> const &tensor
 }
 
 // GPU `rank` of the layer in a process of its own (a serving framework's TP rank): this GPU only (device g_dev0), its rank's
-// task lists, static_host_init_rank with the caller's exchange region (mc: its multicast address, rv: this GPU's copy)
-static void static_init_rank(int rank, std::map<std::string, void *> const &tensors, unsigned char *mc, unsigned char *rv) {
+// task lists, static_host_init_rank with the caller's exchange region (mc: its multicast address, rv: this GPU's copy,
+// peers: every rank's copy mapped in this process, or none)
+static void static_init_rank(int rank, std::map<std::string, void *> const &tensors, unsigned char *mc, unsigned char *rv,
+                             std::vector<unsigned char *> const &peers) {
   if (rank < 0 || rank >= static_mk::GPUS) {
     fprintf(stderr, "layer: rank %d of %d GPUs\n", rank, static_mk::GPUS);
     exit(1);
@@ -471,7 +473,7 @@ static void static_init_rank(int rank, std::map<std::string, void *> const &tens
   g_ctx.num_lists = static_mk::NSM;
   g_ctx.gpus.assign(1, StaticGpuView());
   static_setup_gpu(0, rank, tensors);
-  static_host_init_rank(g_ctx, @ARGS@, rank, mc, rv);
+  static_host_init_rank(g_ctx, @ARGS@, rank, mc, rv, peers);
   static_alloc_times();
 }
 
@@ -651,7 +653,17 @@ static PyObject *py_init_rank(PyObject *self, PyObject *args) {
   int rank;
   PyObject *nl, *pl;
   unsigned long long mc, rv;
-  if (!PyArg_ParseTuple(args, "iOOKK", &rank, &nl, &pl, &mc, &rv)) return NULL;
+  PyObject *pv = NULL;
+  if (!PyArg_ParseTuple(args, "iOOKK|O", &rank, &nl, &pl, &mc, &rv, &pv)) return NULL;
+  std::vector<unsigned char *> peers;
+  if (pv != NULL && pv != Py_None) {
+    if (!PyList_Check(pv)) {
+      PyErr_SetString(PyExc_TypeError, "peers: a list of every rank's exchange region address");
+      return NULL;
+    }
+    for (Py_ssize_t i = 0; i < PyList_Size(pv); i++)
+      peers.push_back(reinterpret_cast<unsigned char *>(PyLong_AsUnsignedLongLong(PyList_GetItem(pv, i))));
+  }
   if (!PyList_Check(nl) || !PyList_Check(pl) || PyList_Size(nl) != PyList_Size(pl)) {
     PyErr_SetString(PyExc_TypeError, "names / pointers: this GPU's lists");
     return NULL;
@@ -663,7 +675,7 @@ static PyObject *py_init_rank(PyObject *self, PyObject *args) {
     tensors[s] = PyLong_AsVoidPtr(PyList_GetItem(pl, i));
   }
   if (PyErr_Occurred()) return NULL;
-  static_init_rank(rank, tensors, reinterpret_cast<unsigned char *>(mc), reinterpret_cast<unsigned char *>(rv));
+  static_init_rank(rank, tensors, reinterpret_cast<unsigned char *>(mc), reinterpret_cast<unsigned char *>(rv), peers);
   Py_RETURN_NONE;
 }
 static PyObject *py_launch(PyObject *self, PyObject *args) {
@@ -751,7 +763,7 @@ static PyObject *py_finalize(PyObject *self, PyObject *args) { static_finalize()
 static PyMethodDef StaticMethods[] = {
   {"init_func", py_init, METH_VARARGS, "the graph's tensors of every GPU (names, pointers): the buffers and maps"},
   {"init_rank_func", py_init_rank, METH_VARARGS,
-   "(rank, names, pointers, multicast address, local address): one GPU of the layer in a process of its own, the exchange region the caller's"},
+   "(rank, names, pointers, multicast address, local address[, every rank's address]): one GPU of the layer in a process of its own, the exchange region the caller's"},
   {"launch_func", py_launch, METH_VARARGS, "one launch on every GPU ([flush bytes]: serving mode, L2 emptied on the stream first)"},
   {"elapsed_func", py_elapsed, METH_NOARGS, "per GPU the microseconds between the events around the last launch's kernel"},
   {"set_device_func", py_set_device, METH_VARARGS, "(device): the CUDA device of GPU 0, before init_func"},
@@ -909,5 +921,6 @@ def compile_static(pk, schedule_paths: List[str], gpu_tensors: Optional[List[dic
     if rank is None:
         module.init_func(names, pointers)
         return StaticKernel(module, num_gpus, cu_path, so_path)
-    module.init_rank_func(int(rank), names[0], pointers[0], int(exchange[0]), int(exchange[1]))
+    module.init_rank_func(int(rank), names[0], pointers[0], int(exchange[0]), int(exchange[1]),
+                          [int(p) for p in exchange[2]] if len(exchange) > 2 else None)
     return StaticKernel(module, 1, cu_path, so_path)
