@@ -2083,13 +2083,31 @@ __device__ __forceinline__ void
                            c0a = tb + TW * a + lanes,
                            c1a = c0a + ACC_STAGES * TW;
             int i0 = start_s[slot];
-            int const end = i0 + nt;
+            // (W2C) the entries of all the slot's pairs: its nt distinct
+            // tokens, then the other pairs of a token already there (an idle
+            // row's: build_table TOKEN_ORDER)
+            int const end =
+                RES::W2C ? (slot + 1 < n_live ? start_s[slot + 1] : RES::NPAIR)
+                         : i0 + nt;
             // the accumulator column of entry i of the slot's list: its token,
-            // or (W2C) its place in the list
+            // or (W2C) its place in the list; for an entry past the distinct
+            // tokens the place of its token (a binary search of the list)
             [[maybe_unused]] int const cb = start_s[slot];
             auto col = [&](int i, int t_) {
               if constexpr (RES::W2C) {
-                return i - cb;
+                if (i - cb < nt) {
+                  return i - cb;
+                }
+                int lo = 0, hi = nt;
+                while (lo < hi) {
+                  int const m = (lo + hi) >> 1;
+                  if (tok_s[cb + m] < t_) {
+                    lo = m + 1;
+                  } else {
+                    hi = m;
+                  }
+                }
+                return lo;
               } else {
                 return t_;
               }
@@ -2641,8 +2659,10 @@ __device__ __forceinline__ void run_scaled_moe_experts(Maps const &maps,
   }
   [[maybe_unused]] long long pt_bt[3] = {0, 0, 0}; // PROF: build_table's steps
   if constexpr (RES::W2C) { // each slot's list in token order; the token
-                            // masks in the W13 accumulator's area (no W13
-                            // item has run yet)
+                            // masks, claim masks and extra pair counts in the
+                            // W13 accumulator's area (no W13 item has run yet)
+    static_assert(!RES::W2C || RES::NSLOT * 20 <= 128 * T * 4,
+                  "STATIC_MOE64_W2C: build_table's masks in OFF_ACC");
     build_table<RES, true>(RES::PROF >= 0 ? pt_bt : nullptr,
                            reinterpret_cast<unsigned long long *>(
                                rt_sm() + scaled_moe::Smem<RES>::OFF_ACC));

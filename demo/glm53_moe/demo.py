@@ -37,6 +37,8 @@ bank of the experts node (shared_bank: 7 layer calls).
                      a saved pair (a kernel change that keeps the rounding; same --layer --rank --x)
      --prof-experts  the experts node with its per-SM stamps (scaled_moe_experts_layer prof=): per phase of the last
                      timed launch, medians over the SMs (prof_report)
+     --live-rows N   a live table (rows < N live) as the decoder attaches it: bs N on the T layer (rows >= N idle:
+                     topk_route gives them the shared experts' pairs, routed ones at weight 0)
 Steps 5-6 run the layer through the test harness (python/mirage/mpk/static_harness.py).
 
 y = the MoE output (+ the residual: zero in this demo, so y is comparable with the MoE output of SGLang).
@@ -270,7 +272,7 @@ def build(ws: list, out: str, plan: str, search: list = None, costs_code: str = 
           profile: bool = False, extra_flags: list = None):
     """Build the graph, compile its plan, and load the kernel for GPUs 0..len(ws)-1.
 
-    ws contains the tensors from load_weights (or shared_bank's). plan: a saved plan file, or None: round_robin_plan.
+    ws contains the tensors from load_weights (or shared_bank's), and "live" (--live-rows) if given. plan: a saved plan file, or None: round_robin_plan.
     search: cost record files. Then the solver searches a plan, starting from the plan above (search.search_plan), and
     writes it to out/plan.json and its predicted timeline to out/plan_view.json. costs_code: the records of these kernel
     templates: "current" (static_schedule.code_tag), "any", or a tag.
@@ -280,7 +282,8 @@ def build(ws: list, out: str, plan: str, search: list = None, costs_code: str = 
     """
     gpus = len(ws)
     mpk = build_kernel(gpus)
-    grids = build_graph(mpk, ws[0])
+    # "live" (--live-rows): attached after the graph's nodes (build_graph live), bound by name per GPU
+    grids = build_graph(mpk, {k: v for k, v in ws[0].items() if k != "live"}, live=ws[0].get("live"))
     p = check_plan(plan, gpus, torch.cuda.get_device_properties(0).multi_processor_count) if plan else \
         round_robin_plan(mpk, grids)
     if search:
@@ -327,6 +330,9 @@ def main():
                     "bit-exact baseline")
     ap.add_argument("--same-y", metavar="FILE", help="y and the routed rows of the first launch must equal these saved ones "
                     "bit for bit (same --layer --rank --x)")
+    ap.add_argument("--live-rows", type=int, default=None, metavar="N", help="a live table [T] int32, 1 for rows < N, 0 "
+                    "after, attached as the decoder does (build_graph live; topk_route_live_rows): bs N on the T layer "
+                    "(N = T: every row live, with the table, as the decoder at bs T). Default: no live table")
     ap.add_argument("--prof-experts", action="store_true", help="the experts node's per-SM stamps (scaled_moe_experts_layer "
                     "prof=): where its time goes, for the last timed launch")
     args = ap.parse_args()
@@ -348,6 +354,11 @@ def main():
     ws = load_weights(checkpoint_reader(snapshot), args.layer, args.gpus, x, tp=args.tp, rank=args.rank)
     if args.shared_in_bank:
         ws = [shared_bank(w) for w in ws]
+    if args.live_rows is not None and not 1 <= args.live_rows <= T:
+        raise ValueError(f"--live-rows {args.live_rows}: 1 .. T = {T}")
+    if args.live_rows is not None:   # the decoder's live table (seq_lens > 0) of bs live_rows
+        for g, w in enumerate(ws):
+            w["live"] = (torch.arange(T) < args.live_rows).to(torch.int32).to(torch.device("cuda", g))
     if args.prof_experts:   # buffer slot 4 of the experts node: [SMs, MOE_PROF_WORDS] int64
         for g, w in enumerate(ws):
             w["moe_prof"] = torch.zeros(torch.cuda.get_device_properties(g).multi_processor_count, 384, dtype=torch.int64,
@@ -385,7 +396,7 @@ def main():
         spans.append(h.span_us())
         if args.record:
             launches.append((h.task_times(), h.timing()))
-    print(f"{args.gpus} GPU(s), grids {info['grids']}: median span {statistics.median(spans):.1f} us over {args.reps} launches")
+    print(f"{args.gpus} GPU(s), live rows {args.live_rows or 'all (no table)'} of T = {T}, grids {info['grids']}: median span {statistics.median(spans):.1f} us over {args.reps} launches")
     print(f"span min {min(spans):.1f} median {statistics.median(spans):.1f} max {max(spans):.1f} us")
     y_last = ws[0]["moe_out"].cpu()
     print(f"  y of the last timed launch bit-equal to the first: {torch.equal(y_last, first['y'])}")

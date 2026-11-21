@@ -174,10 +174,16 @@ __device__ __forceinline__ void table_poll(unsigned long long const *pairs,
 // (start / tok / wt / kk: slot s's entries start[s] .. + ntok[s] - 1, in no
 // particular order); s_ints[1] = number of slots. st (optional,
 // scaled_moe_experts' stamps): thread 0's times past each of its first three
-// barriers. TOKEN_ORDER (T <= 64, a token at most once in a slot): each slot's
-// entries in token order, the same on every SM (scaled_moe_experts W2C: a
-// token's place picks its h_q row); tmask: NSLOT 64-bit words of shared memory
-// (the slots' token masks)
+// barriers. TOKEN_ORDER (T <= 64; scaled_moe_experts W2C): each slot's
+// entries start[s] .. + ntok[s] - 1 are its DISTINCT tokens in token order,
+// the same on every SM (a token's place picks its h_q row); ntok[s] is their
+// count. A token with more than one pair in a slot (a run-time idle row:
+// topk_route's idle_pair puts all its pairs on the shared bank experts, or
+// expert 0) has one of them there (whichever won the claim) and the others
+// after: entries start[s] + ntok[s] .. start[s] + its pairs - 1 (its pairs =
+// start[s + 1] - start[s], NPAIR - start[s] for the last slot), in no
+// particular order. tmask: 2 NSLOT 64-bit words + NSLOT ints of shared memory
+// (the slots' token masks, their claim masks, their extra pairs)
 template <class RES, bool TOKEN_ORDER = false>
 __device__ __forceinline__ void
     build_table(long long *st = nullptr, unsigned long long *tmask = nullptr) {
@@ -287,6 +293,8 @@ __device__ __forceinline__ void
         fill_s[i] = 0;
         if constexpr (TOKEN_ORDER) {
           tmask[i] = 0ull;
+          tmask[NSLOT + i] = 0ull;
+          reinterpret_cast<int *>(tmask + 2 * NSLOT)[i] = 0;
         }
       }
       run += mine[q];
@@ -296,7 +304,10 @@ __device__ __forceinline__ void
   if constexpr (TOKEN_ORDER) {
     // 3. the pairs into their slots' entries in token order: the tokens' bits
     // (bit t & 31 of the slot's 32-bit word t >> 5), then a pair's place = the
-    // slot's tokens below its token
+    // slot's tokens below its token, for the pair that first claims the token's
+    // bit in the slot's claim mask; another pair of the same token and slot
+    // (an idle row's) goes after the slot's distinct tokens; then ntok = the
+    // distinct tokens
     static_assert(!TOKEN_ORDER || T <= 64, "build_table: a slot's tokens in "
                                            "one 64-bit mask");
     for (int i = threadIdx.x; i < NPAIR; i += 256) {
@@ -309,11 +320,22 @@ __device__ __forceinline__ void
     __syncthreads();
     for (int i = threadIdx.x; i < NPAIR; i += 256) {
       int const slot = sel_ss[i], t = i / K;
+      unsigned long long const bit = 1ull << t,
+                               had = atomicOr(tmask + NSLOT + slot, bit);
       int const pos_ =
-          start_s[slot] + __popcll(tmask[slot] & ((1ull << t) - 1ull));
+          start_s[slot] +
+          ((had & bit) == 0ull
+               ? __popcll(tmask[slot] & (bit - 1ull))
+               : __popcll(tmask[slot]) +
+                     atomicAdd(reinterpret_cast<int *>(tmask + 2 * NSLOT) +
+                                   slot,
+                               1));
       tok_s[pos_] = t;
       w_s[pos_] = wsel_ss[i];
       kk_s[pos_] = (unsigned char)(i % K);
+    }
+    for (int s_ = threadIdx.x; s_ < n_live; s_ += 256) {
+      ntok_s[s_] = __popcll(tmask[s_]);
     }
   } else {
     // 3. the pairs into their slots' entries (a position by a shared atomic)
