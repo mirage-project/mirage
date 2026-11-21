@@ -115,6 +115,74 @@ __device__ __forceinline__ float
                           : 0.f);
 }
 
+// the same comb on one thread's registers (every lane of the warp computes it,
+// no shuffle): c [HC HC] = z of comb (c[i HC + j] = comb[i][j]) in, comb out.
+// The row and column reductions are hc_tree<N, STRIDE> trees in the
+// butterflies' order (a row (c0 + c1) + (c2 + c3), a column (c_j + c_{j+HC})
+// + (c_{j+2HC} + c_{j+3HC}): every lane of hc_row_sum / hc_col_sum gets this
+// sum, the additions commute), the same operations per element as
+// hc_comb_post: bit-equal to its lanes 0 .. HC HC - 1 for every T (the
+// coefficients do not depend on T). STATIC_HC_OLD=1: hc_comb_post instead
+// (A/B).
+template <int N, int STRIDE, bool MAX>
+__device__ __forceinline__ float hc_tree(float const *v) {
+  if constexpr (N == 1) {
+    return v[0];
+  } else {
+    float const a = hc_tree<N / 2, STRIDE, MAX>(v);
+    float const b = hc_tree<N / 2, STRIDE, MAX>(v + (N / 2) * STRIDE);
+    return MAX ? fmaxf(a, b) : a + b;
+  }
+}
+template <int HC, int ITERS>
+__device__ __forceinline__ void hc_comb_regs(float (&c)[HC * HC],
+                                             float hc_eps) {
+  static_assert((HC & (HC - 1)) == 0, "hc_comb_regs: HC a power of 2");
+#pragma unroll
+  for (int i = 0; i < HC; i++) { // softmax over the row, + eps after the sum
+    float const mx = hc_tree<HC, 1, true>(c + i * HC);
+#pragma unroll
+    for (int j = 0; j < HC; j++) {
+      c[i * HC + j] = expf(c[i * HC + j] - mx);
+    }
+  }
+#pragma unroll
+  for (int i = 0; i < HC; i++) {
+    float const s = hc_tree<HC, 1, false>(c + i * HC);
+#pragma unroll
+    for (int j = 0; j < HC; j++) {
+      c[i * HC + j] = __fdividef(c[i * HC + j], s) + hc_eps;
+    }
+  }
+#pragma unroll
+  for (int j = 0; j < HC; j++) {
+    float const s = hc_tree<HC, HC, false>(c + j) + hc_eps;
+#pragma unroll
+    for (int i = 0; i < HC; i++) {
+      c[i * HC + j] = __fdividef(c[i * HC + j], s);
+    }
+  }
+#pragma unroll 1
+  for (int it = 1; it < ITERS; it++) {
+#pragma unroll
+    for (int i = 0; i < HC; i++) {
+      float const s = hc_tree<HC, 1, false>(c + i * HC) + hc_eps;
+#pragma unroll
+      for (int j = 0; j < HC; j++) {
+        c[i * HC + j] = __fdividef(c[i * HC + j], s);
+      }
+    }
+#pragma unroll
+    for (int j = 0; j < HC; j++) {
+      float const s = hc_tree<HC, HC, false>(c + j) + hc_eps;
+#pragma unroll
+      for (int i = 0; i < HC; i++) {
+        c[i * HC + j] = __fdividef(c[i * HC + j], s);
+      }
+    }
+  }
+}
+
 template <int KS, int HC, int H, int NMIX, int ITERS>
 __device__ __forceinline__ void hc_pre_task(float const *mix,
                                             __nv_bfloat16 const *res,
@@ -239,6 +307,35 @@ __device__ __forceinline__ void hc_pre_task(float const *mix,
   }
   __syncthreads();
   if (part == 1) { // post and comb finished (warp 0), no x
+#ifndef STATIC_HC_OLD
+    if (threadIdx.x < 32) { // comb on every lane's registers (hc_comb_regs),
+                            // lane 0 stores it; post on its lanes
+      static_assert(CB % 4 == 0 && (2 * HC) % 4 == 0,
+                    "hc_pre: comb as float4s in coef_s and h_res");
+      float const pz = coef_s[ci];
+      float cm[CB];
+#pragma unroll
+      for (int q = 0; q < CB / 4; q++) {
+        float4 const v = reinterpret_cast<float4 const *>(coef_s + 2 * HC)[q];
+        cm[4 * q] = v.x;
+        cm[4 * q + 1] = v.y;
+        cm[4 * q + 2] = v.z;
+        cm[4 * q + 3] = v.w;
+      }
+      float const pv = hc_sigmoid(pz) * post_mult;
+      hc_comb_regs<HC, ITERS>(cm, hc_eps);
+      if (lane == 0) {
+#pragma unroll
+        for (int q = 0; q < CB / 4; q++) {
+          reinterpret_cast<float4 *>(h_res_out + (size_t)t * CB)[q] =
+              make_float4(
+                  cm[4 * q], cm[4 * q + 1], cm[4 * q + 2], cm[4 * q + 3]);
+        }
+      } else if (lane >= CB + HC && lane < CB + 2 * HC) {
+        h_post_out[(size_t)t * HC + lane - CB - HC] = pv;
+      }
+    }
+#else
     if (threadIdx.x < 32) {
       float const c =
           hc_comb_post<HC, ITERS>(coef_s[ci], lane, hc_eps, post_mult);
@@ -248,6 +345,7 @@ __device__ __forceinline__ void hc_pre_task(float const *mix,
         h_post_out[(size_t)t * HC + lane - CB - HC] = c;
       }
     }
+#endif
     __syncthreads();
     if (threadIdx.x == 0) {
       STAGE_STAMP_AT(1)
