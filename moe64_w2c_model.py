@@ -13,13 +13,19 @@ What is modelled, per randomized step (T = 64 tokens, the GLM-5.3 TP8 bank or th
   5. the MMA's B operand: row c of K tile kt read through the 128-B swizzle (chunk k at (k ^ (c & 7)) of row c), for
      c < N = 16 ceil(nt / 16); accumulator column c = B row c
   6. the W2 epilogue: list entry i of the reader's table reads column i - start (W2C) and stores to row (tok[i], kk[i]):
-     the bytes must be token tok[i]'s h_q (the value the writer produced for that token)
-  7. idle rows (a run-time live table, rows >= live; live drawn from 1..64, half of the runs 64): their pairs all on
-     the shared bank experts (topk_route idle_pair), a token several times in one slot; the slot's distinct tokens
-     first, the other pairs after (build_table TOKEN_ORDER); every R row (t, k) written exactly once by W2
+     the bytes must be token tok[i]'s h_q (the value the writer produced for that token); every R row (t, k) written
+     exactly once
+  7. idle rows (a run-time live table, rows >= live; live drawn from 1..63 in half of the runs, else 64): their pairs
+     all on the shared bank experts (topk_route idle_pair), a token several times in one slot. rows_once (every SM,
+     from the pairs) must be false exactly when a row is idle; then the step runs the old code (SlotsOld: the shared-
+     atomic list order, h_q rows [slot T + token], the MMA N = 64, column = token), checked as 3.-6. with that layout.
+     The old W13 epilogue's in-place SiLU of the second item (h_silu_tok, dst = up = h2, 4 tokens a step) is counted
+     per token: a live token's must be applied once in every run; an idle token's count (its entries' 4-groups in
+     the SM's own list order) is printed, with how often two SMs' orders give different counts (the idle rows'
+     values of the old code depend on the order; they are not used)
 Negative controls (each must fail in most runs): the old atomic list order with W2C rows; the writer without the
 swizzle; plane rows from start[slot] (not a multiple of 8) with the swizzle by global row; ng = floor(nt / 16); the
-old constant expect (16 KB) with the W2C copies; idle rows without the dedup (every pair at its token's rank).
+old constant expect (16 KB) with the W2C copies; the W2C code for a step with idle rows (no fallback).
 Run: python3 moe64_w2c_model.py [runs]   (exit 0: the W2C model passes every run and every control fails)
 """
 import itertools
@@ -55,11 +61,16 @@ def route(rng, cfg, live=T):
     return pairs   # pairs[t][k] = bank expert
 
 
-def build_table(pairs, rng, token_order, dedup=True):
-    """build_table: slots, start (prefix sums of the slots' pair counts), the entries. token_order: TOKEN_ORDER, the
-    slot's distinct tokens at start + their rank (the pair that claims the token's bit first, in the SM's own atomic
-    order), the other pairs of a token after them (dedup; without it: every pair at its token's rank, the code before
-    the idle-row fix), ntok = the distinct tokens. Returns None when two pairs land on one entry (no dedup)."""
+def rows_once(pairs):
+    """rows_once: no token has two pairs on one expert (a live row's K experts are distinct)"""
+    return all(len(set(row)) == len(row) for row in pairs)
+
+
+def build_table(pairs, rng, token_order):
+    """build_table: slots, start (prefix sums of the slots' pair counts), ntok (the counts), the entries. token_order:
+    TOKEN_ORDER, every pair at start + the rank of its token in the slot's token mask; else the old order (each slot's
+    pairs in the order the SM's threads won the shared atomic: a random permutation per SM). Returns None when two
+    pairs land on one entry (TOKEN_ORDER with a token twice in a slot)."""
     K = len(pairs[0])
     live = sorted({e for row in pairs for e in row})
     slot_of = {e: s for s, e in enumerate(live)}
@@ -71,39 +82,47 @@ def build_table(pairs, rng, token_order, dedup=True):
     for c in ntok:
         start.append(run)
         run += c
-    npairs = list(ntok)
     tok, kk = [None] * run, [None] * run
+    order = [(t, k) for t in range(T) for k in range(K)]
+    rng.shuffle(order)   # the SM's threads' atomic order
     if token_order:
         mask = [0] * len(live)
         for t, row in enumerate(pairs):
             for e in row:
                 mask[slot_of[e]] |= 1 << t
-        claim, dupc = [0] * len(live), [0] * len(live)
-        order = [(t, k) for t in range(T) for k in range(K)]
-        rng.shuffle(order)   # the SM's threads' atomic order
         for t, k in order:
             s = slot_of[pairs[t][k]]
-            rank = bin(mask[s] & ((1 << t) - 1)).count("1")
-            if not dedup or not claim[s] >> t & 1:
-                pos = start[s] + rank
-            else:
-                pos = start[s] + bin(mask[s]).count("1") + dupc[s]
-                dupc[s] += 1
-            claim[s] |= 1 << t
+            pos = start[s] + bin(mask[s] & ((1 << t) - 1)).count("1")
             if tok[pos] is not None:
                 return None
             tok[pos], kk[pos] = t, k
-        ntok = [bin(m).count("1") for m in mask]
-    else:   # the old order: each slot's pairs in the order the SM's threads won the shared atomic
+    else:
         fill = [0] * len(live)
-        order = [(t, k) for t in range(T) for k in range(K)]
-        rng.shuffle(order)
         for t, k in order:
             s = slot_of[pairs[t][k]]
             pos = start[s] + fill[s]
             fill[s] += 1
             tok[pos], kk[pos] = t, k
-    return dict(live=live, ntok=ntok, start=start, tok=tok, kk=kk, npairs=npairs)
+    return dict(live=live, ntok=ntok, start=start, tok=tok, kk=kk)
+
+
+def silu_counts(tab, s):
+    """the old W13 epilogue's in-place SiLU of a slot's second item (h_silu_tok, the T-wide path: more than 8 entries):
+    entries in steps of 4 (all loads, then all stores), then one at a time; per token the number of steps that hold it
+    (each applies SiLU once more to the token's column of h2)"""
+    st, nt = tab["start"][s], tab["ntok"][s]
+    lst = tab["tok"][st:st + nt]
+    cnt = {}
+    k = 0
+    steps = []
+    while k + 4 <= nt:
+        steps.append(set(lst[k:k + 4]))
+        k += 4
+    steps += [{t} for t in lst[k:]]
+    for sp in steps:
+        for t in sp:
+            cnt[t] = cnt.get(t, 0) + 1
+    return cnt
 
 
 def hq_swz(f, r):
@@ -119,19 +138,51 @@ def value(slot, t, f):
 FEATS = sorted({c * 16 + b for c in range(16) for b in (0, 15)} | {5, 77, 130, 201})
 
 
-def run_once(rng, cfg, ctl, live=T):
+def run_once(rng, cfg, ctl, live=T, stats=None):
     IR = cfg["IR"]
     KT2 = IR // 128
     pairs = route(rng, cfg, live)
-    dedup = ctl != "no_dedup"
-    tw = build_table(pairs, rng, ctl != "atomic_order", dedup)   # the writer SM's table
-    tr = build_table(pairs, rng, ctl != "atomic_order", dedup)   # the reader SM's table (its own atomics)
+    fast = rows_once(pairs) or ctl == "no_fallback"
+    if ctl is None and fast != (live == T):
+        return f"rows_once {rows_once(pairs)} with live {live}"
+    tw = build_table(pairs, rng, fast and ctl != "atomic_order")   # the writer SM's table
+    tr = build_table(pairs, rng, fast and ctl != "atomic_order")   # the reader SM's table (its own atomics)
     if tw is None or tr is None:
         return "two pairs on one entry (a token twice in a slot)"
     written = {}   # R row (t, k) -> times written
     nslot = len(tw["live"])
     plane_rows = cfg["NSLOT"] * T
     assert nslot <= cfg["NSLOT"]
+    K = len(pairs[0])
+    if not fast:   # the old code (SlotsOld): h_q [slot T + token][IR] by the h_q tensor map, column = token
+        hq = {}
+        for s in range(nslot):
+            st = tw["start"][s]
+            for j in range(tw["ntok"][s]):
+                t = tw["tok"][st + j]
+                for f in FEATS:
+                    if f < IR:
+                        hq[(s * T + t, f)] = value(s, t, f)
+            if tw["ntok"][s] > 8:   # the T-wide W13 epilogue: the in-place SiLU, two SMs' orders
+                c1, c2 = silu_counts(tw, s), silu_counts(tr, s)
+                for t, n in c1.items():
+                    if t < live and n != 1:
+                        return f"slot {s}: live token {t} SiLU applied {n} times"
+                    if stats is not None and t >= live:
+                        stats["idle"] += 1
+                        stats["idle_order_dep"] += n != c2[t]
+                        stats["max_apply"] = max(stats["max_apply"], n)
+        for s in range(nslot):
+            st = tr["start"][s]
+            for i in range(st, st + tr["ntok"][s]):
+                t = tr["tok"][i]
+                written[(t, tr["kk"][i])] = written.get((t, tr["kk"][i]), 0) + 1
+                for f in FEATS:   # the TMA box {128, 64, KT2}: buffer row c = h_q row slot T + c; column = token
+                    if f < IR and hq.get((s * T + t, f)) != value(s, t, f):
+                        return f"old code: slot {s} column {t} feature {f} reads {hq.get((s * T + t, f))}"
+        if sorted(written) != [(t, k) for t in range(T) for k in range(K)] or any(v != 1 for v in written.values()):
+            return "the old W2 epilogue does not write every R row (t, k) exactly once"
+        return None
     planes = {}   # (kt, row, byte) -> value
 
     def row0(tab, s):
@@ -141,7 +192,7 @@ def run_once(rng, cfg, ctl, live=T):
     for s in range(nslot):
         nt = tw["ntok"][s]
         if nt > T:
-            return f"slot {s}: {nt} distinct tokens > T"
+            return f"slot {s}: {nt} tokens > T"
         for j in range(nt):
             t = tw["tok"][tw["start"][s] + j]
             r = row0(tw, s) + j
@@ -168,12 +219,9 @@ def run_once(rng, cfg, ctl, live=T):
         if by > T * 128:   # the entry's h_q buffer (W2_HQB): T rows x 128 B a plane
             return f"slot {s}: {by} B a plane past the h_q buffer's {T * 128}"
         st = tr["start"][s]
-        dist = [tr["tok"][st + c] for c in range(nt)]
-        if dist != sorted(set(dist)):
-            return f"slot {s}: the first ntok entries are not distinct tokens in order"
-        for i in range(st, st + tr["npairs"][s]):
+        for i in range(st, st + nt):
             t = tr["tok"][i]
-            c = i - st if i - st < nt else dist.index(t)   # the epilogue's column (W2C; past nt: the token's place)
+            c = i - st   # the epilogue's column (W2C)
             written[(t, tr["kk"][i])] = written.get((t, tr["kk"][i]), 0) + 1
             if c >= n_mma:
                 return f"column {c} past the MMA's N {n_mma} (slot {s}, nt {nt})"
@@ -184,7 +232,6 @@ def run_once(rng, cfg, ctl, live=T):
                 got = smem(kt, c * 128 + hq_swz(fb, c))
                 if got != value(s, t, f):
                     return f"slot {s} column {c}: token {t} feature {f} reads {got}"
-    K = len(pairs[0])
     if sorted(written) != [(t, k) for t in range(T) for k in range(K)] or any(v != 1 for v in written.values()):
         return "the W2 epilogue does not write every R row (t, k) exactly once"
     return None
@@ -204,21 +251,24 @@ def main():
     ok = True
     for name, cfg in CFGS.items():
         bad, first, nidle = 0, None, 0
+        stats = dict(idle=0, idle_order_dep=0, max_apply=0)
         for _ in range(runs):
             lv = T if rng.random() < 0.5 else rng.randint(1, T - 1)
             nidle += lv < T
-            r = run_once(rng, cfg, None, lv)
+            r = run_once(rng, cfg, None, lv, stats)
             if r is not None:
                 bad += 1
                 first = first or f"live {lv}: {r}"
-        print(f"{name} W2C: {runs - bad} / {runs} runs pass ({nidle} with idle rows){'' if first is None else ': ' + first}")
+        print(f"{name} W2C: {runs - bad} / {runs} runs pass ({nidle} with idle rows: the old code){'' if first is None else ': ' + first}")
+        print(f"  old code, idle tokens of the T-wide slots: {stats['idle']}, SiLU applied up to {stats['max_apply']} "
+              f"times; two SMs' orders give different counts for {stats['idle_order_dep']} (live tokens: once, checked)")
         ok &= bad == 0
-        for ctl in ("atomic_order", "no_swizzle", "start_rows", "ng_floor", "old_expect", "no_dedup"):
+        for ctl in ("atomic_order", "no_swizzle", "start_rows", "ng_floor", "old_expect", "no_fallback"):
             n = max(runs // 100, 200)
             fails = 0
             first = None
             for _ in range(n):
-                r = run_once(rng, cfg, ctl, rng.randint(1, T - 1) if ctl == "no_dedup" else T)
+                r = run_once(rng, cfg, ctl, rng.randint(1, T - 1) if ctl == "no_fallback" else T)
                 if r is not None:
                     fails += 1
                     first = first or r

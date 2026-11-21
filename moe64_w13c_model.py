@@ -2,7 +2,8 @@
 
 Part A, the data (per randomized step, T = 64 tokens, the GLM-5.3 TP8 bank or the GLM-5.3-Flash TP4 bank; routing and
 build_table from moe64_w2c_model.py; half of the runs with idle rows, live drawn from 1..63: a token several times in a
-shared slot, the slot's distinct tokens first):
+shared slot. rows_once must be false exactly then, and the step runs the old code (SlotsOld, no W13C groups: checked in
+moe64_w2c_model.py); the checks below are of the steps with every row live):
   1. three SMs build their tables (TOKEN_ORDER lists), order_slots (natural place order: shared, many-token, others;
      the W2_TABLE rotation r0 / rot), w13c_groups (the extra groups 1 .. ng - 1 of each slot, place order)
   2. entry_of on every SM: queue index idx < n13 -> (slot, group q, first item); the same on every SM; every
@@ -18,7 +19,8 @@ shared slot, the slot's distinct tokens first):
   7. CHQ: each group adds 2 per 128 features (MT13 a group); W2 waits for MT13 ceil(ntok / 16): equal to the adds
   8. the extra groups' table fits Smem OFF_XG (NXG ints)
 Negative controls (each must fail): the old atomic list order; W2 waiting MT13 (not per group); nq = floor(n / 4);
-h_q rows without the group's c0; the gather rows without the group's 16 q; the scales indexed by place, not token.
+h_q rows without the group's c0; the gather rows without the group's 16 q; the scales indexed by place, not token; the
+W13C code for a step with idle rows (no fallback).
 
 Part B, the W13C ring protocol (randomized interleavings of one SM's roles, the bank's KT_LAT / 2 stages an item):
   loaders warp 0 (s even) / warp 7 (s odd): per own stage the `empty` wait of slot g % 4 (g >= 4), expect + TMAs
@@ -44,7 +46,7 @@ Run: python3 moe64_w13c_model.py [runs]   (exit 0: both parts pass every run, ev
 import random
 import sys
 
-from moe64_w2c_model import CFGS, build_table, hq_swz, route
+from moe64_w2c_model import CFGS, build_table, hq_swz, route, rows_once
 
 T, N16, NSM = 64, 16, 148
 MT13 = 4          # IR 256 / 64
@@ -102,7 +104,14 @@ def zbyte(t, kt, f):
 def run_data(rng, cfg, ctl, live=T):
     IR, NSLOT, shared = cfg["IR"], cfg["NSLOT"], cfg["SHARED"]
     pairs = route(rng, cfg, live)
+    fast = rows_once(pairs) or ctl == "no_fallback"
+    if ctl is None and fast != (live == T):
+        return f"rows_once {rows_once(pairs)} with live {live}"
+    if not fast:   # the old code (SlotsOld): moe64_w2c_model.py checks it
+        return None
     tabs = [build_table(pairs, rng, ctl != "atomic_order") for _ in range(3)]   # W13 loader+epilogue SM, another, W2 SM
+    if None in tabs:
+        return "two pairs on one entry (a token twice in a slot)"
     ods = [order_slots(tb, shared) for tb in tabs]
     xgs = [w13c_groups(tb, od) for tb, od in zip(tabs, ods)]
     ents = [entries(tb, od, xg) for tb, od, xg in zip(tabs, ods, xgs)]
@@ -162,9 +171,8 @@ def run_data(rng, cfg, ctl, live=T):
         if need != chq[s]:
             return f"slot {s}: W2 waits CHQ {need}, the groups add {chq[s]}"
         st = tr["start"][s]
-        dist = [tr["tok"][st + c] for c in range(ntk)]
-        for i in range(st, st + tr["npairs"][s]):   # the distinct tokens, then an idle row's other pairs
-            c = i - st if i - st < ntk else dist.index(tr["tok"][i])
+        for i in range(st, st + ntk):
+            c = i - st
             r = s * T + c
             for f in FEATS:
                 if f < IR:
@@ -363,13 +371,13 @@ def main():
             lv = T if rng.random() < 0.5 else rng.randint(1, T - 1)
             nidle += lv < T
             bad += run_data(rng, cfg, None, lv) is not None
-        print(f"{name} W13C data: {runs - bad} / {runs} runs pass ({nidle} with idle rows)")
+        print(f"{name} W13C data: {runs - bad} / {runs} runs pass ({nidle} with idle rows: the old code)")
         ok &= bad == 0
-        for ctl in ("atomic_order", "chq_mt13", "nq_floor", "no_c0", "gather_no_q", "xs_by_place"):
+        for ctl in ("atomic_order", "chq_mt13", "nq_floor", "no_c0", "gather_no_q", "xs_by_place", "no_fallback"):
             n = max(runs // 100, 200)
             fails, first = 0, None
             for _ in range(n):
-                r = run_data(rng, cfg, ctl)
+                r = run_data(rng, cfg, ctl, rng.randint(1, T - 1) if ctl == "no_fallback" else T)
                 if r is not None:
                     fails += 1
                     first = first or r

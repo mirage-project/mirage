@@ -33,6 +33,7 @@ tokens). The h_q buffer keeps its size (`NSLOT T IR` bytes = `KT2` planes of `NS
 Conditions (`Slots::W2C`): `STATIC_MOE64_W2C != 0 && T == 64 && LIVE == T && MANY_EPI && !SINGLE`. LIVE == T: a
 token is at most once in a slot (a 64-bit mask per slot; idle rows of a verify step put a token several times on the
 shared experts). MANY_EPI and !SINGLE: the only h_q writer is then `h_quant_group_tok<.., H = true>` (static_assert).
+LIVE is compile-time; rows made idle at run time by the decoder's live table send the step to the old code (section 8).
 
 ## 2. Grouping tokens by token id, not by per-SM table order
 
@@ -156,21 +157,43 @@ array); T < 64, LIVE < T, the layer without map slot 7, and `-DSTATIC_MOE64_W13C
 Not measured yet: the gain (bound in this section's first version: 16 KB -> ~4 KB of z_q a stage, a 4th stage; ~17-21
 us a layer if W13 is bound by the bytes landing per SM). Box job: moe64_ab2.sh (old / w2c / new).
 
-## 8. Run-time idle rows (commit 0c29da4)
+## 8. Run-time idle rows: the whole step takes the old code
 
-Example (GLM-5.3, T = 64, the decoder's live table with rows 0..62 live): row 63's 9 pairs all name the shared bank
-expert (topk_route idle_pair: the 8 routed pairs at weight 0, the shared pair at weight 1), so token 63 is 9 times in
-the shared slot.
+Example (GLM-5.3 TP8, T = 64, K = 9, the decoder's live table with rows 0..62 live): token 63's 9 pairs all name the
+shared bank expert (topk_route idle_pair: 8 routed pairs at weight 0, the shared pair at weight 1).
 
 ```
-before: every pair at start + rank(63) = start + 63: 8 entries of the slot never written (stale tok / kk),
-        ntok = 72: h_q rows 130 T + 64 .. 71 (the next slot's / past the planes), W2 N 80, h_q copy 18 KB > 16 KB
-now:    the pair that claims bit 63 first -> start + 63; the other 8 -> start + 64 .. start + 71; ntok = 64;
-        W2 epilogue: entries start .. start[s + 1] - 1; entry start + 64 + j reads column rank(63) = 63 (binary search)
+run_scaled_moe_experts, after wait_z_and_pairs (every SM, the same pairs):
+  rows_once<RES>():  thread 63: e[0..8] = sel[567..575] = {256, 256, ..., 256} -> dup = 1;  __syncthreads_or -> false
+  -> scaled_moe_table_and_queue<SlotsOld<RES>, OUT>   (W2C = W13C = false: the code of -DSTATIC_MOE64_W2C=0)
+live 64 (no idle row): rows_once -> true -> scaled_moe_table_and_queue<RES, OUT>  (W2C, W13C as sections 1-7)
 ```
 
-The layer's compile-time LIVE is T (Python sees no live count); the decoder's live table makes rows idle at run time
-(SGLang's CUDA graph capture of the T = 64 layers: most batch sizes). With W2C on, the GLM-5.3 TP8 bs 64 server hit an
-illegal memory access before any graph was captured; with `-DSTATIC_MOE64_W2C=0` it passed. moe64_w2c_model.py and
-moe64_w13c_model.py now draw idle rows in half of their runs (every R row written once); control no_dedup (the code
-before) fails every run. demo/glm53_moe/demo.py `--live-rows N` attaches the decoder's table.
+`SlotsOld<RES>` derives from `RES`: the routing table's `__shared__` arrays (RES's member functions) and `Smem` are
+RES's own, so static and dynamic shared memory are unchanged (GLM-5.3 18432 B static in the MoE-only build, 19456 B in
+the layer kernel; Flash 34816 B). `h_quant_group_tok`'s `red_s` is one array for both codes: the h_q plane row count
+is a run-time argument (`pl`, a constant at each call), not a template argument. The old code is the same source
+instantiated with W2C off; the `-DSTATIC_MOE64_W2C=0` build and T < 64 builds are SASS-identical to the parent.
+
+The run-time dedup this replaces (commit 0c29da4: build_table's claim masks, the W2 epilogue over all of a slot's
+pairs with a binary search for the column of a repeated token) cost +19 us a layer at live 64, where no row is idle
+(box: W2C 135.85 us at a795180 vs 154.9 us at 0c29da4, old 136.95 / 137.2). Cause, from the SASS (sm_100a, nvcc
+13.3, MoE-only build, W2C without W13C): the epilogue's `col(i, t)` lambda put a token load, a branch and an inlined
+binary-search loop (with BSSY / BSYNC reconvergence) in front of each of the 16 single-column TMEM loads of an
+8-token step: the loop body grew from 592 B (16 back-to-back LDTM, one wait) to 5280 B, its tail from 944 B to
+5552 B, run for every W2 tile (~42 an SM) by the 4 epilogue warps. The fallback keeps the a795180 epilogue (560 B).
+
+The live-63 mismatch of 0c29da4 (y and routed rows not bit-equal to old) is in the idle row only, by the code: the
+old code's T-wide W13 epilogue applies SiLU in place to the second item's h (`h_silu_tok`, dst = up = h2, 4 list
+entries a step: loads, then stores). A token listed n times in a slot gets SiLU once per step that holds it: 1 for a
+live token, up to 9 for an idle token, a count that depends on the SM's atomic list order (moe64_w2c_model.py: two
+SMs' orders give different counts for ~40 % of the idle tokens of the T-wide slots). The dedup code listed the idle
+token once (SiLU once), so its idle row differed from old's; the live rows are computed per token with the same
+operations in both. This is also why old itself is not run-to-run bit-equal at live 1 (63 idle tokens). With the
+fallback, a step with idle rows runs the old code, so its live rows are the old code's; demo.py --same-y now compares
+the live rows as well (whole tensors are still printed).
+
+CPU models: moe64_w2c_model.py checks rows_once == (no idle row) in every run, the W2C path for live steps and the old
+layout (atomic order, rows [slot T + token], column = token, every R row once) for idle steps, and the in-place SiLU
+counts above (live tokens: exactly once); control no_fallback (the W2C table with idle rows) fails every run.
+moe64_w13c_model.py: the same decision, its data checks for live steps, control no_fallback.

@@ -71,8 +71,10 @@ constexpr int MOE_SPLIT_SLOTS = 32;
 // memory (chunk ^ (row & 7)). W2 copies the slot's first W2C_N ng rows of each
 // plane (ng = ceil(ntok / W2C_N); bulk copies, no tensor map) into the entry's
 // h_q buffer and runs the MMA N = W2C_N ng wide; accumulator column c is the
-// token at place c. 0: h_q rows [slot T + token][IR] by the h_q tensor map, the
-// MMA N = 64 wide (a -D for the A/B).
+// token at place c. A step with an idle row (the decoder's live table at run
+// time: a token several times in a slot) runs the code without W2C and W13C
+// (rows_once, SlotsOld). 0: h_q rows [slot T + token][IR] by the h_q tensor
+// map, the MMA N = 64 wide (a -D for the A/B).
 #ifndef STATIC_MOE64_W2C
 #define STATIC_MOE64_W2C 1
 #endif
@@ -257,8 +259,12 @@ struct Slots {
   static constexpr int PFE = 40, LAST = LAST_;
   // STATIC_MOE64_W2C above: T = 64 with every row live (a token once in a
   // slot's list: its bit in a 64-bit mask) and the many-token W13 epilogue
-  // (h_quant_group_tok H: the only h_q writer then). HQP: the rows of an h_q
-  // plane
+  // (h_quant_group_tok H: the only h_q writer then). The layer is compiled
+  // with every row live, but the decoder's live table can make rows idle at
+  // run time (topk_route's idle_pair: all of an idle row's pairs on the shared
+  // bank experts, so its token is several times in a slot); such a step runs
+  // the code of SlotsOld<Slots> (W2C and W13C off) instead (rows_once,
+  // run_scaled_moe_experts). HQP: the rows of an h_q plane
   static constexpr bool W2C =
       STATIC_MOE64_W2C != 0 && T == 64 && LIVE == T && MANY_EPI && !SINGLE;
   static constexpr int HQP = NSLOT * T;
@@ -320,6 +326,42 @@ struct Slots {
     return a;
   } // per entry: k
 };
+
+// (STATIC_MOE64_W2C) the layer's code for a step with an idle row: RES with
+// W2C and W13C off, i.e. the code of -DSTATIC_MOE64_W2C=0. Derived from RES,
+// so the routing table's shared arrays (RES's member functions) and the
+// shared-memory layout (Smem: no W2C term) are RES's own.
+template <class RES>
+struct SlotsOld : RES {
+  static constexpr bool W2C = false, W13C = false;
+};
+
+// (STATIC_MOE64_W2C) after the routing pairs are in sel() (wait_z_and_pairs
+// and its __syncthreads), all 256 threads: true when no token has two pairs on
+// one expert (thread t < T: its token's K pairs), the same on every SM (the
+// same pairs). A live row's K experts are distinct; an idle row's pairs
+// (topk_route idle_pair) all name the shared bank experts (or expert 0)
+template <class RES>
+__device__ __forceinline__ bool rows_once() {
+  constexpr int K = RES::K;
+  int const *const sel_ss = RES::sel();
+  int dup = 0;
+  if (threadIdx.x < T) {
+    int e[K];
+#pragma unroll
+    for (int k = 0; k < K; k++) {
+      e[k] = sel_ss[threadIdx.x * K + k];
+    }
+#pragma unroll
+    for (int k = 1; k < K; k++) {
+#pragma unroll
+      for (int k2 = 0; k2 < k; k2++) {
+        dup |= e[k] == e[k2] ? 1 : 0;
+      }
+    }
+  }
+  return __syncthreads_or(dup) == 0;
+}
 
 // the 128 epilogue threads: copies the weight scales of item (ex, m),
 // [NATOMS][2], from the W13 scale tensor [E][IR / 128][NATOMS][2] (expert ex:
@@ -420,11 +462,13 @@ __device__ __forceinline__ void hq_amax(float const *ha,
 }
 
 // the scale from the two warps' amax, the e4m3 values of the two items, the
-// scale of the token (feature 0's thread). PL > 0 (STATIC_MOE64_W2C): the
-// values into the h_q planes of PL rows, row slot T + c0 + j0 + 2 i (the
+// scale of the token (feature 0's thread). pl > 0 (STATIC_MOE64_W2C): the
+// values into the h_q planes of pl rows, row slot T + c0 + j0 + 2 i (the
 // token's place in the slot's list; c0: (W13C) the group's first place),
-// swizzled (hq_swz); the scale as before
-template <int W, int IR, int PL = 0>
+// swizzled (hq_swz); the scale as before. (pl is a run-time argument, a
+// constant at every call: one instance of h_quant_group_tok's shared red_s
+// for the W2C code and the code without it in one kernel)
+template <int W, int IR>
 __device__ __forceinline__ void hq_out(uint8_t *hq,
                                        float *hs,
                                        float const *ha,
@@ -437,7 +481,8 @@ __device__ __forceinline__ void hq_out(uint8_t *hq,
                                        int f,
                                        int w0,
                                        int j0,
-                                       int c0) {
+                                       int c0,
+                                       int pl) {
   constexpr int KT2 = IR / 128;
   float a[W], b[W], r0[W], r1[W], sc[W];
   int t[W];
@@ -460,9 +505,9 @@ __device__ __forceinline__ void hq_out(uint8_t *hq,
   }
 #pragma unroll
   for (int i = 0; i < W; i++) {
-    if constexpr (PL > 0) {
+    if (pl > 0) {
       int const r = slot * T + c0 + j0 + 2 * i, o = hq_swz(f, r);
-      uint8_t *const q = hq + ((size_t)kt2 * PL + r) * 128;
+      uint8_t *const q = hq + ((size_t)kt2 * pl + r) * 128;
       q[o] = q0[i];
       q[o ^ 64] = q1[i];
     } else {
@@ -508,10 +553,10 @@ __device__ __forceinline__ void h_silu_tok(float *dst,
 // scale, the e4m3 values (h_q [NSLOT x T][IR], its scales hs [NSLOT][T][KT2]);
 // then thread 64 adds 2 to CHQ[slot] (release; W2 waits for MT13). The other
 // tokens' entries are not written (W2 reads none of them). H: acc holds this
-// item's h ([64][T], T >= 32's epilogue), not its gate and up rows. PL > 0
-// (with H): h_q in planes (hq_out), the list's places from c0 (W13C: the
-// group's first)
-template <int IR, int LIMIT, bool H = false, int PL = 0>
+// item's h ([64][T], T >= 32's epilogue), not its gate and up rows. pl > 0
+// (with H): h_q in planes of pl rows (hq_out), the list's places from c0
+// (W13C: the group's first)
+template <int IR, int LIMIT, bool H = false>
 __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
                                                   float *hs,
                                                   uint32_t *chq,
@@ -523,9 +568,9 @@ __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
                                                   int const *tok,
                                                   int nt,
                                                   bool wide,
-                                                  int c0 = 0) {
+                                                  int c0 = 0,
+                                                  int pl = 0) {
   constexpr int KT2 = IR / 128;
-  static_assert(PL == 0 || H, "h_q planes: the T >= 32 epilogue (H)");
   __shared__ float red_s[4 * T]; // [warp of the epilogue][token]
   int const lane = threadIdx.x & 31, f = row & 63;
   if constexpr (H) { // the slot's tokens, also after a T-wide drain
@@ -540,12 +585,12 @@ __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
     int const w0 = (row >> 6) * 2; // its two warps
     j = row >> 6;
     for (; j + 6 < nt; j += 8) {
-      hq_out<4, IR, PL>(
-          hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j, c0);
+      hq_out<4, IR>(
+          hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j, c0, pl);
     }
     for (; j < nt; j += 2) {
-      hq_out<1, IR, PL>(
-          hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j, c0);
+      hq_out<1, IR>(
+          hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j, c0, pl);
     }
   } else {
     int const n = wide ? T : nt;
@@ -2083,31 +2128,13 @@ __device__ __forceinline__ void
                            c0a = tb + TW * a + lanes,
                            c1a = c0a + ACC_STAGES * TW;
             int i0 = start_s[slot];
-            // (W2C) the entries of all the slot's pairs: its nt distinct
-            // tokens, then the other pairs of a token already there (an idle
-            // row's: build_table TOKEN_ORDER)
-            int const end =
-                RES::W2C ? (slot + 1 < n_live ? start_s[slot + 1] : RES::NPAIR)
-                         : i0 + nt;
+            int const end = i0 + nt;
             // the accumulator column of entry i of the slot's list: its token,
-            // or (W2C) its place in the list; for an entry past the distinct
-            // tokens the place of its token (a binary search of the list)
+            // or (W2C) its place in the list
             [[maybe_unused]] int const cb = start_s[slot];
             auto col = [&](int i, int t_) {
               if constexpr (RES::W2C) {
-                if (i - cb < nt) {
-                  return i - cb;
-                }
-                int lo = 0, hi = nt;
-                while (lo < hi) {
-                  int const m = (lo + hi) >> 1;
-                  if (tok_s[cb + m] < t_) {
-                    lo = m + 1;
-                  } else {
-                    hi = m;
-                  }
-                }
-                return lo;
+                return i - cb;
               } else {
                 return t_;
               }
@@ -2319,10 +2346,7 @@ __device__ __forceinline__ void
               }
               asm volatile("bar.sync 1, 128;" ::: "memory");
               if (i == 1) {
-                h_quant_group_tok<IR,
-                                  RES::LIMIT,
-                                  true,
-                                  RES::W2C ? RES::HQP : 0>(
+                h_quant_group_tok<IR, RES::LIMIT, true>(
                     buf_at<uint8_t>(g, RES::HQ),
                     buf_at<float>(g, RES::HSF),
                     cnt_now(g) + RES::CHQ,
@@ -2334,7 +2358,8 @@ __device__ __forceinline__ void
                     tk,
                     nt,
                     wide,
-                    W2C_N * q13);
+                    W2C_N * q13,
+                    RES::W2C ? RES::HQP : 0);
               }
             }
           } else {
@@ -2557,6 +2582,78 @@ using ScaledMoeSlotsOf =
                       param_or<PARAMS, 2, 0>(),
                       slot_or<MAP_SLOTS, 7, -1>()>;
 
+// run_scaled_moe_experts once the routing pairs have landed, with the code of
+// RES (run_scaled_moe_experts picks RES or, for a step with an idle row,
+// scaled_moe::SlotsOld<RES>): the routing table, the queue's order, the PROF
+// stamps so far, then the queue (run_expert_dynamic) into the node's output
+// buffer OUT. pt_*: thread 0's (and thread 64's pt_pairs) PROF times
+template <class RES, int OUT>
+__device__ __forceinline__ void
+    scaled_moe_table_and_queue(Maps const &maps,
+                               G const &g,
+                               KernelLocals &L,
+                               int sm_id,
+                               uint32_t pre_idx,
+                               [[maybe_unused]] long long pt_task,
+                               [[maybe_unused]] long long pt_sync,
+                               [[maybe_unused]] long long pt_z,
+                               [[maybe_unused]] long long pt_pairs) {
+  [[maybe_unused]] long long pt_bt[3] = {0, 0, 0}; // PROF: build_table's steps
+  if constexpr (RES::W2C) { // each slot's list in token order; the token
+                            // masks in the W13 accumulator's area (no W13
+                            // item has run yet)
+    build_table<RES, true>(RES::PROF >= 0 ? pt_bt : nullptr,
+                           reinterpret_cast<unsigned long long *>(
+                               rt_sm() + scaled_moe::Smem<RES>::OFF_ACC));
+  } else {
+    build_table<RES>(RES::PROF >= 0 ? pt_bt : nullptr);
+  }
+  if constexpr (RES::ORDER) {
+    scaled_moe::order_slots<RES>();
+  }
+  if constexpr (RES::W13C) { // the extra W13 groups of the queue
+    scaled_moe::w13c_groups<RES>();
+  }
+  [[maybe_unused]] long long const pt_table = RES::PROF >= 0 ? gtime() : 0;
+  long long *prof = nullptr;
+  if constexpr (RES::PROF >= 0) {
+    prof = buf_at<long long>(g, RES::PROF) +
+           (size_t)sm_id * scaled_moe::MOE_PROF_WORDS;
+  }
+  if (threadIdx.x == 0) {
+    s_ints[2] = (int)pre_idx;
+    if constexpr (RES::PROF >= 0) {
+      for (int i = 1; i < scaled_moe::MOE_PROF_EV0; i++) {
+        prof[i] = 0;
+      }
+      prof[9] = pt_task;
+      prof[10] = pt_z;
+      prof[11] = pt_pairs;
+      prof[13] = pt_sync;
+      prof[14] = pt_bt[0];
+      prof[15] = pt_bt[2];
+      prof[0] = pt_table;
+    }
+  }
+  __syncthreads();
+  if constexpr (RES::PROF >= 0) {
+    if (threadIdx.x == 64) { // a table_poll warp: its pairs landed
+      prof[12] = pt_pairs;
+    }
+  }
+  scaled_moe::run_expert_dynamic<RES>(g,
+                                      maps,
+                                      buf_at<float>(g, OUT),
+                                      L.base,
+                                      L.tb,
+                                      L.gl,
+                                      L.gi0,
+                                      L.gi1,
+                                      L.wt,
+                                      sm_id,
+                                      prof STAGE_STAMP_ARG(L.stage_stamps));
+}
+
 // scaled_moe_experts task (one per SM, task x on SM x): wait for z_q, phase
 // switch, routing table, then the queue (above) -> the routed rows [T][K][LAT]
 // in the node's output buffer; its counter counts the SMs done. IN: its
@@ -2657,62 +2754,19 @@ __device__ __forceinline__ void run_scaled_moe_experts(Maps const &maps,
   if constexpr (RES::PROF >= 0) {
     pt_pairs = gtime();
   }
-  [[maybe_unused]] long long pt_bt[3] = {0, 0, 0}; // PROF: build_table's steps
-  if constexpr (RES::W2C) { // each slot's list in token order; the token
-                            // masks, claim masks and extra pair counts in the
-                            // W13 accumulator's area (no W13 item has run yet)
-    static_assert(!RES::W2C || RES::NSLOT * 20 <= 128 * T * 4,
-                  "STATIC_MOE64_W2C: build_table's masks in OFF_ACC");
-    build_table<RES, true>(RES::PROF >= 0 ? pt_bt : nullptr,
-                           reinterpret_cast<unsigned long long *>(
-                               rt_sm() + scaled_moe::Smem<RES>::OFF_ACC));
+  if constexpr (RES::W2C) { // every row live in this step: W2C (W13C); a
+                            // step with an idle row: the code without them
+    if (scaled_moe::rows_once<RES>()) {
+      scaled_moe_table_and_queue<RES, SELF::buf>(
+          maps, g, L, sm_id, pre_idx, pt_task, pt_sync, pt_z, pt_pairs);
+    } else {
+      scaled_moe_table_and_queue<scaled_moe::SlotsOld<RES>, SELF::buf>(
+          maps, g, L, sm_id, pre_idx, pt_task, pt_sync, pt_z, pt_pairs);
+    }
   } else {
-    build_table<RES>(RES::PROF >= 0 ? pt_bt : nullptr);
+    scaled_moe_table_and_queue<RES, SELF::buf>(
+        maps, g, L, sm_id, pre_idx, pt_task, pt_sync, pt_z, pt_pairs);
   }
-  if constexpr (RES::ORDER) {
-    scaled_moe::order_slots<RES>();
-  }
-  if constexpr (RES::W13C) { // the extra W13 groups of the queue
-    scaled_moe::w13c_groups<RES>();
-  }
-  [[maybe_unused]] long long const pt_table = RES::PROF >= 0 ? gtime() : 0;
-  long long *prof = nullptr;
-  if constexpr (RES::PROF >= 0) {
-    prof = buf_at<long long>(g, RES::PROF) +
-           (size_t)sm_id * scaled_moe::MOE_PROF_WORDS;
-  }
-  if (threadIdx.x == 0) {
-    s_ints[2] = (int)pre_idx;
-    if constexpr (RES::PROF >= 0) {
-      for (int i = 1; i < scaled_moe::MOE_PROF_EV0; i++) {
-        prof[i] = 0;
-      }
-      prof[9] = pt_task;
-      prof[10] = pt_z;
-      prof[11] = pt_pairs;
-      prof[13] = pt_sync;
-      prof[14] = pt_bt[0];
-      prof[15] = pt_bt[2];
-      prof[0] = pt_table;
-    }
-  }
-  __syncthreads();
-  if constexpr (RES::PROF >= 0) {
-    if (threadIdx.x == 64) { // a table_poll warp: its pairs landed
-      prof[12] = pt_pairs;
-    }
-  }
-  scaled_moe::run_expert_dynamic<RES>(g,
-                                      maps,
-                                      buf_at<float>(g, SELF::buf),
-                                      L.base,
-                                      L.tb,
-                                      L.gl,
-                                      L.gi0,
-                                      L.gi1,
-                                      L.wt,
-                                      sm_id,
-                                      prof STAGE_STAMP_ARG(L.stage_stamps));
   if (threadIdx.x == 0) {
     g.stamps[sm_id * NSTAMP + STAMP_TASK1] = gtime();
   }
