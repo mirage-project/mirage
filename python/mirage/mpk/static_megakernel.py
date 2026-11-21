@@ -195,7 +195,7 @@ class StaticMegakernel(PersistentKernel):
         """A tensor map slot (Maps::m; the same map again: the same slot). source: ("t", tensor) a graph tensor or a node's output
         by its tensor; ("b", buffer slot, byte offset); ("x", exchange buffer slot, byte offset, set) in the exchange region's set.
         kind and dims as host.cuh reads them: bf16 (rows, K, box rows), wblk (MXFP4 pieces, box pieces), wblk8 (e4m3 pieces, box
-        pieces), sf (chunks, box chunks), act8 (K bytes, rows), act8kt (K bytes, rows, K tiles). Returns the slot."""
+        pieces), sf (chunks, box chunks), act8 (K bytes, rows[, box rows]), act8kt (K bytes, rows, K tiles). Returns the slot."""
         key = (kind, (source[0], source[1].guid) + tuple(source[2:]) if source[0] == "t" else tuple(source), tuple(dims))
         for i, m in enumerate(self._maps):
             if m[3] == key:
@@ -680,7 +680,8 @@ class StaticMegakernel(PersistentKernel):
         One task runs on each SM. The SMs take expert work from a shared queue and write routed output rows.
         buf_slots: the scratch buffers for h_q and its scales, the fp32 weight scales (by pointer), then the profile
         buffer (or -1) and the scratch of the split mode.
-        map_slots: the tensor maps of the weights, of z_q in both exchange sets, and of h_q (scaled_moe::Slots).
+        map_slots: the tensor maps of the weights, of z_q in both exchange sets, of h_q, then (T = 64 with every row live and
+        the many-token epilogue) of z_q's single rows in both sets (scaled_moe::Slots).
         Counters track completed SMs, the next queue entry and completed W13 items per expert slot. The first two counters
         each reserve 32 words. The third reserves NSLOT words, then the pair counters of the two-SM W13 groups: of the
         single-item W13 entries (num_sms / 2 words; a layer of few live rows: topk_route's valid_rows, e.g. 1 or 2 of T = 8),
@@ -753,6 +754,12 @@ class StaticMegakernel(PersistentKernel):
             assert self._map(kind, ("x", zq.info["buf"], 0, 1), dims_) == first + 1
             maps.append(first)
         maps.append(self._map("act8kt", ("b", hq, 0), (IR, NSLOT * T, min(KT2, 2))))   # a W2 unit's K tiles (at most 2)
+        if T == 64 and live == T and many_token_epilogue and not single:
+            # map slot 7 (scaled_moe::Slots ZQR, STATIC_MOE64_W13C): z_q's single rows (box 1 row, tile::gather4) in set 0,
+            # then set 1; the layer of scaled_moe::Slots W2C (W13 over a slot's own tokens in groups of 16)
+            first = self._map("act8", ("x", zq.info["buf"], 0, 0), (L, T, 1))
+            assert self._map("act8", ("x", zq.info["buf"], 0, 1), (L, T, 1)) == first + 1
+            maps.append(first)
         tensors = [z_q, pairs, w13, w2, output]
         # T = 64's shared-memory layout has only the many-token W13 epilogue (the other: an illegal access)
         assert many_token_epilogue or T <= 32, "scaled_moe_experts_layer: many_token_epilogue=False needs T <= 32"
