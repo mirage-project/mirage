@@ -73,17 +73,18 @@ ROUTER_PARTS = 8   # the router's K parts: 5 K tiles of 128 each, a task's K fit
 HQ, HQ_SF = "swiglu_moe_experts.h_q", "swiglu_moe_experts.h_q_scales"   # the expert node's scratch (given: the check reads h_q)
 
 
-def build_graph(mpk: StaticMegakernel, w: dict) -> None:
-    """Declare the layer calls on the tensors of w (load_weights and the inputs)."""
+def build_graph(mpk: StaticMegakernel, w: dict, valid_rows: int = None) -> None:
+    """Declare the layer calls on the tensors of w (load_weights and the inputs). valid_rows < T (11-21): a decode build of
+    that many live rows (the others idle: not routed, their pairs row 0's experts at weight 0)."""
     t = {}
     a = lambda k: t.setdefault(k, mpk.attach_input(torch_tensor=w[k], name=k))   # one tensor per name: writers and readers
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
     I, KO = w["sgu_weight"].shape[0] // 2, w["sd_weight"].shape[1]
     logit_part, pairs = nt((T, E), float32, "logit_part"), nt((T, K), int64, "pairs")
     mpk.gemm_tile_layer(input=a("x"), weight=a("gate_weight"), output=logit_part)                    # logits, fp32 K parts
+    rows = valid_rows if valid_rows is not None and valid_rows < T else None
     mpk.topk_route_layer(input=logit_part, bias=a("gate_bias"), output=pairs, routed_scaling_factor=ROUTE_SCALE,
-                         score_func="sqrtsoftplus",                                                 # top 6, sorted by id
-                         live_positions=a("live_pos") if "live_pos" in w else None)   # (DSV41_PAD_SMALL: padding rows)
+                         score_func="sqrtsoftplus", valid_rows=rows, idle_row0=rows is not None)   # top 6, sorted by id
     x_q = nt((T, HID), uint8, "x_q")
     mpk.act_quant_layer(input=a("x"), output=x_q)                                                   # x -> e4m3, per 32
     sgu_part = nt((T, 2 * I), float32, "sgu_part")
@@ -258,13 +259,13 @@ def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
                 lists[turn[k % sms]].append(tk)
                 k += 1
     route = next(n for n in nodes if n.name == "topk_route")
-    if len(route.params) >= 8 and route.params[7] == 1:   # (DSV41_PAD_SMALL, topk_route LIVEPOS) a padding row's task polls
-        # row 0's pairs: an in-node wait the plan's dependency check does not see, so row 0's task must not come after another
-        # routing task on its SM (it waits for nothing in the node: it then always runs)
+    if len(route.params) >= 8 and route.params[7] == 1:   # (topk_route COPY0) an idle row's task polls row 0's pairs: a wait
+        # inside the node that the plan's dependency check does not see, so row 0's task must not come after another routing
+        # task on its SM (row 0 waits for nothing in the node: it then always runs)
         idx = next(i for i, name in names.items() if name == "pairs")
         for sm, lst in enumerate(lists):
             ours = [tk[1][0] for tk in lst if tk[0] == idx]
-            assert 0 not in ours or ours[0] == 0, f"topk_route LIVEPOS: row 0's task after row {ours[0]}'s on SM {sm}"
+            assert 0 not in ours or ours[0] == 0, f"topk_route COPY0: row 0's task after row {ours[0]}'s on SM {sm}"
     return {"grids": grids, "lists": [copy.deepcopy(lists) for _ in range(mpk.num_gpus)]}   # the same plan on every GPU
 
 
@@ -286,7 +287,7 @@ def x_flag_modes(mpk: StaticMegakernel, prefill: bool = False) -> dict:
 
 def build(ws: list, out: str, profile: bool = False, extra_flags: list = None, plan: str = "hand", search: list = None,
           costs_code: str = "current", time_limit_s: float = 300, device: int = 0, num_gpus: int = None, rank: int = None,
-          exchange_pool=None, x_flag: bool = False, x_flag_prefill: bool = False):
+          exchange_pool=None, x_flag: bool = False, x_flag_prefill: bool = False, valid_rows: int = None):
     """Build the graph on len(ws) GPUs (ws: each GPU's tensors), compile its plan (plan "hand": hand_plan; else a plan file;
     search: the solver's plan from these cost record files, starting from that plan -> <out>/plan.json) and load the kernel.
     Return the kernel, each GPU's node buffers (by output tensor name) and the information from compile_plan, with "paths",
@@ -296,7 +297,7 @@ def build(ws: list, out: str, profile: bool = False, extra_flags: list = None, p
     sms = torch.cuda.get_device_properties(0).multi_processor_count - int(os.environ.get("STATIC_FREE_SMS_MOE", 0))
     mpk = StaticMegakernel(num_gpus=gpus, num_sms=sms)
     mpk.moe_rows_poll = "-DMOE_ROWS_POLL" in (extra_flags or [])   # (C12, 11-18: sum_store polls the routed rows; default off)
-    build_graph(mpk, w)
+    build_graph(mpk, w, valid_rows=valid_rows)
     if x_flag:   # H1 stage A: x's flag and the deferred wait (x_flag_modes)
         mpk.x_flag_modes = x_flag_modes(mpk, x_flag_prefill)
     p = hand_plan(mpk, sms) if plan == "hand" \

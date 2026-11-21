@@ -73,6 +73,13 @@ class _ShareHit(Exception):
         self.entry = entry
 
 
+def backed(v: torch.Tensor, rows: int) -> bool:
+    """(DSV41_STATIC_ROWS) v (contiguous) is the first rows of a buffer of at least `rows` rows of its row stride (GLM's
+    dsa_static_layer._backed): a kernel bound to it may read past v's rows."""
+    rowb = v[0].numel() * v.element_size() if v.dim() > 1 else v.element_size()
+    return v.is_contiguous() and v.untyped_storage().nbytes() - v.storage_offset() * v.element_size() >= rows * rowb
+
+
 def _build_shared(build, *args, **kw):
     """build(*args, **kw) (attn_demo.build / moe_demo.build): (sk, bufs, info, shared). With DSV41_SHARE_MODULES, compile_static
     first generates the layer's code; when a module of the same code, flags, device and rank is loaded, the build stops there
@@ -221,22 +228,32 @@ class MhcMixin:
             self.sk._owner = self
 
     def bind_streams(self, R: torch.Tensor):
-        assert R.is_contiguous() and R.dtype == torch.bfloat16 and R.shape == (T, HC, HID), f"streams {R.shape} {R.dtype}"
-        ptr = R.data_ptr()
+        """The streams of this step's n <= T rows (n < T, DSV41_STATIC_ROWS: read in place when R is the first rows of a
+        buffer of T rows (the kernel reads its idle rows too: a static layer's output), else copied into the layer's own)."""
+        n = R.shape[0]
+        assert R.is_contiguous() and R.dtype == torch.bfloat16 and R.shape[1:] == (HC, HID) and 0 < n <= T, \
+            f"streams {R.shape} {R.dtype}"
+        if n == T or backed(R, T):
+            ptr = R.data_ptr()
+        else:
+            own = self.w["streams"]
+            own.view(T, HC, HID)[:n].copy_(R)
+            ptr = own.data_ptr()
         if self.binds.get("streams") != ptr:
             self._rb("streams", ptr)
 
     def triplet(self):
         """(pre [T, HC], post [T, HC], comb [T, HC, HC]) fp32 of this launch, what deepseek_v4_mhc's stats kernels return."""
-        w = self.w
-        return w["h_pre"], w["h_post"], w["h_comb"].view(T, HC, HC)
+        w, n = self.w, getattr(self, "rows", T)
+        return w["h_pre"][:n], w["h_post"][:n], w["h_comb"].view(T, HC, HC)[:n]
 
     def hc_state(self, next, mhc):
         """deepseek_v4_mhc.HcState of the sublayer's end: R' (with the next layer's Engram in the kernel: R''), pre and, when the
         kernel made it and the next sublayer takes it, its input."""
-        w = self.w
-        return mhc.HcState(w["streams_eg" if "streams_eg" in w else "streams_out"].view(T, HC, HID), w["h_pre"],
-                           mhc.HcNormed(w["x_out"]) if ("gamma_next" in w and next is not None) or "eg_gamma" in w else None)
+        w, n = self.w, getattr(self, "rows", T)   # (n < T, DSV41_STATIC_ROWS: this step's live rows)
+        return mhc.HcState(w["streams_eg" if "streams_eg" in w else "streams_out"].view(T, HC, HID)[:n], w["h_pre"][:n],
+                           mhc.HcNormed(w["x_out"][:n]) if ("gamma_next" in w and next is not None) or "eg_gamma" in w
+                           else None)
         # (eg_gamma, DSV41_EG_X: the Engram layer's attention input from R'', whatever next is: SGLang's post before an
         # Engram layer passes next=None, as it computes no input there)
 
@@ -278,13 +295,16 @@ def _bind_xflag_in(layer):
 
 
 def _bind_x(layer, x: torch.Tensor):
-    """Graph tensor x reads SGLang's x when it is contiguous bf16 [T, H] (a CUDA graph captures the address), else a copy."""
-    ok = x.is_contiguous() and x.dtype == torch.bfloat16 and x.shape == (T, HID)
+    """Graph tensor x reads SGLang's x when it is contiguous bf16 [T, H] (a CUDA graph captures the address), else a copy.
+    A step of n < T rows (DSV41_STATIC_ROWS): x read in place when it is the first rows of a buffer of T rows (a static layer's
+    output: the kernel reads its idle rows too), else copied into the first rows of the layer's own."""
+    n = x.shape[0]
+    ok = x.is_contiguous() and x.dtype == torch.bfloat16 and x.shape[1:] == (HID,) and (n == T or (0 < n < T and backed(x, T)))
     ptr = x.data_ptr() if ok else layer.w["x"].data_ptr()
     if layer.binds.get("x") != ptr:
         layer._rb("x", ptr)
     if not ok:
-        layer.w["x"].copy_(x)
+        layer.w["x"][:n].copy_(x)
 
 
 class Sources:
@@ -331,30 +351,38 @@ class StepTables:
         self.t = {"positions": z(T), "window_rows": z(T, attn_demo.W), "window_loc": z(T), "req_slots": z(T, dt=torch.int64)}
         self.pages = {r: z(T, cap // 128) for r, cap in caps.items()}   # by compress ratio, entries of 128 rows
 
-    def fill(self, core, positions, req_pool_indices):
-        """SGLang's metadata core (DSV4AttnMetadata) of this step. DSV41_FILL_FUSED=1 (11-20 night): in one kernel
-        (fill_tables.py), else as torch ops (6 or more small kernels)."""
+    def fill(self, core, positions, req_pool_indices, n: int = T):
+        """SGLang's metadata core (DSV4AttnMetadata) of this step of n <= T rows (n < T, DSV41_STATIC_ROWS: rows n .. T - 1
+        as SGLang pads a CUDA graph's rows: position 0, request slot 0, KV slot 0, the window's rows 0 then -1, the page
+        table's row 0s). DSV41_FILL_FUSED=1 (11-20 night): in one kernel (fill_tables.py), else as torch ops."""
         if os.environ.get("DSV41_FILL_FUSED", "0") != "0":
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import fill_tables
-            fill_tables.fill(self, core, positions, req_pool_indices, T)
+            fill_tables.fill(self, core, positions, req_pool_indices, T, n)
             if os.environ.get("DSV41_FILL_CHECK", "0") != "0" and not torch.cuda.is_current_stream_capturing():
                 got = {k: v.clone() for k, v in self.t.items()}
                 gp = {r: p.clone() for r, p in self.pages.items()}
-                self._fill_torch(core, positions, req_pool_indices)
+                self._fill_torch(core, positions, req_pool_indices, n)
                 ok = all(torch.equal(got[k], self.t[k]) for k in got) and all(torch.equal(gp[r], self.pages[r]) for r in gp)
                 print(f"[dsv41_static] DSV41_FILL_CHECK: the fused fill equals the torch fill: {ok}", flush=True)
                 assert ok, "DSV41_FILL_FUSED: the fused fill differs"
             return
-        self._fill_torch(core, positions, req_pool_indices)
+        self._fill_torch(core, positions, req_pool_indices, n)
 
-    def _fill_torch(self, core, positions, req_pool_indices):
+    def _fill_torch(self, core, positions, req_pool_indices, n: int = T):
         t = self.t
-        t["positions"].copy_(positions.view(-1))
-        t["window_rows"].copy_(core.swa_page_indices[:T])
-        t["window_loc"].copy_(core.swa_out_cache_loc[:T])
-        t["req_slots"].copy_(req_pool_indices[:T])
-        pt = core.page_table[:T].to(torch.int32)
+        t["positions"][:n].copy_(positions.view(-1)[:n])
+        t["window_rows"][:n].copy_(core.swa_page_indices[:n])
+        t["window_loc"][:n].copy_(core.swa_out_cache_loc[:n])
+        t["req_slots"][:n].copy_(req_pool_indices[:n])
+        pt = core.page_table[:n].to(torch.int32)
+        if n < T:   # SGLang's padding rows
+            t["positions"][n:].zero_()
+            t["window_rows"][n:].fill_(-1)
+            t["window_rows"][n:, 0] = 0
+            t["window_loc"][n:].zero_()
+            t["req_slots"][n:].zero_()
+            pt = torch.cat([pt, pt.new_zeros(T - n, pt.shape[1])])
         for r, pages in self.pages.items():
             # SGLang's pages: 256 / r rows; ratio 1 expands to entries of 128 (expand_index_page_table)
             e = (pt[:, :, None] * 2 + torch.arange(2, device=pt.device, dtype=torch.int32)).flatten(1) if r == 1 else pt
@@ -487,11 +515,13 @@ class StaticAttn(MhcMixin):
             ids: torch.Tensor = None) -> torch.Tensor:
         """One decode step of T rows: this rank's y [T, H] bf16 (the layer's own buffer), or with the exchange the sum. With the
         pools bound the step's tables are filled (StepTables) and x is read where SGLang left it: no copy kernel."""
+        self.rows = x.shape[0]   # (n < T, DSV41_STATIC_ROWS: the hook pads the step's tables, x and R are read or copied)
         if self.pool:
             _bind_x(self, x)
             if XFLAG_ATTN and XFLAG_ATTN_BIND:
                 _bind_xflag_in(self)
         else:
+            assert self.rows == T, "a step of fewer rows: the pools bound (DSV41_STATIC_POOL=1)"
             self.w["x"].copy_(x)
             self.w["positions"].copy_(positions.view(-1))
             attn_demo.window_tables(self.w)
@@ -510,7 +540,7 @@ class StaticAttn(MhcMixin):
                 self._rb("eg_ids", ids.data_ptr())
         self._launch()
         self.steps += 1
-        return self.w["y"]
+        return self.w["y"][:self.rows]
 
 
 def engram_kv_buffer(tp: int, dev, group):
@@ -587,8 +617,7 @@ def engram_tensors(read, layer: int, tp: int, rank: int, dev) -> dict:
 class StaticMoE(MhcMixin):
     def __init__(self, layer: int, ckpt: str, rank: int, tp: int, dev, out_root: str, pdl: bool,
                  exchange_pool: ExchangePool = None, mhc: bool = False, norm_next: bool = False, stats: bool = False,
-                 engram: bool = False, gamma_name: str = None, engram_kv: torch.Tensor = None, head: bool = False,
-                 live_pos: torch.Tensor = None):
+                 engram: bool = False, gamma_name: str = None, engram_kv: torch.Tensor = None, head: bool = False):
         """engram (11-20, DSV41_ENGRAM=1, with mHC and no next input): the next layer's Engram in this kernel after the post
         (moe_demo.engram_nodes); SGLang then takes R'' (hc_state) and skips its own (dsv41_static_hook)."""
         self.layer, self.pdl, self.steps, self.binds = layer, pdl, 0, {}
@@ -597,9 +626,6 @@ class StaticMoE(MhcMixin):
         w.update(moe_weights.routed_tensors(read, layer, tp, [rank], dev)[0])
         w["x"] = torch.zeros(T, HID, dtype=torch.bfloat16, device=dev)
         w["y"] = torch.zeros(T, HID, dtype=torch.bfloat16, device=dev)
-        if live_pos is not None:   # (11-21, DSV41_PAD_SMALL) the step's positions (StepTables'): a padding row is at 0
-            assert live_pos.dtype == torch.int32 and tuple(live_pos.shape) == (T,)
-            w["live_pos"] = live_pos
         if mhc or stats:
             gn = gamma_name or f"layers.{layer + 1}.attn_norm.weight"   # (the last layer with the head: norm.weight)
             w.update(mhc_tensors(read, layer, "ffn", gn if norm_next and mhc else None, dev, stats))
@@ -638,14 +664,17 @@ class StaticMoE(MhcMixin):
         self.sk, self.bufs, self.info, self.shared = _build_shared(moe_demo.build, [w], out, extra_flags=flags, device=dev.index,
                                                                    profile=TIMING, x_flag=XFLAG, x_flag_prefill=XFLAG_PREFILL,
                                                                    **rk)   # (bufs: as StaticAttn)
-        self.w = w
+        self.w, self.out, self.flags, self.dev_index = w, out, flags, dev.index   # (rows_variant builds with these)
+        self.build_kw, self.variants = dict(num_gpus=tp, rank=rank), {}
         if SHARE:
             self._init_binds(w, self.shared)
         if XFLAG_ATTN and "gamma_next" in w:   # stage B: this post computes the next attention's input
             _bind_xflag_out(self)
 
     def run(self, x: torch.Tensor, R: torch.Tensor = None, emb: torch.Tensor = None) -> torch.Tensor:
-        """One decode step of T rows: this rank's part of y [T, H] bf16 (the layer's own buffer), or with the exchange the sum."""
+        """One decode step of n <= T rows (n < T, DSV41_STATIC_ROWS: a build of n live rows, rows_variant, or this one with
+        its idle rows routed): this rank's part of y [n, H] bf16 (the layer's own buffer), or with the exchange the sum."""
+        self.rows = x.shape[0]
         _bind_x(self, x)
         if XFLAG:
             _bind_xflag_in(self)
@@ -659,7 +688,25 @@ class StaticMoE(MhcMixin):
         self._own()
         self.sk.launch_stream(torch.cuda.current_stream().cuda_stream, self.pdl)
         self.steps += 1
-        return self.w["y"]
+        return self.w["y"][:self.rows]
+
+    def rows_variant(self, rows: int, exchange_pool: ExchangePool = None):
+        """(11-21, DSV41_STATIC_ROWS) this layer's decode build of `rows` < T live rows: the same tensors (w: weights and
+        inputs shared, one of the two runs a step), its idle rows not routed (moe_demo.build_graph valid_rows: their pairs row
+        0's experts at weight 0, so no expert outside the live rows' is streamed); its own kernel, node buffers and exchange
+        region."""
+        v = object.__new__(StaticMoE)
+        v.__dict__.update({k: val for k, val in self.__dict__.items() if k not in ("sk", "bufs", "info", "shared", "binds",
+                                                                                  "variants", "steps")})
+        v.steps, v.binds, v.live_rows = 0, {}, rows
+        rk = dict(num_gpus=self.build_kw["num_gpus"], rank=self.build_kw["rank"], exchange_pool=exchange_pool) \
+            if exchange_pool is not None else {}
+        v.sk, v.bufs, v.info, v.shared = _build_shared(moe_demo.build, [self.w], self.out + f"_r{rows}",
+                                                       extra_flags=self.flags, device=self.dev_index, profile=TIMING,
+                                                       x_flag=XFLAG, x_flag_prefill=XFLAG_PREFILL, valid_rows=rows, **rk)
+        if SHARE:
+            v._init_binds(self.w, v.shared)
+        return v
 
 
 class StaticHead:

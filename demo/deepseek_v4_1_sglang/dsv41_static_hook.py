@@ -88,12 +88,23 @@ EG_EARLY = os.environ.get("DSV41_EG_EARLY", "0") != "0"
 # (11-20, DSV41_ENGRAM=2) DSV41_EG_ROWS=1: the n-gram rows looked up in the host attention kernel (engram_rows: each rank's rows
 # of SGLang's own table, by multicast into every rank's buffer; the act_quant polls them): no SGLang gather or all-reduce
 EG_ROWS = os.environ.get("DSV41_EG_ROWS", "0") != "0"
-# (11-21) DSV41_PAD_SMALL=1: decode batches of 1 .. T - 1 rows run the static layers too, padded to T. SGLang captures no
-# decode graph below T rows, so it replays the T-row graph with its own padding (position 0, request slot 0, seq_len 1,
-# KV slot 0: the rows its own layers would also compute harmlessly); the MoE's routing keeps the padding rows out of the
-# experts (topk_route LIVEPOS: row 0's experts at weight 0), and the greedy ids are handed over for the live rows only
-PAD_SMALL = os.environ.get("DSV41_PAD_SMALL", "0") != "0"
-PAD_LIVE = os.environ.get("DSV41_PAD_LIVE", "1") != "0"   # (check only: 0 = the padding rows routed as live ones)
+# (11-21) DSV41_STATIC_ROWS=1,2,4: decode steps of n < T rows run the static layers too (GLM-5.3 #821's way): SGLang's own CUDA
+# graphs of those batch sizes, unchanged; the static layers of T rows read the n rows, their idle rows as SGLang pads a graph
+# (StepTables.fill: position 0, request slot 0, KV slot 0); the MoE layers get a build of n live rows for each n listed (its idle
+# rows not routed: no expert outside the live rows'); a step of n rows without one runs the T build, its idle rows routed. A
+# step of T rows runs exactly the T build as before
+ROWS = sorted({int(x) for x in os.environ.get("DSV41_STATIC_ROWS", "").split(",") if x.strip()})
+assert all(0 < r < 8 for r in ROWS), f"DSV41_STATIC_ROWS {ROWS}: live-row builds below T"
+SMALL = bool(ROWS)
+# (a 8-row build and its live-row variants alternate from step to step: H1's x flags count each kernel's launches, so the
+# chain would wait for ever; DSV41_ENGRAM=1's gather in the MoE forward takes T rows only)
+assert not (SMALL and os.environ.get("DSV41_X_FLAG", "0") != "0"), "DSV41_STATIC_ROWS: not with DSV41_X_FLAG (H1)"
+assert not (SMALL and ENGRAM and not ENGRAM2), "DSV41_STATIC_ROWS: with DSV41_ENGRAM=2 (or no Engram), not 1"
+
+
+def _ok_rows(rows: int) -> bool:
+    """A decode step of this many rows runs the static layers: T, or with DSV41_STATIC_ROWS (and not in check mode) 1 .. T."""
+    return rows == T or (SMALL and not CHECK and 0 < rows < T)
 assert not HEAD or MHC, "DSV41_HEAD: DSV41_STATIC_MHC=1"
 KEEP = os.environ.get("DSV41_STATIC_KEEP", "sgl" if CHECK else "static")
 PDL = os.environ.get("DSV41_STATIC_PDL", "0") != "0"
@@ -145,7 +156,7 @@ def _init_cuda_graphs(self, *args, **kwargs):
         _STATE["meta"] = {"variants": {lay.layer_id: attn_weights.variant_of(cfg, lay.layer_id) for lay in layers},
                           "engram": [lay.layer_id for lay in layers if lay.engram is not None], "tp": tp}   # (for dsv41_static_prof)
         attn_pool = ExchangePool(_STATE["tp_group"], dev, len(layers)) if AR or MHC else None
-        moe_pool = ExchangePool(_STATE["tp_group"], dev, len(layers)) if AR or MHC else None
+        moe_pool = ExchangePool(_STATE["tp_group"], dev, len(layers) * (1 + len(ROWS))) if AR or MHC else None   # (+ variants)
         self._dsv41_pools = (attn_pool, moe_pool)   # the exchange regions: alive as long as the layers
         steps = None
         if POOL:   # the caps by ratio as StaticAttn's
@@ -208,18 +219,24 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 if head and HEAD2:   # (its exchange region holds the head's rows too: larger than the pool's slots)
                     pool = ExchangePool(_STATE["tp_group"], dev, 1)
                     self._dsv41_pools = self._dsv41_pools + (pool,)
-                assert not PAD_SMALL or steps is not None, "DSV41_PAD_SMALL: the step tables (DSV41_STATIC_POOL=1)"
                 lay.mlp._dsv41 = StaticMoE(L, ckpt, int(ex.moe_tp_rank), int(ex.moe_tp_size), dev, OUT, PDL, pool, mhc=MHC,
                                            norm_next=norm_next or head, stats=STATS, engram=eg,
                                            gamma_name="norm.weight" if head else None,
-                                           engram_kv=egkv[L][0] if eg and L in egkv else None, head=head and HEAD2,
-                                           live_pos=steps.t["positions"] if PAD_SMALL and PAD_LIVE else None)
+                                           engram_kv=egkv[L][0] if eg and L in egkv else None, head=head and HEAD2)
                 if head:
                     _STATE["head_moe"] = lay.mlp._dsv41
                 if eg:   # the next layer's Engram module: its gather runs before this kernel, its forward passes R'' on
                     lay.mlp._dsv41.eg_mod = layers[L + 1].engram
                     layers[L + 1].engram._dsv41_moe = lay.mlp._dsv41
                     _log(f"MoE L{L}: layer {L + 1}'s Engram gate in its kernel")
+                for r in ROWS:   # (DSV41_STATIC_ROWS) its decode builds of r live rows, the same tensors
+                    vpool = pool
+                    if head and HEAD2:
+                        vpool = ExchangePool(_STATE["tp_group"], dev, 1)
+                        self._dsv41_pools = self._dsv41_pools + (vpool,)
+                    lay.mlp._dsv41.variants[r] = lay.mlp._dsv41.rows_variant(r, vpool)
+                if ROWS and L == 0:
+                    _log(f"MoE: decode builds of {ROWS} live rows beside the {T}-row one")
                 _MOES.append(lay.mlp._dsv41)
                 if AR or SEAM or MHC:
                     _OUTS.add(lay.mlp._dsv41.w["y"].data_ptr())
@@ -337,8 +354,8 @@ def _attn_forward(self, x, positions, forward_batch, x_quant=None, defer_all_red
     if st is None or not _active():
         return _orig_attn(self, x, positions, forward_batch, x_quant, defer_all_reduce)
     mode, rows = forward_batch.forward_mode, x.shape[0]
-    if mode.is_decode() and rows == T and defer_all_reduce:
-        rpi = forward_batch.req_pool_indices[:T]
+    if mode.is_decode() and _ok_rows(rows) and (rows == T or POOL) and defer_all_reduce:
+        rpi = forward_batch.req_pool_indices[:rows]
         if not POOL:
             if st.filled == 0 and st.steps == 0:
                 raise RuntimeError(f"L{st.layer}: a decode step before any prefill of {T} prompts of the same length")
@@ -346,7 +363,7 @@ def _attn_forward(self, x, positions, forward_batch, x_quant=None, defer_all_red
                 raise RuntimeError(f"L{st.layer}: the rows changed: prefill {st.req.tolist()}, decode {rpi.tolist()}")
         if POOL and st.layer == _STATE["first"]:
             fm = _v4.get_attn_backend().forward_metadata
-            _STATE["tables"].fill(getattr(fm, "core_attn_metadata", None) or fm.core_metadata, positions, rpi)
+            _STATE["tables"].fill(getattr(fm, "core_attn_metadata", None) or fm.core_metadata, positions, rpi, rows)
         if not _STATE["started"]:
             capturing = torch.cuda.is_current_stream_capturing()
             _log(f"first static decode step (L{st.layer}): " + ("in a CUDA graph capture" if capturing else
@@ -358,21 +375,29 @@ def _attn_forward(self, x, positions, forward_batch, x_quant=None, defer_all_red
             eg_ids = None
             if getattr(st, "engram", False) and EG_ROWS:   # (DSV41_EG_ROWS=1) the kernel looks the rows up: only the ids
                 ids = _STATE.get("hash_ids")
-                assert ids is not None and ids.shape[0] == T, "DSV41_EG_ROWS: no hash ids of this step (EngramHasher.forward)"
+                assert ids is not None and ids.shape[0] == rows, "DSV41_EG_ROWS: no hash ids of this step (EngramHasher.forward)"
+                if rows < T:   # (DSV41_STATIC_ROWS) the ids of T rows, the idle rows' 0 (a row of the table)
+                    pad = _STATE.get("ids_pad")
+                    if pad is None or pad.shape[1:] != ids.shape[1:]:
+                        pad = _STATE["ids_pad"] = torch.zeros(T, *ids.shape[1:], dtype=ids.dtype, device=ids.device)
+                    pad[:rows].copy_(ids)
+                    ids = pad
                 eg_ids = ids[:, st.eg_mod.layer_hash_index]
             elif getattr(st, "engram", False):   # (DSV41_ENGRAM=2) the next layer's n-gram rows by SGLang's own gather, now
                 ids = _STATE.get("hash_ids")
-                assert ids is not None and ids.shape[0] == T, "DSV41_ENGRAM=2: no hash ids of this step (EngramHasher.forward)"
-                rows = lambda h: h.eg_mod.embed_rows(ids[:, h.eg_mod.layer_hash_index], forward_batch, False).flatten(-2).to(
-                    torch.bfloat16).contiguous()
+                assert ids is not None and ids.shape[0] == rows, "DSV41_ENGRAM=2: no hash ids of this step (EngramHasher.forward)"
+                gather = lambda h: h.eg_mod.embed_rows(ids[:, h.eg_mod.layer_hash_index], forward_batch, False).flatten(
+                    -2).to(torch.bfloat16).contiguous()
                 if EG_EARLY:   # every host's rows before the step's first host kernel (the hash ids are the step's)
                     pre = _STATE.setdefault("eg_early", {})
                     if st.layer not in pre:
                         pre.clear()
-                        pre.update({h.layer: rows(h) for h in _STATE["eg_hosts"]})
+                        pre.update({h.layer: gather(h) for h in _STATE["eg_hosts"]})
                     emb = pre.pop(st.layer)
                 else:
-                    emb = rows(st)
+                    emb = gather(st)
+                if emb.shape[0] < T:   # (DSV41_STATIC_ROWS) T rows, the idle rows' 0
+                    emb = torch.cat([emb, emb.new_zeros(T - emb.shape[0], emb.shape[1])])
             y = st.run(x, positions, st.R, emb=emb, ids=eg_ids)
             st.R = None
             _STATE["pending"] = st
@@ -422,8 +447,9 @@ def _run_stats(st, *args):
 
 def _moe_forward(self, hidden_states, forward_batch=None, *args, **kwargs):
     st = getattr(self, "_dsv41", None)
+    rows = hidden_states.shape[0]
     if st is None or not _active() or forward_batch is None or not forward_batch.forward_mode.is_decode() or \
-            hidden_states.shape[0] != T:
+            not _ok_rows(rows) or (rows < T and not MHC):
         return _orig_moe(self, hidden_states, forward_batch, *args, **kwargs)
     if not _ATTNS and not _STATE.get("moe_started"):   # (no static attention on this rank: the MoE layers report the first step)
         _STATE["moe_started"] = True
@@ -438,11 +464,12 @@ def _moe_forward(self, hidden_states, forward_batch=None, *args, **kwargs):
             assert ids is not None and ids.shape[0] == T, "DSV41_ENGRAM: no hash ids of this step (EngramHasher.forward)"
             m = st.eg_mod
             emb = m.embed_rows(ids[:, m.layer_hash_index], forward_batch, False).flatten(-2).to(torch.bfloat16).contiguous()
-        y = st.run(x, st.R, emb=emb)
+        v = st.variants.get(rows, st) if rows < T else st   # (DSV41_STATIC_ROWS: the build of these live rows, if any)
+        y = v.run(x, st.R, emb=emb)
         if st.engram:
             st.eg_fresh = True   # (this forward's R'': the next Engram layer's forward passes it on, check mode compares it)
         st.R = None
-        _STATE["pending"] = st
+        _STATE["pending"] = v
         return out if CHECK else y
     if CHECK:
         out = _orig_moe(self, hidden_states, forward_batch, *args, **kwargs)
@@ -561,8 +588,9 @@ if ENGRAM:
 def _head_x(t):
     """(DSV41_HEAD) the last MoE kernel's head input when t is its streams (mhc_combine) or that input (the final norm)."""
     st = _STATE.get("head_moe")
-    return st.w["x_out"] if st is not None and t.data_ptr() in (st.w["streams_out"].data_ptr(), st.w["x_out"].data_ptr()) \
-        and t.shape[0] == T else None
+    return st.w["x_out"][:t.shape[0]] if st is not None and t.data_ptr() in (st.w["streams_out"].data_ptr(),
+                                                                            st.w["x_out"].data_ptr()) \
+        and _ok_rows(t.shape[0]) else None
 
 
 def _patch_final_norm(norm):
@@ -601,7 +629,8 @@ if HEAD:
         if buf is None or tuple(buf.shape) != tuple(hd.w["logits"].shape) or buf.dtype != torch.float32 or \
                 not buf.is_contiguous():
             buf = None
-        out = hd.w["logits"] if HEAD2 else hd.run(hidden_states, buf)   # (HEAD2: computed by the last MoE kernel)
+        out = hd.w["logits"][:hidden_states.shape[0]] if HEAD2 else hd.run(hidden_states, buf)   # (HEAD2: computed by the
+        # last MoE kernel; n rows of a smaller step)
         if HEAD_CHECK and not torch.cuda.is_current_stream_capturing() and hd.steps <= 8:   # SGLang's LM head on the same x
             got = out.clone()
             ref = _orig_get_logits(self, hidden_states, lm_head, logits_metadata, embedding_bias, False).float()
@@ -629,7 +658,8 @@ def _read(self, residual, norm, quant_format="", post_residual_addition=None):
     prefill's streams would keep 1.3 GB per sublayer alive)."""
     x, state = _orig_read(self, residual, norm, quant_format, post_residual_addition)
     st = getattr(self.layer.self_attn if self.attention else self.layer.mlp, "_dsv41", None)
-    if st is not None and isinstance(state, _bd.ReadState) and self.batch.forward_mode.is_decode() and state.streams.shape[0] == T:
+    if st is not None and isinstance(state, _bd.ReadState) and self.batch.forward_mode.is_decode() and \
+            _ok_rows(state.streams.shape[0]):
         st.R = state.streams
     return x, state
 
@@ -712,23 +742,6 @@ if MHC or STATS:
     _bd.HcReadCall.read = _read
 _bd.MoeTransport.prepare_output = _moe_prepare
 _mr.ModelRunner.init_cuda_graphs = _init_cuda_graphs
-if PAD_SMALL:   # no decode graph below T rows: SGLang pads 1 .. T - 1 rows into the T-row graph (the static layers')
-    from sglang.srt.model_executor.runner import base_cuda_graph_runner as _bcgr
-    from sglang.srt.model_executor.runner import decode_cuda_graph_runner as _dcgr
-    _orig_bs_to_capture = _bcgr.get_batch_sizes_to_capture
-
-    def _bs_to_capture(*args, **kwargs):
-        capture_bs, compile_bs = _orig_bs_to_capture(*args, **kwargs)
-        small = [b for b in capture_bs if b < T]
-        capture_bs = sorted(set(b for b in capture_bs if b >= T) | ({T} if small else set()))
-        compile_bs = sorted(set(b for b in compile_bs if b >= T) | ({T} if any(b < T for b in compile_bs) else set()))
-        _log(f"DSV41_PAD_SMALL: decode graphs {capture_bs} (the batches below {T} rows padded to {T})")
-        return capture_bs, compile_bs
-    import sglang.srt.model_executor.runner as _runner_pkg
-    from sglang.srt.model_executor.model_runner_components import cuda_graph_setup as _cgs
-    for _m in (_bcgr, _dcgr, _runner_pkg, _cgs, _mr):   # (every module that bound the name at its import)
-        if getattr(_m, "get_batch_sizes_to_capture", None) is _orig_bs_to_capture:
-            _m.get_batch_sizes_to_capture = _bs_to_capture
 _v4.MQALayer.forward = _attn_forward
 _dv2.DeepseekV2MoE.forward = _moe_forward
 # S2-1 (11-18; default off): DSV41_S2_ARGMAX=1: the greedy sampler's torch.argmax(logits, -1) by fast_argmax (the same index,
@@ -774,9 +787,8 @@ if HEAD_ARGMAX:
         def recorded_ids(self, logits_output, forward_batch, *, watermark_state):
             hd, lg = _STATE.get("head"), logits_output.next_token_logits
             si = forward_batch.sampling_info
-            rows = 0 if lg is None or lg.dim() != 2 else lg.shape[0]   # (DSV41_PAD_SMALL: the live rows of a padded replay)
-            ok = (self.recorded and hd is not None and lg is not None and lg.dim() == 2 and 0 < rows <= T
-                  and (rows == T or PAD_SMALL)
+            rows = 0 if lg is None or lg.dim() != 2 else lg.shape[0]   # (DSV41_STATIC_ROWS: a step of fewer rows)
+            ok = (self.recorded and hd is not None and lg is not None and lg.dim() == 2 and _ok_rows(rows)
                   and lg.data_ptr() == hd.w["logits"].data_ptr() and forward_batch is self._replayed_batch
                   and forward_batch.forward_mode.is_decode() and si.is_all_greedy and not forward_batch.return_logprob
                   and not (watermark_state is not None and si.has_watermark_candidates)

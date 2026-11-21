@@ -20,12 +20,12 @@
 // t >= ROWS is not routed: its K DUP routed pairs are the shared bank experts
 // (expert 0 without shared experts) at weight 0, so it streams no expert of its
 // own (its logits are not read, not re-armed).
-// LIVEPOS (params[7] = 1; 11-21, DSV41_PAD_SMALL): the live rows at run time,
-// a serving framework's decode batch of fewer rows padded to T (SGLang pads a
-// CUDA graph's rows with position 0, a live decode row has position >= 1): a
-// row t > 0 with pos[t] == 0 is routed as usual (its logits read and re-armed:
-// it may be live in the next launch) but stores row 0's experts at weight 0
-// (polled from row 0's pairs), so it streams no expert of its own.
+// COPY0 (params[7] = 1; 11-21, with ROWS < T and no shared bank experts: the
+// DSv4.1 decode builds of 1 / 2 / 4 live rows): an idle row's pairs are row
+// 0's experts at weight 0 (polled from row 0's pairs) instead of expert 0, so
+// no expert outside the live rows' is streamed. Row 0 waits for nothing in the
+// node; the plan must not put row 0's task behind another row's on its SM
+// (moe_demo.hand_plan asserts it).
 // SCORE selects the gate: 0 the sigmoid one above (K3, GLM); 1 DeepSeek-V4's
 // Gate.forward (inference/model.py), as torch computes it: scores =
 // sqrt(softplus(logit)) (softplus's threshold 20; IEEE expf, log1pf, sqrtf),
@@ -57,20 +57,35 @@ template <int NSPLIT,
           int SHARED = 0,
           int ROWS = T,
           int SCORE = 0,
-          bool LIVEPOS = false>
+          bool COPY0 = false>
 __device__ __forceinline__ void topk_route_task(float const *bias,
                                                 float *lpart,
                                                 unsigned long long *pairs,
                                                 int t,
                                                 char *sm,
-                                                bool warm STAGE_STAMP_PARAM,
-                                                int const *pos = nullptr) {
+                                                bool warm STAGE_STAMP_PARAM) {
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   __syncthreads(); // the scratch below is in the ring area: the previous tile's
                    // epilogue must have read every landed stage
   static_assert(ROWS >= 1 && ROWS <= T, "topk_route: 1 .. T live rows");
   if constexpr (ROWS < T) {
     if (t >= ROWS) { // an idle row (the header comment): no expert of its own
+      if constexpr (COPY0) {
+        static_assert(SHARED == 0, "topk_route COPY0: no shared bank experts");
+        if (threadIdx.x < K * DUP) { // row 0's expert at the same place, weight 0
+          unsigned long long r0;
+          do {
+            asm volatile("ld.relaxed.gpu.global.u64 %0, [%1];"
+                         : "=l"(r0)
+                         : "l"(pairs + threadIdx.x)
+                         : "memory");
+          } while (r0 == ~0ull);
+          pairs[t * K * DUP + threadIdx.x] =
+              (r0 & 0xFFFFFFFF00000000ull) |
+              (unsigned long long)__float_as_uint(0.f);
+        }
+        return;
+      }
       if (threadIdx.x < K * DUP + SHARED) {
         int const i = threadIdx.x;
         unsigned const e =
@@ -242,30 +257,12 @@ __device__ __forceinline__ void topk_route_task(float const *bias,
         if constexpr (SCALE_BITS != 0) {
           w *= __int_as_float(SCALE_BITS);
         }
-        bool pad = false;
-        if constexpr (LIVEPOS) {
-          pad = t > 0 && pos[t] == 0; // (row 0 is always live)
-        }
 #pragma unroll
         for (int j = 0; j < DUP; j++) {
-          unsigned long long pv =
+          pairs[t * (K * DUP + SHARED) + at * DUP + j] =
               ((unsigned long long)(unsigned)(sel_s[threadIdx.x] * DUP + j)
                << 32) |
               (unsigned long long)__float_as_uint(w);
-          if constexpr (LIVEPOS) {
-            if (pad) { // row 0's pair at the same place, weight 0
-              unsigned long long r0;
-              do {
-                asm volatile("ld.relaxed.gpu.global.u64 %0, [%1];"
-                             : "=l"(r0)
-                             : "l"(pairs + at * DUP + j)
-                             : "memory");
-              } while (r0 == ~0ull);
-              pv = (r0 & 0xFFFFFFFF00000000ull) |
-                   (unsigned long long)__float_as_uint(0.f);
-            }
-          }
-          pairs[t * (K * DUP + SHARED) + at * DUP + j] = pv;
         }
       }
     }
@@ -349,9 +346,8 @@ __device__ __forceinline__ void run_topk_route(Maps const &,
   constexpr int ROWS =
       param_or<PARAMS, 5, 0>() > 0 ? param_or<PARAMS, 5, 0>() : T;
   constexpr int SCORE = param_or0<PARAMS, 6>();
-  constexpr bool LIVEPOS = param_or0<PARAMS, 7>() == 1;
-  static_assert(!LIVEPOS || topk_shared<PARAMS>() == 0,
-                "topk_route LIVEPOS: no shared bank experts");
+  constexpr bool COPY0 = param_or0<PARAMS, 7>() == 1;
+  static_assert(!COPY0 || ROWS < T, "topk_route COPY0: a build of fewer live rows");
   topk_route_task<LOGITS::y,
                   NE,
                   N,
@@ -361,14 +357,12 @@ __device__ __forceinline__ void run_topk_route(Maps const &,
                   topk_shared<PARAMS>(),
                   ROWS,
                   SCORE,
-                  LIVEPOS>(
-      buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()),
-      buf_at<float>(g, LOGITS::buf),
-      buf_at<unsigned long long>(g, SELF::buf),
-      tk.x,
-      L.sm,
-      warm STAGE_STAMP_ARG(L.stage_stamps),
-      LIVEPOS ? buf_at<int const>(g, slot_at<BUF_SLOTS, LIVEPOS ? 1 : 0>()) : nullptr);
+                  COPY0>(buf_at<float const>(g, slot_at<BUF_SLOTS, 0>()),
+                        buf_at<float>(g, LOGITS::buf),
+                        buf_at<unsigned long long>(g, SELF::buf),
+                        tk.x,
+                        L.sm,
+                        warm STAGE_STAMP_ARG(L.stage_stamps));
 }
 // dynamic shared memory: the scratch, inside the ring area
 template <class SELF,

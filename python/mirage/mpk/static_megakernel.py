@@ -471,8 +471,8 @@ class StaticMegakernel(PersistentKernel):
                                    # at weight 0: no expert of its own is streamed)
         score_func: str = "sigmoid",   # "sigmoid" (K3, GLM) or "sqrtsoftplus" (DeepSeek-V4's gate, below)
         block_dim: tuple = (256, 1, 1),
-        live_positions: DTensor = None,   # (11-21) [T] int32, a graph tensor: a row t > 0 at position 0 is a serving
-                                          # framework's padding row: it stores row 0's experts at weight 0 (params[7] = 1)
+        idle_row0: bool = False,   # (11-21, with valid_rows < T, no shared experts) an idle row's pairs: row 0's experts at
+                                   # weight 0, not expert 0 (params[7] = 1: tasks/topk_route.cuh COPY0)
     ):
         """Task t = token t: adds the router's partial sums of row t, top K ((output.dim(1) - shared_experts) / sub_experts)
         of the E experts (bias.dim(0)). params = [E, K], [E, K, the routed scaling factor as fp32 bits], with sub-experts [E, K,
@@ -502,18 +502,15 @@ class StaticMegakernel(PersistentKernel):
             if K != 6:
                 raise ValueError(f"topk_route_layer: sqrtsoftplus takes K = 6 (torch's sum order is fitted for 6), not {K}")
             params = params + [0] * (6 - len(params)) + [1]
-        if live_positions is not None:
-            assert SH == 0 and live_positions.num_dims == 1 and live_positions.dim(0) == T, "live_positions: [T], no shared"
-            self._dtypes("topk_route_layer", live_positions=(live_positions, int32))
-            params = params + [0] * (7 - len(params)) + [1]
-        if score_func not in ("sigmoid", "sqrtsoftplus"):
+        elif score_func != "sigmoid":
             raise ValueError(f"topk_route_layer: score_func 'sigmoid' or 'sqrtsoftplus', not {score_func!r}")
+        if idle_row0:
+            assert valid_rows is not None and valid_rows < T and SH == 0, "idle_row0: valid_rows < T, no shared experts"
+            params = params + [0] * (7 - len(params)) + [1]
         self._add_node("topk_route", (output.dim(0), 1, 1), block_dim, [input, bias, output],
                        [(0, -1, -1), (-1, -1, -1), (0, -1, -1)], params,
                        out_buffer=lambda n: (T * (K * DUP + SH) * 8, 0xFF, False),   # the pairs, u64, polled by every moe_experts task
-                       buf_slots=[self._tensor_slot(bias)] + ([self._tensor_slot(live_positions)] if live_positions is not None
-                                                              else []),
-                       dry=True, cost_inputs=[0])   # adds the router's K parts
+                       buf_slots=[self._tensor_slot(bias)], dry=True, cost_inputs=[0])   # adds the router's K parts
 
     def sum_quant_send_layer(
         self,
@@ -1366,7 +1363,7 @@ class StaticMegakernel(PersistentKernel):
             raise ValueError("swiglu_moe_experts_layer: x_q must be an act_quant node's output of x (a graph input)")
         route = producer_of(pairs, nodes)
         if route is None or route.name != "topk_route" or len(route.params) not in (7, 8) or \
-                list(route.params[:2]) != [E, K] or route.params[6] != 1:   # (8: + the live rows by position)
+                list(route.params[:2]) != [E, K] or route.params[6] != 1:   # (8: + idle rows on row 0's experts)
             raise ValueError(f"swiglu_moe_experts_layer: the pairs must be a topk_route node's with the DeepSeek-V4 gate "
                              f"(score_func 'sqrtsoftplus') over the {E} experts of w13")
         hq = self._scratch("swiglu_moe_experts.h_q", NSLOT * T * IRP)              # zeroed once: columns [I, IRP) stay 0

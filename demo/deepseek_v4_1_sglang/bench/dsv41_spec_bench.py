@@ -75,10 +75,8 @@ def main():
         extra["json_model_override_args"] = os.environ["DSV41_OVERRIDE"]
     if os.environ.get("DSV41_NO_SWA_REPLAY"):
         extra["enable_decoder_swa_bounded_replay"] = False
-    # (DSV41_PAD_SMALL, the static layers: a batch below 8 rows replays the 8-row graph, padded: its slots and graph buffers)
-    gbs = max(args.bs, 8) if os.environ.get("DSV41_PAD_SMALL", "0") != "0" else args.bs
-    llm = sgl.Engine(model_path=MODEL, tp_size=int(os.environ.get("DSV41_TP", "4")), max_running_requests=gbs,
-                     cuda_graph_max_bs_decode=gbs, context_length=args.ctx, mem_fraction_static=0.6,
+    llm = sgl.Engine(model_path=MODEL, tp_size=int(os.environ.get("DSV41_TP", "4")), max_running_requests=args.bs,
+                     cuda_graph_max_bs_decode=args.bs, context_length=args.ctx, mem_fraction_static=0.6,
                      trust_remote_code=True, disable_radix_cache=True, log_level="warning", **extra)
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
