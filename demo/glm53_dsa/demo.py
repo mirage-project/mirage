@@ -71,6 +71,10 @@ except ImportError:
     from weights import check_config, checkpoint_reader, download_layers, is_full_layer, layer_tensors
 
 T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each request): the kernel's T (8, 16, 32, 64)
+# T >= 32: the FP8 GEMMs (q_a / kv_a, q_b, the indexer's wq_b, o_proj) with power-of-two scales, as SGLang runs them with
+# DeepGEMM on Blackwell: the weights requantized (weights.requant_ue8m0), the activations' scales rounded up, the MMA
+# applying both (scaled_gemm_tile UE8M0)
+UE8M0 = T >= 32
 H, PAGE, TOPK = 6144, 64, 2048
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -129,13 +133,14 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     xq, qkva = nt((T, H), uint8, "x_fp8"), nt((T, 2688), int64, "qkva")
     # T = 64: x and v quantized in token tiles (a task of all 64 tokens takes 8 tokens a warp, on 48 / 16 SMs): x in 2, v
     # (before o_proj, on the critical chain) in 8
-    mpk.group_quant_layer(input=t["x"], output=xq, token_tiles=2 if T == 64 else 1)
-    mpk.scaled_gemm_tile_layer(input=xq, weight=t["w_qkva"], weight_scales=t["w_qkva_sf"], output=qkva, combine="add")
+    mpk.group_quant_layer(input=t["x"], output=xq, token_tiles=2 if T == 64 else 1, ue8m0=UE8M0)
+    mpk.scaled_gemm_tile_layer(input=xq, weight=t["w_qkva"], weight_scales=t["w_qkva_sf"], output=qkva, combine="add",
+                               ue8m0=UE8M0)
     if full:
         kw = nt((T, 256), int64, "idx_kw")
         mpk.gemm_tile_layer(input=t["x"], weight=t["w_kw"], output=kw, combine="add")
     qcq = nt((T, 2048), uint8, "q_c_fp8")   # q_c quantized (the node also applies q_a_layernorm)
-    mpk.dsa_q_norm_quant_layer(qkva=qkva, gamma=t["q_a_norm"], output=qcq, eps=eps)
+    mpk.dsa_q_norm_quant_layer(qkva=qkva, gamma=t["q_a_norm"], output=qcq, eps=eps, ue8m0=UE8M0)
     mpk.dsa_kv_write_layer(qkva=qkva, gamma=t["kv_a_norm"], cos_sin=t["cos_sin"], seq_lens=t["seq_lens"],
                            block_table=t["block_table"], cache=t["cache"], kv0=cfg["q_lora_rank"], eps=eps)
     if full:
@@ -143,12 +148,13 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
                                     seq_lens=t["seq_lens"], block_table=t["block_table"], index_cache=t["index_cache"],
                                     key_scale=key_scale)
     qb = nt((T, NH * 256), int64, "q_b")
-    mpk.scaled_gemm_tile_layer(input=qcq, weight=t["w_qb"], weight_scales=t["w_qb_sf"], output=qb, combine="add")
+    mpk.scaled_gemm_tile_layer(input=qcq, weight=t["w_qb"], weight_scales=t["w_qb_sf"], output=qb, combine="add",
+                               ue8m0=UE8M0)
     if full:
         iq = nt((T, 4096), int64, "idx_q")
         # skip_seq: a step whose contexts are all at most TOPK reads no index scores (dsa_index_score skip_k)
         mpk.scaled_gemm_tile_layer(input=qcq, weight=t["w_iqb"], weight_scales=t["w_iqb_sf"], output=iq, combine="add",
-                                   skip_seq=(t["seq_lens"], TOPK))
+                                   skip_seq=(t["seq_lens"], TOPK), ue8m0=UE8M0)
     q = nt((T, NH, 576), bfloat16, "q_mla")
     mpk.dsa_q_absorb_layer(qb=qb, w_uk=t["w_uk"], cos_sin=t["cos_sin"], seq_lens=t["seq_lens"], output=q)
     if full:
@@ -167,7 +173,7 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     # the most a lane per lse allows (32 / splits)
     mpk.dsa_mla_merge_layer(input=split, output=o_lat, tokens_per_task={32: 2, 64: 32 // splits}.get(T))
     mpk.dsa_o_absorb_layer(input=o_lat, w_uv=t["w_uv"], output=v)
-    mpk.group_quant_layer(input=v, output=vq, token_tiles=8 if T == 64 else 1)
+    mpk.group_quant_layer(input=v, output=vq, token_tiles=8 if T == 64 else 1, ue8m0=UE8M0)
     # T = 64: o_proj's sums in fixed point ("add"), so its K can split (build's round robin: 2 parts, 96 tasks) and
     # allreduce_send sends each 128-column block once its parts are added; T <= 32 keeps the plain stores (the adds and
     # the zeroed buffer cost more there than the blocks' early sends gain)
@@ -178,10 +184,10 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     if not tail:   # attn_out = bf16(o_proj): what the nodes below give on one GPU with a zero residual
         assert mpk.num_gpus == 1 and next_norm is None
         mpk.scaled_gemm_tile_layer(input=vq, weight=t["w_o"], weight_scales=t["w_o_sf"], output=t["attn_out"],
-                                   combine="store_bf16")
+                                   combine="store_bf16", ue8m0=UE8M0)
         return
     mpk.scaled_gemm_tile_layer(input=vq, weight=t["w_o"], weight_scales=t["w_o_sf"], output=o,
-                               combine="add" if o_add else "store")
+                               combine="add" if o_add else "store", ue8m0=UE8M0)
     mpk.allreduce_send_layer(input=o, output=sent)
     if not land:
         mpk.sum_gpus_layer(input=sent, output=osum)
@@ -333,7 +339,7 @@ def main():
     residual = torch.zeros(T, H, dtype=torch.bfloat16, device=dev)   # y = the attention output
     launches_of = {}   # --record: per layer, the per-task times and the span ends of each timed launch
     for layer, full in zip(args.layers, fulls):
-        w = layer_tensors(read, layer, tp=args.tp, rank=args.rank, device=dev, full=full)
+        w = layer_tensors(read, layer, tp=args.tp, rank=args.rank, device=dev, full=full, ue8m0=UE8M0)
         cache = torch.empty(npages * PAGE, 576, dtype=torch.bfloat16, device=dev)
         index_cache = torch.empty(npages, PAGE * 132, dtype=torch.uint8, device=dev) if full else None
         random_history(cache, index_cache)

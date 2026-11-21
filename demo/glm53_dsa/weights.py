@@ -120,15 +120,33 @@ def dequant(w: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
     return w.view(torch.float8_e4m3fn).float() * scale
 
 
-def packed(w: torch.Tensor, s: torch.Tensor):
-    """e4m3 [N, K] (N, K multiples of 128) -> (pieces viewed [N, K] uint8, scales [N / 128, K / 128] fp32)."""
+def requant_ue8m0(w: torch.Tensor, s: torch.Tensor):
+    """e4m3 [N, K] (N, K multiples of 128) with fp32 block scales -> (e4m3 [N, K] uint8, fp32 scales [N / 128, K / 128],
+    powers of two): SGLang's requantization for DeepGEMM on Blackwell (fp8_utils.requant_weight_ue8m0): dequantize to
+    bf16, then per 128 x 128 block sf = ceil_to_ue8m0(max(amax, 1e-4) / 448) and e4m3(w / sf)."""
+    N, K = w.shape
+    v = dequant(w, s).to(torch.bfloat16).view(N // 128, 128, K // 128, 128)
+    amax = v.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
+    bits = (amax / 448.0).view(torch.int32)   # ceil_to_ue8m0: the exponent, up by one if the mantissa is not zero
+    e = (((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).to(torch.int32)).clamp(1, 254)
+    sf = (e << 23).view(torch.float32)
+    q = (v * (1.0 / sf)).to(torch.float8_e4m3fn)
+    return q.view(N, K).view(torch.uint8), sf.view(N // 128, K // 128).contiguous()
+
+
+def packed(w: torch.Tensor, s: torch.Tensor, ue8m0: bool = False):
+    """e4m3 [N, K] (N, K multiples of 128) -> (pieces viewed [N, K] uint8, scales [N / 128, K / 128] fp32). ue8m0: the
+    weight requantized first (requant_ue8m0)."""
+    if ue8m0:
+        w, s = requant_ue8m0(w, s)
     q, sf = pack_w2(w.view(torch.uint8).contiguous(), s.float().contiguous())
     return q.view(w.shape[0], w.shape[1]), sf
 
 
-def layer_tensors(read, layer: int, tp: int = 8, rank: int = 0, device="cpu", full: bool = None) -> dict:
+def layer_tensors(read, layer: int, tp: int = 8, rank: int = 0, device="cpu", full: bool = None, ue8m0: bool = False) -> dict:
     """Return the tensors of the attention of `layer` for shard `rank` of `tp`, on `device`, in the layouts of the module
-    docstring. full: the layer runs its indexer (None: the checkpoint has indexer.wq_b)."""
+    docstring. full: the layer runs its indexer (None: the checkpoint has indexer.wq_b). ue8m0: the FP8 GEMM weights
+    requantized with power-of-two scales (requant_ue8m0), for the GEMMs' UE8M0 mode."""
     p = f"model.layers.{layer}.self_attn."
     full = read.has(p + "indexer.wq_b.weight") if full is None else full
     get = lambda name: read(p + name).to(device)
@@ -140,19 +158,20 @@ def layer_tensors(read, layer: int, tp: int = 8, rank: int = 0, device="cpu", fu
     assert qa.shape == (2048, 6144) and kva.shape == (576, 6144) and kva_s.shape[0] == 5
     zero = torch.zeros(64, 6144, dtype=torch.uint8, device=device)
     w["w_qkva"], w["w_qkva_sf"] = packed(torch.cat([qa.view(torch.uint8), kva.view(torch.uint8), zero]),
-                                         torch.cat([qa_s, kva_s]))
+                                         torch.cat([qa_s, kva_s]), ue8m0)
     qb, qb_s = get("q_b_proj.weight"), get("q_b_proj.weight_scale_inv")
     rows = slice(rank * NH * 256, (rank + 1) * NH * 256)
-    w["w_qb"], w["w_qb_sf"] = packed(qb[rows].contiguous(), qb_s[rank * NH * 2:(rank + 1) * NH * 2].contiguous())
+    w["w_qb"], w["w_qb_sf"] = packed(qb[rows].contiguous(), qb_s[rank * NH * 2:(rank + 1) * NH * 2].contiguous(), ue8m0)
     kvb = dequant(get("kv_b_proj.weight"), get("kv_b_proj.weight_scale_inv")).to(torch.bfloat16).view(64, 448, 512)
     kvb = kvb[rank * NH:(rank + 1) * NH]
     w["w_uk"] = kvb[:, :192].contiguous()                       # [NH, 192, 512]
     w["w_uv"] = kvb[:, 192:].transpose(1, 2).contiguous()       # [NH, 512, 256]
     o, o_s = get("o_proj.weight"), get("o_proj.weight_scale_inv")
     cols = slice(rank * NH * 256, (rank + 1) * NH * 256)
-    w["w_o"], w["w_o_sf"] = packed(o[:, cols].contiguous(), o_s[:, rank * NH * 2:(rank + 1) * NH * 2].contiguous())
+    w["w_o"], w["w_o_sf"] = packed(o[:, cols].contiguous(), o_s[:, rank * NH * 2:(rank + 1) * NH * 2].contiguous(),
+                                   ue8m0)
     if full:
-        w["w_iqb"], w["w_iqb_sf"] = packed(get("indexer.wq_b.weight"), get("indexer.wq_b.weight_scale_inv"))
+        w["w_iqb"], w["w_iqb_sf"] = packed(get("indexer.wq_b.weight"), get("indexer.wq_b.weight_scale_inv"), ue8m0)
         wk = dequant(get("indexer.wk.weight"), get("indexer.wk.weight_scale_inv")).to(torch.bfloat16)
         wp = get("indexer.weights_proj.weight").to(torch.bfloat16)
         assert wk.shape == (128, 6144) and wp.shape == (32, 6144)

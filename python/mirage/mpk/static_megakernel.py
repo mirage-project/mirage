@@ -384,6 +384,9 @@ class StaticMegakernel(PersistentKernel):
         combine: str = "add",   # as gemm_tile_layer: "slots", "add", "store" or "store_bf16" (a layer's final output)
         skip_seq: tuple = None,   # as gemm_tile_layer's: (seq_lens [T] int32, L), an "add" GEMM whose readers read nothing in a
                                   # launch where every token has seq_lens <= L (e.g. GLM-5.3's indexer q, dsa_index_score skip_k)
+        ue8m0: bool = False,      # the weight scales [N / 128, K / 128] and the input's are powers of two (the weight
+                                  # requantized as SGLang does for DeepGEMM on Blackwell; the input from a ue8m0 node): the
+                                  # MMA applies them, one accumulator per issuer (scale layout 2)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare an FP8 GEMM with fp32 scales (tasks/scaled_gemm_tile.cuh).
@@ -397,7 +400,7 @@ class StaticMegakernel(PersistentKernel):
         A GateUpScales piece holds 64 gate rows, then 64 up rows.
         Tensor maps load weights and activations. Pointers load fp32 weight scales.
         Weight maps cover one or two pieces. Activation maps cover one or two K tiles, in both exchange sets.
-        params = [mode, K, N, scale layout (0 BlockScales, 1 GateUpScales)[, L of skip_seq]].
+        params = [mode, K, N, scale layout (0 BlockScales, 1 GateUpScales, 2 UE8M0 BlockScales)[, L of skip_seq]].
         buf_slots = [weight scale buffer slot[, seq_lens of skip_seq]]. map_slots = [weight map slot, activation map slot].
         """
         from .compiler import graph_nodes, producer_of
@@ -420,6 +423,12 @@ class StaticMegakernel(PersistentKernel):
         if dims not in layouts:
             raise ValueError(f"scaled_gemm_tile_layer: weight scales {dims}, expected one of {list(layouts)}")
         layout = layouts[dims]
+        if ue8m0:
+            flag = {"group_quant": 1, "dsa_q_norm_quant": 3}.get(q.name)   # the producer's ue8m0 param
+            if layout != 0 or flag is None or len(q.params) <= flag or not q.params[flag]:
+                raise ValueError("scaled_gemm_tile_layer: ue8m0 needs BlockScales [N / 128, K / 128] and an input from a "
+                                 "ue8m0 group_quant or dsa_q_norm_quant node")
+            layout = 2
         assert skip_seq is None or combine == "add", "skip_seq: an \"add\" GEMM"
         params, bufs = [mode, K, N, layout], [self._tensor_slot(weight_scales)]
         if skip_seq is not None:
@@ -525,16 +534,18 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,    # z_q [T, L] e4m3 bytes (uint8)
         token_tiles: int = 1,   # each 128-column group in this many tasks of T / token_tiles tokens (grid y; a multiple of
                                 # 8 tokens each): at T = 64 a task of all tokens quantizes 8 tokens a warp, on L / 128 SMs
+        ue8m0: bool = False,    # each scale rounded up to a power of two (SGLang's scale_ue8m0 for DeepGEMM on Blackwell),
+                                # for a UE8M0 scaled_gemm_tile; the scales keep their fp32 layout
         block_dim: tuple = (256, 1, 1),
     ):
         """Quantize one 128-column group per task, with a separate scale for each token.
 
-        Use s = max(amax, 1e-10) / 448 and q = e4m3(x / s).
+        Use s = max(amax, 1e-10) / 448 (ue8m0: the power of two at or above it) and q = e4m3(x / s).
         Store z_q in this GPU's exchange region, followed by fp32 scales [L / 128][T].
         Before each launch, fill the output with 0xFF for scaled_moe_experts to poll.
         Each task increments the completion counter after all its stores.
         scaled_gemm_tile waits for all these tasks before its TMA loads.
-        params = [L]. buf_slots = [x's buffer slot], or [-1] if a node produces x.
+        params = [L[, 1: ue8m0]]. buf_slots = [x's buffer slot], or [-1] if a node produces x.
         """
         from .compiler import graph_nodes, producer_of
         T, L = self._tokens(input.dim(0)), input.dim(1)
@@ -547,7 +558,7 @@ class StaticMegakernel(PersistentKernel):
         assert token_tiles == 1 or (T % token_tiles == 0 and T // token_tiles % 8 == 0)
         self._add_node("group_quant", (L // 128, token_tiles, 1), block_dim, [input, output],
                        # x from a node: each task waits until all its tasks are counted
-                       [(1, -1, -1) if p is None else (-1, -1, -1), (1, -1, -1)], [L],
+                       [(1, -1, -1) if p is None else (-1, -1, -1), (1, -1, -1)], [L] + ([1] if ue8m0 else []),
                        out_buffer=lambda n: (zq32_bytes(T, L), 0xFF, False), exchange=True,
                        counters=1, buf_slots=[-1 if p is not None else self._tensor_slot(input)])
 
@@ -969,6 +980,7 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,    # z_q [T, QL] e4m3 bytes (uint8): q_c quantized, as a group_quant node writes it; or q_c [T, QL]
                             # bf16 itself (GLM-5.3-Flash: the input of its bf16 indexer wq_b, a gemm_tile)
         eps: float = 1e-5,
+        ue8m0: bool = False,    # the scales rounded up to powers of two (group_quant_layer's ue8m0)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the MLA q_a_layernorm with the quantization of its output (tasks/dsa_q_norm_quant.cuh). Task t is token t:
@@ -977,15 +989,17 @@ class StaticMegakernel(PersistentKernel):
         (z_q, then the scales [QL / 128][T]). scaled_gemm_tile reads it after the counter. A reader that polls 16-byte
         units (scaled_moe_experts) must not read it. Thus the host does not fill the buffer with 0xFF before a launch.
         A bf16 output: the node writes q_c [T, QL] bf16 to its own buffer instead (a gemm_tile reads it after the counter).
-        params = [QL, eps bits, 1 if the output is bf16 else 0]. buf_slots: [gamma]. One counter: the count of the tasks."""
+        params = [QL, eps bits, 1 if the output is bf16 else 0[, 1: ue8m0]]. buf_slots: [gamma]. One counter: the count of
+        the tasks."""
         self._fx_producer("dsa_q_norm_quant_layer", qkva)
         T, QL = self._tokens(output.dim(0)), output.dim(1)
         bf = output.dtype == bfloat16
+        assert not (bf and ue8m0), "dsa_q_norm_quant_layer: ue8m0 scales of an e4m3 output"
         self._dtypes("dsa_q_norm_quant_layer", qkva=(qkva, int64), gamma=(gamma, float32),
                      output=(output, bfloat16 if bf else uint8))
         assert QL in (1536, 2048) and QL <= qkva.dim(1) and gamma.dim(0) == QL
         self._add_node("dsa_q_norm_quant", (T, 1, 1), block_dim, [qkva, output], [(-1, -1, -1), (0, -1, -1)],
-                       [QL, float_bits(eps), int(bf)],
+                       [QL, float_bits(eps), int(bf)] + ([1] if ue8m0 else []),
                        out_buffer=lambda n: (T * QL * 2, -1, False) if bf else (zq32_bytes(T, QL), -1, False),
                        exchange=not bf, counters=1,
                        buf_slots=[self._tensor_slot(gamma)],

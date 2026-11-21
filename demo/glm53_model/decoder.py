@@ -152,7 +152,8 @@ class StaticDecoder:
         """The tensors of the attention (every layer), the dense MLP and the MoE (router, bias, the routed experts' bank and
         the shared expert) of this rank, from the checkpoint."""
         for l in range(self.L):
-            w = dsa_weights.layer_tensors(self.read, l, tp=TP, rank=self.rank, device=self.dev, full=self.full[l])
+            w = dsa_weights.layer_tensors(self.read, l, tp=TP, rank=self.rank, device=self.dev, full=self.full[l],
+                                          ue8m0=dsa_demo.UE8M0)
             w.pop("input_norm")   # not a kernel tensor: the engine's norm, or the kernel before (norm_next below)
             self.attn_w.append(w)
             self.ffn_w.append(dense_mlp.dense_tensors(self.read, l, tp=TP, rank=self.rank, device=self.dev) if l < self.dense
