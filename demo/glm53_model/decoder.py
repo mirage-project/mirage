@@ -73,6 +73,8 @@ for _k in PLANS:
         PLANS[_k] = os.environ[f"MIRAGE_STATIC_PLAN_{_k.upper()}"]
 # the serving build: the kernel resets its own buffers
 SERVING = ["-DSTATIC_RESET_IN_KERNEL"]
+# MIRAGE_STATIC_EXTRA_FLAGS: more nvcc flags for every layer of the server (A/B of -D switches, e.g. -DSTATIC_MOE64_W13C=0)
+SERVING += os.environ.get("MIRAGE_STATIC_EXTRA_FLAGS", "").split()
 # MIRAGE_STATIC_PDL=1 (the default; 0: off): the kernels launch programmatically (PDL). The start of a kernel (its resets,
 # barrier, TMEM) then overlaps the end of the kernel before it.
 PDL = os.environ.get("MIRAGE_STATIC_PDL", "1") == "1"

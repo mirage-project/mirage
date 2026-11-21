@@ -1431,25 +1431,29 @@ __device__ __forceinline__ void
 //        warps done)
 //   [14] / [15] thread 0: in build_table, past its first barrier / its third
 //             (the slots numbered; the pairs' binary searches follow)
-//   [8] epilogue events recorded, from [MOE_PROF_EV0] up to [MOE_PROF_EV_END]:
+//   [8] epilogue events seen; the first MOE_PROF_EV_END - MOE_PROF_EV0 are
+//       recorded, from [MOE_PROF_EV0] up to [MOE_PROF_EV_END] (the later ones
+//       dropped: [8] above that count):
 //       kind << 56 | (time - [0]); kind 1 a W13 item seen, 2 its h_q written;
 //       3 a W2 tile seen, 4 its scales read (a new slot: also its CHQ wait and
 //       h_q scales), 5 its accumulator full, 9 (T >= 32) its TMEM columns read
 //       (acc_empty arrived), 6 its rows stored
-//   [380] / [381] / [382] the W2 issuer warp 1's W2 tiles: ns waiting for the
-//             entry's h_q (T = 64) / for acc_empty (the epilogue freed the
-//             accumulator tick) / for the W2 stage's full barrier (weights)
-//   [383] the same acc_empty wait for warp 6's W2 tiles
+//   [MOE_PROF_EV_END + 0 / 1 / 2] the W2 issuer warp 1's W2 tiles: ns waiting
+//             for the entry's h_q (T = 64) / for acc_empty (the epilogue freed
+//             the accumulator tick) / for the W2 stage's full barrier (weights)
+//   [MOE_PROF_EV_END + 3] the same acc_empty wait for warp 6's W2 tiles
+// 492 events: GLM-5.3-Flash TP4 layer 15 at T = 64 measured 8 W13 items
+// (4 events each) and up to 71 W2 tiles (5 each) on an SM, 387 events.
 // The recording threads keep their counts, sums and [0] in registers and only
 // store (no global load on the pipeline's path); the sums and the count at the
 // queue's end.
-constexpr int MOE_PROF_WORDS = 384, MOE_PROF_EV0 = 16, MOE_PROF_EV_END = 380;
+constexpr int MOE_PROF_WORDS = 512, MOE_PROF_EV0 = 16, MOE_PROF_EV_END = 508;
 __device__ __forceinline__ void
     moe_prof_event(long long *prof, int &n, long long t0, int kind) {
   if (MOE_PROF_EV0 + n < MOE_PROF_EV_END) {
     prof[MOE_PROF_EV0 + n] = ((long long)kind << 56) | (gtime() - t0);
-    n++;
   }
+  n++;
 }
 
 // Arm W2 tile k of this SM:
@@ -1968,11 +1972,11 @@ __device__ __forceinline__ void
         if constexpr (RES::PROF >= 0) {
           if (lane == 0) {
             if (iss == 0) {
-              prof[380] = pw_hq;
-              prof[381] = pw_acc;
-              prof[382] = pw_full;
+              prof[MOE_PROF_EV_END] = pw_hq;
+              prof[MOE_PROF_EV_END + 1] = pw_acc;
+              prof[MOE_PROF_EV_END + 2] = pw_full;
             } else {
-              prof[383] = pw_acc;
+              prof[MOE_PROF_EV_END + 3] = pw_acc;
             }
           }
         }

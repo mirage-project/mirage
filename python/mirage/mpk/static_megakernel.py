@@ -37,7 +37,8 @@ SF_CHUNK = 512   # one MX scale chunk (config.cuh): 128 rows x 4 B
 MAX_SUM_PARTS = 14   # the most K parts sum_send adds (tasks/sum_send.cuh)
 HC_MIX_STRIDE = 32   # floats per (part, token) of hc_post_mix's mixes
 MOE_SPLIT_SLOTS = 32   # the expert slots of scaled_moe_experts' split mode (tasks/scaled_moe_experts.cuh)
-MOE_PROF_WORDS = 384   # int64 words per SM of scaled_moe_experts' profile (tasks/scaled_moe_experts.cuh)
+MOE_PROF_WORDS = 512   # int64 words per SM of scaled_moe_experts' profile (tasks/scaled_moe_experts.cuh)
+MOE_PROF_EV_END = 508   # its events: words 16 .. MOE_PROF_EV_END - 1; the W2 issuers' waits: MOE_PROF_EV_END + 0 .. 3
 # DSA constants (dsa_common.cuh, tasks/dsa_index_topk.cuh):
 #   DSA_TOPK_BINS        the bins of a token histogram of the index scores (TOPK_BINS)
 #   DSA_TOPK_REC         the ints of a chunk record of the top-k count node (TOPK_REC)
@@ -681,8 +682,9 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,    # R [T x K, L] fp32: this GPU's routed rows, one per (token, routed expert k); allreduce_send adds a
                             # token's K in order
         swiglu_limit: float = None,   # gate clamped to at most this, up to [-limit, limit] first (GLM-5.3-Flash: 10); None: none
-        prof: DTensor = None,   # int64 [SMs, 256], a graph input: per-SM stamps of the node's phases (scaled_moe::moe_prof_event:
-                                # W13 items, W2 tiles, the ring switch, the W2 loaders' waits); None: none compiled in
+        prof: DTensor = None,   # int64 [SMs, MOE_PROF_WORDS], a graph input: per-SM stamps of the node's phases
+                                # (scaled_moe::moe_prof_event: W13 items, W2 tiles, the ring switch, the W2 loaders' waits);
+                                # None: none compiled in
         many_token_epilogue: bool = True,   # T >= 32: a two-item W13 entry keeps both items' h in shared memory (the slots of
                                             # many tokens: their T-wide SiLU in a loop); False: the per-item epilogue of T < 32
         w2_in_slot_order: bool = False,     # the W2 tiles in the slots' index order instead of the queue's slot order (the

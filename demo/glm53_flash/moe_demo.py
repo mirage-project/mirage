@@ -56,7 +56,8 @@ from mirage.core import bfloat16, float32, uint8
 from mirage.mpk import compiler
 from mirage.mpk.fp8_fp32scale_weights import pack_w13, pack_w2, requant_ue8m0
 from mirage.mpk.static_harness import Harness
-from mirage.mpk.static_megakernel import HC_MIX_STRIDE, StaticMegakernel, scaled_moe_hq_ue
+from mirage.mpk.static_megakernel import (HC_MIX_STRIDE, MOE_PROF_EV_END, MOE_PROF_WORDS, StaticMegakernel,
+                                         scaled_moe_hq_ue)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dsa_mla import bf, fp8_gemm, gemm, group_quant, relrms  # noqa: E402
@@ -418,7 +419,7 @@ def prof_report(prof: torch.Tensor, bar: int, t: dict):
         r = p[sm]
         if r[0] == 0:
             continue
-        ev = [(int(v) >> 56, (int(v) & ((1 << 56) - 1)) / 1e3) for v in r[16:16 + int(r[8])]]
+        ev = [(int(v) >> 56, (int(v) & ((1 << 56) - 1)) / 1e3) for v in r[16:min(16 + int(r[8]), MOE_PROF_EV_END)]]
         for k, i in (("task started", 9), ("first barrier", 13), ("z_q + pairs landed", 10), ("switch done (t0)", 11),
                      ("switch done (t64)", 12), ("table: 1st barrier", 14), ("table: slots numbered", 15)):
             per[k].append((r[i] - bar) / 1e3)
@@ -452,17 +453,23 @@ def prof_report(prof: torch.Tensor, bar: int, t: dict):
             per["last W13 -> 1st W2 done"].append(w2[6][0] - done13[-1])
         per["W2 loaders: wait stage (sum)"].append((r[4] + r[6]) / 1e3)
         per["W2 loaders: wait CHQ (sum)"].append((r[5] + r[7]) / 1e3)
-        # the W2 issuers (warp 1: [380] h_q, [381] acc_empty, [382] the stage's full barrier; warp 6: [383] acc_empty)
-        per["W2 issuers: wait acc_empty (sum)"].append((r[381] + r[383]) / 1e3)
-        per["W2 issuers: wait full (sum)"].append(r[382] / 1e3)
-        per["W2 issuer 1: wait acc_empty"].append(r[381] / 1e3)
-        per["W2 issuer 1: wait h_q"].append(r[380] / 1e3)
+        # the W2 issuers (warp 1: [EV_END] h_q, [EV_END + 1] acc_empty, [EV_END + 2] the stage's full barrier; warp 6:
+        # [EV_END + 3] acc_empty)
+        wq = r[MOE_PROF_EV_END:MOE_PROF_EV_END + 4]
+        per["W2 issuers: wait acc_empty (sum)"].append((wq[1] + wq[3]) / 1e3)
+        per["W2 issuers: wait full (sum)"].append(wq[2] / 1e3)
+        per["W2 issuer 1: wait acc_empty"].append(wq[1] / 1e3)
+        per["W2 issuer 1: wait h_q"].append(wq[0] / 1e3)
     q = lambda v, f: sorted(v)[min(len(v) - 1, int(f * len(v)))]
+    cut = [sm for sm in range(p.shape[0]) if p[sm][0] and 16 + int(p[sm][8]) > MOE_PROF_EV_END]   # events dropped
+    if cut:
+        print(f"  WARNING: {len(cut)} SMs saw more than {MOE_PROF_EV_END - 16} events (most "
+              f"{max(int(p[sm][8]) for sm in cut)}): their last ones are not recorded (scaled_moe::MOE_PROF_EV_END)")
     names = {1: "13seen", 2: "13done", 3: "2seen", 4: "2scales", 5: "2full", 6: "2done"}
     by_start = sorted(range(p.shape[0]), key=lambda sm: p[sm][0])
     for sm in (by_start[0], by_start[len(by_start) // 2], by_start[-1]):   # the first, median and last SM to start
         r = p[sm]
-        ev = [(int(v) >> 56, (int(v) & ((1 << 56) - 1)) / 1e3) for v in r[16:16 + int(r[8])]]
+        ev = [(int(v) >> 56, (int(v) & ((1 << 56) - 1)) / 1e3) for v in r[16:min(16 + int(r[8]), MOE_PROF_EV_END)]]
         print(f"  SM {sm}: starts {(r[0] - bar) / 1e3:.1f} us, switch {(r[2] - r[0]) / 1e3:.1f}..{(r[3] - r[0]) / 1e3:.1f}, "
               f"end {(r[1] - r[0]) / 1e3:.1f} (from its start): " +
               " ".join(f"{names[k]}@{x:.1f}" for k, x in ev if k in (1, 2, 6))[:900])
@@ -665,8 +672,8 @@ def main():
     t["h_post"].copy_(h_post)
     t["h_res"].copy_(h_res)
     if args.prof_experts:
-        t["moe_prof"] = torch.zeros(torch.cuda.get_device_properties(0).multi_processor_count, 384, dtype=torch.int64,
-                                    device=dev)
+        t["moe_prof"] = torch.zeros(torch.cuda.get_device_properties(0).multi_processor_count, MOE_PROF_WORDS,
+                                    dtype=torch.int64, device=dev)
     mpk = StaticMegakernel(num_gpus=1)
     grids = build_graph(mpk, t, attn_next=None if attn_next is None else {k: attn_next[k] for k in ("rms_eps", "hc_eps",
                                                                                                         "norm_eps", "iters")},
