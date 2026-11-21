@@ -55,7 +55,7 @@ from mirage.core import bfloat16, float32, uint8
 from mirage.mpk import compiler
 from mirage.mpk.fp8_fp32scale_weights import pack_w13, pack_w2, requant_ue8m0
 from mirage.mpk.static_harness import Harness
-from mirage.mpk.static_megakernel import HC_MIX_STRIDE, StaticMegakernel
+from mirage.mpk.static_megakernel import HC_MIX_STRIDE, StaticMegakernel, scaled_moe_hq_ue
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dsa_mla import bf, fp8_gemm, gemm, group_quant, relrms  # noqa: E402
@@ -69,7 +69,7 @@ FLUSH_BYTES = 512 << 20
 # T = 64, this script's layer (main): the down weights requantized to power-of-two scales, h_q's scales rounded up to
 # powers of two, the W2 MMA applying both (scaled_moe_experts_layer w2_ue8m0); MIRAGE_STATIC_MOE64_W2UE=0: off
 W2_UE8M0 = T == 64 and os.environ.get("MIRAGE_STATIC_MOE64_W2UE", "1") != "0"
-REF_H_UE8M0 = False   # the reference's h scales: powers of two (main sets it to W2_UE8M0)
+REF_H_UE8M0 = False   # the reference's h scales: powers of two (main sets it: scaled_moe_hq_ue)
 
 
 def load_layer(model_dir: str, layer: int, tp: int, rank: int, dev) -> dict:
@@ -635,8 +635,11 @@ def main():
 
     w = load_layer(args.model_dir, args.layer, args.tp, args.rank, dev)
     global REF_H_UE8M0
-    REF_H_UE8M0 = W2_UE8M0
-    print(f"W2_UE8M0 (down requantized, power-of-two h_q scales, the W2 MMA applying them; the reference alike): {W2_UE8M0}")
+    # the reference's h scales as the build has them (scaled_moe_hq_ue: -DSTATIC_MOE64_W2UE=0 or -DSTATIC_MOE64_W2C=0: the
+    # requantized down weights through the fp32-scale W2, h_q's scales amax / 448)
+    REF_H_UE8M0 = scaled_moe_hq_ue(W2_UE8M0, args.nvcc_flag)
+    print(f"W2_UE8M0 (down requantized, power-of-two h_q scales, the W2 MMA applying them): {W2_UE8M0}; the build's "
+          f"power-of-two h_q scales (the reference alike): {REF_H_UE8M0}")
     if W2_UE8M0:
         requant_down(w)
     g = torch.Generator().manual_seed(args.seed)

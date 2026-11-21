@@ -67,7 +67,7 @@ import torch
 from mirage.core import bfloat16, float32, int64, uint8
 from mirage.mpk import compiler
 from mirage.mpk.static_harness import Harness
-from mirage.mpk.static_megakernel import StaticMegakernel
+from mirage.mpk.static_megakernel import StaticMegakernel, scaled_moe_hq_ue
 
 try:
     from .weights import check_config, checkpoint_reader, download_layer, layer_tensors   # imported as demo.glm53_moe.demo
@@ -478,9 +478,10 @@ def main():
     n_live = args.live_rows if args.live_rows is not None else T
     print(f"W2_UE8M0 (W2 weights requantized, power-of-two h_q scales, the W2 MMA applying them): {W2_UE8M0}")
     if args.check_ref:   # the live rows (an idle row's values are not used)
-        # h_q's scales are powers of two with the W2 MMA path only (-DSTATIC_MOE64_W2UE=0: the requantized weights through
-        # the fp32-scale W2, h_q's scales as before)
-        h_ue = W2_UE8M0 and "-DSTATIC_MOE64_W2UE=0" not in args.nvcc_flag
+        # h_q's scales are powers of two with the W2 MMA path only, as the build has it (scaled_moe_hq_ue:
+        # -DSTATIC_MOE64_W2UE=0 or -DSTATIC_MOE64_W2C=0: the requantized weights through the fp32-scale W2, h_q's scales
+        # as before)
+        h_ue = scaled_moe_hq_ue(W2_UE8M0, args.nvcc_flag)
         rr = first["routed_rows"].shape[0] // T * n_live
         ref = ref_rows(ws[0], ws[0]["x"][:n_live], ws[0]["routing_pairs"][:n_live], h_ue)
         e_r = relrms(first["routed_rows"][:rr], ref.cpu())

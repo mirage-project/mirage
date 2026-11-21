@@ -56,6 +56,25 @@ def zq32_bytes(tokens: int, width: int) -> int:
     return tokens * width + (width // 128) * tokens * 4
 
 
+def nvcc_define(flags, name: str, default: int) -> int:
+    """The value of macro `name` that nvcc flags give (-DNAME=V; -DNAME: 1; the last one wins), else `default`."""
+    v = default
+    for f in flags:
+        if f == "-D" + name:
+            v = 1
+        elif f.startswith("-D" + name + "="):
+            v = int(f[len(name) + 3:], 0)
+    return v
+
+
+def scaled_moe_hq_ue(w2_ue8m0: bool, flags=()) -> bool:
+    """Whether a scaled_moe_experts layer built with w2_ue8m0 (option 4) and these nvcc flags compiles scaled_moe::Slots
+    W2UE, so HQ_UE: h_q's scales rounded up to powers of two. The kernel: W2UE = STATIC_MOE64_W2UE != 0 && option 4 &&
+    W2C, W2C = STATIC_MOE64_W2C != 0 && (T = 64, every row live, the many-token epilogue, not single); the last part is
+    what scaled_moe_experts_layer(w2_ue8m0=True) requires. Both macros default to 1 (tasks/scaled_moe_experts.cuh)."""
+    return bool(w2_ue8m0) and all(nvcc_define(flags, m, 1) != 0 for m in ("STATIC_MOE64_W2UE", "STATIC_MOE64_W2C"))
+
+
 def float_bits(v: float) -> int:
     """An fp32 value as the int of its bits (a param; the kernel template reads it with __int_as_float)."""
     return struct.unpack("<i", struct.pack("<f", v))[0]
