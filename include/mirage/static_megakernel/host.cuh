@@ -699,6 +699,12 @@ static void static_host_init(StaticContext &ctx,
       MKS_CK(cudaMemset(g.rv, 0, 2 * EXCHANGE_SET));
       g.mc = nullptr;
     }
+#if STATIC_GLM64_TWOSHOT
+    for (int q = 0; q < GPUS; q++) { // every GPU's copy (one process: mapped
+                                     // for every GPU, mc_alloc)
+      g.peer[q] = GPUS > 1 ? recv[q] : g.rv;
+    }
+#endif
     s.args = args;
     s.tensors = v.tensors;
     build_bufs(s, v.tensors, args);
@@ -717,12 +723,15 @@ static void static_host_init(StaticContext &ctx,
 // lands in every rank's copy), rv this GPU's copy, e.g. torch symmetric memory
 // over the TP group (SGLang's custom all-reduce allocates its push buffers that
 // way). No peer access: the kernel stores through mc and reads its own copy.
+// peers (STATIC_GLM64_TWOSHOT, GPUS > 1): every rank's copy mapped in this
+// process (torch symmetric memory's buffer_ptrs), peers[rank] = rv
 static void
     static_host_init_rank(StaticContext &ctx,
                           std::map<std::string, std::string> const &args,
                           int rank,
                           unsigned char *mc,
-                          unsigned char *rv) {
+                          unsigned char *rv,
+                          std::vector<unsigned char *> const &peers = {}) {
   using namespace static_host;
   if (ctx.num_gpus != 1 || rank < 0 || rank >= GPUS || rv == nullptr ||
       (GPUS > 1 && mc == nullptr)) {
@@ -754,6 +763,22 @@ static void
   g.rank = rank;
   g.mc = GPUS > 1 ? mc : nullptr;
   g.rv = rv;
+#if STATIC_GLM64_TWOSHOT
+  if (GPUS > 1 && ((int)peers.size() != GPUS || peers[rank] != rv)) {
+    fprintf(stderr,
+            "static_host: init_rank: STATIC_GLM64_TWOSHOT stores into the "
+            "owner's copy: every rank's exchange region (got %zu, rank %d's "
+            "%p, local %p); or build with -DSTATIC_GLM64_TWOSHOT=0\n",
+            peers.size(),
+            rank,
+            peers.size() > (size_t)rank ? (void *)peers[rank] : nullptr,
+            (void *)rv);
+    exit(1);
+  }
+  for (int q = 0; q < GPUS; q++) {
+    g.peer[q] = GPUS > 1 ? peers[q] : rv;
+  }
+#endif
   s.args = args;
   s.tensors = v.tensors;
   build_bufs(s, v.tensors, args);

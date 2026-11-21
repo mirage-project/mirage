@@ -305,6 +305,9 @@ __device__ __forceinline__ void run_hc_post_mix(Maps const &,
                                                 G const &g,
                                                 KernelLocals &L,
                                                 StaticTask const &tk) {
+  static_assert(!AR_TWOSHOT || sizeof(SELF) == 0,
+                "hc_post_mix: reads an allreduce_send buffer in the one-shot layout; "
+                "build with -DSTATIC_GLM64_TWOSHOT=0 (core.cuh)");
   constexpr int HC = PARAMS::v[0], H = PARAMS::v[1], NMIX = PARAMS::v[2];
   static_assert(NMIX == HC * (HC + 2),
                 "hc_post_mix: params {HC, H, NMIX = HC (HC + 2)}");

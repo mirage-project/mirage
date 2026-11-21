@@ -11,6 +11,8 @@
 // (int64 fixed point [T][W], a counter per 128-column block counting its K
 // parts): task x sends column block x of every token once that block's parts
 // are added (dsa::fx_wait_cols), so the GEMM can split K.
+// STATIC_GLM64_TWOSHOT (core.cuh): each row goes by one unicast store per 16 B
+// to its token's owner GPU only (ar_twoshot_send), not to every GPU.
 #pragma once
 #include "../core.cuh"
 #include "../dsa_common.cuh"
@@ -64,11 +66,19 @@ __device__ __forceinline__ void allreduce_send_task(G const &g,
         p1.z += b.z;
         p1.w += b.w;
       }
-      push16(g, dst, pack_bf16x8(p0, p1));
+      if constexpr (AR_TWOSHOT) {
+        ar_twoshot_send<W, OFF>(g, t, c, pack_bf16x8(p0, p1));
+      } else {
+        push16(g, dst, pack_bf16x8(p0, p1));
+      }
     } else {
       float4 const *row =
           reinterpret_cast<float4 const *>(src) + ((size_t)t * W + 8 * c) / 4;
-      push16(g, dst, pack_bf16x8(row[0], row[1]));
+      if constexpr (AR_TWOSHOT) {
+        ar_twoshot_send<W, OFF>(g, t, c, pack_bf16x8(row[0], row[1]));
+      } else {
+        push16(g, dst, pack_bf16x8(row[0], row[1]));
+      }
     }
   }
   if constexpr (REARM && RS >= 0) { // the producer is done: no SM reads buffer
@@ -113,10 +123,15 @@ __device__ __forceinline__ void
       v[k] = fx_to_float(a.x);
       v[k + 1] = fx_to_float(a.y);
     }
-    push16(g,
-           OFF + (size_t)g.rank * ((size_t)T * W * 2) + ((size_t)t * W + c) * 2,
-           pack_bf16x8(make_float4(v[0], v[1], v[2], v[3]),
-                       make_float4(v[4], v[5], v[6], v[7])));
+    uint4 const pv = pack_bf16x8(make_float4(v[0], v[1], v[2], v[3]),
+                                 make_float4(v[4], v[5], v[6], v[7]));
+    if constexpr (AR_TWOSHOT) {
+      ar_twoshot_send<W, OFF>(g, t, c / 8, pv);
+    } else {
+      push16(g,
+             OFF + (size_t)g.rank * ((size_t)T * W * 2) + ((size_t)t * W + c) * 2,
+             pv);
+    }
   }
   __syncthreads();
 }
@@ -174,7 +189,11 @@ __device__ __forceinline__ void
     }
     size_t const dst =
         OFF + (size_t)g.rank * ((size_t)T * W * 2) + ((size_t)t * C8 + c) * 16;
-    push16(g, dst, pack_bf16x8(p0, p1));
+    if constexpr (AR_TWOSHOT) {
+      ar_twoshot_send<W, OFF>(g, t, c, pack_bf16x8(p0, p1));
+    } else {
+      push16(g, dst, pack_bf16x8(p0, p1));
+    }
 #pragma unroll 1
     for (int p = 0; p < NSPLIT; p++) {
       float const *s = src + ((size_t)p * T + t) * W + 8 * c;

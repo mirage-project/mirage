@@ -72,6 +72,38 @@ struct PrefetchList {
 };
 #endif
 #endif
+// STATIC_GLM64_TWOSHOT 1: the all-reduce of allreduce_send -> residual_add
+// (LAND) as a two-shot by token. Example (8 GPUs, T 64, H 6144; GPU 2 owns
+// tokens 16..23, AR_TOWN = T / GPUS = 8):
+//   allreduce_send on GPU 5, token 17: its bf16 partial row -> ONE store per
+//     16 B into GPU 2's copy (G::peer[2]), slot 5 of the owner landing
+//     [GPUS][AR_TOWN][H] at the send buffer's offset 0 (ar_twoshot_put16)
+//   residual_add task x on GPU 2: first the vectors of tokens 16..23 among its
+//     slice (ar_twoshot_vec): the 8 slots added in GPU order (fp32,
+//     allreduce_land_bf16, the same code as the one-shot), bf16(sum) multicast
+//     into the gathered rows [T][H] at offset GPUS AR_TOWN H 2 of the same
+//     buffer on every GPU, the 8 slots re-armed; then its whole slice: each
+//     vector polled from the gathered rows (one slot), y and h32 as before
+// Every value is computed by the same code in the same order: y and h32
+// bit-identical. The tasks' slices are taken in token-interleaved order (64
+// columns of every token in turn), so task x needs only the owners' task x:
+// no task waits for a later task of its own GPU. 0: the one-shot (every GPU's
+// partial multicast to every GPU, each GPU adds all 8 slots of every vector).
+// Default: 1 at T 64 on 8 GPUs (the readers sum_gpus, sum_rmsnorm, hc_post,
+// hc_post_mix of an allreduce_send buffer take only the one-shot layout)
+#ifndef STATIC_GLM64_TWOSHOT
+#if STATIC_TOKENS == 64 && STATIC_GPUS == 8
+#define STATIC_GLM64_TWOSHOT 1
+#else
+#define STATIC_GLM64_TWOSHOT 0
+#endif
+#endif
+constexpr bool AR_TWOSHOT = STATIC_GLM64_TWOSHOT != 0;
+static_assert(!AR_TWOSHOT || (GPUS >= 2 && T % GPUS == 0),
+              "STATIC_GLM64_TWOSHOT: 2 GPUs or more (the landing and the "
+              "gathered rows share the [GPUS][T][W] buffer), T a multiple of "
+              "the GPUs");
+
 #ifdef STATIC_NO_START_BARRIER
 #ifndef STATIC_RESET_IN_KERNEL
 #error                                                                         \
@@ -112,6 +144,11 @@ struct G {
                      // host (config.cuh STAMP_*)
   long long *start_barrier; // [1] written by every SM once the start barrier is
                             // passed: the last SM's time remains
+#if STATIC_GLM64_TWOSHOT
+  unsigned char *peer[GPUS]; // (STATIC_GLM64_TWOSHOT) every GPU's copy of the
+                             // exchange region (both sets), mapped in this
+                             // process (peer[rank] = rv)
+#endif
 };
 
 // the exchange region's set of this launch: its launch number's parity, set at
@@ -179,6 +216,87 @@ __device__ __forceinline__ uint32_t *cnt_now(G const &g) {
 __device__ __forceinline__ void push16(G const &g, size_t off, uint4 v) {
   push16_mc(g.mc, g.rv, off + rg_set(), v);
 }
+
+#if STATIC_GLM64_TWOSHOT
+// (STATIC_GLM64_TWOSHOT) an allreduce_send buffer [GPUS][T][W] bf16, used as
+//   [0, ar_g_off)          the owner landing: slot r (the sending GPU), row j
+//                          of the owner's tokens (token owner * AR_TOWN + j) at
+//                          r * ar_rank + j * W * 2 (each GPU's copy: its own
+//                          tokens only), written by unicast stores
+//   [ar_g_off, + T W 2)    the gathered rows [T][W] bf16 (bf16 of the sums over
+//                          the GPUs), multicast by the owners (every GPU's
+//                          copy: all tokens)
+// both 0xFF-filled (the buffer's fill) and re-armed by their readers
+constexpr int AR_TOWN = T / GPUS; // tokens per owner GPU (8 at T 64, 8 GPUs)
+template <int W>
+__host__ __device__ constexpr size_t ar_rank() {
+  return (size_t)AR_TOWN * W * 2;
+} // one sending GPU's slot in the owner landing
+template <int W>
+__host__ __device__ constexpr size_t ar_g_off() {
+  return (size_t)GPUS * ar_rank<W>();
+} // the gathered rows' offset in the buffer
+// 16 B at offset `off` of this launch's set of GPU h's exchange region (one
+// NVLink store; h = rank: the local copy). G::peer by constant indices (a
+// dynamic index into the kernel parameter would copy G to local memory)
+__device__ __forceinline__ void ar_twoshot_put16(G const &g,
+                                                 int h,
+                                                 size_t off,
+                                                 uint4 v) {
+  unsigned char *dst = g.peer[0];
+#pragma unroll
+  for (int q = 1; q < GPUS; q++) {
+    dst = h == q ? g.peer[q] : dst;
+  }
+  asm volatile(
+      "st.relaxed.sys.global.v4.u32 [%0], {%1, %2, %3, %4};" ::"l"(
+          dst + off + rg_set()),
+      "r"(v.x),
+      "r"(v.y),
+      "r"(v.z),
+      "r"(v.w)
+      : "memory");
+}
+// allreduce_send's store of this GPU's bf16 partial of token t, vector c (of
+// W / 8) into the buffer at OFF: slot g.rank of the owner landing of token t's
+// owner (t / AR_TOWN)
+template <int W, size_t OFF>
+__device__ __forceinline__ void
+    ar_twoshot_send(G const &g, int t, int c, uint4 v) {
+  int const h = t / AR_TOWN, j = t - h * AR_TOWN;
+  ar_twoshot_put16(g,
+                   h,
+                   OFF + (size_t)g.rank * ar_rank<W>() +
+                       ((size_t)j * (W / 8) + c) * 16,
+                   v);
+}
+// the order residual_add's tasks take the T x W / 8 vectors in (vector index i
+// -> token t, vector c of the row): 8 vectors (64 columns) of each token in
+// turn, so a slice of 8 GPUS x AR_TOWN consecutive indices or more holds
+// vectors of every owner's tokens. Owner of i: (i / (8 AR_TOWN)) % GPUS
+template <int W>
+__device__ __forceinline__ void ar_twoshot_vec(int i, int &t, int &c) {
+  static_assert(W % 64 == 0, "STATIC_GLM64_TWOSHOT: whole 64-column groups");
+  int const q = i >> 3; // (64-column group) * T + token
+  t = q % T;
+  c = (q / T) * 8 + (i & 7);
+}
+// the indices i of [0, n) whose token this GPU owns, counted
+__device__ __forceinline__ int ar_twoshot_owned_below(int n, int rank) {
+  constexpr int B = 8 * AR_TOWN; // a run of one owner's indices
+  int const r = n % (B * GPUS) - rank * B;
+  return n / (B * GPUS) * B + (r < 0 ? 0 : r > B ? B : r);
+}
+// the j-th index this GPU owns
+__device__ __forceinline__ int ar_twoshot_owned_at(int j, int rank) {
+  constexpr int B = 8 * AR_TOWN;
+  return j / B * (B * GPUS) + rank * B + j % B;
+}
+#else
+// declared only: the calls are in discarded `if constexpr (AR_TWOSHOT)` branches
+template <int W, size_t OFF>
+__device__ void ar_twoshot_send(G const &g, int t, int c, uint4 v);
+#endif
 
 // params[I] of a node (StaticParams<P...>::v holds P..., 0)
 template <class PARAMS, int I>
@@ -251,7 +369,9 @@ __device__ __forceinline__ uint4 pack_bf16x8(float4 const &p0,
 // vector v of `row` from every GPU (slot r at row + r * RANK, 0xFF-prefilled)
 // and adds them in fp32 in GPU order -> the 8 sums. REARM: re-armed by
 // allreduce_rearm after the caller used them.
-template <size_t RANK>
+// W16W (STATIC_GLM64_TWOSHOT's owner landing): the slots come by unicast
+// NVLink stores, every 4-B word must be written (valid16w)
+template <size_t RANK, bool W16W = false>
 __device__ __forceinline__ void
     allreduce_land_bf16(G const &g, unsigned char const *row, int v, float *s) {
   uint4 u[GPUS];
@@ -268,7 +388,7 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int r = 0; r < GPUS; r++) {
       if (!ok[r]) {
-        ok[r] = valid16(u[r]);
+        ok[r] = W16W ? valid16w(u[r]) : valid16(u[r]);
       }
       all = all && ok[r];
     }

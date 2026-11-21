@@ -165,6 +165,9 @@ __device__ __forceinline__ void run_hc_post(Maps const &,
                                             G const &g,
                                             KernelLocals &L,
                                             StaticTask const &tk) {
+  static_assert(!AR_TWOSHOT || sizeof(SELF) == 0,
+                "hc_post: reads an allreduce_send buffer in the one-shot layout; "
+                "build with -DSTATIC_GLM64_TWOSHOT=0 (core.cuh)");
   constexpr int H = PARAMS::v[0], HC = PARAMS::v[1];
   static_assert(SEND::buf >= 0 && SEND::v[0] == H && SEND::v[1] >= 1,
                 "hc_post: rows of H sent by an allreduce_send node (a "
