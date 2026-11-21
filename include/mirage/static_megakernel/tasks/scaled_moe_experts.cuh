@@ -1340,7 +1340,8 @@ __device__ __forceinline__ void
 //   [8] epilogue events recorded, from [MOE_PROF_EV0] up to [MOE_PROF_EV_END]:
 //       kind << 56 | (time - [0]); kind 1 a W13 item seen, 2 its h_q written;
 //       3 a W2 tile seen, 4 its scales read (a new slot: also its CHQ wait and
-//       h_q scales), 5 its accumulator full, 6 its rows stored
+//       h_q scales), 5 its accumulator full, 9 (T >= 32) its TMEM columns read
+//       (acc_empty arrived), 6 its rows stored
 //   [380] / [381] / [382] the W2 issuer warp 1's W2 tiles: ns waiting for the
 //             entry's h_q (T = 64) / for acc_empty (the epilogue freed the
 //             accumulator tick) / for the W2 stage's full barrier (weights)
@@ -2190,6 +2191,11 @@ __device__ __forceinline__ void
               if (i0 + 8 == end) { // the item's last columns are read
                 fence_before();
                 mbar_arrive(rt.acc_empty0 + 8 * a);
+                if constexpr (RES::PROF >= 0) {
+                  if (pev) {
+                    moe_prof_event(prof, pn, pt0, 9);
+                  }
+                }
               }
 #pragma unroll
               for (int k = 0; k < 8; k++) { // drain_w2_promoted's products
@@ -2223,6 +2229,11 @@ __device__ __forceinline__ void
               tmem_keep8(c1);
               fence_before();
               mbar_arrive(rt.acc_empty0 + 8 * a);
+              if constexpr (RES::PROF >= 0) {
+                if (pev) {
+                  moe_prof_event(prof, pn, pt0, 9);
+                }
+              }
 #pragma unroll
               for (int k = 0; k < 8; k++) {
                 if (k < left) {

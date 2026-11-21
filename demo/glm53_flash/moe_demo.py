@@ -382,7 +382,7 @@ def prof_report(prof: torch.Tensor, bar: int, t: dict):
                            "end", "W13 items", "W13 item (seen-done)", "W13: seen -> scales", "W13: scales -> drained",
                            "W13: drained -> h_q", "W13: h_q -> next seen", "W13 done-done", "last W13 done",
                            "switch", "last W13 -> 1st W2 done", "W2 tiles", "W2: scales (+ CHQ, new slot)", "W2: wait acc full",
-                           "W2: drain + store", "W2 done-done", "W2 loaders: wait stage (sum)", "W2 loaders: wait CHQ (sum)",
+                           "W2: drain + store", "W2: acc full -> TMEM read", "W2: TMEM read -> stored", "W2 done-done", "W2 loaders: wait stage (sum)", "W2 loaders: wait CHQ (sum)",
                            "W2 issuers: wait acc_empty (sum)", "W2 issuers: wait full (sum)", "W2 issuer 1: wait acc_empty",
                            "W2 issuer 1: wait h_q")}
     for sm in range(p.shape[0]):
@@ -410,11 +410,14 @@ def prof_report(prof: torch.Tensor, bar: int, t: dict):
             per["last W13 done"].append(done13[-1] + (r[0] - bar) / 1e3)
         if r[2]:
             per["switch"].append((r[3] - r[2]) / 1e3)
-        w2 = {k: [x for kk, x in ev if kk == k] for k in (3, 4, 5, 6)}
+        w2 = {k: [x for kk, x in ev if kk == k] for k in (3, 4, 5, 6, 9)}
         per["W2 tiles"].append(len(w2[6]))
         per["W2: scales (+ CHQ, new slot)"] += [b - a for a, b in zip(w2[3], w2[4])]
         per["W2: wait acc full"] += [b - a for a, b in zip(w2[4], w2[5])]
         per["W2: drain + store"] += [b - a for a, b in zip(w2[5], w2[6])]
+        if len(w2[9]) == len(w2[6]):   # T >= 32: 9 = the tile's TMEM columns read (acc_empty arrived)
+            per["W2: acc full -> TMEM read"] += [b - a for a, b in zip(w2[5], w2[9])]
+            per["W2: TMEM read -> stored"] += [b - a for a, b in zip(w2[9], w2[6])]
         per["W2 done-done"] += [b - a for a, b in zip(w2[6], w2[6][1:])]
         if done13 and w2[6]:
             per["last W13 -> 1st W2 done"].append(w2[6][0] - done13[-1])
