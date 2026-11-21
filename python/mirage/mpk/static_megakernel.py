@@ -671,6 +671,10 @@ class StaticMegakernel(PersistentKernel):
         last: DTensor = None,   # T = 64: int32 [1 + 40], a graph tensor the launches share (zeros at first): the node writes the
                                 # experts its queue took first, and the next launch brings their W13 weights into L2 while its
                                 # routing lands (scaled_moe::Slots PFE, LAST); None: the bank's first 40 experts
+        w2_ue8m0: bool = False,   # T = 64 with every row live and the many-token epilogue: w2 / w2_scales are requantized to
+                                  # power-of-two scales (fp8_fp32scale_weights.pack_w2(ue8m0=True), SGLang's DeepGEMM
+                                  # requantization), h_q's scales are rounded up to powers of two and the W2 MMA applies both
+                                  # (scaled_moe::Slots W2UE, -DSTATIC_MOE64_W2UE=0 turns the MMA path off)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the routed FP8 experts in tasks/scaled_moe_experts.cuh.
@@ -695,7 +699,7 @@ class StaticMegakernel(PersistentKernel):
           w13: [E, 2 IR, L] e4m3 bytes; scales: [E, IR / 128, L / 128, 2] fp32 (gate, up).
           w2: [E, L, IR] e4m3 bytes; scales: [E, L / 128, IR / 128] fp32.
         z_q must come from group_quant_layer. params = [IR], [IR, the swiglu limit as fp32 bits] or [IR, the limit's bits or 0,
-        the options (scaled_moe::Slots OPTS_: 1 no many-token epilogue, 2 the W2 tiles in slot order)].
+        the options (scaled_moe::Slots OPTS_: 1 no many-token epilogue, 2 the W2 tiles in slot order, 4 w2_ue8m0)].
         """
         from .compiler import graph_nodes, producer_of
         T, K, L = self._tokens(pairs.dim(0)), pairs.dim(1), z_q.dim(1)
@@ -754,7 +758,11 @@ class StaticMegakernel(PersistentKernel):
             assert self._map(kind, ("x", zq.info["buf"], 0, 1), dims_) == first + 1
             maps.append(first)
         maps.append(self._map("act8kt", ("b", hq, 0), (IR, NSLOT * T, min(KT2, 2))))   # a W2 unit's K tiles (at most 2)
-        if T == 64 and live == T and many_token_epilogue and not single:
+        w2c = T == 64 and live == T and many_token_epilogue and not single   # scaled_moe::Slots W2C's layer
+        if w2_ue8m0 and not (w2c and KT2 == 2):
+            raise ValueError("scaled_moe_experts_layer: w2_ue8m0 needs T = 64, every row live, the many-token epilogue and "
+                             "IR = 256 (scaled_moe::Slots W2UE)")
+        if w2c:
             # map slot 7 (scaled_moe::Slots ZQR, STATIC_MOE64_W13C): z_q's single rows (box 1 row, tile::gather4) in set 0,
             # then set 1; the layer of scaled_moe::Slots W2C (W13 over a slot's own tokens in groups of 16)
             first = self._map("act8", ("x", zq.info["buf"], 0, 0), (L, T, 1))
@@ -763,7 +771,7 @@ class StaticMegakernel(PersistentKernel):
         tensors = [z_q, pairs, w13, w2, output]
         # T = 64's shared-memory layout has only the many-token W13 epilogue (the other: an illegal access)
         assert many_token_epilogue or T <= 32, "scaled_moe_experts_layer: many_token_epilogue=False needs T <= 32"
-        opts = (0 if many_token_epilogue else 1) | (2 if w2_in_slot_order else 0)
+        opts = (0 if many_token_epilogue else 1) | (2 if w2_in_slot_order else 0) | (4 if w2_ue8m0 else 0)
         params = [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)]
         if opts:
             params = [IR, params[1] if len(params) > 1 else 0, opts]
