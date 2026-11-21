@@ -17,6 +17,7 @@ bank of the experts node (shared_bank: 7 layer calls).
   2. build_graph     the layer as 13 layer calls, as the K3 demo: router (gemm_tile), topk_route (x 2.5), group_quant (x); the
                      shared expert: scaled_gemm_tile (gate_up), silu_and_mul, group_quant (h), scaled_gemm_tile (down);
                      scaled_moe_experts; allreduce_send (shared), allreduce_send (routed); sum_gpus (routed), sum_gpus (shared), residual_add
+                     (T >= 32: no sum_gpus nodes, residual_add adds the sent sums over the GPUs)
   3. compile_plan    the plan (--plan: a plan file, default solver_plan.json) ->
                      schedules/schedule_gpu<g>.json. The two plan files are for one GPU (--gpus 1 --tp 8: one TP8 shard),
                      as measured on a B200:
@@ -153,9 +154,11 @@ def build_graph(mpk: StaticMegakernel, w: dict, next_norm=None, live=None) -> di
         mpk.scaled_moe_experts_layer(z_q=z_q, pairs=t["routing_pairs"], w13=t["w13"], w13_scales=t["w13_sf"],
                                      w2=t["w2"], w2_scales=t["w2_sf"], output=t["routed_rows"],
                                      **MOE_OPTS)                                                      # W13, SiLU, W2
-        r_sent, Rsum = nt((T, H), bfloat16, "r_sent"), nt((T, H), bfloat16, "routed_summed")
+        r_sent = nt((T, H), bfloat16, "r_sent")
+        Rsum = r_sent if T >= 32 else nt((T, H), bfloat16, "routed_summed")   # T >= 32: added over the GPUs in residual_add
         mpk.allreduce_send_layer(input=t["routed_rows"], output=r_sent)                              # a token's 9 rows added
-        mpk.sum_gpus_layer(input=r_sent, output=Rsum)                                                # over the GPUs
+        if T < 32:
+            mpk.sum_gpus_layer(input=r_sent, output=Rsum)                                            # over the GPUs
         mpk.residual_add_layer(addend=Rsum, residual=t["residual"], output=t["moe_out"],             # y = R + res
                                counted=next_norm is not None)
     else:
@@ -191,9 +194,12 @@ def _shared_branch(mpk, t, z_q, nt, next_norm):
     mpk.allreduce_send_layer(input=S, output=s_sent, num_tasks=mpk._num_sms())                       # S to every GPU
     r_sent = nt((T, H), bfloat16, "r_sent")
     mpk.allreduce_send_layer(input=t["routed_rows"], output=r_sent)                                  # a token's rows, sent
-    Rsum, Ssum = nt((T, H), bfloat16, "routed_summed"), nt((T, H), bfloat16, "shared_summed")
-    mpk.sum_gpus_layer(input=r_sent, output=Rsum)                                                    # R over the GPUs
-    mpk.sum_gpus_layer(input=s_sent, output=Ssum)                                                    # S over the GPUs
+    if T >= 32:   # R and S added over the GPUs in residual_add (no sum_gpus nodes)
+        Rsum, Ssum = r_sent, s_sent
+    else:
+        Rsum, Ssum = nt((T, H), bfloat16, "routed_summed"), nt((T, H), bfloat16, "shared_summed")
+        mpk.sum_gpus_layer(input=r_sent, output=Rsum)                                                # R over the GPUs
+        mpk.sum_gpus_layer(input=s_sent, output=Ssum)                                                # S over the GPUs
     mpk.residual_add_layer(input=Rsum, addend=Ssum, residual=t["residual"], output=t["moe_out"],     # y = R + S + res
                            counted=next_norm is not None)
 

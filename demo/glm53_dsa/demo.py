@@ -12,7 +12,7 @@ layer 7 with the indices of layer 6.
     gemm_tile x [wk | weights_proj] -> dsa_index_k_write (the index cache row)
     dsa_q_absorb (q_nope W_UK, RoPE q_pe);  dsa_index_score -> dsa_index_topk (the indices)
     sparse_mla (splits) -> dsa_mla_merge -> dsa_o_absorb (W_UV) -> group_quant(v) -> scaled_gemm_tile o_proj ->
-    allreduce_send -> sum_gpus -> residual_add (y = attention output + residual, a graph tensor)
+    allreduce_send -> sum_gpus (T < 32) -> residual_add (y = attention output + residual, a graph tensor)
 
   0. weights        Download the attention tensors of --layers (weights.py) and run check_config.
   1. state          seq_lens (--seq-lens; 0: an idle slot), a shuffled block table (pages of 64) and the RoPE table. x: --x
@@ -172,9 +172,10 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     # allreduce_send sends each 128-column block once its parts are added; T <= 32 keeps the plain stores (the adds and
     # the zeroed buffer cost more there than the blocks' early sends gain)
     o_add = T == 64
-    o, sent, osum = (nt((T, H), int64 if o_add else float32, "o_proj"), nt((T, H), bfloat16, "o_sent"),
-                     nt((T, H), bfloat16, "o_sum"))
-    if not tail:   # attn_out = bf16(o_proj): what the three nodes below give on one GPU with a zero residual
+    land = T >= 32   # residual_add adds the sent sums over the GPUs itself: no sum_gpus node (the T = 32 hand plans have none)
+    o, sent = nt((T, H), int64 if o_add else float32, "o_proj"), nt((T, H), bfloat16, "o_sent")
+    osum = sent if land else nt((T, H), bfloat16, "o_sum")
+    if not tail:   # attn_out = bf16(o_proj): what the nodes below give on one GPU with a zero residual
         assert mpk.num_gpus == 1 and next_norm is None
         mpk.scaled_gemm_tile_layer(input=vq, weight=t["w_o"], weight_scales=t["w_o_sf"], output=t["attn_out"],
                                    combine="store_bf16")
@@ -182,7 +183,8 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     mpk.scaled_gemm_tile_layer(input=vq, weight=t["w_o"], weight_scales=t["w_o_sf"], output=o,
                                combine="add" if o_add else "store")
     mpk.allreduce_send_layer(input=o, output=sent)
-    mpk.sum_gpus_layer(input=sent, output=osum)
+    if not land:
+        mpk.sum_gpus_layer(input=sent, output=osum)
     mpk.residual_add_layer(addend=osum, residual=t["residual"], output=t["attn_out"],   # y = attention output + residual
                            counted=next_norm is not None)
     if next_norm is not None:
@@ -192,7 +194,7 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
 
 def drop_missing_nodes(mpk, plan: dict) -> dict:
     """Return the plan without the tasks of the nodes that the graph of mpk does not have (build_graph tail=False:
-    the last three)."""
+    the last ones)."""
     have = {n.graph_idx for n in compiler.graph_nodes(mpk)}
     lists = [[[e for e in sm if e[0] in have] for sm in gpu] for gpu in plan["lists"]]
     return dict(plan, grids={k: v for k, v in plan["grids"].items() if int(k) in have}, lists=lists)

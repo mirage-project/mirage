@@ -874,18 +874,20 @@ class StaticMegakernel(PersistentKernel):
 
     def residual_add_layer(
         self,
-        addend: DTensor,        # S [T, H] bf16, sum_gpus's output buffer
+        addend: DTensor,        # S [T, H] bf16, sum_gpus's output buffer, or allreduce_send's (S lands here: no sum_gpus node)
         *,                      # the other arguments by keyword
         input: DTensor = None,  # o [T, H] bf16: this GPU's part, sent by sum_send (every GPU's part arrives through the exchange region),
-                                # or a second sum_gpus node's output (GLM-5.3: the routed sum). None: one sum, as in an attention layer
+                                # or a second sum_gpus node's output (GLM-5.3: the routed sum), or with S from allreduce_send, a
+                                # second allreduce_send node's output. None: one sum, as in an attention layer
         residual: DTensor,      # [T, H] bf16 (a graph input)
         output: DTensor,        # y [T, H] bf16
         counted: bool = False,  # one counter add per task after its stores (a row_rmsnorm node waits, then reads h32)
         block_dim: tuple = (256, 1, 1),
     ):
         """Task x of the SMs: slice x of y = bf16(bf16(input + addend) + residual), or y = bf16(addend + residual) with no
-        input. The residual is a graph input (it may be y's own memory: each value is read before it is written, by the
-        same thread). params = [H]. buf_slots: [residual, output]."""
+        input. Sums from allreduce_send are added over the GPUs here, each rounded to bf16 as sum_gpus stores it (the same y
+        as with sum_gpus nodes). The residual is a graph input (it may be y's own memory: each value is read before it is
+        written, by the same thread). params = [H]. buf_slots: [residual, output]."""
         T, H = self._tokens(output.dim(0)), output.dim(1)
         self._dtypes("residual_add_layer", addend=(addend, bfloat16), residual=(residual, bfloat16), output=(output, bfloat16),
                      **({"input": (input, bfloat16)} if input is not None else {}))
@@ -893,12 +895,13 @@ class StaticMegakernel(PersistentKernel):
         from .compiler import graph_nodes, producer_of
         nodes = graph_nodes(self)
         a = producer_of(addend, nodes)
-        if a is None or a.name != "sum_gpus":
-            raise ValueError("residual_add_layer: the addend from sum_gpus")
+        if a is None or a.name not in ("sum_gpus", "allreduce_send"):
+            raise ValueError("residual_add_layer: the addend from sum_gpus or allreduce_send")
         if input is not None:
             o = producer_of(input, nodes)
-            if o is None or o.name not in ("sum_send", "sum_gpus"):
-                raise ValueError("residual_add_layer: the input from sum_send or sum_gpus")
+            srcs = ("allreduce_send",) if a.name == "allreduce_send" else ("sum_send", "sum_gpus")
+            if o is None or o.name not in srcs:
+                raise ValueError(f"residual_add_layer: with the addend from {a.name}, the input from {' or '.join(srcs)}")
         if producer_of(residual, nodes) is not None:
             raise ValueError("residual_add_layer: the residual must be a graph input")
         tensors = [addend, residual, output] if input is None else [addend, input, residual, output]
