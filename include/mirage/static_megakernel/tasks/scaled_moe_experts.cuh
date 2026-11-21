@@ -62,6 +62,43 @@ namespace scaled_moe {
 // layer checks that scaled_moe_experts_layer sizes the scratch for this many.
 constexpr int MOE_SPLIT_SLOTS = 32;
 
+// STATIC_MOE64_W2C 1 (default; T = 64 layers of LIVE == T, the many-token W13
+// epilogue: Slots::W2C): W2 reads only the h_q rows of a slot's own tokens. A
+// slot's tokens are in token order in its list (build_table TOKEN_ORDER: the
+// same on every SM), so token t's row is its place c in the list. h_q is two
+// planes [KT2][NSLOT T][128 B], row slot T + c of plane kt holding that token's
+// K tile kt, its 16-B chunks already in the 128-B swizzled order of shared
+// memory (chunk ^ (row & 7)). W2 copies the slot's first W2C_N ng rows of each
+// plane (ng = ceil(ntok / W2C_N); bulk copies, no tensor map) into the entry's
+// h_q buffer and runs the MMA N = W2C_N ng wide; accumulator column c is the
+// token at place c. 0: h_q rows [slot T + token][IR] by the h_q tensor map, the
+// MMA N = 64 wide (a -D for the A/B).
+#ifndef STATIC_MOE64_W2C
+#define STATIC_MOE64_W2C 1
+#endif
+constexpr int W2C_N = 16; // (W2C) the MMA N per group of a slot's tokens
+// kind::f8f6f4 (e4m3 x e4m3 -> fp32, M128) with N = n (a multiple of 16)
+__device__ __forceinline__ uint32_t idesc_f8_n(int n) {
+  return (IDESC_F8 & ~(0x3Fu << 17)) | ((uint32_t)(n / 8) << 17);
+}
+// runtime.cuh mma_f8 with the instruction descriptor idesc
+__device__ __forceinline__ void
+    mma_f8_i(uint32_t d, uint64_t a, uint64_t b, uint32_t idesc, uint32_t en) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, %4, 0;\n"
+               "tcgen05.mma.cta_group::1.kind::f8f6f4 [%0], %1, %2, %3, "
+               "p;\n}" ::"r"(d),
+               "l"(a),
+               "l"(b),
+               "r"(idesc),
+               "r"(en));
+}
+// (W2C) byte f (0..127) of row r of an h_q plane: 16-B chunk f >> 4 at chunk
+// (f >> 4) ^ (r & 7), as the 128-B swizzle puts it in shared memory (rows
+// 1024-B aligned in groups of 8). Byte f + 64 is at this ^ 64.
+__device__ __forceinline__ int hq_swz(int f, int r) {
+  return (((f >> 4) ^ (r & 7)) << 4) | (f & 15);
+}
+
 // what the bodies below use of the layer state, as slots and offsets
 // (compile-time; run_scaled_moe_experts fills it from the node's slots):
 // buffers HQ (h_q), HSF (its fp32 scales [NSLOT][T][KT2]), W13SF / W2SF (the
@@ -163,6 +200,13 @@ struct Slots {
   // previous launch's experts (their count, then the experts of its queue's
   // first slots); without it the bank's first PFE experts
   static constexpr int PFE = 40, LAST = LAST_;
+  // STATIC_MOE64_W2C above: T = 64 with every row live (a token once in a
+  // slot's list: its bit in a 64-bit mask) and the many-token W13 epilogue
+  // (h_quant_group_tok H: the only h_q writer then). HQP: the rows of an h_q
+  // plane
+  static constexpr bool W2C =
+      STATIC_MOE64_W2C != 0 && T == 64 && LIVE == T && MANY_EPI && !SINGLE;
+  static constexpr int HQP = NSLOT * T;
   static_assert(NE % 32 == 0 && NE <= 1024,
                 "scaled_moe_experts: build_table's 8 warps x 128 experts");
   // the routing table of this step, built on every SM by build_table (shared
@@ -311,8 +355,10 @@ __device__ __forceinline__ void hq_amax(float const *ha,
 }
 
 // the scale from the two warps' amax, the e4m3 values of the two items, the
-// scale of the token (feature 0's thread)
-template <int W, int IR>
+// scale of the token (feature 0's thread). PL > 0 (STATIC_MOE64_W2C): the
+// values into the h_q planes of PL rows, row slot T + j0 + 2 i (the token's
+// place in the slot's list), swizzled (hq_swz); the scale as before
+template <int W, int IR, int PL = 0>
 __device__ __forceinline__ void hq_out(uint8_t *hq,
                                        float *hs,
                                        float const *ha,
@@ -347,9 +393,16 @@ __device__ __forceinline__ void hq_out(uint8_t *hq,
   }
 #pragma unroll
   for (int i = 0; i < W; i++) {
-    uint8_t *const q = hq + ((size_t)slot * T + t[i]) * IR + kt2 * 128 + f;
-    q[0] = q0[i];
-    q[64] = q1[i];
+    if constexpr (PL > 0) {
+      int const r = slot * T + j0 + 2 * i, o = hq_swz(f, r);
+      uint8_t *const q = hq + ((size_t)kt2 * PL + r) * 128;
+      q[o] = q0[i];
+      q[o ^ 64] = q1[i];
+    } else {
+      uint8_t *const q = hq + ((size_t)slot * T + t[i]) * IR + kt2 * 128 + f;
+      q[0] = q0[i];
+      q[64] = q1[i];
+    }
     if (f == 0) {
       hs[((size_t)slot * T + t[i]) * KT2 + kt2] = sc[i];
     }
@@ -388,8 +441,9 @@ __device__ __forceinline__ void h_silu_tok(float *dst,
 // scale, the e4m3 values (h_q [NSLOT x T][IR], its scales hs [NSLOT][T][KT2]);
 // then thread 64 adds 2 to CHQ[slot] (release; W2 waits for MT13). The other
 // tokens' entries are not written (W2 reads none of them). H: acc holds this
-// item's h ([64][T], T >= 32's epilogue), not its gate and up rows.
-template <int IR, int LIMIT, bool H = false>
+// item's h ([64][T], T >= 32's epilogue), not its gate and up rows. PL > 0
+// (with H): h_q in planes (hq_out)
+template <int IR, int LIMIT, bool H = false, int PL = 0>
 __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
                                                   float *hs,
                                                   uint32_t *chq,
@@ -402,6 +456,7 @@ __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
                                                   int nt,
                                                   bool wide) {
   constexpr int KT2 = IR / 128;
+  static_assert(PL == 0 || H, "h_q planes: the T >= 32 epilogue (H)");
   __shared__ float red_s[4 * T]; // [warp of the epilogue][token]
   int const lane = threadIdx.x & 31, f = row & 63;
   if constexpr (H) { // the slot's tokens, also after a T-wide drain
@@ -416,10 +471,10 @@ __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
     int const w0 = (row >> 6) * 2; // its two warps
     j = row >> 6;
     for (; j + 6 < nt; j += 8) {
-      hq_out<4, IR>(hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j);
+      hq_out<4, IR, PL>(hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j);
     }
     for (; j < nt; j += 2) {
-      hq_out<1, IR>(hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j);
+      hq_out<1, IR, PL>(hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j);
     }
   } else {
     int const n = wide ? T : nt;
@@ -665,6 +720,26 @@ __device__ __forceinline__ void
       mma_mx(d, dw + 4, dh + 4, idesc_mx(IDESC, 2), 1u, sfc, sfc);
       mma_mx(d, dw + 6, dh + 6, idesc_mx(IDESC, 3), 1u, sfc, sfc);
     }
+  }
+}
+
+// (STATIC_MOE64_W2C) issue_w2_promoted_hq with the instruction descriptor
+// idesc (N = W2C_N ng: the slot's first W2C_N ng rows of each K tile of the
+// buffer, [KT2][T][128 B] as before)
+template <int KT2>
+__device__ __forceinline__ void issue_w2_promoted_hq_n(uint32_t st,
+                                                       uint32_t hq,
+                                                       uint32_t acc,
+                                                       uint32_t idesc) {
+  static_assert(KT2 <= 2, "scaled_moe_experts: W2's K tiles in the two halves");
+#pragma unroll
+  for (int kt = 0; kt < KT2; kt++) {
+    uint32_t const d = acc + ACC_STAGES * TW * kt;
+    uint64_t const dw = mkdesc(st + kt * 16384), dh = mkdesc(hq) + 8 * TW * kt;
+    mma_f8_i(d, dw, dh, idesc, 0u);
+    mma_f8_i(d, dw + 2, dh + 2, idesc, 1u);
+    mma_f8_i(d, dw + 4, dh + 4, idesc, 1u);
+    mma_f8_i(d, dw + 6, dh + 6, idesc, 1u);
   }
 }
 
@@ -998,24 +1073,41 @@ __device__ __forceinline__ void w2_arm(Maps const &maps,
 
 // T = 64: W2 entry e2's h_q (its slot's [KT2][T][128 B]) into buffer e2 & 1,
 // by the loader of its first tile after that tile's w2_arm (its CHQ acquire
-// and async-proxy fence), once the issuer's MMAs of entry e2 - 2 are done
+// and async-proxy fence), once the issuer's MMAs of entry e2 - 2 are done.
+// RES::W2C: the slot's first W2C_N ng rows of each h_q plane (ng = ceil(ntok /
+// W2C_N)), one bulk copy a plane, into rows 0 .. W2C_N ng - 1 of the buffer's
+// K tile (the planes hold the swizzled bytes: the same shared-memory image)
 template <class RES>
-__device__ __forceinline__ void
-    w2_load_hq(Maps const &maps, uint32_t base, int e2, int slot) {
+__device__ __forceinline__ void w2_load_hq(
+    Maps const &maps, G const &g, uint32_t base, int e2, int slot) {
   using SM_ = Smem<RES>;
   int const b = e2 & 1;
   if (e2 >= 2) {
     mbar_wait(w2hq_bar<RES>(base, 2 + b), ((e2 >> 1) - 1) & 1);
   }
   uint32_t const f = w2hq_bar<RES>(base, b);
-  mbar_expect(f, SM_::W2_HQB);
-  tma3(&maps.m[RES::HQ_KT],
-       f,
-       base + SM_::W2_HQ0 + b * SM_::W2_HQB,
-       0,
-       slot * T,
-       0,
-       EVICT_LAST);
+  if constexpr (RES::W2C) {
+    uint32_t const by =
+        (uint32_t)((RES::ntok()[slot] + W2C_N - 1) / W2C_N) * (W2C_N * 128);
+    mbar_expect(f, RES::KT2 * by);
+    uint8_t const *const hq = buf_at<uint8_t const>(g, RES::HQ);
+#pragma unroll
+    for (int kt = 0; kt < RES::KT2; kt++) {
+      bulk_g2s(base + SM_::W2_HQ0 + b * SM_::W2_HQB + kt * (TW * 128),
+               hq + ((size_t)kt * RES::HQP + (size_t)slot * T) * 128,
+               by,
+               f);
+    }
+  } else {
+    mbar_expect(f, SM_::W2_HQB);
+    tma3(&maps.m[RES::HQ_KT],
+         f,
+         base + SM_::W2_HQ0 + b * SM_::W2_HQB,
+         0,
+         slot * T,
+         0,
+         EVICT_LAST);
+  }
 }
 
 // all 8 warps of the SM, until the queue is empty. gl / gi0 / gi1: ring stage
@@ -1292,7 +1384,7 @@ __device__ __forceinline__ void
           }
           if ((w2k & 1) == 0) { // this warp armed the entry's first tile
             if constexpr (T == 64) {
-              scaled_moe::w2_load_hq<RES>(maps, base, e2, slot);
+              scaled_moe::w2_load_hq<RES>(maps, g, base, e2, slot);
             }
             scaled_moe::w2_stage_scales<RES>(g, base, qn % W2QD, slot, ex, ot0);
           }
@@ -1357,6 +1449,13 @@ __device__ __forceinline__ void
             mbar_wait(w2hq_bar<RES>(baseu, e2 & 1), (e2 >> 1) & 1);
           }
         }
+        // (W2C) the MMAs' N: the slot's tokens in groups of W2C_N
+        [[maybe_unused]] uint32_t idesc_n = 0;
+        if constexpr (RES::W2C) {
+          idesc_n = idesc_f8_n(
+              W2C_N *
+              ((warp_same<true>(ntok_s[e.a / OT2]) + W2C_N - 1) / W2C_N));
+        }
         for (int i = 0; i < e.b;
              i++, w2k++) { // warp 1: the tile's 4 KT2 MMAs; warp 6: the
                            // second arrival on acc_full
@@ -1373,7 +1472,13 @@ __device__ __forceinline__ void
           mbar_wait(w2_bar<RES>(baseu, s), (w2k / W2_ST) & 1);
           fence_after();
           if (issuer_lane<true>()) { // one K tile in each accumulator half
-            if constexpr (T == 64) {
+            if constexpr (RES::W2C) {
+              issue_w2_promoted_hq_n<KT2>(
+                  baseu + s * W2_STB,
+                  baseu + SM_::W2_HQ0 + (e2 & 1) * SM_::W2_HQB,
+                  tbu + TW * a,
+                  idesc_n);
+            } else if constexpr (T == 64) {
               issue_w2_promoted_hq<IDESC_MX_E4M3, KT2>(
                   baseu + s * W2_STB,
                   baseu + SM_::W2_HQ0 + (e2 & 1) * SM_::W2_HQB,
@@ -1453,7 +1558,7 @@ __device__ __forceinline__ void
           }
           if ((w2k7 & 1) == 1) { // this warp armed the entry's first tile
             if constexpr (T == 64) {
-              scaled_moe::w2_load_hq<RES>(maps, base, e27, slot);
+              scaled_moe::w2_load_hq<RES>(maps, g, base, e27, slot);
             }
             scaled_moe::w2_stage_scales<RES>(g, base, qn % W2QD, slot, ex, ot0);
           }
@@ -1576,16 +1681,26 @@ __device__ __forceinline__ void
                            c1a = c0a + ACC_STAGES * TW;
             int i0 = start_s[slot];
             int const end = i0 + nt;
+            // the accumulator column of entry i of the slot's list: its token,
+            // or (W2C) its place in the list
+            [[maybe_unused]] int const cb = start_s[slot];
+            auto col = [&](int i, int t_) {
+              if constexpr (RES::W2C) {
+                return i - cb;
+              } else {
+                return t_;
+              }
+            };
             for (; i0 + 8 <= end; i0 += 8) {
               float c0[8], c1[8], r[8];
               int t[8];
 #pragma unroll
               for (int k = 0; k < 8; k++) {
                 t[k] = tok_s[i0 + k];
-                c0[k] = tmem_ld1(c0a + t[k]);
+                c0[k] = tmem_ld1(c0a + col(i0 + k, t[k]));
                 c1[k] = 0.f;
                 if constexpr (KT2 == 2) {
-                  c1[k] = tmem_ld1(c1a + t[k]);
+                  c1[k] = tmem_ld1(c1a + col(i0 + k, t[k]));
                 }
               }
               tmem_keep8(c0);
@@ -1616,9 +1731,9 @@ __device__ __forceinline__ void
                 c0[k] = c1[k] = 0.f;
                 if (k < left) { // warp-uniform
                   int const t = tok_s[i0 + k];
-                  c0[k] = tmem_ld1(c0a + t);
+                  c0[k] = tmem_ld1(c0a + col(i0 + k, t));
                   if constexpr (KT2 == 2) {
-                    c1[k] = tmem_ld1(c1a + t);
+                    c1[k] = tmem_ld1(c1a + col(i0 + k, t));
                   }
                 }
               }
@@ -1717,6 +1832,8 @@ __device__ __forceinline__ void
           }
           constexpr bool HEAVY =
               T >= 32 && !RES::SINGLE && RES::LIVE == T && RES::MANY_EPI;
+          static_assert(!RES::W2C || HEAVY,
+                        "STATIC_MOE64_W2C: h_q from the many-token epilogue");
           if (HEAVY && items == W13_PAIR) {
             if constexpr (HEAVY) { // OFF_ACC: the first item's h [64][T], then
                                    // the up rows / the second item's h
@@ -1763,7 +1880,10 @@ __device__ __forceinline__ void
               }
               asm volatile("bar.sync 1, 128;" ::: "memory");
               if (i == 1) {
-                h_quant_group_tok<IR, RES::LIMIT, true>(
+                h_quant_group_tok<IR,
+                                  RES::LIMIT,
+                                  true,
+                                  RES::W2C ? RES::HQP : 0>(
                     buf_at<uint8_t>(g, RES::HQ),
                     buf_at<float>(g, RES::HSF),
                     cnt_now(g) + RES::CHQ,
@@ -2096,7 +2216,15 @@ __device__ __forceinline__ void run_scaled_moe_experts(Maps const &maps,
     pt_pairs = gtime();
   }
   [[maybe_unused]] long long pt_bt[3] = {0, 0, 0}; // PROF: build_table's steps
-  build_table<RES>(RES::PROF >= 0 ? pt_bt : nullptr);
+  if constexpr (RES::W2C) { // each slot's list in token order; the token
+                            // masks in the W13 accumulator's area (no W13
+                            // item has run yet)
+    build_table<RES, true>(RES::PROF >= 0 ? pt_bt : nullptr,
+                           reinterpret_cast<unsigned long long *>(
+                               rt_sm() + scaled_moe::Smem<RES>::OFF_ACC));
+  } else {
+    build_table<RES>(RES::PROF >= 0 ? pt_bt : nullptr);
+  }
   if constexpr (RES::ORDER) {
     scaled_moe::order_slots<RES>();
   }

@@ -174,9 +174,13 @@ __device__ __forceinline__ void table_poll(unsigned long long const *pairs,
 // (start / tok / wt / kk: slot s's entries start[s] .. + ntok[s] - 1, in no
 // particular order); s_ints[1] = number of slots. st (optional,
 // scaled_moe_experts' stamps): thread 0's times past each of its first three
-// barriers
-template <class RES>
-__device__ __forceinline__ void build_table(long long *st = nullptr) {
+// barriers. TOKEN_ORDER (T <= 64, a token at most once in a slot): each slot's
+// entries in token order, the same on every SM (scaled_moe_experts W2C: a
+// token's place picks its h_q row); tmask: NSLOT 64-bit words of shared memory
+// (the slots' token masks)
+template <class RES, bool TOKEN_ORDER = false>
+__device__ __forceinline__ void
+    build_table(long long *st = nullptr, unsigned long long *tmask = nullptr) {
   constexpr int NE = RES::NE, K = RES::K, NPAIR = RES::NPAIR,
                 NSLOT = RES::NSLOT;
   int *const cntE_s = RES::cnt_e(), *const sel_ss = RES::sel(),
@@ -281,20 +285,46 @@ __device__ __forceinline__ void build_table(long long *st = nullptr) {
       if (i < n_live) {
         start_s[i] = run;
         fill_s[i] = 0;
+        if constexpr (TOKEN_ORDER) {
+          tmask[i] = 0ull;
+        }
       }
       run += mine[q];
     }
   }
   __syncthreads();
-  // 3. the pairs into their slots' entries (a position by a shared atomic)
-  for (int i = threadIdx.x; i < NPAIR; i += 256) {
-    int const slot = sel_ss[i],
-              pos_ = start_s[slot] + atomicAdd(&fill_s[slot], 1);
-    tok_s[pos_] = i / K;
-    w_s[pos_] = wsel_ss[i];
-    kk_s[pos_] =
-        (unsigned char)(i %
-                        K); // k: the pair's place in the token's K (its R row)
+  if constexpr (TOKEN_ORDER) {
+    // 3. the pairs into their slots' entries in token order: the tokens' bits
+    // (bit t & 31 of the slot's 32-bit word t >> 5), then a pair's place = the
+    // slot's tokens below its token
+    static_assert(!TOKEN_ORDER || T <= 64, "build_table: a slot's tokens in "
+                                           "one 64-bit mask");
+    for (int i = threadIdx.x; i < NPAIR; i += 256) {
+      int const t = i / K;
+      uint32_t const a = (uint32_t)__cvta_generic_to_shared(
+          reinterpret_cast<unsigned int *>(tmask) + 2 * sel_ss[i] + (t >> 5));
+      asm volatile("red.shared.or.b32 [%0], %1;" ::"r"(a), "r"(1u << (t & 31))
+                   : "memory");
+    }
+    __syncthreads();
+    for (int i = threadIdx.x; i < NPAIR; i += 256) {
+      int const slot = sel_ss[i], t = i / K;
+      int const pos_ =
+          start_s[slot] + __popcll(tmask[slot] & ((1ull << t) - 1ull));
+      tok_s[pos_] = t;
+      w_s[pos_] = wsel_ss[i];
+      kk_s[pos_] = (unsigned char)(i % K);
+    }
+  } else {
+    // 3. the pairs into their slots' entries (a position by a shared atomic)
+    for (int i = threadIdx.x; i < NPAIR; i += 256) {
+      int const slot = sel_ss[i],
+                pos_ = start_s[slot] + atomicAdd(&fill_s[slot], 1);
+      tok_s[pos_] = i / K;
+      w_s[pos_] = wsel_ss[i];
+      // k: the pair's place in the token's K (its R row)
+      kk_s[pos_] = (unsigned char)(i % K);
+    }
   }
   __syncthreads();
 }
