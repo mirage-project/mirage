@@ -127,7 +127,9 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
     NH = w["w_uk"].shape[0]
     xq, qkva = nt((T, H), uint8, "x_fp8"), nt((T, 2688), int64, "qkva")
-    mpk.group_quant_layer(input=t["x"], output=xq)
+    # T = 64: x and v quantized in token tiles (a task of all 64 tokens takes 8 tokens a warp, on 48 / 16 SMs): x in 2, v
+    # (before o_proj, on the critical chain) in 8
+    mpk.group_quant_layer(input=t["x"], output=xq, token_tiles=2 if T == 64 else 1)
     mpk.scaled_gemm_tile_layer(input=xq, weight=t["w_qkva"], weight_scales=t["w_qkva_sf"], output=qkva, combine="add")
     if full:
         kw = nt((T, 256), int64, "idx_kw")
@@ -165,7 +167,7 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     # the most a lane per lse allows (32 / splits)
     mpk.dsa_mla_merge_layer(input=split, output=o_lat, tokens_per_task={32: 2, 64: 32 // splits}.get(T))
     mpk.dsa_o_absorb_layer(input=o_lat, w_uv=t["w_uv"], output=v)
-    mpk.group_quant_layer(input=v, output=vq)
+    mpk.group_quant_layer(input=v, output=vq, token_tiles=8 if T == 64 else 1)
     o, sent, osum = nt((T, H), float32, "o_proj"), nt((T, H), bfloat16, "o_sent"), nt((T, H), bfloat16, "o_sum")
     if not tail:   # attn_out = bf16(o_proj): what the three nodes below give on one GPU with a zero residual
         assert mpk.num_gpus == 1 and next_norm is None
