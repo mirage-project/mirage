@@ -25,12 +25,55 @@ ROOT = os.environ.get("DSV41_STATIC_ROOT", os.path.abspath(os.path.join(os.path.
 sys.path.insert(0, os.path.join(ROOT, "python"))
 sys.path.append(os.path.join(ROOT, "demo"))   # the demos as packages: both have a demo.py and a weights.py
 
-from deepseek_v4_1_csa2 import demo as attn_demo          # noqa: E402
 from deepseek_v4_1_csa2 import weights as attn_weights    # noqa: E402
-from deepseek_v4_1_moe import demo as moe_demo            # noqa: E402
 from deepseek_v4_1_moe import weights as moe_weights      # noqa: E402
 
+
+def _load_copy(path: str, name: str, tokens: int):
+    """(11-21) the module at path as sys.modules[name], executed with STATIC_TOKENS = tokens: the demos' and this module's T is
+    a module constant, so a process with layers of several T (DSV41_STATIC_T) has one copy of each per T > 8"""
+    import importlib.util
+    if name in sys.modules:
+        return sys.modules[name]
+    old = os.environ.get("STATIC_TOKENS")
+    os.environ["STATIC_TOKENS"] = str(tokens)
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        try:
+            spec.loader.exec_module(mod)
+        except BaseException:
+            sys.modules.pop(name, None)
+            raise
+    finally:
+        if old is None:
+            os.environ.pop("STATIC_TOKENS", None)
+        else:
+            os.environ["STATIC_TOKENS"] = old
+    return mod
+
+
+TOKENS = int(os.environ.get("STATIC_TOKENS", "8"))   # this module's T (a copy of it: layer_module)
+if TOKENS == 8:
+    from deepseek_v4_1_csa2 import demo as attn_demo      # noqa: E402
+    from deepseek_v4_1_moe import demo as moe_demo        # noqa: E402
+else:   # (the package's own demo modules are T = 8's)
+    attn_demo = _load_copy(os.path.join(ROOT, "demo", "deepseek_v4_1_csa2", "demo.py"), f"deepseek_v4_1_csa2.demo_t{TOKENS}",
+                           TOKENS)
+    moe_demo = _load_copy(os.path.join(ROOT, "demo", "deepseek_v4_1_moe", "demo.py"), f"deepseek_v4_1_moe.demo_t{TOKENS}",
+                          TOKENS)
+
 T, HID = attn_demo.T, attn_demo.HID
+assert T == TOKENS
+
+
+def layer_module(tokens: int):
+    """(11-21, DSV41_STATIC_T) this module's classes for layers of T = tokens: this module, or its copy of that T (its own demo
+    modules; the weights module shared)"""
+    if tokens == T:
+        return sys.modules[__name__]
+    return _load_copy(os.path.abspath(__file__), f"dsv41_static_layer_t{tokens}", tokens)
 _readers = {}
 # DSV41_STATIC_TIMING=1 (measurement, 2026-11-17): the timing build (every task stamps its start and end; dsv41_static_prof
 # then samples per node). Not a serving number: the stamps cost a little in every task.
@@ -59,8 +102,11 @@ PROF_SHARE = SHARE and bool(os.environ.get("DSV41_STATIC_PROF"))
 
 
 def _head_demo():
-    """head_demo.py beside this file, whatever sys.path the process has (a bench script elsewhere, the forced boot)"""
+    """head_demo.py beside this file, whatever sys.path the process has (a bench script elsewhere, the forced boot); T > 8: its
+    copy of this T"""
     here = os.path.dirname(os.path.abspath(__file__))
+    if T != 8:
+        return _load_copy(os.path.join(here, "head_demo.py"), f"head_demo_t{T}", T)
     if here not in sys.path:
         sys.path.insert(0, here)
     import head_demo
@@ -155,18 +201,24 @@ def reader(ckpt: str):
 HC = 4   # mHC streams
 
 
-def mhc_tensors(read, layer: int, kind: str, gamma_name: str, dev, stats: bool = False) -> dict:
+def mhc_tensors(read, layer: int, kind: str, gamma_name: str, dev, stats: bool = False, shared: dict = None) -> dict:
     """The tensors of StaticMegakernel.dsv41_mhc_nodes for one sublayer (kind "attn" or "ffn"): the streams in and out, the mixes'
-    weight (fn as bf16 hi | lo rows, padded to 128 rows), base and scale, pre, and with gamma_name the next sublayer's input."""
-    p = f"layers.{layer}."
-    fn, base, scale = (read(p + f"hc_{kind}_{n}").float() for n in ("fn", "base", "scale"))
-    hi = fn.bfloat16()
-    fn_w = torch.cat([hi, (fn - hi.float()).bfloat16(), torch.zeros(128 - 2 * fn.shape[0], fn.shape[1], dtype=torch.bfloat16)])
+    weight (fn as bf16 hi | lo rows, padded to 128 rows), base and scale, pre, and with gamma_name the next sublayer's input.
+    shared (a layer of another T, DSV41_STATIC_T): its weights (hc_fn_w, hc_small, gamma_next) instead of reading them."""
     z = lambda *shape, dt=torch.bfloat16: torch.zeros(*shape, dtype=dt, device=dev)
-    w = dict(streams=z(T, HC * HID), streams_out=z(T, HC * HID), hc_fn_w=fn_w.to(dev).contiguous(),
-             hc_small=torch.cat([base, scale]).to(dev).contiguous(), h_pre=z(T, HC, dt=torch.float32), x_out=z(T, HID))
+    if shared is not None:
+        fn_w, small = shared["hc_fn_w"], shared["hc_small"]
+    else:
+        p = f"layers.{layer}."
+        fn, base, scale = (read(p + f"hc_{kind}_{n}").float() for n in ("fn", "base", "scale"))
+        hi = fn.bfloat16()
+        fn_w = torch.cat([hi, (fn - hi.float()).bfloat16(),
+                          torch.zeros(128 - 2 * fn.shape[0], fn.shape[1], dtype=torch.bfloat16)]).to(dev).contiguous()
+        small = torch.cat([base, scale]).to(dev).contiguous()
+    w = dict(streams=z(T, HC * HID), streams_out=z(T, HC * HID), hc_fn_w=fn_w, hc_small=small,
+             h_pre=z(T, HC, dt=torch.float32), x_out=z(T, HID))
     if gamma_name is not None:
-        w["gamma_next"] = read(gamma_name).bfloat16().to(dev).contiguous()
+        w["gamma_next"] = shared["gamma_next"] if shared is not None else read(gamma_name).bfloat16().to(dev).contiguous()
     if stats:   # only the coefficients: post and comb for SGLang's own post
         w.update(h_post=z(T, HC, dt=torch.float32), h_comb=z(T, HC * HC, dt=torch.float32))
     return w
@@ -393,12 +445,15 @@ class StepTables:
 class StaticAttn(MhcMixin):
     def __init__(self, layer: int, ckpt: str, rank: int, tp: int, dev, out_root: str, max_pos: int, sources: Sources, pdl: bool,
                  exchange_pool: ExchangePool = None, tables: StepTables = None, mhc: bool = False, stats: bool = False,
-                 engram_kv: tuple = None):
+                 engram_kv: tuple = None, weights_from=None):
         """engram_kv (11-20, DSV41_ENGRAM=2): (kv view, multicast address[, Engram layer, default the next[, rows]]) of
         engram_kv_buffer: this kernel also computes that layer's Engram kv into it (moe_demo.engram_kv_nodes), for the gate in
         the MoE kernel before that layer. rows (DSV41_EG_ROWS=1): {emb: engram_emb_buffer's view, emb_mc: its multicast
-        address, and engram_rows_tables' tensors}: the n-gram rows looked up in this kernel too (run's ids each step)."""
+        address, and engram_rows_tables' tensors}: the n-gram rows looked up in this kernel too (run's ids each step).
+        weights_from (11-21, DSV41_STATIC_T): the same layer of another T (StaticAttn of T = 8): its weight tensors, not read
+        again (this layer's own: its inputs, outputs and state of T rows)."""
         cfg = sources.cfg
+        self.T = T
         self.layer, self.pdl, self.steps, self.filled, self.pool, self.binds = layer, pdl, 0, 0, False, {}
         self.variant = attn_weights.variant_of(cfg, layer)
         ratio = cfg["compress_ratios"][layer]
@@ -406,12 +461,15 @@ class StaticAttn(MhcMixin):
         csrc = layer == cfg["candidate_source_layer"]
         rows = (max_pos + 2 + 255) // 256 * 256
         cap = max(((max_pos + 1) // max(ratio, 1) + 255) // 256 * 256, attn_demo.NC)
-        w = {**attn_weights.layer_tensors(reader(ckpt), cfg, layer, tp, rank, rows, dev),
-             **attn_demo.state_tensors(self.variant, ratio, csrc, cap, dev), **sources.shared(layer, self.variant)}
+        sw = weights_from.w if weights_from is not None else None
+        lt = {k: sw[k] for k in weights_from.weight_keys} if sw is not None else \
+            attn_weights.layer_tensors(reader(ckpt), cfg, layer, tp, rank, rows, dev)
+        self.weight_keys = list(lt)
+        w = {**lt, **attn_demo.state_tensors(self.variant, ratio, csrc, cap, dev), **sources.shared(layer, self.variant)}
         self.engram = engram_kv is not None
         if self.engram:
             w.update(engram_kv_tensors(reader(ckpt), engram_kv[2] if len(engram_kv) > 2 else layer + 1, tp, rank, dev,
-                                       engram_kv[0]))
+                                       engram_kv[0], sw))
             eg_rows = engram_kv[3] if len(engram_kv) > 3 else None
             if eg_rows is not None:   # the lookup's tensors (eg_ids, eg_emb_mc: stand-ins, rebound below and in run)
                 w.update(eg_emb=eg_rows["emb"], eg_emb_mc=torch.zeros_like(eg_rows["emb"]),
@@ -423,9 +481,10 @@ class StaticAttn(MhcMixin):
             if "compress_pages" in w:
                 w["compress_pages"] = tables.pages[ratio]
         if mhc or stats:
-            w.update(mhc_tensors(reader(ckpt), layer, "attn", f"layers.{layer}.ffn_norm.weight" if mhc else None, dev, stats))
+            w.update(mhc_tensors(reader(ckpt), layer, "attn", f"layers.{layer}.ffn_norm.weight" if mhc else None, dev, stats,
+                                 sw))
             os.environ["HC_DRY"] = os.environ.get("HC_DRY_ATTN", "0")
-        out = os.path.join(out_root, f"rank{rank}", f"attn{layer}")
+        out = os.path.join(out_root, f"rank{rank}", f"attn{layer}" + (f"_t{T}" if T != 8 else ""))   # (each T its own: its .so)
         flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"] + os.environ.get("DSV41_STATIC_FLAGS", "").split()
         if PROF_SHARE:
             flags.append("-DSTATIC_STAMP_REBIND")
@@ -586,20 +645,24 @@ def engram_rows_tables(module, tp: int, dev, group) -> dict:
             "eg_starts": torch.tensor(starts, dtype=torch.int64, device=dev), "peer": False}
 
 
-def engram_kv_tensors(read, layer: int, tp: int, rank: int, dev, kv: torch.Tensor) -> dict:
+def engram_kv_tensors(read, layer: int, tp: int, rank: int, dev, kv: torch.Tensor, shared: dict = None) -> dict:
     """(DSV41_ENGRAM=2) moe_demo.engram_kv_nodes' tensors in the attention kernel before layer `layer`'s Engram: the wkv
     shard (as engram_tensors), the n-gram rows' buffer, kv (engram_kv_buffer's view) and eg_kv_mc (a stand-in of kv's shape:
     the layer rebinds it to kv's multicast address)."""
-    w = {k: v for k, v in engram_tensors(read, layer, tp, rank, dev).items() if k in ("eg_wkv", "eg_wkv_scales", "eg_emb")}
+    w = {k: v for k, v in engram_tensors(read, layer, tp, rank, dev, shared).items() if k in ("eg_wkv", "eg_wkv_scales", "eg_emb")}
     w.update(eg_kv=kv, eg_kv_mc=torch.zeros_like(kv))
     return w
 
 
-def engram_tensors(read, layer: int, tp: int, rank: int, dev) -> dict:
+def engram_tensors(read, layer: int, tp: int, rank: int, dev, shared: dict = None) -> dict:
     """(11-20) The tensors of moe_demo.engram_nodes for the Engram of layer `layer` (inference/model.py Engram), GPU rank of tp:
     the wkv weight's rows [r W, r W + W) of 25600 (W = 25600 / tp; e4m3 bytes, its 32 x 32 block scales as gemm_fp8_tile's
     chunks), q_weight x k_weight in fp32 ([HC, dim], as the official multiplies them), the gathered n-gram rows' buffer
     (eg_emb, bound to SGLang's gather output each step) and R'' (streams_eg)."""
+    if shared is not None:   # (a layer of another T: its weights; shared["eg_qk"] only in a MoE layer's)
+        z = lambda n: torch.zeros(T, n, dtype=torch.bfloat16, device=dev)
+        w = {k: shared[k] for k in ("eg_wkv", "eg_wkv_scales", "eg_qk") if k in shared}
+        return {**w, "eg_emb": z(6144), "streams_eg": z(HC * HID)}
     from mirage.mpk.static_megakernel import w8_scale_chunks
     p = f"layers.{layer}.engram."
     wkv, sc = read(p + "wkv.weight"), read(p + "wkv.scale")
@@ -617,23 +680,31 @@ def engram_tensors(read, layer: int, tp: int, rank: int, dev) -> dict:
 class StaticMoE(MhcMixin):
     def __init__(self, layer: int, ckpt: str, rank: int, tp: int, dev, out_root: str, pdl: bool,
                  exchange_pool: ExchangePool = None, mhc: bool = False, norm_next: bool = False, stats: bool = False,
-                 engram: bool = False, gamma_name: str = None, engram_kv: torch.Tensor = None, head: bool = False):
+                 engram: bool = False, gamma_name: str = None, engram_kv: torch.Tensor = None, head: bool = False,
+                 weights_from=None):
         """engram (11-20, DSV41_ENGRAM=1, with mHC and no next input): the next layer's Engram in this kernel after the post
-        (moe_demo.engram_nodes); SGLang then takes R'' (hc_state) and skips its own (dsv41_static_hook)."""
-        self.layer, self.pdl, self.steps, self.binds = layer, pdl, 0, {}
+        (moe_demo.engram_nodes); SGLang then takes R'' (hc_state) and skips its own (dsv41_static_hook). weights_from (11-21,
+        DSV41_STATIC_T): the same layer of another T (StaticMoE of T = 8): its weight tensors (the expert bank too), not read
+        again."""
+        self.layer, self.pdl, self.steps, self.binds, self.T = layer, pdl, 0, {}, T
         read = reader(ckpt)
-        w = moe_weights.layer_tensors(read, layer, tp, rank, dev)
-        w.update(moe_weights.routed_tensors(read, layer, tp, [rank], dev)[0])
+        sw = weights_from.w if weights_from is not None else None
+        if sw is not None:
+            w = {k: sw[k] for k in weights_from.weight_keys}
+        else:
+            w = moe_weights.layer_tensors(read, layer, tp, rank, dev)
+            w.update(moe_weights.routed_tensors(read, layer, tp, [rank], dev)[0])
+        self.weight_keys = list(w)
         w["x"] = torch.zeros(T, HID, dtype=torch.bfloat16, device=dev)
         w["y"] = torch.zeros(T, HID, dtype=torch.bfloat16, device=dev)
         if mhc or stats:
             gn = gamma_name or f"layers.{layer + 1}.attn_norm.weight"   # (the last layer with the head: norm.weight)
-            w.update(mhc_tensors(read, layer, "ffn", gn if norm_next and mhc else None, dev, stats))
+            w.update(mhc_tensors(read, layer, "ffn", gn if norm_next and mhc else None, dev, stats, sw))
             os.environ["HC_DRY"] = os.environ.get("HC_DRY_MOE", "1")
         self.engram = engram
         if engram:
             assert mhc and not norm_next and not stats, "the Engram nodes: mHC's post in the kernel, no next input"
-            eg = engram_tensors(read, layer + 1, tp, rank, dev)
+            eg = engram_tensors(read, layer + 1, tp, rank, dev, sw)
             if engram_kv is not None:   # (DSV41_ENGRAM=2) kv from the attention kernel before: the gate only
                 eg = {"eg_qk": eg["eg_qk"], "streams_eg": eg["streams_eg"], "eg_kv": engram_kv}
                 if os.environ.get("DSV41_EG_X", "0") != "0":   # (11-20) and the Engram layer's attention input from R''
@@ -643,9 +714,9 @@ class StaticMoE(MhcMixin):
         if head:   # (11-20, DSV41_HEAD=2) the LM head in this kernel (moe_demo.head_nodes), after the post's next input
             head_demo = _head_demo()
             assert mhc and norm_next, "the head in the MoE kernel: mHC's post computes its input (norm.weight)"
-            hw = head_demo.head_tensors(read, tp, rank, dev)
+            hw = head_demo.head_tensors(read, tp, rank, dev, sw)
             w.update({k: hw[k] for k in ("head_w", "logits", "head_ids") if k in hw})
-        out = os.path.join(out_root, f"rank{rank}", f"moe{layer}")
+        out = os.path.join(out_root, f"rank{rank}", f"moe{layer}" + (f"_t{T}" if T != 8 else ""))
         flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"] + os.environ.get("DSV41_STATIC_FLAGS", "").split()
         if engram or head:   # the gate / the head's GEMM waits on the post's counter: a release (tasks/engram_gate.cuh)
             fast = "-DHCP_FAST_END" in flags
@@ -715,6 +786,7 @@ class StaticHead:
     gathered -> the logits [T, 129280] fp32 (SGLang's next_token_logits_buffer when it has one)."""
 
     def __init__(self, ckpt: str, rank: int, tp: int, dev, out_root: str, pdl: bool, exchange_pool: ExchangePool):
+        assert T == 8, "DSV41_HEAD=1 (its own kernel): T = 8 only"
         head_demo = _head_demo()
         self.pdl, self.steps, self.binds = pdl, 0, {}
         self.w = head_demo.head_tensors(reader(ckpt), tp, rank, dev)

@@ -1319,7 +1319,7 @@ __device__ SA_TASK_INLINE void sparse_attn_task(float const *q,
       SA_MARK(5)
       // the scale chunks of heads [16 g, 16 g + 16) (64; a split task its
       // share's): a 16-B line each
-      if ((tid >> 2) < lnb) {
+      if ((tid >> 2) < lnb && (XQ_LINES == 4 || (tid & 3) < XQ_LINES)) {
         int const lc = lb0 + (tid >> 2); // head lc / 4, its 128-column block
                                          // lc % 4
         uint32_t const s4 = *reinterpret_cast<uint32_t const *>(

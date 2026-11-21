@@ -4,12 +4,13 @@ This is a temporary branch for one measurement. It holds the static attention an
 inside the kernels, and the optimizations of 11-17 to 11-20. Every switch is off by default. The command below turns on
 the set that is being measured.
 
-Decode steps of 8 rows run the static layers (T = 8), and with `DSV41_STATIC_ROWS=1,2,4` (in `SET` below, the same for
-every batch size) so do steps of 1 to 7 rows, the way GLM-5.3 does it (#821). SGLang keeps its own CUDA graphs of those
-batch sizes, unchanged. The static layers read the step's rows and treat their other rows as SGLang treats a padding row
-of a graph (position 0, request slot 0, KV slot 0). The MoE layers have builds of 1, 2 and 4 live rows, whose idle rows
-read no expert. A step of 8 rows runs exactly the 8-row build it ran without the switch. SGLang runs the batch sizes above
-8 and the prefill with its own layers, so a run at bs > 8 still compares SGLang with SGLang.
+Every decode step of 1 to 64 rows runs the static layers, the way GLM-5.3 does it (#821), with one `SET` (below) for every
+batch size. The static layers are built for T = 8, 16, 32 and 64 rows (`DSV41_STATIC_T=16,32,64` adds the last three; the
+same weights). A step of n rows runs the layers of the smallest T >= n. SGLang keeps its own CUDA graphs of every batch
+size, unchanged. The static layers read the step's n rows and treat their other rows as SGLang treats a padding row of a
+graph (position 0, request slot 0, KV slot 0). With `DSV41_STATIC_ROWS=1,2,4` the MoE layers also have builds of 1, 2 and
+4 live rows, whose idle rows read no expert. A step of 8 rows runs exactly the 8-row build it ran without these switches.
+The prefill runs on SGLang's layers.
 
 The method is PR #819's. `dsv41_spec_bench.py` is #819's `sgl_spec_bench.py` (`demo/glm53_flash/sglang_dsa/` in upstream
 mpk) with DSv4.1's model path and engine arguments; it also prints a hash of every row's output. Each run starts one
@@ -44,7 +45,8 @@ STATIC="PYTHONPATH=$D/boot DSV41_STATIC_ROOT=$MIRAGE DSV41_STATIC_ATTN=all DSV41
 SET="DSV41_STATIC_PDL=1 DSV41_STATIC_MHC=1 SA_DRY=0 HC_DRY_MOE=1 HC_DRY_ATTN=0 \
     DSV41_STATIC_FLAGS='-DHCP_LOOP -DHCP_SSQ=2 -DHCP_VPOLL -DSTATIC_NO_START_BARRIER -DSTATIC_RESET_PARITY -DI1_BF16 -DI1B_FQ -DHCP_FAST_END -DSTATIC_CNT_POLL_NS=0 -DSTATIC_POLL_NS=0' \
     DSV41_STATIC_IS_TCGEN05=1 DSV41_SHARE_MODULES=1 \
-    DSV41_ENGRAM=2 DSV41_HEAD=2 DSV41_EG_KV14=1 DSV41_HEAD_ARGMAX=1 DSV41_EG_ROWS=1 DSV41_FILL_FUSED=1 DSV41_STATIC_ROWS=1,2,4"
+    DSV41_ENGRAM=2 DSV41_HEAD=2 DSV41_EG_KV14=1 DSV41_HEAD_ARGMAX=1 DSV41_EG_ROWS=1 DSV41_FILL_FUSED=1 DSV41_STATIC_ROWS=1,2,4 \
+    DSV41_STATIC_T=16,32,64"
 ```
 
 ## The comparison
@@ -91,6 +93,7 @@ minus 1.
 | `DSV41_EG_ROWS=1` | the n-gram rows looked up in that attention kernel too (SGLang's own table, read in place as its PEER_READ lookup does), not by SGLang's gather between the kernels |
 | `DSV41_HEAD=2` | the end of the step in the last MoE kernel: its post computes the head's input (the streams' collapse and the final norm), then the LM head (bf16 GEMM over this GPU's vocab rows, multicast gather into SGLang's fp32 logits buffer) |
 | `DSV41_STATIC_ROWS=1,2,4` | decode steps of 1 to 7 rows on the static layers (above); no change at 8 rows |
+| `DSV41_STATIC_T=16,32,64` | the static layers also for 16, 32 and 64 rows: decode steps of 9 to 64 rows (above); no change at 8 rows |
 | `DSV41_FILL_FUSED=1` | the step's tables (positions, window rows, page tables), which the first static layer copies from SGLang's metadata, in one kernel instead of 6 small kernels and copies before attention L0 |
 | `DSV41_HEAD_ARGMAX=1` | the head's gather also computes each token's greedy next token (torch.argmax's rules); for a replayed all-greedy decode batch SGLang takes those ids (its in-graph greedy helper's rules) instead of running its 30 us argmax between the graph replays |
 
@@ -104,8 +107,9 @@ bit SGLang's (other fp32 orders), so unforced runs may make other tokens; the co
 The argmax counts as ours: it runs in the last static kernel, on the logits that kernel computes. S2-1 below, which only
 makes SGLang's own sampler faster, is still left out.
 
-The numbers below are of bs 8 and were measured without `DSV41_STATIC_ROWS`, which does not change a step of 8 rows (the
-same build; the same tokens locally). Our runs of this set on 11-20 night (4 x B300, both sides forced to SGLang's own greedy tokens, each job one machine): job
+The numbers below are of bs 8 and were measured without `DSV41_STATIC_ROWS` and `DSV41_STATIC_T`, which do not change a step
+of 8 rows (the same build; the same tokens locally). The larger T add their own kernels and buffers on each GPU, and SGLang
+needs more KV cache at bs 64: check the free memory at bs 64 before the timed runs. Our runs of this set on 11-20 night (4 x B300, both sides forced to SGLang's own greedy tokens, each job one machine): job
 1120_200601 SGLang 4372.5 us, the static layers 3632.7 us, +20.4 %; without DSV41_FILL_FUSED 3656.7 us (+19.6 %; the
 same-token pair -24.2 us). Job 1120_175418 (SGLang 4351.3 us), without DSV41_FILL_FUSED: 3650.1 us, +19.2 %, and
 without DSV41_EG_ROWS too 3662.8 us (+18.8 %). SGLang's own period differs by about 30 us from machine to machine.

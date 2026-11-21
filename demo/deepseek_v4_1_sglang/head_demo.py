@@ -18,22 +18,28 @@ import sys
 import torch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-T, HID = 8, 5120
+T = int(os.environ.get("STATIC_TOKENS", "8"))   # tokens (rows) per step: the kernel's T (8, 16, 32 or 64)
+HID = 5120
 KP = int(os.environ.get("DSV41_HEAD_KP", 1))        # the GEMM's K parts (11-20: 1: 253 tasks, at most 2 an SM: GEMM 52.6 us vs 58.2 at 2, about 61 at 4; a task costs about 2.75 us besides its bytes)
 SEND = int(os.environ.get("DSV41_HEAD_SEND", 148))  # the sends' tasks
 GQ = int(os.environ.get("DSV41_HEAD_GQ", 16))       # the gather's tasks a token
 ARGMAX = os.environ.get("DSV41_HEAD_ARGMAX", "0") != "0"   # (11-20) the gather also stores each token's greedy next token
 
 
-def head_tensors(read, tp: int, rank: int, dev) -> dict:
-    """GPU rank's tensors: its vocab rows of head.weight (bf16, zero rows to whole 128-row blocks), x and the logits."""
-    w = read("head.weight")
-    V = w.shape[0] // tp
-    assert V * tp == w.shape[0] and w.shape[1] == HID, f"head.weight {tuple(w.shape)}"
-    hw = torch.zeros(-(-V // 128) * 128, HID, dtype=torch.bfloat16)
-    hw[:V] = w[rank * V:(rank + 1) * V]
-    w = {"head_w": hw.to(dev).contiguous(), "x": torch.zeros(T, HID, dtype=torch.bfloat16, device=dev),
-         "logits": torch.zeros(T, tp * V, dtype=torch.float32, device=dev)}
+def head_tensors(read, tp: int, rank: int, dev, shared: dict = None) -> dict:
+    """GPU rank's tensors: its vocab rows of head.weight (bf16, zero rows to whole 128-row blocks), x and the logits. shared
+    (11-21: a layer of another T): its head_w and logits' width instead of reading head.weight."""
+    if shared is not None:
+        hw, n = shared["head_w"], shared["logits"].shape[1]
+    else:
+        w = read("head.weight")
+        V = w.shape[0] // tp
+        assert V * tp == w.shape[0] and w.shape[1] == HID, f"head.weight {tuple(w.shape)}"
+        hw = torch.zeros(-(-V // 128) * 128, HID, dtype=torch.bfloat16)
+        hw[:V] = w[rank * V:(rank + 1) * V]
+        hw, n = hw.to(dev).contiguous(), tp * V
+    w = {"head_w": hw, "x": torch.zeros(T, HID, dtype=torch.bfloat16, device=dev),
+         "logits": torch.zeros(T, n, dtype=torch.float32, device=dev)}
     if ARGMAX:
         w["head_ids"] = torch.zeros(T, dtype=torch.int32, device=dev)
     return w

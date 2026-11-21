@@ -42,9 +42,11 @@ constexpr uint32_t FP8_STAGE_TX =
 constexpr uint32_t FP8_W_TX =
     2 * (16384 + SF_CHUNK); // a stage's weight bytes alone (x_q made in the
                             // task: fused act_quant, fp8_fused_act)
-constexpr int TM_WSF = 232, TM_XSF = TM_WSF + 4 * 2 * SMAX;
-static_assert(TM_XSF == TM_WSF + 4 * 2 * SMAX && TM_XSF + 4 * 2 * SMAX <= 512,
-              "gemm_fp8_tile: the TMEM columns of the scales");
+constexpr int TM_WSF = TM_W13_SF, TM_XSF = TM_WSF + 4 * 2 * SMAX; // (T = 64: 256)
+static_assert(TM_XSF == TM_WSF + 4 * 2 * SMAX && TM_XSF + 4 * 2 * SMAX <= 512 &&
+                  2 * ACC_STAGES * T <= TM_WSF,
+              "gemm_fp8_tile: the TMEM columns of the scales, past the "
+              "accumulators");
 
 __device__ __forceinline__ uint32_t idesc_mx8(uint32_t sf) {
   return idesc_mx(IDESC_MX_E4M3, sf);
@@ -199,7 +201,7 @@ __device__ __forceinline__ int issue_fp8_job(Fp8Job const &j,
                                              int iss,
                                              int g,
                                              int a STAGE_STAMP_PARAM) {
-  uint32_t const acc = tb + 8 * a + 32 * iss;
+  uint32_t const acc = tb + T * a + ACC_STAGES * T * iss; // (T = 8: 8 a + 32 iss)
   bool first = true;
   for (int s = 0; s < j.nst; s++, g++) {
     int const st = g % SMAX;
@@ -217,7 +219,7 @@ __device__ __forceinline__ int issue_fp8_job(Fp8Job const &j,
       cp_sf(sfa, base + OFF_WSF + c * SF_CHUNK);
       cp_sf(sfb, base + OFF_XSF + c * SF_CHUNK);
       uint64_t const dw = mkdesc(base + st * FSTAGE + at * 16384),
-                     dx = mkdesc(base + st * FSTAGE + W_STAGE + at * 1024);
+                     dx = mkdesc(base + st * FSTAGE + W_STAGE + at * (T * 128));
       for (int k = 0; k < 4; k++) {
         mma_mx(acc,
                dw + 2 * k,
@@ -263,7 +265,9 @@ __device__ __noinline__ int
                   uint32_t act_target,
                   uint32_t const *wait0 STAGE_STAMP_PARAM) {
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  int const a = wt & 3, par = (wt >> 2) & 1;
+  // accumulator tick wt: its columns' index a and parity (T = 8 and 16: 4 ticks)
+  int const a = ACC_STAGES == 4 ? (wt & 3) : acc_slot(wt),
+            par = (ACC_STAGES == 4 ? (wt >> 2) : acc_round(wt)) & 1;
   if (warp == 0) {
     if (lane == 0) {
       load_fp8_job(
@@ -271,9 +275,10 @@ __device__ __noinline__ int
     }
   } else if (warp == 1 || warp == 6) {
     if (lane == 0) {
-      if (wt >= 4) {
+      if (wt >= ACC_STAGES) {
         mbar_wait(rt.acc_empty0 + 8 * a,
-                  ((wt >> 2) - 1) & 1); // the stage's previous tile is drained
+                  ((ACC_STAGES == 4 ? (wt >> 2) : acc_round(wt)) - 1) &
+                      1); // the stage's previous tile is drained
       }
       rg =
           issue_fp8_job(j,
@@ -286,7 +291,7 @@ __device__ __noinline__ int
                                               : nullptr));
     }
   } else if (warp >= 2 && warp <= 5) {
-    float v[8];
+    float v[T];
     int const row = drain_acc<128>(tb, a, par, v);
 #ifdef STATIC_TIMING_BUILD
     if (FP8_STAMP == 3 && threadIdx.x == 64 && stamp) {
@@ -329,8 +334,10 @@ __device__ __noinline__ int
 // task's; their last readers were the SM's earlier MMAs, all done once warps
 // 2..5 drained the previous tile (before barrier 4, which every writer passes
 // first: run_gemm_fp8_tile); the next job's loader refills a slot only
-// after this job's MMAs on it (`empty`). Round r (nst rounds): unit u = 256 r +
-// threadIdx.x = token u / (32 nst), columns 8 (u % (32 nst)) .. + 7 of the job
+// after this job's MMAs on it (`empty`). Round r (nst T / 8 rounds): unit u =
+// 256 r + threadIdx.x = token u / (32 nst), columns 8 (u % (32 nst)) .. + 7 of
+// the job (T > 8: the activation tiles T rows of 128 B, the scale lines as
+// xq_scale_line's)
 // (4 threads a 32-column group, 16 a 128-column K tile, as
 // act_quant_parts_task): 2 P float4 in flight per thread (not all 8 tokens'
 // loads at once: the layer kernel's registers are all used, and a spill slows
@@ -340,11 +347,11 @@ __device__ __noinline__ int
 template <int P, int KA>
 __device__ __noinline__ void
     fp8_fused_act(float const *part, int c0, int nst, uint32_t base, int g0) {
-  static_assert(T == 8 && KA % 256 == 0,
-                "fused act_quant: 8 tokens, 256 threads, whole stages");
+  static_assert(T % 8 == 0 && KA % 256 == 0,
+                "fused act_quant: 8 tokens a round, 256 threads, whole stages");
   int const i = threadIdx.x, g8 = 32 * nst; // 8-column units of a token
 #pragma unroll 1
-  for (int r = 0; r < nst; r++) {
+  for (int r = 0; r < nst * (T / 8); r++) {
     int const u = 256 * r + i, t = u / g8, cg = u - t * g8, kk = cg >> 4,
               jl = cg & 15, st = (g0 + (kk >> 1)) % SMAX;
     float const *const src = part + (size_t)t * KA + c0 + 8 * cg;
@@ -400,22 +407,37 @@ __device__ __noinline__ void
     uint32_t const s4 = xq_scale_word<16>(ex); // 16 threads: a K tile
     // K tile kk of the job: stage kk / 2 (ring slot st), tile kk % 2; the
     // 16-B chunk (cg % 16) / 2 of row t, its 8-B half cg % 2
-    uint32_t const tile = base + st * FSTAGE + W_STAGE + (kk & 1) * 1024;
+    uint32_t const tile = base + st * FSTAGE + W_STAGE + (kk & 1) * (T * 128);
     asm volatile(
         "st.shared.v2.b32 [%0], {%1, %2};" ::"r"(
-            tile + t * 128 + ((((cg >> 1) & 7) ^ t) << 4) + 8 * (cg & 1)),
+            tile + t * 128 + ((((cg >> 1) & 7) ^ (T == 8 ? t : (t & 7))) << 4) +
+            8 * (cg & 1)),
         "r"(q0),
         "r"(q1)
         : "memory");
-    if (jl < 4) { // line t + 8 jl of the scale chunk (xq_scale_line)
-      asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};" ::"r"(
-                       base + OFF_XSF + (2 * st + (kk & 1)) * SF_CHUNK +
-                       (t + 8 * jl) * 16),
-                   "r"(jl == 0 ? s4 : 0u),
-                   "r"(0u),
-                   "r"(0u),
-                   "r"(0u)
+    uint32_t const chunk = base + OFF_XSF + (2 * st + (kk & 1)) * SF_CHUNK;
+    if constexpr (T <= 32) {
+      if (jl < XQ_LINES) { // line t + T jl of the scale chunk (xq_scale_line)
+        asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};" ::"r"(
+                         chunk + (t + T * jl) * 16),
+                     "r"(jl == 0 ? s4 : 0u),
+                     "r"(0u),
+                     "r"(0u),
+                     "r"(0u)
+                     : "memory");
+      }
+    } else if (jl == 0) { // T = 64: word t / 32 of line t % 32 (xq_scale_line)
+      asm volatile("st.shared.b32 [%0], %1;" ::"r"(chunk + (t % 32) * 16 +
+                                                    4 * (t / 32)),
+                   "r"(s4)
                    : "memory");
+      if (t < 32) {
+        asm volatile("st.shared.v2.b32 [%0], {%1, %2};" ::"r"(chunk + t * 16 +
+                                                               8),
+                     "r"(0u),
+                     "r"(0u)
+                     : "memory");
+      }
     }
   }
   asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -428,16 +450,17 @@ __device__ __noinline__ void
 // this job's loader fills slots g0 .. g0 + nst - 1 only, and 2 nst <= SMAX
 __device__ __forceinline__ void
     fp8_fused_copy(uint32_t base, int gp, int g0, int nst) {
-  for (int k = threadIdx.x; k < nst * 192; k += 256) {
-    int const s = k / 192, r = k - s * 192, a = (gp + s) % SMAX,
-              b = (g0 + s) % SMAX; // per stage: 2 tiles (128 x 16 B), then
+  constexpr int TU = 16 * T, SU = TU + 64; // (T = 8: 128, 192)
+  for (int k = threadIdx.x; k < nst * SU; k += 256) {
+    int const s = k / SU, r = k - s * SU, a = (gp + s) % SMAX,
+              b = (g0 + s) % SMAX; // per stage: 2 tiles (16 T x 16 B), then
                                    // 2 scale chunks (64 x 16 B)
-    uint32_t const src = r < 128 ? base + a * FSTAGE + W_STAGE + 16 * r
-                                 : base + OFF_XSF + 2 * a * SF_CHUNK +
-                                       16 * (r - 128),
-                   dst = r < 128 ? base + b * FSTAGE + W_STAGE + 16 * r
-                                 : base + OFF_XSF + 2 * b * SF_CHUNK +
-                                       16 * (r - 128);
+    uint32_t const src = r < TU ? base + a * FSTAGE + W_STAGE + 16 * r
+                                : base + OFF_XSF + 2 * a * SF_CHUNK +
+                                      16 * (r - TU),
+                   dst = r < TU ? base + b * FSTAGE + W_STAGE + 16 * r
+                                : base + OFF_XSF + 2 * b * SF_CHUNK +
+                                      16 * (r - TU);
     uint32_t w0, w1, w2, w3;
     asm volatile("ld.shared.v4.b32 {%0, %1, %2, %3}, [%4];"
                  : "=r"(w0), "=r"(w1), "=r"(w2), "=r"(w3)
@@ -641,21 +664,24 @@ __device__ __forceinline__ void run_gemm_fp8_tile(Maps const &maps,
       if (tk.x == 0 && (warp == 0 || warp == 7)) {
         unsigned char *const tap =
             buf_at<unsigned char>(g, slot_at<BUF_SLOTS, 0>());
+        constexpr int TC = 8 * T, KU = TC + 32; // (T = 8: 64, 96)
         for (int k = (threadIdx.x & 31) + (warp == 7 ? 32 : 0);
-             k < 2 * j.nst * 96;
+             k < 2 * j.nst * KU;
              k += 64) {
-          int const kk = k / 96, r = k - kk * 96,
+          int const kk = k / KU, r = k - kk * KU,
                     st = ((int)g0 + (kk >> 1)) % SMAX, at = kk & 1,
-                    kb = j.kt0 + kk; // 64 16-B chunks of the tile, 32 lines
+                    kb = j.kt0 + kk; // 8 T 16-B chunks of the tile, 32 lines
           uint32_t const src =
-              r < 64
-                  ? L.base + st * FSTAGE + W_STAGE + at * 1024 +
-                        (r >> 3) * 128 + (((r & 7) ^ (r >> 3)) << 4)
-                  : L.base + OFF_XSF + (2 * st + at) * SF_CHUNK + 16 * (r - 64);
+              r < TC ? L.base + st * FSTAGE + W_STAGE + at * (T * 128) +
+                           (r >> 3) * 128 +
+                           (((r & 7) ^ (T == 8 ? (r >> 3) : ((r >> 3) & 7)))
+                            << 4)
+                     : L.base + OFF_XSF + (2 * st + at) * SF_CHUNK +
+                           16 * (r - TC);
           unsigned char *const dst =
-              r < 64
+              r < TC
                   ? tap + (size_t)(r >> 3) * K + kb * 128 + 16 * (r & 7)
-                  : tap + (size_t)T * K + (size_t)kb * SF_CHUNK + 16 * (r - 64);
+                  : tap + (size_t)T * K + (size_t)kb * SF_CHUNK + 16 * (r - TC);
           uint4 v;
           asm volatile("ld.shared.v4.b32 {%0, %1, %2, %3}, [%4];"
                        : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)

@@ -63,17 +63,31 @@ __device__ __forceinline__ uint32_t xq_scale_word(int ex) {
   }
   return s4;
 }
-// line t + 8 j (j < 4) of block kb's scale chunk in the output (out: x_q of
-// width K, then the chunks): line t row t's 4 scale bytes s4, lines t + 8,
-// t + 16, t + 24 zeros
-static_assert(T == 8 && SF_CHUNK == 32 * 16,
-              "xq_scale_line: the T = 8 tasks (one per token) write the "
-              "chunk's 32 lines of 16 B, 4 each");
+// line t + T j (j < XQ_LINES = 32 / T) of block kb's scale chunk in the
+// output (out: x_q of width K, then the chunks): line t row t's 4 scale bytes
+// s4, the task's other lines zeros (T = 8: lines t + 8, t + 16, t + 24), so the
+// T tasks (one per token) write the chunk's 32 lines of 16 B. T = 64: row t is
+// the 4-byte word t / 32 of line t % 32 (the chunk's layout: row r's scales at
+// byte 16 (r % 32) + 4 (r / 32)), the tasks of t < 32 also zero words 2, 3
+constexpr int XQ_LINES = T >= 32 ? 1 : 32 / T;
+static_assert((T == 8 || T == 16 || T == 32 || T == 64) &&
+                  SF_CHUNK == 32 * 16,
+              "xq_scale_line: the T tasks (one per token) write the chunk's "
+              "32 lines of 16 B");
 __device__ __forceinline__ void xq_scale_line(
     unsigned char *out, int K, int kb, int t, int j, uint32_t s4) {
-  *reinterpret_cast<uint4 *>(out + xq_scales_at(K) + (size_t)kb * SF_CHUNK +
-                             (t + 8 * j) * 16) =
-      make_uint4(j == 0 ? s4 : 0u, 0u, 0u, 0u);
+  if constexpr (T <= 32) {
+    *reinterpret_cast<uint4 *>(out + xq_scales_at(K) + (size_t)kb * SF_CHUNK +
+                               (t + T * j) * 16) =
+        make_uint4(j == 0 ? s4 : 0u, 0u, 0u, 0u);
+  } else {
+    unsigned char *const line =
+        out + xq_scales_at(K) + (size_t)kb * SF_CHUNK + (t % 32) * 16;
+    *reinterpret_cast<uint32_t *>(line + 4 * (t / 32)) = s4;
+    if (t < 32) {
+      *reinterpret_cast<uint2 *>(line + 8) = make_uint2(0u, 0u);
+    }
+  }
 }
 
 // columns c .. c + 7 of token t's row of a gemm_fp8_tile node's output in
@@ -209,7 +223,7 @@ __device__ __forceinline__ void act_quant_task(__nv_bfloat16 const *x,
                    xq_pack4(v + 8, ex),
                    xq_pack4(v + 12, ex));
     uint32_t const s4 = xq_scale_word<8>(ex); // 8 threads = a 128-column block
-    if (j < 4) {
+    if (j < XQ_LINES) {
       xq_scale_line(out, K, c / 128, t, j, s4);
     }
   }
@@ -268,7 +282,7 @@ __device__ __forceinline__ void
       uint32_t const s4 = xq_scale_word<16>(ex); // 16 threads: a 128-col block
       if (real) {
         *reinterpret_cast<uint2 *>(out + (size_t)t * K + c) = q;
-        if ((l & 15) < 4) {
+        if ((l & 15) < XQ_LINES) {
           xq_scale_line(out, K, c / 128, t, l & 15, s4);
         }
       }
@@ -347,7 +361,7 @@ __device__ __forceinline__ void act_quant_swiglu_task(float const *part,
       uint32_t const s4 = xq_scale_word<16>(ex); // 16 threads: a 128-col block
       if (real) {
         *reinterpret_cast<uint2 *>(out + (size_t)t * K + c) = q;
-        if ((l & 15) < 4) {
+        if ((l & 15) < XQ_LINES) {
           xq_scale_line(out, K, c / 128, t, l & 15, s4);
         }
       }

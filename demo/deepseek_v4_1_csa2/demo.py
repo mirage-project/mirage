@@ -71,14 +71,15 @@ from safetensors import safe_open
 from mirage.core import bfloat16, float32, uint8
 from mirage.mpk import compiler
 from mirage.mpk.static_harness import Harness
-from mirage.mpk.static_megakernel import MAX_BUFS, RING_STAGES, StaticMegakernel, zq_bytes
+from mirage.mpk.static_megakernel import MAX_BUFS, StaticMegakernel, ring_stages, zq_bytes
 
 try:
     from .weights import checkpoint_reader, download_layer, layer_tensors, model_config, variant_of   # as a package
 except ImportError:
     from weights import checkpoint_reader, download_layer, layer_tensors, model_config, variant_of    # as a script
 
-T, HID, QL, D, W, OL, NC = 8, 5120, 1280, 512, 128, 1024, 512   # tokens, dim, q_lora_rank, head_dim, window, o_lora_rank, top-k
+T = int(os.environ.get("STATIC_TOKENS", "8"))   # tokens (rows) per step: the kernel's T (8, 16, 32 or 64)
+HID, QL, D, W, OL, NC = 5120, 1280, 512, 128, 1024, 512   # dim, q_lora_rank, head_dim, window, o_lora_rank, top-k
 ROW, CROW, IROW = D + D // 32, D // 2 + D // 16, 64 + 4          # bytes per row: window cache, compressed KV, index K
 # the variants whose wo_b quantizes wo_a's output itself (no act_quant node between them; build_graph); the SWA layer keeps the
 # node (faster there)
@@ -191,8 +192,9 @@ def build_graph(mpk: StaticMegakernel, w: dict, variant: str, ratio: int, csrc: 
                           output=o_q, window_rows=a("window_rows"), **cx)   # q from wq_b's K parts (its RoPE done there)
     wo_a_part = nt((T, G * OL), float32, "wo_a_part")
     mpk.gemm_fp8_tile_layer(input=o_q, weight=a("wo_a_weight"), weight_scales=a("wo_a_scales"), output=wo_a_part, groups=G)
-    # fused only when each of wo_b's 4 K parts (hand_grids) is at most RING_STAGES / 2 stages: TP4 (K 2048), not TP2 / TP1
-    fused = variant in OA_Q_FUSED_IN and G * OL // 4 // 256 <= RING_STAGES // 2
+    # fused only when each of wo_b's 4 K parts (hand_grids) is at most half the ring's stages (T <= 16: 5, 32: 4, 64: 3):
+    # TP4 (K 2048) at T <= 32, not TP2 / TP1
+    fused = variant in OA_Q_FUSED_IN and G * OL // 4 // 256 <= ring_stages(T) // 2
     if fused:   # wo_b's tasks quantize wo_a's K parts themselves (gemm_fp8_tile.cuh fp8_fused_act): no oa_q hop
         oa_q = wo_a_part
         # x_q still lands in "oa_q" (act_quant's layout; build returns it with the node buffers): wo_b's row block 0 copies it
@@ -227,7 +229,10 @@ def score_chunks(heads: int, cap: int, sms: int) -> int:
     sparse_attn task (H < 64: a task per pair) or an indexer_topk task. TP4 at 4096 positions: 2 halves, 9 chunks, 72 tasks on
     100 SMs, instead of 136 in 2 rounds; full_r2 there: 9 chunks of 256."""
     ch, free = cap // 256, sms - T * heads // 16 * (1 + NC // 128 if heads < 64 else 1) - T
-    return -(-ch // -(-T * ch // free)) if free > 0 else ch
+    n = -(-ch // -(-T * ch // free)) if free > 0 else ch
+    # T > 8 (11-21): fewer free SMs a token, so larger chunks: at most 2048 positions a task (8 halves; its index K in shared
+    # memory: 68 B a position, 2048 -> 148 KB of the 227)
+    return max(n, -(-ch // 8)) if T > 8 else n
 
 
 # the hand plan's grids, by output tensor name
@@ -273,8 +278,12 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
             grid["eg_emb"] = (T, 1, 1)
     rows = [(idx, (x, 0, 0)) for idx, name in names.items() if name == "eg_emb" for x in range(T)]
     grids = {idx: grid[name] for idx, name in names.items()}
+    # T > 8 (11-21): a node whose tasks of one token run at once along x (the post with the next input, the Engram gate)
+    # token by token, so that a token's tasks land on different SMs (as moe_demo.hand_plan)
+    conc = {n.graph_idx for n in nodes if n.info.get("concurrent_along_axis") == 0} if T > 8 else set()
     tasks = [(idx, (x, y, z)) for idx in sorted(grids) for x in range(grids[idx][0]) for y in range(grids[idx][1])
              for z in range(grids[idx][2])]
+    tasks = sorted(tasks, key=lambda tk: (tk[0], tk[1][1], tk[1][0], tk[1][2]) if tk[0] in conc else (tk[0],) + tk[1])
     sa = next(idx for idx, name in names.items() if name == "o_q")
     own = [tk for tk in tasks if tk[0] == sa]
     before = sorted((tk for tk in tasks if tk[0] < sa), key=lambda tk: BEFORE.index(names[tk[0]]))
@@ -290,6 +299,9 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     first = [tk for tk in before if topk_first and names[tk[0]] == "compress_idx"]
     before = [tk for tk in before if tk not in first]
     m = n + len(first)
+    if T > 8 and m >= sms:   # (11-21: sparse_attn's tasks leave no SM for the nodes before it) round robin with these grids
+        from mirage.mpk import plan_gen
+        return plan_gen.round_robin_plan(mpk, grids)
     lists = [[own[sm]] if sm < n else [first[sm - n]] if sm < m else before[sm - m::sms - m] for sm in range(sms)]
     # (DSV41_ENGRAM=2) Engram's kv tasks behind the nodes before sparse_attn, round robin over the SMs without a sparse_attn
     # task, ahead of the nodes after it: they run while sparse_attn's inputs and o_q are computed (wo_a / wo_b wait for o_q).
@@ -358,6 +370,8 @@ def build(ws: list, variant: str, ratio: int, csrc: bool, heads: int, out: str, 
     # STATIC_FREE_SMS_ATTN: SMs left out of the launch (no CTA there): a framework's side stream runs on them meanwhile
     sms = torch.cuda.get_device_properties(0).multi_processor_count - int(os.environ.get("STATIC_FREE_SMS_ATTN", 0))
     mpk = StaticMegakernel(num_gpus=gpus, num_sms=sms)
+    if T > 8:   # (11-21) the per-token counters of T = 64: more than config.cuh's default 16 lines
+        mpk.max_counter_lines = 32
     build_graph(mpk, w, variant, ratio, csrc, heads)
     if x_flag:   # H1 stage B: x's flag and the deferred wait (x_flag_modes)
         mpk.x_flag_modes = x_flag_modes(mpk, x_flag_prefill)
@@ -435,7 +449,8 @@ def random_inputs(w: dict, variant: str, ratio: int, pos: int, seed: int = 1):
 def from_buffer(buf: torch.Tensor, K: int):
     """act_quant's layout (o_q, oa_q): e4m3 bytes [T, K], then per 128 columns a 512-B scale chunk -> bytes, scales [T, K / 32]."""
     o = buf.cpu()
-    return o[:T * K].view(T, K), o[T * K:].view(K // 128, 32, 16)[:, :T, :4].permute(1, 0, 2).reshape(T, K // 32)
+    # (a chunk's row r: line r % 32, word r / 32; T <= 32: word 0)
+    return o[:T * K].view(T, K), o[T * K:].view(-1, 32, 4, 4).permute(0, 2, 1, 3).reshape(-1, 128, 4)[:, :T].permute(1, 0, 2).reshape(T, K // 32)
 
 
 def added(buf: torch.Tensor, n: int) -> torch.Tensor:
@@ -447,31 +462,40 @@ def added(buf: torch.Tensor, n: int) -> torch.Tensor:
     return out
 
 
+GOLDEN_T = 8   # the golden cases' rows (8 requests a step)
+
+
+def rep(v: torch.Tensor) -> torch.Tensor:
+    """A golden tensor of GOLDEN_T rows as T rows (T > 8, 11-21: the step's 8 requests T / 8 times, each copy its own cache
+    rows; every row is checked against the golden)."""
+    return v if v.shape[0] == T else v.repeat((T // v.shape[0],) + (1,) * (v.dim() - 1))
+
+
 def golden_state(w: dict, g, src, pre: str, variant: str, ratio: int, csrc: bool):
     """Set the graph tensors to golden step g's inputs and the state before it: src's tensors named pre + name (the case's
-    shared state, pre "", before its first step; the step before's, pre "state_after.")."""
-    cat = lambda src, name, row: torch.cat([src.get_tensor(name + (".fp8" if row == D else ".fp4")).view(torch.uint8)
-                                            .reshape(T, -1, row), src.get_tensor(name + ".scale").view(torch.uint8)], -1)
-    w["x"].copy_(g.get_tensor("x"))
-    w["positions"].copy_(g.get_tensor("positions"))
+    shared state, pre "", before its first step; the step before's, pre "state_after."). T > 8: rep."""
+    cat = lambda src, name, row: rep(torch.cat([src.get_tensor(name + (".fp8" if row == D else ".fp4")).view(torch.uint8)
+                                                .reshape(GOLDEN_T, -1, row), src.get_tensor(name + ".scale").view(torch.uint8)], -1))
+    w["x"].copy_(rep(g.get_tensor("x")))
+    w["positions"].copy_(rep(g.get_tensor("positions")))
     if "window_loc" in w:   # (not in check_golden's expected state)
         window_tables(w)
     w["window_cache"].copy_(cat(src, pre + "window_kv_cache", D))
     if variant.startswith("full"):
         new = {"compress_cache": cat(src, pre + "compress_kv_cache", D // 2), "index_k": cat(src, pre + "indexer.k_cache", 64)}
         if ratio == 2:
-            w["cmp_state"][:, :, 0].copy_(src.get_tensor(pre + "compressor.kv_state"))
-            w["cmp_state"][:, :, 1].copy_(src.get_tensor(pre + "compressor.score_state"))
+            w["cmp_state"][:, :, 0].copy_(rep(src.get_tensor(pre + "compressor.kv_state")))
+            w["cmp_state"][:, :, 1].copy_(rep(src.get_tensor(pre + "compressor.score_state")))
     elif variant in ("reuse", "reindex"):
         new = {"compress_cache": cat(g, "in.compress_kv", D // 2)}
         if variant == "reindex":
             new["index_k"] = cat(g, "in.index_k", 64)
-            cb = g.get_tensor("in.candidates")
+            cb = rep(g.get_tensor("in.candidates"))
             nb = (cb.shape[1] + 7) // 8
             w["candidates"].zero_()
             w["candidates"][:, :nb].copy_(torch.nn.functional.pad(cb, (0, nb * 8 - cb.shape[1])).view(T, nb, 8).any(-1).byte())
         else:
-            ti = g.get_tensor("topk_idxs")[:, W:]
+            ti = rep(g.get_tensor("topk_idxs"))[:, W:]
             ids = torch.full((T, NC), -1, dtype=torch.int32)
             ids[:, :ti.shape[1]] = torch.where(ti >= 0, ti - W, ti)
             w["compress_idx"].copy_(ids)
@@ -537,8 +561,8 @@ def check_golden(args, ws: list, shards: list, variant: str, ratio: int, csrc: b
             exp = {n: w[n].clone() for n in ("x", "positions", *state)}   # the state the step should leave
             golden_state(exp, g, g, "state_after.", variant, ratio, csrc)
             ysum = torch.zeros(T, HID, dtype=torch.float32, device=w["x"].device)   # GPU 0 (a launch leaves another current)
-            g_oq = g.get_tensor("o_q").view(torch.uint8).view(T, 64, D)
-            g_os = g.get_tensor("o_s").view(torch.uint8).view(T, 64, D // 32)
+            g_oq = rep(g.get_tensor("o_q").view(torch.uint8).view(GOLDEN_T, 64, D))
+            g_os = rep(g.get_tensor("o_s").view(torch.uint8).view(GOLDEN_T, 64, D // 32))
             if multi:
                 args.h.launch(0, timeout_s=60)
             for r in range(len(shards)):
@@ -564,12 +588,16 @@ def check_golden(args, ws: list, shards: list, variant: str, ratio: int, csrc: b
                     sst["values equal"] += int((got == ref).sum())
                     sst["values"] += got.numel()
                     sst["relRMS max"] = max(sst["relRMS max"], ((got - ref).norm() / ref.norm().clamp(min=1e-30)).item())
-            y, gold = ysum.bfloat16().float(), g.get_tensor("y").to(ysum.device).float()
+            y, gold = ysum.bfloat16().float(), rep(g.get_tensor("y")).to(ysum.device).float()
             if multi:   # the layer's own all-reduce
                 y_ref, y = y, w["y"].float()
                 stats["steps with y equal on every GPU"] += int(all(torch.equal(wg["y"].cpu(), w["y"].cpu()) for wg in ws))
                 stats["y values equal to y_ref"] += int((y == y_ref).sum())
                 stats["y vs y_ref relRMS max"] = max(stats["y vs y_ref relRMS max"], ((y - y_ref).norm() / y_ref.norm()).item())
+            if T > GOLDEN_T:   # (T > 8) the copies of the 8 requests: y bit for bit the first copy's
+                y8 = y.view(T // GOLDEN_T, GOLDEN_T, -1)
+                stats["steps with every copy's y = the first's"] = stats.get("steps with every copy's y = the first's", 0) + \
+                    int(all(torch.equal(y8[i], y8[0]) for i in range(1, T // GOLDEN_T)))
             near = (gold.abs() * 2.0 ** -7).clamp(min=2.0 ** -133)   # 1 to 2 bf16 steps at the golden's magnitude
             stats["y values within 2^-7 relative"] += int(((y - gold).abs() <= near).sum())
             stats["y values"] += y.numel()

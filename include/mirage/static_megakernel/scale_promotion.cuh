@@ -96,10 +96,17 @@ __device__ __forceinline__ void issue_promoted(uint32_t base,
         uint64_t const db =
             mkdesc(base + st * FSTAGE + W_STAGE + at * (T * 128));
         if (one) {
-          mma_mx(acc, dw, db, idesc_mx(IDESC, 0), 0u, sfc, sfc);
-          mma_mx(acc, dw + 2, db + 2, idesc_mx(IDESC, 1), 1u, sfc, sfc);
-          mma_mx(acc, dw + 4, db + 4, idesc_mx(IDESC, 2), 1u, sfc, sfc);
-          mma_mx(acc, dw + 6, db + 6, idesc_mx(IDESC, 3), 1u, sfc, sfc);
+          if constexpr (F8_UNSCALED) { // T = 64 (runtime.cuh mma_f8)
+            mma_f8(acc, dw, db, 0u);
+            mma_f8(acc, dw + 2, db + 2, 1u);
+            mma_f8(acc, dw + 4, db + 4, 1u);
+            mma_f8(acc, dw + 6, db + 6, 1u);
+          } else {
+            mma_mx(acc, dw, db, idesc_mx(IDESC, 0), 0u, sfc, sfc);
+            mma_mx(acc, dw + 2, db + 2, idesc_mx(IDESC, 1), 1u, sfc, sfc);
+            mma_mx(acc, dw + 4, db + 4, idesc_mx(IDESC, 2), 1u, sfc, sfc);
+            mma_mx(acc, dw + 6, db + 6, idesc_mx(IDESC, 3), 1u, sfc, sfc);
+          }
         }
       }
       if (one) {
@@ -169,8 +176,8 @@ __device__ __forceinline__ int drain_promoted(
     v[t] = 0.0f;
   }
   // the pieces of a round (q = 2 issuer + piece) in batches of QB: their
-  // loads before one wait (T = 32: 2 at a time, for the registers)
-  constexpr int QB = T <= 16 ? 4 : 2;
+  // loads before one wait (T = 32: 2 at a time, T = 64: 1, for the registers)
+  constexpr int QB = T <= 16 ? 4 : T == 32 ? 2 : 1;
   for (int r = 0; r < ROUNDS; r++) {
     int const tick = wtt + r, a = acc_slot(tick);
     mbar_wait(rt.acc_full0 + 8 * a, acc_round(tick) & 1);

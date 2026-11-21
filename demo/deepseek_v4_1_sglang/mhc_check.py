@@ -19,7 +19,7 @@ from deepseek_v4_1_moe import demo as moe_demo         # noqa: E402
 from deepseek_v4_1_moe import weights as moe_weights   # noqa: E402
 from mirage.mpk.static_harness import Harness          # noqa: E402
 
-T, H, HC, EPS, HC_EPS, ITERS = 8, 5120, 4, 1e-20, 1e-6, 20
+T, H, HC, EPS, HC_EPS, ITERS = attn_demo.T, 5120, 4, 1e-20, 1e-6, 20   # T: STATIC_TOKENS (the demos', default 8)
 ap = argparse.ArgumentParser()
 ap.add_argument("--checkpoint", required=True)
 ap.add_argument("--layer", type=int, default=3)
@@ -302,7 +302,7 @@ if GEN_ONLY:
 sk, bufs, info = build("mhc", a.flag)
 h = Harness(sk)
 print(f"mhc build {time.time() - t0:.0f} s, grids {info['grids']}", flush=True)
-h.launch(timeout_s=60)
+h.launch(timeout_s=float(os.environ.get("MHC_TIMEOUT", 60)))   # (MHC_TIMEOUT: a debug run, e.g. under compute-sanitizer)
 print(f"L{L} {a.kind}: span {h.span_us():.1f} us", flush=True)
 
 

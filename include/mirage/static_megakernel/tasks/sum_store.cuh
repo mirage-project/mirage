@@ -3,8 +3,9 @@
 // before the launch: polled) added in part order -> bf16 (fp8_gemm's bf16
 // output) -> the layer's output y [T][N] (a graph tensor, written by pointer;
 // every value each launch). Task x of grid (N / NC, 1, 1): columns [x NC,
-// (x + 1) NC), NC whole 128-column blocks; per block warp t takes token t,
-// lane l columns 4 l .. 4 l + 3. Then the node's counter += 1. warm = false
+// (x + 1) NC), NC whole 128-column blocks; per block warp t takes token t
+// (T > 8: tokens t, t + 8, ..., one after another), lane l columns 4 l ..
+// 4 l + 3. Then the node's counter += 1. warm = false
 // (this node's first task on the SM): first a dry pass, the same
 // code with one round of loads and no stores, while wo_b's parts are on their
 // way; one copy of the code (unroll 1).
@@ -46,9 +47,10 @@ __device__ __forceinline__ void sum_store_task(G const &g,
                                                uint32_t *done_cnt,
                                                int x,
                                                bool warm STAGE_STAMP_PARAM) {
-  static_assert(T == 8 && NC % 128 == 0 && N % NC == 0,
-                "sum_store: a warp per token, whole 128-column blocks");
-  int const t = threadIdx.x >> 5, l = threadIdx.x & 31;
+  static_assert(T % 8 == 0 && NC % 128 == 0 && N % NC == 0,
+                "sum_store: a warp per token (T / 8 in turn), whole 128-column "
+                "blocks");
+  int const l = threadIdx.x & 31;
   constexpr size_t XR = (size_t)T * N * 2; // one GPU's slot (bf16)
 #pragma unroll 1
   for (int pass = warm ? 1 : 0; pass < 2; pass++) {
@@ -63,6 +65,8 @@ __device__ __forceinline__ void sum_store_task(G const &g,
       }
     }
 #endif
+    for (int ti = 0; ti < T / 8; ti++) { // (T = 8: once, t = the warp)
+    int const t = (threadIdx.x >> 5) + 8 * ti;
     for (int c = x * NC + 4 * l; c < (x + 1) * NC; c += 128) {
       float4 v[P];
       bool ok[P];
@@ -190,9 +194,12 @@ __device__ __forceinline__ void sum_store_task(G const &g,
         }
       }
     }
+    }
   }
   if constexpr (GPUS > 1 && !SEND_ONLY) { // every GPU's sums of these columns,
                                           // in GPU order
+    for (int ti = 0; ti < T / 8; ti++) {
+    int const t = (threadIdx.x >> 5) + 8 * ti;
     for (int c = x * NC + 4 * l; c < (x + 1) * NC; c += 128) {
       // the pair's 16 B (both lanes load them; each takes its half)
       unsigned char const *row =
@@ -247,6 +254,7 @@ __device__ __forceinline__ void sum_store_task(G const &g,
           }
         }
       }
+    }
     }
   }
   __syncthreads();

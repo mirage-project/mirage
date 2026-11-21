@@ -48,7 +48,10 @@ def main():
     tok = AutoTokenizer.from_pretrained(a.tokenizer or a.model, trust_remote_code=True)
     if a.template:
         tok.chat_template = open(a.template).read()
-    prompts = ([PROMPTS[0]] * 8 if a.same_length_copies else PROMPTS)[:a.prompts]
+    # more than 8 (11-21, decode batches of up to 64 rows): the 8 again, each copy marked "(2)", "(3)", ... (distinct requests)
+    base = [PROMPTS[0]] * max(8, a.prompts) if a.same_length_copies else \
+        [q if i < 8 else f"{q} ({i // 8 + 1})" for i, q in enumerate(PROMPTS * (-(-a.prompts // 8)))]
+    prompts = base[:a.prompts]
     texts = [tok.apply_chat_template([{"role": "user", "content": " ".join([q] * a.repeat)}], tokenize=False,
                                      add_generation_prompt=True, enable_thinking=False) for q in prompts]
     ids = [tok.encode(t, add_special_tokens=False) for t in texts]
@@ -65,7 +68,8 @@ def main():
     if a.deterministic:
         extra["enable_deterministic_inference"] = True
     llm = sgl.Engine(model_path=a.model, tokenizer_path=a.tokenizer or a.model, trust_remote_code=True, tp_size=int(os.environ.get("SGL_TP", "4")),
-                     max_running_requests=8, cuda_graph_max_bs_decode=8, context_length=a.ctx, max_total_tokens=a.max_total_tokens,
+                     max_running_requests=max(8, a.prompts), cuda_graph_max_bs_decode=max(8, a.prompts), context_length=a.ctx,
+                     max_total_tokens=a.max_total_tokens,
                      mem_fraction_static=a.mem_fraction, disable_radix_cache=True, disable_cuda_graph=not a.graph,
                      log_level="warning", **extra)
     t0 = time.perf_counter()
@@ -78,7 +82,7 @@ def main():
         s = o["text"]
         cut = s.find(tok.eos_token) if tok.eos_token else -1
         answers.append(s[:cut] if cut >= 0 and not a.ignore_eos else s)
-    print(f"up to {a.tokens} new tokens in {dt:.1f} s; distinct answers among the 8: {len(set(answers))}", flush=True)
+    print(f"up to {a.tokens} new tokens in {dt:.1f} s; distinct answers among the {len(answers)}: {len(set(answers))}", flush=True)
     for q, s in zip(prompts, answers):
         print("ANSWER:", repr(q[:40]), "->", repr(s[:200]), flush=True)
     if a.out:

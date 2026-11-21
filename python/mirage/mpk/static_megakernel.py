@@ -28,8 +28,9 @@ MAX_BUFS, MAX_MAPS, NODE_COUNTER_LINES, RING_STAGES = 24, 32, 16, 5   # RING_STA
 
 
 def ring_stages(tokens: int) -> int:
-    """The GEMM weight ring's stages (config.cuh SMAX) at T tokens: 5, or 4 at T = 32 (the activation's T x 256 B a stage)."""
-    return 5 if tokens <= 16 else 4
+    """The GEMM weight ring's stages (config.cuh SMAX) at T tokens: 5, 4 at T = 32, 3 at T = 64 (the activation's T x 256 B
+    a stage)."""
+    return 5 if tokens <= 16 else 4 if tokens == 32 else 3
 COMBINE = {"slots": 0, "add": 1, "store": 2, "store_bf16": 3}
 SF_CHUNK = 512   # one MX scale chunk (config.cuh): 128 rows x 4 B
 MAX_SUM_PARTS = 14   # the most K parts sum_send adds (tasks/sum_send.cuh)

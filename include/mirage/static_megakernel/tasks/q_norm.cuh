@@ -162,7 +162,7 @@ __device__ QN_TASK_INLINE void q_norm_task(float const *part,
           xq_scale_word<16>(ex); // 16 threads = a 128-column block
       if (real) {
         *reinterpret_cast<uint2 *>(out + (size_t)t * K + c) = q;
-        if ((l & 15) < 4) {
+        if ((l & 15) < XQ_LINES) {
           xq_scale_line(out, K, c / 128, t, l & 15, s4);
         }
       }

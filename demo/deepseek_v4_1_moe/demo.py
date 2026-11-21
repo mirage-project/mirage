@@ -67,7 +67,8 @@ try:
 except ImportError:   # as a script
     from weights import checkpoint_reader, download_layer, layer_tensors, model_config, routed_tensors, unpack_pieces
 
-T, HID, E, K, INTER = 8, 5120, 384, 6, 2304   # tokens, dim, routed experts, experts per token, expert intermediate
+T = int(os.environ.get("STATIC_TOKENS", "8"))   # tokens (rows) per step: the kernel's T (8, 16, 32 or 64)
+HID, E, K, INTER = 5120, 384, 6, 2304   # dim, routed experts, experts per token, expert intermediate
 ROUTE_SCALE, SWIGLU_LIMIT = 1.5, 10.0          # model.py Gate.forward's route_scale; Expert's clamp
 ROUTER_PARTS = 8   # the router's K parts: 5 K tiles of 128 each, a task's K fits the ring's 5 stages
 HQ, HQ_SF = "swiglu_moe_experts.h_q", "swiglu_moe_experts.h_q_scales"   # the expert node's scratch (given: the check reads h_q)
@@ -211,9 +212,17 @@ def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
         grid.update({"head_part": (vp // 128, HEAD_KP, 1), "head_sent": (HEAD_SEND, 1, 1), "logits": (HEAD_GQ, T, 1),
                      "logits_am": (HEAD_GQ, T, 1)})   # (logits_am: the gather with the argmax)
     grids = {idx: grid[name] for idx, name in names.items()}
-    tasks = lambda name: [(idx, (x, y, 0)) for idx in grids if names[idx] == name
-                          for x in range(grids[idx][0]) for y in range(grids[idx][1])]
+    # T > 8 (11-21): a node whose tasks of one token run at once (concurrent along x: the post with the next input, the
+    # Engram gate) dealt token by token, so that a token's tasks land on different SMs in the same order on every SM
+    conc = {n.graph_idx for n in nodes if n.info.get("concurrent_along_axis") == 0} if T > 8 else set()
+
+    def tasks(name):
+        ts = [(idx, (x, y, 0)) for idx in grids if names[idx] == name for x in range(grids[idx][0]) for y in range(grids[idx][1])]
+        return sorted(ts, key=lambda tk: (tk[1][1], tk[1][0])) if ts and ts[0][0] in conc else ts
     order = [tk for name in ("pairs", "hs_q", "x_q", "logit_part", "sgu_part", "sd_part") for tk in tasks(name)]
+    if T > 8 and len(order) > sms + (sms - 16):   # (11-21, T = 64: the front's tasks fill more than two rounds) round robin
+        from mirage.mpk import plan_gen
+        return plan_gen.round_robin_plan(mpk, grids)
     # more tasks than SMs (STATIC_FREE_SMS_MOE): the last ones behind the first short tasks that do not wait for them (x_q's, the router's)
     assert len(order) <= sms + (sms - 16), f"{len(order)} tasks, {sms} SMs"
     ex = next(idx for idx, name in names.items() if name == "routed_rows")
@@ -237,7 +246,8 @@ def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
         for i, tk in enumerate(tasks("eg_q")):
             sm = (len(order) + i) % sms
             lists[sm].insert(lists[sm].index((ex, (sm, 0, 0))), tk)
-        free = list(range(busy, sms))   # the SMs with nothing after their expert task
+        free = list(range(busy, sms)) or list(range(sms))   # the SMs with nothing after their expert task (T > 8: maybe
+        # none: then all, the gate's tasks last on them)
         for i, tk in enumerate(tasks("eg_part")):
             lists[free[i % len(free)]].append(tk)
         for i, tk in enumerate(tasks("eg_sent")):
@@ -296,6 +306,8 @@ def build(ws: list, out: str, profile: bool = False, extra_flags: list = None, p
     # STATIC_FREE_SMS_MOE: SMs left out of the launch (no CTA there): a framework's side stream runs on them meanwhile
     sms = torch.cuda.get_device_properties(0).multi_processor_count - int(os.environ.get("STATIC_FREE_SMS_MOE", 0))
     mpk = StaticMegakernel(num_gpus=gpus, num_sms=sms)
+    if T > 8:   # (11-21) the expert node's counter per expert slot (T K of them) and the per-token counters: T = 64 needs
+        mpk.max_counter_lines = 32   # more than config.cuh's default 16 (the generated layer defines STATIC_NODE_COUNTER_LINES)
     mpk.moe_rows_poll = "-DMOE_ROWS_POLL" in (extra_flags or [])   # (C12, 11-18: sum_store polls the routed rows; default off)
     build_graph(mpk, w, valid_rows=valid_rows)
     if x_flag:   # H1 stage A: x's flag and the deferred wait (x_flag_modes)
@@ -357,7 +369,8 @@ def from_buffer(buf: torch.Tensor, n: int):
     """act_quant's layout: e4m3 bytes [T, n], then per 128 columns a 512-B scale chunk -> bytes [T, n], scale bytes [T, n / 32]
     (CPU)."""
     o = buf.cpu()
-    return o[:T * n].view(T, n), o[T * n:].view(n // 128, 32, 16)[:, :T, :4].permute(1, 0, 2).reshape(T, n // 32)
+    # (a chunk's row r: line r % 32, word r / 32; T <= 32: word 0)
+    return o[:T * n].view(T, n), o[T * n:].view(-1, 32, 4, 4).permute(0, 2, 1, 3).reshape(-1, 128, 4)[:, :T].permute(1, 0, 2).reshape(T, n // 32)
 
 
 def w8_dequant(wb: torch.Tensor, chunks: torch.Tensor) -> torch.Tensor:
@@ -387,7 +400,7 @@ def partial_reference(bufs: dict, w: dict, I: int) -> torch.Tensor:
         W2 = unpack_pieces(w["w2"][e].view(OT2, KT2, 128, 64), w["w2_scales"][e].view(OT2, KT2, 512))
         W2 = W2.transpose(1, 2).reshape(HID, IRP)
         for t, k in (ids == e).nonzero().tolist():
-            q, sc = hq_all[si * T + t], hsf_all[si, :, t, :4].reshape(-1)
+            q, sc = hq_all[si * T + t], hsf_all[si, :, t % 32, 4 * (t // 32):4 * (t // 32) + 4].reshape(-1)
             ref[t] += float(wts[t, k]) * (W2 @ (q.view(torch.float8_e4m3fn).double() *
                                                 torch.exp2(sc.double() - 127).repeat_interleave(32)))
     q, sc = from_buffer(bufs["hs_q"], KO)
@@ -479,8 +492,9 @@ def main():
                     "all-reduce in the layer (sum_store's exchange)")
     ap.add_argument("--tp", type=int, default=4, help="MoE TP size: 4 (576 intermediate columns per GPU); with --gpus 1 also 2 or 1")
     ap.add_argument("--rank", type=int, default=0, help="with --gpus 1: the rank whose columns the GPU holds")
-    ap.add_argument("--x", help="the input x, bf16 [8, 5120] raw file (default: random, seed 1)")
-    ap.add_argument("--compare-y", help="a reference y, bf16 [8, 5120] raw file (with --gpus 1: the same rank's part)")
+    ap.add_argument("--x", help="the input x, bf16 [T, 5120] raw file (default: random, seed 1)")
+    ap.add_argument("--compare-y", help="a reference y, bf16 [T, 5120] raw file (with --gpus 1: the same rank's part)")
+    ap.add_argument("--save-y", help="write the first launch's y (GPU 0) to this raw bf16 [T, 5120] file")
     ap.add_argument("--out", default="build/dsv41_moe")
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--plan", default="hand", help="'hand' (hand_plan) or a plan file")
@@ -520,7 +534,10 @@ def main():
         compiler.write_plan_file(args.save_plan, info["plan"])
     h = Harness(sk)
     serving = bool(h.layout.get("serving"))
-    if not check_launch(ws, h, bufs, serving, args.compare_y):
+    ok = check_launch(ws, h, bufs, serving, args.compare_y)
+    if args.save_y:
+        ws[0]["y"].cpu().contiguous().view(torch.int16).numpy().tofile(args.save_y)
+    if not ok:
         sk.finalize()
         raise SystemExit(1)
     spans, launches, events = [], [], []
