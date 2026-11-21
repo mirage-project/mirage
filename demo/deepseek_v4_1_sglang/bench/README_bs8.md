@@ -40,7 +40,7 @@ STATIC="PYTHONPATH=$D/boot DSV41_STATIC_ROOT=$MIRAGE DSV41_STATIC_ATTN=all DSV41
 SET="DSV41_STATIC_PDL=1 DSV41_STATIC_MHC=1 SA_DRY=0 HC_DRY_MOE=1 HC_DRY_ATTN=0 \
     DSV41_STATIC_FLAGS='-DHCP_LOOP -DHCP_SSQ=2 -DHCP_VPOLL -DSTATIC_NO_START_BARRIER -DSTATIC_RESET_PARITY -DI1_BF16 -DI1B_FQ -DHCP_FAST_END -DSTATIC_CNT_POLL_NS=0 -DSTATIC_POLL_NS=0' \
     DSV41_STATIC_IS_TCGEN05=1 DSV41_SHARE_MODULES=1 \
-    DSV41_ENGRAM=2 DSV41_HEAD=2 DSV41_EG_KV14=1 DSV41_HEAD_ARGMAX=1 DSV41_EG_ROWS=1"
+    DSV41_ENGRAM=2 DSV41_HEAD=2 DSV41_EG_KV14=1 DSV41_HEAD_ARGMAX=1 DSV41_EG_ROWS=1 DSV41_FILL_FUSED=1"
 ```
 
 ## The comparison
@@ -86,6 +86,7 @@ minus 1.
 | `DSV41_EG_KV14=1` | layer 14's wkv in attention L1's kernel instead of L13's (a reuse kernel has no idle SMs for it) |
 | `DSV41_EG_ROWS=1` | the n-gram rows looked up in that attention kernel too (SGLang's own table, read in place as its PEER_READ lookup does), not by SGLang's gather between the kernels |
 | `DSV41_HEAD=2` | the end of the step in the last MoE kernel: its post computes the head's input (the streams' collapse and the final norm), then the LM head (bf16 GEMM over this GPU's vocab rows, multicast gather into SGLang's fp32 logits buffer) |
+| `DSV41_FILL_FUSED=1` | the step's tables (positions, window rows, page tables), which the first static layer copies from SGLang's metadata, in one kernel instead of 6 small kernels and copies before attention L0 |
 | `DSV41_HEAD_ARGMAX=1` | the head's gather also computes each token's greedy next token (torch.argmax's rules); for a replayed all-greedy decode batch SGLang takes those ids (its in-graph greedy helper's rules) instead of running its 30 us argmax between the graph replays |
 
 None of them changes the outputs. Up to I1b the golden checks match line for line. For the post's fast end, the polls and
@@ -99,8 +100,9 @@ The argmax counts as ours: it runs in the last static kernel, on the logits that
 makes SGLang's own sampler faster, is still left out.
 
 Our runs of this set on 11-20 night (4 x B300, both sides forced to SGLang's own greedy tokens, each job one machine): job
-1120_175418 SGLang 4351.3 us, the static layers 3650.1 us, +19.2 %; without DSV41_EG_ROWS 3662.8 us (+18.8 %), and in
-job 1120_162612 (SGLang 4381.6 us) 3658.2 us, +19.8 %. SGLang's own period differs by about 30 us from machine to machine.
+1120_200601 SGLang 4372.5 us, the static layers 3632.7 us, +20.4 %; without DSV41_FILL_FUSED 3656.7 us (+19.6 %; the
+same-token pair -24.2 us). Job 1120_175418 (SGLang 4351.3 us), without DSV41_FILL_FUSED: 3650.1 us, +19.2 %, and
+without DSV41_EG_ROWS too 3662.8 us (+18.8 %). SGLang's own period differs by about 30 us from machine to machine.
 Without the last line (Engram and the head), on 11-20: SGLang 4382.5 us, the static layers 3752.3 us, +16.8 %. Without `DSV41_SHARE_MODULES` the set gave 4074.5 us (+7.6 %), and without the fast end
 and the polls too 4093.8 us (+7.1 %).
 

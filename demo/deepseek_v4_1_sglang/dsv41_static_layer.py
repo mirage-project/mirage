@@ -332,7 +332,23 @@ class StepTables:
         self.pages = {r: z(T, cap // 128) for r, cap in caps.items()}   # by compress ratio, entries of 128 rows
 
     def fill(self, core, positions, req_pool_indices):
-        """SGLang's metadata core (DSV4AttnMetadata) of this step."""
+        """SGLang's metadata core (DSV4AttnMetadata) of this step. DSV41_FILL_FUSED=1 (11-20 night): in one kernel
+        (fill_tables.py), else as torch ops (6 or more small kernels)."""
+        if os.environ.get("DSV41_FILL_FUSED", "0") != "0":
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import fill_tables
+            fill_tables.fill(self, core, positions, req_pool_indices, T)
+            if os.environ.get("DSV41_FILL_CHECK", "0") != "0" and not torch.cuda.is_current_stream_capturing():
+                got = {k: v.clone() for k, v in self.t.items()}
+                gp = {r: p.clone() for r, p in self.pages.items()}
+                self._fill_torch(core, positions, req_pool_indices)
+                ok = all(torch.equal(got[k], self.t[k]) for k in got) and all(torch.equal(gp[r], self.pages[r]) for r in gp)
+                print(f"[dsv41_static] DSV41_FILL_CHECK: the fused fill equals the torch fill: {ok}", flush=True)
+                assert ok, "DSV41_FILL_FUSED: the fused fill differs"
+            return
+        self._fill_torch(core, positions, req_pool_indices)
+
+    def _fill_torch(self, core, positions, req_pool_indices):
         t = self.t
         t["positions"].copy_(positions.view(-1))
         t["window_rows"].copy_(core.swa_page_indices[:T])
