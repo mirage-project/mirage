@@ -75,6 +75,8 @@ T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each
 # DeepGEMM on Blackwell: the weights requantized (weights.requant_ue8m0), the activations' scales rounded up, the MMA
 # applying both (scaled_gemm_tile UE8M0)
 UE8M0 = T >= 32
+# sparse_mla splits: 16; T = 64: 8 (the merge's token tile is 32 / splits tokens; 8 was the faster)
+SPLITS = 8 if T == 64 else 16
 H, PAGE, TOPK = 6144, 64, 2048
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -230,31 +232,36 @@ def check_plan(path: str, sms: int) -> dict:
     return p
 
 
+def rr_plan(mpk, full: bool) -> dict:
+    """The round-robin plan (plan_gen.round_robin_plan; e.g. T = 64, which has no hand plan) of the graph in mpk, a "full"
+    or "shared" layer: the grids of the kind's T = 32 hand plan, 8 dsa_q_absorb tasks a head, and each "add" FP8 GEMM's K
+    in the most parts that keep its tasks within one round of the SMs."""
+    from mirage.mpk import plan_gen
+    with open(os.path.join(HERE, f"hand_plan_{'full' if full else 'shared'}_T32.json")) as f:
+        grids = {int(k): v for k, v in json.load(f)["grids"].items()}
+    for n in compiler.graph_nodes(mpk):
+        if n.name == "dsa_q_absorb":   # two token groups: 8 tasks a head (declared: 4)
+            grids[n.graph_idx] = (2 * n.grid[0], n.grid[1], n.grid[2])
+        elif n.name == "scaled_gemm_tile" and n.params[0] == 1:   # an "add" GEMM: K in the most parts (whole 128-column
+            # tiles) that keep its tasks within one round of the SMs
+            tiles, sms = n.params[1] // 128, mpk._num_sms()
+            grids[n.graph_idx] = (n.grid[0], max(d for d in range(1, tiles + 1) if tiles % d == 0 and n.grid[0] * d <= sms),
+                                  1)
+    return plan_gen.round_robin_plan(mpk, grids)
+
+
 def build(mpk, ws: dict, plan: str, out: str, search: list = None, costs_code: str = "current", time_limit_s: float = 300,
           profile: bool = False, extra_flags: list = None):
     """Compile the plan of the graph in mpk and load the kernel. Return the kernel and the compile_plan information, with
     "paths" (the schedule files).
-    plan: a plan file, or "rr_full" / "rr_shared": the round-robin plan (plan_gen.round_robin_plan; e.g. T = 64, which has
-    no hand plan) with the grids of the kind's T = 32 hand plan, 8 dsa_q_absorb tasks a head, and each "add" FP8 GEMM's K
-    in the most parts that keep its tasks within one round of the SMs.
+    plan: a plan file, or "rr_full" / "rr_shared": the kind's round-robin plan (rr_plan).
     search: cost record files. If given, the solver searches a plan that starts from `plan` (search.search_plan). It writes
     the plan to out/plan.json and its predicted timeline to out/plan_view.json.
     costs_code: the kernel templates of the records to use: "current" (static_schedule.code_tag), "any", or a tag.
     profile: if True, build the timing build (for cost records). extra_flags: more nvcc flags (e.g. -DSTATIC_RESET_IN_KERNEL).
     The function writes the schedules to out/schedules and the compiled layer to out/build."""
     if plan.startswith("rr_"):
-        from mirage.mpk import plan_gen
-        with open(os.path.join(HERE, f"hand_plan_{plan[3:]}_T32.json")) as f:
-            grids = {int(k): v for k, v in json.load(f)["grids"].items()}
-        for n in compiler.graph_nodes(mpk):
-            if n.name == "dsa_q_absorb":   # two token groups: 8 tasks a head (declared: 4)
-                grids[n.graph_idx] = (2 * n.grid[0], n.grid[1], n.grid[2])
-            elif n.name == "scaled_gemm_tile" and n.params[0] == 1:   # an "add" GEMM: K in the most parts (whole 128-col
-                # tiles) that keep its tasks within one round of the SMs
-                tiles, sms = n.params[1] // 128, mpk._num_sms()
-                grids[n.graph_idx] = (n.grid[0], max(d for d in range(1, tiles + 1)
-                                                     if tiles % d == 0 and n.grid[0] * d <= sms), 1)
-        p = plan_gen.round_robin_plan(mpk, grids)
+        p = rr_plan(mpk, plan == "rr_full")
     else:
         p = check_plan(plan, torch.cuda.get_device_properties(0).multi_processor_count)
     os.makedirs(out, exist_ok=True)
@@ -282,7 +289,7 @@ def add_common_args(ap: argparse.ArgumentParser):
     ap.add_argument("--rank", type=int, default=0, help="the TP shard on this GPU")
     ap.add_argument("--maxctx", type=int, default=16384,
                     help="the most positions a request may have (a multiple of 1024 and of 64 x chunks)")
-    ap.add_argument("--splits", type=int, default=8 if T == 64 else 16,
+    ap.add_argument("--splits", type=int, default=SPLITS,
                     help="sparse_mla tasks per request (default 16; T = 64: 8, the fastest of 4 / 8 / 16 there)")
     ap.add_argument("--chunks", type=int, default=16, help="dsa_index_score tasks per request")
     ap.add_argument("--plan", default="hand", help="hand (default), solver, rr (round robin), or a path prefix of "

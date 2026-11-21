@@ -42,26 +42,28 @@ from demo.glm53_moe import weights as moe_weights
 from mirage.mpk import compiler
 from mirage.mpk.static_megakernel import StaticMegakernel
 
-# T: rows per decode step of the kernels (a token of each request), STATIC_TOKENS (8, 16 or 32; the demos read it too)
+# T: rows per decode step of the kernels (a token of each request), STATIC_TOKENS (8, 16, 32 or 64; the demos read it too)
 T = int(os.environ.get("STATIC_TOKENS", "8"))
 H, PAGE, TOPK, E, TP = 6144, 64, 2048, 256, 8
-assert T in (8, 16, 32) and dsa_demo.T == T and moe_demo.T == T and dense_mlp.T == T, "STATIC_TOKENS: 8, 16 or 32"
+assert T in (8, 16, 32, 64) and dsa_demo.T == T and moe_demo.T == T and dense_mlp.T == T, "STATIC_TOKENS: 8, 16, 32 or 64"
 HERE = os.path.dirname(os.path.abspath(__file__))
 # the MoE graph: the shared expert in the experts' bank (moe_demo.shared_bank, as demo/glm53_flash's MoE) for T > 8, in its
 # own nodes (demo/glm53_moe's) for T = 8: the faster graph at each T
 MOE_BANK = T > 8
 # the plans of the four kernel kinds: the hand plans, or with MIRAGE_STATIC_PLAN=solver the solver plans of the demos
 # (search.search_plan on B200 cost records; the dense layer has only a hand plan). These plans are of T = 8, with the MoE
-# shared expert in its own nodes. For T = 16 / 32, only the attention has hand plans (dsa_demo.plan_file). The kinds with
-# no plan use round robin (moe_demo.round_robin_plan).
+# shared expert in its own nodes. For T = 16 / 32, only the attention has hand plans (dsa_demo.plan_file); T = 64's
+# attention uses the demo's round robin on the T = 32 hand plans' grids (dsa_demo.rr_plan). The other kinds with no plan
+# use round robin (moe_demo.round_robin_plan).
 _PLAN = os.environ.get("MIRAGE_STATIC_PLAN", "hand")
 if _PLAN not in ("hand", "solver"):
     raise ValueError(f"MIRAGE_STATIC_PLAN={_PLAN}: hand or solver")
 PLANS = {"attn_full": dsa_demo.plan_file(_PLAN, True), "attn_shared": dsa_demo.plan_file(_PLAN, False),
          "moe": os.path.join(os.path.dirname(moe_demo.__file__), f"{_PLAN}_plan.json"),
          "dense": os.path.join(HERE, "hand_plan_dense.json")} if T == 8 else {
-             "attn_full": dsa_demo.plan_file("hand", True) if _PLAN == "hand" else None,
-             "attn_shared": dsa_demo.plan_file("hand", False) if _PLAN == "hand" else None, "moe": None, "dense": None}
+             "attn_full": dsa_demo.plan_file("hand", True) if _PLAN == "hand" and T != 64 else None,
+             "attn_shared": dsa_demo.plan_file("hand", False) if _PLAN == "hand" and T != 64 else None, "moe": None,
+             "dense": None}
 if MOE_BANK:
     PLANS["moe"] = None
 # a plan file per kind instead (of this T and graph, e.g. a searched one): MIRAGE_STATIC_PLAN_ATTN_FULL, _ATTN_SHARED, _MOE,
@@ -252,7 +254,8 @@ class StaticDecoder:
             st = {k: t[k] for k in ("seq_lens", "block_table", "cos_sin")}
             bufs = {k: t[k] for k in graph if k in t}
             cfg = self.cfg
-            dsa_demo.build_graph(mpk, w, st, bufs, full, cfg, self.maxctx, 16, 16, cfg["rms_norm_eps"], key_scale="fp32",
+            dsa_demo.build_graph(mpk, w, st, bufs, full, cfg, self.maxctx, dsa_demo.SPLITS, 16, cfg["rms_norm_eps"],
+                                 key_scale="fp32",
                                  tail=ALLREDUCE_IN_KERNEL,   # else the engine all-reduces and adds: o_proj writes attn_out
                                  next_norm=nn)
         elif kind == "moe":
@@ -270,7 +273,8 @@ class StaticDecoder:
             tag += f"_allreduce{self.gpus}"
         out = os.path.join(self.build_dir, tag)
         if PLANS[kind] is None:   # round robin over this graph's nodes (row_rmsnorm included)
-            plan = moe_demo.round_robin_plan(mpk, rr_grids or {})
+            plan = dsa_demo.rr_plan(mpk, kind == "attn_full") if T == 64 and kind.startswith("attn") else \
+                moe_demo.round_robin_plan(mpk, rr_grids or {})
             paths, _ = compiler.compile_plan(mpk, plan, os.path.join(out, f"schedules_r{self.rank}"))
             return mpk, paths, out
         plan = compiler.plan_from_file(PLANS[kind])
