@@ -53,6 +53,7 @@ python demo.py ... --plan hand --record costs.json      (cost records of this GP
 python demo.py ... --plan hand --search costs.json      (the solver's plans from these records)
 """
 import argparse
+import json
 import os
 import statistics
 import subprocess
@@ -191,9 +192,10 @@ def drop_missing_nodes(mpk, plan: dict) -> dict:
 
 def plan_file(plan: str, full: bool) -> str:
     """Return the plan file of a layer kind: plan = "hand", "solver" or a path prefix. A hand plan of T = 16 or 32 has
-    the suffix _T16 or _T32. The solver plans are of T = 8 only. plan = "rr": "rr" (build's round robin)."""
+    the suffix _T16 or _T32. The solver plans are of T = 8 only. plan = "rr": "rr_full" or "rr_shared" (build's round
+    robin)."""
     if plan == "rr":
-        return plan
+        return f"rr_{'full' if full else 'shared'}"
     if plan == "solver" and T != 8:
         raise ValueError(f"plan_file: no solver plan of T = {T} (STATIC_TOKENS)")
     kind = "full" if full else "shared"
@@ -216,15 +218,21 @@ def build(mpk, ws: dict, plan: str, out: str, search: list = None, costs_code: s
           profile: bool = False, extra_flags: list = None):
     """Compile the plan of the graph in mpk and load the kernel. Return the kernel and the compile_plan information, with
     "paths" (the schedule files).
-    plan: a plan file, or "rr": the round-robin plan (plan_gen.round_robin_plan; e.g. T = 64, which has no hand plan).
+    plan: a plan file, or "rr_full" / "rr_shared": the round-robin plan (plan_gen.round_robin_plan; e.g. T = 64, which has
+    no hand plan) with the grids of the kind's T = 32 hand plan (the GEMMs' K parts) and 8 dsa_q_absorb tasks a head.
     search: cost record files. If given, the solver searches a plan that starts from `plan` (search.search_plan). It writes
     the plan to out/plan.json and its predicted timeline to out/plan_view.json.
     costs_code: the kernel templates of the records to use: "current" (static_schedule.code_tag), "any", or a tag.
     profile: if True, build the timing build (for cost records). extra_flags: more nvcc flags (e.g. -DSTATIC_RESET_IN_KERNEL).
     The function writes the schedules to out/schedules and the compiled layer to out/build."""
-    if plan == "rr":
+    if plan.startswith("rr_"):
         from mirage.mpk import plan_gen
-        p = plan_gen.round_robin_plan(mpk)
+        with open(os.path.join(HERE, f"hand_plan_{plan[3:]}_T32.json")) as f:
+            grids = {int(k): v for k, v in json.load(f)["grids"].items()}
+        for n in compiler.graph_nodes(mpk):
+            if n.name == "dsa_q_absorb":   # two token groups: 8 tasks a head (declared: 4)
+                grids[n.graph_idx] = (2 * n.grid[0], n.grid[1], n.grid[2])
+        p = plan_gen.round_robin_plan(mpk, grids)
     else:
         p = check_plan(plan, torch.cuda.get_device_properties(0).multi_processor_count)
     os.makedirs(out, exist_ok=True)
