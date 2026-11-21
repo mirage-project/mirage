@@ -20,7 +20,7 @@ The experts are #799's GLM-5.3 MoE tasks (demo/glm53_moe) with Flash's shapes:
               (with mhc_pre: the next attention's x_attn, h_post, h_res too), every rank's new streams equal; random streams
               and coefficients
   time        --reps launches, L2 emptied before each (--save-y / --same-y: the new streams saved, or required bit-equal to
-              saved ones)
+              saved ones; with mhc_pre also x_attn, h_post, h_res)
               --prof-experts: the experts node with its per-SM stamps (scaled_moe_experts.cuh moe_prof_event): per phase,
               the medians over the SMs (W13 items, the ring switch, W2 tiles and what each waits for)
               --timeline: the timing build; per node of the last launch, its first task start and last task end (from the
@@ -661,6 +661,7 @@ def main():
               f"{rr_idle:.1e}")
         ok = ok and idle_ok and rr_idle == 0.0
     first = t["streams_out"].clone()
+    outs = {k: t[k].clone() for k in ("x_attn", "h_post_next", "h_res_next") if k in t}   # mhc_pre: x_attn, h_post, h_res
     spans, launches = [], []   # launches (--record): per timed launch, the per-task times and the span
     for _ in range(args.reps):
         h.launch(FLUSH_BYTES, timeout_s=60)
@@ -690,14 +691,22 @@ def main():
         json.dump({"plan": args.plan or "round robin", "grids": {str(k): v for k, v in info["grids"].items()}, "end": args.end,
                    "timing_build": profile, "spans_us": spans}, f, indent=1)
     ok = ok and same
-    if args.save_y:
-        torch.save(first.cpu(), args.save_y)
-        print(f"  the new streams saved to {args.save_y}")
+    if args.save_y:   # the new streams alone, or with mhc_pre {"streams_out", "x_attn", "h_post_next", "h_res_next"}
+        torch.save({"streams_out": first.cpu(), **{k: v.cpu() for k, v in outs.items()}} if outs else first.cpu(),
+                   args.save_y)
+        print(f"  the new streams{' and ' + ', '.join(outs) if outs else ''} saved to {args.save_y}")
     if args.same_y:
         base = torch.load(args.same_y)
-        eq = bool((first.cpu().view(torch.int16) == base.view(torch.int16)).all())
-        print(f"  the new streams bit-equal to {args.same_y}: {eq}")
-        ok = ok and eq
+        base = base if isinstance(base, dict) else {"streams_out": base}
+        mine = {"streams_out": first, **outs}
+        bits = lambda a: a.contiguous().view(torch.int16 if a.element_size() == 2 else torch.int32)
+        for k in base:
+            eq = k in mine and mine[k].shape == base[k].shape and bool((bits(mine[k].cpu()) == bits(base[k])).all())
+            print(f"  {k} bit-equal to {args.same_y}: {eq}")
+            ok = ok and eq
+        missing = [k for k in mine if k not in base]
+        if missing:
+            print(f"  not in {args.same_y} (not compared): {', '.join(missing)}")
     print("PASS" if ok else "FAIL")
     sk.finalize()
     sys.exit(0 if ok else 1)
