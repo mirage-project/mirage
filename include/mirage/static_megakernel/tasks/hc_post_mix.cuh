@@ -4,9 +4,10 @@
 // of every stream of every token:
 //   1. before the sums land: fn's slice (the next sublayer's hc_*_fn, its
 //      NMIX rows x the task's columns of every stream) into registers, then to
-//      shared memory; warp w = tokens t = w, w + 8, ..: this lane's R[t][i] (HC
-//      values) and token t's coefficients (T = 64: every token's to shared
-//      memory instead, cp.async, read in step 3)
+//      shared memory (T = 64: after step 2, so the sums' polls are not
+//      issued behind fn's loads); warp w = tokens t = w, w + 8, ..: this
+//      lane's R[t][i] (HC values) and token t's coefficients (T = 64: every
+//      token's to shared memory instead, cp.async, read in step 3)
 //      (h_post [T][HC], h_res [T][HC HC] fp32: the sublayer's, finished,
 //      SGLang's MHCState)
 //   2. warp w, a lane per (token, 8 columns), lands the GPUs' bf16 partial sums
@@ -15,7 +16,8 @@
 //   3. warp w, lane l: R'[t][j][c] = bf16(post[j] out[c] + sum_i comb[i][j]
 //      R[t][i][c]), rounded as SGLang's _mhc_post_torch (each product, then
 //      the sum over i in order, then post out added: no FMA), to R' (a graph
-//      tensor) and to shared memory
+//      tensor) and to shared memory (T = 64: to shared memory, then R' rows
+//      from there in 16-byte stores)
 //   4. the partial mixes of the task's columns as a GEMM of its slice: mixes
 //      [T][NMIX] = R' [T][HC 32] (bf16, exact: R' is bf16) x fn [HC 32][NMIX]
 //      (fp32 as bf16 hi + lo, two MMAs: ~2^-17 relative per product),
@@ -81,6 +83,15 @@ __device__ __forceinline__ void
   // the token blocks whose R values and coefficients are in registers at a
   // time (T = 64: 2 halves of 4 blocks)
   constexpr int TBH = TB > 4 ? 4 : TB, NHALF = TB / TBH;
+  // T64: the T = 64 order (STATIC_HC_OLD=1: the previous one, for the A/B):
+  // fn's split after the sums landed (their polls are not issued behind fn's
+  // loads), R' to global memory as 16-byte stores from shared memory after
+  // step 3 (not a 2-byte store per value), step 3's halves not unrolled
+#ifdef STATIC_HC_OLD
+  constexpr bool T64 = false;
+#else
+  constexpr bool T64 = T == 64;
+#endif
   static_assert(TM % 8 == 0 && 256 % TM == 0 && TB % TBH == 0 && H % C == 0 &&
                     C == HC_MIX_STRIDE && NMIX + 1 <= HC_MIX_STRIDE,
                 "hc_post_mix: a warp per 8 tokens, a lane per column");
@@ -147,14 +158,19 @@ __device__ __forceinline__ void
       }
     }
   }
-  // fn's slice to shared memory, as bf16 hi + lo
+  // fn's slice to shared memory, as bf16 hi + lo (T64: after the sums)
+  auto fn_split = [&]() {
 #pragma unroll
-  for (int q = 0; q < FNV; q++) {
-    int const idx = threadIdx.x + 256 * q, r = idx / (HC * C),
-              k = idx % (HC * C);
-    __nv_bfloat16 const hi = __float2bfloat16_rn(fv[q]);
-    fh[r * KP + k] = hi;
-    fl[r * KP + k] = __float2bfloat16_rn(fv[q] - __bfloat162float(hi));
+    for (int q = 0; q < FNV; q++) {
+      int const idx = threadIdx.x + 256 * q, r = idx / (HC * C),
+                k = idx % (HC * C);
+      __nv_bfloat16 const hi = __float2bfloat16_rn(fv[q]);
+      fh[r * KP + k] = hi;
+      fl[r * KP + k] = __float2bfloat16_rn(fv[q] - __bfloat162float(hi));
+    }
+  };
+  if constexpr (!T64) {
+    fn_split();
   }
   STAGE_STAMP_T0(0)
   // 2. the sums: lane l of warp w lands 8 columns (vector l % 4) of its token
@@ -175,13 +191,20 @@ __device__ __forceinline__ void
       allreduce_rearm<S_RANK>(g, row, v);
     }
   }
+  if constexpr (T64) {
+    fn_split();
+  }
   if constexpr (NHALF > 1) {
     asm volatile("cp.async.wait_all;" ::: "memory"); // R, coefficients landed
   }
   __syncthreads();
   STAGE_STAMP_T0(1)
   // 3. R'
+#if STATIC_TOKENS == 64 && !defined(STATIC_HC_OLD)
+#pragma unroll 1
+#else
 #pragma unroll
+#endif
   for (int hf = 0; hf < NHALF; hf++) {
     if constexpr (NHALF > 1) { // T = 64: this half's R and coefficients
 #pragma unroll                 // (shared memory)
@@ -214,12 +237,26 @@ __device__ __forceinline__ void
         }
         __nv_bfloat16 const bb =
             __float2bfloat16(__fadd_rn(__fmul_rn(post[b][j], o), a));
-        rout[((size_t)t * HC + j) * H + c] = bb;
+        if constexpr (!T64) {
+          rout[((size_t)t * HC + j) * H + c] = bb;
+        }
         rb[t * KP + j * C + lane] = bb;
       }
     }
   }
   __syncthreads();
+  if constexpr (T64) { // R' rows (t, j) of the task's columns: 4 x 16 bytes
+    constexpr int NV = T * HC * (C / 8);
+    static_assert(NV % 256 == 0, "hc_post_mix: whole rounds of R' stores");
+#pragma unroll
+    for (int q = 0; q < NV / 256; q++) {
+      int const k = threadIdx.x + 256 * q, row = k / (C / 8),
+                v = k % (C / 8); // row t HC + j
+      *reinterpret_cast<uint4 *>(rout + (size_t)row * H + s * C + 8 * v) =
+          *reinterpret_cast<uint4 const *>(rb + (row / HC) * KP +
+                                           (row % HC) * C + 8 * v);
+    }
+  }
   {
     // 4. the mixes: tile w < MT NT8 (warp w % 8) has tokens [16 mt, 16 mt +
     // 16) (T = 8: its rows 8 .. 15 repeat 0 .. 7, dropped) x rows [8 nt, 8 nt
