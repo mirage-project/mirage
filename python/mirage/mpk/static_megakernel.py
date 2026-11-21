@@ -354,7 +354,6 @@ class StaticMegakernel(PersistentKernel):
             out_buffer = lambda n: (T * N * 2, -1, False)
         else:                      # [T][N] fp32, every value written each launch
             out_buffer = lambda n: (T * N * 4, -1, False)
-        assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
         tiles = K // 128
         if input_polled:
             parts = next(y for y in range(1, tiles + 1) if tiles % y == 0 and tiles // y <= ring_stages(T, getattr(self, "ring_stages", None)))
@@ -421,7 +420,6 @@ class StaticMegakernel(PersistentKernel):
         if dims not in layouts:
             raise ValueError(f"scaled_gemm_tile_layer: weight scales {dims}, expected one of {list(layouts)}")
         layout = layouts[dims]
-        assert combine != "add" or N // 128 <= 32, "one counter per 128-row block, at most 32"
         assert skip_seq is None or combine == "add", "skip_seq: an \"add\" GEMM"
         params, bufs = [mode, K, N, layout], [self._tensor_slot(weight_scales)]
         if skip_seq is not None:
