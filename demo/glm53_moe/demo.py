@@ -43,9 +43,10 @@ bank of the experts node (shared_bank: 7 layer calls).
                      with the kernel's rounding points and the loaded weights (ref_rows), relRMS (with --live-rows: the
                      live rows)
      --diff-y FILE   y and the routed rows against a saved pair (--save-y of another build), relRMS: a numerics change
-T = 64: W2_UE8M0 (default; MIRAGE_STATIC_MOE64_W2UE=0: off): the W2 weights requantized to power-of-two scales at load
-(weights.layer_tensors w2_ue8m0, SGLang's DeepGEMM requantization), h_q's scales rounded up to powers of two and the W2
-MMA applying both (scaled_moe_experts_layer w2_ue8m0): a numerics change against the checkpoint's fp32 scales.
+T = 64: W2_UE8M0 (default; MIRAGE_STATIC_MOE64_W2UE=0 or I / tp != 256: off): the W2 weights requantized to power-of-two
+scales at load (weights.layer_tensors w2_ue8m0, SGLang's DeepGEMM requantization), h_q's scales rounded up to powers of
+two and the W2 MMA applying both (scaled_moe_experts_layer w2_ue8m0): a numerics change against the checkpoint's fp32
+scales.
 Steps 5-6 run the layer through the test harness (python/mirage/mpk/static_harness.py).
 
 y = the MoE output (+ the residual: zero in this demo, so y is comparable with the MoE output of SGLang).
@@ -422,6 +423,9 @@ def main():
     if args.gpus < 1 or (tp != args.gpus and args.gpus != 1) or I % tp != 0 or I // tp not in (128, 256, 512):
         raise ValueError(f"--gpus {args.gpus} --tp {args.tp}: the kernel needs I / tp = 128, 256 or 512 (tp = 4, 8 or 16), "
                          f"and tp = gpus or one GPU")
+    global W2_UE8M0
+    if W2_UE8M0 and I // tp != 256:   # W2_UE8M0 needs IR = 256 (scaled_moe_experts_layer): tp 4 / 16 keep the fp32-scale W2
+        W2_UE8M0 = MOE_OPTS["w2_ue8m0"] = False
     if args.plan is None and not args.shared_in_bank and T == 8:   # the plan files are of T = 8
         args.plan = os.path.join(os.path.dirname(os.path.abspath(__file__)), "solver_plan.json")
     if args.plan:

@@ -21,10 +21,11 @@ The experts are #799's GLM-5.3 MoE tasks (demo/glm53_moe) with Flash's shapes:
               and coefficients
   time        --reps launches, L2 emptied before each (--save-y / --same-y: the new streams saved, or required bit-equal to
               saved ones; --diff-y: their relRMS against saved ones, a numerics change)
-  T = 64      W2_UE8M0 (this script's layer; MIRAGE_STATIC_MOE64_W2UE=0: off): the down weights requantized to power-of-two
-              scales at load (requant_down: SGLang's DeepGEMM requantization), h_q's scales rounded up to powers of two, the
-              W2 MMA applying both (build_graph w2_ue8m0); the reference then uses the requantized weights and power-of-two h
-              scales. The serving layer (sglang_moe: one bank for every T) keeps the checkpoint's scales
+  T = 64      W2_UE8M0 (this script's layer; MIRAGE_STATIC_MOE64_W2UE=0 or --valid-rows N < T: off): the down weights
+              requantized to power-of-two scales at load (requant_down: SGLang's DeepGEMM requantization), h_q's scales
+              rounded up to powers of two, the W2 MMA applying both (build_graph w2_ue8m0); the reference then uses the
+              requantized weights and the build's h scales (scaled_moe_hq_ue). The serving layer (sglang_moe: one bank for
+              every T) keeps the checkpoint's scales
               --prof-experts: the experts node with its per-SM stamps (scaled_moe_experts.cuh moe_prof_event): per phase,
               the medians over the SMs (W13 items, the ring switch, W2 tiles and what each waits for)
               --timeline: the timing build; per node of the last launch, its first task start and last task end (from the
@@ -634,7 +635,11 @@ def main():
     assert I // args.tp == 256 * SUB, f"TP{args.tp}: {I // args.tp} features per GPU; the bank takes {SUB} sub-experts of 256"
 
     w = load_layer(args.model_dir, args.layer, args.tp, args.rank, dev)
-    global REF_H_UE8M0
+    global REF_H_UE8M0, W2_UE8M0
+    if W2_UE8M0 and args.gpus == 1 and 0 < args.valid_rows < T:
+        # idle rows (topk_route valid_rows): the layer has no W2C (scaled_moe_experts_layer), so no W2_UE8M0 either; the
+        # checkpoint's down scales through the fp32-scale W2 (run_tp has no idle rows)
+        W2_UE8M0 = False
     # the reference's h scales as the build has them (scaled_moe_hq_ue: -DSTATIC_MOE64_W2UE=0 or -DSTATIC_MOE64_W2C=0: the
     # requantized down weights through the fp32-scale W2, h_q's scales amax / 448)
     REF_H_UE8M0 = scaled_moe_hq_ue(W2_UE8M0, args.nvcc_flag)
