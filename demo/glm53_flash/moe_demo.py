@@ -382,7 +382,9 @@ def prof_report(prof: torch.Tensor, bar: int, t: dict):
                            "end", "W13 items", "W13 item (seen-done)", "W13: seen -> scales", "W13: scales -> drained",
                            "W13: drained -> h_q", "W13: h_q -> next seen", "W13 done-done", "last W13 done",
                            "switch", "last W13 -> 1st W2 done", "W2 tiles", "W2: scales (+ CHQ, new slot)", "W2: wait acc full",
-                           "W2: drain + store", "W2 done-done", "W2 loaders: wait stage (sum)", "W2 loaders: wait CHQ (sum)")}
+                           "W2: drain + store", "W2 done-done", "W2 loaders: wait stage (sum)", "W2 loaders: wait CHQ (sum)",
+                           "W2 issuers: wait acc_empty (sum)", "W2 issuers: wait full (sum)", "W2 issuer 1: wait acc_empty",
+                           "W2 issuer 1: wait h_q")}
     for sm in range(p.shape[0]):
         r = p[sm]
         if r[0] == 0:
@@ -418,6 +420,11 @@ def prof_report(prof: torch.Tensor, bar: int, t: dict):
             per["last W13 -> 1st W2 done"].append(w2[6][0] - done13[-1])
         per["W2 loaders: wait stage (sum)"].append((r[4] + r[6]) / 1e3)
         per["W2 loaders: wait CHQ (sum)"].append((r[5] + r[7]) / 1e3)
+        # the W2 issuers (warp 1: [380] h_q, [381] acc_empty, [382] the stage's full barrier; warp 6: [383] acc_empty)
+        per["W2 issuers: wait acc_empty (sum)"].append((r[381] + r[383]) / 1e3)
+        per["W2 issuers: wait full (sum)"].append(r[382] / 1e3)
+        per["W2 issuer 1: wait acc_empty"].append(r[381] / 1e3)
+        per["W2 issuer 1: wait h_q"].append(r[380] / 1e3)
     q = lambda v, f: sorted(v)[min(len(v) - 1, int(f * len(v)))]
     names = {1: "13seen", 2: "13done", 3: "2seen", 4: "2scales", 5: "2full", 6: "2done"}
     by_start = sorted(range(p.shape[0]), key=lambda sm: p[sm][0])

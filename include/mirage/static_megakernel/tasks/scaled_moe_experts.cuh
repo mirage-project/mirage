@@ -1337,17 +1337,21 @@ __device__ __forceinline__ void
 //        warps done)
 //   [14] / [15] thread 0: in build_table, past its first barrier / its third
 //             (the slots numbered; the pairs' binary searches follow)
-//   [8] epilogue events recorded, from [MOE_PROF_EV0]: kind << 56 | (time -
-//       [0]); kind 1 a W13 item seen, 2 its h_q written; 3 a W2 tile seen, 4
-//       its scales read (a new slot: also its CHQ wait and h_q scales), 5 its
-//       accumulator full, 6 its rows stored
+//   [8] epilogue events recorded, from [MOE_PROF_EV0] up to [MOE_PROF_EV_END]:
+//       kind << 56 | (time - [0]); kind 1 a W13 item seen, 2 its h_q written;
+//       3 a W2 tile seen, 4 its scales read (a new slot: also its CHQ wait and
+//       h_q scales), 5 its accumulator full, 6 its rows stored
+//   [380] / [381] / [382] the W2 issuer warp 1's W2 tiles: ns waiting for the
+//             entry's h_q (T = 64) / for acc_empty (the epilogue freed the
+//             accumulator tick) / for the W2 stage's full barrier (weights)
+//   [383] the same acc_empty wait for warp 6's W2 tiles
 // The recording threads keep their counts, sums and [0] in registers and only
 // store (no global load on the pipeline's path); the sums and the count at the
 // queue's end.
-constexpr int MOE_PROF_WORDS = 384, MOE_PROF_EV0 = 16;
+constexpr int MOE_PROF_WORDS = 384, MOE_PROF_EV0 = 16, MOE_PROF_EV_END = 380;
 __device__ __forceinline__ void
     moe_prof_event(long long *prof, int &n, long long t0, int kind) {
-  if (MOE_PROF_EV0 + n < MOE_PROF_WORDS) {
+  if (MOE_PROF_EV0 + n < MOE_PROF_EV_END) {
     prof[MOE_PROF_EV0 + n] = ((long long)kind << 56) | (gtime() - t0);
     n++;
   }
@@ -1849,6 +1853,8 @@ __device__ __forceinline__ void
                    baseu = (uint32_t)warp_same<true>((int)base);
     int wtt0 = warp_same<true>(wt), w2k = 0, e2 = 0; // e2: W2 entries (T = 64)
     [[maybe_unused]] int gcu = 0; // (W13C) its ring's stage count
+    // PROF: the W2 tiles' waits for h_q / acc_empty / the stage's full barrier
+    [[maybe_unused]] long long pw_hq = 0, pw_acc = 0, pw_full = 0;
 #ifdef STATIC_TIMING_BUILD
     bool w2_seen = false;
 #endif
@@ -1859,6 +1865,17 @@ __device__ __forceinline__ void
                          warp_same<true>(w2q[qpos][1]),
                          warp_same<true>(w2q[qpos][2])};
       if (e.kind == QE_END) {
+        if constexpr (RES::PROF >= 0) {
+          if (lane == 0) {
+            if (iss == 0) {
+              prof[380] = pw_hq;
+              prof[381] = pw_acc;
+              prof[382] = pw_full;
+            } else {
+              prof[383] = pw_acc;
+            }
+          }
+        }
         break;
       }
       if (e.kind == QE_W2) {
@@ -1870,7 +1887,12 @@ __device__ __forceinline__ void
 #endif
         if constexpr (T == 64) { // the entry's h_q landed (w2_load_hq)
           if (iss == 0) {
+            [[maybe_unused]] long long const t0 =
+                RES::PROF >= 0 ? gtime() : 0;
             mbar_wait(w2hq_bar<RES>(baseu, e2 & 1), (e2 >> 1) & 1);
+            if constexpr (RES::PROF >= 0) {
+              pw_hq += gtime() - t0;
+            }
           }
         }
         // (W2C) the MMAs' N: the slot's tokens in groups of W2C_N
@@ -1885,7 +1907,12 @@ __device__ __forceinline__ void
                            // second arrival on acc_full
           int const wtt = wtt0 + i, a = acc_slot(wtt), s = w2k % W2_ST;
           if (wtt >= ACC_STAGES) {
+            [[maybe_unused]] long long const t0 =
+                RES::PROF >= 0 ? gtime() : 0;
             mbar_wait(rt.acc_empty0 + 8 * a, (acc_round(wtt) - 1) & 1);
+            if constexpr (RES::PROF >= 0) {
+              pw_acc += gtime() - t0;
+            }
           }
           if (iss == 1) {
             if (issuer_lane<true>()) {
@@ -1893,7 +1920,14 @@ __device__ __forceinline__ void
             }
             continue;
           }
-          mbar_wait(w2_bar<RES>(baseu, s), (w2k / W2_ST) & 1);
+          {
+            [[maybe_unused]] long long const t0 =
+                RES::PROF >= 0 ? gtime() : 0;
+            mbar_wait(w2_bar<RES>(baseu, s), (w2k / W2_ST) & 1);
+            if constexpr (RES::PROF >= 0) {
+              pw_full += gtime() - t0;
+            }
+          }
           fence_after();
           if (issuer_lane<true>()) { // one K tile in each accumulator half
             if constexpr (RES::W2C) {
