@@ -4,7 +4,8 @@
 // token (request) t, for the NH heads on this GPU. The attention body does
 // these steps:
 //   1. Gather the selected cache rows into shared memory with a
-//      double-buffered cp.async pipeline (64 rows for each tile).
+//      double-buffered pipeline of bulk copies, one for each row (64 rows
+//      for each tile), that complete on a barrier of the stage.
 //   2. Compute QK and PV with mma.sync m16n8k16. A tile holds 16 heads. With
 //      NH = 8, rows 8..15 are empty.
 //   3. Compute the online softmax in fp32.
@@ -64,18 +65,27 @@ constexpr int KQ = 4;
 // D_QK: the row width of q and of the cache (512 latent + ROPE, ROPE = 64 or
 // 0). q holds the query until each warp has its q fragments in registers.
 // After that, the space of q holds the KQ partial scores
-// [KQ][HEAD_TILE][KV_TILE] fp32 of a tile (partial_scores).
+// [KQ][HEAD_TILE][KV_TILE] fp32 of a tile (partial_scores). A row of kv is
+// D_QK + 8 wide (kv_at): the 16 extra bytes put the 8 rows of an ldmatrix in
+// different banks. bars: the barriers of the stages' copies.
 template <int D_QK>
 struct alignas(128) Smem {
   bf16 q[HEAD_TILE * D_QK];
-  bf16 kv[NSTAGE][KV_TILE * D_QK];
+  bf16 kv[NSTAGE][KV_TILE * (D_QK + 8)];
   bf16 probabilities[HEAD_TILE * KV_TILE];
   float row_max[HEAD_TILE]; // log2 units (sparse_mla_split)
   float row_sum[HEAD_TILE];
   float alpha[HEAD_TILE];
   int64_t cache_rows[NSTAGE][KV_TILE];
   unsigned valid_masks[NSTAGE][KV_TILE / 32];
+  uint64_t bars[NSTAGE];
 };
+
+// the offset of (row, col) of a kv stage
+template <int D_QK>
+__device__ __forceinline__ int kv_at(int row, int col) {
+  return row * (D_QK + 8) + col;
+}
 
 using namespace dsa; // the shared-memory and MMA helpers (dsa_common.cuh)
 
@@ -149,9 +159,10 @@ __device__ __forceinline__ int page_of(int const *pages, int pos, int seq_len) {
 // Translate the positions of one tile to cache rows. Thread tid < KV_TILE
 // gives the position pos of slot tid and its cache page (page_of; -1: no
 // position). A page outside [0, num_pages) gives no row. Move the valid rows
-// to the front of the list. Then start the cp.async copies of these rows into
-// stage `stage`. An empty tile starts no copy. All 256 threads must call this
-// function.
+// to the front of the list. Then start the bulk copies of these rows into
+// stage `stage`, on its barrier (one arrival per call: an empty tile copies
+// nothing, and the barrier's phase completes at once). All 256 threads must
+// call this function.
 template <int PAGE, int D_QK>
 __device__ __forceinline__ void prefetch_tile(Smem<D_QK> &sm,
                                               bf16 const *cache,
@@ -174,8 +185,15 @@ __device__ __forceinline__ void prefetch_tile(Smem<D_QK> &sm,
   }
   __syncthreads();
   int const live_rows = tile_valid_count(sm, stage);
+  // round up to 16 rows, because each PV step reads 16 rows. The rows after
+  // live_rows are copies of row 0 (their probabilities are 0).
+  int const rows_to_load = (live_rows + 15) / 16 * 16;
+  uint32_t const bar = __cvta_generic_to_shared(&sm.bars[stage]);
+  if (tid == 0) {
+    mbar_expect(bar, rows_to_load * D_QK * 2);
+  }
   if (live_rows == 0) {
-    return; // all threads return here: no copy and no async group
+    return; // all threads return here: no copy
   }
   if (live_rows < KV_TILE) {
     // Each lane keeps its row in a register from before the barrier. Thus a
@@ -188,23 +206,29 @@ __device__ __forceinline__ void prefetch_tile(Smem<D_QK> &sm,
     }
     __syncthreads();
   }
-  // round up to 16 rows, because each PV step reads 16 rows
-  int const rows_to_load = (live_rows + 15) / 16 * 16;
-  for (int i = tid; i < rows_to_load * D_QK / 8; i += 256) {
-    int const row = i / (D_QK / 8), col = i % (D_QK / 8) * 8;
-    int64_t const r = row < live_rows ? sm.cache_rows[stage][row] : -1;
-    copy_async(sm.kv[stage] + swizzle<D_QK>(row, col),
-               cache + (r >= 0 ? r * D_QK : 0) + col,
-               r >= 0);
+  if (tid < rows_to_load) {
+    int64_t const r = sm.cache_rows[stage][tid < live_rows ? tid : 0];
+    // the earlier reads of this stage (generic proxy) before the copy
+    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+    bulk_g2s(__cvta_generic_to_shared(sm.kv[stage] + kv_at<D_QK>(tid, 0)),
+             cache + r * D_QK,
+             D_QK * 2,
+             bar);
   }
-  copy_commit();
+}
+
+// Wait for the copies of the n-th call of prefetch_tile on stage `stage` in
+// this task (n from 0).
+template <int D_QK>
+__device__ __forceinline__ void wait_tile(Smem<D_QK> &sm, int stage, int n) {
+  mbar_wait(__cvta_generic_to_shared(&sm.bars[stage]), n & 1);
 }
 
 // Compute one split, tiles [first_tile, last_tile), of the index slots of one
 // token (the header: splits; pools and in_order: load_index). Write o_part
 // [NH][512] fp32 and lse [NH]. Before the call, the caller starts the copies
-// of the first tile of the split into stage 0 (prefetch_tile). idx can be
-// nullptr (load_index).
+// of the first tile of the split into stage 0 (prefetch_tile; the first use
+// of the stage barriers). idx can be nullptr (load_index).
 template <int NH, int TOPK, int S, int PAGE, int D_QK, int KPOOL, int NIDX>
 __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
                                                  bf16 const *q,
@@ -253,6 +277,7 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
       idx, first_tile + 1, last_tile, seq_len, pools, in_order);
   int next_page = page_of<PAGE>(pages, next_pos, seq_len);
   copy_wait();
+  wait_tile(sm, 0, 0);
   __syncthreads();
   // q fragments of K part kq: the same for every tile of the split
   uint32_t qa[KSTEPS][4];
@@ -278,8 +303,15 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
       next_page = page_of<PAGE>(pages, following, seq_len);
     }
     int const live_rows = tile_valid_count(sm, stage);
+    // the copies of the next tile: call (tile + 1 - first_tile) / 2 of its
+    // stage
+    auto const wait_next = [&]() {
+      if (tile + 1 < last_tile) {
+        wait_tile(sm, stage ^ 1, (tile + 1 - first_tile) / 2);
+      }
+    };
     if (live_rows == 0) {
-      copy_wait();
+      wait_next();
       __syncthreads();
       continue;
     }
@@ -296,8 +328,8 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
         for (int n = 0; n < ROWS / 16; n++) {
           uint32_t b[4];
           load_a(b,
-                 kv + swizzle<D_QK>(row0 + n * 16 + lane / 16 * 8 + lane % 8,
-                                    k + (lane / 8 % 2) * 8));
+                 kv + kv_at<D_QK>(row0 + n * 16 + lane / 16 * 8 + lane % 8,
+                                  k + (lane / 8 % 2) * 8));
           mma16816(qa[j], b, sc[2 * n]);
           mma16816(qa[j], b + 2, sc[2 * n + 1]);
         }
@@ -384,8 +416,8 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
         for (int c = 0; c < 4; c++) {
           uint32_t b[4];
           load_v(b,
-                 kv + swizzle<D_QK>(k + lane % 16,
-                                    warp * 64 + c * 16 + lane / 16 * 8));
+                 kv + kv_at<D_QK>(k + lane % 16,
+                                  warp * 64 + c * 16 + lane / 16 * 8));
           mma16816(a, b, acc[c]);
           mma16816(a, b + 2, acc[c] + 4);
         }
@@ -393,7 +425,7 @@ __device__ __forceinline__ void sparse_mla_split(Smem<D_QK> &sm,
     }
     // Wait for the gather of the next tile. The barrier keeps this tile in
     // shared memory until all warps complete PV.
-    copy_wait();
+    wait_next();
     __syncthreads();
   }
 #pragma unroll
@@ -504,10 +536,11 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
                                ? nullptr
                                : buf_at<int const>(g, IDX) + (size_t)t * NIDX;
   int const *const pages = buf_at<int const>(g, BT) + (size_t)t * MAXP;
+  Smem &sm = *reinterpret_cast<Smem *>(L.sm);
   auto const first_tile = [&]() { // start the copies of tile 0 of the split
     int const pos0 =
         smla::load_index<KPOOL>(idx_t, first, last, sl, pools, in_order);
-    smla::prefetch_tile<PAGE, D_QK>(*reinterpret_cast<Smem *>(L.sm),
+    smla::prefetch_tile<PAGE, D_QK>(sm,
                                     buf_at<__nv_bfloat16 const>(g, CACHE),
                                     NUM_PAGES,
                                     0,
@@ -521,6 +554,12 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
   // the copies of tile 0 before its waits.
   bool const early =
       KPOOL == 1 && IX::x == 0 && (first + 1) * smla::KV_TILE < live;
+  if (threadIdx.x == 0) { // the stages' barriers: one arrival per phase
+    for (int i = 0; i < smla::NSTAGE; i++) {
+      mbar_init(__cvta_generic_to_shared(&sm.bars[i]), 1);
+    }
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
   if (early) {
     first_tile();
   }
@@ -536,11 +575,15 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
   }
   __syncthreads();
   dsa::stamp_ready(L);
+  if (threadIdx.x < smla::KV_TILE) { // the copying threads: the cache row of
+                                     // this step (dsa_kv_write) before copies
+    asm volatile("fence.proxy.async.global;" ::: "memory");
+  }
   if (!early) {
     first_tile();
   }
   smla::sparse_mla_split<NH, TOPK, S, PAGE, D_QK, KPOOL, NIDX>(
-      *reinterpret_cast<Smem *>(L.sm),
+      sm,
       buf_at<__nv_bfloat16 const>(g, Q::buf) + (size_t)t * NH * D_QK,
       buf_at<__nv_bfloat16 const>(g, CACHE),
       idx_t,
@@ -555,6 +598,12 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
       pools,
       in_order);
   dsa::ring_release();
+  if (threadIdx.x < smla::NSTAGE) { // all copies waited for
+    asm volatile(
+        "mbarrier.inval.shared::cta.b64 [%0];" ::"r"(
+            (uint32_t)__cvta_generic_to_shared(&sm.bars[threadIdx.x]))
+        : "memory");
+  }
   if (threadIdx.x == 0) {
     cnt_add(cnt_now(g) + SELF::counter + t, 1);
   }
