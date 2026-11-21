@@ -99,6 +99,60 @@ __device__ __forceinline__ int hq_swz(int f, int r) {
   return (((f >> 4) ^ (r & 7)) << 4) | (f & 15);
 }
 
+// STATIC_MOE64_W13C 1 (default; with Slots::W2C and the node's z_q row maps,
+// map slots 7 / 8: Slots::W13C): W13 over a slot's own tokens in groups of
+// W2C_N. A slot of n tokens has ng = ceil(n / W2C_N) groups; group q holds the
+// places W2C_N q .. of the slot's list (token order, build_table TOKEN_ORDER).
+// A W13 entry is (slot, group q, two items). Its ring stage is the two weight
+// pieces (32 KB) and the group's z_q rows only: per K tile ceil(n_q / 4)
+// tile::gather4 of 4 rows (n_q: the group's tokens; a gather4's rows past n_q
+// repeat the group's first token), at + 512 B per 4 rows of the K tile's
+// W2C_N x 128 B (the 128-B swizzle is by address, as one 16-row box would put
+// them). The W13 MMA runs N = W2C_N; accumulator column c is the group's place
+// c; the epilogue writes h_q rows slot T + W2C_N q + c (W2C's rows) and adds 2
+// to CHQ[slot] per 128 features and group (W2 waits for ng MT13). The ring has
+// its own geometry and barriers (W13C_ST stages of W13C_FST bytes in the
+// layer-wide ring's area, barriers after the W2 scale buffers: w13c_full,
+// w13c_empty). 0: the W2C-only code (a -D for the A/B).
+#ifndef STATIC_MOE64_W13C
+#define STATIC_MOE64_W13C 1
+#endif
+// (W13C) the ring: W13C_ST stages of the weights (W_STAGE) and the z_q rows of
+// two K tiles (W13C_ZST: 2 x W2C_N rows x 128 B). Stage g is in slot g % 4;
+// an item has KT_LAT / 2 stages (even), so slot g % 4 is always loaded by the
+// same loader (g % 2: warp 0 even, warp 7 odd; runtime.cuh's parity rule)
+constexpr int W13C_ST = 4, W13C_ZST = 2 * W2C_N * 128,
+              W13C_FST = W_STAGE + W13C_ZST;
+static_assert(W13C_FST % 1024 == 0 && W13C_ST * W13C_FST <= OFF_WSF,
+              "STATIC_MOE64_W13C: 1024-aligned stages in the ring's area");
+// tile::gather4: z_q rows r0..r3 (8 bits each in rows4) x the 128-B K tile at
+// byte column c0 -> 4 x 128 B at sm (SW128 by address)
+__device__ __forceinline__ void tma_gather4(void const *d,
+                                            uint32_t mb,
+                                            uint32_t sm,
+                                            int c0,
+                                            uint32_t rows4,
+                                            uint64_t hint) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.tile::gather4."
+               "mbarrier::complete_tx::bytes.L2::cache_hint"
+               " [%0], [%1, {%3, %4, %5, %6, %7}], [%2], %8;" ::"r"(sm),
+               "l"((uint64_t)d),
+               "r"(mb),
+               "r"(c0),
+               "r"(rows4 & 0xffu),
+               "r"((rows4 >> 8) & 0xffu),
+               "r"((rows4 >> 16) & 0xffu),
+               "r"(rows4 >> 24),
+               "l"(hint)
+               : "memory");
+}
+// (W13C) a W13 item's ring job: its first weight piece, the gather4s a K tile
+// (nq) and the group's W2C_N z_q rows (tokens), 4 a word, 8 bits each
+struct W13cJob {
+  int tile0, nq;
+  uint32_t rows[W2C_N / 4];
+};
+
 // what the bodies below use of the layer state, as slots and offsets
 // (compile-time; run_scaled_moe_experts fills it from the node's slots):
 // buffers HQ (h_q), HSF (its fp32 scales [NSLOT][T][KT2]), W13SF / W2SF (the
@@ -131,7 +185,8 @@ template <int HQ_,
           int LIVE_ = T,
           int LAST_ = -1,
           int SPLIT_ = -1,
-          int OPTS_ = 0>
+          int OPTS_ = 0,
+          int ZQR_ = -1>
 struct Slots {
   static constexpr int HQ = HQ_, HSF = HSF_, CNT = CNT_, W2NEXT = CNT_ + 32,
                        CHQ = CNT_ + 64;
@@ -207,6 +262,16 @@ struct Slots {
   static constexpr bool W2C =
       STATIC_MOE64_W2C != 0 && T == 64 && LIVE == T && MANY_EPI && !SINGLE;
   static constexpr int HQP = NSLOT * T;
+  // STATIC_MOE64_W13C above: with W2C and the z_q row maps (ZQR: set 0, set 1
+  // at + 1; scaled_moe_experts_layer declares them for such a layer). NXG: a
+  // bound of the extra groups (groups 1 .. of the slots of more than W2C_N
+  // tokens: fewer than NPAIR / W2C_N)
+  static constexpr int ZQR = ZQR_;
+  static constexpr bool W13C = STATIC_MOE64_W13C != 0 && W2C && ZQR >= 0;
+  static constexpr int NXG = NPAIR / W2C_N + 1;
+  static_assert(!W13C || (KT_LAT % 4 == 0 && W2_TABLE && T <= 256),
+                "STATIC_MOE64_W13C: an even number of stages an item, the "
+                "queue's place order of order_slots, tokens in 8 bits");
   static_assert(NE % 32 == 0 && NE <= 1024,
                 "scaled_moe_experts: build_table's 8 warps x 128 experts");
   // the routing table of this step, built on every SM by build_table (shared
@@ -356,8 +421,9 @@ __device__ __forceinline__ void hq_amax(float const *ha,
 
 // the scale from the two warps' amax, the e4m3 values of the two items, the
 // scale of the token (feature 0's thread). PL > 0 (STATIC_MOE64_W2C): the
-// values into the h_q planes of PL rows, row slot T + j0 + 2 i (the token's
-// place in the slot's list), swizzled (hq_swz); the scale as before
+// values into the h_q planes of PL rows, row slot T + c0 + j0 + 2 i (the
+// token's place in the slot's list; c0: (W13C) the group's first place),
+// swizzled (hq_swz); the scale as before
 template <int W, int IR, int PL = 0>
 __device__ __forceinline__ void hq_out(uint8_t *hq,
                                        float *hs,
@@ -370,7 +436,8 @@ __device__ __forceinline__ void hq_out(uint8_t *hq,
                                        int kt2,
                                        int f,
                                        int w0,
-                                       int j0) {
+                                       int j0,
+                                       int c0) {
   constexpr int KT2 = IR / 128;
   float a[W], b[W], r0[W], r1[W], sc[W];
   int t[W];
@@ -394,7 +461,7 @@ __device__ __forceinline__ void hq_out(uint8_t *hq,
 #pragma unroll
   for (int i = 0; i < W; i++) {
     if constexpr (PL > 0) {
-      int const r = slot * T + j0 + 2 * i, o = hq_swz(f, r);
+      int const r = slot * T + c0 + j0 + 2 * i, o = hq_swz(f, r);
       uint8_t *const q = hq + ((size_t)kt2 * PL + r) * 128;
       q[o] = q0[i];
       q[o ^ 64] = q1[i];
@@ -442,7 +509,8 @@ __device__ __forceinline__ void h_silu_tok(float *dst,
 // then thread 64 adds 2 to CHQ[slot] (release; W2 waits for MT13). The other
 // tokens' entries are not written (W2 reads none of them). H: acc holds this
 // item's h ([64][T], T >= 32's epilogue), not its gate and up rows. PL > 0
-// (with H): h_q in planes (hq_out)
+// (with H): h_q in planes (hq_out), the list's places from c0 (W13C: the
+// group's first)
 template <int IR, int LIMIT, bool H = false, int PL = 0>
 __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
                                                   float *hs,
@@ -454,7 +522,8 @@ __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
                                                   float const *ha,
                                                   int const *tok,
                                                   int nt,
-                                                  bool wide) {
+                                                  bool wide,
+                                                  int c0 = 0) {
   constexpr int KT2 = IR / 128;
   static_assert(PL == 0 || H, "h_q planes: the T >= 32 epilogue (H)");
   __shared__ float red_s[4 * T]; // [warp of the epilogue][token]
@@ -471,10 +540,12 @@ __device__ __forceinline__ void h_quant_group_tok(uint8_t *hq,
     int const w0 = (row >> 6) * 2; // its two warps
     j = row >> 6;
     for (; j + 6 < nt; j += 8) {
-      hq_out<4, IR, PL>(hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j);
+      hq_out<4, IR, PL>(
+          hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j, c0);
     }
     for (; j < nt; j += 2) {
-      hq_out<1, IR, PL>(hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j);
+      hq_out<1, IR, PL>(
+          hq, hs, ha, acc, red_s, tok, wide, slot, kt2, f, w0, j, c0);
     }
   } else {
     int const n = wide ? T : nt;
@@ -830,6 +901,18 @@ struct Smem {
   static_assert(OFF_W2S - OFF_W2BAR + W2QD * W2S_BYTES <=
                     RES::KT2 * 1024 + RES::KT2 * SF_CHUNK,
                 "the W2 scale buffers fit the OFF_W2BAR area");
+  // (W13C) after the W2 scale buffers: the W13C ring's barriers, full
+  // [W13C_ST] then empty [W13C_ST] (w13c_full / w13c_empty), then the extra
+  // groups (w13c_groups: NXG ints, slot | group << 16)
+  static constexpr int OFF_W13CB = OFF_W2S + W2QD * W2S_BYTES,
+                       OFF_XG = OFF_W13CB + 16 * W13C_ST;
+  static_assert(!RES::W13C ||
+                    (OFF_W13CB % 8 == 0 &&
+                     OFF_XG - OFF_W2BAR + RES::NXG * 4 <=
+                         RES::KT2 * 1024 + RES::KT2 * SF_CHUNK &&
+                     W13C_ST * W13C_FST <= OFF_WSF),
+                "STATIC_MOE64_W13C: the barriers and the extra groups fit the "
+                "OFF_W2BAR area, the ring the W13 ring's");
   // TMEM: the constant scale chunk at CONST_SF; the accumulators of piece 1
   // from PROMO_COL1. W2's K tiles go into the two accumulator halves.
   static constexpr int CONST_SF = 232;
@@ -856,6 +939,182 @@ __device__ __forceinline__ uint32_t w2s_bar(uint32_t base, int q) {
 template <class RES>
 __device__ __forceinline__ uint32_t w2hq_bar(uint32_t base, int i) {
   return base + Smem<RES>::OFF_W2BAR + 128 + 8 * i;
+}
+
+// ---- (STATIC_MOE64_W13C) the W13 ring of a group's rows. Stage counter g (0
+// at run_expert_dynamic's start, the same count in warp 0, warp 7 and both
+// issuers): slot g % W13C_ST, phase g / W13C_ST; stage s of the item (g % 2 =
+// s % 2) loaded by warp 0 (s even) / warp 7 (s odd), so a slot has one loader.
+// full [W13C_ST]: count 1 (the loader's expect) + the TMA bytes; empty
+// [W13C_ST]: count 2 (the owning issuer's commit, the other one's arrive), as
+// runtime.cuh's ring. Every issuer waits on every stage's full in order.
+template <class RES>
+__device__ __forceinline__ uint32_t w13c_full(uint32_t base, int st) {
+  return base + Smem<RES>::OFF_W13CB + 8 * st;
+}
+template <class RES>
+__device__ __forceinline__ uint32_t w13c_empty(uint32_t base, int st) {
+  return base + Smem<RES>::OFF_W13CB + 8 * W13C_ST + 8 * st;
+}
+// a loader (warp 0 lane 0 par 0, warp 7 lane 0 par 1): its stages [s0,
+// min(NST, s1)) of job j (s % 2 == par), each after its slot's `empty` (its
+// own slots only): one expect of the weights and the group's rows, the two
+// weight pieces (one TMA, as load_job's kind 1), per K tile j.nq gather4 of
+// the rows 4 q .. 4 q + 3 at + 512 q (z_q in exchange set dbuf_par)
+template <class RES>
+__device__ __forceinline__ void w13c_load(Maps const &maps,
+                                          W13cJob const &j,
+                                          uint32_t base,
+                                          int &g,
+                                          int par,
+                                          int s0,
+                                          int s1 = 1 << 20) {
+  constexpr int NST = RES::KT_LAT / 2;
+  int const send = NST < s1 ? NST : s1;
+  CUtensorMap const *const zm = &maps.m[RES::ZQR + dbuf_par];
+  uint32_t const by = 2 * 16384 + (uint32_t)j.nq * (2 * 512);
+  for (int s = s0; s < send; s++, g++) {
+    if ((s & 1) != par) {
+      continue;
+    }
+    int const st = g % W13C_ST;
+    if (g >= W13C_ST) {
+      mbar_wait(w13c_empty<RES>(base, st), ((g / W13C_ST) - 1) & 1);
+    }
+    uint32_t const full = w13c_full<RES>(base, st), dst = base + st * W13C_FST;
+    mbar_expect(full, by);
+    tma3(&maps.m[RES::W13X2], full, dst, 0, 0, j.tile0 + 2 * s, EVICT_FIRST);
+#pragma unroll
+    for (int kt = 0; kt < 2; kt++) {
+      int const c0 = (2 * s + kt) * 128;
+      uint32_t const zk = dst + W_STAGE + kt * (W2C_N * 128);
+#pragma unroll
+      for (int q = 0; q < W2C_N / 4; q++) {
+        if (q < j.nq) {
+          tma_gather4(zm, full, zk + 512 * q, c0, j.rows[q], EVICT_LAST);
+        }
+      }
+    }
+  }
+}
+// issuer iss of a W13C item (scale_promotion.cuh issue_promoted with the W13C
+// ring and MMA N = W2C_N): round r = stages 2 r (issuer 0), 2 r + 1 (issuer
+// 1), accumulator tick wtt + r; piece `at` of a stage into its own columns
+// (the same columns as issue_promoted, the first W2C_N of them); both issuers
+// wait on every stage's full in order; each arrives once on a round's
+// acc_full (a commit, or an arrive when the round has no stage of its own)
+template <int NATOMS, class RES>
+__device__ __forceinline__ void w13c_issue(
+    uint32_t base, uint32_t tb, int iss, int &g, int wtt STAGE_STAMP_PARAM) {
+  constexpr int NST = PromoRounds<NATOMS>::NST;
+  uint32_t const idesc = idesc_f8_n(W2C_N);
+  for (int s = 0; s < NST; s++, g++) {
+    int const tick = wtt + (s >> 1), a = acc_slot(tick);
+    if ((s & 1) == 0 && tick >= ACC_STAGES) {
+      mbar_wait(rt.acc_empty0 + 8 * a, (acc_round(tick) - 1) & 1);
+    }
+    int const st = g % W13C_ST;
+    mbar_wait(w13c_full<RES>(base, st), (g / W13C_ST) & 1);
+    fence_after();
+    STAGE_STAMP(s == 0)
+    bool const mine = (s & 1) == iss;
+    bool const one = issuer_lane<true>();
+    if (!mine) {
+      if (one) {
+        mbar_arrive(w13c_empty<RES>(base, st));
+      }
+    } else {
+      int const na = (NATOMS - 2 * s < 2) ? NATOMS - 2 * s : 2;
+      for (int at = 0; at < na; at++) {
+        uint32_t const acc = tb + (at == 0 ? 0u : (uint32_t)PROMO_COL1) +
+                             TW * a + ACC_STAGES * TW * iss;
+        uint64_t const dw = mkdesc(base + st * W13C_FST + at * 16384);
+        uint64_t const db =
+            mkdesc(base + st * W13C_FST + W_STAGE + at * (W2C_N * 128));
+        if (one) {
+          mma_f8_i(acc, dw, db, idesc, 0u);
+          mma_f8_i(acc, dw + 2, db + 2, idesc, 1u);
+          mma_f8_i(acc, dw + 4, db + 4, idesc, 1u);
+          mma_f8_i(acc, dw + 6, db + 6, idesc, 1u);
+        }
+      }
+      if (one) {
+        tc_commit(w13c_empty<RES>(base, st));
+      }
+    }
+    if ((s & 1) == 1 || s == NST - 1) { // the last stage of the round
+      bool const had = (2 * (s >> 1) + iss) < NST; // the round has my stage
+      if (one) {
+        if (had) {
+          tc_commit(rt.acc_full0 + 8 * a);
+        } else {
+          mbar_arrive(rt.acc_full0 + 8 * a);
+        }
+      }
+    }
+  }
+}
+// the 128 epilogue threads, a W13C item (drain_promoted_tok for a group):
+// v[c] (c < W2C_N; the group's place c, c < nt its token tok[c]) = the sum
+// over the pieces of sw(piece, row) sx(tok[c], piece) partial(piece), the
+// same pieces in the same order as drain_promoted (bit-equal to its
+// v[tok[c]]); columns c >= nt hold no token (their v is not used). A round:
+// the 4 pieces' W2C_N columns (tcgen05.ld x16 each) before one wait.
+template <int NATOMS, class WS>
+__device__ __forceinline__ int drain_promoted_c(uint32_t tb,
+                                                int wtt,
+                                                float const *bs,
+                                                float const *xs,
+                                                int const *tok,
+                                                int nt,
+                                                float *v) {
+  constexpr int NST = PromoRounds<NATOMS>::NST,
+                ROUNDS = PromoRounds<NATOMS>::ROUNDS;
+  int const lg = (threadIdx.x >> 5) & 3, lane = threadIdx.x & 31,
+            row = lg * 32 + lane;
+  uint32_t const lanes = (uint32_t)(lg * 32) << 16;
+  int xo[W2C_N]; // the scales' column of place c
+#pragma unroll
+  for (int c = 0; c < W2C_N; c++) {
+    v[c] = 0.0f;
+    xo[c] = c < nt ? tok[c] : 0;
+  }
+  for (int r = 0; r < ROUNDS; r++) {
+    int const tick = wtt + r, a = acc_slot(tick);
+    mbar_wait(rt.acc_full0 + 8 * a, acc_round(tick) & 1);
+    fence_after();
+    float p[4][W2C_N];
+#pragma unroll
+    for (int q = 0; q < 4; q++) { // (issuer, piece) as drain_promoted's
+      int const iss = q >> 1, at = q & 1, s = 2 * r + iss, atom = 2 * s + at;
+      if (s < NST && atom < NATOMS) {
+        tmem_ld_cols_nw<W2C_N>(tb + (at == 0 ? 0u : (uint32_t)PROMO_COL1) +
+                                   TW * a + ACC_STAGES * TW * iss + lanes,
+                               p[q]);
+      }
+    }
+#pragma unroll
+    for (int q = 0; q < 4; q++) {
+      int const iss = q >> 1, at = q & 1, s = 2 * r + iss, atom = 2 * s + at;
+      if (s < NST && atom < NATOMS) {
+        tmem_keep_cols<W2C_N>(p[q]);
+      }
+    }
+#pragma unroll
+    for (int q = 0; q < 4; q++) {
+      int const iss = q >> 1, at = q & 1, s = 2 * r + iss, atom = 2 * s + at;
+      if (s < NST && atom < NATOMS) {
+        float const sw = WS::of(bs, atom, row);
+#pragma unroll
+        for (int c = 0; c < W2C_N; c++) {
+          v[c] = fmaf(sw * xs[atom * T + xo[c]], p[q][c], v[c]);
+        }
+      }
+    }
+    fence_before();
+    mbar_arrive(rt.acc_empty0 + 8 * a); // 128 arrivals
+  }
+  return row;
 }
 
 // The loader that arms the first tile of W2 entry (slot, ot0: the tile of the
@@ -966,6 +1225,45 @@ __device__ __forceinline__ void order_slots() {
   __syncthreads();
 }
 
+// (W13C) after order_slots, warp 0: the extra groups (groups 1 .. ng - 1 of
+// each slot of more than W2C_N tokens), in the queue's place order of their
+// slots (the slot at place p: fill()[w2_table_pos(p)], as entry_of), into
+// Smem OFF_XG (slot | group << 16); s_ints[6] = their count. Then a
+// __syncthreads. Every SM builds the same table (deterministic inputs).
+template <class RES>
+__device__ __forceinline__ void w13c_groups() {
+  int *const xg = reinterpret_cast<int *>(rt_sm() + Smem<RES>::OFF_XG);
+  if (threadIdx.x < 32) {
+    int const lane = threadIdx.x, n_live = s_ints[1], r0 = s_ints[4],
+              rot = s_ints[5];
+    int run = 0;
+    for (int p0 = 0; p0 < n_live; p0 += 32) {
+      int const p = p0 + lane;
+      int slot = 0, nx = 0;
+      if (p < n_live) {
+        slot = RES::fill()[w2_table_pos(p, r0, rot)];
+        nx = (RES::ntok()[slot] + W2C_N - 1) / W2C_N - 1;
+      }
+      int inc = nx;
+#pragma unroll
+      for (int o = 1; o < 32; o <<= 1) {
+        int const u = __shfl_up_sync(0xffffffffu, inc, o);
+        if (lane >= o) {
+          inc += u;
+        }
+      }
+      for (int q = 1; q <= nx; q++) {
+        xg[run + inc - nx + q - 1] = slot | q << 16;
+      }
+      run += __shfl_sync(0xffffffffu, inc, 31);
+    }
+    if (lane == 0) {
+      s_ints[6] = run;
+    }
+  }
+  __syncthreads();
+}
+
 // the box of tensor map d at (c0, c1, c2) into L2 (fire and forget)
 __device__ __forceinline__ void
     tma3_prefetch_l2(void const *d, int c0, int c1, int c2) {
@@ -1059,7 +1357,12 @@ __device__ __forceinline__ void w2_arm(Maps const &maps,
   }
   if (slot != chk_slot) {
     [[maybe_unused]] long long const t0 = RES::PROF >= 0 ? gtime() : 0;
-    cnt_wait(cnt_now(g) + RES::CHQ + slot, RES::MT13);
+    if constexpr (RES::W13C) { // MT13 items of each of the slot's groups
+      cnt_wait(cnt_now(g) + RES::CHQ + slot,
+               RES::MT13 * ((RES::ntok()[slot] + W2C_N - 1) / W2C_N));
+    } else {
+      cnt_wait(cnt_now(g) + RES::CHQ + slot, RES::MT13);
+    }
     asm volatile("fence.proxy.async.global;" ::: "memory");
     chk_slot = slot;
     if constexpr (RES::PROF >= 0) {
@@ -1151,7 +1454,14 @@ __device__ __forceinline__ void
     for (int q = 0; q < W2QD; q++) {
       mbar_init(w2s_bar<RES>(base, q), 1);
     }
-    asm volatile("st.shared.u32 [%0], %1;" ::"r"(w2_w7gl<RES>(base)), "r"(gl)
+    if constexpr (RES::W13C) { // the W13C ring (its stage count from 0)
+      for (int st = 0; st < W13C_ST; st++) {
+        mbar_init(w13c_full<RES>(base, st), 1);
+        mbar_init(w13c_empty<RES>(base, st), 2);
+      }
+    }
+    asm volatile("st.shared.u32 [%0], %1;" ::"r"(w2_w7gl<RES>(base)),
+                 "r"(RES::W13C ? 0 : gl)
                  : "memory");
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
@@ -1174,8 +1484,11 @@ __device__ __forceinline__ void
                      2 * n_live * (MT13 / W13_PAIR) <= NSM;
   // npe: the items of a W13 entry; per13: the entries of a slot
   int const npe = split ? 1 : W13_PAIR, per13 = MT13 / npe;
+  // (W13C) the W13 entries per group: the slots' first groups and the extra
+  // groups (s_ints[6], w13c_groups)
+  int const ngrp13 = RES::W13C ? n_live + s_ints[6] : n_live;
   int const n13s = RES::SINGLE ? n_live * MT13 : 0,
-            n13 = RES::SINGLE ? 0 : n_live * per13, n2 = n_live * OT2;
+            n13 = RES::SINGLE ? 0 : ngrp13 * per13, n2 = n_live * OT2;
   int const n4 = ((n2 * 4 / 5) / OT2) * OT2,
             t1 = (n2 - n4 < NSM) ? n2 - n4 : NSM, off1 = n2 - t1,
             n2e = (off1 + 1) / 2;
@@ -1225,6 +1538,23 @@ __device__ __forceinline__ void
                          // the W2 tiles that wait for them)
           e.kind = QE_W13;
           int p13 = idx / per13;
+          if constexpr (RES::W13C) { // group p13: the first groups of places
+                                     // 0 .. M - 1 (the slots of many tokens),
+                                     // the extra groups, then the others'
+            int const M = s_ints[3], nx = s_ints[6];
+            if (p13 >= M && p13 < M + nx) {
+              int const xv = reinterpret_cast<int const *>(
+                  rt_sm() + SM_::OFF_XG)[p13 - M];
+              e.a = xv & 0xffff;
+              e.b = idx % per13 * npe | npe << 8 | (xv >> 16) << 16;
+            } else {
+              p13 = w2_table_pos(
+                  p13 >= M ? p13 - nx : p13, s_ints[4], s_ints[5]);
+              e.a = slot_at(p13);
+              e.b = idx % per13 * npe | npe << 8;
+            }
+            return;
+          }
           if constexpr (RES::W2_TABLE) { // the table is in the W2 tiles' order
             p13 = w2_table_pos(p13, s_ints[4], s_ints[5]);
           }
@@ -1265,11 +1595,33 @@ __device__ __forceinline__ void
     j.amap2 = &maps.m[RES::ZQ_KT + dbuf_par];
     j.tile0 = ex * (MT13 * KT_LAT) + ((e.b & 255) + i) * KT_LAT;
   };
+  // (W13C) the ring job of item i of a W13 entry (slot e.a, group e.b >> 16):
+  // the group's tokens (places W2C_N q ..; the rows past them its first)
+  [[maybe_unused]] auto w13c_job = [&](QueueEntry const &e,
+                                       int i,
+                                       W13cJob &j) {
+    int const slot = e.a, q = e.b >> 16, n0 = ntok_s[slot] - W2C_N * q;
+    int const n = n0 < W2C_N ? n0 : W2C_N;
+    int const *const tk = tok_s + start_s[slot] + W2C_N * q;
+    j.tile0 = eid_s[slot] * (MT13 * KT_LAT) + ((e.b & 255) + i) * KT_LAT;
+    j.nq = (n + 3) / 4;
+#pragma unroll
+    for (int q4 = 0; q4 < W2C_N / 4; q4++) {
+      uint32_t w = 0;
+#pragma unroll
+      for (int r = 0; r < 4; r++) {
+        int const c = 4 * q4 + r;
+        w |= (uint32_t)tk[c < n ? c : 0] << (8 * r);
+      }
+      j.rows[q4] = w;
+    }
+  };
   if (warp == 0) {
     if (lane == 0) {
       int qn = 0, w2k = 0, e2 = 0,
           chk = -1; // w2k: this SM's W2 tiles so far; e2: its W2 entries
                     // (T = 64's h_q buffers); chk: the slot checked last
+      [[maybe_unused]] int gc = 0; // (W13C) its ring's stage count
       bool switched = false, maps_pf = false;
       int idx = s_ints[2], pend = -1;
       [[maybe_unused]] long long pw_st = 0, pw_chq = 0; // PROF: the waits
@@ -1338,21 +1690,32 @@ __device__ __forceinline__ void
             // First wait for warp 7 to arm every stage below gl.
             // To arm use u, warp 7 must wait for use u - 1 to finish.
             // The barrier is then at phase u or u + 1, so the wait is valid.
+            // (W13C: the same with its ring, stage count gc, W13C_ST slots)
+            int const gw = RES::W13C ? gc : gl;
             for (;;) {
               uint32_t g7;
               asm volatile("ld.volatile.shared.u32 %0, [%1];"
                            : "=r"(g7)
                            : "r"(w2_w7gl<RES>(base))
                            : "memory");
-              if ((int)g7 >= gl) {
+              if ((int)g7 >= gw) {
                 break;
               }
               __nanosleep(32);
             }
-            for (int st0 = 0; st0 < SMAX; st0++) {
-              if (gl > st0) {
-                int const gq = st0 + SMAX * ((gl - 1 - st0) / SMAX);
-                mbar_wait(rt.empty0 + 8 * st0, (gq / SMAX) & 1);
+            if constexpr (RES::W13C) {
+              for (int st0 = 0; st0 < W13C_ST; st0++) {
+                if (gc > st0) {
+                  int const gq = st0 + W13C_ST * ((gc - 1 - st0) / W13C_ST);
+                  mbar_wait(w13c_empty<RES>(base, st0), (gq / W13C_ST) & 1);
+                }
+              }
+            } else {
+              for (int st0 = 0; st0 < SMAX; st0++) {
+                if (gl > st0) {
+                  int const gq = st0 + SMAX * ((gl - 1 - st0) / SMAX);
+                  mbar_wait(rt.empty0 + 8 * st0, (gq / SMAX) & 1);
+                }
               }
             }
             mbar_arrive(w2_bar<RES>(base, 6)); // warp 7 may load its W2 tiles
@@ -1390,6 +1753,21 @@ __device__ __forceinline__ void
           }
           w2k += e.b;
           e2++;
+        } else if constexpr (RES::W13C) { // the W13C ring, as below
+          W13cJob j;
+          int const items = (e.b >> 8) & 15;
+          for (int i = 0; i + 1 < items; i++) {
+            w13c_job(e, i, j);
+            scaled_moe::w13c_load<RES>(maps, j, base, gc, 0, 0);
+          }
+          w13c_job(e, items - 1, j);
+          scaled_moe::w13c_load<RES>(maps, j, base, gc, 0, 0, W13_TAKE_AT);
+          n13_mine++;
+          int const idx1 = (int)atom_inc_lane0(cnt_now(g) + RES::W2NEXT);
+          pend = -1;
+          scaled_moe::w13c_load<RES>(maps, j, base, gc, 0, W13_TAKE_AT);
+          entry_of(idx1, en);
+          publish(en, qn + 1);
         } else {
           TileJob j;
           int const items = (e.b >> 8) & 15;
@@ -1425,6 +1803,7 @@ __device__ __forceinline__ void
     uint32_t const tbu = (uint32_t)warp_same<true>((int)tb),
                    baseu = (uint32_t)warp_same<true>((int)base);
     int wtt0 = warp_same<true>(wt), w2k = 0, e2 = 0; // e2: W2 entries (T = 64)
+    [[maybe_unused]] int gcu = 0; // (W13C) its ring's stage count
 #ifdef STATIC_TIMING_BUILD
     bool w2_seen = false;
 #endif
@@ -1502,6 +1881,17 @@ __device__ __forceinline__ void
       } else { // W13: 8 columns for each piece, PromoRounds ticks
                // (scale_promotion.cuh), for each item of the entry
         for (int i = 0; i < ((e.b >> 8) & 15); i++) {
+          if constexpr (RES::W13C) {
+            scaled_moe::w13c_issue<KT_LAT, RES>(
+                baseu,
+                tbu,
+                iss,
+                gcu,
+                wtt0 STAGE_STAMP_ARG(
+                    (iss == 0 && qn == 0 && i == 0) ? stamp : nullptr));
+            wtt0 += PromoRounds<KT_LAT>::ROUNDS;
+            continue;
+          }
           issue_promoted<IDESC_MX_E4M3, KT_LAT>(
               baseu,
               tbu,
@@ -1516,6 +1906,7 @@ __device__ __forceinline__ void
     }
   } else if (warp == 7) { // second loader: the odd W13 stages, the odd W2 tiles
     int w2k7 = 0, chk7 = -1, e27 = 0;
+    [[maybe_unused]] int gc7 = 0; // (W13C) its ring's stage count (lane 0)
     bool ready = false;
     [[maybe_unused]] long long pw_st7 = 0, pw_chq7 = 0; // PROF: the waits
     for (int qn = 0;; qn++) {
@@ -1566,6 +1957,18 @@ __device__ __forceinline__ void
         w2k7 += e.b;
         e27++;
         __syncwarp();
+      } else if constexpr (RES::W13C) { // its odd stages of the W13C ring
+        for (int i = 0; i < ((e.b >> 8) & 15); i++) {
+          if (lane == 0) {
+            W13cJob j;
+            w13c_job(e, i, j);
+            scaled_moe::w13c_load<RES>(maps, j, base, gc7, 1, 0);
+            asm volatile(
+                "st.volatile.shared.u32 [%0], %1;" ::"r"(w2_w7gl<RES>(base)),
+                "r"(gc7)
+                : "memory"); // for warp 0's switch
+          }
+        }
       } else {
         for (int i = 0; i < ((e.b >> 8) & 15); i++) {
           TileJob j;
@@ -1800,15 +2203,31 @@ __device__ __forceinline__ void
               moe_prof_event(prof, pn, pt0, 7);
             }
           }
-          // the slot's tokens only
-          int const nt = ntok_s[slot];
-          int const *const tk = tok_s + start_s[slot];
+          // the slot's tokens only; (W13C) the group's: places W2C_N q13 ..
+          // (at most W2C_N), column j is place W2C_N q13 + j
+          [[maybe_unused]] int const q13 = RES::W13C ? e.b >> 16 : 0;
+          int nt = ntok_s[slot];
+          int const *tk = tok_s + start_s[slot];
+          if constexpr (RES::W13C) {
+            nt -= W2C_N * q13;
+            nt = nt < W2C_N ? nt : W2C_N;
+            tk += W2C_N * q13;
+          }
           // more than 8 tokens (the shared experts' slots: all T): the T-wide
           // drain (the per-token one took ~60 us an item at nt = 32);
           // acc_s column t is token t's. Else column j is token tk[j]'s
-          bool const wide = nt > 8;
+          bool const wide = !RES::W13C && nt > 8;
           int row;
-          if (wide) {
+          if constexpr (RES::W13C) {
+            row = drain_promoted_c<KT_LAT, GateUpScales>(
+                tb,
+                wtt0,
+                bs,
+                reinterpret_cast<float const *>(rt_sm() + SM_::OFF_XS),
+                tk,
+                nt,
+                v);
+          } else if (wide) {
             row = drain_promoted<KT_LAT, GateUpScales>(
                 tb,
                 wtt0,
@@ -1838,9 +2257,11 @@ __device__ __forceinline__ void
             if constexpr (HEAVY) { // OFF_ACC: the first item's h [64][T], then
                                    // the up rows / the second item's h
               float *const h1 = acc_s, *const h2 = acc_s + 64 * T;
+              // the columns of v: (W13C) the group's W2C_N places, else T
+              constexpr int NJ = RES::W13C ? W2C_N : T;
               if (row >= 64) {
 #pragma unroll
-                for (int j = 0; j < T; j++) {
+                for (int j = 0; j < NJ; j++) {
                   if (wide || j < nt) {
                     h2[h_at(row - 64, j)] = v[j];
                   }
@@ -1870,7 +2291,7 @@ __device__ __forceinline__ void
                   }
                 } else {
 #pragma unroll
-                  for (int j = 0; j < 8; j++) {
+                  for (int j = 0; j < (RES::W13C ? W2C_N : 8); j++) {
                     if (j < nt) {
                       dst[h_at(row, j)] =
                           silu2_limit<RES::LIMIT>(v[j], h2[h_at(row, j)]);
@@ -1894,7 +2315,8 @@ __device__ __forceinline__ void
                     h1,
                     tk,
                     nt,
-                    wide);
+                    wide,
+                    W2C_N * q13);
               }
             }
           } else {
@@ -2081,7 +2503,8 @@ __device__ __forceinline__ void
 // tiles (each 2 slots: the exchange region's sets), h_q), its counter, z_q's
 // offset, the sizes: NE and K from topk_route's params (PAIRS; its bank:
 // sub-experts and shared experts), LAT from group_quant's (ZQ), IR its own
-// params[0], the swiglu limit its params[1] (if any)
+// params[0], the swiglu limit its params[1] (if any), the z_q row maps (map
+// slot 7, if any: STATIC_MOE64_W13C)
 template <class SELF,
           class PARAMS,
           class BUF_SLOTS,
@@ -2113,7 +2536,8 @@ using ScaledMoeSlotsOf =
                                                    : T),
                       slot_or<BUF_SLOTS, 6, -1>(),
                       slot_or<BUF_SLOTS, 5, -1>(),
-                      param_or<PARAMS, 2, 0>()>;
+                      param_or<PARAMS, 2, 0>(),
+                      slot_or<MAP_SLOTS, 7, -1>()>;
 
 // scaled_moe_experts task (one per SM, task x on SM x): wait for z_q, phase
 // switch, routing table, then the queue (above) -> the routed rows [T][K][LAT]
@@ -2227,6 +2651,9 @@ __device__ __forceinline__ void run_scaled_moe_experts(Maps const &maps,
   }
   if constexpr (RES::ORDER) {
     scaled_moe::order_slots<RES>();
+  }
+  if constexpr (RES::W13C) { // the extra W13 groups of the queue
+    scaled_moe::w13c_groups<RES>();
   }
   [[maybe_unused]] long long const pt_table = RES::PROF >= 0 ? gtime() : 0;
   long long *prof = nullptr;
