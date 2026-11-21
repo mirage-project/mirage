@@ -88,6 +88,12 @@ EG_EARLY = os.environ.get("DSV41_EG_EARLY", "0") != "0"
 # (11-20, DSV41_ENGRAM=2) DSV41_EG_ROWS=1: the n-gram rows looked up in the host attention kernel (engram_rows: each rank's rows
 # of SGLang's own table, by multicast into every rank's buffer; the act_quant polls them): no SGLang gather or all-reduce
 EG_ROWS = os.environ.get("DSV41_EG_ROWS", "0") != "0"
+# (11-21) DSV41_PAD_SMALL=1: decode batches of 1 .. T - 1 rows run the static layers too, padded to T. SGLang captures no
+# decode graph below T rows, so it replays the T-row graph with its own padding (position 0, request slot 0, seq_len 1,
+# KV slot 0: the rows its own layers would also compute harmlessly); the MoE's routing keeps the padding rows out of the
+# experts (topk_route LIVEPOS: row 0's experts at weight 0), and the greedy ids are handed over for the live rows only
+PAD_SMALL = os.environ.get("DSV41_PAD_SMALL", "0") != "0"
+PAD_LIVE = os.environ.get("DSV41_PAD_LIVE", "1") != "0"   # (check only: 0 = the padding rows routed as live ones)
 assert not HEAD or MHC, "DSV41_HEAD: DSV41_STATIC_MHC=1"
 KEEP = os.environ.get("DSV41_STATIC_KEEP", "sgl" if CHECK else "static")
 PDL = os.environ.get("DSV41_STATIC_PDL", "0") != "0"
@@ -202,10 +208,12 @@ def _init_cuda_graphs(self, *args, **kwargs):
                 if head and HEAD2:   # (its exchange region holds the head's rows too: larger than the pool's slots)
                     pool = ExchangePool(_STATE["tp_group"], dev, 1)
                     self._dsv41_pools = self._dsv41_pools + (pool,)
+                assert not PAD_SMALL or steps is not None, "DSV41_PAD_SMALL: the step tables (DSV41_STATIC_POOL=1)"
                 lay.mlp._dsv41 = StaticMoE(L, ckpt, int(ex.moe_tp_rank), int(ex.moe_tp_size), dev, OUT, PDL, pool, mhc=MHC,
                                            norm_next=norm_next or head, stats=STATS, engram=eg,
                                            gamma_name="norm.weight" if head else None,
-                                           engram_kv=egkv[L][0] if eg and L in egkv else None, head=head and HEAD2)
+                                           engram_kv=egkv[L][0] if eg and L in egkv else None, head=head and HEAD2,
+                                           live_pos=steps.t["positions"] if PAD_SMALL and PAD_LIVE else None)
                 if head:
                     _STATE["head_moe"] = lay.mlp._dsv41
                 if eg:   # the next layer's Engram module: its gather runs before this kernel, its forward passes R'' on
@@ -704,6 +712,23 @@ if MHC or STATS:
     _bd.HcReadCall.read = _read
 _bd.MoeTransport.prepare_output = _moe_prepare
 _mr.ModelRunner.init_cuda_graphs = _init_cuda_graphs
+if PAD_SMALL:   # no decode graph below T rows: SGLang pads 1 .. T - 1 rows into the T-row graph (the static layers')
+    from sglang.srt.model_executor.runner import base_cuda_graph_runner as _bcgr
+    from sglang.srt.model_executor.runner import decode_cuda_graph_runner as _dcgr
+    _orig_bs_to_capture = _bcgr.get_batch_sizes_to_capture
+
+    def _bs_to_capture(*args, **kwargs):
+        capture_bs, compile_bs = _orig_bs_to_capture(*args, **kwargs)
+        small = [b for b in capture_bs if b < T]
+        capture_bs = sorted(set(b for b in capture_bs if b >= T) | ({T} if small else set()))
+        compile_bs = sorted(set(b for b in compile_bs if b >= T) | ({T} if any(b < T for b in compile_bs) else set()))
+        _log(f"DSV41_PAD_SMALL: decode graphs {capture_bs} (the batches below {T} rows padded to {T})")
+        return capture_bs, compile_bs
+    import sglang.srt.model_executor.runner as _runner_pkg
+    from sglang.srt.model_executor.model_runner_components import cuda_graph_setup as _cgs
+    for _m in (_bcgr, _dcgr, _runner_pkg, _cgs, _mr):   # (every module that bound the name at its import)
+        if getattr(_m, "get_batch_sizes_to_capture", None) is _orig_bs_to_capture:
+            _m.get_batch_sizes_to_capture = _bs_to_capture
 _v4.MQALayer.forward = _attn_forward
 _dv2.DeepseekV2MoE.forward = _moe_forward
 # S2-1 (11-18; default off): DSV41_S2_ARGMAX=1: the greedy sampler's torch.argmax(logits, -1) by fast_argmax (the same index,
@@ -749,7 +774,9 @@ if HEAD_ARGMAX:
         def recorded_ids(self, logits_output, forward_batch, *, watermark_state):
             hd, lg = _STATE.get("head"), logits_output.next_token_logits
             si = forward_batch.sampling_info
-            ok = (self.recorded and hd is not None and lg is not None and lg.dim() == 2 and lg.shape[0] == T
+            rows = 0 if lg is None or lg.dim() != 2 else lg.shape[0]   # (DSV41_PAD_SMALL: the live rows of a padded replay)
+            ok = (self.recorded and hd is not None and lg is not None and lg.dim() == 2 and 0 < rows <= T
+                  and (rows == T or PAD_SMALL)
                   and lg.data_ptr() == hd.w["logits"].data_ptr() and forward_batch is self._replayed_batch
                   and forward_batch.forward_mode.is_decode() and si.is_all_greedy and not forward_batch.return_logprob
                   and not (watermark_state is not None and si.has_watermark_candidates)
@@ -759,7 +786,7 @@ if HEAD_ARGMAX:
             _ha_used[0 if ok else 1] += 1
             if sum(_ha_used) in (1, 16, 256):
                 _log(f"head argmax: {_ha_used[0]} batches from the kernel's ids, {_ha_used[1]} by the sampler")
-            return hd.w["head_ids"].clone() if ok else None   # (int32: the sampler's contract; a copy: the next replay
+            return hd.w["head_ids"][:rows].clone() if ok else None   # (int32: the sampler's contract; a copy: the next replay
             # rewrites the buffer)
 
     _orig_init_ugg3 = _mr.ModelRunner.maybe_init_uocr_greedy_graph

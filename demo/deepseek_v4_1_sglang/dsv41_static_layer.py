@@ -587,7 +587,8 @@ def engram_tensors(read, layer: int, tp: int, rank: int, dev) -> dict:
 class StaticMoE(MhcMixin):
     def __init__(self, layer: int, ckpt: str, rank: int, tp: int, dev, out_root: str, pdl: bool,
                  exchange_pool: ExchangePool = None, mhc: bool = False, norm_next: bool = False, stats: bool = False,
-                 engram: bool = False, gamma_name: str = None, engram_kv: torch.Tensor = None, head: bool = False):
+                 engram: bool = False, gamma_name: str = None, engram_kv: torch.Tensor = None, head: bool = False,
+                 live_pos: torch.Tensor = None):
         """engram (11-20, DSV41_ENGRAM=1, with mHC and no next input): the next layer's Engram in this kernel after the post
         (moe_demo.engram_nodes); SGLang then takes R'' (hc_state) and skips its own (dsv41_static_hook)."""
         self.layer, self.pdl, self.steps, self.binds = layer, pdl, 0, {}
@@ -596,6 +597,9 @@ class StaticMoE(MhcMixin):
         w.update(moe_weights.routed_tensors(read, layer, tp, [rank], dev)[0])
         w["x"] = torch.zeros(T, HID, dtype=torch.bfloat16, device=dev)
         w["y"] = torch.zeros(T, HID, dtype=torch.bfloat16, device=dev)
+        if live_pos is not None:   # (11-21, DSV41_PAD_SMALL) the step's positions (StepTables'): a padding row is at 0
+            assert live_pos.dtype == torch.int32 and tuple(live_pos.shape) == (T,)
+            w["live_pos"] = live_pos
         if mhc or stats:
             gn = gamma_name or f"layers.{layer + 1}.attn_norm.weight"   # (the last layer with the head: norm.weight)
             w.update(mhc_tensors(read, layer, "ffn", gn if norm_next and mhc else None, dev, stats))

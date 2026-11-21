@@ -4,8 +4,10 @@ This is a temporary branch for one measurement. It holds the static attention an
 inside the kernels, and the optimizations of 11-17 to 11-20. Every switch is off by default. The command below turns on
 the set that is being measured.
 
-Only decode steps of exactly 8 rows run the static layers (T = 8). SGLang runs the other batch sizes and the prefill
-with its own layers. A run at another batch size therefore compares SGLang with SGLang.
+Decode steps of 8 rows run the static layers (T = 8). With `DSV41_PAD_SMALL=1` steps of 1 to 7 rows run them too, padded
+to 8: add it to `SET` for a run at bs 1, 2 or 4 (the bench then gives the engine 8 request slots). The bs-8 numbers below
+were measured without it. SGLang runs the larger batch sizes and the prefill with its own layers, so a run at bs > 8
+compares SGLang with SGLang.
 
 The method is PR #819's. `dsv41_spec_bench.py` is #819's `sgl_spec_bench.py` (`demo/glm53_flash/sglang_dsa/` in upstream
 mpk) with DSv4.1's model path and engine arguments; it also prints a hash of every row's output. Each run starts one
@@ -86,6 +88,7 @@ minus 1.
 | `DSV41_EG_KV14=1` | layer 14's wkv in attention L1's kernel instead of L13's (a reuse kernel has no idle SMs for it) |
 | `DSV41_EG_ROWS=1` | the n-gram rows looked up in that attention kernel too (SGLang's own table, read in place as its PEER_READ lookup does), not by SGLang's gather between the kernels |
 | `DSV41_HEAD=2` | the end of the step in the last MoE kernel: its post computes the head's input (the streams' collapse and the final norm), then the LM head (bf16 GEMM over this GPU's vocab rows, multicast gather into SGLang's fp32 logits buffer) |
+| `DSV41_PAD_SMALL=1` | (bs 1 to 7 only) SGLang captures no decode graph below 8 rows and pads those batches into the 8-row graph (its padding rows: position 0, request and KV slot 0); the MoE's routing gives a padding row row 0's experts at weight 0, so it reads no expert of its own |
 | `DSV41_FILL_FUSED=1` | the step's tables (positions, window rows, page tables), which the first static layer copies from SGLang's metadata, in one kernel instead of 6 small kernels and copies before attention L0 |
 | `DSV41_HEAD_ARGMAX=1` | the head's gather also computes each token's greedy next token (torch.argmax's rules); for a replayed all-greedy decode batch SGLang takes those ids (its in-graph greedy helper's rules) instead of running its 30 us argmax between the graph replays |
 

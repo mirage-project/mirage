@@ -82,7 +82,8 @@ def build_graph(mpk: StaticMegakernel, w: dict) -> None:
     logit_part, pairs = nt((T, E), float32, "logit_part"), nt((T, K), int64, "pairs")
     mpk.gemm_tile_layer(input=a("x"), weight=a("gate_weight"), output=logit_part)                    # logits, fp32 K parts
     mpk.topk_route_layer(input=logit_part, bias=a("gate_bias"), output=pairs, routed_scaling_factor=ROUTE_SCALE,
-                         score_func="sqrtsoftplus")                                                 # top 6, sorted by id
+                         score_func="sqrtsoftplus",                                                 # top 6, sorted by id
+                         live_positions=a("live_pos") if "live_pos" in w else None)   # (DSV41_PAD_SMALL: padding rows)
     x_q = nt((T, HID), uint8, "x_q")
     mpk.act_quant_layer(input=a("x"), output=x_q)                                                   # x -> e4m3, per 32
     sgu_part = nt((T, 2 * I), float32, "sgu_part")
@@ -256,6 +257,14 @@ def hand_plan(mpk: StaticMegakernel, sms: int) -> dict:
             for tk in tasks(name):
                 lists[turn[k % sms]].append(tk)
                 k += 1
+    route = next(n for n in nodes if n.name == "topk_route")
+    if len(route.params) >= 8 and route.params[7] == 1:   # (DSV41_PAD_SMALL, topk_route LIVEPOS) a padding row's task polls
+        # row 0's pairs: an in-node wait the plan's dependency check does not see, so row 0's task must not come after another
+        # routing task on its SM (it waits for nothing in the node: it then always runs)
+        idx = next(i for i, name in names.items() if name == "pairs")
+        for sm, lst in enumerate(lists):
+            ours = [tk[1][0] for tk in lst if tk[0] == idx]
+            assert 0 not in ours or ours[0] == 0, f"topk_route LIVEPOS: row 0's task after row {ours[0]}'s on SM {sm}"
     return {"grids": grids, "lists": [copy.deepcopy(lists) for _ in range(mpk.num_gpus)]}   # the same plan on every GPU
 
 

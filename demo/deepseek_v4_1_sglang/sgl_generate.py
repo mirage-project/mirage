@@ -31,6 +31,8 @@ def main():
     ap.add_argument("--template", default=None, help="a chat_template.jinja (the checkpoint's if it has one)")
     ap.add_argument("--same-length-copies", action="store_true", help="the first prompt 8 times, ignore_eos")
     ap.add_argument("--tokens", type=int, default=96)
+    ap.add_argument("--prompts", type=int, default=8, help="the first N prompts only (decode batches of N rows)")
+    ap.add_argument("--deterministic", action="store_true", help="SGLang's batch-invariant mode (--enable-deterministic-inference)")
     ap.add_argument("--ignore-eos", action="store_true", help="every request runs all --tokens steps (every decode step has 8 rows)")
     ap.add_argument("--repeat", type=int, default=1, help="the prompt text this many times (a longer context)")
     ap.add_argument("--graph", action="store_true", help="CUDA graphs (default: eager)")
@@ -46,7 +48,7 @@ def main():
     tok = AutoTokenizer.from_pretrained(a.tokenizer or a.model, trust_remote_code=True)
     if a.template:
         tok.chat_template = open(a.template).read()
-    prompts = [PROMPTS[0]] * 8 if a.same_length_copies else PROMPTS
+    prompts = ([PROMPTS[0]] * 8 if a.same_length_copies else PROMPTS)[:a.prompts]
     texts = [tok.apply_chat_template([{"role": "user", "content": " ".join([q] * a.repeat)}], tokenize=False,
                                      add_generation_prompt=True, enable_thinking=False) for q in prompts]
     ids = [tok.encode(t, add_special_tokens=False) for t in texts]
@@ -60,6 +62,8 @@ def main():
         extra["disable_flashinfer_autotune"] = True
     if a.no_bounded_replay:
         extra["enable_decoder_swa_bounded_replay"] = False
+    if a.deterministic:
+        extra["enable_deterministic_inference"] = True
     llm = sgl.Engine(model_path=a.model, tokenizer_path=a.tokenizer or a.model, trust_remote_code=True, tp_size=int(os.environ.get("SGL_TP", "4")),
                      max_running_requests=8, cuda_graph_max_bs_decode=8, context_length=a.ctx, max_total_tokens=a.max_total_tokens,
                      mem_fraction_static=a.mem_fraction, disable_radix_cache=True, disable_cuda_graph=not a.graph,

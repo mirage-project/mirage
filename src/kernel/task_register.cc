@@ -5551,9 +5551,10 @@ int TaskRegister::register_topk_route_sm100_task(
   // experts, every token's)]]]}. inputs: router logits [T, N >= E] fp32 (rows
   // past E: padding), bias [E] fp32; output: routing pairs [T, K DUP +
   // SHARED]. Grid x = token.
-  assert(params.size() >= 2 && params.size() <= 5);
+  // [, ROWS[, SCORE[, 1: the live rows by position (11-21)]]]
+  assert(params.size() >= 2 && params.size() <= 8);
   int const dup = params.size() >= 4 && params[3] > 1 ? params[3] : 1;
-  int const shared = params.size() == 5 ? params[4] : 0;
+  int const shared = params.size() >= 5 ? params[4] : 0;
   assert(shared >= 0 && params[1] + shared <= 256);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(bgraph, 2, 1, input_ops, output_ops);
