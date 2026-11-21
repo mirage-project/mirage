@@ -17,6 +17,9 @@ index, e.g. 22000-22999 for CUDA_VISIBLE_DEVICES=0,1,2,3 and 26000-26999 for 4,5
 of a box: each in its own directory (logs, nsys reports, build directories are under the current directory); their ports
 come from disjoint ranges (SGLang's own default draws from 22000-29999 for both and binds later); the build cache is
 shared (one lock file per layer.cu).
+FLASH_ARGMAX=1 (passed on to every run, as FLASH_ARGMAX_DIR / FLASH_ARGMAX_LOG_EVERY): greedy decode steps take the per-rank
+argmax of ../sglang_argmax (the logits not gathered; needs sglang_patch_argmax.py applied to the venv's SGLang); each run's
+"[flash argmax]" lines are printed after its result lines.
 """
 import os
 import random
@@ -204,8 +207,10 @@ if __name__ == "__main__":
         env.update(extra, DSA_STATIC_OUT=os.path.join(os.getcwd(), name, "static"),
                    KDA_STATIC_OUT=os.path.join(os.getcwd(), name, "static_kda"),
                    MOE_STATIC_OUT=os.path.join(os.getcwd(), name, "static_moe"))
-        # A/B: these two pass through from the chain's environment (the others of the hooks come from the run table)
-        env.update({k: os.environ[k] for k in ("MOE_STATIC_END_PRE", "MOE_STATIC_PLAN64") if os.environ.get(k)})
+        # A/B: these pass through from the chain's environment (the others of the hooks come from the run table; the
+        # FLASH_ARGMAX* names are not stripped above either, listed so that a later strip rule keeps them)
+        env.update({k: os.environ[k] for k in ("MOE_STATIC_END_PRE", "MOE_STATIC_PLAN64", "FLASH_ARGMAX", "FLASH_ARGMAX_DIR",
+                                               "FLASH_ARGMAX_LOG_EVERY") if os.environ.get(k)})
         log = os.path.join(os.getcwd(), f"{name}.log")
         run = [sys.executable, os.path.join(HERE, cmd[0]), *cmd[1:]]
         if name.startswith("prof_"):
@@ -242,3 +247,9 @@ if __name__ == "__main__":
         print(f"=== {name}: exit {code} ({log}){f', {len(checks)} check lines' if checks else ''}", flush=True)
         for l in [l for l in lines if any(k in l for k in KEYS) and "replaces SGLang" not in l][:12]:
             print("   ", l[:300], flush=True)
+        if env.get("FLASH_ARGMAX") == "1":   # the per-rank argmax's own lines (graphs captured: counted)
+            am = [l for l in lines if "[flash argmax]" in l]
+            ncap = sum("graph captured" in l for l in am)
+            print(f"    [flash argmax] {len(am)} lines, {ncap} graphs captured with it", flush=True)
+            for l in [l for l in am if "graph captured" not in l][:8]:
+                print("   ", l[:300], flush=True)
