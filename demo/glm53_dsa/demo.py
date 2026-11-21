@@ -168,13 +168,19 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     mpk.dsa_mla_merge_layer(input=split, output=o_lat, tokens_per_task={32: 2, 64: 32 // splits}.get(T))
     mpk.dsa_o_absorb_layer(input=o_lat, w_uv=t["w_uv"], output=v)
     mpk.group_quant_layer(input=v, output=vq, token_tiles=8 if T == 64 else 1)
-    o, sent, osum = nt((T, H), float32, "o_proj"), nt((T, H), bfloat16, "o_sent"), nt((T, H), bfloat16, "o_sum")
+    # T = 64: o_proj's sums in fixed point ("add"), so its K can split (build's round robin: 2 parts, 96 tasks) and
+    # allreduce_send sends each 128-column block once its parts are added; T <= 32 keeps the plain stores (the adds and
+    # the zeroed buffer cost more there than the blocks' early sends gain)
+    o_add = T == 64
+    o, sent, osum = (nt((T, H), int64 if o_add else float32, "o_proj"), nt((T, H), bfloat16, "o_sent"),
+                     nt((T, H), bfloat16, "o_sum"))
     if not tail:   # attn_out = bf16(o_proj): what the three nodes below give on one GPU with a zero residual
         assert mpk.num_gpus == 1 and next_norm is None
         mpk.scaled_gemm_tile_layer(input=vq, weight=t["w_o"], weight_scales=t["w_o_sf"], output=t["attn_out"],
                                    combine="store_bf16")
         return
-    mpk.scaled_gemm_tile_layer(input=vq, weight=t["w_o"], weight_scales=t["w_o_sf"], output=o, combine="store")
+    mpk.scaled_gemm_tile_layer(input=vq, weight=t["w_o"], weight_scales=t["w_o_sf"], output=o,
+                               combine="add" if o_add else "store")
     mpk.allreduce_send_layer(input=o, output=sent)
     mpk.sum_gpus_layer(input=sent, output=osum)
     mpk.residual_add_layer(addend=osum, residual=t["residual"], output=t["attn_out"],   # y = attention output + residual
@@ -221,7 +227,8 @@ def build(mpk, ws: dict, plan: str, out: str, search: list = None, costs_code: s
     """Compile the plan of the graph in mpk and load the kernel. Return the kernel and the compile_plan information, with
     "paths" (the schedule files).
     plan: a plan file, or "rr_full" / "rr_shared": the round-robin plan (plan_gen.round_robin_plan; e.g. T = 64, which has
-    no hand plan) with the grids of the kind's T = 32 hand plan (the GEMMs' K parts) and 8 dsa_q_absorb tasks a head.
+    no hand plan) with the grids of the kind's T = 32 hand plan, 8 dsa_q_absorb tasks a head, and each "add" FP8 GEMM's K
+    in the most parts that keep its tasks within one round of the SMs.
     search: cost record files. If given, the solver searches a plan that starts from `plan` (search.search_plan). It writes
     the plan to out/plan.json and its predicted timeline to out/plan_view.json.
     costs_code: the kernel templates of the records to use: "current" (static_schedule.code_tag), "any", or a tag.
@@ -234,6 +241,11 @@ def build(mpk, ws: dict, plan: str, out: str, search: list = None, costs_code: s
         for n in compiler.graph_nodes(mpk):
             if n.name == "dsa_q_absorb":   # two token groups: 8 tasks a head (declared: 4)
                 grids[n.graph_idx] = (2 * n.grid[0], n.grid[1], n.grid[2])
+            elif n.name == "scaled_gemm_tile" and n.params[0] == 1:   # an "add" GEMM: K in the most parts (whole 128-col
+                # tiles) that keep its tasks within one round of the SMs
+                tiles, sms = n.params[1] // 128, mpk._num_sms()
+                grids[n.graph_idx] = (n.grid[0], max(d for d in range(1, tiles + 1)
+                                                     if tiles % d == 0 and n.grid[0] * d <= sms), 1)
         p = plan_gen.round_robin_plan(mpk, grids)
     else:
         p = check_plan(plan, torch.cuda.get_device_properties(0).multi_processor_count)
