@@ -33,6 +33,10 @@ bank of the experts node (shared_bank: 7 layer calls).
   5. timed launches  --reps launches, 512 MB read on every GPU before each (empties L2); span per launch
                      --record FILE: the timing build; the per-task times become cost records (cost_records.py) appended to FILE
   6. --compare-y     y vs a reference y file (bf16 [T, 6144], e.g. SGLang's), relRMS
+     --save-y / --same-y FILE   y and the routed rows of the first launch saved (torch.save), or required bit-equal to
+                     a saved pair (a kernel change that keeps the rounding; same --layer --rank --x)
+     --prof-experts  the experts node with its per-SM stamps (scaled_moe_experts_layer prof=): per phase of the last
+                     timed launch, medians over the SMs (prof_report)
 Steps 5-6 run the layer through the test harness (python/mirage/mpk/static_harness.py).
 
 y = the MoE output (+ the residual: zero in this demo, so y is comparable with the MoE output of SGLang).
@@ -153,7 +157,7 @@ def build_graph(mpk: StaticMegakernel, w: dict, next_norm=None, live=None) -> di
     if bank:
         mpk.scaled_moe_experts_layer(z_q=z_q, pairs=t["routing_pairs"], w13=t["w13"], w13_scales=t["w13_sf"],
                                      w2=t["w2"], w2_scales=t["w2_sf"], output=t["routed_rows"],
-                                     **MOE_OPTS)                                                      # W13, SiLU, W2
+                                                     prof=t.get("moe_prof"), **MOE_OPTS)                              # W13, SiLU, W2
         r_sent = nt((T, H), bfloat16, "r_sent")
         Rsum = r_sent if T >= 32 else nt((T, H), bfloat16, "routed_summed")   # T >= 32: added over the GPUs in residual_add
         mpk.allreduce_send_layer(input=t["routed_rows"], output=r_sent)                              # a token's 9 rows added
@@ -186,7 +190,7 @@ def _shared_branch(mpk, t, z_q, nt, next_norm):
                                combine="store")                                                      # shared down: S
     mpk.scaled_moe_experts_layer(z_q=z_q, pairs=t["routing_pairs"], w13=t["w13"], w13_scales=t["w13_sf"],
                                  w2=t["w2"], w2_scales=t["w2_sf"], output=t["routed_rows"],
-                                 **MOE_OPTS)                                                          # W13, SiLU, W2
+                                 prof=t.get("moe_prof"), **MOE_OPTS)                                  # W13, SiLU, W2
     # The hand plan keeps graph order on each SM.
     # Put the shared send after the experts so its wait does not delay them.
     # One send task per SM, as for R: the saved plans were measured with this grid.
@@ -202,6 +206,54 @@ def _shared_branch(mpk, t, z_q, nt, next_norm):
         mpk.sum_gpus_layer(input=s_sent, output=Ssum)                                                # S over the GPUs
     mpk.residual_add_layer(input=Rsum, addend=Ssum, residual=t["residual"], output=t["moe_out"],     # y = R + S + res
                            counted=next_norm is not None)
+
+
+def prof_report(prof: torch.Tensor, bar: int):
+    """The experts node's stamps of the last launch (scaled_moe::moe_prof_event; ns), as demo/glm53_flash/moe_demo.py
+    prints them: per SM its W13 items (seen -> h_q written) and W2 tiles (seen -> CHQ and scale loads -> accumulator full
+    -> rows stored), the ring switch, the W2 loaders' waits; medians (p10 / p90) over the SMs, in us."""
+    p = prof.numpy()
+    per = {k: [] for k in ("task started", "z_q + pairs landed", "switch done (t0)", "start", "end", "W13 items",
+                           "W13 item (seen-done)", "W13: seen -> scales", "W13: scales -> drained", "W13: drained -> h_q",
+                           "W13 done-done", "last W13 done", "switch", "last W13 -> 1st W2 done", "W2 tiles",
+                           "W2: scales (+ CHQ, new slot)", "W2: wait acc full", "W2: drain + store", "W2 done-done",
+                           "W2 loaders: wait stage (sum)", "W2 loaders: wait CHQ (sum)")}
+    for sm in range(p.shape[0]):
+        r = p[sm]
+        if r[0] == 0:
+            continue
+        ev = [(int(v) >> 56, (int(v) & ((1 << 56) - 1)) / 1e3) for v in r[16:16 + int(r[8])]]
+        for k, i in (("task started", 9), ("z_q + pairs landed", 10), ("switch done (t0)", 11)):
+            per[k].append((r[i] - bar) / 1e3)
+        per["start"].append((r[0] - bar) / 1e3)
+        per["end"].append((r[1] - bar) / 1e3)
+        seen13, done13 = [x for k, x in ev if k == 1], [x for k, x in ev if k == 2]
+        sc13, dr13 = [x for k, x in ev if k == 7], [x for k, x in ev if k == 8]
+        per["W13 items"].append(len(done13))
+        per["W13 item (seen-done)"] += [b - a for a, b in zip(seen13, done13)]
+        per["W13: seen -> scales"] += [b - a for a, b in zip(seen13, sc13)]
+        per["W13: scales -> drained"] += [b - a for a, b in zip(sc13, dr13)]
+        per["W13: drained -> h_q"] += [b - a for a, b in zip(dr13, done13)]
+        per["W13 done-done"] += [b - a for a, b in zip(done13, done13[1:])]
+        if done13:
+            per["last W13 done"].append(done13[-1] + (r[0] - bar) / 1e3)
+        if r[2]:
+            per["switch"].append((r[3] - r[2]) / 1e3)
+        w2 = {k: [x for kk, x in ev if kk == k] for k in (3, 4, 5, 6)}
+        per["W2 tiles"].append(len(w2[6]))
+        per["W2: scales (+ CHQ, new slot)"] += [b - a for a, b in zip(w2[3], w2[4])]
+        per["W2: wait acc full"] += [b - a for a, b in zip(w2[4], w2[5])]
+        per["W2: drain + store"] += [b - a for a, b in zip(w2[5], w2[6])]
+        per["W2 done-done"] += [b - a for a, b in zip(w2[6], w2[6][1:])]
+        if done13 and w2[6]:
+            per["last W13 -> 1st W2 done"].append(w2[6][0] - done13[-1])
+        per["W2 loaders: wait stage (sum)"].append((r[4] + r[6]) / 1e3)
+        per["W2 loaders: wait CHQ (sum)"].append((r[5] + r[7]) / 1e3)
+    q = lambda v, f: sorted(v)[min(len(v) - 1, int(f * len(v)))]
+    print("  experts prof (us from the start barrier; per SM / per item, median (p10 / p90)):")
+    for k, v in per.items():
+        if v:
+            print(f"    {k:30s} {statistics.median(v):8.2f}   ({q(v, 0.1):.2f} / {q(v, 0.9):.2f})")
 
 
 def check_plan(plan: str, gpus: int, sms: int) -> dict:
@@ -271,6 +323,12 @@ def main():
     ap.add_argument("--record", default=None, metavar="FILE", help="the timing build; this run's cost records appended to FILE")
     ap.add_argument("--nvcc-flag", action="append", default=[], help="an nvcc flag for the layer (repeatable), e.g. "
                     "-DSTATIC_RESET_IN_KERNEL: the kernel resets its buffers itself, no host memsets or sync per launch")
+    ap.add_argument("--save-y", metavar="FILE", help="save y and the routed rows of the first launch (torch.save): a "
+                    "bit-exact baseline")
+    ap.add_argument("--same-y", metavar="FILE", help="y and the routed rows of the first launch must equal these saved ones "
+                    "bit for bit (same --layer --rank --x)")
+    ap.add_argument("--prof-experts", action="store_true", help="the experts node's per-SM stamps (scaled_moe_experts_layer "
+                    "prof=): where its time goes, for the last timed launch")
     args = ap.parse_args()
     # check the GPU count, the TP size and the plan before the download and the weight load
     tp = args.tp or args.gpus
@@ -290,6 +348,10 @@ def main():
     ws = load_weights(checkpoint_reader(snapshot), args.layer, args.gpus, x, tp=args.tp, rank=args.rank)
     if args.shared_in_bank:
         ws = [shared_bank(w) for w in ws]
+    if args.prof_experts:   # buffer slot 4 of the experts node: [SMs, MOE_PROF_WORDS] int64
+        for g, w in enumerate(ws):
+            w["moe_prof"] = torch.zeros(torch.cuda.get_device_properties(g).multi_processor_count, 384, dtype=torch.int64,
+                                        device=torch.device("cuda", g))
     sk, info = build(ws, args.out, args.plan, search=args.search,
                      costs_code=args.costs_code, time_limit_s=args.time, profile=args.record is not None,
                      extra_flags=args.nvcc_flag)
@@ -298,6 +360,22 @@ def main():
     y = ws[0]["moe_out"].cpu()
     for g in range(1, args.gpus):
         assert torch.equal(ws[g]["moe_out"].cpu(), y), f"y differs on GPU {g}"
+    first = {"y": y.clone(), "routed_rows": ws[0]["routed_rows"].cpu().clone()}   # (--save-y / --same-y: GPU 0's)
+    e = (ws[0]["routing_pairs"].cpu() >> 32).flatten()   # the bank experts of the first launch's pairs
+    _, n = e.unique(return_counts=True)
+    print(f"routing: {len(n)} expert slots, {e.numel() / len(n):.2f} pairs a slot (median {n.median().item()}, max "
+          f"{n.max().item()}); slots of more than 16 tokens: {int((n > 16).sum())}")
+    same_ok = True
+    if args.save_y:
+        torch.save(first, args.save_y)
+        print(f"y and the routed rows of the first launch saved to {args.save_y}")
+    if args.same_y:
+        base = torch.load(args.same_y)
+        bits = lambda v: v.contiguous().view(torch.int16 if v.element_size() == 2 else torch.int32)
+        for k in ("y", "routed_rows"):
+            eq = k in base and base[k].shape == first[k].shape and bool((bits(base[k]) == bits(first[k])).all())
+            print(f"  {k} bit-equal to {args.same_y}: {eq}")
+            same_ok = same_ok and eq
     if args.compare_y:
         ref = torch.from_numpy(np.fromfile(args.compare_y, dtype=np.uint16).reshape(T, H).astype(np.int16)).view(torch.bfloat16).float()
         print(f"y vs {args.compare_y}: relRMS {((y.float() - ref).norm() / ref.norm()).item():.2e}")
@@ -308,6 +386,11 @@ def main():
         if args.record:
             launches.append((h.task_times(), h.timing()))
     print(f"{args.gpus} GPU(s), grids {info['grids']}: median span {statistics.median(spans):.1f} us over {args.reps} launches")
+    print(f"span min {min(spans):.1f} median {statistics.median(spans):.1f} max {max(spans):.1f} us")
+    y_last = ws[0]["moe_out"].cpu()
+    print(f"  y of the last timed launch bit-equal to the first: {torch.equal(y_last, first['y'])}")
+    if args.prof_experts:
+        prof_report(ws[0]["moe_prof"].cpu(), h.timing()[0][0])
     if args.record:
         from mirage.mpk import cost_records
         nvcc = subprocess.run(["nvcc", "--version"], capture_output=True, text=True).stdout.strip().splitlines()[-1]
@@ -316,7 +399,11 @@ def main():
                                               machine)
         cost_records.append_records(args.record, records)
         print(f"cost records: {len(records)} added to {args.record} (code {records[0]['code'] if records else '-'}, {machine})")
+    if args.same_y:
+        print("PASS" if same_ok else "FAIL")
     sk.finalize()
+    if not same_ok:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
