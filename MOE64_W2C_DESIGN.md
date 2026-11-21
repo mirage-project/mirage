@@ -108,25 +108,69 @@ SGLang = 16550 us a step from 17796) needs -1246 us a step = -16.6 us a MoE laye
 of these numbers is measured; the box job's prof rows (`W2 done-done`, `W2: wait acc full`, `W2 loaders: wait CHQ`)
 give the split.
 
-## 7. W13C (not implemented in this branch)
+## 7. W13C (STATIC_MOE64_W13C, commits b8545e5, 263cc53)
 
-Measured shape of the W13 phase at T = 64: a W13 ring stage is 32 KB of weights + 16 KB of z_q (64 rows x 2 K tiles
-x 128 B, config.cuh `A_STAGE = TW 256`), 24 stages an item (KT_LAT 48), the MMA N = 64. z_q is a third of the bytes
-a stage lands (from L2), and the 48 KB stage limits the ring to 3 stages (SMAX 3, smem). The bigger lever by the
-same bound as section 6: 16 KB -> 4 KB a stage is -25 % of the W13 landing bytes (W13 ~70-85 us a layer: bound
-~17-21 us), and 36 KB stages give a 4th stage in the same 144 KB.
+Example (GLM-5.3 TP8 rank 0, T = 64, KT_LAT 48): the shared slot 130 has 64 tokens, slot 5 has tokens {3, 40, 41}.
 
-What a GLM W13C needs, mapped from K3's W13C / W13C2 / W13C4:
+```
+w13c_groups (every SM):  slot 130: ng 4, extra groups (130, 1) (130, 2) (130, 3) at queue places M .. M + 2
+entry (slot 5, q 0, items 0..1):  n 3, nq 1, rows word = 3 | 40 << 8 | 41 << 16 | 3 << 24
+w13c_load stage s (slot g % 4):  expect 32768 + 1 x 1024; tma3 W13X2 (2 pieces); per K tile 2 s + kt:
+                                  tma_gather4(ZQR, dst + 32768 + kt 2048, col (2 s + kt) 128, rows word)
+w13c_issue:  mma_f8_i x 4 a piece, idesc_f8_n(16), columns as issue_promoted
+drain_promoted_c:  v[c] += sw x xs[atom][tok[c]] x acc[c], c < 16 (atoms in issue_promoted's order)
+epilogue:  h_q plane row 5 T + 16 q + c (hq_out c0 = 16 q); CHQ[5] += 2 per 128 features: MT13 per group
+W2 (w2_arm):  waits CHQ[slot] >= MT13 ceil(ntok / 16)
+```
 
-1. a 2D z_q row map per exchange set (K3: `act8 <K bytes> <rows> 1`, box 1 row) for `tile::gather4`; Python
-   `scaled_moe_experts_layer` map slots 7 / 8 (T = 64 only), host.cuh map kind if `act8` has no 1-row box;
-2. a W13 loader in scaled_moe_experts.cuh (not runtime.cuh `load_job`, shared by every GEMM): weights by warp 0 /
-   warp 7 as now, z_q rows of the slot's tokens by `ceil(n / 4)` gather4 a K tile (K3 W13C4), expect bytes from n;
-3. slots of more than 16 tokens (the shared expert's: 64) in groups of 16 (K3: extra groups `n_live + q`, W13 items
-   per group, CHQ per group) or kept on the N = 64 path; the ring geometry must be one for all items;
-4. `issue_promoted` with a per-item idesc (N = 16), `drain_promoted` reading 16 columns, its z_q scales
-   `xs[atom][tok[c]]` (fp32 in shared memory: no TMEM scale copy at T = 64, simpler than K3's W13C2 scale buffers);
-5. the HEAVY epilogue's h buffers indexed by place c instead of token (its wide path assumes token columns);
-6. a new ring protocol if the stage count or loaders change (4 stages, two loaders: K3's W13C2 rule "slot s loaded
-   by warp s % 2, waited / committed by issuer s % 2", `full` count 2) -> a CPU ring model with negative controls
-   before any box run.
+| | W2C only (`-DSTATIC_MOE64_W13C=0`) | W2C + W13C (default) |
+|---|---|---|
+| W13 entry | (slot, two items) | (slot, group of <= 16 places, two items) |
+| ring | layer-wide: 3 stages of 48 KB (32 KB + 64 z_q rows) | own: 4 stages of 36 KB (32 KB + 2 x 16 rows), same 144 KB |
+| z_q rows a stage | 1 TMA box {128, 64, 2} = 16 KB | 2 x ceil(n / 4) tile::gather4 of 4 rows = 1..4 KB |
+| barriers | rt.full0 / empty0 [3] | w13c_full [4] count 1, w13c_empty [4] count 2 (OFF_W2BAR + 2304) |
+| MMA N | 64 | 16 |
+| drain | T-wide (n > 8) or per token (n <= 8) | 16 columns, scale of tok[c] |
+| CHQ per slot | MT13 | MT13 ceil(ntok / 16) |
+
+Inputs: map slot 7 (Slots ZQR) = z_q as `act8 <L> <T> 1` (box {128, 1}, SW128) in exchange set 0, slot 8 set 1;
+scaled_moe_experts_layer declares them for T = 64 layers of W2C's conditions; a layer without them compiles to the W2C
+code (SASS-identical). Shared memory: dynamic and static unchanged (GLM-5.3 199040 -> launch 200704 + static 18432 in the
+MoE-only build, 19456 in the GLM-5.3 layer kernel; Flash 196608 + 34816 = 231424 of 232448). The OFF_W2BAR area holds the
+8 barriers (+2304) and the extra groups' table (+2368, NXG = NPAIR / 16 + 1 ints: 132 B GLM-5.3, 292 B Flash) inside its
+3072 B.
+
+Protocol: slot g % 4 always has the loader g % 2 (24 / 16 stages an item, even), its `empty` waits are on its own slots
+(runtime.cuh's parity rule); every issuer waits every stage's `full` in order; the owner commits `empty`, the other
+arrives (count 2, as the layer ring); acc ticks as issue_promoted. Warp 0's switch to W2 waits warp 7's stage count, then
+each slot's last `empty` phase. CPU model `moe64_w13c_model.py` (2e4 runs a bank of the data part and of the ring with
+roles at bursty random speeds): passes; controls that fail: odd depth 3, `empty` count 1, the switch on warp 0's slots
+only, the switch without warp 7's count with 4 accumulator ticks; data controls: atomic order, CHQ MT13, nq floor, h_q
+rows without 16 q, gather rows without 16 q, scales by place. Found by the model: at ACC_STAGES 2 the switch's wait for
+warp 7's count is implied (issuer 0 starts a round only after the round two ticks back was drained, which follows issuer
+1's MMAs of it); the wait stays.
+
+Builds (nvcc 13.3, sm_100a): W13C 255 registers, 0 spills, 0-B stack (W2C only: 256-B stack: the T-wide path's local
+array); T < 64, LIVE < T, the layer without map slot 7, and `-DSTATIC_MOE64_W13C=0`: SASS identical to the parent.
+
+Not measured yet: the gain (bound in this section's first version: 16 KB -> ~4 KB of z_q a stage, a 4th stage; ~17-21
+us a layer if W13 is bound by the bytes landing per SM). Box job: moe64_ab2.sh (old / w2c / new).
+
+## 8. Run-time idle rows (commit 0c29da4)
+
+Example (GLM-5.3, T = 64, the decoder's live table with rows 0..62 live): row 63's 9 pairs all name the shared bank
+expert (topk_route idle_pair: the 8 routed pairs at weight 0, the shared pair at weight 1), so token 63 is 9 times in
+the shared slot.
+
+```
+before: every pair at start + rank(63) = start + 63: 8 entries of the slot never written (stale tok / kk),
+        ntok = 72: h_q rows 130 T + 64 .. 71 (the next slot's / past the planes), W2 N 80, h_q copy 18 KB > 16 KB
+now:    the pair that claims bit 63 first -> start + 63; the other 8 -> start + 64 .. start + 71; ntok = 64;
+        W2 epilogue: entries start .. start[s + 1] - 1; entry start + 64 + j reads column rank(63) = 63 (binary search)
+```
+
+The layer's compile-time LIVE is T (Python sees no live count); the decoder's live table makes rows idle at run time
+(SGLang's CUDA graph capture of the T = 64 layers: most batch sizes). With W2C on, the GLM-5.3 TP8 bs 64 server hit an
+illegal memory access before any graph was captured; with `-DSTATIC_MOE64_W2C=0` it passed. moe64_w2c_model.py and
+moe64_w13c_model.py now draw idle rows in half of their runs (every R row written once); control no_dedup (the code
+before) fails every run. demo/glm53_moe/demo.py `--live-rows N` attaches the decoder's table.
