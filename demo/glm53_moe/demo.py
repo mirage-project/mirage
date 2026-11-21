@@ -383,9 +383,16 @@ def main():
     if args.same_y:
         base = torch.load(args.same_y)
         bits = lambda v: v.contiguous().view(torch.int16 if v.element_size() == 2 else torch.int32)
+        # with idle rows (--live-rows N < T) only the live rows decide: an idle row's values are not used, and the old
+        # code's differ between runs there (its in-place SiLU of a token listed several times in a slot)
+        n_live = args.live_rows if args.live_rows is not None else T
         for k in ("y", "routed_rows"):
             eq = k in base and base[k].shape == first[k].shape and bool((bits(base[k]) == bits(first[k])).all())
             print(f"  {k} bit-equal to {args.same_y}: {eq}")
+            if n_live < T and k in base and base[k].shape == first[k].shape:
+                r = first[k].shape[0] // T * n_live   # y rows < N; routed rows (t, k) of tokens t < N
+                eq = bool((bits(base[k][:r]) == bits(first[k][:r])).all())
+                print(f"  {k} of the {n_live} live rows bit-equal to {args.same_y}: {eq}")
             same_ok = same_ok and eq
     if args.compare_y:
         ref = torch.from_numpy(np.fromfile(args.compare_y, dtype=np.uint16).reshape(T, H).astype(np.int16)).view(torch.bfloat16).float()
