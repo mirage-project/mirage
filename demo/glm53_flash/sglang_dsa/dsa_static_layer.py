@@ -152,7 +152,8 @@ class StaticDSA:
         plan = demo.round_robin_plan(mpk, grids) if self.plan == "rr" else compiler.plan_from_file(self.plan)
         out_dir = os.path.join(out_root, f"rank{rank}", f"layer{layer}{f'_t{T}' if T != 8 else ''}"
                                f"{'_post' if self.post_only else ''}")
-        flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"]
+        # FLASH_TWOSHOT=0: the one-shot all-reduce at T 64 (core.cuh STATIC_FLASH64_TWOSHOT; A/B)
+        flags = ["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"] + (["-DSTATIC_FLASH64_TWOSHOT=0"] if os.environ.get("FLASH_TWOSHOT") == "0" else [])
         self.group = fused["group"]
         self.fused_args = fused
         # every rank: the same lists; this rank alone, the exchange region in symmetric memory
@@ -161,7 +162,8 @@ class StaticDSA:
         paths, self.info = compiler.compile_plan(mpk, plan, os.path.join(out_dir, "schedules"))
         self.xbuf, self.xhandle, mc = _exchange_region(mpk.exchange_region_bytes(), dev, fused["group"])
         self.sk = mpk.compile_static(paths, gpu_tensors=[self.t], out_dir=os.path.join(out_dir, "build"),
-                                     extra_flags=flags, device=dev.index, rank=rank, exchange=(mc, self.xbuf.data_ptr()))
+                                     extra_flags=flags, device=dev.index, rank=rank,
+                                     exchange=(mc, self.xbuf.data_ptr(), [int(p) for p in self.xhandle.buffer_ptrs]))
         self.layer, self.pdl, self.req_to_token, self.eps = layer, pdl, req_to_token, eps
         self.w = w   # the checkpoint's tensors of this rank (dsa_mla.load_layer)
         self._bound = {}    # graph tensor name -> the address bound now

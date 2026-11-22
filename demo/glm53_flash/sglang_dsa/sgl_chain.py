@@ -20,6 +20,8 @@ shared (one lock file per layer.cu).
 FLASH_ARGMAX=1 (passed on to every run, as FLASH_ARGMAX_DIR / FLASH_ARGMAX_LOG_EVERY): greedy decode steps take the per-rank
 argmax of ../sglang_argmax (the logits not gathered; needs sglang_patch_argmax.py applied to the venv's SGLang); each run's
 "[flash argmax]" lines are printed after its result lines.
+FLASH_TWOSHOT=0 (passed on to every run): the static layers of T 64 built with the one-shot all-reduce
+(-DSTATIC_FLASH64_TWOSHOT=0; default: the two-shot by token, core.cuh), for the A/B.
 """
 import os
 import random
@@ -210,7 +212,7 @@ if __name__ == "__main__":
         # A/B: these pass through from the chain's environment (the others of the hooks come from the run table; the
         # FLASH_ARGMAX* names are not stripped above either, listed so that a later strip rule keeps them)
         env.update({k: os.environ[k] for k in ("MOE_STATIC_END_PRE", "MOE_STATIC_PLAN64", "FLASH_ARGMAX", "FLASH_ARGMAX_DIR",
-                                               "FLASH_ARGMAX_LOG_EVERY") if os.environ.get(k)})
+                                               "FLASH_ARGMAX_LOG_EVERY", "FLASH_TWOSHOT") if os.environ.get(k)})
         log = os.path.join(os.getcwd(), f"{name}.log")
         run = [sys.executable, os.path.join(HERE, cmd[0]), *cmd[1:]]
         if name.startswith("prof_"):

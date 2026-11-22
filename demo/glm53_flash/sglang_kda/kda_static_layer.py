@@ -175,13 +175,15 @@ class StaticKDA:
                                f"layer{layer}{f'_t{self.T}' if self.T != 8 else ''}{'_post' if self.post_only else ''}")
         self.paths, self.info = compiler.compile_plan(mpk, plan, os.path.join(out_dir, "schedules"))
         self.mpk = mpk   # the graph (cost_records.records_of_run)
-        flags = ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"]
+        # FLASH_TWOSHOT=0: the one-shot all-reduce at T 64 (core.cuh STATIC_FLASH64_TWOSHOT; A/B)
+        flags = ["-DSTATIC_RESET_IN_KERNEL", "-DSTATIC_PDL_TRIGGER=1"] + (["-DSTATIC_FLASH64_TWOSHOT=0"] if os.environ.get("FLASH_TWOSHOT") == "0" else [])
         self.fused_args = fused
         self.group = fused["group"]
         # this rank alone, the exchange region in symmetric memory
         self.xbuf, self.xhandle, mc = exchange_region(mpk.exchange_region_bytes(), dev, fused["group"])
         self.sk = mpk.compile_static(self.paths, gpu_tensors=[self.t], out_dir=os.path.join(out_dir, "build"),
-                                     extra_flags=flags, device=dev.index, rank=rank, exchange=(mc, self.xbuf.data_ptr()))
+                                     extra_flags=flags, device=dev.index, rank=rank,
+                                     exchange=(mc, self.xbuf.data_ptr(), [int(p) for p in self.xhandle.buffer_ptrs]))
         self.layer, self.pdl = layer, pdl
         self.inputs = None   # the last run's: "bound" or how they were copied
         self._bound = {}   # graph tensor name -> the address bound now

@@ -61,14 +61,15 @@ class ExchangePool:
         self.group, self.dev, self.slots, self.taken, self.buf = group, dev, slots, 0, None
 
     def take(self, nbytes: int) -> tuple:
-        """(the multicast address, this GPU's address) of the next region of nbytes."""
+        """(the multicast address, this GPU's address, every rank's address) of the next region of nbytes (every rank's:
+        STATIC_FLASH64_TWOSHOT's unicast stores into the owner's copy)."""
         if self.buf is None:
             self.slot = -(-nbytes // 65536) * 65536
             self.buf, self.handle, self.mc = _exchange_region(self.slot * self.slots, self.dev, self.group)
         assert nbytes <= self.slot and self.taken < self.slots, "ExchangePool: more or larger regions than its slots"
         off = self.taken * self.slot
         self.taken += 1
-        return self.mc + off, self.buf.data_ptr() + off
+        return self.mc + off, self.buf.data_ptr() + off, [int(p) + off for p in self.handle.buffer_ptrs]
 
 
 class StaticMoE:
@@ -119,9 +120,10 @@ class StaticMoE:
             exchange = pool.take(mpk.exchange_region_bytes())
         else:
             self.xbuf, self.xhandle, mc = _exchange_region(mpk.exchange_region_bytes(), dev, group)
-            exchange = (mc, self.xbuf.data_ptr())
+            exchange = (mc, self.xbuf.data_ptr(), [int(p) for p in self.xhandle.buffer_ptrs])
         self.sk = mpk.compile_static(paths, gpu_tensors=[self.t], out_dir=os.path.join(out_dir, "build"),
-                                     extra_flags=["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"],
+                                     extra_flags=["-DSTATIC_RESET_IN_KERNEL", f"-DSTATIC_PDL_TRIGGER={int(pdl)}"]
+                                     + (["-DSTATIC_FLASH64_TWOSHOT=0"] if os.environ.get("FLASH_TWOSHOT") == "0" else []),
                                      device=dev.index, rank=rank, exchange=exchange)
         self.layer, self.pdl = layer, pdl
         self._at = {}   # graph tensor -> the address it is bound to now
