@@ -2,8 +2,9 @@
 
 The checkpoint stores e4m3 expert weights and fp32 scales for 128 x 128 blocks.
 The loader selects a TP shard and reorders its weights into pieces.
-The e4m3 bytes and fp32 scale values do not change (layer_tensors(w2_ue8m0=True): the down weights requantized to
-power-of-two scales, SGLang's DeepGEMM requantization: fp8_fp32scale_weights.requant_ue8m0).
+The e4m3 bytes and fp32 scale values do not change (layer_tensors(w2_ue8m0=True) / (w13_ue8m0=True): the down / the
+gate and up weights requantized to power-of-two scales, SGLang's DeepGEMM requantization:
+fp8_fp32scale_weights.requant_ue8m0).
 scaled_moe_experts and scaled_gemm_tile read these pieces.
 mirage.mpk.fp8_fp32scale_weights defines the piece layout.
 The tensors are:
@@ -91,13 +92,15 @@ def checkpoint_reader(snapshot: str):
 
 
 def layer_tensors(read, layer: int, tp: int = 1, rank: int = 0, num_experts: int = 256, device="cpu",
-                  w2_ue8m0: bool = False) -> dict:
+                  w2_ue8m0: bool = False, w13_ue8m0: bool = False) -> dict:
     """Load the router, correction bias, and expert weights for shard rank of tp.
 
     Select gate/up rows and down columns from the expert intermediate dimension.
     The module docstring defines the returned tensor names and layouts.
     w2_ue8m0: every expert's down shard (the shared expert's too) requantized to power-of-two scales
     (pack_w2(ue8m0=True)), for scaled_moe_experts_layer(w2_ue8m0=True).
+    w13_ue8m0: every expert's gate and up shards (the shared expert's too) requantized the same way
+    (pack_w13(ue8m0=True)), for scaled_moe_experts_layer(w13_ue8m0=True).
     """
     p = f"model.layers.{layer}.mlp."
     w = {"router": read(p + "gate.weight").to(device), "bias": read(p + "gate.e_score_correction_bias").float().to(device)}
@@ -122,7 +125,7 @@ def layer_tensors(read, layer: int, tp: int = 1, rank: int = 0, num_experts: int
             us = read(q + "up_proj.weight_scale_inv")[blocks].float().to(device)
             down = full(q + "down_proj.weight", (None, rows)).view(torch.uint8).contiguous().to(device)
             ds = read(q + "down_proj.weight_scale_inv")[:, blocks].float().contiguous().to(device)
-            for k, v in zip(("w13", "w13_sf"), pack_w13(gate, gs, up, us)):
+            for k, v in zip(("w13", "w13_sf"), pack_w13(gate, gs, up, us, ue8m0=w13_ue8m0)):
                 banks[k].append(v)
             for k, v in zip(("w2", "w2_sf"), pack_w2(down, ds, ue8m0=w2_ue8m0)):
                 banks[k].append(v)

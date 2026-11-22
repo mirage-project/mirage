@@ -23,7 +23,8 @@ no attention.
 
 The MoE kernels have their own copy of this rank's experts (as demo/glm53_moe, demo/glm53_flash's StaticMoE): read from the
 checkpoint into the piece layout of mirage.mpk.fp8_fp32scale_weights (the same bytes and scale values; at T = 64 the down
-weights requantized to power-of-two scales, moe_demo.W2_UE8M0), about 1.2 GB per layer. The engine keeps its own weights, so its prefill runs its own layers.
+weights and the gate / up weights requantized to power-of-two scales, moe_demo.W2_UE8M0 and W13_UE8M0; MoE x then quantized
+with power-of-two scales), about 1.2 GB per layer. The engine keeps its own weights, so its prefill runs its own layers.
 
 MIRAGE_STATIC_ALLREDUCE_IN_KERNEL=0: the engine ends the sublayers instead. Every kernel is built for one GPU and ends with
 this rank's partial sum (the attention at o_proj; the FFN's all-reduce is a copy and its residual zero), written to the
@@ -174,7 +175,8 @@ class StaticDecoder:
     def _moe_tensors(self, l: int) -> dict:
         """Layer l's MoE tensors of this rank from the checkpoint (MOE_BANK: the shared expert in the bank)."""
         w = moe_weights.layer_tensors(self.read, l, tp=TP, rank=self.rank, device=self.dev,
-                                      w2_ue8m0=moe_demo.W2_UE8M0)   # T = 64: W2 requantized (moe_demo.W2_UE8M0)
+                                      w2_ue8m0=moe_demo.W2_UE8M0,   # T = 64: W2 requantized (moe_demo.W2_UE8M0)
+                                      w13_ue8m0=moe_demo.W13_UE8M0)   # and W13 (moe_demo.W13_UE8M0)
         return moe_demo.shared_bank(w) if MOE_BANK else w
 
     # ---- setup: after the KV pool, before CUDA graph capture ----
