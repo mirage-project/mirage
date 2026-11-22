@@ -16,7 +16,8 @@ layer 7 with the indices of layer 6.
 
   0. weights        Download the attention tensors of --layers (weights.py) and run check_config.
   1. state          seq_lens (--seq-lens; 0: an idle slot), a shuffled block table (pages of 64) and the RoPE table. x: --x
-                    (bf16 [T, 6144] raw file) or random. The residual is zero, so y is the attention output. For each
+                    (bf16 [T, 6144] raw file) or random. The residual is zero (--residual random: seed 3), so y is the
+                    attention output. For each
                     layer, random history in the latent cache (and the index cache): bf16 rows, e4m3 keys with UE8M0 scales
                     (seed 1).
   2. compile_plan   Select the plan of the layer kind (full or shared) with --plan: hand (default), solver, or PREFIX (the
@@ -42,7 +43,9 @@ layer 7 with the indices of layer 6.
   4. y              The first launch (not timed) gives the output y of layer L (the graph tensor attn_out,
                     bf16 [T, 6144]).
                     --save-y DIR writes it to DIR/y_layer<L>.bin. --compare-y DIR compares it with DIR/y_layer<L>.bin
-                    (relRMS).
+                    (relRMS). Both also keep every launch's y (and x_next with --next-norm: row_rmsnorm after the
+                    layer) in DIR/launches_layer<L>.pt and compare them bit for bit; --vary-x gives each timed launch
+                    its own x (demo/glm53_model/ab_launches.py).
   5. timed launches --reps launches, 512 MB read before each (empties L2); span per launch
                     --record FILE: the timing build; the per-task times become cost records (cost_records.py) appended to
                     FILE
@@ -69,6 +72,12 @@ try:
     from .weights import check_config, checkpoint_reader, download_layers, is_full_layer, layer_tensors
 except ImportError:
     from weights import check_config, checkpoint_reader, download_layers, is_full_layer, layer_tensors
+try:   # the A/B options (--vary-x, --residual, --next-norm)
+    from demo.glm53_model import ab_launches
+except ImportError:
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "glm53_model"))
+    import ab_launches
 
 T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each request): the kernel's T (8, 16, 32, 64)
 # T >= 32: the FP8 GEMMs (q_a / kv_a, q_b, the indexer's wq_b, o_proj) with power-of-two scales, as SGLang runs them with
@@ -336,6 +345,7 @@ def main():
     ap.add_argument("--reps", type=int, default=20, help="the timed launches of each layer")
     ap.add_argument("--gpus", type=int, default=1, help="GPUs of the layer (> 1: TP = gpus, GPU g runs shard g, the "
                     "all-reduce over the GPUs in the kernel; --plan rr)")
+    ab_launches.add_args(ap)
     args = ap.parse_args()
     G = args.gpus
     if G > 1 and args.plan != "rr":
@@ -353,7 +363,8 @@ def main():
         x = torch.randn(T, H, generator=torch.Generator().manual_seed(2)).to(torch.bfloat16)
     xs = [x.to(d) for d in devs]
     npages = T * (args.maxctx // PAGE)
-    residuals = [torch.zeros(T, H, dtype=torch.bfloat16, device=d) for d in devs]   # y = the attention output
+    res = ab_launches.residual(args.residual, (T, H))   # zero (default): y = the attention output
+    residuals = [res.to(d) for d in devs]
     launches_of = {}   # --record: per layer, the per-task times and the span ends of each timed launch
     for layer, full in zip(args.layers, fulls):
         ws, bufs_of = [], []
@@ -369,19 +380,24 @@ def main():
                 b["index_cache"] = index_cache
             bufs_of.append(b)
         w, bufs = ws[0], bufs_of[0]
+        # --next-norm: gamma and x_next attached last (build_graph next_norm), bound by name on every GPU
+        nn = [{"norm_w": ab_launches.norm_gamma(H).to(d), "x_next": torch.zeros(T, H, dtype=torch.bfloat16, device=d)}
+              for d in devs] if args.next_norm else [{} for _ in devs]
         mpk = StaticMegakernel(num_gpus=G)
-        build_graph(mpk, w, st, bufs, full, cfg, args.maxctx, args.splits, args.chunks, cfg["rms_norm_eps"])
+        build_graph(mpk, w, st, bufs, full, cfg, args.maxctx, args.splits, args.chunks, cfg["rms_norm_eps"],
+                    next_norm=(nn[0]["norm_w"], nn[0]["x_next"], cfg["rms_norm_eps"]) if args.next_norm else None)
         out = os.path.join(args.out, f"layer{layer}")
-        kt = [kernel_tensors(ws[g], sts[g], bufs_of[g]) for g in range(G)]
+        kt = [dict(kernel_tensors(ws[g], sts[g], bufs_of[g]), **nn[g]) for g in range(G)]
         sk, info = build(mpk, kt if G > 1 else kt[0], plan_file(args.plan, full), out, search=args.search,
                          costs_code=args.costs_code, time_limit_s=args.time, profile=args.record is not None,
                          extra_flags=args.nvcc_flag)
         h = Harness(sk)
         h.launch(timeout_s=60)
         torch.cuda.synchronize()
-        y = bufs["attn_out"].cpu()
-        for g in range(1, G):
-            assert torch.equal(bufs_of[g]["attn_out"].cpu(), y), f"layer {layer}: y differs on GPU {g}"
+        outs = [dict({"y": bufs_of[g]["attn_out"]}, **({"x_next": nn[g]["x_next"]} if args.next_norm else {}))
+                for g in range(G)]
+        launch_outs = [ab_launches.outputs(outs, f"layer {layer} launch 0")]   # every GPU the same bits
+        y = launch_outs[0]["y"]
         if args.save_y:
             os.makedirs(args.save_y, exist_ok=True)
             y.view(torch.int16).numpy().tofile(os.path.join(args.save_y, f"y_layer{layer}.bin"))
@@ -391,16 +407,26 @@ def main():
             print(f"layer {layer}: y vs {f}: relRMS {((y.float() - ref).norm() / ref.norm()).item():.2e}, bit-equal "
                   f"{torch.equal(y.view(torch.int16), ref.to(torch.bfloat16).view(torch.int16))}")
         spans, launches = [], []
-        for _ in range(args.reps):
+        for n in range(1, args.reps + 1):
+            if args.vary_x:   # launch n's own x (ab_launches.varied_x)
+                ab_launches.set_x(xs, ab_launches.varied_x(n, (T, H)))
             h.launch(512 << 20, timeout_s=60)   # 512 MB read first: L2 emptied
             spans.append(h.span_us())
             if args.record:
                 launches.append((h.task_times(), h.timing()))
+            if args.compare_y or args.save_y:
+                launch_outs.append(ab_launches.outputs(outs, f"layer {layer} launch {n}"))
+        if args.vary_x:   # the next layer starts from the demo's x again
+            ab_launches.set_x(xs, x)
         print(f"layer {layer} ({'full' if full else 'shared'}), {G} GPU(s), grids {info['grids']}: median span "
               f"{statistics.median(spans):.1f} us over {args.reps} launches")
-        if args.compare_y or args.save_y:   # the timed launches gave the same y as the first
-            y_last = bufs["attn_out"].cpu()
-            print(f"layer {layer}: y of the last timed launch bit-equal to the first: {torch.equal(y_last, y)}")
+        if (args.compare_y or args.save_y) and not args.vary_x:   # the timed launches gave the same y as the first
+            print(f"layer {layer}: y of the last timed launch bit-equal to the first: "
+                  f"{torch.equal(launch_outs[-1]['y'], y)}")
+        if args.save_y:
+            ab_launches.save(os.path.join(args.save_y, f"launches_layer{layer}.pt"), launch_outs)
+        if args.compare_y:
+            ab_launches.compare(os.path.join(args.compare_y, f"launches_layer{layer}.pt"), launch_outs, f"layer {layer}")
         if args.record:
             launches_of[layer] = (mpk, info["paths"], launches)
         sk.finalize()

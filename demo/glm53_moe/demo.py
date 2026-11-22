@@ -43,13 +43,16 @@ bank of the experts node (shared_bank: 7 layer calls).
                      with the kernel's rounding points and the loaded weights (ref_rows), relRMS (with --live-rows: the
                      live rows)
      --diff-y FILE   y and the routed rows against a saved pair (--save-y of another build), relRMS: a numerics change
+     --vary-x, --residual random, --next-norm (demo/glm53_model/ab_launches.py): each timed launch its own x, a nonzero
+                     residual, row_rmsnorm after the layer; --save-y / --same-y also keep every launch's y (and x_next)
+                     in FILE.launches.pt and compare them bit for bit
 T = 64: W2_UE8M0 (default; MIRAGE_STATIC_MOE64_W2UE=0 or I / tp != 256: off): the W2 weights requantized to power-of-two
 scales at load (weights.layer_tensors w2_ue8m0, SGLang's DeepGEMM requantization), h_q's scales rounded up to powers of
 two and the W2 MMA applying both (scaled_moe_experts_layer w2_ue8m0): a numerics change against the checkpoint's fp32
 scales.
 Steps 5-6 run the layer through the test harness (python/mirage/mpk/static_harness.py).
 
-y = the MoE output (+ the residual: zero in this demo, so y is comparable with the MoE output of SGLang).
+y = the MoE output (+ the residual: zero by default, so y is comparable with the MoE output of SGLang).
 
 python demo.py --checkpoint zai-org/GLM-5.3 --gpus 1 --tp 8 [--rank 0] [--layer 3] [--plan PLAN] [--out DIR] [--reps 20]
                [--x x.bin] [--compare-y y.bin]                  (one GPU: shard 0 of TP8; y is that shard's part)
@@ -74,6 +77,12 @@ try:
     from .weights import check_config, checkpoint_reader, download_layer, layer_tensors   # imported as demo.glm53_moe.demo
 except ImportError:
     from weights import check_config, checkpoint_reader, download_layer, layer_tensors    # run as a script
+try:   # the A/B options (--vary-x, --residual, --next-norm)
+    from demo.glm53_model import ab_launches
+except ImportError:
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "glm53_model"))
+    import ab_launches
 
 T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each request): the kernel's T (8, 16 or 32)
 # scaled_moe_experts' options for GLM-5.3's slots, most of 1 or 2 tokens (layer 22, one B200, TP8 rank 0, the shared expert
@@ -366,8 +375,11 @@ def build(ws: list, out: str, plan: str, search: list = None, costs_code: str = 
     """
     gpus = len(ws)
     mpk = build_kernel(gpus)
-    # "live" (--live-rows): attached after the graph's nodes (build_graph live), bound by name per GPU
-    grids = build_graph(mpk, {k: v for k, v in ws[0].items() if k != "live"}, live=ws[0].get("live"))
+    # "live" (--live-rows) and "norm_w" / "x_next" (--next-norm; eps in "norm_eps"): attached after the graph's nodes
+    # (build_graph next_norm / live), bound by name per GPU
+    late = ("live", "norm_w", "x_next", "norm_eps")
+    nn = (ws[0]["norm_w"], ws[0]["x_next"], ws[0]["norm_eps"]) if "norm_w" in ws[0] else None
+    grids = build_graph(mpk, {k: v for k, v in ws[0].items() if k not in late}, next_norm=nn, live=ws[0].get("live"))
     p = check_plan(plan, gpus, torch.cuda.get_device_properties(0).multi_processor_count) if plan else \
         round_robin_plan(mpk, grids)
     if search:
@@ -379,8 +391,8 @@ def build(ws: list, out: str, plan: str, search: list = None, costs_code: str = 
         compiler.write_plan_file(os.path.join(out, "plan.json"), p)
         plan_viewer.save(os.path.join(out, "plan_view.json"), p, summary, f"searched from {plan or 'round robin'}")
     paths, info = compiler.compile_plan(mpk, p, os.path.join(out, "schedules"))
-    sk = mpk.compile_static(paths, gpu_tensors=ws, out_dir=os.path.join(out, "build"), extra_flags=extra_flags,
-                            profile=profile)
+    sk = mpk.compile_static(paths, gpu_tensors=[{k: v for k, v in w.items() if k != "norm_eps"} for w in ws],
+                            out_dir=os.path.join(out, "build"), extra_flags=extra_flags, profile=profile)
     return sk, dict(info, paths=paths, mpk=mpk)
 
 
@@ -423,6 +435,7 @@ def main():
                     "reference of the kernel's own pairs (ref_rows; relRMS; FAIL above 5e-3)")
     ap.add_argument("--diff-y", metavar="FILE", help="y and the routed rows of the first launch against a saved pair "
                     "(--save-y), relRMS (a numerics change: e.g. W2_UE8M0 against the fp32-scale build)")
+    ab_launches.add_args(ap)
     args = ap.parse_args()
     # check the GPU count, the TP size and the plan before the download and the weight load
     tp = args.tp or args.gpus
@@ -437,12 +450,18 @@ def main():
     if args.plan:
         check_plan(args.plan, args.gpus, torch.cuda.get_device_properties(0).multi_processor_count)
     snapshot = download_layer(args.checkpoint, args.layer, revision=args.revision)
-    check_config(snapshot, args.layer)
+    cfg = check_config(snapshot, args.layer)
     if args.x:
         x = torch.from_numpy(np.fromfile(args.x, dtype=np.uint16).reshape(T, H).astype(np.int16)).view(torch.bfloat16)
     else:
         x = torch.randn(T, H, generator=torch.Generator().manual_seed(1)).to(torch.bfloat16)
-    ws = load_weights(checkpoint_reader(snapshot), args.layer, args.gpus, x, tp=args.tp, rank=args.rank)
+    ws = load_weights(checkpoint_reader(snapshot), args.layer, args.gpus, x, tp=args.tp, rank=args.rank,
+                      residual=ab_launches.residual(args.residual, (T, H)))
+    if args.next_norm:   # x_next = RMSNorm(y) gamma (row_rmsnorm after residual_add)
+        for g, w in enumerate(ws):
+            w.update(norm_w=ab_launches.norm_gamma(H).to(torch.device("cuda", g)),
+                     x_next=torch.zeros(T, H, dtype=torch.bfloat16, device=torch.device("cuda", g)),
+                     norm_eps=cfg.get("rms_norm_eps", 1e-5))
     if args.shared_in_bank:
         ws = [shared_bank(w) for w in ws]
     if args.live_rows is not None and not 1 <= args.live_rows <= T:
@@ -459,9 +478,9 @@ def main():
                      extra_flags=args.nvcc_flag)
     h = Harness(sk)
     h.launch(timeout_s=60)
-    y = ws[0]["moe_out"].cpu()
-    for g in range(1, args.gpus):
-        assert torch.equal(ws[g]["moe_out"].cpu(), y), f"y differs on GPU {g}"
+    outs = [dict({"y": w["moe_out"]}, **({"x_next": w["x_next"]} if args.next_norm else {})) for w in ws]
+    launch_outs = [ab_launches.outputs(outs, "launch 0")]   # every GPU the same bits
+    y = launch_outs[0]["y"]
     first = {"y": y.clone(), "routed_rows": ws[0]["routed_rows"].cpu().clone()}   # (--save-y / --same-y: GPU 0's)
     e = (ws[0]["routing_pairs"].cpu() >> 32).flatten()   # the bank experts of the first launch's pairs
     _, n = e.unique(return_counts=True)
@@ -510,15 +529,24 @@ def main():
         ref = torch.from_numpy(np.fromfile(args.compare_y, dtype=np.uint16).reshape(T, H).astype(np.int16)).view(torch.bfloat16).float()
         print(f"y vs {args.compare_y}: relRMS {((y.float() - ref).norm() / ref.norm()).item():.2e}")
     spans, launches = [], []   # launches (--record): per timed launch, the per-task times and the per-GPU span ends
-    for _ in range(args.reps):
+    for n in range(1, args.reps + 1):
+        if args.vary_x:   # launch n's own x (ab_launches.varied_x)
+            ab_launches.set_x([w["x"] for w in ws], ab_launches.varied_x(n, (T, H)))
         h.launch(512 << 20, timeout_s=60)   # 512 MB read on every GPU first: L2 emptied
         spans.append(h.span_us())
         if args.record:
             launches.append((h.task_times(), h.timing()))
+        if args.save_y or args.same_y:
+            launch_outs.append(ab_launches.outputs(outs, f"launch {n}"))
     print(f"{args.gpus} GPU(s), live rows {args.live_rows or 'all (no table)'} of T = {T}, grids {info['grids']}: median span {statistics.median(spans):.1f} us over {args.reps} launches")
     print(f"span min {min(spans):.1f} median {statistics.median(spans):.1f} max {max(spans):.1f} us")
-    y_last = ws[0]["moe_out"].cpu()
-    print(f"  y of the last timed launch bit-equal to the first: {torch.equal(y_last, first['y'])}")
+    if not args.vary_x:
+        y_last = ws[0]["moe_out"].cpu()
+        print(f"  y of the last timed launch bit-equal to the first: {torch.equal(y_last, first['y'])}")
+    if args.save_y:
+        ab_launches.save(args.save_y + ".launches.pt", launch_outs)
+    if args.same_y:
+        same_ok = ab_launches.compare(args.same_y + ".launches.pt", launch_outs, "MoE") and same_ok
     if args.prof_experts:
         prof_report(ws[0]["moe_prof"].cpu(), h.timing()[0][0])
     if args.record:
