@@ -81,6 +81,81 @@ def check_deadlock_free(all_tasks: List[dict], queues: List[List[int]], groups: 
         raise ValueError(f"the task lists can deadlock: {len(stuck)} of {num_tasks} tasks wait for each other in a circle")
 
 
+def check_twoshot_deadlock_free(gpus: List[tuple], kinds: Dict[int, str]) -> None:
+    """Raise unless the GPUs' lists together can run with the cross-GPU waits of STATIC_FLASH64_TWOSHOT (core.cuh).
+    gpus: per GPU (all_tasks, queues, groups) as check_deadlock_free takes them. kinds: graph_idx -> "send" (allreduce_send)
+    or "twoshot" (an hc_post, hc_post_mix or sum_gpus reading an allreduce_send node's output).
+    The waits, per GPU g, task t (the same task on GPU o: the task of the same node and grid position there):
+      - t waits for its deps and for the task before it on its SM (as check_deadlock_free); a dep of an allreduce_send
+        node: also for that send task on every GPU (the sums of every GPU land on g)
+      - a two-shot task runs in two steps: step 1 (the owner's add + multicast) starts when t could start; t ends only
+        after step 1 of the same task on every other GPU (step 2 polls the owners' sums; every GPU counts as an owner)
+    Example (2 GPUs): GPU 0 SM 3 = [hc_post_mix 5, hc_post_mix 7], GPU 1 SM 3 = [hc_post_mix 7, hc_post_mix 5]:
+    GPU 0's task 5 waits for GPU 1's task 5 (step 1), which is behind GPU 1's task 7, which waits for GPU 0's task 7,
+    which is behind GPU 0's task 5: a circle (each GPU's lists alone pass check_deadlock_free). The same lists on every
+    GPU always pass. The vertices: ("E", g, t) = task t on GPU g ended, ("S", g, t) = its step 1 done (two-shot tasks)."""
+    succ: Dict[tuple, List[tuple]] = {}
+    verts = set()
+    reps, ids = [], []   # per GPU: task -> its group's first task; (node, pos) -> task id
+    for all_tasks, queues, groups in gpus:
+        rep = list(range(len(all_tasks)))
+        for group in groups:
+            for t in group:
+                rep[t] = group[0]
+        reps.append(rep)
+        ids.append({(d["node"], tuple(d["pos"])): i for i, d in enumerate(all_tasks)})
+
+    def edge(a, b):
+        if a != b:
+            succ.setdefault(a, []).append(b)
+            verts.update((a, b))
+
+    for g, (all_tasks, queues, groups) in enumerate(gpus):
+        rep = reps[g]
+        two = lambda t: kinds.get(all_tasks[t]["node"]) == "twoshot"
+        end = lambda t: ("E", g, rep[t])
+        entry = lambda t: ("S", g, t) if two(t) else end(t)
+        for t, d in enumerate(all_tasks):
+            verts.add(end(t))
+            for p in d["deps"]:
+                edge(end(p), entry(t))
+                if kinds.get(all_tasks[p]["node"]) == "send":
+                    key = (all_tasks[p]["node"], tuple(all_tasks[p]["pos"]))
+                    for o in range(len(gpus)):
+                        if o != g and key in ids[o]:
+                            edge(("E", o, reps[o][ids[o][key]]), entry(t))
+            if two(t):
+                edge(("S", g, t), end(t))
+                key = (d["node"], tuple(d["pos"]))
+                for o in range(len(gpus)):
+                    if o != g and key in ids[o]:
+                        edge(("S", o, ids[o][key]), end(t))
+        for sm_list in queues:
+            for a, b in zip(sm_list, sm_list[1:]):
+                edge(end(a), entry(b))
+    waiting = {v: 0 for v in verts}
+    for a, bs in succ.items():
+        for b in bs:
+            waiting[b] += 1
+    ready = [v for v, n in waiting.items() if n == 0]
+    done = 0
+    while ready:
+        v = ready.pop()
+        done += 1
+        for s in succ.get(v, []):
+            waiting[s] -= 1
+            if waiting[s] == 0:
+                ready.append(s)
+    if done != len(verts):
+        stuck = sorted((v[1], gpus[v[1]][0][v[2]]["node"], tuple(gpus[v[1]][0][v[2]]["pos"])) for v, n in waiting.items()
+                       if n > 0 and v[0] == "S")
+        raise ValueError(f"STATIC_FLASH64_TWOSHOT: the GPUs' task lists can deadlock across GPUs ({len(verts) - done} of "
+                         f"{len(verts)} steps wait in a circle; two-shot tasks (gpu, node, pos) among them: {stuck[:6]}). "
+                         f"A two-shot task waits for the same task on every other GPU: give the GPUs lists with the same "
+                         f"order of these tasks (e.g. the same lists), or build with -DSTATIC_FLASH64_TWOSHOT=0 "
+                         f"(compile_plan twoshot=False)")
+
+
 def write_schedule(path: str, nodes: Dict[str, dict], all_tasks: List[dict], queues: List[List[int]], info: dict,
                    groups: List[List[int]] = ()) -> None:
     check_deadlock_free(all_tasks, queues, groups)
