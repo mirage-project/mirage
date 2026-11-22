@@ -10,8 +10,8 @@ features [64 m, 64 m + 64), and its rows 64..127 are the up rows of the same fea
 = e * (OT2 * KT2) + ot * KT2 + kt.
 The kernel selects a weight scale for each row of a piece.
 A W13 piece uses separate gate and up scales. A W2 piece uses one scale.
-pack_w2(ue8m0=True) and requant_ue8m0 change the bytes and scales: SGLang's requantization to power-of-two scales (the
-UE8M0 modes of scaled_gemm_tile and scaled_moe_experts' W2).
+pack_w2(ue8m0=True), pack_w13(ue8m0=True) and requant_ue8m0 change the bytes and scales: SGLang's requantization to
+power-of-two scales (the UE8M0 modes of scaled_gemm_tile and scaled_moe_experts' W2 and W13).
 """
 import torch
 
@@ -28,14 +28,21 @@ def gate_up_rows(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return torch.stack([gate.view(IR // 64, 64, -1), up.view(IR // 64, 64, -1)], 1).reshape(2 * IR, -1)
 
 
-def pack_w13(gate: torch.Tensor, gate_scale: torch.Tensor, up: torch.Tensor, up_scale: torch.Tensor):
+def pack_w13(gate: torch.Tensor, gate_scale: torch.Tensor, up: torch.Tensor, up_scale: torch.Tensor, ue8m0: bool = False):
     """Pack one expert's gate and up weights for this GPU.
 
     Each input has [IR, H] e4m3 bytes and [IR / 128, H / 128] fp32 scales.
     Return uint8 pieces [IR / 64, H / 128, 128, 128].
     Also return fp32 scales [IR / 128, H / 128, 2], with gate before up.
     Feature tile m uses scale block row m // 2.
+    ue8m0: the gate and up shards requantized first, each per 128 x 128 block (requant_ue8m0: other bytes, power-of-two
+    scales; a block of SGLang's fused [2 I, H] w13 is all gate or all up rows, so its requantization of the full weight
+    gives these bytes), for scaled_moe_experts' W13 with the scales applied by the MMA
+    (scaled_moe_experts_layer(w13_ue8m0=True)).
     """
+    if ue8m0:
+        gate, gate_scale = requant_ue8m0(gate.view(torch.uint8), gate_scale)
+        up, up_scale = requant_ue8m0(up.view(torch.uint8), up_scale)
     return piece_tiles(gate_up_rows(gate, up)), torch.stack([gate_scale, up_scale], -1).float().contiguous()
 
 
