@@ -138,3 +138,29 @@ server's `MIRAGE_STATIC_EXTRA_FLAGS` already carries `-DSTATIC_MOE64_W13C=0`.
   h_q (the W2 loaders wait for MT13). Not implemented.
 - No GPU run; no compile of the decoder's real graphs (only the synthetic MoE-only kernels t64lv / t64pv / tf64v and the
   timing build).
+
+## 6. Review round 1 (two reviews of 6af560f..aacd79b): no defect found, no code change
+
+Both reviews (one on the MMA / TMEM / scale-factor contract, one on numerics and wiring) report no defect. Each point was
+checked again in the code:
+
+| point | where | result |
+|---|---|---|
+| idesc: `idesc_mx(IDESC_MX_E4M3, j)`, N = TW = 64 fixed, so W2UE's `idesc_mx_e4m3_n` is not needed | issue_w13_ue | holds |
+| chunk rows: lane l word c = row l + 32 c; weight side words 0, 1 gate, 2, 3 up (GateUpScales `row >= 64`); z_q side words 0, 1 tokens l, l + 32, words 2, 3 past N hold 127 | issue_w13_ue st.shared.v4 | holds |
+| scale pointer `W13SF + ex (IR/128) KT_LAT 2 + GateUpScales::first(mt, KT_LAT, 0)`, float4 per lane = {g(2s), u(2s), g(2s+1), u(2s+1)}, 16-B aligned (KT_LAT even) | issuer W13UE branch, stage_w13_scales | holds |
+| xs [KT_LAT][T] written by wait_z_and_pairs, then `__syncthreads` before the issuers read it | run_scaled_moe_experts | holds |
+| first MMA of each issuer does not accumulate (`s == iss && at == 0`) | issue_w13_ue | holds |
+| barrier counts: empty 2 (owner's commit + other's arrive), acc_full 2 (runtime.cuh:593, 638), acc_empty 128 after fence_before | issue_w13_ue, drain_w13_ue | holds |
+| ticks: +1 an item in issuers and epilogue; the other `PromoRounds` increments only on the non-W13UE path | issuer, epilogue | holds |
+| scale slot k = 2 (g % SMAX) + at reused only after full(g), which follows empty(g - SMAX) (both issuers) | moe64_w13ue_model.py: MODEL OK, controls fail (rerun 2026-11-22) | holds |
+| OFF_WSF + 6 x 512 B = RING_BYTES - OFF_WSF (config.cuh:87-88): the e4m3 loader passes WSF = false; W2 ring, h_q buffers, W13C ring and the W2UE constant chunk end below OFF_WSF (static_asserts) | config.cuh, Smem | holds |
+| TMEM 384..431 clear of accumulators 0..255 and W2UE chunks 256..267 / 320..331 (static_assert); SlotsOld's piece-1 columns are used only in a SlotsOld step, never with a W13UE item in flight | Smem::W13UE_COL | holds |
+| epilogue `bar.sync 1, 128` keeps stage_w13_scales' ordering of acc_s reads; nothing reads OFF_BS under W13UE | epilogue | holds |
+| reference: `ref_rows(x_ue8m0=W13_UE8M0)` follows the graph's group_quant param, not the nvcc switch, so `-DSTATIC_MOE64_W13UE=0` has the same reference | demo.py | holds |
+| non-bank shared expert (`_shared_branch`, T <= 8 in the decoder): `scaled_gemm_tile_layer` reads z_q's fp32 scales unless its own `ue8m0=True`; at T <= 8 W13_UE8M0 is False anyway | demo.py, static_megakernel.py:446 | holds |
+
+Open (box only, not a defect): the decoder's MoE layer kernel total shared memory. From the source: MoE-only build
+203776 (launch) + 18432 (static, includes group_quant's `scale_s[T]`) = 222208 B; the decoder adds row_rmsnorm's
+`red[8]` (32 B) = 222240 B, 10208 B under 232448. ptxas on the box prints the static part; check it with the first
+decoder build.
