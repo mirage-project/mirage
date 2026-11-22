@@ -49,3 +49,31 @@ How this differs from GLM-5.3's STATIC_GLM64_TWOSHOT (mirage_twoshot f3b9b28; 8 
 Switch: STATIC_FLASH64_TWOSHOT (core.cuh), default 1 at T 64 on 4 GPUs, else 0; -DSTATIC_FLASH64_TWOSHOT=0 builds the
 one-shot (the same code as before). The host sets G::peer: the harness (one process) every GPU's copy of the
 multicast region (mc_alloc), a serving rank (init_rank) every rank's copy from torch symmetric memory's buffer_ptrs.
+
+## The A/B (box, 4 GPUs; build on the box: its nvcc 13.0)
+
+Harness (one process, GPUs 0..3, the in-kernel all-reduce over them; `-DSTATIC_RESET_IN_KERNEL` as the server builds, so
+the re-arms run; each pair: the default build saves the outputs, the one-shot build must give the same bits):
+
+```
+export STATIC_TOKENS=64 CUDA_VISIBLE_DEVICES=0,1,2,3 M=/raid/catalyst/models/GLM-5.3-Flash R=--nvcc-flag=-DSTATIC_RESET_IN_KERNEL
+O=--nvcc-flag=-DSTATIC_FLASH64_TWOSHOT=0
+python demo/glm53_flash/moe_demo.py --model-dir $M --layer 3 --tp 4 --gpus 4 --end mhc $R --out /tmp/f2s_moe2 --save-y /tmp/f2s_moe.pt
+python demo/glm53_flash/moe_demo.py --model-dir $M --layer 3 --tp 4 --gpus 4 --end mhc $R $O --out /tmp/f2s_moe1 --same-y /tmp/f2s_moe.pt
+python demo/glm53_flash/moe_demo.py --model-dir $M --layer 3 --tp 4 --gpus 4 --end mhc_pre $R --out /tmp/f2s_moep2 --save-y /tmp/f2s_moep.pt
+python demo/glm53_flash/moe_demo.py --model-dir $M --layer 3 --tp 4 --gpus 4 --end mhc_pre $R $O --out /tmp/f2s_moep1 --same-y /tmp/f2s_moep.pt
+python demo/glm53_flash/dsa_fused_demo.py --model-dir $M --layer 3 --tp 4 --gpus 4 $R --out /tmp/f2s_dsa2 --save-y /tmp/f2s_dsa.pt
+python demo/glm53_flash/dsa_fused_demo.py --model-dir $M --layer 3 --tp 4 --gpus 4 $R $O --out /tmp/f2s_dsa1 --same-y /tmp/f2s_dsa.pt
+python demo/glm53_flash/kda_fused_demo.py --model-dir $M --layer 0 --tp 4 --gpus 4 $R --out /tmp/f2s_kda2 --save-y /tmp/f2s_kda.pt
+python demo/glm53_flash/kda_fused_demo.py --model-dir $M --layer 0 --tp 4 --gpus 4 $R $O --out /tmp/f2s_kda1 --same-y /tmp/f2s_kda.pt
+```
+
+Each run ends with PASS / FAIL (the reference checks, every GPU equal, the last timed launch equal to the first, and with
+--same-y the saved outputs bit for bit) and prints `span ... median` over the GPUs (512 MB read before each launch).
+
+Server (sglang_dsa/sgl_chain.py, every DSA / KDA / MoE layer static; FLASH_TWOSHOT=0 builds the T 64 layers one-shot):
+
+```
+cd <run dir> && CUDA_VISIBLE_DEVICES=0,1,2,3 python <tree>/demo/glm53_flash/sglang_dsa/sgl_chain.py check_t64_bs64_attn check_t64_bs64_moe4l prof_all3ppf_off_bs64_p256 prof_all3ppf_off_bs64_p4000
+cd <other run dir> && FLASH_TWOSHOT=0 CUDA_VISIBLE_DEVICES=0,1,2,3 python <tree>/demo/glm53_flash/sglang_dsa/sgl_chain.py prof_all3ppf_off_bs64_p256 prof_all3ppf_off_bs64_p4000
+```
