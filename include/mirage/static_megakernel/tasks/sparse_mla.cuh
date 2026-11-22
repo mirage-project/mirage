@@ -511,12 +511,28 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
     }
   }
   bool const in_order = KPOOL > 1 && sl / KPOOL <= NIDX;
-  int const per = (slots + smla::KV_TILE * S - 1) / (smla::KV_TILE * S);
+  static_assert(smla::KV_TILE == dsa::MLA_KV_TILE, "sparse_mla: the tile");
+  // T = 64 (dsa_common.cuh STATIC_ATTN64_MERGENS): the split's tiles and its
+  // empty test from mla_split_tiles / mla_live_splits, as dsa_mla_merge's
+  // ns_of
+  constexpr bool LIVE_SPLITS = KPOOL == 1 && dsa::ATTN64_MERGENS;
+  int const per =
+      LIVE_SPLITS
+          ? dsa::mla_split_tiles<TOPK, S>(live)
+          : (slots + smla::KV_TILE * S - 1) / (smla::KV_TILE * S);
   int const first = s * per, last = first + per;
   float *const o = buf_at<float>(g, SELF::buf);
   float *const o_part = o + ((size_t)t * S + s) * NH * smla::LATENT;
   float *const lse =
       o + (size_t)T * S * NH * smla::LATENT + ((size_t)t * S + s) * NH;
+  if constexpr (KPOOL == 1 && dsa::ATTN64_MERGENS) {
+    if (s >= dsa::mla_live_splits<TOPK, S>(live)) {
+      // The split has no valid slot: no barrier (no shared memory), no
+      // counter add (dsa_mla_merge waits for the mla_live_splits splits)
+      dsa::stamp_ready(L);
+      return;
+    }
+  }
   __syncthreads(); // wait until the previous task completes its shared-memory
                    // reads
   if (KPOOL == 1 && first * smla::KV_TILE >= live) {

@@ -114,6 +114,38 @@ __device__ __forceinline__ bool idx_all_short(G const &g, KernelLocals &L) {
 #endif
 }
 
+// STATIC_ATTN64_MERGENS (T = 64 only; default 1, -DSTATIC_ATTN64_MERGENS=0:
+// off). Example: TOPK 2048, S = 8 sparse_mla splits of 4 tiles (256 slots)
+// each, a token of seq_lens 300: splits 0 and 1 hold valid slots, splits 2..7
+// are empty. sparse_mla's empty split (KPOOL 1) returns at its entry with no
+// barrier and no counter add, and dsa_mla_merge waits for counter + t to reach
+// mla_live_splits(300) = 2 instead of S = 8. Both use mla_live_splits: split
+// s is empty if and only if s >= mla_live_splits(live). No other node waits
+// on the counter of a KPOOL-1 sparse_mla (dsa_o_absorb's MERGE reads only a
+// KPOOL > 1 sparse_mla).
+#ifndef STATIC_ATTN64_MERGENS
+#define STATIC_ATTN64_MERGENS 1
+#endif
+constexpr bool ATTN64_MERGENS = STATIC_ATTN64_MERGENS != 0 && T == 64;
+constexpr int MLA_KV_TILE = 64; // sparse_mla's tile of index slots (KV_TILE)
+
+// sparse_mla of KPOOL 1 (TOPK index slots, S splits): the tiles of 64 slots
+// of each split of a token of `live` valid slots (min(seq_lens, TOPK)). Split
+// s takes tiles [s per, s per + per).
+template <int TOPK, int S>
+__device__ __forceinline__ int mla_split_tiles(int live) {
+  static_assert(TOPK % (MLA_KV_TILE * S) == 0,
+                "sparse_mla: whole tiles of 64 slots in each split");
+  return TOPK / (MLA_KV_TILE * S);
+}
+// The splits that hold a valid slot of a token of `live` valid slots: split s
+// holds one if and only if s < mla_live_splits(live) (s per 64 < live).
+template <int TOPK, int S>
+__device__ __forceinline__ int mla_live_splits(int live) {
+  int const rows = MLA_KV_TILE * mla_split_tiles<TOPK, S>(live);
+  return (live + rows - 1) / rows;
+}
+
 // Return the 16-bit key of a fp32 score that holds a bf16 value. A larger
 // score gives a larger key. The 32-bit key flips all bits of a negative score
 // and sets the sign bit of a positive score. The low 16 bits of the score are
