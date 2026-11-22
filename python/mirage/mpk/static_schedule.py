@@ -244,6 +244,12 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
             *[f"#define STATIC_RESET_SMS_MASK{w} {m}ull" for w, m in enumerate(mask)], "",
             *([f"#define STATIC_L2_PREFETCH {len(pk._prefetch)}   // the weights kernel_begin prefetches into L2 "
                "(StaticMegakernel.l2_prefetch_weights)", ""] if getattr(pk, "_prefetch", None) else []),
+            # T = 64 with a GLM-5.3 indexer (a dsa_index_topk node of unit 1; GLM-5.3-Flash's is unit 4):
+            # KernelLocals.idx_short (core.cuh) for dsa_common.cuh's STATIC_ATTN64_IDXSKIP; other layers keep
+            # KernelLocals as it was
+            *(["#define STATIC_DSA_IDX_SHORT 1   // KernelLocals.idx_short (dsa_common.cuh idx_all_short)", ""]
+              if pk.tokens == 64 and any(n["name"] == "dsa_index_topk" and n["params"][3] == 1 for n in nodes.values())
+              else []),
             "struct StaticTask { int node, x, y, z; };   // one entry of an SM's list: the graph node and the task's grid position",
             "// a node: its grid, its first counter (-1: none) and its output buffer slot (-1: none); as an input's producer also its",
             "// params (v, then a 0)",

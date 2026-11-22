@@ -71,6 +71,49 @@ __device__ __forceinline__ void stamp_ready(KernelLocals &L) {
 #endif
 }
 
+// STATIC_ATTN64_IDXSKIP (T = 64 only; default 1, -DSTATIC_ATTN64_IDXSKIP=0:
+// off). Example: 64 requests of 300 positions, TOPK 2048. Every
+// dsa_index_score task (16 chunks x 64 tokens) and every dsa_index_topk task
+// (16 x 64, two nodes) of the launch has no work: the top-k takes all
+// positions of each token, so nobody reads a score, a record or a selected
+// index (sparse_mla of KPOOL 1 reads idx only when seq_lens[t] > TOPK). Then
+// such a task returns at its entry: no load, no barrier, no counter add. No
+// task waits on those counters in such a launch: dsa_index_topk count waits
+// for the score counter + t only if n > TOPK, write for the count counter + t
+// only if n > TOPK, sparse_mla for the write counter + t only if seq_lens[t] >
+// TOPK. The first such task on an SM loads the T seq_lens once
+// (idx_all_short); the later ones read the answer from KernelLocals.
+#ifndef STATIC_ATTN64_IDXSKIP
+#define STATIC_ATTN64_IDXSKIP 1
+#endif
+#if STATIC_TOKENS == 64 && defined(STATIC_DSA_IDX_SHORT)
+constexpr bool ATTN64_IDXSKIP = STATIC_ATTN64_IDXSKIP != 0;
+#else
+constexpr bool ATTN64_IDXSKIP = false; // (KernelLocals has no idx_short)
+#endif
+
+// (ATTN64_IDXSKIP) Whether every seq_lens[t] (buffer slot SEQ, int32 [T]) is
+// at most K, for this launch. All threads of the CTA call it at a task's
+// entry. The first call on the SM loads the T values (one barrier: the
+// __syncthreads_and); the later calls with the same K use L.idx_short.
+template <int K, int SEQ>
+__device__ __forceinline__ bool idx_all_short(G const &g, KernelLocals &L) {
+  static_assert(ATTN64_IDXSKIP && K > 0 && T <= 256,
+                "idx_all_short: T = 64 with STATIC_ATTN64_IDXSKIP, K > 0");
+#if STATIC_TOKENS == 64 && defined(STATIC_DSA_IDX_SHORT)
+  if (L.idx_short == K || L.idx_short == -K) {
+    return L.idx_short == K;
+  }
+  int const t = threadIdx.x;
+  bool const shrt =
+      __syncthreads_and(t >= T || buf_at<int const>(g, SEQ)[t] <= K);
+  L.idx_short = shrt ? K : -K;
+  return shrt;
+#else
+  return false;
+#endif
+}
+
 // Return the 16-bit key of a fp32 score that holds a bf16 value. A larger
 // score gives a larger key. The 32-bit key flips all bits of a negative score
 // and sets the sign bit of a positive score. The low 16 bits of the score are

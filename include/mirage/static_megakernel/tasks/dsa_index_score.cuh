@@ -3,7 +3,9 @@
 // below). Task (c, t) is chunk c of the context of token t: positions
 // [c CH, c CH + CH) below n = min(seq_lens[t], MAXCTX). A task computes no
 // scores if its chunk starts at or after position n, or if n <= SKIPK
-// (see run_dsa_index_score).
+// (see run_dsa_index_score). T = 64 with STATIC_ATTN64_IDXSKIP
+// (dsa_common.cuh): when every token of the launch has seq_lens[t] <= SKIPK,
+// every task returns at its entry, without the counter add.
 // The caller must keep seq_lens[t] <= MAXCTX = MAXP x PAGE. Each slot t must be
 // a different request (see step 1).
 //   score[t][j] = bf16( sum_h w_h relu(q8_h . k8_j) s_j )
@@ -400,6 +402,14 @@ __device__ __forceinline__ void run_dsa_index_score(Maps const &,
                 "token");
   int const t = tk.y, cx = tk.x, tid = threadIdx.x, warp = tid >> 5,
             lane = tid & 31;
+  if constexpr (ATTN64_IDXSKIP && !FLASH && SKIPK > 0) {
+    // every token of the launch has at most SKIPK positions (dsa_common.cuh
+    // STATIC_ATTN64_IDXSKIP): no scores, no counter add (no task waits)
+    if (idx_all_short<SKIPK, SEQ>(g, L)) {
+      stamp_ready(L);
+      return;
+    }
+  }
   unsigned char *const sm = reinterpret_cast<unsigned char *>(L.sm);
   int const seq = buf_at<int const>(g, SEQ)[t];
   int const n = min(MAXCTX, FLASH ? seq / 4 : seq); // FLASH: complete pools

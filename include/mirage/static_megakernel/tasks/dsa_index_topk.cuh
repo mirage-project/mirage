@@ -31,6 +31,10 @@
 //            slots. If n <= TOPK, the task reads no record.
 // Each node adds 1 to its counter + t for each task. If sparse_mla reads idx,
 // it waits for the CHK write tasks of token t.
+// T = 64 with STATIC_ATTN64_IDXSKIP (dsa_common.cuh, UNIT 1): when every token
+// of the launch has n <= TOPK, every task returns at its entry. It writes no
+// record and no idx (idx keeps its old values; no reader then) and adds to no
+// counter.
 #pragma once
 #include "../dsa_common.cuh"
 
@@ -333,6 +337,16 @@ __device__ __forceinline__ void run_dsa_index_topk(Maps const &,
   static_assert(TOPK > 0 && MAXCTX >= TOPK && UNIT >= 1,
                 "dsa_index_topk: sizes");
   int const c = tk.x, t = tk.y;
+  if constexpr (dsa::ATTN64_IDXSKIP && UNIT == 1) {
+    // every token of the launch has at most TOPK positions (dsa_common.cuh
+    // STATIC_ATTN64_IDXSKIP): no record, no idx (sparse_mla of KPOOL 1 and
+    // the later shared layers read idx only when seq_lens[t] > TOPK), no
+    // counter add (no task waits)
+    if (dsa::idx_all_short<TOPK, SEQ>(g, L)) {
+      dsa::stamp_ready(L);
+      return;
+    }
+  }
   int const n = min(MAXCTX, buf_at<int const>(g, SEQ)[t] / UNIT);
   __syncthreads(); // wait until the previous task completes its shared-memory
                    // reads

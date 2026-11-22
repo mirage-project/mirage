@@ -432,6 +432,12 @@ struct KernelLocals {
   bool ring_relaid; // a task re-laid the ring's shared memory (moe_experts'
                     // phase switch): a GEMM after it starts with fresh ring
                     // barriers
+#if STATIC_TOKENS == 64 && defined(STATIC_DSA_IDX_SHORT)
+  int idx_short; // (dsa_common.cuh idx_all_short, STATIC_ATTN64_IDXSKIP; the
+                 // generated layer of T = 64 with an indexer defines
+                 // STATIC_DSA_IDX_SHORT) 0: not read yet in this launch; K:
+                 // every seq_lens[t] <= K; -K: some seq_lens[t] > K
+#endif
 #ifdef STATIC_TIMING_BUILD
   unsigned long long *stage_stamps =
       nullptr; // this list entry's 2 GEMM stage stamps (set by the generated
@@ -661,6 +667,9 @@ __device__ __forceinline__ void kernel_begin(G const &g, KernelLocals &L) {
   L.gi1 = 0;
   L.wt = 0;
   L.ring_relaid = false;
+#if STATIC_TOKENS == 64 && defined(STATIC_DSA_IDX_SHORT)
+  L.idx_short = 0;
+#endif
 }
 
 // after the task loop (STATIC_NO_START_BARRIER with no reset SMs: first this
