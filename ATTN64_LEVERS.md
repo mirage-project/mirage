@@ -175,3 +175,28 @@ Expected y (from reading the code, not run): L1, L2a, L4, L6 bit-equal to the ol
 assigns a job's stage s to issuer s & 1 whatever SMAX is; L6: the same per-token MMA columns); L3 may differ in the last bits
 (relRMS printed by `--compare-y`). The span per layer is the line `layer L (...): median span X us over 20 launches`.
 The server: `MIRAGE_STATIC_EXTRA_FLAGS="-DSTATIC_ATTN64_..=0"` and the two env variables in the server's environment.
+
+## Reviews of 6af560f..a8adf13 (two, read-only; no GPU)
+
+Example (layer 7, shared, T = 64, every seq_lens 300, TOPK 2048, S = 8):
+
+```
+mla_split_tiles<2048, 8>(300) = max(1, min(4, ceil(5 / 2))) = 3
+mla_live_splits<2048, 8>(300) = ceil(300 / 192) = 2
+sparse_mla split s >= 2: returns at entry, no counter add
+dsa_mla_merge: cnt_wait(counter + t, 2), reads splits 0, 1
+```
+
+Neither review found a defect; no code changed. Points checked again against the code after the reviews:
+
+- L1: the only waiters on the indexer counters are dsa_index_topk count (score counter, only if n > TOPK), write (count
+  counter, only if n > TOPK) and sparse_mla's IX wait (only if idx_t != nullptr, i.e. seq_lens[t] > TOPK); skip_k is
+  0 or TOPK, so `L.idx_short` keyed by K never mixes two thresholds. `idx_all_short` runs after kernel_begin's
+  griddepcontrol.wait (thread 0) and tmem_alloc_512's __syncthreads, and all 256 threads reach `__syncthreads_and`.
+- L2a / L3: sparse_mla and dsa_mla_merge take `live = min(max(seq_lens[t], 0), TOPK)`, the same S and TOPK, and the
+  same `mla_live_splits`. A CPU simulation of S in {4, 8, 16}, MLALIVE 0 / 1, live 0..2048 (NSM 148): ns <= S, the ns
+  splits cover [0, live), `s per 64 >= live` if and only if `s >= ns`, and with MLALIVE 0 ns equals the old
+  `ceil(live / (TOPK / S))`. For KPOOL 1, slots = TOPK, so the old per equals `TOPK / 64 / S`.
+- L6: `changeable_grid_dims` {1: (1, 1, None, 2)} gives y in {1, 2} (compiler.candidate_grids: no map on axis 1, length
+  2). In dsa_q_absorb, TT = 16 at TH = 2, y = 2; the q_pe loop's warps 0..3 take t0 + 4 w + cb, warps 4..7 break.
+- Rerun here: py_compile of demo.py, static_megakernel.py, static_schedule.py; `test_static_twoshot_order.py` 7 checks OK.
