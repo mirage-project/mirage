@@ -86,6 +86,11 @@ T = int(os.environ.get("STATIC_TOKENS", "8"))   # rows per step (a token of each
 UE8M0 = T >= 32
 # sparse_mla splits: 16; T = 64: 8 (the merge's token tile is 32 / splits tokens; 8 was the faster)
 SPLITS = 8 if T == 64 else 16
+# T = 64: the GEMM weight ring's stages of the attention layers (build_graph; config.cuh SMAX, T = 64's default 3).
+# MIRAGE_ATTN64_RING: 4 (default; ring 4 x 48 KB + scales, the scaled_gemm_tile need 204352 B of the 227 KB) or 3 (the
+# old layers: no STATIC_RING_STAGES define)
+ATTN64_RING = int(os.environ.get("MIRAGE_ATTN64_RING", "4"))
+assert ATTN64_RING in (3, 4), f"MIRAGE_ATTN64_RING={ATTN64_RING}: 3 or 4"
 H, PAGE, TOPK = 6144, 64, 2048
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -138,6 +143,8 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     mpk.max_counter_lines = 32   # and more than the default 16 counter lines (STATIC_NODE_COUNTER_LINES)
     if T == 32:   # sparse_mla's shared memory (576-wide rows) is in the ring and needs 5 stages, not the 4 of T = 32
         mpk.ring_stages = 5
+    elif T == 64 and ATTN64_RING != 3:   # q_a | kv_a and o_proj (8 K tiles a task): 4 stages issued before their waits
+        mpk.ring_stages = ATTN64_RING
     t = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in kernel_tensors(w, st, bufs).items()}
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
     NH = w["w_uk"].shape[0]
