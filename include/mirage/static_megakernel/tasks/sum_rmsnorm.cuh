@@ -290,6 +290,9 @@ __device__ __forceinline__ void run_sum_rmsnorm(Maps const &,
                                                 G const &g,
                                                 KernelLocals &L,
                                                 StaticTask const &tk) {
+  static_assert(!AR_TWOSHOT || sizeof(SELF) == 0,
+                "sum_rmsnorm: reads an allreduce_send buffer in the one-shot "
+                "layout (static_schedule.ar_twoshot: no STATIC_AR_TWOSHOT)");
   constexpr int LAT = SEND::v[0], EPS = PARAMS::v[1];
   static_assert(SEND::buf >= 0,
                 "sum_rmsnorm: rows sent by an allreduce_send node");

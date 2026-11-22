@@ -72,6 +72,37 @@ struct PrefetchList {
 };
 #endif
 #endif
+// STATIC_AR_TWOSHOT: the all-reduce of allreduce_send -> hc_post /
+// hc_post_mix (GLM-5.3-Flash's layer tails; and sum_gpus) as a two-shot by
+// token. The generated layer.cu defines it for a graph of T 64 on 4 GPUs
+// without sum_rmsnorm (static_schedule.ar_twoshot, header_code); every other
+// layer has the one-shot (every GPU's partial multicast to every GPU, each GPU
+// adds all slots of every vector). Example (4 GPUs, T 64, H 4096; GPU 2 owns
+// tokens 32..47, AR_TOWN = T / GPUS = 16):
+//   allreduce_send on GPU 1, token 37: its bf16 partial row -> ONE store per
+//     16 B into GPU 2's copy (G::peer[2]), slot 1, row 5 of the owner landing
+//     [GPUS][AR_TOWN][H] at the send buffer's offset 0 (ar_twoshot_send)
+//   hc_post_mix task s on GPU 2, the lane of token 37, vector c: 1. (GPU 2 owns
+//     token 37) the 4 slots added in GPU order (fp32, allreduce_land_bf16, the
+//     same code as the one-shot), bf16(sum) multicast into the gathered rows
+//     [T][H] at offset GPUS AR_TOWN H 2 of the same buffer on every GPU, the 4
+//     slots re-armed; 2. (every GPU, every token) the vector polled from the
+//     gathered rows (one slot), re-armed (ar_twoshot_get). hc_post task (q, t),
+//     sum_gpus task (q, t): the same, step 1 on GPU t / AR_TOWN
+// The readers round the sum to bf16 before using it (the one-shot too): R',
+// the mixes and the sums are bit-identical. Task x of a reader waits in step 2
+// only for step 1 of task x on the owner GPUs (compile_plan checks the GPUs'
+// lists together: static_schedule.check_twoshot_deadlock_free). sum_rmsnorm
+// reads only the one-shot layout (no STATIC_AR_TWOSHOT in its graphs).
+#ifdef STATIC_AR_TWOSHOT
+constexpr bool AR_TWOSHOT = true;
+#else
+constexpr bool AR_TWOSHOT = false;
+#endif
+static_assert(!AR_TWOSHOT || (T == 64 && GPUS == 4),
+              "STATIC_AR_TWOSHOT: the layers of T 64 on 4 GPUs "
+              "(static_schedule.ar_twoshot)");
+
 #ifdef STATIC_NO_START_BARRIER
 #ifndef STATIC_RESET_IN_KERNEL
 #error                                                                         \
@@ -112,6 +143,11 @@ struct G {
                      // host (config.cuh STAMP_*)
   long long *start_barrier; // [1] written by every SM once the start barrier is
                             // passed: the last SM's time remains
+#ifdef STATIC_AR_TWOSHOT
+  unsigned char *peer[GPUS]; // (STATIC_AR_TWOSHOT) every GPU's copy of the
+                             // exchange region (both sets), mapped in this
+                             // process (peer[rank] = rv)
+#endif
 };
 
 // the exchange region's set of this launch: its launch number's parity, set at
@@ -179,6 +215,66 @@ __device__ __forceinline__ uint32_t *cnt_now(G const &g) {
 __device__ __forceinline__ void push16(G const &g, size_t off, uint4 v) {
   push16_mc(g.mc, g.rv, off + rg_set(), v);
 }
+
+#ifdef STATIC_AR_TWOSHOT
+// (STATIC_AR_TWOSHOT) an allreduce_send buffer [GPUS][T][W] bf16, used as
+//   [0, ar_g_off)          the owner landing: slot r (the sending GPU), row j
+//                          of the owner's tokens (token owner * AR_TOWN + j) at
+//                          r * ar_rank + j * W * 2 (each GPU's copy: its own
+//                          tokens only), written by unicast stores
+//   [ar_g_off, + T W 2)    the gathered rows [T][W] bf16 (bf16 of the sums over
+//                          the GPUs), multicast by the owners (every GPU's
+//                          copy: all tokens)
+// both 0xFF-filled (the buffer's fill) and re-armed by their readers
+constexpr int AR_TOWN = T / GPUS; // tokens per owner GPU (16 at T 64, 4 GPUs)
+template <int W>
+__host__ __device__ constexpr size_t ar_rank() {
+  return (size_t)AR_TOWN * W * 2;
+} // one sending GPU's slot in the owner landing
+template <int W>
+__host__ __device__ constexpr size_t ar_g_off() {
+  return (size_t)GPUS * ar_rank<W>();
+} // the gathered rows' offset in the buffer
+// 16 B at offset `off` of this launch's set of GPU h's exchange region (one
+// NVLink store; h = rank: the local copy). G::peer by constant indices (a
+// dynamic index into the kernel parameter would copy G to local memory)
+__device__ __forceinline__ void ar_twoshot_put16(G const &g,
+                                                 int h,
+                                                 size_t off,
+                                                 uint4 v) {
+  unsigned char *dst = g.peer[0];
+#pragma unroll
+  for (int q = 1; q < GPUS; q++) {
+    dst = h == q ? g.peer[q] : dst;
+  }
+  asm volatile(
+      "st.relaxed.sys.global.v4.u32 [%0], {%1, %2, %3, %4};" ::"l"(
+          dst + off + rg_set()),
+      "r"(v.x),
+      "r"(v.y),
+      "r"(v.z),
+      "r"(v.w)
+      : "memory");
+}
+// allreduce_send's store of this GPU's bf16 partial of token t, vector c (of
+// W / 8) into the buffer at OFF: slot g.rank of the owner landing of token t's
+// owner (t / AR_TOWN)
+template <int W, size_t OFF>
+__device__ __forceinline__ void
+    ar_twoshot_send(G const &g, int t, int c, uint4 v) {
+  int const h = t / AR_TOWN, j = t - h * AR_TOWN;
+  ar_twoshot_put16(g,
+                   h,
+                   OFF + (size_t)g.rank * ar_rank<W>() +
+                       ((size_t)j * (W / 8) + c) * 16,
+                   v);
+}
+#else
+// declared only: the calls are in discarded `if constexpr (AR_TWOSHOT)`
+// branches
+template <int W, size_t OFF>
+__device__ void ar_twoshot_send(G const &g, int t, int c, uint4 v);
+#endif
 
 // params[I] of a node (StaticParams<P...>::v holds P..., 0)
 template <class PARAMS, int I>
@@ -251,7 +347,9 @@ __device__ __forceinline__ uint4 pack_bf16x8(float4 const &p0,
 // vector v of `row` from every GPU (slot r at row + r * RANK, 0xFF-prefilled)
 // and adds them in fp32 in GPU order -> the 8 sums. REARM: re-armed by
 // allreduce_rearm after the caller used them.
-template <size_t RANK>
+// W16W (STATIC_AR_TWOSHOT's owner landing): the slots come by unicast
+// NVLink stores, every 4-B word must be written (valid16w)
+template <size_t RANK, bool W16W = false>
 __device__ __forceinline__ void
     allreduce_land_bf16(G const &g, unsigned char const *row, int v, float *s) {
   uint4 u[GPUS];
@@ -268,7 +366,7 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int r = 0; r < GPUS; r++) {
       if (!ok[r]) {
-        ok[r] = valid16(u[r]);
+        ok[r] = W16W ? valid16w(u[r]) : valid16(u[r]);
       }
       all = all && ok[r];
     }
@@ -297,6 +395,57 @@ __device__ __forceinline__ void
     rearm16(row + (size_t)r * RANK + (size_t)v * 16);
   }
 }
+#ifdef STATIC_AR_TWOSHOT
+// (STATIC_AR_TWOSHOT) a reader's all-reduced vector c (of W / 8) of token
+// t from the allreduce_send buffer at SOFF (the same task on every GPU reads
+// it): 1. on token t's owner (t / AR_TOWN), the GPUS landing slots added in
+// fp32 in GPU order (allreduce_land_bf16, the one-shot's code), bf16(sum)
+// multicast into the gathered rows of every GPU, the slots re-armed; 2. on
+// every GPU, the gathered vector polled (one slot), re-armed. Returns the 8
+// bf16 sums: the one-shot's bf16(sum). Step 2 waits for step 1 of the same
+// task on the owner GPU
+template <size_t SOFF, int W>
+__device__ __forceinline__ uint4 ar_twoshot_get(G const &g, int t, int c) {
+  constexpr size_t AR = ar_rank<W>(), GOFF = ar_g_off<W>();
+  static_assert(GOFF + (size_t)T * W * 2 <= (size_t)GPUS * T * W * 2,
+                "STATIC_AR_TWOSHOT: the landing and the gathered rows fit "
+                "in the allreduce_send buffer");
+  unsigned char const *const sl = g.rv + SOFF + rg_set();
+  size_t const gv = GOFF + ((size_t)t * (W / 8) + c) * 16;
+  if (t / AR_TOWN == g.rank) {
+    int const lv = (t % AR_TOWN) * (W / 8) + c; // the vector in each slot
+    float s[8];
+    allreduce_land_bf16<AR, true>(g, sl, lv, s);
+    push16(g,
+           SOFF + gv,
+           pack_bf16x8(make_float4(s[0], s[1], s[2], s[3]),
+                       make_float4(s[4], s[5], s[6], s[7])));
+    if constexpr (REARM) { // the one reader of these slots
+      allreduce_rearm<AR>(g, sl, lv);
+    }
+  }
+  uint4 u = ld16_poll(sl + gv);
+  while (!valid16(u)) {
+    u = ld16_poll(sl + gv);
+  }
+  if constexpr (REARM) { // this GPU's one reader of this gathered vector
+    rearm16(sl + gv);
+  }
+  return u;
+}
+// the same as 8 fp32 values (each the one-shot's bf16(sum), as hc_post and
+// hc_post_mix use it)
+template <size_t SOFF, int W>
+__device__ __forceinline__ void
+    ar_twoshot_get_f32(G const &g, int t, int c, float *s) {
+  uint4 const u = ar_twoshot_get<SOFF, W>(g, t, c);
+  __nv_bfloat16 const *const b = reinterpret_cast<__nv_bfloat16 const *>(&u);
+#pragma unroll
+  for (int k = 0; k < 8; k++) {
+    s[k] = __bfloat162float(b[k]);
+  }
+}
+#endif
 
 // the kernel's local variables (every function is inlined, so they stay in
 // registers)

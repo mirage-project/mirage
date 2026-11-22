@@ -8,6 +8,9 @@
 // serving framework), graph tensors: h_post [T][HC], h_res [T][HC HC] fp32
 // (comb[i][j] at i HC + j, SGLang's MHCState). With counters (one per token),
 // task (q, t) adds 1 to token t's once its columns of R' are written.
+// STATIC_AR_TWOSHOT (core.cuh): the sums of token t are added on its
+// owner GPU (task (q, t) there) and read by every GPU from the gathered rows
+// (ar_twoshot_get), the same bf16 values.
 #pragma once
 #include "../core.cuh"
 #include "hc_pre.cuh"
@@ -24,7 +27,9 @@ __device__ __forceinline__ void hc_post_task(G const &g,
                                              uint32_t *done_cnt,
                                              int q,
                                              int t STAGE_STAMP_PARAM) {
+#ifndef STATIC_AR_TWOSHOT
   constexpr size_t S_RANK = (size_t)T * H * 2; // one GPU's slot
+#endif
   constexpr int COLS = H / Q;
   static_assert(COLS * Q == H && COLS % 8 == 0 && COLS / 8 <= 256,
                 "hc_post: whole 8-column vectors, one per thread");
@@ -56,6 +61,15 @@ __device__ __forceinline__ void hc_post_task(G const &g,
     // a quarter of the code, which the last task of every T = 64 layer fetches
     // cold (4.1 -> 2.9 us a task)
     if (v < COLS / 8) {
+#ifdef STATIC_AR_TWOSHOT
+      // core.cuh ar_twoshot_get: the owner of token t adds, every GPU polls the
+      // gathered bf16 sums
+      float s[8];
+      ar_twoshot_get_f32<SOFF, H>(g, t, q * (COLS / 8) + v, s);
+      if (v == 0) {
+        STAGE_STAMP_AT(1)
+      }
+#else
       unsigned char const *row =
           g.rv + SOFF + rg_set() + (size_t)t * H * 2 + (size_t)q * COLS * 2;
       float s[8];
@@ -67,6 +81,7 @@ __device__ __forceinline__ void hc_post_task(G const &g,
       for (int k = 0; k < 8; k++) {
         s[k] = __bfloat162float(__float2bfloat16(s[k]));
       }
+#endif
 #pragma unroll 1
       for (int j = 0; j < HC; j++) {
         float cj[HC];
@@ -92,9 +107,11 @@ __device__ __forceinline__ void hc_post_task(G const &g,
         }
         *reinterpret_cast<uint4 *>(rout + ((size_t)t * HC + j) * H + c) = ou;
       }
+#ifndef STATIC_AR_TWOSHOT
       if constexpr (REARM) {
         allreduce_rearm<S_RANK>(g, row, v);
       }
+#endif
     }
   } else if (v < COLS / 8) {
     float post[HC], comb[HC][HC];
@@ -106,6 +123,13 @@ __device__ __forceinline__ void hc_post_task(G const &g,
         comb[i][j] = coef_s[2 * HC + i * HC + j];
       }
     }
+#ifdef STATIC_AR_TWOSHOT
+    float s[8]; // core.cuh ar_twoshot_get (as the T = 64 branch)
+    ar_twoshot_get_f32<SOFF, H>(g, t, q * (COLS / 8) + v, s);
+    if (v == 0) {
+      STAGE_STAMP_AT(1)
+    }
+#else
     unsigned char const *row =
         g.rv + SOFF + rg_set() + (size_t)t * H * 2 + (size_t)q * COLS * 2;
     float s[8];
@@ -117,6 +141,7 @@ __device__ __forceinline__ void hc_post_task(G const &g,
     for (int k = 0; k < 8; k++) {
       s[k] = __bfloat162float(__float2bfloat16(s[k])); // the all-reduced bf16
     }
+#endif
 #pragma unroll
     for (int j = 0; j < HC; j++) {
       uint4 ou;
@@ -138,9 +163,11 @@ __device__ __forceinline__ void hc_post_task(G const &g,
       }
       *reinterpret_cast<uint4 *>(rout + ((size_t)t * HC + j) * H + c) = ou;
     }
+#ifndef STATIC_AR_TWOSHOT
     if constexpr (REARM) {
       allreduce_rearm<S_RANK>(g, row, v);
     }
+#endif
   }
   __syncthreads();
   if (done_cnt != nullptr && threadIdx.x == 0) {

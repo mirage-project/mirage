@@ -20,6 +20,19 @@ __device__ __forceinline__ void
   static_assert(COLS * Q == H && COLS % 8 == 0 && COLS / 8 <= 256,
                 "sum_gpus: whole 8-column vectors, one per thread");
   int const v = threadIdx.x;
+#ifdef STATIC_AR_TWOSHOT
+  // (STATIC_AR_TWOSHOT, core.cuh ar_twoshot_get) the owner of token t
+  // (its task (q, t)) adds the landing slots in GPU order and multicasts
+  // bf16(sum) into the gathered rows; every GPU's task (q, t) polls its vector
+  // there (one slot): the same bf16 value as the one-shot's. Task (q, t) waits
+  // only for the owner's task (q, t)
+  if (v < COLS / 8) {
+    *reinterpret_cast<uint4 *>(ssum + (size_t)t * H + q * COLS + 8 * v) =
+        ar_twoshot_get<SOFF, H>(g, t, q * (COLS / 8) + v);
+  }
+  __syncthreads();
+  return;
+#endif
   unsigned char const *row =
       g.rv + SOFF + rg_set() + (size_t)t * H * 2 + (size_t)q * COLS * 2;
   if (v < COLS / 8) {

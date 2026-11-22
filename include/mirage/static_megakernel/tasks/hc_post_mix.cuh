@@ -29,6 +29,10 @@
 //      form of step 4 ran latency-bound at 8 warps a SM: 14.0 / 5.4 us at
 //      T = 32 / 16.)
 // Counter: one; every task adds 1 (hc_pre reads R' once it is the task count).
+// STATIC_AR_TWOSHOT (core.cuh): in step 2 a lane whose token this GPU owns
+// adds that vector's landing slots and multicasts bf16(sum) into the gathered
+// rows; every lane reads its vector there (ar_twoshot_get), the same values.
+// Task s waits only for task s of the other GPUs.
 #pragma once
 #include "../core.cuh"
 #include "hc_pre.cuh"
@@ -72,7 +76,9 @@ __device__ __forceinline__ void
                      uint32_t *done_cnt,
                      int s,
                      char *scratch STAGE_STAMP_PARAM) {
+#ifndef STATIC_AR_TWOSHOT
   constexpr size_t S_RANK = (size_t)T * H * 2; // one GPU's slot
+#endif
   constexpr int C = 32, CB = HC * HC;
   // TM: the tokens of the thread mapping below (a warp per token of a block
   // of 8, 256 / TM threads per token): T, or 8 in a layer of fewer tokens,
@@ -174,6 +180,17 @@ __device__ __forceinline__ void
   static_assert(TB * (C / 8) <= 32, "hc_post_mix: a lane per landed vector");
   if (lane < TB * (C / 8) && (T >= 8 || warp < T)) {
     int const t = warp + 8 * (lane / (C / 8)), v = lane % (C / 8);
+#ifdef STATIC_AR_TWOSHOT
+    // core.cuh ar_twoshot_get: the lanes of this GPU's tokens add their
+    // vector's landing slots and multicast bf16(sum) (the owner's step), then
+    // every lane polls its vector from the gathered rows
+    float sum[8];
+    ar_twoshot_get_f32<SOFF, H>(g, t, s * (C / 8) + v, sum);
+#pragma unroll
+    for (int k = 0; k < 8; k++) {
+      out_s[t * C + 8 * v + k] = sum[k]; // the all-reduced bf16
+    }
+#else
     unsigned char const *row =
         g.rv + SOFF + rg_set() + (size_t)t * H * 2 + (size_t)s * C * 2;
     float sum[8];
@@ -186,6 +203,7 @@ __device__ __forceinline__ void
     if constexpr (REARM) {
       allreduce_rearm<S_RANK>(g, row, v);
     }
+#endif
   }
   if constexpr (T64) {
     fn_split();
