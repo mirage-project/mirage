@@ -1,18 +1,20 @@
-// tasks/dsa_mla_merge.cuh -- Merge the splits of sparse MLA decode. Task (h, t)
-// is head h of token t:
+// tasks/dsa_mla_merge.cuh -- Merge the splits of sparse MLA decode. Task (h, y)
+// is head h of the G tokens [G y, G y + G) (G = T / the grid's y: 1, or 8 at
+// T = 64, where a task per token is 1024 tasks of ~1.2 us, 7 deep on an SM:
+// the last ran ~8.5 us after its splits were written). For each token t:
 //   o[t][h] = bf16( sum_s e^(lse_s - m) o_s / sum_s e^(lse_s - m) ),
 //   m = max_s lse_s, over the S splits of sparse_mla.
 // Each o_s is already the softmax average of its split. A split with no valid
 // position has lse = -inf. The output is o_lat [T][NH][512] bf16, the attention
 // output in the latent space. Then the task adds 1 to counter + h (dsa_o_absorb
-// waits for the T tasks of each head).
+// waits for the tasks of each head).
 #pragma once
 #include "../dsa_common.cuh"
 #include <cmath>
 
 namespace static_mk {
 
-// Task (h, t). PARAMS {NH}. SM: the sparse_mla node (grid (S, T); its
+// Task (h, y). PARAMS {NH}. SM: the sparse_mla node (grid (S, T); its
 // counter + t counts the splits of token t).
 template <class SELF,
           class PARAMS,
@@ -24,59 +26,128 @@ __device__ __forceinline__ void run_dsa_mla_merge(Maps const &,
                                                   G const &g,
                                                   KernelLocals &L,
                                                   StaticTask const &tk) {
-  constexpr int NH = PARAMS::v[0], S = SM::x, LAT = dsa::MLA_LATENT;
+  constexpr int NH = PARAMS::v[0], S = SM::x, LAT = dsa::MLA_LATENT,
+                G = T / SELF::y;
   static_assert(SM::y == T && SM::buf >= 0 && SM::counter >= 0 &&
                     SM::v[0] == NH,
                 "dsa_mla_merge: a sparse_mla node's splits of NH heads");
-  static_assert(SELF::x == NH && SELF::y == T && SELF::buf >= 0 &&
+  static_assert(SELF::x == NH && SELF::y * G == T && SELF::buf >= 0 &&
                     SELF::counter >= 0,
-                "dsa_mla_merge: grid (heads, tokens), o_lat and a counter");
-  int const h = tk.x, t = tk.y;
+                "dsa_mla_merge: grid (heads, token tiles), o_lat and a counter");
+  int const h = tk.x, t0 = tk.y * G;
   // The task uses no shared memory, so it starts with no barrier.
   if (threadIdx.x == 0) {
-    cnt_wait(cnt_now(g) + SM::counter + t, S);
+    for (int i = 0; i < G; i++) {
+      cnt_wait(cnt_now(g) + SM::counter + t0 + i, S);
+    }
   }
   __syncthreads();
   dsa::stamp_ready(L);
   float const *o = buf_at<float const>(g, SM::buf);
   float const *lse = o + (size_t)T * S * NH * LAT;
-  int const c = 2 * threadIdx.x;
-  // Issue all loads first (the S lse values and the S column pairs of the
-  // thread). Thus they go to L2 at the same time.
-  float l[S];
-  float2 v[S];
+  if constexpr (G == 1) {
+    int const t = t0, c = 2 * threadIdx.x;
+    // Issue all loads first (the S lse values and the S column pairs of the
+    // thread). Thus they go to L2 at the same time.
+    float l[S];
+    float2 v[S];
 #pragma unroll
-  for (int s = 0; s < S; s++) {
-    asm volatile("ld.global.cg.f32 %0, [%1];"
-                 : "=f"(l[s])
-                 : "l"(lse + ((size_t)t * S + s) * NH + h)
-                 : "memory");
-    asm volatile("ld.global.cg.v2.f32 {%0, %1}, [%2];"
-                 : "=f"(v[s].x), "=f"(v[s].y)
-                 : "l"(o + (((size_t)t * S + s) * NH + h) * LAT + c)
-                 : "memory");
-  }
-  float m = -INFINITY;
+    for (int s = 0; s < S; s++) {
+      asm volatile("ld.global.cg.f32 %0, [%1];"
+                   : "=f"(l[s])
+                   : "l"(lse + ((size_t)t * S + s) * NH + h)
+                   : "memory");
+      asm volatile("ld.global.cg.v2.f32 {%0, %1}, [%2];"
+                   : "=f"(v[s].x), "=f"(v[s].y)
+                   : "l"(o + (((size_t)t * S + s) * NH + h) * LAT + c)
+                   : "memory");
+    }
+    float m = -INFINITY;
 #pragma unroll
-  for (int s = 0; s < S; s++) {
-    m = fmaxf(m, l[s]);
-  }
-  float wsum = 0.f;
+    for (int s = 0; s < S; s++) {
+      m = fmaxf(m, l[s]);
+    }
+    float wsum = 0.f;
 #pragma unroll
-  for (int s = 0; s < S; s++) {
-    l[s] = m == -INFINITY ? 0.f : __expf(l[s] - m);
-    wsum += l[s];
-  }
-  float const inv = wsum > 0.f ? 1.0f / wsum : 0.f;
-  float2 acc = make_float2(0.f, 0.f);
+    for (int s = 0; s < S; s++) {
+      l[s] = m == -INFINITY ? 0.f : __expf(l[s] - m);
+      wsum += l[s];
+    }
+    float const inv = wsum > 0.f ? 1.0f / wsum : 0.f;
+    float2 acc = make_float2(0.f, 0.f);
 #pragma unroll
-  for (int s = 0; s < S; s++) {
-    acc.x += l[s] * v[s].x;
-    acc.y += l[s] * v[s].y;
+    for (int s = 0; s < S; s++) {
+      acc.x += l[s] * v[s].x;
+      acc.y += l[s] * v[s].y;
+    }
+    *reinterpret_cast<__nv_bfloat162 *>(buf_at<__nv_bfloat16>(g, SELF::buf) +
+                                        ((size_t)t * NH + h) * LAT + c) =
+        __floats2bfloat162_rn(acc.x * inv, acc.y * inv);
+  } else {
+    // G tokens: thread j has the columns [4 q, 4 q + 4), q = j % 128, of the
+    // G / 2 tokens of parity j / 128, in 16-B loads; the G S lse values are
+    // loaded once a warp (lane i S + s) and shuffled: a thread per column pair
+    // and token with its own lse loads is 32 L2 round trips a thread (the
+    // task: 4.5 us)
+    static_assert(G % 2 == 0 && G * S <= 32 && LAT == 512,
+                  "dsa_mla_merge: token tiles of an even size, a lane per lse");
+    constexpr int GH = G / 2;
+    int const lane = threadIdx.x & 31, q = threadIdx.x & 127,
+              par = threadIdx.x >> 7;
+    float lv = 0.f;
+    if (lane < G * S) {
+      asm volatile("ld.global.cg.f32 %0, [%1];"
+                   : "=f"(lv)
+                   : "l"(lse + ((size_t)(t0 + lane / S) * S + lane % S) * NH +
+                         h)
+                   : "memory");
+    }
+    float4 v[GH][S];
+#pragma unroll
+    for (int k = 0; k < GH; k++) {
+#pragma unroll
+      for (int s = 0; s < S; s++) {
+        asm volatile("ld.global.cg.v4.f32 {%0, %1, %2, %3}, [%4];"
+                     : "=f"(v[k][s].x), "=f"(v[k][s].y), "=f"(v[k][s].z),
+                       "=f"(v[k][s].w)
+                     : "l"(o +
+                           (((size_t)(t0 + 2 * k + par) * S + s) * NH + h) *
+                               LAT +
+                           4 * q)
+                     : "memory");
+      }
+    }
+#pragma unroll
+    for (int k = 0; k < GH; k++) {
+      float l[S], m = -INFINITY;
+#pragma unroll
+      for (int s = 0; s < S; s++) {
+        l[s] = __shfl_sync(0xffffffffu, lv, (2 * k + par) * S + s);
+        m = fmaxf(m, l[s]);
+      }
+      float wsum = 0.f;
+#pragma unroll
+      for (int s = 0; s < S; s++) {
+        l[s] = m == -INFINITY ? 0.f : __expf(l[s] - m);
+        wsum += l[s];
+      }
+      float const inv = wsum > 0.f ? 1.0f / wsum : 0.f;
+      float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+      for (int s = 0; s < S; s++) {
+        acc.x += l[s] * v[k][s].x;
+        acc.y += l[s] * v[k][s].y;
+        acc.z += l[s] * v[k][s].z;
+        acc.w += l[s] * v[k][s].w;
+      }
+      __nv_bfloat162 *const d =
+          reinterpret_cast<__nv_bfloat162 *>(
+              buf_at<__nv_bfloat16>(g, SELF::buf) +
+              ((size_t)(t0 + 2 * k + par) * NH + h) * LAT + 4 * q);
+      d[0] = __floats2bfloat162_rn(acc.x * inv, acc.y * inv);
+      d[1] = __floats2bfloat162_rn(acc.z * inv, acc.w * inv);
+    }
   }
-  *reinterpret_cast<__nv_bfloat162 *>(buf_at<__nv_bfloat16>(g, SELF::buf) +
-                                      ((size_t)t * NH + h) * LAT + c) =
-      __floats2bfloat162_rn(acc.x * inv, acc.y * inv);
   __syncthreads();
   if (threadIdx.x == 0) {
     cnt_add(cnt_now(g) + SELF::counter + h, 1);

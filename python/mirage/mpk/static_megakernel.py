@@ -358,7 +358,8 @@ class StaticMegakernel(PersistentKernel):
             changeable = {1: (128, 2, ring_stages(T))}
         else:
             parts = 1
-            params, map_slots = [mode, K, N, 0], [self._gemm_map(weight, (128, 64)), self._gemm_map(input, (T,))]
+            # (the activation's box: the MMA's N rows = config.cuh TW; T < 8: 8, the rows past the tensor read as 0)
+            params, map_slots = [mode, K, N, 0], [self._gemm_map(weight, (128, 64)), self._gemm_map(input, (max(T, 8),))]
             changeable = {"store": {}, "store_bf16": {0: (64, 1, 2)}}.get(combine, {0: (64, 1, 2), 1: (128, 2, None)})
         if skip_seq is not None:
             self._dtypes("gemm_tile_layer", seq_lens=(skip_seq[0], int32))
@@ -498,6 +499,8 @@ class StaticMegakernel(PersistentKernel):
         self,
         input: DTensor,     # x [T, L] bf16: a graph input (each GPU has all of x), or a node's output (h_s of silu_and_mul)
         output: DTensor,    # z_q [T, L] e4m3 bytes (uint8)
+        token_tiles: int = 1,   # each 128-column group in this many tasks of T / token_tiles tokens (grid y; a multiple of
+                                # 8 tokens each): at T = 64 a task of all tokens quantizes 8 tokens a warp, on L / 128 SMs
         block_dim: tuple = (256, 1, 1),
     ):
         """Quantize one 128-column group per task, with a separate scale for each token.
@@ -517,7 +520,8 @@ class StaticMegakernel(PersistentKernel):
         if p is not None and (p.info["buf"] < 0 or p.info["counter"] < 0 or p.info["exchange"]):
             raise ValueError(f"group_quant_layer: x from {p.name}: it must be a node's output buffer on this GPU (not in the "
                              f"exchange region) whose node counts its tasks")
-        self._add_node("group_quant", (L // 128, 1, 1), block_dim, [input, output],
+        assert token_tiles == 1 or (T % token_tiles == 0 and T // token_tiles % 8 == 0)
+        self._add_node("group_quant", (L // 128, token_tiles, 1), block_dim, [input, output],
                        # x from a node: each task waits until all its tasks are counted
                        [(1, -1, -1) if p is None else (-1, -1, -1), (1, -1, -1)], [L],
                        out_buffer=lambda n: (zq32_bytes(T, L), 0xFF, False), exchange=True,
@@ -625,6 +629,9 @@ class StaticMegakernel(PersistentKernel):
         swiglu_limit: float = None,   # gate clamped to at most this, up to [-limit, limit] first (GLM-5.3-Flash: 10); None: none
         prof: DTensor = None,   # int64 [SMs, 256], a graph input: per-SM stamps of the node's phases (scaled_moe::moe_prof_event:
                                 # W13 items, W2 tiles, the ring switch, the W2 loaders' waits); None: none compiled in
+        last: DTensor = None,   # T = 64: int32 [1 + 40], a graph tensor the launches share (zeros at first): the node writes the
+                                # experts its queue took first, and the next launch brings their W13 weights into L2 while its
+                                # routing lands (scaled_moe::Slots PFE, LAST); None: the bank's first 40 experts
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the routed FP8 experts in tasks/scaled_moe_experts.cuh.
@@ -671,13 +678,25 @@ class StaticMegakernel(PersistentKernel):
             raise ValueError(f"scaled_moe_experts_layer: the pairs must be a topk_route node's over the {E} experts of w13")
         assert swiglu_limit is None or (math.isfinite(swiglu_limit) and swiglu_limit > 0)
         hq = self._scratch("scaled_moe_experts.h_q", NSLOT * T * IR)          # every row written before its counter lets W2 read it
-        hsf = self._scratch("scaled_moe_experts.h_q_scales", NSLOT * T * KT2 * 4)   # written before its counter lets W2 read it
+        # the single-item W13 entries (scaled_moe::Slots SINGLE: the live rows' slots have at most num_sms W13 items, and h_q's
+        # scales can hold their amax too: T >= 8 as the buffer is; a layer of fewer tokens has it sized for both)
+        live = route.params[5] if len(route.params) >= 6 and route.params[5] > 0 else T
+        nsm = self._num_sms()
+        single = (live * (K - shared) + shared) * (IR // 64) <= nsm and (T < 8 or 2 * NSLOT * KT2 >= 3 * nsm)
+        hsf_floats = NSLOT * T * KT2
+        if T < 8:   # whole 16-B words: W2 copies a slot's scales as such (T = 1: 8 bytes a slot)
+            hsf_floats = -(-max(hsf_floats, nsm * T // 2 + nsm * T if single else 0) // 4) * 4
+        hsf = self._scratch("scaled_moe_experts.h_q_scales", hsf_floats * 4)   # written before its counter lets W2 read it
         w13_pieces, w2_pieces = E * 2 * IR * L // 16384, E * L * IR // 16384   # one 128 x 128 e4m3 piece: 16 KB
         bufs = [hq, hsf, self._tensor_slot(w13_scales), self._tensor_slot(w2_scales)]
         if prof is not None:   # buffer slot 4 (scaled_moe::Slots PROF)
             self._dtypes("scaled_moe_experts_layer", prof=(prof, int64))
             assert (prof.dim(0), prof.dim(1)) == (self._num_sms(), 384), "prof: [SMs, scaled_moe::MOE_PROF_WORDS] int64"
             bufs.append(self._tensor_slot(prof))
+        if last is not None:   # buffer slot 5 (scaled_moe::Slots LAST)
+            self._dtypes("scaled_moe_experts_layer", last=(last, int32))
+            assert T == 64 and last.dim(0) == 1 + 40, "last: int32 [1 + scaled_moe::Slots PFE], a T = 64 layer"
+            bufs += ([-1] if prof is None else []) + [self._tensor_slot(last)]
         maps = [self._map("wblk8", ("t", w13), (w13_pieces, 1)), self._map("wblk8", ("t", w13), (w13_pieces, 2)),
                 self._map("wblk8", ("t", w2), (w2_pieces, 1)), self._map("wblk8", ("t", w2), (w2_pieces, 2))]
         for kind, dims_ in (("act8", (L, T)), ("act8kt", (L, T, 2))):
@@ -686,11 +705,7 @@ class StaticMegakernel(PersistentKernel):
             maps.append(first)
         maps.append(self._map("act8kt", ("b", hq, 0), (IR, NSLOT * T, KT2)))
         tensors = [z_q, pairs, w13, w2, output]
-        # the pair counters of single-item W13 entries (scaled_moe::Slots SINGLE: the live rows' slots have at most num_sms W13
-        # items, and h_q's scales can hold their amax too)
-        live = route.params[5] if len(route.params) >= 6 and route.params[5] > 0 else T
-        single = (live * (K - shared) + shared) * (IR // 64) <= self._num_sms() and 2 * NSLOT * KT2 >= 3 * self._num_sms()
-        pairc = self._num_sms() // 2 if single else 0
+        pairc = nsm // 2 if single else 0   # the pair counters of the single-item W13 entries
         self._add_node("scaled_moe_experts", (self._num_sms(), 1, 1), block_dim, tensors, [(-1, -1, -1)] * len(tensors),
                        [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)], one_task_per_sm=True,
                        out_buffer=lambda n: (T * K * L * 4, -1, False),
@@ -970,14 +985,12 @@ class StaticMegakernel(PersistentKernel):
         pooled_cache: DTensor,  # [pages, page x 132] uint8: the pooled keys, e4m3 then fp32 scales (written in place)
         page: int = 64,
         eps: float = 1e-6,
-        tokens_per_request: int = 1,   # NT > 1: task x = tokens x NT .. x NT + NT - 1 of one request, in order (a
-                                       # speculative verify step: its draft tokens; idle rows have seq_lens 0)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the pooled indexer key update of GLM-5.3-Flash (tasks/dsa_kpool_update.cuh, SGLang's
         kpool_decode_update_and_maybe_write_cache). Task t: k = LayerNorm(k) (bf16); at position p = seq_lens[t] - 1 with
         p % 4 = 3, the pool p / 4 (the tail's 3 earlier keys and this one) -> the pooled cache; then (k, gate) -> tail slot
-        p % RING. params = [page, MAXPP, RING, eps bits[, NT]]. buf_slots: [k_norm_weight, k_norm_bias, ape, seq_lens,
+        p % RING. params = [page, MAXPP, RING, eps bits]. buf_slots: [k_norm_weight, k_norm_bias, ape, seq_lens,
         req_slots, pooled_block_table, tail_k, tail_score, pooled_cache]. One counter: the count of the tasks."""
         self._fx_producer("dsa_kpool_update_layer", kw)
         T = self._tokens(kw.dim(0))
@@ -990,10 +1003,8 @@ class StaticMegakernel(PersistentKernel):
         assert (ape.dim(0), ape.dim(1)) == (4, 128) and RING >= 4 and tail_k.dim(2) == 128
         assert tuple(tail_score.dim(i) for i in range(3)) == tuple(tail_k.dim(i) for i in range(3))
         assert seq_lens.dim(0) == T and req_slots.dim(0) == T and pooled_block_table.dim(0) == T
-        NT = tokens_per_request
-        assert 1 <= NT <= T and T % NT == 0, f"dsa_kpool_update_layer: tokens_per_request {NT} divides {T}"
-        self._add_node("dsa_kpool_update", (T // NT, 1, 1), block_dim, [kw, pooled_cache], [(-1, -1, -1), (-1, -1, -1)],
-                       [page, pooled_block_table.dim(1), RING, float_bits(eps)] + ([NT] if NT > 1 else []), counters=1,
+        self._add_node("dsa_kpool_update", (T, 1, 1), block_dim, [kw, pooled_cache], [(-1, -1, -1), (-1, -1, -1)],
+                       [page, pooled_block_table.dim(1), RING, float_bits(eps)], counters=1,
                        buf_slots=[self._tensor_slot(k_norm_weight), self._tensor_slot(k_norm_bias), self._tensor_slot(ape),
                                   self._tensor_slot(seq_lens), self._tensor_slot(req_slots),
                                   self._tensor_slot(pooled_block_table), self._tensor_slot(tail_k),
@@ -1021,7 +1032,9 @@ class StaticMegakernel(PersistentKernel):
         self._dtypes("dsa_q_absorb_layer", qb=(qb, int64), w_uk=(w_uk, bfloat16), seq_lens=(seq_lens, int32),
                      output=(output, bfloat16), **({"cos_sin": (cos_sin, bfloat16)} if ROPE else {}))
         assert w_uk.dim(2) == 512 and (output.dim(0), output.dim(1), output.dim(2)) == (T, NH, 512 + ROPE)
-        self._add_node("dsa_q_absorb", (NH * 4, 1, 1), block_dim, [qb, output], [(-1, -1, -1), (-1, -1, -1)],
+        # (T = 64: each task half the tokens, NH x 8 tasks: 64 tasks of all 64 tokens left more than half the SMs idle)
+        self._add_node("dsa_q_absorb", (NH * 4, 2 if T == 64 and ROPE == 0 else 1, 1), block_dim, [qb, output],
+                       [(-1, -1, -1), (-1, -1, -1)],
                        [NH, NOPE, ROPE], out_buffer=lambda n: (T * NH * (512 + ROPE) * 2, -1, False), counters=1,
                        buf_slots=[self._tensor_slot(w_uk), self._tensor_slot(cos_sin if ROPE else seq_lens),
                                   self._tensor_slot(seq_lens)],
@@ -1108,7 +1121,7 @@ class StaticMegakernel(PersistentKernel):
         block_table: DTensor, seq_lens: DTensor,
         output: DTensor,        # [T, NH, 512] fp32. NOTE: this shape is not the shape of the node buffer. The tensor gives
                                 # the name of the buffer. The buffer holds o [T, S, NH, 512], then lse [T, S, NH]
-                                # (S = the split count after compilation). Only dsa_mla_merge reads it.
+                                # (S = the split count after compilation). Only dsa_mla_merge (or dsa_o_absorb) reads it.
         softmax_scale: float,   # 1 / sqrt(qk_nope_head_dim + qk_rope_head_dim)
         splits: int = 16,       # tasks per token, TOPK / splits index slots each (whole tiles of 64)
         page: int = 64,
@@ -1136,7 +1149,9 @@ class StaticMegakernel(PersistentKernel):
                        [(-1, -1, -1), (-1, -1, -1), (1, 0, -1) if kpool == 1 else (-1, 0, -1), (-1, 0, -1)],
                        [NH, TOPK, page, block_table.dim(1), cache.dim(0) // page, float_bits(softmax_scale), q.dim(2) - 512,
                         kpool, NIDX],
-                       changeable_grid_dims={0: (64, 1, None, TOPK)},   # TOPK: kpool 4 splits the slots, not indices
+                       # TOPK: kpool 4 splits the slots, not indices; T = 64: 4 splits at most (dsa_mla_merge's 8-token
+                       # tasks have a lane per lse)
+                       changeable_grid_dims={0: (64, -(-TOPK // 256) if T == 64 else 1, None, TOPK)},
                        out_buffer=lambda n: (T * n.grid[0] * NH * 513 * 4, -1, False), counters=T,
                        buf_slots=[self._tensor_slot(cache), self._tensor_slot(block_table), self._tensor_slot(seq_lens),
                                   self._tensor_slot(indices)])
@@ -1147,30 +1162,43 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,        # o_lat [T, NH, 512] bf16
         block_dim: tuple = (256, 1, 1),
     ):
-        """Declare the split merge (tasks/dsa_mla_merge.cuh). Task (h, t) merges the sparse_mla splits of head h of token t.
-        params = [NH]. Counters: one for each head (dsa_o_absorb waits for the T tasks of its head)."""
+        """Declare the split merge (tasks/dsa_mla_merge.cuh). Task (h, y) merges the sparse_mla splits of head h of the tokens
+        [G y, G y + G): G = 1, or 8 at T = 64 (NH x 8 tasks, one round of the SMs, instead of NH x 64).
+        params = [NH]. Counters: one for each head (dsa_o_absorb waits for the tasks of its head)."""
         self._producer("dsa_mla_merge_layer", input, ("sparse_mla",))
         T, NH = self._tokens(output.dim(0)), output.dim(1)
         self._dtypes("dsa_mla_merge_layer", input=(input, float32), output=(output, bfloat16))
         assert output.dim(2) == 512
-        self._add_node("dsa_mla_merge", (NH, T, 1), block_dim, [input, output], [(-1, 0, -1), (1, 0, -1)], [NH],
+        G = 8 if T == 64 else 1
+        self._add_node("dsa_mla_merge", (NH, T // G, 1), block_dim, [input, output], [(-1, 0, -1), (1, 0, -1)], [NH],
                        out_buffer=lambda n: (T * NH * 512 * 2, -1, False), counters=NH)
 
     def dsa_o_absorb_layer(
         self,
-        input: DTensor,         # o_lat [T, NH, 512] bf16 (the dsa_mla_merge output)
+        input: DTensor,         # o_lat [T, NH, 512] bf16 (the dsa_mla_merge output), or the sparse_mla output (no merge node)
         w_uv: DTensor,          # W_UV [NH, 512, 256] bf16 (from kv_b_proj, dequantized)
         output: DTensor,        # v [T, NH x 256] bf16 (the o_proj input, through group_quant)
+        o_lat: DTensor = None,  # with the sparse_mla output: o_lat [T, NH, 512] bf16, the merged splits as a graph tensor
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the value up-projection (tasks/dsa_o_absorb.cuh). Task h * 4 + cb computes value columns [64 cb, 64 cb + 64)
-        of head h for all tokens. params = [NH]. buf_slots: [w_uv]. One counter: the count of the tasks."""
-        self._producer("dsa_o_absorb_layer", input, ("dsa_mla_merge",))
+        of head h for all tokens. params = [NH]. buf_slots: [w_uv]. One counter: the count of the tasks. With the sparse_mla
+        output as input, each task merges its head's splits itself (dsa_mla_merge's math; task cb 0 also writes o_lat):
+        params = [NH, 1], buf_slots: [w_uv, o_lat]."""
+        merge = self._producer("dsa_o_absorb_layer", input, ("dsa_mla_merge", "sparse_mla")).name == "sparse_mla"
         T, NH = self._tokens(input.dim(0)), input.dim(1)
-        self._dtypes("dsa_o_absorb_layer", input=(input, bfloat16), w_uv=(w_uv, bfloat16), output=(output, bfloat16))
+        self._dtypes("dsa_o_absorb_layer", input=(input, float32 if merge else bfloat16), w_uv=(w_uv, bfloat16),
+                     output=(output, bfloat16))
         assert (w_uv.dim(0), w_uv.dim(1), w_uv.dim(2)) == (NH, 512, 256) and output.dim(1) == NH * 256
-        self._add_node("dsa_o_absorb", (NH * 4, 1, 1), block_dim, [input, output], [(-1, -1, -1), (-1, -1, -1)], [NH],
-                       out_buffer=lambda n: (T * NH * 256 * 2, -1, False), counters=1, buf_slots=[self._tensor_slot(w_uv)])
+        assert merge == (o_lat is not None), "dsa_o_absorb_layer: o_lat with (and only with) the sparse_mla output"
+        bufs = [self._tensor_slot(w_uv)]
+        if merge:
+            self._dtypes("dsa_o_absorb_layer", o_lat=(o_lat, bfloat16))
+            bufs.append(self._tensor_slot(o_lat))
+        self._add_node("dsa_o_absorb", (NH * 4, 2 if T == 64 else 1, 1), block_dim, [input, output],   # (as dsa_q_absorb)
+                       [(-1, -1, -1), (-1, -1, -1)],
+                       [NH, 1] if merge else [NH], out_buffer=lambda n: (T * NH * 256 * 2, -1, False), counters=1,
+                       buf_slots=bufs)
 
     # ---- GLM-5.3-Flash: mHC (tasks/hc_post_mix.cuh, hc_pre.cuh, hc_post.cuh) and KDA (tasks/kda_decode.cuh). The residual is
     # HC streams [T, HC H] (bf16, stream i = columns [i H, i H + H)); a sublayer's body -> a gemm_tile -> allreduce_send ->
@@ -1218,7 +1246,9 @@ class StaticMegakernel(PersistentKernel):
         output: DTensor,        # [T, HC H] bf16: the new streams
         coef: tuple,            # (h_post [T, HC], h_res [T, HC HC]) fp32 graph tensors, post and comb finished (the sublayer's
                                 # pre ran before the layer: SGLang's MHCState)
-        parts: int = 4,         # tasks per token, each H / parts columns
+        parts: int = 0,         # tasks per token, each H / parts columns (a thread per 8 columns, at most 256); 0: 4, or 2
+                                # when 4 T tasks are more than the SMs (T = 64: 256 tasks ran in two rounds of the SMs,
+                                # the second starting ~4 us after the sums landed)
         block_dim: tuple = (256, 1, 1),
     ):
         """Task (q, t): columns [q C, q C + C) of token t: out = sum over the GPUs, R'_j = sum_i comb[i][j] R_i + post_j out.
@@ -1230,6 +1260,8 @@ class StaticMegakernel(PersistentKernel):
             raise ValueError("hc_post_layer: sent from an allreduce_send node")
         T, H = self._tokens(sent.dim(0)), sent.dim(1)
         HC = residual.dim(1) // H
+        if not parts:
+            parts = 2 if 4 * T > self._num_sms() and H // 16 <= 256 else 4
         self._dtypes("hc_post_layer", sent=(sent, bfloat16), residual=(residual, bfloat16), output=(output, bfloat16))
         h_post, h_res = coef
         self._dtypes("hc_post_layer", h_post=(h_post, float32), h_res=(h_res, float32))
@@ -1283,78 +1315,42 @@ class StaticMegakernel(PersistentKernel):
         conv_state: DTensor,    # [NR, 3 x 3 HL D] bf16: per state row the last 3 inputs [3][3 HL D] (oldest first; SGLang's
                                 # KDA pool)
         rec_state: DTensor,     # [NS, HL D D] fp32: per state slot the [HL][V][K] recurrent state
-        rows: DTensor,          # [T] int32: the state slot of each request (a decode step); serve: [R], of each request
+        rows: DTensor,          # [T] int32: the state slot of each request
         output: DTensor,        # o [T, HL D] bf16 (after the gated o_norm)
-        accepted: DTensor = None,   # [T / NT] int32 with serve: a graph tensor of the verify build (buffer slot 7: it
-                                    # marks a task's tokens as one request's; not read)
-        tokens_per_request: int = 1,   # NT: 1 = one decode step of T requests; NT > 1 (with serve) = a speculative verify
-                                       # step of T / NT requests
-        requests_per_task: int = 1,   # RP: 2 / 4 / 8 = a decode step's requests 2 / 4 / 8 per task (NT 1): T / RP tasks per
-                                      # head, one wave of the SMs at T = 16 / 32 / 64 (tasks/kda_decode.cuh RP); the default
+        requests_per_task: int = 1,   # RP: 2 / 4 / 8 = a decode step's requests 2 / 4 / 8 per task: T / RP tasks per head,
+                                      # one wave of the SMs at T = 16 / 32 / 64 (tasks/kda_decode.cuh RP); the default
                                       # grid, a plan may take RP 1, 2 or 4 (T = 64: also 8; grid x)
         lower_bound: float = -5.0, norm_eps: float = 1e-5,
-        serve: dict = None,     # NT > 1: a serving framework's speculative verify step (SGLang's KDA
-                                # target-verify contract with ReplaySSM, tasks/kda_decode.cuh SERVE): {"nvalid" [R] int32 (the
-                                # request's draft tokens, the other rows idle), "icw_row" [R] int32, "icw" [rows, DRAFT, 3,
-                                # 3 HL D] bf16 (the per-token conv windows: after token t, (t, j) = x_{t - 2 + j}; SGLang's
-                                # intermediate_conv_window), "ring_v", "ring_k" [slots, HL, L, D] bf16,
-                                # "ring_g" [slots, HL, L, D] fp32, "ring_beta" [slots, HL, L] fp32, "draft" DRAFT}; the conv
-                                # state is then [NR, 3, 3 HL D] (read only) and rec_state is read only
         block_dim: tuple = (256, 1, 1),
     ):
         """Task (r, h): request r, local head h (RP > 1: requests RP r .. RP r + RP - 1): short conv, gates, the delta rule
-        on the state, gated RMSNorm (tasks/kda_decode.cuh); a decode step updates the conv window and the state in place.
-        params = [HL, D, lower bound, o_norm eps, 1 (the conv layout)]; NT = T / grid x. serve: its NT tokens in order, the
-        pools read only, the ring and the per-token windows written for the framework's commit; params + [1, DRAFT, L]."""
+        on the state, gated RMSNorm (tasks/kda_decode.cuh); the conv window and the state are updated in place.
+        params = [HL, D, lower bound, o_norm eps, 1 (the conv layout)]; RP = T / grid x."""
         from .compiler import graph_nodes, producer_of
         p = producer_of(proj, graph_nodes(self))
         if p is None or p.name != "gemm_tile" or p.params[0] != COMBINE["slots"] or p.params[3] != 0:
             raise ValueError("kda_decode_layer: proj must be a gemm_tile node's output in slots")
-        T, HLD, D, NT = self._tokens(output.dim(0)), output.dim(1), f_b.dim(1), tokens_per_request
+        T, HLD, D = self._tokens(output.dim(0)), output.dim(1), f_b.dim(1)
         HL = HLD // D
-        if NT < 1 or NT > 8 or T % NT != 0:
-            raise ValueError(f"kda_decode_layer: tokens_per_request {NT} must divide the {T} tokens (at most 8)")
-        if (NT > 1) != (serve is not None) or (NT > 1) != (accepted is not None):
-            raise ValueError("kda_decode_layer: serve and accepted exactly when tokens_per_request > 1")
         # the kernel indexes these by the head count and head dim: other shapes would be read silently wrong
         assert (conv_weight.dim(0), conv_weight.dim(1)) == (3 * HLD, 4)
         assert (f_b.dim(0), g_b.dim(0), g_b.dim(1)) == (HLD, HLD, D)
         assert small.dim(0) >= HLD + HL + D
         assert conv_state.dim(1) == 3 * HLD * 3 and rec_state.dim(1) == HLD * D
         slots = [conv_weight, f_b, g_b, small, conv_state, rec_state, rows]
-        if NT > 1:
-            assert accepted.dim(0) == T // NT
-            self._dtypes("kda_decode_layer", accepted=(accepted, int32))
-            slots.append(accepted)
         self._dtypes("kda_decode_layer", proj=(proj, float32), conv_weight=(conv_weight, float32), f_b=(f_b, bfloat16),
                      g_b=(g_b, bfloat16), small=(small, float32), conv_state=(conv_state, bfloat16),
                      rec_state=(rec_state, float32), rows=(rows, int32), output=(output, bfloat16))
         params = [HL, D, float_bits(lower_bound), float_bits(norm_eps), 1]   # 1: the conv layout [3][3 HL D]
-        if serve is not None:
-            sv = serve
-            draft, L = int(sv["draft"]), sv["ring_v"].dim(2)
-            assert 1 <= draft <= NT <= L, f"kda_decode_layer: serve draft {draft} <= NT {NT} <= ring {L}"
-            assert (sv["icw"].dim(1), sv["icw"].dim(2), sv["icw"].dim(3)) == (draft, 3, 3 * HLD), \
-                "serve: icw [rows, DRAFT, 3, 3 HL D]"
-            for k in ("ring_v", "ring_k", "ring_g"):
-                assert (sv[k].dim(1), sv[k].dim(2), sv[k].dim(3)) == (HL, L, D), f"serve: {k} [slots, HL, L, D]"
-            assert (sv["ring_beta"].dim(1), sv["ring_beta"].dim(2)) == (HL, L), "serve: ring_beta [slots, HL, L]"
-            assert sv["nvalid"].dim(0) == T // NT and sv["icw_row"].dim(0) == T // NT
-            self._dtypes("kda_decode_layer", nvalid=(sv["nvalid"], int32), icw_row=(sv["icw_row"], int32),
-                         icw=(sv["icw"], bfloat16), ring_v=(sv["ring_v"], bfloat16), ring_k=(sv["ring_k"], bfloat16),
-                         ring_g=(sv["ring_g"], float32), ring_beta=(sv["ring_beta"], float32))
-            slots += [sv[k] for k in ("nvalid", "icw_row", "icw", "ring_v", "ring_k", "ring_g", "ring_beta")]
-            params += [1, draft, L]
         RP = requests_per_task
-        if RP not in (1, 2, 4, 8) or (RP > 1 and NT != 1) or T % (NT * RP):
-            raise ValueError(f"kda_decode_layer: requests_per_task {RP}: 1, or 2 / 4 / 8 in a decode step (one token per "
-                             f"request)")
-        self._add_node("kda_decode", (T // (NT * RP), HL, 1), block_dim, [proj, output], [(0, -1, -1), (0, 1, -1)], params,
+        if RP not in (1, 2, 4, 8) or T % RP:
+            raise ValueError(f"kda_decode_layer: requests_per_task {RP}: 1, 2, 4 or 8 (one token per request)")
+        self._add_node("kda_decode", (T // RP, HL, 1), block_dim, [proj, output], [(0, -1, -1), (0, 1, -1)], params,
                        # o, 0xFF before each launch, written in whole 16-B stores: the o_proj GEMM waits for all tasks (its
                        # counter) or polls o (input_polled)
                        out_buffer=lambda n: (T * HLD * 2, 0xFF, False), counters=1,
                        # a decode step: 1 .. 4 requests per task (T = 64: .. 8)
-                       changeable_grid_dims={} if NT > 1 else {0: (1, 1, 8 if T == 64 else 4)},
+                       changeable_grid_dims={0: (1, 1, 8 if T == 64 else 4)},
                        cost_inputs=[0],   # adds the projection's K parts
                        buf_slots=[self._tensor_slot(t) for t in slots])
 
@@ -1363,8 +1359,8 @@ class StaticMegakernel(PersistentKernel):
                        rank=None, exchange=None):
         """Build the graph as it is now, one schedule.json per GPU (static_schedule.compile_static); profile: the timing build
         (per-task start / end stamps, static_harness.Harness.task_times); device: the CUDA device of GPU 0. rank / exchange:
-        GPU `rank` alone in this process with the caller's exchange region (multicast address, local address), e.g. one
-        TP rank of a serving framework (exchange_region_bytes)."""
+        GPU `rank` alone in this process with the caller's exchange region (multicast address, local address[, every rank's
+        address]), e.g. one TP rank of a serving framework (exchange_region_bytes)."""
         from .static_schedule import compile_static
         return compile_static(self, schedule_paths, gpu_tensors, out_dir, extra_flags=extra_flags, profile=profile,
                               device=device, rank=rank, exchange=exchange)

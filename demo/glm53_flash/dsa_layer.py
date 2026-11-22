@@ -1,6 +1,5 @@
 """GLM-5.3-Flash DSA attention, the whole layer with the sublayer boundary inside (as Kimi K3's fused layers, #811): the
-lightning indexer with its pooled keys, MLA (dsa_mla) and the boundary, for one decode step (or one speculative verify
-step) of T rows on a TP shard.
+lightning indexer with its pooled keys, MLA (dsa_mla) and the boundary, for one decode step of T rows on a TP shard.
 
   indexer   gemm_tile x [wk | gate | weights_proj] (bf16, 384 rows) -> dsa_kpool_update (LayerNorm k, the tail ring, the
             pool of 4 it closes -> the pooled cache);  dsa_q_norm_quant (bf16 q_c) -> gemm_tile wq_b (bf16) ->
@@ -33,7 +32,10 @@ IH, ID, PPAGE, KGW = 32, 128, 64, 384   # indexer heads x dims; pools per pooled
 TILES = 33                             # sparse_mla: 512 x 4 + 3 tail = 2051 index slots, 33 tiles of 64
 SLOTS = TILES * 64
 MLA_TILES = 36                         # sparse_mla's slots in tiles (the last 3 empty): every divisor of 36 a split count
-IQ_SKIP_T = (8, 16, 32, 64)            # the T whose indexer q GEMM skips a step of short tokens only (gemm_tile skip_seq)
+IQ_SKIP_T = (1, 2, 4, 8, 16, 32, 64)   # the T whose indexer q GEMM skips a step of short tokens only (gemm_tile skip_seq)
+# the T whose dsa_o_absorb merges the sparse_mla splits itself (no merge node; each thread holds the S lse values and
+# column pairs of all T tokens in registers, 3 S T floats): 1 GPU, 18 splits, T 1 -1.4 us a layer, T 2 +1.4 (slower)
+ABSORB_MERGE_T = (1,)
 FLUSH_BYTES = mla.FLUSH_BYTES
 
 
@@ -186,13 +188,11 @@ def topk_of(scores: torch.Tensor, seq_lens) -> torch.Tensor:
 def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float, fused: dict, o_parts: int = 4) -> dict:
     """The layer's nodes; returns the plan's grids {graph_idx: grid} for the GEMMs. splits: sparse_mla tasks per token
     (a divisor of MLA_TILES: 36 = one tile each, 18 = two, 12 = three, ...). fused: {"rms_eps", "hc_eps", "norm_eps",
-    "iters"[, "verify": True: the T rows are "requests" (default 1) requests' consecutive tokens, T / requests each (a
-    speculative verify step: dsa_kpool_update runs them in order; per-token seq_lens, the other rows idle)]}. o_proj adds
-    its o_parts K parts into t["o"] (int64 fixed point: this GPU's partial sum), then allreduce_send (each 128-column block
-    once its parts are added, bf16 to every GPU), hc_post_mix (the sum over the GPUs; the attention's mHC post with
-    t["h_post_in"] / t["h_res_in"] on the streams t["R_in"] -> t["R_out"]; the FFN's mHC mixes with t["hc_ffn_fn"]) and
-    hc_pre (the FFN's mHC pre with t["hc_ffn_small"]: its input t["x_ffn"] = RMSNorm(sum_i pre_i R'_i) t["ffn_norm"], its
-    h_post / h_res into t["h_post_out"] / t["h_res_out"])."""
+    "iters"}. o_proj adds its o_parts K parts into t["o"] (int64 fixed point: this GPU's partial sum), then allreduce_send
+    (each 128-column block once its parts are added, bf16 to every GPU), hc_post_mix (the sum over the GPUs; the
+    attention's mHC post with t["h_post_in"] / t["h_res_in"] on the streams t["R_in"] -> t["R_out"]; the FFN's mHC mixes
+    with t["hc_ffn_fn"]) and hc_pre (the FFN's mHC pre with t["hc_ffn_small"]: its input t["x_ffn"] = RMSNorm(sum_i pre_i
+    R'_i) t["ffn_norm"], its h_post / h_res into t["h_post_out"] / t["h_res_out"])."""
     mpk.max_bufs = 56            # the layer uses 48 buffer slots, more than config.cuh's default 24 (STATIC_MAX_BUFS)
     mpk.max_counter_lines = 24   # and 20 counter lines, more than the default 16 (STATIC_NODE_COUNTER_LINES)
     a = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
@@ -214,10 +214,7 @@ def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float,
                            block_table=a["block_table"], cache=a["cache"], kv0=QL, page=page, eps=eps, rope=0)
     mpk.dsa_kpool_update_layer(kw=kw, k_norm_weight=a["k_norm_w"], k_norm_bias=a["k_norm_b"], ape=a["ape"],
                                seq_lens=a["seq_lens"], req_slots=a["req_slots"], pooled_block_table=a["pooled_bt"],
-                               tail_k=a["tail_k"], tail_score=a["tail_score"], pooled_cache=a["pcache"], eps=ln_eps,
-                               # a verify step: the T rows are one request's draft tokens in order (the pooled keys they
-                               # close and their tail entries, token by token)
-                               tokens_per_request=T // int(fused.get("requests", 1)) if fused.get("verify") else 1)
+                               tail_k=a["tail_k"], tail_score=a["tail_score"], pooled_cache=a["pcache"], eps=ln_eps)
     iq = nt((T, IH * ID), int64, "idx_q")
     # (a step whose tokens all have at most POOLS pools reads no indexer q: dsa_index_score skip_k)
     mpk.gemm_tile_layer(input=a["q_c"], weight=a["w_iqb"], output=iq, combine="add",
@@ -233,10 +230,13 @@ def build_graph(mpk, t: dict, page: int, splits: int, eps: float, ln_eps: float,
     mpk.sparse_mla_layer(q=a["q_mla"], cache=a["cache"], indices=a["pool_idx"], block_table=a["block_table"],
                          seq_lens=a["seq_lens"], output=split, softmax_scale=NOPE ** -0.5, splits=splits, page=page,
                          kpool=KPOOL, slots=MLA_TILES * 64)
-    mpk.dsa_mla_merge_layer(input=split, output=a["o_lat"])
-    mpk.dsa_o_absorb_layer(input=a["o_lat"], w_uv=a["w_uv"], output=a["v"])
+    if T in ABSORB_MERGE_T:   # o_absorb merges its head's splits (no merge node: one handover less on the critical path)
+        mpk.dsa_o_absorb_layer(input=split, w_uv=a["w_uv"], output=a["v"], o_lat=a["o_lat"])
+    else:
+        mpk.dsa_mla_merge_layer(input=split, output=a["o_lat"])
+        mpk.dsa_o_absorb_layer(input=a["o_lat"], w_uv=a["w_uv"], output=a["v"])
     vq = nt((T, NH * DV), uint8, "v_fp8")
-    mpk.group_quant_layer(input=a["v"], output=vq)
+    mpk.group_quant_layer(input=a["v"], output=vq, token_tiles=4 if T == 64 else 1)   # (T = 64: 128 tasks, not 32)
     # the boundary: all-reduce, the attention's mHC post, the FFN's mHC pre
     assert t["o"].dtype == torch.int64
     mpk.scaled_gemm_tile_layer(input=vq, weight=a["w_o"], weight_scales=a["w_o_sf"], output=a["o"], combine="add")

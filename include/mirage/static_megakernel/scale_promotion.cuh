@@ -15,16 +15,16 @@
 // A round is two ring stages (one for each issuer, two pieces each). A round
 // uses one accumulator tick (acc_full / acc_empty, as a whole-K job does). A
 // job uses PromoRounds<NATOMS>::ROUNDS ticks. The columns of tick a (0..3):
-// piece 0 of issuer i at T a + 4 T i (the columns of runtime.cuh issue_job),
-// piece 1 at PROMO_COL1 + T a + 4 T i.
+// piece 0 of issuer i at TW a + 4 TW i (the columns of runtime.cuh issue_job),
+// piece 1 at PROMO_COL1 + TW a + 4 TW i (TW: the ring's width, config.cuh).
 #pragma once
 #include "core.cuh"
 
 namespace static_mk {
 
 constexpr int PROMO_COL1 =
-    512 - 2 * ACC_STAGES * T; // TMEM columns PROMO_COL1..511: piece
-                              // 1 of each (tick, issuer)
+    512 - 2 * ACC_STAGES * TW; // TMEM columns PROMO_COL1..511: piece
+                               // 1 of each (tick, issuer)
 
 // the ring stages and the accumulator ticks of a job of NATOMS pieces (a W13
 // item of scaled_moe_experts, a scaled_gemm_tile tile)
@@ -91,10 +91,10 @@ __device__ __forceinline__ void issue_promoted(uint32_t base,
       int const na = (NATOMS - 2 * s < 2) ? NATOMS - 2 * s : 2;
       for (int at = 0; at < na; at++) {
         uint32_t const acc = tb + (at == 0 ? 0u : (uint32_t)PROMO_COL1) +
-                             T * a + ACC_STAGES * T * iss;
+                             TW * a + ACC_STAGES * TW * iss;
         uint64_t const dw = mkdesc(base + st * FSTAGE + at * 16384);
         uint64_t const db =
-            mkdesc(base + st * FSTAGE + W_STAGE + at * (T * 128));
+            mkdesc(base + st * FSTAGE + W_STAGE + at * (TW * 128));
         if (one) {
           if constexpr (F8_UNSCALED) { // T = 64 (runtime.cuh mma_f8)
             mma_f8(acc, dw, db, 0u);
@@ -175,6 +175,51 @@ __device__ __forceinline__ int drain_promoted(
   for (int t = 0; t < T; t++) {
     v[t] = 0.0f;
   }
+  if constexpr (TW == 64) {
+    // T = 64: a round's 4 pieces as 8 halves of 32 columns; the next half's
+    // load is in flight while this half's FMAs run (one 64-column load waited
+    // before its FMAs left the load latency exposed 32 times an item). The
+    // same FMAs in the same order: bit-equal.
+    for (int r = 0; r < ROUNDS; r++) {
+      int const tick = wtt + r, a = acc_slot(tick);
+      mbar_wait(rt.acc_full0 + 8 * a, acc_round(tick) & 1);
+      fence_after();
+      float pa[32], pb[32];
+#pragma unroll
+      for (int h = 0; h < 8; h++) {
+        int const iss = h >> 2, at = (h >> 1) & 1, s = 2 * r + iss,
+                  atom = 2 * s + at;
+        float *const cur = (h & 1) ? pb : pa, *const nxt = (h & 1) ? pa : pb;
+        if (h == 0 && s < NST && atom < NATOMS) {
+          tmem_ld_cols_nw<32>(tb + TW * a + lanes, pa);
+          tmem_keep_cols<32>(pa);
+        }
+        int const iss1 = (h + 1) >> 2, at1 = ((h + 1) >> 1) & 1,
+                  s1 = 2 * r + iss1, atom1 = 2 * s1 + at1;
+        bool const next = h + 1 < 8 && s1 < NST && atom1 < NATOMS;
+        if (next) {
+          tmem_ld_cols_nw<32>(tb + (at1 == 0 ? 0u : (uint32_t)PROMO_COL1) +
+                                  TW * a + ACC_STAGES * TW * iss1 + lanes +
+                                  32 * ((h + 1) & 1),
+                              nxt);
+        }
+        if (s < NST && atom < NATOMS) {
+          float const sw = WS::of(bs, atom, row);
+#pragma unroll
+          for (int t = 0; t < 32; t++) {
+            int const c = 32 * (h & 1) + t;
+            v[c] = fmaf(sw * xs[atom * T + c], cur[t], v[c]);
+          }
+        }
+        if (next) {
+          tmem_keep_cols<32>(nxt);
+        }
+      }
+      fence_before();
+      mbar_arrive(rt.acc_empty0 + 8 * a); // 128 arrivals
+    }
+    return row;
+  }
   // the pieces of a round (q = 2 issuer + piece) in batches of QB: their
   // loads before one wait (T = 32: 2 at a time, T = 64: 1, for the registers)
   constexpr int QB = T <= 16 ? 4 : T == 32 ? 2 : 1;
@@ -184,15 +229,15 @@ __device__ __forceinline__ int drain_promoted(
     fence_after();
 #pragma unroll
     for (int q0 = 0; q0 < 4; q0 += QB) {
-      float p[QB][T];
+      float p[QB][TW];
 #pragma unroll
       for (int qq = 0; qq < QB; qq++) {
         int const iss = (q0 + qq) >> 1, at = (q0 + qq) & 1, s = 2 * r + iss,
                   atom = 2 * s + at;
         if (s < NST && atom < NATOMS) {
-          tmem_ld_cols_nw<T>(tb + (at == 0 ? 0u : (uint32_t)PROMO_COL1) +
-                                 T * a + ACC_STAGES * T * iss + lanes,
-                             p[qq]);
+          tmem_ld_cols_nw<TW>(tb + (at == 0 ? 0u : (uint32_t)PROMO_COL1) +
+                                  TW * a + ACC_STAGES * TW * iss + lanes,
+                              p[qq]);
         }
       }
 #pragma unroll
@@ -200,7 +245,7 @@ __device__ __forceinline__ int drain_promoted(
         int const iss = (q0 + qq) >> 1, at = (q0 + qq) & 1, s = 2 * r + iss,
                   atom = 2 * s + at;
         if (s < NST && atom < NATOMS) {
-          tmem_keep_cols<T>(p[qq]);
+          tmem_keep_cols<TW>(p[qq]);
         }
       }
 #pragma unroll
@@ -249,7 +294,7 @@ __device__ __forceinline__ int drain_promoted_tok(uint32_t tb,
     mbar_wait(rt.acc_full0 + 8 * a, acc_round(tick) & 1);
     fence_after();
 #pragma unroll
-    for (int c = 0; c < T / 8; c++) {
+    for (int c = 0; c < TW / 8; c++) {
       if (8 * c < nt) {
         float p[4][8];
 #pragma unroll
@@ -257,7 +302,7 @@ __device__ __forceinline__ int drain_promoted_tok(uint32_t tb,
           int const iss = q >> 1, at = q & 1, s = 2 * r + iss,
                     atom = 2 * s + at;
           uint32_t const col = tb + (at == 0 ? 0u : (uint32_t)PROMO_COL1) +
-                               T * a + ACC_STAGES * T * iss + lanes;
+                               TW * a + ACC_STAGES * TW * iss + lanes;
 #pragma unroll
           for (int jj = 0; jj < 8; jj++) {
             p[q][jj] = 0.0f;

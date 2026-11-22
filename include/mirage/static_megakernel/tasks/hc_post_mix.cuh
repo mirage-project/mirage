@@ -4,9 +4,10 @@
 // of every stream of every token:
 //   1. before the sums land: fn's slice (the next sublayer's hc_*_fn, its
 //      NMIX rows x the task's columns of every stream) into registers, then to
-//      shared memory; warp w = tokens t = w, w + 8, ..: this lane's R[t][i] (HC
-//      values) and token t's coefficients (T = 64: every token's to shared
-//      memory instead, cp.async, read in step 3)
+//      shared memory (T = 64: after step 2, so the sums' polls are not
+//      issued behind fn's loads); warp w = tokens t = w, w + 8, ..: this
+//      lane's R[t][i] (HC values) and token t's coefficients (T = 64: every
+//      token's to shared memory instead, cp.async, read in step 3)
 //      (h_post [T][HC], h_res [T][HC HC] fp32: the sublayer's, finished,
 //      SGLang's MHCState)
 //   2. warp w, a lane per (token, 8 columns), lands the GPUs' bf16 partial sums
@@ -15,7 +16,8 @@
 //   3. warp w, lane l: R'[t][j][c] = bf16(post[j] out[c] + sum_i comb[i][j]
 //      R[t][i][c]), rounded as SGLang's _mhc_post_torch (each product, then
 //      the sum over i in order, then post out added: no FMA), to R' (a graph
-//      tensor) and to shared memory
+//      tensor) and to shared memory (T = 64: to shared memory, then R' rows
+//      from there in 16-byte stores)
 //   4. the partial mixes of the task's columns as a GEMM of its slice: mixes
 //      [T][NMIX] = R' [T][HC 32] (bf16, exact: R' is bf16) x fn [HC 32][NMIX]
 //      (fp32 as bf16 hi + lo, two MMAs: ~2^-17 relative per product),
@@ -27,6 +29,10 @@
 //      form of step 4 ran latency-bound at 8 warps a SM: 14.0 / 5.4 us at
 //      T = 32 / 16.)
 // Counter: one; every task adds 1 (hc_pre reads R' once it is the task count).
+// STATIC_AR_TWOSHOT (core.cuh): in step 2 a lane whose token this GPU owns
+// adds that vector's landing slots and multicasts bf16(sum) into the gathered
+// rows; every lane reads its vector there (ar_twoshot_get), the same values.
+// Task s waits only for task s of the other GPUs.
 #pragma once
 #include "../core.cuh"
 #include "hc_pre.cuh"
@@ -70,13 +76,25 @@ __device__ __forceinline__ void
                      uint32_t *done_cnt,
                      int s,
                      char *scratch STAGE_STAMP_PARAM) {
+#ifndef STATIC_AR_TWOSHOT
   constexpr size_t S_RANK = (size_t)T * H * 2; // one GPU's slot
+#endif
   constexpr int C = 32, CB = HC * HC;
-  constexpr int TB = T / 8; // token blocks: warp w takes tokens w + 8 b
+  // TM: the tokens of the thread mapping below (a warp per token of a block
+  // of 8, 256 / TM threads per token): T, or 8 in a layer of fewer tokens,
+  // where warp w has token w for w < T and the other warps none (their R, sums
+  // and mixes are neither read nor written)
+  constexpr int TM = T < 8 ? 8 : T;
+  constexpr int TB = TM / 8; // token blocks: warp w takes tokens w + 8 b
   // the token blocks whose R values and coefficients are in registers at a
   // time (T = 64: 2 halves of 4 blocks)
   constexpr int TBH = TB > 4 ? 4 : TB, NHALF = TB / TBH;
-  static_assert(T % 8 == 0 && 256 % T == 0 && TB % TBH == 0 && H % C == 0 &&
+  // T64: the T = 64 order: fn's split after the sums landed (their polls are
+  // not issued behind fn's loads), R' to global memory as 16-byte stores from
+  // shared memory after step 3 (not a 2-byte store per value), step 3's halves
+  // not unrolled
+  constexpr bool T64 = T == 64;
+  static_assert(TM % 8 == 0 && 256 % TM == 0 && TB % TBH == 0 && H % C == 0 &&
                     C == HC_MIX_STRIDE && NMIX + 1 <= HC_MIX_STRIDE,
                 "hc_post_mix: a warp per 8 tokens, a lane per column");
   // scratch, from T HC C floats on (the area below is not used): the sums
@@ -105,13 +123,15 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int b = 0; b < TBH; b++) {
       int const t = warp + 8 * b;
+      bool const live = T >= 8 || t < T; // (T < 8: this warp's token)
 #pragma unroll
       for (int i = 0; i < HC; i++) {
-        rv[b][i] = __bfloat162float(res[((size_t)t * HC + i) * H + c]);
-        post[b][i] = h_post[(size_t)t * HC + i];
+        rv[b][i] =
+            live ? __bfloat162float(res[((size_t)t * HC + i) * H + c]) : 0.f;
+        post[b][i] = live ? h_post[(size_t)t * HC + i] : 0.f;
 #pragma unroll
         for (int j = 0; j < HC; j++) {
-          comb[b][i][j] = h_res[(size_t)t * CB + i * HC + j];
+          comb[b][i][j] = live ? h_res[(size_t)t * CB + i * HC + j] : 0.f;
         }
       }
     }
@@ -140,21 +160,37 @@ __device__ __forceinline__ void
       }
     }
   }
-  // fn's slice to shared memory, as bf16 hi + lo
+  // fn's slice to shared memory, as bf16 hi + lo (T64: after the sums)
+  auto fn_split = [&]() {
 #pragma unroll
-  for (int q = 0; q < FNV; q++) {
-    int const idx = threadIdx.x + 256 * q, r = idx / (HC * C),
-              k = idx % (HC * C);
-    __nv_bfloat16 const hi = __float2bfloat16_rn(fv[q]);
-    fh[r * KP + k] = hi;
-    fl[r * KP + k] = __float2bfloat16_rn(fv[q] - __bfloat162float(hi));
+    for (int q = 0; q < FNV; q++) {
+      int const idx = threadIdx.x + 256 * q, r = idx / (HC * C),
+                k = idx % (HC * C);
+      __nv_bfloat16 const hi = __float2bfloat16_rn(fv[q]);
+      fh[r * KP + k] = hi;
+      fl[r * KP + k] = __float2bfloat16_rn(fv[q] - __bfloat162float(hi));
+    }
+  };
+  if constexpr (!T64) {
+    fn_split();
   }
   STAGE_STAMP_T0(0)
   // 2. the sums: lane l of warp w lands 8 columns (vector l % 4) of its token
   // block l / 4, all of the warp's tokens at once
   static_assert(TB * (C / 8) <= 32, "hc_post_mix: a lane per landed vector");
-  if (lane < TB * (C / 8)) {
+  if (lane < TB * (C / 8) && (T >= 8 || warp < T)) {
     int const t = warp + 8 * (lane / (C / 8)), v = lane % (C / 8);
+#ifdef STATIC_AR_TWOSHOT
+    // core.cuh ar_twoshot_get: the lanes of this GPU's tokens add their
+    // vector's landing slots and multicast bf16(sum) (the owner's step), then
+    // every lane polls its vector from the gathered rows
+    float sum[8];
+    ar_twoshot_get_f32<SOFF, H>(g, t, s * (C / 8) + v, sum);
+#pragma unroll
+    for (int k = 0; k < 8; k++) {
+      out_s[t * C + 8 * v + k] = sum[k]; // the all-reduced bf16
+    }
+#else
     unsigned char const *row =
         g.rv + SOFF + rg_set() + (size_t)t * H * 2 + (size_t)s * C * 2;
     float sum[8];
@@ -167,6 +203,10 @@ __device__ __forceinline__ void
     if constexpr (REARM) {
       allreduce_rearm<S_RANK>(g, row, v);
     }
+#endif
+  }
+  if constexpr (T64) {
+    fn_split();
   }
   if constexpr (NHALF > 1) {
     asm volatile("cp.async.wait_all;" ::: "memory"); // R, coefficients landed
@@ -174,7 +214,11 @@ __device__ __forceinline__ void
   __syncthreads();
   STAGE_STAMP_T0(1)
   // 3. R'
+#if STATIC_TOKENS == 64
+#pragma unroll 1
+#else
 #pragma unroll
+#endif
   for (int hf = 0; hf < NHALF; hf++) {
     if constexpr (NHALF > 1) { // T = 64: this half's R and coefficients
 #pragma unroll                 // (shared memory)
@@ -194,6 +238,9 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int b = 0; b < TBH; b++) {
       int const t = warp + 8 * (TBH * hf + b);
+      if (T < 8 && t >= T) { // no token on this warp
+        continue;
+      }
       float const o = out_s[t * C + lane];
 #pragma unroll
       for (int j = 0; j < HC; j++) {
@@ -204,17 +251,31 @@ __device__ __forceinline__ void
         }
         __nv_bfloat16 const bb =
             __float2bfloat16(__fadd_rn(__fmul_rn(post[b][j], o), a));
-        rout[((size_t)t * HC + j) * H + c] = bb;
+        if constexpr (!T64) {
+          rout[((size_t)t * HC + j) * H + c] = bb;
+        }
         rb[t * KP + j * C + lane] = bb;
       }
     }
   }
   __syncthreads();
+  if constexpr (T64) { // R' rows (t, j) of the task's columns: 4 x 16 bytes
+    constexpr int NV = T * HC * (C / 8);
+    static_assert(NV % 256 == 0, "hc_post_mix: whole rounds of R' stores");
+#pragma unroll
+    for (int q = 0; q < NV / 256; q++) {
+      int const k = threadIdx.x + 256 * q, row = k / (C / 8),
+                v = k % (C / 8); // row t HC + j
+      *reinterpret_cast<uint4 *>(rout + (size_t)row * H + s * C + 8 * v) =
+          *reinterpret_cast<uint4 const *>(rb + (row / HC) * KP +
+                                           (row % HC) * C + 8 * v);
+    }
+  }
   {
     // 4. the mixes: tile w < MT NT8 (warp w % 8) has tokens [16 mt, 16 mt +
     // 16) (T = 8: its rows 8 .. 15 repeat 0 .. 7, dropped) x rows [8 nt, 8 nt
     // + 8)
-    constexpr int MT = (T + 15) / 16, NT8 = NMIX / 8, NW = (MT * NT8 + 7) / 8;
+    constexpr int MT = (TM + 15) / 16, NT8 = NMIX / 8, NW = (MT * NT8 + 7) / 8;
 #pragma unroll
     for (int k = 0; k < NW; k++) { // a warp's tiles
       int const w = warp + 8 * k;
@@ -223,7 +284,9 @@ __device__ __forceinline__ void
       }
       int const m0 = (w / NT8) * 16, n0 = (w % NT8) * 8, g = lane >> 2,
                 tq = lane & 3;
-      int const t0 = m0 + g, t1 = m0 + g + 8 < T ? m0 + g + 8 : m0 + g;
+      // (T < 8: the rows from T on repeat token 0, dropped)
+      int const t0 = (T >= 8 || m0 + g < T) ? m0 + g : 0,
+                t1 = m0 + g + 8 < T ? m0 + g + 8 : t0;
       float acc[4] = {0.f, 0.f, 0.f, 0.f};
 #pragma unroll
       for (int k0 = 0; k0 < HC * C; k0 += 16) {
@@ -238,8 +301,10 @@ __device__ __forceinline__ void
         hcpm_mma(a, bh, acc);
         hcpm_mma(a, bl, acc);
       }
-      *reinterpret_cast<float2 *>(mix + ((size_t)s * T + t0) * HC_MIX_STRIDE +
-                                  n0 + 2 * tq) = make_float2(acc[0], acc[1]);
+      if (T >= 8 || m0 + g < T) {
+        *reinterpret_cast<float2 *>(mix + ((size_t)s * T + t0) * HC_MIX_STRIDE +
+                                    n0 + 2 * tq) = make_float2(acc[0], acc[1]);
+      }
       if (m0 + g + 8 < T) {
         *reinterpret_cast<float2 *>(
             mix + ((size_t)s * T + m0 + g + 8) * HC_MIX_STRIDE + n0 + 2 * tq) =
@@ -247,12 +312,14 @@ __device__ __forceinline__ void
       }
     }
     // entry NMIX: the sum of squares of the token's HC 32 values, then 0s
-    constexpr int TPT = 256 / T, PER = HC * C / TPT;
+    constexpr int TPT = 256 / TM, PER = HC * C / TPT;
     int const t = threadIdx.x / TPT, part = threadIdx.x % TPT;
+    bool const live = T >= 8 || t < T; // (T < 8: this warp's token)
     float q = 0.f;
 #pragma unroll
     for (int k = 0; k < PER; k++) {
-      float const x = __bfloat162float(rb[t * KP + part * PER + k]);
+      float const x =
+          live ? __bfloat162float(rb[t * KP + part * PER + k]) : 0.f;
       q = fmaf(x, x, q);
     }
 #pragma unroll
@@ -263,7 +330,7 @@ __device__ __forceinline__ void
 #pragma unroll
     for (int k = 0; k < NE; k++) { // the thread's entries
       int const e = part + TPT * k;
-      if (e < HC_MIX_STRIDE - NMIX) {
+      if (e < HC_MIX_STRIDE - NMIX && live) {
         mix[((size_t)s * T + t) * HC_MIX_STRIDE + NMIX + e] = e == 0 ? q : 0.f;
       }
     }
