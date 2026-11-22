@@ -7,12 +7,13 @@
 // Each o_s is already the softmax average of its split. Without seq_lens
 // (KPOOL > 1), a split with no valid slot has lse = -inf. With seq_lens
 // (KPOOL 1), the task reads only the splits that hold a valid slot: split s
-// holds slots [s TOPK / S, (s + 1) TOPK / S), and the first
-// min(seq_lens[t], TOPK) slots are valid. sparse_mla writes nothing for the
-// other splits (T = 64, STATIC_ATTN64_MERGENS: nor do they add to its
-// counter; the task waits for the splits that hold a valid slot). The output
-// is o_lat [T][NH][512] bf16, the attention output in the latent space. Then the task adds 1 to counter + h (dsa_o_absorb
-// waits for the tasks of each head).
+// holds slots [s TOPK / S, (s + 1) TOPK / S) (T = 64, STATIC_ATTN64_MLALIVE:
+// dsa_common.cuh mla_split_tiles), and the first min(seq_lens[t], TOPK) slots
+// are valid. sparse_mla writes nothing for the other splits (T = 64,
+// STATIC_ATTN64_MERGENS: nor do they add to its counter; the task waits for
+// the splits that hold a valid slot). The output is o_lat [T][NH][512] bf16,
+// the attention output in the latent space. Then the task adds 1 to counter +
+// h (dsa_o_absorb waits for the tasks of each head).
 #pragma once
 #include "../dsa_common.cuh"
 #include <cmath>
@@ -46,10 +47,13 @@ __device__ __forceinline__ void run_dsa_mla_merge(Maps const &,
   static_assert(
       SEQ < 0 || SM::v[7] == 1,
       "dsa_mla_merge: seq_lens only for a sparse_mla node of KPOOL 1");
-  // T = 64 (dsa_common.cuh STATIC_ATTN64_MERGENS): ns from mla_live_splits,
-  // sparse_mla's own test of an empty split, and the wait for the ns splits
-  // that hold a valid slot (sparse_mla's empty splits add nothing)
-  constexpr bool LIVE_SPLITS = SEQ >= 0 && dsa::ATTN64_MERGENS;
+  // T = 64 (dsa_common.cuh STATIC_ATTN64_MERGENS, STATIC_ATTN64_MLALIVE): ns
+  // from mla_live_splits, sparse_mla's own test of an empty split;
+  // STATIC_ATTN64_MERGENS: the wait for the ns splits that hold a valid slot
+  // (sparse_mla's empty splits add nothing)
+  constexpr bool LIVE_SPLITS =
+      SEQ >= 0 && (dsa::ATTN64_MERGENS || dsa::ATTN64_MLALIVE);
+  constexpr bool WAIT_LIVE = SEQ >= 0 && dsa::ATTN64_MERGENS;
   auto ns_of = [&](int t) {
     if constexpr (SEQ >= 0) {
       int const live = min(max(buf_at<int const>(g, SEQ)[t], 0), TOPK);
@@ -64,7 +68,7 @@ __device__ __forceinline__ void run_dsa_mla_merge(Maps const &,
   };
   // The task uses no shared memory, so it starts with no barrier.
   if (threadIdx.x == 0) {
-    if constexpr (LIVE_SPLITS) { // the G loads of seq_lens first, then the waits
+    if constexpr (WAIT_LIVE) { // the G loads of seq_lens first, then the waits
       int ns[G];
 #pragma unroll
       for (int i = 0; i < G; i++) {

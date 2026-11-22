@@ -129,6 +129,19 @@ __device__ __forceinline__ bool idx_all_short(G const &g, KernelLocals &L) {
 constexpr bool ATTN64_MERGENS = STATIC_ATTN64_MERGENS != 0 && T == 64;
 constexpr int MLA_KV_TILE = 64; // sparse_mla's tile of index slots (KV_TILE)
 
+// STATIC_ATTN64_MLALIVE (T = 64 only; default 1, -DSTATIC_ATTN64_MLALIVE=0:
+// off). The tiles of a split from the token's valid slots instead of TOPK, so
+// that the work of a token spreads over MLA_LIVE_SPLITS = 148 / 64 = 2 splits
+// (64 tokens x 2 = 128 tasks: one round of the SMs). Example: TOPK 2048, S =
+// 8, seq_lens 300 = 5 tiles: TOPK / 64 / S = 4 tiles a split gives splits of
+// 256 + 44 rows; ceil(5 / 2) = 3 tiles gives 192 + 108 rows. At most TOPK /
+// 64 / S tiles (seq_lens >= 2048: as before), at least 1.
+#ifndef STATIC_ATTN64_MLALIVE
+#define STATIC_ATTN64_MLALIVE 1
+#endif
+constexpr bool ATTN64_MLALIVE = STATIC_ATTN64_MLALIVE != 0 && T == 64;
+constexpr int MLA_LIVE_SPLITS = NSM / T > 1 ? NSM / T : 1;
+
 // sparse_mla of KPOOL 1 (TOPK index slots, S splits): the tiles of 64 slots
 // of each split of a token of `live` valid slots (min(seq_lens, TOPK)). Split
 // s takes tiles [s per, s per + per).
@@ -136,7 +149,13 @@ template <int TOPK, int S>
 __device__ __forceinline__ int mla_split_tiles(int live) {
   static_assert(TOPK % (MLA_KV_TILE * S) == 0,
                 "sparse_mla: whole tiles of 64 slots in each split");
-  return TOPK / (MLA_KV_TILE * S);
+  constexpr int PER = TOPK / (MLA_KV_TILE * S);
+  if constexpr (ATTN64_MLALIVE) {
+    int const tiles = (live + MLA_KV_TILE - 1) / MLA_KV_TILE;
+    return max(1,
+               min(PER, (tiles + MLA_LIVE_SPLITS - 1) / MLA_LIVE_SPLITS));
+  }
+  return PER;
 }
 // The splits that hold a valid slot of a token of `live` valid slots: split s
 // holds one if and only if s < mla_live_splits(live) (s per 64 < live).

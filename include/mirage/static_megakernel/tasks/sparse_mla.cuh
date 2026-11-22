@@ -512,10 +512,11 @@ __device__ __forceinline__ void run_sparse_mla(Maps const &,
   }
   bool const in_order = KPOOL > 1 && sl / KPOOL <= NIDX;
   static_assert(smla::KV_TILE == dsa::MLA_KV_TILE, "sparse_mla: the tile");
-  // T = 64 (dsa_common.cuh STATIC_ATTN64_MERGENS): the split's tiles and its
-  // empty test from mla_split_tiles / mla_live_splits, as dsa_mla_merge's
-  // ns_of
-  constexpr bool LIVE_SPLITS = KPOOL == 1 && dsa::ATTN64_MERGENS;
+  // T = 64 (dsa_common.cuh STATIC_ATTN64_MERGENS, STATIC_ATTN64_MLALIVE): the
+  // split's tiles and its empty test from mla_split_tiles / mla_live_splits,
+  // as dsa_mla_merge's ns_of
+  constexpr bool LIVE_SPLITS =
+      KPOOL == 1 && (dsa::ATTN64_MERGENS || dsa::ATTN64_MLALIVE);
   int const per =
       LIVE_SPLITS
           ? dsa::mla_split_tiles<TOPK, S>(live)
