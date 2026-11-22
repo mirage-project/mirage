@@ -319,10 +319,25 @@ def node_table(nodes: List[Node]) -> Dict[str, dict]:
     return table
 
 
-def compile_plan(pk, plan: dict, out_dir: str) -> Tuple[List[str], dict]:
+def twoshot_kinds(pk, nodes: List[Node]) -> Dict[int, str]:
+    """The nodes of the cross-GPU waits of STATIC_GLM64_TWOSHOT (core.cuh; on by default at T 64 on 8 GPUs): graph_idx ->
+    "send" (allreduce_send), "twoshot" (sum_gpus, or a residual_add whose sums come from allreduce_send: task x waits for
+    task x of the other GPUs). Empty when the default is off."""
+    if not (pk.num_gpus == 8 and pk.tokens == 64):
+        return {}
+    kinds = {n.graph_idx: "send" for n in nodes if n.name == "allreduce_send"}
+    for n in nodes:
+        a = producer_of(n.inputs[0], nodes) if n.inputs else None
+        if n.name == "sum_gpus" or (n.name == "residual_add" and a is not None and a.name == "allreduce_send"):
+            kinds[n.graph_idx] = "twoshot"
+    return kinds if "twoshot" in kinds.values() else {}
+
+
+def compile_plan(pk, plan: dict, out_dir: str, twoshot: Optional[bool] = None) -> Tuple[List[str], dict]:
     """Returns (the schedule file paths in GPU order, {"grids": {name#graph_idx: grid}}). See the module comment. For pk's GPUs
     and SMs (StaticMegakernel.num_gpus, num_sms); an SM's list holds at most static_schedule.MAX_TASKS_PER_SM - 1 tasks (then
-    the end entry)."""
+    the end entry). twoshot: the kernel's STATIC_GLM64_TWOSHOT (None: its default, on at T 64 on 8 GPUs); when on, the
+    GPUs' lists together must not deadlock with its cross-GPU waits (static_schedule.check_twoshot_deadlock_free)."""
     num_gpus, num_sms, max_tasks = pk.num_gpus, pk._num_sms(), static_schedule.MAX_TASKS_PER_SM - 1
     if len(plan["lists"]) != num_gpus:
         raise ValueError(f"the plan has lists for {len(plan['lists'])} GPUs, compiling for {num_gpus}")
@@ -344,7 +359,8 @@ def compile_plan(pk, plan: dict, out_dir: str) -> Tuple[List[str], dict]:
             print(f"plain launch: the cluster pairs do not fit ({e})", flush=True)
     table = node_table(nodes)
     info = {"grids": {f"{n.name}#{n.graph_idx}": list(n.grid) for n in nodes}, "cluster_size": cluster_size}
-    paths = []
+    kinds = twoshot_kinds(pk, nodes) if twoshot is not False else {}
+    paths, per_gpu = [], []
     for gpu in range(num_gpus):
         tasks = gpu_tasks(pk, nodes, gpu, num_gpus)
         add_dependencies(tasks)
@@ -353,9 +369,14 @@ def compile_plan(pk, plan: dict, out_dir: str) -> Tuple[List[str], dict]:
         if longest > max_tasks:
             raise ValueError(f"GPU {gpu}: an SM has {longest} tasks, at most {max_tasks}")
         all_tasks = [{"node": t.node, "pos": list(t.pos), "deps": t.deps} for t in tasks]
+        groups = concurrent_groups(tasks, nodes)
         paths.append(os.path.join(out_dir, f"schedule_gpu{gpu}.json"))
         static_schedule.write_schedule(paths[-1], table, all_tasks, lists, {"cluster_size": cluster_size, "gpu": gpu},
-                                       concurrent_groups(tasks, nodes))
+                                       groups)
+        if kinds:
+            per_gpu.append((all_tasks, lists, groups))
+    if kinds:   # the cross-GPU waits of the two-shot (task x waits for task x of the other GPUs)
+        static_schedule.check_twoshot_deadlock_free(per_gpu, kinds)
     print(f"plan: grids {info['grids']} | {'cluster launch (2 CTAs)' if cluster_size == 2 else 'plain launch'}", flush=True)
     return paths, info
 
