@@ -1359,8 +1359,8 @@ class StaticMegakernel(PersistentKernel):
                        rank=None, exchange=None):
         """Build the graph as it is now, one schedule.json per GPU (static_schedule.compile_static); profile: the timing build
         (per-task start / end stamps, static_harness.Harness.task_times); device: the CUDA device of GPU 0. rank / exchange:
-        GPU `rank` alone in this process with the caller's exchange region (multicast address, local address), e.g. one
-        TP rank of a serving framework (exchange_region_bytes)."""
+        GPU `rank` alone in this process with the caller's exchange region (multicast address, local address[, every rank's
+        address]), e.g. one TP rank of a serving framework (exchange_region_bytes)."""
         from .static_schedule import compile_static
         return compile_static(self, schedule_paths, gpu_tensors, out_dir, extra_flags=extra_flags, profile=profile,
                               device=device, rank=rank, exchange=exchange)

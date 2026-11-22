@@ -181,7 +181,8 @@ class StaticKDA:
         # this rank alone, the exchange region in symmetric memory
         self.xbuf, self.xhandle, mc = exchange_region(mpk.exchange_region_bytes(), dev, fused["group"])
         self.sk = mpk.compile_static(self.paths, gpu_tensors=[self.t], out_dir=os.path.join(out_dir, "build"),
-                                     extra_flags=flags, device=dev.index, rank=rank, exchange=(mc, self.xbuf.data_ptr()))
+                                     extra_flags=flags, device=dev.index, rank=rank,
+                                     exchange=(mc, self.xbuf.data_ptr(), [int(p) for p in self.xhandle.buffer_ptrs]))
         self.layer, self.pdl = layer, pdl
         self.inputs = None   # the last run's: "bound" or how they were copied
         self._bound = {}   # graph tensor name -> the address bound now

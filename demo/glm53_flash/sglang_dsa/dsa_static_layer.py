@@ -161,7 +161,8 @@ class StaticDSA:
         paths, self.info = compiler.compile_plan(mpk, plan, os.path.join(out_dir, "schedules"))
         self.xbuf, self.xhandle, mc = _exchange_region(mpk.exchange_region_bytes(), dev, fused["group"])
         self.sk = mpk.compile_static(paths, gpu_tensors=[self.t], out_dir=os.path.join(out_dir, "build"),
-                                     extra_flags=flags, device=dev.index, rank=rank, exchange=(mc, self.xbuf.data_ptr()))
+                                     extra_flags=flags, device=dev.index, rank=rank,
+                                     exchange=(mc, self.xbuf.data_ptr(), [int(p) for p in self.xhandle.buffer_ptrs]))
         self.layer, self.pdl, self.req_to_token, self.eps = layer, pdl, req_to_token, eps
         self.w = w   # the checkpoint's tensors of this rank (dsa_mla.load_layer)
         self._bound = {}    # graph tensor name -> the address bound now
