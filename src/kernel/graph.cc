@@ -1142,6 +1142,12 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_GPT_OSS_MXFP8_QUANT_SM100, variant_id);
+  } else if (name == "gpt_oss_moe_norm") {
+    int variant_id = task_register->register_gpt_oss_moe_norm_sm100_task(
+        customized->bgraph, params);
+    // inputs x, table, weight; outputs y, sum
+    task_config[op] =
+        std::make_tuple(3, 2, TASK_GPT_OSS_MOE_NORM_SM100, variant_id);
   } else if (name == "dsa_q_norm_quant") {
     int variant_id = task_register->register_dsa_q_norm_quant_sm100_task(
         customized->bgraph, params);

@@ -26,6 +26,7 @@ from mirage.mpk.sm90_moe_split import Sm90MoeSplit, sm90_moe_split_weights
 from mirage.mpk.models.utils import shuffle_tensors
 from mxfp4 import Mxfp4Checkpoint, convert_expert_weight, prepare_gpt_oss_expert_bank
 
+FI_GEMM2_WIDTH = 3072   # FlashInfer's unfinalized MoE rows (flashinfer_moe.H_PAD; Model checks): gpt_oss_moe_norm's row stride
 T, PAGE = 8, 64                       # token rows of a step (main: the bucket of the batch), KV page size
 BUCKETS = (8, 16, 32, 64)             # the kernels' token rows, as the other static models' (a step of R requests: the
                                       # smallest >= R; rows past R idle)
@@ -158,6 +159,12 @@ class Model:
         if self.fused_residual:
             self.shared.update({"moe_y": zeros(T, H), "x_res": zeros(T, H)})
             self.y0 = zeros(T, H)
+        # GPTOSS_MOE_FOLD=1 (Blackwell, FlashInfer from logits): FlashInfer runs unfinalized and the next layer's first
+        # task (gpt_oss_moe_norm) computes its finalize, the residual add and the norm: one kernel less a layer. moe_tab
+        # [L + 1, 4] int64: row j = the experts' outputs layer j's norm reads (row 0 none; FlashinferMoe.set_fold)
+        self.moe_fold = (self.fused_residual and self.fi_logits and os.environ.get("GPTOSS_MOE_FOLD", "0") == "1")
+        if self.moe_fold:
+            self.moe_tab = zeros(self.L + 1, 4, dtype=torch.int64)
         ext = None if self.moe_kind == "mpk" else __import__(self.moe_kind + "_moe")
         self.texperts = []
         names = ("gate_up_proj_blocks", "gate_up_proj_scales", "gate_up_proj_bias", "down_proj_blocks",
@@ -206,6 +213,9 @@ class Model:
                     ext.FlashinferMoe(R, E, TOPK, H, self.limit, self.shared["moe_y"], self.fi_logits)
                     if self.moe_kind == "flashinfer" else
                     None if self.native else Sm90MoeSplit(T, H, I, E, TOPK, self.shared["h2"], self.shared["act"], R))
+        if self.moe_fold:
+            assert ext.H_PAD == FI_GEMM2_WIDTH
+            self.moe.set_fold(self.moe_tab)
 
     def layer_tensors(self, i: int) -> dict:
         """Layer i's tensors by graph name: its weights and cache, the shared buffers, its residual in and out."""
@@ -213,7 +223,10 @@ class Model:
         t = {**self.shared, **self.layers[i], **ring, "x_in": self.x_embed if i == 0 else self.x[i % 2],
              "x_out": self.x[(i + 1) % 2]}
         if self.fused_residual:   # x_in: the previous layer's x1 (its experts in y_in); the gate's x1 is x_out
-            t.update({"y_in": self.y0 if i == 0 else self.shared["moe_y"], "x1": self.x[(i + 1) % 2]})
+            # fold: the experts' table row in y_in's place (the same graph inputs in the same order: the plans' node ids)
+            y_in = ({"moe_tab": self.moe_tab[i]} if self.moe_fold else
+                    {"y_in": self.y0 if i == 0 else self.shared["moe_y"]})
+            t.update({**y_in, "x1": self.x[(i + 1) % 2]})
         return t
 
     def residual_in(self, i: int) -> torch.Tensor:
@@ -221,7 +234,16 @@ class Model:
         x = self.x_embed if i == 0 else self.x[i % 2]
         if not self.fused_residual or i == 0:
             return x.clone()
-        return (x.float() + self.shared["moe_y"].float()).to(x.dtype)
+        return (x.float() + self.moe_y_of(i - 1).float()).to(x.dtype)
+
+    def moe_y_of(self, i: int) -> torch.Tensor:
+        """Layer i's experts' sum [T, H] bf16 after it ran (rows past R zero); fold: FlashInfer's finalize of its
+        unfinalized outputs (FlashinferMoe.y_of), else moe_y (the last layer's)."""
+        if not self.moe_fold:
+            return self.shared["moe_y"]
+        y = torch.zeros_like(self.shared["moe_y"])
+        y[:self.R] = self.moe.y_of(self.moe.keep[i])
+        return y
 
     def routed_experts(self, R: int) -> torch.Tensor:
         """The last layer's experts of the first R requests [R, TOPK], ascending, as the gate left them (ranks, or the
@@ -240,7 +262,8 @@ class Model:
     def head_tensors(self, prompt: torch.Tensor, gen: torch.Tensor) -> dict:
         """The final norm and lm_head, then the next step's tokens (prompt [R, P] i64; gen [R, NEW] i64: the generated
         tokens)."""
-        fused = {"y_in": self.shared["moe_y"], "x_res": self.shared["x_res"]} if self.fused_residual else {}
+        y_in = {"moe_tab": self.moe_tab[self.L]} if getattr(self, "moe_fold", False) else {"y_in": self.shared.get("moe_y")}
+        fused = {**y_in, "x_res": self.shared["x_res"]} if self.fused_residual else {}
         return {"x": self.x[self.L % 2], **self.head, **fused, "embed": self.embed, "prompt": prompt, "gen": gen,
                 "x_embed": self.x_embed, "kv_indptr": self.shared["kv_indptr"],
                 "last_page_len": self.shared["last_page_len"], "kv_indices": self.shared["kv_indices"],
@@ -260,12 +283,14 @@ class Model:
 def launch_layer(m: Model, kernel, inst: int, i: int):
     """Layer i: its kernel (instance inst), then its routed experts and combine (moe_kind): x_out = x1 + the experts'
     sum (Blackwell's native experts: inside the kernel)."""
+    if i == 0 and getattr(m, "moe_fold", False):   # a capture's table restore, before the step's first kernel
+        m.moe.begin_step()
     kernel.launch_instances(inst, 1)
     t, L = m.shared, m.layers[i]
     if m.native:
         return
-    if m.moe_kind == "flashinfer":   # the experts' sum into moe_y (the next norm adds x1)
-        m.moe.launch(t["routing"], t["topk_w"], t["h2"], m.texperts[i])
+    if m.moe_kind == "flashinfer":   # the experts' sum into moe_y (the next norm adds x1); fold: into moe_tab row i + 1
+        m.moe.launch(t["routing"], t["topk_w"], t["h2"], m.texperts[i], layer=i)
         return
     if m.moe_kind != "mpk":
         m.moe.launch(t["routing"], t["topk_w"], t["h2"], t["x1"], m.x[(i + 1) % 2], m.texperts[i])
@@ -280,6 +305,9 @@ def warm_moe(m: Model):
     if m.moe_kind == "flashinfer":
         t = m.shared
         m.moe.autotune(t["routing"], t["topk_w"], t["h2"], m.texperts[0])
+        if getattr(m, "moe_fold", False):   # the unfinalized outputs' contract on this GPU and FlashInfer build
+            print(f"fold: FlashInfer finalize contract {m.moe.verify_fold(t['routing'], t['topk_w'], t['h2'], m.texperts[0])}",
+                  flush=True)
 
 
 def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
@@ -287,8 +315,8 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
     then runs the experts)."""
     mpk.max_bufs = max(getattr(mpk, "max_bufs", 0), 64)   # the layer's tensors (Hopper's default; Blackwell's is 24)
     A = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
-    fused = "y_in" in A   # the residual stream x_in + y_in, into x_res (Model.fused_residual)
-    mpk.sm90_rmsnorm_layer(A["x_in"], A["ln1"], A["h"], m.eps, **(dict(add=A["y_in"], sum_out=A["x_res"]) if fused else {}))
+    fused = "y_in" in A or "moe_tab" in A   # the residual stream x_in + y_in, into x_res (Model.fused_residual)
+    first_norm(m, mpk, A, A["x_in"], A["ln1"])
     mpk.gemm_tile_layer(input=A["h"], weight=A["w_qkv"], output=A["qkv32"], combine="store",
                         store_parts=A["qkv32"].dim(0) // A["h"].dim(0), min_parts=min_kparts("qkv"))
     qkv_bias = dict(qkv_bias=A["b_qkv"], qkv_staged=A["qkv"])   # the attention tasks add the bias (no bias node)
@@ -325,11 +353,21 @@ def build_layer(m: Model, mpk: StaticMegakernel, t: dict, window: int):
         mpk.l2_prefetch_weights(float(os.environ["STATIC_L2_PREFETCH_MB"]))
 
 
+def first_norm(m: Model, mpk: StaticMegakernel, A: dict, x, weight):
+    """A kernel's first node: h = norm(x), with the previous layer's experts added first when fused (x_res = x + y):
+    y read from y_in, or (fold, moe_tab) FlashInfer's finalize computed in the task (gpt_oss_moe_norm)."""
+    if "moe_tab" in A:
+        mpk.gpt_oss_moe_norm_layer(x, A["moe_tab"], weight, A["h"], A["x_res"], m.eps, top_k=m.TOPK,
+                                   gemm2_width=FI_GEMM2_WIDTH)
+    else:
+        mpk.sm90_rmsnorm_layer(x, weight, A["h"], m.eps,
+                               **(dict(add=A["y_in"], sum_out=A["x_res"]) if "y_in" in A else {}))
+
+
 def build_head(m: Model, mpk: StaticMegakernel, t: dict):
     mpk.max_bufs = max(getattr(mpk, "max_bufs", 0), 64)
     A = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
-    mpk.sm90_rmsnorm_layer(A["x"], A["norm"], A["h"], m.eps,
-                           **(dict(add=A["y_in"], sum_out=A["x_res"]) if "y_in" in A else {}))
+    first_norm(m, mpk, A, A["x"], A["norm"])
     mpk.gemm_tile_layer(input=A["h"], weight=A["lm_head"], output=A["logits"], combine="store")
     # the next step's token (the prompt's, else the argmax), its embedding row and page table: no launch between the steps
     mpk.sm90_next_token_layer(A["logits"], A["embed"], A["prompt"], A["x_embed"], A["gen"], A["kv_indptr"],

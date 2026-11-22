@@ -1650,6 +1650,23 @@ class StaticMegakernel(PersistentKernel):
         self._sm90_node("sm90_rmsnorm", (T, 1, 1), [input, add, weight, output, sum_out], [H, float_bits(eps), 1],
                         block_dim)
 
+    def gpt_oss_moe_norm_layer(self, input: DTensor, moe_table: DTensor, weight: DTensor, output: DTensor,
+                               sum_out: DTensor, eps: float, top_k: int, gemm2_width: int,
+                               block_dim: tuple = (256, 1, 1)):
+        """Blackwell GPT-OSS with FlashInfer's trtllm-gen MoE run unfinalized (do_finalize=False): its finalize, the
+        residual add and the RMSNorm of each token (tasks/gpt_oss_moe_norm.cuh): task x = row x. sum_out = bf16(input +
+        y), output = bf16(rmsnorm(sum_out) weight), with y finalizeKernel's bf16 output computed from moe_table (int64 [4]:
+        the addresses of gemm2_output [rows, gemm2_width] bf16, expanded_idx_to_permuted_idx [R top_k] int32, the experts'
+        weights [R, top_k] bf16, then R; rows past R add 0), which the host writes after each MoE call.
+        params = [H, eps bits, top_k, gemm2_width]."""
+        T, H = self._tokens(input.dim(0)), input.dim(1)
+        self._dtypes("gpt_oss_moe_norm_layer", input=(input, bfloat16), moe_table=(moe_table, int64),
+                     weight=(weight, bfloat16), output=(output, bfloat16), sum_out=(sum_out, bfloat16))
+        assert moe_table.num_dims == 1 and moe_table.dim(0) == 4, "gpt_oss_moe_norm_layer: moe_table is int64 [4]"
+        assert H % 8 == 0 and 1 <= top_k <= 8 and gemm2_width >= H and gemm2_width % 8 == 0
+        self._sm90_node("gpt_oss_moe_norm", (T, 1, 1), [input, moe_table, weight, output, sum_out],
+                        [H, float_bits(eps), top_k, gemm2_width], block_dim)
+
     def sm90_attention_layer(self, qkv: DTensor, k_cache: DTensor, v_cache: DTensor, cos: DTensor, sin: DTensor,
                              qo_indptr: DTensor, kv_indptr: DTensor, kv_indices: DTensor, last_page_len: DTensor,
                              output: DTensor, num_q_heads: int, window: int = 0, sinks: DTensor = None,

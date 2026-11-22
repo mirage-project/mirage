@@ -19,6 +19,8 @@ for that backend (vllm/model_executor/layers/fused_moe/oracle/mxfp4.py): hidden 
 2944 (zeros after the checkpoint's rows), each gate / up row pair swapped (trtllm-gen's SwiGLU takes up first), then
 trtllm-gen's row shuffle for its transposed MMA output and the scales' interleave. FlashInfer is not a Mirage dependency;
 without it gpt_oss_static.py on Blackwell falls back to the native gpt_oss_moe_experts task."""
+import os
+
 import torch
 from flashinfer import trtllm_fp4_block_scale_moe, trtllm_fp4_block_scale_routed_moe
 from flashinfer.fp4_quantization import nvfp4_block_scale_interleave
@@ -80,13 +82,67 @@ class FlashinferMoe:
         self.beta = torch.full((E,), beta, dtype=f32, device=dev)
         self.limit = torch.full((E,), limit, dtype=f32, device=dev)
         self.y = y[:R]   # the experts' sum [R, H] bf16 (vLLM's unpadded output; the next layer's norm adds it)
+        self.table = None   # fold mode (set_fold): FlashInfer's finalize is the next layer's gpt_oss_moe_norm
 
-    def launch(self, routing, topk_w, h2, L):
+    def set_fold(self, table):
+        """Fold mode: FlashInfer runs unfinalized (do_finalize=False; the call passes output=y still, so that its
+        autotuner key and tactic stay those of the finalized call) and each layer's gpt_oss_moe_norm task computes the
+        finalize (tasks/gpt_oss_moe_norm.cuh). table int64 [L + 1, 4] on the GPU: row j is what layer j's norm reads (L:
+        the head's), {gemm2_output, expanded_idx_to_permuted_idx, expert weights addresses, R}; row 0 stays {0, 0, 0,
+        0} (no experts before layer 0). Layer i's call writes row i + 1: eagerly a copy from host memory (stream
+        ordered, before layer i + 1's kernel); in a CUDA graph capture its addresses are the capture's own, written to
+        that capture's pinned host table, which begin_step's copy at the step's start (captured: replayed) puts in the
+        table, so that each replay restores its own addresses whatever ran before it."""
+        assert self.logits, "fold mode: FlashInfer's routing from logits (GPTOSS_FI_ROUTE=logits)"
+        assert table.dtype == torch.int64 and table.is_cuda and table.is_contiguous() and table.shape[1] == 4
+        self.table = table
+        self.keep = {}          # layer -> its last call's outputs (alive while the table points at them)
+        self.capture_rows = None
+        self.captures = []      # every capture's pinned rows (a replay reads them)
+
+    def begin_step(self):
+        """Fold mode, before layer 0's kernel of a step: in a capture, the copy that restores the capture's table."""
+        if self.table is None:
+            return
+        if torch.cuda.is_current_stream_capturing():
+            rows = torch.zeros(self.table.shape, dtype=torch.int64).pin_memory()
+            self.captures.append(rows)
+            self.capture_rows = rows
+            self.table.copy_(rows, non_blocking=True)   # a memcpy node: reads rows at each replay
+        else:
+            self.capture_rows = None
+
+    def _fold_out(self, out, i):
+        """Fold mode: layer i's unfinalized outputs [gemm2_output, expert_weights, expanded_idx_to_permuted_idx]
+        checked against the task's contract, their addresses into table row i + 1."""
+        R, TOPK = self.R, self.TOPK
+        g2, w, idx = out
+        assert g2.dtype == torch.bfloat16 and g2.dim() == 2 and g2.shape[1] == H_PAD and g2.is_contiguous(), \
+            f"gemm2_output {g2.dtype} {tuple(g2.shape)}: the task reads rows of {H_PAD} bf16"
+        assert w.dtype == torch.bfloat16 and tuple(w.shape) == (R, TOPK) and w.is_contiguous(), (w.dtype, w.shape)
+        assert idx.dtype == torch.int32 and idx.numel() == R * TOPK and idx.is_contiguous(), (idx.dtype, idx.shape)
+        assert g2.data_ptr() % 16 == 0
+        # the task reproduces finalizeKernel, which FlashInfer 0.7.2.post1's finalize::run picks while
+        # ceil(H / 256) x R < 1184 (R < 99; finalizeKernelVecLoad from there) and top-k <= 4 (SmallBatch past it)
+        assert -(-self.H // 256) * R < 1184 and TOPK <= 4, (R, TOPK)
+        self.keep[i] = (g2, w, idx)
+        vals = [g2.data_ptr(), idx.data_ptr(), w.data_ptr(), R]
+        if torch.cuda.is_current_stream_capturing():
+            assert self.capture_rows is not None, "fold mode: a capture starts with begin_step (launch_layer's layer 0)"
+            self.capture_rows[i + 1] = torch.tensor(vals, dtype=torch.int64)
+        else:   # pageable: the copy has read vals when it returns
+            self.table[i + 1].copy_(torch.tensor(vals, dtype=torch.int64))
+
+    def launch(self, routing, topk_w, h2, L, layer=None, do_finalize=None, output=None):
         """routing [E + TOPK, T]: the gate's bf16 logits [T][E] at its start (self.logits), else its top-k ids [T][TOPK]
         in its rows past E; h2: its h, [T, H_PAD] bf16 or MXFP8
         (uint8 [T, H_PAD 33 / 32]: e4m3 [T][H_PAD], then UE8M0 scales [T][H_PAD / 32]) (sm90_gate_layer topk_ids,
-        h_mxfp8)."""
+        h_mxfp8). Fold mode (set_fold): unfinalized, layer's outputs into the table (do_finalize / output: verify_fold's
+        override, no table write)."""
         R, E, TOPK, H = self.R, self.E, self.TOPK, self.H
+        override = do_finalize is not None
+        fold = (not do_finalize) if override else self.table is not None
+        assert override or not fold or layer is not None, "fold mode: launch(..., layer=i)"
         T = routing.shape[1]
         assert routing.shape[0] == E + TOPK
         if h2.dtype == torch.uint8:
@@ -102,18 +158,58 @@ class FlashinferMoe:
                  gemm2_weights=L["fw2"], gemm2_weights_scale=L["fs2"], gemm2_bias=L["fb2"], output1_scale_scalar=None,
                  output1_scale_gate_scalar=None, output2_scale_scalar=None, num_experts=E, top_k=TOPK, n_group=None,
                  topk_group=None, intermediate_size=I_PAD, local_expert_offset=0, local_num_experts=E,
-                 routed_scaling_factor=None, routing_method_type=RoutingMethodType.Renormalize, do_finalize=True,
-                 enable_pdl=True, output=self.y, tune_max_num_tokens=max(R, 8))
+                 routed_scaling_factor=None, routing_method_type=RoutingMethodType.Renormalize, do_finalize=not fold,
+                 enable_pdl=True, output=self.y if output is None else output, tune_max_num_tokens=max(R, 8))
         if self.logits:   # bf16 logits [T][E] at routing's start; FlashInfer's routing: top-k, softmax over it
             logits = routing.reshape(-1).view(torch.bfloat16)[:T * E].view(T, E)[:R]
-            trtllm_fp4_block_scale_moe(routing_logits=logits, routing_bias=None, **w)
+            out = trtllm_fp4_block_scale_moe(routing_logits=logits, routing_bias=None, **w)
         else:             # the gate's top-k ids [T][TOPK] in routing's rows past E, and its weights
+            assert not fold
             ids = routing[E:].reshape(-1)[:T * TOPK].view(T, TOPK)[:R]
-            trtllm_fp4_block_scale_routed_moe(topk_ids=(ids, topk_w[:R]), routing_bias=None, **w)
+            out = trtllm_fp4_block_scale_routed_moe(topk_ids=(ids, topk_w[:R]), routing_bias=None, **w)
+        if fold and not override:
+            self._fold_out(out, layer)
+        return out
+
+    def y_of(self, out):
+        """FlashInfer's finalizeKernel on unfinalized outputs [gemm2_output, expert_weights,
+        expanded_idx_to_permuted_idx] in torch: [R, H] bf16 = bf16(sum over k ascending, idx != -1, of w gemm2[idx][:H])
+        in fp32 from 0 (a product of two bf16 is exact in fp32, so each step rounds once as an fma; off only where the
+        fma's flush to zero would act)."""
+        g2, w, idx = out
+        R, TOPK, H = self.R, self.TOPK, self.H
+        idx = idx.view(R, TOPK).long()
+        acc = torch.zeros(R, H, dtype=torch.float32, device=g2.device)
+        for k in range(TOPK):
+            p = idx[:, k]
+            e = g2[p.clamp(min=0), :H].float()
+            acc = torch.where((p != -1)[:, None], acc + w[:, k:k + 1].float() * e, acc)
+        return acc.to(torch.bfloat16)
+
+    def verify_fold(self, routing, topk_w, h2, L):
+        """Fold mode's contract on this GPU and FlashInfer build: the finalized call's output equals y_of of the
+        unfinalized call's (same inputs, bit for bit), and the unfinalized outputs match the task's layout. Raises."""
+        ref = torch.zeros_like(self.y)
+        self.launch(routing, topk_w, h2, L, do_finalize=True, output=ref)
+        out = self.launch(routing, topk_w, h2, L, do_finalize=False)
+        g2, w, idx = out
+        assert g2.dtype == torch.bfloat16 and g2.shape[1] == H_PAD and g2.is_contiguous(), (g2.dtype, g2.shape)
+        assert w.dtype == torch.bfloat16 and tuple(w.shape) == (self.R, self.TOPK), (w.dtype, w.shape)
+        assert idx.dtype == torch.int32 and idx.numel() == self.R * self.TOPK, (idx.dtype, idx.shape)
+        y = self.y_of(out)
+        torch.cuda.synchronize()
+        bad = (y.view(torch.int16) != ref.view(torch.int16)).sum().item()
+        assert bad == 0, f"verify_fold: {bad} of {y.numel()} elements differ from FlashInfer's finalize"
+        assert ref.abs().sum().item() > 0, "verify_fold: zero output (inputs not routed)"
+        return {"elements": y.numel(), "minus_one_slots": int((idx == -1).sum().item())}
 
     def autotune(self, routing, topk_w, h2, L):
-        """FlashInfer's tactic search for this batch (as vLLM's warm-up): run once under its autotuner."""
+        """        FlashInfer's tactic search for this batch (as vLLM's warm-up): run once under its autotuner. The fold mode's
+        unfinalized call shares the finalized call's tuning key (the same output tensor, shapes and runner), so both
+        searches are this one call's. GPTOSS_FI_TUNE_CACHE: a tactic file loaded if it exists and saved after (one
+        tactic for both arms of an A / B)."""
         from flashinfer.autotuner import autotune
-        with autotune(True):
-            self.launch(routing, topk_w, h2, L)
+        cache = os.environ.get("GPTOSS_FI_TUNE_CACHE") or None
+        with autotune(True, cache=cache):
+            self.launch(routing, topk_w, h2, L, do_finalize=True)
         torch.cuda.synchronize()

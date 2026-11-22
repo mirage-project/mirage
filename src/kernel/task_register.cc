@@ -5864,6 +5864,21 @@ int TaskRegister::register_gpt_oss_mxfp8_quant_sm100_task(
       static_build_only_task("gpt_oss_mxfp8_quant", params));
 }
 
+int TaskRegister::register_gpt_oss_moe_norm_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {H, eps bits, TOPK, HP}. inputs: x, table, weight; outputs: y, sum
+  // (tasks/gpt_oss_moe_norm.cuh)
+  assert(params.size() == 4 && params[0] % 8 == 0 && params[2] >= 1 &&
+         params[2] <= 8 && params[3] >= params[0] && params[3] % 8 == 0);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 3, 2, input_ops, output_ops);
+  assert(input_ops[1]->dtensor.num_dims == 1 &&
+         input_ops[1]->dtensor.dim[0] == 4);
+  return register_task_variant(
+      TASK_GPT_OSS_MOE_NORM_SM100,
+      static_build_only_task("gpt_oss_moe_norm", params));
+}
+
 int TaskRegister::register_dsa_q_norm_quant_sm100_task(
     threadblock::Graph const &bgraph, std::vector<int> const &params) {
   // params: {QL (2048 or 1536), eps (fp32 bits), OUT (0: z_q, 1: bf16 q_c)}.
