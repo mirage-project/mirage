@@ -322,8 +322,10 @@ def node_table(nodes: List[Node]) -> Dict[str, dict]:
 def twoshot_kinds(pk, nodes: List[Node]) -> Dict[int, str]:
     """The nodes of the cross-GPU waits of STATIC_FLASH64_TWOSHOT (core.cuh; on by default at T 64 on 4 GPUs): graph_idx ->
     "send" (allreduce_send), "twoshot" (an hc_post, hc_post_mix or sum_gpus reading an allreduce_send node's output: task x
-    waits for task x of the other GPUs). Empty when the default is off."""
-    if not (pk.num_gpus == 4 and pk.tokens == 64):
+    waits for task x of the other GPUs). Empty when the default is off (also with a sum_rmsnorm node: the generated layer.cu
+    then defines it 0, static_schedule.twoshot_blocked)."""
+    if not (pk.num_gpus == 4 and pk.tokens == 64) or static_schedule.twoshot_blocked([n.name for n in nodes], pk.tokens,
+                                                                                      pk.num_gpus):
         return {}
     kinds = {n.graph_idx: "send" for n in nodes if n.name == "allreduce_send"}
     for n in nodes:

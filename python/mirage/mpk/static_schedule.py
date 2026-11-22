@@ -202,6 +202,13 @@ def config_checks(used: List[str], tokens: int = 8, max_bufs: Optional[int] = No
             'static_megakernel.py)");']
 
 
+def twoshot_blocked(node_names, tokens: int, num_gpus: int) -> bool:
+    """True when core.cuh's default STATIC_FLASH64_TWOSHOT (1 at T 64 on 4 GPUs) is on but the graph has a node that reads
+    an allreduce_send buffer only in the one-shot layout (sum_rmsnorm, e.g. Kimi K3's MoE on 4 GPUs at T 64): the generated
+    layer.cu then defines the switch 0 (header_code) and compile_plan skips the two-shot's cross-GPU check."""
+    return tokens == 64 and num_gpus == 4 and "sum_rmsnorm" in set(node_names)
+
+
 def reset_sms(schedule: dict) -> List[int]:
     """The SMs whose first task waits for another node's tasks (it has dependencies), or that have none: where a
     STATIC_NO_START_BARRIER kernel resets the next launch's buffer set, off the path (core.cuh kernel_begin)."""
@@ -222,6 +229,9 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
             "// the kernel-wide sizes (config.cuh): tokens per step and GPUs (the graph's: StaticMegakernel.tokens, num_gpus), SMs (the",
             "// schedules' task lists per GPU)",
             f"#define STATIC_TOKENS {pk.tokens}", f"#define STATIC_GPUS {num_gpus}", f"#define STATIC_SMS {num_lists}", ""] + (
+            ["// sum_rmsnorm reads only the one-shot layout: core.cuh's default STATIC_FLASH64_TWOSHOT (1 at T 64 on 4 GPUs) off",
+             "#ifndef STATIC_FLASH64_TWOSHOT", "#define STATIC_FLASH64_TWOSHOT 0", "#endif", ""]
+            if twoshot_blocked(used, pk.tokens, num_gpus) else []) + (
             [f"#define STATIC_MAX_BUFS {pk.max_bufs}   // buffer slots (config.cuh MAX_BUFS; StaticMegakernel.max_bufs)", ""]
             if getattr(pk, "max_bufs", None) else []) + (
             [f"#define STATIC_NODE_COUNTER_LINES {pk.max_counter_lines}   // counter lines (config.cuh NODE_COUNTER_LINES; "

@@ -70,7 +70,13 @@ def main():
         ss.check_deadlock_free(tasks(deps), q)
     assert raises([(tasks(deps), e, []), (tasks(deps), f, [])], {1: "send"}), "send circle not flagged"
     assert not raises([(tasks(deps), e, []), (tasks(deps), e, [])], {1: "send"}), "same lists (sends) flagged"
-    print("test_static_twoshot_order: 6 checks OK")
+    # 5. the default switch: off for a graph with sum_rmsnorm (the one-shot layout only), else on only at T 64 on 4 GPUs
+    #    (twoshot_blocked: header_code then defines STATIC_FLASH64_TWOSHOT 0, compile_plan skips this check)
+    assert ss.twoshot_blocked(["allreduce_send", "sum_rmsnorm", "sum_gpus"], 64, 4), "K3 MoE at T 64 on 4 GPUs not blocked"
+    assert not ss.twoshot_blocked(["allreduce_send", "hc_post_mix", "hc_post"], 64, 4), "Flash tail blocked"
+    assert not ss.twoshot_blocked(["allreduce_send", "sum_rmsnorm"], 64, 8), "8 GPUs blocked (default already off)"
+    assert not ss.twoshot_blocked(["allreduce_send", "sum_rmsnorm"], 32, 4), "T 32 blocked (default already off)"
+    print("test_static_twoshot_order: 7 checks OK")
 
 
 if __name__ == "__main__":

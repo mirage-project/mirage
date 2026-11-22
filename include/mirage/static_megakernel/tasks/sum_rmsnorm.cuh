@@ -292,7 +292,8 @@ __device__ __forceinline__ void run_sum_rmsnorm(Maps const &,
                                                 StaticTask const &tk) {
   static_assert(!AR_TWOSHOT || sizeof(SELF) == 0,
                 "sum_rmsnorm: reads an allreduce_send buffer in the one-shot layout; "
-                "build with -DSTATIC_FLASH64_TWOSHOT=0 (core.cuh)");
+                "build with -DSTATIC_FLASH64_TWOSHOT=0 (core.cuh; the generated "
+                "layer.cu defines it 0 when the graph has sum_rmsnorm)");
   constexpr int LAT = SEND::v[0], EPS = PARAMS::v[1];
   static_assert(SEND::buf >= 0,
                 "sum_rmsnorm: rows sent by an allreduce_send node");

@@ -92,8 +92,9 @@ struct PrefetchList {
 // lists together: static_schedule.check_twoshot_deadlock_free). 0: the
 // one-shot (every GPU's partial multicast to every GPU, each GPU adds all
 // slots of every vector). Default: 1 at T 64 on 4 GPUs (sum_rmsnorm takes
-// only the one-shot layout: a static assert asks for
-// -DSTATIC_FLASH64_TWOSHOT=0). FLASH_TWOSHOT.md: the design
+// only the one-shot layout: a generated layer.cu with a sum_rmsnorm node
+// defines it 0, static_schedule.twoshot_blocked; =1 there fails its static
+// assert). FLASH_TWOSHOT.md: the design
 #ifndef STATIC_FLASH64_TWOSHOT
 #if STATIC_TOKENS == 64 && STATIC_GPUS == 4
 #define STATIC_FLASH64_TWOSHOT 1

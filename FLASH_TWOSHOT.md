@@ -43,8 +43,11 @@ How this differs from GLM-5.3's STATIC_GLM64_TWOSHOT (mirage_twoshot f3b9b28; 8 
 - the readers: GLM's residual_add (LAND) and sum_gpus; Flash's hc_post and hc_post_mix (GLM's commit static-asserts
   them off). hc_post_mix's slice (32 columns of every token) already holds vectors of every owner's tokens, so it
   needs no token-interleaved order; a lane does step 1 for its own vector when this GPU owns its token, then step 2.
-- sum_gpus is ported as in GLM's commit; sum_rmsnorm keeps the one-shot layout (a static assert asks for
-  -DSTATIC_FLASH64_TWOSHOT=0); Flash does not use either.
+- sum_gpus is ported as in GLM's commit; sum_rmsnorm keeps the one-shot layout; Flash does not use either. A graph with a
+  sum_rmsnorm node at T 64 on 4 GPUs (e.g. demo/kimi_k3_moe/demo.py --gpus 4, STATIC_TOKENS=64) keeps the one-shot by
+  default: the generated layer.cu defines STATIC_FLASH64_TWOSHOT 0 before core.cuh (static_schedule.twoshot_blocked,
+  header_code) and compile_plan skips the two-shot check (compiler.twoshot_kinds); -DSTATIC_FLASH64_TWOSHOT=1 there fails
+  sum_rmsnorm's static assert.
 
 Switch: STATIC_FLASH64_TWOSHOT (core.cuh), default 1 at T 64 on 4 GPUs, else 0; -DSTATIC_FLASH64_TWOSHOT=0 builds the
 one-shot (the same code as before). The host sets G::peer: the harness (one process) every GPU's copy of the
