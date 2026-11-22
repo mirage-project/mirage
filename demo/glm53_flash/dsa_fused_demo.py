@@ -17,7 +17,11 @@ multicast exchange region), one kernel per GPU.
            x_ffn, h_post, h_res against SGLang's mHC formulas (mhc.py _mhc_post_torch / _mhc_pre_torch, the norm as
            RMSNorm.forward_native); every GPU's outputs equal; o_proj per GPU from the kernel's v; end to end: every GPU's
            DSA reference (dsa_mla.reference) on the kernel's own selection, then the boundary
-  time     --reps launches, 512 MB read before each (L2 emptied): the span over the GPUs
+  time     --reps launches, 512 MB read before each (L2 emptied): the span over the GPUs; then every GPU's outputs
+           of the last launch must equal the first's bit for bit (same_as_first)
+  A/B      --save-y FILE / --same-y FILE: GPU 0's outputs of the first launch saved / compared bit for bit (save_same),
+           e.g. the default build (STATIC_TOKENS=64 on 4 GPUs: core.cuh STATIC_FLASH64_TWOSHOT, the two-shot all-reduce)
+           against --nvcc-flag=-DSTATIC_FLASH64_TWOSHOT=0 (the one-shot)
 
   plans    the round-robin plan of build_graph's grids (OUT/plan.json), or --plan FILE (one GPU's lists, repeated for the
            GPUs); --search COSTS: the plan search.search_plan finds from it with the prefetch cost model
@@ -29,7 +33,7 @@ multicast exchange region), one kernel per GPU.
 
 python demo/glm53_flash/dsa_fused_demo.py --model-dir /raid/catalyst/models/GLM-5.3-Flash [--tp 4] [--layer 3] [--seq-lens ...]
     [--page 1] [--maxctx 8192] [--out /tmp/flash_dsa_fused] [--reps 20] [--nvcc-flag=-DSTATIC_RESET_IN_KERNEL]
-    [--plan FILE] [--search COSTS ...] [--record FILE] [--collect FILE [--jobs 4] [--rounds 3]]
+    [--plan FILE] [--search COSTS ...] [--record FILE] [--collect FILE [--jobs 4] [--rounds 3]] [--save-y FILE] [--same-y FILE]
 """
 import argparse
 import json
@@ -110,6 +114,35 @@ def load_mhc(model_dir: str, layer: int) -> dict:
         m[k] = m[k].float() if k.startswith("hc_") else m[k].to(torch.bfloat16)
     assert m["hc_attn_fn"].shape == (HC * (HC + 2), HC * H)
     return m
+
+
+def _bits(a: torch.Tensor) -> torch.Tensor:
+    return a.detach().cpu().contiguous().view(torch.uint8)
+
+
+def same_as_first(ts: list, outs: list, keys) -> bool:
+    """Every GPU's tensors `keys` now (after the timed launches) bit-equal to outs[r] (the first launch's): the exchange
+    region's two sets and the slots the readers re-armed give the same values every launch. Prints; returns it."""
+    same = all(torch.equal(_bits(ts[r][k]), _bits(outs[r][k])) for r in range(len(ts)) for k in keys)
+    print(f"  every GPU's {', '.join(keys)} of the last timed launch bit-equal to the first: {same}", flush=True)
+    return same
+
+
+def save_same(args, mine: dict) -> bool:
+    """--save-y FILE: save mine ({name: tensor}: GPU 0's outputs of the first launch); --same-y FILE: they must equal the
+    saved ones bit for bit (the A/B of a build switch, e.g. --nvcc-flag=-DSTATIC_FLASH64_TWOSHOT=0 against the default).
+    Prints each; returns whether all are equal (True without --same-y)."""
+    ok = True
+    if getattr(args, "save_y", None):
+        torch.save({k: v.detach().cpu() for k, v in mine.items()}, args.save_y)
+        print(f"  {', '.join(mine)} saved to {args.save_y}")
+    if getattr(args, "same_y", None):
+        base = torch.load(args.same_y)
+        for k in base:
+            eq = k in mine and mine[k].shape == base[k].shape and torch.equal(_bits(mine[k]), _bits(base[k]))
+            print(f"  {k} bit-equal to {args.same_y}: {eq}")
+            ok = ok and eq
+    return ok
 
 
 def hc_pre_ref(R: torch.Tensor, fn, base, scale, gamma, rms_eps, hc_eps, norm_eps, iters, post_mult=2.0,
@@ -332,6 +365,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_args(ap)
     ap.add_argument("--out", default="/tmp/flash_dsa_fused")
+    ap.add_argument("--save-y", metavar="FILE", help="save GPU 0's outputs of the first launch (torch.save; R', x_ffn, "
+                    "h_post, h_res, the pool indices): a bit-exact reference for --same-y")
+    ap.add_argument("--same-y", metavar="FILE", help="GPU 0's outputs of the first launch must equal these saved ones bit "
+                    "for bit (A/B of a build switch, e.g. --nvcc-flag=-DSTATIC_FLASH64_TWOSHOT=0)")
     args = ap.parse_args()
     while len(args.seq_lens) < T:   # T rows (STATIC_TOKENS): more requests, context lengths one shorter
         args.seq_lens = args.seq_lens + [max(1, v - 1) for v in args.seq_lens[:T - len(args.seq_lens)]]
@@ -423,7 +460,10 @@ def main():
     with open(os.path.join(args.out, "result.json"), "w") as f:
         json.dump({"plan": args.plan or "round robin", "grids": {str(k): v for k, v in info["grids"].items()}, "seq_lens": L,
                    "gpus": n, "timing_build": timing, "spans_us": spans}, f, indent=1)
+    ok = same_as_first(ts, outs, keys) and save_same(args, outs[0])
     sk.finalize()
+    print("PASS" if ok else "FAIL", flush=True)
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":

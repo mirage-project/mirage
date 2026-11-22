@@ -477,11 +477,37 @@ def collect(args, mpk, current: dict) -> None:
           flush=True)
 
 
+def save_same_y(args, first: torch.Tensor, outs: dict) -> bool:
+    """--save-y FILE: save the new streams of the first launch (first), with mhc_pre also outs {"x_attn", "h_post_next",
+    "h_res_next"}; --same-y FILE: they must equal the saved ones bit for bit. Prints; returns whether they are equal (True
+    without --same-y)."""
+    ok = True
+    if args.save_y:   # the new streams alone, or with mhc_pre {"streams_out", "x_attn", "h_post_next", "h_res_next"}
+        torch.save({"streams_out": first.cpu(), **{k: v.cpu() for k, v in outs.items()}} if outs else first.cpu(),
+                   args.save_y)
+        print(f"  the new streams{' and ' + ', '.join(outs) if outs else ''} saved to {args.save_y}")
+    if args.same_y:
+        base = torch.load(args.same_y)
+        base = base if isinstance(base, dict) else {"streams_out": base}
+        mine = {"streams_out": first, **outs}
+        bits = lambda a: a.contiguous().view(torch.int16 if a.element_size() == 2 else torch.int32)
+        for k in base:
+            eq = k in mine and mine[k].shape == base[k].shape and bool((bits(mine[k].cpu()) == bits(base[k])).all())
+            print(f"  {k} bit-equal to {args.same_y}: {eq}")
+            ok = ok and eq
+        missing = [k for k in mine if k not in base]
+        if missing:
+            print(f"  not in {args.same_y} (not compared): {', '.join(missing)}")
+    return ok
+
+
 def run_tp(args, w0: dict, x: torch.Tensor, attn_next: dict) -> None:
     """--gpus N (2 .. --tp): ranks 0 .. N-1 of TP --tp on GPUs 0 .. N-1 of this process, one kernel each: the all-reduce over
     the N GPUs through the runtime's exchange region (multicast), as SGLang's TP layers (the sum over N ranks, not all --tp:
     the mechanism, not the model's numbers). x and the random streams and coefficients are the same on every rank. Checks
-    every rank's new streams (check_end), then --reps timed launches."""
+    every rank's new streams (check_end), then --reps timed launches: every rank's outputs of the last one bit-equal to the
+    first's. --save-y / --same-y: GPU 0's outputs of the first launch (save_same_y; the A/B of a build switch, e.g. at
+    STATIC_TOKENS=64 on 4 GPUs --nvcc-flag=-DSTATIC_FLASH64_TWOSHOT=0, the one-shot all-reduce, against the default)."""
     n = args.gpus
     assert 1 < n <= args.tp and torch.cuda.device_count() >= n, \
         f"--gpus {n}: 2 .. --tp {args.tp} GPUs ({torch.cuda.device_count()} GPUs visible)"
@@ -521,7 +547,9 @@ def run_tp(args, w0: dict, x: torch.Tensor, attn_next: dict) -> None:
     torch.cuda.synchronize()
     print(f"layer {args.layer}, TP{args.tp} ranks 0..{n - 1} on {n} GPUs, the end {args.end} in the kernel", flush=True)
     ok = check_end(ts, ws, x, streams, h_post, h_res, attn_next, T)
-    first = ts[0]["streams_out"].clone()
+    keys = ("streams_out", "x_attn", "h_post_next", "h_res_next") if attn_next is not None else ("streams_out",)
+    firsts = [{k: t[k].clone() for k in keys} for t in ts]   # every rank's outputs of the first launch
+    first = firsts[0]["streams_out"]
     spans = []
     for i in range(args.reps):
         try:
@@ -531,15 +559,17 @@ def run_tp(args, w0: dict, x: torch.Tensor, attn_next: dict) -> None:
             os._exit(2)
         spans.append(h.span_us())
     torch.cuda.synchronize()
-    same = bool((ts[0]["streams_out"].view(torch.int16) == first.view(torch.int16)).all())
-    print(f"  new streams of the last timed launch bit-equal to the first: {same}")
+    bits = lambda a: a.contiguous().view(torch.uint8)
+    same = all(torch.equal(bits(t[k]), bits(f[k])) for t, f in zip(ts, firsts) for k in keys)
+    print(f"  every rank's {', '.join(keys)} of the last timed launch bit-equal to the first: {same}")
     print(f"machine {socket.gethostname()} {torch.cuda.get_device_name(0)} x {n}, grids {info['grids']}, {args.reps} launches: "
           f"span min {min(spans):.1f} median {statistics.median(spans):.1f} max {max(spans):.1f} us")
     with open(os.path.join(args.out, "result.json"), "w") as f:
         json.dump({"plan": args.plan or "round robin", "grids": {str(k): v for k, v in info["grids"].items()}, "end": args.end,
                    "gpus": n, "timing_build": args.timeline, "spans_us": spans}, f, indent=1)
-    print("PASS" if ok and same else "FAIL", flush=True)
-    sys.exit(0 if ok and same else 1)
+    ok = save_same_y(args, first, {k: v for k, v in firsts[0].items() if k != "streams_out"}) and ok and same
+    print("PASS" if ok else "FAIL", flush=True)
+    sys.exit(0 if ok else 1)
 
 
 def main():
@@ -690,23 +720,7 @@ def main():
     with open(os.path.join(args.out, "result.json"), "w") as f:
         json.dump({"plan": args.plan or "round robin", "grids": {str(k): v for k, v in info["grids"].items()}, "end": args.end,
                    "timing_build": profile, "spans_us": spans}, f, indent=1)
-    ok = ok and same
-    if args.save_y:   # the new streams alone, or with mhc_pre {"streams_out", "x_attn", "h_post_next", "h_res_next"}
-        torch.save({"streams_out": first.cpu(), **{k: v.cpu() for k, v in outs.items()}} if outs else first.cpu(),
-                   args.save_y)
-        print(f"  the new streams{' and ' + ', '.join(outs) if outs else ''} saved to {args.save_y}")
-    if args.same_y:
-        base = torch.load(args.same_y)
-        base = base if isinstance(base, dict) else {"streams_out": base}
-        mine = {"streams_out": first, **outs}
-        bits = lambda a: a.contiguous().view(torch.int16 if a.element_size() == 2 else torch.int32)
-        for k in base:
-            eq = k in mine and mine[k].shape == base[k].shape and bool((bits(mine[k].cpu()) == bits(base[k])).all())
-            print(f"  {k} bit-equal to {args.same_y}: {eq}")
-            ok = ok and eq
-        missing = [k for k in mine if k not in base]
-        if missing:
-            print(f"  not in {args.same_y} (not compared): {', '.join(missing)}")
+    ok = save_same_y(args, first, outs) and ok and same
     print("PASS" if ok else "FAIL")
     sk.finalize()
     sys.exit(0 if ok else 1)

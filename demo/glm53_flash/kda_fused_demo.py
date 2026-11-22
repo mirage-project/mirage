@@ -13,7 +13,11 @@ fused layers, #811: o_proj, the TP all-reduce, the residual and the norm in one 
   check    the boundary from the kernel's own per-GPU partial sums (dsa_fused_demo.check_boundary's formulas: SGLang's mHC
            post / pre); every GPU's outputs equal; per GPU kda_decode's o and the new states against kda_reference.ref_kda
            on the same inputs, o_proj from the kernel's o; end to end: the reference's partial sums, then the boundary
-  time     --reps launches, 512 MB read before each (L2 emptied), the states put back: the span over the GPUs
+  time     --reps launches, 512 MB read before each (L2 emptied), the states put back: the span over the GPUs; then
+           every GPU's outputs of the last launch must equal the first's bit for bit (dsa_fused_demo.same_as_first)
+  A/B      --save-y FILE / --same-y FILE: GPU 0's outputs of the first launch saved / compared bit for bit
+           (dsa_fused_demo.save_same), e.g. the default build (STATIC_TOKENS=64 on 4 GPUs: the two-shot all-reduce)
+           against --nvcc-flag=-DSTATIC_FLASH64_TWOSHOT=0 (the one-shot)
 
   plans    the round-robin plan (kda_static_layer.plan_of; OUT/plan.json), or --plan FILE (one GPU's lists, repeated for the
            GPUs); --search COSTS: the plan search.search_plan finds from it with the prefetch cost model
@@ -23,7 +27,7 @@ fused layers, #811: o_proj, the TP all-reduce, the residual and the norm in one 
 
 python demo/glm53_flash/kda_fused_demo.py --model-dir /raid/catalyst/models/GLM-5.3-Flash [--tp 4] [--gpus N] [--layer 0]
     [--o-parts 4] [--out /tmp/flash_kda_fused] [--reps 20] [--nvcc-flag=-DSTATIC_RESET_IN_KERNEL]
-    [--plan FILE] [--search COSTS ...] [--record FILE] [--collect FILE [--jobs 4] [--rounds 3]]
+    [--plan FILE] [--search COSTS ...] [--record FILE] [--collect FILE [--jobs 4] [--rounds 3]] [--save-y FILE] [--same-y FILE]
 """
 import argparse
 import json
@@ -121,6 +125,10 @@ def main():
     ap.add_argument("--iters", type=int, default=0, help="Sinkhorn iterations (default: the config's)")
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--out", default="/tmp/flash_kda_fused")
+    ap.add_argument("--save-y", metavar="FILE", help="save GPU 0's outputs of the first launch (torch.save; R', x_ffn, "
+                    "h_post, h_res): a bit-exact reference for --same-y")
+    ap.add_argument("--same-y", metavar="FILE", help="GPU 0's outputs of the first launch must equal these saved ones bit "
+                    "for bit (A/B of a build switch, e.g. --nvcc-flag=-DSTATIC_FLASH64_TWOSHOT=0)")
     ap.add_argument("--nvcc-flag", action="append", default=[])
     ap.add_argument("--plan", help="a plan file (compiler.write_plan_file) instead of the round-robin plan")
     ap.add_argument("--idle", type=int, default=0, help="a decode step whose last N rows are idle (slot -1, a padded batch): "
@@ -303,7 +311,10 @@ def main():
     with open(os.path.join(args.out, "result.json"), "w") as f:
         json.dump({"plan": args.plan or "round robin", "grids": {str(k): v for k, v in info["grids"].items()}, "gpus": n,
                    "timing_build": timing, "spans_us": spans}, f, indent=1)
+    ok = dfd.same_as_first(ts, outs, keys) and dfd.save_same(args, outs[0])
     sk.finalize()
+    print("PASS" if ok else "FAIL", flush=True)
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == "__main__":
