@@ -91,6 +91,10 @@ SPLITS = 8 if T == 64 else 16
 # old layers: no STATIC_RING_STAGES define)
 ATTN64_RING = int(os.environ.get("MIRAGE_ATTN64_RING", "4"))
 assert ATTN64_RING in (3, 4), f"MIRAGE_ATTN64_RING={ATTN64_RING}: 3 or 4"
+# T = 64: the token tiles (grid y) of dsa_q_absorb in rr_plan. MIRAGE_ATTN64_QABS_Y: 2 (default; [NH x 8, 2] = 128 tasks of
+# 16 tokens at TP8) or 1 (the old [NH x 8, 1]: 64 tasks of 32 tokens)
+ATTN64_QABS_Y = int(os.environ.get("MIRAGE_ATTN64_QABS_Y", "2"))
+assert ATTN64_QABS_Y in (1, 2), f"MIRAGE_ATTN64_QABS_Y={ATTN64_QABS_Y}: 1 or 2"
 H, PAGE, TOPK = 6144, 64, 2048
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -250,14 +254,14 @@ def check_plan(path: str, sms: int) -> dict:
 
 def rr_plan(mpk, full: bool) -> dict:
     """The round-robin plan (plan_gen.round_robin_plan; e.g. T = 64, which has no hand plan) of the graph in mpk, a "full"
-    or "shared" layer: the grids of the kind's T = 32 hand plan, 8 dsa_q_absorb tasks a head, and each "add" FP8 GEMM's K
-    in the most parts that keep its tasks within one round of the SMs."""
+    or "shared" layer: the grids of the kind's T = 32 hand plan, 8 dsa_q_absorb tasks a head (T = 64: in ATTN64_QABS_Y
+    token tiles), and each "add" FP8 GEMM's K in the most parts that keep its tasks within one round of the SMs."""
     from mirage.mpk import plan_gen
     with open(os.path.join(HERE, f"hand_plan_{'full' if full else 'shared'}_T32.json")) as f:
         grids = {int(k): v for k, v in json.load(f)["grids"].items()}
     for n in compiler.graph_nodes(mpk):
-        if n.name == "dsa_q_absorb":   # two token groups: 8 tasks a head (declared: 4)
-            grids[n.graph_idx] = (2 * n.grid[0], n.grid[1], n.grid[2])
+        if n.name == "dsa_q_absorb":   # two token groups: 8 tasks a head (declared: 4); T = 64: ATTN64_QABS_Y token tiles
+            grids[n.graph_idx] = (2 * n.grid[0], ATTN64_QABS_Y if T == 64 else n.grid[1], n.grid[2])
         elif n.name == "scaled_gemm_tile" and n.params[0] == 1:   # an "add" GEMM: K in the most parts (whole 128-column
             # tiles) that keep its tasks within one round of the SMs
             tiles, sms = n.params[1] // 128, mpk._num_sms()
