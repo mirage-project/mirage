@@ -75,7 +75,8 @@ struct PrefetchList {
 // STATIC_AR_TWOSHOT: the all-reduce of allreduce_send -> hc_post /
 // hc_post_mix (GLM-5.3-Flash's layer tails; and sum_gpus) as a two-shot by
 // token. The generated layer.cu defines it for a graph of T 64 on 4 GPUs
-// without sum_rmsnorm (static_schedule.ar_twoshot, header_code); every other
+// with an allreduce_send and without sum_rmsnorm (static_schedule.ar_twoshot,
+// header_code); every other
 // layer has the one-shot (every GPU's partial multicast to every GPU, each GPU
 // adds all slots of every vector). Example (4 GPUs, T 64, H 4096; GPU 2 owns
 // tokens 32..47, AR_TOWN = T / GPUS = 16):

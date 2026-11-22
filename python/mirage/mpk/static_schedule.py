@@ -203,9 +203,10 @@ def config_checks(used: List[str], tokens: int = 8, max_bufs: Optional[int] = No
 
 def ar_twoshot(node_names, tokens: int, num_gpus: int) -> bool:
     """The all-reduce of allreduce_send -> hc_post / hc_post_mix / sum_gpus as a two-shot by token (core.cuh
-    STATIC_AR_TWOSHOT, defined by header_code): a graph of T 64 on 4 GPUs (GLM-5.3-Flash's TP4 layers at bs 64) without
-    sum_rmsnorm (it reads only the one-shot layout, e.g. Kimi K3's MoE)."""
-    return tokens == 64 and num_gpus == 4 and "sum_rmsnorm" not in set(node_names)
+    STATIC_AR_TWOSHOT, defined by header_code): a graph of T 64 on 4 GPUs (GLM-5.3-Flash's TP4 layers at bs 64) with an
+    allreduce_send and without sum_rmsnorm (it reads only the one-shot layout, e.g. Kimi K3's MoE)."""
+    names = set(node_names)
+    return tokens == 64 and num_gpus == 4 and "allreduce_send" in names and "sum_rmsnorm" not in names
 
 
 def reset_sms(schedule: dict) -> List[int]:

@@ -70,11 +70,12 @@ def main():
         ss.check_deadlock_free(tasks(deps), q)
     assert raises([(tasks(deps), e, []), (tasks(deps), f, [])], {1: "send"}), "send circle not flagged"
     assert not raises([(tasks(deps), e, []), (tasks(deps), e, [])], {1: "send"}), "same lists (sends) flagged"
-    # 5. when the generated layer.cu has the two-shot (ar_twoshot): T 64 on 4 GPUs without sum_rmsnorm
+    # 5. when the generated layer.cu has the two-shot (ar_twoshot): T 64 on 4 GPUs, allreduce_send, no sum_rmsnorm
     assert ss.ar_twoshot(["allreduce_send", "hc_post_mix", "hc_pre"], 64, 4), "Flash tail at T 64 on 4 GPUs"
     assert not ss.ar_twoshot(["allreduce_send", "sum_rmsnorm", "sum_gpus"], 64, 4), "K3 MoE at T 64 on 4 GPUs"
     assert not ss.ar_twoshot(["allreduce_send", "hc_post_mix"], 64, 8), "8 GPUs"
     assert not ss.ar_twoshot(["allreduce_send", "hc_post_mix"], 32, 4), "T 32"
+    assert not ss.ar_twoshot(["hc_post_mix", "hc_pre"], 64, 4), "no allreduce_send"
     print("test_static_twoshot_order: 7 checks OK")
 
 
