@@ -675,6 +675,10 @@ class StaticMegakernel(PersistentKernel):
                                   # power-of-two scales (fp8_fp32scale_weights.pack_w2(ue8m0=True), SGLang's DeepGEMM
                                   # requantization), h_q's scales are rounded up to powers of two and the W2 MMA applies both
                                   # (scaled_moe::Slots W2UE)
+        w13_ue8m0: bool = False,  # T = 64 with every row live and the many-token epilogue: w13 / w13_scales are requantized
+                                  # to power-of-two scales (fp8_fp32scale_weights.pack_w13(ue8m0=True)) and z_q comes from a
+                                  # group_quant_layer(ue8m0=True); the W13 MMA applies both scales, one accumulator an item
+                                  # (scaled_moe::Slots W13UE)
         block_dim: tuple = (256, 1, 1),
     ):
         """Declare the routed FP8 experts in tasks/scaled_moe_experts.cuh.
@@ -698,7 +702,8 @@ class StaticMegakernel(PersistentKernel):
           w13: [E, 2 IR, L] e4m3 bytes; scales: [E, IR / 128, L / 128, 2] fp32 (gate, up).
           w2: [E, L, IR] e4m3 bytes; scales: [E, L / 128, IR / 128] fp32.
         z_q must come from group_quant_layer. params = [IR], [IR, the swiglu limit as fp32 bits] or [IR, the limit's bits or 0,
-        the options (scaled_moe::Slots OPTS_: 1 no many-token epilogue, 2 the W2 tiles in slot order, 4 w2_ue8m0)].
+        the options (scaled_moe::Slots OPTS_: 1 no many-token epilogue, 2 the W2 tiles in slot order, 4 w2_ue8m0,
+        8 w13_ue8m0)].
         """
         from .compiler import graph_nodes, producer_of
         T, K, L = self._tokens(pairs.dim(0)), pairs.dim(1), z_q.dim(1)
@@ -761,10 +766,17 @@ class StaticMegakernel(PersistentKernel):
         if w2_ue8m0 and not (w2c and KT2 == 2):
             raise ValueError("scaled_moe_experts_layer: w2_ue8m0 needs T = 64, every row live, the many-token epilogue and "
                              "IR = 256 (scaled_moe::Slots W2UE)")
+        if w13_ue8m0 and not (w2c and KT_L % 2 == 0 and KT_L <= 64):
+            raise ValueError("scaled_moe_experts_layer: w13_ue8m0 needs T = 64, every row live, the many-token epilogue and "
+                             "L / 128 even, at most 64 (scaled_moe::Slots W13UE)")
+        if w13_ue8m0 and not (len(zq.params) >= 2 and zq.params[1] != 0):
+            raise ValueError("scaled_moe_experts_layer: w13_ue8m0 needs z_q from group_quant_layer(ue8m0=True) (power-of-two "
+                             "scales for the W13 MMA)")
         tensors = [z_q, pairs, w13, w2, output]
         # T = 64's shared-memory layout has only the many-token W13 epilogue (the other: an illegal access)
         assert many_token_epilogue or T <= 32, "scaled_moe_experts_layer: many_token_epilogue=False needs T <= 32"
-        opts = (0 if many_token_epilogue else 1) | (2 if w2_in_slot_order else 0) | (4 if w2_ue8m0 else 0)
+        opts = ((0 if many_token_epilogue else 1) | (2 if w2_in_slot_order else 0) | (4 if w2_ue8m0 else 0) |
+                (8 if w13_ue8m0 else 0))
         params = [IR] if swiglu_limit is None else [IR, float_bits(swiglu_limit)]
         if opts:
             params = [IR, params[1] if len(params) > 1 else 0, opts]
