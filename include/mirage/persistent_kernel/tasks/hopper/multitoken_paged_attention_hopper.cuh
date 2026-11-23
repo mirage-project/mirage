@@ -28,8 +28,15 @@
 #include "tma.cuh"
 #include "utils.cuh"
 #include "wgmma.cuh"
+#include <type_traits>
 #define USE_TMA_Q 0
 namespace kernel {
+
+// what runs between the work that needs no producer and the first read of the
+// QKV rows (the caller's wait for them and any staging); all threads call it
+struct AttnNoHook {
+  __device__ __forceinline__ void operator()() const {}
+};
 
 template <typename T,
           int NUM_QO_HEADS,
@@ -50,7 +57,11 @@ template <typename T,
           // [max_seq_len, ROTARY_DIM]. Default = full-dim NeoX RoPE.
           int ROTARY_DIM = HEAD_DIM,
           // Rows between consecutive pages. 0 = packed layout.
-          int PAGE_STRIDE_ROWS = 0>
+          int PAGE_STRIDE_ROWS = 0,
+          // Sliding-window attention. A query at absolute position p attends
+          // to keys in (p - WINDOW_SIZE, p]. 0 = no window.
+          int WINDOW_SIZE = 0,
+          class PreQ = AttnNoHook>
 __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     void *paged_k_cache_ptr,
     void *paged_v_cache_ptr,
@@ -70,7 +81,21 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     void *qkv_ptr,
     void *output_ptr,
     void *lse = nullptr,
-    int kv_idx = 0) {
+    int kv_idx = 0,
+    // Attention sinks: NUM_QO_PER_KV learned logits, one per query head of
+    // this task's KV head. nullptr = no sinks.
+    void const *sink_ptr = nullptr,
+    // PreQ != AttnNoHook: the page table, the barriers and the first tile's
+    // rows of earlier positions are issued before pre_q() (they need no
+    // producer); q and the new tokens' rows after it
+    PreQ const &pre_q = PreQ{}) {
+  // Catches a template argument landing in the wrong slot at codegen time.
+  static_assert(ROTARY_DIM > 0 && ROTARY_DIM <= HEAD_DIM && ROTARY_DIM % 2 == 0,
+                "ROTARY_DIM must be even and in (0, HEAD_DIM]");
+  // Split-KV chunks would each need their own window bounds; GPT-OSS uses
+  // split KV only for full attention. Sinks belong in its merge.
+  static_assert(!PARTITION_KV || WINDOW_SIZE == 0,
+                "sliding window is only supported for non-split KV tasks");
   // Stride between consecutive pages of K or V.
   constexpr int PAGE_STRIDE =
       PAGE_STRIDE_ROWS > 0 ? PAGE_STRIDE_ROWS : PAGE_SIZE;
@@ -87,6 +112,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   constexpr int CP_CHUNK_SIZE = 16 / sizeof(T);
   constexpr int PRODUCER_WARPGROUP_SYNC_BARRIER_ID = 8;
   constexpr int CONSUMER_WARPGROUP_SYNC_BARRIER_ID = 9;
+  // RoPE syncs only its HEAD_DIM participating threads, so it needs a barrier
+  // of its own: sharing 9 lets the idle threads' 128-count arrivals release it.
+  constexpr int ROTARY_SYNC_BARRIER_ID = 10;
   // NOTE(Yu): we use m64n64k16 mma atom to compute matrix multiplication
   constexpr int MMA_ITERS_M = (MAX_TOKENS * NUM_QO_PER_KV + 63) / 64;
 
@@ -121,11 +149,15 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   int const finished_seq_len = global_seq_len - num_tokens;
   int kv_cache_offset = PARTITION_KV ? kv_idx * SEQ_LEN : 0;
 
-  // Load the paged KV indices into shared memory
+  // Load the paged KV indices into shared memory (16-B vectors when the
+  // request's first index is 16-B aligned: a later request of a packed table
+  // need not be)
   __shared__ __align__(16) int page_indices[MAX_PAGES_PER_REQUEST];
+  int const vec_end = first_page_pos % (16 / sizeof(int)) == 0
+                          ? num_pages - num_pages % (16 / sizeof(int))
+                          : 0; // the pages loaded as vectors
 #pragma unroll
-  for (int i = threadIdx.x; i < num_pages * sizeof(int) / 16;
-       i += NUM_THREADS) {
+  for (int i = threadIdx.x; i < vec_end * sizeof(int) / 16; i += NUM_THREADS) {
     __uint128_t const *src_ptr =
         reinterpret_cast<__uint128_t const *>(paged_kv_indices_buffer_ptr +
                                               first_page_pos) +
@@ -133,13 +165,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     __uint128_t *dst_ptr = reinterpret_cast<__uint128_t *>(page_indices) + i;
     *dst_ptr = *src_ptr;
   }
-  if (num_pages % (16 / sizeof(int)) != 0) {
-    int tail_pages = num_pages % (16 / sizeof(int));
-    int tail_offset = num_pages - tail_pages;
-    for (int i = threadIdx.x; i < tail_pages; i += NUM_THREADS) {
-      page_indices[tail_offset + i] =
-          paged_kv_indices_buffer_ptr[first_page_pos + tail_offset + i];
-    }
+  for (int i = vec_end + threadIdx.x; i < num_pages; i += NUM_THREADS) {
+    page_indices[i] = paged_kv_indices_buffer_ptr[first_page_pos + i];
   }
 
   __syncthreads();
@@ -268,7 +295,16 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
   KVSmem k_buffer_smem(s_k_buffer), v_buffer_smem(s_v_buffer);
 
   int const num_iters = (seq_len + KV_TILE_SIZE - 1) / KV_TILE_SIZE;
-  int curr_iter_len = min(seq_len, KV_TILE_SIZE);
+  // Under a sliding window the task starts at the tile holding the earliest
+  // query's window start. The runtime recycles the pages below it (their
+  // page-table slots read -1), so those tiles must not be loaded at all.
+  // Tiles keep their absolute index; barrier slots, phases and the buffer
+  // parity count from first_kv_iter.
+  int const first_kv_iter =
+      WINDOW_SIZE > 0
+          ? max(finished_seq_len - WINDOW_SIZE + 1, 0) / KV_TILE_SIZE
+          : 0;
+  int curr_iter_len = min(seq_len - first_kv_iter * KV_TILE_SIZE, KV_TILE_SIZE);
 
   // Currently assume that PAGE_SIZE is a multiplier of KV_TILE_SIZE
   // so that we access a single page in one iteration
@@ -291,6 +327,39 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     }
   }
   __syncthreads();
+
+  constexpr bool EARLY = !std::is_same_v<PreQ, AttnNoHook>;
+  __shared__ float s_sinks_early[EARLY ? NUM_QO_PER_KV : 1];
+  if constexpr (EARLY) {
+    // the first tile's rows of earlier positions (the KV cache: no producer),
+    // and the sinks
+    int const first_tile_offset_ =
+        kv_cache_offset + first_kv_iter * KV_TILE_SIZE;
+    if (warpgroup_id == NUM_WARPGROUPS - 1) {
+      int const page_idx_0 = page_indices[first_tile_offset_ / PAGE_SIZE];
+#pragma unroll
+      for (int chunk_idx = threadIdx.x - NUM_THREADS * CONSUMER_WARPGROUPS;
+           chunk_idx < KV_TILE_SIZE * HEAD_DIM / CP_CHUNK_SIZE;
+           chunk_idx += NUM_THREADS) {
+        int dst_row = chunk_idx / (HEAD_DIM / CP_CHUNK_SIZE);
+        int col = (chunk_idx % (HEAD_DIM / CP_CHUNK_SIZE)) * CP_CHUNK_SIZE;
+        if (dst_row < curr_iter_len &&
+            dst_row + first_tile_offset_ < global_seq_len - num_tokens) {
+          int page_offset = (dst_row + first_tile_offset_) % PAGE_SIZE;
+          int src_row = page_idx_0 * PAGE_STRIDE + page_offset;
+          load_smem(k_buffer_smem(dst_row, col),
+                    paged_k_cache_dmem(src_row, col));
+          load_smem(v_buffer_smem(dst_row, col),
+                    paged_v_cache_dmem(src_row, col));
+        }
+      }
+    }
+    if (!PARTITION_KV && sink_ptr != nullptr && threadIdx.x < NUM_QO_PER_KV) {
+      s_sinks_early[threadIdx.x] =
+          float(static_cast<T const *>(sink_ptr)[threadIdx.x]);
+    }
+    pre_q(); // (synchronizes the block)
+  }
 
   if (warpgroup_id == NUM_WARPGROUPS - 1) {
     // prefetch
@@ -316,7 +385,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 #endif
 
     // load k and v
-    int page_idx_0 = page_indices[kv_cache_offset / PAGE_SIZE];
+    int const first_tile_offset =
+        kv_cache_offset + first_kv_iter * KV_TILE_SIZE;
+    int page_idx_0 = page_indices[first_tile_offset / PAGE_SIZE];
 #pragma unroll
     for (int chunk_idx = threadIdx.x - NUM_THREADS * CONSUMER_WARPGROUPS;
          chunk_idx < KV_TILE_SIZE * HEAD_DIM / CP_CHUNK_SIZE;
@@ -326,13 +397,18 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       if (dst_row >= curr_iter_len) {
         // P @ V still reads the entire tile after masking P. Zero the tail:
         // a masked probability of zero does not suppress a stale NaN in V.
-        load_smem_with_predict(k_buffer_smem(dst_row, col), k_dmem(0, 0), false);
-        load_smem_with_predict(v_buffer_smem(dst_row, col), v_dmem(0, 0), false);
-      } else if (dst_row + kv_cache_offset < global_seq_len - num_tokens) {
+        load_smem_with_predict(
+            k_buffer_smem(dst_row, col), k_dmem(0, 0), false);
+        load_smem_with_predict(
+            v_buffer_smem(dst_row, col), v_dmem(0, 0), false);
+      } else if (dst_row + first_tile_offset < global_seq_len - num_tokens) {
+        if constexpr (EARLY) {
+          continue; // issued before pre_q()
+        }
         // load from KV Cache
         // int page_idx = page_indices[(dst_row + cp_finished_seq_len) /
         // PAGE_SIZE];
-        int page_offset = (dst_row + kv_cache_offset) % PAGE_SIZE;
+        int page_offset = (dst_row + first_tile_offset) % PAGE_SIZE;
         int src_row = page_idx_0 * PAGE_STRIDE + page_offset;
         load_smem(k_buffer_smem(dst_row, col),
                   paged_k_cache_dmem(src_row, col));
@@ -340,7 +416,8 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                   paged_v_cache_dmem(src_row, col));
       } else {
         // load from QKV
-        int src_row = dst_row + kv_cache_offset - (global_seq_len - num_tokens);
+        int src_row =
+            dst_row + first_tile_offset - (global_seq_len - num_tokens);
         load_smem(k_buffer_smem(dst_row, col), k_dmem(src_row, col));
         load_smem(v_buffer_smem(dst_row, col), v_dmem(src_row, col));
       }
@@ -358,9 +435,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     }
 
     // start loading next tile in kv smem
-    for (int iter = 0; iter < num_iters - 1; iter++) {
-      int phase = ((iter + 1) / Kstages) % 2;
-      int slot = (iter + 1) % Kstages;
+    for (int iter = first_kv_iter; iter < num_iters - 1; iter++) {
+      int phase = ((iter + 1 - first_kv_iter) / Kstages) % 2;
+      int slot = (iter + 1 - first_kv_iter) % Kstages;
 
       wait(compute_done[slot], phase ^ 1);
 
@@ -368,7 +445,9 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           min(seq_len - (iter + 1) * KV_TILE_SIZE, KV_TILE_SIZE);
 
       if (next_iter_len > 0) {
-        int page_idx = page_indices[(iter + 1) * KV_TILE_SIZE / PAGE_SIZE];
+        int page_idx =
+            page_indices[((iter + 1) * KV_TILE_SIZE + kv_cache_offset) /
+                         PAGE_SIZE];
 #pragma unroll
         for (int chunk_idx = threadIdx.x - NUM_THREADS * CONSUMER_WARPGROUPS;
              chunk_idx < KV_TILE_SIZE * HEAD_DIM / CP_CHUNK_SIZE;
@@ -379,7 +458,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
             load_smem_with_predict(k_smem(dst_row, col), k_dmem(0, 0), false);
             load_smem_with_predict(v_smem(dst_row, col), v_dmem(0, 0), false);
           } else if (dst_row + (iter + 1) * KV_TILE_SIZE + kv_cache_offset <
-              global_seq_len - num_tokens) {
+                     global_seq_len - num_tokens) {
             // load from KV Cache
             // int page_idx =
             //    page_indices[(dst_row + cp_finished_seq_len) / PAGE_SIZE];
@@ -410,7 +489,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       }
 
       // rotate the buffers
-      if ((iter & 0x1) == 0) {
+      if (((iter - first_kv_iter) & 0x1) == 0) {
         k_smem.set_ptr(s_k_buffer);
         k_buffer_smem.set_ptr(s_k);
         v_smem.set_ptr(s_v_buffer);
@@ -454,13 +533,13 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
     wait(q_barrier[0], 0);
 #endif
 
-    for (int iter = 0; iter < num_iters; iter++) {
-      int phase = (iter / Kstages) % 2;
-      int slot = iter % Kstages;
+    for (int iter = first_kv_iter; iter < num_iters; iter++) {
+      int phase = ((iter - first_kv_iter) / Kstages) % 2;
+      int slot = (iter - first_kv_iter) % Kstages;
       wait(k_barrier[slot], phase);
       wait(v_barrier[slot], phase);
       // rotate the buffers
-      if ((iter & 0x1) == 0) {
+      if (((iter - first_kv_iter) & 0x1) == 0) {
         k_smem.set_ptr(s_k_buffer);
         k_buffer_smem.set_ptr(s_k);
         v_smem.set_ptr(s_v_buffer);
@@ -482,7 +561,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
 
       if (qk_norm) {
         // Q norm
-        if (iter == 0) {
+        if (iter == first_kv_iter) {
           rms_norm_hopper<T,
                           QOSmem,
                           NUM_QO_PER_KV,
@@ -524,9 +603,26 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                   (first_kv_token_to_process + kv_cache_offset) * ROTARY_DIM);
         }
       } else if (rope) {
-        if (iter == 0) {
+        if (iter == first_kv_iter) {
 #pragma unroll
           for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
+            if constexpr (EARLY) {
+              rotary_embedding_hopper_heads<T,
+                                            QOSmem,
+                                            NUM_QO_PER_KV,
+                                            HEAD_DIM,
+                                            THREADS_PER_WARPGROUP *
+                                                CONSUMER_WARPGROUPS,
+                                            ROTARY_SYNC_BARRIER_ID,
+                                            ROTARY_DIM>(
+                  q_smem,
+                  static_cast<T const *>(cos_ptr) +
+                      (token_idx + global_seq_len - num_tokens) * ROTARY_DIM,
+                  static_cast<T const *>(sin_ptr) +
+                      (token_idx + global_seq_len - num_tokens) * ROTARY_DIM,
+                  token_idx);
+              continue;
+            }
             // q rope
             rotary_embedding_hopper<T,
                                     QOSmem,
@@ -534,7 +630,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                                     1,
                                     HEAD_DIM,
                                     THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                                    ROTARY_SYNC_BARRIER_ID,
                                     ROTARY_DIM>(
                 q_smem,
                 static_cast<T const *>(cos_ptr) +
@@ -547,6 +643,27 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         if (kv_tokens_to_process > 0) {
           for (int token_idx = 0; token_idx < kv_tokens_to_process;
                token_idx++) {
+            if constexpr (EARLY) {
+              rotary_embedding_hopper_heads<T,
+                                            KVSmem,
+                                            1,
+                                            HEAD_DIM,
+                                            THREADS_PER_WARPGROUP *
+                                                CONSUMER_WARPGROUPS,
+                                            ROTARY_SYNC_BARRIER_ID,
+                                            ROTARY_DIM>(
+                  k_smem,
+                  static_cast<T const *>(cos_ptr) +
+                      (token_idx + first_kv_token_to_process +
+                       kv_cache_offset) *
+                          ROTARY_DIM,
+                  static_cast<T const *>(sin_ptr) +
+                      (token_idx + first_kv_token_to_process +
+                       kv_cache_offset) *
+                          ROTARY_DIM,
+                  token_idx + curr_iter_len - kv_tokens_to_process);
+              continue;
+            }
             // k rope
             rotary_embedding_hopper<T,
                                     KVSmem,
@@ -554,7 +671,7 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                                     1,
                                     HEAD_DIM,
                                     THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS,
-                                    CONSUMER_WARPGROUP_SYNC_BARRIER_ID,
+                                    ROTARY_SYNC_BARRIER_ID,
                                     ROTARY_DIM>(
                 k_smem,
                 static_cast<T const *>(cos_ptr) +
@@ -568,9 +685,16 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
         }
       }
 
+      // RoPE runs on HEAD_DIM threads, the copy below and the MMAs on all
+      // of them; wait for the rotated rows.
+      wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
+          CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
+
       // update the KV Cache
       if (kv_tokens_to_process > 0) {
-        int page_idx = page_indices[first_kv_token_to_process / PAGE_SIZE];
+        int page_idx =
+            page_indices[(first_kv_token_to_process + kv_cache_offset) /
+                         PAGE_SIZE];
         for (int elem_idx = threadIdx.x;
              elem_idx < kv_tokens_to_process * HEAD_DIM;
              elem_idx += NUM_THREADS) {
@@ -627,9 +751,11 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
           int col = ((lane_idx & 0x3) << 1) + ((frag_idx >> 2) << 3) +
                     (frag_idx & 0x1);
           int token_idx = row / NUM_QO_PER_KV;
+          int key_pos = col + iter * KV_TILE_SIZE;
+          int query_pos = token_idx + seq_len - num_tokens;
           bool is_valid =
-              (row < num_tokens * NUM_QO_PER_KV) &&
-              (col + iter * KV_TILE_SIZE <= token_idx + seq_len - num_tokens);
+              (row < num_tokens * NUM_QO_PER_KV) && (key_pos <= query_pos) &&
+              (WINDOW_SIZE <= 0 || key_pos > query_pos - WINDOW_SIZE);
           x_frag_f[m][frag_idx] = is_valid ? x_frag_f[m][frag_idx] : -inf;
           m_local[m][(frag_idx & 0x3) >> 1] =
               max(m_local[m][(frag_idx & 0x3) >> 1], x_frag_f[m][frag_idx]);
@@ -647,10 +773,16 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
       float rescale[MMA_ITERS_M][2];
 #pragma unroll
       for (int m = 0; m < MMA_ITERS_M; m++) {
+        // A row that has seen no key yet (a window can mask a whole tile)
+        // keeps m = -inf, and exp2(-inf - -inf) would be NaN.
         rescale[m][0] =
-            ptx_exp2(m_prev[m][0] * sm_scale - m_local[m][0] * sm_scale);
+            m_local[m][0] == -inf
+                ? 1.f
+                : ptx_exp2(m_prev[m][0] * sm_scale - m_local[m][0] * sm_scale);
         rescale[m][1] =
-            ptx_exp2(m_prev[m][1] * sm_scale - m_local[m][1] * sm_scale);
+            m_local[m][1] == -inf
+                ? 1.f
+                : ptx_exp2(m_prev[m][1] * sm_scale - m_local[m][1] * sm_scale);
       }
 
       // update d: get partial sum
@@ -772,12 +904,26 @@ __device__ __forceinline__ void multitoken_paged_attention_hopper_impl(
                             + mma_iter_n * 32 // mma iter n
                             + frag_idx];
 
+      // An attention sink is an extra softmax logit that carries no value,
+      // so it enters only the denominator. m_global is in log2 units (see
+      // sm_scale), the sink in natural ones.
+      if constexpr (!PARTITION_KV) {
+        if (sink_ptr != nullptr) {
+          float sink;
+          if constexpr (EARLY) {
+            sink = s_sinks_early[row % NUM_QO_PER_KV];
+          } else {
+            sink = float(static_cast<T const *>(sink_ptr)[row % NUM_QO_PER_KV]);
+          }
+          d_global += ptx_exp2(sink * log2e - m_global);
+        }
+      }
       o_smem.at(row, col) = bfloat16(o_global / d_global);
     }
     wg_sync<THREADS_PER_WARPGROUP * CONSUMER_WARPGROUPS>(
         CONSUMER_WARPGROUP_SYNC_BARRIER_ID);
 
-    async_proxy_fence();
+    tma::async_proxy_fence();
 
     // store the output
 #pragma unroll
