@@ -18,16 +18,13 @@ namespace kernel {
 
 namespace {
 
-// Compute the row-major contiguous byte stride at dimension `dim`, i.e. the
-// number of bytes you advance to move by one element along that axis.
-// Equals product(dim[i] for i > dim) * dtype_size.
-inline int64_t row_major_byte_stride(DTensor const &t, int dim) {
+// Byte stride of `t` at dimension `dim`, i.e. the number of bytes you advance
+// to move by one element along that axis. Uses t.stride rather than t.dim so
+// that windows of a non-contiguous tensor (a narrow/split view, or an input
+// attached with padded rows) land at the right place in the root storage.
+inline int64_t byte_stride(DTensor const &t, int dim) {
   size_t dtype_size = mirage::type::get_datatype_size(t.data_type);
-  int64_t stride = static_cast<int64_t>(dtype_size);
-  for (int i = t.num_dims - 1; i > dim; i--) {
-    stride *= t.dim[i];
-  }
-  return stride;
+  return t.stride[dim] * static_cast<int64_t>(dtype_size);
 }
 
 // Decide the view's per-element strides. For views with the SAME rank as
@@ -128,8 +125,7 @@ DTensor Graph::narrow(DTensor const &input, int dim, int start, int length) {
   }
   std::vector<int> new_dims(input.dim, input.dim + input.num_dims);
   new_dims[dim] = length;
-  int64_t offset =
-      static_cast<int64_t>(start) * row_major_byte_stride(input, dim);
+  int64_t offset = static_cast<int64_t>(start) * byte_stride(input, dim);
   return make_view(input, new_dims, offset);
 }
 
@@ -158,7 +154,7 @@ std::vector<DTensor>
   }
   std::vector<DTensor> outputs;
   outputs.reserve(sizes.size());
-  int64_t stride_bytes = row_major_byte_stride(input, dim);
+  int64_t stride_bytes = byte_stride(input, dim);
   int cursor = 0;
   for (int s : sizes) {
     std::vector<int> new_dims(input.dim, input.dim + input.num_dims);
