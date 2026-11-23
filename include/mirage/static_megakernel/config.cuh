@@ -65,10 +65,14 @@ __host__ __device__ constexpr int acc_round(int tick) {
 // ---- pipeline depths ----
 // stages of the weight ring (6 do not fit in shared memory next to
 // moe_experts' shared tables; T = 32: 4, T = 64: 3, the activation's T x 256 B
-// a stage)
+// a stage), or defined by the generated layer (StaticMegakernel.ring_stages)
+#ifdef STATIC_RING_STAGES
+constexpr int SMAX = STATIC_RING_STAGES;
+#else
 constexpr int SMAX = T <= 16   ? 5
                      : T == 32 ? 4
                                : 3; // static_megakernel.ring_stages
+#endif
 constexpr int W2QD = 4; // entries in moe_experts' shared-memory copy (loader ->
                         // issuers / epilogue; runtime.cuh Rt)
 

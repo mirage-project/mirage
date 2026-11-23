@@ -8,7 +8,10 @@
 //            (group_quant_tile_task)
 //   scale    for each token, s = max(amax of the 128 values, 1e-10) / 448.
 //            Each value becomes e4m3(value / s). SGLang and vLLM use the same
-//            method (per_token_group_quant_fp8, group size 128).
+//            method (per_token_group_quant_fp8, group size 128). UE8M0
+//            (params[1]): s rounded up to a power of two (group_scale), as
+//            SGLang's scale_ue8m0 for DeepGEMM on Blackwell; the scales keep
+//            their fp32 layout.
 //   output   this GPU's copy in the exchange region: z_q [T][L] e4m3, then the
 //            scales [L / 128][T] fp32 (zq32_bytes)
 // Two readers use the output:
@@ -27,8 +30,24 @@ __host__ __device__ constexpr size_t zq32_bytes(int L) {
   return (size_t)T * L + (size_t)(L / 128) * T * 4;
 }
 
+// the scale of a 128-value group with amax `amax`: max(amax, 1e-10) / 448, or
+// (UE8M0) the power of two at or above max(amax, 1e-10) / 448 (DeepGEMM's
+// ceil_to_ue8m0 of the quotient)
+template <bool UE8M0>
+__device__ __forceinline__ float group_scale(float amax) {
+  if constexpr (UE8M0) {
+    uint32_t const b =
+        __float_as_uint(__fdiv_rn(fmaxf(amax, 1.0e-10f), 448.0f));
+    int const e = min(
+        max((int)((b >> 23) & 0xFF) + ((b & 0x7FFFFF) != 0 ? 1 : 0), 1), 254);
+    return __uint_as_float((uint32_t)e << 23);
+  } else {
+    return fmaxf(amax, 1.0e-10f) * (1.0f / 448.0f);
+  }
+}
+
 // ZOFF: the output's offset in the exchange region
-template <size_t ZOFF, int L>
+template <size_t ZOFF, int L, bool UE8M0>
 __device__ __forceinline__ void group_quant_task(G const &g,
                                                  __nv_bfloat16 const *x,
                                                  uint32_t *done_cnt,
@@ -81,7 +100,7 @@ __device__ __forceinline__ void group_quant_task(G const &g,
 #pragma unroll
   for (int i = 0; i < TPW; i++) {
     int const t = TPW * warp + i;
-    float const s = fmaxf(amax[i], 1.0e-10f) * (1.0f / 448.0f);
+    float const s = group_scale<UE8M0>(amax[i]);
     float const r = __frcp_rn(s);
     uint32_t const q = (uint32_t)cvt_e4m3_nv(gq_div(a[i].x, s, r)) |
                        ((uint32_t)cvt_e4m3_nv(gq_div(a[i].y, s, r)) << 8) |
@@ -122,7 +141,7 @@ __device__ __forceinline__ void group_quant_task(G const &g,
 // TT), TT = T / NZ a multiple of 8, the 8 warps TT / 8 tokens each. At T = 64 a
 // task of all tokens quantizes 8 tokens a warp on L / 128 SMs while the others
 // idle (the DSA layer's v, 32 tasks: 6.9 us after its last input; 4 tiles: 2.4)
-template <size_t ZOFF, int L, int NZ>
+template <size_t ZOFF, int L, int NZ, bool UE8M0>
 __device__ __forceinline__ void group_quant_tile_task(G const &g,
                                                       __nv_bfloat16 const *x,
                                                       uint32_t *done_cnt,
@@ -169,7 +188,7 @@ __device__ __forceinline__ void group_quant_tile_task(G const &g,
 #pragma unroll
   for (int i = 0; i < TPW; i++) {
     int const t = TPW * warp + i; // (of the tile)
-    float const s = fmaxf(amax[i], 1.0e-10f) * (1.0f / 448.0f);
+    float const s = group_scale<UE8M0>(amax[i]);
     float const r = __frcp_rn(s);
     uint32_t const q = (uint32_t)cvt_e4m3_nv(gq_div(a[i].x, s, r)) |
                        ((uint32_t)cvt_e4m3_nv(gq_div(a[i].y, s, r)) << 8) |
@@ -231,14 +250,15 @@ __device__ __forceinline__ void run_group_quant(Maps const &,
     }
     __syncthreads();
   }
+  constexpr bool UE8M0 = param_or<PARAMS, 1, 0>() != 0;
   if constexpr (SELF::y == 1) {
-    group_quant_task<exchange_offset[SELF::buf], L>(
+    group_quant_task<exchange_offset[SELF::buf], L, UE8M0>(
         g,
         buf_at<__nv_bfloat16 const>(g, X::x > 0 ? X::buf : XS),
         cnt_now(g) + SELF::counter,
         tk.x);
   } else {
-    group_quant_tile_task<exchange_offset[SELF::buf], L, SELF::y>(
+    group_quant_tile_task<exchange_offset[SELF::buf], L, SELF::y, UE8M0>(
         g,
         buf_at<__nv_bfloat16 const>(g, X::x > 0 ? X::buf : XS),
         cnt_now(g) + SELF::counter,

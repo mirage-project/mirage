@@ -84,7 +84,7 @@ def check_deadlock_free(all_tasks: List[dict], queues: List[List[int]], groups: 
 def check_twoshot_deadlock_free(gpus: List[tuple], kinds: Dict[int, str]) -> None:
     """Raise unless the GPUs' lists together can run with the cross-GPU waits of STATIC_AR_TWOSHOT (core.cuh).
     gpus: per GPU (all_tasks, queues, groups) as check_deadlock_free takes them. kinds: graph_idx -> "send" (allreduce_send)
-    or "twoshot" (an hc_post, hc_post_mix or sum_gpus reading an allreduce_send node's output).
+    or "twoshot" (an hc_post, hc_post_mix, residual_add or sum_gpus reading an allreduce_send node's output).
     The waits, per GPU g, task t (the same task on GPU o: the task of the same node and grid position there):
       - t waits for its deps and for the task before it on its SM (as check_deadlock_free); a dep of an allreduce_send
         node: also for that send task on every GPU (the sums of every GPU land on g)
@@ -185,28 +185,32 @@ TIME_SLOTS = STAGE_SLOT + 2
 
 
 def config_checks(used: List[str], tokens: int = 8, max_bufs: Optional[int] = None,
-                  max_counter_lines: Optional[int] = None) -> List[str]:
+                  max_counter_lines: Optional[int] = None, stages: Optional[int] = None) -> List[str]:
     """static_asserts that the Python copies of the kernel's sizes (here and in static_megakernel.py) are config.cuh's and the
     used task types'."""
-    from .static_megakernel import (HC_MIX_STRIDE, MAX_BUFS, MAX_MAPS, MAX_SUM_PARTS, NODE_COUNTER_LINES, ring_stages,
-                                    SF_CHUNK)
+    from .static_megakernel import (HC_MIX_STRIDE, MAX_BUFS, MAX_MAPS, MAX_SUM_PARTS, MOE_PROF_WORDS, MOE_SPLIT_SLOTS,
+                                    NODE_COUNTER_LINES, ring_stages, SF_CHUNK)
     checks = [f"static_mk::MAX_TASKS_PER_SM == {MAX_TASKS_PER_SM}", f"static_mk::MAX_BUFS == {max_bufs or MAX_BUFS}",
               f"static_mk::MAX_MAPS == {MAX_MAPS}", f"static_mk::NODE_COUNTER_LINES == {max_counter_lines or NODE_COUNTER_LINES}",
-              f"static_mk::SMAX == {ring_stages(tokens)}", f"static_mk::SF_CHUNK == {SF_CHUNK}"]
+              f"static_mk::SMAX == {ring_stages(tokens, stages)}", f"static_mk::SF_CHUNK == {SF_CHUNK}"]
     if "sum_send" in used:
         checks.append(f"static_mk::MAX_SUM_PARTS == {MAX_SUM_PARTS}")
     if "hc_pre" in used:
         checks.append(f"static_mk::HC_MIX_STRIDE == {HC_MIX_STRIDE}")
+    if "scaled_moe_experts" in used:
+        checks += [f"static_mk::scaled_moe::MOE_SPLIT_SLOTS == {MOE_SPLIT_SLOTS}",
+                   f"static_mk::scaled_moe::MOE_PROF_WORDS == {MOE_PROF_WORDS}"]
     return [f"static_assert({' && '.join(checks)}, \"the Python copies of the kernel's sizes (static_schedule.py, "
             'static_megakernel.py)");']
 
 
 def ar_twoshot(node_names, tokens: int, num_gpus: int) -> bool:
-    """The all-reduce of allreduce_send -> hc_post / hc_post_mix / sum_gpus as a two-shot by token (core.cuh
-    STATIC_AR_TWOSHOT, defined by header_code): a graph of T 64 on 4 GPUs (GLM-5.3-Flash's TP4 layers at bs 64) with an
-    allreduce_send and without sum_rmsnorm (it reads only the one-shot layout, e.g. Kimi K3's MoE)."""
+    """The all-reduce of allreduce_send -> hc_post / hc_post_mix / residual_add / sum_gpus as a two-shot by token (core.cuh
+    STATIC_AR_TWOSHOT, defined by header_code): a graph of T 64 on 4 GPUs (GLM-5.3-Flash's TP4 layers at bs 64) or on 8
+    GPUs (GLM-5.3's TP8 layers at bs 64) with an allreduce_send and without sum_rmsnorm (it reads only the one-shot
+    layout, e.g. Kimi K3's MoE)."""
     names = set(node_names)
-    return tokens == 64 and num_gpus == 4 and "allreduce_send" in names and "sum_rmsnorm" not in names
+    return tokens == 64 and num_gpus in (4, 8) and "allreduce_send" in names and "sum_rmsnorm" not in names
 
 
 def reset_sms(schedule: dict) -> List[int]:
@@ -235,7 +239,10 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
             if getattr(pk, "max_bufs", None) else []) + (
             [f"#define STATIC_NODE_COUNTER_LINES {pk.max_counter_lines}   // counter lines (config.cuh NODE_COUNTER_LINES; "
              "StaticMegakernel.max_counter_lines)", ""]
-            if getattr(pk, "max_counter_lines", None) else []) + [
+            if getattr(pk, "max_counter_lines", None) else []) + (
+            [f"#define STATIC_RING_STAGES {pk.ring_stages}   // the weight ring's stages (config.cuh SMAX; "
+             "StaticMegakernel.ring_stages)", ""]
+            if getattr(pk, "ring_stages", None) else []) + [
             "// the exchange region's layout (static_megakernel.py exchange_layout): one set's bytes, the start barrier's slots, per",
             "// buffer slot its offset and bytes (an exchange buffer; else 0)",
             f"#define STATIC_EXCHANGE_SET {set_bytes}", f"#define STATIC_EXCHANGE_HELLO {hello}",
@@ -246,6 +253,12 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
             *[f"#define STATIC_RESET_SMS_MASK{w} {m}ull" for w, m in enumerate(mask)], "",
             *([f"#define STATIC_L2_PREFETCH {len(pk._prefetch)}   // the weights kernel_begin prefetches into L2 "
                "(StaticMegakernel.l2_prefetch_weights)", ""] if getattr(pk, "_prefetch", None) else []),
+            # T = 64 with a GLM-5.3 indexer (a dsa_index_topk node of unit 1; GLM-5.3-Flash's is unit 4):
+            # KernelLocals.idx_short (core.cuh) for dsa_common.cuh's ATTN64_IDXSKIP; other layers keep KernelLocals as
+            # it was
+            *(["#define STATIC_DSA_IDX_SHORT 1   // KernelLocals.idx_short (dsa_common.cuh idx_all_short)", ""]
+              if pk.tokens == 64 and any(n["name"] == "dsa_index_topk" and n["params"][3] == 1 for n in nodes.values())
+              else []),
             "struct StaticTask { int node, x, y, z; };   // one entry of an SM's list: the graph node and the task's grid position",
             "// a node: its grid, its first counter (-1: none) and its output buffer slot (-1: none); as an input's producer also its",
             "// params (v, then a 0)",
@@ -265,7 +278,8 @@ def header_code(pk, nodes: Dict[str, dict], num_gpus: int, num_lists: int, profi
             "struct StaticContext { int num_gpus = 0, num_lists = 0; std::vector<StaticGpuView> gpus; };",
             '#include "mirage/static_megakernel/core.cuh"'] + \
         [f'#include "mirage/static_megakernel/tasks/{name}.cuh"' for name in used] + \
-        config_checks(used, pk.tokens, getattr(pk, "max_bufs", None), getattr(pk, "max_counter_lines", None)) + [""]
+        config_checks(used, pk.tokens, getattr(pk, "max_bufs", None), getattr(pk, "max_counter_lines", None),
+                      getattr(pk, "ring_stages", None)) + [""]
 
 
 def task_tables(schedules: List[dict]) -> List[str]:

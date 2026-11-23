@@ -2,7 +2,9 @@
 
 The checkpoint stores e4m3 expert weights and fp32 scales for 128 x 128 blocks.
 The loader selects a TP shard and reorders its weights into pieces.
-The e4m3 bytes and fp32 scale values do not change.
+The e4m3 bytes and fp32 scale values do not change (layer_tensors(w2_ue8m0=True) / (w13_ue8m0=True): the down / the
+gate and up weights requantized to power-of-two scales, SGLang's DeepGEMM requantization:
+fp8_fp32scale_weights.requant_ue8m0).
 scaled_moe_experts and scaled_gemm_tile read these pieces.
 mirage.mpk.fp8_fp32scale_weights defines the piece layout.
 The tensors are:
@@ -20,6 +22,7 @@ download_layer locates the local snapshot or downloads the required shards.
 check_config checks the fields required by the kernel implementation.
 checkpoint_reader returns a function that reads a tensor by its checkpoint name.
 """
+import contextlib
 import json
 import os
 
@@ -88,26 +91,44 @@ def checkpoint_reader(snapshot: str):
     return read
 
 
-def layer_tensors(read, layer: int, tp: int = 1, rank: int = 0, num_experts: int = 256, device="cpu") -> dict:
+def layer_tensors(read, layer: int, tp: int = 1, rank: int = 0, num_experts: int = 256, device="cpu",
+                  w2_ue8m0: bool = False, w13_ue8m0: bool = False) -> dict:
     """Load the router, correction bias, and expert weights for shard rank of tp.
 
     Select gate/up rows and down columns from the expert intermediate dimension.
     The module docstring defines the returned tensor names and layouts.
+    w2_ue8m0: every expert's down shard (the shared expert's too) requantized to power-of-two scales
+    (pack_w2(ue8m0=True)), for scaled_moe_experts_layer(w2_ue8m0=True).
+    w13_ue8m0: every expert's gate and up shards (the shared expert's too) requantized the same way
+    (pack_w13(ue8m0=True)), for scaled_moe_experts_layer(w13_ue8m0=True).
     """
     p = f"model.layers.{layer}.mlp."
     w = {"router": read(p + "gate.weight").to(device), "bias": read(p + "gate.e_score_correction_bias").float().to(device)}
     banks = {k: [] for k in ("w13", "w13_sf", "w2", "w2_sf")}
-    for expert in [f"experts.{e}." for e in range(num_experts)] + ["shared_experts."]:
-        get = lambda proj: (read(p + expert + proj + ".weight").view(torch.uint8).to(device),
-                            read(p + expert + proj + ".weight_scale_inv").float().to(device))
-        (gate, gs), (up, us), (down, ds) = get("gate_proj"), get("up_proj"), get("down_proj")
-        assert gate.shape[0] % (128 * tp) == 0, f"intermediate {gate.shape[0]}: not whole 128-row blocks for each of {tp} GPUs"
-        IR = gate.shape[0] // tp
-        rows, blocks = slice(rank * IR, rank * IR + IR), slice(rank * IR // 128, (rank * IR + IR) // 128)
-        for k, v in zip(("w13", "w13_sf"), pack_w13(gate[rows], gs[blocks], up[rows], us[blocks])):
-            banks[k].append(v)
-        for k, v in zip(("w2", "w2_sf"), pack_w2(down[:, rows].contiguous(), ds[:, blocks].contiguous())):
-            banks[k].append(v)
+    part = getattr(read, "part", None)   # rows / columns only (the reader's part: just the shard's bytes from the file)
+    keep_open = getattr(read, "keep_open", contextlib.nullcontext)   # one open per file for the layer's experts
+    with keep_open():
+        for expert in [f"experts.{e}." for e in range(num_experts)] + ["shared_experts."]:
+            q = p + expert
+            if part is None:
+                full = lambda name, cut: read(name)[cut[0]] if cut[1] is None else read(name)[:, cut[1]]
+            else:
+                full = lambda name, cut: part(name, rows=cut[0]) if cut[1] is None else part(name, cols=cut[1])
+            s_gate = read(q + "gate_proj.weight_scale_inv")   # [I / 128, H / 128]: small, read whole
+            I = s_gate.shape[0] * 128
+            assert I % (128 * tp) == 0, f"intermediate {I}: not whole 128-row blocks for each of {tp} GPUs"
+            IR = I // tp
+            rows, blocks = slice(rank * IR, rank * IR + IR), slice(rank * IR // 128, (rank * IR + IR) // 128)
+            g8 = lambda n: full(q + n + "_proj.weight", (rows, None)).view(torch.uint8).to(device)
+            gate, up = g8("gate"), g8("up")
+            gs = s_gate[blocks].float().to(device)
+            us = read(q + "up_proj.weight_scale_inv")[blocks].float().to(device)
+            down = full(q + "down_proj.weight", (None, rows)).view(torch.uint8).contiguous().to(device)
+            ds = read(q + "down_proj.weight_scale_inv")[:, blocks].float().contiguous().to(device)
+            for k, v in zip(("w13", "w13_sf"), pack_w13(gate, gs, up, us, ue8m0=w13_ue8m0)):
+                banks[k].append(v)
+            for k, v in zip(("w2", "w2_sf"), pack_w2(down, ds, ue8m0=w2_ue8m0)):
+                banks[k].append(v)
     H, IR = w["router"].shape[1], banks["w2"][0].shape[1] * 128
     last = {k: v.pop() for k, v in banks.items()}   # the last entry is the shared expert
     w.update(sgu=last["w13"].view(2 * IR, H), sgu_sf=last["w13_sf"], sd=last["w2"].view(H, IR), sd_sf=last["w2_sf"])

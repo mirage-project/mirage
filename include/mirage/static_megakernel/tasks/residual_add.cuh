@@ -7,6 +7,8 @@
 //      (GLM-5.3: o = the routed sum, S = the shared expert's sum)
 // A sublayer with one sum has no o (ONE). Then y = bf16(S + prefix). In the
 // DSA attention layer, S is the attention output.
+// S (and o) may instead be allreduce_send outputs: the node adds them over the
+// GPUs itself (the work of the sum_gpus nodes it replaces), with the same y.
 #pragma once
 #include "../core.cuh"
 #include "sum_send.cuh" // the layout of its input o
@@ -16,13 +18,17 @@ namespace static_mk {
 // residual_add task x of NSLICE (ssum: sum_gpus's buffer). OSUM false: o is
 // at OOFF in the exchange region (sum_send). OSUM true: o is osum, a sum_gpus
 // buffer. With ONE, there is no o, and osum, OOFF and OSUM are not used.
+// h32 (a counted node's scratch, else nullptr): y before its bf16 rounding,
+// fp32 [T][H] (row_rmsnorm norms it, as SGLang's fused add + RMSNorm norms the
+// sum)
 template <int NSLICE, size_t OOFF, int H, bool OSUM, bool ONE = false>
 __device__ __forceinline__ void residual_add_task(G const &g,
                                                   __nv_bfloat16 *ssum,
                                                   __nv_bfloat16 *osum,
                                                   __nv_bfloat16 const *prefix,
                                                   __nv_bfloat16 *y,
-                                                  int x) {
+                                                  int x,
+                                                  float *h32 = nullptr) {
   constexpr size_t O_RANK = o_rank_bytes(H);
   int const nv = T * H / 8, lo = (int)((long long)nv * x / NSLICE),
             hi = (int)((long long)nv * (x + 1) / NSLICE);
@@ -39,8 +45,8 @@ __device__ __forceinline__ void residual_add_task(G const &g,
     unsigned char const *op = nullptr;
     uint4 ou = make_uint4(0u, 0u, 0u, 0u);
     if constexpr (!ONE) {
-      op = OSUM ? reinterpret_cast<unsigned char const *>(osum +
-                                                          (size_t)t * H + c)
+      op = OSUM ? reinterpret_cast<unsigned char const *>(osum + (size_t)t * H +
+                                                          c)
                 : g.rv + OOFF + (size_t)r * O_RANK +
                       (size_t)t * (H / GPUS) * 2 + cc * 2 + rg_set();
       ou = poll16(op);
@@ -54,14 +60,21 @@ __device__ __forceinline__ void residual_add_task(G const &g,
     __nv_bfloat16 const *pb = reinterpret_cast<__nv_bfloat16 const *>(&pu);
     uint4 yu;
     __nv_bfloat16 *yb = reinterpret_cast<__nv_bfloat16 *>(&yu);
+    float h[8];
     for (int k = 0; k < 8; k++) {
       float a = __bfloat162float(sb[k]);
       if constexpr (!ONE) {
         a = __bfloat162float(__float2bfloat16(__bfloat162float(ob[k]) + a));
       }
-      yb[k] = __float2bfloat16(a + __bfloat162float(pb[k]));
+      h[k] = a + __bfloat162float(pb[k]);
+      yb[k] = __float2bfloat16(h[k]);
     }
     *reinterpret_cast<uint4 *>(y + (size_t)t * H + c) = yu;
+    if (h32 != nullptr) {
+      float4 *const hp = reinterpret_cast<float4 *>(h32 + (size_t)t * H + c);
+      hp[0] = make_float4(h[0], h[1], h[2], h[3]);
+      hp[1] = make_float4(h[4], h[5], h[6], h[7]);
+    }
     if constexpr (REARM) { // the one reader of these 16 B of S (and of o);
                            // after y is written
       rearm16(sp);
@@ -73,9 +86,171 @@ __device__ __forceinline__ void residual_add_task(G const &g,
   __syncthreads();
 }
 
-// residual_add task x: slice x of SELF::x of y; SSUM: the addend's node
+#ifdef STATIC_AR_TWOSHOT
+// (STATIC_AR_TWOSHOT, core.cuh) residual_land_task's slice [lo, hi) of the
+// vectors in token-interleaved order (ar_twoshot_vec). 1. the vectors of this
+// GPU's tokens in it: the owner landing's 8 slots of S (and of o) added in GPU
+// order (allreduce_land_bf16, as the one-shot), bf16(sum) multicast into the
+// gathered rows of every GPU, the slots re-armed. 2. every vector of it: S
+// (and o) polled from the gathered rows (one slot, this launch's set), then
+// as the one-shot; the gathered vector re-armed after y is written. Task x of
+// a GPU waits in 2 only for the owners' tasks x (in 1): no wait for a later
+// task of its own GPU
+template <size_t SOFF, size_t OOFF, int H, bool ONE>
+__device__ __forceinline__ void residual_land_twoshot(G const &g,
+                                                      __nv_bfloat16 const *prefix,
+                                                      __nv_bfloat16 *y,
+                                                      int lo,
+                                                      int hi,
+                                                      float *h32) {
+  constexpr int C8 = H / 8;
+  constexpr size_t AR = ar_rank<H>(), GOFF = ar_g_off<H>();
+  static_assert(GOFF + (size_t)T * H * 2 <= (size_t)GPUS * T * H * 2,
+                "STATIC_AR_TWOSHOT: the landing and the gathered rows fit "
+                "in the allreduce_send buffer");
+  unsigned char const *const sl = g.rv + SOFF + rg_set(),
+                             *const ol = g.rv + OOFF + rg_set();
+  int const jlo = ar_twoshot_owned_below(lo, g.rank),
+            jhi = ar_twoshot_owned_below(hi, g.rank);
+  for (int j = jlo + threadIdx.x; j < jhi; j += 256) { // 1. this GPU's tokens
+    int t, c;
+    ar_twoshot_vec<H>(ar_twoshot_owned_at(j, g.rank), t, c);
+    int const v = (t % AR_TOWN) * C8 + c; // the vector in each landing slot
+    size_t const gv = ((size_t)t * C8 + c) * 16;
+    float s[8], o[8];
+    allreduce_land_bf16<AR, true>(g, sl, v, s);
+    if constexpr (!ONE) {
+      allreduce_land_bf16<AR, true>(g, ol, v, o);
+    }
+    push16(g,
+           SOFF + GOFF + gv,
+           pack_bf16x8(make_float4(s[0], s[1], s[2], s[3]),
+                       make_float4(s[4], s[5], s[6], s[7])));
+    if constexpr (!ONE) {
+      push16(g,
+             OOFF + GOFF + gv,
+             pack_bf16x8(make_float4(o[0], o[1], o[2], o[3]),
+                         make_float4(o[4], o[5], o[6], o[7])));
+    }
+    if constexpr (REARM) { // the one reader of these slots
+      allreduce_rearm<AR>(g, sl, v);
+      if constexpr (!ONE) {
+        allreduce_rearm<AR>(g, ol, v);
+      }
+    }
+  }
+  for (int i = lo + threadIdx.x; i < hi; i += 256) { // 2. the whole slice
+    int t, c;
+    ar_twoshot_vec<H>(i, t, c);
+    size_t const e = (size_t)t * H + 8 * c;
+    uint4 const pu = *reinterpret_cast<uint4 const *>(prefix + e);
+    unsigned char const *const sp = sl + GOFF + ((size_t)t * C8 + c) * 16,
+                               *const op = ol + GOFF + ((size_t)t * C8 + c) * 16;
+    uint4 su = ld16_poll(sp), ou = make_uint4(0u, 0u, 0u, 0u);
+    if constexpr (!ONE) {
+      ou = ld16_poll(op);
+    }
+    while (!valid16(su) || (!ONE && !valid16(ou))) {
+      if (!valid16(su)) {
+        su = ld16_poll(sp);
+      }
+      if constexpr (!ONE) {
+        if (!valid16(ou)) {
+          ou = ld16_poll(op);
+        }
+      }
+    }
+    __nv_bfloat16 const *sb = reinterpret_cast<__nv_bfloat16 const *>(&su),
+                        *ob = reinterpret_cast<__nv_bfloat16 const *>(&ou),
+                        *pb = reinterpret_cast<__nv_bfloat16 const *>(&pu);
+    uint4 yu;
+    __nv_bfloat16 *yb = reinterpret_cast<__nv_bfloat16 *>(&yu);
+    float h[8];
+    for (int k = 0; k < 8; k++) {
+      float a = __bfloat162float(sb[k]); // = bf16(s[k]) of the one-shot
+      if constexpr (!ONE) {
+        a = __bfloat162float(__float2bfloat16(__bfloat162float(ob[k]) + a));
+      }
+      h[k] = a + __bfloat162float(pb[k]);
+      yb[k] = __float2bfloat16(h[k]);
+    }
+    *reinterpret_cast<uint4 *>(y + e) = yu;
+    if (h32 != nullptr) {
+      float4 *const hp = reinterpret_cast<float4 *>(h32 + e);
+      hp[0] = make_float4(h[0], h[1], h[2], h[3]);
+      hp[1] = make_float4(h[4], h[5], h[6], h[7]);
+    }
+    if constexpr (REARM) { // the one reader of these gathered vectors
+      rearm16(sp);
+      if constexpr (!ONE) {
+        rearm16(op);
+      }
+    }
+  }
+}
+#endif
+
+// residual_add task x of NSLICE whose sums land here: S from the allreduce_send
+// buffer at SOFF in the exchange region ([GPUS][T][H] bf16), o (unless ONE)
+// from the one at OOFF. Each sum is rounded to bf16 as sum_gpus stores it.
+template <int NSLICE, size_t SOFF, size_t OOFF, int H, bool ONE>
+__device__ __forceinline__ void residual_land_task(G const &g,
+                                                   __nv_bfloat16 const *prefix,
+                                                   __nv_bfloat16 *y,
+                                                   int x,
+                                                   float *h32) {
+#ifdef STATIC_AR_TWOSHOT
+  int const nv = T * H / 8, lo = (int)((long long)nv * x / NSLICE),
+            hi = (int)((long long)nv * (x + 1) / NSLICE);
+  residual_land_twoshot<SOFF, OOFF, H, ONE>(g, prefix, y, lo, hi, h32);
+#else
+  constexpr size_t RANK = (size_t)T * H * 2; // one GPU's sums in the buffer
+  unsigned char const *const sb = g.rv + SOFF + rg_set(),
+                             *const ob = g.rv + OOFF + rg_set();
+  int const nv = T * H / 8, lo = (int)((long long)nv * x / NSLICE),
+            hi = (int)((long long)nv * (x + 1) / NSLICE);
+  for (int i = lo + threadIdx.x; i < hi; i += 256) { // vector i: y + 8 i
+    uint4 const pu = *reinterpret_cast<uint4 const *>(prefix + (size_t)i * 8);
+    float s[8], o[8];
+    allreduce_land_bf16<RANK>(g, sb, i, s);
+    if constexpr (!ONE) {
+      allreduce_land_bf16<RANK>(g, ob, i, o);
+    }
+    __nv_bfloat16 const *pb = reinterpret_cast<__nv_bfloat16 const *>(&pu);
+    uint4 yu;
+    __nv_bfloat16 *yb = reinterpret_cast<__nv_bfloat16 *>(&yu);
+    float h[8];
+    for (int k = 0; k < 8; k++) {
+      float a = __bfloat162float(__float2bfloat16(s[k]));
+      if constexpr (!ONE) {
+        a = __bfloat162float(__float2bfloat16(
+            __bfloat162float(__float2bfloat16(o[k])) + a));
+      }
+      h[k] = a + __bfloat162float(pb[k]);
+      yb[k] = __float2bfloat16(h[k]);
+    }
+    *reinterpret_cast<uint4 *>(y + (size_t)i * 8) = yu;
+    if (h32 != nullptr) {
+      float4 *const hp = reinterpret_cast<float4 *>(h32 + (size_t)i * 8);
+      hp[0] = make_float4(h[0], h[1], h[2], h[3]);
+      hp[1] = make_float4(h[4], h[5], h[6], h[7]);
+    }
+    if constexpr (REARM) { // the one reader of these vectors
+      allreduce_rearm<RANK>(g, sb, i);
+      if constexpr (!ONE) {
+        allreduce_rearm<RANK>(g, ob, i);
+      }
+    }
+  }
+#endif
+  __syncthreads();
+}
+
+// residual_add task x: slice x of SELF::x of y (counted: also h32, BUF_SLOTS
+// 2, and one counter add per task); SSUM: the addend's node
 // (sum_gpus), O: the input's node (sum_send, its output in the exchange
-// region; or sum_gpus). With one sum, the node has no o. Then O is the
+// region; or sum_gpus); or both allreduce_send nodes (their sums land here:
+// residual_land_task). With one sum, the node has no o. Then O is the
 // producer of the residual, which is a graph input (O::x == 0), and IN is
 // empty. PARAMS {H}; BUF_SLOTS {the residual, y (graph tensors, [T][H]
 // bf16)}
@@ -94,30 +269,61 @@ __device__ __forceinline__ void run_residual_add(Maps const &,
   constexpr bool ONE = O::x == 0; // one sum: no o
   static_assert(ONE == (sizeof...(IN) == 0),
                 "residual_add: one sum has 2 inputs, two sums have 3");
-  constexpr bool OSUM = !ONE && exchange_bytes[O::buf] == 0; // o from sum_gpus
+  // S (and o) sent by allreduce_send nodes: they land here
+  constexpr bool LAND = SSUM::buf >= 0 && exchange_bytes[SSUM::buf] != 0;
+  constexpr bool OSUM =
+      !ONE && !LAND && exchange_bytes[O::buf] == 0; // o from sum_gpus
   static_assert(H % (8 * GPUS) == 0,
                 "residual_add: whole 8-column vectors of every GPU's part");
+  constexpr size_t SENT = (size_t)GPUS * T * H * 2; // an allreduce_send buffer
   static_assert(
-      SSUM::buf >= 0 &&
-          (ONE || (O::buf >= 0 &&
-                   (OSUM ? exchange_bytes[O::buf] == 0
-                         : exchange_bytes[O::buf] ==
-                               (size_t)GPUS * o_rank_bytes(H)))),
+      LAND ? exchange_bytes[SSUM::buf] == SENT &&
+                 (ONE || (O::buf >= 0 && exchange_bytes[O::buf] == SENT))
+           : SSUM::buf >= 0 &&
+                 (ONE ||
+                  (O::buf >= 0 && (OSUM ? exchange_bytes[O::buf] == 0
+                                        : exchange_bytes[O::buf] ==
+                                              (size_t)GPUS * o_rank_bytes(H)))),
       "residual_add: S from sum_gpus's buffer, o from sum_send's "
-      "(or from a second sum_gpus buffer), or no o");
+      "(or from a second sum_gpus buffer), or no o; or S and o from "
+      "allreduce_send's");
 #ifdef STATIC_RESET_IN_KERNEL
   if constexpr (PDL_TRIGGER == 2) {
     asm volatile("griddepcontrol.launch_dependents;" ::
                      : "memory"); // PDL: near the end (the last task)
   }
 #endif
-  residual_add_task<SELF::x, ONE ? 0 : exchange_offset[O::buf], H, OSUM, ONE>(
-      g,
-      buf_at<__nv_bfloat16>(g, SSUM::buf),
-      ONE ? nullptr : buf_at<__nv_bfloat16>(g, O::buf),
-      buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 0>()),
-      buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 1>()),
-      tk.x);
+  float *const h32 = SELF::counter >= 0
+                         ? buf_at<float>(g, slot_or<BUF_SLOTS, 2, 0>())
+                         : nullptr;
+  if constexpr (LAND) {
+    residual_land_task<SELF::x,
+                       exchange_offset[SSUM::buf],
+                       ONE ? 0 : exchange_offset[O::buf],
+                       H,
+                       ONE>(
+        g,
+        buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 0>()),
+        buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 1>()),
+        tk.x,
+        h32);
+  } else {
+    residual_add_task<SELF::x, ONE ? 0 : exchange_offset[O::buf], H, OSUM, ONE>(
+        g,
+        buf_at<__nv_bfloat16>(g, SSUM::buf),
+        ONE ? nullptr : buf_at<__nv_bfloat16>(g, O::buf),
+        buf_at<__nv_bfloat16 const>(g, slot_at<BUF_SLOTS, 0>()),
+        buf_at<__nv_bfloat16>(g, slot_at<BUF_SLOTS, 1>()),
+        tk.x,
+        h32);
+  }
+  // counted (a row_rmsnorm node waits for all tasks, then reads h32): one add
+  // per task, after its stores (the task ends with a __syncthreads)
+  if constexpr (SELF::counter >= 0) {
+    if (threadIdx.x == 0) {
+      cnt_add(cnt_now(g) + SELF::counter, 1);
+    }
+  }
 }
 
 template <class SELF,

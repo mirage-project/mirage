@@ -3,7 +3,8 @@
 // GEMMs that read it. Task t is token t:
 //   q_c[t] = bf16(RMSNorm(q_a[t]) * gamma)
 //   z_q[t] = e4m3(q_c[t] / s), one scale s for each 128 columns:
-//            s = max(amax, 1e-10) / 448 (the method of group_quant.cuh)
+//            s = max(amax, 1e-10) / 448 (the method of group_quant.cuh; UE8M0,
+//            params[3]: rounded up to a power of two, group_scale)
 // q_a is the first QL columns of the fused A projection (q_a, then kv_a). A
 // COMBINE_ADD GEMM node makes this projection (the demo uses a
 // scaled_gemm_tile). The task rounds q_a to bf16. Then it computes
@@ -98,7 +99,7 @@ __device__ __forceinline__ void run_dsa_q_norm_quant(Maps const &,
   for (int d = 8; d > 0; d >>= 1) {
     amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, d));
   }
-  float const s = fmaxf(amax, 1.0e-10f) * (1.0f / 448.0f);
+  float const s = group_scale<(param_or<PARAMS, 3, 0>() != 0)>(amax);
   uint32_t q[2];
 #pragma unroll
   for (int k = 0; k < 2; k++) {

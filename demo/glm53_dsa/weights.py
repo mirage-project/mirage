@@ -19,12 +19,13 @@ fp32 scales):
   w_kw [256, 6144] bf16                            rows 0..127 dequantized wk, 128..159 weights_proj, then zero rows
   k_norm_w, k_norm_b [128] fp32                    the indexer LayerNorm
 """
+import contextlib
 import json
 import os
 
 import torch
 
-from mirage.mpk.fp8_fp32scale_weights import pack_w2
+from mirage.mpk.fp8_fp32scale_weights import dequant, pack_w2, requant_ue8m0
 
 EXPECTED_CONFIG = {"hidden_size": 6144, "num_attention_heads": 64, "q_lora_rank": 2048, "kv_lora_rank": 512,
                    "qk_nope_head_dim": 192, "qk_rope_head_dim": 64, "v_head_dim": 256, "index_n_heads": 32,
@@ -71,34 +72,60 @@ def is_full_layer(cfg: dict, layer: int) -> bool:
 
 
 def checkpoint_reader(snapshot: str):
-    """Return read(name) -> the tensor `name` of the snapshot. read.has(name) is True if the snapshot has the tensor."""
+    """Return read(name) -> the tensor `name` of the snapshot. read.has(name) is True if the snapshot has the tensor.
+    read.part(name, rows, cols) reads only those rows or columns of a 2-D tensor. Inside `with read.keep_open():`, read
+    and read.part open each file once and keep it open until the block ends (as demo/glm53_flash's load_layer)."""
     from safetensors import safe_open
     with open(os.path.join(snapshot, "model.safetensors.index.json")) as f:
         where = json.load(f)["weight_map"]
+    opened, stacks = {}, []   # inside keep_open: file name -> its open handle; the ExitStack that closes them
+
+    def handle(name):
+        fn = where[name]
+        if fn not in opened:
+            f = safe_open(os.path.join(snapshot, fn), framework="pt")
+            if not stacks:
+                return f   # not inside keep_open: closed after this read
+            opened[fn] = stacks[-1].enter_context(f)
+        return contextlib.nullcontext(opened[fn])
+
+    @contextlib.contextmanager
+    def keep_open():
+        with contextlib.ExitStack() as stack:
+            stacks.append(stack)
+            try:
+                yield
+            finally:
+                stacks.pop()
+                opened.clear()
 
     def read(name):
-        with safe_open(os.path.join(snapshot, where[name]), framework="pt") as f:
+        with handle(name) as f:
             return f.get_tensor(name)
+
+    def part(name, rows: slice = None, cols: slice = None):
+        with handle(name) as f:
+            t = f.get_slice(name)
+            return t[rows] if cols is None else t[:, cols]
     read.has = lambda name: name in where
+    read.part = part
+    read.keep_open = keep_open
     return read
 
 
-def dequant(w: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-    """e4m3 [N, K] with fp32 block scales [ceil(N / 128), K / 128] -> fp32."""
-    N, K = w.shape
-    scale = s.float().repeat_interleave(128, 0)[:N].repeat_interleave(128, 1)[:, :K]
-    return w.view(torch.float8_e4m3fn).float() * scale
-
-
-def packed(w: torch.Tensor, s: torch.Tensor):
-    """e4m3 [N, K] (N, K multiples of 128) -> (pieces viewed [N, K] uint8, scales [N / 128, K / 128] fp32)."""
+def packed(w: torch.Tensor, s: torch.Tensor, ue8m0: bool = False):
+    """e4m3 [N, K] (N, K multiples of 128) -> (pieces viewed [N, K] uint8, scales [N / 128, K / 128] fp32). ue8m0: the
+    weight requantized first (requant_ue8m0)."""
+    if ue8m0:
+        w, s = requant_ue8m0(w, s)
     q, sf = pack_w2(w.view(torch.uint8).contiguous(), s.float().contiguous())
     return q.view(w.shape[0], w.shape[1]), sf
 
 
-def layer_tensors(read, layer: int, tp: int = 8, rank: int = 0, device="cpu", full: bool = None) -> dict:
+def layer_tensors(read, layer: int, tp: int = 8, rank: int = 0, device="cpu", full: bool = None, ue8m0: bool = False) -> dict:
     """Return the tensors of the attention of `layer` for shard `rank` of `tp`, on `device`, in the layouts of the module
-    docstring. full: the layer runs its indexer (None: the checkpoint has indexer.wq_b)."""
+    docstring. full: the layer runs its indexer (None: the checkpoint has indexer.wq_b). ue8m0: the FP8 GEMM weights
+    requantized with power-of-two scales (requant_ue8m0), for the GEMMs' UE8M0 mode."""
     p = f"model.layers.{layer}.self_attn."
     full = read.has(p + "indexer.wq_b.weight") if full is None else full
     get = lambda name: read(p + name).to(device)
@@ -110,19 +137,20 @@ def layer_tensors(read, layer: int, tp: int = 8, rank: int = 0, device="cpu", fu
     assert qa.shape == (2048, 6144) and kva.shape == (576, 6144) and kva_s.shape[0] == 5
     zero = torch.zeros(64, 6144, dtype=torch.uint8, device=device)
     w["w_qkva"], w["w_qkva_sf"] = packed(torch.cat([qa.view(torch.uint8), kva.view(torch.uint8), zero]),
-                                         torch.cat([qa_s, kva_s]))
+                                         torch.cat([qa_s, kva_s]), ue8m0)
     qb, qb_s = get("q_b_proj.weight"), get("q_b_proj.weight_scale_inv")
     rows = slice(rank * NH * 256, (rank + 1) * NH * 256)
-    w["w_qb"], w["w_qb_sf"] = packed(qb[rows].contiguous(), qb_s[rank * NH * 2:(rank + 1) * NH * 2].contiguous())
+    w["w_qb"], w["w_qb_sf"] = packed(qb[rows].contiguous(), qb_s[rank * NH * 2:(rank + 1) * NH * 2].contiguous(), ue8m0)
     kvb = dequant(get("kv_b_proj.weight"), get("kv_b_proj.weight_scale_inv")).to(torch.bfloat16).view(64, 448, 512)
     kvb = kvb[rank * NH:(rank + 1) * NH]
     w["w_uk"] = kvb[:, :192].contiguous()                       # [NH, 192, 512]
     w["w_uv"] = kvb[:, 192:].transpose(1, 2).contiguous()       # [NH, 512, 256]
     o, o_s = get("o_proj.weight"), get("o_proj.weight_scale_inv")
     cols = slice(rank * NH * 256, (rank + 1) * NH * 256)
-    w["w_o"], w["w_o_sf"] = packed(o[:, cols].contiguous(), o_s[:, rank * NH * 2:(rank + 1) * NH * 2].contiguous())
+    w["w_o"], w["w_o_sf"] = packed(o[:, cols].contiguous(), o_s[:, rank * NH * 2:(rank + 1) * NH * 2].contiguous(),
+                                   ue8m0)
     if full:
-        w["w_iqb"], w["w_iqb_sf"] = packed(get("indexer.wq_b.weight"), get("indexer.wq_b.weight_scale_inv"))
+        w["w_iqb"], w["w_iqb_sf"] = packed(get("indexer.wq_b.weight"), get("indexer.wq_b.weight_scale_inv"), ue8m0)
         wk = dequant(get("indexer.wk.weight"), get("indexer.wk.weight_scale_inv")).to(torch.bfloat16)
         wp = get("indexer.weights_proj.weight").to(torch.bfloat16)
         assert wk.shape == (128, 6144) and wp.shape == (32, 6144)

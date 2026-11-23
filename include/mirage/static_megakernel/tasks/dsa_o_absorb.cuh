@@ -46,14 +46,15 @@ __device__ __forceinline__ void run_dsa_o_absorb(Maps const &,
   constexpr int TT = T / SELF::y; // the task's tokens
   static_assert(SELF::x == NH * 4 && SELF::buf >= 0 && SELF::counter >= 0,
                 "dsa_o_absorb: 4 tasks per head, its output v and counter");
-  static_assert(SELF::y * TT == T &&
-                    (SELF::y == 1 || (TT % 8 == 0 && !MERGE)),
+  static_assert(SELF::y * TT == T && (SELF::y == 1 || (TT % 8 == 0 && !MERGE)),
                 "dsa_o_absorb: token tiles of whole 8-token MMA tiles");
   static_assert(OL::buf >= 0 && OL::counter >= 0 &&
-                    (MERGE ? OL::y == T && OL::v[0] == NH
+                    (MERGE ? OL::y == T && OL::v[0] == NH && OL::v[7] > 1
                            : T % OL::y == 0 && OL::x == NH),
                 "dsa_o_absorb: o_lat from dsa_mla_merge (a counter per head) "
-                "or the splits from sparse_mla (a counter per token)");
+                "or the splits from sparse_mla (a counter per token; KPOOL > "
+                "1: a sparse_mla of KPOOL 1 writes nothing for its empty "
+                "splits)");
   int const h = tk.x / 4, cb = tk.x % 4, tid = threadIdx.x;
   auto *const ws = reinterpret_cast<__nv_bfloat16 *>(L.sm);
   auto *const xs = reinterpret_cast<__nv_bfloat16 *>(L.sm + OAB_OFF_X);
@@ -161,13 +162,13 @@ __device__ __forceinline__ void run_dsa_o_absorb(Maps const &,
                                        h * VD + cb * OAB_COLS,
                                    (size_t)NH * VD);
   } else {
-    dsa::absorb_mma<LAT, OAB_COLS, TT>(
-        ws,
-        xs,
-        red,
-        buf_at<__nv_bfloat16>(g, SELF::buf) +
-            ((size_t)tk.y * TT * NH + h) * VD + cb * OAB_COLS,
-        (size_t)NH * VD);
+    dsa::absorb_mma<LAT, OAB_COLS, TT>(ws,
+                                       xs,
+                                       red,
+                                       buf_at<__nv_bfloat16>(g, SELF::buf) +
+                                           ((size_t)tk.y * TT * NH + h) * VD +
+                                           cb * OAB_COLS,
+                                       (size_t)NH * VD);
   }
   dsa::ring_release();
   if (tid == 0) {

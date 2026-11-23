@@ -21,14 +21,37 @@ __device__ __forceinline__ void
                 "sum_gpus: whole 8-column vectors, one per thread");
   int const v = threadIdx.x;
 #ifdef STATIC_AR_TWOSHOT
-  // (STATIC_AR_TWOSHOT, core.cuh ar_twoshot_get) the owner of token t
-  // (its task (q, t)) adds the landing slots in GPU order and multicasts
-  // bf16(sum) into the gathered rows; every GPU's task (q, t) polls its vector
-  // there (one slot): the same bf16 value as the one-shot's. Task (q, t) waits
-  // only for the owner's task (q, t)
+  // (STATIC_AR_TWOSHOT, core.cuh) the owner of token t (its task (q, t)) adds
+  // the landing slots in GPU order and multicasts bf16(sum) into the gathered
+  // rows; every GPU's task (q, t) polls its vector there (one slot): the same
+  // bf16 value as the one-shot's. Task (q, t) waits only for the owner's task
+  // (q, t). The steps of ar_twoshot_get, the vector stored before it is
+  // re-armed
   if (v < COLS / 8) {
-    *reinterpret_cast<uint4 *>(ssum + (size_t)t * H + q * COLS + 8 * v) =
-        ar_twoshot_get<SOFF, H>(g, t, q * (COLS / 8) + v);
+    constexpr size_t AR = ar_rank<H>(), GOFF = ar_g_off<H>();
+    int const c = q * (COLS / 8) + v; // the vector in the row
+    unsigned char const *const sl = g.rv + SOFF + rg_set();
+    size_t const gv = GOFF + ((size_t)t * (H / 8) + c) * 16;
+    if (t / AR_TOWN == g.rank) {
+      int const lv = (t % AR_TOWN) * (H / 8) + c;
+      float s[8];
+      allreduce_land_bf16<AR, true>(g, sl, lv, s);
+      push16(g,
+             SOFF + gv,
+             pack_bf16x8(make_float4(s[0], s[1], s[2], s[3]),
+                         make_float4(s[4], s[5], s[6], s[7])));
+      if constexpr (REARM) {
+        allreduce_rearm<AR>(g, sl, lv);
+      }
+    }
+    uint4 u = ld16_poll(sl + gv);
+    while (!valid16(u)) {
+      u = ld16_poll(sl + gv);
+    }
+    *reinterpret_cast<uint4 *>(ssum + (size_t)t * H + q * COLS + 8 * v) = u;
+    if constexpr (REARM) { // the one reader of this gathered vector
+      rearm16(sl + gv);
+    }
   }
   __syncthreads();
   return;

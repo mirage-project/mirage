@@ -71,6 +71,92 @@ __device__ __forceinline__ void stamp_ready(KernelLocals &L) {
 #endif
 }
 
+// ATTN64_IDXSKIP (T = 64 only: the generated layer of a GLM-5.3 indexer
+// defines STATIC_DSA_IDX_SHORT, static_schedule.header_code). Example: 64
+// requests of 300 positions, TOPK 2048. Every dsa_index_score task (16 chunks
+// x 64 tokens) and every dsa_index_topk task (16 x 64, two nodes) of the
+// launch has no work: the top-k takes all
+// positions of each token, so nobody reads a score, a record or a selected
+// index (sparse_mla of KPOOL 1 reads idx only when seq_lens[t] > TOPK). Then
+// such a task returns at its entry: no load, no barrier, no counter add. No
+// task waits on those counters in such a launch: dsa_index_topk count waits
+// for the score counter + t only if n > TOPK, write for the count counter + t
+// only if n > TOPK, sparse_mla for the write counter + t only if seq_lens[t] >
+// TOPK. The first such task on an SM loads the T seq_lens once
+// (idx_all_short); the later ones read the answer from KernelLocals.
+#if STATIC_TOKENS == 64 && defined(STATIC_DSA_IDX_SHORT)
+constexpr bool ATTN64_IDXSKIP = true;
+#else
+constexpr bool ATTN64_IDXSKIP = false; // (KernelLocals has no idx_short)
+#endif
+
+// (ATTN64_IDXSKIP) Whether every seq_lens[t] (buffer slot SEQ, int32 [T]) is
+// at most K, for this launch. All threads of the CTA call it at a task's
+// entry. The first call on the SM loads the T values (one barrier: the
+// __syncthreads_and); the later calls with the same K use L.idx_short.
+template <int K, int SEQ>
+__device__ __forceinline__ bool idx_all_short(G const &g, KernelLocals &L) {
+  static_assert(ATTN64_IDXSKIP && K > 0 && T <= 256,
+                "idx_all_short: T = 64 with ATTN64_IDXSKIP, K > 0");
+#if STATIC_TOKENS == 64 && defined(STATIC_DSA_IDX_SHORT)
+  if (L.idx_short == K || L.idx_short == -K) {
+    return L.idx_short == K;
+  }
+  int const t = threadIdx.x;
+  bool const shrt =
+      __syncthreads_and(t >= T || buf_at<int const>(g, SEQ)[t] <= K);
+  L.idx_short = shrt ? K : -K;
+  return shrt;
+#else
+  return false;
+#endif
+}
+
+// ATTN64_MERGENS (T = 64 only). Example: TOPK 2048, S = 8 sparse_mla splits
+// of 4 tiles (256 slots) each, a token of seq_lens 300: splits 0 and 1 hold
+// valid slots, splits 2..7
+// are empty. sparse_mla's empty split (KPOOL 1) returns at its entry with no
+// barrier and no counter add, and dsa_mla_merge waits for counter + t to reach
+// mla_live_splits(300) = 2 instead of S = 8. Both use mla_live_splits: split
+// s is empty if and only if s >= mla_live_splits(live). No other node waits
+// on the counter of a KPOOL-1 sparse_mla (dsa_o_absorb's MERGE reads only a
+// KPOOL > 1 sparse_mla).
+constexpr bool ATTN64_MERGENS = T == 64;
+constexpr int MLA_KV_TILE = 64; // sparse_mla's tile of index slots (KV_TILE)
+
+// ATTN64_MLALIVE (T = 64 only). The tiles of a split from the token's valid
+// slots instead of TOPK, so that the work of a token spreads over
+// MLA_LIVE_SPLITS = 148 / 64 = 2 splits
+// (64 tokens x 2 = 128 tasks: one round of the SMs). Example: TOPK 2048, S =
+// 8, seq_lens 300 = 5 tiles: TOPK / 64 / S = 4 tiles a split gives splits of
+// 256 + 44 rows; ceil(5 / 2) = 3 tiles gives 192 + 108 rows. At most TOPK /
+// 64 / S tiles (seq_lens >= 2048: as before), at least 1.
+constexpr bool ATTN64_MLALIVE = T == 64;
+constexpr int MLA_LIVE_SPLITS = NSM / T > 1 ? NSM / T : 1;
+
+// sparse_mla of KPOOL 1 (TOPK index slots, S splits): the tiles of 64 slots
+// of each split of a token of `live` valid slots (min(seq_lens, TOPK)). Split
+// s takes tiles [s per, s per + per).
+template <int TOPK, int S>
+__device__ __forceinline__ int mla_split_tiles(int live) {
+  static_assert(TOPK % (MLA_KV_TILE * S) == 0,
+                "sparse_mla: whole tiles of 64 slots in each split");
+  constexpr int PER = TOPK / (MLA_KV_TILE * S);
+  if constexpr (ATTN64_MLALIVE) {
+    int const tiles = (live + MLA_KV_TILE - 1) / MLA_KV_TILE;
+    return max(1,
+               min(PER, (tiles + MLA_LIVE_SPLITS - 1) / MLA_LIVE_SPLITS));
+  }
+  return PER;
+}
+// The splits that hold a valid slot of a token of `live` valid slots: split s
+// holds one if and only if s < mla_live_splits(live) (s per 64 < live).
+template <int TOPK, int S>
+__device__ __forceinline__ int mla_live_splits(int live) {
+  int const rows = MLA_KV_TILE * mla_split_tiles<TOPK, S>(live);
+  return (live + rows - 1) / rows;
+}
+
 // Return the 16-bit key of a fp32 score that holds a bf16 value. A larger
 // score gives a larger key. The 32-bit key flips all bits of a negative score
 // and sets the sign bit of a positive score. The low 16 bits of the score are
@@ -212,6 +298,39 @@ __device__ __forceinline__ void hadamard128(float (&v)[N][4], int lane) {
       v[j][i] *= 0.08838834764831845f;
     }
   }
+}
+// One warp quantizes one indexer key of 128 values with an fp32 scale, as
+// SGLang's fused indexer-K store does. Lane l holds dims 4 l .. 4 l + 3 in v.
+// Lanes l < 16 rotate the RoPE pairs 2 l and 2 l + 1 (dims [0, 64)). Then each
+// value is rounded to bf16, s = max(1e-4, amax) / 448, and each lane packs its
+// 4 bytes e4m3(v x (1 / s)) into q. The function returns s.
+__device__ __forceinline__ float rope_quant128_fp32(float (&v)[4],
+                                                    int lane,
+                                                    float c0,
+                                                    float s0,
+                                                    float c1,
+                                                    float s1,
+                                                    uint32_t &q) {
+  if (lane < 16) {
+    rope_pair(v[0], v[1], c0, s0);
+    rope_pair(v[2], v[3], c1, s1);
+  }
+  float amax = 0.f;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    v[i] = __bfloat162float(__float2bfloat16_rn(v[i]));
+    amax = fmaxf(amax, fabsf(v[i]));
+  }
+#pragma unroll
+  for (int d = 16; d > 0; d >>= 1) {
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, d));
+  }
+  float const s = fmaxf(1e-4f, amax) / 448.0f, inv = 1.0f / s;
+  q = (uint32_t)cvt_e4m3_nv(v[0] * inv) |
+      ((uint32_t)cvt_e4m3_nv(v[1] * inv) << 8) |
+      ((uint32_t)cvt_e4m3_nv(v[2] * inv) << 16) |
+      ((uint32_t)cvt_e4m3_nv(v[3] * inv) << 24);
+  return s;
 }
 // Lanes l < 16 load the cos and sin of the RoPE pairs 2 l and 2 l + 1 at
 // position pos (rope_quant128 uses them).
@@ -414,17 +533,16 @@ __device__ __forceinline__ void fx_rmsnorm(unsigned long long const *fx,
   }
 }
 
-// Compute one head of an absorb GEMM for all T = 8 tokens on tensor cores
-// (dsa_q_absorb, dsa_o_absorb):
-//   out[t][c] = bf16( sum_k x[t][k] w[k][c] ),  c < M, t < T, k < K
+// Compute one head of an absorb GEMM for TT tokens (default all of the layer's)
+// on tensor cores (dsa_q_absorb, dsa_o_absorb):
+//   out[t][c] = bf16( sum_k x[t][k] w[k][c] ),  c < M, t < TT, k < K
 // The MMA is mma.sync m16n8k16. A is w^T (16 columns x 16 k). B is x^T (16 k x
-// 8 tokens): TW / 8 token tiles (config.cuh TW: one tile in a layer of fewer
+// 8 tokens): TT / 8 token tiles (config.cuh TW: one tile in a layer of fewer
 // than 8 tokens, its rows from T on repeat token 0 and are dropped), each warp
-// does all of them. The accumulators
-// are fp32.
+// does all of them. The accumulators are fp32.
 // Shared memory:
 //   ws   w [K][M] bf16 (swizzle<M>)
-//   xs   x [T][K] bf16 (swizzle<K>)
+//   xs   x [TT][K] bf16 (swizzle<K>)
 //   red  the partial sums of the K parts (absorb_red_bytes)
 // Warp w computes column tile w % (M / 16) and K part w / (M / 16). There are
 // 8 / (M / 16) K parts. Warp kp = 0 adds the parts from red. Row t of out is
@@ -432,9 +550,9 @@ __device__ __forceinline__ void fx_rmsnorm(unsigned long long const *fx,
 // call, make ws and xs ready (cp.async wait, then __syncthreads). TT: the
 // tokens of the call (a multiple of 8; a task of some of the layer's tokens:
 // xs [TT][K], out at its first token).
-template <int M>
+template <int M, int TT = TW>
 __host__ __device__ constexpr int absorb_red_bytes() {
-  return (8 / (M / 16) - 1) * (M / 16) * (TW / 8) * 32 * 4 * 4;
+  return (8 / (M / 16) - 1) * (M / 16) * (TT / 8) * 32 * 4 * 4;
 }
 template <int K, int M, int TT = TW>
 __device__ __forceinline__ void absorb_mma(__nv_bfloat16 const *ws,
