@@ -26,7 +26,8 @@
 // embedding row goes to x_next row r and the page table advances to p + 1. Task
 // x of grid (ceil(V / BLOCK), 1, 1), BLOCK = 256 PER: the argmax of each row's
 // logits [x BLOCK, x BLOCK + BLOCK) into the request's 64-bit key (value, then
-// the lower index); the last task to count takes the rest.
+// the lower index), a warp a row (rows w, w + 8, ..: no block barrier a row);
+// the last task to count takes the rest.
 #pragma once
 #include "sm90_common.cuh"
 
@@ -67,8 +68,7 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
   static_assert(KEY % 2 == 0, "sm90_next_token: the keys 8-B aligned");
   static_assert(R <= SM90_THREADS, "sm90_next_token: a thread a request");
   using Row = Sm90Row<H>;
-  __shared__ unsigned long long red[SM90_WARPS];
-  __shared__ int last, tok_s[R], n_s[R];
+  __shared__ int last, tok_s[R], n_s[R], pos[R];
   unsigned long long *key = (unsigned long long *)(g.cnt + KEY);
   int *kv_indptr = buf_at<int>(g, slot_at<BUF_SLOTS, 5>());
   int *last_page_len = buf_at<int>(g, slot_at<BUF_SLOTS, 6>());
@@ -76,33 +76,60 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
   long long *prompt = buf_at<long long>(g, slot_at<BUF_SLOTS, 2>());
   // each request's step position (every task reads them before it counts
   // below; the last task writes them after)
-  int pos[R];
-#pragma unroll
-  for (int r = 0; r < R; r++) {
+  if (threadIdx.x < R) {
+    int const r = threadIdx.x;
     pos[r] =
         (kv_indptr[r + 1] - kv_indptr[r] - 1) * PAGE + last_page_len[r] - 1;
   }
   sm90_task_begin<IN...>(g);
-  int const base = tk.x * BLOCK + threadIdx.x;
+  __syncthreads(); // pos
+  int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  int const col0 = tk.x * BLOCK;
 #pragma unroll 1
-  for (int r = 0; r < R; r++) {
+  for (int r = warp; r < R; r += SM90_WARPS) {
     if (pos[r] + 1 < P && prompt[(size_t)r * P + pos[r] + 1] >= 0) {
-      continue; // the prompt's next token (the same for every thread)
+      continue; // the prompt's next token
     }
     float const *lr = logits + (size_t)r * V;
     unsigned long long k = 0;
-    for (int c = 0; c < PER; c += CH) {
-      float v[CH];
+    if constexpr (V % 4 == 0 && BLOCK % 128 == 0) {
+      // lane l: the float4s l, l + 32, .. of the block (16-B aligned rows)
+      constexpr int NV = BLOCK / 128;
 #pragma unroll
-      for (int j = 0; j < CH; j++) {
-        int const i = base + (c + j) * SM90_THREADS;
-        v[j] = c + j < PER && i < V ? lr[i] : 0.f;
+      for (int c = 0; c < NV; c += CH / 2) {
+        float4 v[CH / 2];
+#pragma unroll
+        for (int j = 0; j < CH / 2; j++) {
+          int const i = col0 + 4 * (lane + 32 * (c + j));
+          v[j] = c + j < NV && i < V ? *reinterpret_cast<float4 const *>(lr + i)
+                                     : make_float4(0.f, 0.f, 0.f, 0.f);
+        }
+#pragma unroll
+        for (int j = 0; j < CH / 2; j++) {
+          int const i = col0 + 4 * (lane + 32 * (c + j));
+          if (c + j < NV && i < V) {
+            k = max(k, sm90_argmax_key(v[j].x, i));
+            k = max(k, sm90_argmax_key(v[j].y, i + 1));
+            k = max(k, sm90_argmax_key(v[j].z, i + 2));
+            k = max(k, sm90_argmax_key(v[j].w, i + 3));
+          }
+        }
       }
+    } else {
+      constexpr int NS = BLOCK / 32;
+      for (int c = 0; c < NS; c += CH) {
+        float v[CH];
 #pragma unroll
-      for (int j = 0; j < CH; j++) {
-        int const i = base + (c + j) * SM90_THREADS;
-        if (c + j < PER && i < V) {
-          k = max(k, sm90_argmax_key(v[j], i));
+        for (int j = 0; j < CH; j++) {
+          int const i = col0 + lane + 32 * (c + j);
+          v[j] = c + j < NS && i < V ? lr[i] : 0.f;
+        }
+#pragma unroll
+        for (int j = 0; j < CH; j++) {
+          int const i = col0 + lane + 32 * (c + j);
+          if (c + j < NS && i < V) {
+            k = max(k, sm90_argmax_key(v[j], i));
+          }
         }
       }
     }
@@ -110,19 +137,12 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
     for (int o = 16; o > 0; o >>= 1) {
       k = max(k, __shfl_xor_sync(0xffffffffu, k, o));
     }
-    if ((threadIdx.x & 31) == 0) {
-      red[threadIdx.x >> 5] = k;
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-#pragma unroll
-      for (int w = 1; w < SM90_WARPS; w++) {
-        k = max(k, red[w]);
-      }
+    if (lane == 0) {
       atomicMax(key + r, k);
     }
-    __syncthreads(); // red's next use
   }
+  __threadfence();
+  __syncthreads(); // every warp's key updates before the count
   if (threadIdx.x == 0) {
     // release: this task's key updates before its count; acquire: the last
     // task sees every task's
@@ -154,39 +174,47 @@ __device__ __forceinline__ void run_sm90_next_token(Maps const &,
       last_page_len[r] = q + 1 - (n - 1) * PAGE;
     }
     __syncthreads();
-    // the page table: request r's n pages r MP .. r MP + n - 1, packed
+    // the page table: request r's n pages r MP .. r MP + n - 1, packed (its
+    // offset, the pages before it, by thread r); a warp a request
     int *kv_indices = buf_at<int>(g, slot_at<BUF_SLOTS, 7>());
     int *ring = RP > 0 ? buf_at<int>(g, slot_at<BUF_SLOTS, 8>()) : nullptr;
-    int off = 0;
-#pragma unroll 1
-    for (int r = 0; r < R; r++) {
-      for (int j = threadIdx.x; j < n_s[r]; j += SM90_THREADS) {
-        kv_indices[off + j] = r * MP + j;
-        if constexpr (RP > 0) {
-          ring[off + j] = r * RP + j % RP;
-        }
+    if (threadIdx.x < R) {
+      int off = 0;
+      for (int i = 0; i < (int)threadIdx.x; i++) {
+        off += n_s[i];
       }
-      off += n_s[r];
-      if (threadIdx.x == 0) {
-        kv_indptr[r + 1] = off;
+      pos[threadIdx.x] = off; // (pos read: before the barrier above)
+      kv_indptr[threadIdx.x + 1] = off + n_s[threadIdx.x];
+    }
+    __syncthreads();
+    int const warp_l = threadIdx.x >> 5, lane_l = threadIdx.x & 31;
+#pragma unroll 1
+    for (int r = warp_l; r < R; r += SM90_WARPS) {
+      for (int j = lane_l; j < n_s[r]; j += 32) {
+        kv_indices[pos[r] + j] = r * MP + j;
+        if constexpr (RP > 0) {
+          ring[pos[r] + j] = r * RP + j % RP;
+        }
       }
     }
+    // the embedding rows: a warp a row, all of its loads in flight
     uint4 const *emb = buf_at<uint4 const>(g, slot_at<BUF_SLOTS, 1>());
     uint4 *out = buf_at<uint4>(g, slot_at<BUF_SLOTS, 3>());
+    constexpr int NL = (Row::VEC + 31) / 32;
 #pragma unroll 1
-    for (int r = 0; r < R; r++) {
+    for (int r = warp_l; r < R; r += SM90_WARPS) {
       uint4 const *row = emb + (size_t)tok_s[r] * Row::VEC;
-      uint4 rv[Row::PER];
+      uint4 rv[NL];
 #pragma unroll
-      for (int j = 0; j < Row::PER; j++) {
-        if (Row::vec(j) < Row::VEC) {
-          rv[j] = row[Row::vec(j)];
+      for (int j = 0; j < NL; j++) {
+        if (lane_l + 32 * j < Row::VEC) {
+          rv[j] = row[lane_l + 32 * j];
         }
       }
 #pragma unroll
-      for (int j = 0; j < Row::PER; j++) {
-        if (Row::vec(j) < Row::VEC) {
-          out[(size_t)r * Row::VEC + Row::vec(j)] = rv[j];
+      for (int j = 0; j < NL; j++) {
+        if (lane_l + 32 * j < Row::VEC) {
+          out[(size_t)r * Row::VEC + lane_l + 32 * j] = rv[j];
         }
       }
     }

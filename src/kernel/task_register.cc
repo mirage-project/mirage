@@ -5731,9 +5731,9 @@ int TaskRegister::register_sm90_attention_merge_task(
 
 int TaskRegister::register_sm90_gate_task(threadblock::Graph const &bgraph,
                                           std::vector<int> const &params) {
-  // params: {H, E, TOPK, eps bits} (router splits: the grid's y); four
-  // outputs (tasks/sm90_gate.cuh)
-  assert(params.size() == 4);
+  // params: {H, E, TOPK, eps bits[, h's row length (MXFP8 h), logits only]}
+  // (router splits: the grid's y); four outputs (tasks/sm90_gate.cuh)
+  assert(params.size() == 4 || params.size() == 6);
   std::vector<tb::TBInputOp *> input_ops, output_ops;
   static_split_ops(
       bgraph, (int)bgraph.operators.size() - 4, 4, input_ops, output_ops);
@@ -5812,6 +5812,36 @@ int TaskRegister::register_scaled_moe_experts_sm100_task(
   return register_task_variant(
       TASK_SCALED_MOE_EXPERTS_SM100,
       static_build_only_task("scaled_moe_experts", params));
+}
+
+int TaskRegister::register_gpt_oss_moe_norm_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {H, eps bits, TOPK, HP}. inputs: x, table, weight; outputs: y, sum
+  // (tasks/gpt_oss_moe_norm.cuh)
+  assert(params.size() == 4 && params[0] % 8 == 0 && params[2] >= 1 &&
+         params[2] <= 8 && params[3] >= params[0] && params[3] % 8 == 0);
+  std::vector<tb::TBInputOp *> input_ops, output_ops;
+  static_split_ops(bgraph, 3, 2, input_ops, output_ops);
+  assert(input_ops[1]->dtensor.num_dims == 1 &&
+         input_ops[1]->dtensor.dim[0] == 4);
+  return register_task_variant(
+      TASK_GPT_OSS_MOE_NORM_SM100,
+      static_build_only_task("gpt_oss_moe_norm", params));
+}
+
+int TaskRegister::register_gpt_oss_rope_append_sm100_task(
+    threadblock::Graph const &bgraph, std::vector<int> const &params) {
+  // params: {Q, KVH, D, max seq, page, R}; inputs qkv, bias, cos, sin,
+  // qo_indptr, kv_indptr, kv_indices, last_page_len, k cache, v cache,
+  // seq_lens; output q (tasks/gpt_oss_rope_append.cuh)
+  assert(params.size() == 6 && params[2] == 64 && params[0] == 8 * params[1]);
+  return register_static_task(this,
+                              TASK_GPT_OSS_ROPE_APPEND_SM100,
+                              "gpt_oss_rope_append",
+                              bgraph,
+                              params,
+                              (int)bgraph.operators.size() - 1,
+                              6);
 }
 
 int TaskRegister::register_dsa_q_norm_quant_sm100_task(

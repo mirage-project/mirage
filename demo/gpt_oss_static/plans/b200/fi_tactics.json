@@ -1,0 +1,5 @@
+{
+ "flashinfer": "0.7.2.post1",
+ "gpu": "NVIDIA B200",
+ "64": [16, 769]
+}

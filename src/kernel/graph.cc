@@ -1120,6 +1120,21 @@ void Graph::register_task_for_op(KNOperator const *op,
         customized->bgraph, params);
     task_config[op] =
         std::make_tuple(1, 1, TASK_SILU_AND_MUL_SM100, variant_id);
+  } else if (name == "gpt_oss_moe_norm") {
+    int variant_id = task_register->register_gpt_oss_moe_norm_sm100_task(
+        customized->bgraph, params);
+    // inputs x, table, weight; outputs y, sum
+    task_config[op] =
+        std::make_tuple(3, 2, TASK_GPT_OSS_MOE_NORM_SM100, variant_id);
+  } else if (name == "gpt_oss_rope_append") {
+    int variant_id = task_register->register_gpt_oss_rope_append_sm100_task(
+        customized->bgraph, params);
+    // inputs qkv .. v cache, seq_lens; output q (the node's last tensor)
+    task_config[op] =
+        std::make_tuple((int)customized->bgraph.operators.size() - 1,
+                        1,
+                        TASK_GPT_OSS_ROPE_APPEND_SM100,
+                        variant_id);
   } else if (name == "dsa_q_norm_quant") {
     int variant_id = task_register->register_dsa_q_norm_quant_sm100_task(
         customized->bgraph, params);
