@@ -1140,7 +1140,8 @@ class StaticMegakernel(PersistentKernel):
     ):
         """Declare the absorbed query (tasks/dsa_q_absorb.cuh). Task (h * 4 + cb) * TH + th computes latent columns
         [128 cb, 128 cb + 128) of head h for the tokens of group th. The grid is NH * 4 (TH 1: all tokens), or NH * 8
-        from a plan (TH 2, T >= 16: half of the tokens, so each task reads q_nope of half of the tokens). With
+        from a plan (TH 2, T >= 16: half of the tokens, so each task reads q_nope of half of the tokens); at T = 64 with
+        ROPE = 64 a plan may also give y = 2 token tiles (NH * 8 x 2: tasks of 16 tokens). With
         ROPE = 64, the 4 tasks of a head and token group also write the rotated q_pe (of the tokens t with
         t % 4 == cb) at position seq_lens[t] - 1: cos_sin must have at least max(seq_lens) rows.
         params = [NH, NOPE, ROPE]. buf_slots: [w_uk, cos_sin (seq_lens in its place with ROPE = 0: not read),
@@ -1156,7 +1157,10 @@ class StaticMegakernel(PersistentKernel):
         self._add_node("dsa_q_absorb", (NH * 4, 2 if T == 64 and ROPE == 0 else 1, 1), block_dim, [qb, output],
                        [(-1, -1, -1), (-1, -1, -1)],
                        [NH, NOPE, ROPE], out_buffer=lambda n: (T * NH * (512 + ROPE) * 2, -1, False), counters=1,
-                       changeable_grid_dims={0: (1, 1, 2, NH * 8)} if T >= 16 else {},   # NH * 4 or NH * 8 tasks
+                       # NH * 4 or NH * 8 tasks; T = 64 (GLM-5.3, ROPE 64): also the token tiles y, 1 or 2 (a plan's
+                       # [NH * 8, 2]: tasks of 16 tokens)
+                       changeable_grid_dims={**({0: (1, 1, 2, NH * 8)} if T >= 16 else {}),
+                                             **({1: (1, 1, None, 2)} if T == 64 and ROPE == 64 else {})},
                        buf_slots=[self._tensor_slot(w_uk), self._tensor_slot(cos_sin if ROPE else seq_lens),
                                   self._tensor_slot(seq_lens)],
                        cost_inputs=[0])   # waits for the GEMM's K parts

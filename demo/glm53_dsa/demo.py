@@ -129,6 +129,8 @@ def build_graph(mpk, w, st, bufs, full, cfg, maxctx, splits, chunks, eps=1e-5, k
     mpk.max_counter_lines = 32   # and more than the default 16 counter lines (STATIC_NODE_COUNTER_LINES)
     if T == 32:   # sparse_mla's shared memory (576-wide rows) is in the ring and needs 5 stages, not the 4 of T = 32
         mpk.ring_stages = 5
+    elif T == 64:   # q_a | kv_a and o_proj (8 K tiles a task): 4 stages issued before their waits (config.cuh SMAX: 3)
+        mpk.ring_stages = 4
     t = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in kernel_tensors(w, st, bufs).items()}
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
     NH = w["w_uk"].shape[0]
@@ -234,14 +236,14 @@ def check_plan(path: str, sms: int) -> dict:
 
 def rr_plan(mpk, full: bool) -> dict:
     """The round-robin plan (plan_gen.round_robin_plan; e.g. T = 64, which has no hand plan) of the graph in mpk, a "full"
-    or "shared" layer: the grids of the kind's T = 32 hand plan, 8 dsa_q_absorb tasks a head, and each "add" FP8 GEMM's K
-    in the most parts that keep its tasks within one round of the SMs."""
+    or "shared" layer: the grids of the kind's T = 32 hand plan, 8 dsa_q_absorb tasks a head (T = 64: in 2 token tiles,
+    tasks of 16 tokens), and each "add" FP8 GEMM's K in the most parts that keep its tasks within one round of the SMs."""
     from mirage.mpk import plan_gen
     with open(os.path.join(HERE, f"hand_plan_{'full' if full else 'shared'}_T32.json")) as f:
         grids = {int(k): v for k, v in json.load(f)["grids"].items()}
     for n in compiler.graph_nodes(mpk):
-        if n.name == "dsa_q_absorb":   # two token groups: 8 tasks a head (declared: 4)
-            grids[n.graph_idx] = (2 * n.grid[0], n.grid[1], n.grid[2])
+        if n.name == "dsa_q_absorb":   # two token groups: 8 tasks a head (declared: 4); T = 64: 2 token tiles
+            grids[n.graph_idx] = (2 * n.grid[0], 2 if T == 64 else n.grid[1], n.grid[2])
         elif n.name == "scaled_gemm_tile" and n.params[0] == 1:   # an "add" GEMM: K in the most parts (whole 128-column
             # tiles) that keep its tasks within one round of the SMs
             tiles, sms = n.params[1] // 128, mpk._num_sms()
