@@ -25,7 +25,7 @@ import os
 
 import torch
 
-from mirage.mpk.fp8_fp32scale_weights import pack_w2
+from mirage.mpk.fp8_fp32scale_weights import dequant, pack_w2, requant_ue8m0
 
 EXPECTED_CONFIG = {"hidden_size": 6144, "num_attention_heads": 64, "q_lora_rank": 2048, "kv_lora_rank": 512,
                    "qk_nope_head_dim": 192, "qk_rope_head_dim": 64, "v_head_dim": 256, "index_n_heads": 32,
@@ -111,27 +111,6 @@ def checkpoint_reader(snapshot: str):
     read.part = part
     read.keep_open = keep_open
     return read
-
-
-def dequant(w: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-    """e4m3 [N, K] with fp32 block scales [ceil(N / 128), K / 128] -> fp32."""
-    N, K = w.shape
-    scale = s.float().repeat_interleave(128, 0)[:N].repeat_interleave(128, 1)[:, :K]
-    return w.view(torch.float8_e4m3fn).float() * scale
-
-
-def requant_ue8m0(w: torch.Tensor, s: torch.Tensor):
-    """e4m3 [N, K] (N, K multiples of 128) with fp32 block scales -> (e4m3 [N, K] uint8, fp32 scales [N / 128, K / 128],
-    powers of two): SGLang's requantization for DeepGEMM on Blackwell (fp8_utils.requant_weight_ue8m0): dequantize to
-    bf16, then per 128 x 128 block sf = ceil_to_ue8m0(max(amax, 1e-4) / 448) and e4m3(w / sf)."""
-    N, K = w.shape
-    v = dequant(w, s).to(torch.bfloat16).view(N // 128, 128, K // 128, 128)
-    amax = v.abs().float().amax(dim=(1, 3), keepdim=True).clamp(1e-4)
-    bits = (amax / 448.0).view(torch.int32)   # ceil_to_ue8m0: the exponent, up by one if the mantissa is not zero
-    e = (((bits >> 23) & 0xFF) + ((bits & 0x7FFFFF) != 0).to(torch.int32)).clamp(1, 254)
-    sf = (e << 23).view(torch.float32)
-    q = (v * (1.0 / sf)).to(torch.float8_e4m3fn)
-    return q.view(N, K).view(torch.uint8), sf.view(N // 128, K // 128).contiguous()
 
 
 def packed(w: torch.Tensor, s: torch.Tensor, ue8m0: bool = False):
