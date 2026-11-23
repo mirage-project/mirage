@@ -184,6 +184,8 @@ def build_graph(mpk, t: dict, attn_next: dict = None, valid_rows: int = None) ->
     valid_rows: the live rows of a decode step of fewer requests than T (the rows past them are not routed)."""
     mpk.max_counter_lines = 24   # 10 / 14 / 23 counter lines at T = 8 / 16 / 32 (scaled_moe_experts' per-slot counters), more
                                  # than config.cuh's default 16 (STATIC_NODE_COUNTER_LINES)
+    if attn_next is not None:    # the mhc_pre end (hc_post_mix + hc_pre) needs more than 24 at T = 16 / 32
+        mpk.max_counter_lines = 32
     a = {k: mpk.attach_input(torch_tensor=v, name=k) for k, v in t.items()}
     nt = lambda dims, dtype, name: mpk.new_tensor(dims=dims, dtype=dtype, name=name)
     T = t["x"].shape[0]
