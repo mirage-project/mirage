@@ -20,6 +20,7 @@ DSV41_STATIC_OUT (build directory), DSV41_STATIC_MAX_POS (the largest position, 
 DSV41_STATIC_PROF (a file: the kernels' own stamps of the last step when the driver rewrites it, see dsv41_static_prof.py).
 """
 import os
+import sys
 import time
 
 import torch
@@ -568,11 +569,12 @@ def report_experts():
     """The last step's routing, per MoE layer: how many distinct experts its 8 tokens used."""
     if not _MOES or "pairs" not in _MOES[0].bufs[0]:   # (STATIC_NO_START_BARRIER: the host allocates the two sets of pairs)
         return
-    from deepseek_v4_1_moe import demo as moe_demo
-    n = sorted(len(set(moe_demo.pairs_of(m.bufs[0])[0].flatten().tolist())) for m in _MOES)
+    def experts(m):   # (11-23) the layer's own T: its module's MoE demo (a layer of T > 8 is a class of a layer_module copy)
+        return len(set(sys.modules[type(m).__module__].moe_demo.pairs_of(m.bufs[0])[0].flatten().tolist()))
+    n = sorted(experts(m) for m in _MOES)
     print(f"experts last step, {len(n)} MoE layers: min {n[0]} median {n[len(n) // 2]} max {n[-1]}", flush=True)
     from mirage.mpk.static_harness import Harness
-    e = [len(set(moe_demo.pairs_of(m.bufs[0])[0].flatten().tolist())) for m in _MOES]
+    e = [experts(m) for m in _MOES]
     print("moe_spans", [(ex, round(Harness(m.sk).span_us(), 1)) for ex, m in zip(e, _MOES)], flush=True)   # (experts, span) per layer, the last launch
     print("attn_spans", [round(Harness(a.sk).span_us(), 1) for a in _ATTNS], flush=True)
 

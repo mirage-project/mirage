@@ -65,7 +65,10 @@ else:   # (the package's own demo modules are T = 8's)
                           TOKENS)
 
 T, HID = attn_demo.T, attn_demo.HID
-assert T == TOKENS
+assert T == TOKENS and moe_demo.T == TOKENS
+# (11-23) the attention demo's MoE-demo calls (Engram's kv nodes, their grids) take this T's copy, not the package's module
+# by name (T = 8's in a process of several T: DSV41_STATIC_T)
+attn_demo.MOE_DEMO = moe_demo
 
 
 def layer_module(tokens: int):
@@ -106,11 +109,13 @@ def _head_demo():
     copy of this T"""
     here = os.path.dirname(os.path.abspath(__file__))
     if T != 8:
-        return _load_copy(os.path.join(here, "head_demo.py"), f"head_demo_t{T}", T)
-    if here not in sys.path:
-        sys.path.insert(0, here)
-    import head_demo
-    return head_demo
+        hd = _load_copy(os.path.join(here, "head_demo.py"), f"head_demo_t{T}", T)
+    else:
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import head_demo as hd
+    hd.MOE_DEMO = moe_demo   # (11-23) its head nodes from this T's MoE demo (head_demo.moe_demo_mod)
+    return hd
 
 
 class _ShareHit(Exception):
@@ -592,7 +597,6 @@ class StaticAttn(MhcMixin):
             if self.binds.get("eg_emb") != emb.data_ptr():
                 self._rb("eg_emb", emb.data_ptr())
         if ids is not None:   # (DSV41_EG_ROWS=1) the Engram layer's hash ids [T, 24] int64, rows moe_demo.EG_ROWS_STRIDE apart
-            from deepseek_v4_1_moe import demo as moe_demo
             assert ids.dtype == torch.int64 and tuple(ids.shape) == (T, 24) and ids.stride() == (moe_demo.EG_ROWS_STRIDE, 1)
             self.eg_ids_ref = ids
             if self.binds.get("eg_ids") != ids.data_ptr():

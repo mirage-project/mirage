@@ -19,7 +19,15 @@ from deepseek_v4_1_moe import demo as moe_demo         # noqa: E402
 from deepseek_v4_1_moe import weights as moe_weights   # noqa: E402
 from mirage.mpk.static_harness import Harness          # noqa: E402
 
-T, H, HC, EPS, HC_EPS, ITERS = attn_demo.T, 5120, 4, 1e-20, 1e-6, 20   # T: STATIC_TOKENS (the demos', default 8)
+# MHC_COPY_T=T (11-23): the layers of that T built through dsv41_static_layer.layer_module(T), the per-T copies of the demos, in
+# a process whose package demos are T = 8's (STATIC_TOKENS unset): how the SGLang hook builds them with DSV41_STATIC_T
+SLC = None
+if os.environ.get("MHC_COPY_T"):
+    sys.path.insert(0, HERE)
+    import dsv41_static_layer   # noqa: E402
+    SLC = dsv41_static_layer.layer_module(int(os.environ["MHC_COPY_T"]))
+    attn_demo, moe_demo = SLC.attn_demo, SLC.moe_demo
+T, H, HC, EPS, HC_EPS, ITERS = attn_demo.T, 5120, 4, 1e-20, 1e-6, 20   # T: STATIC_TOKENS (the demos', default 8) or MHC_COPY_T
 ap = argparse.ArgumentParser()
 ap.add_argument("--checkpoint", required=True)
 ap.add_argument("--layer", type=int, default=3)
@@ -244,6 +252,7 @@ if a.head and os.environ.get("MHC_HEAD_NODES", "1") != "0":   # the LM head's te
 if a.engram2:   # (attention) the kv nodes, random weights, a stand-in kv buffer (no multicast address: build only)
     sys.path.insert(0, HERE)
     import dsv41_static_layer as sl   # noqa: E402
+    sl = SLC or sl   # (MHC_COPY_T: the copy's)
     g = torch.Generator().manual_seed(23)
     fake = {"wkv.weight": torch.zeros((HC + 1) * H, 6144).to(torch.float8_e4m3fn),
             "wkv.scale": torch.full(((HC + 1) * H // 32, 6144 // 32), 127, dtype=torch.uint8).view(torch.float8_e8m0fnu),
@@ -272,6 +281,7 @@ if a.engram2:   # (attention) the kv nodes, random weights, a stand-in kv buffer
 if a.engram:   # random Engram weights in the checkpoint's formats (e4m3 values of std about 100, e8m0 scales 115-116)
     sys.path.insert(0, HERE)
     import dsv41_static_layer as sl   # noqa: E402
+    sl = SLC or sl   # (MHC_COPY_T: the copy's)
     g = torch.Generator().manual_seed(23)
     fake = {"wkv.weight": (torch.randn((HC + 1) * H, 6144, generator=g) * 100).clamp(-448, 448).to(torch.float8_e4m3fn),
             "wkv.scale": (115 + torch.randint(0, 2, ((HC + 1) * H // 32, 6144 // 32), generator=g)).to(torch.uint8).view(
@@ -296,7 +306,13 @@ t0 = time.time()
 if GEN_ONLY:
     try:
         build("mhc", a.flag)
-    except Exception as e:
+    except Exception as e:   # (11-23) "as expected" only when layer.cu was written: an error before (the graph) is a failure
+        import glob
+        import traceback
+        if not glob.glob(os.path.join(a.out, "mhc", "**", "layer.cu"), recursive=True):
+            traceback.print_exc()
+            print(f"mhc: FAILED before code generation ({type(e).__name__})", flush=True)
+            sys.exit(1)
         print(f"mhc: generated ({type(e).__name__} at the load, as expected)", flush=True)
     sys.exit(0)
 sk, bufs, info = build("mhc", a.flag)

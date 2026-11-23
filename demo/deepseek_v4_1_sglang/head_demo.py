@@ -20,6 +20,19 @@ import torch
 HERE = os.path.dirname(os.path.abspath(__file__))
 T = int(os.environ.get("STATIC_TOKENS", "8"))   # tokens (rows) per step: the kernel's T (8, 16, 32 or 64)
 HID = 5120
+# (11-23) the MoE demo of this module's T: set by its loader (dsv41_static_layer._head_demo) to the copy of the same T, else the
+# package's (a process of one T); as deepseek_v4_1_csa2.demo.MOE_DEMO
+MOE_DEMO = None
+
+
+def moe_demo_mod():
+    """deepseek_v4_1_moe.demo of this module's T (MOE_DEMO, or the package's)"""
+    m = MOE_DEMO
+    if m is None:
+        sys.path.insert(0, os.path.dirname(HERE))
+        from deepseek_v4_1_moe import demo as m
+    assert m.T == T, f"head_demo T = {T} with a MoE demo of T = {m.T}"
+    return m
 KP = int(os.environ.get("DSV41_HEAD_KP", 1))        # the GEMM's K parts (11-20: 1: 253 tasks, at most 2 an SM: GEMM 52.6 us vs 58.2 at 2, about 61 at 4; a task costs about 2.75 us besides its bytes)
 SEND = int(os.environ.get("DSV41_HEAD_SEND", 148))  # the sends' tasks
 GQ = int(os.environ.get("DSV41_HEAD_GQ", 16))       # the gather's tasks a token
@@ -46,8 +59,7 @@ def head_tensors(read, tp: int, rank: int, dev, shared: dict = None) -> dict:
 
 
 def build_graph(mpk, w: dict) -> None:
-    sys.path.insert(0, os.path.dirname(HERE))
-    from deepseek_v4_1_moe.demo import head_nodes
+    head_nodes = moe_demo_mod().head_nodes   # (this T's: MOE_DEMO)
     t = {}
     a = lambda k: t.setdefault(k, mpk.attach_input(torch_tensor=w[k], name=k))
     head_nodes(mpk, a, w, "x")

@@ -80,6 +80,20 @@ except ImportError:
 
 T = int(os.environ.get("STATIC_TOKENS", "8"))   # tokens (rows) per step: the kernel's T (8, 16, 32 or 64)
 HID, QL, D, W, OL, NC = 5120, 1280, 512, 128, 1024, 512   # dim, q_lora_rank, head_dim, window, o_lora_rank, top-k
+# (11-23) the MoE demo of this module's T. A process with layers of several T (DSV41_STATIC_T) has one copy of the demos per
+# T > 8 (dsv41_static_layer._load_copy: sys.modules["deepseek_v4_1_moe.demo_t<T>"]), and the package's module is T = 8's, so
+# an import by name would build this T's Engram nodes with T = 8's rows. The loader sets MOE_DEMO to the copy of the same T; a
+# process of one T (this module run on its own) imports the package's, which then has this T.
+MOE_DEMO = None
+
+
+def moe_demo_mod():
+    """deepseek_v4_1_moe.demo of this module's T (MOE_DEMO, or the package's)"""
+    m = MOE_DEMO
+    if m is None:
+        from deepseek_v4_1_moe import demo as m
+    assert m.T == T, f"deepseek_v4_1_csa2.demo T = {T} with a MoE demo of T = {m.T}"
+    return m
 ROW, CROW, IROW = D + D // 32, D // 2 + D // 16, 64 + 4          # bytes per row: window cache, compressed KV, index K
 # the variants whose wo_b quantizes wo_a's output itself (no act_quant node between them; build_graph); the SWA layer keeps the
 # node (faster there)
@@ -217,7 +231,7 @@ def build_graph(mpk: StaticMegakernel, w: dict, variant: str, ratio: int, csrc: 
     if "h_comb" in w:      # only mHC's coefficients beside the sublayer (the framework runs the all-reduce and the post)
         mpk.dsv41_mhc_stats_nodes(a, w)
     if "eg_wkv" in w:      # (11-20, DSV41_ENGRAM=2) the next layer's Engram kv, gathered into eg_kv for the MoE kernel's gate
-        from deepseek_v4_1_moe.demo import engram_kv_nodes
+        engram_kv_nodes = moe_demo_mod().engram_kv_nodes   # (this T's: MOE_DEMO)
         mb = mpk.max_bufs
         mpk.max_bufs = 64   # (until the slots are known, below)
         engram_kv_nodes(mpk, a, w)
@@ -271,7 +285,7 @@ def hand_plan(mpk: StaticMegakernel, heads: int, cap: int, cmp_rows: int, sms: i
     grid["hc_mix"] = (1, 32, 1)   # the mixes as a gemm_tile: K 20480 in 32 parts of 5 K tiles
     egn = ("eg_q", "eg_part", "eg_kv")   # (11-20, DSV41_ENGRAM=2) Engram's kv nodes (moe_demo.engram_kv_nodes)
     if "eg_part" in names.values():
-        from deepseek_v4_1_moe.demo import EG_KP, EG_SEND
+        EG_KP, EG_SEND = moe_demo_mod().EG_KP, moe_demo_mod().EG_SEND
         egw = next(n.inputs[1].dim(0) for n in nodes if names[n.graph_idx] == "eg_part")
         grid.update({"eg_q": (T, 1, 1), "eg_part": (egw // 128, EG_KP, 1), "eg_kv": (EG_SEND, 1, 1)})
         if "eg_emb" in names.values():   # (DSV41_EG_ROWS=1) the table lookup (engram_rows: its output eg_emb)

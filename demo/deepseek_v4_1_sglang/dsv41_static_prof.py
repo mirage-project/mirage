@@ -12,6 +12,7 @@ in the step's order (attention L, MoE L, ...). No GPU work is added to a step; a
 meas/e2e/prof_table.py turns the files into the table."""
 import json
 import os
+import sys
 
 import numpy as np
 
@@ -64,8 +65,8 @@ def _kernel(st, kind, rank=0):
     on = start > 0
     experts = -1
     if kind == "m" and "pairs" in st.bufs[0] and own is None:   # (shared: the pairs are the last MoE layer's)
-        from deepseek_v4_1_moe import demo as moe_demo
-        experts = len(set(moe_demo.pairs_of(st.bufs[0])[0].flatten().tolist()))
+        # (11-23) the layer's own T: its module's MoE demo (a layer of T > 8 is a class of a layer_module copy)
+        experts = len(set(sys.modules[type(st).__module__].moe_demo.pairs_of(st.bufs[0])[0].flatten().tolist()))
     row = [int(st.layer), kind, getattr(st, "variant", "moe"), int(start[on].min()), int(start[on].max()),
            sb, int(end[on].min()), int(end[on].max()), int(on.sum()), experts]
     if lay.get("profile"):
