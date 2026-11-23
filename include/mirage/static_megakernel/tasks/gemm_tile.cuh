@@ -31,7 +31,11 @@ __device__ __forceinline__ TileJob make_bf16_tile(CUtensorMap const *wmap,
 template <int MODE>
 __device__ __forceinline__ void tile_epilogue(
     void *out, int N, int row0, int split, int row, float const *v) {
-  if (MODE == COMBINE_STORE) { // K part `split` at [split][T][N]
+  if (MODE == COMBINE_STORE) { // K part `split` at [split][T][N]; rows past N
+                               // not stored
+    if (row0 + row >= N) {
+      return;
+    }
     for (int t = 0; t < T; t++) {
       reinterpret_cast<float *>(out)[((size_t)split * T + t) * N + row0 + row] =
           v[t];
